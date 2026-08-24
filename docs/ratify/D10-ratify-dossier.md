@@ -4,7 +4,7 @@
 >
 > **依据**：`docs/DEV_GUIDE.md` §3（状态晋升规则：`released` = verified + runbook + 迁移可逆 + §6.3 双视角 0 High）+ §6.2/§6.3（独立复核与交付后双视角审查）+ `docs/module-status.yaml`（单一事实源）。
 >
-> **生成日期**：2026-08-11　|　**数据快照**：`docs/module-status.yaml` @ 2026-08-11
+> **生成日期**：2026-08-11　|　**数据快照**：`docs/module-status.yaml` @ 2026-08-11（semantic 节已按 2026-08-24 最新证据刷新，见 3.3）
 >
 > **14/14 服务当前状态**：全部 `released`（机械门槛达成），均处 `ratify_pending`。
 
@@ -109,23 +109,25 @@
 备注：____________________________________________________________________
 ```
 
-### 3.3 semantic（FR-05/06/07 · §12.3）✅ §6.3 已闭环（2026-08-11）
+### 3.3 semantic（FR-05/06/07 · §12.3）✅ §6.3 已闭环（2026-08-11）+ 门禁复审全绿（2026-08-21）+ 批次 B 已提交（2026-08-24）
 
 | 项 | 内容 |
 |----|------|
-| 状态 | released | verified_at | 2026-08-08 |
-| evidence | `backend/tests/reports/semantic_gateways_2026-08-07.txt` + `semantic_integration_2026-08-07.txt` + `semantic_unit_2026-08-07.txt` |
+| 状态 | verified（2026-08-21 复审）——released 机械门槛已达成，仅余 §1.5 人工 ratify |
+| evidence | `backend/tests/reports/semantic_gateways_2026-08-17.txt`（5026B 真实非空）+ `backend/tests/reports/semantic_perf_baseline_live_2026-08-21.txt`（k6 live：10 VU/30s，P95=131.63ms、fail 0.00%、1920/1920 checks） |
 | runbook | `docs/runbooks/semantic.md` |
-| 门禁 | 13/13 |
+| 门禁 | 13/13（lint/type/unit/integration/contract/doc_sync/security_reverse/chaos/perf_baseline/observability/secret/supply_chain） |
 
 **§6.3 双视角结论**（2026-08-11 补齐，详见 module-status.yaml `post_verify_review` + CHANGELOG_MODULES）：
 - **0 High**（修复后）。原审查发现 2 处 High 并已在 2026-08-11 修复：
   1. **PII 合规复核自审漏洞（COMPL-2）**：端点原允许 `metric_owner` 自审 → 限 `platform_admin`/`domain_admin` + service 层 `owner_id != actor_id` 守卫（`SELF_REVIEW_BLOCKED`）。
   2. **写端点零审计（TD §15.4）**：create/update/publish/deprecate/pii-review 5 端点补 `write_audit`（与业务同事务）。
 - 新增 `test_semantic_security.py`（5 项）+ `test_semantic_service.py` 补 2 项，pytest 20 项全绿，ruff 全清。
+- **2026-08-21 门禁复审全绿**：semantic 单元测试 355 passed、`security_reverse` 5/5（修复 `test_semantic_security` 遗漏的 `run_lineage_post_commit` AsyncMock 缺口）、语义 live 性能基线 P95=131.63ms 闭环此前 8-13 live 报告未覆盖语义模块的缺口。
+- **2026-08-24 批次 B 遗留改动已提交（5b8149b）**：`api/semantic.py` 13 行——`create_template` 并发撞唯一键 `IntegrityError` → 回滚 + 映射 `ConflictError`/`TPL_EXISTS`，ruff 修复 B904 `raise from`，补 `test_create_template_commit_integrity_error_maps_conflict`；semantic 相关单测 360 passed / ruff 0。独立复核 `post_verify_review`（2026-08-11）0 High；满足 DEV_GUIDE §3 `verified` = implemented + 全部门禁绿 + 独立复核通过。
 
 **待人工判断项（已知接受）**：
-- 无新增；released 机械门槛已全达，仅余 §1.5 人工 ratify。
+- 无新增；released 机械门槛已全达，仅余 §1.5 人工 ratify（agent 不可代签，须人类核验 evidence/runbook 后签收）。
 
 **签收栏**
 ```
