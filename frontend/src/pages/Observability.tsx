@@ -8,6 +8,7 @@ import {
   fetchObsMetricsLineage,
   fetchObsOverview,
   fetchObsQualityEvents,
+  consumeResponseTime,
 } from "../api";
 import type { ObsOverview, QualityEventItem } from "../types";
 import {
@@ -61,6 +62,11 @@ function MetricsTab() {
   const [notif, setNotif] = useState<{ by_status: Record<string, number>; event_total: number; event_notified: number } | null>(null);
   const [lineage, setLineage] = useState<{ edges: number } | null>(null);
   const [events, setEvents] = useState<QualityEventItem[]>([]);
+  // 提数响应时效 KPI（P1#10）：独立 fetch，无权限/失败静默不展示
+  const [respTime, setRespTime] = useState<{
+    days: number;
+    items: Array<{ date: string; count: number; avg_ms: number; p95_ms: number; p99_ms: number; max_ms: number; error_count: number }>;
+  } | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
@@ -96,6 +102,13 @@ function MetricsTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 响应时效：独立请求，失败（无权限/接口异常）静默隐藏卡片，不拖累主看板
+  useEffect(() => {
+    consumeResponseTime(7)
+      .then((r) => setRespTime(r))
+      .catch(() => {});
   }, []);
 
   if (loading) return null;
@@ -164,6 +177,46 @@ function MetricsTab() {
                 <span className="mono">{v}</span>
               </div>
             ))}
+          </Card>
+        </Col>
+      </Row>
+
+      <Row gutter={[16, 16]} style={{ marginTop: 8 }}>
+        <Col xs={24}>
+          <Card
+            title="提数响应时效（近 7 天）"
+            size="small"
+            extra={
+              respTime && respTime.items.some((i) => i.count > 0) ? (
+                <Tag color="blue">{respTime.items.reduce((s, i) => s + i.count, 0)} 次查询</Tag>
+              ) : null
+            }
+          >
+            {!respTime || respTime.items.every((i) => i.count === 0) ? (
+              <div style={{ ...rowStyle, borderBottom: "none" }} className="muted">
+                暂无提数查询记录（执行过 /consume/query 或详情页「查询最新数据」后展示）
+              </div>
+            ) : (
+              (() => {
+                const days = respTime.items.filter((i) => i.count > 0);
+                const last = days[days.length - 1];
+                const total = days.reduce((s, i) => s + i.count, 0);
+                const errTotal = days.reduce((s, i) => s + i.error_count, 0);
+                return (
+                  <>
+                    <div style={{ display: "flex", gap: 28, flexWrap: "wrap", marginBottom: 8 }}>
+                      <Statistic title="平均响应" value={last.avg_ms} suffix="ms" />
+                      <Statistic title="P95" value={last.p95_ms} suffix="ms" />
+                      <Statistic title="P99" value={last.p99_ms} suffix="ms" />
+                      <Statistic title="峰值" value={last.max_ms} suffix="ms" />
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--ink-3)" }}>
+                      最近一天 {last.date}：{last.count} 次 · 失败 {last.error_count} 次 · 近 7 天累计 {total} 次查询（失败 {errTotal} 次）
+                    </div>
+                  </>
+                );
+              })()
+            )}
           </Card>
         </Col>
       </Row>

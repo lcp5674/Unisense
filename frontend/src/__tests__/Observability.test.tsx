@@ -10,6 +10,7 @@ vi.mock("../api", () => ({
   fetchObsMetricsLineage: vi.fn(),
   fetchObsOverview: vi.fn(),
   fetchObsQualityEvents: vi.fn(),
+  consumeResponseTime: vi.fn(),
 }));
 
 import {
@@ -19,6 +20,7 @@ import {
   fetchObsMetricsLineage,
   fetchObsOverview,
   fetchObsQualityEvents,
+  consumeResponseTime,
 } from "../api";
 
 const mockedQuality = vi.mocked(fetchObsMetricsQuality);
@@ -143,6 +145,19 @@ beforeEach(() => {
   } as never);
   mockedLineage.mockResolvedValue({ edges: 7 } as never);
   mockedQualityEvents.mockResolvedValue({ items: [], total: 0 } as never);
+  // 响应时效卡：默认空数据（无提数记录态）
+  vi.mocked(consumeResponseTime).mockResolvedValue({
+    days: 7,
+    items: Array.from({ length: 7 }, (_, i) => ({
+      date: `2026-08-${String(18 + i).padStart(2, "0")}`,
+      count: 0,
+      avg_ms: 0,
+      p95_ms: 0,
+      p99_ms: 0,
+      max_ms: 0,
+      error_count: 0,
+    })),
+  } as never);
 });
 
 describe("Observability 可观测中心", () => {

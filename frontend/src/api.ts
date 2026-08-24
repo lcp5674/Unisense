@@ -1510,6 +1510,22 @@ export async function queryMetricInternal(
   });
 }
 
+/** 提数响应时效 KPI：近 N 天查询量/avg/p95/p99/错误数（管理员视角） */
+export async function consumeResponseTime(days = 7): Promise<{
+  days: number;
+  items: Array<{
+    date: string;
+    count: number;
+    avg_ms: number;
+    p95_ms: number;
+    p99_ms: number;
+    max_ms: number;
+    error_count: number;
+  }>;
+}> {
+  return request(`${API_BASE}/consume/stats/response-time?days=${days}`);
+}
+
 export async function createApiClient(req: ClientCreateRequest): Promise<ClientCreatedResponse> {
   return request<ClientCreatedResponse>(`${API_BASE}/consume/api-clients`, {
     method: "POST",

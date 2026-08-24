@@ -341,6 +341,7 @@ describe("FeedbackCenter 质疑闭环", () => {
       user_id: 99,
       target_type: "metric",
       target_id: "sales_gmv",
+      rating: null,
       comment: "口径疑问",
       category: "question",
       priority: "medium",
