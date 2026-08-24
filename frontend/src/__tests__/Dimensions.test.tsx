@@ -26,6 +26,9 @@ vi.mock("../api", () => {
     getDimension: vi.fn(),
     updateDimension: vi.fn(),
     publishDimension: vi.fn(),
+    submitDimension: vi.fn(),
+    approveDimension: vi.fn(),
+    rejectDimension: vi.fn(),
     deprecateDimension: vi.fn(),
     bindMetricDimension: vi.fn(),
     listMetricDimensions: vi.fn(),
@@ -54,10 +57,13 @@ vi.mock("../api", () => {
   };
 });
 
-import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember, deleteDimensionMember, listDimensionMetrics, listDimensionMappings, updateDimensionMapping, listReconciliations, listUsers, listFavorites, listDataSources, previewColumnValues, fetchCurrentUser } from "../api";
+import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember, deleteDimensionMember, listDimensionMetrics, listDimensionMappings, updateDimensionMapping, listReconciliations, listUsers, listFavorites, listDataSources, previewColumnValues, fetchCurrentUser, submitDimension, approveDimension, rejectDimension } from "../api";
 
 const mockedList = vi.mocked(listDimensions);
 const mockedListFavorites = vi.mocked(listFavorites);
+const mockedSubmitDim = vi.mocked(submitDimension);
+const mockedApproveDim = vi.mocked(approveDimension);
+const mockedRejectDim = vi.mocked(rejectDimension);
 
 const DIMS: Dimension[] = [
   {
@@ -598,5 +604,93 @@ describe("Dimensions 页面", () => {
     await screen.findByText("dim_channel");
     fireEvent.click(screen.getByRole("button", { name: /返\s*回/ }));
     await screen.findByText("dashboard-page");
+  });
+});
+
+describe("Dimensions 审核流（提交审核/通过/驳回，复用主数据审核组件）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedList.mockResolvedValue({ items: DIMS, total: 2 });
+    mockedListFavorites.mockResolvedValue([]);
+    vi.mocked(listMetrics).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 });
+    vi.mocked(listDomainTree).mockResolvedValue([
+      { id: 1, code: "finance", name: "财务域", parent_id: null, level: 1, sort_order: 0, status: "ACTIVE", metric_count: 0, children: [] },
+    ]);
+    vi.mocked(listDimensionMembers).mockResolvedValue({ items: [], total: 0 });
+    vi.mocked(listUsers).mockResolvedValue([]);
+    vi.mocked(fetchCurrentUser).mockResolvedValue({
+      id: 1, username: "admin", display_name: "管理员", role: "platform_admin", domain: "finance", org_id: 1,
+    } as never);
+    vi.mocked(listDataSources).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    vi.mocked(previewColumnValues).mockResolvedValue({ values: [], total: 0, truncated: false });
+    vi.mocked(listDimensionMetrics).mockResolvedValue({ items: [], total: 0 });
+    vi.mocked(listDimensionMappings).mockResolvedValue({ items: [], total: 0 });
+    vi.mocked(listReconciliations).mockResolvedValue({ items: [], total: 0 });
+  });
+
+  it("DRAFT 维度显示「提交审核」，填写说明后调用 submitDimension（进 REVIEW）", async () => {
+    mockedSubmitDim.mockResolvedValue({ ...DIMS[1], status: "REVIEW" } as never);
+    render(
+      <MemoryRouter initialEntries={["/dimensions"]}>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+    await screen.findByText("dim_region");
+    fireEvent.click(screen.getAllByRole("button", { name: /提交审核/ })[0]);
+    const modal = await screen.findByRole("dialog");
+    fireEvent.change(within(modal).getByLabelText("提交说明"), {
+      target: { value: "区域维度定义已完善，申请发布" },
+    });
+    fireEvent.click(within(modal).getByRole("button", { name: /确 定|确定|OK/ }));
+
+    await waitFor(() =>
+      expect(mockedSubmitDim).toHaveBeenCalledWith("dim_region", {
+        change_reason: "区域维度定义已完善，申请发布",
+        reviewer_type: null,
+        reviewer_id: null,
+        reviewer_domain: null,
+      }),
+    );
+    expect(await screen.findByText(/已提交审核/)).toBeInTheDocument();
+  });
+
+  it("REVIEW 维度（platform_admin 可审）审核通过并发布", async () => {
+    const reviewRow = { ...DIMS[0], status: "REVIEW", submitted_by: 2 };
+    mockedList.mockResolvedValue({ items: [reviewRow], total: 1 });
+    mockedApproveDim.mockResolvedValue({ ...DIMS[0], status: "PUBLISHED" } as never);
+    render(
+      <MemoryRouter initialEntries={["/dimensions"]}>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+    await screen.findByText("dim_channel");
+    fireEvent.click(await screen.findByRole("button", { name: "审核通过并发布" }));
+    await waitFor(() => expect(mockedApproveDim).toHaveBeenCalledWith("dim_channel", { comment: null }));
+    expect(await screen.findByText(/审核通过，已发布/)).toBeInTheDocument();
+  });
+
+  it("REVIEW 维度驳回：填写原因后调用 rejectDimension，状态回 DRAFT", async () => {
+    const reviewRow = { ...DIMS[0], status: "REVIEW", submitted_by: 2 };
+    mockedList.mockResolvedValue({ items: [reviewRow], total: 1 });
+    mockedRejectDim.mockResolvedValue({ ...DIMS[0], status: "DRAFT" } as never);
+    render(
+      <MemoryRouter initialEntries={["/dimensions"]}>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+    await screen.findByText("dim_channel");
+    fireEvent.click(await screen.findByRole("button", { name: "驳回该主数据" }));
+    const modal = await screen.findByRole("dialog");
+    fireEvent.change(within(modal).getByLabelText("驳回原因"), {
+      target: { value: "缺少层级说明，请补充后再提交" },
+    });
+    fireEvent.click(within(modal).getByRole("button", { name: /确 定|确定|OK/ }));
+
+    await waitFor(() =>
+      expect(mockedRejectDim).toHaveBeenCalledWith("dim_channel", {
+        reason: "缺少层级说明，请补充后再提交",
+      }),
+    );
+    expect(await screen.findByText(/已驳回，可修改后重新提交/)).toBeInTheDocument();
   });
 });

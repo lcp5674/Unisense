@@ -10,7 +10,10 @@ from pydantic import BaseModel, Field
 
 
 class TermStatus(enum.StrEnum):
+    """术语状态机（对齐指标审核流：DRAFT → REVIEW → PUBLISHED → DEPRECATED）。"""
+
     DRAFT = "DRAFT"
+    REVIEW = "REVIEW"  # 待审核（已提交审核，审核通过才发布）
     PUBLISHED = "PUBLISHED"
     DEPRECATED = "DEPRECATED"
 
@@ -57,6 +60,16 @@ class TermResponse(BaseModel):
     boundary: str | None = None
     status: TermStatus
     owner_id: int
+    # ---- 审核流字段（对齐主数据审核 ReviewFieldsMixin，供前端评审权判断/驳回展示）----
+    submitted_by: int | None = None
+    approver_id: int | None = None
+    reviewer_id: int | None = None
+    reviewer_type: str | None = None
+    reviewer_domain: str | None = None
+    reject_reason: str | None = None
+    reject_reviewer_id: int | None = None
+    rejected_at: datetime | None = None
+    reviewed_at: datetime | None = None
     version: int = 1
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -73,6 +86,15 @@ class TermResponse(BaseModel):
             boundary=getattr(m, "boundary", None),
             status=m.status,
             owner_id=m.owner_id,
+            submitted_by=getattr(m, "submitted_by", None),
+            approver_id=getattr(m, "approver_id", None),
+            reviewer_id=getattr(m, "reviewer_id", None),
+            reviewer_type=getattr(m, "reviewer_type", None),
+            reviewer_domain=getattr(m, "reviewer_domain", None),
+            reject_reason=getattr(m, "reject_reason", None),
+            reject_reviewer_id=getattr(m, "reject_reviewer_id", None),
+            rejected_at=getattr(m, "rejected_at", None),
+            reviewed_at=getattr(m, "reviewed_at", None),
             created_at=getattr(m, "created_at", None),
             updated_at=getattr(m, "updated_at", None),
         )

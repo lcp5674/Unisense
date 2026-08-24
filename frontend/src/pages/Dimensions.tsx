@@ -7,7 +7,9 @@ import {
   createDimension,
   getDimension,
   updateDimension,
-  publishDimension,
+  submitDimension,
+  approveDimension,
+  rejectDimension,
   deprecateDimension,
   bindMetricDimension,
   unbindMetricDimension,
@@ -37,6 +39,7 @@ import {
   fetchCurrentUser,
   UnisenseApiError,
 } from "../api";
+import type { ReviewSubmitBody } from "../api";
 import type {
   Dimension,
   DimensionMapping,
@@ -47,13 +50,19 @@ import type {
   SubjectDomainTreeNode,
   UserBrief,
   DataSource,
+  CurrentUser,
 } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
 import { usePermission } from "../hooks/usePermission";
+import {
+  MasterDataReviewActions,
+  MasterDataReviewModals,
+  useMasterDataReview,
+} from "../components/MasterDataReview";
 
-const STATUS_COLOR: Record<string, string> = { DRAFT: "default", PUBLISHED: "success", DEPRECATED: "error" };
-const STATUS_LABEL: Record<string, string> = { DRAFT: "草稿", PUBLISHED: "已发布", DEPRECATED: "已废弃" };
+const STATUS_COLOR: Record<string, string> = { DRAFT: "default", REVIEW: "processing", PUBLISHED: "success", DEPRECATED: "error" };
+const STATUS_LABEL: Record<string, string> = { DRAFT: "草稿", REVIEW: "审核中", PUBLISHED: "已发布", DEPRECATED: "已废弃" };
 // 指标 6 状态中文标签/颜色（区别于维度 3 状态）：绑定指标列表列渲染使用，
 // 避免用维度状态映射渲染指标状态导致 EXPERIMENTAL/REVIEW/DATA_SOURCE_DROPPED 直出英文。
 const METRIC_STATUS_LABEL: Record<string, string> = {
@@ -167,6 +176,10 @@ function DimensionsTab() {
   const [detailMappings, setDetailMappings] = useState<DimensionMapping[]>([]);
   // 并发查询防竞态：只有最后一次发起的请求允许落地结果
   const loadSeq = useRef(0);
+  // 当前用户（审核权判断：指派评审人/域评审组/域管理员兜底）
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  // 审核流状态（共享 hook：提交审核 Modal / 驳回 Modal / 正在审批的维度）
+  const review = useMasterDataReview();
 
   // 支持从全局搜索栏经 ?kw= 直达定位；初始值已由 useState 承接，
   // 此处仅同步「URL 出现新筛选值」的场景，并保留用户手动清空筛选的能力。
@@ -228,6 +241,8 @@ function DimensionsTab() {
         ),
       )
       .catch(() => {});
+    // 当前用户（审核流评审权判断）
+    fetchCurrentUser().then(setCurrentUser).catch(() => {});
   }, []);
 
   // 维度收藏切换（行内心形）
@@ -304,13 +319,49 @@ function DimensionsTab() {
     }
   }
 
-  async function handlePublish(d: Dimension) {
+  // 提交审核（DRAFT → REVIEW）：维度是下游指标绑定/消费校验的权威来源，发布须先审
+  async function handleSubmitReview(values: ReviewSubmitBody) {
+    if (!review.submitTarget) return;
+    review.setSubmitBusy(true);
     try {
-      await publishDimension(d.dim_code);
-      message.success("已发布");
+      await submitDimension(review.submitTarget.code, values);
+      message.success(`「${review.submitTarget.name}」已提交审核，待评审通过后发布`);
+      review.setSubmitTarget(null);
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "发布失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "提交审核失败");
+    } finally {
+      review.setSubmitBusy(false);
+    }
+  }
+
+  // 审核通过（REVIEW → PUBLISHED）
+  async function handleApprove(row: { code: string; name: string }) {
+    review.setBusyCode(row.code);
+    try {
+      await approveDimension(row.code, { comment: null });
+      message.success(`「${row.name}」审核通过，已发布`);
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "审核通过失败");
+    } finally {
+      review.setBusyCode(null);
+    }
+  }
+
+  // 审核驳回（REVIEW → DRAFT，驳回原因必填）
+  async function handleReject(reason: string) {
+    if (!review.rejectTarget) return;
+    review.setRejectBusy(true);
+    try {
+      await rejectDimension(review.rejectTarget.code, { reason });
+      message.success(`「${review.rejectTarget.name}」已驳回，可修改后重新提交`);
+      review.setRejectTarget(null);
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "驳回失败");
+    } finally {
+      review.setRejectBusy(false);
     }
   }
 
@@ -475,7 +526,23 @@ function DimensionsTab() {
                 绑定指标
               </Button>
             )}
-            {d.status !== "PUBLISHED" && can("dimension:edit") && <Button size="small" type="primary" onClick={() => handlePublish(d)}>发布</Button>}
+            {can("dimension:edit") && (
+              <MasterDataReviewActions
+                row={{
+                  code: d.dim_code,
+                  name: d.name,
+                  status: d.status,
+                  reviewer_type: d.reviewer_type,
+                  reviewer_id: d.reviewer_id,
+                  reviewer_domain: d.reviewer_domain,
+                }}
+                user={currentUser}
+                busyCode={review.busyCode}
+                onApprove={handleApprove}
+                onOpenSubmit={(r) => review.setSubmitTarget({ code: r.code, name: r.name })}
+                onOpenReject={(r) => review.setRejectTarget({ code: r.code, name: r.name })}
+              />
+            )}
             {can("dimension:deprecate") && <Button size="small" danger onClick={() => handleDeprecate(d)}>废弃</Button>}
           </Space>
         ) : (
@@ -518,6 +585,7 @@ function DimensionsTab() {
           onChange={(v) => setStatus(v ?? "")}
           options={[
             { value: "DRAFT", label: "草稿" },
+            { value: "REVIEW", label: "审核中" },
             { value: "PUBLISHED", label: "已发布" },
             { value: "DEPRECATED", label: "已废弃" },
           ]}
@@ -788,6 +856,20 @@ function DimensionsTab() {
           </>
         )}
       </Drawer>
+
+      {/* 提交审核 + 驳回审核 Modal（共享组件）：维度发布前须评审通过 */}
+      <MasterDataReviewModals
+        entityLabel="维度"
+        submitDescription="维度是下游指标绑定/消费校验的权威来源。提交后由评审人审核通过才可发布；审核期间维度锁定不可编辑，驳回后可修改重提。"
+        submitTarget={review.submitTarget}
+        submitBusy={review.submitBusy}
+        onCancelSubmit={() => review.setSubmitTarget(null)}
+        onConfirmSubmit={handleSubmitReview}
+        rejectTarget={review.rejectTarget}
+        rejectBusy={review.rejectBusy}
+        onCancelReject={() => review.setRejectTarget(null)}
+        onConfirmReject={handleReject}
+      />
     </div>
   );
 }

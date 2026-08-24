@@ -56,6 +56,16 @@ class DimensionResponse(BaseModel):
     status: str
     #: 绑定指标数（list_dimensions LEFT JOIN 聚合，from_model 默认 0）
     metric_count: int = 0
+    # ---- 审核流字段（对齐主数据审核 ReviewFieldsMixin，供前端评审权判断/驳回展示）----
+    submitted_by: int | None = None
+    approver_id: int | None = None
+    reviewer_id: int | None = None
+    reviewer_type: str | None = None
+    reviewer_domain: str | None = None
+    reject_reason: str | None = None
+    reject_reviewer_id: int | None = None
+    rejected_at: datetime | None = None
+    reviewed_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -71,6 +81,15 @@ class DimensionResponse(BaseModel):
             owner_id=m.owner_id,
             status=m.status,
             metric_count=getattr(m, "metric_count", 0),
+            submitted_by=getattr(m, "submitted_by", None),
+            approver_id=getattr(m, "approver_id", None),
+            reviewer_id=getattr(m, "reviewer_id", None),
+            reviewer_type=getattr(m, "reviewer_type", None),
+            reviewer_domain=getattr(m, "reviewer_domain", None),
+            reject_reason=getattr(m, "reject_reason", None),
+            reject_reviewer_id=getattr(m, "reject_reviewer_id", None),
+            rejected_at=getattr(m, "rejected_at", None),
+            reviewed_at=getattr(m, "reviewed_at", None),
             created_at=getattr(m, "created_at", None),
             updated_at=getattr(m, "updated_at", None),
         )

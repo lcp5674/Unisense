@@ -1585,6 +1585,39 @@ export async function publishDimension(dimCode: string): Promise<Dimension> {
   });
 }
 
+/** 提交维度审核（DRAFT → REVIEW，发布须先审） */
+export async function submitDimension(
+  dimCode: string,
+  body: ReviewSubmitBody,
+): Promise<Dimension> {
+  return request<Dimension>(
+    `${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/submit`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+}
+
+/** 审核通过维度（REVIEW → PUBLISHED） */
+export async function approveDimension(
+  dimCode: string,
+  body: { comment?: string | null },
+): Promise<Dimension> {
+  return request<Dimension>(
+    `${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/approve`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+}
+
+/** 审核驳回维度（REVIEW → DRAFT，驳回原因必填） */
+export async function rejectDimension(
+  dimCode: string,
+  body: { reason: string },
+): Promise<Dimension> {
+  return request<Dimension>(
+    `${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/reject`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+}
+
 export async function deprecateDimension(dimCode: string): Promise<Dimension> {
   return request<Dimension>(`${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/deprecate`, {
     method: "POST",
@@ -1734,15 +1767,18 @@ export async function publishMeasureCatalog(measureCode: string): Promise<Measur
   );
 }
 
+/** 主数据审核提交请求体（对齐后端 ReviewSubmitRequest / 指标审核流 TD §13，逻辑度量/维度/术语共用） */
+export interface ReviewSubmitBody {
+  change_reason: string;
+  reviewer_id?: number | null;
+  reviewer_type?: "user" | "domain" | null;
+  reviewer_domain?: string | null;
+}
+
 /** 提交逻辑度量审核（DRAFT → REVIEW，发布须先审） */
 export async function submitMeasureCatalog(
   measureCode: string,
-  body: {
-    change_reason: string;
-    reviewer_id?: number | null;
-    reviewer_type?: "user" | "domain" | null;
-    reviewer_domain?: string | null;
-  },
+  body: ReviewSubmitBody,
 ): Promise<MeasureCatalog> {
   return request<MeasureCatalog>(
     `${API_BASE}/measure-catalogs/${encodeURIComponent(measureCode)}/submit`,
@@ -2047,9 +2083,37 @@ export async function createTerm(body: {
   });
 }
 
-export async function submitTerm(termCode: string): Promise<GlossaryTerm> {
+/** 提交术语审核（DRAFT → REVIEW，业务用户发布须先审） */
+export async function submitTerm(termCode: string, body: ReviewSubmitBody): Promise<GlossaryTerm> {
   return request<GlossaryTerm>(`${API_BASE}/terms/${encodeURIComponent(termCode)}/submit`, {
     method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** 直接发布术语（平台管理员直发通道，含"再次发布"；业务用户走 submit+approve 审核流） */
+export async function publishTerm(termCode: string): Promise<GlossaryTerm> {
+  return request<GlossaryTerm>(`${API_BASE}/terms/${encodeURIComponent(termCode)}/publish`, {
+    method: "POST",
+  });
+}
+
+/** 审核通过术语（REVIEW → PUBLISHED） */
+export async function approveTerm(
+  termCode: string,
+  body: { comment?: string | null },
+): Promise<GlossaryTerm> {
+  return request<GlossaryTerm>(`${API_BASE}/terms/${encodeURIComponent(termCode)}/approve`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** 审核驳回术语（REVIEW → DRAFT，驳回原因必填） */
+export async function rejectTerm(termCode: string, body: { reason: string }): Promise<GlossaryTerm> {
+  return request<GlossaryTerm>(`${API_BASE}/terms/${encodeURIComponent(termCode)}/reject`, {
+    method: "POST",
+    body: JSON.stringify(body),
   });
 }
 

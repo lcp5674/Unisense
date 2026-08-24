@@ -22,6 +22,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.mysql import Base
 from app.models.base import BaseModel
+from app.models.review_fields import ReviewFieldsMixin
 
 
 class DimensionType(enum.StrEnum):
@@ -44,7 +45,14 @@ class DimensionType(enum.StrEnum):
 
 
 class DimensionStatus(enum.StrEnum):
+    """维度状态机（对齐指标审核流：DRAFT → REVIEW → PUBLISHED → DEPRECATED）。
+
+    维度是下游指标绑定/消费校验的权威来源，发布须先提交审核（审核流复用
+    ``app.services.master_data_review``，与逻辑度量/术语统一）。
+    """
+
     DRAFT = "DRAFT"
+    REVIEW = "REVIEW"  # 待审核（已提交审核，审核通过才发布）
     PUBLISHED = "PUBLISHED"
     DEPRECATED = "DEPRECATED"
 
@@ -66,7 +74,7 @@ class ReconciliationStatus(enum.StrEnum):
     REJECTED = "REJECTED"
 
 
-class Dimension(Base, BaseModel):
+class Dimension(Base, BaseModel, ReviewFieldsMixin):
     __tablename__ = "dimension"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)

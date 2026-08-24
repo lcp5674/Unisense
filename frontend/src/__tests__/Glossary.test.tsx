@@ -27,6 +27,9 @@ vi.mock("../api", () => {
     createTermRelation: vi.fn(),
     listTermRelations: vi.fn(),
     submitTerm: vi.fn(),
+    publishTerm: vi.fn(),
+    approveTerm: vi.fn(),
+    rejectTerm: vi.fn(),
     deprecateTerm: vi.fn(),
     batchSubmitTerms: vi.fn(),
     batchDeprecateTerms: vi.fn(),
@@ -37,6 +40,7 @@ vi.mock("../api", () => {
     listFavorites: vi.fn(),
     addFavorite: vi.fn(),
     removeFavorite: vi.fn(),
+    fetchCurrentUser: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -53,6 +57,10 @@ import {
   batchDeprecateTerms,
   inferTermSuggestion,
   listDomainTree,
+  fetchCurrentUser,
+  approveTerm,
+  rejectTerm,
+  submitTerm,
 } from "../api";
 
 const mockedList = vi.mocked(listTerms);
@@ -66,6 +74,10 @@ const mockedBatchSubmit = vi.mocked(batchSubmitTerms);
 const mockedBatchDeprecate = vi.mocked(batchDeprecateTerms);
 const mockedInfer = vi.mocked(inferTermSuggestion);
 const mockedDomainTree = vi.mocked(listDomainTree);
+const mockedFetchCurrentUser = vi.mocked(fetchCurrentUser);
+const mockedApprove = vi.mocked(approveTerm);
+const mockedReject = vi.mocked(rejectTerm);
+const mockedSubmit = vi.mocked(submitTerm);
 
 const TERMS: GlossaryTerm[] = [
   {
@@ -105,6 +117,9 @@ beforeEach(() => {
   mockedListFavorites.mockResolvedValue([]);
   mockedDomainTree.mockResolvedValue([]);
   mockedListRelations.mockResolvedValue({ items: [], total: 0 });
+  mockedFetchCurrentUser.mockResolvedValue({
+    id: 1, username: "admin", display_name: "管理员", role: "platform_admin", domain: "finance", org_id: 1,
+  });
 });
 
 describe("Glossary 页面", () => {
@@ -516,5 +531,85 @@ describe("Glossary 页面", () => {
     const graphDialog = await screen.findByRole("dialog");
     fireEvent.click(within(graphDialog).getByRole("button", { name: /建\s*立\s*关\s*系/ }));
     await screen.findByText("建立关系：GMV");
+  });
+});
+
+describe("Glossary 审核流（提交审核/通过/驳回，复用主数据审核组件）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedList.mockResolvedValue({ items: TERMS, total: 2, page: 1, page_size: 20 });
+    mockedConflicts.mockResolvedValue({ items: [], total: 0 });
+    mockedListFavorites.mockResolvedValue([]);
+    mockedDomainTree.mockResolvedValue([]);
+    mockedListRelations.mockResolvedValue({ items: [], total: 0 });
+    mockedFetchCurrentUser.mockResolvedValue({
+      id: 1, username: "admin", display_name: "管理员", role: "platform_admin", domain: "finance", org_id: 1,
+    } as never);
+  });
+
+  it("DRAFT 术语显示「提交审核」，填写说明后调用 submitTerm（进 REVIEW）", async () => {
+    mockedSubmit.mockResolvedValue({ ...TERMS[0], status: "REVIEW" } as never);
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+    await screen.findByText("成交总额");
+    fireEvent.click(screen.getAllByRole("button", { name: /提交审核/ })[0]);
+    const modal = await screen.findByRole("dialog");
+    fireEvent.change(within(modal).getByLabelText("提交说明"), {
+      target: { value: "术语定义已与业务对齐，申请发布" },
+    });
+    fireEvent.click(within(modal).getByRole("button", { name: /确 定|确定|OK/ }));
+
+    await waitFor(() =>
+      expect(mockedSubmit).toHaveBeenCalledWith("GMV", {
+        change_reason: "术语定义已与业务对齐，申请发布",
+        reviewer_type: null,
+        reviewer_id: null,
+        reviewer_domain: null,
+      }),
+    );
+    expect(await screen.findByText(/已提交审核/)).toBeInTheDocument();
+  });
+
+  it("REVIEW 术语（platform_admin 可审）审核通过并发布", async () => {
+    const reviewRow = { ...TERMS[0], status: "REVIEW", submitted_by: 2 };
+    mockedList.mockResolvedValue({ items: [reviewRow], total: 1, page: 1, page_size: 20 });
+    mockedApprove.mockResolvedValue({ ...TERMS[0], status: "PUBLISHED" } as never);
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+    await screen.findByText("成交总额");
+    fireEvent.click(await screen.findByRole("button", { name: "审核通过并发布" }));
+    await waitFor(() => expect(mockedApprove).toHaveBeenCalledWith("GMV", { comment: null }));
+    expect(await screen.findByText(/审核通过，已发布/)).toBeInTheDocument();
+  });
+
+  it("REVIEW 术语驳回：填写原因后调用 rejectTerm，状态回 DRAFT", async () => {
+    const reviewRow = { ...TERMS[0], status: "REVIEW", submitted_by: 2 };
+    mockedList.mockResolvedValue({ items: [reviewRow], total: 1, page: 1, page_size: 20 });
+    mockedReject.mockResolvedValue({ ...TERMS[0], status: "DRAFT" } as never);
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+    await screen.findByText("成交总额");
+    fireEvent.click(await screen.findByRole("button", { name: "驳回该主数据" }));
+    const modal = await screen.findByRole("dialog");
+    fireEvent.change(within(modal).getByLabelText("驳回原因"), {
+      target: { value: "定义与业务实际不符，请补充边界说明" },
+    });
+    fireEvent.click(within(modal).getByRole("button", { name: /确 定|确定|OK/ }));
+
+    await waitFor(() =>
+      expect(mockedReject).toHaveBeenCalledWith("GMV", {
+        reason: "定义与业务实际不符，请补充边界说明",
+      }),
+    );
+    expect(await screen.findByText(/已驳回，可修改后重新提交/)).toBeInTheDocument();
   });
 });

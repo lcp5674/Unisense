@@ -1,12 +1,9 @@
 import { useEffect, useState } from "react";
 import { Alert, App as AntApp, Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Tooltip } from "antd";
 import {
-  CheckOutlined,
-  CloseOutlined,
   EditOutlined,
   PlusOutlined,
   RobotOutlined,
-  SendOutlined,
   StopOutlined,
 } from "@ant-design/icons";
 import {
@@ -22,10 +19,16 @@ import {
   UnisenseApiError,
   updateMeasureCatalog,
 } from "../api";
+import type { ReviewSubmitBody } from "../api";
 import type { CurrentUser, MeasureCatalog, MeasureCategory, MeasureFormat, MeasureSuggestResult, SubjectDomainTreeNode } from "../types";
 import { MEASURE_CATEGORY_LABEL, MEASURE_FORMAT_LABEL } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 import { usePermission } from "../hooks/usePermission";
+import {
+  MasterDataReviewActions,
+  MasterDataReviewModals,
+  useMasterDataReview,
+} from "../components/MasterDataReview";
 
 const STATUS_COLOR: Record<string, string> = {
   DRAFT: "default",
@@ -69,22 +72,6 @@ function errMsg(e: unknown, fallback: string): string {
   return e instanceof UnisenseApiError ? `${e.message}（${e.codeZh}）` : fallback;
 }
 
-/** 审核权判断（对齐 MetricReview canReview）：指派评审人/域评审组/未指派域管理员兜底 */
-function canReviewMeasure(row: MeasureCatalog, user: CurrentUser | null): boolean {
-  if (!user) return false;
-  if (user.role === "platform_admin") return true;
-  if (row.reviewer_type === "user" && row.reviewer_id != null) {
-    return user.id === row.reviewer_id;
-  }
-  if (row.reviewer_type === "domain" && row.reviewer_domain) {
-    return (
-      (user.role === "domain_admin" || user.role === "reviewer") &&
-      user.domain === row.reviewer_domain
-    );
-  }
-  return user.role === "domain_admin";
-}
-
 export function MeasureCatalogs() {
   const { message } = AntApp.useApp();
   const { can } = usePermission();
@@ -104,14 +91,9 @@ export function MeasureCatalogs() {
   const [saving, setSaving] = useState(false);
   const [suggestLoading, setSuggestLoading] = useState(false);
   const [suggestResult, setSuggestResult] = useState<MeasureSuggestResult | null>(null);
-  // 审核流状态：提交审核 Modal / 驳回 Modal / 正在审批的度量
-  const [submitTarget, setSubmitTarget] = useState<MeasureCatalog | null>(null);
-  const [submitBusy, setSubmitBusy] = useState(false);
-  const [rejectTarget, setRejectTarget] = useState<MeasureCatalog | null>(null);
-  const [rejectBusy, setRejectBusy] = useState(false);
-  const [busyCode, setBusyCode] = useState<string | null>(null);
+  // 审核流状态（共享 hook：提交审核 Modal / 驳回 Modal / 正在审批的度量）
+  const review = useMasterDataReview();
   const [form] = Form.useForm();
-  const [reviewForm] = Form.useForm();
   const watchFormat = Form.useWatch("measure_format", form);
 
   async function load() {
@@ -271,65 +253,48 @@ export function MeasureCatalogs() {
   }
 
   // 提交审核（DRAFT → REVIEW）：度量是原子指标继承源，发布须先审
-  function openSubmitReview(row: MeasureCatalog) {
-    setSubmitTarget(row);
-    reviewForm.resetFields();
-  }
-
-  async function handleSubmitReview() {
-    if (!submitTarget) return;
-    const values = await reviewForm.validateFields();
-    setSubmitBusy(true);
+  async function handleSubmitReview(values: ReviewSubmitBody) {
+    if (!review.submitTarget) return;
+    review.setSubmitBusy(true);
     try {
-      await submitMeasureCatalog(submitTarget.measure_code, {
-        change_reason: values.change_reason,
-        reviewer_type: values.reviewer_type ?? null,
-        reviewer_id: values.reviewer_id ?? null,
-        reviewer_domain: values.reviewer_domain ?? null,
-      });
-      message.success(`「${submitTarget.name}」已提交审核，待评审通过后发布`);
-      setSubmitTarget(null);
+      await submitMeasureCatalog(review.submitTarget.code, values);
+      message.success(`「${review.submitTarget.name}」已提交审核，待评审通过后发布`);
+      review.setSubmitTarget(null);
       await load();
     } catch (e) {
       message.error(errMsg(e, "提交审核失败"));
     } finally {
-      setSubmitBusy(false);
+      review.setSubmitBusy(false);
     }
   }
 
   // 审核通过（REVIEW → PUBLISHED）
-  async function handleApprove(row: MeasureCatalog) {
-    setBusyCode(row.measure_code);
+  async function handleApprove(row: { code: string; name: string }) {
+    review.setBusyCode(row.code);
     try {
-      await approveMeasureCatalog(row.measure_code, { comment: null });
+      await approveMeasureCatalog(row.code, { comment: null });
       message.success(`「${row.name}」审核通过，已发布`);
       await load();
     } catch (e) {
       message.error(errMsg(e, "审核通过失败"));
     } finally {
-      setBusyCode(null);
+      review.setBusyCode(null);
     }
   }
 
   // 审核驳回（REVIEW → DRAFT，驳回原因必填）
-  function openReject(row: MeasureCatalog) {
-    setRejectTarget(row);
-    reviewForm.resetFields();
-  }
-
-  async function handleReject() {
-    if (!rejectTarget) return;
-    const values = await reviewForm.validateFields();
-    setRejectBusy(true);
+  async function handleReject(reason: string) {
+    if (!review.rejectTarget) return;
+    review.setRejectBusy(true);
     try {
-      await rejectMeasureCatalog(rejectTarget.measure_code, { reason: values.reason });
-      message.success(`「${rejectTarget.name}」已驳回，可修改后重新提交`);
-      setRejectTarget(null);
+      await rejectMeasureCatalog(review.rejectTarget.code, { reason });
+      message.success(`「${review.rejectTarget.name}」已驳回，可修改后重新提交`);
+      review.setRejectTarget(null);
       await load();
     } catch (e) {
       message.error(errMsg(e, "驳回失败"));
     } finally {
-      setRejectBusy(false);
+      review.setRejectBusy(false);
     }
   }
 
@@ -462,7 +427,6 @@ export function MeasureCatalogs() {
             key: "actions",
             width: 280,
             render: (_, row) => {
-              const canReview = canReviewMeasure(row, currentUser);
               return (
                 <Space size={4}>
                   {row.status === "REVIEW" ? (
@@ -474,41 +438,21 @@ export function MeasureCatalogs() {
                       <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)} />
                     </Tooltip>
                   )}
-                  {row.status === "DRAFT" && (
-                    <Tooltip title="提交审核（度量发布前须评审通过）">
-                      <Button
-                        size="small"
-                        type="primary"
-                        icon={<SendOutlined />}
-                        onClick={() => openSubmitReview(row)}
-                      >
-                        提交审核
-                      </Button>
-                    </Tooltip>
-                  )}
-                  {row.status === "REVIEW" && canReview && (
-                    <>
-                      <Tooltip title="审核通过并发布">
-                        <Button
-                          size="small"
-                          type="primary"
-                          icon={<CheckOutlined />}
-                          aria-label="审核通过并发布"
-                          loading={busyCode === row.measure_code}
-                          onClick={() => handleApprove(row)}
-                        />
-                      </Tooltip>
-                      <Tooltip title="驳回（须填原因）">
-                        <Button
-                          size="small"
-                          danger
-                          icon={<CloseOutlined />}
-                          aria-label="驳回该度量"
-                          onClick={() => openReject(row)}
-                        />
-                      </Tooltip>
-                    </>
-                  )}
+                  <MasterDataReviewActions
+                    row={{
+                      code: row.measure_code,
+                      name: row.name,
+                      status: row.status,
+                      reviewer_type: row.reviewer_type,
+                      reviewer_id: row.reviewer_id,
+                      reviewer_domain: row.reviewer_domain,
+                    }}
+                    user={currentUser}
+                    busyCode={review.busyCode}
+                    onApprove={handleApprove}
+                    onOpenSubmit={(r) => review.setSubmitTarget({ code: r.code, name: r.name })}
+                    onOpenReject={(r) => review.setRejectTarget({ code: r.code, name: r.name })}
+                  />
                   {row.status === "PUBLISHED" && (
                     <Popconfirm
                       title="确认废弃该逻辑度量？"
@@ -652,95 +596,19 @@ export function MeasureCatalogs() {
         </Form>
       </Modal>
 
-      {/* 提交审核 Modal（DRAFT → REVIEW）：度量发布前须评审通过 */}
-      <Modal
-        title={submitTarget ? `提交审核 · ${submitTarget.name}` : "提交审核"}
-        open={!!submitTarget}
-        onOk={handleSubmitReview}
-        onCancel={() => setSubmitTarget(null)}
-        confirmLoading={submitBusy}
-        width={560}
-      >
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 16 }}
-          message="度量发布前须先评审通过"
-          description="度量是原子指标的权威定义（单位/格式/小数位/口径直接传播到下游指标）。提交后由评审人审核通过才可发布；审核期间度量锁定不可编辑，驳回后可修改重提。"
-        />
-        <Form form={reviewForm} layout="vertical">
-          <Form.Item
-            name="change_reason"
-            label="提交说明"
-            rules={[{ required: true, min: 4, message: "请填写提交说明（至少 4 字），说明为何发布该度量" }]}
-          >
-            <Input.TextArea
-              rows={2}
-              maxLength={200}
-              placeholder="如：门诊收费金额度量已与业务对齐口径，申请发布"
-            />
-          </Form.Item>
-          <Form.Item
-            name="reviewer_type"
-            label="评审指派（可选）"
-            extra="不指定则由域管理员兜底评审"
-          >
-            <Select
-              allowClear
-              placeholder="不指派（域管理员兜底）"
-              options={[
-                { value: "user", label: "指定用户" },
-                { value: "domain", label: "指定域评审组" },
-              ]}
-            />
-          </Form.Item>
-          <Form.Item noStyle shouldUpdate={(prev, cur) => prev.reviewer_type !== cur.reviewer_type}>
-            {({ getFieldValue }) =>
-              getFieldValue("reviewer_type") === "user" ? (
-                <Form.Item
-                  name="reviewer_id"
-                  label="评审用户 ID"
-                  rules={[{ required: true, message: "请填写评审用户 ID" }]}
-                >
-                  <Input type="number" placeholder="如 5" />
-                </Form.Item>
-              ) : getFieldValue("reviewer_type") === "domain" ? (
-                <Form.Item
-                  name="reviewer_domain"
-                  label="评审域"
-                  rules={[{ required: true, message: "请填写评审域 code" }]}
-                >
-                  <Input placeholder="如 outpatient" />
-                </Form.Item>
-              ) : null
-            }
-          </Form.Item>
-        </Form>
-      </Modal>
-
-      {/* 驳回审核 Modal（REVIEW → DRAFT）：驳回原因必填，通知提交人修改 */}
-      <Modal
-        title={rejectTarget ? `驳回审核 · ${rejectTarget.name}` : "驳回审核"}
-        open={!!rejectTarget}
-        onOk={handleReject}
-        onCancel={() => setRejectTarget(null)}
-        confirmLoading={rejectBusy}
-        width={520}
-      >
-        <Form form={reviewForm} layout="vertical">
-          <Form.Item
-            name="reason"
-            label="驳回原因"
-            rules={[{ required: true, min: 4, message: "请填写驳回原因（至少 4 字），通知提交人修改" }]}
-          >
-            <Input.TextArea
-              rows={3}
-              maxLength={500}
-              placeholder="如：统计口径与业务实际不符，请补充计算依据后重新提交"
-            />
-          </Form.Item>
-        </Form>
-      </Modal>
+      {/* 提交审核 + 驳回审核 Modal（共享组件）：度量发布前须评审通过 */}
+      <MasterDataReviewModals
+        entityLabel="逻辑度量"
+        submitDescription="度量是原子指标的权威定义（单位/格式/小数位/口径直接传播到下游指标）。提交后由评审人审核通过才可发布；审核期间度量锁定不可编辑，驳回后可修改重提。"
+        submitTarget={review.submitTarget}
+        submitBusy={review.submitBusy}
+        onCancelSubmit={() => review.setSubmitTarget(null)}
+        onConfirmSubmit={handleSubmitReview}
+        rejectTarget={review.rejectTarget}
+        rejectBusy={review.rejectBusy}
+        onCancelReject={() => review.setRejectTarget(null)}
+        onConfirmReject={handleReject}
+      />
     </Card>
   );
 }

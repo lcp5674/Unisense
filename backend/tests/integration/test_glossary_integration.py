@@ -134,7 +134,9 @@ def db_env():
 
 
 async def test_term_lifecycle_draft_published_deprecated(db_env) -> None:
-    """术语状态机 DRAFT→PUBLISHED→DEPRECATED 闭环。"""
+    """术语状态机 DRAFT→REVIEW→PUBLISHED→DEPRECATED 闭环（审核流）。"""
+    from app.services.master_data_review.schemas import ReviewApproveRequest, ReviewSubmitRequest
+
     async with db_env["session_factory"]() as session:
         svc = GlossaryService(session)
         created = await svc.create_term(
@@ -150,7 +152,24 @@ async def test_term_lifecycle_draft_published_deprecated(db_env) -> None:
         )
         assert created.status.value == "DRAFT"
 
-        published = await svc.submit_term("gmv", db_env["owner_id"])
+        # 提交审核 → REVIEW
+        submitted = await svc.submit_term(
+            "gmv",
+            ReviewSubmitRequest(change_reason="完善定义后提审"),
+            actor_id=db_env["owner_id"],
+            role="platform_admin",
+            user_domain="sales",
+        )
+        assert submitted.status.value == "REVIEW"
+
+        # 审核通过 → PUBLISHED
+        published = await svc.approve_term(
+            "gmv",
+            ReviewApproveRequest(),
+            actor_id=db_env["owner_id"],
+            role="platform_admin",
+            user_domain="sales",
+        )
         assert published.status.value == "PUBLISHED"
 
         deprecated = await svc.deprecate_term("gmv", db_env["owner_id"])

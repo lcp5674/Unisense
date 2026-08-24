@@ -268,7 +268,7 @@ describe("MeasureCatalogs 审核流（提交审核/通过/驳回）", () => {
     mockedReject.mockResolvedValue({ ...measure, status: "DRAFT" });
     renderCatalogs();
 
-    fireEvent.click(await screen.findByRole("button", { name: "驳回该度量" }));
+    fireEvent.click(await screen.findByRole("button", { name: "驳回该主数据" }));
     const modal = await screen.findByRole("dialog");
     fireEvent.change(within(modal).getByLabelText("驳回原因"), {
       target: { value: "统计口径与业务实际不符" },

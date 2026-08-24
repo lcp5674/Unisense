@@ -265,8 +265,8 @@ async def test_create_term_auto_code_both_empty() -> None:
     assert resp.term_code == "term"
 
 
-async def test_submit_term_from_deprecated_republishes() -> None:
-    """状态机：已废弃术语可重新发布（DEPRECATED→PUBLISHED），已发布幂等。"""
+async def test_publish_term_from_deprecated_republishes() -> None:
+    """状态机：admin 直发 publish_term 已废弃术语可再次发布（DEPRECATED→PUBLISHED），已发布幂等。"""
     db = MagicMock()
     svc = GlossaryService(db)
     repo = MagicMock()
@@ -276,21 +276,43 @@ async def test_submit_term_from_deprecated_republishes() -> None:
     svc._repo = repo
     svc._snapshot = AsyncMock()  # 跳过快照计数
 
-    # DEPRECATED → PUBLISHED
+    # DEPRECATED → PUBLISHED（publish_term 直发通道，含"再次发布"能力）
     deprecated = _make_term()
     deprecated.id = 1
     deprecated.status = TermStatus.DEPRECATED.value
     repo.get_term = AsyncMock(return_value=deprecated)
-    resp = await svc.submit_term("c1", 1)
+    resp = await svc.publish_term("c1", 1)
     assert resp.status == TermStatus.PUBLISHED
 
-    # 已发布幂等：重复提交不报错、状态不变
+    # 已发布幂等：重复发布不报错、状态不变
     published = _make_term()
     published.id = 1
     published.status = TermStatus.PUBLISHED.value
     repo.get_term = AsyncMock(return_value=published)
-    resp2 = await svc.submit_term("c1", 1)
+    resp2 = await svc.publish_term("c1", 1)
     assert resp2.status == TermStatus.PUBLISHED
+
+
+async def test_submit_term_goes_to_review() -> None:
+    """审核流：业务用户 submit_term 提交审核（DRAFT → REVIEW），并写入提交人/清空驳回。"""
+    from app.services.master_data_review.schemas import ReviewSubmitRequest
+
+    db = MagicMock()
+    svc = GlossaryService(db)
+    repo = MagicMock()
+    term = _make_term()
+    term.id = 1
+    term.status = TermStatus.DRAFT.value
+    repo.get_term = AsyncMock(return_value=term)
+    repo.commit = AsyncMock()
+    svc._repo = repo
+    svc._notify_reviewers = AsyncMock()
+
+    resp = await svc.submit_term(
+        "c1", ReviewSubmitRequest(change_reason="完善术语定义后提审"), 1, "metric_owner", "user"
+    )
+    assert resp.status == TermStatus.REVIEW
+    assert term.submitted_by == 1
 
 
 async def test_deprecate_already_deprecated_raises_business_error() -> None:

@@ -10,6 +10,9 @@ import {
   createTermRelation,
   listTermRelations,
   submitTerm,
+  publishTerm,
+  approveTerm,
+  rejectTerm,
   deprecateTerm,
   batchSubmitTerms,
   batchDeprecateTerms,
@@ -20,14 +23,21 @@ import {
   listFavorites,
   addFavorite,
   removeFavorite,
+  fetchCurrentUser,
   UnisenseApiError,
 } from "../api";
-import type { GlossaryTerm, GlossaryConflict, SubjectDomainTreeNode, TermRelationViewItem } from "../types";
+import type { ReviewSubmitBody } from "../api";
+import type { GlossaryTerm, GlossaryConflict, SubjectDomainTreeNode, TermRelationViewItem, CurrentUser } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 import { usePermission } from "../hooks/usePermission";
+import {
+  MasterDataReviewActions,
+  MasterDataReviewModals,
+  useMasterDataReview,
+} from "../components/MasterDataReview";
 
-const STATUS_COLOR: Record<string, string> = { DRAFT: "default", PUBLISHED: "success", DEPRECATED: "error" };
-const STATUS_LABEL: Record<string, string> = { DRAFT: "草稿", PUBLISHED: "已发布", DEPRECATED: "已废弃" };
+const STATUS_COLOR: Record<string, string> = { DRAFT: "default", REVIEW: "processing", PUBLISHED: "success", DEPRECATED: "error" };
+const STATUS_LABEL: Record<string, string> = { DRAFT: "草稿", REVIEW: "审核中", PUBLISHED: "已发布", DEPRECATED: "已废弃" };
 // 关系类型 8 种（产品丰富增强，对齐后端 TermRelationType 枚举）
 const RELATION_TYPE_LABEL: Record<string, string> = {
   SYNONYM_OF: "同义（SYNONYM_OF）",
@@ -142,6 +152,10 @@ function TermsTab() {
   const focusCode = searchParams.get("focus");
   // 并发查询防竞态：只有最后一次发起的请求允许落地结果
   const loadSeq = useRef(0);
+  // 当前用户（审核流评审权判断）
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  // 审核流状态（共享 hook：提交审核 Modal / 驳回 Modal / 正在审批的术语）
+  const review = useMasterDataReview();
   // 搜索框初始值承接 URL 关键词（首查即带过滤）
   const [search, setSearch] = useState(urlKw);
   const { can } = usePermission();
@@ -205,7 +219,7 @@ function TermsTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, pageSize, status, ownerId]);
 
-  // 加载当前用户术语收藏（TERM 类型）供行内收藏按钮判断
+  // 加载当前用户术语收藏（TERM 类型）供行内收藏按钮判断；同时取当前用户供审核权判断
   useEffect(() => {
     listFavorites()
       .then((favs) =>
@@ -214,6 +228,7 @@ function TermsTab() {
         ),
       )
       .catch(() => {});
+    fetchCurrentUser().then(setCurrentUser).catch(() => {});
   }, []);
 
   // 加载主题域树作为业务域选项（新建/编辑不手造）
@@ -307,13 +322,49 @@ function TermsTab() {
     }
   }
 
-  async function handleSubmit(t: GlossaryTerm) {
+  // 提交审核（DRAFT → REVIEW）：术语是业务概念标准层，发布须先审
+  async function handleSubmitReview(values: ReviewSubmitBody) {
+    if (!review.submitTarget) return;
+    review.setSubmitBusy(true);
     try {
-      await submitTerm(t.term_code);
-      message.success("已提交发布");
+      await submitTerm(review.submitTarget.code, values);
+      message.success(`「${review.submitTarget.name}」已提交审核，待评审通过后发布`);
+      review.setSubmitTarget(null);
       load();
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "提交失败");
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "提交审核失败");
+    } finally {
+      review.setSubmitBusy(false);
+    }
+  }
+
+  // 审核通过（REVIEW → PUBLISHED）
+  async function handleApprove(row: { code: string; name: string }) {
+    review.setBusyCode(row.code);
+    try {
+      await approveTerm(row.code, { comment: null });
+      message.success(`「${row.name}」审核通过，已发布`);
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "审核通过失败");
+    } finally {
+      review.setBusyCode(null);
+    }
+  }
+
+  // 审核驳回（REVIEW → DRAFT，驳回原因必填）
+  async function handleReject(reason: string) {
+    if (!review.rejectTarget) return;
+    review.setRejectBusy(true);
+    try {
+      await rejectTerm(review.rejectTarget.code, { reason });
+      message.success(`「${review.rejectTarget.name}」已驳回，可修改后重新提交`);
+      review.setRejectTarget(null);
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "驳回失败");
+    } finally {
+      review.setRejectBusy(false);
     }
   }
 
@@ -442,11 +493,25 @@ function TermsTab() {
           >
             {favCodes.has(t.term_code) ? "已收藏" : "收藏"}
           </Button>
-          {t.status === "DRAFT" && can("glossary:edit") && (
-            <Button size="small" type="primary" icon={<SendOutlined />} onClick={() => handleSubmit(t)}>提交</Button>
+          {can("glossary:edit") && (
+            <MasterDataReviewActions
+              row={{
+                code: t.term_code,
+                name: t.name,
+                status: t.status,
+                reviewer_type: t.reviewer_type,
+                reviewer_id: t.reviewer_id,
+                reviewer_domain: t.reviewer_domain,
+              }}
+              user={currentUser}
+              busyCode={review.busyCode}
+              onApprove={handleApprove}
+              onOpenSubmit={(r) => review.setSubmitTarget({ code: r.code, name: r.name })}
+              onOpenReject={(r) => review.setRejectTarget({ code: r.code, name: r.name })}
+            />
           )}
-          {t.status === "DEPRECATED" && can("glossary:edit") && (
-            <Button size="small" type="primary" icon={<SendOutlined />} onClick={() => handleSubmit(t)}>再次发布</Button>
+          {t.status === "DEPRECATED" && currentUser?.role === "platform_admin" && can("glossary:edit") && (
+            <Button size="small" type="primary" icon={<SendOutlined />} onClick={() => publishTerm(t.term_code).then(() => { message.success("已重新发布"); load(); })}>再次发布</Button>
           )}
           {t.status !== "DEPRECATED" && can("glossary:deprecate") && (
             <Button size="small" danger onClick={() => handleDeprecate(t)}>废弃</Button>
@@ -473,7 +538,7 @@ function TermsTab() {
           style={{ width: 140 }}
           value={status || undefined}
           onChange={(v) => { setStatus(v || ""); setPage(1); }}
-          options={[{ value: "DRAFT", label: "草稿" }, { value: "PUBLISHED", label: "已发布" }, { value: "DEPRECATED", label: "已废弃" }]}
+          options={[{ value: "DRAFT", label: "草稿" }, { value: "REVIEW", label: "审核中" }, { value: "PUBLISHED", label: "已发布" }, { value: "DEPRECATED", label: "已废弃" }]}
         />
         {can("glossary:create") && (
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建术语</Button>
@@ -848,6 +913,20 @@ function TermsTab() {
           {batchAction === "deprecate" ? "废弃后可通过「再次发布」重新发布。" : "草稿 / 已废弃术语可发布；已发布将幂等跳过。"}
         </p>
       </Modal>
+
+      {/* 提交审核 + 驳回审核 Modal（共享组件）：术语发布前须评审通过 */}
+      <MasterDataReviewModals
+        entityLabel="术语"
+        submitDescription="术语是业务概念标准层，被指标引用的标准定义。提交后由评审人审核通过才可发布；审核期间术语锁定不可编辑，驳回后可修改重提。"
+        submitTarget={review.submitTarget}
+        submitBusy={review.submitBusy}
+        onCancelSubmit={() => review.setSubmitTarget(null)}
+        onConfirmSubmit={handleSubmitReview}
+        rejectTarget={review.rejectTarget}
+        rejectBusy={review.rejectBusy}
+        onCancelReject={() => review.setRejectTarget(null)}
+        onConfirmReject={handleReject}
+      />
     </div>
   );
 }

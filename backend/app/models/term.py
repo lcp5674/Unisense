@@ -13,12 +13,15 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.mysql import Base
 from app.models.base import BaseModel
+from app.models.review_fields import ReviewFieldsMixin
 
 
-class Term(Base, BaseModel):
+class Term(Base, BaseModel, ReviewFieldsMixin):
     """术语库实体。
 
     业务概念标准层，提供指标引用的标准定义。
+    状态机 DRAFT → REVIEW → PUBLISHED → DEPRECATED（对齐指标审核流，
+    审核字段复用 ``ReviewFieldsMixin``，与逻辑度量/维度统一）。
 
     Attributes:
         term_code: 术语编码（唯一）。
@@ -42,7 +45,7 @@ class Term(Base, BaseModel):
     synonyms: Mapped[list[Any]] = mapped_column(JSON, nullable=False, comment="同义词列表")
     boundary: Mapped[str | None] = mapped_column(Text, nullable=True, comment="边界说明")
     status: Mapped[str] = mapped_column(
-        Enum("DRAFT", "PUBLISHED", "DEPRECATED", name="term_status_enum"),
+        Enum("DRAFT", "REVIEW", "PUBLISHED", "DEPRECATED", name="term_status_enum"),
         nullable=False,
         default="DRAFT",
         comment="术语状态",

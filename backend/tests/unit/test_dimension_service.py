@@ -1401,3 +1401,85 @@ async def test_member_ops_rejected_when_dimension_deprecated() -> None:
         raise AssertionError("废弃维度下应拒绝批量发布")
     except Exception as exc:
         assert getattr(exc, "error_code", None) == "INVALID_STATE"
+
+
+async def test_submit_dimension_goes_to_review() -> None:
+    """审核流：维度 submit_dimension 提交审核（DRAFT → REVIEW），写入提交人/评审指派。"""
+    from app.services.master_data_review.schemas import ReviewSubmitRequest
+
+    svc, repo = await _svc()
+    dim = Dimension(
+        dim_code="dim_r", name="地区", domain="outpatient", type="SCD1",
+        status="DRAFT", owner_id=1,
+    )
+    repo.get_dimension = AsyncMock(return_value=dim)
+    svc._notify_reviewers = AsyncMock()
+
+    resp = await svc.submit_dimension(
+        "dim_r",
+        ReviewSubmitRequest(change_reason="完善地区维度定义后提审", reviewer_type="domain"),
+        1, "metric_owner", "outpatient",
+    )
+    assert resp.status == "REVIEW"
+    assert dim.submitted_by == 1
+    assert dim.reviewer_type == "domain"
+    assert dim.reviewer_domain == "outpatient"
+
+
+async def test_approve_dimension_sets_published() -> None:
+    """审核流：维度 approve_dimension 审核通过（REVIEW → PUBLISHED），写入通过人。"""
+    from app.services.master_data_review.schemas import ReviewApproveRequest
+
+    svc, repo = await _svc()
+    dim = Dimension(
+        dim_code="dim_r", name="地区", domain="outpatient", type="SCD1",
+        status="REVIEW", owner_id=1, submitted_by=2,
+    )
+    repo.get_dimension = AsyncMock(return_value=dim)
+    svc._notify_submitter = AsyncMock()
+
+    resp = await svc.approve_dimension(
+        "dim_r", ReviewApproveRequest(), 3, "domain_admin", "outpatient"
+    )
+    assert resp.status == "PUBLISHED"
+    assert dim.approver_id == 3
+    assert dim.reviewed_at is not None
+
+
+async def test_reject_dimension_sets_draft_with_reason() -> None:
+    """审核流：维度 reject_dimension 驳回（REVIEW → DRAFT），驳回原因落库可追溯。"""
+    from app.services.master_data_review.schemas import ReviewRejectRequest
+
+    svc, repo = await _svc()
+    dim = Dimension(
+        dim_code="dim_r", name="地区", domain="outpatient", type="SCD1",
+        status="REVIEW", owner_id=1, submitted_by=2,
+    )
+    repo.get_dimension = AsyncMock(return_value=dim)
+    svc._notify_submitter = AsyncMock()
+
+    resp = await svc.reject_dimension(
+        "dim_r", ReviewRejectRequest(reason="缺少层级说明"), 3, "domain_admin", "outpatient"
+    )
+    assert resp.status == "DRAFT"
+    assert dim.reject_reason == "缺少层级说明"
+    assert dim.reject_reviewer_id == 3
+    assert dim.rejected_at is not None
+
+
+async def test_dimension_review_blocks_update() -> None:
+    """审核中锁定：REVIEW 状态维度禁止编辑（评审失真防护，驳回后修改重提）。"""
+    svc, repo = await _svc()
+    dim = Dimension(
+        dim_code="dim_r", name="地区", domain="outpatient", type="SCD1",
+        status="REVIEW", owner_id=1,
+    )
+    repo.get_dimension = AsyncMock(return_value=dim)
+    from app.services.dimension.schemas import DimensionUpdate
+
+    try:
+        await svc.update_dimension("dim_r", DimensionUpdate(name="新名称"))
+        raise AssertionError("REVIEW 状态应禁止编辑")
+    except UnisenseError as exc:
+        assert exc.error_code == "INVALID_STATE"
+        assert "审核中" in str(exc)

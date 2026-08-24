@@ -53,6 +53,7 @@ from app.services.dimension.schemas import (
     ReconciliationReview,
     ReconciliationSubmit,
 )
+from app.services.master_data_review.service import MasterDataReviewMixin
 
 logger = get_logger("unisense.dimension")
 
@@ -66,7 +67,14 @@ _VALID_DIM_TYPES = {e.value for e in DimensionType}
 _VALID_MEMBER_STATUSES = {e.value for e in DimensionStatus}
 
 
-class DimensionService(BaseService):
+class DimensionService(BaseService, MasterDataReviewMixin):
+    """维度管理服务：复用 ``MasterDataReviewMixin`` 审核流（DRAFT→REVIEW→PUBLISHED→DEPRECATED）。"""
+
+    _review_entity_name = "维度"
+    _review_event_prefix = "dimension"
+    _review_code_attr = "dim_code"
+    _review_status_enum = DimensionStatus
+
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session)
         self._session = session
@@ -146,6 +154,13 @@ class DimensionService(BaseService):
         dim = await self._require(dim_code)
         if dim.status == DimensionStatus.DEPRECATED.value:
             raise UnisenseError(f"已废弃维度不可更新: {dim_code}", error_code="INVALID_STATE")
+        # 审核中锁定（REVIEW）：评审人基于当前定义审核，审核中改定义会造成评审失真；
+        # 驳回回 DRAFT 后即可修改重提（对齐指标 REVIEW 编辑即撤回的语义）。
+        if dim.status == DimensionStatus.REVIEW.value:
+            raise UnisenseError(
+                f"审核中的维度不可编辑（{dim_code}），请等待审核结果或驳回后修改",
+                error_code="INVALID_STATE",
+            )
         # 改编码：仅 DRAFT 状态允许（已发布/已废弃维度改编码会破坏线上引用）；
         # 校验新编码唯一，事务内级联更新成员/映射/绑定引用。
         if data.dim_code is not None and data.dim_code != dim_code:
@@ -186,6 +201,51 @@ class DimensionService(BaseService):
             )
         dim.status = DimensionStatus.PUBLISHED.value
         await self._repo.commit()
+        return dim
+
+    async def submit_dimension(
+        self,
+        dim_code: str,
+        request: Any,
+        actor_id: int,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> Dimension:
+        """提交维度审核（DRAFT → REVIEW，复用主数据审核流 TD §13）。"""
+        dim = await self._require(dim_code)
+        await self._submit_review(
+            dim, request, actor_id, role, user_domain, code=dim_code
+        )
+        return dim
+
+    async def approve_dimension(
+        self,
+        dim_code: str,
+        request: Any,
+        actor_id: int,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> Dimension:
+        """审核通过维度（REVIEW → PUBLISHED，复用主数据审核流 FR-004）。"""
+        dim = await self._require(dim_code)
+        await self._approve_review(
+            dim, request, actor_id, role, user_domain, code=dim_code
+        )
+        return dim
+
+    async def reject_dimension(
+        self,
+        dim_code: str,
+        request: Any,
+        actor_id: int,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> Dimension:
+        """审核驳回维度（REVIEW → DRAFT，复用主数据审核流 FR-005）。"""
+        dim = await self._require(dim_code)
+        await self._reject_review(
+            dim, request, actor_id, role, user_domain, code=dim_code
+        )
         return dim
 
     async def deprecate_dimension(self, dim_code: str) -> Dimension:

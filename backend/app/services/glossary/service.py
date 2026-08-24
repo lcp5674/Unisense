@@ -42,6 +42,7 @@ from app.services.glossary.schemas import (
     TermResponse,
     TermStatus,
 )
+from app.services.master_data_review.service import MasterDataReviewMixin
 
 logger = get_logger("unisense.glossary.service")
 
@@ -90,7 +91,14 @@ def _get_synonym_threshold() -> float:
     return getattr(settings, "glossary_synonym_threshold", 0.8)
 
 
-class GlossaryService(BaseService):
+class GlossaryService(BaseService, MasterDataReviewMixin):
+    """术语库服务：复用 ``MasterDataReviewMixin`` 审核流（DRAFT→REVIEW→PUBLISHED→DEPRECATED）。"""
+
+    _review_entity_name = "术语"
+    _review_event_prefix = "term"
+    _review_code_attr = "term_code"
+    _review_status_enum = TermStatus
+
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session)
         self._session = session
@@ -164,10 +172,32 @@ class GlossaryService(BaseService):
         )
         return [TermResponse.from_model(t) for t in rows], total
 
-    async def submit_term(self, term_code: str, actor_id: int) -> TermResponse:
+    async def submit_term(
+        self,
+        term_code: str,
+        request: Any,
+        actor_id: int,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> TermResponse:
+        """提交术语审核（DRAFT → REVIEW，复用主数据审核流 TD §13）。
+
+        业务用户发布术语须走审核流（submit → approve）；admin 直发走 ``publish_term``。
+        """
         term = await self._require_term(term_code)
-        # 状态机：DRAFT→PUBLISHED（首次发布）；DEPRECATED→PUBLISHED（废弃后可重新发布）。
-        # 已发布重复提交幂等（返回当前），避免重复点击报错。
+        await self._submit_review(
+            term, request, actor_id, role, user_domain, code=term_code
+        )
+        return TermResponse.from_model(term)
+
+    async def publish_term(self, term_code: str, actor_id: int) -> TermResponse:
+        """直接发布术语（平台管理员直发通道，含"再次发布"能力）。
+
+        业务用户发布须走审核流（submit_term → approve_term）；
+        本方法保留为系统/种子/管理员兜底直发（API 层收紧为 platform_admin），
+        避免造数与批量导入场景被迫走审核流程。已发布幂等返回；已废弃可再次发布。
+        """
+        term = await self._require_term(term_code)
         if term.status == TermStatus.PUBLISHED.value:
             return TermResponse.from_model(term)
         if term.status not in (TermStatus.DRAFT.value, TermStatus.DEPRECATED.value):
@@ -175,12 +205,50 @@ class GlossaryService(BaseService):
                 f"当前状态不可发布: {term.status}", error_code="INVALID_STATE"
             )
         term.status = TermStatus.PUBLISHED.value
-        await self._snapshot(term, actor_id, "submit")
+        await self._snapshot(term, actor_id, "publish")
         await self._repo.commit()
+        return TermResponse.from_model(term)
+
+    async def approve_term(
+        self,
+        term_code: str,
+        request: Any,
+        actor_id: int,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> TermResponse:
+        """审核通过术语（REVIEW → PUBLISHED，复用主数据审核流 FR-004）。"""
+        term = await self._require_term(term_code)
+        await self._approve_review(
+            term, request, actor_id, role, user_domain, code=term_code
+        )
+        await self._snapshot(term, actor_id, "approve")
+        return TermResponse.from_model(term)
+
+    async def reject_term(
+        self,
+        term_code: str,
+        request: Any,
+        actor_id: int,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> TermResponse:
+        """审核驳回术语（REVIEW → DRAFT，复用主数据审核流 FR-005）。"""
+        term = await self._require_term(term_code)
+        await self._reject_review(
+            term, request, actor_id, role, user_domain, code=term_code
+        )
         return TermResponse.from_model(term)
 
     async def update_term(self, term_code: str, data: Any, actor_id: int) -> TermResponse:
         term = await self._require_term(term_code)
+        # 审核中锁定（REVIEW）：评审人基于当前定义审核，审核中改定义会造成评审失真；
+        # 驳回回 DRAFT 后即可修改重提（对齐指标 REVIEW 编辑即撤回的语义）。
+        if term.status == TermStatus.REVIEW.value:
+            raise BusinessError(
+                f"审核中的术语不可编辑（{term_code}），请等待审核结果或驳回后修改",
+                error_code="INVALID_STATE",
+            )
         if data.term_code is not None and data.term_code != term.term_code:
             # 编码编辑唯一性校验（防与其他术语冲突）
             existing = await self._repo.get_term(data.term_code)
@@ -205,11 +273,15 @@ class GlossaryService(BaseService):
     async def batch_submit_terms(
         self, term_codes: list[str], actor_id: int
     ) -> list[dict[str, Any]]:
-        """批量发布（207 语义：逐条处理，部分失败不阻断成功项）。"""
+        """批量发布（207 语义：逐条处理，部分失败不阻断成功项）。
+
+        批量导入走 admin 直发通道（``publish_term``，API 层收紧为 platform_admin），
+        单条业务发布须走审核流（submit_term → approve_term）。
+        """
         results: list[dict[str, Any]] = []
         for code in term_codes:
             try:
-                resp = await self.submit_term(code, actor_id)
+                resp = await self.publish_term(code, actor_id)
                 results.append(
                     {"term_code": code, "ok": True, "status": resp.status.value}
                 )

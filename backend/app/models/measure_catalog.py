@@ -12,15 +12,15 @@
 from __future__ import annotations
 
 import enum
-from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, Enum, Integer, String, Text
+from sqlalchemy import BigInteger, Enum, Integer, String, Text
 from sqlalchemy.dialects.mysql import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.mysql import Base
 from app.models.base import BaseModel
+from app.models.review_fields import ReviewFieldsMixin
 
 
 class MeasureFormat(enum.StrEnum):
@@ -56,7 +56,7 @@ class MeasureStatus(enum.StrEnum):
     DEPRECATED = "DEPRECATED"
 
 
-class MeasureCatalog(Base, BaseModel):
+class MeasureCatalog(Base, BaseModel, ReviewFieldsMixin):
     __tablename__ = "measure_catalog"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -97,40 +97,4 @@ class MeasureCatalog(Base, BaseModel):
         nullable=False,
         default=MeasureStatus.DRAFT.value,
         comment="状态（DRAFT/REVIEW/PUBLISHED/DEPRECATED）",
-    )
-
-    # ---- 审核流字段（对齐指标审核流 TD §13：提交/指派/通过/驳回可追溯）----
-    #: 提交评审人 ID（approve/reject 时禁止自审，管理员豁免）
-    submitted_by: Mapped[int | None] = mapped_column(
-        BigInteger, nullable=True, comment="提交评审人 ID（approve/reject 时禁止自审）"
-    )
-    #: 审核通过人 ID（REVIEW→PUBLISHED 时写入）
-    approver_id: Mapped[int | None] = mapped_column(
-        BigInteger, nullable=True, comment="审核通过人 ID"
-    )
-    #: 评审指派（TD §13）：可指定评审用户或域评审组；未指派由域管理员兜底评审
-    reviewer_id: Mapped[int | None] = mapped_column(
-        BigInteger, nullable=True, comment="指定评审用户 ID（reviewer_type=user 时生效）"
-    )
-    reviewer_type: Mapped[str | None] = mapped_column(
-        String(16), nullable=True, comment="评审指派类型: user(指定用户)/domain(域评审组)"
-    )
-    reviewer_domain: Mapped[str | None] = mapped_column(
-        String(64), nullable=True, comment="评审团队所在域（reviewer_type=domain 时生效）"
-    )
-    #: 驳回可追溯（对齐指标 FR-005）：reject 时落库驳回原因/审核人/时间，DRAFT 详情页展示引导修改
-    reject_reason: Mapped[str | None] = mapped_column(
-        String(500),
-        nullable=True,
-        comment="最近一次审核驳回原因（REVIEW→DRAFT 时写入，用于引导修改后重提）",
-    )
-    reject_reviewer_id: Mapped[int | None] = mapped_column(
-        BigInteger, nullable=True, comment="驳回审核人 ID（reject 时写入）"
-    )
-    rejected_at: Mapped[datetime | None] = mapped_column(
-        DateTime, nullable=True, comment="驳回时间（REVIEW→DRAFT 时写入）"
-    )
-    #: 最近审核时间（approve/reject 时写入，审计可追溯）
-    reviewed_at: Mapped[datetime | None] = mapped_column(
-        DateTime, nullable=True, comment="最近审核时间（approve/reject 时写入）"
     )

@@ -1146,9 +1146,9 @@ def seed_glossary(api: Api) -> None:
             f"[glossary] 创建术语 {t.get('name')} code={t.get('term_code')} "
             f"status={t.get('status')}"
         )
-        # 发布一个正常术语（供推荐/搜索）
+        # 发布一个正常术语（供推荐/搜索）——admin 直发通道（submit 现走审核流）
         if s["name"].endswith("收费金额"):
-            api.post(f"/terms/{t.get('term_code')}/submit")
+            api.post(f"/terms/{t.get('term_code')}/publish")
             print(f"[glossary] 发布术语 {t.get('name')}")
 
 

@@ -837,6 +837,29 @@ export interface ConsumptionGuideResponse {
 // 消费服务（backend /api/v1/consume/*）
 // ============================================================================
 
+/** 主数据审核流共享字段（对齐后端 ReviewFieldsMixin / 指标审核流 TD §13）。
+ *  逻辑度量/维度/术语三类主数据统一走 DRAFT→REVIEW→PUBLISHED→DEPRECATED，字段名一致。 */
+export interface ReviewFields {
+  /** 提交评审人 ID（approve/reject 时禁止自审） */
+  submitted_by?: number | null;
+  /** 审核通过人 ID */
+  approver_id?: number | null;
+  /** 指定评审用户 ID（reviewer_type=user 时生效） */
+  reviewer_id?: number | null;
+  /** 评审指派类型: user(指定用户)/domain(域评审组) */
+  reviewer_type?: string | null;
+  /** 评审团队所在域（reviewer_type=domain 时生效） */
+  reviewer_domain?: string | null;
+  /** 最近一次审核驳回原因（引导修改后重提） */
+  reject_reason?: string | null;
+  /** 驳回审核人 ID */
+  reject_reviewer_id?: number | null;
+  /** 驳回时间 */
+  rejected_at?: string | null;
+  /** 最近审核时间（approve/reject 时写入） */
+  reviewed_at?: string | null;
+}
+
 export interface DimensionExpr {
   name: string;
   value: string | number;
@@ -912,7 +935,7 @@ export interface SnapshotResponse {
 // 维度服务（backend /api/v1/dimensions/*）
 // ============================================================================
 
-export interface Dimension {
+export interface Dimension extends ReviewFields {
   id: number;
   dim_code: string;
   name: string;
@@ -1003,7 +1026,7 @@ export type MeasureCategory =
   | "QUALITY"
   | "OTHER";
 
-export interface MeasureCatalog {
+export interface MeasureCatalog extends ReviewFields {
   id: number;
   measure_code: string;
   name: string;
@@ -1023,16 +1046,6 @@ export interface MeasureCatalog {
   domain: string;
   owner_id: number;
   status: string;
-  /** 审核流字段（对齐指标审核流 TD §13） */
-  submitted_by?: number | null;
-  approver_id?: number | null;
-  reviewer_id?: number | null;
-  reviewer_type?: string | null;
-  reviewer_domain?: string | null;
-  reject_reason?: string | null;
-  reject_reviewer_id?: number | null;
-  rejected_at?: string | null;
-  reviewed_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1101,7 +1114,7 @@ export interface MetricMountInput {
 // 术语表（backend /api/v1/terms/*）
 // ============================================================================
 
-export interface GlossaryTerm {
+export interface GlossaryTerm extends ReviewFields {
   id: number;
   term_code: string;
   name: string;

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, require_roles
 from app.api.responses import get_trace_id, ok
-from app.core.audit import write_audit
+from app.core.audit import client_ip, write_audit
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.services.glossary.schemas import (
@@ -21,16 +21,26 @@ from app.services.glossary.schemas import (
     TermUpdate,
 )
 from app.services.glossary.service import GlossaryService
+from app.services.master_data_review.schemas import (
+    ReviewApproveRequest,
+    ReviewRejectRequest,
+    ReviewSubmitRequest,
+)
 
 router = APIRouter(prefix="/terms", tags=["glossary"])
 
 _WRITE_ROLES = ("metric_owner", "domain_admin", "platform_admin")
 _GOV_ROLES = ("domain_admin", "platform_admin")
 _READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer")
+# 审核端点角色门禁（对齐指标审核流）：平台管理员/域管理员/评审员可审
+_REVIEW_ROLES = ("platform_admin", "domain_admin", "reviewer")
+# 直发通道仅平台管理员（系统/种子/批量导入兜底），业务用户发布须走 submit+approve 审核流
+_ADMIN_ROLES = ("platform_admin",)
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 # 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
 _GOV_DEPS = [Depends(require_roles(*_GOV_ROLES)), Depends(guard_against_injection)]
+_REVIEW_DEPS = [Depends(require_roles(*_REVIEW_ROLES)), Depends(guard_against_injection)]
 
 
 @router.post("", status_code=201, dependencies=_WRITE_DEPS)
@@ -77,14 +87,17 @@ async def infer_term_suggestion(
     return ok(data=data, trace_id=trace_id)
 
 
-@router.post("/batch-submit", dependencies=_WRITE_DEPS)
+@router.post("/batch-submit", dependencies=_WRITE_DEPS + [Depends(require_roles(*_ADMIN_ROLES))])
 async def batch_submit_terms(
     payload: TermBatchOp,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    """批量发布术语（207 语义：逐条处理，部分失败不阻断成功项）。"""
+    """批量发布术语（207 语义：逐条处理，部分失败不阻断成功项）。
+
+    批量导入走 admin 直发通道（绕过单条审核）；业务用户单条发布须走 submit+approve 审核流。
+    """
     data = await GlossaryService(db).batch_submit_terms(payload.term_codes, user.id)
     await write_audit(
         db,
@@ -166,18 +179,103 @@ async def get_term(
 @router.post("/{term_code}/submit", dependencies=_WRITE_DEPS)
 async def submit_term(
     term_code: str,
+    request: ReviewSubmitRequest,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
 ) -> Any:
-    resp = await GlossaryService(db).submit_term(term_code, user.id)
+    """提交术语审核（DRAFT → REVIEW，术语是业务概念标准层，发布须先审）。"""
+    resp = await GlossaryService(db).submit_term(
+        term_code, request, user.id, role=user.role, user_domain=user.domain
+    )
     await write_audit(
         db,
         actor_id=user.id,
         action="term.submit",
         entity_type="term",
         entity_id=term_code,
+        detail={"change_reason": request.change_reason},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=resp, trace_id=trace_id)
+
+
+@router.post(
+    "/{term_code}/publish",
+    dependencies=_WRITE_DEPS + [Depends(require_roles(*_ADMIN_ROLES))],
+)
+async def publish_term(
+    term_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """直接发布术语（平台管理员直发通道，含"再次发布"能力；业务用户走 submit+approve 审核流）。"""
+    resp = await GlossaryService(db).publish_term(term_code, user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="term.publish",
+        entity_type="term",
+        entity_id=term_code,
         detail={},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=resp, trace_id=trace_id)
+
+
+@router.post("/{term_code}/approve", dependencies=_REVIEW_DEPS)
+async def approve_term(
+    term_code: str,
+    request: ReviewApproveRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """审核通过术语（REVIEW → PUBLISHED，评审人身份校验 + 自审禁止）。"""
+    resp = await GlossaryService(db).approve_term(
+        term_code, request, user.id, role=user.role, user_domain=user.domain
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="term.approve",
+        entity_type="term",
+        entity_id=term_code,
+        detail={"comment": request.comment},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=resp, trace_id=trace_id)
+
+
+@router.post("/{term_code}/reject", dependencies=_REVIEW_DEPS)
+async def reject_term(
+    term_code: str,
+    request: ReviewRejectRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """审核驳回术语（REVIEW → DRAFT，驳回原因落库并通知提交人）。"""
+    resp = await GlossaryService(db).reject_term(
+        term_code, request, user.id, role=user.role, user_domain=user.domain
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="term.reject",
+        entity_type="term",
+        entity_id=term_code,
+        detail={"reason": request.reason},
+        ip=client_ip(http_req),
         trace_id=trace_id,
     )
     await db.commit()

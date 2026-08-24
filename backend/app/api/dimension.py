@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, require_roles
 from app.api.responses import get_trace_id, ok
-from app.core.audit import write_audit
+from app.core.audit import client_ip, write_audit
 from app.core.exceptions import AuthError, NotFoundError
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
@@ -33,16 +33,26 @@ from app.services.dimension.schemas import (
     ReconciliationSubmit,
 )
 from app.services.dimension.service import DimensionService
+from app.services.master_data_review.schemas import (
+    ReviewApproveRequest,
+    ReviewRejectRequest,
+    ReviewSubmitRequest,
+)
 
 router = APIRouter(prefix="/dimensions", tags=["dimension"])
 
 _WRITE_ROLES = ("metric_owner", "domain_admin", "platform_admin")
 _GOV_ROLES = ("domain_admin", "platform_admin")
 _READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer")
+# 审核端点角色门禁（对齐指标审核流）：平台管理员/域管理员/评审员可审
+_REVIEW_ROLES = ("platform_admin", "domain_admin", "reviewer")
+# 直发通道仅平台管理员（系统/种子/管理员兜底），业务用户发布须走 submit+approve 审核流
+_ADMIN_ROLES = ("platform_admin",)
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 # 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
 _GOV_DEPS = [Depends(require_roles(*_GOV_ROLES)), Depends(guard_against_injection)]
+_REVIEW_DEPS = [Depends(require_roles(*_REVIEW_ROLES)), Depends(guard_against_injection)]
 
 # 域作用域守卫（P1-10）：domain_admin/metric_owner 仅可操作本域资源，
 # 防跨域越权——此前 API 仅校验角色、无 user.domain 作用域，域管理员可任意增删改他域维度。
@@ -385,7 +395,13 @@ async def deprecate_dimension(
     return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
 
 
-@router.post("/{dim_code}/publish", dependencies=_WRITE_DEPS + [Depends(_scope_dimension)])
+@router.post(
+    "/{dim_code}/publish",
+    # 直发通道仅平台管理员（系统/种子/管理员兜底）；业务用户发布须走 submit+approve 审核流
+    dependencies=(
+        _WRITE_DEPS + [Depends(_scope_dimension)] + [Depends(require_roles(*_ADMIN_ROLES))]
+    ),
+)
 async def publish_dimension(
     dim_code: str,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -404,6 +420,105 @@ async def publish_dimension(
     )
     await db.commit()
     return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
+
+
+@router.post(
+    "/{dim_code}/submit",
+    response_model=Any,
+    summary="提交维度审核（DRAFT → REVIEW）",
+    dependencies=_WRITE_DEPS + [Depends(_scope_dimension)],
+)
+async def submit_dimension(
+    dim_code: str,
+    request: ReviewSubmitRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """DRAFT → REVIEW，提交审核（维度是下游指标绑定/消费校验的权威来源，发布须先审）。"""
+    service = DimensionService(db)
+    dim = await service.submit_dimension(
+        dim_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.submit",
+        entity_type="dimension",
+        entity_id=dim_code,
+        detail={"change_reason": request.change_reason},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=DimensionResponse.from_model(dim), trace_id=trace_id)
+
+
+@router.post(
+    "/{dim_code}/approve",
+    response_model=Any,
+    summary="审核通过维度（REVIEW → PUBLISHED）",
+    dependencies=_REVIEW_DEPS,
+)
+async def approve_dimension(
+    dim_code: str,
+    request: ReviewApproveRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """REVIEW → PUBLISHED，审核通过（评审人身份校验 + 自审禁止）。"""
+    service = DimensionService(db)
+    dim = await service.approve_dimension(
+        dim_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.approve",
+        entity_type="dimension",
+        entity_id=dim_code,
+        detail={"comment": request.comment},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=DimensionResponse.from_model(dim), trace_id=trace_id)
+
+
+@router.post(
+    "/{dim_code}/reject",
+    response_model=Any,
+    summary="审核驳回维度（REVIEW → DRAFT）",
+    dependencies=_REVIEW_DEPS,
+)
+async def reject_dimension(
+    dim_code: str,
+    request: ReviewRejectRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """REVIEW → DRAFT，驳回审核（驳回原因落库并通知提交人）。"""
+    service = DimensionService(db)
+    dim = await service.reject_dimension(
+        dim_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.reject",
+        entity_type="dimension",
+        entity_id=dim_code,
+        detail={"reason": request.reason},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=DimensionResponse.from_model(dim), trace_id=trace_id)
 
 
 @router.post("/{dim_code}/members", dependencies=_WRITE_DEPS + [Depends(_scope_dimension)])
