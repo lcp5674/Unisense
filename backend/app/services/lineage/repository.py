@@ -1423,6 +1423,35 @@ class LineageRepository:
             bucket["derived_by" if edge_type == "DERIVED_FROM" else "consumed_by"] = int(cnt)
         return out
 
+    async def metric_referrers(self, metric_code: str) -> list[dict[str, str]]:
+        """返回引用指定指标的活跃血缘引用者（deprecate 被引用拦截用）。
+
+        以 ``metric:{code}`` 为 source_node 的存活边：``DERIVED_FROM`` → target 为
+        派生该指标的派生指标；``CONSUMED_BY`` → target 为消费方/报表。stale 与
+        软删边过滤——「被引用」只统计当前生效的引用，废弃被引用指标会让下游
+        引用悬空，调用方据此在未指定替代指标时拦截废弃。
+
+        Args:
+            metric_code: 指标编码。
+
+        Returns:
+            ``[{"node": "metric:xxx"|"consumer:xxx"|"table:xxx", "edge_type": ...}]``
+            按 node 去重；无引用返回空列表。
+        """
+        rows = (
+            await self._db.execute(
+                select(LineageEdge.target_node, LineageEdge.edge_type)
+                .where(
+                    LineageEdge.deleted_at.is_(None),
+                    LineageEdge.stale.is_(False),
+                    LineageEdge.source_node == f"metric:{metric_code}",
+                    LineageEdge.edge_type.in_(["DERIVED_FROM", "CONSUMED_BY"]),
+                )
+                .distinct()
+            )
+        ).all()
+        return [{"node": str(r[0]), "edge_type": str(r[1])} for r in rows]
+
     async def list_all_edges(self, limit: int | None = None) -> list[LineageEdge]:
         """取出全部未删除血缘边（断链校验用，按 id 升序）。"""
         stmt = select(LineageEdge).where(LineageEdge.deleted_at.is_(None)).order_by(LineageEdge.id)

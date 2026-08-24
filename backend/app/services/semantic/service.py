@@ -2496,6 +2496,24 @@ class MetricService(BaseService):
                     error_code="VALIDATION_ERROR",
                 )
 
+        # 被引用拦截（TD §12.3 强化）：废弃仍被活跃引用的指标会让下游引用悬空。
+        # 未指定替代指标时拦截并列出引用者，引导先指定替代或处理下游；已指定
+        # 替代指标视为下游有去处，放行（与发布端 DependencyChecker 反向保护互补）。
+        from app.services.lineage.repository import LineageRepository
+
+        referrers = await LineageRepository(self._db).metric_referrers(metric_code)
+        if referrers and successor_code is None:
+            ref_desc = "、".join(
+                f"{r['node']}（{'派生' if r['edge_type'] == 'DERIVED_FROM' else '报表/消费'}）"
+                for r in referrers[:10]
+            )
+            more = f" 等 {len(referrers)} 个引用者" if len(referrers) > 10 else ""
+            raise BusinessError(
+                f"指标 {metric_code} 仍被 {len(referrers)} 处活跃引用（{ref_desc}{more}），"
+                "废弃将悬空下游。请先指定替代指标（successor_code）或处理下游引用后再废弃",
+                error_code="METRIC_REFERENCED",
+            )
+
         from datetime import timedelta
 
         sunset_days = self._settings.metric_sunset_days  # 对齐 TD §13，可配置化覆盖

@@ -1653,3 +1653,81 @@ async def test_affected_asset_owners_empty_when_no_owners() -> None:
     ]
     repo = LineageRepository(_FakeDB(rows, meta_rows=meta))
     assert await repo.affected_asset_owners("table:ods.t") == set()
+
+
+# ---- metric_referrers（deprecate 被引用拦截）----
+
+
+class _ReferrerDB:
+    """面向 metric_referrers 的假 db：source_node 等值 + 存活 + edge_type IN 过滤。"""
+
+    def __init__(self, edges: list[LineageEdge]) -> None:
+        self.edges = edges
+
+    async def execute(self, stmt: object) -> _Result:
+        sql = re.sub(r"\s+", " ", str(stmt.compile(compile_kwargs={"literal_binds": True})))
+        sn = _extract(sql, "source_node")
+        rows = [
+            e
+            for e in self.edges
+            if getattr(e, "deleted_at", None) is None
+            and not getattr(e, "stale", False)
+            and e.source_node == sn
+            and e.edge_type in ("DERIVED_FROM", "CONSUMED_BY")
+        ]
+        seen: set[tuple[str, str]] = set()
+        out: list[tuple[str, str]] = []
+        for e in rows:
+            key = (e.target_node, e.edge_type)
+            if key not in seen:
+                seen.add(key)
+                out.append((e.target_node, e.edge_type))
+        return _Result(rows=out)
+
+
+def _ref_edge(
+    source: str,
+    target: str,
+    *,
+    edge_type: str = "DERIVED_FROM",
+    stale: bool = False,
+    deleted: bool = False,
+) -> LineageEdge:
+    edge = LineageEdge(
+        source_node=f"metric:{source}",
+        target_node=target,
+        edge_type=edge_type,
+        granularity="L1",
+        provenance="manual",
+    )
+    edge.stale = stale
+    if deleted:
+        edge.deleted_at = datetime.now()
+    return edge
+
+
+async def test_metric_referrers_returns_active_references() -> None:
+    """返回引用指定指标的活跃 DERIVED_FROM/CONSUMED_BY 引用者（deprecate 拦截用）。
+
+    过滤：stale 失效边、软删边、非 metric: source、非引用类型边不计入。
+    """
+    edges = [
+        _ref_edge("sales_gmv_daily", "metric:sales_gmv_derived", edge_type="DERIVED_FROM"),
+        _ref_edge("sales_gmv_daily", "metric:sales_gmv_ratio", edge_type="DERIVED_FROM"),
+        _ref_edge("sales_gmv_daily", "consumer:bi_report", edge_type="CONSUMED_BY"),
+        # 失效 / 软删 / 反向 / 无关类型均不计入
+        _ref_edge("sales_gmv_daily", "metric:stale_ref", edge_type="DERIVED_FROM", stale=True),
+        _ref_edge("sales_gmv_daily", "metric:deleted_ref", edge_type="DERIVED_FROM", deleted=True),
+        _ref_edge("other", "metric:sales_gmv_daily", edge_type="DERIVED_FROM"),  # source 不是它
+        _ref_edge("sales_gmv_daily", "table:landing", edge_type="LINEAGE_UP"),  # 非引用类型
+    ]
+    repo = LineageRepository(_ReferrerDB(edges))
+    refs = await repo.metric_referrers("sales_gmv_daily")
+    got = {(r["node"], r["edge_type"]) for r in refs}
+    assert got == {
+        ("metric:sales_gmv_derived", "DERIVED_FROM"),
+        ("metric:sales_gmv_ratio", "DERIVED_FROM"),
+        ("consumer:bi_report", "CONSUMED_BY"),
+    }
+    # 无引用 → 空列表
+    assert await repo.metric_referrers("not_exist") == []

@@ -45,8 +45,12 @@ def _svc_with_repo() -> tuple[MetricService, MagicMock]:
     mock_gov_svc.check_metric_permission = AsyncMock(
         return_value=Decision(allow=True, reason="mocked_allowed")
     )
+    # deprecate 被引用拦截（TD §12.3）默认走「无引用者」路径：db.execute 返回
+    # 空结果集，避免单元测试连库；有引用场景由专项测试用 patch 覆盖。
+    _db = MagicMock()
+    _db.execute = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=[])))
     with patch("app.services.semantic.service.MetricRepository") as mock_repo_cls:
-        svc = MetricService(db=MagicMock(), governance_svc=mock_gov_svc)
+        svc = MetricService(db=_db, governance_svc=mock_gov_svc)
         # submit 路径会经 _notify_metric_stakeholders 开独立 DB 会话做定向通知，
         # 单元测试中会跨事件循环连库产生 RuntimeError——统一 mock 掉（通知行为另有集成测试）。
         svc._notify_metric_stakeholders = AsyncMock(return_value=None)
@@ -883,6 +887,71 @@ async def test_deprecate_metric_already_deprecated_rejected():
 
     with pytest.raises(BusinessError):
         await svc.deprecate_metric("sales_gmv_daily", "x", actor_id=1, role="metric_owner")
+
+
+async def test_deprecate_metric_referenced_without_successor_blocked():
+    """被引用拦截：仍被派生/报表引用且未指定替代 → 废弃被拦。
+
+    返回 METRIC_REFERENCED 并列出引用者；废弃被活跃引用的指标会让下游
+    DERIVED_FROM/CONSUMED_BY 引用悬空，无替代指标时须先处理下游，避免
+    静默破损（与发布端反向保护互补）。
+    """
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    repo.update_with_optimistic_lock = AsyncMock()
+    with (
+        patch(
+            "app.services.lineage.repository.LineageRepository.metric_referrers",
+            new=AsyncMock(
+                return_value=[
+                    {"node": "metric:sales_gmv_derived", "edge_type": "DERIVED_FROM"},
+                    {"node": "consumer:bi_report", "edge_type": "CONSUMED_BY"},
+                ]
+            ),
+        ),
+        pytest.raises(BusinessError) as exc,
+    ):
+        await svc.deprecate_metric("sales_gmv_daily", None, actor_id=1, role="metric_owner")
+    assert exc.value.error_code == "METRIC_REFERENCED"
+    assert "sales_gmv_derived" in exc.value.message
+    repo.update_with_optimistic_lock.assert_not_called()
+
+
+async def test_deprecate_metric_referenced_with_successor_allowed():
+    """被引用但指定替代指标 → 放行（下游可改绑替代，不悬空）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        side_effect=lambda code: make_metric(status="PUBLISHED", metric_code=code)
+    )
+    deprecated = make_metric(status="DEPRECATED", successor_code="sales_gmv_v2")
+    repo.update_with_optimistic_lock = AsyncMock(return_value=deprecated)
+    with patch(
+        "app.services.lineage.repository.LineageRepository.metric_referrers",
+        new=AsyncMock(
+            return_value=[{"node": "metric:sales_gmv_derived", "edge_type": "DERIVED_FROM"}]
+        ),
+    ):
+        result = await svc.deprecate_metric(
+            "sales_gmv_daily", "sales_gmv_v2", actor_id=1, role="metric_owner"
+        )
+    assert result.status == "DEPRECATED"
+    assert repo.update_with_optimistic_lock.call_args.kwargs["successor_code"] == "sales_gmv_v2"
+
+
+async def test_deprecate_metric_not_referenced_allowed():
+    """无活跃引用者 → 正常废弃，不触发拦截。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    deprecated = make_metric(status="DEPRECATED", successor_code=None)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=deprecated)
+    with patch(
+        "app.services.lineage.repository.LineageRepository.metric_referrers",
+        new=AsyncMock(return_value=[]),
+    ):
+        result = await svc.deprecate_metric(
+            "sales_gmv_daily", None, actor_id=1, role="metric_owner"
+        )
+    assert result.status == "DEPRECATED"
 
 
 async def test_list_metrics_pagination_offset():
