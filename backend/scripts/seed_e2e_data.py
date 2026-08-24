@@ -901,8 +901,8 @@ CATALOGS: list[dict[str, Any]] = [
 
 def ensure_datasource(api: Api) -> dict[str, Any]:
     """幂等注册数据源并手动注册目录元数据。"""
-    # 找已存在的 e2e 数据源
-    sources = api.get("/data-sources?keyword=E2E&page_size=50")
+    # 找已存在的 HIS 门诊数据源（keyword 与数据源名匹配，防重复创建）
+    sources = api.get("/data-sources?keyword=HIS&page_size=50")
     for s in (sources.get("items") or []):
         if s.get("name") == DATA_SOURCE["name"]:
             print(f"[datasource] 已存在 {s.get('source_id')}")
@@ -1501,6 +1501,7 @@ def main() -> int:
     publish_metric(api, "outp_e2e_drugfee_day")
     publish_metric(api, "outp_e2e_prescription_day")
     publish_metric(api, "outp_e2e_piipatient_day", pii_columns=["patient_phone"])
+    publish_metric(api, "yb_e2e_settle_day")
     publish_metric(api, "outp_e2e_deprecated_day")
     # 废弃 outp_e2e_deprecated_day（successor=outp_e2e_fee_day 已发布）→ 造 DEPRECATED 状态
     try:
