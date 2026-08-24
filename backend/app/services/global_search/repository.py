@@ -15,11 +15,12 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from sqlalchemy import String, cast, or_, select
+from sqlalchemy import String, case, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.data_source import DataSource, DBCatalog
 from app.models.dimension import Dimension
+from app.models.measure_catalog import MeasureCatalog
 from app.models.metric import Metric
 from app.models.metric_template import MetricTemplate
 from app.models.subject_domain import SubjectDomain
@@ -95,18 +96,33 @@ class GlobalSearchRepository:
         return groups
 
     async def _search_metrics(self, needle: str, limit: int) -> list[dict[str, Any]]:
+        """指标检索：metric_code/name/description 直接命中 + 关联逻辑度量同义词命中。
+
+        同义词（业务别名，如"支付金额"别名"pay"）存于 ``measure_catalog.synonyms``，
+        经 ``metric.measure_id`` 外连接粗匹配；命中来源以 ``match_reason`` 标识
+        （``synonym`` 供前端提示"您是不是想找…"，直接命中为 ``field``）。
+        """
+        code_match = Metric.metric_code.like(needle, escape="/")
+        name_match = Metric.name.like(needle, escape="/")
+        desc_match = Metric.description.like(needle, escape="/")
+        syn_match = MeasureCatalog.synonyms.cast(String).like(needle, escape="/")
         stmt = (
-            select(Metric)
+            select(
+                Metric,
+                case(
+                    (or_(code_match, name_match, desc_match), "field"),
+                    (syn_match, "synonym"),
+                    else_="field",
+                ).label("match_reason"),
+            )
+            .outerjoin(MeasureCatalog, Metric.measure_id == MeasureCatalog.id)
             .where(
                 Metric.deleted_at.is_(None),
-                or_(
-                        Metric.metric_code.like(needle, escape="/"),
-                        Metric.name.like(needle, escape="/"),
-                    ),
+                or_(code_match, name_match, desc_match, syn_match),
             )
             .limit(limit)
         )
-        rows = (await self._session.execute(stmt)).scalars().all()
+        rows = (await self._session.execute(stmt)).all()
         return [
             {
                 "type": "metric",
@@ -116,8 +132,9 @@ class GlobalSearchRepository:
                 "domain": m.domain,
                 "status": m.status,
                 "pii_flag": bool(m.pii_flag),
+                "match_reason": reason,
             }
-            for m in rows
+            for m, reason in rows
         ]
 
     async def _search_dimensions(self, needle: str, limit: int) -> list[dict[str, Any]]:
@@ -155,6 +172,8 @@ class GlobalSearchRepository:
                     Term.term_code.like(needle, escape="/"),
                     Term.name.like(needle, escape="/"),
                     Term.definition.like(needle, escape="/"),
+                    # 术语同义词（业务别名）粗匹配：JSON 文本 LIKE，走参数化防注入
+                    Term.synonyms.cast(String).like(needle, escape="/"),
                 ),
             )
             .limit(limit)

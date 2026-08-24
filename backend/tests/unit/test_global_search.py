@@ -34,6 +34,13 @@ def _rows_result(*rows: object) -> MagicMock:
     return r
 
 
+def _all_result(*rows: object) -> MagicMock:
+    """供 select(Metric, match_reason) 行查询使用（走 result.all() 而非 scalars）。"""
+    r = MagicMock()
+    r.all.return_value = list(rows)
+    return r
+
+
 def _metric(code: str = "sales_gmv_day", name: str = "每日GMV") -> SimpleNamespace:
     return SimpleNamespace(
         id=1, metric_code=code, name=name, domain="sales", status="PUBLISHED", pii_flag=False
@@ -98,7 +105,7 @@ class TestGlobalSearchRepository:
         repo = GlobalSearchRepository(s)
         s.execute = AsyncMock(
             side_effect=[
-                _rows_result(_metric()),  # metric
+                _all_result((_metric(), "field")),  # metric（行含 match_reason）
                 _rows_result(_dimension()),  # dimension
                 _rows_result(_term()),  # term
                 _rows_result(_template()),  # template
@@ -113,6 +120,7 @@ class TestGlobalSearchRepository:
 
         assert groups["metric"][0]["type"] == "metric"
         assert groups["metric"][0]["code"] == "sales_gmv_day"
+        assert groups["metric"][0]["match_reason"] == "field"
         assert groups["dimension"][0]["code"] == "region"
         assert groups["term"][0]["code"] == "gmv"
         assert groups["template"][0]["code"] == "tpl_sales_orders"
@@ -172,6 +180,60 @@ class TestGlobalSearchRepository:
         # 转义符为 /：% 转义为 /% （100% → 100/%），并生成 ESCAPE '/' 子句
         assert "/%" in compiled
         assert "ESCAPE '/'" in compiled
+
+    async def test_metric_synonym_hit_reports_match_reason(self) -> None:
+        """指标经关联逻辑度量同义词命中 → match_reason=synonym（供前端"您是不是想找…"提示）。"""
+        s = _session()
+        repo = GlobalSearchRepository(s)
+        s.execute = AsyncMock(return_value=_all_result((_metric(), "synonym")))
+
+        items = await repo._search_metrics("%pay%", limit=5)
+
+        assert items[0]["code"] == "sales_gmv_day"
+        assert items[0]["match_reason"] == "synonym"
+        assert items[0]["type"] == "metric"
+
+    async def test_metric_synonyms_join_in_sql(self) -> None:
+        """指标检索 SQL 外连接 measure_catalog，同义词列参与 LIKE 匹配（参数化 + 转义）。"""
+        s = _session()
+        repo = GlobalSearchRepository(s)
+        s.execute = AsyncMock(return_value=_all_result())
+
+        await repo.search("支付", limit=5)
+        metric_stmt = s.execute.call_args_list[0].args[0]
+        compiled = str(metric_stmt.compile(compile_kwargs={"literal_binds": True}))
+
+        assert "measure_catalog" in compiled
+        assert "synonyms" in compiled.lower()
+        assert "ESCAPE '/'" in compiled
+        # 直接命中优先级高于同义词：CASE 中 field 标签先于 synonym 标签
+        assert compiled.index("'field'") < compiled.index("'synonym'")
+
+    async def test_metric_synonyms_case_prioritizes_direct_match(self) -> None:
+        """同义词与直接字段都命中时 match_reason=field，避免"同义词匹配"标签噪音。"""
+        s = _session()
+        repo = GlobalSearchRepository(s)
+        s.execute = AsyncMock(return_value=_all_result((_metric(), "field")))
+
+        items = await repo._search_metrics("%sales_gmv%", limit=5)
+
+        assert items[0]["code"] == "sales_gmv_day"
+        assert items[0]["match_reason"] == "field"
+
+    async def test_term_search_matches_synonyms(self) -> None:
+        """术语同义词命中：term.synonyms（JSON）粗匹配参与检索。"""
+        s = _session()
+        repo = GlobalSearchRepository(s)
+        s.execute = AsyncMock(side_effect=[_rows_result()] * 8)
+
+        await repo.search("成交", limit=5)
+        # 第 3 次执行为 term 查询（8 类顺序：metric/dimension/term/...）
+        term_stmt = s.execute.call_args_list[2].args[0]
+        compiled = str(term_stmt.compile(compile_kwargs={"literal_binds": True}))
+
+        assert "synonyms" in compiled.lower()
+        assert "ESCAPE '/'" in compiled
+        assert "成交" in compiled
 
 
 class TestGlobalSearchService:
