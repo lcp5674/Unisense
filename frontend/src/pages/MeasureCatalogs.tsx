@@ -1,16 +1,17 @@
 import { useEffect, useState } from "react";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, Space, Tooltip, App as AntApp, Popconfirm } from "antd";
-import { PlusOutlined, SendOutlined, StopOutlined, EditOutlined } from "@ant-design/icons";
+import { Alert, App as AntApp, Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Tooltip } from "antd";
+import { EditOutlined, PlusOutlined, RobotOutlined, SendOutlined, StopOutlined } from "@ant-design/icons";
 import {
-  listMeasureCatalogs,
+  autoSuggestMeasureCatalog,
   createMeasureCatalog,
-  updateMeasureCatalog,
-  publishMeasureCatalog,
   deprecateMeasureCatalog,
   listDomainTree,
+  listMeasureCatalogs,
+  publishMeasureCatalog,
   UnisenseApiError,
+  updateMeasureCatalog,
 } from "../api";
-import type { MeasureCatalog, MeasureCategory, MeasureFormat, SubjectDomainTreeNode } from "../types";
+import type { MeasureCatalog, MeasureCategory, MeasureFormat, MeasureSuggestResult, SubjectDomainTreeNode } from "../types";
 import { MEASURE_CATEGORY_LABEL, MEASURE_FORMAT_LABEL } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 import { usePermission } from "../hooks/usePermission";
@@ -63,6 +64,8 @@ export function MeasureCatalogs() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<MeasureCatalog | null>(null);
   const [saving, setSaving] = useState(false);
+  const [suggestLoading, setSuggestLoading] = useState(false);
+  const [suggestResult, setSuggestResult] = useState<MeasureSuggestResult | null>(null);
   const [form] = Form.useForm();
   const watchFormat = Form.useWatch("measure_format", form);
 
@@ -96,6 +99,7 @@ export function MeasureCatalogs() {
 
   function openCreate() {
     setEditing(null);
+    setSuggestResult(null);
     form.resetFields();
     form.setFieldsValue({ measure_format: "AMOUNT", category: "OTHER" });
     setModalOpen(true);
@@ -103,6 +107,7 @@ export function MeasureCatalogs() {
 
   function openEdit(row: MeasureCatalog) {
     setEditing(row);
+    setSuggestResult(null);
     form.setFieldsValue({
       measure_code: row.measure_code,
       name: row.name,
@@ -132,6 +137,44 @@ export function MeasureCatalogs() {
       fields.default_decimal_places = def.decimal ?? null;
     }
     form.setFieldsValue(fields);
+  }
+
+  // AI 推断：名称/描述 → 逐字段回填（编码/格式/单位/小数位/分类/口径/同义词/域），
+  // 用户可改后再提交。后端规则兜底 + LLM 增强，LLM 不可用自动降级规则。
+  async function handleSuggest() {
+    const name = form.getFieldValue("name");
+    if (!name || !String(name).trim()) {
+      message.warning("请先输入度量中文名，再点「AI 推断」");
+      return;
+    }
+    const values = form.getFieldsValue();
+    setSuggestLoading(true);
+    try {
+      const res = await autoSuggestMeasureCatalog({
+        name: String(name).trim(),
+        description: values.description ?? null,
+        domain: values.domain ?? null,
+      });
+      const f = res.fields;
+      const llmCount = Object.values(f).filter((x) => x.source === "llm").length;
+      form.setFieldsValue({
+        measure_code: f.measure_code?.value || undefined,
+        measure_format: f.measure_format?.value || "AMOUNT",
+        default_unit: f.default_unit?.value || undefined,
+        default_decimal_places: f.default_decimal_places?.value ?? undefined,
+        source_system: (f.source_system?.value as string[]) || [],
+        synonyms: (f.synonyms?.value as string[]) || [],
+        category: f.category?.value || "OTHER",
+        stat_caliber: f.stat_caliber?.value || undefined,
+        domain: f.domain?.value || values.domain,
+      });
+      setSuggestResult(res);
+      message.success(`AI 推断完成：${llmCount} 项 AI 生成，其余规则兜底，可修改后提交`);
+    } catch (e) {
+      message.error(errMsg(e, "AI 推断失败"));
+    } finally {
+      setSuggestLoading(false);
+    }
   }
 
   async function handleSubmit() {
@@ -359,8 +402,52 @@ export function MeasureCatalogs() {
             </Form.Item>
           )}
           <Form.Item name="name" label="度量中文名" rules={[{ required: true, message: "请输入度量中文名" }]}>
-            <Input placeholder="如 支付金额" maxLength={128} />
+            <Input placeholder="如 门诊收费金额" maxLength={128} />
           </Form.Item>
+          <Space style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+            <Button
+              icon={<RobotOutlined />}
+              onClick={handleSuggest}
+              loading={suggestLoading}
+              disabled={!!editing}
+            >
+              AI 推断（名称+描述 → 回填编码/格式/分类/口径）
+            </Button>
+            <span className="muted" style={{ fontSize: 12 }}>
+              仅新建时可用；推断结果可修改后再提交
+            </span>
+          </Space>
+          {suggestResult && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="AI 推断结果（已回填表单，可修改）"
+              description={
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {[
+                    ["measure_code", "编码"],
+                    ["measure_format", "格式"],
+                    ["category", "分类"],
+                    ["default_unit", "单位"],
+                    ["default_decimal_places", "小数位"],
+                    ["stat_caliber", "统计口径"],
+                    ["synonyms", "同义词"],
+                  ].map(([key, label]) => {
+                    const sf = suggestResult.fields[key];
+                    if (!sf) return null;
+                    const v = Array.isArray(sf.value) ? sf.value.join("、") : sf.value ?? "—";
+                    return (
+                      <li key={key}>
+                        <b>{label}：</b>
+                        {String(v)}（{sf.source === "llm" ? "AI" : "规则"} · 置信度 {(sf.confidence * 100).toFixed(0)}%）
+                      </li>
+                    );
+                  })}
+                </ul>
+              }
+            />
+          )}
           <Form.Item name="domain" label="业务域" rules={[{ required: true, message: "请选择业务域" }]}>
             <Select options={domainOptions} showSearch optionFilterProp="label" placeholder="选择业务域" />
           </Form.Item>

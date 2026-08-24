@@ -6,15 +6,19 @@ owner 覆盖）/更新（DRAFT 改码/格式联动）/状态机（publish/deprec
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.core.exceptions import ConflictError, NotFoundError, UnisenseError, ValidationError
+from app.core.codegen import slugify_code
+from app.core.exceptions import ConflictError, NotFoundError, UnisenseError
 from app.models.measure_catalog import MeasureCatalog
 from app.services.measure_catalog.repository import MeasureCatalogRepository
-from app.services.measure_catalog.schemas import MeasureCreate, MeasureUpdate
+from app.services.measure_catalog.schemas import (
+    MeasureAutoSuggestRequest,
+    MeasureCreate,
+    MeasureUpdate,
+)
 from app.services.measure_catalog.service import MeasureCatalogService
 
 
@@ -289,3 +293,119 @@ class TestMeasureService:
         repo.count_metrics_by_measure = AsyncMock(return_value=0)
         out = await svc.deprecate_measure("amt")
         assert out.status == "DEPRECATED"
+
+
+# ---------- AI 推断（auto_suggest） ----------
+
+
+async def _suggest_svc() -> tuple[MeasureCatalogService, MagicMock]:
+    """构造推断服务（mock db；domain 查询走 execute，返回空即可）。"""
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_FakeResult(rows=[]))
+    svc = MeasureCatalogService(db)
+    svc._repo = MagicMock()  # noqa: SLF001
+    return svc, db
+
+
+def _patch_llm(enabled: bool = False, content: str = "{}"):
+    """patch LlmConfigService：enabled 控制是否走 LLM，content 为 LLM 返回文本。"""
+    client = MagicMock()
+    client.enabled = enabled
+    resp = MagicMock()
+    resp.get.return_value = content
+    client.chat = AsyncMock(return_value=resp)
+    cls = MagicMock()
+    cls.return_value.build_client = AsyncMock(return_value=client)
+    return patch(
+        "app.services.llm.config_service.LlmConfigService", cls
+    ), cls.return_value.build_client
+
+
+class TestMeasureAutoSuggest:
+    async def test_rule_flow_register(self) -> None:
+        """门诊挂号人次 → NUMERIC/人次/0/FLOW（规则确定性推断）。"""
+        svc, _ = await _suggest_svc()
+        with _patch_llm(enabled=False)[0]:
+            resp = await svc.auto_suggest(
+                MeasureAutoSuggestRequest(name="门诊挂号人次", domain="outpatient")
+            )
+        f = resp.fields
+        assert f["measure_format"].value == "NUMERIC"
+        assert f["default_unit"].value == "人次"
+        assert f["default_decimal_places"].value == 0
+        assert f["category"].value == "FLOW"
+        assert f["measure_code"].value == f"outpatient_{slugify_code('门诊挂号人次')}"
+        assert f["source_system"].value == ["HIS"]
+
+    async def test_rule_fee_amount(self) -> None:
+        """门诊收费金额 → AMOUNT/CNY/2/FEE。"""
+        svc, _ = await _suggest_svc()
+        with _patch_llm(enabled=False)[0]:
+            resp = await svc.auto_suggest(
+                MeasureAutoSuggestRequest(name="门诊收费金额", domain="medical_fee")
+            )
+        f = resp.fields
+        assert f["measure_format"].value == "AMOUNT"
+        assert f["default_unit"].value == "CNY"
+        assert f["default_decimal_places"].value == 2
+        assert f["category"].value == "FEE"
+
+    async def test_rule_ratio_drug(self) -> None:
+        """门诊药占比 → RATIO/小数/4/QUALITY。"""
+        svc, _ = await _suggest_svc()
+        with _patch_llm(enabled=False)[0]:
+            resp = await svc.auto_suggest(
+                MeasureAutoSuggestRequest(name="门诊药占比", domain="medication")
+            )
+        f = resp.fields
+        assert f["measure_format"].value == "RATIO"
+        assert f["default_unit"].value == "小数"
+        assert f["default_decimal_places"].value == 4
+        assert f["category"].value == "QUALITY"
+
+    async def test_llm_unavailable_falls_back_to_rule(self) -> None:
+        """LLM 不可用（disabled）→ 规则兜底，不抛错不阻断。"""
+        svc, _ = await _suggest_svc()
+        with _patch_llm(enabled=False)[0]:
+            resp = await svc.auto_suggest(MeasureAutoSuggestRequest(name="门诊收费金额"))
+        f = resp.fields
+        assert f["measure_format"].value == "AMOUNT"
+        assert f["synonyms"].value == []  # 规则兜底：同义词为空
+
+    async def test_llm_enhances_synonyms_and_caliber(self) -> None:
+        """LLM 可用且返回合法 JSON → 增强同义词/统计口径/业务域。"""
+        llm_json = (
+            '{"synonyms": ["门诊收入", "诊费"], "stat_caliber": "收费明细按结算日期去重后求和", '
+            '"domain": "medical_fee", "source_system": ["HIS"], "description": "门诊收费总额"}'
+        )
+        svc, _ = await _suggest_svc()
+        with _patch_llm(enabled=True, content=llm_json)[0]:
+            resp = await svc.auto_suggest(
+                MeasureAutoSuggestRequest(name="门诊收费金额", domain="medical_fee")
+            )
+        f = resp.fields
+        assert f["synonyms"].value == ["门诊收入", "诊费"]
+        assert f["stat_caliber"].value == "收费明细按结算日期去重后求和"
+        assert f["domain"].value == "medical_fee"
+        assert f["synonyms"].source == "llm"
+
+    async def test_llm_domain_not_in_candidates_dropped(self) -> None:
+        """LLM 推断域不在现有域集合 → 丢弃（防脏域），规则域保留。"""
+        llm_json = '{"domain": "not_exist_domain", "synonyms": ["别名"]}'
+        svc, _ = await _suggest_svc()
+        with _patch_llm(enabled=True, content=llm_json)[0]:
+            resp = await svc.auto_suggest(
+                MeasureAutoSuggestRequest(name="门诊收费金额", domain="medical_fee")
+            )
+        f = resp.fields
+        assert f["domain"].value == "medical_fee"  # 规则值保留（LLM 脏域被丢弃）
+        assert f["synonyms"].value == ["别名"]  # 合法字段仍生效
+
+    async def test_llm_bad_json_falls_back(self) -> None:
+        """LLM 返回非法 JSON → 解析失败降级规则，不抛错。"""
+        svc, _ = await _suggest_svc()
+        with _patch_llm(enabled=True, content="不是JSON{{")[0]:
+            resp = await svc.auto_suggest(MeasureAutoSuggestRequest(name="门诊收费金额"))
+        f = resp.fields
+        assert f["measure_format"].value == "AMOUNT"
+        assert f["category"].value == "FEE"

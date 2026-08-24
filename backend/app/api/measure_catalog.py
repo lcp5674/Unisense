@@ -12,12 +12,17 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, require_roles
-from app.api.responses import get_trace_id, ok
+from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import write_audit
 from app.core.exceptions import AuthError, NotFoundError
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
-from app.services.measure_catalog.schemas import MeasureCreate, MeasureResponse, MeasureUpdate
+from app.services.measure_catalog.schemas import (
+    MeasureAutoSuggestRequest,
+    MeasureCreate,
+    MeasureResponse,
+    MeasureUpdate,
+)
 from app.services.measure_catalog.service import MeasureCatalogService
 
 router = APIRouter(prefix="/measure-catalogs", tags=["measure_catalog"])
@@ -98,6 +103,29 @@ async def list_measures(
         data={"items": converted, "total": total, "page": page, "page_size": page_size},
         trace_id=trace_id,
     )
+
+
+@router.post(
+    "/auto-suggest",
+    response_model=ApiResponse[Any],
+    summary="逻辑度量 AI 推断（名称/描述 → 编码/格式/单位/分类/口径）",
+    # LLM 额度防护：该端点触发 LLM 命名/同义词，是"新建逻辑度量"的创建辅助，
+    # 收紧为写角色（platform_admin/domain_admin/metric_owner，与创建能力对齐），
+    # 避免只读角色任意调用耗尽 LLM 额度。
+    dependencies=_WRITE_DEPS,
+)
+async def auto_suggest_measure(
+    payload: MeasureAutoSuggestRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """输入名称 +（可选）描述/域/源表/度量列 → 逐字段推断，来源 llm/rule + 置信度 + 理由。
+
+    策略：规则确定性兜底（编码/格式/单位/小数位/分类），LLM 业务增强（同义词/统计口径/
+    业务域/源头系统）；LLM 不可用自动降级规则，不阻断。
+    """
+    resp = await MeasureCatalogService(db).auto_suggest(payload)
+    return ok(data=resp, trace_id=trace_id)
 
 
 @router.get("/{measure_code}", dependencies=_READ_DEPS)

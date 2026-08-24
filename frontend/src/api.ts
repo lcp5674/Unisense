@@ -53,6 +53,7 @@ import {
   Dimension,
   DimensionMapping,
   MeasureCatalog,
+  MeasureSuggestResult,
   MetricMount,
   DimensionMember,
   DimensionExpr,
@@ -1653,6 +1654,19 @@ export async function listMeasureCatalogs(params?: {
 
 export async function getMeasureCatalog(measureCode: string): Promise<MeasureCatalog> {
   return request(`${API_BASE}/measure-catalogs/${encodeURIComponent(measureCode)}`);
+}
+
+export async function autoSuggestMeasureCatalog(body: {
+  name: string;
+  description?: string | null;
+  domain?: string | null;
+  source_table?: string | null;
+  measure_column?: string | null;
+}): Promise<MeasureSuggestResult> {
+  return request<MeasureSuggestResult>(`${API_BASE}/measure-catalogs/auto-suggest`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 export async function createMeasureCatalog(body: {
