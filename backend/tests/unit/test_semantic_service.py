@@ -1257,7 +1257,7 @@ async def test_batch_register_db_error_savepoint_continues():
 
     request = MetricBatchRegisterRequest(
         source_table="dwd.sales_detail",
-        measure_columns=["ok_col", "bad_col"],
+        measure_columns=["ok_amount_col", "bad_col"],
         dimension_mapping={"domain": "sales"},
         llm_prefill=True,
         domain="sales",
@@ -2961,7 +2961,7 @@ async def test_update_metric_collects_optional_fields():
     await svc.update_metric(
         "sales_gmv_daily",
         MetricUpdateRequest(
-            name="新名称",
+            name="新用户数",
             sla="08:00",
             backup_owner_id=5,
             change_reason="调整元数据",
@@ -2970,7 +2970,7 @@ async def test_update_metric_collects_optional_fields():
         role="metric_owner",
     )
     _, kwargs = repo.update_with_optimistic_lock.call_args
-    assert kwargs["name"] == "新名称"
+    assert kwargs["name"] == "新用户数"
     assert kwargs["sla"] == "08:00"
     assert kwargs["backup_owner_id"] == 5
 
@@ -3025,18 +3025,18 @@ async def test_update_metric_rename_clears_rename_required_mark():
     )
     repo.get_by_code = AsyncMock(return_value=existing)
     repo.update_with_optimistic_lock = AsyncMock(
-        return_value=make_metric(status="DRAFT", row_version=2, version=2, name="新名称")
+        return_value=make_metric(status="DRAFT", row_version=2, version=2, name="新用户数")
     )
     repo.create_version = AsyncMock(return_value=MagicMock())
 
     await svc.update_metric(
         "sales_gmv_daily",
-        MetricUpdateRequest(name="新名称", change_reason="响应仲裁改名要求"),
+        MetricUpdateRequest(name="新用户数", change_reason="响应仲裁改名要求"),
         actor_id=1,
         role="metric_owner",
     )
     _, kwargs = repo.update_with_optimistic_lock.call_args
-    assert kwargs["name"] == "新名称"
+    assert kwargs["name"] == "新用户数"
     # rename_required 被清除并记录 resolved_at（幂等闭环）
     mark = kwargs["arbitration_mark"]
     assert mark["rename_required"] is False
@@ -4751,7 +4751,7 @@ async def test_update_metric_row_version_match_passes():
     await svc.update_metric(
         "sales_gmv_daily",
         MetricUpdateRequest(
-            name="新名称",
+            name="新用户数",
             change_reason="调整元数据",
             row_version=5,  # 与当前一致
         ),
@@ -4759,7 +4759,7 @@ async def test_update_metric_row_version_match_passes():
         role="metric_owner",
     )
     _, kwargs = repo.update_with_optimistic_lock.call_args
-    assert kwargs["name"] == "新名称"
+    assert kwargs["name"] == "新用户数"
 
 
 async def test_update_metric_description_row_version_conflict_raises_409():

@@ -49,6 +49,85 @@ RESERVED_WORDS: frozenset[str] = frozenset(
     }
 )
 
+# 受控词根（词素）表：指标名须命中至少一个词根才视为业务命名（TD §12.3 命名规范强约束）。
+# 统一收敛在常量中，避免散落到业务逻辑；英文词根在匹配时统一小写。
+# 覆盖财务/经营/用户/业务量/度量词根，供 ``validate_metric_name`` 做硬卡校验。
+CONTROLLED_MORPHEMES: frozenset[str] = frozenset(
+    {
+        # 财务/经营类
+        "收入",
+        "营收",
+        "成本",
+        "利润",
+        "毛利",
+        "净利",
+        "金额",
+        "总额",
+        "余额",
+        "资产",
+        "负债",
+        "税费",
+        "费用",
+        # 用户/客户类
+        "用户",
+        "客户",
+        "会员",
+        "粉丝",
+        "客单",
+        # 业务量类
+        "订单",
+        "销售",
+        "销量",
+        "产量",
+        "产值",
+        "库存",
+        "退款",
+        "复购",
+        "转化",
+        "留存",
+        "活跃",
+        "新增",
+        "覆盖",
+        "达标",
+        "份额",
+        # 度量词根
+        "数量",
+        "数",
+        "量",
+        "额",
+        "价",
+        "费",
+        "率",
+        "占比",
+        "比例",
+        "时长",
+        "频次",
+        "次数",
+        "平均",
+        "累计",
+        "环比",
+        "同比",
+        "增长",
+        "下降",
+        # 英文业务词根（小写匹配）
+        "gmv",
+        "arpu",
+        "revenue",
+        "cost",
+        "profit",
+        "user",
+        "customer",
+        "order",
+        "amount",
+        "count",
+        "rate",
+        "ratio",
+        "sales",
+        "sum",
+        "avg",
+    }
+)
+
 # 依赖指标允许被消费的状态（与 DependencyChecker 一致）
 _ALLOWED_DEP_STATUSES = frozenset({"PUBLISHED", "EXPERIMENTAL"})
 
@@ -74,6 +153,8 @@ class ConflictPrechecker:
 
     #: 保留词集合（类级暴露，供命名规范校验与外部断言引用）
     RESERVED_WORDS: frozenset[str] = RESERVED_WORDS
+    #: 受控词根集合（类级暴露，供命名规范硬卡与外部断言引用）
+    CONTROLLED_MORPHEMES: frozenset[str] = CONTROLLED_MORPHEMES
 
     def __init__(self, existing_loader: ExistingLoader | None = None) -> None:
         """初始化预检器。
@@ -121,6 +202,38 @@ class ConflictPrechecker:
             return False, f"metric_code 含保留词: {hits}，请使用业务含义明确的命名"
 
         return True, None
+
+    @staticmethod
+    def validate_metric_name(
+        name: str | None,
+        *,
+        metric_type: str | None = None,
+    ) -> tuple[bool, str | None]:
+        """校验指标名命中受控词根（TD §12.3 命名规范强约束，硬卡）。
+
+        指标名须包含至少一个受控业务词根（收入/成本/用户/订单/金额/数量/率 等），
+        否则返回明确错误——拦截裸词/无意义命名（如 ``新名称``/``abc``）。
+        维度类指标（``metric_type == "dimension"``）豁免：纯维度指标可能不含业务词根。
+
+        Args:
+            name: 指标名。
+            metric_type: 指标类型；``"dimension"`` 时豁免词根校验。
+
+        Returns:
+            (合法, 错误信息): 合法为 True 时错误信息为 None。
+        """
+        if not name or not str(name).strip():
+            return False, "指标名不能为空"
+        if metric_type == "dimension":
+            return True, None
+        lowered = str(name).lower()
+        for morpheme in CONTROLLED_MORPHEMES:
+            if morpheme in lowered:
+                return True, None
+        return False, (
+            "指标名未命中受控词根，请使用业务术语（如：收入、成本、用户数、"
+            "订单量、金额、占比…）"
+        )
 
     @staticmethod
     def _to_candidate(

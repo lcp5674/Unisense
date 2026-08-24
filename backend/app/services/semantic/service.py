@@ -424,6 +424,16 @@ class MetricService(BaseService):
         # 3. 校验字典字段值存在于 SystemDict（对齐 FR-009）
         await self._validate_dict_fields(request)
 
+        # 3a. 命名规范硬卡（TD §12.3 强化）：指标名须命中受控词根，否则拦截
+        # 裸词/无意义命名；维度类指标（metric_type="dimension"）豁免。
+        from app.services.semantic.conflict_precheck import ConflictPrechecker
+
+        valid_name, name_error = ConflictPrechecker.validate_metric_name(
+            request.name, metric_type=request.type
+        )
+        if not valid_name:
+            raise ValidationError(name_error, error_code="METRIC_NAME_NO_MORPHEME")
+
         # 3a. OneData 类型化字段兜底（界限文档 §2.3）：原子指标 = 逻辑度量 + 聚合方式，
         # 不绑物理表——单位由逻辑度量 default_unit 继承；派生/复合缺省用默认物理属性。
         # 物理属性（time_semantics/freshness/dw_layer）对原子属挂载/数据语义层，缺省取默认。
@@ -939,6 +949,17 @@ class MetricService(BaseService):
             if new_val is not None and new_val != getattr(metric, field, None):
                 await self._validate_dict_field(dict_type, new_val)
 
+        # 命名规范硬卡（TD §12.3 强化）：改名时新名称须命中受控词根
+        # （仅校验实际发生变更的名称，存量指标未改名时不受影响；维度类豁免）。
+        if "name" in updates and updates["name"] != metric.name:
+            from app.services.semantic.conflict_precheck import ConflictPrechecker
+
+            valid_name, name_error = ConflictPrechecker.validate_metric_name(
+                updates["name"], metric_type=metric.type
+            )
+            if not valid_name:
+                raise ValidationError(name_error, error_code="METRIC_NAME_NO_MORPHEME")
+
         # Top-level 破坏性字段变更检测（granularity/unit 直接修改等同口径变更）
         # 当 definition_json 未同时提交时，需独立判定是否触发 PENDING_VERSION
         top_level_breaking = False
@@ -1418,6 +1439,20 @@ class MetricService(BaseService):
             actor_id=actor_id,
         )
         return updated
+
+    @staticmethod
+    def term_binding_reminder(metric: Metric) -> str | None:
+        """发布软提醒（P1 术语治理）：已有口径定义但未绑定业务术语 → 返回引导提示。
+
+        不硬卡发布——存量指标可能没有术语，仅经发布响应信封的 ``message`` 引导
+        用户先绑定术语（POST /metric-definitions/{code}/term）。
+        """
+        if metric.term_id is None and metric.definition_json:
+            return (
+                "该指标已有口径定义但未绑定业务术语，建议先在指标详情绑定术语，"
+                "纳入术语治理后口径更可追溯"
+            )
+        return None
 
     async def infer_metric_description(
         self,

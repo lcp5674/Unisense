@@ -72,7 +72,7 @@ class TestDomainValidation:
             svc = MetricService(mock_db)
             req = MetricCreateRequest(
                 metric_code="order_gmv_amount_day",
-                name="测试",
+                name="测试订单量",
                 domain="nonexistent",
                 type="atomic",
                 granularity="day",
