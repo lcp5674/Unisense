@@ -185,6 +185,9 @@ export function MetricCreate() {
   // R5: 口径定义 JSON 即时校验（输入时实时检测语法，内联显示错误）
   const [definitionError, setDefinitionError] = useState<string | null>(null);
   const [sourceTables, setSourceTables] = useState<string[]>([]);
+  // 下游使用表（消费方）：该指标产出的数据被哪些表消费（写入口径定义 downstream_tables，
+  // 血缘据此注册 metric → table 下游边）。与 sourceTables（上游依赖）方向相反。
+  const [downstreamTables, setDownstreamTables] = useState<string[]>([]);
   const [tableOptions, setTableOptions] = useState<{ value: string; label: string }[]>([]);
   const [tableSearching, setTableSearching] = useState(false);
 
@@ -442,10 +445,25 @@ export function MetricCreate() {
         prev.some((o) => o.value === srcTable) ? prev : [{ value: srcTable, label: srcTable }, ...prev]
       );
     }
-    // 依赖表（血缘推断的关联表）自动填充到「口径定义 → 关联数据表」，并合并保留用户已选
-    const related = (result as unknown as { related_tables?: string[] }).related_tables;
-    if (Array.isArray(related) && related.length > 0) {
-      setSourceTables((prev) => Array.from(new Set([...(prev || []), ...related])));
+    // 依赖表（血缘推断）自动回填到「口径定义」：
+    // - 上游依赖表（result.source_tables，向后兼容 related_tables）→ 依赖表（上游）
+    // - 下游使用表（result.downstream_tables）→ 使用表（下游）
+    // 均合并保留用户已选；方向不再混（此前 related_tables 含源表下游邻居被误填为上游）。
+    const sugg = result as unknown as {
+      related_tables?: string[];
+      source_tables?: string[];
+      downstream_tables?: string[];
+    };
+    const upstream = Array.isArray(sugg.source_tables)
+      ? sugg.source_tables
+      : Array.isArray(sugg.related_tables)
+        ? sugg.related_tables
+        : [];
+    if (Array.isArray(upstream) && upstream.length > 0) {
+      setSourceTables((prev) => Array.from(new Set([...(prev || []), ...upstream])));
+    }
+    if (Array.isArray(sugg.downstream_tables) && sugg.downstream_tables.length > 0) {
+      setDownstreamTables((prev) => Array.from(new Set([...(prev || []), ...sugg.downstream_tables!])));
     }
     // 推断口径定义回填到实际表单（expression → definition JSON；sql → sqlText）
     const defJson = (defField?.value as Record<string, unknown>) ?? null;
@@ -583,7 +601,10 @@ export function MetricCreate() {
   }
 
   function buildDefinitionJson(values: Record<string, unknown>): Record<string, unknown> | null {
+    // 依赖表（上游，加工出指标的表）→ definition_json.source_tables
     const tables = sourceTables.length ? { source_tables: sourceTables } : {};
+    // 使用表（下游，消费指标的表）→ definition_json.downstream_tables（血缘注册下游边）
+    const downTables = downstreamTables.length ? { downstream_tables: downstreamTables } : {};
     // 主表单选中的维度 → definition_json.dimensions（血缘注册指标↔维度边）
     const dimsField = selectedDims.length ? { dimensions: selectedDims } : {};
     // 依赖指标 → definition_json.dependencies（血缘注册上游→本指标边，仅 derived/composite）
@@ -597,7 +618,7 @@ export function MetricCreate() {
     if (mode === "sql") {
       const sql = sqlText.trim();
       if (!sql) { message.error("口径 SQL 模式请输入 SQL 语句"); return null; }
-      return { sql, ...tables, ...srcField, ...measureField, ...dimsField, ...depsField };
+      return { sql, ...tables, ...downTables, ...srcField, ...measureField, ...dimsField, ...depsField };
     }
     let def: Record<string, unknown>;
     try { def = values.definition ? JSON.parse(String(values.definition)) : {}; }
@@ -610,11 +631,11 @@ export function MetricCreate() {
         measure && !hasManualExpression
           ? { expression: `${String(values.aggregation || "SUM")}(${measure})` }
           : {};
-      return { ...def, ...autoExpr, ...srcField, ...measureField, ...tables, ...dimsField };
+      return { ...def, ...autoExpr, ...srcField, ...measureField, ...tables, ...downTables, ...dimsField };
     }
     // derived/composite：计算表达式输入 + 依赖指标 → 口径（不读源表/度量列）
     const expr = calcExpression.trim() ? { expression: calcExpression.trim() } : {};
-    return { ...def, ...expr, ...tables, ...dimsField, ...depsField };
+    return { ...def, ...expr, ...tables, ...downTables, ...dimsField, ...depsField };
   }
 
   // OneData 向导：下一步纯前进（不逐级硬校验——避免打断"先粗填再回头改"的构建式流程；
@@ -1038,8 +1059,8 @@ export function MetricCreate() {
                 </Form.Item>
                 {metricType === "derived" && (
                   <Form.Item
-                    label="挂载实体（源表/粒度，OneData 挂载层）"
-                    extra="派生指标挂载物理表承载粒度/周期——粒度从指标下沉到挂载（界限文档 §2.3）；原子指标不挂载"
+                    label={<span>挂载实体表（指标的家）<Tag color="blue" style={{ marginLeft: 6 }}>OneData 挂载层</Tag></span>}
+                    extra="【通俗理解】这个指标计算出来的结果最终存到哪张物理表？这张表就是指标的“家”（落地/物化表），粒度、统计周期也挂在它身上——不是“原料表”，也不是“消费表”。原子/复合指标不挂载。"
                   >
                     <Row gutter={12}>
                       <Col span={8}>
@@ -1223,6 +1244,30 @@ export function MetricCreate() {
 
             {/* 关联数据表 */}
             <Card type="inner" title="④ 口径定义" size="small">
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message="三类表的关系，方向别搞混："
+                description={
+                  <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.8 }}>
+                    <li>
+                      <b>依赖表（上游）</b>：这个指标是靠哪些表“加工”出来的？——如
+                      <span className="mono" style={{ fontSize: 12 }}> dwd.sales_detail</span>
+                      （血缘自动生成 表 → 指标 边）
+                    </li>
+                    <li>
+                      <b>使用表（下游）</b>：哪些表会“消费”这个指标的结果？——如
+                      <span className="mono" style={{ fontSize: 12 }}> ads.gmv_report</span>
+                      （血缘自动生成 指标 → 表 边）
+                    </li>
+                    <li>
+                      <b>挂载实体表（指标的家）</b>（Step②，仅派生指标）：结果存到哪张物理表？
+                      ——区别于上面的“原料”和“客户”。
+                    </li>
+                  </ul>
+                }
+              />
               {inferredDefinition.json && (
                 <Alert
                   type="info"
@@ -1244,12 +1289,32 @@ export function MetricCreate() {
                   }
                 />
               )}
-              <Form.Item label="关联数据表">
+              <Form.Item
+                label="依赖表（上游）"
+                extra="加工出这个指标的“原料表”（可多选）——血缘据此生成 表 → 指标 上游边"
+              >
                 <Select
                   mode="multiple" allowClear showSearch
                   placeholder="展开浏览已接入表，或输入关键词搜索（支持多选）"
                   value={sourceTables}
                   onChange={(v: string[]) => setSourceTables(v)}
+                  onSearch={searchTables}
+                  onOpenChange={handleTableDropdown}
+                  loading={tableSearching}
+                  notFoundContent={tableSearching ? <Spin size="small" /> : "无匹配表"}
+                  options={tableOptions}
+                  filterOption={false}
+                />
+              </Form.Item>
+              <Form.Item
+                label="使用表（下游）"
+                extra="消费这个指标结果的“客户表”（可多选）——血缘据此生成 指标 → 表 下游边"
+              >
+                <Select
+                  mode="multiple" allowClear showSearch
+                  placeholder="展开浏览已接入表，或输入关键词搜索（支持多选）"
+                  value={downstreamTables}
+                  onChange={(v: string[]) => setDownstreamTables(v)}
                   onSearch={searchTables}
                   onOpenChange={handleTableDropdown}
                   loading={tableSearching}
@@ -1310,7 +1375,7 @@ export function MetricCreate() {
                       definitionError ||
                       (isAtomic
                         ? "聚合表达式将基于 源表/度量列/聚合 自动生成；可在此手写 expression 覆盖。"
-                        : "结构：expression（计算表达式，已在上方填写）、dependencies（已在上方选择）、source_tables（来源表）、dimensions（已在上方选择）。")
+                        : "结构：expression（计算表达式，已在上方填写）、dependencies（依赖指标）、source_tables（依赖表/上游）、downstream_tables（使用表/下游）、dimensions（维度）。")
                     }
                     extra={
                       <Space size={8}>
@@ -1492,16 +1557,43 @@ export function MetricCreate() {
                 );
               })}
             </Row>
-            {(inferSummary as unknown as { related_tables?: string[] }).related_tables?.length ? (
-              <div style={{ marginTop: 12 }}>
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>关联数据表（来自血缘推断）：</Typography.Text>
-                <div style={{ marginTop: 6 }}>
-                  {(inferSummary as unknown as { related_tables: string[] }).related_tables.map((t) => (
-                    <Tag key={t} className="mono" style={{ marginBottom: 4 }}>{t}</Tag>
-                  ))}
+            {(() => {
+              const s = inferSummary as unknown as {
+                related_tables?: string[];
+                source_tables?: string[];
+                downstream_tables?: string[];
+              };
+              const upstream = Array.isArray(s.source_tables) ? s.source_tables : s.related_tables;
+              const downstream = s.downstream_tables;
+              if (!upstream?.length && !downstream?.length) return null;
+              return (
+                <div style={{ marginTop: 12 }}>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    血缘推断关联表（已回填到 Step③ 口径定义）：
+                  </Typography.Text>
+                  {upstream?.length ? (
+                    <div style={{ marginTop: 6 }}>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>依赖表（上游）：</Typography.Text>
+                      <div style={{ marginTop: 4 }}>
+                        {upstream.map((t) => (
+                          <Tag key={t} className="mono" style={{ marginBottom: 4 }}>{t}</Tag>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  {downstream?.length ? (
+                    <div style={{ marginTop: 6 }}>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>使用表（下游）：</Typography.Text>
+                      <div style={{ marginTop: 4 }}>
+                        {downstream.map((t) => (
+                          <Tag key={t} className="mono" style={{ marginBottom: 4 }}>{t}</Tag>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
-              </div>
-            ) : null}
+              );
+            })()}
           </div>
         )}
       </Modal>

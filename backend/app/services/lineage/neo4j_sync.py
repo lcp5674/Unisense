@@ -115,6 +115,8 @@ def parse_metric_edges(
     - ``source_tables`` 上游源表 -> ``table:{t}`` → ``metric:{code}``
     - ``dependencies`` 依赖指标 -> ``metric:{dep}`` → ``metric:{code}``
     - ``source_table`` 落地物化表 -> ``metric:{code}`` → ``table:{t}``
+    - ``downstream_tables`` 下游使用表 -> ``metric:{code}`` → ``table:{t}``
+      （与落地表同向，指标消费方）
     """
     if not isinstance(definition, dict):
         return []
@@ -129,6 +131,9 @@ def parse_metric_edges(
     source_table = definition.get("source_table")
     if isinstance(source_table, str) and source_table:
         edges.append((node, f"table:{source_table}", "DERIVED_FROM"))
+    for table in definition.get("downstream_tables") or []:
+        if isinstance(table, str) and table:
+            edges.append((node, f"table:{table}", "DERIVED_FROM"))
     return edges
 
 

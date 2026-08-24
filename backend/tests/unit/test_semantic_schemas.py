@@ -133,6 +133,28 @@ def test_definition_source_tables_not_list_rejected():
     assert "必须为数据表名数组" in str(exc.value)
 
 
+def test_definition_downstream_tables_normalized():
+    """downstream_tables（下游使用表）规范化：去重 + 去空白 + 转字符串。"""
+    req = MetricCreateRequest(
+        **_base_payload(
+            definition_json={
+                "expression": "SUM(amount)",
+                "downstream_tables": [" ads.gmv_report ", "ads.gmv_report", "  "],
+            }
+        )
+    )
+    assert req.definition_json["downstream_tables"] == ["ads.gmv_report"]
+
+
+def test_definition_downstream_tables_not_list_rejected():
+    """downstream_tables 非数组 → 422。"""
+    with pytest.raises(ValidationError) as exc:
+        MetricCreateRequest(
+            **_base_payload(definition_json={"downstream_tables": "ads.gmv_report"})
+        )
+    assert "必须为数据表名数组" in str(exc.value)
+
+
 def test_definition_update_sql_invalid_rejected():
     """更新请求的 definition_json 同样校验 SQL 语法（非法 SQL → 422）。"""
     from app.services.semantic.schemas import MetricUpdateRequest

@@ -1291,6 +1291,42 @@ async def test_sync_metric_table_edges_removes_stale_and_adds_new() -> None:
     ]
 
 
+async def test_sync_metric_table_edges_with_downstream_tables() -> None:
+    """downstream_tables（下游使用表）并入 current_down：软删缺失 + 注册新增。
+
+    落地表与下游使用表同向（metric → table），差异同步一并管理——指标编辑
+    增删下游消费表后，血缘图不残留旧使用表边。
+    """
+    db = _FakeDB(
+        [
+            # 落地表边（仍声明 → 保留）
+            _Row(
+                1, "metric:m", "table:dws.gmv", "DERIVED_FROM", "L3",
+                provenance="metric_definition",
+            ),
+            # 旧下游使用表（不再声明 → 软删）
+            _Row(
+                2, "metric:m", "table:ads.old_report", "DERIVED_FROM", "L3",
+                provenance="metric_definition",
+            ),
+            # 已声明的下游使用表（仍声明 → 保留）
+            _Row(
+                3, "metric:m", "table:ads.gmv_report", "DERIVED_FROM", "L3",
+                provenance="metric_definition",
+            ),
+        ]
+    )
+    repo = LineageRepository(db)
+    deleted, added = await repo.sync_metric_table_edges(
+        "m", "dws.gmv", ["ods.order"], ["ads.gmv_report", "ads.new_report"]
+    )
+    assert deleted == 1  # ads.old_report 不再声明 → 软删
+    assert added == 2  # ods.order + ads.new_report 新增（gmv/ads.gmv_report 已存在不计）
+    remaining = [r for r in db._rows if r.source_node == "metric:m"]
+    targets = sorted(r.target_node for r in remaining)
+    assert targets == ["table:ads.gmv_report", "table:ads.new_report", "table:dws.gmv"]
+
+
 async def test_sync_metric_table_edges_no_tables_clears_all() -> None:
     """sync 无声明表：清理全部残留表边（指标不再声明任何表）。"""
     db = _FakeDB(

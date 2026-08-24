@@ -34,7 +34,8 @@ export const DEF_FIELD_LABEL: Record<string, string> = {
   // SQL 模式
   sql: "口径 SQL",
   etl_sql: "口径 SQL",
-  source_tables: "关联数据表",
+  source_tables: "依赖表（上游）",
+  downstream_tables: "使用表（下游）",
   source_fields: "来源字段",
   source_columns: "来源字段",
   group_by: "分组维度",

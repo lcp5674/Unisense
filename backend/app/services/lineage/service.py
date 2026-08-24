@@ -1240,7 +1240,9 @@ class LineageService(BaseService):
 
         解析约定与 ``scripts.sync_neo4j_assets.parse_metric_edges`` 保持一致：
         - ``source_table``（落地/物化表）→ ``metric:{code}`` → ``table:{t}``；
-        - ``source_tables``（上游源表）→ ``table:{t}`` → ``metric:{code}``。
+        - ``source_tables``（上游源表）→ ``table:{t}`` → ``metric:{code}``；
+        - ``downstream_tables``（下游使用表）→ ``metric:{code}`` → ``table:{t}``
+          （与落地表同向，指标消费方/使用表）。
 
         ``definition_json`` 缺键/类型异常/空值对应边静默跳过；返回本次写入的边列表
         （空列表表示无可注册的表血缘）。
@@ -1279,7 +1281,14 @@ class LineageService(BaseService):
         upstream_tables = [
             t for t in (definition.get("source_tables") or []) if isinstance(t, str) and t
         ]
-        await self._repo.sync_metric_table_edges(metric_code, source_table_clean, upstream_tables)
+        downstream_tables = [
+            t
+            for t in (definition.get("downstream_tables") or [])
+            if isinstance(t, str) and t
+        ]
+        await self._repo.sync_metric_table_edges(
+            metric_code, source_table_clean, upstream_tables, downstream_tables
+        )
         if source_table_clean:
             edges.append(
                 await self._repo.upsert_metric_table_edge(

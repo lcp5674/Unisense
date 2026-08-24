@@ -15,12 +15,30 @@ from app.services.metric_mount.schemas import MetricMountInput
 # ---- 请求 Schema ----
 
 
+def _normalize_table_list(v: Any, key: str) -> list[str]:
+    """表名列表规范化（``source_tables``/``downstream_tables`` 共用）。
+
+    非数组拒绝（422）；元素去空白、转字符串、去重，与 db_catalog/血缘节点约定一致。
+    """
+    if not isinstance(v, list):
+        raise ValueError(f"{key} 必须为数据表名数组")
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for t in v:
+        name = str(t).strip()
+        if name and name not in seen:
+            seen.add(name)
+            cleaned.append(name)
+    return cleaned
+
+
 def _validate_definition_json(v: dict[str, Any]) -> dict[str, Any]:
     """口径定义结构校验与规范化（FR-07 生产化）。
 
     1. ``sql``：若提供，用 sqlglot 做语法校验，非法 SQL 拒绝（422）。
-    2. ``source_tables``：若提供，规范化为去重字符串数组（指标锚定的数据表，
-       与 db_catalog/血缘节点约定一致）。
+    2. ``source_tables``（上游依赖表）与 ``downstream_tables``（下游使用表）：
+       若提供，规范化为去重字符串数组（指标锚定的数据表，与 db_catalog/血缘节点
+       约定一致）。
     3. 仅做校验与规范化，不新增字段、不改变未提供字段。
     """
     sql = v.get("sql")
@@ -34,18 +52,9 @@ def _validate_definition_json(v: dict[str, Any]) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001 - sqlglot 语法错误统一 422
             raise ValueError(f"口径 SQL 语法错误: {exc}") from exc
 
-    source_tables = v.get("source_tables")
-    if source_tables is not None:
-        if not isinstance(source_tables, list):
-            raise ValueError("source_tables 必须为数据表名数组")
-        seen: set[str] = set()
-        cleaned: list[str] = []
-        for t in source_tables:
-            name = str(t).strip()
-            if name and name not in seen:
-                seen.add(name)
-                cleaned.append(name)
-        v["source_tables"] = cleaned
+    for key in ("source_tables", "downstream_tables"):
+        if v.get(key) is not None:
+            v[key] = _normalize_table_list(v[key], key)
     return v
 
 

@@ -139,17 +139,21 @@ class FakeRepo:
         metric_code: str,
         downstream_table: str | None,
         upstream_tables: list[str],
+        downstream_tables: list[str] | None = None,
     ) -> tuple[int, int]:
-        """表边差异同步假实现：记录声明落地表/源表集。"""
+        """表边差异同步假实现：记录声明落地表/源表集/下游使用表集。"""
         self.upsert_calls.append(
             {
                 "op": "sync_metric_table_edges",
                 "metric_code": metric_code,
                 "downstream": downstream_table,
                 "upstream": upstream_tables,
+                "downstream_tables": downstream_tables or [],
             }
         )
-        return 0, len(upstream_tables) + (1 if downstream_table else 0)
+        return 0, len(upstream_tables) + len(downstream_tables or []) + (
+            1 if downstream_table else 0
+        )
 
     async def upsert_metric_column_edge(
         self,
@@ -1701,6 +1705,34 @@ async def test_register_metric_from_definition_mount_authority() -> None:
     assert len(edges) == 1
     assert edges[0].edge_type == "DERIVED_FROM"
     assert edges[0].target_node == "table:dws.gmv_new"
+
+
+async def test_register_metric_from_definition_downstream_tables() -> None:
+    """下游使用表（downstream_tables）传入表边差异同步。
+
+    消费该指标的表与落地表同向（metric → table），由 sync_metric_table_edges
+    的 current_down 合并处理——注册后血缘图同时显示指标的家与客户。
+    """
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    metric = SimpleNamespace(
+        id=7,
+        metric_code="gmv_total",
+        definition_json={
+            "source_table": "dws.gmv",
+            "source_tables": ["ods.order"],
+            "downstream_tables": ["ads.gmv_report", "dws.gmv_copy"],
+        },
+    )
+    edges = await svc.register_metric_from_definition(metric)
+    # edges 返回落地表下游边（上游源表/下游使用表由 sync 差异同步注册，不入 edges）
+    assert len(edges) == 1
+    assert edges[0].target_node == "table:dws.gmv"
+    table_sync = [c for c in repo.upsert_calls if c.get("op") == "sync_metric_table_edges"]
+    assert table_sync and table_sync[0]["downstream"] == "dws.gmv"
+    assert sorted(table_sync[0]["upstream"]) == ["ods.order"]
+    assert sorted(table_sync[0]["downstream_tables"]) == ["ads.gmv_report", "dws.gmv_copy"]
 
 
 async def test_query_impact_merges_dimension_column_edges_from_mysql() -> None:

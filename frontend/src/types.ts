@@ -2644,6 +2644,12 @@ export interface AutoSuggestResponse {
   definition_mode: string | null;
   /** 向后兼容：旧式域默认/规则默认值聚合。 */
   defaults?: Record<string, unknown>;
+  /** 血缘推断关联表（向后兼容：上游依赖 + 下游使用并集，新代码请用下述方向拆分字段）。 */
+  related_tables?: string[];
+  /** 血缘推断：上游依赖表（加工出源表的表，填入「依赖表（上游）」）。 */
+  source_tables?: string[];
+  /** 血缘推断：下游使用表（消费源表的表，填入「使用表（下游）」）。 */
+  downstream_tables?: string[];
 }
 
 // ============================================================================

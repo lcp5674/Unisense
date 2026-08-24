@@ -1580,29 +1580,44 @@ async def auto_suggest_metric(
             "reason": "AI 依据表结构/SQL 生成的业务命名",
         }
 
-    # 依赖表推断：从血缘图中提取源表的上游/下游关联表，供「口径定义 → 关联数据表」自动填充
+    # 依赖表推断：从血缘图中提取源表的上下游关联表，供「口径定义」自动填充。
+    # 方向拆分（修复混向 bug）：源表的上游邻居（入边 source）是加工出它的依赖表，
+    # 源表的下游邻居（出边 target）是消费它的表——此前 direction="both" 一把抓，
+    # 会把源表的下游消费表也塞进 source_tables（指标的上游依赖），方向被混。
     related_tables: list[str] = []
+    source_tables: list[str] = []
+    downstream_tables: list[str] = []
     if effective_table:
         try:
             from app.services.lineage.parser import node_table
             from app.services.lineage.repository import LineageRepository
 
-            edges = await LineageRepository(db).edges_for_node(
-                node_table(effective_table), direction="both"
-            )
+            repo = LineageRepository(db)
             self_node = node_table(effective_table)
             seen: set[str] = set()
-            for edge in edges:
-                for node in (edge.source_node, edge.target_node):
-                    if node.startswith("table:") and node != self_node:
-                        name = node[len("table:"):]
+
+            def _collect(nodes: list[str]) -> list[str]:
+                """过滤非自表节点并去重（仅收 table:* 邻居）。"""
+                out: list[str] = []
+                for n in nodes:
+                    if n.startswith("table:") and n != self_node:
+                        name = n[len("table:"):]
                         if name not in seen:
                             seen.add(name)
-                            related_tables.append(name)
+                            out.append(name)
+                return out
+
+            for edge in await repo.edges_for_node(self_node, direction="upstream"):
+                source_tables.extend(_collect([edge.source_node]))
+            for edge in await repo.edges_for_node(self_node, direction="downstream"):
+                downstream_tables.extend(_collect([edge.target_node]))
+            related_tables = source_tables + downstream_tables
         except Exception:
             pass  # 血缘不可用/无关联边 → 不阻断推断
 
     result["related_tables"] = related_tables
+    result["source_tables"] = source_tables
+    result["downstream_tables"] = downstream_tables
     return ok(data=result, trace_id=trace_id)
 
 

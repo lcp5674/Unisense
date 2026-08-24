@@ -132,3 +132,70 @@ async def test_auto_suggest_valid_request_returns_fields(
     data = resp.json()["data"]
     assert data["fields"]["name"]["value"] == "销售金额"
     assert data["definition_json"]["source_table"] == "dwd.sales_detail"
+
+
+async def test_auto_suggest_splits_lineage_direction(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """血缘推断按方向拆分：上游邻居 → source_tables，下游邻居 → downstream_tables。
+
+    修复混向 bug：此前 direction="both" 一把抓，源表的下游消费表被误塞进
+    source_tables（指标的上游依赖）。此处验证 metric 边被过滤、方向正确归位。
+    """
+    with (
+        patch(
+            "app.services.llm.config_service.LlmConfigService.build_client",
+            new=AsyncMock(return_value=SimpleNamespace(enabled=False)),
+        ),
+        patch(
+            "app.services.semantic.auto_fill.auto_fill",
+            return_value=_mock_auto_fill_result(),
+        ),
+        patch(
+            "app.services.lineage.repository.LineageRepository",
+            return_value=MagicMock(
+                edges_for_node=AsyncMock(
+                    side_effect=lambda node, direction: [
+                        SimpleNamespace(
+                            source_node="table:ods.sales_order",
+                            target_node="table:dwd.sales_detail",
+                        ),
+                        # 指标依赖边（入边 source=metric）应被过滤
+                        SimpleNamespace(
+                            source_node="metric:dep_gmv",
+                            target_node="table:dwd.sales_detail",
+                        ),
+                    ]
+                    if direction == "upstream"
+                    else [
+                        SimpleNamespace(
+                            source_node="table:dwd.sales_detail",
+                            target_node="table:ads.gmv_report",
+                        ),
+                        # 指标消费边（出边 target=metric）应被过滤
+                        SimpleNamespace(
+                            source_node="table:dwd.sales_detail",
+                            target_node="metric:consumer_x",
+                        ),
+                    ]
+                )
+            ),
+        ),
+    ):
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/auto-suggest",
+            json={
+                "domain_code": "sales",
+                "source_table": "dwd.sales_detail",
+                "measure_column": "gmv",
+                "period": "day",
+            },
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    # 上游依赖表：仅入边 table 邻居；下游使用表：仅出边 table 邻居；metric 边过滤
+    assert data["source_tables"] == ["ods.sales_order"]
+    assert data["downstream_tables"] == ["ads.gmv_report"]
+    # 兼容字段 related_tables = 上游 + 下游并集（旧前端无方向时兜底）
+    assert data["related_tables"] == ["ods.sales_order", "ads.gmv_report"]

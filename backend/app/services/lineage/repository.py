@@ -462,28 +462,40 @@ class LineageRepository:
         metric_code: str,
         downstream_table: str | None,
         upstream_tables: list[str],
+        downstream_tables: list[str] | None = None,
     ) -> tuple[int, int]:
         """差异同步「指标↔表」血缘边（软删缺失 + 注册新增，返回 (删除数, 新增数)）。
 
         与 ``sync_metric_dimension_edges``/``sync_metric_column_edges`` 同款：
         ``register_metric_from_definition`` 的表边是纯追加语义，指标编辑改
-        ``source_table``（落地表）/``source_tables``（源表集）后，旧表边会残留，
-        血缘图仍显示指标产出/来源于已不使用的表。以当前声明为唯一事实源：
-        软删不再声明的表边、注册新增表边。
+        ``source_table``（落地表）/``source_tables``（源表集）/``downstream_tables``
+        （下游使用表）后，旧表边会残留，血缘图仍显示指标产出/来源于已不使用的表。
+        以当前声明为唯一事实源：软删不再声明的表边、注册新增表边。
+
+        下游方向（``metric:{code}`` → ``table:{tbl}``）同时容纳落地表
+        （``definition_json.source_table``，指标物化所在）与下游使用表
+        （``definition_json.downstream_tables``，消费该指标的表）——二者同向，
+        合并进 ``current_down`` 参与差异同步，语义区别由口径 JSON 承载。
 
         Args:
             metric_code: 指标编码。
             downstream_table: 当前落地表（``definition_json.source_table``，可为 None）。
             upstream_tables: 当前源表列表（``definition_json.source_tables``）。
+            downstream_tables: 当前下游使用表列表（``definition_json.downstream_tables``，
+                消费该指标的表；缺省空列表）。
 
         Returns:
             ``(deleted_count, added_count)``。
         """
         node = f"metric:{metric_code}"
         current_down = {node_table(downstream_table)} if downstream_table else set()
+        current_down.update(
+            node_table(t) for t in (downstream_tables or []) if isinstance(t, str) and t
+        )
         current_up = {node_table(t) for t in upstream_tables if isinstance(t, str) and t}
         deleted = 0
-        # 1a) 软删不再声明的落地表边（metric:{code} → table:{tbl}，DERIVED_FROM）
+        # 1a) 软删不再声明的下游表边（metric:{code} → table:{tbl}，DERIVED_FROM）
+        #     —— 含落地表（物化）与下游使用表（消费方），同向合并进 current_down
         for edge in await self.edges_for_node(node, direction="downstream"):
             if edge.edge_type != "DERIVED_FROM" or not edge.target_node.startswith("table:"):
                 continue  # 仅处理 table 节点，跳过指标依赖边（metric:*）

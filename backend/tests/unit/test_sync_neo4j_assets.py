@@ -76,6 +76,18 @@ def test_parse_metric_edges_full() -> None:
     ]
 
 
+def test_parse_metric_edges_downstream_tables() -> None:
+    """下游使用表 -> 指标产出表边（source=指标, target=表，与落地表同向）。"""
+    edges = parse_metric_edges(
+        "sales_e2e_gmv_day",
+        {"downstream_tables": ["ads.gmv_report", "dws.gmv_copy"]},
+    )
+    assert edges == [
+        ("metric:sales_e2e_gmv_day", "table:ads.gmv_report", "DERIVED_FROM"),
+        ("metric:sales_e2e_gmv_day", "table:dws.gmv_copy", "DERIVED_FROM"),
+    ]
+
+
 def test_parse_metric_edges_none_or_empty() -> None:
     """definition 为 None / 空字典 / 缺键时返回空列表。"""
     assert parse_metric_edges("sales_e2e_gmv_day", None) == []

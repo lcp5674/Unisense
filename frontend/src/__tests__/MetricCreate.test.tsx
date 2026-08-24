@@ -531,6 +531,54 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     );
   });
 
+  it("SQL 推断：血缘关联表按方向拆分为 依赖表（上游）+ 使用表（下游）回填", async () => {
+    mockedSuggest.mockResolvedValue({
+      metric_code_suggestion: "sales_order_gmv_day",
+      segments: { domain: "sales", biz_object: "order", measure: "gmv", period: "day" },
+      fields: {
+        source_table: { value: "dwd.sales_detail", source: "sql_parse", confidence: 0.9, reason: "" },
+        measure_column: { value: "gmv", source: "sql_parse", confidence: 0.9, reason: "" },
+        name: { value: "订单销售额", source: "sql_parse", confidence: 0.8 },
+      },
+      definition_json: { expression: "SUM(gmv)", source_fields: [{ table: "dwd.sales_detail", column: "gmv" }] },
+      definition_mode: "expression",
+      // 方向拆分：上游依赖表 + 下游使用表（不再混向——此前 related_tables 一把抓）
+      source_tables: ["ods.sales_order"],
+      downstream_tables: ["ads.gmv_report"],
+    } as never);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openSqlInfer();
+    fireEvent.change(screen.getByPlaceholderText(/SELECT SUM\(amount\) AS gmv/), {
+      target: { value: "SELECT SUM(gmv) AS gmv FROM dwd.sales_detail GROUP BY dt, shop_id" },
+    });
+    fireEvent.click(screen.getByText("智能推断并回填字段"));
+
+    // 摘要 Modal：按方向分类展示（依赖表在上、使用表在下）
+    await screen.findByText("SQL 智能推断结果");
+    expect(screen.getByText("依赖表（上游）：")).toBeTruthy();
+    expect(screen.getByText("使用表（下游）：")).toBeTruthy();
+    expect(screen.getAllByText("ods.sales_order").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("ads.gmv_report").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByText("知道了"));
+
+    // 回填到 Step③ 口径定义：两个多选 Select 各自承接对应方向的表
+    await goToStep(2);
+    await waitFor(() => {
+      const depLabel = Array.from(document.querySelectorAll(".ant-form-item-label")).find(
+        (el) => el.textContent?.includes("依赖表")
+      );
+      const depItem = depLabel?.closest(".ant-form-item") as HTMLElement | null;
+      expect(depItem?.textContent).toContain("ods.sales_order");
+      const useLabel = Array.from(document.querySelectorAll(".ant-form-item-label")).find(
+        (el) => el.textContent?.includes("使用表")
+      );
+      const useItem = useLabel?.closest(".ant-form-item") as HTMLElement | null;
+      expect(useItem?.textContent).toContain("ads.gmv_report");
+    });
+  });
+
   it("SQL 推断后「一键采纳」将系统建议编码填入输入框（惰性设计）", async () => {
     mockedSuggest.mockResolvedValue({
       fields: {
@@ -700,7 +748,7 @@ describe("MetricCreate 源表选择惰性化", () => {
     // 口径定义在向导 Step2（治理+口径）——导航过去
     await goToStep(2);
     // 展开「口径定义 → 关联数据表」多选下拉
-    const relatedSelect = screen.getByText(/展开浏览已接入表/);
+    const relatedSelect = screen.getAllByText(/展开浏览已接入表/)[0];
     fireEvent.mouseDown(relatedSelect);
     // 展开即触发加载（onOpenChange → 空关键词加载默认表列表，与源表名一致）
     await waitFor(() => expect(mockedCatalogs).toHaveBeenCalledWith(
@@ -715,7 +763,7 @@ describe("MetricCreate 源表选择惰性化", () => {
     await screen.findByText("注册指标（草稿）");
     // 口径定义在向导 Step2（治理+口径）——导航过去
     await goToStep(2);
-    const relatedSelect = screen.getByText(/展开浏览已接入表/);
+    const relatedSelect = screen.getAllByText(/展开浏览已接入表/)[0];
     fireEvent.mouseDown(relatedSelect);
     // 关联数据表是多选 Select（.ant-select-multiple），其搜索输入框在容器内；源表/度量列等单选不受影响
     const relatedSearchInput = document.querySelector(
