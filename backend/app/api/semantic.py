@@ -188,7 +188,19 @@ async def create_template(
         ip=client_ip(request),
         trace_id=get_trace_id(request),
     )
-    await db.commit()
+    # 并发竞态兜底：select 预检在并发下仍可能同时通过，唯一键冲突在 commit 才暴露。
+    # 捕获 IntegrityError → 回滚会话 + 转 ConflictError（中文友好），避免 500。
+    from sqlalchemy.exc import IntegrityError
+
+    from app.core.exceptions import ConflictError
+
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise ConflictError(
+            f"模板编码已存在: {template.code}", error_code="TPL_EXISTS"
+        ) from exc
     await db.refresh(template)
     return ok(data=template.to_dict(), trace_id=get_trace_id(request))
 

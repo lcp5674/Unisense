@@ -299,3 +299,36 @@ async def test_instantiate_empty_definition_falls_back_to_template_default() -> 
         "expression": "sum(x)",
         "source_tables": ["dwd.orders"],
     }
+
+
+async def test_create_template_commit_integrity_error_maps_conflict() -> None:
+    """create_template commit 撞唯一键 → 回滚 + ConflictError(TPL_EXISTS) 而非 500。
+
+    背景：select 预检在并发下可能同时通过，唯一键冲突到 commit 才暴露；
+    捕获 IntegrityError 转友好 ConflictError，避免裸 500（与预检分支同码）。
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    from app.api.semantic import create_template
+    from app.core.exceptions import ConflictError
+
+    body = {"code": "tpl_fin_gmv", "name": "GMV", "domain": "finance"}
+    # 预检通过（无重复）
+    r = MagicMock()
+    r.scalar_one_or_none.return_value = None
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=r)
+    # commit 抛 IntegrityError（并发唯一键冲突）
+    db.commit = AsyncMock(side_effect=IntegrityError("stmt", {}, Exception("dup key")))
+    db.rollback = AsyncMock()
+    db.refresh = AsyncMock()
+
+    req = MagicMock()
+    req.headers.get.return_value = ""
+    user = MagicMock(id=1)
+
+    with pytest.raises(ConflictError) as ei:
+        await create_template(user=user, request=req, body=body, db=db)
+    assert ei.value.error_code == "TPL_EXISTS"
+    assert "已存在" in ei.value.message
+    db.rollback.assert_awaited_once()
