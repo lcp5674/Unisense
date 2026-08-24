@@ -65,3 +65,60 @@ async def metric_reuse_stats(
     """
     result = await MetricStatsService(db).reuse_summary()
     return ok(data=MetricReuseResponse.model_validate(result), trace_id=trace_id)
+
+
+class MetricLedgerZombieItem(BaseModel):
+    """僵尸指标明细（长期无更新 + 零引用）。"""
+
+    metric_code: str
+    name: str
+    domain: str | None = None
+    type: str
+    status: str
+    last_updated_at: str | None = Field(default=None, description="最后一次更新时间（ISO8601）")
+    days_since_update: int | None = Field(default=None, description="距最后一次更新的天数")
+    derived_by_count: int = Field(description="被派生指标 DERIVED_FROM 引用数")
+    consumed_by_count: int = Field(description="被报表/接入方 CONSUMED_BY 引用数")
+    reuse_count: int = Field(description="总复用度（派生引用 + 消费引用）")
+
+
+class MetricLedgerDuplicateItem(BaseModel):
+    """重复建设指标明细（SAME_DEF_DIFF_NAME 冲突预检信号）。"""
+
+    metric_code: str
+    name: str
+    domain: str | None = None
+    conflict_score: float | None = Field(default=None, description="口径相似度得分")
+    existing_code: str | None = Field(default=None, description="口径实质相同的既有指标码")
+    reason: str | None = Field(default=None, description="冲突预检原因")
+
+
+class MetricLedgerResponse(BaseModel):
+    """指标资产账本（活跃/僵尸/重复建设）。"""
+
+    total: int = Field(description="参与统计的指标总数")
+    active_count: int = Field(description="活跃指标数（近 30 天有更新或有引用）")
+    zombie_count: int = Field(description="僵尸指标数（长期无更新且零引用）")
+    duplicate_count: int = Field(description="重复建设指标数（SAME_DEF_DIFF_NAME 信号）")
+    zombies: list[MetricLedgerZombieItem] = Field(default_factory=list)
+    duplicates: list[MetricLedgerDuplicateItem] = Field(default_factory=list)
+
+
+@router.get(
+    "/stats/ledger",
+    response_model=ApiResponse[MetricLedgerResponse],
+    summary="指标资产账本（P1：活跃/僵尸/重复建设清单）",
+    dependencies=_READ_DEPS,
+)
+async def metric_asset_ledger(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[MetricLedgerResponse]:
+    """返回活跃/僵尸指标数与每个僵尸指标详情（最后一次更新、被引用次数）。
+
+    僵尸判定复用 HealthScorer 活跃度维度（近 30 天无更新）+ 零引用；重复建设
+    以冲突预检挂载的 SAME_DEF_DIFF_NAME 信号为来源（低耦合，不深挖仲裁侧）。
+    """
+    result = await MetricStatsService(db).asset_ledger()
+    return ok(data=MetricLedgerResponse.model_validate(result), trace_id=trace_id)
