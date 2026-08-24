@@ -931,7 +931,8 @@ export function DataSources() {
   function buildConnectionConfig(values: Record<string, unknown>): Record<string, unknown> {
     const cfg: Record<string, unknown> = {};
     // 空 host 剔除（Med 9）：编辑模式非 admin 未回显 host，提交空值会覆盖真实
-    // host 使源不可用；host 必填由表单校验保证（创建/测试连接时），此处仅为防御。
+    // host 使源不可用；新建时由表单校验保证必填，编辑模式允许留空（=保持原配置），
+    // 故测试连接前置拦截（handleTest）缺 host 的情况，此处仅为防御。
     if (values.host && String(values.host).trim()) {
       cfg.host = String(values.host).trim();
     }
@@ -952,6 +953,12 @@ export function DataSources() {
     }
     const values = form.getFieldsValue();
     const cfg = buildConnectionConfig(values);
+    // 编辑模式 Host 非必填（留空=保持原配置），空 Host 会生成缺连接地址的配置，
+    // 后端以 422 拒绝且提示不可读。这里前置拦截，给出明确可读的指引。
+    if (!cfg.host) {
+      message.warning("请填写 Host（连接地址）后再测试连接");
+      return;
+    }
     try {
       const res = await testDataSourceConnection({
         source_type: String(values.source_type) as SourceType,
@@ -966,7 +973,15 @@ export function DataSources() {
         setDbOptions([]);
       }
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "测试失败");
+      // 422 多为请求校验失败（如连接配置缺字段），后端 detail 不进入统一信封，
+      // 这里给出可读提示而非「请求失败 (HTTP 422)（HTTP_ERROR）」
+      message.error(
+        err instanceof UnisenseApiError && err.status === 422
+          ? "连接配置不完整，请检查 Host / 端口 / 凭据后重试"
+          : err instanceof UnisenseApiError
+            ? `${err.message}（${err.codeZh}）`
+            : "测试失败",
+      );
     }
   }
 

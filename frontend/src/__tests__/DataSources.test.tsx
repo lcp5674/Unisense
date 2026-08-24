@@ -256,6 +256,16 @@ describe("DataSources", () => {
     expect(screen.getByText(/Source ID 将由系统自动生成：mysql_finance/)).toBeTruthy();
   });
 
+  it("新建弹窗未填 Host 点测试连接：前端校验拦截不发请求", async () => {
+    await openCreateModal();
+    await selectType("MySQL（mysql）");
+    fireEvent.click(screen.getByText("测试连接"));
+    await waitFor(() => {
+      expect(mockedTest).not.toHaveBeenCalled();
+    });
+    expect(screen.getByText("请先填写类型与 Host")).toBeTruthy();
+  });
+
   it("测试连接按钮调用后端并提示成功", async () => {
     await openCreateModal();
     fireEvent.change(screen.getByPlaceholderText("127.0.0.1"), { target: { value: "10.0.0.1" } });
@@ -416,6 +426,28 @@ describe("DataSources", () => {
     expect(payload.domain).toBe("finance");
     // 未修改连接字段 → 不提交 connection_config（保持原配置，避免重置健康状态）
     expect(payload.connection_config).toBeUndefined();
+  });
+
+  it("编辑弹窗清空 Host 后点测试连接：前端拦截不发请求并提示", async () => {
+    renderSources();
+    await waitFor(() => {
+      expect(screen.getByText("管理")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByText("管理"));
+    await screen.findByText(/数据源：财务库/);
+    fireEvent.click(screen.getByText("编辑"));
+    await screen.findByText(/编辑数据源：mysql_finance/);
+    // 等待明文回显完成后清空 Host（编辑模式 Host 非必填，可留空）
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("10.0.0.1")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByDisplayValue("10.0.0.1"), { target: { value: "" } });
+    fireEvent.click(screen.getByText("测试连接"));
+    // 缺 Host 的配置后端会 422 拒绝——前端应先拦截，给出可读提示而不发请求
+    await waitFor(() => {
+      expect(mockedTest).not.toHaveBeenCalled();
+    });
+    expect(screen.getByText("请填写 Host（连接地址）后再测试连接")).toBeTruthy();
   });
 
   it("编辑时修改连接字段则随更新提交完整 connection_config（含回显字段）", async () => {
