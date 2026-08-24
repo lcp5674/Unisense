@@ -15,8 +15,21 @@ import {
   FieldTimeOutlined,
 } from "@ant-design/icons";
 import { Pie, Bar } from "@ant-design/charts";
-import { fetchDashboard, fetchRecommendedMetrics, fetchRecommendedTerms } from "../api";
-import type { AssetStat, DashboardData, OwnerAssetStat, RecommendItem, GlossaryTerm } from "../types";
+import {
+  fetchDashboard,
+  fetchObsOverview,
+  fetchRecommendedMetrics,
+  fetchRecommendedTerms,
+} from "../api";
+import type {
+  AssetStat,
+  DashboardData,
+  ObsOverview,
+  OwnerAssetStat,
+  RecommendItem,
+  GlossaryTerm,
+} from "../types";
+import { METRIC_HEALTH_LEVEL_LABEL } from "../utils/enums";
 import { useTracking } from "../hooks/useTracking";
 
 const EDGE_TYPE_LABEL: Record<string, string> = {
@@ -423,6 +436,77 @@ function GovernanceCards({ data, navigate }: { data: DashboardData; navigate: (t
   );
 }
 
+// ---- 指标可信度：健康度四档分布（绿/黄/红）+ 覆盖率 + 低健康 Top ----
+// 数据源复用可观测中心聚合端点（/observability/overview quality.metric_health）——
+// 与可观测中心同源同口径，避免在仪表盘聚合端点重复实现健康度评分逻辑。
+const METRIC_HEALTH_ORDER = ["EXCELLENT", "GOOD", "WARNING", "CRITICAL"] as const;
+type MetricHealth = ObsOverview["quality"]["metric_health"];
+
+function MetricCredibilityCard({ h, navigate }: { h: MetricHealth; navigate: (to: string) => void }) {
+  const byLevel = h.by_level ?? {};
+  const totalScored = h.total_scored ?? 0;
+  const coverage = h.coverage_pct ?? 0;
+  const risks = h.top_risk ?? [];
+  // 绿档可信率：EXCELLENT+GOOD 占已评分指标的比例，作为「业务可信度」的直观读数
+  const totalHealth = METRIC_HEALTH_ORDER.reduce((sum, l) => sum + (byLevel[l] ?? 0), 0);
+  const credibleRate = totalHealth > 0 ? Math.round(((byLevel.EXCELLENT ?? 0) + (byLevel.GOOD ?? 0)) / totalHealth * 100) : 0;
+
+  return (
+    <Card
+      style={{ marginBottom: 20 }}
+      styles={{ body: { paddingTop: 16, paddingBottom: 16 } }}
+      title={
+        <span style={{ fontSize: 15, fontWeight: 600 }}>
+          指标可信度
+          <span className="muted" style={{ fontWeight: 400, fontSize: 12, marginLeft: 8 }}>
+            基于健康度五维评分（口径完整度 / 活跃度 / 质量 / Owner 响应 / 血缘覆盖）—— 点击进入可观测中心
+          </span>
+        </span>
+      }
+    >
+      <button
+        className="gov-card gov-card-wide"
+        data-tone="health"
+        type="button"
+        onClick={() => navigate("/observability")}
+        title="进入可观测中心查看完整健康明细"
+      >
+        <div className="gov-head">
+          <span className="gov-label">
+            <SafetyCertificateOutlined /> 健康度分布
+          </span>
+          <span className="gov-total">{coverage}%</span>
+        </div>
+        <div className="gov-sevs">
+          {METRIC_HEALTH_ORDER.map((l) => (
+            <span key={l} className="gov-sev" data-sev={l}>
+              {METRIC_HEALTH_LEVEL_LABEL[l] ?? l} <b>{byLevel[l] ?? 0}</b>
+            </span>
+          ))}
+        </div>
+        <div className="gov-sub">
+          健康覆盖率 {coverage}% · 已评分 {totalScored} 项 · 绿档可信 {credibleRate}%
+        </div>
+        {risks.length > 0 && (
+          <div className="gov-risks">
+            <div className="gov-risks-title">
+              <WarningOutlined /> 低健康指标 Top {risks.length}（按评分升序）
+            </div>
+            {risks.map((r) => (
+              <div key={r.metric_id} className="gov-risk-item">
+                <span className="gov-risk-name" title={r.metric_code ?? undefined}>
+                  {r.metric_name ?? r.metric_code ?? `指标 #${r.metric_id}`}
+                </span>
+                <span className="gov-risk-score">{r.score} 分</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </button>
+    </Card>
+  );
+}
+
 // ---- Owner 责任分布：以堆积条形图展示每位 Owner 的指标状态构成 ----
 // 分段颜色与生命周期信号条语义一致：草稿灰 / 实验紫 / 审核橙 / 已发布青 / 已废弃深灰
 const OWNER_STATES = [
@@ -698,6 +782,8 @@ export function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [recommended, setRecommended] = useState<RecommendItem[]>([]);
   const [terms, setTerms] = useState<GlossaryTerm[]>([]);
+  // 指标可信度：复用可观测中心聚合端点（/observability/overview quality.metric_health）
+  const [metricHealth, setMetricHealth] = useState<MetricHealth | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { track } = useTracking();
@@ -754,17 +840,25 @@ export function Dashboard() {
       setLoading(true);
       setError(null);
       try {
-        const [dash, rec, recTerms] = await Promise.all([
+        const [dash, rec, recTerms, overview] = await Promise.all([
           fetchDashboard(),
           fetchRecommendedMetrics(RECOMMEND_INITIAL_LIMIT).catch((e) => {
             console.warn("[Dashboard] 推荐指标加载失败", e);
             return [];
           }),
           fetchRecommendedTerms(5).catch(() => []),
+          // 指标可信度独立拉取可观测聚合，失败静默降级（卡片隐藏），不阻断仪表盘其余读数
+          fetchObsOverview()
+            .then((o) => o?.quality?.metric_health ?? null)
+            .catch((e) => {
+              console.warn("[Dashboard] 指标可信度加载失败", e);
+              return null;
+            }),
         ]);
         setData(dash);
         setRecommended(rec);
         setTerms(recTerms);
+        setMetricHealth(overview);
         track("dashboard_view", undefined, "dashboard");
       } catch (err) {
         setError(err instanceof Error ? err.message : "加载仪表盘失败");
@@ -822,6 +916,9 @@ export function Dashboard() {
 
       {/* 治理指标体系：质量健康 / 合规复核 / 冲突风险 / 近 30 天更新 */}
       <GovernanceCards data={data} navigate={navigate} />
+
+      {/* 指标可信度：健康度四档分布（红黄绿）+ 覆盖率 + 低健康 Top（复用可观测中心聚合） */}
+      {metricHealth ? <MetricCredibilityCard h={metricHealth} navigate={navigate} /> : null}
 
       {/* Owner 责任分布：按责任人查看指标规模与待审积压 */}
       <OwnerDistribution data={data} navigate={navigate} />
