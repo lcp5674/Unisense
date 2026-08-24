@@ -222,6 +222,7 @@ _VERB_TEMPLATES: dict[str, str] = {
     "submit": "提交了{entity}评审",
     "approve": "审核通过了{entity}",
     "reject": "驳回了{entity}",
+    "clarify": "澄清了{entity}（质疑回复）",
     "review": "复核了{entity}",
     "confirm": "确认了{entity}",
     "resubmit": "重新提交了{entity}评审",

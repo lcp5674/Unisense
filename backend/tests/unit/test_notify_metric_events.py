@@ -79,6 +79,8 @@ def _svc() -> tuple[NotifyService, MagicMock]:
     repo.find_recent_notification = AsyncMock(return_value=None)
     repo.save_notification = AsyncMock(side_effect=lambda n: n)
     repo.get_user_display_name = AsyncMock(return_value="审核员")
+    # P2 资产订阅：默认无资产订阅者（metric 事件 payload 含 metric_code 会触发匹配）
+    repo.list_asset_subscribers = AsyncMock(return_value=[])
     repo.commit = AsyncMock()
     svc._repo = repo  # noqa: SLF001
     return svc, repo

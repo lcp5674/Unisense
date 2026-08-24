@@ -373,9 +373,14 @@ class NotifyService(BaseService):
         # P2 资产订阅（按指标/源表 watch）：事件 payload 携带资产引用时，
         # 额外匹配"关注了该资产"的用户，与事件订阅者合并（同用户×渠道去重，
         # 事件订阅优先，避免同一通知重复投递）。
+        # best-effort：资产匹配失败（repo 异常/数据异常）仅告警，绝不阻断事件订阅扇出。
         asset_subs: list[SubscriptionPref] = []
-        for asset_type, asset_id in self._extract_asset_keys(data.payload):
-            asset_subs.extend(await self._repo.list_asset_subscribers(asset_type, asset_id))
+        try:
+            for asset_type, asset_id in self._extract_asset_keys(data.payload):
+                asset_subs.extend(await self._repo.list_asset_subscribers(asset_type, asset_id))
+        except Exception:
+            logger.warning("notify_asset_subscriber_match_failed", exc_info=True)
+            asset_subs = []
         if asset_subs:
             merged: dict[tuple[int, str], SubscriptionPref] = {}
             for s in subs:
