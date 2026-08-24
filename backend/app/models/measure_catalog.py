@@ -30,6 +30,18 @@ class MeasureFormat(enum.StrEnum):
     NUMERIC = "NUMERIC"  # 数值（自定义单位、小数按需）
 
 
+class MeasureCategory(enum.StrEnum):
+    """度量分类：按业务视角组织度量目录，跨域通用（医疗/电商等均可挂）。"""
+
+    FLOW = "FLOW"  # 流量类（人次/单量：门诊人次、订单量）
+    FEE = "FEE"  # 费用类（金额：门诊费用、GMV）
+    DRUG = "DRUG"  # 药品类（处方、药品用量/费用）
+    MEDICAL_INSURANCE = "MEDICAL_INSURANCE"  # 医保类（结算金额、报销比例）
+    EFFICIENCY = "EFFICIENCY"  # 效率类（次均/人效、单价）
+    QUALITY = "QUALITY"  # 质量类（率/占比、质控指标）
+    OTHER = "OTHER"  # 其他/未分类
+
+
 class MeasureStatus(enum.StrEnum):
     """逻辑度量状态机（照 dimension 发布式主数据）。"""
 
@@ -63,6 +75,12 @@ class MeasureCatalog(Base, BaseModel):
     source_system: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True, comment="源头系统")
     #: 同义词（统一查询/查重匹配，指标基础信息第 8 项）
     synonyms: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True, comment="同义词")
+    #: 度量分类（FLOW/FEE/DRUG/MEDICAL_INSURANCE/EFFICIENCY/QUALITY/OTHER）
+    category: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=MeasureCategory.OTHER.value, comment="度量分类"
+    )
+    #: 统计口径（业务侧如何计算该度量，如"收费明细按结算日期去重后求和"）
+    stat_caliber: Mapped[str | None] = mapped_column(Text, nullable=True, comment="统计口径")
     domain: Mapped[str] = mapped_column(String(64), nullable=False, comment="业务域")
     owner_id: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="负责人 ID")
     status: Mapped[str] = mapped_column(

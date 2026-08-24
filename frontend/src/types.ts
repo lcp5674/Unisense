@@ -994,6 +994,15 @@ export interface DimensionMetricBinding {
 
 export type MeasureFormat = "AMOUNT" | "RATIO" | "NUMERIC";
 
+export type MeasureCategory =
+  | "FLOW"
+  | "FEE"
+  | "DRUG"
+  | "MEDICAL_INSURANCE"
+  | "EFFICIENCY"
+  | "QUALITY"
+  | "OTHER";
+
 export interface MeasureCatalog {
   id: number;
   measure_code: string;
@@ -1007,6 +1016,10 @@ export interface MeasureCatalog {
   /** 源头系统（业务系统术语多值） */
   source_system: string[] | null;
   synonyms: string[] | null;
+  /** 度量分类（FLOW/FEE/DRUG/MEDICAL_INSURANCE/EFFICIENCY/QUALITY/OTHER） */
+  category: MeasureCategory;
+  /** 统计口径（业务侧如何计算） */
+  stat_caliber: string | null;
   domain: string;
   owner_id: number;
   status: string;
@@ -1019,6 +1032,17 @@ export const MEASURE_FORMAT_LABEL: Record<MeasureFormat, string> = {
   AMOUNT: "金额",
   RATIO: "比率",
   NUMERIC: "数值",
+};
+
+/** 度量分类展示文案 */
+export const MEASURE_CATEGORY_LABEL: Record<MeasureCategory, string> = {
+  FLOW: "流量类",
+  FEE: "费用类",
+  DRUG: "药品类",
+  MEDICAL_INSURANCE: "医保类",
+  EFFICIENCY: "效率类",
+  QUALITY: "质量类",
+  OTHER: "其他",
 };
 
 // ============================================================================
