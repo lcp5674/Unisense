@@ -45,7 +45,7 @@ E2E_USERS = [
         "email": "e2e_owner@unisense.local",
         "display_name": "E2E指标Owner",
         "role": "metric_owner",
-        "domain": "sales",
+        "domain": "outpatient",
     },
     {
         "username": "e2e_compliance",
@@ -64,147 +64,268 @@ E2E_USERS = [
 ]
 
 # OneData 原子层：逻辑度量目录（原子指标 = 逻辑度量 + 聚合方式，不绑物理表）。
-# 度量格式联动默认单位/小数位（AMOUNT→元/2 位；NUMERIC→显式单位/0 位）。
+# 度量格式联动默认单位/小数位（AMOUNT→元/2 位；RATIO→小数/4 位；NUMERIC→显式单位/0 位）。
+# 度量目录从电商演示改为医疗实际场景：口径依托 HIS 门诊真实数据（dp元数据.csv：
+# tj_cf_drug_prescription / tj_cf_diagnosis / tj_pharmacy_feebill_master 等）。
 MEASURES: list[dict[str, Any]] = [
     {
-        "code": "sales_payment_amount",
-        "name": "支付金额",
-        "description": "成交订单金额总和",
+        "code": "outp_register_cnt",
+        "name": "门诊挂号人次",
+        "description": "门诊挂号记录数（按挂号记录去重）",
+        "measure_format": "NUMERIC",
+        "default_unit": "人次",
+        "default_decimal_places": 0,
+        "domain": "outpatient",
+        "category": "FLOW",
+        "stat_caliber": "挂号表记录数，按挂号单号去重后计数",
+    },
+    {
+        "code": "outp_visit_cnt",
+        "name": "门诊就诊人次",
+        "description": "门诊实际就诊人次（收费记录按就诊去重）",
+        "measure_format": "NUMERIC",
+        "default_unit": "人次",
+        "default_decimal_places": 0,
+        "domain": "outpatient",
+        "category": "FLOW",
+        "stat_caliber": "收费主表按就诊号去重计数",
+    },
+    {
+        "code": "outp_fee_amount",
+        "name": "门诊收费金额",
+        "description": "门诊收费总额（实收合计）",
         "measure_format": "AMOUNT",
         "default_unit": "CNY",
         "default_decimal_places": 2,
-        "domain": "sales",
+        "domain": "medical_fee",
+        "category": "FEE",
+        "stat_caliber": "收费明细实收金额求和",
     },
     {
-        "code": "sales_order_cnt",
-        "name": "订单数",
-        "description": "订单数量",
-        "measure_format": "NUMERIC",
-        "default_unit": "cnt",
-        "default_decimal_places": 0,
-        "domain": "sales",
+        "code": "outp_drug_fee_amount",
+        "name": "门诊药品费用",
+        "description": "门诊收费中药品费用合计",
+        "measure_format": "AMOUNT",
+        "default_unit": "CNY",
+        "default_decimal_places": 2,
+        "domain": "medication",
+        "category": "DRUG",
+        "stat_caliber": "收费明细中药品类费用求和",
     },
     {
-        "code": "user_active_user_cnt",
-        "name": "活跃用户数",
-        "description": "每日活跃去重用户数",
+        "code": "outp_prescription_cnt",
+        "name": "门诊处方数",
+        "description": "门诊处方数量",
         "measure_format": "NUMERIC",
-        "default_unit": "cnt",
+        "default_unit": "笔",
         "default_decimal_places": 0,
-        "domain": "user",
+        "domain": "medication",
+        "category": "DRUG",
+        "stat_caliber": "处方表记录数，按处方单号去重后计数",
     },
     {
-        "code": "user_pii_user_cnt",
-        "name": "PII 用户数",
-        "description": "留存 PII 的用户数",
-        "measure_format": "NUMERIC",
-        "default_unit": "cnt",
-        "default_decimal_places": 0,
-        "domain": "user",
+        "code": "yb_settle_amount",
+        "name": "门诊医保结算金额",
+        "description": "门诊医保结算总金额",
+        "measure_format": "AMOUNT",
+        "default_unit": "CNY",
+        "default_decimal_places": 2,
+        "domain": "medical_insurance",
+        "category": "MEDICAL_INSURANCE",
+        "stat_caliber": "医保结算明细结算金额求和",
+    },
+    {
+        "code": "yb_reimburse_ratio",
+        "name": "医保报销比例",
+        "description": "医保支付金额占结算金额的比例",
+        "measure_format": "RATIO",
+        "default_unit": "小数",
+        "default_decimal_places": 4,
+        "domain": "medical_insurance",
+        "category": "MEDICAL_INSURANCE",
+        "stat_caliber": "医保支付金额 ÷ 结算总金额",
+    },
+    {
+        "code": "outp_avg_fee",
+        "name": "次均门诊费用",
+        "description": "门诊收费总额 ÷ 就诊人次",
+        "measure_format": "AMOUNT",
+        "default_unit": "CNY",
+        "default_decimal_places": 2,
+        "domain": "medical_fee",
+        "category": "EFFICIENCY",
+        "stat_caliber": "门诊收费总额 ÷ 门诊就诊人次",
+    },
+    {
+        "code": "outp_drug_ratio",
+        "name": "门诊药占比",
+        "description": "药品费用占门诊收费总额的比例",
+        "measure_format": "RATIO",
+        "default_unit": "小数",
+        "default_decimal_places": 4,
+        "domain": "medication",
+        "category": "QUALITY",
+        "stat_caliber": "门诊药品费用 ÷ 门诊收费总额",
     },
 ]
 
 # 标准指标定义（definition_json 里 sql 会被 sqlglot 校验，必须是合法 SQL）
 METRICS: list[dict[str, Any]] = [
     {
-        "code": "sales_e2e_gmv_day",
-        "name": "E2E销售额",
-        "domain": "sales",
+        "code": "outp_e2e_register_day",
+        "name": "门诊挂号人次",
+        "domain": "outpatient",
         "type": "atomic",
-        "unit": "CNY",
-        "aggregation": "SUM",
-        "time_semantics": "PERIOD",
-        "freshness": "T1",
-        "dw_layer": "DWS",
-        "metric_tier": "T1",
-        # OneData 原子层：引用逻辑度量（支付金额），不绑物理表
-        "measure_id_code": "sales_payment_amount",
-        "period": "day",
-        "definition_json": {
-            "sql": "SELECT order_amount AS gmv, channel, dt FROM ods_e2e_order",
-            "source_tables": ["ods_e2e_order"],
-            "dimensions": ["channel", "store"],
-            "measures": [{"name": "gmv", "aggregation": "SUM"}],
-            "period": "day",
-        },
-    },
-    {
-        "code": "sales_e2e_ordercnt_day",
-        "name": "E2E订单量",
-        "domain": "sales",
-        "type": "atomic",
-        "unit": "cnt",
+        "unit": "人次",
         "aggregation": "COUNT",
         "time_semantics": "PERIOD",
         "freshness": "T1",
         "dw_layer": "DWS",
-        "metric_tier": "T2",
-        # OneData 原子层：引用逻辑度量（订单数），不绑物理表
-        "measure_id_code": "sales_order_cnt",
+        "metric_tier": "T1",
+        # OneData 原子层：引用逻辑度量（门诊挂号人次），不绑物理表
+        "measure_id_code": "outp_register_cnt",
         "period": "day",
         "definition_json": {
             "sql": (
-                "SELECT COUNT(order_id) AS order_cnt, channel, dt "
-                "FROM ods_e2e_order GROUP BY channel, dt"
+                "SELECT COUNT(register_id) AS register_cnt, department_id, dt "
+                "FROM ods_his_register GROUP BY department_id, dt"
             ),
-            "source_tables": ["ods_e2e_order"],
-            "dimensions": ["channel"],
-            "measures": [{"name": "order_cnt", "aggregation": "COUNT"}],
+            "source_tables": ["ods_his_register"],
+            "dimensions": ["department_id", "dt"],
+            "measures": [{"name": "register_cnt", "aggregation": "COUNT"}],
             "period": "day",
         },
     },
     {
-        "code": "user_e2e_activeuser_day",
-        "name": "E2E活跃用户数",
-        "domain": "user",
+        "code": "outp_e2e_visit_day",
+        "name": "门诊就诊人次",
+        "domain": "outpatient",
         "type": "atomic",
-        "unit": "cnt",
+        "unit": "人次",
         "aggregation": "COUNT_DISTINCT",
         "time_semantics": "PERIOD",
         "freshness": "T1",
         "dw_layer": "DWS",
         "metric_tier": "T1",
-        # OneData 原子层：引用逻辑度量（活跃用户数），不绑物理表
-        "measure_id_code": "user_active_user_cnt",
+        # OneData 原子层：引用逻辑度量（门诊就诊人次），不绑物理表
+        "measure_id_code": "outp_visit_cnt",
         "period": "day",
         "definition_json": {
             "sql": (
-                "SELECT COUNT(DISTINCT user_id) AS active_user, dt FROM ods_e2e_user "
-                "WHERE is_active = 1 GROUP BY dt"
+                "SELECT COUNT(DISTINCT visit_id) AS visit_cnt, dept_id, dt "
+                "FROM ods_his_receipt WHERE delete_flag = 0 GROUP BY dept_id, dt"
             ),
-            "source_tables": ["ods_e2e_user"],
-            "dimensions": ["dt"],
-            "measures": [{"name": "active_user", "aggregation": "COUNT_DISTINCT"}],
+            "source_tables": ["ods_his_receipt"],
+            "dimensions": ["dept_id", "dt"],
+            "measures": [{"name": "visit_cnt", "aggregation": "COUNT_DISTINCT"}],
             "period": "day",
         },
     },
     {
-        "code": "user_e2e_piiuser_day",
-        "name": "E2E用户电话留存指标",
-        "domain": "user",
+        "code": "outp_e2e_fee_day",
+        "name": "门诊收费金额",
+        "domain": "medical_fee",
         "type": "atomic",
-        "unit": "cnt",
+        "unit": "CNY",
+        "aggregation": "SUM",
+        "time_semantics": "PERIOD",
+        "freshness": "T1",
+        "dw_layer": "DWS",
+        "metric_tier": "T1",
+        # OneData 原子层：引用逻辑度量（门诊收费金额），不绑物理表
+        "measure_id_code": "outp_fee_amount",
+        "period": "day",
+        "definition_json": {
+            "sql": (
+                "SELECT SUM(total_fee) AS fee, dept_id, dt FROM ods_his_receipt "
+                "WHERE delete_flag = 0 GROUP BY dept_id, dt"
+            ),
+            "source_tables": ["ods_his_receipt"],
+            "dimensions": ["dept_id", "dt"],
+            "measures": [{"name": "fee", "aggregation": "SUM"}],
+            "period": "day",
+        },
+    },
+    {
+        "code": "outp_e2e_drugfee_day",
+        "name": "门诊药品费用",
+        "domain": "medication",
+        "type": "atomic",
+        "unit": "CNY",
+        "aggregation": "SUM",
+        "time_semantics": "PERIOD",
+        "freshness": "T1",
+        "dw_layer": "DWS",
+        "metric_tier": "T2",
+        # OneData 原子层：引用逻辑度量（门诊药品费用），不绑物理表
+        "measure_id_code": "outp_drug_fee_amount",
+        "period": "day",
+        "definition_json": {
+            "sql": (
+                "SELECT SUM(drug_fee) AS drug_fee, dt FROM ods_his_receipt "
+                "WHERE delete_flag = 0 GROUP BY dt"
+            ),
+            "source_tables": ["ods_his_receipt"],
+            "dimensions": ["dt"],
+            "measures": [{"name": "drug_fee", "aggregation": "SUM"}],
+            "period": "day",
+        },
+    },
+    {
+        "code": "outp_e2e_prescription_day",
+        "name": "门诊处方数",
+        "domain": "medication",
+        "type": "atomic",
+        "unit": "笔",
+        "aggregation": "COUNT",
+        "time_semantics": "PERIOD",
+        "freshness": "T1",
+        "dw_layer": "DWS",
+        "metric_tier": "T1",
+        # OneData 原子层：引用逻辑度量（门诊处方数），不绑物理表
+        "measure_id_code": "outp_prescription_cnt",
+        "period": "day",
+        "definition_json": {
+            "sql": (
+                "SELECT COUNT(DISTINCT prescription_id) AS prescription_cnt, doctor_id, dt "
+                "FROM ods_his_prescription GROUP BY doctor_id, dt"
+            ),
+            "source_tables": ["ods_his_prescription"],
+            "dimensions": ["doctor_id", "dt"],
+            "measures": [{"name": "prescription_cnt", "aggregation": "COUNT"}],
+            "period": "day",
+        },
+    },
+    {
+        "code": "outp_e2e_piipatient_day",
+        "name": "门诊患者电话留存指标",
+        "domain": "patient",
+        "type": "atomic",
+        "unit": "人",
         "aggregation": "COUNT_DISTINCT",
         "time_semantics": "PERIOD",
         "freshness": "T1",
         "dw_layer": "DWS",
         "metric_tier": "T3",
-        # OneData 原子层：引用逻辑度量（PII 用户数），不绑物理表
-        "measure_id_code": "user_pii_user_cnt",
+        # OneData 原子层：引用逻辑度量（门诊挂号人次），不绑物理表
+        "measure_id_code": "outp_register_cnt",
         "period": "day",
         "definition_json": {
-            "sql": "SELECT COUNT(DISTINCT user_id) AS pii_user, dt FROM ods_e2e_user GROUP BY dt",
-            "source_tables": ["ods_e2e_user"],
+            "sql": (
+                "SELECT COUNT(DISTINCT patient_id) AS piipatient, dt "
+                "FROM ods_his_register GROUP BY dt"
+            ),
+            "source_tables": ["ods_his_register"],
             "dimensions": ["dt"],
-            "measures": [{"name": "pii_user", "aggregation": "COUNT_DISTINCT"}],
-            "source_fields": [{"name": "phone", "pii": True}],
+            "measures": [{"name": "piipatient", "aggregation": "COUNT_DISTINCT"}],
+            "source_fields": [{"name": "patient_phone", "pii": True}],
             "period": "day",
         },
     },
     {
-        "code": "sales_e2e_deprecated_day",
-        "name": "E2E待废弃指标",
-        "domain": "sales",
+        "code": "outp_e2e_deprecated_day",
+        "name": "门诊待废弃指标",
+        "domain": "medical_fee",
         "type": "atomic",
         "unit": "CNY",
         "aggregation": "SUM",
@@ -212,21 +333,46 @@ METRICS: list[dict[str, Any]] = [
         "freshness": "T1",
         "dw_layer": "DWS",
         "metric_tier": "T3",
-        # OneData 原子层：引用逻辑度量（支付金额），不绑物理表
-        "measure_id_code": "sales_payment_amount",
+        # OneData 原子层：引用逻辑度量（门诊收费金额），不绑物理表
+        "measure_id_code": "outp_fee_amount",
         "period": "day",
         "definition_json": {
-            "sql": "SELECT amount, dt FROM ods_e2e_order",
-            "source_tables": ["ods_e2e_order"],
+            "sql": "SELECT total_fee, dt FROM ods_his_receipt",
+            "source_tables": ["ods_his_receipt"],
             "dimensions": ["dt"],
-            "measures": [{"name": "amount", "aggregation": "SUM"}],
+            "measures": [{"name": "total_fee", "aggregation": "SUM"}],
             "period": "day",
         },
     },
     {
-        "code": "sales_e2e_unitprice_day",
-        "name": "E2E客单价（派生）",
-        "domain": "sales",
+        "code": "yb_e2e_settle_day",
+        "name": "门诊医保结算金额",
+        "domain": "medical_insurance",
+        "type": "atomic",
+        "unit": "CNY",
+        "aggregation": "SUM",
+        "time_semantics": "PERIOD",
+        "freshness": "T1",
+        "dw_layer": "DWS",
+        "metric_tier": "T1",
+        # OneData 原子层：引用逻辑度量（门诊医保结算金额），不绑物理表
+        "measure_id_code": "yb_settle_amount",
+        "period": "day",
+        "definition_json": {
+            "sql": (
+                "SELECT SUM(settle_amount) AS settle_amount, settle_time, dt "
+                "FROM ods_his_yb_settle WHERE delete_flag = 0 GROUP BY settle_time, dt"
+            ),
+            "source_tables": ["ods_his_yb_settle"],
+            "dimensions": ["settle_time", "dt"],
+            "measures": [{"name": "settle_amount", "aggregation": "SUM"}],
+            "period": "day",
+        },
+    },
+    {
+        "code": "outp_e2e_avgfee_day",
+        "name": "次均门诊费用（派生）",
+        "domain": "medical_fee",
         "type": "derived",
         "unit": "CNY",
         "aggregation": "AVG",
@@ -236,31 +382,34 @@ METRICS: list[dict[str, Any]] = [
         "metric_tier": "T1",
         # OneData 挂载层：派生指标挂载数据集（源表/列/粒度/周期/域），granularity 由 service 从 mount 回填
         "mount": {
-            "source_table": "ads_sales_e2e_gmv_day",
-            "source_column": "unit_price",
+            "source_table": "ads_outp_e2e_fee_day",
+            "source_column": "avg_fee",
             "granularity": "day",
             "default_period": "day",
-            "domain": "sales",
+            "domain": "medical_fee",
         },
         "period": "day",
         "definition_json": {
-            "sql": "SELECT gmv / NULLIF(order_cnt, 0) AS unit_price, dt FROM ads_sales_e2e_gmv_day",
-            "source_tables": ["ads_sales_e2e_gmv_day"],
+            "sql": (
+                "SELECT fee / NULLIF(visit_cnt, 0) AS avg_fee, dt "
+                "FROM ads_outp_e2e_fee_day"
+            ),
+            "source_tables": ["ads_outp_e2e_fee_day"],
             "dimensions": ["dt"],
-            "measures": [{"name": "unit_price", "aggregation": "AVG"}],
-            "dependencies": ["sales_e2e_gmv_day", "sales_e2e_ordercnt_day"],
+            "measures": [{"name": "avg_fee", "aggregation": "AVG"}],
+            "dependencies": ["outp_e2e_fee_day", "outp_e2e_visit_day"],
             "period": "day",
         },
     },
 ]
 
 # 口径相同但编码不同的一对指标 → 稳定触发 same_def_diff_name 软冲突
-CONFLICT_DEF = "SELECT SUM(amount) AS revenue, dt FROM ods_e2e_order GROUP BY dt"
+CONFLICT_DEF = "SELECT SUM(total_fee) AS fee, dt FROM ods_his_receipt GROUP BY dt"
 CONFLICT_PAIR = [
     {
-        "code": "sales_e2e_conflicta_day",
-        "name": "E2E冲突口径A",
-        "domain": "sales",
+        "code": "outp_e2e_conflicta_day",
+        "name": "门诊冲突口径A",
+        "domain": "medical_fee",
         "type": "atomic",
         "unit": "CNY",
         "aggregation": "SUM",
@@ -268,21 +417,21 @@ CONFLICT_PAIR = [
         "freshness": "T1",
         "dw_layer": "DWS",
         "metric_tier": "T3",
-        # OneData 原子层：引用逻辑度量（支付金额），不绑物理表
-        "measure_id_code": "sales_payment_amount",
+        # OneData 原子层：引用逻辑度量（门诊收费金额），不绑物理表
+        "measure_id_code": "outp_fee_amount",
         "period": "day",
         "definition_json": {
             "sql": CONFLICT_DEF,
-            "source_tables": ["ods_e2e_order"],
+            "source_tables": ["ods_his_receipt"],
             "dimensions": ["dt"],
-            "measures": [{"name": "amount", "aggregation": "SUM"}],
+            "measures": [{"name": "fee", "aggregation": "SUM"}],
             "period": "day",
         },
     },
     {
-        "code": "sales_e2e_conflictb_day",
-        "name": "E2E冲突口径B",
-        "domain": "sales",
+        "code": "outp_e2e_conflictb_day",
+        "name": "门诊冲突口径B",
+        "domain": "medical_fee",
         "type": "atomic",
         "unit": "CNY",
         "aggregation": "SUM",
@@ -290,14 +439,14 @@ CONFLICT_PAIR = [
         "freshness": "T1",
         "dw_layer": "DWS",
         "metric_tier": "T3",
-        # OneData 原子层：引用逻辑度量（支付金额），不绑物理表
-        "measure_id_code": "sales_payment_amount",
+        # OneData 原子层：引用逻辑度量（门诊收费金额），不绑物理表
+        "measure_id_code": "outp_fee_amount",
         "period": "day",
         "definition_json": {
             "sql": CONFLICT_DEF,
-            "source_tables": ["ods_e2e_order"],
+            "source_tables": ["ods_his_receipt"],
             "dimensions": ["dt"],
-            "measures": [{"name": "amount", "aggregation": "SUM"}],
+            "measures": [{"name": "fee", "aggregation": "SUM"}],
             "period": "day",
         },
     },
@@ -467,6 +616,10 @@ def ensure_measure(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
         body["default_unit"] = spec["default_unit"]
     if spec.get("default_decimal_places") is not None:
         body["default_decimal_places"] = spec["default_decimal_places"]
+    if spec.get("category") is not None:
+        body["category"] = spec["category"]
+    if spec.get("stat_caliber") is not None:
+        body["stat_caliber"] = spec["stat_caliber"]
     created = api.post("/measure-catalogs", body)
     print(f"[measure] 创建 {code} id={created.get('id')} status={created.get('status')}")
     # 发布逻辑度量（DRAFT→PUBLISHED）
@@ -565,13 +718,16 @@ def _backfill_legacy_metric_measures(measure_ids: dict[str, int]) -> None:
 def legacy_metric_measure_map() -> dict[str, str]:
     """存量 E2E 原子指标 → 逻辑度量编码（与 METRICS spec 的 measure_id_code 一致）。"""
     return {
-        "sales_e2e_gmv_day": "sales_payment_amount",
-        "sales_e2e_ordercnt_day": "sales_order_cnt",
-        "user_e2e_activeuser_day": "user_active_user_cnt",
-        "user_e2e_piiuser_day": "user_pii_user_cnt",
-        "sales_e2e_deprecated_day": "sales_payment_amount",
-        "sales_e2e_conflicta_day": "sales_payment_amount",
-        "sales_e2e_conflictb_day": "sales_payment_amount",
+        "outp_e2e_register_day": "outp_register_cnt",
+        "outp_e2e_visit_day": "outp_visit_cnt",
+        "outp_e2e_fee_day": "outp_fee_amount",
+        "outp_e2e_drugfee_day": "outp_drug_fee_amount",
+        "outp_e2e_prescription_day": "outp_prescription_cnt",
+        "outp_e2e_piipatient_day": "outp_register_cnt",
+        "outp_e2e_deprecated_day": "outp_fee_amount",
+        "yb_e2e_settle_day": "yb_settle_amount",
+        "outp_e2e_conflicta_day": "outp_fee_amount",
+        "outp_e2e_conflictb_day": "outp_fee_amount",
     }
 
 
@@ -616,74 +772,125 @@ def _pii_review(api: Api, code: str, *, columns: list[str]) -> None:
 # 3. 数据源 + 目录（手动注册元数据，不连真实源库）
 # ---------------------------------------------------------------------------
 DATA_SOURCE = {
-    "name": "E2E MySQL 业务库",
+    "name": "HIS 门诊业务库",
     "source_type": "mysql",
     "connection_config": {
         "host": "127.0.0.1",
         "port": 3306,
         "user": "e2e",
         "password": "e2e",
-        "database": "e2e_biz",
+        "database": "his_outpatient",
     },
-    "domain": "sales",
+    "domain": "outpatient",
 }
 
 CATALOGS: list[dict[str, Any]] = [
     {
-        "entity_name": "ods_e2e_order",
+        "entity_name": "ods_his_register",
         "entity_type": "TABLE",
         "schema_json": {
             "columns": [
-                {
-                    "name": "order_id",
-                    "type": "bigint",
-                    "nullable": False,
-                    "comment": "订单ID",
-                },
-                {
-                    "name": "order_amount",
-                    "type": "decimal",
-                    "nullable": False,
-                    "comment": "订单金额",
-                },
-                {"name": "channel", "type": "string", "nullable": False, "comment": "渠道"},
-                {"name": "store", "type": "string", "nullable": False, "comment": "门店"},
+                {"name": "register_id", "type": "bigint", "nullable": False, "comment": "挂号单号"},
+                {"name": "patient_id", "type": "bigint", "nullable": False, "comment": "患者ID"},
+                {"name": "patient_phone", "type": "string", "nullable": False, "comment": "患者手机号"},
+                {"name": "doctor_id", "type": "bigint", "nullable": False, "comment": "医生ID"},
+                {"name": "department_id", "type": "bigint", "nullable": False, "comment": "科室ID"},
+                {"name": "register_time", "type": "datetime", "nullable": False, "comment": "挂号时间"},
+                {"name": "register_fee", "type": "decimal", "nullable": False, "comment": "挂号费"},
+                {"name": "delete_flag", "type": "tinyint", "nullable": False, "comment": "删除标记"},
                 {"name": "dt", "type": "date", "nullable": False, "comment": "日期"},
             ]
         },
-        "etl_sql": "SELECT * FROM source.ods_order",
+        "etl_sql": "SELECT * FROM source.ods_register",
     },
     {
-        "entity_name": "ods_e2e_user",
+        "entity_name": "ods_his_receipt",
         "entity_type": "TABLE",
         "schema_json": {
             "columns": [
-                {"name": "user_id", "type": "bigint", "nullable": False, "comment": "用户ID"},
-                {"name": "phone", "type": "string", "nullable": False, "comment": "手机号"},
-                {"name": "id_card", "type": "string", "nullable": False, "comment": "身份证号"},
-                {"name": "is_active", "type": "tinyint", "nullable": False, "comment": "是否活跃"},
+                {"name": "receipt_id", "type": "bigint", "nullable": False, "comment": "收费单号"},
+                {"name": "visit_id", "type": "bigint", "nullable": False, "comment": "就诊号"},
+                {"name": "patient_id", "type": "bigint", "nullable": False, "comment": "患者ID"},
+                {"name": "dept_id", "type": "bigint", "nullable": False, "comment": "科室ID"},
+                {"name": "receipt_time", "type": "datetime", "nullable": False, "comment": "收费时间"},
+                {"name": "total_fee", "type": "decimal", "nullable": False, "comment": "收费总额"},
+                {"name": "drug_fee", "type": "decimal", "nullable": False, "comment": "药品费用"},
+                {"name": "check_fee", "type": "decimal", "nullable": False, "comment": "检查费用"},
+                {"name": "lab_fee", "type": "decimal", "nullable": False, "comment": "检验费用"},
+                {"name": "delete_flag", "type": "tinyint", "nullable": False, "comment": "删除标记"},
+                {"name": "dt", "type": "date", "nullable": False, "comment": "日期"},
+            ]
+        },
+        "etl_sql": "SELECT * FROM source.ods_receipt",
+    },
+    {
+        "entity_name": "ods_his_prescription",
+        "entity_type": "TABLE",
+        "schema_json": {
+            "columns": [
+                {"name": "prescription_id", "type": "bigint", "nullable": False, "comment": "处方单号"},
+                {"name": "patient_id", "type": "bigint", "nullable": False, "comment": "患者ID"},
+                {"name": "doctor_id", "type": "bigint", "nullable": False, "comment": "开方医生ID"},
+                {"name": "prescription_time", "type": "datetime", "nullable": False, "comment": "开方时间"},
+                {"name": "drug_id", "type": "bigint", "nullable": False, "comment": "药品ID"},
+                {"name": "drug_name", "type": "string", "nullable": False, "comment": "药品名称"},
+                {"name": "drug_fee", "type": "decimal", "nullable": False, "comment": "药品金额"},
+                {"name": "is_antibiotic", "type": "tinyint", "nullable": False, "comment": "是否抗菌药物"},
+                {"name": "dt", "type": "date", "nullable": False, "comment": "日期"},
+            ]
+        },
+        "etl_sql": "SELECT * FROM source.ods_prescription",
+    },
+    {
+        "entity_name": "ods_his_drug",
+        "entity_type": "TABLE",
+        "schema_json": {
+            "columns": [
+                {"name": "drug_id", "type": "bigint", "nullable": False, "comment": "药品ID"},
+                {"name": "drug_name", "type": "string", "nullable": False, "comment": "药品名称"},
+                {"name": "drug_code", "type": "string", "nullable": False, "comment": "药品编码"},
+                {"name": "drug_type", "type": "string", "nullable": False, "comment": "药品分类"},
+                {"name": "antibiotic_flag", "type": "tinyint", "nullable": False, "comment": "是否抗菌药"},
+            ]
+        },
+    },
+    {
+        "entity_name": "ods_his_yb_settle",
+        "entity_type": "TABLE",
+        "schema_json": {
+            "columns": [
+                {"name": "settle_id", "type": "bigint", "nullable": False, "comment": "结算单号"},
+                {"name": "receipt_id", "type": "bigint", "nullable": False, "comment": "收费单号"},
+                {"name": "patient_id", "type": "bigint", "nullable": False, "comment": "患者ID"},
+                {"name": "settle_time", "type": "datetime", "nullable": False, "comment": "结算时间"},
+                {"name": "settle_amount", "type": "decimal", "nullable": False, "comment": "结算金额"},
+                {"name": "yb_pay", "type": "decimal", "nullable": False, "comment": "医保支付"},
+                {"name": "self_pay", "type": "decimal", "nullable": False, "comment": "个人自付"},
+                {"name": "delete_flag", "type": "tinyint", "nullable": False, "comment": "删除标记"},
                 {"name": "dt", "type": "date", "nullable": False, "comment": "日期"},
             ]
         },
     },
     {
-        "entity_name": "dwd_e2e_order",
+        "entity_name": "dwd_his_receipt",
         "entity_type": "TABLE",
         "schema_json": {
             "columns": [
-                {"name": "order_id", "type": "bigint", "nullable": False, "comment": "订单ID"},
-                {"name": "gmv", "type": "decimal", "nullable": False, "comment": "GMV"},
-                {"name": "channel", "type": "string", "nullable": False, "comment": "渠道"},
+                {"name": "receipt_id", "type": "bigint", "nullable": False, "comment": "收费单号"},
+                {"name": "visit_id", "type": "bigint", "nullable": False, "comment": "就诊号"},
+                {"name": "total_fee", "type": "decimal", "nullable": False, "comment": "收费总额"},
+                {"name": "drug_fee", "type": "decimal", "nullable": False, "comment": "药品费用"},
+                {"name": "dept_id", "type": "bigint", "nullable": False, "comment": "科室ID"},
                 {"name": "dt", "type": "date", "nullable": False, "comment": "日期"},
             ]
         },
     },
     {
-        "entity_name": "ads_sales_e2e_gmv_day",
+        "entity_name": "ads_outp_e2e_fee_day",
         "entity_type": "TABLE",
         "schema_json": {
             "columns": [
-                {"name": "unit_price", "type": "decimal", "nullable": False, "comment": "客单价"},
+                {"name": "avg_fee", "type": "decimal", "nullable": False, "comment": "次均门诊费用"},
                 {"name": "dt", "type": "date", "nullable": False, "comment": "日期"},
             ]
         },
@@ -723,19 +930,21 @@ def ensure_datasource(api: Api) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 LINEAGE_SQLS = [
     (
-        "INSERT INTO dwd_e2e_order SELECT o.order_id, o.order_amount AS gmv, o.channel, o.dt "
-        "FROM ods_e2e_order o JOIN ods_e2e_user u ON o.order_id = u.user_id"
+        "INSERT INTO dwd_his_receipt "
+        "SELECT r.receipt_id, r.visit_id, r.total_fee, r.drug_fee, r.dept_id, r.dt "
+        "FROM ods_his_receipt r WHERE r.delete_flag = 0"
     ),
     (
-        "INSERT INTO ads_sales_e2e_gmv_day SELECT gmv / NULLIF(cnt, 0) AS unit_price, dt "
-        "FROM (SELECT dt, SUM(order_amount) AS gmv, COUNT(order_id) AS cnt "
-        "      FROM dwd_e2e_order GROUP BY dt) t"
+        "INSERT INTO ads_outp_e2e_fee_day "
+        "SELECT fee / NULLIF(visit_cnt, 0) AS avg_fee, dt "
+        "FROM (SELECT dt, SUM(total_fee) AS fee, COUNT(DISTINCT visit_id) AS visit_cnt "
+        "      FROM dwd_his_receipt GROUP BY dt) t"
     ),
 ]
 
 
 def seed_lineage(api: Api) -> None:
-    edges = api.get("/lineage/edges?node=table%3Aods_e2e_order&page_size=50")
+    edges = api.get("/lineage/edges?node=table%3Aods_his_receipt&page_size=50")
     if (edges.get("items") or []):
         print("[lineage] 血缘边已存在，跳过")
         return
@@ -761,22 +970,22 @@ def seed_conflicts(api: Api, metric_ids: dict[str, int]) -> None:
         return
     # 软冲突：不同编码 + 相同 definition → same_def_diff_name（200 正常返回）
     cand_b = {
-        "metric_code": "sales_e2e_conflictb_day",
-        "domain": "sales",
+        "metric_code": "outp_e2e_conflictb_day",
+        "domain": "medical_fee",
         "definition": CONFLICT_DEF,
-        "source_tables": ["ods_e2e_order"],
+        "source_tables": ["ods_his_receipt"],
         "has_pii": False,
         "pii_authorized": False,
-        "metric_id": metric_ids.get("sales_e2e_conflictb_day"),
+        "metric_id": metric_ids.get("outp_e2e_conflictb_day"),
     }
     exist_a = {
-        "metric_code": "sales_e2e_conflicta_day",
-        "domain": "sales",
+        "metric_code": "outp_e2e_conflicta_day",
+        "domain": "medical_fee",
         "definition": CONFLICT_DEF,
-        "source_tables": ["ods_e2e_order"],
+        "source_tables": ["ods_his_receipt"],
         "has_pii": False,
         "pii_authorized": False,
-        "metric_id": metric_ids.get("sales_e2e_conflicta_day"),
+        "metric_id": metric_ids.get("outp_e2e_conflicta_day"),
     }
     resp = api.post("/conflicts/check", {"candidate": cand_b, "existing": [exist_a]})
     for d in resp.get("detections") or []:
@@ -788,23 +997,23 @@ def seed_conflicts(api: Api, metric_ids: dict[str, int]) -> None:
             "/conflicts/check",
             {
                 "candidate": {
-                    "metric_code": "sales_e2e_conflicta_day",
-                    "domain": "sales",
+                    "metric_code": "outp_e2e_conflicta_day",
+                    "domain": "medical_fee",
                     "definition": CONFLICT_DEF,
-                    "source_tables": ["ods_e2e_order"],
+                    "source_tables": ["ods_his_receipt"],
                     "has_pii": False,
                     "pii_authorized": False,
-                    "metric_id": metric_ids.get("sales_e2e_conflicta_day"),
+                    "metric_id": metric_ids.get("outp_e2e_conflicta_day"),
                 },
                 "existing": [
                     {
-                        "metric_code": "sales_e2e_conflicta_day",
-                        "domain": "finance",
+                        "metric_code": "outp_e2e_conflicta_day",
+                        "domain": "medical_insurance",
                         "definition": (
-                            "SELECT SUM(amount) FROM completely_different_table "
-                            "GROUP BY region"
+                            "SELECT SUM(settle_amount) FROM ods_his_yb_settle "
+                            "GROUP BY settle_time"
                         ),
-                        "source_tables": ["other_table"],
+                        "source_tables": ["ods_his_yb_settle"],
                         "has_pii": False,
                         "pii_authorized": False,
                     }
@@ -821,8 +1030,8 @@ def seed_conflicts(api: Api, metric_ids: dict[str, int]) -> None:
 # 6. 质量中心
 # ---------------------------------------------------------------------------
 def seed_quality(api: Api, metric_ids: dict[str, int]) -> None:
-    gmv_id = metric_ids["sales_e2e_gmv_day"]
-    rules = api.get(f"/quality/rules?metric_id={gmv_id}&page_size=50")
+    fee_id = metric_ids["outp_e2e_fee_day"]
+    rules = api.get(f"/quality/rules?metric_id={fee_id}&page_size=50")
     rule = None
     for r in (rules.get("items") or []):
         if r.get("rule_type") == "COMPLETENESS":
@@ -832,7 +1041,7 @@ def seed_quality(api: Api, metric_ids: dict[str, int]) -> None:
         rule = api.post(
             "/quality/rules",
             {
-                "metric_id": gmv_id,
+                "metric_id": fee_id,
                 "rule_type": "COMPLETENESS",
                 "threshold": {"op": ">=", "value": 90},
                 "rule_mode": "static",
@@ -848,8 +1057,8 @@ def seed_quality(api: Api, metric_ids: dict[str, int]) -> None:
     api.post(
         "/quality/observe",
         {
-            "metric_id": gmv_id,
-            "metric_code": "sales_e2e_gmv_day",
+            "metric_id": fee_id,
+            "metric_code": "outp_e2e_fee_day",
             "value": 95.5,
             "obs_time": datetime.now().isoformat(),
         },
@@ -858,7 +1067,7 @@ def seed_quality(api: Api, metric_ids: dict[str, int]) -> None:
     try:
         detect = api.post(
             "/quality/events/detect",
-            {"metric_id": gmv_id, "rule_type": "COMPLETENESS", "obs_value": 50.0},
+            {"metric_id": fee_id, "rule_type": "COMPLETENESS", "obs_value": 50.0},
         )
         if detect:
             print(
@@ -881,14 +1090,14 @@ def seed_quality(api: Api, metric_ids: dict[str, int]) -> None:
         print(f"[quality] 事件 {eid} 闭环 ACK->RESOLVED->CLOSED")
 
     # 基准 + 对账
-    benchs = api.get("/quality/benchmarks?metric_code=sales_e2e_gmv_day&page_size=50")
+    benchs = api.get("/quality/benchmarks?metric_code=outp_e2e_fee_day&page_size=50")
     bench = (benchs.get("items") or [None])[0]
     if bench is None:
         bench = api.post(
             "/quality/benchmarks/import",
             {
-                "source_id": "e2e_bench_2026",
-                "metric_code": "sales_e2e_gmv_day",
+                "source_id": "his_bench_2026",
+                "metric_code": "outp_e2e_fee_day",
                 "bench_date": date.today().isoformat(),
                 "bench_value": 1000.0,
                 "provider": "e2e_seed",
@@ -921,12 +1130,12 @@ def seed_glossary(api: Api) -> None:
     terms = api.get("/terms?page_size=50")
     existing = {t.get("name") for t in (terms.get("items") or [])}
     specs = [
-        {"name": "E2E术语-日活用户", "definition": "每日活跃的去重用户数，用于衡量用户活跃度。",
-         "domain": "user", "synonyms": ["DAU", "日活"]},
-        {"name": "E2E术语-日活用户", "definition": "与上一条口径不同但名称相同，用于触发同名冲突。",
-         "domain": "user", "synonyms": ["DAU", "日活"]},
-        {"name": "E2E术语-销售额", "definition": "一定周期内成交订单金额的总和，衡量销售规模。",
-         "domain": "sales", "synonyms": ["GMV", "成交额"]},
+        {"name": "E2E术语-门诊挂号人次", "definition": "门诊挂号记录数，衡量门诊接诊规模。",
+         "domain": "outpatient", "synonyms": ["挂号量", "门诊量"]},
+        {"name": "E2E术语-门诊挂号人次", "definition": "与上一条口径不同但名称相同，用于触发同名冲突。",
+         "domain": "outpatient", "synonyms": ["挂号量", "门诊量"]},
+        {"name": "E2E术语-门诊收费金额", "definition": "一定周期内门诊收费总额，衡量门诊收入规模。",
+         "domain": "medical_fee", "synonyms": ["门诊收入", "门诊费用"]},
     ]
     for s in specs:
         if s["name"] in existing:
@@ -938,7 +1147,7 @@ def seed_glossary(api: Api) -> None:
             f"status={t.get('status')}"
         )
         # 发布一个正常术语（供推荐/搜索）
-        if s["name"].endswith("销售额"):
+        if s["name"].endswith("收费金额"):
             api.post(f"/terms/{t.get('term_code')}/submit")
             print(f"[glossary] 发布术语 {t.get('name')}")
 
@@ -948,14 +1157,14 @@ def seed_glossary(api: Api) -> None:
 # ---------------------------------------------------------------------------
 def seed_dimensions(api: Api, metric_ids: dict[str, int]) -> None:
     # 按名称查找（code 为自动生成的域_名称_slug，不硬编码）
-    dims = api.get("/dimensions?keyword=%E6%B8%A0%E9%81%93&page_size=50")
+    dims = api.get("/dimensions?keyword=%E7%A7%91%E5%AE%A4&page_size=50")
     dim = None
     for d in (dims.get("items") or []):
-        if d.get("name") == "E2E渠道维度":
+        if d.get("name") == "E2E科室维度":
             dim = d
             break
     if dim is None:
-        dim = api.post("/dimensions", {"name": "E2E渠道维度", "domain": "sales", "type": "SCD1"})
+        dim = api.post("/dimensions", {"name": "E2E科室维度", "domain": "outpatient", "type": "SCD1"})
         print(f"[dimension] 创建维度 {dim.get('dim_code')}")
     else:
         print(f"[dimension] 维度已存在 {dim.get('dim_code')}")
@@ -963,46 +1172,46 @@ def seed_dimensions(api: Api, metric_ids: dict[str, int]) -> None:
     # 确保 3 个成员（缺则补）
     members = api.get(f"/dimensions/{dim_code}/members")
     existing_members = {m.get("member_name") for m in (members.get("items") or [])}
-    for name in ["线上", "线下", "小程序"]:
+    for name in ["内科", "外科", "儿科"]:
         if name in existing_members:
             continue
         api.post(
             f"/dimensions/{dim_code}/members",
             {"dim_code": dim_code, "member_name": name},
         )
-    print(f"[dimension] 确保成员 线上/线下/小程序 (已有 {len(existing_members)})")
+    print(f"[dimension] 确保成员 内科/外科/儿科 (已有 {len(existing_members)})")
     # 绑定指标（role 枚举: PARTITION/SPLICE/FILTER）——幂等：先查已绑定
-    metric_id = metric_ids["sales_e2e_gmv_day"]
+    metric_id = metric_ids["outp_e2e_fee_day"]
     bound = api.get(f"/dimensions/{metric_id}/metric-dimensions") or {}
     already = any(b.get("dim_code") == dim_code for b in (bound.get("items") or []))
     if already:
-        print("[dimension] 已绑定指标 sales_e2e_gmv_day，跳过")
+        print("[dimension] 已绑定指标 outp_e2e_fee_day，跳过")
     else:
         api.post(
             f"/dimensions/{dim_code}/metrics",
             {"metric_id": metric_id, "dim_code": dim_code, "role": "FILTER"},
         )
-        print("[dimension] 绑定指标 sales_e2e_gmv_day")
+        print("[dimension] 绑定指标 outp_e2e_fee_day")
 
 
 # ---------------------------------------------------------------------------
 # 9. 治理：授权 / PII 复核 / 被遗忘权
 # ---------------------------------------------------------------------------
 def seed_governance(api: Api, user_ids: dict[str, int], metric_ids: dict[str, int]) -> None:
-    # 授权：给 e2e_analyst 授 sales 域读权限 + sales_e2e_gmv_day 白名单
+    # 授权：给 e2e_analyst 授 outpatient 域读权限 + outp_e2e_fee_day 白名单
     grants = api.get("/grants?user_id={}&page_size=50".format(user_ids["e2e_analyst"]))
     if not (grants.get("items") or []):
         api.post(
             "/grants",
             {
                 "user_id": user_ids["e2e_analyst"],
-                "domain": "sales",
-                "metric_whitelist": ["sales_e2e_gmv_day", "sales_e2e_ordercnt_day"],
+                "domain": "outpatient",
+                "metric_whitelist": ["outp_e2e_fee_day", "outp_e2e_visit_day"],
                 "grant_type": "READ",
                 "reason": "e2e 种子数据授权",
             },
         )
-        print("[governance] 授予 e2e_analyst sales 域 READ")
+        print("[governance] 授予 e2e_analyst outpatient 域 READ")
     else:
         print("[governance] 授权已存在")
 
@@ -1012,11 +1221,11 @@ def seed_governance(api: Api, user_ids: dict[str, int], metric_ids: dict[str, in
         {
             "user_id": user_ids["e2e_analyst"],
             "action": "read",
-            "domain": "sales",
-            "metric_code": "sales_e2e_gmv_day",
+            "domain": "outpatient",
+            "metric_code": "outp_e2e_fee_day",
         },
     )
-    print(f"[governance] PDP check e2e_analyst read sales_e2e_gmv_day -> {check.get('allow')}")
+    print(f"[governance] PDP check e2e_analyst read outp_e2e_fee_day -> {check.get('allow')}")
 
     # 被遗忘权：先让 subject 用户产生审计行，再匿名化
     analyst_token = login(api.base, "e2e_analyst", "changeme123")
@@ -1053,10 +1262,10 @@ def seed_notify(api: Api) -> None:
     notifs = api.get("/notify/notifications?page_size=5")
     if not (notifs.get("items") or []):
         for event_type, payload in [
-            ("quality.anomaly", {"metric_code": "sales_e2e_gmv_day", "message": "完整率低于阈值"}),
+            ("quality.anomaly", {"metric_code": "outp_e2e_fee_day", "message": "完整率低于阈值"}),
             (
                 "conflict_open",
-                {"metric_code": "sales_e2e_conflicta_day", "message": "检测到口径冲突"},
+                {"metric_code": "outp_e2e_conflicta_day", "message": "检测到口径冲突"},
             ),
         ]:
             resp = api.post(
@@ -1083,7 +1292,7 @@ def seed_observability(api: Api) -> None:
     feedbacks = api.get("/observability/feedback?limit=50")
     fb = None
     for f in (feedbacks.get("items") or []):
-        if f.get("target_id") == "sales_e2e_gmv_day":
+        if f.get("target_id") == "outp_e2e_fee_day":
             fb = f
             break
     if fb is None:
@@ -1091,9 +1300,9 @@ def seed_observability(api: Api) -> None:
             "/observability/feedback",
             {
                 "target_type": "metric",
-                "target_id": "sales_e2e_gmv_day",
+                "target_id": "outp_e2e_fee_day",
                 "rating": 5,
-                "comment": "e2e 反馈：指标口径清晰",
+                "comment": "e2e 反馈：门诊收费金额口径清晰",
             },
         )
         print(f"[observability] 提交反馈 id={fb.get('id') or fb.get('feedback_id')}")
@@ -1116,8 +1325,8 @@ def seed_consume(api: Api) -> None:
             {
                 "client_id": "e2e_app",
                 "secret": "e2e_secret_2026",
-                "scope_domain": "sales",
-                "metric_whitelist": ["sales_e2e_gmv_day", "sales_e2e_ordercnt_day"],
+                "scope_domain": "outpatient",
+                "metric_whitelist": ["outp_e2e_fee_day", "outp_e2e_visit_day"],
             },
         )
         print(f"[consume] 创建 API 客户端 {created.get('client_id')}")
@@ -1125,8 +1334,8 @@ def seed_consume(api: Api) -> None:
         print("[consume] API 客户端已存在")
     # 收藏
     try:
-        api.post("/consume/me/favorites", {"metric_code": "sales_e2e_gmv_day"})
-        print("[consume] 收藏 sales_e2e_gmv_day")
+        api.post("/consume/me/favorites", {"metric_code": "outp_e2e_fee_day"})
+        print("[consume] 收藏 outp_e2e_fee_day")
     except SeedError as e:
         print(f"[consume] 收藏跳过：{e}")
 
@@ -1150,7 +1359,7 @@ def seed_tracking(api: Api, metric_ids: dict[str, int]) -> None:
                 {
                     "event_type": event_type,
                     "target_type": "metric",
-                    "target_id": "sales_e2e_gmv_day",
+                    "target_id": "outp_e2e_fee_day",
                     "context": {"source": "e2e_seed"},
                 },
             )
@@ -1171,13 +1380,13 @@ SMOKE_CHECKS = [
     ("数据源", lambda a: _count(a.get("/data-sources?page_size=50"), "items") >= 1),
     ("目录表", lambda a: _count(a.get("/catalogs?entity_type=TABLE&page_size=100"), "items") >= 4),
     ("血缘边", lambda a: _count(
-        a.get("/lineage/edges?node=table%3Aods_e2e_order&page_size=100"), "items"
+        a.get("/lineage/edges?node=table%3Aods_his_receipt&page_size=100"), "items"
     ) >= 1),
     ("冲突", lambda a: _count(a.get("/conflicts?page_size=100"), "items") >= 1),
     ("质量规则", lambda a: _count(a.get("/quality/rules?page_size=100"), "items") >= 1),
     ("质量事件", lambda a: _count(a.get("/quality/events?page_size=100"), "items") >= 1),
     ("基准", lambda a: _count(
-        a.get("/quality/benchmarks?metric_code=sales_e2e_gmv_day&page_size=100"), "items"
+        a.get("/quality/benchmarks?metric_code=outp_e2e_fee_day&page_size=100"), "items"
     ) >= 1),
     ("对账记录", lambda a: _count(
         a.get("/quality/reconciliation-records?page_size=100"), "items"
@@ -1190,7 +1399,7 @@ SMOKE_CHECKS = [
     ("通知", lambda a: _count(a.get("/notify/notifications?page_size=100"), "items") >= 1),
     ("反馈", lambda a: _count(a.get("/observability/feedback?limit=50"), "items") >= 1),
     ("收藏", lambda a: len(a.get("/consume/me/favorites") or []) >= 1),
-    ("搜索命中", lambda a: _nonzero(a.get("/search?q=sales_e2e_gmv_day&limit=5"), "total")),
+    ("搜索命中", lambda a: _nonzero(a.get("/search?q=outp_e2e_fee_day&limit=5"), "total")),
 ]
 
 
@@ -1199,10 +1408,10 @@ def _count(data: dict[str, Any], key: str) -> int:
 
 
 def _first_dim_code(api: Api) -> str | None:
-    """按名称定位 E2E 渠道维度 code（code 为自动生成的域_名称_slug，不硬编码）。"""
-    dims = api.get("/dimensions?keyword=%E6%B8%A0%E9%81%93&page_size=50")
+    """按名称定位 E2E 科室维度 code（code 为自动生成的域_名称_slug，不硬编码）。"""
+    dims = api.get("/dimensions?keyword=%E7%A7%91%E5%AE%A4&page_size=50")
     for d in (dims.get("items") or []):
-        if d.get("name") == "E2E渠道维度":
+        if d.get("name") == "E2E科室维度":
             return d.get("dim_code")
     return None
 
@@ -1283,27 +1492,30 @@ def main() -> int:
         metric_ids[spec["code"]] = m.get("id") or 0
     # OneData 存量订正：旧式原子指标（measure_id 为空）补关联逻辑度量（幂等）
     _backfill_legacy_metric_measures(measure_ids)
-    # 发布：sales_e2e_gmv_day / sales_e2e_ordercnt_day / user_e2e_activeuser_day /
-    #        user_e2e_piiuser_day / sales_e2e_deprecated_day
-    publish_metric(api, "sales_e2e_gmv_day")
-    publish_metric(api, "sales_e2e_ordercnt_day")
-    publish_metric(api, "user_e2e_activeuser_day")
-    publish_metric(api, "user_e2e_piiuser_day", pii_columns=["phone"])
-    publish_metric(api, "sales_e2e_deprecated_day")
-    # 废弃 sales_e2e_deprecated_day（successor=sales_e2e_gmv_day 已发布）→ 造 DEPRECATED 状态
+    # 发布：outp_e2e_register_day / outp_e2e_visit_day / outp_e2e_fee_day /
+    #        outp_e2e_drugfee_day / outp_e2e_prescription_day / outp_e2e_piipatient_day /
+    #        outp_e2e_deprecated_day
+    publish_metric(api, "outp_e2e_register_day")
+    publish_metric(api, "outp_e2e_visit_day")
+    publish_metric(api, "outp_e2e_fee_day")
+    publish_metric(api, "outp_e2e_drugfee_day")
+    publish_metric(api, "outp_e2e_prescription_day")
+    publish_metric(api, "outp_e2e_piipatient_day", pii_columns=["patient_phone"])
+    publish_metric(api, "outp_e2e_deprecated_day")
+    # 废弃 outp_e2e_deprecated_day（successor=outp_e2e_fee_day 已发布）→ 造 DEPRECATED 状态
     try:
         dep = api.post(
-            "/metric-definitions/sales_e2e_deprecated_day/deprecate",
-            {"successor_code": "sales_e2e_gmv_day"},
+            "/metric-definitions/outp_e2e_deprecated_day/deprecate",
+            {"successor_code": "outp_e2e_fee_day"},
         )
-        print(f"[metric] sales_e2e_deprecated_day 废弃 -> {dep.get('status')}")
+        print(f"[metric] outp_e2e_deprecated_day 废弃 -> {dep.get('status')}")
     except SeedError as e:
         if "deprecat" in str(e).lower():
-            print(f"[metric] sales_e2e_deprecated_day 废弃跳过：{e}")
+            print(f"[metric] outp_e2e_deprecated_day 废弃跳过：{e}")
         else:
             raise
     # 派生指标依赖已发布指标
-    publish_metric(api, "sales_e2e_unitprice_day")
+    publish_metric(api, "outp_e2e_avgfee_day")
     # 冲突对保持 DRAFT（用于冲突列表来源），不发布
 
     print("\n===== 5. 数据源 + 目录 =====")
