@@ -14,7 +14,7 @@ import enum
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, DateTime, Enum, Index, String, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, DateTime, Enum, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.mysql import Base
@@ -184,3 +184,49 @@ class UserPreference(Base, BaseModel):
     )
 
     __table_args__ = (UniqueConstraint("user_id", "preference_key", name="uk_pref"),)
+
+
+class QueryRequesterType(enum.StrEnum):
+    """提数请求方类型（响应时效 KPI 数据源 query_log）。"""
+
+    API_CLIENT = "api_client"
+    INTERNAL = "internal"
+
+
+class QueryLog(Base, TimestampMixin):
+    """提数查询日志（TD §12.6 增强：响应时效 KPI 数据源）。
+
+    每次真实执行查询（POST /consume/query 与 POST /consume/metrics/{code}/query）后
+    best-effort 落一条：记录指标、请求方、耗时（毫秒）、结果状态，供平台响应时效统计
+    （日均请求量 / avg / p95 / p99）使用。查询耗时在 API 层计时，落库独立 try/except，
+    失败绝不阻断查询响应。
+    """
+
+    __tablename__ = "query_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    metric_code: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True, comment="被查询指标编码"
+    )
+    requester_type: Mapped[QueryRequesterType] = mapped_column(
+        Enum(QueryRequesterType, values_callable=lambda e: [m.value for m in e]),
+        nullable=False,
+        comment="请求方类型：api_client 接入方 / internal 内部用户",
+    )
+    requester_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True, comment="请求方 ID（client_id / 用户 ID）"
+    )
+    requester_name: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="请求方名称快照（client_id / 用户名）"
+    )
+    duration_ms: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="查询耗时（毫秒）"
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="结果状态：ok/error"
+    )
+    error_code: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="失败错误码（status=error 时）"
+    )
+
+    __table_args__ = (Index("ix_query_log_created", "created_at"),)

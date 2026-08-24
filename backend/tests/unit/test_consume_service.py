@@ -24,6 +24,7 @@ from app.models.consume import (
     ApiClientStatus,
     FavoriteAssetType,
     MetricValueSnapshot,
+    QueryRequesterType,
     SnapshotGeneratedBy,
 )
 from app.models.metric import Metric
@@ -1221,3 +1222,81 @@ async def test_projection_columns_supports_measures_object_array() -> None:
     sql, params = svc._build_query_sql(req, m)
     assert "`channel`, `store`, `gmv`" in sql
     assert params["metric_code"] == "gmv"
+
+
+# ---- 响应时效 KPI（P1#10）----
+
+
+def _rows_result(rows):
+    res = MagicMock()
+    res.all.return_value = rows
+    return res
+
+
+async def test_response_time_stats_aggregates_percentiles() -> None:
+    """响应时效统计：按天聚合 avg/p95/p99/max/error_count，缺失天补 0。"""
+    from datetime import timedelta
+
+    svc = _svc(await _client())
+    today = datetime.now(UTC)
+    rows = [
+        (today, 100, "ok"),
+        (today, 200, "ok"),
+        (today, 400, "error"),
+        (today - timedelta(days=1), 1000, "ok"),
+    ]
+    svc._db.execute = AsyncMock(return_value=_rows_result(rows))
+    stats = await svc.response_time_stats(days=7)
+    assert stats["days"] == 7
+    assert len(stats["items"]) == 7
+    today_item = stats["items"][-1]
+    assert today_item["count"] == 3
+    assert today_item["avg_ms"] == 233  # (100+200+400)/3
+    assert today_item["error_count"] == 1
+    assert today_item["max_ms"] == 400
+    # p95: [100,200,400] rank=1.9 -> 200 + 0.9*200 = 380
+    assert today_item["p95_ms"] == 380
+    yesterday_item = stats["items"][-2]
+    assert yesterday_item["count"] == 1
+    assert yesterday_item["avg_ms"] == 1000
+    assert stats["items"][0]["count"] == 0
+    assert stats["items"][0]["avg_ms"] == 0
+
+
+def test_percentile_interpolation() -> None:
+    """线性插值分位数边界。"""
+    svc = ConsumeService(MagicMock())
+    assert svc._percentile([], 95) == 0
+    assert svc._percentile([50], 95) == 50
+    assert svc._percentile([100, 200, 300, 400], 50) == 250
+    vals = list(range(1, 101))
+    assert 94 <= svc._percentile(vals, 95) <= 96
+
+
+async def test_record_query_log_best_effort() -> None:
+    """落查询日志：成功提交一次；失败仅告警回滚，不阻断查询响应。"""
+    svc = _svc(await _client())
+    svc._db.commit = AsyncMock()
+    await svc.record_query_log(
+        metric_code="gmv",
+        requester_type=QueryRequesterType.API_CLIENT,
+        requester_id="acme",
+        requester_name="acme",
+        duration_ms=42,
+        status="ok",
+    )
+    svc._db.add.assert_called_once()
+    svc._db.commit.assert_awaited_once()
+    # 失败路径：commit 抛异常，rollback 后被吞掉（不向上抛）
+    svc._db.commit = AsyncMock(side_effect=Exception("db down"))
+    svc._db.rollback = AsyncMock()
+    await svc.record_query_log(
+        metric_code="gmv",
+        requester_type=QueryRequesterType.INTERNAL,
+        requester_id="1",
+        requester_name="alice",
+        duration_ms=10,
+        status="error",
+        error_code="DEPENDENCY_DEGRADED_ENGINE",
+    )
+    svc._db.rollback.assert_awaited_once()

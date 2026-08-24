@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import secrets
+import time
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, Query
@@ -26,7 +27,12 @@ from app.core.exceptions import BusinessError, ValidationError
 from app.core.guard import guard_against_injection
 from app.core.security import create_access_token, hash_password
 from app.db.mysql import get_db_session
-from app.models.consume import ApiClient, ApiClientStatus, FavoriteAssetType
+from app.models.consume import (
+    ApiClient,
+    ApiClientStatus,
+    FavoriteAssetType,
+    QueryRequesterType,
+)
 from app.models.user import User
 from app.services.consume.repository import ApiClientRepo
 from app.services.consume.schemas import (
@@ -130,9 +136,28 @@ async def query(
     db: AsyncSession = Depends(get_db_session),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[QueryResponse]:
-    """语义查询：OLAP 不可用时降级 503；成功则返回执行计划 + 元信息并写审计。"""
+    """语义查询：OLAP 不可用时降级 503；成功则返回执行计划 + 元信息并写审计。
+
+    响应时效 KPI：真实查询耗时在 API 层计时，成功/失败均 best-effort 落
+    ``query_log``（独立事务，失败不阻断响应）。
+    """
     svc = ConsumeService(db)
-    res = await svc.execute_query(req, client)
+    start = time.perf_counter()
+    try:
+        res = await svc.execute_query(req, client)
+    except Exception as exc:
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        await svc.record_query_log(
+            metric_code=req.metric_code,
+            requester_type=QueryRequesterType.API_CLIENT,
+            requester_id=client.client_id,
+            requester_name=client.client_id,
+            duration_ms=duration_ms,
+            status="error",
+            error_code=getattr(exc, "error_code", None) or type(exc).__name__,
+        )
+        raise
+    duration_ms = int((time.perf_counter() - start) * 1000)
     # PII 数据分级审计（对齐 TD §15.4：PII 访问必须留痕 data_classification=PII）
     # 执行方为接入方本体（client.id），而非其创建者（created_by），避免审计归属伪造（PLAT-2）。
     is_pii = bool((res.meta or {}).get("pii", False))
@@ -150,6 +175,14 @@ async def query(
         pii_access=is_pii,
     )
     await db.commit()
+    await svc.record_query_log(
+        metric_code=req.metric_code,
+        requester_type=QueryRequesterType.API_CLIENT,
+        requester_id=client.client_id,
+        requester_name=client.client_id,
+        duration_ms=duration_ms,
+        status="ok",
+    )
     return ok(data=res)
 
 
@@ -172,7 +205,22 @@ async def query_metric_internal(
     """
     merged = req.model_copy(update={"metric_code": code})
     svc = ConsumeService(db)
-    res = await svc.execute_query(merged, internal_user=user)
+    start = time.perf_counter()
+    try:
+        res = await svc.execute_query(merged, internal_user=user)
+    except Exception as exc:
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        await svc.record_query_log(
+            metric_code=code,
+            requester_type=QueryRequesterType.INTERNAL,
+            requester_id=str(user.id),
+            requester_name=user.username,
+            duration_ms=duration_ms,
+            status="error",
+            error_code=getattr(exc, "error_code", None) or type(exc).__name__,
+        )
+        raise
+    duration_ms = int((time.perf_counter() - start) * 1000)
     # PII 数据分级审计（对齐 TD §15.4：PII 访问必须留痕 data_classification=PII）
     is_pii = bool((res.meta or {}).get("pii", False))
     await write_audit(
@@ -186,6 +234,14 @@ async def query_metric_internal(
         pii_access=is_pii,
     )
     await db.commit()
+    await svc.record_query_log(
+        metric_code=code,
+        requester_type=QueryRequesterType.INTERNAL,
+        requester_id=str(user.id),
+        requester_name=user.username,
+        duration_ms=duration_ms,
+        status="ok",
+    )
     return ok(data=res)
 
 
@@ -382,6 +438,21 @@ async def confirm_version(
     )
     await db.commit()
     return ok(data={"ok": True})
+
+
+@router.get("/consume/stats/response-time", response_model=ApiResponse[dict])
+async def response_time_stats(
+    db: AsyncSession = Depends(get_db_session),
+    user: User = Depends(require_roles("platform_admin", "domain_admin")),
+    days: int = Query(7, ge=1, le=90),
+    trace_id: Annotated[str, Depends(get_trace_id)] = "",
+) -> ApiResponse[dict]:
+    """提数响应时效 KPI：近 N 天查询量/avg/p95/p99/最大耗时/错误数。
+
+    数据源为 ``query_log``（每次真实查询 best-effort 落库）；管理员视角，
+    供可观测中心「提数响应时效」卡片消费。
+    """
+    return ok(data=await ConsumeService(db).response_time_stats(days), trace_id=trace_id)
 
 
 @router.post("/consume/versions/{version_id}/reject")

@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -26,6 +26,8 @@ from app.models.consume import (
     ApiClientStatus,
     FavoriteAssetType,
     MetricValueSnapshot,
+    QueryLog,
+    QueryRequesterType,
     SnapshotGeneratedBy,
 )
 from app.models.data_source import DataSource, DBCatalog
@@ -951,3 +953,96 @@ class ConsumeService(BaseService):
             generated_at=r.generated_at,
             generated_by=r.generated_by,
         )
+
+    # ---- 响应时效 KPI（P1）----
+
+    async def record_query_log(
+        self,
+        *,
+        metric_code: str,
+        requester_type: QueryRequesterType,
+        requester_id: str,
+        requester_name: str | None,
+        duration_ms: int,
+        status: str,
+        error_code: str | None = None,
+    ) -> None:
+        """落一条提数查询日志（响应时效 KPI 数据源），best-effort 绝不阻断响应。
+
+        独立 try/except + rollback：插入失败仅告警，不影响查询主链路返回。
+        调用方应在业务事务提交后调用，日志独立成事务。
+        """
+        try:
+            self._db.add(
+                QueryLog(
+                    metric_code=metric_code,
+                    requester_type=requester_type,
+                    requester_id=requester_id,
+                    requester_name=requester_name,
+                    duration_ms=duration_ms,
+                    status=status,
+                    error_code=error_code,
+                )
+            )
+            await self._db.commit()
+        except Exception:
+            logger.warning(
+                "query_log_record_failed",
+                metric_code=metric_code,
+                exc_info=True,
+            )
+            await self._db.rollback()
+
+    @staticmethod
+    def _percentile(sorted_values: list[int], p: float) -> int:
+        """线性插值分位数（p ∈ (0,100]），输入须为升序列表；空列表返回 0。"""
+        if not sorted_values:
+            return 0
+        if len(sorted_values) == 1:
+            return sorted_values[0]
+        rank = (len(sorted_values) - 1) * p / 100.0
+        lo = int(rank)
+        hi = min(lo + 1, len(sorted_values) - 1)
+        frac = rank - lo
+        return int(sorted_values[lo] + frac * (sorted_values[hi] - sorted_values[lo]))
+
+    async def response_time_stats(self, days: int = 7) -> dict[str, Any]:
+        """响应时效统计：按天聚合提数查询 avg/p95/p99/max 与错误数。
+
+        MySQL 8 无窗口分位数函数，故拉取近 N 天明细在内存线性插值分位数
+        （查询日志量级可控，避免过度工程）。
+        """
+        days = max(1, min(int(days), 90))
+        since = (datetime.now(UTC) - timedelta(days=days - 1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        rows = (
+            await self._db.execute(
+                select(QueryLog.created_at, QueryLog.duration_ms, QueryLog.status)
+                .where(QueryLog.created_at >= since)
+                .order_by(QueryLog.created_at)
+            )
+        ).all()
+        by_day: dict[str, list[int]] = {}
+        errors: dict[str, int] = {}
+        for created_at, duration_ms, status in rows:
+            day = created_at.astimezone(UTC).date().isoformat()
+            by_day.setdefault(day, []).append(int(duration_ms or 0))
+            if status == "error":
+                errors[day] = errors.get(day, 0) + 1
+        items: list[dict[str, Any]] = []
+        for i in range(days):
+            day = (since + timedelta(days=i)).date().isoformat()
+            vals = sorted(by_day.get(day, []))
+            items.append(
+                {
+                    "date": day,
+                    "count": len(vals),
+                    "avg_ms": int(sum(vals) / len(vals)) if vals else 0,
+                    "p95_ms": self._percentile(vals, 95),
+                    "p99_ms": self._percentile(vals, 99),
+                    "max_ms": vals[-1] if vals else 0,
+                    "error_count": errors.get(day, 0),
+                }
+            )
+        return {"days": days, "items": items}
