@@ -8,6 +8,10 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
@@ -19,16 +23,51 @@ from app.core.exceptions import (
     ValidationError,
 )
 from app.models.measure_catalog import MeasureCatalog, MeasureCategory, MeasureFormat, MeasureStatus
+from app.models.subject_domain import SubjectDomain
 from app.services.measure_catalog.repository import MeasureCatalogRepository
 from app.services.measure_catalog.schemas import (
-    MeasureCreate,
-    MeasureUpdate,
     _FORMAT_DEFAULTS,
+    MeasureAutoSuggestRequest,
+    MeasureCreate,
+    MeasureSuggestResponse,
+    MeasureUpdate,
+    SuggestField,
 )
 
 _VALID_FORMATS = {e.value for e in MeasureFormat}
 _VALID_CATEGORIES = {e.value for e in MeasureCategory}
 _VALID_STATUSES = {e.value for e in MeasureStatus}
+
+# ---- 度量目录 AI 推断规则表（LLM 不可用时的确定性兜底）----
+# 度量格式关键词：按业务语义命中 AMOUNT / RATIO / NUMERIC
+_FORMAT_KEYWORDS: dict[str, list[str]] = {
+    "AMOUNT": ["金额", "费用", "收入", "收费", "支出", "结算", "支付", "成本", "毛利", "余额"],
+    "RATIO": ["占比", "比例", "比率", "报销比例", "药占比"],
+    "NUMERIC": ["人次", "人数", "次数", "数量", "笔", "张", "件", "例", "数"],
+}
+# 度量分类关键词：流量 / 费用 / 药品 / 医保 / 效率 / 质量
+_CATEGORY_KEYWORDS: dict[str, list[str]] = {
+    "FLOW": ["人次", "就诊", "挂号", "接诊", "门诊量", "患者数", "流量"],
+    "FEE": ["金额", "费用", "收入", "收费", "支出", "成本", "余额"],
+    "DRUG": ["药品", "处方", "抗菌", "用药", "药费"],
+    "MEDICAL_INSURANCE": ["医保", "报销", "统筹", "自付", "结算"],
+    "EFFICIENCY": ["次均", "人均", "平均", "单价", "效率", "周转", "候诊"],
+    "QUALITY": ["占比", "比例", "达标", "合格", "质控", "率"],
+}
+# NUMERIC 度量默认单位：按名称细化（人次/人/次/笔/张）
+_NUMERIC_UNIT_KEYWORDS: list[tuple[str, str]] = [
+    ("人次", "人次"),
+    ("人数", "人"),
+    ("患者", "人"),
+    ("次数", "次"),
+    ("笔", "笔"),
+    ("张", "张"),
+]
+# 医疗场景源头系统推断
+_MEDICAL_DOMAINS = {
+    "outpatient", "medication", "medical_fee", "medical_insurance",
+    "diagnosis", "quality", "patient",
+}
 
 
 class MeasureCatalogService(BaseService):
@@ -118,7 +157,9 @@ class MeasureCatalogService(BaseService):
     async def update_measure(self, measure_code: str, data: MeasureUpdate) -> MeasureCatalog:
         measure = await self._require(measure_code)
         if measure.status == MeasureStatus.DEPRECATED.value:
-            raise UnisenseError(f"已废弃逻辑度量不可更新: {measure_code}", error_code="INVALID_STATE")
+            raise UnisenseError(
+                f"已废弃逻辑度量不可更新: {measure_code}", error_code="INVALID_STATE"
+            )
         # 改编码：仅 DRAFT 状态允许（已发布度量被指标引用，改码会破坏引用）。
         if data.measure_code is not None and data.measure_code != measure_code:
             if measure.status != MeasureStatus.DRAFT.value:
@@ -194,6 +235,166 @@ class MeasureCatalogService(BaseService):
         measure.status = MeasureStatus.DEPRECATED.value
         await self._repo.commit()
         return measure
+
+    async def auto_suggest(self, data: MeasureAutoSuggestRequest) -> MeasureSuggestResponse:
+        """度量目录 AI 推断：规则兜底 + LLM 业务增强，任一失败不阻断。
+
+        规则产出确定性字段（编码/格式/单位/小数位/分类）；LLM 补充同义词/统计口径/
+        业务域/源头系统（不可用自动降级规则）。
+        """
+        rule = self._suggest_by_rule(data)
+        llm = await self._suggest_by_llm(data)
+        # LLM 覆盖规则字段：来源标记 llm，置信度 0.7，理由统一
+        for key, val in llm.items():
+            if val is None or (isinstance(val, list) and not val):
+                continue
+            rule[key] = SuggestField(
+                value=val, source="llm", confidence=0.7, reason="AI 依据业务语义推断"
+            )
+        # 编码/格式/单位/小数位/分类始终以规则为准（确定性、避免 LLM 幻觉破坏枚举合法性）
+        return MeasureSuggestResponse(fields=rule)
+
+    def _suggest_by_rule(self, data: MeasureAutoSuggestRequest) -> dict[str, SuggestField]:
+        """规则推断：编码/格式/单位/小数位/分类/源头系统（确定性，LLM 不可用兜底）。"""
+        text = f"{data.name} {data.description or ''}"
+        fmt = self._match_keyword(text, _FORMAT_KEYWORDS) or "NUMERIC"
+        category = self._match_keyword(text, _CATEGORY_KEYWORDS) or MeasureCategory.OTHER.value
+        default_unit, decimal = _FORMAT_DEFAULTS[fmt]
+        if fmt == "AMOUNT":
+            default_unit = "CNY"  # 货币单位编码（对齐 unit 字典与 seed 语义）
+        if fmt == "NUMERIC":
+            for kw, unit in _NUMERIC_UNIT_KEYWORDS:
+                if kw in data.name:
+                    default_unit, decimal = unit, 0
+                    break
+        # 编码：{domain_slug}_{name_slug}，缺省仅 name_slug（与 create_measure 生成规则对齐）
+        domain_slug = slugify_code(data.domain or "")
+        name_slug = slugify_code(data.name)
+        code_base = (
+            f"{domain_slug}_{name_slug}" if domain_slug and name_slug else (name_slug or "measure")
+        )
+        source_system = (
+            ["HIS"]
+            if (data.domain in _MEDICAL_DOMAINS or "wedw" in (data.source_table or "").lower())
+            else []
+        )
+        fields: dict[str, SuggestField] = {
+            "measure_code": SuggestField(
+                value=code_base, source="rule", confidence=0.9,
+                reason="由业务域与名称自动生成，可修改",
+            ),
+            "name": SuggestField(
+                value=data.name, source="rule", confidence=1.0, reason="沿用输入名称"
+            ),
+            "description": SuggestField(
+                value=data.description, source="rule", confidence=0.8, reason="沿用输入描述"
+            ),
+            "measure_format": SuggestField(
+                value=fmt, source="rule", confidence=0.85,
+                reason=f"名称/描述含「{self._matched_keyword(text, _FORMAT_KEYWORDS, fmt)}」语义",
+            ),
+            "default_unit": SuggestField(
+                value=default_unit, source="rule", confidence=0.9, reason="度量格式联动默认单位"
+            ),
+            "default_decimal_places": SuggestField(
+                value=decimal, source="rule", confidence=0.9, reason="度量格式联动默认小数位"
+            ),
+            "source_system": SuggestField(
+                value=source_system or [], source="rule", confidence=0.6,
+                reason="按业务域/源表推断源头系统",
+            ),
+            "synonyms": SuggestField(
+                value=[], source="rule", confidence=0.4, reason="规则无法推断同义词，交 AI 补充"
+            ),
+            "category": SuggestField(
+                value=category, source="rule", confidence=0.8,
+                reason=(
+                    f"名称/描述命中「{self._matched_keyword(text, _CATEGORY_KEYWORDS, category)}」"
+                    "分类"
+                ),
+            ),
+            "stat_caliber": SuggestField(
+                value=data.description, source="rule", confidence=0.5,
+                reason="暂用输入描述作口径，交 AI 完善",
+            ),
+            "domain": SuggestField(
+                value=data.domain, source="rule", confidence=0.7, reason="沿用所选业务域"
+            ),
+        }
+        return fields
+
+    async def _suggest_by_llm(self, data: MeasureAutoSuggestRequest) -> dict[str, Any]:
+        """LLM 业务增强：同义词/统计口径/业务域/源头系统。不可用/解析失败返回 {}。"""
+        try:
+            from app.services.llm.config_service import LlmConfigService
+
+            llm_client = await LlmConfigService(self._session).build_client()
+            if not getattr(llm_client, "enabled", False):
+                return {}
+            # 业务域候选（供 LLM 从现有域中选择，避免推断出不存在的域）
+            domain_stmt = select(SubjectDomain.code, SubjectDomain.name).where(
+                SubjectDomain.deleted_at.is_(None), SubjectDomain.status == "active"
+            )
+            domains = {
+                f"{code}({name})": code
+                for code, name in (await self._session.execute(domain_stmt)).all()
+            }
+            candidates = "、".join(domains.keys()) or "门诊/药品/医疗费用/医保/诊断/质控/患者"
+            prompt = (
+                "你是医疗指标体系专家。给定逻辑度量，仅返回合法 JSON"
+                "（不要解释、不要 markdown）：\n"
+                f'{{"synonyms":["同义词1","同义词2"],"stat_caliber":"统计口径","domain":"业务域code",'
+                f'"source_system":["源头系统"],"description":"精炼描述"}}\n'
+                f"名称：{data.name}\n描述：{data.description or '无'}\n"
+                f"参考源表：{data.source_table or '无'}\n可选业务域：{candidates}\n"
+                f"domain 必须取业务域 code 之一（不确定用空字符串）。"
+            )
+            resp = await llm_client.chat(
+                messages=[{"role": "user", "content": prompt}], max_tokens=300
+            )
+            raw = (resp.get("content") or "").strip()
+            # 提取 JSON：容忍 ```json 包裹
+            if "```" in raw:
+                raw = raw.split("```")[1] if "```" in raw else raw
+            raw = raw.strip().strip("`").strip()
+            start, end = raw.find("{"), raw.rfind("}")
+            if start < 0 or end < start:
+                return {}
+            parsed = json.loads(raw[start : end + 1])
+            out: dict[str, Any] = {}
+            for key in ("synonyms", "stat_caliber", "domain", "source_system", "description"):
+                val = parsed.get(key)
+                if isinstance(val, str):
+                    val = val.strip()
+                if val in (None, "", []):
+                    continue
+                if key == "domain" and val not in domains.values():
+                    continue  # 推断出的域不在现有域集合 → 丢弃，防脏域
+                if key == "synonyms" and isinstance(val, list):
+                    val = [str(s).strip() for s in val if str(s).strip()][:5]
+                if key == "source_system" and isinstance(val, list):
+                    val = [str(s).strip() for s in val if str(s).strip()][:3]
+                out[key] = val
+            return out
+        except Exception:
+            return {}  # LLM 不可用/解析失败 → 规则兜底，不阻断
+
+    @staticmethod
+    def _match_keyword(text: str, table: dict[str, list[str]]) -> str | None:
+        """返回首个命中关键词的 key（按表内关键词顺序）。"""
+        for key, kws in table.items():
+            if any(kw in text for kw in kws):
+                return key
+        return None
+
+    @staticmethod
+    def _matched_keyword(text: str, table: dict[str, list[str]], fallback: str) -> str:
+        """返回命中的具体关键词（供 reason 展示），未命中返回 fallback 值本身。"""
+        for kws in table.values():
+            for kw in kws:
+                if kw in text:
+                    return kw
+        return fallback
 
     async def _require(self, measure_code: str) -> MeasureCatalog:
         measure = await self._repo.get(measure_code)

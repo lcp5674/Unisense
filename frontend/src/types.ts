@@ -1045,6 +1045,18 @@ export const MEASURE_CATEGORY_LABEL: Record<MeasureCategory, string> = {
   OTHER: "其他",
 };
 
+/** 逻辑度量 AI 推断：单字段结果（值 + 来源 + 置信度 + 理由） */
+export interface SuggestField {
+  value: string | number | string[] | null;
+  source: "llm" | "rule";
+  confidence: number;
+  reason: string;
+}
+
+export interface MeasureSuggestResult {
+  fields: Record<string, SuggestField>;
+}
+
 // ============================================================================
 // 指标挂载实体（backend /api/v1/metric-mounts/*，OneData 挂载层）
 // 派生指标 = 原子 + 时间 + 业务限定 + 挂载；粒度从 metric 下沉到挂载（界限文档 §2.3 第 3 条）。

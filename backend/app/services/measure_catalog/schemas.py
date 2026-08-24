@@ -157,3 +157,30 @@ class MeasureResponse(BaseModel):
             created_at=getattr(m, "created_at", None),
             updated_at=getattr(m, "updated_at", None),
         )
+
+
+class MeasureAutoSuggestRequest(BaseModel):
+    """度量目录 AI 推断请求：名称必填，其余可选作为推断上下文。"""
+
+    name: str = Field(..., max_length=128, description="度量中文名（如 门诊收费金额）")
+    description: str | None = Field(None, max_length=1000, description="度量描述（业务说明）")
+    domain: str | None = Field(None, max_length=64, description="业务域（可选，辅助推断）")
+    source_table: str | None = Field(None, max_length=256, description="参考源表（辅助推断）")
+    measure_column: str | None = Field(None, max_length=128, description="参考度量列（辅助推断）")
+
+
+class SuggestField(BaseModel):
+    """推断字段：值 + 来源（llm/rule）+ 置信度 + 理由。"""
+
+    value: Any = None
+    source: str = "rule"  # llm / rule
+    confidence: float = 0.0  # 0-1
+    reason: str = ""
+
+
+class MeasureSuggestResponse(BaseModel):
+    """推断结果：逐字段带来源与置信度，用户可改后再提交。"""
+
+    fields: dict[str, SuggestField]
+    # 字段键：measure_code / name / description / measure_format / default_unit /
+    #        default_decimal_places / source_system / synonyms / category / stat_caliber / domain
