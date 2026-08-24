@@ -776,6 +776,123 @@ describe("MetricCreate 源表选择惰性化", () => {
   });
 });
 
+describe("MetricCreate 未采集表/字段手动输入", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedTree.mockResolvedValue(TREE);
+    mockedDict.mockResolvedValue([]);
+    mockedSuggest.mockResolvedValue(NO_SUGGESTION);
+    // 模拟平台未采集：搜索任何关键词都返回空 → 触发「未采集，手动输入」选项注入
+    mockedCatalogs.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 });
+  });
+
+  it("依赖表（上游）：搜索未采集表注入「未采集」选项，点选即以完整表名录入", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await goToStep(2);
+    // 展开依赖表（上游）多选下拉（第 1 个「展开浏览已接入表」）
+    const relatedSelect = screen.getAllByText(/展开浏览已接入表/)[0];
+    const depSelectEl = relatedSelect.closest(".ant-select");
+    fireEvent.mouseDown(relatedSelect);
+    // 输入未采集表名 → 下拉注入选项（optionRender 标注「未采集，手动输入」）
+    const searchInput = depSelectEl?.querySelector(
+      ".ant-select-selection-search-input"
+    ) as HTMLInputElement;
+    fireEvent.change(searchInput, { target: { value: "ods.unknown_detail" } });
+    const injected = await waitFor(() => {
+      const el = document.querySelector(
+        '.ant-select-item-option[title="ods.unknown_detail"]'
+      ) as HTMLElement | null;
+      expect(el).toBeTruthy();
+      return el;
+    });
+    // 下拉里明确标识「未采集，手动输入」（通俗提示）
+    expect(injected!.textContent).toContain("未采集，手动输入");
+    fireEvent.click(injected!);
+    // 选中后 tag 为干净表名（不带「未采集」后缀——提交的是 value 本身）
+    await waitFor(() => {
+      const tag = depSelectEl?.querySelector(".ant-select-selection-item");
+      expect(tag?.textContent).toContain("ods.unknown_detail");
+    });
+    expect(screen.queryByText("ods.unknown_detail（未采集，手动输入）")).toBeNull();
+  });
+
+  it("使用表（下游）：同样支持未采集表手动录入（第 2 个多选下拉）", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await goToStep(2);
+    // 第 2 个「展开浏览已接入表」= 使用表（下游）
+    const relatedSelect = screen.getAllByText(/展开浏览已接入表/)[1];
+    const downSelectEl = relatedSelect.closest(".ant-select");
+    fireEvent.mouseDown(relatedSelect);
+    const searchInput = downSelectEl?.querySelector(
+      ".ant-select-selection-search-input"
+    ) as HTMLInputElement;
+    fireEvent.change(searchInput, { target: { value: "ads.unknown_report" } });
+    const injected = await waitFor(() => {
+      const el = document.querySelector(
+        '.ant-select-item-option[title="ads.unknown_report"]'
+      ) as HTMLElement | null;
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(injected!.textContent).toContain("未采集，手动输入");
+    fireEvent.click(injected!);
+    await waitFor(() => {
+      const tag = downSelectEl?.querySelector(".ant-select-selection-item");
+      expect(tag?.textContent).toContain("ads.unknown_report");
+    });
+  });
+
+  it("度量列：未采集源表场景下可直接输入自定义列名（注入「未采集」列选项）", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await goToStep(1);
+    // 原子指标 Step1 度量列 Select：直接输入未采集列名
+    const colInput = document.querySelector('input[id="measure_column"]') as HTMLInputElement;
+    fireEvent.mouseDown(colInput);
+    fireEvent.change(colInput, { target: { value: "pay_amt" } });
+    const injected = await waitFor(() => {
+      const el = document.querySelector(
+        '.ant-select-item-option[title="pay_amt"]'
+      ) as HTMLElement | null;
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(injected!.textContent).toContain("未采集，手动输入");
+    fireEvent.click(injected!);
+    // 选中后选择框显示干净列名
+    await waitFor(() => {
+      const sel = document.querySelector(".ant-select-selection-item");
+      expect(sel?.textContent).toContain("pay_amt");
+    });
+  });
+
+  it("批量注册弹窗：源宽表未采集时可手动输入完整表名", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    const modal = await openBatchModal();
+    // 源表 Select 搜索输入未采集宽表名 → 注入「未采集」选项
+    const srcInput = modal.querySelector('input[id="source_table"]') as HTMLInputElement;
+    fireEvent.mouseDown(srcInput);
+    fireEvent.change(srcInput, { target: { value: "ods.unknown_wide" } });
+    const injected = await waitFor(() => {
+      const el = document.querySelector(
+        '.ant-select-item-option[title="ods.unknown_wide"]'
+      ) as HTMLElement | null;
+      expect(el).toBeTruthy();
+      return el;
+    });
+    expect(injected!.textContent).toContain("未采集，手动输入");
+    fireEvent.click(injected!);
+    // 选中后弹窗内显示完整表名
+    await waitFor(() => {
+      const sel = modal.querySelector(".ant-select-selection-item");
+      expect(sel?.textContent).toContain("ods.unknown_wide");
+    });
+  });
+});
+
 describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.5）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
