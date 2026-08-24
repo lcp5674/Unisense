@@ -350,6 +350,28 @@ class QualityRepository:
         rows = (await self._db.execute(stmt)).scalars().all()
         return list(rows), total
 
+    async def list_due_benchmark_ids(self, cutoff: datetime) -> list[int]:
+        """返回超过对账周期的 benchmark id 清单（P1 对账触发）。
+
+        到期定义：该 benchmark 在 ``cutoff`` 之后没有任何对账记录（含从未对账）。
+        """
+        recent_exists = (
+            select(func.count())
+            .select_from(ReconciliationRecord)
+            .where(
+                ReconciliationRecord.benchmark_id == ExternalBenchmark.id,
+                ReconciliationRecord.deleted_at.is_(None),
+                ReconciliationRecord.created_at >= cutoff,
+            )
+            .exists()
+        )
+        stmt = (
+            select(ExternalBenchmark.id)
+            .where(ExternalBenchmark.deleted_at.is_(None), ~recent_exists)
+        )
+        rows = (await self._db.execute(stmt)).all()
+        return [r[0] for r in rows]
+
     # ---- ReconciliationRecord（外部基准对账记录，TD §4.15.7）----
     async def save_reconciliation(self, rec: ReconciliationRecord) -> ReconciliationRecord:
         self._db.add(rec)

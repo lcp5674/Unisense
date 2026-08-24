@@ -108,3 +108,54 @@ async def run_quality_checks(ctx: dict[str, Any]) -> dict[str, int]:
         "triggered": triggered,
         "skipped_no_obs": skipped_no_obs,
     }
+
+
+async def run_reconciliation_checks(
+    ctx: dict[str, Any],
+    *,
+    period_days: int = 7,
+    tier2_ratio: float = 0.3,
+    max_targets: int = 100,
+) -> dict[str, int]:
+    """对账触发任务：扫描已 bind benchmark 且超过对账周期的指标，生成待对账提醒。
+
+    仅做调度触发与提醒，不执行外部数据对比（外部对比需真实数据源接入）；
+    T1 全量、T2/T3 按比例抽样，命中则发布 ``reconciliation.due`` 事件
+    （EventBus → notify），与手动对账链路（import_benchmark → bind →
+    run_reconciliation → confirm）解耦互补。
+    """
+    from app.db.mysql import async_session_factory
+    from app.services.quality.repository import QualityRepository
+    from app.services.quality.service import QualityService
+
+    cutoff = datetime.now(UTC) - timedelta(days=period_days)
+    async with async_session_factory() as db:
+        repo = QualityRepository(db)
+        due_ids = set(await repo.list_due_benchmark_ids(cutoff))
+        svc = QualityService(db)
+        targets = await svc.sample_reconciliation_targets(
+            tier2_ratio=tier2_ratio,
+            due_benchmark_ids=due_ids,
+            max_targets=max_targets,
+        )
+        reminded = 0
+        for target in targets:
+            # 生成待对账提醒（best-effort，publisher 内部熔断降级）
+            await svc._publisher.publish(  # noqa: SLF001 - 同模块编排任务访问服务内部发布器
+                {
+                    "event_type": "reconciliation.due",
+                    "benchmark_id": target["benchmark_id"],
+                    "metric_code": target["metric_code"],
+                    "metric_tier": target["metric_tier"],
+                }
+            )
+            reminded += 1
+        await db.commit()
+
+    logger.info(
+        "reconciliation_checks_done",
+        due=len(due_ids),
+        sampled=len(targets),
+        reminded=reminded,
+    )
+    return {"due": len(due_ids), "sampled": len(targets), "reminded": reminded}

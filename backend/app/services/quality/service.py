@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import random
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -719,3 +720,64 @@ class QualityService(BaseService):
         rec.checked_at = datetime.now(UTC)
         rec = await self._repo.save_reconciliation(rec)
         return ReconciliationRecordResponse.from_model(rec)
+
+    async def sample_reconciliation_targets(
+        self,
+        *,
+        tier2_ratio: float = 0.3,
+        tier3_ratio: float = 0.0,
+        due_benchmark_ids: set[int] | None = None,
+        max_targets: int = 200,
+        seed: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """按分级抽样待对账目标（P1 对账加固）：T1 全量、T2/T3 按比例抽样。
+
+        Args:
+            tier2_ratio: T2 抽样比例（普通指标）。
+            tier3_ratio: T3 抽样比例（默认不抽样）。
+            due_benchmark_ids: 限定在到期基准清单内抽样；None 时对全部已 bind
+                benchmark 抽样。
+            max_targets: 抽样清单上限。
+            seed: 随机种子（测试可复现；生产不传则随机）。
+
+        Returns:
+            ``[{"benchmark_id", "metric_code", "metric_tier"}]`` 抽样清单。
+        """
+        from sqlalchemy import select
+
+        from app.models.metric import Metric
+
+        stmt = (
+            select(ExternalBenchmark.id, ExternalBenchmark.metric_code, Metric.metric_tier)
+            .join(Metric, Metric.metric_code == ExternalBenchmark.metric_code)
+            .where(ExternalBenchmark.deleted_at.is_(None), Metric.deleted_at.is_(None))
+        )
+        rows = (await self._db.execute(stmt)).all()
+        if due_benchmark_ids is not None:
+            rows = [r for r in rows if r[0] in due_benchmark_ids]
+        if not rows:
+            return []
+        by_code: dict[str, dict[str, Any]] = {}
+        for bid, code, tier in rows:
+            bucket = by_code.setdefault(code, {"metric_tier": tier or "T3", "benchmark_ids": []})
+            bucket["benchmark_ids"].append(bid)
+        ratios = {"T1": 1.0, "T2": tier2_ratio, "T3": tier3_ratio}
+        rng = random.Random(seed)
+        sampled: list[dict[str, Any]] = []
+        for code, bucket in by_code.items():
+            ratio = ratios.get(bucket["metric_tier"], 0.0)
+            ids = bucket["benchmark_ids"]
+            # 抽样以指标为粒度：T1 全量；T2/T3 按比例放行整条指标（含其全部基准）
+            if ratio >= 1.0:
+                chosen = ids
+            elif ratio > 0.0 and rng.random() < ratio:
+                chosen = ids
+            else:
+                continue
+            for bid in chosen:
+                sampled.append(
+                    {"benchmark_id": bid, "metric_code": code, "metric_tier": bucket["metric_tier"]}
+                )
+                if len(sampled) >= max_targets:
+                    return sampled
+        return sampled
