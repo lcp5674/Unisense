@@ -269,13 +269,25 @@ class TestInferMetricSql:
         f = result["fields"]
         assert f["name"]["value"] == "日xyz次数"
         assert f["name"]["source"] == "rule"
-        # 非计数列（如 gmv）保持原英文标签行为不变
+        # 非计数列（如 gmv）映射为业务中文标签，同样命中「额」词根
         profile2 = build_profile(
             source_table="dwd.sales_detail", measure_column="gmv", period="day"
         )
         profile2["domain_code"] = "sales"
         result2 = infer_metric(profile2)
-        assert result2["fields"]["name"]["value"] == "日gmv"
+        assert result2["fields"]["name"]["value"] == "日成交额"
+
+    def test_amount_column_label_hits_controlled_morpheme(self) -> None:
+        """金额/费用类列名生成中文标签（fee_amount→费用），命中「费/额」词根。"""
+        profile = build_profile(
+            source_table="dwd.tj_cf_drug_prescription_df",
+            measure_column="fee_amount",
+            period="day",
+        )
+        profile["domain_code"] = "outpatient"
+        result = infer_metric(profile)
+        assert result["fields"]["name"]["value"] == "日费用"
+        assert result["fields"]["unit"]["value"] == "CNY"
 
 
 class TestAutoFillBackwardCompat:

@@ -4185,6 +4185,11 @@ class MetricService(BaseService):
                 f"{request.domain}_entity_{col.replace('_', '')}_day"
             )
             defaults = suggested.get("defaults", {})
+            # 指标名用 auto_fill 推断的中文业务名（命中受控词根），空则回退列名。
+            # 修复前直接用英文列名（name=col），不命中受控词根 → 批量注册计数列/金额列
+            # 候选名被命名校验拦截只能到 VALIDATION_ERROR（无法直接创建）。
+            _name_field = (suggested.get("fields") or {}).get("name") or {}
+            name = str(_name_field.get("value") or col)
 
             # 维度列映射 → 口径定义：维度名（keys）合入 dimensions（与单条注册 Step② 关联维度
             # 一致，血缘差异同步据此建「指标↔维度」边）；完整映射冗余到 dimension_columns
@@ -4211,7 +4216,7 @@ class MetricService(BaseService):
                 async with self._db.begin_nested():
                     create_req = MetricCreateRequest(
                         metric_code=code,
-                        name=col,
+                        name=name,
                         domain=request.domain,
                         type=defaults.get("type", "atomic"),
                         granularity=defaults.get("granularity", "day"),

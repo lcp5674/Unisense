@@ -31,9 +31,10 @@ logger = structlog.get_logger("unisense.auto_fill")
 
 # 源表名前缀清洗
 _TABLE_PREFIXES = re.compile(r"^(dwd_|ods_|dws_|ads_|dim_|tmp_)", re.IGNORECASE)
-# 计数类列名主干 → 中文业务标签（无列注释时用于名称生成，命中受控词根）
-# 对齐 _infer_unit 的 cnt/count/num 计数识别；未知前缀保底「次数」同样命中词根。
-_CN_COUNT_LABELS: dict[str, str] = {
+# 业务列名 → 中文标签（无列注释时用于名称生成，命中受控词根）
+# 计数类对齐 _infer_unit 的 cnt/count/num 识别；金额/比率/时长类按列名/token 匹配。
+_CN_COLUMN_LABELS: dict[str, str] = {
+    # 计数类
     "register": "挂号次数",
     "visit": "就诊次数",
     "patient": "患者数",
@@ -49,6 +50,26 @@ _CN_COUNT_LABELS: dict[str, str] = {
     "play": "播放次数",
     "login": "登录次数",
     "pay": "支付次数",
+    # 金额/费用类
+    "amount": "金额",
+    "amt": "金额",
+    "fee": "费用",
+    "cost": "成本",
+    "revenue": "收入",
+    "income": "收入",
+    "expense": "费用",
+    "sales": "销售额",
+    "gmv": "成交额",
+    "profit": "利润",
+    "price": "金额",
+    # 比率类
+    "rate": "比率",
+    "ratio": "占比",
+    "percent": "占比",
+    # 时长类
+    "duration": "时长",
+    "hours": "时长",
+    "minutes": "时长",
 }
 # 计数类列名后缀（识别顺序：长后缀在前）
 _COUNT_SUFFIXES = ("_quantity", "_count", "_cnt", "_num", "_qty")
@@ -494,11 +515,12 @@ def _period_cn(period: str | None, grain: str | None) -> str:
     return _PERIOD_CN.get(token, _PERIOD_CN.get(_GRAIN_TOKENS.get(token, ""), "日"))
 
 
-def _cn_count_label(col: str) -> str | None:
-    """计数类列名 → 中文业务标签（命中受控词根）；非计数列返回 None。
+def _cn_column_label(col: str) -> str | None:
+    """业务列名 → 中文标签（命中受控词根）；无法映射返回 None。
 
-    列名以计数后缀结尾时：主干命中业务词表 → 中文标签；未知主干 → 「xx次数」
-    （含受控词根「次数」，候选名可过命名校验，避免生成英文 slug 被拦）。
+    计数后缀列（_cnt/_count/_num/_qty/_quantity）：主干命中词表 → 中文标签；
+    未知主干 → 「xx次数」（含受控词根「次数」）。非计数列：全列名/逐 token 查
+    金额/费用/比率词表。避免生成英文 slug 被命名校验拦截。
     """
     base = col.lower().strip()
     for suf in _COUNT_SUFFIXES:
@@ -507,7 +529,12 @@ def _cn_count_label(col: str) -> str | None:
             last = stem.split("_")[-1]
             if not last:
                 return None
-            return _CN_COUNT_LABELS.get(last, f"{last}次数")
+            return _CN_COLUMN_LABELS.get(last, f"{last}次数")
+    if base in _CN_COLUMN_LABELS:
+        return _CN_COLUMN_LABELS[base]
+    for token in base.split("_"):
+        if token in _CN_COLUMN_LABELS:
+            return _CN_COLUMN_LABELS[token]
     return None
 
 
@@ -520,10 +547,10 @@ def _measure_label(profile: dict[str, Any]) -> str:
     measure_column: str | None = profile.get("measure_column")
     sql_profile: SqlProfile | None = profile.get("sql_profile")
     if measure_column:
-        return _cn_count_label(measure_column) or measure_column.replace("_", " ")
+        return _cn_column_label(measure_column) or measure_column.replace("_", " ")
     if sql_profile and sql_profile.measures:
         col = str(sql_profile.measures[0]["column"])
-        return _cn_count_label(col) or col.replace("_", " ")
+        return _cn_column_label(col) or col.replace("_", " ")
     return "指标"
 
 
