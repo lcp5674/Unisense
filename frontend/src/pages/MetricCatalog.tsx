@@ -397,6 +397,8 @@ export function MetricCatalog() {
   // 列表加载失败的错误信息（区别于空结果：失败显示重试空态，空结果显示原空态引导）
   const [loadError, setLoadError] = useState<string | null>(null);
   const [userMap, setUserMap] = useState<Map<number, string>>(new Map());
+  // 评审用户下拉 label：display_name（username）格式（与责任人列 userMap 区分，责任人列保持纯 display_name）
+  const [userLabelMap, setUserLabelMap] = useState<Map<number, string>>(new Map());
   const [domainMap, setDomainMap] = useState<Map<string, string>>(new Map());
   // OneData 逻辑度量目录映射（id → 名称/单位）：原子指标展示继承的逻辑度量（目录名称 + 默认单位）
   const [measureMap, setMeasureMap] = useState<Map<number, { name: string; default_unit?: string | null }>>(new Map());
@@ -522,7 +524,14 @@ export function MetricCatalog() {
   // 用户/域中文名映射
   useEffect(() => {
     Promise.all([
-      listUsers().then((u) => setUserMap(new Map(u.map((x) => [x.id, x.display_name || x.username])))),
+      listUsers().then((u) => {
+        setUserMap(new Map(u.map((x) => [x.id, x.display_name || x.username])));
+        setUserLabelMap(
+          new Map(
+            u.map((x) => [x.id, x.display_name ? `${x.display_name}（${x.username}）` : x.username]),
+          ),
+        );
+      }),
       listDomainTree().then((tree) => {
         const m = new Map<string, string>();
         flattenDomains(tree, m);
@@ -1905,9 +1914,9 @@ export function MetricCatalog() {
                   optionFilterProp="label"
                   value={batchReviewerId ?? undefined}
                   onChange={(v) => setBatchReviewerId(v ?? null)}
-                  options={[...userMap.entries()].map(([id, name]) => ({
+                  options={[...userLabelMap.entries()].map(([id, label]) => ({
                     value: id,
-                    label: `${name}（${id}）`,
+                    label,
                   }))}
                 />
               )}

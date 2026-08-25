@@ -678,7 +678,7 @@ describe("Glossary 审核流（提交审核/通过/驳回，复用主数据审�
     await waitFor(() => expect(within(modal).getAllByRole("combobox")).toHaveLength(2));
     expect(within(modal).queryByPlaceholderText("如 5")).toBeNull();
     fireEvent.mouseDown(within(modal).getAllByRole("combobox")[1]);
-    fireEvent.click(await screen.findByTitle("李药师（#5）"));
+    fireEvent.click(await screen.findByTitle("李药师（pharmacist）"));
 
     fireEvent.change(within(modal).getByLabelText("提交说明"), {
       target: { value: "术语定义已与业务对齐，申请发布" },
@@ -798,7 +798,7 @@ describe("Glossary 审核候选按角色过滤", () => {
 
     // 用户下拉含 domain_admin（李药师），不含普通用户（viewer）
     fireEvent.mouseDown(within(modal).getAllByRole("combobox")[1]);
-    expect(await screen.findByTitle("李药师（#5）")).toBeInTheDocument();
+    expect(await screen.findByTitle("李药师（pharmacist）")).toBeInTheDocument();
     expect(screen.queryByTitle("普通用户（#6）")).toBeNull();
   });
 

@@ -340,7 +340,7 @@ describe("MeasureCatalogs 审核流（提交审核/通过/驳回）", () => {
     await waitFor(() => expect(within(modal).getAllByRole("combobox")).toHaveLength(2));
     expect(within(modal).queryByPlaceholderText("如 5")).toBeNull();
     fireEvent.mouseDown(within(modal).getAllByRole("combobox")[1]);
-    fireEvent.click(await screen.findByTitle("张医生（#3）"));
+    fireEvent.click(await screen.findByTitle("张医生（doctor）"));
 
     fireEvent.change(within(modal).getByLabelText("提交说明"), {
       target: { value: "门诊收费口径已与业务对齐" },

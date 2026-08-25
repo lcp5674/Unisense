@@ -2374,7 +2374,7 @@ export function MetricCreate() {
                   onChange={setBatchReviewerId}
                   options={batchUsers.map((u) => ({
                     value: u.id,
-                    label: `${u.display_name || u.username}（#${u.id}）`,
+                    label: u.display_name ? `${u.display_name}（${u.username}）` : u.username,
                   }))}
                 />
               )}

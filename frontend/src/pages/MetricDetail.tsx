@@ -2255,7 +2255,10 @@ export function MetricDetail() {
               optionFilterProp="label"
               value={submitReviewerId ?? undefined}
               onChange={(v) => setSubmitReviewerId(v ?? null)}
-              options={users.map((u) => ({ value: u.id, label: `${u.display_name || u.username}（${u.id}）` }))}
+              options={users.map((u) => ({
+                value: u.id,
+                label: u.display_name ? `${u.display_name}（${u.username}）` : u.username,
+              }))}
               {...DROPDOWN_FULL_WIDTH}
             />
           )}
