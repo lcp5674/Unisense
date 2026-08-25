@@ -585,7 +585,7 @@ describe("MetricCatalog", () => {
     mockedBatchSubmit.mockResolvedValue({
       ok_count: 1,
       fail_count: 0,
-      results: [{ metric_code: "sales_gmv_sum_d", ok: true, message: "" }],
+      results: [{ code: "sales_gmv_sum_d", ok: true, message: "" }],
     } as never);
     renderCatalog();
     await screen.findByText("sales_gmv_sum_d");
@@ -601,7 +601,7 @@ describe("MetricCatalog", () => {
     await waitFor(() => {
       expect(mockedBatchSubmit).toHaveBeenCalledWith([
         expect.objectContaining({
-          metric_code: "sales_gmv_sum_d",
+          code: "sales_gmv_sum_d",
           change_reason: "批量提交审核",
           reviewer_id: null,
           reviewer_type: null,

@@ -11,6 +11,10 @@ import {
   approveDimension,
   rejectDimension,
   deprecateDimension,
+  batchSubmitDimensions,
+  batchApproveDimensions,
+  batchRejectDimensions,
+  batchDeprecateDimensions,
   bindMetricDimension,
   unbindMetricDimension,
   listDimensionMappings,
@@ -51,10 +55,12 @@ import type {
   UserBrief,
   DataSource,
   CurrentUser,
+  BatchResult,
 } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
 import { usePermission } from "../hooks/usePermission";
+import { MasterDataBatch, type BatchActionKey } from "../components/MasterDataBatch";
 import {
   MasterDataReviewActions,
   MasterDataReviewModals,
@@ -180,6 +186,38 @@ function DimensionsTab() {
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   // 审核流状态（共享 hook：提交审核 Modal / 驳回 Modal / 正在审批的维度）
   const review = useMasterDataReview();
+  // 批量操作：多选行（rowSelection）+ 共享 MasterDataBatch 组件（对齐指标完整批量模式）
+  const [selected, setSelected] = useState<Dimension[]>([]);
+  // 评审角色判断（对齐后端 _REVIEW_ROLES）：平台管理员/域管理员/评审员可审
+  const canReview =
+    !!currentUser &&
+    (currentUser.role === "platform_admin" ||
+      currentUser.role === "domain_admin" ||
+      currentUser.role === "reviewer");
+
+  async function runBatch(action: BatchActionKey, opts: {
+    codes: string[];
+    reason?: string;
+    changeReason?: string;
+    reviewerType?: "user" | "domain" | null;
+    reviewerId?: number | null;
+    reviewerDomain?: string | null;
+  }): Promise<BatchResult> {
+    if (action === "submit") {
+      return batchSubmitDimensions(
+        opts.codes.map((code) => ({
+          code,
+          change_reason: opts.changeReason ?? "批量提交审核",
+          reviewer_id: opts.reviewerType === "user" ? opts.reviewerId : null,
+          reviewer_type: opts.reviewerType,
+          reviewer_domain: opts.reviewerType === "domain" ? opts.reviewerDomain : null,
+        })),
+      );
+    }
+    if (action === "approve") return batchApproveDimensions(opts.codes);
+    if (action === "reject") return batchRejectDimensions(opts.codes, opts.reason ?? "");
+    return batchDeprecateDimensions(opts.codes);
+  }
 
   // 支持从全局搜索栏经 ?kw= 直达定位；初始值已由 useState 承接，
   // 此处仅同步「URL 出现新筛选值」的场景，并保留用户手动清空筛选的能力。
@@ -593,12 +631,34 @@ function DimensionsTab() {
         {can("dimension:create") && (
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建维度</Button>
         )}
+        <MasterDataBatch
+          selected={selected}
+          codeKey="dim_code"
+          entityLabel="维度"
+          actions={[
+            { key: "submit", label: "批量提交审核（草稿）" },
+            { key: "approve", label: "批量通过（审核中）" },
+            { key: "reject", label: "批量驳回（审核中）" },
+            { key: "deprecate", label: "批量废弃（已发布）", danger: true },
+          ]}
+          canRun={(a) => (a === "approve" || a === "reject" ? !!canReview : can("dimension:create") || can("dimension:deprecate"))}
+          onRun={runBatch}
+          onDone={() => {
+            setSelected([]);
+            load();
+          }}
+          reviewerDomainOptions={[...domainMap.entries()].map(([value, name]) => ({ value, label: `${name} (${value})` }))}
+        />
       </Space>
       <Table
         dataSource={items}
         columns={columns}
         rowKey="dim_code"
         loading={loading}
+        rowSelection={{
+          selectedRowKeys: selected.map((s) => s.dim_code),
+          onChange: (_keys, rows) => setSelected(rows),
+        }}
         pagination={{
           current: page,
           pageSize,

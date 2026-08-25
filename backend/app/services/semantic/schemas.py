@@ -389,26 +389,9 @@ class MetricSubmitRequest(BaseModel):
 
 
 # ---- 批量操作 Schema（TD §13 批量治理：提交/通过/打回/下线，逐条收集结果不整体失败）----
-
-
-class MetricBatchSubmitItem(BaseModel):
-    """批量提交审核的单条项（含评审指派）。"""
-
-    metric_code: str = Field(..., max_length=64, description="指标编码")
-    change_reason: str = Field(..., min_length=4, description="提交审核说明")
-    reviewer_id: int | None = Field(None, description="指定评审用户 ID（reviewer_type=user）")
-    reviewer_type: Literal["user", "domain"] | None = Field(
-        None, description="评审指派类型: user(指定用户)/domain(域评审组)"
-    )
-    reviewer_domain: str | None = Field(
-        None, max_length=64, description="域评审组所在域（缺省用指标自身域）"
-    )
-
-
-class MetricBatchSubmitRequest(BaseModel):
-    """批量提交审核请求。"""
-
-    items: list[MetricBatchSubmitItem] = Field(..., min_length=1, max_length=100)
+# 提交（BatchSubmitRequest）/ 打回（BatchRejectRequest）/ 响应（BatchResponse）等
+# 通用结构统一在 app.api.batch_common（四模块复用）；此处仅保留指标特有参数
+# （approve 灰度发布 / deprecate 替代指标）。
 
 
 class MetricBatchApproveRequest(BaseModel):
@@ -419,13 +402,6 @@ class MetricBatchApproveRequest(BaseModel):
         "standard", description="发布模式: standard(全量)/experimental(灰度)"
     )
     gray_tenant_ids: list[int] | None = Field(None, description="灰度白名单租户 ID")
-
-
-class MetricBatchRejectRequest(BaseModel):
-    """批量审核驳回请求（REVIEW → DRAFT）。"""
-
-    metric_codes: list[str] = Field(..., min_length=1, max_length=100)
-    reason: str = Field(..., min_length=4, description="驳回原因")
 
 
 class MetricBatchDeprecateItem(BaseModel):
@@ -439,22 +415,6 @@ class MetricBatchDeprecateRequest(BaseModel):
     """批量下线（废弃）请求。"""
 
     items: list[MetricBatchDeprecateItem] = Field(..., min_length=1, max_length=100)
-
-
-class MetricBatchItemResult(BaseModel):
-    """批量操作的单条结果（逐条收集，不因单条失败整体回滚）。"""
-
-    metric_code: str
-    ok: bool
-    message: str = ""
-
-
-class MetricBatchResponse(BaseModel):
-    """批量操作响应。"""
-
-    results: list[MetricBatchItemResult]
-    ok_count: int
-    fail_count: int
 
 
 class MetricApproveRequest(BaseModel):

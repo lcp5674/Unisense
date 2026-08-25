@@ -306,8 +306,8 @@ describe("MetricCreate 批量注册指标", () => {
     });
     mockedBatchSubmit.mockResolvedValue({
       results: [
-        { metric_code: "sales_gmv_day", ok: true, message: "" },
-        { metric_code: "sales_order_cnt_day", ok: true, message: "" },
+        { code: "sales_gmv_day", ok: true, message: "" },
+        { code: "sales_order_cnt_day", ok: true, message: "" },
       ],
       ok_count: 2,
       fail_count: 0,
@@ -320,8 +320,8 @@ describe("MetricCreate 批量注册指标", () => {
     fireEvent.click(within(modal).getByText("批量提交评审"));
     await waitFor(() => {
       expect(mockedBatchSubmit).toHaveBeenCalledWith([
-        { metric_code: "sales_gmv_day", change_reason: "批量注册后提交评审", reviewer_type: "domain", reviewer_id: undefined },
-        { metric_code: "sales_order_cnt_day", change_reason: "批量注册后提交评审", reviewer_type: "domain", reviewer_id: undefined },
+        { code: "sales_gmv_day", change_reason: "批量注册后提交评审", reviewer_type: "domain", reviewer_id: undefined },
+        { code: "sales_order_cnt_day", change_reason: "批量注册后提交评审", reviewer_type: "domain", reviewer_id: undefined },
       ]);
     });
     await waitFor(() => expect(screen.getByText(/批量提交完成：成功 2 \/ 失败 0/)).toBeTruthy());

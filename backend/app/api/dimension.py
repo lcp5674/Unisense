@@ -7,8 +7,19 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.batch_common import (
+    BatchCodesRequest,
+    BatchRejectRequest,
+    BatchResponse,
+    BatchSubmitItem,
+    BatchSubmitRequest,
+    batch_audit_action,
+    batch_failed_codes,
+    batch_response,
+    run_batch,
+)
 from app.api.deps import CurrentUser, require_roles
-from app.api.responses import get_trace_id, ok
+from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
 from app.core.exceptions import AuthError, NotFoundError
 from app.core.guard import guard_against_injection
@@ -519,6 +530,206 @@ async def reject_dimension(
     )
     await db.commit()
     return ok(data=DimensionResponse.from_model(dim), trace_id=trace_id)
+
+
+# ---- 批量治理端点（TD §13：逐条收集结果不整体失败；执行语义统一 app.api.batch_common）----
+
+
+@router.post(
+    "/batch-submit",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量提交维度审核（DRAFT → REVIEW，可带评审指派）",
+    dependencies=_WRITE_DEPS,
+)
+async def batch_submit_dimensions(
+    request: BatchSubmitRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条 DRAFT→REVIEW；单条失败不阻断其余（返回逐条结果）。"""
+    service = DimensionService(db)
+
+    async def run_one(item: BatchSubmitItem) -> None:
+        # 域作用域守卫（P1-10）：domain_admin/metric_owner 仅可操作本域资源
+        dim = await service.get_dimension(item.code)
+        if dim is None:
+            raise NotFoundError(f"维度不存在: {item.code}")
+        _assert_domain_scope(user, dim.domain)
+        await service.submit_dimension(
+            item.code,
+            ReviewSubmitRequest(
+                change_reason=item.change_reason,
+                reviewer_id=item.reviewer_id,
+                reviewer_type=item.reviewer_type,
+                reviewer_domain=item.reviewer_domain,
+            ),
+            actor_id=user.id,
+            role=user.role,
+            user_domain=user.domain,
+        )
+
+    results = await run_batch(
+        db,
+        units=request.items,
+        code_of=lambda item: item.code,
+        run=run_one,
+        abort_message="批量提交内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("dimension.batch_submit", results),
+        entity_type="dimension",
+        entity_id=f"batch:{len(request.items)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+            "fail": sum(1 for r in results if not r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=batch_response(results), trace_id=trace_id)
+
+
+@router.post(
+    "/batch-approve",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量审核通过维度（REVIEW → PUBLISHED，即批量发布）",
+    dependencies=_REVIEW_DEPS,
+)
+async def batch_approve_dimensions(
+    request: BatchCodesRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条 REVIEW→PUBLISHED；评审人指派校验由 service 层逐条执行。"""
+    service = DimensionService(db)
+    results = await run_batch(
+        db,
+        units=request.codes,
+        code_of=lambda code: code,
+        run=lambda code: service.approve_dimension(
+            code,
+            ReviewApproveRequest(),
+            actor_id=user.id,
+            role=user.role,
+            user_domain=user.domain,
+        ),
+        abort_message="批量通过内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("dimension.batch_approve", results),
+        entity_type="dimension",
+        entity_id=f"batch:{len(request.codes)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=batch_response(results), trace_id=trace_id)
+
+
+@router.post(
+    "/batch-reject",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量审核驳回维度（REVIEW → DRAFT）",
+    dependencies=_REVIEW_DEPS,
+)
+async def batch_reject_dimensions(
+    request: BatchRejectRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条 REVIEW→DRAFT；驳回原因统一作用于所有项并落库可追溯。"""
+    service = DimensionService(db)
+    results = await run_batch(
+        db,
+        units=request.codes,
+        code_of=lambda code: code,
+        run=lambda code: service.reject_dimension(
+            code,
+            ReviewRejectRequest(reason=request.reason),
+            actor_id=user.id,
+            role=user.role,
+            user_domain=user.domain,
+        ),
+        abort_message="批量驳回内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("dimension.batch_reject", results),
+        entity_type="dimension",
+        entity_id=f"batch:{len(request.codes)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=batch_response(results), trace_id=trace_id)
+
+
+@router.post(
+    "/batch-deprecate",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量废弃维度（PUBLISHED → DEPRECATED）",
+    dependencies=_WRITE_DEPS,
+)
+async def batch_deprecate_dimensions(
+    request: BatchCodesRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条 PUBLISHED→DEPRECATED（被指标绑定者由 service 层废弃保护拦截）。"""
+    service = DimensionService(db)
+
+    async def run_one(code: str) -> None:
+        dim = await service.get_dimension(code)
+        if dim is None:
+            raise NotFoundError(f"维度不存在: {code}")
+        _assert_domain_scope(user, dim.domain)
+        await service.deprecate_dimension(code)
+
+    results = await run_batch(
+        db,
+        units=request.codes,
+        code_of=lambda code: code,
+        run=run_one,
+        abort_message="批量废弃内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("dimension.batch_deprecate", results),
+        entity_type="dimension",
+        entity_id=f"batch:{len(request.codes)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=batch_response(results), trace_id=trace_id)
 
 
 @router.post("/{dim_code}/members", dependencies=_WRITE_DEPS + [Depends(_scope_dimension)])

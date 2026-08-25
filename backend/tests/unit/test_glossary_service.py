@@ -430,49 +430,6 @@ async def test_update_term_code_conflict_raises() -> None:
         assert exc.error_code == "TERM_EXISTS"
 
 
-async def test_batch_submit_terms_partial_failure() -> None:
-    """批量发布：逐条处理，部分失败不阻断成功项（207 语义）。"""
-    db = MagicMock()
-    svc = GlossaryService(db)
-    # submit_term 内部依赖 _require_term + _snapshot + _repo.commit
-    repo = MagicMock()
-    draft = _make_term()
-    draft.term_code = "ok1"
-    _persist(draft)
-    repo.get_term = AsyncMock(side_effect=lambda code: draft if code == "ok1" else None)
-    repo.count_term_versions = AsyncMock(return_value=0)
-    repo.save_term_version = AsyncMock()
-    repo.commit = AsyncMock()
-    svc._repo = repo
-
-    results = await svc.batch_submit_terms(["ok1", "missing2"], 1)
-    assert len(results) == 2
-    assert results[0]["ok"] is True and results[0]["status"] == "PUBLISHED"
-    assert results[1]["ok"] is False
-
-
-async def test_batch_deprecate_terms_all_success() -> None:
-    """批量废弃全成功。"""
-    db = MagicMock()
-    svc = GlossaryService(db)
-    repo = MagicMock()
-    t1 = _make_term()
-    t1.term_code = "a1"
-    t2 = _make_term()
-    t2.term_code = "a2"
-    _persist(t1)
-    _persist(t2)
-    repo.get_term = AsyncMock(side_effect=lambda code: t1 if code == "a1" else t2)
-    repo.count_term_versions = AsyncMock(return_value=0)
-    repo.save_term_version = AsyncMock()
-    repo.commit = AsyncMock()
-    svc._repo = repo
-
-    results = await svc.batch_deprecate_terms(["a1", "a2"], 1)
-    assert all(r["ok"] for r in results)
-    assert all(r["status"] == "DEPRECATED" for r in results)
-
-
 def test_relation_type_enum_has_eight_values() -> None:
     """关系类型枚举扩展为 8 种（产品丰富增强）。"""
     from app.models.glossary import TermRelationType

@@ -85,8 +85,8 @@ import {
   ArchivedMetricResponse,
   MetricBatchRegisterRequest,
   MetricBatchRegisterResult,
-  MetricBatchResult,
-  MetricBatchSubmitItem,
+  BatchResult,
+  BatchSubmitItem,
   MetricCreateRequest,
   MetricListResponse,
   MetricDimension,
@@ -757,20 +757,20 @@ export async function submitReview(
 
 // 批量提交审核（可带评审指派）
 export async function batchSubmitMetrics(
-  items: MetricBatchSubmitItem[],
-): Promise<MetricBatchResult> {
-  return request<MetricBatchResult>(`${API_BASE}/metric-definitions/batch-submit`, {
+  items: BatchSubmitItem[],
+): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/metric-definitions/batch-submit`, {
     method: "POST",
     body: JSON.stringify({ items }),
   });
 }
 
-// 批量审核通过（= 批量发布）
+// 批量审核通过（= 批量发布；后端保留灰度参数 mode/gray_tenant_ids）
 export async function batchApproveMetrics(
   metricCodes: string[],
   mode: "standard" | "experimental" = "standard",
-): Promise<MetricBatchResult> {
-  return request<MetricBatchResult>(`${API_BASE}/metric-definitions/batch-approve`, {
+): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/metric-definitions/batch-approve`, {
     method: "POST",
     body: JSON.stringify({ metric_codes: metricCodes, mode }),
   });
@@ -780,18 +780,18 @@ export async function batchApproveMetrics(
 export async function batchRejectMetrics(
   metricCodes: string[],
   reason: string,
-): Promise<MetricBatchResult> {
-  return request<MetricBatchResult>(`${API_BASE}/metric-definitions/batch-reject`, {
+): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/metric-definitions/batch-reject`, {
     method: "POST",
-    body: JSON.stringify({ metric_codes: metricCodes, reason }),
+    body: JSON.stringify({ codes: metricCodes, reason }),
   });
 }
 
 // 批量下线（废弃，每项须带替代指标）
 export async function batchDeprecateMetrics(
   items: { metric_code: string; successor_code: string }[],
-): Promise<MetricBatchResult> {
-  return request<MetricBatchResult>(`${API_BASE}/metric-definitions/batch-deprecate`, {
+): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/metric-definitions/batch-deprecate`, {
     method: "POST",
     body: JSON.stringify({ items }),
   });
@@ -1634,6 +1634,40 @@ export async function deprecateDimension(dimCode: string): Promise<Dimension> {
   });
 }
 
+// ---- 维度批量治理（TD §13，后端统一 app/api/batch_common）----
+
+/** 批量提交维度审核（DRAFT → REVIEW，可带评审指派） */
+export async function batchSubmitDimensions(items: BatchSubmitItem[]): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/dimensions/batch-submit`, {
+    method: "POST",
+    body: JSON.stringify({ items }),
+  });
+}
+
+/** 批量审核通过维度（REVIEW → PUBLISHED） */
+export async function batchApproveDimensions(codes: string[]): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/dimensions/batch-approve`, {
+    method: "POST",
+    body: JSON.stringify({ codes }),
+  });
+}
+
+/** 批量审核驳回维度（REVIEW → DRAFT，原因必填） */
+export async function batchRejectDimensions(codes: string[], reason: string): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/dimensions/batch-reject`, {
+    method: "POST",
+    body: JSON.stringify({ codes, reason }),
+  });
+}
+
+/** 批量废弃维度（PUBLISHED → DEPRECATED） */
+export async function batchDeprecateDimensions(codes: string[]): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/dimensions/batch-deprecate`, {
+    method: "POST",
+    body: JSON.stringify({ codes }),
+  });
+}
+
 export async function listDimensionMappings(
   sourceDimCode?: string,
   pageSize = 200,
@@ -1823,6 +1857,40 @@ export async function deprecateMeasureCatalog(measureCode: string): Promise<Meas
     `${API_BASE}/measure-catalogs/${encodeURIComponent(measureCode)}/deprecate`,
     { method: "POST" },
   );
+}
+
+// ---- 逻辑度量批量治理（TD §13，后端统一 app/api/batch_common）----
+
+/** 批量提交逻辑度量审核（DRAFT → REVIEW，可带评审指派） */
+export async function batchSubmitMeasures(items: BatchSubmitItem[]): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/measure-catalogs/batch-submit`, {
+    method: "POST",
+    body: JSON.stringify({ items }),
+  });
+}
+
+/** 批量审核通过逻辑度量（REVIEW → PUBLISHED） */
+export async function batchApproveMeasures(codes: string[]): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/measure-catalogs/batch-approve`, {
+    method: "POST",
+    body: JSON.stringify({ codes }),
+  });
+}
+
+/** 批量审核驳回逻辑度量（REVIEW → DRAFT，原因必填） */
+export async function batchRejectMeasures(codes: string[], reason: string): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/measure-catalogs/batch-reject`, {
+    method: "POST",
+    body: JSON.stringify({ codes, reason }),
+  });
+}
+
+/** 批量废弃逻辑度量（PUBLISHED → DEPRECATED） */
+export async function batchDeprecateMeasures(codes: string[]): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/measure-catalogs/batch-deprecate`, {
+    method: "POST",
+    body: JSON.stringify({ codes }),
+  });
 }
 
 // ---- 指标挂载实体（OneData 挂载层，/api/v1/metric-mounts）----
@@ -2171,25 +2239,46 @@ export async function inferTermSuggestion(name: string): Promise<TermInferResult
   });
 }
 
-// 批量发布/废弃术语（POST /terms/batch-submit | batch-deprecate，207 语义逐条结果）
-export type TermBatchResultItem = {
-  term_code: string;
-  ok: boolean;
-  status?: string;
-  error?: string;
-};
+// ---- 术语批量治理（TD §13，后端统一 app/api/batch_common）----
+// 业务用户批量发布须走 submit+approve 审核流；批量导入/种子走 admin 直发 batch-publish。
 
-export async function batchSubmitTerms(termCodes: string[]): Promise<TermBatchResultItem[]> {
-  return request<TermBatchResultItem[]>(`${API_BASE}/terms/batch-submit`, {
+/** 批量提交术语审核（DRAFT → REVIEW，可带评审指派） */
+export async function batchSubmitTerms(items: BatchSubmitItem[]): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/terms/batch-submit`, {
     method: "POST",
-    body: JSON.stringify({ term_codes: termCodes }),
+    body: JSON.stringify({ items }),
   });
 }
 
-export async function batchDeprecateTerms(termCodes: string[]): Promise<TermBatchResultItem[]> {
-  return request<TermBatchResultItem[]>(`${API_BASE}/terms/batch-deprecate`, {
+/** 批量发布术语（platform_admin 直发通道，绕过单条审核） */
+export async function batchPublishTerms(codes: string[]): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/terms/batch-publish`, {
     method: "POST",
-    body: JSON.stringify({ term_codes: termCodes }),
+    body: JSON.stringify({ codes }),
+  });
+}
+
+/** 批量审核通过术语（REVIEW → PUBLISHED） */
+export async function batchApproveTerms(codes: string[]): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/terms/batch-approve`, {
+    method: "POST",
+    body: JSON.stringify({ codes }),
+  });
+}
+
+/** 批量审核驳回术语（REVIEW → DRAFT，原因必填） */
+export async function batchRejectTerms(codes: string[], reason: string): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/terms/batch-reject`, {
+    method: "POST",
+    body: JSON.stringify({ codes, reason }),
+  });
+}
+
+/** 批量废弃术语（PUBLISHED → DEPRECATED） */
+export async function batchDeprecateTerms(codes: string[]): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/terms/batch-deprecate`, {
+    method: "POST",
+    body: JSON.stringify({ codes }),
   });
 }
 

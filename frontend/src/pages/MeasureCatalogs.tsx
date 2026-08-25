@@ -9,6 +9,10 @@ import {
 import {
   approveMeasureCatalog,
   autoSuggestMeasureCatalog,
+  batchApproveMeasures,
+  batchDeprecateMeasures,
+  batchRejectMeasures,
+  batchSubmitMeasures,
   createMeasureCatalog,
   deprecateMeasureCatalog,
   fetchCurrentUser,
@@ -20,10 +24,11 @@ import {
   updateMeasureCatalog,
 } from "../api";
 import type { ReviewSubmitBody } from "../api";
-import type { CurrentUser, MeasureCatalog, MeasureCategory, MeasureFormat, MeasureSuggestResult, SubjectDomainTreeNode } from "../types";
+import type { BatchResult, CurrentUser, MeasureCatalog, MeasureCategory, MeasureFormat, MeasureSuggestResult, SubjectDomainTreeNode } from "../types";
 import { MEASURE_CATEGORY_LABEL, MEASURE_FORMAT_LABEL } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 import { usePermission } from "../hooks/usePermission";
+import { MasterDataBatch, type BatchActionKey } from "../components/MasterDataBatch";
 import {
   MasterDataReviewActions,
   MasterDataReviewModals,
@@ -95,6 +100,38 @@ export function MeasureCatalogs() {
   const review = useMasterDataReview();
   const [form] = Form.useForm();
   const watchFormat = Form.useWatch("measure_format", form);
+  // 批量操作：多选行（rowSelection）+ 共享 MasterDataBatch 组件（对齐指标完整批量模式）
+  const [selected, setSelected] = useState<MeasureCatalog[]>([]);
+  // 评审角色判断（对齐后端 _REVIEW_ROLES）：平台管理员/域管理员/评审员可审
+  const canReview =
+    !!currentUser &&
+    (currentUser.role === "platform_admin" ||
+      currentUser.role === "domain_admin" ||
+      currentUser.role === "reviewer");
+
+  async function runBatch(action: BatchActionKey, opts: {
+    codes: string[];
+    reason?: string;
+    changeReason?: string;
+    reviewerType?: "user" | "domain" | null;
+    reviewerId?: number | null;
+    reviewerDomain?: string | null;
+  }): Promise<BatchResult> {
+    if (action === "submit") {
+      return batchSubmitMeasures(
+        opts.codes.map((code) => ({
+          code,
+          change_reason: opts.changeReason ?? "批量提交审核",
+          reviewer_id: opts.reviewerType === "user" ? opts.reviewerId : null,
+          reviewer_type: opts.reviewerType,
+          reviewer_domain: opts.reviewerType === "domain" ? opts.reviewerDomain : null,
+        })),
+      );
+    }
+    if (action === "approve") return batchApproveMeasures(opts.codes);
+    if (action === "reject") return batchRejectMeasures(opts.codes, opts.reason ?? "");
+    return batchDeprecateMeasures(opts.codes);
+  }
 
   async function load() {
     setLoading(true);
@@ -349,12 +386,34 @@ export function MeasureCatalogs() {
             setStatus(v);
           }}
         />
+        <MasterDataBatch
+          selected={selected}
+          codeKey="measure_code"
+          entityLabel="逻辑度量"
+          actions={[
+            { key: "submit", label: "批量提交审核（草稿）" },
+            { key: "approve", label: "批量通过（审核中）" },
+            { key: "reject", label: "批量驳回（审核中）" },
+            { key: "deprecate", label: "批量废弃（已发布）", danger: true },
+          ]}
+          canRun={(a) => (a === "approve" || a === "reject" ? !!canReview : canWrite)}
+          onRun={runBatch}
+          onDone={() => {
+            setSelected([]);
+            void load();
+          }}
+          reviewerDomainOptions={domainOptions}
+        />
       </Space>
 
       <Table<MeasureCatalog>
         rowKey="id"
         loading={loading}
         dataSource={items}
+        rowSelection={{
+          selectedRowKeys: selected.map((s) => s.id),
+          onChange: (_keys, rows) => setSelected(rows),
+        }}
         pagination={{
           current: page,
           pageSize,

@@ -32,6 +32,9 @@ vi.mock("../api", () => {
     rejectTerm: vi.fn(),
     deprecateTerm: vi.fn(),
     batchSubmitTerms: vi.fn(),
+    batchPublishTerms: vi.fn(),
+    batchApproveTerms: vi.fn(),
+    batchRejectTerms: vi.fn(),
     batchDeprecateTerms: vi.fn(),
     inferTermSuggestion: vi.fn(),
     listDomainTree: vi.fn(),
@@ -118,6 +121,7 @@ beforeEach(() => {
   mockedList.mockResolvedValue({ items: TERMS, total: 2, page: 1, page_size: 20 });
   mockedConflicts.mockResolvedValue({ items: [], total: 0 });
   mockedListFavorites.mockResolvedValue([]);
+  mockedUsers.mockResolvedValue([]);
   mockedDomainTree.mockResolvedValue([]);
   mockedListRelations.mockResolvedValue({ items: [], total: 0 });
   mockedFetchCurrentUser.mockResolvedValue({
@@ -423,44 +427,62 @@ describe("Glossary 页面", () => {
     });
   });
 
-  it("批量操作：勾选行后批量发布按钮可用，提交调用 batchSubmitTerms", async () => {
-    mockedBatchSubmit.mockResolvedValue([{ term_code: "GMV", ok: true, status: "PUBLISHED" }]);
+  it("批量操作：勾选行后「批量提交审核」可用，确认弹窗提交调用 batchSubmitTerms", async () => {
+    mockedBatchSubmit.mockResolvedValue({
+      results: [{ code: "GMV", ok: true, message: "" }],
+      ok_count: 1,
+      fail_count: 0,
+    });
     render(
       <MemoryRouter initialEntries={["/glossary"]}>
         <Glossary />
       </MemoryRouter>,
     );
     await screen.findAllByText("共 2 条");
-    const submitBtn = screen.getByRole("button", { name: /批量发布/ }) as HTMLButtonElement;
-    expect(submitBtn.disabled).toBe(true);
+    const batchBtn = screen.getByRole("button", { name: /批量操作/ }) as HTMLButtonElement;
+    expect(batchBtn.disabled).toBe(true);
     // 勾选第一行（[0] 是表头全选，[1] 是第一行）
     fireEvent.click(screen.getAllByRole("checkbox")[1]);
-    expect(submitBtn.disabled).toBe(false);
-    fireEvent.click(submitBtn);
-    // 可控确认弹窗（文本被 <b> 数字拆分，用前缀匹配；ok 按钮 antd 双字加空格）
-    await screen.findByText(/确定发布选中的/);
-    fireEvent.click(screen.getByRole("button", { name: "发 布" }));
+    expect(batchBtn.disabled).toBe(false);
+    fireEvent.click(batchBtn);
+    // Dropdown 菜单 → 批量提交审核（草稿）
+    fireEvent.click(await screen.findByText("批量提交审核（草稿）"));
+    // 确认弹窗（提交说明初始值「批量提交术语审核」满足 min 4，直接确认）
+    await screen.findByText(/确定批量提交审核选中的/);
+    fireEvent.click(screen.getByRole("button", { name: "提交审核" }));
     await waitFor(() => {
-      expect(mockedBatchSubmit).toHaveBeenCalledWith(["GMV"]);
+      expect(mockedBatchSubmit).toHaveBeenCalledWith([
+        { code: "GMV", change_reason: "批量提交术语审核", reviewer_id: null, reviewer_type: null, reviewer_domain: null },
+      ]);
     });
   });
 
-  it("批量废弃：勾选行 → 确认弹窗 → 调用 batchDeprecateTerms", async () => {
-    mockedBatchDeprecate.mockResolvedValue([
-      { term_code: "GMV", ok: true, status: "DEPRECATED" },
-    ]);
+  it("批量废弃：勾选行 → 批量操作下拉 → 确认弹窗 → 调用 batchDeprecateTerms", async () => {
+    mockedBatchDeprecate.mockResolvedValue({
+      results: [{ code: "GMV", ok: true, message: "" }],
+      ok_count: 1,
+      fail_count: 0,
+    });
+    // 批量废弃只对已发布（PUBLISHED）生效——提供一条已发布术语
+    mockedList.mockResolvedValue({
+      items: [{ ...TERMS[0], status: "PUBLISHED" }],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
     render(
       <MemoryRouter initialEntries={["/glossary"]}>
         <Glossary />
       </MemoryRouter>,
     );
-    await screen.findAllByText("共 2 条");
-    const depBtn = screen.getByRole("button", { name: /批量废弃/ }) as HTMLButtonElement;
-    expect(depBtn.disabled).toBe(true);
+    await screen.findAllByText("共 1 条");
+    const batchBtn = screen.getByRole("button", { name: /批量操作/ }) as HTMLButtonElement;
+    expect(batchBtn.disabled).toBe(true);
     fireEvent.click(screen.getAllByRole("checkbox")[1]);
-    expect(depBtn.disabled).toBe(false);
-    fireEvent.click(depBtn);
-    await screen.findByText(/确定废弃选中的/);
+    expect(batchBtn.disabled).toBe(false);
+    fireEvent.click(batchBtn);
+    fireEvent.click(await screen.findByText("批量废弃（已发布）"));
+    await screen.findByText(/确定批量废弃选中的/);
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "废 弃" }));
     await waitFor(() => {

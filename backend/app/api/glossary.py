@@ -7,14 +7,23 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.batch_common import (
+    BatchCodesRequest,
+    BatchRejectRequest,
+    BatchResponse,
+    BatchSubmitRequest,
+    batch_audit_action,
+    batch_failed_codes,
+    batch_response,
+    run_batch,
+)
 from app.api.deps import CurrentUser, require_roles
-from app.api.responses import get_trace_id, ok
+from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.services.glossary.schemas import (
     ConflictResolve,
-    TermBatchOp,
     TermCreate,
     TermNameInfer,
     TermRelationCreate,
@@ -87,51 +96,231 @@ async def infer_term_suggestion(
     return ok(data=data, trace_id=trace_id)
 
 
-@router.post("/batch-submit", dependencies=_WRITE_DEPS + [Depends(require_roles(*_ADMIN_ROLES))])
+# ---- 批量治理端点（TD §13：逐条收集结果不整体失败；执行语义统一 app.api.batch_common）----
+# 业务用户批量发布须走 submit+approve 审核流；批量导入/种子走 admin 直发 batch-publish。
+
+
+@router.post(
+    "/batch-submit",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量提交术语审核（DRAFT → REVIEW，可带评审指派）",
+    dependencies=_WRITE_DEPS,
+)
 async def batch_submit_terms(
-    payload: TermBatchOp,
+    request: BatchSubmitRequest,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
-) -> Any:
-    """批量发布术语（207 语义：逐条处理，部分失败不阻断成功项）。
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条 DRAFT→REVIEW；单条失败不阻断其余（返回逐条结果）。"""
+    service = GlossaryService(db)
 
-    批量导入走 admin 直发通道（绕过单条审核）；业务用户单条发布须走 submit+approve 审核流。
-    """
-    data = await GlossaryService(db).batch_submit_terms(payload.term_codes, user.id)
+    async def run_one(item) -> None:
+        await service.submit_term(
+            item.code,
+            ReviewSubmitRequest(
+                change_reason=item.change_reason,
+                reviewer_id=item.reviewer_id,
+                reviewer_type=item.reviewer_type,
+                reviewer_domain=item.reviewer_domain,
+            ),
+            actor_id=user.id,
+            role=user.role,
+            user_domain=user.domain,
+        )
+
+    results = await run_batch(
+        db,
+        units=request.items,
+        code_of=lambda item: item.code,
+        run=run_one,
+        abort_message="批量提交内部错误，已中止后续项",
+    )
     await write_audit(
         db,
         actor_id=user.id,
-        action="term.batch_submit",
+        action=batch_audit_action("term.batch_submit", results),
         entity_type="term",
-        entity_id=f"count={len(payload.term_codes)}",
-        detail={"term_codes": payload.term_codes},
+        entity_id=f"batch:{len(request.items)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+            "fail": sum(1 for r in results if not r.ok),
+        },
+        ip=client_ip(http_req),
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data=data, trace_id=trace_id)
+    return ok(data=batch_response(results), trace_id=trace_id)
 
 
-@router.post("/batch-deprecate", dependencies=_WRITE_DEPS)
+@router.post(
+    "/batch-publish",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量发布术语（platform_admin 直发通道，绕过单条审核）",
+    dependencies=_WRITE_DEPS + [Depends(require_roles(*_ADMIN_ROLES))],
+)
+async def batch_publish_terms(
+    request: BatchCodesRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """批量导入/种子走 admin 直发（DRAFT/DEPRECATED → PUBLISHED，幂等跳过已发布）。"""
+    service = GlossaryService(db)
+    results = await run_batch(
+        db,
+        units=request.codes,
+        code_of=lambda code: code,
+        run=lambda code: service.publish_term(code, user.id),
+        abort_message="批量发布内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("term.batch_publish", results),
+        entity_type="term",
+        entity_id=f"batch:{len(request.codes)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=batch_response(results), trace_id=trace_id)
+
+
+@router.post(
+    "/batch-approve",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量审核通过术语（REVIEW → PUBLISHED，即批量发布）",
+    dependencies=_REVIEW_DEPS,
+)
+async def batch_approve_terms(
+    request: BatchCodesRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条 REVIEW→PUBLISHED；评审人指派校验由 service 层逐条执行。"""
+    service = GlossaryService(db)
+    results = await run_batch(
+        db,
+        units=request.codes,
+        code_of=lambda code: code,
+        run=lambda code: service.approve_term(
+            code,
+            ReviewApproveRequest(),
+            actor_id=user.id,
+            role=user.role,
+            user_domain=user.domain,
+        ),
+        abort_message="批量通过内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("term.batch_approve", results),
+        entity_type="term",
+        entity_id=f"batch:{len(request.codes)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=batch_response(results), trace_id=trace_id)
+
+
+@router.post(
+    "/batch-reject",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量审核驳回术语（REVIEW → DRAFT）",
+    dependencies=_REVIEW_DEPS,
+)
+async def batch_reject_terms(
+    request: BatchRejectRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条 REVIEW→DRAFT；驳回原因统一作用于所有项并落库可追溯。"""
+    service = GlossaryService(db)
+    results = await run_batch(
+        db,
+        units=request.codes,
+        code_of=lambda code: code,
+        run=lambda code: service.reject_term(
+            code,
+            ReviewRejectRequest(reason=request.reason),
+            actor_id=user.id,
+            role=user.role,
+            user_domain=user.domain,
+        ),
+        abort_message="批量驳回内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("term.batch_reject", results),
+        entity_type="term",
+        entity_id=f"batch:{len(request.codes)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=batch_response(results), trace_id=trace_id)
+
+
+@router.post(
+    "/batch-deprecate",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量废弃术语（PUBLISHED → DEPRECATED）",
+    dependencies=_WRITE_DEPS,
+)
 async def batch_deprecate_terms(
-    payload: TermBatchOp,
+    request: BatchCodesRequest,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
-) -> Any:
-    """批量废弃术语（207 语义：逐条处理，部分失败不阻断成功项）。"""
-    data = await GlossaryService(db).batch_deprecate_terms(payload.term_codes, user.id)
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条 PUBLISHED→DEPRECATED（已废弃幂等跳过）。"""
+    service = GlossaryService(db)
+    results = await run_batch(
+        db,
+        units=request.codes,
+        code_of=lambda code: code,
+        run=lambda code: service.deprecate_term(code, user.id),
+        abort_message="批量废弃内部错误，已中止后续项",
+    )
     await write_audit(
         db,
         actor_id=user.id,
-        action="term.batch_deprecate",
+        action=batch_audit_action("term.batch_deprecate", results),
         entity_type="term",
-        entity_id=f"count={len(payload.term_codes)}",
-        detail={"term_codes": payload.term_codes},
+        entity_id=f"batch:{len(request.codes)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
+        ip=client_ip(http_req),
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data=data, trace_id=trace_id)
+    return ok(data=batch_response(results), trace_id=trace_id)
 
 
 @router.get("", dependencies=_READ_DEPS)

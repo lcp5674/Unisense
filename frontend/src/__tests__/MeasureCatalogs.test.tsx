@@ -14,6 +14,10 @@ vi.mock("../api", () => ({
   submitMeasureCatalog: vi.fn(),
   approveMeasureCatalog: vi.fn(),
   rejectMeasureCatalog: vi.fn(),
+  batchSubmitMeasures: vi.fn(),
+  batchApproveMeasures: vi.fn(),
+  batchRejectMeasures: vi.fn(),
+  batchDeprecateMeasures: vi.fn(),
   fetchCurrentUser: vi.fn(),
   listDomainTree: vi.fn(),
   listUsers: vi.fn(),
@@ -24,6 +28,7 @@ vi.mock("../api", () => ({
 import {
   approveMeasureCatalog,
   autoSuggestMeasureCatalog,
+  batchSubmitMeasures,
   createMeasureCatalog,
   fetchCurrentUser,
   listDomainTree,
@@ -41,6 +46,7 @@ const mockedCreate = vi.mocked(createMeasureCatalog);
 const mockedSubmit = vi.mocked(submitMeasureCatalog);
 const mockedApprove = vi.mocked(approveMeasureCatalog);
 const mockedReject = vi.mocked(rejectMeasureCatalog);
+const mockedBatchSubmit = vi.mocked(batchSubmitMeasures);
 const mockedCurrentUser = vi.mocked(fetchCurrentUser);
 const mockedUsers = vi.mocked(listUsers);
 
@@ -339,5 +345,35 @@ describe("MeasureCatalogs 审核流（提交审核/通过/驳回）", () => {
       }),
     );
     expect(await screen.findByText(/已提交审核/)).toBeInTheDocument();
+  });
+
+  it("批量操作：勾选草稿逻辑度量 → 批量提交审核 → 调用 batchSubmitMeasures", async () => {
+    mockedBatchSubmit.mockResolvedValue({
+      results: [{ code: "medical_fee_men_zhen_shou_fei", ok: true, message: "" }],
+      ok_count: 1,
+      fail_count: 0,
+    });
+    renderCatalogs();
+    await screen.findByText("门诊收费金额");
+    // 勾选表头全选（measure 为 DRAFT，可批量提交审核）
+    const selectAll = document.querySelector(".ant-table-selection-column input[type=checkbox]") as Element;
+    fireEvent.click(selectAll);
+    const batchBtn = screen.getByRole("button", { name: /批量操作/ }) as HTMLButtonElement;
+    expect(batchBtn.disabled).toBe(false);
+    fireEvent.click(batchBtn);
+    fireEvent.click(await screen.findByText("批量提交审核（草稿）"));
+    await screen.findByText(/确定批量提交审核选中的/);
+    fireEvent.click(screen.getByRole("button", { name: "提交审核" }));
+    await waitFor(() => {
+      expect(mockedBatchSubmit).toHaveBeenCalledWith([
+        {
+          code: "medical_fee_men_zhen_shou_fei",
+          change_reason: "批量提交逻辑度量审核",
+          reviewer_id: null,
+          reviewer_type: null,
+          reviewer_domain: null,
+        },
+      ]);
+    });
   });
 });

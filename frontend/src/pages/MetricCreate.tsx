@@ -1770,7 +1770,7 @@ export function MetricCreate() {
                   try {
                     const res = await batchSubmitMetrics(
                       codes.map((metric_code) => ({
-                        metric_code,
+                        code: metric_code,
                         change_reason: "批量注册后提交评审",
                         reviewer_type: batchReviewerType,
                         reviewer_id: batchReviewerType === "user" ? batchReviewerId : undefined,

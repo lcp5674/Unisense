@@ -50,8 +50,8 @@ async def test_batch_submit_mixed_results(client):
             "/api/v1/metric-definitions/batch-submit",
             json={
                 "items": [
-                    {"metric_code": "sales_gmv_daily", "change_reason": "首次提交审核"},
-                    {"metric_code": "bad_metric", "change_reason": "首次提交审核"},
+                    {"code": "sales_gmv_daily", "change_reason": "首次提交审核"},
+                    {"code": "bad_metric", "change_reason": "首次提交审核"},
                 ]
             },
         )
@@ -60,7 +60,7 @@ async def test_batch_submit_mixed_results(client):
     body = resp.json()["data"]
     assert body["ok_count"] == 1
     assert body["fail_count"] == 1
-    by_code = {r["metric_code"]: r for r in body["results"]}
+    by_code = {r["code"]: r for r in body["results"]}
     assert by_code["sales_gmv_daily"]["ok"] is True
     assert by_code["bad_metric"]["ok"] is False
     assert "指标不存在" in by_code["bad_metric"]["message"]
@@ -80,7 +80,7 @@ async def test_batch_submit_sanitizes_unknown_exception(client):
         resp = await client.post(
             "/api/v1/metric-definitions/batch-submit",
             json={
-                "items": [{"metric_code": "sales_gmv_daily", "change_reason": "首次提交审核"}]
+                "items": [{"code": "sales_gmv_daily", "change_reason": "首次提交审核"}]
             },
         )
 
@@ -108,7 +108,7 @@ async def test_batch_submit_passes_reviewer_assignment(client):
             json={
                 "items": [
                     {
-                        "metric_code": "sales_gmv_daily",
+                        "code": "sales_gmv_daily",
                         "change_reason": "提交审核",
                         "reviewer_id": 7,
                         "reviewer_type": "user",
@@ -148,7 +148,7 @@ async def test_batch_approve_mixed_results(client):
     body = resp.json()["data"]
     assert body["ok_count"] == 1
     assert body["fail_count"] == 1
-    by_code = {r["metric_code"]: r for r in body["results"]}
+    by_code = {r["code"]: r for r in body["results"]}
     assert by_code["pii_metric"]["ok"] is False
     assert "合规" in by_code["pii_metric"]["message"]
 
@@ -200,7 +200,7 @@ async def test_batch_reject_mixed_results(client):
         with _as_reviewer():
             resp = await client.post(
                 "/api/v1/metric-definitions/batch-reject",
-                json={"metric_codes": ["sales_gmv_daily", "x"], "reason": "口径需调整"},
+                json={"codes": ["sales_gmv_daily", "x"], "reason": "口径需调整"},
             )
 
     assert resp.status_code == 200
@@ -239,7 +239,7 @@ async def test_batch_deprecate_mixed_results(client):
     body = resp.json()["data"]
     assert body["ok_count"] == 1
     assert body["fail_count"] == 1
-    by_code = {r["metric_code"]: r for r in body["results"]}
+    by_code = {r["code"]: r for r in body["results"]}
     assert by_code["no_successor"]["ok"] is False
     assert "未发布" in by_code["no_successor"]["message"]
 
@@ -257,16 +257,16 @@ async def test_batch_submit_empty_items_422(client):
 
 async def test_run_batch_all_success():
     """全部成功 → 逐条 ok，不触发回滚。"""
-    from app.api.metrics import _run_batch
+    from app.api.batch_common import run_batch
 
     db = MagicMock()
     db.rollback = AsyncMock()
     units = [{"code": "a"}, {"code": "b"}]
     run = AsyncMock()
-    results = await _run_batch(
+    results = await run_batch(
         db, units=units, code_of=lambda u: u["code"], run=run, abort_message="aborted"
     )
-    assert [r.metric_code for r in results] == ["a", "b"]
+    assert [r.code for r in results] == ["a", "b"]
     assert all(r.ok for r in results)
     assert run.await_count == 2
     db.rollback.assert_not_awaited()
@@ -274,7 +274,7 @@ async def test_run_batch_all_success():
 
 async def test_run_batch_business_error_continues():
     """业务异常（非 SQLAlchemy）→ 单条失败，其余继续，不整体回滚。"""
-    from app.api.metrics import _run_batch
+    from app.api.batch_common import run_batch
     from app.core.exceptions import BusinessError
 
     db = MagicMock()
@@ -285,7 +285,7 @@ async def test_run_batch_business_error_continues():
         if unit["code"] == "b":
             raise BusinessError("指标不存在", error_code="NOT_FOUND")
 
-    results = await _run_batch(
+    results = await run_batch(
         db, units=units, code_of=lambda u: u["code"], run=run, abort_message="aborted"
     )
     assert [r.ok for r in results] == [True, False, True]
@@ -298,7 +298,7 @@ async def test_run_batch_db_error_rolls_back_and_marks_rest():
     """SQLAlchemyError → 回滚会话 + 剩余项统一标记失败（abort_message）+ 中止。"""
     from sqlalchemy.exc import SQLAlchemyError
 
-    from app.api.metrics import _run_batch
+    from app.api.batch_common import run_batch
 
     db = MagicMock()
     db.rollback = AsyncMock()
@@ -308,11 +308,11 @@ async def test_run_batch_db_error_rolls_back_and_marks_rest():
         if unit["code"] == "b":
             raise SQLAlchemyError("connection lost")
 
-    results = await _run_batch(
+    results = await run_batch(
         db, units=units, code_of=lambda u: u["code"], run=run, abort_message="DB 异常中止批量"
     )
     # a 成功；b 触发 DB 异常 → b（自身）与 c（未处理）统一标记 abort_message 失败后中止
-    assert [r.metric_code for r in results] == ["a", "b", "c"]
+    assert [r.code for r in results] == ["a", "b", "c"]
     assert results[0].ok is True
     assert results[1].ok is False
     assert results[2].ok is False
@@ -323,20 +323,19 @@ async def test_run_batch_db_error_rolls_back_and_marks_rest():
 
 def test_batch_audit_action_levels():
     """审计动作名区分全成功/部分失败/全失败。"""
-    from app.api.metrics import _batch_audit_action
-    from app.services.semantic.schemas import MetricBatchItemResult
+    from app.api.batch_common import BatchItemResult, batch_audit_action
 
-    ok = MetricBatchItemResult(metric_code="a", ok=True)
-    fail = MetricBatchItemResult(metric_code="b", ok=False, message="x")
+    ok = BatchItemResult(code="a", ok=True)
+    fail = BatchItemResult(code="b", ok=False, message="x")
     assert (
-        _batch_audit_action("metric_definition.batch_submit", [ok, ok])
+        batch_audit_action("metric_definition.batch_submit", [ok, ok])
         == "metric_definition.batch_submit"
     )
     assert (
-        _batch_audit_action("metric_definition.batch_submit", [fail, fail])
+        batch_audit_action("metric_definition.batch_submit", [fail, fail])
         == "metric_definition.batch_submit_failed"
     )
     assert (
-        _batch_audit_action("metric_definition.batch_submit", [ok, fail])
+        batch_audit_action("metric_definition.batch_submit", [ok, fail])
         == "metric_definition.batch_submit_partial"
     )

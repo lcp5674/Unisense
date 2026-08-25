@@ -15,6 +15,9 @@ import {
   rejectTerm,
   deprecateTerm,
   batchSubmitTerms,
+  batchPublishTerms,
+  batchApproveTerms,
+  batchRejectTerms,
   batchDeprecateTerms,
   inferTermSuggestion,
   listDomainTree,
@@ -27,9 +30,10 @@ import {
   UnisenseApiError,
 } from "../api";
 import type { ReviewSubmitBody } from "../api";
-import type { GlossaryTerm, GlossaryConflict, SubjectDomainTreeNode, TermRelationViewItem, CurrentUser } from "../types";
+import type { GlossaryTerm, GlossaryConflict, SubjectDomainTreeNode, TermRelationViewItem, CurrentUser, BatchResult } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 import { usePermission } from "../hooks/usePermission";
+import { MasterDataBatch, type BatchActionKey } from "../components/MasterDataBatch";
 import {
   MasterDataReviewActions,
   MasterDataReviewModals,
@@ -131,9 +135,8 @@ function TermsTab() {
   // 业务域选项（主题域树，不手造）+ AI 推断中标记
   const [domainOptions, setDomainOptions] = useState<{ value: string; label: string }[]>([]);
   const [inferring, setInferring] = useState(false);
-  // 批量状态流转（多选行 + 确认弹窗）
-  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
-  const [batchAction, setBatchAction] = useState<"submit" | "deprecate" | null>(null);
+  // 批量状态流转（多选行 + 共享 MasterDataBatch 组件，对齐指标完整批量模式）
+  const [selectedRows, setSelectedRows] = useState<GlossaryTerm[]>([]);
   // 关系目标术语选项（Select 搜索）
   const [relationOptions, setRelationOptions] = useState<{ value: number; label: string }[]>([]);
   const [relationLoading, setRelationLoading] = useState(false);
@@ -156,6 +159,37 @@ function TermsTab() {
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   // 审核流状态（共享 hook：提交审核 Modal / 驳回 Modal / 正在审批的术语）
   const review = useMasterDataReview();
+  // 评审角色判断（对齐后端 _REVIEW_ROLES）：平台管理员/域管理员/评审员可审
+  const canReview =
+    !!currentUser &&
+    (currentUser.role === "platform_admin" ||
+      currentUser.role === "domain_admin" ||
+      currentUser.role === "reviewer");
+
+  async function runBatch(action: BatchActionKey, opts: {
+    codes: string[];
+    reason?: string;
+    changeReason?: string;
+    reviewerType?: "user" | "domain" | null;
+    reviewerId?: number | null;
+    reviewerDomain?: string | null;
+  }): Promise<BatchResult> {
+    if (action === "submit") {
+      return batchSubmitTerms(
+        opts.codes.map((code) => ({
+          code,
+          change_reason: opts.changeReason ?? "批量提交审核",
+          reviewer_id: opts.reviewerType === "user" ? opts.reviewerId : null,
+          reviewer_type: opts.reviewerType,
+          reviewer_domain: opts.reviewerType === "domain" ? opts.reviewerDomain : null,
+        })),
+      );
+    }
+    if (action === "approve") return batchApproveTerms(opts.codes);
+    if (action === "reject") return batchRejectTerms(opts.codes, opts.reason ?? "");
+    if (action === "publish") return batchPublishTerms(opts.codes);
+    return batchDeprecateTerms(opts.codes);
+  }
   // 搜索框初始值承接 URL 关键词（首查即带过滤）
   const [search, setSearch] = useState(urlKw);
   const { can } = usePermission();
@@ -253,29 +287,6 @@ function TermsTab() {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载术语列表失败");
     } finally {
       setRelationLoading(false);
-    }
-  }
-
-  // 批量发布/废弃（207 语义：成功/失败逐条反馈）
-  async function handleBatch(action: "submit" | "deprecate") {
-    if (!selectedRowKeys.length) return;
-    const codes = selectedRowKeys.map(String);
-    try {
-      const results =
-        action === "submit"
-          ? await batchSubmitTerms(codes)
-          : await batchDeprecateTerms(codes);
-      const okCount = results.filter((r) => r.ok).length;
-      const failCount = results.length - okCount;
-      message[okCount > 0 ? "success" : "error"](
-        `批量${action === "submit" ? "发布" : "废弃"}完成：成功 ${okCount} 条` +
-          (failCount ? `，失败 ${failCount} 条（已跳过不影响成功项）` : ""),
-      );
-      setSelectedRowKeys([]);
-      setBatchAction(null);
-      load();
-    } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "批量操作失败");
     }
   }
 
@@ -543,12 +554,31 @@ function TermsTab() {
         {can("glossary:create") && (
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建术语</Button>
         )}
-        <Button icon={<SendOutlined />} disabled={!selectedRowKeys.length || !can("glossary:edit")} onClick={() => setBatchAction("submit")}>
-          批量发布
-        </Button>
-        <Button danger icon={<PlusOutlined rotate={45} />} disabled={!selectedRowKeys.length || !can("glossary:deprecate")} onClick={() => setBatchAction("deprecate")}>
-          批量废弃
-        </Button>
+        <MasterDataBatch
+          selected={selectedRows}
+          codeKey="term_code"
+          entityLabel="术语"
+          actions={[
+            { key: "submit", label: "批量提交审核（草稿）" },
+            { key: "approve", label: "批量通过（审核中）" },
+            { key: "reject", label: "批量驳回（审核中）" },
+            { key: "publish", label: "批量发布（管理员直发）", adminOnly: true },
+            { key: "deprecate", label: "批量废弃（已发布）", danger: true },
+          ]}
+          canRun={(a) => {
+            if (a === "approve" || a === "reject") return !!canReview;
+            if (a === "publish") return currentUser?.role === "platform_admin";
+            if (a === "deprecate") return can("glossary:deprecate");
+            return can("glossary:edit");
+          }}
+          onRun={runBatch}
+          onDone={() => {
+            setSelectedRows([]);
+            load();
+          }}
+          reviewerDomainOptions={domainOptions}
+          isAdmin={currentUser?.role === "platform_admin"}
+        />
         <span className="muted">共 {total} 条</span>
       </Space>
 
@@ -557,7 +587,10 @@ function TermsTab() {
         columns={columns}
         rowKey="term_code"
         loading={loading}
-        rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }}
+        rowSelection={{
+          selectedRowKeys: selectedRows.map((s) => s.term_code),
+          onChange: (_keys, rows) => setSelectedRows(rows),
+        }}
         pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条` }}
         locale={{ emptyText: "暂无术语" }}
         rowClassName={(r) => (focusCode && r.term_code === focusCode ? "ant-table-row-selected" : "")}
@@ -896,22 +929,6 @@ function TermsTab() {
             <Select options={Object.entries(RELATION_TYPE_LABEL).map(([v, label]) => ({ value: v, label }))} />
           </Form.Item>
         </Form>
-      </Modal>
-
-      {/* 批量状态流转确认弹窗（可控 Modal，明确展示操作数量） */}
-      <Modal
-        title={batchAction === "submit" ? "批量发布术语" : "批量废弃术语"}
-        open={batchAction !== null}
-        onCancel={() => setBatchAction(null)}
-        onOk={() => handleBatch(batchAction as "submit" | "deprecate")}
-        okText={batchAction === "submit" ? "发布" : "废弃"}
-        okButtonProps={{ danger: batchAction === "deprecate" }}
-        confirmLoading={false}
-      >
-        <p style={{ marginBottom: 0 }}>
-          确定{batchAction === "submit" ? "发布" : "废弃"}选中的 <b>{selectedRowKeys.length}</b> 个术语吗？
-          {batchAction === "deprecate" ? "废弃后可通过「再次发布」重新发布。" : "草稿 / 已废弃术语可发布；已发布将幂等跳过。"}
-        </p>
       </Modal>
 
       {/* 提交审核 + 驳回审核 Modal（共享组件）：术语发布前须评审通过 */}

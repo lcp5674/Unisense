@@ -270,40 +270,6 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         await self._repo.commit()
         return TermResponse.from_model(term)
 
-    async def batch_submit_terms(
-        self, term_codes: list[str], actor_id: int
-    ) -> list[dict[str, Any]]:
-        """批量发布（207 语义：逐条处理，部分失败不阻断成功项）。
-
-        批量导入走 admin 直发通道（``publish_term``，API 层收紧为 platform_admin），
-        单条业务发布须走审核流（submit_term → approve_term）。
-        """
-        results: list[dict[str, Any]] = []
-        for code in term_codes:
-            try:
-                resp = await self.publish_term(code, actor_id)
-                results.append(
-                    {"term_code": code, "ok": True, "status": resp.status.value}
-                )
-            except Exception as exc:  # noqa: BLE001 - 批量逐条容错
-                results.append({"term_code": code, "ok": False, "error": str(exc)})
-        return results
-
-    async def batch_deprecate_terms(
-        self, term_codes: list[str], actor_id: int
-    ) -> list[dict[str, Any]]:
-        """批量废弃（207 语义：逐条处理，部分失败不阻断成功项）。"""
-        results: list[dict[str, Any]] = []
-        for code in term_codes:
-            try:
-                resp = await self.deprecate_term(code, actor_id)
-                results.append(
-                    {"term_code": code, "ok": True, "status": resp.status.value}
-                )
-            except Exception as exc:  # noqa: BLE001 - 批量逐条容错
-                results.append({"term_code": code, "ok": False, "error": str(exc)})
-        return results
-
     async def deprecate_term(self, term_code: str, actor_id: int) -> TermResponse:
         term = await self._require_term(term_code)
         if term.status == TermStatus.DEPRECATED.value:

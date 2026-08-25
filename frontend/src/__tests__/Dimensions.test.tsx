@@ -30,6 +30,10 @@ vi.mock("../api", () => {
     approveDimension: vi.fn(),
     rejectDimension: vi.fn(),
     deprecateDimension: vi.fn(),
+    batchSubmitDimensions: vi.fn(),
+    batchApproveDimensions: vi.fn(),
+    batchRejectDimensions: vi.fn(),
+    batchDeprecateDimensions: vi.fn(),
     bindMetricDimension: vi.fn(),
     listMetricDimensions: vi.fn(),
     listDimensionMappings: vi.fn(),
@@ -57,13 +61,15 @@ vi.mock("../api", () => {
   };
 });
 
-import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember, deleteDimensionMember, listDimensionMetrics, listDimensionMappings, updateDimensionMapping, listReconciliations, listUsers, listFavorites, listDataSources, previewColumnValues, fetchCurrentUser, submitDimension, approveDimension, rejectDimension } from "../api";
+import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember, deleteDimensionMember, listDimensionMetrics, listDimensionMappings, updateDimensionMapping, listReconciliations, listUsers, listFavorites, listDataSources, previewColumnValues, fetchCurrentUser, submitDimension, approveDimension, rejectDimension, batchSubmitDimensions, batchDeprecateDimensions } from "../api";
 
 const mockedList = vi.mocked(listDimensions);
 const mockedListFavorites = vi.mocked(listFavorites);
 const mockedSubmitDim = vi.mocked(submitDimension);
 const mockedApproveDim = vi.mocked(approveDimension);
 const mockedRejectDim = vi.mocked(rejectDimension);
+const mockedBatchSubmitDim = vi.mocked(batchSubmitDimensions);
+const mockedBatchDeprecateDim = vi.mocked(batchDeprecateDimensions);
 
 const DIMS: Dimension[] = [
   {
@@ -775,5 +781,63 @@ describe("Dimensions 审核流（提交审核/通过/驳回，复用主数据审
       }),
     );
     expect(await screen.findByText(/已提交审核/)).toBeInTheDocument();
+  });
+
+  it("批量操作：勾选草稿维度 → 批量提交审核 → 调用 batchSubmitDimensions", async () => {
+    mockedBatchSubmitDim.mockResolvedValue({
+      results: [{ code: "dim_region", ok: true, message: "" }],
+      ok_count: 1,
+      fail_count: 0,
+    });
+    render(
+      <MemoryRouter initialEntries={["/dimensions"]}>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+    await screen.findByText("dim_channel");
+    // 勾选「区域」（DRAFT 行）：[0] 表头全选、[1] 渠道、[2] 区域
+    fireEvent.click(screen.getAllByRole("checkbox")[2]);
+    const batchBtn = screen.getByRole("button", { name: /批量操作/ }) as HTMLButtonElement;
+    expect(batchBtn.disabled).toBe(false);
+    fireEvent.click(batchBtn);
+    fireEvent.click(await screen.findByText("批量提交审核（草稿）"));
+    await screen.findByText(/确定批量提交审核选中的/);
+    fireEvent.click(screen.getByRole("button", { name: "提交审核" }));
+    await waitFor(() => {
+      expect(mockedBatchSubmitDim).toHaveBeenCalledWith([
+        {
+          code: "dim_region",
+          change_reason: "批量提交维度审核",
+          reviewer_id: null,
+          reviewer_type: null,
+          reviewer_domain: null,
+        },
+      ]);
+    });
+  });
+
+  it("批量废弃：勾选已发布维度 → 确认弹窗 → 调用 batchDeprecateDimensions", async () => {
+    mockedBatchDeprecateDim.mockResolvedValue({
+      results: [{ code: "dim_channel", ok: true, message: "" }],
+      ok_count: 1,
+      fail_count: 0,
+    });
+    render(
+      <MemoryRouter initialEntries={["/dimensions"]}>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+    await screen.findByText("dim_channel");
+    // 勾选「渠道」（PUBLISHED 行）
+    fireEvent.click(screen.getAllByRole("checkbox")[1]);
+    const batchBtn = screen.getByRole("button", { name: /批量操作/ }) as HTMLButtonElement;
+    fireEvent.click(batchBtn);
+    fireEvent.click(await screen.findByText("批量废弃（已发布）"));
+    await screen.findByText(/确定批量废弃选中的/);
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "废 弃" }));
+    await waitFor(() => {
+      expect(mockedBatchDeprecateDim).toHaveBeenCalledWith(["dim_channel"]);
+    });
   });
 });

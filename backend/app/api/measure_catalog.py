@@ -11,6 +11,17 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.batch_common import (
+    BatchCodesRequest,
+    BatchRejectRequest,
+    BatchResponse,
+    BatchSubmitItem,
+    BatchSubmitRequest,
+    batch_audit_action,
+    batch_failed_codes,
+    batch_response,
+    run_batch,
+)
 from app.api.deps import CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
@@ -312,3 +323,203 @@ async def deprecate_measure(
     )
     await db.commit()
     return ok(data=MeasureResponse.from_model(resp), trace_id=trace_id)
+
+
+# ---- 批量治理端点（TD §13：逐条收集结果不整体失败；执行语义统一 app.api.batch_common）----
+
+
+@router.post(
+    "/batch-submit",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量提交逻辑度量审核（DRAFT → REVIEW，可带评审指派）",
+    dependencies=_WRITE_DEPS,
+)
+async def batch_submit_measures(
+    request: BatchSubmitRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条 DRAFT→REVIEW；单条失败不阻断其余（返回逐条结果）。"""
+    service = MeasureCatalogService(db)
+
+    async def run_one(item: BatchSubmitItem) -> None:
+        # 域作用域守卫（P1-10）：domain_admin/metric_owner 仅可操作本域资源
+        measure = await service.get_measure(item.code)
+        if measure is None:
+            raise NotFoundError(f"逻辑度量不存在: {item.code}")
+        _assert_domain_scope(user, measure.domain)
+        await service.submit_measure(
+            item.code,
+            MeasureSubmitRequest(
+                change_reason=item.change_reason,
+                reviewer_id=item.reviewer_id,
+                reviewer_type=item.reviewer_type,
+                reviewer_domain=item.reviewer_domain,
+            ),
+            actor_id=user.id,
+            role=user.role,
+            user_domain=user.domain,
+        )
+
+    results = await run_batch(
+        db,
+        units=request.items,
+        code_of=lambda item: item.code,
+        run=run_one,
+        abort_message="批量提交内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("measure_catalog.batch_submit", results),
+        entity_type="measure_catalog",
+        entity_id=f"batch:{len(request.items)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+            "fail": sum(1 for r in results if not r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=batch_response(results), trace_id=trace_id)
+
+
+@router.post(
+    "/batch-approve",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量审核通过逻辑度量（REVIEW → PUBLISHED，即批量发布）",
+    dependencies=_REVIEW_DEPS,
+)
+async def batch_approve_measures(
+    request: BatchCodesRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条 REVIEW→PUBLISHED；评审人指派校验由 service 层逐条执行。"""
+    service = MeasureCatalogService(db)
+    results = await run_batch(
+        db,
+        units=request.codes,
+        code_of=lambda code: code,
+        run=lambda code: service.approve_measure(
+            code,
+            MeasureApproveRequest(),
+            actor_id=user.id,
+            role=user.role,
+            user_domain=user.domain,
+        ),
+        abort_message="批量通过内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("measure_catalog.batch_approve", results),
+        entity_type="measure_catalog",
+        entity_id=f"batch:{len(request.codes)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=batch_response(results), trace_id=trace_id)
+
+
+@router.post(
+    "/batch-reject",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量审核驳回逻辑度量（REVIEW → DRAFT）",
+    dependencies=_REVIEW_DEPS,
+)
+async def batch_reject_measures(
+    request: BatchRejectRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条 REVIEW→DRAFT；驳回原因统一作用于所有项并落库可追溯。"""
+    service = MeasureCatalogService(db)
+    results = await run_batch(
+        db,
+        units=request.codes,
+        code_of=lambda code: code,
+        run=lambda code: service.reject_measure(
+            code,
+            MeasureRejectRequest(reason=request.reason),
+            actor_id=user.id,
+            role=user.role,
+            user_domain=user.domain,
+        ),
+        abort_message="批量驳回内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("measure_catalog.batch_reject", results),
+        entity_type="measure_catalog",
+        entity_id=f"batch:{len(request.codes)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=batch_response(results), trace_id=trace_id)
+
+
+@router.post(
+    "/batch-deprecate",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量废弃逻辑度量（PUBLISHED → DEPRECATED）",
+    dependencies=_WRITE_DEPS,
+)
+async def batch_deprecate_measures(
+    request: BatchCodesRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条 PUBLISHED→DEPRECATED（被指标引用者由 service 层废弃保护拦截）。"""
+    service = MeasureCatalogService(db)
+
+    async def run_one(code: str) -> None:
+        measure = await service.get_measure(code)
+        if measure is None:
+            raise NotFoundError(f"逻辑度量不存在: {code}")
+        _assert_domain_scope(user, measure.domain)
+        await service.deprecate_measure(code)
+
+    results = await run_batch(
+        db,
+        units=request.codes,
+        code_of=lambda code: code,
+        run=run_one,
+        abort_message="批量废弃内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("measure_catalog.batch_deprecate", results),
+        entity_type="measure_catalog",
+        entity_id=f"batch:{len(request.codes)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=batch_response(results), trace_id=trace_id)

@@ -760,7 +760,7 @@ export function MetricCatalog() {
         }
         const res = await batchApproveMetrics(codes);
         ok = res.ok_count;
-        res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.metric_code}: ${r.message}`); failedCodes.push(r.metric_code); });
+        res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.code}: ${r.message}`); failedCodes.push(r.code); });
       } else if (batchAction === "reject") {
         if (!batchRejectReason.trim() || batchRejectReason.trim().length < 4) {
           message.warning("请填写驳回原因（至少 4 字）");
@@ -773,7 +773,7 @@ export function MetricCatalog() {
         }
         const res = await batchRejectMetrics(codes, batchRejectReason.trim());
         ok = res.ok_count;
-        res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.metric_code}: ${r.message}`); failedCodes.push(r.metric_code); });
+        res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.code}: ${r.message}`); failedCodes.push(r.code); });
       } else if (batchAction === "deprecate") {
         const items = selected
           .filter((m) => m.status === "PUBLISHED" && batchSuccessors[m.metric_code])
@@ -784,7 +784,7 @@ export function MetricCatalog() {
         }
         const res = await batchDeprecateMetrics(items);
         ok = res.ok_count;
-        res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.metric_code}: ${r.message}`); failedCodes.push(r.metric_code); });
+        res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.code}: ${r.message}`); failedCodes.push(r.code); });
       } else if (batchAction === "submit") {
         // 批量提交：走后端原子 /batch-submit（逐条收集结果、单条失败不整体回滚），
         // 不再 N 次 submitReview 循环（P2-9 接线）
@@ -800,7 +800,7 @@ export function MetricCatalog() {
         }
         const res = await batchSubmitMetrics(
           targets.map((m) => ({
-            metric_code: m.metric_code,
+            code: m.metric_code,
             change_reason: "批量提交审核",
             reviewer_id: batchReviewerType === "user" ? batchReviewerId : null,
             reviewer_type: batchReviewerType,
@@ -808,7 +808,7 @@ export function MetricCatalog() {
           })),
         );
         ok = res.ok_count;
-        res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.metric_code}: ${r.message}`); failedCodes.push(r.metric_code); });
+        res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.code}: ${r.message}`); failedCodes.push(r.code); });
       } else {
         // delete：逐条处理（无批量删除端点）
         const targets = selected.filter((m) => m.status === "DRAFT");

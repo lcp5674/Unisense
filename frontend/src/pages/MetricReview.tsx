@@ -314,7 +314,7 @@ export function MetricReview() {
       const res = approved
         ? await batchApproveMetrics(codes)
         : await batchRejectMetrics(codes, "批量打回，请修改后重新提交");
-      const errors = res.results.filter((r) => !r.ok).map((r) => `${r.metric_code}: ${r.message}`);
+      const errors = res.results.filter((r) => !r.ok).map((r) => `${r.code}: ${r.message}`);
       if (res.ok_count) message.success(`${approved ? "通过" : "打回"}成功 ${res.ok_count} 个`);
       if (errors.length) message.error(errors.slice(0, 3).join("；"));
     } catch (err) {

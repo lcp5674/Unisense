@@ -7,17 +7,26 @@ from __future__ import annotations
 
 import contextlib
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.batch_common import (
+    BatchRejectRequest,
+    BatchResponse,
+    BatchSubmitRequest,
+    batch_audit_action,
+    batch_failed_codes,
+    batch_response,
+    run_batch,
+)
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
-from app.core.exceptions import ConflictError, public_error_message
+from app.core.exceptions import ConflictError
 from app.core.guard import guard_against_injection
 from app.core.logging import get_logger
 from app.db.mysql import get_db_session
@@ -29,11 +38,7 @@ from app.services.semantic.schemas import (
     MetricAutoSuggestRequest,
     MetricBatchApproveRequest,
     MetricBatchDeprecateRequest,
-    MetricBatchItemResult,
     MetricBatchRegisterRequest,
-    MetricBatchRejectRequest,
-    MetricBatchResponse,
-    MetricBatchSubmitRequest,
     MetricCompareMatrixRequest,
     MetricCompareRequest,
     MetricCreateRequest,
@@ -1649,109 +1654,31 @@ async def auto_suggest_metric(
 
 
 # ---- 批量治理端点（TD §13：提交/通过/打回/下线，逐条收集结果不整体失败）----
-
-
-def _batch_response(results: list[MetricBatchItemResult]) -> MetricBatchResponse:
-    """组装批量响应（统计成功/失败数）。"""
-    return MetricBatchResponse(
-        results=results,
-        ok_count=sum(1 for r in results if r.ok),
-        fail_count=sum(1 for r in results if not r.ok),
-    )
-
-
-def _batch_failed_codes(results: list[MetricBatchItemResult]) -> list[str]:
-    """批量操作的失败明细（编码+原因），供审计逐条追溯；截断 20 条防审计膨胀。"""
-    return [f"{r.metric_code}: {r.message}" for r in results if not r.ok][:20]
-
-
-async def _run_batch(
-    db: AsyncSession,
-    *,
-    units: Sequence[Any],
-    code_of: Callable[[Any], str],
-    run: Callable[[Any], Awaitable[None]],
-    abort_message: str,
-) -> list[MetricBatchItemResult]:
-    """批量逐条执行：业务失败逐条收集（不整体回滚）；DB 级异常回滚会话并中止后续。
-
-    幂等语义：单条业务异常（UnisenseError 等）只记该条失败，其余继续——这是
-    批量治理端点的既定契约（TD §13）。但 SQLAlchemy 的 DB 级异常（如
-    IntegrityError/OperationalError）会**污染会话**：flush 失败后会话处于
-    rolled-back 态，后续任何操作与最终 commit 都会抛 InvalidRequestError，
-    导致本可成功的项也全部失败、最终 500 整体回滚（C5 健壮性修复）。
-
-    因此对 SQLAlchemyError 单独处理：回滚清理会话，把剩余未执行项统一标记
-    失败（返回部分成功语义，不再 500），并把中止原因记日志供排查。
-    """
-    from sqlalchemy.exc import SQLAlchemyError
-
-    results: list[MetricBatchItemResult] = []
-    for unit in units:
-        code = code_of(unit)
-        try:
-            await run(unit)
-            results.append(MetricBatchItemResult(metric_code=code, ok=True))
-        except SQLAlchemyError:
-            # DB 级异常：会话污染，后续操作/commit 必失败 → 回滚 + 剩余项标记失败
-            await db.rollback()
-            for rest in units[len(results):]:
-                results.append(
-                    MetricBatchItemResult(
-                        metric_code=code_of(rest),
-                        ok=False,
-                        message=abort_message,
-                    )
-                )
-            logger.warning(
-                "batch_aborted_on_db_error",
-                action=abort_message,
-                processed=len(results),
-                total=len(units),
-                exc_info=True,
-            )
-            break
-        except Exception as exc:  # noqa: BLE001 - 批量逐条容错，业务失败不整体回滚
-            results.append(
-                MetricBatchItemResult(metric_code=code, ok=False, message=public_error_message(exc))
-            )
-    return results
-
-
-def _batch_audit_action(base: str, results: list[MetricBatchItemResult]) -> str:
-    """根据批量结果返回审计动作名：全成功/部分失败/全失败。
-
-    生产合规场景下审计 action 须区分部分失败（此前部分失败仍记成功动作，误导审计）。
-    """
-    ok = sum(1 for r in results if r.ok)
-    if ok == len(results):
-        return base
-    if ok == 0:
-        return f"{base}_failed"
-    return f"{base}_partial"
+# 批量执行/审计/响应语义统一在 app.api.batch_common（run_batch/batch_audit_action/
+# batch_failed_codes/batch_response），各模块复用，避免重复代码。
 
 
 @router.post(
     "/batch-submit",
-    response_model=ApiResponse[MetricBatchResponse],
+    response_model=ApiResponse[BatchResponse],
     summary="批量提交指标审核（可带评审指派，TD §13）",
     dependencies=_WRITE_DEPS,
 )
 async def batch_submit_metrics(
-    request: MetricBatchSubmitRequest,
+    request: BatchSubmitRequest,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     http_req: Request,
-) -> ApiResponse[MetricBatchResponse]:
+) -> ApiResponse[BatchResponse]:
     """逐条 DRAFT→REVIEW；单条失败不阻断其余（返回逐条结果）。"""
     service = MetricService(db)
-    results = await _run_batch(
+    results = await run_batch(
         db,
         units=request.items,
-        code_of=lambda item: item.metric_code,
+        code_of=lambda item: item.code,
         run=lambda item: service.submit_metric(
-            item.metric_code,
+            item.code,
             MetricSubmitRequest(
                 change_reason=item.change_reason,
                 reviewer_id=item.reviewer_id,
@@ -1767,11 +1694,11 @@ async def batch_submit_metrics(
     await write_audit(
         db,
         actor_id=user.id,
-        action=_batch_audit_action("metric_definition.batch_submit", results),
+        action=batch_audit_action("metric_definition.batch_submit", results),
         entity_type="metric_definition",
         entity_id=f"batch:{len(request.items)}",
         detail={
-            "failed_codes": _batch_failed_codes(results),
+            "failed_codes": batch_failed_codes(results),
             "ok": sum(1 for r in results if r.ok),
             "fail": sum(1 for r in results if not r.ok),
         },
@@ -1779,12 +1706,12 @@ async def batch_submit_metrics(
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data=_batch_response(results), trace_id=trace_id)
+    return ok(data=batch_response(results), trace_id=trace_id)
 
 
 @router.post(
     "/batch-approve",
-    response_model=ApiResponse[MetricBatchResponse],
+    response_model=ApiResponse[BatchResponse],
     summary="批量审核通过（REVIEW → PUBLISHED/EXPERIMENTAL，即批量发布）",
     dependencies=[Depends(require_roles(*_REVIEW_ROLES)), Depends(guard_against_injection)],
 )
@@ -1794,10 +1721,10 @@ async def batch_approve_metrics(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     http_req: Request,
-) -> ApiResponse[MetricBatchResponse]:
+) -> ApiResponse[BatchResponse]:
     """逐条 REVIEW→PUBLISHED/EXPERIMENTAL；评审人指派校验由 service 层逐条执行。"""
     service = MetricService(db)
-    results = await _run_batch(
+    results = await run_batch(
         db,
         units=request.metric_codes,
         code_of=lambda code: code,
@@ -1813,39 +1740,39 @@ async def batch_approve_metrics(
     await write_audit(
         db,
         actor_id=user.id,
-        action=_batch_audit_action("metric_definition.batch_approve", results),
+        action=batch_audit_action("metric_definition.batch_approve", results),
         entity_type="metric_definition",
         entity_id=f"batch:{len(request.metric_codes)}",
         detail={
             "mode": request.mode,
-            "failed_codes": _batch_failed_codes(results),
+            "failed_codes": batch_failed_codes(results),
             "ok": sum(1 for r in results if r.ok),
         },
         ip=client_ip(http_req),
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data=_batch_response(results), trace_id=trace_id)
+    return ok(data=batch_response(results), trace_id=trace_id)
 
 
 @router.post(
     "/batch-reject",
-    response_model=ApiResponse[MetricBatchResponse],
+    response_model=ApiResponse[BatchResponse],
     summary="批量审核驳回（REVIEW → DRAFT）",
     dependencies=[Depends(require_roles(*_REVIEW_ROLES)), Depends(guard_against_injection)],
 )
 async def batch_reject_metrics(
-    request: MetricBatchRejectRequest,
+    request: BatchRejectRequest,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     http_req: Request,
-) -> ApiResponse[MetricBatchResponse]:
+) -> ApiResponse[BatchResponse]:
     """逐条 REVIEW→DRAFT；评审人指派校验由 service 层逐条执行。"""
     service = MetricService(db)
-    results = await _run_batch(
+    results = await run_batch(
         db,
-        units=request.metric_codes,
+        units=request.codes,
         code_of=lambda code: code,
         run=lambda code: service.reject_metric(
             code,
@@ -1859,23 +1786,23 @@ async def batch_reject_metrics(
     await write_audit(
         db,
         actor_id=user.id,
-        action=_batch_audit_action("metric_definition.batch_reject", results),
+        action=batch_audit_action("metric_definition.batch_reject", results),
         entity_type="metric_definition",
-        entity_id=f"batch:{len(request.metric_codes)}",
+        entity_id=f"batch:{len(request.codes)}",
         detail={
-            "failed_codes": _batch_failed_codes(results),
+            "failed_codes": batch_failed_codes(results),
             "ok": sum(1 for r in results if r.ok),
         },
         ip=client_ip(http_req),
         trace_id=trace_id,
     )
     await db.commit()
-    return ok(data=_batch_response(results), trace_id=trace_id)
+    return ok(data=batch_response(results), trace_id=trace_id)
 
 
 @router.post(
     "/batch-deprecate",
-    response_model=ApiResponse[MetricBatchResponse],
+    response_model=ApiResponse[BatchResponse],
     summary="批量下线（废弃）指标（PUBLISHED → DEPRECATED）",
     dependencies=_WRITE_DEPS,
 )
@@ -1885,10 +1812,10 @@ async def batch_deprecate_metrics(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     http_req: Request,
-) -> ApiResponse[MetricBatchResponse]:
+) -> ApiResponse[BatchResponse]:
     """逐条 PUBLISHED→DEPRECATED（每项须带替代指标）；单条失败不阻断其余。"""
     service = MetricService(db)
-    results = await _run_batch(
+    results = await run_batch(
         db,
         units=request.items,
         code_of=lambda item: item.metric_code,
@@ -1904,11 +1831,11 @@ async def batch_deprecate_metrics(
     await write_audit(
         db,
         actor_id=user.id,
-        action=_batch_audit_action("metric_definition.batch_deprecate", results),
+        action=batch_audit_action("metric_definition.batch_deprecate", results),
         entity_type="metric_definition",
         entity_id=f"batch:{len(request.items)}",
         detail={
-            "failed_codes": _batch_failed_codes(results),
+            "failed_codes": batch_failed_codes(results),
             "ok": sum(1 for r in results if r.ok),
         },
         ip=client_ip(http_req),
@@ -1916,7 +1843,7 @@ async def batch_deprecate_metrics(
     )
     await db.commit()
     await service.run_lineage_post_commit()
-    return ok(data=_batch_response(results), trace_id=trace_id)
+    return ok(data=batch_response(results), trace_id=trace_id)
 
 
 # ------------------------------------------------------------------

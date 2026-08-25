@@ -354,27 +354,27 @@ export interface MetricBatchRegisterResult {
   candidates: MetricBatchRegisterCandidate[];
 }
 
-// ---- 批量治理（TD §13：提交/通过/打回/下线，逐条收集结果）----
+// ---- 批量治理（TD §13：提交/通过/打回/下线，逐条收集结果；后端统一 app/api/batch_common）----
 
-/** 批量提交审核单条项（含评审指派） */
-export interface MetricBatchSubmitItem {
-  metric_code: string;
+/** 批量提交审核单条项（含评审指派），指标/逻辑度量/维度/术语共用 */
+export interface BatchSubmitItem {
+  code: string;
   change_reason: string;
   reviewer_id?: number | null;
   reviewer_type?: "user" | "domain" | null;
   reviewer_domain?: string | null;
 }
 
-/** 批量操作单条结果 */
-export interface MetricBatchItemResult {
-  metric_code: string;
+/** 批量操作单条结果（code 为实体编码） */
+export interface BatchItemResult {
+  code: string;
   ok: boolean;
   message: string;
 }
 
-/** 批量操作响应 data 结构 */
-export interface MetricBatchResult {
-  results: MetricBatchItemResult[];
+/** 批量操作响应 data 结构（四模块统一） */
+export interface BatchResult {
+  results: BatchItemResult[];
   ok_count: number;
   fail_count: number;
 }
