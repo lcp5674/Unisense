@@ -1220,9 +1220,11 @@ function SubscriptionsTab() {
         if (r.asset_type) {
           const assetLabel = r.asset_type === "METRIC" ? "指标" : r.asset_type === "TABLE" ? "源表" : r.asset_type;
           return (
-            <span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap", minWidth: 0 }}>
               <Tag color="blue">关注 {assetLabel}</Tag>
-              <Typography.Text code>{r.asset_id}</Typography.Text>
+              <Typography.Text code style={{ wordBreak: "break-all", whiteSpace: "normal", maxWidth: 320 }}>
+                {r.asset_id}
+              </Typography.Text>
             </span>
           );
         }

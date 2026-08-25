@@ -38,6 +38,7 @@ vi.mock("../api", () => {
 
 import {
   listNotifications,
+  listSubscriptions,
   markNotificationRead,
   markAllNotificationsRead,
   deleteNotification,
@@ -731,6 +732,31 @@ describe("通知中心 - 收件箱增强（点击已读 / 筛选 / 聚合 / 待�
     await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/detail/sales_gmv"));
   });
 
+  it("超长指标编码：渲染为单个可点击按钮且不截断、不破坏卡片字段结构（防溢出重叠）", async () => {
+    const longCode = "outp_e2e_fee_day_2026_q3_retail_amount_sum_by_store_region";
+    const n = notif({
+      id: 15,
+      template_code: "metric.approved",
+      title: "指标已通过",
+      body: `指标编码：${longCode}`,
+      payload: { metric_code: longCode },
+    });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
+
+    // 长编码仍作为单个可点击按钮渲染，文本完整不截断（值为 Button 时才可能溢出，见 styles.css .notif-body-field .ant-btn）
+    const btn = screen.getByRole("button", { name: longCode }) as HTMLButtonElement;
+    expect(btn.textContent).toBe(longCode);
+    // 按钮位于字段行内（.notif-body-field .ant-btn 选择器命中，允许换行收缩）
+    const field = btn.closest(".notif-body-field") as HTMLElement;
+    expect(field).toBeTruthy();
+    expect(field.querySelector(".notif-body-label")?.textContent).toBe("指标编码");
+    // 点击仍可直达详情（长编码不因样式修复而丢失跳转能力）
+    fireEvent.click(btn);
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe(`/detail/${longCode}`));
+  });
+
   it("同类聚合：相同消息类型合并为一张卡片并显示 ×N", async () => {
     const a = notif({ id: 11, template_code: "metric.health_critical", title: "指标健康告警", payload: { level: "ERROR" } });
     const b = notif({ id: 12, template_code: "metric.health_critical", title: "指标健康告警", payload: { level: "ERROR" } });
@@ -855,5 +881,37 @@ describe("通知中心 - 前后端事件类型中文映射一致性", () => {
     expect(screen.getByText("指标灰度发布")).toBeInTheDocument();
     expect(screen.queryByText("metric.resubmitted")).not.toBeInTheDocument();
     expect(screen.queryByText("lineage.change_impacted")).not.toBeInTheDocument();
+  });
+
+  it("资产订阅超长指标编码：code 可换行收缩不撑破表格列", async () => {
+    const longCode = "outp_e2e_fee_day_2026_q3_retail_amount_sum_by_store_region";
+    vi.mocked(listSubscriptions).mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          user_id: 5,
+          channel: "in_app",
+          event_type: null,
+          asset_type: "METRIC",
+          asset_id: longCode,
+          enabled: true,
+          threshold: null,
+          created_at: "2026-08-10T10:00:00",
+        },
+      ],
+      total: 1,
+    });
+    mockedList.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 10 });
+    renderPage();
+    fireEvent.click(screen.getByRole("tab", { name: "订阅设置" }));
+
+    await waitFor(() => expect(screen.getByText("关注 指标")).toBeInTheDocument());
+    const code = screen.getByText(longCode) as HTMLElement;
+    expect(code.tagName.toLowerCase()).toBe("code");
+    // 长编码允许词内换行（antd 把 style 落在外层 .ant-typography，word-break/white-space 为继承属性，
+    // 作用于内层 code 的文本换行），避免撑宽表格列与相邻字样重叠
+    const wrap = code.closest(".ant-typography") as HTMLElement;
+    expect(wrap.style.wordBreak).toBe("break-all");
+    expect(wrap.style.whiteSpace).toBe("normal");
   });
 });

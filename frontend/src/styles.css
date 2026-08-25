@@ -1306,6 +1306,9 @@ body {
   font-weight: 600;
   color: var(--ink);
   line-height: 1.4;
+  /* 标题过长时收缩换行，避免挤压右侧状态区导致重叠 */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* 事件类型徽标：标题旁的小字 Tag，帮助用户快速识别通知类型（业务术语） */
@@ -1398,6 +1401,8 @@ body {
   font-size: 12.5px;
   line-height: 1.55;
   min-width: 0;
+  /* 兜底：字段级允许任意长串（如超长指标编码）在词内换行，防止撑破 grid 列 */
+  overflow-wrap: anywhere;
 }
 
 .notif-body-label {
@@ -1410,6 +1415,16 @@ body {
   color: var(--ink);
   word-break: break-word;
   min-width: 0;
+}
+
+/* 可点击字段值（Button 渲染，如指标编码直达详情）：
+   antd Button 默认 white-space: nowrap 且 flex 子项不收缩（min-width: auto），
+   超长连续编码会横向撑开溢出，与相邻字段重叠。这里允许换行并收缩。 */
+.notif-body-field .ant-btn {
+  white-space: normal;
+  word-break: break-word;
+  min-width: 0;
+  text-align: left;
 }
 
 .notif-body-full {
