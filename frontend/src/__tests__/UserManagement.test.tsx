@@ -117,8 +117,8 @@ const USERS = {
   page: 1,
   page_size: 20,
   items: [
-    { id: 1, username: "admin", email: "admin@example.com", display_name: "平台管理员", role: "platform_admin", domain: null, org_id: 1, org_name: "默认团队", status: "active", last_login_at: "2026-08-14T10:00:00", created_at: "2026-08-01T10:00:00" },
-    { id: 2, username: "alice", email: "alice@example.com", display_name: "爱丽丝", role: "viewer", domain: "finance", org_id: 1, org_name: "默认团队", status: "disabled", last_login_at: null, created_at: "2026-08-02T10:00:00" },
+    { id: 1, username: "admin", email: "admin@example.com", display_name: "平台管理员", role: "platform_admin", roles: ["platform_admin"], domain: null, org_id: 1, org_name: "默认团队", status: "active", last_login_at: "2026-08-14T10:00:00", created_at: "2026-08-01T10:00:00" },
+    { id: 2, username: "alice", email: "alice@example.com", display_name: "爱丽丝", role: "viewer", roles: ["viewer"], domain: "finance", org_id: 1, org_name: "默认团队", status: "disabled", last_login_at: null, created_at: "2026-08-02T10:00:00" },
   ],
 };
 
@@ -421,8 +421,8 @@ describe("UserManagement 用户管理", () => {
     await screen.findByText("alice");
 
     fireEvent.click(screen.getByText("创建用户"));
-    // 打开角色下拉：内置角色 + 自定义角色（带「自定义」后缀）
-    fireEvent.mouseDown(screen.getByLabelText("角色"));
+    // 打开角色下拉（多选）：内置角色 + 自定义角色（带「自定义」后缀）
+    fireEvent.mouseDown(screen.getByLabelText("角色（可多选）"));
     await clickSelectOption("data_analyst（自定义）");
     // 选中后表单角色值为自定义角色（下拉项与选中项均含该文本，用 getAllByText 判定）
     await waitFor(() =>

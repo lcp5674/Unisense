@@ -30,7 +30,11 @@ async def metrics_client() -> AsyncIterator[httpx.AsyncClient]:
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=1, role="platform_admin", domain=None
+        id=1,
+        role="platform_admin",
+        domain=None,
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -49,9 +53,7 @@ async def test_infer_metric_description_inflight_conflict(
     mock_guard = MagicMock()
     mock_guard.acquire = AsyncMock(return_value=False)
     mock_guard.release = AsyncMock(return_value=True)
-    with patch(
-        "app.api.metrics.InferInflightGuard", return_value=mock_guard
-    ):
+    with patch("app.api.metrics.InferInflightGuard", return_value=mock_guard):
         resp = await metrics_client.post(
             "/api/v1/metric-definitions/sales_gmv_daily/infer-description",
             params={"force": False},
@@ -76,7 +78,11 @@ async def test_get_metric_redacts_description_for_pii_non_sensitive(
     原样返回——非敏感角色可绕过读分级看到敏感描述。修复后 description=None。
     """
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=2, role="viewer", domain=None
+        id=2,
+        role="viewer",
+        domain=None,
+        roles_all=lambda: ["viewer"],
+        has_role=lambda r: r == "viewer",
     )
     from app.services.semantic.schemas import MetricResponse
 
@@ -141,9 +147,11 @@ async def test_update_metric_audit_records_governance_changed(
     fake_metric = make_metric(metric_code="sales_gmv_daily")
     mock_svc.update_metric = AsyncMock(return_value=fake_metric)
     mock_audit = AsyncMock()
-    with patch("app.api.metrics.MetricService", return_value=mock_svc), patch(
-        "app.api.metrics.write_audit", mock_audit
-    ), patch("app.api.metrics._register_metric_l3_lineage", AsyncMock(return_value=None)):
+    with (
+        patch("app.api.metrics.MetricService", return_value=mock_svc),
+        patch("app.api.metrics.write_audit", mock_audit),
+        patch("app.api.metrics._register_metric_l3_lineage", AsyncMock(return_value=None)),
+    ):
         resp = await metrics_client.put(
             "/api/v1/metric-definitions/sales_gmv_daily",
             json={
@@ -167,9 +175,11 @@ async def test_update_metric_audit_no_governance_when_unchanged(
     fake_metric = make_metric(metric_code="sales_gmv_daily")
     mock_svc.update_metric = AsyncMock(return_value=fake_metric)
     mock_audit = AsyncMock()
-    with patch("app.api.metrics.MetricService", return_value=mock_svc), patch(
-        "app.api.metrics.write_audit", mock_audit
-    ), patch("app.api.metrics._register_metric_l3_lineage", AsyncMock(return_value=None)):
+    with (
+        patch("app.api.metrics.MetricService", return_value=mock_svc),
+        patch("app.api.metrics.write_audit", mock_audit),
+        patch("app.api.metrics._register_metric_l3_lineage", AsyncMock(return_value=None)),
+    ):
         resp = await metrics_client.put(
             "/api/v1/metric-definitions/sales_gmv_daily",
             json={"name": "新名称", "change_reason": "仅调整名称"},
@@ -177,4 +187,3 @@ async def test_update_metric_audit_no_governance_when_unchanged(
     assert resp.status_code == 200
     detail = mock_audit.call_args.kwargs["detail"]
     assert "governance_changed" not in detail
-

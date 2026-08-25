@@ -61,7 +61,12 @@ async def llm_client() -> AsyncIterator[httpx.AsyncClient]:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -93,7 +98,9 @@ async def test_get_config_can_edit_false_for_viewer() -> None:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="viewer")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="viewer", roles_all=lambda: ["viewer"], has_role=lambda r: r == "viewer"
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         resp = await c.get("/api/v1/ai/config")
@@ -111,7 +118,12 @@ async def test_get_config_secret_returns_plaintext() -> None:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         resp = await c.get("/api/v1/ai/config/1/secret")
@@ -130,7 +142,12 @@ async def test_get_config_secret_404_when_missing() -> None:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         resp = await c.get("/api/v1/ai/config/99/secret")
@@ -146,7 +163,12 @@ async def test_get_config_secret_404_when_no_key() -> None:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         resp = await c.get("/api/v1/ai/config/1/secret")
@@ -161,7 +183,9 @@ async def test_get_config_secret_forbidden_for_viewer() -> None:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="viewer")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="viewer", roles_all=lambda: ["viewer"], has_role=lambda r: r == "viewer"
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         resp = await c.get("/api/v1/ai/config/1/secret")
@@ -210,7 +234,12 @@ async def test_put_config_updates() -> None:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         resp = await c.put(
@@ -239,7 +268,12 @@ async def test_delete_config() -> None:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         resp = await c.delete("/api/v1/ai/config/1")
@@ -255,7 +289,9 @@ async def test_write_rejected_for_viewer() -> None:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="viewer")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="viewer", roles_all=lambda: ["viewer"], has_role=lambda r: r == "viewer"
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         resp = await c.post(
@@ -309,7 +345,12 @@ async def test_test_instance_by_id() -> None:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {

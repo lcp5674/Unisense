@@ -51,7 +51,12 @@ async def audit_client() -> AsyncIterator[httpx.AsyncClient]:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -99,6 +104,7 @@ async def test_list_audit_logs_with_trace_id_filter(audit_client: httpx.AsyncCli
 
 # ------------------------------------------------------------------- 导出（合规留档）
 
+
 def _export_session() -> MagicMock:
     """export 端点专用 mock：单次主查询 + write_audit(仅 add) + commit。"""
     session = MagicMock()
@@ -118,7 +124,12 @@ async def test_export_audit_csv() -> None:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         resp = await c.get("/api/v1/audit/export")
@@ -143,7 +154,12 @@ async def test_export_audit_json() -> None:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         resp = await c.get("/api/v1/audit/export", params={"format": "json"})
@@ -165,7 +181,12 @@ async def test_export_audit_limited() -> None:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         resp = await c.get("/api/v1/audit/export", params={"format": "json", "limit": 1})
@@ -181,7 +202,9 @@ async def test_export_audit_viewer_forbidden() -> None:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=9, role="viewer")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=9, role="viewer", roles_all=lambda: ["viewer"], has_role=lambda r: r == "viewer"
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         resp = await c.get("/api/v1/audit/export")

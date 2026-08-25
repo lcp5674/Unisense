@@ -253,6 +253,7 @@ def test_masking_mapping() -> None:
 
 # ------------------------------------------------- RBAC 可配置化（role_actions 参数）
 
+
 def test_role_actions_override_enables_action() -> None:
     """覆盖映射为 reviewer 追加 export 后，本域可导出（默认 reviewer 无 export）。"""
     subject = Subject(1, "reviewer", domain="sales")
@@ -360,3 +361,43 @@ def test_is_ui_action_matches_registry() -> None:
 def test_ui_action_registry_not_under_10() -> None:
     """注册表规模不低于 10（防误删导致注册表塌缩的浅层防御）。"""
     assert len(UI_ACTION_REGISTRY) >= 10, "UI 权限点注册表规模异常偏小"
+
+
+# ---------------------------------------------------------------------------
+# 方案 A 多角色：PDP 决策取全部角色权限并集
+# ---------------------------------------------------------------------------
+
+
+def test_decide_multi_role_union_same_domain() -> None:
+    """主角色 viewer + 扩展角色 domain_admin：同域 approve 应放行（权限并集）。"""
+    subject = Subject(1, "viewer", domain="sales", roles=("domain_admin",))
+    d = decide(subject, "approve", Resource(domain="sales"))
+    assert d.allow, d.reason
+    assert d.error_code == ""
+
+
+def test_decide_multi_role_platform_admin_bypass() -> None:
+    """主角色 reviewer + 扩展角色 platform_admin：跨域 write 应直通（任一角色命中）。"""
+    subject = Subject(1, "reviewer", domain="hr", roles=("platform_admin",))
+    d = decide(subject, "write", Resource(domain="sales"))
+    assert d.allow
+    assert "直通" in d.reason
+
+
+def test_decide_multi_role_metric_owner_owner_mismatch_still_blocks() -> None:
+    """扩展角色 metric_owner：写他人负责的指标仍被 owner 校验拦截（不因并集失控）。"""
+    subject = Subject(7, "reviewer", domain="sales", roles=("metric_owner",))
+    d = decide(subject, "write", Resource(domain="sales", owner_id=99))
+    assert not d.allow
+    assert d.error_code == "FORBIDDEN"
+
+
+def test_decide_multi_role_pii_review_compliance_officer() -> None:
+    """扩展角色 compliance_officer：未复核 PII 资产的 review 动作放行。"""
+    subject = Subject(2, "viewer", domain="sales", roles=("compliance_officer",))
+    d = decide(
+        subject,
+        "review",
+        Resource(domain="sales", sensitivity="PII", compliance_reviewed=False),
+    )
+    assert d.allow, d.reason

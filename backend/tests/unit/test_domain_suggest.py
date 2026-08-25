@@ -228,9 +228,7 @@ async def test_lookup_tables_catalog_and_mount() -> None:
         "app.services.semantic.domain_suggest._domain_map",
         new=AsyncMock(return_value={"sales": "销售", "finance": "财务"}),
     ):
-        matches = await suggest_domain(
-            db, source_table="dwd.sales_detail"
-        )
+        matches = await suggest_domain(db, source_table="dwd.sales_detail")
     # 目录 0.9 + 挂载 0.85 → multiple（跨域共用表）
     assert matches["status"] == "multiple"
     assert {c["code"] for c in matches["candidates"]} == {"sales", "finance"}
@@ -279,7 +277,11 @@ async def metrics_client() -> AsyncIterator[httpx.AsyncClient]:
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=1, role="platform_admin", domain=None
+        id=1,
+        role="platform_admin",
+        domain=None,
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

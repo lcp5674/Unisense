@@ -62,7 +62,9 @@ async def pref_env() -> AsyncIterator[PrefEnv]:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="viewer")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="viewer", roles_all=lambda: ["viewer"], has_role=lambda r: r == "viewer"
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield PrefEnv(c, session)

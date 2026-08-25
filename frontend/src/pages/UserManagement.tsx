@@ -96,7 +96,7 @@ export function UserManagement() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-  const [role, setRole] = useState("");
+  const [role, setRole] = useState<string[]>([]);
   const [status, setStatus] = useState("");
   const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -143,7 +143,7 @@ export function UserManagement() {
     setLoading(true);
     try {
       const res = await listAdminUsers({
-        role: role || undefined,
+        role: role.length ? role : undefined,
         status: status || undefined,
         keyword: keyword || undefined,
         page,
@@ -203,11 +203,17 @@ export function UserManagement() {
   async function handleCreate(values: Record<string, unknown>) {
     setSaving(true);
     try {
+      // 方案 A 多角色：角色字段为多选数组；主角色取首个（后端按权限优先级重算）。
+      const roleList =
+        Array.isArray(values.roles) && values.roles.length > 0
+          ? (values.roles as string[])
+          : [String(values.role ?? "viewer")];
       const payload: UserCreateRequest = {
         username: String(values.username),
         email: String(values.email),
         display_name: String(values.display_name),
-        role: String(values.role ?? "viewer"),
+        role: roleList[0],
+        roles: roleList,
         org_id: values.org_id ? Number(values.org_id) : undefined,
         password: String(values.password),
       };
@@ -229,10 +235,16 @@ export function UserManagement() {
     if (!editTarget) return;
     setSaving(true);
     try {
+      // 方案 A 多角色：多选数组；主角色取首个（后端按权限优先级重算）。
+      const roleList =
+        Array.isArray(values.roles) && values.roles.length > 0
+          ? (values.roles as string[])
+          : [String(values.role)];
       const payload: UserUpdateRequest = {
         display_name: String(values.display_name),
         email: String(values.email),
-        role: String(values.role),
+        role: roleList[0],
+        roles: roleList,
         org_id: values.org_id ? Number(values.org_id) : undefined,
       };
       await updateUser(editTarget.id, payload);
@@ -312,7 +324,7 @@ export function UserManagement() {
     editForm.setFieldsValue({
       display_name: u.display_name,
       email: u.email,
-      role: u.role,
+      roles: u.roles?.length ? u.roles : [u.role],
       org_id: u.org_id ?? undefined,
     });
   }
@@ -334,9 +346,21 @@ export function UserManagement() {
     },
     {
       title: "角色",
-      dataIndex: "role",
-      key: "role",
-      render: (v: string) => <Tag>{ROLE_LABEL[v] ?? v}</Tag>,
+      dataIndex: "roles",
+      key: "roles",
+      // 方案 A 多角色：全部角色渲染为多个 Tag，主角色（user.role）标蓝突出。
+      render: (_: unknown, u: AdminUser) => {
+        const roles = u.roles?.length ? u.roles : [u.role];
+        return (
+          <>
+            {roles.map((r) => (
+              <Tag key={r} color={r === u.role ? "blue" : undefined}>
+                {ROLE_LABEL[r] ?? r}
+              </Tag>
+            ))}
+          </>
+        );
+      },
     },
     {
       title: "所属团队",
@@ -425,12 +449,14 @@ export function UserManagement() {
       <Card styles={{ body: { paddingTop: 8 } }}>
         <Space style={{ marginBottom: 12 }} wrap>
           <Select
+            mode="multiple"
             allowClear
-            placeholder="全部角色"
-            style={{ width: 150 }}
-            value={role || undefined}
-            onChange={(v) => { setRole(v || ""); setPage(1); }}
+            placeholder="全部角色（可多选）"
+            style={{ minWidth: 200 }}
+            value={role}
+            onChange={(v: string[]) => { setRole(v); setPage(1); }}
             options={roleOptions}
+            maxTagCount="responsive"
           />
           <Select
             allowClear
@@ -532,11 +558,23 @@ export function UserManagement() {
           <Form.Item name="display_name" label="显示名称" rules={[{ required: true }]}>
             <Input placeholder="如 张三" />
           </Form.Item>
-          <Space size={16} style={{ width: "100%" }}>
-            <Form.Item name="role" label="角色" initialValue="viewer" rules={[{ required: true }]} style={{ width: 180 }}>
-              <Select options={roleOptions} />
+          <Space size={16} style={{ width: "100%" }} align="start">
+            <Form.Item
+              name="roles"
+              label="角色（可多选）"
+              initialValue={["viewer"]}
+              rules={[{ required: true, message: "至少选择一个角色" }]}
+              style={{ minWidth: 240 }}
+              extra="主角色自动取权限最高者（如同时选择域管理员+评审员，主角色为域管理员）"
+            >
+              <Select
+                mode="multiple"
+                options={roleOptions}
+                placeholder="选择一个或多个角色"
+                maxTagCount="responsive"
+              />
             </Form.Item>
-            <Form.Item name="org_id" label="所属团队" style={{ width: 280 }} extra={undefined}>
+            <Form.Item name="org_id" label="所属团队" style={{ width: 260 }} extra={undefined}>
               <Select
                 allowClear
                 showSearch
@@ -597,8 +635,18 @@ export function UserManagement() {
           <Form.Item name="email" label="邮箱" rules={[{ required: true, type: "email", message: "请输入合法邮箱" }]}>
             <Input className="mono" />
           </Form.Item>
-          <Form.Item name="role" label="角色" rules={[{ required: true }]}>
-            <Select options={roleOptions} />
+          <Form.Item
+            name="roles"
+            label="角色（可多选）"
+            rules={[{ required: true, message: "至少选择一个角色" }]}
+            extra="主角色自动取权限最高者；移除「平台管理员」将失去平台级管理权"
+          >
+            <Select
+              mode="multiple"
+              options={roleOptions}
+              placeholder="选择一个或多个角色"
+              maxTagCount="responsive"
+            />
           </Form.Item>
           <Form.Item
             name="org_id"

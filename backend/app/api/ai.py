@@ -105,7 +105,8 @@ async def get_llm_config(
     """
     svc = LlmConfigService(db)
     rows = await svc.list_configs()
-    can_edit = user.role in ("platform_admin", "domain_admin")
+    # 方案 A 多角色：platform_admin/domain_admin 任一角色命中即可编辑。
+    can_edit = user.has_role("platform_admin") or user.has_role("domain_admin")
     items = [
         LlmConfigResponse.build(
             id=row.id,

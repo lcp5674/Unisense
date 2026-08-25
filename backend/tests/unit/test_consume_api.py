@@ -33,7 +33,12 @@ async def favorites_client() -> AsyncIterator[httpx.AsyncClient]:
     )
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="metric_owner")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="metric_owner",
+        roles_all=lambda: ["metric_owner"],
+        has_role=lambda r: r == "metric_owner",
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         with patch("app.api.consume.ConsumeService", return_value=svc):

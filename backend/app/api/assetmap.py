@@ -9,7 +9,6 @@ GET /export.csv（资产导出）。
 from __future__ import annotations
 
 import csv
-import enum
 import io
 from typing import Annotated, Any
 
@@ -63,13 +62,8 @@ def _assert_enum(value: str | None, allowed: set[str], field: str) -> None:
 
 
 def _is_platform_admin(user: User) -> bool:
-    """当前用户是否平台管理员（角色归一化兼容 enum 成员/字符串/多角色列表）。"""
-    role = user.role
-    if isinstance(role, (list, tuple, set)):
-        role_strs = [r.value if isinstance(r, enum.Enum) else str(r) for r in role]
-        return "platform_admin" in role_strs
-    role_val = role.value if isinstance(role, enum.Enum) else role
-    return str(role_val) == "platform_admin"
+    """当前用户是否平台管理员（方案 A 多角色：主角色或 user_role 扩展命中即判为是）。"""
+    return user.has_role("platform_admin")
 
 
 _READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer")

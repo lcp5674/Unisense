@@ -208,6 +208,19 @@ async def create_metric(
         ip=client_ip(http_req),
         trace_id=trace_id,
     )
+    # 冲突自动命中留痕（PLAT-3）：创建时自动预检命中相似口径（已落 conflict 表 OPEN
+    # 记录）→ 记审计，供合规追溯自动检测到哪些冲突；未命中（纯创建）不额外审计。
+    if getattr(metric, "pending_conflict", False):
+        await write_audit(
+            db,
+            actor_id=user.id,
+            action="conflict.auto_detect",
+            entity_type="conflict",
+            entity_id=metric.metric_code,
+            detail=getattr(metric, "pending_conflict_detail", {}) or {},
+            ip=client_ip(http_req),
+            trace_id=trace_id,
+        )
     # L3 指标血缘：口径定义含 source_table/source_tables 时注册 metric↔table 边（同事务）
     await _register_metric_l3_lineage(db, metric)
     # PLAT-3: 业务写入 + 审计同事务原子提交（缺 commit 会导致事务随会话关闭被回滚）
@@ -235,7 +248,7 @@ async def list_metrics(
     service = MetricService(db)
     metrics, total = await service.list_metrics(params, actor_id=user.id, role=user.role)
     # PII 读分级：非敏感角色对 PII 指标脱敏口径（保留键结构，值替换为 ***）
-    sensitive = user.role in _SENSITIVE_ROLES
+    sensitive = any(r in _SENSITIVE_ROLES for r in user.roles_all())
     items: list[MetricResponse] = []
     for m in metrics:
         item = MetricResponse.model_validate(m)
@@ -373,7 +386,7 @@ async def get_metric(
     await db.commit()
     # PII 读分级：非敏感角色脱敏口径（保留键结构，值替换为 ***）
     data: MetricResponse = metric
-    if metric.pii_flag and user.role not in _SENSITIVE_ROLES:
+    if metric.pii_flag and not any(r in _SENSITIVE_ROLES for r in user.roles_all()):
         data = metric.model_copy(
             update={
                 "definition_json": redact_definition(metric.definition_json),
@@ -422,7 +435,7 @@ async def get_archived_metric(
     # PLAT-3: PII 访问审计须提交持久化
     await db.commit()
     # PII 读分级：非敏感角色脱敏口径（保留键结构，值替换为 ***）
-    if metric.pii_flag and user.role not in _SENSITIVE_ROLES:
+    if metric.pii_flag and not any(r in _SENSITIVE_ROLES for r in user.roles_all()):
         data = {
             **data,
             "metric": metric.model_copy(
@@ -1239,7 +1252,7 @@ async def get_metric_versions(
     # PLAT-3: PII 访问审计须提交持久化，否则随会话关闭被回滚（合规审计静默丢失）
     await db.commit()
     # PII 读分级：非敏感角色对 PII 指标的版本口径脱敏（与 get/list/compare 同级）
-    if metric.pii_flag and user.role not in _SENSITIVE_ROLES:
+    if metric.pii_flag and not any(r in _SENSITIVE_ROLES for r in user.roles_all()):
         for v in versions:
             v.definition_json = redact_definition(v.definition_json)
             if v.diff_json:
@@ -1435,7 +1448,7 @@ async def compare_metrics(
         role=user.role,
     )
     # PII 脱敏：非合规角色对比 PII 指标时，口径定义脱敏
-    if user.role not in _SENSITIVE_ROLES:
+    if not any(r in _SENSITIVE_ROLES for r in user.roles_all()):
         for key in ("fields",):
             field_data = result.get(key, {})
             if "definition" in field_data:
@@ -1464,7 +1477,7 @@ async def compare_metrics_matrix(
         request.metric_codes, actor_id=user.id, role=user.role
     )
     # PII 脱敏：非合规角色对比 PII 指标时，口径定义脱敏（对齐 T049）
-    if user.role not in _SENSITIVE_ROLES:
+    if not any(r in _SENSITIVE_ROLES for r in user.roles_all()):
         defn = result.get("fields", {}).get("definition", {})
         for code, definition in (defn.get("values") or {}).items():
             if isinstance(definition, dict) and definition.get("pii"):

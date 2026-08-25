@@ -21,12 +21,19 @@ def _as_reviewer(role: str = "domain_admin"):
     class _Ctx:
         def __enter__(self) -> None:
             app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-                id=1, role=role, domain="sales"
+                id=1,
+                role=role,
+                domain="sales",
+                roles_all=lambda: [role],
+                has_role=lambda r: r == role,
             )
 
         def __exit__(self, *exc: object) -> None:
             app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-                id=1, role="metric_owner"
+                id=1,
+                role="metric_owner",
+                roles_all=lambda: ["metric_owner"],
+                has_role=lambda r: r == "metric_owner",
             )
 
     return _Ctx()
@@ -79,9 +86,7 @@ async def test_batch_submit_sanitizes_unknown_exception(client):
 
         resp = await client.post(
             "/api/v1/metric-definitions/batch-submit",
-            json={
-                "items": [{"code": "sales_gmv_daily", "change_reason": "首次提交审核"}]
-            },
+            json={"items": [{"code": "sales_gmv_daily", "change_reason": "首次提交审核"}]},
         )
 
     assert resp.status_code == 200
@@ -246,9 +251,7 @@ async def test_batch_deprecate_mixed_results(client):
 
 async def test_batch_submit_empty_items_422(client):
     """空 items 列表 → 422（schema 约束）。"""
-    resp = await client.post(
-        "/api/v1/metric-definitions/batch-submit", json={"items": []}
-    )
+    resp = await client.post("/api/v1/metric-definitions/batch-submit", json={"items": []})
     assert resp.status_code == 422
 
 

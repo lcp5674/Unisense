@@ -60,7 +60,9 @@ async def users_client() -> AsyncIterator[httpx.AsyncClient]:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="viewer")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="viewer", roles_all=lambda: ["viewer"], has_role=lambda r: r == "viewer"
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -119,7 +121,12 @@ async def audit_entity_client() -> AsyncIterator[httpx.AsyncClient]:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -231,9 +238,7 @@ async def test_list_metrics_enriches_health_score_from_table() -> None:
                 result.scalars.return_value.all.return_value = []
             elif "metric_health_score" in sql:
                 # 模拟 SQLAlchemy Row（支持属性访问）
-                result.all.return_value = [
-                    SimpleNamespace(metric_id=1, score=78, level="GOOD")
-                ]
+                result.all.return_value = [SimpleNamespace(metric_id=1, score=78, level="GOOD")]
             else:
                 result.scalars.return_value.all.return_value = []
             return result
@@ -243,7 +248,9 @@ async def test_list_metrics_enriches_health_score_from_table() -> None:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="viewer")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="viewer", roles_all=lambda: ["viewer"], has_role=lambda r: r == "viewer"
+    )
     with patch(
         "app.api.metrics.MetricService.list_metrics",
         new=AsyncMock(return_value=([_metric_snapshot()], 1)),

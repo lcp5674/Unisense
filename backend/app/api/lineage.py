@@ -101,7 +101,8 @@ def _assert_edge_domain(user: User, domains: set[str]) -> None:
     """域归属校验（P1 IDOR 加固）：platform_admin 全局放行；
     其余角色命中边任一解析域才允许；两端均无解析域时不阻断（无法判属）。
     """
-    if user.role == "platform_admin" or not domains:
+    # 方案 A 多角色：任一角色为 platform_admin 即全局放行。
+    if user.has_role("platform_admin") or not domains:
         return
     if user.domain not in domains:
         raise AuthError(

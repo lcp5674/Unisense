@@ -24,12 +24,19 @@ def _as_user(role: str, domain: str | None = "finance"):
     class _Ctx:
         def __enter__(self) -> None:
             app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-                id=1, role=role, domain=domain
+                id=1,
+                role=role,
+                domain=domain,
+                roles_all=lambda: [role],
+                has_role=lambda r: r == role,
             )
 
         def __exit__(self, *exc: object) -> None:
             app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-                id=1, role="metric_owner"
+                id=1,
+                role="metric_owner",
+                roles_all=lambda: ["metric_owner"],
+                has_role=lambda r: r == "metric_owner",
             )
 
     return _Ctx()

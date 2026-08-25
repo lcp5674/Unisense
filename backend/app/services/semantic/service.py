@@ -4451,15 +4451,18 @@ class MetricService(BaseService):
         Returns:
             是否存在至少一个活跃的 compliance_officer。
         """
-        from sqlalchemy import func, select
+        from sqlalchemy import func, or_, select
 
-        from app.models.user import User
+        from app.models.user import User, UserRole
 
         stmt = (
             select(func.count())
             .select_from(User)
             .where(
-                User.role == "compliance_officer",
+                or_(
+                    User.role == "compliance_officer",
+                    User.role_items.any(UserRole.role == "compliance_officer"),
+                ),
                 User.status == "active",
             )
         )

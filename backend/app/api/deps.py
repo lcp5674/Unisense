@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import enum
 from collections.abc import Awaitable, Callable
 from typing import Annotated
 
@@ -140,16 +139,17 @@ def require_roles(*allowed_roles: str) -> Callable[..., Awaitable[User]]:
         user: CurrentUser,
         db: Annotated[AsyncSession, Depends(get_db_session)],
     ) -> User:
-        role_val = user.role.value if isinstance(user.role, enum.Enum) else user.role
-        role_val = str(role_val)
-        if role_val in allowed_roles:
+        # 方案 A 多角色：命中用户任意角色（主角色 user.role ∪ user_role 表）即放行。
+        if any(r in allowed_roles for r in user.roles_all()):
             return user
-        if is_any_active_gate and await _is_custom_role(db, role_val):
-            return user
+        if is_any_active_gate:
+            for r in user.roles_all():
+                if await _is_custom_role(db, r):
+                    return user
         raise AuthError(
             f"无权操作，需要角色: {', '.join(allowed_roles)}",
             error_code="FORBIDDEN",
-            ctx={"user_role": role_val},
+            ctx={"user_role": user.roles_all()},
         )
 
     return _check_role

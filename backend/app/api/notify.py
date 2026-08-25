@@ -105,7 +105,11 @@ async def mark_read(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    resp = await NotifyService(db).mark_read(notif_id, actor_id=user.id, role=user.role)
+    resp = await NotifyService(db).mark_read(
+
+        notif_id, actor_id=user.id, role=user.role, roles=user.roles_all()
+
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -152,7 +156,11 @@ async def delete_notification(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    await NotifyService(db).delete_notification(notif_id, actor_id=user.id, role=user.role)
+    await NotifyService(db).delete_notification(
+
+        notif_id, actor_id=user.id, role=user.role, roles=user.roles_all()
+
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -199,7 +207,11 @@ async def mark_sent(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    resp = await NotifyService(db).mark_sent(notif_id, actor_id=user.id, role=user.role)
+    resp = await NotifyService(db).mark_sent(
+
+        notif_id, actor_id=user.id, role=user.role, roles=user.roles_all()
+
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -223,7 +235,11 @@ async def mark_failed(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    resp = await NotifyService(db).mark_failed(notif_id, actor_id=user.id, role=user.role)
+    resp = await NotifyService(db).mark_failed(
+
+        notif_id, actor_id=user.id, role=user.role, roles=user.roles_all()
+
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -248,7 +264,11 @@ async def retry_delivery(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     """重试投递失败的站内通知（送达失败处置，仅 FAILED 可重试）。"""
-    resp = await NotifyService(db).retry_delivery(notif_id, actor_id=user.id, role=user.role)
+    resp = await NotifyService(db).retry_delivery(
+
+        notif_id, actor_id=user.id, role=user.role, roles=user.roles_all()
+
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -273,7 +293,11 @@ async def mark_handled(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     """标记待办类通知为「已处理」（待办闭环：处理后不再出现在仅待处理）。"""
-    resp = await NotifyService(db).mark_handled(notif_id, actor_id=user.id, role=user.role)
+    resp = await NotifyService(db).mark_handled(
+
+        notif_id, actor_id=user.id, role=user.role, roles=user.roles_all()
+
+    )
     await write_audit(
         db,
         actor_id=user.id,

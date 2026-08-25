@@ -379,12 +379,18 @@ def all_configurable_actions() -> frozenset[str]:
 
 @dataclass(frozen=True, slots=True)
 class Subject:
-    """决策主体属性（TD §12.5.6：user_id / role / domain / grants）。"""
+    """决策主体属性（TD §12.5.6：user_id / role / domain / grants）。
+
+    Attributes:
+        role: 主角色（兼容单角色决策路径）。
+        roles: 全部角色（方案 A 多角色；缺省为空 → 决策时等价于 ``(role,)``）。
+    """
 
     user_id: int
     role: str
     domain: str | None = None
     grants: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    roles: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,9 +451,15 @@ def decide(
 
     masking = masking_for(resource.sensitivity)
 
+    # 方案 A 多角色：全部角色 = 主角色 + subject.roles 扩展（去重，保持主角色在前）。
+    all_roles = tuple(dict.fromkeys((subject.role,) + tuple(subject.roles)))
+    is_platform_admin = RoleName.PLATFORM_ADMIN.value in all_roles
+    is_metric_owner = RoleName.METRIC_OWNER.value in all_roles
+    is_compliance_officer = RoleName.COMPLIANCE_OFFICER.value in all_roles
+
     # PII 合规门禁（COMPL-1）：未经合规复核的 PII 资产，除合规官复核动作外一律拒绝
     if resource.sensitivity == SensitivityLevel.PII.value and not resource.compliance_reviewed:
-        is_compliance_review = act == "review" and subject.role == RoleName.COMPLIANCE_OFFICER.value
+        is_compliance_review = act == "review" and is_compliance_officer
         if not is_compliance_review:
             return Decision(
                 False,
@@ -457,9 +469,12 @@ def decide(
             )
 
     effective_actions = role_actions if role_actions is not None else ROLE_ACTIONS
-    role_actions_for_role = effective_actions.get(subject.role, frozenset())
+    # 多角色权限取并集：任一角色允许该动作即放行（同域判定时生效）。
+    role_actions_for_role = frozenset().union(
+        *(effective_actions.get(r, frozenset()) for r in all_roles)
+    )
 
-    if subject.role == RoleName.PLATFORM_ADMIN.value:
+    if is_platform_admin:
         return Decision(True, "platform_admin 跨域运维直通", masking=masking)
 
     same_domain = (
@@ -469,7 +484,7 @@ def decide(
     )
     if same_domain and act in role_actions_for_role:
         owner_mismatch = (
-            subject.role == RoleName.METRIC_OWNER.value
+            is_metric_owner
             and act == "write"
             and resource.owner_id is not None
             and resource.owner_id != subject.user_id

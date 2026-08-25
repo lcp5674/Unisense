@@ -1552,16 +1552,19 @@ class CollectorService(BaseService):
         独立 session 通知，不干扰采集事务；best-effort 失败仅告警。
         """
         try:
-            from sqlalchemy import select
+            from sqlalchemy import or_, select
 
             from app.db.mysql import async_session_factory
-            from app.models.user import User
+            from app.models.user import User, UserRole
             from app.services.notify.service import NotifyService
 
             async with async_session_factory() as session:
                 stmt = select(User.id).where(
                     User.status == "active",
-                    User.role == "compliance_officer",
+                    or_(
+                        User.role == "compliance_officer",
+                        User.role_items.any(UserRole.role == "compliance_officer"),
+                    ),
                 )
                 result = await session.execute(stmt)
                 targets = [r[0] for r in result.all()]

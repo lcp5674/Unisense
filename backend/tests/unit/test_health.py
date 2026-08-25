@@ -89,7 +89,10 @@ async def test_ready_redis_none_skips(client: httpx.AsyncClient) -> None:
 
 async def test_metrics_endpoint(client: httpx.AsyncClient) -> None:
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=1, role="platform_admin"
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
     )
     try:
         resp = await client.get("/metrics")
@@ -110,7 +113,10 @@ async def test_degraded_overview(client: httpx.AsyncClient) -> None:
     from app.core.degradation_registry import init_degradation_registry
 
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=1, role="platform_admin"
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
     )
     registry = init_degradation_registry()
     registry.register_degradation("redis", "probe failed")

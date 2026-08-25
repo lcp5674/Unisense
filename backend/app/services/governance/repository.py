@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.data_source import DBCatalog
@@ -23,6 +23,7 @@ from app.models.governance import (
     UserPermission,
 )
 from app.models.metric import Metric
+from app.models.user import User, UserRole
 
 
 class GovernanceRepository:
@@ -62,13 +63,17 @@ class GovernanceRepository:
         return list((await self._db.execute(stmt)).scalars().all())
 
     async def count_users_by_role(self, role: str) -> int:
-        """统计使用该角色的用户数（删除自定义角色前的占用校验）。"""
-        from app.models.user import User
+        """统计使用该角色的用户数（删除自定义角色前的占用校验）。
 
+        方案 A 多角色：主角色或 user_role 扩展角色命中任一即计入。
+        """
         stmt = (
             select(func.count())
             .select_from(User)
-            .where(User.role == role, User.deleted_at.is_(None))
+            .where(
+                or_(User.role == role, User.role_items.any(UserRole.role == role)),
+                User.deleted_at.is_(None),
+            )
         )
         return int((await self._db.execute(stmt)).scalar() or 0)
 

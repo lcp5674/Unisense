@@ -173,6 +173,7 @@ export interface AdminUser {
   email: string;
   display_name: string;
   role: string;
+  roles: string[];
   domain: string | null;
   org_id: number | null;
   org_name: string | null;
@@ -206,6 +207,7 @@ export interface UserCreateRequest {
   email: string;
   display_name: string;
   role: string;
+  roles?: string[];
   domain?: string | null;
   org_id?: number | null;
   password: string;
@@ -215,6 +217,7 @@ export interface UserUpdateRequest {
   display_name: string;
   email: string;
   role: string;
+  roles?: string[];
   domain?: string | null;
   org_id?: number | null;
 }

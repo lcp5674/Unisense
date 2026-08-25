@@ -12,7 +12,7 @@ from typing import Annotated
 import jwt
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
@@ -31,7 +31,7 @@ from app.core.security import (
     verify_password,
 )
 from app.db.mysql import get_db_session
-from app.models.user import User
+from app.models.user import User, UserRole
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -208,7 +208,8 @@ async def list_users(
     """
     stmt = select(User).order_by(User.id)
     if role:
-        stmt = stmt.where(User.role == role)
+        # 方案 A 多角色：主角色或 user_role 扩展角色命中任一即计入。
+        stmt = stmt.where(or_(User.role == role, User.role_items.any(UserRole.role == role)))
     rows = (await db.execute(stmt)).scalars().all()
     return ok(
         [

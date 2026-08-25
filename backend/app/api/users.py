@@ -36,7 +36,7 @@ from app.core.guard import guard_against_injection
 from app.core.security import hash_password, verify_password
 from app.db.mysql import get_db_session
 from app.models.subject_domain import SubjectDomain
-from app.models.user import Organization, User
+from app.models.user import Organization, User, UserRole
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -57,6 +57,31 @@ BUILTIN_ROLES: tuple[str, ...] = (
 #: 管理端点依赖：仅平台管理员 + 注入守卫（纵深防御，ORM 参数化兜底之外拦截注入 payload）。
 _ADMIN_DEPS = [Depends(require_roles("platform_admin")), Depends(guard_against_injection)]
 
+#: 角色优先级（数字越小越优先）：主角色（user.role）取权限最高者，向后兼容
+#: 所有既有单角色读取（Owner 责任链 / 评审指派 / PDP 主角色决策）。
+#: 排序依据内置角色默认权限覆盖广度（ROLE_UI_ACTIONS）：域管理 > 指标负责 > 评审 > 合规。
+#: 自定义角色无内置优先级，统一按最低（100）处理。
+_ROLE_PRIORITY: dict[str, int] = {
+    "platform_admin": 0,
+    "domain_admin": 1,
+    "metric_owner": 2,
+    "reviewer": 3,
+    "compliance_officer": 4,
+    "analyst": 5,
+    "viewer": 6,
+}
+
+
+def _resolve_primary_role(roles: list[str]) -> str:
+    """从角色列表解析主角色：优先级最高（数字最小）者；自定义角色恒最后。"""
+    return min(roles, key=lambda r: _ROLE_PRIORITY.get(r, 100))
+
+
+def _normalize_roles(roles: list[str] | None, fallback: str) -> list[str]:
+    """归一化角色列表：缺省回退为主角色；去重并保持首个出现顺序。"""
+    source = roles if roles else [fallback]
+    return list(dict.fromkeys(source))
+
 
 class UserAdmin(BaseModel):
     """用户管理视图（管理端）。绝不暴露 ``password_hash``。
@@ -66,7 +91,8 @@ class UserAdmin(BaseModel):
         username: 用户名。
         email: 邮箱。
         display_name: 显示名称。
-        role: 角色。
+        role: 主角色（权限最高者）。
+        roles: 全部角色（主角色在前，含 user_role 扩展，方案 A 多角色）。
         domain: 所属域。
         status: 状态（active/disabled/deleted）。
         last_login_at: 最后登录时间。
@@ -80,6 +106,7 @@ class UserAdmin(BaseModel):
     email: str
     display_name: str
     role: str
+    roles: list[str] = Field(default_factory=list, description="全部角色（主角色在前）")
     domain: str | None
     org_id: int | None = None
     org_name: str | None = None
@@ -101,7 +128,12 @@ class UserCreateRequest(BaseModel):
         description="邮箱（全局唯一）",
     )
     display_name: str = Field(..., min_length=1, max_length=128, description="显示名称")
-    role: str = Field(default="viewer", max_length=32, description="角色（内置或自定义角色名）")
+    role: str = Field(default="viewer", max_length=32, description="主角色（内置或自定义角色名）")
+    roles: list[str] | None = Field(
+        default=None,
+        max_length=16,
+        description="全部角色（方案 A 多角色；缺省=[role]，主角色自动取权限最高者）",
+    )
     #: 方案 B：所属域不再由用户直接维护，改由所属团队（org_id）自动继承——
     #: 团队绑定域则成员继承团队域，否则可显式指定（兼容旧客户端）；前端已合并为
     #: 「所属团队」单一下拉。后端按 ``org.domain or payload.domain`` 解析。
@@ -127,7 +159,12 @@ class UserUpdateRequest(BaseModel):
         max_length=128,
         description="邮箱（全局唯一）",
     )
-    role: str = Field(..., max_length=32, description="角色（内置或自定义角色名）")
+    role: str = Field(..., max_length=32, description="主角色（内置或自定义角色名）")
+    roles: list[str] | None = Field(
+        default=None,
+        max_length=16,
+        description="全部角色（方案 A 多角色；缺省=[role]，主角色自动取权限最高者）",
+    )
     #: 方案 B：所属域由所属团队自动继承（同创建）；org_id 缺省保持不变（不换团队）。
     domain: str | None = Field(
         default=None, max_length=64, description="所属域（由团队继承的兜底）"
@@ -330,6 +367,7 @@ def _to_admin(row: User, org_name: str | None = None) -> UserAdmin:
         email=row.email,
         display_name=row.display_name,
         role=row.role.value if hasattr(row.role, "value") else row.role,
+        roles=row.roles_all(),
         domain=row.domain,
         org_id=row.org_id,
         org_name=org_name,
@@ -376,7 +414,7 @@ async def _notify_user(
 async def list_admin_users(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
-    role: str | None = Query(None, description="按角色过滤"),
+    role: list[str] | None = Query(None, description="按角色过滤（可重复，命中任一）"),
     status: str | None = Query(None, description="按状态过滤（active/disabled/deleted）"),
     keyword: str | None = Query(None, description="按用户名/显示名/邮箱模糊"),
     page: int = Query(1, ge=1, description="页码"),
@@ -386,7 +424,12 @@ async def list_admin_users(
     """用户管理列表（分页 + 过滤，含邮箱与时间字段）。"""
     base = select(User)
     if role:
-        base = base.where(User.role == role)
+        # 方案 A 多角色：任一选中角色命中（主角色或 user_role 扩展）即计入。
+        conds = [
+            or_(User.role == r, User.role_items.any(UserRole.role == r))
+            for r in role
+        ]
+        base = base.where(or_(*conds))
     if status:
         base = base.where(User.status == status)
     if keyword:
@@ -440,7 +483,10 @@ async def create_user(
     """
     _validate_password_complexity(payload.password)
     await _assert_unique(db, username=payload.username, email=payload.email)
-    await _assert_role_valid(db, payload.role)
+    roles = _normalize_roles(payload.roles, payload.role)
+    for r in roles:
+        await _assert_role_valid(db, r)
+    primary_role = _resolve_primary_role(roles)
     org_id = payload.org_id or user.org_id
     org = await _assert_org_active(db, org_id)
     # 方案 B：所属域由所属团队继承（团队绑定域则自动继承，否则用显式兜底）
@@ -451,7 +497,7 @@ async def create_user(
         username=payload.username,
         email=payload.email,
         display_name=payload.display_name,
-        role=payload.role,
+        role=primary_role,
         domain=domain,
         status="active",
         must_change_password=True,
@@ -459,6 +505,8 @@ async def create_user(
     )
     db.add(row)
     await db.flush()
+    # 方案 A 多角色：全部角色（含主角色）落 user_role 权威表，供跨请求角色解析。
+    row.role_items = [UserRole(user_id=row.id, role=r) for r in roles]
     await write_audit(
         db,
         actor_id=user.id,
@@ -469,6 +517,7 @@ async def create_user(
             "username": row.username,
             "display_name": row.display_name,
             "role": row.role,
+            "roles": roles,
             "domain": row.domain,
             "org_id": row.org_id,
         },
@@ -628,11 +677,14 @@ async def update_user(
     if row is None:
         raise NotFoundError("用户不存在", error_code="USER_NOT_FOUND")
     await _assert_unique(db, username=row.username, email=payload.email, exclude_id=row.id)
-    await _assert_role_valid(db, payload.role)
-    if row.id == user.id and payload.role != "platform_admin":
+    roles = _normalize_roles(payload.roles, payload.role)
+    for r in roles:
+        await _assert_role_valid(db, r)
+    if row.id == user.id and "platform_admin" not in roles:
         raise ValidationError(
             "不能降级当前登录的平台管理员角色", error_code="SELF_DEMOTE_FORBIDDEN"
         )
+    primary_role = _resolve_primary_role(roles)
 
     # 方案 B：换团队（org_id 提供时）或保持原团队，域由团队继承
     org_name: str | None = None
@@ -656,8 +708,10 @@ async def update_user(
 
     row.display_name = payload.display_name
     row.email = payload.email
-    row.role = payload.role
+    row.role = primary_role
     row.domain = domain
+    # 方案 A 多角色：整表替换 user_role（级联删除旧行 + 插入新集合，含主角色）。
+    row.role_items = [UserRole(user_id=row.id, role=r) for r in roles]
     await write_audit(
         db,
         actor_id=user.id,
@@ -668,6 +722,7 @@ async def update_user(
             "username": row.username,
             "display_name": row.display_name,
             "role": row.role,
+            "roles": roles,
             "domain": row.domain,
             "org_id": row.org_id,
         },

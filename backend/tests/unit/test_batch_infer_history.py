@@ -58,7 +58,11 @@ async def history_client() -> AsyncIterator[httpx.AsyncClient]:
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=7, role="platform_admin", username="admin_lcp"
+        id=7,
+        role="platform_admin",
+        username="admin_lcp",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

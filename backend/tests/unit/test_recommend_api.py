@@ -41,7 +41,9 @@ async def test_recommend_metrics_allowed_for_role(client, role: str) -> None:
     with patch("app.api.recommend.RecommendService") as mock_svc:
         instance = mock_svc.return_value
         instance.recommend_metrics = AsyncMock(return_value=[_ALLOWED_ITEM])
-        app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=7, role=role)
+        app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+            id=7, role=role, roles_all=lambda: [role], has_role=lambda r: r == role
+        )
 
         resp = await client.get("/api/v1/recommend/metrics?limit=6")
 
@@ -57,7 +59,9 @@ async def test_recommend_metrics_uses_authenticated_user_id(client) -> None:
     with patch("app.api.recommend.RecommendService") as mock_svc:
         instance = mock_svc.return_value
         instance.recommend_metrics = AsyncMock(return_value=[_ALLOWED_ITEM])
-        app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=42, role="viewer")
+        app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+            id=42, role="viewer", roles_all=lambda: ["viewer"], has_role=lambda r: r == "viewer"
+        )
 
         await client.get("/api/v1/recommend/metrics?limit=5")
 
@@ -67,7 +71,9 @@ async def test_recommend_metrics_uses_authenticated_user_id(client) -> None:
 async def test_recommend_metrics_analyst_forbidden(client) -> None:
     """负向对照：analyst 不在读权限列表，必须返回 403。"""
     with patch("app.api.recommend.RecommendService"):
-        app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="analyst")
+        app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+            id=1, role="analyst", roles_all=lambda: ["analyst"], has_role=lambda r: r == "analyst"
+        )
 
         resp = await client.get("/api/v1/recommend/metrics")
 
@@ -77,8 +83,8 @@ async def test_recommend_metrics_analyst_forbidden(client) -> None:
 
 async def test_recommend_terms_role_allowed_for_viewer(client) -> None:
     """同路由组：GET /recommend/terms 对 viewer 开放（同 _READ_ROLES）。"""
-    from app.services.glossary.schemas import TermResponse
     from app.models.term import Term
+    from app.services.glossary.schemas import TermResponse
 
     term = Term(
         id=1,
@@ -93,7 +99,9 @@ async def test_recommend_terms_role_allowed_for_viewer(client) -> None:
     with patch("app.api.recommend.RecommendService") as mock_svc:
         instance = mock_svc.return_value
         instance.recommend_terms = AsyncMock(return_value=[TermResponse.from_model(term)])
-        app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="viewer")
+        app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+            id=1, role="viewer", roles_all=lambda: ["viewer"], has_role=lambda r: r == "viewer"
+        )
 
         resp = await client.get("/api/v1/recommend/terms")
 

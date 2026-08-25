@@ -34,7 +34,11 @@ async def metrics_client() -> AsyncIterator[httpx.AsyncClient]:
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=1, role="platform_admin", domain=None
+        id=1,
+        role="platform_admin",
+        domain=None,
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -54,12 +58,8 @@ def _metric(code: str = "sales_gmv_d"):
 async def test_complete_emergency_review_success(metrics_client: httpx.AsyncClient) -> None:
     """管理角色补审 → 200 并返回指标。"""
     with patch("app.api.metrics.MetricService") as mock_svc:
-        mock_svc.return_value.complete_emergency_review = AsyncMock(
-            return_value=_metric()
-        )
-        resp = await metrics_client.post(
-            "/api/v1/metric-definitions/sales_gmv_d/emergency-review"
-        )
+        mock_svc.return_value.complete_emergency_review = AsyncMock(return_value=_metric())
+        resp = await metrics_client.post("/api/v1/metric-definitions/sales_gmv_d/emergency-review")
 
     assert resp.status_code == 200
     assert resp.json()["data"]["metric_code"] == "sales_gmv_d"
@@ -73,15 +73,15 @@ async def test_complete_emergency_review_non_admin_forbidden(
 ) -> None:
     """metric_owner 补审 → 403（端点角色门禁）。"""
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=2, role="metric_owner", domain="sales"
+        id=2,
+        role="metric_owner",
+        domain="sales",
+        roles_all=lambda: ["metric_owner"],
+        has_role=lambda r: r == "metric_owner",
     )
     with patch("app.api.metrics.MetricService") as mock_svc:
-        mock_svc.return_value.complete_emergency_review = AsyncMock(
-            return_value=_metric()
-        )
-        resp = await metrics_client.post(
-            "/api/v1/metric-definitions/sales_gmv_d/emergency-review"
-        )
+        mock_svc.return_value.complete_emergency_review = AsyncMock(return_value=_metric())
+        resp = await metrics_client.post("/api/v1/metric-definitions/sales_gmv_d/emergency-review")
 
     assert resp.status_code == 403
 
@@ -96,9 +96,7 @@ async def test_complete_emergency_review_not_emergency(
                 "该指标非紧急发布，无需补审", error_code="NOT_EMERGENCY_PUBLISHED"
             )
         )
-        resp = await metrics_client.post(
-            "/api/v1/metric-definitions/sales_gmv_d/emergency-review"
-        )
+        resp = await metrics_client.post("/api/v1/metric-definitions/sales_gmv_d/emergency-review")
 
     assert resp.status_code == 409
     assert resp.json()["code"] == "NOT_EMERGENCY_PUBLISHED"

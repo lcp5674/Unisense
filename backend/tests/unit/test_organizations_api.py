@@ -108,7 +108,11 @@ async def admin_client() -> AsyncIterator[httpx.AsyncClient]:
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=1, role="platform_admin", org_id=1
+        id=1,
+        role="platform_admin",
+        org_id=1,
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -132,7 +136,11 @@ async def test_list_organizations_with_user_count() -> None:
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=1, role="platform_admin", org_id=1
+        id=1,
+        role="platform_admin",
+        org_id=1,
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -275,7 +283,11 @@ async def test_viewer_forbidden_from_organizations() -> None:
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=9, role="viewer", org_id=1
+        id=9,
+        role="viewer",
+        org_id=1,
+        roles_all=lambda: ["viewer"],
+        has_role=lambda r: r == "viewer",
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -300,7 +312,11 @@ async def test_update_org_suspend_notifies_all_members(admin_client: httpx.Async
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=1, role="platform_admin", org_id=1
+        id=1,
+        role="platform_admin",
+        org_id=1,
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -332,7 +348,11 @@ async def test_update_org_activate_notifies_all_members(admin_client: httpx.Asyn
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=1, role="platform_admin", org_id=1
+        id=1,
+        role="platform_admin",
+        org_id=1,
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -359,7 +379,11 @@ async def test_update_org_name_only_no_notification(admin_client: httpx.AsyncCli
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=1, role="platform_admin", org_id=1
+        id=1,
+        role="platform_admin",
+        org_id=1,
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -385,7 +409,11 @@ async def test_update_org_suspend_notify_failure_does_not_block(
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=1, role="platform_admin", org_id=1
+        id=1,
+        role="platform_admin",
+        org_id=1,
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -429,9 +457,7 @@ async def test_update_organization_domain_propagates_to_members(
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     with patch("app.api.organizations._assert_domain_active", new=AsyncMock()):
-        resp = await admin_client.patch(
-            "/api/v1/organizations/1", json={"domain": "finance"}
-        )
+        resp = await admin_client.patch("/api/v1/organizations/1", json={"domain": "finance"})
     app.dependency_overrides.pop(deps.get_db_session, None)
 
     assert resp.status_code == 200

@@ -473,10 +473,18 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   return (body as ApiEnvelope<T>).data;
 }
 
-function pageQs(params: Record<string, string | number | undefined>): string {
+function pageQs(params: Record<string, string | number | string[] | undefined>): string {
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
+    if (v === undefined || v === null || v === "") continue;
+    if (Array.isArray(v)) {
+      // 数组 → 重复 key（?role=a&role=b），后端 list query 收集为多值。
+      for (const item of v) {
+        if (item !== undefined && item !== null && item !== "") qs.append(k, String(item));
+      }
+    } else {
+      qs.set(k, String(v));
+    }
   }
   return qs.toString();
 }
@@ -947,7 +955,7 @@ export async function listUsers(role?: string): Promise<UserBrief[]> {
 
 // ---- 用户管理（backend /api/v1/users，platform_admin 专属）----
 export async function listAdminUsers(params: {
-  role?: string;
+  role?: string[];
   status?: string;
   keyword?: string;
   page?: number;

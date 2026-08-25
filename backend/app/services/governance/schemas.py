@@ -291,6 +291,10 @@ class PermissionSnapshot(BaseModel):
 
     user_id: int
     role: str
+    roles: list[str] = Field(
+        default_factory=list,
+        description="全部角色（主角色在前，含 user_role 扩展角色，方案 A 多角色）",
+    )
     home_domain: str | None = None
     allowed_actions: list[str]
     ui_actions: list[str] = Field(

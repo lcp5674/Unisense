@@ -34,7 +34,12 @@ async def collector_client() -> AsyncIterator[httpx.AsyncClient]:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
@@ -350,8 +355,9 @@ async def test_infer_column_description_inflight_conflict(
     mock_guard = MagicMock()
     mock_guard.acquire = AsyncMock(return_value=False)
     mock_guard.release = AsyncMock(return_value=True)
-    with patch("app.api.collector._svc", return_value=fake_svc), patch(
-        "app.api.collector.InferInflightGuard", return_value=mock_guard
+    with (
+        patch("app.api.collector._svc", return_value=fake_svc),
+        patch("app.api.collector.InferInflightGuard", return_value=mock_guard),
     ):
         resp = await collector_client.post(
             "/api/v1/catalogs/1/columns/id/infer-description",
@@ -505,8 +511,9 @@ async def test_infer_descriptions_batch_inflight_conflict(
     mock_guard = MagicMock()
     mock_guard.acquire = AsyncMock(return_value=False)
     mock_guard.release = AsyncMock(return_value=True)
-    with patch("app.api.collector._svc", return_value=fake_svc), patch(
-        "app.api.collector.InferInflightGuard", return_value=mock_guard
+    with (
+        patch("app.api.collector._svc", return_value=fake_svc),
+        patch("app.api.collector.InferInflightGuard", return_value=mock_guard),
     ):
         resp = await collector_client.post("/api/v1/catalogs/1/infer-descriptions")
     assert resp.status_code == 409
@@ -617,8 +624,7 @@ async def test_infer_descriptions_batch_partial_failure(
     assert data["failed"] == ["c"]
     # c 未被 upsert
     upsert_cols = [
-        c.kwargs["column_name"]
-        for c in fake_svc._repo.upsert_description.await_args_list
+        c.kwargs["column_name"] for c in fake_svc._repo.upsert_description.await_args_list
     ]
     assert upsert_cols == ["a", "b"]
 
@@ -635,8 +641,9 @@ async def test_infer_table_description_inflight_conflict(
     mock_guard = MagicMock()
     mock_guard.acquire = AsyncMock(return_value=False)
     mock_guard.release = AsyncMock(return_value=True)
-    with patch("app.api.collector._svc", return_value=fake_svc), patch(
-        "app.api.collector.InferInflightGuard", return_value=mock_guard
+    with (
+        patch("app.api.collector._svc", return_value=fake_svc),
+        patch("app.api.collector.InferInflightGuard", return_value=mock_guard),
     ):
         resp = await collector_client.post(
             "/api/v1/catalogs/1/infer-table-description",
@@ -762,9 +769,12 @@ async def test_collect_sync_creates_and_completes_run(
             "mode": "FULL",
         }
     )
-    with patch("app.api.collector._svc", return_value=fake_svc), patch(
-        "app.api.collector.build_collector",
-        return_value=MagicMock(dispose=AsyncMock()),
+    with (
+        patch("app.api.collector._svc", return_value=fake_svc),
+        patch(
+            "app.api.collector.build_collector",
+            return_value=MagicMock(dispose=AsyncMock()),
+        ),
     ):
         resp = await collector_client.post("/api/v1/data-sources/s1/collect", json={"mode": "FULL"})
     assert resp.status_code == 200
@@ -788,9 +798,12 @@ async def test_collect_sync_failure_marks_run_failed(
         return_value=SimpleNamespace(source_type="mysql", connection_config="enc")
     )
     fake_svc.collect_and_register = AsyncMock(side_effect=RuntimeError("conn refused"))
-    with patch("app.api.collector._svc", return_value=fake_svc), patch(
-        "app.api.collector.build_collector",
-        return_value=MagicMock(dispose=AsyncMock()),
+    with (
+        patch("app.api.collector._svc", return_value=fake_svc),
+        patch(
+            "app.api.collector.build_collector",
+            return_value=MagicMock(dispose=AsyncMock()),
+        ),
     ):
         resp = await collector_client.post("/api/v1/data-sources/s1/collect", json={"mode": "FULL"})
     assert resp.status_code == 500

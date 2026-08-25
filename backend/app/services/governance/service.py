@@ -361,12 +361,16 @@ class GovernanceService(BaseService):
         """
         user = await self._ensure_user_exists(user_id)
         role_s = _role_to_str(user.role)
+        all_roles = user.roles_all()
         ui_role_actions = await self.load_ui_role_actions()
-        role_actions = ui_role_actions.get(role_s, frozenset())
+        role_actions = frozenset().union(
+            *(ui_role_actions.get(r, frozenset()) for r in all_roles)
+        )
         direct = await self._repo.list_user_ui_permissions(user_id)
         return {
             "user_id": user_id,
             "role": role_s,
+            "roles": all_roles,
             "role_actions": sorted(role_actions),
             "direct_actions": sorted(direct),
             "effective_actions": sorted(set(role_actions) | direct),
@@ -753,15 +757,23 @@ class GovernanceService(BaseService):
             if g.domain:
                 domains.add(g.domain)
         role_s = _role_to_str(user.role)
+        all_roles = user.roles_all()
         role_actions = await self.load_role_actions()
         ui_role_actions = await self.load_ui_role_actions()
         direct_actions = await self._repo.list_user_ui_permissions(user.id)
-        ui_actions = set(ui_role_actions.get(role_s, frozenset())) | direct_actions
+        # 方案 A 多角色：所有角色（主角色 + user_role 扩展）的权限点取并集，
+        # 避免多角色用户只按单角色查 ui_actions 导致其它角色权限缺失。
+        ui_actions: set[str] = set(direct_actions)
+        allowed_actions: set[str] = set()
+        for r in all_roles:
+            ui_actions |= set(ui_role_actions.get(r, frozenset()))
+            allowed_actions |= set(role_actions.get(r, frozenset()))
         return PermissionSnapshot(
             user_id=user.id,
             role=role_s,
+            roles=all_roles,
             home_domain=user.domain,
-            allowed_actions=sorted(role_actions.get(role_s, frozenset())),
+            allowed_actions=sorted(allowed_actions),
             ui_actions=sorted(ui_actions),
             granted_domains=sorted(domains),
             metric_whitelist=sorted(whitelist),
@@ -779,6 +791,7 @@ class GovernanceService(BaseService):
             role=_role_to_str(user.role),
             domain=user.domain,
             grants=tuple(_grant_to_dict(g) for g in grants),
+            roles=tuple(user.roles_all()),
         )
         resource = policy.Resource(domain=req.domain, metric_code=req.metric_code)
         if req.metric_code:
@@ -887,6 +900,7 @@ class GovernanceService(BaseService):
             role=_role_to_str(user.role),
             domain=user.domain,
             grants=tuple(_grant_to_dict(g) for g in grants),
+            roles=tuple(user.roles_all()),
         )
         resource = policy.Resource(
             domain=metric.domain,

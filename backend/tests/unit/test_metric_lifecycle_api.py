@@ -35,7 +35,11 @@ async def metrics_client() -> AsyncIterator[httpx.AsyncClient]:
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=1, role="platform_admin", domain=None
+        id=1,
+        role="platform_admin",
+        domain=None,
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -59,9 +63,7 @@ async def test_get_archived_metric(metrics_client: httpx.AsyncClient) -> None:
                 "arbitration_mark": None,
             }
         )
-        resp = await metrics_client.get(
-            "/api/v1/metric-definitions/sales_gmv_d/archived"
-        )
+        resp = await metrics_client.get("/api/v1/metric-definitions/sales_gmv_d/archived")
     assert resp.status_code == 200
     assert resp.json()["data"]["metric"]["metric_code"] == "sales_gmv_d"
 
@@ -80,9 +82,7 @@ async def test_restore_metric(metrics_client: httpx.AsyncClient) -> None:
     with patch("app.api.metrics.MetricService") as mock_svc:
         mock_svc.return_value.restore_metric = AsyncMock(return_value=_metric())
         mock_svc.return_value.run_lineage_post_commit = AsyncMock()
-        resp = await metrics_client.post(
-            "/api/v1/metric-definitions/sales_gmv_d/restore"
-        )
+        resp = await metrics_client.post("/api/v1/metric-definitions/sales_gmv_d/restore")
     assert resp.status_code == 200
     mock_svc.return_value.restore_metric.assert_awaited_once()
 
@@ -90,12 +90,8 @@ async def test_restore_metric(metrics_client: httpx.AsyncClient) -> None:
 async def test_promote_metric(metrics_client: httpx.AsyncClient) -> None:
     """灰度全量发布 → 200。"""
     with patch("app.api.metrics.MetricService") as mock_svc:
-        mock_svc.return_value.promote_metric = AsyncMock(
-            return_value=_metric()
-        )
-        resp = await metrics_client.post(
-            "/api/v1/metric-definitions/sales_gmv_d/promote"
-        )
+        mock_svc.return_value.promote_metric = AsyncMock(return_value=_metric())
+        resp = await metrics_client.post("/api/v1/metric-definitions/sales_gmv_d/promote")
     assert resp.status_code == 200
     mock_svc.return_value.promote_metric.assert_awaited_once_with(
         "sales_gmv_d", actor_id=1, role="platform_admin", user_domain=None
@@ -106,9 +102,7 @@ async def test_rollback_metric(metrics_client: httpx.AsyncClient) -> None:
     """灰度回滚 → 200。"""
     with patch("app.api.metrics.MetricService") as mock_svc:
         mock_svc.return_value.rollback_metric = AsyncMock(return_value=_metric())
-        resp = await metrics_client.post(
-            "/api/v1/metric-definitions/sales_gmv_d/rollback"
-        )
+        resp = await metrics_client.post("/api/v1/metric-definitions/sales_gmv_d/rollback")
     assert resp.status_code == 200
     mock_svc.return_value.rollback_metric.assert_awaited_once_with(
         "sales_gmv_d", actor_id=1, role="platform_admin", user_domain=None
@@ -118,9 +112,7 @@ async def test_rollback_metric(metrics_client: httpx.AsyncClient) -> None:
 async def test_emergency_publish_metric(metrics_client: httpx.AsyncClient) -> None:
     """紧急发布（特性开关默认开启）→ 200。"""
     with patch("app.api.metrics.MetricService") as mock_svc:
-        mock_svc.return_value.emergency_publish_metric = AsyncMock(
-            return_value=_metric()
-        )
+        mock_svc.return_value.emergency_publish_metric = AsyncMock(return_value=_metric())
         resp = await metrics_client.post(
             "/api/v1/metric-definitions/sales_gmv_d/emergency-publish",
             json={"reason": "生产故障需立即发布处理", "target_version": 1},
@@ -148,9 +140,7 @@ async def test_batch_register_metrics(metrics_client: httpx.AsyncClient) -> None
         mock_svc.return_value.batch_register_metrics = AsyncMock(
             return_value={
                 "batch_id": "b1",
-                "candidates": [
-                    {"metric_code": "c1", "status": "DRAFT", "validation_errors": None}
-                ],
+                "candidates": [{"metric_code": "c1", "status": "DRAFT", "validation_errors": None}],
             }
         )
         resp = await metrics_client.post(
@@ -168,9 +158,7 @@ async def test_batch_register_metrics(metrics_client: httpx.AsyncClient) -> None
 async def test_recover_source_dropped(metrics_client: httpx.AsyncClient) -> None:
     """源已恢复（DSD → PUBLISHED）→ 200。"""
     with patch("app.api.metrics.MetricService") as mock_svc:
-        mock_svc.return_value.recover_source_dropped = AsyncMock(
-            return_value=_metric()
-        )
+        mock_svc.return_value.recover_source_dropped = AsyncMock(return_value=_metric())
         resp = await metrics_client.post(
             "/api/v1/metric-definitions/sales_gmv_d/recover-source-dropped"
         )
@@ -181,9 +169,7 @@ async def test_recover_source_dropped(metrics_client: httpx.AsyncClient) -> None
 async def test_confirm_deprecate_dropped(metrics_client: httpx.AsyncClient) -> None:
     """确认退役（DSD → DEPRECATED）→ 200。"""
     with patch("app.api.metrics.MetricService") as mock_svc:
-        mock_svc.return_value.confirm_deprecate_dropped = AsyncMock(
-            return_value=_metric()
-        )
+        mock_svc.return_value.confirm_deprecate_dropped = AsyncMock(return_value=_metric())
         mock_svc.return_value.run_lineage_post_commit = AsyncMock()
         resp = await metrics_client.post(
             "/api/v1/metric-definitions/sales_gmv_d/confirm-deprecate-dropped",
@@ -210,7 +196,11 @@ async def test_mark_source_dropped_owner_forbidden(
 ) -> None:
     """P0-1: metric_owner 调用 mark-source-dropped → 403（越权收紧）。"""
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=2, role="metric_owner", domain="sales"
+        id=2,
+        role="metric_owner",
+        domain="sales",
+        roles_all=lambda: ["metric_owner"],
+        has_role=lambda r: r == "metric_owner",
     )
     with patch("app.api.metrics.MetricService") as mock_svc:
         mock_svc.return_value.mark_source_dropped = AsyncMock(return_value=0)
@@ -282,9 +272,7 @@ async def test_confirm_version_api(metrics_client: httpx.AsyncClient) -> None:
             json={"version": 1},
         )
     assert resp.status_code == 200
-    mock_svc.return_value.confirm_version.assert_awaited_once_with(
-        "sales_gmv_d", 1, consumer_id=1
-    )
+    mock_svc.return_value.confirm_version.assert_awaited_once_with("sales_gmv_d", 1, consumer_id=1)
 
 
 async def test_reject_version_api(metrics_client: httpx.AsyncClient) -> None:
@@ -335,9 +323,7 @@ async def test_get_metric_health_api(metrics_client: httpx.AsyncClient) -> None:
     )
     with patch("app.api.metrics.MetricService") as mock_svc:
         mock_svc.return_value.get_metric_health = AsyncMock(return_value=health)
-        resp = await metrics_client.get(
-            "/api/v1/metric-definitions/sales_gmv_d/health"
-        )
+        resp = await metrics_client.get("/api/v1/metric-definitions/sales_gmv_d/health")
     assert resp.status_code == 200
     assert resp.json()["data"]["level"] == "HEALTHY"
     mock_svc.return_value.get_metric_health.assert_awaited_once_with("sales_gmv_d")

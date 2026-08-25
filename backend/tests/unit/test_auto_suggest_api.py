@@ -33,7 +33,11 @@ async def metrics_client() -> AsyncIterator[httpx.AsyncClient]:
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=1, role="platform_admin", domain=None
+        id=1,
+        role="platform_admin",
+        domain=None,
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -113,9 +117,7 @@ async def test_auto_suggest_valid_request_returns_fields(
         ),
         patch(
             "app.services.lineage.repository.LineageRepository",
-            return_value=MagicMock(
-                edges_for_node=AsyncMock(return_value=[])
-            ),
+            return_value=MagicMock(edges_for_node=AsyncMock(return_value=[])),
         ),
     ):
         resp = await metrics_client.post(
@@ -155,29 +157,31 @@ async def test_auto_suggest_splits_lineage_direction(
             "app.services.lineage.repository.LineageRepository",
             return_value=MagicMock(
                 edges_for_node=AsyncMock(
-                    side_effect=lambda node, direction: [
-                        SimpleNamespace(
-                            source_node="table:ods.sales_order",
-                            target_node="table:dwd.sales_detail",
-                        ),
-                        # 指标依赖边（入边 source=metric）应被过滤
-                        SimpleNamespace(
-                            source_node="metric:dep_gmv",
-                            target_node="table:dwd.sales_detail",
-                        ),
-                    ]
-                    if direction == "upstream"
-                    else [
-                        SimpleNamespace(
-                            source_node="table:dwd.sales_detail",
-                            target_node="table:ads.gmv_report",
-                        ),
-                        # 指标消费边（出边 target=metric）应被过滤
-                        SimpleNamespace(
-                            source_node="table:dwd.sales_detail",
-                            target_node="metric:consumer_x",
-                        ),
-                    ]
+                    side_effect=lambda node, direction: (
+                        [
+                            SimpleNamespace(
+                                source_node="table:ods.sales_order",
+                                target_node="table:dwd.sales_detail",
+                            ),
+                            # 指标依赖边（入边 source=metric）应被过滤
+                            SimpleNamespace(
+                                source_node="metric:dep_gmv",
+                                target_node="table:dwd.sales_detail",
+                            ),
+                        ]
+                        if direction == "upstream"
+                        else [
+                            SimpleNamespace(
+                                source_node="table:dwd.sales_detail",
+                                target_node="table:ads.gmv_report",
+                            ),
+                            # 指标消费边（出边 target=metric）应被过滤
+                            SimpleNamespace(
+                                source_node="table:dwd.sales_detail",
+                                target_node="metric:consumer_x",
+                            ),
+                        ]
+                    )
                 )
             ),
         ),

@@ -12,7 +12,6 @@ P3: datetime.utcnow() → datetime.now(UTC)。
 from __future__ import annotations
 
 import asyncio
-import enum
 import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -890,20 +889,26 @@ class NotifyService(BaseService):
             raise NotFoundError(f"通知不存在: {notif_id}")
         return notif
 
-    async def mark_sent(self, notif_id: int, actor_id: int, role: str = "") -> Notification:
-        return await self._transition(notif_id, NotifyStatus.SENT.value, actor_id, role)
+    async def mark_sent(
+        self, notif_id: int, actor_id: int, role: str = "", roles: list[str] | None = None
+    ) -> Notification:
+        return await self._transition(notif_id, NotifyStatus.SENT.value, actor_id, role, roles)
 
-    async def mark_failed(self, notif_id: int, actor_id: int, role: str = "") -> Notification:
-        return await self._transition(notif_id, NotifyStatus.FAILED.value, actor_id, role)
+    async def mark_failed(
+        self, notif_id: int, actor_id: int, role: str = "", roles: list[str] | None = None
+    ) -> Notification:
+        return await self._transition(notif_id, NotifyStatus.FAILED.value, actor_id, role, roles)
 
-    async def retry_delivery(self, notif_id: int, actor_id: int, role: str = "") -> Notification:
+    async def retry_delivery(
+        self, notif_id: int, actor_id: int, role: str = "", roles: list[str] | None = None
+    ) -> Notification:
         """重试投递失败的站内通知（送达失败处置）。
 
         仅 FAILED 状态可重试（PENDING/SENT 重试无意义）；按存储的渠道与 payload
         重新投递，成功 → SENT + sent_at + 清空 last_error，失败 → 保持 FAILED + 更新原因。
         """
         notif = await self.get_notification(notif_id)
-        self._assert_owner(notif, actor_id, role)
+        self._assert_owner(notif, actor_id, role, roles)
         if notif.status != NotifyStatus.FAILED.value:
             raise UnisenseError(
                 f"仅发送失败的通知可重试（当前 {notif.status}）",
@@ -926,23 +931,27 @@ class NotifyService(BaseService):
         await self._repo.commit()
         return notif
 
-    async def mark_handled(self, notif_id: int, actor_id: int, role: str = "") -> Notification:
+    async def mark_handled(
+        self, notif_id: int, actor_id: int, role: str = "", roles: list[str] | None = None
+    ) -> Notification:
         """标记待办类通知为「已处理」（待办闭环）。
 
         用户点「去仲裁/去审批」等行动按钮处理完成后，回标记办结——通知不再出现在
         「仅待处理」筛选，避免处理完仍提示待办的快照残留。
         """
         notif = await self.get_notification(notif_id)
-        self._assert_owner(notif, actor_id, role)
+        self._assert_owner(notif, actor_id, role, roles)
         if notif.handled_at is None:
             notif.handled_at = datetime.now(UTC)
         await self._repo.commit()
         return notif
 
-    async def mark_read(self, notif_id: int, actor_id: int, role: str = "") -> Notification:
+    async def mark_read(
+        self, notif_id: int, actor_id: int, role: str = "", roles: list[str] | None = None
+    ) -> Notification:
         """单条通知标记已读（幂等：已读不再覆写时间）。"""
         notif = await self.get_notification(notif_id)
-        self._assert_owner(notif, actor_id, role)
+        self._assert_owner(notif, actor_id, role, roles)
         if notif.read_at is None:
             notif.read_at = datetime.now(UTC)
         await self._repo.commit()
@@ -956,10 +965,12 @@ class NotifyService(BaseService):
         """当前用户未读通知总数（全局角标，精确计数而非列表近似）。"""
         return await self._repo.count_unread(actor_id)
 
-    async def delete_notification(self, notif_id: int, actor_id: int, role: str = "") -> None:
+    async def delete_notification(
+        self, notif_id: int, actor_id: int, role: str = "", roles: list[str] | None = None
+    ) -> None:
         """删除单条通知（物理删除；仅通知归属者本人或平台管理员可操作）。"""
         notif = await self.get_notification(notif_id)
-        self._assert_owner(notif, actor_id, role)
+        self._assert_owner(notif, actor_id, role, roles)
         await self._repo.delete_notification(notif)
         await self._repo.commit()
 
@@ -967,21 +978,37 @@ class NotifyService(BaseService):
         """当前用户清空全部通知（按 subscriber 限定，天然隔离），返回删除条数。"""
         return await self._repo.delete_all(actor_id)
 
-    def _assert_owner(self, notif: Notification, actor_id: int, role: str = "") -> None:
-        """IDOR 防护：仅通知归属者本人或平台管理员可操作，其余角色一律拒绝。"""
-        role_val = role.value if isinstance(role, enum.Enum) else str(role or "")
-        if not (role_val == "platform_admin" or notif.subscriber_id == actor_id):
-            raise AuthError(
-                "无权修改他人通知状态",
-                error_code="FORBIDDEN",
-                ctx={"notif_id": notif.id, "actor_id": actor_id, "owner_id": notif.subscriber_id},
-            )
+    def _assert_owner(
+        self,
+        notif: Notification,
+        actor_id: int,
+        role: str = "",
+        roles: list[str] | None = None,
+    ) -> None:
+        """IDOR 防护：仅通知归属者本人或平台管理员可操作，其余角色一律拒绝。
+
+        方案 A 多角色：``roles`` 携带用户全部角色（主角色 + user_role 扩展），
+        任一角色为 platform_admin 即豁免；缺省回退主角色（``role``）。
+        """
+        all_roles = roles or ([str(role)] if role else [])
+        if "platform_admin" in all_roles or notif.subscriber_id == actor_id:
+            return
+        raise AuthError(
+            "无权修改他人通知状态",
+            error_code="FORBIDDEN",
+            ctx={"notif_id": notif.id, "actor_id": actor_id, "owner_id": notif.subscriber_id},
+        )
 
     async def _transition(
-        self, notif_id: int, status: str, actor_id: int, role: str = ""
+        self,
+        notif_id: int,
+        status: str,
+        actor_id: int,
+        role: str = "",
+        roles: list[str] | None = None,
     ) -> Notification:
         notif = await self.get_notification(notif_id)
-        self._assert_owner(notif, actor_id, role)
+        self._assert_owner(notif, actor_id, role, roles)
         notif.status = status
         if status == NotifyStatus.SENT.value:
             notif.sent_at = datetime.now(UTC)

@@ -17,6 +17,7 @@ from app.services.semantic.metric_stats import MetricStatsService
 
 # ---- repository ----
 
+
 async def test_repo_metric_reuse_counts_groups_by_edge_type() -> None:
     db = MagicMock()
     result = MagicMock()
@@ -43,6 +44,7 @@ async def test_repo_metric_reuse_counts_empty() -> None:
 
 # ---- service ----
 
+
 def _db_with_metrics(rows: list[tuple]) -> MagicMock:
     db = MagicMock()
     result = MagicMock()
@@ -59,9 +61,7 @@ async def test_reuse_summary_sorts_by_reuse_desc() -> None:
             ("gmv_total", "GMV 总览", "sales", "derived", "PUBLISHED"),
         ]
     )
-    with patch(
-        "app.services.semantic.metric_stats.LineageRepository"
-    ) as repo_cls:
+    with patch("app.services.semantic.metric_stats.LineageRepository") as repo_cls:
         repo = repo_cls.return_value
         repo.metric_reuse_counts = AsyncMock(
             return_value={
@@ -86,9 +86,7 @@ async def test_reuse_summary_sorts_by_reuse_desc() -> None:
 async def test_reuse_summary_degrades_when_lineage_unavailable() -> None:
     """血缘表无数据时全部指标零复用（降级而不是报错）。"""
     db = _db_with_metrics([("m1", "指标1", "sales", "atomic", "PUBLISHED")])
-    with patch(
-        "app.services.semantic.metric_stats.LineageRepository"
-    ) as repo_cls:
+    with patch("app.services.semantic.metric_stats.LineageRepository") as repo_cls:
         repo = repo_cls.return_value
         repo.metric_reuse_counts = AsyncMock(return_value={})
         result = await MetricStatsService(db).reuse_summary()
@@ -100,10 +98,16 @@ async def test_reuse_summary_degrades_when_lineage_unavailable() -> None:
 
 # ---- API ----
 
+
 async def test_reuse_api_envelope_and_validation() -> None:
     """端点返回统一信封，复用清单字段完整且经 Pydantic 校验。"""
     db = MagicMock()
-    user = MagicMock(id=1, role="platform_admin")
+    user = MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     with patch("app.api.metric_stats.MetricStatsService") as svc_cls:
         svc = svc_cls.return_value
         svc.reuse_summary = AsyncMock(

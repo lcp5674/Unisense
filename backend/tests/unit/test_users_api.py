@@ -79,7 +79,12 @@ async def admin_client() -> AsyncIterator[httpx.AsyncClient]:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -94,7 +99,9 @@ async def _request(role: str) -> httpx.AsyncClient:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role=role)
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role=role, roles_all=lambda: [role], has_role=lambda r: r == role
+    )
     transport = ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
@@ -134,7 +141,12 @@ async def test_list_users_returns_paginated() -> None:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/api/v1/users?page=1&page_size=20")
@@ -155,13 +167,14 @@ async def test_list_users_returns_paginated() -> None:
 
 
 async def test_create_user_success(admin_client: httpx.AsyncClient) -> None:
-    with patch("app.api.users.hash_password", return_value="hashed:abc"), patch(
-        "app.api.users._assert_unique", new=AsyncMock()
-    ), patch(
-        "app.api.users._assert_domain_active", new=AsyncMock()
-    ), patch(
-        "app.api.users._assert_org_active",
-        new=AsyncMock(return_value=_make_org()),
+    with (
+        patch("app.api.users.hash_password", return_value="hashed:abc"),
+        patch("app.api.users._assert_unique", new=AsyncMock()),
+        patch("app.api.users._assert_domain_active", new=AsyncMock()),
+        patch(
+            "app.api.users._assert_org_active",
+            new=AsyncMock(return_value=_make_org()),
+        ),
     ):
         resp = await admin_client.post(
             "/api/v1/users",
@@ -181,6 +194,124 @@ async def test_create_user_success(admin_client: httpx.AsyncClient) -> None:
     assert data["role"] == "viewer"
     assert "password_hash" not in resp.text
     assert "password" not in resp.text
+
+
+async def test_create_user_with_multiple_roles(admin_client: httpx.AsyncClient) -> None:
+    """方案 A 多角色：POST roles 多选，主角色取权限最高者，user_role 全部落表。"""
+    with (
+        patch("app.api.users.hash_password", return_value="hashed:abc"),
+        patch("app.api.users._assert_unique", new=AsyncMock()),
+        patch("app.api.users._assert_domain_active", new=AsyncMock()),
+        patch(
+            "app.api.users._assert_org_active",
+            new=AsyncMock(return_value=_make_org()),
+        ),
+    ):
+        resp = await admin_client.post(
+            "/api/v1/users",
+            json={
+                "username": "carol",
+                "email": "carol@example.com",
+                "display_name": "卡罗尔",
+                "role": "reviewer",
+                "roles": ["domain_admin", "reviewer"],
+                "org_id": 1,
+                "password": "Secret123!",
+            },
+        )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    # 主角色自动重算为权限最高者（domain_admin > reviewer）
+    assert data["role"] == "domain_admin"
+    assert set(data["roles"]) == {"domain_admin", "reviewer"}
+
+
+async def test_update_user_replaces_roles(admin_client: httpx.AsyncClient) -> None:
+    """方案 A 多角色：PUT 整表替换 roles（含主角色重算 + 自我保护）。"""
+    row = _make_user(id=2, role="viewer")
+    session = _make_session()
+    user_result = MagicMock()
+    user_result.scalar_one_or_none.return_value = row
+    org_result = MagicMock()
+    org_result.scalar_one_or_none.return_value = None
+    session.execute = AsyncMock(side_effect=[user_result, org_result])
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with (
+            patch("app.api.users._assert_unique", new=AsyncMock()),
+            patch("app.api.users._assert_domain_active", new=AsyncMock()),
+            patch(
+                "app.api.users._assert_org_active",
+                new=AsyncMock(return_value=_make_org()),
+            ),
+        ):
+            resp = await client.put(
+                "/api/v1/users/2",
+                json={
+                    "display_name": "卡罗尔",
+                    "email": "carol@example.com",
+                    "role": "reviewer",
+                    "roles": ["metric_owner", "reviewer"],
+                },
+            )
+    app.dependency_overrides.clear()
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    # metric_owner 优先级高于 reviewer → 主角色 metric_owner
+    assert data["role"] == "metric_owner"
+    assert set(data["roles"]) == {"metric_owner", "reviewer"}
+
+
+async def test_update_self_platform_admin_removal_forbidden(
+    admin_client: httpx.AsyncClient,
+) -> None:
+    """自我保护：当前登录平台管理员不能通过多角色编辑移除自己的 platform_admin。"""
+    row = _make_user(id=1, role="platform_admin")  # 编辑的是自己
+    session = _make_session()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = row
+    session.execute = AsyncMock(return_value=result)
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with (
+            patch("app.api.users._assert_unique", new=AsyncMock()),
+            patch("app.api.users._assert_domain_active", new=AsyncMock()),
+        ):
+            resp = await client.put(
+                "/api/v1/users/1",
+                json={
+                    "display_name": "平台管理员",
+                    "email": "admin@example.com",
+                    "role": "viewer",
+                    "roles": ["viewer"],
+                },
+            )
+    app.dependency_overrides.clear()
+    assert resp.status_code == 422  # SELF_DEMOTE_FORBIDDEN → ValidationError
+    body = resp.json()
+    assert body["code"] == "SELF_DEMOTE_FORBIDDEN"
 
 
 async def test_create_user_conflict(admin_client: httpx.AsyncClient) -> None:
@@ -209,8 +340,9 @@ async def test_create_user_weak_password(admin_client: httpx.AsyncClient) -> Non
 
 async def test_create_user_invalid_domain_rejected(admin_client: httpx.AsyncClient) -> None:
     """domain 非 active 主题域 code → 422 USER_DOMAIN_INVALID（防绕过 UI 注入任意域值）。"""
-    with patch("app.api.users._assert_unique", new=AsyncMock()), patch(
-        "app.api.users._assert_org_active", new=AsyncMock(return_value=_make_org())
+    with (
+        patch("app.api.users._assert_unique", new=AsyncMock()),
+        patch("app.api.users._assert_org_active", new=AsyncMock(return_value=_make_org())),
     ):
         resp = await admin_client.post(
             "/api/v1/users",
@@ -231,8 +363,9 @@ async def test_create_user_invalid_domain_rejected(admin_client: httpx.AsyncClie
 async def test_update_user_invalid_domain_rejected(admin_client: httpx.AsyncClient) -> None:
     """编辑时把域改为不存在/未启用的主题域 → 422 USER_DOMAIN_INVALID。"""
     user = _make_user()
-    with patch("app.api.users._get_user", return_value=user), patch(
-        "app.api.users._assert_unique", new=AsyncMock()
+    with (
+        patch("app.api.users._get_user", return_value=user),
+        patch("app.api.users._assert_unique", new=AsyncMock()),
     ):
         resp = await admin_client.put(
             "/api/v1/users/2",
@@ -254,9 +387,11 @@ async def test_update_user_invalid_domain_rejected(admin_client: httpx.AsyncClie
 
 async def test_update_user_success(admin_client: httpx.AsyncClient) -> None:
     user = _make_user()
-    with patch("app.api.users._get_user", return_value=user), patch(
-        "app.api.users._assert_unique", new=AsyncMock()
-    ), patch("app.api.users._assert_domain_active", new=AsyncMock()):
+    with (
+        patch("app.api.users._get_user", return_value=user),
+        patch("app.api.users._assert_unique", new=AsyncMock()),
+        patch("app.api.users._assert_domain_active", new=AsyncMock()),
+    ):
         resp = await admin_client.put(
             "/api/v1/users/2",
             json={
@@ -276,8 +411,9 @@ async def test_update_user_success(admin_client: httpx.AsyncClient) -> None:
 async def test_update_user_self_demote_rejected(admin_client: httpx.AsyncClient) -> None:
     # 当前用户 id=1，编辑目标 id=1（自己），且降级非 platform_admin
     admin = _make_user(id=1, username="admin", role="platform_admin")
-    with patch("app.api.users._get_user", return_value=admin), patch(
-        "app.api.users._assert_unique", new=AsyncMock()
+    with (
+        patch("app.api.users._get_user", return_value=admin),
+        patch("app.api.users._assert_unique", new=AsyncMock()),
     ):
         resp = await admin_client.put(
             "/api/v1/users/1",
@@ -343,7 +479,12 @@ async def _batch_status_client(rows: list[User]) -> tuple[httpx.AsyncClient, Mag
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="platform_admin")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     transport = ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://test"), session
 
@@ -431,8 +572,9 @@ async def test_batch_status_over_quota_rejected(admin_client: httpx.AsyncClient)
 
 async def test_reset_password_success(admin_client: httpx.AsyncClient) -> None:
     user = _make_user()
-    with patch("app.api.users._get_user", return_value=user), patch(
-        "app.api.users.hash_password", return_value="hashed:new"
+    with (
+        patch("app.api.users._get_user", return_value=user),
+        patch("app.api.users.hash_password", return_value="hashed:new"),
     ):
         resp = await admin_client.post(
             "/api/v1/users/2/reset-password", json={"new_password": "Newsecret123!"}
@@ -458,11 +600,13 @@ async def test_reset_password_not_found(admin_client: httpx.AsyncClient) -> None
 
 async def test_create_user_sends_created_notification(admin_client: httpx.AsyncClient) -> None:
     """创建用户成功后定向通知新用户本人 user.created，通知体不含明文密码。"""
-    with patch("app.api.users.hash_password", return_value="hashed:abc"), patch(
-        "app.api.users._assert_unique", new=AsyncMock()
-    ), patch("app.api.users._assert_domain_active", new=AsyncMock()), patch(
-        "app.api.users._assert_org_active", new=AsyncMock(return_value=_make_org())
-    ), patch("app.services.notify.service.NotifyService") as ns:
+    with (
+        patch("app.api.users.hash_password", return_value="hashed:abc"),
+        patch("app.api.users._assert_unique", new=AsyncMock()),
+        patch("app.api.users._assert_domain_active", new=AsyncMock()),
+        patch("app.api.users._assert_org_active", new=AsyncMock(return_value=_make_org())),
+        patch("app.services.notify.service.NotifyService") as ns,
+    ):
         ns.return_value.notify_user = AsyncMock()
         resp = await admin_client.post(
             "/api/v1/users",
@@ -489,11 +633,13 @@ async def test_create_user_sends_created_notification(admin_client: httpx.AsyncC
 
 async def test_create_user_notify_failure_does_not_block(admin_client: httpx.AsyncClient) -> None:
     """通知失败（如 Redis 不可用）不阻断创建主流程（best-effort）。"""
-    with patch("app.api.users.hash_password", return_value="hashed:abc"), patch(
-        "app.api.users._assert_unique", new=AsyncMock()
-    ), patch("app.api.users._assert_domain_active", new=AsyncMock()), patch(
-        "app.api.users._assert_org_active", new=AsyncMock(return_value=_make_org())
-    ), patch("app.services.notify.service.NotifyService") as ns:
+    with (
+        patch("app.api.users.hash_password", return_value="hashed:abc"),
+        patch("app.api.users._assert_unique", new=AsyncMock()),
+        patch("app.api.users._assert_domain_active", new=AsyncMock()),
+        patch("app.api.users._assert_org_active", new=AsyncMock(return_value=_make_org())),
+        patch("app.services.notify.service.NotifyService") as ns,
+    ):
         ns.return_value.notify_user = AsyncMock(side_effect=RuntimeError("redis down"))
         resp = await admin_client.post(
             "/api/v1/users",
@@ -514,9 +660,10 @@ async def test_create_user_notify_failure_does_not_block(admin_client: httpx.Asy
 async def test_disable_user_sends_status_notification(admin_client: httpx.AsyncClient) -> None:
     """单条禁用 → 定向通知 user.status_changed（标题「账号已禁用」）。"""
     user = _make_user()
-    with patch("app.api.users._get_user", return_value=user), patch(
-        "app.services.notify.service.NotifyService"
-    ) as ns:
+    with (
+        patch("app.api.users._get_user", return_value=user),
+        patch("app.services.notify.service.NotifyService") as ns,
+    ):
         ns.return_value.notify_user = AsyncMock()
         resp = await admin_client.patch("/api/v1/users/2/status", json={"status": "disabled"})
     assert resp.status_code == 200
@@ -532,9 +679,10 @@ async def test_disable_user_sends_status_notification(admin_client: httpx.AsyncC
 async def test_enable_user_sends_status_notification(admin_client: httpx.AsyncClient) -> None:
     """单条启用 → 定向通知 user.status_changed（标题「账号已启用」）。"""
     user = _make_user(status="disabled")
-    with patch("app.api.users._get_user", return_value=user), patch(
-        "app.services.notify.service.NotifyService"
-    ) as ns:
+    with (
+        patch("app.api.users._get_user", return_value=user),
+        patch("app.services.notify.service.NotifyService") as ns,
+    ):
         ns.return_value.notify_user = AsyncMock()
         resp = await admin_client.patch("/api/v1/users/2/status", json={"status": "active"})
     assert resp.status_code == 200
@@ -590,9 +738,11 @@ async def test_batch_status_skips_notification_for_failed_items() -> None:
 async def test_reset_password_sends_notification(admin_client: httpx.AsyncClient) -> None:
     """重置密码 → 定向通知 user.password_reset，提示用临时密码登录，不含明文。"""
     user = _make_user()
-    with patch("app.api.users._get_user", return_value=user), patch(
-        "app.api.users.hash_password", return_value="hashed:new"
-    ), patch("app.services.notify.service.NotifyService") as ns:
+    with (
+        patch("app.api.users._get_user", return_value=user),
+        patch("app.api.users.hash_password", return_value="hashed:new"),
+        patch("app.services.notify.service.NotifyService") as ns,
+    ):
         ns.return_value.notify_user = AsyncMock()
         resp = await admin_client.post(
             "/api/v1/users/2/reset-password", json={"new_password": "Newsecret123!"}
@@ -615,11 +765,14 @@ async def test_reset_password_sends_notification(admin_client: httpx.AsyncClient
 
 async def test_create_user_inherits_team_domain(admin_client: httpx.AsyncClient) -> None:
     """创建用户：团队绑定域（org.domain=sales）时，用户自动继承团队域（不传 domain）。"""
-    with patch("app.api.users.hash_password", return_value="hashed:abc"), patch(
-        "app.api.users._assert_unique", new=AsyncMock()
-    ), patch("app.api.users._assert_domain_active", new=AsyncMock()), patch(
-        "app.api.users._assert_org_active",
-        new=AsyncMock(return_value=_make_org(domain="sales")),
+    with (
+        patch("app.api.users.hash_password", return_value="hashed:abc"),
+        patch("app.api.users._assert_unique", new=AsyncMock()),
+        patch("app.api.users._assert_domain_active", new=AsyncMock()),
+        patch(
+            "app.api.users._assert_org_active",
+            new=AsyncMock(return_value=_make_org(domain="sales")),
+        ),
     ):
         resp = await admin_client.post(
             "/api/v1/users",
@@ -640,11 +793,16 @@ async def test_create_user_inherits_team_domain(admin_client: httpx.AsyncClient)
 async def test_update_user_change_team_inherits_new_domain(admin_client: httpx.AsyncClient) -> None:
     """编辑用户换团队：新团队绑定域（domain=finance）时，用户域自动切换为新团队域。"""
     user = _make_user(org_id=1, domain="sales")
-    with patch("app.api.users._get_user", return_value=user), patch(
-        "app.api.users._assert_unique", new=AsyncMock()
-    ), patch("app.api.users._assert_domain_active", new=AsyncMock()), patch(
-        "app.api.users._assert_org_active",
-        new=AsyncMock(return_value=_make_org(id=2, name="金融团队", code="fin", domain="finance")),
+    with (
+        patch("app.api.users._get_user", return_value=user),
+        patch("app.api.users._assert_unique", new=AsyncMock()),
+        patch("app.api.users._assert_domain_active", new=AsyncMock()),
+        patch(
+            "app.api.users._assert_org_active",
+            new=AsyncMock(
+                return_value=_make_org(id=2, name="金融团队", code="fin", domain="finance")
+            ),
+        ),
     ):
         resp = await admin_client.put(
             "/api/v1/users/2",
@@ -660,3 +818,57 @@ async def test_update_user_change_team_inherits_new_domain(admin_client: httpx.A
     assert data["org_id"] == 2
     assert data["org_name"] == "金融团队"
     assert data["domain"] == "finance"
+
+
+# ---------------------------------------------------------------------------
+# 方案 A 多角色：require_roles 命中任一角色即放行
+# ---------------------------------------------------------------------------
+
+
+async def test_multi_role_user_with_platform_admin_can_access() -> None:
+    """扩展角色为 platform_admin 的用户可访问平台管理端点（主角色 reviewer 亦可）。"""
+    session = _make_session()
+    total_result = MagicMock()
+    total_result.scalar.return_value = 0
+    rows_result = MagicMock()
+    rows_result.scalars.return_value.all.return_value = []
+    org_result = MagicMock()
+    org_result.all.return_value = []
+    session.execute = AsyncMock(side_effect=[total_result, rows_result, org_result])
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=2,
+        role="reviewer",
+        roles_all=lambda: ["reviewer", "platform_admin"],
+        has_role=lambda r: r in ("reviewer", "platform_admin"),
+    )
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/users?page=1&page_size=20")
+    app.dependency_overrides.clear()
+    assert resp.status_code == 200
+
+
+async def test_multi_role_user_without_platform_admin_forbidden() -> None:
+    """扩展角色不含 platform_admin → 平台管理端点仍拒绝（fail-closed）。"""
+    session = _make_session()
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=2,
+        role="reviewer",
+        roles_all=lambda: ["reviewer", "metric_owner"],
+        has_role=lambda r: r in ("reviewer", "metric_owner"),
+    )
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/users")
+    app.dependency_overrides.clear()
+    assert resp.status_code == 403

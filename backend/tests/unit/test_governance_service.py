@@ -49,10 +49,24 @@ class FakeEvents:
 
 
 class FakeUser:
-    def __init__(self, uid: int = 1, role: str = "viewer", domain: str | None = "hr") -> None:
+    def __init__(
+        self,
+        uid: int = 1,
+        role: str = "viewer",
+        domain: str | None = "hr",
+        extra_roles: list[str] | None = None,
+    ) -> None:
         self.id = uid
         self.role = role
         self.domain = domain
+        self._extra_roles = extra_roles or []
+
+    def roles_all(self) -> list[str]:
+        """方案 A 多角色：主角色 + 扩展角色。"""
+        return [self.role, *self._extra_roles]
+
+    def has_role(self, role: str) -> bool:
+        return role in self.roles_all()
 
 
 class FakeMetric:
@@ -649,9 +663,7 @@ async def test_classification_rescan_filters_by_source_ids() -> None:
         FakeCatalog(1, "a", {"columns": [{"name": "phone"}]}, "INTERNAL", source_id="ds1"),
         FakeCatalog(2, "b", {"columns": [{"name": "gmv"}]}, "INTERNAL", source_id="ds2"),
     ]
-    result = await svc.classification_rescan(
-        ClassificationRescanRequest(source_ids=["ds1"])
-    )
+    result = await svc.classification_rescan(ClassificationRescanRequest(source_ids=["ds1"]))
     assert result.scanned == 1
     assert result.items[0].catalog_id == 1
 
@@ -882,8 +894,8 @@ async def test_check_metric_permission_skip_pii_gate_allows_submit_flow() -> Non
     assert cross.allow is False
 
 
-
 # ------------------------------------------- RBAC 可配置化（角色权限点覆盖）
+
 
 async def test_list_role_permissions_default_view() -> None:
     """默认（无覆盖）：全部角色显示默认动作、custom=None、effective=默认。"""
@@ -999,6 +1011,7 @@ async def test_remind_expiring_grants_notifies_and_dedupes() -> None:
 
 # --------------------------------------------- 自定义角色（方案 A）与动作点注册表
 
+
 async def test_create_custom_role_ok() -> None:
     """创建自定义角色：写入 role 表（is_custom=True），权限点默认为空集。"""
     svc, repo, _ = _svc()
@@ -1072,6 +1085,23 @@ async def test_my_permissions_includes_ui_actions() -> None:
     assert "catalog:view" in snap.ui_actions
     assert "metric:create" not in snap.ui_actions
     assert "read" in snap.allowed_actions  # 资源级动词保持兼容
+
+
+async def test_my_permissions_multi_role_union() -> None:
+    """方案 A 多角色：主角色 viewer + 扩展 reviewer → UI 权限点与资源级动词取并集。"""
+    svc, _repo, _ = _svc()
+    snap = await svc.my_permissions(
+        FakeUser(uid=1, role="viewer", extra_roles=["reviewer"])  # type: ignore[arg-type]
+    )
+    # reviewer 独有权限点出现在并集中
+    assert "metric:approve" in snap.ui_actions
+    # viewer 基础只读保留
+    assert "catalog:view" in snap.ui_actions
+    # 资源级动词并集：viewer(read) ∪ reviewer(read, approve)
+    assert "read" in snap.allowed_actions
+    assert "approve" in snap.allowed_actions
+    # roles 字段含全部角色（主角色在前）
+    assert snap.roles == ["viewer", "reviewer"]
 
 
 async def test_custom_role_ui_actions_via_override() -> None:

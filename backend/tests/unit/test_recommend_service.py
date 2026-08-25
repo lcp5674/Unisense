@@ -410,9 +410,7 @@ async def test_recommend_metrics_filters_gray_metric() -> None:
     # 热门层返回灰度指标 m_gray（EXPERIMENTAL）+ 已发布 m_new_1；
     # Metric 过滤白名单仅 m_new_1（等价于 m_gray 非 PUBLISHED 被过滤）
     svc._session = _metric_aware_session([], [], ["m_new_1"])
-    svc._repo.popular_metrics = AsyncMock(
-        return_value=[("m_gray", 5), ("m_new_1", 3)]
-    )
+    svc._repo.popular_metrics = AsyncMock(return_value=[("m_gray", 5), ("m_new_1", 3)])
     svc._repo.recent_published_metrics = AsyncMock(
         return_value=[
             {

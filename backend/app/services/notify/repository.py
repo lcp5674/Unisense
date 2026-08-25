@@ -8,7 +8,7 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.notify import EventLog, Notification, NotifyStatus, SubscriptionPref
-from app.models.user import User
+from app.models.user import User, UserRole
 
 # 待处理类事件（TD §12.9 通知闭环：接收者需要采取行动，而非仅被告知）。
 # 供「仅看待处理」筛选与前端「需处理」语义标记使用；集中维护避免散落。
@@ -278,11 +278,17 @@ class NotifyRepository:
         return display_name or username
 
     async def list_admin_ids(self) -> list[int]:
-        """查询全部启用的 platform_admin 用户 ID（字典未收录值待收录通知的收件人）。"""
+        """查询全部启用的 platform_admin 用户 ID（字典未收录值待收录通知的收件人）。
+
+        方案 A 多角色：主角色或 user_role 扩展角色为 platform_admin 均计入。
+        """
         stmt = (
             select(User.id)
             .where(
-                User.role == "platform_admin",
+                or_(
+                    User.role == "platform_admin",
+                    User.role_items.any(UserRole.role == "platform_admin"),
+                ),
                 User.status == "active",
             )
             .order_by(User.id)

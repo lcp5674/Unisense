@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, Enum, ForeignKey, Index, String
+from sqlalchemy import Boolean, Enum, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.mysql import Base
@@ -47,6 +47,31 @@ class Organization(Base, BaseModel):
     users: Mapped[list[User]] = relationship("User", back_populates="org", lazy="selectin")
 
     __table_args__ = (Index("idx_organization_code", "code"),)
+
+
+class UserRole(Base, BaseModel):
+    """用户角色关联表（多角色，TD §4.1 增强：user.role 保留为主角色冗余）。
+
+    方案 A 多角色：``user_role`` 为**权威角色源**（一个用户可挂多角色），
+    ``user.role`` 为主角色（权限最高者，向后兼容所有既有单角色读取/责任链）。
+    存量单角色用户迁移回填为一行 ``user_role(user_id, role=user.role)``。
+
+    Attributes:
+        user_id: 用户 ID（关联 user.id）。
+        role: 角色名（内置七角色或自定义角色名）。
+    """
+
+    __tablename__ = "user_role"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("user.id", name="fk_user_role_user"), nullable=False, comment="用户 ID"
+    )
+    role: Mapped[str] = mapped_column(String(32), nullable=False, comment="角色名")
+
+    __table_args__ = (
+        Index("idx_user_role_user", "user_id"),
+        UniqueConstraint("user_id", "role", name="uk_user_role_user_role"),
+    )
 
 
 class User(Base, BaseModel):
@@ -98,8 +123,33 @@ class User(Base, BaseModel):
     )
 
     org: Mapped[Organization] = relationship("Organization", back_populates="users")
+    #: 多角色关联（方案 A）：权威角色源为 ``user_role`` 表；``user.role`` 为主角色冗余。
+    role_items: Mapped[list[UserRole]] = relationship(
+        "UserRole", lazy="selectin", cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         Index("idx_user_org", "org_id"),
         Index("idx_user_role", "role"),
     )
+
+    def roles_all(self) -> list[str]:
+        """返回用户全部角色：主角色（``user.role``）+ ``user_role`` 表扩展角色。
+
+        主角色恒在首位；``user_role`` 含主角色重复值时去重。
+        通过 ``__dict__`` 读取 relationship 避免触发未加载实例的 lazy load
+        （测试/构造期直接 ``User(**base)`` 未挂 role_items 时安全回退为主角色）。
+        """
+        primary = str(self.role.value if hasattr(self.role, "value") else self.role)
+        extra = [str(r.role) for r in (self.__dict__.get("role_items") or [])]
+        seen: set[str] = {primary}
+        result = [primary]
+        for r in extra:
+            if r not in seen:
+                seen.add(r)
+                result.append(r)
+        return result
+
+    def has_role(self, role: str) -> bool:
+        """判断用户是否拥有指定角色（主角色或 ``user_role`` 扩展角色）。"""
+        return role in self.roles_all()

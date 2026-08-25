@@ -30,9 +30,7 @@ def _metric(
     m.type = "atomic"
     m.status = "PUBLISHED"
     m.updated_at = (
-        None
-        if updated_days_ago is None
-        else datetime.now(UTC) - timedelta(days=updated_days_ago)
+        None if updated_days_ago is None else datetime.now(UTC) - timedelta(days=updated_days_ago)
     )
     m.pending_conflict = pending_conflict
     m.pending_conflict_detail = detail
@@ -142,7 +140,12 @@ async def test_ledger_degrades_on_empty_data() -> None:
 async def test_ledger_api_envelope_and_validation() -> None:
     """端点返回统一信封，账本字段完整且经 Pydantic 校验。"""
     db = MagicMock()
-    user = MagicMock(id=1, role="platform_admin")
+    user = MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     with patch("app.api.metric_stats.MetricStatsService") as svc_cls:
         svc = svc_cls.return_value
         svc.asset_ledger = AsyncMock(

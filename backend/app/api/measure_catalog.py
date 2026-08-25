@@ -57,7 +57,12 @@ _SCOPED_ROLES = ("domain_admin", "metric_owner")
 
 
 def _assert_domain_scope(user: CurrentUser, resource_domain: str) -> None:
-    if user.role in _SCOPED_ROLES and user.domain and resource_domain != user.domain:
+    # 方案 A 多角色：任一角色命中作用域角色即受域约束（主角色或 user_role 扩展）。
+    if (
+        any(r in _SCOPED_ROLES for r in user.roles_all())
+        and user.domain
+        and resource_domain != user.domain
+    ):
         raise AuthError(
             f"无权限操作其他域的资源（资源域 {resource_domain}，当前域 {user.domain}）",
             error_code="FORBIDDEN",
