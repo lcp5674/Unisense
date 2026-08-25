@@ -1589,6 +1589,76 @@ describe("MetricDetail 按钮级权限过滤", () => {
     });
   });
 
+  it("编辑弹窗口径分角色（伪代码/数仓口径）回填 + 修改合入 + 清空移除（dirty 语义）", async () => {
+    // 存量指标（口径双字段上线前注册）无 pseudo_definition/dw_definition → 打开弹窗两框为空；
+    // 输入伪代码口径保存 → 合入 definition_json；清空数仓口径保存 → 从口径移除（dirty 区分）。
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "DRAFT",
+      definition_json: {
+        sql: "SELECT SUM(amount) AS gmv FROM dwd_sales",
+        pseudo_definition: "按渠道汇总订单金额（伪 SQL）",
+        dw_definition: "SELECT channel, SUM(order_amount) FROM dwd_sales GROUP BY channel",
+      },
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "outpatient",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    fireEvent.click(await screen.findByRole("button", { name: /编辑/ }));
+    await waitFor(() => {
+      expect(document.querySelector(".ant-modal")).toBeTruthy();
+    });
+    // 回填：两个口径分角色 TextArea 均带原值
+    const pseudoArea = document.querySelector('[data-testid="editPseudoDefinition"]') as HTMLTextAreaElement | null;
+    const dwArea = document.querySelector('[data-testid="editDwDefinition"]') as HTMLTextAreaElement | null;
+    expect(pseudoArea).toBeTruthy();
+    expect(dwArea).toBeTruthy();
+    expect((pseudoArea as HTMLTextAreaElement).value).toBe("按渠道汇总订单金额（伪 SQL）");
+    expect((dwArea as HTMLTextAreaElement).value).toBe(
+      "SELECT channel, SUM(order_amount) FROM dwd_sales GROUP BY channel",
+    );
+    // 修改伪代码口径 + 清空数仓口径 → 保存：pseudo 更新、dw 移除、sql 保留
+    fireEvent.change(pseudoArea as HTMLTextAreaElement, { target: { value: "按渠道汇总实付金额（伪 SQL）" } });
+    fireEvent.change(dwArea as HTMLTextAreaElement, { target: { value: "" } });
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "补填伪代码口径" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => {
+      const lastCall = mockedUpdateMetric.mock.calls[mockedUpdateMetric.mock.calls.length - 1]?.[1];
+      expect(lastCall).toMatchObject({
+        definition_json: {
+          sql: "SELECT SUM(amount) AS gmv FROM dwd_sales",
+          pseudo_definition: "按渠道汇总实付金额（伪 SQL）",
+        },
+      });
+      // dw_definition 被清空移除（不在提交口径中）
+      const def = (lastCall as { definition_json?: Record<string, unknown> }).definition_json ?? {};
+      expect("dw_definition" in def).toBe(false);
+    });
+  });
+
   it("编辑弹窗口径定义支持表达式模式切 SQL 模式并保存（Segmented 双向切换）", async () => {
     // 表达式模式指标（definition_json 无 sql）→ 打开弹窗默认表达式模式；
     // 切「SQL 模式」出现 SQL 框，输入 SQL 保存 → definition_json 合入 sql（保留原字段）

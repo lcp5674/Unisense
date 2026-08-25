@@ -694,6 +694,12 @@ export function MetricDetail() {
   // 存量 SQL 模式指标（definition_json 含 sql/etl_sql）打开弹窗时自动落到 SQL 模式。
   const [editDefMode, setEditDefMode] = useState<"expression" | "sql">("expression");
   const [editSqlText, setEditSqlText] = useState("");
+  // 口径分角色（对齐注册页 Step③）：系统开发伪代码口径 / 数仓开发详细口径，
+  // 独立于口径主体模式（expression/sql）始终可编辑；dirty 区分"未改保留"与"清空移除"。
+  const [editPseudoDefinition, setEditPseudoDefinition] = useState("");
+  const [editDwDefinition, setEditDwDefinition] = useState("");
+  const [editPseudoDirty, setEditPseudoDirty] = useState(false);
+  const [editDwDirty, setEditDwDirty] = useState(false);
   const [renameSuggestLoaded, setRenameSuggestLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -1011,6 +1017,11 @@ export function MetricDetail() {
     const isSqlMode = rawSql.trim().length > 0;
     setEditDefMode(isSqlMode ? "sql" : "expression");
     setEditSqlText(rawSql);
+    // 口径分角色回填（系统开发伪代码口径 / 数仓开发详细口径，独立于主体模式）
+    setEditPseudoDefinition(typeof def.pseudo_definition === "string" ? def.pseudo_definition : "");
+    setEditDwDefinition(typeof def.dw_definition === "string" ? def.dw_definition : "");
+    setEditPseudoDirty(false);
+    setEditDwDirty(false);
     editForm.setFieldsValue({
       name: metric.name,
       granularity: metric.granularity,
@@ -1128,6 +1139,28 @@ export function MetricDetail() {
           const base = definitionJson ?? { ...(metric.definition_json ?? {}) };
           const next = { ...base };
           delete next.source_table;
+          definitionJson = next;
+        }
+      }
+      // 口径分角色合入 definition_json（系统开发伪代码口径 / 数仓开发详细口径）：
+      // 独立于口径主体模式（expression/sql），作为补充说明始终可编辑；dirty 区分保留/清空
+      if (editPseudoDirty) {
+        if (editPseudoDefinition.trim()) {
+          definitionJson = { ...(definitionJson ?? {}), pseudo_definition: editPseudoDefinition.trim() };
+        } else {
+          const base = definitionJson ?? { ...(metric.definition_json ?? {}) };
+          const next = { ...base };
+          delete next.pseudo_definition;
+          definitionJson = next;
+        }
+      }
+      if (editDwDirty) {
+        if (editDwDefinition.trim()) {
+          definitionJson = { ...(definitionJson ?? {}), dw_definition: editDwDefinition.trim() };
+        } else {
+          const base = definitionJson ?? { ...(metric.definition_json ?? {}) };
+          const next = { ...base };
+          delete next.dw_definition;
           definitionJson = next;
         }
       }
@@ -2608,6 +2641,43 @@ export function MetricDetail() {
               </Form.Item>
             </>
           )}
+          {/* 口径分角色（对齐注册页 Step③）：系统开发伪代码口径 / 数仓开发详细口径——
+              独立于口径主体模式（expression/sql），作为补充说明始终可编辑。
+              存量指标（注册于口径双字段上线前）在此补填后，详情/展开区即展示对应分块。 */}
+          <Form.Item
+            label="伪代码口径（系统开发）"
+            style={{ marginBottom: 8 }}
+            extra="系统开发提供的伪 SQL / 自然语言口径说明，与口径主体（表达式/SQL）相互独立。"
+          >
+            <Input.TextArea
+              rows={3}
+              className="mono"
+              data-testid="editPseudoDefinition"
+              value={editPseudoDefinition}
+              onChange={(e) => {
+                setEditPseudoDefinition(e.target.value);
+                setEditPseudoDirty(true);
+              }}
+              placeholder="如：按渠道汇总订单金额（伪代码 / 伪 SQL）"
+            />
+          </Form.Item>
+          <Form.Item
+            label="数仓详细口径（数仓开发）"
+            style={{ marginBottom: 8 }}
+            extra="数仓开发指标的详细口径：完整 SQL 或建模口径说明。"
+          >
+            <Input.TextArea
+              rows={4}
+              className="mono"
+              data-testid="editDwDefinition"
+              value={editDwDefinition}
+              onChange={(e) => {
+                setEditDwDefinition(e.target.value);
+                setEditDwDirty(true);
+              }}
+              placeholder="如：SELECT channel, SUM(order_amount) AS amount FROM dwd.sales_detail GROUP BY channel"
+            />
+          </Form.Item>
           {/* 口径定义编辑模式（对齐注册页）：开发人员可直接以 SQL 描述口径，
               后端 sqlglot 校验语法；SQL 模式口径变更与表达式同级触发版本确认 */}
           <Form.Item
