@@ -1117,8 +1117,8 @@ async def extend_version(
 @router.delete(
     "/{metric_code}",
     response_model=ApiResponse[None],
-    summary="删除指标（FR-07，软删除，仅 DRAFT 状态）",
-    dependencies=[Depends(require_roles("platform_admin")), Depends(guard_against_injection)],
+    summary="删除指标（FR-07，软删除，仅 DRAFT/DEPRECATED 状态）",
+    dependencies=_WRITE_DEPS,
 )
 async def delete_metric(
     metric_code: str,
@@ -1127,9 +1127,9 @@ async def delete_metric(
     trace_id: Annotated[str, Depends(get_trace_id)],
     http_req: Request,
 ) -> ApiResponse[None]:
-    """仅 platform_admin 可软删除 DRAFT 状态指标（非 DRAFT 拒绝）。"""
+    """软删除 DRAFT/DEPRECATED 指标；仅平台/域管理员或原 Owner（service 层校验）。"""
     service = MetricService(db)
-    metric = await service.delete_metric(metric_code, actor_id=user.id)
+    metric = await service.delete_metric(metric_code, actor_id=user.id, role=user.role)
     await write_audit(
         db,
         actor_id=user.id,

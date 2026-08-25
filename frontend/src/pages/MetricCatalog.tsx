@@ -140,7 +140,7 @@ const COLUMN_OPTIONS = [
 // 各群体默认可见列（平台管理=全部；治理审核含提交人——审核追溯需要）
 const DEFAULT_VISIBLE_COLUMNS: Record<RoleGroup, string[]> = {
   consumer: ["metric_code", "name", "fav", "domain", "owner", "calibre", "status"],
-  producer: ["metric_code", "name", "status", "calibre", "owner", "type", "health", "version", "updated_at"],
+  producer: ["metric_code", "name", "status", "calibre", "owner", "type", "health", "version", "updated_at", "rowActions"],
   governance: ["metric_code", "name", "status", "submitter", "type", "version", "updated_at"],
   admin: COLUMN_OPTIONS.map((c) => c.value),
 };
@@ -410,6 +410,14 @@ export function MetricCatalog() {
   const [currentUserDomain, setCurrentUserDomain] = useState<string>("");
   // 当前用户群体（consumer/producer/governance/admin）：决定列默认视图与明细抽屉信息密度
   const roleGroup = ROLE_GROUP[currentUserRole] ?? "admin";
+  // 删除权限：平台/域管理员，或指标创建者（原 Owner）；仅非发布状态可删（DRAFT/DEPRECATED，
+  // 后端 INVALID_STATE 兜底），对齐维度/度量「草稿/废弃可由管理员或生产者处理」的决策
+  const canDeleteMetric = (r: MetricResponse) =>
+    (r.status === "DRAFT" || r.status === "DEPRECATED") &&
+    (currentUserRole === "platform_admin" ||
+      currentUserRole === "domain_admin" ||
+      r.owner_id === currentUserId);
+
   const [myMetricsOnly, setMyMetricsOnly] = useState(false);
   // 合规官默认只看 PII 指标（listMetrics 支持 pii_flag 过滤）
   const [piiOnly, setPiiOnly] = useState(false);
@@ -755,7 +763,7 @@ export function MetricCatalog() {
     }
   }
 
-  // 单条删除草稿指标（软删除，仅 platform_admin；对齐批量删除语义）
+  // 单条删除草稿指标（软删除，仅平台/域管理员或原 Owner；对齐批量删除语义）
   const [deleting, setDeleting] = useState<string | null>(null);
   async function handleSingleDelete(metricCode: string) {
     setDeleting(metricCode);
@@ -1227,9 +1235,9 @@ export function MetricCatalog() {
             width: 80,
             align: "center" as const,
             render: (_: unknown, r: MetricResponse) =>
-              r.status === "DRAFT" && currentUserRole === "platform_admin" ? (
+              canDeleteMetric(r) ? (
                 <Popconfirm
-                  title="删除草稿指标"
+                  title="删除指标"
                   description={`确定删除 ${r.metric_code} 吗？软删除后可在回收站恢复。`}
                   okText="删除"
                   okButtonProps={{ danger: true }}
@@ -1252,7 +1260,12 @@ export function MetricCatalog() {
                 </Popconfirm>
               ) : (
                 <span style={{ color: "#bbb", fontSize: 12 }}>
-                  {r.status === "DRAFT" ? "仅平台管理员可删" : ""}
+                  {(r.status === "DRAFT" || r.status === "DEPRECATED") &&
+                  currentUserRole !== "platform_admin" &&
+                  currentUserRole !== "domain_admin" &&
+                  r.owner_id !== currentUserId
+                    ? "仅管理员或创建者可删"
+                    : ""}
                 </span>
               ),
           },
@@ -1793,8 +1806,10 @@ export function MetricCatalog() {
                       title={
                         !selected.some((m) => m.status === "DRAFT")
                           ? "批量删除仅适用于勾选中的草稿（DRAFT）指标；当前勾选无草稿指标"
-                          : currentUserRole !== "platform_admin"
-                            ? "仅平台管理员（platform_admin）可删除指标"
+                          : currentUserRole !== "platform_admin" &&
+                              currentUserRole !== "domain_admin" &&
+                              !selected.some((m) => m.owner_id === currentUserId)
+                            ? "仅平台/域管理员或指标创建者（Owner）可删除；当前勾选非你创建的指标"
                             : undefined
                       }
                     >
@@ -1803,8 +1818,12 @@ export function MetricCatalog() {
                   ),
                   icon: <DeleteOutlined />,
                   danger: true,
-                  // 后端 DELETE 仅 platform_admin 可执行；非平台管理员禁用，避免 403
-                  disabled: !selected.some((m) => m.status === "DRAFT") || currentUserRole !== "platform_admin",
+                  // 后端允许平台/域管理员或原 Owner 删除 DRAFT/DEPRECATED；非权限禁用避免 403
+                  disabled:
+                    !selected.some((m) => m.status === "DRAFT") ||
+                    (currentUserRole !== "platform_admin" &&
+                      currentUserRole !== "domain_admin" &&
+                      !selected.some((m) => m.owner_id === currentUserId)),
                 },
               ],
               onClick: ({ key }) => {
@@ -2278,7 +2297,7 @@ export function MetricCatalog() {
         {batchAction === "delete" && (
           <p>
             将删除勾选的 <b>{selected.filter((m) => m.status === "DRAFT").length}</b> 个草稿指标
-            （软删除，仅 platform_admin 可执行）。如需找回，可在右上角「回收站」中恢复。
+            （软删除，仅平台/域管理员或指标创建者可执行）。如需找回，可在右上角「回收站」中恢复。
           </p>
         )}
       </Modal>

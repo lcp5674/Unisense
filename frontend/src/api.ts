@@ -712,7 +712,7 @@ export async function confirmDeprecateDropped(
   );
 }
 
-// 删除指标（软删除，仅 DRAFT 状态；仅 platform_admin）
+// 删除指标（软删除，仅 DRAFT/DEPRECATED 状态；平台/域管理员或原 Owner）
 export async function deleteMetric(code: string): Promise<{ deleted: boolean }> {
   return request<{ deleted: boolean }>(
     `${API_BASE}/metric-definitions/${encodeURIComponent(code)}`,

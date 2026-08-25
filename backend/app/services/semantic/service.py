@@ -3298,25 +3298,38 @@ class MetricService(BaseService):
         )
         return updated
 
-    async def delete_metric(self, metric_code: str, actor_id: int) -> Metric:
-        """软删除指标（仅 DRAFT 状态）。
+    async def delete_metric(
+        self, metric_code: str, actor_id: int, role: str | None = None
+    ) -> Metric:
+        """软删除指标（仅 DRAFT/DEPRECATED 未对外投入状态；REVIEW/PUBLISHED 禁止）。
+
+        删除语义（用户决策）：草稿/废弃这种未对外投入的可交由管理员或生产者
+        （原 Owner）软删；审核中/启用中的资源不可删。软删后可经 restore 恢复。
 
         Args:
             metric_code: 指标编码。
             actor_id: 操作人 ID。
+            role: 操作人角色（平台/域管理员或原 Owner 可删，其余拒绝）。
 
         Returns:
             被删除的指标。
 
         Raises:
             NotFoundError: 指标不存在。
-            BusinessError: 指标非 DRAFT 状态不可删除。
+            BusinessError: 指标非 DRAFT/DEPRECATED 状态 / 无删除权限。
         """
         metric = await self.get_metric(metric_code)
-        if metric.status != "DRAFT":
+        if metric.status not in ("DRAFT", "DEPRECATED"):
             raise BusinessError(
-                f"仅 DRAFT 状态的指标可删除，当前状态 {metric.status}",
-                error_code="VALIDATION_ERROR",
+                f"仅 DRAFT/DEPRECATED 状态的指标可删除（当前 {metric.status}）；"
+                "审核中/启用中的资源不可删除",
+                error_code="INVALID_STATE",
+            )
+        # 权限：平台/域管理员或原 Owner（生产者），对齐 restore 语义
+        if role not in ("platform_admin", "domain_admin") and metric.owner_id != actor_id:
+            raise BusinessError(
+                "仅平台/域管理员或指标原 Owner 可删除",
+                error_code="FORBIDDEN",
             )
 
         await self._repo.soft_delete(metric.id)

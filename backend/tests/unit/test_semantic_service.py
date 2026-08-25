@@ -2677,15 +2677,37 @@ async def test_rollback_metric_success():
 
 async def test_delete_metric_success_and_reject():
     svc, repo = _svc_with_repo()
-    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", owner_id=1))
     repo.soft_delete = AsyncMock()
-    result = await svc.delete_metric("sales_gmv_daily", actor_id=1)
+    svc._cleanup_metric_lineage = AsyncMock()
+
+    # 原 Owner（创建者）可删自己的草稿
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", owner_id=1))
+    result = await svc.delete_metric("sales_gmv_daily", actor_id=1, role="metric_owner")
     assert result.status == "DRAFT"
     repo.soft_delete.assert_awaited_once()
+    svc._cleanup_metric_lineage.assert_awaited_once_with("sales_gmv_daily")
 
-    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED", owner_id=1))
-    with pytest.raises(BusinessError):
-        await svc.delete_metric("sales_gmv_daily", actor_id=1)
+    # 原 Owner 可删已废弃指标（未对外投入状态，对齐维度/度量决策）
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DEPRECATED", owner_id=1))
+    result = await svc.delete_metric("sales_gmv_daily", actor_id=1, role="metric_owner")
+    assert result.status == "DEPRECATED"
+
+    # 非 Owner 且非管理员 → FORBIDDEN
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", owner_id=1))
+    with pytest.raises(BusinessError) as exc:
+        await svc.delete_metric("sales_gmv_daily", actor_id=2, role="metric_owner")
+    assert exc.value.error_code == "FORBIDDEN"
+
+    # 平台/域管理员可删他人草稿
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", owner_id=2))
+    await svc.delete_metric("sales_gmv_daily", actor_id=9, role="domain_admin")
+
+    # 审核中/启用中不可删（INVALID_STATE）
+    for status in ("REVIEW", "PUBLISHED"):
+        repo.get_by_code = AsyncMock(return_value=make_metric(status=status, owner_id=1))
+        with pytest.raises(BusinessError) as exc:
+            await svc.delete_metric("sales_gmv_daily", actor_id=1, role="platform_admin")
+        assert exc.value.error_code == "INVALID_STATE"
 
 
 async def test_restore_metric_success_and_guards():

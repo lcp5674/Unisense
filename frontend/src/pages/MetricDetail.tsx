@@ -1517,6 +1517,17 @@ export function MetricDetail() {
     }
   }
 
+  // 按钮级权限点（细粒度管控，方案 C）：与后端 require_roles 对齐——
+  // 提交评审=metric:create、发布/灰度=metric:approve、PII 复核=pii:review、
+  // 紧急发布=metric:emergency-publish、废弃=metric:deprecate、
+  // 全量发布/回滚/改名=metric:edit（写操作，owner 归属由后端 PDP 强制）。
+  // can() 控制按钮可见性；后端接口强制仍为最终边界，二者不互相替代。
+  // 注意：usePermission 是 hook，必须位于下方 `if (!metric)` 早退之前（Rules of Hooks），
+  // 否则首次渲染（metric 为 null）跳过该 hook、加载后调用会造成 hook 顺序变化。
+  const { can, loading: permLoading } = usePermission();
+  // 权限快照加载完成前按钮一律不渲染（避免 fail-open 让无权用户短暂看到「审批通过」等）
+  const permReady = !permLoading;
+
   if (!metric) {
     if (loading) return <Card loading />;
     if (archived) {
@@ -1617,9 +1628,7 @@ export function MetricDetail() {
   // 紧急发布=metric:emergency-publish、废弃=metric:deprecate、
   // 全量发布/回滚/改名=metric:edit（写操作，owner 归属由后端 PDP 强制）。
   // can() 控制按钮可见性；后端接口强制仍为最终边界，二者不互相替代。
-  const { can, loading: permLoading } = usePermission();
-  // 权限快照加载完成前按钮一律不渲染（避免 fail-open 让无权用户短暂看到「审批通过」等）
-  const permReady = !permLoading;
+  // （usePermission 与 permReady 已在早退前声明，保证 hook 顺序稳定）
   const canApprove = permReady && can("metric:approve");
   const canDeprecate = permReady && can("metric:deprecate");
   const canEdit = permReady && can("metric:edit");
@@ -1702,32 +1711,35 @@ export function MetricDetail() {
             {metric.status === "PUBLISHED" ? "发起变更申请" : "编辑"}
           </Button>
         )}
-      {/* 删除 DRAFT 草稿（软删）：仅平台管理员；删除后指标进回收站（archived 列表可恢复）。
-          详情页删除入口消除「DRAFT 单删需回目录批量删」的闭环缺口（复审 D2） */}
-      {metric.status === "DRAFT" && canDelete && (
-        <Button
-          danger
-          icon={<DeleteOutlined />}
-          loading={busy}
-          onClick={() =>
-            Modal.confirm({
-              title: "确认删除草稿指标？",
-              content: `「${metric.name}」（${metric.metric_code}）为 DRAFT 草稿，删除后进入回收站（可在已归档列表恢复），不可被提交评审。确认继续？`,
-              okText: "确认删除",
-              cancelText: "取消",
-              okButtonProps: { danger: true },
-              onOk: () =>
-                runAction(() => deleteMetric(metric.metric_code), "删除草稿").then(() => {
-                  // 删除后提示恢复路径：软删指标进回收站，可在目录页「已归档」视图恢复（复审 P2-9）
-                  message.success("草稿已删除，可在指标目录『已归档』视图中恢复");
-                  navigate("/metrics");
-                }),
-            })
-          }
-        >
-          删除
-        </Button>
-      )}
+      {/* 删除 DRAFT/DEPRECATED 指标（软删）：平台/域管理员或指标创建者（原 Owner）可删；
+          删除后指标进回收站（archived 列表可恢复）。详情页删除入口消除「单删需回目录批量删」
+          的闭环缺口（复审 D2）；权限对齐后端 delete_metric（管理员或原 Owner） */}
+      {(metric.status === "DRAFT" || metric.status === "DEPRECATED") &&
+        canDelete &&
+        (isAdmin || metric.owner_id === currentUser?.id) && (
+          <Button
+            danger
+            icon={<DeleteOutlined />}
+            loading={busy}
+            onClick={() =>
+              Modal.confirm({
+                title: "确认删除指标？",
+                content: `「${metric.name}」（${metric.metric_code}）为 ${metric.status === "DEPRECATED" ? "已废弃" : "DRAFT 草稿"}，删除后进入回收站（可在已归档列表恢复），不再对外可见。确认继续？`,
+                okText: "确认删除",
+                cancelText: "取消",
+                okButtonProps: { danger: true },
+                onOk: () =>
+                  runAction(() => deleteMetric(metric.metric_code), "删除指标").then(() => {
+                    // 删除后提示恢复路径：软删指标进回收站，可在目录页「已归档」视图恢复（复审 P2-9）
+                    message.success("指标已删除，可在指标目录『已归档』视图中恢复");
+                    navigate("/metrics");
+                  }),
+              })
+            }
+          >
+            删除
+          </Button>
+        )}
       {metric.status === "REVIEW" && canApprove && (
         <Button
           type="primary"

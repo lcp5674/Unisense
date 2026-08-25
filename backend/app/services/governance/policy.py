@@ -174,7 +174,7 @@ UI_ACTION_REGISTRY: dict[str, dict[str, str]] = {
     "templates:view": {"module": "指标", "label": "查看指标模板", "description": "访问指标模板页"},
     "metric:create": {"module": "指标", "label": "创建指标", "description": "新增指标（含口径定义）"},  # noqa: E501
     "metric:edit": {"module": "指标", "label": "编辑指标", "description": "修改指标口径 / 描述"},
-    "metric:delete": {"module": "指标", "label": "删除指标", "description": "删除 DRAFT 草稿指标（软删，仅平台管理员）"},  # noqa: E501
+    "metric:delete": {"module": "指标", "label": "删除指标", "description": "删除 DRAFT/DEPRECATED 指标（软删，平台/域管理员或原 Owner）"},  # noqa: E501
     "metric:approve": {"module": "指标", "label": "审批指标", "description": "通过 / 驳回指标审核"},
     "metric:deprecate": {"module": "指标", "label": "废弃指标", "description": "下线并废弃指标"},
     "metric:export": {"module": "指标", "label": "导出指标", "description": "导出指标清单"},
@@ -281,7 +281,7 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "dashboard:view", "todo:view", "notifications:view", "notifications:publish",
             "favorites:view",
             "catalog:view", "compare:view", "templates:view", "metric:create", "metric:edit",
-            "metric:approve", "metric:deprecate", "metric:export", "metric:review",
+            "metric:delete", "metric:approve", "metric:deprecate", "metric:export", "metric:review",
             "metric:emergency-publish", "metric:rollback", "metric:import",
             "metric:infer-description",
             "assetmap:view", "assetmap:edit", "assetmap:export", "lineage:view",
@@ -311,7 +311,7 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
         {
             "dashboard:view", "todo:view", "notifications:view", "favorites:view",
             "catalog:view", "compare:view", "metric:create", "metric:edit",
-            "metric:deprecate", "metric:export", "metric:review",
+            "metric:delete", "metric:deprecate", "metric:export", "metric:review",
             "metric:infer-description",
             "assetmap:view", "lineage:view", "lineage:write", "lineage:manage-edge",
             "quality:view", "review:view", "review:escalate", "review:close",

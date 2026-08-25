@@ -666,6 +666,48 @@ describe("MetricCatalog", () => {
     });
   });
 
+  it("单指标删除：指标创建者（原 Owner）可删除自己的草稿", async () => {
+    const draft = { ...metric, status: "DRAFT" as const };
+    mockedList.mockResolvedValue({ items: [draft], total: 1, page: 1, page_size: 20 });
+    mockedDeleteMetric.mockResolvedValue({} as never);
+    // 当前用户 metric_owner(id=1)，草稿指标 owner_id=1 → 创建者可删（对齐后端「管理员或原 Owner」）
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "u",
+      display_name: "用户",
+      role: "metric_owner",
+      domain: "sales",
+      org_id: 1,
+    });
+    renderCatalog();
+    await screen.findByText("sales_gmv_sum_d");
+    fireEvent.click(await screen.findByLabelText("删除指标"));
+    await screen.findByText(/确定删除 sales_gmv_sum_d 吗/);
+    fireEvent.click(screen.getByRole("button", { name: "删 除" }));
+    await waitFor(() => {
+      expect(mockedDeleteMetric).toHaveBeenCalledWith("sales_gmv_sum_d");
+    });
+  });
+
+  it("单指标删除：非创建者且非管理员看不到删除按钮（占位提示）", async () => {
+    const draft = { ...metric, status: "DRAFT" as const, owner_id: 2 };
+    mockedList.mockResolvedValue({ items: [draft], total: 1, page: 1, page_size: 20 });
+    mockedDeleteMetric.mockResolvedValue({} as never);
+    // 当前用户 metric_owner(id=1)，草稿指标 owner_id=2 → 非创建者且非管理员 → 不显示删除按钮
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "u",
+      display_name: "用户",
+      role: "metric_owner",
+      domain: "sales",
+      org_id: 1,
+    });
+    renderCatalog();
+    await screen.findByText("sales_gmv_sum_d");
+    expect(screen.queryByLabelText("删除指标")).toBeNull();
+    expect(screen.getByText("仅管理员或创建者可删")).toBeTruthy();
+  });
+
   it("批量下线：无下游引用的指标可留空替代指标直接下线（successor_code=null）", async () => {
     const p = { ...metric, status: "PUBLISHED" as const };
     mockedList.mockResolvedValue({ items: [p], total: 1, page: 1, page_size: 20 });

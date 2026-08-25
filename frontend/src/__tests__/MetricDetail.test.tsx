@@ -540,6 +540,46 @@ describe("MetricDetail", () => {
     });
     expect(screen.getByText(/粒度 day 与口径定义不符/)).toBeInTheDocument();
   });
+  it("删除：指标创建者（原 Owner）可在详情页删除自己的草稿", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "DRAFT" }); // owner_id=1
+    // 授予 metric:delete 权限点（默认 beforeEach 无），当前用户 metric_owner(id=1) === owner_id(1)
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "outpatient",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create", "metric:edit", "metric:delete", "metric:deprecate"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    // currentUser(id=1) === metric.owner_id(1) → 创建者可删（对齐后端「管理员或原 Owner」）
+    // 删除按钮带 DeleteOutlined icon，accessible name 为「delete 删 除」，用正则匹配
+    // 注意：不点击弹窗——Modal.confirm 为静态方法渲染到独立 portal，跨测试残留会污染后续用例
+    expect(await screen.findByRole("button", { name: /删\s*除/ })).toBeInTheDocument();
+  });
+  it("删除：非创建者且非管理员在详情页看不到删除按钮", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "DRAFT", owner_id: 2 }); // 他人草稿
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "outpatient",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create", "metric:edit", "metric:delete", "metric:deprecate"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    await screen.findByText("销售 GMV");
+    // 有 metric:delete 权限点，但非创建者且非管理员 → 不渲染删除按钮
+    await waitFor(() => expect(screen.queryByRole("button", { name: /删\s*除/ })).not.toBeInTheDocument());
+  });
   it("编辑弹窗聚合方式独立字段：回填 + 提交直接携带（非治理属性，走口径变更语义）", async () => {
     // 聚合方式（SUM/AVG）本质是口径变更，与粒度/单位同级——编辑弹窗应独立回填并提交，
     // 而非混入治理属性 dirty 机制（后端据此触发版本确认，修复 aggregation 判定矛盾）。

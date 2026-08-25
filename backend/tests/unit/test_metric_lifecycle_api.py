@@ -69,12 +69,15 @@ async def test_get_archived_metric(metrics_client: httpx.AsyncClient) -> None:
 
 
 async def test_archive_metric(metrics_client: httpx.AsyncClient) -> None:
-    """归档（DELETE）→ 200。"""
+    """归档（DELETE）→ 200，调用携带角色（管理员或原 Owner）。"""
     with patch("app.api.metrics.MetricService") as mock_svc:
         mock_svc.return_value.delete_metric = AsyncMock(return_value=_metric())
         mock_svc.return_value.run_lineage_post_commit = AsyncMock()
         resp = await metrics_client.delete("/api/v1/metric-definitions/sales_gmv_d")
     assert resp.status_code == 200
+    mock_svc.return_value.delete_metric.assert_awaited_once_with(
+        "sales_gmv_d", actor_id=1, role="platform_admin"
+    )
 
 
 async def test_restore_metric(metrics_client: httpx.AsyncClient) -> None:
