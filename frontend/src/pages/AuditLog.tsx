@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, Card, Table, Tag, Input, Select, Button, Space, Tabs, Tooltip, message } from "antd";
+import { Alert, Card, Table, Tag, Input, Select, Button, Space, Tabs, Tooltip, Modal, Descriptions, message } from "antd";
 import { DownloadOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import { exportAudit, listAudit, UnisenseApiError } from "../api";
 import type { AuditEntry } from "../types";
@@ -83,12 +83,19 @@ function ComplianceReport({
   sensitiveAccess,
   exportRecords,
   loading,
+  onRowClick,
 }: {
   sensitiveAccess: AuditEntry[];
   exportRecords: AuditEntry[];
   loading: boolean;
+  onRowClick?: (record: AuditEntry) => void;
 }) {
   const accessRows = groupSensitiveAccess(sensitiveAccess);
+  // 导出记录表格行可点击看详情（与操作日志同一弹窗）；聚合行（操作人）不可点击
+  const exportRowProps = (record: AuditEntry) => ({
+    onClick: () => onRowClick?.(record),
+    style: { cursor: "pointer" as const },
+  });
   return (
     <div>
       <Alert
@@ -115,6 +122,7 @@ function ComplianceReport({
           rowKey="id"
           size="small"
           loading={loading}
+          onRow={exportRowProps}
           pagination={false}
           locale={{ emptyText: "暂无导出记录" }}
           columns={EXPORT_RECORD_COLUMNS}
@@ -140,6 +148,8 @@ export function AuditLog() {
   const [complianceLoading, setComplianceLoading] = useState(false);
   const [sensitiveAccess, setSensitiveAccess] = useState<AuditEntry[]>([]);
   const [exportRecords, setExportRecords] = useState<AuditEntry[]>([]);
+  // 行点击详情弹窗：选中的审计条目（WORM 记录，行数据即完整详情，无需额外请求）
+  const [selected, setSelected] = useState<AuditEntry | null>(null);
 
   // 合规报告聚合：敏感访问（pii_access=true）+ 导出动作（action 含 export），各取最近 100 条
   async function loadCompliance() {
@@ -311,6 +321,78 @@ export function AuditLog() {
     },
   ];
 
+  // 行点击打开详情弹窗（审计为 WORM 只读记录，直接展示行内完整数据）
+  const openDetail = (record: AuditEntry) => setSelected(record);
+  const rowClickProps = (record: AuditEntry) => ({
+    onClick: () => openDetail(record),
+    style: { cursor: "pointer" as const },
+  });
+
+  // 详情弹窗：基本信息 Descriptions + detail_json 全字段结构化展示
+  function renderDetailModal() {
+    const e = selected;
+    if (!e) return null;
+    const detailEntries = Object.entries(e.detail_json ?? {}).filter(
+      ([, v]) => v !== null && v !== undefined,
+    );
+    return (
+      <Modal
+        open={!!selected}
+        title="审计日志详情"
+        width={720}
+        onCancel={() => setSelected(null)}
+        footer={
+          <Button type="primary" onClick={() => setSelected(null)}>
+            关闭
+          </Button>
+        }
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={e.action_desc ?? auditActionLabel(e.action)}
+          description={`操作时间：${formatCnTime(e.created_at)}`}
+        />
+        <Descriptions column={2} bordered size="small" style={{ marginBottom: 16 }}>
+          <Descriptions.Item label="编号">{e.id}</Descriptions.Item>
+          <Descriptions.Item label="操作者">{e.actor_display ?? `用户 #${e.actor_id}`}</Descriptions.Item>
+          <Descriptions.Item label="操作对象">
+            <Tag>{entityTypeLabel(e.entity_type)}</Tag>
+            <span className="mono" style={{ fontSize: 12, marginLeft: 4 }}>{e.entity_id || "—"}</span>
+          </Descriptions.Item>
+          <Descriptions.Item label="来源地址">{e.ip || "—"}</Descriptions.Item>
+          <Descriptions.Item label="追踪编号">
+            <span className="mono" style={{ fontSize: 12 }}>{e.trace_id || "—"}</span>
+          </Descriptions.Item>
+          <Descriptions.Item label="敏感数据">
+            {e.pii_access ? <Tag color="red">涉及敏感数据</Tag> : <Tag>非敏感</Tag>}
+          </Descriptions.Item>
+          <Descriptions.Item label="是否归档">{e.archived ? "是" : "否"}</Descriptions.Item>
+          <Descriptions.Item label="原始动作码">
+            <span className="mono" style={{ fontSize: 12 }}>{e.action}</span>
+          </Descriptions.Item>
+        </Descriptions>
+        <div style={{ fontWeight: 500, marginBottom: 8 }}>操作详情</div>
+        {detailEntries.length > 0 ? (
+          <div style={{ maxHeight: 320, overflow: "auto" }}>
+            <Descriptions column={1} bordered size="small">
+              {detailEntries.map(([k, v]) => (
+                <Descriptions.Item key={k} label={AUDIT_FIELD_LABEL[k] ?? k}>
+                  <span className="mono" style={{ fontSize: 12, wordBreak: "break-all" }}>
+                    {auditValueText(v)}
+                  </span>
+                </Descriptions.Item>
+              ))}
+            </Descriptions>
+          </div>
+        ) : (
+          <span className="muted">无附加详情</span>
+        )}
+      </Modal>
+    );
+  }
+
   return (
     <div>
       <div className="page-head">
@@ -387,6 +469,7 @@ export function AuditLog() {
           columns={columns}
           rowKey="id"
           loading={loading}
+          onRow={rowClickProps}
           pagination={{ current: page, pageSize, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条` }}
           locale={{ emptyText: "暂无审计记录" }}
           size="small"
@@ -402,11 +485,13 @@ export function AuditLog() {
                 sensitiveAccess={sensitiveAccess}
                 exportRecords={exportRecords}
                 loading={complianceLoading}
+                onRowClick={openDetail}
               />
             ),
           },
         ]}
       />
+      {renderDetailModal()}
     </div>
   );
 }

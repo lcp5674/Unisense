@@ -215,3 +215,105 @@ describe("AuditLog 合规报告", () => {
     expect(screen.getByText("暂无敏感数据访问记录")).toBeTruthy();
   });
 });
+
+describe("AuditLog 行点击详情弹窗", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedListAudit.mockResolvedValue({ items: [ENTRY], total: 1, page: 1, page_size: 20 });
+    mockedExportAudit.mockResolvedValue();
+  });
+
+  it("点击操作日志行打开弹窗并展示完整详情（detail_json 全字段 + 元信息）", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("创建了数据源（名称=财务库）")).toBeTruthy();
+    });
+    // 点击操作者单元格，冒泡到行 onClick
+    fireEvent.click(screen.getByText("张伟"));
+    await waitFor(() => {
+      expect(screen.getByRole("dialog")).toBeTruthy();
+    });
+    const modal = within(screen.getByRole("dialog"));
+    // 元信息：来源地址 / 完整追踪编号（非截断）/ 原始动作码 / 完整 entity_id（技术前缀不剥离）
+    expect(modal.getByText("10.0.0.1")).toBeTruthy();
+    expect(modal.getByText("trace-abc123")).toBeTruthy();
+    expect(modal.getByText("data_source.create")).toBeTruthy();
+    expect(modal.getByText("batch:5")).toBeTruthy();
+    // detail_json 全字段：字段名中文映射 + 值
+    expect(modal.getByText("源类型")).toBeTruthy();
+    expect(modal.getByText("mysql")).toBeTruthy();
+    expect(modal.getByText("名称")).toBeTruthy();
+    expect(modal.getByText("财务库")).toBeTruthy();
+  });
+
+  it("detail_json 为空的条目弹窗显示无附加详情", async () => {
+    mockedListAudit.mockResolvedValue({
+      items: [{ ...ENTRY, id: 2, detail_json: null }],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("创建了数据源（名称=财务库）")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByText("张伟"));
+    await waitFor(() => {
+      expect(screen.getByText("无附加详情")).toBeTruthy();
+    });
+  });
+
+  it("点击关闭按钮关闭弹窗", async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("创建了数据源（名称=财务库）")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByText("张伟"));
+    await waitFor(() => {
+      expect(screen.getByRole("dialog")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /关\s*闭/ }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+  });
+
+  it("合规报告导出记录行点击同样打开详情弹窗", async () => {
+    mockedListAudit.mockImplementation(async (params) => {
+      if (params?.pii_access) return { items: [], total: 0, page: 1, page_size: 100 };
+      return {
+        items: [
+          {
+            ...ENTRY,
+            id: 20,
+            action: "audit.export",
+            entity_type: "audit_log",
+            entity_id: "2026-08-18",
+            detail_json: { format: "csv", rows: 5 },
+            action_desc: "导出了审计日志",
+          },
+        ],
+        total: 1,
+        page: 1,
+        page_size: 100,
+      };
+    });
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "合规报告" })).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "合规报告" }));
+    await waitFor(() => {
+      expect(screen.getByText("审计导出记录（1）")).toBeTruthy();
+    });
+    // 限定在导出记录卡片内点击（操作日志 Tab 仍留在 DOM 中，全局匹配会命中多个"张伟"）
+    const exportCard = screen.getByText("审计导出记录（1）").closest(".ant-card") as HTMLElement;
+    fireEvent.click(within(exportCard).getByText("张伟"));
+    await waitFor(() => {
+      expect(screen.getByRole("dialog")).toBeTruthy();
+    });
+    const modal = within(screen.getByRole("dialog"));
+    expect(modal.getByText("导出了审计日志")).toBeTruthy();
+    expect(modal.getByText("csv")).toBeTruthy(); // detail_json 的 format 字段
+  });
+});
