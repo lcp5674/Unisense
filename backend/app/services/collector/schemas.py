@@ -691,3 +691,43 @@ class DescriptionCoverageResponse(BaseModel):
     per_table_total: int | None = None
     page: int | None = None
     page_size: int | None = None
+
+
+# ---- 跨表批量 LLM 推断历史（服务端持久化，跨设备/团队可见） ----
+
+
+class BatchInferHistoryTable(BaseModel):
+    """批量历史中的一张表（catalog_id + entity_name，供一键重新勾选）。"""
+
+    catalog_id: int
+    entity_name: str
+
+
+class BatchInferHistoryCreate(BaseModel):
+    """写入一条批量推断历史。"""
+
+    tables: list[BatchInferHistoryTable] = Field(min_length=1, description="本次会话涉及的表")
+    done: int = Field(default=0, ge=0, description="成功表数")
+    failed: int = Field(default=0, ge=0, description="失败表数")
+    cancelled: int = Field(default=0, ge=0, description="取消表数")
+    added: int = Field(default=0, ge=0, description="新增字段描述数")
+    elapsed: int = Field(default=0, ge=0, description="总耗时（秒）")
+    failed_tables: list[BatchInferHistoryTable] = Field(
+        default_factory=list, description="失败表（一键重跑用）"
+    )
+
+
+class BatchInferHistoryEntry(BaseModel):
+    """批量推断历史单条记录（含操作人快照，团队治理动作可追溯）。"""
+
+    id: int
+    actor_id: int | None = None
+    actor_name: str | None = None
+    tables: list[BatchInferHistoryTable]
+    done: int
+    failed: int
+    cancelled: int
+    added: int
+    elapsed: int
+    failed_tables: list[BatchInferHistoryTable]
+    created_at: str  # UTC ISO 时间（前端按上海时区展示）

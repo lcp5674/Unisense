@@ -33,6 +33,9 @@ vi.mock("../api", () => {
     updateTableDescription: vi.fn(),
     fetchAssetEntityDetail: vi.fn(),
     fetchDescriptionCoverage: vi.fn(),
+    fetchBatchInferHistory: vi.fn(),
+    createBatchInferHistory: vi.fn(),
+    clearBatchInferHistory: vi.fn(),
     listFavorites: vi.fn(),
     addFavorite: vi.fn(),
     removeFavorite: vi.fn(),
@@ -40,7 +43,7 @@ vi.mock("../api", () => {
   };
 });
 
-import { listCatalogs, registerCatalog, listDataSources, listCatalogDatabases, refreshCatalogEntity, fetchDescriptionCoverage, fetchAssetEntityDetail, inferDescriptions, inferTableDescription, updateTableDescription, updateColumnDescription, listFavorites } from "../api";
+import { listCatalogs, registerCatalog, listDataSources, listCatalogDatabases, refreshCatalogEntity, fetchDescriptionCoverage, fetchAssetEntityDetail, inferDescriptions, inferTableDescription, updateTableDescription, updateColumnDescription, listFavorites, fetchBatchInferHistory, createBatchInferHistory } from "../api";
 
 const mockedList = vi.mocked(listCatalogs);
 const mockedRegister = vi.mocked(registerCatalog);
@@ -123,6 +126,20 @@ beforeEach(() => {
     fields_with_desc: 16,
     fields_missing_desc: 24,
     per_table: [],
+  });
+  vi.mocked(fetchBatchInferHistory).mockResolvedValue([]);
+  vi.mocked(createBatchInferHistory).mockResolvedValue({
+    id: 1,
+    actor_id: 1,
+    actor_name: "admin",
+    tables: [],
+    done: 0,
+    failed: 0,
+    cancelled: 0,
+    added: 0,
+    elapsed: 0,
+    failed_tables: [],
+    created_at: "2026-08-25T00:00:00",
   });
 });
 
@@ -1357,6 +1374,157 @@ describe("Catalogs 页面", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /批量推断所选表（2）/ })).toBeTruthy(),
     );
+  });
+
+  it("跨表批量推断：限流失败后智能重试建议降低并发并自动重试", async () => {
+    vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
+      total_tables: 2,
+      tables_with_desc: 0,
+      tables_missing_desc: 2,
+      total_fields: 4,
+      fields_with_desc: 1,
+      fields_missing_desc: 3,
+      per_table: [
+        {
+          catalog_id: 1, entity_name: "ods_order", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: false,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 1, missing_fields: 1,
+          missing_field_names: ["id"], updated_at: "2026-08-14T02:30:00",
+        },
+        {
+          catalog_id: 3, entity_name: "ods_pay", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: true,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 0, missing_fields: 2,
+          missing_field_names: ["amount", "pay_time"], updated_at: "2026-08-14T04:00:00",
+        },
+      ],
+    });
+    // 表1 首次推断限流（429）；表3 成功；智能重试（降并发）时表1 再次成功
+    vi.mocked(inferDescriptions)
+      .mockRejectedValueOnce(new Error("429 Too Many Requests"))
+      .mockResolvedValueOnce({
+        inferred: [
+          { column_name: "amount", description: "支付金额", source: "llm", confidence: 0.9 },
+          { column_name: "pay_time", description: "支付时间", source: "llm", confidence: 0.9 },
+        ],
+        skipped: [],
+        failed: [],
+      } as Awaited<ReturnType<typeof inferDescriptions>>)
+      .mockResolvedValueOnce({
+        inferred: [{ column_name: "id", description: "订单主键", source: "llm", confidence: 0.9 }],
+        skipped: [],
+        failed: [],
+      } as Awaited<ReturnType<typeof inferDescriptions>>);
+    vi.mocked(inferTableDescription).mockResolvedValue({
+      catalog_id: 3,
+      description: "支付表",
+      source: "llm",
+      confidence: 0.9,
+    });
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText("ods_order")).toBeTruthy());
+    const orderRow = screen.getByText("ods_order").closest("tr") as HTMLElement;
+    const payRow = screen.getByText("ods_pay").closest("tr") as HTMLElement;
+    fireEvent.click(within(orderRow).getByRole("checkbox"));
+    fireEvent.click(within(payRow).getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: /批量推断所选表/ }));
+    await waitFor(() => expect(screen.getByText("批量 LLM 推断确认")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /开始推断/ }));
+
+    // 完成 → 失败分桶显示限流×1 + 智能建议 Alert（默认并发 2 → 建议降至 1）
+    await waitFor(() =>
+      expect(screen.getByText(/成功 1 张 \/ 失败 1 张（限流×1）/)).toBeTruthy(),
+    );
+    expect(screen.getByText(/检测到限流（1 张），建议降低并发重试（自动降至 1）/)).toBeTruthy();
+    // 点击智能重试 → 自动降并发并重试失败项
+    fireEvent.click(screen.getByRole("button", { name: /降低并发重试/ }));
+
+    await waitFor(() => expect(inferDescriptions).toHaveBeenCalledTimes(3));
+    await waitFor(() =>
+      expect(screen.getByText(/成功 2 张 \/ 失败 0 张/)).toBeTruthy(),
+    );
+    // 并发偏好已降为 1 并持久化（智能重试后进入进度视图，Select 在确认视图才有，故验证持久化值）
+    await waitFor(() =>
+      expect(localStorage.getItem("unisense.desc-coverage.batchConcurrency")).toBe("1"),
+    );
+  });
+
+  it("跨表批量推断：完成后持久化到服务端历史，历史视图展示操作人", async () => {
+    vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
+      total_tables: 1,
+      tables_with_desc: 1,
+      tables_missing_desc: 0,
+      total_fields: 2,
+      fields_with_desc: 0,
+      fields_missing_desc: 2,
+      per_table: [
+        {
+          catalog_id: 1, entity_name: "ods_order", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: true,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 0, missing_fields: 2,
+          missing_field_names: ["id", "amount"], updated_at: "2026-08-14T02:30:00",
+        },
+      ],
+    });
+    vi.mocked(inferDescriptions).mockResolvedValue({
+      inferred: [
+        { column_name: "id", description: "订单主键", source: "llm", confidence: 0.9 },
+        { column_name: "amount", description: "订单金额", source: "llm", confidence: 0.9 },
+      ],
+      skipped: [],
+      failed: [],
+    } as Awaited<ReturnType<typeof inferDescriptions>>);
+    // 首次加载历史为空；服务端写入后刷新返回带操作人的条目
+    vi.mocked(fetchBatchInferHistory)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: 1,
+          actor_id: 1,
+          actor_name: "admin",
+          tables: [{ catalog_id: 1, entity_name: "ods_order" }],
+          done: 1,
+          failed: 0,
+          cancelled: 0,
+          added: 2,
+          elapsed: 5,
+          failed_tables: [],
+          created_at: "2026-08-25T01:00:00",
+        },
+      ]);
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText("ods_order")).toBeTruthy());
+    const orderRow = screen.getByText("ods_order").closest("tr") as HTMLElement;
+    fireEvent.click(within(orderRow).getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: /批量推断所选表/ }));
+    await waitFor(() => expect(screen.getByText("批量 LLM 推断确认")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /开始推断/ }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/成功 1 张 \/ 失败 0 张/)).toBeTruthy(),
+    );
+    // 服务端持久化调用：payload 含表集（catalog_id + entity_name）
+    await waitFor(() => expect(createBatchInferHistory).toHaveBeenCalledTimes(1));
+    const payload = vi.mocked(createBatchInferHistory).mock.calls[0][0];
+    expect(payload.tables).toEqual([{ catalog_id: 1, entity_name: "ods_order" }]);
+    expect(payload.done).toBe(1);
+    expect(payload.added).toBe(2);
+    // 历史视图展示服务端返回的操作人（跨设备/团队可见）
+    fireEvent.click(screen.getByRole("button", { name: /历史记录/ }));
+    await waitFor(() => expect(screen.getByText(/操作人：admin/)).toBeTruthy());
   });
 
   it("跨表批量推断：完成后进度行展示新增字段预览", async () => {

@@ -35,7 +35,10 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import {
+  clearBatchInferHistory,
+  createBatchInferHistory,
   fetchAssetEntityDetail,
+  fetchBatchInferHistory,
   fetchDescriptionCoverage,
   inferColumnDescription,
   inferDescriptions,
@@ -44,6 +47,8 @@ import {
   updateTableDescription,
 } from "../api";
 import type {
+  BatchInferHistoryEntry,
+  BatchInferHistoryTable,
   DescriptionCoverage,
   TableCoverageItem,
 } from "../api";
@@ -157,10 +162,19 @@ type LastFailedTable = { catalog_id: number; entity_name: string };
  */
 type BatchErrorCategory = "rate_limit" | "timeout" | "in_progress" | "unknown";
 
-/** 批量历史记录（localStorage 保留近 5 次会话，供查看与一键重新勾选重跑）。 */
+/**
+ * 批量历史记录（localStorage 保留近 5 次会话，供查看与一键重新勾选重跑）。
+ * 服务端持久化后条目携带 id/actor_name/tablesWithId（跨设备、团队可见）。
+ */
 type BatchHistoryEntry = {
+  /** 服务端持久化 id（有值表示已写入服务端）。 */
+  id?: number;
+  /** 操作人姓名快照（服务端条目，团队治理动作可追溯）。 */
+  actor_name?: string;
   ts: number;
   tables: string[];
+  /** 服务端条目携带的表集（含 catalog_id，重新勾选更精确）。 */
+  tablesWithId?: BatchInferHistoryTable[];
   done: number;
   failed: number;
   cancelled: number;
@@ -168,6 +182,26 @@ type BatchHistoryEntry = {
   elapsed: number;
   failedTables: LastFailedTable[];
 };
+
+/** 服务端条目 → 本地 BatchHistoryEntry 结构（created_at UTC ISO → epoch）。 */
+function toLocalHistoryEntry(e: BatchInferHistoryEntry): BatchHistoryEntry {
+  return {
+    id: e.id,
+    actor_name: e.actor_name ?? undefined,
+    ts: new Date(e.created_at).getTime(),
+    tables: e.tables.map((t) => t.entity_name),
+    tablesWithId: e.tables,
+    done: e.done,
+    failed: e.failed,
+    cancelled: e.cancelled,
+    added: e.added,
+    elapsed: e.elapsed,
+    failedTables: e.failed_tables,
+  };
+}
+
+/** 智能重试建议：按失败分桶给出重试策略（限流→降并发、超时→单表串行、并发冲突→稍后）。 */
+type RetryAdvice = { mode: "lower" | "serial" | "wait" | "none"; message: string };
 
 const BATCH_ERROR_LABEL: Record<BatchErrorCategory, string> = {
   rate_limit: "限流",
@@ -588,8 +622,27 @@ export const DescriptionCoveragePanel = forwardRef<
     }
   }
 
+  /**
+   * 从服务端加载批量推断历史（跨设备/团队可见，按时间倒序）。
+   * 服务端返回非空记录才覆盖本地（避免服务端刚启用/被清空时误清用户本地缓存历史）；
+   * 服务端不可用（网络/权限）时静默保留 localStorage 缓存。
+   */
+  async function loadServerHistory() {
+    try {
+      const entries = await fetchBatchInferHistory();
+      if (entries.length > 0) {
+        const mapped = entries.map(toLocalHistoryEntry);
+        setBatchHistory(mapped);
+        writeBatchHistory(mapped);
+      }
+    } catch {
+      // 服务端不可用：保留 localStorage 缓存（离线可继续用）
+    }
+  }
+
   useEffect(() => {
     load();
+    void loadServerHistory();
   }, []);
 
   // 暴露 reload 给父组件：采集目录主列表「刷新」按钮共享刷新治理面板（方案 D）
@@ -914,24 +967,27 @@ export const DescriptionCoveragePanel = forwardRef<
     setBatchRunning(false);
     setBatchFinished(true);
     setBatchElapsed(Math.round((Date.now() - startMs) / 1000));
-    // 写入批量历史（近 5 次）：含结果摘要与失败表，供历史视图查看与一键重跑
+    // 写入批量历史（近 5 次）：含结果摘要与失败表，供历史视图查看与一键重跑；
+    // 同时 best-effort 持久化到服务端（跨设备/团队可见，失败静默降级 localStorage）。
+    const entry: BatchHistoryEntry = {
+      ts: Date.now(),
+      tables: tasks.map((t) => t.entity_name),
+      tablesWithId: tasks.map((t) => ({ catalog_id: t.catalog_id, entity_name: t.entity_name })),
+      done: final.filter((p) => p.status === "done").length,
+      failed: final.filter((p) => p.status === "error").length,
+      cancelled: final.filter((p) => p.status === "cancelled").length,
+      added: final.reduce((s, p) => s + (p.added ?? 0), 0),
+      elapsed: Math.round((Date.now() - startMs) / 1000),
+      failedTables: final
+        .filter((p) => p.status === "error")
+        .map((p) => ({ catalog_id: p.catalog_id, entity_name: p.entity_name })),
+    };
     setBatchHistory((prev) => {
-      const entry: BatchHistoryEntry = {
-        ts: Date.now(),
-        tables: tasks.map((t) => t.entity_name),
-        done: final.filter((p) => p.status === "done").length,
-        failed: final.filter((p) => p.status === "error").length,
-        cancelled: final.filter((p) => p.status === "cancelled").length,
-        added: final.reduce((s, p) => s + (p.added ?? 0), 0),
-        elapsed: Math.round((Date.now() - startMs) / 1000),
-        failedTables: final
-          .filter((p) => p.status === "error")
-          .map((p) => ({ catalog_id: p.catalog_id, entity_name: p.entity_name })),
-      };
       const next = [entry, ...prev].slice(0, BATCH_HISTORY_LIMIT);
       writeBatchHistory(next);
       return next;
     });
+    void persistServerHistory(entry, tasks);
     if (cancelRef.current) return;
     await load();
     setSelectedRowKeys([]);
@@ -943,10 +999,35 @@ export const DescriptionCoveragePanel = forwardRef<
     );
   }
 
+  /** 批量历史 best-effort 持久化到服务端（跨设备/团队可见）；失败静默降级 localStorage。 */
+  async function persistServerHistory(entry: BatchHistoryEntry, tasks: BatchTask[]) {
+    try {
+      await createBatchInferHistory({
+        tables: tasks.map((t) => ({ catalog_id: t.catalog_id, entity_name: t.entity_name })),
+        done: entry.done,
+        failed: entry.failed,
+        cancelled: entry.cancelled,
+        added: entry.added,
+        elapsed: entry.elapsed,
+        failed_tables: entry.failedTables,
+      });
+      // 刷新服务端列表（拿回 id/操作人快照，历史视图展示团队操作人）
+      await loadServerHistory();
+    } catch {
+      // 服务端不可用：localStorage 缓存仍在，离线可继续用
+    }
+  }
+
   /** 批量推断入口：整批 in-flight 去重（key=表集签名），避免重复点击重复调 LLM。 */
-  function startBatchInfer(tasks: BatchTask[], initial?: BatchProgressItem[], resetIds?: Set<number>) {
+  function startBatchInfer(
+    tasks: BatchTask[],
+    initial?: BatchProgressItem[],
+    resetIds?: Set<number>,
+    concurrency?: number,
+  ) {
     const key = `cross:${tasks.map((t) => t.catalog_id).sort((a, b) => a - b).join(",")}`;
-    const p = runInflight(key, () => runBatchInfer(tasks, batchConcurrency, initial, resetIds));
+    const eff = concurrency ?? batchConcurrency;
+    const p = runInflight(key, () => runBatchInfer(tasks, eff, initial, resetIds));
     if (!p) {
       message.info("该批量推断正在进行中，请稍候");
       return;
@@ -961,6 +1042,63 @@ export const DescriptionCoveragePanel = forwardRef<
       batchProgress.some((p) => p.catalog_id === t.catalog_id && p.status === "error"),
     );
     if (failed.length === 0) return;
+    startBatchInfer(batchTasks, batchProgress);
+  }
+
+  /** 智能重试建议：按失败分桶给出重试策略（限流→降并发、超时→单表串行、并发冲突→稍后）。 */
+  function computeRetryAdvice(): RetryAdvice {
+    if (batchErrorBuckets.rate_limit > 0) {
+      return {
+        mode: batchConcurrency > 1 ? "lower" : "none",
+        message:
+          batchConcurrency > 1
+            ? `检测到限流（${batchErrorBuckets.rate_limit} 张），建议降低并发重试（自动降至 ${Math.max(1, batchConcurrency - 1)}）`
+            : "检测到限流但已是最低并发，建议稍后重试",
+      };
+    }
+    if (batchErrorBuckets.timeout > 0) {
+      return {
+        mode: "serial",
+        message: `检测到超时（${batchErrorBuckets.timeout} 张），建议单表串行重试（并发 1，降低 LLM 压力）`,
+      };
+    }
+    if (batchErrorBuckets.in_progress > 0) {
+      return {
+        mode: "wait",
+        message: "部分表正在其它会话推断（409 并发冲突），建议稍后重试",
+      };
+    }
+    return { mode: "none", message: "" };
+  }
+
+  /**
+   * 智能重试：按失败分桶自动调整并发后重试——
+   * - 限流：自动降至更低并发（min(当前-1, 1)），并持久化新并发偏好
+   * - 超时：自动降为单表串行（并发 1）
+   * - 并发冲突：提示稍后，不自动重试
+   * - 其它/无失败：维持当前并发
+   */
+  function retryBatchSmart() {
+    const failed = batchTasks.filter((t) =>
+      batchProgress.some((p) => p.catalog_id === t.catalog_id && p.status === "error"),
+    );
+    if (failed.length === 0) return;
+    const advice = computeRetryAdvice();
+    if (advice.mode === "lower") {
+      const next = Math.max(1, batchConcurrency - 1);
+      setBatchConcurrency(next);
+      startBatchInfer(batchTasks, batchProgress, undefined, next);
+      return;
+    }
+    if (advice.mode === "serial") {
+      setBatchConcurrency(1);
+      startBatchInfer(batchTasks, batchProgress, undefined, 1);
+      return;
+    }
+    if (advice.mode === "wait") {
+      message.info(advice.message);
+      return;
+    }
     startBatchInfer(batchTasks, batchProgress);
   }
 
@@ -1012,11 +1150,13 @@ export const DescriptionCoveragePanel = forwardRef<
   /**
    * 从批量历史一键重跑：重新勾选该次会话涉及的、当前仍可勾选的表（有失败表则优先失败表，
    * 无失败表则按表名匹配全量），并回到确认面板。表可能已被补全或删除，仅保留仍可勾选的。
+   * 服务端条目携带 catalog_id（tablesWithId/failedTables），匹配更精确。
    */
   function relaunchHistory(entry: BatchHistoryEntry) {
     if (!coverage) return;
     const failedIds = new Set(entry.failedTables.map((f) => f.catalog_id));
     const failedNames = new Set(entry.failedTables.map((f) => f.entity_name));
+    const allIds = new Set((entry.tablesWithId ?? []).map((t) => t.catalog_id));
     const allNames = new Set(entry.tables);
     const selectable = (t: TableCoverageItem) => !(t.missing_fields === 0 && !!t.table_desc);
     const ids = coverage.per_table
@@ -1025,7 +1165,8 @@ export const DescriptionCoveragePanel = forwardRef<
           selectable(t) &&
           (failedIds.has(t.catalog_id) ||
             failedNames.has(t.entity_name) ||
-            (entry.failedTables.length === 0 && allNames.has(t.entity_name))),
+            (entry.failedTables.length === 0 &&
+              (allIds.has(t.catalog_id) || allNames.has(t.entity_name)))),
       )
       .map((t) => t.catalog_id);
     setSelectedRowKeys(ids);
@@ -1036,10 +1177,15 @@ export const DescriptionCoveragePanel = forwardRef<
     setBatchOpen(true);
   }
 
-  /** 清空批量历史（localStorage + state）。 */
-  function clearBatchHistory() {
+  /** 清空批量历史（服务端当前用户自己的记录 + localStorage + state）。 */
+  async function clearBatchHistory() {
     setBatchHistory([]);
     writeBatchHistory([]);
+    try {
+      await clearBatchInferHistory();
+    } catch {
+      // 服务端不可用：本地已清空
+    }
   }
 
   /** 一键勾选所有存在描述缺失的表（字段缺失或表描述缺失）。 */
@@ -1103,6 +1249,8 @@ export const DescriptionCoveragePanel = forwardRef<
   const batchSummaryText = `成功 ${batchDoneCount} 张 / 失败 ${batchErrorCount} 张${
     batchErrorBucketText ? `（${batchErrorBucketText}）` : ""
   }${batchCancelledCount > 0 ? ` / 取消 ${batchCancelledCount} 张` : ""} · 新增字段描述 ${batchAddedCount} 个 · 耗时 ${batchElapsed}s`;
+  // 智能重试建议：仅在完成后有失败时计算（限流→降并发、超时→单表串行、并发冲突→稍后）
+  const retryAdvice = batchFinished && batchErrorCount > 0 ? computeRetryAdvice() : null;
 
   return (
     <div>
@@ -1288,6 +1436,21 @@ export const DescriptionCoveragePanel = forwardRef<
                       message={batchSummaryText}
                     />
                   )}
+                  {retryAdvice && (
+                    <Alert
+                      type="info"
+                      showIcon
+                      style={{ marginBottom: 12 }}
+                      message={retryAdvice.message}
+                      action={
+                        retryAdvice.mode === "lower" || retryAdvice.mode === "serial" ? (
+                          <Button size="small" type="primary" onClick={retryBatchSmart}>
+                            {retryAdvice.mode === "lower" ? "降低并发重试" : "单表串行重试"}
+                          </Button>
+                        ) : undefined
+                      }
+                    />
+                  )}
                   {batchRunning && batchProgress.length > 0 && (
                     <Progress
                       percent={Math.round(
@@ -1413,6 +1576,7 @@ export const DescriptionCoveragePanel = forwardRef<
                               <span className="muted" style={{ fontSize: 12 }}>
                                 {formatCnTime(new Date(h.ts).toISOString())}
                               </span>
+                              {h.actor_name && <Tag color="blue">操作人：{h.actor_name}</Tag>}
                               <span>
                                 成功 {h.done} · 失败 {h.failed}
                                 {h.cancelled > 0 ? ` · 取消 ${h.cancelled}` : ""} · 新增 {h.added}{" "}

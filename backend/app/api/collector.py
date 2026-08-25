@@ -24,12 +24,12 @@ import json
 import time
 import uuid
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
@@ -41,11 +41,15 @@ from app.core.logging import get_logger
 from app.core.probe_throttle import check_collect_rate, check_probe_rate
 from app.db.mysql import get_db_session
 from app.db.redis import get_redis
+from app.models.collector_models import BatchInferHistory
 from app.models.data_source import DBCatalog
 from app.services.collector.distributed_lock import CollectionLock
 from app.services.collector.infer_guard import InferInflightGuard
 from app.services.collector.schemas import (
     BatchDeleteRequest,
+    BatchInferHistoryCreate,
+    BatchInferHistoryEntry,
+    BatchInferHistoryTable,
     BatchScheduleRequest,
     BatchSourceResult,
     BatchTestConnectionRequest,
@@ -1090,6 +1094,132 @@ async def get_description_coverage(
     svc = _svc(db)
     coverage = await svc._repo.get_description_coverage(page=page, page_size=page_size)
     return ok(data=DescriptionCoverageResponse(**coverage), trace_id=trace_id)
+
+
+#: 批量推断历史保留条数（写入时自动裁剪，防止无限增长）。
+_BATCH_HISTORY_LIMIT = 20
+
+
+def _to_history_entry(r: BatchInferHistory) -> BatchInferHistoryEntry:
+    """ORM 行 → 响应 schema（JSON 列解析为表结构）。"""
+    return BatchInferHistoryEntry(
+        id=r.id,
+        actor_id=r.actor_id,
+        actor_name=r.actor_name,
+        tables=[BatchInferHistoryTable(**t) for t in (r.tables_json or [])],
+        done=r.done,
+        failed=r.failed,
+        cancelled=r.cancelled,
+        added=r.added,
+        elapsed=r.elapsed,
+        failed_tables=[
+            BatchInferHistoryTable(**t) for t in (r.failed_tables_json or [])
+        ],
+        created_at=r.created_at.isoformat() if r.created_at else "",
+    )
+
+
+@catalog_router.get("/batch-infer-history", dependencies=_READ_DEPS)
+async def list_batch_infer_history(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    limit: int = Query(_BATCH_HISTORY_LIMIT, ge=1, le=100, description="返回条数"),
+) -> ApiResponse[list[BatchInferHistoryEntry]]:
+    """批量推断历史（服务端持久化，跨设备/团队可见，按时间倒序）。"""
+    rows = (
+        (
+            await db.execute(
+                select(BatchInferHistory)
+                .where(BatchInferHistory.deleted_at.is_(None))
+                .order_by(BatchInferHistory.created_at.desc())
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return ok(data=[_to_history_entry(r) for r in rows], trace_id=trace_id)
+
+
+@catalog_router.post("/batch-infer-history", dependencies=_WRITE_DEPS)
+async def create_batch_infer_history(
+    body: BatchInferHistoryCreate,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[BatchInferHistoryEntry]:
+    """写入一条批量推断历史（自动裁剪到近 N 条，超出的软删）。"""
+    row = BatchInferHistory(
+        actor_id=user.id,
+        actor_name=getattr(user, "username", None),
+        tables_json=[t.model_dump() for t in body.tables],
+        done=body.done,
+        failed=body.failed,
+        cancelled=body.cancelled,
+        added=body.added,
+        elapsed=body.elapsed,
+        failed_tables_json=[t.model_dump() for t in body.failed_tables],
+    )
+    db.add(row)
+    await db.flush()
+    keep_ids = (
+        select(BatchInferHistory.id)
+        .where(BatchInferHistory.deleted_at.is_(None))
+        .order_by(BatchInferHistory.created_at.desc())
+        .limit(_BATCH_HISTORY_LIMIT)
+    )
+    await db.execute(
+        update(BatchInferHistory)
+        .where(
+            BatchInferHistory.deleted_at.is_(None),
+            BatchInferHistory.id.not_in(keep_ids),
+        )
+        .values(deleted_at=datetime.now(UTC))
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="catalog.batch_infer_history",
+        entity_type="batch_infer_history",
+        entity_id=str(row.id),
+        detail={"done": body.done, "failed": body.failed, "added": body.added},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    await db.refresh(row)
+    return ok(data=_to_history_entry(row), trace_id=trace_id)
+
+
+@catalog_router.delete("/batch-infer-history", dependencies=_WRITE_DEPS)
+async def clear_batch_infer_history(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, int]]:
+    """清空当前用户自己的批量推断历史（团队他人记录保留）。"""
+    result = await db.execute(
+        update(BatchInferHistory)
+        .where(
+            BatchInferHistory.deleted_at.is_(None),
+            BatchInferHistory.actor_id == user.id,
+        )
+        .values(deleted_at=datetime.now(UTC))
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="catalog.batch_infer_history_clear",
+        entity_type="batch_infer_history",
+        entity_id="",
+        detail={"cleared": result.rowcount},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data={"cleared": result.rowcount}, trace_id=trace_id)
 
 
 @catalog_router.get("/{catalog_id}", dependencies=_READ_DEPS)

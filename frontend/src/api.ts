@@ -3753,6 +3753,61 @@ export async function inferTableDescription(
   );
 }
 
+// ---- 跨表批量 LLM 推断历史（服务端持久化，跨设备/团队可见） ----
+
+export interface BatchInferHistoryTable {
+  catalog_id: number;
+  entity_name: string;
+}
+
+export interface BatchInferHistoryEntry {
+  id: number;
+  actor_id: number | null;
+  actor_name: string | null;
+  tables: BatchInferHistoryTable[];
+  done: number;
+  failed: number;
+  cancelled: number;
+  added: number;
+  elapsed: number;
+  failed_tables: BatchInferHistoryTable[];
+  created_at: string;
+}
+
+export interface BatchInferHistoryCreate {
+  tables: BatchInferHistoryTable[];
+  done: number;
+  failed: number;
+  cancelled: number;
+  added: number;
+  elapsed: number;
+  failed_tables: BatchInferHistoryTable[];
+}
+
+/** 读取服务端批量推断历史（按时间倒序，团队可见）。 */
+export async function fetchBatchInferHistory(limit = 20): Promise<BatchInferHistoryEntry[]> {
+  return request<BatchInferHistoryEntry[]>(
+    `${API_BASE}/catalogs/batch-infer-history?limit=${limit}`,
+  );
+}
+
+/** 写入一条批量推断历史（服务端自动裁剪到近 20 条）。 */
+export async function createBatchInferHistory(
+  body: BatchInferHistoryCreate,
+): Promise<BatchInferHistoryEntry> {
+  return request<BatchInferHistoryEntry>(`${API_BASE}/catalogs/batch-infer-history`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** 清空当前用户自己的批量推断历史（团队他人记录保留）。 */
+export async function clearBatchInferHistory(): Promise<{ cleared: number }> {
+  return request<{ cleared: number }>(`${API_BASE}/catalogs/batch-infer-history`, {
+    method: "DELETE",
+  });
+}
+
 // ---- 资产地图 ----
 export async function fetchAssetSummary(): Promise<AssetCatalogSummary> {
   return request<AssetCatalogSummary>(`${API_BASE}/assetmap/summary`);

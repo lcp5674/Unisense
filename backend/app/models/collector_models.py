@@ -221,3 +221,49 @@ class CollectionRun(Base, BaseModel):
         Index("idx_collection_run_source", "source_id", "started_at"),
         Index("idx_collection_run_status", "status", "started_at"),
     )
+
+
+class BatchInferHistory(Base, BaseModel):
+    """跨表批量 LLM 推断历史（服务端持久化，跨设备/团队可见）。
+
+    描述缺失治理「批量推断所选表」每次会话落一行（成功/失败/取消/新增字段/耗时），
+    供历史视图查看与一键重新勾选重跑。与前端 localStorage 缓存不同，服务端记录
+    不随设备丢失，且 actor_name 标明操作人，团队治理动作可追溯。
+
+    Attributes:
+        actor_id: 触发人 ID。
+        actor_name: 触发人姓名快照（改名后历史仍可读）。
+        tables_json: 本次会话涉及的表 [{catalog_id, entity_name}]。
+        done: 成功表数。
+        failed: 失败表数。
+        cancelled: 取消表数。
+        added: 新增字段描述数。
+        elapsed: 总耗时（秒）。
+        failed_tables_json: 失败表 [{catalog_id, entity_name}]（一键重跑用）。
+    """
+
+    __tablename__ = "batch_infer_history"
+
+    actor_id: Mapped[int | None] = mapped_column(
+        nullable=True, comment="触发人 ID"
+    )
+    actor_name: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="触发人姓名快照"
+    )
+    tables_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list, comment="涉及的表 [{catalog_id, entity_name}]"
+    )
+    done: Mapped[int] = mapped_column(INTEGER, nullable=False, default=0, comment="成功表数")
+    failed: Mapped[int] = mapped_column(INTEGER, nullable=False, default=0, comment="失败表数")
+    cancelled: Mapped[int] = mapped_column(
+        INTEGER, nullable=False, default=0, comment="取消表数"
+    )
+    added: Mapped[int] = mapped_column(
+        INTEGER, nullable=False, default=0, comment="新增字段描述数"
+    )
+    elapsed: Mapped[int] = mapped_column(INTEGER, nullable=False, default=0, comment="总耗时（秒）")
+    failed_tables_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list, comment="失败表 [{catalog_id, entity_name}]"
+    )
+
+    __table_args__ = (Index("idx_batch_history_created", "created_at"),)
