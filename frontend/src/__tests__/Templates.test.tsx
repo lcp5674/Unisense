@@ -32,6 +32,8 @@ vi.mock("../api", () => {
     updateMetricTemplate: vi.fn(),
     listDomainTree: vi.fn(),
     listDictItems: vi.fn(),
+    getDomainDefaults: vi.fn(),
+    listMeasureCatalogs: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -45,7 +47,7 @@ vi.mock("../hooks/usePermission", () => ({
   usePermission: () => ({ can: () => true }),
 }));
 
-import { listTemplates, createMetric, instantiateTemplate, listFavorites, listUsers, updateTemplateOwner, setTemplateActive, updateMetricTemplate, listDomainTree, listDictItems } from "../api";
+import { listTemplates, createMetric, instantiateTemplate, listFavorites, listUsers, updateTemplateOwner, setTemplateActive, updateMetricTemplate, listDomainTree, listDictItems, listMeasureCatalogs } from "../api";
 
 const mockedList = vi.mocked(listTemplates);
 const mockedCreate = vi.mocked(createMetric);
@@ -57,6 +59,7 @@ const mockedSetActive = vi.mocked(setTemplateActive);
 const mockedUpdateMetricTemplate = vi.mocked(updateMetricTemplate);
 const mockedDomainTree = vi.mocked(listDomainTree);
 const mockedDictItems = vi.mocked(listDictItems);
+const mockedMeasureCatalogs = vi.mocked(listMeasureCatalogs);
 
 const CREATED: MetricResponse = {
   id: 1,
@@ -122,6 +125,15 @@ const TPLS: MetricTemplate[] = [
     serving_mode: "BATCH_ONLY",
     additivity: "ADDITIVE",
     metric_tier: "T1",
+    // OneData 预设（方案A）：原子模板预设逻辑度量
+    measure_id: 1,
+    mount: null,
+    product_owner_id: null,
+    tech_owner_id: null,
+    dw_developer_id: null,
+    product_owner_name: null,
+    tech_owner_name: null,
+    dw_developer_name: null,
     is_active: true,
     owner_id: null,
     created_by: 1,
@@ -145,6 +157,15 @@ const TPLS: MetricTemplate[] = [
     serving_mode: "BATCH_ONLY",
     additivity: "ADDITIVE",
     metric_tier: "T1",
+    // OneData 预设（方案A）：原子模板预设逻辑度量
+    measure_id: 1,
+    mount: null,
+    product_owner_id: null,
+    tech_owner_id: null,
+    dw_developer_id: null,
+    product_owner_name: null,
+    tech_owner_name: null,
+    dw_developer_name: null,
     is_active: true,
     owner_id: null,
     created_by: 1,
@@ -158,6 +179,8 @@ beforeEach(() => {
   mockedListFavorites.mockResolvedValue([]);
   mockedDomainTree.mockResolvedValue([]);
   mockedDictItems.mockResolvedValue([]);
+  // OneData 原子层：默认无已发布逻辑度量（度量下拉为空，不影响既有断言）
+  mockedMeasureCatalogs.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 });
   mockedListUsers.mockResolvedValue([
     { id: 1, username: "alice", display_name: "Alice", role: "metric_owner", domain: "finance", status: "ACTIVE" },
     { id: 2, username: "bob", display_name: "Bob", role: "metric_owner", domain: "finance", status: "ACTIVE" },
@@ -293,6 +316,30 @@ describe("Templates 页面", () => {
       );
     });
     expect(mockedCreate).not.toHaveBeenCalled();
+  });
+
+  it("方案A：原子模板实例化——模板 measure_id 预设预填并随请求提交", async () => {
+    mockedInstantiate.mockResolvedValue(CREATED);
+    render(
+      <MemoryRouter>
+        <Templates />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("tpl_gmv_daily");
+    fireEvent.click(screen.getAllByText("实例化指标")[0]);
+    await screen.findByText("从模板实例化：GMV 日汇总模板");
+    // 原子类型 → 显示逻辑度量下拉，且预填模板 measure_id（TPLS[0].measure_id=1）
+    await waitFor(() => {
+      expect(screen.getByText("逻辑度量（OneData 原子层）")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByText("实例化创建"));
+    await waitFor(() => {
+      expect(mockedInstantiate).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ measure_id: 1 }),
+      );
+    });
   });
 
   it("P2-13 编辑模板：打开编辑弹窗回填当前值，保存调用 updateMetricTemplate（PATCH 局部更新）", async () => {

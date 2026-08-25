@@ -146,6 +146,10 @@ async def test_instantiate_required_fields_satisfied_by_template_default() -> No
         ("type", "atomic"), ("unit", "元"), ("aggregation", "SUM"),
         ("time_semantics", "PERIOD"), ("freshness", "T1"), ("dw_layer", "DWS"),
         ("serving_mode", "BATCH_ONLY"), ("additivity", "ADDITIVE"), ("metric_tier", "T3"),
+        # OneData 预设列：mock 须显式置 None（否则 MagicMock 泄漏进 merged → 422）
+        ("measure_id", None), ("mount", None),
+        ("product_owner_id", None), ("tech_owner_id", None), ("dw_developer_id", None),
+        ("product_owner_name", None), ("tech_owner_name", None), ("dw_developer_name", None),
     ):
         setattr(template, f, v)
 
@@ -268,6 +272,10 @@ async def test_instantiate_empty_definition_falls_back_to_template_default() -> 
         ("type", "atomic"), ("unit", "元"), ("aggregation", "SUM"),
         ("time_semantics", "PERIOD"), ("freshness", "T1"), ("dw_layer", "DWS"),
         ("serving_mode", "BATCH_ONLY"), ("additivity", "ADDITIVE"), ("metric_tier", "T3"),
+        # OneData 预设列：mock 须显式置 None（否则 MagicMock 泄漏进 merged → 422）
+        ("measure_id", None), ("mount", None),
+        ("product_owner_id", None), ("tech_owner_id", None), ("dw_developer_id", None),
+        ("product_owner_name", None), ("tech_owner_name", None), ("dw_developer_name", None),
     ):
         setattr(template, f, v)
 
@@ -299,6 +307,170 @@ async def test_instantiate_empty_definition_falls_back_to_template_default() -> 
         "expression": "sum(x)",
         "source_tables": ["dwd.orders"],
     }
+
+
+def _instantiate_template_mock(
+    *,
+    type_: str = "atomic",
+    defaults: dict | None = None,
+    **presets: object,
+) -> tuple[MagicMock, MagicMock, MagicMock]:
+    """构造 instantiate 测试的公共 mock（模板 + db + MetricService）。
+
+    模板列预设经 ``presets`` 覆盖（measure_id/mount/三方责任/serving_mode 等），
+    defaults_json 从 ``defaults`` 合并（含 definition_json 保证原子口径合法）。
+    """
+    from unittest.mock import patch
+
+    template = MagicMock()
+    template.id = 1
+    template.is_active = True
+    template.defaults_json = {
+        "granularity": "day",
+        "measure_id": 1,
+        "definition_json": {"expression": "sum(x)"},
+        **(defaults or {}),
+    }
+    template.required_fields = []
+    base = {
+        "type": type_, "unit": "元", "aggregation": "SUM",
+        "time_semantics": "PERIOD", "freshness": "T1", "dw_layer": "DWS",
+        "serving_mode": "BATCH_ONLY", "additivity": "ADDITIVE", "metric_tier": "T3",
+        "measure_id": None, "mount": None,
+        "product_owner_id": None, "tech_owner_id": None, "dw_developer_id": None,
+        "product_owner_name": None, "tech_owner_name": None, "dw_developer_name": None,
+    }
+    base.update(presets)
+    for f, v in base.items():
+        setattr(template, f, v)
+
+    db = MagicMock()
+    r = MagicMock()
+    r.scalar_one_or_none.return_value = template
+    db.execute = AsyncMock(return_value=r)
+    db.commit = AsyncMock()
+
+    fake_metric = MagicMock()
+    fake_metric.metric_code = "sales_gmv_day"
+    fake_metric.to_dict = MagicMock(return_value={"metric_code": "sales_gmv_day"})
+    svc_instance = MagicMock()
+    svc_instance.create_metric = AsyncMock(return_value=fake_metric)
+    patch_obj = patch("app.api.semantic.MetricService", return_value=svc_instance)
+    return template, db, patch_obj, svc_instance
+
+
+async def test_instantiate_atomic_presets_measure_id_and_responsible() -> None:
+    """方案A：原子模板实例化——模板列预设的 measure_id/三方责任并入 create_metric 请求。
+
+    修复前模板无 measure_id 字段，原子实例化因缺逻辑度量 422；
+    修复后模板 measure_id 预设透传，且可预设默认三方责任。
+    """
+    from app.api.semantic import instantiate_template
+
+    _tpl, db, patch_obj, svc_instance = _instantiate_template_mock(
+        type_="atomic", measure_id=7, product_owner_id=3, product_owner_name="外部产品"
+    )
+    user = MagicMock(id=1)
+    req = MagicMock()
+    with patch_obj:
+        await instantiate_template(
+            user=user, template_id=1, request=req,
+            body={"name": "测试", "domain": "sales"}, db=db,
+        )
+    create_req = svc_instance.create_metric.call_args[0][0]
+    assert create_req.measure_id == 7
+    assert create_req.product_owner_id == 3
+    assert create_req.product_owner_name == "外部产品"
+
+
+async def test_instantiate_derived_presets_mount() -> None:
+    """方案A：派生模板实例化——模板 mount 预设并入 create_metric 请求（落 metric_mount）。
+
+    修复前模板无 mount 字段，派生实例化出"无家"指标（无粒度/无落地血缘）；
+    修复后 mount 透传，service 自动落 metric_mount 并回填粒度。
+    """
+    from app.api.semantic import instantiate_template
+
+    mount_preset = {
+        "source_table": "dwd.sales_detail", "source_column": "amount",
+        "granularity": "日", "default_period": "day", "domain": "sales",
+    }
+    _tpl, db, patch_obj, svc_instance = _instantiate_template_mock(
+        type_="derived",
+        defaults={"definition_json": {"expression": "x", "dependencies": ["sales_gmv"]}},
+        mount=mount_preset,
+    )
+    user = MagicMock(id=1)
+    req = MagicMock()
+    with patch_obj:
+        await instantiate_template(
+            user=user, template_id=1, request=req,
+            body={"name": "派生GMV", "domain": "sales"}, db=db,
+        )
+    create_req = svc_instance.create_metric.call_args[0][0]
+    assert create_req.mount.source_table == "dwd.sales_detail"
+    assert create_req.mount.granularity == "日"
+
+
+async def test_instantiate_body_overrides_template_preset() -> None:
+    """用户 body 显式传值优先于模板预设（measure_id 覆盖）。"""
+    from app.api.semantic import instantiate_template
+
+    _tpl, db, patch_obj, svc_instance = _instantiate_template_mock(
+        type_="atomic", measure_id=7
+    )
+    user = MagicMock(id=1)
+    req = MagicMock()
+    with patch_obj:
+        await instantiate_template(
+            user=user, template_id=1, request=req,
+            body={"name": "测试", "domain": "sales", "measure_id": 9}, db=db,
+        )
+    create_req = svc_instance.create_metric.call_args[0][0]
+    assert create_req.measure_id == 9
+
+
+async def test_instantiate_drops_invalid_literal_preset() -> None:
+    """强韧性：模板预设非法枚举值（如历史脏数据 serving_mode='REALTIME'）不 422 卡死。
+
+    实例化前剔除非法枚举，让其落到 MetricCreateRequest 默认值（BATCH_ONLY）。
+    """
+    from app.api.semantic import instantiate_template
+
+    _tpl, db, patch_obj, svc_instance = _instantiate_template_mock(
+        type_="atomic", serving_mode="REALTIME"
+    )
+    user = MagicMock(id=1)
+    req = MagicMock()
+    with patch_obj:
+        await instantiate_template(
+            user=user, template_id=1, request=req,
+            body={"name": "测试", "domain": "sales"}, db=db,
+        )
+    create_req = svc_instance.create_metric.call_args[0][0]
+    assert create_req.serving_mode == "BATCH_ONLY"
+
+
+async def test_instantiate_mount_only_applies_for_derived() -> None:
+    """挂载预设仅对派生生效：atomic 模板带 mount 预设时，不并入请求（原子不挂载）。"""
+    from app.api.semantic import instantiate_template
+
+    mount_preset = {
+        "source_table": "dwd.sales_detail", "source_column": "amount",
+        "granularity": "日", "default_period": "day", "domain": "sales",
+    }
+    _tpl, db, patch_obj, svc_instance = _instantiate_template_mock(
+        type_="atomic", mount=mount_preset
+    )
+    user = MagicMock(id=1)
+    req = MagicMock()
+    with patch_obj:
+        await instantiate_template(
+            user=user, template_id=1, request=req,
+            body={"name": "测试", "domain": "sales"}, db=db,
+        )
+    create_req = svc_instance.create_metric.call_args[0][0]
+    assert create_req.mount is None
 
 
 async def test_create_template_commit_integrity_error_maps_conflict() -> None:

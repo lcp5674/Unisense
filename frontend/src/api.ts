@@ -55,6 +55,7 @@ import {
   MeasureCatalog,
   MeasureSuggestResult,
   MetricMount,
+  MetricMountInput,
   DimensionMember,
   DimensionExpr,
   DryRunResponse,
@@ -1424,6 +1425,15 @@ export async function updateMetricTemplate(
     serving_mode: string;
     additivity: string;
     metric_tier: string;
+    // OneData 预设（方案A）：逻辑度量/挂载/三方责任局部更新（传 null 清除）
+    measure_id: number | null;
+    mount: MetricMountInput | null;
+    product_owner_id: number | null;
+    tech_owner_id: number | null;
+    dw_developer_id: number | null;
+    product_owner_name: string | null;
+    tech_owner_name: string | null;
+    dw_developer_name: string | null;
     owner_id: number | null;
     is_active: boolean;
   }>,

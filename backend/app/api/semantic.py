@@ -8,7 +8,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from types import UnionType
+from typing import Any, Literal, Union, get_args, get_origin
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import func, or_, select
@@ -28,6 +29,52 @@ _READ_ROLES = ALL_ROLES
 _WRITE_ROLES = ("platform_admin", "domain_admin", "metric_owner")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
+
+#: 模板预设中受 MetricCreateRequest 枚举约束的字段（方案A 收严后与请求同源枚举）
+_LITERAL_PRESET_FIELDS = (
+    "aggregation",
+    "time_semantics",
+    "freshness",
+    "dw_layer",
+    "serving_mode",
+    "additivity",
+    "metric_tier",
+)
+
+
+def _literal_values(ann: Any) -> set[Any]:
+    """提取注解中所有 ``Literal`` 字面量取值。
+
+    兼容三种形态：``Literal["A"]``、``Optional[Literal["A"]]``（typing.Union）、
+    ``Literal["A"] | None``（PEP 604 types.UnionType）。返回空集表示非枚举注解。
+    """
+    origin = get_origin(ann)
+    if origin is Literal:
+        return set(get_args(ann))
+    if origin in (Union, UnionType):
+        values: set[Any] = set()
+        for a in get_args(ann):
+            values |= _literal_values(a)
+        return values
+    return set()
+
+
+def _drop_invalid_literal_presets(merged: dict[str, Any]) -> None:
+    """实例化前剔除非法枚举预设值（强韧性兜底）。
+
+    模板预设字段已与 ``MetricCreateRequest`` 同源枚举收严，但存量/直接改库的模板仍可能
+    含非法枚举值（如 ``serving_mode='REALTIME'``，迁移 0085 已清洗存量；此处防御后续
+    枚举集收缩或绕过校验直写库）。透传给 ``MetricCreateRequest`` 会 422 卡死整个实例化
+    ——对枚举字段仅保留合法取值，非法值丢弃让其落到请求默认值，单个脏模板不阻断实例化。
+    """
+    from app.services.semantic.schemas import MetricCreateRequest
+
+    for field in _LITERAL_PRESET_FIELDS:
+        if field not in merged or merged[field] is None:
+            continue
+        allowed = _literal_values(MetricCreateRequest.model_fields[field].annotation)
+        if allowed and merged[field] not in allowed:
+            del merged[field]
 
 
 # ----------------------------------------------------------------
@@ -173,7 +220,18 @@ async def create_template(
         dw_layer=validated.dw_layer,
         serving_mode=validated.serving_mode,
         additivity=validated.additivity,
-        metric_tier=body.get("metric_tier"),
+        metric_tier=validated.metric_tier,
+        # OneData 预设（方案A：模板对齐当前指标注册信息结构）
+        measure_id=validated.measure_id,
+        mount=(
+            validated.mount.model_dump() if validated.mount is not None else None
+        ),
+        product_owner_id=validated.product_owner_id,
+        tech_owner_id=validated.tech_owner_id,
+        dw_developer_id=validated.dw_developer_id,
+        product_owner_name=validated.product_owner_name,
+        tech_owner_name=validated.tech_owner_name,
+        dw_developer_name=validated.dw_developer_name,
         owner_id=validated.owner_id,
         created_by=user.id,
     )
@@ -323,6 +381,15 @@ async def update_template(
     _apply("serving_mode", validated.serving_mode)
     _apply("additivity", validated.additivity)
     _apply("metric_tier", validated.metric_tier)
+    # OneData 预设（方案A）：逻辑度量/挂载/三方责任局部更新（传 null 清除）
+    _apply("measure_id", validated.measure_id)
+    _apply("mount", validated.mount.model_dump() if validated.mount is not None else None)
+    _apply("product_owner_id", validated.product_owner_id)
+    _apply("tech_owner_id", validated.tech_owner_id)
+    _apply("dw_developer_id", validated.dw_developer_id)
+    _apply("product_owner_name", validated.product_owner_name)
+    _apply("tech_owner_name", validated.tech_owner_name)
+    _apply("dw_developer_name", validated.dw_developer_name)
     _apply("owner_id", validated.owner_id)
     _apply("is_active", validated.is_active)
     if not updates:
@@ -470,6 +537,29 @@ async def instantiate_template(
     if not merged.get("definition_json") and defaults.get("definition_json"):
         merged["definition_json"] = defaults["definition_json"]
 
+    # OneData 预设字段（方案A）：按实例化后的最终类型条件透传——
+    # 原子 → 逻辑度量 measure_id（度量格式/单位/小数位/源头系统继承）；
+    # 派生 → 挂载实体 mount（源表/列/粒度/周期/域，service 落 metric_mount 并回填粒度）。
+    # 优先级：body 显式传值 > 模板专用列预设 > defaults_json 历史值（专用列是权威预设，
+    # 覆盖 defaults_json 中可能残留的同键值）。
+    merged_type = merged.get("type")
+    if merged_type == "atomic" and template.measure_id is not None and "measure_id" not in body:
+        merged["measure_id"] = template.measure_id
+    if merged_type == "derived" and template.mount and "mount" not in body:
+        merged["mount"] = template.mount
+    # 口径三方责任预设：模板作者预设的默认责任方（body 显式传值优先），实例化时作为指标默认
+    for f in (
+        "product_owner_id",
+        "tech_owner_id",
+        "dw_developer_id",
+        "product_owner_name",
+        "tech_owner_name",
+        "dw_developer_name",
+    ):
+        val = getattr(template, f, None)
+        if val is not None and f not in body:
+            merged[f] = val
+
     # 3. 必填字段校验（对齐 merged：模板默认值亦满足必填——
     #    仅查 body 会误拒"模板默认已提供"的必填字段）
     required = template.required_fields or []
@@ -482,6 +572,8 @@ async def instantiate_template(
     # 4. 委托 MetricService 创建指标
     from app.services.semantic.schemas import MetricCreateRequest
 
+    # 枚举收严兜底（强韧性）：剔除模板预设中的非法枚举值，避免存量脏模板 422 卡死实例化
+    _drop_invalid_literal_presets(merged)
     create_req = MetricCreateRequest(**merged)
     svc = MetricService(db)
     metric = await svc.create_metric(create_req, owner_id=user.id)

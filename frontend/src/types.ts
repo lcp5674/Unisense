@@ -811,6 +811,17 @@ export interface MetricTemplate {
   serving_mode: string;
   additivity: string;
   metric_tier: string;
+  /** OneData 原子层：逻辑度量预设（原子指标实例化时继承度量格式/单位/小数位） */
+  measure_id: number | null;
+  /** OneData 挂载层：挂载实体预设（派生指标实例化时落 metric_mount） */
+  mount: MetricMountInput | null;
+  /** 口径三方责任预设（实例化时作为指标默认责任方，均可空） */
+  product_owner_id: number | null;
+  tech_owner_id: number | null;
+  dw_developer_id: number | null;
+  product_owner_name: string | null;
+  tech_owner_name: string | null;
+  dw_developer_name: string | null;
   is_active: boolean;
   owner_id: number | null;
   created_by: number;

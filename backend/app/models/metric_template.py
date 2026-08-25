@@ -37,6 +37,9 @@ class MetricTemplate(Base, BaseModel):
         serving_mode: 服务模式预设。
         additivity: 可加性预设。
         metric_tier: 指标分级预设。
+        measure_id: 逻辑度量预设（原子指标 OneData 原子层）。
+        mount: 挂载实体预设（派生指标）。
+        product_owner_id/tech_owner_id/dw_developer_id(+_name): 口径三方责任预设。
         version: 模板版本号。
         is_active: 是否启用。
         owner_id: 责任人（Owner）ID（可空，模板负责人）。
@@ -45,6 +48,38 @@ class MetricTemplate(Base, BaseModel):
     """
 
     __tablename__ = "metric_template"
+
+    # ---- OneData 预设（方案A：模板对齐当前指标注册信息结构）----
+    #: 关联逻辑度量 ID（原子指标预设；实例化 atomic 时透传给 MetricCreateRequest.measure_id）
+    measure_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("measure_catalog.id", name="fk_template_measure"),
+        nullable=True,
+        comment="逻辑度量预设（原子指标 OneData 原子层，实例化时继承度量格式/单位）",
+    )
+    #: 挂载实体预设（派生指标专用：源表/列/粒度/周期/域，实例化 derived 时透传落 metric_mount）
+    mount: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True, comment="挂载实体预设（派生指标：源表/列/粒度/周期/域）"
+    )
+    #: 口径三方责任预设（实例化时作为指标默认责任方，均可空）
+    product_owner_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, comment="产品需求方用户 ID 预设"
+    )
+    tech_owner_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, comment="技术方用户 ID 预设"
+    )
+    dw_developer_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, comment="数仓开发用户 ID 预设"
+    )
+    product_owner_name: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="产品需求方名称预设（非平台用户直接填写）"
+    )
+    tech_owner_name: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="技术方名称预设（非平台用户直接填写）"
+    )
+    dw_developer_name: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="数仓开发名称预设（非平台用户直接填写）"
+    )
 
     code: Mapped[str] = mapped_column(
         String(64), nullable=False, unique=True, comment="模板编码（唯一）"

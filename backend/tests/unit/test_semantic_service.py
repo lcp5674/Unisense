@@ -51,6 +51,15 @@ def _svc_with_repo() -> tuple[MetricService, MagicMock]:
     _db.execute = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=[])))
     with patch("app.services.semantic.service.MetricRepository") as mock_repo_cls:
         svc = MetricService(db=_db, governance_svc=mock_gov_svc)
+        # create_metric 3a 步 OneData 校验：原子指标关联的逻辑度量须存在且 PUBLISHED。
+        # 默认 mock 为「已发布」度量（default_unit=元），happy path 不阻断；缺度量/未发布
+        # 场景由专项测试替换 svc._measure_repo 覆盖（如 measure_missing / measure_draft）。
+        measure_repo = MagicMock()
+        fake_measure = MagicMock()
+        fake_measure.status = "PUBLISHED"
+        fake_measure.default_unit = "元"
+        measure_repo.get_by_id = AsyncMock(return_value=fake_measure)
+        svc._measure_repo = measure_repo
         # submit 路径会经 _notify_metric_stakeholders 开独立 DB 会话做定向通知，
         # 单元测试中会跨事件循环连库产生 RuntimeError——统一 mock 掉（通知行为另有集成测试）。
         svc._notify_metric_stakeholders = AsyncMock(return_value=None)
@@ -238,15 +247,15 @@ async def test_create_atomic_inherits_unit_from_measure():
     repo.create_version = AsyncMock(return_value=MagicMock())
 
     fake_measure = MagicMock()
+    fake_measure.status = "PUBLISHED"
     fake_measure.default_unit = "元"
-    with patch("app.services.measure_catalog.repository.MeasureCatalogRepository") as mock_mc:
-        mock_mc.return_value.get_by_id = AsyncMock(return_value=fake_measure)
-        await svc.create_metric(
-            MetricCreateRequest(
-                **make_create_payload(measure_id=7, unit=None),
-            ),
-            owner_id=1,
-        )
+    svc._measure_repo.get_by_id = AsyncMock(return_value=fake_measure)
+    await svc.create_metric(
+        MetricCreateRequest(
+            **make_create_payload(measure_id=7, unit=None),
+        ),
+        owner_id=1,
+    )
 
     captured = repo.create.call_args[0][0]
     assert captured.unit == "元"
@@ -256,25 +265,53 @@ async def test_create_atomic_inherits_unit_from_measure():
     assert captured.dw_layer == "DWD"
 
 
-async def test_create_atomic_defaults_unit_when_measure_missing():
-    """原子关联度量不存在时，unit 回退默认值 cnt（不阻断创建）。"""
+async def test_create_atomic_measure_missing_raises():
+    """原子关联的逻辑度量不存在 → 422 拦截（防 FK 500，而非静默回退 unit=cnt）。
+
+    修复前：measure_id 指向不存在的度量时静默回退 unit="cnt"，随后 flush 撞
+    fk_metric_measure 抛 IntegrityError → 500。现在 create_metric 3a 步显式校验
+    度量存在且已发布，未命中直接 ValidationError。
+    """
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=None)
-    created = make_metric()
-    repo.create = AsyncMock(return_value=created)
+    repo.create = AsyncMock(return_value=make_metric())
     repo.create_version = AsyncMock(return_value=MagicMock())
 
-    with patch("app.services.measure_catalog.repository.MeasureCatalogRepository") as mock_mc:
-        mock_mc.return_value.get_by_id = AsyncMock(return_value=None)
+    svc._measure_repo.get_by_id = AsyncMock(return_value=None)
+    with pytest.raises(ValidationError) as exc:
         await svc.create_metric(
             MetricCreateRequest(
                 **make_create_payload(measure_id=999, unit=None),
             ),
             owner_id=1,
         )
+    assert exc.value.error_code == "MEASURE_NOT_FOUND"
 
-    captured = repo.create.call_args[0][0]
-    assert captured.unit == "cnt"
+
+async def test_create_atomic_measure_not_published_raises():
+    """原子关联的逻辑度量未发布（DRAFT/REVIEW/DEPRECATED）→ 422 拦截。
+
+    度量是原子指标的权威继承源（单位/格式/小数位/口径直接传播到下游），
+    草稿/已废弃度量不应被新指标引用（对齐 measure 状态机：PUBLISHED 才可用）。
+    """
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    for status in ("DRAFT", "REVIEW", "DEPRECATED"):
+        fake_measure = MagicMock()
+        fake_measure.status = status
+        fake_measure.default_unit = "元"
+        svc._measure_repo.get_by_id = AsyncMock(return_value=fake_measure)
+        with pytest.raises(ValidationError) as exc:
+            await svc.create_metric(
+                MetricCreateRequest(
+                    **make_create_payload(measure_id=7, unit=None),
+                ),
+                owner_id=1,
+            )
+        assert exc.value.error_code == "MEASURE_NOT_PUBLISHED"
 
 
 async def test_create_metric_duplicate_code_raises_conflict():

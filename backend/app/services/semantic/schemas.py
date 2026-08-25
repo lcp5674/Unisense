@@ -565,7 +565,13 @@ class MetricBatchRegisterRequest(BaseModel):
 
 
 class MetricTemplateCreateRequest(BaseModel):
-    """模板创建请求（对齐 FR-041：Schema 校验替代裸 dict）。"""
+    """模板创建请求（对齐 FR-041：Schema 校验替代裸 dict）。
+
+    预设字段枚举与 ``MetricCreateRequest`` 对齐（方案A）：此前模板枚举字段为宽松
+    ``str``，实例化时透传给 Literal 严格校验会契约漂移——模板作者预设非法值
+    （如 ``serving_mode="REALTIME"``）在实例化/编辑时 422。收严为同源枚举，从源头
+    拦截非法值；存量非法值由迁移 0085 清洗。
+    """
 
     code: str | None = Field(
         None,
@@ -581,13 +587,36 @@ class MetricTemplateCreateRequest(BaseModel):
     type: Literal["atomic", "derived", "composite"] | None = Field(None, description="指标类型预设")
     granularity: str | None = Field(None, max_length=64, description="粒度预设")
     unit: str | None = Field(None, max_length=32, description="单位预设")
-    aggregation: str | None = Field(None, max_length=32, description="聚合方式预设")
-    time_semantics: str | None = Field(None, max_length=32, description="时间语义预设")
-    freshness: str | None = Field(None, max_length=32, description="数据新鲜度预设")
-    dw_layer: str | None = Field(None, max_length=32, description="数仓分层预设")
-    serving_mode: str | None = Field(None, max_length=32, description="服务模式预设")
-    additivity: str | None = Field(None, max_length=32, description="可加性预设")
-    metric_tier: str | None = Field(None, max_length=8, description="指标分级预设")
+    aggregation: Literal[
+        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE"
+    ] | None = Field(None, description="聚合方式预设")
+    time_semantics: Literal["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"] | None = Field(
+        None, description="时间语义预设"
+    )
+    freshness: Literal["REALTIME", "T0", "T1", "HOURLY"] | None = Field(
+        None, description="数据新鲜度预设"
+    )
+    dw_layer: Literal["ODS", "DWD", "DWS", "ADS", "DM"] | None = Field(
+        None, description="数仓分层预设"
+    )
+    serving_mode: Literal["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"] | None = Field(
+        None, description="服务模式预设"
+    )
+    additivity: Literal["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"] | None = Field(
+        None, description="可加性预设"
+    )
+    metric_tier: Literal["T1", "T2", "T3"] | None = Field(None, description="指标分级预设")
+    # OneData 原子层：原子指标预设逻辑度量（度量格式/单位/小数位/源头系统实例化时继承）
+    measure_id: int | None = Field(None, ge=1, description="逻辑度量预设（原子指标）")
+    # OneData 挂载层：派生指标预设挂载实体（源表/列/粒度/周期/域，实例化时落 metric_mount）
+    mount: MetricMountInput | None = Field(None, description="挂载实体预设（派生指标）")
+    # 口径三方责任预设（实例化时作为指标默认责任方，均可空；与 metric 字段命名一致）
+    product_owner_id: int | None = Field(None, ge=1, description="产品需求方用户 ID 预设")
+    tech_owner_id: int | None = Field(None, ge=1, description="技术方用户 ID 预设")
+    dw_developer_id: int | None = Field(None, ge=1, description="数仓开发用户 ID 预设")
+    product_owner_name: str | None = Field(None, max_length=128, description="产品需求方名称预设")
+    tech_owner_name: str | None = Field(None, max_length=128, description="技术方名称预设")
+    dw_developer_name: str | None = Field(None, max_length=128, description="数仓开发名称预设")
     owner_id: int | None = Field(None, ge=1, description="责任人（Owner）ID")
 
 
@@ -595,7 +624,7 @@ class MetricTemplateUpdateRequest(BaseModel):
     """模板更新请求（P2-13：模板编辑闭环，全字段可选 PATCH 语义）。
 
     对齐 ``MetricTemplateCreateRequest`` 的字段集，但全部可选——只更新传入字段。
-    复用同一套 ``pattern``/``max_length`` 约束，保证编辑后的模板仍符合创建时的
+    复用同一套 ``pattern``/``max_length``/枚举约束，保证编辑后的模板仍符合创建时的
     校验强度（避免「创建严格、编辑松懈」的契约漂移）。
     """
 
@@ -607,13 +636,36 @@ class MetricTemplateUpdateRequest(BaseModel):
     type: Literal["atomic", "derived", "composite"] | None = Field(None, description="指标类型预设")
     granularity: str | None = Field(None, max_length=64, description="粒度预设")
     unit: str | None = Field(None, max_length=32, description="单位预设")
-    aggregation: str | None = Field(None, max_length=32, description="聚合方式预设")
-    time_semantics: str | None = Field(None, max_length=32, description="时间语义预设")
-    freshness: str | None = Field(None, max_length=32, description="数据新鲜度预设")
-    dw_layer: str | None = Field(None, max_length=32, description="数仓分层预设")
-    serving_mode: str | None = Field(None, max_length=32, description="服务模式预设")
-    additivity: str | None = Field(None, max_length=32, description="可加性预设")
-    metric_tier: str | None = Field(None, max_length=8, description="指标分级预设")
+    aggregation: Literal[
+        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE"
+    ] | None = Field(None, description="聚合方式预设")
+    time_semantics: Literal["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"] | None = Field(
+        None, description="时间语义预设"
+    )
+    freshness: Literal["REALTIME", "T0", "T1", "HOURLY"] | None = Field(
+        None, description="数据新鲜度预设"
+    )
+    dw_layer: Literal["ODS", "DWD", "DWS", "ADS", "DM"] | None = Field(
+        None, description="数仓分层预设"
+    )
+    serving_mode: Literal["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"] | None = Field(
+        None, description="服务模式预设"
+    )
+    additivity: Literal["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"] | None = Field(
+        None, description="可加性预设"
+    )
+    metric_tier: Literal["T1", "T2", "T3"] | None = Field(None, description="指标分级预设")
+    # OneData 原子层：逻辑度量预设（传 null 清除）
+    measure_id: int | None = Field(None, ge=1, description="逻辑度量预设（原子指标）")
+    # OneData 挂载层：挂载实体预设（传 null 清除）
+    mount: MetricMountInput | None = Field(None, description="挂载实体预设（派生指标）")
+    # 口径三方责任预设（传 null 清除）
+    product_owner_id: int | None = Field(None, ge=1, description="产品需求方用户 ID 预设")
+    tech_owner_id: int | None = Field(None, ge=1, description="技术方用户 ID 预设")
+    dw_developer_id: int | None = Field(None, ge=1, description="数仓开发用户 ID 预设")
+    product_owner_name: str | None = Field(None, max_length=128, description="产品需求方名称预设")
+    tech_owner_name: str | None = Field(None, max_length=128, description="技术方名称预设")
+    dw_developer_name: str | None = Field(None, max_length=128, description="数仓开发名称预设")
     owner_id: int | None = Field(None, ge=1, description="责任人（Owner）ID（传 null 解除）")
     is_active: bool | None = Field(None, description="是否启用（模板上/下架）")
 

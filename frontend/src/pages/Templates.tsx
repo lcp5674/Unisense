@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, Cascader, message, Space, Descriptions, Popconfirm, Tooltip, Switch } from "antd";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, Cascader, message, Space, Descriptions, Popconfirm, Tooltip, Switch, Divider } from "antd";
 import { PlusOutlined, ArrowLeftOutlined, HeartOutlined, ReadOutlined, EditOutlined } from "@ant-design/icons";
 import {
   listTemplates,
@@ -16,9 +16,11 @@ import {
   listDomainTree,
   listDictItems,
   getDomainDefaults,
+  listMeasureCatalogs,
   UnisenseApiError,
 } from "../api";
-import type { MetricCreateRequest, MetricTemplate, MetricType, UserBrief, SubjectDomainTreeNode } from "../types";
+import type { MetricCreateRequest, MetricTemplate, MetricType, UserBrief, SubjectDomainTreeNode, MeasureCatalog } from "../types";
+import RoleOwnerSelect, { type RoleOwnerValue } from "../components/RoleOwnerSelect";
 import { useTracking } from "../hooks/useTracking";
 import { usePermission } from "../hooks/usePermission";
 import { enumLabel, METRIC_TYPE_LABEL, GRANULARITY_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, METRIC_TIER_LABEL } from "../utils/enums";
@@ -95,6 +97,8 @@ export function Templates() {
   const [domainOptions, setDomainOptions] = useState<any[]>([]);
   const [granularityOptions, setGranularityOptions] = useState<Array<{ value: string; label: string }>>([]);
   const [unitOptions, setUnitOptions] = useState<Array<{ value: string; label: string }>>([]);
+  // OneData 原子层：已发布逻辑度量（度量目录），供原子模板预设/实例化选择（仅 PUBLISHED 可选）
+  const [measureOptions, setMeasureOptions] = useState<Array<{ value: number; label: string; measure: MeasureCatalog }>>([]);
   // 模板详情弹窗（默认口径 / 必填字段 / 描述）
   const [detailTpl, setDetailTpl] = useState<MetricTemplate | null>(null);
   // 域 code → 中文名映射（列表「域」列显示中文名，与指标目录一致）
@@ -122,6 +126,18 @@ export function Templates() {
     listDictItems("unit")
       .then((items) => setUnitOptions(dictToOptions(items)))
       .catch(() => {});
+    // OneData 原子层：仅已发布逻辑度量可选（度量格式/单位/小数位实例化时继承）
+    listMeasureCatalogs({ status: "PUBLISHED", page_size: 200 })
+      .then((res) =>
+        setMeasureOptions(
+          (res.items ?? []).map((m) => ({
+            value: m.id,
+            label: `${m.name} (${m.measure_code})`,
+            measure: m,
+          })),
+        ),
+      )
+      .catch(() => setMeasureOptions([]));
   }, []);
 
   // 支持从全局搜索栏经 ?kw= 直达定位；初始值已由 useState 承接，
@@ -283,22 +299,54 @@ export function Templates() {
     setLoading(true);
     try {
       // 组装指标基础信息（模板实例化时后端会把模板默认口径与用户覆盖合并）
+      const metricType = (String(values.type) as MetricType) ?? "atomic";
+      const isAtomic = metricType === "atomic";
+      const isDerived = metricType === "derived";
+      const domain = Array.isArray(values.domain)
+        ? String(values.domain[values.domain.length - 1])
+        : String(values.domain);
       const payload: MetricCreateRequest = {
         metric_code: values.metric_code ? String(values.metric_code) : undefined,
         name: String(values.name),
         // 域取自 Cascader 路径叶子（如 ["sales","order"] → "order"），对齐注册指标页 selectedDomain 语义
-        domain: Array.isArray(values.domain)
-          ? String(values.domain[values.domain.length - 1])
-          : String(values.domain),
-        type: (String(values.type) as MetricType) ?? "atomic",
+        domain,
+        type: metricType,
         granularity: String(values.granularity || "day"),
         unit: String(values.unit || ""),
         aggregation: (String(values.aggregation) as MetricCreateRequest["aggregation"]) ?? "SUM",
         time_semantics: (String(values.time_semantics) as MetricCreateRequest["time_semantics"]) ?? "PERIOD",
         freshness: (String(values.freshness) as MetricCreateRequest["freshness"]) ?? "T1",
         dw_layer: (String(values.dw_layer) as MetricCreateRequest["dw_layer"]) ?? "DWS",
+        serving_mode: (String(values.serving_mode) as MetricCreateRequest["serving_mode"]) ?? "BATCH_ONLY",
+        additivity: (String(values.additivity) as MetricCreateRequest["additivity"]) ?? "ADDITIVE",
         definition_json: {},
       };
+      // OneData 原子层（方案A）：原子指标关联逻辑度量（度量格式/单位/小数位实例化时继承）
+      if (isAtomic && values.measure_id) {
+        payload.measure_id = Number(values.measure_id);
+      }
+      // OneData 挂载层（方案A）：派生指标挂载实体（源表/列/粒度/周期/域，服务端落 metric_mount）
+      if (isDerived) {
+        const ms = String(values.mount_source_table ?? "").trim();
+        const mc = String(values.mount_source_column ?? "").trim();
+        const mg = String(values.mount_granularity ?? "").trim();
+        if (ms && mc && mg) {
+          payload.mount = {
+            source_table: ms,
+            source_column: mc,
+            granularity: mg,
+            default_period: String(values.mount_default_period ?? "") || null,
+            domain,
+          };
+        }
+      }
+      // 口径三方责任（可选）：平台用户 id 或外部人员名称兜底（RoleOwnerSelect 组合值拆分）
+      payload.product_owner_id = (values.product_owner as RoleOwnerValue | undefined)?.id ?? undefined;
+      payload.tech_owner_id = (values.tech_owner as RoleOwnerValue | undefined)?.id ?? undefined;
+      payload.dw_developer_id = (values.dw_developer as RoleOwnerValue | undefined)?.id ?? undefined;
+      payload.product_owner_name = (values.product_owner as RoleOwnerValue | undefined)?.name ?? undefined;
+      payload.tech_owner_name = (values.tech_owner as RoleOwnerValue | undefined)?.name ?? undefined;
+      payload.dw_developer_name = (values.dw_developer as RoleOwnerValue | undefined)?.name ?? undefined;
       // 口径：弹窗输入优先（用户可接受模板默认或自行补充）；非法 JSON 拦截，避免静默创建"空心/错乱"指标
       const rawDef = values.definition_json ? String(values.definition_json).trim() : "";
       if (rawDef) {
@@ -344,6 +392,24 @@ export function Templates() {
       time_semantics: tpl.time_semantics ?? "PERIOD",
       freshness: tpl.freshness ?? "T1",
       dw_layer: tpl.dw_layer ?? "DWS",
+      // OneData 预设（方案A）：原子→逻辑度量；派生→挂载实体；治理与服务模式默认值
+      measure_id: tpl.measure_id ?? undefined,
+      mount_source_table: tpl.mount?.source_table ?? "",
+      mount_source_column: tpl.mount?.source_column ?? "",
+      mount_granularity: tpl.mount?.granularity ?? "",
+      mount_default_period: tpl.mount?.default_period ?? undefined,
+      serving_mode: tpl.serving_mode ?? "BATCH_ONLY",
+      additivity: tpl.additivity ?? "ADDITIVE",
+      // 口径三方责任预设（模板作者预设的默认责任方，实例化时可改）
+      product_owner: tpl.product_owner_id || tpl.product_owner_name
+        ? { id: tpl.product_owner_id, name: tpl.product_owner_name }
+        : undefined,
+      tech_owner: tpl.tech_owner_id || tpl.tech_owner_name
+        ? { id: tpl.tech_owner_id, name: tpl.tech_owner_name }
+        : undefined,
+      dw_developer: tpl.dw_developer_id || tpl.dw_developer_name
+        ? { id: tpl.dw_developer_id, name: tpl.dw_developer_name }
+        : undefined,
       // 口径预填模板默认（若模板未定义口径则为空，用户可在弹窗内补充——避免实例化出"空心"指标无血缘）
       definition_json: tpl.defaults_json?.definition_json
         ? JSON.stringify(tpl.defaults_json.definition_json, null, 2)
@@ -370,6 +436,22 @@ export function Templates() {
       serving_mode: tpl.serving_mode,
       additivity: tpl.additivity,
       metric_tier: tpl.metric_tier,
+      // OneData 预设（方案A）：逻辑度量/挂载/三方责任回填
+      measure_id: tpl.measure_id ?? undefined,
+      mount_source_table: tpl.mount?.source_table ?? "",
+      mount_source_column: tpl.mount?.source_column ?? "",
+      mount_granularity: tpl.mount?.granularity ?? "",
+      mount_default_period: tpl.mount?.default_period ?? undefined,
+      mount_domain: tpl.mount?.domain ?? tpl.domain,
+      product_owner: tpl.product_owner_id || tpl.product_owner_name
+        ? { id: tpl.product_owner_id, name: tpl.product_owner_name }
+        : undefined,
+      tech_owner: tpl.tech_owner_id || tpl.tech_owner_name
+        ? { id: tpl.tech_owner_id, name: tpl.tech_owner_name }
+        : undefined,
+      dw_developer: tpl.dw_developer_id || tpl.dw_developer_name
+        ? { id: tpl.dw_developer_id, name: tpl.dw_developer_name }
+        : undefined,
       required_fields: tpl.required_fields ?? [],
       owner_id: tpl.owner_id,
       is_active: tpl.is_active,
@@ -396,6 +478,44 @@ export function Templates() {
         "metric_tier", "owner_id", "is_active",
       ]) {
         if (values[key] !== undefined && values[key] !== null) payload[key] = values[key];
+      }
+      // OneData 预设（方案A）：逻辑度量预设局部更新（传 null 清除）
+      if (values.measure_id !== undefined) {
+        payload.measure_id = values.measure_id ? Number(values.measure_id) : null;
+      }
+      // OneData 挂载预设：仅当挂载字段被编辑时提交——派生且三项必填齐全 → 落 mount；
+      // 否则（清空/切非派生）→ 传 null 清除预设
+      if (
+        values.mount_source_table !== undefined ||
+        values.mount_source_column !== undefined ||
+        values.mount_granularity !== undefined ||
+        values.mount_default_period !== undefined
+      ) {
+        const ms = String(values.mount_source_table ?? "").trim();
+        const mc = String(values.mount_source_column ?? "").trim();
+        const mg = String(values.mount_granularity ?? "").trim();
+        if (String(values.type) === "derived" && ms && mc && mg) {
+          payload.mount = {
+            source_table: ms,
+            source_column: mc,
+            granularity: mg,
+            default_period: String(values.mount_default_period ?? "") || null,
+            domain: String(values.mount_domain || editTpl.domain || ""),
+          };
+        } else {
+          payload.mount = null;
+        }
+      }
+      // 口径三方责任预设（RoleOwnerSelect 组合值拆分：id 平台用户 / name 外部人员兜底）
+      const ownerKeys: Array<{ formKey: string; idKey: string; nameKey: string }> = [
+        { formKey: "product_owner", idKey: "product_owner_id", nameKey: "product_owner_name" },
+        { formKey: "tech_owner", idKey: "tech_owner_id", nameKey: "tech_owner_name" },
+        { formKey: "dw_developer", idKey: "dw_developer_id", nameKey: "dw_developer_name" },
+      ];
+      for (const { formKey, idKey, nameKey } of ownerKeys) {
+        const v = values[formKey] as RoleOwnerValue | undefined;
+        payload[idKey] = v?.id ?? null;
+        payload[nameKey] = v?.name ?? null;
       }
       // required_fields（多选 tag）：空数组合法（清空必填约束）
       if (values.required_fields !== undefined) {
@@ -625,6 +745,61 @@ export function Templates() {
             <Form.Item name="type" label="类型" style={{ width: 240 }}>
               <Select options={["atomic", "derived", "composite"].map((v) => ({ value: v, label: METRIC_TYPE_LABEL[v] ?? v }))} />
             </Form.Item>
+            {/* OneData 预设（方案A）：按类型条件渲染——原子→逻辑度量；派生→挂载实体 */}
+            <Form.Item noStyle shouldUpdate={(prev, cur) => prev.type !== cur.type}>
+              {({ getFieldValue }) =>
+                getFieldValue("type") === "atomic" ? (
+                  <Form.Item
+                    name="measure_id"
+                    label="逻辑度量（OneData 原子层）"
+                    extra={
+                      <span className="muted" style={{ fontSize: 12 }}>
+                        原子指标 = 逻辑度量 + 聚合方式；度量格式/单位/小数位实例化时继承
+                      </span>
+                    }
+                    style={{ width: "100%", marginBottom: 8 }}
+                  >
+                    <Select
+                      showSearch
+                      allowClear
+                      placeholder="选择或搜索逻辑度量（仅已发布可选，如 支付金额 pay_amt）"
+                      optionFilterProp="label"
+                      options={measureOptions.map((o) => ({ value: o.value, label: o.label }))}
+                    />
+                  </Form.Item>
+                ) : getFieldValue("type") === "derived" ? (
+                  <Form.Item
+                    label="挂载实体（指标的家，OneData 挂载层）"
+                    style={{ width: "100%", marginBottom: 8 }}
+                    extra={
+                      <span className="muted" style={{ fontSize: 12 }}>
+                        派生指标计算结果的落地表/粒度——服务端自动落 metric_mount 并回填粒度
+                      </span>
+                    }
+                  >
+                    <Space wrap>
+                      <Form.Item name="mount_source_table" noStyle>
+                        <Input placeholder="源表（如 dwd.sales_detail）" style={{ width: 220 }} maxLength={255} />
+                      </Form.Item>
+                      <Form.Item name="mount_source_column" noStyle>
+                        <Input placeholder="度量列" style={{ width: 140 }} maxLength={255} />
+                      </Form.Item>
+                      <Form.Item name="mount_granularity" noStyle>
+                        <Input placeholder="粒度（如 日/月）" style={{ width: 120 }} maxLength={64} />
+                      </Form.Item>
+                      <Form.Item name="mount_default_period" noStyle>
+                        <Select
+                          allowClear
+                          placeholder="默认周期"
+                          style={{ width: 110 }}
+                          options={["day", "week", "month", "quarter", "year"].map((v) => ({ value: v, label: v }))}
+                        />
+                      </Form.Item>
+                    </Space>
+                  </Form.Item>
+                ) : null
+              }
+            </Form.Item>
             <Form.Item name="granularity" label="粒度" rules={[{ required: true, message: "请选择粒度" }]} style={{ width: 240 }}>
               <Select
                 options={granularityOptions.length ? granularityOptions : undefined}
@@ -653,6 +828,12 @@ export function Templates() {
             <Form.Item name="dw_layer" label="数仓层" rules={[{ required: true, message: "请选择数仓层" }]} style={{ width: 240 }}>
               <Select options={["ODS", "DWD", "DWS", "ADS", "DM"].map((v) => ({ value: v, label: DW_LAYER_LABEL[v] ?? v }))} />
             </Form.Item>
+            <Form.Item name="serving_mode" label="服务模式" style={{ width: 240 }}>
+              <Select options={["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"].map((v) => ({ value: v }))} />
+            </Form.Item>
+            <Form.Item name="additivity" label="可加性" style={{ width: 240 }}>
+              <Select options={["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"].map((v) => ({ value: v }))} />
+            </Form.Item>
             <Form.Item
               name="definition_json"
               label="口径定义（JSON，可留空用模板默认）"
@@ -664,6 +845,19 @@ export function Templates() {
                 className="mono"
               />
             </Form.Item>
+            {/* 口径三方责任（可选）：模板预设的默认责任方，实例化时可改 */}
+            <Divider plain style={{ margin: "8px 0" }}>口径三方责任（可选，默认沿用模板预设）</Divider>
+            <Space wrap>
+              <Form.Item name="product_owner" label="产品需求方" extra="口径业务语义提出人" style={{ width: 240, marginBottom: 8 }}>
+                <RoleOwnerSelect users={users} placeholder="选择平台用户或输入外部人员" />
+              </Form.Item>
+              <Form.Item name="tech_owner" label="技术方" extra="口径 ETL/SQL 实现人" style={{ width: 240, marginBottom: 8 }}>
+                <RoleOwnerSelect users={users} placeholder="选择平台用户或输入外部人员" />
+              </Form.Item>
+              <Form.Item name="dw_developer" label="数仓开发" extra="数仓建模/血缘维护人" style={{ width: 240, marginBottom: 8 }}>
+                <RoleOwnerSelect users={users} placeholder="选择平台用户或输入外部人员" />
+              </Form.Item>
+            </Space>
           </Space>
         </Form>
       </Modal>
@@ -690,6 +884,26 @@ export function Templates() {
               <Descriptions.Item label="状态">{detailTpl.is_active ? <Tag color="green">启用</Tag> : <Tag>停用</Tag>}</Descriptions.Item>
               <Descriptions.Item label="必填字段" span={2}>
                 {detailTpl.required_fields?.length ? detailTpl.required_fields.join("、") : <span className="muted">—</span>}
+              </Descriptions.Item>
+              {/* OneData 预设（方案A）：逻辑度量 / 挂载实体 / 三方责任 */}
+              <Descriptions.Item label="逻辑度量预设">
+                {detailTpl.measure_id
+                  ? measureOptions.find((o) => o.value === detailTpl.measure_id)?.measure.name
+                    ? `${measureOptions.find((o) => o.value === detailTpl.measure_id)?.measure.name} (${measureOptions.find((o) => o.value === detailTpl.measure_id)?.measure.measure_code})`
+                    : `#${detailTpl.measure_id}`
+                  : <span className="muted">—</span>}
+              </Descriptions.Item>
+              <Descriptions.Item label="挂载实体预设">
+                {detailTpl.mount ? `${detailTpl.mount.source_table} / ${detailTpl.mount.source_column} / ${detailTpl.mount.granularity}` : <span className="muted">—</span>}
+              </Descriptions.Item>
+              <Descriptions.Item label="产品需求方" span={2}>
+                {detailTpl.product_owner_name || (detailTpl.product_owner_id ? `用户 #${detailTpl.product_owner_id}` : <span className="muted">—</span>)}
+              </Descriptions.Item>
+              <Descriptions.Item label="技术方" span={2}>
+                {detailTpl.tech_owner_name || (detailTpl.tech_owner_id ? `用户 #${detailTpl.tech_owner_id}` : <span className="muted">—</span>)}
+              </Descriptions.Item>
+              <Descriptions.Item label="数仓开发" span={2}>
+                {detailTpl.dw_developer_name || (detailTpl.dw_developer_id ? `用户 #${detailTpl.dw_developer_id}` : <span className="muted">—</span>)}
               </Descriptions.Item>
               <Descriptions.Item label="描述" span={2}>
                 {detailTpl.description || <span className="muted">—</span>}
@@ -741,6 +955,56 @@ export function Templates() {
             <Form.Item name="type" label="指标类型预设" style={{ width: 196 }}>
               <Select allowClear options={["atomic", "derived", "composite"].map((v) => ({ value: v, label: METRIC_TYPE_LABEL[v] ?? v }))} placeholder="（不预设）" />
             </Form.Item>
+            {/* OneData 预设（方案A）：按类型条件渲染——原子→逻辑度量；派生→挂载实体 */}
+            <Form.Item noStyle shouldUpdate={(prev, cur) => prev.type !== cur.type}>
+              {({ getFieldValue }) =>
+                getFieldValue("type") === "atomic" ? (
+                  <Form.Item
+                    name="measure_id"
+                    label="逻辑度量预设（OneData 原子层）"
+                    extra={
+                      <span className="muted" style={{ fontSize: 12 }}>
+                        仅已发布度量可选；实例化时继承度量格式/单位/小数位
+                      </span>
+                    }
+                    style={{ width: "100%", marginBottom: 8 }}
+                  >
+                    <Select
+                      showSearch
+                      allowClear
+                      optionFilterProp="label"
+                      placeholder="选择逻辑度量（仅已发布可选）"
+                      options={measureOptions.map((o) => ({ value: o.value, label: o.label }))}
+                    />
+                  </Form.Item>
+                ) : getFieldValue("type") === "derived" ? (
+                  <Form.Item label="挂载实体预设（OneData 挂载层）" style={{ width: "100%", marginBottom: 8 }}>
+                    <Space wrap>
+                      <Form.Item name="mount_source_table" noStyle>
+                        <Input placeholder="源表（如 dwd.sales_detail）" style={{ width: 220 }} maxLength={255} />
+                      </Form.Item>
+                      <Form.Item name="mount_source_column" noStyle>
+                        <Input placeholder="度量列" style={{ width: 140 }} maxLength={255} />
+                      </Form.Item>
+                      <Form.Item name="mount_granularity" noStyle>
+                        <Input placeholder="粒度（如 日/月）" style={{ width: 120 }} maxLength={64} />
+                      </Form.Item>
+                      <Form.Item name="mount_default_period" noStyle>
+                        <Select
+                          allowClear
+                          placeholder="默认周期"
+                          style={{ width: 110 }}
+                          options={["day", "week", "month", "quarter", "year"].map((v) => ({ value: v, label: v }))}
+                        />
+                      </Form.Item>
+                      <Form.Item name="mount_domain" noStyle>
+                        <Input placeholder="挂载域（缺省用模板域）" style={{ width: 160 }} maxLength={64} />
+                      </Form.Item>
+                    </Space>
+                  </Form.Item>
+                ) : null
+              }
+            </Form.Item>
             <Form.Item name="granularity" label="粒度预设" style={{ width: 196 }}>
               <Select allowClear options={granularityOptions} showSearch placeholder="（不预设）" />
             </Form.Item>
@@ -760,7 +1024,7 @@ export function Templates() {
               <Select allowClear options={["ODS", "DWD", "DWS", "ADS", "DM"].map((v) => ({ value: v, label: DW_LAYER_LABEL[v] ?? v }))} placeholder="（不预设）" />
             </Form.Item>
             <Form.Item name="serving_mode" label="服务模式预设" style={{ width: 196 }}>
-              <Select allowClear options={["BATCH_ONLY", "REALTIME"].map((v) => ({ value: v }))} placeholder="（不预设）" />
+              <Select allowClear options={["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"].map((v) => ({ value: v }))} placeholder="（不预设）" />
             </Form.Item>
             <Form.Item name="additivity" label="可加性预设" style={{ width: 196 }}>
               <Select allowClear options={["ADDITIVE", "NON_ADDITIVE", "SEMI_ADDITIVE"].map((v) => ({ value: v }))} placeholder="（不预设）" />
@@ -788,6 +1052,19 @@ export function Templates() {
             >
               <Input.TextArea rows={3} placeholder='{"expression": "sum(amount)", "source_tables": ["dwd_order_di"]}' className="mono" />
             </Form.Item>
+            {/* 口径三方责任预设（可选）：实例化时作为指标默认责任方 */}
+            <Divider plain style={{ margin: "8px 0" }}>口径三方责任预设（可选）</Divider>
+            <Space wrap>
+              <Form.Item name="product_owner" label="产品需求方" extra="口径业务语义提出人" style={{ width: 280, marginBottom: 8 }}>
+                <RoleOwnerSelect users={users} placeholder="选择平台用户或输入外部人员" />
+              </Form.Item>
+              <Form.Item name="tech_owner" label="技术方" extra="口径 ETL/SQL 实现人" style={{ width: 280, marginBottom: 8 }}>
+                <RoleOwnerSelect users={users} placeholder="选择平台用户或输入外部人员" />
+              </Form.Item>
+              <Form.Item name="dw_developer" label="数仓开发" extra="数仓建模/血缘维护人" style={{ width: 280, marginBottom: 8 }}>
+                <RoleOwnerSelect users={users} placeholder="选择平台用户或输入外部人员" />
+              </Form.Item>
+            </Space>
           </Space>
         </Form>
       </Modal>

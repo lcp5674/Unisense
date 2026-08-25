@@ -188,6 +188,55 @@ def test_template_create_owner_id_validation():
         MetricTemplateCreateRequest(name="GMV 模板", domain="fin", owner_id=0)
 
 
+def test_template_create_onedata_presets():
+    """方案A：模板 OneData 预设字段（measure_id/mount/三方责任）创建请求。"""
+    from app.services.semantic.schemas import MetricTemplateCreateRequest
+
+    req = MetricTemplateCreateRequest(
+        name="派生 GMV 模板",
+        domain="sales",
+        type="derived",
+        measure_id=5,
+        mount={
+            "source_table": "dwd.sales_detail",
+            "source_column": "amount",
+            "granularity": "日",
+            "default_period": "day",
+            "domain": "sales",
+        },
+        product_owner_id=2,
+        product_owner_name="外部产品",
+        serving_mode="REALTIME_ONLY",
+    )
+    assert req.measure_id == 5
+    # dict → MetricMountInput 内嵌
+    assert req.mount.source_table == "dwd.sales_detail"
+    assert req.product_owner_id == 2
+    assert req.product_owner_name == "外部产品"
+
+
+def test_template_enum_literals_aligned_with_metric_create():
+    """方案A：模板预设枚举与 MetricCreateRequest 同源——非法值（REALTIME）被拒。
+
+    修复前模板 serving_mode 为宽松 str，模板作者可预设 "REALTIME"，实例化时撞
+    MetricCreateRequest Literal 校验 422。收严后创建/编辑即拦截，从源头消除漂移。
+    """
+    from app.services.semantic.schemas import (
+        MetricTemplateCreateRequest,
+        MetricTemplateUpdateRequest,
+    )
+
+    with pytest.raises(ValidationError):
+        MetricTemplateCreateRequest(name="x", domain="s", serving_mode="REALTIME")
+    with pytest.raises(ValidationError):
+        MetricTemplateCreateRequest(name="x", domain="s", aggregation="FOO")
+    with pytest.raises(ValidationError):
+        MetricTemplateUpdateRequest(serving_mode="REALTIME")
+    # 合法值通过
+    MetricTemplateCreateRequest(name="x", domain="s", serving_mode="REALTIME_ONLY")
+    MetricTemplateUpdateRequest(additivity="SEMI_ADDITIVE")
+
+
 # ---- 指标类型化口径校验（PRD 4.5：三类指标生产配置差异）----
 
 

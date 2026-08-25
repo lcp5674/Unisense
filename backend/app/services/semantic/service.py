@@ -183,6 +183,11 @@ class MetricService(BaseService):
         """
         super().__init__(db)
         self._repo = MetricRepository(db)
+        # OneData 原子层：逻辑度量目录仓储（原子指标 measure_id 存在性/状态校验与单位继承）。
+        # 与 self._repo 同模式——构造时捕获，单元测试直接替换实例即可 mock。
+        from app.services.measure_catalog.repository import MeasureCatalogRepository
+
+        self._measure_repo = MeasureCatalogRepository(db)
         self._cache = (
             cache
             if cache is not None
@@ -424,7 +429,25 @@ class MetricService(BaseService):
         # 3. 校验字典字段值存在于 SystemDict（对齐 FR-009）
         await self._validate_dict_fields(request)
 
-        # 3a. 命名规范硬卡（TD §12.3 强化）：指标名须命中受控词根，否则拦截
+        # 3a. OneData 原子层校验：原子指标关联的逻辑度量必须存在且已发布
+        # （防 FK 500——传不存在 measure_id 时 flush 抛 IntegrityError → 500；
+        #  防草稿/软删度量被新指标引用——度量是原子指标的权威继承源，须 PUBLISHED 才可用）。
+        measure: Any = None
+        if request.type == "atomic" and request.measure_id is not None:
+            measure = await self._measure_repo.get_by_id(request.measure_id)
+            if measure is None:
+                raise ValidationError(
+                    f"关联的逻辑度量不存在: {request.measure_id}",
+                    error_code="MEASURE_NOT_FOUND",
+                )
+            if measure.status != "PUBLISHED":
+                raise ValidationError(
+                    "关联的逻辑度量未发布"
+                    f"（当前 {measure.status}），不可用于新指标: {request.measure_id}",
+                    error_code="MEASURE_NOT_PUBLISHED",
+                )
+
+        # 3b. 命名规范硬卡（TD §12.3 强化）：指标名须命中受控词根，否则拦截
         # 裸词/无意义命名；维度类指标（metric_type="dimension"）豁免。
         from app.services.semantic.conflict_precheck import ConflictPrechecker
 
@@ -434,16 +457,13 @@ class MetricService(BaseService):
         if not valid_name:
             raise ValidationError(name_error, error_code="METRIC_NAME_NO_MORPHEME")
 
-        # 3a. OneData 类型化字段兜底（界限文档 §2.3）：原子指标 = 逻辑度量 + 聚合方式，
-        # 不绑物理表——单位由逻辑度量 default_unit 继承；派生/复合缺省用默认物理属性。
+        # 3c. OneData 类型化字段兜底（界限文档 §2.3）：原子指标 = 逻辑度量 + 聚合方式，
+        # 不绑物理表——单位由逻辑度量 default_unit 继承（measure 已在 3a 校验并复用）；
+        # 派生/复合缺省用默认物理属性。
         # 物理属性（time_semantics/freshness/dw_layer）对原子属挂载/数据语义层，缺省取默认。
         if request.unit is None:
-            if request.type == "atomic" and request.measure_id is not None:
-                from app.services.measure_catalog.repository import MeasureCatalogRepository
-
-                measure = await MeasureCatalogRepository(self._db).get_by_id(request.measure_id)
-                if measure is not None and measure.default_unit:
-                    request.unit = measure.default_unit
+            if request.type == "atomic" and measure is not None and measure.default_unit:
+                request.unit = measure.default_unit
             if request.unit is None:
                 request.unit = "cnt"
         if request.time_semantics is None:
@@ -453,7 +473,7 @@ class MetricService(BaseService):
         if request.dw_layer is None:
             request.dw_layer = "DWD"
 
-        # 3b. 口径完整性：把 top-level 的 source_table/measure_column 合入 definition_json。
+        # 3d. 口径完整性：把 top-level 的 source_table/measure_column 合入 definition_json。
         # 血缘差异同步（register_metric_from_definition）读 definition.source_table /
         # measure_column 建「指标↔落地表」边——但批量注册/模板实例化等后端构造路径此前
         # 不写这两个键，导致请求传了 source_table 却无血缘边（与前端单条 buildDefinitionJson
