@@ -204,3 +204,119 @@ async def test_batch_register_from_sql_missing_domain_422(
         json={"candidates": [dict(_ATOMIC_CANDIDATE)]},
     )
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------- 注入守卫豁免
+
+
+async def test_parse_sql_batch_etl_sql_with_injection_features_200(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """大段 ETL SQL（-- 注释 / /* */ 块注释 / UNION SELECT / 多语句）是合法输入，
+    注入守卫须对 sql 字段豁免 → 200（对齐 /lineage/parse 模式）。"""
+    etl_sql = (
+        "DROP TABLE IF EXISTS tmp_gmv_stage;\n"
+        "CREATE TABLE tmp_gmv_stage AS\n"
+        "SELECT dt, region, SUM(amount) AS gmv /* +SET_VAR(enable_vectorized_engine=false) */\n"
+        "FROM dwd_order_di WHERE dt >= '2026-01-01' -- 取本年\n"
+        "GROUP BY dt, region;\n"
+        "INSERT INTO dws_gmv_daily SELECT dt, region, gmv FROM tmp_gmv_stage\n"
+        "UNION ALL SELECT dt, region, gmv FROM ods.archive_gmv"
+    )
+    with (
+        patch(
+            "app.services.semantic.sql_split.infer_sql_batch",
+            new=AsyncMock(
+                return_value={
+                    "statements": [],
+                    "candidates": [],
+                    "skipped": [],
+                    "domain": {"code": None, "status": "none", "confidence": None},
+                }
+            ),
+        ) as m,
+        patch("app.api.metrics.write_audit", new=AsyncMock()),
+    ):
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/parse-sql-batch",
+            json={"sql": etl_sql, "split_mode": "semicolon"},
+        )
+    assert resp.status_code == 200
+    m.assert_awaited_once()
+
+
+async def test_parse_sql_batch_custom_rules_with_comment_delimiters_200(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """custom_rules 承载用户自定义切分规则（可能含 -- / 正则），须豁免 → 200。"""
+    with (
+        patch(
+            "app.services.semantic.sql_split.infer_sql_batch",
+            new=AsyncMock(
+                return_value={
+                    "statements": [],
+                    "candidates": [],
+                    "skipped": [],
+                    "domain": {"code": None, "status": "none", "confidence": None},
+                }
+            ),
+        ) as m,
+        patch("app.api.metrics.write_audit", new=AsyncMock()),
+    ):
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/parse-sql-batch",
+            json={
+                "sql": "SELECT 1",
+                "split_mode": "custom",
+                "custom_rules": {
+                    "delimiters": ["^--.*$"],
+                    "start_markers": ["/* begin */"],
+                },
+            },
+        )
+    assert resp.status_code == 200
+    m.assert_awaited_once()
+
+
+async def test_batch_register_from_sql_definition_sql_exempted_200(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """候选 definition_json.sql 承载 SQL 口径（含注入特征）→ 路径豁免 → 200。"""
+    cand = dict(_ATOMIC_CANDIDATE)
+    cand["type"] = "composite"
+    cand["measure_column"] = None
+    cand["aggregation"] = None
+    cand["definition_json"] = {
+        "sql": (
+            "SELECT dt, SUM(a) / SUM(b) AS ratio FROM dwd_fact_di -- 比值\n"
+            "UNION ALL SELECT dt, 0 FROM ods.legacy"
+        ),
+        "dependencies": ["sales_order_amount_day"],
+    }
+    cand["dependencies"] = ["sales_order_amount_day"]
+    with (
+        patch("app.api.metrics.MetricService") as mock_svc,
+        patch("app.api.metrics.write_audit", new=AsyncMock()),
+    ):
+        mock_svc.return_value.batch_register_from_sql = AsyncMock(
+            return_value={"batch_id": "b", "candidates": []}
+        )
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/batch-register-from-sql",
+            json={"domain": "sales", "candidates": [cand]},
+        )
+    assert resp.status_code == 200
+
+
+async def test_batch_register_from_sql_name_injection_still_blocked_400(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """豁免仅覆盖 definition_json 子树；候选 name 字段注入仍应被拦截 → 400。"""
+    cand = dict(_ATOMIC_CANDIDATE)
+    cand["name"] = "x'; DROP TABLE users--"
+    resp = await metrics_client.post(
+        "/api/v1/metric-definitions/batch-register-from-sql",
+        json={"domain": "sales", "candidates": [cand]},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "INJECTION_DETECTED"

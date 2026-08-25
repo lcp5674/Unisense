@@ -16,6 +16,7 @@ from app.core.guard import (
     _is_suspicious,
     guard_against_injection,
     guard_against_injection_exempt,
+    guard_against_injection_exempt_paths,
 )
 
 
@@ -212,3 +213,124 @@ class TestGuardAgainstInjectionExempt:
         guard = guard_against_injection_exempt("dialect")
         with pytest.raises(BusinessError):
             await guard(self._request({"sql": "-- comment"}))
+
+
+class TestGuardAgainstInjectionExemptPaths:
+    """guard_against_injection_exempt_paths 嵌套路径豁免（SQL 批量注册候选口径场景）。"""
+
+    @staticmethod
+    def _request(body: dict | None = None, query: dict | None = None) -> MagicMock:
+        request = MagicMock()
+        request.query_params = query or {}
+        request.method = "POST"
+        request.json = AsyncMock(return_value=body)
+        return request
+
+    def test_parse_path_syntax(self) -> None:
+        from app.core.guard import _parse_exempt_path
+
+        assert _parse_exempt_path("candidates[].definition_json") == (
+            "candidates",
+            "[*]",
+            "definition_json",
+        )
+        assert _parse_exempt_path("sql") == ("sql",)
+        assert _parse_exempt_path("a[].b[].c") == ("a", "[*]", "b", "[*]", "c")
+        with pytest.raises(ValueError):
+            _parse_exempt_path("a..b")
+
+    async def test_nested_sql_subtree_exempted(self) -> None:
+        """candidates[].definition_json 子树含合法 ETL SQL（-- 注释/UNION/多语句）应放行。"""
+        guard = guard_against_injection_exempt_paths("candidates[].definition_json")
+        await guard(
+            self._request(
+                {
+                    "domain": "sales",
+                    "candidates": [
+                        {
+                            "key": "0:composite",
+                            "metric_code": "s_gmv_day",
+                            "name": "GMV",
+                            "definition_json": {
+                                "sql": (
+                                    "SELECT dt, SUM(amount) FROM dwd_order_di -- 取当日\n"
+                                    "UNION ALL SELECT dt, amount FROM ods.archive;\n"
+                                    "/* 上日全量 */ SELECT dt, SUM(amount) FROM dwd_order_di"
+                                )
+                            },
+                        },
+                        {
+                            "key": "1:amount",
+                            "metric_code": "s_amount_day",
+                            "name": "金额",
+                            "definition_json": {"expression": "sum(amount)"},
+                        },
+                    ],
+                }
+            )
+        )  # 不应抛异常
+
+    async def test_sibling_fields_still_scanned(self) -> None:
+        """豁免 definition_json 后，候选同层字段（name）注入仍应拦截。"""
+        guard = guard_against_injection_exempt_paths("candidates[].definition_json")
+        with pytest.raises(BusinessError):
+            await guard(
+                self._request(
+                    {
+                        "domain": "sales",
+                        "candidates": [
+                            {
+                                "key": "x",
+                                "metric_code": "s_a_day",
+                                "name": "x'; DROP TABLE users--",
+                                "definition_json": {"sql": "SELECT 1"},
+                            }
+                        ],
+                    }
+                )
+            )
+
+    async def test_unrelated_nested_key_not_auto_exempted(self) -> None:
+        """非豁免路径的嵌套同名键不自动豁免（保守：data.sql 仍拦截）。"""
+        guard = guard_against_injection_exempt_paths("candidates[].definition_json")
+        with pytest.raises(BusinessError):
+            await guard(self._request({"data": {"definition_json": {"sql": "-- hidden"}}}))
+
+    async def test_other_fields_still_scanned(self) -> None:
+        """顶层非豁免字段（dialect 含注入）仍拦截。"""
+        guard = guard_against_injection_exempt_paths("candidates[].definition_json")
+        with pytest.raises(BusinessError):
+            await guard(
+                self._request(
+                    {
+                        "candidates": [{"definition_json": {"sql": "SELECT 1"}}],
+                        "dialect": "hive'; drop table users--",
+                    }
+                )
+            )
+
+    async def test_query_params_still_blocked(self) -> None:
+        """query 参数不参与路径豁免，命中仍拦截。"""
+        guard = guard_against_injection_exempt_paths("candidates[].definition_json")
+        with pytest.raises(BusinessError):
+            await guard(
+                self._request(
+                    body={"candidates": [{"definition_json": {"sql": "SELECT 1"}}]},
+                    query={"node": "' OR 1=1 -- "},
+                )
+            )
+
+    async def test_multiple_paths(self) -> None:
+        """多个豁免路径同时生效。"""
+        guard = guard_against_injection_exempt_paths(
+            "candidates[].definition_json",
+            "statements[].sql",
+        )
+        await guard(
+            self._request(
+                {
+                    "statements": [{"sql": "SELECT 1 -- c", "measure_count": 1}],
+                    "candidates": [{"definition_json": {"expression": "sum(1)"}}],
+                }
+            )
+        )  # 不应抛异常

@@ -27,7 +27,11 @@ from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
 from app.core.exceptions import ConflictError
-from app.core.guard import guard_against_injection
+from app.core.guard import (
+    guard_against_injection,
+    guard_against_injection_exempt,
+    guard_against_injection_exempt_paths,
+)
 from app.core.logging import get_logger
 from app.db.mysql import get_db_session
 from app.db.redis import get_redis
@@ -149,6 +153,27 @@ _SENSITIVE_ROLES = ("platform_admin", "domain_admin", "compliance_officer")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 # 写端点统一 RBAC + 注入守卫（对齐 semantic.py 的 _WRITE_DEPS 模式）
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
+
+# ---- SQL 文本承载端点：注入守卫按字段/路径豁免 ----
+# 下述端点的合法输入就是原始 SQL 文本（用户粘贴的指标 SQL/口径表达式），仅经
+# sqlglot 纯函数解析与落库存储（不执行、不拼接进任何 DB 查询），注入正则反而会
+# 误伤合法 ETL SQL（-- 行注释 / /* */ 块注释 / UNION SELECT / 多语句），故对承载
+# SQL 的字段/子树豁免扫描，对齐 /lineage/parse 的 sql 字段豁免（lineage.py:58）。
+# 其余字段（metric_code/name/key 等）与 query 参数仍全量扫描，纵深防御不削弱。
+_SQL_PARSE_DEPS = [
+    Depends(require_roles(*_WRITE_ROLES)),
+    Depends(guard_against_injection_exempt("sql", "custom_rules")),
+]
+_SQL_SUGGEST_DEPS = [
+    Depends(require_roles(*_WRITE_ROLES)),
+    Depends(guard_against_injection_exempt("sql")),
+]
+# batch-register 候选的 SQL 在嵌套层（candidates[].definition_json 承载 sql/expression），
+# 顶层豁免无效——用路径豁免精确跳过该子树（列表任意元素 + 点号路径）。
+_SQL_BATCH_REGISTER_DEPS = [
+    Depends(require_roles(*_WRITE_ROLES)),
+    Depends(guard_against_injection_exempt_paths("candidates[].definition_json")),
+]
 
 
 @router.post(
@@ -1489,7 +1514,8 @@ async def batch_register_metrics(
     # LLM 额度防护：该端点触发 LLM 命名（不可用时降级规则），是"注册指标"的创建辅助。
     # 原挂 _READ_DEPS——viewer 等只读角色可任意调用耗尽 LLM 额度，收紧为写角色
     # （platform_admin/domain_admin/metric_owner，与注册能力对齐）。
-    dependencies=_WRITE_DEPS,
+    # sql 字段（"指标定义 SQL"）是待解析的 SQL 文本本身 → 豁免注入扫描。
+    dependencies=_SQL_SUGGEST_DEPS,
 )
 async def auto_suggest_metric(
     request: MetricAutoSuggestRequest,
@@ -1662,7 +1688,8 @@ async def auto_suggest_metric(
     summary="业务域建议（FR-010 域建议增强）",
     # LLM 额度防护：该端点可能触发 LLM 推断域（表未被采集时），对齐 auto-suggest
     # 收紧为写角色（platform_admin/domain_admin/metric_owner）。
-    dependencies=_WRITE_DEPS,
+    # sql 字段是待解析的 SQL 文本本身 → 豁免注入扫描（见 _SQL_SUGGEST_DEPS）。
+    dependencies=_SQL_SUGGEST_DEPS,
 )
 async def suggest_domain_metric(
     request: MetricSuggestDomainRequest,
@@ -1691,8 +1718,9 @@ async def suggest_domain_metric(
     "/parse-sql-batch",
     response_model=ApiResponse[Any],
     summary="SQL 批量解析候选（场景A/B：多语句切分 + 多度量拆分）",
-    # LLM 额度防护：可能触发域建议/自定义分段 LLM，对齐 auto-suggest 收紧为写角色
-    dependencies=_WRITE_DEPS,
+    # LLM 额度防护：可能触发域建议/自定义分段 LLM，对齐 auto-suggest 收紧为写角色。
+    # sql/custom_rules 承载待解析 SQL 文本与切分规则 → 豁免注入扫描（见 _SQL_PARSE_DEPS）。
+    dependencies=_SQL_PARSE_DEPS,
 )
 async def parse_sql_batch_metrics(
     request: MetricSqlParseRequest,
@@ -1737,7 +1765,8 @@ async def parse_sql_batch_metrics(
     "/batch-register-from-sql",
     response_model=ApiResponse[Any],
     summary="从 SQL 解析候选批量注册指标（场景A/B）",
-    dependencies=_WRITE_DEPS,
+    # 候选 definition_json 子树承载 SQL 口径 → 路径豁免注入扫描（见 _SQL_BATCH_REGISTER_DEPS）。
+    dependencies=_SQL_BATCH_REGISTER_DEPS,
 )
 async def batch_register_from_sql_metrics(
     request: MetricSqlBatchRegisterRequest,
