@@ -133,16 +133,24 @@ async def run_batch(
             await run(unit)
             results.append(BatchItemResult(code=code, ok=True))
         except SQLAlchemyError:
-            # DB 级异常：会话污染，后续操作/commit 必失败 → 回滚 + 剩余项标记失败
+            # DB 级异常：会话污染，后续操作/commit 必失败 → 回滚 + 剩余项标记失败。
+            # **结果失真修复**：整会话回滚会把此前已 flush 未 commit 的成功项一并丢弃——
+            # 若不改标失败，响应/审计会宣称「N 项成功」而库中实际未落（提交/通过类批量
+            # 的严重失真）。故重建已执行项为失败（pydantic 模型不可变，需重建列表）。
             await db.rollback()
+            rolled_back = [
+                BatchItemResult(code=r.code, ok=False, message=abort_message)
+                for r in results
+            ]
             for rest in units[len(results):]:
-                results.append(
+                rolled_back.append(
                     BatchItemResult(
                         code=code_of(rest),
                         ok=False,
                         message=abort_message,
                     )
                 )
+            results = rolled_back
             logger.warning(
                 "batch_aborted_on_db_error",
                 action=abort_message,

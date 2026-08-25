@@ -298,7 +298,12 @@ async def test_run_batch_business_error_continues():
 
 
 async def test_run_batch_db_error_rolls_back_and_marks_rest():
-    """SQLAlchemyError → 回滚会话 + 剩余项统一标记失败（abort_message）+ 中止。"""
+    """SQLAlchemyError → 回滚会话 + **全部已执行项改标失败**（失真修复）+ 中止。
+
+    结果失真修复：DB 级异常整会话回滚会把此前已 flush 未 commit 的成功项一并丢弃，
+    若不改标失败，响应/审计会宣称「N 项成功」而库中实际未落。修复后此前 ok 的项
+    也统一标记 abort_message 失败。
+    """
     from sqlalchemy.exc import SQLAlchemyError
 
     from app.api.batch_common import run_batch
@@ -314,13 +319,11 @@ async def test_run_batch_db_error_rolls_back_and_marks_rest():
     results = await run_batch(
         db, units=units, code_of=lambda u: u["code"], run=run, abort_message="DB 异常中止批量"
     )
-    # a 成功；b 触发 DB 异常 → b（自身）与 c（未处理）统一标记 abort_message 失败后中止
+    # a 此前成功但被整会话回滚（未落库）→ 改标失败；b 触发 DB 异常 → 自身失败；
+    # c 未处理 → 统一 abort_message 失败后中止
     assert [r.code for r in results] == ["a", "b", "c"]
-    assert results[0].ok is True
-    assert results[1].ok is False
-    assert results[2].ok is False
-    assert results[1].message == "DB 异常中止批量"
-    assert results[2].message == "DB 异常中止批量"
+    assert all(r.ok is False for r in results)
+    assert all(r.message == "DB 异常中止批量" for r in results)
     db.rollback.assert_awaited_once()
 
 
