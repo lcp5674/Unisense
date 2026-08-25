@@ -1060,10 +1060,18 @@ async def list_catalog_databases(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     source_id: str | None = None,
+    source_status: str | None = Query(
+        None,
+        pattern=r"^(active|deleted|all)$",
+        description="源状态过滤：active=仅活跃源 / deleted=仅已删源 / all=全部",
+    ),
 ) -> ApiResponse[dict[str, list[str]]]:
-    """目录去重库名列表（供前端库名筛选下拉，可随 source_id 联动）。"""
+    """目录去重库名列表（供前端库名筛选下拉，可随 source_id / source_status 联动）。"""
     svc = _svc(db)
-    return ok(data={"items": await svc.list_catalog_databases(source_id)}, trace_id=trace_id)
+    return ok(
+        data={"items": await svc.list_catalog_databases(source_id, source_status)},
+        trace_id=trace_id,
+    )
 
 
 @catalog_router.get("/description-coverage", dependencies=_READ_DEPS)

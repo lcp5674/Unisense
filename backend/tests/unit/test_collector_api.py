@@ -218,6 +218,30 @@ async def test_list_catalog_databases_returns_distinct(
     assert call_kwargs[0] == "mysql_unisense"
 
 
+async def test_list_catalog_databases_filters_by_source_status(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """GET /catalogs/databases 支持 source_status 透传（与列表默认「活跃源」对齐）。"""
+    with patch(
+        "app.api.collector.CollectorService.list_catalog_databases",
+        new_callable=AsyncMock,
+        return_value=["unisense"],
+    ) as mock_list:
+        resp = await collector_client.get("/api/v1/catalogs/databases?source_status=active")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["items"] == ["unisense"]
+    mock_list.assert_awaited_once()
+    assert mock_list.await_args.args == (None, "active")
+
+
+async def test_list_catalog_databases_rejects_invalid_source_status(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """非法的 source_status 值返回 422（pattern 校验），避免越权枚举。"""
+    resp = await collector_client.get("/api/v1/catalogs/databases?source_status=bogus")
+    assert resp.status_code == 422
+
+
 # ---- 表级业务描述 + 描述缺失统计（TD §12.1） ----
 
 

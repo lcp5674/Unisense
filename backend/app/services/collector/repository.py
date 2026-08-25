@@ -588,16 +588,29 @@ class CollectorRepository:
         )
         return {row[0]: (row[1] or row[2]) for row in res.all()}
 
-    async def list_catalog_databases(self, source_id: str | None = None) -> list[str]:
+    async def list_catalog_databases(
+        self, source_id: str | None = None, source_status: str | None = None
+    ) -> list[str]:
         """目录去重库名列表（entity_name 前缀，供前端库名筛选下拉）。
 
         - 仅统计未删除（deleted_at IS NULL）的实体；
         - 指定 source_id 时仅统计该源；
+        - source_status=active/deleted 时按源删除状态过滤（与列表默认「活跃源」
+          对齐，避免已删源的库名出现在活跃下拉中）；
         - 无前缀（无 "." 的实体，如 Kafka topic）不计入库名。
         """
         base = select(DBCatalog.entity_name).where(DBCatalog.deleted_at.is_(None))
         if source_id:
             base = base.where(DBCatalog.source_id == source_id)
+        if source_status in ("active", "deleted"):
+            # outerjoin DataSource 按源软删状态过滤：active=仅活跃源 /
+            # deleted=仅已删源；无对应 data_source 记录的行归入 active（同
+            # _list_catalogs_with_source_status 语义，保持两处一致）。
+            base = base.outerjoin(DataSource, DataSource.source_id == DBCatalog.source_id)
+            if source_status == "active":
+                base = base.where(DataSource.deleted_at.is_(None))
+            else:
+                base = base.where(DataSource.deleted_at.isnot(None))
         res = await self._db.execute(base)
         dbs: set[str] = set()
         for (name,) in res.all():

@@ -436,11 +436,12 @@ export function Catalogs() {
     }
   }
 
-  // 库名选项随数据源联动：切换数据源时刷新库名下拉并重置已选库名
+  // 库名选项随数据源联动：切换数据源/源状态时刷新库名下拉并重置已选库名
+  // （source_status 透传后端，避免已删源的库名出现在「活跃源」下拉中，与列表默认筛选对齐）
   async function loadDatabases() {
     setDatabasesLoading(true);
     try {
-      setDatabases(await listCatalogDatabases(sourceId || undefined));
+      setDatabases(await listCatalogDatabases(sourceId || undefined, sourceStatus || undefined));
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载库名失败");
       setDatabases([]);
@@ -453,7 +454,7 @@ export function Catalogs() {
     loadDatabases();
     setDatabase("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceId]);
+  }, [sourceId, sourceStatus]);
 
   async function loadSources() {
     setSourcesLoading(true);

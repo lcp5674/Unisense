@@ -3559,9 +3559,9 @@ export async function getCatalogDetail(catalogId: number): Promise<DBCatalog> {
   return request<DBCatalog>(`${API_BASE}/catalogs/${catalogId}`);
 }
 
-/** 目录去重库名列表（供库名筛选下拉，可随 source_id 联动）。 */
-export async function listCatalogDatabases(sourceId?: string): Promise<string[]> {
-  const qs = pageQs({ source_id: sourceId });
+/** 目录去重库名列表（供库名筛选下拉，可随 source_id / source_status 联动）。 */
+export async function listCatalogDatabases(sourceId?: string, sourceStatus?: string): Promise<string[]> {
+  const qs = pageQs({ source_id: sourceId, source_status: sourceStatus });
   const res = await request<{ items: string[] }>(`${API_BASE}/catalogs/databases?${qs}`);
   return res.items;
 }

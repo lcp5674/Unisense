@@ -1221,6 +1221,42 @@ async def test_repo_list_catalog_databases_filters_by_source():
     assert "mysql_sales" in compiled
 
 
+async def test_repo_list_catalog_databases_filters_by_source_status():
+    """source_status=active/deleted 时按源删除状态过滤库名（与列表默认「活跃源」对齐）。"""
+    s = MagicMock()
+    res = MagicMock()
+    res.all.return_value = [("sales.c",)]
+    s.execute = AsyncMock(return_value=res)
+    repo = CollectorRepository(s)
+    # active：outerjoin DataSource 且仅活跃源（deleted_at IS NULL）
+    dbs = await repo.list_catalog_databases(source_status="active")
+    assert dbs == ["sales"]
+    stmt = s.execute.call_args_list[0].args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "data_source" in compiled.lower()
+    assert "deleted_at" in compiled.lower()
+    # deleted：仅已删源（deleted_at IS NOT NULL）
+    s.execute.reset_mock()
+    await repo.list_catalog_databases(source_status="deleted")
+    deleted_stmt = s.execute.call_args_list[0].args[0].compile(
+        compile_kwargs={"literal_binds": True}
+    )
+    assert "is not null" in str(deleted_stmt).lower()
+
+
+async def test_repo_list_catalog_databases_source_status_none_keeps_plain_query():
+    """source_status 缺省/None 时不过滤源状态（保持既有行为，不 join DataSource）。"""
+    s = MagicMock()
+    res = MagicMock()
+    res.all.return_value = [("sales.c",)]
+    s.execute = AsyncMock(return_value=res)
+    repo = CollectorRepository(s)
+    await repo.list_catalog_databases()
+    stmt = s.execute.call_args_list[0].args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).lower()
+    assert "data_source" not in compiled
+
+
 # ---------- US6: 空 schema 告警 ----------
 
 

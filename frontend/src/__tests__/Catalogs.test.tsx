@@ -216,6 +216,9 @@ describe("Catalogs 页面", () => {
     await waitFor(() => {
       expect(mockedDatabases).toHaveBeenCalled();
     });
+    // 默认源状态为「活跃源」→ 库名下拉请求透传 source_status=active（与列表筛选对齐）
+    const dbCalls = mockedDatabases.mock.calls;
+    expect(dbCalls[dbCalls.length - 1]).toEqual([undefined, "active"]);
     // 选择库名 "unisense" → 触发带 database 参数的列表请求
     fireEvent.mouseDown(screen.getByText("全部库名"));
     const options = await screen.findAllByText("unisense");
@@ -224,6 +227,31 @@ describe("Catalogs 页面", () => {
       const calls = mockedList.mock.calls;
       const lastCall = calls.length > 0 ? calls[calls.length - 1][0] : undefined;
       expect(lastCall?.database).toBe("unisense");
+    });
+  });
+
+  it("切换「已删除源」后库名下拉请求透传 source_status=deleted（避免活跃下拉混入已删源库名）", async () => {
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    // 初始默认「活跃源」
+    await waitFor(() => {
+      expect(mockedDatabases).toHaveBeenCalled();
+    });
+    const firstCalls = mockedDatabases.mock.calls;
+    expect(firstCalls[firstCalls.length - 1]).toEqual([undefined, "active"]);
+
+    // 切换到「已删除源」→ 库名下拉重新请求且透传 source_status=deleted
+    fireEvent.mouseDown(screen.getByText("活跃源"));
+    const deletedOption = await screen.findByText("已删除源");
+    fireEvent.click(deletedOption);
+    await waitFor(() => {
+      const calls = mockedDatabases.mock.calls;
+      const lastCall = calls[calls.length - 1];
+      expect(lastCall).toEqual([undefined, "deleted"]);
     });
   });
 

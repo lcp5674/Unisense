@@ -1655,9 +1655,11 @@ class CollectorService(BaseService):
             page_size=params.page_size,
         )
 
-    async def list_catalog_databases(self, source_id: str | None = None) -> list[str]:
-        """目录去重库名列表（供前端库名筛选下拉，可随 source_id 联动）。"""
-        return await self._repo.list_catalog_databases(source_id)
+    async def list_catalog_databases(
+        self, source_id: str | None = None, source_status: str | None = None
+    ) -> list[str]:
+        """目录去重库名列表（供前端库名筛选下拉，可随 source_id / source_status 联动）。"""
+        return await self._repo.list_catalog_databases(source_id, source_status)
 
     async def get_catalog_detail(self, catalog_id: int) -> DBCatalogResponse:
         """按主键取目录实体详情（血缘图谱表节点下钻用）。
