@@ -19,14 +19,15 @@ vi.mock("../api", async () => {
     listUsers: vi.fn().mockResolvedValue([]),
     listMeasureCatalogs: vi.fn().mockResolvedValue({ items: [], total: 0 }),
     autoSuggestMetric: vi.fn(),
+    suggestDomain: vi.fn(),
     getDomainDefaults: vi.fn(),
     checkConflict: vi.fn(),
     createMetric: vi.fn(),
   };
 });
 
-import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, checkConflict, createMetric, listMetrics } from "../api";
-import type { DBCatalog, SubjectDomainTreeNode, AutoSuggestResponse } from "../types";
+import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, checkConflict, createMetric, listMetrics, listMeasureCatalogs } from "../api";
+import type { DBCatalog, SubjectDomainTreeNode, AutoSuggestResponse, DomainSuggestionResponse } from "../types";
 
 const mockedTree = vi.mocked(listDomainTree);
 const mockedDict = vi.mocked(listDictItems);
@@ -35,6 +36,7 @@ const mockedBatch = vi.mocked(batchRegisterMetrics);
 const mockedBatchSubmit = vi.mocked(batchSubmitMetrics);
 const mockedUsers = vi.mocked(listUsers);
 const mockedSuggest = vi.mocked(autoSuggestMetric);
+const mockedSuggestDomain = vi.mocked(suggestDomain);
 const mockedCheckConflict = vi.mocked(checkConflict);
 const mockedCreate = vi.mocked(createMetric);
 const mockedMetrics = vi.mocked(listMetrics);
@@ -46,6 +48,14 @@ const NO_SUGGESTION: AutoSuggestResponse = {
   fields: {},
   definition_json: null,
   definition_mode: null,
+};
+
+/** 业务域建议默认返回：无法建议（不干扰既有 SQL 推断测试主流程）。 */
+const NO_DOMAIN_SUGGESTION: DomainSuggestionResponse = {
+  status: "none",
+  domain: null,
+  candidates: [],
+  matched_tables: [],
 };
 
 /** 构造完整 DBCatalog（源表搜索 mock 用），仅 entity_name/source_name 参与渲染。 */
@@ -462,6 +472,7 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     mockedTree.mockResolvedValue(TREE);
     mockedDict.mockResolvedValue([]);
     mockedSuggest.mockResolvedValue(NO_SUGGESTION);
+    mockedSuggestDomain.mockResolvedValue(NO_DOMAIN_SUGGESTION);
     mockedCatalogs.mockResolvedValue({
       items: [makeCatalog("dwd.sales_detail")],
       total: 1,
@@ -646,20 +657,25 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     });
   });
 
-  it("SQL 推断：未选域或未粘贴 SQL 时「智能推断」按钮禁用（惰性引导）", async () => {
+  it("SQL 推断：未粘贴 SQL 时「智能推断」按钮禁用；未选域也可打开抽屉（域建议在抽屉内）", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
-    // 未选域时标题区「SQL 智能推断」按钮 disabled（无法打开抽屉触发推断）
+    // 未选域时标题区「SQL 智能推断」按钮 enabled——域建议在抽屉内完成（FR-010 域建议增强）
     const titleBtn = screen.getByRole("button", { name: /SQL 智能推断/ }) as HTMLButtonElement;
-    expect(titleBtn.disabled).toBe(true);
+    expect(titleBtn.disabled).toBe(false);
     expect(mockedSuggest).not.toHaveBeenCalled();
-    // 选域后打开抽屉：SQL 为空时抽屉内「智能推断并回填字段」按钮 disabled
-    await pickDomain();
-    mockedSuggest.mockClear(); // 清掉 pickDomain 触发的域默认推断调用，仅验证抽屉按钮不触发
-    fireEvent.click(screen.getByRole("button", { name: /SQL 智能推断/ }));
+    // 打开抽屉（未选域也可打开）：SQL 为空时抽屉内「智能推断并回填字段」按钮 disabled
+    fireEvent.click(titleBtn);
     await waitFor(() => expect(document.querySelector(".ant-drawer")).toBeTruthy());
-    const inferBtn = screen.getByText("智能推断并回填字段").closest("button") as HTMLButtonElement;
+    let inferBtn = screen.getByText("智能推断并回填字段").closest("button") as HTMLButtonElement;
     expect(inferBtn.disabled).toBe(true);
+    expect(mockedSuggest).not.toHaveBeenCalled();
+    // 粘贴 SQL 后（仍未选域）按钮 enabled——可触发 域建议 + SQL 推断
+    fireEvent.change(screen.getByPlaceholderText(/SELECT SUM\(amount\) AS gmv/), {
+      target: { value: "SELECT SUM(gmv) AS gmv FROM dwd.sales_detail GROUP BY dt" },
+    });
+    inferBtn = screen.getByText("智能推断并回填字段").closest("button") as HTMLButtonElement;
+    expect(inferBtn.disabled).toBe(false);
     expect(mockedSuggest).not.toHaveBeenCalled();
   });
 
@@ -705,6 +721,127 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     // 正确映射：后端 ConflictType 值为 same_name_diff_def → 中文「同名不同义」
     await screen.findByText(/同名不同义/);
     expect(screen.queryByText(/same_name_diff_def/)).toBeNull();
+  });
+});
+
+describe("MetricCreate SQL 推断业务域建议（FR-010 域建议增强）", () => {
+  const INFER_RESULT = {
+    metric_code_suggestion: null,
+    segments: { domain: "", biz_object: null, measure: null, period: null },
+    fields: {
+      source_table: { value: "dwd.sales_detail", source: "sql_parse", confidence: 0.9, reason: "" },
+      measure_column: { value: "gmv", source: "sql_parse", confidence: 0.9, reason: "" },
+      name: { value: "订单销售额", source: "sql_parse", confidence: 0.8 },
+    },
+    definition_json: { expression: "SUM(gmv)", source_fields: [{ table: "dwd.sales_detail", column: "gmv" }] },
+    definition_mode: "expression",
+  };
+
+  const SQL = "SELECT SUM(gmv) AS gmv FROM dwd.sales_detail GROUP BY dt";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedTree.mockResolvedValue(TREE);
+    mockedDict.mockResolvedValue([]);
+    mockedSuggest.mockResolvedValue(INFER_RESULT as never);
+    mockedSuggestDomain.mockResolvedValue(NO_DOMAIN_SUGGESTION);
+    mockedCatalogs.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 });
+  });
+
+  async function openInferWithSql() {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await openSqlInfer();
+    fireEvent.change(screen.getByPlaceholderText(/SELECT SUM\(amount\) AS gmv/), {
+      target: { value: SQL },
+    });
+    fireEvent.click(screen.getByText("智能推断并回填字段"));
+  }
+
+  it("未选域 SQL 推断：目录唯一命中业务域 → 自动应用并预填 Step0 域，推断按建议域重跑", async () => {
+    mockedSuggestDomain.mockResolvedValue({
+      status: "unique",
+      domain: { code: "sales", name: "销售", confidence: 0.9, source: "catalog", reason: "采集目录命中" },
+      candidates: [],
+      matched_tables: ["dwd.sales_detail"],
+    } as never);
+    await openInferWithSql();
+    // 抽屉内域建议成功提示（已自动应用）
+    await waitFor(() => expect(screen.getByText(/已按建议选择业务域：销售/)).toBeTruthy());
+    // autoSuggest 以建议域重跑
+    await waitFor(() =>
+      expect(mockedSuggest).toHaveBeenCalledWith(
+        expect.objectContaining({ domain_code: "sales", sql: expect.stringContaining("SELECT") })
+      )
+    );
+  });
+
+  it("未选域 SQL 推断：表归属多个域 → 弹窗候选，选择后应用并重跑推断", async () => {
+    mockedSuggestDomain.mockResolvedValue({
+      status: "multiple",
+      domain: null,
+      candidates: [
+        { code: "sales", name: "销售", confidence: 0.9, source: "catalog", reason: "a" },
+        { code: "finance", name: "财务", confidence: 0.85, source: "mount", reason: "b" },
+      ],
+      matched_tables: ["dwd.sales_detail"],
+    } as never);
+    await openInferWithSql();
+    // 多候选弹窗出现
+    await screen.findByText("选择业务域（SQL 涉及表归属多个域）");
+    // 选「财务」并确认 → 应用域建议 + 用该域重跑推断
+    fireEvent.click(screen.getByText("财务（finance）"));
+    fireEvent.click(screen.getByText("应用并推断"));
+    await waitFor(() =>
+      expect(mockedSuggest).toHaveBeenCalledWith(
+        expect.objectContaining({ domain_code: "finance", sql: expect.stringContaining("SELECT") })
+      )
+    );
+  });
+
+  it("未选域 SQL 推断：AI 兜底推断业务域（表未被采集）→ 自动应用并标记 AI 来源", async () => {
+    mockedSuggestDomain.mockResolvedValue({
+      status: "llm",
+      domain: { code: "medical_fee", name: "医疗收费", confidence: 0.7, source: "llm", reason: "AI 推断" },
+      candidates: [],
+      matched_tables: [],
+    } as never);
+    await openInferWithSql();
+    await waitFor(() => expect(screen.getByText(/已按建议选择业务域：医疗收费/)).toBeTruthy());
+    // 来源徽标为 AI
+    expect(screen.getByText(/来源：AI/)).toBeTruthy();
+  });
+
+  it("已选域 SQL 推断：建议域与当前所选不同 → 抽屉展示冲突提示与切换入口", async () => {
+    mockedSuggestDomain.mockResolvedValue({
+      status: "unique",
+      domain: { code: "finance", name: "财务", confidence: 0.9, source: "catalog", reason: "采集目录命中" },
+      candidates: [],
+      matched_tables: ["dwd.finance_bill"],
+    } as never);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain(); // 选 sales
+    await openSqlInfer();
+    fireEvent.change(screen.getByPlaceholderText(/SELECT SUM\(amount\) AS gmv/), {
+      target: { value: SQL },
+    });
+    fireEvent.click(screen.getByText("智能推断并回填字段"));
+    await screen.findByText("SQL 智能推断结果");
+    // 冲突提示 + 切换按钮
+    expect(screen.getByText(/与当前所选不同/)).toBeTruthy();
+    expect(screen.getByText("切换为 财务")).toBeTruthy();
+  });
+
+  it("未选域 SQL 推断：无法建议业务域 → 提示手动选择，推断照常（空域）", async () => {
+    await openInferWithSql();
+    await screen.findByText("SQL 智能推断结果");
+    expect(screen.getByText(/未能自动推断业务域/)).toBeTruthy();
+    await waitFor(() =>
+      expect(mockedSuggest).toHaveBeenCalledWith(
+        expect.objectContaining({ domain_code: "", sql: expect.stringContaining("SELECT") })
+      )
+    );
   });
 });
 

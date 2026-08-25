@@ -527,6 +527,28 @@ class MetricAutoSuggestRequest(BaseModel):
     sql: str | None = Field(None, max_length=16384, description="指标定义 SQL")
 
 
+class MetricSuggestDomainRequest(BaseModel):
+    """业务域建议请求（FR-010 域建议增强）。
+
+    输入 SQL 或源表（至少一个）→ 反向定位业务域：
+    采集目录（DBCatalog→DataSource.domain）+ 挂载实体（MetricMount.domain）；
+    均未命中（表未被采集，如大段 SQL 引用平台外实体）→ LLM 兜底推断。
+
+    显式 schema 校验（对齐 auto-suggest）：``sql``/``source_table`` 类型化，
+    防非字符串 payload 进入解析器触发 ``AttributeError`` → 500。
+    """
+
+    sql: str | None = Field(None, max_length=16384, description="指标定义 SQL（大段 SQL 场景）")
+    source_table: str | None = Field(None, max_length=256, description="源表名（库.表 或 表名）")
+
+    @model_validator(mode="after")
+    def _at_least_one_source(self) -> MetricSuggestDomainRequest:
+        """sql 与 source_table 至少提供一个，否则 422。"""
+        if not (self.sql or self.source_table):
+            raise ValueError("sql 与 source_table 至少提供一个")
+        return self
+
+
 class MetricBatchRegisterRequest(BaseModel):
     """批量注册请求（对齐 FR-030）。"""
 

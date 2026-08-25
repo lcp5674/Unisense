@@ -4523,6 +4523,17 @@ export async function autoSuggestMetric(data: AutoSuggestRequest): Promise<AutoS
   });
 }
 
+/** 业务域建议（FR-010 域建议增强）：输入 SQL 或源表 → 反向定位/LLM 兜底推断业务域。 */
+export async function suggestDomain(data: {
+  sql?: string | null;
+  source_table?: string | null;
+}): Promise<DomainSuggestionResponse> {
+  return request<DomainSuggestionResponse>(`${API_BASE}/metric-definitions/suggest-domain`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
 // 仲裁改名建议：LLM 生成区分性名称候选（best-effort，LLM 不可用降级规则）
 export async function suggestRenameName(
   metricCode: string,

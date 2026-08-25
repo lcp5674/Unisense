@@ -53,6 +53,7 @@ from app.services.semantic.schemas import (
     MetricResponse,
     MetricSourceDroppedRequest,
     MetricSubmitRequest,
+    MetricSuggestDomainRequest,
     MetricTermBindRequest,
     MetricUpdateRequest,
     MetricVersionResponse,
@@ -1650,6 +1651,37 @@ async def auto_suggest_metric(
     result["related_tables"] = related_tables
     result["source_tables"] = source_tables
     result["downstream_tables"] = downstream_tables
+    return ok(data=result, trace_id=trace_id)
+
+
+@router.post(
+    "/suggest-domain",
+    response_model=ApiResponse[Any],
+    summary="业务域建议（FR-010 域建议增强）",
+    # LLM 额度防护：该端点可能触发 LLM 推断域（表未被采集时），对齐 auto-suggest
+    # 收紧为写角色（platform_admin/domain_admin/metric_owner）。
+    dependencies=_WRITE_DEPS,
+)
+async def suggest_domain_metric(
+    request: MetricSuggestDomainRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """输入 SQL 或源表 → 反向定位业务域。
+
+    反查链路：采集目录（DBCatalog→DataSource.domain）+ 挂载实体（MetricMount.domain）；
+    均未命中（实体未被采集，如大段 SQL 引用平台外实体）→ LLM 从 SQL/表名推断域。
+    返回 ``unique``/``multiple``/``llm``/``none`` 四态，前端据此预填域选择或展示候选。
+    域只是"建议"——最终确认权在用户（域是推断的前提而非结果）。
+    对齐 spec FR-010/FR-011, plan.md D3。
+    """
+    from app.services.semantic.domain_suggest import suggest_domain
+
+    result = await suggest_domain(
+        db,
+        sql=request.sql,
+        source_table=request.source_table,
+    )
     return ok(data=result, trace_id=trace_id)
 
 

@@ -2730,6 +2730,26 @@ export interface AutoSuggestResponse {
   downstream_tables?: string[];
 }
 
+/** 业务域建议候选（FR-010 域建议增强：反向定位/LLM 兜底）。 */
+export interface DomainSuggestionCandidate {
+  code: string;
+  name: string;
+  confidence: number;
+  /** 来源：catalog（采集目录）/ mount（挂载实体）/ llm（AI 推断）。 */
+  source: string;
+  reason?: string;
+}
+
+/** 业务域建议响应（suggest-domain 端点四态）。 */
+export interface DomainSuggestionResponse {
+  /** unique（唯一命中）/ multiple（多候选）/ llm（AI 推断）/ none（无法建议）。 */
+  status: "unique" | "multiple" | "llm" | "none";
+  domain: DomainSuggestionCandidate | null;
+  candidates: DomainSuggestionCandidate[];
+  /** 命中归属的表（空=表未被采集，可提示）。 */
+  matched_tables: string[];
+}
+
 // ============================================================================
 // 全局聚合搜索（backend /api/v1/search，FR-18 全局搜索栏）
 // ============================================================================
