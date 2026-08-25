@@ -82,6 +82,7 @@ const metric: MetricResponse = {
     definition: "当日支付成功订单的成交总额",
     sql: "SELECT SUM(order_amount) AS gmv, dt FROM dwd_order_di GROUP BY dt",
     source_tables: ["dwd_order_di"],
+    downstream_tables: ["dws_gmv_report"],
     dependencies: ["user_base_cnt_d"],
     source_fields: ["gmv"],
   },
@@ -247,7 +248,11 @@ describe("MetricCatalog", () => {
       // 口径 SQL：带标签 + SQL 文本
       expect(screen.getByText("口径 SQL：")).toBeTruthy();
       expect(screen.getByText("SELECT SUM(order_amount) AS gmv, dt FROM dwd_order_di GROUP BY dt")).toBeTruthy();
+      // 关联数据表按方向拆分：依赖表（上游）+ 使用表（下游）分块展示
+      expect(screen.getByText("依赖表（上游）：")).toBeTruthy();
+      expect(screen.getByText("使用表（下游）：")).toBeTruthy();
       expect(screen.getByText("dwd_order_di")).toBeTruthy();
+      expect(screen.getByText("dws_gmv_report")).toBeTruthy();
       expect(screen.getByText("user_base_cnt_d")).toBeTruthy();
       expect(screen.getByText("gmv")).toBeTruthy();
       // 治理追溯：备份责任人=李四、审批人=王五

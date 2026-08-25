@@ -21,6 +21,7 @@ from app.core.exceptions import (
     BusinessError,
     ConflictError,
     NotFoundError,
+    UnisenseError,
     ValidationError,
 )
 from app.core.logging import get_logger
@@ -166,9 +167,10 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         limit: int,
         offset: int,
         owner_id: int | None = None,
+        deleted: bool = False,
     ) -> tuple[list[TermResponse], int]:
         rows, total = await self._repo.list_terms(
-            domain, status, search, limit, offset, owner_id
+            domain, status, search, limit, offset, owner_id, deleted
         )
         return [TermResponse.from_model(t) for t in rows], total
 
@@ -277,6 +279,98 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         term.status = TermStatus.DEPRECATED.value
         await self._snapshot(term, actor_id, "deprecate")
         await self._repo.commit()
+        return TermResponse.from_model(term)
+
+    async def reactivate_term(
+        self, term_code: str, actor_id: int, role: str | None = None
+    ) -> TermResponse:
+        """重新启用已废弃术语（DEPRECATED → DRAFT）。
+
+        已废弃术语为终态，重新启用后回到草稿态，可编辑后**重新走审核**（与
+        DRAFT→REVIEW→PUBLISHED 审核流一致，避免绕过审核直接复活）。仅平台
+        管理员/域管理员或原 Owner 可执行（API 层写角色 + service 层 owner 校验）。
+        """
+        term = await self._require_term(term_code)
+        if term.status != TermStatus.DEPRECATED.value:
+            raise UnisenseError(
+                f"仅 DEPRECATED 状态可重新启用，当前 {term.status}",
+                error_code="INVALID_STATE",
+            )
+        if role not in ("platform_admin", "domain_admin") and term.owner_id != actor_id:
+            raise UnisenseError(
+                "仅平台/域管理员或术语原 Owner 可重新启用",
+                error_code="FORBIDDEN",
+            )
+        term.status = TermStatus.DRAFT.value
+        await self._snapshot(term, actor_id, "reactivate")
+        await self._repo.commit()
+        logger.info("term_reactivated", term_code=term_code, actor_id=actor_id)
+        return TermResponse.from_model(term)
+
+    async def delete_term(
+        self, term_code: str, actor_id: int, role: str | None = None
+    ) -> TermResponse:
+        """软删除术语（仅 DRAFT/DEPRECATED 未对外投入状态；REVIEW/PUBLISHED 禁止）。
+
+        删除语义（用户决策）：草稿/废弃这种未对外投入的可交由管理员或生产者
+        （原 Owner）软删；审核中/启用中的资源不可删。软删后进入回收站，可经
+        ``restore_term`` 恢复（对齐维度/度量生命周期）。
+        """
+        term = await self._require_term(term_code)
+        if term.status not in (
+            TermStatus.DRAFT.value,
+            TermStatus.DEPRECATED.value,
+        ):
+            raise UnisenseError(
+                f"仅 DRAFT/DEPRECATED 状态的术语可删除（当前 {term.status}）；"
+                "审核中/启用中的资源不可删除",
+                error_code="INVALID_STATE",
+            )
+        # 权限：平台/域管理员或原 Owner（生产者）
+        if role not in ("platform_admin", "domain_admin") and term.owner_id != actor_id:
+            raise UnisenseError(
+                "仅平台/域管理员或术语原 Owner 可删除",
+                error_code="FORBIDDEN",
+            )
+        await self._repo.soft_delete_term(term.id)
+        await self._snapshot(term, actor_id, "delete")
+        await self._repo.commit()
+        logger.info("term_deleted", term_code=term_code, actor_id=actor_id, role=role)
+        return TermResponse.from_model(term)
+
+    async def restore_term(
+        self, term_code: str, actor_id: int, role: str | None = None
+    ) -> TermResponse:
+        """恢复已软删术语（回收站恢复；仅 DRAFT/DEPRECATED 且 deleted_at 置位）。
+
+        仅平台/域管理员或原 Owner 可恢复（对齐删除语义）。清除 deleted_at 使
+        术语重新进入正常列表，重新走审核流。
+        """
+        term = await self._repo.get_term_including_deleted(term_code)
+        if term is None:
+            raise NotFoundError(f"术语不存在: {term_code}")
+        if term.deleted_at is None:
+            raise UnisenseError(
+                f"术语 {term_code} 未处于已删除状态，无需恢复",
+                error_code="INVALID_STATE",
+            )
+        if term.status not in (
+            TermStatus.DRAFT.value,
+            TermStatus.DEPRECATED.value,
+        ):
+            raise UnisenseError(
+                f"仅 DRAFT/DEPRECATED 状态的已删术语可恢复，当前 {term.status}",
+                error_code="INVALID_STATE",
+            )
+        if role not in ("platform_admin", "domain_admin") and term.owner_id != actor_id:
+            raise UnisenseError(
+                "仅平台/域管理员或术语原 Owner 可恢复",
+                error_code="FORBIDDEN",
+            )
+        await self._repo.restore_term(term.id)
+        await self._snapshot(term, actor_id, "restore")
+        await self._repo.commit()
+        logger.info("term_restored", term_code=term_code, actor_id=actor_id)
         return TermResponse.from_model(term)
 
     async def list_conflicts(self, status: str | None) -> list[Any]:

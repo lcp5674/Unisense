@@ -34,6 +34,9 @@ export const DEF_FIELD_LABEL: Record<string, string> = {
   // SQL 模式
   sql: "口径 SQL",
   etl_sql: "口径 SQL",
+  // 口径分角色（PRD 4.5 责任方对应）：系统开发伪代码口径 / 数仓开发详细口径
+  pseudo_definition: "伪代码口径（系统开发）",
+  dw_definition: "数仓详细口径（数仓开发）",
   source_tables: "依赖表（上游）",
   downstream_tables: "使用表（下游）",
   source_fields: "来源字段",
@@ -174,8 +177,8 @@ export function ObjectView({
  * 行对行可对照，避免 ObjectView 默认竖排文本块难以比对的问题。
  */
 export const DEF_CANON_ORDER: string[] = [
-  "sql", "etl_sql",
-  "source_tables", "source_fields", "source_columns",
+  "sql", "etl_sql", "pseudo_definition", "dw_definition",
+  "source_tables", "downstream_tables", "source_fields", "source_columns",
   "group_by", "filters", "time_column", "partition_key", "measure_columns",
   "dimensions", "measures", "columns",
   "expression", "expr",
@@ -184,7 +187,7 @@ export const DEF_CANON_ORDER: string[] = [
 
 function renderDefValue(key: string, value: unknown, labels: Record<string, string>): ReactNode {
   if (value === null || value === undefined || value === "") return <span className="muted">—</span>;
-  if (key === "sql" || key === "etl_sql") {
+  if (key === "sql" || key === "etl_sql" || key === "dw_definition") {
     return (
       <pre
         style={{
@@ -199,6 +202,25 @@ function renderDefValue(key: string, value: unknown, labels: Record<string, stri
         }}
       >
         {formatSql(String(value))}
+      </pre>
+    );
+  }
+  if (key === "pseudo_definition") {
+    return (
+      <pre
+        style={{
+          margin: 0,
+          maxHeight: 200,
+          overflow: "auto",
+          background: "var(--paper)",
+          padding: 8,
+          borderRadius: 4,
+          fontSize: 12,
+          lineHeight: 1.5,
+          whiteSpace: "pre-wrap",
+        }}
+      >
+        {String(value)}
       </pre>
     );
   }

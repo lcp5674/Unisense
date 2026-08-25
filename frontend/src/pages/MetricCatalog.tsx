@@ -197,6 +197,11 @@ function ExpandContent({
     : def.source_tables
       ? [String(def.source_tables)]
       : [];
+  const downstreamTables = Array.isArray(def.downstream_tables)
+    ? def.downstream_tables.map((s) => String(s))
+    : def.downstream_tables
+      ? [String(def.downstream_tables)]
+      : [];
   // 口径 SQL：兼容多种键名（etl_sql / sql / calculation_sql / query_sql / sql_template）
   const rawEtl = def.etl_sql ?? def.sql ?? def.calculation_sql ?? def.query_sql ?? def.sql_template;
   const etlSql = rawEtl == null ? "" : String(rawEtl);
@@ -243,8 +248,16 @@ function ExpandContent({
       )}
       {sourceTables.length > 0 && (
         <p style={{ margin: "0 0 8px" }}>
-          <span className="muted">关联数据表：</span>
+          <span className="muted">依赖表（上游）：</span>
           {sourceTables.map((t) => (
+            <Tag key={t} className="mono">{t}</Tag>
+          ))}
+        </p>
+      )}
+      {downstreamTables.length > 0 && (
+        <p style={{ margin: "0 0 8px" }}>
+          <span className="muted">使用表（下游）：</span>
+          {downstreamTables.map((t) => (
             <Tag key={t} className="mono">{t}</Tag>
           ))}
         </p>

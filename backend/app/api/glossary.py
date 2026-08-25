@@ -323,6 +323,84 @@ async def batch_deprecate_terms(
     return ok(data=batch_response(results), trace_id=trace_id)
 
 
+@router.post(
+    "/batch-reactivate",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量重新启用已废弃术语（DEPRECATED → DRAFT）",
+    dependencies=_WRITE_DEPS,
+)
+async def batch_reactivate_terms(
+    request: BatchCodesRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条 DEPRECATED→DRAFT；权限（管理员/原 Owner）由 service 层逐条校验。"""
+    service = GlossaryService(db)
+    results = await run_batch(
+        db,
+        units=request.codes,
+        code_of=lambda code: code,
+        run=lambda code: service.reactivate_term(code, actor_id=user.id, role=user.role),
+        abort_message="批量重新启用内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("term.batch_reactivate", results),
+        entity_type="term",
+        entity_id=f"batch:{len(request.codes)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=batch_response(results), trace_id=trace_id)
+
+
+@router.post(
+    "/batch-delete",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量软删除术语（仅 DRAFT/DEPRECATED 可删）",
+    dependencies=_WRITE_DEPS,
+)
+async def batch_delete_terms(
+    request: BatchCodesRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条软删草稿/废弃术语；权限（管理员/原 Owner）由 service 层逐条校验。"""
+    service = GlossaryService(db)
+    results = await run_batch(
+        db,
+        units=request.codes,
+        code_of=lambda code: code,
+        run=lambda code: service.delete_term(code, actor_id=user.id, role=user.role),
+        abort_message="批量删除内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("term.batch_delete", results),
+        entity_type="term",
+        entity_id=f"batch:{len(request.codes)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=batch_response(results), trace_id=trace_id)
+
+
 @router.get("", dependencies=_READ_DEPS)
 async def list_terms(
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -332,11 +410,13 @@ async def list_terms(
     status: str | None = Query(None),
     search: str | None = Query(None),
     owner_id: int | None = Query(None, description="责任人（Owner）ID 过滤"),
-    page: int = Query(1),
-    page_size: int = Query(20),
+    deleted: bool = Query(False, description="是否查看回收站（已软删记录）"),
+    # P4 分页边界：page ge=1 防 page=0 负 offset；page_size le=200 防无界全量拉取
+    page: int = Query(1, ge=1, le=10000),
+    page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
     items, total = await GlossaryService(db).list_terms(
-        domain, status, search, page_size, (page - 1) * page_size, owner_id
+        domain, status, search, page_size, (page - 1) * page_size, owner_id, deleted
     )
     return ok(
         data={"items": items, "total": total, "page": page, "page_size": page_size},
@@ -508,6 +588,96 @@ async def deprecate_term(
         entity_type="term",
         entity_id=term_code,
         detail={},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=resp, trace_id=trace_id)
+
+
+@router.post(
+    "/{term_code}/reactivate",
+    summary="重新启用已废弃术语（DEPRECATED → DRAFT，可编辑后重新走审核）",
+    dependencies=_WRITE_DEPS,
+)
+async def reactivate_term(
+    term_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """DEPRECATED → DRAFT：回到草稿可编辑，重新提交审核后才发布（不绕过审核）。"""
+    resp = await GlossaryService(db).reactivate_term(
+        term_code, actor_id=user.id, role=user.role
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="term.reactivate",
+        entity_type="term",
+        entity_id=term_code,
+        detail={"status": resp.status},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=resp, trace_id=trace_id)
+
+
+@router.post(
+    "/{term_code}/delete",
+    summary="软删除术语（仅 DRAFT/DEPRECATED 可删；审核中/启用中禁止）",
+    dependencies=_WRITE_DEPS,
+)
+async def delete_term(
+    term_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """软删草稿/废弃术语；仅管理员或原 Owner（service 层校验）。"""
+    resp = await GlossaryService(db).delete_term(
+        term_code, actor_id=user.id, role=user.role
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="term.delete",
+        entity_type="term",
+        entity_id=term_code,
+        detail={"status": resp.status},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=resp, trace_id=trace_id)
+
+
+@router.post(
+    "/{term_code}/restore",
+    summary="恢复已软删术语（回收站恢复）",
+    dependencies=_WRITE_DEPS,
+)
+async def restore_term(
+    term_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """回收站恢复软删术语；仅管理员或原 Owner（service 层校验）。"""
+    resp = await GlossaryService(db).restore_term(
+        term_code, actor_id=user.id, role=user.role
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="term.restore",
+        entity_type="term",
+        entity_id=term_code,
+        detail={"status": resp.status},
+        ip=client_ip(http_req),
         trace_id=trace_id,
     )
     await db.commit()

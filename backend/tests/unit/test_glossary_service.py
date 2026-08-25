@@ -334,6 +334,111 @@ async def test_deprecate_already_deprecated_raises_business_error() -> None:
         assert exc.http_status == 400
 
 
+def _svc_with_term(
+    status: str, owner_id: int = 1, deleted_at=None
+) -> tuple[GlossaryService, MagicMock, Term]:
+    """构造挂到指定状态术语的 service + fake repo（供生命周期用例复用）。"""
+    db = MagicMock()
+    svc = GlossaryService(db)
+    repo = MagicMock()
+    t = _make_term()
+    t.id = 1
+    t.owner_id = owner_id
+    t.status = status
+    t.deleted_at = deleted_at
+    repo.get_term = AsyncMock(return_value=t)
+    repo.get_term_including_deleted = AsyncMock(return_value=t)
+    repo.soft_delete_term = AsyncMock()
+    repo.restore_term = AsyncMock()
+    repo.commit = AsyncMock()
+    repo.count_term_versions = AsyncMock(return_value=0)
+    repo.save_term_version = AsyncMock()
+    svc._repo = repo
+    return svc, repo, t
+
+
+async def test_reactivate_term_deprecated_to_draft() -> None:
+    """生命周期：DEPRECATED 术语重新启用 → DRAFT（回草稿重新走审核），快照留痕。"""
+    svc, repo, t = _svc_with_term(TermStatus.DEPRECATED.value)
+    resp = await svc.reactivate_term("c1", actor_id=1, role="domain_admin")
+    assert resp.status == TermStatus.DRAFT
+    assert t.status == TermStatus.DRAFT.value
+    repo.save_term_version.assert_awaited()
+    repo.commit.assert_awaited()
+
+
+async def test_reactivate_term_requires_deprecated() -> None:
+    """仅 DEPRECATED 可重新启用：PUBLISHED 抛 INVALID_STATE。"""
+    from app.core.exceptions import UnisenseError
+
+    svc, _repo, _t = _svc_with_term(TermStatus.PUBLISHED.value)
+    with pytest.raises(UnisenseError) as ei:
+        await svc.reactivate_term("c1", actor_id=1, role="domain_admin")
+    assert ei.value.error_code == "INVALID_STATE"
+
+
+async def test_reactivate_term_forbidden_for_non_owner() -> None:
+    """非管理员且非原 Owner 不可重新启用。"""
+    from app.core.exceptions import UnisenseError
+
+    svc, _repo, _t = _svc_with_term(TermStatus.DEPRECATED.value, owner_id=99)
+    with pytest.raises(UnisenseError) as ei:
+        await svc.reactivate_term("c1", actor_id=1, role="metric_owner")
+    assert ei.value.error_code == "FORBIDDEN"
+
+
+async def test_delete_term_draft_soft_deletes() -> None:
+    """生命周期：DRAFT 术语软删 → repo.soft_delete_term 被调 + 快照留痕。"""
+    svc, repo, t = _svc_with_term(TermStatus.DRAFT.value)
+    resp = await svc.delete_term("c1", actor_id=1, role="metric_owner")
+    assert resp.status == TermStatus.DRAFT
+    repo.soft_delete_term.assert_awaited_with(1)
+    repo.save_term_version.assert_awaited()
+    repo.commit.assert_awaited()
+
+
+async def test_delete_term_review_or_published_rejected() -> None:
+    """审核中/启用中不可删：REVIEW/PUBLISHED 抛 INVALID_STATE（用户决策边界）。"""
+    from app.core.exceptions import UnisenseError
+
+    for status in (TermStatus.REVIEW.value, TermStatus.PUBLISHED.value):
+        svc, _repo, _t = _svc_with_term(status)
+        with pytest.raises(UnisenseError) as ei:
+            await svc.delete_term("c1", actor_id=1, role="domain_admin")
+        assert ei.value.error_code == "INVALID_STATE"
+
+
+async def test_delete_term_forbidden_for_non_owner() -> None:
+    """非管理员且非原 Owner 不可删除。"""
+    from app.core.exceptions import UnisenseError
+
+    svc, _repo, _t = _svc_with_term(TermStatus.DRAFT.value, owner_id=99)
+    with pytest.raises(UnisenseError) as ei:
+        await svc.delete_term("c1", actor_id=1, role="metric_owner")
+    assert ei.value.error_code == "FORBIDDEN"
+
+
+async def test_restore_term_recovers_deleted() -> None:
+    """生命周期：回收站恢复软删术语 → 清除 deleted_at（repo.restore_term 被调）。"""
+    from datetime import UTC, datetime
+
+    svc, repo, t = _svc_with_term(TermStatus.DRAFT.value, deleted_at=datetime.now(UTC))
+    resp = await svc.restore_term("c1", actor_id=1, role="domain_admin")
+    assert resp.term_code == "c1"
+    repo.restore_term.assert_awaited_with(1)
+    repo.commit.assert_awaited()
+
+
+async def test_restore_term_requires_deleted() -> None:
+    """未删除的术语无需恢复：抛 INVALID_STATE。"""
+    from app.core.exceptions import UnisenseError
+
+    svc, _repo, _t = _svc_with_term(TermStatus.DRAFT.value, deleted_at=None)
+    with pytest.raises(UnisenseError) as ei:
+        await svc.restore_term("c1", actor_id=1, role="domain_admin")
+    assert ei.value.error_code == "INVALID_STATE"
+
+
 async def test_infer_term_suggestion_success() -> None:
     """LLM 推断术语定义/同义词/边界说明：LLM 返回结构化 JSON → 解析成功。"""
     db = MagicMock()

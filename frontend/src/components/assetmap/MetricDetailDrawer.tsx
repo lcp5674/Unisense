@@ -61,8 +61,16 @@ function DefinitionsBlock({ def }: { def: Record<string, unknown> }) {
     : def.source_tables
       ? [String(def.source_tables)]
       : [];
+  const downstreamTables = Array.isArray(def.downstream_tables)
+    ? def.downstream_tables.map((s) => String(s))
+    : def.downstream_tables
+      ? [String(def.downstream_tables)]
+      : [];
   const rawEtl = def.etl_sql ?? def.sql;
   const etlSql = rawEtl == null ? "" : String(rawEtl);
+  // 口径分角色（PRD 4.5 责任方对应）：系统开发伪代码口径 / 数仓开发详细口径
+  const pseudoDefinition = typeof def.pseudo_definition === "string" ? def.pseudo_definition : "";
+  const dwDefinition = typeof def.dw_definition === "string" ? def.dw_definition : "";
 
   return (
     <div>
@@ -80,8 +88,16 @@ function DefinitionsBlock({ def }: { def: Record<string, unknown> }) {
       )}
       {sourceTables.length > 0 && (
         <p style={{ margin: "0 0 8px" }}>
-          <span className="muted">关联数据表：</span>
+          <span className="muted">依赖表（上游）：</span>
           {sourceTables.map((t) => (
+            <Tag key={t} className="mono">{t}</Tag>
+          ))}
+        </p>
+      )}
+      {downstreamTables.length > 0 && (
+        <p style={{ margin: "0 0 8px" }}>
+          <span className="muted">使用表（下游）：</span>
+          {downstreamTables.map((t) => (
             <Tag key={t} className="mono">{t}</Tag>
           ))}
         </p>
@@ -116,6 +132,43 @@ function DefinitionsBlock({ def }: { def: Record<string, unknown> }) {
         >
           {etlSql}
         </pre>
+      )}
+      {pseudoDefinition && (
+        <div style={{ margin: "0 0 8px" }}>
+          <span className="muted">伪代码口径（系统开发）：</span>
+          <pre
+            style={{
+              background: "var(--paper)",
+              padding: 8,
+              borderRadius: 4,
+              margin: "4px 0 0",
+              fontSize: 12,
+              overflow: "auto",
+              maxHeight: 160,
+              whiteSpace: "pre-wrap",
+            }}
+          >
+            {pseudoDefinition}
+          </pre>
+        </div>
+      )}
+      {dwDefinition && (
+        <div style={{ margin: "0 0 8px" }}>
+          <span className="muted">数仓详细口径（数仓开发）：</span>
+          <pre
+            style={{
+              background: "var(--paper)",
+              padding: 8,
+              borderRadius: 4,
+              margin: "4px 0 0",
+              fontSize: 12,
+              overflow: "auto",
+              maxHeight: 200,
+            }}
+          >
+            {dwDefinition}
+          </pre>
+        </div>
       )}
     </div>
   );

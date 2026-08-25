@@ -31,11 +31,16 @@ vi.mock("../api", () => {
     approveTerm: vi.fn(),
     rejectTerm: vi.fn(),
     deprecateTerm: vi.fn(),
+    reactivateTerm: vi.fn(),
+    deleteTerm: vi.fn(),
+    restoreTerm: vi.fn(),
     batchSubmitTerms: vi.fn(),
     batchPublishTerms: vi.fn(),
     batchApproveTerms: vi.fn(),
     batchRejectTerms: vi.fn(),
     batchDeprecateTerms: vi.fn(),
+    batchReactivateTerms: vi.fn(),
+    batchDeleteTerms: vi.fn(),
     inferTermSuggestion: vi.fn(),
     listDomainTree: vi.fn(),
     listUsers: vi.fn(),
@@ -66,6 +71,11 @@ import {
   approveTerm,
   rejectTerm,
   submitTerm,
+  reactivateTerm,
+  deleteTerm,
+  restoreTerm,
+  batchReactivateTerms,
+  batchDeleteTerms,
 } from "../api";
 
 const mockedList = vi.mocked(listTerms);
@@ -84,6 +94,11 @@ const mockedUsers = vi.mocked(listUsers);
 const mockedApprove = vi.mocked(approveTerm);
 const mockedReject = vi.mocked(rejectTerm);
 const mockedSubmit = vi.mocked(submitTerm);
+const mockedReactivate = vi.mocked(reactivateTerm);
+const mockedDelete = vi.mocked(deleteTerm);
+const mockedRestore = vi.mocked(restoreTerm);
+const mockedBatchReactivate = vi.mocked(batchReactivateTerms);
+const mockedBatchDelete = vi.mocked(batchDeleteTerms);
 
 const TERMS: GlossaryTerm[] = [
   {
@@ -683,5 +698,150 @@ describe("Glossary 审核流（提交审核/通过/驳回，复用主数据审�
       }),
     );
     expect(await screen.findByText(/已提交审核/)).toBeInTheDocument();
+  });
+});
+
+describe("Glossary 生命周期（重新启用/删除/回收站恢复）", () => {
+  const deprecatedTerm: GlossaryTerm = { ...TERMS[1], term_code: "AOV_OLD", name: "旧术语", status: "DEPRECATED" };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedConflicts.mockResolvedValue({ items: [], total: 0 });
+    mockedListFavorites.mockResolvedValue([]);
+    mockedDomainTree.mockResolvedValue([]);
+    mockedListRelations.mockResolvedValue({ items: [], total: 0 });
+    mockedUsers.mockResolvedValue([]);
+    mockedFetchCurrentUser.mockResolvedValue({
+      id: 1, username: "admin", display_name: "管理员", role: "platform_admin", domain: null, org_id: 1,
+    } as never);
+  });
+
+  it("DEPRECATED 术语显示「重新启用」与「删除」，点重新启用调用 reactivateTerm", async () => {
+    mockedList.mockResolvedValue({ items: [deprecatedTerm], total: 1 });
+    mockedReactivate.mockResolvedValue({ ...deprecatedTerm, status: "DRAFT" } as never);
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+    await screen.findByText("旧术语");
+    fireEvent.click(screen.getByRole("button", { name: /重新启用/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /确 定|确定|OK/ }));
+    await waitFor(() => expect(mockedReactivate).toHaveBeenCalledWith("AOV_OLD"));
+    expect(await screen.findByText(/已重新启用/)).toBeInTheDocument();
+  });
+
+  it("DRAFT 术语点删除调用 deleteTerm", async () => {
+    mockedList.mockResolvedValue({ items: [TERMS[0]], total: 1 });
+    mockedDelete.mockResolvedValue(TERMS[0] as never);
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+    await screen.findByText("成交总额");
+    fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /确 定|确定|OK/ }));
+    await waitFor(() => expect(mockedDelete).toHaveBeenCalledWith("GMV"));
+    expect(await screen.findByText(/已删除/)).toBeInTheDocument();
+  });
+
+  it("回收站视图显示「恢复」按钮，点击调用 restoreTerm", async () => {
+    mockedList.mockResolvedValue({ items: [TERMS[0]], total: 1 });
+    mockedRestore.mockResolvedValue(TERMS[0] as never);
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+    await screen.findByText("成交总额");
+    // 切换到回收站视图（antd Select placeholder 为文本节点，用 getByText 展开）
+    fireEvent.mouseDown(screen.getByText("回收站"));
+    fireEvent.click(await screen.findByTitle("回收站"));
+    await waitFor(() =>
+      expect(mockedList).toHaveBeenCalledWith(expect.objectContaining({ deleted: true })),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /恢 复|恢复/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /确 定|确定|OK/ }));
+    await waitFor(() => expect(mockedRestore).toHaveBeenCalledWith("GMV"));
+    expect(await screen.findByText(/已恢复/)).toBeInTheDocument();
+  });
+});
+
+describe("Glossary 审核候选按角色过滤", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedList.mockResolvedValue({ items: TERMS, total: 2, page: 1, page_size: 20 });
+    mockedConflicts.mockResolvedValue({ items: [], total: 0 });
+    mockedListFavorites.mockResolvedValue([]);
+    mockedDomainTree.mockResolvedValue([
+      { id: 1, code: "finance", name: "财务域", parent_id: null, level: 1, sort_order: 0, status: "ACTIVE", metric_count: 0, children: [] },
+      { id: 2, code: "pharmacy", name: "药房域", parent_id: null, level: 1, sort_order: 0, status: "ACTIVE", metric_count: 0, children: [] },
+    ]);
+    mockedListRelations.mockResolvedValue({ items: [], total: 0 });
+    mockedUsers.mockResolvedValue([
+      { id: 5, username: "pharmacist", display_name: "李药师", role: "domain_admin", domain: "pharmacy", status: "active" },
+      { id: 6, username: "viewer1", display_name: "普通用户", role: "viewer", domain: "finance", status: "active" },
+    ]);
+    mockedFetchCurrentUser.mockResolvedValue({
+      id: 1, username: "admin", display_name: "管理员", role: "platform_admin", domain: null, org_id: 1,
+    } as never);
+  });
+
+  it("评审用户下拉只列出有审核权的用户（domain_admin/reviewer），普通用户被过滤", async () => {
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+    await screen.findByText("成交总额");
+    fireEvent.click(screen.getAllByRole("button", { name: /提交审核/ })[0]);
+    const modal = await screen.findByRole("dialog");
+    fireEvent.mouseDown(within(modal).getByRole("combobox"));
+    fireEvent.click(await screen.findByTitle("指定用户"));
+
+    // 用户下拉含 domain_admin（李药师），不含普通用户（viewer）
+    fireEvent.mouseDown(within(modal).getAllByRole("combobox")[1]);
+    expect(await screen.findByTitle("李药师（#5）")).toBeInTheDocument();
+    expect(screen.queryByTitle("普通用户（#6）")).toBeNull();
+  });
+
+  it("平台管理员可见全部评审域；域管理员仅可见自己域", async () => {
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+    await screen.findByText("成交总额");
+    fireEvent.click(screen.getAllByRole("button", { name: /提交审核/ })[0]);
+    const modal = await screen.findByRole("dialog");
+    fireEvent.mouseDown(within(modal).getByRole("combobox"));
+    fireEvent.click(await screen.findByTitle("指定域评审组"));
+
+    // 平台管理员（admin）：全部域可见
+    fireEvent.mouseDown(within(modal).getAllByRole("combobox")[1]);
+    expect(await screen.findByTitle("财务域（finance）")).toBeInTheDocument();
+    expect(screen.getByTitle("药房域（pharmacy）")).toBeInTheDocument();
+  });
+
+  it("域管理员提交时评审域下拉仅显示自己域", async () => {
+    mockedFetchCurrentUser.mockResolvedValue({
+      id: 9, username: "pharm_admin", display_name: "药房管理员", role: "domain_admin", domain: "pharmacy", org_id: 1,
+    } as never);
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+    await screen.findByText("成交总额");
+    fireEvent.click(screen.getAllByRole("button", { name: /提交审核/ })[0]);
+    const modal = await screen.findByRole("dialog");
+    fireEvent.mouseDown(within(modal).getByRole("combobox"));
+    fireEvent.click(await screen.findByTitle("指定域评审组"));
+
+    // 域管理员仅能看到自己域（pharmacy），财务域被过滤
+    fireEvent.mouseDown(within(modal).getAllByRole("combobox")[1]);
+    expect(await screen.findByTitle("药房域（pharmacy）")).toBeInTheDocument();
+    expect(screen.queryByTitle("财务域（finance）")).toBeNull();
   });
 });

@@ -6,9 +6,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.glossary import GlossaryConflict, TermRelation, TermVersion
@@ -25,14 +26,47 @@ class GlossaryRepository:
         return term
 
     async def get_term(self, term_code: str) -> Term | None:
-        stmt = select(Term).where(Term.term_code == term_code)
+        # P2 软删一致性：对齐 list_terms，软删术语不可见（详情/查重/删除均查不到已删术语）
+        stmt = select(Term).where(
+            Term.term_code == term_code,
+            Term.deleted_at.is_(None),
+        )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
     async def get_term_by_id(self, term_id: int) -> Term | None:
-        stmt = select(Term).where(Term.id == term_id)
+        # P2 软删一致性：对齐 list_terms
+        stmt = select(Term).where(
+            Term.id == term_id,
+            Term.deleted_at.is_(None),
+        )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def get_term_including_deleted(self, term_code: str) -> Term | None:
+        """查术语（含已软删），供回收站恢复/删除守卫使用。
+
+        常规查询走 ``get_term``（软删不可见）；恢复已删术语须能命中软删行。
+        """
+        stmt = select(Term).where(Term.term_code == term_code)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def soft_delete_term(self, term_id: int) -> None:
+        """软删术语：置 deleted_at（回收站可恢复，不物理删除）。"""
+        await self._session.execute(
+            update(Term)
+            .where(Term.id == term_id, Term.deleted_at.is_(None))
+            .values(deleted_at=datetime.now(UTC))
+        )
+
+    async def restore_term(self, term_id: int) -> None:
+        """恢复软删术语：清除 deleted_at（回收站恢复）。"""
+        await self._session.execute(
+            update(Term)
+            .where(Term.id == term_id, Term.deleted_at.is_not(None))
+            .values(deleted_at=None)
+        )
 
     async def list_terms(
         self,
@@ -42,8 +76,10 @@ class GlossaryRepository:
         limit: int,
         offset: int,
         owner_id: int | None = None,
+        deleted: bool = False,
     ) -> tuple[Iterable[Term], int]:
-        conditions = [Term.deleted_at.is_(None)]
+        # 回收站视图：deleted=True 列出已软删术语；默认列表仅未删
+        conditions = [Term.deleted_at.is_not(None) if deleted else Term.deleted_at.is_(None)]
         if domain:
             conditions.append(Term.domain == domain)
         if status:
@@ -78,7 +114,8 @@ class GlossaryRepository:
         await self._session.flush()
 
     async def all_terms(self) -> list[Term]:
-        stmt = select(Term)
+        # P2 软删一致性：对齐 list_terms，排除已软删
+        stmt = select(Term).where(Term.deleted_at.is_(None))
         return list((await self._session.execute(stmt)).scalars().all())
 
     async def save_conflict(self, conflict: GlossaryConflict) -> GlossaryConflict:

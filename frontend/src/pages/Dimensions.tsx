@@ -743,6 +743,7 @@ function DimensionsTab() {
             load();
           }}
           reviewerDomainOptions={[...domainMap.entries()].map(([value, name]) => ({ value, label: `${name} (${value})` }))}
+          user={currentUser}
         />
       </Space>
       <Table
@@ -1020,6 +1021,7 @@ function DimensionsTab() {
           value: code,
           label: `${name}（${code}）`,
         }))}
+        user={currentUser}
         submitTarget={review.submitTarget}
         submitBusy={review.submitBusy}
         onCancelSubmit={() => review.setSubmitTarget(null)}

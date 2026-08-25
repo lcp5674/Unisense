@@ -2214,6 +2214,7 @@ export async function listTerms(params?: {
   status?: string;
   search?: string;
   owner_id?: number;
+  deleted?: boolean;
   page?: number;
   page_size?: number;
 }): Promise<{ items: GlossaryTerm[]; total: number; page: number; page_size: number }> {
@@ -2222,6 +2223,7 @@ export async function listTerms(params?: {
     status: params?.status,
     search: params?.search,
     owner_id: params?.owner_id,
+    deleted: params?.deleted ? "true" : undefined,
     page: params?.page ?? 1,
     page_size: params?.page_size ?? 20,
   });
@@ -2279,6 +2281,27 @@ export async function rejectTerm(termCode: string, body: { reason: string }): Pr
 
 export async function deprecateTerm(termCode: string): Promise<GlossaryTerm> {
   return request<GlossaryTerm>(`${API_BASE}/terms/${encodeURIComponent(termCode)}/deprecate`, {
+    method: "POST",
+  });
+}
+
+/** 重新启用已废弃术语（DEPRECATED → DRAFT，可编辑后重新走审核） */
+export async function reactivateTerm(termCode: string): Promise<GlossaryTerm> {
+  return request<GlossaryTerm>(`${API_BASE}/terms/${encodeURIComponent(termCode)}/reactivate`, {
+    method: "POST",
+  });
+}
+
+/** 软删除术语（仅 DRAFT/DEPRECATED 可删；审核中/启用中禁止） */
+export async function deleteTerm(termCode: string): Promise<GlossaryTerm> {
+  return request<GlossaryTerm>(`${API_BASE}/terms/${encodeURIComponent(termCode)}/delete`, {
+    method: "POST",
+  });
+}
+
+/** 恢复已软删术语（回收站恢复） */
+export async function restoreTerm(termCode: string): Promise<GlossaryTerm> {
+  return request<GlossaryTerm>(`${API_BASE}/terms/${encodeURIComponent(termCode)}/restore`, {
     method: "POST",
   });
 }
@@ -2359,6 +2382,22 @@ export async function batchRejectTerms(codes: string[], reason: string): Promise
 /** 批量废弃术语（PUBLISHED → DEPRECATED） */
 export async function batchDeprecateTerms(codes: string[]): Promise<BatchResult> {
   return request<BatchResult>(`${API_BASE}/terms/batch-deprecate`, {
+    method: "POST",
+    body: JSON.stringify({ codes }),
+  });
+}
+
+/** 批量重新启用已废弃术语（DEPRECATED → DRAFT） */
+export async function batchReactivateTerms(codes: string[]): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/terms/batch-reactivate`, {
+    method: "POST",
+    body: JSON.stringify({ codes }),
+  });
+}
+
+/** 批量软删除术语（仅 DRAFT/DEPRECATED 可删） */
+export async function batchDeleteTerms(codes: string[]): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/terms/batch-delete`, {
     method: "POST",
     body: JSON.stringify({ codes }),
   });

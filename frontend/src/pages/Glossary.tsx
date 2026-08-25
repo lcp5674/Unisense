@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Descriptions } from "antd";
-import { PlusOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined, ThunderboltOutlined, LoadingOutlined, ApartmentOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Descriptions, Popconfirm } from "antd";
+import { PlusOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined, ThunderboltOutlined, LoadingOutlined, ApartmentOutlined, DeleteOutlined, RedoOutlined, ReloadOutlined } from "@ant-design/icons";
 import {
   listTerms,
   createTerm,
@@ -14,11 +14,16 @@ import {
   approveTerm,
   rejectTerm,
   deprecateTerm,
+  reactivateTerm,
+  deleteTerm,
+  restoreTerm,
   batchSubmitTerms,
   batchPublishTerms,
   batchApproveTerms,
   batchRejectTerms,
   batchDeprecateTerms,
+  batchReactivateTerms,
+  batchDeleteTerms,
   inferTermSuggestion,
   listDomainTree,
   listTermConflicts,
@@ -124,6 +129,8 @@ function TermsTab() {
   // 责任人（Owner）下钻（?owner_id=，总览仪表 Owner 责任分布）
   const urlOwnerId = searchParams.get("owner_id");
   const [status, setStatus] = useState(urlStatus);
+  // 回收站视图：deleted=true 时列出已软删术语（仅管理员/原 Owner 可恢复）
+  const [deleted, setDeleted] = useState(false);
   const [ownerId, setOwnerId] = useState<number | undefined>(
     urlOwnerId && /^\d+$/.test(urlOwnerId) ? Number(urlOwnerId) : undefined,
   );
@@ -188,6 +195,8 @@ function TermsTab() {
     if (action === "approve") return batchApproveTerms(opts.codes);
     if (action === "reject") return batchRejectTerms(opts.codes, opts.reason ?? "");
     if (action === "publish") return batchPublishTerms(opts.codes);
+    if (action === "reactivate") return batchReactivateTerms(opts.codes);
+    if (action === "delete") return batchDeleteTerms(opts.codes);
     return batchDeprecateTerms(opts.codes);
   }
   // 搜索框初始值承接 URL 关键词（首查即带过滤）
@@ -201,6 +210,7 @@ function TermsTab() {
       const res = await listTerms({
         search: overSearch ?? search,
         status,
+        deleted,
         owner_id: ownerId,
         page,
         page_size: pageSize,
@@ -251,7 +261,7 @@ function TermsTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize, status, ownerId]);
+  }, [page, pageSize, status, ownerId, deleted]);
 
   // 加载当前用户术语收藏（TERM 类型）供行内收藏按钮判断；同时取当前用户供审核权判断
   useEffect(() => {
@@ -389,6 +399,38 @@ function TermsTab() {
     }
   }
 
+  // 生命周期（对齐维度/度量）：重新启用（DEPRECATED→DRAFT）/ 删除（软删进回收站）/ 恢复（回收站）
+  async function handleReactivate(t: GlossaryTerm) {
+    try {
+      await reactivateTerm(t.term_code);
+      message.success("已重新启用，回到草稿状态");
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "重新启用失败");
+    }
+  }
+
+  async function handleDelete(t: GlossaryTerm) {
+    try {
+      await deleteTerm(t.term_code);
+      message.success("已删除，可在回收站恢复");
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "删除失败");
+    }
+  }
+
+  // 回收站恢复
+  async function handleRestore(t: GlossaryTerm) {
+    try {
+      await restoreTerm(t.term_code);
+      message.success("已恢复");
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "恢复失败");
+    }
+  }
+
   // 详情：先用列表行数据即时展示，再拉取最新完整详情补全（owner/版本/时间戳等列外字段）
   async function openDetail(t: GlossaryTerm) {
     setDetailTerm(t);
@@ -486,49 +528,85 @@ function TermsTab() {
       title: "操作",
       key: "actions",
       width: 420,
-      render: (_: unknown, t: GlossaryTerm) => (
-        <Space wrap>
-          <Button size="small" type="link" onClick={() => openDetail(t)}>详情</Button>
-          {can("glossary:edit") && (
-            <Button size="small" type="link" onClick={() => openEdit(t)}>编辑</Button>
-          )}
-          <Button size="small" type="link" icon={<ApartmentOutlined />} onClick={() => openRelationView(t)}>关系</Button>
-          {can("glossary:create") && (
-            <Button size="small" type="link" onClick={() => openRelation(t)}>建立关系</Button>
-          )}
-          <Button
-            size="small"
-            type="link"
-            icon={<HeartOutlined style={{ color: favCodes.has(t.term_code) ? "#eb2f96" : undefined }} />}
-            onClick={() => toggleFavorite(t)}
-          >
-            {favCodes.has(t.term_code) ? "已收藏" : "收藏"}
-          </Button>
-          {can("glossary:edit") && (
-            <MasterDataReviewActions
-              row={{
-                code: t.term_code,
-                name: t.name,
-                status: t.status,
-                reviewer_type: t.reviewer_type,
-                reviewer_id: t.reviewer_id,
-                reviewer_domain: t.reviewer_domain,
-              }}
-              user={currentUser}
-              busyCode={review.busyCode}
-              onApprove={handleApprove}
-              onOpenSubmit={(r) => review.setSubmitTarget({ code: r.code, name: r.name })}
-              onOpenReject={(r) => review.setRejectTarget({ code: r.code, name: r.name })}
-            />
-          )}
-          {t.status === "DEPRECATED" && currentUser?.role === "platform_admin" && can("glossary:edit") && (
-            <Button size="small" type="primary" icon={<SendOutlined />} onClick={() => publishTerm(t.term_code).then(() => { message.success("已重新发布"); load(); })}>再次发布</Button>
-          )}
-          {t.status !== "DEPRECATED" && can("glossary:deprecate") && (
-            <Button size="small" danger onClick={() => handleDeprecate(t)}>废弃</Button>
-          )}
-        </Space>
-      ),
+      render: (_: unknown, t: GlossaryTerm) => {
+        // 回收站视图：仅展示恢复（软删项不提供编辑/审核等操作）
+        if (deleted) {
+          return (
+            <Space wrap>
+              <Popconfirm
+                title="确认恢复该术语？"
+                description="恢复后回到原状态（草稿/废弃），可重新走审核流"
+                onConfirm={() => handleRestore(t)}
+              >
+                <Button size="small" type="primary" icon={<ReloadOutlined />}>
+                  恢复
+                </Button>
+              </Popconfirm>
+            </Space>
+          );
+        }
+        return (
+          <Space wrap>
+            <Button size="small" type="link" onClick={() => openDetail(t)}>详情</Button>
+            {can("glossary:edit") && (
+              <Button size="small" type="link" onClick={() => openEdit(t)}>编辑</Button>
+            )}
+            <Button size="small" type="link" icon={<ApartmentOutlined />} onClick={() => openRelationView(t)}>关系</Button>
+            {can("glossary:create") && (
+              <Button size="small" type="link" onClick={() => openRelation(t)}>建立关系</Button>
+            )}
+            <Button
+              size="small"
+              type="link"
+              icon={<HeartOutlined style={{ color: favCodes.has(t.term_code) ? "#eb2f96" : undefined }} />}
+              onClick={() => toggleFavorite(t)}
+            >
+              {favCodes.has(t.term_code) ? "已收藏" : "收藏"}
+            </Button>
+            {can("glossary:edit") && (
+              <MasterDataReviewActions
+                row={{
+                  code: t.term_code,
+                  name: t.name,
+                  status: t.status,
+                  reviewer_type: t.reviewer_type,
+                  reviewer_id: t.reviewer_id,
+                  reviewer_domain: t.reviewer_domain,
+                }}
+                user={currentUser}
+                busyCode={review.busyCode}
+                onApprove={handleApprove}
+                onOpenSubmit={(r) => review.setSubmitTarget({ code: r.code, name: r.name })}
+                onOpenReject={(r) => review.setRejectTarget({ code: r.code, name: r.name })}
+              />
+            )}
+            {t.status === "DEPRECATED" && currentUser?.role === "platform_admin" && can("glossary:edit") && (
+              <Button size="small" type="primary" icon={<SendOutlined />} onClick={() => publishTerm(t.term_code).then(() => { message.success("已重新发布"); load(); })}>再次发布</Button>
+            )}
+            {t.status === "DEPRECATED" && can("glossary:edit") && (
+              <Popconfirm
+                title="确认重新启用该术语？"
+                description="回到草稿状态，需重新提交审核后才能发布"
+                onConfirm={() => handleReactivate(t)}
+              >
+                <Button size="small" icon={<RedoOutlined />}>重新启用</Button>
+              </Popconfirm>
+            )}
+            {t.status !== "DEPRECATED" && can("glossary:deprecate") && (
+              <Button size="small" danger onClick={() => handleDeprecate(t)}>废弃</Button>
+            )}
+            {(t.status === "DRAFT" || t.status === "DEPRECATED") && can("glossary:edit") && (
+              <Popconfirm
+                title="确认删除该术语？"
+                description="删除后进入回收站，可恢复"
+                onConfirm={() => handleDelete(t)}
+              >
+                <Button size="small" danger icon={<DeleteOutlined />} aria-label="删除">删除</Button>
+              </Popconfirm>
+            )}
+          </Space>
+        );
+      },
     },
   ];
 
@@ -551,6 +629,18 @@ function TermsTab() {
           onChange={(v) => { setStatus(v || ""); setPage(1); }}
           options={[{ value: "DRAFT", label: "草稿" }, { value: "REVIEW", label: "审核中" }, { value: "PUBLISHED", label: "已发布" }, { value: "DEPRECATED", label: "已废弃" }]}
         />
+        <Select
+          value={deleted ? "trash" : undefined}
+          placeholder="回收站"
+          allowClear
+          style={{ width: 120 }}
+          onChange={(v) => {
+            setPage(1);
+            setDeleted(v === "trash");
+            setSelectedRows([]);
+          }}
+          options={[{ value: "trash", label: "回收站" }]}
+        />
         {can("glossary:create") && (
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建术语</Button>
         )}
@@ -563,7 +653,9 @@ function TermsTab() {
             { key: "approve", label: "批量通过（审核中）" },
             { key: "reject", label: "批量驳回（审核中）" },
             { key: "publish", label: "批量发布（管理员直发）", adminOnly: true },
+            { key: "reactivate", label: "批量重新启用（已废弃）" },
             { key: "deprecate", label: "批量废弃（已发布）", danger: true },
+            { key: "delete", label: "批量删除（草稿/废弃）", danger: true },
           ]}
           canRun={(a) => {
             if (a === "approve" || a === "reject") return !!canReview;
@@ -577,6 +669,7 @@ function TermsTab() {
             load();
           }}
           reviewerDomainOptions={domainOptions}
+          user={currentUser}
           isAdmin={currentUser?.role === "platform_admin"}
         />
         <span className="muted">共 {total} 条</span>
@@ -936,6 +1029,7 @@ function TermsTab() {
         entityLabel="术语"
         submitDescription="术语是业务概念标准层，被指标引用的标准定义。提交后由评审人审核通过才可发布；审核期间术语锁定不可编辑，驳回后可修改重提。"
         reviewerDomainOptions={domainOptions}
+        user={currentUser}
         submitTarget={review.submitTarget}
         submitBusy={review.submitBusy}
         onCancelSubmit={() => review.setSubmitTarget(null)}

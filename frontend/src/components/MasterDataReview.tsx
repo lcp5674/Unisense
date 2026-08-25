@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Alert, Button, Form, Input, Modal, Select, Tooltip } from "antd";
 import {
   CheckOutlined,
@@ -106,6 +106,8 @@ export function MasterDataReviewModals(props: {
   submitDescription: string;
   /** 评审指派可选业务域（评审域选择框；不传则回退为手动输入 code） */
   reviewerDomainOptions?: { value: string; label: string }[];
+  /** 当前用户：评审候选按角色过滤（平台管理员全量；域管理员/评审员限自己域） */
+  user?: CurrentUser | null;
   submitTarget: { code: string; name: string } | null;
   submitBusy: boolean;
   onCancelSubmit: () => void;
@@ -119,6 +121,7 @@ export function MasterDataReviewModals(props: {
     entityLabel,
     submitDescription,
     reviewerDomainOptions,
+    user,
     submitTarget,
     submitBusy,
     onCancelSubmit,
@@ -131,20 +134,29 @@ export function MasterDataReviewModals(props: {
   const [submitForm] = Form.useForm();
   const [rejectForm] = Form.useForm();
   // 评审用户候选（全局用户列表，三页共用；打开提交弹窗时懒加载，失败静默回退空列表）
+  // 按角色过滤：仅 domain_admin / reviewer 有审核权，不展示普通用户（避免指派无人可审）
   const [userOptions, setUserOptions] = useState<{ value: number; label: string }[]>([]);
   useEffect(() => {
     if (!submitTarget) return;
     listUsers()
       .then((users: UserBrief[]) =>
         setUserOptions(
-          users.map((u) => ({
-            value: u.id,
-            label: `${u.display_name || u.username}（#${u.id}）`,
-          })),
+          users
+            .filter((u) => u.role === "domain_admin" || u.role === "reviewer")
+            .map((u) => ({
+              value: u.id,
+              label: `${u.display_name || u.username}（#${u.id}）`,
+            })),
         ),
       )
       .catch(() => setUserOptions([]));
   }, [submitTarget]);
+  // 评审域候选：平台管理员可全量；域管理员/评审员仅自己域（防止指派到无权管辖的域）
+  const effectiveReviewerDomains = useMemo(() => {
+    if (!reviewerDomainOptions) return undefined;
+    if (!user || user.role === "platform_admin" || !user.domain) return reviewerDomainOptions;
+    return reviewerDomainOptions.filter((d) => d.value === user.domain);
+  }, [reviewerDomainOptions, user]);
 
   async function handleSubmitOk() {
     const values = await submitForm.validateFields();
@@ -235,9 +247,13 @@ export function MasterDataReviewModals(props: {
                       allowClear
                       optionFilterProp="label"
                       placeholder="选择评审域"
-                      options={reviewerDomainOptions}
+                      options={effectiveReviewerDomains}
                       notFoundContent={
-                        reviewerDomainOptions.length ? undefined : "暂无启用中的主题域"
+                        effectiveReviewerDomains?.length
+                          ? undefined
+                          : user?.role === "domain_admin" || user?.role === "reviewer"
+                            ? "当前域无可指派的评审域"
+                            : "暂无启用中的主题域"
                       }
                     />
                   ) : (

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Button, Dropdown, Form, Input, message, Modal, Select, Tag } from "antd";
 import {
   CheckOutlined,
@@ -8,7 +8,7 @@ import {
 } from "@ant-design/icons";
 import type { MenuProps } from "antd";
 import { listUsers } from "../api";
-import type { BatchResult, UserBrief } from "../types";
+import type { BatchResult, CurrentUser, UserBrief } from "../types";
 
 /** 主数据批量治理共享 UI（统一「批量治理」复用模式）。
  *  逻辑度量/维度/术语三页复用：多选后「批量操作」下拉（提交审核/通过/驳回/废弃/直发发布）
@@ -60,6 +60,8 @@ interface MasterDataBatchProps<T extends object> extends BatchReviewerOptions {
   onDone?: () => void;
   /** 是否平台管理员（决定 admin 直发发布可见性） */
   isAdmin?: boolean;
+  /** 当前用户：评审候选按角色过滤（平台管理员全量；域管理员/评审员限自己域） */
+  user?: CurrentUser | null;
   /** 批量按钮文案（默认「批量操作」） */
   buttonLabel?: string;
 }
@@ -86,6 +88,7 @@ export function MasterDataBatch<T extends object>(props: MasterDataBatchProps<T>
     onDone,
     reviewerDomainOptions,
     isAdmin = false,
+    user,
     buttonLabel = "批量操作",
   } = props;
   const [action, setAction] = useState<BatchActionKey | null>(null);
@@ -99,6 +102,7 @@ export function MasterDataBatch<T extends object>(props: MasterDataBatchProps<T>
   const [userOptions, setUserOptions] = useState<{ value: number; label: string }[]>([]);
 
   // 评审用户候选（全局用户列表，打开提交审核弹窗时懒加载，失败静默回退空列表）
+  // 按角色过滤：仅 domain_admin / reviewer 有审核权，不展示普通用户（避免指派无人可审）
   const openSubmitModal = (act: BatchActionKey) => {
     setAction(act);
     form.resetFields();
@@ -106,15 +110,23 @@ export function MasterDataBatch<T extends object>(props: MasterDataBatchProps<T>
       listUsers()
         .then((users: UserBrief[]) =>
           setUserOptions(
-            users.map((u) => ({
-              value: u.id,
-              label: `${u.display_name || u.username}（#${u.id}）`,
-            })),
+            users
+              .filter((u) => u.role === "domain_admin" || u.role === "reviewer")
+              .map((u) => ({
+                value: u.id,
+                label: `${u.display_name || u.username}（#${u.id}）`,
+              })),
           ),
         )
         .catch(() => setUserOptions([]));
     }
   };
+  // 评审域候选：平台管理员可全量；域管理员/评审员仅自己域（防止指派到无权管辖的域）
+  const effectiveReviewerDomains = useMemo(() => {
+    if (!reviewerDomainOptions) return undefined;
+    if (!user || user.role === "platform_admin" || !user.domain) return reviewerDomainOptions;
+    return reviewerDomainOptions.filter((d) => d.value === user.domain);
+  }, [reviewerDomainOptions, user]);
 
   const asRec = (row: T) => row as Record<string, unknown>;
   const codesOf = (filter: (s: string) => boolean) =>
@@ -272,8 +284,14 @@ export function MasterDataBatch<T extends object>(props: MasterDataBatchProps<T>
                       allowClear
                       optionFilterProp="label"
                       placeholder="选择评审域"
-                      options={reviewerDomainOptions}
-                      notFoundContent={reviewerDomainOptions?.length ? undefined : "暂无启用中的主题域"}
+                      options={effectiveReviewerDomains}
+                      notFoundContent={
+                        effectiveReviewerDomains?.length
+                          ? undefined
+                          : user?.role === "domain_admin" || user?.role === "reviewer"
+                            ? "当前域无可指派的评审域"
+                            : "暂无启用中的主题域"
+                      }
                     />
                   </Form.Item>
                 ) : null

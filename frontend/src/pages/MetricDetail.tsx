@@ -408,8 +408,16 @@ function DefinitionCard({ metric }: { metric: MetricResponse }) {
     : def.source_tables
       ? [String(def.source_tables)]
       : [];
+  const downstreamTables: string[] = Array.isArray(def.downstream_tables)
+    ? def.downstream_tables.map((s) => String(s))
+    : def.downstream_tables
+      ? [String(def.downstream_tables)]
+      : [];
   const rawEtl = def.etl_sql ?? def.sql;
   const etlSql = rawEtl == null ? "" : String(rawEtl);
+  // 口径分角色（PRD 4.5 责任方对应）：系统开发伪代码口径 / 数仓开发详细口径
+  const pseudoDefinition = typeof def.pseudo_definition === "string" ? def.pseudo_definition : "";
+  const dwDefinition = typeof def.dw_definition === "string" ? def.dw_definition : "";
   return (
     <Card title="口径定义" size="small" style={{ marginBottom: 16 }}>
       <Descriptions column={1} size="small" bordered>
@@ -421,8 +429,15 @@ function DefinitionCard({ metric }: { metric: MetricResponse }) {
           </Descriptions.Item>
         )}
         {sourceTables.length > 0 && (
-          <Descriptions.Item label="关联数据表">
+          <Descriptions.Item label="依赖表（上游）">
             {sourceTables.map((t) => (
+              <Tag key={t} className="mono">{t}</Tag>
+            ))}
+          </Descriptions.Item>
+        )}
+        {downstreamTables.length > 0 && (
+          <Descriptions.Item label="使用表（下游）">
+            {downstreamTables.map((t) => (
               <Tag key={t} className="mono">{t}</Tag>
             ))}
           </Descriptions.Item>
@@ -456,6 +471,20 @@ function DefinitionCard({ metric }: { metric: MetricResponse }) {
           <Descriptions.Item label="口径 SQL">
             <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto" }}>
               {etlSql}
+            </pre>
+          </Descriptions.Item>
+        )}
+        {pseudoDefinition && (
+          <Descriptions.Item label="伪代码口径（系统开发）">
+            <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto", whiteSpace: "pre-wrap" }}>
+              {pseudoDefinition}
+            </pre>
+          </Descriptions.Item>
+        )}
+        {dwDefinition && (
+          <Descriptions.Item label="数仓详细口径（数仓开发）">
+            <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto" }}>
+              {dwDefinition}
             </pre>
           </Descriptions.Item>
         )}
