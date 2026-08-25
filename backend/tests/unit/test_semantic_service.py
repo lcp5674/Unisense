@@ -1403,7 +1403,7 @@ async def test_batch_register_db_error_savepoint_continues():
 
 def _sql_atomic(
     key: str, code: str, name: str, col: str, agg: str = "SUM"
-) -> "SqlBatchCreateCandidate":
+) -> SqlBatchCreateCandidate:
     """构造 SQL 批量注册原子候选。"""
     return SqlBatchCreateCandidate(
         key=key,
@@ -1423,7 +1423,7 @@ def _sql_atomic(
 
 def _sql_composite(
     key: str, code: str, name: str, deps: list[str]
-) -> "SqlBatchCreateCandidate":
+) -> SqlBatchCreateCandidate:
     """构造 SQL 批量注册复合候选。"""
     return SqlBatchCreateCandidate(
         key=key,
