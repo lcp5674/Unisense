@@ -102,6 +102,7 @@ import RoleOwnerSelect, { type RoleOwnerValue } from "../components/RoleOwnerSel
 import { QualitySnapshot } from "./metric/QualitySnapshot";
 import { LineageImpact } from "./metric/LineageImpact";
 import { VersionHistory } from "./metric/VersionHistory";
+import { buildChangeInfo, changeVersionText, MetricDiffView } from "./metric/ChangeContext";
 import { AuditTimeline } from "./metric/AuditTimeline";
 import { RelatedDimensions } from "./metric/RelatedDimensions";
 import { CodeValue } from "../components/CodeValue";
@@ -267,6 +268,51 @@ function DeprecatedChain({ metric }: { metric: MetricResponse }) {
           {metric.deprecated_at && <span className="muted">废弃时间：{formatCnTime(metric.deprecated_at)}</span>}
         </Space>
       }
+      style={{ marginBottom: 16 }}
+    />
+  );
+}
+
+// 审核中（REVIEW）状态引导：展示本次审批是新增/变更/破坏性/重评审 + 变更前后对比。
+// 复用 ChangeContext 的 buildChangeInfo/MetricDiffView；versions 已由详情页加载，无需自拉。
+function ReviewStatusContext({ metric, versions }: { metric: MetricResponse; versions: MetricVersionResponse[] }) {
+  if (!versions.length) return null;
+  const info = buildChangeInfo(metric, versions);
+  const showDiff = info.kind !== "new" && info.diff != null && Object.keys(info.diff).length > 0;
+  const diff = showDiff ? info.diff : null;
+  return (
+    <>
+      <Alert
+        type={info.kind === "breaking" ? "warning" : "info"}
+        showIcon
+        message={
+          <Space size={8} wrap>
+            <Tag color={info.color}>{info.tag}{changeVersionText(info)}</Tag>
+            <span>该指标当前为「审核中（REVIEW）」，待评审通过后方可对外消费</span>
+          </Space>
+        }
+        description={info.note}
+        style={{ marginBottom: 16 }}
+      />
+      {diff && (
+        <Card size="small" title="变更前后对比" style={{ marginBottom: 16 }}>
+          <MetricDiffView diff={diff} />
+        </Card>
+      )}
+    </>
+  );
+}
+
+// 已发布（PUBLISHED）且经历过变更（非首次创建）：轻量提示当前口径为变更后版本
+function PublishedChangeContext({ metric, versions }: { metric: MetricResponse; versions: MetricVersionResponse[] }) {
+  const info = buildChangeInfo(metric, versions);
+  if (info.kind !== "update" && info.kind !== "breaking") return null;
+  return (
+    <Alert
+      type="info"
+      showIcon
+      message={`当前口径为「${info.tag}」${changeVersionText(info)}，已生效`}
+      description={info.note}
       style={{ marginBottom: 16 }}
     />
   );
@@ -1940,15 +1986,29 @@ export function MetricDetail() {
 
       <DeprecatedChain metric={metric} />
 
-      {/* 非发布状态引导：DRAFT/REVIEW/EXPERIMENTAL 尚未成为可消费口径（对齐作废/废弃横幅） */}
-      {(metric.status === "DRAFT" || metric.status === "REVIEW" || metric.status === "EXPERIMENTAL") && (
+      {/* 状态机细分引导：REVIEW=变更上下文（新增/变更/破坏性/重评审 + 前后对比）、
+          EXPERIMENTAL=灰度说明、DRAFT=草稿提示、PUBLISHED 已变更=变更后口径提示（对齐作废/废弃横幅） */}
+      {metric.status === "REVIEW" && <ReviewStatusContext metric={metric} versions={versions} />}
+      {metric.status === "EXPERIMENTAL" && (
         <Alert
           type="info"
           showIcon
-          message={`该指标当前为「${METRIC_STATUS_LABEL[metric.status] ?? metric.status}」，尚未发布为可消费口径`}
-          description="请勿在生产消费中使用该口径；发布后（或从「待办中心」处理该指标后）方可对外消费。"
+          message="该指标当前为「灰度实验（EXPERIMENTAL）」，仅对白名单租户生效"
+          description="灰度版本可经「全量发布」转正式（PUBLISHED），或「回滚」退回上一正式版本；非白名单租户暂不可消费该口径。"
           style={{ marginBottom: 16 }}
         />
+      )}
+      {metric.status === "DRAFT" && (
+        <Alert
+          type="info"
+          showIcon
+          message="该指标当前为「草稿（DRAFT）」，尚未提交评审"
+          description="请勿在生产消费中使用该口径；完成编辑后可提交评审，评审通过后方可对外消费。"
+          style={{ marginBottom: 16 }}
+        />
+      )}
+      {metric.status === "PUBLISHED" && versions.length > 0 && (
+        <PublishedChangeContext metric={metric} versions={versions} />
       )}
 
       {/* 存量原子指标 OneData 化引导（D3：不自动迁移，留人工重建）：

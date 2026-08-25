@@ -3,7 +3,7 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 import { MemoryRouter, Routes, Route, useSearchParams } from "react-router-dom";
 import { MetricDetail } from "../pages/MetricDetail";
 import { PermissionProvider } from "../hooks/usePermission";
-import type { MeasureCatalog, MetricHealth, MetricResponse, SystemDictItem } from "../types";
+import type { MeasureCatalog, MetricHealth, MetricResponse, MetricVersionResponse, SystemDictItem } from "../types";
 
 vi.mock("../api", () => ({
   getMetric: vi.fn(),
@@ -806,6 +806,114 @@ describe("MetricDetail", () => {
     await screen.findByText("query-page-sales_gmv_sum_d");
   });
 
+  describe("MetricDetail 状态机细分引导（新增/变更/破坏性/重评审 + 前后对比）", () => {
+  function makeVersion(partial: Partial<MetricVersionResponse> & { version: number }): MetricVersionResponse {
+    return {
+      id: partial.version,
+      metric_id: 1,
+      change_type: "CREATE",
+      definition_json: {},
+      diff_json: null,
+      status: "DRAFT",
+      change_reason: "",
+      created_by: 1,
+      published_at: null,
+      created_at: "2026-08-01T00:00:00",
+      ...partial,
+    };
+  }
+
+  it("REVIEW 新增指标（首次提交）：展示新增 Tag 且无变更前后对比", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "REVIEW", version: 1, effective_version: null, approver_id: null, pii_flag: false });
+    mockedListVersions.mockResolvedValue([makeVersion({ version: 1, change_type: "CREATE", status: "REVIEW" })]);
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    await screen.findByText("新增指标");
+    expect(screen.queryByText("变更前后对比")).toBeNull();
+  });
+
+  it("REVIEW 变更指标：展示 v1→v2 与变更前后对比", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "REVIEW", version: 2, effective_version: 1, approver_id: null, pii_flag: false });
+    mockedListVersions.mockResolvedValue([
+      makeVersion({
+        version: 2,
+        change_type: "UPDATE",
+        status: "REVIEW",
+        diff_json: {
+          expression: { before: "sum(gmv)", after: "sum(gmv_amount)", change_type: "UPDATE" },
+        },
+      }),
+      makeVersion({ version: 1, change_type: "CREATE", status: "PUBLISHED", published_at: "2026-08-01T00:00:00" }),
+    ]);
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    await screen.findByText("变更前后对比");
+    expect(screen.getByText(/变更指标 v1→v2/)).toBeTruthy();
+    // 变更后值（diff after）唯一出现；变更前值同时出现在口径定义中，用 getAllByText 兼容
+    expect(screen.getByText("sum(gmv_amount)")).toBeTruthy();
+    expect(screen.getAllByText("sum(gmv)").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("REVIEW 破坏性变更：展示破坏性 Tag 与对比", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "REVIEW", version: 2, effective_version: 1, approver_id: null, pii_flag: false });
+    mockedListVersions.mockResolvedValue([
+      makeVersion({
+        version: 2,
+        change_type: "BREAKING",
+        status: "REVIEW",
+        diff_json: {
+          granularity: { before: "day", after: "month", change_type: "BREAKING" },
+        },
+      }),
+      makeVersion({ version: 1, change_type: "CREATE", status: "PUBLISHED", published_at: "2026-08-01T00:00:00" }),
+    ]);
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    await screen.findByText(/破坏性变更 v2/);
+    expect(screen.getByText("变更前后对比")).toBeTruthy();
+  });
+
+  it("REVIEW 废弃恢复重评审：当前版本仍已发布时展示重评审 Tag", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "REVIEW", version: 1, effective_version: 1, approver_id: null, pii_flag: false });
+    mockedListVersions.mockResolvedValue([
+      makeVersion({ version: 1, change_type: "CREATE", status: "PUBLISHED", published_at: "2026-08-01T00:00:00" }),
+    ]);
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    await screen.findByText(/废弃恢复重评审/);
+  });
+
+  it("EXPERIMENTAL：展示灰度说明而非草稿提示", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "EXPERIMENTAL", version: 2, effective_version: 1, pii_flag: false });
+    mockedListVersions.mockResolvedValue([]);
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    await screen.findByText(/灰度实验（EXPERIMENTAL）/);
+    expect(screen.queryByText(/尚未提交评审/)).toBeNull();
+  });
+
+  it("DRAFT：展示草稿提示", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "DRAFT", version: 1, effective_version: null, approver_id: null, pii_flag: false });
+    mockedListVersions.mockResolvedValue([]);
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    await screen.findByText(/草稿（DRAFT）/);
+  });
+
+  it("PUBLISHED 且经历过变更：轻量提示当前为变更后口径", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "PUBLISHED", version: 2, effective_version: 1, pii_flag: false });
+    mockedListVersions.mockResolvedValue([
+      makeVersion({ version: 2, change_type: "UPDATE", status: "PUBLISHED", published_at: "2026-08-02T00:00:00" }),
+      makeVersion({ version: 1, change_type: "CREATE", status: "PUBLISHED", published_at: "2026-08-01T00:00:00" }),
+    ]);
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    await screen.findByText(/当前口径为「变更指标」/);
+  });
+
+  it("PUBLISHED 首次创建：不展示变更提示", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "PUBLISHED", version: 1, effective_version: 1, pii_flag: false });
+    mockedListVersions.mockResolvedValue([
+      makeVersion({ version: 1, change_type: "CREATE", status: "PUBLISHED", published_at: "2026-08-01T00:00:00" }),
+    ]);
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    await screen.findByText("销售 GMV");
+    expect(screen.queryByText(/当前口径为「变更指标」/)).toBeNull();
+  });
+  });
 });
 
 
@@ -2302,4 +2410,5 @@ describe("MetricDetail 按钮级权限过滤", () => {
       expect(lastCall?.measure_id).toBeNull();
     });
   });
+
 });
