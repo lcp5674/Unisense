@@ -712,6 +712,8 @@ async def test_infer_sql_batch_llm_measure_fallback() -> None:
     assert cand["aggregation"] == "SUM"
     assert cand["name"] == "日成交额"
     assert cand["source_table"] == "dwd_order_di"
+    # P2-2：LLM 兜底提取的候选带 source=llm（前端「AI 推断」复核标识）
+    assert cand["source"] == "llm"
 
 
 async def test_infer_sql_batch_llm_fallback_failure_skips() -> None:
@@ -952,3 +954,57 @@ def test_build_atomic_candidate_empty_domain_code_none() -> None:
         time_column="dt",
     )
     assert cand2["metric_code"] == "sales_order_amount_day"
+
+
+async def test_infer_sql_batch_llm_batch_limit() -> None:
+    """P1-2：批级 LLM 兜底限额——超过 _LLM_BATCH_LIMIT 的语句降级 skipped(llm_limit)。
+
+    修复前多语句脚本逐条失败语句都调 LLM（20 条失败语句 = 20 次调用），可能打满
+    LLM 配额/拖慢解析。修复后 _llm_infer_measures 调用数封顶 _LLM_BATCH_LIMIT，
+    超限语句不调 LLM 直接 skipped 并标注 llm_limit（前端提示「已达 AI 兜底上限」）。
+    """
+    from app.services.semantic.sql_infer import SqlProfile
+    from app.services.semantic.sql_split import _LLM_BATCH_LIMIT
+
+    real_parse = parse_sql_profile
+
+    def _fake_parse(sql: str) -> SqlProfile:
+        if "unparsable_col" in sql:
+            return SqlProfile(sql=sql)  # 规则层解析失败（空画像）
+        return real_parse(sql)
+
+    # 构造 _LLM_BATCH_LIMIT + 1 条失败语句（每条独立 SUM）
+    parts = [
+        f"SELECT dt, SUM(unparsable_col{i}) AS m{i} FROM dwd_order_di GROUP BY dt"
+        for i in range(_LLM_BATCH_LIMIT + 1)
+    ]
+    llm_mock = AsyncMock(
+        side_effect=lambda db, full_sql, focus_sql: [
+            {
+                "column": "unparsable_col0",
+                "agg": "SUM",
+                "alias": "gmv",
+                "table": "dwd_order_di",
+                "period": "day",
+                "name": "日成交额",
+            }
+        ]
+    )
+    with (
+        patch(
+            "app.services.semantic.sql_split.parse_sql_profile",
+            side_effect=_fake_parse,
+        ),
+        patch(
+            "app.services.semantic.sql_split._llm_infer_measures",
+            new=llm_mock,
+        ),
+    ):
+        result = await infer_sql_batch(
+            _fake_db(), sql=";".join(parts), split_mode="semicolon", domain_code="sales"
+        )
+    # 前 _LLM_BATCH_LIMIT 条走 LLM 产出候选；超限第 N+1 条降级 skipped(llm_limit)
+    assert llm_mock.call_count == _LLM_BATCH_LIMIT
+    assert len(result["candidates"]) == _LLM_BATCH_LIMIT
+    assert len(result["skipped"]) == 1
+    assert result["skipped"][0]["reason"] == "llm_limit"

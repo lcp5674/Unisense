@@ -4584,6 +4584,17 @@ class MetricService(BaseService):
             )
         await self._validate_domain_active(request.domain)
 
+        # P0-1：冲突预检比对对象在批量循环内共享——预加载一次，每候选成功后增量
+        # 追加，避免 N 候选 = N 次全量加载 + N 次与全量 existing 比对（O(N²) 性能
+        # 退化；对齐 batch_register_metrics 的 L3 复用模式，service.py:608-609 注释
+        # 声明「批量注册场景传入预加载 existing」此前 SQL 批量路径漏接线）。
+        # best-effort：预加载失败降级为 None（每候选内部 load_conflict_existing 亦
+        # 有 best-effort 兜底），不阻断批量注册。
+        try:
+            preloaded_existing = await self.load_conflict_existing()
+        except Exception:  # noqa: BLE001 - 预加载失败仅降级，不影响主流程
+            preloaded_existing = None
+
         # Phase1 原子：逐候选 savepoint 创建；业务/编码冲突记 VALIDATION_ERROR 继续
         atom_ok: set[str] = set()
         for cand in request.candidates:
@@ -4608,8 +4619,36 @@ class MetricService(BaseService):
                         granularity=cand.granularity,
                     )
                     await self.create_metric(
-                        create_req, owner_id=actor_id, role=role, user_domain=user_domain
+                        create_req,
+                        owner_id=actor_id,
+                        role=role,
+                        user_domain=user_domain,
+                        _preloaded_conflict_existing=preloaded_existing,
                     )
+                    # P0-1 增量：原子成功后追加到共享 existing，保持候选间互相冲突
+                    # 检测（与逐候选加载时「前一候选已 flush 出现在后续候选比对集」
+                    # 行为一致，对齐 batch_register_metrics 的 L3 逻辑）。
+                    if preloaded_existing is not None:
+                        from app.services.conflict.schemas import MetricInput
+
+                        _cdef = cand.definition_json or {}
+                        preloaded_existing.append(
+                            MetricInput(
+                                metric_code=code,
+                                domain=request.domain,
+                                definition=(
+                                    _cdef.get("definition")
+                                    or _cdef.get("expression")
+                                    or ""
+                                ),
+                                source_tables=_cdef.get("source_tables") or [],
+                                has_pii=bool(_cdef.get("pii")),
+                                pii_authorized=False,
+                                metric_id=None,
+                                definition_json=_cdef,
+                                synonyms=[],
+                            )
+                        )
                 atom_ok.add(code)
                 candidates.append(
                     {"metric_code": code, "status": "DRAFT", "validation_errors": None}
@@ -4687,9 +4726,22 @@ class MetricService(BaseService):
                         # P1-3：复合候选携带实际统计周期/粒度（不再默认 day 失真）
                         period=cand.period,
                         granularity=cand.granularity,
+                        # P0-2：复合指标批量创建补齐单位 + 口径三方责任（单条创建有、
+                        # 批量路径此前漏传——责任链/单位继承中断，详情页 OwnerChain 不完整）
+                        unit=cand.unit,
+                        product_owner_id=cand.product_owner_id,
+                        tech_owner_id=cand.tech_owner_id,
+                        dw_developer_id=cand.dw_developer_id,
+                        product_owner_name=cand.product_owner_name,
+                        tech_owner_name=cand.tech_owner_name,
+                        dw_developer_name=cand.dw_developer_name,
                     )
                     await self.create_metric(
-                        create_req, owner_id=actor_id, role=role, user_domain=user_domain
+                        create_req,
+                        owner_id=actor_id,
+                        role=role,
+                        user_domain=user_domain,
+                        _preloaded_conflict_existing=preloaded_existing,
                     )
                 candidates.append(
                     {"metric_code": code, "status": "DRAFT", "validation_errors": None}

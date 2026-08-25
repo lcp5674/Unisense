@@ -649,6 +649,14 @@ class SqlBatchCreateCandidate(BaseModel):
     mount: MetricMountInput | None = Field(
         None, description="挂载实体（可选，创建时落 metric_mount）"
     )
+    # P0-2：口径三方责任预设（复合指标批量创建补齐——详情页 OwnerChain 责任链完整；
+    # 原子候选责任方通常随创建人/域默认，复合候选允许携带独立责任方）
+    product_owner_id: int | None = Field(None, ge=1, description="产品需求方用户 ID")
+    tech_owner_id: int | None = Field(None, ge=1, description="技术方用户 ID（口径 ETL 实现人）")
+    dw_developer_id: int | None = Field(None, ge=1, description="数仓开发用户 ID（血缘维护人）")
+    product_owner_name: str | None = Field(None, max_length=128, description="产品需求方名称兜底")
+    tech_owner_name: str | None = Field(None, max_length=128, description="技术方名称兜底")
+    dw_developer_name: str | None = Field(None, max_length=128, description="数仓开发名称兜底")
 
 
 class MetricSqlBatchRegisterRequest(BaseModel):

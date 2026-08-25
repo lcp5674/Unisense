@@ -2816,6 +2816,15 @@ export interface SqlBatchCandidate {
   statement_index: number;
   /** P2-10：语句级建议域（整段域建议为多域/无域时后端逐语句反查；与生效域可能不同） */
   suggested_domain_code?: string | null;
+  /** P2-2：候选来源（rule=规则层可靠产出 / llm=LLM 兜底提取，需人工复核） */
+  source?: "rule" | "llm" | null;
+  /** P0-2：口径三方责任（复合候选批量创建补齐；原子通常随创建人/域默认） */
+  product_owner_id?: number | null;
+  tech_owner_id?: number | null;
+  dw_developer_id?: number | null;
+  product_owner_name?: string | null;
+  tech_owner_name?: string | null;
+  dw_developer_name?: string | null;
 }
 
 /** SQL 批量解析语句摘要（前端 Collapse 分组标题）。 */

@@ -1633,6 +1633,89 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     });
   });
 
+  it("批量创建：失败项可一键重试，仅重跑失败候选（P1-1）", async () => {
+    mockedBatchFromSql
+      .mockResolvedValueOnce({
+        batch_id: "sqlbatch_fail1",
+        candidates: [
+          { metric_code: "sales_order_amount_day", status: "DRAFT", validation_errors: null },
+          {
+            metric_code: "sales_order_userid_day",
+            status: "VALIDATION_ERROR",
+            validation_errors: "候选参数校验失败",
+          },
+          {
+            metric_code: "sales_order_amountuserid_day",
+            status: "VALIDATION_ERROR",
+            validation_errors: "依赖未创建",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        batch_id: "sqlbatch_retry",
+        candidates: [
+          { metric_code: "sales_order_userid_day", status: "DRAFT", validation_errors: null },
+          { metric_code: "sales_order_amountuserid_day", status: "DRAFT", validation_errors: null },
+        ],
+      });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+    await screen.findByText(/批量创建完成：成功 1 \/ 失败 2/);
+    // 重试失败项（2）——仅重跑失败候选，成功候选不重复创建
+    fireEvent.click(screen.getByText(/重试失败项（2）/));
+    await waitFor(() => {
+      expect(mockedBatchFromSql).toHaveBeenCalledTimes(2);
+      const retryBody = mockedBatchFromSql.mock.calls[1][0];
+      expect(retryBody.candidates.length).toBe(2);
+      expect(
+        retryBody.candidates.map((c: { metric_code: string }) => c.metric_code).sort(),
+      ).toEqual(["sales_order_amountuserid_day", "sales_order_userid_day"]);
+    });
+  });
+
+  it("批量创建：原子 DRAFT 可一键提交评审，复合候选排除（P1-1）", async () => {
+    mockedBatchSubmit.mockResolvedValue({ results: [], ok_count: 2, fail_count: 0 });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+    await screen.findByText(/批量创建完成：成功 3 \/ 失败 0/);
+    fireEvent.click(screen.getByText("批量提交评审"));
+    await waitFor(() => {
+      expect(mockedBatchSubmit).toHaveBeenCalled();
+      const payload = mockedBatchSubmit.mock.calls[0][0] as Array<{ code: string }>;
+      // 只送审 2 个原子 DRAFT，复合候选（依赖未发布）被排除
+      expect(payload.map((x) => x.code).sort()).toEqual([
+        "sales_order_amount_day",
+        "sales_order_userid_day",
+      ]);
+    });
+  });
+
+  it("批量解析：LLM 兜底候选展示「AI 推断」复核标识（P2-2）", async () => {
+    mockedParseSqlBatch.mockResolvedValueOnce({
+      ...SQL_BATCH_RESULT,
+      candidates: [{ ...SQL_BATCH_RESULT.candidates[0], source: "llm" }],
+    });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await openSqlInfer();
+    fireEvent.click(screen.getByText("批量解析"));
+    fireEvent.change(screen.getByPlaceholderText(/批量解析：粘贴含多个 SELECT/), {
+      target: {
+        value: "SELECT dt, SUM(x) AS v FROM t GROUP BY dt",
+      },
+    });
+    fireEvent.click(screen.getByText("解析候选"));
+    await screen.findByText(/共 1 个候选/);
+    // AI 推断 Tag 出现（规则层候选不显示）
+    expect(screen.getByText("AI 推断")).toBeTruthy();
+  });
+
   it("批量解析：语句级建议域展示（跨域脚本提示，P2-10）", async () => {
     mockedParseSqlBatch.mockResolvedValueOnce({
       ...SQL_BATCH_RESULT,

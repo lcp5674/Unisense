@@ -337,6 +337,8 @@ export function MetricCreate() {
   // 批量创建结果（复用 batchResult 分桶展示，但保留复合候选的「需先发布原子」提示）
   const [sqlBatchCreateResult, setSqlBatchCreateResult] = useState<MetricBatchRegisterResult | null>(null);
   const [sqlBatchCreating, setSqlBatchCreating] = useState(false);
+  // P1-1：SQL 批量失败候选的 key 集合（仅重跑失败项，避免全量重跑把已建 DRAFT 再判冲突）
+  const [sqlBatchRetryFailedKeys, setSqlBatchRetryFailedKeys] = useState<string[]>([]);
   // 批量注册成功 → 「批量提交评审」直达（复用 /batch-submit，复审 D1）
   const [batchSubmitLoading, setBatchSubmitLoading] = useState(false);
   // 批量提交评审指派（复审 P2-10）：默认域评审组，可指定评审用户（对齐单指标提交的 reviewer_type/id）
@@ -928,7 +930,18 @@ export function MetricCreate() {
       message.warning("请先选择业务域（可到第 ① 步选择，或确认上方建议域后重试）");
       return;
     }
-    const checked = sqlBatchResult.candidates.filter((c) => sqlBatchChecked.has(c.key));
+    await submitSqlBatch(new Set(sqlBatchChecked));
+  }
+
+  // P1-1：SQL 批量创建核心（可被「批量创建」与「重试失败项」复用）——按给定 key 集合
+  // 从原始候选过滤出待提交项，调用 batch-register-from-sql；成功后记录失败 key 供重试。
+  async function submitSqlBatch(keys: Set<string>) {
+    if (!sqlBatchResult) return;
+    if (!selectedDomain) {
+      message.warning("请先选择业务域（可到第 ① 步选择，或确认上方建议域后重试）");
+      return;
+    }
+    const checked = sqlBatchResult.candidates.filter((c) => keys.has(c.key));
     if (checked.length === 0) { message.warning("请至少勾选一个候选指标"); return; }
     setSqlBatchCreating(true);
     try {
@@ -960,9 +973,23 @@ export function MetricCreate() {
           granularity: c.granularity,
           definition_json: c.definition_json,
           dependencies: c.dependencies,
+          // P0-2：复合候选携带口径三方责任（批量创建补齐 OwnerChain）
+          product_owner_id: c.product_owner_id,
+          tech_owner_id: c.tech_owner_id,
+          dw_developer_id: c.dw_developer_id,
+          product_owner_name: c.product_owner_name,
+          tech_owner_name: c.tech_owner_name,
+          dw_developer_name: c.dw_developer_name,
         })),
       });
       setSqlBatchCreateResult(res);
+      // P1-1：记录失败候选的 key（从结果反查原始候选），供「重试失败项」仅重跑失败项
+      const failCodes = new Set(
+        res.candidates.filter((c) => c.status === "VALIDATION_ERROR").map((c) => c.metric_code),
+      );
+      setSqlBatchRetryFailedKeys(
+        sqlBatchResult.candidates.filter((c) => failCodes.has(c.metric_code)).map((c) => c.key),
+      );
     } catch (err) {
       const detail = err instanceof UnisenseApiError ? err.message : "";
       message.error(detail ? `批量创建失败：${detail}` : "批量创建失败，请稍后重试");
@@ -2187,7 +2214,7 @@ export function MetricCreate() {
                   </Space>
                 </div>
                 <Collapse
-                  style={{ marginTop: 8 }}
+                  style={{ marginTop: 8, maxHeight: 360, overflow: "auto" }}
                   size="small"
                   defaultActiveKey={sqlBatchResult.statements.map((s) => `stmt-${s.index}`)}
                   items={(() => {
@@ -2217,6 +2244,13 @@ export function MetricCreate() {
                                 <Tag color={c.type === "composite" ? "purple" : "blue"}>
                                   {c.type === "composite" ? "复合" : "原子"}
                                 </Tag>
+                                {/* P2-2：LLM 兜底提取的候选加「AI 推断」标识，与规则层可靠产出
+                                    视觉区分——用户可分辨哪些需人工复核（编码/名称/聚合/周期） */}
+                                {c.source === "llm" && (
+                                  <Tooltip title="该候选由 AI 兜底从 SQL 中推断提取（规则层未能解析出度量），编码/名称/聚合/周期建议人工复核后创建">
+                                    <Tag color="gold" style={{ fontSize: 12 }}>AI 推断</Tag>
+                                  </Tooltip>
+                                )}
                                 {c.type === "atomic" ? (
                                   <>
                                     <Input
@@ -2289,13 +2323,56 @@ export function MetricCreate() {
                       const checkedComposites = sqlBatchResult.candidates.filter(
                         (c) => c.type === "composite" && sqlBatchChecked.has(c.key)
                       );
+                      // P1-1：可一键送审的原子 DRAFT（排除复合——依赖原子未发布会被拦截，
+                      // 需先逐个发布原子后再对复合发起提交评审）
+                      const compositeCodes = new Set(
+                        sqlBatchResult.candidates
+                          .filter((c) => c.type === "composite")
+                          .map((c) => c.metric_code),
+                      );
+                      const draftAtoms = sqlBatchCreateResult.candidates.filter(
+                        (c) => c.status === "DRAFT" && !compositeCodes.has(c.metric_code),
+                      );
+                      const submitReview = async () => {
+                        const codes = draftAtoms.map((c) => c.metric_code);
+                        if (codes.length === 0) return;
+                        if (batchReviewerType === "user" && batchReviewerId == null) {
+                          message.warning("请先选择评审用户，或切换回域评审组");
+                          return;
+                        }
+                        setBatchSubmitLoading(true);
+                        try {
+                          const res = await batchSubmitMetrics(
+                            codes.map((metric_code) => ({
+                              code: metric_code,
+                              change_reason: "SQL 批量注册后提交评审",
+                              reviewer_type: batchReviewerType,
+                              reviewer_id: batchReviewerType === "user" ? batchReviewerId : undefined,
+                            })),
+                          );
+                          message.success(`批量提交完成：成功 ${res.ok_count} / 失败 ${res.fail_count}`);
+                          handleSqlBatchCreateDone();
+                        } catch (err) {
+                          message.error(
+                            err instanceof UnisenseApiError
+                              ? `${err.message}（${err.codeZh}）`
+                              : "批量提交失败",
+                          );
+                        } finally {
+                          setBatchSubmitLoading(false);
+                        }
+                      };
                       return (
                         <>
                           <Alert
                             type={failed > 0 ? "warning" : "success"}
                             showIcon
                             message={`批量创建完成：成功 ${succeeded} / 失败 ${failed}`}
-                            description={`批次号：${sqlBatchCreateResult.batch_id}（成功的指标已创建为 DRAFT 草稿）`}
+                            description={
+                              draftAtoms.length > 0
+                                ? `批次号：${sqlBatchCreateResult.batch_id}（${draftAtoms.length} 个原子指标已创建为 DRAFT，可一键提交评审；复合候选需先发布依赖原子）`
+                                : `批次号：${sqlBatchCreateResult.batch_id}（成功的指标已创建为 DRAFT 草稿）`
+                            }
                           />
                           <Table
                             size="small"
@@ -2303,6 +2380,7 @@ export function MetricCreate() {
                             dataSource={sqlBatchCreateResult.candidates}
                             columns={BATCH_RESULT_COLUMNS}
                             pagination={false}
+                            scroll={{ y: 280 }}
                             style={{ marginTop: 12 }}
                             locale={{ emptyText: "无创建结果" }}
                           />
@@ -2314,9 +2392,30 @@ export function MetricCreate() {
                               message={`含 ${checkedComposites.length} 个复合候选：依赖的原子指标为 DRAFT，需先逐个发布原子后，再对复合指标发起提交评审`}
                             />
                           )}
-                          <Button block style={{ marginTop: 12 }} onClick={handleSqlBatchCreateDone}>
-                            完成
-                          </Button>
+                          <Space style={{ marginTop: 12 }} wrap>
+                            {/* P1-1：仅重跑失败候选（已成功候选不重复创建，避免「继续注册」
+                                全量重跑把已建 DRAFT 再判冲突） */}
+                            <Button
+                              disabled={sqlBatchRetryFailedKeys.length === 0}
+                              loading={sqlBatchCreating}
+                              onClick={() => void submitSqlBatch(new Set(sqlBatchRetryFailedKeys))}
+                            >
+                              重试失败项{sqlBatchRetryFailedKeys.length > 0 ? `（${sqlBatchRetryFailedKeys.length}）` : ""}
+                            </Button>
+                            {/* P1-1：原子 DRAFT 一键送审（对齐宽表批量弹窗的「批量提交评审」直达，
+                                消除「批量注册成功仅提示即结束、需回目录手动勾选提交」的闭环断点） */}
+                            <Button
+                              type="primary"
+                              loading={batchSubmitLoading}
+                              disabled={draftAtoms.length === 0}
+                              onClick={() => void submitReview()}
+                            >
+                              批量提交评审
+                            </Button>
+                            <Button onClick={handleSqlBatchCreateDone}>
+                              完成
+                            </Button>
+                          </Space>
                         </>
                       );
                     })()}

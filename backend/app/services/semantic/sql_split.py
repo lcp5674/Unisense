@@ -40,6 +40,10 @@ from app.services.semantic.sql_infer import (
 _QUOTES = ('"', "'", "`")
 # 阈值：自定义切分未生效（≤1 段）才触发 LLM 语义分段兜底
 _LLM_SPLIT_MIN_SEGMENTS = 2
+# P1-2：单批推断的 LLM 兜底调用总额度（度量提取 + 周期推断共用计数）——
+# 多语句脚本若逐条失败语句都调 LLM 会打满配额/拖慢解析；超限降级 skipped
+# 并标注 llm_limit（前端提示「已达本批 AI 兜底上限」），不阻断其余语句。
+_LLM_BATCH_LIMIT = 5
 
 
 # ----------------------------------------------------------------
@@ -460,12 +464,15 @@ def _build_atomic_candidate(
     domain_defaults: dict[str, Any],
     time_column: str | None,
     suggested_domain_code: str | None = None,
+    source: str = "rule",
 ) -> dict[str, Any]:
     """构建原子候选：expression 模式推断（勿传多度量原 SQL，避免兄弟度量进口径），
     聚合方式覆盖为 SQL 解析值（比列名规则更可靠）。
 
     ``measure`` 可能来自下沉收集（ETL 透传 INSERT），自带 ``alias/table/expression``：
     key 用 alias 防同列不同语义冲突，源表/口径优先用度量自身携带值。
+    ``source``（P2-2）：``rule``（规则层可靠产出）或 ``llm``（LLM 兜底提取，
+    前端据此加「AI 推断」Tag 让用户复核）。
     """
     col = measure["column"]
     agg = measure["agg"] or "COUNT"
@@ -514,6 +521,8 @@ def _build_atomic_candidate(
         "definition_mode": "expression",
         "statement_index": idx,
         "suggested_domain_code": suggested_domain_code,
+        # P2-2：候选来源（rule=规则层 / llm=LLM 兜底），前端「AI 推断」复核标识
+        "source": source,
     }
 
 
@@ -721,6 +730,9 @@ async def infer_sql_batch(
     statements: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    # P1-2：批级 LLM 兜底调用计数（度量提取 + 周期推断共用），超 _LLM_BATCH_LIMIT
+    # 后不再调 LLM，降级 skipped（llm_limit）——防多语句脚本打满 LLM 配额/拖慢解析
+    llm_call_count = 0
     # P2-10：整段域建议未定/多域时，逐语句反向建议域——跨域脚本各语句表可能
     # 分属不同域（跨域共用 DWD 层表是常态），候选携带语句级建议域供前端提示。
     # 整段唯一/LLM 已定域或用户显式指定域时不重复建议（避免 N 次 DB 查询）。
@@ -748,6 +760,17 @@ async def infer_sql_batch(
             llm_measures = None
             llm_tried = reason_code == "parse_failed" and db is not None
             if llm_tried:
+                if llm_call_count >= _LLM_BATCH_LIMIT:
+                    # 已达批级限额：不再调 LLM，降级 skipped（前端提示 AI 兜底上限）
+                    skipped.append(
+                        {
+                            "index": idx,
+                            "sql": seg[:500],
+                            "reason": "llm_limit",
+                        }
+                    )
+                    continue
+                llm_call_count += 1
                 # 传完整脚本 + 焦点语句：方言语句字段来源/口径常依赖前置语句
                 # 定义（CTE/SET/变量），只看单段会信息丢失影响推断
                 llm_measures = await _llm_infer_measures(
@@ -766,6 +789,7 @@ async def infer_sql_batch(
                             domain_defaults=domain_defaults,
                             time_column=profile.time_column,
                             suggested_domain_code=seg_domain_code,
+                            source="llm",
                         )
                     )
             else:
@@ -782,7 +806,8 @@ async def infer_sql_batch(
         period = _period_from_profile(profile)
         # 规则层无时间信号（无截断/别名粒度、无时间列）→ LLM 兜底推断周期；
         # LLM 不可用/失败降级规则层默认，绝不阻断候选生成
-        if _period_uncertain(profile) and db is not None:
+        if _period_uncertain(profile) and db is not None and llm_call_count < _LLM_BATCH_LIMIT:
+            llm_call_count += 1
             llm_period = await _llm_infer_period(
                 db, full_sql=sql, focus_sql=seg
             )

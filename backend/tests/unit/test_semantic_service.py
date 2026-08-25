@@ -2057,6 +2057,116 @@ async def test_sql_batch_register_catches_pydantic_validation_error():
     assert "候选参数校验失败" in result["candidates"][1]["validation_errors"]
 
 
+async def test_sql_batch_register_conflict_existing_loaded_once():
+    """P0-1：SQL 批量注册冲突预检比对对象只加载一次（循环外预加载 + 逐候选增量）。
+
+    修复前 batch_register_from_sql 每候选 create_metric 都调 load_conflict_existing
+    全量加载（N 候选 = N 次全量加载，O(N²) 性能退化；service.py:608-609 注释声明的
+    「批量注册场景传入预加载 existing」此前 SQL 批量路径漏接线）。修复后循环前预加载
+    一次，逐候选成功后增量追加，保持候选间互相冲突检测。
+    """
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    # mock 全量加载源：返回空活动指标（load_conflict_existing 正常返回 []）
+    repo.list_active_for_conflict = AsyncMock(return_value=[])
+
+    request = MetricSqlBatchRegisterRequest(
+        domain="sales",
+        candidates=[
+            _sql_atomic("0:amount", "sales_order_amount_day", "日订单金额", "amount"),
+            _sql_atomic("0:user_id", "sales_order_userid_day", "日去重用户", "user_id"),
+            _sql_composite(
+                "0:composite",
+                "sales_order_comp_day",
+                "金额用户复合",
+                ["sales_order_amount_day", "sales_order_userid_day"],
+            ),
+        ],
+    )
+
+    load_spy = AsyncMock(wraps=svc.load_conflict_existing)
+    svc.load_conflict_existing = load_spy  # type: ignore[method-assign]
+
+    result = await svc.batch_register_from_sql(request, actor_id=1)
+
+    assert len(result["candidates"]) == 3
+    assert all(c["status"] == "DRAFT" for c in result["candidates"])
+    # 核心断言：3 候选（含复合）只触发 1 次全量加载（循环外），而非每候选 1 次
+    assert load_spy.await_count == 1
+
+
+async def test_sql_batch_register_composite_owners_and_unit():
+    """P0-2：复合指标批量创建补齐口径三方责任 + 单位（详情页 OwnerChain 完整）。
+
+    修复前 Phase2 只传 aggregation/definition_json/period/granularity，复合指标
+    责任方三角缺失、单位取默认——单条创建有、批量路径漏传。修复后候选携带的
+    unit/product_owner_id 等透传到 create_metric 的 MetricCreateRequest。
+    """
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest, SqlBatchCreateCandidate
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    request = MetricSqlBatchRegisterRequest(
+        domain="sales",
+        candidates=[
+            _sql_atomic("0:amount", "sales_order_amount_day", "日订单金额", "amount"),
+            SqlBatchCreateCandidate(
+                key="0:composite",
+                metric_code="sales_order_comp_day",
+                name="金额用户复合",
+                type="composite",
+                period="day",
+                granularity="day",
+                unit="CNY",
+                definition_json={
+                    "sql": "SELECT dt, SUM(amount) FROM dwd_order_di GROUP BY dt",
+                    "dependencies": ["sales_order_amount_day"],
+                    "source_tables": ["dwd_order_di"],
+                },
+                dependencies=["sales_order_amount_day"],
+                product_owner_id=10,
+                tech_owner_id=11,
+                dw_developer_id=12,
+                product_owner_name="产品王",
+                tech_owner_name="技术李",
+                dw_developer_name="数仓赵",
+            ),
+        ],
+    )
+
+    captured: list = []
+
+    async def _capture_create(req, **kw):
+        captured.append(req)
+        return make_metric()
+
+    real_create = svc.create_metric
+    svc.create_metric = _capture_create  # type: ignore[method-assign]
+    # 兼容：真实 create_metric 内部会调 repo.create/create_version，直接返回 mock 即可
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    result = await svc.batch_register_from_sql(request, actor_id=1)
+    assert all(c["status"] == "DRAFT" for c in result["candidates"])
+    # 捕获的复合候选 MetricCreateRequest 携带单位 + 三方责任
+    composite_req = next(r for r in captured if r.type == "composite")
+    assert composite_req.unit == "CNY"
+    assert composite_req.product_owner_id == 10
+    assert composite_req.tech_owner_id == 11
+    assert composite_req.dw_developer_id == 12
+    assert composite_req.product_owner_name == "产品王"
+    assert composite_req.tech_owner_name == "技术李"
+    assert composite_req.dw_developer_name == "数仓赵"
+    del real_create
+
+
 async def test_review_compliance_rejects_non_pii():
     """非 PII 指标无需合规复核 → PII_FLAG_REQUIRED。"""
     svc, repo = _svc_with_repo()
