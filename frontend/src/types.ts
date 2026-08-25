@@ -64,6 +64,8 @@ export interface MetricResponse {
   reject_reason?: string | null;
   reject_reviewer_id?: number | null;
   rejected_at?: string | null;
+  /** 审核通过时间（「我审过的」视图：由 list 接口从生效版本 published_at 填充，驳回场景用 rejected_at） */
+  approved_at?: string | null;
   pii_flag: boolean;
   compliance_reviewed: boolean;
   /** 关联业务术语 ID（P2-11：术语治理归属，null=未绑定） */

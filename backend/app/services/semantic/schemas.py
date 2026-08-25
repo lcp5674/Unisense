@@ -775,6 +775,10 @@ class MetricResponse(BaseModel):
     granularity: str | None = None
     # OneData 原子层：关联逻辑度量 ID（原子必填；派生/复合继承可空）
     measure_id: int | None = None
+    # 逻辑度量展示信息（best-effort 填充，度量软删/查询失败时缺省）：详情页
+    # 「逻辑度量」栏展示名称+编码，原子指标关联的权威继承源可读可追溯
+    measure_code: str | None = None
+    measure_name: str | None = None
     unit: str
     currency: str | None
     aggregation: str
@@ -813,6 +817,10 @@ class MetricResponse(BaseModel):
     reject_reason: str | None = None
     reject_reviewer_id: int | None = None
     rejected_at: str | None = None
+    # 审核通过时间（审批工作台「我审过的」展示处理时间）：metric 表无独立列，
+    # 由 list 接口从当前生效版本 metric_version.published_at 批量填充（无迁移）；
+    # 驳回场景用 rejected_at，通过场景用 approved_at
+    approved_at: datetime | None = None
     # 指标业务描述（TD §12.1 治理补充，独立于口径/版本，资产地图抽屉展示/编辑）
     description: str | None = None
     description_source: str | None = None

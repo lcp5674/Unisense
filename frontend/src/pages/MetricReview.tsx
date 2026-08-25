@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Button, Card, Input, Modal, Radio, Segmented, Select, Space, Table, Tag, Tooltip, message } from "antd";
+import { Alert, Button, Card, Descriptions, Input, Modal, Radio, Segmented, Select, Space, Table, Tag, Tooltip, message } from "antd";
 import { ArrowLeftOutlined, CheckCircleOutlined, ClockCircleOutlined } from "@ant-design/icons";
 import {
   listMetrics,
@@ -137,6 +137,140 @@ function reviewerLabel(
   return <span className="muted">域管理员（未指派）</span>;
 }
 
+// 我的评审结论（「我审过的」视图）：approver_id=我 → 通过；reject_reviewer_id=我 → 驳回。
+// 返回 null 表示该指标虽被 reviewed_by 命中但当前用户既非通过人也非驳回人（数据异常兜底）。
+function reviewVerdict(metric: MetricResponse, userId: number | null) {
+  if (userId == null) return null;
+  if (metric.approver_id === userId) {
+    return { verdict: "approved" as const, time: metric.approved_at ?? metric.updated_at ?? null };
+  }
+  if (metric.reject_reviewer_id === userId) {
+    return {
+      verdict: "rejected" as const,
+      time: metric.rejected_at ?? null,
+      reason: metric.reject_reason ?? "",
+    };
+  }
+  return null;
+}
+
+// 评审记录详情弹窗（「我审过的」行点击/查看详情）：展示我的处理结论 + 指标完整口径，
+// 解决"只看到已处理标签、看不到审了什么、怎么处理的"的评审回看盲区。
+function ReviewDetailModal({
+  metric,
+  verdict,
+  userMap,
+  domainMap,
+  onClose,
+}: {
+  metric: MetricResponse;
+  verdict: { verdict: "approved" | "rejected"; time: string | null; reason?: string };
+  userMap: Map<number, string>;
+  domainMap: Record<string, string>;
+  onClose: () => void;
+}) {
+  const def = metric.definition_json ?? {};
+  const expression = typeof def.expression === "string" ? def.expression : undefined;
+  const dependencies: string[] = Array.isArray(def.dependencies)
+    ? def.dependencies.map((s) => String(s))
+    : [];
+  const rawSource = def.source_fields ?? def.source_columns;
+  const sourceFields: string[] = Array.isArray(rawSource)
+    ? rawSource.map((s) => String(s))
+    : rawSource
+      ? [String(rawSource)]
+      : [];
+  const sourceTables: string[] = Array.isArray(def.source_tables)
+    ? def.source_tables.map((s) => String(s))
+    : def.source_tables
+      ? [String(def.source_tables)]
+      : [];
+  const rawEtl = def.etl_sql ?? def.sql;
+  const etlSql = rawEtl == null ? "" : String(rawEtl);
+  const approved = verdict.verdict === "approved";
+  return (
+    <Modal
+      title={`评审记录：${metric.metric_code}`}
+      open
+      onCancel={onClose}
+      footer={null}
+      width={720}
+    >
+      <Alert
+        type={approved ? "success" : "error"}
+        showIcon
+        style={{ marginBottom: 16 }}
+        message={approved ? "已通过评审" : "已驳回"}
+        description={
+          <Space direction="vertical" size={2}>
+            <span>
+              处理时间：{verdict.time ? formatCnTime(verdict.time) : "—"}
+            </span>
+            {!approved && verdict.reason ? <span>驳回原因：{verdict.reason}</span> : null}
+          </Space>
+        }
+      />
+      <Descriptions column={1} size="small" bordered style={{ marginBottom: 16 }}>
+        <Descriptions.Item label="名称">{metric.name}</Descriptions.Item>
+        <Descriptions.Item label="所属域">
+          {domainMap[metric.domain] ?? metric.domain}
+        </Descriptions.Item>
+        <Descriptions.Item label="类型">{metric.type}</Descriptions.Item>
+        <Descriptions.Item label="状态">{metric.status}</Descriptions.Item>
+        <Descriptions.Item label="版本">v{metric.version}</Descriptions.Item>
+        <Descriptions.Item label="指派评审人">
+          {reviewerLabel(metric, userMap, domainMap)}
+        </Descriptions.Item>
+        {metric.description ? (
+          <Descriptions.Item label="业务描述">{metric.description}</Descriptions.Item>
+        ) : null}
+      </Descriptions>
+      <Card title="口径定义" size="small" style={{ marginBottom: 16 }}>
+        <Descriptions column={1} size="small" bordered>
+          {expression && (
+            <Descriptions.Item label={metric.type === "atomic" ? "聚合表达式" : "计算表达式"}>
+              <code className="mono">{expression}</code>
+            </Descriptions.Item>
+          )}
+          {sourceTables.length > 0 && (
+            <Descriptions.Item label="依赖表（上游）">
+              {sourceTables.map((t) => (
+                <Tag key={t} className="mono">{t}</Tag>
+              ))}
+            </Descriptions.Item>
+          )}
+          {dependencies.length > 0 && (
+            <Descriptions.Item label="依赖指标">
+              {dependencies.map((d) => (
+                <Tag key={d} className="mono">{d}</Tag>
+              ))}
+            </Descriptions.Item>
+          )}
+          {sourceFields.length > 0 && (
+            <Descriptions.Item label="来源字段">
+              {sourceFields.map((s) => (
+                <Tag key={s}>{s}</Tag>
+              ))}
+            </Descriptions.Item>
+          )}
+          {etlSql && (
+            <Descriptions.Item label="口径 SQL">
+              <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto", maxHeight: 200 }}>
+                {etlSql}
+              </pre>
+            </Descriptions.Item>
+          )}
+          <Descriptions.Item label="完整 JSON">
+            <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto", maxHeight: 220 }}>
+              {JSON.stringify(def, null, 2)}
+            </pre>
+          </Descriptions.Item>
+        </Descriptions>
+      </Card>
+    </Modal>
+  );
+}
+
 export function MetricReview() {
   const [items, setItems] = useState<MetricResponse[]>([]);
   const [total, setTotal] = useState(0);
@@ -146,8 +280,13 @@ export function MetricReview() {
   const [userMap, setUserMap] = useState<Map<number, string>>(new Map());
   // 域 code → 中文名（「域」列显示中文名，与指标目录一致）
   const [domainMap, setDomainMap] = useState<Record<string, string>>({});
+  // 「我审过的」详情弹窗：点击行/查看详情打开，展示我的处理结论 + 完整口径
+  const [detailMetric, setDetailMetric] = useState<MetricResponse | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
   const [batchBusy, setBatchBusy] = useState(false);
+  // 批量打回原因（L1）：批量打回须填写原因（对齐单条驳回），提交人据此修改重提
+  const [batchRejectOpen, setBatchRejectOpen] = useState(false);
+  const [batchRejectReason, setBatchRejectReason] = useState("");
   // 审批工作台视角：pending=待我审（REVIEW）；reviewed=我审过的（按 reviewed_by 过滤，
   // 命中审批通过或驳回——评审历史完整不丢驳回记录）
   const [view, setView] = useState<"pending" | "reviewed">("pending");
@@ -295,7 +434,7 @@ export function MetricReview() {
   }
 
   // 批量操作：通过 / 打回（逐条收集结果）
-  async function runBatch(approved: boolean) {
+  async function runBatch(approved: boolean, reason?: string) {
     const keys = selectedKeys.map(String);
     const targets = items.filter((m) => keys.includes(m.metric_code));
     if (!targets.length) {
@@ -313,7 +452,9 @@ export function MetricReview() {
       const codes = authorized.map((m) => m.metric_code);
       const res = approved
         ? await batchApproveMetrics(codes)
-        : await batchRejectMetrics(codes, "批量打回，请修改后重新提交");
+        // 批量打回原因（L1）：由评审人在弹窗填写（runBatch(false, reason)），
+        // 不再硬编码「批量打回，请修改后重新提交」
+        : await batchRejectMetrics(codes, reason?.trim() || "批量打回，请修改后重新提交");
       const errors = res.results.filter((r) => !r.ok).map((r) => `${r.code}: ${r.message}`);
       if (res.ok_count) message.success(`${approved ? "通过" : "打回"}成功 ${res.ok_count} 个`);
       if (errors.length) message.error(errors.slice(0, 3).join("；"));
@@ -359,6 +500,55 @@ export function MetricReview() {
       render: (_: unknown, r: MetricResponse) => reviewerLabel(r, userMap, domainMap),
     },
     {
+      // 「我审过的」视图：展示我的处理结论（通过/驳回 + 时间 + 原因）；待我审视图不显示
+      title: "处理结果",
+      key: "verdict",
+      render: (_: unknown, r: MetricResponse) => {
+        if (view !== "reviewed") return null;
+        const v = reviewVerdict(r, currentUser?.id ?? null);
+        if (!v) return <span className="muted">—</span>;
+        if (v.verdict === "approved") {
+          return (
+            <Space direction="vertical" size={2}>
+              <Tag color="green">已通过</Tag>
+              {v.time ? (
+                <span className="muted" style={{ fontSize: 12 }}>
+                  {formatCnTime(v.time)}
+                </span>
+              ) : null}
+            </Space>
+          );
+        }
+        return (
+          <Space direction="vertical" size={2}>
+            <Tag color="red">已驳回</Tag>
+            {v.reason ? (
+              <Tooltip title={v.reason}>
+                <span
+                  className="muted"
+                  style={{
+                    fontSize: 12,
+                    maxWidth: 180,
+                    display: "inline-block",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {v.reason}
+                </span>
+              </Tooltip>
+            ) : null}
+            {v.time ? (
+              <span className="muted" style={{ fontSize: 12 }}>
+                {formatCnTime(v.time)}
+              </span>
+            ) : null}
+          </Space>
+        );
+      },
+    },
+    {
       title: "版本",
       dataIndex: "version",
       key: "version",
@@ -381,9 +571,13 @@ export function MetricReview() {
       title: "操作",
       key: "actions",
       render: (_: unknown, r: MetricResponse) => {
-        // 「我审过的」视图仅回看，不再提供操作
+        // 「我审过的」视图：仅回看——查看详情弹窗展示处理结论（通过/驳回+原因+时间）与完整口径
         if (view === "reviewed") {
-          return <Tag>已处理</Tag>;
+          return (
+            <Button size="small" type="link" onClick={() => setDetailMetric(r)}>
+              查看详情
+            </Button>
+          );
         }
         // 同时满足权限点与行级/域级评审人身份才允许操作
         const allowed = canApprove && canReview(r, currentUser);
@@ -466,7 +660,10 @@ export function MetricReview() {
                   danger
                   icon={<ClockCircleOutlined />}
                   disabled={!selectedKeys.length || batchBusy || !canApprove || !items.some((m) => selectedKeys.includes(m.metric_code) && canReview(m, currentUser))}
-                  onClick={() => runBatch(false)}
+                  onClick={() => {
+                    setBatchRejectReason("");
+                    setBatchRejectOpen(true);
+                  }}
                 >
                   批量打回
                 </Button>
@@ -513,6 +710,13 @@ export function MetricReview() {
           columns={columns}
           rowKey="metric_code"
           loading={loading}
+          // 「我审过的」视图行点击 → 查看评审记录详情（处理结论 + 完整口径）
+          onRow={(r) => ({
+            onClick: () => {
+              if (view === "reviewed") setDetailMetric(r);
+            },
+            style: view === "reviewed" ? { cursor: "pointer" } : undefined,
+          })}
           rowSelection={
             view === "pending"
               ? {
@@ -541,6 +745,47 @@ export function MetricReview() {
                 : "您还没有评审过指标",
           }}
         />
+        {/* 批量打回原因弹窗（L1）：对齐单条驳回——原因必填（至少 4 字），提交人据此修改重提 */}
+        <Modal
+          title="批量打回"
+          open={batchRejectOpen}
+          onOk={() => {
+            if (batchRejectReason.trim().length < 4) {
+              message.warning("驳回原因至少 4 字，请补充说明");
+              return;
+            }
+            setBatchRejectOpen(false);
+            void runBatch(false, batchRejectReason);
+          }}
+          onCancel={() => setBatchRejectOpen(false)}
+          okText="打回"
+          cancelText="取消"
+          okButtonProps={{ danger: true }}
+        >
+          <p>将退回 {selectedKeys.length} 个指标至草稿，请填写驳回原因（提交人据此修改重提）。</p>
+          <Input.TextArea
+            rows={3}
+            value={batchRejectReason}
+            placeholder="批量驳回原因（必填，至少 4 字）"
+            onChange={(e) => setBatchRejectReason(e.target.value)}
+          />
+        </Modal>
+        {/* 「我审过的」评审记录详情弹窗：处理结论（通过/驳回+原因+时间）+ 完整口径 */}
+        {detailMetric && view === "reviewed"
+          ? (() => {
+              const v = reviewVerdict(detailMetric, currentUser?.id ?? null);
+              if (!v) return null;
+              return (
+                <ReviewDetailModal
+                  metric={detailMetric}
+                  verdict={v}
+                  userMap={userMap}
+                  domainMap={domainMap}
+                  onClose={() => setDetailMetric(null)}
+                />
+              );
+            })()
+          : null}
       </Card>
     </div>
   );

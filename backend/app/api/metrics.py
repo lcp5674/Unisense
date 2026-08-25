@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -150,6 +151,40 @@ _PII_REVIEW_ROLES = ("platform_admin", "domain_admin", "compliance_officer")
 _READ_ROLES = ALL_ROLES
 # PII 指标口径可读角色：仅管理/合规可见完整口径，其余角色读路径脱敏
 _SENSITIVE_ROLES = ("platform_admin", "domain_admin", "compliance_officer")
+
+
+async def _fill_approved_at(
+    db: AsyncSession, metrics: list[Any]
+) -> dict[tuple[int, int], datetime]:
+    """批量查指标生效版本（effective_version）的 published_at，作 approved_at 填充。
+
+    审批工作台「我审过的」视图需要展示通过时间；metric 表无 approved_at 列，
+    从 metric_version.published_at 读取（无迁移）。effective_version 为空的
+    指标（从未发布过）跳过，不发起版本查询。
+    """
+    version_pairs = [
+        (m.id, m.effective_version) for m in metrics if m.effective_version is not None
+    ]
+    if not version_pairs:
+        return {}
+    from sqlalchemy import tuple_
+
+    from app.models.metric_version import MetricVersion
+
+    rows = (
+        await db.execute(
+            select(
+                MetricVersion.metric_id,
+                MetricVersion.version,
+                MetricVersion.published_at,
+            ).where(
+                tuple_(MetricVersion.metric_id, MetricVersion.version).in_(version_pairs)
+            )
+        )
+    ).all()
+    return {(r[0], r[1]): r[2] for r in rows if r[2] is not None}
+
+
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 # 写端点统一 RBAC + 注入守卫（对齐 semantic.py 的 _WRITE_DEPS 模式）
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
@@ -247,11 +282,19 @@ async def list_metrics(
     """支持域/状态/分级/关键词过滤与分页。"""
     service = MetricService(db)
     metrics, total = await service.list_metrics(params, actor_id=user.id, role=user.role)
+    # 审核通过时间（审批工作台「我审过的」视图）：metric 表无 approved_at 列，
+    # 从当前生效版本（effective_version）的 metric_version.published_at 批量填充——
+    # 仅评审历史过滤（reviewed_by）场景需要，避免每次列表多一次版本查询。
+    approved_map: dict[tuple[int, int], datetime] = {}
+    if params.reviewed_by is not None:
+        approved_map = await _fill_approved_at(db, metrics)
     # PII 读分级：非敏感角色对 PII 指标脱敏口径（保留键结构，值替换为 ***）
     sensitive = any(r in _SENSITIVE_ROLES for r in user.roles_all())
     items: list[MetricResponse] = []
     for m in metrics:
         item = MetricResponse.model_validate(m)
+        if item.approved_at is None and m.effective_version is not None:
+            item.approved_at = approved_map.get((m.id, m.effective_version))
         if item.pii_flag and not sensitive:
             item = item.model_copy(
                 update={

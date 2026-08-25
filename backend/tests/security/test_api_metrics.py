@@ -88,7 +88,12 @@ async def viewer_client():
         yield session
 
     def fake_user():
-        return MagicMock(id=2, role="viewer")
+        return MagicMock(
+            id=2,
+            role="viewer",
+            roles_all=lambda: ["viewer"],
+            has_role=lambda r: r == "viewer",
+        )
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = fake_user
@@ -123,7 +128,12 @@ async def test_pii_review_forbidden_for_metric_owner(client):
 
 async def test_pii_review_succeeds_for_domain_admin(client):
     # 合规/域管理员可执行 PII 复核
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=99, role="domain_admin")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=99,
+        role="domain_admin",
+        roles_all=lambda: ["domain_admin"],
+        has_role=lambda r: r == "domain_admin",
+    )
     metric = make_metric(pii_flag=True, compliance_reviewed=True)
     try:
         with patch("app.api.metrics.MetricService") as mock_svc:
@@ -191,7 +201,12 @@ async def test_metric_write_endpoints_commit():
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=1, role="domain_admin")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="domain_admin",
+        roles_all=lambda: ["domain_admin"],
+        has_role=lambda r: r == "domain_admin",
+    )
     metric = make_metric()
     try:
         with patch("app.api.metrics.MetricService") as mock_svc:
@@ -227,3 +242,62 @@ async def test_metric_write_endpoints_commit():
         assert session.commit.await_count >= 5, "指标写端点未全部提交事务"
     finally:
         app.dependency_overrides.clear()
+
+
+async def test_fill_approved_at_from_published_at():
+    """「我审过的」通过时间：从生效版本 metric_version.published_at 批量填充。"""
+    from app.api.metrics import _fill_approved_at
+
+    db = AsyncMock()
+    result = MagicMock()
+    result.all.return_value = [(1, 2, datetime(2026, 8, 10, 10, 0, tzinfo=UTC))]
+    db.execute = AsyncMock(return_value=result)
+    out = await _fill_approved_at(db, [MagicMock(id=1, effective_version=2)])
+    assert out == {(1, 2): datetime(2026, 8, 10, 10, 0, tzinfo=UTC)}
+    db.execute.assert_awaited_once()
+
+
+async def test_fill_approved_at_skips_none_version():
+    """effective_version 为空的指标（从未发布）跳过，不发起版本查询。"""
+    from app.api.metrics import _fill_approved_at
+
+    db = AsyncMock()
+    out = await _fill_approved_at(db, [MagicMock(id=2, effective_version=None)])
+    assert out == {}
+    db.execute.assert_not_awaited()
+
+
+async def test_list_metrics_reviewed_by_fills_approved_at(client):
+    """list 带 reviewed_by（「我审过的」）时，approved_at 由生效版本 published_at 填充。"""
+    metric = make_metric(status="PUBLISHED", approver_id=7, effective_version=2)
+    published = datetime(2026, 8, 10, 10, 0, tzinfo=UTC)
+
+    async def fake_db():
+        session = AsyncMock()
+        session.add = MagicMock()
+
+        async def fake_execute(stmt, *args, **kwargs):
+            result = MagicMock()
+            if "metric_version" in str(stmt):
+                result.all.return_value = [(1, 2, published)]
+            else:
+                result.all.return_value = []
+                result.scalars.return_value.all.return_value = []
+            return result
+
+        session.execute = AsyncMock(side_effect=fake_execute)
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    try:
+        with patch("app.api.metrics.MetricService") as mock_svc:
+            instance = mock_svc.return_value
+            instance.list_metrics = AsyncMock(return_value=([metric], 1))
+            resp = await client.get("/api/v1/metric-definitions?reviewed_by=7")
+    finally:
+        app.dependency_overrides.pop(deps.get_db_session, None)
+
+    assert resp.status_code == 200
+    item = resp.json()["data"]["items"][0]
+    assert item["approved_at"] is not None
+    assert "2026-08-10T10:00" in item["approved_at"]

@@ -181,11 +181,12 @@ describe("MetricReview 指标审批", () => {
     expect(screen.getAllByText(/PII 待复核/).length).toBeGreaterThan(0);
   });
 
-  it("「我审过的」视图：按 reviewed_by 查询（含驳回历史）、无操作按钮、无批量按钮", async () => {
+  it("「我审过的」视图：按 reviewed_by 查询（含驳回历史）、展示处理结果、无操作按钮、无批量按钮", async () => {
     const reviewed: MetricResponse = {
       ...metric,
       status: "PUBLISHED",
       approver_id: 1,
+      approved_at: "2026-08-10T10:00:00",
     };
     mockedList.mockResolvedValue({ items: [reviewed], total: 1, page: 1, page_size: 20 });
     renderReview();
@@ -198,8 +199,52 @@ describe("MetricReview 指标审批", () => {
     );
     // 无「通过」操作、无批量通过按钮
     expect(screen.queryAllByRole("button", { name: /通\s*过/ }).length).toBe(0);
-    // 「已处理」标记可见
-    expect(screen.getByText("已处理")).toBeTruthy();
+    // 处理结果列：已通过 Tag
+    expect(screen.getByText("已通过")).toBeTruthy();
+    // 操作列：查看详情按钮（替代旧的"已处理"标签）
+    expect(screen.getByRole("button", { name: /查看详情/ })).toBeTruthy();
+  });
+
+  it("「我审过的」驳回场景：展示已驳回 + 原因 + 时间", async () => {
+    const rejected: MetricResponse = {
+      ...metric,
+      status: "DRAFT",
+      reject_reviewer_id: 1,
+      reject_reason: "口径缺少过滤条件，请补充后重提",
+      rejected_at: "2026-08-11T09:30:00",
+    };
+    mockedList.mockResolvedValue({ items: [rejected], total: 1, page: 1, page_size: 20 });
+    renderReview();
+    fireEvent.click(await screen.findByRole("radio", { name: /我审过的/ }));
+    await screen.findByText("sales_gmv_day");
+    // 处理结果列：已驳回 Tag + 原因（截断展示仍可读）
+    expect(screen.getByText("已驳回")).toBeTruthy();
+    expect(screen.getByText(/口径缺少过滤条件/)).toBeTruthy();
+  });
+
+  it("「我审过的」查看详情弹窗：处理结论 + 完整口径", async () => {
+    const reviewed: MetricResponse = {
+      ...metric,
+      status: "PUBLISHED",
+      approver_id: 1,
+      approved_at: "2026-08-10T10:00:00",
+      definition_json: {
+        expression: "SUM(amount)",
+        source_tables: ["demo.sales_order"],
+        source_fields: ["amount"],
+      },
+    };
+    mockedList.mockResolvedValue({ items: [reviewed], total: 1, page: 1, page_size: 20 });
+    renderReview();
+    fireEvent.click(await screen.findByRole("radio", { name: /我审过的/ }));
+    await screen.findByText("sales_gmv_day");
+    fireEvent.click(screen.getByRole("button", { name: /查看详情/ }));
+    // 弹窗：处理结论 + 完整口径
+    expect(await screen.findByText(/评审记录：sales_gmv_day/)).toBeTruthy();
+    expect(screen.getByText("已通过评审")).toBeTruthy();
+    // 表达式与依赖表在口径卡片和完整 JSON 中均出现，用 getAllByText 断言
+    expect(screen.getAllByText(/SUM\(amount\)/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("demo.sales_order").length).toBeGreaterThan(0);
   });
 
   it("深页空结果自动回退上一页（审批后列表缩短不致空页）", async () => {
