@@ -1,11 +1,12 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Alert, Button, Form, Input, Modal, Select, Tooltip } from "antd";
 import {
   CheckOutlined,
   CloseOutlined,
   SendOutlined,
 } from "@ant-design/icons";
-import type { CurrentUser } from "../types";
+import type { CurrentUser, UserBrief } from "../types";
+import { listUsers } from "../api";
 import type { ReviewSubmitBody } from "../api";
 
 /** 主数据审核流共享 UI（统一「主数据审核」复用模式）。
@@ -129,6 +130,21 @@ export function MasterDataReviewModals(props: {
   } = props;
   const [submitForm] = Form.useForm();
   const [rejectForm] = Form.useForm();
+  // 评审用户候选（全局用户列表，三页共用；打开提交弹窗时懒加载，失败静默回退空列表）
+  const [userOptions, setUserOptions] = useState<{ value: number; label: string }[]>([]);
+  useEffect(() => {
+    if (!submitTarget) return;
+    listUsers()
+      .then((users: UserBrief[]) =>
+        setUserOptions(
+          users.map((u) => ({
+            value: u.id,
+            label: `${u.display_name || u.username}（#${u.id}）`,
+          })),
+        ),
+      )
+      .catch(() => setUserOptions([]));
+  }, [submitTarget]);
 
   async function handleSubmitOk() {
     const values = await submitForm.validateFields();
@@ -195,10 +211,17 @@ export function MasterDataReviewModals(props: {
               getFieldValue("reviewer_type") === "user" ? (
                 <Form.Item
                   name="reviewer_id"
-                  label="评审用户 ID"
-                  rules={[{ required: true, message: "请填写评审用户 ID" }]}
+                  label="评审用户"
+                  rules={[{ required: true, message: "请选择评审用户" }]}
                 >
-                  <Input type="number" placeholder="如 5" />
+                  <Select
+                    showSearch
+                    allowClear
+                    optionFilterProp="label"
+                    placeholder="选择评审用户"
+                    options={userOptions}
+                    notFoundContent={userOptions.length ? undefined : "暂无可用用户"}
+                  />
                 </Form.Item>
               ) : getFieldValue("reviewer_type") === "domain" ? (
                 <Form.Item

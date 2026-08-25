@@ -35,6 +35,7 @@ vi.mock("../api", () => {
     batchDeprecateTerms: vi.fn(),
     inferTermSuggestion: vi.fn(),
     listDomainTree: vi.fn(),
+    listUsers: vi.fn(),
     listTermConflicts: vi.fn(),
     resolveTermConflict: vi.fn(),
     listFavorites: vi.fn(),
@@ -57,6 +58,7 @@ import {
   batchDeprecateTerms,
   inferTermSuggestion,
   listDomainTree,
+  listUsers,
   fetchCurrentUser,
   approveTerm,
   rejectTerm,
@@ -75,6 +77,7 @@ const mockedBatchDeprecate = vi.mocked(batchDeprecateTerms);
 const mockedInfer = vi.mocked(inferTermSuggestion);
 const mockedDomainTree = vi.mocked(listDomainTree);
 const mockedFetchCurrentUser = vi.mocked(fetchCurrentUser);
+const mockedUsers = vi.mocked(listUsers);
 const mockedApprove = vi.mocked(approveTerm);
 const mockedReject = vi.mocked(rejectTerm);
 const mockedSubmit = vi.mocked(submitTerm);
@@ -542,6 +545,16 @@ describe("Glossary 审核流（提交审核/通过/驳回，复用主数据审�
     mockedListFavorites.mockResolvedValue([]);
     mockedDomainTree.mockResolvedValue([]);
     mockedListRelations.mockResolvedValue({ items: [], total: 0 });
+    mockedUsers.mockResolvedValue([
+      {
+        id: 5,
+        username: "pharmacist",
+        display_name: "李药师",
+        role: "domain_admin",
+        domain: "pharmacy",
+        status: "active",
+      },
+    ]);
     mockedFetchCurrentUser.mockResolvedValue({
       id: 1, username: "admin", display_name: "管理员", role: "platform_admin", domain: "finance", org_id: 1,
     } as never);
@@ -611,5 +624,42 @@ describe("Glossary 审核流（提交审核/通过/驳回，复用主数据审�
       }),
     );
     expect(await screen.findByText(/已驳回，可修改后重新提交/)).toBeInTheDocument();
+  });
+
+  it("提交审核指定「指定用户」时评审用户为选项框，选择用户后提交 reviewer_id", async () => {
+    mockedSubmit.mockResolvedValue({ ...TERMS[0], status: "REVIEW" } as never);
+    render(
+      <MemoryRouter initialEntries={["/glossary"]}>
+        <Glossary />
+      </MemoryRouter>,
+    );
+    await screen.findByText("成交总额");
+    fireEvent.click(screen.getAllByRole("button", { name: /提交审核/ })[0]);
+    const modal = await screen.findByRole("dialog");
+
+    // 评审指派选「指定用户」
+    fireEvent.mouseDown(within(modal).getByRole("combobox"));
+    fireEvent.click(await screen.findByTitle("指定用户"));
+
+    // 评审用户渲染为选项框（含用户下拉），而非手动输入框
+    await waitFor(() => expect(within(modal).getAllByRole("combobox")).toHaveLength(2));
+    expect(within(modal).queryByPlaceholderText("如 5")).toBeNull();
+    fireEvent.mouseDown(within(modal).getAllByRole("combobox")[1]);
+    fireEvent.click(await screen.findByTitle("李药师（#5）"));
+
+    fireEvent.change(within(modal).getByLabelText("提交说明"), {
+      target: { value: "术语定义已与业务对齐，申请发布" },
+    });
+    fireEvent.click(within(modal).getByRole("button", { name: /确 定|确定|OK/ }));
+
+    await waitFor(() =>
+      expect(mockedSubmit).toHaveBeenCalledWith("GMV", {
+        change_reason: "术语定义已与业务对齐，申请发布",
+        reviewer_type: "user",
+        reviewer_id: 5,
+        reviewer_domain: null,
+      }),
+    );
+    expect(await screen.findByText(/已提交审核/)).toBeInTheDocument();
   });
 });

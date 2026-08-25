@@ -16,6 +16,7 @@ vi.mock("../api", () => ({
   rejectMeasureCatalog: vi.fn(),
   fetchCurrentUser: vi.fn(),
   listDomainTree: vi.fn(),
+  listUsers: vi.fn(),
   autoSuggestMeasureCatalog: vi.fn(),
   UnisenseApiError: class extends Error {},
 }));
@@ -27,6 +28,7 @@ import {
   fetchCurrentUser,
   listDomainTree,
   listMeasureCatalogs,
+  listUsers,
   rejectMeasureCatalog,
   submitMeasureCatalog,
 } from "../api";
@@ -40,6 +42,7 @@ const mockedSubmit = vi.mocked(submitMeasureCatalog);
 const mockedApprove = vi.mocked(approveMeasureCatalog);
 const mockedReject = vi.mocked(rejectMeasureCatalog);
 const mockedCurrentUser = vi.mocked(fetchCurrentUser);
+const mockedUsers = vi.mocked(listUsers);
 
 const measure: MeasureCatalog = {
   id: 1,
@@ -216,6 +219,16 @@ describe("MeasureCatalogs 审核流（提交审核/通过/驳回）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockedDomains.mockResolvedValue([]);
+    mockedUsers.mockResolvedValue([
+      {
+        id: 3,
+        username: "doctor",
+        display_name: "张医生",
+        role: "domain_admin",
+        domain: "medical_fee",
+        status: "active",
+      },
+    ]);
     mockedCurrentUser.mockResolvedValue({
       id: 1,
       username: "admin",
@@ -292,5 +305,39 @@ describe("MeasureCatalogs 审核流（提交审核/通过/驳回）", () => {
     // 编辑按钮 disabled（审核中锁定）
     const editBtn = document.querySelector('button[disabled] .anticon-edit');
     expect(editBtn).toBeTruthy();
+  });
+
+  it("提交审核指定「指定用户」时评审用户为选项框，选择用户后提交 reviewer_id", async () => {
+    mockedList.mockResolvedValue({ items: [measure], total: 1, page: 1, page_size: 20 });
+    mockedSubmit.mockResolvedValue({ ...measure, status: "REVIEW" });
+    renderCatalogs();
+
+    fireEvent.click(await screen.findByRole("button", { name: /提交审核/ }));
+    const modal = await screen.findByRole("dialog");
+
+    // 评审指派选「指定用户」
+    fireEvent.mouseDown(within(modal).getByRole("combobox"));
+    fireEvent.click(await screen.findByTitle("指定用户"));
+
+    // 评审用户渲染为选项框（含用户下拉），而非手动输入框
+    await waitFor(() => expect(within(modal).getAllByRole("combobox")).toHaveLength(2));
+    expect(within(modal).queryByPlaceholderText("如 5")).toBeNull();
+    fireEvent.mouseDown(within(modal).getAllByRole("combobox")[1]);
+    fireEvent.click(await screen.findByTitle("张医生（#3）"));
+
+    fireEvent.change(within(modal).getByLabelText("提交说明"), {
+      target: { value: "门诊收费口径已与业务对齐" },
+    });
+    fireEvent.click(within(modal).getByRole("button", { name: /确 定|确定|OK/ }));
+
+    await waitFor(() =>
+      expect(mockedSubmit).toHaveBeenCalledWith("medical_fee_men_zhen_shou_fei", {
+        change_reason: "门诊收费口径已与业务对齐",
+        reviewer_type: "user",
+        reviewer_id: 3,
+        reviewer_domain: null,
+      }),
+    );
+    expect(await screen.findByText(/已提交审核/)).toBeInTheDocument();
   });
 });
