@@ -292,7 +292,8 @@ def _infer_unit(profile: dict[str, Any]) -> SuggestionField:
         if _col_signal(meta, "duration", "second", "minute", "时长"):
             return _field("MINUTE", src, 0.78, "列元数据（时长类）→ 单位 MINUTE")
         if _col_signal(meta, "cnt", "count", "num", "qty", "quantity", "次数", "数量"):
-            return _field("COUNT", src, 0.75, "列元数据（计数类）→ 单位 COUNT")
+            # unit 字典无 COUNT code；TIMES（次）为最通用计数单位，与字典/seed 对齐
+            return _field("TIMES", src, 0.75, "列元数据（计数类）→ 单位 TIMES（次）")
     measure_column: str | None = profile.get("measure_column")
     if measure_column:
         col = measure_column.lower()
@@ -304,7 +305,7 @@ def _infer_unit(profile: dict[str, Any]) -> SuggestionField:
             return _field("CNY", "rule", 0.68, f"列名含金额语义（{measure_column}）→ CNY")
         if any(k in col for k in ("cnt", "count", "num")):
             return _field(
-                "COUNT", "rule", 0.66, f"列名含计数语义（{measure_column}）→ COUNT"
+                "TIMES", "rule", 0.66, f"列名含计数语义（{measure_column}）→ TIMES（次）"
             )
     return _field(None, "fallback", 0.0, "无法从列元数据/名称推断单位，请手动指定")
 

@@ -266,6 +266,33 @@ async def test_create_atomic_inherits_unit_from_measure():
     assert captured.dw_layer == "DWD"
 
 
+async def test_create_unit_defaults_to_times_when_measure_has_no_unit():
+    """逻辑度量无 default_unit 时，原子指标 unit 兜底字典合法 TIMES（修复前为非法 cnt）。
+
+    修复：auto_fill 计数推断与 create_metric/批量注册兜底 unit 从 COUNT/cnt 统一改为
+    TIMES——unit 字典无 COUNT/cnt，此前批量注册计数列（visit_cnt 等）报
+    「字典值不存在: unit/COUNT」。
+    """
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    fake_measure = MagicMock()
+    fake_measure.status = "PUBLISHED"
+    fake_measure.default_unit = None
+    svc._measure_repo.get_by_id = AsyncMock(return_value=fake_measure)
+    await svc.create_metric(
+        MetricCreateRequest(
+            **make_create_payload(measure_id=7, unit=None),
+        ),
+        owner_id=1,
+    )
+
+    captured = repo.create.call_args[0][0]
+    assert captured.unit == "TIMES"
+
+
 async def test_create_atomic_measure_missing_raises():
     """原子关联的逻辑度量不存在 → 422 拦截（防 FK 500，而非静默回退 unit=cnt）。
 

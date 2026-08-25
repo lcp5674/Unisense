@@ -465,7 +465,7 @@ class MetricService(BaseService):
             if request.type == "atomic" and measure is not None and measure.default_unit:
                 request.unit = measure.default_unit
             if request.unit is None:
-                request.unit = "cnt"
+                request.unit = "TIMES"
         if request.time_semantics is None:
             request.time_semantics = "PERIOD"
         if request.freshness is None:
@@ -509,7 +509,11 @@ class MetricService(BaseService):
             # 原子/复合不设粒度（granularity 可空）
             granularity=(
                 request.granularity
-                or (request.mount.granularity if request.type == "derived" and request.mount else None)
+                or (
+                    request.mount.granularity
+                    if request.type == "derived" and request.mount
+                    else None
+                )
             ),
             # OneData 原子层：关联逻辑度量（原子必填，派生/复合继承可空）
             measure_id=request.measure_id,
@@ -2323,7 +2327,11 @@ class MetricService(BaseService):
                 if not isinstance(definition, dict):
                     return
                 dependencies = definition.get("dependencies") or []
-                if not isinstance(dependencies, list) or metric.type == "atomic" or not dependencies:
+                if (
+                    not isinstance(dependencies, list)
+                    or metric.type == "atomic"
+                    or not dependencies
+                ):
                     return
                 edge_type = _METRIC_DEP_EDGE_TYPE.get(metric.type, "DERIVED_FROM")
                 repo = LineageRepository(self._db)
@@ -4207,7 +4215,7 @@ class MetricService(BaseService):
                         domain=request.domain,
                         type=defaults.get("type", "atomic"),
                         granularity=defaults.get("granularity", "day"),
-                        unit=defaults.get("unit", "cnt"),
+                        unit=defaults.get("unit", "TIMES"),
                         aggregation=defaults.get("aggregation", "SUM"),
                         time_semantics=defaults.get("time_semantics", "PERIOD"),
                         freshness=defaults.get("freshness", "T1"),

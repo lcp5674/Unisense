@@ -156,7 +156,9 @@ class TestInferMetricSql:
 
     def test_fields_source_table_from_input(self) -> None:
         """显式传入 source_table/measure_column 时，fields 原样回填且来源为 input。"""
-        profile = build_profile(source_table="dws.account_balance", measure_column="end_bal", period="day")
+        profile = build_profile(
+            source_table="dws.account_balance", measure_column="end_bal", period="day"
+        )
         profile["domain_code"] = ""
         result = infer_metric(profile)
         f = result["fields"]
@@ -203,6 +205,40 @@ class TestInferMetricSql:
         f = result["fields"]
         assert f["aggregation"]["value"] == "LAST_VALUE"
         assert f["additivity"]["value"] == "SEMI_ADDITIVE"
+
+    def test_count_unit_uses_valid_dict_code(self) -> None:
+        """计数类列（cnt/count/num）unit 须为字典合法 code TIMES，而非不存在的 COUNT。
+
+        unit 字典无 COUNT code；修复前推断 COUNT 导致批量注册报
+        「字典值不存在: unit/COUNT」。
+        """
+        # 列名计数语义
+        profile = build_profile(
+            source_table="dwd.tj_cf_drug_prescription_df",
+            measure_column="visit_cnt",
+            period="day",
+        )
+        profile["domain_code"] = "outpatient"
+        result = infer_metric(profile)
+        f = result["fields"]
+        assert f["unit"]["value"] == "TIMES"
+        assert f["unit"]["source"] == "rule"
+        # 聚合仍为 COUNT（aggregation 字典含 COUNT，合法）
+        assert f["aggregation"]["value"] == "COUNT"
+
+    def test_count_unit_from_column_meta(self) -> None:
+        """列元数据计数类（次数/数量）unit 推断为 TIMES。"""
+        profile = build_profile(
+            source_table="dwd.tj_cf_drug_prescription_df",
+            measure_column="prescription_cnt",
+            period="day",
+            measure_meta={"type": "int", "comment": "处方次数"},
+        )
+        profile["domain_code"] = "outpatient"
+        result = infer_metric(profile)
+        f = result["fields"]
+        assert f["unit"]["value"] == "TIMES"
+        assert f["unit"]["source"] == "column_meta"
 
 
 class TestAutoFillBackwardCompat:
