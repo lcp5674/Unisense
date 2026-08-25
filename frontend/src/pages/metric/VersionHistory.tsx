@@ -9,13 +9,7 @@ import {
 import type { MetricVersionResponse } from "../../types";
 import { ObjectView, DEF_FIELD_LABEL } from "../../utils/display";
 import { formatCnTime } from "../../utils/timeCn";
-
-const CHANGE_TYPE_LABEL: Record<string, string> = {
-  CREATE: "创建",
-  UPDATE: "更新",
-  PUBLISH: "发布",
-  DEPRECATE: "废弃",
-};
+import { CHANGE_TYPE_LABEL } from "../../utils/enums";
 
 const VERSION_STATUS_META: Record<string, { color: string; label: string }> = {
   DRAFT: { color: "default", label: "草稿" },

@@ -88,6 +88,15 @@ export const METRIC_STATUS_COLOR: Record<string, string> = {
   DEPRECATED: "error",
 };
 
+/** 指标版本变更类型（MetricVersion.change_type：CREATE/UPDATE/BREAKING；PUBLISH/DEPRECATE 兜底防御） */
+export const CHANGE_TYPE_LABEL: Record<string, string> = {
+  CREATE: "创建",
+  UPDATE: "变更",
+  BREAKING: "破坏性变更",
+  PUBLISH: "发布",
+  DEPRECATE: "废弃",
+};
+
 // ---- 指标关联/推荐边类型（详情页「看过此指标的人还看了」等）----
 export const METRIC_RELATION_EDGE_LABEL: Record<string, string> = {
   DERIVED_FROM: "派生自",

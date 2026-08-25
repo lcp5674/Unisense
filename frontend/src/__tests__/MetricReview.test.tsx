@@ -31,6 +31,7 @@ vi.mock("../api", () => {
     listDomainTree: vi.fn(),
     batchApproveMetrics: vi.fn(),
     batchRejectMetrics: vi.fn(),
+    listVersions: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -42,10 +43,13 @@ import {
   listDomainTree,
   listMetrics,
   listUsers,
+  listVersions,
 } from "../api";
+import type { MetricVersionResponse } from "../types";
 const mockedList = vi.mocked(listMetrics);
 const mockedApprove = vi.mocked(approveMetric);
 const mockedBatchReject = vi.mocked(batchRejectMetrics);
+const mockedListVersions = vi.mocked(listVersions);
 
 const metric: MetricResponse = {
   id: 1,
@@ -115,6 +119,8 @@ describe("MetricReview 指标审批", () => {
     });
     vi.mocked(listUsers).mockResolvedValue([]);
     vi.mocked(listDomainTree).mockResolvedValue([]);
+    // 变更上下文默认无版本记录（详情/确认弹窗的 listVersions 均走默认空）
+    vi.mocked(listVersions).mockResolvedValue([]);
   });
 
   it("加载并展示待审核指标", async () => {
@@ -384,5 +390,175 @@ describe("MetricReview 指标审批", () => {
         "口径与同名指标冲突，请修正后重提",
       );
     });
+  });
+
+  // ---- 审批变更上下文（新增/变更/破坏性变更/重评审 + 前后对比）----
+
+  function reviewedMetric(over: Partial<MetricResponse> = {}): MetricResponse {
+    return {
+      ...metric,
+      status: "PUBLISHED",
+      approver_id: 1,
+      approved_at: "2026-08-10T10:00:00",
+      ...over,
+    };
+  }
+
+  function version(v: Partial<MetricVersionResponse>): MetricVersionResponse {
+    return {
+      id: 1,
+      metric_id: 1,
+      version: 1,
+      change_type: "CREATE",
+      definition_json: {},
+      diff_json: null,
+      status: "DRAFT",
+      change_reason: "",
+      created_by: 1,
+      published_at: null,
+      created_at: "2026-08-01T00:00:00",
+      ...v,
+    };
+  }
+
+  async function openDetail(metricObj: MetricResponse) {
+    mockedList.mockResolvedValue({ items: [metricObj], total: 1, page: 1, page_size: 20 });
+    renderReview();
+    fireEvent.click(await screen.findByRole("radio", { name: /我审过的/ }));
+    await screen.findByText("sales_gmv_day");
+    fireEvent.click(screen.getByRole("button", { name: /查看详情/ }));
+    await screen.findByText(/评审记录：sales_gmv_day/);
+  }
+
+  it("评审记录：新增指标（CREATE 无已发布版本）展示新增标签 + 无历史对比", async () => {
+    const reviewed = reviewedMetric({ version: 1, effective_version: null });
+    mockedListVersions.mockResolvedValue([
+      version({ version: 1, change_type: "CREATE", status: "DRAFT" }),
+    ]);
+    await openDetail(reviewed);
+    // 变更上下文：新增指标 + 首次提交评审说明；不渲染变更前后对比
+    expect(await screen.findByText("新增指标")).toBeTruthy();
+    expect(screen.getByText("首次提交评审，无历史口径可对比")).toBeTruthy();
+    expect(screen.queryByText("变更前")).toBeNull();
+    // 类型/状态中文（原为 atomic/PUBLISHED 英文裸显）
+    expect(screen.getByText("原子指标")).toBeTruthy();
+    expect(screen.getByText("已发布")).toBeTruthy();
+  });
+
+  it("评审记录：变更指标（UPDATE + 已发布）展示 v{prev}→v{cur} + 前后对比值", async () => {
+    const reviewed = reviewedMetric({ version: 2, effective_version: 1 });
+    mockedListVersions.mockResolvedValue([
+      version({
+        version: 2,
+        change_type: "UPDATE",
+        status: "DRAFT",
+        diff_json: {
+          expression: { before: "SUM(amount) * 1.1", after: "SUM(amount) * 1.2", change_type: "UPDATE" },
+        },
+      }),
+      version({ version: 1, change_type: "CREATE", status: "PUBLISHED", published_at: "2026-08-01T00:00:00" }),
+    ]);
+    await openDetail(reviewed);
+    // 变更标签带版本区间 + 字段中文标签 + before/after 值
+    expect(await screen.findByText("变更指标 v1→v2")).toBeTruthy();
+    expect(screen.getByText("表达式")).toBeTruthy();
+    expect(screen.getByText("变更前")).toBeTruthy();
+    expect(screen.getByText("变更后")).toBeTruthy();
+    expect(screen.getByText("SUM(amount) * 1.1")).toBeTruthy();
+    expect(screen.getByText("SUM(amount) * 1.2")).toBeTruthy();
+  });
+
+  it("评审记录：破坏性变更（BREAKING）展示破坏性变更标签", async () => {
+    const reviewed = reviewedMetric({ version: 2, effective_version: 1 });
+    mockedListVersions.mockResolvedValue([
+      version({
+        version: 2,
+        change_type: "BREAKING",
+        status: "DRAFT",
+        diff_json: { measure_id: { before: 1, after: 2, change_type: "BREAKING" } },
+      }),
+      version({ version: 1, change_type: "CREATE", status: "PUBLISHED", published_at: "2026-08-01T00:00:00" }),
+    ]);
+    await openDetail(reviewed);
+    // 顶部标签（带 v2 后缀）+ 字段级 Tag 均显示「破坏性变更」
+    await waitFor(() => {
+      expect(screen.getAllByText(/破坏性变更/).length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it("评审记录：回看视图已发布变更版本仍按版本记录判定为变更（不误判重评审）", async () => {
+    const reviewed = reviewedMetric({ version: 2, effective_version: 1 });
+    // approve 后 cur 已转正 PUBLISHED——判定须基于 change_type（UPDATE→变更）；
+    // gating 生效：metric.status 已非 REVIEW，不会误判为「废弃恢复重评审」
+    mockedListVersions.mockResolvedValue([
+      version({
+        version: 2,
+        change_type: "UPDATE",
+        status: "PUBLISHED",
+        published_at: "2026-08-02T00:00:00",
+        diff_json: { name: { before: "旧名", after: "新名", change_type: "UPDATE" } },
+      }),
+      version({ version: 1, change_type: "CREATE", status: "PUBLISHED", published_at: "2026-08-01T00:00:00" }),
+    ]);
+    await openDetail(reviewed);
+    expect(await screen.findByText("变更指标 v1→v2")).toBeTruthy();
+    expect(screen.queryByText("废弃恢复重评审")).toBeNull();
+    expect(screen.getByText("旧名")).toBeTruthy();
+    expect(screen.getByText("新名")).toBeTruthy();
+  });
+
+  it("待我审确认弹窗：废弃恢复重评审（REVIEW + 当前版本已发布）展示重评审标签", async () => {
+    mockedList.mockResolvedValue({
+      items: [{ ...metric, status: "REVIEW", version: 2, effective_version: 1 }],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+    // 废弃后重提不新建版本：当前版本记录仍 PUBLISHED（published_at 非空）
+    mockedListVersions.mockResolvedValue([
+      version({ version: 2, change_type: "UPDATE", status: "PUBLISHED", published_at: "2026-08-01T00:00:00" }),
+    ]);
+    renderReview();
+    await screen.findByText("sales_gmv_day");
+    fireEvent.click(screen.getAllByRole("button", { name: /^通\s*过$/ })[0]);
+    // 确认弹窗内变更摘要：废弃恢复重评审 + 说明（Tag 带版本后缀 v2）
+    expect(await screen.findByText(/废弃恢复重评审/)).toBeTruthy();
+    expect(screen.getByText("该指标此前已发布，本次为废弃后重新提交评审")).toBeTruthy();
+  });
+
+  it("评审记录：listVersions 失败静默降级，处理结论与口径展示不受影响", async () => {
+    const reviewed = reviewedMetric({
+      definition_json: { expression: "SUM(amount)", source_tables: ["demo.sales_order"] },
+    });
+    mockedListVersions.mockRejectedValue(new Error("network"));
+    await openDetail(reviewed);
+    // 弹窗正常展示处理结论与口径；变更上下文不渲染、不崩
+    expect(screen.getByText("已通过评审")).toBeTruthy();
+    expect(screen.getAllByText(/SUM\(amount\)/).length).toBeGreaterThan(0);
+    expect(screen.queryByText("变更上下文")).toBeNull();
+  });
+
+  it("评审记录：object/array diff 值渲染不崩（JSON pre 与 Tag 列表）", async () => {
+    const reviewed = reviewedMetric({ version: 2, effective_version: 1 });
+    mockedListVersions.mockResolvedValue([
+      version({
+        version: 2,
+        change_type: "UPDATE",
+        status: "DRAFT",
+        diff_json: {
+          source_tables: { before: ["a"], after: ["a", "b"], change_type: "UPDATE" },
+          metric_mount: { before: { table: "t1" }, after: { table: "t2" }, change_type: "UPDATE" },
+        },
+      }),
+      version({ version: 1, change_type: "CREATE", status: "PUBLISHED", published_at: "2026-08-01T00:00:00" }),
+    ]);
+    await openDetail(reviewed);
+    expect(await screen.findByText("变更指标 v1→v2")).toBeTruthy();
+    // array → Tag 列表（before/after 各一）；object → JSON pre
+    expect(screen.getByText("依赖表（上游）")).toBeTruthy();
+    expect(screen.getAllByText("a").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("b")).toBeTruthy();
+    expect(screen.getByText(/"t1"/)).toBeTruthy();
+    expect(screen.getByText(/"t2"/)).toBeTruthy();
   });
 });
