@@ -2177,6 +2177,137 @@ async def test_review_compliance_rejects_non_pii():
     assert exc.value.error_code == "PII_FLAG_REQUIRED"
 
 
+async def test_sql_batch_register_batch_id_persisted():
+    """P0-C：SQL 批量创建的指标携带 batch_id（此前 MetricCreateRequest 无该字段，
+    pydantic extra=ignore 丢弃——批量创建的指标无法整批回溯）。"""
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    request = MetricSqlBatchRegisterRequest(
+        domain="sales",
+        candidates=[
+            _sql_atomic("0:amount", "sales_order_amount_day", "日订单金额", "amount"),
+            _sql_composite(
+                "0:composite",
+                "sales_order_comp_day",
+                "金额用户复合",
+                ["sales_order_amount_day"],
+            ),
+        ],
+    )
+    captured: list = []
+
+    async def _capture_create(req, **kw):
+        captured.append(req)
+        return make_metric()
+
+    svc.create_metric = _capture_create  # type: ignore[method-assign]
+
+    result = await svc.batch_register_from_sql(request, actor_id=1)
+    assert all(c["status"] == "DRAFT" for c in result["candidates"])
+    batch_id = result["batch_id"]
+    assert batch_id.startswith("sqlbatch_")
+    # 原子 + 复合候选的 MetricCreateRequest 都携带同一 batch_id
+    assert all(req.batch_id == batch_id for req in captured)
+    assert len(captured) == 2
+
+
+async def test_sql_batch_register_atomic_owners_passed():
+    """P0-2 原子侧：SQL 批量注册原子候选的三方责任透传（此前仅复合补齐，原子
+    责任链空——详情页 OwnerChain 不完整）。"""
+    from app.services.semantic.schemas import (
+        MetricSqlBatchRegisterRequest,
+        SqlBatchCreateCandidate,
+    )
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    request = MetricSqlBatchRegisterRequest(
+        domain="sales",
+        candidates=[
+            SqlBatchCreateCandidate(
+                key="0:amount",
+                metric_code="sales_order_amount_day",
+                name="日订单金额",
+                type="atomic",
+                source_table="dwd_order_di",
+                measure_column="amount",
+                aggregation="SUM",
+                period="day",
+                definition_json={
+                    "expression": "SUM(amount)",
+                    "source_fields": [{"table": "dwd_order_di", "column": "amount"}],
+                },
+                product_owner_id=10,
+                tech_owner_id=11,
+                dw_developer_id=12,
+                product_owner_name="产品王",
+                tech_owner_name="技术李",
+                dw_developer_name="数仓赵",
+            )
+        ],
+    )
+    captured: list = []
+
+    async def _capture_create(req, **kw):
+        captured.append(req)
+        return make_metric()
+
+    svc.create_metric = _capture_create  # type: ignore[method-assign]
+
+    result = await svc.batch_register_from_sql(request, actor_id=1)
+    assert all(c["status"] == "DRAFT" for c in result["candidates"])
+    atomic_req = captured[0]
+    assert atomic_req.product_owner_id == 10
+    assert atomic_req.tech_owner_id == 11
+    assert atomic_req.dw_developer_id == 12
+    assert atomic_req.product_owner_name == "产品王"
+    assert atomic_req.tech_owner_name == "技术李"
+    assert atomic_req.dw_developer_name == "数仓赵"
+
+
+async def test_sql_batch_register_conflict_llm_budget():
+    """P0-2：SQL 批量注册的冲突预检共享批级 LLM 预算——超过预算后 create_metric
+    降级纯词法（use_llm=False），防批量路径数百上千次 LLM 调用（成本/超时风险）。"""
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    request = MetricSqlBatchRegisterRequest(
+        domain="sales",
+        candidates=[
+            _sql_atomic("0:a", "sales_order_amount_day", "日订单金额", "amount"),
+            _sql_atomic("0:b", "sales_order_userid_day", "日去重用户", "user_id"),
+            _sql_atomic("0:c", "sales_order_cnt_day", "日订单数", "order_id", agg="COUNT"),
+        ],
+    )
+    captured: list = []
+
+    async def _capture_create(req, **kw):
+        captured.append(kw.get("_conflict_llm_budget"))
+        return make_metric()
+
+    svc.create_metric = _capture_create  # type: ignore[method-assign]
+
+    result = await svc.batch_register_from_sql(request, actor_id=1)
+    assert all(c["status"] == "DRAFT" for c in result["candidates"])
+    # 每个候选都拿到共享预算 dict（同引用、limit=10）——批级共享设计成立
+    assert all(isinstance(b, dict) and b["limit"] == 10 for b in captured)
+    # 3 个候选共享同一预算对象（create_metric 被替换，used 递增由真实路径内部驱动）
+    assert len({id(b) for b in captured}) == 1
+    assert captured[-1]["used"] == 0
+
+
 # ---- 指标编码自动生成（FR-010）----
 
 

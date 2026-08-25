@@ -2058,6 +2058,12 @@ export function MetricDetail() {
           <Descriptions.Item label="编码">{metric.metric_code}</Descriptions.Item>
           <Descriptions.Item label="域">{metric.domain}</Descriptions.Item>
           <Descriptions.Item label="类型">{enumLabel(METRIC_TYPE_LABEL, metric.type)}</Descriptions.Item>
+          {/* P0-C：批量注册批次标识——详情页可识别"这一批"来源，整批可回溯 */}
+          {metric.batch_id && (
+            <Descriptions.Item label="来源批次">
+              <code className="muted">{metric.batch_id}</code>
+            </Descriptions.Item>
+          )}
           {/* OneData 原子层：逻辑度量（权威继承源）——关联显示名称+编码（详情后端 best-effort
               填充 measure_code/measure_name）；未关联提示引导「发起变更申请」关联（编辑弹窗
               atomic 有逻辑度量选择器），而非仅黄色横幅空引导 */}

@@ -542,10 +542,18 @@ export function MetricReview() {
       title: "编码",
       dataIndex: "metric_code",
       key: "metric_code",
-      render: (code: string) => (
-        <Button type="link" size="small" onClick={() => navigate(`/detail/${code}`)}>
-          {code}
-        </Button>
+      render: (code: string, r: MetricResponse) => (
+        <Space size={6}>
+          <Button type="link" size="small" onClick={() => navigate(`/detail/${code}`)}>
+            {code}
+          </Button>
+          {/* P0-C：批量注册批次标识——审核人一眼看出"这是一批"（batch 维度可回溯） */}
+          {r.batch_id && (
+            <Tooltip title={`批量注册批次：${r.batch_id}`}>
+              <Tag color="cyan" style={{ marginInlineEnd: 0 }}>批量</Tag>
+            </Tooltip>
+          )}
+        </Space>
       ),
     },
     { title: "名称", dataIndex: "name", key: "name", ellipsis: true },

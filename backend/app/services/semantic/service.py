@@ -352,6 +352,7 @@ class MetricService(BaseService):
         role: str | None = None,
         user_domain: str | None = None,
         _preloaded_conflict_existing: list[Any] | None = None,
+        _conflict_llm_budget: dict[str, int] | None = None,
     ) -> Metric:
         """创建指标（初始状态 DRAFT）。
 
@@ -543,6 +544,8 @@ class MetricService(BaseService):
             product_owner_name=request.product_owner_name,
             tech_owner_name=request.tech_owner_name,
             dw_developer_name=request.dw_developer_name,
+            # P0-C：批量注册批次 ID（可空）——批量创建的指标可整批回溯
+            batch_id=getattr(request, "batch_id", None),
         )
 
         metric = await self._repo.create(metric)
@@ -606,10 +609,14 @@ class MetricService(BaseService):
         # 可处置记录」严格一致，杜绝「有标记无记录」的孤儿态（曾致目录显示冲突、
         # 仲裁台为空、标记无法通过正常仲裁清除）。软冲突同样落库，仲裁台区分展示。
         # 抽取为公共方法 _detect_and_mark_conflicts：更新口径后（P2-I）复用同一逻辑。
-        # 批量注册场景传入预加载的 existing（逐列增量追加），避免 N 次全量加载。
+        # 批量注册场景传入预加载的 existing（逐列增量追加），避免 N 次全量加载；
+        # 批级 LLM 补位预算（_conflict_llm_budget）防批量路径数百上千次 LLM 调用。
         metric = (
             await self._detect_and_mark_conflicts(
-                metric, definition, existing=_preloaded_conflict_existing
+                metric,
+                definition,
+                existing=_preloaded_conflict_existing,
+                llm_budget=_conflict_llm_budget,
             )
             or metric
         )
@@ -718,6 +725,7 @@ class MetricService(BaseService):
         metric: Metric,
         definition: dict[str, Any],
         existing: list[Any] | None = None,
+        llm_budget: dict[str, int] | None = None,
     ) -> Metric:
         """创建/口径更新后自动预检相似口径（best-effort，不阻断主流程）。
 
@@ -732,6 +740,10 @@ class MetricService(BaseService):
             existing: 预加载的冲突比对对象（批量注册场景由调用方加载一次并逐列
                 增量追加，避免 N 列 = N 次全量加载的 O(N²) 性能退化）；None 时
                 内部加载（单条/更新场景）。
+            llm_budget: 批级 LLM 补位预算（{"used", "limit"}，批量注册共享）——
+                批量 N 候选每个都启用 use_llm 补位可能触发数百上千次 LLM 调用
+                （成本/超时风险）；预算耗尽后降级纯词法判定（use_llm=False），
+                单条创建/更新为 None（不受限）。
         """
         try:
             from app.services.conflict.repository import ConflictRepository
@@ -808,8 +820,16 @@ class MetricService(BaseService):
             # 补位触发区（0.45≤def_sim<0.85）的同义异名/表述差异大口径，交由 LLM 判定
             # 语义同义——使创建时检测能力对齐人工预检（/conflicts/check）。LLM 异常由
             # check 内部降级为词法判定（best-effort），不阻断创建主流程。
+            # 批级预算（P0-2）：批量注册 N 候选共享 llm_budget，预算耗尽降级纯词法——
+            # 防批量路径数百上千次 LLM 调用（成本/超时风险；对齐 sql_split 的 LLM 限额）。
+            use_llm = True
+            if llm_budget is not None:
+                if llm_budget["used"] >= llm_budget["limit"]:
+                    use_llm = False
+                else:
+                    llm_budget["used"] += 1
             await ConflictService(self._db).check(
-                candidate, existing, use_llm=True, source="auto"
+                candidate, existing, use_llm=use_llm, source="auto"
             )
             # 以冲突表实际未决记录为准挂标记（杜绝孤儿标记）
             open_conflict = await ConflictRepository(self._db).get_first_open_for_metric(
@@ -4404,6 +4424,9 @@ class MetricService(BaseService):
             preloaded_existing = await self.load_conflict_existing()
         except Exception:  # noqa: BLE001 - 预加载失败仅降级，不影响主流程
             preloaded_existing = None
+        # 批级 LLM 补位预算（P0-2）：N 列每个 use_llm=True 的补位可能触发数百上千次
+        # LLM 调用——预算耗尽后降级纯词法判定；单条创建不受限。
+        conflict_llm_budget = {"used": 0, "limit": 10}
 
         for col in request.measure_columns:
             # 使用 auto_fill 引擎生成编码建议
@@ -4475,6 +4498,7 @@ class MetricService(BaseService):
                         role=role,
                         user_domain=user_domain,
                         _preloaded_conflict_existing=preloaded_existing,
+                        _conflict_llm_budget=conflict_llm_budget,
                     )
                     # L3 增量：新列成功后追加到共享 existing，保持候选间互相冲突检测
                     # （与逐列加载时「前一候选已 flush 出现在后续列比对集」行为一致）。
@@ -4594,6 +4618,9 @@ class MetricService(BaseService):
             preloaded_existing = await self.load_conflict_existing()
         except Exception:  # noqa: BLE001 - 预加载失败仅降级，不影响主流程
             preloaded_existing = None
+        # 批级 LLM 补位预算（P0-2）：N 候选每个 use_llm=True 的补位可能触发数百上千次
+        # LLM 调用（成本/超时风险）——预算耗尽后降级纯词法判定；单条创建不受限。
+        conflict_llm_budget = {"used": 0, "limit": 10}
 
         # Phase1 原子：逐候选 savepoint 创建；业务/编码冲突记 VALIDATION_ERROR 继续
         atom_ok: set[str] = set()
@@ -4617,6 +4644,16 @@ class MetricService(BaseService):
                         measure_column=cand.measure_column,
                         period=cand.period,
                         granularity=cand.granularity,
+                        # P0-C：SQL 批量创建指标带批次 ID——创建后可整批回溯
+                        batch_id=batch_id,
+                        # 原子候选责任方（P0-2 补：此前仅复合透传，原子责任链空——
+                        # 详情页 OwnerChain 不完整；candidate 携带三方 owner/名称兜底）
+                        product_owner_id=cand.product_owner_id,
+                        tech_owner_id=cand.tech_owner_id,
+                        dw_developer_id=cand.dw_developer_id,
+                        product_owner_name=cand.product_owner_name,
+                        tech_owner_name=cand.tech_owner_name,
+                        dw_developer_name=cand.dw_developer_name,
                     )
                     await self.create_metric(
                         create_req,
@@ -4624,6 +4661,7 @@ class MetricService(BaseService):
                         role=role,
                         user_domain=user_domain,
                         _preloaded_conflict_existing=preloaded_existing,
+                        _conflict_llm_budget=conflict_llm_budget,
                     )
                     # P0-1 增量：原子成功后追加到共享 existing，保持候选间互相冲突
                     # 检测（与逐候选加载时「前一候选已 flush 出现在后续候选比对集」
@@ -4735,6 +4773,8 @@ class MetricService(BaseService):
                         product_owner_name=cand.product_owner_name,
                         tech_owner_name=cand.tech_owner_name,
                         dw_developer_name=cand.dw_developer_name,
+                        # P0-C：复合指标批量创建也带批次 ID（整批回溯）
+                        batch_id=batch_id,
                     )
                     await self.create_metric(
                         create_req,
@@ -4742,6 +4782,7 @@ class MetricService(BaseService):
                         role=role,
                         user_domain=user_domain,
                         _preloaded_conflict_existing=preloaded_existing,
+                        _conflict_llm_budget=conflict_llm_budget,
                     )
                 candidates.append(
                     {"metric_code": code, "status": "DRAFT", "validation_errors": None}

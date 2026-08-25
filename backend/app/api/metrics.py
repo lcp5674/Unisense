@@ -1558,7 +1558,23 @@ async def batch_register_metrics(
         action="metric_definition.batch_register",
         entity_type="metric_definition",
         entity_id=f"batch:{result['batch_id']}",
-        detail={"count": len(result["candidates"]), "domain": request.domain},
+        detail={
+            "count": len(result["candidates"]),
+            "domain": request.domain,
+            "batch_id": result["batch_id"],
+            # 审计失败明细（P0-C 加固）：全败此前也记"成功"无法追溯部分失败
+            "ok_count": sum(
+                1 for c in result["candidates"] if c["status"] == "DRAFT"
+            ),
+            "failed_count": sum(
+                1 for c in result["candidates"] if c["status"] != "DRAFT"
+            ),
+            "failed_codes": [
+                c["metric_code"]
+                for c in result["candidates"]
+                if c["status"] != "DRAFT"
+            ][:20],
+        },
         trace_id=trace_id,
     )
     await db.commit()
@@ -1846,7 +1862,24 @@ async def batch_register_from_sql_metrics(
         action="metric_definition.sql_batch_register",
         entity_type="metric_definition",
         entity_id=f"batch:{result['batch_id']}",
-        detail={"count": len(result["candidates"]), "domain": request.domain},
+        detail={
+            "count": len(result["candidates"]),
+            "domain": request.domain,
+            "batch_id": result["batch_id"],
+            # 审计失败明细（P0-C 加固）：全败此前也记"成功"无法追溯部分失败——
+            # 补 ok/failed 计数 + 失败编码（截断 20 防 detail 膨胀）
+            "ok_count": sum(
+                1 for c in result["candidates"] if c["status"] == "DRAFT"
+            ),
+            "failed_count": sum(
+                1 for c in result["candidates"] if c["status"] != "DRAFT"
+            ),
+            "failed_codes": [
+                c["metric_code"]
+                for c in result["candidates"]
+                if c["status"] != "DRAFT"
+            ][:20],
+        },
         trace_id=trace_id,
     )
     await db.commit()

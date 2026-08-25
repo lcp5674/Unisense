@@ -73,6 +73,8 @@ export interface MetricResponse {
   compliance_reviewed: boolean;
   /** 关联业务术语 ID（P2-11：术语治理归属，null=未绑定） */
   term_id: number | null;
+  /** P0-C：批量注册批次 ID（可空）——列表/详情/审核页展示批次可回溯整批 */
+  batch_id?: string | null;
   effective_version: number | null;
   consumption_guide: Record<string, unknown> | null;
   successor_code: string | null;

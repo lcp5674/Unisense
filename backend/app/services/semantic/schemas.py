@@ -170,6 +170,11 @@ class MetricCreateRequest(BaseModel):
     period: str | None = Field(
         None, max_length=32, description="统计周期（用于自动推断编码和粒度）"
     )
+    # P0-C：批量注册批次 ID（可空）——批量创建的指标带 batch_id 可回溯整批（"这一批
+    # 50 个"在创建后与单条可区分）；单条创建为 None。落 Metric.batch_id（有索引）。
+    batch_id: str | None = Field(
+        None, max_length=64, description="批量注册批次 ID（可空，单条创建为 None）"
+    )
 
     @field_validator("metric_code")
     @classmethod
@@ -879,6 +884,8 @@ class MetricResponse(BaseModel):
     consumption_guide: dict[str, Any] | None
     successor_code: str | None
     deprecated_at: datetime | None
+    # P0-C：批量注册批次 ID（可空）——列表/详情/审核页展示批次可回溯整批
+    batch_id: str | None = None
     # DB 列为 date（models/metric.py），序列化输出 ISO "YYYY-MM-DD"，前端 string 兼容
     sunset_until: date | None
     emergency_publish: bool = False

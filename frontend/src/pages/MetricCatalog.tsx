@@ -1366,6 +1366,12 @@ export function MetricCatalog() {
           {r.emergency_publish && <Tag color="volcano">紧急</Tag>}
           {r.pending_conflict && <Tag color="orange">冲突</Tag>}
           {r.pending_version && <Tag color="purple" icon={<ThunderboltOutlined />}>版本待确认</Tag>}
+          {/* P0-C：批量注册指标带批次标识——整批可回溯（列表可识别"这一批 50 个"） */}
+          {r.batch_id && (
+            <Tooltip title={`批量注册批次：${r.batch_id}`} placement="top">
+              <Tag color="cyan">批量</Tag>
+            </Tooltip>
+          )}
           {r.gray_tenant_ids && r.gray_tenant_ids.length > 0 && (
             <Tooltip
               title={`灰度租户：${r.gray_tenant_ids.join("、")}`}
@@ -1374,7 +1380,7 @@ export function MetricCatalog() {
               <Tag color="purple">灰度 {r.gray_tenant_ids.length} 租户</Tag>
             </Tooltip>
           )}
-          {!r.pii_flag && !r.emergency_publish && !r.pending_conflict && !r.pending_version && !r.gray_tenant_ids && <span className="muted">—</span>}
+          {!r.pii_flag && !r.emergency_publish && !r.pending_conflict && !r.pending_version && !r.gray_tenant_ids && !r.batch_id && <span className="muted">—</span>}
         </Space>
       ),
     },
