@@ -93,19 +93,27 @@ def _split_semicolon(sql: str) -> list[str]:
 
 
 def _split_statement(sql: str) -> list[str]:
-    """sqlglot 按语句语义切分（CTE/INSERT 单条天然正确；注释/引号内分号不误切）。"""
-    try:
-        asts = sqlglot.parse(sql)
-    except Exception:
-        return []
-    segments: list[str] = []
-    for ast in asts:
-        if ast is None:
+    """sqlglot 按语句语义切分（CTE/INSERT 单条天然正确；注释/引号内分号不误切）。
+
+    多方言依次尝试（默认 → hive → spark）：默认方言遇 Hive 特有语法
+    （如 ``create table ... stored as orc``）会整段抛错，回退 hive/spark 方言
+    保证 ETL 脚本可切分（避免因一条 DDL 导致整段回退到分号切分）。
+    """
+    for dialect in (None, "hive", "spark"):
+        try:
+            asts = sqlglot.parse(sql, dialect=dialect)
+        except Exception:
             continue
-        text = ast.sql().strip()
-        if text:
-            segments.append(text)
-    return segments
+        segments: list[str] = []
+        for ast in asts:
+            if ast is None:
+                continue
+            text = ast.sql().strip()
+            if text:
+                segments.append(text)
+        if len(segments) >= _LLM_SPLIT_MIN_SEGMENTS:
+            return segments
+    return []
 
 
 def _split_by_start_markers(sql: str, start_markers: list[Any]) -> list[str]:
@@ -275,7 +283,9 @@ def split_select_measures(
     for m in profile.measures:
         out.append(
             {
-                "source_table": table,
+                # 下沉场景度量自带来源表（聚合所在子查询），优先于 tables[0]
+                # （tables[0] 可能是 join 右侧的字典表）
+                "source_table": m.get("table") or table,
                 "measure_column": m["column"],
                 "aggregation": m["agg"],
                 "period": period,
@@ -301,30 +311,37 @@ def _build_atomic_candidate(
     time_column: str | None,
 ) -> dict[str, Any]:
     """构建原子候选：expression 模式推断（勿传多度量原 SQL，避免兄弟度量进口径），
-    聚合方式覆盖为 SQL 解析值（比列名规则更可靠）。"""
+    聚合方式覆盖为 SQL 解析值（比列名规则更可靠）。
+
+    ``measure`` 可能来自下沉收集（ETL 透传 INSERT），自带 ``alias/table/expression``：
+    key 用 alias 防同列不同语义冲突，源表/口径优先用度量自身携带值。
+    """
     col = measure["column"]
     agg = measure["agg"] or "COUNT"
-    profile = build_profile(source_table=table, measure_column=col, period=period)
+    alias = measure.get("alias")
+    measure_table = measure.get("table") or table
+    profile = build_profile(source_table=measure_table, measure_column=col, period=period)
     profile["domain_code"] = domain_code or ""
     result = infer_metric(profile, domain_defaults=domain_defaults or {})
     fields = result["fields"]
     fields["aggregation"] = _field(
         agg, "sql_parse", 0.95, f"SQL 度量 {col} 使用 {agg} 聚合"
     )
+    expression = measure.get("expression") or f"{agg}({col})"
     definition: dict[str, Any] = {
-        "expression": f"{agg}({col})",
-        "source_fields": [{"table": table, "column": col}] if table else [],
+        "expression": expression,
+        "source_fields": [{"table": measure_table, "column": col}] if measure_table else [],
         "partition_key": time_column,
     }
     metric_code = result.get("metric_code_suggestion")
-    if not metric_code and domain_code and table and period:
-        metric_code = generate_metric_code(domain_code, table, col, period)
+    if not metric_code and domain_code and measure_table and period:
+        metric_code = generate_metric_code(domain_code, measure_table, col, period)
     return {
-        "key": f"{idx}:{col}",
+        "key": f"{idx}:{alias or col}",
         "metric_code": metric_code,
         "name": fields["name"]["value"],
         "type": "atomic",
-        "source_table": table,
+        "source_table": measure_table,
         "measure_column": col,
         "aggregation": agg,
         "period": period,

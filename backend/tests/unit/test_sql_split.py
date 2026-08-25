@@ -326,3 +326,97 @@ async def test_infer_sql_batch_empty_sql() -> None:
     result = await infer_sql_batch(_fake_db(), sql="   ")
     assert result["candidates"] == []
     assert result["statements"] == []
+
+
+# ---------------------------------------------------------------- ETL 透传 INSERT 下沉
+
+
+# Hive ETL 脚本：set 参数 + 中文 comment 的建表 DDL + 透传 INSERT（默认方言对 DDL 解析失败）
+_HIVE_ETL_SQL = """
+set hive.vectorized.execution.enabled=false;
+create table if not exists wedw_dws.doctor_active_month_di(
+ month_id string comment "统计月,时间格式yyyy-MM",
+ hosp_name string comment "医院名称"
+)
+stored as orc;
+insert overwrite table wedw_dws.doctor_active_month_di
+select
+    a.month_id,
+    coalesce(b.org_name, '-99') as hosp_name,
+    a.current_month_active_doctor_cnt
+from
+(
+    select
+        substr(create_date,1,7) as month_id,
+        count(distinct doctor_code) as current_month_active_doctor_cnt
+    from wedw_dw.doctor_visit_agent_info_da
+    group by substr(create_date,1,7)
+)a
+left join
+(
+    select distinct rel_code, org_name
+    from wedw_dw.disease_care_sys_org_staff_relation_df
+)b
+on a.hosp_code = b.rel_code
+"""
+
+
+def test_split_statement_hive_ddl_uses_hive_dialect() -> None:
+    """Hive 特有 DDL（stored as orc + 中文 comment）默认方言解析失败 → 回退 hive 方言正常切分。"""
+    segments = _split_statement(_HIVE_ETL_SQL)
+    assert len(segments) == 3
+    assert "SET " in segments[0].upper()
+    assert "CREATE TABLE" in segments[1].upper()
+    assert "INSERT OVERWRITE" in segments[2].upper()
+
+
+async def test_infer_sql_batch_etl_insert_passthrough_candidates() -> None:
+    """ETL 透传 INSERT：最外层无聚合 → 下沉提取内层聚合候选。
+
+    候选 key 用投影别名（区分同列不同语义），源表取聚合所在子查询表（非字典表）。
+    """
+    result = await infer_sql_batch(
+        _fake_db(), sql=_HIVE_ETL_SQL, split_mode="statement", domain_code="sales"
+    )
+    # set + create 无聚合进 skipped，insert 下沉出 1 个候选
+    assert len(result["skipped"]) == 2
+    atoms = [c for c in result["candidates"] if c["type"] == "atomic"]
+    assert len(atoms) == 1
+    cand = atoms[0]
+    assert cand["key"] == "2:current_month_active_doctor_cnt"
+    assert cand["source_table"] == "wedw_dw.doctor_visit_agent_info_da"
+    assert cand["measure_column"] == "doctor_code"
+    assert cand["aggregation"] == "COUNT_DISTINCT"
+    assert "COUNT(DISTINCT" in cand["definition_json"]["expression"].upper()
+
+
+async def test_infer_sql_batch_etl_insert_synthesize_composite() -> None:
+    """透传 INSERT 多度量 + synthesize_composite → N 原子 + 1 复合。"""
+    sql = """
+    insert overwrite table wedw_dws.t
+    select a.month_id, a.current_month_active_doctor_cnt, a.last_month_active_doctor_cnt
+    from (
+        select substr(create_date,1,7) as month_id,
+               count(distinct doctor_code) as current_month_active_doctor_cnt,
+               count(distinct case when last_visit_date is not null then doctor_code end)
+                   as last_month_active_doctor_cnt
+        from wedw_dw.doctor_visit_agent_info_da
+        group by substr(create_date,1,7)
+    ) a
+    """
+    result = await infer_sql_batch(
+        _fake_db(), sql=sql, split_mode="statement", domain_code="sales", synthesize_composite=True
+    )
+    atoms = [c for c in result["candidates"] if c["type"] == "atomic"]
+    composites = [c for c in result["candidates"] if c["type"] == "composite"]
+    assert len(atoms) == 2
+    assert len(composites) == 1
+    # key 用别名区分同列（doctor_code）不同语义的度量
+    keys = {a["key"] for a in atoms}
+    assert keys == {
+        "0:current_month_active_doctor_cnt",
+        "0:last_month_active_doctor_cnt",
+    }
+    comp = composites[0]
+    assert comp["key"] == "0:composite"
+    assert set(comp["dependencies"]) == {a["metric_code"] for a in atoms}

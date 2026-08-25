@@ -94,12 +94,40 @@ def _extract_group_by(select: exp.Select) -> list[str]:
     return cols
 
 
-def _extract_measures(select: exp.Select) -> list[dict[str, str]]:
+def _from_table(select: exp.Select) -> str | None:
+    """SELECT 的 FROM 直接引用的第一个物理表（穿透子查询别名）。
+
+    供"外层透传下沉"场景定位度量真正的来源表：聚合子查询的 FROM 常是
+    ``(select ... from dwd_xxx) t1 left join (select ...) t2`` 形态，
+    取最左侧来源的第一个物理表（而非 join 右侧的字典/维表）。
+    """
+    fr = select.args.get("from")
+    if fr is None:
+        return None
+    this = fr.this
+    if isinstance(this, exp.Table):
+        return _norm_table_name(this)
+    for node in this.walk():
+        if isinstance(node, exp.Table):
+            parent = node.parent
+            if isinstance(parent, exp.Insert) and parent.this is node:
+                continue
+            return _norm_table_name(node)
+    return None
+
+
+def _projection_measures(
+    select: exp.Select, enrich: bool = False, table: str | None = None
+) -> list[dict[str, Any]]:
     """SELECT 投影中的度量：聚合函数包裹的列 → ``{"column", "agg"}``。
 
-    处理 COUNT(DISTINCT x)（DISTINCT 修饰符）与 COUNT(*)（星号）。
+    处理 COUNT(DISTINCT x)（DISTINCT 修饰符）、COUNT(*)（星号）与
+    ``count(distinct case when ... then col end)``（Case 包裹时取 then 分支列）。
+
+    ``enrich=True`` 时（下沉场景）附加 ``alias``（投影别名）、``table``（来源表）、
+    ``expression``（原始聚合投影 SQL）——区分同列不同语义的度量并还原口径。
     """
-    measures: list[dict[str, str]] = []
+    measures: list[dict[str, Any]] = []
     for projection in select.expressions:
         if not isinstance(projection, exp.Alias) and not isinstance(projection, exp.Column):
             continue
@@ -115,15 +143,52 @@ def _extract_measures(select: exp.Select) -> list[dict[str, str]]:
         if isinstance(col_expr, exp.Distinct):
             agg_name = "COUNT_DISTINCT"
             inner = col_expr.expressions[0] if col_expr.expressions else None
-            if isinstance(inner, exp.Column):
+            if isinstance(inner, (exp.Column, exp.Case)):
                 col_expr = inner
         if isinstance(col_expr, exp.Star):
             col_name = "*"
         elif isinstance(col_expr, exp.Column):
             col_name = col_expr.name.lower()
+        elif isinstance(col_expr, exp.Case):
+            # count(distinct case when ... then col end) → 取 then 分支列
+            col_name = next(
+                (c.name.lower() for c in col_expr.walk() if isinstance(c, exp.Column)),
+                "*",
+            )
         else:
             col_name = "*"
-        measures.append({"column": col_name, "agg": agg_name})
+        measure: dict[str, Any] = {"column": col_name, "agg": agg_name}
+        if enrich:
+            measure["alias"] = (
+                projection.alias_or_name if isinstance(projection, exp.Alias) else None
+            )
+            measure["table"] = table
+            measure["expression"] = target.sql()
+        measures.append(measure)
+    return measures
+
+
+def _extract_measures(select: exp.Select) -> list[dict[str, Any]]:
+    """SELECT 投影度量；外层无聚合时下沉 FROM 子树找聚合投影。
+
+    ETL 落宽表常见 ``insert overwrite ... select a.col1, a.cnt ... from (聚合子查询) a``
+    透传形态——最外层投影只是改名/join 字典，聚合在子查询内。此时下沉收集聚合
+    投影的度量，按 ``(alias, agg)`` 去重（UNION 多支同指标合并），并附带
+    ``alias/table/expression`` 供候选构建区分同列不同语义并还原口径。
+    """
+    measures = _projection_measures(select)
+    if measures:
+        return measures
+    seen: set[tuple[str, str]] = set()
+    for sub in select.find_all(exp.Select):
+        if sub is select:
+            continue
+        for m in _projection_measures(sub, enrich=True, table=_from_table(sub)):
+            key = (m["alias"] or m["column"], m["agg"])
+            if key in seen:
+                continue
+            seen.add(key)
+            measures.append(m)
     return measures
 
 
