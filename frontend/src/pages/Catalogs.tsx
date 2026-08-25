@@ -659,7 +659,7 @@ export function Catalogs() {
               type="text"
               size="small"
               icon={<HeartOutlined style={{ color: favNames.has(record.entity_name) ? "#eb2f96" : undefined }} />}
-              onClick={() => toggleFavorite(record)}
+              onClick={(e) => { e.stopPropagation(); toggleFavorite(record); }}
               aria-label={favNames.has(record.entity_name) ? "取消收藏" : "收藏"}
             />
           </Tooltip>
@@ -667,7 +667,7 @@ export function Catalogs() {
             type="link"
             size="small"
             icon={<EyeOutlined />}
-            onClick={() => openFieldDetail(record)}
+            onClick={(e) => { e.stopPropagation(); openFieldDetail(record); }}
           >
             字段详情
           </Button>
@@ -832,7 +832,17 @@ export function Catalogs() {
           tableLayout="fixed"
           rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }}
           onRow={(r) => ({
-            style: focusName && r.entity_name === focusName ? { background: "#fffbe6" } : undefined,
+            // 行点击打开字段详情（对齐描述缺失治理面板交互）：点选择列复选框/操作按钮不触发
+            onClick: (e) => {
+              const target = e.target as HTMLElement;
+              if (target.closest(".ant-table-selection-column")) return;
+              if (target.closest("button, a")) return;
+              openFieldDetail(r);
+            },
+            style: {
+              cursor: "pointer",
+              ...(focusName && r.entity_name === focusName ? { background: "#fffbe6" } : undefined),
+            },
           })}
           pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条` }}
           scroll={{ x: "max" }}

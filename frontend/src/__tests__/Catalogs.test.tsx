@@ -422,6 +422,64 @@ describe("Catalogs 页面", () => {
     });
   });
 
+  it("点击表格行打开字段详情抽屉（对齐描述缺失治理行点击交互）", async () => {
+    const withCols = {
+      ...CATALOGS[0],
+      schema_def: {
+        columns: [
+          { name: "order_id", type: "bigint", nullable: true },
+          { name: "amount", type: "decimal", nullable: true },
+        ],
+      },
+    } as DBCatalog;
+    mockedList.mockResolvedValue({ items: [withCols], total: 1, page: 1, page_size: 20 });
+
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    // 点击行主体（实体名所在 cell，避开操作列按钮与选择列复选框）
+    const entityCell = await screen.findByText("dwd_finance_order");
+    const row = entityCell.closest("tr") as HTMLElement;
+    fireEvent.click(row);
+
+    await waitFor(() => {
+      expect(screen.getByText("order_id")).toBeTruthy();
+    });
+  });
+
+  it("点击选择列复选框不打开字段详情抽屉（行点击守卫）", async () => {
+    const withCols = {
+      ...CATALOGS[0],
+      schema_def: {
+        columns: [
+          { name: "order_id", type: "bigint", nullable: true },
+          { name: "amount", type: "decimal", nullable: true },
+        ],
+      },
+    } as DBCatalog;
+    mockedList.mockResolvedValue({ items: [withCols], total: 1, page: 1, page_size: 20 });
+
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    const entityCell = await screen.findByText("dwd_finance_order");
+    const row = entityCell.closest("tr") as HTMLElement;
+    fireEvent.click(within(row).getByRole("checkbox"));
+
+    // 抽屉未打开（字段不渲染）
+    expect(screen.queryByText("order_id")).toBeNull();
+    // 但复选框已勾选（选中行状态生效）
+    await waitFor(() => {
+      expect(within(row).getByRole("checkbox")).toHaveProperty("checked", true);
+    });
+  });
+
   it("采集该表按钮触发单实体刷新并回填最新字段", async () => {
     // 首次列表：实体无字段（schema 空）→ 抽屉显示空态
     const emptySchema = { ...CATALOGS[0], schema_def: {} };
