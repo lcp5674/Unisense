@@ -4,6 +4,7 @@ import { lineageImpact, lineageImpactPreview } from "../../api";
 import type { ImpactPreview, LineageEdge, LineageNodeInfo } from "../../types";
 import { AssetGraph, AssetGraphEdge, AssetGraphNode } from "../../components/assetmap/AssetGraph";
 import { LINEAGE_EDGE_TYPE_LABEL } from "../../utils/enums";
+import { CodeValue } from "../../components/CodeValue";
 
 const EDGE_COLOR: Record<string, string> = {
   METRIC_DERIVES: "blue",
@@ -140,9 +141,13 @@ export function LineageImpact({ metricCode }: { metricCode: string }) {
     {
       title: direction === "downstream" ? "下游节点" : direction === "upstream" ? "上游节点" : "关联节点",
       key: "node",
-      render: (_: unknown, e: LineageEdge) => (
-        <span className="mono">{direction === "downstream" ? e.target_node : e.source_node}</span>
-      ),
+      render: (_: unknown, e: LineageEdge) => {
+        // 节点 ID 形如 metric:/table:/field:，剥离前缀展示编码本体（等宽窄列下保留更多省略空间）；
+        // 完整 ID 仍存于 aria-label，hover 可查
+        const node = direction === "downstream" ? e.target_node : e.source_node;
+        const display = node.replace(/^(metric|table|field):/, "");
+        return <CodeValue value={node} displayValue={display} code maxWidth={280} maxChars={34} />;
+      },
     },
     {
       title: "关系",

@@ -38,6 +38,7 @@ import { MEASURE_CATEGORY_LABEL, MEASURE_FORMAT_LABEL } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 import { usePermission } from "../hooks/usePermission";
 import { MasterDataBatch, type BatchActionKey } from "../components/MasterDataBatch";
+import { CodeValue } from "../components/CodeValue";
 import {
   MasterDataReviewActions,
   MasterDataReviewModals,
@@ -498,7 +499,7 @@ export function MeasureCatalogs() {
           },
         }}
         columns={[
-          { title: "编码", dataIndex: "measure_code", width: 180, render: (v) => <code>{v}</code> },
+          { title: "编码", dataIndex: "measure_code", width: 180, render: (v) => <CodeValue value={String(v)} code maxWidth={170} /> },
           { title: "名称", dataIndex: "name", width: 160 },
           {
             title: "度量格式",

@@ -103,6 +103,7 @@ import { LineageImpact } from "./metric/LineageImpact";
 import { VersionHistory } from "./metric/VersionHistory";
 import { AuditTimeline } from "./metric/AuditTimeline";
 import { RelatedDimensions } from "./metric/RelatedDimensions";
+import { CodeValue } from "../components/CodeValue";
 
 const { Paragraph } = Typography;
 
@@ -447,15 +448,14 @@ function DefinitionCard({ metric }: { metric: MetricResponse }) {
             {dependencies.map((d) => {
               const depCode = String(d);
               return (
-                <Tag
+                <CodeValue
                   key={depCode}
-                  className="mono"
-                  style={{ cursor: "pointer", marginRight: 4 }}
-                  onClick={() => navigate(`/detail/${encodeURIComponent(depCode)}`)}
-                  title={`查看依赖指标 ${depCode}`}
-                >
-                  {depCode}
-                </Tag>
+                  value={depCode}
+                  tag
+                  maxWidth={280}
+                  target={`/detail/${encodeURIComponent(depCode)}`}
+                  onNavigate={(t) => navigate(t)}
+                />
               );
             })}
           </Descriptions.Item>

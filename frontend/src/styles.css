@@ -1462,6 +1462,10 @@ body {
 .code-value-tip-overlay {
   max-width: 400px;
 }
+.code-value-tip-overlay-wide {
+  /* 极端长值（>100 字符）弹层加宽，避免过窄导致每行换行过密 */
+  max-width: 520px;
+}
 .code-value-tip-text {
   font-family: var(--font-mono);
   font-size: 12px;
@@ -1470,6 +1474,19 @@ body {
   margin-bottom: 2px;
   max-height: 120px;
   overflow: auto;
+}
+.code-value-tip-text-extreme {
+  /* 极端长值纵向滚动兜底：弹层高度受限，超长值可滚动查看而非撑出屏幕 */
+  max-height: 160px;
+}
+.code-value-tag {
+  /* Tag 变体：max-width 由内联 style 覆盖，此处保证单行 + CSS 截断二次兜底 */
+  display: inline-block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  margin-inline-end: 4px;
 }
 
 .notif-body-full {

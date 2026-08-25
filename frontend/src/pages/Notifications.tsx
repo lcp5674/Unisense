@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Alert, Spin, Empty, Pagination, Tooltip } from "antd";
-import { PlusOutlined, SendOutlined, ClockCircleOutlined, LinkOutlined, CheckOutlined, DeleteOutlined, UserOutlined, StarOutlined, SearchOutlined, CopyOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Alert, Spin, Empty, Pagination } from "antd";
+import { PlusOutlined, SendOutlined, ClockCircleOutlined, LinkOutlined, CheckOutlined, DeleteOutlined, UserOutlined, StarOutlined, SearchOutlined } from "@ant-design/icons";
 import {
   listNotifications,
   listNotifyEvents,
@@ -21,6 +21,7 @@ import { NOTIFY_STATUS_LABEL, QUALITY_LEVEL_LABEL } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
 import { notifyNotifChanged } from "../utils/notifBus";
 import { usePermission } from "../hooks/usePermission";
+import { CodeValue } from "../components/CodeValue";
 
 // 渠道 = 消息送达方式（面向业务用户，不用 webhook/sms 等英文码）
 const CHANNEL_LABEL: Record<string, string> = {
@@ -593,78 +594,8 @@ function fieldTarget(key: string, value: string): string | null {
   return null;
 }
 
-// —— 长标识值（指标编码等）展示 ——
-// 超长连续编码（如 outp_e2e_fee_day_2026_q3_retail_amount_sum_by_store_region）若整行换行会撑高卡片且视觉杂乱。
-// 这里做「单行中间省略」：保留首尾段 + 省略号，hover 由 Tooltip 展示完整值并可一键复制，点击仍直达详情。
-const CODE_ELLIPSIS_MAX = 44;
-function ellipsizeCode(v: string, max = CODE_ELLIPSIS_MAX): string {
-  if (v.length <= max) return v;
-  const headLen = Math.ceil(max * 0.6); // 首段占比 60%，便于识别编码前缀模式
-  const tailLen = max - headLen - 1; // 尾部剩余（-1 给省略号），保留编码结尾特征
-  return `${v.slice(0, headLen)}…${v.slice(-tailLen)}`;
-}
-
-function CodeValue({
-  value,
-  target,
-  onNavigate,
-  code,
-}: {
-  value: string;
-  target?: string | null;
-  onNavigate?: (t: string) => void;
-  /** code 变体：等宽字体 + 浅底（订阅表格等场景） */
-  code?: boolean;
-}) {
-  const isLong = value.length > CODE_ELLIPSIS_MAX;
-  const [copied, setCopied] = useState(false);
-  const copy = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* 剪贴板不可用时静默，不阻断交互 */
-    }
-  };
-  const cls = [
-    "code-value",
-    code ? "code-value-code" : "",
-    isLong ? "code-value-long" : "",
-    onNavigate ? "code-value-link" : "",
-  ].filter(Boolean).join(" ");
-  const Tag = code ? "code" : "span";
-  const inner = (
-    <Tag
-      className={cls}
-      aria-label={value}
-      onClick={onNavigate ? (e) => { e.stopPropagation(); onNavigate(target as string); } : undefined}
-    >
-      {isLong ? ellipsizeCode(value) : value}
-    </Tag>
-  );
-  if (!isLong) return inner;
-  return (
-    <Tooltip
-      trigger={["hover", "focus"]}
-      placement="topLeft"
-      mouseEnterDelay={0.15}
-      mouseLeaveDelay={0.15}
-      overlayClassName="code-value-tip-overlay"
-      title={
-        <div className="code-value-tip">
-          <div className="code-value-tip-text">{value}</div>
-          <Button size="small" type="link" icon={<CopyOutlined />} onClick={copy}>
-            {copied ? "已复制" : "复制"}
-          </Button>
-        </div>
-      }
-    >
-      {inner}
-    </Tooltip>
-  );
-}
+// —— 长标识值（指标编码等）统一走公共组件 CodeValue（components/CodeValue.tsx）——
+// 策略：超长单行中间省略 + hover 完整值 + 一键复制 + 可点击直达详情。
 
 // 可选渠道：后端无短信实现，不提供 sms（避免订阅了永不投递的渠道）
 const CHANNELS = ["email", "webhook", "in_app"];
