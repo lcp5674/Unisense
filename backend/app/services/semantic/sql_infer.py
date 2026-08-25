@@ -26,6 +26,24 @@ from sqlglot import exp
 _TIME_COLUMN_HINTS = (
     "dt", "date", "day", "time", "month", "week", "quarter", "year", "period", "stat"
 )
+# 截断表达式长度 → 统计粒度（substr(x,1,7)=YYYY-MM 月；1,6=YYYYMM 月；1,4=YYYY 年）
+_SUBSTR_LENGTH_GRAIN = {7: "month", 6: "month", 5: "month", 4: "year"}
+# date_format 格式化模式 → 统计粒度（含 Hive 小写 yyyy/MM/dd 变体）
+_DATE_FORMAT_GRAIN = (
+    ("%y-%m-%d", "day"), ("%y%m%d", "day"), ("yyyy-mm-dd", "day"), ("yyyymmdd", "day"),
+    ("%y-%m", "month"), ("%y%m", "month"), ("yyyy-mm", "month"), ("yyyymm", "month"),
+    ("%y", "year"), ("yyyy", "year"),
+    ("%y-%w", "week"), ("%y-%u", "week"),
+)
+# 投影别名/列名 → 统计粒度（比 _TIME_COLUMN_HINTS 更明确，如 month_id 优先于 create_date）
+_TIME_GRAIN_ALIAS = (
+    ("month_id", "month"), ("stat_month", "month"), ("biz_month", "month"), ("mon", "month"),
+    ("week_id", "week"), ("stat_week", "week"), ("wk", "week"),
+    ("quarter_id", "quarter"), ("stat_quarter", "quarter"), ("qtr", "quarter"),
+    ("year_id", "year"), ("stat_year", "year"), ("yr", "year"),
+    ("hour_id", "hour"), ("stat_hour", "hour"),
+    ("day_id", "day"), ("stat_date", "day"),
+)
 # 聚合函数 → 规范大写
 _AGG_FUNCS = {
     "SUM",
@@ -52,6 +70,9 @@ class SqlProfile:
     measures: list[dict[str, Any]] = field(default_factory=list)
     filters: list[str] = field(default_factory=list)
     time_column: str | None = None
+    # 截断/别名表达的明确时间粒度（substr(x,1,7) as month_id → "month"），
+    # 比 time_column 的模糊 token 更可靠——period 推断优先用它
+    time_granularity: str | None = None
     sql: str | None = None
 
 
@@ -209,8 +230,113 @@ def _extract_filters(select: exp.Select) -> list[str]:
     return predicates
 
 
-def _detect_time_column(group_by: list[str], filters: list[str]) -> str | None:
-    """从 GROUP BY 与时间谓词中识别时间列。"""
+# 已知统计粒度（date_trunc unit / LLM 结果白名单）
+_KNOWN_GRAINS = {"day", "week", "month", "quarter", "year", "hour"}
+
+
+def _expr_time_grain(node: exp.Expr, alias: str | None = None) -> str | None:
+    """单个投影/分组表达式 → 明确时间粒度（截断/格式化/别名）；无信号返回 None。"""
+    if alias:
+        low = alias.lower()
+        for token, grain in _TIME_GRAIN_ALIAS:
+            if token in low:
+                return grain
+    # 裸列（如 group by month_id）→ 按列名匹配粒度别名
+    if isinstance(node, exp.Column):
+        low = node.name.lower()
+        for token, grain in _TIME_GRAIN_ALIAS:
+            if token in low:
+                return grain
+        return None
+    # substr(x,1,7)/substring(x,1,7)：按截断长度（7=YYYY-MM 月、6=YYYYMM 月、4=YYYY 年）
+    if isinstance(node, exp.Substring):
+        length = node.args.get("length")
+        if isinstance(length, exp.Literal):
+            with contextlib.suppress(ValueError):
+                return _SUBSTR_LENGTH_GRAIN.get(int(length.this))
+    # date_trunc('month', x)：按 unit
+    if isinstance(node, exp.DateTrunc):
+        unit = node.args.get("unit")
+        if isinstance(unit, exp.Literal):
+            grain = str(unit.this).lower()
+            return grain if grain in _KNOWN_GRAINS else None
+    # date_format(x, '%Y-%m')（默认方言解析为 Anonymous）：按 format 模式
+    if isinstance(node, exp.Anonymous) and str(node.this).upper() == "DATE_FORMAT":
+        args = node.expressions
+        if len(args) >= 2 and isinstance(args[1], exp.Literal):
+            fmt = str(args[1].this).lower()
+            for pattern, grain in _DATE_FORMAT_GRAIN:
+                if pattern in fmt:
+                    return grain
+    # date(x) 截断到日
+    if isinstance(node, exp.Date):
+        return "day"
+    return None
+
+
+def _detect_time_granularity(select: exp.Select) -> str | None:
+    """从投影别名 / 投影表达式 / GROUP BY 表达式识别明确时间粒度。
+
+    ETL 常见 ``substr(create_date,1,7) as month_id`` / ``date_trunc('month', x)``
+    等——表达式把时间列截断到固定粒度，直接决定指标统计周期，比
+    ``_detect_time_column`` 的列名 token 更可靠。优先级：投影别名 > 投影表达式
+    > GROUP BY 表达式；最外层透传无信号时下沉 FROM 子树（ETL 透传 INSERT 的
+    聚合子查询，对齐 ``_extract_measures`` 下沉逻辑）。无信号返回 None。
+    """
+
+    def _scan(s: exp.Select) -> str | None:
+        for proj in s.expressions:
+            if isinstance(proj, exp.Alias):
+                grain = _expr_time_grain(proj.this, alias=proj.alias_or_name)
+            else:
+                grain = _expr_time_grain(proj)
+            if grain:
+                return grain
+        group = s.args.get("group")
+        if group:
+            for expr in group.expressions:
+                grain = _expr_time_grain(expr)
+                if grain:
+                    return grain
+        return None
+
+    grain = _scan(select)
+    if grain:
+        return grain
+    for sub in select.find_all(exp.Select):
+        if sub is select:
+            continue
+        grain = _scan(sub)
+        if grain:
+            return grain
+    return None
+
+
+def _detect_time_column(
+    select: exp.Select | None,
+    group_by: list[str],
+    filters: list[str],
+) -> str | None:
+    """从 GROUP BY / 投影别名 / 时间谓词中识别时间列。
+
+    优先返回明确的粒度列（month_id/week_id 等，比 create_date 更能确定周期）；
+    其次投影别名里的时间列（``substr(create_date,1,7) as month_id`` 在 group_by
+    中只体现底层列 create_date，别名承载真实时间语义）；最后回退 GROUP BY +
+    谓词的 hint 匹配（原逻辑）。
+    """
+    # 1) GROUP BY 中明确的粒度列（month_id/week_id/stat_date 等，比 create_date 更能确定周期）
+    for g in group_by:
+        gl = g.lower()
+        if any(token in gl for token, _ in _TIME_GRAIN_ALIAS):
+            return g
+    # 2) 投影别名中的时间列
+    if select is not None:
+        for proj in select.expressions:
+            if isinstance(proj, exp.Alias):
+                alias = proj.alias_or_name
+                if alias and any(h in alias.lower() for h in _TIME_COLUMN_HINTS):
+                    return alias
+    # 3) GROUP BY + 谓词 hint（原逻辑）
     haystack = " ".join(group_by + filters).lower()
     for hint in _TIME_COLUMN_HINTS:
         if hint in haystack:
@@ -254,13 +380,15 @@ def parse_sql_profile(sql: str) -> SqlProfile:
     group_by = _extract_group_by(select)
     measures = _extract_measures(select)
     filters = _extract_filters(select)
-    time_column = _detect_time_column(group_by, filters)
+    time_column = _detect_time_column(select, group_by, filters)
+    time_granularity = _detect_time_granularity(select)
     return SqlProfile(
         source_tables=source_tables,
         group_by=group_by,
         measures=measures,
         filters=filters,
         time_column=time_column,
+        time_granularity=time_granularity,
         sql=sql.strip(),
     )
 
@@ -273,5 +401,6 @@ def profile_to_dict(profile: SqlProfile) -> dict[str, Any]:
         "measures": profile.measures,
         "filters": profile.filters,
         "time_column": profile.time_column,
+        "time_granularity": profile.time_granularity,
         "sql": profile.sql,
     }

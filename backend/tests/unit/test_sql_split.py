@@ -12,9 +12,11 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.services.llm.parse import parse_sql_split_result
+from app.services.llm.parse import parse_period_infer_result, parse_sql_split_result
 from app.services.semantic.sql_infer import parse_sql_profile
 from app.services.semantic.sql_split import (
+    _period_from_profile,
+    _period_uncertain,
     _split_semicolon,
     _split_statement,
     infer_sql_batch,
@@ -388,6 +390,8 @@ async def test_infer_sql_batch_etl_insert_passthrough_candidates() -> None:
     assert cand["measure_column"] == "doctor_code"
     assert cand["aggregation"] == "COUNT_DISTINCT"
     assert "COUNT(DISTINCT" in cand["definition_json"]["expression"].upper()
+    # substr(create_date,1,7) 截月 → 周期自动识别为月（不再回落 day）
+    assert cand["period"] == "month"
 
 
 async def test_infer_sql_batch_etl_insert_synthesize_composite() -> None:
@@ -420,3 +424,119 @@ async def test_infer_sql_batch_etl_insert_synthesize_composite() -> None:
     comp = composites[0]
     assert comp["key"] == "0:composite"
     assert set(comp["dependencies"]) == {a["metric_code"] for a in atoms}
+
+
+# ---------------------------------------------------------------- 周期推断 + LLM 兜底
+
+
+def test_period_from_profile_substr_month() -> None:
+    """substr(create_date,1,7) 截月 → 周期 month（粒度信号优先于列名 token）。"""
+    profile = parse_sql_profile(
+        "SELECT substr(create_date,1,7) AS month_id, SUM(amt) AS amt "
+        "FROM t GROUP BY substr(create_date,1,7)"
+    )
+    assert _period_from_profile(profile) == "month"
+
+
+def test_period_from_profile_plain_dt() -> None:
+    """dt 日分区 → 周期 day。"""
+    profile = parse_sql_profile(
+        "SELECT dt, SUM(amount) AS gmv FROM dwd_order_di GROUP BY dt"
+    )
+    assert _period_from_profile(profile) == "day"
+
+
+def test_period_from_profile_month_column() -> None:
+    """group by month_id 裸列 → 周期 month。"""
+    profile = parse_sql_profile(
+        "SELECT month_id, SUM(amt) AS amt FROM t GROUP BY month_id"
+    )
+    assert _period_from_profile(profile) == "month"
+
+
+def test_period_from_profile_no_time_defaults_day() -> None:
+    """无时间信号 → 回落 day。"""
+    profile = parse_sql_profile("SELECT SUM(amount) AS gmv FROM dwd_order_di")
+    assert _period_from_profile(profile) == "day"
+
+
+def test_period_uncertain_signal() -> None:
+    """有明确粒度信号或时间列 → 不触发 LLM（确定）。"""
+    month = parse_sql_profile(
+        "SELECT substr(create_date,1,7) AS month_id, SUM(amt) AS amt "
+        "FROM t GROUP BY substr(create_date,1,7)"
+    )
+    assert not _period_uncertain(month)
+    dt = parse_sql_profile("SELECT dt, SUM(amount) AS gmv FROM dwd_order_di GROUP BY dt")
+    assert not _period_uncertain(dt)
+
+
+def test_period_uncertain_no_time_signal() -> None:
+    """无时间列且无粒度信号 → 不确定（触发 LLM 兜底）。"""
+    profile = parse_sql_profile("SELECT SUM(amount) AS gmv FROM dwd_order_di")
+    assert _period_uncertain(profile)
+
+
+async def test_infer_sql_batch_llm_period_fallback() -> None:
+    """规则层无时间信号 → LLM 兜底推断周期；LLM 不可用/失败降级 day。"""
+    sql = "SELECT SUM(amount) AS gmv FROM dwd_order_di"
+    db = _fake_db()
+
+    # LLM 可用且返回 month → 候选周期 month
+    async def _fake_chat(**kwargs):
+        content = '{"period": "month", "confidence": 0.9, "reason": "月度汇总"}'
+        return {"content": content, "role": "assistant"}
+
+    fake_client = MagicMock()
+    fake_client.enabled = True
+    fake_client.chat = AsyncMock(side_effect=_fake_chat)
+    with patch(
+        "app.services.llm.config_service.LlmConfigService"
+    ) as mock_svc:
+        mock_svc.return_value.build_client = AsyncMock(return_value=fake_client)
+        result = await infer_sql_batch(db, sql=sql, split_mode="statement", domain_code="sales")
+    cands = [c for c in result["candidates"] if c["type"] == "atomic"]
+    assert cands and all(c["period"] == "month" for c in cands)
+
+
+async def test_infer_sql_batch_llm_period_unavailable_degrades_day() -> None:
+    """LLM 不可用（enabled=False）→ 降级规则层默认 day，不阻断候选。"""
+    db = _fake_db()
+    fake_client = MagicMock()
+    fake_client.enabled = False
+    with patch(
+        "app.services.llm.config_service.LlmConfigService"
+    ) as mock_svc:
+        mock_svc.return_value.build_client = AsyncMock(return_value=fake_client)
+        result = await infer_sql_batch(
+            db, sql="SELECT SUM(amount) AS gmv FROM dwd_order_di",
+            split_mode="statement", domain_code="sales",
+        )
+    cands = [c for c in result["candidates"] if c["type"] == "atomic"]
+    assert cands and all(c["period"] == "day" for c in cands)
+
+
+# ---------------------------------------------------------------- parse_period_infer_result
+
+
+def test_parse_period_infer_result_valid() -> None:
+    parsed = parse_period_infer_result(
+        '{"period": "month", "confidence": 0.85, "reason": "substr截月"}'
+    )
+    assert parsed == {"period": "month", "confidence": 0.85, "reason": "substr截月"}
+
+
+def test_parse_period_infer_result_alias_and_chinese() -> None:
+    """granularity 别名 + 中文「月」→ 归一化 month。"""
+    parsed = parse_period_infer_result('{"granularity": "月", "score": 0.9}')
+    assert parsed is not None
+    assert parsed["period"] == "month"
+    assert parsed["confidence"] == 0.9
+
+
+def test_parse_period_infer_result_invalid() -> None:
+    """period 越界 / 缺 confidence / 非 JSON → None（上层降级）。"""
+    assert parse_period_infer_result('{"period": "decade", "confidence": 0.8}') is None
+    assert parse_period_infer_result('{"period": "month"}') is None
+    assert parse_period_infer_result('{"period": "month", "confidence": 1.5}') is None
+    assert parse_period_infer_result("不是 JSON") is None

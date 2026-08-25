@@ -99,3 +99,83 @@ class TestParseSqlProfile:
             {"column": "amount", "agg": "SUM"},
             {"column": "user_id", "agg": "COUNT_DISTINCT"},
         ]
+
+    # ------------------------------------------------------------ 时间粒度识别
+
+    def test_time_granularity_substr_month(self) -> None:
+        """substr(x,1,7) 截月 → time_granularity=month（识别截断表达式粒度）。"""
+        p = parse_sql_profile(
+            "SELECT substr(create_date,1,7) AS month_id, SUM(amt) AS amt "
+            "FROM wedw_dw.t GROUP BY substr(create_date,1,7)"
+        )
+        assert p.time_granularity == "month"
+        assert p.time_column == "month_id"
+
+    def test_time_granularity_substr_month_6(self) -> None:
+        """substr(x,1,6)（YYYYMM）→ month。"""
+        p = parse_sql_profile(
+            "SELECT substr(create_date,1,6) AS m, SUM(amt) AS amt "
+            "FROM t GROUP BY substr(create_date,1,6)"
+        )
+        assert p.time_granularity == "month"
+
+    def test_time_granularity_substr_year(self) -> None:
+        """substr(x,1,4) 截年 → year。"""
+        p = parse_sql_profile(
+            "SELECT substr(create_date,1,4) AS y, SUM(amt) AS amt "
+            "FROM t GROUP BY substr(create_date,1,4)"
+        )
+        assert p.time_granularity == "year"
+
+    def test_time_granularity_date_trunc_month(self) -> None:
+        """date_trunc('month', x) → month。"""
+        p = parse_sql_profile(
+            "SELECT date_trunc('month', create_date) AS m, SUM(amt) AS amt "
+            "FROM t GROUP BY date_trunc('month', create_date)"
+        )
+        assert p.time_granularity == "month"
+
+    def test_time_granularity_date_format(self) -> None:
+        """date_format(x, '%Y-%m') → month。"""
+        p = parse_sql_profile(
+            "SELECT date_format(create_date, '%Y-%m') AS m, SUM(amt) AS amt "
+            "FROM t GROUP BY date_format(create_date, '%Y-%m')"
+        )
+        assert p.time_granularity == "month"
+
+    def test_time_granularity_plain_month_column(self) -> None:
+        """group by month_id（裸列别名）→ month。"""
+        p = parse_sql_profile(
+            "SELECT month_id, SUM(amt) AS amt FROM t GROUP BY month_id"
+        )
+        assert p.time_granularity == "month"
+        assert p.time_column == "month_id"
+
+    def test_time_granularity_plain_dt_keeps_none(self) -> None:
+        """dt 日分区 → 无显式粒度信号（time_granularity=None，period 走 token 推断 day）。"""
+        p = parse_sql_profile(
+            "SELECT dt, SUM(amount) AS gmv FROM dwd_order_di GROUP BY dt"
+        )
+        assert p.time_granularity is None
+        assert p.time_column == "dt"
+
+    def test_time_granularity_no_time_signal(self) -> None:
+        """无时间维度 → 两者皆 None（触发上层 LLM 周期兜底）。"""
+        p = parse_sql_profile("SELECT SUM(amount) AS gmv FROM dwd_order_di")
+        assert p.time_granularity is None
+        assert p.time_column is None
+
+    def test_time_granularity_etl_passthrough_sinks(self) -> None:
+        """ETL 透传 INSERT：最外层无时间信号 → 下沉聚合子查询识别 substr 截月。"""
+        sql = """
+        INSERT OVERWRITE TABLE wedw_dws.doctor_active_month_di
+        SELECT a.month_id, a.current_month_active_doctor_cnt
+        FROM (
+            SELECT substr(create_date,1,7) AS month_id,
+                   count(distinct doctor_code) AS current_month_active_doctor_cnt
+            FROM wedw_dw.doctor_visit_agent_info_da
+            GROUP BY substr(create_date,1,7)
+        ) a
+        """
+        p = parse_sql_profile(sql)
+        assert p.time_granularity == "month"

@@ -2113,6 +2113,9 @@ export function MetricCreate() {
                                       onChange={(v) => handleSqlBatchEdit(c.key, { aggregation: v })}
                                       options={AGG_OPTIONS}
                                     />
+                                    <Tag color="green" style={{ fontSize: 12 }}>
+                                      {PERIOD_OPTIONS.find((p) => p.value === c.period)?.label || c.period || "日 (day)"}
+                                    </Tag>
                                   </>
                                 ) : (
                                   <Typography.Text style={{ fontSize: 12 }}>{c.name}</Typography.Text>

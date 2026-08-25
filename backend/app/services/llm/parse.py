@@ -261,3 +261,47 @@ def parse_sql_split_result(raw: str) -> list[dict[str, Any]] | None:
     if not out:
         return None
     return out
+
+
+# LLM 周期推断白名单（与 sql_infer._KNOWN_GRAINS / 指标周期枚举对齐）
+_PERIOD_WHITELIST = ("day", "week", "month", "quarter", "year", "hour")
+
+
+def parse_period_infer_result(raw: str) -> dict[str, Any] | None:
+    """解析统计周期推断结果（LLM 兜底：规则层无法确定时间粒度时从 SQL 推断）。
+
+    约定返回结构：``{"period", "confidence", "reason"}``。
+    ``period`` 须在白名单（day/week/month/quarter/year/hour）内，兼容常见
+    中文/英文别名（月/month、周/week 等）；``confidence`` 越界或缺任一关键字段
+    返回 ``None``（上层降级为规则层默认周期）。
+
+    Returns:
+        ``{"period", "confidence", "reason"}``；解析失败返回 ``None``。
+    """
+    obj = parse_json_object(raw)
+    if obj is None:
+        return None
+    period = extract_str_field(obj, "period", "granularity", "grain", "cycle")
+    if period is None:
+        return None
+    low = period.lower()
+    # 兼容中文别名与英文全称
+    alias_map = {
+        "日": "day", "天": "day", "daily": "day", "1d": "day",
+        "周": "week", "weekly": "week", "1w": "week",
+        "月": "month", "monthly": "month", "1m": "month", "mon": "month",
+        "季": "quarter", "季度": "quarter", "quarterly": "quarter", "qtr": "quarter",
+        "年": "year", "年度": "year", "yearly": "year", "annually": "year",
+        "时": "hour", "小时": "hour", "hourly": "hour",
+    }
+    if low in alias_map:
+        low = alias_map[low]
+    if low not in _PERIOD_WHITELIST:
+        return None
+    confidence = extract_numeric_field(
+        obj, "confidence", "score", "prob", min_value=0.0, max_value=1.0
+    )
+    if confidence is None:
+        return None
+    reason = extract_str_field(obj, "reason", "note", "explanation", "basis")
+    return {"period": low, "confidence": confidence, "reason": reason}

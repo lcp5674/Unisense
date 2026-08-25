@@ -189,6 +189,40 @@ async def _llm_split(db: Any, sql: str) -> list[str] | None:
         return None  # LLM 不可用/超时/解析失败 → 降级单段
 
 
+async def _llm_infer_period(db: Any, statement_sql: str) -> str | None:
+    """LLM 从整段 SQL 推断统计周期（规则层无时间信号时兜底）。
+
+    不同 SQL 场景（窗口函数 partition by 月份、无 GROUP BY 时间列、Oracle
+    ``trunc(x,'MM')`` 等）规则层可能漏判——此时让 LLM 看整段 SQL 判断
+    统计周期。不可用/超时/解析失败返回 None（上层降级规则层默认 day）。
+    """
+    try:
+        from app.services.llm.config_service import LlmConfigService
+        from app.services.llm.parse import parse_period_infer_result
+
+        client = await LlmConfigService(db).build_client()
+        if not getattr(client, "enabled", False):
+            return None
+        prompt = (
+            "下面是一段指标定义 SQL。请判断该指标最可能的统计周期："
+            "看 GROUP BY 的时间粒度/时间列的截断方式（如 substr(x,1,7) 是月、"
+            "date_trunc('month',x) 是月、按日分区 dt 是日）。"
+            "只返回 JSON（不要解释、不要 Markdown 代码块）："
+            '{"period": "day|week|month|quarter|year|hour", "confidence": 0到1的小数, '
+            '"reason": "一句话依据"}\n\n'
+            f"SQL：\n{statement_sql}"
+        )
+        resp = await client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=512,
+        )
+        raw = (resp.get("content") or "").strip()
+        parsed = parse_period_infer_result(raw)
+        return parsed["period"] if parsed else None
+    except Exception:
+        return None  # LLM 不可用/超时/解析失败 → 降级规则层默认
+
+
 async def split_sql_statements(
     sql: str,
     mode: str = "statement",
@@ -231,7 +265,14 @@ async def split_sql_statements(
 
 
 def _period_from_profile(profile: SqlProfile) -> str:
-    """从画像时间列推断统计周期（默认 day）。"""
+    """从画像推断统计周期（默认 day）。
+
+    优先级：明确时间粒度（``substr(x,1,7) as month_id`` 等截断/别名信号，
+    ``profile.time_granularity``）> 时间列名 token。ETL 截月表达式此前被
+    取成底层列 create_date 回落 day——粒度信号直接修正这一误判。
+    """
+    if profile.time_granularity:
+        return profile.time_granularity
     tc = (profile.time_column or "").lower()
     for token, period in (
         ("week", "week"), ("wk", "week"),
@@ -243,6 +284,15 @@ def _period_from_profile(profile: SqlProfile) -> str:
         if token in tc:
             return period
     return "day"
+
+
+def _period_uncertain(profile: SqlProfile) -> bool:
+    """规则层是否无法确定统计周期（无截断/别名粒度信号且无时间列）。
+
+    True 时上层调用 LLM 兜底推断；False 时规则层结果可信（如 ``dt`` 分区=日、
+    ``substr(x,1,7) as month_id``=月），不浪费 LLM 调用。
+    """
+    return profile.time_granularity is None and profile.time_column is None
 
 
 def _group_key(columns: list[str]) -> str:
@@ -530,6 +580,12 @@ async def infer_sql_batch(
         tables = _physical_source_tables(seg, profile)
         table = tables[0] if tables else None
         period = _period_from_profile(profile)
+        # 规则层无时间信号（无截断/别名粒度、无时间列）→ LLM 兜底推断周期；
+        # LLM 不可用/失败降级规则层默认，绝不阻断候选生成
+        if _period_uncertain(profile) and db is not None:
+            llm_period = await _llm_infer_period(db, seg)
+            if llm_period:
+                period = llm_period
         atoms: list[dict[str, Any]] = []
         for measure in profile.measures:
             atoms.append(
