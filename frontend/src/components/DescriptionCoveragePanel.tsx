@@ -1,4 +1,4 @@
-import { useEffect, useState, type Key, type ReactNode } from "react";
+import { useEffect, useRef, useState, type Key, type ReactNode } from "react";
 import {
   Alert,
   Button,
@@ -8,6 +8,7 @@ import {
   Input,
   Row,
   Col,
+  Select,
   Space,
   Spin,
   Statistic,
@@ -22,6 +23,7 @@ import {
   CheckOutlined,
   CloseOutlined,
   EditOutlined,
+  ReloadOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import {
@@ -109,13 +111,22 @@ type BatchTask = {
   missing_field_names: string[];
 };
 
-/** 跨表批量推断：进度弹窗中单张表的实时状态。 */
+/** 跨表批量推断：进度面板中单张表的实时状态。 */
 type BatchProgressItem = {
   catalog_id: number;
   entity_name: string;
-  status: "pending" | "running" | "done" | "error";
+  status: "pending" | "running" | "done" | "error" | "cancelled";
   summary: string;
+  /** 失败原因明细（成功为空，供 Tooltip 展示与重试定位）。 */
+  detail?: string;
+  /** 本次新增字段描述数（结果汇总用）。 */
+  added?: number;
+  /** 本次跳过字段描述数（已有描述不覆盖）。 */
+  skipped?: number;
 };
+
+/** 最近一次批量会话的失败表（localStorage 持久化，刷新后可一键重新勾选重试）。 */
+type LastFailedTable = { catalog_id: number; entity_name: string };
 
 function batchStatusTag(status: BatchProgressItem["status"]) {
   switch (status) {
@@ -127,6 +138,8 @@ function batchStatusTag(status: BatchProgressItem["status"]) {
       return <Tag color="success">完成</Tag>;
     case "error":
       return <Tag color="error">失败</Tag>;
+    case "cancelled":
+      return <Tag>已取消</Tag>;
   }
 }
 
@@ -433,12 +446,32 @@ export function DescriptionCoveragePanel({
   const [tableDescSaving, setTableDescSaving] = useState(false);
   const [tableInferring, setTableInferring] = useState(false);
 
-  // 跨表批量推断：主表格勾选多表 → 单弹窗（确认视图 → 进度视图）→ 串行逐表推断
+  // 跨表批量推断：主表格勾选多表 → 单弹窗（确认视图 → 进度视图）→ 并发逐表推断
   const [selectedRowKeys, setSelectedRowKeys] = useState<Key[]>([]);
   const [batchOpen, setBatchOpen] = useState(false);
   const [batchStarted, setBatchStarted] = useState(false);
   const [batchRunning, setBatchRunning] = useState(false);
+  const [batchFinished, setBatchFinished] = useState(false);
   const [batchProgress, setBatchProgress] = useState<BatchProgressItem[]>([]);
+  /** 当前批次的完整任务集（供「重试失败项」复用，不受勾选清空影响）。 */
+  const [batchTasks, setBatchTasks] = useState<BatchTask[]>([]);
+  /** 并发数（1/2/3/5，默认 2），localStorage 持久化。 */
+  const [batchConcurrency, setBatchConcurrency] = useState<number>(() => {
+    const v = Number(localStorage.getItem("unisense.desc-coverage.batchConcurrency"));
+    return Number.isInteger(v) && v >= 1 && v <= 5 ? v : 2;
+  });
+  /** 上次批量会话失败表（localStorage 持久化，刷新后可一键重新勾选重试）。 */
+  const [lastFailed, setLastFailed] = useState<LastFailedTable[]>(() => {
+    try {
+      const raw = localStorage.getItem("unisense.desc-coverage.lastBatchFailed");
+      return raw ? (JSON.parse(raw) as LastFailedTable[]) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [batchElapsed, setBatchElapsed] = useState(0);
+  /** 运行中取消标志（ref 保证异步调度内可靠读写）。 */
+  const cancelRef = useRef(false);
 
   // 概览指标下钻明细（点击指标数字 → 该口径贡献的 per_table 子集）
   const [metricDrillOpen, setMetricDrillOpen] = useState(false);
@@ -468,6 +501,11 @@ export function DescriptionCoveragePanel({
   useEffect(() => {
     load();
   }, []);
+
+  // 并发数偏好持久化（下次进入保留用户选择）
+  useEffect(() => {
+    localStorage.setItem("unisense.desc-coverage.batchConcurrency", String(batchConcurrency));
+  }, [batchConcurrency]);
 
   async function openDetail(catalogId: number) {
     // 关闭下钻明细抽屉：从「明细列表」下钻到「单表详情」时，列表抽屉让位，
@@ -640,21 +678,38 @@ export function DescriptionCoveragePanel({
 
   /**
    * 单张表按需执行字段批量推断（missing_fields>0）与表描述推断（!table_desc）。
-   * 各动作独立 try/catch：单动作失败不阻断另一动作，返回汇总文本与整体成败。
+   * 各动作独立 try/catch：单动作失败不阻断另一动作，返回汇总文本、失败明细与统计。
    * 复用后端单表批量端点（FR-023 幂等 + in-flight 锁 + 审计），不覆盖已有 manual/llm 描述。
    */
-  async function inferOneTable(task: BatchTask): Promise<{ ok: boolean; summary: string }> {
+  async function inferOneTable(task: BatchTask): Promise<{
+    ok: boolean;
+    summary: string;
+    detail?: string;
+    added: number;
+    skipped: number;
+  }> {
     const parts: string[] = [];
+    const errs: string[] = [];
     let ok = true;
+    let added = 0;
+    let skipped = 0;
     if (task.missing_fields > 0) {
       try {
         const res = await inferDescriptions(task.catalog_id);
-        parts.push(`字段 +${res.inferred.length}（跳过 ${res.skipped.length} / 失败 ${res.failed.length}）`);
+        added = res.inferred.length;
+        skipped = res.skipped.length;
+        parts.push(`字段 +${res.inferred.length}（跳过 ${res.skipped.length}）`);
+        if (res.failed.length > 0) {
+          ok = false;
+          errs.push(`字段失败 ${res.failed.length} 个：${res.failed.slice(0, 3).join("、")}`);
+        }
       } catch (err) {
         ok = false;
-        parts.push(
-          isInferInProgress(err) ? "字段推断进行中" : `字段失败：${err instanceof Error ? err.message : "未知"}`,
-        );
+        const msg = isInferInProgress(err)
+          ? "字段推断进行中（可能在其它会话执行）"
+          : `字段推断失败：${err instanceof Error ? err.message : "未知错误"}`;
+        parts.push(msg);
+        errs.push(msg);
       }
     }
     if (task.needs_table_desc) {
@@ -663,60 +718,168 @@ export function DescriptionCoveragePanel({
         parts.push("表描述已生成");
       } catch (err) {
         ok = false;
-        parts.push(
-          isInferInProgress(err) ? "表描述推断进行中" : `表描述失败：${err instanceof Error ? err.message : "未知"}`,
-        );
+        const msg = isInferInProgress(err)
+          ? "表描述推断进行中（可能在其它会话执行）"
+          : `表描述推断失败：${err instanceof Error ? err.message : "未知错误"}`;
+        parts.push(msg);
+        errs.push(msg);
       }
     }
-    return { ok, summary: parts.join("；") || "无缺失描述" };
+    return {
+      ok,
+      summary: parts.join("；") || "无缺失描述",
+      detail: errs.join("；") || undefined,
+      added,
+      skipped,
+    };
   }
 
-  /** 串行逐表执行批量推断，实时更新进度；全部完成后刷新覆盖数据并清空勾选。 */
-  async function runBatchInfer(tasks: BatchTask[]) {
-    setBatchProgress(
-      tasks.map((t) => ({
-        catalog_id: t.catalog_id,
-        entity_name: t.entity_name,
-        status: "pending" as const,
-        summary: "",
-      })),
-    );
-    setBatchRunning(true);
-    for (let i = 0; i < tasks.length; i++) {
-      setBatchProgress((prev) => prev.map((p, idx) => (idx === i ? { ...p, status: "running" } : p)));
-      const { ok, summary } = await inferOneTable(tasks[i]);
-      setBatchProgress((prev) =>
-        prev.map((p, idx) => (idx === i ? { ...p, status: ok ? "done" : "error", summary } : p)),
-      );
+  /** 把失败表写入 localStorage 并同步 state（全部成功则清除），供刷新后一键重试。 */
+  function persistLastFailed(failed: LastFailedTable[]) {
+    setLastFailed(failed);
+    try {
+      if (failed.length > 0) {
+        localStorage.setItem("unisense.desc-coverage.lastBatchFailed", JSON.stringify(failed));
+      } else {
+        localStorage.removeItem("unisense.desc-coverage.lastBatchFailed");
+      }
+    } catch {
+      // localStorage 不可用时静默降级（不影响本次批量结果展示）
     }
+  }
+
+  /**
+   * 有界并发逐表执行批量推断，实时更新进度；支持运行中取消（未启动任务标已取消）。
+   * 重试语义：传入 initial 进度时保留已完成/已取消项，仅把 error 且命中 resetIds 的项
+   * 重置为 pending 重新执行（汇总反映整批结果，而非重试子集）。
+   * 全部完成后刷新覆盖数据、清空勾选，并把失败表持久化供下次进入一键重试。
+   */
+  async function runBatchInfer(
+    tasks: BatchTask[],
+    concurrency: number,
+    initial?: BatchProgressItem[],
+    resetIds?: Set<number>,
+  ) {
+    const progress: BatchProgressItem[] = tasks.map((t) => {
+      const prev = initial?.find((p) => p.catalog_id === t.catalog_id);
+      const shouldReset =
+        prev?.status === "error" && (!resetIds || resetIds.has(t.catalog_id));
+      if (prev && !shouldReset) return prev;
+      return { catalog_id: t.catalog_id, entity_name: t.entity_name, status: "pending", summary: "" };
+    });
+    setBatchProgress(progress);
+    setBatchRunning(true);
+    setBatchFinished(false);
+    cancelRef.current = false;
+    const startMs = Date.now();
+    const taskById = new Map(tasks.map((t) => [t.catalog_id, t]));
+    const workIdx = progress
+      .map((p, i) => (p.status === "pending" ? i : -1))
+      .filter((i) => i >= 0);
+    let next = 0;
+    const worker = async () => {
+      while (!cancelRef.current) {
+        const k = next++;
+        if (k >= workIdx.length) break;
+        const i = workIdx[k];
+        const task = taskById.get(progress[i].catalog_id);
+        if (!task) continue;
+        progress[i] = { ...progress[i], status: "running" };
+        setBatchProgress([...progress]);
+        const r = await inferOneTable(task);
+        progress[i] = {
+          ...progress[i],
+          status: r.ok ? "done" : "error",
+          summary: r.summary,
+          detail: r.detail,
+          added: r.added,
+          skipped: r.skipped,
+        };
+        setBatchProgress([...progress]);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.max(1, Math.min(concurrency, workIdx.length)) }, () => worker()),
+    );
+    const final = progress.map((p) =>
+      p.status === "pending" ? { ...p, status: "cancelled" as const, summary: "未执行" } : p,
+    );
+    setBatchProgress(final);
     setBatchRunning(false);
+    setBatchFinished(true);
+    setBatchElapsed(Math.round((Date.now() - startMs) / 1000));
+    if (cancelRef.current) return;
     await load();
     setSelectedRowKeys([]);
+    persistLastFailed(
+      final.filter((p) => p.status === "error").map((p) => ({
+        catalog_id: p.catalog_id,
+        entity_name: p.entity_name,
+      })),
+    );
   }
 
   /** 批量推断入口：整批 in-flight 去重（key=表集签名），避免重复点击重复调 LLM。 */
-  function startBatchInfer(tasks: BatchTask[]) {
+  function startBatchInfer(tasks: BatchTask[], initial?: BatchProgressItem[], resetIds?: Set<number>) {
     const key = `cross:${tasks.map((t) => t.catalog_id).sort((a, b) => a - b).join(",")}`;
-    const p = runInflight(key, () => runBatchInfer(tasks));
+    const p = runInflight(key, () => runBatchInfer(tasks, batchConcurrency, initial, resetIds));
     if (!p) {
       message.info("该批量推断正在进行中，请稍候");
       return;
     }
+    setBatchTasks(tasks);
     setBatchStarted(true);
   }
 
-  /** 关闭批量弹窗并重置状态（推断中不可关闭）。 */
+  /** 重试全部失败项：合并进同一批次视图，仅重置 error 项重新执行，其余结果保留。 */
+  function retryBatch() {
+    const failed = batchTasks.filter((t) =>
+      batchProgress.some((p) => p.catalog_id === t.catalog_id && p.status === "error"),
+    );
+    if (failed.length === 0) return;
+    startBatchInfer(batchTasks, batchProgress);
+  }
+
+  /** 单表重试（进度表格失败行内的「重试」按钮）：仅重置该表，其余失败项保持失败。 */
+  function retryOne(catalogId: number) {
+    if (!batchTasks.some((t) => t.catalog_id === catalogId)) return;
+    startBatchInfer(batchTasks, batchProgress, new Set([catalogId]));
+  }
+
+  /** 运行中取消：停止调度未启动任务，进行中的自然完成（已完成结果保留）。 */
+  function cancelBatch() {
+    cancelRef.current = true;
+  }
+
+  /** 关闭批量面板并重置状态（推断中不可关闭）。 */
   function closeBatch() {
     setBatchOpen(false);
     setBatchStarted(false);
+    setBatchFinished(false);
     setBatchProgress([]);
+    setBatchTasks([]);
   }
 
-  /** 打开批量弹窗（确认视图）：重置到未开始状态。 */
+  /** 打开批量面板（确认视图）：重置到未开始状态。 */
   function openBatch() {
     setBatchStarted(false);
+    setBatchFinished(false);
     setBatchProgress([]);
     setBatchOpen(true);
+  }
+
+  /** 从上次失败记录一键恢复：重新勾选失败表并打开确认面板（并清除旧提示）。 */
+  function relaunchLastFailed() {
+    setSelectedRowKeys(lastFailed.map((f) => f.catalog_id));
+    setLastFailed([]);
+    try {
+      localStorage.removeItem("unisense.desc-coverage.lastBatchFailed");
+    } catch {
+      // localStorage 不可用时静默降级
+    }
+    setBatchOpen(true);
+    setBatchStarted(false);
+    setBatchProgress([]);
   }
 
   if (loading && !coverage) return <Spin tip="加载描述覆盖统计…" />;
@@ -746,6 +909,15 @@ export function DescriptionCoveragePanel({
       needs_table_desc: !t.table_desc,
       missing_field_names: t.missing_field_names ?? [],
     }));
+
+  // 批量进度汇总（结果卡展示）
+  const batchDoneCount = batchProgress.filter((p) => p.status === "done").length;
+  const batchErrorCount = batchProgress.filter((p) => p.status === "error").length;
+  const batchCancelledCount = batchProgress.filter((p) => p.status === "cancelled").length;
+  const batchAddedCount = batchProgress.reduce((s, p) => s + (p.added ?? 0), 0);
+  const batchSummaryText = `成功 ${batchDoneCount} 张 / 失败 ${batchErrorCount} 张${
+    batchCancelledCount > 0 ? ` / 取消 ${batchCancelledCount} 张` : ""
+  } · 新增字段描述 ${batchAddedCount} 个 · 耗时 ${batchElapsed}s`;
 
   return (
     <div>
@@ -856,6 +1028,20 @@ export function DescriptionCoveragePanel({
         </Col>
       </Row>
 
+      {!isSummary && lastFailed.length > 0 && !batchOpen && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={`上次批量推断有 ${lastFailed.length} 张表未完成（${lastFailed.map((f) => f.entity_name).slice(0, 3).join("、")}${lastFailed.length > 3 ? "…" : ""}）`}
+          action={
+            <Button size="small" onClick={relaunchLastFailed}>
+              重新勾选并重试
+            </Button>
+          }
+        />
+      )}
+
       {!isSummary && (
         <Card
           size="small"
@@ -892,6 +1078,24 @@ export function DescriptionCoveragePanel({
             >
               {batchStarted ? (
                 <>
+                  {batchFinished && (
+                    <Alert
+                      type={batchErrorCount > 0 ? "warning" : "success"}
+                      showIcon
+                      style={{ marginBottom: 12 }}
+                      message={batchSummaryText}
+                    />
+                  )}
+                  {batchRunning && batchProgress.length > 0 && (
+                    <Progress
+                      percent={Math.round(
+                        ((batchDoneCount + batchErrorCount) / batchProgress.length) * 100,
+                      )}
+                      size="small"
+                      status="active"
+                      style={{ marginBottom: 12 }}
+                    />
+                  )}
                   <Table<BatchProgressItem>
                     dataSource={batchProgress}
                     rowKey="catalog_id"
@@ -909,13 +1113,59 @@ export function DescriptionCoveragePanel({
                         width: 96,
                         render: (v: BatchProgressItem["status"]) => batchStatusTag(v),
                       },
-                      { title: "结果", dataIndex: "summary", ellipsis: true },
+                      {
+                        title: "结果",
+                        dataIndex: "summary",
+                        ellipsis: true,
+                        render: (v: string, r) =>
+                          r.detail ? (
+                            <Tooltip title={r.detail}>
+                              <span className="muted" style={{ color: "#cf1322" }}>
+                                {v}
+                              </span>
+                            </Tooltip>
+                          ) : (
+                            v
+                          ),
+                      },
+                      {
+                        title: "操作",
+                        width: 80,
+                        render: (_, r) =>
+                          !batchRunning && r.status === "error" ? (
+                            <Button
+                              size="small"
+                              icon={<ReloadOutlined />}
+                              onClick={() => retryOne(r.catalog_id)}
+                            >
+                              重试
+                            </Button>
+                          ) : null,
+                      },
                     ]}
                   />
                   <div style={{ marginTop: 16, textAlign: "right" }}>
-                    <Button type="primary" onClick={closeBatch} disabled={batchRunning}>
-                      {batchRunning ? "推断中…" : "关闭"}
-                    </Button>
+                    {batchRunning ? (
+                      <Space>
+                        <Button danger onClick={cancelBatch}>
+                          取消
+                        </Button>
+                        <Button type="primary" disabled>
+                          推断中…
+                        </Button>
+                      </Space>
+                    ) : (
+                      <Space>
+                        {batchErrorCount > 0 && (
+                          <Button type="primary" danger icon={<ReloadOutlined />} onClick={retryBatch}>
+                            重试失败项（{batchErrorCount}）
+                          </Button>
+                        )}
+                        <Button type="primary" onClick={closeBatch}>
+                          关闭
+                        </Button>
+                      </Space>
+                    )}
                   </div>
                 </>
               ) : (
@@ -944,7 +1194,37 @@ export function DescriptionCoveragePanel({
                       </div>
                     ))}
                   </div>
-                  <div style={{ marginTop: 16, textAlign: "right" }}>
+                  <div
+                    style={{
+                      marginTop: 16,
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                    }}
+                  >
+                    <Space size={8}>
+                      <span className="muted" style={{ fontSize: 12 }}>
+                        并发数
+                      </span>
+                      <Select
+                        size="small"
+                        value={batchConcurrency}
+                        onChange={setBatchConcurrency}
+                        style={{ width: 64 }}
+                        data-testid="batch-concurrency-select"
+                        options={[
+                          { value: 1, label: "1" },
+                          { value: 2, label: "2" },
+                          { value: 3, label: "3" },
+                          { value: 5, label: "5" },
+                        ]}
+                      />
+                      <Tooltip title="并发数越大越快，但会增加 LLM 并发调用；建议按接口限流设置">
+                        <span className="muted" style={{ fontSize: 12 }}>
+                          （已有描述不覆盖）
+                        </span>
+                      </Tooltip>
+                    </Space>
                     <Space>
                       <Button onClick={closeBatch}>取消</Button>
                       <Button
