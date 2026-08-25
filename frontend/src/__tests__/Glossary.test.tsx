@@ -74,8 +74,6 @@ import {
   reactivateTerm,
   deleteTerm,
   restoreTerm,
-  batchReactivateTerms,
-  batchDeleteTerms,
 } from "../api";
 
 const mockedList = vi.mocked(listTerms);
@@ -97,8 +95,6 @@ const mockedSubmit = vi.mocked(submitTerm);
 const mockedReactivate = vi.mocked(reactivateTerm);
 const mockedDelete = vi.mocked(deleteTerm);
 const mockedRestore = vi.mocked(restoreTerm);
-const mockedBatchReactivate = vi.mocked(batchReactivateTerms);
-const mockedBatchDelete = vi.mocked(batchDeleteTerms);
 
 const TERMS: GlossaryTerm[] = [
   {
@@ -717,7 +713,7 @@ describe("Glossary 生命周期（重新启用/删除/回收站恢复）", () =>
   });
 
   it("DEPRECATED 术语显示「重新启用」与「删除」，点重新启用调用 reactivateTerm", async () => {
-    mockedList.mockResolvedValue({ items: [deprecatedTerm], total: 1 });
+    mockedList.mockResolvedValue({ items: [deprecatedTerm], total: 1, page: 1, page_size: 20 });
     mockedReactivate.mockResolvedValue({ ...deprecatedTerm, status: "DRAFT" } as never);
     render(
       <MemoryRouter initialEntries={["/glossary"]}>
@@ -732,7 +728,7 @@ describe("Glossary 生命周期（重新启用/删除/回收站恢复）", () =>
   });
 
   it("DRAFT 术语点删除调用 deleteTerm", async () => {
-    mockedList.mockResolvedValue({ items: [TERMS[0]], total: 1 });
+    mockedList.mockResolvedValue({ items: [TERMS[0]], total: 1, page: 1, page_size: 20 });
     mockedDelete.mockResolvedValue(TERMS[0] as never);
     render(
       <MemoryRouter initialEntries={["/glossary"]}>
@@ -747,7 +743,7 @@ describe("Glossary 生命周期（重新启用/删除/回收站恢复）", () =>
   });
 
   it("回收站视图显示「恢复」按钮，点击调用 restoreTerm", async () => {
-    mockedList.mockResolvedValue({ items: [TERMS[0]], total: 1 });
+    mockedList.mockResolvedValue({ items: [TERMS[0]], total: 1, page: 1, page_size: 20 });
     mockedRestore.mockResolvedValue(TERMS[0] as never);
     render(
       <MemoryRouter initialEntries={["/glossary"]}>
