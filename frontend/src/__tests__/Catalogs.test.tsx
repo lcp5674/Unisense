@@ -1130,6 +1130,247 @@ describe("Catalogs 页面", () => {
     expect(localStorage.getItem("unisense.desc-coverage.lastBatchFailed")).toBeNull();
   });
 
+  it("跨表批量推断：失败原因按限流/超时分桶展示在结果汇总", async () => {
+    vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
+      total_tables: 2,
+      tables_with_desc: 0,
+      tables_missing_desc: 2,
+      total_fields: 4,
+      fields_with_desc: 1,
+      fields_missing_desc: 3,
+      per_table: [
+        {
+          catalog_id: 1, entity_name: "ods_order", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: true,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 1, missing_fields: 1,
+          missing_field_names: ["id"], updated_at: "2026-08-14T02:30:00",
+        },
+        {
+          catalog_id: 3, entity_name: "ods_pay", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: true,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 0, missing_fields: 2,
+          missing_field_names: ["amount", "pay_time"], updated_at: "2026-08-14T04:00:00",
+        },
+      ],
+    });
+    // 表1 字段推断限流（429）；表3 字段推断超时（分桶与调用顺序无关，各归一类）
+    vi.mocked(inferDescriptions)
+      .mockRejectedValueOnce(Object.assign(new Error("rate limit exceeded: 429"), { status: 429 }))
+      .mockRejectedValueOnce(new Error("LLM 调用超时"));
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText("ods_order")).toBeTruthy());
+    const orderRow = screen.getByText("ods_order").closest("tr") as HTMLElement;
+    const payRow = screen.getByText("ods_pay").closest("tr") as HTMLElement;
+    fireEvent.click(within(orderRow).getByRole("checkbox"));
+    fireEvent.click(within(payRow).getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: /批量推断所选表/ }));
+    await waitFor(() => expect(screen.getByText("批量 LLM 推断确认")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /开始推断/ }));
+
+    // 汇总分桶展示失败原因
+    await waitFor(() =>
+      expect(screen.getByText(/失败 2 张（限流×1 · 超时×1）/)).toBeTruthy(),
+    );
+    // 两表均失败 → 一键重试失败项（2）
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /重试失败项（2）/ })).toBeTruthy(),
+    );
+  });
+
+  it("跨表批量推断：完成后写入历史，历史视图可查看并一键重新勾选失败表", async () => {
+    // 预置一条更早的历史，验证新会话排在最前
+    localStorage.setItem(
+      "unisense.desc-coverage.batchHistory",
+      JSON.stringify([
+        { ts: 1000, tables: ["ods_old"], done: 1, failed: 0, cancelled: 0, added: 2, elapsed: 3, failedTables: [] },
+      ]),
+    );
+    vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
+      total_tables: 2,
+      tables_with_desc: 0,
+      tables_missing_desc: 2,
+      total_fields: 4,
+      fields_with_desc: 1,
+      fields_missing_desc: 3,
+      per_table: [
+        {
+          catalog_id: 1, entity_name: "ods_order", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: false,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 1, missing_fields: 1,
+          missing_field_names: ["id"], updated_at: "2026-08-14T02:30:00",
+        },
+        {
+          catalog_id: 3, entity_name: "ods_pay", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: true,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 0, missing_fields: 2,
+          missing_field_names: ["amount", "pay_time"], updated_at: "2026-08-14T04:00:00",
+        },
+      ],
+    });
+    // 表1 字段推断失败（超时）；表3 成功
+    vi.mocked(inferDescriptions)
+      .mockRejectedValueOnce(new Error("LLM 调用超时"))
+      .mockResolvedValueOnce({
+        inferred: [
+          { column_name: "amount", description: "支付金额", source: "llm", confidence: 0.9 },
+          { column_name: "pay_time", description: "支付时间", source: "llm", confidence: 0.9 },
+        ],
+        skipped: [],
+        failed: [],
+      } as Awaited<ReturnType<typeof inferDescriptions>>);
+    vi.mocked(inferTableDescription).mockResolvedValue({
+      catalog_id: 1,
+      description: "订单表",
+      source: "llm",
+      confidence: 0.9,
+    });
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText("ods_order")).toBeTruthy());
+    const orderRow = screen.getByText("ods_order").closest("tr") as HTMLElement;
+    const payRow = screen.getByText("ods_pay").closest("tr") as HTMLElement;
+    fireEvent.click(within(orderRow).getByRole("checkbox"));
+    fireEvent.click(within(payRow).getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: /批量推断所选表/ }));
+    await waitFor(() => expect(screen.getByText("批量 LLM 推断确认")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /开始推断/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /关\s*闭/ })).toBeTruthy(),
+    );
+
+    // 历史已写入 localStorage：新会话（失败 1）排在最前，预置历史保留（共 2 条）
+    const history = JSON.parse(
+      localStorage.getItem("unisense.desc-coverage.batchHistory")!,
+    ) as Array<{ failed: number; failedTables: Array<{ catalog_id: number; entity_name: string }> }>;
+    expect(history).toHaveLength(2);
+    expect(history[0].failed).toBe(1);
+    expect(history[0].failedTables).toEqual([{ catalog_id: 1, entity_name: "ods_order" }]);
+
+    // 完成态可直接查看历史（无需关闭重开），新会话历史排在预置历史前
+    fireEvent.click(screen.getByRole("button", { name: /历史记录/ }));
+    await waitFor(() => expect(screen.getByText("批量推断历史")).toBeTruthy());
+    expect(screen.getAllByText(/成功 \d+ · 失败 \d+/)).toHaveLength(2);
+    expect(screen.getByText(/失败表：ods_order/)).toBeTruthy();
+
+    // 一键重新勾选此批（取第一条=最新会话）→ 回到确认视图且失败表 ods_order 已勾选
+    fireEvent.click(screen.getAllByRole("button", { name: /重新勾选此批/ })[0]);
+    await waitFor(() => expect(screen.getByText("批量 LLM 推断确认")).toBeTruthy());
+    expect(screen.getByRole("button", { name: /批量推断所选表（1）/ })).toBeTruthy();
+    const panel = screen.getByTestId("batch-infer-panel") as HTMLElement;
+    expect(within(panel).getByText("ods_order")).toBeTruthy();
+  });
+
+  it("跨表批量推断：一键勾选全部有缺失表", async () => {
+    vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
+      total_tables: 3,
+      tables_with_desc: 1,
+      tables_missing_desc: 2,
+      total_fields: 6,
+      fields_with_desc: 3,
+      fields_missing_desc: 3,
+      per_table: [
+        {
+          catalog_id: 1, entity_name: "ods_order", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: false,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 1, missing_fields: 1,
+          missing_field_names: ["id"], updated_at: "2026-08-14T02:30:00",
+        },
+        {
+          catalog_id: 3, entity_name: "ods_pay", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: true,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 0, missing_fields: 2,
+          missing_field_names: ["amount", "pay_time"], updated_at: "2026-08-14T04:00:00",
+        },
+        {
+          catalog_id: 5, entity_name: "dwd_finance", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: true,
+          description: "财务表", description_source: "manual", owner_name: null,
+          total_fields: 2, covered_fields: 2, missing_fields: 0,
+          missing_field_names: [], updated_at: "2026-08-14T05:00:00",
+        },
+      ],
+    });
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText("ods_order")).toBeTruthy());
+    // 初始无勾选 → 批量按钮禁用
+    const batchBtn = screen.getByRole("button", { name: /批量推断所选表/ }) as HTMLButtonElement;
+    expect(batchBtn.disabled).toBe(true);
+    // 一键勾选全部有缺失（ods_order/ods_pay 可选，dwd_finance 无缺失被跳过）
+    fireEvent.click(screen.getByRole("button", { name: /选全部有缺失/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /批量推断所选表（2）/ })).toBeTruthy(),
+    );
+  });
+
+  it("跨表批量推断：完成后进度行展示新增字段预览", async () => {
+    vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
+      total_tables: 1,
+      tables_with_desc: 1,
+      tables_missing_desc: 0,
+      total_fields: 2,
+      fields_with_desc: 0,
+      fields_missing_desc: 2,
+      per_table: [
+        {
+          catalog_id: 1, entity_name: "ods_order", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: true,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 0, missing_fields: 2,
+          missing_field_names: ["id", "amount"], updated_at: "2026-08-14T02:30:00",
+        },
+      ],
+    });
+    vi.mocked(inferDescriptions).mockResolvedValue({
+      inferred: [
+        { column_name: "id", description: "订单主键", source: "llm", confidence: 0.9 },
+        { column_name: "amount", description: "支付金额", source: "llm", confidence: 0.9 },
+      ],
+      skipped: [],
+      failed: [],
+    } as Awaited<ReturnType<typeof inferDescriptions>>);
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText("ods_order")).toBeTruthy());
+    const orderRow = screen.getByText("ods_order").closest("tr") as HTMLElement;
+    fireEvent.click(within(orderRow).getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: /批量推断所选表/ }));
+    await waitFor(() => expect(screen.getByText("批量 LLM 推断确认")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /开始推断/ }));
+
+    // 完成后进度行展示新增字段预览 +2 个
+    await waitFor(() => expect(screen.getByText("+2 个")).toBeTruthy());
+    // 悬浮查看字段名明细
+    fireEvent.mouseEnter(screen.getByText("+2 个"));
+    await waitFor(() => expect(screen.getByText("id、amount")).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /关\s*闭/ })).toBeTruthy(),
+    );
+  });
+
   it("提供统一的返回按钮（返回上一入口）", async () => {
     render(
       <MemoryRouter initialEntries={["/catalogs"]}>

@@ -119,6 +119,10 @@ type BatchProgressItem = {
   summary: string;
   /** 失败原因明细（成功为空，供 Tooltip 展示与重试定位）。 */
   detail?: string;
+  /** 失败原因分类（汇总分桶与重试判断）。 */
+  errorCategory?: BatchErrorCategory;
+  /** 本次新增字段描述名（结果预览，成功后非空）。 */
+  inferredNames?: string[];
   /** 本次新增字段描述数（结果汇总用）。 */
   added?: number;
   /** 本次跳过字段描述数（已有描述不覆盖）。 */
@@ -127,6 +131,72 @@ type BatchProgressItem = {
 
 /** 最近一次批量会话的失败表（localStorage 持久化，刷新后可一键重新勾选重试）。 */
 type LastFailedTable = { catalog_id: number; entity_name: string };
+
+/**
+ * 批量失败原因分类（汇总分桶 + 重试可判断）：
+ * - rate_limit：接口限流（429），短暂等待后重试通常可成功
+ * - timeout：LLM 调用超时/网络中断，重试可成功
+ * - in_progress：该表推断正在其它会话进行（后端幂等 409），重试大概率仍 409，建议稍后再试
+ * - unknown：其它异常
+ */
+type BatchErrorCategory = "rate_limit" | "timeout" | "in_progress" | "unknown";
+
+/** 批量历史记录（localStorage 保留近 5 次会话，供查看与一键重新勾选重跑）。 */
+type BatchHistoryEntry = {
+  ts: number;
+  tables: string[];
+  done: number;
+  failed: number;
+  cancelled: number;
+  added: number;
+  elapsed: number;
+  failedTables: LastFailedTable[];
+};
+
+const BATCH_ERROR_LABEL: Record<BatchErrorCategory, string> = {
+  rate_limit: "限流",
+  timeout: "超时",
+  in_progress: "并发",
+  unknown: "未知",
+};
+
+/** 批量历史 localStorage key 与保留条数。 */
+const BATCH_HISTORY_KEY = "unisense.desc-coverage.batchHistory";
+const BATCH_HISTORY_LIMIT = 5;
+
+/** 按错误特征归类批量失败原因（isInferInProgress 优先判定，再按文案匹配）。 */
+function classifyBatchError(err: unknown): BatchErrorCategory {
+  if (isInferInProgress(err)) return "in_progress";
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  const lower = msg.toLowerCase();
+  if (/(rate\s*limit|429|限流)/.test(lower)) return "rate_limit";
+  if (/(timeout|超时|etimedout|econnreset|econnaborted|read\s*timeout)/.test(lower)) {
+    return "timeout";
+  }
+  return "unknown";
+}
+
+function readBatchHistory(): BatchHistoryEntry[] {
+  try {
+    const raw = localStorage.getItem(BATCH_HISTORY_KEY);
+    return raw ? (JSON.parse(raw) as BatchHistoryEntry[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeBatchHistory(entries: BatchHistoryEntry[]) {
+  try {
+    const trimmed = entries.slice(0, BATCH_HISTORY_LIMIT);
+    if (trimmed.length > 0) {
+      localStorage.setItem(BATCH_HISTORY_KEY, JSON.stringify(trimmed));
+    } else {
+      localStorage.removeItem(BATCH_HISTORY_KEY);
+    }
+  } catch {
+    // localStorage 不可用时静默降级（不影响本次批量结果展示）
+  }
+}
 
 function batchStatusTag(status: BatchProgressItem["status"]) {
   switch (status) {
@@ -470,6 +540,10 @@ export function DescriptionCoveragePanel({
     }
   });
   const [batchElapsed, setBatchElapsed] = useState(0);
+  /** 批量历史（近 5 次会话，localStorage 持久化）。 */
+  const [batchHistory, setBatchHistory] = useState<BatchHistoryEntry[]>(readBatchHistory);
+  /** 批量面板内「历史记录」视图开关。 */
+  const [historyOpen, setHistoryOpen] = useState(false);
   /** 运行中取消标志（ref 保证异步调度内可靠读写）。 */
   const cancelRef = useRef(false);
 
@@ -687,17 +761,22 @@ export function DescriptionCoveragePanel({
     detail?: string;
     added: number;
     skipped: number;
+    errorCategory?: BatchErrorCategory;
+    inferredNames: string[];
   }> {
     const parts: string[] = [];
     const errs: string[] = [];
     let ok = true;
     let added = 0;
     let skipped = 0;
+    let errorCategory: BatchErrorCategory | undefined;
+    const inferredNames: string[] = [];
     if (task.missing_fields > 0) {
       try {
         const res = await inferDescriptions(task.catalog_id);
         added = res.inferred.length;
         skipped = res.skipped.length;
+        inferredNames.push(...res.inferred.map((i) => i.column_name));
         parts.push(`字段 +${res.inferred.length}（跳过 ${res.skipped.length}）`);
         if (res.failed.length > 0) {
           ok = false;
@@ -705,11 +784,13 @@ export function DescriptionCoveragePanel({
         }
       } catch (err) {
         ok = false;
+        const cat = classifyBatchError(err);
+        errorCategory = errorCategory ?? cat;
         const msg = isInferInProgress(err)
           ? "字段推断进行中（可能在其它会话执行）"
           : `字段推断失败：${err instanceof Error ? err.message : "未知错误"}`;
         parts.push(msg);
-        errs.push(msg);
+        errs.push(`[${BATCH_ERROR_LABEL[cat]}] ${msg}`);
       }
     }
     if (task.needs_table_desc) {
@@ -718,11 +799,13 @@ export function DescriptionCoveragePanel({
         parts.push("表描述已生成");
       } catch (err) {
         ok = false;
+        const cat = classifyBatchError(err);
+        errorCategory = errorCategory ?? cat;
         const msg = isInferInProgress(err)
           ? "表描述推断进行中（可能在其它会话执行）"
           : `表描述推断失败：${err instanceof Error ? err.message : "未知错误"}`;
         parts.push(msg);
-        errs.push(msg);
+        errs.push(`[${BATCH_ERROR_LABEL[cat]}] ${msg}`);
       }
     }
     return {
@@ -731,6 +814,8 @@ export function DescriptionCoveragePanel({
       detail: errs.join("；") || undefined,
       added,
       skipped,
+      errorCategory,
+      inferredNames,
     };
   }
 
@@ -792,6 +877,8 @@ export function DescriptionCoveragePanel({
           status: r.ok ? "done" : "error",
           summary: r.summary,
           detail: r.detail,
+          errorCategory: r.errorCategory,
+          inferredNames: r.inferredNames,
           added: r.added,
           skipped: r.skipped,
         };
@@ -808,6 +895,24 @@ export function DescriptionCoveragePanel({
     setBatchRunning(false);
     setBatchFinished(true);
     setBatchElapsed(Math.round((Date.now() - startMs) / 1000));
+    // 写入批量历史（近 5 次）：含结果摘要与失败表，供历史视图查看与一键重跑
+    setBatchHistory((prev) => {
+      const entry: BatchHistoryEntry = {
+        ts: Date.now(),
+        tables: tasks.map((t) => t.entity_name),
+        done: final.filter((p) => p.status === "done").length,
+        failed: final.filter((p) => p.status === "error").length,
+        cancelled: final.filter((p) => p.status === "cancelled").length,
+        added: final.reduce((s, p) => s + (p.added ?? 0), 0),
+        elapsed: Math.round((Date.now() - startMs) / 1000),
+        failedTables: final
+          .filter((p) => p.status === "error")
+          .map((p) => ({ catalog_id: p.catalog_id, entity_name: p.entity_name })),
+      };
+      const next = [entry, ...prev].slice(0, BATCH_HISTORY_LIMIT);
+      writeBatchHistory(next);
+      return next;
+    });
     if (cancelRef.current) return;
     await load();
     setSelectedRowKeys([]);
@@ -858,6 +963,7 @@ export function DescriptionCoveragePanel({
     setBatchFinished(false);
     setBatchProgress([]);
     setBatchTasks([]);
+    setHistoryOpen(false);
   }
 
   /** 打开批量面板（确认视图）：重置到未开始状态。 */
@@ -865,6 +971,7 @@ export function DescriptionCoveragePanel({
     setBatchStarted(false);
     setBatchFinished(false);
     setBatchProgress([]);
+    setHistoryOpen(false);
     setBatchOpen(true);
   }
 
@@ -877,9 +984,53 @@ export function DescriptionCoveragePanel({
     } catch {
       // localStorage 不可用时静默降级
     }
+    setHistoryOpen(false);
     setBatchOpen(true);
     setBatchStarted(false);
     setBatchProgress([]);
+  }
+
+  /**
+   * 从批量历史一键重跑：重新勾选该次会话涉及的、当前仍可勾选的表（有失败表则优先失败表，
+   * 无失败表则按表名匹配全量），并回到确认面板。表可能已被补全或删除，仅保留仍可勾选的。
+   */
+  function relaunchHistory(entry: BatchHistoryEntry) {
+    if (!coverage) return;
+    const failedIds = new Set(entry.failedTables.map((f) => f.catalog_id));
+    const failedNames = new Set(entry.failedTables.map((f) => f.entity_name));
+    const allNames = new Set(entry.tables);
+    const selectable = (t: TableCoverageItem) => !(t.missing_fields === 0 && !!t.table_desc);
+    const ids = coverage.per_table
+      .filter(
+        (t) =>
+          selectable(t) &&
+          (failedIds.has(t.catalog_id) ||
+            failedNames.has(t.entity_name) ||
+            (entry.failedTables.length === 0 && allNames.has(t.entity_name))),
+      )
+      .map((t) => t.catalog_id);
+    setSelectedRowKeys(ids);
+    setHistoryOpen(false);
+    setBatchStarted(false);
+    setBatchFinished(false);
+    setBatchProgress([]);
+    setBatchOpen(true);
+  }
+
+  /** 清空批量历史（localStorage + state）。 */
+  function clearBatchHistory() {
+    setBatchHistory([]);
+    writeBatchHistory([]);
+  }
+
+  /** 一键勾选所有存在描述缺失的表（字段缺失或表描述缺失）。 */
+  function selectAllMissing() {
+    if (!coverage) return;
+    setSelectedRowKeys(
+      coverage.per_table
+        .filter((t) => !(t.missing_fields === 0 && !!t.table_desc))
+        .map((t) => t.catalog_id),
+    );
   }
 
   if (loading && !coverage) return <Spin tip="加载描述覆盖统计…" />;
@@ -910,14 +1061,29 @@ export function DescriptionCoveragePanel({
       missing_field_names: t.missing_field_names ?? [],
     }));
 
-  // 批量进度汇总（结果卡展示）
+  // 批量进度汇总（结果卡展示；失败按原因分桶统计，如「失败 2 张（限流×1 · 超时×1）」）
   const batchDoneCount = batchProgress.filter((p) => p.status === "done").length;
   const batchErrorCount = batchProgress.filter((p) => p.status === "error").length;
   const batchCancelledCount = batchProgress.filter((p) => p.status === "cancelled").length;
   const batchAddedCount = batchProgress.reduce((s, p) => s + (p.added ?? 0), 0);
+  const batchErrorBuckets = batchProgress.reduce<Record<BatchErrorCategory, number>>(
+    (acc, p) => {
+      if (p.status === "error" && p.errorCategory) acc[p.errorCategory] += 1;
+      return acc;
+    },
+    { rate_limit: 0, timeout: 0, in_progress: 0, unknown: 0 },
+  );
+  const batchErrorBucketText = (
+    Object.entries(batchErrorBuckets).filter(([, n]) => n > 0) as [
+      BatchErrorCategory,
+      number,
+    ][]
+  )
+    .map(([c, n]) => `${BATCH_ERROR_LABEL[c]}×${n}`)
+    .join(" · ");
   const batchSummaryText = `成功 ${batchDoneCount} 张 / 失败 ${batchErrorCount} 张${
-    batchCancelledCount > 0 ? ` / 取消 ${batchCancelledCount} 张` : ""
-  } · 新增字段描述 ${batchAddedCount} 个 · 耗时 ${batchElapsed}s`;
+    batchErrorBucketText ? `（${batchErrorBucketText}）` : ""
+  }${batchCancelledCount > 0 ? ` / 取消 ${batchCancelledCount} 张` : ""} · 新增字段描述 ${batchAddedCount} 个 · 耗时 ${batchElapsed}s`;
 
   return (
     <div>
@@ -1050,18 +1216,25 @@ export function DescriptionCoveragePanel({
           extra={
             <Space>
               {canInferCatalog && (
-                <Tooltip title="勾选多张表后，批量 LLM 推断每张表缺失的字段描述与表级描述（已有描述不覆盖）">
-                  <Button
-                    size="small"
-                    type="primary"
-                    icon={<ThunderboltOutlined />}
-                    disabled={selectedRowKeys.length === 0}
-                    onClick={openBatch}
-                  >
-                    批量推断所选表
-                    {selectedRowKeys.length > 0 ? `（${selectedRowKeys.length}）` : ""}
-                  </Button>
-                </Tooltip>
+                <>
+                  <Tooltip title="一键勾选所有存在描述缺失的表（字段缺失或表描述缺失）">
+                    <Button size="small" onClick={selectAllMissing}>
+                      选全部有缺失
+                    </Button>
+                  </Tooltip>
+                  <Tooltip title="勾选多张表后，批量 LLM 推断每张表缺失的字段描述与表级描述（已有描述不覆盖）">
+                    <Button
+                      size="small"
+                      type="primary"
+                      icon={<ThunderboltOutlined />}
+                      disabled={selectedRowKeys.length === 0}
+                      onClick={openBatch}
+                    >
+                      批量推断所选表
+                      {selectedRowKeys.length > 0 ? `（${selectedRowKeys.length}）` : ""}
+                    </Button>
+                  </Tooltip>
+                </>
               )}
               <Button size="small" icon={<ThunderboltOutlined />} onClick={load} loading={loading}>
                 刷新
@@ -1073,10 +1246,23 @@ export function DescriptionCoveragePanel({
             <Card
               size="small"
               style={{ marginBottom: 12 }}
-              title={batchStarted ? "批量 LLM 推断" : "批量 LLM 推断确认"}
+              title={
+                historyOpen
+                  ? "批量推断历史"
+                  : batchStarted
+                    ? "批量 LLM 推断"
+                    : "批量 LLM 推断确认"
+              }
+              extra={
+                !batchRunning && !historyOpen && batchHistory.length > 0 ? (
+                  <Button size="small" onClick={() => setHistoryOpen(true)}>
+                    历史记录
+                  </Button>
+                ) : undefined
+              }
               data-testid="batch-infer-panel"
             >
-              {batchStarted ? (
+              {batchStarted && !historyOpen ? (
                 <>
                   {batchFinished && (
                     <Alert
@@ -1129,6 +1315,21 @@ export function DescriptionCoveragePanel({
                           ),
                       },
                       {
+                        title: "新增字段",
+                        dataIndex: "inferredNames",
+                        width: 120,
+                        render: (v: string[] | undefined) => {
+                          if (!v || v.length === 0) return <span className="muted">-</span>;
+                          return (
+                            <Tooltip title={v.join("、")}>
+                              <span className="mono" style={{ color: "#3f8600" }}>
+                                +{v.length} 个
+                              </span>
+                            </Tooltip>
+                          );
+                        },
+                      },
+                      {
                         title: "操作",
                         width: 80,
                         render: (_, r) =>
@@ -1167,6 +1368,73 @@ export function DescriptionCoveragePanel({
                       </Space>
                     )}
                   </div>
+                </>
+              ) : historyOpen ? (
+                <>
+                  {batchHistory.length === 0 ? (
+                    <Empty description="暂无批量历史" />
+                  ) : (
+                    <>
+                      {batchHistory.map((h) => (
+                        <div
+                          key={h.ts}
+                          style={{
+                            marginBottom: 10,
+                            padding: "8px 12px",
+                            border: "1px solid #f0f0f0",
+                            borderRadius: 6,
+                          }}
+                        >
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              alignItems: "center",
+                              gap: 8,
+                            }}
+                          >
+                            <Space size={8} wrap>
+                              <span className="muted" style={{ fontSize: 12 }}>
+                                {formatCnTime(new Date(h.ts).toISOString())}
+                              </span>
+                              <span>
+                                成功 {h.done} · 失败 {h.failed}
+                                {h.cancelled > 0 ? ` · 取消 ${h.cancelled}` : ""} · 新增 {h.added}{" "}
+                                字段 · {h.elapsed}s
+                              </span>
+                            </Space>
+                            <Space size={4}>
+                              {h.failedTables.length > 0 && (
+                                <Tooltip title={h.failedTables.map((f) => f.entity_name).join("、")}>
+                                  <Tag color="error">失败 {h.failedTables.length}</Tag>
+                                </Tooltip>
+                              )}
+                              <Button
+                                size="small"
+                                icon={<ReloadOutlined />}
+                                onClick={() => relaunchHistory(h)}
+                              >
+                                重新勾选此批
+                              </Button>
+                            </Space>
+                          </div>
+                          {h.failedTables.length > 0 && (
+                            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                              失败表：{h.failedTables.map((f) => f.entity_name).join("、")}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                      <div style={{ marginTop: 16, display: "flex", justifyContent: "space-between" }}>
+                        <Button size="small" danger onClick={clearBatchHistory}>
+                          清空历史
+                        </Button>
+                        <Button size="small" onClick={() => setHistoryOpen(false)}>
+                          返回
+                        </Button>
+                      </div>
+                    </>
+                  )}
                 </>
               ) : (
                 <>
