@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Card, Input, Modal, Radio, Select, Space, Table, Tag, message } from "antd";
+import { Alert, Button, Card, Input, Modal, Radio, Select, Space, Table, Tag, message } from "antd";
 import { ArrowLeftOutlined } from "@ant-design/icons";
 import {
   arbitrateConflict,
@@ -44,6 +44,21 @@ const CONFLICT_TYPE_LABEL: Record<string, string> = {
   cross_domain_same_def: "跨域同口径异源",
   version_conflict: "口径版本冲突",
   pii: "PII 冲突",
+};
+
+// 治理字段（后端迁移 0090）：软/硬冲突区分展示 + 来源标识，降低仲裁台噪音
+const SEVERITY_LABEL: Record<string, string> = {
+  hard: "硬冲突·需仲裁",
+  soft: "软冲突·建议复核",
+};
+const SEVERITY_COLOR: Record<string, string> = {
+  hard: "error",
+  soft: "blue",
+};
+const SOURCE_LABEL: Record<string, string> = {
+  auto: "自动预检",
+  manual: "人工预检",
+  backfill: "存量回填",
 };
 
 // 仲裁决策：choose_existing/choose_candidate 映射后端 choose_canonical；merge/keep_diff 一一对应。
@@ -114,16 +129,39 @@ function errText(err: unknown, fallback: string) {
   return err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : fallback;
 }
 
-/** 弹窗顶部冲突摘要：类型 + 相似度 + 状态 */
+/** 弹窗顶部冲突摘要：类型 + 相似度 + 状态 + 软硬级别 + 来源 */
 function ConflictSummary({ c }: { c: ConflictResponse }) {
+  const sev = c.severity === "hard" || c.severity === "soft" ? c.severity : "";
   return (
     <div style={{ marginBottom: 12 }}>
       <Space wrap>
         <Tag>{CONFLICT_TYPE_LABEL[c.type] ?? c.type}</Tag>
         <Tag color={STATUS_COLOR[c.status]}>{STATUS_LABEL[c.status] ?? c.status}</Tag>
+        {sev ? <Tag color={SEVERITY_COLOR[sev]}>{SEVERITY_LABEL[sev]}</Tag> : null}
+        {c.source ? <Tag>{SOURCE_LABEL[c.source] ?? c.source}</Tag> : null}
         <span className="muted">相似度 {(Number(c.similarity_score) * 100).toFixed(1)}%</span>
       </Space>
-      {c.description ? <p style={{ marginTop: 8 }}>{c.description}</p> : null}
+      {c.reason ? (
+        <p style={{ marginTop: 8 }} className="muted">
+          {c.reason}
+        </p>
+      ) : null}
+      {c.description ? <p style={{ marginTop: 4 }}>{c.description}</p> : null}
+      {sev === "hard" ? (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginTop: 8 }}
+          message="硬冲突（阻断发布）：须协商或裁决后方可发布"
+        />
+      ) : sev === "soft" ? (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginTop: 8 }}
+          message="软冲突（不阻断发布）：建议复核后处置，可合并或保留差异"
+        />
+      ) : null}
     </div>
   );
 }
@@ -131,6 +169,7 @@ function ConflictSummary({ c }: { c: ConflictResponse }) {
 export function ReviewWorkbench() {
   const [items, setItems] = useState<ConflictResponse[]>([]);
   const [status, setStatus] = useState("");
+  const [severity, setSeverity] = useState("");
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -182,7 +221,7 @@ export function ReviewWorkbench() {
   async function load() {
     setLoading(true);
     try {
-      const res = await listConflicts({ status, page_size: 50 });
+      const res = await listConflicts({ status, severity, page_size: 50 });
       setItems(res.items);
     } catch (err) {
       message.error(errText(err, "加载失败"));
@@ -194,7 +233,7 @@ export function ReviewWorkbench() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status]);
+  }, [status, severity]);
 
   async function loadCompare(c: ConflictResponse) {
     const candidate = c.candidate_metric_code ?? "";
@@ -399,6 +438,21 @@ export function ReviewWorkbench() {
     { title: "冲突ID", dataIndex: "conflict_id", key: "conflict_id" },
     { title: "类型", dataIndex: "type", key: "type", render: (v: string) => CONFLICT_TYPE_LABEL[v] ?? v },
     {
+      title: "级别",
+      key: "severity",
+      width: 150,
+      render: (_: unknown, r: ConflictResponse) => {
+        const sev = r.severity === "hard" || r.severity === "soft" ? r.severity : "";
+        if (!sev) return <span className="muted">—</span>;
+        return (
+          <Space size={4} wrap>
+            <Tag color={SEVERITY_COLOR[sev]}>{SEVERITY_LABEL[sev]}</Tag>
+            {r.source ? <Tag>{SOURCE_LABEL[r.source] ?? r.source}</Tag> : null}
+          </Space>
+        );
+      },
+    },
+    {
       title: "状态",
       dataIndex: "status",
       key: "status",
@@ -466,20 +520,33 @@ export function ReviewWorkbench() {
       <Card
         title="审核工作台（冲突仲裁）"
         extra={
-          <Select
-            value={status || undefined}
-            onChange={(v) => setStatus(v || "")}
-            style={{ width: 140 }}
-            allowClear
-            placeholder="全部状态"
-            options={[
-              { value: "OPEN", label: "待处理" },
-              { value: "NEGOTIATING", label: "协商中" },
-              { value: "RULED", label: "已裁决" },
-              { value: "ESCALATED", label: "已升级" },
-              { value: "CLOSED", label: "已关闭" },
-            ]}
-          />
+          <Space>
+            <Select
+              value={severity || undefined}
+              onChange={(v) => setSeverity(v || "")}
+              style={{ width: 140 }}
+              allowClear
+              placeholder="全部级别"
+              options={[
+                { value: "hard", label: "硬冲突·需仲裁" },
+                { value: "soft", label: "软冲突·建议复核" },
+              ]}
+            />
+            <Select
+              value={status || undefined}
+              onChange={(v) => setStatus(v || "")}
+              style={{ width: 140 }}
+              allowClear
+              placeholder="全部状态"
+              options={[
+                { value: "OPEN", label: "待处理" },
+                { value: "NEGOTIATING", label: "协商中" },
+                { value: "RULED", label: "已裁决" },
+                { value: "ESCALATED", label: "已升级" },
+                { value: "CLOSED", label: "已关闭" },
+              ]}
+            />
+          </Space>
         }
       >
         <Table

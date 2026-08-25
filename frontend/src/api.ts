@@ -1015,11 +1015,13 @@ export async function resetUserPassword(
 // ---- 冲突 ----
 export async function listConflicts(params: {
   status?: string;
+  severity?: string;
   page?: number;
   page_size?: number;
 }): Promise<ConflictListResponse> {
   const qs = pageQs({
     status: params.status,
+    severity: params.severity,
     page: params.page ?? 1,
     page_size: params.page_size ?? 20,
   });

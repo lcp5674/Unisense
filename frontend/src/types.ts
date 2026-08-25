@@ -406,6 +406,10 @@ export interface ConflictResponse {
   metric_codes: string[];
   decision_json: Record<string, unknown> | null;
   severity?: string;
+  // 治理字段（后端迁移 0090）：仲裁台据此区分软/硬冲突并提示来源/原因
+  source?: string;
+  reason?: string;
+  block_publish?: boolean;
   candidate_metric_code?: string;
   existing_metric_code?: string;
   description?: string;

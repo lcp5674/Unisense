@@ -415,3 +415,73 @@ describe("ReviewWorkbench 冲突仲裁", () => {
     await screen.findByText("dashboard-page");
   });
 });
+
+describe("ReviewWorkbench 软/硬冲突区分（治理字段迁移 0090）", () => {
+  it("列表按 severity/source 区分展示：硬冲突红标需仲裁、软冲突蓝标建议复核、来源标识", async () => {
+    const withGovernance = [
+      baseConflict({
+        conflict_id: "CF-H",
+        severity: "hard",
+        source: "auto",
+        reason: "同名口径定义/域不同，须协商或裁决后方可发布",
+        block_publish: true,
+      }),
+      baseConflict({
+        conflict_id: "CF-S",
+        type: "same_def_diff_name",
+        severity: "soft",
+        source: "manual",
+        reason: "口径实质相同但命名各异，建议合并",
+        block_publish: false,
+      }),
+    ];
+    mockedList.mockResolvedValue({
+      items: withGovernance,
+      total: withGovernance.length,
+      page: 1,
+      page_size: 20,
+    } as ConflictListResponse);
+    renderWorkbench();
+    await waitFor(() => expect(screen.getByText("CF-H")).toBeInTheDocument());
+    expect(screen.getByText("硬冲突·需仲裁")).toBeInTheDocument();
+    expect(screen.getByText("软冲突·建议复核")).toBeInTheDocument();
+    expect(screen.getByText("自动预检")).toBeInTheDocument();
+    expect(screen.getByText("人工预检")).toBeInTheDocument();
+  });
+
+  it("级别过滤：选择「硬冲突」后以 severity=hard 重新拉取", async () => {
+    renderWorkbench();
+    await waitFor(() => expect(screen.getByText("CF-A")).toBeInTheDocument());
+    fireEvent.mouseDown(screen.getByText("全部级别"));
+    fireEvent.click(await screen.findByText("硬冲突·需仲裁"));
+    await waitFor(() =>
+      expect(mockedList).toHaveBeenCalledWith(
+        expect.objectContaining({ severity: "hard" }),
+      ),
+    );
+  });
+
+  it("弹窗摘要：硬冲突显示阻断提示，软冲突显示建议复核提示", async () => {
+    const hard = baseConflict({
+      conflict_id: "CF-H2",
+      severity: "hard",
+      source: "backfill",
+      reason: "同名口径定义/域不同",
+      block_publish: true,
+    });
+    mockedList.mockResolvedValue({
+      items: [hard],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    } as ConflictListResponse);
+    renderWorkbench();
+    await waitFor(() => expect(screen.getByText("CF-H2")).toBeInTheDocument());
+    const row = screen.getByText("CF-H2").closest("tr") as HTMLElement;
+    fireEvent.click(within(row).getByRole("button", { name: /对\s*比/ }));
+    await waitFor(() =>
+      expect(screen.getByText("硬冲突（阻断发布）：须协商或裁决后方可发布")).toBeInTheDocument(),
+    );
+    expect(screen.getAllByText("存量回填").length).toBeGreaterThan(0);
+  });
+});
