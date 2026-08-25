@@ -229,7 +229,10 @@ function ReviewDetailModal({
         <Descriptions column={1} size="small" bordered>
           {expression && (
             <Descriptions.Item label={metric.type === "atomic" ? "聚合表达式" : "计算表达式"}>
-              <code className="mono">{expression}</code>
+              {/* 长表达式超宽时换行而非撑破弹窗：inline-block 使 wordBreak 生效 */}
+              <code className="mono" style={{ display: "inline-block", maxWidth: "100%", wordBreak: "break-word" }}>
+                {expression}
+              </code>
             </Descriptions.Item>
           )}
           {sourceTables.length > 0 && (
@@ -255,13 +258,42 @@ function ReviewDetailModal({
           )}
           {etlSql && (
             <Descriptions.Item label="口径 SQL">
-              <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto", maxHeight: 200 }}>
+              {/* pre-wrap + wordBreak：长 SQL 行自动换行，maxWidth 兜底不撑破弹窗；maxHeight 控制纵向滚动 */}
+              <pre
+                style={{
+                  background: "var(--paper)",
+                  padding: 8,
+                  borderRadius: 4,
+                  margin: 0,
+                  fontSize: 12,
+                  overflow: "auto",
+                  maxHeight: 200,
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                  maxWidth: "100%",
+                  boxSizing: "border-box",
+                }}
+              >
                 {etlSql}
               </pre>
             </Descriptions.Item>
           )}
           <Descriptions.Item label="完整 JSON">
-            <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto", maxHeight: 220 }}>
+            <pre
+              style={{
+                background: "var(--paper)",
+                padding: 8,
+                borderRadius: 4,
+                margin: 0,
+                fontSize: 12,
+                overflow: "auto",
+                maxHeight: 220,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                maxWidth: "100%",
+                boxSizing: "border-box",
+              }}
+            >
               {JSON.stringify(def, null, 2)}
             </pre>
           </Descriptions.Item>

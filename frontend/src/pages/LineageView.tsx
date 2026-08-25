@@ -428,7 +428,7 @@ function TableDetailDrawer({ detail, open, onClose, loading }: {
           {detail.etl_sql && (
             <>
               <h4 style={{ marginTop: 16 }}>ETL SQL</h4>
-              <pre className="mono" style={{ fontSize: 12, background: "#f5f5f5", padding: 12, borderRadius: 6, maxHeight: 240, overflow: "auto" }}>
+              <pre className="mono" style={{ fontSize: 12, background: "#f5f5f5", padding: 12, borderRadius: 6, maxHeight: 240, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word", maxWidth: "100%", boxSizing: "border-box" }}>
                 {formatSql(detail.etl_sql)}
               </pre>
             </>
@@ -1388,7 +1388,7 @@ function RunDetailBody({ run }: { run: LineageIngestRun }) {
           {detail?.sql ? (
             <>
               <h4 style={{ marginTop: 16 }}>SQL 原文</h4>
-              <pre className="mono" style={{ fontSize: 12, background: "#f5f5f5", padding: 12, borderRadius: 6, maxHeight: 260, overflow: "auto" }}>
+              <pre className="mono" style={{ fontSize: 12, background: "#f5f5f5", padding: 12, borderRadius: 6, maxHeight: 260, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word", maxWidth: "100%", boxSizing: "border-box" }}>
                 {formatSql(detail.sql)}
               </pre>
             </>

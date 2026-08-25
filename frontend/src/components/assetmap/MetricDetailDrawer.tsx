@@ -128,6 +128,10 @@ function DefinitionsBlock({ def }: { def: Record<string, unknown> }) {
             fontSize: 12,
             overflow: "auto",
             maxHeight: 200,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            maxWidth: "100%",
+            boxSizing: "border-box",
           }}
         >
           {etlSql}
@@ -146,6 +150,9 @@ function DefinitionsBlock({ def }: { def: Record<string, unknown> }) {
               overflow: "auto",
               maxHeight: 160,
               whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+              maxWidth: "100%",
+              boxSizing: "border-box",
             }}
           >
             {pseudoDefinition}
@@ -164,6 +171,10 @@ function DefinitionsBlock({ def }: { def: Record<string, unknown> }) {
               fontSize: 12,
               overflow: "auto",
               maxHeight: 200,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+              maxWidth: "100%",
+              boxSizing: "border-box",
             }}
           >
             {dwDefinition}

@@ -107,6 +107,10 @@ function renderValue(key: string, value: unknown, depth: number, labels: Record<
           borderRadius: 4,
           fontSize: 12,
           lineHeight: 1.5,
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          maxWidth: "100%",
+          boxSizing: "border-box",
         }}
       >
         {formatSql(String(value))}
@@ -199,6 +203,10 @@ function renderDefValue(key: string, value: unknown, labels: Record<string, stri
           borderRadius: 4,
           fontSize: 12,
           lineHeight: 1.5,
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          maxWidth: "100%",
+          boxSizing: "border-box",
         }}
       >
         {formatSql(String(value))}
@@ -218,6 +226,9 @@ function renderDefValue(key: string, value: unknown, labels: Record<string, stri
           fontSize: 12,
           lineHeight: 1.5,
           whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          maxWidth: "100%",
+          boxSizing: "border-box",
         }}
       >
         {String(value)}

@@ -912,7 +912,7 @@ export function Templates() {
             {detailTpl.defaults_json?.definition_json ? (
               <div>
                 <div style={{ fontWeight: 600, marginBottom: 4 }}>默认口径（实例化时自动合并）</div>
-                <pre className="mono" style={{ fontSize: 12, maxHeight: 200, overflow: "auto", background: "#fafafa", padding: 8, borderRadius: 6, margin: 0 }}>
+                <pre className="mono" style={{ fontSize: 12, maxHeight: 200, overflow: "auto", background: "#fafafa", padding: 8, borderRadius: 6, margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", maxWidth: "100%", boxSizing: "border-box" }}>
                   {JSON.stringify(detailTpl.defaults_json.definition_json, null, 2)}
                 </pre>
               </div>

@@ -347,7 +347,7 @@ describe("SystemDict 页面", () => {
     // 提交（Modal 主按钮）
     fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
     await waitFor(() => expect(mockedBatchCreate).toHaveBeenCalled());
-    const [dictType, items] = mockedBatchCreate.mock.calls[0] as [string, Array<Record<string, unknown>>];
+    const [dictType, items] = mockedBatchCreate.mock.calls[0]!;
     expect(dictType).toBe("granularity");
     expect(items).toHaveLength(2);
     expect(items[0].label).toBe("分钟");

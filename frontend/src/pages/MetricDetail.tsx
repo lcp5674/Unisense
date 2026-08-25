@@ -470,27 +470,28 @@ function DefinitionCard({ metric }: { metric: MetricResponse }) {
         )}
         {etlSql && (
           <Descriptions.Item label="口径 SQL">
-            <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto" }}>
+            {/* pre-wrap + wordBreak：长 SQL 行自动换行，maxWidth 兜底不撑破弹窗；maxHeight 控制纵向滚动 */}
+            <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word", maxWidth: "100%", boxSizing: "border-box" }}>
               {etlSql}
             </pre>
           </Descriptions.Item>
         )}
         {pseudoDefinition && (
           <Descriptions.Item label="伪代码口径（系统开发）">
-            <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto", whiteSpace: "pre-wrap" }}>
+            <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word", maxWidth: "100%", boxSizing: "border-box" }}>
               {pseudoDefinition}
             </pre>
           </Descriptions.Item>
         )}
         {dwDefinition && (
           <Descriptions.Item label="数仓详细口径（数仓开发）">
-            <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto" }}>
+            <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word", maxWidth: "100%", boxSizing: "border-box" }}>
               {dwDefinition}
             </pre>
           </Descriptions.Item>
         )}
         <Descriptions.Item label="完整 JSON">
-          <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto", maxHeight: 240 }}>
+          <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto", maxHeight: 240, whiteSpace: "pre-wrap", wordBreak: "break-word", maxWidth: "100%", boxSizing: "border-box" }}>
             {JSON.stringify(def, null, 2)}
           </pre>
         </Descriptions.Item>

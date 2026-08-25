@@ -249,6 +249,37 @@ describe("MetricReview 指标审批", () => {
     expect(screen.getAllByText("demo.sales_order").length).toBeGreaterThan(0);
   });
 
+  it("评审记录弹窗：长口径 SQL/JSON 自动换行不撑破弹窗（pre-wrap + 宽度约束）", async () => {
+    // 超长单行 SQL（无空格的长 token）与超长 JSON 字符串：若 white-space=pre 会按内容宽度撑破弹窗
+    const longToken = "SUM(COALESCE(COUNT(DISTINCT CASE WHEN status='active' THEN doctor_code END),0)) OVER (PARTITION BY month_id ORDER BY hosp_code)";
+    const reviewed: MetricResponse = {
+      ...metric,
+      status: "PUBLISHED",
+      approver_id: 1,
+      approved_at: "2026-08-10T10:00:00",
+      definition_json: {
+        expression: longToken,
+        etl_sql: `SELECT ${longToken} AS m FROM dwd_t -- ${"x".repeat(300)}`,
+        source_tables: ["demo.sales_order"],
+      },
+    };
+    mockedList.mockResolvedValue({ items: [reviewed], total: 1, page: 1, page_size: 20 });
+    renderReview();
+    fireEvent.click(await screen.findByRole("radio", { name: /我审过的/ }));
+    await screen.findByText("sales_gmv_day");
+    fireEvent.click(screen.getByRole("button", { name: /查看详情/ }));
+    await screen.findByText(/评审记录：sales_gmv_day/);
+    // 口径 SQL 与完整 JSON 的 pre 均须 pre-wrap + 宽度约束（长行换行而非横向撑开弹窗）
+    const pres = Array.from(document.querySelectorAll(".ant-modal pre"));
+    expect(pres.length).toBeGreaterThanOrEqual(2);
+    for (const p of pres) {
+      const st = (p as HTMLElement).style;
+      expect(st.whiteSpace).toBe("pre-wrap");
+      expect(st.wordBreak).toBe("break-word");
+      expect(st.maxWidth).toBe("100%");
+    }
+  });
+
   it("深页空结果自动回退上一页（审批后列表缩短不致空页）", async () => {
     // 默认第 1 页有数据、共 200 条（多页可分页）；第 2 页请求返回空（total>0 → 触发回退重查）
     mockedList.mockResolvedValue({ items: [metric], total: 200, page: 1, page_size: 20 });
