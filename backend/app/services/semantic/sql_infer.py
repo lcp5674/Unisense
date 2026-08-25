@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import contextlib
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -58,6 +59,47 @@ _AGG_FUNCS = {
     "PERCENTILE_APPROX",
     "LAST_VALUE",
     "FIRST_VALUE",
+}
+
+# 工业场景常用 SQL 方言（默认方言失败时依次尝试解析；Hadoop/Doris 系在前，
+# 与血缘解析器方言策略一致）。sqlglot 25.x 内置：clickhouse/oracle/trino/
+# presto/postgres/mysql/tsql/snowflake/bigquery/redshift/databricks/impala/
+# teradata/athena/duckdb/materialize/risingwave 等。
+_INDUSTRIAL_DIALECTS = (
+    "hive",
+    "spark",
+    "starrocks",
+    "doris",
+    "clickhouse",
+    "oracle",
+    "trino",
+    "presto",
+    "postgres",
+    "mysql",
+    "tsql",
+    "snowflake",
+    "bigquery",
+    "redshift",
+    "databricks",
+    "impala",
+    "teradata",
+    "athena",
+    "duckdb",
+    "materialize",
+    "risingwave",
+)
+
+# ClickHouse 合并/条件聚合函数 → 规范聚合（sumMerge/sumIf → SUM 等）
+_COMBINED_AGG_MAP = {
+    "summerge": "SUM",
+    "sumif": "SUM",
+    "sumdistinct": "SUM",
+    "avgmerge": "AVG",
+    "avgif": "AVG",
+    "countmerge": "COUNT",
+    "countif": "COUNT",
+    "maxmerge": "MAX",
+    "minmerge": "MIN",
 }
 
 
@@ -137,6 +179,52 @@ def _from_table(select: exp.Select) -> str | None:
     return None
 
 
+def _agg_display_name(agg: exp.AggFunc) -> str:
+    """聚合节点 → 规范聚合名（含工业方言聚合归一）。
+
+    ClickHouse ``sumMerge/sumIf`` 解析为 ``CombinedAggFunc``（``this`` 是函数名
+    字符串）→ 按映射归一为 ``SUM`` 等；``countIf`` → ``COUNT``；Trino/Presto
+    ``approx_distinct`` → ``COUNT_DISTINCT``（key 无下划线，与既有映射对齐）。
+    """
+    key = agg.key.upper()
+    if key == "COMBINEDAGGFUNC":
+        fn = str(agg.this).lower() if isinstance(agg.this, str) else ""
+        return _COMBINED_AGG_MAP.get(fn, "SUM")
+    if key == "COUNTIF":
+        return "COUNT"
+    if key == "APPROXDISTINCT":
+        return "COUNT_DISTINCT"
+    if key.startswith("PERCENTILE"):
+        return "PERCENTILE"
+    return key
+
+
+def _extract_col_name(node: exp.Expr | None) -> str:
+    """从聚合参数表达式提取度量列名。
+
+    裸列 → 列名；``*`` → ``*``；``DISTINCT x`` → x；``CASE WHEN`` → then 分支列；
+    复杂表达式（``COALESCE``/``nvl``/算术/条件/方言函数）→ 取内部第一个
+    Column（如 Oracle ``sum(nvl(amount,0))`` → ``amount``）；无列可提取 → ``*``。
+    """
+    if node is None:
+        return "*"
+    if isinstance(node, exp.Star):
+        return "*"
+    if isinstance(node, exp.Column):
+        return node.name.lower()
+    if isinstance(node, exp.Distinct):
+        inner = node.expressions[0] if node.expressions else None
+        return _extract_col_name(inner)
+    if isinstance(node, exp.Case):
+        return next(
+            (c.name.lower() for c in node.walk() if isinstance(c, exp.Column)), "*"
+        )
+    first = next(
+        (c.name.lower() for c in node.walk() if isinstance(c, exp.Column)), None
+    )
+    return first or "*"
+
+
 def _projection_measures(
     select: exp.Select, enrich: bool = False, table: str | None = None
 ) -> list[dict[str, Any]]:
@@ -156,28 +244,17 @@ def _projection_measures(
         agg = target.find(exp.AggFunc) if target else None
         if agg is None:
             continue
-        agg_name = agg.key.upper()
-        agg_name = "COUNT_DISTINCT" if agg_name == "APPROX_DISTINCT" else agg_name
-        agg_name = "PERCENTILE" if agg_name.startswith("PERCENTILE") else agg_name
+        agg_name = _agg_display_name(agg)
         # DISTINCT 修饰符：sqlglot 将 COUNT(DISTINCT x) 解析为 Count(this=Distinct(...))
         col_expr = agg.this
         if isinstance(col_expr, exp.Distinct):
             agg_name = "COUNT_DISTINCT"
-            inner = col_expr.expressions[0] if col_expr.expressions else None
-            if isinstance(inner, (exp.Column, exp.Case)):
-                col_expr = inner
-        if isinstance(col_expr, exp.Star):
-            col_name = "*"
-        elif isinstance(col_expr, exp.Column):
-            col_name = col_expr.name.lower()
-        elif isinstance(col_expr, exp.Case):
-            # count(distinct case when ... then col end) → 取 then 分支列
-            col_name = next(
-                (c.name.lower() for c in col_expr.walk() if isinstance(c, exp.Column)),
-                "*",
-            )
-        else:
-            col_name = "*"
+            col_expr = col_expr.expressions[0] if col_expr.expressions else None
+        # ClickHouse 合并/条件聚合：this 是函数名字符串，真正参数在 expressions[0]
+        # （sumMerge(amount_state) → expressions[0]=Column(amount_state)）
+        if isinstance(agg, exp.CombinedAggFunc):
+            col_expr = agg.expressions[0] if agg.expressions else None
+        col_name = _extract_col_name(col_expr)
         measure: dict[str, Any] = {"column": col_name, "agg": agg_name}
         if enrich:
             measure["alias"] = (
@@ -348,21 +425,72 @@ def _detect_time_column(
     return None
 
 
-def _parse_profile_ast(sql: str) -> exp.Expr | None:
-    """解析 SQL 为 AST；默认方言失败/降级 Command 时用 Doris 预处理兜底。
+# 方言特有聚合函数名（文本命中才遍历方言择优——避免普通 SQL 每条全方言解析的性能损耗）
+_DIALECT_AGG_HINT = re.compile(
+    r"\b(summerge|sumif|sumdistinct|avgmerge|avgif|countif|countmerge|maxmerge|"
+    r"minmerge|approx_distinct|approx_count_distinct|percentile_approx|uniq|uniqexact|"
+    r"quantile|grouparray|topk|anyif|corr|covar_pop|regr_slope|stddev|var_pop)\b",
+    re.IGNORECASE,
+)
 
-    生产 ETL 常用 Doris/StarRocks 的 ``CREATE TABLE ... DISTRIBUTED BY ... BUCKETS n
-    PROPERTIES(...) AS SELECT`` 形态，sqlglot 默认方言把整句降级为 ``Command``
-    （无 Select 子树）→ 画像为空 → 批量解析跳过全部候选。复用血缘解析器的
-    ``_preprocess_dialect``（剥离物理分布/副本属性等与口径无关的子句）后重试，
-    口径语义不变；仍失败返回 ``None``（上层降级空画像，不抛异常）。
+
+def _best_dialect_ast(
+    sql: str, baseline: exp.Expr | None
+) -> exp.Expr | None:
+    """按「聚合识别数最大化」从工业方言中选解析结果（默认方言为基线）。
+
+    方言对同一 SQL 的解析「宽松度」不同：ClickHouse ``sumMerge/sumIf`` 在
+    hive/spark 等方言下降级为 ``Anonymous``（非 AggFunc），仅 clickhouse 方言
+    识别为 ``CombinedAggFunc``——只取首个可解析方言会丢失度量。故比较各方言
+    解析出的 ``AggFunc`` 数量，选识别最充分的 AST；数量未超过基线则保留基线
+    （普通 SQL 方言识别度相同 → 行为不变）。
     """
+    best = baseline
+    best_count = len(list(best.find_all(exp.AggFunc))) if best is not None else 0
+    for dialect in _INDUSTRIAL_DIALECTS:
+        try:
+            candidate = sqlglot.parse_one(
+                sql, dialect=dialect, error_level=sqlglot.ErrorLevel.RAISE
+            )
+        except Exception:
+            continue
+        if candidate is None or candidate.find(exp.Select) is None:
+            continue
+        count = len(list(candidate.find_all(exp.AggFunc)))
+        if count > best_count:
+            best, best_count = candidate, count
+    return best
+
+
+def _parse_profile_ast(sql: str) -> exp.Expr | None:
+    """解析 SQL 为 AST；默认方言失败/识别不全时用工业方言 + Doris 预处理兜底。
+
+    生产 ETL 常用方言语法（Doris/StarRocks 的 ``CREATE TABLE ... DISTRIBUTED BY
+    ... AS SELECT``、ClickHouse ``MergeTree`` 建表 + ``sumMerge`` 聚合、Oracle
+    ``trunc(x,'MM')``、Trino ``date_trunc``、T-SQL ``CONVERT`` 等）sqlglot 默认
+    方言可能整句降级为 ``Command``（无 Select 子树）或把方言聚合降级为
+    ``Anonymous`` → 画像度量缺失 → 批量解析候选减少。解析策略（代价递增）：
+    1. 默认方言解析，有 Select 子树 → 文本含方言聚合函数名时再遍历方言择优
+       （``_best_dialect_ast``，避免 sumMerge 等被宽松方言降级丢度量），否则直接采用；
+    2. 默认方言无 Select 子树 → 遍历工业方言选聚合识别最多的 AST；
+    3. 复用血缘解析器 ``_preprocess_dialect``（剥离物理分布/副本属性等与口径无关
+       的子句）后按默认方言重试——口径语义不变；
+    全部失败返回 ``None``（上层降级空画像，不抛异常）。
+    """
+    ast: exp.Expr | None = None
     try:
         ast = sqlglot.parse_one(sql, error_level=sqlglot.ErrorLevel.RAISE)
     except Exception:
         ast = None
     if ast is not None and ast.find(exp.Select) is not None:
+        # 默认方言成功：仅当文本疑似含方言特有聚合函数时才遍历方言择优（性能护栏）
+        if _DIALECT_AGG_HINT.search(sql.lower()):
+            return _best_dialect_ast(sql, baseline=ast)
         return ast
+    # 默认方言无 Select 子树（降级 Command / 方言 DDL）→ 工业方言选聚合识别最多的
+    best = _best_dialect_ast(sql, baseline=None)
+    if best is not None:
+        return best
     # Doris/StarRocks 方言语法（CTAS 物理属性等）→ 剥离后重试（懒导入避免模块耦合）
     try:
         from app.services.lineage.parser import _preprocess_dialect

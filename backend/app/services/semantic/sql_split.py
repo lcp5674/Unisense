@@ -30,7 +30,11 @@ from app.services.semantic.auto_fill import (
     generate_metric_code,
     infer_metric,
 )
-from app.services.semantic.sql_infer import SqlProfile, parse_sql_profile
+from app.services.semantic.sql_infer import (
+    _INDUSTRIAL_DIALECTS,
+    SqlProfile,
+    parse_sql_profile,
+)
 
 # 引号字符（单/双/反引号）——分号扫描须跳过字符串/标识符内的分号
 _QUOTES = ('"', "'", "`")
@@ -93,14 +97,38 @@ def _split_semicolon(sql: str) -> list[str]:
 
 
 def _split_statement(sql: str) -> list[str]:
-    """sqlglot 按语句语义切分（CTE/INSERT 单条天然正确；注释/引号内分号不误切）。
+    """按语句语义切分多语句 SQL，优先保留原文切片。
 
-    多方言依次尝试（默认 → hive → spark → starrocks → doris）：默认方言遇
-    Hive/Doris 特有语法（如 ``create table ... stored as orc``、``CREATE TABLE ...
-    DISTRIBUTED BY ... AS SELECT``）会整段抛错或降级 Command，回退到对应方言
-    保证 ETL 脚本可切分（避免因一条 DDL 导致整段回退到分号切分）。
+    三步策略：
+    1. **默认方言语义切分**确定理想段数 + **引号/注释感知分号切分**（``_split_semicolon``）
+       取原文切片：两者段数一致 → 无 CTE/INSERT 内分号 → 用原文切片。sqlglot 方言
+       ``ast.sql()`` 序列化会改写方言语法（ClickHouse ``sumMerge`` → ``SUMMERGE``、
+       ``countIf`` → ``COUNT_IF``），原文切片完整保留方言写法，后续 ``parse_sql_profile``
+       方言识别不丢度量。
+    2. 段数不一致（CTE/INSERT 内分号等语义边界）→ 用默认方言序列化（语义正确，
+       罕见场景接受序列化改写）。
+    3. 默认方言不足 2 段 → 工业方言语义切分（Doris/ClickHouse 等 DDL 语法，见
+       ``sql_infer._INDUSTRIAL_DIALECTS``）；仍不足 → 返回原文分号切片兜底。
+
+    Returns:
+        至少 2 段的原文/序列化切片；极端失败返回 ``[]``（上层降级整段）。
     """
-    for dialect in (None, "hive", "spark", "starrocks", "doris"):
+    semicolon_segments = _split_semicolon(sql)
+    try:
+        default_asts = sqlglot.parse(sql)
+    except Exception:
+        default_asts = None
+    if default_asts is not None:
+        default_segments = [
+            ast.sql().strip()
+            for ast in default_asts
+            if ast is not None and ast.sql().strip()
+        ]
+        if len(default_segments) >= _LLM_SPLIT_MIN_SEGMENTS:
+            if len(default_segments) == len(semicolon_segments):
+                return semicolon_segments
+            return default_segments
+    for dialect in _INDUSTRIAL_DIALECTS:
         try:
             asts = sqlglot.parse(sql, dialect=dialect)
         except Exception:
@@ -114,6 +142,8 @@ def _split_statement(sql: str) -> list[str]:
                 segments.append(text)
         if len(segments) >= _LLM_SPLIT_MIN_SEGMENTS:
             return segments
+    if len(semicolon_segments) >= _LLM_SPLIT_MIN_SEGMENTS:
+        return semicolon_segments
     return []
 
 
@@ -190,12 +220,16 @@ async def _llm_split(db: Any, sql: str) -> list[str] | None:
         return None  # LLM 不可用/超时/解析失败 → 降级单段
 
 
-async def _llm_infer_period(db: Any, statement_sql: str) -> str | None:
+async def _llm_infer_period(
+    db: Any, full_sql: str, focus_sql: str | None = None
+) -> str | None:
     """LLM 从整段 SQL 推断统计周期（规则层无时间信号时兜底）。
 
     不同 SQL 场景（窗口函数 partition by 月份、无 GROUP BY 时间列、Oracle
     ``trunc(x,'MM')`` 等）规则层可能漏判——此时让 LLM 看整段 SQL 判断
-    统计周期。不可用/超时/解析失败返回 None（上层降级规则层默认 day）。
+    统计周期。传**完整脚本 + 焦点语句**：完整脚本提供上下文（CTE/前置语句/
+    注释），LLM 只针对焦点语句下结论——切分后的单段可能已丢失来源上下文。
+    不可用/超时/解析失败返回 None（上层降级规则层默认 day）。
     """
     try:
         from app.services.llm.config_service import LlmConfigService
@@ -205,13 +239,15 @@ async def _llm_infer_period(db: Any, statement_sql: str) -> str | None:
         if not getattr(client, "enabled", False):
             return None
         prompt = (
-            "下面是一段指标定义 SQL。请判断该指标最可能的统计周期："
+            "下面是一段完整的 SQL 脚本（可能含多条语句/建表/注释）：\n"
+            f"{full_sql}\n\n"
+            "请判断以下【焦点语句】对应的指标最可能的统计周期："
             "看 GROUP BY 的时间粒度/时间列的截断方式（如 substr(x,1,7) 是月、"
-            "date_trunc('month',x) 是月、按日分区 dt 是日）。"
+            "date_trunc('month',x) 是月、按日分区 dt 是日）。\n"
+            f"焦点语句：\n{focus_sql or full_sql}\n\n"
             "只返回 JSON（不要解释、不要 Markdown 代码块）："
             '{"period": "day|week|month|quarter|year|hour", "confidence": 0到1的小数, '
-            '"reason": "一句话依据"}\n\n'
-            f"SQL：\n{statement_sql}"
+            '"reason": "一句话依据"}'
         )
         resp = await client.chat(
             messages=[{"role": "user", "content": prompt}],
@@ -224,18 +260,24 @@ async def _llm_infer_period(db: Any, statement_sql: str) -> str | None:
         return None  # LLM 不可用/超时/解析失败 → 降级规则层默认
 
 
-async def _llm_infer_measures(db: Any, sql: str) -> list[dict[str, Any]] | None:
+async def _llm_infer_measures(
+    db: Any, full_sql: str, focus_sql: str | None = None
+) -> list[dict[str, Any]] | None:
     """LLM 兜底：规则层解析不出聚合度量时，让 LLM 从 SQL 提取度量清单。
 
     触发时机：``parse_sql_profile`` 返回空 ``measures``（sqlglot 不支持方言 /
-    Doris 剥离后仍失败 / 极端嵌套等）。LLM 提取 ``[{column, agg, alias, table,
-    period, name}]``，结构对齐 ``_build_atomic_candidate`` 下沉场景可消费的
-    measure 字段（alias/table 用于区分同列多语义、source_fields 还原口径）。
-    不可用/超时/解析失败返回 ``None``（上层降级 skipped，绝不阻断批量解析）。
+    Doris 剥离后仍失败 / 极端嵌套等）。传**完整脚本 + 焦点语句**：完整脚本提供
+    上下文（CTE 定义、前置 SET/变量、注释、兄弟语句），LLM 只从焦点语句中提取
+    度量——方言语句的字段来源/口径常依赖前置定义，只看切分后的单段会信息丢失。
+    LLM 提取 ``[{column, agg, alias, table, period, name}]``，结构对齐
+    ``_build_atomic_candidate`` 下沉场景可消费的 measure 字段（alias/table 用于
+    区分同列多语义、source_fields 还原口径）。不可用/超时/解析失败返回 ``None``
+    （上层降级 skipped，绝不阻断批量解析）。
 
     Args:
         db: 异步会话（LLM 客户端构建需要）。
-        sql: 无法用规则解析的语句。
+        full_sql: 完整原始 SQL 脚本（上下文）。
+        focus_sql: 待提取度量的焦点语句（缺省用完整脚本）。
 
     Returns:
         ``[{"column", "agg", "alias"?, "table"?, "period"?, "name"?}]``；
@@ -249,18 +291,20 @@ async def _llm_infer_measures(db: Any, sql: str) -> list[dict[str, Any]] | None:
         if not getattr(client, "enabled", False):
             return None
         prompt = (
-            "下面是一段指标定义 SQL，可能包含规则解析器无法识别的方言语法"
-            "（如 Doris/StarRocks 建表、复杂嵌套、非标准函数等）。\n"
-            "请提取其中的指标度量列，判断标准：被 SUM/COUNT/AVG/MAX/MIN/"
-            "COUNT(DISTINCT) 等聚合函数包裹的列或表达式（含 CASE WHEN 聚合、"
-            "COUNT(DISTINCT CASE WHEN ...)），每个聚合对应一个度量。\n"
+            "下面是一段完整的 SQL 脚本（可能含多条语句/建表/CTE/注释等）：\n"
+            f"{full_sql}\n\n"
+            "请仅从以下【焦点语句】中提取指标度量列（完整脚本仅供理解字段来源与"
+            "口径上下文，不要提取其它语句的度量）：\n"
+            f"{focus_sql or full_sql}\n\n"
+            "判断标准：被 SUM/COUNT/AVG/MAX/MIN/COUNT(DISTINCT) 等聚合函数包裹的"
+            "列或表达式（含 CASE WHEN 聚合、COUNT(DISTINCT CASE WHEN ...)、方言"
+            "聚合 sumIf/sumMerge/countIf/approx_distinct 等），每个聚合对应一个度量。\n"
             "只返回 JSON（不要解释、不要 Markdown 代码块）："
             '{"measures": [{"column": "度量列名", "agg": "SUM|COUNT|COUNT_DISTINCT|AVG|MAX|MIN",'
             ' "alias": "投影别名(若有)", "table": "来源物理表(能判断才填)",'
             ' "period": "day|week|month|quarter|year|hour", "name": "简短中文指标名建议"}, ...],'
             ' "source_table": "主来源表(无法判断留null)"}\n'
-            "如果确实没有聚合度量，返回 {\"measures\": []}。\n\n"
-            f"SQL：\n{sql}"
+            "如果焦点语句确实没有聚合度量，返回 {\"measures\": []}。\n"
         )
         resp = await client.chat(
             messages=[{"role": "user", "content": prompt}],
@@ -660,7 +704,11 @@ async def infer_sql_batch(
             llm_measures = None
             llm_tried = reason_code == "parse_failed" and db is not None
             if llm_tried:
-                llm_measures = await _llm_infer_measures(db, seg)
+                # 传完整脚本 + 焦点语句：方言语句字段来源/口径常依赖前置语句
+                # 定义（CTE/SET/变量），只看单段会信息丢失影响推断
+                llm_measures = await _llm_infer_measures(
+                    db, full_sql=sql, focus_sql=seg
+                )
             if llm_measures:
                 base_period = _period_from_profile(profile)
                 for measure in llm_measures:
@@ -690,7 +738,9 @@ async def infer_sql_batch(
         # 规则层无时间信号（无截断/别名粒度、无时间列）→ LLM 兜底推断周期；
         # LLM 不可用/失败降级规则层默认，绝不阻断候选生成
         if _period_uncertain(profile) and db is not None:
-            llm_period = await _llm_infer_period(db, seg)
+            llm_period = await _llm_infer_period(
+                db, full_sql=sql, focus_sql=seg
+            )
             if llm_period:
                 period = llm_period
         atoms: list[dict[str, Any]] = []

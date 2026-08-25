@@ -744,3 +744,122 @@ async def test_infer_sql_batch_llm_fallback_failure_skips() -> None:
     assert len(result["candidates"]) == 0
     assert len(result["skipped"]) == 1
     assert result["skipped"][0]["reason"] == "llm_infer_failed"
+
+
+# ----------------------------------------------------------------
+# 工业方言：原文保留 + LLM 完整 SQL 传参
+# ----------------------------------------------------------------
+
+
+def test_split_statement_preserves_original_dialect_syntax() -> None:
+    """ClickHouse 多语句切分保留原文（sumMerge/countIf 小写不被序列化改写）。
+
+    sqlglot 方言 ``ast.sql()`` 序列化会把 ``sumMerge`` → ``SUMMERGE``、
+    ``countIf`` → ``COUNT_IF``（大写），后续方言识别失效丢失度量。切分应返回
+    原文切片，完整保留方言写法。
+    """
+    sql = (
+        "CREATE TABLE IF NOT EXISTS dwd.agg_doctor_daily "
+        "ENGINE = MergeTree() ORDER BY (stat_date) "
+        "AS SELECT toDate(ts) AS d, sumIf(amount, is_valid=1) AS v "
+        "FROM ods.e GROUP BY toDate(ts);\n"
+        "SELECT toDate(ts) AS d, sumMerge(amount_state) AS a "
+        "FROM dwd.agg_doctor_daily GROUP BY toDate(ts);"
+    )
+    segs = _split_statement(sql)
+    assert len(segs) == 2
+    # 原文保留：方言函数名保持原样（未被序列化改写为 SUMMERGE/COUNT_IF）
+    assert "sumMerge" in segs[1]
+    assert "sumIf" in segs[0]
+    assert "COUNT_IF" not in "".join(segs).upper().replace("COUNT_IF(", "")
+
+
+def test_split_statement_cte_merged_semantics() -> None:
+    """合法 CTE 多语句按语义切分（CTE 整体一段，不被分号误切）。"""
+    sql = (
+        "WITH base AS (SELECT user_id, dt FROM dwd_user_di WHERE dt >= '2026-01-01') "
+        "SELECT dt, COUNT(DISTINCT user_id) AS uv FROM base GROUP BY dt;\n"
+        "SELECT dt, SUM(amount) AS gmv FROM dwd_order_di GROUP BY dt;"
+    )
+    segs = _split_statement(sql)
+    assert len(segs) == 2
+    assert "WITH base AS" in segs[0]
+    assert "SELECT dt, SUM(amount)" in segs[1]
+
+
+async def test_infer_sql_batch_llm_measure_passes_full_sql() -> None:
+    """LLM 度量兜底传完整脚本 + 焦点语句（上下文不因切分丢失）。"""
+    from app.services.semantic.sql_infer import SqlProfile
+
+    real_parse = parse_sql_profile
+
+    def _fake_parse(sql: str) -> SqlProfile:
+        if "SUM(unparsable_col)" in sql:
+            return SqlProfile(sql=sql)
+        return real_parse(sql)
+
+    llm_measures = [{"column": "unparsable_col", "agg": "SUM"}]
+    full = (
+        "-- 前置说明\n"
+        "SELECT dt, SUM(unparsable_col) AS gmv2 FROM dwd_order_di GROUP BY dt;\n"
+        "SELECT dt, COUNT(DISTINCT user_id) AS uv FROM dwd_user_di GROUP BY dt;"
+    )
+    with (
+        patch(
+            "app.services.semantic.sql_split.parse_sql_profile",
+            side_effect=_fake_parse,
+        ),
+        patch(
+            "app.services.semantic.sql_split._llm_infer_measures",
+            new=AsyncMock(return_value=llm_measures),
+        ) as mock_llm,
+    ):
+        await infer_sql_batch(
+            _fake_db(),
+            sql=full,
+            split_mode="statement",
+            domain_code="sales",
+        )
+    assert mock_llm.await_count == 1
+    kwargs = mock_llm.await_args.kwargs
+    # 完整脚本作为上下文传入（含前置注释），焦点语句精确到含聚合的段
+    assert kwargs["full_sql"] == full
+    assert "SUM(unparsable_col)" in kwargs["focus_sql"]
+    assert "COUNT(DISTINCT user_id)" not in kwargs["focus_sql"]
+
+
+async def test_infer_sql_batch_llm_period_passes_full_sql() -> None:
+    """LLM 周期兜底传完整脚本 + 焦点语句。"""
+    from app.services.semantic.sql_infer import SqlProfile
+
+    real_parse = parse_sql_profile
+
+    def _fake_parse(sql: str) -> SqlProfile:
+        if "dwd_order_di" in sql and "SUM(amount)" in sql:
+            return SqlProfile(measures=[{"column": "amount", "agg": "SUM"}])
+        return real_parse(sql)
+
+    full = (
+        "WITH meta AS (SELECT 1 AS x) SELECT * FROM meta;\n"
+        "SELECT SUM(amount) AS gmv FROM dwd_order_di;"
+    )
+    with (
+        patch(
+            "app.services.semantic.sql_split.parse_sql_profile",
+            side_effect=_fake_parse,
+        ),
+        patch(
+            "app.services.semantic.sql_split._llm_infer_period",
+            new=AsyncMock(return_value="month"),
+        ) as mock_llm,
+    ):
+        await infer_sql_batch(
+            _fake_db(),
+            sql=full,
+            split_mode="statement",
+            domain_code="sales",
+        )
+    assert mock_llm.await_count == 1
+    kwargs = mock_llm.await_args.kwargs
+    assert kwargs["full_sql"] == full
+    assert "SUM(amount)" in kwargs["focus_sql"]

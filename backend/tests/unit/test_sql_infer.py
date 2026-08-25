@@ -220,3 +220,100 @@ class TestParseSqlProfile:
         assert "footprint_service_ctl.footprint_service.ods_track_event" in p.source_tables
         # event_date 透传 → 时间列可识别（下沉子查询 to_date 截日）
         assert p.time_column is not None
+
+    # ------------------------------------------------------------
+    # 工业方言聚合识别（ClickHouse/Oracle/Trino/PostgreSQL/MySQL/T-SQL 等）
+    # ------------------------------------------------------------
+
+    def test_clickhouse_merge_conditional_aggregates(self) -> None:
+        """ClickHouse sumMerge/sumIf/countIf 方言聚合 → 规范聚合名 + 列提取。
+
+        默认方言把 sumMerge/sumIf 降级为 Anonymous（非 AggFunc）→ 依赖
+        ``_best_dialect_ast`` 按聚合识别数择优选 clickhouse 方言，且
+        ``CombinedAggFunc`` 的参数在 ``expressions[0]``（this 是函数名字符串）。
+        """
+        p = parse_sql_profile(
+            "SELECT toDate(ts) AS stat_date, city_id, "
+            "sumMerge(amount_state) AS amount, "
+            "sumIf(amount, is_valid=1) AS valid_amount, "
+            "countIf(user_id <> '') AS user_cnt "
+            "FROM dwd.agg_city_daily GROUP BY toDate(ts), city_id"
+        )
+        assert {m["column"]: m["agg"] for m in p.measures} == {
+            "amount_state": "SUM",
+            "amount": "SUM",
+            "user_id": "COUNT",
+        }
+
+    def test_oracle_nvl_wrapped_column_extracted(self) -> None:
+        """Oracle sum(nvl(amount,0)) → 列从复杂表达式内提取（COALESCE 包裹）。"""
+        p = parse_sql_profile(
+            "SELECT trunc(create_date,'MM') AS month_id, dept_code, "
+            "SUM(nvl(amount,0)) AS amount, "
+            "COUNT(DISTINCT CASE WHEN status='Y' THEN order_id END) AS valid_cnt "
+            "FROM dwd.ord_detail GROUP BY trunc(create_date,'MM'), dept_code"
+        )
+        assert {m["column"]: m["agg"] for m in p.measures} == {
+            "amount": "SUM",
+            "order_id": "COUNT_DISTINCT",
+        }
+
+    def test_trino_approx_distinct_normalized(self) -> None:
+        """Trino/Presto approx_distinct → COUNT_DISTINCT（key 无下划线映射）。"""
+        p = parse_sql_profile(
+            "SELECT date_trunc('month', create_date) AS month_id, store_code, "
+            "approx_distinct(user_id) AS uv, SUM(amount) AS gmv "
+            "FROM dwd.store_sales GROUP BY 1, 2"
+        )
+        assert {m["column"]: m["agg"] for m in p.measures} == {
+            "user_id": "COUNT_DISTINCT",
+            "amount": "SUM",
+        }
+
+    def test_postgres_filter_count(self) -> None:
+        """PostgreSQL count(*) FILTER (WHERE ...) → COUNT(*)（FILTER 修饰符不干扰）。"""
+        p = parse_sql_profile(
+            "SELECT date_trunc('month', created_at) AS month_id, org_id, "
+            "COUNT(*) FILTER (WHERE status='paid') AS paid_cnt, "
+            "SUM(amount) AS amount "
+            "FROM ods.payments GROUP BY 1, 2"
+        )
+        assert {m["column"]: m["agg"] for m in p.measures} == {
+            "*": "COUNT",
+            "amount": "SUM",
+        }
+
+    def test_mysql_ifnull_and_tsql_convert(self) -> None:
+        """MySQL IFNULL(SUM) + T-SQL CONVERT 分组 → 聚合提取不受方言函数影响。"""
+        mysql = parse_sql_profile(
+            "SELECT DATE_FORMAT(create_time, '%Y-%m') AS month_id, shop_id, "
+            "IFNULL(SUM(amount),0) AS amount, COUNT(DISTINCT user_id) AS uv "
+            "FROM t_trade GROUP BY 1, 2"
+        )
+        assert {m["column"]: m["agg"] for m in mysql.measures} == {
+            "amount": "SUM",
+            "user_id": "COUNT_DISTINCT",
+        }
+        tsql = parse_sql_profile(
+            "SELECT CONVERT(VARCHAR(7), create_date, 120) AS month_id, shop_code, "
+            "SUM(amount) AS gmv, COUNT(DISTINCT user_id) AS uv "
+            "FROM dbo.trade GROUP BY CONVERT(VARCHAR(7), create_date, 120), shop_code"
+        )
+        assert {m["column"]: m["agg"] for m in tsql.measures} == {
+            "amount": "SUM",
+            "user_id": "COUNT_DISTINCT",
+        }
+
+    def test_normal_sql_uses_default_dialect_unchanged(self) -> None:
+        """普通 SQL（无方言聚合）→ 默认方言解析，行为与方言择优前一致。"""
+        p = parse_sql_profile(
+            "SELECT dt, shop_id, SUM(amount) AS gmv, COUNT(DISTINCT user_id) AS uv "
+            "FROM dwd.sales WHERE dt >= '2026-01-01' GROUP BY dt, shop_id"
+        )
+        assert {m["column"]: m["agg"] for m in p.measures} == {
+            "amount": "SUM",
+            "user_id": "COUNT_DISTINCT",
+        }
+        assert p.time_column == "dt"
+        assert p.time_granularity is None
+
