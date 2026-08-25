@@ -1731,3 +1731,56 @@ async def test_metric_referrers_returns_active_references() -> None:
     }
     # 无引用 → 空列表
     assert await repo.metric_referrers("not_exist") == []
+
+
+class _ReferrerBatchDB:
+    """面向 metric_referrers_batch 的假 db：source_node IN (...) + 存活 + edge_type 过滤。"""
+
+    def __init__(self, edges: list[LineageEdge]) -> None:
+        self.edges = edges
+
+    async def execute(self, stmt: object) -> _Result:
+        sql = re.sub(r"\s+", " ", str(stmt.compile(compile_kwargs={"literal_binds": True})))
+        m = re.search(r"source_node IN \(([^)]*)\)", sql)
+        assert m is not None, f"batch 查询应使用 IN，实际 SQL: {sql}"
+        codes = {c.strip().strip("'") for c in m.group(1).split(",")}
+        rows = [
+            e
+            for e in self.edges
+            if getattr(e, "deleted_at", None) is None
+            and not getattr(e, "stale", False)
+            and e.source_node in codes
+            and e.edge_type in ("DERIVED_FROM", "CONSUMED_BY")
+        ]
+        seen: set[tuple[str, str, str]] = set()
+        out: list[tuple[str, str, str]] = []
+        for e in rows:
+            key = (e.source_node, e.target_node, e.edge_type)
+            if key not in seen:
+                seen.add(key)
+                out.append((e.source_node, e.target_node, e.edge_type))
+        return _Result(rows=out)
+
+
+async def test_metric_referrers_batch_returns_per_code() -> None:
+    """批量下游审查：一次 IN 查询返回每指标引用者，无引用指标为空列表。"""
+    edges = [
+        _ref_edge("sales_gmv_daily", "metric:sales_gmv_derived", edge_type="DERIVED_FROM"),
+        _ref_edge("sales_gmv_daily", "consumer:bi_report", edge_type="CONSUMED_BY"),
+        _ref_edge("sales_uv_daily", "metric:sales_uv_derived", edge_type="DERIVED_FROM"),
+        # 失效 / 软删 / 无关类型不计入
+        _ref_edge("sales_gmv_daily", "metric:stale_ref", edge_type="DERIVED_FROM", stale=True),
+        _ref_edge("sales_uv_daily", "metric:deleted_ref", edge_type="DERIVED_FROM", deleted=True),
+        _ref_edge("sales_gmv_daily", "table:landing", edge_type="LINEAGE_UP"),
+    ]
+    repo = LineageRepository(_ReferrerBatchDB(edges))
+    got = await repo.metric_referrers_batch(["sales_gmv_daily", "sales_uv_daily", "no_ref"])
+    assert got["sales_gmv_daily"] == [
+        {"node": "metric:sales_gmv_derived", "edge_type": "DERIVED_FROM"},
+        {"node": "consumer:bi_report", "edge_type": "CONSUMED_BY"},
+    ]
+    assert got["sales_uv_daily"] == [{"node": "metric:sales_uv_derived", "edge_type": "DERIVED_FROM"}]
+    # 无引用指标 → 空列表（入参必有键）
+    assert got["no_ref"] == []
+    # 空入参 → 空 dict
+    assert await repo.metric_referrers_batch([]) == {}

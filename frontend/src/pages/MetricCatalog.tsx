@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { Table, Input, Select, Button, Space, Tag, message, Tooltip, Descriptions, Drawer, Dropdown, Modal, Checkbox, Card } from "antd";
+import { Table, Input, Select, Button, Space, Tag, message, Tooltip, Descriptions, Drawer, Dropdown, Modal, Checkbox, Card, Popconfirm } from "antd";
 import {
   ArrowLeftOutlined,
   SearchOutlined,
@@ -37,6 +37,8 @@ import {
   batchRejectMetrics,
   batchDeprecateMetrics,
   batchSubmitMetrics,
+  checkMetricDownstream,
+  type MetricDownstreamCheckResult,
   listMeasureCatalogs,
   UnisenseApiError,
 } from "../api";
@@ -121,6 +123,7 @@ const COLUMN_OPTIONS = [
   { value: "metric_code", label: "编码" },
   { value: "name", label: "名称" },
   { value: "fav", label: "收藏" },
+  { value: "rowActions", label: "操作" },
   { value: "domain", label: "业务域" },
   { value: "owner", label: "责任人" },
   { value: "type", label: "类型" },
@@ -509,6 +512,28 @@ export function MetricCatalog() {
       )
       .catch(() => setBatchSuccessorOptions([]));
   }
+  // 批量下线下游使用审查：打开批量下线面板时惰性加载勾选已发布指标的被引用情况
+  const [downstreamMap, setDownstreamMap] = useState<Record<string, MetricDownstreamCheckResult>>({});
+  const [downstreamLoading, setDownstreamLoading] = useState(false);
+  // 有下游但未填替代指标被前端拦截的行（标红提示）
+  const [deprecateBlocked, setDeprecateBlocked] = useState<Set<string>>(new Set());
+  function loadDownstreamCheck(codes: string[]) {
+    if (!codes.length) {
+      setDownstreamMap({});
+      return;
+    }
+    setDownstreamLoading(true);
+    checkMetricDownstream(codes)
+      .then((rows) => {
+        const map: Record<string, MetricDownstreamCheckResult> = {};
+        rows.forEach((r) => {
+          map[r.metric_code] = r;
+        });
+        setDownstreamMap(map);
+      })
+      .catch(() => setDownstreamMap({}))
+      .finally(() => setDownstreamLoading(false));
+  }
   // 预览抽屉
   const [previewMetric, setPreviewMetric] = useState<MetricResponse | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -730,6 +755,27 @@ export function MetricCatalog() {
     }
   }
 
+  // 单条删除草稿指标（软删除，仅 platform_admin；对齐批量删除语义）
+  const [deleting, setDeleting] = useState<string | null>(null);
+  async function handleSingleDelete(metricCode: string) {
+    setDeleting(metricCode);
+    try {
+      await deleteMetric(metricCode);
+      message.success(`已删除草稿指标 ${metricCode}（可在回收站恢复）`);
+      if (items.length <= 1) setPage(1);
+      load();
+    } catch (err) {
+      const e = err as { message?: string; codeZh?: string };
+      const text =
+        e && typeof e === "object" && typeof e.codeZh === "string" && typeof e.message === "string"
+          ? `${e.message}（${e.codeZh}）`
+          : "删除失败";
+      message.error(text);
+    } finally {
+      setDeleting(null);
+    }
+  }
+
   useEffect(() => {
     load();
   }, [page, pageSize, status, domain, tier, sortBy, sortOrder, myMetricsOnly, piiOnly, currentUserId, ownerFilter, lifecycleDate, deletedView]);
@@ -832,6 +878,8 @@ export function MetricCatalog() {
     let ok = 0;
     const errors: string[] = [];
     const failedCodes: string[] = [];
+    // 前端拦截（有下游未填替代）时保留弹窗 + 标红，不进入 finally 的关闭/清理
+    let intercepted = false;
     try {
       if (batchAction === "approve") {
         const codes = selected.filter((m) => m.status === "REVIEW").map((m) => m.metric_code);
@@ -857,27 +905,31 @@ export function MetricCatalog() {
         res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.code}: ${r.message}`); failedCodes.push(r.code); });
       } else if (batchAction === "deprecate") {
         const deprecatable = selected.filter((m) => m.status === "PUBLISHED");
-        const missingSucc = deprecatable.filter((m) => !batchSuccessors[m.metric_code]);
-        const items = deprecatable
-          .filter((m) => batchSuccessors[m.metric_code])
-          .map((m) => ({ metric_code: m.metric_code, successor_code: batchSuccessors[m.metric_code] }));
         if (!deprecatable.length) {
           message.warning("勾选的指标中没有已发布（PUBLISHED）状态");
           return;
         }
-        if (!items.length) {
-          message.warning("请为勾选的已发布指标填写替代指标");
-          return;
-        }
-        // 修复前：未填替代指标的勾选项被静默过滤，成功数与勾选数不符且无说明。
-        // 现在明确提示跳过项，避免用户误以为全部废弃成功。
-        if (missingSucc.length) {
-          message.warning(
-            `${missingSucc.length} 个已发布指标未填写替代指标，已跳过：${missingSucc
+        // 下游审查后：有下游引用但未填替代指标 → 前端拦截（标红提示，不静默跳过）
+        const blocked = deprecatable.filter(
+          (m) =>
+            (downstreamMap[m.metric_code]?.referrer_count ?? 0) > 0 &&
+            !batchSuccessors[m.metric_code],
+        );
+        if (blocked.length) {
+          intercepted = true;
+          setDeprecateBlocked(new Set(blocked.map((m) => m.metric_code)));
+          message.error(
+            `以下 ${blocked.length} 个指标存在下游引用，须填写替代指标后才能下线：${blocked
               .map((m) => m.metric_code)
               .join("、")}`,
           );
+          return;
         }
+        // 无下游引用的行可留空（successor_code=null），有下游且已填替代的正常提交
+        const items = deprecatable.map((m) => ({
+          metric_code: m.metric_code,
+          successor_code: batchSuccessors[m.metric_code] || null,
+        }));
         const res = await batchDeprecateMetrics(items);
         ok = res.ok_count;
         res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.code}: ${r.message}`); failedCodes.push(r.code); });
@@ -930,6 +982,8 @@ export function MetricCatalog() {
       );
     } finally {
       setBatchBusy(false);
+      // 前端拦截：保留弹窗 + 标红，等待用户补填替代指标
+      if (intercepted) return;
       setBatchAction(null);
       setBatchFailedCodes(failedCodes);
       if (ok) message.success(`${BATCH_ACTION_LABEL[batchAction] ?? "操作"}成功 ${ok} 个`);
@@ -945,6 +999,8 @@ export function MetricCatalog() {
       setSelected([]);
       setBatchRejectReason("");
       setBatchSuccessors({});
+      setDeprecateBlocked(new Set());
+      setDownstreamMap({});
       setBatchReviewerType(null);
       setBatchReviewerId(null);
       load();
@@ -1163,6 +1219,45 @@ export function MetricCatalog() {
         />
       ),
     },
+    ...(!deletedView
+      ? [
+          {
+            title: "操作",
+            key: "rowActions",
+            width: 80,
+            align: "center" as const,
+            render: (_: unknown, r: MetricResponse) =>
+              r.status === "DRAFT" && currentUserRole === "platform_admin" ? (
+                <Popconfirm
+                  title="删除草稿指标"
+                  description={`确定删除 ${r.metric_code} 吗？软删除后可在回收站恢复。`}
+                  okText="删除"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={(e) => {
+                    e?.stopPropagation();
+                    handleSingleDelete(r.metric_code);
+                  }}
+                  onCancel={(e) => e?.stopPropagation()}
+                >
+                  <Button
+                    type="link"
+                    size="small"
+                    danger
+                    aria-label="删除指标"
+                    loading={deleting === r.metric_code}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    删除
+                  </Button>
+                </Popconfirm>
+              ) : (
+                <span style={{ color: "#bbb", fontSize: 12 }}>
+                  {r.status === "DRAFT" ? "仅平台管理员可删" : ""}
+                </span>
+              ),
+          },
+        ]
+      : []),
     {
       title: "业务域",
       dataIndex: "domain",
@@ -1620,32 +1715,92 @@ export function MetricCatalog() {
               items: [
                 {
                   key: "submit",
-                  label: "批量提交审核（草稿）",
+                  label: (
+                    <Tooltip
+                      title={
+                        !selected.some((m) => m.status === "DRAFT")
+                          ? "批量提交仅适用于勾选中的草稿（DRAFT）指标；当前勾选无草稿指标"
+                          : !canCreate
+                            ? "无提交审核权限（metric:create）"
+                            : undefined
+                      }
+                    >
+                      <span>批量提交审核（草稿）</span>
+                    </Tooltip>
+                  ),
                   icon: <CheckCircleOutlined />,
                   disabled: !selected.some((m) => m.status === "DRAFT") || !canCreate,
                 },
                 {
                   key: "approve",
-                  label: "批量通过（评审中）",
+                  label: (
+                    <Tooltip
+                      title={
+                        !selected.some((m) => m.status === "REVIEW")
+                          ? "批量通过仅适用于勾选中的评审中（REVIEW）指标；当前勾选无评审中指标"
+                          : !canApprove
+                            ? "无审核通过权限（metric:approve）"
+                            : undefined
+                      }
+                    >
+                      <span>批量通过（评审中）</span>
+                    </Tooltip>
+                  ),
                   icon: <CheckCircleOutlined />,
                   disabled: !selected.some((m) => m.status === "REVIEW") || !canApprove,
                 },
                 {
                   key: "reject",
-                  label: "批量打回（评审中）",
+                  label: (
+                    <Tooltip
+                      title={
+                        !selected.some((m) => m.status === "REVIEW")
+                          ? "批量打回仅适用于勾选中的评审中（REVIEW）指标；当前勾选无评审中指标"
+                          : !canApprove
+                            ? "无审核打回权限（metric:approve）"
+                            : undefined
+                      }
+                    >
+                      <span>批量打回（评审中）</span>
+                    </Tooltip>
+                  ),
                   icon: <ClockCircleOutlined />,
                   disabled: !selected.some((m) => m.status === "REVIEW") || !canApprove,
                 },
                 {
                   key: "deprecate",
-                  label: "批量下线（已发布）",
+                  label: (
+                    <Tooltip
+                      title={
+                        !selected.some((m) => m.status === "PUBLISHED")
+                          ? "批量下线仅适用于勾选中的已发布（PUBLISHED）指标；当前勾选无已发布指标"
+                          : !canDeprecate
+                            ? "无下线权限（metric:deprecate）"
+                            : undefined
+                      }
+                    >
+                      <span>批量下线（已发布）</span>
+                    </Tooltip>
+                  ),
                   icon: <DeleteOutlined />,
                   disabled: !selected.some((m) => m.status === "PUBLISHED") || !canDeprecate,
                 },
                 { type: "divider" },
                 {
                   key: "delete",
-                  label: "批量删除（草稿）",
+                  label: (
+                    <Tooltip
+                      title={
+                        !selected.some((m) => m.status === "DRAFT")
+                          ? "批量删除仅适用于勾选中的草稿（DRAFT）指标；当前勾选无草稿指标"
+                          : currentUserRole !== "platform_admin"
+                            ? "仅平台管理员（platform_admin）可删除指标"
+                            : undefined
+                      }
+                    >
+                      <span>批量删除（草稿）</span>
+                    </Tooltip>
+                  ),
                   icon: <DeleteOutlined />,
                   danger: true,
                   // 后端 DELETE 仅 platform_admin 可执行；非平台管理员禁用，避免 403
@@ -1654,7 +1809,14 @@ export function MetricCatalog() {
               ],
               onClick: ({ key }) => {
                 const act = key as "submit" | "delete" | "approve" | "reject" | "deprecate";
-                if (act === "deprecate") loadSuccessorOptions();
+                if (act === "deprecate") {
+                  loadSuccessorOptions();
+                  // 打开批量下线面板即审查勾选已发布指标的下游使用情况
+                  setDeprecateBlocked(new Set());
+                  loadDownstreamCheck(
+                    selected.filter((m) => m.status === "PUBLISHED").map((m) => m.metric_code),
+                  );
+                }
                 setBatchAction(act);
               },
             }}
@@ -2042,32 +2204,75 @@ export function MetricCatalog() {
           <div>
             <p>
               将勾选的 <b>{selected.filter((m) => m.status === "PUBLISHED").length}</b> 个已发布指标下线
-              （PUBLISHED → DEPRECATED），须为每个指标填写替代指标编码。
+              （PUBLISHED → DEPRECATED）。已先审查每个指标的下游使用情况：
+              <b style={{ color: "#fa8c16" }}>有下游引用须填替代指标</b>，
+              <b style={{ color: "#52c41a" }}>无下游引用可安全下线（替代指标选填）</b>。
             </p>
             {selected
               .filter((m) => m.status === "PUBLISHED")
-              .map((m) => (
-                <div key={m.metric_code} style={{ marginBottom: 8 }}>
-                  <span className="mono" style={{ fontSize: 12, marginRight: 8 }}>
-                    {m.metric_code}
-                  </span>
-                  <Select
-                    allowClear
-                    showSearch
-                    optionFilterProp="label"
-                    style={{ width: 280 }}
-                    placeholder="选择替代指标（须已发布）"
-                    value={batchSuccessors[m.metric_code] || undefined}
-                    onChange={(v) =>
-                      setBatchSuccessors((prev) => ({ ...prev, [m.metric_code]: v ?? "" }))
-                    }
-                    options={batchSuccessorOptions.filter(
-                      (o) => !selected.some((s) => s.metric_code === o.value),
-                    )}
-                    notFoundContent="无已发布指标可作替代"
-                  />
-                </div>
-              ))}
+              .map((m) => {
+                const info = downstreamMap[m.metric_code];
+                const hasDownstream = (info?.referrer_count ?? 0) > 0;
+                const blocked = deprecateBlocked.has(m.metric_code);
+                return (
+                  <div
+                    key={m.metric_code}
+                    style={{
+                      marginBottom: 8,
+                      padding: 8,
+                      border: `1px solid ${blocked ? "#ff4d4f" : "#f0f0f0"}`,
+                      borderRadius: 6,
+                      background: blocked ? "#fff2f0" : undefined,
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                      <span className="mono" style={{ fontSize: 12 }}>
+                        {m.metric_code}
+                      </span>
+                      {downstreamLoading ? (
+                        <span style={{ fontSize: 12, color: "#999" }}>下游使用审查中…</span>
+                      ) : info === undefined ? (
+                        <span style={{ fontSize: 12, color: "#999" }}>未获取到下游信息</span>
+                      ) : hasDownstream ? (
+                        <Tooltip
+                          title={
+                            "下游引用：" +
+                            (info.referrers
+                              .map((r) =>
+                                r.edge_type === "DERIVED_FROM"
+                                  ? `派生指标 ${r.node.replace("metric:", "")}`
+                                  : `消费方 ${r.node.replace("consumer:", "")}`,
+                              )
+                              .join("；") || "引用明细不可见")
+                          }
+                        >
+                          <Tag color="orange">⚠ 被 {info.referrer_count} 处下游引用</Tag>
+                        </Tooltip>
+                      ) : (
+                        <Tag color="green">✓ 无下游引用，可安全下线</Tag>
+                      )}
+                      {blocked && (
+                        <span style={{ color: "#ff4d4f", fontSize: 12 }}>须填写替代指标</span>
+                      )}
+                    </div>
+                    <Select
+                      allowClear
+                      showSearch
+                      optionFilterProp="label"
+                      style={{ width: 280, marginTop: 6 }}
+                      placeholder={hasDownstream ? "有下游引用，须选择替代指标" : "无下游引用，替代指标选填"}
+                      value={batchSuccessors[m.metric_code] || undefined}
+                      onChange={(v) =>
+                        setBatchSuccessors((prev) => ({ ...prev, [m.metric_code]: v ?? "" }))
+                      }
+                      options={batchSuccessorOptions.filter(
+                        (o) => !selected.some((s) => s.metric_code === o.value),
+                      )}
+                      notFoundContent="无已发布指标可作替代"
+                    />
+                  </div>
+                );
+              })}
           </div>
         )}
         {batchAction === "delete" && (

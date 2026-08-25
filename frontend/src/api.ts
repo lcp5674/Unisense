@@ -800,14 +800,36 @@ export async function batchRejectMetrics(
   });
 }
 
-// 批量下线（废弃，每项须带替代指标）
+// 批量下线（废弃；有下游引用时必须填替代指标，无下游引用可留空）
 export async function batchDeprecateMetrics(
-  items: { metric_code: string; successor_code: string }[],
+  items: { metric_code: string; successor_code: string | null }[],
 ): Promise<BatchResult> {
   return request<BatchResult>(`${API_BASE}/metric-definitions/batch-deprecate`, {
     method: "POST",
     body: JSON.stringify({ items }),
   });
+}
+
+// 批量下线下游使用审查：返回每指标的被引用情况（下线弹窗预审用）
+export interface MetricDownstreamReferrer {
+  node: string;
+  edge_type: string;
+}
+export interface MetricDownstreamCheckResult {
+  metric_code: string;
+  referrer_count: number;
+  referrers: MetricDownstreamReferrer[];
+}
+export async function checkMetricDownstream(
+  metricCodes: string[],
+): Promise<MetricDownstreamCheckResult[]> {
+  return request<MetricDownstreamCheckResult[]>(
+    `${API_BASE}/metric-definitions/downstream-check`,
+    {
+      method: "POST",
+      body: JSON.stringify({ metric_codes: metricCodes }),
+    },
+  );
 }
 
 // 审核通过：REVIEW → PUBLISHED/EXPERIMENTAL（后端 /approve，对齐 FR-004）

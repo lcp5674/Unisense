@@ -342,3 +342,30 @@ def test_batch_audit_action_levels():
         batch_audit_action("metric_definition.batch_submit", [ok, fail])
         == "metric_definition.batch_submit_partial"
     )
+
+
+async def test_downstream_check_returns_per_metric(client):
+    """批量下线下游审查端点：一次查询返回每指标引用者数量与明细。"""
+    with patch(
+        "app.services.lineage.repository.LineageRepository.metric_referrers_batch"
+    ) as mock_batch:
+        mock_batch.return_value = {
+            "sales_gmv_daily": [
+                {"node": "metric:sales_gmv_derived", "edge_type": "DERIVED_FROM"},
+                {"node": "consumer:bi_report", "edge_type": "CONSUMED_BY"},
+            ],
+            "sales_uv_daily": [],
+        }
+        resp = await client.post(
+            "/api/v1/metric-definitions/downstream-check",
+            json={"metric_codes": ["sales_gmv_daily", "sales_uv_daily"]},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body[0]["metric_code"] == "sales_gmv_daily"
+    assert body[0]["referrer_count"] == 2
+    assert body[0]["referrers"][0]["node"] == "metric:sales_gmv_derived"
+    assert body[1]["metric_code"] == "sales_uv_daily"
+    assert body[1]["referrer_count"] == 0
+    assert body[1]["referrers"] == []

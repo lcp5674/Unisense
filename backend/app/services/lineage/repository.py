@@ -1452,6 +1452,44 @@ class LineageRepository:
         ).all()
         return [{"node": str(r[0]), "edge_type": str(r[1])} for r in rows]
 
+    async def metric_referrers_batch(
+        self, metric_codes: list[str]
+    ) -> dict[str, list[dict[str, str]]]:
+        """批量查询多指标的被引用情况（批量下线下游审查用）。
+
+        一次 ``source_node IN (...)`` 查询返回所有指标的存活引用边，避免
+        逐个调用 :meth:`metric_referrers` 的 N 次查询。语义与单查完全一致：
+        ``DERIVED_FROM`` → 派生该指标的派生指标；``CONSUMED_BY`` → 消费方/报表；
+        stale 与软删边过滤。
+
+        Args:
+            metric_codes: 指标编码列表。
+
+        Returns:
+            ``{metric_code: [{"node": "metric:xxx"|"consumer:xxx"|"table:xxx", "edge_type": ...}]}``
+            每个入参编码都有键（无引用为空列表）。
+        """
+        if not metric_codes:
+            return {}
+        rows = (
+            await self._db.execute(
+                select(LineageEdge.source_node, LineageEdge.target_node, LineageEdge.edge_type)
+                .where(
+                    LineageEdge.deleted_at.is_(None),
+                    LineageEdge.stale.is_(False),
+                    LineageEdge.source_node.in_([f"metric:{c}" for c in metric_codes]),
+                    LineageEdge.edge_type.in_(["DERIVED_FROM", "CONSUMED_BY"]),
+                )
+                .distinct()
+            )
+        ).all()
+        out: dict[str, list[dict[str, str]]] = {c: [] for c in metric_codes}
+        for source, target, edge_type in rows:
+            code = str(source)[len("metric:") :]
+            if code in out:
+                out[code].append({"node": str(target), "edge_type": str(edge_type)})
+        return out
+
     async def list_all_edges(self, limit: int | None = None) -> list[LineageEdge]:
         """取出全部未删除血缘边（断链校验用，按 id 升序）。"""
         stmt = select(LineageEdge).where(LineageEdge.deleted_at.is_(None)).order_by(LineageEdge.id)

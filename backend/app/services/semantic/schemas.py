@@ -423,13 +423,40 @@ class MetricBatchDeprecateItem(BaseModel):
     """批量下线（废弃）的单条项。"""
 
     metric_code: str = Field(..., max_length=64, description="指标编码")
-    successor_code: str = Field(..., max_length=64, description="替代指标编码（须已发布）")
+    successor_code: str | None = Field(
+        None,
+        max_length=64,
+        description="替代指标编码（须已发布；无下游引用时选填，有下游引用未填将被 METRIC_REFERENCED 拦截）",
+    )
 
 
 class MetricBatchDeprecateRequest(BaseModel):
     """批量下线（废弃）请求。"""
 
     items: list[MetricBatchDeprecateItem] = Field(..., min_length=1, max_length=100)
+
+
+class MetricDownstreamCheckRequest(BaseModel):
+    """批量下线下游使用审查请求（批量下线弹窗预审用）。"""
+
+    metric_codes: list[str] = Field(..., min_length=1, max_length=100)
+
+
+class MetricDownstreamReferrer(BaseModel):
+    """单个下游引用者。"""
+
+    node: str = Field(..., description="引用者节点：metric:{code} 派生 / consumer:{name} 消费")
+    edge_type: str = Field(..., description="边类型：DERIVED_FROM 派生 / CONSUMED_BY 消费")
+
+
+class MetricDownstreamCheckResult(BaseModel):
+    """单个指标的下游使用审查结果。"""
+
+    metric_code: str = Field(..., description="指标编码")
+    referrer_count: int = Field(..., description="活跃下游引用数量")
+    referrers: list[MetricDownstreamReferrer] = Field(
+        default_factory=list, description="下游引用者明细"
+    )
 
 
 class MetricApproveRequest(BaseModel):

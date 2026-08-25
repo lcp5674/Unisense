@@ -49,6 +49,8 @@ from app.services.semantic.schemas import (
     MetricCreateRequest,
     MetricDeprecateRequest,
     MetricDescriptionUpdateRequest,
+    MetricDownstreamCheckRequest,
+    MetricDownstreamCheckResult,
     MetricEmergencyPublishRequest,
     MetricHealthResponse,
     MetricListParams,
@@ -1996,6 +1998,36 @@ async def batch_reject_metrics(
     )
     await db.commit()
     return ok(data=batch_response(results), trace_id=trace_id)
+
+
+@router.post(
+    "/downstream-check",
+    response_model=ApiResponse[list[MetricDownstreamCheckResult]],
+    summary="批量下线下游使用审查（返回每个指标的被引用情况）",
+    dependencies=_READ_DEPS,
+)
+async def check_metrics_downstream(
+    request: MetricDownstreamCheckRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[list[MetricDownstreamCheckResult]]:
+    """批量下线弹窗预审用：一次查询返回多指标活跃下游引用者。
+
+    供前端在下线前展示「有下游（须填替代） / 无下游（可安全下线）」提示；
+    最终废弃仍由 deprecate_metric 的 METRIC_REFERENCED 兜底拦截。
+    """
+    from app.services.lineage.repository import LineageRepository
+
+    referrers = await LineageRepository(db).metric_referrers_batch(request.metric_codes)
+    results = [
+        MetricDownstreamCheckResult(
+            metric_code=code,
+            referrer_count=len(refs),
+            referrers=refs,
+        )
+        for code, refs in referrers.items()
+    ]
+    return ok(data=results, trace_id=trace_id)
 
 
 @router.post(

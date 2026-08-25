@@ -16,6 +16,7 @@ vi.mock("../api", () => ({
   removeFavorite: vi.fn(),
   batchSubmitMetrics: vi.fn(),
   batchDeprecateMetrics: vi.fn(),
+  checkMetricDownstream: vi.fn(),
   deleteMetric: vi.fn(),
   restoreMetric: vi.fn(),
   fetchMyPermissions: vi.fn(),
@@ -38,6 +39,7 @@ import {
   removeFavorite,
   batchSubmitMetrics,
   batchDeprecateMetrics,
+  checkMetricDownstream,
   deleteMetric,
   restoreMetric,
   fetchMyPermissions,
@@ -56,6 +58,7 @@ const mockedAddFavorite = vi.mocked(addFavorite);
 const mockedRemoveFavorite = vi.mocked(removeFavorite);
 const mockedBatchSubmit = vi.mocked(batchSubmitMetrics);
 const mockedBatchDeprecate = vi.mocked(batchDeprecateMetrics);
+const mockedDownstream = vi.mocked(checkMetricDownstream);
 const mockedDeleteMetric = vi.mocked(deleteMetric);
 const mockedPermissions = vi.mocked(fetchMyPermissions);
 const mockedMatrix = vi.mocked(compareMetricsMatrix);
@@ -204,6 +207,8 @@ describe("MetricCatalog", () => {
       org_id: 1,
     });
     mockedFavorites.mockResolvedValue([]);
+    // 批量下线下游审查：默认无下游（各用例按需覆盖）
+    mockedDownstream.mockResolvedValue([]);
   });
 
   it("渲染治理徽章（紧急/灰度/PII）", async () => {
@@ -645,20 +650,135 @@ describe("MetricCatalog", () => {
     });
   });
 
-  it("批量下线：勾选已发布指标但未填替代指标 → 前端拦截提示（不提交）", async () => {
+  it("单指标删除：草稿指标行显示「删除」按钮，确认后软删（仅平台管理员）", async () => {
+    const draft = { ...metric, status: "DRAFT" as const };
+    mockedList.mockResolvedValue({ items: [draft], total: 1, page: 1, page_size: 20 });
+    mockedDeleteMetric.mockResolvedValue({} as never);
+    renderCatalog();
+    await screen.findByText("sales_gmv_sum_d");
+    // 草稿 + platform_admin → 操作列出现「删除」（角色加载后操作列才渲染，等待出现）
+    fireEvent.click(await screen.findByLabelText("删除指标"));
+    // Popconfirm 确认弹窗
+    await screen.findByText(/确定删除 sales_gmv_sum_d 吗/);
+    fireEvent.click(screen.getByRole("button", { name: "删 除" }));
+    await waitFor(() => {
+      expect(mockedDeleteMetric).toHaveBeenCalledWith("sales_gmv_sum_d");
+    });
+  });
+
+  it("批量下线：无下游引用的指标可留空替代指标直接下线（successor_code=null）", async () => {
     const p = { ...metric, status: "PUBLISHED" as const };
     mockedList.mockResolvedValue({ items: [p], total: 1, page: 1, page_size: 20 });
+    mockedDownstream.mockResolvedValue([
+      { metric_code: "sales_gmv_sum_d", referrer_count: 0, referrers: [] },
+    ]);
+    mockedBatchDeprecate.mockResolvedValue({
+      ok_count: 1,
+      fail_count: 0,
+      results: [{ code: "sales_gmv_sum_d", ok: true, message: "" }],
+    } as never);
     renderCatalog();
     await screen.findByText("sales_gmv_sum_d");
     const selectAll = document.querySelector(".ant-table-selection-column input[type=checkbox]") as Element;
     fireEvent.click(selectAll);
     fireEvent.click(screen.getByRole("button", { name: /批量操作/ }));
     fireEvent.click(screen.getByText("批量下线（已发布）"));
-    await screen.findByText(/将勾选的/);
-    // 未填替代指标直接确认 → 拦截（H4 修复保留的守卫：全部未填时提示填写）
+    // 下游审查展示：绿色「无下游引用，可安全下线」
+    await screen.findByText("✓ 无下游引用，可安全下线");
+    // 不填替代直接确认 → 允许提交（successor_code=null）
     fireEvent.click(screen.getByRole("button", { name: /下\s*线/ }));
-    await screen.findByText("请为勾选的已发布指标填写替代指标");
+    await waitFor(() => {
+      expect(mockedBatchDeprecate).toHaveBeenCalledWith([
+        { metric_code: "sales_gmv_sum_d", successor_code: null },
+      ]);
+    });
+  });
+
+  it("批量下线：有下游引用未填替代 → 前端拦截标红（不提交）", async () => {
+    const p = { ...metric, status: "PUBLISHED" as const };
+    mockedList.mockResolvedValue({ items: [p], total: 1, page: 1, page_size: 20 });
+    mockedDownstream.mockResolvedValue([
+      {
+        metric_code: "sales_gmv_sum_d",
+        referrer_count: 1,
+        referrers: [{ node: "metric:sales_gmv_ratio", edge_type: "DERIVED_FROM" }],
+      },
+    ]);
+    renderCatalog();
+    await screen.findByText("sales_gmv_sum_d");
+    const selectAll = document.querySelector(".ant-table-selection-column input[type=checkbox]") as Element;
+    fireEvent.click(selectAll);
+    fireEvent.click(screen.getByRole("button", { name: /批量操作/ }));
+    fireEvent.click(screen.getByText("批量下线（已发布）"));
+    // 下游审查展示：橙色「被 1 处下游引用」
+    await screen.findByText("⚠ 被 1 处下游引用");
+    // 未填替代直接确认 → 前端拦截（标红 + 提示），不提交
+    fireEvent.click(screen.getByRole("button", { name: /下\s*线/ }));
+    await screen.findByText(/以下 1 个指标存在下游引用，须填写替代指标后才能下线/);
+    await screen.findByText("须填写替代指标");
     expect(mockedBatchDeprecate).not.toHaveBeenCalled();
+  });
+
+  it("批量下线：有下游引用填写替代指标后正常提交", async () => {
+    const p = { ...metric, status: "PUBLISHED" as const };
+    mockedList.mockResolvedValue({ items: [p], total: 1, page: 1, page_size: 20 });
+    mockedDownstream.mockResolvedValue([
+      {
+        metric_code: "sales_gmv_sum_d",
+        referrer_count: 1,
+        referrers: [{ node: "metric:sales_gmv_ratio", edge_type: "DERIVED_FROM" }],
+      },
+    ]);
+    // 替代指标候选（loadSuccessorOptions 拉 PUBLISHED 列表）
+    // 初始列表只返回 1 个已发布指标（避免全选把替代候选也勾上）；
+    // loadSuccessorOptions 用 {status:"PUBLISHED", page_size:100} 拉替代候选（2 个）
+    mockedList.mockImplementation((params?: { status?: string; page_size?: number }) => {
+      if (params?.status === "PUBLISHED" && params?.page_size === 100) {
+        return Promise.resolve({
+          items: [
+            { ...metric, metric_code: "sales_gmv_ratio", name: "销售 GMV 占比" },
+            p,
+          ],
+          total: 2,
+          page: 1,
+          page_size: 100,
+        } as never);
+      }
+      return Promise.resolve({ items: [p], total: 1, page: 1, page_size: 20 } as never);
+    });
+    mockedBatchDeprecate.mockResolvedValue({
+      ok_count: 1,
+      fail_count: 0,
+      results: [{ code: "sales_gmv_sum_d", ok: true, message: "" }],
+    } as never);
+    renderCatalog();
+    await screen.findByText("sales_gmv_sum_d");
+    const selectAll = document.querySelector(".ant-table-selection-column input[type=checkbox]") as Element;
+    fireEvent.click(selectAll);
+    fireEvent.click(screen.getByRole("button", { name: /批量操作/ }));
+    fireEvent.click(screen.getByText("批量下线（已发布）"));
+    await screen.findByText("⚠ 被 1 处下游引用");
+    // 选择替代指标 sales_gmv_ratio（作用域限定在弹窗内，避免命中顶部筛选 Select；
+    // 点击 .ant-select-item-option 本体才能触发选中，对齐 clickSelectOption 模式）
+    const modal = await screen.findByRole("dialog");
+    const placeholder = within(modal).getByText("有下游引用，须选择替代指标");
+    fireEvent.mouseDown(placeholder);
+    await waitFor(() => {
+      const dropdown = document.querySelector(
+        ".ant-select-dropdown:not(.ant-select-dropdown-hidden)",
+      ) as HTMLElement | null;
+      const option = dropdown?.querySelector(
+        '.ant-select-item-option[title="销售 GMV 占比 (sales_gmv_ratio)"]',
+      ) as HTMLElement | null;
+      expect(option).toBeTruthy();
+      if (option) fireEvent.click(option);
+    });
+    fireEvent.click(screen.getByRole("button", { name: /下\s*线/ }));
+    await waitFor(() => {
+      expect(mockedBatchDeprecate).toHaveBeenCalledWith([
+        { metric_code: "sales_gmv_sum_d", successor_code: "sales_gmv_ratio" },
+      ]);
+    });
   });
 });
 
