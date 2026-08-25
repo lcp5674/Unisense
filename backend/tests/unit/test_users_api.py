@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from httpx import ASGITransport
+from sqlalchemy.sql import Delete
 
 from app.api import deps
 from app.main import app
@@ -234,7 +235,8 @@ async def test_update_user_replaces_roles(admin_client: httpx.AsyncClient) -> No
     user_result.scalar_one_or_none.return_value = row
     org_result = MagicMock()
     org_result.scalar_one_or_none.return_value = None
-    session.execute = AsyncMock(side_effect=[user_result, org_result])
+    # 第 1 次：_get_user 查用户；第 2 次：org 查询；第 3 次：显式删除旧 user_role（delete 语句）
+    session.execute = AsyncMock(side_effect=[user_result, org_result, MagicMock()])
 
     async def fake_db():
         yield session
@@ -271,6 +273,11 @@ async def test_update_user_replaces_roles(admin_client: httpx.AsyncClient) -> No
     # metric_owner 优先级高于 reviewer → 主角色 metric_owner
     assert data["role"] == "metric_owner"
     assert set(data["roles"]) == {"metric_owner", "reviewer"}
+    # 显式删除旧 user_role 行（delete-orphan 失效时的确定性兜底，防唯一键冲突）
+    delete_call = session.execute.await_args_list[2]
+    assert isinstance(delete_call.args[0], Delete)
+    # role_items 整表重建为请求的角色集合
+    assert {ur.role for ur in row.role_items} == {"metric_owner", "reviewer"}
 
 
 async def test_update_self_platform_admin_removal_forbidden(

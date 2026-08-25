@@ -25,7 +25,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, require_roles
@@ -710,7 +710,13 @@ async def update_user(
     row.email = payload.email
     row.role = primary_role
     row.domain = domain
-    # 方案 A 多角色：整表替换 user_role（级联删除旧行 + 插入新集合，含主角色）。
+    # 方案 A 多角色：整表替换 user_role（含主角色）。
+    # 注：实测 SQLAlchemy 2.0 下本 relationship 的 delete-orphan 不触发
+    # （clear()/remove()/整体赋值均不产生 DELETE，session.deleted 为空），
+    # 若仅 `row.role_items = [...]` 会与存量行唯一键 uk_user_role_user_role 冲突（真实环境 500）。
+    # 因此先显式 Core delete 旧行，再装载新集合。
+    await db.execute(delete(UserRole).where(UserRole.user_id == row.id))
+    row.role_items = []
     row.role_items = [UserRole(user_id=row.id, role=r) for r in roles]
     await write_audit(
         db,
