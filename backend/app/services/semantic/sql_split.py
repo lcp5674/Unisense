@@ -498,6 +498,15 @@ def _build_atomic_candidate(
         "source_fields": [{"table": measure_table, "column": col}] if measure_table else [],
         "partition_key": time_column,
     }
+    # A-1/2 人工核对标识：CASE 条件聚合/窗口函数/下沉子查询度量的口径非简单 SUM(col)，
+    # 注册后口径可能不直观（CASE 过滤条件、OVER 窗口语义在 expression 中保留但前端
+    # 需提示人工核对）；前端据此加「口径需核对」Tag，避免用户误以为全表聚合。
+    _expr_upper = (expression or "").upper()
+    needs_review = bool(
+        "CASE" in _expr_upper
+        or " OVER " in f" {_expr_upper} "
+        or measure.get("sunk")
+    )
     metric_code = result.get("metric_code_suggestion")
     if metric_code and not domain_code:
         # 域未确定（多域/无域建议）时不得 bake-in 首段为空的非法编码——
@@ -526,6 +535,8 @@ def _build_atomic_candidate(
         "suggested_domain_code": suggested_domain_code,
         # P2-2：候选来源（rule=规则层 / llm=LLM 兜底），前端「AI 推断」复核标识
         "source": source,
+        # A-1/2：CASE/窗口/下沉口径需人工核对标识（前端「口径需核对」Tag）
+        "needs_review": needs_review,
     }
 
 

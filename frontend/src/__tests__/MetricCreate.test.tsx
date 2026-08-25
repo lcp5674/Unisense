@@ -1716,6 +1716,50 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     expect(screen.getByText("AI 推断")).toBeTruthy();
   });
 
+  it("批量解析：CASE/窗口口径候选展示「口径需核对」标识（A-1/2）", async () => {
+    mockedParseSqlBatch.mockResolvedValueOnce({
+      ...SQL_BATCH_RESULT,
+      candidates: [{ ...SQL_BATCH_RESULT.candidates[0], needs_review: true }],
+    });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await openSqlInfer();
+    fireEvent.click(screen.getByText("批量解析"));
+    fireEvent.change(screen.getByPlaceholderText(/批量解析：粘贴含多个 SELECT/), {
+      target: { value: "SELECT SUM(CASE WHEN status='paid' THEN amount END) AS v FROM t" },
+    });
+    fireEvent.click(screen.getByText("解析候选"));
+    await screen.findByText(/共 1 个候选/);
+    expect(screen.getByText("口径需核对")).toBeTruthy();
+  });
+
+  it("批量解析：草稿持久化——解析成功写 localStorage，重新进入恢复候选（生产就绪）", async () => {
+    localStorage.removeItem("unisense.sql-batch.draft");
+    mockedParseSqlBatch.mockResolvedValueOnce(SQL_BATCH_RESULT);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await openSqlInfer();
+    fireEvent.click(screen.getByText("批量解析"));
+    fireEvent.change(screen.getByPlaceholderText(/批量解析：粘贴含多个 SELECT/), {
+      target: { value: "SELECT dt, SUM(amount) AS gmv FROM t GROUP BY dt" },
+    });
+    fireEvent.click(screen.getByText("解析候选"));
+    await screen.findByText(/共 3 个候选/);
+    // 解析成功 → 草稿写入 localStorage（含 SQL/结果/切分配置）
+    const draft = JSON.parse(localStorage.getItem("unisense.sql-batch.draft") ?? "null");
+    expect(draft).toBeTruthy();
+    expect(draft.result.candidates.length).toBeGreaterThan(0);
+    expect(draft.sql).toContain("SUM(amount)");
+    // 重新进入（卸载后重渲染）→ 挂载 useEffect 恢复候选（提示「已恢复上次草稿」）
+    const { unmount } = renderPage();
+    unmount();
+    localStorage.setItem("unisense.sql-batch.draft", JSON.stringify(draft));
+    renderPage();
+    await screen.findByText(/已恢复上次的 SQL 批量解析草稿/);
+    expect(screen.getByText(/共 3 个候选/)).toBeTruthy();
+    localStorage.removeItem("unisense.sql-batch.draft");
+  });
+
   it("批量解析：语句级建议域展示（跨域脚本提示，P2-10）", async () => {
     mockedParseSqlBatch.mockResolvedValueOnce({
       ...SQL_BATCH_RESULT,

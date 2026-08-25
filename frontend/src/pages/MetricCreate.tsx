@@ -16,6 +16,36 @@ import RoleOwnerSelect, { type RoleOwnerValue } from "../components/RoleOwnerSel
 const { Title, Paragraph } = Typography;
 const { TextArea } = Input;
 
+// SQL 批量解析草稿持久化（生产就绪加固）：候选存 React state 刷新/离开即丢、
+// 无草稿会话——解析结果 + SQL 输入 + 切分模式/规则 + 合成开关写入 localStorage，
+// 重新进入页面可一键恢复继续创建（"解析 50 个候选关掉页面回来"不再丢失）。
+const SQL_BATCH_DRAFT_KEY = "unisense.sql-batch.draft";
+interface SqlBatchDraft {
+  sql: string;
+  splitMode: "semicolon" | "statement" | "custom";
+  customDelimiters: string;
+  customMarkers: string;
+  synthesize: boolean;
+  result: SqlBatchParseResult;
+  savedAt: number;
+}
+
+function loadSqlBatchDraft(): SqlBatchDraft | null {
+  try {
+    const raw = localStorage.getItem(SQL_BATCH_DRAFT_KEY);
+    if (!raw) return null;
+    const draft = JSON.parse(raw) as SqlBatchDraft;
+    // 仅恢复 24h 内的草稿（避免陈旧草稿长期占用）
+    if (!draft?.result || Date.now() - (draft.savedAt ?? 0) > 24 * 3600 * 1000) {
+      localStorage.removeItem(SQL_BATCH_DRAFT_KEY);
+      return null;
+    }
+    return draft;
+  } catch {
+    return null;
+  }
+}
+
 function treeToCascaderOptions(nodes: SubjectDomainTreeNode[]): any[] {
   return nodes.map((n) => ({
     value: n.code,
@@ -333,6 +363,23 @@ export function MetricCreate() {
   const [sqlBatchChecked, setSqlBatchChecked] = useState<Set<string>>(new Set());
   // 勾选联动提示：取消勾选被复合依赖的原子时弹窗
   const [sqlBatchConflictKey, setSqlBatchConflictKey] = useState<string>("");
+  // SQL 批量草稿恢复（生产就绪加固）：挂载时若存在 24h 内草稿，恢复解析结果与
+  // 输入/切分配置——"解析后刷新/离开再回来"候选不丢，可继续勾选创建
+  useEffect(() => {
+    const draft = loadSqlBatchDraft();
+    if (!draft) return;
+    setSqlInferText(draft.sql);
+    setSqlBatchMode("batch");
+    setSqlBatchSplitMode(draft.splitMode);
+    setSqlBatchCustomDelimiters(draft.customDelimiters);
+    setSqlBatchCustomMarkers(draft.customMarkers);
+    setSqlBatchSynthesize(draft.synthesize);
+    setSqlBatchResult(draft.result);
+    setSqlBatchChecked(
+      new Set(draft.result.candidates.filter((c) => c.type === "atomic").map((c) => c.key)),
+    );
+    message.info("已恢复上次的 SQL 批量解析草稿，可继续勾选创建");
+  }, []);
   const [sqlBatchConflictOpen, setSqlBatchConflictOpen] = useState(false);
   // 批量创建结果（复用 batchResult 分桶展示，但保留复合候选的「需先发布原子」提示）
   const [sqlBatchCreateResult, setSqlBatchCreateResult] = useState<MetricBatchRegisterResult | null>(null);
@@ -841,6 +888,24 @@ export function MetricCreate() {
             : "未解析到可注册的指标候选（请检查 SQL 是否含 SELECT + 聚合函数）",
         );
       } else {
+        // 生产就绪加固：解析成功即存草稿（刷新/离开不丢，重新进入页面可恢复
+        // 继续勾选创建——批量候选此前存 React state 刷新即失）
+        try {
+          localStorage.setItem(
+            SQL_BATCH_DRAFT_KEY,
+            JSON.stringify({
+              sql,
+              splitMode: sqlBatchSplitMode,
+              customDelimiters: sqlBatchCustomDelimiters,
+              customMarkers: sqlBatchCustomMarkers,
+              synthesize,
+              result,
+              savedAt: Date.now(),
+            } satisfies SqlBatchDraft),
+          );
+        } catch {
+          /* localStorage 不可用（隐私模式/配额满）静默跳过，不影响主流程 */
+        }
         message.success(`已解析 ${result.candidates.length} 个候选指标，可勾选后批量创建`);
       }
     } catch (err) {
@@ -1003,6 +1068,12 @@ export function MetricCreate() {
     setSqlBatchCreateResult(null);
     setSqlBatchResult(null);
     setSqlBatchChecked(new Set());
+    // 生产就绪：创建完成后清除草稿（避免下次进入恢复已用完的批次）
+    try {
+      localStorage.removeItem(SQL_BATCH_DRAFT_KEY);
+    } catch {
+      /* localStorage 不可用静默跳过 */
+    }
   }
 
   async function handleAutoSuggest() {
@@ -2249,6 +2320,13 @@ export function MetricCreate() {
                                 {c.source === "llm" && (
                                   <Tooltip title="该候选由 AI 兜底从 SQL 中推断提取（规则层未能解析出度量），编码/名称/聚合/周期建议人工复核后创建">
                                     <Tag color="gold" style={{ fontSize: 12 }}>AI 推断</Tag>
+                                  </Tooltip>
+                                )}
+                                {/* A-1/2：CASE/窗口/下沉子查询口径候选——expression 保留原始
+                                    结构（非简化 SUM(col)），注册后口径不直观，提示人工核对 */}
+                                {c.needs_review && (
+                                  <Tooltip title="该候选口径含 CASE 条件/窗口函数/子查询下沉，expression 保留原始 SQL 结构——请核对注册后指标口径是否符合预期">
+                                    <Tag color="orange" style={{ fontSize: 12 }}>口径需核对</Tag>
                                   </Tooltip>
                                 )}
                                 {c.type === "atomic" ? (
