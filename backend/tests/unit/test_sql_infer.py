@@ -17,13 +17,16 @@ class TestParseSqlProfile:
         assert "dwd.sales_detail" in p.source_tables
         assert "shop_id" in p.group_by
         assert "dt" in p.group_by
-        assert p.measures == [{"column": "amount", "agg": "SUM"}]
+        # A-1/2：顶层投影也带 enrich 键（alias/table/expression 原始口径）
+        assert {m["column"]: m["agg"] for m in p.measures} == {"amount": "SUM"}
+        assert p.measures[0]["expression"] == "SUM(amount)"
         assert p.time_column == "dt"
 
     def test_count_distinct(self) -> None:
         sql = "SELECT COUNT(DISTINCT user_id) AS uv FROM dwd.user_active"
         p = parse_sql_profile(sql)
-        assert p.measures == [{"column": "user_id", "agg": "COUNT_DISTINCT"}]
+        assert {m["column"]: m["agg"] for m in p.measures} == {"user_id": "COUNT_DISTINCT"}
+        assert p.measures[0]["expression"] == "COUNT(DISTINCT user_id)"
 
     def test_ratio_derived(self) -> None:
         sql = (
@@ -90,15 +93,19 @@ class TestParseSqlProfile:
         assert "CASE WHEN" in (last["expression"] or "").upper()
 
     def test_direct_aggregation_keeps_legacy_shape(self) -> None:
-        """直接投影聚合（非下沉）：measures 保持基础 column/agg 结构，不附加 enrich 键。"""
+        """直接投影聚合（非下沉）：measures 结构含基础 column/agg + enrich 键
+        （alias/table/expression 原始口径，A-1/2 防 CASE/窗口口径丢失）。"""
         p = parse_sql_profile(
             "SELECT dt, SUM(amount) AS gmv, COUNT(DISTINCT user_id) AS uv "
             "FROM dwd_order_di GROUP BY dt"
         )
-        assert p.measures == [
-            {"column": "amount", "agg": "SUM"},
-            {"column": "user_id", "agg": "COUNT_DISTINCT"},
-        ]
+        assert {m["column"]: m["agg"] for m in p.measures} == {
+            "amount": "SUM",
+            "user_id": "COUNT_DISTINCT",
+        }
+        assert {m["alias"] for m in p.measures} == {"gmv", "uv"}
+        # 顶层投影不挂 table（源表由候选构建的 _physical_source_tables 过滤 CTE 后决定）
+        assert all(m.get("table") is None for m in p.measures)
 
     # ------------------------------------------------------------ 时间粒度识别
 
@@ -327,4 +334,71 @@ class TestParseSqlProfile:
         aggs = {(m["column"], m["agg"]) for m in p.measures}
         assert ("amount", "FIRST_VALUE") in aggs
         assert ("amount", "LAST_VALUE") in aggs
+
+    def test_dialect_agg_no_crash_and_normalized(self) -> None:
+        """P0-A：方言聚合（uniqExact/quantile/topK）不再崩溃整批，且归一为注册枚举。
+
+        此前 ``AnonymousAggFunc.this`` 是函数名字符串，``_extract_col_name`` 对 str
+        调用 ``.walk()`` 抛 AttributeError → ``infer_sql_batch`` 整批 500（ClickHouse
+        DAU/UV 常用函数必炸）。修复后 uniqExact→COUNT_DISTINCT、quantile→PERCENTILE、
+        topK→COUNT（近似计数）。
+        """
+        p = parse_sql_profile(
+            "SELECT uniqExact(user_id) AS uv, quantile(0.5)(amount) AS p50, "
+            "topK(5)(product) AS top FROM orders"
+        )
+        aggs = {(m["column"], m["agg"]) for m in p.measures}
+        # topK(5)(product) 列取 '*'（参数非首个 Column），聚合归 COUNT——三者都不崩溃
+        assert ("user_id", "COUNT_DISTINCT") in aggs
+        assert ("amount", "PERCENTILE") in aggs
+        assert ("*", "COUNT") in aggs
+        # 不支持的统计聚合（corr/stddev/var）诚实跳过，不产出非法候选
+        p2 = parse_sql_profile(
+            "SELECT corr(x, y) AS c, stddev(amount) AS sd FROM t"
+        )
+        assert p2.measures == []
+
+    def test_bare_aggregation_projection(self) -> None:
+        """P0-B：无别名裸聚合投影（SELECT sum(amount) FROM t）被识别。
+
+        ETL 最普遍写法此前因投影非 Alias/Column 被跳过 → measures=0，规则层失效。
+        裸聚合用 sqlglot 生成别名（_col_1）与候选结构对齐。
+        """
+        p = parse_sql_profile("SELECT sum(amount) FROM orders")
+        assert {m["column"]: m["agg"] for m in p.measures} == {"amount": "SUM"}
+        assert p.measures[0]["alias"] == "_col_1"
+
+    def test_case_expression_preserved(self) -> None:
+        """A-1：CASE 聚合口径完整保留（此前落库简化 SUM(col)，CASE 条件丢失变全表聚合）。"""
+        p = parse_sql_profile(
+            "SELECT SUM(CASE WHEN status='paid' THEN amount END) AS paid_amt FROM orders"
+        )
+        assert p.measures[0]["expression"] == (
+            "SUM(CASE WHEN status = 'paid' THEN amount END)"
+        )
+
+    def test_window_expression_preserved(self) -> None:
+        """A-2：窗口函数投影保留 OVER 语义（此前落库 SUM(col) 丢窗口 → 语义错误）。"""
+        p = parse_sql_profile(
+            "SELECT SUM(amount) OVER (PARTITION BY dt) AS running FROM orders"
+        )
+        assert "OVER" in p.measures[0]["expression"].upper()
+
+    def test_join_same_name_column_table_attribution(self) -> None:
+        """A-3：join 同名列按列前缀归属物理表（sum(a.amount)/sum(b.amount) 分属 a/b 表）。"""
+        p = parse_sql_profile(
+            "SELECT SUM(a.amount) AS a_amt, SUM(b.amount) AS b_amt "
+            "FROM dwd.x a JOIN dwd.y b ON a.id = b.id"
+        )
+        tables = {m.get("table") for m in p.measures}
+        assert tables == {"dwd.x", "dwd.y"}
+
+    def test_subquery_alias_column_resolved(self) -> None:
+        """A-4：子查询/CTE 投影别名列解析为物理列（SUM(x) FROM (SELECT amount AS x) → amount）。"""
+        p = parse_sql_profile(
+            "SELECT t.g, SUM(t.x) FROM "
+            "(SELECT amount AS x, city AS g FROM dwd.orders) t GROUP BY t.g"
+        )
+        assert {m["column"] for m in p.measures} == {"amount"}
+
 

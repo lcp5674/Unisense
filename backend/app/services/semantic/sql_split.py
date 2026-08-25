@@ -478,10 +478,13 @@ def _build_atomic_candidate(
     agg = measure["agg"] or "COUNT"
     alias = measure.get("alias")
     measure_table = measure.get("table") or table
-    # 下沉度量同列多语义（ETL 多个 ``SUM(CASE WHEN ...)`` 分支同落一列）时用
-    # alias 作命名锚点生成编码/名称，避免 N 个候选撞同一编码；口径列仍为原始
-    # col（expression/source_fields 不受影响），普通单语句（无 alias）行为不变。
-    code_col = alias if alias and alias != col else col
+    # 下沉度量（A-4：ETL 透传 INSERT 内层子查询的聚合投影）同列多语义（多个
+    # ``SUM(CASE WHEN ...)`` 分支同落一列）时用 alias 作命名锚点生成编码/名称，
+    # 避免 N 个候选撞同一编码；口径列仍为原始 col（expression/source_fields 不受
+    # 影响）。**顶层投影**（sunk=False，含裸聚合生成别名）用真实列作锚点——alias
+    # 仅为投影别名，若用 alias 会改变既有编码语义（如 SUM(amount) AS gmv → 本应
+    # 用 amount 而非 gmv）。
+    code_col = alias if (alias and alias != col and measure.get("sunk")) else col
     profile = build_profile(source_table=measure_table, measure_column=code_col, period=period)
     profile["domain_code"] = domain_code or ""
     result = infer_metric(profile, domain_defaults=domain_defaults or {})
@@ -740,7 +743,13 @@ async def infer_sql_batch(
         not domain_code and suggestion and suggestion.get("status") in ("multiple", "none")
     )
     for idx, seg in enumerate(segments):
-        profile = parse_sql_profile(seg)
+        # P0-A 兜底：单语句画像解析/方言提取意外异常绝不炸整批——降级 skipped
+        # 继续后续语句（候选构建本身也有 try 保护，此处覆盖画像层）
+        try:
+            profile = parse_sql_profile(seg)
+        except Exception:  # noqa: BLE001 - 单语句异常仅降级跳过该句
+            skipped.append({"index": idx, "sql": seg[:500], "reason": "parse_failed"})
+            continue
         seg_domain_code: str | None = None
         if per_stmt_suggest:
             from app.services.semantic.domain_suggest import suggest_domain

@@ -1008,3 +1008,23 @@ async def test_infer_sql_batch_llm_batch_limit() -> None:
     assert len(result["candidates"]) == _LLM_BATCH_LIMIT
     assert len(result["skipped"]) == 1
     assert result["skipped"][0]["reason"] == "llm_limit"
+
+
+async def test_infer_sql_batch_single_statement_profile_error_degrades() -> None:
+    """P0-A 兜底：单语句画像解析异常绝不炸整批——降级 skipped(parse_failed) 继续后续。
+
+    方言聚合/极端嵌套等使 ``parse_sql_profile`` 抛异常时，``infer_sql_batch`` 应跳过
+    该语句而非让整个批量解析 500。
+    """
+    parts = ["SELECT 1", "SELECT SUM(amount) AS gmv FROM t"]
+    with patch(
+        "app.services.semantic.sql_split.parse_sql_profile",
+        side_effect=RuntimeError("boom"),
+    ):
+        result = await infer_sql_batch(
+            _fake_db(), sql=";".join(parts), split_mode="semicolon", domain_code="sales"
+        )
+    # 异常语句 → skipped(parse_failed)；两条语句均被跳过（第一条 DDL、第二条画像异常）
+    assert len(result["candidates"]) == 0
+    assert all(s["reason"] == "parse_failed" for s in result["skipped"])
+    assert len(result["skipped"]) == 2

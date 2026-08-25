@@ -104,6 +104,39 @@ _COMBINED_AGG_MAP = {
     "minmerge": "MIN",
 }
 
+# 方言聚合函数名（AnonymousAggFunc/ParameterizedAgg 的 this 字符串）→ 注册枚举聚合。
+# 崩溃修复（P0-A）后这些函数能正常产出候选；不归一的话聚合值（QUANTILE/ARGMAX/
+# GROUPCONCAT）不在 MetricCreateRequest.aggregation Literal → 批量创建 pydantic
+# 整批失败（P1-4 一致性缺陷）。映射到语义最接近的注册枚举：
+# - uniqExact/uniq → COUNT_DISTINCT（UV 语义）
+# - quantile/quantileExact/percentile_approx → PERCENTILE（分位数）
+# - argMax/argMin → MAX/MIN（参数化首/末值）
+# - topK/groupArray/stringAgg/groupConcat → COUNT（数组/串聚合，近似计数语义，
+#   候选 source=dialect 前端提示人工复核）
+_DIALECT_AGG_MAP = {
+    "uniqexact": "COUNT_DISTINCT",
+    "uniq": "COUNT_DISTINCT",
+    "quantile": "PERCENTILE",
+    "quantileexact": "PERCENTILE",
+    "percentileapprox": "PERCENTILE",
+    "argmax": "MAX",
+    "argmin": "MIN",
+    "topk": "COUNT",
+    "topkweighted": "COUNT",
+    "grouparray": "COUNT",
+    "groupconcat": "COUNT",
+    "stringagg": "COUNT",
+    "listagg": "COUNT",
+    "anyif": "COUNT",
+}
+# 无注册枚举可归一的统计聚合（相关性/协方差/回归/标准差/方差）→ 返回 None 跳过
+# 该度量（诚实不产出非法候选，避免注册失败/口径错误），不崩溃不炸整批。
+_DIALECT_AGG_SKIP = {
+    "corr", "covar_pop", "covar_samp", "regr_slope", "regr_r2", "regr_intercept",
+    "stddev", "stddevpop", "stddevsamp", "stddev_samp", "varpop", "varsamp",
+    "var_pop", "var_samp", "variance",
+}
+
 
 @dataclass
 class SqlProfile:
@@ -181,12 +214,52 @@ def _from_table(select: exp.Select) -> str | None:
     return None
 
 
-def _agg_display_name(agg: exp.AggFunc) -> str:
-    """聚合节点 → 规范聚合名（含工业方言聚合归一）。
+def _table_alias_map(select: exp.Select) -> dict[str, str]:
+    """SELECT FROM/JOIN 的别名 → 物理表映射（A-3 源表归属用）。
+
+    ``FROM dwd.orders a LEFT JOIN dwd.ref b ON ...`` → ``{a: dwd.orders, b: dwd.ref}``；
+    无别名裸表 ``FROM orders`` → ``{orders: orders}``。sqlglot 把 join 右侧表也放入
+    ``find_all(exp.Table)``，故能完整收集两侧别名。
+    """
+    mapping: dict[str, str] = {}
+    for node in select.find_all(exp.Table):
+        parent = node.parent
+        if isinstance(parent, exp.Insert) and parent.this is node:
+            continue
+        alias = (node.alias or node.name or "").lower()
+        if alias:
+            mapping[alias] = _norm_table_name(node)
+    return mapping
+
+
+def _measure_table(select: exp.Select, agg: exp.AggFunc) -> str | None:
+    """聚合投影的度量来源物理表：按列前缀归属（A-3 join 同名列区分）。
+
+    ``sum(a.amount), sum(b.amount)`` 的候选此前都取 ``_from_table`` 的第一个物理表
+    ——b 侧口径错挂 a 表。此处从聚合参数列的表前缀（``a.amount`` → 别名 a）解析
+    对应物理表；无前缀/未命中返回 None（上层回退通用来源表）。
+    """
+    col = agg.this
+    if isinstance(col, exp.Distinct):
+        col = col.expressions[0] if col.expressions else None
+    if isinstance(col, exp.Column) and col.table:
+        return _table_alias_map(select).get(col.table.lower())
+    if isinstance(col, exp.Case):
+        for c in col.walk():
+            if isinstance(c, exp.Column) and c.table:
+                return _table_alias_map(select).get(c.table.lower())
+    return None
+
+
+def _agg_display_name(agg: exp.AggFunc) -> str | None:
+    """聚合节点 → 规范聚合名（含工业方言聚合归一）；不支持的方言聚合返回 None。
 
     ClickHouse ``sumMerge/sumIf`` 解析为 ``CombinedAggFunc``（``this`` 是函数名
     字符串）→ 按映射归一为 ``SUM`` 等；``countIf`` → ``COUNT``；Trino/Presto
-    ``approx_distinct`` → ``COUNT_DISTINCT``（key 无下划线，与既有映射对齐）。
+    ``approx_distinct`` → ``COUNT_DISTINCT``（key 无下划线，与既有映射对齐）；
+    ``uniqExact/quantile/topK`` 等解析为 ``AnonymousAggFunc``/``ParameterizedAgg``
+    （``this`` 是函数名）→ 按 ``_DIALECT_AGG_MAP`` 归一；无枚举可归一的统计聚合
+    （corr/stddev/var 等）→ 返回 ``None``（上层跳过该度量，不产出非法候选）。
     """
     key = agg.key.upper()
     if key == "COMBINEDAGGFUNC":
@@ -196,6 +269,13 @@ def _agg_display_name(agg: exp.AggFunc) -> str:
         return "COUNT"
     if key == "APPROXDISTINCT":
         return "COUNT_DISTINCT"
+    # 方言聚合：this 是函数名字符串 → 按函数名归一（corr/stddev/var 等无枚举可归
+    # 一 → None 跳过该度量，避免产出非法候选导致批量创建整批失败）
+    if isinstance(agg.this, str):
+        fn = agg.this.lower()
+        if fn in _DIALECT_AGG_SKIP:
+            return None
+        return _DIALECT_AGG_MAP.get(fn, fn.upper())
     # 首/末值窗口函数：sqlglot key 无下划线（FIRSTVALUE），归一为注册 schema 的
     # 带下划线枚举（MetricCreateRequest.aggregation Literal）——否则批量创建时
     # 候选聚合 FIRSTVALUE 不匹配枚举 → pydantic 校验整批失败（P1-4 一致性缺陷）。
@@ -205,7 +285,13 @@ def _agg_display_name(agg: exp.AggFunc) -> str:
         return "LAST_VALUE"
     if key.startswith("PERCENTILE"):
         return "PERCENTILE"
-    return key
+    # 方言统计聚合专用类（Quantile/Corr/Stddev 等，this 是 Column 非字符串）：
+    # 统一按函数名归一/跳过——quantile → PERCENTILE，corr/stddev/var → None 跳过
+    # （无注册枚举可归一的统计聚合，诚实不产出非法候选）
+    low = key.lower()
+    if low in _DIALECT_AGG_SKIP:
+        return None
+    return _DIALECT_AGG_MAP.get(low, key)
 
 
 def _extract_col_name(node: exp.Expr | None) -> str:
@@ -214,7 +300,14 @@ def _extract_col_name(node: exp.Expr | None) -> str:
     裸列 → 列名；``*`` → ``*``；``DISTINCT x`` → x；``CASE WHEN`` → then 分支列；
     复杂表达式（``COALESCE``/``nvl``/算术/条件/方言函数）→ 取内部第一个
     Column（如 Oracle ``sum(nvl(amount,0))`` → ``amount``）；无列可提取 → ``*``。
+
+    **P0-A 兜底**：方言聚合（ClickHouse ``uniqExact``/``topK``、Trino
+    ``approx_distinct`` 等）解析为 ``AnonymousAggFunc``/``ParameterizedAgg`` 时
+    ``agg.this`` 是**函数名字符串**——直接对 str 调用 ``.walk()`` 会抛
+    ``AttributeError``，使 ``infer_sql_batch`` 整批 500（工业 DAU/UV 常用函数必炸）。
     """
+    if isinstance(node, str):
+        return "*"
     if node is None:
         return "*"
     if isinstance(node, exp.Star):
@@ -235,32 +328,60 @@ def _extract_col_name(node: exp.Expr | None) -> str:
 
 
 def _projection_measures(
-    select: exp.Select, enrich: bool = False, table: str | None = None
+    select: exp.Select,
+    enrich: bool = False,
+    table: str | None = None,
+    sunk: bool = False,
 ) -> list[dict[str, Any]]:
     """SELECT 投影中的度量：聚合函数包裹的列 → ``{"column", "agg"}``。
 
     处理 COUNT(DISTINCT x)（DISTINCT 修饰符）、COUNT(*)（星号）与
     ``count(distinct case when ... then col end)``（Case 包裹时取 then 分支列）。
 
+    **P0-B**：支持**无别名裸聚合投影**（``SELECT sum(amount) FROM t`` 的投影是
+    ``exp.Sum``，非 ``Alias``/``Column``）——ETL 最普遍写法此前被直接跳过导致
+    measures=0；裸聚合用 sqlglot 生成投影别名，与下沉/LLM 兜底候选结构对齐。
+
+    **P0-A**：方言聚合（``AnonymousAggFunc``/``ParameterizedAgg``）的 ``this`` 是
+    函数名字符串，列参数在 ``expressions``——取其中第一个 Column 作为度量列
+    （``uniqExact(user_id)`` → user_id）；``_agg_display_name`` 返回 ``None`` 的
+    统计聚合（corr/stddev/var 等）→ 跳过该投影（不产出非法候选）。
+
     ``enrich=True`` 时（下沉场景）附加 ``alias``（投影别名）、``table``（来源表）、
     ``expression``（原始聚合投影 SQL）——区分同列不同语义的度量并还原口径。
     """
     measures: list[dict[str, Any]] = []
     for projection in select.expressions:
-        if not isinstance(projection, exp.Alias) and not isinstance(projection, exp.Column):
-            continue
         target = projection.this if isinstance(projection, exp.Alias) else projection
+        # 裸聚合投影（P0-B）：非 Alias/Column 但本身是聚合函数（sum/count 等）
+        if not isinstance(projection, exp.Alias) and not isinstance(projection, exp.Column):
+            if not isinstance(target, exp.AggFunc):
+                continue
+            projection = exp.alias_(target, f"_col_{len(measures) + 1}")
         agg = target.find(exp.AggFunc) if target else None
         if agg is None:
             continue
         agg_name = _agg_display_name(agg)
+        if agg_name is None:
+            # 无注册枚举可归一的统计聚合 → 跳过该投影（诚实不产出非法候选）
+            continue
         # DISTINCT 修饰符：sqlglot 将 COUNT(DISTINCT x) 解析为 Count(this=Distinct(...))
         col_expr = agg.this
         if isinstance(col_expr, exp.Distinct):
             agg_name = "COUNT_DISTINCT"
             col_expr = col_expr.expressions[0] if col_expr.expressions else None
+        # 方言聚合（P0-A）：this 是函数名字符串，真正列参数在 expressions——
+        # 取第一个 Column（uniqExact(user_id) → user_id；topK(10)(product) 跳过
+        # Literal 取 product；sumMerge(amount_state) → amount_state）
+        if isinstance(agg.this, str):
+            col_expr = next(
+                (
+                    e for e in (agg.expressions or [])
+                    if isinstance(e, (exp.Column, exp.Alias))
+                ),
+                (agg.expressions[0] if agg.expressions else None),
+            )
         # ClickHouse 合并/条件聚合：this 是函数名字符串，真正参数在 expressions[0]
-        # （sumMerge(amount_state) → expressions[0]=Column(amount_state)）
         if isinstance(agg, exp.CombinedAggFunc):
             col_expr = agg.expressions[0] if agg.expressions else None
         col_name = _extract_col_name(col_expr)
@@ -269,8 +390,20 @@ def _projection_measures(
             measure["alias"] = (
                 projection.alias_or_name if isinstance(projection, exp.Alias) else None
             )
-            measure["table"] = table
-            measure["expression"] = target.sql()
+            # A-3：join 同名列按列前缀归属物理表（sum(a.amount)/sum(b.amount) 分别
+            # 归属 a/b 表）；无前缀/未命中回退传入的 table
+            measure["table"] = _measure_table(select, agg) or table
+            # A-4 下沉标记：候选构建据此区分「下沉子查询度量」（同列多语义用 alias
+            # 作编码锚点）vs「顶层投影度量」（编码用真实列，alias 仅为投影别名）
+            measure["sunk"] = sunk
+            # 原始投影 SQL（A-1/2：CASE/窗口/表达式口径完整保留，替代简化 SUM(col)）。
+            # 方言聚合（ClickHouse sumMerge 的 CombinedAggFunc 等）在默认方言下
+            # ``target.sql()`` 序列化会抛异常（sqlglot 方言序列化 bug）→ 降级简化式，
+            # 绝不因序列化失败让整段解析崩溃（对齐生产降级哲学）。
+            try:
+                measure["expression"] = target.sql()
+            except Exception:  # noqa: BLE001 - 序列化失败仅降级简化式
+                measure["expression"] = f"{agg_name}({col_name})"
         measures.append(measure)
     return measures
 
@@ -282,15 +415,45 @@ def _extract_measures(select: exp.Select) -> list[dict[str, Any]]:
     透传形态——最外层投影只是改名/join 字典，聚合在子查询内。此时下沉收集聚合
     投影的度量，按 ``(alias, agg)`` 去重（UNION 多支同指标合并），并附带
     ``alias/table/expression`` 供候选构建区分同列不同语义并还原口径。
+
+    **A-1/2**：顶层投影也走 ``enrich=True`` 携带原始 ``expression``（如
+    ``SUM(CASE WHEN status='paid' THEN amount END)``/``SUM(amount) OVER (...``）——
+    此前顶层候选由 ``_build_atomic_candidate`` 用简化 ``SUM(col)`` 还原口径，
+    CASE 过滤条件/窗口语义被丢弃，注册后指标变全表聚合（数据错误）。
+    顶层不传 ``table``（候选的源表由 ``_physical_source_tables`` 过滤 CTE 别名后
+    决定，避免顶层 measure 误挂 CTE 名）且 ``sunk=False``（编码锚点用真实列）。
     """
-    measures = _projection_measures(select)
+    measures = _projection_measures(select, enrich=True, table=None, sunk=False)
+    # A-4：全局子查询投影别名 → 物理列映射（聚合参数是子查询/CTE 投影别名时解析为
+    # 底层物理列——``SUM(x) FROM (SELECT amount AS x ...)`` 的 source_fields 若不
+    # 解析会落 ``[orders, x]``（物理表+不存在的列），血缘/下游错乱）。仅映射
+    # Alias(Column) 简单透传，复杂表达式保留别名。
+    alias_map: dict[str, str] = {}
+    for sub in select.find_all(exp.Select):
+        if sub is select:
+            continue
+        for proj in sub.expressions:
+            if (
+                isinstance(proj, exp.Alias)
+                and isinstance(proj.this, exp.Column)
+                and proj.alias_or_name
+            ):
+                alias_map[proj.alias_or_name.lower()] = proj.this.name.lower()
     if measures:
+        if alias_map:
+            for m in measures:
+                if m["column"] in alias_map:
+                    m["column"] = alias_map[m["column"]]
         return measures
     seen: set[tuple[str, str]] = set()
     for sub in select.find_all(exp.Select):
         if sub is select:
             continue
-        for m in _projection_measures(sub, enrich=True, table=_from_table(sub)):
+        for m in _projection_measures(
+            sub, enrich=True, table=_from_table(sub), sunk=True
+        ):
+            if alias_map and m["column"] in alias_map:
+                m["column"] = alias_map[m["column"]]
             key = (m["alias"] or m["column"], m["agg"])
             if key in seen:
                 continue
