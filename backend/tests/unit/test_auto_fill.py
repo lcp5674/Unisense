@@ -240,6 +240,43 @@ class TestInferMetricSql:
         assert f["unit"]["value"] == "TIMES"
         assert f["unit"]["source"] == "column_meta"
 
+    def test_count_column_label_hits_controlled_morpheme(self) -> None:
+        """无列注释的计数列生成中文标签，命中受控词根（修复前为英文 slug 被命名校验拦截）。
+
+        列注释优先逻辑不受影响（本用例 measure_meta 无 comment）。
+        """
+        profile = build_profile(
+            source_table="ods_his_register",
+            measure_column="register_cnt",
+            period="day",
+        )
+        profile["domain_code"] = "outpatient"
+        result = infer_metric(profile)
+        f = result["fields"]
+        # label「挂号次数」→ name「日挂号次数」，命中「挂号/次数」受控词根
+        assert f["name"]["value"] == "日挂号次数"
+        assert f["name"]["source"] == "rule"
+
+    def test_unknown_count_column_label_falls_back_to_times(self) -> None:
+        """未知计数列名主干保底「xx次数」，仍命中「次数」受控词根。"""
+        profile = build_profile(
+            source_table="ods_his_register",
+            measure_column="xyz_cnt",
+            period="day",
+        )
+        profile["domain_code"] = "outpatient"
+        result = infer_metric(profile)
+        f = result["fields"]
+        assert f["name"]["value"] == "日xyz次数"
+        assert f["name"]["source"] == "rule"
+        # 非计数列（如 gmv）保持原英文标签行为不变
+        profile2 = build_profile(
+            source_table="dwd.sales_detail", measure_column="gmv", period="day"
+        )
+        profile2["domain_code"] = "sales"
+        result2 = infer_metric(profile2)
+        assert result2["fields"]["name"]["value"] == "日gmv"
+
 
 class TestAutoFillBackwardCompat:
     """auto_fill 旧结构 + 新附加字段兼容。"""

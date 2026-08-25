@@ -31,6 +31,27 @@ logger = structlog.get_logger("unisense.auto_fill")
 
 # 源表名前缀清洗
 _TABLE_PREFIXES = re.compile(r"^(dwd_|ods_|dws_|ads_|dim_|tmp_)", re.IGNORECASE)
+# 计数类列名主干 → 中文业务标签（无列注释时用于名称生成，命中受控词根）
+# 对齐 _infer_unit 的 cnt/count/num 计数识别；未知前缀保底「次数」同样命中词根。
+_CN_COUNT_LABELS: dict[str, str] = {
+    "register": "挂号次数",
+    "visit": "就诊次数",
+    "patient": "患者数",
+    "prescription": "处方数",
+    "drug": "药品数",
+    "order": "订单量",
+    "user": "用户数",
+    "member": "会员数",
+    "customer": "客户数",
+    "student": "学生数",
+    "employee": "员工数",
+    "click": "点击次数",
+    "play": "播放次数",
+    "login": "登录次数",
+    "pay": "支付次数",
+}
+# 计数类列名后缀（识别顺序：长后缀在前）
+_COUNT_SUFFIXES = ("_quantity", "_count", "_cnt", "_num", "_qty")
 # 合法编码字符
 _CODE_SEGMENT_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 # 4 段式完整编码
@@ -473,6 +494,23 @@ def _period_cn(period: str | None, grain: str | None) -> str:
     return _PERIOD_CN.get(token, _PERIOD_CN.get(_GRAIN_TOKENS.get(token, ""), "日"))
 
 
+def _cn_count_label(col: str) -> str | None:
+    """计数类列名 → 中文业务标签（命中受控词根）；非计数列返回 None。
+
+    列名以计数后缀结尾时：主干命中业务词表 → 中文标签；未知主干 → 「xx次数」
+    （含受控词根「次数」，候选名可过命名校验，避免生成英文 slug 被拦）。
+    """
+    base = col.lower().strip()
+    for suf in _COUNT_SUFFIXES:
+        if base.endswith(suf):
+            stem = base[: -len(suf)]
+            last = stem.split("_")[-1]
+            if not last:
+                return None
+            return _CN_COUNT_LABELS.get(last, f"{last}次数")
+    return None
+
+
 def _measure_label(profile: dict[str, Any]) -> str:
     """度量中文标签（用于名称生成）。"""
     meta: dict[str, Any] = profile.get("measure_meta", {}) or {}
@@ -482,9 +520,10 @@ def _measure_label(profile: dict[str, Any]) -> str:
     measure_column: str | None = profile.get("measure_column")
     sql_profile: SqlProfile | None = profile.get("sql_profile")
     if measure_column:
-        return measure_column.replace("_", " ")
+        return _cn_count_label(measure_column) or measure_column.replace("_", " ")
     if sql_profile and sql_profile.measures:
-        return str(sql_profile.measures[0]["column"]).replace("_", " ")
+        col = str(sql_profile.measures[0]["column"])
+        return _cn_count_label(col) or col.replace("_", " ")
     return "指标"
 
 
