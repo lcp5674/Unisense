@@ -308,6 +308,96 @@ class TestMeasureService:
         assert out.status == "DEPRECATED"
 
 
+# ---------- 生命周期（reactivate/delete/restore） ----------
+
+
+class TestMeasureLifecycle:
+    async def test_reactivate_requires_deprecated(self) -> None:
+        svc, repo = await _svc()
+        repo.get = AsyncMock(return_value=_m("amt", status="DRAFT"))
+        with pytest.raises(UnisenseError):
+            await svc.reactivate_measure("amt")
+
+    async def test_reactivate_sets_draft(self) -> None:
+        svc, repo = await _svc()
+        m = _m("amt", status="DEPRECATED")
+        repo.get = AsyncMock(return_value=m)
+        out = await svc.reactivate_measure("amt")
+        assert out.status == "DRAFT"
+
+    async def test_delete_rejects_review(self) -> None:
+        svc, repo = await _svc()
+        repo.get = AsyncMock(return_value=_m("amt", status="REVIEW"))
+        with pytest.raises(UnisenseError) as exc:
+            await svc.delete_measure("amt", actor_id=1, role="platform_admin")
+        assert exc.value.error_code == "INVALID_STATE"
+
+    async def test_delete_rejects_published(self) -> None:
+        svc, repo = await _svc()
+        repo.get = AsyncMock(return_value=_m("amt", status="PUBLISHED"))
+        with pytest.raises(UnisenseError):
+            await svc.delete_measure("amt", actor_id=1, role="platform_admin")
+
+    async def test_delete_requires_admin_or_owner(self) -> None:
+        svc, repo = await _svc()
+        repo.get = AsyncMock(return_value=_m("amt", status="DRAFT", owner_id=5))
+        with pytest.raises(UnisenseError) as exc:
+            await svc.delete_measure("amt", actor_id=1, role="metric_owner")
+        assert exc.value.error_code == "FORBIDDEN"
+
+    async def test_delete_protects_referenced_measure(self) -> None:
+        svc, repo = await _svc()
+        repo.get = AsyncMock(return_value=_m("amt", status="DRAFT"))
+        repo.count_metrics_by_measure = AsyncMock(return_value=1)
+        with pytest.raises(ConflictError):
+            await svc.delete_measure("amt", actor_id=1, role="platform_admin")
+
+    async def test_delete_draft_soft_deletes(self) -> None:
+        svc, repo = await _svc()
+        repo.get = AsyncMock(return_value=_m("amt", status="DRAFT"))
+        repo.count_metrics_by_measure = AsyncMock(return_value=0)
+        repo.soft_delete_measure = AsyncMock()
+        out = await svc.delete_measure("amt", actor_id=1, role="platform_admin")
+        repo.soft_delete_measure.assert_awaited_once_with(1)
+        assert out.status == "DRAFT"
+
+    async def test_delete_deprecated_by_owner(self) -> None:
+        svc, repo = await _svc()
+        repo.get = AsyncMock(return_value=_m("amt", status="DEPRECATED", owner_id=1))
+        repo.count_metrics_by_measure = AsyncMock(return_value=0)
+        repo.soft_delete_measure = AsyncMock()
+        await svc.delete_measure("amt", actor_id=1, role="metric_owner")
+        repo.soft_delete_measure.assert_awaited_once_with(1)
+
+    async def test_restore_requires_deleted(self) -> None:
+        svc, repo = await _svc()
+        repo.get = AsyncMock(return_value=_m("amt", status="DRAFT"))
+        with pytest.raises(UnisenseError):
+            await svc.restore_measure("amt", actor_id=1, role="platform_admin")
+
+    async def test_restore_requires_admin_or_owner(self) -> None:
+        from datetime import UTC, datetime
+
+        svc, repo = await _svc()
+        m = _m("amt", status="DRAFT", owner_id=5)
+        m.deleted_at = datetime.now(UTC)
+        repo.get = AsyncMock(return_value=m)
+        with pytest.raises(UnisenseError) as exc:
+            await svc.restore_measure("amt", actor_id=1, role="metric_owner")
+        assert exc.value.error_code == "FORBIDDEN"
+
+    async def test_restore_clears_deleted_at(self) -> None:
+        from datetime import UTC, datetime
+
+        svc, repo = await _svc()
+        m = _m("amt", status="DRAFT", owner_id=1)
+        m.deleted_at = datetime.now(UTC)
+        repo.get = AsyncMock(return_value=m)
+        repo.restore_measure = AsyncMock()
+        await svc.restore_measure("amt", actor_id=1, role="metric_owner")
+        repo.restore_measure.assert_awaited_once_with(1)
+
+
 # ---------- 审核流（submit/approve/reject，对齐指标审核流 TD §13） ----------
 
 
@@ -324,18 +414,27 @@ class TestMeasureReviewFlow:
     async def test_submit_requires_draft(self) -> None:
         svc, _ = await _review_svc(_m("amt", status="PUBLISHED"))
         with pytest.raises(UnisenseError):
-            await svc.submit_measure("amt", MeasureSubmitRequest(change_reason="发布新度量"), 1, "metric_owner")
+            await svc.submit_measure(
+                "amt", MeasureSubmitRequest(change_reason="发布新度量"), 1, "metric_owner"
+            )
 
     async def test_submit_requires_stat_caliber(self) -> None:
         svc, _ = await _review_svc(_m("amt", status="DRAFT", stat_caliber=None))
         with pytest.raises(UnisenseError):
-            await svc.submit_measure("amt", MeasureSubmitRequest(change_reason="发布新度量"), 1, "metric_owner")
+            await svc.submit_measure(
+                "amt", MeasureSubmitRequest(change_reason="发布新度量"), 1, "metric_owner"
+            )
 
     async def test_submit_sets_review_with_reviewer(self) -> None:
         m = _m("amt", status="DRAFT", stat_caliber="收费明细求和")
         svc, _ = await _review_svc(m)
         out = await svc.submit_measure(
-            "amt", MeasureSubmitRequest(change_reason="发布新度量", reviewer_id=9, reviewer_type="user"), 1, "metric_owner"
+            "amt",
+            MeasureSubmitRequest(
+                change_reason="发布新度量", reviewer_id=9, reviewer_type="user"
+            ),
+            1,
+            "metric_owner",
         )
         assert out.status == "REVIEW"
         assert out.submitted_by == 1
@@ -345,7 +444,9 @@ class TestMeasureReviewFlow:
     async def test_submit_owner_only(self) -> None:
         svc, _ = await _review_svc(_m("amt", owner_id=5, stat_caliber="x"))
         with pytest.raises(UnisenseError):
-            await svc.submit_measure("amt", MeasureSubmitRequest(change_reason="越权提交"), 1, "metric_owner")
+            await svc.submit_measure(
+                "amt", MeasureSubmitRequest(change_reason="越权提交"), 1, "metric_owner"
+            )
 
     async def test_approve_requires_review(self) -> None:
         svc, _ = await _review_svc(_m("amt", status="DRAFT"))
@@ -363,7 +464,9 @@ class TestMeasureReviewFlow:
     async def test_approve_sets_published(self) -> None:
         m = _m("amt", status="REVIEW", submitted_by=1)
         svc, _ = await _review_svc(m)
-        out = await svc.approve_measure("amt", MeasureApproveRequest(comment="口径合理"), 9, "domain_admin")
+        out = await svc.approve_measure(
+            "amt", MeasureApproveRequest(comment="口径合理"), 9, "domain_admin"
+        )
         assert out.status == "PUBLISHED"
         assert out.approver_id == 9
         assert out.reviewed_at is not None
@@ -379,24 +482,38 @@ class TestMeasureReviewFlow:
         assert out.status == "PUBLISHED"
 
     async def test_approve_domain_reviewer_scope(self) -> None:
-        m = _m("amt", status="REVIEW", submitted_by=1, reviewer_type="domain", reviewer_domain="medical_fee")
+        m = _m(
+            "amt",
+            status="REVIEW",
+            submitted_by=1,
+            reviewer_type="domain",
+            reviewer_domain="medical_fee",
+        )
         svc, _ = await _review_svc(m)
         # 异域评审被拒
         with pytest.raises(UnisenseError):
-            await svc.approve_measure("amt", MeasureApproveRequest(), 5, "reviewer", user_domain="sales")
+            await svc.approve_measure(
+                "amt", MeasureApproveRequest(), 5, "reviewer", user_domain="sales"
+            )
         # 同域评审通过
-        out = await svc.approve_measure("amt", MeasureApproveRequest(), 5, "reviewer", user_domain="medical_fee")
+        out = await svc.approve_measure(
+            "amt", MeasureApproveRequest(), 5, "reviewer", user_domain="medical_fee"
+        )
         assert out.status == "PUBLISHED"
 
     async def test_reject_requires_review(self) -> None:
         svc, _ = await _review_svc(_m("amt", status="PUBLISHED"))
         with pytest.raises(UnisenseError):
-            await svc.reject_measure("amt", MeasureRejectRequest(reason="口径不清"), 9, "domain_admin")
+            await svc.reject_measure(
+                "amt", MeasureRejectRequest(reason="口径不清"), 9, "domain_admin"
+            )
 
     async def test_reject_sets_draft_with_reason(self) -> None:
         m = _m("amt", status="REVIEW", submitted_by=1)
         svc, _ = await _review_svc(m)
-        out = await svc.reject_measure("amt", MeasureRejectRequest(reason="统计口径与业务不符"), 9, "domain_admin")
+        out = await svc.reject_measure(
+            "amt", MeasureRejectRequest(reason="统计口径与业务不符"), 9, "domain_admin"
+        )
         assert out.status == "DRAFT"
         assert out.reject_reason == "统计口径与业务不符"
         assert out.reject_reviewer_id == 9

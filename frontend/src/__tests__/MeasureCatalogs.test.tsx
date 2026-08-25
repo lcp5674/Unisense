@@ -11,6 +11,9 @@ vi.mock("../api", () => ({
   updateMeasureCatalog: vi.fn(),
   publishMeasureCatalog: vi.fn(),
   deprecateMeasureCatalog: vi.fn(),
+  reactivateMeasureCatalog: vi.fn(),
+  deleteMeasureCatalog: vi.fn(),
+  restoreMeasureCatalog: vi.fn(),
   submitMeasureCatalog: vi.fn(),
   approveMeasureCatalog: vi.fn(),
   rejectMeasureCatalog: vi.fn(),
@@ -18,6 +21,8 @@ vi.mock("../api", () => ({
   batchApproveMeasures: vi.fn(),
   batchRejectMeasures: vi.fn(),
   batchDeprecateMeasures: vi.fn(),
+  batchReactivateMeasures: vi.fn(),
+  batchDeleteMeasures: vi.fn(),
   fetchCurrentUser: vi.fn(),
   listDomainTree: vi.fn(),
   listUsers: vi.fn(),
@@ -30,11 +35,14 @@ import {
   autoSuggestMeasureCatalog,
   batchSubmitMeasures,
   createMeasureCatalog,
+  deleteMeasureCatalog,
   fetchCurrentUser,
   listDomainTree,
   listMeasureCatalogs,
   listUsers,
+  reactivateMeasureCatalog,
   rejectMeasureCatalog,
+  restoreMeasureCatalog,
   submitMeasureCatalog,
 } from "../api";
 import { PermissionProvider } from "../hooks/usePermission";
@@ -49,6 +57,9 @@ const mockedReject = vi.mocked(rejectMeasureCatalog);
 const mockedBatchSubmit = vi.mocked(batchSubmitMeasures);
 const mockedCurrentUser = vi.mocked(fetchCurrentUser);
 const mockedUsers = vi.mocked(listUsers);
+const mockedReactivate = vi.mocked(reactivateMeasureCatalog);
+const mockedDelete = vi.mocked(deleteMeasureCatalog);
+const mockedRestore = vi.mocked(restoreMeasureCatalog);
 
 const measure: MeasureCatalog = {
   id: 1,
@@ -375,5 +386,76 @@ describe("MeasureCatalogs 审核流（提交审核/通过/驳回）", () => {
         },
       ]);
     });
+  });
+});
+
+describe("MeasureCatalogs 生命周期（重新启用/删除/回收站恢复）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedDomains.mockResolvedValue([]);
+    mockedUsers.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "admin",
+      display_name: "管理员",
+      role: "platform_admin",
+      domain: null,
+      org_id: 1,
+    } as never);
+  });
+
+  it("DEPRECATED 度量显示「重新启用」和「删除」，点重新启用调用 reactivateMeasureCatalog", async () => {
+    const deprecated = { ...measure, status: "DEPRECATED" as const };
+    mockedList.mockResolvedValue({ items: [deprecated], total: 1, page: 1, page_size: 20 });
+    mockedReactivate.mockResolvedValue({ ...deprecated, status: "DRAFT" });
+    renderCatalogs();
+
+    fireEvent.click(await screen.findByRole("button", { name: /重新启用/ }));
+    // Popconfirm 确认
+    fireEvent.click(await screen.findByRole("button", { name: /确 定|确定|OK/ }));
+
+    await waitFor(() =>
+      expect(mockedReactivate).toHaveBeenCalledWith("medical_fee_men_zhen_shou_fei"),
+    );
+    expect(await screen.findByText(/已重新启用/)).toBeInTheDocument();
+  });
+
+  it("DRAFT 度量点删除调用 deleteMeasureCatalog", async () => {
+    mockedList.mockResolvedValue({ items: [measure], total: 1, page: 1, page_size: 20 });
+    mockedDelete.mockResolvedValue(measure);
+    renderCatalogs();
+
+    fireEvent.click(await screen.findByRole("button", { name: /删除/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /确 定|确定|OK/ }));
+
+    await waitFor(() =>
+      expect(mockedDelete).toHaveBeenCalledWith("medical_fee_men_zhen_shou_fei"),
+    );
+    expect(await screen.findByText(/已删除/)).toBeInTheDocument();
+  });
+
+  it("回收站视图显示「恢复」按钮，点击调用 restoreMeasureCatalog", async () => {
+    mockedList.mockResolvedValue({ items: [measure], total: 1, page: 1, page_size: 20 });
+    mockedRestore.mockResolvedValue(measure);
+    renderCatalogs();
+
+    // 切换到回收站视图（antd Select placeholder 为文本节点，用 getByText 展开）
+    fireEvent.mouseDown(screen.getByText("回收站"));
+    fireEvent.click(await screen.findByTitle("回收站"));
+
+    // 回收站视图下仅显示恢复按钮（编辑/审核等操作隐藏）
+    await waitFor(() =>
+      expect(mockedList).toHaveBeenCalledWith(
+        expect.objectContaining({ deleted: true, status: undefined }),
+      ),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /恢 复|恢复/ }));
+    // Popconfirm 确认
+    fireEvent.click(await screen.findByRole("button", { name: /确 定|确定|OK/ }));
+
+    await waitFor(() =>
+      expect(mockedRestore).toHaveBeenCalledWith("medical_fee_men_zhen_shou_fei"),
+    );
+    expect(await screen.findByText(/已恢复/)).toBeInTheDocument();
   });
 });

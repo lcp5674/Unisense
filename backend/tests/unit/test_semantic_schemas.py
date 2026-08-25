@@ -155,6 +155,44 @@ def test_definition_downstream_tables_not_list_rejected():
     assert "必须为数据表名数组" in str(exc.value)
 
 
+def test_definition_pseudo_and_dw_normalized():
+    """口径双字段规范化：pseudo_definition/dw_definition 去空白保留。"""
+    req = MetricCreateRequest(
+        **_base_payload(
+            definition_json={
+                "expression": "SUM(amount)",
+                "pseudo_definition": "  SUM(收费金额) 按结算日期去重  ",
+                "dw_definition": "  SELECT visit_date, SUM(real_amount) FROM dwd.fee_bill_di  ",
+            }
+        )
+    )
+    assert req.definition_json["pseudo_definition"] == "SUM(收费金额) 按结算日期去重"
+    assert req.definition_json["dw_definition"] == (
+        "SELECT visit_date, SUM(real_amount) FROM dwd.fee_bill_di"
+    )
+
+
+def test_definition_pseudo_empty_rejected():
+    """pseudo_definition 空字符串 → 422（防空白字段入库）。"""
+    with pytest.raises(ValidationError) as exc:
+        MetricCreateRequest(
+            **_base_payload(definition_json={"pseudo_definition": "   "})
+        )
+    assert "必须为非空字符串" in str(exc.value)
+
+
+def test_definition_dw_pseudo_survives_sql_not_required():
+    """dw_definition 不强制走 sqlglot 校验（数仓开发维护，可含伪 SQL/建模口径文本）。"""
+    req = MetricCreateRequest(
+        **_base_payload(
+            definition_json={
+                "dw_definition": "由数仓开发维护的详细加工口径，非完整可执行 SQL",
+            }
+        )
+    )
+    assert req.definition_json["dw_definition"] == "由数仓开发维护的详细加工口径，非完整可执行 SQL"
+
+
 def test_definition_update_sql_invalid_rejected():
     """更新请求的 definition_json 同样校验 SQL 语法（非法 SQL → 422）。"""
     from app.services.semantic.schemas import MetricUpdateRequest
@@ -289,7 +327,7 @@ def test_atomic_with_physical_source_passes():
 
 
 def test_atomic_with_top_level_source_passes():
-    """原子指标 definition 为空但顶层 source_table/measure_column 提供来源 → 通过（自动推断路径）。"""
+    """definition 为空但顶层 source_table/measure_column 提供来源 → 通过（自动推断）。"""
     req = MetricCreateRequest(
         **_base_payload(
             definition_json={},

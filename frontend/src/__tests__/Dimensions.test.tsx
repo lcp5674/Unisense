@@ -30,6 +30,9 @@ vi.mock("../api", () => {
     approveDimension: vi.fn(),
     rejectDimension: vi.fn(),
     deprecateDimension: vi.fn(),
+    reactivateDimension: vi.fn(),
+    deleteDimension: vi.fn(),
+    restoreDimension: vi.fn(),
     batchSubmitDimensions: vi.fn(),
     batchApproveDimensions: vi.fn(),
     batchRejectDimensions: vi.fn(),
@@ -61,7 +64,7 @@ vi.mock("../api", () => {
   };
 });
 
-import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember, deleteDimensionMember, listDimensionMetrics, listDimensionMappings, updateDimensionMapping, listReconciliations, listUsers, listFavorites, listDataSources, previewColumnValues, fetchCurrentUser, submitDimension, approveDimension, rejectDimension, batchSubmitDimensions, batchDeprecateDimensions } from "../api";
+import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember, deleteDimensionMember, listDimensionMetrics, listDimensionMappings, updateDimensionMapping, listReconciliations, listUsers, listFavorites, listDataSources, previewColumnValues, fetchCurrentUser, submitDimension, approveDimension, rejectDimension, batchSubmitDimensions, batchDeprecateDimensions, reactivateDimension, deleteDimension, restoreDimension } from "../api";
 
 const mockedList = vi.mocked(listDimensions);
 const mockedListFavorites = vi.mocked(listFavorites);
@@ -70,6 +73,9 @@ const mockedApproveDim = vi.mocked(approveDimension);
 const mockedRejectDim = vi.mocked(rejectDimension);
 const mockedBatchSubmitDim = vi.mocked(batchSubmitDimensions);
 const mockedBatchDeprecateDim = vi.mocked(batchDeprecateDimensions);
+const mockedReactivateDim = vi.mocked(reactivateDimension);
+const mockedDeleteDim = vi.mocked(deleteDimension);
+const mockedRestoreDim = vi.mocked(restoreDimension);
 
 const DIMS: Dimension[] = [
   {
@@ -839,5 +845,84 @@ describe("Dimensions 审核流（提交审核/通过/驳回，复用主数据审
     await waitFor(() => {
       expect(mockedBatchDeprecateDim).toHaveBeenCalledWith(["dim_channel"]);
     });
+  });
+});
+
+describe("Dimensions 生命周期（重新启用/删除/回收站恢复）", () => {
+  const deprecatedDim: Dimension = {
+    ...DIMS[0],
+    dim_code: "dim_old",
+    name: "旧维度",
+    status: "DEPRECATED",
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedListFavorites.mockResolvedValue([]);
+    vi.mocked(listMetrics).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 });
+    vi.mocked(listDomainTree).mockResolvedValue([
+      { id: 1, code: "finance", name: "财务域", parent_id: null, level: 1, sort_order: 0, status: "ACTIVE", metric_count: 0, children: [] },
+    ]);
+    vi.mocked(listDimensionMembers).mockResolvedValue({ items: [], total: 0 });
+    vi.mocked(listUsers).mockResolvedValue([]);
+    vi.mocked(fetchCurrentUser).mockResolvedValue({
+      id: 1,
+      username: "admin",
+      display_name: "管理员",
+      role: "platform_admin",
+      domain: null,
+      org_id: 1,
+    } as never);
+  });
+
+  it("DEPRECATED 维度显示「重新启用」与「删除」，点重新启用调用 reactivateDimension", async () => {
+    mockedList.mockResolvedValue({ items: [deprecatedDim], total: 1 });
+    mockedReactivateDim.mockResolvedValue({ ...deprecatedDim, status: "DRAFT" });
+    render(
+      <MemoryRouter initialEntries={["/dimensions"]}>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+    await screen.findByText("旧维度");
+    fireEvent.click(screen.getByRole("button", { name: /重新启用/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /确 定|确定|OK/ }));
+    await waitFor(() => expect(mockedReactivateDim).toHaveBeenCalledWith("dim_old"));
+    expect(await screen.findByText(/已重新启用/)).toBeInTheDocument();
+  });
+
+  it("DRAFT 维度点删除调用 deleteDimension", async () => {
+    mockedList.mockResolvedValue({ items: [DIMS[1]], total: 1 });
+    mockedDeleteDim.mockResolvedValue(DIMS[1]);
+    render(
+      <MemoryRouter initialEntries={["/dimensions"]}>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+    await screen.findByText("区域");
+    fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /确 定|确定|OK/ }));
+    await waitFor(() => expect(mockedDeleteDim).toHaveBeenCalledWith("dim_region"));
+    expect(await screen.findByText(/已删除/)).toBeInTheDocument();
+  });
+
+  it("回收站视图显示「恢复」按钮，点击调用 restoreDimension", async () => {
+    mockedList.mockResolvedValue({ items: [DIMS[1]], total: 1 });
+    mockedRestoreDim.mockResolvedValue(DIMS[1]);
+    render(
+      <MemoryRouter initialEntries={["/dimensions"]}>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+    await screen.findByText("区域");
+    // 切换到回收站视图（antd Select placeholder 为文本节点，用 getByText 展开）
+    fireEvent.mouseDown(screen.getByText("回收站"));
+    fireEvent.click(await screen.findByTitle("回收站"));
+    await waitFor(() =>
+      expect(mockedList).toHaveBeenCalledWith(expect.objectContaining({ deleted: true })),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /恢 复|恢复/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /确 定|确定|OK/ }));
+    await waitFor(() => expect(mockedRestoreDim).toHaveBeenCalledWith("dim_region"));
+    expect(await screen.findByText(/已恢复/)).toBeInTheDocument();
   });
 });

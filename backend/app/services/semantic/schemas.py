@@ -39,7 +39,9 @@ def _validate_definition_json(v: dict[str, Any]) -> dict[str, Any]:
     2. ``source_tables``（上游依赖表）与 ``downstream_tables``（下游使用表）：
        若提供，规范化为去重字符串数组（指标锚定的数据表，与 db_catalog/血缘节点
        约定一致）。
-    3. 仅做校验与规范化，不新增字段、不改变未提供字段。
+    3. ``pseudo_definition``（系统开发伪代码口径）与 ``dw_definition``
+       （数仓开发详细口径）：去空白字符串规范化（纯文本，不做 SQL 强校验）。
+    4. 仅做校验与规范化，不新增字段、不改变未提供字段。
     """
     sql = v.get("sql")
     if sql is not None:
@@ -55,6 +57,12 @@ def _validate_definition_json(v: dict[str, Any]) -> dict[str, Any]:
     for key in ("source_tables", "downstream_tables"):
         if v.get(key) is not None:
             v[key] = _normalize_table_list(v[key], key)
+    for key in ("pseudo_definition", "dw_definition"):
+        val = v.get(key)
+        if val is not None:
+            if not isinstance(val, str) or not val.strip():
+                raise ValueError(f"{key} 必须为非空字符串")
+            v[key] = val.strip()
     return v
 
 
@@ -98,7 +106,10 @@ class MetricCreateRequest(BaseModel):
     unit: str | None = Field(
         None,
         max_length=32,
-        description="单位（OneData：原子指标由逻辑度量 default_unit 继承，缺省则继承；派生/复合缺省用默认）",
+        description=(
+            "单位（OneData：原子指标由逻辑度量 default_unit 继承，缺省则继承；"
+            "派生/复合缺省用默认）"
+        ),
     )
     currency: str | None = Field(None, max_length=16, description="币种")
     # 与字典种子对齐（9 值）：SUM/AVG/COUNT/COUNT_DISTINCT/LAST_VALUE + MAX/MIN/MEDIAN/PERCENTILE
@@ -132,7 +143,9 @@ class MetricCreateRequest(BaseModel):
     sla: str | None = Field(None, max_length=128, description="SLA 契约")
     # 口径三方责任（PRD 4.5 补充，均可空）：产品需求方/技术方/数仓开发（user.id）。
     # 与 owner_id 同模式——从"指标归谁管"细化为"口径从需求到落地谁负责"。
-    product_owner_id: int | None = Field(None, description="产品需求方用户 ID（口径业务需求提出人）")
+    product_owner_id: int | None = Field(
+        None, description="产品需求方用户 ID（口径业务需求提出人）"
+    )
     tech_owner_id: int | None = Field(None, description="技术方用户 ID（口径 ETL/SQL 实现人）")
     dw_developer_id: int | None = Field(None, description="数仓开发用户 ID（数仓建模/血缘维护人）")
     # 外部人员名称兜底（责任方非平台用户时直接填名称，id 为空）：展示优先级 id>name
@@ -180,7 +193,7 @@ class MetricCreateRequest(BaseModel):
         return _validate_definition_json(v)
 
     @model_validator(mode="after")
-    def validate_definition_by_type(self) -> "MetricCreateRequest":
+    def validate_definition_by_type(self) -> MetricCreateRequest:
         """按指标类型校验口径定义完整性（注册门禁，PRD 4.5 / TD §12.2 / OneData）。
 
         三类指标在生产中的配置差异：
@@ -272,7 +285,9 @@ class MetricUpdateRequest(BaseModel):
     consumption_guide: dict[str, Any] | None = Field(None, description="消费指南")
     backup_owner_id: int | None = Field(None, description="副 Owner ID")
     # 口径三方责任（非破坏性变更，不触发版本确认）：产品需求方/技术方/数仓开发（user.id）
-    product_owner_id: int | None = Field(None, description="产品需求方用户 ID（口径业务需求提出人）")
+    product_owner_id: int | None = Field(
+        None, description="产品需求方用户 ID（口径业务需求提出人）"
+    )
     tech_owner_id: int | None = Field(None, description="技术方用户 ID（口径 ETL/SQL 实现人）")
     dw_developer_id: int | None = Field(None, description="数仓开发用户 ID（数仓建模/血缘维护人）")
     # 外部人员名称兜底（责任方非平台用户时直接填名称，id 为空）：展示优先级 id>name

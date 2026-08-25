@@ -2,12 +2,12 @@ import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { BarsOutlined, ArrowLeftOutlined, PlusOutlined, MinusCircleOutlined, RobotOutlined } from "@ant-design/icons";
 import {
-  Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Collapse, Drawer, Form, Input, Modal, Row, Segmented, Select, Space, Spin, Steps, Table, Tooltip, Typography, App as AntApp, Tag,
+  Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Collapse, Divider, Drawer, Form, Input, Modal, Radio, Row, Segmented, Select, Space, Spin, Steps, Table, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
 import {
-  createMetric, listCatalogs, autoSuggestMetric, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, listMeasureCatalogs, fetchCurrentUser, UnisenseApiError,
+  createMetric, listCatalogs, autoSuggestMetric, suggestDomain, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, listMeasureCatalogs, fetchCurrentUser, UnisenseApiError,
 } from "../api";
-import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, Dimension, MeasureCatalog, MetricMountInput } from "../types";
+import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, DomainSuggestionCandidate, Dimension, MeasureCatalog, MetricMountInput } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
 import { MEASURE_FORMAT_LABEL } from "../types";
 import { usePermission } from "../hooks/usePermission";
@@ -33,6 +33,17 @@ function flattenDomainOptions(nodes: SubjectDomainTreeNode[]): Array<{ value: st
       : []),
     ...flattenDomainOptions(n.children),
   ]);
+}
+
+// 域建议回填：将域 code 映射为 Cascader 需要的完整路径数组（父→子），
+// 找不到（非叶子/停用域）返回 null——调用方提示手动选择。
+function findDomainPath(nodes: SubjectDomainTreeNode[], code: string): string[] | null {
+  for (const n of nodes) {
+    if (n.code === code) return [n.code];
+    const sub = findDomainPath(n.children, code);
+    if (sub) return [n.code, ...sub];
+  }
+  return null;
 }
 
 // 批量注册结果明细列：成功=DRAFT（草稿），失败=VALIDATION_ERROR（含原因）
@@ -126,6 +137,9 @@ const SOURCE_META: Record<string, { color: string; text: string }> = {
   rule: { color: "cyan", text: "规则" },
   llm: { color: "magenta", text: "AI" },
   fallback: { color: "default", text: "兜底" },
+  // 业务域建议来源（FR-010 域建议增强）
+  catalog: { color: "green", text: "采集目录" },
+  mount: { color: "blue", text: "挂载实体" },
 };
 
 function InferBadge({ field }: { field: SuggestionField }) {
@@ -209,6 +223,11 @@ export function MetricCreate() {
 
   const [mode, setMode] = useState<"expression" | "sql">("expression");
   const [sqlText, setSqlText] = useState("");
+  // 口径双字段（对齐 Step④ 责任方：技术方=系统开发、数仓开发=数仓建模）：
+  // - pseudo_definition：系统开发提供的伪代码口径（伪 SQL/自然语言，非完整 SQL）
+  // - dw_definition：数仓开发指标的详细口径（完整 SQL/建模口径）
+  const [pseudoDefinition, setPseudoDefinition] = useState("");
+  const [dwDefinition, setDwDefinition] = useState("");
   // OneData 向导：SQL 智能推断是"工具"而非主流程步骤（方案 C）——收敛为右上角抽屉入口
   const [sqlInferOpen, setSqlInferOpen] = useState(false);
   // 派生/复合指标的计算表达式（MEL 语法，如 gmv / order_cnt），自动合入 definition_json.expression。
@@ -254,6 +273,16 @@ export function MetricCreate() {
   // 推断结果友好摘要（SQL 智能推断成功后展示，让用户明确知道推断出了什么）
   const [inferSummary, setInferSummary] = useState<AutoSuggestResponse | null>(null);
   const [inferSummaryOpen, setInferSummaryOpen] = useState(false);
+
+  // 业务域建议（FR-010 域建议增强）：SQL 推断时反向定位/LLM 兜底推断业务域。
+  // domainSuggestionStatus：unique/llm=已应用；conflict=建议域与当前所选不同；matched=与所选一致；
+  // multiple=多候选待挑；none=无法建议。
+  const [domainSuggesting, setDomainSuggesting] = useState(false);
+  const [domainSuggestion, setDomainSuggestion] = useState<DomainSuggestionCandidate | null>(null);
+  const [domainSuggestionStatus, setDomainSuggestionStatus] = useState<string | null>(null);
+  const [candidateCandidates, setCandidateCandidates] = useState<DomainSuggestionCandidate[]>([]);
+  const [candidateOpen, setCandidateOpen] = useState(false);
+  const [candidateChecked, setCandidateChecked] = useState<string>("");
 
   // 批量注册指标弹窗状态（POST /metric-definitions/batch-register）
   const [batchOpen, setBatchOpen] = useState(false);
@@ -541,19 +570,12 @@ export function MetricCreate() {
     }
   }
 
-  async function handleDomainChange(value: string[], _selectedOptions: any) {
-    const domainCode = value[value.length - 1];
-    setSelectedDomain(domainCode);
-    if (!domainCode) return;
-    // 切换域先清空上一域的推断建议（编码/字段徽标/口径定义预览），
-    // 避免推断失败时残留旧域建议导致提交用错域的自动生成编码
-    setSuggestedCode(null);
-    setInferred({});
-    setInferredDefinition({ json: null, mode: null });
-    // 域默认值预填（TD §3.8 主题域默认值）：选域后将该域配置的默认粒度/单位/聚合等
-    // 预填到表单（用户可覆盖），打通「主题域配置 → 注册指标预填」的跨服务闭环。
-    // 用 isFieldTouched 区分「用户手动输入」与「initialValues 全局默认」：
-    // 域默认值覆盖全局 initialValues（域配置优先），但尊重用户已手动修改的字段。
+  // 域默认值预填（TD §3.8 主题域默认值）：选域后将该域配置的默认粒度/单位/聚合等
+  // 预填到表单（用户可覆盖），打通「主题域配置 → 注册指标预填」的跨服务闭环。
+  // 用 isFieldTouched 区分「用户手动输入」与「initialValues 全局默认」：
+  // 域默认值覆盖全局 initialValues（域配置优先），但尊重用户已手动修改的字段。
+  // 独立函数供「域建议自动选域」复用（不触发 autoSuggest，调用方自行推断）。
+  async function loadDomainDefaults(domainCode: string) {
     try {
       const defaults = await getDomainDefaults(domainCode);
       const prefill: Record<string, unknown> = {};
@@ -577,6 +599,18 @@ export function MetricCreate() {
       // 域默认值拉取失败不阻断选域流程（推断仍进行）
       domainPrefillRef.current = new Set();
     }
+  }
+
+  async function handleDomainChange(value: string[], _selectedOptions: any) {
+    const domainCode = value[value.length - 1];
+    setSelectedDomain(domainCode);
+    if (!domainCode) return;
+    // 切换域先清空上一域的推断建议（编码/字段徽标/口径定义预览），
+    // 避免推断失败时残留旧域建议导致提交用错域的自动生成编码
+    setSuggestedCode(null);
+    setInferred({});
+    setInferredDefinition({ json: null, mode: null });
+    await loadDomainDefaults(domainCode);
     setSuggesting(true);
     try {
       const sourceTable = form.getFieldValue("source_table");
@@ -596,14 +630,29 @@ export function MetricCreate() {
     }
   }
 
+  // 应用域建议：将建议域预填到 Step0 域 Cascader + 预填域默认值（不触发 autoSuggest——
+  // 调用方 handleSqlInfer 会随后用该域跑 SQL 推断，避免重复网络请求）。
+  async function applyDomainSuggestion(dom: DomainSuggestionCandidate) {
+    setDomainSuggestion(dom);
+    setDomainSuggestionStatus("applied");
+    const path = findDomainPath(domainTree, dom.code);
+    if (!path) {
+      message.warning(`建议的业务域「${dom.name}（${dom.code}）」不在可选域树中，请手动选择`);
+      return;
+    }
+    form.setFieldValue("domain_path", path);
+    setSelectedDomain(dom.code);
+    await loadDomainDefaults(dom.code);
+    message.success(`已按建议选择业务域：${dom.name}（${dom.code}）`);
+  }
+
   // 粘贴 SQL 智能推断（独立入口：仅用于推断并回填属性，与最终「口径定义」相互独立）
-  async function handleSqlInfer() {
-    if (!selectedDomain) { message.warning("请先选择业务域"); return; }
-    if (!sqlInferText.trim()) { message.warning("请先粘贴指标 SQL"); return; }
+  // 用指定域跑 SQL 自动推断并回填（域建议后重跑也复用；错误内部消化不阻断）
+  async function runSqlInfer(domainCode: string) {
     setSqlInferring(true);
     try {
       const result = await autoSuggestMetric({
-        domain_code: selectedDomain,
+        domain_code: domainCode,
         sql: sqlInferText.trim(),
       });
       applySuggestion(result);
@@ -630,6 +679,63 @@ export function MetricCreate() {
     } finally {
       setSqlInferring(false);
     }
+  }
+
+  // 粘贴 SQL 智能推断（独立入口：仅用于推断并回填属性，与最终「口径定义」相互独立）。
+  // 不再要求先选业务域（FR-010 域建议增强）：未选域时先反向定位/LLM 兜底推断业务域，
+  // 预填 Step0 域 Cascader 后继续推断；已选域则交叉校验（不同域提示可切换）。
+  async function handleSqlInfer() {
+    const sql = sqlInferText.trim();
+    if (!sql) { message.warning("请先粘贴指标 SQL"); return; }
+    setSqlInferring(true);
+    setDomainSuggesting(true);
+    let effectiveDomain = selectedDomain;
+    // ① 业务域建议——失败不阻断主推断（域建议只是辅助）
+    try {
+      const suggestion = await suggestDomain({ sql });
+      if (suggestion.status === "unique" || suggestion.status === "llm") {
+        const dom = suggestion.domain;
+        if (dom) {
+          if (!effectiveDomain) {
+            await applyDomainSuggestion(dom);
+            effectiveDomain = dom.code;
+          } else if (dom.code !== effectiveDomain) {
+            setDomainSuggestion(dom);
+            setDomainSuggestionStatus("conflict");
+          } else {
+            setDomainSuggestion(dom);
+            setDomainSuggestionStatus("matched");
+          }
+        } else {
+          setDomainSuggestion(null);
+          setDomainSuggestionStatus("none");
+        }
+      } else if (suggestion.status === "multiple") {
+        setCandidateCandidates(suggestion.candidates || []);
+        setCandidateOpen(true);
+        setDomainSuggestion(null);
+        setDomainSuggestionStatus("multiple");
+      } else {
+        setDomainSuggestion(null);
+        setDomainSuggestionStatus("none");
+      }
+    } catch {
+      setDomainSuggestion(null);
+      setDomainSuggestionStatus("none");
+    } finally {
+      setDomainSuggesting(false);
+    }
+    // ② 按最终域跑 SQL 自动推断（域可能刚被建议更新）
+    await runSqlInfer(effectiveDomain || "");
+  }
+
+  // 多候选域挑一个：应用域建议后用该域重跑 SQL 推断
+  async function handleCandidateConfirm(code: string) {
+    const dom = candidateCandidates.find((c) => c.code === code);
+    setCandidateOpen(false);
+    if (!dom) return;
+    await applyDomainSuggestion(dom);
+    await runSqlInfer(dom.code);
   }
 
   async function handleAutoSuggest() {
@@ -677,10 +783,14 @@ export function MetricCreate() {
     const srcField = isAtomic && src ? { source_table: src } : {};
     const measure = String(values.measure_column || "").trim();
     const measureField = isAtomic && measure ? { measure_column: measure } : {};
+    // 口径双字段（系统开发伪代码口径 / 数仓开发详细口径）→ definition_json
+    const pseudoField = pseudoDefinition.trim() ? { pseudo_definition: pseudoDefinition.trim() } : {};
+    const dwField = dwDefinition.trim() ? { dw_definition: dwDefinition.trim() } : {};
+    const caliberFields = { ...pseudoField, ...dwField };
     if (mode === "sql") {
       const sql = sqlText.trim();
       if (!sql) { message.error("口径 SQL 模式请输入 SQL 语句"); return null; }
-      return { sql, ...tables, ...downTables, ...srcField, ...measureField, ...dimsField, ...depsField };
+      return { sql, ...tables, ...downTables, ...srcField, ...measureField, ...dimsField, ...depsField, ...caliberFields };
     }
     let def: Record<string, unknown>;
     try { def = values.definition ? JSON.parse(String(values.definition)) : {}; }
@@ -939,8 +1049,8 @@ export function MetricCreate() {
       <Space style={{ width: "100%", justifyContent: "space-between", marginBottom: 16 }} align="center">
         <Title level={3} style={{ margin: 0 }}>注册指标（草稿）</Title>
         <Space>
-          <Tooltip title="粘贴指标 SQL 智能推断并回填字段（独立工具，不占注册主流程）">
-            <Button icon={<RobotOutlined />} onClick={() => setSqlInferOpen(true)} disabled={!selectedDomain}>
+          <Tooltip title="粘贴指标 SQL 智能推断并回填字段（未选域时可先推断出业务域建议，独立工具，不占注册主流程）">
+            <Button icon={<RobotOutlined />} onClick={() => setSqlInferOpen(true)}>
               SQL 智能推断
             </Button>
           </Tooltip>
@@ -1491,6 +1601,52 @@ export function MetricCreate() {
                   <Paragraph type="secondary" style={{ marginTop: 4, fontSize: 12 }}>后端将用 sqlglot 校验 SQL 语法；不合法将拒绝提交。</Paragraph>
                 </Form.Item>
               )}
+
+              <Divider style={{ margin: "8px 0 16px" }} />
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message="口径分角色填写（可选）"
+                description={
+                  <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.8 }}>
+                    <li>
+                      <b>伪代码口径</b>：由<b>系统开发（技术方）</b>提供——描述“这个指标大致怎么算”，可用伪代码/自然语言，如
+                      <span className="mono" style={{ fontSize: 12 }}> SUM(收费金额) WHERE 结算日期 = 当日</span>
+                    </li>
+                    <li>
+                      <b>数仓详细口径</b>：由<b>数仓开发</b>提供——落地加工的具体 SQL/建模口径，如
+                      <span className="mono" style={{ fontSize: 12 }}> SELECT ... FROM dwd.fee_bill_di WHERE ...</span>
+                    </li>
+                  </ul>
+                }
+              />
+              <Form.Item
+                label="伪代码口径（系统开发）"
+                extra="技术方（系统开发）提供的口径说明——伪 SQL/自然语言即可，描述“这个指标大致怎么算”"
+              >
+                <TextArea
+                  rows={3}
+                  value={pseudoDefinition}
+                  onChange={(e) => setPseudoDefinition(e.target.value)}
+                  placeholder="如：SUM(收费金额) 按结算日期，去重就诊，剔除退费"
+                  aria-label="伪代码口径"
+                  className="mono"
+                />
+              </Form.Item>
+              <Form.Item
+                label="数仓详细口径（数仓开发）"
+                extra="数仓开发提供的落地加工口径——具体 SQL 或建模口径（走血缘校验/冲突预检的依据）"
+              >
+                <TextArea
+                  rows={4}
+                  value={dwDefinition}
+                  onChange={(e) => setDwDefinition(e.target.value)}
+                  placeholder={"如：SELECT visit_date, SUM(real_amount) AS amt\nFROM dwd.fee_bill_di\nWHERE biz_type='outp'\nGROUP BY visit_date"}
+                  aria-label="数仓详细口径"
+                  className="mono"
+                />
+              </Form.Item>
             </Card>
             {renderStepNav()}
             </>
@@ -1557,6 +1713,12 @@ export function MetricCreate() {
           面向原子指标：粘贴一段指标定义 SQL（含 SELECT + 聚合 + GROUP BY + 时间过滤），
           系统用 sqlglot 解析并自动推断类型/名称/粒度/单位/聚合/时间语义/新鲜度/数仓层/
           可加性/服务模式/分级，并生成口径定义。推断结果回填到向导各步骤，可确认或覆盖。
+          {!selectedDomain && (
+            <span style={{ display: "block", marginTop: 6 }}>
+              尚未选择业务域：将先按 SQL 涉及表<b>反向定位业务域</b>（未采集表走 AI 推断），
+              建议域会预填到第 ① 步，可确认或改选。
+            </span>
+          )}
         </Paragraph>
         <TextArea
           rows={6}
@@ -1571,11 +1733,58 @@ export function MetricCreate() {
           block
           style={{ marginTop: 12 }}
           onClick={handleSqlInfer}
-          disabled={!selectedDomain || !sqlInferText.trim() || sqlInferring}
+          disabled={!sqlInferText.trim() || sqlInferring}
           loading={sqlInferring}
         >
           智能推断并回填字段
         </Button>
+        )}
+        {/* 业务域建议（FR-010 域建议增强）：推断时反向定位/LLM 兜底推断业务域 */}
+        {domainSuggesting && (
+          <div style={{ marginTop: 12 }}>
+            <Spin size="small" /> <Typography.Text type="secondary" style={{ fontSize: 12 }}>正在推断业务域…</Typography.Text>
+          </div>
+        )}
+        {domainSuggestion && !domainSuggesting && (
+          <Alert
+            type={domainSuggestionStatus === "conflict" ? "warning" : "success"}
+            showIcon
+            style={{ marginTop: 12 }}
+            message={
+              domainSuggestionStatus === "conflict"
+                ? `该 SQL 涉及表主要归属「${domainSuggestion.name}（${domainSuggestion.code}）」域，与当前所选不同`
+                : domainSuggestionStatus === "applied"
+                  ? `已按建议选择业务域：${domainSuggestion.name}（${domainSuggestion.code}）`
+                  : `SQL 涉及表归属业务域：${domainSuggestion.name}（${domainSuggestion.code}）`
+            }
+            description={
+              <Space wrap>
+                <span>
+                  来源：{SOURCE_META[domainSuggestion.source]?.text ?? domainSuggestion.source} ·
+                  置信度 {Math.round((domainSuggestion.confidence || 0) * 100)}%
+                </span>
+                {domainSuggestionStatus === "conflict" && (
+                  <Button
+                    size="small"
+                    type="link"
+                    onClick={() => {
+                      void applyDomainSuggestion(domainSuggestion);
+                    }}
+                  >
+                    切换为 {domainSuggestion.name}
+                  </Button>
+                )}
+              </Space>
+            }
+          />
+        )}
+        {domainSuggestionStatus === "none" && !domainSuggesting && (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginTop: 12 }}
+            message="未能自动推断业务域（SQL 涉及表未被采集且 AI 不可用），请到第 ① 步手动选择"
+          />
         )}
         {inferSummary && (
           <Alert
@@ -1586,6 +1795,40 @@ export function MetricCreate() {
           />
         )}
       </Drawer>
+
+      {/* 业务域多候选选择：跨域共用 DWD 层表时列候选让用户挑（FR-010 域建议增强） */}
+      <Modal
+        title="选择业务域（SQL 涉及表归属多个域）"
+        open={candidateOpen}
+        onCancel={() => setCandidateOpen(false)}
+        onOk={() => {
+          const checked = candidateCandidates.find((c) => c.code === candidateChecked);
+          if (checked) void handleCandidateConfirm(checked.code);
+        }}
+        okText="应用并推断"
+        cancelText="取消"
+      >
+        <Paragraph type="secondary" style={{ fontSize: 12 }}>
+          SQL 涉及的表在平台中归属多个业务域（跨域共用 DWD 层表是常态），请选择最贴合的域；
+          也可取消后到第 ① 步手动选择。
+        </Paragraph>
+        <Radio.Group
+          style={{ width: "100%" }}
+          value={candidateChecked}
+          onChange={(e) => setCandidateChecked(e.target.value)}
+        >
+          <Space direction="vertical" style={{ width: "100%" }}>
+            {candidateCandidates.map((c) => (
+              <Radio key={c.code} value={c.code}>
+                {c.name}（{c.code}）
+                <Tag color={SOURCE_META[c.source]?.color} style={{ marginLeft: 6 }}>
+                  {SOURCE_META[c.source]?.text ?? c.source} · {Math.round((c.confidence || 0) * 100)}%
+                </Tag>
+              </Radio>
+            ))}
+          </Space>
+        </Radio.Group>
+      </Modal>
 
       {/* 推断结果摘要：SQL 智能推断成功后展示，让用户明确知道识别出了什么（惰性设计：给反馈而非只默默回填） */}
       <Modal

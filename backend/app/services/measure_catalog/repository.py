@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +28,26 @@ class MeasureCatalogRepository:
         stmt = select(MeasureCatalog).where(MeasureCatalog.id == measure_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def soft_delete_measure(self, measure_id: int) -> None:
+        """软删逻辑度量：置 deleted_at（回收站可恢复）。"""
+        from sqlalchemy import update
+
+        await self._session.execute(
+            update(MeasureCatalog)
+            .where(MeasureCatalog.id == measure_id, MeasureCatalog.deleted_at.is_(None))
+            .values(deleted_at=datetime.now(UTC))
+        )
+
+    async def restore_measure(self, measure_id: int) -> None:
+        """恢复软删逻辑度量：清除 deleted_at（回收站恢复）。"""
+        from sqlalchemy import update
+
+        await self._session.execute(
+            update(MeasureCatalog)
+            .where(MeasureCatalog.id == measure_id, MeasureCatalog.deleted_at.is_not(None))
+            .values(deleted_at=None)
+        )
+
     async def list(
         self,
         domain: str | None,
@@ -33,6 +55,7 @@ class MeasureCatalogRepository:
         keyword: str | None = None,
         owner_id: int | None = None,
         *,
+        deleted: bool = False,
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[list[MeasureCatalog], int]:
@@ -40,8 +63,13 @@ class MeasureCatalogRepository:
 
         - total 用独立 count（不含 JOIN），与列表共用同一过滤条件，保证分页一致性
         - keyword 参数化 LIKE + 通配符转义（对齐 FR-035：% / _ 须转义，防模糊放大）
+        - deleted=True 时列出已软删记录（回收站视图）
         """
-        conditions = [MeasureCatalog.deleted_at.is_(None)]
+        conditions = (
+            [MeasureCatalog.deleted_at.is_not(None)]
+            if deleted
+            else [MeasureCatalog.deleted_at.is_(None)]
+        )
         if domain:
             conditions.append(MeasureCatalog.domain == domain)
         if status:

@@ -1008,6 +1008,137 @@ async def test_deprecate_dimension_lineage_cleanup_failure_is_best_effort() -> N
     repo.commit.assert_awaited()
 
 
+# ---------- 生命周期（reactivate/delete/restore，草稿/废弃可删、审核/启用禁删） ----------
+
+
+async def test_reactivate_dimension_requires_deprecated() -> None:
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(return_value=SimpleNamespace(dim_code="region", status="DRAFT"))
+    try:
+        await svc.reactivate_dimension("region")
+    except UnisenseError as exc:
+        assert exc.error_code == "INVALID_STATE"
+    else:
+        raise AssertionError("should raise UnisenseError")
+
+
+async def test_reactivate_dimension_sets_draft() -> None:
+    svc, repo = await _svc()
+    dim = SimpleNamespace(dim_code="region", status="DEPRECATED")
+    repo.get_dimension = AsyncMock(return_value=dim)
+    result = await svc.reactivate_dimension("region")
+    assert result.status == "DRAFT"
+    repo.commit.assert_awaited()
+
+
+async def test_delete_dimension_rejects_review() -> None:
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(return_value=SimpleNamespace(dim_code="region", status="REVIEW"))
+    try:
+        await svc.delete_dimension("region", actor_id=1, role="platform_admin")
+    except UnisenseError as exc:
+        assert exc.error_code == "INVALID_STATE"
+    else:
+        raise AssertionError("should raise UnisenseError")
+
+
+async def test_delete_dimension_rejects_published() -> None:
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(
+        return_value=SimpleNamespace(dim_code="region", status="PUBLISHED")
+    )
+    try:
+        await svc.delete_dimension("region", actor_id=1, role="platform_admin")
+    except UnisenseError:
+        pass
+    else:
+        raise AssertionError("should raise UnisenseError")
+
+
+async def test_delete_dimension_requires_admin_or_owner() -> None:
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(
+        return_value=SimpleNamespace(dim_code="region", status="DRAFT", owner_id=5)
+    )
+    try:
+        await svc.delete_dimension("region", actor_id=1, role="metric_owner")
+    except UnisenseError as exc:
+        assert exc.error_code == "FORBIDDEN"
+    else:
+        raise AssertionError("should raise UnisenseError")
+
+
+async def test_delete_dimension_protects_bound() -> None:
+    from app.core.exceptions import BusinessError
+
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(
+        return_value=SimpleNamespace(dim_code="region", status="DRAFT", owner_id=1)
+    )
+    repo.count_metric_dimensions = AsyncMock(return_value=2)
+    try:
+        await svc.delete_dimension("region", actor_id=1, role="platform_admin")
+    except BusinessError as exc:
+        assert exc.error_code == "DIMENSION_BOUND_BY_METRICS"
+    else:
+        raise AssertionError("should raise BusinessError")
+
+
+async def test_delete_dimension_soft_deletes() -> None:
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(
+        return_value=SimpleNamespace(id=1, dim_code="region", status="DRAFT", owner_id=1)
+    )
+    repo.count_metric_dimensions = AsyncMock(return_value=0)
+    repo.soft_delete_dimension = AsyncMock()
+    await svc.delete_dimension("region", actor_id=1, role="metric_owner")
+    repo.soft_delete_dimension.assert_awaited_once_with(1)
+
+
+async def test_restore_dimension_requires_deleted() -> None:
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(
+        return_value=SimpleNamespace(dim_code="region", status="DRAFT", deleted_at=None)
+    )
+    try:
+        await svc.restore_dimension("region", actor_id=1, role="platform_admin")
+    except UnisenseError as exc:
+        assert exc.error_code == "INVALID_STATE"
+    else:
+        raise AssertionError("should raise UnisenseError")
+
+
+async def test_restore_dimension_requires_admin_or_owner() -> None:
+    from datetime import UTC, datetime
+
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(
+        return_value=SimpleNamespace(
+            dim_code="region", status="DRAFT", owner_id=5, deleted_at=datetime.now(UTC)
+        )
+    )
+    try:
+        await svc.restore_dimension("region", actor_id=1, role="metric_owner")
+    except UnisenseError as exc:
+        assert exc.error_code == "FORBIDDEN"
+    else:
+        raise AssertionError("should raise UnisenseError")
+
+
+async def test_restore_dimension_clears_deleted_at() -> None:
+    from datetime import UTC, datetime
+
+    svc, repo = await _svc()
+    repo.get_dimension = AsyncMock(
+        return_value=SimpleNamespace(
+            id=1, dim_code="region", status="DRAFT", owner_id=1, deleted_at=datetime.now(UTC)
+        )
+    )
+    repo.restore_dimension = AsyncMock()
+    await svc.restore_dimension("region", actor_id=1, role="metric_owner")
+    repo.restore_dimension.assert_awaited_once_with(1)
+
+
 async def test_update_member_deprecated_rejected() -> None:
     """状态机保护：已废弃成员拒绝任何更新（防止静默复活/篡改）。"""
     svc, repo = await _svc()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +30,26 @@ class DimensionRepository:
         stmt = select(Dimension).where(Dimension.dim_code == dim_code)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def soft_delete_dimension(self, dim_id: int) -> None:
+        """软删维度：置 deleted_at（回收站可恢复）。"""
+        from sqlalchemy import update
+
+        await self._session.execute(
+            update(Dimension)
+            .where(Dimension.id == dim_id, Dimension.deleted_at.is_(None))
+            .values(deleted_at=datetime.now(UTC))
+        )
+
+    async def restore_dimension(self, dim_id: int) -> None:
+        """恢复软删维度：清除 deleted_at（回收站恢复）。"""
+        from sqlalchemy import update
+
+        await self._session.execute(
+            update(Dimension)
+            .where(Dimension.id == dim_id, Dimension.deleted_at.is_not(None))
+            .values(deleted_at=None)
+        )
+
     async def list_dimensions(
         self,
         domain: str | None,
@@ -35,6 +57,7 @@ class DimensionRepository:
         keyword: str | None = None,
         owner_id: int | None = None,
         *,
+        deleted: bool = False,
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[list[tuple[Dimension, int]], int]:
@@ -43,8 +66,13 @@ class DimensionRepository:
         - LEFT JOIN 聚合取绑定指标数（未绑定计数 0）
         - total 用独立 count（不含 JOIN），与列表共用同一过滤条件，保证分页一致性
         - 对齐 glossary 的服务端分页（page/page_size），消除全量拉回的性能隐患
+        - deleted=True 时列出已软删记录（回收站视图）
         """
-        conditions = [Dimension.deleted_at.is_(None)]
+        conditions = (
+            [Dimension.deleted_at.is_not(None)]
+            if deleted
+            else [Dimension.deleted_at.is_(None)]
+        )
         if domain:
             conditions.append(Dimension.domain == domain)
         if status:

@@ -22,6 +22,7 @@ import {
   AuditEntry,
   AutoSuggestRequest,
   AutoSuggestResponse,
+  DomainSuggestionResponse,
   BatchDeleteRequest,
   BatchSourceResult,
   BatchToggleRequest,
@@ -1561,6 +1562,7 @@ export async function listDimensions(params?: {
   status?: string;
   keyword?: string;
   owner_id?: number;
+  deleted?: boolean;
   page?: number;
   page_size?: number;
 }): Promise<{ items: Dimension[]; total: number }> {
@@ -1569,6 +1571,7 @@ export async function listDimensions(params?: {
     status: params?.status,
     keyword: params?.keyword,
     owner_id: params?.owner_id,
+    deleted: params?.deleted ? "true" : undefined,
     page: params?.page,
     page_size: params?.page_size ?? 50,
   });
@@ -1634,6 +1637,27 @@ export async function deprecateDimension(dimCode: string): Promise<Dimension> {
   });
 }
 
+/** 重新启用已废弃维度（DEPRECATED → DRAFT，可编辑后重新走审核） */
+export async function reactivateDimension(dimCode: string): Promise<Dimension> {
+  return request<Dimension>(`${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/reactivate`, {
+    method: "POST",
+  });
+}
+
+/** 软删除维度（仅 DRAFT/DEPRECATED 可删；管理员或原 Owner） */
+export async function deleteDimension(dimCode: string): Promise<Dimension> {
+  return request<Dimension>(`${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/delete`, {
+    method: "POST",
+  });
+}
+
+/** 恢复已软删维度（回收站恢复） */
+export async function restoreDimension(dimCode: string): Promise<Dimension> {
+  return request<Dimension>(`${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/restore`, {
+    method: "POST",
+  });
+}
+
 // ---- 维度批量治理（TD §13，后端统一 app/api/batch_common）----
 
 /** 批量提交维度审核（DRAFT → REVIEW，可带评审指派） */
@@ -1663,6 +1687,22 @@ export async function batchRejectDimensions(codes: string[], reason: string): Pr
 /** 批量废弃维度（PUBLISHED → DEPRECATED） */
 export async function batchDeprecateDimensions(codes: string[]): Promise<BatchResult> {
   return request<BatchResult>(`${API_BASE}/dimensions/batch-deprecate`, {
+    method: "POST",
+    body: JSON.stringify({ codes }),
+  });
+}
+
+/** 批量重新启用已废弃维度（DEPRECATED → DRAFT） */
+export async function batchReactivateDimensions(codes: string[]): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/dimensions/batch-reactivate`, {
+    method: "POST",
+    body: JSON.stringify({ codes }),
+  });
+}
+
+/** 批量软删除维度（仅 DRAFT/DEPRECATED 可删） */
+export async function batchDeleteDimensions(codes: string[]): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/dimensions/batch-delete`, {
     method: "POST",
     body: JSON.stringify({ codes }),
   });
@@ -1731,6 +1771,7 @@ export async function listMeasureCatalogs(params?: {
   status?: string;
   keyword?: string;
   owner_id?: number;
+  deleted?: boolean;
   page?: number;
   page_size?: number;
 }): Promise<{ items: MeasureCatalog[]; total: number; page: number; page_size: number }> {
@@ -1739,6 +1780,7 @@ export async function listMeasureCatalogs(params?: {
     status: params?.status,
     keyword: params?.keyword,
     owner_id: params?.owner_id,
+    deleted: params?.deleted ? "true" : undefined,
     page: params?.page,
     page_size: params?.page_size ?? 50,
   });
@@ -1859,6 +1901,30 @@ export async function deprecateMeasureCatalog(measureCode: string): Promise<Meas
   );
 }
 
+/** 重新启用已废弃逻辑度量（DEPRECATED → DRAFT，可编辑后重新走审核） */
+export async function reactivateMeasureCatalog(measureCode: string): Promise<MeasureCatalog> {
+  return request<MeasureCatalog>(
+    `${API_BASE}/measure-catalogs/${encodeURIComponent(measureCode)}/reactivate`,
+    { method: "POST" },
+  );
+}
+
+/** 软删除逻辑度量（仅 DRAFT/DEPRECATED 可删；管理员或原 Owner） */
+export async function deleteMeasureCatalog(measureCode: string): Promise<MeasureCatalog> {
+  return request<MeasureCatalog>(
+    `${API_BASE}/measure-catalogs/${encodeURIComponent(measureCode)}/delete`,
+    { method: "POST" },
+  );
+}
+
+/** 恢复已软删逻辑度量（回收站恢复） */
+export async function restoreMeasureCatalog(measureCode: string): Promise<MeasureCatalog> {
+  return request<MeasureCatalog>(
+    `${API_BASE}/measure-catalogs/${encodeURIComponent(measureCode)}/restore`,
+    { method: "POST" },
+  );
+}
+
 // ---- 逻辑度量批量治理（TD §13，后端统一 app/api/batch_common）----
 
 /** 批量提交逻辑度量审核（DRAFT → REVIEW，可带评审指派） */
@@ -1888,6 +1954,22 @@ export async function batchRejectMeasures(codes: string[], reason: string): Prom
 /** 批量废弃逻辑度量（PUBLISHED → DEPRECATED） */
 export async function batchDeprecateMeasures(codes: string[]): Promise<BatchResult> {
   return request<BatchResult>(`${API_BASE}/measure-catalogs/batch-deprecate`, {
+    method: "POST",
+    body: JSON.stringify({ codes }),
+  });
+}
+
+/** 批量重新启用已废弃逻辑度量（DEPRECATED → DRAFT） */
+export async function batchReactivateMeasures(codes: string[]): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/measure-catalogs/batch-reactivate`, {
+    method: "POST",
+    body: JSON.stringify({ codes }),
+  });
+}
+
+/** 批量软删除逻辑度量（仅 DRAFT/DEPRECATED 可删） */
+export async function batchDeleteMeasures(codes: string[]): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/measure-catalogs/batch-delete`, {
     method: "POST",
     body: JSON.stringify({ codes }),
   });

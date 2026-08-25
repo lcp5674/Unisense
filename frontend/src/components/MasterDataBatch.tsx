@@ -16,7 +16,7 @@ import type { BatchResult, UserBrief } from "../types";
  *  + 失败明细弹窗（超 3 条完整展示）+ 重试失败项。对齐指标 MetricCatalog 完整批量模式
  *  TD §13：逐条收集结果不整体失败。 */
 
-export type BatchActionKey = "submit" | "approve" | "reject" | "deprecate" | "publish";
+export type BatchActionKey = "submit" | "approve" | "reject" | "deprecate" | "reactivate" | "delete" | "publish";
 
 export interface BatchActionConfig {
   key: BatchActionKey;
@@ -69,6 +69,8 @@ const ACTION_VERB: Record<BatchActionKey, string> = {
   approve: "通过",
   reject: "驳回",
   deprecate: "废弃",
+  reactivate: "重新启用",
+  delete: "删除",
   publish: "发布",
 };
 
@@ -125,11 +127,13 @@ export function MasterDataBatch<T extends object>(props: MasterDataBatchProps<T>
       if (act === "submit") targets = codesOf((s) => s === "DRAFT");
       else if (act === "approve") targets = codesOf((s) => s === "REVIEW");
       else if (act === "reject") targets = codesOf((s) => s === "REVIEW");
+      else if (act === "reactivate") targets = codesOf((s) => s === "DEPRECATED");
+      else if (act === "delete") targets = codesOf((s) => s === "DRAFT" || s === "DEPRECATED");
       else if (act === "publish") targets = codesOf((s) => s === "DRAFT" || s === "DEPRECATED" || s === "PUBLISHED");
       else targets = codesOf((s) => s === "PUBLISHED"); // deprecate
     }
     if (!targets.length) {
-      const hint = act === "submit" ? "草稿" : act === "approve" || act === "reject" ? "审核中（REVIEW）" : act === "deprecate" ? "已发布" : "可发布";
+      const hint = act === "submit" ? "草稿" : act === "approve" || act === "reject" ? "审核中（REVIEW）" : act === "reactivate" ? "已废弃" : act === "delete" ? "草稿或已废弃" : act === "deprecate" ? "已发布" : "可发布";
       message.warning(`勾选的${entityLabel}中没有${hint}状态可操作`);
       return;
     }
@@ -216,13 +220,15 @@ export function MasterDataBatch<T extends object>(props: MasterDataBatchProps<T>
         onOk={() => runBatch(action!)}
         confirmLoading={busy}
         okText={action ? ACTION_VERB[action] : "确定"}
-        okButtonProps={{ danger: action === "deprecate" || action === "reject" }}
+        okButtonProps={{ danger: action === "deprecate" || action === "delete" || action === "reject" }}
         width={520}
         destroyOnClose
       >
         <p>
           确定批量{ACTION_VERB[action ?? "submit"]}选中的 <b>{retryCodes?.length ?? selected.length}</b> 个{entityLabel}吗？
           {action === "deprecate" ? " 废弃后不可恢复（被下游引用者会被保护拦截）。" : ""}
+          {action === "delete" ? " 删除后进入回收站，可恢复（仅草稿/废弃可删；被下游引用者会被保护拦截）。" : ""}
+          {action === "reactivate" ? " 重新启用后回到草稿状态，需重新提交审核后才能发布。" : ""}
           {action === "reject" ? " 驳回后将回到草稿状态，需修改后重新提交。" : ""}
           {action === "publish" ? " 直发发布将跳过审核流程（仅平台管理员）。" : ""}
         </p>

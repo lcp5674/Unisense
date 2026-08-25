@@ -200,6 +200,9 @@ function ExpandContent({
   // 口径 SQL：兼容多种键名（etl_sql / sql / calculation_sql / query_sql / sql_template）
   const rawEtl = def.etl_sql ?? def.sql ?? def.calculation_sql ?? def.query_sql ?? def.sql_template;
   const etlSql = rawEtl == null ? "" : String(rawEtl);
+  // 口径分角色（PRD 4.5 责任方对应）：系统开发伪代码口径 / 数仓开发详细口径
+  const pseudoDefinition = typeof def.pseudo_definition === "string" ? def.pseudo_definition : "";
+  const dwDefinition = typeof def.dw_definition === "string" ? def.dw_definition : "";
 
   return (
     <div style={{ padding: "4px 8px" }}>
@@ -277,6 +280,44 @@ function ExpandContent({
             }}
           >
             {etlSql}
+          </pre>
+        </div>
+      )}
+      {/* 口径分角色展示：系统开发伪代码口径（自然语言/伪 SQL）+ 数仓开发详细口径（完整 SQL/建模口径） */}
+      {pseudoDefinition && (
+        <div style={{ margin: "0 0 8px" }}>
+          <span className="muted">伪代码口径（系统开发）：</span>
+          <pre
+            style={{
+              background: "var(--paper)",
+              padding: 8,
+              borderRadius: 4,
+              margin: "4px 0 0",
+              fontSize: 12,
+              overflow: "auto",
+              maxHeight: 160,
+              whiteSpace: "pre-wrap",
+            }}
+          >
+            {pseudoDefinition}
+          </pre>
+        </div>
+      )}
+      {dwDefinition && (
+        <div style={{ margin: "0 0 8px" }}>
+          <span className="muted">数仓详细口径（数仓开发）：</span>
+          <pre
+            style={{
+              background: "var(--paper)",
+              padding: 8,
+              borderRadius: 4,
+              margin: "4px 0 0",
+              fontSize: 12,
+              overflow: "auto",
+              maxHeight: 200,
+            }}
+          >
+            {dwDefinition}
           </pre>
         </div>
       )}

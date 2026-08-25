@@ -160,13 +160,16 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
         keyword: str | None = None,
         owner_id: int | None = None,
         *,
+        deleted: bool = False,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[MeasureCatalog], int]:
         """分页列出逻辑度量，返回 (列表, total)（服务端分页，对齐 dimension）。"""
         limit = min(max(page_size, 1), 200)
         offset = (max(page, 1) - 1) * limit
-        return await self._repo.list(domain, status, keyword, owner_id, limit=limit, offset=offset)
+        return await self._repo.list(
+            domain, status, keyword, owner_id, deleted=deleted, limit=limit, offset=offset
+        )
 
     async def update_measure(self, measure_code: str, data: MeasureUpdate) -> MeasureCatalog:
         measure = await self._require(measure_code)
@@ -305,6 +308,92 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
                 error_code="MEASURE_BOUND_BY_METRICS",
             )
         measure.status = MeasureStatus.DEPRECATED.value
+        await self._repo.commit()
+        return measure
+
+    async def reactivate_measure(self, measure_code: str) -> MeasureCatalog:
+        """重新启用已废弃逻辑度量（DEPRECATED → DRAFT）。
+
+        已废弃为终态，重新启用后回到草稿，可编辑后**重新走审核**（与
+        DRAFT→REVIEW→PUBLISHED 审核流一致，避免绕过审核直接复活）。
+        仅平台管理员或原 Owner 可执行（API 层写角色 + service 层 owner 校验）。
+        """
+        measure = await self._require(measure_code)
+        if measure.status != MeasureStatus.DEPRECATED.value:
+            raise UnisenseError(
+                f"仅 DEPRECATED 状态可重新启用，当前 {measure.status}",
+                error_code="INVALID_STATE",
+            )
+        measure.status = MeasureStatus.DRAFT.value
+        await self._repo.commit()
+        return measure
+
+    async def delete_measure(
+        self, measure_code: str, actor_id: int, role: str | None = None
+    ) -> MeasureCatalog:
+        """软删除逻辑度量（仅 DRAFT/DEPRECATED 未对外投入状态；REVIEW/PUBLISHED 禁止）。
+
+        删除语义（用户决策）：草稿/废弃这种未对外投入的可交由管理员或生产者
+        （原 Owner）软删；审核中/启用中的资源不可删。被指标引用的度量禁止删除
+        （对齐 deprecate_measure 的 MEASURE_BOUND_BY_METRICS 保护）。
+        """
+        measure = await self._require(measure_code)
+        if measure.status not in (
+            MeasureStatus.DRAFT.value,
+            MeasureStatus.DEPRECATED.value,
+        ):
+            raise UnisenseError(
+                f"仅 DRAFT/DEPRECATED 状态的逻辑度量可删除（当前 {measure.status}）；"
+                "审核中/启用中的资源不可删除",
+                error_code="INVALID_STATE",
+            )
+        # 权限：平台/域管理员或原 Owner（生产者）
+        if role not in ("platform_admin", "domain_admin") and measure.owner_id != actor_id:
+            raise UnisenseError(
+                "仅平台/域管理员或逻辑度量原 Owner 可删除",
+                error_code="FORBIDDEN",
+            )
+        # 引用保护（跨服务一致性）：被指标引用的度量禁止删除（同废弃保护）
+        bound = await self._repo.count_metrics_by_measure(measure.id)
+        if bound > 0:
+            raise ConflictError(
+                f"逻辑度量 {measure_code} 正被 {bound} 个指标引用，无法删除；请先改绑相关指标",
+                error_code="MEASURE_BOUND_BY_METRICS",
+            )
+        await self._repo.soft_delete_measure(measure.id)
+        await self._repo.commit()
+        return measure
+
+    async def restore_measure(
+        self, measure_code: str, actor_id: int, role: str | None = None
+    ) -> MeasureCatalog:
+        """恢复已软删逻辑度量（回收站恢复；仅 DRAFT/DEPRECATED 且 deleted_at 置位）。
+
+        仅平台/域管理员或原 Owner 可恢复（对齐删除语义）。清除 deleted_at 使
+        度量重新进入正常列表，重新走审核流。
+        """
+        measure = await self._repo.get(measure_code)
+        if measure is None:
+            raise NotFoundError(f"逻辑度量不存在: {measure_code}")
+        if measure.deleted_at is None:
+            raise UnisenseError(
+                f"逻辑度量 {measure_code} 未处于已删除状态，无需恢复",
+                error_code="INVALID_STATE",
+            )
+        if measure.status not in (
+            MeasureStatus.DRAFT.value,
+            MeasureStatus.DEPRECATED.value,
+        ):
+            raise UnisenseError(
+                f"仅 DRAFT/DEPRECATED 状态的已删逻辑度量可恢复，当前 {measure.status}",
+                error_code="INVALID_STATE",
+            )
+        if role not in ("platform_admin", "domain_admin") and measure.owner_id != actor_id:
+            raise UnisenseError(
+                "仅平台/域管理员或逻辑度量原 Owner 可恢复",
+                error_code="FORBIDDEN",
+            )
+        await self._repo.restore_measure(measure.id)
         await self._repo.commit()
         return measure
 

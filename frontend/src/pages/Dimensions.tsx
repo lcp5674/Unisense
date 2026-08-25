@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Drawer, Descriptions, Popconfirm, Divider, Tooltip } from "antd";
-import { DeleteOutlined, EditOutlined, PlusOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined, DatabaseOutlined, ThunderboltOutlined } from "@ant-design/icons";
+import { DeleteOutlined, EditOutlined, PlusOutlined, RedoOutlined, ReloadOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined, DatabaseOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import {
   listDimensions,
   createDimension,
@@ -11,10 +11,15 @@ import {
   approveDimension,
   rejectDimension,
   deprecateDimension,
+  reactivateDimension,
+  deleteDimension,
+  restoreDimension,
   batchSubmitDimensions,
   batchApproveDimensions,
   batchRejectDimensions,
   batchDeprecateDimensions,
+  batchReactivateDimensions,
+  batchDeleteDimensions,
   bindMetricDimension,
   unbindMetricDimension,
   listDimensionMappings,
@@ -151,6 +156,8 @@ function DimensionsTab() {
   const [ownerId, setOwnerId] = useState<number | undefined>(
     urlOwnerId && /^\d+$/.test(urlOwnerId) ? Number(urlOwnerId) : undefined,
   );
+  // 回收站视图：deleted=true 时列出已软删维度（仅管理员/原 Owner 可恢复）
+  const [deleted, setDeleted] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
@@ -216,6 +223,8 @@ function DimensionsTab() {
     }
     if (action === "approve") return batchApproveDimensions(opts.codes);
     if (action === "reject") return batchRejectDimensions(opts.codes, opts.reason ?? "");
+    if (action === "reactivate") return batchReactivateDimensions(opts.codes);
+    if (action === "delete") return batchDeleteDimensions(opts.codes);
     return batchDeprecateDimensions(opts.codes);
   }
 
@@ -315,6 +324,7 @@ function DimensionsTab() {
         keyword: (overrideKeyword ?? keyword) || undefined,
         status: status || undefined,
         owner_id: ownerId,
+        deleted,
         page,
         page_size: pageSize,
       });
@@ -333,7 +343,7 @@ function DimensionsTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyword, status, ownerId, page]);
+  }, [keyword, status, ownerId, deleted, page]);
 
   async function handleCreate(values: Record<string, unknown>) {
     if (saving) return;
@@ -410,6 +420,39 @@ function DimensionsTab() {
       load();
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "废弃失败");
+    }
+  }
+
+  // 重新启用（DEPRECATED → DRAFT，可编辑后重新走审核）
+  async function handleReactivate(d: Dimension) {
+    try {
+      await reactivateDimension(d.dim_code);
+      message.success("已重新启用，回到草稿，请提交审核后发布");
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "重新启用失败");
+    }
+  }
+
+  // 软删除（仅 DRAFT/DEPRECATED 可删；管理员或原 Owner）
+  async function handleDelete(d: Dimension) {
+    try {
+      await deleteDimension(d.dim_code);
+      message.success("已删除，可在回收站恢复");
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "删除失败");
+    }
+  }
+
+  // 回收站恢复
+  async function handleRestore(d: Dimension) {
+    try {
+      await restoreDimension(d.dim_code);
+      message.success("已恢复");
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "恢复失败");
     }
   }
 
@@ -527,9 +570,24 @@ function DimensionsTab() {
     {
       title: "操作",
       key: "actions",
-      width: 300,
-      render: (_: unknown, d: Dimension) =>
-        d.status !== "DEPRECATED" ? (
+      width: 320,
+      render: (_: unknown, d: Dimension) => {
+        if (deleted) {
+          return (
+            <Space size={4}>
+              <Popconfirm
+                title="确认恢复该维度？"
+                description="恢复后回到原状态（草稿/废弃），可重新走审核流"
+                onConfirm={() => handleRestore(d)}
+              >
+                <Button size="small" type="primary" icon={<ReloadOutlined />}>
+                  恢复
+                </Button>
+              </Popconfirm>
+            </Space>
+          );
+        }
+        return d.status !== "DEPRECATED" ? (
           <Space size={4} wrap>
             <Button
               size="small"
@@ -582,6 +640,15 @@ function DimensionsTab() {
               />
             )}
             {can("dimension:deprecate") && <Button size="small" danger onClick={() => handleDeprecate(d)}>废弃</Button>}
+            {can("dimension:edit") && d.status === "DRAFT" && (
+              <Popconfirm
+                title="确认删除该维度？"
+                description="删除后进入回收站，可恢复"
+                onConfirm={() => handleDelete(d)}
+              >
+                <Button size="small" danger icon={<DeleteOutlined />} aria-label="删除">删除</Button>
+              </Popconfirm>
+            )}
           </Space>
         ) : (
           <Space size={4} wrap>
@@ -594,9 +661,23 @@ function DimensionsTab() {
               {favCodes.has(d.dim_code) ? "已收藏" : "收藏"}
             </Button>
             <Button size="small" onClick={() => openDetail(d)}>详情</Button>
-            <Tag>已停用</Tag>
+            <Popconfirm
+              title="确认重新启用该维度？"
+              description="回到草稿状态，需重新提交审核后才能发布"
+              onConfirm={() => handleReactivate(d)}
+            >
+              <Button size="small" icon={<RedoOutlined />}>重新启用</Button>
+            </Popconfirm>
+            <Popconfirm
+              title="确认删除该维度？"
+              description="删除后进入回收站，可恢复；被指标绑定的维度无法删除"
+              onConfirm={() => handleDelete(d)}
+            >
+              <Button size="small" danger icon={<DeleteOutlined />} aria-label="删除">删除</Button>
+            </Popconfirm>
           </Space>
-        ),
+        );
+      },
     },
   ];
 
@@ -628,6 +709,18 @@ function DimensionsTab() {
             { value: "DEPRECATED", label: "已废弃" },
           ]}
         />
+        <Select
+          value={deleted ? "trash" : undefined}
+          placeholder="回收站"
+          allowClear
+          style={{ width: 120 }}
+          onChange={(v) => {
+            setPage(1);
+            setDeleted(v === "trash");
+            setSelected([]);
+          }}
+          options={[{ value: "trash", label: "回收站" }]}
+        />
         {can("dimension:create") && (
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建维度</Button>
         )}
@@ -639,7 +732,9 @@ function DimensionsTab() {
             { key: "submit", label: "批量提交审核（草稿）" },
             { key: "approve", label: "批量通过（审核中）" },
             { key: "reject", label: "批量驳回（审核中）" },
+            { key: "reactivate", label: "批量重新启用（已废弃）" },
             { key: "deprecate", label: "批量废弃（已发布）", danger: true },
+            { key: "delete", label: "批量删除（草稿/废弃）", danger: true },
           ]}
           canRun={(a) => (a === "approve" || a === "reject" ? !!canReview : can("dimension:create") || can("dimension:deprecate"))}
           onRun={runBatch}

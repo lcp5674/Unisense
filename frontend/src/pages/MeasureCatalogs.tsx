@@ -2,8 +2,11 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Alert, App as AntApp, Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Tooltip } from "antd";
 import {
+  DeleteOutlined,
   EditOutlined,
   PlusOutlined,
+  RedoOutlined,
+  ReloadOutlined,
   RobotOutlined,
   StopOutlined,
 } from "@ant-design/icons";
@@ -11,15 +14,20 @@ import {
   approveMeasureCatalog,
   autoSuggestMeasureCatalog,
   batchApproveMeasures,
+  batchDeleteMeasures,
   batchDeprecateMeasures,
+  batchReactivateMeasures,
   batchRejectMeasures,
   batchSubmitMeasures,
   createMeasureCatalog,
+  deleteMeasureCatalog,
   deprecateMeasureCatalog,
   fetchCurrentUser,
   listDomainTree,
   listMeasureCatalogs,
+  reactivateMeasureCatalog,
   rejectMeasureCatalog,
+  restoreMeasureCatalog,
   submitMeasureCatalog,
   UnisenseApiError,
   updateMeasureCatalog,
@@ -94,6 +102,8 @@ export function MeasureCatalogs() {
   const [domain, setDomain] = useState<string>();
   const [status, setStatus] = useState<string>();
   const [keyword, setKeyword] = useState<string | undefined>(urlKw || undefined);
+  // 回收站视图：deleted=true 时列出已软删度量（仅管理员/原 Owner 可恢复）
+  const [deleted, setDeleted] = useState(false);
   const [domainOptions, setDomainOptions] = useState<{ value: string; label: string }[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<MeasureCatalog | null>(null);
@@ -134,13 +144,15 @@ export function MeasureCatalogs() {
     }
     if (action === "approve") return batchApproveMeasures(opts.codes);
     if (action === "reject") return batchRejectMeasures(opts.codes, opts.reason ?? "");
+    if (action === "reactivate") return batchReactivateMeasures(opts.codes);
+    if (action === "delete") return batchDeleteMeasures(opts.codes);
     return batchDeprecateMeasures(opts.codes);
   }
 
   async function load() {
     setLoading(true);
     try {
-      const res = await listMeasureCatalogs({ domain, status, keyword, page, page_size: pageSize });
+      const res = await listMeasureCatalogs({ domain, status, keyword, deleted, page, page_size: pageSize });
       setItems(res.items);
       setTotal(res.total);
     } catch (e) {
@@ -153,7 +165,7 @@ export function MeasureCatalogs() {
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize, domain, status, keyword]);
+  }, [page, pageSize, domain, status, keyword, deleted]);
 
   // URL ?kw= 变化时同步关键词（全局搜索跳转定位；避免空值覆盖用户输入）
   useEffect(() => {
@@ -358,6 +370,39 @@ export function MeasureCatalogs() {
     }
   }
 
+  // 重新启用（DEPRECATED → DRAFT，可编辑后重新走审核）
+  async function handleReactivate(row: MeasureCatalog) {
+    try {
+      await reactivateMeasureCatalog(row.measure_code);
+      message.success(`「${row.name}」已重新启用，回到草稿，请提交审核后发布`);
+      await load();
+    } catch (e) {
+      message.error(errMsg(e, "重新启用失败"));
+    }
+  }
+
+  // 软删除（仅 DRAFT/DEPRECATED 可删；管理员或原 Owner）
+  async function handleDelete(row: MeasureCatalog) {
+    try {
+      await deleteMeasureCatalog(row.measure_code);
+      message.success(`「${row.name}」已删除，可在回收站恢复`);
+      await load();
+    } catch (e) {
+      message.error(errMsg(e, "删除失败"));
+    }
+  }
+
+  // 回收站恢复
+  async function handleRestore(row: MeasureCatalog) {
+    try {
+      await restoreMeasureCatalog(row.measure_code);
+      message.success(`「${row.name}」已恢复`);
+      await load();
+    } catch (e) {
+      message.error(errMsg(e, "恢复失败"));
+    }
+  }
+
   return (
     <Card
       title="逻辑度量目录"
@@ -399,6 +444,18 @@ export function MeasureCatalogs() {
             setStatus(v);
           }}
         />
+        <Select
+          value={deleted ? "trash" : undefined}
+          placeholder="回收站"
+          allowClear
+          style={{ width: 120 }}
+          onChange={(v) => {
+            setPage(1);
+            setDeleted(v === "trash");
+            setSelected([]);
+          }}
+          options={[{ value: "trash", label: "回收站" }]}
+        />
         <MasterDataBatch
           selected={selected}
           codeKey="measure_code"
@@ -407,7 +464,9 @@ export function MeasureCatalogs() {
             { key: "submit", label: "批量提交审核（草稿）" },
             { key: "approve", label: "批量通过（审核中）" },
             { key: "reject", label: "批量驳回（审核中）" },
+            { key: "reactivate", label: "批量重新启用（已废弃）" },
             { key: "deprecate", label: "批量废弃（已发布）", danger: true },
+            { key: "delete", label: "批量删除（草稿/废弃）", danger: true },
           ]}
           canRun={(a) => (a === "approve" || a === "reject" ? !!canReview : canWrite)}
           onRun={runBatch}
@@ -497,8 +556,21 @@ export function MeasureCatalogs() {
           {
             title: "操作",
             key: "actions",
-            width: 280,
+            width: 300,
             render: (_, row) => {
+              if (deleted) {
+                return (
+                  <Space size={4}>
+                    <Popconfirm
+                      title="确认恢复该逻辑度量？"
+                      description="恢复后回到原状态（草稿/废弃），可重新走审核流"
+                      onConfirm={() => handleRestore(row)}
+                    >
+                      <Button size="small" type="primary" icon={<ReloadOutlined />}>恢复</Button>
+                    </Popconfirm>
+                  </Space>
+                );
+              }
               return (
                 <Space size={4}>
                   {row.status === "REVIEW" ? (
@@ -532,6 +604,33 @@ export function MeasureCatalogs() {
                       onConfirm={() => handleDeprecate(row)}
                     >
                       <Button size="small" danger icon={<StopOutlined />} />
+                    </Popconfirm>
+                  )}
+                  {row.status === "DEPRECATED" && (
+                    <>
+                      <Popconfirm
+                        title="确认重新启用该逻辑度量？"
+                        description="回到草稿状态，需重新提交审核后才能发布"
+                        onConfirm={() => handleReactivate(row)}
+                      >
+                        <Button size="small" icon={<RedoOutlined />}>重新启用</Button>
+                      </Popconfirm>
+                      <Popconfirm
+                        title="确认删除该逻辑度量？"
+                        description="删除后进入回收站，可恢复；被指标引用的度量无法删除"
+                        onConfirm={() => handleDelete(row)}
+                      >
+                        <Button size="small" danger icon={<DeleteOutlined />} aria-label="删除" />
+                      </Popconfirm>
+                    </>
+                  )}
+                  {row.status === "DRAFT" && (
+                    <Popconfirm
+                      title="确认删除该逻辑度量？"
+                      description="删除后进入回收站，可恢复"
+                      onConfirm={() => handleDelete(row)}
+                    >
+                      <Button size="small" danger icon={<DeleteOutlined />} aria-label="删除" />
                     </Popconfirm>
                   )}
                 </Space>

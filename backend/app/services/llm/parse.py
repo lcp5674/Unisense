@@ -160,3 +160,65 @@ def parse_bool_result(raw: str, *aliases: str) -> bool | None:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return bool(value)
     return None
+
+
+def parse_term_infer_result(raw: str) -> dict[str, Any] | None:
+    """解析术语推断结果（定义/同义词/边界说明，基于术语名称生成）。
+
+    约定返回结构：``{"definition", "synonyms": [...], "boundary", "confidence"}``。
+    同义词可能为逗号/顿号分隔的字符串或列表——统一归一为列表；
+    任一核心字段缺失都返回 None（上层降级为 LLM 不可用）。
+
+    Returns:
+        ``{"definition", "synonyms", "boundary", "confidence"}``；解析失败返回 ``None``。
+    """
+    obj = parse_json_object(raw)
+    if obj is None:
+        return None
+    definition = extract_str_field(obj, "definition", "desc", "text", "meaning")
+    confidence = extract_numeric_field(
+        obj, "confidence", "score", "prob", "certainty", min_value=0.0, max_value=1.0
+    )
+    if definition is None or confidence is None:
+        return None
+    # 同义词：列表或字符串（逗号/顿号/分号分隔）统一归一为 list[str]
+    synonyms: list[str] = []
+    raw_syn = obj.get("synonyms") or obj.get("alias") or obj.get("aliases")
+    if isinstance(raw_syn, list):
+        for item in raw_syn:
+            if isinstance(item, str) and item.strip():
+                synonyms.append(item.strip())
+    elif isinstance(raw_syn, str) and raw_syn.strip():
+        for part in re.split(r"[,，;；、\n]+", raw_syn):
+            if part.strip():
+                synonyms.append(part.strip())
+    boundary = extract_str_field(obj, "boundary", "exclusion", "note", "constraint")
+    return {
+        "definition": definition,
+        "synonyms": synonyms,
+        "boundary": boundary,
+        "confidence": confidence,
+    }
+
+
+def parse_domain_infer_result(raw: str) -> dict[str, Any] | None:
+    """解析业务域推断结果（LLM 兜底：表未被采集时从 SQL/表名推断域）。
+
+    约定返回结构：``{"domain_code", "confidence", "reason"}``。
+    ``domain_code``/``confidence`` 任一缺失或越界返回 ``None``
+    （上层降级为无法建议，用户手动选域）。
+
+    Returns:
+        ``{"domain_code", "confidence", "reason"}``；解析失败返回 ``None``。
+    """
+    obj = parse_json_object(raw)
+    if obj is None:
+        return None
+    domain_code = extract_str_field(obj, "domain_code", "domain", "code")
+    confidence = extract_numeric_field(
+        obj, "confidence", "score", "prob", min_value=0.0, max_value=1.0
+    )
+    if domain_code is None or confidence is None:
+        return None
+    reason = extract_str_field(obj, "reason", "note", "explanation", "basis")
+    return {"domain_code": domain_code, "confidence": confidence, "reason": reason}

@@ -111,11 +111,12 @@ async def list_measures(
     status: str | None = Query(None),
     keyword: str | None = Query(None, description="关键词：编码/名称/描述模糊匹配"),
     owner_id: int | None = Query(None, description="负责人 ID 过滤"),
+    deleted: bool = Query(False, description="是否查看回收站（已软删记录）"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
     items, total = await MeasureCatalogService(db).list_measures(
-        domain, status, keyword, owner_id, page=page, page_size=page_size
+        domain, status, keyword, owner_id, deleted=deleted, page=page, page_size=page_size
     )
     converted = [MeasureResponse.from_model(i) for i in items]
     return ok(
@@ -325,6 +326,95 @@ async def deprecate_measure(
     return ok(data=MeasureResponse.from_model(resp), trace_id=trace_id)
 
 
+@router.post(
+    "/{measure_code}/reactivate",
+    response_model=ApiResponse[MeasureResponse],
+    summary="重新启用已废弃逻辑度量（DEPRECATED → DRAFT，可编辑后重新走审核）",
+    dependencies=_SCOPED_DEPS,
+)
+async def reactivate_measure(
+    measure_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """DEPRECATED → DRAFT：回到草稿可编辑，重新提交审核后才发布（不绕过审核）。"""
+    resp = await MeasureCatalogService(db).reactivate_measure(measure_code)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="measure_catalog.reactivate",
+        entity_type="measure_catalog",
+        entity_id=measure_code,
+        detail={},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=MeasureResponse.from_model(resp), trace_id=trace_id)
+
+
+@router.post(
+    "/{measure_code}/delete",
+    response_model=ApiResponse[MeasureResponse],
+    summary="软删除逻辑度量（仅 DRAFT/DEPRECATED 可删；审核中/启用中禁止）",
+    dependencies=_SCOPED_DEPS,
+)
+async def delete_measure(
+    measure_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """软删草稿/废弃逻辑度量；仅管理员或原 Owner（service 层校验）。"""
+    resp = await MeasureCatalogService(db).delete_measure(
+        measure_code, actor_id=user.id, role=user.role
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="measure_catalog.delete",
+        entity_type="measure_catalog",
+        entity_id=measure_code,
+        detail={"status": resp.status},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=MeasureResponse.from_model(resp), trace_id=trace_id)
+
+
+@router.post(
+    "/{measure_code}/restore",
+    response_model=ApiResponse[MeasureResponse],
+    summary="恢复已软删逻辑度量（回收站恢复）",
+    dependencies=_SCOPED_DEPS,
+)
+async def restore_measure(
+    measure_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """回收站恢复软删度量；仅管理员或原 Owner（service 层校验）。"""
+    resp = await MeasureCatalogService(db).restore_measure(
+        measure_code, actor_id=user.id, role=user.role
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="measure_catalog.restore",
+        entity_type="measure_catalog",
+        entity_id=measure_code,
+        detail={"status": resp.status},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=MeasureResponse.from_model(resp), trace_id=trace_id)
+
+
 # ---- 批量治理端点（TD §13：逐条收集结果不整体失败；执行语义统一 app.api.batch_common）----
 
 
@@ -479,6 +569,53 @@ async def batch_reject_measures(
 
 
 @router.post(
+    "/batch-reactivate",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量重新启用已废弃逻辑度量（DEPRECATED → DRAFT）",
+    dependencies=_WRITE_DEPS,
+)
+async def batch_reactivate_measures(
+    request: BatchCodesRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条 DEPRECATED→DRAFT（重新启用后走审核流）。"""
+    service = MeasureCatalogService(db)
+
+    async def run_one(code: str) -> None:
+        measure = await service.get_measure(code)
+        if measure is None:
+            raise NotFoundError(f"逻辑度量不存在: {code}")
+        _assert_domain_scope(user, measure.domain)
+        await service.reactivate_measure(code)
+
+    results = await run_batch(
+        db,
+        units=request.codes,
+        code_of=lambda code: code,
+        run=run_one,
+        abort_message="批量重新启用内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("measure_catalog.batch_reactivate", results),
+        entity_type="measure_catalog",
+        entity_id=f"batch:{len(request.codes)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=batch_response(results), trace_id=trace_id)
+
+
+@router.post(
     "/batch-deprecate",
     response_model=ApiResponse[BatchResponse],
     summary="批量废弃逻辑度量（PUBLISHED → DEPRECATED）",
@@ -512,6 +649,53 @@ async def batch_deprecate_measures(
         db,
         actor_id=user.id,
         action=batch_audit_action("measure_catalog.batch_deprecate", results),
+        entity_type="measure_catalog",
+        entity_id=f"batch:{len(request.codes)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=batch_response(results), trace_id=trace_id)
+
+
+@router.post(
+    "/batch-delete",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量软删除逻辑度量（仅 DRAFT/DEPRECATED 可删）",
+    dependencies=_WRITE_DEPS,
+)
+async def batch_delete_measures(
+    request: BatchCodesRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条软删草稿/废弃逻辑度量；管理员或原 Owner（service 层逐条校验）。"""
+    service = MeasureCatalogService(db)
+
+    async def run_one(code: str) -> None:
+        measure = await service.get_measure(code)
+        if measure is None:
+            raise NotFoundError(f"逻辑度量不存在: {code}")
+        _assert_domain_scope(user, measure.domain)
+        await service.delete_measure(code, actor_id=user.id, role=user.role)
+
+    results = await run_batch(
+        db,
+        units=request.codes,
+        code_of=lambda code: code,
+        run=run_one,
+        abort_message="批量删除内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("measure_catalog.batch_delete", results),
         entity_type="measure_catalog",
         entity_id=f"batch:{len(request.codes)}",
         detail={

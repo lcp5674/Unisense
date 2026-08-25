@@ -154,11 +154,12 @@ async def list_dimensions(
     status: str | None = Query(None),
     keyword: str | None = Query(None, description="关键词：编码/名称/描述模糊匹配"),
     owner_id: int | None = Query(None, description="责任人（Owner）ID 过滤"),
+    deleted: bool = Query(False, description="是否查看回收站（已软删记录）"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
     items, total = await DimensionService(db).list_dimensions(
-        domain, status, keyword, owner_id, page=page, page_size=page_size
+        domain, status, keyword, owner_id, deleted=deleted, page=page, page_size=page_size
     )
     converted = []
     for dim, metric_count in items:
@@ -400,6 +401,97 @@ async def deprecate_dimension(
         entity_type="dimension",
         entity_id=dim_code,
         detail={},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
+
+
+@router.post(
+    "/{dim_code}/reactivate",
+    response_model=ApiResponse[DimensionResponse],
+    summary="重新启用已废弃维度（DEPRECATED → DRAFT，可编辑后重新走审核）",
+    dependencies=_WRITE_DEPS + [Depends(_scope_dimension)],
+)
+async def reactivate_dimension(
+    dim_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """DEPRECATED → DRAFT：回到草稿可编辑，重新提交审核后才发布（不绕过审核）。"""
+    resp = await DimensionService(db).reactivate_dimension(dim_code)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.reactivate",
+        entity_type="dimension",
+        entity_id=dim_code,
+        detail={},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
+
+
+@router.post(
+    "/{dim_code}/delete",
+    response_model=ApiResponse[DimensionResponse],
+    summary="软删除维度（仅 DRAFT/DEPRECATED 可删；审核中/启用中禁止）",
+    dependencies=_WRITE_DEPS + [Depends(_scope_dimension)],
+)
+async def delete_dimension(
+    dim_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """软删草稿/废弃维度；仅管理员或原 Owner（service 层校验）。"""
+    resp = await DimensionService(db).delete_dimension(
+        dim_code, actor_id=user.id, role=user.role
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.delete",
+        entity_type="dimension",
+        entity_id=dim_code,
+        detail={"status": resp.status},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
+
+
+@router.post(
+    "/{dim_code}/restore",
+    response_model=ApiResponse[DimensionResponse],
+    summary="恢复已软删维度（回收站恢复）",
+    dependencies=_WRITE_DEPS + [Depends(_scope_dimension)],
+)
+async def restore_dimension(
+    dim_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """回收站恢复软删维度；仅管理员或原 Owner（service 层校验）。"""
+    resp = await DimensionService(db).restore_dimension(
+        dim_code, actor_id=user.id, role=user.role
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.restore",
+        entity_type="dimension",
+        entity_id=dim_code,
+        detail={"status": resp.status},
+        ip=client_ip(http_req),
         trace_id=trace_id,
     )
     await db.commit()
@@ -719,6 +811,100 @@ async def batch_deprecate_dimensions(
         db,
         actor_id=user.id,
         action=batch_audit_action("dimension.batch_deprecate", results),
+        entity_type="dimension",
+        entity_id=f"batch:{len(request.codes)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=batch_response(results), trace_id=trace_id)
+
+
+@router.post(
+    "/batch-reactivate",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量重新启用已废弃维度（DEPRECATED → DRAFT）",
+    dependencies=_WRITE_DEPS,
+)
+async def batch_reactivate_dimensions(
+    request: BatchCodesRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条 DEPRECATED→DRAFT（重新启用后走审核流）。"""
+    service = DimensionService(db)
+
+    async def run_one(code: str) -> None:
+        dim = await service.get_dimension(code)
+        if dim is None:
+            raise NotFoundError(f"维度不存在: {code}")
+        _assert_domain_scope(user, dim.domain)
+        await service.reactivate_dimension(code)
+
+    results = await run_batch(
+        db,
+        units=request.codes,
+        code_of=lambda code: code,
+        run=run_one,
+        abort_message="批量重新启用内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("dimension.batch_reactivate", results),
+        entity_type="dimension",
+        entity_id=f"batch:{len(request.codes)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=batch_response(results), trace_id=trace_id)
+
+
+@router.post(
+    "/batch-delete",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量软删除维度（仅 DRAFT/DEPRECATED 可删）",
+    dependencies=_WRITE_DEPS,
+)
+async def batch_delete_dimensions(
+    request: BatchCodesRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条软删草稿/废弃维度；管理员或原 Owner（service 层逐条校验）。"""
+    service = DimensionService(db)
+
+    async def run_one(code: str) -> None:
+        dim = await service.get_dimension(code)
+        if dim is None:
+            raise NotFoundError(f"维度不存在: {code}")
+        _assert_domain_scope(user, dim.domain)
+        await service.delete_dimension(code, actor_id=user.id, role=user.role)
+
+    results = await run_batch(
+        db,
+        units=request.codes,
+        code_of=lambda code: code,
+        run=run_one,
+        abort_message="批量删除内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("dimension.batch_delete", results),
         entity_type="dimension",
         entity_id=f"batch:{len(request.codes)}",
         detail={

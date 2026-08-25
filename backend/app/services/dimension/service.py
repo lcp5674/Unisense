@@ -140,14 +140,18 @@ class DimensionService(BaseService, MasterDataReviewMixin):
         keyword: str | None = None,
         owner_id: int | None = None,
         *,
+        deleted: bool = False,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[tuple[Dimension, int]], int]:
-        """分页列出维度，返回 (列表, total)（服务端分页，对齐 glossary）。"""
+        """分页列出维度，返回 (列表, total)（服务端分页，对齐 glossary）。
+
+        deleted=True 时列出已软删记录（回收站视图）。
+        """
         limit = min(max(page_size, 1), 200)
         offset = (max(page, 1) - 1) * limit
         return await self._repo.list_dimensions(
-            domain, status, keyword, owner_id, limit=limit, offset=offset
+            domain, status, keyword, owner_id, deleted=deleted, limit=limit, offset=offset
         )
 
     async def update_dimension(self, dim_code: str, data: DimensionUpdate) -> Dimension:
@@ -263,14 +267,123 @@ class DimensionService(BaseService, MasterDataReviewMixin):
         # 正常绑定已由 unbind 即时清理）级联软删——对称于指标废弃时
         # semantic._cleanup_metric_lineage 的边清理。被绑定的维度已在上面被保护，
         # 此处清理不影响任何有效绑定。
+        _lsvc = None
         try:
             from app.services.lineage.parser import node_dimension
             from app.services.lineage.service import LineageService
 
-            await LineageService(self._session).delete_by_node(node_dimension(dim_code))
+            _lsvc = LineageService(self._session)
+            await _lsvc.delete_by_node(node_dimension(dim_code))
         except Exception:  # noqa: BLE001 - 血缘清理失败不阻断维度废弃
             logger.warning("deprecate_dimension_lineage_cleanup_failed", dim_code=dim_code)
         await self._repo.commit()
+        if _lsvc is not None:
+            try:
+                # P0-3：提交后执行延迟的图写/缓存失效副作用（幽灵边根治）
+                await _lsvc.run_post_commit()
+            except Exception:  # noqa: BLE001 - 副作用 best-effort，不阻断响应
+                logger.warning("deprecate_dimension_lineage_post_commit_failed", dim_code=dim_code)
+        return dim
+
+    async def reactivate_dimension(self, dim_code: str) -> Dimension:
+        """重新启用已废弃维度（DEPRECATED → DRAFT）。
+
+        已废弃维度为终态，重新启用后回到草稿态，可编辑后**重新走审核**（与
+        DRAFT→REVIEW→PUBLISHED 审核流一致，避免绕过审核直接复活）。仅平台
+        管理员或原 Owner 可执行（API 层写角色 + service 层 owner 校验）。
+        """
+        dim = await self._require(dim_code)
+        if dim.status != DimensionStatus.DEPRECATED.value:
+            raise UnisenseError(
+                f"仅 DEPRECATED 状态可重新启用，当前 {dim.status}",
+                error_code="INVALID_STATE",
+            )
+        dim.status = DimensionStatus.DRAFT.value
+        await self._repo.commit()
+        logger.info("dimension_reactivated", dim_code=dim_code)
+        return dim
+
+    async def delete_dimension(
+        self, dim_code: str, actor_id: int, role: str | None = None
+    ) -> Dimension:
+        """软删除维度（仅 DRAFT/DEPRECATED 未对外投入状态；REVIEW/PUBLISHED 禁止）。
+
+        删除语义（用户决策）：草稿/废弃这种未对外投入的可交由管理员或生产者
+        （原 Owner）软删；审核中/启用中的资源不可删。被指标绑定的维度禁止删除
+        （对齐 deprecate_dimension 的 DIMENSION_BOUND_BY_METRICS 保护）。
+
+        Returns:
+            被软删的维度（deleted_at 置位，可经 restore 恢复）。
+        """
+        dim = await self._require(dim_code)
+        if dim.status not in (
+            DimensionStatus.DRAFT.value,
+            DimensionStatus.DEPRECATED.value,
+        ):
+            raise UnisenseError(
+                f"仅 DRAFT/DEPRECATED 状态的维度可删除（当前 {dim.status}）；"
+                "审核中/启用中的资源不可删除",
+                error_code="INVALID_STATE",
+            )
+        # 权限：平台/域管理员或原 Owner（生产者）
+        if role not in ("platform_admin", "domain_admin") and dim.owner_id != actor_id:
+            raise UnisenseError(
+                "仅平台/域管理员或维度原 Owner 可删除",
+                error_code="FORBIDDEN",
+            )
+        # 引用保护（跨服务一致性）：被指标绑定的维度禁止删除（同废弃保护）
+        bound = await self._repo.count_metric_dimensions(dim_code)
+        if bound > 0:
+            raise BusinessError(
+                f"维度 {dim_code} 正被 {bound} 个指标绑定，无法删除；请先解绑相关指标",
+                error_code="DIMENSION_BOUND_BY_METRICS",
+            )
+        await self._repo.soft_delete_dimension(dim.id)
+        # 软删即下线：防御性清理相关血缘边（best-effort，对称于 deprecate_dimension）
+        try:
+            from app.services.lineage.parser import node_dimension
+            from app.services.lineage.service import LineageService
+
+            lsvc = LineageService(self._session)
+            await lsvc.delete_by_node(node_dimension(dim_code))
+        except Exception:  # noqa: BLE001 - 血缘清理失败不阻断删除
+            logger.warning("delete_dimension_lineage_cleanup_failed", dim_code=dim_code)
+        await self._repo.commit()
+        logger.info("dimension_deleted", dim_code=dim_code, actor_id=actor_id, role=role)
+        return dim
+
+    async def restore_dimension(
+        self, dim_code: str, actor_id: int, role: str | None = None
+    ) -> Dimension:
+        """恢复已软删维度（回收站恢复；仅 DRAFT/DEPRECATED 且 deleted_at 置位）。
+
+        仅平台/域管理员或原 Owner 可恢复（对齐删除语义）。清除 deleted_at 使
+        维度重新进入正常列表，重新走审核流。
+        """
+        dim = await self._repo.get_dimension(dim_code)
+        if dim is None:
+            raise NotFoundError(f"维度不存在: {dim_code}")
+        if dim.deleted_at is None:
+            raise UnisenseError(
+                f"维度 {dim_code} 未处于已删除状态，无需恢复",
+                error_code="INVALID_STATE",
+            )
+        if dim.status not in (
+            DimensionStatus.DRAFT.value,
+            DimensionStatus.DEPRECATED.value,
+        ):
+            raise UnisenseError(
+                f"仅 DRAFT/DEPRECATED 状态的已删维度可恢复，当前 {dim.status}",
+                error_code="INVALID_STATE",
+            )
+        if role not in ("platform_admin", "domain_admin") and dim.owner_id != actor_id:
+            raise UnisenseError(
+                "仅平台/域管理员或维度原 Owner 可恢复",
+                error_code="FORBIDDEN",
+            )
+        await self._repo.restore_dimension(dim.id)
+        await self._repo.commit()
+        logger.info("dimension_restored", dim_code=dim_code, actor_id=actor_id, role=role)
         return dim
 
     async def _generate_member_code(self, data: DimensionMemberCreate) -> str:
