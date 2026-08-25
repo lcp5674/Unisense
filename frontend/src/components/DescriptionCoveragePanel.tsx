@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type Key, type ReactNode } from "react";
 import {
   Alert,
   Button,
@@ -98,6 +98,36 @@ function isInferInProgress(err: unknown): boolean {
     err !== null &&
     (err as { code?: string }).code === "LLM_INFER_IN_PROGRESS"
   );
+}
+
+/** 跨表批量推断：单张被选表的待执行动作（由 per_table 覆盖数据派生）。 */
+type BatchTask = {
+  catalog_id: number;
+  entity_name: string;
+  missing_fields: number;
+  needs_table_desc: boolean;
+  missing_field_names: string[];
+};
+
+/** 跨表批量推断：进度弹窗中单张表的实时状态。 */
+type BatchProgressItem = {
+  catalog_id: number;
+  entity_name: string;
+  status: "pending" | "running" | "done" | "error";
+  summary: string;
+};
+
+function batchStatusTag(status: BatchProgressItem["status"]) {
+  switch (status) {
+    case "pending":
+      return <Tag>等待</Tag>;
+    case "running":
+      return <Tag color="processing">推断中…</Tag>;
+    case "done":
+      return <Tag color="success">完成</Tag>;
+    case "error":
+      return <Tag color="error">失败</Tag>;
+  }
 }
 
 /**
@@ -403,6 +433,13 @@ export function DescriptionCoveragePanel({
   const [tableDescSaving, setTableDescSaving] = useState(false);
   const [tableInferring, setTableInferring] = useState(false);
 
+  // 跨表批量推断：主表格勾选多表 → 单弹窗（确认视图 → 进度视图）→ 串行逐表推断
+  const [selectedRowKeys, setSelectedRowKeys] = useState<Key[]>([]);
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchStarted, setBatchStarted] = useState(false);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchProgress, setBatchProgress] = useState<BatchProgressItem[]>([]);
+
   // 概览指标下钻明细（点击指标数字 → 该口径贡献的 per_table 子集）
   const [metricDrillOpen, setMetricDrillOpen] = useState(false);
   const [metricDrillTitle, setMetricDrillTitle] = useState("");
@@ -599,6 +636,89 @@ export function DescriptionCoveragePanel({
     }
   }
 
+  // ---- 跨表批量推断 ----
+
+  /**
+   * 单张表按需执行字段批量推断（missing_fields>0）与表描述推断（!table_desc）。
+   * 各动作独立 try/catch：单动作失败不阻断另一动作，返回汇总文本与整体成败。
+   * 复用后端单表批量端点（FR-023 幂等 + in-flight 锁 + 审计），不覆盖已有 manual/llm 描述。
+   */
+  async function inferOneTable(task: BatchTask): Promise<{ ok: boolean; summary: string }> {
+    const parts: string[] = [];
+    let ok = true;
+    if (task.missing_fields > 0) {
+      try {
+        const res = await inferDescriptions(task.catalog_id);
+        parts.push(`字段 +${res.inferred.length}（跳过 ${res.skipped.length} / 失败 ${res.failed.length}）`);
+      } catch (err) {
+        ok = false;
+        parts.push(
+          isInferInProgress(err) ? "字段推断进行中" : `字段失败：${err instanceof Error ? err.message : "未知"}`,
+        );
+      }
+    }
+    if (task.needs_table_desc) {
+      try {
+        await inferTableDescription(task.catalog_id);
+        parts.push("表描述已生成");
+      } catch (err) {
+        ok = false;
+        parts.push(
+          isInferInProgress(err) ? "表描述推断进行中" : `表描述失败：${err instanceof Error ? err.message : "未知"}`,
+        );
+      }
+    }
+    return { ok, summary: parts.join("；") || "无缺失描述" };
+  }
+
+  /** 串行逐表执行批量推断，实时更新进度；全部完成后刷新覆盖数据并清空勾选。 */
+  async function runBatchInfer(tasks: BatchTask[]) {
+    setBatchProgress(
+      tasks.map((t) => ({
+        catalog_id: t.catalog_id,
+        entity_name: t.entity_name,
+        status: "pending" as const,
+        summary: "",
+      })),
+    );
+    setBatchRunning(true);
+    for (let i = 0; i < tasks.length; i++) {
+      setBatchProgress((prev) => prev.map((p, idx) => (idx === i ? { ...p, status: "running" } : p)));
+      const { ok, summary } = await inferOneTable(tasks[i]);
+      setBatchProgress((prev) =>
+        prev.map((p, idx) => (idx === i ? { ...p, status: ok ? "done" : "error", summary } : p)),
+      );
+    }
+    setBatchRunning(false);
+    await load();
+    setSelectedRowKeys([]);
+  }
+
+  /** 批量推断入口：整批 in-flight 去重（key=表集签名），避免重复点击重复调 LLM。 */
+  function startBatchInfer(tasks: BatchTask[]) {
+    const key = `cross:${tasks.map((t) => t.catalog_id).sort((a, b) => a - b).join(",")}`;
+    const p = runInflight(key, () => runBatchInfer(tasks));
+    if (!p) {
+      message.info("该批量推断正在进行中，请稍候");
+      return;
+    }
+    setBatchStarted(true);
+  }
+
+  /** 关闭批量弹窗并重置状态（推断中不可关闭）。 */
+  function closeBatch() {
+    setBatchOpen(false);
+    setBatchStarted(false);
+    setBatchProgress([]);
+  }
+
+  /** 打开批量弹窗（确认视图）：重置到未开始状态。 */
+  function openBatch() {
+    setBatchStarted(false);
+    setBatchProgress([]);
+    setBatchOpen(true);
+  }
+
   if (loading && !coverage) return <Spin tip="加载描述覆盖统计…" />;
   if (error) return <Alert type="error" message={error} />;
   if (!coverage) return <Empty description="暂无覆盖数据" />;
@@ -616,6 +736,16 @@ export function DescriptionCoveragePanel({
   const schemaColumns = Array.isArray(detail?.schema_summary)
     ? detail?.schema_summary
     : [];
+  // 勾选表 → 待执行动作清单（字段缺失 + 表描述缺失，供确认弹窗展示与串行执行）
+  const selectedTasks: BatchTask[] = coverage.per_table
+    .filter((t) => selectedRowKeys.includes(t.catalog_id))
+    .map((t) => ({
+      catalog_id: t.catalog_id,
+      entity_name: t.entity_name,
+      missing_fields: t.missing_fields,
+      needs_table_desc: !t.table_desc,
+      missing_field_names: t.missing_field_names ?? [],
+    }));
 
   return (
     <div>
@@ -732,16 +862,122 @@ export function DescriptionCoveragePanel({
           title="按表列缺失字段数（点击行查看详情并补全）"
           style={{ marginBottom: 16 }}
           extra={
-            <Button size="small" icon={<ThunderboltOutlined />} onClick={load} loading={loading}>
-              刷新
-            </Button>
+            <Space>
+              {canInferCatalog && (
+                <Tooltip title="勾选多张表后，批量 LLM 推断每张表缺失的字段描述与表级描述（已有描述不覆盖）">
+                  <Button
+                    size="small"
+                    type="primary"
+                    icon={<ThunderboltOutlined />}
+                    disabled={selectedRowKeys.length === 0}
+                    onClick={openBatch}
+                  >
+                    批量推断所选表
+                    {selectedRowKeys.length > 0 ? `（${selectedRowKeys.length}）` : ""}
+                  </Button>
+                </Tooltip>
+              )}
+              <Button size="small" icon={<ThunderboltOutlined />} onClick={load} loading={loading}>
+                刷新
+              </Button>
+            </Space>
           }
         >
+          {batchOpen && (
+            <Card
+              size="small"
+              style={{ marginBottom: 12 }}
+              title={batchStarted ? "批量 LLM 推断" : "批量 LLM 推断确认"}
+              data-testid="batch-infer-panel"
+            >
+              {batchStarted ? (
+                <>
+                  <Table<BatchProgressItem>
+                    dataSource={batchProgress}
+                    rowKey="catalog_id"
+                    size="small"
+                    pagination={false}
+                    columns={[
+                      {
+                        title: "表",
+                        dataIndex: "entity_name",
+                        render: (v: string) => <span className="mono">{v}</span>,
+                      },
+                      {
+                        title: "状态",
+                        dataIndex: "status",
+                        width: 96,
+                        render: (v: BatchProgressItem["status"]) => batchStatusTag(v),
+                      },
+                      { title: "结果", dataIndex: "summary", ellipsis: true },
+                    ]}
+                  />
+                  <div style={{ marginTop: 16, textAlign: "right" }}>
+                    <Button type="primary" onClick={closeBatch} disabled={batchRunning}>
+                      {batchRunning ? "推断中…" : "关闭"}
+                    </Button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p style={{ marginBottom: 12 }}>
+                    将为以下 <b>{selectedTasks.length}</b> 张表自动推断缺失描述（已有描述不会被覆盖）：
+                  </p>
+                  <div style={{ maxHeight: 320, overflowY: "auto" }}>
+                    {selectedTasks.map((t) => (
+                      <div key={t.catalog_id} style={{ marginBottom: 10 }}>
+                        <Space size={4} wrap>
+                          <span className="mono">{t.entity_name}</span>
+                          {t.needs_table_desc && <Tag color="blue">表描述</Tag>}
+                          {t.missing_fields > 0 && (
+                            <Tag color="red">{t.missing_fields} 个缺失字段</Tag>
+                          )}
+                        </Space>
+                        {t.missing_field_names.length > 0 && (
+                          <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+                            {t.missing_field_names.slice(0, 8).join("、")}
+                            {t.missing_field_names.length > 8
+                              ? `…等 ${t.missing_field_names.length} 个`
+                              : ""}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ marginTop: 16, textAlign: "right" }}>
+                    <Space>
+                      <Button onClick={closeBatch}>取消</Button>
+                      <Button
+                        type="primary"
+                        icon={<ThunderboltOutlined />}
+                        onClick={() => startBatchInfer(selectedTasks)}
+                      >
+                        开始推断
+                      </Button>
+                    </Space>
+                  </div>
+                </>
+              )}
+            </Card>
+          )}
           <Table<TableCoverageItem>
             dataSource={coverage.per_table}
             columns={tableCoverageCols}
             rowKey={(r) => r.catalog_id}
             size="small"
+            rowSelection={
+              canInferCatalog
+                ? {
+                    selectedRowKeys,
+                    onChange: (keys) => setSelectedRowKeys(keys),
+                    preserveSelectedRowKeys: true,
+                    // 仅可选「有缺失」的表（字段缺失或表描述缺失），无缺失表禁用勾选
+                    getCheckboxProps: (r) => ({
+                      disabled: r.missing_fields === 0 && !!r.table_desc,
+                    }),
+                  }
+                : undefined
+            }
             pagination={{
               pageSize,
               showSizeChanger: true,
@@ -750,7 +986,12 @@ export function DescriptionCoveragePanel({
               showTotal: (t) => `共 ${t} 张表`,
             }}
             onRow={(record) => ({
-              onClick: () => openDetail(record.catalog_id),
+              onClick: (e) => {
+                // 点击选择列复选框不打开详情（antd checkbox 冒泡到行）
+                const target = e.target as HTMLElement;
+                if (target.closest(".ant-table-selection-column")) return;
+                openDetail(record.catalog_id);
+              },
               style: { cursor: "pointer" },
             })}
           />

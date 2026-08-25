@@ -40,7 +40,7 @@ vi.mock("../api", () => {
   };
 });
 
-import { listCatalogs, registerCatalog, listDataSources, listCatalogDatabases, refreshCatalogEntity, fetchDescriptionCoverage, fetchAssetEntityDetail, inferDescriptions, updateTableDescription, updateColumnDescription, listFavorites } from "../api";
+import { listCatalogs, registerCatalog, listDataSources, listCatalogDatabases, refreshCatalogEntity, fetchDescriptionCoverage, fetchAssetEntityDetail, inferDescriptions, inferTableDescription, updateTableDescription, updateColumnDescription, listFavorites } from "../api";
 
 const mockedList = vi.mocked(listCatalogs);
 const mockedRegister = vi.mocked(registerCatalog);
@@ -665,6 +665,156 @@ describe("Catalogs 页面", () => {
     await waitFor(() => {
       expect(updateColumnDescription).toHaveBeenCalledWith(1, "id", "订单主键");
     });
+  });
+
+  it("跨表批量推断：勾选多张有缺失表 → 确认弹窗展示自动纳入的缺失字段 → 串行推断 → 刷新覆盖", async () => {
+    vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
+      total_tables: 3,
+      tables_with_desc: 1,
+      tables_missing_desc: 2,
+      total_fields: 6,
+      fields_with_desc: 3,
+      fields_missing_desc: 3,
+      per_table: [
+        {
+          catalog_id: 1, entity_name: "ods_order", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: false,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 1, missing_fields: 1,
+          missing_field_names: ["id"], updated_at: "2026-08-14T02:30:00",
+        },
+        {
+          catalog_id: 2, entity_name: "dwd_user", source_id: "s2", source_name: "Platform MySQL",
+          entity_type: "TABLE", domain: "platform", sensitivity_level: "CONFIDENTIAL", table_desc: true,
+          description: "用户明细表", description_source: "manual", owner_name: "张三",
+          total_fields: 2, covered_fields: 2, missing_fields: 0,
+          missing_field_names: [], updated_at: "2026-08-14T03:00:00",
+        },
+        {
+          catalog_id: 3, entity_name: "ods_pay", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: true,
+          description: "支付流水表", description_source: "manual", owner_name: null,
+          total_fields: 2, covered_fields: 0, missing_fields: 2,
+          missing_field_names: ["amount", "pay_time"], updated_at: "2026-08-14T04:00:00",
+        },
+      ],
+    });
+    vi.mocked(inferDescriptions).mockResolvedValue({
+      inferred: [{ column_name: "id", description: "订单主键", source: "llm", confidence: 0.9 }],
+      skipped: [],
+      failed: [],
+    } as Awaited<ReturnType<typeof inferDescriptions>>);
+    vi.mocked(inferTableDescription).mockResolvedValue({
+      catalog_id: 1,
+      description: "订单表",
+      source: "llm",
+      confidence: 0.9,
+    });
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    // 治理表格渲染 3 张表，批量推断按钮初始禁用
+    await waitFor(() => expect(screen.getByText("ods_order")).toBeTruthy());
+    const batchBtn = screen.getByRole("button", { name: /批量推断所选表/ }) as HTMLButtonElement;
+    expect(batchBtn.disabled).toBe(true);
+
+    // 无缺失表（dwd_user）复选框禁用，有缺失表可勾选
+    const fullRow = screen.getByText("dwd_user").closest("tr") as HTMLElement;
+    expect(within(fullRow).getByRole("checkbox")).toBeDisabled();
+    const orderRow = screen.getByText("ods_order").closest("tr") as HTMLElement;
+    const payRow = screen.getByText("ods_pay").closest("tr") as HTMLElement;
+    fireEvent.click(within(orderRow).getByRole("checkbox"));
+    fireEvent.click(within(payRow).getByRole("checkbox"));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /批量推断所选表（2）/ })).toBeTruthy(),
+    );
+
+    // 确认面板：展示每张被选表将自动纳入的缺失字段与动作
+    fireEvent.click(screen.getByRole("button", { name: /批量推断所选表/ }));
+    await waitFor(() => expect(screen.getByText("批量 LLM 推断确认")).toBeTruthy());
+    const panel = screen.getByTestId("batch-infer-panel") as HTMLElement;
+    expect(within(panel).getByText("表描述")).toBeTruthy();
+    expect(within(panel).getByText("1 个缺失字段")).toBeTruthy();
+    expect(within(panel).getByText("2 个缺失字段")).toBeTruthy();
+    expect(within(panel).getByText(/id/)).toBeTruthy();
+    expect(within(panel).getByText(/amount/)).toBeTruthy();
+
+    // 开始推断：串行调用字段批量（表1、表3）与表描述（表1），完成后刷新覆盖数据
+    fireEvent.click(screen.getByRole("button", { name: /开始推断/ }));
+    await waitFor(() => expect(inferDescriptions).toHaveBeenCalledWith(1));
+    await waitFor(() => expect(inferDescriptions).toHaveBeenCalledWith(3));
+    expect(inferTableDescription).toHaveBeenCalledWith(1);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /关\s*闭/ })).toBeTruthy(),
+    );
+    // 全表处理完成后 load() 刷新覆盖统计（初始 1 次 + 批量后 1 次）
+    await waitFor(() => expect(fetchDescriptionCoverage).toHaveBeenCalledTimes(2));
+    // 勾选已清空 → 批量按钮回到禁用
+    const batchBtnAfter = screen.getByRole("button", { name: /批量推断所选表/ }) as HTMLButtonElement;
+    expect(batchBtnAfter.disabled).toBe(true);
+  });
+
+  it("跨表批量推断：单表动作失败不阻断其他表，进度标记失败并继续", async () => {
+    vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
+      total_tables: 2,
+      tables_with_desc: 0,
+      tables_missing_desc: 2,
+      total_fields: 4,
+      fields_with_desc: 1,
+      fields_missing_desc: 3,
+      per_table: [
+        {
+          catalog_id: 1, entity_name: "ods_order", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: true,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 1, missing_fields: 1,
+          missing_field_names: ["id"], updated_at: "2026-08-14T02:30:00",
+        },
+        {
+          catalog_id: 3, entity_name: "ods_pay", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: true,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 0, missing_fields: 2,
+          missing_field_names: ["amount", "pay_time"], updated_at: "2026-08-14T04:00:00",
+        },
+      ],
+    });
+    vi.mocked(inferDescriptions)
+      .mockRejectedValueOnce(new Error("LLM 超时"))
+      .mockResolvedValueOnce({
+        inferred: [
+          { column_name: "amount", description: "支付金额", source: "llm", confidence: 0.9 },
+          { column_name: "pay_time", description: "支付时间", source: "llm", confidence: 0.9 },
+        ],
+        skipped: [],
+        failed: [],
+      } as Awaited<ReturnType<typeof inferDescriptions>>);
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText("ods_order")).toBeTruthy());
+    const orderRow = screen.getByText("ods_order").closest("tr") as HTMLElement;
+    const payRow = screen.getByText("ods_pay").closest("tr") as HTMLElement;
+    fireEvent.click(within(orderRow).getByRole("checkbox"));
+    fireEvent.click(within(payRow).getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: /批量推断所选表/ }));
+    await waitFor(() => expect(screen.getByText("批量 LLM 推断确认")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /开始推断/ }));
+
+    // 表1 字段推断失败（进度标记失败），表3 继续成功；最终可关闭
+    await waitFor(() => expect(inferDescriptions).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /关\s*闭/ })).toBeTruthy(),
+    );
+    expect(inferDescriptions).toHaveBeenCalledWith(3);
+    // 刷新覆盖数据照常执行（失败不阻断整体）
+    await waitFor(() => expect(fetchDescriptionCoverage).toHaveBeenCalledTimes(2));
   });
 
   it("提供统一的返回按钮（返回上一入口）", async () => {
