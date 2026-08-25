@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom";
+import { afterEach } from "vitest";
 import { message } from "antd";
 
 // antd/rc-motion 出入场动画与 App.message 通知在 jsdom 中依赖 transitionend/
