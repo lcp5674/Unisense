@@ -95,11 +95,12 @@ def _split_semicolon(sql: str) -> list[str]:
 def _split_statement(sql: str) -> list[str]:
     """sqlglot 按语句语义切分（CTE/INSERT 单条天然正确；注释/引号内分号不误切）。
 
-    多方言依次尝试（默认 → hive → spark）：默认方言遇 Hive 特有语法
-    （如 ``create table ... stored as orc``）会整段抛错，回退 hive/spark 方言
+    多方言依次尝试（默认 → hive → spark → starrocks → doris）：默认方言遇
+    Hive/Doris 特有语法（如 ``create table ... stored as orc``、``CREATE TABLE ...
+    DISTRIBUTED BY ... AS SELECT``）会整段抛错或降级 Command，回退到对应方言
     保证 ETL 脚本可切分（避免因一条 DDL 导致整段回退到分号切分）。
     """
-    for dialect in (None, "hive", "spark"):
+    for dialect in (None, "hive", "spark", "starrocks", "doris"):
         try:
             asts = sqlglot.parse(sql, dialect=dialect)
         except Exception:
@@ -370,7 +371,11 @@ def _build_atomic_candidate(
     agg = measure["agg"] or "COUNT"
     alias = measure.get("alias")
     measure_table = measure.get("table") or table
-    profile = build_profile(source_table=measure_table, measure_column=col, period=period)
+    # 下沉度量同列多语义（ETL 多个 ``SUM(CASE WHEN ...)`` 分支同落一列）时用
+    # alias 作命名锚点生成编码/名称，避免 N 个候选撞同一编码；口径列仍为原始
+    # col（expression/source_fields 不受影响），普通单语句（无 alias）行为不变。
+    code_col = alias if alias and alias != col else col
+    profile = build_profile(source_table=measure_table, measure_column=code_col, period=period)
     profile["domain_code"] = domain_code or ""
     result = infer_metric(profile, domain_defaults=domain_defaults or {})
     fields = result["fields"]
@@ -385,7 +390,7 @@ def _build_atomic_candidate(
     }
     metric_code = result.get("metric_code_suggestion")
     if not metric_code and domain_code and measure_table and period:
-        metric_code = generate_metric_code(domain_code, measure_table, col, period)
+        metric_code = generate_metric_code(domain_code, measure_table, code_col, period)
     return {
         "key": f"{idx}:{alias or col}",
         "metric_code": metric_code,

@@ -348,10 +348,39 @@ def _detect_time_column(
     return None
 
 
+def _parse_profile_ast(sql: str) -> exp.Expr | None:
+    """解析 SQL 为 AST；默认方言失败/降级 Command 时用 Doris 预处理兜底。
+
+    生产 ETL 常用 Doris/StarRocks 的 ``CREATE TABLE ... DISTRIBUTED BY ... BUCKETS n
+    PROPERTIES(...) AS SELECT`` 形态，sqlglot 默认方言把整句降级为 ``Command``
+    （无 Select 子树）→ 画像为空 → 批量解析跳过全部候选。复用血缘解析器的
+    ``_preprocess_dialect``（剥离物理分布/副本属性等与口径无关的子句）后重试，
+    口径语义不变；仍失败返回 ``None``（上层降级空画像，不抛异常）。
+    """
+    try:
+        ast = sqlglot.parse_one(sql, error_level=sqlglot.ErrorLevel.RAISE)
+    except Exception:
+        ast = None
+    if ast is not None and ast.find(exp.Select) is not None:
+        return ast
+    # Doris/StarRocks 方言语法（CTAS 物理属性等）→ 剥离后重试（懒导入避免模块耦合）
+    try:
+        from app.services.lineage.parser import _preprocess_dialect
+
+        pre = _preprocess_dialect(sql, "doris")
+        if pre != sql:
+            return sqlglot.parse_one(pre, error_level=sqlglot.ErrorLevel.RAISE)
+    except Exception:
+        return None
+    return ast if ast is not None else None
+
+
 def parse_sql_profile(sql: str) -> SqlProfile:
     """解析指标 SQL 为画像。
 
-    解析失败（语法错误/方言不支持）返回空画像，不抛异常。
+    解析失败（语法错误/方言不支持）返回空画像，不抛异常。Doris/StarRocks 的
+    CTAS 物理属性（``DISTRIBUTED BY``/``PROPERTIES``/``BUCKETS`` 等）经
+    ``_parse_profile_ast`` 剥离后按默认方言解析，支持生产 ETL 的宽表落库形态。
 
     Args:
         sql: 指标定义 SQL。
@@ -361,9 +390,8 @@ def parse_sql_profile(sql: str) -> SqlProfile:
     """
     if not sql or not sql.strip():
         return SqlProfile()
-    try:
-        ast = sqlglot.parse_one(sql, error_level=sqlglot.ErrorLevel.RAISE)
-    except Exception:
+    ast = _parse_profile_ast(sql)
+    if ast is None:
         return SqlProfile(sql=sql.strip())
 
     select = ast

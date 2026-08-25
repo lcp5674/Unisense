@@ -179,3 +179,44 @@ class TestParseSqlProfile:
         """
         p = parse_sql_profile(sql)
         assert p.time_granularity == "month"
+
+    def test_doris_ctas_physical_attrs_degrade_fallback(self) -> None:
+        """Doris CTAS（DUPLICATE KEY + DISTRIBUTED BY + PROPERTIES + BUCKETS）画像解析。
+
+        默认方言把整句降级为 Command（无 Select 子树）→ 依赖 ``_preprocess_dialect``
+        剥离物理分布/副本属性后按默认方言解析，聚合度量/源表须正确提取。
+        """
+        sql = """
+        CREATE TABLE IF NOT EXISTS wedw_dws.doctor_func_index_df
+        DUPLICATE KEY(create_date, doctor_code, hosp_code)
+        COMMENT '家医智能体-功能使用分析'
+        DISTRIBUTED BY HASH(create_date, doctor_code, hosp_code) BUCKETS 5
+        PROPERTIES ("replication_allocation" = "tag.location.default: 1")
+        AS
+        SELECT
+            a.event_date AS create_date,
+            a.quality_control_qc_report_cnt,
+            a.remote_clinic_cnt
+        FROM (
+            SELECT
+                to_date(t1.event_time) AS event_date,
+                SUM(CASE WHEN get_json_string(t1.biz_data,'$.skillId')='quality-control-qc-report'
+                    THEN 1 ELSE 0 END) AS quality_control_qc_report_cnt,
+                SUM(CASE WHEN get_json_string(t1.biz_data,'$.skillId')='remote-clinic'
+                    THEN 1 ELSE 0 END) AS remote_clinic_cnt
+            FROM footprint_service_ctl.footprint_service.ods_track_event t1
+            WHERE t1.click_event='skill-call'
+            GROUP BY to_date(t1.event_time)
+        ) a
+        """
+        p = parse_sql_profile(sql)
+        # 物理属性剥离后默认方言可解析 → 度量/源表不丢
+        assert len(p.measures) == 2
+        assert {m["alias"] for m in p.measures} == {
+            "quality_control_qc_report_cnt",
+            "remote_clinic_cnt",
+        }
+        assert p.measures[0]["agg"] == "SUM"
+        assert "footprint_service_ctl.footprint_service.ods_track_event" in p.source_tables
+        # event_date 透传 → 时间列可识别（下沉子查询 to_date 截日）
+        assert p.time_column is not None

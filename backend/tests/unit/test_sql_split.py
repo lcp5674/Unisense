@@ -426,6 +426,74 @@ async def test_infer_sql_batch_etl_insert_synthesize_composite() -> None:
     assert set(comp["dependencies"]) == {a["metric_code"] for a in atoms}
 
 
+# ---------------------------------------------------------------- Doris CTAS（场景A 扩展）
+
+
+# Doris 落宽表脚本：DROP + CREATE TABLE ... DISTRIBUTED BY ... PROPERTIES ... AS SELECT
+# （默认方言对 DISTRIBUTED BY/PROPERTIES 降级 Command，须走 starrocks 方言/剥离兜底）
+_DORIS_CTAS_SQL = """
+DROP TABLE IF EXISTS wedw_dws.doctor_func_index_df;
+CREATE TABLE IF NOT EXISTS wedw_dws.doctor_func_index_df
+DUPLICATE KEY(create_date, doctor_code, hosp_code)
+COMMENT '家医智能体-功能使用分析'
+DISTRIBUTED BY HASH(create_date, doctor_code, hosp_code) BUCKETS 5
+PROPERTIES ("replication_allocation" = "tag.location.default: 1")
+AS
+SELECT
+    a.create_date,
+    a.quality_control_qc_report_cnt,
+    a.remote_clinic_cnt
+FROM (
+    SELECT
+        to_date(t1.event_time) AS create_date,
+        SUM(CASE WHEN get_json_string(t1.biz_data,'$.skillId')='quality-control-qc-report'
+            THEN 1 ELSE 0 END) AS quality_control_qc_report_cnt,
+        SUM(CASE WHEN get_json_string(t1.biz_data,'$.skillId')='remote-clinic'
+            THEN 1 ELSE 0 END) AS remote_clinic_cnt
+    FROM footprint_service_ctl.footprint_service.ods_track_event t1
+    WHERE t1.click_event='skill-call'
+    GROUP BY to_date(t1.event_time)
+) a
+"""
+
+
+def test_split_statement_doris_ctas_uses_starrocks_dialect() -> None:
+    """Doris CTAS（DISTRIBUTED BY/PROPERTIES）默认方言降级 Command → starrocks 方言语义切分。"""
+    segments = _split_statement(_DORIS_CTAS_SQL)
+    assert len(segments) == 2
+    assert "DROP TABLE" in segments[0].upper()
+    assert "CREATE TABLE" in segments[1].upper()
+    # create 段保留 SELECT 口径（未丢失）
+    assert "quality_control_qc_report_cnt" in segments[1]
+
+
+async def test_infer_sql_batch_doris_ctas_candidates_with_alias_anchor() -> None:
+    """Doris CTAS 批量解析：产出原子候选；同列多语义（SUM(CASE) 分支）用 alias 锚点区分编码。
+
+    回归：默认方言不支持 DISTRIBUTED BY/PROPERTIES 曾致整句解析失败 → 0 候选
+    （前端提示「未解析到可注册的指标候选」）；修复后须产出候选且编码可区分。
+    """
+    result = await infer_sql_batch(
+        _fake_db(), sql=_DORIS_CTAS_SQL, split_mode="statement", domain_code="wedw"
+    )
+    # DROP 无聚合进 skipped，CTAS 下沉出 2 个原子候选
+    assert len(result["skipped"]) == 1
+    assert result["skipped"][0]["reason"] == "未解析到聚合度量列"
+    atoms = [c for c in result["candidates"] if c["type"] == "atomic"]
+    assert len(atoms) == 2
+    # alias 锚点：同落 biz_data 列的 2 个 case 聚合 → 编码/名称可区分
+    codes = {c["metric_code"] for c in atoms}
+    assert len(codes) == 2
+    assert any("qualitycontrol" in c for c in codes)
+    assert any("remoteclinic" in c for c in codes)
+    # 口径表达式保留完整 CASE（非裸 SUM(biz_data)）
+    exprs = {c["definition_json"]["expression"] for c in atoms}
+    assert all("CASE WHEN" in e.upper() for e in exprs)
+    # 源表取聚合所在子查询的物理表
+    src = "footprint_service_ctl.footprint_service.ods_track_event"
+    assert all(c["source_table"] == src for c in atoms)
+
+
 # ---------------------------------------------------------------- 周期推断 + LLM 兜底
 
 
