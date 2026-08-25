@@ -1163,6 +1163,30 @@ export function MetricCreate() {
     }
   }
 
+  // 批量注册维度列映射：源表列名 → 维度名自动推断（列名命中业务特征即预填，用户可改）。
+  // 例如 dept_code/科室 → dept、doctor_id/医生 → doctor、patient_id/患者 → patient。
+  // 推断仅作"免手输"提效——预填后仍是 AutoComplete 可搜索平台维度/手输兜底，不强制平台存在
+  // （血缘「指标↔维度」边可挂未采集维度节点，与单条注册 dimensions 语义一致）。
+  const COLUMN_DIM_HINTS: Array<{ match: RegExp; dim: string }> = [
+    { match: /dept|ks_|科室|部门|department/i, dim: "dept" },
+    { match: /doctor|physician|ys_|医生|医师/i, dim: "doctor" },
+    { match: /patient|br_|患者|病人/i, dim: "patient" },
+    { match: /diag|zd_|病种|诊断/i, dim: "diagnosis" },
+    { match: /drug|yp_|药品/i, dim: "drug" },
+    { match: /presc|cf_|处方/i, dim: "prescription" },
+    { match: /pharm|药房/i, dim: "pharmacy" },
+    { match: /settle|yb_|医保|结算/i, dim: "yb_settle" },
+    { match: /channel|渠道/i, dim: "channel" },
+    { match: /store|门店|shop/i, dim: "store" },
+    { match: /city|城市|region|区域/i, dim: "region" },
+    { match: /date|dt_|time|时间/i, dim: "time" },
+  ];
+  // 列名 → 维度名：命中第一条业务特征返回对应维度名，未命中返回 null（不预填）
+  function inferDimFromColumn(colName: string): string | null {
+    const hit = COLUMN_DIM_HINTS.find((h) => h.match.test(colName));
+    return hit ? hit.dim : null;
+  }
+
   // 提交批量注册：度量列按行拆分，维度映射为可选 JSON，成功/失败明细展示在结果区
   async function handleBatchSubmit(values: Record<string, unknown>) {
     // tags Select 返回数组；兼容历史手输换行文本
@@ -2482,7 +2506,7 @@ export function MetricCreate() {
             </Form.Item>
             <Form.Item
               label="维度列映射（可选）"
-              extra="每行一个：维度名 + 该维度在源表对应的列（列名从源表列选择）"
+              extra="每行一个：维度名 + 该维度在源表对应的列。维度名将写入指标维度（血缘图据此生成指标↔维度边）；选择源表列后系统按列名自动推断维度名，可修改或搜索平台维度。"
             >
               <Form.List name="dimension_mapping_list">
                 {(fields, { add, remove }) => (
@@ -2507,21 +2531,30 @@ export function MetricCreate() {
                             }
                           />
                         </Form.Item>
-                        <Form.Item
-                          {...restField}
-                          name={[name, "col_name"]}
-                          rules={[{ required: true, message: "列名" }]}
-                          style={{ marginBottom: 0 }}
-                        >
-                          <Select
-                            showSearch
-                            allowClear
-                            placeholder={batchColumnOptions.length > 0 ? "选择源表列" : "先选源表后可选列"}
-                            options={batchColumnOptions}
-                            loading={batchColLoading}
-                            style={{ width: 220 }}
-                          />
-                        </Form.Item>
+            <Form.Item
+              {...restField}
+              name={[name, "col_name"]}
+              rules={[{ required: true, message: "列名" }]}
+              style={{ marginBottom: 0 }}
+            >
+              <Select
+                showSearch
+                allowClear
+                placeholder={batchColumnOptions.length > 0 ? "选择源表列" : "先选源表后可选列"}
+                options={batchColumnOptions}
+                loading={batchColLoading}
+                style={{ width: 220 }}
+                onChange={(colVal) => {
+                  // 列名自动推断维度名预填（仅当该行维度名为空，不覆盖用户已填值）
+                  if (!colVal) return;
+                  const inferred = inferDimFromColumn(String(colVal));
+                  if (inferred) {
+                    const current = batchForm.getFieldValue(["dimension_mapping_list", name, "dim_name"]);
+                    if (!current) batchForm.setFieldValue(["dimension_mapping_list", name, "dim_name"], inferred);
+                  }
+                }}
+              />
+            </Form.Item>
                         <Button type="text" danger icon={<MinusCircleOutlined />} aria-label="删除该维度映射行" onClick={() => remove(name)} />
                       </Space>
                     ))}

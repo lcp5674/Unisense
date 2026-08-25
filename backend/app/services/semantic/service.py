@@ -4137,6 +4137,23 @@ class MetricService(BaseService):
             )
             defaults = suggested.get("defaults", {})
 
+            # 维度列映射 → 口径定义：维度名（keys）合入 dimensions（与单条注册 Step② 关联维度
+            # 一致，血缘差异同步据此建「指标↔维度」边）；完整映射冗余到 dimension_columns
+            # （保留"该维度在源表对应哪列"信息，血缘/展示可读）。空名/纯空白键过滤。
+            _defn: dict[str, Any] = {"expression": f"SUM({col})", "dependencies": []}
+            if request.dimension_mapping:
+                _dim_names = [
+                    str(d).strip() for d in request.dimension_mapping if str(d).strip()
+                ]
+                _dim_names = list(dict.fromkeys(_dim_names))  # 保序去重
+                if _dim_names:
+                    _defn["dimensions"] = _dim_names
+                    _defn["dimension_columns"] = {
+                        str(k).strip(): str(v).strip()
+                        for k, v in request.dimension_mapping.items()
+                        if str(k).strip() and str(v).strip()
+                    }
+
             try:
                 # P13 savepoint 隔离：每条候选独立嵌套事务——单列 DB 错误（如重复编码
                 # IntegrityError）只回滚本 savepoint，不污染此前已 flush 成功的候选。
@@ -4157,7 +4174,7 @@ class MetricService(BaseService):
                         metric_tier=defaults.get("metric_tier", "T3"),
                         serving_mode=defaults.get("serving_mode", "BATCH_ONLY"),
                         additivity=defaults.get("additivity", "ADDITIVE"),
-                        definition_json={"expression": f"SUM({col})", "dependencies": []},
+                        definition_json=_defn,
                         source_table=request.source_table,
                         measure_column=col,
                         period="day",

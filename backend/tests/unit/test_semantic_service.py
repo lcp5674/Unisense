@@ -1320,6 +1320,66 @@ async def test_batch_register_success():
     assert all(c["validation_errors"] is None for c in result["candidates"])
 
 
+async def test_batch_register_dimension_mapping_into_definition():
+    """批量注册：维度列映射合入每个候选指标的 definition_json。
+
+    - ``dimensions``：维度名数组（对齐单条注册，血缘差异同步据此建「指标↔维度」边）
+    - ``dimension_columns``：保留 维度名→源表列 完整映射（血缘/展示可读）
+    - 空名/纯空白键过滤、保序去重
+    """
+    svc, repo = _svc_with_repo()
+    captured: list = []
+
+    async def _capture(req, **kw):
+        captured.append(req)
+        return make_metric()
+
+    svc.create_metric = _capture  # type: ignore[method-assign]
+
+    from app.services.semantic.schemas import MetricBatchRegisterRequest
+
+    request = MetricBatchRegisterRequest(
+        source_table="dwd.sales_detail",
+        measure_columns=["gmv", "order_cnt"],
+        dimension_mapping={"dept": "dept_code", "date": "dt", "": "empty_col", "  ": "space_col"},
+        llm_prefill=True,
+        domain="sales",
+    )
+    result = await svc.batch_register_metrics(request, actor_id=1)
+
+    assert len(result["candidates"]) == 2
+    assert len(captured) == 2
+    for req in captured:
+        defn = req.definition_json
+        assert defn["dimensions"] == ["dept", "date"]
+        assert defn["dimension_columns"] == {"dept": "dept_code", "date": "dt"}
+
+
+async def test_batch_register_no_dimension_mapping_keeps_plain_definition():
+    """批量注册：未传维度映射时 definition_json 保持最简（不注入 dimensions 键）。"""
+    svc, repo = _svc_with_repo()
+    captured: list = []
+
+    async def _capture(req, **kw):
+        captured.append(req)
+        return make_metric()
+
+    svc.create_metric = _capture  # type: ignore[method-assign]
+
+    from app.services.semantic.schemas import MetricBatchRegisterRequest
+
+    request = MetricBatchRegisterRequest(
+        source_table="dwd.sales_detail",
+        measure_columns=["gmv"],
+        llm_prefill=True,
+        domain="sales",
+    )
+    result = await svc.batch_register_metrics(request, actor_id=1)
+
+    assert result["candidates"][0]["status"] == "DRAFT"
+    assert captured[0].definition_json == {"expression": "SUM(gmv)", "dependencies": []}
+
+
 async def test_batch_register_partial_failure():
     """批量注册：部分校验失败。"""
     svc, repo = _svc_with_repo()

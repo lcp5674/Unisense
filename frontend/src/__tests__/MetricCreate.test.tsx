@@ -232,6 +232,7 @@ describe("MetricCreate 批量注册指标", () => {
           { name: "gmv" },
           { name: "order_cnt" },
           { name: "dup" },
+          { name: "dept_code" },
         ]),
       ],
       total: 1,
@@ -385,6 +386,33 @@ describe("MetricCreate 批量注册指标", () => {
     await waitFor(() => {
       expect(mockedBatch).toHaveBeenCalledWith(
         expect.objectContaining({ dimension_mapping: { date: "gmv" } }),
+      );
+    });
+  });
+
+  it("维度映射选择源表列后按列名自动推断维度名预填", async () => {
+    mockedBatch.mockResolvedValue({
+      batch_id: "batch_map2",
+      candidates: [{ metric_code: "sales_gmv_day", status: "DRAFT", validation_errors: null }],
+    });
+    renderPage();
+    const modal = await openBatchModal();
+    await fillBatchForm(modal, "gmv");
+
+    // 添加维度映射行：不手输维度名，直接选列 dept_code → 维度名自动预填为 dept
+    fireEvent.click(within(modal).getByText("添加维度映射"));
+    const colSelect = within(modal).getByText("选择源表列");
+    fireEvent.mouseDown(colSelect);
+    await clickSelectOption("dept_code");
+    const dimInput = modal.querySelector('[data-testid="dim-name-auto"] input') as HTMLInputElement;
+    await waitFor(() => {
+      expect((dimInput as HTMLInputElement).value).toBe("dept");
+    });
+
+    fireEvent.click(within(modal).getByText("提交批量注册"));
+    await waitFor(() => {
+      expect(mockedBatch).toHaveBeenCalledWith(
+        expect.objectContaining({ dimension_mapping: { dept: "dept_code" } }),
       );
     });
   });
