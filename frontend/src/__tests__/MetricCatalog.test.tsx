@@ -869,6 +869,34 @@ describe("MetricCatalog 已应用筛选回显（非空态可感知子集）", ()
       expect(call).toBeTruthy();
     });
   });
+
+  it("一键「重置筛选」清空全部条件（状态/分级），回到默认视图", async () => {
+    mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
+    render(
+      <PermissionProvider user={{ id: 1, role: "platform_admin" } as any}>
+        <MemoryRouter initialEntries={["/catalog?status=PUBLISHED&tier=T1"]}>
+          <Routes>
+            <Route path="/catalog" element={<MetricCatalog />} />
+            <Route path="/detail/:code" element={<div>detail</div>} />
+          </Routes>
+        </MemoryRouter>
+      </PermissionProvider>,
+    );
+    await screen.findByText("sales_gmv_sum_d");
+    expect(screen.getByText("已应用筛选：")).toBeTruthy();
+    // 点击「重置筛选」：状态/分级被清空，后续请求不再携带这些筛选
+    fireEvent.click(screen.getByRole("button", { name: /重置筛选/ }));
+    await waitFor(() => {
+      const call = mockedList.mock.calls.find(
+        (c) => (c[0]?.status === undefined || c[0]?.status === "") && (c[0]?.metric_tier === undefined || c[0]?.metric_tier === ""),
+      );
+      expect(call).toBeTruthy();
+    });
+    // 已应用筛选回显消失（hasFilter 为 false）
+    await waitFor(() => {
+      expect(screen.queryByText("已应用筛选：")).toBeNull();
+    });
+  });
 });
 
 describe("MetricCatalog 加载失败降级", () => {

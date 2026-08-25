@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { Table, Input, Select, Button, Space, Tag, message, Tooltip, Descriptions, Drawer, Dropdown, Modal, Checkbox } from "antd";
+import { Table, Input, Select, Button, Space, Tag, message, Tooltip, Descriptions, Drawer, Dropdown, Modal, Checkbox, Card } from "antd";
 import {
   ArrowLeftOutlined,
   SearchOutlined,
@@ -608,6 +608,24 @@ export function MetricCatalog() {
     localStorage.removeItem(`${VISIBLE_COLS_STORAGE_PREFIX}${group}`);
     setVisibleCols(DEFAULT_VISIBLE_COLUMNS[group]);
     message.success(`已恢复${GROUP_LABEL[group] ?? ""}默认列`);
+  }
+
+  // 一键重置全部筛选条件（搜索/条件/快捷筛选/排序），回到默认视图
+  function handleResetFilters() {
+    setKeyword("");
+    setInputValue("");
+    setStatus("");
+    setDomain("");
+    setTier("");
+    setOwnerFilter("");
+    setLifecycleFilter(null);
+    setLifecycleDate({});
+    setMyMetricsOnly(false);
+    setFavoritesOnly(false);
+    setPiiOnly(false);
+    setSortBy("updated_at");
+    setSortOrder("desc");
+    setPage(1);
   }
 
   const userName = useMemo(
@@ -1649,169 +1667,226 @@ export function MetricCatalog() {
         </Space>
       </div>
 
-      <Space style={{ marginBottom: 16 }} wrap>
-        <Input
-          placeholder="搜索指标名 / 编码 / 描述"
-          value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
-          onPressEnter={handleSearch}
-          prefix={<SearchOutlined />}
-          style={{ width: 220 }}
-        />
-        <Button type="primary" onClick={handleSearch} icon={<SearchOutlined />}>
-          搜索
-        </Button>
-        <Select
-          value={domain || undefined}
-          onChange={(v) => { setDomain(v || ""); setPage(1); }}
-          style={{ width: 130 }}
-          allowClear
-          placeholder="全部域"
-          options={domainFilterOptions}
-        />
-        <Select
-          value={status || undefined}
-          onChange={(v) => { setStatus(v || ""); setPage(1); }}
-          style={{ width: 130 }}
-          allowClear
-          placeholder="全部状态"
-          options={[
-            { value: "DRAFT", label: "草稿" },
-            { value: "EXPERIMENTAL", label: "实验" },
-            { value: "REVIEW", label: "审核" },
-            { value: "PUBLISHED", label: "已发布" },
-            { value: "DEPRECATED", label: "已废弃" },
-            { value: "DATA_SOURCE_DROPPED", label: "数据源下线" },
-          ]}
-        />
-        <Select
-          value={tier || undefined}
-          onChange={(v) => { setTier(v || ""); setPage(1); }}
-          style={{ width: 110 }}
-          allowClear
-          placeholder="全部分级"
-          options={TIER_OPTIONS}
-        />
-        <Select
-          value={sortBy}
-          onChange={setSortBy}
-          style={{ width: 130 }}
-          options={SORT_OPTIONS}
-        />
-        <Button
-          size="small"
-          type={sortOrder === "asc" ? "primary" : "default"}
-          onClick={() => setSortOrder((o) => (o === "asc" ? "desc" : "asc"))}
-        >
-          {sortOrder === "asc" ? "升序 ↑" : "降序 ↓"}
-        </Button>
-        {/* 责任人（Owner）筛选：此前仅支持资产地图 URL 下钻（?owner_id=），无独立控件；
-            补 UI 入口（复审 D4），选择责任人即按 owner_id 过滤 */}
-        <Select
-          showSearch
-          value={ownerFilter ? Number(ownerFilter) : undefined}
-          onChange={(v) => {
-            setOwnerFilter(v ? String(v) : "");
-            setPage(1);
+      {/* 筛选面板：搜索 / 条件筛选 / 快捷筛选 分区展示，避免单行堆叠（美化重构）。
+          三个区域用发丝虚线分隔，标签前置让每个控件用途一目了然；已应用筛选在面板内回显 */}
+      <Card size="small" style={{ marginBottom: 16 }}>
+        {/* ① 搜索行：主入口突出，输入框自适应拉宽 */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <Input
+            placeholder="搜索指标名 / 编码 / 描述"
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            onPressEnter={handleSearch}
+            prefix={<SearchOutlined />}
+            allowClear
+            style={{ flex: "1 1 260px", minWidth: 220 }}
+          />
+          <Button type="primary" onClick={handleSearch} icon={<SearchOutlined />}>
+            搜索
+          </Button>
+          <Button icon={<ReloadOutlined />} disabled={!hasFilter} onClick={handleResetFilters}>
+            重置筛选
+          </Button>
+          <span style={{ flex: 1 }} />
+          <span className="muted" style={{ fontSize: 12 }}>
+            {favoritesOnly ? `当前页命中 ${displayItems.length} 条（全量 ${total} 条）` : `共 ${total} 条`}
+          </span>
+        </div>
+
+        {/* ② 条件筛选行：字段筛选 + 排序，标签分组 */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            flexWrap: "wrap",
+            marginTop: 12,
+            paddingTop: 12,
+            borderTop: "1px dashed var(--line)",
           }}
-          style={{ width: 160 }}
-          allowClear
-          placeholder="责任人"
-          optionFilterProp="label"
-          options={[...userMap.entries()].map(([id, name]) => ({
-            value: id,
-            label: `${name}（#${id}）`,
-          }))}
-        />
-        {currentUserId && (
-          <Button
-            type={myMetricsOnly ? "primary" : "default"}
-            icon={<UserOutlined />}
-            onClick={() => setMyMetricsOnly(!myMetricsOnly)}
-          >
-            {myMetricsOnly ? "我的指标" : "全部指标"}
-          </Button>
-        )}
-        <Tooltip
-          title={
-            favoritesError
-              ? "收藏列表加载失败，无法使用「只看收藏」过滤"
-              : favoritesOnly
-                ? "仅过滤当前页命中的收藏，可在搜索框输入关键字缩小范围"
-                : "只看我收藏的指标（当前页内过滤）"
-          }
         >
+          <span className="muted" style={{ fontSize: 12, flex: "none" }}>业务域</span>
+          <Select
+            value={domain || undefined}
+            onChange={(v) => { setDomain(v || ""); setPage(1); }}
+            style={{ width: 140 }}
+            allowClear
+            placeholder="全部域"
+            options={domainFilterOptions}
+          />
+          <span className="muted" style={{ fontSize: 12, flex: "none" }}>状态</span>
+          <Select
+            value={status || undefined}
+            onChange={(v) => { setStatus(v || ""); setPage(1); }}
+            style={{ width: 140 }}
+            allowClear
+            placeholder="全部状态"
+            options={[
+              { value: "DRAFT", label: "草稿" },
+              { value: "EXPERIMENTAL", label: "实验" },
+              { value: "REVIEW", label: "审核" },
+              { value: "PUBLISHED", label: "已发布" },
+              { value: "DEPRECATED", label: "已废弃" },
+              { value: "DATA_SOURCE_DROPPED", label: "数据源下线" },
+            ]}
+          />
+          <span className="muted" style={{ fontSize: 12, flex: "none" }}>分级</span>
+          <Select
+            value={tier || undefined}
+            onChange={(v) => { setTier(v || ""); setPage(1); }}
+            style={{ width: 120 }}
+            allowClear
+            placeholder="全部分级"
+            options={TIER_OPTIONS}
+          />
+          {/* 责任人（Owner）筛选：此前仅支持资产地图 URL 下钻（?owner_id=），无独立控件；
+              补 UI 入口（复审 D4），选择责任人即按 owner_id 过滤 */}
+          <span className="muted" style={{ fontSize: 12, flex: "none" }}>责任人</span>
+          <Select
+            showSearch
+            value={ownerFilter ? Number(ownerFilter) : undefined}
+            onChange={(v) => {
+              setOwnerFilter(v ? String(v) : "");
+              setPage(1);
+            }}
+            style={{ width: 170 }}
+            allowClear
+            placeholder="全部责任人"
+            optionFilterProp="label"
+            options={[...userMap.entries()].map(([id, name]) => ({
+              value: id,
+              label: `${name}（#${id}）`,
+            }))}
+          />
+          <span style={{ flex: 1 }} />
+          <span className="muted" style={{ fontSize: 12, flex: "none" }}>排序</span>
+          <Select
+            value={sortBy}
+            onChange={setSortBy}
+            style={{ width: 140 }}
+            options={SORT_OPTIONS}
+          />
           <Button
-            type={favoritesOnly ? "primary" : "default"}
-            icon={favoritesOnly ? <HeartFilled style={{ color: "#eb2f96" }} /> : <HeartOutlined />}
-            disabled={favoritesError}
-            onClick={() => setFavoritesOnly(!favoritesOnly)}
-          >
-            {favoritesOnly ? "只看收藏" : "我的收藏"}
-          </Button>
-        </Tooltip>
-        <Tooltip title="只看含 PII 的指标（合规官默认开启此视角）">
-          <Button
-            type={piiOnly ? "primary" : "default"}
-            icon={<SafetyCertificateOutlined />}
-            onClick={() => setPiiOnly(!piiOnly)}
-          >
-            {piiOnly ? "只看PII" : "PII指标"}
-          </Button>
-        </Tooltip>
-        {LIFECYCLE_PRESETS.map((p) => (
-          <Button
-            key={p.key}
             size="small"
-            type={lifecycleFilter === p.key ? "primary" : "default"}
-            icon={p.icon}
-            onClick={() => {
-              if (lifecycleFilter === p.key) {
-                setLifecycleFilter(null);
-                setStatus("");
-                setLifecycleDate({});
-                setSortBy("updated_at");
-                setPage(1);
-              } else {
-                handleLifecycle(p.key);
-              }
+            type={sortOrder === "asc" ? "primary" : "default"}
+            onClick={() => setSortOrder((o) => (o === "asc" ? "desc" : "asc"))}
+          >
+            {sortOrder === "asc" ? "升序 ↑" : "降序 ↓"}
+          </Button>
+        </div>
+
+        {/* ③ 快捷筛选行：常用视角开关 + 生命周期快筛 */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            flexWrap: "wrap",
+            marginTop: 12,
+            paddingTop: 12,
+            borderTop: "1px dashed var(--line)",
+          }}
+        >
+          <span className="muted" style={{ fontSize: 12, flex: "none" }}>快捷筛选</span>
+          {currentUserId && (
+            <Button
+              type={myMetricsOnly ? "primary" : "default"}
+              icon={<UserOutlined />}
+              onClick={() => setMyMetricsOnly(!myMetricsOnly)}
+            >
+              {myMetricsOnly ? "我的指标" : "全部指标"}
+            </Button>
+          )}
+          <Tooltip
+            title={
+              favoritesError
+                ? "收藏列表加载失败，无法使用「只看收藏」过滤"
+                : favoritesOnly
+                  ? "仅过滤当前页命中的收藏，可在搜索框输入关键字缩小范围"
+                  : "只看我收藏的指标（当前页内过滤）"
+            }
+          >
+            <Button
+              type={favoritesOnly ? "primary" : "default"}
+              icon={favoritesOnly ? <HeartFilled style={{ color: "#eb2f96" }} /> : <HeartOutlined />}
+              disabled={favoritesError}
+              onClick={() => setFavoritesOnly(!favoritesOnly)}
+            >
+              {favoritesOnly ? "只看收藏" : "我的收藏"}
+            </Button>
+          </Tooltip>
+          <Tooltip title="只看含 PII 的指标（合规官默认开启此视角）">
+            <Button
+              type={piiOnly ? "primary" : "default"}
+              icon={<SafetyCertificateOutlined />}
+              onClick={() => setPiiOnly(!piiOnly)}
+            >
+              {piiOnly ? "只看PII" : "PII指标"}
+            </Button>
+          </Tooltip>
+          <span className="muted" style={{ fontSize: 12, flex: "none", marginLeft: 4 }}>生命周期</span>
+          {LIFECYCLE_PRESETS.map((p) => (
+            <Button
+              key={p.key}
+              size="small"
+              type={lifecycleFilter === p.key ? "primary" : "default"}
+              icon={p.icon}
+              onClick={() => {
+                if (lifecycleFilter === p.key) {
+                  setLifecycleFilter(null);
+                  setStatus("");
+                  setLifecycleDate({});
+                  setSortBy("updated_at");
+                  setPage(1);
+                } else {
+                  handleLifecycle(p.key);
+                }
+              }}
+            >
+              {p.label}
+            </Button>
+          ))}
+        </div>
+
+        {/* ④ 已应用筛选回显 */}
+        {hasFilter && !deletedView && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              flexWrap: "wrap",
+              marginTop: 12,
+              paddingTop: 10,
+              borderTop: "1px dashed var(--line)",
             }}
           >
-            {p.label}
-          </Button>
-        ))}
-        <span className="muted">
-          {favoritesOnly ? `当前页命中 ${displayItems.length} 条（全量 ${total} 条）` : `共 ${total} 条`}
-        </span>
-      </Space>
-
-      {hasFilter && !deletedView && (
-        <Space wrap size={[6, 4]} style={{ margin: "8px 0", width: "100%" }}>
-          <span className="muted" style={{ fontSize: 12 }}>已应用筛选：</span>
-          {keyword && <Tag closable onClose={() => { setKeyword(""); setInputValue(""); setPage(1); }}>关键词：{keyword}</Tag>}
-          {status && <Tag closable onClose={() => { setStatus(""); setPage(1); }}>状态：{METRIC_STATUS_LABEL[status] ?? status}</Tag>}
-          {domain && <Tag closable onClose={() => { setDomain(""); setPage(1); }}>域：{domainName(domain)}</Tag>}
-          {tier && <Tag closable onClose={() => { setTier(""); setPage(1); }}>分级：{METRIC_TIER_LABEL[tier] ?? tier}</Tag>}
-          {lifecycleFilter && (
-            <Tag closable onClose={() => { setLifecycleFilter(null); setStatus(""); setLifecycleDate({}); setSortBy("updated_at"); setPage(1); }}>
-              {LIFECYCLE_PRESETS.find((p) => p.key === lifecycleFilter)?.label ?? lifecycleFilter}
-            </Tag>
-          )}
-          {ownerFilter && <Tag closable onClose={() => { setOwnerFilter(""); setPage(1); }}>责任人下钻</Tag>}
-          {myMetricsOnly && <Tag closable onClose={() => { setMyMetricsOnly(false); setPage(1); }}>我的指标</Tag>}
-          {piiOnly && <Tag closable onClose={() => { setPiiOnly(false); setPage(1); }}>只看 PII</Tag>}
-          {favoritesOnly && <Tag closable onClose={() => { setFavoritesOnly(false); }}>只看收藏</Tag>}
-          {/* 按用户群体差异化：当前角色视图只读提示（静默生效，避免用户困惑列为何变化）+ 一键恢复默认 */}
-          {currentUserRole && visibleCols !== null && (
-            <Tag color="blue">
-              {GROUP_LABEL[ROLE_GROUP[currentUserRole] ?? "admin"] ?? ""}视图
-              <a style={{ marginLeft: 6, fontSize: 12 }} onClick={handleResetRoleView}>
-                恢复默认
-              </a>
-            </Tag>
-          )}
-        </Space>
-      )}
+            <span className="muted" style={{ fontSize: 12, flex: "none" }}>已应用筛选：</span>
+            {keyword && <Tag closable onClose={() => { setKeyword(""); setInputValue(""); setPage(1); }}>关键词：{keyword}</Tag>}
+            {status && <Tag closable onClose={() => { setStatus(""); setPage(1); }}>状态：{METRIC_STATUS_LABEL[status] ?? status}</Tag>}
+            {domain && <Tag closable onClose={() => { setDomain(""); setPage(1); }}>域：{domainName(domain)}</Tag>}
+            {tier && <Tag closable onClose={() => { setTier(""); setPage(1); }}>分级：{METRIC_TIER_LABEL[tier] ?? tier}</Tag>}
+            {lifecycleFilter && (
+              <Tag closable onClose={() => { setLifecycleFilter(null); setStatus(""); setLifecycleDate({}); setSortBy("updated_at"); setPage(1); }}>
+                {LIFECYCLE_PRESETS.find((p) => p.key === lifecycleFilter)?.label ?? lifecycleFilter}
+              </Tag>
+            )}
+            {ownerFilter && <Tag closable onClose={() => { setOwnerFilter(""); setPage(1); }}>责任人下钻</Tag>}
+            {myMetricsOnly && <Tag closable onClose={() => { setMyMetricsOnly(false); setPage(1); }}>我的指标</Tag>}
+            {piiOnly && <Tag closable onClose={() => { setPiiOnly(false); setPage(1); }}>只看 PII</Tag>}
+            {favoritesOnly && <Tag closable onClose={() => { setFavoritesOnly(false); }}>只看收藏</Tag>}
+            {/* 按用户群体差异化：当前角色视图只读提示（静默生效，避免用户困惑列为何变化）+ 一键恢复默认 */}
+            {currentUserRole && visibleCols !== null && (
+              <Tag color="blue">
+                {GROUP_LABEL[ROLE_GROUP[currentUserRole] ?? "admin"] ?? ""}视图
+                <a style={{ marginLeft: 6, fontSize: 12 }} onClick={handleResetRoleView}>
+                  恢复默认
+                </a>
+              </Tag>
+            )}
+          </div>
+        )}
+      </Card>
 
       <Table
         dataSource={displayItems}
