@@ -5559,3 +5559,70 @@ async def test_update_metric_review_edit_resets_to_draft():
     assert updates["reviewer_id"] is None
     assert updates["reviewer_type"] is None
     assert updates["reviewer_domain"] is None
+
+
+async def test_sql_batch_register_doris_ctas_candidates_end_to_end():
+    """Doris CTAS 解析候选 → batch_register_from_sql 端到端创建 DRAFT。
+
+    回归链路：默认方言不支持 DUPLICATE KEY/DISTRIBUTED BY/PROPERTIES 曾致解析
+    失败 → 0 候选（无法批量注册）；现在 parse-sql-batch 剥离物理属性后产出候选，
+    候选 definition_json（expression + source_fields）被 batch-register-from-sql
+    消费并逐条 savepoint 创建——「解析 → 注册」整条链路对 Doris 全通。
+    """
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+    from app.services.semantic.sql_split import infer_sql_batch
+
+    doris_ctas = """
+DROP TABLE IF EXISTS wedw_dws.doctor_func_index_df;
+CREATE TABLE IF NOT EXISTS wedw_dws.doctor_func_index_df
+DUPLICATE KEY(create_date, doctor_code, hosp_code)
+DISTRIBUTED BY HASH(create_date, doctor_code, hosp_code) BUCKETS 5
+PROPERTIES ("replication_allocation" = "tag.location.default: 1")
+AS SELECT
+  coalesce(a.event_date, b.create_date) AS create_date,
+  coalesce(a.quality_control_qc_report_cnt, 0) AS quality_control_qc_report_cnt,
+  coalesce(b.order_cnt, 0) AS yyf_order_cnt
+FROM (
+  SELECT t1.user_id, to_date(t1.event_time) AS event_date,
+    sum(case when get_json_string(t1.biz_data,'$.skillId')='quality-control-qc-report'
+        then 1 else 0 end) AS quality_control_qc_report_cnt
+  FROM ods_track_event t1 GROUP BY t1.user_id, to_date(t1.event_time)
+) a
+FULL JOIN (
+  SELECT doctor_code, create_date, count(distinct prescription_no) AS order_cnt
+  FROM doctor_yyf_his_order_detail_df GROUP BY doctor_code, create_date
+) b ON a.user_id = b.doctor_code AND a.event_date = b.create_date
+"""
+    parsed = await infer_sql_batch(
+        MagicMock(), sql=doris_ctas, split_mode="statement", domain_code="wedw"
+    )
+    atoms = [c for c in parsed["candidates"] if c["type"] == "atomic"]
+    assert len(atoms) >= 2, "Doris CTAS 应解析出 ≥2 个原子候选"
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    request = MetricSqlBatchRegisterRequest(
+        domain="wedw",
+        candidates=[
+            SqlBatchCreateCandidate(
+                key=c["key"],
+                metric_code=c["metric_code"],
+                name=c["name"],
+                type="atomic",
+                source_table=c["source_table"],
+                measure_column=c["measure_column"],
+                aggregation=c["aggregation"],
+                period=c["period"],
+                definition_json=c["definition_json"],
+            )
+            for c in atoms
+        ],
+    )
+    result = await svc.batch_register_from_sql(request, actor_id=1)
+    assert len(result["candidates"]) == len(atoms)
+    assert all(c["status"] == "DRAFT" for c in result["candidates"])
+    # 候选携带 Doris 口径（expression + source_fields）创建成功
+    assert repo.create.call_count == len(atoms)

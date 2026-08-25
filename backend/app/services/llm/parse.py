@@ -305,3 +305,90 @@ def parse_period_infer_result(raw: str) -> dict[str, Any] | None:
         return None
     reason = extract_str_field(obj, "reason", "note", "explanation", "basis")
     return {"period": low, "confidence": confidence, "reason": reason}
+
+
+# LLM 度量提取聚合白名单（与 sql_infer._AGG_FUNCS 对齐）
+_MEASURE_AGG_WHITELIST = {
+    "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "APPROX_DISTINCT", "MAX", "MIN",
+    "MEDIAN", "PERCENTILE", "LAST_VALUE", "FIRST_VALUE",
+}
+
+
+def _normalize_measure_agg(agg: str) -> str | None:
+    """归一化 LLM 返回的聚合方式到大写白名单；非法返回 None。
+
+    ``approx_count_distinct``/``approx_distinct`` 归一到 ``COUNT_DISTINCT``、
+    ``percentile_approx``/``percentile_cont`` 归一到 ``PERCENTILE``。
+    """
+    upper = agg.upper().replace(" ", "_").replace("-", "_")
+    if upper in ("APPROX_COUNT_DISTINCT", "APPROX_DISTINCT"):
+        return "COUNT_DISTINCT"
+    if upper.startswith("PERCENTILE"):
+        return "PERCENTILE"
+    if upper in ("COUNT_DISTINCT", "DISTINCT_COUNT"):
+        return "COUNT_DISTINCT"
+    return upper if upper in _MEASURE_AGG_WHITELIST else None
+
+
+def parse_sql_measures_result(raw: str) -> list[dict[str, Any]] | None:
+    """解析 SQL 度量提取结果（LLM 兜底：规则层无法解析时从 SQL 提取聚合度量）。
+
+    约定返回结构：``{"measures": [{"column", "agg", "alias", "table", "period",
+    "name", "reason"}, ...], "source_table": ...}``。``column``/``agg`` 必填
+    （agg 归一到大写白名单）；``alias``/``table``/``period``/``name`` 可缺省。
+    逐项过滤：缺 column、agg 非法、column 重复的丢弃——防止 LLM 幻觉产出
+    无聚合列/重复列污染候选；整体无有效度量返回 ``None``（上层降级为 skipped，
+    不阻断批量解析）。
+
+    Returns:
+        ``[{"column", "agg", "alias"?, "table"?, "period"?, "name"?}]``；
+        解析失败或无有效度量返回 ``None``。
+    """
+    obj = parse_json_object(raw)
+    if obj is None:
+        return None
+    items: Any = None
+    for key in ("measures", "metrics", "items", "aggregations", "candidates"):
+        value = obj.get(key)
+        if isinstance(value, list):
+            items = value
+            break
+    if items is None:
+        return None
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        column = extract_str_field(
+            item, "column", "col", "measure_column", "metric_column", "field", "expr"
+        )
+        if column is None or column in seen:
+            continue
+        agg = extract_str_field(
+            item, "agg", "aggregation", "aggregate", "func", "function", "operator"
+        )
+        agg_norm = _normalize_measure_agg(agg) if agg else None
+        if agg_norm is None:
+            continue
+        seen.add(column)
+        measure: dict[str, Any] = {"column": column, "agg": agg_norm}
+        alias = extract_str_field(item, "alias", "as", "label", "output_name")
+        if alias and alias != column:
+            measure["alias"] = alias
+        table = extract_str_field(item, "table", "source_table", "src_table", "from_table")
+        if table:
+            measure["table"] = table
+        period = extract_str_field(item, "period", "granularity", "grain", "cycle")
+        if period:
+            measure["period"] = period
+        name = extract_str_field(item, "name", "metric_name", "title", "desc")
+        if name:
+            measure["name"] = name
+        reason = extract_str_field(item, "reason", "note", "explanation", "basis")
+        if reason:
+            measure["reason"] = reason
+        out.append(measure)
+    if not out:
+        return None
+    return out

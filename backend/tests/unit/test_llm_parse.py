@@ -13,6 +13,7 @@ from app.services.llm.parse import (
     parse_bool_result,
     parse_description_result,
     parse_json_object,
+    parse_sql_measures_result,
     strip_code_fence,
 )
 
@@ -209,3 +210,77 @@ def test_parse_batch_description_result_confidence_out_of_range_skipped() -> Non
     )
     out = parse_batch_description_result(raw, ["a", "b"])
     assert out == {"b": ("B", 0.6)}
+
+
+# ---- parse_sql_measures_result（SQL 度量提取 LLM 兜底解析）----
+
+
+def test_parse_sql_measures_result_happy() -> None:
+    """合法结构：column/agg 必填，alias/table/period/name 可缺省，agg 归一。"""
+    raw = (
+        '{"measures": ['
+        '{"column": "order_cnt", "agg": "COUNT_DISTINCT", "alias": "yyf_order_cnt",'
+        ' "table": "wedw_dw.doctor_yyf_his_order_detail_df", "period": "day",'
+        ' "name": "日订单量"},'
+        '{"column": "biz_data", "agg": "sum", "alias": "quality_control_qc_report_cnt",'
+        ' "table": "ods_track_event"},'
+        '{"column": "amount", "agg": "approx_count_distinct"}'
+        "]}"
+    )
+    out = parse_sql_measures_result(raw)
+    assert out is not None
+    assert len(out) == 3
+    assert out[0] == {
+        "column": "order_cnt",
+        "agg": "COUNT_DISTINCT",
+        "alias": "yyf_order_cnt",
+        "table": "wedw_dw.doctor_yyf_his_order_detail_df",
+        "period": "day",
+        "name": "日订单量",
+    }
+    # 小写 sum 归一到大写；approx_count_distinct → COUNT_DISTINCT
+    assert out[1]["agg"] == "SUM"
+    assert out[2]["agg"] == "COUNT_DISTINCT"
+
+
+def test_parse_sql_measures_result_filters_invalid() -> None:
+    """缺 column / agg 非法 / 重复 column → 丢弃；整体无效返回 None。"""
+    raw = (
+        '{"measures": ['
+        '{"column": "a", "agg": "SUM"},'
+        '{"column": "a", "agg": "SUM"},'  # 重复列丢弃
+        '{"column": "b", "agg": "NOT_AN_AGG"},'  # 非法聚合丢弃
+        '{"agg": "SUM"},'  # 缺 column 丢弃
+        '{"column": "c"}'  # 缺 agg 丢弃
+        "]}"
+    )
+    out = parse_sql_measures_result(raw)
+    assert out is not None
+    assert len(out) == 1
+    assert out[0]["column"] == "a"
+
+
+def test_parse_sql_measures_result_invalid_returns_none() -> None:
+    """非 JSON / 非 measures 数组 / 空数组 / 无有效度量 → None。"""
+    assert parse_sql_measures_result("not json") is None
+    assert parse_sql_measures_result('{"other": 1}') is None
+    assert parse_sql_measures_result('{"measures": []}') is None
+    assert parse_sql_measures_result('{"measures": [{"column": "a", "agg": "BAD"}]}') is None
+
+
+def test_parse_sql_measures_result_fence_and_alias_keys() -> None:
+    """代码围栏剥离 + 别名 key（metric_column/aggregation/from_table）兼容。"""
+    raw = (
+        "```json\n"
+        '{"measures": [{"metric_column": "gmv", "aggregation": "SUM",'
+        ' "from_table": "dwd_order_di", "metric_name": "成交额"}]}\n'
+        "```"
+    )
+    out = parse_sql_measures_result(raw)
+    assert out is not None
+    assert out[0] == {
+        "column": "gmv",
+        "agg": "SUM",
+        "table": "dwd_order_di",
+        "name": "成交额",
+    }

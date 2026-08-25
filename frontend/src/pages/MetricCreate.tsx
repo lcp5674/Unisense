@@ -46,6 +46,23 @@ function findDomainPath(nodes: SubjectDomainTreeNode[], code: string): string[] 
   return null;
 }
 
+// SQL 批量解析 skipped 原因分类 → 友好文案（对齐后端 _classify_no_measure）。
+const SQL_SKIP_REASON_TEXT: Record<string, string> = {
+  ddl_only: "建表/删表等非查询语句（无聚合度量）已跳过",
+  parse_failed: "含聚合但语法/方言无法识别，已尝试 AI 兜底仍未能提取",
+  no_aggregate: "语句未包含 SUM/COUNT 等聚合函数，已跳过",
+  llm_infer_failed: "已尝试 AI 兜底解析仍无法识别聚合度量",
+};
+
+/** 汇总多条 skipped 成一行可读文案（按原因去重，未知原因用兜底文案）。 */
+function sqlSkipSummary(skipped: { index: number; sql: string; reason: string }[]): string {
+  const reasons = [...new Set(skipped.map((s) => s.reason))];
+  if (reasons.length === 0) return "未解析到可注册的指标候选";
+  return reasons
+    .map((r) => SQL_SKIP_REASON_TEXT[r] || "部分语句未能解析出聚合度量")
+    .join("；");
+}
+
 // 批量注册结果明细列：成功=DRAFT（草稿），失败=VALIDATION_ERROR（含原因）
 const BATCH_RESULT_COLUMNS = [
   { title: "指标编码", dataIndex: "metric_code", key: "metric_code" },
@@ -796,7 +813,12 @@ export function MetricCreate() {
         }
       }
       if (result.candidates.length === 0) {
-        message.warning("未解析到可注册的指标候选（请检查 SQL 是否含 SELECT + 聚合函数）");
+        // 按后端 skipped 原因分类提示（避免一律「请检查 SQL 是否含 SELECT + 聚合函数」）
+        message.warning(
+          result.skipped.length > 0
+            ? `${sqlSkipSummary(result.skipped)}，请调整 SQL 后重试`
+            : "未解析到可注册的指标候选（请检查 SQL 是否含 SELECT + 聚合函数）",
+        );
       } else {
         message.success(`已解析 ${result.candidates.length} 个候选指标，可勾选后批量创建`);
       }
@@ -2070,7 +2092,21 @@ export function MetricCreate() {
                 >
                   <span className="muted" style={{ fontSize: 12 }}>
                     共 {sqlBatchResult.candidates.length} 个候选 · 已勾选 {sqlBatchChecked.size} 个
-                    {sqlBatchResult.skipped.length > 0 && ` · ${sqlBatchResult.skipped.length} 条语句无聚合度量已跳过`}
+                    {sqlBatchResult.skipped.length > 0 && (
+                      <Tooltip
+                        title={sqlBatchResult.skipped
+                          .map(
+                            (s) =>
+                              `#${s.index + 1} ${SQL_SKIP_REASON_TEXT[s.reason] || s.reason}`,
+                          )
+                          .join("\n")}
+                      >
+                        <span style={{ color: "#faad14", cursor: "help" }}>
+                          {" "}
+                          · {sqlBatchResult.skipped.length} 条语句跳过
+                        </span>
+                      </Tooltip>
+                    )}
                   </span>
                   <Space size={8}>
                     <span className="muted" style={{ fontSize: 12 }}>合成复合指标</span>

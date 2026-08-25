@@ -224,6 +224,55 @@ async def _llm_infer_period(db: Any, statement_sql: str) -> str | None:
         return None  # LLM 不可用/超时/解析失败 → 降级规则层默认
 
 
+async def _llm_infer_measures(db: Any, sql: str) -> list[dict[str, Any]] | None:
+    """LLM 兜底：规则层解析不出聚合度量时，让 LLM 从 SQL 提取度量清单。
+
+    触发时机：``parse_sql_profile`` 返回空 ``measures``（sqlglot 不支持方言 /
+    Doris 剥离后仍失败 / 极端嵌套等）。LLM 提取 ``[{column, agg, alias, table,
+    period, name}]``，结构对齐 ``_build_atomic_candidate`` 下沉场景可消费的
+    measure 字段（alias/table 用于区分同列多语义、source_fields 还原口径）。
+    不可用/超时/解析失败返回 ``None``（上层降级 skipped，绝不阻断批量解析）。
+
+    Args:
+        db: 异步会话（LLM 客户端构建需要）。
+        sql: 无法用规则解析的语句。
+
+    Returns:
+        ``[{"column", "agg", "alias"?, "table"?, "period"?, "name"?}]``；
+        失败返回 ``None``。
+    """
+    try:
+        from app.services.llm.config_service import LlmConfigService
+        from app.services.llm.parse import parse_sql_measures_result
+
+        client = await LlmConfigService(db).build_client()
+        if not getattr(client, "enabled", False):
+            return None
+        prompt = (
+            "下面是一段指标定义 SQL，可能包含规则解析器无法识别的方言语法"
+            "（如 Doris/StarRocks 建表、复杂嵌套、非标准函数等）。\n"
+            "请提取其中的指标度量列，判断标准：被 SUM/COUNT/AVG/MAX/MIN/"
+            "COUNT(DISTINCT) 等聚合函数包裹的列或表达式（含 CASE WHEN 聚合、"
+            "COUNT(DISTINCT CASE WHEN ...)），每个聚合对应一个度量。\n"
+            "只返回 JSON（不要解释、不要 Markdown 代码块）："
+            '{"measures": [{"column": "度量列名", "agg": "SUM|COUNT|COUNT_DISTINCT|AVG|MAX|MIN",'
+            ' "alias": "投影别名(若有)", "table": "来源物理表(能判断才填)",'
+            ' "period": "day|week|month|quarter|year|hour", "name": "简短中文指标名建议"}, ...],'
+            ' "source_table": "主来源表(无法判断留null)"}\n'
+            "如果确实没有聚合度量，返回 {\"measures\": []}。\n\n"
+            f"SQL：\n{sql}"
+        )
+        resp = await client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=2048,
+        )
+        raw = (resp.get("content") or "").strip()
+        parsed = parse_sql_measures_result(raw)
+        return parsed if parsed else None
+    except Exception:
+        return None  # LLM 不可用/超时/解析失败 → 降级 skipped
+
+
 async def split_sql_statements(
     sql: str,
     mode: str = "statement",
@@ -391,10 +440,12 @@ def _build_atomic_candidate(
     metric_code = result.get("metric_code_suggestion")
     if not metric_code and domain_code and measure_table and period:
         metric_code = generate_metric_code(domain_code, measure_table, code_col, period)
+    # LLM 兜底场景自带建议名（measure["name"]）优先；规则层（无 name）走 auto_fill
+    candidate_name = measure.get("name") or fields["name"]["value"]
     return {
         "key": f"{idx}:{alias or col}",
         "metric_code": metric_code,
-        "name": fields["name"]["value"],
+        "name": candidate_name,
         "type": "atomic",
         "source_table": measure_table,
         "measure_column": col,
@@ -522,6 +573,30 @@ async def _load_domain_defaults(db: Any, domain_code: str) -> dict[str, Any]:
     return {}
 
 
+def _classify_no_measure(seg: str, profile: SqlProfile, llm_tried: bool) -> str:
+    """无聚合度量语句的跳过原因分类（前端友好文案的稳定 code）。
+
+    优先级：LLM 兜底已尝试仍失败 → ``llm_infer_failed``；无 SELECT 的纯 DDL/
+    非查询语句（drop/create/alter/truncate/comment 等）→ ``ddl_only``；含
+    SELECT 且含聚合关键字但规则层未解析出度量 → ``parse_failed``（方言/结构
+    异常，值得 LLM 兜底）；含 SELECT 但确实无聚合关键字 → ``no_aggregate``。
+    前端按 code 映射中文文案，避免一律「请检查是否含 SELECT + 聚合函数」。
+    """
+    if llm_tried:
+        return "llm_infer_failed"
+    lower = seg.lower()
+    if re.search(r"\bselect\b", lower) is None:
+        return "ddl_only"
+    # 标准聚合词 + 方言变体前缀（sumMerge/sumIf/countIf/approx_distinct 等）：
+    # 只要语句疑似含聚合但规则层未解析出度量，就值得 LLM 兜底（避免 ClickHouse/
+    # StarRocks 等方言聚合被误判「确实无聚合」而跳过）。
+    if re.search(
+        r"\b(sum|count|avg|max|min|median|percentile|distinct)[a-z_]*\b", lower
+    ):
+        return "parse_failed"
+    return "no_aggregate"
+
+
 # ----------------------------------------------------------------
 # 批量推断主函数
 # ----------------------------------------------------------------
@@ -578,9 +653,36 @@ async def infer_sql_batch(
         profile = parse_sql_profile(seg)
         statements.append(_statement_meta(idx, seg, profile))
         if not profile.measures:
-            skipped.append(
-                {"index": idx, "sql": seg[:500], "reason": "未解析到聚合度量列"}
-            )
+            # 规则层无聚合度量：仅对含 SELECT 的语句尝试 LLM 兜底提取（纯 DDL
+            # 如 drop/create 非查询语句不浪费 LLM 调用）；LLM 不可用/失败才按
+            # 原因分类进 skipped（绝不因单条解析失败阻断整批）。
+            reason_code = _classify_no_measure(seg, profile, llm_tried=False)
+            llm_measures = None
+            llm_tried = reason_code == "parse_failed" and db is not None
+            if llm_tried:
+                llm_measures = await _llm_infer_measures(db, seg)
+            if llm_measures:
+                base_period = _period_from_profile(profile)
+                for measure in llm_measures:
+                    candidates.append(
+                        _build_atomic_candidate(
+                            idx=idx,
+                            measure=measure,
+                            table=None,
+                            period=measure.get("period") or base_period,
+                            domain_code=domain_code,
+                            domain_defaults=domain_defaults,
+                            time_column=profile.time_column,
+                        )
+                    )
+            else:
+                skipped.append(
+                    {
+                        "index": idx,
+                        "sql": seg[:500],
+                        "reason": _classify_no_measure(seg, profile, llm_tried=llm_tried),
+                    }
+                )
             continue
         tables = _physical_source_tables(seg, profile)
         table = tables[0] if tables else None

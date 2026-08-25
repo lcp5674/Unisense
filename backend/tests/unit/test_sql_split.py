@@ -281,11 +281,11 @@ async def test_infer_sql_batch_single_measure_no_composite() -> None:
 
 
 async def test_infer_sql_batch_skipped_statement() -> None:
-    """无聚合度量列的语句进 skipped（候选不产出）。"""
+    """无聚合度量列的语句进 skipped（候选不产出），原因分类 no_aggregate。"""
     sql = "SELECT 1; SELECT dt, SUM(amount) AS gmv FROM dwd_order_di GROUP BY dt"
     result = await infer_sql_batch(_fake_db(), sql=sql, split_mode="semicolon", domain_code="sales")
     assert len(result["skipped"]) == 1
-    assert result["skipped"][0]["reason"] == "未解析到聚合度量列"
+    assert result["skipped"][0]["reason"] == "no_aggregate"
     assert len(result["candidates"]) == 1
 
 
@@ -476,9 +476,9 @@ async def test_infer_sql_batch_doris_ctas_candidates_with_alias_anchor() -> None
     result = await infer_sql_batch(
         _fake_db(), sql=_DORIS_CTAS_SQL, split_mode="statement", domain_code="wedw"
     )
-    # DROP 无聚合进 skipped，CTAS 下沉出 2 个原子候选
+    # DROP 无聚合进 skipped（ddl_only 分类），CTAS 下沉出 2 个原子候选
     assert len(result["skipped"]) == 1
-    assert result["skipped"][0]["reason"] == "未解析到聚合度量列"
+    assert result["skipped"][0]["reason"] == "ddl_only"
     atoms = [c for c in result["candidates"] if c["type"] == "atomic"]
     assert len(atoms) == 2
     # alias 锚点：同落 biz_data 列的 2 个 case 聚合 → 编码/名称可区分
@@ -608,3 +608,139 @@ def test_parse_period_infer_result_invalid() -> None:
     assert parse_period_infer_result('{"period": "month"}') is None
     assert parse_period_infer_result('{"period": "month", "confidence": 1.5}') is None
     assert parse_period_infer_result("不是 JSON") is None
+
+
+# ---------------------------------------------------------------- 无度量分类 + LLM 兜底
+
+
+def test_classify_no_measure_categories() -> None:
+    """跳过原因四分类：纯 DDL / 含聚合但解析失败 / 确实无聚合 / LLM 已尝试。"""
+    from app.services.semantic.sql_infer import SqlProfile
+    from app.services.semantic.sql_split import _classify_no_measure
+
+    empty = SqlProfile(sql="x")
+    # 无 SELECT 的纯 DDL → ddl_only
+    assert (
+        _classify_no_measure("DROP TABLE IF EXISTS dwd_tmp", empty, llm_tried=False)
+        == "ddl_only"
+    )
+    assert (
+        _classify_no_measure("CREATE TABLE t (a int)", empty, llm_tried=False)
+        == "ddl_only"
+    )
+    # 含 SUM 但规则层解析失败 → parse_failed（值得 LLM 兜底）
+    assert (
+        _classify_no_measure(
+            "SELECT dt, SUM(x) AS v FROM t GROUP BY dt", empty, llm_tried=False
+        )
+        == "parse_failed"
+    )
+    # 方言聚合变体（ClickHouse sumMerge/sumIf）未解析出度量 → 也走 parse_failed（LLM 兜底）
+    assert (
+        _classify_no_measure(
+            "SELECT dt, sumMerge(amount_state) AS amount FROM t GROUP BY dt",
+            empty,
+            llm_tried=False,
+        )
+        == "parse_failed"
+    )
+    assert (
+        _classify_no_measure(
+            "SELECT countIf(x > 0) AS c FROM t", empty, llm_tried=False
+        )
+        == "parse_failed"
+    )
+    # 含 SELECT 但确实无聚合 → no_aggregate
+    assert (
+        _classify_no_measure("SELECT 1", empty, llm_tried=False) == "no_aggregate"
+    )
+    assert (
+        _classify_no_measure("SELECT * FROM dwd_order_di", empty, llm_tried=False)
+        == "no_aggregate"
+    )
+    # LLM 已尝试仍失败 → llm_infer_failed（最高优先级）
+    assert (
+        _classify_no_measure("SELECT 1", empty, llm_tried=True) == "llm_infer_failed"
+    )
+
+
+async def test_infer_sql_batch_llm_measure_fallback() -> None:
+    """规则层解析不出度量的语句 → LLM 兜底提取度量 → 产出候选（不进 skipped）。
+
+    回归：方言/结构异常致 parse_sql_profile 空画像曾直接 skipped → 0 候选
+    （前端提示「未解析到候选」）；LLM 兜底后即使规则层失败也能产出候选。
+    """
+    from app.services.semantic.sql_infer import SqlProfile
+
+    real_parse = parse_sql_profile
+
+    def _fake_parse(sql: str) -> SqlProfile:
+        if "SUM(unparsable_col)" in sql:
+            return SqlProfile(sql=sql)  # 规则层解析失败（空画像）
+        return real_parse(sql)
+
+    llm_measures = [
+        {
+            "column": "unparsable_col",
+            "agg": "SUM",
+            "alias": "gmv2",
+            "table": "dwd_order_di",
+            "period": "day",
+            "name": "日成交额",
+        }
+    ]
+    with (
+        patch(
+            "app.services.semantic.sql_split.parse_sql_profile",
+            side_effect=_fake_parse,
+        ),
+        patch(
+            "app.services.semantic.sql_split._llm_infer_measures",
+            new=AsyncMock(return_value=llm_measures),
+        ),
+    ):
+        result = await infer_sql_batch(
+            _fake_db(),
+            sql="SELECT dt, SUM(unparsable_col) AS gmv2 FROM dwd_order_di GROUP BY dt",
+            split_mode="statement",
+            domain_code="sales",
+        )
+    assert len(result["skipped"]) == 0
+    assert len(result["candidates"]) == 1
+    cand = result["candidates"][0]
+    assert cand["measure_column"] == "unparsable_col"
+    assert cand["aggregation"] == "SUM"
+    assert cand["name"] == "日成交额"
+    assert cand["source_table"] == "dwd_order_di"
+
+
+async def test_infer_sql_batch_llm_fallback_failure_skips() -> None:
+    """LLM 兜底不可用/失败 → 语句进 skipped（reason=llm_infer_failed），不阻断整批。"""
+    from app.services.semantic.sql_infer import SqlProfile
+
+    real_parse = parse_sql_profile
+
+    def _fake_parse(sql: str) -> SqlProfile:
+        if "SUM(unparsable_col)" in sql:
+            return SqlProfile(sql=sql)
+        return real_parse(sql)
+
+    with (
+        patch(
+            "app.services.semantic.sql_split.parse_sql_profile",
+            side_effect=_fake_parse,
+        ),
+        patch(
+            "app.services.semantic.sql_split._llm_infer_measures",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        result = await infer_sql_batch(
+            _fake_db(),
+            sql="SELECT dt, SUM(unparsable_col) AS gmv2 FROM dwd_order_di GROUP BY dt",
+            split_mode="statement",
+            domain_code="sales",
+        )
+    assert len(result["candidates"]) == 0
+    assert len(result["skipped"]) == 1
+    assert result["skipped"][0]["reason"] == "llm_infer_failed"

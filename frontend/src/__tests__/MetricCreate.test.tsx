@@ -1502,4 +1502,48 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     expect(screen.getByText(/含 1 个复合候选/)).toBeTruthy();
     expect(screen.getByText(/需先逐个发布原子/)).toBeTruthy();
   });
+
+  it("批量解析：无候选时按 skipped 原因分类提示（不再一律「请检查 SELECT」）", async () => {
+    mockedParseSqlBatch.mockResolvedValueOnce({
+      statements: [
+        { index: 0, sql: "DROP TABLE IF EXISTS t", source_tables: [], measure_count: 0, group_by: [] },
+        {
+          index: 1,
+          sql: "SELECT dt, SUM(x) AS v FROM t GROUP BY dt",
+          source_tables: ["t"],
+          measure_count: 0,
+          group_by: ["dt"],
+        },
+      ],
+      candidates: [],
+      skipped: [
+        { index: 0, sql: "DROP...", reason: "ddl_only" },
+        { index: 1, sql: "SELECT...", reason: "parse_failed" },
+      ],
+      domain: {
+        code: "sales",
+        name: "销售",
+        status: "user",
+        confidence: null,
+        candidates: [],
+        matched_tables: [],
+      },
+    });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await openSqlInfer();
+    fireEvent.click(screen.getByText("批量解析"));
+    fireEvent.change(screen.getByPlaceholderText(/批量解析：粘贴含多个 SELECT/), {
+      target: { value: "DROP TABLE IF EXISTS t; SELECT dt, SUM(x) AS v FROM t GROUP BY dt" },
+    });
+    fireEvent.click(screen.getByText("解析候选"));
+
+    // 分类文案（去重后拼接）而非旧泛化提示
+    expect(await screen.findByText(/建表\/删表等非查询语句（无聚合度量）已跳过/)).toBeTruthy();
+    expect(
+      screen.getByText(/含聚合但语法\/方言无法识别，已尝试 AI 兜底仍未能提取/),
+    ).toBeTruthy();
+    // 无候选 → 不出现成功文案
+    expect(screen.queryByText(/已解析 .* 个候选指标/)).toBeNull();
+  });
 });
