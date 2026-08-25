@@ -253,11 +253,13 @@ async def test_check_drops_self_reference_by_code_resolution() -> None:
             MetricInput(
                 metric_code="sales_conflicta_day", domain="sales", definition="sum(price)"
             ),
-            MetricInput(metric_code="sales_conflictb_day", domain="sales", definition="sum(x)"),
+            MetricInput(
+                metric_code="sales_conflictb_day", domain="sales", definition="sum(amount)"
+            ),
         ],
     )
     result = await svc.check(req.candidate, req.existing)
-    # 自我引用被剔除：检测结果只针对合法对（conflictb_day），绝不含自我引用
+    # 自我引用被剔除：检测结果只针对合法对（conflictb_day 同义不同名），绝不含自我引用
     assert [d.existing_code for d in result.detections] == ["sales_conflictb_day"]
     assert len(repo.conflicts) == 1
     assert repo.conflicts[0].metric_codes == {

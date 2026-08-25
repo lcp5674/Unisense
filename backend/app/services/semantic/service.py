@@ -604,100 +604,8 @@ class MetricService(BaseService):
         # **实际未决记录**挂 pending_conflict 标记——保证「指标目录标记 ⇔ 仲裁台
         # 可处置记录」严格一致，杜绝「有标记无记录」的孤儿态（曾致目录显示冲突、
         # 仲裁台为空、标记无法通过正常仲裁清除）。软冲突同样落库，仲裁台区分展示。
-        try:
-            from app.services.conflict.repository import ConflictRepository
-            from app.services.conflict.schemas import MetricInput
-            from app.services.conflict.service import ConflictService
-
-            async def _load_existing_metrics() -> list[MetricInput]:
-                """加载已存在口径供预检比对（仅取预检所需字段，避免整模型暴露）。"""
-                metrics, _ = await self._repo.list_metrics(limit=1000)
-                rows: list[MetricInput] = []
-                for m in metrics:
-                    defn = m.definition_json or {}
-                    rows.append(
-                        MetricInput(
-                            metric_code=m.metric_code,
-                            domain=m.domain or "",
-                            definition=(
-                                defn.get("definition") or defn.get("expression") or ""
-                            ),
-                            source_tables=defn.get("source_tables") or [],
-                            has_pii=bool(m.pii_flag),
-                            pii_authorized=bool(m.compliance_reviewed),
-                            metric_id=m.id,
-                        )
-                    )
-                return rows
-
-            # OneData 挂载层权威：把挂载实体的 source_table 并入预检比对（挂载独立更新后
-            # definition_json 的 source_tables 冗余可能过期，预检须基于最新物理来源）
-            source_tables = list(definition.get("source_tables") or [])
-            try:
-                from app.services.metric_mount.repository import MetricMountRepository
-
-                _mount = await MetricMountRepository(self._db).get_by_metric(metric.id)
-                if (
-                    _mount is not None
-                    and isinstance(_mount.source_table, str)
-                    and _mount.source_table
-                    and _mount.source_table not in source_tables
-                ):
-                    source_tables.append(_mount.source_table)
-            except Exception:  # noqa: BLE001 - best-effort：mount 查询失败仅跳过挂载源表
-                pass
-
-            candidate = MetricInput(
-                metric_code=metric.metric_code,
-                domain=metric.domain or "",
-                definition=(definition.get("definition") or definition.get("expression") or ""),
-                source_tables=source_tables,
-                has_pii=bool(metric.pii_flag),
-                pii_authorized=bool(metric.compliance_reviewed),
-                metric_id=metric.id,
-            )
-            existing = await _load_existing_metrics()
-            # 排除自身：新指标已落库，避免与自身比对（check 亦有自我引用防御，此处省查询）
-            existing = [e for e in existing if e.metric_code != metric.metric_code]
-            await ConflictService(self._db).check(
-                candidate, existing, use_llm=False, source="auto"
-            )
-            # 以冲突表实际未决记录为准挂标记（杜绝孤儿标记）
-            open_conflict = await ConflictRepository(self._db).get_first_open_for_metric(
-                metric.metric_code
-            )
-            if open_conflict is not None:
-                codes = open_conflict.metric_codes or {}
-                conflict_detail = {
-                    "conflict_type": getattr(open_conflict.type, "value", None),
-                    "score": open_conflict.similarity_score,
-                    "existing_code": codes.get("existing"),
-                    "existing_metric_id": open_conflict.metric_b,
-                    "severity": open_conflict.severity or "soft",
-                    "block_publish": bool(open_conflict.block_publish),
-                    "reason": open_conflict.reason or "",
-                    "source": open_conflict.source or "auto",
-                    "conflict_id": open_conflict.conflict_id,
-                }
-                metric = await self._repo.update_with_optimistic_lock(
-                    metric.id,
-                    metric.row_version,
-                    pending_conflict=True,
-                    pending_conflict_detail=conflict_detail,
-                )
-                logger.info(
-                    "metric_conflict_detected",
-                    metric_code=metric.metric_code,
-                    conflict_id=open_conflict.conflict_id,
-                    conflict_detail=conflict_detail,
-                )
-        except Exception:
-            # 冲突落库失败不阻塞创建（best-effort）：不挂标记也不落库，
-            # 避免「有标记无记录」的孤儿态；用户可稍后手动预检或重跑。
-            logger.warning(
-                "metric_conflict_precheck_failed",
-                metric_code=metric.metric_code,
-            )
+        # 抽取为公共方法 _detect_and_mark_conflicts：更新口径后（P2-I）复用同一逻辑。
+        metric = await self._detect_and_mark_conflicts(metric, definition) or metric
 
         # PII 血缘传播（对齐 US13/TD §12.6）：创建时若声明的上游字段带 PII 标记，
         # 则联动治理服务标记指标 pii_flag + lineage_edge.pii_inherited。
@@ -725,6 +633,162 @@ class MetricService(BaseService):
         # 指标完整血缘注册（表血缘 + 指标间依赖边，best-effort 不阻断创建）
         await self._register_metric_lineage_full(metric)
 
+        return metric
+
+    async def load_conflict_existing(self) -> list[Any]:
+        """加载冲突预检的对比对象（P0-A/P1-F/P1-G/P2-K 数据接入）。
+
+        全部活动（非软删、非 DEPRECATED）指标分页全量（P1-F/G 修复——原
+        ``list_metrics(limit=1000)`` 不过滤状态致 DEPRECATED 参与比对制造仲裁台
+        噪音、1000 条截断漏检更早的历史指标）；附带关联逻辑度量的同义词
+        （P2-K，批量 IN 查询避免 N+1）。
+        供创建/更新自动预检与手动预检（/conflicts/check 的 existing 为空时
+        服务端自动加载）复用。
+        """
+        from sqlalchemy import select
+
+        from app.models.measure_catalog import MeasureCatalog
+        from app.services.conflict.schemas import MetricInput
+
+        rows = await self._repo.list_active_for_conflict()
+        syn_map: dict[int, list[str]] = {}
+        measure_ids = [m.measure_id for m in rows if m.measure_id]
+        if measure_ids:
+            # best-effort：度量目录同义词查询失败降级为无同义词，不阻断预检主流程
+            # （手动预检端点 /conflicts/check 复用此方法，查询异常须降级而非 500）。
+            try:
+                measures = (
+                    await self._db.execute(
+                        select(MeasureCatalog.id, MeasureCatalog.synonyms).where(
+                            MeasureCatalog.id.in_(measure_ids),
+                            MeasureCatalog.deleted_at.is_(None),
+                        )
+                    )
+                ).all()
+                syn_map = {mid: [str(s) for s in (syn or [])] for mid, syn in measures}
+            except Exception:  # noqa: BLE001 - 同义词查询降级，仅告警
+                logger.warning("conflict_synonyms_load_failed best-effort 跳过")
+        result: list[MetricInput] = []
+        for m in rows:
+            defn = m.definition_json or {}
+            result.append(
+                MetricInput(
+                    metric_code=m.metric_code,
+                    domain=m.domain or "",
+                    definition=(defn.get("definition") or defn.get("expression") or ""),
+                    source_tables=defn.get("source_tables") or [],
+                    has_pii=bool(m.pii_flag),
+                    pii_authorized=bool(m.compliance_reviewed),
+                    metric_id=m.id,
+                    definition_json=defn,
+                    synonyms=syn_map.get(m.measure_id, []),
+                )
+            )
+        return result
+
+    async def _detect_and_mark_conflicts(self, metric: Metric, definition: dict[str, Any]) -> None:
+        """创建/口径更新后自动预检相似口径（best-effort，不阻断主流程）。
+
+        P2-I：更新口径后也触发重检（原仅创建时检测一次）——指标改口径后与其它
+        指标"后来变得同义"也能被发现。命中即落 conflict 表 OPEN 记录（硬/软均落，
+        source=auto），并按冲突表**实际未决记录**挂 pending_conflict 标记——保证
+        「指标目录标记 ⇔ 仲裁台可处置记录」严格一致，杜绝「有标记无记录」孤儿态。
+        """
+        try:
+            from app.services.conflict.repository import ConflictRepository
+            from app.services.conflict.schemas import MetricInput
+            from app.services.conflict.service import ConflictService
+
+            # OneData 挂载层权威：把挂载实体的 source_table 并入预检比对（挂载独立
+            # 更新后 definition_json 的 source_tables 冗余可能过期）
+            source_tables = list(definition.get("source_tables") or [])
+            try:
+                from app.services.metric_mount.repository import MetricMountRepository
+
+                _mount = await MetricMountRepository(self._db).get_by_metric(metric.id)
+                if (
+                    _mount is not None
+                    and isinstance(_mount.source_table, str)
+                    and _mount.source_table
+                    and _mount.source_table not in source_tables
+                ):
+                    source_tables.append(_mount.source_table)
+            except Exception:  # noqa: BLE001 - best-effort：mount 查询失败仅跳过挂载源表
+                pass
+
+            candidate = MetricInput(
+                metric_code=metric.metric_code,
+                domain=metric.domain or "",
+                definition=(definition.get("definition") or definition.get("expression") or ""),
+                source_tables=source_tables,
+                has_pii=bool(metric.pii_flag),
+                pii_authorized=bool(metric.compliance_reviewed),
+                metric_id=metric.id,
+                definition_json=definition,
+            )
+            # P2-K：原子指标关联逻辑度量目录（OneData），同义词并入候选比对
+            if metric.measure_id is not None:
+                try:
+                    from sqlalchemy import select
+
+                    from app.models.measure_catalog import MeasureCatalog
+
+                    syn = (
+                        await self._db.execute(
+                            select(MeasureCatalog.synonyms).where(
+                                MeasureCatalog.id == metric.measure_id
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if syn:
+                        candidate.synonyms = [str(s) for s in syn]
+                except Exception:  # noqa: BLE001 - best-effort：同义词查询失败仅跳过
+                    pass
+
+            existing = await self.load_conflict_existing()
+            # 排除自身：指标已落库，避免与自身比对（check 亦有自我引用防御，此处省查询）
+            existing = [e for e in existing if e.metric_code != metric.metric_code]
+            await ConflictService(self._db).check(
+                candidate, existing, use_llm=False, source="auto"
+            )
+            # 以冲突表实际未决记录为准挂标记（杜绝孤儿标记）
+            open_conflict = await ConflictRepository(self._db).get_first_open_for_metric(
+                metric.metric_code
+            )
+            if open_conflict is not None:
+                codes = open_conflict.metric_codes or {}
+                conflict_detail = {
+                    "conflict_type": getattr(open_conflict.type, "value", None),
+                    "score": open_conflict.similarity_score,
+                    "existing_code": codes.get("existing"),
+                    "existing_metric_id": open_conflict.metric_b,
+                    "severity": open_conflict.severity or "soft",
+                    "block_publish": bool(open_conflict.block_publish),
+                    "reason": open_conflict.reason or "",
+                    "source": open_conflict.source or "auto",
+                    "conflict_id": open_conflict.conflict_id,
+                }
+                updated = await self._repo.update_with_optimistic_lock(
+                    metric.id,
+                    metric.row_version,
+                    pending_conflict=True,
+                    pending_conflict_detail=conflict_detail,
+                )
+                logger.info(
+                    "metric_conflict_detected",
+                    metric_code=metric.metric_code,
+                    conflict_id=open_conflict.conflict_id,
+                    conflict_detail=conflict_detail,
+                )
+                # 返回更新后的对象（挂标记后），供 create_metric 覆盖返回值
+                return updated
+        except Exception:
+            # 冲突落库失败不阻塞创建/更新（best-effort）：不挂标记也不落库，
+            # 避免「有标记无记录」的孤儿态；用户可稍后手动预检或重跑。
+            logger.warning(
+                "metric_conflict_precheck_failed",
+                metric_code=metric.metric_code,
+            )
         return metric
 
     async def get_metric(self, metric_code: str) -> Metric:
@@ -1354,6 +1418,19 @@ class MetricService(BaseService):
         ):
             await self._register_metric_lineage_full(metric)
 
+        # P2-I：口径变更后重检冲突（best-effort，不阻断更新）。
+        # 原实现仅在创建时检测一次——指标改口径后与其它指标"后来变得同义"无法发现。
+        # 仅在实际生效的口径变更时重检（本次提交了 definition_json 且未走 PUBLISHED
+        # 破坏性待确认 PENDING_VERSION——新口径未生效，避免对"未来口径"误报冲突）。
+        if (
+            "definition_json" in updates
+            and request.definition_json is not None
+            and not (metric.status == "PUBLISHED" and is_breaking)
+        ):
+            _new_defn = updated.definition_json or {}
+            if _new_defn:
+                await self._detect_and_mark_conflicts(updated, _new_defn)
+
         logger.info(
             "metric_updated",
             metric_code=metric_code,
@@ -1948,6 +2025,38 @@ class MetricService(BaseService):
         invalid = MetricStateMachine.validate_transition(metric.status, target_status)
         if invalid is not None:
             raise ConflictError(invalid, error_code="INVALID_TRANSITION")
+
+        # 未决硬冲突门禁（TD §12.4 / proposal：硬冲突阻断发布 409）：
+        # 指标存在 block_publish=True 的未决冲突（OPEN/NEGOTIATING/ESCALATED）时，
+        # 审核通过前必须先协商/裁决消除硬冲突——此前 pending_conflict 仅用于目录
+        # 红标展示，评审人可直接放行未经协商的冲突口径进入消费方（治理漏洞）。
+        # 软冲突（block_publish=False）不阻断，发布后仍可标注。
+        try:
+            from app.models.conflict import Conflict as ConflictModel
+            from app.services.conflict.repository import ConflictRepository
+
+            open_conflict = await ConflictRepository(self._db).get_first_open_for_metric(
+                metric_code
+            )
+        except Exception:  # noqa: BLE001 - best-effort：冲突查询失败不阻断审批主流程
+            open_conflict = None
+        # 仅真实冲突记录（ORM 实例）参与判定——mock/降级返回的非 ORM 对象不误判
+        # （单测 mock DB 下 get_first_open_for_metric 会返回 MagicMock，其 block_publish
+        # 恒 truthy，若不判型会把所有审核测试误拦为 CONFLICT_BLOCKED）。
+        if (
+            open_conflict is not None
+            and isinstance(open_conflict, ConflictModel)
+            and bool(open_conflict.block_publish)
+        ):
+            raise BusinessError(
+                "该指标存在未决硬冲突（block_publish），须先协商/裁决消除后方可审核通过",
+                error_code="CONFLICT_BLOCKED",
+                ctx={
+                    "metric_code": metric_code,
+                    "conflict_id": open_conflict.conflict_id,
+                    "conflict_type": getattr(open_conflict.type, "value", None),
+                },
+            )
 
         # PII 指标须先过合规审核（不可跳过）
         if metric.pii_flag and not metric.compliance_reviewed:
@@ -4270,7 +4379,10 @@ class MetricService(BaseService):
                     column=col,
                     exc_info=True,
                 )
-                break
+                # 修复前误用 break：单列 DB 错误会中止整批，后续列被静默跳过（
+                # candidates 缺失、前端结果表不显示）。对齐注释与 batch_register_from_sql
+                # 的「逐列独立」语义，改为 continue 继续处理后续列。
+                continue
 
         return {"batch_id": batch_id, "candidates": candidates}
 

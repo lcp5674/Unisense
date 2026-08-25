@@ -18,6 +18,10 @@ class MetricInput(BaseModel):
     has_pii: bool = False
     pii_authorized: bool = False
     metric_id: int | None = None
+    # P1-D：完整口径定义（含维度/过滤/粒度/聚合/依赖/单位），供 similarity 富文本比对
+    definition_json: dict[str, Any] | None = None
+    # P2-K：关联逻辑度量/术语的同义词列表（gmv↔成交总额），供名称语义等价判定
+    synonyms: list[str] = Field(default_factory=list)
 
 
 class ConflictCheckRequest(BaseModel):

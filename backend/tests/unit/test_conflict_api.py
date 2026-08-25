@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.api import conflict as conflict_api
 from app.models.conflict import Conflict, ConflictStatus, ConflictType
@@ -243,3 +243,78 @@ class TestNotifyReopenOwners:
                 FakeDb(_metric("cand", "PUBLISHED", owner_id=7)), conflict, "tid"
             )
         ns.return_value.notify_user.assert_not_awaited()
+
+
+class TestCheckConflictAutoLoad:
+    """P0-A：手动"冲突预检"existing 为空时服务端自动加载，杜绝空转。
+
+    修复前前端 handlePrecheck 只传 candidate（existing 缺省空列表），check 遍历
+    空列表永远返回"未检测到冲突"——用户主动求证的入口形同虚设。
+    """
+
+    async def test_existing_empty_auto_loads_active_metrics(self) -> None:
+        """existing 为空 → 调用 MetricService.load_conflict_existing 并传入 check。"""
+        from app.api.conflict import check_conflict
+        from app.services.conflict.schemas import (
+            ConflictCheckRequest,
+            ConflictCheckResult,
+            MetricInput,
+        )
+        from app.services.semantic.service import MetricService
+
+        candidate = MetricInput(
+            metric_code="new_metric_day", domain="sales", definition="sum(amount)"
+        )
+        payload = ConflictCheckRequest(candidate=candidate)  # existing 缺省空
+        loaded = [
+            MetricInput(
+                metric_code="existing_metric_day", domain="sales", definition="sum(amount)"
+            )
+        ]
+        svc = AsyncMock()
+        svc.check = AsyncMock(return_value=ConflictCheckResult(detections=[], blocked=False))
+        db = MagicMock()
+        db.commit = AsyncMock()
+        with (
+            patch.object(conflict_api, "_svc", return_value=svc),
+            patch.object(
+                MetricService, "load_conflict_existing", AsyncMock(return_value=loaded)
+            ) as loader,
+        ):
+            resp = await check_conflict(
+                payload, request=MagicMock(), db=db, user=MagicMock(id=1), trace_id="tid"
+            )
+        loader.assert_awaited_once()
+        # check 收到自动加载的 existing（而非空列表）
+        assert svc.check.await_args.args[1] == loaded
+        assert resp.data is not None
+
+    async def test_existing_provided_does_not_auto_load(self) -> None:
+        """调用方已传 existing → 不自动加载（保留显式对比对象语义）。"""
+        from app.api.conflict import check_conflict
+        from app.services.conflict.schemas import (
+            ConflictCheckRequest,
+            ConflictCheckResult,
+            MetricInput,
+        )
+        from app.services.semantic.service import MetricService
+
+        candidate = MetricInput(
+            metric_code="new_metric_day", domain="sales", definition="sum(amount)"
+        )
+        provided = [MetricInput(metric_code="other_day", domain="sales", definition="x")]
+        payload = ConflictCheckRequest(candidate=candidate, existing=provided)
+        svc = AsyncMock()
+        svc.check = AsyncMock(return_value=ConflictCheckResult(detections=[], blocked=False))
+        db = MagicMock()
+        db.commit = AsyncMock()
+        with (
+            patch.object(conflict_api, "_svc", return_value=svc),
+            patch.object(MetricService, "load_conflict_existing", AsyncMock()) as loader,
+        ):
+            resp = await check_conflict(
+                payload, request=MagicMock(), db=db, user=MagicMock(id=1), trace_id="tid"
+            )
+        loader.assert_not_awaited()
+        assert svc.check.await_args.args[1] == provided
+        assert resp.data is not None

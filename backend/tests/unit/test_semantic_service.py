@@ -359,13 +359,15 @@ async def test_create_metric_marks_pending_conflict_on_precheck_hit():
     created = make_metric()
     repo.create = AsyncMock(return_value=created)
     repo.create_version = AsyncMock(return_value=MagicMock())
-    # 已存在口径相同但编码不同 → 预检命中 SAME_DEF_DIFF_NAME（软冲突）
+    # 已存在口径相同但编码不同 → 预检命中 SAME_DEF_DIFF_NAME（软冲突）。
+    # P1-D 口径要素归一：同义口径的 definition_json 要素（dependencies）须对称，
+    # 富文本比对（口径+依赖）一致才判同义——不同依赖属不同口径，不误判重复建设。
     existing = make_metric(
         id=9,
         metric_code="sales_gmv_amount_day",
-        definition_json={"expression": "SUM(order_amount)"},
+        definition_json={"expression": "SUM(order_amount)", "dependencies": ["fct_order"]},
     )
-    repo.list_metrics = AsyncMock(return_value=([existing], 1))
+    repo.list_active_for_conflict = AsyncMock(return_value=[existing])
     updated = make_metric(
         pending_conflict=True,
         pending_conflict_detail={"conflict_type": "same_def_diff_name"},
@@ -423,7 +425,7 @@ async def test_create_metric_no_flag_when_no_open_conflict():
     created = make_metric()
     repo.create = AsyncMock(return_value=created)
     repo.create_version = AsyncMock(return_value=MagicMock())
-    repo.list_metrics = AsyncMock(return_value=([make_metric(id=9)], 1))
+    repo.list_active_for_conflict = AsyncMock(return_value=[make_metric(id=9)])
 
     captured: list[object] = []
     with (
@@ -448,13 +450,13 @@ async def test_create_metric_no_flag_when_no_open_conflict():
 
 
 async def test_create_metric_precheck_failure_is_best_effort():
-    """预检依赖加载失败（list_metrics 抛错）→ 不阻断创建，也不抛异常。"""
+    """预检依赖加载失败（list_active_for_conflict 抛错）→ 不阻断创建，也不抛异常。"""
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=None)
     created = make_metric()
     repo.create = AsyncMock(return_value=created)
     repo.create_version = AsyncMock(return_value=MagicMock())
-    repo.list_metrics = AsyncMock(side_effect=RuntimeError("catalog down"))
+    repo.list_active_for_conflict = AsyncMock(side_effect=RuntimeError("catalog down"))
 
     result = await svc.create_metric(MetricCreateRequest(**make_create_payload()), owner_id=1)
 
@@ -498,6 +500,87 @@ async def test_update_metric_creates_version_and_bumps():
     assert version_arg.version == 2
     assert result.row_version == 2
     assert result.version == 2
+
+
+async def test_update_metric_definition_change_triggers_conflict_recheck():
+    """P2-I：口径变更后触发冲突重检（best-effort，不阻断更新）。
+
+    原实现仅在创建时检测一次——指标改口径后与其它指标"后来变得同义"无法发现。
+    """
+    svc, repo = _svc_with_repo()
+    existing = make_metric(status="DRAFT", row_version=1, version=1)
+    repo.get_by_code = AsyncMock(return_value=existing)
+    updated = make_metric(status="DRAFT", row_version=2, version=2)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    svc._detect_and_mark_conflicts = AsyncMock(return_value=updated)
+
+    await svc.update_metric(
+        "sales_gmv_daily",
+        MetricUpdateRequest(
+            definition_json={"expression": "SUM(order_amount)", "dependencies": ["fct_order"]},
+            change_reason="口径更新",
+        ),
+        actor_id=1,
+        role="metric_owner",
+    )
+    # 重检被触发：候选为更新后的指标（含新口径）
+    svc._detect_and_mark_conflicts.assert_awaited_once()
+    args = svc._detect_and_mark_conflicts.await_args
+    assert args.args[0].metric_code == "sales_gmv_daily"
+    assert args.args[1]["expression"] == "SUM(order_amount)"
+
+
+async def test_update_metric_no_definition_change_skips_conflict_recheck():
+    """P2-I：非口径变更（仅责任方调整）不触发冲突重检，避免无谓扫描。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(status="DRAFT", row_version=1, version=1, product_owner_id=3)
+    repo.get_by_code = AsyncMock(return_value=existing)
+    repo.update_with_optimistic_lock = AsyncMock(
+        return_value=make_metric(status="DRAFT", row_version=2, version=1)
+    )
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    svc._detect_and_mark_conflicts = AsyncMock(return_value=existing)
+
+    await svc.update_metric(
+        "sales_gmv_daily",
+        MetricUpdateRequest(
+            product_owner_id=None,
+            product_owner_name="外部需求方A",
+            change_reason="责任方调整",
+        ),
+        actor_id=1,
+        role="metric_owner",
+    )
+    svc._detect_and_mark_conflicts.assert_not_called()
+
+
+async def test_load_conflict_existing_returns_active_metrics_with_features():
+    """P0-A/P1-F/G/P2-K：load_conflict_existing 返回活动指标（含 definition_json + 同义词）。
+
+    供手动预检（existing 为空时服务端自动加载）与创建/更新自动预检复用；
+    不再走 ``list_metrics(limit=1000)``（修复 DEPRECATED 参与比对与截断漏检）。
+    """
+    svc, repo = _svc_with_repo()
+    m = make_metric(
+        id=9,
+        metric_code="sales_gmv_amount_day",
+        measure_id=1,
+        definition_json={"expression": "SUM(order_amount)", "dependencies": ["fct_order"]},
+    )
+    repo.list_active_for_conflict = AsyncMock(return_value=[m])
+    rows = await svc.load_conflict_existing()
+    assert len(rows) == 1
+    assert rows[0].metric_code == "sales_gmv_amount_day"
+    # P1-D：完整 definition_json 透传供富文本比对
+    assert rows[0].definition_json == {
+        "expression": "SUM(order_amount)",
+        "dependencies": ["fct_order"],
+    }
+    # P2-K：同义词字段默认空（无度量目录同义词时）
+    assert rows[0].synonyms == []
+    # P1-F/G：走专用全量加载（非 list_metrics limit=1000）
+    repo.list_active_for_conflict.assert_awaited_once()
 
 
 # ---- 口径三方责任：外部人员名称兜底 + 显式置空（PRD 4.5 补充）----
@@ -1553,6 +1636,56 @@ async def test_batch_register_db_error_savepoint_continues():
     assert "已跳过该列" in result["candidates"][1]["validation_errors"]
 
 
+async def test_batch_register_db_error_middle_col_continues():
+    """P13 补强：DB 错误发生在中间列时，后续列仍继续处理（修复 break 中止整批 bug）。
+
+    修复前 SQLAlchemyError 分支误用 break，中间列 DB 错误会静默中止剩余列——
+    candidates 缺失、前端结果表不显示后续列。修复后逐列独立，仅坏列失败。
+    """
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    from sqlalchemy.exc import IntegrityError
+
+    from app.services.semantic.schemas import MetricBatchRegisterRequest
+
+    request = MetricBatchRegisterRequest(
+        source_table="dwd.sales_detail",
+        measure_columns=["ok_amount_col", "bad_col", "ok_amount_col_2"],
+        dimension_mapping={"domain": "sales"},
+        llm_prefill=True,
+        domain="sales",
+    )
+
+    real_create = svc.create_metric
+
+    async def _flaky_create(req, **kw):
+        # 中间列模拟 DB 级错误（唯一键冲突）
+        if getattr(req, "measure_column", None) == "bad_col":
+            raise IntegrityError("stmt", {}, Exception("duplicate key"))
+        return await real_create(req, **kw)
+
+    svc.create_metric = _flaky_create  # type: ignore[method-assign]
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _fake_nested():
+        yield
+
+    svc._db.begin_nested = _fake_nested  # type: ignore[method-assign]
+
+    result = await svc.batch_register_metrics(request, actor_id=1)
+
+    assert len(result["candidates"]) == 3  # 后续列不被中止
+    assert result["candidates"][0]["status"] == "DRAFT"  # 第 1 列成功
+    assert result["candidates"][1]["status"] == "VALIDATION_ERROR"  # 中间坏列失败
+    assert result["candidates"][2]["status"] == "DRAFT"  # 第 3 列继续成功（修复核心断言）
+    assert "已跳过该列" in result["candidates"][1]["validation_errors"]
+
+
 # ---------------------------------------------------------------- SQL 批量注册（场景A/B）
 
 
@@ -2258,6 +2391,77 @@ async def test_approve_metric_standard():
     result = await svc.approve_metric(
         "sales_gmv_daily", MetricApproveRequest(), actor_id=1, role="platform_admin"
     )
+    assert result.status == "PUBLISHED"
+    svc._publish_event.assert_awaited_once()
+
+
+async def test_approve_metric_hard_conflict_blocked():
+    """TD §12.4 硬冲突阻断发布：未决 block_publish=True 冲突时 approve 被拒。
+
+    修复前 pending_conflict 仅用于目录红标展示，评审人可直接放行未经协商的
+    冲突口径进入消费方。修复后 REVIEW 审批前置检查未决硬冲突 → CONFLICT_BLOCKED。
+    """
+    from app.models.conflict import Conflict, ConflictStatus, ConflictType
+    from app.services.conflict.repository import ConflictRepository
+
+    svc, repo = _svc_with_repo()
+    metric = make_metric(status="REVIEW", owner_id=1, pii_flag=False)
+    metric.submitted_by = 1
+    repo.get_by_code = AsyncMock(return_value=metric)
+    repo.get_version = AsyncMock(return_value=MagicMock())
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    repo.mark_version_published = AsyncMock()
+
+    hard_conflict = Conflict(
+        conflict_id="conf_001",
+        type=ConflictType.SAME_DEF_DIFF_NAME,
+        status=ConflictStatus.OPEN,
+        severity="hard",
+        block_publish=True,
+        similarity_score=0.95,
+        metric_codes={"candidate": "sales_gmv_daily", "existing": "sales_gmv_weekly"},
+    )
+    with patch.object(
+        ConflictRepository, "get_first_open_for_metric", new=AsyncMock(return_value=hard_conflict)
+    ):
+        with pytest.raises(BusinessError) as exc:
+            await svc.approve_metric(
+                "sales_gmv_daily", MetricApproveRequest(), actor_id=1, role="platform_admin"
+            )
+    assert exc.value.error_code == "CONFLICT_BLOCKED"
+    repo.update_with_optimistic_lock.assert_not_awaited()
+    repo.mark_version_published.assert_not_awaited()
+
+
+async def test_approve_metric_soft_conflict_allowed():
+    """软冲突（block_publish=False）不阻断发布——仅硬冲突需要先协商/裁决。"""
+    from app.models.conflict import Conflict, ConflictStatus, ConflictType
+    from app.services.conflict.repository import ConflictRepository
+
+    svc, repo = _svc_with_repo()
+    metric = make_metric(status="REVIEW", owner_id=1, pii_flag=False)
+    metric.submitted_by = 1
+    repo.get_by_code = AsyncMock(return_value=metric)
+    repo.get_version = AsyncMock(return_value=MagicMock())
+    repo.update_with_optimistic_lock = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    repo.mark_version_published = AsyncMock()
+    svc._publish_event = AsyncMock()
+
+    soft_conflict = Conflict(
+        conflict_id="conf_002",
+        type=ConflictType.SAME_DEF_DIFF_NAME,
+        status=ConflictStatus.OPEN,
+        severity="soft",
+        block_publish=False,
+        similarity_score=0.7,
+        metric_codes={"candidate": "sales_gmv_daily", "existing": "sales_gmv_weekly"},
+    )
+    with patch.object(
+        ConflictRepository, "get_first_open_for_metric", new=AsyncMock(return_value=soft_conflict)
+    ):
+        result = await svc.approve_metric(
+            "sales_gmv_daily", MetricApproveRequest(), actor_id=1, role="platform_admin"
+        )
     assert result.status == "PUBLISHED"
     svc._publish_event.assert_awaited_once()
 

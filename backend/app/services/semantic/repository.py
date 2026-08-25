@@ -501,6 +501,32 @@ class MetricRepository:
         result = await self._db.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_active_for_conflict(self, *, page_size: int = 500) -> list[Metric]:
+        """冲突预检加载全部活动指标（P1-F 排除 DEPRECATED + P1-G 分页全量）。
+
+        修复前 `_load_existing_metrics` 用 ``list_metrics(limit=1000)``：
+        - 不过滤状态 → DEPRECATED 废弃指标也参与比对，仲裁台噪音；
+        - 1000 条截断 → 超出部分（通常是更早的历史指标）不参与比对，
+          而新指标往往正与历史指标冲突，漏检。
+        此处按 ``id`` 分页全量加载非软删、非 DEPRECATED 指标，返回完整清单。
+        """
+        rows: list[Metric] = []
+        offset = 0
+        while True:
+            stmt = (
+                select(Metric)
+                .where(Metric.deleted_at.is_(None), Metric.status != "DEPRECATED")
+                .order_by(Metric.id)
+                .offset(offset)
+                .limit(page_size)
+            )
+            page = list((await self._db.execute(stmt)).scalars().all())
+            rows.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+        return rows
+
     async def count_confirmations_by_versions(
         self, metric_id: int, versions: list[int]
     ) -> dict[int, tuple[int, int]]:

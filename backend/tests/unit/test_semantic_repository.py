@@ -794,3 +794,34 @@ async def test_aggregate_dashboard_governance_indicators():
         "updated_30d_ratio": 0.6,
     }
     assert db.execute.await_count == 22
+
+
+# ---------- P1-F/P1-G：冲突预检活动指标加载（排除 DEPRECATED + 分页全量） ----------
+
+
+def _scalar_result(rows: list) -> MagicMock:
+    r = MagicMock()
+    r.scalars.return_value.all.return_value = rows
+    return r
+
+
+async def test_list_active_for_conflict_excludes_deprecated_and_paginates():
+    """P1-F/G：排除 DEPRECATED + 分页全量（无 limit=1000 截断）。
+
+    修复前用 ``list_metrics(limit=1000)``：不过滤状态致 DEPRECATED 参与比对
+    制造仲裁台噪音、1000 条截断漏检更早的历史指标。现按 id 分页全量加载。
+    """
+    db = _mock_session()
+    page1 = [_metric(id=1, status="PUBLISHED"), _metric(id=2, status="EXPERIMENTAL")]
+    page2 = [_metric(id=3, status="PUBLISHED")]  # 不满页 → 循环结束
+    db.execute = AsyncMock(
+        side_effect=[_scalar_result(page1), _scalar_result(page2)]
+    )
+    repo = MetricRepository(db)
+    rows = await repo.list_active_for_conflict(page_size=2)
+    assert [m.id for m in rows] == [1, 2, 3]
+    # 分页：两次查询（第一次满页、第二次不满页结束）
+    assert db.execute.await_count == 2
+    # 每次查询均携带 select 语句对象（含 where/order/offset）
+    assert db.execute.await_args_list[0].args[0] is not None
+    assert db.execute.await_args_list[1].args[0] is not None

@@ -345,9 +345,18 @@ async def check_conflict(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[Any]:
-    """冲突检测；命中则落库 OPEN，硬冲突（同名不同义/PII）阻断发布返回 409。"""
+    """冲突检测；命中则落库 OPEN，硬冲突（同名不同义/PII）阻断发布返回 409。
+
+    P0-A 修复：前端"冲突预检"按钮只传 candidate（existing 为空）时，服务端
+    自动加载活动指标作对比对象——否则 ``check`` 遍历空列表永远返回"未检测到
+    冲突"，用户主动求证的入口形同虚设。复用 MetricService.load_conflict_existing
+    （P1-F/G 已修复 DEPRECATED 参与比对与 1000 条截断漏检）。
+    """
     svc = _svc(db, request)
-    result = await svc.check(payload.candidate, payload.existing)
+    existing = payload.existing
+    if not existing:
+        existing = await MetricService(db).load_conflict_existing()
+    result = await svc.check(payload.candidate, existing)
     # PLAT-3: 命中冲突会落库 OPEN，属治理写操作须留痕；无命中（纯读）不审计
     if result.detections:
         await write_audit(
