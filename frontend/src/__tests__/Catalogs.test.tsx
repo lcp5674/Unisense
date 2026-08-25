@@ -467,6 +467,43 @@ describe("Catalogs 页面", () => {
     expect(fetchDescriptionCoverage).toHaveBeenCalled();
   });
 
+  it("主列表「刷新」按钮共享刷新治理面板（方案 D：无重复刷新按钮）", async () => {
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText("字段描述覆盖率")).toBeTruthy());
+    expect(fetchDescriptionCoverage).toHaveBeenCalledTimes(1);
+    // 页面只有主列表一个「刷新」按钮（治理面板内重复刷新按钮已移除）
+    fireEvent.click(screen.getByRole("button", { name: /刷新/ }));
+    await waitFor(() => expect(fetchDescriptionCoverage).toHaveBeenCalledTimes(2));
+  });
+
+  it("描述缺失治理面板可折叠（Collapse）：收起/展开切换", async () => {
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText("字段描述覆盖率")).toBeTruthy());
+    // antd Collapse 收起用 height 动画（非 display:none），testing-library 无法感知隐藏，
+    // 改断言 header 的 aria-expanded 状态翻转（antd Collapse header 自带该属性）。
+    const getHeader = () =>
+      screen.getByText("描述缺失治理").closest(".ant-collapse-header") as HTMLElement;
+    expect(getHeader().getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(getHeader());
+    await waitFor(() => expect(getHeader().getAttribute("aria-expanded")).toBe("false"));
+    // 主列表仍在（页面 h2 与主列表 Card title 均含「采集目录」）
+    expect(screen.getAllByText("采集目录").length).toBeGreaterThan(0);
+    // 再次点击展开
+    fireEvent.click(getHeader());
+    await waitFor(() => expect(getHeader().getAttribute("aria-expanded")).toBe("true"));
+    await waitFor(() => expect(screen.getByText("字段描述覆盖率")).toBeTruthy());
+  });
+
   it("描述缺失治理面板：统计卡可下钻字段描述覆盖率明细", async () => {
     render(
       <MemoryRouter>

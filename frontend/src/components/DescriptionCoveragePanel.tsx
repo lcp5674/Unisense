@@ -1,4 +1,12 @@
-import { useEffect, useRef, useState, type Key, type ReactNode } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+  type Key,
+  type ReactNode,
+} from "react";
 import {
   Alert,
   Button,
@@ -73,6 +81,14 @@ export type DescriptionCoveragePanelProps = {
    * entityName 为待治理实体名（undefined 表示不指定具体表）。
    */
   onGovern?: (entityName?: string) => void;
+};
+
+/**
+ * 暴露给父组件的命令式句柄：reload 触发覆盖数据重新拉取。
+ * 采集目录主列表「刷新」按钮共享刷新治理面板（方案 D：去掉面板内重复刷新按钮）。
+ */
+export type DescriptionCoveragePanelHandle = {
+  reload: () => void;
 };
 
 /**
@@ -492,10 +508,10 @@ function buildTableColumns(): ColumnsType<TableCoverageItem> {
  *   （表级/字段级 LLM 推断与人工编辑），运维/管理视角的完整治理工作台。
  * - summary（资产地图）：只读总览——统计卡下钻明细保留，治理动作引导跳转采集目录。
  */
-export function DescriptionCoveragePanel({
-  variant = "full",
-  onGovern,
-}: DescriptionCoveragePanelProps) {
+export const DescriptionCoveragePanel = forwardRef<
+  DescriptionCoveragePanelHandle,
+  DescriptionCoveragePanelProps
+>(function DescriptionCoveragePanel({ variant = "full", onGovern }, ref) {
   const isSummary = variant === "summary";
   const [coverage, setCoverage] = useState<DescriptionCoverage | null>(null);
   const [loading, setLoading] = useState(true);
@@ -575,6 +591,9 @@ export function DescriptionCoveragePanel({
   useEffect(() => {
     load();
   }, []);
+
+  // 暴露 reload 给父组件：采集目录主列表「刷新」按钮共享刷新治理面板（方案 D）
+  useImperativeHandle(ref, () => ({ reload: load }));
 
   // 并发数偏好持久化（下次进入保留用户选择）
   useEffect(() => {
@@ -1236,9 +1255,6 @@ export function DescriptionCoveragePanel({
                   </Tooltip>
                 </>
               )}
-              <Button size="small" icon={<ThunderboltOutlined />} onClick={load} loading={loading}>
-                刷新
-              </Button>
             </Space>
           }
         >
@@ -1674,4 +1690,4 @@ export function DescriptionCoveragePanel({
       />
     </div>
   );
-}
+});

@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip, Drawer, Empty, Descriptions, Dropdown, Checkbox } from "antd";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip, Drawer, Empty, Descriptions, Dropdown, Checkbox, Collapse } from "antd";
 import { PlusOutlined, ReloadOutlined, DeleteOutlined, EyeOutlined, SyncOutlined, ArrowLeftOutlined, HeartOutlined, SettingOutlined } from "@ant-design/icons";
 import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, listDataSources, listCatalogDatabases, refreshCatalogEntity, inferColumnDescription, inferDescriptions, updateColumnDescription, listFavorites, addFavorite, removeFavorite, UnisenseApiError } from "../api";
 import type { DBCatalog, DataSource, SchemaColumn } from "../types";
 import { enumLabel, ENTITY_TYPE_LABEL } from "../utils/enums";
 import { SchemaTable } from "../components/SchemaTable";
-import { DescriptionCoveragePanel } from "../components/DescriptionCoveragePanel";
+import { DescriptionCoveragePanel, type DescriptionCoveragePanelHandle } from "../components/DescriptionCoveragePanel";
 import { useResizableColumns } from "../components/ResizableTable";
 import { usePermission } from "../hooks/usePermission";
 
@@ -105,6 +105,8 @@ export function Catalogs() {
   // 源状态筛选默认「活跃源」：已删除源的采集目录默认不展示（设计为追溯保留），
   // 需查看历史采集记录时显式切换「已删除源」。
   const [sourceStatus, setSourceStatus] = useState<"" | "active" | "deleted">("active");
+  // 治理面板命令式句柄（方案 D：主列表「刷新」按钮共享刷新治理面板）
+  const panelRef = useRef<DescriptionCoveragePanelHandle>(null);
   const [entityType, setEntityType] = useState("");
   const [sensitivity, setSensitivity] = useState(urlSensitivity);
   const [ownerId, setOwnerId] = useState<number | undefined>(
@@ -378,6 +380,12 @@ export function Catalogs() {
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
+  }
+
+  /** 主列表「刷新」同时刷新治理面板（方案 D：共享刷新，去掉面板内重复刷新按钮）。 */
+  function handleRefreshAll() {
+    load();
+    panelRef.current?.reload();
   }
 
   // 来源感知返回：从资产地图（变更追踪/资产地图 Tab）跳入时精确回来源 Tab；
@@ -694,12 +702,40 @@ export function Catalogs() {
       </div>
 
       {/* 描述缺失治理工作台（TD §12.1）：统计卡可下钻 + 按表列缺失字段数治理表格
-          + 治理抽屉（表级/字段级编辑与 LLM 推断）。与资产地图 summary 总览共享同一组件。 */}
-      <DescriptionCoveragePanel variant="full" />
+          + 治理抽屉（表级/字段级编辑与 LLM 推断）。与资产地图 summary 总览共享同一组件。
+          Collapse 可折叠：默认展开，收起后给下方采集目录列表让位（方案 B）。
+          治理动作集中在主列表「刷新」按钮共享刷新（方案 D）。 */}
+      <Collapse
+        defaultActiveKey={["descCoverage"]}
+        style={{ marginBottom: 16 }}
+        items={[
+          {
+            key: "descCoverage",
+            label: (
+              <Space size={8}>
+                <span style={{ fontWeight: 500 }}>描述缺失治理</span>
+                <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>
+                  治理视角：按表列缺失字段数优先补全表/字段描述（支持 LLM 推断）；
+                  与下方采集目录列表数据同源、职责互补
+                </span>
+              </Space>
+            ),
+            children: <DescriptionCoveragePanel ref={panelRef} variant="full" />,
+          },
+        ]}
+      />
 
       <Card
+        title={
+          <Space size={8}>
+            <span>采集目录</span>
+            <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>
+              运维视角：浏览 / 检索 / 管理全部采集实体
+            </span>
+          </Space>
+        }
         extra={
-          <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
+          <Button icon={<ReloadOutlined />} onClick={handleRefreshAll} loading={loading}>
             刷新
           </Button>
         }
