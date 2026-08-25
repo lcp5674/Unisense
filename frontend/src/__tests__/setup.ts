@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom";
+import { message } from "antd";
 
 // antd/rc-motion 出入场动画与 App.message 通知在 jsdom 中依赖 transitionend/
 // requestAnimationFrame 推进，测试在动画完成前结束即触发 React 的 act() 警告
@@ -78,3 +79,12 @@ if (typeof window !== "undefined") {
   window.getComputedStyle = (elt: Element, _pseudoElt?: string | null) =>
     origGetComputedStyle(elt);
 }
+
+// antd 静态 message 使用全局单例 holder（挂载在 body 下独立容器），不受
+// testing-library 的 React 树清理影响，跨测试残留。后一个测试若断言同类文案
+// （如「已提交审核」）会命中上一测试的残留 toast → 单测通过、全量 flaky。
+// 统一在 afterEach 用 antd 官方 message.destroy() 清除（直接删 DOM 会破坏
+// 单例 holder 缓存，导致后续 message 无法渲染，故不可行），根治此类污染。
+afterEach(() => {
+  message.destroy();
+});

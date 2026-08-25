@@ -861,6 +861,10 @@ function DimensionsTab() {
       <MasterDataReviewModals
         entityLabel="维度"
         submitDescription="维度是下游指标绑定/消费校验的权威来源。提交后由评审人审核通过才可发布；审核期间维度锁定不可编辑，驳回后可修改重提。"
+        reviewerDomainOptions={Array.from(domainMap.entries()).map(([code, name]) => ({
+          value: code,
+          label: `${name}（${code}）`,
+        }))}
         submitTarget={review.submitTarget}
         submitBusy={review.submitBusy}
         onCancelSubmit={() => review.setSubmitTarget(null)}

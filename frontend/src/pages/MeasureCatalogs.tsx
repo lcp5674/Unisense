@@ -600,6 +600,7 @@ export function MeasureCatalogs() {
       <MasterDataReviewModals
         entityLabel="逻辑度量"
         submitDescription="度量是原子指标的权威定义（单位/格式/小数位/口径直接传播到下游指标）。提交后由评审人审核通过才可发布；审核期间度量锁定不可编辑，驳回后可修改重提。"
+        reviewerDomainOptions={domainOptions}
         submitTarget={review.submitTarget}
         submitBusy={review.submitBusy}
         onCancelSubmit={() => review.setSubmitTarget(null)}

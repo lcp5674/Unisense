@@ -103,6 +103,8 @@ export function MasterDataReviewModals(props: {
   entityLabel: string;
   /** 提交审核弹窗的说明描述 */
   submitDescription: string;
+  /** 评审指派可选业务域（评审域选择框；不传则回退为手动输入 code） */
+  reviewerDomainOptions?: { value: string; label: string }[];
   submitTarget: { code: string; name: string } | null;
   submitBusy: boolean;
   onCancelSubmit: () => void;
@@ -115,6 +117,7 @@ export function MasterDataReviewModals(props: {
   const {
     entityLabel,
     submitDescription,
+    reviewerDomainOptions,
     submitTarget,
     submitBusy,
     onCancelSubmit,
@@ -201,9 +204,22 @@ export function MasterDataReviewModals(props: {
                 <Form.Item
                   name="reviewer_domain"
                   label="评审域"
-                  rules={[{ required: true, message: "请填写评审域 code" }]}
+                  rules={[{ required: true, message: "请选择评审域" }]}
                 >
-                  <Input placeholder="如 outpatient" />
+                  {reviewerDomainOptions ? (
+                    <Select
+                      showSearch
+                      allowClear
+                      optionFilterProp="label"
+                      placeholder="选择评审域"
+                      options={reviewerDomainOptions}
+                      notFoundContent={
+                        reviewerDomainOptions.length ? undefined : "暂无启用中的主题域"
+                      }
+                    />
+                  ) : (
+                    <Input placeholder="如 outpatient" />
+                  )}
                 </Form.Item>
               ) : null
             }

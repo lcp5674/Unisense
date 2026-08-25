@@ -918,6 +918,7 @@ function TermsTab() {
       <MasterDataReviewModals
         entityLabel="术语"
         submitDescription="术语是业务概念标准层，被指标引用的标准定义。提交后由评审人审核通过才可发布；审核期间术语锁定不可编辑，驳回后可修改重提。"
+        reviewerDomainOptions={domainOptions}
         submitTarget={review.submitTarget}
         submitBusy={review.submitBusy}
         onCancelSubmit={() => review.setSubmitTarget(null)}
