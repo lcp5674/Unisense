@@ -14,10 +14,13 @@
 
 用法:
     poetry run python -m scripts.backfill_conflict_orphans [--apply] [--limit N]
+    poetry run python -m scripts.backfill_conflict_orphans --cleanup-self-refs [--apply]
 
 参数:
     --apply: 真正写库；缺省为 dry-run（只统计不改动）
     --limit: 仅处理前 N 个待回填指标（调试用，默认全部）
+    --cleanup-self-refs: 清理自引用冲突（metric_a==metric_b 的未决记录 + 关联
+        指标自引用标记），软删保留审计；可独立运行或与回填配合
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ import argparse
 import asyncio
 import sys
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -102,7 +106,7 @@ async def _forward_pass(
     if limit:
         metrics = metrics[:limit]
 
-    stats = {"scanned": len(metrics), "created": 0, "skipped_has_open": 0}
+    stats = {"scanned": len(metrics), "created": 0, "skipped_has_open": 0, "skipped_self_ref": 0}
     for metric in metrics:
         code = metric.metric_code
         # 已有未决记录（含人工预检/历史自动）→ 一致，跳过
@@ -110,6 +114,27 @@ async def _forward_pass(
             stats["skipped_has_open"] += 1
             continue
         detail = dict(metric.pending_conflict_detail or {})
+        # 自引用防御：detail 指向自身（existing_code==自己 或 existing_metric_id==自己）
+        # 是历史 precheck 候选未带 metric_id 导致的误报（同一行被比对自己）——不构成
+        # 合法冲突。跳过建记录并清除错误标记，避免在冲突表落「无法正常裁决」的自我冲突
+        # （曾致 13 个 e2e 指标在仲裁台显示「候选=现有=同一指标」）。
+        existing_code = detail.get("existing_code")
+        existing_metric_id = detail.get("existing_metric_id")
+        is_self_ref = bool(existing_code and existing_code == code) or (
+            existing_metric_id is not None and existing_metric_id == metric.id
+        )
+        if is_self_ref:
+            stats["skipped_self_ref"] += 1
+            logger.warning(
+                "backfill_self_reference_skipped",
+                metric_code=code,
+                existing_code=existing_code,
+                existing_metric_id=existing_metric_id,
+            )
+            if not dry_run:
+                metric.pending_conflict = False
+                metric.pending_conflict_detail = None
+            continue
         ctype = _parse_ctype(detail.get("conflict_type"))
         conflict = Conflict(
             conflict_id=_new_conflict_id(),
@@ -124,7 +149,9 @@ async def _forward_pass(
             severity=_derive_severity(detail, ctype),
             source="backfill",
             reason=detail.get("reason") or "",
-            block_publish=bool(detail.get("block_publish", ctype == ConflictType.SAME_NAME_DIFF_DEF)),
+            block_publish=bool(
+                detail.get("block_publish", ctype == ConflictType.SAME_NAME_DIFF_DEF)
+            ),
             metric_a=metric.id,
             metric_b=detail.get("existing_metric_id"),
         )
@@ -170,6 +197,14 @@ async def _reverse_pass(
 
     stats = {"scanned": len(conflicts), "flagged": 0}
     for conflict in conflicts:
+        # 自引用冲突（metric_a==metric_b / candidate==existing）是误报数据，
+        # 不把其 detail 回置给指标（否则标记永远无法清除、污染指标目录）。
+        if (
+            conflict.metric_a is not None
+            and conflict.metric_b is not None
+            and conflict.metric_a == conflict.metric_b
+        ):
+            continue
         detail = _detail_from_conflict(conflict)
         mc = conflict.metric_codes or {}
         for code in (mc.get("candidate"), mc.get("existing")):
@@ -180,6 +215,76 @@ async def _reverse_pass(
             if not dry_run:
                 metric.pending_conflict = True
                 metric.pending_conflict_detail = detail
+    return stats
+
+
+async def _cleanup_self_refs(session: Any, dry_run: bool) -> dict[str, int]:
+    """清理自引用冲突（metric_a==metric_b 的未决记录 + 关联指标自引用标记）。
+
+    自引用记录是历史 precheck 候选未带 metric_id 的误报产物（同一行比对自己，
+    仲裁台显示「候选=现有=同一指标」）。清理做软删（deleted_at）保留审计，并清除
+    关联指标的自引用 pending_conflict 标记。幂等：重复执行无副作用。
+    """
+    stmt = (
+        select(Conflict)
+        .where(
+            Conflict.deleted_at.is_(None),
+            Conflict.metric_a.is_not(None),
+            Conflict.metric_a == Conflict.metric_b,
+            Conflict.status.in_(_OPEN_STATUSES),
+        )
+        .order_by(Conflict.created_at.desc())
+    )
+    conflicts = list((await session.execute(stmt)).scalars().all())
+    stats = {
+        "scanned": len(conflicts),
+        "conflicts_cleaned": 0,
+        "metrics_cleared": 0,
+    }
+    codes: set[str] = set()
+    for conflict in conflicts:
+        # 二次防御：仅清理「双侧同一指标行且未软删」的自引用记录——即使查询层
+        # 过滤与实际对象状态有偏差（如内存会话残留），也不误清非自引用/已删记录。
+        if (
+            conflict.metric_a is None
+            or conflict.metric_b is None
+            or conflict.metric_a != conflict.metric_b
+            or conflict.deleted_at is not None
+        ):
+            continue
+        mc = conflict.metric_codes or {}
+        for v in (mc.get("candidate"), mc.get("existing")):
+            if v:
+                codes.add(v)
+        stats["conflicts_cleaned"] += 1
+        logger.warning(
+            "cleanup_self_ref_conflict",
+            conflict_id=conflict.conflict_id,
+            metric_a=conflict.metric_a,
+            metric_b=conflict.metric_b,
+            metric_codes=conflict.metric_codes,
+        )
+        if not dry_run:
+            conflict.deleted_at = datetime.now(UTC)
+    if codes and not dry_run:
+        metric_rows = list(
+            (
+                await session.execute(
+                    select(Metric).where(
+                        Metric.metric_code.in_(codes), Metric.deleted_at.is_(None)
+                    )
+                )
+            ).scalars().all()
+        )
+        for metric in metric_rows:
+            detail = dict(metric.pending_conflict_detail or {})
+            is_self_ref = detail.get("existing_code") == metric.metric_code or (
+                detail.get("existing_metric_id") == metric.id
+            )
+            if is_self_ref:
+                metric.pending_conflict = False
+                metric.pending_conflict_detail = None
+                stats["metrics_cleared"] += 1
     return stats
 
 
@@ -202,12 +307,32 @@ async def run(apply: bool, limit: int | None) -> None:
     await db_engine.dispose()
 
 
+async def run_cleanup(apply: bool) -> None:
+    async with async_session_factory() as session:
+        stats = await _cleanup_self_refs(session, not apply)
+        if apply:
+            await session.commit()
+        logger.info("cleanup_self_ref_conflicts_done", stats=stats, apply=apply)
+
+    from app.db.mysql import engine as db_engine
+
+    await db_engine.dispose()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="回填存量口径冲突孤儿标记")
     parser.add_argument("--apply", action="store_true", help="真正写库（缺省 dry-run）")
     parser.add_argument("--limit", type=int, default=None, help="仅处理前 N 个指标")
+    parser.add_argument(
+        "--cleanup-self-refs",
+        action="store_true",
+        help="清理自引用冲突（metric_a==metric_b）记录与关联指标标记",
+    )
     args = parser.parse_args()
-    asyncio.run(run(args.apply, args.limit))
+    if args.cleanup_self_refs:
+        asyncio.run(run_cleanup(args.apply))
+    else:
+        asyncio.run(run(args.apply, args.limit))
 
 
 if __name__ == "__main__":

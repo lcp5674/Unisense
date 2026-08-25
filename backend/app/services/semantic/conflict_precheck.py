@@ -261,12 +261,17 @@ class ConflictPrechecker:
         metric_code: str,
         definition_json: dict[str, Any],
         extra_source_tables: list[str] | None = None,
+        metric_id: int | None = None,
     ) -> dict[str, Any]:
         """将指标编码 + 口径定义转为 conflict.similarity 期望的候选字典。
 
         ``extra_source_tables``：OneData 挂载层权威（挂载实体的 source_table），
         由调用方在 async 上下文解析后传入——挂载独立更新后 definition_json 的
         source_tables 冗余可能过期，合并挂载源表保证预检比对基于最新物理来源。
+        ``metric_id``：候选的真实指标行 ID（创建后调用须传入）。detect_conflict 的
+        自我引用防御依赖「候选/现有双侧 metric_id 相等判定」——候选不携带 ID 时
+        防御单侧失效，同码自身条目会被误报为 SAME_NAME_DIFF_DEF（曾致 13 个
+        存量指标挂自引用孤儿标记，见 backfill_conflict_orphans）。
         """
         tables = list(definition_json.get("source_tables", []) or [])
         for t in extra_source_tables or []:
@@ -281,6 +286,7 @@ class ConflictPrechecker:
             "source_tables": tables,
             "has_pii": bool(definition_json.get("pii", False)),
             "pii_authorized": bool(definition_json.get("pii_authorized", False)),
+            "metric_id": metric_id,
         }
 
     @staticmethod
@@ -302,6 +308,7 @@ class ConflictPrechecker:
         definition_json: dict[str, Any],
         *,
         extra_source_tables: list[str] | None = None,
+        metric_id: int | None = None,
     ) -> dict[str, Any] | None:
         """异步预检：相似口径 / 敏感级 / 依赖未发布。
 
@@ -313,6 +320,11 @@ class ConflictPrechecker:
             definition_json: 口径定义。
             extra_source_tables: OneData 挂载层权威源表列表（挂载实体的 source_table），
                 独立更新后并入比对，避免 definition_json 冗余过期导致漏检。
+            metric_id: 候选的真实指标行 ID（创建后调用须传入自身 id）。候选不携带
+                metric_id 时 detect_conflict 的自我引用防御单侧失效——同码自身条目
+                会被误判 SAME_NAME_DIFF_DEF（候选 definition_json 缺 domain 键→域空
+                与库里域不等，触发「同名定义/域不同」）。传自身 id 后，与 existing 中
+                同码自身行（同 metric_id）配对时防御生效返回 None。
 
         Returns:
             冲突详情或 None。
@@ -326,7 +338,10 @@ class ConflictPrechecker:
             return None
 
         candidate = self._to_candidate(
-            metric_code, definition_json, extra_source_tables=extra_source_tables
+            metric_code,
+            definition_json,
+            extra_source_tables=extra_source_tables,
+            metric_id=metric_id,
         )
         existing_list = await self._existing_loader()
         if not existing_list:
@@ -334,8 +349,9 @@ class ConflictPrechecker:
 
         # ① 语义冲突（同名不同义 / PII / 重复建设），复用 conflict 服务相似度规则
         # 注意：不与候选同码条目做排除——同名不同义的合法形态恰是「新提交 vs
-        # 已存在同码行」；precheck 仅在创建后调用，此时同码条目即刚创建的自身行，
-        # 定义一致不会触发误报（自我冲突防御落在 check 创建入口，见 conflict.service）。
+        # 已存在同码行」（候选未落库、existing 为既有行）。创建后调用须传 metric_id，
+        # 使 detect_conflict 对「同码且同 metric_id」的自身条目免疫误报（自我冲突防御
+        # 依赖双侧 metric_id 相等判定，见 conflict.similarity.detect_conflict）。
         for ext in existing_list:
             det = detect_conflict(candidate, ext)
             if det is not None:

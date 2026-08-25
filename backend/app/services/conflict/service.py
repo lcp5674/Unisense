@@ -135,6 +135,23 @@ class ConflictService(BaseService):
                     det = detect_conflict(cand_dict, ext_dict, llm_judge=lambda a, b: True)
             if det is None:
                 continue
+            # 纵深防御：候选与现有解析到同一指标行 → 不构成冲突，不上报也不落库。
+            # detect_conflict 的自我引用防御（similarity.py cand_id==ext_id）依赖双侧
+            # metric_id 非 None，此处兜底任何漏网的自引用（如候选/现有单侧缺 id 时
+            # 同码自身误报），杜绝在冲突表落「永远无法正常裁决」的自我冲突
+            # （曾致 13 个存量孤儿标记，见 backfill_conflict_orphans）。
+            if (
+                candidate.metric_id is not None
+                and det.existing_metric_id is not None
+                and candidate.metric_id == det.existing_metric_id
+            ):
+                logger.warning(
+                    "conflict_self_reference_skipped 候选 %s 与现有 %s 同一指标行（id=%s）",
+                    candidate.metric_code,
+                    det.existing_code,
+                    candidate.metric_id,
+                )
+                continue
             detections.append(
                 DetectionOut(
                     conflict_type=det.conflict_type,

@@ -196,6 +196,47 @@ async def test_check_drops_self_reference_by_metric_id() -> None:
     assert not any(e["event_type"] == "conflict_open" for e in events.published)
 
 
+async def test_check_skip_self_reference_at_construct_time(monkeypatch) -> None:
+    """纵深防御：即使 detect_conflict 返回 existing_metric_id==候选 id 的检测
+    （绕过 _drop_self_references 与 detect_conflict 自身 id 防御的漏网形态），
+    落库循环内仍拦截，绝不写入「候选=现有=同一指标行」的自我冲突。"""
+    from app.services.conflict import service as conflict_service
+    from app.services.conflict.similarity import ConflictDetection
+
+    svc, repo, events, _, _ = _svc()
+
+    def _fake_detect(cand: dict, ext: dict, llm_judge=None):
+        # 构造漏网自引用：不同码（_drop_self_references 不剔除），
+        # 但 existing_metric_id 与候选 metric_id 相同（detect_conflict 137 行
+        # 防御本应拦截，此处模拟其被绕过的形态以验证落库循环兜底）。
+        return ConflictDetection(
+            conflict_type=ConflictType.SAME_NAME_DIFF_DEF,
+            score=1.0,
+            existing_code=ext["metric_code"],
+            existing_metric_id=cand.get("metric_id"),
+            severity="hard",
+            block_publish=True,
+            reason="模拟漏网自引用",
+        )
+
+    monkeypatch.setattr(conflict_service, "detect_conflict", _fake_detect)
+    req = ConflictCheckRequest(
+        candidate=MetricInput(
+            metric_code="cand_a_day", domain="sales", definition="sum(amount)", metric_id=7
+        ),
+        existing=[
+            MetricInput(
+                metric_code="cand_b_day", domain="finance", definition="sum(price)", metric_id=7
+            )
+        ],
+    )
+    result = await svc.check(req.candidate, req.existing)
+    assert len(repo.conflicts) == 0  # 纵深防御拦截，不落库
+    assert result.detections == []  # 不上报
+    assert result.blocked is False
+    assert not any(e["event_type"] == "conflict_open" for e in events.published)
+
+
 async def test_check_drops_self_reference_by_code_resolution() -> None:
     """候选/现有同码且都解析到同一活动指标行（调用方未传 metric_id）→ 剔除。
 
