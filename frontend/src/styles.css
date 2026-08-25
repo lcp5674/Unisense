@@ -1427,6 +1427,51 @@ body {
   text-align: left;
 }
 
+/* —— 长标识值（指标编码等）—— */
+/* 超长编码「单行中间省略」：保留首尾段，hover 由 Tooltip 展示完整值；避免整行换行撑高卡片/表格列 */
+.code-value {
+  display: inline;
+  word-break: break-word;
+  min-width: 0;
+}
+.code-value-long {
+  display: inline-block;
+  /* 中间省略后约 44 字符，此处放宽到能完整展示（等宽约 290px）；
+     极端窄屏（<300px）才触发 ellipsis 截尾兜底，保证单行不溢出 */
+  max-width: 420px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+.code-value-code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  background: rgba(120, 132, 148, 0.13);
+  padding: 0 4px;
+  border-radius: 4px;
+}
+.code-value-link {
+  color: var(--signal);
+  cursor: pointer;
+}
+.code-value-link:hover {
+  text-decoration: underline;
+}
+.code-value-tip-overlay {
+  max-width: 400px;
+}
+.code-value-tip-text {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+  margin-bottom: 2px;
+  max-height: 120px;
+  overflow: auto;
+}
+
 .notif-body-full {
   font-size: 12.5px;
   line-height: 1.6;

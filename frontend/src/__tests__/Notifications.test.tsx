@@ -728,11 +728,12 @@ describe("通知中心 - 收件箱增强（点击已读 / 筛选 / 聚合 / 待�
     renderPage();
     await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: "sales_gmv" }));
+    // 短编码渲染为可点击链接元素（CodeValue），点击直达详情
+    fireEvent.click(screen.getByText("sales_gmv"));
     await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/detail/sales_gmv"));
   });
 
-  it("超长指标编码：渲染为单个可点击按钮且不截断、不破坏卡片字段结构（防溢出重叠）", async () => {
+  it("超长指标编码：单行中间省略 + hover 完整值 + 点击直达详情（防溢出重叠）", async () => {
     const longCode = "outp_e2e_fee_day_2026_q3_retail_amount_sum_by_store_region";
     const n = notif({
       id: 15,
@@ -745,16 +746,64 @@ describe("通知中心 - 收件箱增强（点击已读 / 筛选 / 聚合 / 待�
     renderPage();
     await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
 
-    // 长编码仍作为单个可点击按钮渲染，文本完整不截断（值为 Button 时才可能溢出，见 styles.css .notif-body-field .ant-btn）
-    const btn = screen.getByRole("button", { name: longCode }) as HTMLButtonElement;
-    expect(btn.textContent).toBe(longCode);
-    // 按钮位于字段行内（.notif-body-field .ant-btn 选择器命中，允许换行收缩）
-    const field = btn.closest(".notif-body-field") as HTMLElement;
+    // 长编码渲染为可点击链接元素（CodeValue），字段结构完整
+    const el = screen.getByText((t) => t.includes("outp_e2e_fee_day") && t.includes("…")) as HTMLElement;
+    expect(el.classList.contains("code-value-link")).toBe(true);
+    const field = el.closest(".notif-body-field") as HTMLElement;
     expect(field).toBeTruthy();
     expect(field.querySelector(".notif-body-label")?.textContent).toBe("指标编码");
-    // 点击仍可直达详情（长编码不因样式修复而丢失跳转能力）
-    fireEvent.click(btn);
+    // 显示为中间省略（首尾段保留），DOM 文本非完整值（完整值在 aria-label / Tooltip）
+    expect(el.textContent).not.toBe(longCode);
+    expect(el.getAttribute("aria-label")).toBe(longCode);
+    // hover 显示完整值 Tooltip + 复制按钮
+    fireEvent.mouseEnter(el);
+    await waitFor(() => expect(screen.getByText(longCode)).toBeTruthy());
+    // 点击仍可直达详情（省略展示不丢失跳转能力）
+    fireEvent.click(el);
     await waitFor(() => expect(screen.getByTestId("path").textContent).toBe(`/detail/${longCode}`));
+  });
+
+  it("短指标编码：完整展示不省略、无 Tooltip", async () => {
+    const shortCode = "sales_gmv";
+    const n = notif({
+      id: 16,
+      template_code: "metric.approved",
+      title: "指标已通过",
+      body: `指标编码：${shortCode}`,
+      payload: { metric_code: shortCode },
+    });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
+
+    const el = screen.getByText(shortCode) as HTMLElement;
+    expect(el.classList.contains("code-value-long")).toBe(false);
+    expect(el.textContent).toBe(shortCode); // 完整展示，未省略
+    expect(el.getAttribute("aria-label")).toBe(shortCode);
+  });
+
+  it("长编码 Tooltip 内复制按钮：一键复制完整值", async () => {
+    const longCode = "outp_e2e_fee_day_2026_q3_retail_amount_sum_by_store_region";
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const n = notif({
+      id: 17,
+      template_code: "metric.approved",
+      title: "指标已通过",
+      body: `指标编码：${longCode}`,
+      payload: { metric_code: longCode },
+    });
+    mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("指标已通过")).toBeInTheDocument());
+
+    const el = screen.getByText((t) => t.includes("outp_e2e_fee_day") && t.includes("…")) as HTMLElement;
+    fireEvent.mouseEnter(el);
+    await waitFor(() => expect(screen.getByText(longCode)).toBeTruthy());
+    // 复制按钮（antd 两字按钮自动加空格，用正则匹配）
+    fireEvent.click(screen.getByRole("button", { name: /复\s*制/ }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(longCode));
+    await waitFor(() => expect(screen.getByText("已复制")).toBeTruthy());
   });
 
   it("同类聚合：相同消息类型合并为一张卡片并显示 ×N", async () => {
@@ -883,7 +932,7 @@ describe("通知中心 - 前后端事件类型中文映射一致性", () => {
     expect(screen.queryByText("lineage.change_impacted")).not.toBeInTheDocument();
   });
 
-  it("资产订阅超长指标编码：code 可换行收缩不撑破表格列", async () => {
+  it("资产订阅超长指标编码：code 单行中间省略 + hover 完整值（不撑破表格列）", async () => {
     const longCode = "outp_e2e_fee_day_2026_q3_retail_amount_sum_by_store_region";
     vi.mocked(listSubscriptions).mockResolvedValue({
       items: [
@@ -906,12 +955,13 @@ describe("通知中心 - 前后端事件类型中文映射一致性", () => {
     fireEvent.click(screen.getByRole("tab", { name: "订阅设置" }));
 
     await waitFor(() => expect(screen.getByText("关注 指标")).toBeInTheDocument());
-    const code = screen.getByText(longCode) as HTMLElement;
+    const code = screen.getByText((t) => t.includes("outp_e2e_fee_day") && t.includes("…")) as HTMLElement;
     expect(code.tagName.toLowerCase()).toBe("code");
-    // 长编码允许词内换行（antd 把 style 落在外层 .ant-typography，word-break/white-space 为继承属性，
-    // 作用于内层 code 的文本换行），避免撑宽表格列与相邻字样重叠
-    const wrap = code.closest(".ant-typography") as HTMLElement;
-    expect(wrap.style.wordBreak).toBe("break-all");
-    expect(wrap.style.whiteSpace).toBe("normal");
+    expect(code.classList.contains("code-value-code")).toBe(true);
+    // 单行中间省略展示（首尾段保留），完整值在 aria-label，hover Tooltip 补全
+    expect(code.textContent).not.toBe(longCode);
+    expect(code.getAttribute("aria-label")).toBe(longCode);
+    fireEvent.mouseEnter(code);
+    await waitFor(() => expect(screen.getByText(longCode)).toBeTruthy());
   });
 });
