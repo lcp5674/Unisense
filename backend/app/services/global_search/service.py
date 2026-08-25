@@ -1,6 +1,7 @@
 """全局聚合搜索服务（FR-18 全局搜索栏生产化）。
 
-编排 GlobalSearchRepository 跨 8 类资源聚合搜索，返回按类型分组结果。
+编排 GlobalSearchRepository 跨 9 类资源（指标/维度/术语/模板/数据源/采集目录表/
+采集目录字段/主题域/度量目录）聚合搜索，返回按类型分组结果。
 只读能力，无业务状态流转；失败由全局错误处理器统一兜底。
 """
 
@@ -23,7 +24,7 @@ class GlobalSearchService(BaseService):
         self._repo = GlobalSearchRepository(session)
 
     async def search(self, q: str, limit: int = 5) -> dict[str, list[dict[str, Any]]]:
-        """跨 8 类资源聚合搜索，按类型分组返回（每类至多 limit 条）。
+        """跨 9 类资源聚合搜索，按类型分组返回（每类至多 limit 条）。
 
         Args:
             q: 搜索关键词（去空白后非空）。

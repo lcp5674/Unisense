@@ -250,6 +250,7 @@ const SEARCH_TYPE_LABEL: Record<GlobalSearchType, string> = {
   catalog: "采集目录",
   field: "字段",
   subject_domain: "主题域",
+  measure: "度量目录",
 };
 
 // 顶栏下拉分组展示顺序
@@ -262,6 +263,7 @@ const SEARCH_TYPE_ORDER: GlobalSearchType[] = [
   "catalog",
   "field",
   "subject_domain",
+  "measure",
 ];
 
 export function Layout({ user }: { user: CurrentUser }) {

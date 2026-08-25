@@ -33,6 +33,9 @@ export function navigateToSearchItem(
     case "field":
       navigate(`/catalogs?kw=${encodeURIComponent(item.code)}`);
       break;
+    case "measure":
+      navigate(`/measure-catalogs?kw=${encodeURIComponent(item.name)}`);
+      break;
     case "subject_domain":
       navigate("/domains");
       break;

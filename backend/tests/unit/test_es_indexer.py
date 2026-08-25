@@ -1,7 +1,8 @@
 """ES 索引管理与数据同步单测（TD §1.3 ES 检索加速层）。
 
 ES 以 MagicMock 隔离（不连真实 ES）；聚焦：
-- ensure_indexes 幂等创建（已存在不报错）；
+- ensure_indexes 幂等创建 / analyzer 版本检测自动重建 / 强制重建；
+- mapping 含中英同义词 analyzer（search_analyzer + cn_en_synonym filter）；
 - sync_metrics / sync_terms 从 MySQL 灌入，按业务编码 upsert；
 - _join_synonyms 归一（JSON 数组/字符串 → 空格分隔）。
 """
@@ -14,9 +15,11 @@ from app.models.metric import Metric
 from app.models.term import Term
 from app.services.search.es_indexer import (
     _METRIC_INDEX,
+    _SYSTEM_ANALYZER,
     _TERM_INDEX,
     EsIndexer,
     _join_synonyms,
+    _mapping_settings,
 )
 
 
@@ -53,36 +56,91 @@ def _rows_result(rows):
     return res
 
 
-async def test_ensure_indexes_creates_both() -> None:
-    """ensure_indexes 幂等创建 metric_idx/term_idx 映射。"""
-    session = MagicMock()
+def _current_mapping(index: str) -> dict:
+    """含当前 search_analyzer 版本的 mapping（供幂等检测）。"""
+    return {
+        index: {
+            "mappings": {
+                "properties": {"name": {"type": "text", "analyzer": _SYSTEM_ANALYZER}}
+            }
+        }
+    }
+
+
+def _es_client() -> MagicMock:
     es = MagicMock()
     es.enabled = True
-    es.create_index = AsyncMock(side_effect=lambda idx, body: True)
-    indexer = EsIndexer(session, es_client=es)
+    es.create_index = AsyncMock(return_value=True)
+    es.delete_index = AsyncMock(return_value=True)
+    es.get_mapping = AsyncMock(return_value=None)  # 默认索引不存在 → 需创建
+    es.index = AsyncMock()
+    return es
+
+
+async def test_ensure_indexes_creates_both() -> None:
+    """ensure_indexes 幂等创建 metric_idx/term_idx 映射。"""
+    es = _es_client()
+    indexer = EsIndexer(MagicMock(), es_client=es)
     result = await indexer.ensure_indexes()
     assert result == {_METRIC_INDEX: True, _TERM_INDEX: True}
     assert es.create_index.await_count == 2
 
 
 async def test_ensure_indexes_existing_is_idempotent() -> None:
-    """已存在的索引返回 False（幂等不报错）。"""
-    session = MagicMock()
-    es = MagicMock()
-    es.enabled = True
-    es.create_index = AsyncMock(return_value=False)
-    indexer = EsIndexer(session, es_client=es)
+    """索引已含当前 analyzer → 幂等返回 False，不重建。"""
+    es = _es_client()
+    es.get_mapping = AsyncMock(
+        side_effect=lambda idx: _current_mapping(idx)
+    )
+    indexer = EsIndexer(MagicMock(), es_client=es)
     result = await indexer.ensure_indexes()
     assert result == {_METRIC_INDEX: False, _TERM_INDEX: False}
+    es.delete_index.assert_not_awaited()
+    es.create_index.assert_not_awaited()
+
+
+async def test_ensure_indexes_recreates_when_analyzer_missing() -> None:
+    """索引存在但 analyzer 缺失（旧版 mapping）→ 删除重建返回 True。"""
+    es = _es_client()
+    # 旧版 mapping：name 为 text 但无 analyzer
+    es.get_mapping = AsyncMock(
+        return_value={
+            _METRIC_INDEX: {"mappings": {"properties": {"name": {"type": "text"}}}}
+        }
+    )
+    indexer = EsIndexer(MagicMock(), es_client=es)
+    result = await indexer.ensure_indexes()
+    assert result[_METRIC_INDEX] is True
+    es.delete_index.assert_any_await(_METRIC_INDEX)
+
+
+async def test_ensure_indexes_force_recreate() -> None:
+    """force_recreate=True 强制删除重建（同义词词表变更后）。"""
+    es = _es_client()
+    es.get_mapping = AsyncMock(side_effect=lambda idx: _current_mapping(idx))
+    indexer = EsIndexer(MagicMock(), es_client=es)
+    result = await indexer.ensure_indexes(force_recreate=True)
+    assert result == {_METRIC_INDEX: True, _TERM_INDEX: True}
+    assert es.delete_index.await_count == 2
+    assert es.create_index.await_count == 2
+
+
+def test_mapping_settings_contain_synonym_analyzer() -> None:
+    """settings 含中英同义词 analyzer：search_analyzer + cn_en_synonym filter。"""
+    settings = _mapping_settings()
+    analysis = settings["analysis"]
+    assert analysis["filter"]["cn_en_synonym"]["type"] == "synonym"
+    assert analysis["analyzer"][_SYSTEM_ANALYZER]["filter"] == ["lowercase", "cn_en_synonym"]
+    # 同义词等价组含业务词对（如订单 → order/sales_order）
+    synonyms = analysis["filter"]["cn_en_synonym"]["synonyms"]
+    assert any(line.startswith("订单,") for line in synonyms)
 
 
 async def test_sync_metrics_indexes_with_synonyms() -> None:
     """指标灌入：包含关联逻辑度量同义词，按 id 作为 doc_id upsert。"""
     session = MagicMock()
     session.execute = AsyncMock(return_value=_rows_result([(_metric(), "支付金额 pay")]))
-    es = MagicMock()
-    es.enabled = True
-    es.index = AsyncMock()
+    es = _es_client()
     indexer = EsIndexer(session, es_client=es)
     count = await indexer.sync_metrics()
     assert count == 1
@@ -97,9 +155,7 @@ async def test_sync_terms_indexes() -> None:
     """术语灌入：同义词数组归一为空格分隔文本。"""
     session = MagicMock()
     session.execute = AsyncMock(return_value=_rows_result([_term()]))
-    es = MagicMock()
-    es.enabled = True
-    es.index = AsyncMock()
+    es = _es_client()
     indexer = EsIndexer(session, es_client=es)
     count = await indexer.sync_terms()
     assert count == 1
@@ -116,9 +172,7 @@ async def test_sync_all_reports_counts() -> None:
     session.execute = AsyncMock(
         side_effect=[_rows_result([(_metric(), None)]), _rows_result([])]
     )
-    es = MagicMock()
-    es.enabled = True
-    es.index = AsyncMock()
+    es = _es_client()
     indexer = EsIndexer(session, es_client=es)
     counts = await indexer.sync_all()
     assert counts == {_METRIC_INDEX: 1, _TERM_INDEX: 0}

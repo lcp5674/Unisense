@@ -1,7 +1,7 @@
 """全局聚合搜索 API（FR-18 全局搜索栏生产化）。
 
-GET /api/v1/search?q=...&limit=...：跨 8 类资源（指标/维度/术语/模板/
-数据源/采集目录表+字段/主题域）按关键词聚合搜索，按类型分组返回。
+GET /api/v1/search?q=...&limit=...：跨 9 类资源（指标/维度/术语/模板/
+数据源/采集目录表+字段/主题域/度量目录）按关键词聚合搜索，按类型分组返回。
 
 只读端点：全部已登录角色可读（RBAC 读闸门）+ SQL 注入守卫（纵深防御）。
 """
@@ -47,7 +47,7 @@ async def global_search(
     q: str = Query(..., min_length=1, max_length=100, description="搜索关键词"),
     limit: int = Query(5, ge=1, le=20, description="每类资源返回条数上限"),
 ) -> Any:
-    """跨指标/维度/术语/模板/数据源/采集目录表+字段/主题域聚合搜索。
+    """跨指标/维度/术语/模板/数据源/采集目录表+字段/主题域/度量目录聚合搜索。
 
     返回按类型分组的命中的 top-N 条目，供顶栏实时下拉与全局搜索页消费。
     """
@@ -61,13 +61,20 @@ async def ensure_indexes(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
+    force_recreate: bool = Query(
+        False,
+        description="强制删除重建（analyzer/同义词词表变更后使用，随后需 /indexes/sync 重灌）",
+    ),
 ) -> Any:
-    """创建 metric_idx / term_idx 索引映射（幂等：已存在返回 False 不报错）。
+    """创建 metric_idx / term_idx 索引映射（幂等：已含当前 analyzer 返回 False 不重建）。
+
+    同义词过滤器变更无法原地更新 → 版本检测到旧 mapping 自动删除重建（返回 True），
+    调用方随后调用 /indexes/sync 全量重灌。force_recreate=True 强制重建。
 
     ES 未配置/不可用抛 503（SearchUnavailableError），检索路径自动降级 MySQL。
     """
     indexer = EsIndexer(db)
-    created = await indexer.ensure_indexes()
+    created = await indexer.ensure_indexes(force_recreate=force_recreate)
     return ok(data={"created": created, "enabled": indexer.enabled}, trace_id=trace_id)
 
 

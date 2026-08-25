@@ -2,11 +2,18 @@
 
 背景：指标/术语两类检索此前为 MySQL LIKE；ES 8.15 服务已部署但未接线
 （仅就绪探针）。本服务负责：
-- ``ensure_indexes``：创建 metric_idx / term_idx 索引映射（幂等）；
+- ``ensure_indexes``：创建 metric_idx / term_idx 索引映射（幂等；analyzer 版本
+  变更自动检测并删除重建，同义词扩展实时生效）；
 - ``sync_metrics`` / ``sync_terms`` / ``sync_all``：从 MySQL 全量灌入 ES
   （按业务编码 upsert，支持重复执行）；
 - ES 未配置/不可用时静默跳过（检索路径由 ``global_search`` 自动降级 MySQL LIKE，
   对齐 TD §1.3 降级边界 "ES✗→退 MySQL"）。
+
+中英同义词过滤器（``search/synonyms.py`` 数据源）：
+- mapping 配置 ``search_analyzer``（standard 分词 + lowercase + ``cn_en_synonym``
+  token filter），对 name/description/definition/synonyms 文本字段生效；
+- 查询"订单"在分词层等价为 "order/sales_order"，命中英文名称/描述中的 token
+  （与 MySQL LIKE 路径的中英扩展共用同一份词对，行为一致）。
 """
 
 from __future__ import annotations
@@ -21,40 +28,65 @@ from app.core.logging import get_logger
 from app.models.measure_catalog import MeasureCatalog
 from app.models.metric import Metric
 from app.models.term import Term
+from app.services.search.synonyms import es_synonym_lines
 
 logger = get_logger(__name__)
 
 _METRIC_INDEX = "metric_idx"
 _TERM_INDEX = "term_idx"
+#: 自定义 analyzer 名（检测 mapping 版本用：字段 analyzer 指向它即认为已含同义词扩展）
+_SYSTEM_ANALYZER = "search_analyzer"
+
+
+def _mapping_settings() -> dict[str, Any]:
+    """索引 settings：基础分片 + 中英同义词 analyzer（与 MySQL LIKE 扩展共用词对）。"""
+    return {
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+        "analysis": {
+            "filter": {
+                # ES 8.15 内联 synonyms：逗号分隔等价组（首词为规范形式）
+                "cn_en_synonym": {"type": "synonym", "synonyms": es_synonym_lines()},
+            },
+            "analyzer": {
+                _SYSTEM_ANALYZER: {
+                    "type": "custom",
+                    "tokenizer": "standard",
+                    "filter": ["lowercase", "cn_en_synonym"],
+                },
+            },
+        },
+    }
+
 
 _METRIC_MAPPING: dict[str, Any] = {
-    "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+    "settings": _mapping_settings(),
     "mappings": {
         "properties": {
             "id": {"type": "long"},
             "metric_code": {"type": "keyword"},
-            "name": {"type": "text"},
-            "description": {"type": "text"},
+            "name": {"type": "text", "analyzer": _SYSTEM_ANALYZER},
+            "description": {"type": "text", "analyzer": _SYSTEM_ANALYZER},
             "domain": {"type": "keyword"},
             "status": {"type": "keyword"},
             "pii_flag": {"type": "boolean"},
             # 关联逻辑度量同义词（业务别名，如"支付金额"→"pay"），参与 multi_match
-            "synonyms": {"type": "text"},
+            "synonyms": {"type": "text", "analyzer": _SYSTEM_ANALYZER},
         }
     },
 }
 
 _TERM_MAPPING: dict[str, Any] = {
-    "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+    "settings": _mapping_settings(),
     "mappings": {
         "properties": {
             "id": {"type": "long"},
             "term_code": {"type": "keyword"},
-            "name": {"type": "text"},
-            "definition": {"type": "text"},
+            "name": {"type": "text", "analyzer": _SYSTEM_ANALYZER},
+            "definition": {"type": "text", "analyzer": _SYSTEM_ANALYZER},
             "domain": {"type": "keyword"},
             "status": {"type": "keyword"},
-            "synonyms": {"type": "text"},
+            "synonyms": {"type": "text", "analyzer": _SYSTEM_ANALYZER},
         }
     },
 }
@@ -72,12 +104,44 @@ class EsIndexer:
         """ES 是否可用（未配置/未安装/熔断均视为不可用，调用方降级 MySQL）。"""
         return self._es.enabled
 
-    async def ensure_indexes(self) -> dict[str, bool]:
-        """幂等创建索引映射；已存在返回 False（不报错）。ES 不可用抛 SearchUnavailableError。"""
+    async def ensure_indexes(self, *, force_recreate: bool = False) -> dict[str, bool]:
+        """幂等创建索引映射；analyzer 版本变更自动删除重建。
+
+        同义词过滤器定义在 index settings（analyzer），无法在已存在索引上原地更新。
+        检测规则：mapping 的文本字段已指向 ``search_analyzer`` → 幂等（False）；
+        索引不存在或 analyzer 缺失 → 删除（若存在）后重建（True），调用方随后需
+        ``sync_all`` 全量重灌。``force_recreate=True`` 强制删除重建（同义词词表变更后）。
+
+        Args:
+            force_recreate: 是否强制重建（忽略版本检测）。
+
+        Returns:
+            ``{index: created_or_recreated}``；ES 不可用抛 SearchUnavailableError。
+        """
         return {
-            _METRIC_INDEX: await self._es.create_index(_METRIC_INDEX, _METRIC_MAPPING),
-            _TERM_INDEX: await self._es.create_index(_TERM_INDEX, _TERM_MAPPING),
+            _METRIC_INDEX: await self._ensure_index(
+                _METRIC_INDEX, _METRIC_MAPPING, force_recreate
+            ),
+            _TERM_INDEX: await self._ensure_index(_TERM_INDEX, _TERM_MAPPING, force_recreate),
         }
+
+    async def _ensure_index(self, index: str, mapping: dict[str, Any], force: bool) -> bool:
+        """单索引确保存在且 analyzer 为当前版本（返回 True=本次创建/重建）。"""
+        if force or not await self._has_current_analyzer(index):
+            await self._es.delete_index(index)  # 不存在时静默成功（返回 False）
+            return await self._es.create_index(index, mapping)
+        return False
+
+    async def _has_current_analyzer(self, index: str) -> bool:
+        """索引 mapping 是否已含 ``search_analyzer``（版本检测，false=不存在或旧版）。"""
+        mapping = await self._es.get_mapping(index)
+        if not mapping:
+            return False
+        props = ((mapping.get(index) or {}).get("mappings") or {}).get("properties") or {}
+        return any(
+            isinstance(field, dict) and field.get("analyzer") == _SYSTEM_ANALYZER
+            for field in props.values()
+        )
 
     async def sync_metrics(self) -> int:
         """全量灌入指标（含关联逻辑度量同义词）；按 metric_code 作为 doc_id upsert。"""

@@ -15,6 +15,7 @@ const TYPE_LABEL: Record<GlobalSearchType, string> = {
   catalog: "采集目录",
   field: "字段",
   subject_domain: "主题域",
+  measure: "度量目录",
 };
 
 const TYPE_COLOR: Record<GlobalSearchType, string> = {
@@ -26,6 +27,7 @@ const TYPE_COLOR: Record<GlobalSearchType, string> = {
   catalog: "orange",
   field: "gold",
   subject_domain: "magenta",
+  measure: "volcano",
 };
 
 const TYPE_ORDER: GlobalSearchType[] = [
@@ -37,6 +39,7 @@ const TYPE_ORDER: GlobalSearchType[] = [
   "catalog",
   "field",
   "subject_domain",
+  "measure",
 ];
 
 function emptyGroups(): Record<GlobalSearchType, GlobalSearchItem[]> {
@@ -49,6 +52,7 @@ function emptyGroups(): Record<GlobalSearchType, GlobalSearchItem[]> {
     catalog: [],
     field: [],
     subject_domain: [],
+    measure: [],
   };
 }
 

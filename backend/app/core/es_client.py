@@ -156,6 +156,42 @@ class EsClient:
             self._breaker.record_failure()
             raise SearchUnavailableError(f"es create_index failed: {exc}") from exc
 
+    async def delete_index(self, index: str) -> bool:
+        """删除索引（不存在视为成功返回 False；供 analyzer/mapping 变更后重建）。"""
+        if not self._enabled or self._client is None:
+            raise SearchUnavailableError("elasticsearch client disabled")
+        if not self._breaker.allow():
+            raise CircuitOpenError("es circuit open")
+        try:
+            await self._client.indices.delete(index=index)
+            self._breaker.record_success()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            # index_not_found（404）视为已删除成功
+            if getattr(exc, "status_code", None) == 404:
+                self._breaker.record_success()
+                return False
+            self._breaker.record_failure()
+            raise SearchUnavailableError(f"es delete_index failed: {exc}") from exc
+
+    async def get_mapping(self, index: str) -> Any | None:
+        """读取索引 mapping（不存在返回 None；供 analyzer 版本检测）。"""
+        if not self._enabled or self._client is None:
+            raise SearchUnavailableError("elasticsearch client disabled")
+        if not self._breaker.allow():
+            raise CircuitOpenError("es circuit open")
+        try:
+            resp = await self._client.indices.get_mapping(index=index)
+            self._breaker.record_success()
+            return resp
+        except Exception as exc:  # noqa: BLE001
+            # index_not_found（404）返回 None
+            if getattr(exc, "status_code", None) == 404:
+                self._breaker.record_success()
+                return None
+            self._breaker.record_failure()
+            raise SearchUnavailableError(f"es get_mapping failed: {exc}") from exc
+
     async def health(self) -> bool:
         """真实探活（供 /ready 探针），结果经熔断器统计。"""
         if not self._enabled or self._client is None:

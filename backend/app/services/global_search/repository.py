@@ -1,17 +1,20 @@
 """全局聚合搜索 Repository（FR-18 全局搜索栏生产化）。
 
-跨 8 类资源（指标/维度/术语/模板/数据源/采集目录表/采集目录字段/主题域）
+跨 9 类资源（指标/维度/术语/模板/数据源/采集目录表/采集目录字段/主题域/度量目录）
 按关键词模糊匹配，统一返回结构化条目供前端顶栏下拉与全局搜索页消费。
 
 检索架构（TD §1.3 / §5.2 降级矩阵）：
 - 指标/术语两类优先走 Elasticsearch（metric_idx/term_idx，multi_match 含同义词字段，
   相关度排序优于 MySQL LIKE）；ES 禁用/异常时自动降级 MySQL LIKE（TD 降级边界
-  "ES✗→退 MySQL"）。其余 6 类维持 MySQL（未建索引）。
+  "ES✗→退 MySQL"）。其余 7 类维持 MySQL（未建索引）。
+- 中英业务同义词（``search/synonyms.py``）双向扩展关键词：中文→英文候选 OR 进
+  LIKE 命中英文表名/字段名/编码，英文→中文命中中文内容；ES 侧由 synonym filter
+  在分词层等价扩展。两端共用同一份词对，保证行为一致。
 - 全部 MySQL 查询走 SQLAlchemy ORM 参数化（无字符串拼接 SQL）。
 
 安全约束：
 - LIKE 通配符（%/_）转义，防用户输入放大模糊匹配面。
-- 字段级搜索对 schema_json 用 CAST(... AS CHAR) 粗匹配 + 内存精确提取列名，
+- 字段级搜索对 schema_json 用 CAST(... AS CHAR) 粗匹配 + 内存精确提取列名/注释，
   命中列以独立 ``field`` 条目返回。
 """
 
@@ -31,6 +34,7 @@ from app.models.metric import Metric
 from app.models.metric_template import MetricTemplate
 from app.models.subject_domain import SubjectDomain
 from app.models.term import Term
+from app.services.search.synonyms import SYNONYM_MAP
 
 
 def _escape_like(text: str) -> str:
@@ -41,6 +45,43 @@ def _escape_like(text: str) -> str:
     现用 / 作转义符（转义 //、/% 和 /_），配合 like(..., escape="/")。
     """
     return text.replace("/", "//").replace("%", "/%").replace("_", "/_")
+
+
+def _expand_keywords(q: str) -> list[str]:
+    """中英业务同义词双向扩展关键词（去重、保序）。
+
+    - 中文命中词对：返回 ``[中文, *英文候选]``（如 ``订单 → 订单, order, sales_order``）；
+    - 英文命中某候选：返回 ``[英文, 中文]``（如 ``order → order, 订单``）；
+    - 未命中任何词对：仅返回原词。
+
+    Returns:
+        原始关键词 + 同义词候选（含原词本身，保证原语义不丢失）。
+    """
+    raw = q.strip()
+    if not raw:
+        return []
+    expanded = [raw]
+    low = raw.lower()
+    if low in SYNONYM_MAP:
+        expanded.extend(SYNONYM_MAP[low])
+    else:
+        for cn, en_list in SYNONYM_MAP.items():
+            if low in (e.lower() for e in en_list):
+                expanded.append(cn)
+                break
+    seen: set[str] = set()
+    out: list[str] = []
+    for kw in expanded:
+        k = kw.strip()
+        if k and k.lower() not in seen:
+            seen.add(k.lower())
+            out.append(k)
+    return out
+
+
+def _like_any(column: Any, needles: list[str]) -> Any:
+    """列命中任一 LIKE 候选（统一 ESCAPE '/'，防通配符放大）。"""
+    return or_(*(column.like(n, escape="/") for n in needles))
 
 
 class GlobalSearchRepository:
@@ -61,7 +102,7 @@ class GlobalSearchRepository:
         return self._es_client
 
     async def search(self, q: str, limit: int = 5) -> dict[str, list[dict[str, Any]]]:
-        """跨 8 类资源聚合搜索，按类型分组返回。
+        """跨 9 类资源聚合搜索，按类型分组返回。
 
         Args:
             q: 搜索关键词（调用方已去空白，非空）。
@@ -80,11 +121,14 @@ class GlobalSearchRepository:
             "catalog": [],
             "field": [],
             "subject_domain": [],
+            "measure": [],
         }
-        if not q.strip():
+        raw_q = q.strip()
+        if not raw_q:
             return groups
-        needle = f"%{_escape_like(q.strip())}%"
-        # 8 类资源查询相互独立，并行提交缩短聚合搜索 P95；
+        # 中英同义词扩展 → 多 LIKE 候选（各方法共用，保证行为一致）
+        needles = [f"%{_escape_like(kw)}%" for kw in _expand_keywords(raw_q)]
+        # 9 类资源查询相互独立，并行提交缩短聚合搜索 P95；
         # 同一 AsyncSession 由 SQLAlchemy 内部锁串行化底层执行（安全），
         # 未来拆分独立会话时即可真正并行下推。
         (
@@ -96,20 +140,22 @@ class GlobalSearchRepository:
             groups["catalog"],
             groups["field"],
             groups["subject_domain"],
+            groups["measure"],
         ) = await asyncio.gather(
-            self._search_metrics(needle, limit, raw_q=q.strip()),
-            self._search_dimensions(needle, limit),
-            self._search_terms(needle, limit, raw_q=q.strip()),
-            self._search_templates(needle, limit),
-            self._search_data_sources(needle, limit),
-            self._search_catalogs(needle, limit),
-            self._search_fields(q, limit),
-            self._search_subject_domains(needle, limit),
+            self._search_metrics(needles, limit, raw_q=raw_q),
+            self._search_dimensions(needles, limit),
+            self._search_terms(needles, limit, raw_q=raw_q),
+            self._search_templates(needles, limit),
+            self._search_data_sources(needles, limit),
+            self._search_catalogs(needles, limit),
+            self._search_fields(raw_q, limit),
+            self._search_subject_domains(needles, limit),
+            self._search_measures(needles, limit),
         )
         return groups
 
     async def _search_metrics(
-        self, needle: str, limit: int, raw_q: str | None = None
+        self, needles: list[str], limit: int, raw_q: str | None = None
     ) -> list[dict[str, Any]]:
         """指标检索：ES 优先（相关度排序），ES 禁用/异常/未命中时降级 MySQL LIKE。
 
@@ -121,10 +167,10 @@ class GlobalSearchRepository:
             es_items = await self._es_search_assets("metric", raw_q, limit)
             if es_items is not None:
                 return es_items
-        code_match = Metric.metric_code.like(needle, escape="/")
-        name_match = Metric.name.like(needle, escape="/")
-        desc_match = Metric.description.like(needle, escape="/")
-        syn_match = MeasureCatalog.synonyms.cast(String).like(needle, escape="/")
+        code_match = _like_any(Metric.metric_code, needles)
+        name_match = _like_any(Metric.name, needles)
+        desc_match = _like_any(Metric.description, needles)
+        syn_match = _like_any(MeasureCatalog.synonyms.cast(String), needles)
         stmt = (
             select(
                 Metric,
@@ -156,15 +202,15 @@ class GlobalSearchRepository:
             for m, reason in rows
         ]
 
-    async def _search_dimensions(self, needle: str, limit: int) -> list[dict[str, Any]]:
+    async def _search_dimensions(self, needles: list[str], limit: int) -> list[dict[str, Any]]:
         stmt = (
             select(Dimension)
             .where(
                 Dimension.deleted_at.is_(None),
                 or_(
-                    Dimension.dim_code.like(needle, escape="/"),
-                    Dimension.name.like(needle, escape="/"),
-                    Dimension.description.like(needle, escape="/"),
+                    _like_any(Dimension.dim_code, needles),
+                    _like_any(Dimension.name, needles),
+                    _like_any(Dimension.description, needles),
                 ),
             )
             .limit(limit)
@@ -183,7 +229,7 @@ class GlobalSearchRepository:
         ]
 
     async def _search_terms(
-        self, needle: str, limit: int, raw_q: str | None = None
+        self, needles: list[str], limit: int, raw_q: str | None = None
     ) -> list[dict[str, Any]]:
         """术语检索：ES 优先（相关度排序），ES 禁用/异常/未命中时降级 MySQL LIKE。"""
         if raw_q:
@@ -195,11 +241,13 @@ class GlobalSearchRepository:
             .where(
                 Term.deleted_at.is_(None),
                 or_(
-                    Term.term_code.like(needle, escape="/"),
-                    Term.name.like(needle, escape="/"),
-                    Term.definition.like(needle, escape="/"),
+                    _like_any(Term.term_code, needles),
+                    _like_any(Term.name, needles),
+                    _like_any(Term.definition, needles),
                     # 术语同义词（业务别名）粗匹配：JSON 文本 LIKE，走参数化防注入
-                    Term.synonyms.cast(String).like(needle, escape="/"),
+                    _like_any(Term.synonyms.cast(String), needles),
+                    # 边界说明（可空）纳入检索，扩大"描述类"命中面
+                    _like_any(Term.boundary, needles),
                 ),
             )
             .limit(limit)
@@ -230,6 +278,9 @@ class GlobalSearchRepository:
         if not es.enabled:
             return None
         index = "metric_idx" if asset_type == "metric" else "term_idx"
+        # metric_idx 描述字段名 description；term_idx 为 definition（es_indexer.py 定义）。
+        # 此前统一写 description 致 ES 路径搜术语定义静默不命中 → 按类型区分（TD§12.7 全链路一致）。
+        desc_field = "description" if asset_type == "metric" else "definition"
         try:
             resp = await es.search(
                 index,
@@ -237,7 +288,7 @@ class GlobalSearchRepository:
                     "query": {
                         "multi_match": {
                             "query": raw_q,
-                            "fields": ["code^3", "name^2", "description", "synonyms"],
+                            "fields": ["code^3", "name^2", desc_field, "synonyms"],
                             "type": "best_fields",
                             "fuzziness": "AUTO",
                         }
@@ -273,15 +324,15 @@ class GlobalSearchRepository:
             "status": src.get("status"),
         }
 
-    async def _search_templates(self, needle: str, limit: int) -> list[dict[str, Any]]:
+    async def _search_templates(self, needles: list[str], limit: int) -> list[dict[str, Any]]:
         stmt = (
             select(MetricTemplate)
             .where(
                 MetricTemplate.deleted_at.is_(None),
                 or_(
-                    MetricTemplate.code.like(needle, escape="/"),
-                    MetricTemplate.name.like(needle, escape="/"),
-                    MetricTemplate.description.like(needle, escape="/"),
+                    _like_any(MetricTemplate.code, needles),
+                    _like_any(MetricTemplate.name, needles),
+                    _like_any(MetricTemplate.description, needles),
                 ),
             )
             .limit(limit)
@@ -299,14 +350,16 @@ class GlobalSearchRepository:
             for t in rows
         ]
 
-    async def _search_data_sources(self, needle: str, limit: int) -> list[dict[str, Any]]:
+    async def _search_data_sources(self, needles: list[str], limit: int) -> list[dict[str, Any]]:
         stmt = (
             select(DataSource)
             .where(DataSource.deleted_at.is_(None))
             .where(
                 or_(
-                    DataSource.name.like(needle, escape="/"),
-                    DataSource.source_id.like(needle, escape="/"),
+                    _like_any(DataSource.name, needles),
+                    _like_any(DataSource.source_id, needles),
+                    # 用途描述（TD§12.1 描述类字段全覆盖）纳入检索
+                    _like_any(DataSource.description, needles),
                 )
             )
             .limit(limit)
@@ -325,11 +378,21 @@ class GlobalSearchRepository:
             for s in rows
         ]
 
-    async def _search_catalogs(self, needle: str, limit: int) -> list[dict[str, Any]]:
-        """表级搜索：entity_name 模糊匹配（表/视图/字段实体，表名列命中）。"""
+    async def _search_catalogs(self, needles: list[str], limit: int) -> list[dict[str, Any]]:
+        """表级搜索：entity_name + 表级业务描述模糊匹配（表/视图/字段实体）。
+
+        表级描述（``DBCatalog.description``，治理补全的"销售订单表"等中文说明）纳入
+        匹配，让"搜中文描述找到英文表"成为可能（TD§12.1 描述类字段全覆盖）。
+        """
         stmt = (
             select(DBCatalog)
-            .where(DBCatalog.deleted_at.is_(None), DBCatalog.entity_name.like(needle, escape="/"))
+            .where(
+                DBCatalog.deleted_at.is_(None),
+                or_(
+                    _like_any(DBCatalog.entity_name, needles),
+                    _like_any(DBCatalog.description, needles),
+                ),
+            )
             .limit(limit)
         )
         rows = (await self._session.execute(stmt)).scalars().all()
@@ -349,20 +412,23 @@ class GlobalSearchRepository:
         ]
 
     async def _search_fields(self, q: str, limit: int) -> list[dict[str, Any]]:
-        """字段级搜索：扫描 db_catalog.schema_json 的 columns[].name 命中关键词。
+        """字段级搜索：扫描 db_catalog.schema_json 的 columns[].name/comment 命中关键词。
 
         SQL 层用 ``CAST(schema_json AS CHAR) LIKE %kw%`` 粗筛（跨方言可用），
-        内存层精确提取命中的列名，返回所属表 + 列名，避免整表 JSON 文本误报。
+        内存层精确提取命中的列名或字段注释，返回所属表 + 列名，避免整表 JSON 文本误报。
+        修复：此前内存精筛只匹配 col.name，注释（col.comment）命中的结果被丢弃
+        → 现同时匹配列名与字段注释（TD§12.1 描述类字段全覆盖）。
         """
-        raw = q.strip().lower()
+        raw = q.strip()
         if not raw:
             return []
-        needle = f"%{_escape_like(q.strip())}%"
+        raw_variants = [k.lower() for k in _expand_keywords(raw)]
+        needles = [f"%{_escape_like(kw)}%" for kw in _expand_keywords(raw)]
         stmt = (
             select(DBCatalog)
             .where(
                 DBCatalog.deleted_at.is_(None),
-                cast(DBCatalog.schema_json, String).ilike(needle, escape="/"),
+                or_(*(cast(DBCatalog.schema_json, String).ilike(n, escape="/") for n in needles)),
             )
             .limit(limit * 3)
         )
@@ -371,8 +437,13 @@ class GlobalSearchRepository:
         for c in rows:
             columns = (c.schema_json or {}).get("columns") or []
             for col in columns:
-                col_name = str(col.get("name", "")) if isinstance(col, dict) else ""
-                if col_name and raw in col_name.lower():
+                if not isinstance(col, dict):
+                    continue
+                col_name = str(col.get("name", ""))
+                col_comment = str(col.get("comment", ""))
+                name_hit = col_name and any(rv in col_name.lower() for rv in raw_variants)
+                comment_hit = col_comment and any(rv in col_comment.lower() for rv in raw_variants)
+                if name_hit or comment_hit:
                     items.append(
                         {
                             "type": "field",
@@ -390,14 +461,16 @@ class GlobalSearchRepository:
                         return items
         return items
 
-    async def _search_subject_domains(self, needle: str, limit: int) -> list[dict[str, Any]]:
+    async def _search_subject_domains(self, needles: list[str], limit: int) -> list[dict[str, Any]]:
         stmt = (
             select(SubjectDomain)
             .where(
                 SubjectDomain.deleted_at.is_(None),
                 or_(
-                    SubjectDomain.code.like(needle, escape="/"),
-                    SubjectDomain.name.like(needle, escape="/"),
+                    _like_any(SubjectDomain.code, needles),
+                    _like_any(SubjectDomain.name, needles),
+                    # 域描述（TD§12.1 描述类字段全覆盖）纳入检索
+                    _like_any(SubjectDomain.description, needles),
                 ),
             )
             .limit(limit)
@@ -414,4 +487,41 @@ class GlobalSearchRepository:
                 "level": d.level,
             }
             for d in rows
+        ]
+
+    async def _search_measures(self, needles: list[str], limit: int) -> list[dict[str, Any]]:
+        """度量目录检索（FR-18 覆盖度量目录模块）：编码/名称/描述/统计口径/源头系统/同义词。
+
+        度量目录为原子指标权威继承源（OneData 原子层），承载"同义词/源头系统/统计口径"
+        等描述类信息——全部纳入匹配，让"搜中文口径找到度量"成为可能。
+        走 MySQL LIKE（与其余 7 类一致，未建 ES 索引）。
+        """
+        stmt = (
+            select(MeasureCatalog)
+            .where(
+                MeasureCatalog.deleted_at.is_(None),
+                or_(
+                    _like_any(MeasureCatalog.measure_code, needles),
+                    _like_any(MeasureCatalog.name, needles),
+                    _like_any(MeasureCatalog.description, needles),
+                    # 统计口径（业务侧如何计算该度量）——描述类字段
+                    _like_any(MeasureCatalog.stat_caliber, needles),
+                    # 源头系统/同义词为 JSON 数组：CAST 文本粗匹配，参数化防注入
+                    _like_any(MeasureCatalog.source_system.cast(String), needles),
+                    _like_any(MeasureCatalog.synonyms.cast(String), needles),
+                ),
+            )
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [
+            {
+                "type": "measure",
+                "id": m.id,
+                "code": m.measure_code,
+                "name": m.name,
+                "domain": m.domain,
+                "status": m.status,
+            }
+            for m in rows
         ]

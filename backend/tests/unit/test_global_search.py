@@ -18,7 +18,11 @@ from httpx import ASGITransport
 
 from app.api import deps
 from app.main import app
-from app.services.global_search.repository import GlobalSearchRepository, _escape_like
+from app.services.global_search.repository import (
+    GlobalSearchRepository,
+    _escape_like,
+    _expand_keywords,
+)
 from app.services.global_search.service import GlobalSearchService
 
 
@@ -82,6 +86,7 @@ def _source(source_id: str = "mysql_finance") -> SimpleNamespace:
         domain="finance",
         health_status="healthy",
         source_type="mysql",
+        description="财务结算库",
     )
 
 
@@ -94,12 +99,19 @@ def _catalog(
         source_id="mysql_finance",
         entity_type="TABLE",
         sensitivity_level="INTERNAL",
+        description="销售订单明细表",
         schema_json={"columns": columns or []},
     )
 
 
 def _domain(code: str = "sales") -> SimpleNamespace:
     return SimpleNamespace(id=7, code=code, name="销售域", level=1, status="active")
+
+
+def _measure(code: str = "pay_amt") -> SimpleNamespace:
+    return SimpleNamespace(
+        id=8, measure_code=code, name="支付金额", domain="sales", status="PUBLISHED"
+    )
 
 
 class TestEscapeLike:
@@ -111,7 +123,7 @@ class TestEscapeLike:
 
 class TestGlobalSearchRepository:
     async def test_search_groups_each_type(self) -> None:
-        """8 类资源各自查询，按类型分组返回。"""
+        """9 类资源各自查询，按类型分组返回。"""
         s = _session()
         repo = _repo(s)
         s.execute = AsyncMock(
@@ -124,6 +136,7 @@ class TestGlobalSearchRepository:
                 _rows_result(_catalog()),  # catalog
                 _rows_result(),  # field（本次无命中）
                 _rows_result(_domain()),  # subject_domain
+                _rows_result(_measure()),  # measure（度量目录）
             ]
         )
 
@@ -140,8 +153,10 @@ class TestGlobalSearchRepository:
         assert groups["catalog"][0]["code"] == "finance.dwd_order"
         assert groups["field"] == []
         assert groups["subject_domain"][0]["code"] == "sales"
-        # 8 类各执行一次查询
-        assert s.execute.await_count == 8
+        assert groups["measure"][0]["code"] == "pay_amt"
+        assert groups["measure"][0]["type"] == "measure"
+        # 9 类各执行一次查询
+        assert s.execute.await_count == 9
 
     async def test_search_blank_returns_all_empty(self) -> None:
         """空/纯空白关键词不触发任何查询，返回全空分组。"""
@@ -184,7 +199,7 @@ class TestGlobalSearchRepository:
         """LIKE 通配符被转义，防模糊放大。"""
         s = _session()
         repo = _repo(s)
-        s.execute = AsyncMock(side_effect=[_rows_result()] * 8)
+        s.execute = AsyncMock(side_effect=[_rows_result()] * 9)
         await repo.search("100%", limit=5)
         metric_stmt = s.execute.call_args_list[0].args[0]
         compiled = str(metric_stmt.compile(compile_kwargs={"literal_binds": True}))
@@ -198,7 +213,7 @@ class TestGlobalSearchRepository:
         repo = _repo(s)
         s.execute = AsyncMock(return_value=_all_result((_metric(), "synonym")))
 
-        items = await repo._search_metrics("%pay%", limit=5)
+        items = await repo._search_metrics(["%pay%"], limit=5)
 
         assert items[0]["code"] == "sales_gmv_day"
         assert items[0]["match_reason"] == "synonym"
@@ -226,7 +241,7 @@ class TestGlobalSearchRepository:
         repo = _repo(s)
         s.execute = AsyncMock(return_value=_all_result((_metric(), "field")))
 
-        items = await repo._search_metrics("%sales_gmv%", limit=5)
+        items = await repo._search_metrics(["%sales_gmv%"], limit=5)
 
         assert items[0]["code"] == "sales_gmv_day"
         assert items[0]["match_reason"] == "field"
@@ -235,16 +250,135 @@ class TestGlobalSearchRepository:
         """术语同义词命中：term.synonyms（JSON）粗匹配参与检索。"""
         s = _session()
         repo = _repo(s)
-        s.execute = AsyncMock(side_effect=[_rows_result()] * 8)
+        s.execute = AsyncMock(side_effect=[_rows_result()] * 9)
 
         await repo.search("成交", limit=5)
-        # 第 3 次执行为 term 查询（8 类顺序：metric/dimension/term/...）
+        # 第 3 次执行为 term 查询（9 类顺序：metric/dimension/term/...）
         term_stmt = s.execute.call_args_list[2].args[0]
         compiled = str(term_stmt.compile(compile_kwargs={"literal_binds": True}))
 
         assert "synonyms" in compiled.lower()
         assert "ESCAPE '/'" in compiled
         assert "成交" in compiled
+
+    # ---- 描述类字段全覆盖（TD§12.1）：表/数据源/主题域描述、术语边界、字段注释 ----
+
+    async def test_catalog_search_matches_description(self) -> None:
+        """采集目录表级业务描述纳入检索（搜中文描述找到英文表名）。"""
+        s = _session()
+        repo = _repo(s)
+        s.execute = AsyncMock(return_value=_rows_result(_catalog()))
+
+        items = await repo._search_catalogs(["%订单%"], limit=5)
+
+        assert items[0]["code"] == "finance.dwd_order"
+        stmt = s.execute.call_args.args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "description" in compiled.lower()
+        assert "销售订单明细表" in compiled or "%订单%" in compiled
+
+    async def test_data_source_search_matches_description(self) -> None:
+        """数据源用途描述纳入检索。"""
+        s = _session()
+        repo = _repo(s)
+        s.execute = AsyncMock(return_value=_rows_result(_source()))
+
+        items = await repo._search_data_sources(["%结算%"], limit=5)
+
+        assert items[0]["code"] == "mysql_finance"
+        stmt = s.execute.call_args.args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "description" in compiled.lower()
+
+    async def test_subject_domain_search_matches_description(self) -> None:
+        """主题域描述纳入检索。"""
+        s = _session()
+        repo = _repo(s)
+        s.execute = AsyncMock(return_value=_rows_result(_domain()))
+
+        items = await repo._search_subject_domains(["%销售%"], limit=5)
+
+        assert items[0]["code"] == "sales"
+        stmt = s.execute.call_args.args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "description" in compiled.lower()
+
+    async def test_term_search_matches_boundary(self) -> None:
+        """术语边界说明（boundary）纳入检索。"""
+        s = _session()
+        repo = _repo(s)
+        s.execute = AsyncMock(side_effect=[_rows_result()] * 9)
+
+        await repo.search("口径", limit=5)
+        term_stmt = s.execute.call_args_list[2].args[0]
+        compiled = str(term_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "boundary" in compiled.lower()
+
+    async def test_field_search_matches_column_comment(self) -> None:
+        """字段注释（col.comment）命中返回该列——修复此前注释命中被内存精筛丢弃。"""
+        s = _session()
+        repo = _repo(s)
+        s.execute = AsyncMock(
+            return_value=_rows_result(
+                _catalog(
+                    "finance.dwd_order",
+                    columns=[{"name": "order_id", "type": "bigint", "comment": "订单ID"}],
+                )
+            )
+        )
+
+        fields = await repo._search_fields("订单ID", limit=5)
+
+        assert len(fields) == 1
+        assert fields[0]["code"] == "order_id"
+        assert fields[0]["table_name"] == "finance.dwd_order"
+
+    # ---- 度量目录（FR-18 覆盖度量目录模块，新增 measure 分组）----
+
+    async def test_measure_search(self) -> None:
+        """度量目录按编码/名称/描述/口径/同义词检索，独立 measure 分组。"""
+        s = _session()
+        repo = _repo(s)
+        s.execute = AsyncMock(return_value=_rows_result(_measure()))
+
+        items = await repo._search_measures(["%支付%"], limit=5)
+
+        assert items[0]["type"] == "measure"
+        assert items[0]["code"] == "pay_amt"
+        assert items[0]["name"] == "支付金额"
+        assert items[0]["status"] == "PUBLISHED"
+
+    async def test_measure_search_sql_includes_description_fields(self) -> None:
+        """度量目录 SQL 覆盖编码/名称/描述/统计口径/源头系统/同义词。"""
+        s = _session()
+        repo = _repo(s)
+        s.execute = AsyncMock(return_value=_rows_result())
+
+        await repo._search_measures(["%pay%"], limit=5)
+        stmt = s.execute.call_args.args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True})).lower()
+        for col in ("measure_code", "description", "stat_caliber", "source_system", "synonyms"):
+            assert col in compiled, f"度量目录检索缺少列 {col}"
+
+    # ---- 中英同义词扩展（search/synonyms.py，双向）----
+
+    async def test_synonym_expansion_chinese_to_english(self) -> None:
+        """搜中文"订单" → LIKE 候选含英文 order/sales_order（命中英文表名）。"""
+        s = _session()
+        repo = _repo(s)
+        s.execute = AsyncMock(return_value=_rows_result())
+
+        await repo._search_catalogs(["%订单%", "%order%", "%sales_order%"], limit=5)
+        stmt = s.execute.call_args.args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "%order%" in compiled
+        assert "%sales_order%" in compiled
+
+    def test_expand_keywords_chinese_to_english(self) -> None:
+        assert _expand_keywords("订单") == ["订单", "order", "sales_order"]
+        assert _expand_keywords("order") == ["order", "订单"]
+        assert _expand_keywords("未知词") == ["未知词"]
+        assert _expand_keywords("  ") == []
 
     # ---- ES 检索接线（TD §1.3：ES 优先，降级 MySQL LIKE）----
 
@@ -272,7 +406,7 @@ class TestGlobalSearchRepository:
             ]
         )
         repo = GlobalSearchRepository(s, es_client=es)
-        items = await repo._search_metrics("%gmv%", limit=5, raw_q="gmv")
+        items = await repo._search_metrics(["%gmv%"], limit=5, raw_q="gmv")
         assert items[0]["code"] == "sales_gmv_day"
         assert items[0]["match_reason"] == "field"
         es.search.assert_awaited_once()
@@ -295,10 +429,29 @@ class TestGlobalSearchRepository:
             ]
         )
         repo = GlobalSearchRepository(s, es_client=es)
-        items = await repo._search_terms("%gmv%", limit=5, raw_q="gmv")
+        items = await repo._search_terms(["%gmv%"], limit=5, raw_q="gmv")
         assert items[0]["code"] == "gmv"
         es.search.assert_awaited_once()
         s.execute.assert_not_awaited()
+
+    async def test_term_es_search_uses_definition_field(self) -> None:
+        """术语 ES fields 用 definition（term_idx 实际字段名），修复 description 不匹配 bug。"""
+        s = _session()
+        es = self._enabled_es([])  # 零命中 → 降级 MySQL，但 es.search 调用已被断言
+        repo = GlobalSearchRepository(s, es_client=es)
+        s.execute = AsyncMock(return_value=_rows_result())
+
+        await repo._search_terms(["%gmv%"], limit=5, raw_q="gmv")
+
+        body = es.search.call_args.args[1]
+        fields = body["query"]["multi_match"]["fields"]
+        assert "definition" in fields
+        assert "description" not in fields
+        # metric 路径仍用 description
+        await repo._search_metrics(["%gmv%"], limit=5, raw_q="gmv")
+        body_metric = es.search.call_args.args[1]
+        fields_metric = body_metric["query"]["multi_match"]["fields"]
+        assert "description" in fields_metric
 
     async def test_es_search_fallback_to_mysql(self) -> None:
         """ES 异常（down/熔断）时降级 MySQL LIKE，不阻断检索。"""
@@ -308,7 +461,7 @@ class TestGlobalSearchRepository:
         es.search = AsyncMock(side_effect=RuntimeError("es down"))
         repo = GlobalSearchRepository(s, es_client=es)
         s.execute = AsyncMock(return_value=_all_result((_metric(), "field")))
-        items = await repo._search_metrics("%gmv%", limit=5, raw_q="gmv")
+        items = await repo._search_metrics(["%gmv%"], limit=5, raw_q="gmv")
         assert items[0]["code"] == "sales_gmv_day"
         s.execute.assert_awaited()
 
@@ -318,7 +471,7 @@ class TestGlobalSearchRepository:
         es = self._enabled_es([])
         repo = GlobalSearchRepository(s, es_client=es)
         s.execute = AsyncMock(return_value=_all_result((_metric(), "field")))
-        items = await repo._search_metrics("%gmv%", limit=5, raw_q="gmv")
+        items = await repo._search_metrics(["%gmv%"], limit=5, raw_q="gmv")
         assert items[0]["code"] == "sales_gmv_day"
         s.execute.assert_awaited()
 
@@ -330,7 +483,7 @@ class TestGlobalSearchRepository:
         es.search = AsyncMock()
         repo = GlobalSearchRepository(s, es_client=es)
         s.execute = AsyncMock(return_value=_all_result((_metric(), "field")))
-        items = await repo._search_metrics("%gmv%", limit=5, raw_q="gmv")
+        items = await repo._search_metrics(["%gmv%"], limit=5, raw_q="gmv")
         assert items[0]["code"] == "sales_gmv_day"
         es.search.assert_not_awaited()
 
@@ -354,7 +507,7 @@ async def search_client() -> AsyncIterator[httpx.AsyncClient]:
 
     async def fake_db():
         session = MagicMock()
-        session.execute = AsyncMock(side_effect=[MagicMock()] * 8)
+        session.execute = AsyncMock(side_effect=[MagicMock()] * 9)
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
@@ -377,6 +530,7 @@ class TestGlobalSearchAPI:
         assert "metric" in data["groups"]
         assert "field" in data["groups"]
         assert "subject_domain" in data["groups"]
+        assert "measure" in data["groups"]
 
     async def test_search_blank_returns_422(self, search_client: httpx.AsyncClient) -> None:
         resp = await search_client.get("/api/v1/search", params={"q": ""})

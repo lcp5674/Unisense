@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Alert, App as AntApp, Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Tooltip } from "antd";
 import {
   EditOutlined,
@@ -81,6 +82,9 @@ export function MeasureCatalogs() {
   const { message } = AntApp.useApp();
   const { can } = usePermission();
   const canWrite = can("metric:create") || can("metric:import");
+  // 全局搜索跳转定位：?kw= 预填关键词（与维度/术语/模板等列表页一致）
+  const [searchParams] = useSearchParams();
+  const urlKw = searchParams.get("kw") ?? "";
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [items, setItems] = useState<MeasureCatalog[]>([]);
   const [total, setTotal] = useState(0);
@@ -89,7 +93,7 @@ export function MeasureCatalogs() {
   const [pageSize, setPageSize] = useState(20);
   const [domain, setDomain] = useState<string>();
   const [status, setStatus] = useState<string>();
-  const [keyword, setKeyword] = useState<string>();
+  const [keyword, setKeyword] = useState<string | undefined>(urlKw || undefined);
   const [domainOptions, setDomainOptions] = useState<{ value: string; label: string }[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<MeasureCatalog | null>(null);
@@ -150,6 +154,15 @@ export function MeasureCatalogs() {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, pageSize, domain, status, keyword]);
+
+  // URL ?kw= 变化时同步关键词（全局搜索跳转定位；避免空值覆盖用户输入）
+  useEffect(() => {
+    if (urlKw && urlKw !== keyword) {
+      setKeyword(urlKw);
+      setPage(1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlKw]);
 
   useEffect(() => {
     fetchCurrentUser().then(setCurrentUser).catch(() => {});
