@@ -595,47 +595,86 @@ class MetricService(BaseService):
             actor_id=str(owner_id),
         )
 
-        # 异步冲突预检（对齐 FR-012）：创建后调 ConflictPrechecker.precheck
-        # 命中相似口径→更新 pending_conflict=True + pending_conflict_detail
+        # 冲突自动落库 + 标记（对齐 FR-012 / TD §12.4）：创建后自动预检相似口径。
+        # 命中即落 conflict 表 OPEN 记录（硬/软均落，source=auto），并按冲突表
+        # **实际未决记录**挂 pending_conflict 标记——保证「指标目录标记 ⇔ 仲裁台
+        # 可处置记录」严格一致，杜绝「有标记无记录」的孤儿态（曾致目录显示冲突、
+        # 仲裁台为空、标记无法通过正常仲裁清除）。软冲突同样落库，仲裁台区分展示。
         try:
-            from app.services.semantic.conflict_precheck import ConflictPrechecker
+            from app.services.conflict.repository import ConflictRepository
+            from app.services.conflict.schemas import MetricInput
+            from app.services.conflict.service import ConflictService
 
-            async def _load_existing_metrics() -> list[dict[str, Any]]:
+            async def _load_existing_metrics() -> list[MetricInput]:
                 """加载已存在口径供预检比对（仅取预检所需字段，避免整模型暴露）。"""
                 metrics, _ = await self._repo.list_metrics(limit=1000)
-                rows: list[dict[str, Any]] = []
+                rows: list[MetricInput] = []
                 for m in metrics:
                     defn = m.definition_json or {}
                     rows.append(
-                        {
-                            "metric_code": m.metric_code,
-                            "domain": m.domain,
-                            "definition": (defn.get("definition") or defn.get("expression") or ""),
-                            "source_tables": defn.get("source_tables") or [],
-                            "has_pii": bool(m.pii_flag),
-                            "pii_authorized": bool(m.compliance_reviewed),
-                            "status": m.status,
-                            "metric_id": m.id,
-                        }
+                        MetricInput(
+                            metric_code=m.metric_code,
+                            domain=m.domain or "",
+                            definition=(
+                                defn.get("definition") or defn.get("expression") or ""
+                            ),
+                            source_tables=defn.get("source_tables") or [],
+                            has_pii=bool(m.pii_flag),
+                            pii_authorized=bool(m.compliance_reviewed),
+                            metric_id=m.id,
+                        )
                     )
                 return rows
 
-            prechecker = ConflictPrechecker(existing_loader=_load_existing_metrics)
             # OneData 挂载层权威：把挂载实体的 source_table 并入预检比对（挂载独立更新后
             # definition_json 的 source_tables 冗余可能过期，预检须基于最新物理来源）
-            mount_extra: list[str] | None = None
+            source_tables = list(definition.get("source_tables") or [])
             try:
                 from app.services.metric_mount.repository import MetricMountRepository
 
                 _mount = await MetricMountRepository(self._db).get_by_metric(metric.id)
-                if _mount is not None and isinstance(_mount.source_table, str) and _mount.source_table:
-                    mount_extra = [_mount.source_table]
+                if (
+                    _mount is not None
+                    and isinstance(_mount.source_table, str)
+                    and _mount.source_table
+                    and _mount.source_table not in source_tables
+                ):
+                    source_tables.append(_mount.source_table)
             except Exception:  # noqa: BLE001 - best-effort：mount 查询失败仅跳过挂载源表
                 pass
-            conflict_detail = await prechecker.precheck(
-                metric.metric_code, definition, extra_source_tables=mount_extra
+
+            candidate = MetricInput(
+                metric_code=metric.metric_code,
+                domain=metric.domain or "",
+                definition=(definition.get("definition") or definition.get("expression") or ""),
+                source_tables=source_tables,
+                has_pii=bool(metric.pii_flag),
+                pii_authorized=bool(metric.compliance_reviewed),
+                metric_id=metric.id,
             )
-            if conflict_detail is not None:
+            existing = await _load_existing_metrics()
+            # 排除自身：新指标已落库，避免与自身比对（check 亦有自我引用防御，此处省查询）
+            existing = [e for e in existing if e.metric_code != metric.metric_code]
+            await ConflictService(self._db).check(
+                candidate, existing, use_llm=False, source="auto"
+            )
+            # 以冲突表实际未决记录为准挂标记（杜绝孤儿标记）
+            open_conflict = await ConflictRepository(self._db).get_first_open_for_metric(
+                metric.metric_code
+            )
+            if open_conflict is not None:
+                codes = open_conflict.metric_codes or {}
+                conflict_detail = {
+                    "conflict_type": getattr(open_conflict.type, "value", None),
+                    "score": open_conflict.similarity_score,
+                    "existing_code": codes.get("existing"),
+                    "existing_metric_id": open_conflict.metric_b,
+                    "severity": open_conflict.severity or "soft",
+                    "block_publish": bool(open_conflict.block_publish),
+                    "reason": open_conflict.reason or "",
+                    "source": open_conflict.source or "auto",
+                    "conflict_id": open_conflict.conflict_id,
+                }
                 metric = await self._repo.update_with_optimistic_lock(
                     metric.id,
                     metric.row_version,
@@ -645,10 +684,12 @@ class MetricService(BaseService):
                 logger.info(
                     "metric_conflict_detected",
                     metric_code=metric.metric_code,
+                    conflict_id=open_conflict.conflict_id,
                     conflict_detail=conflict_detail,
                 )
         except Exception:
-            # 冲突预检失败不阻塞创建（best-effort）
+            # 冲突落库失败不阻塞创建（best-effort）：不挂标记也不落库，
+            # 避免「有标记无记录」的孤儿态；用户可稍后手动预检或重跑。
             logger.warning(
                 "metric_conflict_precheck_failed",
                 metric_code=metric.metric_code,

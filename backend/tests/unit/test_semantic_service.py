@@ -324,7 +324,9 @@ async def test_create_metric_duplicate_code_raises_conflict():
 
 
 async def test_create_metric_marks_pending_conflict_on_precheck_hit():
-    """真实预检命中相似口径 → 挂 pending_conflict 标记并持久化详情。"""
+    """真实预检命中相似口径 → 落 conflict 表 OPEN 记录并挂 pending_conflict 标记。"""
+    from app.models.conflict import Conflict, ConflictStatus, ConflictType
+
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=None)
     created = make_metric()
@@ -343,13 +345,79 @@ async def test_create_metric_marks_pending_conflict_on_precheck_hit():
     )
     repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
 
-    result = await svc.create_metric(MetricCreateRequest(**make_create_payload()), owner_id=1)
+    open_conflict = Conflict(
+        conflict_id="CF-AUTO",
+        type=ConflictType.SAME_DEF_DIFF_NAME,
+        status=ConflictStatus.OPEN,
+        metric_codes={"candidate": created.metric_code, "existing": "sales_gmv_amount_day"},
+        similarity_score=0.9,
+        severity="soft",
+        source="auto",
+        reason="口径实质相同但命名各异，建议合并",
+        block_publish=False,
+        metric_b=9,
+    )
+    captured: list[Conflict] = []
+    with (
+        patch(
+            "app.services.conflict.repository.ConflictRepository.count_open_for_pair",
+            AsyncMock(return_value=0),
+        ),
+        patch(
+            "app.services.conflict.repository.ConflictRepository.create",
+            AsyncMock(side_effect=lambda c: (captured.append(c), c)[1]),
+        ),
+        patch(
+            "app.services.conflict.repository.ConflictRepository.get_first_open_for_metric",
+            AsyncMock(return_value=open_conflict),
+        ),
+    ):
+        result = await svc.create_metric(MetricCreateRequest(**make_create_payload()), owner_id=1)
 
+    # 自动落库：软冲突也落 conflict 表 OPEN 记录（source=auto）
+    assert len(captured) == 1
+    assert captured[0].severity == "soft"
+    assert captured[0].source == "auto"
+    assert captured[0].block_publish is False
+    # 按冲突表实际记录挂标记，detail 携带 conflict_id 供定位
     repo.update_with_optimistic_lock.assert_awaited_once()
     _, kwargs = repo.update_with_optimistic_lock.call_args
     assert kwargs["pending_conflict"] is True
     assert kwargs["pending_conflict_detail"]["conflict_type"] == "same_def_diff_name"
+    assert kwargs["pending_conflict_detail"]["conflict_id"] == "CF-AUTO"
+    assert kwargs["pending_conflict_detail"]["source"] == "auto"
     assert result.pending_conflict is True
+
+
+async def test_create_metric_no_flag_when_no_open_conflict():
+    """预检无未决冲突 → 不落库也不挂标记（杜绝「有标记无记录」孤儿态）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    created = make_metric()
+    repo.create = AsyncMock(return_value=created)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    repo.list_metrics = AsyncMock(return_value=([make_metric(id=9)], 1))
+
+    captured: list[object] = []
+    with (
+        patch(
+            "app.services.conflict.repository.ConflictRepository.count_open_for_pair",
+            AsyncMock(return_value=0),
+        ),
+        patch(
+            "app.services.conflict.repository.ConflictRepository.create",
+            AsyncMock(side_effect=lambda c: (captured.append(c), c)[1]),
+        ),
+        patch(
+            "app.services.conflict.repository.ConflictRepository.get_first_open_for_metric",
+            AsyncMock(return_value=None),
+        ),
+    ):
+        result = await svc.create_metric(MetricCreateRequest(**make_create_payload()), owner_id=1)
+
+    assert result is created
+    assert captured == []
+    repo.update_with_optimistic_lock.assert_not_called()
 
 
 async def test_create_metric_precheck_failure_is_best_effort():

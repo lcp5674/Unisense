@@ -97,8 +97,23 @@ class ConflictService(BaseService):
             logger.warning("conflict 事件发布失败（best-effort 跳过）：%s", exc)
 
     async def check(
-        self, candidate: MetricInput, existing_list: list[MetricInput]
+        self,
+        candidate: MetricInput,
+        existing_list: list[MetricInput],
+        *,
+        use_llm: bool = True,
+        source: str = "manual",
     ) -> ConflictCheckResult:
+        """冲突检测；命中落库 OPEN 记录（硬+软均落，PII 转 pii_review）。
+
+        Args:
+            candidate: 候选口径。
+            existing_list: 已存在口径列表。
+            use_llm: 是否对「补位触发区」口径发起 LLM 语义判定。创建路径（source=auto）
+                传 False 避免注册时引入 LLM 调用；人工预检（/conflicts/check）保持 True。
+            source: 冲突来源标识，落库到 conflict.source——``auto`` 创建自动预检 /
+                ``manual`` 人工预检 / ``backfill`` 存量回填。仲裁台据此区分来源展示。
+        """
         detections: list[DetectionOut] = []
         blocked = False
         existing_list = await self._drop_self_references(candidate, existing_list)
@@ -108,7 +123,7 @@ class ConflictService(BaseService):
             det = detect_conflict(cand_dict, ext_dict)
             # ---- LLM 语义补位（异步）----
             # 词法无冲突、但落入补位触发区且双方有定义时，调用 LLM 判定语义同义。
-            if det is None and is_borderline_match(cand_dict, ext_dict):
+            if use_llm and det is None and is_borderline_match(cand_dict, ext_dict):
                 try:
                     confirmed = await self._llm.judge_same_semantics(
                         cand_dict.get("definition", ""), ext_dict.get("definition", "")
@@ -163,7 +178,16 @@ class ConflictService(BaseService):
                 domain=candidate.domain or None,
                 similarity_score=det.score,
                 metric_codes={"candidate": candidate.metric_code, "existing": det.existing_code},
+                # 治理元数据（迁移 0090）：仲裁台据此区分软/硬冲突并提示来源
+                severity=det.severity,
+                source=source,
+                reason=det.reason,
+                block_publish=det.block_publish,
             )
+            # metric_a/b 解析落库：候选侧（候选已落库时）+ 现有侧（检测携带），
+            # 供跨域一致率统计（consistency_stats）按指标域 join。
+            conflict.metric_a = candidate.metric_id
+            conflict.metric_b = det.existing_metric_id
             await self._repo.create(conflict)
             await self._safe_publish(
                 {
@@ -228,7 +252,12 @@ class ConflictService(BaseService):
 
     async def list_conflicts(self, params: Any) -> tuple[list[Conflict], int]:
         return await self._repo.list_conflicts(
-            params.status, params.type, params.domain, params.page, params.page_size
+            params.status,
+            params.type,
+            params.domain,
+            params.page,
+            params.page_size,
+            severity=getattr(params, "severity", None),
         )
 
     async def get(self, conflict_id: str) -> Conflict:

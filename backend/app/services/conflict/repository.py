@@ -37,6 +37,7 @@ class ConflictRepository:
         domain: str | None,
         page: int,
         page_size: int,
+        severity: str | None = None,
     ) -> tuple[list[Conflict], int]:
         conditions: list[Any] = [Conflict.deleted_at.is_(None)]
         if status is not None:
@@ -45,6 +46,8 @@ class ConflictRepository:
             conditions.append(Conflict.type == ctype)
         if domain is not None:
             conditions.append(Conflict.domain == domain)
+        if severity is not None:
+            conditions.append(Conflict.severity == severity)
         count_stmt = select(func.count()).select_from(Conflict).where(*conditions)
         total = int((await self._db.execute(count_stmt)).scalar() or 0)
         stmt = (
@@ -126,6 +129,35 @@ class ConflictRepository:
         )
         total = int((await self._db.execute(stmt)).scalar() or 0)
         return total
+
+    async def get_first_open_for_metric(self, metric_code: str) -> Conflict | None:
+        """取某指标（作为候选或现有）最新的一条未决冲突（OPEN/NEGOTIATING/ESCALATED）。
+
+        创建路径（semantic.create_metric）据此以冲突表**实际记录**为准挂
+        ``pending_conflict`` 标记——保证「指标目录标记 ⇔ 仲裁台可处置记录」
+        严格一致，杜绝「有标记无记录」的孤儿态（曾致目录显示冲突、仲裁台为空）。
+        返回 None 表示该指标当前无未决冲突。
+        """
+        cand = func.json_unquote(func.json_extract(Conflict.metric_codes, "$.candidate"))
+        ext = func.json_unquote(func.json_extract(Conflict.metric_codes, "$.existing"))
+        stmt = (
+            select(Conflict)
+            .where(
+                Conflict.deleted_at.is_(None),
+                Conflict.status.in_(
+                    [
+                        ConflictStatus.OPEN,
+                        ConflictStatus.NEGOTIATING,
+                        ConflictStatus.ESCALATED,
+                    ]
+                ),
+                or_(cand == metric_code, ext == metric_code),
+            )
+            .order_by(Conflict.created_at.desc())
+            .limit(1)
+        )
+        row = (await self._db.execute(stmt)).scalar_one_or_none()
+        return row
 
     async def count_open_for_pair(self, candidate_code: str, existing_code: str) -> int:
         """统计同一（候选, 现有）有序对当前仍处未决状态的冲突数。

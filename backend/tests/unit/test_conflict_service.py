@@ -612,3 +612,149 @@ async def test_arbitrate_rename_requires_keep_diff_decision() -> None:
             ),
             actor_id=1,
         )
+
+
+class FakeLlm:
+    """记录 judge_same_semantics 调用（use_llm 参数行为验证）。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    async def judge_same_semantics(self, a: str, b: str) -> bool:
+        self.calls.append((a, b))
+        return True
+
+
+async def test_check_persists_governance_fields_hard() -> None:
+    """硬冲突落库：severity/source/block_publish/reason/metric_a/metric_b 齐全。"""
+    svc, repo, events, _, _ = _svc()
+    req = ConflictCheckRequest(
+        candidate=MetricInput(
+            metric_code="gmv_total",
+            domain="sales",
+            definition="sum(amount)",
+            metric_id=101,
+        ),
+        existing=[
+            MetricInput(
+                metric_code="gmv_total",
+                domain="finance",
+                definition="sum(price)",
+                metric_id=202,
+            )
+        ],
+    )
+    await svc.check(req.candidate, req.existing, source="auto")
+    assert len(repo.conflicts) == 1
+    c = repo.conflicts[0]
+    assert c.severity == "hard"
+    assert c.source == "auto"
+    assert c.block_publish is True
+    assert c.reason  # 非空检测原因
+    assert c.metric_a == 101
+    assert c.metric_b == 202
+
+
+async def test_check_persists_soft_conflict_fields_default_manual() -> None:
+    """软冲突落库：source 缺省为 manual、block_publish=False（不阻断发布）。"""
+    svc, repo, _, _, _ = _svc()
+    req = ConflictCheckRequest(
+        candidate=MetricInput(
+            metric_code="sales_gmv_amount_day", domain="sales", definition="sum(order_amount)"
+        ),
+        existing=[
+            MetricInput(
+                metric_code="sales_gmv_amt_day", domain="sales", definition="sum(order_amount)"
+            )
+        ],
+    )
+    await svc.check(req.candidate, req.existing)
+    assert len(repo.conflicts) == 1
+    c = repo.conflicts[0]
+    assert c.type == ConflictType.SAME_DEF_DIFF_NAME
+    assert c.severity == "soft"
+    assert c.source == "manual"
+    assert c.block_publish is False
+
+
+async def test_check_use_llm_false_skips_llm_borderline() -> None:
+    """创建路径 use_llm=False：补位触发区不调 LLM，不落库（词法无冲突）。"""
+    from unittest.mock import patch
+
+    from app.services.conflict.similarity import ConflictDetection
+
+    def _fake_detect(candidate: dict, existing: dict, llm_judge=None):
+        # 词法恒无冲突；仅 LLM 判定（llm_judge 非空）时升级为同义软冲突
+        if llm_judge is not None:
+            return ConflictDetection(
+                conflict_type=ConflictType.SAME_DEF_DIFF_NAME,
+                score=0.9,
+                existing_code=existing.get("metric_code", ""),
+                existing_metric_id=None,
+                severity="soft",
+                block_publish=False,
+                reason="LLM 语义判定为同义口径（补位）",
+                llm_confirmed=True,
+            )
+        return None
+
+    llm = FakeLlm()
+    svc = ConflictService(db=object(), llm=llm)
+    repo = FakeRepo()
+    events = FakeEvents()
+    svc._repo = repo
+    svc._events = events
+    req = ConflictCheckRequest(
+        candidate=MetricInput(metric_code="a_metric_day", domain="sales", definition="def1"),
+        existing=[MetricInput(metric_code="b_metric_day", domain="sales", definition="def2")],
+    )
+    with (
+        patch("app.services.conflict.service.detect_conflict", side_effect=_fake_detect),
+        patch("app.services.conflict.service.is_borderline_match", return_value=True),
+    ):
+        result = await svc.check(req.candidate, req.existing, use_llm=False)
+    assert llm.calls == []
+    assert result.detections == []
+    assert len(repo.conflicts) == 0
+
+
+async def test_check_use_llm_true_calls_llm_borderline() -> None:
+    """人工预检 use_llm=True：补位触发区调 LLM，判定同义则落库软冲突。"""
+    from unittest.mock import patch
+
+    from app.services.conflict.similarity import ConflictDetection
+
+    def _fake_detect(candidate: dict, existing: dict, llm_judge=None):
+        if llm_judge is not None:
+            return ConflictDetection(
+                conflict_type=ConflictType.SAME_DEF_DIFF_NAME,
+                score=0.9,
+                existing_code=existing.get("metric_code", ""),
+                existing_metric_id=None,
+                severity="soft",
+                block_publish=False,
+                reason="LLM 语义判定为同义口径（补位）",
+                llm_confirmed=True,
+            )
+        return None
+
+    llm = FakeLlm()
+    svc = ConflictService(db=object(), llm=llm)
+    repo = FakeRepo()
+    events = FakeEvents()
+    svc._repo = repo
+    svc._events = events
+    req = ConflictCheckRequest(
+        candidate=MetricInput(metric_code="a_metric_day", domain="sales", definition="def1"),
+        existing=[MetricInput(metric_code="b_metric_day", domain="sales", definition="def2")],
+    )
+    with (
+        patch("app.services.conflict.service.detect_conflict", side_effect=_fake_detect),
+        patch("app.services.conflict.service.is_borderline_match", return_value=True),
+    ):
+        result = await svc.check(req.candidate, req.existing, use_llm=True)
+    assert len(llm.calls) == 1
+    assert len(result.detections) == 1
+    assert len(repo.conflicts) == 1
+    assert repo.conflicts[0].type == ConflictType.SAME_DEF_DIFF_NAME
+    assert repo.conflicts[0].severity == "soft"

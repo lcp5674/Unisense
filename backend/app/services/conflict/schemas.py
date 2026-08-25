@@ -65,6 +65,7 @@ class ConflictListParams(BaseModel):
     status: ConflictStatus | None = None
     type: ConflictType | None = None
     domain: str | None = None
+    severity: Literal["hard", "soft"] | None = None
     page: int = Field(1, ge=1)
     page_size: int = Field(20, ge=1, le=200)
 
@@ -85,6 +86,9 @@ class ConflictResponse(BaseModel):
     resolved_at: datetime | None = None
     # B1-1: 前端 types.ts 依赖的字段（从 metric_codes / decision_json / created_at 推导）
     severity: str | None = None
+    source: str | None = None
+    reason: str | None = None
+    block_publish: bool | None = None
     candidate_metric_code: str | None = None
     existing_metric_code: str | None = None
     description: str | None = None
@@ -108,8 +112,12 @@ class ConflictResponse(BaseModel):
             decision_json=m.decision_json,
             created_at=m.created_at,
             resolved_at=m.resolved_at,
-            # B1-1: 推导缺失字段
-            severity=dj.get("status") or dj.get("severity"),
+            # B1-1: 推导缺失字段；治理字段直接读模型（迁移 0090），
+            # 仲裁台据此区分软/硬冲突与来源，而非从 decision_json 猜
+            severity=getattr(m, "severity", None) or dj.get("status") or dj.get("severity"),
+            source=getattr(m, "source", None),
+            reason=getattr(m, "reason", None),
+            block_publish=getattr(m, "block_publish", None),
             candidate_metric_code=mc.get("candidate"),
             existing_metric_code=mc.get("existing"),
             description=mc.get("description"),

@@ -17,7 +17,7 @@ import enum
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, DateTime, Enum, Float, String
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Enum, Float, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.mysql import Base
@@ -59,6 +59,11 @@ class Conflict(Base, BaseModel):
     )
     domain: Mapped[str | None] = mapped_column(String(64), nullable=True)
     similarity_score: Mapped[float] = mapped_column(Float, default=0.0)
+    # 检测元数据（治理字段，迁移 0090）：仲裁台据此区分软/硬冲突并提示
+    severity: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    block_publish: Mapped[bool] = mapped_column(Boolean, default=False)
     metric_codes: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     arbitrator_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     decision_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)

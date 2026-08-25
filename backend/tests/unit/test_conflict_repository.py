@@ -231,3 +231,83 @@ class TestRulingRecordResponseFromOrm:
         assert resp.conflict_id == "CF-ABC"
         assert resp.decision == "choose_canonical"
         assert resp.arbitrator_id == 7
+
+
+class TestListConflictsSeverity:
+    """仲裁台软/硬冲突区分：severity 过滤（迁移 0090 治理字段）。"""
+
+    async def test_severity_filter_hard(self, repo: ConflictRepository, db: MagicMock) -> None:
+        mock_count = MagicMock()
+        mock_count.scalar.return_value = 1
+        mock_rows = MagicMock()
+        mock_rows.scalars.return_value.all.return_value = [
+            Conflict(conflict_id="c1", severity="hard")
+        ]
+        db.execute = AsyncMock(side_effect=[mock_count, mock_rows])
+        rows, total = await repo.list_conflicts(
+            status=None, ctype=None, domain=None, page=1, page_size=10, severity="hard"
+        )
+        assert len(rows) == 1
+        assert total == 1
+        assert rows[0].severity == "hard"
+
+    async def test_severity_none_no_filter(self, repo: ConflictRepository, db: MagicMock) -> None:
+        """severity 缺省不加过滤条件（兼容旧调用）。"""
+        mock_count = MagicMock()
+        mock_count.scalar.return_value = 2
+        mock_rows = MagicMock()
+        mock_rows.scalars.return_value.all.return_value = [
+            Conflict(conflict_id="c1"),
+            Conflict(conflict_id="c2"),
+        ]
+        db.execute = AsyncMock(side_effect=[mock_count, mock_rows])
+        rows, total = await repo.list_conflicts(
+            status=None, ctype=None, domain=None, page=1, page_size=10
+        )
+        assert len(rows) == 2
+        assert total == 2
+
+
+class TestGetFirstOpenForMetric:
+    """创建路径取最新未决冲突（决定是否挂 pending_conflict 标记）。"""
+
+    async def test_returns_open_conflict(self, repo: ConflictRepository, db: MagicMock) -> None:
+        conflict = Conflict(
+            conflict_id="CF-1",
+            type=ConflictType.SAME_NAME_DIFF_DEF,
+            status=ConflictStatus.OPEN,
+            metric_codes={"candidate": "a_metric_day", "existing": "a_metric_week"},
+            severity="hard",
+        )
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = conflict
+        db.execute.return_value = mock_result
+        row = await repo.get_first_open_for_metric("a_metric_day")
+        assert row is not None
+        assert row.conflict_id == "CF-1"
+        assert row.severity == "hard"
+        db.execute.assert_awaited_once()
+
+    async def test_none_when_no_open(self, repo: ConflictRepository, db: MagicMock) -> None:
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        db.execute.return_value = mock_result
+        assert await repo.get_first_open_for_metric("a_metric_day") is None
+
+    async def test_matches_existing_role_too(
+        self, repo: ConflictRepository, db: MagicMock
+    ) -> None:
+        """指标作为 existing 侧出现也须命中（反向一致性回填用）。"""
+        conflict = Conflict(
+            conflict_id="CF-2",
+            type=ConflictType.SAME_DEF_DIFF_NAME,
+            status=ConflictStatus.OPEN,
+            metric_codes={"candidate": "b_metric_day", "existing": "a_metric_day"},
+            severity="soft",
+        )
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = conflict
+        db.execute.return_value = mock_result
+        row = await repo.get_first_open_for_metric("a_metric_day")
+        assert row is not None
+        assert row.conflict_id == "CF-2"
