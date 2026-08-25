@@ -305,8 +305,9 @@ describe("Catalogs 页面", () => {
       </MemoryRouter>,
     );
 
-    await screen.findByText("全部源状态");
-    fireEvent.mouseDown(screen.getByText("全部源状态"));
+    // 默认源状态为「活跃源」（展示已选中值），打开下拉选「已删除源」
+    await screen.findByText("活跃源");
+    fireEvent.mouseDown(screen.getByText("活跃源"));
     const deletedOption = await screen.findByText("已删除源");
     fireEvent.click(deletedOption);
 

@@ -102,7 +102,9 @@ export function Catalogs() {
   // 列显示开关（DataHub 式：默认全开，实体/操作列固定不可关）
   const [visibleCols, setVisibleCols] = useState<string[]>(ALL_COLUMN_VALUES);
   const [sourceId, setSourceId] = useState(urlSourceId);
-  const [sourceStatus, setSourceStatus] = useState<"" | "active" | "deleted">("");
+  // 源状态筛选默认「活跃源」：已删除源的采集目录默认不展示（设计为追溯保留），
+  // 需查看历史采集记录时显式切换「已删除源」。
+  const [sourceStatus, setSourceStatus] = useState<"" | "active" | "deleted">("active");
   const [entityType, setEntityType] = useState("");
   const [sensitivity, setSensitivity] = useState(urlSensitivity);
   const [ownerId, setOwnerId] = useState<number | undefined>(

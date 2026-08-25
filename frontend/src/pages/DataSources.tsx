@@ -626,7 +626,7 @@ function SourceDetailModal({
         {can("data-source:delete") && (
           <Popconfirm
             title="删除数据源"
-            description={`确定删除「${source.name}」？其采集目录、水位、漂移日志将一并清理，删除后原 ID 可重建同名数据源。`}
+            description={`确定删除「${source.name}」？数据源将软删除，其采集目录保留以便追溯，可在采集目录按「已删除源」筛选查看；删除后原 ID 可重建同名数据源。`}
             okText="确认删除"
             okButtonProps={{ danger: true }}
             cancelText="取消"
@@ -1486,7 +1486,7 @@ export function DataSources() {
           </Popconfirm>
           <Popconfirm
             title="批量删除"
-            description={`确定删除选中的 ${selectedRowKeys.length} 个数据源？其采集目录、水位、漂移日志将一并清理，删除后原 ID 可重建同名数据源。`}
+            description={`确定删除选中的 ${selectedRowKeys.length} 个数据源？数据源将软删除，其采集目录保留以便追溯，可在采集目录按「已删除源」筛选查看；删除后原 ID 可重建同名数据源。`}
             okText="确认删除"
             okButtonProps={{ danger: true }}
             onConfirm={handleBatchDelete}
