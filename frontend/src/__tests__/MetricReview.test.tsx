@@ -37,6 +37,7 @@ vi.mock("../api", () => {
 
 import {
   approveMetric,
+  batchRejectMetrics,
   fetchCurrentUser,
   listDomainTree,
   listMetrics,
@@ -44,6 +45,7 @@ import {
 } from "../api";
 const mockedList = vi.mocked(listMetrics);
 const mockedApprove = vi.mocked(approveMetric);
+const mockedBatchReject = vi.mocked(batchRejectMetrics);
 
 const metric: MetricResponse = {
   id: 1,
@@ -315,5 +317,41 @@ describe("MetricReview 指标审批", () => {
     expect(
       document.querySelector(".ant-modal-confirm-btns .ant-btn-primary"),
     ).toBeTruthy();
+  });
+
+  it("L1：批量打回弹窗须填写原因（对齐单条驳回，不再硬编码）", async () => {
+    mockedBatchReject.mockResolvedValue({
+      ok_count: 1,
+      fail_count: 0,
+      results: [{ code: "sales_gmv_day", ok: true, message: "" }],
+    } as never);
+    renderReview();
+    await screen.findByText("sales_gmv_day");
+    // 勾选首行
+    const checkbox = document.querySelector(
+      ".ant-table-tbody .ant-checkbox-input",
+    ) as HTMLInputElement;
+    fireEvent.click(checkbox);
+    // 点「批量打回」→ 打开原因弹窗（修复前直接硬编码原因提交，无弹窗）
+    fireEvent.click(await screen.findByRole("button", { name: /批量打回/ }));
+    await waitFor(() => expect(document.querySelector(".ant-modal")).toBeTruthy());
+    // 不填原因点确认 → 拦截并提示
+    fireEvent.click(
+      document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement,
+    );
+    await screen.findByText("驳回原因至少 4 字，请补充说明");
+    expect(mockedBatchReject).not.toHaveBeenCalled();
+    // 填写原因后确认 → batchRejectMetrics 携带评审人填写的原因
+    const reasonArea = document.querySelector(".ant-modal textarea") as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "口径与同名指标冲突，请修正后重提" } });
+    fireEvent.click(
+      document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement,
+    );
+    await waitFor(() => {
+      expect(mockedBatchReject).toHaveBeenCalledWith(
+        ["sales_gmv_day"],
+        "口径与同名指标冲突，请修正后重提",
+      );
+    });
   });
 });

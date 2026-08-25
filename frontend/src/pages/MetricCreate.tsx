@@ -294,6 +294,9 @@ export function MetricCreate() {
   const [batchForm] = Form.useForm();
   const [batchSubmitting, setBatchSubmitting] = useState(false);
   const [batchResult, setBatchResult] = useState<MetricBatchRegisterResult | null>(null);
+  // L2 重试失败项：记录最近一批的失败列（candidates 与列按下标一一对应），
+  // 「重试失败项」按钮仅重跑失败列，避免「继续注册」全量重跑把已建 DRAFT 的列再判冲突
+  const [batchRetryFailed, setBatchRetryFailed] = useState<string[]>([]);
   // SQL 批量解析（FR-010 批量注册增强，场景A/B：多语句切分 + 多度量拆分 + 复合合成）。
   // 独立 sqlBatch* state 前缀，不动既有 handleSqlInfer/batch 逻辑。
   const [sqlBatchMode, setSqlBatchMode] = useState<"single" | "batch">("single");
@@ -1191,12 +1194,18 @@ export function MetricCreate() {
   async function handleBatchSubmit(values: Record<string, unknown>) {
     // tags Select 返回数组；兼容历史手输换行文本
     const rawMeasure = values.measure_columns;
-    const measureColumns = (Array.isArray(rawMeasure) ? rawMeasure : String(rawMeasure || "").split("\n"))
+    const splitColumns = (Array.isArray(rawMeasure) ? rawMeasure : String(rawMeasure || "").split("\n"))
       .map((s) => String(s).trim())
       .filter(Boolean);
+    // 去重（保留首次出现顺序）：重复列会生成相同 metric_code，第二条被后端判
+    // VALIDATION_ERROR 误导、且结果表 rowKey 重复（修复前无去重）
+    const measureColumns = [...new Set(splitColumns)];
     if (measureColumns.length === 0) {
       message.warning("请至少填写一个度量列");
       return;
+    }
+    if (measureColumns.length < splitColumns.length) {
+      message.warning(`已去除 ${splitColumns.length - measureColumns.length} 个重复度量列`);
     }
     let dimensionMapping: Record<string, string> | undefined;
     const mappingRows = (Array.isArray(values.dimension_mapping_list) ? values.dimension_mapping_list : []) as Array<{
@@ -1223,6 +1232,11 @@ export function MetricCreate() {
     try {
       const result = await batchRegisterMetrics(req);
       setBatchResult(result);
+      // L2：按 candidates 与列下标一一对应，记录本批失败列供「重试失败项」按钮使用
+      const failedCols = result.candidates
+        .map((c, i) => (c.status === "VALIDATION_ERROR" ? measureColumns[i] : null))
+        .filter((c): c is string => Boolean(c));
+      setBatchRetryFailed(failedCols);
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "批量注册失败");
     } finally {
@@ -2408,6 +2422,20 @@ export function MetricCreate() {
             </Space>
             <Space style={{ marginTop: 16 }}>
               <Button onClick={() => setBatchResult(null)}>继续注册</Button>
+              {/* L2：仅重跑失败列（已成功列不重复创建），替代「继续注册」全量重跑——
+                  全量重跑会把已建 DRAFT 的列再判为重复冲突变 VALIDATION_ERROR，结果误导 */}
+              <Button
+                disabled={batchRetryFailed.length === 0}
+                onClick={() => {
+                  batchForm.setFieldsValue({ measure_columns: batchRetryFailed });
+                  void handleBatchSubmit({
+                    ...batchForm.getFieldsValue(),
+                    measure_columns: batchRetryFailed,
+                  });
+                }}
+              >
+                重试失败项{batchRetryFailed.length > 0 ? `（${batchRetryFailed.length}）` : ""}
+              </Button>
               {/* 批量提交直达：把本次成功注册的 DRAFT 指标一键送审（复用原子 /batch-submit，
                   消除「批量注册成功仅弹窗即结束、需回目录手动勾选提交」的闭环断点，复审 D1） */}
               <Button

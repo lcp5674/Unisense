@@ -15,6 +15,7 @@ vi.mock("../api", () => ({
   addFavorite: vi.fn(),
   removeFavorite: vi.fn(),
   batchSubmitMetrics: vi.fn(),
+  batchDeprecateMetrics: vi.fn(),
   deleteMetric: vi.fn(),
   restoreMetric: vi.fn(),
   fetchMyPermissions: vi.fn(),
@@ -36,6 +37,7 @@ import {
   addFavorite,
   removeFavorite,
   batchSubmitMetrics,
+  batchDeprecateMetrics,
   deleteMetric,
   restoreMetric,
   fetchMyPermissions,
@@ -53,6 +55,7 @@ const mockedFavorites = vi.mocked(listFavorites);
 const mockedAddFavorite = vi.mocked(addFavorite);
 const mockedRemoveFavorite = vi.mocked(removeFavorite);
 const mockedBatchSubmit = vi.mocked(batchSubmitMetrics);
+const mockedBatchDeprecate = vi.mocked(batchDeprecateMetrics);
 const mockedDeleteMetric = vi.mocked(deleteMetric);
 const mockedPermissions = vi.mocked(fetchMyPermissions);
 const mockedMatrix = vi.mocked(compareMetricsMatrix);
@@ -640,6 +643,22 @@ describe("MetricCatalog", () => {
     await waitFor(() => {
       expect(mockedDeleteMetric).toHaveBeenCalledWith("sales_gmv_sum_d");
     });
+  });
+
+  it("批量下线：勾选已发布指标但未填替代指标 → 前端拦截提示（不提交）", async () => {
+    const p = { ...metric, status: "PUBLISHED" as const };
+    mockedList.mockResolvedValue({ items: [p], total: 1, page: 1, page_size: 20 });
+    renderCatalog();
+    await screen.findByText("sales_gmv_sum_d");
+    const selectAll = document.querySelector(".ant-table-selection-column input[type=checkbox]") as Element;
+    fireEvent.click(selectAll);
+    fireEvent.click(screen.getByRole("button", { name: /批量操作/ }));
+    fireEvent.click(screen.getByText("批量下线（已发布）"));
+    await screen.findByText(/将勾选的/);
+    // 未填替代指标直接确认 → 拦截（H4 修复保留的守卫：全部未填时提示填写）
+    fireEvent.click(screen.getByRole("button", { name: /下\s*线/ }));
+    await screen.findByText("请为勾选的已发布指标填写替代指标");
+    expect(mockedBatchDeprecate).not.toHaveBeenCalled();
   });
 });
 

@@ -28,7 +28,7 @@ vi.mock("../api", async () => {
   };
 });
 
-import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, checkConflict, createMetric, listMetrics } from "../api";
+import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, checkConflict, createMetric, listMetrics, listMeasureCatalogs } from "../api";
 import type { DBCatalog, SubjectDomainTreeNode, AutoSuggestResponse, DomainSuggestionResponse, SqlBatchParseResult } from "../types";
 
 const mockedTree = vi.mocked(listDomainTree);
@@ -308,6 +308,64 @@ describe("MetricCreate 批量注册指标", () => {
       expect(screen.getByText("批量注册完成：成功 2 / 失败 0")).toBeTruthy();
       expect(screen.getByText("sales_gmv_day")).toBeTruthy();
       expect(screen.getByText("sales_order_cnt_day")).toBeTruthy();
+    });
+  });
+
+  it("L2：批量注册失败项出现「重试失败项」按钮，点击仅重跑失败列", async () => {
+    mockedBatch
+      .mockResolvedValueOnce({
+        batch_id: "batch_retry1",
+        candidates: [
+          { metric_code: "sales_gmv_day", status: "DRAFT", validation_errors: null },
+          { metric_code: "sales_order_cnt_day", status: "VALIDATION_ERROR", validation_errors: "命名校验失败" },
+        ],
+      })
+      .mockResolvedValueOnce({
+        batch_id: "batch_retry2",
+        candidates: [
+          { metric_code: "sales_order_cnt_day", status: "DRAFT", validation_errors: null },
+        ],
+      });
+    renderPage();
+    const modal = await openBatchModal();
+    await fillBatchForm(modal, "gmv\norder_cnt");
+    fireEvent.click(within(modal).getByText("提交批量注册"));
+    await waitFor(() => {
+      expect(screen.getByText("批量注册完成：成功 1 / 失败 1")).toBeTruthy();
+    });
+    // 修复前无单条重试：仅「继续注册」全量重跑会把已建 DRAFT 的列再判冲突。
+    // 修复后「重试失败项」仅重跑失败列（order_cnt）。
+    const retryBtn = screen.getByRole("button", { name: /重试失败项/ });
+    fireEvent.click(retryBtn);
+    await waitFor(() => {
+      // 第二次调用以失败列重跑（仅 order_cnt，不再包含已成功的 gmv）
+      expect(mockedBatch).toHaveBeenLastCalledWith(
+        expect.objectContaining({ measure_columns: ["order_cnt"] }),
+      );
+    });
+  });
+
+  it("M3：批量注册重复度量列自动去重（提交唯一列）", async () => {
+    mockedBatch.mockResolvedValue({
+      batch_id: "batch_dedupe",
+      candidates: [
+        { metric_code: "sales_gmv_day", status: "DRAFT", validation_errors: null },
+      ],
+    });
+    renderPage();
+    const modal = await openBatchModal();
+    // tags 模式可产生重复 tag：先点选 gmv，再手输同值 tag 构造重复。
+    // handleBatchSubmit 去重后仅提交唯一列（修复前重复列生成相同 metric_code，
+    // 第二条被后端判 VALIDATION_ERROR 误导）
+    await fillBatchForm(modal, "gmv");
+    const tagInput = modal.querySelector(".ant-select-multiple input") as HTMLInputElement;
+    fireEvent.change(tagInput, { target: { value: "gmv" } });
+    fireEvent.keyDown(tagInput, { key: "Enter", code: "Enter" });
+    fireEvent.click(within(modal).getByText("提交批量注册"));
+    await waitFor(() => {
+      expect(mockedBatch).toHaveBeenCalledWith(
+        expect.objectContaining({ measure_columns: ["gmv"] }),
+      );
     });
   });
 
@@ -1185,6 +1243,85 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     expect(mockedCreate).not.toHaveBeenCalled();
   });
 });
+
+describe("MetricCreate 口径分角色双字段（伪代码/数仓详细口径）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedTree.mockResolvedValue(TREE);
+    mockedDict.mockResolvedValue([{ code: "CNY", label: "元" }] as never);
+    mockedSuggest.mockResolvedValue(NO_SUGGESTION);
+    mockedCatalogs.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 });
+    mockedMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 50 });
+    // 逻辑度量目录返回一个已发布度量（原子指标选它继承格式/单位）
+    (listMeasureCatalogs as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          measure_code: "medical_fee_amt",
+          name: "门诊收费金额",
+          measure_format: "AMOUNT",
+          default_unit: "CNY",
+          default_decimal_places: 2,
+          source_system: ["HIS"],
+          domain: "medical_fee",
+          status: "PUBLISHED",
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 200,
+    });
+  });
+
+  it("Step② 展示「伪代码口径（系统开发）」与「数仓详细口径（数仓开发）」两个输入区", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await goToStep(2);
+
+    const pseudo = screen.getByRole("textbox", { name: "伪代码口径" }) as HTMLTextAreaElement;
+    const dw = screen.getByRole("textbox", { name: "数仓详细口径" }) as HTMLTextAreaElement;
+    fireEvent.change(pseudo, { target: { value: "SUM(收费金额) 按结算日期去重" } });
+    fireEvent.change(dw, { target: { value: "SELECT visit_date, SUM(real_amount) FROM dwd.fee_bill_di" } });
+    expect(pseudo.value).toBe("SUM(收费金额) 按结算日期去重");
+    expect(dw.value).toBe("SELECT visit_date, SUM(real_amount) FROM dwd.fee_bill_di");
+    // 分角色引导文案存在（通俗提示）
+    expect(screen.getByText(/口径分角色填写/)).toBeInTheDocument();
+  });
+
+  it("提交时 pseudo_definition/dw_definition 合入 definition_json", async () => {
+    mockedCreate.mockResolvedValue({ metric_code: "medical_fee_amt_daily" } as any);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await goToStep(1);
+    // 选逻辑度量（原子指标 OneData 继承源）
+    fireEvent.mouseDown(screen.getByText("选择或搜索逻辑度量（如 支付金额 pay_amt）"));
+    await clickSelectOption("门诊收费金额 (medical_fee_amt)");
+    await goToStep(2);
+    // 填名称 + 口径双字段
+    fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "门诊收费金额" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "伪代码口径" }), {
+      target: { value: "SUM(收费金额) 按结算日期去重" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "数仓详细口径" }), {
+      target: { value: "SELECT visit_date, SUM(real_amount) AS amt FROM dwd.fee_bill_di" },
+    });
+    await goToStep(3);
+    fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
+
+    await waitFor(() => {
+      expect(mockedCreate).toHaveBeenCalled();
+      const body = mockedCreate.mock.calls[0][0] as {
+        definition_json: { pseudo_definition?: string; dw_definition?: string };
+      };
+      expect(body.definition_json.pseudo_definition).toBe("SUM(收费金额) 按结算日期去重");
+      expect(body.definition_json.dw_definition).toBe(
+        "SELECT visit_date, SUM(real_amount) AS amt FROM dwd.fee_bill_di",
+      );
+    });
+  });
+});
+
 describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
   /** 批量解析结果：单语句 2 原子 + 1 复合（合成复合开关开启时后端返回）。 */
   const SQL_BATCH_RESULT: SqlBatchParseResult = {

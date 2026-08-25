@@ -838,12 +838,27 @@ export function MetricCatalog() {
         ok = res.ok_count;
         res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.code}: ${r.message}`); failedCodes.push(r.code); });
       } else if (batchAction === "deprecate") {
-        const items = selected
-          .filter((m) => m.status === "PUBLISHED" && batchSuccessors[m.metric_code])
+        const deprecatable = selected.filter((m) => m.status === "PUBLISHED");
+        const missingSucc = deprecatable.filter((m) => !batchSuccessors[m.metric_code]);
+        const items = deprecatable
+          .filter((m) => batchSuccessors[m.metric_code])
           .map((m) => ({ metric_code: m.metric_code, successor_code: batchSuccessors[m.metric_code] }));
+        if (!deprecatable.length) {
+          message.warning("勾选的指标中没有已发布（PUBLISHED）状态");
+          return;
+        }
         if (!items.length) {
           message.warning("请为勾选的已发布指标填写替代指标");
           return;
+        }
+        // 修复前：未填替代指标的勾选项被静默过滤，成功数与勾选数不符且无说明。
+        // 现在明确提示跳过项，避免用户误以为全部废弃成功。
+        if (missingSucc.length) {
+          message.warning(
+            `${missingSucc.length} 个已发布指标未填写替代指标，已跳过：${missingSucc
+              .map((m) => m.metric_code)
+              .join("、")}`,
+          );
         }
         const res = await batchDeprecateMetrics(items);
         ok = res.ok_count;
