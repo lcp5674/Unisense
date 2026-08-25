@@ -15,6 +15,10 @@ from httpx import ASGITransport
 
 from app.api import deps
 from app.main import app
+from app.services.collector.schemas import TestConnectionResult
+
+# 以 Test 开头的 Pydantic 模型名会被 pytest 误判为测试类收集，显式排除
+TestConnectionResult.__test__ = False
 
 
 @pytest.fixture
@@ -769,3 +773,31 @@ async def test_collect_sync_failure_marks_run_failed(
     fake_svc.fail_collection_run.assert_awaited_once()
     assert "conn refused" in fake_svc.fail_collection_run.await_args.args[1]
     fake_svc.complete_collection_run.assert_not_awaited()
+
+
+async def test_test_connection_hive_metastore_passes_validation(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """回归：hive_metastore 连接预检通过 schema 校验（曾因 SourceTypeEnum 缺失而 422）。
+
+    修复前 ``TestConnectionRequest.source_type: SourceType`` 不含 hive_metastore，
+    请求直接 422；修复后应到达 service 层（本测试 mock service，仅验证路由层
+    schema 校验放行）。
+    """
+    fake_svc = MagicMock()
+    fake_svc.test_connection = AsyncMock(
+        return_value=TestConnectionResult(ok=True, source_type="hive_metastore", latency_ms=10)
+    )
+    with patch("app.api.collector._svc", return_value=fake_svc):
+        resp = await collector_client.post(
+            "/api/v1/data-sources/test-connection",
+            json={
+                "source_type": "hive_metastore",
+                "connection_config": {"host": "10.0.0.5", "port": 3306, "database": "metastore"},
+            },
+        )
+    assert resp.status_code == 200
+    fake_svc.test_connection.assert_awaited_once()
+    body = resp.json()["data"]
+    assert body["ok"] is True
+    assert body["source_type"] == "hive_metastore"

@@ -26,6 +26,7 @@ from app.services.collector.schemas import (
     DataSourceCreateRequest,
     DataSourceUpdateRequest,
     DBCatalogCreateRequest,
+    TestConnectionRequest,
 )
 from app.services.collector.service import CollectorService
 from app.services.collector.spi import (
@@ -35,6 +36,9 @@ from app.services.collector.spi import (
     FailedSpec,
     build_collector,
 )
+
+# 以 Test 开头的 Pydantic 模型名会被 pytest 误判为测试类收集，显式排除
+TestConnectionRequest.__test__ = False
 
 
 def _svc() -> tuple[CollectorService, MagicMock]:
@@ -1285,6 +1289,31 @@ def test_connection_config_with_host_passes():
         domain="d",
     )
     assert req.connection_config["host"] == "127.0.0.1"
+
+
+def test_hive_metastore_type_accepted_by_schemas():
+    """回归：SourceTypeEnum 曾缺 hive_metastore，连接预检/创建/枚举请求全部 422。
+
+    Hive Metastore 采集器与前端类型列表均已支持，但共享枚举遗漏导致
+    ``TestConnectionRequest.source_type`` 等用 ``SourceType`` 校验的请求直接 422
+    （修复见 enums.py + 迁移 0085）。本测试锁定该类型在三类请求 schema 中均可解析。
+    """
+    cfg = {"host": "10.0.0.5", "port": 3306, "database": "metastore"}
+    # 连接预检（test-connection）
+    probe_req = TestConnectionRequest(source_type="hive_metastore", connection_config=cfg)
+    assert probe_req.source_type == "hive_metastore"
+    # 创建数据源
+    create_req = DataSourceCreateRequest(
+        source_id="hms1",
+        name="HMS",
+        source_type="hive_metastore",
+        connection_config=cfg,
+        domain="d",
+    )
+    assert create_req.source_type == "hive_metastore"
+    # 更新数据源（PATCH 语义下 source_type 可选）
+    update_req = DataSourceUpdateRequest(source_type="hive_metastore")
+    assert update_req.source_type == "hive_metastore"
 
 
 # ---------- US6: batch 事件发布 ----------

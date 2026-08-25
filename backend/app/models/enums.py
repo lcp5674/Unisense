@@ -9,11 +9,12 @@ import enum
 
 
 class SourceTypeEnum(enum.StrEnum):
-    """数据源类型枚举（8 种生产类型）。"""
+    """数据源类型枚举（9 种生产类型，含 Hive Metastore 直连）。"""
 
     MYSQL = "mysql"
     POSTGRES = "postgres"
     HIVE = "hive"
+    HIVE_METASTORE = "hive_metastore"
     SPARK = "spark"
     DORIS = "doris"
     CLICKHOUSE = "clickhouse"
