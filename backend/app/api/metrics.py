@@ -261,7 +261,22 @@ async def create_metric(
     # L3 指标血缘：口径定义含 source_table/source_tables 时注册 metric↔table 边（同事务）
     await _register_metric_l3_lineage(db, metric)
     # PLAT-3: 业务写入 + 审计同事务原子提交（缺 commit 会导致事务随会话关闭被回滚）
-    await db.commit()
+    # 并发竞态兜底（对齐 semantic.py 模板创建端点）：select 预检 + repository 层 flush
+    # 捕获在并发下仍可能同时通过，血缘/冲突等延迟 flush 的对象唯一键冲突在 commit 才
+    # 暴露。捕获 IntegrityError → 回滚会话 + 转 ConflictError（中文友好），避免 500。
+    from sqlalchemy.exc import IntegrityError
+
+    from app.core.exceptions import ConflictError
+
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise ConflictError(
+            f"指标编码已存在: {metric.metric_code}",
+            error_code="METRIC_CODE_EXISTS",
+            ctx={"code": "METRIC_CODE_EXISTS", "metric_code": metric.metric_code},
+        ) from exc
     return ok(
         data=MetricResponse.model_validate(metric),
         trace_id=trace_id,

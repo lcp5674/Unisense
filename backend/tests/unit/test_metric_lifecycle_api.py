@@ -169,6 +169,41 @@ async def test_recover_source_dropped(metrics_client: httpx.AsyncClient) -> None
     mock_svc.return_value.recover_source_dropped.assert_awaited_once()
 
 
+async def test_create_metric_commit_integrity_error() -> None:
+    """单条创建并发竞态：commit 唯一键冲突 → 转 ConflictError(409)，不 500。
+
+    覆盖审查遗留项「单条创建路径不捕 IntegrityError」——repository 层 flush 捕获
+    已覆盖 metric/version 的直接唯一键冲突；此处验证端点 commit 兜底（血缘/冲突等
+    延迟 flush 对象的唯一键冲突在 commit 才暴露，对齐 semantic.py 模板创建端点先例）。
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    from app.api.metrics import create_metric as create_metric_handler
+    from app.core.exceptions import ConflictError
+
+    db = MagicMock()
+    db.commit = AsyncMock(
+        side_effect=IntegrityError(
+            "Duplicate entry 'sales_gmv_d' for key 'metric.metric_code'", None, None
+        )
+    )
+    db.rollback = AsyncMock()
+    user = MagicMock(id=1, role="platform_admin")
+
+    with (
+        patch("app.api.metrics.MetricService") as mock_svc,
+        patch("app.api.metrics._register_metric_l3_lineage", new_callable=AsyncMock),
+    ):
+        mock_svc.return_value.create_metric = AsyncMock(return_value=_metric("sales_gmv_d"))
+        with pytest.raises(ConflictError) as exc_info:
+            await create_metric_handler(
+                MagicMock(), db, user, trace_id="trace-1", http_req=MagicMock()
+            )
+    assert exc_info.value.error_code == "METRIC_CODE_EXISTS"
+    assert "sales_gmv_d" in exc_info.value.message
+    db.rollback.assert_awaited_once()
+
+
 async def test_confirm_deprecate_dropped(metrics_client: httpx.AsyncClient) -> None:
     """确认退役（DSD → DEPRECATED）→ 200。"""
     with patch("app.api.metrics.MetricService") as mock_svc:

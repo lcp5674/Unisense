@@ -90,6 +90,80 @@ async def test_template_owner_assign_and_errors() -> None:
     assert exc.value.status_code == 422
 
 
+async def test_instantiate_template_commit_integrity_error() -> None:
+    """模板实例化并发竞态：commit 唯一键冲突 → 转 ConflictError(409)，不 500。
+
+    覆盖审查遗留项：instantiate_template 端点 commit 无 IntegrityError 兜底——
+    "先预检再插"的 TOCTOU 场景下血缘/冲突等延迟 flush 对象在 commit 才暴露唯一键
+    冲突，捕获转 ConflictError（对齐上方模板创建端点先例）。
+    """
+    from unittest.mock import patch
+
+    from sqlalchemy.exc import IntegrityError
+
+    from app.api.semantic import instantiate_template
+    from app.core.exceptions import ConflictError
+
+    template = MagicMock()
+    template.defaults_json = {}
+    for _f in (
+        "type",
+        "granularity",
+        "unit",
+        "aggregation",
+        "time_semantics",
+        "freshness",
+        "dw_layer",
+        "serving_mode",
+        "additivity",
+        "metric_tier",
+        "measure_id",
+        "mount",
+        "product_owner_id",
+        "tech_owner_id",
+        "dw_developer_id",
+        "product_owner_name",
+        "tech_owner_name",
+        "dw_developer_name",
+    ):
+        setattr(template, _f, None)
+    template.required_fields = []
+
+    r = MagicMock()
+    r.scalar_one_or_none.return_value = template
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=r)
+    db.commit = AsyncMock(
+        side_effect=IntegrityError(
+            "Duplicate entry 'tpl_sales_gmv_day' for key 'metric.metric_code'", None, None
+        )
+    )
+    db.rollback = AsyncMock()
+
+    body = {
+        "metric_code": "tpl_sales_gmv_day",
+        "name": "销售 GMV 日",
+        "domain": "sales",
+        "type": "atomic",
+        "aggregation": "SUM",
+    }
+    user = MagicMock(id=1)
+    with (
+        patch("app.api.semantic.MetricService") as mock_svc,
+        patch("app.api.semantic._drop_invalid_literal_presets", return_value=None),
+        patch("app.services.semantic.schemas.MetricCreateRequest", return_value=MagicMock()),
+    ):
+        mock_svc.return_value.create_metric = AsyncMock(
+            return_value=MagicMock(metric_code="tpl_sales_gmv_day")
+        )
+        with pytest.raises(ConflictError) as exc_info:
+            await instantiate_template(
+                user=user, template_id=1, request=MagicMock(), body=body, db=db
+            )
+    assert exc_info.value.error_code == "METRIC_CODE_EXISTS"
+    db.rollback.assert_awaited_once()
+
+
 async def test_list_templates_escapes_wildcards_and_sorts_stably() -> None:
     """模板列表：LIKE 通配符转义（FR-035）+ 排序确定性（domain,name,id 次级，防翻页重漏）。"""
     from sqlalchemy.dialects import mysql

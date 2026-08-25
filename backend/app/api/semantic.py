@@ -588,7 +588,25 @@ async def instantiate_template(
         ip=client_ip(request),
         trace_id=get_trace_id(request),
     )
-    await db.commit()
+    # 并发竞态兜底（对齐上方模板创建端点）：实例化也是"先预检再插"的 TOCTOU 场景，
+    # 血缘/冲突等延迟 flush 对象的唯一键冲突在 commit 才暴露——捕获 IntegrityError →
+    # 回滚会话 + 转 ConflictError（中文友好），避免 500。
+    from sqlalchemy.exc import IntegrityError
+
+    from app.core.exceptions import ConflictError
+
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise ConflictError(
+            f"指标编码已存在: {getattr(metric, 'metric_code', '')}",
+            error_code="METRIC_CODE_EXISTS",
+            ctx={
+                "code": "METRIC_CODE_EXISTS",
+                "metric_code": getattr(metric, "metric_code", ""),
+            },
+        ) from exc
 
     data = metric.to_dict() if hasattr(metric, "to_dict") else metric
     return ok(data=data, trace_id=get_trace_id(request))
