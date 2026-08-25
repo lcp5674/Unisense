@@ -591,9 +591,11 @@ function SourceDetailModal({
           </Button>
         )}
         {can("data-source:test-connection") && (
-          <Button icon={<ApiOutlined />} loading={checking} onClick={handleCheck}>
-            测试连接
-          </Button>
+          <Tooltip title="对已保存的数据源实时探活，放行内网/私有地址；与创建表单的「测试连接」不同（后者受 SSRF 安全策略限制，拒绝内网/回环地址）">
+            <Button icon={<ApiOutlined />} loading={checking} onClick={handleCheck}>
+              测试连接
+            </Button>
+          </Tooltip>
         )}
         <Tooltip title="定时采集按数据源的默认采集模式执行（可在编辑表单修改）">
           <Input
@@ -1800,6 +1802,13 @@ export function DataSources() {
             )}
             <span className="muted" style={{ fontSize: 12 }}>创建前验证 Host / 端口 / 凭据可达性</span>
           </Space>
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 8 }}
+            message="内网 / 本机地址会被安全策略拦截，属预期行为"
+            description="「测试连接」受 SSRF 安全策略保护，内网（192.168.x / 10.x 等）与本机（localhost / 127.0.0.1）地址会被拒绝，这不是配置错误。内网数据库可直接填写配置后创建，创建完成后在详情弹窗点「探活」验证连接（探活放行内网地址）。"
+          />
         </Form>
       </Modal>
 
