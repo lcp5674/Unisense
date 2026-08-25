@@ -284,3 +284,25 @@ def test_parse_sql_measures_result_fence_and_alias_keys() -> None:
         "table": "dwd_order_di",
         "name": "成交额",
     }
+
+
+def test_parse_sql_measures_result_period_normalized() -> None:
+    """P0-2：度量提取的 period 经 normalize_period 归一化（中文别名→白名单），
+    非法周期丢弃——避免污染候选编码（此前直接透传 月度/daily 致非法编码段）。"""
+    raw = (
+        '{"measures": ['
+        '{"column": "a", "agg": "SUM", "period": "月度"},'
+        '{"column": "b", "agg": "SUM", "period": "daily"},'
+        '{"column": "c", "agg": "SUM", "period": "weekly"},'
+        '{"column": "d", "agg": "SUM", "period": "not_a_period"}'
+        "]}"
+    )
+    out = parse_sql_measures_result(raw)
+    assert out is not None
+    by_col = {m["column"]: m for m in out}
+    # 中文别名 / 英文全称 → 归一化白名单值
+    assert by_col["a"].get("period") == "month"
+    assert by_col["b"].get("period") == "day"
+    assert by_col["c"].get("period") == "week"
+    # 非法周期 → 丢弃该字段（度量本身保留，缺省由上层规则层补）
+    assert "period" not in by_col["d"]

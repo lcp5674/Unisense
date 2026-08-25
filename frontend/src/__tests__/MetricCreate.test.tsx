@@ -1546,4 +1546,106 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     // 无候选 → 不出现成功文案
     expect(screen.queryByText(/已解析 .* 个候选指标/)).toBeNull();
   });
+
+  it("批量解析：切分模式可切换，custom 模式携带 delimiters/start_markers 规则（P2-8）", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await openSqlInfer();
+    fireEvent.click(screen.getByText("批量解析"));
+    // 默认 statement；切换到「自定义规则」
+    const splitSelect = screen.getByTestId("sql-batch-split-mode").closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(splitSelect.querySelector(".ant-select-selector") as HTMLElement);
+    await clickSelectOption("自定义规则");
+    // custom 模式出现规则输入框
+    fireEvent.change(screen.getByPlaceholderText(/分隔符正则/), {
+      target: { value: "GO;" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/起始标记正则/), {
+      target: { value: "CREATE TABLE" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/批量解析：粘贴含多个 SELECT/), {
+      target: { value: "SELECT 1" },
+    });
+    fireEvent.click(screen.getByText("解析候选"));
+    await waitFor(() => {
+      expect(mockedParseSqlBatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          split_mode: "custom",
+          custom_rules: { delimiters: ["GO;"], start_markers: ["CREATE TABLE"] },
+        }),
+      );
+    });
+  });
+
+  it("批量创建：候选编码为空时按最终域生成 4 段编码（P0-1）", async () => {
+    mockedParseSqlBatch.mockResolvedValueOnce({
+      ...SQL_BATCH_RESULT,
+      candidates: [
+        {
+          ...SQL_BATCH_RESULT.candidates[0],
+          metric_code: null as unknown as string,
+          suggested_domain_code: null,
+        },
+      ],
+    });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openSqlInfer();
+    fireEvent.click(screen.getByText("批量解析"));
+    fireEvent.change(screen.getByPlaceholderText(/批量解析：粘贴含多个 SELECT/), {
+      target: {
+        value: "SELECT dt, SUM(amount) AS gmv FROM dwd.sales_detail GROUP BY dt",
+      },
+    });
+    fireEvent.click(screen.getByText("解析候选"));
+    await screen.findByText(/共 1 个候选/);
+    // 编码为空 → 展示「选域后自动生成」占位
+    expect(screen.getByText("（选域后自动生成）")).toBeTruthy();
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+    await waitFor(() => {
+      expect(mockedBatchFromSql).toHaveBeenCalled();
+      const body = mockedBatchFromSql.mock.calls[0][0];
+      // resolveCode：域 sales + 表 sales_detail → biz sales + 列 amount + 周期 day
+      expect(body.candidates[0].metric_code).toBe("sales_sales_amount_day");
+      // P1-5：granularity 随候选提交
+      expect(body.candidates[0].granularity).toBe("day");
+    });
+  });
+
+  it("批量创建：候选周期行内可编辑，提交携带修改后的 period（P2-9）", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+    // 第一个原子候选的周期 Select 当前为「日 (day)」，改为「月 (month)」
+    const periodSelect = (
+      screen.getByTestId("sql-batch-period-0:amount").closest(".ant-select") as HTMLElement
+    );
+    fireEvent.mouseDown(periodSelect.querySelector(".ant-select-selector") as HTMLElement);
+    await clickSelectOption("月 (month)");
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+    await waitFor(() => {
+      expect(mockedBatchFromSql).toHaveBeenCalled();
+      const body = mockedBatchFromSql.mock.calls[0][0];
+      const atom = body.candidates.find((c: { type: string }) => c.type === "atomic");
+      expect(atom?.period).toBe("month");
+    });
+  });
+
+  it("批量解析：语句级建议域展示（跨域脚本提示，P2-10）", async () => {
+    mockedParseSqlBatch.mockResolvedValueOnce({
+      ...SQL_BATCH_RESULT,
+      statements: [{ ...SQL_BATCH_RESULT.statements[0], suggested_domain: "health" }],
+      candidates: SQL_BATCH_RESULT.candidates.map((c) => ({
+        ...c,
+        suggested_domain_code: "health",
+      })),
+    });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await openBatchMode();
+    // 当前未选域（selectedDomain 空）→ 展示「建议域 health」Tag（两个原子候选各一个）
+    expect(screen.getAllByText("建议域 health").length).toBeGreaterThan(0);
+  });
 });

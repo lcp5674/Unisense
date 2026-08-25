@@ -410,6 +410,12 @@ def split_select_measures(
 ) -> list[dict[str, Any]]:
     """场景B：单语句多度量拆分为 N 个度量候选（共享源表/维度/时间谓词）。
 
+    **注意（P2-7）**：本函数当前无任何端点/服务调用（仅测试引用），属保留的
+    场景B 公共 API；``infer_sql_batch`` 内部用 ``_build_atomic_candidate``（功能
+    更全：含编码/口径/别名锚点），不经过本函数。如需启用场景B 独立入口，应
+    先对齐候选字段结构（``source_table/measure_column/aggregation/period`` 仅
+    覆盖原子候选最小集）。
+
     Args:
         statement_sql: 单条指标 SQL。
         profile: 已解析画像（缺省内部解析）。
@@ -453,6 +459,7 @@ def _build_atomic_candidate(
     domain_code: str | None,
     domain_defaults: dict[str, Any],
     time_column: str | None,
+    suggested_domain_code: str | None = None,
 ) -> dict[str, Any]:
     """构建原子候选：expression 模式推断（勿传多度量原 SQL，避免兄弟度量进口径），
     聚合方式覆盖为 SQL 解析值（比列名规则更可靠）。
@@ -482,6 +489,12 @@ def _build_atomic_candidate(
         "partition_key": time_column,
     }
     metric_code = result.get("metric_code_suggestion")
+    if metric_code and not domain_code:
+        # 域未确定（多域/无域建议）时不得 bake-in 首段为空的非法编码——
+        # ``generate_metric_code("", ...)`` 会产出 ``_order_amount_day``（P0 缺陷，
+        # 批量创建时 pydantic 校验整批 500）。候选编码改由前端在用户选域后按
+        # 最终域重新生成（前端提交时若 metric_code 为空则用 selectedDomain 拼 4 段）。
+        metric_code = None
     if not metric_code and domain_code and measure_table and period:
         metric_code = generate_metric_code(domain_code, measure_table, code_col, period)
     # LLM 兜底场景自带建议名（measure["name"]）优先；规则层（无 name）走 auto_fill
@@ -500,6 +513,7 @@ def _build_atomic_candidate(
         "definition_json": definition,
         "definition_mode": "expression",
         "statement_index": idx,
+        "suggested_domain_code": suggested_domain_code,
     }
 
 
@@ -511,8 +525,14 @@ def _build_composite_candidate(
     atoms: list[dict[str, Any]],
     domain_code: str | None,
     period: str,
+    suggested_domain_code: str | None = None,
 ) -> dict[str, Any] | None:
-    """合成复合候选：依赖组内 N 原子编码，口径 SQL=原语句（保留多度量计算结构）。"""
+    """合成复合候选：依赖组内 N 原子编码，口径 SQL=原语句（保留多度量计算结构）。
+
+    编码/粒度使用语句实际统计周期（``period``），不再硬编码 ``_day``/``day``——
+    月粒度 ETL 的复合指标此前生成 ``xxx_day``（粒度 day）与实际口径（month）不符，
+    注册后编码与粒度均失真（P1-3 一致性缺陷）。
+    """
     codes = [c["metric_code"] for c in atoms if c.get("metric_code")]
     if len(codes) < 2:
         return None
@@ -522,7 +542,7 @@ def _build_composite_candidate(
     names = "、".join(str(c.get("name", "")) for c in atoms)
     return {
         "key": f"{idx}:composite",
-        "metric_code": f"{domain_code}_{biz}_{groupkey}_day" if domain_code else None,
+        "metric_code": f"{domain_code}_{biz}_{groupkey}_{period}" if domain_code else None,
         # 原子名已含周期前缀（如「日金额」），复合名直接拼接避免「日日」重复
         "name": f"{names}复合"[:128],
         "type": "composite",
@@ -531,7 +551,7 @@ def _build_composite_candidate(
         "aggregation": None,
         "period": period,
         "unit": None,
-        "granularity": "day",
+        "granularity": period,
         "definition_json": {
             "sql": sql,
             "dependencies": codes,
@@ -540,17 +560,25 @@ def _build_composite_candidate(
         "definition_mode": "sql",
         "dependencies": codes,
         "statement_index": idx,
+        "suggested_domain_code": suggested_domain_code,
     }
 
 
-def _statement_meta(idx: int, sql: str, profile: SqlProfile) -> dict[str, Any]:
-    """语句摘要（前端 Collapse 分组标题用）。"""
+def _statement_meta(
+    idx: int, sql: str, profile: SqlProfile, suggested_domain: str | None = None
+) -> dict[str, Any]:
+    """语句摘要（前端 Collapse 分组标题用）。
+
+    ``suggested_domain``（P2-10）：整段域建议为 multiple/none 时逐语句反查的
+    域编码——跨域脚本各语句表可能分属不同域，前端据此在语句级提示建议域。
+    """
     return {
         "index": idx,
         "sql": sql[:2000],
         "source_tables": profile.source_tables,
         "measure_count": len(profile.measures),
         "group_by": profile.group_by,
+        "suggested_domain": suggested_domain,
     }
 
 
@@ -693,9 +721,25 @@ async def infer_sql_batch(
     statements: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    # P2-10：整段域建议未定/多域时，逐语句反向建议域——跨域脚本各语句表可能
+    # 分属不同域（跨域共用 DWD 层表是常态），候选携带语句级建议域供前端提示。
+    # 整段唯一/LLM 已定域或用户显式指定域时不重复建议（避免 N 次 DB 查询）。
+    per_stmt_suggest = bool(
+        not domain_code and suggestion and suggestion.get("status") in ("multiple", "none")
+    )
     for idx, seg in enumerate(segments):
         profile = parse_sql_profile(seg)
-        statements.append(_statement_meta(idx, seg, profile))
+        seg_domain_code: str | None = None
+        if per_stmt_suggest:
+            from app.services.semantic.domain_suggest import suggest_domain
+
+            try:
+                seg_suggestion = await suggest_domain(db, sql=seg)
+                if seg_suggestion.get("status") in ("unique", "llm"):
+                    seg_domain_code = seg_suggestion["domain"]["code"]
+            except Exception:
+                seg_domain_code = None  # 逐语句建议失败不影响候选生成
+        statements.append(_statement_meta(idx, seg, profile, suggested_domain=seg_domain_code))
         if not profile.measures:
             # 规则层无聚合度量：仅对含 SELECT 的语句尝试 LLM 兜底提取（纯 DDL
             # 如 drop/create 非查询语句不浪费 LLM 调用）；LLM 不可用/失败才按
@@ -721,6 +765,7 @@ async def infer_sql_batch(
                             domain_code=domain_code,
                             domain_defaults=domain_defaults,
                             time_column=profile.time_column,
+                            suggested_domain_code=seg_domain_code,
                         )
                     )
             else:
@@ -754,6 +799,7 @@ async def infer_sql_batch(
                     domain_code=domain_code,
                     domain_defaults=domain_defaults,
                     time_column=profile.time_column,
+                    suggested_domain_code=seg_domain_code,
                 )
             )
         candidates.extend(atoms)
@@ -765,6 +811,7 @@ async def infer_sql_batch(
                 atoms=atoms,
                 domain_code=domain_code,
                 period=period,
+                suggested_domain_code=seg_domain_code,
             )
             if composite:
                 candidates.append(composite)

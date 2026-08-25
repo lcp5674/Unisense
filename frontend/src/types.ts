@@ -2814,6 +2814,8 @@ export interface SqlBatchCandidate {
   /** 复合候选的依赖指标编码 */
   dependencies?: string[] | null;
   statement_index: number;
+  /** P2-10：语句级建议域（整段域建议为多域/无域时后端逐语句反查；与生效域可能不同） */
+  suggested_domain_code?: string | null;
 }
 
 /** SQL 批量解析语句摘要（前端 Collapse 分组标题）。 */
@@ -2823,6 +2825,8 @@ export interface SqlStatementMeta {
   source_tables: string[];
   measure_count: number;
   group_by: string[];
+  /** P2-10：语句级建议域编码（未建议为 null） */
+  suggested_domain?: string | null;
 }
 
 /** SQL 批量解析响应（parse-sql-batch 端点）。 */
@@ -2853,6 +2857,8 @@ export interface SqlBatchRegisterCandidate {
   aggregation?: string | null;
   unit?: string | null;
   period?: string | null;
+  /** P1-5：粒度（推断产出，批量创建落库；旧式物理来源承载） */
+  granularity?: string | null;
   measure_id?: number | null;
   definition_json: Record<string, unknown>;
   dependencies?: string[] | null;

@@ -4524,6 +4524,8 @@ class MetricService(BaseService):
         """
         import uuid
 
+        from pydantic import ValidationError as PydanticValidationError
+
         from app.services.semantic.schemas import MetricCreateRequest
 
         batch_id = f"sqlbatch_{uuid.uuid4().hex[:12]}"
@@ -4563,6 +4565,7 @@ class MetricService(BaseService):
                         source_table=cand.source_table,
                         measure_column=cand.measure_column,
                         period=cand.period,
+                        granularity=cand.granularity,
                     )
                     await self.create_metric(
                         create_req, owner_id=actor_id, role=role, user_domain=user_domain
@@ -4570,6 +4573,16 @@ class MetricService(BaseService):
                 atom_ok.add(code)
                 candidates.append(
                     {"metric_code": code, "status": "DRAFT", "validation_errors": None}
+                )
+            except PydanticValidationError as exc:
+                # 候选参数校验失败（如空域非法编码 _order_amount_day、非法聚合等）
+                # 逐条标记 VALIDATION_ERROR，绝不因单个候选 schema 校验失败炸整批 500
+                candidates.append(
+                    {
+                        "metric_code": code,
+                        "status": "VALIDATION_ERROR",
+                        "validation_errors": f"候选参数校验失败: {exc.errors()[0].get('msg', '')}",
+                    }
                 )
             except (BusinessError, ConflictError) as exc:
                 candidates.append(
@@ -4631,12 +4644,23 @@ class MetricService(BaseService):
                         # 占位 SUM（对齐批量注册默认聚合）
                         aggregation=cand.aggregation or "SUM",
                         definition_json=cand.definition_json,
+                        # P1-3：复合候选携带实际统计周期/粒度（不再默认 day 失真）
+                        period=cand.period,
+                        granularity=cand.granularity,
                     )
                     await self.create_metric(
                         create_req, owner_id=actor_id, role=role, user_domain=user_domain
                     )
                 candidates.append(
                     {"metric_code": code, "status": "DRAFT", "validation_errors": None}
+                )
+            except PydanticValidationError as exc:
+                candidates.append(
+                    {
+                        "metric_code": code,
+                        "status": "VALIDATION_ERROR",
+                        "validation_errors": f"候选参数校验失败: {exc.errors()[0].get('msg', '')}",
+                    }
                 )
             except (BusinessError, ConflictError) as exc:
                 candidates.append(

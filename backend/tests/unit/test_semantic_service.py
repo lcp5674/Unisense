@@ -1944,6 +1944,61 @@ async def test_sql_batch_register_domain_gate():
     assert exc.value.error_code == "FORBIDDEN"
 
 
+async def test_sql_batch_register_catches_pydantic_validation_error():
+    """P0 兜底：候选构造 MetricCreateRequest 触发 pydantic ValidationError → 逐条标记
+    VALIDATION_ERROR，绝不因单个候选 schema 校验失败整批 500（此前非法编码/聚合漏网时
+    整批 500）。"""
+    from pydantic import ValidationError
+
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    request = MetricSqlBatchRegisterRequest(
+        domain="sales",
+        candidates=[
+            _sql_atomic("0:ok", "sales_order_ok_day", "日订单金额", "ok_col"),
+            _sql_atomic("0:bad", "sales_order_bad_day", "日用户数", "bad_col"),
+        ],
+    )
+    exc = ValidationError.from_exception_data(
+        "MetricCreateRequest",
+        [{
+            "type": "value_error",
+            "loc": ("metric_code",),
+            "input": "_bad",
+            "ctx": {"error": ValueError("非法编码")},
+        }],
+    )
+
+    real_create = svc.create_metric
+    counter = {"calls": 0}
+
+    async def _failing_create(req, **kw):
+        counter["calls"] += 1
+        # 第一个候选正常创建；第二个候选在 MetricCreateRequest 构造时抛 ValidationError
+        if counter["calls"] >= 2:
+            raise exc
+        return await real_create(req, **kw)
+
+    svc.create_metric = _failing_create  # type: ignore[method-assign]
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _fake_nested():
+        yield
+
+    svc._db.begin_nested = _fake_nested  # type: ignore[method-assign]
+
+    result = await svc.batch_register_from_sql(request, actor_id=1)
+    assert result["candidates"][0]["status"] == "DRAFT"
+    assert result["candidates"][1]["status"] == "VALIDATION_ERROR"
+    assert "候选参数校验失败" in result["candidates"][1]["validation_errors"]
+
+
 async def test_review_compliance_rejects_non_pii():
     """非 PII 指标无需合规复核 → PII_FLAG_REQUIRED。"""
     svc, repo = _svc_with_repo()

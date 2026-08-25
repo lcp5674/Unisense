@@ -97,7 +97,8 @@ const DICT_FIELD_MAP: Array<{ dictType: string; field: string; label: string }> 
 
 // SQL 批量解析候选行内可编辑的聚合方式（对齐 MetricCreateRequest 聚合枚举）。
 const AGG_OPTIONS = [
-  "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE",
+  "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "FIRST_VALUE",
+  "MAX", "MIN", "MEDIAN", "PERCENTILE",
 ].map((v) => ({ value: v, label: v }));
 
 // 统计周期选项：与粒度字典（granularity dict）对齐，避免同一"周期"概念两套数据源漂移。
@@ -321,6 +322,13 @@ export function MetricCreate() {
   const [sqlBatchResult, setSqlBatchResult] = useState<SqlBatchParseResult | null>(null);
   // 合成复合指标开关（单语句多度量时组内追加复合候选）
   const [sqlBatchSynthesize, setSqlBatchSynthesize] = useState(false);
+  // P2-8：切分模式（semicolon/statement/custom）——后端已实现，前端此前硬编码 statement
+  const [sqlBatchSplitMode, setSqlBatchSplitMode] = useState<"semicolon" | "statement" | "custom">(
+    "statement"
+  );
+  // P2-8：custom 模式自定义切分规则（delimiters/start_markers 正则，逗号分隔多规则）
+  const [sqlBatchCustomDelimiters, setSqlBatchCustomDelimiters] = useState("");
+  const [sqlBatchCustomMarkers, setSqlBatchCustomMarkers] = useState("");
   // 勾选的候选 key 集合（默认全选原子；复合由「合成复合」开关生成）
   const [sqlBatchChecked, setSqlBatchChecked] = useState<Set<string>>(new Set());
   // 勾选联动提示：取消勾选被复合依赖的原子时弹窗
@@ -789,7 +797,18 @@ export function MetricCreate() {
     try {
       const result = await parseSqlBatch({
         sql,
-        split_mode: "statement",
+        split_mode: sqlBatchSplitMode,
+        custom_rules:
+          sqlBatchSplitMode === "custom"
+            ? {
+                delimiters: sqlBatchCustomDelimiters
+                  ? sqlBatchCustomDelimiters.split(",").map((s) => s.trim()).filter(Boolean)
+                  : undefined,
+                start_markers: sqlBatchCustomMarkers
+                  ? sqlBatchCustomMarkers.split(",").map((s) => s.trim()).filter(Boolean)
+                  : undefined,
+              }
+            : undefined,
         synthesize_composite: synthesize,
       });
       setSqlBatchResult(result);
@@ -913,11 +932,24 @@ export function MetricCreate() {
     if (checked.length === 0) { message.warning("请至少勾选一个候选指标"); return; }
     setSqlBatchCreating(true);
     try {
+      // P0-1：候选编码可能为空（域未定时后端不 bake-in）——按最终 selectedDomain 生成
+      // 4 段编码（对齐后端 generate_metric_code：域_业务对象_度量_周期），避免空段非法编码。
+      const resolveCode = (c: SqlBatchCandidate): string => {
+        if (c.metric_code) return c.metric_code;
+        const rawTable = c.source_table || "";
+        const biz = rawTable
+          ? (rawTable.split(".").pop() || "")
+              .replace(/^(dwd_|ods_|dws_|ads_|dim_|tmp_)/, "")
+              .split("_")[0]
+          : "entity";
+        const measure = (c.measure_column || "metric").replace(/_/g, "").toLowerCase();
+        return [selectedDomain, biz || "entity", measure, c.period || "day"].join("_");
+      };
       const res = await batchRegisterFromSql({
         domain: selectedDomain,
         candidates: checked.map((c) => ({
           key: c.key,
-          metric_code: c.metric_code,
+          metric_code: resolveCode(c),
           name: c.name,
           type: c.type,
           source_table: c.source_table,
@@ -925,6 +957,7 @@ export function MetricCreate() {
           aggregation: c.aggregation,
           unit: c.unit,
           period: c.period,
+          granularity: c.granularity,
           definition_json: c.definition_json,
           dependencies: c.dependencies,
         })),
@@ -2057,6 +2090,42 @@ export function MetricCreate() {
               时 AI 兜底），每条语句可拆出多个度量候选；开启「合成复合指标」后多度量语句
               追加一个复合候选（依赖组内原子）。候选可勾选/改名/改聚合后一键批量创建 DRAFT。
             </Paragraph>
+            {/* P2-8：切分模式（semicolon/statement/custom）在解析前可配置 */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+              <span className="muted" style={{ fontSize: 12 }}>切分模式</span>
+              <Select
+                size="small"
+                style={{ width: 120 }}
+                value={sqlBatchSplitMode}
+                onChange={(v) => setSqlBatchSplitMode(v)}
+                data-testid="sql-batch-split-mode"
+                options={[
+                  { value: "statement", label: "语义切分" },
+                  { value: "semicolon", label: "分号切分" },
+                  { value: "custom", label: "自定义规则" },
+                ]}
+              />
+              {sqlBatchSplitMode === "custom" && (
+                <>
+                  <Input
+                    size="small"
+                    style={{ width: 170 }}
+                    placeholder="分隔符正则(逗号分隔)"
+                    value={sqlBatchCustomDelimiters}
+                    onChange={(e) => setSqlBatchCustomDelimiters(e.target.value)}
+                    allowClear
+                  />
+                  <Input
+                    size="small"
+                    style={{ width: 170 }}
+                    placeholder="起始标记正则(逗号分隔)"
+                    value={sqlBatchCustomMarkers}
+                    onChange={(e) => setSqlBatchCustomMarkers(e.target.value)}
+                    allowClear
+                  />
+                </>
+              )}
+            </div>
             <Button
               type="primary"
               block
@@ -2163,15 +2232,28 @@ export function MetricCreate() {
                                       onChange={(v) => handleSqlBatchEdit(c.key, { aggregation: v })}
                                       options={AGG_OPTIONS}
                                     />
-                                    <Tag color="green" style={{ fontSize: 12 }}>
-                                      {PERIOD_OPTIONS.find((p) => p.value === c.period)?.label || c.period || "日 (day)"}
-                                    </Tag>
+                                    {/* P2-9：周期可编辑（推断错可行内修正，不必先创建再改） */}
+                                    <Select
+                                      size="small"
+                                      style={{ width: 110 }}
+                                      value={c.period || "day"}
+                                      onChange={(v) => handleSqlBatchEdit(c.key, { period: v })}
+                                      data-testid={`sql-batch-period-${c.key}`}
+                                      options={PERIOD_OPTIONS}
+                                    />
+                                    {/* P2-10：语句级建议域与当前生效域不一致时提示（跨域脚本） */}
+                                    {c.suggested_domain_code && c.suggested_domain_code !== selectedDomain && (
+                                      <Tooltip title={`该语句表反查建议域为「${c.suggested_domain_code}」，与当前域 ${selectedDomain || "未选"} 不一致；将按当前域创建`}>
+                                        <Tag color="orange" style={{ fontSize: 12 }}>建议域 {c.suggested_domain_code}</Tag>
+                                      </Tooltip>
+                                    )}
                                   </>
                                 ) : (
                                   <Typography.Text style={{ fontSize: 12 }}>{c.name}</Typography.Text>
                                 )}
+                                {/* P0-1：候选编码为空（域未定时后端不 bake-in）→ 提示选域后自动生成 */}
                                 <Typography.Text code style={{ fontSize: 12, flex: 1 }}>
-                                  {c.metric_code}
+                                  {c.metric_code || <span className="muted">（选域后自动生成）</span>}
                                 </Typography.Text>
                                 {c.type === "composite" && (
                                   <Tooltip title="复合指标依赖批内原子（DRAFT）；批量提交评审会被「依赖未发布」拦截，需先发布原子后再提交">

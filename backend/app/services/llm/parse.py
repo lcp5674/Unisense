@@ -266,14 +266,40 @@ def parse_sql_split_result(raw: str) -> list[dict[str, Any]] | None:
 # LLM 周期推断白名单（与 sql_infer._KNOWN_GRAINS / 指标周期枚举对齐）
 _PERIOD_WHITELIST = ("day", "week", "month", "quarter", "year", "hour")
 
+# 周期别名（中文/英文全称/简写 → 白名单值）
+_PERIOD_ALIASES = {
+    "日": "day", "天": "day", "daily": "day", "1d": "day",
+    "周": "week", "weekly": "week", "1w": "week",
+    "月": "month", "月度": "month", "月均": "month", "monthly": "month", "1m": "month", "mon": "month",
+    "季": "quarter", "季度": "quarter", "quarterly": "quarter", "qtr": "quarter",
+    "年": "year", "年度": "year", "yearly": "year", "annually": "year",
+    "时": "hour", "小时": "hour", "hourly": "hour",
+}
+
+
+def normalize_period(raw: str | None) -> str | None:
+    """归一化统计周期到白名单值；缺失/非法返回 ``None``。
+
+    兼容中文别名（``月``/``月度`` → ``month``）与英文全称/简写
+    （``daily``/``1d`` → ``day``）。供 ``parse_period_infer_result`` 与
+    ``parse_sql_measures_result`` 共用——两个 LLM 解析器对同一「period」
+    字段必须用同一套白名单与别名，避免 SQL 度量提取兜底产出非法周期
+    （如 ``月度``）污染候选编码。
+    """
+    if not raw:
+        return None
+    low = str(raw).strip().lower()
+    if low in _PERIOD_ALIASES:
+        low = _PERIOD_ALIASES[low]
+    return low if low in _PERIOD_WHITELIST else None
+
 
 def parse_period_infer_result(raw: str) -> dict[str, Any] | None:
     """解析统计周期推断结果（LLM 兜底：规则层无法确定时间粒度时从 SQL 推断）。
 
     约定返回结构：``{"period", "confidence", "reason"}``。
-    ``period`` 须在白名单（day/week/month/quarter/year/hour）内，兼容常见
-    中文/英文别名（月/month、周/week 等）；``confidence`` 越界或缺任一关键字段
-    返回 ``None``（上层降级为规则层默认周期）。
+    ``period`` 经 ``normalize_period`` 归一化（白名单 + 中文/英文别名）；
+    ``confidence`` 越界或缺任一关键字段返回 ``None``（上层降级为规则层默认周期）。
 
     Returns:
         ``{"period", "confidence", "reason"}``；解析失败返回 ``None``。
@@ -282,21 +308,8 @@ def parse_period_infer_result(raw: str) -> dict[str, Any] | None:
     if obj is None:
         return None
     period = extract_str_field(obj, "period", "granularity", "grain", "cycle")
-    if period is None:
-        return None
-    low = period.lower()
-    # 兼容中文别名与英文全称
-    alias_map = {
-        "日": "day", "天": "day", "daily": "day", "1d": "day",
-        "周": "week", "weekly": "week", "1w": "week",
-        "月": "month", "monthly": "month", "1m": "month", "mon": "month",
-        "季": "quarter", "季度": "quarter", "quarterly": "quarter", "qtr": "quarter",
-        "年": "year", "年度": "year", "yearly": "year", "annually": "year",
-        "时": "hour", "小时": "hour", "hourly": "hour",
-    }
-    if low in alias_map:
-        low = alias_map[low]
-    if low not in _PERIOD_WHITELIST:
+    period_norm = normalize_period(period)
+    if period_norm is None:
         return None
     confidence = extract_numeric_field(
         obj, "confidence", "score", "prob", min_value=0.0, max_value=1.0
@@ -304,7 +317,7 @@ def parse_period_infer_result(raw: str) -> dict[str, Any] | None:
     if confidence is None:
         return None
     reason = extract_str_field(obj, "reason", "note", "explanation", "basis")
-    return {"period": low, "confidence": confidence, "reason": reason}
+    return {"period": period_norm, "confidence": confidence, "reason": reason}
 
 
 # LLM 度量提取聚合白名单（与 sql_infer._AGG_FUNCS 对齐）
@@ -380,8 +393,9 @@ def parse_sql_measures_result(raw: str) -> list[dict[str, Any]] | None:
         if table:
             measure["table"] = table
         period = extract_str_field(item, "period", "granularity", "grain", "cycle")
-        if period:
-            measure["period"] = period
+        period_norm = normalize_period(period)
+        if period_norm:
+            measure["period"] = period_norm
         name = extract_str_field(item, "name", "metric_name", "title", "desc")
         if name:
             measure["name"] = name

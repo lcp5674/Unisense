@@ -863,3 +863,92 @@ async def test_infer_sql_batch_llm_period_passes_full_sql() -> None:
     kwargs = mock_llm.await_args.kwargs
     assert kwargs["full_sql"] == full
     assert "SUM(amount)" in kwargs["focus_sql"]
+
+
+# ---------------------------------------------------------------- P0-1/P1-3/P2-10 修复回归
+
+
+async def test_infer_sql_batch_multiple_domain_no_illegal_code() -> None:
+    """P0-1+P2-10：整段域建议为多域时，候选不 bake-in 首段为空的非法编码，
+    且携带逐语句建议域（suggested_domain_code）。"""
+    multiple = {
+        "status": "multiple",
+        "domain": None,
+        "candidates": [
+            {"code": "sales", "name": "销售", "confidence": 0.9, "source": "catalog", "reason": "表A"},
+            {"code": "health", "name": "医疗", "confidence": 0.8, "source": "catalog", "reason": "表B"},
+        ],
+        "matched_tables": ["dwd_order_di", "dwd_patient_di"],
+    }
+
+    async def _per_stmt(db, **kwargs):
+        # 整段（多语句含分号）→ multiple；单段 → 按内容返回 unique（跨域）
+        sql = kwargs.get("sql", "")
+        if ";" in sql:
+            return multiple
+        if "user_id" in sql:
+            return {"status": "unique", "domain": {"code": "health"}, "candidates": [], "matched_tables": []}
+        return {"status": "unique", "domain": {"code": "sales"}, "candidates": [], "matched_tables": []}
+
+    with patch(
+        "app.services.semantic.domain_suggest.suggest_domain",
+        new=AsyncMock(side_effect=_per_stmt),
+    ):
+        result = await infer_sql_batch(
+            _fake_db(), sql=_MULTI_SQL, split_mode="statement"
+        )
+    # 整段 multiple → 域未生效 → 原子候选 metric_code 为 None（无 _xxx_day 非法编码）
+    assert result["domain"]["status"] == "multiple"
+    atoms = [c for c in result["candidates"] if c["type"] == "atomic"]
+    assert atoms, "应有原子候选"
+    assert all(c["metric_code"] is None for c in atoms), "多域态不得 bake-in 非法编码"
+    # P2-10：候选携带逐语句建议域（第二句 health、第一句 sales）
+    codes = {c["suggested_domain_code"] for c in atoms}
+    assert "sales" in codes and "health" in codes
+
+
+async def test_infer_sql_batch_composite_uses_real_period() -> None:
+    """P1-3：月粒度语句的复合候选编码/粒度用实际周期（不再硬编码 _day/day）。"""
+    month_sql = (
+        "SELECT substr(create_date,1,7) AS month_id, "
+        "SUM(amount) AS gmv, COUNT(DISTINCT user_id) AS uv "
+        "FROM dwd_order_di GROUP BY substr(create_date,1,7)"
+    )
+    result = await infer_sql_batch(
+        _fake_db(), sql=month_sql, split_mode="statement", domain_code="sales",
+        synthesize_composite=True,
+    )
+    comp = next(c for c in result["candidates"] if c["type"] == "composite")
+    assert comp["metric_code"].endswith("_month"), comp["metric_code"]
+    assert comp["granularity"] == "month"
+    assert "_day" not in comp["metric_code"]
+    # 原子候选周期也是 month
+    atoms = [c for c in result["candidates"] if c["type"] == "atomic"]
+    assert all(c["period"] == "month" for c in atoms)
+
+
+def test_build_atomic_candidate_empty_domain_code_none() -> None:
+    """P0-1 单测：域为空时原子候选编码为 None（不生成 _xxx_day 非法编码）。"""
+    from app.services.semantic.sql_split import _build_atomic_candidate
+
+    cand = _build_atomic_candidate(
+        idx=0,
+        measure={"column": "amount", "agg": "SUM"},
+        table="dwd_order_di",
+        period="day",
+        domain_code=None,
+        domain_defaults={},
+        time_column="dt",
+    )
+    assert cand["metric_code"] is None
+    # 有域时正常生成
+    cand2 = _build_atomic_candidate(
+        idx=0,
+        measure={"column": "amount", "agg": "SUM"},
+        table="dwd_order_di",
+        period="day",
+        domain_code="sales",
+        domain_defaults={},
+        time_column="dt",
+    )
+    assert cand2["metric_code"] == "sales_order_amount_day"

@@ -45,7 +45,9 @@ _TIME_GRAIN_ALIAS = (
     ("hour_id", "hour"), ("stat_hour", "hour"),
     ("day_id", "day"), ("stat_date", "day"),
 )
-# 聚合函数 → 规范大写
+# 聚合函数 → 规范大写（含窗口/首末值函数；实际解析名见 _agg_display_name）。
+# 注意 sqlglot 的 key 无下划线（FIRST_VALUE → FIRSTVALUE），此处保留注册
+# schema 的带下划线规范名作为「推断产物 → 注册枚举」对齐的权威清单。
 _AGG_FUNCS = {
     "SUM",
     "AVG",
@@ -194,6 +196,13 @@ def _agg_display_name(agg: exp.AggFunc) -> str:
         return "COUNT"
     if key == "APPROXDISTINCT":
         return "COUNT_DISTINCT"
+    # 首/末值窗口函数：sqlglot key 无下划线（FIRSTVALUE），归一为注册 schema 的
+    # 带下划线枚举（MetricCreateRequest.aggregation Literal）——否则批量创建时
+    # 候选聚合 FIRSTVALUE 不匹配枚举 → pydantic 校验整批失败（P1-4 一致性缺陷）。
+    if key in ("FIRSTVALUE", "FIRST_VALUE"):
+        return "FIRST_VALUE"
+    if key in ("LASTVALUE", "LAST_VALUE"):
+        return "LAST_VALUE"
     if key.startswith("PERCENTILE"):
         return "PERCENTILE"
     return key

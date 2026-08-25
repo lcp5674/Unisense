@@ -112,9 +112,11 @@ class MetricCreateRequest(BaseModel):
         ),
     )
     currency: str | None = Field(None, max_length=16, description="币种")
-    # 与字典种子对齐（9 值）：SUM/AVG/COUNT/COUNT_DISTINCT/LAST_VALUE + MAX/MIN/MEDIAN/PERCENTILE
+    # 与字典种子对齐（10 值）：SUM/AVG/COUNT/COUNT_DISTINCT/LAST_VALUE/FIRST_VALUE
+    # + MAX/MIN/MEDIAN/PERCENTILE（FIRST_VALUE 由 SQL 推断产出，如余额首值场景）
     aggregation: Literal[
-        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE"
+        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "FIRST_VALUE",
+        "MAX", "MIN", "MEDIAN", "PERCENTILE",
     ] = Field(
         ...,
         description="聚合方式: SUM/AVG/COUNT/COUNT_DISTINCT/LAST_VALUE/MAX/MIN/MEDIAN/PERCENTILE",
@@ -626,10 +628,18 @@ class SqlBatchCreateCandidate(BaseModel):
     source_table: str | None = Field(None, max_length=256, description="源表名")
     measure_column: str | None = Field(None, max_length=128, description="度量列（复合为空）")
     aggregation: Literal[
-        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE"
+        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "FIRST_VALUE",
+        "MAX", "MIN", "MEDIAN", "PERCENTILE",
     ] | None = Field(None, description="聚合方式（复合为空）")
     unit: str | None = Field(None, max_length=32, description="单位")
     period: str | None = Field(None, max_length=16, description="统计周期")
+    granularity: str | None = Field(
+        None,
+        max_length=64,
+        description=(
+            "粒度（由推断产出，批量创建落库；OneData 粒度下沉前旧式物理来源承载）"
+        ),
+    )
     measure_id: int | None = Field(None, ge=1, description="关联逻辑度量（原子可选）")
     definition_json: dict[str, Any] = Field(
         ...,
@@ -674,7 +684,8 @@ class MetricTemplateCreateRequest(BaseModel):
     granularity: str | None = Field(None, max_length=64, description="粒度预设")
     unit: str | None = Field(None, max_length=32, description="单位预设")
     aggregation: Literal[
-        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE"
+        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "FIRST_VALUE",
+        "MAX", "MIN", "MEDIAN", "PERCENTILE",
     ] | None = Field(None, description="聚合方式预设")
     time_semantics: Literal["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"] | None = Field(
         None, description="时间语义预设"
@@ -723,7 +734,8 @@ class MetricTemplateUpdateRequest(BaseModel):
     granularity: str | None = Field(None, max_length=64, description="粒度预设")
     unit: str | None = Field(None, max_length=32, description="单位预设")
     aggregation: Literal[
-        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE"
+        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "FIRST_VALUE",
+        "MAX", "MIN", "MEDIAN", "PERCENTILE",
     ] | None = Field(None, description="聚合方式预设")
     time_semantics: Literal["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"] | None = Field(
         None, description="时间语义预设"

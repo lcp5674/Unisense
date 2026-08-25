@@ -317,3 +317,14 @@ class TestParseSqlProfile:
         assert p.time_column == "dt"
         assert p.time_granularity is None
 
+    def test_first_last_value_normalized_to_registry_enum(self) -> None:
+        """P1-4：FIRST_VALUE/LAST_VALUE 窗口函数归一为注册 schema 枚举（FIRSTVALUE→FIRST_VALUE），
+        批量创建不再因聚合不匹配 Literal 整批失败。"""
+        p = parse_sql_profile(
+            "SELECT dt, FIRST_VALUE(amount) AS first_amt, LAST_VALUE(amount) AS last_amt "
+            "FROM dwd.balance GROUP BY dt"
+        )
+        aggs = {(m["column"], m["agg"]) for m in p.measures}
+        assert ("amount", "FIRST_VALUE") in aggs
+        assert ("amount", "LAST_VALUE") in aggs
+
