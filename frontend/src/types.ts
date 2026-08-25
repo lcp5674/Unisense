@@ -29,6 +29,9 @@ export interface MetricResponse {
   granularity: string | null;
   /** OneData 原子层：关联逻辑度量 ID（原子必填；派生/复合继承可空；旧后端缺省） */
   measure_id?: number | null;
+  /** 逻辑度量展示信息（backend best-effort 填充）：详情页「逻辑度量」栏展示名称+编码 */
+  measure_code?: string | null;
+  measure_name?: string | null;
   unit: string;
   currency: string | null;
   aggregation: string;

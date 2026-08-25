@@ -351,6 +351,7 @@ class MetricService(BaseService):
         owner_id: int,
         role: str | None = None,
         user_domain: str | None = None,
+        _preloaded_conflict_existing: list[Any] | None = None,
     ) -> Metric:
         """创建指标（初始状态 DRAFT）。
 
@@ -605,7 +606,13 @@ class MetricService(BaseService):
         # 可处置记录」严格一致，杜绝「有标记无记录」的孤儿态（曾致目录显示冲突、
         # 仲裁台为空、标记无法通过正常仲裁清除）。软冲突同样落库，仲裁台区分展示。
         # 抽取为公共方法 _detect_and_mark_conflicts：更新口径后（P2-I）复用同一逻辑。
-        metric = await self._detect_and_mark_conflicts(metric, definition) or metric
+        # 批量注册场景传入预加载的 existing（逐列增量追加），避免 N 次全量加载。
+        metric = (
+            await self._detect_and_mark_conflicts(
+                metric, definition, existing=_preloaded_conflict_existing
+            )
+            or metric
+        )
 
         # PII 血缘传播（对齐 US13/TD §12.6）：创建时若声明的上游字段带 PII 标记，
         # 则联动治理服务标记指标 pii_flag + lineage_edge.pii_inherited。
@@ -686,13 +693,25 @@ class MetricService(BaseService):
             )
         return result
 
-    async def _detect_and_mark_conflicts(self, metric: Metric, definition: dict[str, Any]) -> None:
+    async def _detect_and_mark_conflicts(
+        self,
+        metric: Metric,
+        definition: dict[str, Any],
+        existing: list[Any] | None = None,
+    ) -> Metric:
         """创建/口径更新后自动预检相似口径（best-effort，不阻断主流程）。
 
         P2-I：更新口径后也触发重检（原仅创建时检测一次）——指标改口径后与其它
         指标"后来变得同义"也能被发现。命中即落 conflict 表 OPEN 记录（硬/软均落，
         source=auto），并按冲突表**实际未决记录**挂 pending_conflict 标记——保证
         「指标目录标记 ⇔ 仲裁台可处置记录」严格一致，杜绝「有标记无记录」孤儿态。
+
+        Args:
+            metric: 目标指标。
+            definition: 口径定义。
+            existing: 预加载的冲突比对对象（批量注册场景由调用方加载一次并逐列
+                增量追加，避免 N 列 = N 次全量加载的 O(N²) 性能退化）；None 时
+                内部加载（单条/更新场景）。
         """
         try:
             from app.services.conflict.repository import ConflictRepository
@@ -745,7 +764,8 @@ class MetricService(BaseService):
                 except Exception:  # noqa: BLE001 - best-effort：同义词查询失败仅跳过
                     pass
 
-            existing = await self.load_conflict_existing()
+            if existing is None:
+                existing = await self.load_conflict_existing()
             # 排除自身：指标已落库，避免与自身比对（check 亦有自我引用防御，此处省查询）
             existing = [e for e in existing if e.metric_code != metric.metric_code]
             await ConflictService(self._db).check(
@@ -836,7 +856,7 @@ class MetricService(BaseService):
         if cached is not None:
             resp = MetricResponse.model_validate(cached)
             self._assert_metric_visible(resp, actor_id, role)
-            return resp
+            return await self._attach_measure_info(resp)
         metric = await self._repo.get_by_code(metric_code)
         if metric is None:
             # 详情直访的友好作废引导：指标因口径仲裁被软删（deleted_at + successor）时，
@@ -856,7 +876,34 @@ class MetricService(BaseService):
             raise NotFoundError(f"指标不存在: {metric_code}")
         self._assert_metric_visible(metric, actor_id, role)
         await self._cache.set(metric)
-        return MetricResponse.model_validate(metric)
+        return await self._attach_measure_info(MetricResponse.model_validate(metric))
+
+    async def _attach_measure_info(self, resp: MetricResponse) -> MetricResponse:
+        """best-effort 填充逻辑度量展示信息（measure_code/measure_name）。
+
+        原子指标关联的权威继承源（度量目录）在详情页「逻辑度量」栏展示名称+编码；
+        度量已软删/查询异常时降级为仅 measure_id（不阻断详情读取）。
+        """
+        if resp.measure_id is None:
+            return resp
+        try:
+            from sqlalchemy import select
+
+            from app.models.measure_catalog import MeasureCatalog
+
+            row = (
+                await self._db.execute(
+                    select(MeasureCatalog.measure_code, MeasureCatalog.name).where(
+                        MeasureCatalog.id == resp.measure_id
+                    )
+                )
+            ).first()
+            if row is not None:
+                resp.measure_code = row[0]
+                resp.measure_name = row[1]
+        except Exception:  # noqa: BLE001 - best-effort：度量查询失败仅降级
+            pass
+        return resp
 
     async def get_archived_metric_public(self, metric_code: str) -> dict[str, Any]:
         """作废指标详情（含 successor 指针与历史口径），供作废引导页展示。
@@ -1009,6 +1056,23 @@ class MetricService(BaseService):
                 f"指标状态 {metric.status} 不允许更新",
                 error_code="VALIDATION_ERROR",
             )
+
+        # OneData 原子层校验（对齐 create_metric 3a）：更新/更换关联逻辑度量时，
+        # 目标度量须存在（防 FK 500——传不存在 measure_id 时 flush 抛 IntegrityError→500）；
+        # 原子指标还须 PUBLISHED（度量是原子指标的权威继承源，草稿/软删度量不可被引用）。
+        if request.measure_id is not None:
+            measure = await self._measure_repo.get_by_id(request.measure_id)
+            if measure is None:
+                raise ValidationError(
+                    f"关联的逻辑度量不存在: {request.measure_id}",
+                    error_code="MEASURE_NOT_FOUND",
+                )
+            if metric.type == "atomic" and measure.status != "PUBLISHED":
+                raise ValidationError(
+                    "关联的逻辑度量未发布"
+                    f"（当前 {measure.status}），不可用于该指标: {request.measure_id}",
+                    error_code="MEASURE_NOT_PUBLISHED",
+                )
 
         # 收集更新字段
         updates: dict[str, Any] = {}
@@ -4279,6 +4343,15 @@ class MetricService(BaseService):
         # 获取域默认值
         domain_defaults = await self._get_domain_defaults(request.domain)
 
+        # L3：冲突预检比对对象在批量循环内共享——预加载一次，每列成功后增量追加，
+        # 避免 N 列 = N 次全量加载 + N 次与全量 existing 比对（O(N²) 性能退化）。
+        # best-effort：预加载失败降级为 None（每列内部 load_conflict_existing 亦
+        # 有 best-effort 兜底），不阻断批量注册。
+        try:
+            preloaded_existing = await self.load_conflict_existing()
+        except Exception:  # noqa: BLE001 - 预加载失败仅降级，不影响主流程
+            preloaded_existing = None
+
         for col in request.measure_columns:
             # 使用 auto_fill 引擎生成编码建议
             from app.services.semantic.auto_fill import auto_fill as _auto_fill
@@ -4343,9 +4416,36 @@ class MetricService(BaseService):
                         period="day",
                         batch_id=batch_id,
                     )
-                    await self.create_metric(
-                        create_req, owner_id=actor_id, role=role, user_domain=user_domain
+                    _created = await self.create_metric(
+                        create_req,
+                        owner_id=actor_id,
+                        role=role,
+                        user_domain=user_domain,
+                        _preloaded_conflict_existing=preloaded_existing,
                     )
+                    # L3 增量：新列成功后追加到共享 existing，保持候选间互相冲突检测
+                    # （与逐列加载时「前一候选已 flush 出现在后续列比对集」行为一致）。
+                    if preloaded_existing is not None and _created is not None:
+                        from app.services.conflict.schemas import MetricInput
+
+                        _cdef = _created.definition_json or {}
+                        preloaded_existing.append(
+                            MetricInput(
+                                metric_code=_created.metric_code,
+                                domain=_created.domain or "",
+                                definition=(
+                                    _cdef.get("definition")
+                                    or _cdef.get("expression")
+                                    or ""
+                                ),
+                                source_tables=_cdef.get("source_tables") or [],
+                                has_pii=bool(_created.pii_flag),
+                                pii_authorized=bool(_created.compliance_reviewed),
+                                metric_id=_created.id,
+                                definition_json=_cdef,
+                                synonyms=[],
+                            )
+                        )
                 candidates.append(
                     {
                         "metric_code": code,

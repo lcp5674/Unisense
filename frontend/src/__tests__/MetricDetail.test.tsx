@@ -3,7 +3,7 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 import { MemoryRouter, Routes, Route, useSearchParams } from "react-router-dom";
 import { MetricDetail } from "../pages/MetricDetail";
 import { PermissionProvider } from "../hooks/usePermission";
-import type { MetricHealth, MetricResponse, SystemDictItem } from "../types";
+import type { MeasureCatalog, MetricHealth, MetricResponse, SystemDictItem } from "../types";
 
 vi.mock("../api", () => ({
   getMetric: vi.fn(),
@@ -13,6 +13,7 @@ vi.mock("../api", () => ({
   fetchMyPermissions: vi.fn(),
   listFavorites: vi.fn(),
   listMetrics: vi.fn(),
+  listMeasureCatalogs: vi.fn().mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 }),
   listCatalogs: vi.fn().mockResolvedValue({ items: [] }),
   getMetricHealth: vi.fn(),
   listDictItems: vi.fn(),
@@ -74,6 +75,7 @@ import {
   listDimensions,
   listFavorites,
   listMetrics,
+  listMeasureCatalogs,
   listCatalogs,
   getMetricHealth,
   listUsers,
@@ -110,6 +112,7 @@ const mockedDictItems = vi.mocked(listDictItems);
 const mockedDimensions = vi.mocked(listDimensions);
 const mockedCatalogs = vi.mocked(listCatalogs);
 const mockedListMetrics = vi.mocked(listMetrics);
+const mockedListMeasureCatalogs = vi.mocked(listMeasureCatalogs);
 const mockedFavorites = vi.mocked(listFavorites);
 const mockedHealth = vi.mocked(getMetricHealth);
 const mockedUsers = vi.mocked(listUsers);
@@ -809,7 +812,10 @@ describe("MetricDetail 按钮级权限过滤", () => {
   it("有 metric:approve 权限点时 REVIEW 状态显示审批/灰度发布按钮", async () => {
     mockedGetMetric.mockResolvedValue({ ...metric, status: "REVIEW", pii_flag: false });
     renderWithPerms(["metric:approve", "metric:emergency-publish"]);
-    expect(await screen.findByText("审批通过")).toBeInTheDocument();
+    // M1 修复：未指派评审人时非管理角色按钮显示为「审批通过（未被指派评审）」且禁用
+    // （与后端 _assert_reviewer_authorized 未指派仅 domain_admin 兜底一致）——按钮仍展示，
+    // 用正则匹配变体文案
+    expect(await screen.findByText(/审批通过/)).toBeInTheDocument();
     expect(screen.getByText("灰度发布")).toBeInTheDocument();
     expect(screen.getByText("紧急发布")).toBeInTheDocument();
   });
@@ -2003,6 +2009,257 @@ describe("MetricDetail 按钮级权限过滤", () => {
           definition_json: expect.not.objectContaining({ dimensions: expect.anything() }),
         }),
       );
+    });
+  });
+
+  it("H3：编辑弹窗清空口径 JSON 后改子字段 → 提交口径保留原主体（不丢 expression/sql/source_tables）", async () => {
+    // 修复前：口径 JSON 文本框留空后，子字段（伪代码/数仓/维度等）合并以 {} 为基底，
+    // 原口径主体被静默丢弃（保存后口径变空）。修复后：子字段合并以原 metric.definition_json
+    // 为基底，仅叠加改动字段。
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "DRAFT",
+      // 无 sql → expression 模式 → 编辑弹窗显示「口径定义（JSON）」文本框
+      definition_json: {
+        expression: "sum(gmv)",
+        definition: "当日支付成功订单的成交总额",
+        source_tables: ["dwd_order_di"],
+        dependencies: ["user_base_cnt_d"],
+      },
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1, role: "metric_owner", home_domain: "outpatient",
+      allowed_actions: ["read", "write"], ui_actions: ["metric:create"],
+      granted_domains: [], metric_whitelist: [], row_level_restricted: false, grants: [], expiring_soon: [],
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    fireEvent.click(await screen.findByRole("button", { name: /编辑/ }));
+    await waitFor(() => expect(document.querySelector(".ant-modal")).toBeTruthy());
+    // 清空口径 JSON 文本框（UI 提示「留空表示不修改口径」）
+    const defArea = document.querySelector('.ant-modal textarea[id="definition_json"]') as HTMLTextAreaElement;
+    fireEvent.change(defArea, { target: { value: "" } });
+    // 改伪代码口径（子字段 dirty → 触发合并）
+    const pseudoArea = document.querySelector('.ant-modal textarea[data-testid="editPseudoDefinition"]') as HTMLTextAreaElement;
+    fireEvent.change(pseudoArea, { target: { value: "sum(成交额) 按日汇总" } });
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "补充口径说明" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => {
+      const lastCall = mockedUpdateMetric.mock.calls[mockedUpdateMetric.mock.calls.length - 1]?.[1];
+      expect(lastCall?.definition_json).toEqual(
+        expect.objectContaining({
+          expression: "sum(gmv)", // 原主体保留（修复核心断言）
+          source_tables: ["dwd_order_di"], // 原 source_tables 保留
+          pseudo_definition: "sum(成交额) 按日汇总", // 新子字段叠加
+        }),
+      );
+    });
+  });
+
+  it("M2：PUBLISHED 仅改治理属性 → 提示直接生效，不宣称进入消费方确认期", async () => {
+    // 修复前：PUBLISHED 保存成功无条件提示「破坏性修改进入消费方确认期」。
+    // 修复后：仅实际破坏性（粒度/单位/聚合/口径主体）变化才提示 PENDING，治理属性直接更新。
+    // 用纯 SQL 模式口径（无 expression）：避免 SQL 模式重组排除 expression 被误判为破坏性
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "PUBLISHED",
+      definition_json: {
+        sql: "SELECT SUM(order_amount) AS gmv, dt FROM dwd_order_di GROUP BY dt",
+        source_tables: ["dwd_order_di"],
+        dependencies: ["user_base_cnt_d"],
+      },
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1, role: "metric_owner", home_domain: "outpatient",
+      allowed_actions: ["read", "write"], ui_actions: ["metric:create"],
+      granted_domains: [], metric_whitelist: [], row_level_restricted: false, grants: [], expiring_soon: [],
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    // PUBLISHED 状态编辑入口文案为「发起变更申请」（1666 行，与 DRAFT 的「编辑」区分）
+    fireEvent.click(await screen.findByRole("button", { name: /变更申请/ }));
+    await waitFor(() => expect(document.querySelector(".ant-modal")).toBeTruthy());
+    // 只改名称（治理属性，非破坏性）→ 保存 → 提示「已直接更新，无需消费方确认」
+    const nameInput = document.querySelector('.ant-modal input[id="name"]') as HTMLInputElement;
+    fireEvent.change(nameInput, { target: { value: "销售 GMV（改名）" } });
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "治理属性调整" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await screen.findByText("指标已更新（治理属性变更已直接生效，无需消费方确认）");
+    expect(mockedUpdateMetric).toHaveBeenCalled();
+  });
+
+  it("详情页 atomic 展示已关联逻辑度量名称+编码（backend best-effort 填充）", async () => {
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      pii_flag: false,
+      measure_name: "支付金额",
+      measure_code: "pay_amt",
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1, role: "metric_owner", home_domain: "outpatient",
+      allowed_actions: ["read", "write"], ui_actions: ["metric:read"],
+      granted_domains: [], metric_whitelist: [], row_level_restricted: false, grants: [], expiring_soon: [],
+    });
+    renderWithPerms(["metric:read"]);
+    await screen.findByText("销售 GMV");
+    // Descriptions「逻辑度量」栏：名称 + 编码
+    expect(screen.getByText("逻辑度量")).toBeInTheDocument();
+    expect(screen.getByText("支付金额")).toBeInTheDocument();
+    expect(screen.getByText("pay_amt")).toBeInTheDocument();
+  });
+
+  it("详情页 atomic 未关联逻辑度量显示引导（存量旧式来源）", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, pii_flag: false, measure_id: null });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1, role: "metric_owner", home_domain: "outpatient",
+      allowed_actions: ["read", "write"], ui_actions: ["metric:read"],
+      granted_domains: [], metric_whitelist: [], row_level_restricted: false, grants: [], expiring_soon: [],
+    });
+    renderWithPerms(["metric:read"]);
+    await screen.findByText("销售 GMV");
+    expect(screen.getByText(/未关联（存量旧式来源）/)).toBeInTheDocument();
+  });
+
+  it("atomic 编辑弹窗显示逻辑度量选择器并提交更换（破坏性口径变更）", async () => {
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      pii_flag: false,
+      measure_id: 1,
+      measure_name: "支付金额",
+      measure_code: "pay_amt",
+    });
+    mockedListMeasureCatalogs.mockResolvedValue({
+      items: [
+        { id: 1, measure_code: "pay_amt", name: "支付金额", status: "PUBLISHED" } as unknown as MeasureCatalog,
+        { id: 2, measure_code: "gmv_amt", name: "成交总额", status: "PUBLISHED" } as unknown as MeasureCatalog,
+      ],
+      total: 2, page: 1, page_size: 200,
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1, role: "metric_owner", home_domain: "outpatient",
+      allowed_actions: ["read", "write"], ui_actions: ["metric:create"],
+      granted_domains: [], metric_whitelist: [], row_level_restricted: false, grants: [], expiring_soon: [],
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    fireEvent.click(await screen.findByRole("button", { name: /变更申请/ }));
+    await waitFor(() => expect(document.querySelector(".ant-modal")).toBeTruthy());
+    // 逻辑度量选择器（atomic 专属，位于名称后、粒度前，是弹窗内首个 Select）
+    expect(screen.getByText("逻辑度量（度量目录，OneData 原子层）")).toBeInTheDocument();
+    // 选择新度量
+    fireEvent.mouseDown(document.querySelector(".ant-modal .ant-select-selector") as HTMLElement);
+    await screen.findByText("成交总额（gmv_amt）");
+    fireEvent.click(screen.getByText("成交总额（gmv_amt）"));
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "更换逻辑度量" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => {
+      const lastCall = mockedUpdateMetric.mock.calls[mockedUpdateMetric.mock.calls.length - 1]?.[1];
+      expect(lastCall?.measure_id).toBe(2);
+    });
+  });
+
+  it("atomic 编辑弹窗清空逻辑度量 → 提交 measure_id=null 解除关联", async () => {
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      pii_flag: false,
+      measure_id: 1,
+      measure_name: "支付金额",
+      measure_code: "pay_amt",
+    });
+    mockedListMeasureCatalogs.mockResolvedValue({
+      items: [
+        { id: 1, measure_code: "pay_amt", name: "支付金额", status: "PUBLISHED" } as unknown as MeasureCatalog,
+      ],
+      total: 1, page: 1, page_size: 200,
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1, role: "metric_owner", home_domain: "outpatient",
+      allowed_actions: ["read", "write"], ui_actions: ["metric:create"],
+      granted_domains: [], metric_whitelist: [], row_level_restricted: false, grants: [], expiring_soon: [],
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    fireEvent.click(await screen.findByRole("button", { name: /变更申请/ }));
+    await waitFor(() => expect(document.querySelector(".ant-modal")).toBeTruthy());
+    // 回填当前逻辑度量后 allowClear 清除按钮已渲染（首个 Select 为逻辑度量）——直接点击解除关联
+    const clearBtn = document.querySelector(".ant-modal .ant-select-clear") as HTMLElement;
+    expect(clearBtn).toBeTruthy();
+    fireEvent.mouseDown(clearBtn);
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "解除逻辑度量关联" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => {
+      const lastCall = mockedUpdateMetric.mock.calls[mockedUpdateMetric.mock.calls.length - 1]?.[1];
+      expect(lastCall?.measure_id).toBeNull();
     });
   });
 });

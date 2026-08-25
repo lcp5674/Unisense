@@ -502,6 +502,67 @@ async def test_update_metric_creates_version_and_bumps():
     assert result.version == 2
 
 
+async def test_update_metric_rejects_missing_measure():
+    """OneData 校验：更新关联逻辑度量不存在 → 拒绝（防 FK 500）。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(status="DRAFT", row_version=1, version=1)
+    repo.get_by_code = AsyncMock(return_value=existing)
+    measure_repo = MagicMock()
+    measure_repo.get_by_id = AsyncMock(return_value=None)
+    svc._measure_repo = measure_repo
+
+    with pytest.raises(ValidationError) as exc:
+        await svc.update_metric(
+            "sales_gmv_daily",
+            MetricUpdateRequest(measure_id=999, change_reason="更换逻辑度量"),
+            actor_id=1,
+            role="metric_owner",
+        )
+    assert exc.value.error_code == "MEASURE_NOT_FOUND"
+
+
+async def test_update_metric_rejects_unpublished_measure():
+    """OneData 校验：原子指标关联的逻辑度量未发布 → 拒绝（权威继承源须已发布）。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(status="DRAFT", row_version=1, version=1)
+    repo.get_by_code = AsyncMock(return_value=existing)
+    measure_repo = MagicMock()
+    draft_measure = MagicMock()
+    draft_measure.status = "DRAFT"
+    measure_repo.get_by_id = AsyncMock(return_value=draft_measure)
+    svc._measure_repo = measure_repo
+
+    with pytest.raises(ValidationError) as exc:
+        await svc.update_metric(
+            "sales_gmv_daily",
+            MetricUpdateRequest(measure_id=2, change_reason="更换逻辑度量"),
+            actor_id=1,
+            role="metric_owner",
+        )
+    assert exc.value.error_code == "MEASURE_NOT_PUBLISHED"
+
+
+async def test_update_metric_accepts_published_measure():
+    """OneData 校验：关联逻辑度量存在且已发布 → 正常更新并收集 measure_id（破坏性口径变更）。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(status="DRAFT", row_version=1, version=1)
+    repo.get_by_code = AsyncMock(return_value=existing)
+    updated = make_metric(status="DRAFT", row_version=2, version=2)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    result = await svc.update_metric(
+        "sales_gmv_daily",
+        MetricUpdateRequest(measure_id=1, change_reason="更换逻辑度量"),
+        actor_id=1,
+        role="metric_owner",
+    )
+    # measure_id 被收集进更新字段（后端 BREAKING_TOP_LEVEL_FIELDS 含 measure_id）
+    call_args = repo.update_with_optimistic_lock.call_args
+    assert call_args.kwargs.get("measure_id") == 1
+    assert result.row_version == 2
+
+
 async def test_update_metric_definition_change_triggers_conflict_recheck():
     """P2-I：口径变更后触发冲突重检（best-effort，不阻断更新）。
 
@@ -918,7 +979,12 @@ async def test_promote_pending_version_applies_mount_change():
     version_obj = MagicMock()
     version_obj.definition_json = metric.definition_json
     version_obj.diff_json = {
-        "granularity": {"before": "日", "after": "月", "change_type": "BREAKING", "mount_change": True},
+        "granularity": {
+            "before": "日",
+            "after": "月",
+            "change_type": "BREAKING",
+            "mount_change": True,
+        },
     }
     repo.get_version = AsyncMock(return_value=version_obj)
     updated = make_metric(status="PUBLISHED", type="derived", granularity="月", row_version=6)
@@ -1495,6 +1561,41 @@ async def test_batch_register_success():
     assert len(result["candidates"]) == 2
     # 实现契约：每条候选 {metric_code, status, validation_errors}，成功为 DRAFT
     assert all(c["status"] == "DRAFT" for c in result["candidates"])
+
+
+async def test_batch_register_conflict_existing_loaded_once():
+    """L3：批量注册冲突预检比对对象只加载一次（循环外预加载 + 逐列增量）。
+
+    修复前每列 create_metric → _detect_and_mark_conflicts 都调 load_conflict_existing
+    全量加载（N 列 = N 次全量加载，O(N²) 性能退化）。修复后循环前预加载一次，
+    逐列成功后增量追加，保持候选间互相冲突检测。
+    """
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    # mock 全量加载源：返回空活动指标（load_conflict_existing 正常返回 []）
+    repo.list_active_for_conflict = AsyncMock(return_value=[])
+
+    from app.services.semantic.schemas import MetricBatchRegisterRequest
+
+    request = MetricBatchRegisterRequest(
+        source_table="dwd.sales_detail",
+        measure_columns=["gmv", "order_cnt", "order_amt"],
+        dimension_mapping={"domain": "sales"},
+        llm_prefill=True,
+        domain="sales",
+    )
+
+    load_spy = AsyncMock(wraps=svc.load_conflict_existing)
+    svc.load_conflict_existing = load_spy  # type: ignore[method-assign]
+
+    result = await svc.batch_register_metrics(request, actor_id=1)
+
+    assert len(result["candidates"]) == 3
+    assert all(c["status"] == "DRAFT" for c in result["candidates"])
+    # 核心断言：3 列只触发 1 次全量加载（循环外），而非每列 1 次（修复前为 3 次）
+    assert load_spy.await_count == 1
     assert all(c["validation_errors"] is None for c in result["candidates"])
 
 
@@ -2421,13 +2522,17 @@ async def test_approve_metric_hard_conflict_blocked():
         similarity_score=0.95,
         metric_codes={"candidate": "sales_gmv_daily", "existing": "sales_gmv_weekly"},
     )
-    with patch.object(
-        ConflictRepository, "get_first_open_for_metric", new=AsyncMock(return_value=hard_conflict)
+    with (
+        patch.object(
+            ConflictRepository,
+            "get_first_open_for_metric",
+            new=AsyncMock(return_value=hard_conflict),
+        ),
+        pytest.raises(BusinessError) as exc,
     ):
-        with pytest.raises(BusinessError) as exc:
-            await svc.approve_metric(
-                "sales_gmv_daily", MetricApproveRequest(), actor_id=1, role="platform_admin"
-            )
+        await svc.approve_metric(
+            "sales_gmv_daily", MetricApproveRequest(), actor_id=1, role="platform_admin"
+        )
     assert exc.value.error_code == "CONFLICT_BLOCKED"
     repo.update_with_optimistic_lock.assert_not_awaited()
     repo.mark_version_published.assert_not_awaited()
@@ -2986,6 +3091,31 @@ async def test_get_metric_public_from_db_and_cache():
     svc._cache.get = AsyncMock(return_value=full)
     resp2 = await svc.get_metric_public("sales_gmv_daily")
     assert resp2.metric_code == "sales_gmv_daily"
+
+
+async def test_get_metric_public_attaches_measure_info():
+    """get_metric_public：measure_id 非空时 best-effort 填充逻辑度量名称/编码（详情页展示）。"""
+    from app.services.semantic.schemas import MetricResponse
+
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.get = AsyncMock(return_value=None)
+    svc._cache.set = AsyncMock()
+    repo.get_by_code = AsyncMock(return_value=make_metric(measure_id=7))
+    # 度量目录命中：返回 (measure_code, name)；_svc_with_repo 默认 _db.execute 为空结果集
+    svc._db.execute = AsyncMock(
+        return_value=MagicMock(first=MagicMock(return_value=("pay_amt", "支付金额")))
+    )
+
+    resp = await svc.get_metric_public("sales_gmv_daily")
+    assert isinstance(resp, MetricResponse)
+    assert resp.measure_code == "pay_amt"
+    assert resp.measure_name == "支付金额"
+    # 度量查询失败降级：仅 measure_id，不阻断详情
+    svc._db.execute = AsyncMock(side_effect=Exception("db down"))
+    resp2 = await svc.get_metric_public("sales_gmv_daily")
+    assert resp2.measure_id == 7
+    assert resp2.measure_code is None
 
 
 async def test_get_metric_public_not_found():
@@ -3893,7 +4023,10 @@ async def test_approve_composite_metric_invalid_formula():
         owner_id=1,
         pii_flag=False,
         type="composite",
-        definition_json={"dependencies": ["sales_gmv_amount_daily"], "expression": "amount / head_amount"},
+        definition_json={
+            "dependencies": ["sales_gmv_amount_daily"],
+            "expression": "amount / head_amount",
+        },
     )
     repo.get_by_code = AsyncMock(return_value=metric)
     fake_checker = MagicMock()

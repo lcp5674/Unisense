@@ -59,6 +59,7 @@ import {
   listDimensions,
   listDomainTree,
   listFavorites,
+  listMeasureCatalogs,
   listMetrics,
   listSubscriptions,
   listTerms,
@@ -671,6 +672,15 @@ export function MetricDetail() {
     Array<{ value: string; label: string }>
   >([]);
   const [editSourceTableDirty, setEditSourceTableDirty] = useState(false);
+  // 编辑弹窗「逻辑度量」（OneData 原子层，仅 atomic 显示）：原子指标关联的权威继承源——
+  // 创建页 Step②有选择器、编辑弹窗此前缺失（存量原子指标无法在「发起变更申请」中关联/更换）。
+  // 后端 MetricUpdateRequest.measure_id 已支持（更换=破坏性口径变更，触发版本确认）。
+  const [editMeasureOptions, setEditMeasureOptions] = useState<
+    Array<{ value: number; label: string }>
+  >([]);
+  const [editMeasureId, setEditMeasureId] = useState<number | null>(null);
+  const [editMeasureIdDirty, setEditMeasureIdDirty] = useState(false);
+  const [editMeasureLoading, setEditMeasureLoading] = useState(false);
   // 编辑弹窗「治理属性」（币种/聚合/时间语义/新鲜度/数仓层/分级）：
   // 指标创建后治理字段此前不可改（分层纠正/时效调整/分级晋升/币种修正只能重建指标）。
   // 后端 MetricUpdateRequest 已支持（非破坏性，不触发版本递增），前端补齐编辑入口。
@@ -982,6 +992,25 @@ export function MetricDetail() {
     setEditSourceTable(rawSrcTable);
     setEditSourceTableOptions((prev) => ensureInOptions(prev, rawSrcTable || undefined));
     setEditSourceTableDirty(false);
+    // OneData 原子层：回填当前逻辑度量 + 加载已发布度量目录（创建页 Step②同款）——
+    // 存量原子指标 measure_id 为空 → 引导在此关联；已关联 → 可查看/更换（破坏性口径变更）。
+    // 打开编辑弹窗即加载（保证新发布的度量可选）；非 atomic 不加载（派生/复合继承原子）。
+    setEditMeasureId(metric.measure_id ?? null);
+    setEditMeasureIdDirty(false);
+    if (metric.type === "atomic") {
+      setEditMeasureLoading(true);
+      listMeasureCatalogs({ status: "PUBLISHED", page_size: 200 })
+        .then((res) =>
+          setEditMeasureOptions(
+            (res.items ?? []).map((m) => ({
+              value: m.id,
+              label: `${m.name}（${m.measure_code}）`,
+            })),
+          ),
+        )
+        .catch(() => setEditMeasureOptions([]))
+        .finally(() => setEditMeasureLoading(false));
+    }
     // 治理属性回填 + 遗留值兜底（字典未收录的历史值可显示可保留，防静默清空）
     const govInit: Record<string, string> = {};
     for (const f of ["dw_layer", "freshness", "time_semantics", "metric_tier"]) {
@@ -1099,7 +1128,7 @@ export function MetricDetail() {
       // 用户修改过才生效——非空写入、清空则从口径移除（dirty 区分"未改保留"与"清空移除"）
       if (editDimsDirty) {
         if (editDims.length) {
-          definitionJson = { ...(definitionJson ?? {}), dimensions: editDims };
+          definitionJson = { ...(definitionJson ?? (metric.definition_json ?? {})), dimensions: editDims };
         } else {
           const base = definitionJson ?? { ...(metric.definition_json ?? {}) };
           const next = { ...base };
@@ -1110,7 +1139,7 @@ export function MetricDetail() {
       // 依赖指标选择器合入 definition_json.dependencies（非原子指标，血缘生成原子→衍生边）
       if (metric.type !== "atomic" && editDepsDirty) {
         if (editDeps.length) {
-          definitionJson = { ...(definitionJson ?? {}), dependencies: editDeps };
+          definitionJson = { ...(definitionJson ?? (metric.definition_json ?? {})), dependencies: editDeps };
         } else {
           const base = definitionJson ?? { ...(metric.definition_json ?? {}) };
           const next = { ...base };
@@ -1122,7 +1151,7 @@ export function MetricDetail() {
       // 用户修改过才生效——写入表达式、清空则从口径移除（与依赖/维度 dirty 语义一致）
       if (metric.type !== "atomic" && editDefMode === "expression" && editCalcExpressionDirty) {
         if (editCalcExpression.trim()) {
-          definitionJson = { ...(definitionJson ?? {}), expression: editCalcExpression.trim() };
+          definitionJson = { ...(definitionJson ?? (metric.definition_json ?? {})), expression: editCalcExpression.trim() };
         } else {
           const base = definitionJson ?? { ...(metric.definition_json ?? {}) };
           const next = { ...base };
@@ -1134,7 +1163,7 @@ export function MetricDetail() {
       // dirty 区分"未改保留"与"清空移除"（清空即解除指标↔落地表关系）
       if (editSourceTableDirty) {
         if (editSourceTable.trim()) {
-          definitionJson = { ...(definitionJson ?? {}), source_table: editSourceTable.trim() };
+          definitionJson = { ...(definitionJson ?? (metric.definition_json ?? {})), source_table: editSourceTable.trim() };
         } else {
           const base = definitionJson ?? { ...(metric.definition_json ?? {}) };
           const next = { ...base };
@@ -1146,7 +1175,7 @@ export function MetricDetail() {
       // 独立于口径主体模式（expression/sql），作为补充说明始终可编辑；dirty 区分保留/清空
       if (editPseudoDirty) {
         if (editPseudoDefinition.trim()) {
-          definitionJson = { ...(definitionJson ?? {}), pseudo_definition: editPseudoDefinition.trim() };
+          definitionJson = { ...(definitionJson ?? (metric.definition_json ?? {})), pseudo_definition: editPseudoDefinition.trim() };
         } else {
           const base = definitionJson ?? { ...(metric.definition_json ?? {}) };
           const next = { ...base };
@@ -1156,7 +1185,7 @@ export function MetricDetail() {
       }
       if (editDwDirty) {
         if (editDwDefinition.trim()) {
-          definitionJson = { ...(definitionJson ?? {}), dw_definition: editDwDefinition.trim() };
+          definitionJson = { ...(definitionJson ?? (metric.definition_json ?? {})), dw_definition: editDwDefinition.trim() };
         } else {
           const base = definitionJson ?? { ...(metric.definition_json ?? {}) };
           const next = { ...base };
@@ -1180,6 +1209,10 @@ export function MetricDetail() {
         unit: values.unit,
         aggregation: values.aggregation, // 聚合方式属口径变更，与粒度/单位同级（后端触发版本确认）
         ...govPayload,
+        // OneData 原子层：更换/关联逻辑度量（破坏性口径变更，后端 BREAKING_TOP_LEVEL_FIELDS
+        // 含 measure_id 触发版本确认）——仅 atomic 且用户改过才提交：改过传新值、清空传 null
+        // （解除关联），未改不传（保留原关联）。
+        ...(metric.type === "atomic" && editMeasureIdDirty ? { measure_id: editMeasureId } : {}),
         definition_json: definitionJson,
         change_reason: String(values.change_reason ?? "").trim(),
         row_version: metric.row_version, // 跨请求乐观锁：他人已改则 409 拒绝
@@ -1286,6 +1319,36 @@ export function MetricDetail() {
     return unknown;
   }
 
+  // 破坏性编辑判定（对齐后端 BREAKING_TOP_LEVEL_FIELDS + BREAKING_DEF_FIELDS）：
+  // 粒度/单位/聚合/口径主体字段任一变化即破坏性——已发布指标触发 PENDING 消费方
+  // 确认期；仅改治理属性/名称/责任方等非破坏性字段则直接生效。用于区分保存成功提示。
+  const BREAKING_DEF_FIELDS = [
+    "expression", "aggregation", "granularity", "dependencies",
+    "sql", "etl_sql", "source_table", "source_tables", "measure_column",
+  ];
+  function isBreakingEdit(m: MetricResponse, req: MetricUpdateRequest): boolean {
+    if (req.granularity !== m.granularity) return true;
+    if (req.unit !== m.unit) return true;
+    if (req.aggregation !== m.aggregation) return true;
+    // OneData 原子层：更换/解除逻辑度量属破坏性口径变更（对齐后端 BREAKING_TOP_LEVEL_FIELDS）
+    if (req.measure_id !== undefined && req.measure_id !== (m.measure_id ?? null)) return true;
+    const def = req.definition_json;
+    if (def === undefined) return false; // 未提交口径 → 不涉及口径破坏
+    const oldDef = m.definition_json ?? {};
+    for (const k of BREAKING_DEF_FIELDS) {
+      const ov = oldDef[k];
+      const nv = def[k];
+      if (k === "dependencies") {
+        const os = [...(Array.isArray(ov) ? ov : [])].sort().join(",");
+        const ns = [...(Array.isArray(nv) ? nv : [])].sort().join(",");
+        if (os !== ns) return true;
+      } else if (ov !== nv) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // 实际执行保存（含状态提示）：引导弹窗「仍按原值保存 / 通知管理员并保存」均走此路径。
   async function doSaveEdit(req: MetricUpdateRequest) {
     if (!metric) return;
@@ -1296,10 +1359,15 @@ export function MetricDetail() {
         message.success("修改已保存，指标已退回草稿，请重新提交评审");
       } else if (metric.status === "PUBLISHED") {
         // 已发布指标：破坏性变更（粒度/单位/聚合/口径）触发 PENDING 确认期，
-        // 治理属性变更直接生效——后端返回后提示用户进入确认流程
-        message.success(
-          "变更已提交：破坏性修改进入消费方确认期（确认后新口径生效），治理属性已直接更新",
-        );
+        // 治理属性变更直接生效——按是否破坏性区分提示，避免"只改治理属性却宣称
+        // 进入消费方确认期"的过度承诺（修复前无条件提示 PENDING）。
+        if (isBreakingEdit(metric, req)) {
+          message.success(
+            "变更已提交：破坏性修改进入消费方确认期（确认后新口径生效），治理属性已直接更新",
+          );
+        } else {
+          message.success("指标已更新（治理属性变更已直接生效，无需消费方确认）");
+        }
       } else {
         message.success("指标已更新");
       }
@@ -1529,16 +1597,18 @@ export function MetricDetail() {
   const group = ROLE_GROUP[role] ?? "admin";
   const isOwnerOrAdmin = isAdmin || role === "metric_owner";
   const piiMasked = metric.pii_flag && !SENSITIVE_ROLES.includes(role);
-  // 评审指派校验（对齐审批页）：仅被指派评审人可审批/灰度。
-  // user 指派 → 须为被指派人本人；domain 指派 → 须为域评审角色（platform_admin/domain_admin/reviewer）；
-  // 未指派 → 后端按域管理员兜底，前端不设限。最终裁决由后端 _assert_reviewer_authorized 兜底。
+  // 评审指派校验（对齐审批页 + 后端 _assert_reviewer_authorized 四分支）：
+  // platform_admin 始终可审；user 指派 → 须为被指派人本人；domain 指派 → 须为
+  // 该域 domain_admin/reviewer 角色（域不匹配跨域 admin 也会被后端 FORBIDDEN_REVIEWER
+  // 拒绝，前端一并禁用避免"看到可点、点后被拒"）；未指派 → 仅 domain_admin 兜底。
   const canActAsReviewer =
-    isAdmin ||
+    role === "platform_admin" ||
     (metric?.reviewer_type === "user"
       ? metric.reviewer_id != null && metric.reviewer_id === currentUser?.id
       : metric?.reviewer_type === "domain"
-        ? role === "domain_admin" || role === "reviewer"
-        : true);
+        ? (role === "domain_admin" || role === "reviewer") &&
+          currentUser?.domain === metric.reviewer_domain
+        : role === "domain_admin");
   const notAssignedReviewer = metric?.status === "REVIEW" && !canActAsReviewer;
 
   // 按钮级权限点（细粒度管控，方案 C）：与后端 require_roles 对齐——
@@ -1915,6 +1985,25 @@ export function MetricDetail() {
           <Descriptions.Item label="编码">{metric.metric_code}</Descriptions.Item>
           <Descriptions.Item label="域">{metric.domain}</Descriptions.Item>
           <Descriptions.Item label="类型">{enumLabel(METRIC_TYPE_LABEL, metric.type)}</Descriptions.Item>
+          {/* OneData 原子层：逻辑度量（权威继承源）——关联显示名称+编码（详情后端 best-effort
+              填充 measure_code/measure_name）；未关联提示引导「发起变更申请」关联（编辑弹窗
+              atomic 有逻辑度量选择器），而非仅黄色横幅空引导 */}
+          {metric.type === "atomic" && (
+            <Descriptions.Item label="逻辑度量">
+              {metric.measure_id != null ? (
+                <span>
+                  {metric.measure_name || `逻辑度量 #${metric.measure_id}`}
+                  {metric.measure_code && (
+                    <span className="muted" style={{ marginLeft: 6, fontSize: 12 }}>
+                      {metric.measure_code}
+                    </span>
+                  )}
+                </span>
+              ) : (
+                <span style={{ color: "#faad14" }}>未关联（存量旧式来源）</span>
+              )}
+            </Descriptions.Item>
+          )}
           <Descriptions.Item label="分级">{enumLabel(METRIC_TIER_LABEL, metric.metric_tier)}</Descriptions.Item>
           <Descriptions.Item label="聚合">{enumLabel(AGGREGATION_LABEL, metric.aggregation)}</Descriptions.Item>
           <Descriptions.Item label="粒度">{enumLabel(GRANULARITY_LABEL, metric.granularity)}</Descriptions.Item>
@@ -2406,12 +2495,16 @@ export function MetricDetail() {
               metric.pending_version ? (
                 <span>
                   该指标存在<b>待确认的破坏性变更</b>（版本 {metric.version}），
-                  修改<b>粒度/单位/聚合方式/口径定义</b>将被拒绝；请先在
+                  修改<b>粒度/单位/聚合方式
+                    {metric.type === "atomic" ? "/逻辑度量" : ""}/口径定义</b>
+                  将被拒绝；请先在
                   「版本历史」完成确认或等待超时后再发起新变更。治理属性与名称仍可直接修改。
                 </span>
               ) : (
                 <span>
-                  修改<b>粒度/单位/聚合方式/口径定义</b>（破坏性变更）将进入{" "}
+                  修改<b>粒度/单位/聚合方式
+                    {metric.type === "atomic" ? "/逻辑度量" : ""}/口径定义</b>
+                  （破坏性变更）将进入{" "}
                   <b>PENDING 确认期</b>，需消费方确认后新口径才生效；仅修改治理属性
                   （数仓层/时效/分级/币种等）与名称将直接生效、不触发版本确认。
                 </span>
@@ -2427,6 +2520,41 @@ export function MetricDetail() {
           >
             <Input maxLength={128} placeholder="指标名称" />
           </Form.Item>
+          {/* OneData 原子层：关联逻辑度量（度量目录，仅 atomic 显示）——
+              创建页 Step②有选择器、编辑弹窗此前缺失——存量原子指标无法在「发起变更申请」
+              中关联/更换逻辑度量（详情页黄色引导"先创建逻辑度量再编辑关联"但编辑窗口无此选项）。
+              更换/解除 = 破坏性口径变更（后端 BREAKING_TOP_LEVEL_FIELDS 含 measure_id，
+              触发版本确认）。 */}
+          {metric.type === "atomic" && (
+            <Form.Item
+              label="逻辑度量（度量目录，OneData 原子层）"
+              tooltip="原子指标 = 逻辑度量 + 聚合方式，不直接绑定物理表；度量格式/单位/小数位由度量目录继承。更换/解除关联属破坏性口径变更，已发布指标需消费方确认。"
+              style={{ marginBottom: 8 }}
+              extra={
+                editMeasureId == null
+                  ? "存量旧式来源未关联逻辑度量——选择下方度量完成 OneData 化关联。"
+                  : "清空可解除关联（将回到未关联状态）。"
+              }
+            >
+              <Select
+                allowClear
+                showSearch
+                optionFilterProp="label"
+                placeholder="选择或搜索逻辑度量"
+                value={editMeasureId ?? undefined}
+                onChange={(v) => {
+                  setEditMeasureId(v ?? null);
+                  setEditMeasureIdDirty(true);
+                }}
+                options={editMeasureOptions}
+                loading={editMeasureLoading}
+                notFoundContent={
+                  editMeasureLoading ? "加载中…" : "暂无已发布逻辑度量，请先到「度量目录」创建"
+                }
+                {...DROPDOWN_FULL_WIDTH}
+              />
+            </Form.Item>
+          )}
           <Space size={16} style={{ width: "100%" }}>
             <Form.Item name="granularity" label="粒度" style={{ marginBottom: 8, flex: 1 }}>
               <Select
