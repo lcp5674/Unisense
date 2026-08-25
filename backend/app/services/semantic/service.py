@@ -4203,6 +4203,170 @@ class MetricService(BaseService):
 
         return {"batch_id": batch_id, "candidates": candidates}
 
+    async def batch_register_from_sql(
+        self,
+        request: Any,
+        actor_id: int,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> dict[str, Any]:
+        """从 SQL 解析候选批量注册指标（FR-010 批量注册增强，场景A/B）。
+
+        对齐 ``batch_register_metrics`` 的域门禁 + savepoint 逐条隔离；复合候选在
+        savepoint 外先做依赖预检（批内原子已创建 或 库中已存在），缺依赖直接记
+        VALIDATION_ERROR 跳过——不浪费嵌套事务，且批量提交时复合依赖原子 PUBLISHED
+        由发布流程兜底（前端对复合禁用一键提交审核）。
+
+        Args:
+            request: 批量注册请求（domain + candidates，原子先行复合在后）。
+            actor_id: 操作人ID。
+            role: 操作人角色（域管理员/Owner 仅可批量注册本域指标）。
+            user_domain: 操作人所属域。
+
+        Returns:
+            {batch_id, candidates: [{metric_code, status, validation_errors}]}.
+        """
+        import uuid
+
+        from app.services.semantic.schemas import MetricCreateRequest
+
+        batch_id = f"sqlbatch_{uuid.uuid4().hex[:12]}"
+        candidates: list[dict[str, Any]] = []
+
+        # 域门禁（与单条 create / batch_register 同级）
+        if (
+            role in ("domain_admin", "metric_owner")
+            and user_domain
+            and request.domain != user_domain
+        ):
+            raise BusinessError(
+                f"{'域管理员' if role == 'domain_admin' else '指标 Owner'}仅可批量注册本域指标",
+                error_code="FORBIDDEN",
+                ctx={"request_domain": request.domain, "user_domain": user_domain, "role": role},
+            )
+        await self._validate_domain_active(request.domain)
+
+        # Phase1 原子：逐候选 savepoint 创建；业务/编码冲突记 VALIDATION_ERROR 继续
+        atom_ok: set[str] = set()
+        for cand in request.candidates:
+            if cand.type != "atomic":
+                continue
+            code = cand.metric_code
+            try:
+                async with self._db.begin_nested():
+                    create_req = MetricCreateRequest(
+                        metric_code=code,
+                        name=cand.name,
+                        domain=request.domain,
+                        type="atomic",
+                        measure_id=cand.measure_id,
+                        unit=cand.unit,
+                        aggregation=cand.aggregation or "SUM",
+                        definition_json=cand.definition_json,
+                        mount=cand.mount,
+                        source_table=cand.source_table,
+                        measure_column=cand.measure_column,
+                        period=cand.period,
+                    )
+                    await self.create_metric(
+                        create_req, owner_id=actor_id, role=role, user_domain=user_domain
+                    )
+                atom_ok.add(code)
+                candidates.append(
+                    {"metric_code": code, "status": "DRAFT", "validation_errors": None}
+                )
+            except (BusinessError, ConflictError) as exc:
+                candidates.append(
+                    {
+                        "metric_code": code,
+                        "status": "VALIDATION_ERROR",
+                        "validation_errors": public_error_message(exc),
+                    }
+                )
+            except SQLAlchemyError:
+                # savepoint 已自动回滚本候选；DB 级错误（如编码唯一约束）标记跳过
+                candidates.append(
+                    {
+                        "metric_code": code,
+                        "status": "VALIDATION_ERROR",
+                        "validation_errors": "批量注册单条失败（DB 错误），已跳过该条",
+                    }
+                )
+                logger.warning(
+                    "sql_batch_register_atom_db_error",
+                    batch_id=batch_id,
+                    metric_code=code,
+                    exc_info=True,
+                )
+
+        # Phase2 复合：savepoint 外先依赖预检，缺依赖直接跳过（不浪费嵌套事务）
+        for cand in request.candidates:
+            if cand.type != "composite":
+                continue
+            code = cand.metric_code
+            deps = cand.dependencies or []
+            missing: list[str] = []
+            for dep in deps:
+                if dep in atom_ok:
+                    continue
+                try:
+                    exists = await self._repo.get_by_code(dep)
+                except Exception:
+                    exists = None
+                if exists is None:
+                    missing.append(dep)
+            if missing:
+                candidates.append(
+                    {
+                        "metric_code": code,
+                        "status": "VALIDATION_ERROR",
+                        "validation_errors": f"依赖指标未创建或不存在: {', '.join(missing)}",
+                    }
+                )
+                continue
+            try:
+                async with self._db.begin_nested():
+                    create_req = MetricCreateRequest(
+                        metric_code=code,
+                        name=cand.name,
+                        domain=request.domain,
+                        type="composite",
+                        # aggregation 为 schema 必填；复合指标聚合语义由依赖/表达式承载，
+                        # 占位 SUM（对齐批量注册默认聚合）
+                        aggregation=cand.aggregation or "SUM",
+                        definition_json=cand.definition_json,
+                    )
+                    await self.create_metric(
+                        create_req, owner_id=actor_id, role=role, user_domain=user_domain
+                    )
+                candidates.append(
+                    {"metric_code": code, "status": "DRAFT", "validation_errors": None}
+                )
+            except (BusinessError, ConflictError) as exc:
+                candidates.append(
+                    {
+                        "metric_code": code,
+                        "status": "VALIDATION_ERROR",
+                        "validation_errors": public_error_message(exc),
+                    }
+                )
+            except SQLAlchemyError:
+                candidates.append(
+                    {
+                        "metric_code": code,
+                        "status": "VALIDATION_ERROR",
+                        "validation_errors": "批量注册复合指标失败（DB 错误），已跳过",
+                    }
+                )
+                logger.warning(
+                    "sql_batch_register_composite_db_error",
+                    batch_id=batch_id,
+                    metric_code=code,
+                    exc_info=True,
+                )
+
+        return {"batch_id": batch_id, "candidates": candidates}
+
     # ---- US11: 消费指南 ----
 
     async def get_consumption_guide(self, metric_code: str) -> dict[str, Any]:

@@ -52,6 +52,8 @@ from app.services.semantic.schemas import (
     MetricRejectRequest,
     MetricResponse,
     MetricSourceDroppedRequest,
+    MetricSqlBatchRegisterRequest,
+    MetricSqlParseRequest,
     MetricSubmitRequest,
     MetricSuggestDomainRequest,
     MetricTermBindRequest,
@@ -1682,6 +1684,85 @@ async def suggest_domain_metric(
         sql=request.sql,
         source_table=request.source_table,
     )
+    return ok(data=result, trace_id=trace_id)
+
+
+@router.post(
+    "/parse-sql-batch",
+    response_model=ApiResponse[Any],
+    summary="SQL 批量解析候选（场景A/B：多语句切分 + 多度量拆分）",
+    # LLM 额度防护：可能触发域建议/自定义分段 LLM，对齐 auto-suggest 收紧为写角色
+    dependencies=_WRITE_DEPS,
+)
+async def parse_sql_batch_metrics(
+    request: MetricSqlParseRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """粘贴大段 SQL → 切分（; / 语句语义 / 自定义规则）→ 逐语句推断候选清单。
+
+    只读 + LLM（域建议/自定义分段兜底），不落库；候选由前端勾选微调后调
+    ``/batch-register-from-sql`` 批量创建。审计记录解析动作（治理：LLM 类操作留痕）。
+    """
+    from app.services.semantic.sql_split import infer_sql_batch
+
+    result = await infer_sql_batch(
+        db,
+        sql=request.sql,
+        split_mode=request.split_mode,
+        custom_rules=request.custom_rules,
+        domain_code=request.domain_code,
+        synthesize_composite=request.synthesize_composite,
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="metric_definition.sql_batch_parse",
+        entity_type="metric_definition",
+        entity_id="parse:sql",
+        detail={
+            "split_mode": request.split_mode,
+            "statement_count": len(result["statements"]),
+            "candidate_count": len(result["candidates"]),
+            "domain": request.domain_code,
+        },
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
+@router.post(
+    "/batch-register-from-sql",
+    response_model=ApiResponse[Any],
+    summary="从 SQL 解析候选批量注册指标（场景A/B）",
+    dependencies=_WRITE_DEPS,
+)
+async def batch_register_from_sql_metrics(
+    request: MetricSqlBatchRegisterRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """候选清单 + 域 → 逐条 savepoint 批量创建 DRAFT（复用 batch-register 模式）。
+
+    复合候选依赖预检缺依赖时记 VALIDATION_ERROR 跳过；原子先行复合在后。
+    """
+    service = MetricService(db)
+    result = await service.batch_register_from_sql(
+        request, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="metric_definition.sql_batch_register",
+        entity_type="metric_definition",
+        entity_id=f"batch:{result['batch_id']}",
+        detail={"count": len(result["candidates"]), "domain": request.domain},
+        trace_id=trace_id,
+    )
+    await db.commit()
     return ok(data=result, trace_id=trace_id)
 
 

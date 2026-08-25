@@ -222,3 +222,42 @@ def parse_domain_infer_result(raw: str) -> dict[str, Any] | None:
         return None
     reason = extract_str_field(obj, "reason", "note", "explanation", "basis")
     return {"domain_code": domain_code, "confidence": confidence, "reason": reason}
+
+
+def parse_sql_split_result(raw: str) -> list[dict[str, Any]] | None:
+    """解析 SQL 语义分段结果（LLM 兜底：用户自定义切分未生效时按语义拆语句）。
+
+    约定返回结构：``{"statements": [{"sql", "name", "reason"}, ...]}``。
+    ``sql`` 兼容别名（sql/text/statement/segment/content）；逐项去空去重，
+    防止 LLM 幻觉产出重复/空白片段污染候选；整体无有效片段返回 ``None``
+    （上层降级为单段整体处理）。
+
+    Returns:
+        ``[{"sql", "name", "reason"}]``；解析失败或无有效片段返回 ``None``。
+    """
+    obj = parse_json_object(raw)
+    if obj is None:
+        return None
+    items: Any = None
+    for key in ("statements", "segments", "items", "parts", "queries"):
+        value = obj.get(key)
+        if isinstance(value, list):
+            items = value
+            break
+    if items is None:
+        return None
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        sql_text = extract_str_field(item, "sql", "text", "statement", "segment", "content")
+        if sql_text is None or sql_text in seen:
+            continue
+        name = extract_str_field(item, "name", "title", "label", "metric_name")
+        reason = extract_str_field(item, "reason", "note", "explanation", "basis")
+        seen.add(sql_text)
+        out.append({"sql": sql_text, "name": name, "reason": reason})
+    if not out:
+        return None
+    return out

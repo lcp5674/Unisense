@@ -2751,6 +2751,94 @@ export interface DomainSuggestionResponse {
 }
 
 // ============================================================================
+// SQL 批量解析/注册（backend /parse-sql-batch / /batch-register-from-sql，FR-010 批量注册增强）
+// ============================================================================
+
+/** SQL 批量解析请求（场景A 多语句切分 / 场景B 单语句多度量拆分）。 */
+export interface SqlParseRequest {
+  /** 大段 SQL 脚本（含多个指标） */
+  sql: string;
+  /** 切分模式：semicolon（引号感知 ;）/ statement（CTE/INSERT 语义）/ custom（用户自定义规则） */
+  split_mode?: "semicolon" | "statement" | "custom";
+  /** 自定义切分规则：{delimiters: string[], start_markers: string[]} */
+  custom_rules?: { delimiters?: string[]; start_markers?: string[] } | null;
+  /** 显式指定域（缺省自动建议） */
+  domain_code?: string | null;
+  /** 单语句多度量时是否合成复合指标候选 */
+  synthesize_composite?: boolean;
+}
+
+/** SQL 批量解析候选（前端勾选微调后提交创建）。 */
+export interface SqlBatchCandidate {
+  /** 稳定标识：{语句序号}:{度量列}（原子）/{语句序号}:composite（复合） */
+  key: string;
+  metric_code: string;
+  name: string;
+  type: "atomic" | "composite";
+  source_table: string | null;
+  measure_column: string | null;
+  aggregation: string | null;
+  period: string | null;
+  unit: string | null;
+  granularity: string | null;
+  /** 口径定义（原子：expression 模式；复合：sql+dependencies） */
+  definition_json: Record<string, unknown>;
+  definition_mode: string;
+  /** 复合候选的依赖指标编码 */
+  dependencies?: string[] | null;
+  statement_index: number;
+}
+
+/** SQL 批量解析语句摘要（前端 Collapse 分组标题）。 */
+export interface SqlStatementMeta {
+  index: number;
+  sql: string;
+  source_tables: string[];
+  measure_count: number;
+  group_by: string[];
+}
+
+/** SQL 批量解析响应（parse-sql-batch 端点）。 */
+export interface SqlBatchParseResult {
+  statements: SqlStatementMeta[];
+  candidates: SqlBatchCandidate[];
+  /** 无聚合度量列的语句（跳过原因）。 */
+  skipped: { index: number; sql: string; reason: string }[];
+  /** 域建议（未显式指定域时返回四态；已指定=status user）。 */
+  domain: {
+    code: string | null;
+    name: string | null;
+    status: string;
+    confidence: number | null;
+    candidates: DomainSuggestionCandidate[];
+    matched_tables: string[];
+  } | null;
+}
+
+/** SQL 批量创建候选（勾选微调后提交，创建端纯写不重跑 LLM）。 */
+export interface SqlBatchRegisterCandidate {
+  key: string;
+  metric_code: string;
+  name: string;
+  type: "atomic" | "composite";
+  source_table?: string | null;
+  measure_column?: string | null;
+  aggregation?: string | null;
+  unit?: string | null;
+  period?: string | null;
+  measure_id?: number | null;
+  definition_json: Record<string, unknown>;
+  dependencies?: string[] | null;
+  mount?: MetricMountInput | null;
+}
+
+/** SQL 批量创建请求（batch-register-from-sql 端点）。 */
+export interface SqlBatchRegisterRequest {
+  domain: string;
+  candidates: SqlBatchRegisterCandidate[];
+}
+
+// ============================================================================
 // 全局聚合搜索（backend /api/v1/search，FR-18 全局搜索栏）
 // ============================================================================
 
@@ -2762,7 +2850,8 @@ export type GlobalSearchType =
   | "data_source"
   | "catalog"
   | "field"
-  | "subject_domain";
+  | "subject_domain"
+  | "measure";
 
 export interface GlobalSearchItem {
   type: GlobalSearchType;

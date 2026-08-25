@@ -30,6 +30,7 @@ from app.services.semantic.schemas import (
     MetricRejectRequest,
     MetricSubmitRequest,
     MetricUpdateRequest,
+    SqlBatchCreateCandidate,
 )
 from app.services.semantic.service import MetricService
 
@@ -1395,6 +1396,163 @@ async def test_batch_register_db_error_savepoint_continues():
     assert result["candidates"][0]["status"] == "DRAFT"  # ok_col 成功
     assert result["candidates"][1]["status"] == "VALIDATION_ERROR"  # bad_col 被 savepoint 隔离捕获
     assert "已跳过该列" in result["candidates"][1]["validation_errors"]
+
+
+# ---------------------------------------------------------------- SQL 批量注册（场景A/B）
+
+
+def _sql_atomic(
+    key: str, code: str, name: str, col: str, agg: str = "SUM"
+) -> "SqlBatchCreateCandidate":
+    """构造 SQL 批量注册原子候选。"""
+    return SqlBatchCreateCandidate(
+        key=key,
+        metric_code=code,
+        name=name,
+        type="atomic",
+        source_table="dwd_order_di",
+        measure_column=col,
+        aggregation=agg,
+        period="day",
+        definition_json={
+            "expression": f"{agg}({col})",
+            "source_fields": [{"table": "dwd_order_di", "column": col}],
+        },
+    )
+
+
+def _sql_composite(
+    key: str, code: str, name: str, deps: list[str]
+) -> "SqlBatchCreateCandidate":
+    """构造 SQL 批量注册复合候选。"""
+    return SqlBatchCreateCandidate(
+        key=key,
+        metric_code=code,
+        name=name,
+        type="composite",
+        definition_json={
+            "sql": "SELECT dt, SUM(amount) FROM dwd_order_di GROUP BY dt",
+            "dependencies": deps,
+            "source_tables": ["dwd_order_di"],
+        },
+        dependencies=deps,
+    )
+
+
+async def test_sql_batch_register_success_with_composite():
+    """SQL 批量注册：原子 + 复合全部成功（复合依赖批内原子）。"""
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    request = MetricSqlBatchRegisterRequest(
+        domain="sales",
+        candidates=[
+            _sql_atomic("0:amount", "sales_order_amount_day", "日订单金额", "amount", "SUM"),
+            _sql_atomic(
+                "0:user_id", "sales_order_userid_day", "日去重用户", "user_id", "COUNT_DISTINCT"
+            ),
+            _sql_composite(
+                "0:composite",
+                "sales_order_amountuserid_day",
+                "金额用户复合",
+                ["sales_order_amount_day", "sales_order_userid_day"],
+            ),
+        ],
+    )
+    result = await svc.batch_register_from_sql(request, actor_id=1)
+    assert "batch_id" in result
+    assert len(result["candidates"]) == 3
+    assert all(c["status"] == "DRAFT" for c in result["candidates"])
+    assert all(c["validation_errors"] is None for c in result["candidates"])
+
+
+async def test_sql_batch_register_composite_missing_dep_skipped():
+    """复合候选依赖缺失（批内未创建 + 库中不存在）→ VALIDATION_ERROR 跳过。"""
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)  # 任何依赖都不存在
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    request = MetricSqlBatchRegisterRequest(
+        domain="sales",
+        candidates=[
+            _sql_atomic("0:amount", "sales_order_amount_day", "日订单金额", "amount"),
+            _sql_composite(
+                "0:composite",
+                "sales_order_comp_day",
+                "复合",
+                ["sales_order_amount_day", "missing_dep"],
+            ),
+        ],
+    )
+    result = await svc.batch_register_from_sql(request, actor_id=1)
+    assert result["candidates"][0]["status"] == "DRAFT"
+    assert result["candidates"][1]["status"] == "VALIDATION_ERROR"
+    assert "missing_dep" in result["candidates"][1]["validation_errors"]
+    # 缺依赖的复合不进 savepoint 创建
+    assert repo.create.call_count == 1
+
+
+async def test_sql_batch_register_db_error_savepoint_isolation():
+    """SQL 批量注册单条 DB 错误：savepoint 隔离，仅该条失败、其余继续。"""
+    from sqlalchemy.exc import IntegrityError
+
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    request = MetricSqlBatchRegisterRequest(
+        domain="sales",
+        candidates=[
+            _sql_atomic("0:ok", "sales_order_ok_day", "日订单金额", "ok_col"),
+            _sql_atomic("0:bad", "sales_order_bad_day", "日用户数", "bad_col"),
+        ],
+    )
+    real_create = svc.create_metric
+
+    async def _flaky_create(req, **kw):
+        if getattr(req, "measure_column", None) == "bad_col":
+            raise IntegrityError("stmt", {}, Exception("duplicate key"))
+        return await real_create(req, **kw)
+
+    svc.create_metric = _flaky_create  # type: ignore[method-assign]
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _fake_nested():
+        yield
+
+    svc._db.begin_nested = _fake_nested  # type: ignore[method-assign]
+
+    result = await svc.batch_register_from_sql(request, actor_id=1)
+    assert result["candidates"][0]["status"] == "DRAFT"
+    assert result["candidates"][1]["status"] == "VALIDATION_ERROR"
+    assert "已跳过该条" in result["candidates"][1]["validation_errors"]
+
+
+async def test_sql_batch_register_domain_gate():
+    """域门禁：域管理员仅可批量注册本域指标。"""
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    svc, _ = _svc_with_repo()
+    request = MetricSqlBatchRegisterRequest(
+        domain="sales",
+        candidates=[_sql_atomic("0:amount", "sales_order_amount_day", "日订单金额", "amount")],
+    )
+    with pytest.raises(BusinessError) as exc:
+        await svc.batch_register_from_sql(
+            request, actor_id=1, role="domain_admin", user_domain="finance"
+        )
+    assert exc.value.error_code == "FORBIDDEN"
 
 
 async def test_review_compliance_rejects_non_pii():

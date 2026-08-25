@@ -350,6 +350,8 @@ _VERB_TEMPLATES: dict[str, str] = {
     "reject_unknown": "驳回了{entity}未知词",
     # 批量动作（前缀 batch_）
     "batch_register": "批量注册了{entity}",
+    "sql_batch_parse": "解析了{entity}候选（SQL 批量）",
+    "sql_batch_register": "从 SQL 批量注册了{entity}",
     "batch_submit": "批量提交了{entity}评审",
     "batch_approve": "批量审核通过了{entity}",
     "batch_reject": "批量驳回了{entity}",

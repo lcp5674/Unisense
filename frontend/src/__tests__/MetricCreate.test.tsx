@@ -20,14 +20,16 @@ vi.mock("../api", async () => {
     listMeasureCatalogs: vi.fn().mockResolvedValue({ items: [], total: 0 }),
     autoSuggestMetric: vi.fn(),
     suggestDomain: vi.fn(),
+    parseSqlBatch: vi.fn(),
+    batchRegisterFromSql: vi.fn(),
     getDomainDefaults: vi.fn(),
     checkConflict: vi.fn(),
     createMetric: vi.fn(),
   };
 });
 
-import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, checkConflict, createMetric, listMetrics, listMeasureCatalogs } from "../api";
-import type { DBCatalog, SubjectDomainTreeNode, AutoSuggestResponse, DomainSuggestionResponse } from "../types";
+import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, checkConflict, createMetric, listMetrics } from "../api";
+import type { DBCatalog, SubjectDomainTreeNode, AutoSuggestResponse, DomainSuggestionResponse, SqlBatchParseResult } from "../types";
 
 const mockedTree = vi.mocked(listDomainTree);
 const mockedDict = vi.mocked(listDictItems);
@@ -37,6 +39,8 @@ const mockedBatchSubmit = vi.mocked(batchSubmitMetrics);
 const mockedUsers = vi.mocked(listUsers);
 const mockedSuggest = vi.mocked(autoSuggestMetric);
 const mockedSuggestDomain = vi.mocked(suggestDomain);
+const mockedParseSqlBatch = vi.mocked(parseSqlBatch);
+const mockedBatchFromSql = vi.mocked(batchRegisterFromSql);
 const mockedCheckConflict = vi.mocked(checkConflict);
 const mockedCreate = vi.mocked(createMetric);
 const mockedMetrics = vi.mocked(listMetrics);
@@ -1151,5 +1155,186 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
       expect(screen.getByText("原子指标请选择逻辑度量（推荐）或源表与度量列，或填写口径定义")).toBeTruthy()
     );
     expect(mockedCreate).not.toHaveBeenCalled();
+  });
+});
+describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
+  /** 批量解析结果：单语句 2 原子 + 1 复合（合成复合开关开启时后端返回）。 */
+  const SQL_BATCH_RESULT: SqlBatchParseResult = {
+    statements: [
+      {
+        index: 0,
+        sql: "SELECT dt, SUM(amount) AS gmv, COUNT(DISTINCT user_id) AS uv FROM dwd.sales_detail GROUP BY dt",
+        source_tables: ["dwd.sales_detail"],
+        measure_count: 2,
+        group_by: ["dt"],
+      },
+    ],
+    candidates: [
+      {
+        key: "0:amount",
+        metric_code: "sales_order_amount_day",
+        name: "日订单金额",
+        type: "atomic",
+        source_table: "dwd.sales_detail",
+        measure_column: "amount",
+        aggregation: "SUM",
+        period: "day",
+        unit: "CNY",
+        granularity: "day",
+        definition_json: { expression: "SUM(amount)" },
+        definition_mode: "expression",
+        statement_index: 0,
+      },
+      {
+        key: "0:user_id",
+        metric_code: "sales_order_userid_day",
+        name: "日去重用户",
+        type: "atomic",
+        source_table: "dwd.sales_detail",
+        measure_column: "user_id",
+        aggregation: "COUNT_DISTINCT",
+        period: "day",
+        unit: "PERSON",
+        granularity: "day",
+        definition_json: { expression: "COUNT(DISTINCT user_id)" },
+        definition_mode: "expression",
+        statement_index: 0,
+      },
+      {
+        key: "0:composite",
+        metric_code: "sales_order_amountuserid_day",
+        name: "日订单金额、日去重用户复合",
+        type: "composite",
+        source_table: "dwd.sales_detail",
+        measure_column: null,
+        aggregation: null,
+        period: "day",
+        unit: null,
+        granularity: "day",
+        definition_json: {
+          sql: "SELECT dt, SUM(amount), COUNT(DISTINCT user_id) FROM dwd.sales_detail GROUP BY dt",
+          dependencies: ["sales_order_amount_day", "sales_order_userid_day"],
+        },
+        definition_mode: "sql",
+        dependencies: ["sales_order_amount_day", "sales_order_userid_day"],
+        statement_index: 0,
+      },
+    ],
+    skipped: [],
+    domain: { code: "sales", name: "销售", status: "user", confidence: null, candidates: [], matched_tables: [] },
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedTree.mockResolvedValue(TREE);
+    mockedDict.mockResolvedValue([]);
+    mockedSuggest.mockResolvedValue(NO_SUGGESTION);
+    mockedSuggestDomain.mockResolvedValue(NO_DOMAIN_SUGGESTION);
+    mockedParseSqlBatch.mockResolvedValue(SQL_BATCH_RESULT);
+    mockedBatchFromSql.mockResolvedValue({
+      batch_id: "sqlbatch_test",
+      candidates: [
+        { metric_code: "sales_order_amount_day", status: "DRAFT", validation_errors: null },
+        { metric_code: "sales_order_userid_day", status: "DRAFT", validation_errors: null },
+        { metric_code: "sales_order_amountuserid_day", status: "DRAFT", validation_errors: null },
+      ],
+    });
+    mockedCatalogs.mockResolvedValue({
+      items: [makeCatalog("dwd.sales_detail")],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+  });
+
+  /** 打开抽屉并切换到「批量解析」模式。 */
+  async function openBatchMode() {
+    await openSqlInfer();
+    fireEvent.click(screen.getByText("批量解析"));
+    fireEvent.change(screen.getByPlaceholderText(/批量解析：粘贴含多个 SELECT/), {
+      target: {
+        value: "SELECT dt, SUM(amount) AS gmv, COUNT(DISTINCT user_id) AS uv FROM dwd.sales_detail GROUP BY dt",
+      },
+    });
+    fireEvent.click(screen.getByText("解析候选"));
+    await screen.findByText(/共 3 个候选/);
+  }
+
+  it("批量解析：粘贴大段 SQL → 解析候选 → 默认勾选原子 + 复合行带发布提示", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await openBatchMode();
+
+    // 请求参数：statement 模式 + 合成复合默认关
+    expect(mockedParseSqlBatch).toHaveBeenCalledWith(
+      expect.objectContaining({ split_mode: "statement", synthesize_composite: false })
+    );
+    // 默认勾选 2 个原子（复合未自动勾选）
+    expect(screen.getByText(/已勾选 2 个/)).toBeTruthy();
+    // 原子候选（Input 值）+ 复合候选（文本 + 发布提示 Tag）
+    expect(screen.getByDisplayValue("日订单金额")).toBeTruthy();
+    expect(screen.getByDisplayValue("日去重用户")).toBeTruthy();
+    expect(screen.getByText(/日订单金额、日去重用户复合/)).toBeTruthy();
+    expect(screen.getByText("需先发布依赖原子")).toBeTruthy();
+    // 语句分组标题
+    expect(screen.getByText(/语句 1 · dwd.sales_detail · 3 个候选/)).toBeTruthy();
+  });
+
+  it("勾选联动：取消被复合依赖的原子 → 弹窗；「跳过复合」同时取消原子与复合", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await openBatchMode();
+
+    // 勾选复合候选（当前未勾选）
+    fireEvent.click(screen.getByRole("checkbox", { name: "勾选 日订单金额、日去重用户复合" }));
+    await screen.findByText(/已勾选 3 个/);
+    // 取消被复合依赖的原子 → 弹窗（不立即取消）
+    fireEvent.click(screen.getByRole("checkbox", { name: "勾选 日订单金额" }));
+    await screen.findByText("复合指标依赖该原子");
+    // 「跳过复合」：原子 + 复合都被取消，仅剩另一原子
+    fireEvent.click(screen.getByRole("button", { name: /跳过复合/ }));
+    await waitFor(() => {
+      expect(screen.queryByText(/已勾选 1 个/)).toBeTruthy();
+    });
+    expect(screen.getByRole("checkbox", { name: "勾选 日去重用户" })).toBeTruthy();
+  });
+
+  it("勾选联动：弹窗「回滚勾选」保留原子（不取消）", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await openBatchMode();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "勾选 日订单金额、日去重用户复合" }));
+    await screen.findByText(/已勾选 3 个/);
+    fireEvent.click(screen.getByRole("checkbox", { name: "勾选 日订单金额" }));
+    await screen.findByText("复合指标依赖该原子");
+    fireEvent.click(screen.getByRole("button", { name: /回滚勾选/ }));
+    await waitFor(() => {
+      expect(screen.queryByText(/已勾选 3 个/)).toBeTruthy();
+    });
+  });
+
+  it("批量创建：勾选候选 → batch-register-from-sql → 结果分桶 + 复合发布提示", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+
+    // 勾选复合后创建 3 个
+    fireEvent.click(screen.getByRole("checkbox", { name: "勾选 日订单金额、日去重用户复合" }));
+    await screen.findByText(/已勾选 3 个/);
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+
+    await waitFor(() => {
+      expect(mockedBatchFromSql).toHaveBeenCalled();
+      const body = mockedBatchFromSql.mock.calls[0][0];
+      expect(body.domain).toBe("sales");
+      expect(body.candidates.length).toBe(3);
+      expect(body.candidates.some((c: { type: string }) => c.type === "composite")).toBe(true);
+    });
+    // 结果分桶展示 + 复合「需先发布依赖原子」提示
+    await screen.findByText(/批量创建完成：成功 3 \/ 失败 0/);
+    expect(screen.getByText(/含 1 个复合候选/)).toBeTruthy();
+    expect(screen.getByText(/需先逐个发布原子/)).toBeTruthy();
   });
 });

@@ -2,12 +2,12 @@ import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { BarsOutlined, ArrowLeftOutlined, PlusOutlined, MinusCircleOutlined, RobotOutlined } from "@ant-design/icons";
 import {
-  Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Collapse, Divider, Drawer, Form, Input, Modal, Radio, Row, Segmented, Select, Space, Spin, Steps, Table, Tooltip, Typography, App as AntApp, Tag,
+  Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Collapse, Divider, Drawer, Form, Input, Modal, Radio, Row, Segmented, Select, Space, Spin, Steps, Switch, Table, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
 import {
-  createMetric, listCatalogs, autoSuggestMetric, suggestDomain, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, listMeasureCatalogs, fetchCurrentUser, UnisenseApiError,
+  createMetric, listCatalogs, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, listMeasureCatalogs, fetchCurrentUser, UnisenseApiError,
 } from "../api";
-import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, DomainSuggestionCandidate, Dimension, MeasureCatalog, MetricMountInput } from "../types";
+import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, DomainSuggestionCandidate, Dimension, MeasureCatalog, MetricMountInput, SqlBatchParseResult, SqlBatchCandidate } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
 import { MEASURE_FORMAT_LABEL } from "../types";
 import { usePermission } from "../hooks/usePermission";
@@ -77,6 +77,11 @@ const DICT_FIELD_MAP: Array<{ dictType: string; field: string; label: string }> 
   { dictType: "serving_mode", field: "serving_mode", label: "服务模式" },
   { dictType: "metric_tier", field: "metric_tier", label: "分级" },
 ];
+
+// SQL 批量解析候选行内可编辑的聚合方式（对齐 MetricCreateRequest 聚合枚举）。
+const AGG_OPTIONS = [
+  "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE",
+].map((v) => ({ value: v, label: v }));
 
 // 统计周期选项：与粒度字典（granularity dict）对齐，避免同一"周期"概念两套数据源漂移。
 // 字典种子含 minute/hour/day/week/month/quarter/year/realtime（见 seed_domains_dicts.py）。
@@ -289,6 +294,21 @@ export function MetricCreate() {
   const [batchForm] = Form.useForm();
   const [batchSubmitting, setBatchSubmitting] = useState(false);
   const [batchResult, setBatchResult] = useState<MetricBatchRegisterResult | null>(null);
+  // SQL 批量解析（FR-010 批量注册增强，场景A/B：多语句切分 + 多度量拆分 + 复合合成）。
+  // 独立 sqlBatch* state 前缀，不动既有 handleSqlInfer/batch 逻辑。
+  const [sqlBatchMode, setSqlBatchMode] = useState<"single" | "batch">("single");
+  const [sqlBatchParsing, setSqlBatchParsing] = useState(false);
+  const [sqlBatchResult, setSqlBatchResult] = useState<SqlBatchParseResult | null>(null);
+  // 合成复合指标开关（单语句多度量时组内追加复合候选）
+  const [sqlBatchSynthesize, setSqlBatchSynthesize] = useState(false);
+  // 勾选的候选 key 集合（默认全选原子；复合由「合成复合」开关生成）
+  const [sqlBatchChecked, setSqlBatchChecked] = useState<Set<string>>(new Set());
+  // 勾选联动提示：取消勾选被复合依赖的原子时弹窗
+  const [sqlBatchConflictKey, setSqlBatchConflictKey] = useState<string>("");
+  const [sqlBatchConflictOpen, setSqlBatchConflictOpen] = useState(false);
+  // 批量创建结果（复用 batchResult 分桶展示，但保留复合候选的「需先发布原子」提示）
+  const [sqlBatchCreateResult, setSqlBatchCreateResult] = useState<MetricBatchRegisterResult | null>(null);
+  const [sqlBatchCreating, setSqlBatchCreating] = useState(false);
   // 批量注册成功 → 「批量提交评审」直达（复用 /batch-submit，复审 D1）
   const [batchSubmitLoading, setBatchSubmitLoading] = useState(false);
   // 批量提交评审指派（复审 P2-10）：默认域评审组，可指定评审用户（对齐单指标提交的 reviewer_type/id）
@@ -736,6 +756,168 @@ export function MetricCreate() {
     if (!dom) return;
     await applyDomainSuggestion(dom);
     await runSqlInfer(dom.code);
+  }
+
+  // ---- SQL 批量解析（FR-010 批量注册增强，场景A/B）----
+  // 独立 sqlBatch* state，不动既有 handleSqlInfer/batch 逻辑。
+
+  /** 核心批量解析：调 parse-sql-batch 并默认全选原子候选。 */
+  async function runSqlBatchParse(synthesize: boolean) {
+    const sql = sqlInferText.trim();
+    if (!sql) { message.warning("请先粘贴大段指标 SQL"); return; }
+    setSqlBatchParsing(true);
+    try {
+      const result = await parseSqlBatch({
+        sql,
+        split_mode: "statement",
+        synthesize_composite: synthesize,
+      });
+      setSqlBatchResult(result);
+      setSqlBatchChecked(
+        new Set(result.candidates.filter((c) => c.type === "atomic").map((c) => c.key))
+      );
+      // 域建议：未选域且后端建议唯一/LLM 域 → 自动应用（对齐 handleSqlInfer 流程）
+      const dom = result.domain;
+      if (!selectedDomain && dom) {
+        if (dom.code && (dom.status === "unique" || dom.status === "llm")) {
+          await applyDomainSuggestion({
+            code: dom.code,
+            name: dom.name || dom.code,
+            confidence: dom.confidence ?? 0,
+            source: dom.status === "llm" ? "llm" : "catalog",
+            reason: "SQL 批量解析时自动建议的业务域",
+          });
+        } else if (dom.status === "multiple" && dom.candidates.length > 0) {
+          setCandidateCandidates(dom.candidates);
+          setCandidateOpen(true);
+        }
+      }
+      if (result.candidates.length === 0) {
+        message.warning("未解析到可注册的指标候选（请检查 SQL 是否含 SELECT + 聚合函数）");
+      } else {
+        message.success(`已解析 ${result.candidates.length} 个候选指标，可勾选后批量创建`);
+      }
+    } catch (err) {
+      const detail = err instanceof UnisenseApiError ? err.message : "";
+      message.error(detail ? `批量解析失败：${detail}` : "批量解析失败，请检查 SQL 语法或稍后重试");
+    } finally {
+      setSqlBatchParsing(false);
+    }
+  }
+
+  async function handleParseSqlBatch() {
+    await runSqlBatchParse(sqlBatchSynthesize);
+  }
+
+  // 合成复合开关：重新解析（开关影响候选生成）
+  async function handleSqlBatchSynthesizeChange(v: boolean) {
+    setSqlBatchSynthesize(v);
+    if (sqlInferText.trim()) {
+      await runSqlBatchParse(v);
+    }
+  }
+
+  /** 编辑候选字段（名称/聚合等，行内微调后提交）。 */
+  function handleSqlBatchEdit(key: string, patch: Partial<SqlBatchCandidate>) {
+    setSqlBatchResult((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        candidates: prev.candidates.map((c) => (c.key === key ? { ...c, ...patch } : c)),
+      };
+    });
+  }
+
+  /** 勾选切换：取消原子若被某复合候选依赖 → 弹窗让用户选「跳过复合」或「回滚勾选」。 */
+  function handleSqlBatchToggle(key: string, checked: boolean) {
+    if (!sqlBatchResult) return;
+    const next = new Set(sqlBatchChecked);
+    if (checked) {
+      next.add(key);
+      setSqlBatchChecked(next);
+      return;
+    }
+    const cand = sqlBatchResult.candidates.find((c) => c.key === key);
+    if (!cand) return;
+    // 仅当「被勾选」的复合候选依赖该原子时才弹窗（未勾选复合则直接取消原子）
+    const dependents = sqlBatchResult.candidates.filter(
+      (c) =>
+        c.type === "composite" &&
+        sqlBatchChecked.has(c.key) &&
+        (c.dependencies || []).includes(cand.metric_code)
+    );
+    if (dependents.length > 0) {
+      setSqlBatchConflictKey(key);
+      setSqlBatchConflictOpen(true);
+      return; // 不立即取消，等用户选择
+    }
+    next.delete(key);
+    setSqlBatchChecked(next);
+  }
+
+  // 弹窗「跳过复合」：取消该原子 + 同时取消依赖它的复合候选
+  function handleSqlBatchSkipComposite() {
+    if (!sqlBatchResult) return;
+    const next = new Set(sqlBatchChecked);
+    const cand = sqlBatchResult.candidates.find((c) => c.key === sqlBatchConflictKey);
+    if (cand) {
+      next.delete(cand.key);
+      sqlBatchResult.candidates
+        .filter((c) => c.type === "composite" && (c.dependencies || []).includes(cand.metric_code))
+        .forEach((c) => next.delete(c.key));
+    }
+    setSqlBatchChecked(next);
+    setSqlBatchConflictOpen(false);
+    setSqlBatchConflictKey("");
+  }
+
+  // 弹窗「回滚勾选」：保持原子勾选，仅关闭弹窗
+  function handleSqlBatchRollback() {
+    setSqlBatchConflictOpen(false);
+    setSqlBatchConflictKey("");
+  }
+
+  // 批量创建：勾选候选 → batch-register-from-sql（savepoint 逐条隔离，结果分桶展示）
+  async function handleSqlBatchCreate() {
+    if (!sqlBatchResult) return;
+    if (!selectedDomain) {
+      message.warning("请先选择业务域（可到第 ① 步选择，或确认上方建议域后重试）");
+      return;
+    }
+    const checked = sqlBatchResult.candidates.filter((c) => sqlBatchChecked.has(c.key));
+    if (checked.length === 0) { message.warning("请至少勾选一个候选指标"); return; }
+    setSqlBatchCreating(true);
+    try {
+      const res = await batchRegisterFromSql({
+        domain: selectedDomain,
+        candidates: checked.map((c) => ({
+          key: c.key,
+          metric_code: c.metric_code,
+          name: c.name,
+          type: c.type,
+          source_table: c.source_table,
+          measure_column: c.measure_column,
+          aggregation: c.aggregation,
+          unit: c.unit,
+          period: c.period,
+          definition_json: c.definition_json,
+          dependencies: c.dependencies,
+        })),
+      });
+      setSqlBatchCreateResult(res);
+    } catch (err) {
+      const detail = err instanceof UnisenseApiError ? err.message : "";
+      message.error(detail ? `批量创建失败：${detail}` : "批量创建失败，请稍后重试");
+    } finally {
+      setSqlBatchCreating(false);
+    }
+  }
+
+  // 批量创建结果确认后：清空解析状态，可再次解析
+  function handleSqlBatchCreateDone() {
+    setSqlBatchCreateResult(null);
+    setSqlBatchResult(null);
+    setSqlBatchChecked(new Set());
   }
 
   async function handleAutoSuggest() {
@@ -1702,99 +1884,305 @@ export function MetricCreate() {
         </Card>
       </Spin>
 
-      {/* OneData 向导：SQL 智能推断收敛为抽屉工具（非主流程步骤，方案 C） */}
+      {/* OneData 向导：SQL 智能推断收敛为抽屉工具（非主流程步骤，方案 C）；含批量解析模式（FR-010） */}
       <Drawer
         title="SQL 智能推断"
         open={sqlInferOpen}
         onClose={() => setSqlInferOpen(false)}
-        width={520}
+        width={sqlBatchMode === "batch" ? 760 : 540}
       >
-        <Paragraph type="secondary" style={{ fontSize: 12 }}>
-          面向原子指标：粘贴一段指标定义 SQL（含 SELECT + 聚合 + GROUP BY + 时间过滤），
-          系统用 sqlglot 解析并自动推断类型/名称/粒度/单位/聚合/时间语义/新鲜度/数仓层/
-          可加性/服务模式/分级，并生成口径定义。推断结果回填到向导各步骤，可确认或覆盖。
-          {!selectedDomain && (
-            <span style={{ display: "block", marginTop: 6 }}>
-              尚未选择业务域：将先按 SQL 涉及表<b>反向定位业务域</b>（未采集表走 AI 推断），
-              建议域会预填到第 ① 步，可确认或改选。
-            </span>
-          )}
-        </Paragraph>
+        <Segmented
+          block
+          size="small"
+          value={sqlBatchMode}
+          onChange={(v) => setSqlBatchMode(v as "single" | "batch")}
+          options={[
+            { label: "单条推断", value: "single" },
+            { label: "批量解析", value: "batch" },
+          ]}
+          style={{ marginBottom: 12 }}
+        />
         <TextArea
           rows={6}
           value={sqlInferText}
           onChange={(e) => setSqlInferText(e.target.value)}
-          placeholder={"SELECT SUM(amount) AS gmv\nFROM dwd.sales_detail\nGROUP BY dt, shop_id"}
+          placeholder={"单条推断：SELECT SUM(amount) AS gmv FROM dwd.sales_detail GROUP BY dt\n批量解析：粘贴含多个 SELECT 的大段 SQL（支持 ; / CTE / INSERT 切分）"}
           className="mono"
         />
-        {canInferDesc && (
-        <Button
-          type="primary"
-          block
-          style={{ marginTop: 12 }}
-          onClick={handleSqlInfer}
-          disabled={!sqlInferText.trim() || sqlInferring}
-          loading={sqlInferring}
-        >
-          智能推断并回填字段
-        </Button>
-        )}
-        {/* 业务域建议（FR-010 域建议增强）：推断时反向定位/LLM 兜底推断业务域 */}
-        {domainSuggesting && (
-          <div style={{ marginTop: 12 }}>
-            <Spin size="small" /> <Typography.Text type="secondary" style={{ fontSize: 12 }}>正在推断业务域…</Typography.Text>
-          </div>
-        )}
-        {domainSuggestion && !domainSuggesting && (
-          <Alert
-            type={domainSuggestionStatus === "conflict" ? "warning" : "success"}
-            showIcon
-            style={{ marginTop: 12 }}
-            message={
-              domainSuggestionStatus === "conflict"
-                ? `该 SQL 涉及表主要归属「${domainSuggestion.name}（${domainSuggestion.code}）」域，与当前所选不同`
-                : domainSuggestionStatus === "applied"
-                  ? `已按建议选择业务域：${domainSuggestion.name}（${domainSuggestion.code}）`
-                  : `SQL 涉及表归属业务域：${domainSuggestion.name}（${domainSuggestion.code}）`
-            }
-            description={
-              <Space wrap>
-                <span>
-                  来源：{SOURCE_META[domainSuggestion.source]?.text ?? domainSuggestion.source} ·
-                  置信度 {Math.round((domainSuggestion.confidence || 0) * 100)}%
+        {sqlBatchMode === "single" ? (
+          <>
+            <Paragraph type="secondary" style={{ fontSize: 12, marginTop: 12 }}>
+              面向原子指标：粘贴一段指标定义 SQL（含 SELECT + 聚合 + GROUP BY + 时间过滤），
+              系统用 sqlglot 解析并自动推断类型/名称/粒度/单位/聚合/时间语义/新鲜度/数仓层/
+              可加性/服务模式/分级，并生成口径定义。推断结果回填到向导各步骤，可确认或覆盖。
+              {!selectedDomain && (
+                <span style={{ display: "block", marginTop: 6 }}>
+                  尚未选择业务域：将先按 SQL 涉及表<b>反向定位业务域</b>（未采集表走 AI 推断），
+                  建议域会预填到第 ① 步，可确认或改选。
                 </span>
-                {domainSuggestionStatus === "conflict" && (
-                  <Button
-                    size="small"
-                    type="link"
-                    onClick={() => {
-                      void applyDomainSuggestion(domainSuggestion);
-                    }}
-                  >
-                    切换为 {domainSuggestion.name}
-                  </Button>
+              )}
+            </Paragraph>
+            {canInferDesc && (
+              <Button
+                type="primary"
+                block
+                style={{ marginTop: 12 }}
+                onClick={handleSqlInfer}
+                disabled={!sqlInferText.trim() || sqlInferring}
+                loading={sqlInferring}
+              >
+                智能推断并回填字段
+              </Button>
+            )}
+            {/* 业务域建议（FR-010 域建议增强）：推断时反向定位/LLM 兜底推断业务域 */}
+            {domainSuggesting && (
+              <div style={{ marginTop: 12 }}>
+                <Spin size="small" /> <Typography.Text type="secondary" style={{ fontSize: 12 }}>正在推断业务域…</Typography.Text>
+              </div>
+            )}
+            {domainSuggestion && !domainSuggesting && (
+              <Alert
+                type={domainSuggestionStatus === "conflict" ? "warning" : "success"}
+                showIcon
+                style={{ marginTop: 12 }}
+                message={
+                  domainSuggestionStatus === "conflict"
+                    ? `该 SQL 涉及表主要归属「${domainSuggestion.name}（${domainSuggestion.code}）」域，与当前所选不同`
+                    : domainSuggestionStatus === "applied"
+                      ? `已按建议选择业务域：${domainSuggestion.name}（${domainSuggestion.code}）`
+                      : `SQL 涉及表归属业务域：${domainSuggestion.name}（${domainSuggestion.code}）`
+                }
+                description={
+                  <Space wrap>
+                    <span>
+                      来源：{SOURCE_META[domainSuggestion.source]?.text ?? domainSuggestion.source} ·
+                      置信度 {Math.round((domainSuggestion.confidence || 0) * 100)}%
+                    </span>
+                    {domainSuggestionStatus === "conflict" && (
+                      <Button
+                        size="small"
+                        type="link"
+                        onClick={() => {
+                          void applyDomainSuggestion(domainSuggestion);
+                        }}
+                      >
+                        切换为 {domainSuggestion.name}
+                      </Button>
+                    )}
+                  </Space>
+                }
+              />
+            )}
+            {domainSuggestionStatus === "none" && !domainSuggesting && (
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginTop: 12 }}
+                message="未能自动推断业务域（SQL 涉及表未被采集且 AI 不可用），请到第 ① 步手动选择"
+              />
+            )}
+            {inferSummary && (
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginTop: 12 }}
+                message="已根据 SQL 自动回填字段，可关闭抽屉到各步骤确认或覆盖"
+              />
+            )}
+          </>
+        ) : (
+          <>
+            <Paragraph type="secondary" style={{ fontSize: 12, marginTop: 12 }}>
+              面向大段 SQL（含多个指标）：按语句切分（支持 ; / CTE/INSERT 语义，规则未生效
+              时 AI 兜底），每条语句可拆出多个度量候选；开启「合成复合指标」后多度量语句
+              追加一个复合候选（依赖组内原子）。候选可勾选/改名/改聚合后一键批量创建 DRAFT。
+            </Paragraph>
+            <Button
+              type="primary"
+              block
+              style={{ marginTop: 12 }}
+              onClick={() => void handleParseSqlBatch()}
+              disabled={!sqlInferText.trim() || sqlBatchParsing}
+              loading={sqlBatchParsing}
+            >
+              解析候选
+            </Button>
+            {/* 批量解析结果：域提示 + 合成复合开关 + 候选分组预览 + 批量创建 */}
+            {sqlBatchResult && (
+              <>
+                {!selectedDomain && (
+                  <Alert
+                    type={domainSuggestionStatus === "none" ? "warning" : "info"}
+                    showIcon
+                    style={{ marginTop: 12 }}
+                    message={
+                      domainSuggestionStatus === "none"
+                        ? "未能自动推断业务域，请先到第 ① 步选择业务域后再批量创建"
+                        : `批量解析域建议：${sqlBatchResult.domain?.name || sqlBatchResult.domain?.code || "已按第 ① 步所选"}（${sqlBatchResult.domain?.status || "user"}）`
+                    }
+                  />
                 )}
-              </Space>
-            }
-          />
-        )}
-        {domainSuggestionStatus === "none" && !domainSuggesting && (
-          <Alert
-            type="info"
-            showIcon
-            style={{ marginTop: 12 }}
-            message="未能自动推断业务域（SQL 涉及表未被采集且 AI 不可用），请到第 ① 步手动选择"
-          />
-        )}
-        {inferSummary && (
-          <Alert
-            type="info"
-            showIcon
-            style={{ marginTop: 12 }}
-            message="已根据 SQL 自动回填字段，可关闭抽屉到各步骤确认或覆盖"
-          />
+                <div
+                  style={{
+                    marginTop: 12,
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                  }}
+                >
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    共 {sqlBatchResult.candidates.length} 个候选 · 已勾选 {sqlBatchChecked.size} 个
+                    {sqlBatchResult.skipped.length > 0 && ` · ${sqlBatchResult.skipped.length} 条语句无聚合度量已跳过`}
+                  </span>
+                  <Space size={8}>
+                    <span className="muted" style={{ fontSize: 12 }}>合成复合指标</span>
+                    <Switch
+                      size="small"
+                      checked={sqlBatchSynthesize}
+                      onChange={(v) => void handleSqlBatchSynthesizeChange(v)}
+                    />
+                  </Space>
+                </div>
+                <Collapse
+                  style={{ marginTop: 8 }}
+                  size="small"
+                  defaultActiveKey={sqlBatchResult.statements.map((s) => `stmt-${s.index}`)}
+                  items={(() => {
+                    const byStmt = new Map<number, SqlBatchCandidate[]>();
+                    for (const c of sqlBatchResult.candidates) {
+                      const arr = byStmt.get(c.statement_index) || [];
+                      arr.push(c);
+                      byStmt.set(c.statement_index, arr);
+                    }
+                    return [...byStmt.entries()].map(([idx, cands]) => {
+                      const meta = sqlBatchResult.statements.find((s) => s.index === idx);
+                      return {
+                        key: `stmt-${idx}`,
+                        label: `语句 ${idx + 1} · ${meta?.source_tables.join(", ") || "未知源表"} · ${cands.length} 个候选`,
+                        children: (
+                          <div>
+                            {cands.map((c) => (
+                              <div
+                                key={c.key}
+                                style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}
+                              >
+                                <Checkbox
+                                  checked={sqlBatchChecked.has(c.key)}
+                                  onChange={(e) => handleSqlBatchToggle(c.key, e.target.checked)}
+                                  aria-label={`勾选 ${c.name}`}
+                                />
+                                <Tag color={c.type === "composite" ? "purple" : "blue"}>
+                                  {c.type === "composite" ? "复合" : "原子"}
+                                </Tag>
+                                {c.type === "atomic" ? (
+                                  <>
+                                    <Input
+                                      size="small"
+                                      style={{ width: 150 }}
+                                      value={c.name}
+                                      onChange={(e) => handleSqlBatchEdit(c.key, { name: e.target.value })}
+                                    />
+                                    <Select
+                                      size="small"
+                                      style={{ width: 130 }}
+                                      value={c.aggregation || undefined}
+                                      onChange={(v) => handleSqlBatchEdit(c.key, { aggregation: v })}
+                                      options={AGG_OPTIONS}
+                                    />
+                                  </>
+                                ) : (
+                                  <Typography.Text style={{ fontSize: 12 }}>{c.name}</Typography.Text>
+                                )}
+                                <Typography.Text code style={{ fontSize: 12, flex: 1 }}>
+                                  {c.metric_code}
+                                </Typography.Text>
+                                {c.type === "composite" && (
+                                  <Tooltip title="复合指标依赖批内原子（DRAFT）；批量提交评审会被「依赖未发布」拦截，需先发布原子后再提交">
+                                    <Tag color="orange">需先发布依赖原子</Tag>
+                                  </Tooltip>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        ),
+                      };
+                    });
+                  })()}
+                />
+                <Button
+                  type="primary"
+                  block
+                  style={{ marginTop: 12 }}
+                  loading={sqlBatchCreating}
+                  disabled={sqlBatchChecked.size === 0}
+                  onClick={() => void handleSqlBatchCreate()}
+                >
+                  批量创建选中指标（{sqlBatchChecked.size}）
+                </Button>
+                {/* 批量创建结果（复用 batchResult 分桶展示） */}
+                {sqlBatchCreateResult && (
+                  <div style={{ marginTop: 16 }}>
+                    {(() => {
+                      const failed = sqlBatchCreateResult.candidates.filter(
+                        (c) => c.status === "VALIDATION_ERROR"
+                      ).length;
+                      const succeeded = sqlBatchCreateResult.candidates.length - failed;
+                      const checkedComposites = sqlBatchResult.candidates.filter(
+                        (c) => c.type === "composite" && sqlBatchChecked.has(c.key)
+                      );
+                      return (
+                        <>
+                          <Alert
+                            type={failed > 0 ? "warning" : "success"}
+                            showIcon
+                            message={`批量创建完成：成功 ${succeeded} / 失败 ${failed}`}
+                            description={`批次号：${sqlBatchCreateResult.batch_id}（成功的指标已创建为 DRAFT 草稿）`}
+                          />
+                          <Table
+                            size="small"
+                            rowKey="metric_code"
+                            dataSource={sqlBatchCreateResult.candidates}
+                            columns={BATCH_RESULT_COLUMNS}
+                            pagination={false}
+                            style={{ marginTop: 12 }}
+                            locale={{ emptyText: "无创建结果" }}
+                          />
+                          {checkedComposites.length > 0 && (
+                            <Alert
+                              type="info"
+                              showIcon
+                              style={{ marginTop: 8 }}
+                              message={`含 ${checkedComposites.length} 个复合候选：依赖的原子指标为 DRAFT，需先逐个发布原子后，再对复合指标发起提交评审`}
+                            />
+                          )}
+                          <Button block style={{ marginTop: 12 }} onClick={handleSqlBatchCreateDone}>
+                            完成
+                          </Button>
+                        </>
+                      );
+                    })()}
+                  </div>
+                )}
+              </>
+            )}
+          </>
         )}
       </Drawer>
+
+      {/* 勾选联动提示：取消勾选原子但复合候选仍被勾选时，让用户选择处理方式（FR-010 批量） */}
+      <Modal
+        title="复合指标依赖该原子"
+        open={sqlBatchConflictOpen}
+        onCancel={handleSqlBatchRollback}
+        onOk={handleSqlBatchSkipComposite}
+        okText="跳过复合（同时取消复合勾选）"
+        cancelText="回滚勾选（保留该原子）"
+      >
+        <Paragraph type="secondary" style={{ fontSize: 13 }}>
+          该原子指标被一个或多个复合候选依赖。若取消它，复合候选将缺少依赖而无法发布。
+          请选择：「跳过复合」同时取消依赖它的复合候选；或「回滚勾选」保留该原子。
+        </Paragraph>
+      </Modal>
 
       {/* 业务域多候选选择：跨域共用 DWD 层表时列候选让用户挑（FR-010 域建议增强） */}
       <Modal

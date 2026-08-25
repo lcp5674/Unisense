@@ -23,6 +23,9 @@ import {
   AutoSuggestRequest,
   AutoSuggestResponse,
   DomainSuggestionResponse,
+  SqlBatchParseResult,
+  SqlBatchRegisterRequest,
+  SqlParseRequest,
   BatchDeleteRequest,
   BatchSourceResult,
   BatchToggleRequest,
@@ -4571,6 +4574,27 @@ export async function suggestDomain(data: {
     method: "POST",
     body: JSON.stringify(data),
   });
+}
+
+/** SQL 批量解析候选（FR-010 批量注册增强，场景A/B：多语句切分 + 多度量拆分，只读+LLM 不落库）。 */
+export async function parseSqlBatch(data: SqlParseRequest): Promise<SqlBatchParseResult> {
+  return request<SqlBatchParseResult>(`${API_BASE}/metric-definitions/parse-sql-batch`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+/** 从 SQL 解析候选批量注册指标（场景A/B，savepoint 逐条隔离，复合缺依赖跳过）。 */
+export async function batchRegisterFromSql(
+  req: SqlBatchRegisterRequest,
+): Promise<MetricBatchRegisterResult> {
+  return request<MetricBatchRegisterResult>(
+    `${API_BASE}/metric-definitions/batch-register-from-sql`,
+    {
+      method: "POST",
+      body: JSON.stringify(req),
+    },
+  );
 }
 
 // 仲裁改名建议：LLM 生成区分性名称候选（best-effort，LLM 不可用降级规则）

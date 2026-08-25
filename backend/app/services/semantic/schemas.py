@@ -561,6 +561,68 @@ class MetricBatchRegisterRequest(BaseModel):
     domain: str = Field(..., max_length=64, description="所属域")
 
 
+class MetricSqlParseRequest(BaseModel):
+    """SQL 批量解析请求（FR-010 批量注册增强，场景A/B）。
+
+    粘贴大段 SQL（含多指标）→ 按模式切分 + 逐语句推断候选清单（只读 + LLM 域建议，
+    不落库）。``sql`` 类型化防非字符串 payload 进解析器触发 ``AttributeError`` → 500。
+    """
+
+    sql: str = Field(..., max_length=65536, description="大段 SQL 脚本（含多个指标）")
+    split_mode: Literal["semicolon", "statement", "custom"] = Field(
+        "statement",
+        description=(
+            "切分模式：semicolon（引号感知 ;）/ statement（CTE/INSERT 语义）/ "
+            "custom（用户自定义规则）"
+        ),
+    )
+    custom_rules: dict[str, Any] | None = Field(
+        None, description="自定义切分规则：{delimiters: [正则], start_markers: [正则]}"
+    )
+    domain_code: str | None = Field(None, max_length=64, description="显式指定域（缺省自动建议）")
+    synthesize_composite: bool = Field(
+        False, description="单语句多度量时是否合成复合指标候选（依赖组内原子）"
+    )
+
+
+class SqlBatchCreateCandidate(BaseModel):
+    """SQL 批量创建候选（前端勾选微调后提交，创建端纯写不重跑 LLM）。"""
+
+    key: str = Field(
+        ...,
+        max_length=128,
+        description="稳定标识：{语句序号}:{度量列}（原子）/{语句序号}:composite（复合）",
+    )
+    metric_code: str = Field(..., max_length=64, description="指标编码（4 段式）")
+    name: str = Field(..., max_length=128, description="指标名称")
+    type: Literal["atomic", "composite"] = Field(..., description="指标类型")
+    source_table: str | None = Field(None, max_length=256, description="源表名")
+    measure_column: str | None = Field(None, max_length=128, description="度量列（复合为空）")
+    aggregation: Literal[
+        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE"
+    ] | None = Field(None, description="聚合方式（复合为空）")
+    unit: str | None = Field(None, max_length=32, description="单位")
+    period: str | None = Field(None, max_length=16, description="统计周期")
+    measure_id: int | None = Field(None, ge=1, description="关联逻辑度量（原子可选）")
+    definition_json: dict[str, Any] = Field(
+        ...,
+        description="口径定义（原子：expression 模式；复合：sql+dependencies）",
+    )
+    dependencies: list[str] | None = Field(None, description="依赖指标编码（复合必填）")
+    mount: MetricMountInput | None = Field(
+        None, description="挂载实体（可选，创建时落 metric_mount）"
+    )
+
+
+class MetricSqlBatchRegisterRequest(BaseModel):
+    """从 SQL 解析候选批量注册请求（对齐 batch-register 模式，savepoint 逐条隔离）。"""
+
+    domain: str = Field(..., max_length=64, description="所属域（批量域门禁与本域校验）")
+    candidates: list[SqlBatchCreateCandidate] = Field(
+        ..., min_length=1, description="候选清单（原子先行，复合在后）"
+    )
+
+
 class MetricTemplateCreateRequest(BaseModel):
     """模板创建请求（对齐 FR-041：Schema 校验替代裸 dict）。
 
