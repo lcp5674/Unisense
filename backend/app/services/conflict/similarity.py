@@ -98,8 +98,14 @@ def composite_score(name_sim: float, def_sim: float, lineage_ov: float) -> float
     return 0.4 * name_sim + 0.4 * def_sim + 0.2 * lineage_ov
 
 
-#: 参与口径比对的要素（P1-D 口径要素归一）：维度/过滤/粒度/聚合/依赖/单位
-#: 不参与对比会造成「维度不同但文本相同→误判重复建设」「过滤不同→语义漏检」。
+#: 参与口径比对的要素（P1-D 口径要素归一 + 口径双字段扩展）：维度/过滤/粒度/聚合/
+#: 依赖/单位 + 伪代码口径/数仓详细口径/下游使用表。
+#: 不参与对比会造成「维度不同但文本相同→误判重复建设」「过滤不同→语义漏检」；
+#: 伪代码/数仓详细口径是新上的口径双字段，数仓实现口径不同而主体文本相同会被漏判；
+#: 下游使用表反映指标的消费范围，差异同样应敏感。
+#: 注意：source_fields（上游字段）不参与比对——它是口径主体（expression）蕴含的
+#: 冗余声明（SUM(order_amount) 必然声明上游字段 order_amount），加入反而会因
+#: 「声明完整度不同」制造噪音、误判两个口径主体相同的指标为不同口径。
 _DEFINITION_FEATURE_KEYS: tuple[tuple[str, str], ...] = (
     ("dimensions", "维度"),
     ("filters", "过滤"),
@@ -107,6 +113,9 @@ _DEFINITION_FEATURE_KEYS: tuple[tuple[str, str], ...] = (
     ("aggregation", "聚合"),
     ("dependencies", "依赖"),
     ("unit", "单位"),
+    ("pseudo_definition", "伪代码口径"),
+    ("dw_definition", "数仓口径"),
+    ("downstream_tables", "下游表"),
 )
 
 

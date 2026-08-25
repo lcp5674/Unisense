@@ -659,7 +659,9 @@ class MetricService(BaseService):
 
         rows = await self._repo.list_active_for_conflict()
         syn_map: dict[int, list[str]] = {}
+        term_syn_map: dict[int, list[str]] = {}
         measure_ids = [m.measure_id for m in rows if m.measure_id]
+        term_ids = [m.term_id for m in rows if m.term_id]
         if measure_ids:
             # best-effort：度量目录同义词查询失败降级为无同义词，不阻断预检主流程
             # （手动预检端点 /conflicts/check 复用此方法，查询异常须降级而非 500）。
@@ -675,9 +677,27 @@ class MetricService(BaseService):
                 syn_map = {mid: [str(s) for s in (syn or [])] for mid, syn in measures}
             except Exception:  # noqa: BLE001 - 同义词查询降级，仅告警
                 logger.warning("conflict_synonyms_load_failed best-effort 跳过")
+        if term_ids:
+            # P2-K 补齐：术语表同义词（term.py synonyms JSON 列）一并接入比对——
+            # 指标可绑定 metric.term_id（术语治理归属），术语表登记的「门诊挂号人次=
+            # 门诊挂号人数」等价须在冲突检测中生效，否则用不同叫法的指标漏检重复建设。
+            try:
+                from app.models.term import Term
+
+                terms = (
+                    await self._db.execute(
+                        select(Term.id, Term.synonyms).where(
+                            Term.id.in_(term_ids), Term.deleted_at.is_(None)
+                        )
+                    )
+                ).all()
+                term_syn_map = {tid: [str(s) for s in (syn or [])] for tid, syn in terms}
+            except Exception:  # noqa: BLE001 - 术语同义词查询降级，仅告警
+                logger.warning("conflict_term_synonyms_load_failed best-effort 跳过")
         result: list[MetricInput] = []
         for m in rows:
             defn = m.definition_json or {}
+            synonyms = [*syn_map.get(m.measure_id, []), *term_syn_map.get(m.term_id, [])]
             result.append(
                 MetricInput(
                     metric_code=m.metric_code,
@@ -688,7 +708,7 @@ class MetricService(BaseService):
                     pii_authorized=bool(m.compliance_reviewed),
                     metric_id=m.id,
                     definition_json=defn,
-                    synonyms=syn_map.get(m.measure_id, []),
+                    synonyms=synonyms,
                 )
             )
         return result
@@ -763,13 +783,33 @@ class MetricService(BaseService):
                         candidate.synonyms = [str(s) for s in syn]
                 except Exception:  # noqa: BLE001 - best-effort：同义词查询失败仅跳过
                     pass
+            # P2-K 补齐：候选侧同样接入术语表同义词（metric.term_id → Term.synonyms）。
+            # 创建路径与存量侧（load_conflict_existing）两侧对齐，术语登记的等价叫法
+            # 才能对称命中「同名不同义/同义不同名」判定，杜绝一侧接入的检测盲区。
+            if metric.term_id is not None:
+                try:
+                    from app.models.term import Term
+
+                    term_syn = (
+                        await self._db.execute(
+                            select(Term.synonyms).where(Term.id == metric.term_id)
+                        )
+                    ).scalar_one_or_none()
+                    if term_syn:
+                        candidate.synonyms = [*candidate.synonyms, *[str(s) for s in term_syn]]
+                except Exception:  # noqa: BLE001 - best-effort：术语同义词查询失败仅跳过
+                    pass
 
             if existing is None:
                 existing = await self.load_conflict_existing()
             # 排除自身：指标已落库，避免与自身比对（check 亦有自我引用防御，此处省查询）
             existing = [e for e in existing if e.metric_code != metric.metric_code]
+            # 创建/更新路径启用 LLM 语义补位（use_llm=True）：词法未达软冲突阈值但落入
+            # 补位触发区（0.45≤def_sim<0.85）的同义异名/表述差异大口径，交由 LLM 判定
+            # 语义同义——使创建时检测能力对齐人工预检（/conflicts/check）。LLM 异常由
+            # check 内部降级为词法判定（best-effort），不阻断创建主流程。
             await ConflictService(self._db).check(
-                candidate, existing, use_llm=False, source="auto"
+                candidate, existing, use_llm=True, source="auto"
             )
             # 以冲突表实际未决记录为准挂标记（杜绝孤儿标记）
             open_conflict = await ConflictRepository(self._db).get_first_open_for_metric(

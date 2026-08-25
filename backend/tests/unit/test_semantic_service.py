@@ -465,6 +465,64 @@ async def test_create_metric_precheck_failure_is_best_effort():
     repo.update_with_optimistic_lock.assert_not_called()
 
 
+async def test_load_conflict_existing_merges_term_synonyms():
+    """缺口1：存量侧把指标绑定的术语同义词并入比对对象（对齐注释承诺，术语表等价生效）。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(id=9, metric_code="outp_register_person_cnt_day", term_id=7)
+    repo.list_active_for_conflict = AsyncMock(return_value=[existing])
+
+    async def fake_execute(stmt, *args, **kwargs):
+        return MagicMock(all=MagicMock(return_value=[(7, ["门诊挂号人次", "门诊挂号人数"])]))
+
+    svc._db.execute = fake_execute
+
+    result = await svc.load_conflict_existing()
+    assert len(result) == 1
+    assert result[0].metric_code == "outp_register_person_cnt_day"
+    assert "门诊挂号人次" in result[0].synonyms
+    assert "门诊挂号人数" in result[0].synonyms
+
+
+async def test_precheck_merges_term_synonyms_and_uses_llm():
+    """缺口1+3：候选侧并入术语同义词 + 创建路径启用 LLM 补位（use_llm=True）。
+
+    创建时候选 term_id 为 None（术语在创建后单独绑定），但更新口径路径（P2-I）
+    候选已绑术语——候选侧对称接入，与存量侧共同杜绝术语等价的检测盲区。
+    """
+    from app.services.conflict.schemas import ConflictCheckResult, MetricInput
+
+    svc, repo = _svc_with_repo()
+    metric = make_metric(term_id=7)
+    definition = {"expression": "count(register_id)", "source_tables": []}
+    repo.list_active_for_conflict = AsyncMock(return_value=[])
+
+    async def fake_execute(stmt, *args, **kwargs):
+        # SQLAlchemy Result 的 scalar_one_or_none/all 是同步方法
+        return MagicMock(
+            scalar_one_or_none=lambda: ["门诊挂号人次", "门诊挂号人数"],
+            all=lambda: [],
+        )
+
+    svc._db.execute = fake_execute
+
+    captured: list[MetricInput] = []
+    captured_use_llm: list[bool] = []
+
+    async def fake_check(self, candidate, existing, *, use_llm=False, source="auto"):
+        captured.append(candidate)
+        captured_use_llm.append(use_llm)
+        return ConflictCheckResult(detections=[], blocked=False)
+
+    with patch("app.services.conflict.service.ConflictService.check", fake_check):
+        await svc._detect_and_mark_conflicts(metric, definition)
+
+    assert len(captured) == 1
+    assert "门诊挂号人次" in captured[0].synonyms
+    assert "门诊挂号人数" in captured[0].synonyms
+    # 缺口3：创建/更新路径启用 LLM 语义补位（对齐人工预检）
+    assert captured_use_llm == [True]
+
+
 async def test_get_metric_not_found():
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=None)

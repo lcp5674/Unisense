@@ -307,3 +307,107 @@ def test_synonym_equivalence_boosts_name_sim() -> None:
     assert _name_equivalent("gmv_total", "sales_total_amount", ["sales_total_amount"], [])
     # 无同义词 → 不认为等价
     assert not _name_equivalent("gmv_total", "sales_total_amount", [], [])
+
+
+# ---- 口径双字段扩展（缺口2）：伪代码/数仓详细口径/下游表差异应敏感 ----
+
+
+def test_detect_dw_definition_diff_raises_def_sim() -> None:
+    """数仓详细口径（dw_definition）不同 → 主体文本相同也不判同义（数仓实现口径敏感）。"""
+    cand = {
+        "metric_code": "outp_register_cnt_day",
+        "domain": "outpatient",
+        "definition": "count(register_id)",
+        "definition_json": {
+            "expression": "count(register_id)",
+            "dw_definition": "从 ods_his_register 按 register_id 去重计数",
+        },
+    }
+    existing = {
+        "metric_code": "outp_register_person_cnt_day",
+        "domain": "outpatient",
+        "definition": "count(register_id)",
+        "definition_json": {
+            "expression": "count(register_id)",
+            "dw_definition": "从 ods_his_register 按 patient_id 去重统计就诊人数",
+        },
+    }
+    det = detect_conflict(cand, existing)
+    # 主体 expression 相同但数仓实现口径不同 → 不判同义（否则漏判数仓口径冲突）；
+    # 可能降级为更弱的「口径相似」软冲突，但绝不判「同义建议合并」。
+    assert det is None or det.conflict_type != ConflictType.SAME_DEF_DIFF_NAME
+
+
+def test_detect_dw_definition_same_still_matches() -> None:
+    """数仓详细口径相同 → 主体同义仍命中（不误伤）。"""
+    cand = {
+        "metric_code": "outp_register_cnt_day",
+        "domain": "outpatient",
+        "definition": "count(register_id)",
+        "definition_json": {
+            "expression": "count(register_id)",
+            "dw_definition": "从 ods_his_register 按 register_id 去重计数",
+        },
+    }
+    existing = {
+        "metric_code": "outp_register_person_cnt_day",
+        "domain": "outpatient",
+        "definition": "count(register_id)",
+        "definition_json": {
+            "expression": "count(register_id)",
+            "dw_definition": "从 ods_his_register 按 register_id 去重计数",
+        },
+    }
+    det = detect_conflict(cand, existing)
+    assert det is not None
+    assert det.conflict_type == ConflictType.SAME_DEF_DIFF_NAME
+
+
+def test_detect_pseudo_definition_diff_raises_def_sim() -> None:
+    """伪代码口径（pseudo_definition）不同 → 不判同义（系统开发口径敏感）。"""
+    cand = {
+        "metric_code": "outp_fee_amount_day",
+        "domain": "outpatient",
+        "definition": "sum(fee_amount)",
+        "definition_json": {
+            "expression": "sum(fee_amount)",
+            "pseudo_definition": "取门诊收费主表实收金额，按就诊去重汇总",
+        },
+    }
+    existing = {
+        "metric_code": "outp_charge_amount_day",
+        "domain": "outpatient",
+        "definition": "sum(fee_amount)",
+        "definition_json": {
+            "expression": "sum(fee_amount)",
+            "pseudo_definition": "取住院结算表应收金额，按住院号分组累加",
+        },
+    }
+    det = detect_conflict(cand, existing)
+    # 伪代码口径不同 → 不再判同义（可降级为弱软冲突）
+    assert det is None or det.conflict_type != ConflictType.SAME_DEF_DIFF_NAME
+
+
+def test_detect_downstream_tables_diff_raises_def_sim() -> None:
+    """下游使用表不同 → 不判同义（消费范围敏感）。"""
+    cand = {
+        "metric_code": "outp_register_cnt_day",
+        "domain": "outpatient",
+        "definition": "count(register_id)",
+        "definition_json": {
+            "expression": "count(register_id)",
+            "downstream_tables": ["app_rpt_mz_day"],
+        },
+    }
+    existing = {
+        "metric_code": "outp_register_cnt_day2",
+        "domain": "outpatient",
+        "definition": "count(register_id)",
+        "definition_json": {
+            "expression": "count(register_id)",
+            "downstream_tables": ["app_rpt_hospital_wide"],
+        },
+    }
+    det = detect_conflict(cand, existing)
+    # 下游使用表不同 → 不再判同义（可降级为弱软冲突）
+    assert det is None or det.conflict_type != ConflictType.SAME_DEF_DIFF_NAME
