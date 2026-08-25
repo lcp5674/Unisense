@@ -1552,10 +1552,15 @@ async def batch_register_metrics(
     result = await service.batch_register_metrics(
         request, actor_id=user.id, role=user.role, user_domain=user.domain
     )
+    # 审计 action 区分 full/partial/failed（此前恒记成功，全败也无法从 action 追溯）
+    _failed = [c for c in result["candidates"] if c["status"] != "DRAFT"]
+    _action = "metric_definition.batch_register"
+    if _failed:
+        _action += "_failed" if len(_failed) == len(result["candidates"]) else "_partial"
     await write_audit(
         db,
         actor_id=user.id,
-        action="metric_definition.batch_register",
+        action=_action,
         entity_type="metric_definition",
         entity_id=f"batch:{result['batch_id']}",
         detail={
@@ -1856,10 +1861,15 @@ async def batch_register_from_sql_metrics(
     result = await service.batch_register_from_sql(
         request, actor_id=user.id, role=user.role, user_domain=user.domain
     )
+    # 审计 action 区分 full/partial/failed（此前恒记成功，全败也无法从 action 追溯）
+    _failed = [c for c in result["candidates"] if c["status"] != "DRAFT"]
+    _action = "metric_definition.sql_batch_register"
+    if _failed:
+        _action += "_failed" if len(_failed) == len(result["candidates"]) else "_partial"
     await write_audit(
         db,
         actor_id=user.id,
-        action="metric_definition.sql_batch_register",
+        action=_action,
         entity_type="metric_definition",
         entity_id=f"batch:{result['batch_id']}",
         detail={

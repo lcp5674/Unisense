@@ -842,6 +842,12 @@ export function MetricCreate() {
   async function runSqlBatchParse(synthesize: boolean) {
     const sql = sqlInferText.trim();
     if (!sql) { message.warning("请先粘贴大段指标 SQL"); return; }
+    // 生产就绪：超大 SQL 前端友好拦截（后端 schema max_length=65536 会 422，此前
+    // 前端透传技术错误不友好）——分拆后分批解析
+    if (sql.length > 65536) {
+      message.warning(`SQL 过长（${sql.length} 字符，上限 65536），请按指标分拆后分批解析`);
+      return;
+    }
     setSqlBatchParsing(true);
     try {
       const result = await parseSqlBatch({
