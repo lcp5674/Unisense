@@ -361,7 +361,15 @@ def _build_metastore_url(cfg: dict[str, Any]) -> URL:
 
 @registry.register("hive_metastore")
 def create_hive_metastore_collector(cfg: dict[str, Any]) -> HiveMetastoreCollector:
-    """Hive Metastore 采集器工厂：直连 HMS backend MySQL。"""
+    """Hive Metastore 采集器工厂：直连 HMS backend MySQL。
+
+    ``database`` 为 HMS 元数据库名（纯连接凭据），缺省按 ``hive`` 填充——
+    与 schemas 层默认值一致，覆盖所有直接 ``build_from_cfg`` 的入口
+    （连接预检/枚举/采集），避免 URL 无库导致的 ``1046 No database selected``。
+    """
+    cfg = dict(cfg)
+    if not str(cfg.get("database") or "").strip():
+        cfg["database"] = "hive"
     url = _build_metastore_url(cfg)
     connector = SqlalchemyConnector(url, connect_timeout=10, query_timeout=60)
-    return HiveMetastoreCollector(connector, database=cfg.get("database"))
+    return HiveMetastoreCollector(connector, database=cfg["database"])

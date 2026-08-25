@@ -33,6 +33,22 @@ def _validate_cron(value: str) -> str:
     return value
 
 
+# Hive Metastore 默认元数据库名（HMS backend 库默认即 ``hive``，用户可覆盖）
+_HMS_DEFAULT_DATABASE = "hive"
+
+
+def _ensure_hms_database(cfg: dict[str, Any], source_type_value: str) -> None:
+    """hive_metastore 的 ``database`` 是纯连接凭据（HMS 元数据库名），缺省按 hive 填充。
+
+    产品缺陷修复：``database`` 曾被当作"可选"，漏填时采集器直连 HMS backend 库
+    报裸 ``pymysql 1046 'No database selected'``，用户只有等报错才知道缺库名。
+    现统一默认填 ``hive``（Hive 元数据默认库名）：即便用户漏填也能直连 HMS 元库，
+    前端表单同步标注默认值并允许覆盖；非该类型不改变任何字段。
+    """
+    if source_type_value == "hive_metastore" and not str(cfg.get("database") or "").strip():
+        cfg["database"] = _HMS_DEFAULT_DATABASE
+
+
 class DataSourceCreateRequest(BaseModel):
     """数据源注册请求。
 
@@ -59,10 +75,11 @@ class DataSourceCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_connection_config(self) -> DataSourceCreateRequest:
-        """FR-020/P2-7: 按类型校验连接配置必填项。
+        """FR-020/P2-7: 按类型校验连接配置必填项 + 类型专属默认值。
 
         - kafka：需要 ``bootstrap_servers`` 或 ``host``（语义错位修复）；
-        - 其余类型：必须包含 ``host``。
+        - 其余类型：必须包含 ``host``；
+        - hive_metastore：``database``（HMS 元数据库名）缺省按 ``hive`` 填充。
         """
         cfg = self.connection_config
         if not isinstance(cfg, dict):
@@ -77,6 +94,7 @@ class DataSourceCreateRequest(BaseModel):
                 raise ValueError("kafka 的 connection_config 必须包含 bootstrap_servers 或 host")
         elif "host" not in cfg:
             raise ValueError("connection_config 必须包含 host 字段")
+        _ensure_hms_database(cfg, source_type_value)
         return self
 
 
@@ -121,7 +139,7 @@ class DataSourceUpdateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_connection_config(self) -> DataSourceUpdateRequest:
-        """FR-020/P2-7: 仅当传入 connection_config 时按类型校验必填项。"""
+        """FR-020/P2-7: 仅当传入 connection_config 时按类型校验必填项 + 类型专属默认值。"""
         cfg = self.connection_config
         if cfg is None:
             return self
@@ -134,6 +152,7 @@ class DataSourceUpdateRequest(BaseModel):
                 raise ValueError("kafka 的 connection_config 必须包含 bootstrap_servers 或 host")
         elif "host" not in cfg:
             raise ValueError("connection_config 必须包含 host 字段")
+        _ensure_hms_database(cfg, source_type_value)
         return self
 
 
@@ -169,6 +188,7 @@ class TestConnectionRequest(BaseModel):
                 raise ValueError("kafka 的 connection_config 必须包含 bootstrap_servers 或 host")
         elif "host" not in cfg:
             raise ValueError("connection_config 必须包含 host 字段")
+        _ensure_hms_database(cfg, source_type_value)
         return self
 
 

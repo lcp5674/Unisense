@@ -244,3 +244,21 @@ async def test_hms_registered_in_registry():
     assert info["hive_metastore"].label == "Hive Metastore"
     assert info["hive_metastore"].default_port == 3306
     assert info["hive_metastore"].supports_database is True
+
+
+def test_hms_factory_defaults_database_to_hive():
+    """回归：factory 缺 database 时按 hive 填充（与 schemas 层默认值一致）。
+
+    覆盖直接 build_from_cfg 的入口（连接预检/枚举），避免 URL 无库导致
+    ``1046 No database selected``；显式提供 database 时保持原值。
+    """
+    col = registry.build_from_cfg(
+        "hive_metastore",
+        {"host": "8.8.8.8", "port": 3306, "user": "u", "password": "p"},
+    )
+    assert col._database == "hive"
+    col2 = registry.build_from_cfg(
+        "hive_metastore",
+        {"host": "8.8.8.8", "port": 3306, "database": "metastore_db"},
+    )
+    assert col2._database == "metastore_db"

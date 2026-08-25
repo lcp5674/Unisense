@@ -110,6 +110,7 @@ const TYPES: SourceTypeInfo[] = [
   { source_type: "postgres", label: "PostgreSQL", default_port: 5432, supports_database: true, supports_schema: true, description: "关系型数据库" },
   { source_type: "spark", label: "Spark", default_port: 10000, supports_database: true, supports_schema: false, description: "Spark SQL（Thrift Server）" },
   { source_type: "kafka", label: "Kafka", default_port: 9092, supports_database: false, supports_schema: false, description: "消息队列" },
+  { source_type: "hive_metastore", label: "Hive Metastore", default_port: 3306, supports_database: true, supports_schema: false, description: "Hive 元数据直连" },
 ];
 
 const DOMAINS: SubjectDomainTreeNode[] = [
@@ -361,6 +362,22 @@ describe("DataSources", () => {
     expect(payload.source_type).toBe("mysql");
     expect(payload.domain).toBe("finance");
     expect((payload.connection_config as Record<string, unknown>).database).toBeUndefined();
+  });
+
+  it("创建 Hive Metastore 时自动预填 HMS 元数据库名 hive", async () => {
+    await openCreateModal();
+    fireEvent.change(screen.getByPlaceholderText("如 财务 MySQL"), { target: { value: "HMS 元数据" } });
+    await selectDomain("财务（finance）");
+    fireEvent.change(screen.getByPlaceholderText("127.0.0.1"), { target: { value: "10.0.0.5" } });
+    await selectType("Hive Metastore（hive_metastore）");
+    fireEvent.click(screen.getByRole("button", { name: /创\s*建/ }));
+    await waitFor(() => {
+      expect(mockedCreate).toHaveBeenCalled();
+    });
+    const payload = mockedCreate.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(payload.source_type).toBe("hive_metastore");
+    // database（HMS 元数据库名）自动默认 hive，避免漏填导致 1046 No database selected
+    expect((payload.connection_config as Record<string, unknown>).database).toBe("hive");
   });
 
   it("详情弹窗提供实时探活（测试连接）", async () => {

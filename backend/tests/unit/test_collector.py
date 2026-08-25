@@ -1316,6 +1316,55 @@ def test_hive_metastore_type_accepted_by_schemas():
     assert update_req.source_type == "hive_metastore"
 
 
+def test_hive_metastore_database_defaults_to_hive():
+    """回归：hive_metastore 的 database（HMS 元数据库名）缺省按 hive 填充。
+
+    曾因 database 被当作"可选"，漏填时采集直连 HMS backend 库报裸
+    ``pymysql 1046 'No database selected'``，用户只有等报错才知道缺库名。
+    现创建/更新/连接预检三层 schema 均默认填 hive（用户可覆盖），
+    非该类型不改变任何字段。
+    """
+    # 创建：缺 database → 自动填 hive
+    create_req = DataSourceCreateRequest(
+        source_id="hms1",
+        name="HMS",
+        source_type="hive_metastore",
+        connection_config={"host": "10.0.0.5", "port": 3306},
+        domain="d",
+    )
+    assert create_req.connection_config["database"] == "hive"
+    # 创建：显式提供 database → 保持原值不被覆盖
+    create_req2 = DataSourceCreateRequest(
+        source_id="hms2",
+        name="HMS2",
+        source_type="hive_metastore",
+        connection_config={"host": "10.0.0.5", "port": 3306, "database": "metastore_db"},
+        domain="d",
+    )
+    assert create_req2.connection_config["database"] == "metastore_db"
+    # 更新：传入 connection_config 缺 database → 自动填 hive
+    update_req = DataSourceUpdateRequest(
+        source_type="hive_metastore",
+        connection_config={"host": "10.0.0.5"},
+    )
+    assert update_req.connection_config["database"] == "hive"
+    # 连接预检：缺 database → 自动填 hive
+    probe_req = TestConnectionRequest(
+        source_type="hive_metastore",
+        connection_config={"host": "10.0.0.5", "port": 3306},
+    )
+    assert probe_req.connection_config["database"] == "hive"
+    # 非该类型（mysql）不受影响：缺 database 仍保持为空
+    mysql_req = DataSourceCreateRequest(
+        source_id="mysql1",
+        name="MySQL",
+        source_type="mysql",
+        connection_config={"host": "10.0.0.5", "port": 3306},
+        domain="d",
+    )
+    assert "database" not in mysql_req.connection_config
+
+
 # ---------- US6: batch 事件发布 ----------
 
 

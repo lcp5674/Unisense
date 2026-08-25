@@ -372,6 +372,28 @@ frontend/
 
 ---
 
+## 9a. 采集器/数据源类型扩展规范
+
+新增/修改采集器类型（如 `mysql`、`hive_metastore`、`kafka`）时，**须全链路同步**——缺一层即表现为"前端可选但后端 422 / 采集 500"：
+
+| 层 | 落点 | 缺层后果 |
+|---|---|---|
+| 共享枚举 | `app/models/enums.py` `SourceTypeEnum` | 所有用 `SourceType` 校验的请求（test-connection/databases/tables/create/update）直接 422 |
+| DB 枚举迁移 | 新增 alembic 迁移扩展 `source_type_enum`（对齐 0033 写法） | 写入触发 MySQL 1265 `Data truncated` |
+| 采集器注册表 | `collector_registry.py` `TYPE_INFO`（label/默认端口/supports_database） | 前端类型列表缺失该类型 |
+| 连接器 | `connectors/{type}.py`（含 `probe`/`list_databases`/`collect`） | 测试连接"能过校验但探活失败" |
+| 前端表单 | `DataSources.tsx` 类型列表与连接字段 | 前端可选、后端拒绝 |
+| 测试 | schema 级 + 连接器级 + API 级防回归 | 既有测试无法暴露枚举缺口（如 `SourceTypeEnum` 曾漏 `hive_metastore`） |
+
+**产品友好提示原则**（避免"只有报错才知道原因"）：
+
+- 关键连接凭据字段在前端**标注必填/默认值/tooltip**，并默认预填合理值（如 `hive_metastore` 的 `database`=HMS 元数据库名默认 `hive`）；
+- 后端 schema 校验器（`_validate_connection_config`）须覆盖该字段的**默认值与必填校验**，与前端行为一致；
+- 连接器对缺配/误配须给出**明确业务错误**，禁止把裸 DB 错误（如 `pymysql 1046 No database selected`）抛给用户；
+- 历史教训（2026-08-25 修复）：`hive_metastore` 的 `database` 曾被标"可选"，漏填后采集报裸 1046，用户只有失败才知道缺库名；现 schemas + 连接器 + 前端三层统一默认 `hive`。
+
+---
+
 ## 10. API 版本管理规范
 
 - **当前版本**：`v1`（Header `X-API-Version: v1`）。

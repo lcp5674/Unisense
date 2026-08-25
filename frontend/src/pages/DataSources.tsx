@@ -831,6 +831,12 @@ export function DataSources() {
     if (info?.default_port) {
       form.setFieldValue("port", info.default_port);
     }
+    // hive_metastore 的 database 是必填连接凭据（HMS 元数据库名），自动预填默认 hive；
+    // 用户可改，其余类型保持原值不动
+    if (info?.source_type === "hive_metastore") {
+      const cur = form.getFieldValue("database");
+      if (!cur) form.setFieldValue("database", "hive");
+    }
     setDbOptions([]);
     setTableOptions({});
     form.setFieldValue("selected_tables", []);
@@ -939,7 +945,14 @@ export function DataSources() {
       cfg.host = String(values.host).trim();
     }
     if (values.port) cfg.port = Number(values.port);
-    if (values.database) cfg.database = String(values.database);
+    // hive_metastore 的 database 是纯连接凭据（HMS 元数据库名），漏填默认 hive——
+    // 与后端 schemas 默认值一致，避免无库直连报 1046 'No database selected'
+    const sourceTypeValue = String(values.source_type || "");
+    if (values.database) {
+      cfg.database = String(values.database);
+    } else if (sourceTypeValue === "hive_metastore") {
+      cfg.database = "hive";
+    }
     if (values.schema) cfg.schema = String(values.schema);
     if (values.user) cfg.user = String(values.user);
     if (values.password) cfg.password = String(values.password);
@@ -1283,6 +1296,8 @@ export function DataSources() {
   }
 
   const selType = typeInfo(types, sourceType);
+  // Hive Metastore 的 database 是纯连接凭据（HMS 元数据库名），区别于普通关系库的"可选连接库"
+  const isHms = selType?.source_type === "hive_metastore";
   const generated = previewSourceId(sourceType, { database: watchedDatabase, schema: watchedSchema }, domainWatch);
 
   const columns = [
@@ -1728,21 +1743,25 @@ export function DataSources() {
                   <Space direction="vertical" style={{ width: "100%" }}>
                     <Form.Item
                       name="database"
-                      label="连接库（纯连接凭据）"
+                      label={isHms ? "HMS 元数据库名（必填）" : "连接库（纯连接凭据）"}
                       style={{ width: "100%" }}
-                      tooltip="连接实例时使用的默认库，仅作连接凭据、不影响采集范围；采集范围由上方「目标数据库」决定"
+                      tooltip={
+                        isHms
+                          ? "Hive Metastore 元数据库名（HMS backend 库），必填连接凭据，漏填将导致采集报「No database selected」。Hive 默认元库名为 hive，已自动预填，如你的元库名不同请修改"
+                          : "连接实例时使用的默认库，仅作连接凭据、不影响采集范围；采集范围由上方「目标数据库」决定"
+                      }
                     >
                       {dbOptions.length ? (
                         <Select
                           showSearch
                           allowClear
-                          placeholder="全部库（默认）"
+                          placeholder={isHms ? "HMS 元数据库名（默认 hive）" : "全部库（默认）"}
                           optionFilterProp="label"
                           loading={dbLoading}
                           options={dbOptions.map((d) => ({ value: d, label: d }))}
                         />
                       ) : (
-                        <Input className="mono" placeholder="连接默认库（可选）" />
+                        <Input className="mono" placeholder={isHms ? "HMS 元数据库名，默认 hive" : "连接默认库（可选）"} />
                       )}
                     </Form.Item>
                     {selType?.supports_schema && (
