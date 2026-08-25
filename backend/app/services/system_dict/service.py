@@ -11,7 +11,12 @@ from app.core.exceptions import BusinessError, ConflictError, NotFoundError
 from app.models.system_dict import SystemDict
 from app.services.notify.service import NotifyService
 from app.services.system_dict.repository import SystemDictRepository
-from app.services.system_dict.schemas import DictItemCreate, DictItemUpdate
+from app.services.system_dict.schemas import (
+    DictBatchItem,
+    DictBatchResult,
+    DictItemCreate,
+    DictItemUpdate,
+)
 
 logger = structlog.get_logger("unisense.system_dict.service")
 
@@ -174,6 +179,124 @@ class SystemDictService:
             )
         await self._repo.soft_delete(item)
         logger.info("dict_item_deleted", dict_type=dict_type, code=code)
+
+    async def batch_create_items(
+        self,
+        dict_type: str,
+        items: list[DictItemCreate],
+    ) -> DictBatchResult:
+        """批量新增字典项（207 语义：单条失败逐项标注，不影响其余）。
+
+        逐条复用 ``create_item`` 的编码自动生成 / 软删恢复 / 冲突判定；
+        DB 层错误（并发唯一索引冲突等）经 savepoint 隔离回滚，不污染整批事务。
+        业务错误（编码重复等）在写入前抛出，失败项记 ``error_code`` 不阻断其余。
+        """
+        succeeded: list[DictBatchItem] = []
+        failed: list[DictBatchItem] = []
+        for data in items:
+            try:
+                async with self._db.begin_nested():
+                    item = await self.create_item(dict_type, data)
+                succeeded.append(DictBatchItem(code=item.code, label=item.label, ok=True))
+            except BusinessError as exc:
+                failed.append(
+                    DictBatchItem(
+                        code=data.code or "",
+                        label=data.label,
+                        ok=False,
+                        error_code=exc.error_code,
+                        message=exc.message,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - 批量单条失败不阻断其余（207 语义）
+                failed.append(
+                    DictBatchItem(
+                        code=data.code or "",
+                        label=data.label,
+                        ok=False,
+                        error_code="INTERNAL",
+                        message=str(exc),
+                    )
+                )
+        return DictBatchResult(succeeded=succeeded, failed=failed)
+
+    async def batch_toggle_items(
+        self,
+        dict_type: str,
+        codes: list[str],
+        action: str,
+    ) -> DictBatchResult:
+        """批量启用/停用字典项（207 语义）。
+
+        ``action`` 为 ``activate`` 或 ``deactivate``；不存在的编码记为
+        ``NOT_FOUND`` 失败项，其余逐条切换状态。
+        """
+        succeeded: list[DictBatchItem] = []
+        failed: list[DictBatchItem] = []
+        for code in codes:
+            try:
+                async with self._db.begin_nested():
+                    if action == "activate":
+                        item = await self.activate_item(dict_type, code)
+                    else:
+                        item = await self.deactivate_item(dict_type, code)
+                succeeded.append(DictBatchItem(code=item.code, label=item.label, ok=True))
+            except NotFoundError as exc:
+                failed.append(
+                    DictBatchItem(
+                        code=code,
+                        ok=False,
+                        error_code="NOT_FOUND",
+                        message=exc.message,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - 批量单条失败不阻断其余（207 语义）
+                failed.append(
+                    DictBatchItem(
+                        code=code,
+                        ok=False,
+                        error_code="INTERNAL",
+                        message=str(exc),
+                    )
+                )
+        return DictBatchResult(succeeded=succeeded, failed=failed)
+
+    async def batch_delete_items(
+        self,
+        dict_type: str,
+        codes: list[str],
+    ) -> DictBatchResult:
+        """批量删除字典项（207 语义）。
+
+        逐条复用 ``delete_item`` 的引用保护：被指标引用的项记为
+        ``HAS_REFERENCES`` 失败项（提示先停用），其余软删除。
+        """
+        succeeded: list[DictBatchItem] = []
+        failed: list[DictBatchItem] = []
+        for code in codes:
+            try:
+                async with self._db.begin_nested():
+                    await self.delete_item(dict_type, code)
+                succeeded.append(DictBatchItem(code=code, ok=True))
+            except BusinessError as exc:
+                failed.append(
+                    DictBatchItem(
+                        code=code,
+                        ok=False,
+                        error_code=exc.error_code,
+                        message=exc.message,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - 批量单条失败不阻断其余（207 语义）
+                failed.append(
+                    DictBatchItem(
+                        code=code,
+                        ok=False,
+                        error_code="INTERNAL",
+                        message=str(exc),
+                    )
+                )
+        return DictBatchResult(succeeded=succeeded, failed=failed)
 
     async def get_ref_count(self, dict_type: str, code: str) -> int:
         """获取字典项引用计数（被多少指标引用）。

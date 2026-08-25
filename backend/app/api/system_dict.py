@@ -21,6 +21,10 @@ from app.core.exceptions import BusinessError, NotFoundError
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session as get_session
 from app.services.system_dict.schemas import (
+    DictBatchCreateRequest,
+    DictBatchDeleteRequest,
+    DictBatchResult,
+    DictBatchStatusRequest,
     DictItemCreate,
     DictItemResponse,
     DictItemUpdate,
@@ -335,6 +339,124 @@ async def delete_dict_item(
     except (NotFoundError, BusinessError) as exc:
         await svc._db.rollback()
         raise HTTPException(status_code=400, detail=exc.message) from exc
+
+
+@router.post(
+    "/{dict_type}/batch",
+    response_model=ApiResponse[DictBatchResult],
+    summary="批量新增字典项",
+    dependencies=_ADMIN_DEPS,
+)
+async def batch_create_dict_items(
+    dict_type: str,
+    data: DictBatchCreateRequest,
+    user: CurrentUser,
+    request: Request,
+    svc: SystemDictService = Depends(_get_service),
+    trace_id: Annotated[str, Depends(get_trace_id)] = "",
+) -> ApiResponse[DictBatchResult]:
+    """批量新增同一类型字典项（207 语义：单条失败逐项标注，不影响其余）。
+
+    ``code`` 缺省时逐条按显示名自动生成英文编码；与既有项编码重复的条目
+    记为失败项（DUPLICATE_DICT_CODE），其余正常创建。
+    """
+    result = await svc.batch_create_items(dict_type, data.items)
+    await write_audit(
+        svc._db,
+        actor_id=user.id,
+        action="dict.batch_create",
+        entity_type="dict_item",
+        entity_id=f"items:{len(data.items)}",
+        detail={
+            "dict_type": dict_type,
+            "succeeded": len(result.succeeded),
+            "failed": len(result.failed),
+            "failed_items": [
+                {"code": f.code, "error_code": f.error_code, "message": f.message}
+                for f in result.failed
+            ],
+        },
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await svc._db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
+@router.post(
+    "/{dict_type}/batch-status",
+    response_model=ApiResponse[DictBatchResult],
+    summary="批量启用/停用字典项",
+    dependencies=_ADMIN_DEPS,
+)
+async def batch_toggle_dict_items(
+    dict_type: str,
+    data: DictBatchStatusRequest,
+    user: CurrentUser,
+    request: Request,
+    svc: SystemDictService = Depends(_get_service),
+    trace_id: Annotated[str, Depends(get_trace_id)] = "",
+) -> ApiResponse[DictBatchResult]:
+    """批量启用/停用同一类型字典项（207 语义）。
+
+    ``action`` 为 ``activate``（启用）或 ``deactivate``（停用）；不存在的
+    编码记为 NOT_FOUND 失败项，其余逐条切换状态。
+    """
+    result = await svc.batch_toggle_items(dict_type, data.codes, data.action)
+    await write_audit(
+        svc._db,
+        actor_id=user.id,
+        action="dict.batch_enable" if data.action == "activate" else "dict.batch_disable",
+        entity_type="dict_item",
+        entity_id=f"items:{len(data.codes)}",
+        detail={
+            "dict_type": dict_type,
+            "action": data.action,
+            "succeeded": len(result.succeeded),
+            "failed": len(result.failed),
+        },
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await svc._db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
+@router.post(
+    "/{dict_type}/batch-delete",
+    response_model=ApiResponse[DictBatchResult],
+    summary="批量删除字典项",
+    dependencies=_ADMIN_DEPS,
+)
+async def batch_delete_dict_items(
+    dict_type: str,
+    data: DictBatchDeleteRequest,
+    user: CurrentUser,
+    request: Request,
+    svc: SystemDictService = Depends(_get_service),
+    trace_id: Annotated[str, Depends(get_trace_id)] = "",
+) -> ApiResponse[DictBatchResult]:
+    """批量删除同一类型字典项（软删，207 语义）。
+
+    被指标引用的项记为 HAS_REFERENCES 失败项（提示先停用），其余软删除。
+    """
+    result = await svc.batch_delete_items(dict_type, data.codes)
+    await write_audit(
+        svc._db,
+        actor_id=user.id,
+        action="dict.batch_delete",
+        entity_type="dict_item",
+        entity_id=f"items:{len(data.codes)}",
+        detail={
+            "dict_type": dict_type,
+            "succeeded": len(result.succeeded),
+            "failed": len(result.failed),
+        },
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await svc._db.commit()
+    return ok(data=result, trace_id=trace_id)
 
 
 @router.get(

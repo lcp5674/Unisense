@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -97,3 +98,57 @@ class DictUnknownRejectRequest(BaseModel):
 
     notification_id: int = Field(..., gt=0, description="原待办通知 ID")
     reason: str | None = Field(None, max_length=500, description="打回原因")
+
+
+class DictBatchCreateRequest(BaseModel):
+    """批量新增字典项请求（同一 dict_type 下）。"""
+
+    items: list[DictItemCreate] = Field(..., min_length=1, max_length=100, description="待新增项")
+
+
+class DictBatchStatusRequest(BaseModel):
+    """批量启用/停用字典项请求。"""
+
+    codes: list[str] = Field(..., min_length=1, max_length=100, description="待操作编码列表")
+    action: Literal["activate", "deactivate"] = Field(
+        "activate", description="activate 启用 / deactivate 停用"
+    )
+
+    @field_validator("codes")
+    @classmethod
+    def validate_codes(cls, v: list[str]) -> list[str]:
+        for code in v:
+            if not _DICT_CODE_PATTERN.match(code):
+                raise ValueError(f"字典项编码仅含字母、数字和下划线: {code}")
+        return v
+
+
+class DictBatchDeleteRequest(BaseModel):
+    """批量删除字典项请求。"""
+
+    codes: list[str] = Field(..., min_length=1, max_length=100, description="待删除编码列表")
+
+    @field_validator("codes")
+    @classmethod
+    def validate_codes(cls, v: list[str]) -> list[str]:
+        for code in v:
+            if not _DICT_CODE_PATTERN.match(code):
+                raise ValueError(f"字典项编码仅含字母、数字和下划线: {code}")
+        return v
+
+
+class DictBatchItem(BaseModel):
+    """批量操作结果单项（207 语义，逐项标注成败原因）。"""
+
+    code: str = Field(..., description="字典项编码（新增失败时可能为空串）")
+    label: str | None = Field(None, description="显示名（新增失败/未找到时为 None）")
+    ok: bool = Field(..., description="是否成功")
+    error_code: str | None = Field(None, description="失败原因编码")
+    message: str | None = Field(None, description="失败原因描述")
+
+
+class DictBatchResult(BaseModel):
+    """批量操作结果（succeeded + failed 分桶）。"""
+
+    succeeded: list[DictBatchItem] = Field(default_factory=list)
+    failed: list[DictBatchItem] = Field(default_factory=list)

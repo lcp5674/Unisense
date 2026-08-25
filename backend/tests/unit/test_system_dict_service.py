@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from app.core.exceptions import BusinessError, NotFoundError
 from app.services.system_dict.service import SystemDictService
+
+
+@asynccontextmanager
+async def _nested():
+    """真实 savepoint 语义：异常从 yield 抛出进外层 except。
+
+    MagicMock 的 async with（``begin_nested``）的 ``__aexit__`` 返回真值会吞掉
+    块内异常，导致批量失败项无法被捕获；用真实 asynccontextmanager 模拟。
+    """
+    yield
 
 
 @pytest.fixture
@@ -374,3 +385,114 @@ class TestUnknownValueGovernance:
         assert kwargs["payload"]["value"] == "XXX"
         # 原待办办结（不再出现在「仅待处理」）
         mock_notify.mark_handled.assert_awaited_once_with(1, 5, "platform_admin")
+
+
+class TestBatch:
+    """字典批量操作（207 语义：单条失败逐项标注，不影响其余）。"""
+
+    @staticmethod
+    def _install_nested(svc) -> None:
+        """用真实 asynccontextmanager 模拟 begin_nested（MagicMock __aexit__ 吞异常）。"""
+        svc._db.begin_nested = _nested  # type: ignore[method-assign]
+
+    async def test_batch_create_all_success(self, svc) -> None:
+        self._install_nested(svc)
+        created = MagicMock()
+        created.code = "minute"
+        created.label = "分钟"
+        svc.create_item = AsyncMock(return_value=created)
+
+        from app.services.system_dict.schemas import DictItemCreate
+
+        items = [DictItemCreate(label="分钟"), DictItemCreate(label="秒")]
+        result = await svc.batch_create_items("granularity", items)
+        assert len(result.succeeded) == 2
+        assert len(result.failed) == 0
+        assert result.succeeded[0].code == "minute"
+        # 逐条复用 create_item（含编码自动生成/软删恢复/冲突判定）
+        assert svc.create_item.await_count == 2
+
+    async def test_batch_create_partial_duplicate(self, svc) -> None:
+        """编码重复（业务错误）：仅该条失败（DUPLICATE_DICT_CODE），其余继续。"""
+        self._install_nested(svc)
+        from app.core.exceptions import ConflictError
+        from app.services.system_dict.schemas import DictItemCreate
+
+        created = MagicMock()
+        created.code = "second"
+        created.label = "秒"
+        svc.create_item = AsyncMock(
+            side_effect=[
+                ConflictError("字典项已存在: granularity/day", error_code="DUPLICATE_DICT_CODE"),
+                created,
+            ]
+        )
+        items = [DictItemCreate(code="day", label="天"), DictItemCreate(code="second", label="秒")]
+        result = await svc.batch_create_items("granularity", items)
+        assert len(result.succeeded) == 1
+        assert result.succeeded[0].code == "second"
+        assert len(result.failed) == 1
+        assert result.failed[0].code == "day"
+        assert result.failed[0].error_code == "DUPLICATE_DICT_CODE"
+        assert "已存在" in result.failed[0].message
+
+    async def test_batch_toggle_all_success(self, svc) -> None:
+        self._install_nested(svc)
+        item = MagicMock()
+        item.code = "day"
+        item.label = "天"
+        svc.deactivate_item = AsyncMock(return_value=item)
+        result = await svc.batch_toggle_items("granularity", ["day", "month"], "deactivate")
+        assert len(result.succeeded) == 2
+        assert len(result.failed) == 0
+        assert svc.deactivate_item.await_count == 2
+
+    async def test_batch_toggle_partial_not_found(self, svc) -> None:
+        """编码不存在：记为 NOT_FOUND 失败项，其余继续。"""
+        self._install_nested(svc)
+        item = MagicMock()
+        item.code = "day"
+        item.label = "天"
+        svc.activate_item = AsyncMock(
+            side_effect=[NotFoundError("字典项不存在: granularity/nope"), item]
+        )
+        result = await svc.batch_toggle_items("granularity", ["nope", "day"], "activate")
+        assert len(result.succeeded) == 1
+        assert result.succeeded[0].code == "day"
+        assert len(result.failed) == 1
+        assert result.failed[0].code == "nope"
+        assert result.failed[0].error_code == "NOT_FOUND"
+
+    async def test_batch_delete_partial_reference_rejected(self, svc) -> None:
+        """被引用项不可删（HAS_REFERENCES）：仅该条失败，其余继续。"""
+        self._install_nested(svc)
+        svc.delete_item = AsyncMock(
+            side_effect=[
+                BusinessError("该字典项被 3 个指标引用，不可删除", error_code="HAS_REFERENCES"),
+                None,
+            ]
+        )
+        result = await svc.batch_delete_items("unit", ["CNY", "USD"])
+        assert len(result.succeeded) == 1
+        assert result.succeeded[0].code == "USD"
+        assert len(result.failed) == 1
+        assert result.failed[0].code == "CNY"
+        assert result.failed[0].error_code == "HAS_REFERENCES"
+
+    async def test_batch_delete_db_error_savepoint_continues(self, svc) -> None:
+        """DB 级错误（如并发唯一键冲突）：savepoint 隔离，仅该条失败、后续继续。"""
+        self._install_nested(svc)
+        from sqlalchemy.exc import IntegrityError
+
+        svc.delete_item = AsyncMock(
+            side_effect=[
+                IntegrityError("stmt", {}, Exception("boom")),
+                None,
+            ]
+        )
+        result = await svc.batch_delete_items("unit", ["A", "B"])
+        assert len(result.succeeded) == 1
+        assert result.succeeded[0].code == "B"
+        assert len(result.failed) == 1
+        assert result.failed[0].code == "A"
+        assert result.failed[0].error_code == "INTERNAL"

@@ -2671,6 +2671,21 @@ export interface DictItemUpdateRequest {
   description?: string | null;
 }
 
+/** 批量操作结果单项（207 语义，逐项标注成败原因） */
+export interface DictBatchItem {
+  code: string;
+  label?: string | null;
+  ok: boolean;
+  error_code?: string | null;
+  message?: string | null;
+}
+
+/** 批量操作结果（succeeded + failed 分桶） */
+export interface DictBatchResult {
+  succeeded: DictBatchItem[];
+  failed: DictBatchItem[];
+}
+
 /** 字典值校验项（dict_type + value） */
 export interface DictValueCheckItem {
   dict_type: string;

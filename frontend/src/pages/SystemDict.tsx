@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
-  Card, Tabs, Table, Button, Modal, Form, Input, InputNumber, Space, Tag, Select, App as AntApp,
+  Card, Tabs, Table, Button, Modal, Form, Input, InputNumber, Space, Tag, Select, Popconfirm, App as AntApp,
 } from "antd";
 import { PlusOutlined, EditOutlined, DeleteOutlined, StopOutlined, CheckCircleOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import {
   listDictTypes, listAllDictItems, createDictItem, updateDictItem,
   deactivateDictItem, activateDictItem, deleteDictItem,
+  batchCreateDictItems, batchToggleDictItems, batchDeleteDictItems,
 } from "../api";
-import type { SystemDictItem } from "../types";
+import type { DictBatchResult, SystemDictItem } from "../types";
 import { slugifyCode, resolveUniqueCode } from "../utils/zhEnDict";
 import { usePermission } from "../hooks/usePermission";
 
@@ -34,6 +35,13 @@ const DICT_TYPE_LABELS: Record<string, string> = {
 // 缩小「他端新增同名编码但本页未刷新」导致的预览滞后窗口。
 export const QUIET_REFRESH_TTL_MS = 30_000;
 
+// 批量新增弹窗单行（label 必填，code 由后端自动生成）
+interface BatchCreateRow {
+  label: string;
+  sort_order: number;
+  description: string;
+}
+
 export function SystemDict() {
   const { message, modal } = AntApp.useApp();
   const { can } = usePermission();
@@ -58,6 +66,13 @@ export function SystemDict() {
   const [editItem, setEditItem] = useState<SystemDictItem | null>(null);
   const [createForm] = Form.useForm();
   const [editForm] = Form.useForm();
+  // 批量操作（按当前 tab 的 dict_type 作用域）：行选 + 批量新增/启停/删除
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchRows, setBatchRows] = useState<BatchCreateRow[]>([
+    { label: "", sort_order: 0, description: "" },
+  ]);
+  const [batchSubmitting, setBatchSubmitting] = useState(false);
   // 静默刷新的上次执行时间（TTL 防抖：QUIET_REFRESH_TTL_MS 内不重复请求）
   const lastQuietRefreshRef = useRef(0);
   // 编码自动生成预览：监听显示名，与后端 codegen 规则对齐——
@@ -178,6 +193,96 @@ export function SystemDict() {
     });
   }
 
+  // 批量失败清单：label/code（原因）——批量 207 语义下逐项标注，便于治理定位
+  function batchFailSummary(result: DictBatchResult): string {
+    return result.failed
+      .map((f) => `${f.label || f.code || "?"}（${f.message ?? f.error_code ?? "失败"}）`)
+      .join("、");
+  }
+
+  async function handleBatchToggle(enabled: boolean) {
+    if (selectedRowKeys.length === 0) return;
+    const action = enabled ? "启用" : "停用";
+    setBatchSubmitting(true);
+    try {
+      const codes = selectedRowKeys.map(String);
+      const result = await batchToggleDictItems(
+        activeType,
+        codes,
+        enabled ? "activate" : "deactivate",
+      );
+      if (result.failed.length > 0) {
+        message.warning(`${action}完成 ${result.succeeded.length} 个，失败 ${result.failed.length} 个：${batchFailSummary(result)}`);
+      } else {
+        message.success(`已${action} ${result.succeeded.length} 个参照数据项`);
+      }
+      setSelectedRowKeys([]);
+      loadItems();
+    } catch (err: any) {
+      message.error(err?.message || `批量${action}失败`);
+    } finally {
+      setBatchSubmitting(false);
+    }
+  }
+
+  async function handleBatchDelete() {
+    if (selectedRowKeys.length === 0) return;
+    setBatchSubmitting(true);
+    try {
+      const codes = selectedRowKeys.map(String);
+      const result = await batchDeleteDictItems(activeType, codes);
+      if (result.failed.length > 0) {
+        message.warning(`删除完成 ${result.succeeded.length} 个，失败 ${result.failed.length} 个：${batchFailSummary(result)}`);
+      } else {
+        message.success(`已删除 ${result.succeeded.length} 个参照数据项`);
+      }
+      setSelectedRowKeys([]);
+      loadItems();
+    } catch (err: any) {
+      message.error(err?.message || "批量删除失败");
+    } finally {
+      setBatchSubmitting(false);
+    }
+  }
+
+  function addBatchRow() {
+    setBatchRows([...batchRows, { label: "", sort_order: 0, description: "" }]);
+  }
+
+  function updateBatchRow(idx: number, patch: Partial<BatchCreateRow>) {
+    setBatchRows(batchRows.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
+  }
+
+  function removeBatchRow(idx: number) {
+    setBatchRows(batchRows.filter((_, i) => i !== idx));
+  }
+
+  async function handleBatchCreate() {
+    const valid = batchRows
+      .map((r) => ({ ...r, label: r.label.trim() }))
+      .filter((r) => r.label.length > 0);
+    if (valid.length === 0) {
+      message.warning("请至少填写一行的显示名");
+      return;
+    }
+    setBatchSubmitting(true);
+    try {
+      const result = await batchCreateDictItems(activeType, valid);
+      if (result.failed.length > 0) {
+        message.warning(`新增成功 ${result.succeeded.length} 个，失败 ${result.failed.length} 个：${batchFailSummary(result)}`);
+      } else {
+        message.success(`已新增 ${result.succeeded.length} 个参照数据项`);
+      }
+      setBatchOpen(false);
+      setBatchRows([{ label: "", sort_order: 0, description: "" }]);
+      loadItems();
+    } catch (err: any) {
+      message.error(err?.message || "批量新增失败");
+    } finally {
+      setBatchSubmitting(false);
+    }
+  }
+
   const columns = [
     { title: "编码", dataIndex: "code", key: "code", width: 140 },
     { title: "显示名", dataIndex: "label", key: "label", width: 140 },
@@ -222,6 +327,44 @@ export function SystemDict() {
         {can("dict:create") && (
           <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新增参照数据项</Button>
         )}
+        {can("dict:create") && (
+          <Button icon={<PlusOutlined />} onClick={() => setBatchOpen(true)}>批量新增</Button>
+        )}
+        {can("dict:create") && selectedRowKeys.length > 0 && (
+          <>
+            <Button onClick={() => handleBatchToggle(true)} disabled={batchSubmitting}>
+              批量启用
+            </Button>
+            <Popconfirm
+              title="批量停用"
+              description={`确定停用选中的 ${selectedRowKeys.length} 个参照数据项？停用后新指标无法再选用该取值。`}
+              okText="确认停用"
+              onConfirm={() => handleBatchToggle(false)}
+              disabled={batchSubmitting}
+            >
+              <Button icon={<StopOutlined />} disabled={batchSubmitting}>
+                批量停用
+              </Button>
+            </Popconfirm>
+            <Popconfirm
+              title="批量删除"
+              description={`确定删除选中的 ${selectedRowKeys.length} 个参照数据项？被指标引用的项不可删除。`}
+              okText="确认删除"
+              okButtonProps={{ danger: true }}
+              onConfirm={handleBatchDelete}
+              disabled={batchSubmitting}
+            >
+              <Button danger icon={<DeleteOutlined />} disabled={batchSubmitting}>
+                批量删除
+              </Button>
+            </Popconfirm>
+          </>
+        )}
+        {selectedRowKeys.length > 0 && (
+          <span style={{ color: "rgba(0,0,0,0.45)", fontSize: 13 }}>
+            已选 {selectedRowKeys.length} 项
+          </span>
+        )}
         <Select
           allowClear
           placeholder="全部状态"
@@ -237,10 +380,14 @@ export function SystemDict() {
       <Table
         columns={columns}
         dataSource={visibleItems}
-        rowKey="id"
+        rowKey="code"
         loading={loading}
         size="small"
         pagination={false}
+        rowSelection={{
+          selectedRowKeys,
+          onChange: (keys) => setSelectedRowKeys(keys),
+        }}
       />
 
       {/* 新增弹窗 */}
@@ -292,6 +439,58 @@ export function SystemDict() {
             <Input.TextArea rows={2} />
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* 批量新增弹窗：多行显示名/排序/描述，编码由后端逐条自动生成 */}
+      <Modal
+        title={`批量新增 ${DICT_TYPE_LABELS[activeType] || activeType} 参照数据项`}
+        open={batchOpen}
+        onCancel={() => setBatchOpen(false)}
+        onOk={handleBatchCreate}
+        okText="批量新增"
+        confirmLoading={batchSubmitting}
+        width={680}
+      >
+        <div style={{ marginBottom: 12 }}>
+          <Button size="small" type="dashed" icon={<PlusOutlined />} onClick={addBatchRow}>
+            添加一行
+          </Button>
+          <span style={{ marginLeft: 8, color: "rgba(0,0,0,0.45)", fontSize: 13 }}>
+            每行显示名必填；编码自动生成，与既有项冲突的条目会标记为失败
+          </span>
+        </div>
+        {batchRows.map((row, idx) => (
+          <Space key={idx} style={{ display: "flex", marginBottom: 8 }} align="baseline">
+            <Input
+              placeholder="显示名（必填）"
+              value={row.label}
+              data-testid={`dict-batch-label-${idx}`}
+              onChange={(e) => updateBatchRow(idx, { label: e.target.value })}
+              style={{ width: 180 }}
+            />
+            <InputNumber
+              placeholder="排序"
+              min={0}
+              value={row.sort_order}
+              data-testid={`dict-batch-sort-${idx}`}
+              onChange={(v) => updateBatchRow(idx, { sort_order: v ?? 0 })}
+              style={{ width: 90 }}
+            />
+            <Input
+              placeholder="描述"
+              value={row.description}
+              onChange={(e) => updateBatchRow(idx, { description: e.target.value })}
+              style={{ width: 240 }}
+            />
+            <Button
+              type="text"
+              danger
+              icon={<DeleteOutlined />}
+              onClick={() => removeBatchRow(idx)}
+              disabled={batchRows.length === 1}
+            />
+          </Space>
+        ))}
       </Modal>
     </Card>
     </div>

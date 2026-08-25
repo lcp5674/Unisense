@@ -13,12 +13,21 @@ vi.mock("../api", () => ({
   deactivateDictItem: vi.fn(),
   activateDictItem: vi.fn(),
   deleteDictItem: vi.fn(),
+  batchCreateDictItems: vi.fn(),
+  batchToggleDictItems: vi.fn(),
+  batchDeleteDictItems: vi.fn(),
 }));
 
-import { listDictTypes, listAllDictItems, createDictItem } from "../api";
+import {
+  listDictTypes, listAllDictItems, createDictItem,
+  batchCreateDictItems, batchToggleDictItems, batchDeleteDictItems,
+} from "../api";
 const mockedTypes = vi.mocked(listDictTypes);
 const mockedItems = vi.mocked(listAllDictItems);
 const mockedCreate = vi.mocked(createDictItem);
+const mockedBatchCreate = vi.mocked(batchCreateDictItems);
+const mockedBatchToggle = vi.mocked(batchToggleDictItems);
+const mockedBatchDelete = vi.mocked(batchDeleteDictItems);
 
 const ITEMS: SystemDictItem[] = [
   {
@@ -274,4 +283,85 @@ describe("SystemDict 页面", () => {
     expect(arg.code).toBeUndefined();
     // 101 项大列表渲染 + 全量并行下耗时较长，单独放宽超时
   }, 15000);
+
+  it("批量新增按钮始终可点（无需选中行）", async () => {
+    renderDict();
+    await screen.findByText("日");
+    expect(screen.getByRole("button", { name: /批量新增/ })).toBeTruthy();
+    // 未选中行时不渲染批量启停/删除按钮
+    expect(screen.queryByRole("button", { name: /批量启用/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /批量删除/ })).not.toBeInTheDocument();
+  });
+
+  it("选中行后点击批量启用：按 code 调用批量接口（激活）", async () => {
+    mockedBatchToggle.mockResolvedValue({
+      succeeded: [{ code: "daily", label: "日", ok: true }],
+      failed: [],
+    });
+    renderDict();
+    await screen.findByText("日");
+    // 第 0 个 checkbox 为表头全选，第 1 个为「日」行（rowKey=code → key="daily"）
+    const checkboxes = screen.getAllByRole("checkbox");
+    fireEvent.click(checkboxes[1]);
+    await screen.findByText(/已选 1 项/);
+    fireEvent.click(screen.getByRole("button", { name: /批量启用/ }));
+    await waitFor(() =>
+      expect(mockedBatchToggle).toHaveBeenCalledWith("granularity", ["daily"], "activate"),
+    );
+  });
+
+  it("批量停用：Popconfirm 确认后按 code 调 deactivate", async () => {
+    mockedBatchToggle.mockResolvedValue({ succeeded: [], failed: [] });
+    renderDict();
+    await screen.findByText("日");
+    fireEvent.click(screen.getAllByRole("checkbox")[1]);
+    await screen.findByText(/已选 1 项/);
+    fireEvent.click(screen.getByRole("button", { name: /批量停用/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /确认停用/ }));
+    await waitFor(() =>
+      expect(mockedBatchToggle).toHaveBeenCalledWith("granularity", ["daily"], "deactivate"),
+    );
+  });
+
+  it("批量删除：Popconfirm 确认后按 code 调批量删除", async () => {
+    mockedBatchDelete.mockResolvedValue({ succeeded: [], failed: [] });
+    renderDict();
+    await screen.findByText("日");
+    fireEvent.click(screen.getAllByRole("checkbox")[1]);
+    await screen.findByText(/已选 1 项/);
+    fireEvent.click(screen.getByRole("button", { name: /批量删除/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /确认删除/ }));
+    await waitFor(() => expect(mockedBatchDelete).toHaveBeenCalledWith("granularity", ["daily"]));
+  });
+
+  it("批量新增：多行填写显示名后提交，调用批量创建接口", async () => {
+    mockedBatchCreate.mockResolvedValue({ succeeded: [], failed: [] });
+    renderDict();
+    await screen.findByText("日");
+    fireEvent.click(screen.getByRole("button", { name: /批量新增/ }));
+    // 初始 1 行 → 填写显示名
+    fireEvent.change(screen.getByTestId("dict-batch-label-0"), { target: { value: "分钟" } });
+    // 添加第 2 行并填写
+    fireEvent.click(screen.getByRole("button", { name: /添加一行/ }));
+    fireEvent.change(screen.getByTestId("dict-batch-label-1"), { target: { value: "秒" } });
+    // 提交（Modal 主按钮）
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => expect(mockedBatchCreate).toHaveBeenCalled());
+    const [dictType, items] = mockedBatchCreate.mock.calls[0] as [string, Array<Record<string, unknown>>];
+    expect(dictType).toBe("granularity");
+    expect(items).toHaveLength(2);
+    expect(items[0].label).toBe("分钟");
+    expect(items[1].label).toBe("秒");
+    // code 不传 → 后端逐条自动生成
+    expect(items[0].code).toBeUndefined();
+  });
+
+  it("批量新增：全部行为空时提示且不调用接口", async () => {
+    renderDict();
+    await screen.findByText("日");
+    fireEvent.click(screen.getByRole("button", { name: /批量新增/ }));
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => expect(mockedBatchCreate).not.toHaveBeenCalled());
+    expect(await screen.findByText("请至少填写一行的显示名")).toBeTruthy();
+  });
 });

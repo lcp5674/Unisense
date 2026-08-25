@@ -48,6 +48,7 @@ import {
   DataSourceListResponse,
   DataSourceUpdateRequest,
   DBCatalog,
+  DictBatchResult,
   DictItemCreateRequest,
   DictItemUpdateRequest,
   DictUnknownNotifyRequest,
@@ -4555,6 +4556,46 @@ export async function deleteDictItem(dictType: string, code: string): Promise<vo
   await request(`${API_BASE}/dicts/${encodeURIComponent(dictType)}/${encodeURIComponent(code)}`, {
     method: "DELETE",
   });
+}
+
+/** 批量新增同一类型字典项（207 语义：单条失败逐项标注，不影响其余）。 */
+export async function batchCreateDictItems(
+  dictType: string,
+  items: DictItemCreateRequest[],
+): Promise<DictBatchResult> {
+  return request<DictBatchResult>(`${API_BASE}/dicts/${encodeURIComponent(dictType)}/batch`, {
+    method: "POST",
+    body: JSON.stringify({ items }),
+  });
+}
+
+/** 批量启用/停用同一类型字典项（207 语义）。 */
+export async function batchToggleDictItems(
+  dictType: string,
+  codes: string[],
+  action: "activate" | "deactivate",
+): Promise<DictBatchResult> {
+  return request<DictBatchResult>(
+    `${API_BASE}/dicts/${encodeURIComponent(dictType)}/batch-status`,
+    {
+      method: "POST",
+      body: JSON.stringify({ codes, action }),
+    },
+  );
+}
+
+/** 批量删除同一类型字典项（软删，207 语义；被引用的项不可删）。 */
+export async function batchDeleteDictItems(
+  dictType: string,
+  codes: string[],
+): Promise<DictBatchResult> {
+  return request<DictBatchResult>(
+    `${API_BASE}/dicts/${encodeURIComponent(dictType)}/batch-delete`,
+    {
+      method: "POST",
+      body: JSON.stringify({ codes }),
+    },
+  );
 }
 
 export async function getDictItemRefCount(
