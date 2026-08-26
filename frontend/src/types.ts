@@ -2799,7 +2799,7 @@ export interface AutoSuggestResponse {
   measure_suggestions?: MeasureSuggestion[];
 }
 
-/** SQL 推断推荐的逻辑度量候选（OneData 原子层继承源：原子指标 = 逻辑度量 + 聚合）。 */
+/** SQL 推断推荐的逻辑度量候选（OneData 原子层继承源：原子指标 = 逻辑度量 + 基础统计粒度（日））。 */
 export interface MeasureSuggestion {
   id: number;
   measure_code: string;

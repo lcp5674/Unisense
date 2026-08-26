@@ -1368,8 +1368,9 @@ export function MetricDetail() {
         row_version: metric.row_version, // 跨请求乐观锁：他人已改则 409 拒绝
       };
       // 类型化口径完整性校验（PRD 4.5 + 后端 schema 对齐，OneData 语义）：复合指标
-      // 须有依赖指标 + 计算表达式（血缘断链防护）；派生 = 原子 + 时间周期，依赖可选，
-      // 但须有计算表达式。仅当本次提交包含口径时校验——只改名称/治理属性、不动口径的
+      // 须有依赖指标 + 计算表达式（血缘断链防护）；派生 = 原子 + 业务限定 + 时间周期，
+      // 依赖与公式均可选（纯周期派生如「本月活跃医生数」无需手填公式，口径由挂载层/
+      // 周期承载）。仅当本次提交包含口径时校验——只改名称/治理属性、不动口径的
       // 存量不完整指标编辑不被阻塞。
       if (definitionJson !== undefined && metric.type !== "atomic") {
         const finalDeps = Array.isArray(definitionJson.dependencies)
@@ -1384,8 +1385,9 @@ export function MetricDetail() {
           message.warning("复合指标必须声明至少 1 个依赖指标");
           return;
         }
-        if (!hasSql && !finalExpr) {
-          message.warning("派生/复合指标必须填写计算表达式（如 gmv / order_cnt）");
+        // F1：仅复合必填计算表达式——派生依赖可选，纯周期派生可不填公式
+        if (metric.type === "composite" && !hasSql && !finalExpr) {
+          message.warning("复合指标必须填写计算表达式（如 gmv / order_cnt）");
           return;
         }
       }
@@ -2186,8 +2188,9 @@ export function MetricDetail() {
       )}
 
       {/* 存量原子指标 OneData 化引导（D3：不自动迁移，留人工重建）：
-          原子指标未关联逻辑度量（measure_id 为空）说明是旧式物理来源——原子=逻辑度量+聚合、
-          不绑物理表。引导数仓人员在「度量目录」先建逻辑度量，再编辑指标关联，避免口径资产滞留旧语义。 */}
+          原子指标未关联逻辑度量（measure_id 为空）说明是旧式物理来源——原子=逻辑度量+
+          基础统计粒度（日）、不绑物理表。引导数仓人员在「度量目录」先建逻辑度量，再编辑
+          指标关联，避免口径资产滞留旧语义。 */}
       {metric.type === "atomic" && metric.measure_id == null && (
         <Alert
           type="warning"
@@ -3066,7 +3069,7 @@ export function MetricDetail() {
             <>
               <Form.Item
                 label="依赖指标"
-                extra="派生/复合指标的上游（从已发布指标选择）；血缘图谱据此生成 原子→衍生 边。"
+                extra="复合必填、派生选填：纯周期派生（如「本月活跃医生数」）可不依赖其他指标；选择后血缘图谱据此生成依赖边。"
                 style={{ marginBottom: 8 }}
               >
                 <Select

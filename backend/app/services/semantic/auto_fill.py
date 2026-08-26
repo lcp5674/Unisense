@@ -379,12 +379,14 @@ def _infer_type(profile: dict[str, Any]) -> SuggestionField:
     """
     sql_profile: SqlProfile | None = profile.get("sql_profile")
     measure_column: str | None = profile.get("measure_column")
+    # OneData：多指标四则运算/比率 = 复合指标（B1 修正——此前误判为派生）。
+    # avg/mean 是聚合方式而非派生标志（聚合归属逻辑度量），不参与类型判定。
     if _is_ratio_expression(profile):
-        return _field("derived", "sql_parse", 0.9, "SQL 含比率/跨度量运算 → 派生指标")
+        return _field("composite", "sql_parse", 0.9, "SQL 含比率/跨度量运算 → 复合指标")
     if measure_column and any(
-        k in measure_column.lower() for k in ("rate", "ratio", "pct", "avg", "mean")
+        k in measure_column.lower() for k in ("rate", "ratio", "pct")
     ):
-        return _field("derived", "rule", 0.7, f"列名含比率/均值语义（{measure_column}）→ 派生指标")
+        return _field("composite", "rule", 0.7, f"列名含比率语义（{measure_column}）→ 复合指标")
     period = profile.get("period")
     if period and period != "day":
         return _field(

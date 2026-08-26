@@ -101,9 +101,10 @@ class TestAutoFill:
         result = auto_fill(domain_code="test", measure_column="order_count")
         assert result["defaults"].get("type") == "atomic"
 
-    def test_infer_metric_type_derived(self) -> None:
+    def test_infer_metric_type_ratio_composite(self) -> None:
+        """OneData 语义：列名含比率语义（rate/ratio/pct）= 多指标比率 → 复合指标。"""
         result = auto_fill(domain_code="test", measure_column="conversion_rate")
-        assert result["defaults"].get("type") == "derived"
+        assert result["defaults"].get("type") == "composite"
 
     def test_infer_metric_type_period_month_derived(self) -> None:
         """OneData 语义：month 周期 = 原子（活跃医生数）+ 时间周期 → 派生指标。"""
@@ -206,7 +207,8 @@ class TestInferMetricSql:
         result = infer_metric(profile)
         assert result["fields"]["time_semantics"]["value"] == "YTD"
 
-    def test_ratio_type_derived(self) -> None:
+    def test_ratio_type_composite(self) -> None:
+        """OneData 语义：比率/跨度量运算（SUM/SUM）= 复合指标（B1 修正，此前误判派生）。"""
         sql = (
             "SELECT SUM(pay)/SUM(order_cnt) AS rate "
             "FROM dwd.sales_detail WHERE dt = DATE_SUB(CURRENT_DATE, INTERVAL 1 DAY)"
@@ -214,7 +216,7 @@ class TestInferMetricSql:
         profile = build_profile(sql=sql, period="day")
         profile["domain_code"] = ""
         result = infer_metric(profile)
-        assert result["fields"]["type"]["value"] == "derived"
+        assert result["fields"]["type"]["value"] == "composite"
 
     def test_semi_additive_for_balance(self) -> None:
         profile = build_profile(

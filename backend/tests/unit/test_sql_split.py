@@ -270,11 +270,31 @@ async def test_infer_sql_batch_multi_statement_candidates() -> None:
     assert first["period"] == "day"
 
 
-async def test_infer_sql_batch_synthesize_composite() -> None:
-    """场景B 多度量 + synthesize_composite → N 原子 + 1 复合（依赖组内原子）。"""
+async def test_infer_sql_batch_no_arith_no_composite() -> None:
+    """B4：无四则运算的多度量并列（SELECT SUM(a), SUM(b)）不合成复合。"""
     result = await infer_sql_batch(
         _fake_db(),
         sql=_MULTI_MEASURE_SQL,
+        split_mode="statement",
+        domain_code="sales",
+        synthesize_composite=True,
+    )
+    composites = [c for c in result["candidates"] if c["type"] == "composite"]
+    atoms = [c for c in result["candidates"] if c["type"] == "atomic"]
+    assert len(atoms) == 2
+    assert len(composites) == 0
+
+
+async def test_infer_sql_batch_synthesize_composite_with_arith() -> None:
+    """B4：语句含四则运算（SUM/SUM 比率）→ 合成复合（依赖组内原子）。"""
+    arith_sql = (
+        "SELECT dt, SUM(amount) AS gmv, "
+        "SUM(amount)/COUNT(DISTINCT user_id) AS arpu "
+        "FROM dwd_order_di GROUP BY dt"
+    )
+    result = await infer_sql_batch(
+        _fake_db(),
+        sql=arith_sql,
         split_mode="statement",
         domain_code="sales",
         synthesize_composite=True,
@@ -287,7 +307,7 @@ async def test_infer_sql_batch_synthesize_composite() -> None:
     assert comp["key"] == "0:composite"
     assert comp["metric_code"].startswith("sales_order_")
     assert set(comp["dependencies"]) == {a["metric_code"] for a in atoms}
-    assert comp["definition_json"]["sql"] == _MULTI_MEASURE_SQL
+    assert comp["definition_json"]["sql"] == arith_sql
 
 
 async def test_infer_sql_batch_single_measure_no_composite() -> None:
@@ -418,8 +438,8 @@ async def test_infer_sql_batch_etl_insert_passthrough_candidates() -> None:
     assert cand["period"] == "month"
 
 
-async def test_infer_sql_batch_etl_insert_synthesize_composite() -> None:
-    """透传 INSERT 多度量 + synthesize_composite → N 原子 + 1 复合。"""
+async def test_infer_sql_batch_etl_insert_no_arith_no_composite() -> None:
+    """B4：透传 INSERT 多度量（COUNT DISTINCT / 条件 COUNT）无四则运算 → 不合成复合。"""
     sql = """
     insert overwrite table wedw_dws.t
     select a.month_id, a.current_month_active_doctor_cnt, a.last_month_active_doctor_cnt
@@ -435,20 +455,18 @@ async def test_infer_sql_batch_etl_insert_synthesize_composite() -> None:
     result = await infer_sql_batch(
         _fake_db(), sql=sql, split_mode="statement", domain_code="sales", synthesize_composite=True
     )
-    # OneData 语义：month 周期 → 派生候选（原子 + 时间周期）；复合仍合成
+    # OneData 语义：month 周期 → 派生候选（原子 + 时间周期）
     derived = [c for c in result["candidates"] if c["type"] == "derived"]
     composites = [c for c in result["candidates"] if c["type"] == "composite"]
     assert len(derived) == 2
-    assert len(composites) == 1
+    # B4：两个独立聚合列无四则运算，不合成复合
+    assert len(composites) == 0
     # key 用别名区分同列（doctor_code）不同语义的度量
     keys = {a["key"] for a in derived}
     assert keys == {
         "0:current_month_active_doctor_cnt",
         "0:last_month_active_doctor_cnt",
     }
-    comp = composites[0]
-    assert comp["key"] == "0:composite"
-    assert set(comp["dependencies"]) == {a["metric_code"] for a in derived}
 
 
 # ---------------------------------------------------------------- Doris CTAS（场景A 扩展）
@@ -1013,10 +1031,14 @@ async def test_infer_sql_batch_domain_suggest_runs_concurrently() -> None:
 
 
 async def test_infer_sql_batch_composite_uses_real_period() -> None:
-    """P1-3：月粒度语句的复合候选编码/粒度用实际周期（不再硬编码 _day/day）。"""
+    """P1-3：月粒度语句的复合候选编码/粒度用实际周期（不再硬编码 _day/day）。
+
+    B4：需含四则运算才合成复合——此处加入 SUM/COUNT 比率列满足条件。
+    """
     month_sql = (
         "SELECT substr(create_date,1,7) AS month_id, "
-        "SUM(amount) AS gmv, COUNT(DISTINCT user_id) AS uv "
+        "SUM(amount) AS gmv, COUNT(DISTINCT user_id) AS uv, "
+        "SUM(amount)/COUNT(DISTINCT user_id) AS arpu "
         "FROM dwd_order_di GROUP BY substr(create_date,1,7)"
     )
     result = await infer_sql_batch(
@@ -1027,9 +1049,10 @@ async def test_infer_sql_batch_composite_uses_real_period() -> None:
     assert comp["metric_code"].endswith("_month"), comp["metric_code"]
     assert comp["granularity"] == "month"
     assert "_day" not in comp["metric_code"]
-    # 原子候选周期也是 month
-    atoms = [c for c in result["candidates"] if c["type"] == "atomic"]
-    assert all(c["period"] == "month" for c in atoms)
+    # 原子候选（month 周期 → 派生标签）周期也是 month
+    derived = [c for c in result["candidates"] if c["type"] == "derived"]
+    assert len(derived) >= 2
+    assert all(c["period"] == "month" for c in derived)
 
 
 def test_build_atomic_candidate_empty_domain_code_none() -> None:
@@ -1057,6 +1080,46 @@ def test_build_atomic_candidate_empty_domain_code_none() -> None:
         time_column="dt",
     )
     assert cand2["metric_code"] == "sales_order_amount_day"
+
+
+def test_apply_candidate_period_recomputes_type() -> None:
+    """B2：LLM 覆盖周期后类型与周期同步（非日→派生、日→原子；复合保持复合）。"""
+    from app.services.semantic.sql_split import _apply_candidate_period
+
+    # day → month：类型 atomic → derived
+    cand = {
+        "type": "atomic",
+        "period": "day",
+        "granularity": "day",
+        "metric_code": "sales_order_amount_day",
+    }
+    _apply_candidate_period(cand, "month")
+    assert cand["period"] == "month"
+    assert cand["type"] == "derived"
+    assert cand["metric_code"] == "sales_order_amount_month"
+
+    # month → day：类型 derived → atomic
+    cand2 = {
+        "type": "derived",
+        "period": "month",
+        "granularity": "month",
+        "metric_code": "sales_order_amount_month",
+    }
+    _apply_candidate_period(cand2, "day")
+    assert cand2["period"] == "day"
+    assert cand2["type"] == "atomic"
+    assert cand2["metric_code"] == "sales_order_amount_day"
+
+    # 复合保持复合（周期是其属性，不因覆盖降级）
+    cand3 = {
+        "type": "composite",
+        "period": "day",
+        "granularity": "day",
+        "metric_code": "sales_order_amount_day",
+    }
+    _apply_candidate_period(cand3, "month")
+    assert cand3["type"] == "composite"
+    assert cand3["period"] == "month"
 
 
 async def test_infer_sql_batch_llm_batch_limit() -> None:

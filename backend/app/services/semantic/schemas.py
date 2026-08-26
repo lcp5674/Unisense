@@ -752,7 +752,8 @@ class SqlBatchCreateCandidate(BaseModel):
     metric_code: str = Field(..., max_length=64, description="指标编码（4 段式）")
     name: str = Field(..., max_length=128, description="指标名称")
     # 指标类型：解析器规则产出 atomic/composite；用户可在前端将原子候选在线改为
-    # derived（依赖指标 + 计算表达式），创建端按派生指标（OneData 挂载层）处理。
+    # derived（原子指标 + 业务限定 + 时间周期，依赖可选）/ composite（多指标运算，
+    # 强制依赖 + 计算表达式），创建端按派生指标（OneData 挂载层）处理。
     type: Literal["atomic", "derived", "composite"] = Field(..., description="指标类型")
     source_table: str | None = Field(None, max_length=256, description="源表名")
     measure_column: str | None = Field(None, max_length=128, description="度量列（复合为空）")
@@ -776,11 +777,11 @@ class SqlBatchCreateCandidate(BaseModel):
     definition_json: dict[str, Any] = Field(
         ...,
         description=(
-            "口径定义（原子：expression 模式；派生/复合：expression+dependencies，"
-            "依赖指标编码非空）"
+            "口径定义（原子：expression 模式；派生：expression + 可选 dependencies + "
+            "挂载层；复合：expression + dependencies 必填）"
         ),
     )
-    dependencies: list[str] | None = Field(None, description="依赖指标编码（派生/复合必填）")
+    dependencies: list[str] | None = Field(None, description="依赖指标编码（复合必填、派生可选）")
     mount: MetricMountInput | None = Field(
         None, description="挂载实体（可选，创建时落 metric_mount）"
     )

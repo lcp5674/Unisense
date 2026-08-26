@@ -104,9 +104,11 @@ class DependencyChecker:
     async def validate_composite_formula(self, definition_json: dict[str, Any]) -> list[str]:
         """复合指标公式强校验（对齐界限文档 §1.2/§4.2）。
 
-        复合公式只允许引用已存在的**派生/复合指标 code**（4 段式），
+        复合公式只允许引用已存在的**指标 code**（原子/派生/复合，4 段式），
         禁止裸表字段（如 ``amount / head_amount`` 中的 ``amount``）与任意非指标标识符——
         OneData 复合层 = 跨指标聚合，公式里出现物理字段即口径污染。
+        原子指标可作为复合公式操作数（复合 = 多指标运算，可直接基于原子指标，如
+        GMV / 订单数）；自引用/循环依赖由 ``detect_cycle`` 另行拦截（B3 修正）。
 
         SQL 模式（``defn["sql"]``）豁免——完整查询语句不适用表达式 token 解析。
 
@@ -132,14 +134,12 @@ class DependencyChecker:
             # 其余小写标识符必须是合法指标 code
             if not self._is_metric_code(tok):
                 errors.append(
-                    f"公式引用非指标标识符「{tok}」（复合公式仅允许派生/复合指标 code）"
+                    f"公式引用非指标标识符「{tok}」（复合公式仅允许指标 code）"
                 )
                 continue
             metric = await self._get_metric_by_code(tok)
             if metric is None:
                 errors.append(f"公式引用不存在的指标「{tok}」")
-            elif metric.type not in ("derived", "composite"):
-                errors.append(f"公式引用的「{tok}」不是派生/复合指标（当前为 {metric.type}）")
         return errors
 
     async def detect_cycle(

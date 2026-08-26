@@ -265,17 +265,20 @@ class TestValidateCompositeFormula:
 
         assert any("不存在" in err for err in result)
 
-    async def test_atomic_reference_rejected(self) -> None:
-        """公式引用原子指标（非派生/复合）→ 报错（复合层只能聚合派生指标）。"""
+    async def test_atomic_reference_allowed(self) -> None:
+        """B3：公式引用原子指标 → 允许（复合 = 多指标运算，可直接基于原子指标）。
+
+        自引用/循环依赖由 ``detect_cycle`` 另行拦截，不在公式 token 校验范围。
+        """
         checker = _make_checker()
         atomic = _make_metric("outp_fee_amount_daily", "PUBLISHED")
         atomic.type = "atomic"
         checker._get_metric_by_code = AsyncMock(return_value=atomic)
 
-        definition = {"expression": "outp_fee_amount_daily"}
+        definition = {"expression": "outp_fee_amount_daily / outp_prescription_cnt_daily"}
         result = await checker.validate_composite_formula(definition)
 
-        assert any("不是派生/复合指标" in err for err in result)
+        assert result == []
 
     async def test_sql_mode_exempt(self) -> None:
         """SQL 模式口径 → 豁免表达式 token 解析。"""

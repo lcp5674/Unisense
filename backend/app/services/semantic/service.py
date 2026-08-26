@@ -2340,8 +2340,9 @@ class MetricService(BaseService):
                     error_code="CYCLIC_DEPENDENCY",
                     ctx={"cycle_path": cycle},
                 )
-            # 复合指标公式强校验（界限文档 §1.2/§4.2）：公式仅允许引用派生/复合
-            # 指标 code，禁裸表字段与不存在指标——OneData 复合层 = 跨指标聚合。
+            # 复合指标公式强校验（界限文档 §1.2/§4.2）：公式仅允许引用已存在指标
+            # code（原子/派生/复合，B3 放开原子作操作数），禁裸表字段与不存在
+            # 指标——OneData 复合层 = 跨指标聚合。
             if metric.type == "composite":
                 formula_errors = await checker.validate_composite_formula(metric.definition_json)
                 if formula_errors:

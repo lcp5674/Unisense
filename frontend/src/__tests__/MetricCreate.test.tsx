@@ -1324,12 +1324,13 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await goToStep(1);
-    // 原子来源配置区（逻辑度量 + 兼容旧式源表/度量列/周期）展示
+    // 原子来源配置区（逻辑度量 + 兼容旧式源表/度量列）展示——F3：原子不含时间周期，
+    // 统计周期字段已从原子分支移除（周期归派生/挂载层）
     expect(screen.getByText("② 原子来源（逻辑度量 + 基础统计粒度）")).toBeTruthy();
     expect(screen.getByText("逻辑度量（原子指标口径库，OneData 原子层）")).toBeTruthy();
     expect(screen.getByText("源表名（兼容旧式来源，可选）")).toBeTruthy();
     expect(screen.getByText("度量列（兼容旧式来源，可选）")).toBeTruthy();
-    expect(screen.getByText("统计周期（兼容旧式推断，可选）")).toBeTruthy();
+    expect(screen.queryByText("统计周期（兼容旧式推断，可选）")).toBeNull();
     // 依赖指标 / 计算表达式为派生/复合专属，原子下不出现
     expect(screen.queryByText("② 依赖指标")).toBeNull();
     expect(screen.queryByText("计算表达式")).toBeNull();
@@ -1365,7 +1366,7 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     await waitFor(() => expect(screen.getByText("计算表达式")).toBeTruthy());
   });
 
-  it("派生指标未选依赖（纯周期派生）提交 → 不再拦依赖，缺表达式时提示表达式必填", async () => {
+  it("派生指标未选依赖（纯周期派生）提交 → 前端放行（依赖/表达式均可选）", async () => {
     mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
     renderPage();
     await screen.findByText("注册指标（草稿）");
@@ -1377,14 +1378,12 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "本月活跃医生数" } });
     await goToStep(3);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
-    // OneData 语义：派生 = 原子 + 时间周期，依赖可选——未选依赖不再拦截，缺计算表达式才拦截
-    await waitFor(() =>
-      expect(screen.getByText("请填写计算表达式（如 gmv / order_cnt）")).toBeTruthy()
-    );
-    expect(mockedCreate).not.toHaveBeenCalled();
+    // F1：派生 = 原子 + 业务限定 + 时间周期，依赖/公式均可选——未选依赖、未填表达式
+    // 均不再前端拦截，直接提交（口径合法性由后端类型化校验兜底）
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
   });
 
-  it("派生指标已选依赖但缺计算表达式提交 → 前端拦截并提示表达式必填", async () => {
+  it("派生指标已选依赖但缺计算表达式提交 → 前端放行（仅复合必填表达式）", async () => {
     mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
     // 依赖指标搜索返回已发布上游指标
     mockedMetrics.mockResolvedValue({
@@ -1407,10 +1406,8 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "客单价" } });
     await goToStep(3);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
-    await waitFor(() =>
-      expect(screen.getByText("请填写计算表达式（如 gmv / order_cnt）")).toBeTruthy()
-    );
-    expect(mockedCreate).not.toHaveBeenCalled();
+    // F1：仅复合必填表达式——派生带依赖但缺表达式同样放行提交
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
   });
 
   it("原子指标未选逻辑度量且未填口径提交 → 前端拦截并提示来源必填", async () => {

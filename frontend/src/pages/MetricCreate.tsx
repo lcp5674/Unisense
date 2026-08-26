@@ -616,12 +616,6 @@ export function MetricCreate() {
     handleAutoSuggest();
   }
 
-  // 选了统计周期后触发自动推断
-  function handlePeriodSelect(value: string) {
-    form.setFieldValue("period", value);
-    handleAutoSuggest();
-  }
-
   // 将后端推断结果回填到表单：属性字段 + 指标编码，并保存来源徽标与口径定义预览
   // respectPrefill=true（选域触发）：跳过已被域默认值预填的字段，域配置优先于自动推断
   function applySuggestion(result: AutoSuggestResponse, respectPrefill = false) {
@@ -1236,8 +1230,9 @@ export function MetricCreate() {
         setSqlBatchCreating(false);
         return;
       }
-      // 派生/复合须有计算主体（手填 calc 或保留解析自带 sql/expression）
-      if (!hasCalc && !hasEmbedded) {
+      // 仅复合必填计算主体（F1：派生依赖/公式可选——解析候选自带 expression 口径兜底，
+      // 纯周期派生可不填 calc；复合 = 多指标运算，必须能还原计算主体）
+      if (c.type === "composite" && !hasCalc && !hasEmbedded) {
         message.warning(`候选「${c.name}」请填写计算表达式（如 {原子1} / {原子2}）`);
         setSqlBatchCreating(false);
         return;
@@ -1403,7 +1398,18 @@ export function MetricCreate() {
       return { ...def, ...autoExpr, ...srcField, ...measureField, ...tables, ...downTables, ...dimsField, ...caliberFields };
     }
     // derived/composite：计算表达式输入 + 依赖指标 → 口径（不读源表/度量列）
-    const expr = calcExpression.trim() ? { expression: calcExpression.trim() } : {};
+    let expr: Record<string, unknown> = {};
+    if (calcExpression.trim()) {
+      expr = { expression: calcExpression.trim() };
+    } else if (metricType === "derived") {
+      // F1：纯周期派生无需手填公式——从挂载源列自动生成「聚合(度量列)」兜底，
+      // 保证口径有计算主体（对齐后端类型化校验），用户仍可后续编辑补充。
+      // 依赖/公式均可选：派生 = 原子 + 业务限定 + 时间周期。
+      const msCol = String(values.mount_source_column || "").trim();
+      if (msCol) {
+        expr = { expression: `${String(values.aggregation || "SUM")}(${msCol})` };
+      }
+    }
     return { ...def, ...expr, ...tables, ...downTables, ...dimsField, ...depsField, ...caliberFields };
   }
 
@@ -1471,15 +1477,17 @@ export function MetricCreate() {
     // 用 getFieldsValue(true) 取含保留值的完整字段集，保证类型化校验与提交 payload 拿到全部字段。
     const values = form.getFieldsValue(true) as Record<string, unknown>;
     // 类型化必填校验（对齐后端 definition_json 类型校验 + OneData 语义）：
-    // 复合=须有依赖指标+计算表达式；派生=须有计算表达式（依赖可选——纯周期派生
-    // 如「本月活跃医生数」不依赖其他指标）；原子=须有源表度量列或手写口径。
+    // 复合=须有依赖指标+计算表达式；派生=原子+业务限定+时间周期（依赖/公式均可选，
+    // 纯周期派生如「本月活跃医生数」不依赖其他指标、无需手填公式）；原子=须有源表
+    // 度量列或手写口径。
     if (isDerivedOrComposite) {
       if (metricType === "composite" && selectedDeps.length === 0) {
         message.warning("复合指标必须选择至少 1 个依赖指标");
         return;
       }
-      if (!calcExpression.trim()) {
-        message.warning("请填写计算表达式（如 gmv / order_cnt）");
+      // F1：仅复合必填计算表达式——派生依赖可选，纯周期派生可不填公式
+      if (metricType === "composite" && !calcExpression.trim()) {
+        message.warning("复合指标请填写计算表达式（如 gmv / order_cnt）");
         return;
       }
     } else if (isAtomic && mode === "expression") {
@@ -1861,16 +1869,6 @@ export function MetricCreate() {
                         />
                       </Form.Item>
                     </Col>
-                    <Col span={8}>
-                      <Form.Item name="period" label="统计周期（兼容旧式推断，可选）">
-                        <Select
-                          allowClear
-                          placeholder="选择统计周期"
-                          onChange={handlePeriodSelect}
-                          options={PERIOD_OPTIONS}
-                        />
-                      </Form.Item>
-                    </Col>
                   </Row>
                 </>
               ) : (
@@ -1994,7 +1992,8 @@ export function MetricCreate() {
                 </Col>
               </Row>
 
-              {/* OneData：聚合方式为原子指标核心（始终可见）；其余治理字段收敛为"高级设置"——
+              {/* OneData：聚合方式归属逻辑度量（原子 = 逻辑度量 + 基础统计粒度（日），
+                  聚合是度量固有属性故始终可见）；其余治理字段收敛为"高级设置"——
                   由域默认值/度量目录/挂载层自动接管；管理/数仓角色默认展开、业务角色默认折叠 */}
               <Row gutter={16}>
                 <Col span={8}>

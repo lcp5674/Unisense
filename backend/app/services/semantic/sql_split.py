@@ -687,6 +687,29 @@ def _build_atomic_candidate(
     }
 
 
+def _sql_has_arithmetic(sql: str) -> bool:
+    """语句是否含四则运算/比率结构（复合指标判定依据，B4）。
+
+    复合 = 多指标四则运算/比率（OneData）。两个独立聚合列共存（如
+    ``SELECT SUM(a), SUM(b)``）**不构成**复合——仅当语句含 Div/Mul/Add/Sub/Mod
+    运算时才应合成复合候选，避免把「多度量并列」误判为「指标间运算」。
+    """
+    if not sql:
+        return False
+    try:
+        ast = sqlglot.parse_one(sql)
+        if ast is not None:
+            for node in ast.find_all(exp.Binary):
+                if isinstance(node, (exp.Div, exp.Mul, exp.Add, exp.Sub, exp.Mod)):
+                    return True
+    except Exception:
+        pass
+    # AST 解析失败时退化为正则：剥离注释与字符串字面量后检查算术运算符
+    text = re.sub(r"--[^\n]*|/\*.*?\*/", " ", sql)
+    text = re.sub(r"'[^']*'|\"[^\"]*\"", " ", text)
+    return bool(re.search(r"[*/+\-]", text))
+
+
 def _build_composite_candidate(
     *,
     idx: int,
@@ -704,7 +727,10 @@ def _build_composite_candidate(
     月粒度 ETL 的复合指标此前生成 ``xxx_day``（粒度 day）与实际口径（month）不符，
     注册后编码与粒度均失真（P1-3 一致性缺陷）。
     ``raw_sql``（P1-1/P2-5）：复合候选所属语句原始 SQL，批量创建透传落 Metric.raw_sql。
+    仅当语句含四则运算/比率时才合成（B4）——无运算的多度量并列不构成复合。
     """
+    if not _sql_has_arithmetic(sql):
+        return None
     codes = [c["metric_code"] for c in atoms if c.get("metric_code")]
     if len(codes) < 2:
         return None
@@ -862,6 +888,14 @@ def _apply_candidate_period(cand: dict[str, Any], period: str) -> None:
             cand["metric_code"] = "_".join(parts)
     cand["period"] = period
     cand["granularity"] = period
+    # B2：周期驱动类型回映——LLM 覆盖周期后类型必须与周期同步（非日→派生、日→原子）；
+    # 复合指标保持复合（周期是其属性，不因周期覆盖降级）。
+    if cand.get("type") == "composite":
+        return
+    if period and period != "day":
+        cand["type"] = "derived"
+    else:
+        cand["type"] = "atomic"
 
 
 def _candidate_measure_view(cand: dict[str, Any]) -> dict[str, Any]:
