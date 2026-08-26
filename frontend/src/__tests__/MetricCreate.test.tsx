@@ -1325,7 +1325,7 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     await screen.findByText("注册指标（草稿）");
     await goToStep(1);
     // 原子来源配置区（逻辑度量 + 兼容旧式源表/度量列/周期）展示
-    expect(screen.getByText("② 原子来源（逻辑度量 + 聚合方式）")).toBeTruthy();
+    expect(screen.getByText("② 原子来源（逻辑度量 + 基础统计粒度）")).toBeTruthy();
     expect(screen.getByText("逻辑度量（原子指标口径库，OneData 原子层）")).toBeTruthy();
     expect(screen.getByText("源表名（兼容旧式来源，可选）")).toBeTruthy();
     expect(screen.getByText("度量列（兼容旧式来源，可选）")).toBeTruthy();
@@ -1350,14 +1350,14 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     expect(screen.getByText("服务模式")).toBeTruthy();
   });
 
-  it("切换到派生指标：展示依赖指标（必填）与计算表达式，隐藏原子来源", async () => {
+  it("切换到派生指标：展示依赖指标（选填）与计算表达式，隐藏原子来源", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await goToStep(1);
     fireEvent.click(screen.getByText("派生指标"));
     // 依赖指标配置区（Step1）出现，原子专属配置隐藏
-    expect(screen.getByText("② 依赖指标")).toBeTruthy();
-    expect(screen.queryByText("② 原子来源（逻辑度量 + 聚合方式）")).toBeNull();
+    expect(screen.getByText("② 依赖指标（派生选填）")).toBeTruthy();
+    expect(screen.queryByText("② 原子来源（逻辑度量 + 基础统计粒度）")).toBeNull();
     expect(screen.queryByText("源表名（兼容旧式来源，可选）")).toBeNull();
     expect(screen.queryByText("度量列（兼容旧式来源，可选）")).toBeNull();
     // 计算表达式输入在 Step2（口径定义）——受控组件（Form.Item 无 name），label 无 htmlFor，须按文本查询
@@ -1365,7 +1365,7 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     await waitFor(() => expect(screen.getByText("计算表达式")).toBeTruthy());
   });
 
-  it("派生指标未选依赖指标提交 → 前端拦截并提示依赖必填", async () => {
+  it("派生指标未选依赖（纯周期派生）提交 → 不再拦依赖，缺表达式时提示表达式必填", async () => {
     mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
     renderPage();
     await screen.findByText("注册指标（草稿）");
@@ -1374,11 +1374,12 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     fireEvent.click(screen.getByText("派生指标"));
     // 名称在 Step2（治理确认）必填——先填名称再导航到 Step3 提交（依赖指标/计算表达式留空）
     await goToStep(2);
-    fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "客单价" } });
+    fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "本月活跃医生数" } });
     await goToStep(3);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
+    // OneData 语义：派生 = 原子 + 时间周期，依赖可选——未选依赖不再拦截，缺计算表达式才拦截
     await waitFor(() =>
-      expect(screen.getByText("派生/复合指标必须选择至少 1 个依赖指标")).toBeTruthy()
+      expect(screen.getByText("请填写计算表达式（如 gmv / order_cnt）")).toBeTruthy()
     );
     expect(mockedCreate).not.toHaveBeenCalled();
   });

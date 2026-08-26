@@ -359,19 +359,21 @@ def test_atomic_sql_mode_passes():
 
 
 def test_derived_requires_dependencies_and_expression():
-    """派生指标缺依赖指标或计算表达式 → 422；齐备 → 通过。"""
-    with pytest.raises(ValidationError) as exc:
-        MetricCreateRequest(
-            **_base_payload(type="derived", definition_json={"expression": "gmv / order_cnt"})
-        )
-    assert "依赖指标" in str(exc.value)
+    """OneData 派生 = 原子 + 时间周期：依赖可选，但须有计算表达式。"""
+    # 派生无依赖但有表达式 → 通过（纯周期派生，如「本月活跃医生数」不依赖其他指标）
+    req = MetricCreateRequest(
+        **_base_payload(type="derived", definition_json={"expression": "SUM(active_cnt)"})
+    )
+    assert req.type == "derived"
 
+    # 派生无表达式（无论有无依赖）→ 422
     with pytest.raises(ValidationError) as exc:
         MetricCreateRequest(
             **_base_payload(type="derived", definition_json={"dependencies": ["gmv"]})
         )
     assert "计算表达式" in str(exc.value)
 
+    # 派生带依赖 + 表达式 → 通过（依赖型派生，血缘建 DERIVED_FROM 边）
     req = MetricCreateRequest(
         **_base_payload(
             type="derived",

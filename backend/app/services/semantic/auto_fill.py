@@ -369,7 +369,12 @@ def _is_ratio_expression(profile: dict[str, Any]) -> bool:
 
 
 def _infer_type(profile: dict[str, Any]) -> SuggestionField:
-    """指标类型：原子/派生/复合。"""
+    """指标类型：原子/派生/复合（OneData 语义，周期驱动）。
+
+    原子指标 = 逻辑度量 + 基础统计粒度（日），不含时间周期；派生指标 = 原子 +
+    时间周期（月/周/季/年/小时等非日周期）；复合指标 = 多指标四则运算/比率。
+    SQL 解析出的指标天然带业务限定 + 周期，非日周期归为派生（对齐用户建模认知）。
+    """
     sql_profile: SqlProfile | None = profile.get("sql_profile")
     measure_column: str | None = profile.get("measure_column")
     if _is_ratio_expression(profile):
@@ -378,8 +383,14 @@ def _infer_type(profile: dict[str, Any]) -> SuggestionField:
         k in measure_column.lower() for k in ("rate", "ratio", "pct", "avg", "mean")
     ):
         return _field("derived", "rule", 0.7, f"列名含比率/均值语义（{measure_column}）→ 派生指标")
+    period = profile.get("period")
+    if period and period != "day":
+        return _field(
+            "derived", "sql_parse", 0.8,
+            f"解析出时间周期 {period} → 派生指标（原子指标 + 时间周期）",
+        )
     if sql_profile and sql_profile.measures:
-        return _field("atomic", "sql_parse", 0.85, "单表单聚合直算 → 原子指标")
+        return _field("atomic", "sql_parse", 0.85, "单表单聚合直算（日粒度常态）→ 原子指标")
     if measure_column:
         return _field("atomic", "rule", 0.65, f"列 {measure_column} 单度量直算 → 原子指标")
     return _field("atomic", "fallback", 0.4, "默认按原子指标")

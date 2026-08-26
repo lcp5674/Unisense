@@ -105,6 +105,26 @@ class TestAutoFill:
         result = auto_fill(domain_code="test", measure_column="conversion_rate")
         assert result["defaults"].get("type") == "derived"
 
+    def test_infer_metric_type_period_month_derived(self) -> None:
+        """OneData 语义：month 周期 = 原子（活跃医生数）+ 时间周期 → 派生指标。"""
+        result = auto_fill(
+            domain_code="outpatient",
+            source_table="wedw_dw.doctor_visit_agent_info_da",
+            measure_column="doctor_code",
+            period="month",
+        )
+        assert result["defaults"].get("type") == "derived"
+
+    def test_infer_metric_type_period_day_atomic(self) -> None:
+        """OneData 语义：日粒度为基础统计粒度（原子常态），不视为派生周期。"""
+        result = auto_fill(
+            domain_code="sales",
+            source_table="dwd.sales_detail",
+            measure_column="amount",
+            period="day",
+        )
+        assert result["defaults"].get("type") == "atomic"
+
 
 class TestInferMetricSql:
     """SQL 驱动的多字段推断。"""

@@ -214,12 +214,15 @@ function InferBadge({ field }: { field: SuggestionField }) {
   );
 }
 
-// 三类指标生产配置差异引导（对齐 PRD 4.5：原子=绑定物理来源；派生=引用上游+表达式；复合=跨域聚合）。
-// 选类型后展示，说明该类型的核心配置，避免统一表单的认知负担。
+// 三类指标生产配置差异引导（OneData 语义：原子=逻辑度量+基础粒度；派生=原子+时间周期；
+// 复合=多指标运算）。选类型后展示，说明该类型的核心配置，避免统一表单的认知负担。
 const TYPE_HINTS: Record<MetricType, string> = {
-  atomic: "基于物理表字段直接聚合（如 GMV = SUM(pay_amt)）。核心配置：源表、度量列、聚合方式与统计周期。",
-  derived: "引用已发布上游指标 + 计算表达式（如 客单价 = gmv / order_cnt）。核心配置：依赖指标与计算表达式。",
-  composite: "跨域 / 带过滤条件汇总多个指标（如 华东区GMV占比）。核心配置：多个依赖指标与聚合表达式。",
+  atomic:
+    "通用逻辑度量 + 基础统计粒度（日）。一个可复用的度量（如「活跃医生数」），不绑定业务限定与时间周期；可关联逻辑度量目录统一管理格式/单位。",
+  derived:
+    "原子指标 + 时间周期（月/周/季/年等）。如「本月医院入口活跃医生数」= 活跃医生数 + 月周期；依赖指标可选（纯周期派生可不依赖），可携带挂载实体（结果落表）。",
+  composite:
+    "多个指标四则运算/比率（如 医生留存率 = 当月活跃 ÷ 上月活跃）。核心配置：依赖指标与计算表达式。",
 };
 
 export function MetricCreate() {
@@ -249,7 +252,8 @@ export function MetricCreate() {
   }, []);
   // 消费指南（选填）：创建时透传落库（guide_source=manual）；null=未填写
   const [guideDraft, setGuideDraft] = useState<ConsumptionGuidePayload | null>(null);
-  // 指标类型联动：atomic（原子）基于源表直接聚合，不应有上游依赖指标；derived/composite 才有
+  // 指标类型联动（OneData 语义）：atomic（原子）= 逻辑度量 + 基础统计粒度，不依赖上游；
+  // derived（派生）= 原子 + 时间周期，依赖可选；composite（复合）= 多指标运算，依赖必填。
   // 用 state 而非 Form.useWatch：向导分步卸载 Form.Item 后，useWatch 与 getFieldsValue() 对未挂载字段
   // 均返回 undefined（antd 仅保留 store，默认取值路径排除未挂载字段），导致跨步骤后
   // isAtomic/isDerivedOrComposite 整体失效、提交校验跳过、payload 丢失 type。
@@ -1115,8 +1119,9 @@ export function MetricCreate() {
     return [selectedDomain, biz || "entity", measure, c.period || "day"].join("_");
   }
 
-  // 指标类型可在线编辑（原子/派生/复合）：原子是「逻辑度量 + 业务限定 + 统计周期」的
-  // 最小颗粒；把两个原子在线改成派生（如留存率 = 当月/上月）或复合，不再受"只能是原子"限制。
+  // 指标类型可在线编辑（OneData 语义：原子 = 逻辑度量 + 基础粒度；派生 = 原子 + 时间
+  // 周期；复合 = 多指标运算）。周期驱动的解析候选已默认派生（如 month 医生月活）；
+  // 可把同批候选改为原子/派生/复合，不再受"只能是原子"限制。
   function handleSqlBatchTypeChange(key: string, type: MetricType) {
     handleSqlBatchEdit(key, { type });
   }
@@ -1205,27 +1210,23 @@ export function MetricCreate() {
     }
     const checked = sqlBatchResult.candidates.filter((c) => keys.has(c.key));
     if (checked.length === 0) { message.warning("请至少勾选一个候选指标"); return; }
-    // 派生/复合必填校验（对齐单条向导 handleSubmit）：依赖指标 + 计算表达式缺一不可，
-    // 否则后端 _validate_definition_json 会整条校验失败（前端先拦截更友好）。
+    // OneData 语义校验（对齐后端 _validate_definition_json）：复合 = 依赖指标 +
+    // 计算主体必填；派生 = 有计算主体即可（依赖可选——纯周期派生如「本月活跃医生
+    // 数」不依赖其他指标，周期驱动的解析候选自带 expression 口径，无需手填 calc）
     const nonAtomic = checked.filter((c) => c.type !== "atomic");
     for (const c of nonAtomic) {
-      if (!(c.dependencies || []).length) {
-        message.warning(`候选「${c.name}」请至少选择 1 个依赖指标`);
-        setSqlBatchCreating(false);
-        return;
-      }
       const hasCalc = !!(c.calc_expression || "").trim();
       const hasEmbedded = !!String(
         c.definition_json?.sql || c.definition_json?.expression || "",
       ).trim();
-      // 派生（原子在线改为派生）必须给计算表达式；复合解析候选自带 sql 口径时可不填
-      if (c.type === "derived" && !hasCalc) {
-        message.warning(`候选「${c.name}」请填写计算表达式（如 {原子1} / {原子2}）`);
+      if (c.type === "composite" && !(c.dependencies || []).length) {
+        message.warning(`候选「${c.name}」请至少选择 1 个依赖指标`);
         setSqlBatchCreating(false);
         return;
       }
-      if (c.type === "composite" && !hasCalc && !hasEmbedded) {
-        message.warning(`候选「${c.name}」请填写计算表达式`);
+      // 派生/复合须有计算主体（手填 calc 或保留解析自带 sql/expression）
+      if (!hasCalc && !hasEmbedded) {
+        message.warning(`候选「${c.name}」请填写计算表达式（如 {原子1} / {原子2}）`);
         setSqlBatchCreating(false);
         return;
       }
@@ -1457,11 +1458,12 @@ export function MetricCreate() {
     // antd store 已 preserve（getFieldValue 可读），仅 getFieldsValue()/onFinish 默认排除未挂载字段——
     // 用 getFieldsValue(true) 取含保留值的完整字段集，保证类型化校验与提交 payload 拿到全部字段。
     const values = form.getFieldsValue(true) as Record<string, unknown>;
-    // 类型化必填校验（对齐后端 definition_json 类型校验 + PRD 4.5）：
-    // 派生/复合=须有依赖指标+计算表达式；原子=须有源表度量列或手写口径。
+    // 类型化必填校验（对齐后端 definition_json 类型校验 + OneData 语义）：
+    // 复合=须有依赖指标+计算表达式；派生=须有计算表达式（依赖可选——纯周期派生
+    // 如「本月活跃医生数」不依赖其他指标）；原子=须有源表度量列或手写口径。
     if (isDerivedOrComposite) {
-      if (selectedDeps.length === 0) {
-        message.warning("派生/复合指标必须选择至少 1 个依赖指标");
+      if (metricType === "composite" && selectedDeps.length === 0) {
+        message.warning("复合指标必须选择至少 1 个依赖指标");
         return;
       }
       if (!calcExpression.trim()) {
@@ -1761,7 +1763,7 @@ export function MetricCreate() {
             {/* Step 2: 按类型的来源配置——原子=逻辑度量/源字段；派生/复合=依赖指标（SQL 推断已收敛为工具栏抽屉） */}
             <Card
               type="inner"
-              title={isAtomic ? "② 原子来源（逻辑度量 + 聚合方式）" : "② 依赖指标"}
+              title={isAtomic ? "② 原子来源（逻辑度量 + 基础统计粒度）" : metricType === "composite" ? "② 依赖指标（复合必填）" : "② 依赖指标（派生选填）"}
               size="small"
               extra={suggesting && <Spin size="small" />}
             >
@@ -1863,11 +1865,11 @@ export function MetricCreate() {
                 <>
                 <Form.Item
                   label="依赖指标"
-                  required
+                  required={metricType === "composite"}
                   extra={
                     metricType === "composite"
-                      ? "复合指标跨域/多指标聚合：选择多个已发布上游指标（可跨域），血缘据此生成依赖边。"
-                      : "派生指标基于已发布上游指标计算：选择至少 1 个已发布指标，血缘据此生成依赖边。"
+                      ? "复合指标跨域/多指标聚合：选择多个已发布上游指标（可跨域），血缘据此生成依赖边（必填）。"
+                      : "派生指标可选依赖：纯周期派生（如「本月活跃医生数」）可不依赖其他指标；带依赖时血缘据此生成依赖边（选填）。"
                   }
                 >
                   <Select
@@ -2703,10 +2705,10 @@ export function MetricCreate() {
                   size="small"
                   defaultActiveKey={sqlBatchResult.statements.map((s) => `stmt-${s.index}`)}
                   items={(() => {
-                    // 派生/复合依赖指标可选项：本批全部原子候选（跨语句可选），
-                    // label 展示「名称（最终编码）」便于用户识别要依赖哪个原子
+                    // 派生/复合依赖指标可选项：本批全部原子 + 派生候选（跨语句可选，
+                    // 复合不选作依赖——它是顶层运算结果），label 展示「名称（最终编码）」
                     const atomicDepOptions = sqlBatchResult.candidates
-                      .filter((c) => c.type === "atomic")
+                      .filter((c) => c.type !== "composite")
                       .map((c) => ({
                         value: resolveCandidateCode(c),
                         label: `${c.name} (${resolveCandidateCode(c)})`,
@@ -2734,9 +2736,9 @@ export function MetricCreate() {
                                   onChange={(e) => handleSqlBatchToggle(c.key, e.target.checked)}
                                   aria-label={`勾选 ${c.name}`}
                                 />
-                                {/* 指标类型可在线编辑：原子 = 逻辑度量 + 业务限定 + 统计周期
-                                    （单个度量列）；可把同批两个原子改为派生（如留存率 = 当月/上月
-                                    活跃）或复合。改派生/复合后下方切换为依赖指标 + 计算表达式 */}
+                                {/* 指标类型可在线编辑（OneData 语义）：原子 = 逻辑度量 + 基础粒度
+                                    （日）；派生 = 原子 + 时间周期（month/周/季/年，周期驱动默认派生）；
+                                    复合 = 多指标运算。改派生/复合后下方切换为依赖指标 + 计算表达式 */}
                                 <Select
                                   size="small"
                                   style={{ width: 96 }}

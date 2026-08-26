@@ -405,9 +405,10 @@ async def test_infer_sql_batch_etl_insert_passthrough_candidates() -> None:
     )
     # set + create 无聚合进 skipped，insert 下沉出 1 个候选
     assert len(result["skipped"]) == 2
-    atoms = [c for c in result["candidates"] if c["type"] == "atomic"]
-    assert len(atoms) == 1
-    cand = atoms[0]
+    # OneData 语义：month 周期 = 原子（活跃医生数）+ 时间周期 → 派生指标
+    derived = [c for c in result["candidates"] if c["type"] == "derived"]
+    assert len(derived) == 1
+    cand = derived[0]
     assert cand["key"] == "2:current_month_active_doctor_cnt"
     assert cand["source_table"] == "wedw_dw.doctor_visit_agent_info_da"
     assert cand["measure_column"] == "doctor_code"
@@ -434,19 +435,20 @@ async def test_infer_sql_batch_etl_insert_synthesize_composite() -> None:
     result = await infer_sql_batch(
         _fake_db(), sql=sql, split_mode="statement", domain_code="sales", synthesize_composite=True
     )
-    atoms = [c for c in result["candidates"] if c["type"] == "atomic"]
+    # OneData 语义：month 周期 → 派生候选（原子 + 时间周期）；复合仍合成
+    derived = [c for c in result["candidates"] if c["type"] == "derived"]
     composites = [c for c in result["candidates"] if c["type"] == "composite"]
-    assert len(atoms) == 2
+    assert len(derived) == 2
     assert len(composites) == 1
     # key 用别名区分同列（doctor_code）不同语义的度量
-    keys = {a["key"] for a in atoms}
+    keys = {a["key"] for a in derived}
     assert keys == {
         "0:current_month_active_doctor_cnt",
         "0:last_month_active_doctor_cnt",
     }
     comp = composites[0]
     assert comp["key"] == "0:composite"
-    assert set(comp["dependencies"]) == {a["metric_code"] for a in atoms}
+    assert set(comp["dependencies"]) == {a["metric_code"] for a in derived}
 
 
 # ---------------------------------------------------------------- Doris CTAS（场景A 扩展）
@@ -586,7 +588,8 @@ async def test_infer_sql_batch_llm_period_fallback() -> None:
     ) as mock_svc:
         mock_svc.return_value.build_client = AsyncMock(return_value=fake_client)
         result = await infer_sql_batch(db, sql=sql, split_mode="statement", domain_code="sales")
-    cands = [c for c in result["candidates"] if c["type"] == "atomic"]
+    # OneData 语义：LLM 推断 month 周期 → 派生候选（原子 + 时间周期）
+    cands = [c for c in result["candidates"] if c["type"] == "derived"]
     assert cands and all(c["period"] == "month" for c in cands)
 
 
@@ -1142,7 +1145,8 @@ async def test_infer_sql_batch_period_fallback_runs_concurrently() -> None:
         )
     # 并发执行：同时活跃 ≥2（串行则恒为 1）
     assert max_active >= 2
-    cands = [c for c in result["candidates"] if c["type"] == "atomic"]
+    # OneData 语义：LLM 推断出 month 周期 → 派生候选（原子 + 时间周期）
+    cands = [c for c in result["candidates"] if c["type"] == "derived"]
     assert len(cands) == 3
     assert all(c["period"] == "month" for c in cands)
     # 候选按语句 index 顺序回填（与串行一致）

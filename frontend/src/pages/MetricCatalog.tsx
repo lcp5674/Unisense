@@ -57,6 +57,7 @@ import {
   METRIC_STATUS_COLOR,
   METRIC_STATUS_LABEL,
   METRIC_TYPE_LABEL,
+  METRIC_TYPE_DESC,
   METRIC_TIER_LABEL,
   TIME_SEMANTICS_LABEL,
   UNIT_LABEL,
@@ -228,7 +229,11 @@ function ExpandContent({
     <div style={{ padding: "4px 8px" }}>
       <Descriptions column={2} size="small" bordered style={{ marginBottom: 12 }}>
         <Descriptions.Item label="业务域">{domainName(r.domain)}</Descriptions.Item>
-        <Descriptions.Item label="指标类型">{METRIC_TYPE_LABEL[r.type] ?? r.type}</Descriptions.Item>
+        <Descriptions.Item label="指标类型">
+          <Tooltip title={METRIC_TYPE_DESC[r.type] ?? r.type}>
+            <span style={{ cursor: "help" }}>{METRIC_TYPE_LABEL[r.type] ?? r.type}</span>
+          </Tooltip>
+        </Descriptions.Item>
         <Descriptions.Item label="责任人">{userName(r.owner_id)}</Descriptions.Item>
         {/* 治理/运营追溯：业务消费者聚焦口径，隐藏备份/提交/审批/时间/分层/时效/时间语义 */}
         {!isConsumer && <Descriptions.Item label="备份责任人">{userName(r.backup_owner_id)}</Descriptions.Item>}

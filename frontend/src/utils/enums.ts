@@ -17,6 +17,14 @@ export const METRIC_TYPE_LABEL: Record<string, string> = {
   composite: "复合指标",
 };
 
+// OneData 语义说明（类型展示 Tooltip）：原子 = 逻辑度量 + 基础统计粒度（日），不含时间周期；
+// 派生 = 原子 + 时间周期（月/周/季/年，依赖可选）；复合 = 多指标四则运算/比率。
+export const METRIC_TYPE_DESC: Record<string, string> = {
+  atomic: "OneData 原子层：通用逻辑度量 + 基础统计粒度（日）。可复用、不绑定业务限定与时间周期；可关联逻辑度量目录统一管理格式/单位。",
+  derived: "OneData 派生层：原子指标 + 时间周期（月/周/季/年）。如「本月活跃医生数」= 活跃医生数 + 月周期；依赖指标可选，可携带挂载实体（结果落表）。",
+  composite: "OneData 复合层：多个指标四则运算/比率。如「医生留存率」= 当月活跃 ÷ 上月活跃；须声明依赖指标 + 计算表达式。",
+};
+
 export const METRIC_TIER_LABEL: Record<string, string> = {
   T1: "T1（核心）",
   T2: "T2（重要）",

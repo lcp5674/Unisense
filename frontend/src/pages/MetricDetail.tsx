@@ -102,7 +102,7 @@ import type {
   UserBrief,
 } from "../types";
 import { useTracking } from "../hooks/useTracking";
-import { enumLabel, METRIC_TYPE_LABEL, METRIC_TIER_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL, GRANULARITY_LABEL, UNIT_LABEL, RULING_DECISION_LABEL, METRIC_STATUS_COLOR, METRIC_STATUS_LABEL, METRIC_RELATION_EDGE_LABEL } from "../utils/enums";
+import { enumLabel, METRIC_TYPE_LABEL, METRIC_TYPE_DESC, METRIC_TIER_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL, GRANULARITY_LABEL, UNIT_LABEL, RULING_DECISION_LABEL, METRIC_STATUS_COLOR, METRIC_STATUS_LABEL, METRIC_RELATION_EDGE_LABEL } from "../utils/enums";
 import { formatCnTime, formatCnDate } from "../utils/timeCn";
 import { HealthCard } from "./metric/HealthCard";
 import RoleOwnerSelect, { type RoleOwnerValue } from "../components/RoleOwnerSelect";
@@ -437,7 +437,11 @@ function ArchivedDetailPanel({
           {domainInactive(m.domain) && <Tag style={{ marginLeft: 6 }} color="default">已停用</Tag>}
         </Descriptions.Item>
         <Descriptions.Item label="粒度">{m.granularity ? (GRANULARITY_LABEL[m.granularity] ?? m.granularity) : "—"}</Descriptions.Item>
-        <Descriptions.Item label="指标类型">{METRIC_TYPE_LABEL[m.type] ?? m.type}</Descriptions.Item>
+        <Descriptions.Item label="指标类型">
+          <Tooltip title={METRIC_TYPE_DESC[m.type] ?? m.type}>
+            <span style={{ cursor: "help" }}>{METRIC_TYPE_LABEL[m.type] ?? m.type}</span>
+          </Tooltip>
+        </Descriptions.Item>
         <Descriptions.Item label="状态">
           <Tag color="orange">已作废</Tag>
         </Descriptions.Item>
@@ -1363,9 +1367,10 @@ export function MetricDetail() {
         change_reason: String(values.change_reason ?? "").trim(),
         row_version: metric.row_version, // 跨请求乐观锁：他人已改则 409 拒绝
       };
-      // 类型化口径完整性校验（PRD 4.5 + 后端 schema 对齐）：派生/复合指标提交的最终口径
-      // 须有依赖指标 + 计算表达式（缺失则血缘断链、无法构建 DERIVED_FROM）；仅当本次提交
-      // 包含口径时校验——只改名称/治理属性、不动口径的存量不完整指标编辑不被阻塞。
+      // 类型化口径完整性校验（PRD 4.5 + 后端 schema 对齐，OneData 语义）：复合指标
+      // 须有依赖指标 + 计算表达式（血缘断链防护）；派生 = 原子 + 时间周期，依赖可选，
+      // 但须有计算表达式。仅当本次提交包含口径时校验——只改名称/治理属性、不动口径的
+      // 存量不完整指标编辑不被阻塞。
       if (definitionJson !== undefined && metric.type !== "atomic") {
         const finalDeps = Array.isArray(definitionJson.dependencies)
           ? definitionJson.dependencies
@@ -1375,8 +1380,8 @@ export function MetricDetail() {
             ? definitionJson.expression.trim()
             : "";
         const hasSql = typeof definitionJson.sql === "string" && Boolean(definitionJson.sql);
-        if (finalDeps.length === 0) {
-          message.warning("派生/复合指标必须声明至少 1 个依赖指标");
+        if (metric.type === "composite" && finalDeps.length === 0) {
+          message.warning("复合指标必须声明至少 1 个依赖指标");
           return;
         }
         if (!hasSql && !finalExpr) {
