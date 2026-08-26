@@ -293,7 +293,7 @@ function ReviewDetailModal({
             </Descriptions.Item>
           )}
           {etlSql && (
-            <Descriptions.Item label="口径 SQL">
+            <Descriptions.Item label="技术口径（源业务库口径）">
               {/* pre-wrap + wordBreak：长 SQL 行自动换行，maxWidth 兜底不撑破弹窗；maxHeight 控制纵向滚动 */}
               <pre
                 style={{
