@@ -263,6 +263,26 @@ async def test_refine_definition_empty_content(
     assert resp.json()["code"] == "LLM_INFER_UNAVAILABLE"
 
 
+async def test_refine_definition_abnormal_content(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """三层口径 LLM 增强：LLM 返回流式协议原文垃圾 → 400，不灌入口径框。"""
+    mock_client = MagicMock()
+    mock_client.enabled = True
+    garbage = '[\n {"type":"message", "payload":{"choices":[{"delta":{"content":"x"}}]}}]'
+    mock_client.chat = AsyncMock(return_value={"content": garbage * 300})
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        return_value=mock_client,
+    ):
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/refine-definition",
+            json={"field": "dw", "action": "generate", "current": ""},
+        )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "LLM_INFER_UNAVAILABLE"
+
+
 async def test_refine_definition_invalid_field(
     metrics_client: httpx.AsyncClient,
 ) -> None:

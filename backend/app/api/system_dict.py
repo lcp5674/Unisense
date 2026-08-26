@@ -118,13 +118,25 @@ async def infer_dict_item_description(
             ctx={"dict_type": request.dict_type},
         ) from exc
 
-    from app.services.llm.parse import strip_code_fence
+    from app.services.llm.parse import is_abnormal_llm_text, strip_code_fence
 
     description = (resp.get("content") or "").strip()
     description = strip_code_fence(description).strip().strip("\"'")
     if not description:
         raise BusinessError(
             "LLM 未返回有效内容，请重试",
+            error_code="LLM_INFER_UNAVAILABLE",
+            ctx={"dict_type": request.dict_type},
+        )
+    if is_abnormal_llm_text(description):
+        logger.warning(
+            "dict_infer_description_abnormal_content",
+            dict_type=request.dict_type,
+            label=request.label,
+            length=len(description),
+        )
+        raise BusinessError(
+            "LLM 返回内容异常，请重试",
             error_code="LLM_INFER_UNAVAILABLE",
             ctx={"dict_type": request.dict_type},
         )

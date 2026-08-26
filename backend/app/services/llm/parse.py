@@ -18,6 +18,45 @@ from typing import Any
 # 匹配以 ``` 或 ```json 开头/结尾的代码围栏，捕获中间内容（忽略大小写与首尾空白）。
 _FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
 
+# 纯文本 LLM 返回的宽松长度上限（TD §11 韧性）：正常描述/口径受 max_tokens≤800
+# 约束，理论最长约 5k 字符；上限取 20k 只为拦截「把流式协议原文一次性吐出」的异常
+# 形态（如本地调试网关返回 6 万字符的流式信封），远高于任何正常返回。
+MAX_LLM_TEXT_CHARS = 20_000
+
+# 流式协议信封标记（SSE / 增量 JSON），出现在内容开头片段即视为异常。
+_STREAM_DUMP_MARKERS = (
+    '"type":"message"',
+    '"type": "message"',
+    '"choices":[{"delta"',
+    '"choices": [{"delta"',
+)
+
+
+def looks_like_stream_dump(content: str) -> bool:
+    """宽松识别 LLM 是否把流式协议原文（SSE/增量 JSON 信封）当内容返回。
+
+    只检查开头片段（前 2000 字符），命中典型流式标记（``data:``/``event:``
+    /``{"type":"message"...``/``choices[].delta``）即视为异常。正常文本
+    （中文描述/伪代码/数仓 SQL/JSON）几乎不可能以这些标记开头，误伤率极低。
+    """
+    head = content.lstrip()[:2000]
+    if head.startswith(("data:", "event:", "id:")):
+        return True
+    return any(marker in head for marker in _STREAM_DUMP_MARKERS)
+
+
+def is_abnormal_llm_text(content: str) -> bool:
+    """宽松判断 LLM 纯文本返回是否异常（超长或流式原文垃圾）。
+
+    校验刻意宽松：只拦截确定性的异常形态（超长 / 流式信封原文），不做过多的
+    内容语义约束，避免误伤正常描述、伪代码或数仓 SQL。
+    """
+    if not content:
+        return False
+    if len(content) > MAX_LLM_TEXT_CHARS:
+        return True
+    return looks_like_stream_dump(content)
+
 
 def strip_code_fence(raw: str) -> str:
     """剥离 markdown 代码围栏；非围栏文本原样返回。"""

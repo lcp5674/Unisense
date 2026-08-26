@@ -1201,13 +1201,26 @@ async def refine_metric_definition(
             ctx={"field": request.field, "action": request.action},
         ) from exc
 
-    from app.services.llm.parse import strip_code_fence
+    from app.services.llm.parse import is_abnormal_llm_text, strip_code_fence
 
     content = (resp.get("content") or "").strip()
     content = strip_code_fence(content).strip().strip("\"'")
     if not content:
         raise BusinessError(
             "LLM 未返回有效内容，请重试",
+            error_code="LLM_INFER_UNAVAILABLE",
+            ctx={"field": request.field, "action": request.action},
+        )
+    if is_abnormal_llm_text(content):
+        logger.warning(
+            "metric_definition_refine_abnormal_content",
+            field=request.field,
+            action=request.action,
+            metric_code=request.metric_code,
+            length=len(content),
+        )
+        raise BusinessError(
+            "LLM 返回内容异常，请重试",
             error_code="LLM_INFER_UNAVAILABLE",
             ctx={"field": request.field, "action": request.action},
         )

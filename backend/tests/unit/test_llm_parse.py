@@ -9,6 +9,8 @@ from __future__ import annotations
 from app.services.llm.parse import (
     extract_numeric_field,
     extract_str_field,
+    is_abnormal_llm_text,
+    looks_like_stream_dump,
     parse_batch_description_result,
     parse_bool_result,
     parse_description_result,
@@ -358,3 +360,45 @@ def test_parse_sql_candidates_annotations_invalid_returns_none() -> None:
     assert parse_sql_candidates_annotations("not json") is None
     assert parse_sql_candidates_annotations('{"foo": 1}') is None
     assert parse_sql_candidates_annotations('{"candidates": [{"is_measure": true}]}') is None
+
+
+def test_looks_like_stream_dump_json_envelope() -> None:
+    """增量 JSON 流式信封（如本地调试网关返回的 60k 流式原文）→ 判定为异常。"""
+    dump = '[\n {"type":"message", "id":"x", "payload":{"choices":[{"delta":{"content":"..."}}]}}]'
+    assert looks_like_stream_dump(dump) is True
+    # 带空格变体同样命中
+    assert looks_like_stream_dump('[\n {"type": "message"} ]') is True
+
+
+def test_looks_like_stream_dump_sse_prefix() -> None:
+    """SSE 协议原文（data:/event: 前缀）→ 判定为异常。"""
+    assert looks_like_stream_dump("data: {\"type\":\"message\"}\n\ndata: ...") is True
+    assert looks_like_stream_dump("event: message\ndata: hello") is True
+
+
+def test_looks_like_stream_dump_normal_text_false() -> None:
+    """正常文本（中文描述/伪代码/数仓 SQL/JSON）不会被误判为流式原文。"""
+    assert looks_like_stream_dump("该取值的含义与用途") is False
+    assert looks_like_stream_dump("SELECT SUM(amount) FROM orders WHERE dt = '${bizdate}'") is False
+    assert looks_like_stream_dump('{"description": "x", "confidence": 0.5}') is False
+    assert looks_like_stream_dump("伪代码：对当日订单金额求和，剔除退款") is False
+
+
+def test_is_abnormal_llm_text_overlong() -> None:
+    """超长内容（远超 max_tokens 正常上限，如流式垃圾一次性吐出）→ 异常。"""
+    assert is_abnormal_llm_text("x" * 25_000) is True
+
+
+def test_is_abnormal_llm_text_normal_passes() -> None:
+    """正常描述/口径长度放行——校验刻意宽松，不误伤合法内容。"""
+    assert is_abnormal_llm_text("该取值的含义与用途") is False
+    # 一段较长的数仓 SQL 口径（远超 20k 上限之内）也应放行
+    long_sql = "SELECT " + "SUM(amount), " * 200 + "FROM fact_orders"
+    assert len(long_sql) < 20_000
+    assert is_abnormal_llm_text(long_sql) is False
+
+
+def test_is_abnormal_llm_text_empty_false() -> None:
+    """空内容不判为异常（由上层空值检查单独处理）。"""
+    assert is_abnormal_llm_text("") is False
+    assert is_abnormal_llm_text("   ") is False

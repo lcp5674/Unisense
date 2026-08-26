@@ -260,6 +260,23 @@ async def test_infer_description_empty_content(
     assert resp.json()["code"] == "LLM_INFER_UNAVAILABLE"
 
 
+async def test_infer_description_abnormal_content(
+    dict_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LLM 返回流式协议原文垃圾（如测试网关的 60k 流式信封）→ 400，不灌入描述框。"""
+    garbage = '[\n {"type":"message", "payload":{"choices":[{"delta":{"content":"x"}}]}}]' * 300
+    assert len(garbage) > 20_000  # 模拟超长流式原文一次性吐出
+    _install_llm(monkeypatch, _fake_llm_client(content=garbage))
+    with patch("app.api.system_dict.write_audit", new=AsyncMock()) as audit:
+        resp = await dict_client.post(
+            "/api/v1/dicts/infer-description",
+            json={"dict_type": "unit", "label": "元"},
+        )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "LLM_INFER_UNAVAILABLE"
+    audit.assert_not_awaited()  # 异常内容不落审计
+
+
 async def test_infer_description_invalid_422(dict_client: httpx.AsyncClient) -> None:
     """label 为空 → 422（min_length=1）。"""
     resp = await dict_client.post(
