@@ -240,7 +240,7 @@ describe("MetricCatalog", () => {
     expect(screen.getByText("求和 · 日 · 元")).toBeTruthy();
   });
 
-  it("展开行展示指标定义/计算口径/治理追溯", async () => {
+  it("展开行展示三层口径/计算口径/治理追溯", async () => {
     renderCatalog();
     await waitFor(() => {
       expect(screen.getByText("sales_gmv_sum_d")).toBeTruthy();
@@ -249,12 +249,12 @@ describe("MetricCatalog", () => {
     const expandBtn = document.querySelector(".ant-table-row-expand-icon");
     expect(expandBtn).toBeTruthy();
     fireEvent.click(expandBtn as Element);
-    // 展开内容：指标定义 / 计算口径 / 口径 SQL / 来源字段 / 提交人=张三 / 审批人=王五
+    // 展开内容：业务口径 / 计算口径 / 技术口径（源业务库口径）/ 来源字段 / 提交人=张三 / 审批人=王五
     await waitFor(() => {
       expect(screen.getByText("当日支付成功订单的成交总额")).toBeTruthy();
       expect(screen.getByText("sum(gmv)")).toBeTruthy();
-      // 口径 SQL：带标签 + SQL 文本
-      expect(screen.getByText("口径 SQL：")).toBeTruthy();
+      // 技术口径（源业务库口径）：带标签 + SQL 文本
+      expect(screen.getByText("技术口径（源业务库口径）：")).toBeTruthy();
       expect(screen.getByText("SELECT SUM(order_amount) AS gmv, dt FROM dwd_order_di GROUP BY dt")).toBeTruthy();
       // 关联数据表按方向拆分：依赖表（上游）+ 使用表（下游）分块展示
       expect(screen.getByText("依赖表（上游）：")).toBeTruthy();

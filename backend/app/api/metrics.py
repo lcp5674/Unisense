@@ -1773,6 +1773,10 @@ async def auto_suggest_metric(
     result["related_tables"] = related_tables
     result["source_tables"] = source_tables
     result["downstream_tables"] = downstream_tables
+    # SQL 解析出的度量列清单（含聚合方式/来源表/原始表达式），供前端展示让用户
+    # 确认推断是否真正识别成功（多度量脚本不再"只取首个"对用户黑盒——每个度量
+    # 的列名与聚合方式都可见，可核对后再进入②③④步确认或覆盖）。
+    result["parsed_measures"] = parsed.measures if parsed and parsed.measures else []
     return ok(data=result, trace_id=trace_id)
 
 

@@ -2757,6 +2757,16 @@ export interface AutoSuggestResponse {
   source_tables?: string[];
   /** 血缘推断：下游使用表（消费源表的表，填入「使用表（下游）」）。 */
   downstream_tables?: string[];
+  /** SQL 解析出的度量列清单（含聚合方式/来源表/原始表达式）——供用户确认推断
+   *  是否真正识别成功（多度量脚本不再只对用户黑盒展示首个度量）。 */
+  parsed_measures?: {
+    column: string;
+    agg: string;
+    alias?: string | null;
+    table?: string | null;
+    sunk?: boolean;
+    expression?: string | null;
+  }[];
 }
 
 /** 业务域建议候选（FR-010 域建议增强：反向定位/LLM 兜底）。 */

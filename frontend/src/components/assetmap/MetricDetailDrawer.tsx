@@ -74,12 +74,14 @@ function DefinitionsBlock({ def }: { def: Record<string, unknown> }) {
 
   return (
     <div>
-      {definition && (
-        <p style={{ margin: "0 0 8px" }}>
-          <span className="muted">指标定义：</span>
-          {definition}
-        </p>
-      )}
+      <p style={{ margin: "0 0 8px" }}>
+        <span className="muted">业务口径：</span>
+        {definition ? (
+          definition
+        ) : (
+          <span className="muted" style={{ fontStyle: "italic" }}>未填写（可在详情页编辑补填）</span>
+        )}
+      </p>
       {expression && (
         <p style={{ margin: "0 0 8px" }}>
           <span className="muted">计算口径：</span>
@@ -119,23 +121,26 @@ function DefinitionsBlock({ def }: { def: Record<string, unknown> }) {
         </p>
       )}
       {etlSql && (
-        <pre
-          style={{
-            background: "var(--paper)",
-            padding: 8,
-            borderRadius: 4,
-            margin: "0 0 8px",
-            fontSize: 12,
-            overflow: "auto",
-            maxHeight: 200,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-            maxWidth: "100%",
-            boxSizing: "border-box",
-          }}
-        >
-          {etlSql}
-        </pre>
+        <div style={{ margin: "0 0 8px" }}>
+          <span className="muted">技术口径（源业务库口径）：</span>
+          <pre
+            style={{
+              background: "var(--paper)",
+              padding: 8,
+              borderRadius: 4,
+              margin: "4px 0 0",
+              fontSize: 12,
+              overflow: "auto",
+              maxHeight: 200,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+              maxWidth: "100%",
+              boxSizing: "border-box",
+            }}
+          >
+            {etlSql}
+          </pre>
+        </div>
       )}
       {pseudoDefinition && (
         <div style={{ margin: "0 0 8px" }}>
@@ -159,9 +164,9 @@ function DefinitionsBlock({ def }: { def: Record<string, unknown> }) {
           </pre>
         </div>
       )}
-      {dwDefinition && (
-        <div style={{ margin: "0 0 8px" }}>
-          <span className="muted">数仓详细口径（数仓开发）：</span>
+      <div style={{ margin: "0 0 8px" }}>
+        <span className="muted">数仓SQL口径：</span>
+        {dwDefinition ? (
           <pre
             style={{
               background: "var(--paper)",
@@ -179,8 +184,10 @@ function DefinitionsBlock({ def }: { def: Record<string, unknown> }) {
           >
             {dwDefinition}
           </pre>
-        </div>
-      )}
+        ) : (
+          <span className="muted" style={{ fontStyle: "italic" }}>未填写（可在详情页编辑补填）</span>
+        )}
+      </div>
     </div>
   );
 }

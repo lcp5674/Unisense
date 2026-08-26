@@ -757,16 +757,21 @@ export function MetricCreate() {
       setInferSummaryOpen(true);
       const srcTable = (result.fields?.source_table?.value as string) || null;
       const measure = (result.fields?.measure_column?.value as string) || null;
+      const parsed = result.parsed_measures;
+      const parsedNote =
+        Array.isArray(parsed) && parsed.length > 1
+          ? `（识别到 ${parsed.length} 个度量列，已回填首个「${parsed[0].alias ?? parsed[0].column}」，详见结果弹窗）`
+          : "";
       if (srcTable || measure) {
         message.success(
           srcTable && measure
-            ? `已从 SQL 识别：源表 ${srcTable} · 度量列 ${measure}`
+            ? `已从 SQL 识别：源表 ${srcTable} · 度量列 ${measure}${parsedNote}`
             : srcTable
               ? `已从 SQL 识别源表：${srcTable}`
               : `已从 SQL 识别度量列：${measure}`
         );
       } else {
-        message.success("已完成 SQL 解析，字段已按规则推断回填");
+        message.success(`已完成 SQL 解析，字段已按规则推断回填${parsedNote}`);
       }
     } catch (err) {
       const detail = err instanceof UnisenseApiError ? err.message : "";
@@ -2613,6 +2618,62 @@ export function MetricCreate() {
                 );
               })}
             </Row>
+            {(() => {
+              const pm = inferSummary.parsed_measures;
+              if (!Array.isArray(pm) || pm.length === 0) return null;
+              return (
+                <div style={{ marginTop: 12 }}>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    SQL 解析出的度量列（{pm.length} 个）——请核对是否真正识别成功：
+                  </Typography.Text>
+                  <div style={{ marginTop: 6, border: "1px solid #f0f0f0", borderRadius: 6, padding: "4px 10px" }}>
+                    {pm.map((m, idx) => (
+                      <div
+                        key={`${m.alias ?? m.column}-${idx}`}
+                        style={{
+                          padding: "6px 0",
+                          borderBottom: idx < pm.length - 1 ? "1px solid #f0f0f0" : "none",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <Typography.Text strong style={{ fontSize: 13 }} className="mono">
+                            {m.alias ?? m.column}
+                          </Typography.Text>
+                          <Tag color="blue">{m.agg}</Tag>
+                          {m.column && m.column !== m.alias ? (
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }} className="mono">
+                              列 {m.column}
+                            </Typography.Text>
+                          ) : null}
+                          {m.table ? (
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }} className="mono">
+                              表 {m.table}
+                            </Typography.Text>
+                          ) : null}
+                        </div>
+                        {m.expression ? (
+                          <Typography.Text
+                            type="secondary"
+                            style={{ fontSize: 12, display: "block", marginTop: 2 }}
+                            className="mono"
+                          >
+                            {m.expression}
+                          </Typography.Text>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                  {pm.length > 1 ? (
+                    <Alert
+                      type="info"
+                      showIcon
+                      style={{ marginTop: 8 }}
+                      message={`识别到 ${pm.length} 个度量列：当前回填首个「${pm[0].alias ?? pm[0].column}」为原子指标；如需分别创建多个原子指标，请使用下方「批量解析」模式勾选创建`}
+                    />
+                  ) : null}
+                </div>
+              );
+            })()}
             {(() => {
               const s = inferSummary as unknown as {
                 related_tables?: string[];

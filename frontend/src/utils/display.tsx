@@ -31,12 +31,14 @@ export const PLAN_FIELD_LABEL: Record<string, string> = {
 
 /** 口径定义 JSON 字段名 → 中文（对齐 backend definition_json 全集：SQL 模式 / 表达式模式 / seed 数据） */
 export const DEF_FIELD_LABEL: Record<string, string> = {
+  // 三层口径（产品文档 §2.2）：业务口径（口径定义）→ 技术口径（源业务库）→ 数仓SQL口径
+  definition: "业务口径",
   // SQL 模式
-  sql: "口径 SQL",
-  etl_sql: "口径 SQL",
+  sql: "技术口径（源业务库口径）",
+  etl_sql: "技术口径（源业务库口径）",
   // 口径分角色（PRD 4.5 责任方对应）：系统开发伪代码口径 / 数仓开发详细口径
   pseudo_definition: "伪代码口径（系统开发）",
-  dw_definition: "数仓详细口径（数仓开发）",
+  dw_definition: "数仓SQL口径",
   source_tables: "依赖表（上游）",
   downstream_tables: "使用表（下游）",
   source_fields: "来源字段",
@@ -181,6 +183,7 @@ export function ObjectView({
  * 行对行可对照，避免 ObjectView 默认竖排文本块难以比对的问题。
  */
 export const DEF_CANON_ORDER: string[] = [
+  "definition",
   "sql", "etl_sql", "pseudo_definition", "dw_definition",
   "source_tables", "downstream_tables", "source_fields", "source_columns",
   "group_by", "filters", "time_column", "partition_key", "measure_columns",

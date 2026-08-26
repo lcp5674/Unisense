@@ -680,6 +680,59 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     });
   });
 
+  it("SQL 推断：摘要弹窗展示解析出的度量列清单（列名 + 聚合方式 + 原始表达式）", async () => {
+    mockedSuggest.mockResolvedValue({
+      metric_code_suggestion: "doctor_active_doctor_count_month",
+      segments: { domain: "outpatient", biz_object: "doctor", measure: "doctor_code", period: "month" },
+      fields: {
+        source_table: { value: "wedw_dw.doctor_visit_agent_info_da", source: "sql_parse", confidence: 0.9, reason: "" },
+        measure_column: { value: "doctor_code", source: "sql_parse", confidence: 0.9, reason: "" },
+        name: { value: "医生活跃次数", source: "sql_parse", confidence: 0.8 },
+        type: { value: "atomic", source: "sql_parse", confidence: 0.85 },
+        granularity: { value: "month", source: "sql_parse", confidence: 0.9 },
+        aggregation: { value: "COUNT_DISTINCT", source: "sql_parse", confidence: 0.95 },
+      },
+      definition_json: { expression: "COUNT(DISTINCT doctor_code)" },
+      definition_mode: "expression",
+      // SQL 解析出的多度量列（月活 + 留存）——用户可确认识别是否成功
+      parsed_measures: [
+        {
+          column: "doctor_code",
+          agg: "COUNT_DISTINCT",
+          alias: "current_month_active_doctor_cnt",
+          table: "wedw_dw.doctor_visit_agent_info_da",
+          expression: "COUNT(DISTINCT t1.doctor_code)",
+        },
+        {
+          column: "doctor_code",
+          agg: "COUNT_DISTINCT",
+          alias: "last_month_active_doctor_cnt",
+          table: "wedw_dw.doctor_visit_agent_info_da",
+          expression: "COALESCE(COUNT(DISTINCT CASE WHEN NOT t2.doctor_code IS NULL THEN t2.doctor_code END), 0)",
+        },
+      ],
+    } as never);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openSqlInfer();
+    fireEvent.change(screen.getByPlaceholderText(/SELECT SUM\(amount\) AS gmv/), {
+      target: { value: "insert overwrite table x select month_id, count(distinct doctor_code) as current_month_active_doctor_cnt from t group by month_id" },
+    });
+    fireEvent.click(screen.getByText("智能推断并回填字段"));
+
+    // 摘要 Modal：展示两个解析出的度量列 + 聚合方式 + 原始表达式
+    await screen.findByText("SQL 智能推断结果");
+    expect(screen.getByText("SQL 解析出的度量列（2 个）——请核对是否真正识别成功：")).toBeTruthy();
+    expect(screen.getAllByText("current_month_active_doctor_cnt").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("last_month_active_doctor_cnt").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("COUNT_DISTINCT").length).toBeGreaterThan(1);
+    expect(screen.getByText(/COUNT\(DISTINCT t1\.doctor_code\)/)).toBeTruthy();
+    // 多度量提示：可转批量解析分别创建
+    expect(screen.getByText(/识别到 2 个度量列：当前回填首个「current_month_active_doctor_cnt」为原子指标/)).toBeTruthy();
+    fireEvent.click(screen.getByText("知道了"));
+  });
+
   it("SQL 推断后「一键采纳」将系统建议编码填入输入框（惰性设计）", async () => {
     mockedSuggest.mockResolvedValue({
       fields: {
@@ -1244,7 +1297,7 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
   });
 });
 
-describe("MetricCreate 口径分角色双字段（伪代码/数仓详细口径）", () => {
+describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数仓SQL口径）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockedTree.mockResolvedValue(TREE);
@@ -1273,22 +1326,25 @@ describe("MetricCreate 口径分角色双字段（伪代码/数仓详细口径�
     });
   });
 
-  it("Step② 展示「伪代码口径（系统开发）」与「数仓详细口径（数仓开发）」两个输入区", async () => {
+  it("Step② 展示「业务口径」与「伪代码口径（系统开发）」「数仓SQL口径」输入区", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await goToStep(2);
 
+    const biz = screen.getByRole("textbox", { name: "业务口径" }) as HTMLTextAreaElement;
     const pseudo = screen.getByRole("textbox", { name: "伪代码口径" }) as HTMLTextAreaElement;
-    const dw = screen.getByRole("textbox", { name: "数仓详细口径" }) as HTMLTextAreaElement;
+    const dw = screen.getByRole("textbox", { name: "数仓SQL口径" }) as HTMLTextAreaElement;
+    fireEvent.change(biz, { target: { value: "按就诊号去重统计的就诊次数" } });
     fireEvent.change(pseudo, { target: { value: "SUM(收费金额) 按结算日期去重" } });
     fireEvent.change(dw, { target: { value: "SELECT visit_date, SUM(real_amount) FROM dwd.fee_bill_di" } });
+    expect(biz.value).toBe("按就诊号去重统计的就诊次数");
     expect(pseudo.value).toBe("SUM(收费金额) 按结算日期去重");
     expect(dw.value).toBe("SELECT visit_date, SUM(real_amount) FROM dwd.fee_bill_di");
     // 分角色引导文案存在（通俗提示）
     expect(screen.getByText(/口径分角色填写/)).toBeInTheDocument();
   });
 
-  it("提交时 pseudo_definition/dw_definition 合入 definition_json", async () => {
+  it("提交时 definition/pseudo_definition/dw_definition 三层口径合入 definition_json", async () => {
     mockedCreate.mockResolvedValue({ metric_code: "medical_fee_amt_daily" } as any);
     renderPage();
     await screen.findByText("注册指标（草稿）");
@@ -1298,12 +1354,15 @@ describe("MetricCreate 口径分角色双字段（伪代码/数仓详细口径�
     fireEvent.mouseDown(screen.getByText("选择或搜索逻辑度量（如 支付金额 pay_amt）"));
     await clickSelectOption("门诊收费金额 (medical_fee_amt)");
     await goToStep(2);
-    // 填名称 + 口径双字段
+    // 填名称 + 三层口径
     fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "门诊收费金额" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "业务口径" }), {
+      target: { value: "按就诊号去重统计的门诊收费金额" },
+    });
     fireEvent.change(screen.getByRole("textbox", { name: "伪代码口径" }), {
       target: { value: "SUM(收费金额) 按结算日期去重" },
     });
-    fireEvent.change(screen.getByRole("textbox", { name: "数仓详细口径" }), {
+    fireEvent.change(screen.getByRole("textbox", { name: "数仓SQL口径" }), {
       target: { value: "SELECT visit_date, SUM(real_amount) AS amt FROM dwd.fee_bill_di" },
     });
     await goToStep(3);
@@ -1312,8 +1371,9 @@ describe("MetricCreate 口径分角色双字段（伪代码/数仓详细口径�
     await waitFor(() => {
       expect(mockedCreate).toHaveBeenCalled();
       const body = mockedCreate.mock.calls[0][0] as {
-        definition_json: { pseudo_definition?: string; dw_definition?: string };
+        definition_json: { definition?: string; pseudo_definition?: string; dw_definition?: string };
       };
+      expect(body.definition_json.definition).toBe("按就诊号去重统计的门诊收费金额");
       expect(body.definition_json.pseudo_definition).toBe("SUM(收费金额) 按结算日期去重");
       expect(body.definition_json.dw_definition).toBe(
         "SELECT visit_date, SUM(real_amount) AS amt FROM dwd.fee_bill_di",

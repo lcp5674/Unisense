@@ -1510,6 +1510,52 @@ describe("MetricDetail 按钮级权限过滤", () => {
     });
   });
 
+  it("详情页口径定义卡片展示三层口径（业务/技术/数仓SQL空态）", async () => {
+    // 三层口径（产品文档 §2.2）：业务口径（definition_json.definition）→ 技术口径（源业务库口径，sql）
+    // → 数仓SQL口径（dw_definition）；数仓为空时展示"未填写"引导而非隐藏
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "PUBLISHED",
+      definition_json: {
+        definition: "当日支付成功订单的成交总额",
+        sql: "SELECT SUM(order_amount) AS gmv, dt FROM dwd_order_di GROUP BY dt",
+      },
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "outpatient",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    // 三层口径标签与值
+    expect(screen.getByText("业务口径")).toBeTruthy();
+    expect(screen.getByText("当日支付成功订单的成交总额")).toBeTruthy();
+    expect(screen.getByText("技术口径（源业务库口径）")).toBeTruthy();
+    expect(screen.getByText("SELECT SUM(order_amount) AS gmv, dt FROM dwd_order_di GROUP BY dt")).toBeTruthy();
+    // 数仓SQL口径空态：标签可见 + "未填写"引导（而非隐藏）
+    expect(screen.getByText("数仓SQL口径")).toBeTruthy();
+    expect(screen.getByText("未填写（可在编辑弹窗补填）")).toBeTruthy();
+  });
+
   it("编辑弹窗关联维度回填并合入口径 definition_json.dimensions", async () => {
     // 第二个 describe 无 beforeEach，显式补全 Promise.all 依赖
     mockedGetMetric.mockResolvedValue({
@@ -1751,6 +1797,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
       status: "DRAFT",
       definition_json: {
         sql: "SELECT SUM(amount) AS gmv FROM dwd_sales",
+        definition: "按渠道汇总的订单成交总额（业务口径）",
         pseudo_definition: "按渠道汇总订单金额（伪 SQL）",
         dw_definition: "SELECT channel, SUM(order_amount) FROM dwd_sales GROUP BY channel",
       },
@@ -1784,26 +1831,31 @@ describe("MetricDetail 按钮级权限过滤", () => {
     await waitFor(() => {
       expect(document.querySelector(".ant-modal")).toBeTruthy();
     });
-    // 回填：两个口径分角色 TextArea 均带原值
+    // 回填：三个口径 TextArea 均带原值（业务口径 + 伪代码 + 数仓SQL）
+    const bizArea = document.querySelector('[data-testid="editBusinessDefinition"]') as HTMLTextAreaElement | null;
     const pseudoArea = document.querySelector('[data-testid="editPseudoDefinition"]') as HTMLTextAreaElement | null;
     const dwArea = document.querySelector('[data-testid="editDwDefinition"]') as HTMLTextAreaElement | null;
+    expect(bizArea).toBeTruthy();
     expect(pseudoArea).toBeTruthy();
     expect(dwArea).toBeTruthy();
+    expect((bizArea as HTMLTextAreaElement).value).toBe("按渠道汇总的订单成交总额（业务口径）");
     expect((pseudoArea as HTMLTextAreaElement).value).toBe("按渠道汇总订单金额（伪 SQL）");
     expect((dwArea as HTMLTextAreaElement).value).toBe(
       "SELECT channel, SUM(order_amount) FROM dwd_sales GROUP BY channel",
     );
-    // 修改伪代码口径 + 清空数仓口径 → 保存：pseudo 更新、dw 移除、sql 保留
+    // 修改业务口径 + 修改伪代码口径 + 清空数仓口径 → 保存：definition/pseudo 更新、dw 移除、sql 保留
+    fireEvent.change(bizArea as HTMLTextAreaElement, { target: { value: "按渠道汇总的实付金额（业务口径）" } });
     fireEvent.change(pseudoArea as HTMLTextAreaElement, { target: { value: "按渠道汇总实付金额（伪 SQL）" } });
     fireEvent.change(dwArea as HTMLTextAreaElement, { target: { value: "" } });
     const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
-    fireEvent.change(reasonArea, { target: { value: "补填伪代码口径" } });
+    fireEvent.change(reasonArea, { target: { value: "补填三层口径" } });
     fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
     await waitFor(() => {
       const lastCall = mockedUpdateMetric.mock.calls[mockedUpdateMetric.mock.calls.length - 1]?.[1];
       expect(lastCall).toMatchObject({
         definition_json: {
           sql: "SELECT SUM(amount) AS gmv FROM dwd_sales",
+          definition: "按渠道汇总的实付金额（业务口径）",
           pseudo_definition: "按渠道汇总实付金额（伪 SQL）",
         },
       });

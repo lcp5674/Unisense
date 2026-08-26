@@ -463,12 +463,24 @@ function DefinitionCard({ metric }: { metric: MetricResponse }) {
       : [];
   const rawEtl = def.etl_sql ?? def.sql;
   const etlSql = rawEtl == null ? "" : String(rawEtl);
+  // 三层口径（产品文档 §2.2）：业务口径（口径定义）/ 技术口径（源业务库）/ 数仓SQL口径
+  const businessDefinition = typeof def.definition === "string" ? def.definition : "";
   // 口径分角色（PRD 4.5 责任方对应）：系统开发伪代码口径 / 数仓开发详细口径
   const pseudoDefinition = typeof def.pseudo_definition === "string" ? def.pseudo_definition : "";
   const dwDefinition = typeof def.dw_definition === "string" ? def.dw_definition : "";
+  // 空态占位：三层口径始终可见，未填写时给出引导（避免用户误以为"没有该维度"）
+  const emptyHint = (v: string) =>
+    v ? (
+      v
+    ) : (
+      <span className="muted" style={{ fontStyle: "italic" }}>未填写（可在编辑弹窗补填）</span>
+    );
   return (
     <Card title="口径定义" size="small" style={{ marginBottom: 16 }}>
       <Descriptions column={1} size="small" bordered>
+        <Descriptions.Item label="业务口径">
+          {emptyHint(businessDefinition)}
+        </Descriptions.Item>
         {expression && (
           <Descriptions.Item
             label={metric.type === "atomic" ? "聚合表达式" : "计算表达式"}
@@ -515,7 +527,7 @@ function DefinitionCard({ metric }: { metric: MetricResponse }) {
           </Descriptions.Item>
         )}
         {etlSql && (
-          <Descriptions.Item label="口径 SQL">
+          <Descriptions.Item label="技术口径（源业务库口径）">
             {/* pre-wrap + wordBreak：长 SQL 行自动换行，maxWidth 兜底不撑破弹窗；maxHeight 控制纵向滚动 */}
             <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word", maxWidth: "100%", boxSizing: "border-box" }}>
               {etlSql}
@@ -529,13 +541,15 @@ function DefinitionCard({ metric }: { metric: MetricResponse }) {
             </pre>
           </Descriptions.Item>
         )}
-        {dwDefinition && (
-          <Descriptions.Item label="数仓详细口径（数仓开发）">
+        <Descriptions.Item label="数仓SQL口径">
+          {dwDefinition ? (
             <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word", maxWidth: "100%", boxSizing: "border-box" }}>
               {dwDefinition}
             </pre>
-          </Descriptions.Item>
-        )}
+          ) : (
+            <span className="muted" style={{ fontStyle: "italic" }}>未填写（可在编辑弹窗补填）</span>
+          )}
+        </Descriptions.Item>
         <Descriptions.Item label="完整 JSON">
           <pre style={{ background: "var(--paper)", padding: 8, borderRadius: 4, margin: 0, fontSize: 12, overflow: "auto", maxHeight: 240, whiteSpace: "pre-wrap", wordBreak: "break-word", maxWidth: "100%", boxSizing: "border-box" }}>
             {JSON.stringify(def, null, 2)}
@@ -753,6 +767,8 @@ export function MetricDetail() {
   const [editSqlText, setEditSqlText] = useState("");
   // 口径分角色（对齐注册页 Step③）：系统开发伪代码口径 / 数仓开发详细口径，
   // 独立于口径主体模式（expression/sql）始终可编辑；dirty 区分"未改保留"与"清空移除"。
+  const [editBusinessDefinition, setEditBusinessDefinition] = useState("");
+  const [editBusinessDirty, setEditBusinessDirty] = useState(false);
   const [editPseudoDefinition, setEditPseudoDefinition] = useState("");
   const [editDwDefinition, setEditDwDefinition] = useState("");
   const [editPseudoDirty, setEditPseudoDirty] = useState(false);
@@ -1093,7 +1109,9 @@ export function MetricDetail() {
     const isSqlMode = rawSql.trim().length > 0;
     setEditDefMode(isSqlMode ? "sql" : "expression");
     setEditSqlText(rawSql);
-    // 口径分角色回填（系统开发伪代码口径 / 数仓开发详细口径，独立于主体模式）
+    // 口径分角色回填（业务口径 / 系统开发伪代码口径 / 数仓开发详细口径，独立于主体模式）
+    setEditBusinessDefinition(typeof def.definition === "string" ? def.definition : "");
+    setEditBusinessDirty(false);
     setEditPseudoDefinition(typeof def.pseudo_definition === "string" ? def.pseudo_definition : "");
     setEditDwDefinition(typeof def.dw_definition === "string" ? def.dw_definition : "");
     setEditPseudoDirty(false);
@@ -1215,6 +1233,17 @@ export function MetricDetail() {
           const base = definitionJson ?? { ...(metric.definition_json ?? {}) };
           const next = { ...base };
           delete next.source_table;
+          definitionJson = next;
+        }
+      }
+      // 三层口径合入 definition_json：业务口径（一句话）独立于口径主体模式，dirty 区分保留/清空
+      if (editBusinessDirty) {
+        if (editBusinessDefinition.trim()) {
+          definitionJson = { ...(definitionJson ?? (metric.definition_json ?? {})), definition: editBusinessDefinition.trim() };
+        } else {
+          const base = definitionJson ?? { ...(metric.definition_json ?? {}) };
+          const next = { ...base };
+          delete next.definition;
           definitionJson = next;
         }
       }
@@ -2848,9 +2877,25 @@ export function MetricDetail() {
               </Form.Item>
             </>
           )}
-          {/* 口径分角色（对齐注册页 Step③）：系统开发伪代码口径 / 数仓开发详细口径——
-              独立于口径主体模式（expression/sql），作为补充说明始终可编辑。
-              存量指标（注册于口径双字段上线前）在此补填后，详情/展开区即展示对应分块。 */}
+          {/* 三层口径（产品文档 §2.2）：业务口径（一句话，四方评审必读）为第一层，
+              独立输入框 → definition_json.definition，与下方伪代码/数仓SQL口径构成完整三层。 */}
+          <Form.Item
+            label="业务口径"
+            style={{ marginBottom: 8 }}
+            extra="一句话业务口径（口径定义）——不含表名/物理字段名；四方评审必读字段。"
+          >
+            <Input.TextArea
+              rows={2}
+              className="mono"
+              data-testid="editBusinessDefinition"
+              value={editBusinessDefinition}
+              onChange={(e) => {
+                setEditBusinessDefinition(e.target.value);
+                setEditBusinessDirty(true);
+              }}
+              placeholder="如：按就诊号去重统计的就诊次数"
+            />
+          </Form.Item>
           <Form.Item
             label="伪代码口径（系统开发）"
             style={{ marginBottom: 8 }}
@@ -2869,7 +2914,7 @@ export function MetricDetail() {
             />
           </Form.Item>
           <Form.Item
-            label="数仓详细口径（数仓开发）"
+            label="数仓SQL口径"
             style={{ marginBottom: 8 }}
             extra="数仓开发指标的详细口径：完整 SQL 或建模口径说明。"
           >
@@ -2904,7 +2949,7 @@ export function MetricDetail() {
           </Form.Item>
           {editDefMode === "sql" ? (
             <Form.Item
-              label="口径 SQL"
+              label="技术口径（源业务库口径）"
               validateStatus={editDefinitionError ? "error" : undefined}
               help={
                 editDefinitionError ||

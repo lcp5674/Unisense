@@ -635,13 +635,18 @@ def _best_dialect_ast(
 
 
 def _parse_profile_ast(sql: str) -> exp.Expr | None:
-    """解析 SQL 为 AST；默认方言失败/识别不全时用工业方言 + Doris 预处理兜底。
+    """解析 SQL 为 AST；多语句脚本拆分 + 默认方言失败/识别不全时用工业方言 + Doris 预处理兜底。
 
     生产 ETL 常用方言语法（Doris/StarRocks 的 ``CREATE TABLE ... DISTRIBUTED BY
     ... AS SELECT``、ClickHouse ``MergeTree`` 建表 + ``sumMerge`` 聚合、Oracle
     ``trunc(x,'MM')``、Trino ``date_trunc``、T-SQL ``CONVERT`` 等）sqlglot 默认
     方言可能整句降级为 ``Command``（无 Select 子树）或把方言聚合降级为
     ``Anonymous`` → 画像度量缺失 → 批量解析候选减少。解析策略（代价递增）：
+    0. 多语句脚本（``set`` 参数 + ``create table`` DDL + ``insert overwrite ... select``）：
+       ``parse_one`` 只返回第一条语句（常是 ``Set``/``Command``，无 Select 子树）→
+       画像空。改用 ``parse``（复数）拆分全部语句，选「含 Select 且聚合识别最多」
+       的产出语句（度量 SELECT 通常在脚本最末的 INSERT 中）——与 ``sql_split``
+       批量切分语义对齐；
     1. 默认方言解析，有 Select 子树 → 文本含方言聚合函数名时再遍历方言择优
        （``_best_dialect_ast``，避免 sumMerge 等被宽松方言降级丢度量），否则直接采用；
     2. 默认方言无 Select 子树 → 遍历工业方言选聚合识别最多的 AST；
@@ -649,6 +654,24 @@ def _parse_profile_ast(sql: str) -> exp.Expr | None:
        的子句）后按默认方言重试——口径语义不变；
     全部失败返回 ``None``（上层降级空画像，不抛异常）。
     """
+    # 多语句脚本：parse 拆分后选含 Select + 聚合识别最多的产出语句（先于 parse_one，
+    # 否则 set/create DDL 开头的 ETL SQL 直接退化为空画像——真实生产 SQL 常见形态）
+    try:
+        stmts = sqlglot.parse(sql, error_level=sqlglot.ErrorLevel.RAISE)
+        if len(stmts) > 1:
+            best_stmt: exp.Expr | None = None
+            best_count = 0
+            for stmt in stmts:
+                if stmt is None or stmt.find(exp.Select) is None:
+                    continue
+                count = len(list(stmt.find_all(exp.AggFunc)))
+                # 聚合数相同取更靠后的语句（ETL 的 insert overwrite ... select 是产出语句）
+                if count >= best_count:
+                    best_stmt, best_count = stmt, count
+            if best_stmt is not None and best_count > 0:
+                return best_stmt
+    except Exception:
+        pass  # 多语句拆分失败 → 走单语句路径
     ast: exp.Expr | None = None
     try:
         ast = sqlglot.parse_one(sql, error_level=sqlglot.ErrorLevel.RAISE)

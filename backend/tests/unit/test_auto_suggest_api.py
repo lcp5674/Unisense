@@ -203,3 +203,75 @@ async def test_auto_suggest_splits_lineage_direction(
     assert data["downstream_tables"] == ["ads.gmv_report"]
     # 兼容字段 related_tables = 上游 + 下游并集（旧前端无方向时兜底）
     assert data["related_tables"] == ["ods.sales_order", "ads.gmv_report"]
+
+
+# 真实 ETL 多语句 SQL（set 参数 + create table DDL + insert overwrite select 双度量）
+# 覆盖修复：parse_one 只取首条 Set 语句 → 画像空；parse 全语句拆分 → 双度量识别
+_MULTI_STMT_SQL = """set hive.vectorized.execution.enabled=false;
+
+create table if not exists wedw_dws.doctor_active_month_di(
+ month_id string comment '统计月',
+ current_month_active_doctor_cnt int comment '月活',
+ last_month_active_doctor_cnt int comment '留存'
+)
+stored as orc;
+
+insert overwrite table wedw_dws.doctor_active_month_di
+select a.month_id,
+ count(distinct t1.doctor_code) as current_month_active_doctor_cnt,
+ count(distinct case when t2.doctor_code is not null
+   then t2.doctor_code end) as last_month_active_doctor_cnt
+from (
+  select substr(create_date,1,7) as month_id, doctor_code
+  from wedw_dw.doctor_visit_agent_info_da
+) t1
+left join (
+  select substr(last_month_last_visit_date,1,7) as month_id, doctor_code
+  from wedw_dw.doctor_visit_agent_info_da
+) t2
+on t1.month_id = t2.month_id and t1.doctor_code = t2.doctor_code
+group by t1.month_id;
+"""
+
+
+async def test_auto_suggest_multi_stmt_sql_returns_parsed_measures(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """多语句 ETL SQL → parsed_measures 返回每个度量列 + 聚合方式（用户可确认识别成功）。
+
+    覆盖修复：此前 parse_one 只取首条 Set 语句 → 画像空、无字段可展示；
+    修复后 parse 拆分全语句选产出 INSERT ... SELECT → 双度量带聚合返回。
+    """
+    with (
+        patch(
+            "app.services.llm.config_service.LlmConfigService.build_client",
+            new=AsyncMock(return_value=SimpleNamespace(enabled=False)),
+        ),
+        patch(
+            "app.services.semantic.auto_fill.auto_fill",
+            return_value=_mock_auto_fill_result(),
+        ),
+        patch(
+            "app.services.lineage.repository.LineageRepository",
+            return_value=MagicMock(edges_for_node=AsyncMock(return_value=[])),
+        ),
+    ):
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/auto-suggest",
+            json={"domain_code": "outpatient", "sql": _MULTI_STMT_SQL},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    measures = data["parsed_measures"]
+    assert isinstance(measures, list)
+    assert len(measures) == 2
+    # 两个度量列：月活 + 留存，聚合方式均为 COUNT_DISTINCT，含原始表达式
+    assert {m["alias"] for m in measures} == {
+        "current_month_active_doctor_cnt",
+        "last_month_active_doctor_cnt",
+    }
+    assert {m["agg"] for m in measures} == {"COUNT_DISTINCT"}
+    assert any("COUNT(DISTINCT" in m["expression"] for m in measures)
+    # 源表识别（修复后画像不再为空）
+    assert data["source_tables"] == [] or any("doctor_visit" in t for t in data["source_tables"])

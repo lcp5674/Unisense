@@ -237,12 +237,14 @@ function ExpandContent({
         {!isConsumer && <Descriptions.Item label="更新时效">{FRESHNESS_LABEL[r.freshness] ?? r.freshness}</Descriptions.Item>}
         {!isConsumer && <Descriptions.Item label="时间语义">{TIME_SEMANTICS_LABEL[r.time_semantics] ?? r.time_semantics}</Descriptions.Item>}
       </Descriptions>
-      {definition && (
-        <p style={{ margin: "0 0 8px" }}>
-          <span className="muted">指标定义：</span>
-          {definition}
-        </p>
-      )}
+      <p style={{ margin: "0 0 8px" }}>
+        <span className="muted">业务口径：</span>
+        {definition ? (
+          definition
+        ) : (
+          <span className="muted" style={{ fontStyle: "italic" }}>未填写（可在详情页编辑补填）</span>
+        )}
+      </p>
       {expression && (
         <p style={{ margin: "0 0 8px" }}>
           <span className="muted">计算口径：</span>
@@ -283,7 +285,7 @@ function ExpandContent({
       )}
       {etlSql && (
         <div style={{ margin: "0 0 8px" }}>
-          <span className="muted">口径 SQL：</span>
+          <span className="muted">技术口径（源业务库口径）：</span>
           <pre
             style={{
               background: "var(--paper)",
@@ -319,9 +321,9 @@ function ExpandContent({
           </pre>
         </div>
       )}
-      {dwDefinition && (
-        <div style={{ margin: "0 0 8px" }}>
-          <span className="muted">数仓详细口径（数仓开发）：</span>
+      <div style={{ margin: "0 0 8px" }}>
+        <span className="muted">数仓SQL口径：</span>
+        {dwDefinition ? (
           <pre
             style={{
               background: "var(--paper)",
@@ -335,8 +337,10 @@ function ExpandContent({
           >
             {dwDefinition}
           </pre>
-        </div>
-      )}
+        ) : (
+          <span className="muted" style={{ fontStyle: "italic" }}>未填写（可在详情页编辑补填）</span>
+        )}
+      </div>
       <details>
         <summary className="muted" style={{ cursor: "pointer" }}>完整口径 JSON</summary>
         <pre
