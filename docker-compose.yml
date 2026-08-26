@@ -303,8 +303,9 @@ services:
         condition: service_healthy
     restart: unless-stopped
     # 覆盖 Dockerfile 的健康检查：用显式 IPv4（localhost 在 nginx 容器内可能解析到 ::1）
+    # 注意：nginx 降权后监听 8080（见 frontend/Dockerfile），健康检查必须打 8080 而非 80
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
       interval: 30s
       timeout: 3s
       retries: 3
