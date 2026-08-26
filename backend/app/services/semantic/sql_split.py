@@ -851,6 +851,121 @@ def _apply_candidate_period(cand: dict[str, Any], period: str) -> None:
     cand["granularity"] = period
 
 
+def _candidate_measure_view(cand: dict[str, Any]) -> dict[str, Any]:
+    """候选 → 度量视图（LLM 校验层输入：与 ``SqlProfile.measures`` 同构）。
+
+    候选的 ``measure_column`` 是度量锚点（alias 同列语义），聚合/源表直接映射；
+    派生/复合候选聚合为空（agg=None），校验层按派生处理。
+    """
+    return {
+        "column": cand.get("measure_column") or cand.get("name") or "",
+        "agg": cand.get("aggregation"),
+        "alias": cand.get("measure_column"),
+        "table": cand.get("source_table"),
+        "derived": bool(cand.get("derived")) or cand.get("type") == "composite",
+    }
+
+
+def _apply_candidate_validation(
+    candidates: list[dict[str, Any]],
+    validation: dict[str, Any],
+    tables: list[str],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """批量候选的 LLM 校验规范收敛（方案 A 默认全量校验，纯确定性算法）。
+
+    对规则候选做**验证而非改写**：
+    - **聚合纠正**：LLM 值命中注册枚举白名单且置信度 ≥0.7 才采纳（对齐
+      ``merge_validation`` 阈值）；否则保留规则（防幻觉非法枚举整批失败）。
+    - **源表纠正**：LLM 选的表必须在规则解析出的源表集合内。
+    - **is_measure=false**：高置信度（≥0.7）才移出候选 → 记 skipped(llm_not_measure)；
+      低置信度保守保留并标记 ``needs_review``。
+    - **漏检扫描**：LLM 的 ``missed`` 过列名合法性 + 聚合白名单后，**不自动加候选**
+      （候选构建需语句序号/域默认值等上下文，自动加易失真），而是返回响应级
+      ``missed`` 报告供前端提示用户核对（召回缺口透明化）。
+    - **周期覆盖**：LLM 的 period 白名单覆盖经 ``_apply_candidate_period`` 回映。
+
+    Returns:
+        ``(收敛后的候选清单, 校验摘要)``；摘要含 ``agg_corrected``/``dropped``/
+        ``needs_review``/``missed``/``period_override``。
+    """
+    from app.services.semantic.sql_validation import AGG_ENUM
+
+    items_by_key = {str(it["key"]): it for it in validation.get("items", [])}
+    summary: dict[str, Any] = {
+        "agg_corrected": [],
+        "dropped": [],
+        "needs_review": [],
+        "missed": [],
+        "period_override": validation.get("period"),
+    }
+    kept: list[dict[str, Any]] = []
+    for i, cand in enumerate(candidates):
+        item = items_by_key.get(str(i))
+        if item is None:
+            kept.append(cand)
+            continue
+        conf = item.get("confidence")
+        if not item.get("is_measure", True):
+            if conf is None or conf >= 0.7:
+                summary["dropped"].append(
+                    {
+                        "index": cand.get("statement_index", 0),
+                        "sql": str(cand.get("name") or cand.get("measure_column") or "")[:500],
+                        "reason": "llm_not_measure",
+                    }
+                )
+                continue
+            summary["needs_review"].append(
+                {"key": cand.get("key"), "reason": "LLM 判定非度量但置信度低"}
+            )
+        agg = item.get("agg")
+        if agg and agg in AGG_ENUM and agg != cand.get("aggregation") and (
+            conf is None or conf >= 0.7
+        ):
+            summary["agg_corrected"].append(
+                {
+                    "key": cand.get("key"),
+                    "column": cand.get("measure_column"),
+                    "to": agg,
+                }
+            )
+            cand["aggregation"] = agg
+        table = item.get("table")
+        if table and table in tables and table != cand.get("source_table"):
+            cand["source_table"] = table
+        period = item.get("period")
+        if period and period != cand.get("period"):
+            _apply_candidate_period(cand, period)
+        if conf is not None and conf < 0.7:
+            summary["needs_review"].append(
+                {"key": cand.get("key"), "reason": "LLM 校验置信度低，建议人工核对"}
+            )
+        cand["llm_validated"] = True
+        cand["llm_confidence"] = conf
+        kept.append(cand)
+    # 漏检扫描 → 响应级报告（不自动加候选）
+    existing = {(str(c.get("measure_column") or c.get("name"))).lower() for c in kept}
+    for missed in validation.get("missed", []):
+        from app.services.semantic.sql_validation import _sane_column
+
+        column = str(missed.get("column") or "").strip()
+        agg = missed.get("agg")
+        if not _sane_column(column) or agg not in AGG_ENUM:
+            continue
+        if column.lower() in existing:
+            continue
+        existing.add(column.lower())
+        summary["missed"].append(
+            {
+                "column": column,
+                "agg": agg,
+                "alias": (missed.get("alias") or "").strip() or None,
+            }
+        )
+    kept.sort(key=lambda c: (c.get("statement_index", 0), c.get("key", "")))
+    return kept, summary
+
+
 def _apply_candidate_annotations(
     candidates: list[dict[str, Any]],
     annotations: list[dict[str, Any]],
@@ -1099,6 +1214,35 @@ async def infer_sql_batch(
             if composite:
                 candidates.append(composite)
 
+    # LLM 校验层（方案 A 默认全量校验，仅规则模式）：规则解析可能「静默解析错」
+    # （漏度量/聚合归一错/条件聚合丢失），对规则候选做一次 LLM 封闭选择校验
+    # （is_measure/聚合/源表/周期）+ 漏检扫描，经 ``_apply_candidate_validation``
+    # 确定性收敛（白名单/源表回映/置信度）。LLM 不可用/失败保持规则候选不动，
+    # 绝不阻断；整段只花 1 次调用（use_llm 显式模式由 _llm_annotate_candidates
+    # 承担更完整的补全，不再重复校验）。
+    validation_summary: dict[str, Any] = {}
+    if (
+        not use_llm
+        and candidates
+        and db is not None
+        and llm_budget["used"] < llm_budget["limit"]
+    ):
+        from app.services.semantic.sql_validation import llm_validate_measures
+
+        llm_budget["used"] += 1
+        tables_union = sorted(
+            {str(c["source_table"]) for c in candidates if c.get("source_table")}
+        )
+        validation = await llm_validate_measures(
+            db, sql, [_candidate_measure_view(c) for c in candidates], tables_union
+        )
+        if validation:
+            candidates, validation_summary = _apply_candidate_validation(
+                candidates, validation, tables_union
+            )
+            for dropped in validation_summary.get("dropped", []):
+                skipped.append(dropped)
+
     # use_llm 显式模式：对规则候选做一次 LLM 批量补全（封闭选择）+ 规范收敛。
     # 整段 SQL 只花 1 次调用；LLM 不可用/失败保持规则候选不动，绝不阻断。
     # LLM 判为非度量（高置信度）的候选移入 skipped(llm_not_measure)，前端展示。
@@ -1130,4 +1274,5 @@ async def infer_sql_batch(
         "candidates": candidates,
         "skipped": skipped,
         "domain": _domain_payload(suggestion, domain_code),
+        "validation": validation_summary,
     }

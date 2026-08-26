@@ -393,3 +393,54 @@ async def test_batch_register_from_sql_name_injection_still_blocked_400(
     )
     assert resp.status_code == 400
     assert resp.json()["code"] == "INJECTION_DETECTED"
+
+
+# ---- sql-infer-eval（评测报告 + 运行记录）
+
+
+async def test_sql_infer_eval_report_200(metrics_client: httpx.AsyncClient) -> None:
+    """GET 评测报告：实时计算返回 9 用例报告 + 历史列表（确定性）。"""
+    with (
+        patch(
+            "app.services.semantic.sql_infer_eval.service.list_runs",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch(
+            "app.services.semantic.sql_infer_eval.service.latest_run_cases",
+            new=AsyncMock(return_value=(None, [])),
+        ),
+    ):
+        resp = await metrics_client.get("/api/v1/metric-definitions/sql-infer-eval")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    report = data["report"]
+    assert report["total"] >= 5
+    assert report["exact_rate"] == 1.0
+    assert report["measure_recall"] == 1.0
+    assert report["measure_precision"] == 1.0
+    assert "cases" in report and len(report["cases"]) == report["total"]
+    assert data["history"] == []
+    assert data["latest_run"] is None
+
+
+async def test_sql_infer_eval_run_records(metrics_client: httpx.AsyncClient) -> None:
+    """POST 运行评测：落一条历史记录并返回 report + run_id + 审计。"""
+    with (
+        patch(
+            "app.services.semantic.sql_infer_eval.service.run_and_record",
+            new=AsyncMock(
+                return_value={"report": {"total": 9, "exact_rate": 1.0}, "run_id": 7}
+            ),
+        ) as m,
+        patch("app.api.metrics.write_audit", new=AsyncMock()) as audit,
+    ):
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/sql-infer-eval/run"
+        )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["run_id"] == 7
+    m.assert_awaited_once()
+    assert m.await_args.kwargs["actor_id"] == 1
+    audit.assert_awaited_once()
+    assert audit.await_args.kwargs["action"] == "metric_definition.sql_infer_eval_run"

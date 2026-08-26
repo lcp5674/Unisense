@@ -26,6 +26,7 @@ const MetricDetail = lazyNamed(() => import("./pages/MetricDetail"), "MetricDeta
 const MetricCompare = lazyNamed(() => import("./pages/MetricCompare"), "MetricCompare");
 const MetricCreate = lazyNamed(() => import("./pages/MetricCreate"), "MetricCreate");
 const MeasureCatalogs = lazyNamed(() => import("./pages/MeasureCatalogs"), "MeasureCatalogs");
+const SqlInferEval = lazyNamed(() => import("./pages/SqlInferEval"), "SqlInferEval");
 const ReviewWorkbench = lazyNamed(() => import("./pages/ReviewWorkbench"), "ReviewWorkbench");
 const MetricReview = lazyNamed(() => import("./pages/MetricReview"), "MetricReview");
 const TodoCenter = lazyNamed(() => import("./pages/TodoCenter"), "TodoCenter");
@@ -291,6 +292,7 @@ export default function App() {
               <Route path="/quality" element={<QualityCenter />} />
               <Route path="/dimensions" element={<Dimensions />} />
               <Route path="/measure-catalogs" element={<MeasureCatalogs />} />
+              <Route path="/sql-infer-eval" element={<SqlInferEval />} />
               <Route path="/glossary" element={<Glossary />} />
               <Route path="/governance" element={<RequirePerm perm={ROUTE_PERM["/governance"]}><Governance /></RequirePerm>} />
               <Route path="/audit" element={<RequirePerm perm={ROUTE_PERM["/audit"]}><AuditLog /></RequirePerm>} />

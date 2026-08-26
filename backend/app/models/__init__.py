@@ -73,6 +73,7 @@ from app.models.quality import (
     ReconciliationRecord,
     ReconciliationStatus,
 )
+from app.models.sql_infer_eval import SqlInferEvalRun
 from app.models.subject_domain import SubjectDomain
 from app.models.system_dict import SystemDict
 from app.models.term import Term
@@ -147,6 +148,7 @@ __all__ = [
     "SnapshotGeneratedBy",
     "SoftDeleteMixin",
     "SourceTypeEnum",
+    "SqlInferEvalRun",
     "SubscriptionPref",
     "SubjectDomain",
     "SystemDict",

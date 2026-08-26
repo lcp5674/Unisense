@@ -2939,6 +2939,83 @@ export interface SqlBatchRegisterRequest {
 }
 
 // ============================================================================
+// SQL 智能推断评测（backend /metric-definitions/sql-infer-eval，解析成功率可视化）
+// ============================================================================
+
+/** 评测集单条用例结果。 */
+export interface SqlInferEvalCase {
+  case_id: string;
+  dialect: string;
+  exact: boolean;
+  measure_precision: number | null;
+  measure_recall: number | null;
+  table_precision: number | null;
+  table_recall: number | null;
+  period_match: boolean | null;
+  extra_measures: string[];
+  missing_measures: string[];
+  extra_tables: string[];
+  missing_tables: string[];
+  pred_period: string | null;
+  expected_period: string | null;
+}
+
+/** 评测集成功率报告（实时计算，确定性）。 */
+export interface SqlInferEvalReport {
+  total: number;
+  exact_count: number;
+  exact_rate: number;
+  measure_precision: number | null;
+  measure_recall: number | null;
+  table_precision: number | null;
+  table_recall: number | null;
+  period_match_rate: number | null;
+  cases: SqlInferEvalCase[];
+}
+
+/** 评测运行历史记录（成功率趋势）。 */
+export interface SqlInferEvalRunSummary {
+  id: number;
+  ran_at: string | null;
+  total: number;
+  exact_count: number;
+  exact_rate: number;
+  measure_precision: number | null;
+  measure_recall: number | null;
+  table_precision: number | null;
+  table_recall: number | null;
+  period_match_rate: number | null;
+  elapsed_ms: number;
+  actor_id: number | null;
+}
+
+/** 评测集样本（前端逐样本展示 SQL/期望画像/说明）。 */
+export interface SqlInferEvalSample {
+  case_id: string;
+  dialect: string;
+  note: string;
+  sql: string;
+  expected_measures: string[];
+  expected_tables: string[];
+  expected_period: string;
+}
+
+/** 评测页数据（GET /sql-infer-eval）。 */
+export interface SqlInferEvalData {
+  report: SqlInferEvalReport;
+  history: SqlInferEvalRunSummary[];
+  latest_run: SqlInferEvalRunSummary | null;
+  latest_run_cases: SqlInferEvalCase[];
+  dataset: SqlInferEvalSample[];
+}
+
+/** 评测运行结果（POST /sql-infer-eval/run）。 */
+export interface SqlInferEvalRunResult {
+  report: SqlInferEvalReport;
+  run_id: number;
+}
+
+// ============================================================================
 // 全局聚合搜索（backend /api/v1/search，FR-18 全局搜索栏）
 // ============================================================================
 

@@ -436,6 +436,76 @@ async def consistency_stats(
 
 
 @router.get(
+    "/sql-infer-eval",
+    response_model=ApiResponse[Any],
+    summary="SQL 智能推断评测报告（成功率可视化数据源）",
+    dependencies=_READ_DEPS,
+)
+async def sql_infer_eval_report(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """返回评测集当前成功率报告（实时计算，确定性） + 历史运行记录。
+
+    报告含：度量/表级精确率召回率、完全匹配率、逐用例明细（前端逐样本展示）；
+    历史记录供趋势可视化（解析器改动导致成功率波动的追溯）。
+    注意：本路由须定义在 ``GET /{metric_code}`` 之前，避免被路径参数影子。
+    """
+    from app.services.semantic.sql_infer_eval.runner import (
+        dataset_to_dict,
+        report_to_dict,
+        run_eval,
+    )
+    from app.services.semantic.sql_infer_eval.service import latest_run_cases, list_runs
+
+    report = report_to_dict(run_eval())
+    history = await list_runs(db, limit=20)
+    latest_summary, latest_cases = await latest_run_cases(db)
+    return ok(
+        data={
+            "report": report,
+            "history": history,
+            "latest_run": latest_summary,
+            "latest_run_cases": latest_cases,
+            "dataset": dataset_to_dict(),
+        },
+        trace_id=trace_id,
+    )
+
+
+@router.post(
+    "/sql-infer-eval/run",
+    response_model=ApiResponse[Any],
+    summary="运行一次 SQL 智能推断评测并记录历史",
+    dependencies=_WRITE_DEPS,
+)
+async def sql_infer_eval_run(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """运行评测集并落一条历史记录（成功率趋势数据源）。"""
+    from app.services.semantic.sql_infer_eval.service import run_and_record
+
+    result = await run_and_record(db, actor_id=user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="metric_definition.sql_infer_eval_run",
+        entity_type="metric_definition",
+        entity_id=f"eval_run:{result['run_id']}",
+        detail={
+            "exact_rate": result["report"].get("exact_rate"),
+            "total": result["report"].get("total"),
+            "exact_count": result["report"].get("exact_count"),
+        },
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
+@router.get(
     "/{metric_code}",
     response_model=ApiResponse[MetricResponse],
     summary="获取指标语义定义详情（FR-06）",
@@ -1963,6 +2033,30 @@ async def auto_suggest_metric(
         from app.services.semantic.sql_split import _period_from_profile
 
         period = _period_from_profile(parsed)
+
+    # LLM 校验层（方案 A 默认全量校验）：规则解析可能「静默解析错」（漏度量/聚合
+    # 归一错/条件聚合丢失），对规则识别出的度量做 LLM 封闭选择校验 + 漏检扫描，
+    # 再经一致性仲裁（白名单/源表回映/置信度）收敛。LLM 不可用/失败保持规则结果
+    # 不动，绝不阻断；校验摘要随响应返回前端展示。
+    validation_summary: dict[str, Any] = {}
+    if parsed and parsed.measures:
+        try:
+            from app.services.semantic.sql_validation import (
+                llm_validate_measures,
+                merge_validation,
+            )
+
+            val = await llm_validate_measures(db, sql, parsed.measures, parsed.source_tables)
+            if val:
+                parsed.measures, validation_summary = merge_validation(
+                    parsed.measures, val, parsed.source_tables
+                )
+                ovr = validation_summary.get("period_override")
+                if ovr and period is None:
+                    period = ovr
+        except Exception:
+            pass  # 校验层任何异常保持规则结果不动
+
     effective_table = source_table
     if (not effective_table) and parsed and parsed.source_tables:
         effective_table = parsed.source_tables[0]
@@ -2193,6 +2287,9 @@ async def auto_suggest_metric(
     # 的列名与聚合方式都可见，可核对后再进入②③④步确认或覆盖）。
     result["parsed_measures"] = parsed.measures if parsed and parsed.measures else []
     result["measure_suggestions"] = measure_suggestions
+    # LLM 校验摘要（方案 A）：聚合纠正/漏检补充/非度量剔除/需人工核对/周期覆盖，
+    # 前端据此展示「解析正确性已由 AI 校验」的逐项说明
+    result["validation_summary"] = validation_summary
     return ok(data=result, trace_id=trace_id)
 
 
