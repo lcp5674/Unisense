@@ -437,7 +437,10 @@ class MetricBatchDeprecateItem(BaseModel):
     successor_code: str | None = Field(
         None,
         max_length=64,
-        description="替代指标编码（须已发布；无下游引用时选填，有下游引用未填将被 METRIC_REFERENCED 拦截）",
+        description=(
+            "替代指标编码（须已发布；无下游引用时选填，有下游引用未填将被 "
+            "METRIC_REFERENCED 拦截）"
+        ),
     )
 
 
@@ -569,6 +572,13 @@ class MetricAutoSuggestRequest(BaseModel):
     measure_column: str | None = Field(None, max_length=128, description="度量列")
     period: str | None = Field(None, max_length=16, description="统计周期")
     sql: str | None = Field(None, max_length=16384, description="指标定义 SQL")
+    use_llm: bool = Field(
+        False,
+        description=(
+            "是否启用 LLM 全字段推断（默认走程序规则推断；LLM 产出经枚举白名单校验，"
+            "非法回退规则，不阻断）"
+        ),
+    )
 
 
 class MetricSuggestDomainRequest(BaseModel):
