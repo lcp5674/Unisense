@@ -442,19 +442,28 @@ def _is_wrapped_aggregate(target: exp.Expr) -> bool:
     这类投影本质是单个聚合（外层只是格式/默认值包裹，如 MySQL ``IFNULL(SUM(amount),0)``
     仍指「金额合计」），应作为独立聚合度量捕获。
 
-    而 ``ROUND(SUM(a)/NULLIF(COUNT(b),0),2)``（算术/条件组合多个聚合）是**派生比率**，
+    而 ``ROUND(SUM(a)/NULLIF(COUNT(b),0),2)``（算术组合多个聚合）是**派生比率**，
     由 ``_collect_derived_measures`` 收集——若 ``_projection_measures`` 也提取内嵌聚合，
     会：① 与独立聚合（gmv=SUM(amount)）撞同一编码（``fin_trade_amount_day`` 重复 →
     注册 METRIC_CODE_EXISTS）；② 内嵌聚合列名（is_refund）未命中受控词根 → 注册失败。
+
+    注意：**CASE/IF 不算组合节点**——单聚合内部的 ``CASE WHEN`` 只是过滤条件
+    （``count(distinct case when cond then col end)`` = 条件去重计数、
+    ``SUM(CASE WHEN status='paid' THEN amount END)`` = 条件金额合计），与
+    ``sum(case...)``（target 直接是 AggFunc）语义一致，应作为独立聚合捕获；否则
+    包一层 ``COALESCE(COUNT(DISTINCT CASE...),0)`` 默认值就静默丢度量（真实 ETL
+    「当月活跃医生数/上月活跃医生数」双度量场景）。真正排除的是**聚合之间的算术
+    组合**（Div/Mul/Add/Sub/Mod 连接多个聚合或聚合与非聚合），已被 ``len(aggs)>1``
+    或算术节点检查覆盖。
     """
     aggs = [n for n in target.walk() if isinstance(n, exp.AggFunc)]
     if not aggs:
         return False
     if len(aggs) > 1:
         return False
-    # 单聚合且表达式内无算术/条件组合节点（Div/Mul/Add/Sub/Case）→ 纯格式包裹
+    # 单聚合且表达式内无算术组合节点（Div/Mul/Add/Sub/Mod）→ 纯格式包裹/条件聚合
     return not any(
-        isinstance(n, (exp.Div, exp.Mul, exp.Add, exp.Sub, exp.Mod, exp.Case, exp.If))
+        isinstance(n, (exp.Div, exp.Mul, exp.Add, exp.Sub, exp.Mod))
         for n in target.walk()
     )
 
@@ -569,11 +578,13 @@ def _collect_derived_measures(select: exp.Select) -> list[dict[str, Any]]:
         aggs = [n for n in target.walk() if isinstance(n, exp.AggFunc)]
         if not aggs:
             continue  # 表达式不含聚合（substr(dt) 维度列等）→ 非度量
-        # 单聚合 + 纯格式化包裹（IFNULL(SUM(x),0)/ROUND(SUM(x),2)/COUNT FILTER）：
-        # 仍是该聚合本身，已由 _projection_measures 捕获，不重复产出派生候选
+        # 单聚合 + 纯格式化包裹/条件过滤（IFNULL(SUM(x),0)/ROUND(SUM(x),2)/
+        # COALESCE(COUNT(DISTINCT CASE...),0)）：仍是该聚合本身，已由
+        # _projection_measures 捕获，不重复产出派生候选（CASE/IF 是聚合内部
+        # 过滤条件非组合节点，与 _is_wrapped_aggregate 判定保持一致）
         if len(aggs) == 1:
             combined = any(
-                isinstance(n, (exp.Div, exp.Mul, exp.Add, exp.Sub, exp.Mod, exp.Case, exp.If))
+                isinstance(n, (exp.Div, exp.Mul, exp.Add, exp.Sub, exp.Mod))
                 for n in target.walk()
             )
             if not combined:

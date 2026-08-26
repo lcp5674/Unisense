@@ -92,6 +92,52 @@ class TestParseSqlProfile:
         assert last["column"] == "doctor_code"  # case then 分支列提取
         assert "CASE WHEN" in (last["expression"] or "").upper()
 
+    def test_coalesce_wrapped_case_agg_not_lost(self) -> None:
+        """COALESCE 包裹 + CASE 内嵌的条件去重聚合不丢失（用户真实 ETL）。
+
+        真实 Hive 医生月活 SQL：``coalesce(count(distinct case when ... then
+        doctor_code end), 0) as last_month_active_doctor_cnt``——target 是
+        Coalesce，内嵌 AggFunc+Case。此前 ``_is_wrapped_aggregate`` 把 CASE 误当
+        派生组合节点 → 单聚合包裹被跳过 → 双度量只剩 1 个（推断退化为「原子」）。
+        修复：CASE/IF 是聚合内部过滤条件，不算组合节点；派生比率仍由多聚合或
+        Div/Mul 检查排除。
+        """
+        sql = """
+        INSERT OVERWRITE TABLE dws.doctor_active_month_di
+        SELECT a.month_id, a.hosp_code, coalesce(b.org_name, '-99') AS hosp_name,
+               a.current_month_active_doctor_cnt, a.last_month_active_doctor_cnt
+        FROM (
+            SELECT t1.month_id,
+                   count(distinct t1.doctor_code) AS current_month_active_doctor_cnt,
+                   coalesce(count(distinct case when t2.doctor_code is not null
+                           then t2.doctor_code end), 0) AS last_month_active_doctor_cnt
+            FROM wedw_dw.doctor_visit_agent_info_da t1
+            LEFT JOIN wedw_dw.doctor_visit_agent_info_da t2
+              ON t1.doctor_code = t2.doctor_code
+            GROUP BY t1.month_id
+        ) a
+        LEFT JOIN (
+            SELECT DISTINCT rel_code, org_name FROM wedw_dw.disease_care_sys_org_staff_relation_df
+        ) b ON a.hosp_code = b.rel_code
+        """
+        p = parse_sql_profile(sql)
+        assert len(p.measures) == 2
+        by_alias = {m["alias"]: m for m in p.measures}
+        assert set(by_alias) == {"current_month_active_doctor_cnt", "last_month_active_doctor_cnt"}
+        last = by_alias["last_month_active_doctor_cnt"]
+        assert last["agg"] == "COUNT_DISTINCT"
+        assert last["column"] == "doctor_code"
+        assert "CASE WHEN" in (last["expression"] or "").upper()
+
+    def test_coalesce_wrapped_plain_agg_kept_as_measure(self) -> None:
+        """COALESCE(COUNT(DISTINCT x),0) 纯计数包裹仍是独立聚合（非派生候选）。"""
+        p = parse_sql_profile(
+            "SELECT dt, COALESCE(COUNT(DISTINCT user_id), 0) AS uv "
+            "FROM dwd_order_di GROUP BY dt"
+        )
+        assert {m["alias"]: m["agg"] for m in p.measures} == {"uv": "COUNT_DISTINCT"}
+        assert not any(m.get("derived") for m in p.measures)
+
     def test_direct_aggregation_keeps_legacy_shape(self) -> None:
         """直接投影聚合（非下沉）：measures 结构含基础 column/agg + enrich 键
         （alias/table/expression 原始口径，A-1/2 防 CASE/窗口口径丢失）。"""
