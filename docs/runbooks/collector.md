@@ -47,7 +47,7 @@
 
 ## 5. 回滚步骤
 - **migration down**：`alembic downgrade -1`（按依赖逆序 DROP，已验证可逆）
-- **K8s 回滚**：`kubectl rollout undo deploy/unisense-api`
+- **代码回滚**：镜像 tag 回退——`UNISENSE_IMAGE_TAG=<上一版本> docker compose up -d backend worker frontend`（发布/回滚载体见 `scripts/release.sh`；schema 回滚仍用 migration down）
 - **口径/数据源回退**：采集为软删（保留目录历史审计留痕），无需硬删；孤儿资产由后续级联软删补
 
 ## 6. 联系人

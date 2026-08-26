@@ -33,6 +33,8 @@ def _metric() -> Metric:
     m.status = "PUBLISHED"
     m.pii_flag = False
     m.measure_id = 10
+    m.owner_id = 100
+    m.backup_owner_id = 200
     return m
 
 
@@ -57,14 +59,14 @@ def _rows_result(rows):
 
 
 def _current_mapping(index: str) -> dict:
-    """含当前 search_analyzer 版本的 mapping（供幂等检测）。"""
-    return {
-        index: {
-            "mappings": {
-                "properties": {"name": {"type": "text", "analyzer": _SYSTEM_ANALYZER}}
-            }
-        }
-    }
+    """含当前 search_analyzer 版本的 mapping（供幂等检测）。
+
+    metric_idx 需含 D-1 可见性过滤新增的 ``owner_id`` 字段（缺失即旧版需重建）。
+    """
+    props: dict = {"name": {"type": "text", "analyzer": _SYSTEM_ANALYZER}}
+    if index == _METRIC_INDEX:
+        props["owner_id"] = {"type": "long"}
+    return {index: {"mappings": {"properties": props}}}
 
 
 def _es_client() -> MagicMock:

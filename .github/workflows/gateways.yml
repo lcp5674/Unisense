@@ -145,6 +145,12 @@ jobs:
       - name: Install deps
         run: npm ci
         working-directory: frontend
+      # S-1（第九轮）：前端依赖漏洞扫描——对齐后端 pip-audit 门禁。
+      # --audit-level=high：仅 high/critical 阻断（npm audit 对 dev 依赖存在误报，
+      # 放宽到 high 避免 trivial 阻断；prod 依赖漏洞仍会被拦截）。
+      - name: Supply chain (npm audit)
+        run: npm audit --audit-level=high --omit=dev
+        working-directory: frontend
       - name: Typecheck (tsc --noEmit)
         run: npm run typecheck
         working-directory: frontend

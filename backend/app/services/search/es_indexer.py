@@ -70,6 +70,10 @@ _METRIC_MAPPING: dict[str, Any] = {
             "domain": {"type": "keyword"},
             "status": {"type": "keyword"},
             "pii_flag": {"type": "boolean"},
+            # 可见性过滤（D-1）：非管理角色经 bool.filter 按 owner/backup_owner
+            # 收敛"本人负责的未发布资产"，与 MySQL 路径同一语义
+            "owner_id": {"type": "long"},
+            "backup_owner_id": {"type": "long"},
             # 关联逻辑度量同义词（业务别名，如"支付金额"→"pay"），参与 multi_match
             "synonyms": {"type": "text", "analyzer": _SYSTEM_ANALYZER},
         }
@@ -133,15 +137,24 @@ class EsIndexer:
         return False
 
     async def _has_current_analyzer(self, index: str) -> bool:
-        """索引 mapping 是否已含 ``search_analyzer``（版本检测，false=不存在或旧版）。"""
+        """索引 mapping 是否为当前版本（false=不存在或旧版需重建）。
+
+        版本检测 = analyzer 已指向 ``search_analyzer`` 且（metric_idx）含可见性
+        过滤所需的 ``owner_id`` 字段（D-1 新增列；缺失即旧版，重建后 /sync 重灌）。
+        """
         mapping = await self._es.get_mapping(index)
         if not mapping:
             return False
         props = ((mapping.get(index) or {}).get("mappings") or {}).get("properties") or {}
-        return any(
+        has_analyzer = any(
             isinstance(field, dict) and field.get("analyzer") == _SYSTEM_ANALYZER
             for field in props.values()
         )
+        if not has_analyzer:
+            return False
+        if index == _METRIC_INDEX and "owner_id" not in props:
+            return False
+        return True
 
     async def sync_metrics(self) -> int:
         """全量灌入指标（含关联逻辑度量同义词）；按 metric_code 作为 doc_id upsert。"""
@@ -164,6 +177,8 @@ class EsIndexer:
                     "domain": metric.domain,
                     "status": metric.status,
                     "pii_flag": bool(metric.pii_flag),
+                    "owner_id": metric.owner_id,
+                    "backup_owner_id": metric.backup_owner_id,
                     "synonyms": _join_synonyms(synonyms),
                 },
                 doc_id=str(metric.id),

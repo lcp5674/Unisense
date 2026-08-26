@@ -45,7 +45,7 @@
 
 ## 5. 回滚步骤
 - **migration down**：`alembic downgrade -1`
-- **K8s 回滚**：`kubectl rollout undo deploy/unisense-api`
+- **代码回滚**：镜像 tag 回退——`UNISENSE_IMAGE_TAG=<上一版本> docker compose up -d backend worker frontend`（发布/回滚载体见 `scripts/release.sh`；schema 回滚仍用 migration down）
 - **口径版本回退**：指标支持版本化，发布/废弃为状态机变更，回退即置旧版本 active
 
 ## 6. 联系人

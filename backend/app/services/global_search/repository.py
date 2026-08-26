@@ -101,12 +101,23 @@ class GlobalSearchRepository:
             self._es_client = get_es_client()
         return self._es_client
 
-    async def search(self, q: str, limit: int = 5) -> dict[str, list[dict[str, Any]]]:
+    async def search(
+        self,
+        q: str,
+        limit: int = 5,
+        *,
+        visible_actor_id: int | None = None,
+        visible_role: str | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
         """跨 9 类资源聚合搜索，按类型分组返回。
 
         Args:
             q: 搜索关键词（调用方已去空白，非空）。
             limit: 每类资源返回条数上限。
+            visible_actor_id: 读路径行级隔离（P0-3）——非管理角色仅可检索
+                公开状态（PUBLISHED/EXPERIMENTAL/DEPRECATED）+ 本人 Owner/副 Owner
+                的未发布资产；管理角色传 None 即不加过滤（对齐指标目录语义）。
+            visible_role: 调用者角色（配合 visible_actor_id 判定 reviewer 放行）。
 
         Returns:
             ``{"metric": [...], "dimension": [...], ...}`` 分组结构；
@@ -142,7 +153,13 @@ class GlobalSearchRepository:
             groups["subject_domain"],
             groups["measure"],
         ) = await asyncio.gather(
-            self._search_metrics(needles, limit, raw_q=raw_q),
+            self._search_metrics(
+                needles,
+                limit,
+                raw_q=raw_q,
+                visible_actor_id=visible_actor_id,
+                visible_role=visible_role,
+            ),
             self._search_dimensions(needles, limit),
             self._search_terms(needles, limit, raw_q=raw_q),
             self._search_templates(needles, limit),
@@ -154,23 +171,92 @@ class GlobalSearchRepository:
         )
         return groups
 
+    def _visibility_conditions(self, visible_actor_id: int | None, visible_role: str | None) -> Any | None:
+        """指标读路径行级隔离（对齐 semantic/repository.py P0-3）。
+
+        非管理角色（platform_admin/domain_admin 之外）仅可检索：
+        - 公开状态（PUBLISHED/EXPERIMENTAL/DEPRECATED）；
+        - 本人 Owner/副 Owner 的未发布资产（DRAFT/REVIEW 私有工作区不向他人泄露）；
+        - reviewer 额外放行 REVIEW（评审工作台需查看待审项）。
+
+        Returns:
+            SQLAlchemy OR 条件；管理角色/未传上下文返回 None（不加过滤）。
+        """
+        if (
+            visible_actor_id is not None
+            and visible_role is not None
+            and visible_role not in ("platform_admin", "domain_admin")
+        ):
+            visibility: list[Any] = [
+                Metric.status.in_(("PUBLISHED", "EXPERIMENTAL", "DEPRECATED")),
+                Metric.owner_id == visible_actor_id,
+                Metric.backup_owner_id == visible_actor_id,
+            ]
+            if visible_role == "reviewer":
+                visibility.append(Metric.status == "REVIEW")
+            return or_(*visibility)
+        return None
+
+    def _es_visibility_filter(self, visible_actor_id: int | None, visible_role: str | None) -> list[dict[str, Any]]:
+        """ES 查询层可见性过滤（与 MySQL 路径同一语义，跨引擎一致）。
+
+        ES 索引（metric_idx）含 owner_id/backup_owner_id 字段（es_indexer 同步），
+        非管理角色在查询层用 bool.filter 收敛可见范围；管理角色返回空列表（不过滤）。
+        """
+        if (
+            visible_actor_id is not None
+            and visible_role is not None
+            and visible_role not in ("platform_admin", "domain_admin")
+        ):
+            clauses: list[dict[str, Any]] = [
+                {"terms": {"status": ["PUBLISHED", "EXPERIMENTAL", "DEPRECATED"]}},
+                {"term": {"owner_id": visible_actor_id}},
+                {"term": {"backup_owner_id": visible_actor_id}},
+            ]
+            if visible_role == "reviewer":
+                clauses.append({"term": {"status": "REVIEW"}})
+            return [{"bool": {"should": clauses, "minimum_should_match": 1}}]
+        return []
+
     async def _search_metrics(
-        self, needles: list[str], limit: int, raw_q: str | None = None
+        self,
+        needles: list[str],
+        limit: int,
+        raw_q: str | None = None,
+        *,
+        visible_actor_id: int | None = None,
+        visible_role: str | None = None,
     ) -> list[dict[str, Any]]:
         """指标检索：ES 优先（相关度排序），ES 禁用/异常/未命中时降级 MySQL LIKE。
 
         同义词（业务别名，如"支付金额"别名"pay"）存于 ``measure_catalog.synonyms``，
         经 ``metric.measure_id`` 外连接粗匹配；命中来源以 ``match_reason`` 标识
         （``synonym`` 供前端提示"您是不是想找…"，直接命中为 ``field``）。
+
+        可见性（D-1 修复）：MySQL 与 ES 两路径均按 ``_visibility_conditions`` /
+        ``_es_visibility_filter`` 收敛——低权限用户不得经搜索侧门检索他人未发布
+        草稿/审核中指标（此前全局搜索无任何可见性过滤，DRAFT/REVIEW + PII 标记
+        可被任意 viewer 检索，绕过指标目录行级隔离）。
         """
         if raw_q:
-            es_items = await self._es_search_assets("metric", raw_q, limit)
+            es_items = await self._es_search_assets(
+                "metric",
+                raw_q,
+                limit,
+                visible_actor_id=visible_actor_id,
+                visible_role=visible_role,
+            )
             if es_items is not None:
                 return es_items
         code_match = _like_any(Metric.metric_code, needles)
         name_match = _like_any(Metric.name, needles)
         desc_match = _like_any(Metric.description, needles)
         syn_match = _like_any(MeasureCatalog.synonyms.cast(String), needles)
+        conditions: list[Any] = [Metric.deleted_at.is_(None)]
+        visibility = self._visibility_conditions(visible_actor_id, visible_role)
+        if visibility is not None:
+            conditions.append(visibility)
+        conditions.append(or_(code_match, name_match, desc_match, syn_match))
         stmt = (
             select(
                 Metric,
@@ -181,10 +267,7 @@ class GlobalSearchRepository:
                 ).label("match_reason"),
             )
             .outerjoin(MeasureCatalog, Metric.measure_id == MeasureCatalog.id)
-            .where(
-                Metric.deleted_at.is_(None),
-                or_(code_match, name_match, desc_match, syn_match),
-            )
+            .where(*conditions)
             .limit(limit)
         )
         rows = (await self._session.execute(stmt)).all()
@@ -266,9 +349,18 @@ class GlobalSearchRepository:
         ]
 
     async def _es_search_assets(
-        self, asset_type: str, raw_q: str, limit: int
+        self,
+        asset_type: str,
+        raw_q: str,
+        limit: int,
+        *,
+        visible_actor_id: int | None = None,
+        visible_role: str | None = None,
     ) -> list[dict[str, Any]] | None:
         """经 ES 检索指标/术语（multi_match 跨 code/name/description/synonyms，相关度排序）。
+
+        可见性（D-1）：非管理角色在 bool.filter 层收敛可见范围（公开状态 + 本人负责），
+        与 MySQL 路径同一语义；管理角色不过滤。
 
         Returns:
             命中条目列表；ES 禁用/未配置/异常/零命中时返回 ``None``，
@@ -282,20 +374,22 @@ class GlobalSearchRepository:
         # 此前统一写 description 致 ES 路径搜术语定义静默不命中 → 按类型区分（TD§12.7 全链路一致）。
         desc_field = "description" if asset_type == "metric" else "definition"
         try:
-            resp = await es.search(
-                index,
-                {
-                    "query": {
-                        "multi_match": {
-                            "query": raw_q,
-                            "fields": ["code^3", "name^2", desc_field, "synonyms"],
-                            "type": "best_fields",
-                            "fuzziness": "AUTO",
-                        }
-                    }
-                },
-                size=limit,
-            )
+            match_query: dict[str, Any] = {
+                "multi_match": {
+                    "query": raw_q,
+                    "fields": ["code^3", "name^2", desc_field, "synonyms"],
+                    "type": "best_fields",
+                    "fuzziness": "AUTO",
+                }
+            }
+            filters = self._es_visibility_filter(visible_actor_id, visible_role)
+            if filters:
+                body: dict[str, Any] = {
+                    "query": {"bool": {"must": match_query, "filter": filters}}
+                }
+            else:
+                body = {"query": match_query}
+            resp = await es.search(index, body, size=limit)
             hits = ((resp or {}).get("hits") or {}).get("hits") or []
             items = [self._es_hit_to_item(asset_type, h.get("_source") or {}) for h in hits]
             return items or None

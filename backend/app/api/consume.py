@@ -360,9 +360,19 @@ async def list_metric_snapshots(
     _auth: ApiClient | User = Depends(get_consume_or_internal_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> ApiResponse[list[SnapshotResponse]]:
-    """消费快照只读（WORM）：消费方（X-Api-Key / consume Bearer）或内部登录用户均可读。"""
+    """消费快照只读（WORM）：消费方（X-Api-Key / consume Bearer）或内部登录用户均可读。
+
+    D-2 鉴权修复：此前快照端点无 PDP/scope 校验，任意接入方可跨域读取任意指标
+    历史查询数据值——现按通道鉴权：
+    - 消费方（ApiClient）：走接入方四级闸门（scope_domain → 白名单 → PII → 合规复核）；
+    - 内部登录用户（User）：走 PDP 数据权限（平台直通 / 本域 ROLE_ACTIONS / 跨域 grants）。
+    """
     svc = ConsumeService(db)
-    return ok(data=await svc.list_snapshots(code, limit, offset))
+    if isinstance(_auth, ApiClient):
+        data = await svc.list_snapshots_for_client(code, limit, offset, _auth)
+    else:
+        data = await svc.list_snapshots_for_internal(code, limit, offset, _auth)
+    return ok(data=data)
 
 
 @router.get("/consume/me/favorites", response_model=ApiResponse[list[dict[str, str]]])

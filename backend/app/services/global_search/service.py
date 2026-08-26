@@ -23,14 +23,29 @@ class GlobalSearchService(BaseService):
         self._session = session
         self._repo = GlobalSearchRepository(session)
 
-    async def search(self, q: str, limit: int = 5) -> dict[str, list[dict[str, Any]]]:
+    async def search(
+        self,
+        q: str,
+        limit: int = 5,
+        *,
+        visible_actor_id: int | None = None,
+        visible_role: str | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
         """跨 9 类资源聚合搜索，按类型分组返回（每类至多 limit 条）。
 
         Args:
             q: 搜索关键词（去空白后非空）。
             limit: 每类资源返回条数上限。
+            visible_actor_id: 可见性过滤（P0-3 行级隔离，D-1）——非管理角色仅检索
+                公开状态 + 本人负责的未发布资产；管理角色传 None 不过滤。
+            visible_role: 调用者角色（配合 visible_actor_id 判定 reviewer 放行）。
 
         Returns:
             分组结构 ``{"metric": [...], "dimension": [...], ...}``。
         """
-        return await self._repo.search(q, limit)
+        return await self._repo.search(
+            q,
+            limit,
+            visible_actor_id=visible_actor_id,
+            visible_role=visible_role,
+        )

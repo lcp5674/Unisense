@@ -134,6 +134,8 @@ services:
 
   # ---- MinIO (S3 兼容对象存储，用于审计归档) ----
   minio:
+    # S-2（第九轮）：minio:latest 是最危险的浮动 tag——发布前在可联网机器执行
+    # scripts/pin_base_images.sh --apply 固定 digest（消除拉取漂移/供应链风险）。
     image: minio/minio:latest
     container_name: unisense-minio
     # 宿主 19000/19001 → 容器 9000/9001（9000 已被 patent-exam-minio 占用）
@@ -155,6 +157,9 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    # S-3（第九轮）：发布/回滚载体——设 UNISENSE_IMAGE_TAG=<发布版本> 时
+    # 直接拉取已推送镜像（回滚 = 换 tag），否则本地构建（dev）。
+    image: unisense/backend:${UNISENSE_IMAGE_TAG:-dev}
     container_name: unisense-backend
     # 宿主 8100 → 容器 8000（8000 已被 patent-exam-backend 占用，做端口避让）
     ports: ["8100:8000"]
@@ -230,6 +235,8 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    # 与 backend 同一镜像（worker 复用 backend 镜像，tag 跟随发布版本）
+    image: unisense/backend:${UNISENSE_IMAGE_TAG:-dev}
     container_name: unisense-worker
     depends_on:
       backend:
@@ -286,9 +293,11 @@ services:
         # 构建时 API 基础地址留空，运行时通过 nginx 反代 /api 到 backend
         VITE_API_BASE_URL: ""
         VITE_SEMANTIC_API_KEY: ${VITE_SEMANTIC_API_KEY:-dev-semantic-key}
+    # S-3：发布/回滚载体（与 backend 同 tag 策略）
+    image: unisense/frontend:${UNISENSE_IMAGE_TAG:-dev}
     container_name: unisense-frontend
-    # 宿主 8180 → nginx 80（8080 已被 multica-backend-1 占用，做端口避让）
-    ports: ["8180:80"]
+    # 宿主 8180 → 容器 8080（nginx 降权后监听非特权端口 8080；宿主端口保持 8180 不变）
+    ports: ["8180:8080"]
     depends_on:
       backend:
         condition: service_healthy

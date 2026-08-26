@@ -498,7 +498,9 @@ class TestGlobalSearchService:
         out = await svc.search("sales", limit=5)
 
         assert out["metric"][0]["type"] == "metric"
-        svc._repo.search.assert_awaited_once_with("sales", 5)
+        svc._repo.search.assert_awaited_once_with(
+            "sales", 5, visible_actor_id=None, visible_role=None
+        )
 
 
 @pytest.fixture
@@ -546,3 +548,69 @@ class TestGlobalSearchAPI:
             resp = await c.get("/api/v1/search", params={"q": "sales"})
         app.dependency_overrides.clear()
         assert resp.status_code in (401, 403)
+
+
+class TestGlobalSearchVisibility:
+    """D-1 读路径行级隔离：全局搜索不得经侧门检索他人未发布资产。"""
+
+    def _render(self, cond: object) -> str:
+        """渲染 SQL 表达式为字面值（in_ 不展开需 compile literal_binds）。"""
+        from sqlalchemy.dialects import mysql
+        return str(cond.compile(dialect=mysql.dialect(), compile_kwargs={"literal_binds": True}))
+
+    async def test_visibility_conditions_non_admin(self) -> None:
+        """非管理角色返回 OR 可见性条件（公开状态 + 本人负责）。"""
+        repo = _repo(_session())
+        cond = repo._visibility_conditions(visible_actor_id=7, visible_role="viewer")
+        assert cond is not None
+        rendered = self._render(cond)
+        assert "PUBLISHED" in rendered and "EXPERIMENTAL" in rendered and "DEPRECATED" in rendered
+        assert "owner_id" in rendered and "backup_owner_id" in rendered
+
+    async def test_visibility_conditions_admin(self) -> None:
+        """管理角色不加过滤（platform_admin/domain_admin 可检索全部）。"""
+        repo = _repo(_session())
+        assert repo._visibility_conditions(7, "platform_admin") is None
+        assert repo._visibility_conditions(7, "domain_admin") is None
+        assert repo._visibility_conditions(None, None) is None
+
+    async def test_visibility_conditions_reviewer_extra_review(self) -> None:
+        """reviewer 额外放行 REVIEW（评审工作台需看待审项）。"""
+        repo = _repo(_session())
+        cond = self._render(repo._visibility_conditions(7, "reviewer"))
+        assert "REVIEW" in cond
+
+    async def test_es_search_applies_visibility_filter(self) -> None:
+        """非管理角色 ES 查询用 bool.filter 收敛可见范围（与 MySQL 同语义）。"""
+        s = _session()
+        es = MagicMock()
+        es.enabled = True
+        es.search = AsyncMock(return_value={"hits": {"hits": []}})
+        repo = GlobalSearchRepository(s, es_client=es)
+        await repo._es_search_assets(
+            "metric", "gmv", 5, visible_actor_id=7, visible_role="viewer"
+        )
+        body = es.search.call_args.args[1]
+        q = body["query"]
+        assert q["bool"]["must"]["multi_match"]["fields"] == [
+            "code^3", "name^2", "description", "synonyms",
+        ]
+        filter_clause = q["bool"]["filter"][0]["bool"]["should"]
+        statuses = {t for c in filter_clause for t in c.get("terms", {}).get("status", [])}
+        assert {"PUBLISHED", "EXPERIMENTAL", "DEPRECATED"} <= statuses
+        assert {"term": {"owner_id": 7}} in filter_clause
+        assert {"term": {"backup_owner_id": 7}} in filter_clause
+
+    async def test_es_search_no_filter_for_admin(self) -> None:
+        """管理角色 ES 查询不加可见性 filter（保持 multi_match 顶层结构）。"""
+        s = _session()
+        es = MagicMock()
+        es.enabled = True
+        es.search = AsyncMock(return_value={"hits": {"hits": []}})
+        repo = GlobalSearchRepository(s, es_client=es)
+        await repo._es_search_assets(
+            "metric", "gmv", 5, visible_actor_id=7, visible_role="platform_admin"
+        )
+        body = es.search.call_args.args[1]
+        assert "bool" not in body["query"]
+        assert "multi_match" in body["query"]

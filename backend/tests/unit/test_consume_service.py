@@ -1300,3 +1300,62 @@ async def test_record_query_log_best_effort() -> None:
         error_code="DEPENDENCY_DEGRADED_ENGINE",
     )
     svc._db.rollback.assert_awaited_once()
+
+
+# ---- D-2 快照读权限闸门（此前快照端点无 PDP/scope 校验，可跨域读任意指标数据值）----
+async def test_list_snapshots_for_internal_allowed() -> None:
+    """内部用户 PDP 放行 → 返回快照。"""
+    svc = _svc(await _client())
+    svc._snapshots.list_by_metric = AsyncMock(return_value=[_snap()])
+    with patch(
+        "app.services.consume.service.GovernanceService.check_internal_read_permission",
+        new=AsyncMock(return_value=(SimpleNamespace(allow=True, restricted=False, reason=None, error_code=None), None)),
+    ):
+        out = await svc.list_snapshots_for_internal("gmv", 10, 0, SimpleNamespace(id=1))
+    assert len(out) == 1
+    assert out[0].generated_by == SnapshotGeneratedBy.MATERIALIZE
+
+
+async def test_list_snapshots_for_internal_denied() -> None:
+    """内部用户 PDP 拒绝 → FORBIDDEN（跨域无 grants 场景）。"""
+    svc = _svc(await _client())
+    svc._snapshots = MagicMock()
+    svc._snapshots.list_by_metric = AsyncMock()
+    with patch(
+        "app.services.consume.service.GovernanceService.check_internal_read_permission",
+        new=AsyncMock(return_value=(SimpleNamespace(allow=False, restricted=False, reason="跨域需授权", error_code=None), None)),
+    ):
+        with pytest.raises(BusinessError) as ei:
+            await svc.list_snapshots_for_internal("gmv", 10, 0, SimpleNamespace(id=1))
+    assert ei.value.error_code == ErrorCode.FORBIDDEN
+    svc._snapshots.list_by_metric.assert_not_awaited()
+
+
+async def test_list_snapshots_for_client_scope_denied() -> None:
+    """消费方跨域（scope_domain 不匹配）→ FORBIDDEN_DOMAIN。"""
+    svc = _svc(await _client(scope_domain="sales"))
+    svc._snapshots = MagicMock()
+    svc._snapshots.list_by_metric = AsyncMock()
+    svc._get_metric = AsyncMock(return_value=_metric(domain="finance"))
+    with pytest.raises(BusinessError) as ei:
+        await svc.list_snapshots_for_client("gmv", 10, 0, svc._clients.get_by_client_id.return_value)
+    assert ei.value.error_code == ErrorCode.FORBIDDEN_DOMAIN
+    svc._snapshots.list_by_metric.assert_not_awaited()
+
+
+async def test_list_snapshots_for_client_allowed() -> None:
+    """消费方授权通过 → 返回快照。"""
+    svc = _svc(await _client(scope_domain="sales"))
+    svc._get_metric = AsyncMock(return_value=_metric(domain="sales"))
+    svc._snapshots.list_by_metric = AsyncMock(return_value=[_snap()])
+    out = await svc.list_snapshots_for_client("gmv", 10, 0, svc._clients.get_by_client_id.return_value)
+    assert len(out) == 1
+    svc._snapshots.list_by_metric.assert_awaited_once_with("gmv", 10, 0)
+
+
+async def test_list_snapshots_for_client_metric_not_found() -> None:
+    """指标不存在 → NOT_FOUND（fail-closed，不返回空列表误导）。"""
+    svc = _svc(await _client(scope_domain="sales"))
+    svc._get_metric = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError):
+        await svc.list_snapshots_for_client("nope", 10, 0, svc._clients.get_by_client_id.return_value)

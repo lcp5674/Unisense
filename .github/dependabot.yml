@@ -1,0 +1,41 @@
+# Dependabot 依赖自动更新（S-1，第九轮供应链加固）
+# 与 CI 的 pip-audit / npm audit 门禁配合：依赖更新以 PR 形式进入，
+# 由门禁自动验证，避免手工遗漏已知漏洞升级。
+version: 2
+updates:
+  # 后端 Python 依赖（poetry 管理，requirements.txt 由 poetry export 生成）
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    # pip-audit 门禁会拦截已知漏洞版本，依赖更新走 PR 验证
+    labels:
+      - "dependencies"
+      - "security"
+    # 私有仓可编辑项（-e git+ssh://...）不自动更新，避免内网不可达
+    ignore:
+      - dependency-name: "*git+*"
+
+  # 前端 npm 依赖
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "security"
+
+  # GitHub Actions 自身
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ci"

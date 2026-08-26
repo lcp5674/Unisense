@@ -398,7 +398,44 @@ class MetricRepository:
                 error_code="CONFLICT",
             ) from exc
         await self._db.refresh(version)
+        # L-2 版本保留上限治理：创建新版本后自动把超限的已定稿旧版本标记 ARCHIVED
+        # （WORM 保留完整记录，仅收敛"活跃版本"展示面，防版本爆炸）。
+        await self._archive_excess_versions(version.metric_id)
         return version
+
+    #: L-2 每指标保留的"活跃"版本数上限（超出部分标记 ARCHIVED，历史仍可查）
+    _VERSION_RETAIN_LIMIT = 50
+    #: 仅归档已定稿版本（DRAFT/PENDING_CONFIRMATION 不归档，避免影响确认流程）
+    _ARCHIVABLE_VERSION_STATUSES = ("PUBLISHED", "EXPERIMENTAL", "CANCELLED")
+
+    async def _archive_excess_versions(self, metric_id: int) -> int:
+        """将超出保留上限的已定稿旧版本标记 ARCHIVED（L-2 版本爆炸治理）。
+
+        Args:
+            metric_id: 指标 ID。
+
+        Returns:
+            本次归档的版本数。
+        """
+        result = await self._db.execute(
+            select(MetricVersion.id, MetricVersion.status)
+            .where(
+                MetricVersion.metric_id == metric_id,
+                MetricVersion.deleted_at.is_(None),
+                MetricVersion.status.in_(self._ARCHIVABLE_VERSION_STATUSES),
+            )
+            .order_by(MetricVersion.version.desc())
+        )
+        rows = result.all()
+        if len(rows) <= self._VERSION_RETAIN_LIMIT:
+            return 0
+        excess_ids = [row.id for row in rows[self._VERSION_RETAIN_LIMIT :]]
+        await self._db.execute(
+            update(MetricVersion)
+            .where(MetricVersion.id.in_(excess_ids))
+            .values(status="ARCHIVED")
+        )
+        return len(excess_ids)
 
     async def list_versions(self, metric_id: int) -> list[MetricVersion]:
         """查询指标的所有版本。

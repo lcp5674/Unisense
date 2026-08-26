@@ -46,7 +46,7 @@
 
 ## 5. 回滚步骤
 - **migration down**：`alembic downgrade -1`（0006_consume：按序 `drop user_preference` / `drop metric_value_snapshot` / `drop_index ix_api_client_status` / `drop api_client`，可逆、数据无损）
-- **K8s 回滚**：`kubectl rollout undo deploy/unisense-api`
+- **代码回滚**：镜像 tag 回退——`UNISENSE_IMAGE_TAG=<上一版本> docker compose up -d backend worker frontend`（发布/回滚载体见 `scripts/release.sh`；schema 回滚仍用 migration down）
 - **快照 WORM 不可改**：误写须业务补偿（新快照覆盖 + 审计说明）
 
 ## 5.1 端到端验证（2026-08-12 实跑通过）

@@ -3746,6 +3746,9 @@ class MetricService(BaseService):
         versions = await self._repo.list_versions(metric.id)
         if not versions:
             return metric, []
+        # L-2 版本展示收敛：ARCHIVED（超保留上限自动归档的旧版本）默认不展示，
+        # 历史仍可在数据库 WORM 保留（rollback 等内部路径不受影响）。
+        versions = [v for v in versions if v.status != "ARCHIVED"]
         pending = [v for v in versions if v.status == "PENDING_CONFIRMATION"]
         progress: dict[int, tuple[int, int]] = {}
         if pending:

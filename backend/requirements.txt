@@ -101,6 +101,10 @@ tomli==2.4.1
 tomli_w==1.2.0
 typing-inspection==0.4.2
 typing_extensions==4.16.0
+# S-4（第九轮）：本仓库自身作为可编辑依赖安装（commit 已 pin e02d5ec）。
+# 注意——(1) 生产/CI 构建镜像时被 backend/Dockerfile 过滤（容器内无法 SSH 克隆），
+# 运行时代码直接从 /app 源码加载，无需此依赖；(2) 本地 poetry 安装需能访问
+# GitHub（内网/离线环境须先本地 vendored 或镜像内源码，勿依赖外网可达）。
 -e git+ssh://git@github.com/lcp5674/Unisense.git@e02d5ecb3cf5f3653509f9637962df3f96cb7e7f#egg=unisense
 urllib3==2.7.0
 uvicorn==0.30.6

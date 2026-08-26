@@ -1,5 +1,6 @@
 # Unisense 前端 Dockerfile
 # 多阶段构建：node 构建 → nginx 运行
+# S-2（第九轮）：基础镜像 tag 浮动，发布前请用 scripts/pin_base_images.sh 固定 digest。
 FROM node:22-alpine AS builder
 
 WORKDIR /build
@@ -26,10 +27,16 @@ FROM nginx:alpine
 # 复制构建产物
 COPY --from=builder /build/dist /usr/share/nginx/html
 
+# S-2：非 root 运行——nginx 工作进程本就以 nginx 用户跑，这里让 master 也
+# 降权（需 8080 非特权端口 + 缓存/pid 目录归 nginx 用户）。外部端口不受影响
+# （compose 仍映射宿主 8180）。
+RUN chown -R nginx:nginx /var/cache/nginx /var/run && \
+    sed -i 's|^pid .*|pid /tmp/nginx.pid;|' /etc/nginx/nginx.conf
+
 # nginx 配置：SPA 路由 + API 反代到后端
 RUN cat > /etc/nginx/conf.d/default.conf <<'EOF'
 server {
-    listen 80;
+    listen 8080;
     server_name _;
 
     # P2-2（第八轮）：静态产物安全头（对齐后端 SecurityHeadersMiddleware——
@@ -83,9 +90,12 @@ server {
 }
 EOF
 
-EXPOSE 80
+EXPOSE 8080
+
+# S-2：非 root 运行 nginx master
+USER nginx
 
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
-    CMD wget -q -O /dev/null http://127.0.0.1:80/ || exit 1
+    CMD wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1
 
 CMD ["nginx", "-g", "daemon off;"]

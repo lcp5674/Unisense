@@ -266,6 +266,9 @@ async def test_soft_delete_not_found_raises_notfound():
 
 async def test_create_version_persists_and_returns():
     db = _mock_session()
+    # L-2：create_version 会触发 _archive_excess_versions（查询版本数），
+    # 返回空列表（<= 保留上限）不归档。
+    db.execute.return_value = _result(all_=[])
     repo = MetricRepository(db)
     v = _version(metric_id=1, version=1)
 

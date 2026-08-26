@@ -615,6 +615,41 @@ class ConsumeService(BaseService):
                     r.value_json = vj
         return [self._to_snap(r) for r in rows]
 
+    async def list_snapshots_for_internal(
+        self, metric_code: str, limit: int, offset: int, user: User
+    ) -> list[SnapshotResponse]:
+        """内部登录用户读快照：走 PDP 数据权限闸门（对齐 execute_query internal 通道）。
+
+        D-2 修复：此前快照端点无任何 PDP/域校验，任意登录用户可凭 code 跨域读取
+        任意指标的历史查询数据值——现接入 ``check_internal_read_permission``，
+        platform_admin 直通 / 本域角色按 ROLE_ACTIONS / 跨域须命中 ACTIVE grants。
+        """
+        decision, _matched = await GovernanceService(self._db).check_internal_read_permission(
+            user, metric_code
+        )
+        if not decision.allow:
+            raise BusinessError(
+                decision.reason or "无权限查看该指标消费快照",
+                error_code=decision.error_code or ErrorCode.FORBIDDEN,
+                ctx={"metric_code": metric_code, "actor_id": user.id},
+            )
+        return await self.list_snapshots(metric_code, limit, offset)
+
+    async def list_snapshots_for_client(
+        self, metric_code: str, limit: int, offset: int, client: ApiClient
+    ) -> list[SnapshotResponse]:
+        """消费方（X-Api-Key / consume Bearer）读快照：走接入方四级鉴权（对齐 execute_query client 通道）。
+
+        D-2 修复：此前快照端点无 scope_domain/白名单/PII 校验，接入方可跨域读取任意
+        指标历史查询数据值——现复用 ``_assert_authorized``（域 → 白名单 → PII 四级，
+        fail-closed），未经授权一律 FORBIDDEN。
+        """
+        metric = await self._get_metric(metric_code)
+        if metric is None:
+            raise NotFoundError("指标不存在", error_code=ErrorCode.NOT_FOUND)
+        self._assert_authorized(client, metric)
+        return await self.list_snapshots(metric_code, limit, offset)
+
     # ---- 收藏（通用多资产，TD §5.4 favorite）----
     # 各资产类型的 ORM 模型 + 业务编码列（asset_id 统一为业务编码，非数据库 id）
     _ASSET_MODEL: dict[FavoriteAssetType, tuple[Any, str]] = {

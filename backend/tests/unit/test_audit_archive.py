@@ -38,7 +38,9 @@ class TestAuditArchiveFlow:
 
     @pytest.mark.asyncio
     async def test_archive_task_with_rows(self) -> None:
-        """有待归档行时执行归档。"""
+        """有待归档行时执行归档（上传→标记→物理删除热表行）。"""
+        from sqlalchemy import Delete, Update
+
         from app.tasks.audit_archive import audit_archive_task
 
         # Mock audit rows
@@ -55,9 +57,16 @@ class TestAuditArchiveFlow:
         mock_row.created_at = datetime.now(UTC) - timedelta(days=31)
 
         mock_db = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalars.return_value.all.return_value = [mock_row]
-        mock_db.execute.return_value = mock_result
+        # 调用序列：COUNT(容量) → 查询[行] → UPDATE → DELETE → 查询[]（结束循环）
+        count_res = MagicMock()
+        count_res.scalar.return_value = 0
+        q1 = MagicMock()
+        q1.scalars.return_value.all.return_value = [mock_row]
+        q2 = MagicMock()
+        q2.scalars.return_value.all.return_value = []
+        mock_db.execute = AsyncMock(
+            side_effect=[count_res, q1, MagicMock(), MagicMock(), q2]
+        )
         mock_db.add = MagicMock()
         mock_db.commit = AsyncMock()
 
@@ -73,6 +82,59 @@ class TestAuditArchiveFlow:
         assert result["rows_archived"] == 1
         assert result["s3_key"].startswith("audit-archive/")
         assert result["s3_key"].endswith(".jsonl")
+        # L-1：先标记 archived=True，再物理删除热表行（MinIO 冷存已含完整记录）
+        stmt_types = [type(c.args[0]) for c in mock_db.execute.call_args_list]
+        assert Update in stmt_types
+        assert Delete in stmt_types
+        delete_idx = stmt_types.index(Delete)
+        assert "DELETE" in str(mock_db.execute.call_args_list[delete_idx].args[0])
+
+    @pytest.mark.asyncio
+    async def test_archive_task_drains_backlog_in_batches(self) -> None:
+        """积压超过单批时循环处理直到清空（L-1 积压消化）。"""
+        from app.tasks.audit_archive import audit_archive_task
+
+        rows = []
+        for i in range(3):
+            r = MagicMock()
+            r.id = i + 1
+            r.actor_id = 1
+            r.action = "CREATE"
+            r.entity_type = "metric"
+            r.entity_id = f"m{i}"
+            r.detail_json = None
+            r.ip = "127.0.0.1"
+            r.trace_id = f"t{i}"
+            r.pii_access = False
+            r.created_at = datetime.now(UTC) - timedelta(days=40)
+            rows.append(r)
+
+        mock_db = AsyncMock()
+        count_res = MagicMock()
+        count_res.scalar.return_value = 0
+        q1 = MagicMock()
+        q1.scalars.return_value.all.return_value = rows[:2]
+        q2 = MagicMock()
+        q2.scalars.return_value.all.return_value = rows[2:]
+        q3 = MagicMock()
+        q3.scalars.return_value.all.return_value = []
+        # COUNT → 每批(查询 → UPDATE → DELETE) → 查询[]（结束）
+        calls = [count_res, q1, MagicMock(), MagicMock(), q2, MagicMock(), MagicMock(), q3]
+        mock_db.execute = AsyncMock(side_effect=calls)
+        mock_db.add = MagicMock()
+        mock_db.commit = AsyncMock()
+
+        with (
+            patch("app.db.mysql.async_session_factory") as mock_factory,
+            patch("app.tasks.audit_archive._upload_to_minio", return_value=True),
+        ):
+            mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+            mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+            result = await audit_archive_task({})
+
+        assert result["status"] == "SUCCESS"
+        assert result["rows_archived"] == 3
+        assert result["batches"] == 2
 
     @pytest.mark.asyncio
     async def test_archive_task_minio_upload_failure(self) -> None:

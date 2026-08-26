@@ -81,7 +81,7 @@
 
 ## 6. 回滚步骤
 - **migration down**：`alembic downgrade -1`（0019 → 0018 collector → 0017）
-- **K8s 回滚**：`kubectl rollout undo deploy/unisense-api`
+- **代码回滚**：镜像 tag 回退——`UNISENSE_IMAGE_TAG=<上一版本> docker compose up -d backend worker frontend`（发布/回滚载体见 `scripts/release.sh`；schema 回滚仍用 migration down）
 - **血缘数据回退**：edges 为幂等 upsert，重跑 `parse` 可重建；孤儿边用 `DELETE /edges` 清理；历史快照只追加不可改
 
 ## 7. 联系人

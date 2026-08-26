@@ -42,7 +42,7 @@
 
 ## 5. 回滚步骤
 - **migration down**：`alembic downgrade -1`（0004→0003 已验证可逆；注意 role 表随迁移回退）
-- **K8s 回滚**：`kubectl rollout undo deploy/unisense-api`
+- **代码回滚**：镜像 tag 回退——`UNISENSE_IMAGE_TAG=<上一版本> docker compose up -d backend worker frontend`（发布/回滚载体见 `scripts/release.sh`；schema 回滚仍用 migration down）
 - **授权回退**：grants 支持 expire（TTL 软回收），回退即置 expired；历史审计保留
 
 ## 6. 联系人

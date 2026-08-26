@@ -50,8 +50,14 @@ async def global_search(
     """跨指标/维度/术语/模板/数据源/采集目录表+字段/主题域/度量目录聚合搜索。
 
     返回按类型分组的命中的 top-N 条目，供顶栏实时下拉与全局搜索页消费。
+
+    可见性（D-1）：透传当前用户上下文，指标检索按目录同一语义做行级隔离——
+    非管理角色仅可检索公开状态 + 本人负责的未发布资产，杜绝经搜索侧门窥探
+    他人 DRAFT/REVIEW 草稿与 PII 标记。
     """
-    data = await GlobalSearchService(db).search(q.strip(), limit=limit)
+    data = await GlobalSearchService(db).search(
+        q.strip(), limit=limit, visible_actor_id=user.id, visible_role=user.role
+    )
     total = sum(len(items) for items in data.values())
     return ok(data={"groups": data, "total": total}, trace_id=trace_id)
 
