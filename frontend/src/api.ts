@@ -4659,6 +4659,22 @@ export async function deleteDictItem(dictType: string, code: string): Promise<vo
   });
 }
 
+/** 参照数据项描述 LLM 推断（新增/编辑弹窗「AI 生成描述」；LLM 只回填文本不落库）。 */
+export async function inferDictDescription(
+  dictType: string,
+  label: string,
+  dictTypeLabel?: string,
+): Promise<string> {
+  const data = await request<{ description: string }>(
+    `${API_BASE}/dicts/infer-description`,
+    {
+      method: "POST",
+      body: JSON.stringify({ dict_type: dictType, label, dict_type_label: dictTypeLabel }),
+    },
+  );
+  return data.description;
+}
+
 /** 批量新增同一类型字典项（207 语义：单条失败逐项标注，不影响其余）。 */
 export async function batchCreateDictItems(
   dictType: string,

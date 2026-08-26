@@ -180,3 +180,90 @@ async def test_batch_delete_empty_codes_422(dict_client: httpx.AsyncClient) -> N
     """codes 为空 → 422（min_length=1）。"""
     resp = await dict_client.post("/api/v1/dicts/unit/batch-delete", json={"codes": []})
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------- infer-description（描述 LLM）
+
+
+class _FakeLlmService:
+    """模拟 LlmConfigService：build_client 返回可配置的 client。"""
+
+    def __init__(self, client: MagicMock) -> None:
+        self._client = client
+
+    async def build_client(self) -> MagicMock:
+        return self._client
+
+
+def _fake_llm_client(enabled: bool = True, content: str = "该取值的含义与用途") -> MagicMock:
+    client = MagicMock()
+    client.enabled = enabled
+    client.chat = AsyncMock(return_value={"content": content})
+    return client
+
+
+def _install_llm(monkeypatch: pytest.MonkeyPatch, client: MagicMock) -> None:
+    monkeypatch.setattr(
+        "app.services.llm.config_service.LlmConfigService",
+        lambda db: _FakeLlmService(client),
+    )
+
+
+async def test_infer_description_success(
+    dict_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """合法显示名 → 200 返回 LLM 描述，纯文本调用（text），审计 dict.infer_description。"""
+    client = _fake_llm_client()
+    _install_llm(monkeypatch, client)
+    with patch("app.api.system_dict.write_audit", new=AsyncMock()) as audit:
+        resp = await dict_client.post(
+            "/api/v1/dicts/infer-description",
+            json={"dict_type": "unit", "label": "元", "dict_type_label": "单位"},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["description"] == "该取值的含义与用途"
+    client.chat.assert_awaited_once()
+    kwargs = client.chat.await_args.kwargs
+    # 描述是纯文本：显式 text 避免被 chat 缺省 json_object 约束污染为空 JSON
+    assert kwargs["response_format"] == {"type": "text"}
+    prompt = kwargs["messages"][0]["content"]
+    assert "元" in prompt
+    assert "单位" in prompt
+    audit.assert_awaited_once()
+    assert audit.await_args.kwargs["action"] == "dict.infer_description"
+    assert audit.await_args.kwargs["entity_id"] == "unit:元"
+
+
+async def test_infer_description_llm_disabled(
+    dict_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LLM 不可用（enabled=False）→ 400 LLM_INFER_UNAVAILABLE。"""
+    _install_llm(monkeypatch, _fake_llm_client(enabled=False))
+    resp = await dict_client.post(
+        "/api/v1/dicts/infer-description",
+        json={"dict_type": "unit", "label": "元"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "LLM_INFER_UNAVAILABLE"
+
+
+async def test_infer_description_empty_content(
+    dict_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LLM 返回空内容 → 400 LLM_INFER_UNAVAILABLE。"""
+    _install_llm(monkeypatch, _fake_llm_client(content=""))
+    resp = await dict_client.post(
+        "/api/v1/dicts/infer-description",
+        json={"dict_type": "unit", "label": "元"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "LLM_INFER_UNAVAILABLE"
+
+
+async def test_infer_description_invalid_422(dict_client: httpx.AsyncClient) -> None:
+    """label 为空 → 422（min_length=1）。"""
+    resp = await dict_client.post(
+        "/api/v1/dicts/infer-description",
+        json={"dict_type": "unit", "label": ""},
+    )
+    assert resp.status_code == 422

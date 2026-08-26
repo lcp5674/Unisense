@@ -3,11 +3,13 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Card, Tabs, Table, Button, Modal, Form, Input, InputNumber, Space, Tag, Select, Popconfirm, App as AntApp,
 } from "antd";
-import { PlusOutlined, EditOutlined, DeleteOutlined, StopOutlined, CheckCircleOutlined, ArrowLeftOutlined } from "@ant-design/icons";
+import { PlusOutlined, EditOutlined, DeleteOutlined, StopOutlined, CheckCircleOutlined, ArrowLeftOutlined, RobotOutlined } from "@ant-design/icons";
 import {
   listDictTypes, listAllDictItems, createDictItem, updateDictItem,
   deactivateDictItem, activateDictItem, deleteDictItem,
   batchCreateDictItems, batchToggleDictItems, batchDeleteDictItems,
+  inferDictDescription,
+  UnisenseApiError,
 } from "../api";
 import type { DictBatchResult, SystemDictItem } from "../types";
 import { slugifyCode, resolveUniqueCode } from "../utils/zhEnDict";
@@ -75,6 +77,9 @@ export function SystemDict() {
     { label: "", sort_order: 0, description: "" },
   ]);
   const [batchSubmitting, setBatchSubmitting] = useState(false);
+  // LLM 推断描述 loading：单条新增/编辑弹窗标记（"create"|"edit"|null），批量新增按行 index
+  const [inferringForm, setInferringForm] = useState<"create" | "edit" | null>(null);
+  const [inferringBatchIdx, setInferringBatchIdx] = useState<number | null>(null);
   // 静默刷新的上次执行时间（TTL 防抖：QUIET_REFRESH_TTL_MS 内不重复请求）
   const lastQuietRefreshRef = useRef(0);
   // 编码自动生成预览：监听显示名，与后端 codegen 规则对齐——
@@ -136,6 +141,57 @@ export function SystemDict() {
     // 打开弹窗时基于最新项列表重算编码预览，缩小「他端新增同名编码但本页未
     // 刷新」导致的预览滞后窗口（提交仍以后端权威判定为准）。
     refreshItemsQuietly();
+  }
+
+  // AI 生成描述：单条新增/编辑弹窗共用（取当前表单的显示名 + 字典类型上下文，
+  // LLM 只回填描述文本，用户可编辑后随表单提交）。
+  async function handleInferDescription(form: "create" | "edit") {
+    const f = form === "create" ? createForm : editForm;
+    const label = (f.getFieldValue("label") ?? "").trim();
+    if (!label) {
+      message.warning("请先填写显示名，再生成描述");
+      return;
+    }
+    setInferringForm(form);
+    try {
+      const desc = await inferDictDescription(activeType, label, DICT_TYPE_LABELS[activeType]);
+      f.setFieldValue("description", desc);
+      message.success("已生成描述，可编辑后保存");
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError && err.code === "LLM_INFER_UNAVAILABLE"
+          ? "LLM 不可用：请检查 LLM 配置或稍后重试"
+          : err instanceof UnisenseApiError
+            ? `${err.message}（${err.codeZh}）`
+            : "AI 生成描述失败，请稍后重试",
+      );
+    } finally {
+      setInferringForm(null);
+    }
+  }
+
+  // AI 生成描述：批量新增弹窗按行（用该行显示名，回填该行描述）。
+  async function handleBatchInferDescription(idx: number) {
+    const label = (batchRows[idx].label ?? "").trim();
+    if (!label) {
+      message.warning("请先填写该行显示名，再生成描述");
+      return;
+    }
+    setInferringBatchIdx(idx);
+    try {
+      const desc = await inferDictDescription(activeType, label, DICT_TYPE_LABELS[activeType]);
+      updateBatchRow(idx, { description: desc });
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError && err.code === "LLM_INFER_UNAVAILABLE"
+          ? "LLM 不可用：请检查 LLM 配置或稍后重试"
+          : err instanceof UnisenseApiError
+            ? `${err.message}（${err.codeZh}）`
+            : "AI 生成描述失败，请稍后重试",
+      );
+    } finally {
+      setInferringBatchIdx(null);
+    }
   }
 
   async function handleCreate(values: { code?: string; label: string; sort_order?: number; description?: string }) {
@@ -422,8 +478,19 @@ export function SystemDict() {
           <Form.Item name="sort_order" label="排序" initialValue={0}>
             <InputNumber min={0} />
           </Form.Item>
-          <Form.Item name="description" label="描述">
-            <Input.TextArea rows={2} />
+          <Form.Item name="description" label="描述" extra="可点击「AI 生成」根据显示名自动生成描述">
+            <Space.Compact style={{ width: "100%" }}>
+              <Input.TextArea rows={2} placeholder="该取值的含义与用途" data-testid="dict-create-desc" />
+              <Button
+                icon={<RobotOutlined />}
+                loading={inferringForm === "create"}
+                onClick={() => handleInferDescription("create")}
+                style={{ height: "auto" }}
+                data-testid="dict-infer-create"
+              >
+                AI 生成
+              </Button>
+            </Space.Compact>
           </Form.Item>
         </Form>
       </Modal>
@@ -437,8 +504,19 @@ export function SystemDict() {
           <Form.Item name="sort_order" label="排序">
             <InputNumber min={0} />
           </Form.Item>
-          <Form.Item name="description" label="描述">
-            <Input.TextArea rows={2} />
+          <Form.Item name="description" label="描述" extra="可点击「AI 生成」根据显示名自动生成描述">
+            <Space.Compact style={{ width: "100%" }}>
+              <Input.TextArea rows={2} placeholder="该取值的含义与用途" />
+              <Button
+                icon={<RobotOutlined />}
+                loading={inferringForm === "edit"}
+                onClick={() => handleInferDescription("edit")}
+                style={{ height: "auto" }}
+                data-testid="dict-infer-edit"
+              >
+                AI 生成
+              </Button>
+            </Space.Compact>
           </Form.Item>
         </Form>
       </Modal>
@@ -478,12 +556,24 @@ export function SystemDict() {
               onChange={(v) => updateBatchRow(idx, { sort_order: v ?? 0 })}
               style={{ width: 90 }}
             />
-            <Input
-              placeholder="描述"
-              value={row.description}
-              onChange={(e) => updateBatchRow(idx, { description: e.target.value })}
-              style={{ width: 240 }}
-            />
+            <Space.Compact>
+              <Input
+                placeholder="描述"
+                value={row.description}
+                onChange={(e) => updateBatchRow(idx, { description: e.target.value })}
+                style={{ width: 240 }}
+                data-testid={`dict-batch-desc-${idx}`}
+              />
+              <Button
+                size="small"
+                icon={<RobotOutlined />}
+                loading={inferringBatchIdx === idx}
+                onClick={() => handleBatchInferDescription(idx)}
+                data-testid={`dict-batch-infer-${idx}`}
+              >
+                AI
+              </Button>
+            </Space.Compact>
             <Button
               type="text"
               danger

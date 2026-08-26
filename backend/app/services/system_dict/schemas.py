@@ -42,6 +42,21 @@ class DictItemUpdate(BaseModel):
     description: str | None = Field(None, max_length=256)
 
 
+class DictInferDescriptionRequest(BaseModel):
+    """参照数据项描述 LLM 推断请求（供新增/编辑弹窗的「AI 生成描述」按钮调用）。
+
+    LLM 只生成描述文本回填表单，不落库（落库仍走既有 create/update 流程）。
+    注入扫描豁免 label/dict_type/dict_type_label——它们是合法业务输入，仅作 LLM
+    prompt 上下文、不拼接进 DB 查询。
+    """
+
+    dict_type: str = Field(..., min_length=1, max_length=64, description="字典类型编码")
+    label: str = Field(..., min_length=1, max_length=128, description="参照数据项显示名")
+    dict_type_label: str | None = Field(
+        None, max_length=64, description="字典类型中文名（供 LLM 参考上下文）"
+    )
+
+
 class DictItemResponse(BaseModel):
     """字典项响应。"""
 

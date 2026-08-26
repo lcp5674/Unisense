@@ -624,6 +624,7 @@ p2_p3_enhancements:
         desc: "初始化seed脚本(6域+10类字典项)"
         files: ["backend/scripts/seed_domains_dicts.py"]
     note: "写操作审计（2026-08-15）：create/update/status/delete 四个写端点全部补 write_audit（action=DICT_CREATE/DICT_UPDATE/DICT_STATUS/DICT_DELETE，含 actor/IP/trace_id），对齐治理全量审计定位。编码自动生成（2026-08-15）：新建参照数据项时编码由自由输入改为按显示名自动生成英文名——后端 DictItemCreate.code 改可选（缺省经 codegen.slugify_code 术语字典翻译+拼音兜底、冲突 generate_unique_code 自增 _2/_3、纯标点回退 item）；前端新增弹窗「编码（自动生成）」disabled 实时预览（复用 zhEnDict.slugifyCode，与主题域同款），提交不传 code 由后端生成。与主题域编码自动生成约定一致。"
+    note_20260826: "参照数据项描述 LLM 推断（2026-08-26，system_dict+frontend）：用户要求「数据字典参照数据管理新增数据项时描述支持 LLM 推断生成」。① 后端新增 POST /dicts/infer-description（DictInferDescriptionRequest{dict_type,label,dict_type_label}；platform_admin + 注入豁免 label/dict_type/dict_type_label——合法业务输入仅作 LLM 上下文、不拼接 DB 查询；复用 LlmConfigService.build_client + response_format=text（避免缺省 json_object 约束污染为空 JSON）+ strip_code_fence；LLM 不可用/空内容→LLM_INFER_UNAVAILABLE；审计 dict.infer_description 已由 verb 模板覆盖）；路由顺序注意：/infer-description 注册在 /{dict_type} 之前避免被动态段捕获。② 前端 inferDictDescription 封装；SystemDict 单条新增/编辑弹窗描述框加「AI 生成」按钮（RobotOutlined + loading + 错误提示区分 LLM 不可用）+ 批量新增每行描述框加 AI 小按钮（按行回填）；先填显示名才可生成（否则 warning）。验证：后端 test_system_dict_api +4（成功/text/prompt 含 label 与类型上下文/审计、LLM 禁用 400、空内容 400、空 label 422）+ system_dict 全套 60 全过 + ruff 0；前端 SystemDict 24（+3）+ tsc 0。影响接口：POST /dicts/infer-description（新增，仅生成文本回填表单不落库）。"
 
   auto_fill:
     fr: [FR-010, FR-011, FR-016]

@@ -18,13 +18,14 @@ from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
 from app.core.exceptions import BusinessError, NotFoundError
-from app.core.guard import guard_against_injection
+from app.core.guard import guard_against_injection, guard_against_injection_exempt
 from app.db.mysql import get_db_session as get_session
 from app.services.system_dict.schemas import (
     DictBatchCreateRequest,
     DictBatchDeleteRequest,
     DictBatchResult,
     DictBatchStatusRequest,
+    DictInferDescriptionRequest,
     DictItemCreate,
     DictItemResponse,
     DictItemUpdate,
@@ -41,6 +42,12 @@ router = APIRouter(prefix="/dicts", tags=["系统字典管理"])
 
 #: 字典管理写权限：仅 platform_admin（与 docstring/plan 声明一致）。
 _ADMIN_DEPS = [Depends(require_roles("platform_admin")), Depends(guard_against_injection)]
+#: 描述 LLM 推断：platform_admin 写权限；label/dict_type/dict_type_label 是合法业务
+#: 输入，仅作 LLM prompt 上下文、不拼接进 DB 查询，豁免注入扫描（对齐 refine-definition）。
+_INFER_DEPS = [
+    Depends(require_roles("platform_admin")),
+    Depends(guard_against_injection_exempt("label", "dict_type", "dict_type_label")),
+]
 #: 字典查询读权限：全部已登录角色。
 _READ_DEPS = [Depends(require_roles(*ALL_ROLES)), Depends(guard_against_injection)]
 
@@ -61,6 +68,78 @@ async def list_dict_types(
 ) -> ApiResponse[list[str]]:
     data = await svc.list_dict_types()
     return ok(data=data, trace_id=trace_id)
+
+
+@router.post(
+    "/infer-description",
+    response_model=ApiResponse[dict[str, str]],
+    summary="参照数据项描述 LLM 推断（新增/编辑弹窗 AI 生成描述）",
+    dependencies=_INFER_DEPS,
+)
+async def infer_dict_item_description(
+    request: DictInferDescriptionRequest,
+    db: Annotated[AsyncSession, Depends(get_session)],
+    user: CurrentUser,
+    http_req: Request,
+    trace_id: Annotated[str, Depends(get_trace_id)] = "",
+) -> ApiResponse[dict[str, str]]:
+    """根据参照数据项显示名（+字典类型上下文）用 LLM 推断生成一段简洁描述。
+
+    仅生成文本回填表单，不落库（落库仍走既有 create/update 流程）；LLM 不可用
+    或返回空内容抛 ``LLM_INFER_UNAVAILABLE``。
+    """
+    from app.services.llm.config_service import LlmConfigService
+
+    llm_client = await LlmConfigService(db).build_client()
+    if not getattr(llm_client, "enabled", False):
+        raise BusinessError(
+            "LLM 不可用：请检查 LLM 配置或稍后重试",
+            error_code="LLM_INFER_UNAVAILABLE",
+            ctx={"dict_type": request.dict_type},
+        )
+    prompt = _build_dict_description_prompt(request)
+    try:
+        resp = await llm_client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=400,
+            # 描述是纯文本，显式 text 避免被 chat 缺省 json_object 约束污染为空 JSON
+            response_format={"type": "text"},
+        )
+    except Exception as exc:  # noqa: BLE001 - LLM 网络/超时等统一转业务错误
+        logger.warning(
+            "dict_infer_description_llm_failed",
+            dict_type=request.dict_type,
+            label=request.label,
+            error=str(exc)[:200],
+        )
+        raise BusinessError(
+            "LLM 调用失败，请稍后重试",
+            error_code="LLM_INFER_UNAVAILABLE",
+            ctx={"dict_type": request.dict_type},
+        ) from exc
+
+    from app.services.llm.parse import strip_code_fence
+
+    description = (resp.get("content") or "").strip()
+    description = strip_code_fence(description).strip().strip("\"'")
+    if not description:
+        raise BusinessError(
+            "LLM 未返回有效内容，请重试",
+            error_code="LLM_INFER_UNAVAILABLE",
+            ctx={"dict_type": request.dict_type},
+        )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dict.infer_description",
+        entity_type="dict_item",
+        entity_id=f"{request.dict_type}:{request.label}",
+        detail={"dict_type": request.dict_type, "label": request.label},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data={"description": description}, trace_id=trace_id)
 
 
 @router.get(
@@ -473,6 +552,21 @@ async def get_dict_item_ref_count(
 ) -> ApiResponse[dict[str, int]]:
     ref_count = await svc.get_ref_count(dict_type, code)
     return ok(data={"ref_count": ref_count}, trace_id=trace_id)
+
+
+def _build_dict_description_prompt(req: DictInferDescriptionRequest) -> str:
+    """构建参照数据项描述 LLM 推断提示词。
+
+    字典类型中文名（dict_type_label）与显示名作为上下文；要求输出一段简洁、
+    面向数据治理的中文描述（说明该取值含义/用途/适用场景），不带表名/技术细节。
+    """
+    type_name = req.dict_type_label or req.dict_type
+    return (
+        f"请为数据字典「{type_name}」新增的参照数据项写一段简洁的中文描述"
+        f"（50 字以内），说明该取值在数据治理/指标定义中的含义与用途。"
+        f"只输出描述本身，不要任何前缀、引号或解释。\n\n"
+        f"参照数据项显示名：{req.label}"
+    )
 
 
 def _item_response(item: Any, ref_count: int) -> DictItemResponse:

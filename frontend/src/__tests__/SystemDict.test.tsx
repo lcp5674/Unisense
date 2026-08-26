@@ -16,11 +16,13 @@ vi.mock("../api", () => ({
   batchCreateDictItems: vi.fn(),
   batchToggleDictItems: vi.fn(),
   batchDeleteDictItems: vi.fn(),
+  inferDictDescription: vi.fn(),
 }));
 
 import {
   listDictTypes, listAllDictItems, createDictItem,
   batchCreateDictItems, batchToggleDictItems, batchDeleteDictItems,
+  inferDictDescription,
 } from "../api";
 const mockedTypes = vi.mocked(listDictTypes);
 const mockedItems = vi.mocked(listAllDictItems);
@@ -28,6 +30,7 @@ const mockedCreate = vi.mocked(createDictItem);
 const mockedBatchCreate = vi.mocked(batchCreateDictItems);
 const mockedBatchToggle = vi.mocked(batchToggleDictItems);
 const mockedBatchDelete = vi.mocked(batchDeleteDictItems);
+const mockedInfer = vi.mocked(inferDictDescription);
 
 const ITEMS: SystemDictItem[] = [
   {
@@ -60,6 +63,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockedTypes.mockResolvedValue(["granularity"]);
   mockedItems.mockResolvedValue(ITEMS);
+  mockedInfer.mockResolvedValue("由 AI 生成的描述");
 });
 
 function renderDict(initialEntry = "/dicts") {
@@ -363,5 +367,46 @@ describe("SystemDict 页面", () => {
     fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
     await waitFor(() => expect(mockedBatchCreate).not.toHaveBeenCalled());
     expect(await screen.findByText("请至少填写一行的显示名")).toBeTruthy();
+  });
+
+  it("新增弹窗：AI 生成描述——填显示名后点击调用接口并回填描述随提交落库", async () => {
+    renderDict();
+    await screen.findByText("日");
+    fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
+    fireEvent.change(screen.getByLabelText("显示名"), { target: { value: "分钟" } });
+    fireEvent.click(screen.getByTestId("dict-infer-create"));
+    await waitFor(() =>
+      expect(mockedInfer).toHaveBeenCalledWith("granularity", "分钟", "粒度"),
+    );
+    // 提交：AI 生成的描述应随表单携带（setFieldValue 写入 form store，不依赖 DOM 时序）
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
+    const [, payload] = mockedCreate.mock.calls[0];
+    expect(payload.description).toBe("由 AI 生成的描述");
+  });
+
+  it("新增弹窗：未填显示名点 AI 生成——提示且不调用接口", async () => {
+    renderDict();
+    await screen.findByText("日");
+    fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
+    fireEvent.click(screen.getByTestId("dict-infer-create"));
+    await waitFor(() => expect(mockedInfer).not.toHaveBeenCalled());
+    expect(await screen.findByText("请先填写显示名，再生成描述")).toBeTruthy();
+  });
+
+  it("批量新增弹窗：按行 AI 生成描述并回填该行", async () => {
+    renderDict();
+    await screen.findByText("日");
+    fireEvent.click(screen.getByRole("button", { name: /批量新增/ }));
+    fireEvent.change(screen.getByTestId("dict-batch-label-0"), { target: { value: "分钟" } });
+    fireEvent.click(screen.getByTestId("dict-batch-infer-0"));
+    await waitFor(() =>
+      expect(mockedInfer).toHaveBeenCalledWith("granularity", "分钟", "粒度"),
+    );
+    await waitFor(() =>
+      expect((screen.getByTestId("dict-batch-desc-0") as HTMLInputElement).value).toBe(
+        "由 AI 生成的描述",
+      ),
+    );
   });
 });
