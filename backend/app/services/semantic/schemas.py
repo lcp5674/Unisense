@@ -116,7 +116,8 @@ class MetricCreateRequest(BaseModel):
     """创建指标请求。
 
     对齐 TD §3 POST /api/v1/metric-definitions。
-    OneData（界限文档 §2.3）：原子指标 = 逻辑度量（measure_id）+ 聚合方式，不绑物理表；
+    OneData（界限文档 §2.3，变体口径）：原子指标 = 逻辑度量（measure_id）+ 基础统计
+    粒度（日），不含业务限定与时间周期，不绑物理表；派生 = 原子 + 业务限定 + 周期，
     粒度下沉挂载实体（granularity 可选，派生指标由 mount 承载）。
     """
 
@@ -272,11 +273,11 @@ class MetricCreateRequest(BaseModel):
           逻辑度量（``measure_id``）——度量格式/单位/小数位/源头系统/同义词从度量目录
           继承；技术口径（``expression``/``sql``）可选。兼容旧式物理来源（来源表 +
           度量列，批量注册等存量路径），保证渐进迁移不破坏既有流。
-        - ``derived``：OneData 派生层 = 原子指标 + 时间周期（月/周/季/年等）。依赖
-          指标（``dependencies``）**可选**——纯周期派生（如「本月活跃医生数」）可无依赖
-          直建；带依赖时仍构建 ``DERIVED_FROM`` 血缘并在发布时做依赖 PUBLISHED 校验
-          与环检测。派生可携带 ``mount``（挂载实体，承载源表/粒度），粒度不再进指标
-          定义。
+        - ``derived``：OneData 派生层 = 原子指标 + 业务限定 + 时间周期（月/周/季/年
+          等）。依赖指标（``dependencies``）**可选**——纯周期/业务限定派生（如「本月
+          活跃医生数」）可无依赖直建；带依赖时仍构建 ``DERIVED_FROM`` 血缘并在发布时
+          做依赖 PUBLISHED 校验与环检测。派生可携带 ``mount``（挂载实体，承载源表/
+          粒度），粒度不再进指标定义。
         - ``composite``：OneData 复合层 = 多指标四则运算/比率。**须声明依赖指标**
           （``dependencies`` 非空）+ 计算表达式（``expression``），发布时强校验。
 
@@ -304,8 +305,8 @@ class MetricCreateRequest(BaseModel):
             deps = defn.get("dependencies")
             has_sql = bool(defn.get("sql"))
             expr = defn.get("expression")
-            # 复合强制依赖（多指标运算）；派生依赖可选（OneData 派生 = 原子 + 时间周期，
-            # 纯周期派生可无依赖——「本月活跃医生数」不依赖其他指标）
+            # 复合强制依赖（多指标运算）；派生依赖可选（OneData 派生 = 原子 + 业务限定 +
+            # 时间周期，纯周期/业务限定派生可无依赖——「本月活跃医生数」不依赖其他指标）
             if self.type == "composite" and (not isinstance(deps, list) or not deps):
                 raise ValueError(
                     "复合指标必须声明至少 1 个依赖指标（definition_json.dependencies）"

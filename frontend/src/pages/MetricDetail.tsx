@@ -2860,7 +2860,7 @@ export function MetricDetail() {
           {metric.type === "atomic" && (
             <Form.Item
               label="逻辑度量（原子指标口径库，OneData 原子层）"
-              tooltip="原子指标 = 逻辑度量 + 聚合方式，不直接绑定物理表；度量格式/单位/小数位由原子指标口径库继承。更换/解除关联属破坏性口径变更，已发布指标需消费方确认。"
+              tooltip="原子指标 = 逻辑度量 + 基础统计粒度（日），不绑定业务限定与时间周期；度量格式/单位/小数位由原子指标口径库继承。更换/解除关联属破坏性口径变更，已发布指标需消费方确认。"
               style={{ marginBottom: 8 }}
               extra={
                 editMeasureId == null

@@ -754,7 +754,7 @@ export function Templates() {
                     label="逻辑度量（OneData 原子层）"
                     extra={
                       <span className="muted" style={{ fontSize: 12 }}>
-                        原子指标 = 逻辑度量 + 聚合方式；度量格式/单位/小数位实例化时继承
+                        原子指标 = 逻辑度量 + 基础统计粒度（日），不绑定业务限定与时间周期；度量格式/单位/小数位实例化时继承
                       </span>
                     }
                     style={{ width: "100%", marginBottom: 8 }}

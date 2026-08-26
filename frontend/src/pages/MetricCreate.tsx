@@ -214,13 +214,14 @@ function InferBadge({ field }: { field: SuggestionField }) {
   );
 }
 
-// 三类指标生产配置差异引导（OneData 语义：原子=逻辑度量+基础粒度；派生=原子+时间周期；
-// 复合=多指标运算）。选类型后展示，说明该类型的核心配置，避免统一表单的认知负担。
+// 三类指标生产配置差异引导（OneData 语义，变体口径：原子=逻辑度量+基础粒度（日）；
+// 派生=原子+业务限定+时间周期；复合=多指标运算）。选类型后展示，说明该类型的核心配置，
+// 避免统一表单的认知负担。
 const TYPE_HINTS: Record<MetricType, string> = {
   atomic:
     "通用逻辑度量 + 基础统计粒度（日）。一个可复用的度量（如「活跃医生数」），不绑定业务限定与时间周期；可关联逻辑度量目录统一管理格式/单位。",
   derived:
-    "原子指标 + 时间周期（月/周/季/年等）。如「本月医院入口活跃医生数」= 活跃医生数 + 月周期；依赖指标可选（纯周期派生可不依赖），可携带挂载实体（结果落表）。",
+    "原子指标 + 业务限定 + 时间周期（月/周/季/年等）。如「本月医院入口活跃医生数」= 活跃医生数 + 业务限定 + 月周期；依赖指标可选（纯周期/业务限定派生可不依赖），可携带挂载实体（结果落表）。",
   composite:
     "多个指标四则运算/比率（如 医生留存率 = 当月活跃 ÷ 上月活跃）。核心配置：依赖指标与计算表达式。",
 };
@@ -354,7 +355,7 @@ export function MetricCreate() {
   // 多候选域挑选），用 ref 在候选确认后仍保持用户选择的推断模式
   const sqlInferUseLlmRef = useRef(false);
   // 逻辑度量推荐（信息最大化）：SQL 推断按度量列名匹配已发布逻辑度量目录，
-  // 供原子指标一键继承 measure_id（OneData 原子层 = 逻辑度量 + 聚合方式）。
+  // 供原子指标一键继承 measure_id（OneData 原子层 = 逻辑度量 + 基础统计粒度（日））。
   const [measureSuggestions, setMeasureSuggestions] = useState<MeasureSuggestion[]>([]);
 
   // 业务域建议（FR-010 域建议增强）：SQL 推断时反向定位/LLM 兜底推断业务域。
@@ -1776,7 +1777,7 @@ export function MetricCreate() {
                       <>
                         {selectedMeasure
                           ? `继承：${MEASURE_FORMAT_LABEL[selectedMeasure.measure_format] ?? selectedMeasure.measure_format} · 单位 ${selectedMeasure.default_unit || "—"} · 小数位 ${selectedMeasure.default_decimal_places ?? "按需"}${selectedMeasure.source_system?.length ? ` · 源头系统 ${selectedMeasure.source_system.join("/")}` : ""}`
-                          : "原子指标 = 逻辑度量 + 聚合方式，不直接绑定物理表；度量格式/单位/小数位由原子指标口径库继承"}
+                          : "原子指标 = 逻辑度量 + 基础统计粒度（日），不绑定业务限定与时间周期；度量格式/单位/小数位由原子指标口径库继承"}
                         {measureSuggestions.length > 0 && !selectedMeasure ? (
                           <div style={{ marginTop: 4 }}>
                             <Typography.Text type="secondary" style={{ fontSize: 12 }}>

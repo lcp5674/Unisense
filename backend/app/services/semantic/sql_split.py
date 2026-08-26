@@ -645,12 +645,13 @@ def _build_atomic_candidate(
         metric_code = generate_metric_code(domain_code, measure_table, code_col, period)
     # LLM 兜底场景自带建议名（measure["name"]）优先；规则层（无 name）走 auto_fill
     candidate_name = measure.get("name") or fields["name"]["value"]
-    # OneData 语义类型判定（周期驱动）：原子指标 = 逻辑度量 + 基础统计粒度（日），
-    # 不含时间周期；派生指标 = 原子 + 时间周期（月/周/季/年/小时等非日周期）。
-    # SQL 解析出的候选天然带业务限定 + 周期，非日周期时归为派生（对齐用户建模
-    # 认知——「本月活跃医生数」= 活跃医生数 + 月周期）。日粒度作为原子常态统计
-    # 粒度不视为派生周期；``derived`` 字段（比率/条件列）是口径核对标记，与
-    # 类型解耦。前端类型 Select 保留可改（派生↔原子）。
+    # OneData 语义类型判定（周期驱动，变体口径）：原子指标 = 逻辑度量 + 基础统计
+    # 粒度（日），不含业务限定与时间周期；派生指标 = 原子指标 + 业务限定 + 时间
+    # 周期（月/周/季/年/小时等非日周期）。
+    # SQL 解析出的候选天然带业务限定 + 周期，业务限定与非日周期均归派生（对齐用户
+    # 建模认知——「本月活跃医生数」= 活跃医生数 + 业务限定 + 月周期）。日粒度作为
+    # 原子常态统计粒度不视为派生周期；``derived`` 字段（比率/条件列）是口径核对
+    # 标记，与类型解耦。前端类型 Select 保留可改（派生↔原子）。
     cand_type = "derived" if (period and period != "day") else "atomic"
     return {
         "key": f"{idx}:{alias or col}",

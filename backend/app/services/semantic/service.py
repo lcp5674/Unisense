@@ -460,8 +460,9 @@ class MetricService(BaseService):
         if not valid_name:
             raise ValidationError(name_error, error_code="METRIC_NAME_NO_MORPHEME")
 
-        # 3c. OneData 类型化字段兜底（界限文档 §2.3）：原子指标 = 逻辑度量 + 聚合方式，
-        # 不绑物理表——单位由逻辑度量 default_unit 继承（measure 已在 3a 校验并复用）；
+        # 3c. OneData 类型化字段兜底（界限文档 §2.3，变体口径）：原子指标 = 逻辑度量 +
+        # 基础统计粒度（日），不含业务限定与时间周期，不绑物理表——单位由逻辑度量
+        # default_unit 继承（measure 已在 3a 校验并复用）；派生 = 原子 + 业务限定 + 周期，
         # 派生/复合缺省用默认物理属性。
         # 物理属性（time_semantics/freshness/dw_layer）对原子属挂载/数据语义层，缺省取默认。
         if request.unit is None:

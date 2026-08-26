@@ -685,8 +685,8 @@ CREATE TABLE metric (
   INDEX idx_status (status), INDEX idx_domain (domain), INDEX idx_tier (metric_tier), INDEX idx_batch (batch_id)
 );
 
--- OneData 扩展（界限文档 §2.3：原子不绑表、粒度属挂载层，TD §4.1 补充）
--- 逻辑度量目录：原子指标 = 逻辑度量 + 聚合方式；度量格式/默认单位/小数位/源头系统/同义词在此定义，
+-- OneData 扩展（界限文档 §2.3 变体口径：原子不绑业务限定/时间周期、粒度属挂载层，TD §4.1 补充）
+-- 逻辑度量目录：原子指标 = 逻辑度量 + 基础统计粒度（日）；度量格式/默认单位/小数位/源头系统/同义词在此定义，
 -- 原子指标经 metric.measure_id 引用继承（PRD FR-02-08）。状态机 DRAFT/PUBLISHED/DEPRECATED。
 CREATE TABLE measure_catalog (
   id BIGINT PK, measure_code VARCHAR(64) UNIQUE, name VARCHAR(128),
