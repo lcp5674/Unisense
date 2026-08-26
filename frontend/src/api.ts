@@ -177,8 +177,12 @@ import {
 // ---- 运行配置 ----
 // 后端地址：开发时由 Vite dev server 代理到 :8000（见 vite.config.ts），
 // 生产构建可通过 VITE_API_BASE 覆盖。X-Api-Key 用于 Semantic API 网关鉴权。
+// P2（第六轮）：Dockerfile 构建 ARG 用 VITE_API_BASE_URL（compose 传入空串走 nginx
+// 相对路径），源码此前只读 VITE_API_BASE → 构建参数实际失效；此处两者兼容读取。
 const API_BASE_URL: string =
-  (import.meta.env.VITE_API_BASE as string | undefined)?.replace(/\/$/, "") || "";
+  ((import.meta.env.VITE_API_BASE ??
+    import.meta.env.VITE_API_BASE_URL) as string | undefined)?.replace(/\/$/, "") ||
+  "";
 const SEMANTIC_API_KEY: string =
   (import.meta.env.VITE_SEMANTIC_API_KEY as string | undefined) || "dev-semantic-key";
 
@@ -785,10 +789,17 @@ export async function batchSubmitMetrics(
 export async function batchApproveMetrics(
   metricCodes: string[],
   mode: "standard" | "experimental" = "standard",
+  grayTenantIds?: number[],
 ): Promise<BatchResult> {
   return request<BatchResult>(`${API_BASE}/metric-definitions/batch-approve`, {
     method: "POST",
-    body: JSON.stringify({ metric_codes: metricCodes, mode }),
+    body: JSON.stringify({
+      metric_codes: metricCodes,
+      mode,
+      // P1-3（第六轮）：批量通过支持灰度发布（对齐单条 MetricReview）——
+      // 后端 MetricBatchApproveRequest 已接受 gray_tenant_ids，前端此前不传
+      gray_tenant_ids: mode === "experimental" ? grayTenantIds ?? [] : undefined,
+    }),
   });
 }
 

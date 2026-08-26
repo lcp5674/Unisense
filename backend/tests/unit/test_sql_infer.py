@@ -552,3 +552,89 @@ class TestParseSqlProfile:
             "SELECT APPROX_TOP_COUNT(status, 10) AS t FROM t",
         ):
             assert parse_sql_profile(sql).measures == []
+
+    # ---- P0-2 / P0-3（第六轮）：INSERT 带列清单源表 + 复杂 ETL 列→物理表溯源 ----
+
+    def test_insert_with_column_list_excludes_target_table(self) -> None:
+        """P0-2：INSERT INTO ... (a, b) SELECT ... 带列清单——目标表被 sqlglot 包成
+        Schema，旧判断 `parent is exp.Insert` 失配把目标表混入 source_tables（口径/
+        血缘错挂）。修复后目标表排除、源表保留。"""
+        sql = (
+            "INSERT INTO dws.daily_summary (dt, gmv) "
+            "SELECT dt, SUM(amount) AS gmv FROM ods.fact_order GROUP BY dt"
+        )
+        p = parse_sql_profile(sql)
+        assert "dws.daily_summary" not in p.source_tables, "目标表不应混入源表"
+        assert "ods.fact_order" in p.source_tables
+        assert {m["column"] for m in p.measures} == {"amount"}
+
+    def test_nested_join_main_table_first_and_attributed(self) -> None:
+        """P0-3a：多层嵌套 join 源表归属——join 右侧字典表此前在 walk 顺序中排前，
+        source_tables[0] 为字典表导致无表前缀度量候选错挂；主 FROM 表排首 +
+        _measure_table 穿透子查询别名使 sum(a.amount) 归属 ods.raw_event。"""
+        sql = (
+            "SELECT a.user_id, SUM(a.amount) AS total "
+            "FROM (SELECT user_id, amount FROM ods.raw_event) a "
+            "LEFT JOIN ods.ref_dict b ON a.user_id = b.id GROUP BY a.user_id"
+        )
+        p = parse_sql_profile(sql)
+        assert p.source_tables[0] == "ods.raw_event", "主 FROM 表应排首"
+        amount = next(m for m in p.measures if m["column"] == "amount")
+        assert amount["table"] == "ods.raw_event", "sum(a.amount) 应归属 ods.raw_event"
+
+    def test_sinking_same_name_two_subqueries_not_merged(self) -> None:
+        """P0-3b：下沉透传两个子查询同名列（t1.cnt/t2.cnt）——去重键此前
+        (alias, agg) 不含 table，第二支被合并丢；加 table 后两支都保留且分属各自表。"""
+        sql = (
+            "INSERT INTO dws.t SELECT t1.user_id, t1.cnt, t2.cnt "
+            "FROM (SELECT user_id, COUNT(*) cnt FROM ods.a GROUP BY user_id) t1 "
+            "FULL JOIN (SELECT user_id, COUNT(*) cnt FROM ods.b GROUP BY user_id) t2 "
+            "ON t1.user_id = t2.user_id"
+        )
+        p = parse_sql_profile(sql)
+        tables = {m.get("table") for m in p.measures}
+        assert tables == {"ods.a", "ods.b"}, "两个子查询同名列都应保留且分属各自表"
+
+    def test_cte_derived_agg_column_mapped_to_physical(self) -> None:
+        """P0-3c：CTE 派生聚合列 sum(amount) AS day_amt 被外层引用——
+        alias_map 扩展 Alias(AggFunc) → 底层物理列 amount，source_fields 不再落
+        不存在的 day_amt。"""
+        sql = (
+            "WITH base AS (SELECT dt, user_id, SUM(amount) AS day_amt "
+            "FROM dwd.fact_order GROUP BY dt, user_id) "
+            "SELECT dt, COUNT(DISTINCT user_id) AS uv, SUM(day_amt) AS total "
+            "FROM base GROUP BY dt"
+        )
+        p = parse_sql_profile(sql)
+        cols = {m["column"] for m in p.measures}
+        assert "amount" in cols, "sum(day_amt) 应映射到底层物理列 amount"
+        assert "day_amt" not in cols, "CTE 派生别名不应出现在 source_fields 列"
+
+    def test_derived_ratio_columns_produced_with_expression(self) -> None:
+        """P0-3d：无聚合包裹的派生比率列（ROUND(SUM/NULLIF(COUNT)) 客单价、
+        SUM(CASE)/NULLIF(COUNT(*)) 退货率）应产出候选且带 derived 标记 + 完整
+        expression；内嵌聚合不再作为独立聚合重复提取（避免撞码/命名失败）。"""
+        sql = (
+            "INSERT INTO dws.daily_summary (dt, gmv, buyer_cnt, avg_price, refund_rate) "
+            "SELECT dt, SUM(amount) AS gmv, COUNT(DISTINCT order_id) AS buyer_cnt, "
+            "ROUND(SUM(amount)/NULLIF(COUNT(DISTINCT order_id),0),2) AS avg_price, "
+            "SUM(CASE WHEN is_refund=1 THEN 1 ELSE 0 END)/NULLIF(COUNT(*),0) AS refund_rate "
+            "FROM ods.orders GROUP BY dt"
+        )
+        p = parse_sql_profile(sql)
+        derived = [m for m in p.measures if m.get("derived")]
+        assert len(derived) == 2, f"应产出 2 个派生比率候选，实际 {len(derived)}"
+        aliases = {d.get("alias") for d in derived}
+        assert aliases == {"avg_price", "refund_rate"}
+        for d in derived:
+            assert d.get("expression"), "派生候选应携带完整表达式"
+            assert (
+                "SUM" in (d["expression"] or "").upper()
+                or "COUNT" in (d["expression"] or "").upper()
+            )
+        # 独立聚合：仅 gmv/buyer_cnt（内嵌聚合不重复提取）
+        plain = [m for m in p.measures if not m.get("derived")]
+        plain_keys = {(m.get("alias"), m["agg"]) for m in plain}
+        assert ("gmv", "SUM") in plain_keys and ("buyer_cnt", "COUNT_DISTINCT") in plain_keys
+        # 派生比率不产内嵌聚合（is_refund 不再作为独立 SUM 提取）
+        assert not any(m.get("column") == "is_refund" and not m.get("derived") for m in p.measures)

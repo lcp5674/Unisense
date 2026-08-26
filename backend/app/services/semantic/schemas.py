@@ -941,6 +941,10 @@ class MetricResponse(BaseModel):
     deprecated_at: datetime | None
     # P0-C：批量注册批次 ID（可空）——列表/详情/审核页展示批次可回溯整批
     batch_id: str | None = None
+    # P1-1（第六轮）：原始口径 SQL（可空，批量创建透传落库）——此前 MetricResponse
+    # 未声明该字段，API 永不返回、前端零展示（"写而不读"）；声明后详情页可反查
+    # batch_id → 整句口径原文，候选仅表达式时也能核对全貌
+    raw_sql: str | None = None
     # DB 列为 date（models/metric.py），序列化输出 ISO "YYYY-MM-DD"，前端 string 兼容
     sunset_until: date | None
     emergency_publish: bool = False

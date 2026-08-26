@@ -75,6 +75,9 @@ export interface MetricResponse {
   term_id: number | null;
   /** P0-C：批量注册批次 ID（可空）——列表/详情/审核页展示批次可回溯整批 */
   batch_id?: string | null;
+  /** P1-1（第六轮）：原始口径 SQL（批量创建透传落库）——详情页反查 batch_id →
+      整句口径原文；此前 MetricResponse 未声明该字段 API 永不返回（"写而不读"） */
+  raw_sql?: string | null;
   effective_version: number | null;
   consumption_guide: Record<string, unknown> | null;
   successor_code: string | null;

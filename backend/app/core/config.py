@@ -146,6 +146,35 @@ class Settings(BaseSettings):
     )
 
     @model_validator(mode="after")
+    def _derive_doris_from_olap_url(self) -> Settings:
+        """olap_url 配置后同步派生 doris_host/port/database（若仍为默认值）。
+
+        OLAPExecutor 实际连接用 ``doris_host/port/database``（config.py:58-60），
+        而生产校验强制 ``olap_url`` 非空（config.py:162）——两者此前脱节：生产设了
+        ``UNISENSE_OLAP_URL`` 通过启动校验，但容器实际连 ``localhost:8030``（自身）
+        → Doris 查询必失败（P0-1，第六轮工业审查）。此处从 ``olap_url`` 解析
+        host/port 覆盖默认值，并允许 ``olap_url`` 含路径段（``http://fe:8030/unisense``）
+        派生 database。显式配置了 ``UNISENSE_DORIS_HOST/PORT`` 时不被覆盖。
+        """
+        if not self.olap_url:
+            return self
+        from urllib.parse import urlparse
+
+        parsed = urlparse(self.olap_url)
+        host = parsed.hostname
+        if not host:
+            return self
+        if self.doris_host in ("", "localhost"):
+            self.doris_host = host
+        if self.doris_port == 8030:
+            self.doris_port = parsed.port or 8030
+        if self.doris_database == "unisense":
+            db = parsed.path.strip("/")
+            if db:
+                self.doris_database = db
+        return self
+
+    @model_validator(mode="after")
     def validate_production_config(self) -> Settings:
         """生产环境校验：jwt_secret≥32字符、Fernet密钥必须独立、olap_url必须非空、CORS 禁通配符。"""
         if self.env == "prod":
@@ -163,6 +192,13 @@ class Settings(BaseSettings):
                 raise ConfigurationError(
                     "生产环境 UNISENSE_OLAP_URL 必须非空，"
                     "consume 查询需要 OLAP 执行引擎。请配置 Doris/StarRocks 地址后重启。"
+                )
+            if self.doris_host in ("localhost", "127.0.0.1", "0.0.0.0"):
+                raise ConfigurationError(
+                    "生产环境 Doris 连接地址不能是 localhost/127.0.0.1——OLAPExecutor 实际"
+                    "连接用 doris_host（默认 localhost 为容器自身，查询必失败）。"
+                    "请通过 UNISENSE_OLAP_URL（自动派生）或 UNISENSE_DORIS_HOST/PORT "
+                    "配置真实 Doris/StarRocks FE 地址后重启。"
                 )
             # CORS 严格校验：allow_credentials=True 时禁止通配符
             if "*" in self.cors_origins_list:

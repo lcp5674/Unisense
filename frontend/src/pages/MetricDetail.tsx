@@ -2241,6 +2241,41 @@ export function MetricDetail() {
         </Descriptions>
       </Card>
 
+      {/* P1-1（第六轮）：原始口径 SQL——批量创建透传落 Metric.raw_sql，此前
+          MetricResponse 未声明该字段 API 永不返回（"写而不读"）；此处详情页可反查
+          batch_id → 整句口径原文（候选仅表达式时核对全貌），零 SQL 不展示 */}
+      {metric.raw_sql ? (
+        <Card
+          size="small"
+          style={{ marginBottom: 16 }}
+          title={
+            <Space size={6}>
+              <span>原始口径 SQL</span>
+              <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>
+                （批量注册溯源，与 batch_id 对应）
+              </span>
+            </Space>
+          }
+        >
+          <pre
+            style={{
+              margin: 0,
+              maxHeight: 240,
+              overflow: "auto",
+              fontSize: 12,
+              lineHeight: 1.6,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-all",
+              background: "var(--bg-code, #f6f8fa)",
+              padding: 12,
+              borderRadius: 6,
+            }}
+          >
+            {metric.raw_sql}
+          </pre>
+        </Card>
+      ) : null}
+
       {/* P1-3：挂载实体（OneData 挂载层）——详情页可见可管：展示挂载的物理表/粒度/周期/域，
           支持解除挂载（此前挂载仅创建时透传落库、前端无任何查看/管理入口） */}
       <Card

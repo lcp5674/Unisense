@@ -348,6 +348,9 @@ class Metric(Base, BaseModel):
         Index("idx_metric_domain", "domain"),
         Index("idx_metric_tier", "metric_tier"),
         Index("idx_metric_batch", "batch_id"),
+        # P1-4（第六轮）：列表默认 ``ORDER BY updated_at desc`` + created_after/before
+        # 范围过滤 + 软删过滤——(deleted_at, updated_at) 复合索引消除深分页全表扫+filesort
+        Index("idx_metric_deleted_updated", "deleted_at", "updated_at"),
     )
 
 

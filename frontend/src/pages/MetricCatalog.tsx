@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { Table, Input, Select, Button, Space, Tag, message, Tooltip, Descriptions, Drawer, Dropdown, Modal, Checkbox, Card, Popconfirm } from "antd";
+import { Table, Input, Select, Button, Space, Tag, message, Tooltip, Descriptions, Drawer, Dropdown, Modal, Checkbox, Card, Popconfirm, Radio } from "antd";
 import {
   ArrowLeftOutlined,
   SearchOutlined,
@@ -62,6 +62,17 @@ import {
   UNIT_LABEL,
 } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
+
+// 解析灰度租户输入（逗号/空格/顿号分隔的正整数列表）；非法项忽略，空返回 []（对齐
+// MetricReview 的灰度租户解析）
+function parseGrayTenants(raw: string): number[] {
+  const tenants: number[] = [];
+  for (const part of raw.split(/[,，、\s]+/)) {
+    const n = Number(part);
+    if (Number.isInteger(n) && n > 0) tenants.push(n);
+  }
+  return tenants;
+}
 
 // 批量操作动作中文名（结果提示用）
 const BATCH_ACTION_LABEL: Record<string, string> = {
@@ -373,6 +384,9 @@ export function MetricCatalog() {
   const urlDomain = searchParams.get("domain") ?? "";
   const urlTier = searchParams.get("tier") ?? "";
   const urlLifecycle = searchParams.get("lifecycle") ?? "";
+  // P2-6（第六轮）：批次筛选——SQL/宽表批量创建的指标带 batch_id，列表页此前只有
+  // 展示 Tag 无法按批次收敛（审核页已支持，列表页漏）；进 URL 可分享/刷新保持
+  const urlBatchId = searchParams.get("batch_id") ?? "";
   // URL 同步筛选状态（replace 模式，不产生历史堆栈）：业务域/分级/生命周期快筛也进 URL，
   // 让"销售域+已发布+最近7天创建"这类筛选视图可分享、刷新保持（TD §3 协作体验）
   const [items, setItems] = useState<MetricResponse[]>([]);
@@ -390,6 +404,7 @@ export function MetricCatalog() {
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">(
     searchParams.get("sort_order") === "asc" ? "asc" : "desc",
   );
+  const [batchIdFilter, setBatchIdFilter] = useState(urlBatchId);
   const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
   // 主题域 code → status（active/inactive），供域下拉标识停用域
   const [domainStatusMap, setDomainStatusMap] = useState<Map<string, string>>(new Map());
@@ -445,6 +460,7 @@ export function MetricCatalog() {
         if (domain) next.set("domain", domain); else next.delete("domain");
         if (tier) next.set("tier", tier); else next.delete("tier");
         if (lifecycleFilter) next.set("lifecycle", lifecycleFilter); else next.delete("lifecycle");
+        if (batchIdFilter) next.set("batch_id", batchIdFilter); else next.delete("batch_id");
         if (sortBy !== "updated_at") next.set("sort_by", sortBy); else next.delete("sort_by");
         if (sortOrder !== "desc") next.set("sort_order", sortOrder); else next.delete("sort_order");
         return next;
@@ -452,7 +468,7 @@ export function MetricCatalog() {
       { replace: true },
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyword, status, domain, tier, lifecycleFilter, sortBy, sortOrder]);
+  }, [keyword, status, domain, tier, lifecycleFilter, batchIdFilter, sortBy, sortOrder]);
 
   // URL 直达 ?lifecycle= 时（分享/刷新），按快筛 key 计算真实日期区间；
   // 与 handleLifecycle 交互共用同一日期口径（created_7d=7天前起 / stale_30d=30天前止）
@@ -512,6 +528,10 @@ export function MetricCatalog() {
   // 批量打回原因 / 批量下线替代指标映射
   const [batchRejectReason, setBatchRejectReason] = useState("");
   const [batchSuccessors, setBatchSuccessors] = useState<Record<string, string>>({});
+  // P1-3（第六轮）：批量通过支持灰度发布（对齐单条 MetricReview）——
+  // standard=标准发布 / experimental=灰度发布（仅指定租户可见）
+  const [batchApproveMode, setBatchApproveMode] = useState<"standard" | "experimental">("standard");
+  const [batchGrayTenants, setBatchGrayTenants] = useState("");
   // 批量下线替代指标选项：已发布指标（排除勾选集内编码，防替代自身/互替代）
   const [batchSuccessorOptions, setBatchSuccessorOptions] = useState<
     Array<{ value: string; label: string }>
@@ -658,6 +678,7 @@ export function MetricCatalog() {
     setDomain("");
     setTier("");
     setOwnerFilter("");
+    setBatchIdFilter("");
     setLifecycleFilter(null);
     setLifecycleDate({});
     setMyMetricsOnly(false);
@@ -703,8 +724,9 @@ export function MetricCatalog() {
     if (urlDomain && urlDomain !== domain) setDomain(urlDomain);
     if (urlTier && urlTier !== tier) setTier(urlTier);
     if (urlLifecycle && urlLifecycle !== lifecycleFilter) setLifecycleFilter(urlLifecycle);
-    if (urlKw || urlStatus || urlOwnerId || urlDomain || urlTier || urlLifecycle) setPage(1);
-  }, [urlKw, urlStatus, urlOwnerId, urlDomain, urlTier, urlLifecycle]);
+    if (urlBatchId && urlBatchId !== batchIdFilter) setBatchIdFilter(urlBatchId);
+    if (urlKw || urlStatus || urlOwnerId || urlDomain || urlTier || urlLifecycle || urlBatchId) setPage(1);
+  }, [urlKw, urlStatus, urlOwnerId, urlDomain, urlTier, urlLifecycle, urlBatchId]);
 
   async function load(overrideKeyword?: string) {
     const seq = ++loadSeq.current;
@@ -719,6 +741,7 @@ export function MetricCatalog() {
         pii_flag: piiOnly || undefined,
         created_after: lifecycleDate.created_after,
         updated_before: lifecycleDate.updated_before,
+        batch_id: batchIdFilter || undefined,
         deleted: deletedView,
         sort_by: sortBy,
         sort_order: sortOrder,
@@ -793,7 +816,7 @@ export function MetricCatalog() {
 
   useEffect(() => {
     load();
-  }, [page, pageSize, status, domain, tier, sortBy, sortOrder, myMetricsOnly, piiOnly, currentUserId, ownerFilter, lifecycleDate, deletedView]);
+  }, [page, pageSize, status, domain, tier, sortBy, sortOrder, myMetricsOnly, piiOnly, currentUserId, ownerFilter, lifecycleDate, deletedView, batchIdFilter]);
 
   function handleSearch() {
     const kw = inputValue;
@@ -902,7 +925,11 @@ export function MetricCatalog() {
           message.warning("勾选的指标中没有待评审（REVIEW）状态");
           return;
         }
-        const res = await batchApproveMetrics(codes);
+        const res = await batchApproveMetrics(
+          codes,
+          batchApproveMode,
+          batchApproveMode === "experimental" ? parseGrayTenants(batchGrayTenants) : undefined,
+        );
         ok = res.ok_count;
         res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.code}: ${r.message}`); failedCodes.push(r.code); });
       } else if (batchAction === "reject") {
@@ -1913,6 +1940,18 @@ export function MetricCatalog() {
           <Button type="primary" onClick={handleSearch} icon={<SearchOutlined />}>
             搜索
           </Button>
+          {/* P2-6（第六轮）：批次筛选——SQL/宽表批量创建的指标带 batch_id，列表页
+              此前只有展示 Tag 无法按批次收敛；输入批次号精确过滤整批（回车触发，URL 同步） */}
+          <Input
+            placeholder="批次 ID（批量注册追溯）"
+            value={batchIdFilter}
+            onChange={(e) => {
+              setBatchIdFilter(e.target.value);
+              setPage(1);
+            }}
+            allowClear
+            style={{ width: 210 }}
+          />
           <Button icon={<ReloadOutlined />} disabled={!hasFilter} onClick={handleResetFilters}>
             重置筛选
           </Button>
@@ -2101,6 +2140,7 @@ export function MetricCatalog() {
               </Tag>
             )}
             {ownerFilter && <Tag closable onClose={() => { setOwnerFilter(""); setPage(1); }}>责任人下钻</Tag>}
+            {batchIdFilter && <Tag closable onClose={() => { setBatchIdFilter(""); setPage(1); }}>批次：{batchIdFilter}</Tag>}
             {myMetricsOnly && <Tag closable onClose={() => { setMyMetricsOnly(false); setPage(1); }}>我的指标</Tag>}
             {piiOnly && <Tag closable onClose={() => { setPiiOnly(false); setPage(1); }}>只看 PII</Tag>}
             {favoritesOnly && <Tag closable onClose={() => { setFavoritesOnly(false); }}>只看收藏</Tag>}
@@ -2252,10 +2292,32 @@ export function MetricCatalog() {
           </div>
         )}
         {batchAction === "approve" && (
-          <p>
-            将勾选的 <b>{selected.filter((m) => m.status === "REVIEW").length}</b> 个评审中指标通过并发布
-            （REVIEW → PUBLISHED）。评审人指派校验由后端逐条执行，未通过项显示原因。
-          </p>
+          <div>
+            <p>
+              将勾选的 <b>{selected.filter((m) => m.status === "REVIEW").length}</b> 个评审中指标通过并发布
+              （REVIEW → PUBLISHED）。评审人指派校验由后端逐条执行，未通过项显示原因。
+            </p>
+            {/* P1-3（第六轮）：批量通过支持灰度发布——对齐单条 MetricReview 的
+                标准发布/灰度发布（仅指定租户）选择，后端 MetricBatchApproveRequest
+                已接受 mode/gray_tenant_ids，前端此前不传 */}
+            <div style={{ marginTop: 12 }}>
+              <Radio.Group
+                value={batchApproveMode}
+                onChange={(e) => setBatchApproveMode(e.target.value as "standard" | "experimental")}
+              >
+                <Radio value="standard">标准发布（全部租户）</Radio>
+                <Radio value="experimental">灰度发布（仅指定租户）</Radio>
+              </Radio.Group>
+            </div>
+            {batchApproveMode === "experimental" && (
+              <Input
+                style={{ marginTop: 8 }}
+                placeholder="灰度租户 ID（逗号/空格分隔，如 1001, 1002）"
+                value={batchGrayTenants}
+                onChange={(e) => setBatchGrayTenants(e.target.value)}
+              />
+            )}
+          </div>
         )}
         {batchAction === "reject" && (
           <div>

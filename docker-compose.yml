@@ -178,6 +178,18 @@ services:
       UNISENSE_ES_PASSWORD: ${UNISENSE_ES_PASSWORD:-es_changeme}
       # OLAP 可选，默认空（consume 查询会降级 503）
       UNISENSE_OLAP_URL: ${UNISENSE_OLAP_URL:-}
+      # Doris/StarRocks 直连地址（OLAPExecutor 实际连接参数；未显式配置时由
+      # config._derive_doris_from_olap_url 从 UNISENSE_OLAP_URL 自动派生 host/port）
+      UNISENSE_DORIS_HOST: ${UNISENSE_DORIS_HOST:-doris-fe}
+      UNISENSE_DORIS_PORT: ${UNISENSE_DORIS_PORT:-8030}
+      UNISENSE_DORIS_DATABASE: ${UNISENSE_DORIS_DATABASE:-unisense}
+      # MinIO（S3 兼容对象存储，审计归档）——此前 compose 定义了 minio 服务但
+      # backend/worker 未注入 UNISENSE_MINIO_*，容器内默认 localhost:9000 空凭据
+      # → audit_archive 上传必败（第六轮 P2-4）
+      UNISENSE_MINIO_ENDPOINT: ${UNISENSE_MINIO_ENDPOINT:-minio:9000}
+      UNISENSE_MINIO_ACCESS_KEY: ${UNISENSE_MINIO_ACCESS_KEY:-minioadmin}
+      UNISENSE_MINIO_SECRET_KEY: ${UNISENSE_MINIO_SECRET_KEY:-minioadmin}
+      UNISENSE_MINIO_BUCKET: ${UNISENSE_MINIO_BUCKET:-unisense-archive}
       # MySQL 查询降级引擎（OLAP 不可用时的只读兜底，指向可执行指标口径的 MySQL 业务库）
       UNISENSE_MYSQL_FALLBACK_URL: ${UNISENSE_MYSQL_FALLBACK_URL:-mysql+aiomysql://e2e:e2e@mysql:3306/e2e_biz?charset=utf8mb4}
       # JWT 密钥（生产必须通过环境变量注入强密钥）
@@ -233,7 +245,16 @@ services:
       UNISENSE_ES_USERNAME: elastic
       UNISENSE_ES_PASSWORD: ${UNISENSE_ES_PASSWORD:-es_changeme}
       UNISENSE_OLAP_URL: ${UNISENSE_OLAP_URL:-}
-      UNISENSE_JWT_SECRET: ${UNISENSE_JWT_SECRET:-dev-jwt-secret-change-in-production-32bytes}
+      UNISENSE_DORIS_HOST: ${UNISENSE_DORIS_HOST:-doris-fe}
+      UNISENSE_DORIS_PORT: ${UNISENSE_DORIS_PORT:-8030}
+      UNISENSE_DORIS_DATABASE: ${UNISENSE_DORIS_DATABASE:-unisense}
+      # MinIO（S3 兼容对象存储，审计归档）——此前 compose 定义了 minio 服务但
+      # backend/worker 未注入 UNISENSE_MINIO_*，容器内默认 localhost:9000 空凭据
+      # → audit_archive 上传必败（第六轮 P2-4）
+      UNISENSE_MINIO_ENDPOINT: ${UNISENSE_MINIO_ENDPOINT:-minio:9000}
+      UNISENSE_MINIO_ACCESS_KEY: ${UNISENSE_MINIO_ACCESS_KEY:-minioadmin}
+      UNISENSE_MINIO_SECRET_KEY: ${UNISENSE_MINIO_SECRET_KEY:-minioadmin}
+      UNISENSE_MINIO_BUCKET: ${UNISENSE_MINIO_BUCKET:-unisense-archive}
       UNISENSE_JWT_ALGORITHM: HS256
       UNISENSE_JWT_EXPIRE_MINUTES: 60
       UNISENSE_CORS_ORIGINS: http://localhost:8180,http://frontend:80

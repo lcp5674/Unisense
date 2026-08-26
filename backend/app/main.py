@@ -220,6 +220,11 @@ def create_app() -> FastAPI:
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(TraceIdMiddleware)
     app.add_middleware(MetricsMiddleware)
+    # P2（第六轮）：响应 GZip 压缩——parse-sql-batch 等大响应（语句 100 × sql[:2000]
+    # + 候选 200 最坏 ~400KB）压缩传输，避免 JSON 大载荷拖慢工业网络环境
+    from starlette.middleware.gzip import GZipMiddleware
+
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
     # ---- 路由 ----
     app.include_router(health_router)

@@ -179,14 +179,41 @@ def _norm_table_name(table: exp.Table) -> str:
     return ".".join(parts).lower()
 
 
+def _is_write_target(node: exp.Table) -> bool:
+    """判断 Table 节点是否为写操作（INSERT/CREATE/UPDATE/MERGE）的目标表。
+
+    ``INSERT INTO t (a, b) SELECT ...`` 带列清单时，sqlglot 把目标表解析为
+    ``exp.Schema(expressions=[列清单])`` 包裹 ``Table``——``node.parent`` 是
+    ``Schema`` 而非 ``Insert``，旧判断 ``parent is exp.Insert`` 失配，导致目标表
+    混入 source_tables（P0-2：INSERT 带列清单源表错挂）。逐层上溯识别写入目标：
+    Table → Schema → Insert/Create/Update/Merge。
+    """
+    parent = node.parent
+    if parent is None:
+        return False
+    if isinstance(parent, exp.Schema):
+        if parent.this is not node:
+            return False
+        gp = parent.parent
+        return isinstance(gp, (exp.Insert, exp.Create, exp.Update, exp.Merge))
+    if isinstance(parent, exp.Insert):
+        return parent.this is node
+    if isinstance(parent, exp.Create):
+        return parent.this is node
+    if isinstance(parent, exp.Update):
+        return parent.this is node
+    if isinstance(parent, exp.Merge):
+        return parent.this is node
+    return False
+
+
 def _extract_source_tables(ast: exp.Expr) -> list[str]:
     """表级血缘：读入源表（INSERT/CREATE TABLE AS/UPDATE/MERGE 的源 + 普通 SELECT FROM）。"""
     tables: list[str] = []
     for node in ast.walk():
         if isinstance(node, exp.Table):
-            # 排除被写为目标的表（INSERT INTO target）
-            parent = node.parent
-            if isinstance(parent, exp.Insert) and parent.this is node:
+            # 排除被写为目标的表（INSERT INTO target，含带列清单的 Schema 包裹形态）
+            if _is_write_target(node):
                 continue
             name = _norm_table_name(node)
             if name and name not in tables:
@@ -247,8 +274,7 @@ def _from_table(select: exp.Select) -> str | None:
         return _norm_table_name(this)
     for node in this.walk():
         if isinstance(node, exp.Table):
-            parent = node.parent
-            if isinstance(parent, exp.Insert) and parent.this is node:
+            if _is_write_target(node):
                 continue
             return _norm_table_name(node)
     return None
@@ -263,12 +289,33 @@ def _table_alias_map(select: exp.Select) -> dict[str, str]:
     """
     mapping: dict[str, str] = {}
     for node in select.find_all(exp.Table):
-        parent = node.parent
-        if isinstance(parent, exp.Insert) and parent.this is node:
+        if _is_write_target(node):
             continue
         alias = (node.alias or node.name or "").lower()
         if alias:
             mapping[alias] = _norm_table_name(node)
+    return mapping
+
+
+def _full_alias_map(select: exp.Select) -> dict[str, str]:
+    """别名 → 物理表（穿透子查询别名链，P0-3a 多层嵌套源表归属）。
+
+    ``FROM (SELECT ... FROM ods.raw_event) a LEFT JOIN ods.ref_dict b`` →
+    ``{a: ods.raw_event, b: ods.ref_dict}``——子查询别名 a 也解析到其 FROM 主表，
+    使 ``sum(a.amount)`` 候选 source_table 正确归属 ods.raw_event 而非 join 右侧
+    字典表（此前 ``_table_alias_map`` 只映射裸 Table 别名，子查询别名缺失 →
+    ``_measure_table`` 返回 None → 候选回退 ``tables[0]``＝join 右表，口径错挂）。
+    """
+    mapping = _table_alias_map(select)
+    for sub in select.find_all(exp.Subquery):
+        alias = (sub.alias or "").lower()
+        if not alias or alias in mapping:
+            continue
+        inner = sub.this
+        if isinstance(inner, exp.Select):
+            phys = _from_table(inner)
+            if phys:
+                mapping[alias] = phys
     return mapping
 
 
@@ -277,17 +324,19 @@ def _measure_table(select: exp.Select, agg: exp.AggFunc) -> str | None:
 
     ``sum(a.amount), sum(b.amount)`` 的候选此前都取 ``_from_table`` 的第一个物理表
     ——b 侧口径错挂 a 表。此处从聚合参数列的表前缀（``a.amount`` → 别名 a）解析
-    对应物理表；无前缀/未命中返回 None（上层回退通用来源表）。
+    对应物理表（经 ``_full_alias_map`` 穿透子查询别名，P0-3a 多层嵌套也能归属）；
+    无前缀/未命中返回 None（上层回退通用来源表）。
     """
     col = agg.this
     if isinstance(col, exp.Distinct):
         col = col.expressions[0] if col.expressions else None
+    alias_map = _full_alias_map(select)
     if isinstance(col, exp.Column) and col.table:
-        return _table_alias_map(select).get(col.table.lower())
+        return alias_map.get(col.table.lower())
     if isinstance(col, exp.Case):
         for c in col.walk():
             if isinstance(c, exp.Column) and c.table:
-                return _table_alias_map(select).get(c.table.lower())
+                return alias_map.get(c.table.lower())
     return None
 
 
@@ -387,6 +436,29 @@ def _extract_col_name(node: exp.Expr | None) -> str:
     return first or "*"
 
 
+def _is_wrapped_aggregate(target: exp.Expr) -> bool:
+    """是否「格式化包裹的单聚合」投影（IFNULL(SUM(x),0)/ROUND(SUM(x),2)/COALESCE(SUM(x),0)）。
+
+    这类投影本质是单个聚合（外层只是格式/默认值包裹，如 MySQL ``IFNULL(SUM(amount),0)``
+    仍指「金额合计」），应作为独立聚合度量捕获。
+
+    而 ``ROUND(SUM(a)/NULLIF(COUNT(b),0),2)``（算术/条件组合多个聚合）是**派生比率**，
+    由 ``_collect_derived_measures`` 收集——若 ``_projection_measures`` 也提取内嵌聚合，
+    会：① 与独立聚合（gmv=SUM(amount)）撞同一编码（``fin_trade_amount_day`` 重复 →
+    注册 METRIC_CODE_EXISTS）；② 内嵌聚合列名（is_refund）未命中受控词根 → 注册失败。
+    """
+    aggs = [n for n in target.walk() if isinstance(n, exp.AggFunc)]
+    if not aggs:
+        return False
+    if len(aggs) > 1:
+        return False
+    # 单聚合且表达式内无算术/条件组合节点（Div/Mul/Add/Sub/Case）→ 纯格式包裹
+    return not any(
+        isinstance(n, (exp.Div, exp.Mul, exp.Add, exp.Sub, exp.Mod, exp.Case, exp.If))
+        for n in target.walk()
+    )
+
+
 def _projection_measures(
     select: exp.Select,
     enrich: bool = False,
@@ -420,6 +492,12 @@ def _projection_measures(
             projection = exp.alias_(target, f"_col_{len(measures) + 1}")
         agg = target.find(exp.AggFunc) if target else None
         if agg is None:
+            continue
+        # P0-3d：聚合埋在算术/条件组合里（ROUND(SUM/NULLIF(COUNT)) 比率、SUM(CASE)/
+        # NULLIF(COUNT(*)) 退货率）是「派生度量」而非独立聚合投影——由
+        # _collect_derived_measures 收集（含完整 expression）；此处跳过内嵌聚合，
+        # 避免与独立聚合（gmv=SUM(amount)）撞同一编码 / 内嵌列名未命中受控词根
+        if not isinstance(target, exp.AggFunc) and not _is_wrapped_aggregate(target):
             continue
         agg_name = _agg_display_name(agg)
         if agg_name is None:
@@ -468,13 +546,66 @@ def _projection_measures(
     return measures
 
 
+def _collect_derived_measures(select: exp.Select) -> list[dict[str, Any]]:
+    """无聚合包裹的派生投影（ROUND(SUM/NULLIF)/CASE 比率/COALESCE 列等）。
+
+    P0-3d：真实 ETL 的「客单价 = ROUND(SUM(amount)/NULLIF(COUNT(DISTINCT
+    user_id),0),2)」「退货率 = SUM(CASE...)/NULLIF(COUNT(*),0)」等核心派生指标
+    此前被 ``_projection_measures`` 整体跳过——外层 SELECT 有聚合度量时，非聚合
+    表达式投影静默缺失。此处对聚合承载的 SELECT 额外收集：仅收「表达式内仍含
+    聚合函数」的派生投影（比率/条件聚合嵌套），纯列/截断表达式（``substr(dt)``
+    等维度列）不含聚合不产出假候选。``agg=None`` + ``derived=True`` + 原始
+    expression，候选构建标记「口径需核对」，注册聚合占位（口径由 expression 承载，
+    对齐复合指标占位语义）；``sunk=True`` 用 alias 作编码锚点防与内嵌聚合度量撞码。
+    """
+    out: list[dict[str, Any]] = []
+    for projection in select.expressions:
+        target = projection.this if isinstance(projection, exp.Alias) else projection
+        alias = projection.alias_or_name if isinstance(projection, exp.Alias) else None
+        if target is None or isinstance(target, exp.AggFunc):
+            continue
+        if isinstance(target, exp.Column):
+            continue  # 纯列透传（gmv 等已由聚合度量捕获）不重复产出
+        aggs = [n for n in target.walk() if isinstance(n, exp.AggFunc)]
+        if not aggs:
+            continue  # 表达式不含聚合（substr(dt) 维度列等）→ 非度量
+        # 单聚合 + 纯格式化包裹（IFNULL(SUM(x),0)/ROUND(SUM(x),2)/COUNT FILTER）：
+        # 仍是该聚合本身，已由 _projection_measures 捕获，不重复产出派生候选
+        if len(aggs) == 1:
+            combined = any(
+                isinstance(n, (exp.Div, exp.Mul, exp.Add, exp.Sub, exp.Mod, exp.Case, exp.If))
+                for n in target.walk()
+            )
+            if not combined:
+                continue
+        col = next(
+            (c.name.lower() for c in target.walk() if isinstance(c, exp.Column)), "*"
+        )
+        try:
+            expr_sql = target.sql()
+        except Exception:  # noqa: BLE001 - 序列化失败仅降级表达式占位
+            expr_sql = alias or col
+        out.append(
+            {
+                "column": col,
+                "agg": None,
+                "derived": True,
+                "alias": alias,
+                "expression": expr_sql,
+                "sunk": True,  # 用 alias 作编码锚点防与内嵌聚合度量（同列）撞码
+            }
+        )
+    return out
+
+
 def _extract_measures(select: exp.Select) -> list[dict[str, Any]]:
     """SELECT 投影度量；外层无聚合时下沉 FROM 子树找聚合投影。
 
     ETL 落宽表常见 ``insert overwrite ... select a.col1, a.cnt ... from (聚合子查询) a``
     透传形态——最外层投影只是改名/join 字典，聚合在子查询内。此时下沉收集聚合
-    投影的度量，按 ``(alias, agg)`` 去重（UNION 多支同指标合并），并附带
-    ``alias/table/expression`` 供候选构建区分同列不同语义并还原口径。
+    投影的度量，按 ``(alias, agg, table)`` 去重（UNION 多支同指标合并；P0-3b：
+    去重键含 table，两个子查询同名列 ``t1.cnt``/``t2.cnt`` 不再被合并丢一支），
+    并附带 ``alias/table/expression`` 供候选构建区分同列不同语义并还原口径。
 
     **A-1/2**：顶层投影也走 ``enrich=True`` 携带原始 ``expression``（如
     ``SUM(CASE WHEN status='paid' THEN amount END)``/``SUM(amount) OVER (...``）——
@@ -482,30 +613,40 @@ def _extract_measures(select: exp.Select) -> list[dict[str, Any]]:
     CASE 过滤条件/窗口语义被丢弃，注册后指标变全表聚合（数据错误）。
     顶层不传 ``table``（候选的源表由 ``_physical_source_tables`` 过滤 CTE 别名后
     决定，避免顶层 measure 误挂 CTE 名）且 ``sunk=False``（编码锚点用真实列）。
+    **P0-3d**：顶层聚合承载时额外收集派生比率/条件列（``_collect_derived_measures``）。
     """
     measures = _projection_measures(select, enrich=True, table=None, sunk=False)
-    # A-4：全局子查询投影别名 → 物理列映射（聚合参数是子查询/CTE 投影别名时解析为
-    # 底层物理列——``SUM(x) FROM (SELECT amount AS x ...)`` 的 source_fields 若不
-    # 解析会落 ``[orders, x]``（物理表+不存在的列），血缘/下游错乱）。仅映射
-    # Alias(Column) 简单透传，复杂表达式保留别名。
+    # A-4/P0-3c：全局子查询/CTE 投影别名 → 物理列映射（聚合参数是子查询/CTE 投影
+    # 别名时解析为底层物理列——``SUM(x) FROM (SELECT amount AS x ...)`` 的
+    # source_fields 若不解析会落 ``[orders, x]``（物理表+不存在的列），血缘/下游
+    # 错乱）。简单透传 Alias(Column) → 列名；派生聚合列 Alias(AggFunc)（如
+    # ``sum(amount) AS day_amt``）→ 底层聚合列 amount（P0-3c）；复杂表达式保留别名。
     alias_map: dict[str, str] = {}
     for sub in select.find_all(exp.Select):
         if sub is select:
             continue
         for proj in sub.expressions:
-            if (
-                isinstance(proj, exp.Alias)
-                and isinstance(proj.this, exp.Column)
-                and proj.alias_or_name
-            ):
-                alias_map[proj.alias_or_name.lower()] = proj.this.name.lower()
+            if not isinstance(proj, exp.Alias) or not proj.alias_or_name:
+                continue
+            inner = proj.this
+            if isinstance(inner, exp.Column):
+                alias_map[proj.alias_or_name.lower()] = inner.name.lower()
+            elif isinstance(inner, exp.AggFunc):
+                col_expr = inner.this
+                if isinstance(col_expr, exp.Distinct):
+                    col_expr = col_expr.expressions[0] if col_expr.expressions else None
+                alias_map[proj.alias_or_name.lower()] = _extract_col_name(col_expr)
     if measures:
         if alias_map:
             for m in measures:
                 if m["column"] in alias_map:
                     m["column"] = alias_map[m["column"]]
+        # P0-3d：聚合承载 SELECT 的派生比率/条件列（含嵌套聚合）也产出候选
+        derived = _collect_derived_measures(select)
+        if derived:
+            measures.extend(derived)
         return measures
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str | None]] = set()
     for sub in select.find_all(exp.Select):
         if sub is select:
             continue
@@ -514,7 +655,9 @@ def _extract_measures(select: exp.Select) -> list[dict[str, Any]]:
         ):
             if alias_map and m["column"] in alias_map:
                 m["column"] = alias_map[m["column"]]
-            key = (m["alias"] or m["column"], m["agg"])
+            # P0-3b：去重键含来源表——两个子查询同名列（t1.cnt/t2.cnt）分属不同表
+            # 时不再合并丢一支；同表同列同聚合仍合并（UNION 多支同指标）
+            key = (m["alias"] or m["column"], m["agg"], m.get("table"))
             if key in seen:
                 continue
             seen.add(key)
@@ -802,6 +945,15 @@ def parse_sql_profile(sql: str) -> SqlProfile:
         return SqlProfile(sql=sql.strip())
 
     source_tables = _extract_source_tables(ast)
+    # P0-3a：主 FROM 表排首——``find_all(exp.Table)`` 的 walk 顺序会把 join 右侧
+    # 字典表排前（``FROM (SELECT ... FROM ods.raw_event) a LEFT JOIN ods.ref_dict b``
+    # → ref_dict 先于 raw_event），source_tables[0] 若为字典表会让无表前缀度量候选
+    # 错挂 join 右表。主 FROM 表（穿透子查询）排首后，候选回退 tables[0] 得到正确
+    # 主表；度量自身携带 table（_measure_table 穿透别名链）时不受顺序影响。
+    main = _from_table(select)
+    if main and main in source_tables:
+        source_tables.remove(main)
+        source_tables.insert(0, main)
     group_by = _extract_group_by(select)
     measures = _extract_measures(select)
     filters = _extract_filters(select)

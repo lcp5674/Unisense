@@ -47,9 +47,63 @@ class TestValidateProductionConfig:
         with pytest.raises(ConfigurationError, match="OLAP_URL"):
             _mk(olap_url="")
 
+    def test_doris_localhost_rejected_in_prod(self) -> None:
+        """P0-1：生产 OLAP 直连地址不能是 localhost（容器自身），否则查询必失败——
+        olap_url 指向 localhost 会被派生为 doris_host=localhost，须拒绝启动。"""
+        with pytest.raises(ConfigurationError, match="Doris 连接地址"):
+            _mk(olap_url="http://localhost:8030")
+
     def test_cors_wildcard_rejected(self) -> None:
         with pytest.raises(ConfigurationError, match="通配符"):
             _mk(cors_origins="*")
+
+
+class TestDorisDerivedFromOlapUrl:
+    """P0-1：OLAPExecutor 实际连接用 doris_host/port，生产校验却强制 olap_url 非空——
+    两者脱节导致生产设了 olap_url 仍连 localhost。olap_url 配置后自动派生 doris 参数。"""
+
+    def test_dev_olap_url_derives_doris(self) -> None:
+        s = Settings(
+            _env_file=None,
+            env="dev",
+            db_url="mysql+pymysql://u:p@localhost:3306/db",
+            jwt_secret="x" * 40,
+            olap_url="http://doris-fe:8030/unisense",
+        )
+        assert s.doris_host == "doris-fe"
+        assert s.doris_port == 8030
+        assert s.doris_database == "unisense"
+
+    def test_explicit_doris_host_wins(self) -> None:
+        """显式配置 doris_host 时不被 olap_url 覆盖。"""
+        s = Settings(
+            _env_file=None,
+            env="dev",
+            db_url="mysql+pymysql://u:p@localhost:3306/db",
+            jwt_secret="x" * 40,
+            olap_url="http://fe-a:8030",
+            doris_host="fe-b",
+        )
+        assert s.doris_host == "fe-b"
+
+    def test_olap_url_port_derived(self) -> None:
+        s = Settings(
+            _env_file=None,
+            env="dev",
+            db_url="mysql+pymysql://u:p@localhost:3306/db",
+            jwt_secret="x" * 40,
+            olap_url="http://doris:9030",
+        )
+        assert s.doris_port == 9030
+
+    def test_no_olap_url_keeps_default(self) -> None:
+        s = Settings(
+            _env_file=None,
+            env="dev",
+            db_url="mysql+pymysql://u:p@localhost:3306/db",
+            jwt_secret="x" * 40,
+        )
+        assert s.doris_host == "localhost"
 
 
 class TestCorsOriginsList:

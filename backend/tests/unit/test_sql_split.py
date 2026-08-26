@@ -879,8 +879,20 @@ async def test_infer_sql_batch_multiple_domain_no_illegal_code() -> None:
         "status": "multiple",
         "domain": None,
         "candidates": [
-            {"code": "sales", "name": "销售", "confidence": 0.9, "source": "catalog", "reason": "表A"},
-            {"code": "health", "name": "医疗", "confidence": 0.8, "source": "catalog", "reason": "表B"},
+            {
+                "code": "sales",
+                "name": "销售",
+                "confidence": 0.9,
+                "source": "catalog",
+                "reason": "表A",
+            },
+            {
+                "code": "health",
+                "name": "医疗",
+                "confidence": 0.8,
+                "source": "catalog",
+                "reason": "表B",
+            },
         ],
         "matched_tables": ["dwd_order_di", "dwd_patient_di"],
     }
@@ -891,8 +903,18 @@ async def test_infer_sql_batch_multiple_domain_no_illegal_code() -> None:
         if ";" in sql:
             return multiple
         if "user_id" in sql:
-            return {"status": "unique", "domain": {"code": "health"}, "candidates": [], "matched_tables": []}
-        return {"status": "unique", "domain": {"code": "sales"}, "candidates": [], "matched_tables": []}
+            return {
+                "status": "unique",
+                "domain": {"code": "health"},
+                "candidates": [],
+                "matched_tables": [],
+            }
+        return {
+            "status": "unique",
+            "domain": {"code": "sales"},
+            "candidates": [],
+            "matched_tables": [],
+        }
 
     with patch(
         "app.services.semantic.domain_suggest.suggest_domain",
@@ -1085,3 +1107,32 @@ def test_split_custom_skips_redos_delimiters() -> None:
     assert len(segments) == 2
     assert segments[0] == "A"
     assert segments[1] == "--\nB"
+
+
+async def test_infer_sql_batch_candidates_carry_raw_sql() -> None:
+    """P1-1/P2-5：infer_sql_batch 产出的候选直接携带所属语句原始 SQL（raw_sql）——
+    API 消费者/集成链路提交时无需再从语句 meta 反查（口径溯源闭合）。"""
+    sql = "SELECT SUM(amount) AS gmv FROM ods.orders GROUP BY dt"
+    result = await infer_sql_batch(_fake_db(), sql=sql, split_mode="statement", domain_code="sales")
+    assert result["candidates"], "应产出候选"
+    for c in result["candidates"]:
+        assert c.get("raw_sql") == sql, "候选应携带完整语句原文"
+
+
+async def test_infer_sql_batch_derived_ratio_candidate() -> None:
+    """P0-3d：派生比率列（ROUND(SUM/NULLIF(COUNT))）经 infer_sql_batch 产出
+    derived 候选——aggregation=None（前端展示派生而非伪聚合）+ needs_review +
+    完整 expression 口径。"""
+    sql = (
+        "SELECT SUM(amount) AS gmv, COUNT(DISTINCT user_id) AS uv, "
+        "ROUND(SUM(amount)/NULLIF(COUNT(DISTINCT user_id),0),2) AS avg_price "
+        "FROM ods.orders GROUP BY dt"
+    )
+    result = await infer_sql_batch(_fake_db(), sql=sql, split_mode="statement", domain_code="sales")
+    derived = [c for c in result["candidates"] if c.get("derived")]
+    assert len(derived) == 1, "应产出 1 个派生比率候选"
+    d = derived[0]
+    assert d["aggregation"] is None, "派生候选聚合应为 None（占位由 Phase1 处理）"
+    assert d["needs_review"] is True, "派生候选应标记口径需核对"
+    assert "SUM" in (d["definition_json"].get("expression") or "").upper()
+    assert d["raw_sql"] == sql, "派生候选也应携带原始 SQL"

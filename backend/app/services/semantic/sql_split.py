@@ -507,6 +507,7 @@ def _build_atomic_candidate(
     time_column: str | None,
     suggested_domain_code: str | None = None,
     source: str = "rule",
+    raw_sql: str | None = None,
 ) -> dict[str, Any]:
     """构建原子候选：expression 模式推断（勿传多度量原 SQL，避免兄弟度量进口径），
     聚合方式覆盖为 SQL 解析值（比列名规则更可靠）。
@@ -515,9 +516,14 @@ def _build_atomic_candidate(
     key 用 alias 防同列不同语义冲突，源表/口径优先用度量自身携带值。
     ``source``（P2-2）：``rule``（规则层可靠产出）或 ``llm``（LLM 兜底提取，
     前端据此加「AI 推断」Tag 让用户复核）。
+    ``raw_sql``（P1-1/P2-5）：候选所属语句原始 SQL 原文切片——后端候选直接携带，
+    API 消费者/集成链路提交时无需再从语句 meta 反查（口径溯源闭合）。
     """
     col = measure["column"]
-    agg = measure["agg"] or "COUNT"
+    derived = bool(measure.get("derived"))
+    # 派生比率/条件列（P0-3d，agg=None）聚合占位 SUM（口径由 expression 承载，
+    # 对齐复合指标占位语义）；普通度量缺失聚合兜底 COUNT（既有行为）
+    agg = measure["agg"] or ("COUNT" if not derived else "SUM")
     alias = measure.get("alias")
     measure_table = measure.get("table") or table
     # 下沉度量（A-4：ETL 透传 INSERT 内层子查询的聚合投影）同列多语义（多个
@@ -567,7 +573,10 @@ def _build_atomic_candidate(
         "type": "atomic",
         "source_table": measure_table,
         "measure_column": col,
-        "aggregation": agg,
+        # 派生比率/条件列（P0-3d）：聚合占位 None——前端展示「派生表达式」而非
+        # 伪装成标准聚合；批量创建 Phase1 用 ``or "SUM"`` 占位（口径由 expression
+        # 承载），与复合指标占位语义一致
+        "aggregation": None if derived else agg,
         "period": period,
         "unit": fields["unit"]["value"],
         "granularity": fields["granularity"]["value"],
@@ -577,11 +586,17 @@ def _build_atomic_candidate(
         # OneData 接线（生产就绪审查 P2）：SQL 无法推断逻辑度量，恒空——前端批量
         # 候选行提供「关联逻辑度量」选择器补全后透传；此处保持契约键存在
         "measure_id": measure.get("measure_id"),
+        # 口径溯源（P1-1/P2-5）：候选所属语句原始 SQL（原文切片，批量创建透传落
+        # Metric.raw_sql——候选仅表达式，整句口径原文可据此反查）
+        "raw_sql": raw_sql,
         "suggested_domain_code": suggested_domain_code,
         # P2-2：候选来源（rule=规则层 / llm=LLM 兜底），前端「AI 推断」复核标识
         "source": source,
         # A-1/2：CASE/窗口/下沉口径需人工核对标识（前端「口径需核对」Tag）
         "needs_review": needs_review,
+        # P0-3d：派生比率/条件列（ROUND(SUM/NULLIF)/CASE 比率等无聚合包裹的表达式）
+        # ——前端据此展示「派生表达式」并在口径核对区呈现完整 expression
+        "derived": derived,
     }
 
 
@@ -594,12 +609,14 @@ def _build_composite_candidate(
     domain_code: str | None,
     period: str,
     suggested_domain_code: str | None = None,
+    raw_sql: str | None = None,
 ) -> dict[str, Any] | None:
     """合成复合候选：依赖组内 N 原子编码，口径 SQL=原语句（保留多度量计算结构）。
 
     编码/粒度使用语句实际统计周期（``period``），不再硬编码 ``_day``/``day``——
     月粒度 ETL 的复合指标此前生成 ``xxx_day``（粒度 day）与实际口径（month）不符，
     注册后编码与粒度均失真（P1-3 一致性缺陷）。
+    ``raw_sql``（P1-1/P2-5）：复合候选所属语句原始 SQL，批量创建透传落 Metric.raw_sql。
     """
     codes = [c["metric_code"] for c in atoms if c.get("metric_code")]
     if len(codes) < 2:
@@ -628,6 +645,7 @@ def _build_composite_candidate(
         "definition_mode": "sql",
         "dependencies": codes,
         "statement_index": idx,
+        "raw_sql": raw_sql,
         "suggested_domain_code": suggested_domain_code,
     }
 
@@ -872,6 +890,7 @@ async def infer_sql_batch(
                             time_column=profile.time_column,
                             suggested_domain_code=seg_domain_code,
                             source="llm",
+                            raw_sql=seg,
                         )
                     )
             else:
@@ -911,6 +930,7 @@ async def infer_sql_batch(
                     domain_defaults=domain_defaults,
                     time_column=profile.time_column,
                     suggested_domain_code=seg_domain_code,
+                    raw_sql=seg,
                 )
             )
         candidates.extend(atoms)
@@ -923,6 +943,7 @@ async def infer_sql_batch(
                 domain_code=domain_code,
                 period=period,
                 suggested_domain_code=seg_domain_code,
+                raw_sql=seg,
             )
             if composite:
                 candidates.append(composite)

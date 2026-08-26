@@ -82,6 +82,9 @@ const SQL_SKIP_REASON_TEXT: Record<string, string> = {
   parse_failed: "含聚合但语法/方言无法识别，已尝试 AI 兜底仍未能提取",
   no_aggregate: "语句未包含 SUM/COUNT 等聚合函数，已跳过",
   llm_infer_failed: "已尝试 AI 兜底解析仍无法识别聚合度量",
+  // P1-2（第五轮）：后端批级 LLM 兜底额度（_LLM_BATCH_LIMIT=5）耗尽——降级 skipped
+  // 并产 reason=llm_limit；此前前端无此键落到兜底文案，误导用户以为 SQL 有问题
+  llm_limit: "已达本批 AI 兜底上限（每批最多 5 次），建议缩减语句数后重试",
 };
 
 /** 汇总多条 skipped 成一行可读文案（按原因去重，未知原因用兜底文案）。 */
