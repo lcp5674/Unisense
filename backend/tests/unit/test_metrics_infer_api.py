@@ -187,3 +187,86 @@ async def test_update_metric_audit_no_governance_when_unchanged(
     assert resp.status_code == 200
     detail = mock_audit.call_args.kwargs["detail"]
     assert "governance_changed" not in detail
+
+
+async def test_refine_definition_business_enrich_success(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """三层口径 LLM 增强：业务口径丰富增强成功，返回 content 文本（不落库）。"""
+    mock_client = MagicMock()
+    mock_client.enabled = True
+    mock_client.chat = AsyncMock(
+        return_value={"content": "按就诊号去重统计的门诊就诊总人次"}
+    )
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        return_value=mock_client,
+    ):
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/refine-definition",
+            json={
+                "field": "business",
+                "action": "enrich",
+                "current": "门诊就诊次数",
+                "metric_code": "m_outp_visit",
+                "metric_name": "门诊就诊人次",
+                "domain": "wedw_outpatient",
+            },
+        )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["content"] == "按就诊号去重统计的门诊就诊总人次"
+    assert data["source"] == "llm"
+    # 验证 prompt 带上下文（名称/域传入 LLM）
+    _, kwargs = mock_client.chat.await_args
+    prompt = kwargs["messages"][0]["content"]
+    assert "门诊就诊人次" in prompt
+    assert "wedw_outpatient" in prompt
+
+
+async def test_refine_definition_llm_disabled(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """三层口径 LLM 增强：LLM 不可用时返回 400 LLM_INFER_UNAVAILABLE。"""
+    mock_client = MagicMock()
+    mock_client.enabled = False
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        return_value=mock_client,
+    ):
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/refine-definition",
+            json={"field": "dw", "action": "generate", "current": ""},
+        )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "LLM_INFER_UNAVAILABLE"
+
+
+async def test_refine_definition_empty_content(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """三层口径 LLM 增强：LLM 返回空内容 → 400 LLM_INFER_UNAVAILABLE（防空回填）。"""
+    mock_client = MagicMock()
+    mock_client.enabled = True
+    mock_client.chat = AsyncMock(return_value={"content": "```\n  \n```"})
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        return_value=mock_client,
+    ):
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/refine-definition",
+            json={"field": "pseudo", "action": "generate", "current": ""},
+        )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "LLM_INFER_UNAVAILABLE"
+
+
+async def test_refine_definition_invalid_field(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """三层口径 LLM 增强：非法 field 返回 422（Pydantic Literal 校验）。"""
+    resp = await metrics_client.post(
+        "/api/v1/metric-definitions/refine-definition",
+        json={"field": "other", "action": "generate", "current": ""},
+    )
+    assert resp.status_code == 422

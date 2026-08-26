@@ -25,6 +25,7 @@ vi.mock("../api", async () => {
     getDomainDefaults: vi.fn(),
     checkConflict: vi.fn(),
     createMetric: vi.fn(),
+    refineMetricDefinition: vi.fn(),
     // 默认 platform_admin（不受域门禁限制）；跨域预检测试再覆盖为 domain_admin
     fetchCurrentUser: vi.fn().mockResolvedValue({
       id: 1,
@@ -36,7 +37,7 @@ vi.mock("../api", async () => {
   };
 });
 
-import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, checkConflict, createMetric, listMetrics, listMeasureCatalogs, fetchCurrentUser } from "../api";
+import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, checkConflict, createMetric, listMetrics, listMeasureCatalogs, fetchCurrentUser, refineMetricDefinition } from "../api";
 import type { DBCatalog, SubjectDomainTreeNode, AutoSuggestResponse, DomainSuggestionResponse, SqlBatchParseResult } from "../types";
 
 const mockedTree = vi.mocked(listDomainTree);
@@ -52,6 +53,7 @@ const mockedBatchFromSql = vi.mocked(batchRegisterFromSql);
 const mockedCheckConflict = vi.mocked(checkConflict);
 const mockedCreate = vi.mocked(createMetric);
 const mockedMetrics = vi.mocked(listMetrics);
+const mockedRefine = vi.mocked(refineMetricDefinition);
 
 /** 后端 auto-suggest 永不返回 undefined（auto_fill 兜底成完整对象）——"无建议"即空 fields/空 code 的合法响应。 */
 const NO_SUGGESTION: AutoSuggestResponse = {
@@ -1387,6 +1389,35 @@ describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数�
         "SELECT visit_date, SUM(real_amount) AS amt FROM dwd.fee_bill_di",
       );
     });
+  });
+
+  it("Step② 三层口径 AI 生成/丰富增强：业务口径有值点「AI 丰富增强」回填", async () => {
+    mockedRefine.mockResolvedValue({
+      content: "按就诊号去重统计的门诊就诊总人次（含跨院区）",
+      source: "llm",
+    });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await goToStep(2);
+    const biz = screen.getByRole("textbox", { name: "业务口径" }) as HTMLTextAreaElement;
+    fireEvent.change(biz, { target: { value: "门诊就诊次数" } });
+    // 业务口径有值 → 按钮显示「AI 丰富增强」（限定在业务口径 Form.Item 内，避免命中同名按钮）
+    const bizItem = biz.closest(".ant-form-item") as HTMLElement;
+    const enrichBtn = within(bizItem).getByRole("button", { name: /AI 丰富增强/ });
+    expect(enrichBtn).toBeTruthy();
+    fireEvent.click(enrichBtn);
+    await waitFor(() => {
+      const bizArea = screen.getByRole("textbox", { name: "业务口径" }) as HTMLTextAreaElement;
+      expect(bizArea.value).toBe("按就诊号去重统计的门诊就诊总人次（含跨院区）");
+    });
+    // 请求载荷：field=business + action=enrich + 当前值
+    expect(mockedRefine).toHaveBeenCalledWith(
+      expect.objectContaining({
+        field: "business",
+        action: "enrich",
+        current: "门诊就诊次数",
+      }),
+    );
   });
 });
 

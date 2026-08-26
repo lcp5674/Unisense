@@ -447,6 +447,12 @@ class MetricBatchDeprecateRequest(BaseModel):
     items: list[MetricBatchDeprecateItem] = Field(..., min_length=1, max_length=100)
 
 
+class MetricBatchReactivateRequest(BaseModel):
+    """批量重新启用已废弃指标请求（P2-1：DEPRECATED → DRAFT，对齐维度 batch-reactivate）。"""
+
+    metric_codes: list[str] = Field(..., min_length=1, max_length=100)
+
+
 class MetricDownstreamCheckRequest(BaseModel):
     """批量下线下游使用审查请求（批量下线弹窗预审用）。"""
 
@@ -585,6 +591,33 @@ class MetricSuggestDomainRequest(BaseModel):
         if not (self.sql or self.source_table):
             raise ValueError("sql 与 source_table 至少提供一个")
         return self
+
+
+class MetricRefineDefinitionRequest(BaseModel):
+    """指标三层口径 LLM 增强请求（业务口径 / 伪代码口径 / 数仓SQL口径）。
+
+    供编辑弹窗 / 注册向导的「AI 丰富增强 / AI 生成 / AI 优化」按钮调用：
+    LLM 只生成文本回填，不落库、不创建版本（落库仍走既有编辑/提交流程），
+    因此本端点不校验指标权限——凡具备写角色的用户即可对口径做 LLM 辅助。
+    """
+
+    field: Literal["business", "pseudo", "dw"] = Field(
+        ..., description="目标口径层：business=业务口径 / pseudo=伪代码口径 / dw=数仓SQL口径"
+    )
+    action: Literal["enrich", "generate", "optimize"] = Field(
+        ..., description="动作：enrich=丰富增强现有 / generate=从上下文生成 / optimize=优化现有"
+    )
+    current: str = Field(
+        default="", max_length=16384, description="当前口径内容（generate 时可为空）"
+    )
+    metric_code: str | None = Field(None, max_length=64, description="指标编码（供 LLM 参考）")
+    metric_name: str | None = Field(None, max_length=128, description="指标中文名（供 LLM 参考）")
+    domain: str | None = Field(None, max_length=64, description="所属业务域（供 LLM 参考）")
+    sql: str | None = Field(None, max_length=16384, description="技术口径 SQL（源业务库口径）")
+    expression: str | None = Field(None, max_length=4096, description="计算表达式（MEL）")
+    business_definition: str | None = Field(None, max_length=16384, description="现有业务口径")
+    pseudo_definition: str | None = Field(None, max_length=16384, description="现有伪代码口径")
+    dw_definition: str | None = Field(None, max_length=16384, description="现有数仓SQL口径")
 
 
 class MetricBatchRegisterRequest(BaseModel):

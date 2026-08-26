@@ -41,6 +41,7 @@ vi.mock("../api", () => ({
   updateMetricDescription: vi.fn(),
   suggestRenameName: vi.fn(),
   inferMetricDescription: vi.fn(),
+  refineMetricDefinition: vi.fn(),
   upsertSubscription: vi.fn(),
   verifyDictValues: vi.fn(),
   notifyUnknownDictValues: vi.fn(),
@@ -85,6 +86,7 @@ import {
   updateMetricDescription,
   suggestRenameName,
   inferMetricDescription,
+  refineMetricDefinition,
   submitReview,
   emergencyPublishMetric,
   completeEmergencyReview,
@@ -102,6 +104,7 @@ const mockedUpdateMetric = vi.mocked(updateMetric);
 const mockedUpdateDesc = vi.mocked(updateMetricDescription);
 const mockedSuggestRename = vi.mocked(suggestRenameName);
 const mockedInferDesc = vi.mocked(inferMetricDescription);
+const mockedRefine = vi.mocked(refineMetricDefinition);
 const mockedGetMetric = vi.mocked(getMetric);
 const mockedFetchArchived = vi.mocked(fetchArchivedMetric);
 const mockedListVersions = vi.mocked(listVersions);
@@ -1863,6 +1866,136 @@ describe("MetricDetail 按钮级权限过滤", () => {
       const def = (lastCall as { definition_json?: Record<string, unknown> }).definition_json ?? {};
       expect("dw_definition" in def).toBe(false);
     });
+  });
+
+  it("编辑弹窗三层口径 LLM 增强：业务口径 AI 丰富增强回填 + dirty（可保存合入）", async () => {
+    // 业务口径已有值 → 点击「AI 丰富增强」→ LLM 回填增强文本，置 dirty 后可保存合入 definition_json
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "DRAFT",
+      definition_json: {
+        sql: "SELECT SUM(amount) AS gmv FROM dwd_sales",
+        definition: "按渠道汇总的订单成交总额",
+      },
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "outpatient",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    mockedRefine.mockResolvedValue({
+      content: "按就诊号去重统计的门诊就诊总人次（含跨院区）",
+      source: "llm",
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    fireEvent.click(await screen.findByRole("button", { name: /编辑/ }));
+    await waitFor(() => {
+      expect(document.querySelector(".ant-modal")).toBeTruthy();
+    });
+    // 业务口径有值 → 按钮显示「AI 丰富增强」
+    const enrichBtn = screen.getByRole("button", { name: /AI 丰富增强/ });
+    expect(enrichBtn).toBeTruthy();
+    fireEvent.click(enrichBtn);
+    // 等待 LLM 回填：textarea 更新为增强文本
+    await waitFor(() => {
+      const bizArea = document.querySelector('[data-testid="editBusinessDefinition"]') as HTMLTextAreaElement | null;
+      expect((bizArea as HTMLTextAreaElement).value).toBe("按就诊号去重统计的门诊就诊总人次（含跨院区）");
+    });
+    // 请求载荷：field=business + action=enrich + 指标上下文（名称/编码/域/技术口径SQL）
+    expect(mockedRefine).toHaveBeenCalledWith(
+      expect.objectContaining({
+        field: "business",
+        action: "enrich",
+        current: "按渠道汇总的订单成交总额",
+        metric_code: "sales_gmv_sum_d",
+        metric_name: "销售 GMV",
+        domain: "outpatient",
+        sql: "SELECT SUM(amount) AS gmv FROM dwd_sales",
+      }),
+    );
+    // dirty 生效：保存后 LLM 增强文本合入 definition_json.definition
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "AI 丰富增强业务口径" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => {
+      const lastCall = mockedUpdateMetric.mock.calls[mockedUpdateMetric.mock.calls.length - 1]?.[1];
+      expect(lastCall).toMatchObject({
+        definition_json: {
+          sql: "SELECT SUM(amount) AS gmv FROM dwd_sales",
+          definition: "按就诊号去重统计的门诊就诊总人次（含跨院区）",
+        },
+      });
+    });
+  });
+
+  it("编辑弹窗三层口径 LLM 增强：LLM 不可用时提示错误且不回填", async () => {
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "DRAFT",
+      definition_json: { expression: "sum(amount)" },
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "outpatient",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    const llmErr = new UnisenseApiError("LLM 不可用：请检查 LLM 配置或稍后重试", "LLM_INFER_UNAVAILABLE", 400, "trace");
+    llmErr.code = "LLM_INFER_UNAVAILABLE";
+    mockedRefine.mockRejectedValue(llmErr);
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    fireEvent.click(await screen.findByRole("button", { name: /编辑/ }));
+    await waitFor(() => {
+      expect(document.querySelector(".ant-modal")).toBeTruthy();
+    });
+    // 业务口径为空 → 按钮显示「AI 生成」（限定在业务口径 Form.Item 内，避免命中伪代码/数仓的同名按钮）
+    const bizItem = (document.querySelector('[data-testid="editBusinessDefinition"]') as HTMLElement)
+      .closest(".ant-form-item") as HTMLElement;
+    const genBtn = within(bizItem).getByRole("button", { name: /AI 生成/ });
+    fireEvent.click(genBtn);
+    await waitFor(() => {
+      const bizArea = document.querySelector('[data-testid="editBusinessDefinition"]') as HTMLTextAreaElement | null;
+      expect((bizArea as HTMLTextAreaElement).value).toBe("");
+    });
+    // 错误提示
+    await screen.findByText(/LLM 不可用/);
   });
 
   it("编辑弹窗口径定义支持表达式模式切 SQL 模式并保存（Segmented 双向切换）", async () => {

@@ -5,7 +5,7 @@ import {
   Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Collapse, Divider, Drawer, Form, Input, Modal, Radio, Row, Segmented, Select, Space, Spin, Steps, Switch, Table, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
 import {
-  createMetric, listCatalogs, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, listMeasureCatalogs, fetchCurrentUser, UnisenseApiError,
+  createMetric, listCatalogs, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, listMeasureCatalogs, fetchCurrentUser, refineMetricDefinition, UnisenseApiError,
 } from "../api";
 import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, DomainSuggestionCandidate, Dimension, MeasureCatalog, MetricMountInput, SqlBatchParseResult, SqlBatchCandidate, CurrentUser } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
@@ -281,11 +281,15 @@ export function MetricCreate() {
 
   const [mode, setMode] = useState<"expression" | "sql">("expression");
   const [sqlText, setSqlText] = useState("");
+  // 三层口径（产品文档 §2.2）：业务口径（一句话口径定义，四方评审必读）→ definition_json.definition
+  const [businessDefinition, setBusinessDefinition] = useState("");
   // 口径双字段（对齐 Step④ 责任方：技术方=系统开发、数仓开发=数仓建模）：
   // - pseudo_definition：系统开发提供的伪代码口径（伪 SQL/自然语言，非完整 SQL）
   // - dw_definition：数仓开发指标的详细口径（完整 SQL/建模口径）
   const [pseudoDefinition, setPseudoDefinition] = useState("");
   const [dwDefinition, setDwDefinition] = useState("");
+  // 三层口径 LLM 增强：记录正在推断的口径层（business/pseudo/dw），对应按钮 loading
+  const [refiningField, setRefiningField] = useState<"business" | "pseudo" | "dw" | null>(null);
   // OneData 向导：SQL 智能推断是"工具"而非主流程步骤（方案 C）——收敛为右上角抽屉入口
   const [sqlInferOpen, setSqlInferOpen] = useState(false);
   // 派生/复合指标的计算表达式（MEL 语法，如 gmv / order_cnt），自动合入 definition_json.expression。
@@ -748,6 +752,60 @@ export function MetricCreate() {
     message.success(`已按建议选择业务域：${dom.name}（${dom.code}）`);
   }
 
+  // 三层口径 LLM 增强：AI 生成/丰富/优化业务口径、伪代码口径、数仓SQL口径（注册向导）。
+  // 空值 → generate（从上下文生成）；有值 → business enrich、pseudo/dw optimize。
+  // LLM 只回填文本（不落库），回填后用户可继续编辑再提交。
+  async function handleRefineDefinition(field: "business" | "pseudo" | "dw") {
+    if (refiningField) return;
+    const current =
+      field === "business"
+        ? businessDefinition
+        : field === "pseudo"
+          ? pseudoDefinition
+          : dwDefinition;
+    const action =
+      field === "business"
+        ? current.trim()
+          ? "enrich"
+          : "generate"
+        : current.trim()
+          ? "optimize"
+          : "generate";
+    const name = String(form.getFieldValue("name") ?? "").trim();
+    const code = String(form.getFieldValue("metric_code") ?? "").trim();
+    setRefiningField(field);
+    try {
+      const res = await refineMetricDefinition({
+        field,
+        action,
+        current,
+        metric_code: code || undefined,
+        metric_name: name || undefined,
+        domain: selectedDomain || undefined,
+        sql: sqlText.trim() || undefined,
+        expression: calcExpression.trim() || undefined,
+        business_definition: businessDefinition.trim() || undefined,
+        pseudo_definition: pseudoDefinition.trim() || undefined,
+        dw_definition: dwDefinition.trim() || undefined,
+      });
+      const label = field === "business" ? "业务口径" : field === "pseudo" ? "伪代码口径" : "数仓SQL口径";
+      if (field === "business") setBusinessDefinition(res.content);
+      else if (field === "pseudo") setPseudoDefinition(res.content);
+      else setDwDefinition(res.content);
+      message.success(`${label}已${action === "generate" ? "生成" : action === "enrich" ? "丰富增强" : "优化"}，可继续编辑后提交`);
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError && err.code === "LLM_INFER_UNAVAILABLE"
+          ? "LLM 不可用：请检查 LLM 配置或稍后重试"
+          : err instanceof Error
+            ? err.message
+            : "AI 增强失败",
+      );
+    } finally {
+      setRefiningField(null);
+    }
+  }
+
   // 粘贴 SQL 智能推断（独立入口：仅用于推断并回填属性，与最终「口径定义」相互独立）
   // 用指定域跑 SQL 自动推断并回填（域建议后重跑也复用；错误内部消化不阻断）
   async function runSqlInfer(domainCode: string) {
@@ -1155,10 +1213,11 @@ export function MetricCreate() {
     const srcField = isAtomic && src ? { source_table: src } : {};
     const measure = String(values.measure_column || "").trim();
     const measureField = isAtomic && measure ? { measure_column: measure } : {};
-    // 口径双字段（系统开发伪代码口径 / 数仓开发详细口径）→ definition_json
+    // 三层口径 → definition_json：业务口径（一句话）+ 伪代码口径 + 数仓SQL口径
+    const businessField = businessDefinition.trim() ? { definition: businessDefinition.trim() } : {};
     const pseudoField = pseudoDefinition.trim() ? { pseudo_definition: pseudoDefinition.trim() } : {};
     const dwField = dwDefinition.trim() ? { dw_definition: dwDefinition.trim() } : {};
-    const caliberFields = { ...pseudoField, ...dwField };
+    const caliberFields = { ...businessField, ...pseudoField, ...dwField };
     if (mode === "sql") {
       const sql = sqlText.trim();
       if (!sql) { message.error("口径 SQL 模式请输入 SQL 语句"); return null; }
@@ -1175,11 +1234,11 @@ export function MetricCreate() {
         measure && !hasManualExpression
           ? { expression: `${String(values.aggregation || "SUM")}(${measure})` }
           : {};
-      return { ...def, ...autoExpr, ...srcField, ...measureField, ...tables, ...downTables, ...dimsField };
+      return { ...def, ...autoExpr, ...srcField, ...measureField, ...tables, ...downTables, ...dimsField, ...caliberFields };
     }
     // derived/composite：计算表达式输入 + 依赖指标 → 口径（不读源表/度量列）
     const expr = calcExpression.trim() ? { expression: calcExpression.trim() } : {};
-    return { ...def, ...expr, ...tables, ...downTables, ...dimsField, ...depsField };
+    return { ...def, ...expr, ...tables, ...downTables, ...dimsField, ...depsField, ...caliberFields };
   }
 
   // OneData 向导：下一步纯前进（不逐级硬校验——避免打断"先粗填再回头改"的构建式流程；
@@ -2003,13 +2062,39 @@ export function MetricCreate() {
                   </Form.Item>
                 </>
               ) : (
-                <Form.Item label="口径 SQL">
+                <Form.Item label="技术口径（源业务库口径）">
                   <TextArea rows={5} value={sqlText} onChange={(e) => setSqlText(e.target.value)} placeholder="SELECT SUM(amount) AS gmv\nFROM catalog.sales.orders" className="mono" />
                   <Paragraph type="secondary" style={{ marginTop: 4, fontSize: 12 }}>后端将用 sqlglot 校验 SQL 语法；不合法将拒绝提交。</Paragraph>
                 </Form.Item>
               )}
 
               <Divider style={{ margin: "8px 0 16px" }} />
+              {/* 三层口径（产品文档 §2.2）：业务口径（一句话，四方评审必读）为第一层，
+                  独立输入框 → definition_json.definition；与下方伪代码/数仓SQL口径构成完整三层 */}
+              <Form.Item
+                label="业务口径"
+                extra="一句话业务口径（口径定义）——不含表名/物理字段名；四方评审必读字段"
+              >
+                <Space direction="vertical" style={{ width: "100%" }}>
+                  <div style={{ textAlign: "right" }}>
+                    <Button
+                      size="small"
+                      icon={<RobotOutlined />}
+                      loading={refiningField === "business"}
+                      onClick={() => handleRefineDefinition("business")}
+                    >
+                      {businessDefinition.trim() ? "AI 丰富增强" : "AI 生成"}
+                    </Button>
+                  </div>
+                  <TextArea
+                    rows={2}
+                    value={businessDefinition}
+                    onChange={(e) => setBusinessDefinition(e.target.value)}
+                    placeholder="如：按就诊号去重统计的就诊次数"
+                    aria-label="业务口径"
+                  />
+                </Space>
+              </Form.Item>
               <Alert
                 type="info"
                 showIcon
@@ -2022,7 +2107,7 @@ export function MetricCreate() {
                       <span className="mono" style={{ fontSize: 12 }}> SUM(收费金额) WHERE 结算日期 = 当日</span>
                     </li>
                     <li>
-                      <b>数仓详细口径</b>：由<b>数仓开发</b>提供——落地加工的具体 SQL/建模口径，如
+                      <b>数仓SQL口径</b>：由<b>数仓开发</b>提供——落地加工的具体 SQL/建模口径，如
                       <span className="mono" style={{ fontSize: 12 }}> SELECT ... FROM dwd.fee_bill_di WHERE ...</span>
                     </li>
                   </ul>
@@ -2032,27 +2117,51 @@ export function MetricCreate() {
                 label="伪代码口径（系统开发）"
                 extra="技术方（系统开发）提供的口径说明——伪 SQL/自然语言即可，描述“这个指标大致怎么算”"
               >
-                <TextArea
-                  rows={3}
-                  value={pseudoDefinition}
-                  onChange={(e) => setPseudoDefinition(e.target.value)}
-                  placeholder="如：SUM(收费金额) 按结算日期，去重就诊，剔除退费"
-                  aria-label="伪代码口径"
-                  className="mono"
-                />
+                <Space direction="vertical" style={{ width: "100%" }}>
+                  <div style={{ textAlign: "right" }}>
+                    <Button
+                      size="small"
+                      icon={<RobotOutlined />}
+                      loading={refiningField === "pseudo"}
+                      onClick={() => handleRefineDefinition("pseudo")}
+                    >
+                      {pseudoDefinition.trim() ? "AI 优化" : "AI 生成"}
+                    </Button>
+                  </div>
+                  <TextArea
+                    rows={3}
+                    value={pseudoDefinition}
+                    onChange={(e) => setPseudoDefinition(e.target.value)}
+                    placeholder="如：SUM(收费金额) 按结算日期，去重就诊，剔除退费"
+                    aria-label="伪代码口径"
+                    className="mono"
+                  />
+                </Space>
               </Form.Item>
               <Form.Item
-                label="数仓详细口径（数仓开发）"
+                label="数仓SQL口径"
                 extra="数仓开发提供的落地加工口径——具体 SQL 或建模口径（走血缘校验/冲突预检的依据）"
               >
-                <TextArea
-                  rows={4}
-                  value={dwDefinition}
-                  onChange={(e) => setDwDefinition(e.target.value)}
-                  placeholder={"如：SELECT visit_date, SUM(real_amount) AS amt\nFROM dwd.fee_bill_di\nWHERE biz_type='outp'\nGROUP BY visit_date"}
-                  aria-label="数仓详细口径"
-                  className="mono"
-                />
+                <Space direction="vertical" style={{ width: "100%" }}>
+                  <div style={{ textAlign: "right" }}>
+                    <Button
+                      size="small"
+                      icon={<RobotOutlined />}
+                      loading={refiningField === "dw"}
+                      onClick={() => handleRefineDefinition("dw")}
+                    >
+                      {dwDefinition.trim() ? "AI 优化" : "AI 生成"}
+                    </Button>
+                  </div>
+                  <TextArea
+                    rows={4}
+                    value={dwDefinition}
+                    onChange={(e) => setDwDefinition(e.target.value)}
+                    placeholder={"如：SELECT visit_date, SUM(real_amount) AS amt\nFROM dwd.fee_bill_di\nWHERE biz_type='outp'\nGROUP BY visit_date"}
+                    aria-label="数仓SQL口径"
+                    className="mono"
+                  />
+                </Space>
               </Form.Item>
             </Card>
             {renderStepNav()}

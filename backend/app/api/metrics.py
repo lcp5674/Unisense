@@ -27,7 +27,7 @@ from app.api.batch_common import (
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
-from app.core.exceptions import ConflictError
+from app.core.exceptions import BusinessError, ConflictError
 from app.core.guard import (
     guard_against_injection,
     guard_against_injection_exempt,
@@ -43,6 +43,7 @@ from app.services.semantic.schemas import (
     MetricAutoSuggestRequest,
     MetricBatchApproveRequest,
     MetricBatchDeprecateRequest,
+    MetricBatchReactivateRequest,
     MetricBatchRegisterRequest,
     MetricCompareMatrixRequest,
     MetricCompareRequest,
@@ -56,6 +57,7 @@ from app.services.semantic.schemas import (
     MetricListParams,
     MetricListResponse,
     MetricPublishRequest,
+    MetricRefineDefinitionRequest,
     MetricRejectRequest,
     MetricResponse,
     MetricSourceDroppedRequest,
@@ -210,6 +212,17 @@ _SQL_SUGGEST_DEPS = [
 _SQL_BATCH_REGISTER_DEPS = [
     Depends(require_roles(*_WRITE_ROLES)),
     Depends(guard_against_injection_exempt_paths("candidates[].definition_json")),
+]
+# 三层口径 LLM 增强：合法输入就是 SQL/伪 SQL/口径文本（current/sql/dw_definition/
+# pseudo_definition 承载），仅作 LLM prompt 上下文、不拼接进 DB 查询，豁免这些字段
+# 的注入扫描（对齐 _SQL_SUGGEST_DEPS 的 sql 豁免）；其余字段仍全量扫描。
+_REFINE_DEPS = [
+    Depends(require_roles(*_WRITE_ROLES)),
+    Depends(
+        guard_against_injection_exempt(
+            "current", "sql", "dw_definition", "pseudo_definition"
+        )
+    ),
 ]
 
 
@@ -820,6 +833,141 @@ async def infer_metric_description(
     await db.commit()
     return ok(
         data=MetricResponse.model_validate(metric),
+        trace_id=trace_id,
+    )
+
+
+def _build_refine_prompt(req: MetricRefineDefinitionRequest) -> str:
+    """构建三层口径 LLM 增强提示词（business/pseudo/dw × enrich/generate/optimize）。
+
+    公共上下文（仅存在字段才拼入）避免空值占位噪声；业务口径强调"一句话、不含
+    表名/物理字段"；伪代码强调"伪 SQL/自然语言描述大致怎么算"；数仓强调"落地 SQL"。
+    """
+    ctx: list[str] = []
+    if req.metric_name:
+        ctx.append(f"指标名称：{req.metric_name}")
+    if req.metric_code:
+        ctx.append(f"指标编码：{req.metric_code}")
+    if req.domain:
+        ctx.append(f"业务域：{req.domain}")
+    if req.sql:
+        ctx.append(f"技术口径SQL（源业务库口径）：\n{req.sql}")
+    if req.expression:
+        ctx.append(f"计算表达式：{req.expression}")
+    if req.business_definition:
+        ctx.append(f"现有业务口径：{req.business_definition}")
+    if req.pseudo_definition:
+        ctx.append(f"现有伪代码口径：{req.pseudo_definition}")
+    if req.dw_definition:
+        ctx.append(f"现有数仓SQL口径：\n{req.dw_definition}")
+    context = "\n".join(ctx) or "（无附加上下文）"
+
+    instructions = {
+        ("business", "enrich"): (
+            "请丰富增强下面的业务口径描述，使其更完整、专业、清晰，但始终保持一句话"
+            "（不得含表名/物理字段名/技术细节）。只输出增强后的业务口径本身。"
+            f"\n当前业务口径：{req.current or '（空）'}"
+        ),
+        ("business", "generate"): (
+            "请根据以下指标信息生成一句话业务口径（不得含表名/物理字段名/技术细节），"
+            "描述该指标衡量什么。只输出业务口径本身。"
+        ),
+        ("pseudo", "generate"): (
+            "请为以下指标生成系统开发伪代码口径——用伪 SQL 或自然语言描述'这个指标"
+            "大致怎么算'（可含字段名，但不必是完整可执行 SQL）。只输出伪代码口径本身。"
+        ),
+        ("pseudo", "optimize"): (
+            "请优化下面的伪代码口径，使其更清晰、准确、完整，保留原有意图。"
+            "只输出优化后的伪代码口径本身。"
+            f"\n当前伪代码口径：{req.current or '（空）'}"
+        ),
+        ("dw", "generate"): (
+            "请为以下指标生成数仓开发详细口径——落地加工的完整 SQL 或建模口径"
+            "（ANSI SQL，含必要注释说明取数逻辑）。只输出数仓SQL口径本身。"
+        ),
+        ("dw", "optimize"): (
+            "请优化下面的数仓SQL口径：修复潜在问题、补充必要注释、保持 ANSI 兼容、"
+            "结构清晰，保留原有逻辑意图。只输出优化后的数仓SQL口径本身。"
+            f"\n当前数仓SQL口径：\n{req.current or '（空）'}"
+        ),
+    }
+    instruction = instructions.get((req.field, req.action)) or (
+        "请结合上下文，输出一段准确、清晰的口径说明。只输出口径本身。"
+    )
+    return f"{instruction}\n\n参考上下文：\n{context}"
+
+
+@router.post(
+    "/refine-definition",
+    response_model=ApiResponse[dict[str, Any]],
+    summary="指标三层口径 LLM 增强（业务口径/伪代码/数仓SQL，AI 生成/丰富/优化）",
+    dependencies=_REFINE_DEPS,
+)
+async def refine_metric_definition(
+    request: MetricRefineDefinitionRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[dict[str, Any]]:
+    """指标三层口径 LLM 增强（TD §12.1）：LLM 只生成文本回填，不落库不创建版本。
+
+    field=business → 业务口径（一句话）；field=pseudo → 伪代码口径；field=dw → 数仓SQL。
+    action=enrich（丰富增强现有）/ generate（从上下文生成）/ optimize（优化现有）。
+    供编辑弹窗与注册向导的「AI」按钮调用；LLM 不可用抛 LLM_INFER_UNAVAILABLE。
+    """
+    from app.services.llm.config_service import LlmConfigService
+
+    llm_client = await LlmConfigService(db).build_client()
+    if not getattr(llm_client, "enabled", False):
+        raise BusinessError(
+            "LLM 不可用：请检查 LLM 配置或稍后重试",
+            error_code="LLM_INFER_UNAVAILABLE",
+            ctx={"field": request.field, "action": request.action},
+        )
+    prompt = _build_refine_prompt(request)
+    try:
+        resp = await llm_client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=800,
+        )
+    except Exception as exc:  # noqa: BLE001 - LLM 网络/超时等统一转业务错误
+        logger.warning(
+            "metric_refine_llm_failed",
+            field=request.field,
+            action=request.action,
+            metric_code=request.metric_code,
+            error=str(exc)[:200],
+        )
+        raise BusinessError(
+            "LLM 调用失败，请稍后重试",
+            error_code="LLM_INFER_UNAVAILABLE",
+            ctx={"field": request.field, "action": request.action},
+        ) from exc
+
+    from app.services.llm.parse import strip_code_fence
+
+    content = (resp.get("content") or "").strip()
+    content = strip_code_fence(content).strip().strip("\"'")
+    if not content:
+        raise BusinessError(
+            "LLM 未返回有效内容，请重试",
+            error_code="LLM_INFER_UNAVAILABLE",
+            ctx={"field": request.field, "action": request.action},
+        )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="metric_definition.refine",
+        entity_type="metric_definition",
+        entity_id=request.metric_code or request.metric_name or "-",
+        detail={"field": request.field, "action": request.action},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data={"content": content, "source": "llm"},
         trace_id=trace_id,
     )
 
@@ -2135,6 +2283,87 @@ async def batch_deprecate_metrics(
     )
     await db.commit()
     await service.run_lineage_post_commit()
+    return ok(data=batch_response(results), trace_id=trace_id)
+
+
+# ------------------------------------------------------------------
+# 指标重新启用（P2-1，对齐维度/逻辑度量/术语的「批量重新启用」）：
+#   {code}/reactivate : DEPRECATED → DRAFT（单条）
+#   batch-reactivate  : 批量 DEPRECATED → DRAFT（逐条隔离，单条失败不阻断其余）
+# 重新启用后回到草稿态，可编辑后重新走审核流（避免绕过审核直接复活）。
+# ------------------------------------------------------------------
+
+
+@router.post(
+    "/{metric_code}/reactivate",
+    response_model=ApiResponse[MetricResponse],
+    summary="重新启用已废弃指标（DEPRECATED → DRAFT）",
+    dependencies=_WRITE_DEPS,
+)
+async def reactivate_metric(
+    metric_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricResponse]:
+    """DEPRECATED → DRAFT（重新启用后走审核流，对齐维度单条 reactivate）。"""
+    service = MetricService(db)
+    metric = await service.reactivate_metric(
+        metric_code, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="metric_definition.reactivate",
+        entity_type="metric_definition",
+        entity_id=metric.metric_code,
+        detail={"from": "DEPRECATED", "to": "DRAFT"},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=MetricResponse.model_validate(metric), trace_id=trace_id)
+
+
+@router.post(
+    "/batch-reactivate",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量重新启用已废弃指标（DEPRECATED → DRAFT）",
+    dependencies=_WRITE_DEPS,
+)
+async def batch_reactivate_metrics(
+    request: MetricBatchReactivateRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """逐条 DEPRECATED→DRAFT（重新启用后走审核流）。"""
+    service = MetricService(db)
+    results = await run_batch(
+        db,
+        units=request.metric_codes,
+        code_of=lambda code: code,
+        run=lambda code: service.reactivate_metric(
+            code, actor_id=user.id, role=user.role, user_domain=user.domain
+        ),
+        abort_message="批量恢复内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("metric_definition.batch_reactivate", results),
+        entity_type="metric_definition",
+        entity_id=f"batch:{len(request.metric_codes)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
     return ok(data=batch_response(results), trace_id=trace_id)
 
 

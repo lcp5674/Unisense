@@ -813,6 +813,16 @@ export async function batchDeprecateMetrics(
   });
 }
 
+// P2-1：批量重新启用已废弃指标（DEPRECATED → DRAFT，对齐维度/逻辑度量/术语 batch-reactivate）
+export async function batchReactivateMetrics(
+  metricCodes: string[],
+): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/metric-definitions/batch-reactivate`, {
+    method: "POST",
+    body: JSON.stringify({ metric_codes: metricCodes }),
+  });
+}
+
 // 批量下线下游使用审查：返回每指标的被引用情况（下线弹窗预审用）
 export interface MetricDownstreamReferrer {
   node: string;
@@ -4683,6 +4693,38 @@ export async function suggestRenameName(
     {
       method: "POST",
       body: JSON.stringify({ opposite_code: oppositeCode ?? undefined }),
+    },
+  );
+}
+
+// ---- 指标三层口径 LLM 增强（backend /api/v1/metric-definitions/refine-definition）----
+
+export type RefineDefinitionField = "business" | "pseudo" | "dw";
+export type RefineDefinitionAction = "enrich" | "generate" | "optimize";
+
+export interface RefineDefinitionRequest {
+  field: RefineDefinitionField;
+  action: RefineDefinitionAction;
+  current?: string;
+  metric_code?: string;
+  metric_name?: string;
+  domain?: string;
+  sql?: string;
+  expression?: string;
+  business_definition?: string;
+  pseudo_definition?: string;
+  dw_definition?: string;
+}
+
+/** 指标三层口径 LLM 增强：LLM 生成/丰富/优化业务口径、伪代码口径、数仓SQL口径，返回文本回填（不落库）。 */
+export async function refineMetricDefinition(
+  data: RefineDefinitionRequest,
+): Promise<{ content: string; source: string }> {
+  return request<{ content: string; source: string }>(
+    `${API_BASE}/metric-definitions/refine-definition`,
+    {
+      method: "POST",
+      body: JSON.stringify(data),
     },
   );
 }

@@ -68,6 +68,7 @@ import {
   piiReview,
   promoteMetric,
   removeFavorite,
+  refineMetricDefinition,
   rollbackMetric,
   submitReview,
   suggestRenameName,
@@ -773,6 +774,8 @@ export function MetricDetail() {
   const [editDwDefinition, setEditDwDefinition] = useState("");
   const [editPseudoDirty, setEditPseudoDirty] = useState(false);
   const [editDwDirty, setEditDwDirty] = useState(false);
+  // 三层口径 LLM 增强：记录正在推断的口径层（business/pseudo/dw），对应按钮 loading
+  const [refiningField, setRefiningField] = useState<"business" | "pseudo" | "dw" | null>(null);
   const [renameSuggestLoaded, setRenameSuggestLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -1563,6 +1566,66 @@ export function MetricDetail() {
       setEditDefinitionError(null);
     }
     setEditDefMode(mode);
+  }
+
+  // 三层口径 LLM 增强：AI 生成/丰富/优化业务口径、伪代码口径、数仓SQL口径。
+  // 空值 → generate（从上下文生成）；有值 → business enrich、pseudo/dw optimize。
+  // LLM 只回填文本（不落库），回填后置 dirty，用户可继续编辑再保存。
+  async function handleRefineDefinition(field: "business" | "pseudo" | "dw") {
+    if (!metric || refiningField) return;
+    const current =
+      field === "business"
+        ? editBusinessDefinition
+        : field === "pseudo"
+          ? editPseudoDefinition
+          : editDwDefinition;
+    const action =
+      field === "business"
+        ? current.trim()
+          ? "enrich"
+          : "generate"
+        : current.trim()
+          ? "optimize"
+          : "generate";
+    const def = metric.definition_json ?? {};
+    setRefiningField(field);
+    try {
+      const res = await refineMetricDefinition({
+        field,
+        action,
+        current,
+        metric_code: metric.metric_code,
+        metric_name: metric.name,
+        domain: metric.domain,
+        sql: typeof def.sql === "string" ? def.sql : typeof def.etl_sql === "string" ? def.etl_sql : "",
+        expression: typeof def.expression === "string" ? def.expression : "",
+        business_definition: editBusinessDefinition || undefined,
+        pseudo_definition: editPseudoDefinition || undefined,
+        dw_definition: editDwDefinition || undefined,
+      });
+      const label = field === "business" ? "业务口径" : field === "pseudo" ? "伪代码口径" : "数仓SQL口径";
+      if (field === "business") {
+        setEditBusinessDefinition(res.content);
+        setEditBusinessDirty(true);
+      } else if (field === "pseudo") {
+        setEditPseudoDefinition(res.content);
+        setEditPseudoDirty(true);
+      } else {
+        setEditDwDefinition(res.content);
+        setEditDwDirty(true);
+      }
+      message.success(`${label}已${action === "generate" ? "生成" : action === "enrich" ? "丰富增强" : "优化"}，可继续编辑后保存`);
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError && err.code === "LLM_INFER_UNAVAILABLE"
+          ? "LLM 不可用：请检查 LLM 配置或稍后重试"
+          : err instanceof Error
+            ? err.message
+            : "AI 增强失败",
+      );
+    } finally {
+      setRefiningField(null);
+    }
   }
 
   // 仲裁改名建议：调后端 LLM 生成区分性名称候选（best-effort，LLM 不可用降级规则），
@@ -2884,51 +2947,87 @@ export function MetricDetail() {
             style={{ marginBottom: 8 }}
             extra="一句话业务口径（口径定义）——不含表名/物理字段名；四方评审必读字段。"
           >
-            <Input.TextArea
-              rows={2}
-              className="mono"
-              data-testid="editBusinessDefinition"
-              value={editBusinessDefinition}
-              onChange={(e) => {
-                setEditBusinessDefinition(e.target.value);
-                setEditBusinessDirty(true);
-              }}
-              placeholder="如：按就诊号去重统计的就诊次数"
-            />
+            <Space direction="vertical" style={{ width: "100%" }}>
+              <div style={{ textAlign: "right" }}>
+                <Button
+                  size="small"
+                  icon={<RobotOutlined />}
+                  loading={refiningField === "business"}
+                  onClick={() => handleRefineDefinition("business")}
+                >
+                  {editBusinessDefinition.trim() ? "AI 丰富增强" : "AI 生成"}
+                </Button>
+              </div>
+              <Input.TextArea
+                rows={2}
+                className="mono"
+                data-testid="editBusinessDefinition"
+                value={editBusinessDefinition}
+                onChange={(e) => {
+                  setEditBusinessDefinition(e.target.value);
+                  setEditBusinessDirty(true);
+                }}
+                placeholder="如：按就诊号去重统计的就诊次数"
+              />
+            </Space>
           </Form.Item>
           <Form.Item
             label="伪代码口径（系统开发）"
             style={{ marginBottom: 8 }}
             extra="系统开发提供的伪 SQL / 自然语言口径说明，与口径主体（表达式/SQL）相互独立。"
           >
-            <Input.TextArea
-              rows={3}
-              className="mono"
-              data-testid="editPseudoDefinition"
-              value={editPseudoDefinition}
-              onChange={(e) => {
-                setEditPseudoDefinition(e.target.value);
-                setEditPseudoDirty(true);
-              }}
-              placeholder="如：按渠道汇总订单金额（伪代码 / 伪 SQL）"
-            />
+            <Space direction="vertical" style={{ width: "100%" }}>
+              <div style={{ textAlign: "right" }}>
+                <Button
+                  size="small"
+                  icon={<RobotOutlined />}
+                  loading={refiningField === "pseudo"}
+                  onClick={() => handleRefineDefinition("pseudo")}
+                >
+                  {editPseudoDefinition.trim() ? "AI 优化" : "AI 生成"}
+                </Button>
+              </div>
+              <Input.TextArea
+                rows={3}
+                className="mono"
+                data-testid="editPseudoDefinition"
+                value={editPseudoDefinition}
+                onChange={(e) => {
+                  setEditPseudoDefinition(e.target.value);
+                  setEditPseudoDirty(true);
+                }}
+                placeholder="如：按渠道汇总订单金额（伪代码 / 伪 SQL）"
+              />
+            </Space>
           </Form.Item>
           <Form.Item
             label="数仓SQL口径"
             style={{ marginBottom: 8 }}
             extra="数仓开发指标的详细口径：完整 SQL 或建模口径说明。"
           >
-            <Input.TextArea
-              rows={4}
-              className="mono"
-              data-testid="editDwDefinition"
-              value={editDwDefinition}
-              onChange={(e) => {
-                setEditDwDefinition(e.target.value);
-                setEditDwDirty(true);
-              }}
-              placeholder="如：SELECT channel, SUM(order_amount) AS amount FROM dwd.sales_detail GROUP BY channel"
-            />
+            <Space direction="vertical" style={{ width: "100%" }}>
+              <div style={{ textAlign: "right" }}>
+                <Button
+                  size="small"
+                  icon={<RobotOutlined />}
+                  loading={refiningField === "dw"}
+                  onClick={() => handleRefineDefinition("dw")}
+                >
+                  {editDwDefinition.trim() ? "AI 优化" : "AI 生成"}
+                </Button>
+              </div>
+              <Input.TextArea
+                rows={4}
+                className="mono"
+                data-testid="editDwDefinition"
+                value={editDwDefinition}
+                onChange={(e) => {
+                  setEditDwDefinition(e.target.value);
+                  setEditDwDirty(true);
+                }}
+                placeholder="如：SELECT channel, SUM(order_amount) AS amount FROM dwd.sales_detail GROUP BY channel"
+              />
+            </Space>
           </Form.Item>
           {/* 口径定义编辑模式（对齐注册页）：开发人员可直接以 SQL 描述口径，
               后端 sqlglot 校验语法；SQL 模式口径变更与表达式同级触发版本确认 */}
