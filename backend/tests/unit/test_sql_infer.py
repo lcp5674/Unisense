@@ -402,3 +402,53 @@ class TestParseSqlProfile:
         assert {m["column"] for m in p.measures} == {"amount"}
 
 
+
+    def test_positional_group_by_resolved(self) -> None:
+        """方言覆盖：GROUP BY 位置序号（GROUP BY 1, 2）回映 SELECT 投影列名。
+
+        Postgres/Trino/Oracle 惯用写法，sqlglot 解析为 Literal 数字（非 Column），
+        此前 group_by 为空——位置序号按投影下标映射回列名。
+        """
+        p = parse_sql_profile(
+            "SELECT date_trunc('month', create_date) AS month_id, hosp_code, "
+            "COUNT(DISTINCT doctor_code) AS cnt FROM wedw_dw.t GROUP BY 1, 2",
+        )
+        assert p.group_by == ["month_id", "hosp_code"]
+        assert p.time_granularity == "month"
+
+    def test_approx_percentile_normalized(self) -> None:
+        """方言覆盖：Trino/Presto approx_percentile 归一为 PERCENTILE（注册枚举合法）。"""
+        p = parse_sql_profile(
+            "SELECT approx_distinct(user_id) AS uv, "
+            "approx_percentile(amount, 0.5) AS p50 FROM t",
+        )
+        aggs = {m["agg"] for m in p.measures}
+        assert "COUNT_DISTINCT" in aggs
+        assert "PERCENTILE" in aggs
+
+    def test_multistatement_cn_comment_ddl_dialect_fallback(self) -> None:
+        """方言覆盖：多语句 ETL（set + 中文 comment 建表 DDL + insert overwrite）解析不为空。
+
+        默认方言对 `create table ... comment "中文"` 抛 ParseError（多语句拆分分支被
+        吞）→ 方言择优须用 parse（复数）拆分选产出语句——修复前整段解析为空画像。
+        """
+        sql = (
+            "set hive.vectorized.execution.enabled=false;\n"
+            "create table if not exists wedw_dws.t1(\n"
+            ' month_id string comment "统计月",\n'
+            ' hosp_code string comment "医院编码"\n'
+            ") stored as orc;\n"
+            "insert overwrite table wedw_dws.t1\n"
+            "select t1.month_id, t1.hosp_code, "
+            "count(distinct t1.doctor_code) as current_month_active_doctor_cnt\n"
+            "from (select substr(create_date,1,7) as month_id, hosp_code, "
+            "doctor_code from wedw_dw.src "
+            "group by substr(create_date,1,7), hosp_code, doctor_code) t1\n"
+            "group by t1.month_id, t1.hosp_code;"
+        )
+        p = parse_sql_profile(sql)
+        assert p.measures, "多语句中文 comment ETL 不应解析为空"
+        assert p.measures[0]["agg"] == "COUNT_DISTINCT"
+        assert p.measures[0]["alias"] == "current_month_active_doctor_cnt"
+        assert "wedw_dw.src" in p.source_tables
+        assert p.time_granularity == "month"

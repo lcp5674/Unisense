@@ -119,6 +119,7 @@ _DIALECT_AGG_MAP = {
     "quantile": "PERCENTILE",
     "quantileexact": "PERCENTILE",
     "percentileapprox": "PERCENTILE",
+    "approxquantile": "PERCENTILE",
     "argmax": "MAX",
     "argmin": "MIN",
     "topk": "COUNT",
@@ -175,12 +176,32 @@ def _extract_source_tables(ast: exp.Expr) -> list[str]:
 
 
 def _extract_group_by(select: exp.Select) -> list[str]:
-    """GROUP BY 维度列。"""
+    """GROUP BY 维度列（含位置序号 ``GROUP BY 1, 2`` → 映射回 SELECT 投影列名）。"""
     group = select.args.get("group")
     if not group:
         return []
     cols: list[str] = []
+    projections = select.expressions
     for expr in group.expressions:
+        # 位置序号 GROUP BY 1 → SELECT 投影第 1 列（Postgres/Trino/Oracle 惯用写法；
+        # sqlglot 解析为 Literal 数字，非 Column，需按投影下标回映列名）
+        if isinstance(expr, exp.Literal) and not expr.is_string:
+            with contextlib.suppress(ValueError):
+                idx = int(expr.this) - 1
+                if 0 <= idx < len(projections):
+                    proj = projections[idx]
+                    if isinstance(proj, exp.Alias):
+                        cols.append(proj.alias_or_name.lower())
+                    elif isinstance(proj, exp.Column):
+                        cols.append(proj.name.lower())
+                    else:
+                        # 表达式投影（如 date_trunc(...) as month_id）→ 取内部列名
+                        for col in proj.walk():
+                            if isinstance(col, exp.Column):
+                                cols.append(col.name.lower())
+                                break
+                    continue
+            continue
         if isinstance(expr, exp.Column):
             cols.append(expr.name.lower())
         else:
@@ -616,21 +637,30 @@ def _best_dialect_ast(
     识别为 ``CombinedAggFunc``——只取首个可解析方言会丢失度量。故比较各方言
     解析出的 ``AggFunc`` 数量，选识别最充分的 AST；数量未超过基线则保留基线
     （普通 SQL 方言识别度相同 → 行为不变）。
+
+    **多语句脚本**：方言下用 ``parse``（复数）拆分全部语句，选「含 Select 且
+    聚合识别最多」的产出语句（ETL 的 ``set`` + ``create table`` DDL +
+    ``insert overwrite ... select`` 形态）——``parse_one`` 只取第一条（常是
+    ``Set``/``Command``）会丢度量；与 ``_parse_profile_ast`` 的多语句语义对齐，
+    并覆盖默认方言 parse 失败的方言 DDL（如 ``comment "中文"`` 列注释）兜底。
     """
     best = baseline
     best_count = len(list(best.find_all(exp.AggFunc))) if best is not None else 0
     for dialect in _INDUSTRIAL_DIALECTS:
         try:
-            candidate = sqlglot.parse_one(
+            stmts = sqlglot.parse(
                 sql, dialect=dialect, error_level=sqlglot.ErrorLevel.RAISE
             )
         except Exception:
             continue
-        if candidate is None or candidate.find(exp.Select) is None:
+        if not stmts:
             continue
-        count = len(list(candidate.find_all(exp.AggFunc)))
-        if count > best_count:
-            best, best_count = candidate, count
+        for stmt in stmts:
+            if stmt is None or stmt.find(exp.Select) is None:
+                continue
+            count = len(list(stmt.find_all(exp.AggFunc)))
+            if count > best_count:
+                best, best_count = stmt, count
     return best
 
 
