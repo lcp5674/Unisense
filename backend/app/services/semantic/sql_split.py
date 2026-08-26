@@ -44,6 +44,10 @@ _LLM_SPLIT_MIN_SEGMENTS = 2
 # 多语句脚本若逐条失败语句都调 LLM 会打满配额/拖慢解析；超限降级 skipped
 # 并标注 llm_limit（前端提示「已达本批 AI 兜底上限」），不阻断其余语句。
 _LLM_BATCH_LIMIT = 5
+# use_llm 显式模式的批级 LLM 预算（4×规则兜底）：用户主动选择 LLM 推断时放宽
+# 逐语句兜底额度，但 max_batch_statements=100 上限仍保留防超大脚本爆炸；超限
+# 语句降级 skipped(llm_limit) 不阻断（候选补全的整段单次调用也计入此预算）。
+_LLM_BATCH_LIMIT_LLM = 20
 
 
 # ----------------------------------------------------------------
@@ -354,6 +358,76 @@ async def _llm_infer_measures(
         return parsed if parsed else None
     except Exception:
         return None  # LLM 不可用/超时/解析失败 → 降级 skipped
+
+
+async def _llm_annotate_candidates(
+    db: Any,
+    full_sql: str,
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]] | None:
+    """LLM 批量补全候选（use_llm 显式模式）：对规则解析出的候选做**封闭选择**。
+
+    设计（对齐「规则锚定 + LLM 补全 + 规范收敛」架构，解决"一次性给 LLM +
+    每次输出一样 + 准确"不可能三角）：
+    - **锚定**：候选由 sqlglot 规则解析产出（column/agg/table/period 确定可审计）；
+    - **LLM 角色收缩**：LLM 不做自由生成（列名/聚合/源表不让 LLM 发明，杜绝
+      幻觉列污染候选），只对每个候选做 ``is_measure``（是否真度量）/ ``name``
+      （中文指标名润色）/ ``period``（白名单周期）的**封闭选择**——决策面从
+      「生成几十个字段」压缩到「对 N 个候选各做 2-3 个选择」，幻觉空间被几何级压缩；
+    - **单次调用**：整段 SQL 只花 **1 次** LLM 调用（N 个候选打包进一次 JSON 输出），
+      ``temperature=0`` + ``json_object`` 约束输出分布稳定；
+    - **规范收敛**由调用方（``infer_sql_batch`` → ``_apply_candidate_annotations``）
+      执行：白名单 / 列名回映 / 稳定排序 / 置信度——LLM 的随机性在算法层被剥掉。
+
+    Args:
+        db: 异步会话（LLM 客户端构建需要）。
+        full_sql: 完整原始 SQL 脚本（上下文）。
+        candidates: 规则解析出的候选清单（锚点，含 ``key`` 稳定标识）。
+
+    Returns:
+        ``[{key, is_measure, name?, period?, confidence?, reason?}]``；
+        失败返回 ``None``（上层保持规则候选不动，绝不阻断）。
+    """
+    try:
+        from app.services.llm.config_service import LlmConfigService
+        from app.services.llm.parse import parse_sql_candidates_annotations
+
+        client = await LlmConfigService(db).build_client()
+        if not getattr(client, "enabled", False):
+            return None
+        rows = "\n".join(
+            f"- key={c['key']} | 度量列={c.get('measure_column') or '-'} | "
+            f"聚合={c.get('aggregation') or '-'} | 源表={c.get('source_table') or '-'} | "
+            f"建议名={c.get('name') or '-'} | 建议周期={c.get('period') or '-'}"
+            for c in candidates
+        )
+        prompt = (
+            "下面是一段完整的 SQL 脚本（可能含多条语句/建表/CTE/注释等）：\n"
+            f"{full_sql}\n\n"
+            "已用程序从其中解析出以下候选指标（key 是稳定标识），请逐一对每个候选"
+            "做封闭选择（不要新增/发明候选，不要改写度量列/聚合/源表）：\n"
+            f"{rows}\n\n"
+            "对每个候选判断：\n"
+            "1. is_measure：它真的是一个业务度量指标吗？（true/false；例如投影里的"
+            "分组键/常量/普通业务键不是度量）\n"
+            "2. name：更准确的简短中文指标名（在候选基础上润色，不要发明不在 SQL 里的指标）\n"
+            "3. period：统计周期，只从 day|week|month|quarter|year|hour 选"
+            "（看 GROUP BY 时间粒度）\n"
+            "4. confidence：0 到 1 的小数，你对以上判断的确信度\n"
+            "只返回 JSON（不要解释、不要 Markdown 代码块）："
+            '{"candidates": [{"key": "候选key", "is_measure": true, "name": "中文名",'
+            ' "period": "day", "confidence": 0.9, "reason": "一句话依据"}, ...]}'
+        )
+        resp = await client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=2048,
+        )
+        raw = (resp.get("content") or "").strip()
+        parsed = parse_sql_candidates_annotations(raw)
+        return parsed if parsed else None
+    except Exception:
+        return None  # LLM 不可用/超时/解析失败 → 保持规则候选不动
 
 
 async def split_sql_statements(
@@ -760,6 +834,75 @@ def _classify_no_measure(seg: str, profile: SqlProfile, llm_tried: bool) -> str:
 # ----------------------------------------------------------------
 
 
+def _apply_candidate_period(cand: dict[str, Any], period: str) -> None:
+    """应用 LLM 周期覆盖并保持编码/粒度一致（确定性回映）。
+
+    仅当候选 metric_code 为 4 段式（域_业务对象_度量_周期）时才替换末段为
+    新周期（业务段不受 LLM 影响，避免用 key 派生 code_col 引入业务段偏差）；
+    多域候选（编码为空）或编码非 4 段时保守只改 period 字段，避免编码失真。
+    """
+    code = cand.get("metric_code")
+    if code:
+        parts = str(code).split("_")
+        if len(parts) == 4:
+            parts[-1] = period
+            cand["metric_code"] = "_".join(parts)
+    cand["period"] = period
+    cand["granularity"] = period
+
+
+def _apply_candidate_annotations(
+    candidates: list[dict[str, Any]],
+    annotations: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """规范收敛层：把 LLM 封闭选择应用到候选清单（纯确定性算法）。
+
+    与 LLM 的随机性解耦——无论 LLM 这次输出顺序怎么变、个别判断怎么漂，
+    最终落库的候选集合在此层被收敛成同一个结果（"每次业务结果一样"的实现）：
+
+    - **白名单**：周期只认 ``normalize_period`` 白名单值（LLM 产非法值直接丢弃该
+      覆盖）；聚合**不覆盖**（规则解析已过枚举白名单，防幻觉非法 code 整批失败）。
+    - **列名回映**：LLM 不能新增/发明度量列（封闭选择），只能对规则候选做
+      ``is_measure`` 判定；``is_measure=false`` 且高置信度（≥0.7）才移出候选 →
+      记 skipped(llm_not_measure)，低置信度保守保留（规则说有就保留）。
+    - **稳定排序**：按 ``(statement_index, key)`` 确定性排序（不受 LLM 输出顺序影响）。
+    - **置信度**：每候选携带 ``llm_confidence``（低置信度标记需人工确认，不静默落库）。
+
+    Returns:
+        ``(收敛后的候选清单, 被 LLM 判为非度量的 skipped 明细)``。
+    """
+    ann_by_key = {a["key"]: a for a in annotations}
+    kept: list[dict[str, Any]] = []
+    llm_skipped: list[dict[str, Any]] = []
+    for cand in candidates:
+        ann = ann_by_key.get(cand["key"])
+        if ann is None:
+            kept.append(cand)
+            continue
+        if not ann.get("is_measure", True):
+            conf = ann.get("confidence")
+            if conf is None or conf >= 0.7:
+                llm_skipped.append(
+                    {
+                        "index": cand.get("statement_index", 0),
+                        "sql": str(cand.get("name") or cand.get("measure_column") or "")[:500],
+                        "reason": "llm_not_measure",
+                    }
+                )
+                continue
+        name = ann.get("name")
+        if name:
+            cand["name"] = name[:128]
+        period = ann.get("period")
+        if period and period != cand.get("period"):
+            _apply_candidate_period(cand, period)
+        cand["source"] = "llm"
+        cand["llm_confidence"] = ann.get("confidence")
+        kept.append(cand)
+    kept.sort(key=lambda c: (c.get("statement_index", 0), c.get("key", "")))
+    return kept, llm_skipped
+
+
 async def infer_sql_batch(
     db: Any,
     *,
@@ -768,8 +911,9 @@ async def infer_sql_batch(
     custom_rules: dict[str, Any] | None = None,
     domain_code: str | None = None,
     synthesize_composite: bool = False,
+    use_llm: bool = False,
 ) -> dict[str, Any]:
-    """SQL 批量推断主函数：切分 → 逐语句画像 → 候选生成 → 域建议。
+    """SQL 批量推断主函数：切分 → 逐语句画像 → 候选生成 → 域建议 → LLM 补全。
 
     Args:
         db: 异步会话（域建议/自定义 LLM 分段需要）。
@@ -778,6 +922,11 @@ async def infer_sql_batch(
         custom_rules: custom 模式的自定义切分规则。
         domain_code: 用户显式指定的域（缺省则整段一次批量建议）。
         synthesize_composite: 单语句多度量时是否合成复合候选。
+        use_llm: 显式 LLM 模式——对规则解析出的候选做一次 LLM 批量补全
+            （``_llm_annotate_candidates`` 封闭选择：名称润色/周期校正/非度量
+            过滤）+ 规范收敛（``_apply_candidate_annotations``），整段 SQL 只花
+            1 次调用；LLM 不可用/失败保持规则候选不动，绝不阻断。批级 LLM 预算
+            相应放宽到 ``_LLM_BATCH_LIMIT_LLM``（规则兜底模式的 4 倍）。
 
     Returns:
         ``{"statements", "candidates", "skipped", "domain"}``。
@@ -788,9 +937,11 @@ async def infer_sql_batch(
         return {"statements": [], "candidates": [], "skipped": [], "domain": None}
 
     # P1-1：批级 LLM 调用预算（切分兜底 + 整段域建议 + 度量提取 + 周期推断 +
-    # 逐语句域建议全部计入），超 _LLM_BATCH_LIMIT 后不再调 LLM——防多语句脚本
+    # 逐语句域建议 + use_llm 候选补全全部计入），超限后不再调 LLM——防多语句脚本
     # 打满 LLM 配额/拖慢解析；域建议仅在目录/挂载未命中时消耗（内部 best-effort）。
-    llm_budget = {"used": 0, "limit": _LLM_BATCH_LIMIT}
+    # use_llm 显式模式放宽到 _LLM_BATCH_LIMIT_LLM（用户主动选择 LLM，配额更宽）。
+    llm_limit = _LLM_BATCH_LIMIT_LLM if use_llm else _LLM_BATCH_LIMIT
+    llm_budget = {"used": 0, "limit": llm_limit}
 
     segments = await split_sql_statements(
         sql, mode=split_mode, custom_rules=custom_rules, db=db, llm_budget=llm_budget
@@ -860,7 +1011,7 @@ async def infer_sql_batch(
             llm_measures = None
             llm_tried = reason_code == "parse_failed" and db is not None
             if llm_tried:
-                if llm_budget["used"] >= _LLM_BATCH_LIMIT:
+                if llm_budget["used"] >= llm_budget["limit"]:
                     # 已达批级限额：不再调 LLM，降级 skipped（前端提示 AI 兜底上限）
                     skipped.append(
                         {
@@ -910,7 +1061,7 @@ async def infer_sql_batch(
         if (
             _period_uncertain(profile)
             and db is not None
-            and llm_budget["used"] < _LLM_BATCH_LIMIT
+            and llm_budget["used"] < llm_budget["limit"]
         ):
             llm_budget["used"] += 1
             llm_period = await _llm_infer_period(
@@ -947,6 +1098,19 @@ async def infer_sql_batch(
             )
             if composite:
                 candidates.append(composite)
+
+    # use_llm 显式模式：对规则候选做一次 LLM 批量补全（封闭选择）+ 规范收敛。
+    # 整段 SQL 只花 1 次调用；LLM 不可用/失败保持规则候选不动，绝不阻断。
+    # LLM 判为非度量（高置信度）的候选移入 skipped(llm_not_measure)，前端展示。
+    if use_llm and candidates and db is not None and llm_budget["used"] < llm_budget["limit"]:
+        llm_budget["used"] += 1
+        annotations = await _llm_annotate_candidates(db, sql, candidates)
+        if annotations:
+            candidates, llm_skipped = _apply_candidate_annotations(
+                candidates, annotations
+            )
+            if llm_skipped:
+                skipped.extend(llm_skipped)
 
     # P1-2：候选数上限（生产护栏）——单请求产出过多候选（语句数 × 每语句多度量）
     # 会拖慢前端渲染与后续批量创建，超限拒绝并提示缩减范围。

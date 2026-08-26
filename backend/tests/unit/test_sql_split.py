@@ -1136,3 +1136,163 @@ async def test_infer_sql_batch_derived_ratio_candidate() -> None:
     assert d["needs_review"] is True, "派生候选应标记口径需核对"
     assert "SUM" in (d["definition_json"].get("expression") or "").upper()
     assert d["raw_sql"] == sql, "派生候选也应携带原始 SQL"
+
+
+# ---------------------------------------------------------------- use_llm 批量补全
+
+
+async def test_infer_sql_batch_use_llm_annotates_candidates() -> None:
+    """use_llm 显式模式：对规则候选做一次 LLM 批量补全——名称润色 + 周期校正，
+    4 段式编码末段同步为周期、粒度一致，候选标记 source=llm + 置信度。"""
+    sql = "SELECT dt, SUM(amount) AS gmv FROM dwd_order_di GROUP BY dt"
+    ann_mock = AsyncMock(
+        return_value=[
+            {
+                "key": "0:gmv",
+                "is_measure": True,
+                "name": "日订单成交额",
+                "period": "month",
+                "confidence": 0.9,
+                "reason": "GROUP BY 月粒度",
+            }
+        ]
+    )
+    with patch(
+        "app.services.semantic.sql_split._llm_annotate_candidates",
+        new=ann_mock,
+    ):
+        result = await infer_sql_batch(
+            _fake_db(), sql=sql, split_mode="statement", domain_code="sales", use_llm=True
+        )
+    ann_mock.assert_awaited_once()
+    cand = result["candidates"][0]
+    assert cand["source"] == "llm"
+    assert cand["name"] == "日订单成交额"
+    assert cand["period"] == "month"
+    assert cand["granularity"] == "month"
+    # 4 段式编码末段同步为周期（业务段不受 LLM 影响）
+    assert cand["metric_code"] == "sales_order_amount_month"
+    assert cand["llm_confidence"] == 0.9
+
+
+async def test_infer_sql_batch_use_llm_filters_not_measure() -> None:
+    """use_llm 规范收敛：LLM 高置信度判非度量 → 候选移入 skipped(llm_not_measure)；
+    低置信度保守保留（规则说有就保留，source=llm）。"""
+    sql = "SELECT dt, SUM(amount) AS gmv FROM dwd_order_di GROUP BY dt"
+    # 高置信度（≥0.7）→ 过滤
+    with patch(
+        "app.services.semantic.sql_split._llm_annotate_candidates",
+        new=AsyncMock(
+            return_value=[
+                {
+                    "key": "0:gmv",
+                    "is_measure": False,
+                    "confidence": 0.9,
+                    "reason": "这是金额投影不是独立度量",
+                }
+            ]
+        ),
+    ):
+        result = await infer_sql_batch(
+            _fake_db(), sql=sql, split_mode="statement", domain_code="sales", use_llm=True
+        )
+    assert len(result["candidates"]) == 0
+    assert len(result["skipped"]) == 1
+    assert result["skipped"][0]["reason"] == "llm_not_measure"
+    # 低置信度（<0.7）→ 保守保留
+    with patch(
+        "app.services.semantic.sql_split._llm_annotate_candidates",
+        new=AsyncMock(
+            return_value=[
+                {
+                    "key": "0:gmv",
+                    "is_measure": False,
+                    "confidence": 0.5,
+                    "reason": "不确定",
+                }
+            ]
+        ),
+    ):
+        result = await infer_sql_batch(
+            _fake_db(), sql=sql, split_mode="statement", domain_code="sales", use_llm=True
+        )
+    assert len(result["candidates"]) == 1
+    assert result["candidates"][0]["source"] == "llm"
+
+
+async def test_infer_sql_batch_use_llm_degrades_when_unavailable() -> None:
+    """use_llm 兜底：LLM 补全不可用/失败（返回 None）→ 保持规则候选不动（source=rule）。"""
+    sql = "SELECT dt, SUM(amount) AS gmv FROM dwd_order_di GROUP BY dt"
+    with patch(
+        "app.services.semantic.sql_split._llm_annotate_candidates",
+        new=AsyncMock(return_value=None),
+    ):
+        result = await infer_sql_batch(
+            _fake_db(), sql=sql, split_mode="statement", domain_code="sales", use_llm=True
+        )
+    assert len(result["candidates"]) == 1
+    assert result["candidates"][0]["source"] == "rule"
+    assert result["candidates"][0]["metric_code"] == "sales_order_amount_day"
+
+
+async def test_infer_sql_batch_use_llm_raises_budget() -> None:
+    """use_llm 显式模式批级 LLM 预算放宽到 _LLM_BATCH_LIMIT_LLM（规则模式 5 次的
+    4 倍）——逐语句兜底可超过规则模式上限而不降级 llm_limit。"""
+    from app.services.semantic.sql_infer import SqlProfile
+    from app.services.semantic.sql_split import _LLM_BATCH_LIMIT, _LLM_BATCH_LIMIT_LLM
+
+    real_parse = parse_sql_profile
+
+    def _fake_parse(sql: str) -> SqlProfile:
+        if "unparsable_col" in sql:
+            return SqlProfile(sql=sql)  # 规则层解析失败（空画像）
+        return real_parse(sql)
+
+    # 构造 _LLM_BATCH_LIMIT + 1 条失败语句（规则模式会封顶 _LLM_BATCH_LIMIT 次）
+    parts = [
+        f"SELECT dt, SUM(unparsable_col{i}) AS m{i} FROM dwd_order_di GROUP BY dt"
+        for i in range(_LLM_BATCH_LIMIT + 1)
+    ]
+    import re as _re
+
+    def _fake_llm_measures(db, full_sql: str, focus_sql: str) -> list:
+        m = _re.search(r"unparsable_col(\d+)", focus_sql)
+        num = m.group(1) if m else "0"
+        return [
+            {
+                "column": f"unparsable_col{num}",
+                "agg": "SUM",
+                "alias": f"m{num}",
+                "table": "dwd_order_di",
+                "period": "day",
+            }
+        ]
+
+    llm_mock = AsyncMock(side_effect=_fake_llm_measures)
+    with (
+        patch(
+            "app.services.semantic.sql_split.parse_sql_profile",
+            side_effect=_fake_parse,
+        ),
+        patch(
+            "app.services.semantic.sql_split._llm_infer_measures",
+            new=llm_mock,
+        ),
+        patch(
+            "app.services.semantic.sql_split._llm_annotate_candidates",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        result = await infer_sql_batch(
+            _fake_db(),
+            sql=";".join(parts),
+            split_mode="semicolon",
+            domain_code="sales",
+            use_llm=True,
+        )
+    # 预算放宽：6 条失败语句全部走 LLM（规则模式会封顶 _LLM_BATCH_LIMIT=5 条）
+    assert _LLM_BATCH_LIMIT_LLM > _LLM_BATCH_LIMIT
+    assert llm_mock.call_count == _LLM_BATCH_LIMIT + 1
+    assert len(result["candidates"]) == _LLM_BATCH_LIMIT + 1
+    assert all(s["reason"] != "llm_limit" for s in result["skipped"])
+

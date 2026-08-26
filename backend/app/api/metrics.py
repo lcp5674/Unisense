@@ -2247,6 +2247,7 @@ async def parse_sql_batch_metrics(
         custom_rules=request.custom_rules,
         domain_code=request.domain_code,
         synthesize_composite=request.synthesize_composite,
+        use_llm=request.use_llm,
     )
     await write_audit(
         db,

@@ -2825,6 +2825,8 @@ export interface SqlParseRequest {
   domain_code?: string | null;
   /** 单语句多度量时是否合成复合指标候选 */
   synthesize_composite?: boolean;
+  /** 显式 LLM 模式：对规则候选做一次 LLM 批量补全（中文名/周期/非度量过滤）+ 规范收敛 */
+  use_llm?: boolean;
 }
 
 /** SQL 批量解析候选（前端勾选微调后提交创建）。 */

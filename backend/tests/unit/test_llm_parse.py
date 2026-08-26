@@ -13,6 +13,7 @@ from app.services.llm.parse import (
     parse_bool_result,
     parse_description_result,
     parse_json_object,
+    parse_sql_candidates_annotations,
     parse_sql_measures_result,
     strip_code_fence,
 )
@@ -306,3 +307,54 @@ def test_parse_sql_measures_result_period_normalized() -> None:
     assert by_col["c"].get("period") == "week"
     # 非法周期 → 丢弃该字段（度量本身保留，缺省由上层规则层补）
     assert "period" not in by_col["d"]
+
+
+def test_parse_sql_candidates_annotations_happy() -> None:
+    """use_llm 候选补全解析：key/is_measure 布尔化/name 限长/period 白名单归一/
+    confidence 范围。"""
+    raw = (
+        '{"candidates": ['
+        '{"key": "0:gmv", "is_measure": true, "name": "日订单成交额", '
+        ' "period": "月度", "confidence": 0.9, "reason": "月粒度"},'
+        '{"key": "0:uv", "is_measure": "false", "name": "去重用户数", '
+        ' "period": "daily", "confidence": 0.8}'
+        "]}"
+    )
+    out = parse_sql_candidates_annotations(raw)
+    assert out is not None
+    by_key = {a["key"]: a for a in out}
+    # period 中文/英文全称 → 白名单值
+    assert by_key["0:gmv"]["period"] == "month"
+    assert by_key["0:uv"]["period"] == "day"
+    # is_measure 布尔化（字符串 false → False）
+    assert by_key["0:gmv"]["is_measure"] is True
+    assert by_key["0:uv"]["is_measure"] is False
+    assert by_key["0:gmv"]["name"] == "日订单成交额"
+    assert by_key["0:gmv"]["confidence"] == 0.9
+
+
+def test_parse_sql_candidates_annotations_filters_invalid() -> None:
+    """缺 key / 非 dict 项丢弃；非法周期丢弃字段；无有效项返回 None。"""
+    raw = (
+        '{"candidates": ['
+        '{"is_measure": true, "name": "缺key丢弃"},'
+        '"不是dict",'
+        '{"key": "0:gmv", "is_measure": true, "period": "not_a_period"},'
+        '{"key": "1:uv", "is_measure": "是", "period": "month"}'
+        "]}"
+    )
+    out = parse_sql_candidates_annotations(raw)
+    assert out is not None
+    assert len(out) == 2
+    assert out[0]["key"] == "0:gmv"
+    assert "period" not in out[0]  # 非法周期 → 丢弃字段
+    assert out[1]["key"] == "1:uv"
+    assert out[1]["is_measure"] is True  # 中文「是」→ True
+    assert out[1]["period"] == "month"
+
+
+def test_parse_sql_candidates_annotations_invalid_returns_none() -> None:
+    """解析失败 / 无候选列表 / 无有效项 → None（上层保持规则候选不动）。"""
+    assert parse_sql_candidates_annotations("not json") is None
+    assert parse_sql_candidates_annotations('{"foo": 1}') is None
+    assert parse_sql_candidates_annotations('{"candidates": [{"is_measure": true}]}') is None

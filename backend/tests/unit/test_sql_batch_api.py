@@ -109,6 +109,47 @@ async def test_parse_sql_batch_returns_candidates(
     assert audit.await_args.kwargs["action"] == "metric_definition.sql_batch_parse"
 
 
+async def test_parse_sql_batch_passes_use_llm(metrics_client: httpx.AsyncClient) -> None:
+    """use_llm 显式模式透传：请求带 use_llm=true → infer_sql_batch 收到 True。"""
+    result = {
+        "statements": [],
+        "candidates": [],
+        "skipped": [],
+        "domain": {"code": None, "status": "none", "confidence": None},
+    }
+    with (
+        patch(
+            "app.services.semantic.sql_split.infer_sql_batch",
+            new=AsyncMock(return_value=result),
+        ) as m,
+        patch("app.api.metrics.write_audit", new=AsyncMock()),
+    ):
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/parse-sql-batch",
+            json={
+                "sql": "SELECT dt, SUM(amount) AS gmv FROM dwd_order_di GROUP BY dt",
+                "split_mode": "statement",
+                "use_llm": True,
+            },
+        )
+    assert resp.status_code == 200
+    kwargs = m.await_args.kwargs
+    assert kwargs["use_llm"] is True
+    # 缺省（不带 use_llm）→ False
+    with (
+        patch(
+            "app.services.semantic.sql_split.infer_sql_batch",
+            new=AsyncMock(return_value=result),
+        ) as m2,
+        patch("app.api.metrics.write_audit", new=AsyncMock()),
+    ):
+        await metrics_client.post(
+            "/api/v1/metric-definitions/parse-sql-batch",
+            json={"sql": "SELECT SUM(amount) AS gmv FROM dwd_order_di GROUP BY dt"},
+        )
+    assert m2.await_args.kwargs["use_llm"] is False
+
+
 async def test_parse_sql_batch_missing_sql_422(metrics_client: httpx.AsyncClient) -> None:
     """缺 sql → 422（必填）。"""
     resp = await metrics_client.post(

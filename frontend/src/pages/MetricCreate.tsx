@@ -26,6 +26,7 @@ interface SqlBatchDraft {
   customDelimiters: string;
   customMarkers: string;
   synthesize: boolean;
+  useLlm: boolean;
   result: SqlBatchParseResult;
   savedAt: number;
 }
@@ -85,6 +86,8 @@ const SQL_SKIP_REASON_TEXT: Record<string, string> = {
   // P1-2（第五轮）：后端批级 LLM 兜底额度（_LLM_BATCH_LIMIT=5）耗尽——降级 skipped
   // 并产 reason=llm_limit；此前前端无此键落到兜底文案，误导用户以为 SQL 有问题
   llm_limit: "已达本批 AI 兜底上限（每批最多 5 次），建议缩减语句数后重试",
+  // use_llm 显式模式：LLM 高置信度判定该候选非业务度量，已从候选中剔除
+  llm_not_measure: "AI 判定为非业务度量（置信度较高），已剔除；如确为度量请用「解析候选」重试",
 };
 
 /** 汇总多条 skipped 成一行可读文案（按原因去重，未知原因用兜底文案）。 */
@@ -369,6 +372,8 @@ export function MetricCreate() {
   // 独立 sqlBatch* state 前缀，不动既有 handleSqlInfer/batch 逻辑。
   const [sqlBatchMode, setSqlBatchMode] = useState<"single" | "batch">("single");
   const [sqlBatchParsing, setSqlBatchParsing] = useState(false);
+  // LLM 推断按钮独立 loading（与「解析候选」区分，双按钮各自转圈）
+  const [sqlBatchLlmParsing, setSqlBatchLlmParsing] = useState(false);
   const [sqlBatchResult, setSqlBatchResult] = useState<SqlBatchParseResult | null>(null);
   // 合成复合指标开关（单语句多度量时组内追加复合候选）
   const [sqlBatchSynthesize, setSqlBatchSynthesize] = useState(false);
@@ -959,8 +964,9 @@ export function MetricCreate() {
   // ---- SQL 批量解析（FR-010 批量注册增强，场景A/B）----
   // 独立 sqlBatch* state，不动既有 handleSqlInfer/batch 逻辑。
 
-  /** 核心批量解析：调 parse-sql-batch 并默认全选原子候选。 */
-  async function runSqlBatchParse(synthesize: boolean) {
+  /** 核心批量解析：调 parse-sql-batch 并默认全选原子候选。
+   *  useLlm=true 走显式 LLM 模式（后端对规则候选做一次 LLM 批量补全+规范收敛）。 */
+  async function runSqlBatchParse(synthesize: boolean, useLlm = false) {
     const sql = sqlInferText.trim();
     if (!sql) { message.warning("请先粘贴大段指标 SQL"); return; }
     // 生产就绪：超大 SQL 前端友好拦截（后端 schema max_length=65536 会 422，此前
@@ -969,7 +975,11 @@ export function MetricCreate() {
       message.warning(`SQL 过长（${sql.length} 字符，上限 65536），请按指标分拆后分批解析`);
       return;
     }
-    setSqlBatchParsing(true);
+    if (useLlm) {
+      setSqlBatchLlmParsing(true);
+    } else {
+      setSqlBatchParsing(true);
+    }
     try {
       const result = await parseSqlBatch({
         sql,
@@ -986,6 +996,7 @@ export function MetricCreate() {
               }
             : undefined,
         synthesize_composite: synthesize,
+        use_llm: useLlm,
       });
       setSqlBatchResult(result);
       setSqlBatchChecked(
@@ -1026,6 +1037,7 @@ export function MetricCreate() {
               customDelimiters: sqlBatchCustomDelimiters,
               customMarkers: sqlBatchCustomMarkers,
               synthesize,
+              useLlm,
               result,
               savedAt: Date.now(),
             } satisfies SqlBatchDraft),
@@ -1033,18 +1045,26 @@ export function MetricCreate() {
         } catch {
           /* localStorage 不可用（隐私模式/配额满）静默跳过，不影响主流程 */
         }
-        message.success(`已解析 ${result.candidates.length} 个候选指标，可勾选后批量创建`);
+        message.success(
+          useLlm
+            ? `已用 LLM 全字段推断解析 ${result.candidates.length} 个候选指标，可勾选后批量创建`
+            : `已解析 ${result.candidates.length} 个候选指标，可勾选后批量创建`,
+        );
       }
     } catch (err) {
       const detail = err instanceof UnisenseApiError ? err.message : "";
       message.error(detail ? `批量解析失败：${detail}` : "批量解析失败，请检查 SQL 语法或稍后重试");
     } finally {
-      setSqlBatchParsing(false);
+      if (useLlm) {
+        setSqlBatchLlmParsing(false);
+      } else {
+        setSqlBatchParsing(false);
+      }
     }
   }
 
-  async function handleParseSqlBatch() {
-    await runSqlBatchParse(sqlBatchSynthesize);
+  async function handleParseSqlBatch(useLlm = false) {
+    await runSqlBatchParse(sqlBatchSynthesize, useLlm);
   }
 
   // 合成复合开关：重新解析（开关影响候选生成）
@@ -2457,16 +2477,30 @@ export function MetricCreate() {
                 </>
               )}
             </div>
-            <Button
-              type="primary"
-              block
-              style={{ marginTop: 12 }}
-              onClick={() => void handleParseSqlBatch()}
-              disabled={!sqlInferText.trim() || sqlBatchParsing}
-              loading={sqlBatchParsing}
-            >
-              解析候选
-            </Button>
+            <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              <Button
+                type="primary"
+                block
+                onClick={() => void handleParseSqlBatch(false)}
+                disabled={!sqlInferText.trim() || sqlBatchParsing || sqlBatchLlmParsing}
+                loading={sqlBatchParsing}
+              >
+                解析候选
+              </Button>
+              <Button
+                block
+                icon={<RobotOutlined />}
+                onClick={() => void handleParseSqlBatch(true)}
+                disabled={!sqlInferText.trim() || sqlBatchParsing || sqlBatchLlmParsing}
+                loading={sqlBatchLlmParsing}
+              >
+                LLM 推断并回填字段
+              </Button>
+            </div>
+            <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+              LLM 模式：AI 对规则解析出的候选做一次批量补全（中文名/周期/非度量过滤），
+              枚举字段系统校验兜底，同一 SQL 每次结果一致
+            </div>
             {/* 批量解析结果：域提示 + 合成复合开关 + 候选分组预览 + 批量创建 */}
             {sqlBatchResult && (
               <>

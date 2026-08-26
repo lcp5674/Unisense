@@ -406,3 +406,79 @@ def parse_sql_measures_result(raw: str) -> list[dict[str, Any]] | None:
     if not out:
         return None
     return out
+
+
+def _coerce_bool(value: Any, default: bool = True) -> bool:
+    """把 LLM 输出的 is_measure 字段布尔化（接受 bool/数字/中英文）。
+
+    兼容 ``true``/``false``/``True``/``是``/``否``/``1``/``0`` 等形态；
+    无法识别时回退 ``default``（缺省 True——保守原则：规则说有就保留）。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in ("true", "yes", "y", "是", "1"):
+            return True
+        if low in ("false", "no", "n", "否", "0"):
+            return False
+    return default
+
+
+def parse_sql_candidates_annotations(raw: str) -> list[dict[str, Any]] | None:
+    """解析候选批量补全结果（use_llm 显式模式：对规则候选做封闭选择）。
+
+    约定返回结构：``{"candidates": [{"key", "is_measure", "name", "period",
+    "confidence", "reason"}, ...]}``。``key`` 必填（对齐候选 ``{idx}:{alias|col}``
+    稳定标识，LLM 只能对已解析候选做选择、不能新增/发明候选）；``is_measure``
+    布尔化（``_coerce_bool``）；``name`` 非空且 ≤128 才采用；``period`` 经
+    ``normalize_period`` 白名单归一；``confidence`` 越界丢弃。缺 key / 非 dict
+    项丢弃——防 LLM 幻觉产出未知候选键污染结果。整体无有效项返回 ``None``
+    （上层保持规则候选不动）。
+
+    Returns:
+        ``[{"key", "is_measure", "name"?, "period"?, "confidence"?, "reason"?}]``；
+        解析失败或无有效项返回 ``None``。
+    """
+    obj = parse_json_object(raw)
+    if obj is None:
+        return None
+    items: Any = None
+    for key in ("candidates", "items", "annotations", "results"):
+        value = obj.get(key)
+        if isinstance(value, list):
+            items = value
+            break
+    if items is None:
+        return None
+    out: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        key = extract_str_field(item, "key", "candidate_key", "idx", "id")
+        if key is None:
+            continue
+        ann: dict[str, Any] = {"key": key}
+        is_measure = item.get("is_measure", item.get("is_metric", item.get("measure", True)))
+        ann["is_measure"] = _coerce_bool(is_measure)
+        name = extract_str_field(item, "name", "metric_name", "title", "desc")
+        if name and len(name) <= 128:
+            ann["name"] = name
+        period = extract_str_field(item, "period", "granularity", "grain", "cycle")
+        period_norm = normalize_period(period)
+        if period_norm:
+            ann["period"] = period_norm
+        confidence = extract_numeric_field(
+            item, "confidence", "score", "prob", min_value=0.0, max_value=1.0
+        )
+        if confidence is not None:
+            ann["confidence"] = confidence
+        reason = extract_str_field(item, "reason", "note", "explanation", "basis")
+        if reason:
+            ann["reason"] = reason
+        out.append(ann)
+    if not out:
+        return None
+    return out

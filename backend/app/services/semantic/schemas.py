@@ -664,6 +664,14 @@ class MetricSqlParseRequest(BaseModel):
     synthesize_composite: bool = Field(
         False, description="单语句多度量时是否合成复合指标候选（依赖组内原子）"
     )
+    use_llm: bool = Field(
+        False,
+        description=(
+            "显式 LLM 模式：对规则解析出的候选做一次 LLM 批量补全（封闭选择："
+            "中文名润色/周期校正/非度量过滤）+ 规范收敛（白名单/列名回映/稳定排序/"
+            "置信度）；整段 SQL 只花 1 次调用，LLM 不可用自动回退规则候选，绝不阻断"
+        ),
+    )
 
 
 class SqlBatchCreateCandidate(BaseModel):
