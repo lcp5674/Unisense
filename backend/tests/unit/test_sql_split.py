@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from app.services.llm.parse import parse_period_infer_result, parse_sql_split_result
 from app.services.semantic.sql_infer import parse_sql_profile
 from app.services.semantic.sql_split import (
@@ -1028,3 +1030,58 @@ async def test_infer_sql_batch_single_statement_profile_error_degrades() -> None
     assert len(result["candidates"]) == 0
     assert all(s["reason"] == "parse_failed" for s in result["skipped"])
     assert len(result["skipped"]) == 2
+
+
+async def test_infer_sql_batch_statement_limit_exceeded() -> None:
+    """P1-2：语句数超上限（生产护栏）→ 抛 SQL_BATCH_TOO_MANY_STATEMENTS。
+
+    超大脚本（数百条语句）会触发逐语句 LLM 兜底/域建议拖慢解析，超限直接拒绝，
+    提示用户分批解析，而非让用户等待超时。
+    """
+    from app.core.exceptions import BusinessError
+
+    # 构造 101 条简单语句（每条约 20 字符，总量远小于 64KB sql 上限）
+    parts = [f"SELECT {i} AS x" for i in range(101)]
+    with pytest.raises(BusinessError) as exc:
+        await infer_sql_batch(
+            _fake_db(), sql=";".join(parts), split_mode="semicolon", domain_code="sales"
+        )
+    assert exc.value.error_code == "SQL_BATCH_TOO_MANY_STATEMENTS"
+    assert exc.value.ctx["statement_count"] == 101
+
+
+def test_custom_regex_redos_safe() -> None:
+    """P2-3：custom 切分正则安全护栏——危险/非法/超长正则被跳过。
+
+    灾难性回溯（如 (a+)+、(a|a)+、(.*.*)+）与非法正则直接经 _safe_custom_regex
+    拦截，不进入 re.split/re.finditer，避免 ReDoS 拖垮 worker。
+    """
+    from app.services.semantic.sql_split import _safe_custom_regex
+
+    # 危险嵌套量词（ReDoS）→ None
+    assert _safe_custom_regex(r"(a+)+") is None
+    assert _safe_custom_regex(r"(a|a)+") is None
+    assert _safe_custom_regex(r"(.*.*)+") is None
+    assert _safe_custom_regex(r"(a{1,3}){2,}") is None
+    # 非法正则 → None
+    assert _safe_custom_regex("([unclosed") is None
+    # 非字符串 / 空 / 超长 → None
+    assert _safe_custom_regex(123) is None
+    assert _safe_custom_regex("") is None
+    assert _safe_custom_regex("a" * 201) is None
+    # 合法正则 → 编译成功
+    assert _safe_custom_regex(r"^CREATE\s+TABLE") is not None
+
+
+def test_split_custom_skips_redos_delimiters() -> None:
+    """P2-3：_split_custom 对危险 delimiters 跳过（不因单个 ReDoS 规则失败）。"""
+    from app.services.semantic.sql_split import _split_custom
+
+    # 危险分隔符被跳过，安全分隔符仍生效
+    segments = _split_custom(
+        "A;--\nB",
+        {"delimiters": [r"(a+)+", ";"]},  # 前者 ReDoS 风险被跳过，后者生效
+    )
+    assert len(segments) == 2
+    assert segments[0] == "A"
+    assert segments[1] == "--\nB"

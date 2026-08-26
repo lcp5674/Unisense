@@ -103,6 +103,7 @@ class ConflictService(BaseService):
         *,
         use_llm: bool = True,
         source: str = "manual",
+        llm_budget: dict[str, int] | None = None,
     ) -> ConflictCheckResult:
         """冲突检测；命中落库 OPEN 记录（硬+软均落，PII 转 pii_review）。
 
@@ -113,6 +114,9 @@ class ConflictService(BaseService):
                 传 False 避免注册时引入 LLM 调用；人工预检（/conflicts/check）保持 True。
             source: 冲突来源标识，落库到 conflict.source——``auto`` 创建自动预检 /
                 ``manual`` 人工预检 / ``backfill`` 存量回填。仲裁台据此区分来源展示。
+            llm_budget: 批级 LLM 补位预算 ``{"used", "limit"}``（P1-1：单条预检对
+                自动加载的整批 existing 逐对比对时防数百次 LLM 调用，耗尽降级词法；
+                None 表示不限额）。
         """
         detections: list[DetectionOut] = []
         blocked = False
@@ -123,7 +127,14 @@ class ConflictService(BaseService):
             det = detect_conflict(cand_dict, ext_dict)
             # ---- LLM 语义补位（异步）----
             # 词法无冲突、但落入补位触发区且双方有定义时，调用 LLM 判定语义同义。
-            if use_llm and det is None and is_borderline_match(cand_dict, ext_dict):
+            if (
+                use_llm
+                and det is None
+                and is_borderline_match(cand_dict, ext_dict)
+                and (llm_budget is None or llm_budget["used"] < llm_budget["limit"])
+            ):
+                if llm_budget is not None:
+                    llm_budget["used"] += 1
                 try:
                     confirmed = await self._llm.judge_same_semantics(
                         cand_dict.get("definition", ""), ext_dict.get("definition", "")

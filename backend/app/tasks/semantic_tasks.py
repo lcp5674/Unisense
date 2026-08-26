@@ -387,7 +387,9 @@ functions = [
     check_dsd_overdue,
 ]
 
-# Cron 调度配置（供 arq worker 使用）
+# 注意：以下 cron_jobs（dict 格式）仅为语义任务清单参考，实际调度注册
+# 在 ``app/services/collector/worker.py`` 的 ``WorkerSettings.cron_jobs``（arq cron 格式）。
+# 修改调度（频率/时间）请改 worker.py，勿改此处，否则不生效。
 cron_jobs = [
     {"func": check_pending_version_timeouts, "cron": "*/1 * * * *"},  # 每分钟
     {"func": refresh_health_scores, "cron": "0 3 * * *"},  # 每日凌晨3点

@@ -341,3 +341,63 @@ async def test_suggest_domain_valid_request_returns_suggestion(
     assert data["status"] == "unique"
     assert data["domain"]["code"] == "sales"
     assert data["domain"]["source"] == "catalog"
+
+
+# ---- P1-1：llm_budget 批级限额（域建议的 LLM 兜底计入批量解析共享预算）----
+
+
+async def test_suggest_domain_llm_budget_consumed(domain_map: dict[str, str]) -> None:
+    """预算未耗尽时走 LLM 兜底并消耗一次预算（used+1）。"""
+    db = MagicMock()
+    llm = DomainCandidate(
+        code="sales", name="", confidence=0.6, source="llm", reason="AI 推断"
+    )
+    budget = {"used": 0, "limit": 5}
+    with (
+        patch(
+            "app.services.semantic.domain_suggest._domain_map",
+            new=AsyncMock(return_value=domain_map),
+        ),
+        patch(
+            "app.services.semantic.domain_suggest._lookup_tables",
+            new=AsyncMock(return_value=[]),  # 目录/挂载均未命中 → 走 LLM
+        ),
+        patch(
+            "app.services.semantic.domain_suggest._llm_suggest",
+            new=AsyncMock(return_value=llm),
+        ) as llm_mock,
+    ):
+        result = await suggest_domain(
+            db, source_table="ods_track_event", llm_budget=budget
+        )
+    assert result["status"] == "llm"
+    llm_mock.assert_awaited_once()
+    assert budget["used"] == 1
+
+
+async def test_suggest_domain_llm_budget_exhausted_skips_llm(
+    domain_map: dict[str, str],
+) -> None:
+    """预算耗尽时跳过 LLM 兜底（返回 none），不再消耗预算。"""
+    db = MagicMock()
+    budget = {"used": 5, "limit": 5}  # 已耗尽
+    with (
+        patch(
+            "app.services.semantic.domain_suggest._domain_map",
+            new=AsyncMock(return_value=domain_map),
+        ),
+        patch(
+            "app.services.semantic.domain_suggest._lookup_tables",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch(
+            "app.services.semantic.domain_suggest._llm_suggest",
+            new=AsyncMock(return_value=None),
+        ) as llm_mock,
+    ):
+        result = await suggest_domain(
+            db, source_table="ods_track_event", llm_budget=budget
+        )
+    assert result["status"] == "none"
+    llm_mock.assert_not_called()
+    assert budget["used"] == 5  # 不再增加

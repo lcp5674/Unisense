@@ -60,6 +60,8 @@ import {
   listDomainTree,
   listFavorites,
   listMeasureCatalogs,
+  listMetricMounts,
+  deleteMetricMount,
   listMetrics,
   listSubscriptions,
   listTerms,
@@ -81,6 +83,7 @@ import {
 } from "../api";
 import type {
   ArchivedMetricResponse,
+  MetricMount,
   SubjectDomainTreeNode,
   CurrentUser,
   Dimension,
@@ -669,6 +672,11 @@ export function MetricDetail() {
   } | null>(null);
   const [showArchivedModal, setShowArchivedModal] = useState(false);
   const [versions, setVersions] = useState<MetricVersionResponse[]>([]);
+  // 挂载实体（OneData 挂载层，P1-3）：详情页可见可管——此前仅派生创建时透传落库，
+  // 前端无任何页面读取/展示挂载，用户无法查看已挂载实体与解除挂载。
+  const [mounts, setMounts] = useState<MetricMount[]>([]);
+  const [mountsLoading, setMountsLoading] = useState(false);
+  const [unmounting, setUnmounting] = useState(false);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [users, setUsers] = useState<UserBrief[]>([]);
   const [health, setHealth] = useState<MetricHealth | null>(null);
@@ -896,6 +904,8 @@ export function MetricDetail() {
         fetchRelatedMetrics(code).catch(() => [] as RecommendItem[]),
       ]);
       setMetric(m);
+      // P1-3：挂载实体加载（best-effort）
+      if (m.id != null) loadMounts(m.id);
       setVersions(vs);
       setCurrentUser(me);
       setFavorited(favs.some((f) => f.asset_type === "METRIC" && f.asset_id === code));
@@ -962,6 +972,44 @@ export function MetricDetail() {
     } finally {
       setLoading(false);
     }
+  }
+
+  // P1-3：加载挂载实体（OneData 挂载层，best-effort——挂载展示失败不拖垮详情页）
+  async function loadMounts(metricId: number) {
+    setMountsLoading(true);
+    try {
+      const res = await listMetricMounts({ metric_id: metricId, page_size: 50 });
+      setMounts(res.items ?? []);
+    } catch {
+      setMounts([]);
+    } finally {
+      setMountsLoading(false);
+    }
+  }
+
+  // P1-3：解除挂载（带确认；成功后刷新挂载列表）
+  function handleUnmount(mountId: number) {
+    Modal.confirm({
+      title: "解除挂载",
+      content: "解除后该指标不再挂载到物理表（OneData 挂载层实体将被删除）。确认继续？",
+      okText: "解除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        setUnmounting(true);
+        try {
+          await deleteMetricMount(mountId);
+          message.success("已解除挂载");
+          if (metric?.id != null) await loadMounts(metric.id);
+        } catch (err) {
+          message.error(
+            err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "解除挂载失败",
+          );
+        } finally {
+          setUnmounting(false);
+        }
+      },
+    });
   }
 
   useEffect(() => {
@@ -2191,6 +2239,50 @@ export function MetricDetail() {
           </Descriptions.Item>
           <Descriptions.Item label="版本">v{metric.version}</Descriptions.Item>
         </Descriptions>
+      </Card>
+
+      {/* P1-3：挂载实体（OneData 挂载层）——详情页可见可管：展示挂载的物理表/粒度/周期/域，
+          支持解除挂载（此前挂载仅创建时透传落库、前端无任何查看/管理入口） */}
+      <Card
+        size="small"
+        style={{ marginBottom: 16 }}
+        title="挂载实体（OneData 挂载层）"
+        loading={mountsLoading}
+      >
+        {mounts.length === 0 ? (
+          <Typography.Text type="secondary">
+            未挂载——该指标未绑定物理表（派生指标 = 原子 + 时间 + 业务限定 + 挂载）。
+          </Typography.Text>
+        ) : (
+          mounts.map((m) => (
+            <div
+              key={m.id}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                padding: "4px 0",
+              }}
+            >
+              <Space wrap>
+                <Tag color="blue">{m.source_table}</Tag>
+                <span className="muted">
+                  列：{m.source_column} · 粒度：{m.granularity}
+                  {m.default_period ? ` · 默认周期：${m.default_period}` : ""} · 域：{m.domain}
+                </span>
+              </Space>
+              <Button
+                size="small"
+                danger
+                loading={unmounting}
+                icon={<DeleteOutlined />}
+                onClick={() => handleUnmount(m.id)}
+              >
+                解除挂载
+              </Button>
+            </div>
+          ))
+        )}
       </Card>
 
       {/* 业务描述（治理补充）：展示已有描述；有权限时可 LLM 推断生成（能力对齐资产地图） */}

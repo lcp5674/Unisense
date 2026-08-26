@@ -2511,8 +2511,14 @@ class CollectorService(BaseService):
         await self._db.commit()
 
     async def fail_collection_run(self, run_id: int, error: str) -> None:
-        """采集失败收尾（记录错误 + FAILED）并提交。"""
-        await self._repo.fail_collection_run(run_id, error)
+        """采集失败收尾（记录错误 + FAILED）并提交。
+
+        P2-2：错误文本先脱敏（DSN 内嵌凭据/密码回显，TD §13）再截断落库——
+        采集失败原始异常可能含 DB 连接串/账号密码等内部细节，且
+        ``GET /collection-runs/{id}`` 允许任意登录用户读取，防凭据/内部信息泄露。
+        """
+        sanitized = _sanitize_conn_error(error or "")[:512]
+        await self._repo.fail_collection_run(run_id, sanitized)
         await self._db.commit()
 
     async def list_collection_runs(

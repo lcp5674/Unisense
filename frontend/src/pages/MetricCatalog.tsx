@@ -36,6 +36,7 @@ import {
   batchApproveMetrics,
   batchRejectMetrics,
   batchDeprecateMetrics,
+  batchReactivateMetrics,
   batchSubmitMetrics,
   checkMetricDownstream,
   type MetricDownstreamCheckResult,
@@ -492,9 +493,9 @@ export function MetricCatalog() {
   // 无权限则禁用导出按钮，防止 viewer/analyst 等角色导出含 PII 口径的指标清单（数据导出权限缺口）。
   const canExport = can("metric:export");
   // 批量操作确认弹窗：null=关闭 / submit=批量提交审核 / delete=批量删除 /
-  // approve=批量通过 / reject=批量打回 / deprecate=批量下线
+  // approve=批量通过 / reject=批量打回 / deprecate=批量下线 / reactivate=批量恢复
   const [batchAction, setBatchAction] = useState<
-    "submit" | "delete" | "approve" | "reject" | "deprecate" | null
+    "submit" | "delete" | "approve" | "reject" | "deprecate" | "reactivate" | null
   >(null);
   const [batchBusy, setBatchBusy] = useState(false);
   // 批量操作失败明细：超 3 条时提供「查看明细」弹窗（避免 message 截断导致用户看不到全部失败）
@@ -502,7 +503,9 @@ export function MetricCatalog() {
   const [batchErrorsOpen, setBatchErrorsOpen] = useState(false);
   // 批量操作失败项的 metric_code（供「重试失败项」一键重选；batchRetryActionRef 记住原操作类型）
   const [batchFailedCodes, setBatchFailedCodes] = useState<string[]>([]);
-  const batchRetryActionRef = useRef<"submit" | "delete" | "approve" | "reject" | "deprecate" | null>(null);
+  const batchRetryActionRef = useRef<
+    "submit" | "delete" | "approve" | "reject" | "deprecate" | "reactivate" | null
+  >(null);
   // 批量提交审核的评审指派（TD §13）
   const [batchReviewerType, setBatchReviewerType] = useState<"user" | "domain" | null>(null);
   const [batchReviewerId, setBatchReviewerId] = useState<number | null>(null);
@@ -967,6 +970,16 @@ export function MetricCatalog() {
             reviewer_domain: m.domain,
           })),
         );
+        ok = res.ok_count;
+        res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.code}: ${r.message}`); failedCodes.push(r.code); });
+      } else if (batchAction === "reactivate") {
+        // P2-1：批量恢复已废弃指标（DEPRECATED → DRAFT，对齐维度/度量/术语批量重新启用）
+        const targets = selected.filter((m) => m.status === "DEPRECATED");
+        if (!targets.length) {
+          message.warning("勾选的指标中没有已废弃（DEPRECATED）状态");
+          return;
+        }
+        const res = await batchReactivateMetrics(targets.map((m) => m.metric_code));
         ok = res.ok_count;
         res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.code}: ${r.message}`); failedCodes.push(r.code); });
       } else {
@@ -1808,6 +1821,25 @@ export function MetricCatalog() {
                   icon: <DeleteOutlined />,
                   disabled: !selected.some((m) => m.status === "PUBLISHED") || !canDeprecate,
                 },
+                {
+                  // P2-1：批量恢复已废弃指标（DEPRECATED → DRAFT，对齐维度/逻辑度量/术语批量重新启用）
+                  key: "reactivate",
+                  label: (
+                    <Tooltip
+                      title={
+                        !selected.some((m) => m.status === "DEPRECATED")
+                          ? "批量恢复仅适用于勾选中的已废弃（DEPRECATED）指标；当前勾选无已废弃指标"
+                          : !canDeprecate
+                            ? "无恢复权限（metric:deprecate）"
+                            : undefined
+                      }
+                    >
+                      <span>批量恢复（已废弃）</span>
+                    </Tooltip>
+                  ),
+                  icon: <ReloadOutlined />,
+                  disabled: !selected.some((m) => m.status === "DEPRECATED") || !canDeprecate,
+                },
                 { type: "divider" },
                 {
                   key: "delete",
@@ -1837,7 +1869,13 @@ export function MetricCatalog() {
                 },
               ],
               onClick: ({ key }) => {
-                const act = key as "submit" | "delete" | "approve" | "reject" | "deprecate";
+                const act = key as
+                  | "submit"
+                  | "delete"
+                  | "approve"
+                  | "reject"
+                  | "deprecate"
+                  | "reactivate";
                 if (act === "deprecate") {
                   loadSuccessorOptions();
                   // 打开批量下线面板即审查勾选已发布指标的下游使用情况
@@ -2142,7 +2180,9 @@ export function MetricCatalog() {
                 ? "批量打回"
                 : batchAction === "deprecate"
                   ? "批量下线"
-                  : "批量删除草稿"
+                  : batchAction === "reactivate"
+                    ? "批量恢复已废弃指标"
+                    : "批量删除草稿"
         }
         open={batchAction !== null}
         confirmLoading={batchBusy}
@@ -2157,7 +2197,9 @@ export function MetricCatalog() {
                 ? "打回"
                 : batchAction === "deprecate"
                   ? "下线"
-                  : "删除"
+                  : batchAction === "reactivate"
+                    ? "恢复"
+                    : "删除"
         }
         okButtonProps={{
           danger: batchAction === "delete" || batchAction === "deprecate",
@@ -2303,6 +2345,12 @@ export function MetricCatalog() {
                 );
               })}
           </div>
+        )}
+        {batchAction === "reactivate" && (
+          <p>
+            将勾选的 <b>{selected.filter((m) => m.status === "DEPRECATED").length}</b> 个已废弃指标恢复为草稿
+            （DEPRECATED → DRAFT）。恢复后请重新提交审核方可发布（不绕过审核流）。
+          </p>
         )}
         {batchAction === "delete" && (
           <p>

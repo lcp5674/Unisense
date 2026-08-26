@@ -259,7 +259,14 @@ class DegradationMiddleware(BaseHTTPMiddleware):
 # - 导出/批量类端点（CSV 全量拉取）：60 秒窗口 60 次
 _RATE_LIMIT_RULES: list[tuple[tuple[str, ...], int, int]] = [
     (
-        ("infer-description", "suggest-rename", "suggest-rename-name", "auto-suggest"),
+        (
+            "infer-description",
+            "suggest-rename",
+            "suggest-rename-name",
+            "auto-suggest",
+            "conflicts/check",  # P1-1: 冲突预检会逐对调 LLM，同 LLM 严格档
+            "parse-sql-batch",  # P1-2: 批量解析含域建议/自定义分段 LLM 兜底，同 LLM 严格档
+        ),
         60,
         20,
     ),

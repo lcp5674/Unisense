@@ -151,14 +151,44 @@ def _split_statement(sql: str) -> list[str]:
     return []
 
 
+# P2-3：custom 切分正则安全护栏——用户自定义规则（delimiters/start_markers）为任意
+# 正则，直接 re.split/re.finditer 可能携带灾难性回溯（ReDoS）构造拖垮 worker。
+# 校验：长度上限 + 嵌套量词检测 + 可编译性，任一不满足即跳过该规则（不阻断其余规则）。
+_CUSTOM_REGEX_MAX_LEN = 200
+# 灾难性回溯特征：嵌套量词/分组内量词或 alternation 后紧跟量词
+# （如 (a+)+、(a*)*、(a|a)+、(.*.*)+、(a{1,3}){2,}）
+_NESTED_QUANTIFIER_RE = re.compile(
+    r"\([^()]*(?:[+*]|\{\d+,\d*\}|\|)[^()]*\)[+*]|\([^()]*\)\{[^}]*\}"
+)
+
+
+def _safe_custom_regex(pattern: Any) -> re.Pattern[str] | None:
+    """校验并编译自定义切分正则；非法/危险（ReDoS 风险/过长）返回 None（跳过该规则）。"""
+    if not isinstance(pattern, str):
+        return None
+    if not pattern.strip() or len(pattern) > _CUSTOM_REGEX_MAX_LEN:
+        return None
+    if _NESTED_QUANTIFIER_RE.search(pattern):
+        return None
+    try:
+        return re.compile(pattern)
+    except re.error:
+        return None
+
+
 def _split_by_start_markers(sql: str, start_markers: list[Any]) -> list[str]:
-    """按起始标记正则切分：每个标记命中的位置作为新段起点。"""
+    """按起始标记正则切分：每个标记命中的位置作为新段起点。
+
+    P2-3：每个标记经 ``_safe_custom_regex`` 校验（长度/嵌套量词/可编译），
+    危险或非法正则跳过，避免 ReDoS 拖垮 worker。
+    """
     positions: list[int] = []
     for marker in start_markers:
-        if not marker:
+        compiled = _safe_custom_regex(marker)
+        if compiled is None:
             continue
         try:
-            positions.extend(m.start() for m in re.finditer(str(marker), sql))
+            positions.extend(m.start() for m in compiled.finditer(sql))
         except re.error:
             continue  # 非法正则忽略（不阻断其余标记）
     positions = sorted(set(positions))
@@ -177,13 +207,18 @@ def _split_custom(sql: str, custom_rules: dict[str, Any] | None) -> list[str]:
     """用户自定义规则切分：先 ``delimiters`` 分隔符，再 ``start_markers`` 起始标记。
 
     两个维度都未命中或结果仍 ≤1 段时返回空列表（上层据此决定 LLM 兜底/降级单段）。
+    P2-3：delimiters 逐条经 ``_safe_custom_regex`` 校验（长度/嵌套量词/可编译），
+    危险或非法规则跳过，避免拼接出灾难性回溯正则（ReDoS）。
     """
     rules = custom_rules or {}
     delimiters = rules.get("delimiters") or []
     start_markers = rules.get("start_markers") or []
     if delimiters:
-        pattern = "|".join(str(d) for d in delimiters if d)
-        if pattern:
+        compiled_parts = [
+            c.pattern for c in (_safe_custom_regex(d) for d in delimiters) if c is not None
+        ]
+        if compiled_parts:
+            pattern = "|".join(compiled_parts)
             parts = re.split(pattern, sql)
             segments = [p.strip() for p in parts if p.strip()]
             if len(segments) >= _LLM_SPLIT_MIN_SEGMENTS:
@@ -326,6 +361,7 @@ async def split_sql_statements(
     mode: str = "statement",
     custom_rules: dict[str, Any] | None = None,
     db: Any = None,
+    llm_budget: dict[str, int] | None = None,
 ) -> list[str]:
     """按模式切分多语句 SQL。
 
@@ -334,6 +370,8 @@ async def split_sql_statements(
         mode: ``semicolon`` / ``statement`` / ``custom``。
         custom_rules: custom 模式的自定义切分规则（delimiters/start_markers）。
         db: 异步会话（custom 模式 LLM 兜底需要；None 则跳过 LLM）。
+        llm_budget: 批级 LLM 调用预算 ``{"used", "limit"}``（P1-1：custom 切分
+            LLM 兜底计入批量限额，防多语句脚本打满 LLM 配额；None 表示不限额）。
 
     Returns:
         切分后的语句列表（至少 1 段；极端失败降级整段）。
@@ -345,7 +383,11 @@ async def split_sql_statements(
     elif mode == "custom":
         segments = _split_custom(sql, custom_rules)
         if len(segments) < _LLM_SPLIT_MIN_SEGMENTS and db is not None:
-            llm_segments = await _llm_split(db, sql)
+            llm_segments = None
+            if llm_budget is None or llm_budget["used"] < llm_budget["limit"]:
+                if llm_budget is not None:
+                    llm_budget["used"] += 1
+                llm_segments = await _llm_split(db, sql)
             if llm_segments:
                 return llm_segments
     else:  # statement（默认）：语义切分失败时回退引号感知分号切分
@@ -727,18 +769,36 @@ async def infer_sql_batch(
     if not sql or not sql.strip():
         return {"statements": [], "candidates": [], "skipped": [], "domain": None}
 
+    # P1-1：批级 LLM 调用预算（切分兜底 + 整段域建议 + 度量提取 + 周期推断 +
+    # 逐语句域建议全部计入），超 _LLM_BATCH_LIMIT 后不再调 LLM——防多语句脚本
+    # 打满 LLM 配额/拖慢解析；域建议仅在目录/挂载未命中时消耗（内部 best-effort）。
+    llm_budget = {"used": 0, "limit": _LLM_BATCH_LIMIT}
+
     segments = await split_sql_statements(
-        sql, mode=split_mode, custom_rules=custom_rules, db=db
+        sql, mode=split_mode, custom_rules=custom_rules, db=db, llm_budget=llm_budget
     )
     if not segments:
         segments = [sql.strip()]
+
+    # P1-2：批量解析语句数上限（生产护栏）——超大脚本（数百条语句）会触发逐语句
+    # LLM 兜底/域建议拖慢解析，超限直接拒绝，提示用户分批解析（前端友好文案）。
+    max_batch_statements = 100
+    if len(segments) > max_batch_statements:
+        from app.core.exceptions import BusinessError
+
+        raise BusinessError(
+            f"SQL 语句数（{len(segments)}）超过单次批量解析上限 {max_batch_statements}，"
+            "请分批解析",
+            error_code="SQL_BATCH_TOO_MANY_STATEMENTS",
+            ctx={"statement_count": len(segments), "limit": max_batch_statements},
+        )
 
     # 域建议：用户未指定域时整段一次批量建议（目录/挂载反查 + LLM 兜底）
     suggestion: dict[str, Any] | None = None
     if not domain_code:
         from app.services.semantic.domain_suggest import suggest_domain
 
-        suggestion = await suggest_domain(db, sql=sql)
+        suggestion = await suggest_domain(db, sql=sql, llm_budget=llm_budget)
         if suggestion.get("status") in ("unique", "llm"):
             domain_code = suggestion["domain"]["code"]
 
@@ -747,9 +807,6 @@ async def infer_sql_batch(
     statements: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
-    # P1-2：批级 LLM 兜底调用计数（度量提取 + 周期推断共用），超 _LLM_BATCH_LIMIT
-    # 后不再调 LLM，降级 skipped（llm_limit）——防多语句脚本打满 LLM 配额/拖慢解析
-    llm_call_count = 0
     # P2-10：整段域建议未定/多域时，逐语句反向建议域——跨域脚本各语句表可能
     # 分属不同域（跨域共用 DWD 层表是常态），候选携带语句级建议域供前端提示。
     # 整段唯一/LLM 已定域或用户显式指定域时不重复建议（避免 N 次 DB 查询）。
@@ -769,7 +826,9 @@ async def infer_sql_batch(
             from app.services.semantic.domain_suggest import suggest_domain
 
             try:
-                seg_suggestion = await suggest_domain(db, sql=seg)
+                seg_suggestion = await suggest_domain(
+                    db, sql=seg, llm_budget=llm_budget
+                )
                 if seg_suggestion.get("status") in ("unique", "llm"):
                     seg_domain_code = seg_suggestion["domain"]["code"]
             except Exception:
@@ -783,7 +842,7 @@ async def infer_sql_batch(
             llm_measures = None
             llm_tried = reason_code == "parse_failed" and db is not None
             if llm_tried:
-                if llm_call_count >= _LLM_BATCH_LIMIT:
+                if llm_budget["used"] >= _LLM_BATCH_LIMIT:
                     # 已达批级限额：不再调 LLM，降级 skipped（前端提示 AI 兜底上限）
                     skipped.append(
                         {
@@ -793,7 +852,7 @@ async def infer_sql_batch(
                         }
                     )
                     continue
-                llm_call_count += 1
+                llm_budget["used"] += 1
                 # 传完整脚本 + 焦点语句：方言语句字段来源/口径常依赖前置语句
                 # 定义（CTE/SET/变量），只看单段会信息丢失影响推断
                 llm_measures = await _llm_infer_measures(
@@ -829,8 +888,12 @@ async def infer_sql_batch(
         period = _period_from_profile(profile)
         # 规则层无时间信号（无截断/别名粒度、无时间列）→ LLM 兜底推断周期；
         # LLM 不可用/失败降级规则层默认，绝不阻断候选生成
-        if _period_uncertain(profile) and db is not None and llm_call_count < _LLM_BATCH_LIMIT:
-            llm_call_count += 1
+        if (
+            _period_uncertain(profile)
+            and db is not None
+            and llm_budget["used"] < _LLM_BATCH_LIMIT
+        ):
+            llm_budget["used"] += 1
             llm_period = await _llm_infer_period(
                 db, full_sql=sql, focus_sql=seg
             )
@@ -863,6 +926,19 @@ async def infer_sql_batch(
             )
             if composite:
                 candidates.append(composite)
+
+    # P1-2：候选数上限（生产护栏）——单请求产出过多候选（语句数 × 每语句多度量）
+    # 会拖慢前端渲染与后续批量创建，超限拒绝并提示缩减范围。
+    max_batch_candidates = 200
+    if len(candidates) > max_batch_candidates:
+        from app.core.exceptions import BusinessError
+
+        raise BusinessError(
+            f"批量解析候选数（{len(candidates)}）超过单次上限 {max_batch_candidates}，"
+            "请缩减 SQL 范围",
+            error_code="SQL_BATCH_TOO_MANY_CANDIDATES",
+            ctx={"candidate_count": len(candidates), "limit": max_batch_candidates},
+        )
 
     return {
         "statements": statements,

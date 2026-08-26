@@ -34,6 +34,7 @@ import httpx
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import settings
+from app.core.metrics import store as metrics_store
 from app.core.resilience import get_circuit_breaker
 
 logger = logging.getLogger(__name__)
@@ -261,8 +262,9 @@ class LlmClient:
                 # 解析结构化输出
                 structured = self._parse_structured_output(raw_content)
 
-                # 成功 → 复位熔断计数
+                # 成功 → 复位熔断计数 + 上报 LLM 调用指标（可观测性，P0-2）
                 self._breaker.record_success()
+                metrics_store.observe_llm_call(success=True)
                 return {
                     "content": structured.content,
                     "confidence": structured.confidence,
@@ -286,11 +288,13 @@ class LlmClient:
                     status,
                     exc.response.text if exc.response is not None else "",
                 )
+                metrics_store.observe_llm_call(success=False)
                 raise LlmError(f"LLM 请求失败: {status}") from exc
             except (KeyError, IndexError) as exc:
                 # 响应结构异常：记为一次失败（可能上游降级返回垃圾），但不在此退避重试
                 self._breaker.record_failure()
                 logger.error("LLM 响应解析失败: %s", exc)
+                metrics_store.observe_llm_call(success=False)
                 raise LlmError("LLM 响应格式错误") from exc
             except httpx.HTTPError as exc:
                 # 网络/超时等传输层瞬时故障：熔断计数 + 退避重试
@@ -301,8 +305,10 @@ class LlmClient:
                     await asyncio.sleep(_LLM_BACKOFF_BASE * (2**attempt))
                     continue
                 logger.error("LLM 网络错误: %s", exc)
+                metrics_store.observe_llm_call(success=False)
                 raise LlmError(f"LLM 请求失败: {exc}") from exc
         # 不应到达；兜底抛出最后一次异常
+        metrics_store.observe_llm_call(success=False)
         raise LlmError(f"LLM 请求失败: {last_exc}") from last_exc
 
     def _parse_structured_output(self, raw_content: str) -> LlmStructuredOutput:

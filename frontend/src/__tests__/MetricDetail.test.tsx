@@ -14,6 +14,8 @@ vi.mock("../api", () => ({
   listFavorites: vi.fn(),
   listMetrics: vi.fn(),
   listMeasureCatalogs: vi.fn().mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 }),
+  listMetricMounts: vi.fn().mockResolvedValue({ items: [], total: 0 }),
+  deleteMetricMount: vi.fn().mockResolvedValue(undefined),
   listCatalogs: vi.fn().mockResolvedValue({ items: [] }),
   getMetricHealth: vi.fn(),
   listDictItems: vi.fn(),
@@ -77,6 +79,8 @@ import {
   listFavorites,
   listMetrics,
   listMeasureCatalogs,
+  listMetricMounts,
+  deleteMetricMount,
   listCatalogs,
   getMetricHealth,
   listUsers,
@@ -116,6 +120,8 @@ const mockedDimensions = vi.mocked(listDimensions);
 const mockedCatalogs = vi.mocked(listCatalogs);
 const mockedListMetrics = vi.mocked(listMetrics);
 const mockedListMeasureCatalogs = vi.mocked(listMeasureCatalogs);
+const mockedListMetricMounts = vi.mocked(listMetricMounts);
+const mockedDeleteMetricMount = vi.mocked(deleteMetricMount);
 const mockedFavorites = vi.mocked(listFavorites);
 const mockedHealth = vi.mocked(getMetricHealth);
 const mockedUsers = vi.mocked(listUsers);
@@ -2594,6 +2600,68 @@ describe("MetricDetail 按钮级权限过滤", () => {
       const lastCall = mockedUpdateMetric.mock.calls[mockedUpdateMetric.mock.calls.length - 1]?.[1];
       expect(lastCall?.measure_id).toBeNull();
     });
+  });
+
+  // P1-3：挂载实体可见——详情页展示挂载的物理表/粒度/周期/域（此前无任何页面读取挂载）
+  it("详情页展示挂载实体（OneData 挂载层）物理表/粒度/周期/域", async () => {
+    mockedListMetricMounts.mockResolvedValue({
+      items: [
+        {
+          id: 7,
+          metric_id: 1,
+          source_table: "dwd_outpatient_gmv_df",
+          source_column: "amount",
+          granularity: "day",
+          default_period: "day",
+          domain: "outpatient",
+          created_at: "2026-08-01T00:00:00",
+          updated_at: "2026-08-01T00:00:00",
+        },
+      ],
+      total: 1,
+    });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    await screen.findByText("挂载实体（OneData 挂载层）");
+    expect(screen.getByText("dwd_outpatient_gmv_df")).toBeTruthy();
+    expect(screen.getByText(/列：amount · 粒度：day/)).toBeTruthy();
+  });
+
+  // P1-3：挂载实体可管——解除挂载走确认弹窗，确认后调 deleteMetricMount 并刷新
+  it("解除挂载：确认后调 deleteMetricMount 并刷新挂载列表", async () => {
+    mockedListMetricMounts.mockResolvedValue({
+      items: [
+        {
+          id: 7,
+          metric_id: 1,
+          source_table: "dwd_outpatient_gmv_df",
+          source_column: "amount",
+          granularity: "day",
+          default_period: "day",
+          domain: "outpatient",
+          created_at: "2026-08-01T00:00:00",
+          updated_at: "2026-08-01T00:00:00",
+        },
+      ],
+      total: 1,
+    });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    await screen.findByText("挂载实体（OneData 挂载层）");
+    const beforeMountsCalls = mockedListMetricMounts.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: /解除挂载/ }));
+    await waitFor(() => expect(document.querySelector(".ant-modal-confirm")).toBeTruthy());
+    // 确认弹窗「解除」为危险按钮（antd 两字按钮会自动加空格 → 用正则）
+    fireEvent.click(document.querySelector(".ant-modal-confirm .ant-btn-dangerous") as HTMLElement);
+    await waitFor(() => expect(mockedDeleteMetricMount).toHaveBeenCalledWith(7));
+    // 解除成功后刷新挂载列表（解除前已 load 一次，解除后应多一次）
+    await waitFor(() =>
+      expect(mockedListMetricMounts.mock.calls.length).toBe(beforeMountsCalls + 1),
+    );
   });
 
 });

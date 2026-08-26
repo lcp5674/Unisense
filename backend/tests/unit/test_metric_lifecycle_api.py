@@ -169,6 +169,29 @@ async def test_recover_source_dropped(metrics_client: httpx.AsyncClient) -> None
     mock_svc.return_value.recover_source_dropped.assert_awaited_once()
 
 
+async def test_reactivate_metric(metrics_client: httpx.AsyncClient) -> None:
+    """单条重新启用已废弃指标（DEPRECATED → DRAFT）→ 200。"""
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        mock_svc.return_value.reactivate_metric = AsyncMock(return_value=_metric())
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/sales_gmv_d/reactivate"
+        )
+    assert resp.status_code == 200
+    mock_svc.return_value.reactivate_metric.assert_awaited_once()
+
+
+async def test_batch_reactivate_metrics(metrics_client: httpx.AsyncClient) -> None:
+    """批量重新启用已废弃指标 → 200（返回 BatchResponse）。"""
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        mock_svc.return_value.reactivate_metric = AsyncMock(return_value=_metric())
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/batch-reactivate",
+            json={"metric_codes": ["sales_gmv_d", "sales_order_cnt_d"]},
+        )
+    assert resp.status_code == 200
+    assert mock_svc.return_value.reactivate_metric.await_count == 2
+
+
 async def test_create_metric_commit_integrity_error() -> None:
     """单条创建并发竞态：commit 唯一键冲突 → 转 ConflictError(409)，不 500。
 

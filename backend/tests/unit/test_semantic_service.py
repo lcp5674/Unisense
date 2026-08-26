@@ -1294,6 +1294,70 @@ async def test_deprecate_metric_not_referenced_allowed():
     assert result.status == "DEPRECATED"
 
 
+# ---- P2-1：reactivate_metric（DEPRECATED → DRAFT，对齐维度批量重新启用）----
+
+
+async def test_reactivate_metric_success_clears_deprecation_fields():
+    """恢复成功：DEPRECATED → DRAFT，清空替代指标/废弃时间/日落期。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(
+            status="DEPRECATED",
+            successor_code="sales_gmv_v2",
+            deprecated_at=datetime(2026, 8, 1, tzinfo=UTC),
+            sunset_until=datetime(2026, 9, 1).date(),
+        )
+    )
+    restored = make_metric(status="DRAFT", successor_code=None)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=restored)
+
+    result = await svc.reactivate_metric(
+        "sales_gmv_daily", actor_id=1, role="metric_owner"
+    )
+
+    assert result.status == "DRAFT"
+    called = repo.update_with_optimistic_lock.call_args.kwargs
+    assert called["status"] == "DRAFT"
+    assert called["successor_code"] is None
+    assert called["deprecated_at"] is None
+    assert called["sunset_until"] is None
+
+
+async def test_reactivate_metric_non_deprecated_rejected():
+    """仅 DEPRECATED 状态可恢复；DRAFT/REVIEW/PUBLISHED 一律拒绝。"""
+    for status in ("DRAFT", "REVIEW", "PUBLISHED"):
+        svc, repo = _svc_with_repo()
+        repo.get_by_code = AsyncMock(return_value=make_metric(status=status))
+        with pytest.raises(ConflictError) as exc:
+            await svc.reactivate_metric(
+                "sales_gmv_daily", actor_id=1, role="metric_owner"
+            )
+        assert exc.value.error_code == "INVALID_TRANSITION"
+
+
+async def test_reactivate_metric_blocked_by_pdp_cross_domain():
+    """domain_admin 跨域恢复被 PDP 拒绝（对齐 deprecate 的域权限闸门）。"""
+    mock_gov_svc = MagicMock()
+    mock_gov_svc.check_metric_permission = AsyncMock(
+        return_value=Decision(
+            allow=False, reason="跨域越权，无权恢复他域指标", error_code="FORBIDDEN_DOMAIN"
+        )
+    )
+    with patch("app.services.semantic.service.MetricRepository") as mock_repo_cls:
+        _db = MagicMock()
+        _db.execute = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=[])))
+        svc = MetricService(db=_db, governance_svc=mock_gov_svc)
+        mock_repo_cls.return_value.get_by_code = AsyncMock(
+            return_value=make_metric(status="DEPRECATED")
+        )
+        with pytest.raises(BusinessError) as exc:
+            await svc.reactivate_metric(
+                "sales_gmv_daily", actor_id=1, role="domain_admin", user_domain="finance"
+            )
+        assert exc.value.error_code == "FORBIDDEN_DOMAIN"
+        mock_repo_cls.return_value.update_with_optimistic_lock.assert_not_called()
+
+
 async def test_list_metrics_pagination_offset():
     svc, repo = _svc_with_repo()
     repo.list_metrics = AsyncMock(return_value=([make_metric()], 1))

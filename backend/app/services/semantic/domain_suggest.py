@@ -217,6 +217,7 @@ async def suggest_domain(
     *,
     sql: str | None = None,
     source_table: str | None = None,
+    llm_budget: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """业务域建议主函数。
 
@@ -224,6 +225,10 @@ async def suggest_domain(
         db: 异步会话。
         sql: 指标定义 SQL（大段 SQL 场景，可空）。
         source_table: 显式源表（可空；sql 与 source_table 至少提供一个）。
+        llm_budget: 批级 LLM 调用预算 ``{"used", "limit"}``（批量解析场景传入，
+            与度量提取/周期推断共用限额；None 表示不限额，如单条创建场景）。
+            ``_llm_suggest`` 仅在目录/挂载未命中时调用，预算用于防止跨域脚本
+            逐语句建议打满 LLM 配额（P1-1）。
 
     Returns:
         ``{"status", "domain", "candidates", "matched_tables"}``。
@@ -239,7 +244,11 @@ async def suggest_domain(
     domains = _aggregate(matches, domain_map)
 
     if not domains:
-        llm = await _llm_suggest(db, tables, sql, domain_map)
+        llm = None
+        if llm_budget is None or llm_budget["used"] < llm_budget["limit"]:
+            if llm_budget is not None:
+                llm_budget["used"] += 1
+            llm = await _llm_suggest(db, tables, sql, domain_map)
         if llm:
             return {
                 "status": "llm",

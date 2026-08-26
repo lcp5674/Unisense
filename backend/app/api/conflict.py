@@ -356,7 +356,10 @@ async def check_conflict(
     existing = payload.existing
     if not existing:
         existing = await MetricService(db).load_conflict_existing()
-    result = await svc.check(payload.candidate, existing)
+    # P1-1：单条预检对自动加载的整批 existing 逐对 LLM 判定可能数百次——加批级
+    # 预算（limit=10 对齐批量创建），耗尽降级纯词法，防刷耗 LLM 额度。
+    llm_budget = {"used": 0, "limit": 10}
+    result = await svc.check(payload.candidate, existing, llm_budget=llm_budget)
     # PLAT-3: 命中冲突会落库 OPEN，属治理写操作须留痕；无命中（纯读）不审计
     if result.detections:
         await write_audit(

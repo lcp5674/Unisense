@@ -35,6 +35,7 @@ from app.tasks.audit_archive import audit_archive_task
 from app.tasks.collection_run_purge import purge_collection_runs_task
 from app.tasks.notify_purge import notify_purge_task
 from app.tasks.semantic_tasks import (
+    check_dsd_overdue,
     check_emergency_review_overdue,
     check_experimental_expiry,
     check_pending_version_timeouts,
@@ -184,6 +185,7 @@ class WorkerSettings:
         refresh_health_scores,
         check_emergency_review_overdue,
         check_experimental_expiry,
+        check_dsd_overdue,
         run_quality_checks,
         check_escalation_retries,
         audit_archive_task,
@@ -236,6 +238,13 @@ class WorkerSettings:
             name="experimental-expiry",
             hour=4,
             minute=0,
+            run_at_startup=False,
+        ),
+        cron(
+            check_dsd_overdue,
+            name="dsd-overdue",
+            hour=3,
+            minute=30,
             run_at_startup=False,
         ),
         cron(

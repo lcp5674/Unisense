@@ -65,6 +65,19 @@ _DATE_PART_RE = re.compile(r"^\d{4}-\d{2}(-\d{2})?$")
 _MAX_QUERY_ROWS = 1000
 
 
+def _observe_query_result(success: bool) -> None:
+    """上报查询结果指标（P0-2 可观测性：unisense_query_success/failure_total）。
+
+    best-effort：埋点失败绝不阻断查询响应。
+    """
+    try:
+        from app.core.metrics import store as _metrics_store
+
+        _metrics_store.observe_query_result(success)
+    except Exception:  # noqa: BLE001 - 埋点失败不阻断查询
+        logger.warning("query_metrics_observe_failed", exc_info=True)
+
+
 def _validate_date_part(part: str) -> None:
     """校验单段日期格式与语义合法性（年月 / 年月日），非法抛 VALIDATION_ERROR。"""
     if not _DATE_PART_RE.match(part):
@@ -461,17 +474,22 @@ class ConsumeService(BaseService):
             olap_tried = True
             try:
                 executor = _get_olap_executor()
-                return await executor.execute(sql, params), "olap"
+                result = await executor.execute(sql, params)
+                _observe_query_result(True)
+                return result, "olap"
             except Exception as exc:
                 logger.warning("olap_execute_failed_fallback_mysql", error=str(exc))
 
         mysql_executor = _get_mysql_executor()
         if mysql_executor.enabled:
             try:
-                return await mysql_executor.execute(sql, params), "mysql"
+                result = await mysql_executor.execute(sql, params)
+                _observe_query_result(True)
+                return result, "mysql"
             except Exception as exc:
                 logger.warning("mysql_fallback_failed", error=str(exc))
                 fire_degradation_event("OLAP", "olap", "DEGRADED", "engine_unavailable")
+                _observe_query_result(False)
                 raise BusinessError(
                     "查询执行引擎不可用，查询降级",
                     error_code=ErrorCode.DEPENDENCY_DEGRADED_ENGINE,
@@ -481,6 +499,7 @@ class ConsumeService(BaseService):
         # 无任何可用引擎
         reason = "olap_failed" if olap_tried else "olap_not_configured"
         fire_degradation_event("OLAP", "olap", "DEGRADED", reason)
+        _observe_query_result(False)
         raise BusinessError(
             "OLAP 执行引擎不可用，查询降级",
             error_code=ErrorCode.DEPENDENCY_DEGRADED_ENGINE,

@@ -2280,6 +2280,11 @@ class MetricService(BaseService):
         # 灰度发布（EXPERIMENTAL，仅指定租户试点）与标准发布（PUBLISHED）语义不同，
         # 事件/通知须区分，避免 stakeholders 收到「指标已通过」却实际仅灰度试点。
         is_gray = target_status == "EXPERIMENTAL"
+        # 标准发布（非灰度）计数发布量指标（P0-2 可观测性：unisense_metric_publish_total）
+        if not is_gray:
+            from app.core.metrics import store as _metrics_store
+
+            _metrics_store.observe_metric_publish()
         event_type = "metric.gray_published" if is_gray else "metric.approved"
         notify_title = "指标灰度发布" if is_gray else "指标已通过"
         event_payload: dict[str, Any] = {
@@ -2869,6 +2874,67 @@ class MetricService(BaseService):
             "metric_deprecated",
             metric_code=metric_code,
             successor=successor_code,
+            actor_id=actor_id,
+        )
+        return updated
+
+    async def reactivate_metric(
+        self,
+        metric_code: str,
+        actor_id: int,
+        role: str,
+        user_domain: str | None = None,
+    ) -> Metric:
+        """重新启用已废弃指标（DEPRECATED → DRAFT，P2-1 对齐维度 batch-reactivate）。
+
+        已废弃指标为终态，重新启用后回到草稿态，可编辑后**重新走审核流**（与
+        DRAFT→REVIEW→PUBLISHED 一致，避免绕过审核直接复活）。仅平台/域管理员或
+        原 Owner 可执行（API 层写角色 + service 层 owner 校验对齐 deprecate）。
+        清空替代指标/废弃时间/日落期，发布 ``metric.reactivated`` 事件。
+        """
+        metric = await self.get_metric(metric_code)
+        self._assert_owner_or_admin(metric, actor_id, role)
+        # PDP 域权限闸门（对齐 deprecate_metric：写操作，domain_admin 须同域）
+        decision = await self._gov_svc().check_metric_permission(
+            metric_code=metric_code,
+            action="write",
+            user_id=actor_id,
+            role=role,
+            user_domain=user_domain,
+            skip_pii_gate=True,
+        )
+        if not decision.allow:
+            raise BusinessError(
+                decision.reason or "无权恢复该指标",
+                error_code=decision.error_code or "FORBIDDEN",
+            )
+        # 状态机：仅 DEPRECATED 可恢复（其余状态不适用，拒绝非法恢复）
+        if metric.status != "DEPRECATED":
+            raise ConflictError(
+                f"仅 DEPRECATED 状态可恢复，当前 {metric.status}",
+                error_code="INVALID_TRANSITION",
+            )
+        updated = await self._repo.update_with_optimistic_lock(
+            metric.id,
+            metric.row_version,
+            status="DRAFT",
+            successor_code=None,
+            deprecated_at=None,
+            sunset_until=None,
+        )
+        await self._cache.invalidate(metric_code)
+        # 恢复事件：通知相关方指标已回到草稿、可重新提交审核
+        await self._publish_event(
+            "metric.reactivated",
+            {
+                "metric_code": metric_code,
+                "domain": metric.domain,
+            },
+            actor_id=str(actor_id),
+        )
+        logger.info(
+            "metric_reactivated",
+            metric_code=metric_code,
             actor_id=actor_id,
         )
         return updated
