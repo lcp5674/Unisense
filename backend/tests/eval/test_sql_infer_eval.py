@@ -7,7 +7,11 @@
 from __future__ import annotations
 
 from app.services.semantic.sql_infer_eval.dataset import GOLDEN, get_case
-from app.services.semantic.sql_infer_eval.runner import evaluate_case, run_eval
+from app.services.semantic.sql_infer_eval.runner import (
+    evaluate_case,
+    report_to_dict,
+    run_eval,
+)
 
 
 def test_eval_dataset_non_empty() -> None:
@@ -36,6 +40,13 @@ def test_doctor_active_month_measures() -> None:
     assert m.exact
     assert m.measure_recall == 1.0
     assert m.measure_precision == 1.0
+    # 完整实际解析结果（前端"期望 vs 实际"对照展示的数据基础）
+    assert (
+        "doctor_code|COUNT_DISTINCT|alias:current_month_active_doctor_cnt"
+        "|table:wedw_dw.doctor_visit_agent_info_da"
+    ) in m.pred_measures
+    assert "wedw_dw.doctor_visit_agent_info_da" in m.pred_tables
+    assert not (m.missing_measures & m.pred_measures)  # 缺失项不会出现在实际解析中
 
 
 def test_spark_window_derived_measure() -> None:
@@ -54,3 +65,18 @@ def test_trino_approx_aggregate_normalize() -> None:
     m = evaluate_case(case)
     assert m.exact
     assert m.missing_measures == frozenset()
+
+
+def test_report_to_dict_includes_predicted() -> None:
+    """报告序列化含完整实际解析结果（前端对照展示依赖 pred_measures/pred_tables）。"""
+    report = run_eval()
+    cases = report_to_dict(report)["cases"]
+    assert cases, "评测集用例不应为空"
+    for c in cases:
+        assert isinstance(c["pred_measures"], list)
+        assert isinstance(c["pred_tables"], list)
+        # 实际解析全集 = 匹配项 ∪ 多余项；缺失项不在其中
+        assert set(c["pred_measures"]).isdisjoint(c["missing_measures"])
+        assert set(c["pred_measures"]) >= set(c["extra_measures"])
+        assert set(c["pred_tables"]).isdisjoint(c["missing_tables"])
+        assert set(c["pred_tables"]) >= set(c["extra_tables"])

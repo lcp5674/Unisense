@@ -95,6 +95,52 @@ function DialectTag({ dialect }: { dialect: string }) {
   return <Tag color="geekblue">{map[dialect] ?? dialect}</Tag>;
 }
 
+/** "期望 vs 实际"对照表行（度量/源表/周期 三行）。 */
+interface EvalDetailRow {
+  key: string;
+  dim: string;
+  expected: string[];
+  actual: string[];
+  /** 期望有、实际无（期望列标红）。 */
+  missing: string[];
+  /** 实际有、期望无（实际列标橙）。 */
+  extra: string[];
+  matched: boolean;
+  /** 判定列文案（匹配 / N 缺失 · M 多余 / 期望→实际 / —）。 */
+  verdict: string;
+}
+
+/** 标签列表：命中高亮集合的项按指定色标记（缺失红 / 多余橙）。 */
+function EvalTagList({
+  list,
+  highlight,
+  color,
+  emptyText = "—",
+}: {
+  list: string[];
+  highlight: Set<string>;
+  color?: string;
+  emptyText?: string;
+}) {
+  if (!list.length) return <Text type="secondary">{emptyText}</Text>;
+  return (
+    <Space size={[0, 4]} wrap>
+      {list.map((t) => (
+        <Tag key={t} color={highlight.has(t) ? color : undefined}>
+          {t}
+        </Tag>
+      ))}
+    </Space>
+  );
+}
+
+/** 判定列：匹配绿色 / 差异红色 / 无判定灰色。 */
+function EvalVerdict({ matched, verdict }: { matched: boolean; verdict: string }) {
+  if (matched) return <Tag color="success">匹配</Tag>;
+  if (verdict === "—") return <Text type="secondary">—</Text>;
+  return <Tag color="error">{verdict}</Tag>;
+}
+
 export function SqlInferEval() {
   const { message } = App.useApp();
   const [data, setData] = useState<SqlInferEvalData | null>(null);
@@ -371,6 +417,77 @@ export function SqlInferEval() {
 
   const expandCase = (record: SqlInferEvalCase & { note: string; sql: string }) => {
     const sample = data?.dataset?.find((d) => d.case_id === record.case_id);
+    const expMeasures = sample?.expected_measures ?? [];
+    const predMeasures = record.pred_measures ?? [];
+    const expTables = sample?.expected_tables ?? [];
+    const predTables = record.pred_tables ?? [];
+    const missingM = record.missing_measures ?? [];
+    const extraM = record.extra_measures ?? [];
+    const missingT = record.missing_tables ?? [];
+    const extraT = record.extra_tables ?? [];
+    const mDiff = missingM.length + extraM.length;
+    const tDiff = missingT.length + extraT.length;
+    const periodOk = record.period_match === true;
+    const periodBad = record.period_match === false;
+    const rows: EvalDetailRow[] = [
+      {
+        key: "measures",
+        dim: "度量",
+        expected: expMeasures,
+        actual: predMeasures,
+        missing: missingM,
+        extra: extraM,
+        matched: mDiff === 0,
+        verdict: mDiff === 0 ? "匹配" : `${missingM.length} 缺失 · ${extraM.length} 多余`,
+      },
+      {
+        key: "tables",
+        dim: "源表",
+        expected: expTables,
+        actual: predTables,
+        missing: missingT,
+        extra: extraT,
+        matched: tDiff === 0,
+        verdict: tDiff === 0 ? "匹配" : `${missingT.length} 缺失 · ${extraT.length} 多余`,
+      },
+      {
+        key: "period",
+        dim: "周期",
+        expected: record.expected_period ? [record.expected_period] : [],
+        actual: record.pred_period ? [record.pred_period] : [],
+        missing: periodBad && record.expected_period ? [record.expected_period] : [],
+        extra: periodBad && record.pred_period ? [record.pred_period] : [],
+        matched: periodOk,
+        verdict: periodOk
+          ? "匹配"
+          : periodBad
+            ? `期望 ${record.expected_period ?? "—"} → 实际 ${record.pred_period ?? "未识别"}`
+            : "—",
+      },
+    ];
+    const detailColumns: ColumnsType<EvalDetailRow> = [
+      { title: "维度", dataIndex: "dim", width: 64 },
+      {
+        title: "期望",
+        dataIndex: "expected",
+        render: (list: string[], r) => (
+          <EvalTagList list={list} highlight={new Set(r.missing)} color="error" />
+        ),
+      },
+      {
+        title: "实际",
+        dataIndex: "actual",
+        render: (list: string[], r) => (
+          <EvalTagList list={list} highlight={new Set(r.extra)} color="warning" emptyText="未识别" />
+        ),
+      },
+      {
+        title: "判定",
+        dataIndex: "verdict",
+        width: 130,
+        render: (v: string, r) => <EvalVerdict matched={r.matched} verdict={v} />,
+      },
+    ];
     return (
       <div style={{ padding: "8px 4px" }}>
         <Paragraph type="secondary">{record.note}</Paragraph>
@@ -390,26 +507,29 @@ export function SqlInferEval() {
               key: "detail",
               label: "期望 vs 实际（度量/表/周期）",
               children: (
-                <Space direction="vertical" size={4} style={{ width: "100%" }}>
-                  <Text>期望度量：{sample?.expected_measures?.join("；") ?? "—"}</Text>
-                  <Text>期望表：{sample?.expected_tables?.join("，") ?? "—"}</Text>
-                  <Text>期望周期：{sample?.expected_period ?? "—"}</Text>
-                  {record.missing_measures.length > 0 && (
-                    <Text type="danger">缺失度量：{record.missing_measures.join("；")}</Text>
-                  )}
-                  {record.extra_measures.length > 0 && (
-                    <Text type="warning">多余度量：{record.extra_measures.join("；")}</Text>
-                  )}
-                  {record.missing_tables.length > 0 && (
-                    <Text type="danger">缺失表：{record.missing_tables.join("，")}</Text>
-                  )}
-                  {record.extra_tables.length > 0 && (
-                    <Text type="warning">多余表：{record.extra_tables.join("，")}</Text>
-                  )}
-                  {record.period_match === false && (
-                    <Text type="danger">周期不符：期望 {record.expected_period}，实际 {record.pred_period}</Text>
-                  )}
-                </Space>
+                <>
+                  <Space size={16} wrap style={{ marginBottom: 8 }}>
+                    <Text type="secondary">
+                      <Tag color="error" style={{ marginRight: 4 }}>
+                        缺失
+                      </Tag>
+                      期望有、实际未解析出
+                    </Text>
+                    <Text type="secondary">
+                      <Tag color="warning" style={{ marginRight: 4 }}>
+                        多余
+                      </Tag>
+                      实际解析出、期望未声明
+                    </Text>
+                  </Space>
+                  <Table
+                    size="small"
+                    rowKey="key"
+                    pagination={false}
+                    columns={detailColumns}
+                    dataSource={rows}
+                  />
+                </>
               ),
             },
           ]}

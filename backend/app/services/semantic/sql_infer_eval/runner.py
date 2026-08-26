@@ -43,6 +43,9 @@ class CaseMetrics:
     table_precision: float | None = None
     table_recall: float | None = None
     period_match: bool | None = None
+    #: 完整实际解析结果（前端"期望 vs 实际"对照展示用，而非仅差异）。
+    pred_measures: frozenset[str] = frozenset()
+    pred_tables: frozenset[str] = frozenset()
     #: 诊断明细（用于失败定位）。
     extra_measures: frozenset[str] = frozenset()
     missing_measures: frozenset[str] = frozenset()
@@ -126,6 +129,8 @@ def evaluate_case(case: SqlInferCase) -> CaseMetrics:
         table_precision=tp,
         table_recall=tr,
         period_match=period_match,
+        pred_measures=frozenset(pred_measures),
+        pred_tables=frozenset(pred_tables),
         extra_measures=frozenset(pred_measures - exp_measures),
         missing_measures=frozenset(exp_measures - pred_measures),
         extra_tables=frozenset(pred_tables - exp_tables),
@@ -194,6 +199,8 @@ def report_to_dict(report: EvalReport) -> dict[str, object]:
                 "table_precision": m.table_precision,
                 "table_recall": m.table_recall,
                 "period_match": m.period_match,
+                "pred_measures": sorted(m.pred_measures),
+                "pred_tables": sorted(m.pred_tables),
                 "extra_measures": sorted(m.extra_measures),
                 "missing_measures": sorted(m.missing_measures),
                 "extra_tables": sorted(m.extra_tables),

@@ -2960,6 +2960,9 @@ export interface SqlInferEvalCase {
   table_precision: number | null;
   table_recall: number | null;
   period_match: boolean | null;
+  /** 完整实际解析结果（期望 vs 实际对照展示；历史记录可能缺失 → 可选）。 */
+  pred_measures?: string[];
+  pred_tables?: string[];
   extra_measures: string[];
   missing_measures: string[];
   extra_tables: string[];

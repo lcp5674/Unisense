@@ -54,6 +54,8 @@ function evalData(): SqlInferEvalData {
           table_precision: 1,
           table_recall: 1,
           period_match: true,
+          pred_measures: ["amount|SUM|alias:gmv"],
+          pred_tables: ["ods.orders"],
           extra_measures: [],
           missing_measures: [],
           extra_tables: [],
@@ -70,6 +72,8 @@ function evalData(): SqlInferEvalData {
           table_precision: 1,
           table_recall: 1,
           period_match: true,
+          pred_measures: ["doctor_code|COUNT_DISTINCT|alias:current_month_active_doctor_cnt"],
+          pred_tables: ["wedw_dw.doctor_visit_agent_info_da"],
           extra_measures: [],
           missing_measures: ["doctor_code|COUNT_DISTINCT|alias:last_month_active_doctor_cnt"],
           extra_tables: [],
@@ -129,12 +133,21 @@ function evalData(): SqlInferEvalData {
         dialect: "hive",
         note: "真实 ETL",
         sql: "INSERT OVERWRITE ...",
-        expected_measures: ["doctor_code|COUNT_DISTINCT|alias:current_month_active_doctor_cnt"],
+        expected_measures: [
+          "doctor_code|COUNT_DISTINCT|alias:current_month_active_doctor_cnt",
+          "doctor_code|COUNT_DISTINCT|alias:last_month_active_doctor_cnt",
+        ],
         expected_measures_detail: [
           {
             column: "doctor_code",
             agg: "COUNT_DISTINCT",
             alias: "current_month_active_doctor_cnt",
+            table: null,
+          },
+          {
+            column: "doctor_code",
+            agg: "COUNT_DISTINCT",
+            alias: "last_month_active_doctor_cnt",
             table: null,
           },
         ],
@@ -195,20 +208,42 @@ describe("SqlInferEval", () => {
     await waitFor(() => expect(mockedGet).toHaveBeenCalledTimes(2));
   });
 
-  it("展开用例显示期望 vs 实际明细（缺失度量标注）", async () => {
+  it("展开用例显示期望 vs 实际对照表（缺失标红 + 判定）", async () => {
     renderPage();
     // 点表格行展开图标（第二个：doctor_active_month 行）
     const expandIcons = await screen.findAllByRole("button", { name: /Expand row/ });
     fireEvent.click(expandIcons[1]);
     // 点内层 Collapse 面板「期望 vs 实际」
-    const detailPanel = await screen.findByText("期望 vs 实际（度量/表/周期）");
-    fireEvent.click(detailPanel);
-    // 展开区显示缺失度量标注
+    fireEvent.click(await screen.findByText("期望 vs 实际（度量/表/周期）"));
+    // 对照表维度行（度量/源表/周期）
+    expect(await screen.findByText("度量")).toBeTruthy();
+    expect(screen.getByText("源表")).toBeTruthy();
+    expect(screen.getAllByText("周期").length).toBeGreaterThanOrEqual(1);
+    // 缺失度量红标 Tag（期望有、实际未解析出）
     expect(
-      await screen.findByText(
-        "缺失度量：doctor_code|COUNT_DISTINCT|alias:last_month_active_doctor_cnt",
-      ),
+      await screen.findByText("doctor_code|COUNT_DISTINCT|alias:last_month_active_doctor_cnt"),
     ).toBeTruthy();
+    // 实际解析结果完整展示（期望列 + 实际列）
+    expect(
+      screen.getAllByText("doctor_code|COUNT_DISTINCT|alias:current_month_active_doctor_cnt").length,
+    ).toBeGreaterThanOrEqual(2);
+    // 判定列显示差异统计（1 缺失 · 0 多余）
+    expect(await screen.findByText("1 缺失 · 0 多余")).toBeTruthy();
+    // 图例说明
+    expect(screen.getByText("期望有、实际未解析出")).toBeTruthy();
+  });
+
+  it("匹配用例展示绿色判定与完整实际解析", async () => {
+    renderPage();
+    const expandIcons = await screen.findAllByRole("button", { name: /Expand row/ });
+    fireEvent.click(expandIcons[0]); // gmv_daily（exact）
+    fireEvent.click(await screen.findByText("期望 vs 实际（度量/表/周期）"));
+    // 对账表三行判定均为绿色「匹配」
+    expect((await screen.findAllByText("匹配")).length).toBeGreaterThanOrEqual(3);
+    // 期望/实际度量完整展示
+    expect(screen.getAllByText("amount|SUM|alias:gmv").length).toBeGreaterThanOrEqual(2);
+    // 期望/实际源表完整展示
+    expect(screen.getAllByText("ods.orders").length).toBeGreaterThanOrEqual(2);
   });
 
   it("加载失败展示错误提示", async () => {
