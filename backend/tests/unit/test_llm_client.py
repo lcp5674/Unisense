@@ -176,6 +176,44 @@ class TestLlmClient:
         client._client.post.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_chat_default_forces_json_object(self) -> None:
+        """缺省 response_format 时默认强制 json_object（既有 JSON 结构化调用向后兼容）。"""
+        client = LlmClient(base_url="https://api.example.com", api_key="test-key")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "Hello", "finish_reason": "stop"}}],
+            "model": "test-model",
+        }
+        client._client = MagicMock()
+        client._client.post = AsyncMock(return_value=mock_response)
+        await client.chat([{"role": "user", "content": "Hi"}])
+        payload = client._client.post.call_args[1]["json"]
+        assert payload["response_format"] == {"type": "json_object"}
+
+    @pytest.mark.asyncio
+    async def test_chat_text_format_omits_response_format(self) -> None:
+        """显式 {"type": "text"} 时省略 response_format 字段
+        （自由文本，兼容不支持 text 约束的网关）。"""
+        client = LlmClient(base_url="https://api.example.com", api_key="test-key")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "纯文本口径", "finish_reason": "stop"}}],
+            "model": "test-model",
+        }
+        client._client = MagicMock()
+        client._client.post = AsyncMock(return_value=mock_response)
+        result = await client.chat(
+            [{"role": "user", "content": "Hi"}], response_format={"type": "text"}
+        )
+        payload = client._client.post.call_args[1]["json"]
+        assert "response_format" not in payload
+        assert result["content"] == "纯文本口径"
+
+    @pytest.mark.asyncio
     async def test_chat_uses_normalized_url_when_base_has_v1(self) -> None:
         """base_url 已含 /v1（openai 预设）时，请求端点不得拼出 /v1/v1（回归 404）。"""
         client = LlmClient(base_url="https://api.openai.com/v1", api_key="test-key")

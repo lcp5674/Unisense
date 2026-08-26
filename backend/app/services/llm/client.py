@@ -239,16 +239,22 @@ class LlmClient:
         if not self._breaker.allow():
             raise LlmError("LLM 熔断器已开启，请求被快速拒绝（依赖降级中）")
 
-        # 使用 json_object 格式引导 LLM 输出结构化 JSON
-        effective_format = response_format or {"type": "json_object"}
+        # 缺省默认 json_object 引导结构化 JSON（既有 JSON 结构化调用向后兼容）；
+        # 显式 {"type": "text"} 时省略 response_format 字段（自由文本输出，兼容
+        # 不支持 text 约束的网关，避免纯文本 prompt 被 json_object 约束污染为空 JSON）。
+        if isinstance(response_format, dict) and response_format.get("type") == "text":
+            effective_format: dict[str, Any] | None = None
+        else:
+            effective_format = response_format or {"type": "json_object"}
 
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "response_format": effective_format,
         }
+        if effective_format is not None:
+            payload["response_format"] = effective_format
 
         last_exc: Exception | None = None
         for attempt in range(_LLM_MAX_RETRIES + 1):

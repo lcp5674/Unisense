@@ -931,6 +931,8 @@ async def refine_metric_definition(
         resp = await llm_client.chat(
             messages=[{"role": "user", "content": prompt}],
             max_tokens=800,
+            # 口径是纯文本，显式 text 避免被 chat 缺省 json_object 约束污染为空 JSON
+            response_format={"type": "text"},
         )
     except Exception as exc:  # noqa: BLE001 - LLM 网络/超时等统一转业务错误
         logger.warning(

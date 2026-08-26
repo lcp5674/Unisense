@@ -222,6 +222,8 @@ async def test_refine_definition_business_enrich_success(
     prompt = kwargs["messages"][0]["content"]
     assert "门诊就诊人次" in prompt
     assert "wedw_outpatient" in prompt
+    # 口径为纯文本：必须显式 text，避免被 chat 缺省 json_object 约束污染
+    assert kwargs["response_format"] == {"type": "text"}
 
 
 async def test_refine_definition_llm_disabled(
