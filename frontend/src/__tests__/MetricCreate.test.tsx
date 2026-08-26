@@ -2068,7 +2068,8 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     mockedParseSqlBatch.mockClear();
     fireEvent.click(screen.getByText("解析候选"));
     await waitFor(() => {
-      const lastCall = mockedParseSqlBatch.mock.calls.at(-1)?.[0] as { use_llm?: boolean };
+      const calls = mockedParseSqlBatch.mock.calls;
+      const lastCall = calls[calls.length - 1]?.[0] as { use_llm?: boolean };
       expect(lastCall?.use_llm).toBeFalsy();
     });
   });
