@@ -474,3 +474,28 @@ class TestObservabilityRepository:
     async def test_commit(self, repo: ObservabilityRepository) -> None:
         await repo.commit()
         repo._session.commit.assert_called_once()
+
+    async def test_overview_risks_filters_pii_by_org(self, repo) -> None:
+        """PII 待复核按 org_id 隔离（join data_source.org_id），授权到期/漂移保持平台级。"""
+        from sqlalchemy import Select
+
+        def scalar(v: int) -> MagicMock:
+            m = MagicMock()
+            m.scalar.return_value = v
+            return m
+
+        repo._session.execute = AsyncMock(
+            side_effect=[scalar(3), scalar(1), scalar(2)]
+        )
+        out = await repo._overview_risks(org_id=7)
+        assert out["pii_review_pending"] == 3
+
+        selects = [
+            c.args[0] for c in repo._session.execute.call_args_list
+            if isinstance(c.args[0], Select)
+        ]
+        pii_sql = str(selects[0].compile(compile_kwargs={"literal_binds": True}))
+        assert "org_id = 7" in pii_sql
+        # expiring / drift 为平台级治理项，不按组织过滤
+        assert "org_id" not in str(selects[1].compile())
+        assert "org_id" not in str(selects[2].compile())

@@ -280,20 +280,24 @@ class ObservabilityRepository:
         ).scalar() or 0
         return {"edges": edges}
 
-    async def overview_stats(self) -> dict[str, Any]:
+    async def overview_stats(self, org_id: int | None = None) -> dict[str, Any]:
         """平台运营总览聚合（企业级：系统健康 / 资产质量 / 风险雷达 / 近7天趋势 一次拉齐）。
 
         数据口径统一对齐各模块自身语义 + 软删过滤（deleted_at IS NULL）：
         - 资产存量快照：数据源健康 / 治理积压 / 资产规模 / 消费接入；
         - 系统健康：核心依赖实时态（dependency_health）+ 采集链路健康（collection_run/watermark）；
         - 资产质量：指标健康度分布（metric_health_score）+ 血缘健康（lineage_edge/ingest_run）；
-        - 风险雷达：PII 待复核、授权即将到期、近 7 天 Schema 漂移；
+        - 风险雷达：PII 待复核（按组织隔离）、授权即将到期、近 7 天 Schema 漂移；
         - 趋势：近 7 天指标新增 / 采集运行按天聚合。
+
+        ``org_id`` 非 None 时 PII 待复核数经 ``db_catalog → data_source.org_id`` 按
+        组织隔离（平台管理员 org_id=None 全量；其余角色仅见本组织，防 PII 合规计数
+        跨组织泄露给任意 viewer）。
         """
         assets = await self._overview_assets()
         system = await self._overview_system()
         quality = await self._overview_quality()
-        risks = await self._overview_risks()
+        risks = await self._overview_risks(org_id)
         trends = await self._overview_trends()
         # 指标健康度覆盖率：已评分指标 / 资产总指标（口径一致，软删过滤）
         total_metrics = sum(assets["assets"]["metrics_by_status"].values())
@@ -567,19 +571,26 @@ class ObservabilityRepository:
             },
         }
 
-    async def _overview_risks(self) -> dict[str, Any]:
-        """风险雷达：PII 待复核 / 授权即将到期 / 近 7 天 Schema 漂移。"""
-        pii_pending = (
-            await self._session.execute(
-                select(func.count())
-                .select_from(DBCatalog)
-                .where(
-                    DBCatalog.deleted_at.is_(None),
-                    DBCatalog.sensitivity_level.in_(["PII", "CONFIDENTIAL"]),
-                    DBCatalog.compliance_reviewed.is_(False),
-                )
+    async def _overview_risks(self, org_id: int | None = None) -> dict[str, Any]:
+        """风险雷达：PII 待复核 / 授权即将到期 / 近 7 天 Schema 漂移。
+
+        PII 待复核按 ``org_id`` 隔离（数据源资产维度，join data_source.org_id）；
+        授权到期 / Schema 漂移为平台级治理项，保持全量。
+        """
+        pii_stmt = (
+            select(func.count())
+            .select_from(DBCatalog)
+            .where(
+                DBCatalog.deleted_at.is_(None),
+                DBCatalog.sensitivity_level.in_(["PII", "CONFIDENTIAL"]),
+                DBCatalog.compliance_reviewed.is_(False),
             )
-        ).scalar() or 0
+        )
+        if org_id is not None:
+            pii_stmt = pii_stmt.join(
+                DataSource, DataSource.source_id == DBCatalog.source_id
+            ).where(DataSource.deleted_at.is_(None), DataSource.org_id == org_id)
+        pii_pending = (await self._session.execute(pii_stmt)).scalar() or 0
         expiring_cutoff = datetime.now(UTC) + timedelta(days=7)
         expiring = (
             await self._session.execute(

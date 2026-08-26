@@ -157,8 +157,15 @@ async def overview_metrics(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    """平台运营总览：数据源健康 / 治理积压 / 资产规模 / 消费接入 一次拉齐。"""
-    return ok(data=await ObservabilityService(db).overview_stats(), trace_id=trace_id)
+    """平台运营总览：数据源健康 / 治理积压 / 资产规模 / 消费接入 一次拉齐。
+
+    平台管理员全组织可见（org_id=None）；其余角色 PII 待复核数按本组织隔离。
+    """
+    org_id = None if user.has_role("platform_admin") else getattr(user, "org_id", None)
+    return ok(
+        data=await ObservabilityService(db).overview_stats(org_id=org_id),
+        trace_id=trace_id,
+    )
 
 
 # ----------------------------------------------------------------
