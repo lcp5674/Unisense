@@ -20,12 +20,15 @@ from typing import Any
 
 import structlog
 
+from app.tasks.lock import task_locked
+
 logger = structlog.get_logger("unisense.quality.tasks")
 
 #: 观测值新鲜度窗口：超过该时长未写入新观测则跳过评估（避免用陈旧值误报）。
 _OBS_FRESH_WINDOW = timedelta(hours=48)
 
 
+@task_locked("quality-checks")
 async def run_quality_checks(ctx: dict[str, Any]) -> dict[str, int]:
     """周期质量检测：扫描启用规则并用最近观测自动评估。
 

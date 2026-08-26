@@ -11,9 +11,12 @@ from typing import Any
 
 import structlog
 
+from app.tasks.lock import task_locked
+
 logger = structlog.get_logger("unisense.semantic.tasks")
 
 
+@task_locked("pending-version-timeouts")
 async def check_pending_version_timeouts(ctx: dict[str, Any]) -> list[int]:
     """检查 PENDING_VERSION 超时（每分钟 cron）。
 
@@ -76,6 +79,7 @@ async def check_pending_version_timeouts(ctx: dict[str, Any]) -> list[int]:
     return promoted
 
 
+@task_locked("health-scores")
 async def refresh_health_scores(ctx: dict[str, Any]) -> int:
     """每日凌晨批量重算健康度评分。
 
@@ -167,6 +171,7 @@ async def _notify_health_degraded(db: Any, metric: Any, health: Any) -> None:
             )
 
 
+@task_locked("emergency-review")
 async def check_emergency_review_overdue(ctx: dict[str, Any]) -> list[int]:
     """检查紧急发布 24h 补审（每小时 cron）。
 
@@ -203,6 +208,7 @@ async def check_emergency_review_overdue(ctx: dict[str, Any]) -> list[int]:
     return overdue
 
 
+@task_locked("experimental-expiry")
 async def check_experimental_expiry(ctx: dict[str, Any]) -> list[int]:
     """灰度超期强制回收（每日 cron，P1-7）。
 
@@ -328,6 +334,7 @@ async def _notify_dsd_overdue(db: Any, metric: Any) -> None:
             )
 
 
+@task_locked("dsd-overdue")
 async def check_dsd_overdue(ctx: dict[str, Any]) -> list[int]:
     """DSD 处理超期升级提醒（每日 cron，P1-4 闭环）。
 

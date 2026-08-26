@@ -15,9 +15,12 @@ from typing import Any
 
 import structlog
 
+from app.tasks.lock import task_locked
+
 logger = structlog.get_logger("unisense.notify.escalation_tasks")
 
 
+@task_locked("escalation-retries")
 async def check_escalation_retries(ctx: dict[str, Any]) -> dict[str, int]:
     """扫描到点升级并驱动重试/升级。
 

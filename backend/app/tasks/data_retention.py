@@ -23,6 +23,8 @@ from typing import Any
 import structlog
 from sqlalchemy import delete, select, text
 
+from app.tasks.lock import task_locked
+
 logger = structlog.get_logger("unisense.data_retention")
 
 # L-3：软删行保留期（天）——超期物理删除
@@ -56,6 +58,7 @@ _CORE_TABLES = (
 )
 
 
+@task_locked("retention-purge")
 async def purge_retained_records(ctx: dict[str, Any]) -> dict[str, Any]:
     """物理清理超期软删记录与超期评测运行（L-3）。"""
     from app.db.mysql import async_session_factory
@@ -166,6 +169,7 @@ async def purge_retained_records(ctx: dict[str, Any]) -> dict[str, Any]:
     return {"status": "SUCCESS", **stats}
 
 
+@task_locked("table-growth-check")
 async def check_table_growth(ctx: dict[str, Any]) -> dict[str, Any]:
     """通用表大小/行数巡检（L-4）：超阈值发布告警事件。"""
     from app.core.eventbus import get_eventbus

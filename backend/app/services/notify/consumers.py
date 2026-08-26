@@ -110,6 +110,8 @@ BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     # 授权到期提醒 / PII 复核待办（定向通知，模板注册）
     "grant.expiring_soon",
     "pii.review_pending",
+    # 表增长超阈值（data_retention.py 巡检发布，P11：此前无订阅 → 事件发出即消失的死信告警）
+    "storage.table_oversized",
 )
 
 

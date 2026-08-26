@@ -13,6 +13,7 @@ from sqlalchemy import (
     BigInteger,
     DateTime,
     Enum,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -96,6 +97,10 @@ class Dimension(Base, BaseModel, ReviewFieldsMixin):
         nullable=False,
         default=DimensionStatus.DRAFT.value,
         comment="状态",
+    )
+    # P11 C-2：乐观锁版本（编辑回传当前 row_version，不一致即 409 防并发静默覆盖）
+    row_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1", comment="乐观锁版本"
     )
 
 

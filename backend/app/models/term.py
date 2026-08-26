@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Enum, ForeignKey, Index, String, Text
+from sqlalchemy import Enum, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.mysql import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -52,6 +52,10 @@ class Term(Base, BaseModel, ReviewFieldsMixin):
     )
     owner_id: Mapped[int] = mapped_column(
         ForeignKey("user.id", name="fk_term_owner"), nullable=False, comment="Owner ID"
+    )
+    # P11 C-2：乐观锁版本（编辑回传当前 row_version，不一致即 409 防并发静默覆盖）
+    row_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1", comment="乐观锁版本"
     )
 
     __table_args__ = (

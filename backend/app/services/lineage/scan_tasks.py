@@ -14,10 +14,12 @@ from typing import Any
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.tasks.lock import task_locked
 
 logger = get_logger("unisense.lineage.scan_tasks")
 
 
+@task_locked("lineage-scan")
 async def lineage_scan_task(ctx: dict[str, Any]) -> dict[str, Any]:
     """arq 定时扫描任务：扫描配置目录下 SQL 文件并写血缘（每日 cron 触发）。
 

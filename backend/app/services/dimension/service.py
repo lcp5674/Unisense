@@ -156,6 +156,18 @@ class DimensionService(BaseService, MasterDataReviewMixin):
 
     async def update_dimension(self, dim_code: str, data: DimensionUpdate) -> Dimension:
         dim = await self._require(dim_code)
+        # P11 C-2：跨请求乐观锁——前端编辑弹窗回传 row_version，不一致说明他人已改 → 409
+        expected = getattr(data, "row_version", None)
+        if expected is not None and expected != dim.row_version:
+            raise ConflictError(
+                "维度已被他人修改，请刷新后重试",
+                error_code="OPTIMISTIC_LOCK_CONFLICT",
+                ctx={
+                    "dim_code": dim_code,
+                    "current_row_version": dim.row_version,
+                    "expected_row_version": expected,
+                },
+            )
         if dim.status == DimensionStatus.DEPRECATED.value:
             raise UnisenseError(f"已废弃维度不可更新: {dim_code}", error_code="INVALID_STATE")
         # 审核中锁定（REVIEW）：评审人基于当前定义审核，审核中改定义会造成评审失真；
@@ -194,6 +206,8 @@ class DimensionService(BaseService, MasterDataReviewMixin):
             dim.type = data.type
         if data.description is not None:
             dim.description = data.description
+        # 防御式递增（测试构造的简易对象可能无 row_version 属性）
+        dim.row_version = (getattr(dim, "row_version", None) or 1) + 1
         await self._repo.commit()
         return dim
 

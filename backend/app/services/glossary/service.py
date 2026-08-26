@@ -141,9 +141,14 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         if not data.term_code:
             data.term_code = await self._generate_term_code(data)
         # 越权守卫：domain_admin/metric_owner 仅可创建本域术语（platform_admin 不限）。
-        if role and role != "platform_admin" and user_domain and data.domain:
-            if user_domain != data.domain:
-                raise AuthError(
+        if (
+            role
+            and role != "platform_admin"
+            and user_domain
+            and data.domain
+            and user_domain != data.domain
+        ):
+            raise AuthError(
                     f"无权创建他域术语（当前域: {user_domain}，术语域: {data.domain}）",
                     error_code="FORBIDDEN",
                     ctx={"user_domain": user_domain, "term_domain": data.domain},
@@ -267,6 +272,18 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
     ) -> TermResponse:
         term = await self._require_term(term_code)
         self._assert_term_scope(term, actor_id, role, user_domain)
+        # P11 C-2：跨请求乐观锁——前端编辑弹窗回传 row_version，不一致说明他人已改 → 409
+        expected = getattr(data, "row_version", None)
+        if expected is not None and expected != term.row_version:
+            raise ConflictError(
+                "术语已被他人修改，请刷新后重试",
+                error_code="OPTIMISTIC_LOCK_CONFLICT",
+                ctx={
+                    "term_code": term_code,
+                    "current_row_version": term.row_version,
+                    "expected_row_version": expected,
+                },
+            )
         # 审核中锁定（REVIEW）：评审人基于当前定义审核，审核中改定义会造成评审失真；
         # 驳回回 DRAFT 后即可修改重提（对齐指标 REVIEW 编辑即撤回的语义）。
         if term.status == TermStatus.REVIEW.value:
@@ -290,6 +307,8 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
             term.synonyms = list(data.synonyms)
         if data.boundary is not None:
             term.boundary = data.boundary
+        # 防御式递增（测试构造的简易对象可能无 row_version 属性）
+        term.row_version = (getattr(term, "row_version", None) or 1) + 1
         await self._snapshot(term, actor_id, "update")
         await self._detect_conflicts(term)
         await self._repo.commit()

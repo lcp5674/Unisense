@@ -10,7 +10,7 @@ import time as _time
 from functools import lru_cache
 from typing import Any
 
-from pydantic import model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -42,7 +42,12 @@ class Settings(BaseSettings):
     # ---- Elasticsearch ----
     # 默认 19200：docker-compose 已将 ES 避让到宿主 19200（避开本机 9200 占用）。
     es_url: str = "http://localhost:19200"
-    es_username: str = ""
+    # P11 修复：.env.example/.env 历史拼写为 UNISENSE_ES_USER（pydantic extra=ignore 曾静默丢弃）
+    # → 用 AliasChoices 同时兼容规范拼写 UNISENSE_ES_USERNAME 与旧拼写 UNISENSE_ES_USER。
+    es_username: str = Field(
+        default="",
+        validation_alias=AliasChoices("UNISENSE_ES_USERNAME", "UNISENSE_ES_USER"),
+    )
     es_password: str = ""
     # ES 客户端请求超时（秒）：避免慢/挂的 ES 阻塞就绪探针与调用方。工业级容错下限。
     es_request_timeout: float = 3.0

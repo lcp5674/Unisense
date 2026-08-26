@@ -18,10 +18,12 @@ import logging
 from typing import Any
 
 from app.core.config import settings
+from app.tasks.lock import task_locked
 
 logger = logging.getLogger(__name__)
 
 
+@task_locked("notify-purge")
 async def notify_purge_task(ctx: dict[str, Any]) -> dict[str, Any]:
     """Arq 定时任务：清理过期通知与事件日志。
 

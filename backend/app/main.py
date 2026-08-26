@@ -50,7 +50,7 @@ from app.api.users import router as users_router
 from app.core.config import ConfigurationError, settings
 from app.core.degradation import ensure_dependency_health_seed, handle_circuit_signal
 from app.core.degradation_registry import init_degradation_registry
-from app.core.dlq import init_dlq
+from app.core.dlq import get_dlq, init_dlq
 from app.core.eventbus import init_eventbus
 from app.core.feature_flags import get_feature_flag_manager, init_feature_flag_manager
 from app.core.logging import configure_logging
@@ -106,6 +106,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ---- 死信队列初始化（TECH-04）：承接 Redis 发布失败的事件，定时重放兜底 ----
     init_dlq()
     logger.info("dlq_initialized")
+    # P11 C-4：启动 DLQ 重放循环（此前 start_replay_loop 全仓仅定义无调用——事件入队后永不重放）。
+    # 事件总线重试耗尽的事件经此每 5 分钟重放一批，避免「发布失败即丢失」。
+    try:
+        await get_dlq().start_replay_loop()
+        logger.info("dlq_replay_loop_started")
+    except Exception:  # noqa: BLE001 - 重放循环启动失败不应阻断启动
+        logger.warning("dlq_replay_loop_start_failed", exc_info=True)
 
     # ---- 降级注册中心初始化（OPS-05）：统一降级面板 + /health/degraded ----
     init_degradation_registry()
@@ -125,6 +132,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ---- 业务事件 → 通知闭环（TD §5.5）：quality/conflict/governance 事件落 notify 并投递 ----
     register_notify_event_consumers()
     logger.info("notify_event_consumers_registered")
+
+    # ---- 运维级事件默认订阅播种（P11）：platform_admin 默认订阅表增长/容量/降级/采集失败等 ----
+    # 运维级事件此前无任何生产订阅 → 只落 EventLog 不触达（死信告警）。启动 best-effort 播种。
+    try:
+        from app.db.mysql import async_session_factory
+        from app.services.notify.service import NotifyService
+
+        async with async_session_factory() as _session:
+            created = await NotifyService(_session).ensure_ops_subscriptions()
+        logger.info("ops_subscriptions_seeded", created=created)
+    except Exception:  # noqa: BLE001 - 播种失败不应阻断启动（DB 未就绪/无 platform_admin 均合法）
+        logger.warning("ops_subscriptions_seed_failed", exc_info=True)
 
     # ---- 降级事件上报（TD §5.2.4/§5.2.5）：熔断器 open/close 回调持久化 + 告警 ----
     register_degradation_listener(handle_circuit_signal)
@@ -150,6 +169,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
     # ---- 关闭 ----
+    await get_dlq().stop()
     await close_redis_pool()
     logger.info("app_shutting_down")
 

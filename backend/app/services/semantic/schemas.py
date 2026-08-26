@@ -338,7 +338,8 @@ class MetricUpdateRequest(BaseModel):
     # （分层纠正、时效调整、分级晋升、币种修正等生产高频场景），此前只能重建指标。
     # 修复：更新请求支持治理字段，service 直接更新主表治理列（不改变口径定义，非破坏性）。
     aggregation: Literal[
-        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE"
+        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "FIRST_VALUE",
+        "MAX", "MIN", "MEDIAN", "PERCENTILE",
     ] | None = Field(None, description="聚合方式（治理属性）")
     time_semantics: Literal["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"] | None = Field(
         None, description="时间语义（治理属性）"

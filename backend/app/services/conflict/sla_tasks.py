@@ -13,6 +13,8 @@ from typing import Any
 
 import structlog
 
+from app.tasks.lock import task_locked
+
 logger = structlog.get_logger("unisense.conflict.sla_tasks")
 
 #: 冲突仲裁 SLA（天）：超过该时长仍未裁决的 OPEN/NEGOTIATING 冲突自动升级。
@@ -21,6 +23,7 @@ _CONFLICT_SLA_DAYS = 7
 _BATCH_LIMIT = 200
 
 
+@task_locked("conflict-sla-escalation")
 async def auto_escalate_overdue(ctx: dict[str, Any]) -> dict[str, int]:
     """扫描超过 SLA 的 OPEN/NEGOTIATING 冲突并自动升级（每日 cron）。
 

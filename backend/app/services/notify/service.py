@@ -120,6 +120,8 @@ _EVENT_TITLE_CN: dict[str, str] = {
     "catalog.connection_failed": "数据源连接失败",
     # PII 复核待办（catalog 标 NEEDS_REVIEW 定向 compliance_officer）
     "pii.review_pending": "PII 复核待办",
+    # 表增长超阈值（data_retention.py 巡检发布，运维订阅感知——P11 修复死信告警）
+    "storage.table_oversized": "数据表增长超阈值",
 }
 
 _SOURCE_CN: dict[str, str] = {
@@ -1016,6 +1018,51 @@ class NotifyService(BaseService):
             notif.sent_at = datetime.now(UTC)
         await self._repo.commit()
         return notif
+
+    #: 运维级事件集合（P11）：表增长超阈值/审计容量/依赖降级/采集失败/血缘注册失败——
+    #: 此类事件面向平台运维，此前无任何生产订阅播种 → 只落 EventLog 不触达任何用户（死信）。
+    _OPS_EVENT_TYPES: tuple[str, ...] = (
+        "storage.table_oversized",
+        "audit.capacity_warning",
+        "degradation.state_changed",
+        "collect.failed",
+        "catalog.connection_failed",
+        "lineage.metric_register_failed",
+    )
+
+    async def ensure_ops_subscriptions(self) -> int:
+        """为 platform_admin 用户播种运维级事件默认订阅（IN_APP，幂等）。
+
+        启动时调用：为全部 platform_admin（主角色 ``user.role`` 或扩展角色
+        ``user_role.role``）创建运维级事件的默认 IN_APP 订阅；已存在订阅的行
+        跳过（含用户已手动禁用的情况），幂等可重复执行。返回新建订阅数。
+        """
+        from app.models.user import User, UserRole
+
+        subq = select(UserRole.user_id).where(UserRole.role == "platform_admin")
+        stmt = select(User).where(
+            (User.role == "platform_admin") | (User.id.in_(subq)),
+            User.status == "active",
+        )
+        users = list((await self._db.execute(stmt)).scalars().all())
+        created = 0
+        for u in users:
+            for evt in self._OPS_EVENT_TYPES:
+                existing = await self._repo.find_subscription(u.id, "IN_APP", evt)
+                if existing is not None:
+                    continue
+                self._db.add(
+                    SubscriptionPref(
+                        user_id=u.id,
+                        channel="IN_APP",
+                        event_type=evt,
+                        enabled=True,
+                    )
+                )
+                created += 1
+        if created:
+            await self._db.commit()
+        return created
 
     async def upsert_subscription(
         self, data: SubscriptionUpsert, actor_id: int | None = None

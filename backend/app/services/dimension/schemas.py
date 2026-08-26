@@ -43,6 +43,10 @@ class DimensionUpdate(BaseModel):
     domain: str | None = Field(None, max_length=64)
     type: str | None = None
     description: str | None = None
+    # P11 C-2：乐观锁（编辑回传当前 row_version，他人已改则 409 防静默覆盖）
+    row_version: int | None = Field(
+        None, ge=1, description="乐观锁版本（编辑回传当前 row_version）"
+    )
 
 
 class DimensionResponse(BaseModel):
@@ -68,6 +72,8 @@ class DimensionResponse(BaseModel):
     reviewed_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    # P11 C-2：乐观锁版本（前端编辑回传）
+    row_version: int = 1
 
     @classmethod
     def from_model(cls, m: Any) -> DimensionResponse:
@@ -92,6 +98,7 @@ class DimensionResponse(BaseModel):
             reviewed_at=getattr(m, "reviewed_at", None),
             created_at=getattr(m, "created_at", None),
             updated_at=getattr(m, "updated_at", None),
+            row_version=(getattr(m, "row_version", None) or 1),
         )
 
 

@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
@@ -216,7 +217,18 @@ class ConflictService(BaseService):
             # 供跨域一致率统计（consistency_stats）按指标域 join。
             conflict.metric_a = candidate.metric_id
             conflict.metric_b = det.existing_metric_id
-            await self._repo.create(conflict)
+            try:
+                await self._repo.create(conflict)
+            except IntegrityError:
+                # P11 C-3：并发双落兜底——唯一索引 uk_conflict_active_pair 拦截
+                # 同 pair 同时 OPEN。检测结果照常上报（blocked 语义不变），仅跳过重复落库。
+                logger.warning(
+                    "conflict_create_concurrent_duplicate 冲突 %s/%s 并发已存在，跳过落库",
+                    candidate.metric_code,
+                    det.existing_code,
+                )
+                await self._db.rollback()
+                continue
             await self._safe_publish(
                 {
                     "event_type": "conflict_open",

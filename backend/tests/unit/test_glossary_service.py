@@ -514,6 +514,52 @@ async def test_update_term_changes_code() -> None:
     repo.commit.assert_awaited()
 
 
+async def test_update_term_optimistic_lock_conflict() -> None:
+    """P11 C-2：row_version 不匹配（他人已改）→ 409 乐观锁冲突，不落库。"""
+    from app.core.exceptions import ConflictError
+    from app.services.glossary.schemas import TermUpdate
+
+    db = MagicMock()
+    svc = GlossaryService(db)
+    term = _make_term()
+    term.row_version = 3
+    _persist(term)
+    repo = MagicMock()
+    repo.get_term = AsyncMock(side_effect=[term, None])
+    repo.commit = AsyncMock()
+    svc._repo = repo
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.update_term("c1", TermUpdate(name="新名", row_version=2), 1)
+    assert exc.value.error_code == "OPTIMISTIC_LOCK_CONFLICT"
+    assert term.name == "活跃用户"  # 未被修改
+    repo.commit.assert_not_awaited()
+
+
+async def test_update_term_optimistic_lock_success_increments() -> None:
+    """P11 C-2：row_version 匹配 → 成功更新并递增版本。"""
+    from app.services.glossary.schemas import TermUpdate
+
+    db = MagicMock()
+    svc = GlossaryService(db)
+    term = _make_term()
+    term.row_version = 2
+    _persist(term)
+    repo = MagicMock()
+    repo.get_term = AsyncMock(side_effect=[term, None])
+    repo.count_term_versions = AsyncMock(return_value=0)
+    repo.save_term_version = AsyncMock()
+    repo.all_terms = AsyncMock(return_value=[])
+    repo.save_conflict = AsyncMock()
+    repo.commit = AsyncMock()
+    svc._repo = repo
+
+    resp = await svc.update_term("c1", TermUpdate(name="新名", row_version=2), 1)
+    assert resp.name == "新名"
+    assert term.row_version == 3  # 2 -> 3
+    repo.commit.assert_awaited()
+
+
 async def test_update_term_code_conflict_raises() -> None:
     """编辑编码与已有术语冲突 → ConflictError(TERM_EXISTS)。"""
     from app.core.exceptions import ConflictError

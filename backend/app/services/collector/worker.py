@@ -50,6 +50,25 @@ from app.tasks.stale_collection_jobs import stale_collection_jobs_task
 # 替代此前标准 logging 无 trace_id、格式与 backend 割裂的问题。
 logger = structlog.get_logger("unisense.collector.worker")
 
+
+async def _on_job_start(ctx: dict[str, Any]) -> None:
+    """arq 任务启动钩子（P11 C-6）：绑定任务级 trace_id，串起单次任务执行日志。"""
+    from structlog.contextvars import bind_contextvars
+
+    bind_contextvars(
+        job_id=ctx.get("job_id", ""),
+        job_name=ctx.get("job_name", ""),
+        trace_id=ctx.get("job_id", ""),
+    )
+
+
+async def _on_job_end(ctx: dict[str, Any]) -> None:
+    """arq 任务结束钩子（P11 C-6）：清理任务级 contextvars，避免串扰后续任务。"""
+    from structlog.contextvars import unbind_contextvars
+
+    unbind_contextvars("job_id", "job_name", "trace_id")
+
+
 #: P1-6 错过调度补偿：每个源的上次触发水位 key 前缀 / 补偿上限 / 补偿窗口。
 _SCHED_WATERMARK_PREFIX = "collect:sched_watermark:"
 #: 单次扫描最多补偿的错失触发次数（防停机很久导致积压风暴）。
@@ -337,4 +356,8 @@ class WorkerSettings:
     ]
     on_startup = startup
     on_shutdown = shutdown
+    # P11 C-6：任务执行期间绑定 job_id trace_id（此前 bind_contextvars 仅 HTTP 中间件有，
+    # cron/采集任务日志无 trace_id，无法串起单次任务执行）。on_job_end 清理避免串扰。
+    on_job_start = _on_job_start
+    on_job_end = _on_job_end
     redis_settings = RedisSettings.from_dsn(settings.redis_url)

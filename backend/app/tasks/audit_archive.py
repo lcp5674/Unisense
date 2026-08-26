@@ -27,6 +27,7 @@ from sqlalchemy import delete, select, update
 from app.core.config import settings
 from app.models.audit import AuditLog
 from app.models.audit_archive import AuditArchiveLog
+from app.tasks.lock import task_locked
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,7 @@ def _export_jsonl(rows: list[AuditLog]) -> bytes:
     return jsonl_data.getvalue()
 
 
+@task_locked("audit-archive")
 async def audit_archive_task(ctx: dict[str, Any]) -> dict[str, Any]:
     """Arq 定时任务：审计日志归档（物理搬迁 + 积压循环）。
 

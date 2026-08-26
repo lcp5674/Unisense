@@ -625,6 +625,51 @@ async def test_update_dimension_renames_code_and_cascades() -> None:
     repo.commit.assert_awaited()
 
 
+async def test_update_dimension_optimistic_lock_conflict() -> None:
+    """P11 C-2：row_version 不匹配（他人已改）→ 409 乐观锁冲突，不落库。"""
+    from app.core.exceptions import ConflictError
+
+    svc, repo = await _svc()
+    dim = Dimension(
+        id=1,
+        dim_code="dim_x",
+        name="渠道",
+        domain="sales",
+        type="SCD1",
+        owner_id=1,
+        status="DRAFT",
+        row_version=4,
+    )
+    repo.get_dimension = AsyncMock(return_value=dim)
+    payload = DimensionUpdate(name="新名", row_version=3)
+    with pytest.raises(ConflictError) as exc:
+        await svc.update_dimension("dim_x", payload)
+    assert exc.value.error_code == "OPTIMISTIC_LOCK_CONFLICT"
+    assert dim.name == "渠道"  # 未被修改
+    repo.commit.assert_not_awaited()
+
+
+async def test_update_dimension_optimistic_lock_success_increments() -> None:
+    """P11 C-2：row_version 匹配 → 成功更新并递增版本。"""
+    svc, repo = await _svc()
+    dim = Dimension(
+        id=1,
+        dim_code="dim_x",
+        name="渠道",
+        domain="sales",
+        type="SCD1",
+        owner_id=1,
+        status="DRAFT",
+        row_version=2,
+    )
+    repo.get_dimension = AsyncMock(return_value=dim)
+    payload = DimensionUpdate(name="新名", row_version=2)
+    resp = await svc.update_dimension("dim_x", payload)
+    assert resp.name == "新名"
+    assert dim.row_version == 3  # 2 -> 3
+    repo.commit.assert_awaited()
+
+
 async def test_update_dimension_rename_rejected_when_published() -> None:
     """已发布/已废弃维度禁止改编码（避免破坏线上引用）。"""
     from app.core.exceptions import UnisenseError
