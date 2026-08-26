@@ -246,4 +246,35 @@ describe("待办中心 - 聚合与跳转", () => {
     fireEvent.click(screen.getByRole("button", { name: /去恢复/ }));
     await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/detail/GMV_DSD"));
   });
+
+  it("DRAFT 超期治理：创建超 30 天的草稿标记「已超期」，近期草稿不标记", async () => {
+    mockedMetrics.mockResolvedValue({
+      items: [
+        {
+          id: 2,
+          metric_code: "GMV_STALE",
+          name: "超期草稿",
+          domain: "finance",
+          status: "DRAFT",
+          created_at: "2026-06-01T00:00:00", // 距当前（8/26）超 30 天
+        },
+        {
+          id: 3,
+          metric_code: "GMV_FRESH",
+          name: "近期草稿",
+          domain: "finance",
+          status: "DRAFT",
+          created_at: new Date().toISOString(), // 今天创建，未超期
+        },
+      ] as unknown as MetricListResponse["items"],
+      total: 2,
+      page: 1,
+      page_size: 50,
+    } as MetricListResponse);
+    renderPage();
+    // 超期草稿带「已超期（创建超 30 天）」标记
+    expect(await screen.findByText(/已超期（创建超 30 天）/)).toBeTruthy();
+    // 近期草稿无超期标记
+    expect(screen.queryByText(/近期草稿.*已超期/)).toBeNull();
+  });
 });

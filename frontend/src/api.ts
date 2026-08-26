@@ -567,6 +567,8 @@ export async function listMetrics(params: {
   reviewed_by?: number;
   /** 仅查已软删（回收站）指标：true 时展示已删除草稿供恢复 */
   deleted?: boolean;
+  /** 批次过滤（生产就绪审查 P2）：按批量注册批次 ID 精确匹配（审核/列表按"这一批"收敛） */
+  batch_id?: string;
   sort_by?: "updated_at" | "created_at" | "version" | "metric_code" | "name";
   sort_order?: "asc" | "desc";
   page?: number;
@@ -583,6 +585,7 @@ export async function listMetrics(params: {
     pii_flag: params.pii_flag === undefined ? undefined : String(params.pii_flag),
     created_after: params.created_after,
     updated_before: params.updated_before,
+    batch_id: params.batch_id,
     sort_by: params.sort_by,
     sort_order: params.sort_order,
     page: params.page ?? 1,

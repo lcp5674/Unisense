@@ -175,6 +175,10 @@ class MetricCreateRequest(BaseModel):
     batch_id: str | None = Field(
         None, max_length=64, description="批量注册批次 ID（可空，单条创建为 None）"
     )
+    # 口径溯源（生产就绪审查 P2）：SQL 批量/口径 SQL 模式创建时携带整句原始口径 SQL
+    # （ETL 脚本原文切片），落 Metric.raw_sql——候选仅落聚合表达式，整句口径原文
+    # 可据此反查（batch_id → 口径全文），存量/普通创建为 None。
+    raw_sql: str | None = Field(None, description="原始口径 SQL（可空，供 batch_id 溯源）")
 
     @field_validator("metric_code")
     @classmethod
@@ -646,6 +650,9 @@ class SqlBatchCreateCandidate(BaseModel):
         ),
     )
     measure_id: int | None = Field(None, ge=1, description="关联逻辑度量（原子可选）")
+    # 口径溯源（生产就绪审查 P2）：候选所属语句的整句原始 SQL（原文切片），批量
+    # 创建时透传落 Metric.raw_sql——候选口径仅表达式，原文可据此反查（batch_id 溯源）
+    raw_sql: str | None = Field(None, description="候选所属语句原始 SQL（可空）")
     definition_json: dict[str, Any] = Field(
         ...,
         description="口径定义（原子：expression 模式；复合：sql+dependencies）",
@@ -801,6 +808,11 @@ class MetricListParams(BaseModel):
     pii_flag: bool | None = Field(None, description="仅 PII / 仅非 PII 指标")
     # 已删除过滤（回收站视角）：true 时仅查软删（deleted_at 置位）的草稿指标，供恢复
     deleted: bool = Field(False, description="仅查已软删（回收站）指标")
+    # 批次过滤（生产就绪审查 P2）：按批量注册批次 ID 精确匹配——审核/列表页可按
+    # "这一批"收敛（SQL 批量/宽表批量创建的指标带 batch_id，此前无筛选入口）
+    batch_id: str | None = Field(
+        None, max_length=64, description="批量注册批次 ID 精确过滤（可空）"
+    )
     # 生命周期快筛（TD §13）：按创建/更新时间区间过滤（ISO 日期或 datetime）
     created_after: datetime | None = Field(None, description="创建时间 ≥ 该值（生命周期快筛）")
     created_before: datetime | None = Field(None, description="创建时间 ≤ 该值")

@@ -561,4 +561,21 @@ describe("MetricReview 指标审批", () => {
     expect(screen.getByText(/"t1"/)).toBeTruthy();
     expect(screen.getByText(/"t2"/)).toBeTruthy();
   });
+
+  it("批次筛选：输入批次 ID → listMetrics 收到 batch_id 精确匹配（按\"这一批\"收敛）", async () => {
+    renderReview();
+    await screen.findByText("sales_gmv_day");
+    const input = screen.getByPlaceholderText(/批次 ID/) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "sqlbatch_abc" } });
+    // 点击 Input.Search 的搜索按钮触发 onSearch
+    const searchBtn = (input.closest(".ant-input-search") as HTMLElement).querySelector(
+      ".ant-input-search-button",
+    ) as HTMLElement;
+    fireEvent.click(searchBtn);
+    await waitFor(() => {
+      expect(mockedList).toHaveBeenCalledWith(
+        expect.objectContaining({ batch_id: "sqlbatch_abc" }),
+      );
+    });
+  });
 });

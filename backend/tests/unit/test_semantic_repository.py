@@ -139,6 +139,28 @@ async def test_list_metrics_applies_owner_and_pii_filters():
     assert "pii_flag" in compiled
 
 
+async def test_list_metrics_applies_batch_id_filter():
+    """批次筛选（生产就绪审查 P2）：list_metrics 支持 batch_id 精确匹配——审核/
+    列表页可按"这一批"收敛批量创建的指标（此前 MetricListParams 无该参数）。"""
+    db = _mock_session()
+    m1 = _metric(metric_code="a")
+    db.execute.side_effect = [
+        _result(scalar=1),
+        _result(all_=[m1]),
+    ]
+    repo = MetricRepository(db)
+
+    items, total = await repo.list_metrics(batch_id="sqlbatch_abc", offset=0, limit=10)
+
+    assert total == 1
+    assert items == [m1]
+    # 编译 count 语句验证 batch_id 等值条件已加入
+    stmt = db.execute.call_args_list[0].args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "batch_id" in compiled
+    assert "sqlbatch_abc" in compiled
+
+
 # ---------- update_with_optimistic_lock ----------
 
 

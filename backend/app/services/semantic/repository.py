@@ -156,6 +156,7 @@ class MetricRepository:
         created_before: datetime | None = None,
         updated_after: datetime | None = None,
         updated_before: datetime | None = None,
+        batch_id: str | None = None,
         sort_by: str = "updated_at",
         sort_order: str = "desc",
         offset: int = 0,
@@ -229,6 +230,9 @@ class MetricRepository:
             conditions.append(Metric.created_at >= created_after)
         if created_before is not None:
             conditions.append(Metric.created_at <= created_before)
+        # 批次过滤（P2）：按批量注册批次 ID 精确匹配（SQL/宽表批量创建的指标）
+        if batch_id:
+            conditions.append(Metric.batch_id == batch_id)
         if updated_after is not None:
             conditions.append(Metric.updated_at >= updated_after)
         if updated_before is not None:

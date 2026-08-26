@@ -295,6 +295,11 @@ class Metric(Base, BaseModel):
     batch_id: Mapped[str | None] = mapped_column(
         String(64), nullable=True, comment="批量注册批次 ID"
     )
+    # 口径溯源（生产就绪审查 P2）：SQL 批量/口径 SQL 模式创建时携带整句原始 SQL——
+    # 候选仅落聚合表达式，整句口径原文此前不持久化，batch_id 无法反查候选口径全文
+    raw_sql: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="原始口径 SQL（供 batch_id 溯源口径原文）"
+    )
     template_id: Mapped[int | None] = mapped_column(
         ForeignKey("metric_template.id", name="fk_metric_template"),
         nullable=True,

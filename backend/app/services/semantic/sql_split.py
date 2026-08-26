@@ -532,6 +532,9 @@ def _build_atomic_candidate(
         "definition_json": definition,
         "definition_mode": "expression",
         "statement_index": idx,
+        # OneData 接线（生产就绪审查 P2）：SQL 无法推断逻辑度量，恒空——前端批量
+        # 候选行提供「关联逻辑度量」选择器补全后透传；此处保持契约键存在
+        "measure_id": measure.get("measure_id"),
         "suggested_domain_code": suggested_domain_code,
         # P2-2：候选来源（rule=规则层 / llm=LLM 兜底），前端「AI 推断」复核标识
         "source": source,

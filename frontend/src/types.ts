@@ -2825,6 +2825,10 @@ export interface SqlBatchCandidate {
   definition_mode: string;
   /** 复合候选的依赖指标编码 */
   dependencies?: string[] | null;
+  /** OneData 原子层：候选关联逻辑度量（SQL 无法推断恒空，前端选择器关联后透传） */
+  measure_id?: number | null;
+  /** 口径溯源：候选所属语句原始 SQL（批量创建透传落 Metric.raw_sql） */
+  raw_sql?: string | null;
   statement_index: number;
   /** P2-10：语句级建议域（整段域建议为多域/无域时后端逐语句反查；与生效域可能不同） */
   suggested_domain_code?: string | null;
@@ -2884,6 +2888,8 @@ export interface SqlBatchRegisterCandidate {
   granularity?: string | null;
   measure_id?: number | null;
   definition_json: Record<string, unknown>;
+  /** 口径溯源：候选所属语句原始 SQL（透传落 Metric.raw_sql） */
+  raw_sql?: string | null;
   dependencies?: string[] | null;
   mount?: MetricMountInput | null;
 }

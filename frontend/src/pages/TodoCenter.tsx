@@ -13,6 +13,10 @@ const CONFLICT_TYPE_LABEL: Record<string, string> = {
   pii: "PII 冲突",
 };
 
+// DRAFT 超期治理（生产就绪审查 P2）：草稿创建超该天数仍未完善/发布 → 待办标记
+// "已超期"（治理提醒：长期滞留 DRAFT 占用编码且口径可能失活，需完善或清理）
+const DRAFT_STALE_DAYS = 30;
+
 interface Todo {
   kind: "conflict" | "draft" | "review" | "quality" | "dsd";
   title: string;
@@ -81,10 +85,13 @@ export function TodoCenter() {
         });
       }
       for (const m of drafts.items) {
+        const stale =
+          m.created_at != null &&
+          new Date(m.created_at).getTime() < Date.now() - DRAFT_STALE_DAYS * 86400000;
         list.push({
           kind: "draft",
           title: `草稿待完善/发布：${m.name}`,
-          meta: `${m.metric_code} · ${m.domain}`,
+          meta: `${m.metric_code} · ${m.domain}${stale ? ` · 已超期（创建超 ${DRAFT_STALE_DAYS} 天）` : ""}`,
           code: m.metric_code,
         });
       }

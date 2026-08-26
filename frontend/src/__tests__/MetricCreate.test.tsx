@@ -25,10 +25,18 @@ vi.mock("../api", async () => {
     getDomainDefaults: vi.fn(),
     checkConflict: vi.fn(),
     createMetric: vi.fn(),
+    // 默认 platform_admin（不受域门禁限制）；跨域预检测试再覆盖为 domain_admin
+    fetchCurrentUser: vi.fn().mockResolvedValue({
+      id: 1,
+      username: "tester",
+      display_name: "测试员",
+      role: "platform_admin",
+      domain: null,
+    }),
   };
 });
 
-import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, checkConflict, createMetric, listMetrics, listMeasureCatalogs } from "../api";
+import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, checkConflict, createMetric, listMetrics, listMeasureCatalogs, fetchCurrentUser } from "../api";
 import type { DBCatalog, SubjectDomainTreeNode, AutoSuggestResponse, DomainSuggestionResponse, SqlBatchParseResult } from "../types";
 
 const mockedTree = vi.mocked(listDomainTree);
@@ -1561,6 +1569,55 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     await screen.findByText(/批量创建完成：成功 3 \/ 失败 0/);
     expect(screen.getByText(/含 1 个复合候选/)).toBeTruthy();
     expect(screen.getByText(/需先逐个发布原子/)).toBeTruthy();
+  });
+
+  it("批量创建：候选关联逻辑度量（OneData 接线）→ 提交透传 measure_id + 原始 SQL", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+
+    // 打开「0:amount」候选的逻辑度量选择器，选「门诊收费金额」（id=1）
+    const measureSelect = screen.getByTestId("sql-batch-measure-0:amount").closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(measureSelect.querySelector(".ant-select-selector") as HTMLElement);
+    await clickSelectOption("门诊收费金额 (medical_fee_amt)");
+
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+    await waitFor(() => {
+      expect(mockedBatchFromSql).toHaveBeenCalled();
+      const body = mockedBatchFromSql.mock.calls[0][0];
+      const amount = body.candidates.find((c: { key: string }) => c.key === "0:amount");
+      // OneData 接线：选择器选中的逻辑度量透传（此前批量候选无 measure_id，全部游离）
+      expect(amount?.measure_id).toBe(1);
+      // 口径溯源：候选无 raw_sql 时从语句 meta 按 statement_index 提取整句原文
+      expect(amount?.raw_sql).toContain("SUM(amount) AS gmv");
+    });
+  });
+
+  it("批量创建：跨域权限预检——受限用户选非本域 → 前端拦截整批提交", async () => {
+    // domain_admin 用户所属域为 sales，但批量选择 domain=finance → 前端拦截
+    (fetchCurrentUser as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 7,
+      username: "admin",
+      display_name: "管理员",
+      role: "domain_admin",
+      domain: "sales",
+    });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    // 选非本域「财务 (finance)」
+    const cascaderInput = document.querySelector(".ant-cascader input") as HTMLInputElement;
+    fireEvent.mouseDown(cascaderInput);
+    await waitFor(() => {
+      const item = document.querySelector(".ant-cascader-menu-item[title='财务 (finance)']");
+      expect(item).toBeTruthy();
+      if (item) fireEvent.click(item);
+    });
+    await openBatchMode();
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+    // 前端拦截：提示仅可批量注册本域，不发起请求
+    expect(await screen.findByText(/您仅可批量注册本域指标/)).toBeTruthy();
+    expect(mockedBatchFromSql).not.toHaveBeenCalled();
   });
 
   it("批量解析：无候选时按 skipped 原因分类提示（不再一律「请检查 SELECT」）", async () => {

@@ -7,7 +7,7 @@ import {
 import {
   createMetric, listCatalogs, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, listMeasureCatalogs, fetchCurrentUser, UnisenseApiError,
 } from "../api";
-import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, DomainSuggestionCandidate, Dimension, MeasureCatalog, MetricMountInput, SqlBatchParseResult, SqlBatchCandidate } from "../types";
+import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, DomainSuggestionCandidate, Dimension, MeasureCatalog, MetricMountInput, SqlBatchParseResult, SqlBatchCandidate, CurrentUser } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
 import { MEASURE_FORMAT_LABEL } from "../types";
 import { usePermission } from "../hooks/usePermission";
@@ -230,9 +230,14 @@ export function MetricCreate() {
   const [currentStep, setCurrentStep] = useState(0);
   // 当前用户角色（挂载时获取）：管理/数仓角色默认展开高级治理，业务角色默认折叠
   const [currentRole, setCurrentRole] = useState<string>("");
+  // 当前用户完整信息（跨域权限预检：domain_admin/metric_owner 仅可操作本域指标）
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   useEffect(() => {
     fetchCurrentUser()
-      .then((u) => setCurrentRole(u.role))
+      .then((u) => {
+        setCurrentUser(u);
+        setCurrentRole(u.role);
+      })
       .catch(() => {});
   }, []);
   // 指标类型联动：atomic（原子）基于源表直接聚合，不应有上游依赖指标；derived/composite 才有
@@ -1017,6 +1022,13 @@ export function MetricCreate() {
       message.warning("请先选择业务域（可到第 ① 步选择，或确认上方建议域后重试）");
       return;
     }
+    // 跨域权限预检（生产就绪审查 P2）：domain_admin/metric_owner 后端仅可批量注册
+    // 本域指标（service 层整批 FORBIDDEN）——前端先拦截，避免用户提交后整批失败零创建
+    const restrictedRole = currentUser?.role === "domain_admin" || currentUser?.role === "metric_owner";
+    if (restrictedRole && currentUser?.domain && selectedDomain !== currentUser.domain) {
+      message.warning(`您仅可批量注册本域指标（${currentUser.domain}），当前选择 ${selectedDomain} 将整批被拒绝`);
+      return;
+    }
     const checked = sqlBatchResult.candidates.filter((c) => keys.has(c.key));
     if (checked.length === 0) { message.warning("请至少勾选一个候选指标"); return; }
     setSqlBatchCreating(true);
@@ -1034,6 +1046,12 @@ export function MetricCreate() {
         const measure = (c.measure_column || "metric").replace(/_/g, "").toLowerCase();
         return [selectedDomain, biz || "entity", measure, c.period || "day"].join("_");
       };
+      // 口径溯源（P2）：候选所属语句的整句原始 SQL——候选仅带表达式，原文从语句
+      // meta 提取（按 statement_index），批量创建透传落 Metric.raw_sql 可反查口径全文
+      const resolveRawSql = (c: SqlBatchCandidate): string | undefined =>
+        c.raw_sql ||
+        sqlBatchResult.statements.find((s) => s.index === c.statement_index)?.sql ||
+        undefined;
       const res = await batchRegisterFromSql({
         domain: selectedDomain,
         candidates: checked.map((c) => ({
@@ -1049,6 +1067,11 @@ export function MetricCreate() {
           granularity: c.granularity,
           definition_json: c.definition_json,
           dependencies: c.dependencies,
+          // OneData 接线（P2）：候选关联逻辑度量（前端选择器写入，SQL 无法推断）——
+          // 批量创建的原子指标得以关联逻辑度量，不再全部游离走"旧式物理来源"路径
+          measure_id: c.measure_id ?? null,
+          // 口径溯源（P2）：整句原始 SQL 透传落 Metric.raw_sql
+          raw_sql: resolveRawSql(c),
           // P0-2：复合候选携带口径三方责任（批量创建补齐 OwnerChain）
           product_owner_id: c.product_owner_id,
           tech_owner_id: c.tech_owner_id,
@@ -2316,7 +2339,7 @@ export function MetricCreate() {
                             {cands.map((c) => (
                               <div
                                 key={c.key}
-                                style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}
+                                style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", flexWrap: "wrap" }}
                               >
                                 <Checkbox
                                   checked={sqlBatchChecked.has(c.key)}
@@ -2364,6 +2387,21 @@ export function MetricCreate() {
                                       data-testid={`sql-batch-period-${c.key}`}
                                       options={PERIOD_OPTIONS}
                                     />
+                                    {/* OneData 接线（P2）：批量候选关联逻辑度量——SQL 无法推断，
+                                        前端选择器补全；提交透传 measure_id，批量原子不再游离逻辑
+                                        度量体系（对齐单条创建 Step②同款控件） */}
+                                    <Select
+                                      size="small"
+                                      showSearch
+                                      allowClear
+                                      style={{ width: 160 }}
+                                      placeholder="关联逻辑度量"
+                                      optionFilterProp="label"
+                                      value={c.measure_id ?? undefined}
+                                      onChange={(v) => handleSqlBatchEdit(c.key, { measure_id: v ?? null })}
+                                      data-testid={`sql-batch-measure-${c.key}`}
+                                      options={measureOptions.map((o) => ({ value: o.value, label: o.label }))}
+                                    />
                                     {/* P2-10：语句级建议域与当前生效域不一致时提示（跨域脚本） */}
                                     {c.suggested_domain_code && c.suggested_domain_code !== selectedDomain && (
                                       <Tooltip title={`该语句表反查建议域为「${c.suggested_domain_code}」，与当前域 ${selectedDomain || "未选"} 不一致；将按当前域创建`}>
@@ -2378,6 +2416,18 @@ export function MetricCreate() {
                                 <Typography.Text code style={{ fontSize: 12, flex: 1 }}>
                                   {c.metric_code || <span className="muted">（选域后自动生成）</span>}
                                 </Typography.Text>
+                                {/* 口径溯源（P2）：候选口径表达式创建前即可核对——Tooltip 展示完整
+                                    expression（CASE/窗口等原始结构），不必"先创建再改" */}
+                                {c.type === "atomic" && c.definition_json?.expression ? (
+                                  <Tooltip title={`口径表达式：${String(c.definition_json.expression)}`}>
+                                    <Typography.Text
+                                      type="secondary"
+                                      style={{ fontSize: 12, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "help" }}
+                                    >
+                                      {String(c.definition_json.expression)}
+                                    </Typography.Text>
+                                  </Tooltip>
+                                ) : null}
                                 {c.type === "composite" && (
                                   <Tooltip title="复合指标依赖批内原子（DRAFT）；批量提交评审会被「依赖未发布」拦截，需先发布原子后再提交">
                                     <Tag color="orange">需先发布依赖原子</Tag>

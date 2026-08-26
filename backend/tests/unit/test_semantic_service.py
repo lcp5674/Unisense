@@ -1849,7 +1849,7 @@ async def test_batch_register_db_error_middle_col_continues():
 
 
 def _sql_atomic(
-    key: str, code: str, name: str, col: str, agg: str = "SUM"
+    key: str, code: str, name: str, col: str, agg: str = "SUM", raw_sql: str | None = None
 ) -> SqlBatchCreateCandidate:
     """构造 SQL 批量注册原子候选。"""
     return SqlBatchCreateCandidate(
@@ -1865,6 +1865,7 @@ def _sql_atomic(
             "expression": f"{agg}({col})",
             "source_fields": [{"table": "dwd_order_di", "column": col}],
         },
+        raw_sql=raw_sql,
     )
 
 
@@ -2271,6 +2272,87 @@ async def test_sql_batch_register_atomic_owners_passed():
     assert atomic_req.product_owner_name == "产品王"
     assert atomic_req.tech_owner_name == "技术李"
     assert atomic_req.dw_developer_name == "数仓赵"
+
+
+async def test_sql_batch_register_raw_sql_persisted():
+    """口径溯源（P2）：SQL 批量创建原子候选携带整句原始 SQL → 透传落 Metric.raw_sql
+    （此前候选仅表达式，整句口径原文不持久化，batch_id 无法反查）。"""
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    raw = "SELECT dt, SUM(amount) AS amount FROM dwd_order_di GROUP BY dt"
+    request = MetricSqlBatchRegisterRequest(
+        domain="sales",
+        candidates=[
+            _sql_atomic(
+                "0:amount", "sales_order_amount_day", "日订单金额", "amount", "SUM", raw_sql=raw
+            )
+        ],
+    )
+    captured: list = []
+
+    async def _capture_create(req, **kw):
+        captured.append(req)
+        return make_metric()
+
+    svc.create_metric = _capture_create  # type: ignore[method-assign]
+
+    result = await svc.batch_register_from_sql(request, actor_id=1)
+    assert all(c["status"] == "DRAFT" for c in result["candidates"])
+    assert captured[0].raw_sql == raw
+
+
+async def test_sql_batch_register_notifies_creator():
+    """通知闭环（P2）：批量创建成功定向通知创建者本人「已批量创建 N 个 DRAFT」——
+    此前批量创建只发 metric.created 事件、不通知任何用户，创建者无下一步送审引导。"""
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    svc._notify_metric_stakeholders = AsyncMock(return_value=None)
+
+    request = MetricSqlBatchRegisterRequest(
+        domain="sales",
+        candidates=[
+            _sql_atomic("0:amount", "sales_order_amount_day", "日订单金额", "amount")
+        ],
+    )
+    result = await svc.batch_register_from_sql(request, actor_id=7)
+    assert all(c["status"] == "DRAFT" for c in result["candidates"])
+    call = svc._notify_metric_stakeholders.call_args
+    assert call.args[0] == "metric.batch_created"
+    assert call.kwargs["submitter_id"] == 7  # 通知创建者本人
+    assert call.kwargs["payload"]["count"] == 1
+
+
+async def test_sql_batch_register_skips_notify_when_all_failed():
+    """通知闭环（P2）：全部失败时**不**通知创建者「已创建」（避免误导——无成功项
+    不应宣称批量创建成功）。"""
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    # 全部创建失败（DB 错误 → except SQLAlchemyError 标记 VALIDATION_ERROR）
+    repo.create = AsyncMock(side_effect=SQLAlchemyError("boom"))
+    svc._notify_metric_stakeholders = AsyncMock(return_value=None)
+
+    request = MetricSqlBatchRegisterRequest(
+        domain="sales",
+        candidates=[
+            _sql_atomic("0:amount", "sales_order_amount_day", "日订单金额", "amount")
+        ],
+    )
+    result = await svc.batch_register_from_sql(request, actor_id=7)
+    assert result["candidates"][0]["status"] == "VALIDATION_ERROR"
+    assert not svc._notify_metric_stakeholders.called
 
 
 async def test_sql_batch_register_conflict_llm_budget():
@@ -5498,7 +5580,11 @@ async def test_published_metric_resubmit_still_blocked():
 
 
 async def test_submit_notifies_specific_reviewer_when_assigned():
-    """指定评审用户（reviewer_type=user）时，仅通知该评审人（非整个域）。"""
+    """指定评审用户（reviewer_type=user）时，仅通知该评审人（非整个域）。
+
+    提交成功另补「已提交评审」回执给提交人本人（生产就绪审查 P2：to_reviewers/
+    指定评审人分支均排除提交人，此前提交人无回执）——第二次通知调用为回执。
+    """
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(
         return_value=make_metric(status="DRAFT", owner_id=1, domain="sales")
@@ -5515,11 +5601,14 @@ async def test_submit_notifies_specific_reviewer_when_assigned():
         user_domain="sales",
     )
 
-    call = svc._notify_metric_stakeholders.call_args
-    assert call.args[0] == "metric.submitted"
-    # 指定评审人时 payload 携带 reviewer_id + reviewer_type，通知目标按指定人
-    assert call.kwargs["payload"]["reviewer_id"] == 99
-    assert call.kwargs["payload"]["reviewer_type"] == "user"
+    calls = svc._notify_metric_stakeholders.call_args_list
+    # 首次通知：指定评审人（metric.submitted），payload 携带 reviewer_id/type
+    assert calls[0].args[0] == "metric.submitted"
+    assert calls[0].kwargs["payload"]["reviewer_id"] == 99
+    assert calls[0].kwargs["payload"]["reviewer_type"] == "user"
+    # 回执：metric.submitted_ack 通知提交人（actor_id）
+    assert calls[1].args[0] == "metric.submitted_ack"
+    assert calls[1].kwargs["submitter_id"] == 1
 
 
 async def test_deprecated_resubmit_publishes_resubmitted_event():

@@ -365,6 +365,9 @@ export function MetricReview() {
   const [domain, setDomain] = useState<string | undefined>(
     searchParams.get("domain") ?? undefined,
   );
+  // 批次筛选（生产就绪审查 P2）：按批量注册批次 ID 精确匹配——批量创建的指标可
+  // "这一批"收敛审核（SQL 批量/宽表批量产物带 batch_id，此前无筛选入口）
+  const [batchId, setBatchId] = useState(searchParams.get("batch_id") ?? "");
   // 并发查询防竞态：只有最后一次发起的请求允许落地结果（对齐目录/Dimensions/Templates）
   const loadSeq = useRef(0);
   const [page, setPage] = useState(1);
@@ -375,12 +378,14 @@ export function MetricReview() {
   const canApprove = can("metric:approve");
 
   // 筛选变更写回 URL query（合并保留其它参数，replace 避免堆历史）——刷新/分享不丢筛选视图
-  function syncFilter(nextKeyword: string, nextDomain: string | undefined) {
+  function syncFilter(nextKeyword: string, nextDomain: string | undefined, nextBatchId?: string) {
     const next = new URLSearchParams(searchParams);
     if (nextKeyword) next.set("keyword", nextKeyword);
     else next.delete("keyword");
     if (nextDomain) next.set("domain", nextDomain);
     else next.delete("domain");
+    if (nextBatchId) next.set("batch_id", nextBatchId);
+    else next.delete("batch_id");
     setSearchParams(next, { replace: true });
   }
 
@@ -403,6 +408,7 @@ export function MetricReview() {
               page_size: pageSize,
               keyword: keyword || undefined,
               domain: domain || undefined,
+              batch_id: batchId || undefined,
               // 审批工作台 FIFO：最旧待审优先，避免积压（默认后端 updated_at desc 会新单优先）
               sort_by: "updated_at",
               sort_order: "asc",
@@ -413,6 +419,7 @@ export function MetricReview() {
               page_size: pageSize,
               keyword: keyword || undefined,
               domain: domain || undefined,
+              batch_id: batchId || undefined,
               sort_by: "updated_at",
               sort_order: "desc",
             },
@@ -439,8 +446,10 @@ export function MetricReview() {
   useEffect(() => {
     const urlKeyword = searchParams.get("keyword") ?? "";
     const urlDomain = searchParams.get("domain") ?? undefined;
+    const urlBatchId = searchParams.get("batch_id") ?? "";
     if (urlKeyword !== keyword) setKeyword(urlKeyword);
     if (urlDomain !== domain) setDomain(urlDomain);
+    if (urlBatchId !== batchId) setBatchId(urlBatchId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
@@ -467,7 +476,7 @@ export function MetricReview() {
       })
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize, view, currentUser?.id, keyword, domain]);
+  }, [page, pageSize, view, currentUser?.id, keyword, domain, batchId]);
 
   async function handleReview(
     metric: MetricResponse,
@@ -761,7 +770,7 @@ export function MetricReview() {
               const kw = v.trim();
               setKeyword(kw);
               setPage(1);
-              syncFilter(kw, domain);
+              syncFilter(kw, domain, batchId);
             }}
           />
           <Select
@@ -773,12 +782,27 @@ export function MetricReview() {
               const d = v || undefined;
               setDomain(d);
               setPage(1);
-              syncFilter(keyword, d);
+              syncFilter(keyword, d, batchId);
             }}
             options={Object.entries(domainMap).map(([code, name]) => ({
               value: code,
               label: `${name}（${code}）`,
             }))}
+          />
+          {/* 批次筛选（生产就绪审查 P2）：输入批量注册批次 ID 精确匹配——批量创建的
+              指标可按"这一批"收敛审核，不必逐条翻找 */}
+          <Input.Search
+            allowClear
+            placeholder="批次 ID（如 sqlbatch_xxx）"
+            style={{ width: 220 }}
+            defaultValue={batchId}
+            data-testid="review-batch-filter"
+            onSearch={(v) => {
+              const b = v.trim();
+              setBatchId(b);
+              setPage(1);
+              syncFilter(keyword, domain, b);
+            }}
           />
         </Space>
         <Table

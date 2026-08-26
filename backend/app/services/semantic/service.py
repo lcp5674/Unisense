@@ -546,6 +546,8 @@ class MetricService(BaseService):
             dw_developer_name=request.dw_developer_name,
             # P0-C：批量注册批次 ID（可空）——批量创建的指标可整批回溯
             batch_id=getattr(request, "batch_id", None),
+            # 口径溯源（P2）：SQL 批量/口径 SQL 模式携带整句原始口径 SQL，可反查
+            raw_sql=getattr(request, "raw_sql", None),
         )
 
         metric = await self._repo.create(metric)
@@ -1022,6 +1024,7 @@ class MetricService(BaseService):
             created_before=params.created_before,
             updated_after=params.updated_after,
             updated_before=params.updated_before,
+            batch_id=params.batch_id,
             sort_by=params.sort_by,
             sort_order=params.sort_order,
             offset=offset,
@@ -2043,6 +2046,21 @@ class MetricService(BaseService):
             submit_event,
             "指标待评审" if assigned_reviewer else "指标待审核",
             **notify_targets,
+        )
+        # 审批流回执闭环（生产就绪审查 P2）：提交成功定向通知提交人「已提交评审，
+        # 等待审核」——此前只通知评审人，to_reviewers/指定评审人分支均排除提交人
+        # 本人，提交人无回执，提交后不确定评审请求是否已送达。
+        await self._notify_metric_stakeholders(
+            "metric.submitted_ack",
+            "已提交评审，等待审核",
+            metric_code=metric_code,
+            domain=metric.domain,
+            submitter_id=actor_id,
+            payload={
+                "metric_code": metric_code,
+                "domain": metric.domain,
+                "change_reason": request.change_reason,
+            },
         )
 
         logger.info(
@@ -4646,6 +4664,9 @@ class MetricService(BaseService):
                         granularity=cand.granularity,
                         # P0-C：SQL 批量创建指标带批次 ID——创建后可整批回溯
                         batch_id=batch_id,
+                        # 口径溯源（P2）：候选所属语句原始 SQL 原文切片（候选仅表达式，
+                        # 原文可据此反查口径全文）
+                        raw_sql=cand.raw_sql,
                         # 原子候选责任方（P0-2 补：此前仅复合透传，原子责任链空——
                         # 详情页 OwnerChain 不完整；candidate 携带三方 owner/名称兜底）
                         product_owner_id=cand.product_owner_id,
@@ -4817,6 +4838,40 @@ class MetricService(BaseService):
                     metric_code=code,
                     exc_info=True,
                 )
+
+        # 批量创建成功通知闭环（生产就绪审查 P2）：有成功项时定向通知创建者本人
+        # 「已批量创建 N 个 DRAFT 指标，请完善后提交评审」——此前批量创建只发
+        # metric.created 事件、不通知任何用户，创建者完成批量后无下一步送审引导。
+        # 独立 session best-effort（不阻断/不回滚业务事务）；候选带 product_owner
+        # 时一并通知产品需求方（责任链闭环）。
+        _ok = [c for c in candidates if c["status"] == "DRAFT"]
+        if _ok:
+            _notify_ids = {actor_id}
+            for cand in request.candidates:
+                if cand.product_owner_id and cand.product_owner_id != actor_id:
+                    _notify_ids.add(cand.product_owner_id)
+            for uid in _notify_ids:
+                try:
+                    await self._notify_metric_stakeholders(
+                        "metric.batch_created",
+                        f"已批量创建 {len(_ok)} 个指标（DRAFT）",
+                        metric_code=_ok[0]["metric_code"],
+                        domain=request.domain,
+                        submitter_id=uid,
+                        payload={
+                            "batch_id": batch_id,
+                            "count": len(_ok),
+                            "domain": request.domain,
+                            "tip": "请完善口径后提交评审",
+                        },
+                    )
+                except Exception:  # noqa: BLE001 - 通知 best-effort，失败仅告警不阻断
+                    logger.warning(
+                        "sql_batch_register_notify_failed",
+                        batch_id=batch_id,
+                        user_id=uid,
+                        exc_info=True,
+                    )
 
         return {"batch_id": batch_id, "candidates": candidates}
 
