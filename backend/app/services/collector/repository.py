@@ -45,10 +45,14 @@ def _column_has_desc(
     catalog_id: int,
     desc_keys: set[tuple[int, str]],
 ) -> bool:
-    """字段是否有描述：schema comment 非空 或 column_descriptions 有 manual/llm 记录。"""
+    """字段是否有治理描述：仅 ``column_descriptions`` 的 manual/llm 记录。
+
+    口径对齐汇总 ``fields_with_desc``（只计 manual/llm）——schema comment 是采集
+    原始值、非治理产出，若计入会使 per_table 明细与汇总口径矛盾
+    （摘要 fields_missing_desc ≠ 各表 missing_fields 之和，治理数据误导）。
+    """
     name = str(col.get("name") or col.get("column"))
-    comment = (col.get("comment") or "").strip()
-    return bool(comment) or (catalog_id, name) in desc_keys
+    return (catalog_id, name) in desc_keys
 
 
 class CollectorRepository:
@@ -1170,16 +1174,25 @@ class CollectorRepository:
             汇总 + per_table（分页后）+ per_table_total/page/page_size。
         """
         # —— 汇总指标：SQL 端聚合（不装载 db_catalog 大字段）——
+        # 软删源过滤：join data_source.deleted_at IS NULL——软删源目录不再计入治理统计
         total_tables = int(
             await self._db.scalar(
-                select(func.count(DBCatalog.id)).where(DBCatalog.deleted_at.is_(None))
+                select(func.count(DBCatalog.id))
+                .join(DataSource, DataSource.source_id == DBCatalog.source_id)
+                .where(
+                    DBCatalog.deleted_at.is_(None),
+                    DataSource.deleted_at.is_(None),
+                )
             )
             or 0
         )
         tables_with_desc = int(
             await self._db.scalar(
-                select(func.count(DBCatalog.id)).where(
+                select(func.count(DBCatalog.id))
+                .join(DataSource, DataSource.source_id == DBCatalog.source_id)
+                .where(
                     DBCatalog.deleted_at.is_(None),
+                    DataSource.deleted_at.is_(None),
                     DBCatalog.description.is_not(None),
                     DBCatalog.description != "",
                 )
@@ -1191,7 +1204,12 @@ class CollectorRepository:
                 func.coalesce(
                     func.sum(func.json_length(DBCatalog.schema_json["columns"])), 0
                 )
-            ).where(DBCatalog.deleted_at.is_(None))
+            )
+            .join(DataSource, DataSource.source_id == DBCatalog.source_id)
+            .where(
+                DBCatalog.deleted_at.is_(None),
+                DataSource.deleted_at.is_(None),
+            )
         )
         total_fields = int(total_fields_row.scalar() or 0)
         fields_with_desc = int(
@@ -1207,7 +1225,11 @@ class CollectorRepository:
         # —— per_table 明细：服务端分页 ——
         base = (
             select(DBCatalog)
-            .where(DBCatalog.deleted_at.is_(None))
+            .join(DataSource, DataSource.source_id == DBCatalog.source_id)
+            .where(
+                DBCatalog.deleted_at.is_(None),
+                DataSource.deleted_at.is_(None),
+            )
             .order_by(DBCatalog.id)
         )
         per_table_total = int(
@@ -1233,7 +1255,9 @@ class CollectorRepository:
             ).scalars().all()
         srcs = (
             await self._db.execute(
-                select(DataSource.source_id, DataSource.domain, DataSource.name)
+                select(DataSource.source_id, DataSource.domain, DataSource.name).where(
+                    DataSource.deleted_at.is_(None)
+                )
             )
         ).all()
         users = (

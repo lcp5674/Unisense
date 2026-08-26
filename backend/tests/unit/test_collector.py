@@ -3342,7 +3342,7 @@ def _coverage_session() -> MagicMock:
     """构造 coverage 统计用 session：SQL 聚合（scalar）+ execute 返回分页明细。"""
     s = MagicMock()
     # scalar 顺序：total_tables / tables_with_desc / fields_with_desc / per_table_total
-    s.scalar = AsyncMock(side_effect=[2, 1, 2, 2])
+    s.scalar = AsyncMock(side_effect=[2, 1, 1, 2])
 
     cat1 = MagicMock()
     cat1.id = 1
@@ -3414,20 +3414,20 @@ async def test_repo_get_description_coverage_stats() -> None:
     assert cov["tables_with_desc"] == 1
     assert cov["tables_missing_desc"] == 1
     assert cov["total_fields"] == 4
-    # cat1.name(schema comment) + cat2.email(manual 记录) = 2
-    assert cov["fields_with_desc"] == 2
-    assert cov["fields_missing_desc"] == 2
+    # 仅 manual/llm 记录计覆盖（cat2.email）；cat1.name 的 schema comment 不计
+    assert cov["fields_with_desc"] == 1
+    assert cov["fields_missing_desc"] == 3
     # P1-8: 分页元信息（默认 page_size=None 全量）
     assert cov["per_table_total"] == 2
     assert cov["page"] == 1
     assert cov["page_size"] is None
 
     by_name = {t["entity_name"]: t for t in cov["per_table"]}
-    assert by_name["ods_order"]["missing_fields"] == 1
+    assert by_name["ods_order"]["missing_fields"] == 2
     assert by_name["ods_order"]["domain"] == "sales"
     assert by_name["ods_order"]["table_desc"] is False
     assert by_name["ods_order"]["sensitivity_level"] == "INTERNAL"
-    assert by_name["ods_order"]["missing_field_names"] == ["id"]
+    assert by_name["ods_order"]["missing_field_names"] == ["id", "name"]
     assert by_name["ods_order"]["source_name"] == "Sales MySQL"
     assert by_name["ods_order"]["owner_name"] is None
     assert by_name["dwd_user"]["missing_fields"] == 1
@@ -4213,9 +4213,9 @@ async def test_repo_get_description_coverage_pagination() -> None:
     page_stmt = s.execute.call_args_list[1].args[0]
     assert page_stmt._limit == 1
     assert page_stmt._offset == 1
-    # 汇总指标不受分页影响（SQL 端聚合，全量口径）
+    # 汇总指标不受分页影响（SQL 端聚合，全量口径；字段覆盖仅计 manual/llm）
     assert cov["total_tables"] == 2
-    assert cov["fields_with_desc"] == 2
+    assert cov["fields_with_desc"] == 1
 
 
 # ---------- P2-10/12/13 ----------
