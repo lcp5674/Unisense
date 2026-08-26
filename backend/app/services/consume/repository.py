@@ -54,6 +54,26 @@ class SnapshotRepo:
         await self._db.flush()
         return snapshot
 
+    async def get_by_unique(
+        self,
+        metric_code: str,
+        version: int,
+        date_range: str,
+        dims_signature: str | None,
+    ) -> MetricValueSnapshot | None:
+        """按同口径唯一键查快照（metric/version/date_range/dims_signature）。
+
+        WORM 去重前置检查：同口径已存在则跳过（唯一索引竞态兜底在 service 层
+        捕获 IntegrityError）。
+        """
+        stmt = select(MetricValueSnapshot).where(
+            MetricValueSnapshot.metric_code == metric_code,
+            MetricValueSnapshot.version == version,
+            MetricValueSnapshot.date_range == date_range,
+            MetricValueSnapshot.dims_signature == dims_signature,
+        )
+        return (await self._db.execute(stmt)).scalar_one_or_none()
+
     async def list_by_metric(
         self, metric_code: str, limit: int, offset: int
     ) -> list[MetricValueSnapshot]:

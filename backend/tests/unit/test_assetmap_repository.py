@@ -1189,6 +1189,35 @@ class TestHealthSummary:
         assert AssetMapRepository._health_level(30) == "poor"
 
 
+
+
+    async def test_health_descriptions_filters_by_org(self) -> None:
+        """org_id 非 None 时表/字段描述体检按组织过滤（join DataSource.org_id）。"""
+        from sqlalchemy import Select
+
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_desc = MagicMock()
+        r_desc.all.return_value = [
+            SimpleNamespace(
+                description=None,
+                schema_json={"fields": [{"name": "a"}, {"name": "b"}]},
+            )
+        ]
+        r_covered = MagicMock()
+        r_covered.scalar.return_value = 0
+        s.execute = AsyncMock(side_effect=[r_desc, r_covered])
+
+        tables_missing, field_missing, field_total = await repo._health_descriptions(org_id=7)
+        assert tables_missing == 1
+        assert field_total == 2
+
+        selects = [
+            c.args[0] for c in s.execute.call_args_list if isinstance(c.args[0], Select)
+        ]
+        assert len(selects) == 2
+        rendered = [str(x.compile(compile_kwargs={"literal_binds": True})) for x in selects]
+        assert all("org_id = 7" in r for r in rendered)
 class TestPiiOverview:
     async def test_aggregates(self) -> None:
         s = _session()

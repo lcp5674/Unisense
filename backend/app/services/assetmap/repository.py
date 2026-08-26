@@ -1453,8 +1453,8 @@ class AssetMapRepository:
         score -= min(len(stale), 10)
         checks.append({"key": "stale_assets", "count": len(stale), "deduct": 0})
 
-        # 体检 5/6：表描述缺失 / 字段描述缺失
-        desc_missing, field_missing, field_total = await self._health_descriptions()
+        # 体检 5/6：表描述缺失 / 字段描述缺失（按组织隔离）
+        desc_missing, field_missing, field_total = await self._health_descriptions(org_id)
         score -= min(desc_missing // 10, 10)
         checks.append({"key": "tables_missing_desc", "count": desc_missing, "deduct": 0})
         score -= min(field_missing // 100, 10)
@@ -1571,19 +1571,27 @@ class AssetMapRepository:
             for r in rows
         ]
 
-    async def _health_descriptions(self) -> tuple[int, int, int]:
+    async def _health_descriptions(self, org_id: int | None = None) -> tuple[int, int, int]:
         """体检 5/6：表描述缺失数 / 字段描述缺失数 / 字段总数。
 
         表级：``db_catalog.description`` 为空；字段级：schema_json 字段总数减去
         column_descriptions 已覆盖数（一次全表扫描，30s 缓存兜底性能）。
+        ``org_id`` 非 None 时经 ``db_catalog → data_source.org_id`` 按组织隔离
+        （数据源资产描述治理是组织内事务，防跨组织混入健康评分）。
         """
-        rows = (
-            await self._session.execute(
-                select(DBCatalog.description, DBCatalog.schema_json).where(
-                    DBCatalog.deleted_at.is_(None)
-                )
+        catalog_org_filter = None
+        if org_id is not None:
+            catalog_org_filter = (
+                DBCatalog.source_id == DataSource.source_id,
+                DataSource.deleted_at.is_(None),
+                DataSource.org_id == org_id,
             )
-        ).all()
+        stmt = select(DBCatalog.description, DBCatalog.schema_json).where(
+            DBCatalog.deleted_at.is_(None)
+        )
+        if catalog_org_filter is not None:
+            stmt = stmt.where(*catalog_org_filter)
+        rows = (await self._session.execute(stmt)).all()
         tables_missing = sum(1 for r in rows if not r.description)
         field_total = 0
         for r in rows:
@@ -1591,13 +1599,18 @@ class AssetMapRepository:
             fields = schema.get("fields") or schema.get("columns") or []
             if isinstance(fields, list):
                 field_total += len(fields)
-        covered = (
-            await self._session.execute(
-                select(func.count()).select_from(ColumnDescription).where(
-                    ColumnDescription.deleted_at.is_(None)
-                )
+        covered_stmt = (
+            select(func.count()).select_from(ColumnDescription).where(
+                ColumnDescription.deleted_at.is_(None)
             )
-        ).scalar() or 0
+        )
+        if org_id is not None:
+            covered_stmt = (
+                covered_stmt.join(DBCatalog, DBCatalog.id == ColumnDescription.catalog_id)
+                .join(DataSource, DataSource.source_id == DBCatalog.source_id)
+                .where(DataSource.deleted_at.is_(None), DataSource.org_id == org_id)
+            )
+        covered = (await self._session.execute(covered_stmt)).scalar() or 0
         return tables_missing, max(field_total - int(covered), 0), int(field_total)
 
     async def _health_metric_checks(
@@ -1606,6 +1619,9 @@ class AssetMapRepository:
         """体检 7/8/9：PII 未复核 / 无快照 / 废弃未替换指标列表。
 
         无快照判断：以存在任何快照记录的指标码集合为基准，未命中的视为无快照。
+        平台级合规项：指标（Metric）无组织归属维度（血缘可达多组织表），
+        PII 复核/快照/废弃治理本为平台统一口径，按全量统计——
+        组织视角的指标隔离由指标目录行级可见性（visible_actor_id）承担。
         """
         pii_unreviewed_rows = (
             await self._session.execute(

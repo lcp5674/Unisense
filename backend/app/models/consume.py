@@ -81,7 +81,9 @@ class MetricValueSnapshot(Base, TimestampMixin):
     """指标结果快照（TD §4.1 metric_value_snapshot，WORM）。
 
     只写不删（继承 TimestampMixin 而非 BaseModel，不含 deleted_at）。
-    热存 180d 后冷归档；唯一约束防止同口径重复快照。
+    热存 180d 后冷归档；``uk_snapshot_metric_version_range_dims`` 唯一约束
+    防同口径重复快照（JSON dims 无法直接建索引，用 ``dims_signature``
+    确定性签名承载唯一键）。
     """
 
     __tablename__ = "metric_value_snapshot"
@@ -95,6 +97,10 @@ class MetricValueSnapshot(Base, TimestampMixin):
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="生效版本")
     dims: Mapped[dict[str, Any]] = mapped_column(
         JSON, nullable=False, comment="维度组合（如 {province: 广东}）"
+    )
+    #: 维度组合确定性签名（sorted JSON 摘要前 32 位）——承载唯一约束（JSON 列不能直接建索引）
+    dims_signature: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="维度组合确定性签名（唯一键承载）"
     )
     date_range: Mapped[str] = mapped_column(
         String(64), nullable=False, comment="日期区间（如 2026-01~2026-03）"
@@ -113,6 +119,16 @@ class MetricValueSnapshot(Base, TimestampMixin):
         nullable=False,
         default=SnapshotGeneratedBy.QUERY,
         comment="生成来源",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "metric_code",
+            "version",
+            "date_range",
+            "dims_signature",
+            name="uk_snapshot_metric_version_range_dims",
+        ),
     )
 
 

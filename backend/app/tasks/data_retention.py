@@ -29,6 +29,9 @@ logger = structlog.get_logger("unisense.data_retention")
 SOFT_DELETE_RETENTION_DAYS = 180
 # L-3：评测运行记录保留期（天）——只保留近 N 天（无软删，按 ran_at）
 EVAL_RUN_RETENTION_DAYS = 365
+# L-3：行为日志类保留期（天）——query_log（提数查询日志）/ tracking_event（埋点）
+# 只增不减无软删，超期物理删（对齐 notify 90 天清理的日志治理语义，日志类非 WORM）
+LOG_RETENTION_DAYS = 180
 # L-3：单次任务每表最多物理删除的行数（防大表一次删爆 undo/锁）
 _MAX_DELETE_PER_TABLE = 5000
 # L-4：行数/数据大小（MB）告警阈值
@@ -57,16 +60,21 @@ async def purge_retained_records(ctx: dict[str, Any]) -> dict[str, Any]:
     """物理清理超期软删记录与超期评测运行（L-3）。"""
     from app.db.mysql import async_session_factory
     from app.models.conflict import Conflict, RulingRecord
+    from app.models.consume import QueryLog
     from app.models.escalation import EscalationRecord
     from app.models.sql_infer_eval import SqlInferEvalRun
+    from app.models.tracking import TrackingEvent
 
     cutoff = datetime.now(UTC) - timedelta(days=SOFT_DELETE_RETENTION_DAYS)
     eval_cutoff = datetime.now(UTC) - timedelta(days=EVAL_RUN_RETENTION_DAYS)
+    log_cutoff = datetime.now(UTC) - timedelta(days=LOG_RETENTION_DAYS)
     stats: dict[str, int] = {
         "ruling_record": 0,
         "conflict": 0,
         "escalation_record": 0,
         "sql_infer_eval_run": 0,
+        "query_log": 0,
+        "tracking_event": 0,
     }
 
     async with async_session_factory() as db:
@@ -126,6 +134,30 @@ async def purge_retained_records(ctx: dict[str, Any]) -> dict[str, Any]:
         if evals:
             await db.execute(delete(SqlInferEvalRun).where(SqlInferEvalRun.id.in_(evals)))
             stats["sql_infer_eval_run"] = len(evals)
+
+        # 行为日志类保留期（只增不减无软删，超期物理删）：
+        # query_log（提数查询日志）/ tracking_event（埋点）
+        logs = (
+            await db.execute(
+                select(QueryLog.id)
+                .where(QueryLog.created_at < log_cutoff)
+                .limit(_MAX_DELETE_PER_TABLE)
+            )
+        ).scalars().all()
+        if logs:
+            await db.execute(delete(QueryLog).where(QueryLog.id.in_(logs)))
+            stats["query_log"] = len(logs)
+
+        tracking = (
+            await db.execute(
+                select(TrackingEvent.id)
+                .where(TrackingEvent.created_at < log_cutoff)
+                .limit(_MAX_DELETE_PER_TABLE)
+            )
+        ).scalars().all()
+        if tracking:
+            await db.execute(delete(TrackingEvent).where(TrackingEvent.id.in_(tracking)))
+            stats["tracking_event"] = len(tracking)
 
         await db.commit()
 

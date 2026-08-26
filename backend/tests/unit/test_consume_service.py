@@ -105,6 +105,8 @@ def _svc(client: ApiClient) -> ConsumeService:
     defn_res = MagicMock()
     defn_res.scalars.return_value.all.return_value = []
     svc._db.execute = AsyncMock(return_value=defn_res)
+    # WORM 快照去重：默认无同口径已存（save_snapshot 走正常 create 路径）
+    svc._snapshots.get_by_unique = AsyncMock(return_value=None)
     return svc
 
 
@@ -350,7 +352,7 @@ async def test_build_query_sql_mount_table_authority() -> None:
 
 
 async def test_resolve_mount_table_returns_mount_source() -> None:
-    """_resolve_mount_table 查挂载实体返回 source_table（挂载独立更新后消费 SQL 基于最新物理表）。"""
+    """_resolve_mount_table 查挂载实体返回 source_table（挂载独立更新后消费 SQL 用最新物理表）。"""
     svc = _svc(await _client())
     m = _metric_with_source()
     m.id = 7
@@ -1106,6 +1108,7 @@ async def test_execute_mysql_fallback_when_olap_unconfigured(monkeypatch) -> Non
         return_value=("SELECT region, gmv FROM t WHERE metric_code=:m", {"m": "gmv"})
     )
     svc._snapshots = MagicMock()
+    svc._snapshots.get_by_unique = AsyncMock(return_value=None)
     svc._snapshots.create = AsyncMock()
     fake = _FakeMysqlExecutor()
     monkeypatch.setattr("app.services.consume.service.settings.olap_url", "")
@@ -1135,6 +1138,7 @@ async def test_execute_internal_user_skips_whitelist_but_keeps_pii_gate(monkeypa
     )
     svc._build_query_sql = MagicMock(return_value=("SELECT 1", {}))
     svc._snapshots = MagicMock()
+    svc._snapshots.get_by_unique = AsyncMock(return_value=None)
     svc._snapshots.create = AsyncMock()
     monkeypatch.setattr("app.services.consume.service.settings.olap_url", "")
     monkeypatch.setattr("app.services.consume.service.settings.mysql_fallback_url", "")
@@ -1154,6 +1158,7 @@ async def test_execute_internal_user_pii_reviewed_ok(monkeypatch) -> None:
     )
     svc._build_query_sql = MagicMock(return_value=("SELECT 1", {}))
     svc._snapshots = MagicMock()
+    svc._snapshots.get_by_unique = AsyncMock(return_value=None)
     svc._snapshots.create = AsyncMock()
     fake = _FakeMysqlExecutor()
     monkeypatch.setattr("app.services.consume.service.settings.olap_url", "")
@@ -1184,6 +1189,7 @@ async def test_execute_internal_user_denied_without_permission(monkeypatch) -> N
     svc = _svc(await _client())
     svc._get_metric = AsyncMock(return_value=_metric(pii=False, pii_flag=False))
     svc._snapshots = MagicMock()
+    svc._snapshots.get_by_unique = AsyncMock(return_value=None)
     svc._snapshots.create = AsyncMock()
     from app.services.governance.policy import Decision
 
@@ -1310,7 +1316,12 @@ async def test_list_snapshots_for_internal_allowed() -> None:
     svc._snapshots.list_by_metric = AsyncMock(return_value=[_snap()])
     with patch(
         "app.services.consume.service.GovernanceService.check_internal_read_permission",
-        new=AsyncMock(return_value=(SimpleNamespace(allow=True, restricted=False, reason=None, error_code=None), None)),
+        new=AsyncMock(
+            return_value=(
+                SimpleNamespace(allow=True, restricted=False, reason=None, error_code=None),
+                None,
+            )
+        ),
     ):
         out = await svc.list_snapshots_for_internal("gmv", 10, 0, SimpleNamespace(id=1))
     assert len(out) == 1
@@ -1321,12 +1332,22 @@ async def test_list_snapshots_for_internal_denied() -> None:
     """内部用户 PDP 拒绝 → FORBIDDEN（跨域无 grants 场景）。"""
     svc = _svc(await _client())
     svc._snapshots = MagicMock()
+    svc._snapshots.get_by_unique = AsyncMock(return_value=None)
     svc._snapshots.list_by_metric = AsyncMock()
-    with patch(
-        "app.services.consume.service.GovernanceService.check_internal_read_permission",
-        new=AsyncMock(return_value=(SimpleNamespace(allow=False, restricted=False, reason="跨域需授权", error_code=None), None)),
+    with (
+        patch(
+            "app.services.consume.service.GovernanceService.check_internal_read_permission",
+            new=AsyncMock(
+                return_value=(
+                    SimpleNamespace(
+                        allow=False, restricted=False, reason="跨域需授权", error_code=None
+                    ),
+                    None,
+                )
+            ),
+        ),
+        pytest.raises(BusinessError) as ei,
     ):
-        with pytest.raises(BusinessError) as ei:
             await svc.list_snapshots_for_internal("gmv", 10, 0, SimpleNamespace(id=1))
     assert ei.value.error_code == ErrorCode.FORBIDDEN
     svc._snapshots.list_by_metric.assert_not_awaited()
@@ -1336,10 +1357,13 @@ async def test_list_snapshots_for_client_scope_denied() -> None:
     """消费方跨域（scope_domain 不匹配）→ FORBIDDEN_DOMAIN。"""
     svc = _svc(await _client(scope_domain="sales"))
     svc._snapshots = MagicMock()
+    svc._snapshots.get_by_unique = AsyncMock(return_value=None)
     svc._snapshots.list_by_metric = AsyncMock()
     svc._get_metric = AsyncMock(return_value=_metric(domain="finance"))
     with pytest.raises(BusinessError) as ei:
-        await svc.list_snapshots_for_client("gmv", 10, 0, svc._clients.get_by_client_id.return_value)
+        await svc.list_snapshots_for_client(
+            "gmv", 10, 0, svc._clients.get_by_client_id.return_value
+        )
     assert ei.value.error_code == ErrorCode.FORBIDDEN_DOMAIN
     svc._snapshots.list_by_metric.assert_not_awaited()
 
@@ -1349,7 +1373,9 @@ async def test_list_snapshots_for_client_allowed() -> None:
     svc = _svc(await _client(scope_domain="sales"))
     svc._get_metric = AsyncMock(return_value=_metric(domain="sales"))
     svc._snapshots.list_by_metric = AsyncMock(return_value=[_snap()])
-    out = await svc.list_snapshots_for_client("gmv", 10, 0, svc._clients.get_by_client_id.return_value)
+    out = await svc.list_snapshots_for_client(
+        "gmv", 10, 0, svc._clients.get_by_client_id.return_value
+    )
     assert len(out) == 1
     svc._snapshots.list_by_metric.assert_awaited_once_with("gmv", 10, 0)
 
@@ -1359,4 +1385,42 @@ async def test_list_snapshots_for_client_metric_not_found() -> None:
     svc = _svc(await _client(scope_domain="sales"))
     svc._get_metric = AsyncMock(return_value=None)
     with pytest.raises(NotFoundError):
-        await svc.list_snapshots_for_client("nope", 10, 0, svc._clients.get_by_client_id.return_value)
+        await svc.list_snapshots_for_client(
+            "nope", 10, 0, svc._clients.get_by_client_id.return_value
+        )
+
+
+# ---- WORM 快照去重（uk_snapshot_metric_version_range_dims）----
+async def test_dims_signature_deterministic() -> None:
+    """同维度组合不同键序/空格产出相同签名（去重唯一键可靠）。"""
+    from app.services.consume.service import _dims_signature
+
+    a = _dims_signature({"province": "广东", "region": "华南"})
+    b = _dims_signature({"region": "华南", "province": "广东"})
+    c = _dims_signature({"province": "广东", "region": "华南 "})
+    assert a == b
+    assert a != c  # 值不同 → 签名不同（非误合并）
+
+
+async def test_save_snapshot_dedupes_same_caliber() -> None:
+    """同口径（metric/version/date_range/dims）重复保存 → 跳过不重复落库（WORM）。"""
+    svc = _svc(await _client())
+    existing = MetricValueSnapshot(
+        metric_code="gmv", version=1, dims={"region": "华南"}, dims_signature="sig",
+        date_range="2026-01", value_json={"rows": [{"x": 1}]},
+        generated_at=datetime.now(UTC), generated_by=SnapshotGeneratedBy.QUERY,
+    )
+    existing.id = 99
+    svc._snapshots.get_by_unique = AsyncMock(return_value=existing)
+    svc._snapshots.create = AsyncMock()
+    resp = await svc.save_snapshot(
+        metric_code="gmv",
+        version=1,
+        dims={"region": "华南"},
+        date_range="2026-01",
+        value_json={"rows": []},
+        quality_flag=None,
+        generated_at=datetime.now(UTC),
+    )
+    svc._snapshots.create.assert_not_awaited()  # 已存在 → 不重复写
+    assert resp.metric_code == "gmv"

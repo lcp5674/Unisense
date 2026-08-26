@@ -41,7 +41,7 @@ class TestPurgeRetainedRecords:
         """无超期记录时返回 SUCCESS + 各项 0。"""
         from app.tasks.data_retention import purge_retained_records
 
-        mock_db = _mock_db([_empty_result(), _empty_result(), _empty_result(), _empty_result()])
+        mock_db = _mock_db([_empty_result() for _ in range(6)])
 
         with patch("app.db.mysql.async_session_factory") as mock_factory:
             mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
@@ -74,6 +74,8 @@ class TestPurgeRetainedRecords:
                 MagicMock(),  # delete escalation
                 _rows_result([41]),  # select sql_infer_eval_run
                 MagicMock(),  # delete eval
+                _rows_result([]),  # select query_log（无超期，不触发 delete）
+                _rows_result([]),  # select tracking_event（无超期，不触发 delete）
             ]
         )
 
@@ -93,7 +95,7 @@ class TestPurgeRetainedRecords:
             for c in mock_db.execute.call_args_list
             if isinstance(c.args[0], Delete)
         ]
-        assert len(deletes) == 4
+        assert len(deletes) == 4  # 仅四表有行触发 delete（query_log/tracking 空）
         assert mock_db.commit.called
 
     @pytest.mark.asyncio
@@ -103,7 +105,7 @@ class TestPurgeRetainedRecords:
 
         from app.tasks.data_retention import purge_retained_records
 
-        mock_db = _mock_db([_empty_result(), _empty_result(), _empty_result(), _empty_result()])
+        mock_db = _mock_db([_empty_result() for _ in range(6)])
 
         with patch("app.db.mysql.async_session_factory") as mock_factory:
             mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
@@ -115,7 +117,7 @@ class TestPurgeRetainedRecords:
             for c in mock_db.execute.call_args_list
             if isinstance(c.args[0], Select)
         ]
-        assert len(selects) == 4
+        assert len(selects) == 6
         # 全部为 limit 受限查询（防大表一次删爆）
         for s in selects:
             assert s._limit is not None
@@ -210,3 +212,39 @@ class TestCheckTableGrowth:
 
         assert result["status"] == "SUCCESS"
         assert len(result["oversized"]) == 1  # 巡检结果仍返回
+
+
+class TestLogRetention:
+    """行为日志类（query_log/tracking_event）保留期清理。"""
+
+    @pytest.mark.asyncio
+    async def test_purges_expired_query_log_and_tracking(self) -> None:
+        """query_log/tracking_event 超期行物理删除并返回计数。"""
+        from sqlalchemy import Delete
+
+        from app.tasks.data_retention import purge_retained_records
+
+        # 前面 4 表空 + eval 空 + query_log 有 2 行 + tracking 有 1 行
+        mock_db = _mock_db(
+            [_empty_result() for _ in range(4)]
+            + [
+                _rows_result([101, 102]),  # select query_log
+                MagicMock(),  # delete query_log
+                _rows_result([201]),  # select tracking_event
+                MagicMock(),  # delete tracking_event
+            ]
+        )
+        with patch("app.db.mysql.async_session_factory") as mock_factory:
+            mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
+            mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+            result = await purge_retained_records({})
+
+        assert result["query_log"] == 2
+        assert result["tracking_event"] == 1
+        deletes = [
+            c.args[0]
+            for c in mock_db.execute.call_args_list
+            if isinstance(c.args[0], Delete)
+        ]
+        assert len(deletes) == 2
+        assert mock_db.commit.called

@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -588,17 +590,42 @@ class ConsumeService(BaseService):
         generated_at: Any,
         generated_by: SnapshotGeneratedBy = SnapshotGeneratedBy.QUERY,
     ) -> SnapshotResponse:
+        signature = _dims_signature(dims)
+        # WORM 去重：同口径（metric/version/date_range/dims 签名）已存在则跳过，
+        # 防"同口径重复快照"（模型唯一索引 uk_snapshot_metric_version_range_dims
+        # 兜底并发竞态，IntegrityError 视为已存在返回）。
+        existing = await self._snapshots.get_by_unique(
+            metric_code, version, date_range, signature
+        )
+        if existing is not None:
+            return self._to_snap(existing)
         snap = MetricValueSnapshot(
             metric_code=metric_code,
             version=version,
             dims=dims,
+            dims_signature=signature,
             date_range=date_range,
             value_json=value_json,
             quality_flag=quality_flag,
             generated_at=generated_at,
             generated_by=generated_by,
         )
-        await self._snapshots.create(snap)
+        try:
+            await self._snapshots.create(snap)
+        except Exception:
+            # 唯一键并发竞态：另一请求已写入同口径快照 → 回读返回（WORM 不重复落库）
+            logger.info(
+                "snapshot_unique_conflict_skip",
+                metric_code=metric_code,
+                version=version,
+                exc_info=True,
+            )
+            existing = await self._snapshots.get_by_unique(
+                metric_code, version, date_range, signature
+            )
+            if existing is not None:
+                return self._to_snap(existing)
+            raise
         return self._to_snap(snap)
 
     async def list_snapshots(
@@ -1112,3 +1139,16 @@ class ConsumeService(BaseService):
                 }
             )
         return {"days": days, "items": items}
+
+
+def _dims_signature(dims: dict[str, Any]) -> str:
+    """维度组合的确定性签名（同口径唯一键承载）。
+
+    sorted JSON（ensure_ascii=False + 紧凑分隔符）保证「同维度组合不同键序/
+    空格」产出相同签名；sha1 摘要前 32 位承载 ``metric_value_snapshot`` 的
+    ``dims_signature`` 唯一索引（JSON 列不能直接建 MySQL 唯一索引）。
+    """
+    canonical = json.dumps(
+        dims, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    )
+    return hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:32]
