@@ -39,6 +39,9 @@ BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     "metric.rolled_back",
     "metric.emergency_published",
     "metric.health_critical",
+    # 指标重新启用（semantic/service.py reactivate_metric 发布）：DEPRECATED 复活为 DRAFT 后
+    # 通知相关方可重新送审（C1 第七轮：此前发布但不在订阅集合 → 事件永不落 EventLog/扇出）
+    "metric.reactivated",
     # 紧急发布补审完成（P1-6）：complete_emergency_review 写 emergency_reviewed_at 后发布，
     # 定向通知补审执行人/指标 Owner（TD §12.3 紧急发布闭环）
     "metric.emergency_reviewed",

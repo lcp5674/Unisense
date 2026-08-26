@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -139,6 +138,9 @@ async def _svc() -> tuple[MetricMountService, MagicMock]:
     repo.save = AsyncMock(side_effect=lambda m: _persist(m))
     repo.soft_delete = AsyncMock()
     repo.commit = AsyncMock()
+    # C2（第七轮）：挂载粒度与主表冗余列同步——service 新增回填/清空调用须 mock
+    repo.update_metric_granularity = AsyncMock()
+    repo.clear_metric_granularity = AsyncMock()
     svc._repo = repo  # noqa: SLF001
     return svc, repo
 

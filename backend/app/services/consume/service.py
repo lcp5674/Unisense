@@ -469,6 +469,8 @@ class ConsumeService(BaseService):
         - OLAP 失败或未配置 → 尝试 MySQL 降级（配置了 mysql_fallback_url 时）→ ("mysql")；
         - 两者均不可用 → 抛 DEPENDENCY_DEGRADED_ENGINE。
         """
+        from app.services.consume.olap_executor import DorisSqlError
+
         olap_tried = False
         if settings.olap_url:
             olap_tried = True
@@ -477,6 +479,14 @@ class ConsumeService(BaseService):
                 result = await executor.execute(sql, params)
                 _observe_query_result(True)
                 return result, "olap"
+            except DorisSqlError as exc:
+                # R-3：Doris SQL 语义/语法错误是用户 SQL 问题——如实上抛（由 API 层转为
+                # 400/422），不降级 MySQL 重跑（掩盖问题且浪费）。区别于引擎故障的降级路径。
+                _observe_query_result(False)
+                raise BusinessError(
+                    f"OLAP 查询 SQL 错误: {exc}",
+                    error_code=ErrorCode.QUERY_SQL_ERROR,
+                ) from exc
             except Exception as exc:
                 logger.warning("olap_execute_failed_fallback_mysql", error=str(exc))
 

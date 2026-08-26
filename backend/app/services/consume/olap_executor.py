@@ -35,6 +35,20 @@ _CACHE_PREFIX = "olap:cache:"
 _PLACEHOLDER_RE = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
 
 
+class DorisSqlError(Exception):
+    """Doris SQL 语义/语法错误（HTTP 4xx 或 code!=0 的查询错误）。
+
+    R-3（第七轮韧性）：Doris 返回 4xx/查询错误是**用户 SQL 本身的问题**，不是引擎故障——
+    不应触发「降级 MySQL 重跑」（会掩盖 SQL 问题且浪费）、不应污染共享熔断器（坏 SQL 会让
+    olap_breaker 误熔断、连累正常查询降级）。此类错误如实上抛，由消费方呈现给用户。
+    """
+
+    def __init__(self, message: str, *, status_code: int = 0, body: str = "") -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = body[:1000]
+
+
 def _sql_literal(value: Any) -> str:
     """把 Python 值编码为 SQL 字面量（IN 子句列表展开用，单引号翻倍防注入）。"""
     if value is None:
@@ -232,7 +246,10 @@ class OLAPExecutor:
             await self._set_cache(cache_key, result)
             return result
         except Exception as exc:
-            self._breaker.record_failure()
+            # R-3：SQL 语义/语法错误（DorisSqlError）是用户 SQL 问题，不记熔断失败——
+            # 否则坏 SQL 会让共享熔断器误开路，连累后续正常查询全部降级 MySQL。
+            if not isinstance(exc, DorisSqlError):
+                self._breaker.record_failure()
             elapsed = (time.monotonic() - start) * 1000
             logger.warning(
                 "olap_execute_failed",
@@ -283,6 +300,14 @@ class OLAPExecutor:
                 status_code=response.status_code,
                 body=response.text[:500],
             )
+            # R-3：4xx = SQL 语法/参数错误（用户 SQL 问题）→ DorisSqlError 如实上抛、
+            # 不降级不熔断；5xx = 引擎故障 → 降级错误（触发 MySQL 降级 + 熔断计数）。
+            if 400 <= response.status_code < 500:
+                raise DorisSqlError(
+                    f"Doris SQL 错误（HTTP {response.status_code}）",
+                    status_code=response.status_code,
+                    body=response.text,
+                )
             raise _make_degraded_error(f"Doris 返回 HTTP {response.status_code}")
 
         return self._parse_response(response.text)
@@ -315,7 +340,9 @@ class OLAPExecutor:
         code = data.get("code", -1)
         if code != 0:
             message = data.get("message", "未知错误")
-            raise _make_degraded_error(f"Doris 查询错误: {message}")
+            # R-3：Doris 200 + code!=0 是 SQL 查询错误（语法/表不存在/权限）——用户 SQL 问题，
+            # 如实上抛不降级，避免坏 SQL 污染熔断器并连累正常查询。
+            raise DorisSqlError(f"Doris 查询错误: {message}", body=body)
 
         result_data = data.get("data")
         if not isinstance(result_data, dict):

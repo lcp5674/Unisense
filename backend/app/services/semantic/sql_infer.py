@@ -968,16 +968,3 @@ def parse_sql_profile(sql: str) -> SqlProfile:
         time_granularity=time_granularity,
         sql=sql.strip(),
     )
-
-
-def profile_to_dict(profile: SqlProfile) -> dict[str, Any]:
-    """转为普通 dict（便于 JSON 序列化 / endpoint 透传）。"""
-    return {
-        "source_tables": profile.source_tables,
-        "group_by": profile.group_by,
-        "measures": profile.measures,
-        "filters": profile.filters,
-        "time_column": profile.time_column,
-        "time_granularity": profile.time_granularity,
-        "sql": profile.sql,
-    }

@@ -385,6 +385,28 @@ async def check_conflict(
             ip=client_ip(request),
             trace_id=trace_id,
         )
+    # C-3（第七轮）：手动预检命中 → 同步给 existing 侧指标挂 pending_conflict 标记，
+    # 消除「仲裁台有 OPEN 记录、指标目录无标记」的不一致；候选未创建无 metric_code 可挂，
+    # 仅挂已存在的 existing 指标（existing_metric_id 非空即库中真实指标）。
+    for det in result.detections:
+        if det.existing_metric_id is not None and det.existing_code:
+            await db.execute(
+                update(Metric)
+                .where(Metric.metric_code == det.existing_code, Metric.deleted_at.is_(None))
+                .values(
+                    pending_conflict=True,
+                    pending_conflict_detail={
+                        "status": "manual_precheck",
+                        "conflict_id": getattr(det, "conflict_id", None),
+                        "conflict_type": getattr(det.conflict_type, "value", None),
+                        "score": getattr(det, "score", None),
+                        "existing_code": det.existing_code,
+                        "candidate_code": payload.candidate.metric_code,
+                        "severity": det.severity,
+                        "reason": "手动冲突预检命中，待协商或裁决",
+                    },
+                )
+            )
     await db.commit()
     if result.blocked:
         raise HTTPException(

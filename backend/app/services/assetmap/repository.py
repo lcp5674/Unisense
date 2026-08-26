@@ -661,10 +661,15 @@ class AssetMapRepository:
         return {"by_sensitivity": dict(cast("Sequence[tuple[Any, Any]]", rows))}
 
     async def metric_summary(self) -> dict[str, Any]:
+        # C4（第七轮）：按域分布排除草稿/已废弃（对齐域树活跃指标口径，避免资产地图
+        # 「指标总数」把 DRAFT/DEPRECATED 一并计入虚高）；按状态分布保留全量（分布视图）。
         by_domain = (
             await self._session.execute(
                 select(Metric.domain, func.count())
-                .where(Metric.deleted_at.is_(None))
+                .where(
+                    Metric.deleted_at.is_(None),
+                    Metric.status.not_in(("DRAFT", "DEPRECATED")),
+                )
                 .group_by(Metric.domain)
             )
         ).all()

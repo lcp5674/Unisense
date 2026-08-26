@@ -48,7 +48,12 @@ class MetricMountService(BaseService):
             default_period=data.default_period,
             domain=data.domain,
         )
-        return await self._repo.save(mount)
+        saved = await self._repo.save(mount)
+        # C2（第七轮）：回填 metric.granularity 冗余展示列（对齐 semantic 创建路径），
+        # 否则详情页「粒度」读主表列而挂载卡读 mount，出现同页矛盾。
+        if data.granularity:
+            await self._repo.update_metric_granularity(data.metric_id, data.granularity)
+        return saved
 
     async def get_mount(self, mount_id: int) -> MetricMount:
         mount = await self._repo.get(mount_id)
@@ -79,6 +84,8 @@ class MetricMountService(BaseService):
             mount.source_column = data.source_column
         if data.granularity is not None:
             mount.granularity = data.granularity
+            # C2（第七轮）：挂载粒度变更同步回填主表冗余列
+            await self._repo.update_metric_granularity(mount.metric_id, data.granularity)
         if data.default_period is not None:
             mount.default_period = data.default_period
         if data.domain is not None:
@@ -89,6 +96,9 @@ class MetricMountService(BaseService):
     async def delete_mount(self, mount_id: int) -> None:
         mount = await self.get_mount(mount_id)
         await self._repo.soft_delete(mount.id)
+        # C2（第七轮）：解除挂载 → 清空指标粒度冗余列（挂载不在则粒度无权威来源），
+        # 避免详情页残留「旧粒度 + 未挂载」矛盾。
+        await self._repo.clear_metric_granularity(mount.metric_id)
         await self._repo.commit()
 
     async def _require_metric(self, metric_id: int) -> Metric:

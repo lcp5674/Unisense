@@ -58,29 +58,63 @@ class SubjectDomainRepository:
         return list(result.scalars().all())
 
     async def get_metric_count(self, domain_code: str) -> int:
+        # C4（第七轮）：统计口径对齐列表「活跃指标」——排除草稿与已废弃，仅计可用的
+        # PUBLISHED/EXPERIMENTAL 等，避免域树指标数把 DRAFT/DEPRECATED 一并计入虚高。
         stmt = (
             select(func.count())
             .select_from(Metric)
             .where(
                 Metric.domain == domain_code,
                 Metric.deleted_at.is_(None),
+                Metric.status.not_in(("DRAFT", "DEPRECATED")),
             )
         )
         result = await self._db.execute(stmt)
         return result.scalar() or 0
 
     async def get_dimension_count(self, domain_code: str) -> int:
-        """按业务域统计维度数（排除已废弃维度，对齐指标数排除软删的口径）。"""
+        """按业务域统计维度数（排除已废弃/已软删维度，对齐指标数统计口径）。"""
         stmt = (
             select(func.count())
             .select_from(Dimension)
             .where(
                 Dimension.domain == domain_code,
                 Dimension.status != "DEPRECATED",
+                Dimension.deleted_at.is_(None),
             )
         )
         result = await self._db.execute(stmt)
         return result.scalar() or 0
+
+    async def count_metrics_by_domains(self, codes: list[str]) -> dict[str, int]:
+        """批量统计多域指标数（P14：list_tree 2N+1 → 一次 GROUP BY，消除逐域 N 次查询）。"""
+        if not codes:
+            return {}
+        stmt = (
+            select(Metric.domain, func.count())
+            .where(
+                Metric.domain.in_(codes),
+                Metric.deleted_at.is_(None),
+                Metric.status.not_in(("DRAFT", "DEPRECATED")),
+            )
+            .group_by(Metric.domain)
+        )
+        return {code: int(n) for code, n in (await self._db.execute(stmt)).all()}
+
+    async def count_dimensions_by_domains(self, codes: list[str]) -> dict[str, int]:
+        """批量统计多域维度数（P14：与指标数对称，一次 GROUP BY；排除已废弃/软删维度）。"""
+        if not codes:
+            return {}
+        stmt = (
+            select(Dimension.domain, func.count())
+            .where(
+                Dimension.domain.in_(codes),
+                Dimension.status != "DEPRECATED",
+                Dimension.deleted_at.is_(None),
+            )
+            .group_by(Dimension.domain)
+        )
+        return {code: int(n) for code, n in (await self._db.execute(stmt)).all()}
 
     async def create(self, domain: SubjectDomain) -> SubjectDomain:
         self._db.add(domain)

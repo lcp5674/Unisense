@@ -15,7 +15,7 @@
 | 后端并发模型 | 纯 I/O（HTTP/DB/Redis）全异步 `async def`；Neo4j 用官方驱动**异步 session（async Bolt）**，事件循环内直接 await；若环境强制同步驱动则包 `run_in_threadpool` 隔离（避免阻塞事件循环）；CPU 密集（口径 AST 翻译）走进程池 |
 | 关系存储 | MySQL 8.0（业务/配置/审计主库），InnoDB；连接池 `SQLAlchemy async` `pool_size=20`/`max_overflow=10`/`pool_pre_ping=true` |
 | 图存储 | Neo4j 5.x（血缘 L1/L2、影响面、资产地图图）；Bolt 协议，连接池 `max_connection_lifetime=1h` |
-| 检索 | MySQL LIKE 检索（指标/术语名称与别名模糊匹配、同义词匹配、找数推荐召回）——当前实现为 MySQL 集中式检索；ES 仅作健康探活，索引 `metric_idx`/`term_idx` 未落地（P2-13 文档漂移修正） |
+| 检索 | **ES 优先检索（指标/术语/逻辑度量，multi_match 相关度 + fuzziness + 同义词匹配）**，`metric_idx`/`term_idx` 索引由 `es_indexer` 灌入；ES 未配置/异常/零命中**自动降级 MySQL LIKE**（`global_search` 8 类资源 + 指标目录 + 度量目录）；降级边界见 §4.3 |
 | 缓存/队列 | Redis 7（会话、查询缓存、LLM 批量任务队列、限流滑动窗口计数）；连接池 `max_connections=50`；查询缓存 TTL 按 `metric_version` 绑定失效（§12.0.2），会话 TTL=8h |
 | OLAP 下推引擎 | **部署期指定其一**（平台不重造）：Doris（MPP，MySQL 兼容 JDBC 直连 FE:9030，归入 MySQL 采集通道）/ Kylin/Kyligence（预聚合加速）/ Hive+SparkSQL（批路径）；接入经 `data_source.type` 适配，方言由口径翻译层生成（§12.3） |
 | 数据源采集通道 | 只读连接（不改动生产）；通道 A：平台任务库/MySQL 直连 `information_schema`；通道 B：ETL SQL + 字段注释 + 数据示例（供 LLM 解析）；分区感知（`dt`/`event_month`），增量以"新增/变更分区"为最小单位 |
@@ -1378,12 +1378,14 @@ CREATE TABLE asset_claim (
 - **循环依赖检测**：`DERIVED_FROM` 上做环检测，成环在注册/更新时拦截（F3/F16）
 > 准确性门禁：进入影响面/废弃阻断/版本级联等关键链路的边**仅限已确认边**（Parser 确认 + 人工补全 + LLM 推断经人工确认）；实验性/待确认边显式排除（PRD 4.4 质量闭环）。
 
-### 4.3 检索实现（P2-13 文档漂移修正）
+### 4.3 检索实现（ES 优先 + MySQL 降级，P2-13 文档漂移修正）
 
-> **实际实现：MySQL LIKE 集中式检索**，非 ES。全局搜索（`global_search`）索引 8 类资源含指标/术语，
-> 指标列表按关键词 LIKE 过滤（`contains(autoescape=True)` 转义防通配符放大）；`es_client.py` 仅用于
-> 健康探活，**无索引写入**。曾规划 ES 索引（metric_idx/term_idx + IK 中文分词），因检索规模与
-> 中文分词收益暂不落地——本文档与实现对齐，未来规模达到再评估 ES 接入。
+> **实际实现：ES 优先检索，MySQL LIKE 兜底降级**，非"仅健康探活"。
+>
+> - **索引**：`metric_idx`（指标）/`term_idx`（术语）由 `es_indexer`（`app/services/search/es_indexer.py`）从 MySQL 全量同步灌入（含同义词 `synonyms` 字段）；`POST /search/indexes/ensure|sync` 幂等建索引与补数据。
+> - **检索路径**：`global_search` 的指标/术语检索**优先走 ES**（`multi_match` 相关度排序 + `fuzziness` 模糊），ES 未配置（`es_url` 空）/异常/索引缺失/零命中时**自动降级 MySQL LIKE**（`contains(autoescape=True)` 转义防通配符放大）——降级对调用方透明，不阻塞检索主流程。
+> - **范围**：全局聚合搜索 8 类资源 + 指标目录 + 逻辑度量目录均支持；ES 客户端 `es_client.py` 受 `es_breaker` 熔断保护，避免 ES 故障拖垮检索。
+> - 曾规划"仅健康探活"的描述已按实况修正——ES 已接线为检索主路径，MySQL LIKE 为降级兜底。
 
 ---
 

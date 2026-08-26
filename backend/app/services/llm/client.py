@@ -44,6 +44,10 @@ logger = logging.getLogger(__name__)
 _LLM_BREAKER = get_circuit_breaker("LLM")
 _LLM_MAX_RETRIES = 2  # 额外重试次数（总计最多 MAX_RETRIES+1 次）
 _LLM_BACKOFF_BASE = 0.2  # 指数退避基数（秒）
+# R-2（第七轮韧性）：连接阶段快速失败阈值。网关不可达（连接拒绝/DNS/网络分区）是
+# 「确定性不可用」——重试无意义，只会把每次请求拖成 30s×3≈90s。连接错误不重试、
+# 直接计入熔断（连续失败达阈值即开路），让用户等待从 90s 降至 connect 超时（5s）。
+_LLM_CONNECT_TIMEOUT = 5.0
 
 # 多实例路由（LlmRouterClient）参数：
 # - 单实例在路由层连续失败阈值（达到后暂时摘除进入冷却，冷却结束自动恢复）
@@ -194,7 +198,10 @@ class LlmClient:
         self._chat_url = chat_completions_url(self._base_url)
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
-            timeout=httpx.Timeout(self._timeout),
+            # R-2（第七轮韧性）：连接阶段 5s 快速失败——LLM 网关不可达（DNS/连接拒绝/网络分区）
+            # 时立即失败并计入熔断，而非等待 read 超时（30s×3 重试 ≈ 90s 拖住用户）。
+            # read/write/pool 仍用总超时（长文本生成需要），仅 connect 单独收紧。
+            timeout=httpx.Timeout(self._timeout, connect=_LLM_CONNECT_TIMEOUT),
             headers={"Authorization": f"Bearer {self._api_key}"},
         )
 
@@ -299,10 +306,13 @@ class LlmClient:
                 metrics_store.observe_llm_call(success=False)
                 raise LlmError("LLM 响应格式错误") from exc
             except httpx.HTTPError as exc:
-                # 网络/超时等传输层瞬时故障：熔断计数 + 退避重试
+                # 网络/超时等传输层瞬时故障：熔断计数 + 退避重试。
+                # R-2：连接错误（ConnectError）为「确定性不可用」——不重试，直接失败快速
+                # 返回，避免网关宕机时每请求拖 30s×3。read/write 超时仍退避重试（瞬时波动）。
+                is_connect_error = isinstance(exc, httpx.ConnectError)
                 self._breaker.record_failure()
                 last_exc = exc
-                if attempt < _LLM_MAX_RETRIES:
+                if attempt < _LLM_MAX_RETRIES and not is_connect_error:
                     logger.warning("LLM 网络错误（将退避重试）: %s，attempt=%d", exc, attempt)
                     await asyncio.sleep(_LLM_BACKOFF_BASE * (2**attempt))
                     continue

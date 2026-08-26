@@ -342,3 +342,108 @@ async def test_check_dsd_overdue_no_metrics_no_notify(_patch_dsd_overdue_env) ->
 
     assert reminded == []
     notif_svc.notify_user.assert_not_awaited()
+
+
+
+# ---- T-3（第七轮技术债）：补两个已注册 cron 任务的测试 ----
+# check_pending_version_timeouts / check_emergency_review_overdue 已进 worker 调度但零测试。
+# 覆盖「超时默认接受转正 / 无超时无动作」「紧急发布补审超时标记 / 无超时无动作」。
+
+
+def _pending_conf(metric_id: int = 1, version: int = 3) -> SimpleNamespace:
+    return SimpleNamespace(metric_id=metric_id, version=version)
+
+
+async def test_check_pending_version_timeouts_accepts_expired() -> None:
+    """T-3: 存在 deadline 已过的 PENDING 确认 → 按 (metric_id, version) 分组默认接受转正。"""
+    with patch("app.db.mysql.async_session_factory") as factory, patch(
+        "app.services.semantic.service.MetricService"
+    ) as metric_svc_cls:
+        from app.tasks.semantic_tasks import check_pending_version_timeouts
+
+        db = _mock_db([_pending_conf(1, 3), _pending_conf(1, 3), _pending_conf(2, 1)])
+        factory.return_value = _AsyncCM(db)
+
+        svc = MagicMock()
+        svc.auto_accept_timeout = AsyncMock(
+            return_value=_metric(code="sales_gmv_d", status="PUBLISHED")
+        )
+        metric_svc_cls.return_value = svc
+
+        promoted = await check_pending_version_timeouts({})
+
+        # 两个 (metric_id, version) 分组各调一次，成功即入 promoted
+        assert promoted == [1, 2]
+        assert svc.auto_accept_timeout.await_count == 2
+        assert svc.auto_accept_timeout.await_args_list[0].args == (1, 3)
+        assert svc.auto_accept_timeout.await_args_list[1].args == (2, 1)
+        db.commit.assert_awaited()
+
+
+async def test_check_pending_version_timeouts_no_expired() -> None:
+    """T-3: 无超时确认 → 返回空且不触碰 MetricService（不提交）。"""
+    with patch("app.db.mysql.async_session_factory") as factory, patch(
+        "app.services.semantic.service.MetricService"
+    ) as metric_svc_cls:
+        from app.tasks.semantic_tasks import check_pending_version_timeouts
+
+        db = _mock_db([])
+        factory.return_value = _AsyncCM(db)
+
+        svc = MagicMock()
+        svc.auto_accept_timeout = AsyncMock()
+        metric_svc_cls.return_value = svc
+
+        promoted = await check_pending_version_timeouts({})
+
+        assert promoted == []
+        svc.auto_accept_timeout.assert_not_awaited()
+
+
+async def test_check_pending_version_timeouts_accept_failure_isolated() -> None:
+    """T-3: 单组超时接受异常 → 记日志跳过，不阻断其余组转正。"""
+    with patch("app.db.mysql.async_session_factory") as factory, patch(
+        "app.services.semantic.service.MetricService"
+    ) as metric_svc_cls:
+        from app.tasks.semantic_tasks import check_pending_version_timeouts
+
+        db = _mock_db([_pending_conf(1, 3), _pending_conf(2, 1)])
+        factory.return_value = _AsyncCM(db)
+
+        svc = MagicMock()
+        svc.auto_accept_timeout = AsyncMock(side_effect=[None, _metric(status="PUBLISHED")])
+        metric_svc_cls.return_value = svc
+
+        promoted = await check_pending_version_timeouts({})
+
+        # 第一组返回 None（未转正）不入列，第二组成功入列
+        assert promoted == [2]
+
+
+async def test_check_emergency_review_overdue_flags_overdue() -> None:
+    """T-3: 紧急发布超 24h 未补审 → 标记为 overdue。"""
+    with patch("app.db.mysql.async_session_factory") as factory:
+        from app.tasks.semantic_tasks import check_emergency_review_overdue
+
+        metric = _metric(code="emergency_sales_d", status="PUBLISHED")
+        metric.emergency_publish = True
+        metric.emergency_reviewed_at = None
+        db = _mock_db([metric])
+        factory.return_value = _AsyncCM(db)
+
+        overdue = await check_emergency_review_overdue({})
+
+        assert overdue == [metric.id]
+
+
+async def test_check_emergency_review_overdue_no_metric() -> None:
+    """T-3: 无超时紧急发布 → 返回空。"""
+    with patch("app.db.mysql.async_session_factory") as factory:
+        from app.tasks.semantic_tasks import check_emergency_review_overdue
+
+        db = _mock_db([])
+        factory.return_value = _AsyncCM(db)
+
+        overdue = await check_emergency_review_overdue({})
+
+        assert overdue == []

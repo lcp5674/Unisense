@@ -72,5 +72,21 @@ class MetricMountRepository:
             .values(deleted_at=datetime.now(UTC))
         )
 
+    async def update_metric_granularity(self, metric_id: int, granularity: str | None) -> None:
+        """回填 metric.granularity 冗余展示列（对齐 semantic 创建路径，C2 第七轮）。
+
+        metric.granularity 是「冗余回填」列（供列表/详情展示），挂载粒度变更须同步，
+        否则详情页出现「挂载卡新粒度 vs 主表旧粒度」同页矛盾。
+        """
+        await self._session.execute(
+            update(Metric).where(Metric.id == metric_id).values(granularity=granularity)
+        )
+
+    async def clear_metric_granularity(self, metric_id: int) -> None:
+        """解除挂载后清空 metric.granularity 冗余列（挂载不在则粒度无权威来源）。"""
+        await self._session.execute(
+            update(Metric).where(Metric.id == metric_id).values(granularity=None)
+        )
+
     async def commit(self) -> None:
         await self._session.commit()

@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from typing import Any
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -16,6 +18,14 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase
 
 from app.core.config import settings
+
+# R-1（第七轮韧性）：MySQL 主引擎必须防「无限挂起」。
+# - 连接超时：aiomysql 建连阶段超过 10s 视为不可达，快速失败而非无限等待；
+# - 语句级超时：每次新连接执行 SET SESSION MAX_EXECUTION_TIME（SELECT 慢查询硬上限），
+#   防止慢查询无限占用连接拖垮全站（读写超时由 mysql server 层 wait_timeout 兜底）。
+_DB_CONNECT_TIMEOUT = 10
+# 语句级超时（毫秒）：主查询路径 SELECT 超过 30s 由 MySQL 主动终止。
+_DB_MAX_EXECUTION_TIME_MS = 30_000
 
 
 def _mask_password(url: str) -> str:
@@ -52,7 +62,25 @@ engine = create_async_engine(
     pool_pre_ping=True,
     pool_recycle=1800,
     echo=settings.env == "local",
+    # R-1：连接阶段超时——MySQL 不可达（网络分区/宕机）时 10s 快速失败，防全站无限挂起
+    connect_args={"connect_timeout": _DB_CONNECT_TIMEOUT},
 )
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def _set_mysql_statement_timeout(dbapi_connection: Any, connection_record: Any) -> None:  # noqa: ANN401
+    """R-1：新连接注入语句级超时（SELECT 慢查询硬上限，防无限占用连接）。
+
+    ``MAX_EXECUTION_TIME`` 仅对 SELECT 生效（MySQL 5.7.8+），覆盖主查询路径；
+    DML/事务由连接池 ``pool_recycle`` 与 server ``wait_timeout`` 兜底。
+    任一语句异常（权限不足等）不应阻断连接建立，best-effort 记录。
+    """
+    try:
+        cursor = dbapi_connection.cursor()
+        cursor.execute(f"SET SESSION MAX_EXECUTION_TIME = {_DB_MAX_EXECUTION_TIME_MS}")
+        cursor.close()
+    except Exception:  # noqa: BLE001 - 语句级超时注入失败不应阻断建连
+        pass
 
 async_session_factory = async_sessionmaker(
     engine,

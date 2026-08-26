@@ -64,6 +64,8 @@ _EVENT_TITLE_CN: dict[str, str] = {
     "metric.emergency_published": "指标紧急发布",
     "metric.emergency_reviewed": "紧急发布已补审",
     "metric.health_critical": "指标健康度严重",
+    # C1（第七轮）：reactivate_metric 发布 metric.reactivated，标题映射补齐（订阅扇出可见）
+    "metric.reactivated": "指标已重新启用",
     "metric.gray_recycled": "灰度超期已回收",
     "metric.source_dropped": "指标数据源已下线",
     "metric.source_recovered": "指标数据源已恢复",
