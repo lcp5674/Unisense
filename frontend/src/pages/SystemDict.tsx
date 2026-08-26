@@ -478,20 +478,26 @@ export function SystemDict() {
           <Form.Item name="sort_order" label="排序" initialValue={0}>
             <InputNumber min={0} />
           </Form.Item>
-          <Form.Item name="description" label="描述" extra="可点击「AI 生成」根据显示名自动生成描述">
-            <Space.Compact style={{ width: "100%" }}>
+          {/* 描述框必须由 Form.Item 直接包裹（不可经 Space.Compact 中转，
+              否则 value/onChange 注入被布局容器吞掉——AI 生成回填与手动输入均不生效） */}
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 24 }}>
+            <Form.Item
+              name="description"
+              label="描述"
+              extra="可点击「AI 生成」根据显示名自动生成描述"
+              style={{ flex: 1, marginBottom: 0 }}
+            >
               <Input.TextArea rows={2} placeholder="该取值的含义与用途" data-testid="dict-create-desc" />
-              <Button
-                icon={<RobotOutlined />}
-                loading={inferringForm === "create"}
-                onClick={() => handleInferDescription("create")}
-                style={{ height: "auto" }}
-                data-testid="dict-infer-create"
-              >
-                AI 生成
-              </Button>
-            </Space.Compact>
-          </Form.Item>
+            </Form.Item>
+            <Button
+              icon={<RobotOutlined />}
+              loading={inferringForm === "create"}
+              onClick={() => handleInferDescription("create")}
+              data-testid="dict-infer-create"
+            >
+              AI 生成
+            </Button>
+          </div>
         </Form>
       </Modal>
 
@@ -504,20 +510,24 @@ export function SystemDict() {
           <Form.Item name="sort_order" label="排序">
             <InputNumber min={0} />
           </Form.Item>
-          <Form.Item name="description" label="描述" extra="可点击「AI 生成」根据显示名自动生成描述">
-            <Space.Compact style={{ width: "100%" }}>
-              <Input.TextArea rows={2} placeholder="该取值的含义与用途" />
-              <Button
-                icon={<RobotOutlined />}
-                loading={inferringForm === "edit"}
-                onClick={() => handleInferDescription("edit")}
-                style={{ height: "auto" }}
-                data-testid="dict-infer-edit"
-              >
-                AI 生成
-              </Button>
-            </Space.Compact>
-          </Form.Item>
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 24 }}>
+            <Form.Item
+              name="description"
+              label="描述"
+              extra="可点击「AI 生成」根据显示名自动生成描述"
+              style={{ flex: 1, marginBottom: 0 }}
+            >
+              <Input.TextArea rows={2} placeholder="该取值的含义与用途" data-testid="dict-edit-desc" />
+            </Form.Item>
+            <Button
+              icon={<RobotOutlined />}
+              loading={inferringForm === "edit"}
+              onClick={() => handleInferDescription("edit")}
+              data-testid="dict-infer-edit"
+            >
+              AI 生成
+            </Button>
+          </div>
         </Form>
       </Modal>
 

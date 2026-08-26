@@ -378,6 +378,13 @@ describe("SystemDict 页面", () => {
     await waitFor(() =>
       expect(mockedInfer).toHaveBeenCalledWith("granularity", "分钟", "粒度"),
     );
+    // 关键回归保护：AI 生成的内容必须「展示在描述框内」（而非仅写入 form store）——
+    // 历史上 Space.Compact 包裹 TextArea 会吞掉 Form.Item 的 value 注入，导致 store 有值但 UI 不显示
+    await waitFor(() =>
+      expect((screen.getByTestId("dict-create-desc") as HTMLTextAreaElement).value).toBe(
+        "由 AI 生成的描述",
+      ),
+    );
     // 提交：AI 生成的描述应随表单携带（setFieldValue 写入 form store，不依赖 DOM 时序）
     fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
     await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
