@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -409,13 +409,11 @@ async def check_conflict(
             )
     await db.commit()
     if result.blocked:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "trace_id": trace_id,
-                "message": "检测到硬冲突，须协商或裁决后方可发布",
-                "data": result.model_dump(),
-            },
+        from app.core.exceptions import ConflictError
+
+        raise ConflictError(
+            "检测到硬冲突，须协商或裁决后方可发布",
+            ctx={"data": result.model_dump()},
         )
     return ok(data=result.model_dump(), trace_id=trace_id)
 

@@ -47,7 +47,7 @@ def test_redis_tls_support() -> None:
 
 @pytest.mark.asyncio
 async def test_request_body_size_limit() -> None:
-    """T039: 请求体 > 10MB 返回 413。"""
+    """T039: 请求体 > 10MB 返回 413（中间件须真正注册，而非仅定义）。"""
     from app.core.middleware import RequestBodySizeMiddleware
 
     # 验证中间件存在且限制为 10MB
@@ -55,3 +55,12 @@ async def test_request_body_size_limit() -> None:
     from app.core.middleware import _MAX_BODY_SIZE
 
     assert _MAX_BODY_SIZE == 10 * 1024 * 1024
+
+    # P0-2（第八轮）：此前中间件定义于 middleware.py 但 main.py 未注册（死代码），
+    # 裸 body: dict 端点可传任意大请求体。此处断言其已在 FastAPI 中间件栈注册。
+    from app.main import app as unisense_app
+
+    middleware_classes = [m.cls for m in unisense_app.user_middleware]
+    assert RequestBodySizeMiddleware in middleware_classes, (
+        "RequestBodySizeMiddleware 必须在 main.py 注册（P0-2 第八轮）"
+    )

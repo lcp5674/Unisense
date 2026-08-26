@@ -69,11 +69,21 @@ async def list_rules(
     rule_type: str | None = Query(None),
     severity: str | None = Query(None),
     enabled: bool | None = Query(None),
-    page: int = Query(1),
-    page_size: int = Query(20),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
-    rt = QualityRuleType(rule_type) if rule_type else None
-    sv = QualitySeverity(severity) if severity else None
+    try:
+        rt = QualityRuleType(rule_type) if rule_type else None
+    except ValueError:
+        from app.core.exceptions import ValidationError
+
+        raise ValidationError(f"非法 rule_type: {rule_type}") from None
+    try:
+        sv = QualitySeverity(severity) if severity else None
+    except ValueError:
+        from app.core.exceptions import ValidationError
+
+        raise ValidationError(f"非法 severity: {severity}") from None
     items, total = await QualityService(db).list_rules(metric_id, rt, sv, enabled, page, page_size)
     return ok(
         data={"items": items, "total": total, "page": page, "page_size": page_size},
@@ -201,8 +211,8 @@ async def list_events(
     metric_id: int | None = Query(None),
     status: str | None = Query(None),
     level: str | None = Query(None),
-    page: int = Query(1),
-    page_size: int = Query(20),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
     st = QualityEventStatus(status) if status else None
     lv = QualitySeverity(level) if level else None
@@ -352,8 +362,8 @@ async def list_benchmarks(
     trace_id: Annotated[str, Depends(get_trace_id)],
     metric_code: str | None = Query(None),
     source_id: str | None = Query(None),
-    page: int = Query(1),
-    page_size: int = Query(20),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
     items, total = await QualityService(db).list_benchmarks(metric_code, source_id, page, page_size)
     return ok(
@@ -423,8 +433,8 @@ async def list_reconciliation_records(
     trace_id: Annotated[str, Depends(get_trace_id)],
     status: str | None = Query(None),
     metric_code: str | None = Query(None),
-    page: int = Query(1),
-    page_size: int = Query(20),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
     items, total = await QualityService(db).list_reconciliations(
         status, metric_code, page, page_size

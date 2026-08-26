@@ -221,24 +221,36 @@ async def export_audit_logs(
         "created_at",
     ]
     writer.writerow(columns)
+
+    # CSV 注入防护（S-2，第八轮）：对齐 assetmap 导出——detail_json 等字段可能含
+    # 以 = / + / - / @ 开头的值（被注入到审计 detail 的恶意文本），Excel/WPS 会当
+    # 公式执行，导出前统一前缀单引号消毒（OWASP CSV Injection）。
+    def _sanitize(v: object) -> str:
+        s = "" if v is None else str(v)
+        if s.startswith(("=", "+", "-", "@")):
+            return "'" + s
+        return s
+
     for rec in records:
         writer.writerow(
             [
                 rec.get("id"),
-                rec.get("actor_id"),
-                rec.get("actor_display"),
-                rec.get("action"),
-                rec.get("action_desc"),
-                rec.get("entity_type"),
-                rec.get("entity_id"),
-                json.dumps(rec.get("detail_json"), ensure_ascii=False, default=str)
-                if rec.get("detail_json")
-                else "",
-                rec.get("ip"),
-                rec.get("trace_id"),
+                _sanitize(rec.get("actor_id")),
+                _sanitize(rec.get("actor_display")),
+                _sanitize(rec.get("action")),
+                _sanitize(rec.get("action_desc")),
+                _sanitize(rec.get("entity_type")),
+                _sanitize(rec.get("entity_id")),
+                _sanitize(
+                    json.dumps(rec.get("detail_json"), ensure_ascii=False, default=str)
+                    if rec.get("detail_json")
+                    else ""
+                ),
+                _sanitize(rec.get("ip")),
+                _sanitize(rec.get("trace_id")),
                 rec.get("pii_access"),
                 rec.get("archived"),
-                rec.get("created_at"),
+                _sanitize(rec.get("created_at")),
             ]
         )
     # UTF-8 BOM：Excel 打开避免中文乱码

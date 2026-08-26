@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
+from app.core.exceptions import ValidationError
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.services.sensitive_rules.schemas import (
@@ -183,9 +184,7 @@ async def set_rule_status(
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[SensitiveRuleItem]:
     if action not in ("activate", "deactivate"):
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=422, detail="action 仅支持 activate/deactivate")
+        raise ValidationError("action 仅支持 activate/deactivate")
     item = await svc.set_status(rule_id, action)
     await write_audit(
         db,
@@ -218,17 +217,11 @@ async def batch_set_rule_status(
     rule_ids = body.get("rule_ids") or []
     action = str(body.get("action") or "")
     if action not in ("activate", "deactivate"):
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=422, detail="action 仅支持 activate/deactivate")
+        raise ValidationError("action 仅支持 activate/deactivate")
     if not isinstance(rule_ids, list) or not rule_ids:
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=422, detail="rule_ids 不能为空")
+        raise ValidationError("rule_ids 不能为空")
     if len(rule_ids) > 100:
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=422, detail="单次批量操作不超过 100 条")
+        raise ValidationError("单次批量操作不超过 100 条")
     result = await svc.batch_set_status([str(r) for r in rule_ids], action)
     await write_audit(
         db,
@@ -261,23 +254,15 @@ async def batch_set_rule_confidence(
     rule_ids = body.get("rule_ids") or []
     confidence = body.get("confidence")
     if not isinstance(rule_ids, list) or not rule_ids:
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=422, detail="rule_ids 不能为空")
+        raise ValidationError("rule_ids 不能为空")
     if len(rule_ids) > 100:
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=422, detail="单次批量操作不超过 100 条")
+        raise ValidationError("单次批量操作不超过 100 条")
     try:
         conf_val = float(confidence)
     except (TypeError, ValueError):
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=422, detail="confidence 必须是 0-1 的数值")
+        raise ValidationError("confidence 必须是 0-1 的数值") from None
     if not 0.0 <= conf_val <= 1.0:
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=422, detail="confidence 必须在 0-1 之间")
+        raise ValidationError("confidence 必须在 0-1 之间")
     result = await svc.batch_set_confidence([str(r) for r in rule_ids], conf_val)
     await write_audit(
         db,

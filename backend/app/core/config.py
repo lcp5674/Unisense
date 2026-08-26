@@ -183,6 +183,39 @@ class Settings(BaseSettings):
                     "生产环境 UNISENSE_JWT_SECRET 必须≥32字符，当前长度="
                     f"{len(self.jwt_secret)}。请设置强密钥后重启。"
                 )
+            # S-1（第八轮）：拒已知默认弱凭据——compose 默认值（dev-jwt-secret.../test/
+            # es_changeme/minioadmin 等）可通过长度/非空校验，但一旦暴露即被撞库。
+            # 生产必须显式注入强凭据（空值=未配置属合法，不在此列）。
+            weak_values = {
+                "dev-jwt-secret-change-in-production-32bytes",
+                "test",
+                "test1234",
+                "changeme",
+                "es_changeme",
+                "minioadmin",
+                "admin",
+                "password",
+                "123456",
+                "12345678",
+                "secret",
+            }
+            _cred_env_map: tuple[tuple[str, str], ...] = (
+                ("UNISENSE_JWT_SECRET", self.jwt_secret),
+                ("UNISENSE_ES_PASSWORD", self.es_password),
+                ("UNISENSE_MINIO_ACCESS_KEY", self.minio_access_key),
+                ("UNISENSE_MINIO_SECRET_KEY", self.minio_secret_key),
+                ("UNISENSE_NEO4J_PASSWORD", self.neo4j_password),
+            )
+            for var, val in _cred_env_map:
+                if val and val in weak_values:
+                    raise ConfigurationError(
+                        f"生产环境 {var} 使用了已知默认弱凭据，请注入强凭据后重启"
+                    )
+            # MySQL 默认密码 test 内嵌于 db_url（compose 默认 mysql+pymysql://unisense:test@...）
+            if ":test@" in self.db_url or ":test:" in self.db_url:
+                raise ConfigurationError(
+                    "生产环境 UNISENSE_DB_URL 使用了已知默认弱密码 test，请注入强密码后重启"
+                )
             if not self.fernet_key:
                 raise ConfigurationError(
                     "生产环境 UNISENSE_FERNET_KEY 必须独立配置，"

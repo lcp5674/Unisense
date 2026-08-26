@@ -12,16 +12,17 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import structlog
 from arq import ArqRedis, cron
 from arq.connections import RedisSettings
 from croniter import croniter
 
 from app.core.config import settings
 from app.core.eventbus import init_eventbus
+from app.core.logging import configure_logging
 from app.services.collector.queue import RedisJobStore
 from app.services.collector.repository import CollectorRepository
 from app.services.collector.tasks import run_collection_task
@@ -43,7 +44,10 @@ from app.tasks.semantic_tasks import (
 )
 from app.tasks.stale_collection_jobs import stale_collection_jobs_task
 
-logger = logging.getLogger("unisense.collector.worker")
+# P2-2（第八轮）：worker 用 structlog（与 backend 统一 JSON 格式 + 脱敏 processor），
+# 任务执行时可通过 structlog.contextvars.bind_contextvars(job_id=...) 绑定任务级 trace_id，
+# 替代此前标准 logging 无 trace_id、格式与 backend 割裂的问题。
+logger = structlog.get_logger("unisense.collector.worker")
 
 #: P1-6 错过调度补偿：每个源的上次触发水位 key 前缀 / 补偿上限 / 补偿窗口。
 _SCHED_WATERMARK_PREFIX = "collect:sched_watermark:"
@@ -61,6 +65,9 @@ async def startup(ctx: dict[str, Any]) -> None:
     进程从不 ``init_eventbus`` 且不注册订阅者，worker 侧事件双链路全丢
     （本地订阅为空 + Redis 未注入），导致「手动触发有通知、定时触发无通知」。
     """
+    # P2-2：worker 日志与 backend 统一（structlog JSON + 脱敏 processor）
+    configure_logging()
+
     redis = ArqRedis.from_url(settings.redis_url)
     ctx["redis"] = redis
     ctx["job_store"] = RedisJobStore(redis)
@@ -81,7 +88,7 @@ async def shutdown(ctx: dict[str, Any]) -> None:
         try:
             await redis.aclose()
         except Exception as exc:  # noqa: BLE001 - 关闭失败仅记录
-            logger.warning("worker redis 关闭失败: %s", exc)
+            logger.warning("worker_redis_close_failed", error=str(exc))
 
 
 async def collect_scheduler(ctx: dict[str, Any], *args: Any) -> None:
@@ -96,7 +103,7 @@ async def collect_scheduler(ctx: dict[str, Any], *args: Any) -> None:
     now = datetime.now(UTC)
     redis = ctx.get("redis")
     if redis is None:
-        logger.error("调度器 redis 不可用，跳过本轮扫描")
+        logger.error("scheduler_redis_unavailable")
         return
 
     async with async_session_factory() as db:
@@ -104,7 +111,7 @@ async def collect_scheduler(ctx: dict[str, Any], *args: Any) -> None:
         try:
             sources = await repo.list_scheduled_sources()
         except Exception as exc:
-            logger.warning("调度器扫描数据源失败: %s", exc)
+            logger.warning("scheduler_scan_failed", error=str(exc))
             return
 
         triggered = 0
@@ -148,23 +155,23 @@ async def collect_scheduler(ctx: dict[str, Any], *args: Any) -> None:
                     )
                     triggered += 1
                     logger.info(
-                        "scheduler_trigger: source=%s run_at=%s catchup=%s",
-                        src.source_id,
-                        ts.isoformat(),
-                        ts < now,
+                        "scheduler_trigger",
+                        source=src.source_id,
+                        run_at=ts.isoformat(),
+                        catchup=ts < now,
                     )
                 if missed:
                     # 水位推进到本次最后一个触发时刻（避免重复补偿同一时间点）
                     await redis.set(watermark_key, missed[-1].isoformat())
             except Exception as exc:
                 logger.warning(
-                    "scheduler_parse_failed: source=%s cron=%r err=%s",
-                    src.source_id,
-                    cron_expr,
-                    exc,
+                    "scheduler_parse_failed",
+                    source=src.source_id,
+                    cron=cron_expr,
+                    error=str(exc),
                 )
         if triggered:
-            logger.info("scheduler_scan_done: scanned=%d triggered=%d", len(sources), triggered)
+            logger.info("scheduler_scan_done", scanned=len(sources), triggered=triggered)
 
 
 class WorkerSettings:

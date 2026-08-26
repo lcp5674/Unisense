@@ -217,11 +217,11 @@ services:
         - >-
           import urllib.request,sys;
           sys.exit(0 if
-          urllib.request.urlopen('http://localhost:8000/health',timeout=3).status
+          urllib.request.urlopen('http://localhost:8000/ready',timeout=5).status
           == 200 else 1)
       interval: 30s
-      timeout: 5s
-      retries: 3
+      timeout: 10s
+      retries: 5
       start_period: 40s
 
   # ============ 采集异步 worker（P0-7：定时调度真实执行者）============
@@ -315,6 +315,9 @@ services:
       MYSQL_USER: ${UNISENSE_MYSQL_USER:-unisense}
       MYSQL_PASSWORD: ${UNISENSE_MYSQL_PASSWORD:-test}
       MYSQL_DATABASE: ${UNISENSE_MYSQL_DATABASE:-unisense}
+      # P1-2（第八轮）：多库备份（空格分隔）——含 e2e_biz 降级业务库；
+      # backup.sh 未设置 MYSQL_DATABASES 时回退 MYSQL_DATABASE 单库。
+      MYSQL_DATABASES: ${UNISENSE_BACKUP_DATABASES:-unisense}
       BACKUP_DIR: /backups
       RETENTION_DAYS: "7"
     volumes:
@@ -325,9 +328,13 @@ services:
       - -c
       - >-
         while true; do
-          sh /usr/local/bin/backup.sh;
-          echo "[backup-svc] sleep 24h";
-          sleep 86400;
+          if sh /usr/local/bin/backup.sh; then
+            echo "[backup-svc] ok, sleep 24h";
+            sleep 86400;
+          else
+            echo "[backup-svc] FAILED: 备份失败，60s 后重试（不再静默吞掉）" >&2;
+            sleep 60;
+          fi;
         done
     restart: unless-stopped
 

@@ -10,7 +10,7 @@
 
 | 数据 | 方式 | 频率 | 保留 | 介质 |
 |------|------|------|------|------|
-| **MySQL** | 每日全量 `mysqldump --single-transaction` + **binlog 增量**（ROW 格式，RPO≤15min） | 全量每日 02:00；增量每 5 分钟 | 7 天 | `unisense_backups` 卷 / 外部存储 |
+| **MySQL** | 每日全量 `mysqldump --single-transaction` + **binlog 增量**（ROW 格式，RPO≤15min） | 全量每 24h（启动即跑一次 + 循环，见 §二.1 说明）；增量每 5 分钟 | 7 天 | `unisense_backups` 卷 / 外部存储 |
 | Neo4j | `neo4j-admin database dump` | 每日 | 7 天 | 节点本地 + 转存 |
 | Elasticsearch | snapshot API → 仓库 | 每日 | 7 天 | ES snapshot 仓库 |
 | 审计归档 | MinIO 对象（应用层已归档） | 持续 | 180 天 | MinIO 卷 |
@@ -21,9 +21,12 @@
 
 ## 二、备份操作
 
-### 1. MySQL 全量（自动，每日 02:00）
+### 1. MySQL 全量（自动，每 24h 循环）
 
-由 `docker-compose.yml` 的 `backup` 服务执行：
+由 `docker-compose.yml` 的 `backup` 服务执行。注意：**全量备份为「容器启动即跑一次 + 每 24 小时循环」，并非固定每日 02:00**——依赖容器持续运行，重启容器会提前触发一轮全量（幂等，覆盖旧文件）。
+
+- 支持**多库备份**：默认备份 `unisense` 主库；可通过 `UNISENSE_BACKUP_DATABASES="unisense e2e_biz"` 同时备份降级业务库 `e2e_biz`。
+- **失败告警**：任一库备份失败时 `backup.sh` 退出非 0，backup 服务捕获后打印 `[backup-svc] FAILED` 到 stderr 并 **60 秒后快速重试**（而非静默吞掉等下一轮），便于运维通过容器日志及时感知。
 
 ```bash
 # 查看备份服务状态

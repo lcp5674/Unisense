@@ -8,12 +8,23 @@
       name="description"
       content="Unisense 指标语义中台 — 统一指标口径、血缘可追溯、治理可信赖"
     />
+    <!-- P1-3（第八轮）：Google Fonts 改为异步加载（media=print + onload 切换），不阻塞
+         首屏；内网/离线环境加载失败时静默回退系统字体（font-family 有系统栈兜底），
+         不再因外网依赖阻塞渲染。 -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap"
       rel="stylesheet"
+      media="print"
+      onload="this.media='all'"
     />
+    <noscript>
+      <link
+        href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap"
+        rel="stylesheet"
+      />
+    </noscript>
     <title>Unisense · 指标语义中台</title>
   </head>
   <body>

@@ -422,7 +422,7 @@ async def list_collection_jobs(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=200),
     offset: int = 0,
     source_id: str | None = None,
     status: str | None = None,
@@ -586,19 +586,29 @@ async def list_source_catalogs(
     entity_type: str | None = None,
     sensitivity_level: str | None = None,
     keyword: str | None = None,
-    page: int = 1,
-    page_size: int = 20,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
 ) -> ApiResponse[DBCatalogListResponse]:
     """按数据源查询采集目录（采集目录页按源查看表/字段的入口）。"""
     svc = _svc(db)
-    params = DBCatalogListParams(
-        source_id=source_id,
-        entity_type=entity_type,
-        sensitivity_level=sensitivity_level,
-        keyword=keyword,
-        page=page,
-        page_size=page_size,
-    )
+    from pydantic import ValidationError as _PydanticValidationError
+
+    try:
+        params = DBCatalogListParams(
+            source_id=source_id,
+            entity_type=entity_type,
+            sensitivity_level=sensitivity_level,
+            keyword=keyword,
+            page=page,
+            page_size=page_size,
+        )
+    except _PydanticValidationError as exc:
+        # P1-1（第八轮）：手工构造与 Depends 注入版行为对齐——入参非法返回 422
+        # 而非 pydantic ValidationError 冒泡成 500。
+        from app.core.exceptions import ValidationError as AppValidationError
+
+        first_msg = exc.errors()[0]["msg"] if exc.errors() else "参数校验失败"
+        raise AppValidationError(str(first_msg)) from exc
     return ok(data=await svc.list_catalogs(params), trace_id=trace_id)
 
 
@@ -1032,8 +1042,8 @@ async def list_drift_logs(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     entity_name: str | None = None,
-    page: int = 1,
-    page_size: int = 20,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
 ) -> ApiResponse[DriftLogListResponse]:
     """P1-4: Schema Drift 变更日志（按检测时间倒序，分页）。
 
@@ -1651,8 +1661,8 @@ async def list_collection_runs(
     trigger: str | None = None,
     started_after: str | None = None,
     started_before: str | None = None,
-    page: int = 1,
-    page_size: int = 20,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
 ) -> ApiResponse[CollectionRunListResponse]:
     """采集运行历史分页列表（按开始时间倒序，可按源/状态/触发方式/时间区间过滤）。
 

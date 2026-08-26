@@ -3,7 +3,14 @@ import {
 } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Button, Input, App as AntApp } from "antd";
-import { apiLogin, clearAuthTokens, fetchCurrentUser, getToken, UnisenseApiError } from "./api";
+import {
+  apiLogin,
+  AUTH_EXPIRED_EVENT,
+  clearAuthTokens,
+  fetchCurrentUser,
+  getToken,
+  UnisenseApiError,
+} from "./api";
 import type { CurrentUser } from "./types";
 import { Layout } from "./components/Layout";
 import { PermissionProvider, RequirePerm, ROUTE_PERM } from "./hooks/usePermission";
@@ -234,6 +241,15 @@ export default function App() {
       .then((me) => setUser(me))
       .catch(() => clearAuthTokens())
       .finally(() => setBooting(false));
+  }, []);
+
+  // S-4（第八轮）：会话中途失效全局回登录页——api.ts 在 401 刷新失败清 token 后派发
+  // AUTH_EXPIRED_EVENT，此处监听把 user 置 null（App 守卫 `!user → 登录页` 收敛），
+  // 用户不再滞留当前页反复报错。
+  useEffect(() => {
+    const onAuthExpired = () => setUser(null);
+    window.addEventListener(AUTH_EXPIRED_EVENT, onAuthExpired);
+    return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onAuthExpired);
   }, []);
 
   if (booting) {

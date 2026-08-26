@@ -32,6 +32,18 @@ server {
     listen 80;
     server_name _;
 
+    # P2-2（第八轮）：静态产物安全头（对齐后端 SecurityHeadersMiddleware——
+    # 后端 6 项安全头此前仅覆盖 /api 反代响应，静态页面/资源缺失）。
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    # HSTS 仅 HTTPS 部署生效；内网 HTTP 访问时浏览器忽略，无副作用。
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    # CSP：宽松策略适配 Vite/antd 构建（style 需 unsafe-inline 支持动态样式注入），
+    # frame-ancestors 'none' 防点击劫持；不引入 nonce 以免破坏第三方脚本。
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'" always;
+
     # SPA：所有路由都回退到 index.html
     # index.html 必须 no-cache（否则浏览器缓存后用户看不到新功能）；
     # 静态资源（带 hash）继续长缓存。

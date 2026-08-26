@@ -146,6 +146,42 @@ async def test_export_audit_csv() -> None:
     assert entry.action == "audit.export"
 
 
+async def test_export_audit_csv_sanitizes_formula_injection() -> None:
+    """S-2：CSV 导出对以 = / + / - / @ 开头的字段前缀单引号消毒（防 Excel 公式注入）。"""
+    session = MagicMock()
+    rows_result = MagicMock()
+    log = _make_log(action="UPDATE", entity_type="metric_definition")
+    # detail_json 含注入载荷（恶意文本以 = 开头，Excel 会当公式执行）
+    log.detail_json = {"note": "=HYPERLINK(\"http://evil\",\"click\")", "plus": "+SUM(1,1)"}
+    log.entity_id = "@cmd|'/C calc'!A0"
+    rows_result.all.return_value = [(log, "平台管理员")]
+    session.execute = AsyncMock(return_value=rows_result)
+    session.add = MagicMock()
+    session.commit = AsyncMock()
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/audit/export")
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    # detail_json 是 JSON blob（以 { 开头，Excel 不当作公式），嵌套的 = 开头值
+    # 保持 JSON 原样安全；顶层字段（entity_id 以 @ 开头）必须前缀单引号消毒
+    assert "'@cmd|'/C calc'!A0" in resp.text
+    assert '"=HYPERLINK' in resp.text  # 嵌套值保留在 JSON 内（未破坏结构）
+    assert not resp.text.startswith("\n'@cmd")
+
+
 async def test_export_audit_json() -> None:
     """JSON 导出：application/json + 数组含 enrich 字段。"""
     session = _export_session()

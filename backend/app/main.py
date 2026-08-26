@@ -59,6 +59,7 @@ from app.core.middleware import (
     DegradationMiddleware,
     ErrorHandlerMiddleware,
     RateLimitMiddleware,
+    RequestBodySizeMiddleware,
     SecurityHeadersMiddleware,
     TraceIdMiddleware,
 )
@@ -213,6 +214,9 @@ def create_app() -> FastAPI:
     # API 限流（P1-12）：置于最外层业务中间件之前，命中即返回 429，避免限流请求
     # 进入后续重链路（限流本身不依赖 trace_id，缺失时回退 X-Trace-Id header）。
     app.add_middleware(RateLimitMiddleware)
+    # 请求体大小限制（P0-2，第八轮）：定义于 middleware.py 但此前未注册（死代码），
+    # 裸 body: dict 端点可传任意大请求体。注册后 POST/PUT/PATCH 超 10MB 返回 413。
+    app.add_middleware(RequestBodySizeMiddleware)
     app.add_middleware(ErrorHandlerMiddleware)
     # 降级舱壁：仅拦截依赖降级异常（DEPENDENCY_DEGRADED_*）并标注 degraded，置于
     # ErrorHandlerMiddleware 内层（先执行），非降级异常上抛交由 ErrorHandler 统一处理。

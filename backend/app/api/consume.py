@@ -23,7 +23,7 @@ from app.api.deps import CurrentUser, get_current_user, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import write_audit
 from app.core.error_codes import ErrorCode
-from app.core.exceptions import BusinessError, ValidationError
+from app.core.exceptions import BusinessError, ConflictError, ValidationError
 from app.core.guard import guard_against_injection
 from app.core.security import create_access_token, hash_password
 from app.db.mysql import get_db_session
@@ -251,9 +251,7 @@ async def _generate_client_id(repo: ApiClientRepo) -> str:
         candidate = f"app_{secrets.token_hex(4)}"
         if await repo.get_by_client_id(candidate) is None:
             return candidate
-    from fastapi import HTTPException
-
-    raise HTTPException(status_code=409, detail="无法生成唯一接入方 ID，请重试")
+    raise ConflictError("无法生成唯一接入方 ID，请重试")
 
 
 @router.post("/consume/api-clients", response_model=ApiResponse[ClientCreatedResponse])

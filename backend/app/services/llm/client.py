@@ -292,10 +292,14 @@ class LlmClient:
                     logger.warning("LLM HTTP 错误（将退避重试）: %d，attempt=%d", status, attempt)
                     await asyncio.sleep(_LLM_BACKOFF_BASE * (2**attempt))
                     continue
+                # S-5（第八轮）：网关 response.text 可能回显请求 prompt（含用户 SQL/
+                # 口径/查询），全局脱敏 processor 不覆盖该字段——不回显原文，仅记
+                # 状态码与响应体长度（保留可观测性，避免 prompt 泄漏到日志）。
+                resp_text_len = len(exc.response.text) if exc.response is not None else 0
                 logger.error(
-                    "LLM HTTP 错误: %d %s",
+                    "LLM HTTP 错误: %d，response_len=%d",
                     status,
-                    exc.response.text if exc.response is not None else "",
+                    resp_text_len,
                 )
                 metrics_store.observe_llm_call(success=False)
                 raise LlmError(f"LLM 请求失败: {status}") from exc

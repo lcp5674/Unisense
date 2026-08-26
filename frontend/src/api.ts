@@ -25,6 +25,8 @@ import {
   DomainSuggestionResponse,
   SqlBatchParseResult,
   SqlBatchRegisterRequest,
+  SqlInferEvalData,
+  SqlInferEvalRunResult,
   SqlParseRequest,
   BatchDeleteRequest,
   BatchSourceResult,
@@ -341,6 +343,13 @@ interface RequestOptions extends RequestInit {
   consumeFallbackUser?: boolean;
 }
 
+// S-3（第八轮）：主请求超时（毫秒）——此前无超时保护，慢网络/后端挂起时请求无限等待。
+export const REQUEST_TIMEOUT_MS = 30000;
+// S-4（第八轮）：会话中途失效全局事件——401 刷新失败清 token 后派发，App 层监听回登录页。
+// 用自定义事件而非直接 location 跳转：保持 SPA 状态、不依赖路由库、App 守卫（user 为
+// null 即回登录页）统一收敛，登录接口自身 401 也会触发但此时 user 已 null 无害。
+export const AUTH_EXPIRED_EVENT = "unisense:auth-expired";
+
 // P0 令牌无感续期：单飞（single-flight）刷新，多个并发 401 共享同一次 /auth/refresh，
 // 避免重复刷新互相覆盖令牌。返回是否续期成功。
 let _refreshPromise: Promise<boolean> | null = null;
@@ -399,6 +408,9 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "X-Api-Key": SEMANTIC_API_KEY,
+    // P2-2（第八轮）：透传 X-Trace-Id——后端 TraceIdMiddleware 读取并随响应回传，
+    // 使前端请求与后端日志/审计 trace_id 贯通（排查慢请求/报错无需手工对时间）。
+    "X-Trace-Id": crypto.randomUUID(),
     ...(init?.headers as Record<string, string> | undefined),
   };
   if (init?.consumeAuth) {
@@ -414,13 +426,27 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   const {
     consumeAuth: _consumeAuth,
     consumeFallbackUser: _consumeFallbackUser,
+    signal: _initSignal,
     ...restInit
   } = init ?? {};
 
-  let res = await fetch(`${API_BASE_URL}${path}`, {
-    ...restInit,
-    headers,
-  });
+  // S-3：主请求加超时中止（后端挂起不再无限等待）。init.signal 存在时（调用方自定义
+  // 中止，如搜索竞态取消）与超时信号合并，两者任一触发即中止。
+  const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const signal = _initSignal ? AbortSignal.any([_initSignal, timeoutSignal]) : timeoutSignal;
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE_URL}${path}`, {
+      ...restInit,
+      headers,
+      signal,
+    });
+  } catch (err) {
+    if (err instanceof DOMException && (err.name === "TimeoutError" || err.name === "AbortError")) {
+      throw new UnisenseApiError("请求超时，请检查网络或稍后重试", "REQUEST_TIMEOUT", 0, "");
+    }
+    throw err;
+  }
 
   // P0 令牌无感续期：用户访问令牌过期（401）时，用 refresh token 换新后重放一次原请求。
   // 403 是权限拒绝（非过期）、consumeAuth 走独立消费令牌，均不触发刷新。
@@ -430,7 +456,11 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
       const newToken = getToken();
       if (newToken) {
         headers["Authorization"] = `Bearer ${newToken}`;
-        res = await fetch(`${API_BASE_URL}${path}`, { ...restInit, headers });
+        res = await fetch(`${API_BASE_URL}${path}`, {
+          ...restInit,
+          headers,
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
       }
     }
   }
@@ -442,6 +472,8 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
     } else if (res.status === 401) {
       // 401：刷新失败或重放仍 401 → 会话彻底失效，清空 access + refresh
       clearAuthTokens();
+      // S-4：通知 App 层会话失效（user 置 null → 回登录页）。
+      window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
     }
     // 403：已登录但无权限（非令牌过期），保留登录态（access + refresh），
     // 交由上层路由守卫/页面按角色处理，避免「清 access 后刷新仍 403」的割裂中间态。
@@ -4702,6 +4734,21 @@ export async function parseSqlBatch(data: SqlParseRequest): Promise<SqlBatchPars
     method: "POST",
     body: JSON.stringify(data),
   });
+}
+
+/** SQL 智能推断评测页数据：当前成功率报告 + 历史运行趋势（确定性实时计算）。 */
+export async function getSqlInferEval(): Promise<SqlInferEvalData> {
+  return request<SqlInferEvalData>(`${API_BASE}/metric-definitions/sql-infer-eval`, {
+    method: "GET",
+  });
+}
+
+/** 运行一次 SQL 智能推断评测并记录历史（成功率趋势数据源）。 */
+export async function runSqlInferEval(): Promise<SqlInferEvalRunResult> {
+  return request<SqlInferEvalRunResult>(
+    `${API_BASE}/metric-definitions/sql-infer-eval/run`,
+    { method: "POST" },
+  );
 }
 
 /** 从 SQL 解析候选批量注册指标（场景A/B，savepoint 逐条隔离，复合缺依赖跳过）。 */

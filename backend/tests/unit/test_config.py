@@ -57,6 +57,32 @@ class TestValidateProductionConfig:
         with pytest.raises(ConfigurationError, match="通配符"):
             _mk(cors_origins="*")
 
+    def test_default_jwt_secret_rejected(self) -> None:
+        """S-1：compose 默认 JWT 密钥（dev-jwt-secret...）长度≥32 可通过长度校验，
+        但属已知默认弱凭据，生产必须拒绝。"""
+        with pytest.raises(ConfigurationError, match="JWT_SECRET"):
+            _mk(jwt_secret="dev-jwt-secret-change-in-production-32bytes")
+
+    def test_default_minio_secret_rejected(self) -> None:
+        """S-1：MinIO 默认凭据 minioadmin 须拒绝。"""
+        with pytest.raises(ConfigurationError, match="MINIO_SECRET_KEY"):
+            _mk(minio_secret_key="minioadmin")
+
+    def test_default_es_password_rejected(self) -> None:
+        """S-1：ES 默认密码 es_changeme 须拒绝。"""
+        with pytest.raises(ConfigurationError, match="ES_PASSWORD"):
+            _mk(es_password="es_changeme")
+
+    def test_default_mysql_password_rejected(self) -> None:
+        """S-1：db_url 内嵌默认密码 test 须拒绝。"""
+        with pytest.raises(ConfigurationError, match="弱密码"):
+            _mk(db_url="mysql+pymysql://unisense:test@mysql:3306/unisense")
+
+    def test_empty_weak_field_allowed(self) -> None:
+        """S-1：空值=未配置属合法（非弱凭据），不应误拒。"""
+        s = _mk(es_password="", minio_secret_key="")
+        assert s.env == "prod"
+
 
 class TestDorisDerivedFromOlapUrl:
     """P0-1：OLAPExecutor 实际连接用 doris_host/port，生产校验却强制 olap_url 非空——

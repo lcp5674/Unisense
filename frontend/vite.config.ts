@@ -5,6 +5,22 @@ import react from "@vitejs/plugin-react";
 // 也可通过 .env 的 VITE_API_BASE_URL 直接指向后端（含 /api/v1）。
 export default defineConfig({
   plugins: [react()],
+  build: {
+    // P1-3（第八轮）：入口块过大（dist 入口 index-*.js ~913KB）——api.ts（3000+ 行 +
+    // 错误码大表）被所有页面静态引入，把稳定第三方依赖拆成独立 chunk：
+    // 浏览器长期缓存 + 首屏并行加载，显著降低入口块体积与加载时间。
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          react: ["react", "react-dom", "react-router-dom"],
+          antd: ["antd", "@ant-design/icons", "@ant-design/charts"],
+          g6: ["@antv/g6"],
+          state: ["zustand"],
+          util: ["pinyin-pro"],
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     // 开发环境强制不缓存：避免浏览器沿用旧编译产物导致「改了代码页面无变化」。

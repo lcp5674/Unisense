@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
@@ -118,15 +118,11 @@ async def create_domain(
         await svc._db.commit()
         result = await svc.get_domain_with_count(domain.code)
         return ok(data=result, trace_id=trace_id)
-    except ConflictError as exc:
+    except (ConflictError, BusinessError, NotFoundError):
+        # P0-1（第八轮）：re-raise 原始 UnisenseError（ErrorHandler 统一信封，
+        # 保留 error_code/http_status/trace_id，前端 codeZh 映射生效）
         await svc._db.rollback()
-        raise HTTPException(status_code=409, detail=exc.message) from exc
-    except BusinessError as exc:
-        await svc._db.rollback()
-        raise HTTPException(status_code=400, detail=exc.message) from exc
-    except NotFoundError as exc:
-        await svc._db.rollback()
-        raise HTTPException(status_code=404, detail=exc.message) from exc
+        raise
 
 
 @router.put(
@@ -158,12 +154,9 @@ async def update_domain(
         await svc._db.commit()
         result = await svc.get_domain_with_count(domain.code)
         return ok(data=result, trace_id=trace_id)
-    except ConflictError as exc:
+    except (ConflictError, NotFoundError):
         await svc._db.rollback()
-        raise HTTPException(status_code=409, detail=exc.message) from exc
-    except NotFoundError as exc:
-        await svc._db.rollback()
-        raise HTTPException(status_code=404, detail=exc.message) from exc
+        raise
 
 
 @router.patch(
@@ -198,9 +191,9 @@ async def toggle_domain_status(
         await svc._db.commit()
         result = await svc.get_domain_with_count(domain.code)
         return ok(data=result, trace_id=trace_id)
-    except (NotFoundError, BusinessError) as exc:
+    except (NotFoundError, BusinessError):
         await svc._db.rollback()
-        raise HTTPException(status_code=400, detail=exc.message) from exc
+        raise
 
 
 @router.delete(
@@ -230,9 +223,9 @@ async def delete_domain(
         )
         await svc._db.commit()
         return ok(data={"detail": "deleted"}, trace_id=trace_id)
-    except (NotFoundError, BusinessError) as exc:
+    except (NotFoundError, BusinessError):
         await svc._db.rollback()
-        raise HTTPException(status_code=400, detail=exc.message) from exc
+        raise
 
 
 @router.get(
@@ -278,9 +271,9 @@ async def update_domain_defaults(
         )
         await svc._db.commit()
         return ok(data=domain.defaults_json or {}, trace_id=trace_id)
-    except NotFoundError as exc:
+    except NotFoundError:
         await svc._db.rollback()
-        raise HTTPException(status_code=404, detail=exc.message) from exc
+        raise
 
 
 @router.get(

@@ -12,13 +12,13 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, require_roles
 from app.api.responses import get_trace_id, ok
 from app.core.audit import write_audit
-from app.core.exceptions import AuthError, UnisenseError
+from app.core.exceptions import AuthError, NotFoundError, UnisenseError, ValidationError
 from app.core.feature_flags import is_feature_enabled_or_default
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
@@ -156,10 +156,10 @@ async def get_llm_config_secret(
     svc = LlmConfigService(db)
     row = await svc.get_row(instance_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="LLM 实例不存在")
+        raise NotFoundError("LLM 实例不存在")
     secret = await svc.get_secret(instance_id)
     if not secret:
-        raise HTTPException(status_code=404, detail="该实例未配置 API Key")
+        raise NotFoundError("该实例未配置 API Key")
     await write_audit(
         db,
         actor_id=user.id,
@@ -183,7 +183,7 @@ async def create_llm_config(
 ) -> Any:
     """新增一个 LLM 实例（api_key 必填，加密落库）。"""
     if not payload.api_key.strip():
-        raise HTTPException(status_code=422, detail="新增实例必须填写 api_key")
+        raise ValidationError("新增实例必须填写 api_key")
     svc = LlmConfigService(db)
     row = await svc.create(payload, updated_by=user.id)
     await write_audit(
@@ -211,7 +211,7 @@ async def update_llm_config(
     svc = LlmConfigService(db)
     row = await svc.update(instance_id, payload, updated_by=user.id)
     if row is None:
-        raise HTTPException(status_code=404, detail="LLM 实例不存在")
+        raise NotFoundError("LLM 实例不存在")
     await write_audit(
         db,
         actor_id=user.id,
@@ -236,7 +236,7 @@ async def delete_llm_config(
     svc = LlmConfigService(db)
     deleted = await svc.delete(instance_id)
     if not deleted:
-        raise HTTPException(status_code=404, detail="LLM 实例不存在")
+        raise NotFoundError("LLM 实例不存在")
     await write_audit(
         db,
         actor_id=user.id,

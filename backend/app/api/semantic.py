@@ -293,9 +293,9 @@ async def update_template_owner(
     owner_id = body.get("owner_id")
     if owner_id is not None:
         if not isinstance(owner_id, int) or owner_id < 1:
-            from fastapi import HTTPException
+            from app.core.exceptions import ValidationError
 
-            raise HTTPException(status_code=422, detail="owner_id 必须为正整数")
+            raise ValidationError("owner_id 必须为正整数")
         exists = await db.execute(select(User.id).where(User.id == owner_id))
         if exists.scalar_one_or_none() is None:
             from app.core.exceptions import NotFoundError
@@ -460,9 +460,9 @@ async def update_template_active(
         raise NotFoundError(f"模板不存在: {template_id}")
     is_active = body.get("is_active")
     if not isinstance(is_active, bool):
-        from fastapi import HTTPException
+        from app.core.exceptions import ValidationError
 
-        raise HTTPException(status_code=422, detail="is_active 必须为布尔值")
+        raise ValidationError("is_active 必须为布尔值")
     template.is_active = is_active
     await write_audit(
         db,
