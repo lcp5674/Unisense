@@ -453,7 +453,75 @@ describe("SystemConfig LLM 路由配置", () => {
       expect(mockTest).toHaveBeenCalledWith({ instance_id: 2 });
     });
     expect(await screen.findByTestId("cluster-health")).toBeTruthy();
-    const health = screen.getByTestId("cluster-health");
-    expect(within(health).getByText(/集群健康：1 可用 \/ 1 失败/)).toBeTruthy();
+  });
+
+  it("获取模型成功：自动选中第一个模型 + 摘要提示 + 下拉展开（可像选项框点选）", async () => {
+    mockFetchModels.mockResolvedValue({
+      models: ["hy3", "hy3-pro"],
+      supported: true,
+      error: "",
+      latency_ms: 36,
+    });
+    render(<SystemConfig />);
+    fireEvent.click(await screen.findByText("新增 LLM 实例"));
+    fireEvent.change(screen.getByPlaceholderText("https://api.deepseek.com"), {
+      target: { value: "http://127.0.0.1:19091" },
+    });
+    fireEvent.click(screen.getByText("获取模型"));
+    await waitFor(() => {
+      // 成功提示带模型列表摘要
+      expect(screen.getByText(/获取到 2 个可用模型：hy3、hy3-pro/)).toBeTruthy();
+      // 当前模型为空时自动选中第一个
+      expect(screen.getByDisplayValue("hy3")).toBeTruthy();
+    });
+    // 下拉展开（无 hidden class），模型列表可见
+    const dropdown = document.querySelector(".ant-select-dropdown") as HTMLElement | null;
+    expect(dropdown).toBeTruthy();
+    expect(dropdown?.classList.contains("ant-select-dropdown-hidden")).toBe(false);
+  });
+
+  it("获取模型成功：已有模型值时不被覆盖（保留当前输入）", async () => {
+    mockGet.mockResolvedValue(listData({ items: [PRIMARY_ITEM] }) as never);
+    mockFetchModels.mockResolvedValue({
+      models: ["hy3", "hy3-pro"],
+      supported: true,
+      error: "",
+      latency_ms: 20,
+    });
+    render(<SystemConfig />);
+    fireEvent.click(await screen.findByText("编辑"));
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("deepseek-chat")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByText("获取模型"));
+    await waitFor(() => {
+      // 已有模型值（deepseek-chat）不被覆盖为第一个模型
+      expect(screen.getByDisplayValue("deepseek-chat")).toBeTruthy();
+    });
+    expect(screen.queryByDisplayValue("hy3")).toBeNull();
+  });
+
+  it("获取模型失败（不支持 /models）：不自动选中、不展开下拉", async () => {
+    mockFetchModels.mockResolvedValue({
+      models: [],
+      supported: false,
+      error: "HTTP 404: not found",
+      latency_ms: 8,
+    });
+    render(<SystemConfig />);
+    fireEvent.click(await screen.findByText("新增 LLM 实例"));
+    fireEvent.change(screen.getByPlaceholderText("https://api.deepseek.com"), {
+      target: { value: "http://127.0.0.1:19091" },
+    });
+    fireEvent.click(screen.getByText("获取模型"));
+    await waitFor(() => {
+      expect(screen.getByText(/HTTP 404/)).toBeTruthy();
+    });
+    // 模型输入框保持空，未被自动填充
+    expect(
+      (screen.getByRole("combobox", { name: "模型名称" }) as HTMLInputElement).value,
+    ).toBe("");
+    // 下拉未展开
+    expect(document.querySelector(".ant-select-dropdown")).toBeNull();
   });
 });

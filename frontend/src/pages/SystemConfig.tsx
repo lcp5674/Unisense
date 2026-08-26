@@ -189,6 +189,7 @@ export function SystemConfig() {
   const [revealingKey, setRevealingKey] = useState(false);
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
   const [modelOptions, setModelOptions] = useState<{ value: string }[]>([]);
+  const [modelOpen, setModelOpen] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [reordering, setReordering] = useState<{ id: number; dir: -1 | 1 } | null>(null);
   const [testingAll, setTestingAll] = useState(false);
@@ -297,6 +298,7 @@ export function SystemConfig() {
     form.setFieldsValue({ provider: "custom", timeout: 30, enabled: true, priority: 0 });
     clearReveal();
     setModelOptions([]);
+    setModelOpen(false);
     setModalOpen(true);
   }
 
@@ -315,6 +317,7 @@ export function SystemConfig() {
     });
     clearReveal();
     setModelOptions([]);
+    setModelOpen(false);
     setModalOpen(true);
   }
 
@@ -332,7 +335,13 @@ export function SystemConfig() {
       });
       if (res.supported && res.models.length > 0) {
         setModelOptions(res.models.map((m) => ({ value: m })));
-        message.success(`获取到 ${res.models.length} 个可用模型（${res.latency_ms}ms）`);
+        // 当前模型为空时自动选中第一个，并展开下拉供点选/改选（方案 C：像选项框一样可交互）
+        const curModel = (form.getFieldValue("model") as string) || "";
+        if (!curModel) form.setFieldValue("model", res.models[0]);
+        setModelOpen(true);
+        const preview = res.models.slice(0, 5).join("、");
+        const suffix = res.models.length > 5 ? ` 等 ${res.models.length} 个` : "";
+        message.success(`获取到 ${res.models.length} 个可用模型：${preview}${suffix}`);
       } else {
         message.warning(
           res.error || "该网关不支持 /models 接口，请手动输入模型名称",
@@ -874,6 +883,12 @@ export function SystemConfig() {
                 <AutoComplete
                   aria-label="模型名称"
                   options={modelOptions}
+                  open={modelOpen}
+                  onDropdownVisibleChange={setModelOpen}
+                  onFocus={() => {
+                    // 已有模型列表时聚焦即展开（空值聚焦也可见全部选项）
+                    if (modelOptions.length > 0) setModelOpen(true);
+                  }}
                   placeholder="deepseek-chat"
                   className="mono"
                   style={{ width: "100%" }}
