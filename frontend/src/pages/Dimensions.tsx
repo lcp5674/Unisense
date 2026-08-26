@@ -985,6 +985,7 @@ function DimensionsTab() {
               rowKey="member_code"
               size="small"
               pagination={false}
+              scroll={{ y: 260 }}
               loading={detailLoading}
               locale={{ emptyText: "暂无成员" }}
               columns={[
@@ -1000,6 +1001,7 @@ function DimensionsTab() {
               rowKey="id"
               size="small"
               pagination={false}
+              scroll={{ y: 260 }}
               loading={detailLoading}
               locale={{ emptyText: "暂无相关映射" }}
               columns={[

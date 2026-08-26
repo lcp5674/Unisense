@@ -13,6 +13,7 @@ import {
 } from "../utils/auditI18n";
 import { formatCnTime } from "../utils/timeCn";
 import { usePermission } from "../hooks/usePermission";
+import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
 
 // 实体类型筛选选项：集中常量对齐后端全部 entity_type（见 auditI18n.AUDIT_ENTITY_TYPES）
 const AUDIT_ENTITY_OPTIONS = AUDIT_ENTITY_TYPES.map((v) => ({ value: v, label: entityTypeLabel(v) }));
@@ -136,7 +137,9 @@ export function AuditLog() {
   const { can } = usePermission();
   const [items, setItems] = useState<AuditEntry[]>([]);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  // F-1（第十一轮）：每页条数持久化（对齐 MetricCatalog/Dimensions 模式）
+  const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.auditLog.pageSize", 20);
+  const setPageSize = (ps: number) => onShowSizeChange(0, ps);
   const [entityType, setEntityType] = useState("");
   const [actorKeyword, setActorKeyword] = useState("");
   const [traceId, setTraceId] = useState("");

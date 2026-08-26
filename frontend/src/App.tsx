@@ -283,7 +283,7 @@ export default function App() {
               <Route path="/templates" element={<Templates />} />
               <Route path="/detail/:code" element={<MetricDetail />} />
               <Route path="/compare" element={<MetricCompare />} />
-              <Route path="/create" element={<MetricCreate />} />
+              <Route path="/create" element={<RequirePerm perm={ROUTE_PERM["/create"]}><MetricCreate /></RequirePerm>} />
               <Route path="/metrics/review" element={<MetricReview />} />
               <Route path="/favorites" element={<Favorites />} />
               <Route path="/assetmap" element={<AssetMap />} />
@@ -291,7 +291,7 @@ export default function App() {
               <Route path="/review" element={<ReviewWorkbench />} />
               <Route path="/quality" element={<QualityCenter />} />
               <Route path="/dimensions" element={<Dimensions />} />
-              <Route path="/measure-catalogs" element={<MeasureCatalogs />} />
+              <Route path="/measure-catalogs" element={<RequirePerm perm={ROUTE_PERM["/measure-catalogs"]}><MeasureCatalogs /></RequirePerm>} />
               <Route path="/sql-infer-eval" element={<SqlInferEval />} />
               <Route path="/glossary" element={<Glossary />} />
               <Route path="/governance" element={<RequirePerm perm={ROUTE_PERM["/governance"]}><Governance /></RequirePerm>} />
@@ -305,12 +305,12 @@ export default function App() {
               <Route path="/observability" element={<RequirePerm perm={ROUTE_PERM["/observability"]}><Observability /></RequirePerm>} />
               <Route path="/feedback" element={<FeedbackCenter />} />
               <Route path="/tracking-stats" element={<RequirePerm perm={ROUTE_PERM["/tracking-stats"]}><TrackingStats /></RequirePerm>} />
-              <Route path="/data-sources" element={<DataSources />} />
-              <Route path="/catalogs" element={<Catalogs />} />
-              <Route path="/collection-tasks" element={<CollectionTasks />} />
-              <Route path="/collection-history" element={<CollectionHistory />} />
-              <Route path="/domains" element={<SubjectDomain />} />
-              <Route path="/dicts" element={<SystemDict />} />
+              <Route path="/data-sources" element={<RequirePerm perm={ROUTE_PERM["/data-sources"]}><DataSources /></RequirePerm>} />
+              <Route path="/catalogs" element={<RequirePerm perm={ROUTE_PERM["/catalogs"]}><Catalogs /></RequirePerm>} />
+              <Route path="/collection-tasks" element={<RequirePerm perm={ROUTE_PERM["/collection-tasks"]}><CollectionTasks /></RequirePerm>} />
+              <Route path="/collection-history" element={<RequirePerm perm={ROUTE_PERM["/collection-history"]}><CollectionHistory /></RequirePerm>} />
+              <Route path="/domains" element={<RequirePerm perm={ROUTE_PERM["/domains"]}><SubjectDomain /></RequirePerm>} />
+              <Route path="/dicts" element={<RequirePerm perm={ROUTE_PERM["/dicts"]}><SystemDict /></RequirePerm>} />
               <Route path="/sensitive-rules" element={<RequirePerm perm={ROUTE_PERM["/sensitive-rules"]}><SensitiveRules /></RequirePerm>} />
               <Route path="/account" element={<Account />} />
               <Route path="/guide/:metricCode" element={<ConsumptionGuide />} />

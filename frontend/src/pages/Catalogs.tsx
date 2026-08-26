@@ -9,6 +9,7 @@ import { SchemaTable } from "../components/SchemaTable";
 import { DescriptionCoveragePanel, type DescriptionCoveragePanelHandle } from "../components/DescriptionCoveragePanel";
 import { useResizableColumns } from "../components/ResizableTable";
 import { usePermission } from "../hooks/usePermission";
+import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
 
 const SENSITIVITY_LABEL: Record<string, string> = {
   PUBLIC: "公开",
@@ -98,7 +99,9 @@ export function Catalogs() {
   const [items, setItems] = useState<DBCatalog[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  // F-1（第十一轮）：每页条数持久化（对齐 MetricCatalog/Dimensions 模式）
+  const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.catalogs.pageSize", 20);
+  const setPageSize = (ps: number) => onShowSizeChange(0, ps);
   // 列显示开关（DataHub 式：默认全开，实体/操作列固定不可关）
   const [visibleCols, setVisibleCols] = useState<string[]>(ALL_COLUMN_VALUES);
   const [sourceId, setSourceId] = useState(urlSourceId);

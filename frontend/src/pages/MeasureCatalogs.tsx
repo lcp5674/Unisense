@@ -32,14 +32,15 @@ import {
   rejectMeasureCatalog,
   restoreMeasureCatalog,
   submitMeasureCatalog,
-  UnisenseApiError,
   updateMeasureCatalog,
 } from "../api";
+import { errMsg } from "../utils/apiErrorHandlers";
 import type { ReviewSubmitBody } from "../api";
 import type { BatchResult, CurrentUser, MeasureCatalog, MeasureCategory, MeasureFormat, MeasureSuggestResult, SubjectDomainTreeNode } from "../types";
 import { MEASURE_CATEGORY_LABEL, MEASURE_FORMAT_LABEL } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 import { usePermission } from "../hooks/usePermission";
+import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
 import { MasterDataBatch, type BatchActionKey } from "../components/MasterDataBatch";
 import { CodeValue } from "../components/CodeValue";
 import {
@@ -75,10 +76,6 @@ function flattenDomainNames(nodes: SubjectDomainTreeNode[], acc: Map<string, str
   }
 }
 
-function errMsg(e: unknown, fallback: string): string {
-  return e instanceof UnisenseApiError ? `${e.message}（${e.codeZh}）` : fallback;
-}
-
 export function MeasureCatalogs() {
   const { message } = AntApp.useApp();
   const { can } = usePermission();
@@ -91,7 +88,9 @@ export function MeasureCatalogs() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  // F-1（第十一轮）：每页条数持久化（对齐 MetricCatalog/Dimensions 模式）
+  const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.measureCatalogs.pageSize", 20);
+  const setPageSize = (ps: number) => onShowSizeChange(0, ps);
   const [domain, setDomain] = useState<string>();
   const [status, setStatus] = useState<string>();
   const [keyword, setKeyword] = useState<string | undefined>(urlKw || undefined);

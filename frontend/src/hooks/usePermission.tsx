@@ -124,6 +124,7 @@ export const ROUTE_PERM: Record<string, string> = {
   "/quality": "quality:view",
   "/dimensions": "dimensions:view",
   "/glossary": "glossary:view",
+  "/measure-catalogs": "measure-catalogs:view",
   "/query": "query:view",
   "/ai": "ai:view",
   "/feedback": "feedback:view",

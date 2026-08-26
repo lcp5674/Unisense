@@ -1397,7 +1397,7 @@ function RunDetailBody({ run }: { run: LineageIngestRun }) {
           {tableLineage.length > 0 && (
             <>
               <h4 style={{ marginTop: 16 }}>本次解析 · 表级边（{tableLineage.length}）</h4>
-              <Table size="small" rowKey={(r) => `${r.source}__${r.target}`} dataSource={tableLineage} columns={tableColumns} pagination={false} />
+              <Table size="small" rowKey={(r) => `${r.source}__${r.target}`} dataSource={tableLineage} columns={tableColumns} pagination={false} scroll={{ y: 320 }} />
             </>
           )}
 
@@ -1414,6 +1414,7 @@ function RunDetailBody({ run }: { run: LineageIngestRun }) {
                 }))}
                 columns={fieldColumns}
                 pagination={false}
+                scroll={{ y: 320 }}
               />
             </>
           )}

@@ -159,3 +159,18 @@ export function parseMultiStatusResponse(response: any): Array<{item: string; st
     message: item.message || item.error,
   }));
 }
+
+/**
+ * 统一 API 错误文案（F-3 第十一轮）：标准格式 ``message（codeZh）``。
+ * 各页面此前重复 ``${err.message}（${err.codeZh}）`` 三元模板约 170 处、
+ * MeasureCatalogs 还本地复制了同款 helper——统一收敛到本函数。
+ */
+export function errMsg(e: unknown, fallback: string): string {
+  if (e && typeof e === "object" && "message" in e) {
+    const err = e as { message?: unknown; codeZh?: unknown };
+    const base = typeof err.message === "string" && err.message ? err.message : fallback;
+    const codeZh = typeof err.codeZh === "string" ? err.codeZh : "";
+    return codeZh ? `${base}（${codeZh}）` : base;
+  }
+  return fallback;
+}

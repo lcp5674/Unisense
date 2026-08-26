@@ -441,12 +441,14 @@ export function MetricCreate() {
 
   useEffect(() => {
     setDictLoading(true);
+    let failed = 0;
     Promise.all(
       DICT_FIELD_MAP.map(async ({ dictType }) => {
         try {
           const items = await listDictItems(dictType);
           return { dictType, options: items.map((i) => ({ value: i.code, label: `${i.label} (${i.code})` })) };
         } catch {
+          failed += 1;
           return { dictType, options: [] };
         }
       }),
@@ -455,8 +457,17 @@ export function MetricCreate() {
         const map: Record<string, Array<{ value: string; label: string }>> = {};
         for (const r of results) map[r.dictType] = r.options;
         setDictOptions(map);
+        // F-4（第十一轮）：字典服务故障时不再静默——全失败说明聚合/单位等下拉为空会卡死必填表单
+        if (failed > 0) {
+          message.warning(
+            failed === DICT_FIELD_MAP.length
+              ? "字典加载失败，聚合/单位等下拉不可用，请刷新重试"
+              : `部分字典加载失败（${failed}/${DICT_FIELD_MAP.length}），相关下拉可能为空`,
+          );
+        }
       })
       .finally(() => setDictLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 可加性默认值不硬编码：字典加载后取第一个 active 值（ADDITIVE 即产品默认，sort_order=0）。

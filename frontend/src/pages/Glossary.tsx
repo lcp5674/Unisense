@@ -38,6 +38,7 @@ import type { ReviewSubmitBody } from "../api";
 import type { GlossaryTerm, GlossaryConflict, SubjectDomainTreeNode, TermRelationViewItem, CurrentUser, BatchResult } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 import { usePermission } from "../hooks/usePermission";
+import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
 import { MasterDataBatch, type BatchActionKey } from "../components/MasterDataBatch";
 import {
   MasterDataReviewActions,
@@ -122,7 +123,9 @@ function TermsTab() {
   const [items, setItems] = useState<GlossaryTerm[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  // F-1（第十一轮）：每页条数持久化（对齐 MetricCatalog/Dimensions 模式），切换/刷新后保持
+  const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.glossary.pageSize", 20);
+  const setPageSize = (ps: number) => onShowSizeChange(0, ps);
   const [searchParams] = useSearchParams();
   // 生命周期状态下钻（?status=，总览仪表「术语」资产卡片）作为初始筛选
   const urlStatus = searchParams.get("status") ?? "";
