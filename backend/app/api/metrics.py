@@ -74,6 +74,11 @@ from app.services.semantic.schemas import (
     VersionRejectRequest,
 )
 from app.services.semantic.service import MetricService, redact_definition
+from app.services.semantic.sql_infer_eval.schemas import (
+    EvalSampleIn,
+    EvalSamplePreviewIn,
+    EvalSampleUpdate,
+)
 from app.services.subject_domain.service import SubjectDomainService
 
 router = APIRouter(prefix="/metric-definitions", tags=["metric-definitions"])
@@ -456,9 +461,14 @@ async def sql_infer_eval_report(
         report_to_dict,
         run_eval,
     )
-    from app.services.semantic.sql_infer_eval.service import latest_run_cases, list_runs
+    from app.services.semantic.sql_infer_eval.service import (
+        latest_run_cases,
+        list_runs,
+        merged_cases,
+    )
 
-    report = report_to_dict(run_eval())
+    merged = await merged_cases(db)
+    report = report_to_dict(run_eval(samples=merged))
     history = await list_runs(db, limit=20)
     latest_summary, latest_cases = await latest_run_cases(db)
     return ok(
@@ -467,7 +477,7 @@ async def sql_infer_eval_report(
             "history": history,
             "latest_run": latest_summary,
             "latest_run_cases": latest_cases,
-            "dataset": dataset_to_dict(),
+            "dataset": dataset_to_dict(merged),
         },
         trace_id=trace_id,
     )
@@ -503,6 +513,158 @@ async def sql_infer_eval_run(
     )
     await db.commit()
     return ok(data=result, trace_id=trace_id)
+
+
+@router.post(
+    "/sql-infer-eval/samples/preview",
+    response_model=ApiResponse[Any],
+    summary="评测样本即时解析预览（不落库）",
+    # sql 承载待解析 SQL 文本 → 豁免注入扫描（对齐 _SQL_PARSE_DEPS）。
+    dependencies=_SQL_PARSE_DEPS,
+)
+async def sql_infer_eval_sample_preview(
+    request: EvalSamplePreviewIn,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """规则解析该 SQL 的实际画像（度量/源表/周期），供用户对照期望确认。"""
+    from app.services.semantic.sql_infer_eval.service import preview_sample
+
+    return ok(data=preview_sample(request.sql), trace_id=trace_id)
+
+
+@router.get(
+    "/sql-infer-eval/samples",
+    response_model=ApiResponse[Any],
+    summary="评测自定义样本清单",
+    dependencies=_WRITE_DEPS,
+)
+async def sql_infer_eval_samples_list(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """自定义评测样本列表（含停用；内置基线合并视图见 GET /sql-infer-eval）。"""
+    from app.services.semantic.sql_infer_eval.service import list_samples
+
+    items = await list_samples(db)
+    return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
+
+
+@router.post(
+    "/sql-infer-eval/samples",
+    response_model=ApiResponse[Any],
+    summary="创建自定义评测样本",
+    # sql 承载待解析 SQL 文本 → 豁免注入扫描。
+    dependencies=_SQL_PARSE_DEPS,
+)
+async def sql_infer_eval_samples_create(
+    request: EvalSampleIn,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """创建自定义样本（case_id 唯一 + 期望合法性校验），返回落库样本。"""
+    from app.services.semantic.sql_infer_eval.schemas import _measures_to_dicts
+    from app.services.semantic.sql_infer_eval.service import create_sample
+
+    row = await create_sample(
+        db,
+        case_id=request.case_id,
+        dialect=request.dialect,
+        sql=request.sql,
+        expected_period=request.expected_period,
+        expected_measures=_measures_to_dicts(request.expected_measures),
+        expected_tables=list(request.expected_tables or []),
+        note=request.note,
+        actor_id=user.id,
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="metric_definition.sql_infer_eval_sample_create",
+        entity_type="metric_definition",
+        entity_id=f"eval_sample:{row['case_id']}",
+        detail={"sample_id": row["id"], "dialect": row["dialect"]},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=row, trace_id=trace_id)
+
+
+@router.put(
+    "/sql-infer-eval/samples/{sample_id}",
+    response_model=ApiResponse[Any],
+    summary="更新自定义评测样本（内置拒绝）",
+    dependencies=_SQL_PARSE_DEPS,
+)
+async def sql_infer_eval_samples_update(
+    sample_id: int,
+    request: EvalSampleUpdate,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """更新自定义样本（仅提交字段变更；内置基线样本只读拒绝）。"""
+    from app.services.semantic.sql_infer_eval.schemas import _measures_to_dicts
+    from app.services.semantic.sql_infer_eval.service import update_sample
+
+    row = await update_sample(
+        db,
+        sample_id,
+        case_id=request.case_id,
+        dialect=request.dialect,
+        sql=request.sql,
+        expected_period=request.expected_period,
+        expected_measures=(
+            _measures_to_dicts(request.expected_measures)
+            if request.expected_measures is not None
+            else None
+        ),
+        expected_tables=(
+            list(request.expected_tables) if request.expected_tables is not None else None
+        ),
+        note=request.note,
+        enabled=request.enabled,
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="metric_definition.sql_infer_eval_sample_update",
+        entity_type="metric_definition",
+        entity_id=f"eval_sample:{row['case_id']}",
+        detail={"sample_id": row["id"]},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=row, trace_id=trace_id)
+
+
+@router.delete(
+    "/sql-infer-eval/samples/{sample_id}",
+    response_model=ApiResponse[Any],
+    summary="软删自定义评测样本（内置拒绝）",
+    dependencies=_WRITE_DEPS,
+)
+async def sql_infer_eval_samples_delete(
+    sample_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """软删自定义样本（可恢复；内置基线只读拒绝）。"""
+    from app.services.semantic.sql_infer_eval.service import delete_sample
+
+    await delete_sample(db, sample_id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="metric_definition.sql_infer_eval_sample_delete",
+        entity_type="metric_definition",
+        entity_id=f"eval_sample:{sample_id}",
+        detail={"sample_id": sample_id},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data={"sample_id": sample_id}, trace_id=trace_id)
 
 
 @router.get(

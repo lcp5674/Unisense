@@ -1055,8 +1055,19 @@ export function MetricCreate() {
         );
       }
     } catch (err) {
-      const detail = err instanceof UnisenseApiError ? err.message : "";
-      message.error(detail ? `批量解析失败：${detail}` : "批量解析失败，请检查 SQL 语法或稍后重试");
+      // 超时（REQUEST_TIMEOUT）是批量解析最常见的"失败"：LLM 模式逐候选校验/补全
+      // 耗时可达 60-90s（LLM 实例慢/轮询），即便请求已放宽到 180s 仍可能超时——
+      // 明确告知这是耗时而非语法错误，并给出可行动建议（重试/切规则模式）。
+      if (err instanceof UnisenseApiError && err.code === "REQUEST_TIMEOUT") {
+        message.error(
+          useLlm
+            ? "批量解析耗时过长已超时（LLM 实例较慢）：可稍后重试，或改用「解析候选」规则模式（更快）"
+            : "批量解析超时：SQL 过大或后端繁忙，请稍后重试",
+        );
+      } else {
+        const detail = err instanceof UnisenseApiError ? err.message : "";
+        message.error(detail ? `批量解析失败：${detail}` : "批量解析失败，请检查 SQL 语法或稍后重试");
+      }
     } finally {
       if (useLlm) {
         setSqlBatchLlmParsing(false);

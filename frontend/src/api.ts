@@ -68,6 +68,9 @@ import {
   DimensionExpr,
   DryRunResponse,
   ErasureResult,
+  EvalSample,
+  EvalSampleIn,
+  EvalSamplePreview,
   FavoriteResponse,
   Feedback,
   GlossaryConflict,
@@ -341,6 +344,10 @@ interface RequestOptions extends RequestInit {
   consumeAuth?: boolean;
   /** consumeAuth 模式下，无消费令牌时回落登录用户 JWT（仅快照等双通道只读端点） */
   consumeFallbackUser?: boolean;
+  /** 自定义主请求超时（毫秒）；缺省用全局 REQUEST_TIMEOUT_MS（30s）。长任务
+   * （SQL 批量解析/评测运行等 LLM 场景耗时可达 60-90s）须显式放宽，否则 30s
+   * 中止会让用户误以为解析失败。 */
+  timeout?: number;
 }
 
 // S-3（第八轮）：主请求超时（毫秒）——此前无超时保护，慢网络/后端挂起时请求无限等待。
@@ -427,12 +434,15 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
     consumeAuth: _consumeAuth,
     consumeFallbackUser: _consumeFallbackUser,
     signal: _initSignal,
+    timeout: _initTimeout,
     ...restInit
   } = init ?? {};
 
   // S-3：主请求加超时中止（后端挂起不再无限等待）。init.signal 存在时（调用方自定义
-  // 中止，如搜索竞态取消）与超时信号合并，两者任一触发即中止。
-  const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  // 中止，如搜索竞态取消）与超时信号合并，两者任一触发即中止。init.timeout 显式
+  // 覆盖全局超时（SQL 批量解析/评测运行等 LLM 长任务需放宽到 180s，避免误报失败）。
+  const _timeoutMs = _initTimeout ?? REQUEST_TIMEOUT_MS;
+  const timeoutSignal = AbortSignal.timeout(_timeoutMs);
   const signal = _initSignal ? AbortSignal.any([_initSignal, timeoutSignal]) : timeoutSignal;
   let res: Response;
   try {
@@ -459,7 +469,7 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
         res = await fetch(`${API_BASE_URL}${path}`, {
           ...restInit,
           headers,
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          signal: AbortSignal.timeout(_timeoutMs),
         });
       }
     }
@@ -4744,11 +4754,13 @@ export async function suggestDomain(data: {
   });
 }
 
-/** SQL 批量解析候选（FR-010 批量注册增强，场景A/B：多语句切分 + 多度量拆分，只读+LLM 不落库）。 */
+/** SQL 批量解析候选（FR-010 批量注册增强，场景A/B：多语句切分 + 多度量拆分，只读+LLM 不落库）。
+ * LLM 模式逐候选校验/补全可能耗时 60-90s → 显式放宽超时到 180s，避免 30s 中止误报失败。 */
 export async function parseSqlBatch(data: SqlParseRequest): Promise<SqlBatchParseResult> {
   return request<SqlBatchParseResult>(`${API_BASE}/metric-definitions/parse-sql-batch`, {
     method: "POST",
     body: JSON.stringify(data),
+    timeout: 180_000,
   });
 }
 
@@ -4759,11 +4771,55 @@ export async function getSqlInferEval(): Promise<SqlInferEvalData> {
   });
 }
 
-/** 运行一次 SQL 智能推断评测并记录历史（成功率趋势数据源）。 */
+/** 运行一次 SQL 智能推断评测并记录历史（成功率趋势数据源）。
+ * 评测含 LLM 校验路径时耗时较长 → 放宽超时。 */
 export async function runSqlInferEval(): Promise<SqlInferEvalRunResult> {
   return request<SqlInferEvalRunResult>(
     `${API_BASE}/metric-definitions/sql-infer-eval/run`,
-    { method: "POST" },
+    { method: "POST", timeout: 180_000 },
+  );
+}
+
+/** 评测自定义样本清单（含停用）。 */
+export async function listEvalSamples(): Promise<{ items: EvalSample[]; total: number }> {
+  return request<{ items: EvalSample[]; total: number }>(
+    `${API_BASE}/metric-definitions/sql-infer-eval/samples`,
+    { method: "GET" },
+  );
+}
+
+/** 创建自定义评测样本。 */
+export async function createEvalSample(data: EvalSampleIn): Promise<EvalSample> {
+  return request<EvalSample>(
+    `${API_BASE}/metric-definitions/sql-infer-eval/samples`,
+    { method: "POST", body: JSON.stringify(data) },
+  );
+}
+
+/** 更新自定义评测样本（内置基线只读拒绝）。 */
+export async function updateEvalSample(
+  sampleId: number,
+  data: Partial<EvalSampleIn> & { enabled?: boolean },
+): Promise<EvalSample> {
+  return request<EvalSample>(
+    `${API_BASE}/metric-definitions/sql-infer-eval/samples/${sampleId}`,
+    { method: "PUT", body: JSON.stringify(data) },
+  );
+}
+
+/** 软删自定义评测样本（内置基线只读拒绝）。 */
+export async function deleteEvalSample(sampleId: number): Promise<{ sample_id: number }> {
+  return request<{ sample_id: number }>(
+    `${API_BASE}/metric-definitions/sql-infer-eval/samples/${sampleId}`,
+    { method: "DELETE" },
+  );
+}
+
+/** 评测样本即时解析预览（不落库）。 */
+export async function previewEvalSample(sql: string): Promise<EvalSamplePreview> {
+  return request<EvalSamplePreview>(
+    `${API_BASE}/metric-definitions/sql-infer-eval/samples/preview`,
+    { method: "POST", body: JSON.stringify({ sql }) },
   );
 }
 

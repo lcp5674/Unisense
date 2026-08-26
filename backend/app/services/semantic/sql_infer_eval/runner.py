@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from app.services.semantic.sql_infer import parse_sql_profile
@@ -139,9 +140,17 @@ def _macro_avg(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
-def run_eval() -> EvalReport:
-    """运行整个评测集，汇总指标。"""
-    cases = [evaluate_case(c) for c in GOLDEN]
+def run_eval(
+    samples: Sequence[SqlInferCase] | None = None,
+) -> EvalReport:
+    """运行评测集，汇总指标。
+
+    Args:
+        samples: 参与评测的用例序列。缺省/None 用内置基线 ``GOLDEN``（CLI/pytest
+            门禁路径）；传入时按给定序列运行（service 层合并内置 + DB 自定义，
+            让成功率随样本持续扩充而度量）。
+    """
+    cases = [evaluate_case(c) for c in (samples if samples is not None else GOLDEN)]
     mp = [m.measure_precision for m in cases if m.measure_precision is not None]
     mr = [m.measure_recall for m in cases if m.measure_recall is not None]
     tp = [m.table_precision for m in cases if m.table_precision is not None]
@@ -197,10 +206,20 @@ def report_to_dict(report: EvalReport) -> dict[str, object]:
     }
 
 
-def dataset_to_dict() -> list[dict[str, object]]:
-    """评测集样本清单（前端逐样本展示 SQL/期望画像/说明）。"""
+def dataset_to_dict(
+    samples: Sequence[SqlInferCase] | None = None,
+) -> list[dict[str, object]]:
+    """评测集样本清单（前端逐样本展示 SQL/期望画像/说明/来源标记）。
+
+    Args:
+        samples: 待序列化的用例序列；缺省用内置基线 ``GOLDEN``。合并场景由
+            service 层传入（内置 + DB 自定义），此处按 case_id 是否属内置基线
+            标 ``source``（builtin/custom）——前端据此决定只读/可编辑。
+    """
+    cases = samples if samples is not None else GOLDEN
+    builtin_ids = {c.case_id for c in GOLDEN}
     out: list[dict[str, object]] = []
-    for c in GOLDEN:
+    for c in cases:
         out.append(
             {
                 "case_id": c.case_id,
@@ -208,8 +227,19 @@ def dataset_to_dict() -> list[dict[str, object]]:
                 "note": c.note,
                 "sql": c.sql,
                 "expected_measures": [em.signature() for em in c.expected_measures],
+                # 结构化期望度量（CRUD 弹窗回填用）：{column, agg, alias, table}
+                "expected_measures_detail": [
+                    {
+                        "column": em.column,
+                        "agg": em.agg,
+                        "alias": em.alias,
+                        "table": em.table,
+                    }
+                    for em in c.expected_measures
+                ],
                 "expected_tables": list(c.expected_tables),
                 "expected_period": c.expected_period,
+                "source": "builtin" if c.case_id in builtin_ids else "custom",
             }
         )
     return out

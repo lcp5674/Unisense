@@ -5,31 +5,68 @@ import {
   Card,
   Col,
   Collapse,
+  Divider,
   Empty,
+  Form,
+  Input,
+  Modal,
+  Popconfirm,
   Progress,
   Row,
+  Select,
   Space,
   Spin,
   Statistic,
   Table,
   Tag,
   Typography,
+  App,
 } from "antd";
 import {
   CheckCircleOutlined,
   CloseCircleOutlined,
+  DeleteOutlined,
+  EditOutlined,
   PlayCircleOutlined,
+  PlusOutlined,
   ReloadOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
-import { getSqlInferEval, runSqlInferEval } from "../api";
+import {
+  createEvalSample,
+  deleteEvalSample,
+  getSqlInferEval,
+  listEvalSamples,
+  previewEvalSample,
+  runSqlInferEval,
+  updateEvalSample,
+} from "../api";
 import type {
+  EvalSample,
+  EvalSampleIn,
+  EvalSamplePreview,
   SqlInferEvalCase,
   SqlInferEvalData,
+  SqlInferEvalExpectedMeasure,
   SqlInferEvalRunSummary,
 } from "../types";
 
 const { Paragraph, Text, Title } = Typography;
+
+const AGG_OPTIONS = [
+  "SUM",
+  "AVG",
+  "COUNT",
+  "COUNT_DISTINCT",
+  "LAST_VALUE",
+  "FIRST_VALUE",
+  "MAX",
+  "MIN",
+  "MEDIAN",
+  "PERCENTILE",
+];
+const PERIOD_OPTIONS = ["hour", "day", "week", "month", "quarter", "year"];
 
 /** 成功率指标卡配置（数值 → 百分比）。 */
 function pct(v: number | null | undefined): number {
@@ -59,16 +96,26 @@ function DialectTag({ dialect }: { dialect: string }) {
 }
 
 export function SqlInferEval() {
+  const { message } = App.useApp();
   const [data, setData] = useState<SqlInferEvalData | null>(null);
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // ---- 自定义样本管理 ----
+  const [samples, setSamples] = useState<EvalSample[]>([]);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editing, setEditing] = useState<EvalSample | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [preview, setPreview] = useState<EvalSamplePreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [form] = Form.useForm();
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await getSqlInferEval();
+      const [res, sampleRes] = await Promise.all([getSqlInferEval(), listEvalSamples()]);
       setData(res);
+      setSamples(sampleRes.items);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "评测数据加载失败");
@@ -93,16 +140,120 @@ export function SqlInferEval() {
     }
   };
 
+  const openCreate = () => {
+    setEditing(null);
+    setPreview(null);
+    form.resetFields();
+    setModalOpen(true);
+  };
+
+  const openEdit = (s: EvalSample) => {
+    setEditing(s);
+    setPreview(null);
+    form.setFieldsValue({
+      case_id: s.case_id,
+      dialect: s.dialect,
+      sql: s.sql,
+      expected_period: s.expected_period,
+      expected_measures: s.expected_measures.length
+        ? s.expected_measures
+        : [{ column: "", agg: "SUM", alias: "", table: "" }],
+      expected_tables: s.expected_tables,
+      note: s.note,
+    });
+    setModalOpen(true);
+  };
+
+  const handlePreview = async () => {
+    const sql = form.getFieldValue("sql");
+    if (!sql || !String(sql).trim()) {
+      message.warning("请先填写样本 SQL 再预览解析");
+      return;
+    }
+    setPreviewLoading(true);
+    try {
+      const res = await previewEvalSample(String(sql));
+      setPreview(res);
+    } catch (e) {
+      message.error(e instanceof Error ? `预览失败：${e.message}` : "预览失败");
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const handleSave = async () => {
+    let values: {
+      case_id?: string;
+      dialect?: string;
+      sql?: string;
+      expected_period?: string;
+      expected_measures?: SqlInferEvalExpectedMeasure[];
+      expected_tables?: string[];
+      note?: string;
+    };
+    try {
+      values = await form.validateFields();
+    } catch {
+      return;
+    }
+    const payload: EvalSampleIn = {
+      case_id: String(values.case_id ?? "").trim(),
+      dialect: String(values.dialect ?? "hive").trim(),
+      sql: values.sql ?? "",
+      expected_period: values.expected_period ?? "day",
+      expected_measures: (values.expected_measures ?? [])
+        .map((m) => ({ column: (m.column ?? "").trim(), agg: m.agg, alias: m.alias, table: m.table }))
+        .filter((m) => m.column),
+      expected_tables: (values.expected_tables ?? []).map((t) => String(t).trim()).filter(Boolean),
+      note: values.note ?? "",
+    };
+    setSaving(true);
+    try {
+      if (editing) {
+        await updateEvalSample(editing.id, payload);
+        message.success("评测样本已更新");
+      } else {
+        await createEvalSample(payload);
+        message.success("评测样本已创建");
+      }
+      setModalOpen(false);
+      await load();
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : "保存失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (s: EvalSample) => {
+    try {
+      await deleteEvalSample(s.id);
+      message.success(`评测样本 ${s.case_id} 已删除`);
+      await load();
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : "删除失败");
+    }
+  };
+
   const report = data?.report;
   const latest = data?.latest_run;
 
-  // 用例明细：实际结果（report.cases）与样本（dataset）按 case_id 合并
+  // 用例明细：实际结果（report.cases）与样本（dataset）按 case_id 合并，补来源/操作
   const caseRows = (data?.report.cases ?? []).map((c) => {
     const sample = data?.dataset?.find((d) => d.case_id === c.case_id);
-    return { ...c, note: sample?.note ?? "", sql: sample?.sql ?? "" };
+    const custom = samples.find((s) => s.case_id === c.case_id);
+    return {
+      ...c,
+      note: sample?.note ?? "",
+      sql: sample?.sql ?? "",
+      source: sample?.source ?? (custom ? "custom" : "builtin"),
+      customSample: custom ?? null,
+    };
   });
 
-  const caseColumns: ColumnsType<SqlInferEvalCase & { note: string; sql: string }> = [
+  const caseColumns: ColumnsType<
+    SqlInferEvalCase & { note: string; sql: string; source: "builtin" | "custom"; customSample: EvalSample | null }
+  > = [
     {
       title: "用例",
       dataIndex: "case_id",
@@ -110,6 +261,13 @@ export function SqlInferEval() {
       render: (v: string) => <Text code>{v}</Text>,
     },
     { title: "方言", dataIndex: "dialect", width: 110, render: (v: string) => <DialectTag dialect={v} /> },
+    {
+      title: "来源",
+      dataIndex: "source",
+      width: 90,
+      render: (v: "builtin" | "custom") =>
+        v === "custom" ? <Tag color="purple">自定义</Tag> : <Tag>内置</Tag>,
+    },
     {
       title: "结果",
       dataIndex: "exact",
@@ -140,6 +298,36 @@ export function SqlInferEval() {
       render: (v: boolean | null, r) => (v == null ? "—" : v ? `匹配（${r.expected_period}）` : `期望 ${r.expected_period} → 实际 ${r.pred_period}`),
     },
     { title: "说明", dataIndex: "note", ellipsis: true },
+    {
+      title: "操作",
+      key: "ops",
+      width: 90,
+      render: (_, r) =>
+        r.customSample ? (
+          <Space size={4}>
+            <Button
+              type="link"
+              size="small"
+              icon={<EditOutlined />}
+              onClick={() => openEdit(r.customSample as EvalSample)}
+            >
+              编辑
+            </Button>
+            <Popconfirm
+              title={`删除评测样本 ${r.case_id}？`}
+              description="软删可恢复；将不再参与成功率统计"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => handleDelete(r.customSample as EvalSample)}
+            >
+              <Button type="link" size="small" danger icon={<DeleteOutlined />}>
+                删除
+              </Button>
+            </Popconfirm>
+          </Space>
+        ) : (
+          <Text type="secondary">—</Text>
+        ),
+    },
   ];
 
   const historyColumns: ColumnsType<SqlInferEvalRunSummary> = [
@@ -366,7 +554,15 @@ export function SqlInferEval() {
         )}
       </Card>
 
-      <Card title="评测样本明细" style={{ marginTop: 16 }}>
+      <Card
+        title="评测样本明细"
+        style={{ marginTop: 16 }}
+        extra={
+          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+            新增样本
+          </Button>
+        }
+      >
         <Table
           rowKey="case_id"
           size="small"
@@ -376,6 +572,158 @@ export function SqlInferEval() {
           pagination={false}
         />
       </Card>
+
+      <Modal
+        title={editing ? `编辑评测样本：${editing.case_id}` : "新增评测样本"}
+        open={modalOpen}
+        onOk={() => void handleSave()}
+        onCancel={() => setModalOpen(false)}
+        confirmLoading={saving}
+        width={820}
+        okText="保存"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <Form
+          form={form}
+          layout="vertical"
+          initialValues={{
+            dialect: "hive",
+            expected_period: "day",
+            // 默认空度量列表：期望度量可留空（样本只校验表/周期），用户点「添加度量」再填
+            expected_measures: [],
+            expected_tables: [],
+          }}
+        >
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item
+                name="case_id"
+                label="样本编码"
+                rules={[{ required: true, message: "请输入样本编码" }]}
+              >
+                <Input placeholder="如 my_case（唯一，与内置基线不可重复）" disabled={!!editing} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="dialect" label="方言">
+                <Select
+                  options={[
+                    "hive", "spark", "oracle", "clickhouse", "trino", "postgres",
+                    "mysql", "doris", "starrocks", "other",
+                  ].map((d) => ({ value: d, label: d === "other" ? "其他" : d }))}
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item
+            name="sql"
+            label="样本 SQL"
+            rules={[{ required: true, message: "请输入样本 SQL" }]}
+          >
+            <Input.TextArea rows={6} placeholder="粘贴完整 SQL 脚本（多语句 ETL / 方言写法）" />
+          </Form.Item>
+          <Space style={{ marginBottom: preview ? 12 : 0 }}>
+            <Button icon={<ThunderboltOutlined />} loading={previewLoading} onClick={() => void handlePreview()}>
+              预览解析
+            </Button>
+            {!preview && <Text type="secondary">先预览规则实际解析结果，再填写期望对照</Text>}
+          </Space>
+          {preview && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message={`规则解析实际画像：度量 ${preview.measures.length} 个 · 源表 ${preview.source_tables.length} 个 · 周期 ${preview.period ?? "—"}`}
+              description={
+                <Space direction="vertical" size={2}>
+                  {preview.measures.map((m, i) => (
+                    <Text key={i} code>
+                      {m.column} · {m.agg ?? "DERIVED"}
+                      {m.alias ? `（${m.alias}）` : ""}
+                      {m.table ? ` ← ${m.table}` : ""}
+                    </Text>
+                  ))}
+                  {preview.measures.length === 0 && (
+                    <Text type="warning">
+                      未解析出聚合度量——期望度量若填非空，保存后该样本将记为失败（可入库追踪待修缺口）
+                    </Text>
+                  )}
+                  <Text type="secondary">源表：{preview.source_tables.join("，") || "—"}</Text>
+                </Space>
+              }
+            />
+          )}
+          <Divider />
+          <Row gutter={12}>
+            <Col span={12}>
+              <Form.Item
+                name="expected_period"
+                label="期望周期"
+                rules={[{ required: true, message: "请选择期望周期" }]}
+              >
+                <Select options={PERIOD_OPTIONS.map((p) => ({ value: p, label: p }))} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="expected_tables" label="期望源表（回车添加）">
+                <Select mode="tags" placeholder="如 ods.orders" tokenSeparators={[","]} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item label="期望度量（列名 + 聚合方式；留空表示该样本只校验表/周期）">
+            <Form.List name="expected_measures">
+              {(fields, { add, remove }) => (
+                <>
+                  {fields.map(({ key, name }) => (
+                    <Space key={key} align="baseline" style={{ display: "flex", marginBottom: 4 }}>
+                      <Form.Item
+                        name={[name, "column"]}
+                        noStyle
+                        rules={[{ required: true, message: "列名必填" }]}
+                      >
+                        <Input placeholder="度量列" style={{ width: 170 }} />
+                      </Form.Item>
+                      <Form.Item name={[name, "agg"]} noStyle>
+                        <Select
+                          placeholder="聚合"
+                          style={{ width: 160 }}
+                          options={AGG_OPTIONS.map((a) => ({ value: a, label: a }))}
+                          allowClear
+                        />
+                      </Form.Item>
+                      <Form.Item name={[name, "alias"]} noStyle>
+                        <Input placeholder="别名（可选）" style={{ width: 130 }} />
+                      </Form.Item>
+                      <Form.Item name={[name, "table"]} noStyle>
+                        <Input placeholder="源表（可选）" style={{ width: 140 }} />
+                      </Form.Item>
+                      <Button
+                        type="text"
+                        danger
+                        icon={<DeleteOutlined />}
+                        onClick={() => remove(name)}
+                        aria-label="删除度量行"
+                      />
+                    </Space>
+                  ))}
+                  <Button
+                    type="dashed"
+                    block
+                    icon={<PlusOutlined />}
+                    onClick={() => add({ column: "", agg: "SUM", alias: "", table: "" })}
+                  >
+                    添加度量
+                  </Button>
+                </>
+              )}
+            </Form.List>
+          </Form.Item>
+          <Form.Item name="note" label="说明">
+            <Input.TextArea rows={2} placeholder="样本说明（缺陷场景 / 期望行为）" />
+          </Form.Item>
+        </Form>
+      </Modal>
     </div>
   );
 }

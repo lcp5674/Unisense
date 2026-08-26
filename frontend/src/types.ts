@@ -2989,15 +2989,59 @@ export interface SqlInferEvalRunSummary {
   actor_id: number | null;
 }
 
-/** 评测集样本（前端逐样本展示 SQL/期望画像/说明）。 */
+/** 评测期望度量（结构化，CRUD 弹窗回填用）。 */
+export interface SqlInferEvalExpectedMeasure {
+  column: string;
+  agg: string | null;
+  alias?: string | null;
+  table?: string | null;
+}
+
+/** 评测集样本（前端逐样本展示 SQL/期望画像/说明/来源标记）。 */
 export interface SqlInferEvalSample {
   case_id: string;
   dialect: string;
   note: string;
   sql: string;
   expected_measures: string[];
+  expected_measures_detail: SqlInferEvalExpectedMeasure[];
   expected_tables: string[];
   expected_period: string;
+  /** builtin=内置基线（只读）；custom=自定义可管理 */
+  source: "builtin" | "custom";
+}
+
+/** 自定义评测样本（CRUD 返回，含 DB 行信息）。 */
+export interface EvalSample {
+  id: number;
+  case_id: string;
+  dialect: string;
+  sql: string;
+  expected_measures: SqlInferEvalExpectedMeasure[];
+  expected_tables: string[];
+  expected_period: string;
+  note: string;
+  enabled: boolean;
+  is_builtin: boolean;
+  created_by: number | null;
+}
+
+/** 评测样本创建/更新请求。 */
+export interface EvalSampleIn {
+  case_id: string;
+  dialect: string;
+  sql: string;
+  expected_period: string;
+  expected_measures?: SqlInferEvalExpectedMeasure[];
+  expected_tables?: string[];
+  note?: string;
+}
+
+/** 评测样本即时解析预览结果（POST /sql-infer-eval/samples/preview）。 */
+export interface EvalSamplePreview {
+  measures: SqlInferEvalExpectedMeasure[];
+  source_tables: string[];
+  period: string | null;
 }
 
 /** 评测页数据（GET /sql-infer-eval）。 */
