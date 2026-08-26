@@ -240,21 +240,17 @@ class LlmClient:
             raise LlmError("LLM 熔断器已开启，请求被快速拒绝（依赖降级中）")
 
         # 缺省默认 json_object 引导结构化 JSON（既有 JSON 结构化调用向后兼容）；
-        # 显式 {"type": "text"} 时省略 response_format 字段（自由文本输出，兼容
-        # 不支持 text 约束的网关，避免纯文本 prompt 被 json_object 约束污染为空 JSON）。
-        if isinstance(response_format, dict) and response_format.get("type") == "text":
-            effective_format: dict[str, Any] | None = None
-        else:
-            effective_format = response_format or {"type": "json_object"}
+        # 显式 {"type": "text"} 时原样传给网关（自由文本输出，避免纯文本 prompt
+        # 被 json_object 约束污染为空 JSON）。实例返回空 content 由路由层 failover 兜底。
+        effective_format = response_format or {"type": "json_object"}
 
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "response_format": effective_format,
         }
-        if effective_format is not None:
-            payload["response_format"] = effective_format
 
         last_exc: Exception | None = None
         for attempt in range(_LLM_MAX_RETRIES + 1):
@@ -417,6 +413,19 @@ class LlmRouterClient:
                     max_tokens=max_tokens,
                     response_format=response_format,
                 )
+                # 空 content 视为该实例不可用（免费模型偶发空返回/网关空响应），
+                # 与抛错同等对待：failover 下一实例并计入失败次数。
+                if not (result.get("content") or "").strip():
+                    self._consecutive_failures[idx] = self._consecutive_failures.get(idx, 0) + 1
+                    if self._consecutive_failures[idx] >= _ROUTER_FAILOVER_THRESHOLD:
+                        self._cooldown_until[idx] = time.monotonic() + _ROUTER_COOLDOWN_SECONDS
+                        logger.warning(
+                            "LLM 实例 %d 连续返回空内容 %d 次，进入冷却 %ss（由剩余实例承接流量）",
+                            idx,
+                            self._consecutive_failures[idx],
+                            _ROUTER_COOLDOWN_SECONDS,
+                        )
+                    continue
                 # 成功后推进轮询指针到下一实例，并复位该实例失败计数
                 self._rotation = (idx + 1) % n
                 self._consecutive_failures[idx] = 0

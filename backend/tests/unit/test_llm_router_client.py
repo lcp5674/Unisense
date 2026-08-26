@@ -17,10 +17,13 @@ from app.services.llm.client import LlmError, LlmRouterClient
 
 
 class _FakeClient:
-    """最小 LLM 客户端替身：可配置每次 chat 成功/抛 LlmError。"""
+    """最小 LLM 客户端替身：可配置每次 chat 成功/抛 LlmError/返回空 content。"""
 
-    def __init__(self, *, always_fail: bool = False, name: str = "fake") -> None:
+    def __init__(
+        self, *, always_fail: bool = False, name: str = "fake", empty_content: bool = False
+    ) -> None:
         self._always_fail = always_fail
+        self._empty_content = empty_content
         self.name = name
         self.calls = 0
         self.closed = False
@@ -33,6 +36,8 @@ class _FakeClient:
         self.calls += 1
         if self._always_fail:
             raise LlmError(f"{self.name} 不可用")
+        if self._empty_content:
+            return {"content": "", "model": self.name, "usage": {}}
         return {"content": f"ok-{self.name}", "model": self.name, "usage": {}}
 
     async def close(self) -> None:
@@ -66,6 +71,29 @@ class TestFailover:
         assert result["model"] == "b"  # a 失败自动切换到 b
         assert a.calls == 1
         assert b.calls == 1
+
+    async def test_failover_when_instance_returns_empty_content(self) -> None:
+        """实例返回空 content（免费模型偶发空返回/网关空响应）视为失败，failover 下一实例。"""
+        a, b = _FakeClient(empty_content=True, name="a"), _FakeClient(name="b")
+        router = LlmRouterClient([a, b])
+        result = await router.chat([{"role": "user", "content": "x"}])
+        assert result["model"] == "b"  # a 返回空自动切换到 b
+        assert a.calls == 1
+        assert b.calls == 1
+
+    async def test_empty_content_triggers_cooldown(self) -> None:
+        """实例连续返回空内容达到阈值后进入冷却期，后续请求跳过该实例。"""
+        a = _FakeClient(empty_content=True, name="a")
+        b = _FakeClient(name="b")
+        router = LlmRouterClient([a, b])
+        # 连续空 3 次达到冷却阈值（_ROUTER_FAILOVER_THRESHOLD=3），期间由 b 承接
+        for _ in range(3):
+            result = await router.chat([{"role": "user", "content": "x"}])
+            assert result["model"] == "b"
+        # a 已冷却（calls=3），第 4 次请求不再尝试 a，直接由 b 承接
+        result = await router.chat([{"role": "user", "content": "x"}])
+        assert result["model"] == "b"
+        assert a.calls == 3
 
     async def test_fallback_to_last_when_all_down(self) -> None:
         a, b = _FakeClient(always_fail=True, name="a"), _FakeClient(always_fail=True, name="b")

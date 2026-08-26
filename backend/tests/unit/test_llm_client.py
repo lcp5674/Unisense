@@ -193,9 +193,8 @@ class TestLlmClient:
         assert payload["response_format"] == {"type": "json_object"}
 
     @pytest.mark.asyncio
-    async def test_chat_text_format_omits_response_format(self) -> None:
-        """显式 {"type": "text"} 时省略 response_format 字段
-        （自由文本，兼容不支持 text 约束的网关）。"""
+    async def test_chat_text_format_passed_through(self) -> None:
+        """显式 {"type": "text"} 时原样传给网关（自由文本，避免纯文本被 json_object 污染）。"""
         client = LlmClient(base_url="https://api.example.com", api_key="test-key")
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -210,7 +209,7 @@ class TestLlmClient:
             [{"role": "user", "content": "Hi"}], response_format={"type": "text"}
         )
         payload = client._client.post.call_args[1]["json"]
-        assert "response_format" not in payload
+        assert payload["response_format"] == {"type": "text"}
         assert result["content"] == "纯文本口径"
 
     @pytest.mark.asyncio
