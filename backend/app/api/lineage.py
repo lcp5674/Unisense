@@ -71,6 +71,13 @@ _SCAN_DEPS = [
     Depends(require_roles(*_WRITE_ROLES)),
     Depends(guard_against_injection_exempt("path")),
 ]
+# 标准血缘导出（/export）：治理/合规开放 API，任意登录用户（含 viewer）可全量导出
+# 10 万边（含 pii_inherited/SQL 原文）属越权侧门（X-2）。收紧为治理/合规角色，
+# 并在服务层按用户域收敛（domain_admin 仅可导出本域）。
+_EXPORT_DEPS = [
+    Depends(require_roles("platform_admin", "domain_admin", "compliance_officer")),
+    Depends(guard_against_injection),
+]
 
 # Neo4j 驱动持连接池，每请求新建 LineageGraphClient 且从不 dispose 会让 driver
 # 随请求泄漏、连接持续耗尽（P1）。改为模块级单例复用同一 driver：
@@ -108,6 +115,33 @@ def _assert_edge_domain(user: User, domains: set[str]) -> None:
         raise AuthError(
             f"无权操作域外血缘边（当前域: {user.domain}）", error_code="FORBIDDEN"
         )
+
+
+def _effective_read_domain(user: User, requested: str | None) -> str | None:
+    """读路径域收敛（X-2）：platform_admin 可跨域（沿用请求域/不限域）；
+    其余角色强制限定本域——防止低权限用户借血缘读路径跨域窥探他域口径与 PII。
+    返回 None 表示不限定域（仅 platform_admin 且未指定时）。
+    """
+    if user.has_role("platform_admin"):
+        return requested
+    return user.domain
+
+
+async def _assert_node_read_access(user: User, svc: LineageService, node: str) -> None:
+    """读路径节点域收敛（X-2）：platform_admin 放行；其余角色若节点可解析出域
+    且不在本域则拒绝——防止 viewer/analyst 借 /impact /edges /path 探测任意
+    未发布/他域指标口径。节点无法解析（external/未知）时不阻断（无法判属）。
+    """
+    if user.has_role("platform_admin"):
+        return
+    metas = await svc.node_meta({node})
+    for m in metas:
+        d = getattr(m, "domain", None)
+        if d and d != user.domain:
+            raise AuthError(
+                f"无权读取域外血缘节点（当前域: {user.domain}，节点域: {d}）",
+                error_code="FORBIDDEN",
+            )
 
 
 async def dispose_graph_client() -> None:
@@ -269,6 +303,8 @@ async def impact(
     owner/pii），供前端血缘查询/影响分析图谱点击节点时在侧边栏展示具体信息。
     """
     svc = _svc(db)
+    # X-2 读路径域收敛：节点可解析且不在本域时拒绝（platform_admin 放行）
+    await _assert_node_read_access(user, svc, params.node)
     edges = await svc.query_impact(params)
     page = paginate_edges(edges, params.page, params.page_size)
     page["nodes"] = await svc.node_meta(
@@ -290,6 +326,8 @@ async def list_edges(
     节点在侧边栏展示具体信息。
     """
     svc = _svc(db)
+    # X-2 读路径域收敛
+    await _assert_node_read_access(user, svc, params.node)
     edges = await svc.list_edges(params.node, params.direction)
     page = paginate_edges(edges, params.page, params.page_size)
     page["nodes"] = await svc.node_meta(
@@ -518,7 +556,11 @@ async def lineage_path(
     用于回答「A 的数据如何流转到 B」「A→B 之间经过哪些中间层」；``shortest_hops``
     给最短链路，``paths`` 给全部链路（含跳数）。
     """
-    result = await _svc(db).path_query(source=source, target=target, max_hops=max_hops, limit=limit)
+    svc = _svc(db)
+    # X-2 读路径域收敛：起点/终点节点均可解析且不在本域时拒绝
+    await _assert_node_read_access(user, svc, source)
+    await _assert_node_read_access(user, svc, target)
+    result = await svc.path_query(source=source, target=target, max_hops=max_hops, limit=limit)
     return ok(data=result.model_dump(mode="json"), trace_id=trace_id)
 
 
@@ -543,7 +585,7 @@ async def lineage_path_terminals(
 # ---- 标准血缘导出（P4：OpenLineage / JSON 开放 API）----
 
 
-@router.get("/export", dependencies=_READ_DEPS)
+@router.get("/export", dependencies=_EXPORT_DEPS)
 async def lineage_export(
     params: Annotated[LineageExportParams, Depends()],
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -552,12 +594,14 @@ async def lineage_export(
 ) -> ApiResponse[Any]:
     """标准血缘导出（P4）：OpenLineage RunEvent 列表或通用 JSON 边明细。
 
-    供治理/合规平台以开放格式消费血缘：``format=openlineage`` 输出标准
-    RunEvent（L1 表级 inputs/outputs + L2 字段级 schema lineage facet）；
-    ``format=json`` 输出原始边明细 + 元数据。可按 ``node``/``direction``/
+    治理/合规开放 API（限 platform_admin / domain_admin / compliance_officer）。
+    非 platform_admin 导出自动收敛到本域（X-2 域边界），不再可全量导出他域
+    血缘（含 pii_inherited/SQL 原文）。可按 ``node``/``direction``/
     ``granularity``/``provenance`` 过滤后导出。
     """
-    result = await _svc(db).export_lineage(params)
+    effective_domain = _effective_read_domain(user, params.domain)
+    domains = {effective_domain} if effective_domain else None
+    result = await _svc(db).export_lineage(params, domains=domains)
     return ok(data=result, trace_id=trace_id)
 
 
@@ -585,8 +629,10 @@ async def lineage_graph(
     ``provenance`` 指定时从血缘边直接构建表级血缘（DP/SQL 通道导入的表完整可见，
     不再受采集目录交集限制）；为空时复用资产地图采集目录视角图谱。
     """
+    # X-2 读路径域收敛：非 platform_admin 强制限定本域（防跨域窥探 PII/未发布口径）
+    effective_domain = _effective_read_domain(user, domain)
     data = await _svc(db).query_graph(
-        domain=domain, pii_only=pii_only, limit=limit, provenance=provenance
+        domain=effective_domain, pii_only=pii_only, limit=limit, provenance=provenance
     )
     return ok(data=data, trace_id=trace_id)
 

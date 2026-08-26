@@ -74,7 +74,12 @@ class RecommendService(BaseService):
             )
         return result
 
-    async def recommend_metrics(self, user_id: int, limit: int) -> list[dict[str, Any]]:
+    async def recommend_metrics(
+        self,
+        user_id: int,
+        limit: int,
+        domain: str | None = None,
+    ) -> list[dict[str, Any]]:
         """分层推荐策略（协同过滤 → 血缘扩展 → 全局热门 → 最新发布）。
 
         1. 协同过滤：基于 tracking_events 计算相似用户，推荐其偏好但当前用户未交互的指标；
@@ -84,17 +89,24 @@ class RecommendService(BaseService):
 
         每个推荐项均携带 ``reason`` 字段，便于前端向用户解释「为何推荐」。
         所有层级统一排除用户「不感兴趣」（recommend_dismiss）的指标，负反馈跨刷新生效。
+
+        Args:
+            user_id: 用户 ID。
+            limit: 返回条数上限。
+            domain: 域收敛（P1-5 跨域泄漏修复）。非 platform_admin 传入本域，
+                推荐仅产出本域 PUBLISHED 指标——此前仅过滤 PUBLISHED 不校验域，
+                A 域用户会被推荐 B 域指标码（他域信息泄漏 + 点击后 PDP 报错）。
         """
         dismissed = await self._repo.dismissed_metrics(str(user_id))
         # 1. 协同过滤（个性化最强，优先）
         cf_results = await self._collaborative_filtering(user_id, limit, dismissed)
-        cf_results = await self._filter_consumable(cf_results)
+        cf_results = await self._filter_consumable(cf_results, domain=domain)
         if cf_results:
             return cf_results
 
         # 2. 血缘扩展兜底
         lineage = await self._lineage_fallback(user_id, limit, dismissed)
-        lineage = await self._filter_consumable(lineage)
+        lineage = await self._filter_consumable(lineage, domain=domain)
         if lineage:
             return lineage
 
@@ -102,21 +114,28 @@ class RecommendService(BaseService):
         seeds = await self._get_user_metric_actions(str(user_id))
         exclude = seeds | dismissed
         popular = await self._global_popular(limit, exclude)
-        popular = await self._filter_consumable(popular)
+        popular = await self._filter_consumable(popular, domain=domain)
         if popular:
             return popular
-        return await self._latest_published(limit, exclude)
+        return await self._latest_published(limit, exclude, domain=domain)
+
+    async def filter_consumable(
+        self, items: list[dict[str, Any]], domain: str | None = None
+    ) -> list[dict[str, Any]]:
+        """公共消费性过滤（API 层对 related_metrics 结果做域收敛用，P1-5）。"""
+        return await self._filter_consumable(items, domain=domain)
 
     async def _filter_consumable(
-        self, items: list[dict[str, Any]]
+        self, items: list[dict[str, Any]], domain: str | None = None
     ) -> list[dict[str, Any]]:
-        """过滤不可消费的推荐指标（软删作废 + 非已发布），避免推荐"点进去是作废/灰度中"。
+        """过滤不可消费的推荐指标（软删作废 + 非已发布 + 域收敛）。
 
         协同过滤/血缘扩展/全局热门基于行为数据（tracking_events/lineage_edge）返回指标
         编码，不校验指标当前状态——用户曾交互的指标后来被废弃/作废后，仍会出现在推荐
         列表；灰度（EXPERIMENTAL）指标仅对指定租户可见，也不应进入全局推荐。此处统一
         按 Metric 表过滤为 **PUBLISHED**（deleted_at IS NULL 且 status == PUBLISHED），
         与 ``_latest_published``（recent_published_metrics 已过滤 PUBLISHED）完全一致。
+        ``domain`` 非 None 时仅保留本域指标（P1-5 跨域泄漏修复：推荐不产出他域指标码）。
         空列表时调用方自动落入下一层兜底，保证面板不空白。
         """
         if not items:
@@ -124,13 +143,14 @@ class RecommendService(BaseService):
         codes = [str(it.get("metric_id")) for it in items if it.get("metric_id")]
         if not codes:
             return items
-        rows = await self._session.execute(
-            select(Metric.metric_code).where(
-                Metric.metric_code.in_(codes),
-                Metric.deleted_at.is_(None),
-                Metric.status == "PUBLISHED",
-            )
+        stmt = select(Metric.metric_code).where(
+            Metric.metric_code.in_(codes),
+            Metric.deleted_at.is_(None),
+            Metric.status == "PUBLISHED",
         )
+        if domain:
+            stmt = stmt.where(Metric.domain == domain)
+        rows = await self._session.execute(stmt)
         valid = {str(r) for r in rows.scalars().all()}
         return [it for it in items if str(it.get("metric_id")) in valid]
 
@@ -284,13 +304,15 @@ class RecommendService(BaseService):
                 break
         return result
 
-    async def _latest_published(self, limit: int, exclude: set[str]) -> list[dict[str, Any]]:
+    async def _latest_published(
+        self, limit: int, exclude: set[str], domain: str | None = None
+    ) -> list[dict[str, Any]]:
         """最新发布指标（终极兜底，保证面板永不空白）。
 
         当系统完全没有任何行为信号时，回退到最新发布的指标，作为用户的探索起点；
-        同样排除当前用户已交互过的指标。
+        同样排除当前用户已交互过的指标。``domain`` 非 None 时仅取本域（P1-5 域收敛）。
         """
-        codes = await self._repo.recent_published_metrics(limit + len(exclude))
+        codes = await self._repo.recent_published_metrics(limit + len(exclude), domain=domain)
         result: list[dict[str, Any]] = []
         seen: set[str] = set(exclude)
         for code in codes:

@@ -319,27 +319,18 @@ WHERE metric_code = 'sales_gmv_daily' AND dt = '2024-01-01'
             包含 SQL、锚定词、安全状态的结果；execute=True 时含执行结果
         """
         result = await self.nl2sql(nl_query, metric_scope)
-        result["execute"] = execute
-        if execute and result.get("sql"):
-            # 委托 consume 服务执行 SQL
-            try:
-                from app.services.consume.service import _get_olap_executor
-
-                # 复用 consume 进程内共享 executor（单例连接池）：
-                # 每请求新建 OLAPExecutor 会各分配 20 连接 httpx 池且从不关闭，
-                # 高频 NL2SQL+execute 下连接/FD 持续泄漏（D1）。
-                executor = _get_olap_executor()
-                sql = result["sql"]
-                params = result.get("params", {})
-                olap_result = await executor.execute(sql, params)
-                result["execute_result"] = {
-                    "rows": olap_result.rows,
-                    "total": olap_result.total,
-                    "elapsed_ms": olap_result.elapsed_ms,
-                }
-            except Exception as exc:
-                result["execute_error"] = str(exc)
-                logger.warning("ai_ask_execute_failed", error=str(exc), exc_info=True)
+        # 安全加固（X-1）：不再直接执行 LLM 生成的任意 SQL。
+        # 此前 execute=True 会绕过 consume 统一鉴权管道（PDP/域校验/白名单/PII 脱敏），
+        # 低权限用户可借任意 SQL（黑名单可被子查询/换表名绕过）越权读取任意表与原始 PII。
+        # 现统一降级为「只生成 SQL 不执行」，由前端引导到查询工作台走正规鉴权执行
+        # （ConsumeService.execute_query：PDP 数据权限 + 状态闸门 + 行级隔离 + PII 脱敏）。
+        result["execute"] = False
+        if execute:
+            result["notes"] = [
+                *(result.get("notes") or []),
+                "出于安全考虑，AI 生成 SQL 不直接执行，"
+                "请到「查询工作台」粘贴执行（走正规鉴权与行级隔离）",
+            ]
         return result
 
     async def close(self) -> None:

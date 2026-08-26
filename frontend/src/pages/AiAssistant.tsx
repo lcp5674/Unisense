@@ -7,8 +7,6 @@ import {
   Form,
   Input,
   Space,
-  Switch,
-  Table,
   Tag,
   message,
 } from "antd";
@@ -32,31 +30,9 @@ const EXAMPLES = [
   "统计 marketing 域新增用户数，同比上月",
 ];
 
-// 执行结果行：对象数组 → 动态列表格；非行结构 → 可读文本
-function ExecuteResultTable({ rows }: { rows: unknown[] }) {
-  const rowObjects = rows.filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null);
-  if (rowObjects.length === 0) {
-    return <span className="muted">无结构化行数据</span>;
-  }
-  const cols = Object.keys(rowObjects[0]).map((k) => ({
-    title: k,
-    dataIndex: k,
-    key: k,
-    ellipsis: true,
-    render: (v: unknown) =>
-      typeof v === "object" && v !== null ? (
-        <span className="mono" style={{ fontSize: 12 }}>{JSON.stringify(v)}</span>
-      ) : (
-        String(v ?? "")
-      ),
-  }));
-  return <Table size="small" dataSource={rowObjects} columns={cols} rowKey={(_, i) => String(i)} pagination={{ pageSize: 10 }} />;
-}
-
 export function AiAssistant() {
   const [nlQuery, setNlQuery] = useState("");
   const [metricScope, setMetricScope] = useState("");
-  const [execute, setExecute] = useState(false);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<NL2SQLResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -64,7 +40,8 @@ export function AiAssistant() {
   const navigate = useNavigate();
   // 按钮级权限点：无 ai:nl2sql 时禁用问数入口（后端强制仍兜底）
   const canNl2Sql = usePermission().can("ai:nl2sql");
-  // 执行开关：仅查询执行权限者可将 NL2SQL 结果落库执行
+  // 生成方式由后端决定：仅生成 SQL，不直接执行（安全加固 X-1——直接执行会绕过
+  // consume 统一鉴权管道，改由「查询工作台」走正规 PDP/行级隔离/PII 脱敏执行）。
   const canQueryExecute = usePermission().can("query:execute");
 
   // 统一返回上一入口：优先回退浏览器历史（总览快捷入口等），无上一页（URL 直达）时兜底总览仪表
@@ -88,7 +65,6 @@ export function AiAssistant() {
       const res = await aiNl2Sql({
         nl_query: nlQuery.trim(),
         metric_scope: scope.length ? scope : null,
-        execute,
       });
       setResult(res);
       track("ai_nl2sql", undefined, "ai", { method: res.method });
@@ -132,14 +108,6 @@ export function AiAssistant() {
             />
           </Form.Item>
           <Space style={{ marginBottom: 12 }}>
-            <Form.Item
-              label="执行查询"
-              valuePropName="checked"
-              style={{ marginBottom: 0 }}
-              extra={canQueryExecute ? undefined : "无 query:execute 权限，仅生成 SQL 不执行"}
-            >
-              <Switch checked={execute} onChange={setExecute} disabled={!canQueryExecute} />
-            </Form.Item>
             <Button
               type="primary"
               icon={<RobotOutlined />}
@@ -150,6 +118,11 @@ export function AiAssistant() {
             >
               生成 SQL
             </Button>
+            {canQueryExecute && (
+              <span className="muted" style={{ fontSize: 12 }}>
+                生成后可在「查询工作台」执行（走正规鉴权）
+              </span>
+            )}
           </Space>
         </Form>
 
@@ -196,18 +169,23 @@ export function AiAssistant() {
                     ))}
                   </div>
                 )}
+                <div style={{ marginTop: 12 }}>
+                  <Button
+                    type="primary"
+                    disabled={!canQueryExecute}
+                    onClick={() => navigate("/query")}
+                  >
+                    <ThunderboltOutlined /> 到查询工作台执行
+                  </Button>
+                  {!canQueryExecute && (
+                    <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>
+                      无 query:execute 权限，仅可查看 SQL
+                    </span>
+                  )}
+                </div>
               </Card>
             ) : (
               <Alert type="info" message="未生成 SQL，请调整表述后重试" style={{ marginBottom: 16 }} />
-            )}
-
-            {result.execute_result && (
-              <Card title={`执行结果（${result.execute_result.elapsed_ms} ms，共 ${result.execute_result.total} 行）`} size="small">
-                <ExecuteResultTable rows={result.execute_result.rows} />
-              </Card>
-            )}
-            {result.execute_error && (
-              <Alert type="error" message="执行失败" description={result.execute_error} showIcon style={{ marginTop: 16 }} />
             )}
           </div>
         )}

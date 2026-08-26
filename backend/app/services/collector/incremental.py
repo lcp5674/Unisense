@@ -109,7 +109,9 @@ def should_degrade_to_full(
     return watermark_ts is None
 
 
-def should_mix_in(source_type: str, connector: Any | None, ratio_threshold: float = 0.1) -> bool:
+async def should_mix_in(
+    source_type: str, connector: Any | None, ratio_threshold: float = 0.1
+) -> bool:
     """MySQL InnoDB UPDATE_TIME 通常为 NULL，低于占比阈值时降级全量。
 
     检测逻辑：查询 information_schema.tables 中 UPDATE_TIME IS NOT NULL 的表占比，
@@ -119,7 +121,7 @@ def should_mix_in(source_type: str, connector: Any | None, ratio_threshold: floa
 
     Args:
         source_type: 数据源类型。
-        connector: 数据库连接器（有 query 方法）。
+        connector: 数据库连接器（有 async query 方法）。
         ratio_threshold: 降级阈值（0.0-1.0），低于此占比时降级全量。
 
     Returns:
@@ -128,7 +130,10 @@ def should_mix_in(source_type: str, connector: Any | None, ratio_threshold: floa
     if source_type != "mysql" or connector is None:
         return False
     try:
-        ratio = _get_mysql_update_time_ratio(connector)
+        # X-5：此前走同步 _get_mysql_update_time_ratio —— 在已有 running loop 上
+        # run_until_complete 必然抛 RuntimeError 被 except 吞掉恒返 False，导致
+        # InnoDB UPDATE_TIME 为 NULL 的库静默漏采且无降级兜底。现改为原生 async。
+        ratio = await _get_mysql_update_time_ratio_async(connector)
         if ratio < ratio_threshold:
             logger.warning(
                 "mysql_update_time_sparse: ratio=%.2f%% < %.0f%%, 降级为全量",
@@ -139,30 +144,6 @@ def should_mix_in(source_type: str, connector: Any | None, ratio_threshold: floa
     except Exception as exc:
         logger.warning("mysql_update_time_ratio_check_failed: %s", exc)
     return False
-
-
-def _get_mysql_update_time_ratio(connector: Any) -> float:
-    """获取 MySQL UPDATE_TIME IS NOT NULL 表占比（同步轮询版本）。
-
-    Args:
-        connector: 有 query(sql, params) -> list[dict] 方法的连接器。
-
-    Returns:
-        占比 0.0-1.0。
-    """
-    import asyncio
-
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(_get_mysql_update_time_ratio_async(connector))
-        finally:
-            loop.close()
-
-    return loop.run_until_complete(_get_mysql_update_time_ratio_async(connector))
 
 
 async def _get_mysql_update_time_ratio_async(connector: Any) -> float:

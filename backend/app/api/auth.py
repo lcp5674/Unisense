@@ -21,6 +21,7 @@ from app.core.audit import client_ip, write_audit
 from app.core.config import settings
 from app.core.exceptions import AuthError
 from app.core.guard import guard_against_injection
+from app.core.logging import get_logger
 from app.core.login_throttle import is_login_blocked, record_login_failure, reset_login_failures
 from app.core.security import (
     blacklist_token,
@@ -34,6 +35,7 @@ from app.db.mysql import get_db_session
 from app.models.user import User, UserRole
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+logger = get_logger("unisense.auth.api")
 
 
 class LoginRequest(BaseModel):
@@ -116,18 +118,23 @@ async def login(
     # 用户不存在与密码错误返回相同错误码，避免用户枚举。
     if user is None or not await verify_password(body.password, user.password_hash):
         await record_login_failure(throttle_key)
-        # 登录失败留痕（安全审计核心事件，GB/T 35273 认证事件要求）；
-        # actor_id=0（无对应用户），entity_id 记录尝试的用户名，detail 区分凭据错误/锁定。
-        await write_audit(
-            db,
-            actor_id=0,
-            action="auth.login_failed",
-            entity_type="user",
-            entity_id=body.username,
-            detail={"reason": "invalid_credentials", "username": body.username},
-            ip=client_ip(request),
-        )
-        await db.commit()
+        # 登录失败留痕（安全审计核心事件，GB/T 35273 认证事件要求）。
+        # X-4：actor_id 置 None（无对应用户，audit_log.actor_id 已改可空）——
+        # 此前 actor_id=0 触发 FK 违规，失败登录返回 500 且失败审计丢失。
+        # 审计写入本身也做兜底：异常仅告警，绝不把认证失败变成 5xx。
+        try:
+            await write_audit(
+                db,
+                actor_id=None,
+                action="auth.login_failed",
+                entity_type="user",
+                entity_id=body.username,
+                detail={"reason": "invalid_credentials", "username": body.username},
+                ip=client_ip(request),
+            )
+            await db.commit()
+        except Exception:  # noqa: BLE001 - 审计失败不阻断 401（认证主流程优先）
+            logger.warning("login_failed_audit_error", username=body.username, exc_info=True)
         raise AuthError("用户名或密码错误", error_code="AUTH_INVALID_CREDENTIALS")
 
     await reset_login_failures(throttle_key)

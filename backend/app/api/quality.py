@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import CurrentUser, require_roles
 from app.api.responses import get_trace_id, ok
 from app.core.audit import write_audit
+from app.core.exceptions import AuthError, NotFoundError
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.models.quality import QualityEventStatus, QualityRuleType, QualitySeverity
@@ -29,6 +30,40 @@ from app.services.quality.service import QualityService
 
 router = APIRouter(prefix="/quality", tags=["quality"])
 
+
+async def _assert_metric_domain(
+    db: AsyncSession,
+    user: CurrentUser,
+    *,
+    metric_id: int | None = None,
+    metric_code: str | None = None,
+) -> None:
+    """指标域归属校验（P1-3）：platform_admin 放行；其余角色指标须在本域。
+
+    此前 create_rule/import_benchmark 不校验指标归属——域 A 的 metric_owner 可对
+    域 B 指标注册规则/导入基准，污染对账与告警。
+    """
+    if user.has_role("platform_admin"):
+        return
+    from sqlalchemy import select
+
+    from app.models.metric import Metric
+
+    if metric_id is not None:
+        stmt = select(Metric).where(Metric.id == metric_id, Metric.deleted_at.is_(None))
+    elif metric_code is not None:
+        stmt = select(Metric).where(Metric.metric_code == metric_code, Metric.deleted_at.is_(None))
+    else:
+        return
+    metric = (await db.execute(stmt)).scalar_one_or_none()
+    if metric is None:
+        raise NotFoundError("指标不存在")
+    if metric.domain != user.domain:
+        raise AuthError(
+            f"无权操作域外指标（当前域: {user.domain}，指标域: {metric.domain}）",
+            error_code="FORBIDDEN",
+        )
+
 _WRITE_ROLES = ("metric_owner", "domain_admin", "platform_admin")
 _GOV_ROLES = ("metric_owner", "domain_admin", "platform_admin", "compliance_officer")
 _READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "compliance_officer", "viewer")
@@ -46,6 +81,7 @@ async def create_rule(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     """注册质量规则（随指标 PUBLISHED 注册，按 tier/dw_layer 差异化）。"""
+    await _assert_metric_domain(db, user, metric_id=payload.metric_id)
     resp = await QualityService(db).create_rule(payload, user.id)
     await write_audit(
         db,
@@ -214,8 +250,19 @@ async def list_events(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
-    st = QualityEventStatus(status) if status else None
-    lv = QualitySeverity(level) if level else None
+    # P2：非法 status/level 返回 422 而非 500（list_rules 已有同样处理，此处补齐）
+    try:
+        st = QualityEventStatus(status) if status else None
+    except ValueError:
+        from app.core.exceptions import ValidationError
+
+        raise ValidationError(f"非法 status: {status}") from None
+    try:
+        lv = QualitySeverity(level) if level else None
+    except ValueError:
+        from app.core.exceptions import ValidationError
+
+        raise ValidationError(f"非法 level: {level}") from None
     items, total = await QualityService(db).list_events(metric_id, st, lv, page, page_size)
     return ok(
         data={"items": items, "total": total, "page": page, "page_size": page_size},
@@ -340,6 +387,7 @@ async def import_benchmark(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     """导入外部权威基准值（幂等）：同 key 重复导入视为更新。"""
+    await _assert_metric_domain(db, user, metric_code=payload.metric_code)
     resp = await QualityService(db).import_benchmark(payload, user.id)
     # PLAT-3: 审计先于 commit，同事务原子提交
     await write_audit(
@@ -384,6 +432,7 @@ async def bind_benchmark(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     """绑定基准到目标指标，声明比对口径 / 容忍率。"""
+    await _assert_metric_domain(db, user, metric_code=payload.metric_code)
     resp = await QualityService(db).bind_benchmark(benchmark_id, payload, user.id)
     # PLAT-3: 审计先于 commit，同事务原子提交
     await write_audit(

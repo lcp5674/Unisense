@@ -135,39 +135,42 @@ async def test_ask_execute_false_passthrough() -> None:
     assert "sql" in out
 
 
-async def test_ask_execute_true_delegates_to_olap(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ask_execute_true_no_direct_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """安全加固（X-1）：execute=True 不再直接执行 LLM 生成的任意 SQL。
+
+    此前执行路径绕过 consume 统一鉴权（PDP/域/白名单/PII 脱敏），低权限用户
+    可越权读取任意表；现统一降级为「只生成 SQL」，execute 恒为 False，
+    不产出 execute_result/execute_error，并附引导 note。
+    """
     svc, repo = await _svc({"gmv"})
 
-    class _FakeResult:
-        rows = [{"metric_code": "gmv", "value": 1}]
-        total = 1
-        elapsed_ms = 5
+    constructed: list[int] = []
 
     class _FakeExecutor:
-        async def execute(self, sql: str, params: dict) -> _FakeResult:
-            return _FakeResult()
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            constructed.append(1)
+
+        async def execute(self, sql: str, params: dict) -> None:
+            raise AssertionError("不应直接执行 LLM SQL")
 
     monkeypatch.setattr(
         "app.services.consume.service._get_olap_executor",
         lambda: _FakeExecutor(),
     )
     out = await svc.ask("查看 gmv 趋势", execute=True)
-    assert out["execute"] is True
-    assert out["execute_result"]["total"] == 1
+    assert out["execute"] is False
+    assert "execute_result" not in out
+    assert "execute_error" not in out
+    # 引导到查询工作台执行的提示已附加
+    assert any("查询工作台" in n for n in out.get("notes", []))
+    # 执行路径移除后不应构造 OLAP executor
+    assert constructed == []
 
 
-async def test_ask_execute_error_graceful(monkeypatch: pytest.MonkeyPatch) -> None:
-    svc, repo = await _svc({"gmv"})
-
-    class _BoomExecutor:
-        async def execute(self, sql: str, params: dict) -> None:
-            raise RuntimeError("OLAP 不可达")
-
-    monkeypatch.setattr(
-        "app.services.consume.service._get_olap_executor",
-        lambda: _BoomExecutor(),
-    )
-    out = await svc.ask("查看 gmv 趋势", execute=True)
-    # 执行失败不抛异常，写入 execute_error
-    assert "execute_error" in out
-    assert "OLAP 不可达" in out["execute_error"]
+async def test_ask_execute_true_without_llm_sql_still_safe() -> None:
+    """execute=True 但未生成 SQL 时同样安全降级（无执行、无错误）。"""
+    svc, repo = await _svc(set())
+    out = await svc.ask("查看 未知指标 趋势", execute=True)
+    assert out["execute"] is False
+    assert "execute_result" not in out
+    assert "execute_error" not in out

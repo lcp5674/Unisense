@@ -55,7 +55,6 @@ describe("AiAssistant 自然语言查询", () => {
       method: "keyword",
       anchored: ["finance_revenue_sum_d"],
       params: {},
-      execute: false,
     });
     renderAi();
     const textarea = screen.getByPlaceholderText(/如：最近 30 天 finance 域收入总额/) as HTMLTextAreaElement;
@@ -65,7 +64,6 @@ describe("AiAssistant 自然语言查询", () => {
       expect(mockNl2Sql).toHaveBeenCalledWith({
         nl_query: "最近 30 天 finance 域收入总额，按日粒度",
         metric_scope: null,
-        execute: false,
       });
     });
     expect(await screen.findByText(/SELECT \.\.\./)).toBeTruthy();

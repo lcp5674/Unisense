@@ -594,7 +594,9 @@ class TestMeasureReviewFlow:
     async def test_approve_requires_review(self) -> None:
         svc, _ = await _review_svc(_m("amt", status="DRAFT"))
         with pytest.raises(UnisenseError):
-            await svc.approve_measure("amt", MeasureApproveRequest(), 9, "domain_admin")
+            await svc.approve_measure(
+                "amt", MeasureApproveRequest(), 9, "domain_admin", user_domain="sales"
+            )
 
     async def test_approve_self_review_blocked(self) -> None:
         # 指派给提交人本人（自审场景）：评审人身份校验通过，自审禁止拦截
@@ -608,7 +610,7 @@ class TestMeasureReviewFlow:
         m = _m("amt", status="REVIEW", submitted_by=1)
         svc, _ = await _review_svc(m)
         out = await svc.approve_measure(
-            "amt", MeasureApproveRequest(comment="口径合理"), 9, "domain_admin"
+            "amt", MeasureApproveRequest(comment="口径合理"), 9, "domain_admin", user_domain="sales"
         )
         assert out.status == "PUBLISHED"
         assert out.approver_id == 9
@@ -619,7 +621,9 @@ class TestMeasureReviewFlow:
         svc, _ = await _review_svc(m)
         # 非被指派评审人（domain_admin 兜底不覆盖 user 指派）被拒
         with pytest.raises(UnisenseError):
-            await svc.approve_measure("amt", MeasureApproveRequest(), 5, "domain_admin")
+            await svc.approve_measure(
+                "amt", MeasureApproveRequest(), 5, "domain_admin", user_domain="sales"
+            )
         # 被指派者通过
         out = await svc.approve_measure("amt", MeasureApproveRequest(), 9, "reviewer")
         assert out.status == "PUBLISHED"
@@ -644,18 +648,36 @@ class TestMeasureReviewFlow:
         )
         assert out.status == "PUBLISHED"
 
+    async def test_approve_unassigned_cross_domain_rejected(self) -> None:
+        """X-3 越权加固：未指派评审的实体，异域 domain_admin 不可审批（此前只查角色）。"""
+        m = _m("amt", status="REVIEW", submitted_by=1)
+        svc, _ = await _review_svc(m)
+        with pytest.raises(UnisenseError) as exc:
+            await svc.approve_measure(
+                "amt", MeasureApproveRequest(), 9, "domain_admin", user_domain="marketing"
+            )
+        assert exc.value.error_code == "FORBIDDEN_REVIEWER"
+
     async def test_reject_requires_review(self) -> None:
         svc, _ = await _review_svc(_m("amt", status="PUBLISHED"))
         with pytest.raises(UnisenseError):
             await svc.reject_measure(
-                "amt", MeasureRejectRequest(reason="口径不清"), 9, "domain_admin"
+                "amt",
+                MeasureRejectRequest(reason="口径不清"),
+                9,
+                "domain_admin",
+                user_domain="sales",
             )
 
     async def test_reject_sets_draft_with_reason(self) -> None:
         m = _m("amt", status="REVIEW", submitted_by=1)
         svc, _ = await _review_svc(m)
         out = await svc.reject_measure(
-            "amt", MeasureRejectRequest(reason="统计口径与业务不符"), 9, "domain_admin"
+            "amt",
+            MeasureRejectRequest(reason="统计口径与业务不符"),
+            9,
+            "domain_admin",
+            user_domain="sales",
         )
         assert out.status == "DRAFT"
         assert out.reject_reason == "统计口径与业务不符"

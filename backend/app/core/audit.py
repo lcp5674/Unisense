@@ -43,7 +43,7 @@ def client_ip(request: Request | None) -> str:
 async def write_audit(
     session: Any,
     *,
-    actor_id: int,
+    actor_id: int | None,
     action: str,
     entity_type: str,
     entity_id: str,
@@ -52,7 +52,11 @@ async def write_audit(
     trace_id: str = "",
     pii_access: bool = False,
 ) -> None:
-    """写入一条审计记录（仅 add，由调用方负责 commit）。"""
+    """写入一条审计记录（仅 add，由调用方负责 commit）。
+
+    ``actor_id`` 可为 None（系统级事件，如登录失败无对应用户，X-4）——
+    audit_log.actor_id 已改可空，避免 FK 违规把认证失败变成 500。
+    """
     entry = AuditLog(
         actor_id=actor_id,
         action=action,

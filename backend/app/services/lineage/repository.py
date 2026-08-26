@@ -601,11 +601,14 @@ class LineageRepository:
         )
 
     async def _edges_from(self, node: str) -> list[LineageEdge]:
+        # P1-2：stale 失效边不再参与影响分析（与模型注释「stale 不再参与影响分析」对齐）
         return list(
             (
                 await self._db.execute(
                     select(LineageEdge).where(
-                        LineageEdge.source_node == node, LineageEdge.deleted_at.is_(None)
+                        LineageEdge.source_node == node,
+                        LineageEdge.deleted_at.is_(None),
+                        LineageEdge.stale.is_(False),
                     )
                 )
             )
@@ -614,11 +617,14 @@ class LineageRepository:
         )
 
     async def _edges_to(self, node: str) -> list[LineageEdge]:
+        # P1-2：stale 失效边不再参与影响分析
         return list(
             (
                 await self._db.execute(
                     select(LineageEdge).where(
-                        LineageEdge.target_node == node, LineageEdge.deleted_at.is_(None)
+                        LineageEdge.target_node == node,
+                        LineageEdge.deleted_at.is_(None),
+                        LineageEdge.stale.is_(False),
                     )
                 )
             )

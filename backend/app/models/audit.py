@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Boolean, ForeignKey, Index, String
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Index, String
 from sqlalchemy.dialects.mysql import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -36,10 +36,14 @@ class AuditLog(Base, TimestampMixin):
     __tablename__ = "audit_log"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True, comment="主键 ID")
-    actor_id: Mapped[int] = mapped_column(
+    actor_id: Mapped[int | None] = mapped_column(
+        BigInteger,
         ForeignKey("user.id", name="fk_audit_log_user"),
-        nullable=False,
-        comment="操作人 ID",
+        nullable=True,
+        comment=(
+            "操作人 ID（系统级事件如登录失败无对应用户时为 NULL，X-4；"
+            "BigInteger 对齐 user.id）"
+        ),
     )
     action: Mapped[str] = mapped_column(
         String(64), nullable=False, comment="操作类型（CREATE/UPDATE/DELETE/PUBLISH 等）"

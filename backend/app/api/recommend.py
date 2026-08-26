@@ -34,7 +34,10 @@ async def related_metrics(
     trace_id: Annotated[str, Depends(get_trace_id)],
     limit: int = Query(20, le=200),
 ) -> Any:
-    items = await RecommendService(db).related_metrics(metric_id, limit)
+    svc = RecommendService(db)
+    items = await svc.related_metrics(metric_id, limit)
+    # P1-5 跨域泄漏修复：相关推荐仅保留本域 PUBLISHED 指标（platform_admin 不限域）
+    items = await svc.filter_consumable(items, domain=_recommend_domain(user))
     return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
 
 
@@ -46,8 +49,18 @@ async def recommend_metrics(
     limit: int = Query(20, le=200),
 ) -> Any:
     # PLAT-2: 以认证身份 user.id 替代 client 传入的 user_id，杜绝 IDOR 越权读取
-    items = await RecommendService(db).recommend_metrics(user.id, limit)
+    # P1-5: 推荐仅产出本域 PUBLISHED 指标（platform_admin 不限域）
+    items = await RecommendService(db).recommend_metrics(
+        user.id, limit, domain=_recommend_domain(user)
+    )
     return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
+
+
+def _recommend_domain(user: CurrentUser) -> str | None:
+    """推荐域收敛（P1-5）：platform_admin 不限域；其余角色仅本域。"""
+    if user.has_role("platform_admin"):
+        return None
+    return user.domain
 
 
 @router.get("/terms", dependencies=_READ_DEPS)

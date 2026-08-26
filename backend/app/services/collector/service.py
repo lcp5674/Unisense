@@ -1765,7 +1765,7 @@ class CollectorService(BaseService):
                     src.source_type == "mysql"
                     and getattr(collector, "_connector", None) is not None
                     and hasattr(getattr(collector, "_connector", None), "query")
-                    and should_mix_in(
+                    and await should_mix_in(
                         src.source_type,
                         getattr(collector, "_connector", None),
                         self._settings.collector_mysql_incremental_ratio_threshold,

@@ -1114,7 +1114,8 @@ async def test_execute_mysql_fallback_when_olap_unconfigured(monkeypatch) -> Non
 
     res = await svc.execute_query(QueryRequest(metric_code="gmv", date_range=""), client)
 
-    assert res.degraded is False
+    # P2-6：MySQL 降级路径 degraded 应为 True（此前硬编码 False 让消费方误判数据质量）
+    assert res.degraded is True
     assert res.data["engine"] == "mysql"
     assert res.data["rows"] == fake.rows
     assert fake.executed_sql.startswith("SELECT")

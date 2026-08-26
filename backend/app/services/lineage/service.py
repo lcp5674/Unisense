@@ -1041,7 +1041,11 @@ class LineageService(BaseService):
                     merged.append(resp)
         return merged
 
-    async def export_lineage(self, params: LineageExportParams) -> Any:
+    async def export_lineage(
+        self,
+        params: LineageExportParams,
+        domains: set[str] | None = None,
+    ) -> Any:
         """标准血缘导出（P4）：OpenLineage RunEvent 列表或通用 JSON 边明细。
 
         供治理/合规平台以开放格式消费血缘。数据源为 MySQL 权威存储
@@ -1055,6 +1059,8 @@ class LineageService(BaseService):
 
         Args:
             params: 导出参数（format/node/direction/granularity/provenance/limit）。
+            domains: 域收敛集合（X-2）。非 None 时仅保留端点可解析域命中集合的边；
+                端点均无法解析（external/未知）时保留（无法判属，不误伤共享底座表）。
 
         Returns:
             OpenLineage 格式返回 RunEvent dict 列表；JSON 格式返回
@@ -1067,6 +1073,8 @@ class LineageService(BaseService):
             provenance=params.provenance,
             limit=params.limit,
         )
+        if domains:
+            edges = await self._filter_edges_by_domains(edges, domains)
         if params.format == "json":
             return {
                 "format": "json",
@@ -1076,6 +1084,30 @@ class LineageService(BaseService):
                 "edges": [self._repo._edge_dict(e) for e in edges],
             }
         return self._export_openlineage(edges)
+
+    async def _filter_edges_by_domains(
+        self,
+        edges: list[Any],
+        domains: set[str],
+    ) -> list[Any]:
+        """按端点可解析域过滤边（X-2 导出域收敛）。
+
+        两端任一命中允许域集合即保留；两端均无法解析（external/未知节点）保留
+        （无法判属——共享底座表不因无域被误伤）。逐边解析走一次 resolve_node_meta
+        批量查询（端点集合一次查库），随后内存过滤。
+        """
+        node_ids = {e.source_node for e in edges} | {e.target_node for e in edges}
+        metas = await self._repo.resolve_node_meta(node_ids)
+        kept: list[Any] = []
+        for e in edges:
+            src_dom = metas.get(e.source_node, {}).get("domain")
+            tgt_dom = metas.get(e.target_node, {}).get("domain")
+            # 至少一端在本域 → 保留；两端都无法判定 → 保留
+            if (src_dom in domains or tgt_dom in domains) or (
+                src_dom is None and tgt_dom is None
+            ):
+                kept.append(e)
+        return kept
 
     @staticmethod
     def _ol_dataset_from_node(node: str) -> tuple[str, str] | None:

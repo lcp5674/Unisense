@@ -117,13 +117,20 @@ class RecommendRepository:
         rows = (await self._session.execute(stmt)).all()
         return [(str(r[0]), int(r[1])) for r in rows if r[0] is not None]
 
-    async def recent_published_metrics(self, limit: int) -> list[str]:
-        """最新发布的指标码（无任何行为信号时的最终兜底，保证面板永不空白）。"""
+    async def recent_published_metrics(
+        self, limit: int, domain: str | None = None
+    ) -> list[str]:
+        """最新发布的指标码（无任何行为信号时的最终兜底，保证面板永不空白）。
+
+        ``domain`` 非 None 时仅取本域（P1-5 域收敛：推荐不产出他域指标码）。
+        """
         stmt = (
             select(Metric.metric_code)
             .where(Metric.status == "PUBLISHED", Metric.deleted_at.is_(None))
             .order_by(Metric.created_at.desc())
             .limit(limit)
         )
+        if domain:
+            stmt = stmt.where(Metric.domain == domain)
         rows = (await self._session.execute(stmt)).scalars().all()
         return list(rows)

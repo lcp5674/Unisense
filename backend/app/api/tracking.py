@@ -28,6 +28,50 @@ router = APIRouter(prefix="/tracking", tags=["tracking"])
 #: 埋点统计允许的分组字段白名单（防任意列 GROUP BY / 注入）。
 _GROUP_BY_ALLOWED = ("event_type", "target_type", "actor_id")
 
+#: 合法事件类型白名单（P2-8 画像污染加固）。此前 event_type 任意字符串——任何登录
+#: 用户可伪造海量行为事件，污染协同过滤画像、推荐失真。现收敛为前端实际发送的
+#: 事件类型集合 + 推荐消费的指标事件类型；未知类型 422 拒绝。
+_ALLOWED_EVENT_TYPES = frozenset(
+    {
+        # 推荐画像消费的指标行为事件（recommend/repository.METRIC_EVENT_TYPES）
+        "metric_detail_view",
+        "metric_search",
+        "consume_query",
+        "consume_dry_run",
+        "consume_semantic",
+        "consumption_guide_view",
+        # 前端 useTracking 实际埋点的事件类型
+        "consumption_guide_update",
+        "dashboard_view",
+        "favorites_view",
+        "lineage_channel_runs",
+        "lineage_coverage_view",
+        "lineage_edge_detail",
+        "lineage_graph_view",
+        "lineage_parse",
+        "lineage_preview",
+        "lineage_query",
+        "lineage_run_detail",
+        "lineage_stale_confirm",
+        "lineage_stale_restore",
+        "lineage_table_detail",
+        "recommend_click",
+        "recommend_dismiss",
+        "recommend_view",
+        "review_arbitrate",
+        "review_escalate",
+        "review_reopen",
+        "template_edit",
+        "template_instantiate",
+        "todo_center_view",
+        "view",
+    }
+)
+#: context 有界（防超大 context 撑爆/污染画像）：键数上限 + 单键长上限 + 值类型限定。
+_CONTEXT_MAX_KEYS = 16
+_CONTEXT_KEY_MAX_LEN = 64
+_CONTEXT_VALUE_MAX_LEN = 256
+
 
 def _parse_stats_date(value: str, *, field: str) -> datetime:
     """解析 YYYY-MM-DD 日期查询参数；格式非法返回 422（不静默忽略）。"""
@@ -83,6 +127,29 @@ async def create_event(
     user: CurrentUser,
 ) -> ApiResponse[TrackEventResponse]:
     """记录埋点事件（需认证，自动附带 actor_id）。"""
+    # P2-8 画像污染加固：事件类型白名单 + context 有界（防伪造行为事件污染协同过滤）
+    if payload.event_type not in _ALLOWED_EVENT_TYPES:
+        raise ValidationError(
+            f"非法事件类型: {payload.event_type}",
+            ctx={"allowed": sorted(_ALLOWED_EVENT_TYPES)},
+        )
+    if payload.context is not None:
+        if len(payload.context) > _CONTEXT_MAX_KEYS:
+            raise ValidationError(
+                f"context 键数超限（最多 {_CONTEXT_MAX_KEYS}）",
+                ctx={"max_keys": _CONTEXT_MAX_KEYS},
+            )
+        for k, v in payload.context.items():
+            if len(str(k)) > _CONTEXT_KEY_MAX_LEN:
+                raise ValidationError(
+                    f"context 键超长（最多 {_CONTEXT_KEY_MAX_LEN}）",
+                    ctx={"key": str(k)[:_CONTEXT_KEY_MAX_LEN]},
+                )
+            if v is not None and len(str(v)) > _CONTEXT_VALUE_MAX_LEN:
+                raise ValidationError(
+                    f"context 值超长（最多 {_CONTEXT_VALUE_MAX_LEN}）",
+                    ctx={"key": str(k)[:_CONTEXT_KEY_MAX_LEN]},
+                )
     event_id = str(uuid4())
     event = TrackingEvent(
         id=event_id,

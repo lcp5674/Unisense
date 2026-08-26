@@ -410,9 +410,11 @@ class ConsumeService(BaseService):
             "dimensions": [d.model_dump() for d in req.dimensions],
             "date_range": req.date_range,
         }
+        # P2-6：degraded 此前硬编码 False——MySQL 降级结果仍报非降级，消费方误判
+        # 数据质量。现按实际引擎判定：engine=mysql（OLAP 降级）即 degraded=True。
         response = QueryResponse(
             metric_code=req.metric_code,
-            degraded=False,
+            degraded=engine_used == "mysql",
             data={
                 "rows": result.rows,
                 "total": result.total,

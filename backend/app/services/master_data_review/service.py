@@ -306,12 +306,27 @@ class MasterDataReviewMixin:
                     ctx={self._review_code_attr: code, "user_domain": user_domain},
                 )
             return
-        # 未指派：域管理员兜底（保持"仅管理角色可审"语义）
+        # 未指派：域管理员兜底（保持"仅管理角色可审"语义）。
+        # X-3 越权加固：未指派分支此前只查 role==domain_admin 不校验 user_domain——
+        # 任意域 domain_admin 可跨域审批/打回他域未指派主数据。现补本域归属校验：
+        # 实体可解析出域且不在评审人本域时拒绝（对齐指标批量审批的 PDP 域闸门）。
         if role != "domain_admin":
             raise AuthError(
                 f"未指派评审人，仅域管理员可评审该{self._review_entity_name}",
                 error_code="FORBIDDEN_REVIEWER",
                 ctx={self._review_code_attr: code, "role": role},
+            )
+        entity_domain = self._review_domain(entity)
+        if entity_domain and user_domain != entity_domain:
+            raise AuthError(
+                f"无权评审他域{self._review_entity_name}（当前域: {user_domain}，"
+                f"实体域: {entity_domain}）",
+                error_code="FORBIDDEN_REVIEWER",
+                ctx={
+                    self._review_code_attr: code,
+                    "user_domain": user_domain,
+                    "entity_domain": entity_domain,
+                },
             )
 
     # ---- 通知 ----

@@ -560,6 +560,11 @@ class LineageExportParams(BaseModel):
     granularity: Literal["L1", "L2", "L3", "all"] = "all"
     provenance: str | None = Field(default=None, max_length=32, description="按来源通道过滤")
     limit: int = Field(default=10_000, ge=1, le=100_000, description="返回边数上限")
+    domain: str | None = Field(
+        default=None,
+        max_length=64,
+        description="按业务域过滤（X-2 域边界：非 platform_admin 强制收敛到本域）",
+    )
 
 
 class OpenLineageFieldLineage(BaseModel):

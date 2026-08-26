@@ -50,13 +50,14 @@ async def _ai_svc(vocab: set[str]) -> tuple[AiService, MagicMock]:
     return svc, repo
 
 
-async def test_d1_ask_reuses_shared_olap_executor(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Two ask(execute=True) calls must reuse ONE executor (documented defect D1).
+async def test_d1_ask_no_longer_executes_llm_sql(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Security fix X-1: ask(execute=True) no longer executes LLM-generated SQL.
 
-    consume.service keeps a process-wide singleton precisely to reuse the HTTP
-    connection pool ("避免每请求新建客户端泄漏"). ai.ask bypasses it and news an
-    OLAPExecutor() on every call, never closing it -> unbounded connection pools
-    / file-descriptor growth under repeated NL2SQL+execute traffic.
+    The former execute path (D1: per-call OLAPExecutor, and worse: it bypassed the
+    consume unified auth pipeline — PDP / domain / whitelist / PII masking) allowed
+    low-privilege users to read arbitrary tables. The fix removes direct execution
+    entirely; the frontend routes execution through the query workspace which runs
+    the normal consume pipeline. Therefore NO executor should ever be constructed.
     """
     svc, _repo = await _ai_svc({"gmv"})
 
@@ -67,18 +68,17 @@ async def test_d1_ask_reuses_shared_olap_executor(monkeypatch: pytest.MonkeyPatc
             constructors.append(1)
 
         async def execute(self, sql: str, params: dict[str, Any] | None) -> SimpleNamespace:
-            return SimpleNamespace(rows=[], total=0, elapsed_ms=1.0)
+            raise AssertionError("不应直接执行 LLM SQL")
 
     monkeypatch.setattr("app.services.consume.olap_executor.OLAPExecutor", _FakeExecutor)
 
     await svc.ask("查看 gmv 趋势", execute=True)
     await svc.ask("查看 gmv 趋势", execute=True)
 
-    # A shared connection-pool singleton must be created exactly once.
-    assert len(constructors) == 1, (
-        f"OLAPExecutor constructed {len(constructors)} times across 2 asks; "
-        "each construction allocates a fresh 20-connection httpx pool "
-        "(app/services/ai/service.py:262) that is never closed."
+    # Execution removed -> no OLAPExecutor is ever constructed.
+    assert len(constructors) == 0, (
+        f"OLAPExecutor constructed {len(constructors)} times; "
+        "the execute path must be fully removed (security fix X-1)."
     )
 
 
