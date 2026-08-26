@@ -397,6 +397,82 @@ class TestMeasureLifecycle:
         await svc.restore_measure("amt", actor_id=1, role="metric_owner")
         repo.restore_measure.assert_awaited_once_with(1)
 
+    # ---- 已删记录不可变（_require 加固）----
+
+    async def test_require_rejects_deleted_for_update(self) -> None:
+        from datetime import UTC, datetime
+
+        svc, repo = await _svc()
+        m = _m("amt", status="DRAFT")
+        m.deleted_at = datetime.now(UTC)
+        repo.get = AsyncMock(return_value=m)
+        with pytest.raises(UnisenseError) as exc:
+            await svc.update_measure("amt", MeasureUpdate(name="改名"))
+        assert exc.value.error_code == "INVALID_STATE"
+
+    async def test_require_rejects_deleted_for_publish(self) -> None:
+        from datetime import UTC, datetime
+
+        svc, repo = await _svc()
+        m = _m("amt", status="DRAFT")
+        m.deleted_at = datetime.now(UTC)
+        repo.get = AsyncMock(return_value=m)
+        with pytest.raises(UnisenseError):
+            await svc.publish_measure("amt")
+
+    async def test_require_rejects_deleted_for_approve(self) -> None:
+        from datetime import UTC, datetime
+
+        svc, repo = await _svc()
+        m = _m("amt", status="REVIEW")
+        m.deleted_at = datetime.now(UTC)
+        repo.get = AsyncMock(return_value=m)
+        with pytest.raises(UnisenseError):
+            await svc.approve_measure("amt", MeasureApproveRequest(), 1, "platform_admin")
+
+    # ---- 彻底删除（purge，回收站硬删）----
+
+    async def test_purge_requires_deleted(self) -> None:
+        svc, repo = await _svc()
+        repo.get = AsyncMock(return_value=_m("amt", status="DRAFT"))
+        with pytest.raises(UnisenseError) as exc:
+            await svc.purge_measure("amt", actor_id=1, role="platform_admin")
+        assert exc.value.error_code == "INVALID_STATE"
+
+    async def test_purge_requires_admin(self) -> None:
+        from datetime import UTC, datetime
+
+        svc, repo = await _svc()
+        m = _m("amt", status="DRAFT")
+        m.deleted_at = datetime.now(UTC)
+        repo.get = AsyncMock(return_value=m)
+        with pytest.raises(UnisenseError) as exc:
+            await svc.purge_measure("amt", actor_id=1, role="domain_admin")
+        assert exc.value.error_code == "FORBIDDEN"
+
+    async def test_purge_protects_referenced_measure(self) -> None:
+        from datetime import UTC, datetime
+
+        svc, repo = await _svc()
+        m = _m("amt", status="DRAFT")
+        m.deleted_at = datetime.now(UTC)
+        repo.get = AsyncMock(return_value=m)
+        repo.count_metrics_by_measure = AsyncMock(return_value=1)
+        with pytest.raises(ConflictError):
+            await svc.purge_measure("amt", actor_id=1, role="platform_admin")
+
+    async def test_purge_deletes_row(self) -> None:
+        from datetime import UTC, datetime
+
+        svc, repo = await _svc()
+        m = _m("amt", status="DRAFT")
+        m.deleted_at = datetime.now(UTC)
+        repo.get = AsyncMock(return_value=m)
+        repo.count_metrics_by_measure = AsyncMock(return_value=0)
+        repo.purge_measure = AsyncMock()
+        await svc.purge_measure("amt", actor_id=1, role="platform_admin")
+        repo.purge_measure.assert_awaited_once_with(1)
+
 
 # ---------- 审核流（submit/approve/reject，对齐指标审核流 TD §13） ----------
 

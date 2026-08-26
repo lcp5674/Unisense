@@ -553,9 +553,20 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
 
     # ---- 内部辅助 ----
     async def _require_term(self, term_code: str) -> Term:
+        """加载术语并校验可操作：不存在或已软删（回收站）均拒绝。
+
+        已软删记录除「恢复」外不可变——防止回收站中的术语被更新/提交/通过/
+        发布/废弃/重新启用等操作复活成矛盾态。恢复用
+        ``_repo.get_term_including_deleted`` 直取，不走本守卫。
+        """
         term = await self._repo.get_term(term_code)
         if term is None:
             raise NotFoundError(f"术语不存在: {term_code}")
+        if getattr(term, "deleted_at", None) is not None:
+            raise UnisenseError(
+                f"已删除的术语不可执行该操作（{term_code}），请先在回收站恢复",
+                error_code="INVALID_STATE",
+            )
         return term
 
     async def _build_llm_client(self) -> Any:

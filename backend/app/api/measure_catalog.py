@@ -420,6 +420,38 @@ async def restore_measure(
     return ok(data=MeasureResponse.from_model(resp), trace_id=trace_id)
 
 
+@router.post(
+    "/{measure_code}/purge",
+    response_model=ApiResponse[dict],
+    summary="彻底删除已软删逻辑度量（回收站硬删，仅平台管理员）",
+    # 彻底删除是不可恢复的危险操作：仅平台管理员（对齐直发通道 _ADMIN_ROLES）
+    dependencies=[Depends(require_roles(*_ADMIN_ROLES)), Depends(guard_against_injection)],
+)
+async def purge_measure(
+    measure_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> Any:
+    """回收站彻底删除软删度量（物理删除不可恢复）；仅平台管理员。"""
+    await MeasureCatalogService(db).purge_measure(
+        measure_code, actor_id=user.id, role=user.role
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="measure_catalog.purge",
+        entity_type="measure_catalog",
+        entity_id=measure_code,
+        detail={},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data={"measure_code": measure_code}, trace_id=trace_id)
+
+
 # ---- 批量治理端点（TD §13：逐条收集结果不整体失败；执行语义统一 app.api.batch_common）----
 
 

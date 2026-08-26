@@ -14,6 +14,7 @@ vi.mock("../api", () => ({
   reactivateMeasureCatalog: vi.fn(),
   deleteMeasureCatalog: vi.fn(),
   restoreMeasureCatalog: vi.fn(),
+  purgeMeasureCatalog: vi.fn(),
   submitMeasureCatalog: vi.fn(),
   approveMeasureCatalog: vi.fn(),
   rejectMeasureCatalog: vi.fn(),
@@ -40,6 +41,7 @@ import {
   listDomainTree,
   listMeasureCatalogs,
   listUsers,
+  purgeMeasureCatalog,
   reactivateMeasureCatalog,
   rejectMeasureCatalog,
   restoreMeasureCatalog,
@@ -60,6 +62,7 @@ const mockedUsers = vi.mocked(listUsers);
 const mockedReactivate = vi.mocked(reactivateMeasureCatalog);
 const mockedDelete = vi.mocked(deleteMeasureCatalog);
 const mockedRestore = vi.mocked(restoreMeasureCatalog);
+const mockedPurge = vi.mocked(purgeMeasureCatalog);
 
 const measure: MeasureCatalog = {
   id: 1,
@@ -457,5 +460,24 @@ describe("MeasureCatalogs 生命周期（重新启用/删除/回收站恢复）"
       expect(mockedRestore).toHaveBeenCalledWith("medical_fee_men_zhen_shou_fei"),
     );
     expect(await screen.findByText(/已恢复/)).toBeInTheDocument();
+  });
+
+  it("回收站视图（平台管理员）显示「彻底删除」，点击调用 purgeMeasureCatalog", async () => {
+    mockedList.mockResolvedValue({ items: [measure], total: 1, page: 1, page_size: 20 });
+    mockedPurge.mockResolvedValue({ measure_code: measure.measure_code });
+    renderCatalogs();
+
+    // 切换到回收站视图
+    fireEvent.mouseDown(screen.getByText("回收站"));
+    fireEvent.click(await screen.findByTitle("回收站"));
+
+    // 平台管理员可见「彻底删除」按钮，点击后 Popconfirm 确认
+    fireEvent.click(await screen.findByRole("button", { name: /彻底删除/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /确 定|确定|OK/ }));
+
+    await waitFor(() =>
+      expect(mockedPurge).toHaveBeenCalledWith("medical_fee_men_zhen_shou_fei"),
+    );
+    expect(await screen.findByText(/已彻底删除/)).toBeInTheDocument();
   });
 });

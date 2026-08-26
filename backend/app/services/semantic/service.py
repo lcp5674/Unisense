@@ -884,10 +884,17 @@ class MetricService(BaseService):
 
         Raises:
             NotFoundError: 指标不存在。
+            BusinessError: 指标已软删（回收站）——已删记录除「恢复」外不可变，
+                防止被更新/提交/通过/发布/废弃/重新启用等操作复活成矛盾态。
         """
         metric = await self._repo.get_by_code(metric_code)
         if metric is None:
             raise NotFoundError(f"指标不存在: {metric_code}")
+        if getattr(metric, "deleted_at", None) is not None:
+            raise BusinessError(
+                f"已删除的指标不可执行该操作（{metric_code}），请先在回收站恢复",
+                error_code="INVALID_STATE",
+            )
         return metric
 
     async def get_metric_public(

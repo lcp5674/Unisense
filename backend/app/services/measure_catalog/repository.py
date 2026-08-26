@@ -48,6 +48,12 @@ class MeasureCatalogRepository:
             .values(deleted_at=None)
         )
 
+    async def purge_measure(self, measure_id: int) -> None:
+        """彻底删除逻辑度量（回收站硬删，物理删除不可恢复）。"""
+        from sqlalchemy import delete
+
+        await self._session.execute(delete(MeasureCatalog).where(MeasureCatalog.id == measure_id))
+
     async def list(
         self,
         domain: str | None,

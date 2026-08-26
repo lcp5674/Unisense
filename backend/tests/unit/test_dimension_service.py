@@ -576,7 +576,7 @@ async def test_delete_mapping_removes() -> None:
 async def test_list_dimension_metrics_joins_metric() -> None:
     """按维度查绑定指标：join Metric 补 metric_code/name/status（治理追溯）。"""
     svc, repo = await _svc()
-    repo.get_dimension = AsyncMock(return_value=MagicMock())
+    repo.get_dimension = AsyncMock(return_value=MagicMock(deleted_at=None))
     binding = MagicMock()
     metric = MagicMock()
     repo.list_dimension_metrics = AsyncMock(return_value=[(binding, metric)])

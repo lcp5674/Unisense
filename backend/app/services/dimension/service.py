@@ -767,8 +767,13 @@ class DimensionService(BaseService, MasterDataReviewMixin):
         )
         return await self._repo.save_mapping(mapping)
 
-    async def list_mappings(self, source_dim_code: str | None) -> list[DimensionMapping]:
-        return await self._repo.list_mappings(source_dim_code)
+    async def list_mappings(
+        self, source_dim_code: str | None, *, page: int = 1, page_size: int = 20
+    ) -> tuple[list[DimensionMapping], int]:
+        """分页列出维度映射（P10 服务端分页，对齐主表分页模式）。"""
+        limit = min(max(page_size, 1), 200)
+        offset = (max(page, 1) - 1) * limit
+        return await self._repo.list_mappings(source_dim_code, limit=limit, offset=offset)
 
     async def get_mapping(self, mapping_id: int) -> DimensionMapping | None:
         return await self._repo.get_mapping(mapping_id)
@@ -978,9 +983,14 @@ class DimensionService(BaseService, MasterDataReviewMixin):
         return await self._repo.save_reconciliation(rec)
 
     async def list_reconciliations(
-        self, status: str | None
-    ) -> list[tuple[Reconciliation, Metric | None]]:
-        return await self._repo.list_reconciliations(status)
+        self, status: str | None, *, page: int = 1, page_size: int = 20
+    ) -> tuple[list[tuple[Reconciliation, Metric | None]], int]:
+        """分页列出对账记录（P10 服务端分页，防治理记录增长导致的全量拉取）。"""
+        limit = min(max(page_size, 1), 200)
+        offset = (max(page, 1) - 1) * limit
+        return await self._repo.list_reconciliations(
+            status, limit=limit, offset=offset
+        )
 
     async def review_reconciliation(
         self, rec_id: int, data: ReconciliationReview, reviewer_id: int | None = None
@@ -1127,9 +1137,20 @@ class DimensionService(BaseService, MasterDataReviewMixin):
             await self._repo.commit()
 
     async def _require(self, dim_code: str) -> Dimension:
+        """加载维度并校验可操作：不存在或已软删（回收站）均拒绝。
+
+        已软删记录除「恢复」外不可变——防止回收站中的维度被更新/提交/通过/
+        发布/废弃/重新启用等操作复活成矛盾态。恢复用 ``_repo.get_dimension``
+        直取，不走本守卫。
+        """
         dim = await self._repo.get_dimension(dim_code)
         if dim is None:
             raise NotFoundError(f"维度不存在: {dim_code}")
+        if getattr(dim, "deleted_at", None) is not None:
+            raise UnisenseError(
+                f"已删除的维度不可执行该操作（{dim_code}），请先在回收站恢复",
+                error_code="INVALID_STATE",
+            )
         return dim
 
     async def _require_active(self, dim_code: str) -> Dimension:

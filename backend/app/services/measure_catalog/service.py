@@ -397,6 +397,39 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
         await self._repo.commit()
         return measure
 
+    async def purge_measure(
+        self, measure_code: str, actor_id: int, role: str | None = None
+    ) -> None:
+        """彻底删除已软删逻辑度量（回收站硬删，物理删除不可恢复；仅平台管理员）。
+
+        回收站完整闭环：恢复（DRAFT/DEPRECATED）或彻底删除（仅平台管理员）。
+        已软删记录不参与正常列表与审核流（``_require`` 已拒绝），故本方法直取
+        记录、仅允许 deleted_at 置位者硬删；被指标引用的度量禁止彻底删除
+        （防御性保留——历史数据可能存在被删度量仍被引用的情况）。
+        """
+        measure = await self._repo.get(measure_code)
+        if measure is None:
+            raise NotFoundError(f"逻辑度量不存在: {measure_code}")
+        if measure.deleted_at is None:
+            raise UnisenseError(
+                f"逻辑度量 {measure_code} 未处于已删除状态，无需彻底删除",
+                error_code="INVALID_STATE",
+            )
+        if role != "platform_admin":
+            raise UnisenseError(
+                "仅平台管理员可彻底删除逻辑度量",
+                error_code="FORBIDDEN",
+            )
+        bound = await self._repo.count_metrics_by_measure(measure.id)
+        if bound > 0:
+            raise ConflictError(
+                f"逻辑度量 {measure_code} 正被 {bound} 个指标引用，无法彻底删除；"
+                "请先改绑相关指标",
+                error_code="MEASURE_BOUND_BY_METRICS",
+            )
+        await self._repo.purge_measure(measure.id)
+        await self._repo.commit()
+
     async def auto_suggest(self, data: MeasureAutoSuggestRequest) -> MeasureSuggestResponse:
         """度量目录 AI 推断：规则兜底 + LLM 业务增强，任一失败不阻断。
 
@@ -558,7 +591,19 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
         return fallback
 
     async def _require(self, measure_code: str) -> MeasureCatalog:
+        """加载逻辑度量并校验可操作：不存在或已软删（回收站）均拒绝。
+
+        已软删记录除「恢复 / 彻底删除」外不可变——防止回收站中的记录被
+        更新/提交/通过/发布/废弃/重新启用等操作复活成矛盾态（如 PUBLISHED +
+        deleted_at）。恢复/彻底删除用 ``_repo.get`` 直取，不走本守卫。
+        """
         measure = await self._repo.get(measure_code)
         if measure is None:
             raise NotFoundError(f"逻辑度量不存在: {measure_code}")
+        if getattr(measure, "deleted_at", None) is not None:
+            raise UnisenseError(
+                f"已删除的逻辑度量不可执行该操作（{measure_code}），"
+                "请先在回收站恢复或彻底删除",
+                error_code="INVALID_STATE",
+            )
         return measure

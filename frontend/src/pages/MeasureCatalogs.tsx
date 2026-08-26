@@ -25,6 +25,7 @@ import {
   fetchCurrentUser,
   listDomainTree,
   listMeasureCatalogs,
+  purgeMeasureCatalog,
   reactivateMeasureCatalog,
   rejectMeasureCatalog,
   restoreMeasureCatalog,
@@ -123,6 +124,8 @@ export function MeasureCatalogs() {
     (currentUser.role === "platform_admin" ||
       currentUser.role === "domain_admin" ||
       currentUser.role === "reviewer");
+  // 彻底删除（回收站硬删，不可恢复）：仅平台管理员（对齐后端 purge 角色门禁）
+  const canPurge = !!currentUser && currentUser.role === "platform_admin";
 
   async function runBatch(action: BatchActionKey, opts: {
     codes: string[];
@@ -404,6 +407,17 @@ export function MeasureCatalogs() {
     }
   }
 
+  // 回收站彻底删除（仅平台管理员；物理删除不可恢复）
+  async function handlePurge(row: MeasureCatalog) {
+    try {
+      await purgeMeasureCatalog(row.measure_code);
+      message.success(`「${row.name}」已彻底删除`);
+      await load();
+    } catch (e) {
+      message.error(errMsg(e, "彻底删除失败"));
+    }
+  }
+
   return (
     <Card
       title="逻辑度量目录"
@@ -570,6 +584,16 @@ export function MeasureCatalogs() {
                     >
                       <Button size="small" type="primary" icon={<ReloadOutlined />}>恢复</Button>
                     </Popconfirm>
+                    {canPurge && (
+                      <Popconfirm
+                        title="确认彻底删除该逻辑度量？"
+                        description="物理删除不可恢复；被指标引用的度量无法彻底删除"
+                        okButtonProps={{ danger: true }}
+                        onConfirm={() => handlePurge(row)}
+                      >
+                        <Button size="small" danger icon={<DeleteOutlined />}>彻底删除</Button>
+                      </Popconfirm>
+                    )}
                   </Space>
                 );
               }

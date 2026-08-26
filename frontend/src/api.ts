@@ -1985,6 +1985,14 @@ export async function restoreMeasureCatalog(measureCode: string): Promise<Measur
   );
 }
 
+/** 彻底删除已软删逻辑度量（回收站硬删，不可恢复；仅平台管理员） */
+export async function purgeMeasureCatalog(measureCode: string): Promise<{ measure_code: string }> {
+  return request<{ measure_code: string }>(
+    `${API_BASE}/measure-catalogs/${encodeURIComponent(measureCode)}/purge`,
+    { method: "POST" },
+  );
+}
+
 // ---- 逻辑度量批量治理（TD §13，后端统一 app/api/batch_common）----
 
 /** 批量提交逻辑度量审核（DRAFT → REVIEW，可带评审指派） */
