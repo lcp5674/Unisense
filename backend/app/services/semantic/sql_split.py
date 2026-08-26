@@ -952,7 +952,11 @@ def _apply_candidate_validation(
             kept.append(cand)
             continue
         conf = item.get("confidence")
-        if not item.get("is_measure", True):
+        # B4.1：复合候选是刻意合成的多指标聚合体（依赖 + 口径 SQL），非待校验的单度量
+        # —— LLM 把它判为「非度量」/改聚合都不采纳，防真实 API 链路把复合候选剔除
+        #（此前 _candidate_measure_view 把复合当 derived 度量交给 LLM，is_measure=false
+        #  高置信 → 复合被静默丢弃，复合指标功能端到端不可见）。
+        if not item.get("is_measure", True) and cand.get("type") != "composite":
             if conf is None or conf >= 0.7:
                 summary["dropped"].append(
                     {
@@ -966,8 +970,12 @@ def _apply_candidate_validation(
                 {"key": cand.get("key"), "reason": "LLM 判定非度量但置信度低"}
             )
         agg = item.get("agg")
-        if agg and agg in AGG_ENUM and agg != cand.get("aggregation") and (
-            conf is None or conf >= 0.7
+        if (
+            cand.get("type") != "composite"
+            and agg
+            and agg in AGG_ENUM
+            and agg != cand.get("aggregation")
+            and (conf is None or conf >= 0.7)
         ):
             summary["agg_corrected"].append(
                 {

@@ -209,6 +209,52 @@ def test_apply_candidate_validation_drop_non_measure() -> None:
     assert summary["dropped"][0]["reason"] == "llm_not_measure"
 
 
+def test_apply_candidate_validation_keeps_composite() -> None:
+    """B4.1：复合候选是刻意合成的多指标聚合体——LLM 判非度量/改聚合均不采纳。
+
+    此前复合候选经 _candidate_measure_view 交给 LLM 校验，is_measure=false 高置信
+    被剔除 → 复合指标在真实 API 链路不可见。复合必须保留（依赖 + 口径 SQL 承载），
+    也不对其做聚合纠正（聚合为空是复合的固有属性）。
+    """
+    comp = _cand(
+        key="0:composite",
+        name="日成交额、日用户数复合",
+        type="composite",
+        measure_column=None,
+        aggregation=None,
+        metric_code="sales_order_amount_day",
+        definition_json={
+            "sql": (
+                "SELECT dt, SUM(amount) AS gmv, "
+                "SUM(amount)/COUNT(DISTINCT user_id) AS arpu "
+                "FROM dwd_order_di GROUP BY dt"
+            ),
+            "dependencies": ["sales_gmv_amount_day"],
+        },
+    )
+    cands = [comp]
+    val = {
+        "items": [
+            {
+                "key": "0",
+                "is_measure": False,
+                "agg": "COUNT_DISTINCT",
+                "period": "month",
+                "confidence": 0.95,
+            }
+        ],
+        "missed": [],
+    }
+    kept, summary = _apply_candidate_validation(cands, val, ["ods.t"])
+    assert len(kept) == 1  # 复合不被剔除
+    assert summary["dropped"] == []
+    assert kept[0]["type"] == "composite"
+    # 聚合不被纠正（复合聚合为空是固有属性）
+    assert kept[0].get("aggregation") is None
+    # 周期覆盖仍回映（复合周期是其属性）
+    assert kept[0]["period"] == "month"
+
+
 def test_apply_candidate_validation_missed_reported_not_added() -> None:
     """漏检扫描：报告给前端（missed），不自动加候选。"""
     cands = [_cand()]
