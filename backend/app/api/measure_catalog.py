@@ -32,6 +32,7 @@ from app.services.measure_catalog.schemas import (
     MeasureApproveRequest,
     MeasureAutoSuggestRequest,
     MeasureCreate,
+    MeasureInferSynonymsRequest,
     MeasureRejectRequest,
     MeasureResponse,
     MeasureSubmitRequest,
@@ -151,6 +152,28 @@ async def auto_suggest_measure(
     """
     resp = await MeasureCatalogService(db).auto_suggest(payload)
     return ok(data=resp, trace_id=trace_id)
+
+
+@router.post(
+    "/infer-synonyms",
+    response_model=ApiResponse[Any],
+    summary="编辑逻辑度量 AI 生成同义词（不落库，回填表单）",
+    # LLM 额度防护：与 auto-suggest 一致收紧为写角色（创建/编辑能力对齐），
+    # 避免只读角色任意调用耗尽 LLM 额度。
+    dependencies=_WRITE_DEPS,
+)
+async def infer_measure_synonyms(
+    payload: MeasureInferSynonymsRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """输入名称 +（可选）描述 → LLM 生成同义词候选，返回 ``{"synonyms": [...]}``。
+
+    仅生成文本回填表单，不落库（落库仍走既有 update 流程）；LLM 不可用抛
+    ``LLM_INFER_UNAVAILABLE``。
+    """
+    synonyms = await MeasureCatalogService(db).infer_synonyms(payload.name, payload.description)
+    return ok(data={"synonyms": synonyms}, trace_id=trace_id)
 
 
 @router.get("/{measure_code}", dependencies=_READ_DEPS)

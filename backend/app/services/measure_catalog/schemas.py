@@ -70,13 +70,21 @@ class MeasureCreate(BaseModel):
     @field_validator("measure_format")
     @classmethod
     def _format_valid(cls, v: str) -> str:
-        if v not in _VALID_FORMATS:
-            raise ValueError(f"未知度量格式: {v}（须为 {sorted(_VALID_FORMATS)}）")
+        # 字典化后格式值由 service 层校验（dict_type=measure_format），此处仅保证
+        # 非空 + 长度（对齐模型列 String(32)），不再硬编码枚举集合。
+        if not v.strip():
+            raise ValueError("度量格式不能为空")
+        if len(v) > 32:
+            raise ValueError("度量格式长度不能超过 32")
         return v
 
     @model_validator(mode="after")
     def _fill_format_defaults(self) -> MeasureCreate:
-        """单位/小数位缺省时按度量格式联动默认（PRD FR-02-08）。"""
+        """单位/小数位缺省时按度量格式联动默认（PRD FR-02-08）。
+
+        仅对已知枚举格式填充；字典自定义格式（不在 ``_VALID_FORMATS``）不在此填充，
+        由 service 层按字典项 extra 联动（避免 KeyError）。
+        """
         fmt = self.measure_format
         if fmt not in _VALID_FORMATS:
             return self
@@ -110,8 +118,9 @@ class MeasureUpdate(BaseModel):
     @field_validator("measure_format")
     @classmethod
     def _format_valid(cls, v: str | None) -> str | None:
-        if v is not None and v not in _VALID_FORMATS:
-            raise ValueError(f"未知度量格式: {v}（须为 {sorted(_VALID_FORMATS)}）")
+        # 字典化后由 service 层校验，此处仅限长。
+        if v is not None and len(v) > 32:
+            raise ValueError("度量格式长度不能超过 32")
         return v
 
     @field_validator("category")
@@ -203,6 +212,16 @@ class MeasureAutoSuggestRequest(BaseModel):
     domain: str | None = Field(None, max_length=64, description="业务域（可选，辅助推断）")
     source_table: str | None = Field(None, max_length=256, description="参考源表（辅助推断）")
     measure_column: str | None = Field(None, max_length=128, description="参考度量列（辅助推断）")
+
+
+class MeasureInferSynonymsRequest(BaseModel):
+    """编辑弹窗「AI 生成同义词」请求：名称必填，描述作为 LLM 上下文。
+
+    LLM 只生成同义词列表回填表单，不落库（落库仍走既有 update 流程）。
+    """
+
+    name: str = Field(..., max_length=128, description="度量中文名")
+    description: str | None = Field(None, max_length=1000, description="度量描述（供 LLM 参考）")
 
 
 class SuggestField(BaseModel):

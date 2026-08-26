@@ -32,6 +32,10 @@ const DICT_TYPE_LABELS: Record<string, string> = {
   pii_rule: "PII 规则",
   // 原子指标口径库：度量分类（dict_type=measure_category，在线增删改/启停用）
   measure_category: "度量分类",
+  // 原子指标口径库：度量格式（dict_type=measure_format，extra 携带默认单位/小数位联动）
+  measure_format: "度量格式",
+  // 原子指标口径库：源头系统（dict_type=source_system，提供候选，保留自由输入）
+  source_system: "源头系统",
 };
 
 // 打开新增弹窗时静默刷新的最小间隔（毫秒）：TTL 内重复打开直接用缓存，避免
@@ -194,11 +198,27 @@ export function SystemDict() {
     }
   }
 
-  async function handleCreate(values: { code?: string; label: string; sort_order?: number; description?: string }) {
+  function composeExtra(values: { extra_unit?: string; extra_decimal?: number | null }): Record<string, unknown> | null {
+    // 度量格式字典项的 extra 携带联动默认单位/小数位；仅当任一字段填写时组装
+    const unit = values.extra_unit?.trim() ?? "";
+    const hasUnit = unit !== "";
+    const hasDecimal = values.extra_decimal != null;
+    if (!hasUnit && !hasDecimal) return null;
+    const extra: Record<string, unknown> = {};
+    if (hasUnit) extra.unit = unit;
+    if (hasDecimal) extra.decimal = values.extra_decimal;
+    return extra;
+  }
+
+  async function handleCreate(values: { code?: string; label: string; sort_order?: number; description?: string; extra_unit?: string; extra_decimal?: number | null }) {
     try {
       // code 不传由后端按显示名自动生成英文编码（冲突自动追加序号）；
       // 仅「无法自动生成」时手动指定 code 才随表单透传。
-      await createDictItem(activeType, { ...values, sort_order: values.sort_order ?? 0 });
+      await createDictItem(activeType, {
+        ...values,
+        sort_order: values.sort_order ?? 0,
+        extra: composeExtra(values),
+      });
       message.success("新增成功");
       setCreateOpen(false);
       createForm.resetFields();
@@ -208,10 +228,13 @@ export function SystemDict() {
     }
   }
 
-  async function handleEdit(values: { label?: string; sort_order?: number; description?: string }) {
+  async function handleEdit(values: { label?: string; sort_order?: number; description?: string; extra_unit?: string; extra_decimal?: number | null }) {
     if (!editItem) return;
     try {
-      await updateDictItem(activeType, editItem.code, values);
+      await updateDictItem(activeType, editItem.code, {
+        ...values,
+        extra: composeExtra(values),
+      });
       message.success("更新成功");
       setEditOpen(false);
       editForm.resetFields();
@@ -352,10 +375,28 @@ export function SystemDict() {
     { title: "引用数", dataIndex: "ref_count", key: "ref_count", width: 80 },
     { title: "描述", dataIndex: "description", key: "description", ellipsis: true },
     {
+      title: "扩展属性",
+      key: "extra",
+      width: 160,
+      render: (_: unknown, record: SystemDictItem) => {
+        const extra = record.extra as { unit?: unknown; decimal?: unknown } | null;
+        if (!extra) return <span className="muted">—</span>;
+        const unit = extra.unit != null && String(extra.unit) ? String(extra.unit) : null;
+        const decimal = extra.decimal != null ? Number(extra.decimal) : null;
+        return (
+          <span>
+            {unit ? `单位:${unit}` : ""}
+            {unit && decimal != null ? "，" : ""}
+            {decimal != null ? `${decimal}位` : unit ? "" : "—"}
+          </span>
+        );
+      },
+    },
+    {
       title: "操作", key: "action", width: 200,
       render: (_: unknown, record: SystemDictItem) => (
         <Space size="small">
-          {can("dict:create") && <Button size="small" icon={<EditOutlined />} onClick={() => { setEditItem(record); editForm.setFieldsValue({ label: record.label, sort_order: record.sort_order, description: record.description }); setEditOpen(true); }}>编辑</Button>}
+          {can("dict:create") && <Button size="small" icon={<EditOutlined />} onClick={() => { setEditItem(record); const ex = (record.extra ?? {}) as { unit?: unknown; decimal?: unknown }; editForm.setFieldsValue({ label: record.label, sort_order: record.sort_order, description: record.description, extra_unit: ex.unit != null ? String(ex.unit) : undefined, extra_decimal: ex.decimal != null ? Number(ex.decimal) : undefined }); setEditOpen(true); }}>编辑</Button>}
           {can("dict:create") && (
             <Button size="small" icon={record.status === "active" ? <StopOutlined /> : <CheckCircleOutlined />} onClick={() => handleToggle(record)}>
               {record.status === "active" ? "停用" : "启用"}
@@ -478,6 +519,30 @@ export function SystemDict() {
           <Form.Item name="sort_order" label="排序" initialValue={0}>
             <InputNumber min={0} />
           </Form.Item>
+          {activeType === "measure_format" && (
+            <Space size={16} style={{ display: "flex" }}>
+              <Form.Item
+                name="extra_unit"
+                label="默认单位"
+                style={{ width: 220 }}
+                extra="度量格式联动默认单位（如 元 / 小数 / %）"
+              >
+                <Input placeholder="如 元" maxLength={32} />
+              </Form.Item>
+              <Form.Item name="extra_decimal" label="默认小数位" style={{ width: 160 }}>
+                <Select
+                  allowClear
+                  placeholder="按需"
+                  options={[
+                    { value: 0, label: "0" },
+                    { value: 1, label: "1" },
+                    { value: 2, label: "2" },
+                    { value: 4, label: "4" },
+                  ]}
+                />
+              </Form.Item>
+            </Space>
+          )}
           {/* 描述框必须由 Form.Item 直接包裹（不可经 Space.Compact 中转，
               否则 value/onChange 注入被布局容器吞掉——AI 生成回填与手动输入均不生效） */}
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 24 }}>
@@ -510,6 +575,30 @@ export function SystemDict() {
           <Form.Item name="sort_order" label="排序">
             <InputNumber min={0} />
           </Form.Item>
+          {activeType === "measure_format" && (
+            <Space size={16} style={{ display: "flex" }}>
+              <Form.Item
+                name="extra_unit"
+                label="默认单位"
+                style={{ width: 220 }}
+                extra="度量格式联动默认单位（如 元 / 小数 / %）"
+              >
+                <Input placeholder="如 元" maxLength={32} />
+              </Form.Item>
+              <Form.Item name="extra_decimal" label="默认小数位" style={{ width: 160 }}>
+                <Select
+                  allowClear
+                  placeholder="按需"
+                  options={[
+                    { value: 0, label: "0" },
+                    { value: 1, label: "1" },
+                    { value: 2, label: "2" },
+                    { value: 4, label: "4" },
+                  ]}
+                />
+              </Form.Item>
+            </Space>
+          )}
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 24 }}>
             <Form.Item
               name="description"

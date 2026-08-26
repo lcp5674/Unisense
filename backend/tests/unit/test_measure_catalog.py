@@ -137,17 +137,24 @@ class TestMeasureRepository:
 
 @pytest.fixture(autouse=True)
 def _mock_dict_service(monkeypatch: pytest.MonkeyPatch) -> type:
-    """mock SystemDictService（category 字典化后 service 层校验的依赖）。
+    """mock SystemDictService（category/measure_format 字典化后 service 层校验的依赖）。
 
     默认「类型已配置」：list_by_type 非空 → 走 validate_dict_value；
     validate_dict_value 默认放行（模拟值已收录），可设 reject_values 模拟未收录拦截。
     测试可通过 ``_mock_dict_service.configured = False`` 模拟「字典未配置」回退枚举。
+    ``extra_map``：code → 扩展属性（度量格式联动默认单位/小数位），命中才走字典联动，
+    未命中抛 AttributeError → 服务层回退枚举常量（对齐真实 DB 字典未配 extra 场景）。
     """
     from app.core.exceptions import NotFoundError
+
+    class _FakeItem:
+        def __init__(self, extra: dict) -> None:
+            self.extra = extra
 
     class _FakeDictService:
         configured = True  # False → list_by_type 返回空（回退枚举种子校验）
         reject_values: set[str] = set()  # 非空 → 这些值 validate 时抛 NotFoundError
+        extra_map: dict[str, dict] = {}  # code → extra（度量格式联动默认）
 
         def __init__(self, db: object) -> None:
             self.db = db
@@ -161,6 +168,12 @@ def _mock_dict_service(monkeypatch: pytest.MonkeyPatch) -> type:
                     f"字典值不存在: {dict_type}/{code}", error_code="DICT_VALUE_NOT_FOUND"
                 )
             return object()
+
+        async def get_item(self, dict_type: str, code: str) -> object:
+            extra = self.__class__.extra_map.get(code)
+            if extra is None:
+                raise AttributeError("no extra")
+            return _FakeItem(extra)
 
     monkeypatch.setattr(
         "app.services.system_dict.service.SystemDictService", _FakeDictService
@@ -304,12 +317,44 @@ class TestMeasureService:
         # 拦截发生在赋值前，原值保持
         assert m.category == "OTHER"
 
-    async def test_create_rejects_invalid_format(self) -> None:
-        from pydantic import ValidationError
+    async def test_create_rejects_unknown_format_via_dict(
+        self, _mock_dict_service: type
+    ) -> None:
+        """格式字典化：字典已配置时未收录值在 service 层拦截（DICT_VALUE_NOT_FOUND）。"""
+        _mock_dict_service.reject_values = {"BAD"}
+        svc, repo = await _svc()
+        with pytest.raises(NotFoundError):
+            await svc.create_measure(
+                MeasureCreate(measure_code="m", name="x", measure_format="BAD", domain="y")
+            )
+
+    async def test_create_accepts_dict_custom_format_with_extra(
+        self, _mock_dict_service: type
+    ) -> None:
+        """格式字典化：字典已收录的自定义格式可通过，且默认单位/小数位按字典 extra 联动。"""
+        _mock_dict_service.extra_map = {"PERCENT": {"unit": "%", "decimal": 2}}
+        svc, repo = await _svc()
+        out = await svc.create_measure(
+            MeasureCreate(measure_code="m", name="占比", measure_format="PERCENT", domain="y")
+        )
+        assert out.measure_format == "PERCENT"
+        assert out.default_unit == "%"
+        assert out.default_decimal_places == 2
+
+    async def test_create_fallback_to_enum_when_format_dict_unconfigured(
+        self, _mock_dict_service: type
+    ) -> None:
+        """格式字典化：字典未配置（空表/未种子）→ 回退枚举种子值校验。"""
+        from app.core.exceptions import ValidationError
 
         svc, repo = await _svc()
-        with pytest.raises(ValidationError):
-            MeasureCreate(measure_code="m", name="x", measure_format="BAD", domain="y")
+        _mock_dict_service.configured = False
+        try:
+            with pytest.raises(ValidationError):
+                await svc._validate_format("BAD")  # noqa: SLF001 未配置时枚举兜底拦截
+            await svc._validate_format("AMOUNT")  # noqa: SLF001 枚举种子值放行
+        finally:
+            _mock_dict_service.configured = True
 
     async def test_get_not_found(self) -> None:
         svc, repo = await _svc()
@@ -806,3 +851,53 @@ class TestMeasureAutoSuggest:
         f = resp.fields
         assert f["measure_format"].value == "AMOUNT"
         assert f["category"].value == "FEE"
+
+
+class TestMeasureInferSynonyms:
+    """编辑弹窗「AI 生成同义词」：基于名称/描述生成同义词候选（不落库）。"""
+
+    async def test_synonyms_success(self) -> None:
+        """LLM 返回 JSON 数组 → 解析为同义词列表。"""
+        from app.services.measure_catalog.schemas import MeasureInferSynonymsRequest
+
+        svc, _ = await _suggest_svc()
+        with _patch_llm(enabled=True, content='["门诊收入","诊费","挂号费"]')[0]:
+            result = await svc.infer_synonyms(
+                MeasureInferSynonymsRequest(name="门诊收费金额", description="门诊收费")
+            )
+        assert result == ["门诊收入", "诊费", "挂号费"]
+
+    async def test_synonyms_llm_disabled_raises(self) -> None:
+        """LLM 不可用 → LLM_INFER_UNAVAILABLE（与 infer-dict-description 对齐）。"""
+        from app.core.exceptions import BusinessError
+
+        svc, _ = await _suggest_svc()
+        with _patch_llm(enabled=False)[0], pytest.raises(BusinessError) as ei:
+            await svc.infer_synonyms("门诊收费金额")
+        assert ei.value.error_code == "LLM_INFER_UNAVAILABLE"
+
+    async def test_synonyms_empty_content_raises(self) -> None:
+        """LLM 返回空内容 → LLM_INFER_UNAVAILABLE。"""
+        from app.core.exceptions import BusinessError
+
+        svc, _ = await _suggest_svc()
+        with _patch_llm(enabled=True, content="")[0], pytest.raises(BusinessError) as ei:
+            await svc.infer_synonyms("门诊收费金额")
+        assert ei.value.error_code == "LLM_INFER_UNAVAILABLE"
+
+    async def test_synonyms_not_array_returns_empty(self) -> None:
+        """LLM 返回有效但非数组 → 空列表（不报错，前端提示未生成）。"""
+        svc, _ = await _suggest_svc()
+        with _patch_llm(enabled=True, content='{"name":"x"}')[0]:
+            result = await svc.infer_synonyms("门诊收费金额")
+        assert result == []
+
+    async def test_synonyms_abnormal_content_raises(self) -> None:
+        """LLM 返回流式协议垃圾 → LLM_INFER_UNAVAILABLE（宽松校验拦截）。"""
+        from app.core.exceptions import BusinessError
+
+        svc, _ = await _suggest_svc()
+        garbage = 'data: {"type":"message"}\\n' * 500
+        with _patch_llm(enabled=True, content=garbage)[0], pytest.raises(BusinessError) as ei:
+            await svc.infer_synonyms("门诊收费金额")
+        assert ei.value.error_code == "LLM_INFER_UNAVAILABLE"

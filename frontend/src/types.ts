@@ -1065,7 +1065,8 @@ export interface DimensionMetricBinding {
 // 由度量目录定义，原子指标继承（PRD FR-02-08）。
 // ============================================================================
 
-export type MeasureFormat = "AMOUNT" | "RATIO" | "NUMERIC";
+/** 度量格式（字典化：种子值为 AMOUNT/RATIO/NUMERIC，可经「系统设置 → 字典管理」自定义扩展，extra 携带默认单位/小数位） */
+export type MeasureFormat = string;
 
 /** 度量分类（字典化：种子值为 FLOW/FEE/DRUG/MEDICAL_INSURANCE/EFFICIENCY/QUALITY/OTHER，可经「系统设置 → 字典管理」自定义扩展） */
 export type MeasureCategory = string;
@@ -2678,6 +2679,8 @@ export interface SystemDictItem {
   sort_order: number;
   status: string;
   description: string | null;
+  /** 扩展属性（JSON）：如度量格式的默认单位/小数位 {"unit":"元","decimal":2} */
+  extra: Record<string, unknown> | null;
   ref_count: number;
   created_at: string;
   updated_at: string;
@@ -2689,12 +2692,15 @@ export interface DictItemCreateRequest {
   label: string;
   sort_order?: number;
   description?: string | null;
+  /** 扩展属性（JSON）：如度量格式的默认单位/小数位 */
+  extra?: Record<string, unknown> | null;
 }
 
 export interface DictItemUpdateRequest {
   label?: string;
   sort_order?: number;
   description?: string | null;
+  extra?: Record<string, unknown> | null;
 }
 
 /** 批量操作结果单项（207 语义，逐项标注成败原因） */

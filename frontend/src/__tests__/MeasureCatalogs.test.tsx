@@ -29,6 +29,7 @@ vi.mock("../api", () => ({
   listDictItems: vi.fn(),
   listUsers: vi.fn(),
   autoSuggestMeasureCatalog: vi.fn(),
+  inferMeasureSynonyms: vi.fn(),
   UnisenseApiError: class extends Error {},
 }));
 
@@ -39,6 +40,7 @@ import {
   createMeasureCatalog,
   deleteMeasureCatalog,
   fetchCurrentUser,
+  inferMeasureSynonyms,
   listDictItems,
   listDomainTree,
   listMeasureCatalogs,
@@ -55,6 +57,7 @@ const mockedList = vi.mocked(listMeasureCatalogs);
 const mockedDomains = vi.mocked(listDomainTree);
 const mockedDictItems = vi.mocked(listDictItems);
 const mockedSuggest = vi.mocked(autoSuggestMeasureCatalog);
+const mockedInferSynonyms = vi.mocked(inferMeasureSynonyms);
 const mockedCreate = vi.mocked(createMeasureCatalog);
 const mockedSubmit = vi.mocked(submitMeasureCatalog);
 const mockedApprove = vi.mocked(approveMeasureCatalog);
@@ -137,13 +140,13 @@ async function openCreateModal() {
 
 // 度量分类字典种子（对齐 MeasureCategory 枚举，供 listDictItems mock）
 const MOCK_CATEGORY_DICT = [
-  { id: 1, dict_type: "measure_category", code: "FLOW", label: "流量类", sort_order: 0, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "" },
-  { id: 2, dict_type: "measure_category", code: "FEE", label: "费用类", sort_order: 1, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "" },
-  { id: 3, dict_type: "measure_category", code: "DRUG", label: "药品类", sort_order: 2, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "" },
-  { id: 4, dict_type: "measure_category", code: "MEDICAL_INSURANCE", label: "医保类", sort_order: 3, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "" },
-  { id: 5, dict_type: "measure_category", code: "EFFICIENCY", label: "效率类", sort_order: 4, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "" },
-  { id: 6, dict_type: "measure_category", code: "QUALITY", label: "质量类", sort_order: 5, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "" },
-  { id: 7, dict_type: "measure_category", code: "OTHER", label: "其他", sort_order: 6, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "" },
+  { id: 1, dict_type: "measure_category", code: "FLOW", label: "流量类", sort_order: 0, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "", extra: null },
+  { id: 2, dict_type: "measure_category", code: "FEE", label: "费用类", sort_order: 1, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "", extra: null },
+  { id: 3, dict_type: "measure_category", code: "DRUG", label: "药品类", sort_order: 2, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "", extra: null },
+  { id: 4, dict_type: "measure_category", code: "MEDICAL_INSURANCE", label: "医保类", sort_order: 3, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "", extra: null },
+  { id: 5, dict_type: "measure_category", code: "EFFICIENCY", label: "效率类", sort_order: 4, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "", extra: null },
+  { id: 6, dict_type: "measure_category", code: "QUALITY", label: "质量类", sort_order: 5, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "", extra: null },
+  { id: 7, dict_type: "measure_category", code: "OTHER", label: "其他", sort_order: 6, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "", extra: null },
 ];
 
 describe("MeasureCatalogs 度量目录 AI 推断", () => {
@@ -253,6 +256,37 @@ describe("MeasureCatalogs 度量目录 AI 推断", () => {
     fireEvent.click(within(modal).getByRole("button", { name: /AI 推断/ }));
     expect(await screen.findByText(/请先输入度量中文名/)).toBeInTheDocument();
     expect(mockedSuggest).not.toHaveBeenCalled();
+  });
+
+  it("AI 生成同义词：填写名称后点按钮 → 调 inferMeasureSynonyms 并合并回填到同义词标签", async () => {
+    mockedInferSynonyms.mockResolvedValue({ synonyms: ["门诊收入", "诊费"] });
+    renderCatalogs();
+    const modal = await openCreateModal();
+
+    fireEvent.change(within(modal).getByLabelText("度量中文名"), {
+      target: { value: "门诊收费金额" },
+    });
+    fireEvent.click(within(modal).getByRole("button", { name: /AI 生成同义词/ }));
+
+    await waitFor(() =>
+      expect(mockedInferSynonyms).toHaveBeenCalledWith({
+        name: "门诊收费金额",
+        description: null,
+      }),
+    );
+    // 生成结果合并回填为同义词标签（value 存于表单 store，展示为 antd tag）
+    await waitFor(() => {
+      expect(within(modal).getByText("门诊收入")).toBeInTheDocument();
+    });
+    expect(within(modal).getByText("诊费")).toBeInTheDocument();
+  });
+
+  it("AI 生成同义词：未填名称点按钮提示且不调用接口", async () => {
+    renderCatalogs();
+    const modal = await openCreateModal();
+    fireEvent.click(within(modal).getByRole("button", { name: /AI 生成同义词/ }));
+    expect(await screen.findByText(/请先输入度量中文名，再生成同义词/)).toBeInTheDocument();
+    expect(mockedInferSynonyms).not.toHaveBeenCalled();
   });
 });
 

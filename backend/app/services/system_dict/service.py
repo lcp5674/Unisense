@@ -79,6 +79,7 @@ class SystemDictService:
             existing.label = data.label
             existing.sort_order = data.sort_order
             existing.description = data.description
+            existing.extra = data.extra
             item = await self._repo.update(existing)
             logger.info(
                 "dict_item_restored",
@@ -95,6 +96,7 @@ class SystemDictService:
             sort_order=data.sort_order,
             status="active",
             description=data.description,
+            extra=data.extra,
         )
         item = await self._repo.create(item)
         logger.info(
@@ -140,7 +142,7 @@ class SystemDictService:
         code: str,
         data: DictItemUpdate,
     ) -> SystemDict:
-        """更新字典项（label/sort_order/description）。"""
+        """更新字典项（label/sort_order/description/extra）。"""
         item = await self.get_item(dict_type, code)
         if data.label is not None:
             item.label = data.label
@@ -148,6 +150,8 @@ class SystemDictService:
             item.sort_order = data.sort_order
         if data.description is not None:
             item.description = data.description
+        if data.extra is not None:
+            item.extra = data.extra
         item = await self._repo.update(item)
         logger.info("dict_item_updated", dict_type=dict_type, code=code)
         return item

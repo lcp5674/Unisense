@@ -44,6 +44,7 @@ const ITEMS: SystemDictItem[] = [
     ref_count: 3,
     created_at: "2026-08-13T00:00:00",
     updated_at: "2026-08-13T00:00:00",
+    extra: null,
   },
   {
     id: 2,
@@ -56,6 +57,7 @@ const ITEMS: SystemDictItem[] = [
     ref_count: 0,
     created_at: "2026-08-13T00:00:00",
     updated_at: "2026-08-13T00:00:00",
+    extra: null,
   },
 ];
 
@@ -183,6 +185,25 @@ describe("SystemDict 页面", () => {
     const callArg = mockedCreate.mock.calls[0][1] as { code?: string; label: string };
     expect(callArg.label).toBe("人民币元");
     expect(callArg.code).toBeUndefined();
+  });
+
+  it("度量格式字典：新增弹窗展示默认单位/小数位扩展字段，提交携带 extra", async () => {
+    mockedTypes.mockResolvedValue(["granularity", "measure_format"]);
+    mockedCreate.mockResolvedValue({} as any);
+    renderDict();
+    await screen.findByText("日");
+    // 切换到「度量格式」tab（DICT_TYPE_LABELS 注册）
+    fireEvent.click(screen.getByRole("tab", { name: /度量格式/ }));
+    await waitFor(() => expect(mockedItems).toHaveBeenCalledWith("measure_format"));
+    fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
+    const labelInput = await screen.findByPlaceholderText("如 人民币元");
+    fireEvent.change(labelInput, { target: { value: "百分比" } });
+    // 度量格式弹窗专属：默认单位输入框
+    fireEvent.change(screen.getByLabelText("默认单位"), { target: { value: "%" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
+    const callArg = mockedCreate.mock.calls[0][1] as { extra?: Record<string, unknown> };
+    expect(callArg.extra).toEqual({ unit: "%" });
   });
 
   it("新增弹窗打开时静默刷新项列表（缩小并发滞后窗口）", async () => {

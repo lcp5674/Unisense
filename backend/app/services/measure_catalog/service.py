@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +35,8 @@ from app.services.measure_catalog.schemas import (
     MeasureUpdate,
     SuggestField,
 )
+
+logger = structlog.get_logger("unisense.measure_catalog.service")
 
 _VALID_FORMATS = {e.value for e in MeasureFormat}
 _VALID_CATEGORIES = {e.value for e in MeasureCategory}
@@ -136,6 +139,54 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
         except Exception:
             return
 
+    async def _validate_format(self, fmt: str) -> None:
+        """校验度量格式存在且 active（字典化后，dict_type=measure_format）。
+
+        语义与 ``_validate_category`` 一致：字典未配置 → 回退枚举种子值校验；
+        已配置但值不在/停用 → 拦截；DB 异常 → best-effort 放行。
+        """
+        from app.core.exceptions import BusinessError, NotFoundError
+        from app.services.system_dict.service import SystemDictService
+
+        if not fmt:
+            return
+        try:
+            svc = SystemDictService(self._db)
+            if not await svc.list_by_type("measure_format", status="active"):
+                if fmt not in _VALID_FORMATS:
+                    raise ValidationError(
+                        f"未知度量格式: {fmt}",
+                        error_code="INVALID_MEASURE_FORMAT",
+                        ctx={"format": fmt},
+                    )
+                return
+            await svc.validate_dict_value("measure_format", fmt)
+        except (NotFoundError, BusinessError, ValidationError):
+            raise
+        except Exception:
+            return
+
+    async def _resolve_format_defaults(self, fmt: str) -> tuple[str, int | None]:
+        """按度量格式解析默认单位/小数位（PRD FR-02-08 联动）。
+
+        字典化后优先取字典项 extra（``{"unit": ..., "decimal": ...}``）；字典未配置
+        或取值缺失时回退枚举常量（``_FORMAT_DEFAULTS``），自定义格式回退空单位/按需。
+        """
+        from app.services.system_dict.service import SystemDictService
+
+        try:
+            svc = SystemDictService(self._db)
+            if await svc.list_by_type("measure_format", status="active"):
+                item = await svc.get_item("measure_format", fmt)
+                extra = item.extra or {}
+                unit = str(extra.get("unit") or "")
+                decimal = extra.get("decimal")
+                decimal = int(decimal) if decimal is not None else None
+                return unit, decimal
+        except Exception:
+            pass
+        return _FORMAT_DEFAULTS.get(fmt, ("", None))
+
     async def create_measure(
         self, data: MeasureCreate, actor_id: int | None = None
     ) -> MeasureCatalog:
@@ -145,16 +196,12 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
             raise ConflictError(
                 f"逻辑度量编码已存在: {data.measure_code}", error_code="MEASURE_EXISTS"
             )
-        if data.measure_format not in _VALID_FORMATS:
-            raise ValidationError(
-                f"未知度量格式: {data.measure_format}",
-                error_code="INVALID_MEASURE_FORMAT",
-                ctx={"format": data.measure_format},
-            )
+        # 度量格式字典化校验（存在且 active；字典未配置时回退枚举种子值）
+        await self._validate_format(data.measure_format)
         # 度量分类字典化校验（存在且 active；字典未配置时回退枚举种子值）
         await self._validate_category(data.category or MeasureCategory.OTHER.value)
-        # 度量格式联动默认（缺省已由 schema 填充，此处兜底显式赋值）
-        default_unit, default_decimal = _FORMAT_DEFAULTS[data.measure_format]
+        # 度量格式联动默认（缺省已由 schema 填充已知枚举，此处按字典 extra 兜底）
+        default_unit, default_decimal = await self._resolve_format_defaults(data.measure_format)
         measure = MeasureCatalog(
             measure_code=data.measure_code,
             name=data.name,
@@ -233,15 +280,12 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
         if data.domain is not None:
             measure.domain = data.domain
         if data.measure_format is not None:
-            if data.measure_format not in _VALID_FORMATS:
-                raise ValidationError(
-                    f"未知度量格式: {data.measure_format}",
-                    error_code="INVALID_MEASURE_FORMAT",
-                    ctx={"format": data.measure_format},
-                )
-            # 改格式未显式给单位/小数位时，联动新格式默认（避免格式与新默认冲突）
+            await self._validate_format(data.measure_format)
+            # 改格式未显式给单位/小数位时，联动新格式默认（字典 extra 优先，回退枚举常量）
             if data.default_unit is None and data.default_decimal_places is None:
-                default_unit, default_decimal = _FORMAT_DEFAULTS[data.measure_format]
+                default_unit, default_decimal = await self._resolve_format_defaults(
+                    data.measure_format
+                )
                 measure.default_unit = default_unit
                 measure.default_decimal_places = default_decimal
             measure.measure_format = data.measure_format
@@ -597,6 +641,61 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
             return out
         except Exception:
             return {}  # LLM 不可用/解析失败 → 规则兜底，不阻断
+
+    async def infer_synonyms(self, name: str, description: str | None = None) -> list[str]:
+        """编辑弹窗「AI 生成同义词」：基于名称/描述生成同义词候选。
+
+        纯 LLM 调用（不落库，落库仍走既有 update 流程）；LLM 不可用/空内容/
+        异常内容 → ``LLM_INFER_UNAVAILABLE``（与 infer-dict-description 对齐）；
+        返回有效但非数组 → 空列表（前端提示未生成）。
+        """
+        from app.core.exceptions import BusinessError
+        from app.services.llm.config_service import LlmConfigService
+        from app.services.llm.parse import is_abnormal_llm_text
+
+        llm_client = await LlmConfigService(self._session).build_client()
+        if not getattr(llm_client, "enabled", False):
+            raise BusinessError(
+                "LLM 不可用：请检查 LLM 配置或稍后重试",
+                error_code="LLM_INFER_UNAVAILABLE",
+            )
+        prompt = (
+            "你是医疗指标体系专家。给定逻辑度量，生成 3-5 个同义词"
+            "（其他叫法/别名/简称，供统一查询与查重匹配），仅返回 JSON 数组"
+            "如 [\"同义词1\",\"同义词2\"]，不要解释、不要 markdown。\n"
+            f"度量名称：{name}\n描述：{description or '无'}"
+        )
+        try:
+            resp = await llm_client.chat(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=200,
+                # 要求 JSON 数组，显式 json_object 约束（与 auto_suggest 一致）
+                response_format={"type": "json_object"},
+            )
+        except Exception as exc:  # noqa: BLE001 - LLM 网络/超时等统一转业务错误
+            logger.warning(
+                "measure_infer_synonyms_llm_failed",
+                name=name,
+                error=str(exc)[:200],
+            )
+            raise BusinessError(
+                "LLM 调用失败，请稍后重试",
+                error_code="LLM_INFER_UNAVAILABLE",
+            ) from exc
+
+        raw = (resp.get("content") or "").strip()
+        if not raw or is_abnormal_llm_text(raw):
+            raise BusinessError(
+                "LLM 未返回有效内容，请重试",
+                error_code="LLM_INFER_UNAVAILABLE",
+            )
+        try:
+            parsed = json.loads(raw)
+            if not isinstance(parsed, list):
+                return []
+            return [str(s).strip() for s in parsed if str(s).strip()][:8]
+        except Exception:
+            return []
 
     @staticmethod
     def _match_keyword(text: str, table: dict[str, list[str]]) -> str | None:

@@ -23,6 +23,7 @@ import {
   deleteMeasureCatalog,
   deprecateMeasureCatalog,
   fetchCurrentUser,
+  inferMeasureSynonyms,
   listDictItems,
   listDomainTree,
   listMeasureCatalogs,
@@ -60,18 +61,12 @@ const STATUS_LABEL: Record<string, string> = {
   DEPRECATED: "已废弃",
 };
 
-// 度量格式 → 默认单位/默认小数位（PRD FR-02-08 联动；前端与后端 schema 保持同规则）
-const FORMAT_DEFAULTS: Record<MeasureFormat, { unit: string; decimal: number | null }> = {
+// 度量格式 → 默认单位/默认小数位（PRD FR-02-08 联动兜底；字典化后优先取字典项 extra）
+const FORMAT_DEFAULTS: Record<string, { unit: string; decimal: number | null }> = {
   AMOUNT: { unit: "元", decimal: 2 },
   RATIO: { unit: "小数", decimal: 4 },
   NUMERIC: { unit: "", decimal: null },
 };
-
-const FORMAT_OPTIONS = [
-  { value: "AMOUNT", label: "金额 (AMOUNT)" },
-  { value: "RATIO", label: "比率 (RATIO)" },
-  { value: "NUMERIC", label: "数值 (NUMERIC)" },
-];
 
 function flattenDomainNames(nodes: SubjectDomainTreeNode[], acc: Map<string, string>) {
   for (const n of nodes) {
@@ -105,6 +100,15 @@ export function MeasureCatalogs() {
   const [domainOptions, setDomainOptions] = useState<{ value: string; label: string }[]>([]);
   // 度量分类下拉：字典化后从 system_dict（dict_type=measure_category）动态读取
   const [categoryOptions, setCategoryOptions] = useState<{ value: string; label: string }[]>([]);
+  // 度量格式下拉 + 联动默认映射：字典化后从 system_dict（dict_type=measure_format）动态读取，
+  // 每个格式字典项 extra 携带默认单位/小数位（onFormatChange 据此联动）
+  const [formatOptions, setFormatOptions] = useState<{ value: string; label: string }[]>([]);
+  const [formatExtraMap, setFormatExtraMap] = useState<
+    Record<string, { unit: string; decimal: number | null }>
+  >({});
+  // 源头系统候选：字典化后从 system_dict（dict_type=source_system）动态读取（保留 tags 自由输入）
+  const [sourceSystemOptions, setSourceSystemOptions] = useState<{ value: string; label: string }[]>([]);
+  const [synonymLoading, setSynonymLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<MeasureCatalog | null>(null);
   const [saving, setSaving] = useState(false);
@@ -203,6 +207,35 @@ export function MeasureCatalogs() {
       .catch(() => undefined);
   }, []);
 
+  // 度量格式字典化：动态加载 system_dict 中 measure_format 的 active 项，
+  // extra 携带默认单位/小数位（供 onFormatChange 联动；未配置时回退 FORMAT_DEFAULTS）
+  useEffect(() => {
+    listDictItems("measure_format")
+      .then((items) => {
+        const extraMap: Record<string, { unit: string; decimal: number | null }> = {};
+        setFormatOptions(
+          items.map((it) => {
+            const extra = (it.extra ?? {}) as { unit?: unknown; decimal?: unknown };
+            const unit = extra.unit != null ? String(extra.unit) : FORMAT_DEFAULTS[it.code]?.unit ?? "";
+            const decimal =
+              extra.decimal != null ? Number(extra.decimal) : FORMAT_DEFAULTS[it.code]?.decimal ?? null;
+            extraMap[it.code] = { unit, decimal: Number.isNaN(decimal) ? null : decimal };
+            const unitText = unit ? `（单位:${unit}${decimal != null ? `，${decimal}位` : "，按需"}）` : "";
+            return { value: it.code, label: `${it.label} (${it.code})${unitText}` };
+          }),
+        );
+        setFormatExtraMap(extraMap);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  // 源头系统字典化：动态加载 system_dict 中 source_system 的 active 项作候选（保留 tags 自由输入）
+  useEffect(() => {
+    listDictItems("source_system")
+      .then((items) => setSourceSystemOptions(items.map((it) => ({ value: it.code, label: it.label }))))
+      .catch(() => undefined);
+  }, []);
+
   function openCreate() {
     setEditing(null);
     setSuggestResult(null);
@@ -230,13 +263,18 @@ export function MeasureCatalogs() {
     setModalOpen(true);
   }
 
-  // 度量格式联动：切换格式时若未手改单位/小数位，则带出新格式默认（对齐后端 schema）
+  // 度量格式联动：切换格式时若未手改单位/小数位，则带出新格式默认
+  // （字典化后优先取字典项 extra；字典未配置/取值缺失回退 FORMAT_DEFAULTS）
   function onFormatChange(fmt: MeasureFormat) {
-    const def = FORMAT_DEFAULTS[fmt];
+    const def = formatExtraMap[fmt] ?? FORMAT_DEFAULTS[fmt] ?? { unit: "", decimal: null };
     const curUnit = form.getFieldValue("default_unit");
     const curDecimal = form.getFieldValue("default_decimal_places");
+    const allFormatUnits = new Set([
+      ...Object.values(formatExtraMap).map((d) => d.unit),
+      ...Object.values(FORMAT_DEFAULTS).map((d) => d.unit),
+    ]);
     const fields: Record<string, unknown> = {};
-    if (!curUnit || Object.values(FORMAT_DEFAULTS).some((d) => d.unit === curUnit)) {
+    if (!curUnit || allFormatUnits.has(curUnit)) {
       fields.default_unit = def.unit;
     }
     if (curDecimal == null || [2, 4].includes(Number(curDecimal))) {
@@ -281,6 +319,30 @@ export function MeasureCatalogs() {
       message.error(errMsg(e, "AI 推断失败"));
     } finally {
       setSuggestLoading(false);
+    }
+  }
+
+  // AI 生成同义词：基于名称/描述生成同义词候选，合并回填（保留用户已输入项，去重）
+  async function handleInferSynonyms() {
+    const name = form.getFieldValue("name");
+    if (!name || !String(name).trim()) {
+      message.warning("请先输入度量中文名，再生成同义词");
+      return;
+    }
+    setSynonymLoading(true);
+    try {
+      const res = await inferMeasureSynonyms({
+        name: String(name).trim(),
+        description: form.getFieldValue("description") ?? null,
+      });
+      const current: string[] = form.getFieldValue("synonyms") ?? [];
+      const merged = Array.from(new Set([...current, ...(res.synonyms ?? [])]));
+      form.setFieldsValue({ synonyms: merged });
+      message.success(res.synonyms.length > 0 ? `已生成 ${res.synonyms.length} 个同义词，可编辑后保存` : "未生成同义词，可手动输入");
+    } catch (e) {
+      message.error(errMsg(e, "AI 生成同义词失败"));
+    } finally {
+      setSynonymLoading(false);
     }
   }
 
@@ -764,9 +826,9 @@ export function MeasureCatalogs() {
             name="measure_format"
             label="度量格式"
             rules={[{ required: true }]}
-            extra="决定默认单位与小数位（金额:元/2位，比率:小数/4位，数值:自定义）"
+            extra="决定默认单位与小数位；格式与默认值可在「系统设置 → 字典管理 → 度量格式」维护"
           >
-            <Select options={FORMAT_OPTIONS} onChange={onFormatChange} />
+            <Select options={formatOptions} onChange={onFormatChange} />
           </Form.Item>
           <Space size={16} style={{ display: "flex" }}>
             <Form.Item name="default_unit" label="默认单位" style={{ width: 200 }}>
@@ -791,11 +853,25 @@ export function MeasureCatalogs() {
             )}
           </Space>
           <Form.Item name="source_system" label="源头系统（业务系统术语，多选）">
-            <Select mode="tags" placeholder="输入后回车添加" tokenSeparators={[","]} />
+            <Select
+              mode="tags"
+              placeholder="选择或输入后回车添加"
+              tokenSeparators={[","]}
+              options={sourceSystemOptions}
+            />
           </Form.Item>
-          <Form.Item name="synonyms" label="同义词（统一查询/查重匹配）">
-            <Select mode="tags" placeholder="输入后回车添加" tokenSeparators={[","]} />
-          </Form.Item>
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 24 }}>
+            <Form.Item
+              name="synonyms"
+              label="同义词（统一查询/查重匹配）"
+              style={{ flex: 1, marginBottom: 0 }}
+            >
+              <Select mode="tags" placeholder="输入后回车添加" tokenSeparators={[","]} />
+            </Form.Item>
+            <Button icon={<RobotOutlined />} loading={synonymLoading} onClick={handleInferSynonyms}>
+              AI 生成同义词
+            </Button>
+          </div>
           <Form.Item name="description" label="描述">
             <Input.TextArea rows={2} maxLength={500} />
           </Form.Item>

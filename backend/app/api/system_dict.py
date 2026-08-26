@@ -590,6 +590,7 @@ def _item_response(item: Any, ref_count: int) -> DictItemResponse:
         sort_order=item.sort_order,
         status=item.status,
         description=item.description,
+        extra=getattr(item, "extra", None),
         ref_count=ref_count,
         created_at=item.created_at,
         updated_at=item.updated_at,

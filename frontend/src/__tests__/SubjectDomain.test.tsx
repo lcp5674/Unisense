@@ -262,8 +262,8 @@ describe("SubjectDomain 页面", () => {
       Promise.resolve(
         dictType === "granularity"
           ? [
-              { id: 1, dict_type: "granularity", code: "day", label: "日", sort_order: 0, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "" },
-              { id: 2, dict_type: "granularity", code: "month", label: "月", sort_order: 1, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "" },
+              { id: 1, dict_type: "granularity", code: "day", label: "日", sort_order: 0, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "", extra: null },
+              { id: 2, dict_type: "granularity", code: "month", label: "月", sort_order: 1, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "", extra: null },
             ]
           : [],
       ),

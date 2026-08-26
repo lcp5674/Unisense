@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -23,6 +23,10 @@ class DictItemCreate(BaseModel):
     label: str = Field(..., max_length=128, description="显示名")
     sort_order: int = Field(0, description="排序序号")
     description: str | None = Field(None, max_length=256, description="描述")
+    #: 扩展属性（JSON）：如度量格式的 {"unit": "元", "decimal": 2}，前端据此联动默认
+    extra: dict[str, Any] | None = Field(
+        None, description="扩展属性（JSON，如度量格式的默认单位/小数位）"
+    )
 
     @field_validator("code")
     @classmethod
@@ -33,6 +37,13 @@ class DictItemCreate(BaseModel):
             raise ValueError("字典项编码仅含字母、数字和下划线")
         return v
 
+    @field_validator("extra")
+    @classmethod
+    def validate_extra(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        if v is not None and len(v) > 32:
+            raise ValueError("扩展属性键值数量不能超过 32")
+        return v
+
 
 class DictItemUpdate(BaseModel):
     """更新字典项请求。"""
@@ -40,6 +51,7 @@ class DictItemUpdate(BaseModel):
     label: str | None = Field(None, max_length=128)
     sort_order: int | None = None
     description: str | None = Field(None, max_length=256)
+    extra: dict[str, Any] | None = None
 
 
 class DictInferDescriptionRequest(BaseModel):
@@ -67,6 +79,7 @@ class DictItemResponse(BaseModel):
     sort_order: int
     status: str
     description: str | None
+    extra: dict[str, Any] | None = None
     ref_count: int = 0
     created_at: datetime
     updated_at: datetime

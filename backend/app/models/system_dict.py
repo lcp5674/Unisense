@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from sqlalchemy import Enum, Index, Integer, String
+from sqlalchemy.dialects.mysql import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.mysql import Base
@@ -40,6 +41,9 @@ class SystemDict(Base, BaseModel):
         comment="状态",
     )
     description: Mapped[str | None] = mapped_column(String(256), nullable=True, comment="描述")
+    #: 扩展属性（JSON）：字典驱动的字段可携带联动信息，如度量格式（measure_format）
+    #: 的 ``{"unit": "元", "decimal": 2}``——前端格式切换据此联动默认单位/小数位。
+    extra: Mapped[dict | None] = mapped_column(JSON, nullable=True, comment="扩展属性（JSON）")
 
     __table_args__ = (
         Index("uk_dict_type_code", "dict_type", "code", unique=True),

@@ -55,6 +55,7 @@ describe("AiAssistant 自然语言查询", () => {
       method: "keyword",
       anchored: ["finance_revenue_sum_d"],
       params: {},
+      execute: false,
     });
     renderAi();
     const textarea = screen.getByPlaceholderText(/如：最近 30 天 finance 域收入总额/) as HTMLTextAreaElement;

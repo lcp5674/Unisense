@@ -1921,6 +1921,17 @@ export async function autoSuggestMeasureCatalog(body: {
   });
 }
 
+/** 编辑逻辑度量「AI 生成同义词」（不落库，回填表单）：名称必填，描述作 LLM 上下文。 */
+export async function inferMeasureSynonyms(body: {
+  name: string;
+  description?: string | null;
+}): Promise<{ synonyms: string[] }> {
+  return request<{ synonyms: string[] }>(`${API_BASE}/measure-catalogs/infer-synonyms`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 export async function createMeasureCatalog(body: {
   measure_code?: string;
   name: string;
