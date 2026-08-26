@@ -17,6 +17,7 @@ N 个原子候选（共享源表/维度/时间谓词，度量列/聚合/名称�
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -48,6 +49,10 @@ _LLM_BATCH_LIMIT = 5
 # 逐语句兜底额度，但 max_batch_statements=100 上限仍保留防超大脚本爆炸；超限
 # 语句降级 skipped(llm_limit) 不阻断（候选补全的整段单次调用也计入此预算）。
 _LLM_BATCH_LIMIT_LLM = 20
+# 逐语句 LLM 兜底（周期/度量提取）的并发上限——多语句同时触发兜底时用
+# asyncio.gather 并发执行，把墙钟从「N×单次调用」降到「并发数内的单次调用」；
+# 同时限制并发数防止同时打爆 LLM 网关（配合批级预算双护栏）。
+_LLM_FALLBACK_CONCURRENCY = 4
 
 
 # ----------------------------------------------------------------
@@ -1097,6 +1102,15 @@ async def infer_sql_batch(
     per_stmt_suggest = bool(
         not domain_code and suggestion and suggestion.get("status") in ("multiple", "none")
     )
+    # ---- 阶段 1：纯规则解析（串行、无 LLM），收集逐语句兜底需求 ----
+    # 两阶段设计：多语句同时触发 LLM 兜底（周期/度量提取）时，阶段 2 用
+    # asyncio.gather 并发执行，把墙钟从「N×单次调用」降到并发数内单次调用——
+    # 对齐 R-2 韧性（避免多语句脚本逐条串行 LLM 兜底拖到几十秒）。行为等价：
+    # 预算语义（阶段 1 先检查后分配）、skipped 分类、候选顺序（阶段 3 按语句
+    # index 合并）均与串行一致。逐语句域建议因内部预算递增且依赖顺序，保持串行。
+    stmt_records: list[dict[str, Any]] = []
+    pending_period: list[int] = []  # 规则有度量但周期不确定 → _llm_infer_period
+    pending_measures: list[dict[str, Any]] = []  # 规则无度量且 parse_failed → _llm_infer_measures
     for idx, seg in enumerate(segments):
         # P0-A 兜底：单语句画像解析/方言提取意外异常绝不炸整批——降级 skipped
         # 继续后续语句（候选构建本身也有 try 保护，此处覆盖画像层）
@@ -1123,7 +1137,6 @@ async def infer_sql_batch(
             # 如 drop/create 非查询语句不浪费 LLM 调用）；LLM 不可用/失败才按
             # 原因分类进 skipped（绝不因单条解析失败阻断整批）。
             reason_code = _classify_no_measure(seg, profile, llm_tried=False)
-            llm_measures = None
             llm_tried = reason_code == "parse_failed" and db is not None
             if llm_tried:
                 if llm_budget["used"] >= llm_budget["limit"]:
@@ -1137,82 +1150,153 @@ async def infer_sql_batch(
                     )
                     continue
                 llm_budget["used"] += 1
-                # 传完整脚本 + 焦点语句：方言语句字段来源/口径常依赖前置语句
-                # 定义（CTE/SET/变量），只看单段会信息丢失影响推断
-                llm_measures = await _llm_infer_measures(
-                    db, full_sql=sql, focus_sql=seg
+                pending_measures.append(
+                    {
+                        "idx": idx,
+                        "seg": seg,
+                        "profile": profile,
+                        "seg_domain_code": seg_domain_code,
+                    }
                 )
-            if llm_measures:
-                base_period = _period_from_profile(profile)
-                for measure in llm_measures:
-                    candidates.append(
-                        _build_atomic_candidate(
-                            idx=idx,
-                            measure=measure,
-                            table=None,
-                            period=measure.get("period") or base_period,
-                            domain_code=domain_code,
-                            domain_defaults=domain_defaults,
-                            time_column=profile.time_column,
-                            suggested_domain_code=seg_domain_code,
-                            source="llm",
-                            raw_sql=seg,
-                        )
-                    )
             else:
                 skipped.append(
                     {
                         "index": idx,
                         "sql": seg[:500],
-                        "reason": _classify_no_measure(seg, profile, llm_tried=llm_tried),
+                        "reason": _classify_no_measure(seg, profile, llm_tried=False),
                     }
                 )
             continue
         tables = _physical_source_tables(seg, profile)
         table = tables[0] if tables else None
-        period = _period_from_profile(profile)
+        base_period = _period_from_profile(profile)
         # 规则层无时间信号（无截断/别名粒度、无时间列）→ LLM 兜底推断周期；
         # LLM 不可用/失败降级规则层默认，绝不阻断候选生成
-        if (
+        needs_period = (
             _period_uncertain(profile)
             and db is not None
             and llm_budget["used"] < llm_budget["limit"]
-        ):
+        )
+        if needs_period:
             llm_budget["used"] += 1
-            llm_period = await _llm_infer_period(
-                db, full_sql=sql, focus_sql=seg
-            )
-            if llm_period:
-                period = llm_period
-        atoms: list[dict[str, Any]] = []
-        for measure in profile.measures:
-            atoms.append(
-                _build_atomic_candidate(
-                    idx=idx,
-                    measure=measure,
-                    table=table,
-                    period=period,
-                    domain_code=domain_code,
-                    domain_defaults=domain_defaults,
-                    time_column=profile.time_column,
-                    suggested_domain_code=seg_domain_code,
-                    raw_sql=seg,
+            pending_period.append(idx)
+        stmt_records.append(
+            {
+                "idx": idx,
+                "seg": seg,
+                "profile": profile,
+                "table": table,
+                "base_period": base_period,
+                "needs_period": needs_period,
+                "seg_domain_code": seg_domain_code,
+            }
+        )
+
+    # ---- 阶段 2：并发执行逐语句 LLM 兜底（预算已在阶段 1 分配） ----
+    # 每类兜底独立 gather + 信号量限并发（_LLM_FALLBACK_CONCURRENCY），防止同时
+    # 打爆 LLM 网关；单任务失败（LLM 不可用/超时）返回 None 不阻断其余。
+    llm_period_map: dict[int, str | None] = {}
+    if pending_period:
+        period_sem = asyncio.Semaphore(_LLM_FALLBACK_CONCURRENCY)
+
+        async def _run_period(stmt_idx: int) -> tuple[int, str | None]:
+            async with period_sem:
+                # 传完整脚本 + 焦点语句：方言语句字段来源/口径常依赖前置语句
+                # 定义（CTE/SET/变量），只看单段会信息丢失影响推断
+                return stmt_idx, await _llm_infer_period(
+                    db, full_sql=sql, focus_sql=segments[stmt_idx]
                 )
+
+        for stmt_idx, period in await asyncio.gather(
+            *[_run_period(i) for i in pending_period]
+        ):
+            llm_period_map[stmt_idx] = period
+    llm_measures_map: dict[int, list[dict[str, Any]] | None] = {}
+    if pending_measures:
+        measures_sem = asyncio.Semaphore(_LLM_FALLBACK_CONCURRENCY)
+
+        async def _run_measures(item: dict[str, Any]) -> tuple[int, list[dict[str, Any]] | None]:
+            async with measures_sem:
+                return item["idx"], await _llm_infer_measures(
+                    db, full_sql=sql, focus_sql=item["seg"]
+                )
+
+        for item, measures in await asyncio.gather(
+            *[_run_measures(it) for it in pending_measures]
+        ):
+            llm_measures_map[item] = measures
+
+    # ---- 阶段 3：按语句 index 回填合并候选（顺序与串行一致） ----
+    built_by_idx: dict[int, list[dict[str, Any]]] = {}
+
+    def _push_candidate(stmt_idx: int, candidate: dict[str, Any]) -> None:
+        built_by_idx.setdefault(stmt_idx, []).append(candidate)
+
+    for rec in stmt_records:
+        idx = rec["idx"]
+        period = rec["base_period"]
+        if rec["needs_period"] and llm_period_map.get(idx):
+            period = llm_period_map[idx]
+        atoms: list[dict[str, Any]] = []
+        for measure in rec["profile"].measures:
+            atom = _build_atomic_candidate(
+                idx=idx,
+                measure=measure,
+                table=rec["table"],
+                period=period,
+                domain_code=domain_code,
+                domain_defaults=domain_defaults,
+                time_column=rec["profile"].time_column,
+                suggested_domain_code=rec["seg_domain_code"],
+                raw_sql=rec["seg"],
             )
-        candidates.extend(atoms)
+            atoms.append(atom)
+            _push_candidate(idx, atom)
         if synthesize_composite:
             composite = _build_composite_candidate(
                 idx=idx,
-                sql=seg,
-                profile=profile,
+                sql=rec["seg"],
+                profile=rec["profile"],
                 atoms=atoms,
                 domain_code=domain_code,
                 period=period,
-                suggested_domain_code=seg_domain_code,
-                raw_sql=seg,
+                suggested_domain_code=rec["seg_domain_code"],
+                raw_sql=rec["seg"],
             )
             if composite:
-                candidates.append(composite)
+                _push_candidate(idx, composite)
+    for item in pending_measures:
+        idx = item["idx"]
+        seg = item["seg"]
+        llm_measures = llm_measures_map.get(idx)
+        if llm_measures:
+            base_period = _period_from_profile(item["profile"])
+            for measure in llm_measures:
+                _push_candidate(
+                    idx,
+                    _build_atomic_candidate(
+                        idx=idx,
+                        measure=measure,
+                        table=None,
+                        period=measure.get("period") or base_period,
+                        domain_code=domain_code,
+                        domain_defaults=domain_defaults,
+                        time_column=item["profile"].time_column,
+                        suggested_domain_code=item["seg_domain_code"],
+                        source="llm",
+                        raw_sql=seg,
+                    ),
+                )
+        else:
+            skipped.append(
+                {
+                    "index": idx,
+                    "sql": seg[:500],
+                    "reason": _classify_no_measure(seg, item["profile"], llm_tried=True),
+                }
+            )
+    for stmt_idx in sorted(built_by_idx):
+        candidates.extend(built_by_idx[stmt_idx])
 
     # LLM 校验层（方案 A 默认全量校验，仅规则模式）：规则解析可能「静默解析错」
     # （漏度量/聚合归一错/条件聚合丢失），对规则候选做一次 LLM 封闭选择校验

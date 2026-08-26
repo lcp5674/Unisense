@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1034,9 +1035,163 @@ async def test_infer_sql_batch_llm_batch_limit() -> None:
     assert result["skipped"][0]["reason"] == "llm_limit"
 
 
+async def test_infer_sql_batch_period_fallback_runs_concurrently() -> None:
+    """两阶段并发：多语句同时触发周期兜底 → asyncio.gather 并发执行。
+
+    修复前逐语句 ``await _llm_infer_period`` 串行（N 条语句 = N×单次调用墙钟）；
+    修复后阶段 2 用 gather + 信号量并发执行。用 active/max_active 追踪验证
+    同时活跃数 ≥2（并发而非串行），且各语句候选周期正确回填。
+    """
+    parts = [
+        f"SELECT SUM(amount{i}) AS m{i} FROM dwd_order_di"
+        for i in range(3)
+    ]
+    db = _fake_db()
+    active = 0
+    max_active = 0
+
+    async def fake_infer_period(db_arg, full_sql, focus_sql):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.05)
+        active -= 1
+        return "month"
+
+    with patch(
+        "app.services.semantic.sql_split._llm_infer_period",
+        new=AsyncMock(side_effect=fake_infer_period),
+    ):
+        result = await infer_sql_batch(
+            db, sql=";".join(parts), split_mode="semicolon", domain_code="sales"
+        )
+    # 并发执行：同时活跃 ≥2（串行则恒为 1）
+    assert max_active >= 2
+    cands = [c for c in result["candidates"] if c["type"] == "atomic"]
+    assert len(cands) == 3
+    assert all(c["period"] == "month" for c in cands)
+    # 候选按语句 index 顺序回填（与串行一致）
+    assert [int(str(c["key"]).split(":")[0]) for c in cands] == [0, 1, 2]
+
+
+async def test_infer_sql_batch_measures_fallback_runs_concurrently() -> None:
+    """两阶段并发：多条 parse_failed 语句同时触发度量兜底 → gather 并发执行。
+
+    修复前逐语句 ``await _llm_infer_measures`` 串行；修复后阶段 2 并发。用
+    active/max_active 追踪验证同时活跃数 ≥2，且各语句候选按 idx 顺序回填。
+    """
+    from app.services.semantic.sql_infer import SqlProfile
+
+    parts = [
+        f"SELECT dt, SUM(unparsable_col{i}) AS m{i} FROM dwd_order_di GROUP BY dt"
+        for i in range(3)
+    ]
+    real_parse = parse_sql_profile
+
+    def _fake_parse(statement: str) -> SqlProfile:
+        if "unparsable_col" in statement:
+            return SqlProfile(sql=statement)  # 规则层解析失败（空画像）
+        return real_parse(statement)
+
+    db = _fake_db()
+    active = 0
+    max_active = 0
+
+    async def fake_infer_measures(db_arg, full_sql, focus_sql):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.05)
+        active -= 1
+        col = focus_sql.split("SUM(")[1].split(")")[0].strip()
+        return [
+            {
+                "column": col,
+                "agg": "SUM",
+                "alias": f"m_{col}",
+                "table": "dwd_order_di",
+                "period": "day",
+                "name": f"{col} 合计",
+            }
+        ]
+
+    with (
+        patch(
+            "app.services.semantic.sql_split.parse_sql_profile",
+            side_effect=_fake_parse,
+        ),
+        patch(
+            "app.services.semantic.sql_split._llm_infer_measures",
+            new=AsyncMock(side_effect=fake_infer_measures),
+        ),
+    ):
+        result = await infer_sql_batch(
+            db, sql=";".join(parts), split_mode="semicolon", domain_code="sales"
+        )
+    assert max_active >= 2  # 并发而非串行
+    cands = [c for c in result["candidates"] if c["type"] == "atomic"]
+    assert len(cands) == 3
+    # 候选按语句 index 顺序回填（与串行一致）
+    assert [int(str(c["key"]).split(":")[0]) for c in cands] == [0, 1, 2]
+
+
+async def test_infer_sql_batch_mixed_fallback_keeps_statement_order() -> None:
+    """两阶段并发：混合场景（有度量 + LLM 兜底 + 有度量）候选顺序与串行一致。
+
+    按语句 index 合并回填——语句 0 的 gmv、语句 1 的 LLM 兜底、语句 2 的 uv
+    顺序保持 [0,1,2]，而非「先有度量后 LLM」错位。
+    """
+    from app.services.semantic.sql_infer import SqlProfile
+
+    sql = ";".join(
+        [
+            "SELECT dt, SUM(amount) AS gmv FROM dwd_order_di GROUP BY dt",
+            "SELECT dt, SUM(unparsable_col) AS bad FROM dwd_order_di GROUP BY dt",
+            "SELECT dt, COUNT(DISTINCT user_id) AS uv FROM dwd_user_di GROUP BY dt",
+        ]
+    )
+    real_parse = parse_sql_profile
+
+    def _fake_parse(statement: str) -> SqlProfile:
+        if "unparsable_col" in statement:
+            return SqlProfile(sql=statement)  # 该语句规则解析失败
+        return real_parse(statement)
+
+    db = _fake_db()
+
+    async def fake_infer_measures(db_arg, full_sql, focus_sql):
+        return [
+            {
+                "column": "unparsable_col",
+                "agg": "SUM",
+                "alias": "bad",
+                "table": "dwd_order_di",
+                "period": "day",
+                "name": "坏列合计",
+            }
+        ]
+
+    with (
+        patch(
+            "app.services.semantic.sql_split.parse_sql_profile",
+            side_effect=_fake_parse,
+        ),
+        patch(
+            "app.services.semantic.sql_split._llm_infer_measures",
+            new=AsyncMock(side_effect=fake_infer_measures),
+        ),
+    ):
+        result = await infer_sql_batch(
+            db, sql=sql, split_mode="semicolon", domain_code="sales"
+        )
+    cands = [c for c in result["candidates"] if c["type"] == "atomic"]
+    assert [int(str(c["key"]).split(":")[0]) for c in cands] == [0, 1, 2]
+    assert [c["measure_column"] for c in cands] == ["amount", "unparsable_col", "user_id"]
+    assert len(result["skipped"]) == 0
+
+
 async def test_infer_sql_batch_single_statement_profile_error_degrades() -> None:
     """P0-A 兜底：单语句画像解析异常绝不炸整批——降级 skipped(parse_failed) 继续后续。
-
     方言聚合/极端嵌套等使 ``parse_sql_profile`` 抛异常时，``infer_sql_batch`` 应跳过
     该语句而非让整个批量解析 500。
     """
