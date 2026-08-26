@@ -2851,18 +2851,20 @@ export interface SqlBatchCandidate {
   key: string;
   metric_code: string;
   name: string;
-  type: "atomic" | "composite";
+  type: MetricType;
   source_table: string | null;
   measure_column: string | null;
   aggregation: string | null;
   period: string | null;
   unit: string | null;
   granularity: string | null;
-  /** 口径定义（原子：expression 模式；复合：sql+dependencies） */
+  /** 口径定义（原子：expression 模式；派生/复合：expression+dependencies） */
   definition_json: Record<string, unknown>;
   definition_mode: string;
-  /** 复合候选的依赖指标编码 */
+  /** 派生/复合候选的依赖指标编码 */
   dependencies?: string[] | null;
+  /** 派生/复合候选的计算表达式（前端在线编辑，如 {a} / {b}；提交合入 definition_json.expression） */
+  calc_expression?: string | null;
   /** OneData 原子层：候选关联逻辑度量（SQL 无法推断恒空，前端选择器关联后透传） */
   measure_id?: number | null;
   /** 口径溯源：候选所属语句原始 SQL（批量创建透传落 Metric.raw_sql） */
@@ -2916,7 +2918,7 @@ export interface SqlBatchRegisterCandidate {
   key: string;
   metric_code: string;
   name: string;
-  type: "atomic" | "composite";
+  type: MetricType;
   source_table?: string | null;
   measure_column?: string | null;
   aggregation?: string | null;

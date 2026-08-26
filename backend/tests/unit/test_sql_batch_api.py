@@ -216,6 +216,73 @@ async def test_batch_register_from_sql_success(
     assert audit.await_args.kwargs["action"] == "metric_definition.sql_batch_register"
 
 
+async def test_batch_register_from_sql_derived_candidate_200(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """派生候选（type=derived + 依赖指标 + 计算表达式 + 挂载实体）→ 200 透传 service。"""
+    derived = {
+        "key": "0:retention",
+        "metric_code": "outpatient_doctor_retention_month",
+        "name": "医生留存率",
+        "type": "derived",
+        "source_table": "wedw_dws.doctor_active_month_di",
+        "measure_column": None,
+        "aggregation": None,
+        "period": "month",
+        "unit": None,
+        "definition_json": {
+            "expression": (
+                "outpatient_doctor_currentmonthactivedoctorcnt_month / "
+                "outpatient_doctor_lastmonthactivedoctorcnt_month"
+            ),
+            "dependencies": [
+                "outpatient_doctor_currentmonthactivedoctorcnt_month",
+                "outpatient_doctor_lastmonthactivedoctorcnt_month",
+            ],
+        },
+        "dependencies": [
+            "outpatient_doctor_currentmonthactivedoctorcnt_month",
+            "outpatient_doctor_lastmonthactivedoctorcnt_month",
+        ],
+        "mount": {
+            "source_table": "wedw_dws.doctor_active_month_di",
+            "source_column": "doctor_code",
+            "granularity": "month",
+            "default_period": "month",
+            "domain": "outpatient",
+        },
+    }
+    with (
+        patch("app.api.metrics.MetricService") as mock_svc,
+        patch("app.api.metrics.write_audit", new=AsyncMock()) as audit,
+    ):
+        mock_svc.return_value.batch_register_from_sql = AsyncMock(
+            return_value={
+                "batch_id": "sqlbatch_derived1",
+                "candidates": [
+                    {
+                        "metric_code": "outpatient_doctor_retention_month",
+                        "status": "DRAFT",
+                        "validation_errors": None,
+                    }
+                ],
+            }
+        )
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/batch-register-from-sql",
+            json={"domain": "outpatient", "candidates": [derived]},
+        )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["candidates"][0]["status"] == "DRAFT"
+    mock_svc.return_value.batch_register_from_sql.assert_awaited_once()
+    req = mock_svc.return_value.batch_register_from_sql.await_args.args[0]
+    assert req.candidates[0].type == "derived"
+    assert req.candidates[0].mount is not None
+    assert req.candidates[0].mount.source_table == "wedw_dws.doctor_active_month_di"
+    audit.assert_awaited_once()
+
+
 async def test_batch_register_from_sql_empty_candidates_422(
     metrics_client: httpx.AsyncClient,
 ) -> None:

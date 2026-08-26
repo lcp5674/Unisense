@@ -1100,6 +1100,35 @@ export function MetricCreate() {
     });
   }
 
+  // 候选编码解析：域未定时后端不 bake-in → 按最终 selectedDomain 生成 4 段编码
+  // （对齐后端 generate_metric_code：域_业务对象_度量_周期）。批量创建提交与
+  // 「派生/复合依赖指标」选项共用——依赖选项需展示可提交的最终编码。
+  function resolveCandidateCode(c: SqlBatchCandidate): string {
+    if (c.metric_code) return c.metric_code;
+    const rawTable = c.source_table || "";
+    const biz = rawTable
+      ? (rawTable.split(".").pop() || "")
+          .replace(/^(dwd_|ods_|dws_|ads_|dim_|tmp_)/, "")
+          .split("_")[0]
+      : "entity";
+    const measure = (c.measure_column || "metric").replace(/_/g, "").toLowerCase();
+    return [selectedDomain, biz || "entity", measure, c.period || "day"].join("_");
+  }
+
+  // 指标类型可在线编辑（原子/派生/复合）：原子是「逻辑度量 + 业务限定 + 统计周期」的
+  // 最小颗粒；把两个原子在线改成派生（如留存率 = 当月/上月）或复合，不再受"只能是原子"限制。
+  function handleSqlBatchTypeChange(key: string, type: MetricType) {
+    handleSqlBatchEdit(key, { type });
+  }
+
+  function handleSqlBatchDepChange(key: string, deps: string[]) {
+    handleSqlBatchEdit(key, { dependencies: deps });
+  }
+
+  function handleSqlBatchExprChange(key: string, expr: string) {
+    handleSqlBatchEdit(key, { calc_expression: expr });
+  }
+
   /** 勾选切换：取消原子若被某复合候选依赖 → 弹窗让用户选「跳过复合」或「回滚勾选」。 */
   function handleSqlBatchToggle(key: string, checked: boolean) {
     if (!sqlBatchResult) return;
@@ -1176,32 +1205,68 @@ export function MetricCreate() {
     }
     const checked = sqlBatchResult.candidates.filter((c) => keys.has(c.key));
     if (checked.length === 0) { message.warning("请至少勾选一个候选指标"); return; }
+    // 派生/复合必填校验（对齐单条向导 handleSubmit）：依赖指标 + 计算表达式缺一不可，
+    // 否则后端 _validate_definition_json 会整条校验失败（前端先拦截更友好）。
+    const nonAtomic = checked.filter((c) => c.type !== "atomic");
+    for (const c of nonAtomic) {
+      if (!(c.dependencies || []).length) {
+        message.warning(`候选「${c.name}」请至少选择 1 个依赖指标`);
+        setSqlBatchCreating(false);
+        return;
+      }
+      const hasCalc = !!(c.calc_expression || "").trim();
+      const hasEmbedded = !!String(
+        c.definition_json?.sql || c.definition_json?.expression || "",
+      ).trim();
+      // 派生（原子在线改为派生）必须给计算表达式；复合解析候选自带 sql 口径时可不填
+      if (c.type === "derived" && !hasCalc) {
+        message.warning(`候选「${c.name}」请填写计算表达式（如 {原子1} / {原子2}）`);
+        setSqlBatchCreating(false);
+        return;
+      }
+      if (c.type === "composite" && !hasCalc && !hasEmbedded) {
+        message.warning(`候选「${c.name}」请填写计算表达式`);
+        setSqlBatchCreating(false);
+        return;
+      }
+    }
     setSqlBatchCreating(true);
     try {
-      // P0-1：候选编码可能为空（域未定时后端不 bake-in）——按最终 selectedDomain 生成
-      // 4 段编码（对齐后端 generate_metric_code：域_业务对象_度量_周期），避免空段非法编码。
-      const resolveCode = (c: SqlBatchCandidate): string => {
-        if (c.metric_code) return c.metric_code;
-        const rawTable = c.source_table || "";
-        const biz = rawTable
-          ? (rawTable.split(".").pop() || "")
-              .replace(/^(dwd_|ods_|dws_|ads_|dim_|tmp_)/, "")
-              .split("_")[0]
-          : "entity";
-        const measure = (c.measure_column || "metric").replace(/_/g, "").toLowerCase();
-        return [selectedDomain, biz || "entity", measure, c.period || "day"].join("_");
-      };
       // 口径溯源（P2）：候选所属语句的整句原始 SQL——候选仅带表达式，原文从语句
       // meta 提取（按 statement_index），批量创建透传落 Metric.raw_sql 可反查口径全文
       const resolveRawSql = (c: SqlBatchCandidate): string | undefined =>
         c.raw_sql ||
         sqlBatchResult.statements.find((s) => s.index === c.statement_index)?.sql ||
         undefined;
+      // 派生/复合候选口径：计算表达式 + 依赖指标 → definition_json（对齐单条向导
+      // buildDefinitionJson 的 derived/composite 分支；血缘注册读 dependencies 建上游边）
+      const buildBatchDefinitionJson = (c: SqlBatchCandidate): Record<string, unknown> => {
+        if (c.type === "atomic") return c.definition_json || {};
+        // 派生/复合：计算表达式优先覆盖 expression；复合解析候选无 calc 时保留自带
+        // sql 口径（对齐单条向导 buildDefinitionJson 的 derived/composite 分支；血缘
+        // 注册读 dependencies 建上游边）
+        const base = { ...(c.definition_json || {}) };
+        const calc = (c.calc_expression || "").trim();
+        if (calc) base.expression = calc;
+        return { ...base, dependencies: c.dependencies || [] };
+      };
+      // 派生候选挂载实体（OneData 挂载层）：源表/度量列/粒度/周期/域 → 创建端自动落
+      // metric_mount（对齐单条派生向导 mount 收集；复合不设挂载）
+      const buildBatchMount = (c: SqlBatchCandidate) =>
+        c.type === "derived" && c.source_table && c.measure_column
+          ? {
+              source_table: c.source_table,
+              source_column: c.measure_column,
+              granularity: c.granularity || c.period || "day",
+              default_period: c.period || null,
+              domain: selectedDomain,
+            }
+          : undefined;
       const res = await batchRegisterFromSql({
         domain: selectedDomain,
         candidates: checked.map((c) => ({
           key: c.key,
-          metric_code: resolveCode(c),
+          metric_code: resolveCandidateCode(c),
           name: c.name,
           type: c.type,
           source_table: c.source_table,
@@ -1210,8 +1275,9 @@ export function MetricCreate() {
           unit: c.unit,
           period: c.period,
           granularity: c.granularity,
-          definition_json: c.definition_json,
+          definition_json: buildBatchDefinitionJson(c),
           dependencies: c.dependencies,
+          mount: buildBatchMount(c),
           // OneData 接线（P2）：候选关联逻辑度量（前端选择器写入，SQL 无法推断）——
           // 批量创建的原子指标得以关联逻辑度量，不再全部游离走"旧式物理来源"路径
           measure_id: c.measure_id ?? null,
@@ -2637,6 +2703,14 @@ export function MetricCreate() {
                   size="small"
                   defaultActiveKey={sqlBatchResult.statements.map((s) => `stmt-${s.index}`)}
                   items={(() => {
+                    // 派生/复合依赖指标可选项：本批全部原子候选（跨语句可选），
+                    // label 展示「名称（最终编码）」便于用户识别要依赖哪个原子
+                    const atomicDepOptions = sqlBatchResult.candidates
+                      .filter((c) => c.type === "atomic")
+                      .map((c) => ({
+                        value: resolveCandidateCode(c),
+                        label: `${c.name} (${resolveCandidateCode(c)})`,
+                      }));
                     const byStmt = new Map<number, SqlBatchCandidate[]>();
                     for (const c of sqlBatchResult.candidates) {
                       const arr = byStmt.get(c.statement_index) || [];
@@ -2660,9 +2734,21 @@ export function MetricCreate() {
                                   onChange={(e) => handleSqlBatchToggle(c.key, e.target.checked)}
                                   aria-label={`勾选 ${c.name}`}
                                 />
-                                <Tag color={c.type === "composite" ? "purple" : "blue"}>
-                                  {c.type === "composite" ? "复合" : "原子"}
-                                </Tag>
+                                {/* 指标类型可在线编辑：原子 = 逻辑度量 + 业务限定 + 统计周期
+                                    （单个度量列）；可把同批两个原子改为派生（如留存率 = 当月/上月
+                                    活跃）或复合。改派生/复合后下方切换为依赖指标 + 计算表达式 */}
+                                <Select
+                                  size="small"
+                                  style={{ width: 96 }}
+                                  value={c.type}
+                                  onChange={(v) => handleSqlBatchTypeChange(c.key, v as MetricType)}
+                                  data-testid={`sql-batch-type-${c.key}`}
+                                  options={[
+                                    { value: "atomic", label: "原子" },
+                                    { value: "derived", label: "派生" },
+                                    { value: "composite", label: "复合" },
+                                  ]}
+                                />
                                 {/* P2-2：LLM 兜底提取的候选加「AI 推断」标识，与规则层可靠产出
                                     视觉区分——用户可分辨哪些需人工复核（编码/名称/聚合/周期） */}
                                 {c.source === "llm" && (
@@ -2765,7 +2851,37 @@ export function MetricCreate() {
                                     )}
                                   </>
                                 ) : (
-                                  <Typography.Text style={{ fontSize: 12 }}>{c.name}</Typography.Text>
+                                  <>
+                                    <Input
+                                      size="small"
+                                      style={{ width: 150 }}
+                                      value={c.name}
+                                      onChange={(e) => handleSqlBatchEdit(c.key, { name: e.target.value })}
+                                    />
+                                    {/* 派生/复合依赖指标：从本批原子候选选择（跨语句可选），
+                                        提交合入 definition_json.dependencies → 血缘注册上游边 */}
+                                    <Select
+                                      size="small"
+                                      mode="multiple"
+                                      style={{ minWidth: 240 }}
+                                      placeholder="依赖指标（从本批原子候选选择）"
+                                      optionFilterProp="label"
+                                      value={c.dependencies || []}
+                                      onChange={(v) => handleSqlBatchDepChange(c.key, v)}
+                                      data-testid={`sql-batch-deps-${c.key}`}
+                                      options={atomicDepOptions.filter(
+                                        (o) => o.value !== resolveCandidateCode(c),
+                                      )}
+                                    />
+                                    <Input
+                                      size="small"
+                                      style={{ width: 220, fontFamily: "monospace" }}
+                                      placeholder="计算表达式，如 {原子1} / {原子2}"
+                                      value={c.calc_expression || ""}
+                                      onChange={(e) => handleSqlBatchExprChange(c.key, e.target.value)}
+                                      data-testid={`sql-batch-expr-${c.key}`}
+                                    />
+                                  </>
                                 )}
                                 {/* P0-1：候选编码为空（域未定时后端不 bake-in）→ 提示选域后自动生成；
                                     编码可在线编辑（4 段式：域_业务对象_度量_周期），改后创建即用 */}
@@ -2789,8 +2905,8 @@ export function MetricCreate() {
                                     </Typography.Text>
                                   </Tooltip>
                                 ) : null}
-                                {c.type === "composite" && (
-                                  <Tooltip title="复合指标依赖批内原子（DRAFT）；批量提交评审会被「依赖未发布」拦截，需先发布原子后再提交">
+                                {(c.type === "composite" || c.type === "derived") && (
+                                  <Tooltip title="派生/复合指标依赖批内原子（DRAFT）；批量提交评审会被「依赖未发布」拦截，需先发布依赖原子后再提交">
                                     <Tag color="orange">需先发布依赖原子</Tag>
                                   </Tooltip>
                                 )}

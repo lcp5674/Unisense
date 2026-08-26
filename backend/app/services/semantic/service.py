@@ -4928,9 +4928,11 @@ class MetricService(BaseService):
                     exc_info=True,
                 )
 
-        # Phase2 复合：savepoint 外先依赖预检，缺依赖直接跳过（不浪费嵌套事务）
+        # Phase2 派生/复合：savepoint 外先依赖预检，缺依赖直接跳过（不浪费嵌套事务）。
+        # 派生候选（用户将原子在线改为派生：依赖指标 + 计算表达式）与复合同走依赖
+        # 预检 + savepoint 创建；派生额外透传 mount（OneData 挂载层，源表/列/粒度/周期）。
         for cand in request.candidates:
-            if cand.type != "composite":
+            if cand.type not in ("derived", "composite"):
                 continue
             code = cand.metric_code
             deps = cand.dependencies or []
@@ -4959,11 +4961,14 @@ class MetricService(BaseService):
                         metric_code=code,
                         name=cand.name,
                         domain=request.domain,
-                        type="composite",
-                        # aggregation 为 schema 必填；复合指标聚合语义由依赖/表达式承载，
+                        type=cand.type,
+                        # aggregation 为 schema 必填；派生/复合聚合语义由依赖/表达式承载，
                         # 占位 SUM（对齐批量注册默认聚合）
                         aggregation=cand.aggregation or "SUM",
                         definition_json=cand.definition_json,
+                        # OneData 挂载层：派生候选透传挂载实体（源表/列/粒度/周期/域，
+                        # 创建端自动落 metric_mount——与单条派生向导行为一致）
+                        mount=cand.mount,
                         # P1-3：复合候选携带实际统计周期/粒度（不再默认 day 失真）
                         period=cand.period,
                         granularity=cand.granularity,

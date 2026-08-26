@@ -1693,7 +1693,7 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     // 原子候选（Input 值）+ 复合候选（文本 + 发布提示 Tag）
     expect(screen.getByDisplayValue("日订单金额")).toBeTruthy();
     expect(screen.getByDisplayValue("日去重用户")).toBeTruthy();
-    expect(screen.getByText(/日订单金额、日去重用户复合/)).toBeTruthy();
+    expect(screen.getByDisplayValue("日订单金额、日去重用户复合")).toBeTruthy();
     expect(screen.getByText("需先发布依赖原子")).toBeTruthy();
     // 语句分组标题
     expect(screen.getByText(/语句 1 · dwd.sales_detail · 3 个候选/)).toBeTruthy();
@@ -1777,6 +1777,47 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
       expect(amount?.measure_id).toBe(1);
       // 口径溯源：候选无 raw_sql 时从语句 meta 按 statement_index 提取整句原文
       expect(amount?.raw_sql).toContain("SUM(amount) AS gmv");
+    });
+  });
+
+  it("批量创建：候选指标类型可在线改为派生 → 依赖指标 + 计算表达式 + 挂载透传", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+
+    // 把「0:user_id」原子候选改为派生（类型 Select 在线编辑）
+    const typeSelect = screen.getByTestId("sql-batch-type-0:user_id").closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(typeSelect.querySelector(".ant-select-selector") as HTMLElement);
+    await clickSelectOption("派生");
+
+    // 非原子候选显示依赖指标多选 + 计算表达式输入
+    const exprInput = screen.getByTestId("sql-batch-expr-0:user_id") as HTMLInputElement;
+    expect(exprInput).toBeTruthy();
+    fireEvent.change(exprInput, { target: { value: "sales_order_amount_day / sales_order_userid_day" } });
+
+    // 依赖指标：从本批原子候选选择「日订单金额」
+    const depsSelect = screen.getByTestId("sql-batch-deps-0:user_id").closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(depsSelect.querySelector(".ant-select-selector") as HTMLElement);
+    await clickSelectOption("日订单金额 (sales_order_amount_day)");
+
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+    await waitFor(() => {
+      expect(mockedBatchFromSql).toHaveBeenCalled();
+      const body = mockedBatchFromSql.mock.calls[0][0];
+      const derived = body.candidates.find((c: { key: string }) => c.key === "0:user_id");
+      expect(derived?.type).toBe("derived");
+      // 计算表达式 + 依赖指标合入 definition_json（血缘据此建上游边）
+      expect(derived?.definition_json.expression).toBe("sales_order_amount_day / sales_order_userid_day");
+      expect(derived?.definition_json.dependencies).toEqual(["sales_order_amount_day"]);
+      // 派生透传挂载实体（OneData 挂载层：源表/列/粒度/周期/域）
+      expect(derived?.mount).toEqual({
+        source_table: "dwd.sales_detail",
+        source_column: "user_id",
+        granularity: "day",
+        default_period: "day",
+        domain: "sales",
+      });
     });
   });
 

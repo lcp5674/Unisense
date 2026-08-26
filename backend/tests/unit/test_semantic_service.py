@@ -6325,3 +6325,76 @@ FULL JOIN (
     assert all(c["status"] == "DRAFT" for c in result["candidates"])
     # 候选携带 Doris 口径（expression + source_fields）创建成功
     assert repo.create.call_count == len(atoms)
+
+
+async def test_sql_batch_register_derived_phase2_with_mount():
+    """批量注册含派生候选：Phase1 原子 → Phase2 派生（依赖预检 + type=derived + mount）。
+
+    派生候选（用户把原子在线改为派生：依赖指标 + 计算表达式）走 Phase2 依赖预检，
+    依赖在 Phase1 创建的原子命中 atom_ok → savepoint 创建 type=derived 指标并透传
+    挂载实体（OneData 挂载层，源表/列/粒度/周期/域自动落 metric_mount）。
+    """
+    from app.services.semantic.schemas import (
+        MetricMountInput,
+        MetricSqlBatchRegisterRequest,
+        SqlBatchCreateCandidate,
+    )
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    atom = SqlBatchCreateCandidate(
+        key="0:active",
+        metric_code="outpatient_doctor_active_month",
+        name="医生活跃数",
+        type="atomic",
+        source_table="wedw_dws.doctor_active_month_di",
+        measure_column="doctor_code",
+        aggregation="COUNT_DISTINCT",
+        period="month",
+        unit="PERSON",
+        definition_json={
+            "expression": "COUNT(DISTINCT doctor_code)",
+            "source_fields": [
+                {"table": "wedw_dws.doctor_active_month_di", "column": "doctor_code"}
+            ],
+        },
+    )
+    derived = SqlBatchCreateCandidate(
+        key="0:retention",
+        metric_code="outpatient_doctor_retention_month",
+        name="医生留存率",
+        type="derived",
+        source_table="wedw_dws.doctor_active_month_di",
+        measure_column=None,
+        aggregation=None,
+        period="month",
+        unit=None,
+        definition_json={
+            "expression": "outpatient_doctor_active_month / outpatient_doctor_last_active_month",
+            "dependencies": ["outpatient_doctor_active_month"],
+        },
+        dependencies=["outpatient_doctor_active_month"],
+        mount=MetricMountInput(
+            source_table="wedw_dws.doctor_active_month_di",
+            source_column="doctor_code",
+            granularity="month",
+            default_period="month",
+            domain="outpatient",
+        ),
+    )
+    request = MetricSqlBatchRegisterRequest(
+        domain="outpatient",
+        candidates=[atom, derived],
+    )
+    # 派生候选带 mount → create_metric 落 metric_mount；mock 环境下其 save 需 AsyncMock
+    with patch(
+        "app.services.metric_mount.repository.MetricMountRepository.save",
+        new=AsyncMock(return_value=MagicMock()),
+    ):
+        result = await svc.batch_register_from_sql(request, actor_id=1)
+    # Phase1 原子 + Phase2 派生均创建成功（派生依赖命中 atom_ok，无缺依赖跳过）
+    assert [c["status"] for c in result["candidates"]] == ["DRAFT", "DRAFT"]
+    assert repo.create.call_count == 2
