@@ -23,6 +23,7 @@ import {
   deleteMeasureCatalog,
   deprecateMeasureCatalog,
   fetchCurrentUser,
+  listDictItems,
   listDomainTree,
   listMeasureCatalogs,
   purgeMeasureCatalog,
@@ -72,11 +73,6 @@ const FORMAT_OPTIONS = [
   { value: "NUMERIC", label: "数值 (NUMERIC)" },
 ];
 
-const CATEGORY_OPTIONS = (Object.keys(MEASURE_CATEGORY_LABEL) as MeasureCategory[]).map((v) => ({
-  value: v,
-  label: MEASURE_CATEGORY_LABEL[v],
-}));
-
 function flattenDomainNames(nodes: SubjectDomainTreeNode[], acc: Map<string, string>) {
   for (const n of nodes) {
     acc.set(n.code, n.name);
@@ -107,6 +103,8 @@ export function MeasureCatalogs() {
   // 回收站视图：deleted=true 时列出已软删度量（仅管理员/原 Owner 可恢复）
   const [deleted, setDeleted] = useState(false);
   const [domainOptions, setDomainOptions] = useState<{ value: string; label: string }[]>([]);
+  // 度量分类下拉：字典化后从 system_dict（dict_type=measure_category）动态读取
+  const [categoryOptions, setCategoryOptions] = useState<{ value: string; label: string }[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<MeasureCatalog | null>(null);
   const [saving, setSaving] = useState(false);
@@ -160,7 +158,7 @@ export function MeasureCatalogs() {
       setItems(res.items);
       setTotal(res.total);
     } catch (e) {
-      message.error(errMsg(e, "加载度量目录失败"));
+      message.error(errMsg(e, "加载原子指标口径库失败"));
     } finally {
       setLoading(false);
     }
@@ -191,6 +189,17 @@ export function MeasureCatalogs() {
         flattenDomainNames(tree, map);
         setDomainOptions([...map.entries()].map(([value, name]) => ({ value, label: `${name} (${value})` })));
       })
+      .catch(() => undefined);
+  }, []);
+
+  // 度量分类字典化：动态加载 system_dict 中 measure_category 的 active 项
+  useEffect(() => {
+    listDictItems("measure_category")
+      .then((items) =>
+        setCategoryOptions(
+          items.map((it) => ({ value: it.code, label: MEASURE_CATEGORY_LABEL[it.code] ?? it.label })),
+        ),
+      )
       .catch(() => undefined);
   }, []);
 
@@ -420,7 +429,7 @@ export function MeasureCatalogs() {
 
   return (
     <Card
-      title="逻辑度量目录"
+      title="原子指标口径库"
       extra={
         canWrite ? (
           <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
@@ -740,9 +749,9 @@ export function MeasureCatalogs() {
             name="category"
             label="度量分类"
             rules={[{ required: true, message: "请选择度量分类" }]}
-            extra="按业务视角组织度量目录：流量/费用/药品/医保/效率/质量"
+            extra="按业务视角组织原子指标口径：流量/费用/药品/医保/效率/质量"
           >
-            <Select options={CATEGORY_OPTIONS} placeholder="选择度量分类" />
+            <Select options={categoryOptions} placeholder="选择度量分类" />
           </Form.Item>
           <Form.Item
             name="stat_caliber"

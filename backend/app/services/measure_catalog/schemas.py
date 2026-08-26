@@ -14,7 +14,6 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from app.models.measure_catalog import MeasureCategory, MeasureFormat
 
 _VALID_FORMATS = {e.value for e in MeasureFormat}
-_VALID_CATEGORIES = {e.value for e in MeasureCategory}
 
 #: 度量格式 → 默认单位/默认小数位（PRD FR-02-08 单位与默认值联动）
 _FORMAT_DEFAULTS: dict[str, tuple[str, int | None]] = {
@@ -60,8 +59,12 @@ class MeasureCreate(BaseModel):
     @field_validator("category")
     @classmethod
     def _category_valid(cls, v: str) -> str:
-        if v not in _VALID_CATEGORIES:
-            raise ValueError(f"未知度量分类: {v}（须为 {sorted(_VALID_CATEGORIES)}）")
+        # 字典化后分类值由 service 层校验（dict_type=measure_category），
+        # 此处仅保证非空 + 长度（对齐模型列 String(32)），不再硬编码枚举集合。
+        if not v.strip():
+            raise ValueError("度量分类不能为空")
+        if len(v) > 32:
+            raise ValueError("度量分类长度不能超过 32")
         return v
 
     @field_validator("measure_format")
@@ -114,8 +117,9 @@ class MeasureUpdate(BaseModel):
     @field_validator("category")
     @classmethod
     def _category_valid(cls, v: str | None) -> str | None:
-        if v is not None and v not in _VALID_CATEGORIES:
-            raise ValueError(f"未知度量分类: {v}（须为 {sorted(_VALID_CATEGORIES)}）")
+        # 字典化后分类值由 service 层校验（dict_type=measure_category），此处仅限长。
+        if v is not None and len(v) > 32:
+            raise ValueError("度量分类长度不能超过 32")
         return v
 
 

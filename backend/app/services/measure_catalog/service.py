@@ -108,6 +108,34 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
 
         return await generate_unique_code(base, _exists)
 
+    async def _validate_category(self, category: str) -> None:
+        """校验度量分类存在且 active（字典化后，dict_type=measure_category）。
+
+        语义：字典类型未配置（未种子/空表）→ 回退枚举种子值校验（兼容历史环境）；
+        类型已配置但值不在 → 拦截（DICT_VALUE_NOT_FOUND）；值已停用 → 拦截
+        （DICT_VALUE_INACTIVE）；DB 查询异常 → best-effort 放行（不阻断业务）。
+        """
+        from app.core.exceptions import BusinessError, NotFoundError
+        from app.services.system_dict.service import SystemDictService
+
+        if not category:
+            return
+        try:
+            svc = SystemDictService(self._db)
+            if not await svc.list_by_type("measure_category", status="active"):
+                if category not in _VALID_CATEGORIES:
+                    raise ValidationError(
+                        f"未知度量分类: {category}",
+                        error_code="INVALID_MEASURE_CATEGORY",
+                        ctx={"category": category},
+                    )
+                return
+            await svc.validate_dict_value("measure_category", category)
+        except (NotFoundError, BusinessError, ValidationError):
+            raise
+        except Exception:
+            return
+
     async def create_measure(
         self, data: MeasureCreate, actor_id: int | None = None
     ) -> MeasureCatalog:
@@ -123,6 +151,8 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
                 error_code="INVALID_MEASURE_FORMAT",
                 ctx={"format": data.measure_format},
             )
+        # 度量分类字典化校验（存在且 active；字典未配置时回退枚举种子值）
+        await self._validate_category(data.category or MeasureCategory.OTHER.value)
         # 度量格式联动默认（缺省已由 schema 填充，此处兜底显式赋值）
         default_unit, default_decimal = _FORMAT_DEFAULTS[data.measure_format]
         measure = MeasureCatalog(
@@ -224,12 +254,7 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
         if data.synonyms is not None:
             measure.synonyms = data.synonyms
         if data.category is not None:
-            if data.category not in _VALID_CATEGORIES:
-                raise ValidationError(
-                    f"未知度量分类: {data.category}",
-                    error_code="INVALID_MEASURE_CATEGORY",
-                    ctx={"category": data.category},
-                )
+            await self._validate_category(data.category)
             measure.category = data.category
         if data.stat_caliber is not None:
             measure.stat_caliber = data.stat_caliber

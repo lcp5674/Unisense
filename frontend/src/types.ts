@@ -1067,14 +1067,8 @@ export interface DimensionMetricBinding {
 
 export type MeasureFormat = "AMOUNT" | "RATIO" | "NUMERIC";
 
-export type MeasureCategory =
-  | "FLOW"
-  | "FEE"
-  | "DRUG"
-  | "MEDICAL_INSURANCE"
-  | "EFFICIENCY"
-  | "QUALITY"
-  | "OTHER";
+/** 度量分类（字典化：种子值为 FLOW/FEE/DRUG/MEDICAL_INSURANCE/EFFICIENCY/QUALITY/OTHER，可经「系统设置 → 字典管理」自定义扩展） */
+export type MeasureCategory = string;
 
 export interface MeasureCatalog extends ReviewFields {
   id: number;

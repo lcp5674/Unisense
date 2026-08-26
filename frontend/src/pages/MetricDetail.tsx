@@ -2188,7 +2188,7 @@ export function MetricDetail() {
           type="warning"
           showIcon
           message="该原子指标未关联逻辑度量（存量旧式来源）"
-          description="按 OneData 规范，原子指标应关联「指标资产 → 度量目录」中的逻辑度量（继承度量格式/单位/小数位），不直接绑定物理表。建议先创建逻辑度量，再编辑该指标关联。"
+          description="按 OneData 规范，原子指标应关联「指标资产 → 原子指标口径库」中的逻辑度量（继承度量格式/单位/小数位），不直接绑定物理表。建议先创建逻辑度量，再编辑该指标关联。"
           style={{ marginBottom: 16 }}
         />
       )}
@@ -2854,8 +2854,8 @@ export function MetricDetail() {
               触发版本确认）。 */}
           {metric.type === "atomic" && (
             <Form.Item
-              label="逻辑度量（度量目录，OneData 原子层）"
-              tooltip="原子指标 = 逻辑度量 + 聚合方式，不直接绑定物理表；度量格式/单位/小数位由度量目录继承。更换/解除关联属破坏性口径变更，已发布指标需消费方确认。"
+              label="逻辑度量（原子指标口径库，OneData 原子层）"
+              tooltip="原子指标 = 逻辑度量 + 聚合方式，不直接绑定物理表；度量格式/单位/小数位由原子指标口径库继承。更换/解除关联属破坏性口径变更，已发布指标需消费方确认。"
               style={{ marginBottom: 8 }}
               extra={
                 editMeasureId == null
@@ -2876,7 +2876,7 @@ export function MetricDetail() {
                 options={editMeasureOptions}
                 loading={editMeasureLoading}
                 notFoundContent={
-                  editMeasureLoading ? "加载中…" : "暂无已发布逻辑度量，请先到「度量目录」创建"
+                  editMeasureLoading ? "加载中…" : "暂无已发布逻辑度量，请先到「原子指标口径库」创建"
                 }
                 {...DROPDOWN_FULL_WIDTH}
               />

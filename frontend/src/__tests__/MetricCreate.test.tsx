@@ -1326,7 +1326,7 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     await goToStep(1);
     // 原子来源配置区（逻辑度量 + 兼容旧式源表/度量列/周期）展示
     expect(screen.getByText("② 原子来源（逻辑度量 + 聚合方式）")).toBeTruthy();
-    expect(screen.getByText("逻辑度量（度量目录，OneData 原子层）")).toBeTruthy();
+    expect(screen.getByText("逻辑度量（原子指标口径库，OneData 原子层）")).toBeTruthy();
     expect(screen.getByText("源表名（兼容旧式来源，可选）")).toBeTruthy();
     expect(screen.getByText("度量列（兼容旧式来源，可选）")).toBeTruthy();
     expect(screen.getByText("统计周期（兼容旧式推断，可选）")).toBeTruthy();

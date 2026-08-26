@@ -113,7 +113,7 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
       { key: "/metrics/review", label: "指标审批", icon: <AuditOutlined /> },
       { key: "/domains", label: "主题域管理", icon: <ApartmentOutlined /> },
       { key: "/dimensions", label: "维度管理", icon: <PartitionOutlined /> },
-      { key: "/measure-catalogs", label: "度量目录", icon: <TagsOutlined /> },
+      { key: "/measure-catalogs", label: "原子指标口径库", icon: <TagsOutlined /> },
       { key: "/glossary", label: "术语表", icon: <BookOutlined /> },
     ],
   },
@@ -250,7 +250,7 @@ const SEARCH_TYPE_LABEL: Record<GlobalSearchType, string> = {
   catalog: "采集目录",
   field: "字段",
   subject_domain: "主题域",
-  measure: "度量目录",
+  measure: "原子指标口径库",
 };
 
 // 顶栏下拉分组展示顺序

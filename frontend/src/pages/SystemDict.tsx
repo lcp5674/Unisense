@@ -28,6 +28,8 @@ const DICT_TYPE_LABELS: Record<string, string> = {
   // PII 合规增强：敏感规则类别与规则配置（供敏感分级规则引擎 DB 可配置）
   pii_category: "PII 类别",
   pii_rule: "PII 规则",
+  // 原子指标口径库：度量分类（dict_type=measure_category，在线增删改/启停用）
+  measure_category: "度量分类",
 };
 
 // 打开新增弹窗时静默刷新的最小间隔（毫秒）：TTL 内重复打开直接用缓存，避免

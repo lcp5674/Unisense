@@ -15,7 +15,7 @@ const TYPE_LABEL: Record<GlobalSearchType, string> = {
   catalog: "采集目录",
   field: "字段",
   subject_domain: "主题域",
-  measure: "度量目录",
+  measure: "原子指标口径库",
 };
 
 const TYPE_COLOR: Record<GlobalSearchType, string> = {

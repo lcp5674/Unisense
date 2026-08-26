@@ -2644,7 +2644,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     fireEvent.click(await screen.findByRole("button", { name: /变更申请/ }));
     await waitFor(() => expect(document.querySelector(".ant-modal")).toBeTruthy());
     // 逻辑度量选择器（atomic 专属，位于名称后、粒度前，是弹窗内首个 Select）
-    expect(screen.getByText("逻辑度量（度量目录，OneData 原子层）")).toBeInTheDocument();
+    expect(screen.getByText("逻辑度量（原子指标口径库，OneData 原子层）")).toBeInTheDocument();
     // 选择新度量
     fireEvent.mouseDown(document.querySelector(".ant-modal .ant-select-selector") as HTMLElement);
     await screen.findByText("成交总额（gmv_amt）");

@@ -135,6 +135,39 @@ class TestMeasureRepository:
 # ---------- Service ----------
 
 
+@pytest.fixture(autouse=True)
+def _mock_dict_service(monkeypatch: pytest.MonkeyPatch) -> type:
+    """mock SystemDictService（category 字典化后 service 层校验的依赖）。
+
+    默认「类型已配置」：list_by_type 非空 → 走 validate_dict_value；
+    validate_dict_value 默认放行（模拟值已收录），可设 reject_values 模拟未收录拦截。
+    测试可通过 ``_mock_dict_service.configured = False`` 模拟「字典未配置」回退枚举。
+    """
+    from app.core.exceptions import NotFoundError
+
+    class _FakeDictService:
+        configured = True  # False → list_by_type 返回空（回退枚举种子校验）
+        reject_values: set[str] = set()  # 非空 → 这些值 validate 时抛 NotFoundError
+
+        def __init__(self, db: object) -> None:
+            self.db = db
+
+        async def list_by_type(self, dict_type: str, status: str | None = "active") -> list:
+            return [object()] if self.__class__.configured else []
+
+        async def validate_dict_value(self, dict_type: str, code: str) -> object:
+            if code in self.__class__.reject_values:
+                raise NotFoundError(
+                    f"字典值不存在: {dict_type}/{code}", error_code="DICT_VALUE_NOT_FOUND"
+                )
+            return object()
+
+    monkeypatch.setattr(
+        "app.services.system_dict.service.SystemDictService", _FakeDictService
+    )
+    return _FakeDictService
+
+
 async def _svc() -> tuple[MeasureCatalogService, MagicMock]:
     db = MagicMock()
     svc = MeasureCatalogService(db)
@@ -213,12 +246,39 @@ class TestMeasureService:
         assert out.category == "FLOW"
         assert out.stat_caliber == "挂号记录数去重后计数"
 
-    async def test_create_rejects_invalid_category(self) -> None:
-        from pydantic import ValidationError
+    async def test_create_rejects_unknown_category_via_dict(
+        self, _mock_dict_service: type
+    ) -> None:
+        """分类字典化：字典已配置时未收录值在 service 层拦截（DICT_VALUE_NOT_FOUND）。"""
+        _mock_dict_service.reject_values = {"BOGUS"}
+        svc, repo = await _svc()
+        with pytest.raises(NotFoundError):
+            await svc.create_measure(
+                MeasureCreate(measure_code="m", name="x", domain="y", category="BOGUS")
+            )
+
+    async def test_create_accepts_dict_custom_category(self) -> None:
+        """分类字典化：字典已配置且收录的自定义值可通过（不再硬编码枚举）。"""
+        svc, repo = await _svc()
+        out = await svc.create_measure(
+            MeasureCreate(measure_code="m", name="运营类", domain="y", category="OPERATION")
+        )
+        assert out.category == "OPERATION"
+
+    async def test_create_fallback_to_enum_when_dict_unconfigured(
+        self, _mock_dict_service: type
+    ) -> None:
+        """分类字典化：字典未配置（空表/未种子）→ 回退枚举种子值校验。"""
+        from app.core.exceptions import ValidationError
 
         svc, repo = await _svc()
-        with pytest.raises(ValidationError):
-            MeasureCreate(measure_code="m", name="x", domain="y", category="BOGUS")
+        _mock_dict_service.configured = False
+        try:
+            with pytest.raises(ValidationError):
+                await svc._validate_category("BOGUS")  # noqa: SLF001 未配置时枚举兜底拦截
+            await svc._validate_category("FLOW")  # noqa: SLF001 枚举种子值放行
+        finally:
+            _mock_dict_service.configured = True
 
     async def test_update_category_and_caliber(self) -> None:
         svc, repo = await _svc()
@@ -231,11 +291,18 @@ class TestMeasureService:
         assert m.category == "DRUG"
         assert m.stat_caliber == "处方明细按开方日期汇总"
 
-    async def test_update_rejects_invalid_category(self) -> None:
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError):
-            MeasureUpdate(category="BOGUS")
+    async def test_update_rejects_unknown_category_via_dict(
+        self, _mock_dict_service: type
+    ) -> None:
+        """分类字典化：更新时字典已配置且未收录值在 service 层拦截。"""
+        _mock_dict_service.reject_values = {"BOGUS"}
+        svc, repo = await _svc()
+        m = _m("amt", category="OTHER")
+        repo.get = AsyncMock(return_value=m)
+        with pytest.raises(NotFoundError):
+            await svc.update_measure("amt", MeasureUpdate(category="BOGUS"))
+        # 拦截发生在赋值前，原值保持
+        assert m.category == "OTHER"
 
     async def test_create_rejects_invalid_format(self) -> None:
         from pydantic import ValidationError

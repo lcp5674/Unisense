@@ -1692,12 +1692,12 @@ export function MetricCreate() {
                 <>
                   <Form.Item
                     name="measure_id"
-                    label="逻辑度量（度量目录，OneData 原子层）"
+                    label="逻辑度量（原子指标口径库，OneData 原子层）"
                     extra={
                       <>
                         {selectedMeasure
                           ? `继承：${MEASURE_FORMAT_LABEL[selectedMeasure.measure_format] ?? selectedMeasure.measure_format} · 单位 ${selectedMeasure.default_unit || "—"} · 小数位 ${selectedMeasure.default_decimal_places ?? "按需"}${selectedMeasure.source_system?.length ? ` · 源头系统 ${selectedMeasure.source_system.join("/")}` : ""}`
-                          : "原子指标 = 逻辑度量 + 聚合方式，不直接绑定物理表；度量格式/单位/小数位由度量目录继承"}
+                          : "原子指标 = 逻辑度量 + 聚合方式，不直接绑定物理表；度量格式/单位/小数位由原子指标口径库继承"}
                         {measureSuggestions.length > 0 && !selectedMeasure ? (
                           <div style={{ marginTop: 4 }}>
                             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
@@ -1921,7 +1921,7 @@ export function MetricCreate() {
                     label: (
                       <span>
                         高级治理设置
-                        <Tag style={{ marginLeft: 8 }} color="blue">已由域默认/度量目录自动接管</Tag>
+                        <Tag style={{ marginLeft: 8 }} color="blue">已由域默认/原子指标口径库自动接管</Tag>
                       </span>
                     ),
                     children: (
@@ -2946,7 +2946,7 @@ export function MetricCreate() {
             {measureSuggestions.length > 0 ? (
               <div style={{ marginBottom: 12 }}>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  推荐逻辑度量（命中已发布度量目录，点击一键应用为原子指标的继承源）：
+                  推荐逻辑度量（命中已发布原子指标口径库，点击一键应用为原子指标的继承源）：
                 </Typography.Text>
                 <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 8 }}>
                   {measureSuggestions.map((s) => (

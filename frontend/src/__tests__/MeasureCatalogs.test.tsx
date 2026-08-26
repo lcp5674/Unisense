@@ -26,6 +26,7 @@ vi.mock("../api", () => ({
   batchDeleteMeasures: vi.fn(),
   fetchCurrentUser: vi.fn(),
   listDomainTree: vi.fn(),
+  listDictItems: vi.fn(),
   listUsers: vi.fn(),
   autoSuggestMeasureCatalog: vi.fn(),
   UnisenseApiError: class extends Error {},
@@ -38,6 +39,7 @@ import {
   createMeasureCatalog,
   deleteMeasureCatalog,
   fetchCurrentUser,
+  listDictItems,
   listDomainTree,
   listMeasureCatalogs,
   listUsers,
@@ -51,6 +53,7 @@ import { PermissionProvider } from "../hooks/usePermission";
 
 const mockedList = vi.mocked(listMeasureCatalogs);
 const mockedDomains = vi.mocked(listDomainTree);
+const mockedDictItems = vi.mocked(listDictItems);
 const mockedSuggest = vi.mocked(autoSuggestMeasureCatalog);
 const mockedCreate = vi.mocked(createMeasureCatalog);
 const mockedSubmit = vi.mocked(submitMeasureCatalog);
@@ -132,10 +135,22 @@ async function openCreateModal() {
   return modal;
 }
 
+// 度量分类字典种子（对齐 MeasureCategory 枚举，供 listDictItems mock）
+const MOCK_CATEGORY_DICT = [
+  { id: 1, dict_type: "measure_category", code: "FLOW", label: "流量类", sort_order: 0, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "" },
+  { id: 2, dict_type: "measure_category", code: "FEE", label: "费用类", sort_order: 1, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "" },
+  { id: 3, dict_type: "measure_category", code: "DRUG", label: "药品类", sort_order: 2, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "" },
+  { id: 4, dict_type: "measure_category", code: "MEDICAL_INSURANCE", label: "医保类", sort_order: 3, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "" },
+  { id: 5, dict_type: "measure_category", code: "EFFICIENCY", label: "效率类", sort_order: 4, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "" },
+  { id: 6, dict_type: "measure_category", code: "QUALITY", label: "质量类", sort_order: 5, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "" },
+  { id: 7, dict_type: "measure_category", code: "OTHER", label: "其他", sort_order: 6, status: "active", description: null, ref_count: 0, created_at: "", updated_at: "" },
+];
+
 describe("MeasureCatalogs 度量目录 AI 推断", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockedList.mockResolvedValue({ items: [measure], total: 1, page: 1, page_size: 20 });
+    mockedDictItems.mockResolvedValue(MOCK_CATEGORY_DICT);
     mockedDomains.mockResolvedValue([
       {
         id: 1,
@@ -163,6 +178,12 @@ describe("MeasureCatalogs 度量目录 AI 推断", () => {
     renderCatalogs();
     expect(await screen.findByText("门诊收费金额")).toBeInTheDocument();
     expect(screen.getByText("费用类")).toBeInTheDocument();
+  });
+
+  it("分类下拉从字典动态加载（listDictItems(measure_category)）", async () => {
+    renderCatalogs();
+    await openCreateModal();
+    await waitFor(() => expect(mockedDictItems).toHaveBeenCalledWith("measure_category"));
   });
 
   it("新建弹窗展示「AI 推断」按钮，名称+描述推断后回填字段并标注来源", async () => {
@@ -238,6 +259,7 @@ describe("MeasureCatalogs 度量目录 AI 推断", () => {
 describe("MeasureCatalogs 审核流（提交审核/通过/驳回）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockedDictItems.mockResolvedValue(MOCK_CATEGORY_DICT);
     mockedDomains.mockResolvedValue([]);
     mockedUsers.mockResolvedValue([
       {
@@ -395,6 +417,7 @@ describe("MeasureCatalogs 审核流（提交审核/通过/驳回）", () => {
 describe("MeasureCatalogs 生命周期（重新启用/删除/回收站恢复）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockedDictItems.mockResolvedValue(MOCK_CATEGORY_DICT);
     mockedDomains.mockResolvedValue([]);
     mockedUsers.mockResolvedValue([]);
     mockedCurrentUser.mockResolvedValue({
