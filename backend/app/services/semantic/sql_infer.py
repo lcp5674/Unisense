@@ -102,6 +102,10 @@ _COMBINED_AGG_MAP = {
     "countif": "COUNT",
     "maxmerge": "MAX",
     "minmerge": "MIN",
+    "maxif": "MAX",       # 条件极值（maxIf(amount, cond)）——此前未映射被兜底为 SUM
+    "minif": "MIN",       # 语义错误（maxIf 是 MAX 不是 SUM），补齐归一到正确枚举
+    "argmaxif": "MAX",
+    "argminif": "MIN",
 }
 
 # 方言聚合函数名（AnonymousAggFunc/ParameterizedAgg 的 this 字符串）→ 注册枚举聚合。
@@ -120,6 +124,7 @@ _DIALECT_AGG_MAP = {
     "quantileexact": "PERCENTILE",
     "percentileapprox": "PERCENTILE",
     "approxquantile": "PERCENTILE",
+    "approx_percentile": "PERCENTILE",  # Snowflake/Spark/Trino 分位数（函数名形态）
     "argmax": "MAX",
     "argmin": "MIN",
     "topk": "COUNT",
@@ -129,13 +134,27 @@ _DIALECT_AGG_MAP = {
     "stringagg": "COUNT",
     "listagg": "COUNT",
     "anyif": "COUNT",
+    "anylast": "COUNT",          # ClickHouse anyLast（匿名聚合函数名形态）
+    "groupuniqarray": "COUNT",   # ClickHouse groupUniqArray（数组去重→近似计数）
+    "histogram": "COUNT",        # ClickHouse/Trino histogram（分布桶→近似计数）
+    "sumwithoverflow": "SUM",    # ClickHouse sumWithOverflow（溢出不换 SUM 语义）
+    "avgweighted": "AVG",        # ClickHouse avgWeighted（加权均值）
+    "count_big": "COUNT",        # T-SQL COUNT_BIG（Count 类 key 已合法，兜底函数名形态）
+    "collect_list": "COUNT",     # Spark collect_list（数组聚合→近似计数）
+    "collect_set": "COUNT",      # Spark collect_set（去重数组→近似计数）
+    "first": "FIRST_VALUE",      # Spark/Hive first（方言下可能 AnonymousAggFunc）
+    "last": "LAST_VALUE",        # Spark/Hive last
+    "arrayagg": "COUNT",         # PG/Spark array_agg（数组聚合→近似计数）
 }
 # 无注册枚举可归一的统计聚合（相关性/协方差/回归/标准差/方差）→ 返回 None 跳过
 # 该度量（诚实不产出非法候选，避免注册失败/口径错误），不崩溃不炸整批。
+# 含函数名形态（stdev/stdevp/std/var/varp）——某些方言下统计聚合解析为
+# AnonymousAggFunc（this 是函数名字符串），若不入 skip 会产出非法枚举。
 _DIALECT_AGG_SKIP = {
     "corr", "covar_pop", "covar_samp", "regr_slope", "regr_r2", "regr_intercept",
     "stddev", "stddevpop", "stddevsamp", "stddev_samp", "varpop", "varsamp",
     "var_pop", "var_samp", "variance",
+    "stdev", "stdevp", "std", "var", "varp",  # T-SQL/MySQL 简写（函数名形态防御）
 }
 
 
@@ -304,8 +323,28 @@ def _agg_display_name(agg: exp.AggFunc) -> str | None:
         return "FIRST_VALUE"
     if key in ("LASTVALUE", "LAST_VALUE"):
         return "LAST_VALUE"
+    # 方言首/末值聚合：Spark/Hive/CH first()/last() 解析为 First/Last 类（key=FIRST/
+    # LAST，无下划线）→ 归一到注册枚举 FIRST_VALUE/LAST_VALUE，否则产出非法枚举
+    # FIRST/LAST → 批量创建 pydantic 整批失败（P1-4 同类缺陷）。
+    if key == "FIRST":
+        return "FIRST_VALUE"
+    if key == "LAST":
+        return "LAST_VALUE"
     if key.startswith("PERCENTILE"):
         return "PERCENTILE"
+    # 数组/布尔/任意值聚合类（sqlglot 内置子类，key 无下划线）：array_agg→COUNT、
+    # bool_and/bool_or→COUNT、any()/arbitrary()/ANY_VALUE→COUNT、APPROX_TOP_K→COUNT、
+    # collect_set→COUNT——均按「近似计数语义」归一到注册枚举，否则产出非法枚举
+    # （ARRAYAGG/LOGICALAND/LOGICALOR/ANYVALUE/APPROXTOPK/ARRAYUNIQUEAGG）导致
+    # 批量创建整批失败（P1-4 同类缺陷）。
+    if key in ("ARRAYAGG", "ARRAYUNIQUEAGG"):
+        return "COUNT"
+    if key in ("LOGICALAND", "LOGICALOR"):
+        return "COUNT"
+    if key == "ANYVALUE":
+        return "COUNT"
+    if key == "APPROXTOPK":
+        return "COUNT"
     # 方言统计聚合专用类（Quantile/Corr/Stddev 等，this 是 Column 非字符串）：
     # 统一按函数名归一/跳过——quantile → PERCENTILE，corr/stddev/var → None 跳过
     # （无注册枚举可归一的统计聚合，诚实不产出非法候选）
@@ -618,11 +657,16 @@ def _detect_time_column(
     return None
 
 
-# 方言特有聚合函数名（文本命中才遍历方言择优——避免普通 SQL 每条全方言解析的性能损耗）
+# 方言特有聚合函数名（文本命中才遍历方言择优——避免普通 SQL 每条全方言解析的性能损耗）。
+# 注意函数名带下划线的（COUNT_BIG/collect_list/collect_set/approx_percentile）必须用
+# 真实下划线形式，否则默认方言成功解析（降级非 AggFunc）时 hint 不命中 → 不触发择优
+# → 该方言聚合 measures=0 推断退化。
 _DIALECT_AGG_HINT = re.compile(
     r"\b(summerge|sumif|sumdistinct|avgmerge|avgif|countif|countmerge|maxmerge|"
-    r"minmerge|approx_distinct|approx_count_distinct|percentile_approx|uniq|uniqexact|"
-    r"quantile|grouparray|topk|anyif|corr|covar_pop|regr_slope|stddev|var_pop)\b",
+    r"minmerge|maxif|minif|argmaxif|argminif|sumwithoverflow|avgweighted|anylast|"
+    r"groupuniqarray|histogram|arbitrary|count_big|approx_distinct|approx_count_distinct|"
+    r"approx_percentile|percentile_approx|uniq|uniqexact|quantile|grouparray|"
+    r"topk|collect_list|collect_set|listagg|stringagg|anyif|corr|covar_pop|regr_slope|stddev|var_pop)\b",
     re.IGNORECASE,
 )
 

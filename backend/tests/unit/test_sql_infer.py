@@ -452,3 +452,103 @@ class TestParseSqlProfile:
         assert p.measures[0]["alias"] == "current_month_active_doctor_cnt"
         assert "wedw_dw.src" in p.source_tables
         assert p.time_granularity == "month"
+
+    # ------------------------------------------------------------
+    # 方言覆盖（第二轮补齐）：默认方言识别为 AggFunc 子类但 key 未映射 → 非法枚举
+    # （P1-4 同类：批量创建 pydantic 整批失败）；hint 未命中 → 方言聚合降级 measures=0
+    # ------------------------------------------------------------
+
+    def test_dialect_first_last_normalized(self) -> None:
+        """Spark/Hive/CH first()/last()（First/Last 类，key=FIRST/LAST）→ FIRST_VALUE/LAST_VALUE。
+
+        此前产出非法枚举 FIRST/LAST → 批量创建 pydantic 整批失败（P1-4 同类缺陷）。
+        """
+        p = parse_sql_profile(
+            "SELECT first(amount) AS f, last(amount) AS l FROM t GROUP BY dept"
+        )
+        aggs = {(m["column"], m["agg"]) for m in p.measures}
+        assert ("amount", "FIRST_VALUE") in aggs
+        assert ("amount", "LAST_VALUE") in aggs
+
+    def test_dialect_array_and_bool_aggs_normalized(self) -> None:
+        """PG/Spark array_agg、PG bool_and/bool_or、BQ ANY_VALUE、Snow APPROX_TOP_K
+        → 近似计数 COUNT（此前产出非法枚举 ARRAYAGG/LOGICALAND/LOGICALOR/ANYVALUE/
+        APPROXTOPK → 批量创建整批失败）。"""
+        p = parse_sql_profile(
+            "SELECT array_agg(user_id) AS uids, bool_and(flag) AS ba, bool_or(flag) AS bo "
+            "FROM t GROUP BY dept"
+        )
+        assert {m["agg"] for m in p.measures} == {"COUNT"}
+        p2 = parse_sql_profile("SELECT ANY_VALUE(status) AS s FROM t GROUP BY dept")
+        assert {m["agg"] for m in p2.measures} == {"COUNT"}
+        p3 = parse_sql_profile("SELECT APPROX_TOP_K(status, 5) AS t FROM t GROUP BY dept")
+        assert {m["agg"] for m in p3.measures} == {"COUNT"}
+
+    def test_dialect_clickhouse_conditional_extreme(self) -> None:
+        """CH maxIf/minIf/argMaxIf（CombinedAggFunc）→ MAX/MIN。
+
+        此前 _COMBINED_AGG_MAP 无 maxif/minif → 兜底归 SUM（语义错误：maxIf 是 MAX
+        不是 SUM），且 hint 未命中不触发方言择优 → measures=0 推断退化。
+        """
+        p = parse_sql_profile(
+            "SELECT maxIf(amount, status='ok') AS m, minIf(amount, status='ok') AS mn, "
+            "argMaxIf(amount, ts, flag=1) AS a FROM t"
+        )
+        aggs = {(m["column"], m["agg"]) for m in p.measures}
+        assert ("amount", "MAX") in aggs
+        assert ("amount", "MIN") in aggs
+        assert ("amount", "MAX") in aggs  # argMaxIf 同 MAX
+
+    def test_dialect_ch_overflow_weighted(self) -> None:
+        """CH sumWithOverflow → SUM、avgWeighted → AVG（AnonymousAggFunc 函数名形态）。"""
+        p = parse_sql_profile(
+            "SELECT sumWithOverflow(amount) AS s, avgWeighted(amount, w) AS aw FROM t"
+        )
+        assert {m["agg"] for m in p.measures} == {"SUM", "AVG"}
+
+    def test_dialect_approx_percentile_and_arbitrary(self) -> None:
+        """Snow/Spark/Trino approx_percentile → PERCENTILE（hint 缺导致 measures=0 退化）；
+        Trino arbitrary（AnyValue 类）→ COUNT。"""
+        p = parse_sql_profile(
+            "SELECT approx_percentile(amount, 0.5) AS p50, arbitrary(status) AS s FROM t"
+        )
+        aggs = {m["agg"] for m in p.measures}
+        assert "PERCENTILE" in aggs
+        assert "COUNT" in aggs
+
+    def test_dialect_collect_and_countbig(self) -> None:
+        """Spark collect_list/collect_set（ArrayAgg/ArrayUniqueAgg）→ COUNT；
+        T-SQL COUNT_BIG（tsql 方言 Count 类）→ COUNT（hint 用带下划线函数名才触发择优）。"""
+        p = parse_sql_profile(
+            "SELECT collect_list(user_id) AS u, collect_set(user_id) AS us FROM t GROUP BY dept"
+        )
+        assert {m["agg"] for m in p.measures} == {"COUNT"}
+        p2 = parse_sql_profile("SELECT COUNT_BIG(*) AS c FROM t")
+        assert {m["agg"] for m in p2.measures} == {"COUNT"}
+
+    def test_dialect_listagg_and_groupuniq(self) -> None:
+        """Snow LISTAGG（GroupConcat 类）→ COUNT；CH groupUniqArray → COUNT（hint 触发择优）。"""
+        p = parse_sql_profile(
+            "SELECT LISTAGG(status, ',') AS l, groupUniqArray(user_id) AS u FROM t GROUP BY dept"
+        )
+        assert {m["agg"] for m in p.measures} == {"COUNT"}
+
+    def test_dialect_stat_aggs_skipped_honestly(self) -> None:
+        """T-SQL STDEV/VAR、MySQL STD/STDDEV_POP（Stddev/Variance 类）→ 诚实跳过（空画像），
+        不产出非法枚举——与 corr/stddev 统计聚合降级哲学一致。"""
+        for sql in (
+            "SELECT STDEV(amount) AS sd, VAR(amount) AS vr FROM dbo.t",
+            "SELECT STD(amount) AS s, STDDEV_POP(amount) AS sp FROM t_trade",
+        ):
+            assert parse_sql_profile(sql).measures == []
+
+    def test_dialect_unknown_aggs_degrade_empty(self) -> None:
+        """sqlglot 各方言均不识别的罕见聚合（Oracle WM_CONCAT / CH medianExact /
+        Trino map_agg / BQ APPROX_TOP_COUNT）→ 诚实降级空画像，不产出非法候选。"""
+        for sql in (
+            "SELECT WM_CONCAT(status) AS s FROM t GROUP BY dept",
+            "SELECT medianExact(amount) AS m FROM t",
+            "SELECT map_agg(k, v) AS m FROM t GROUP BY dept",
+            "SELECT APPROX_TOP_COUNT(status, 10) AS t FROM t",
+        ):
+            assert parse_sql_profile(sql).measures == []
