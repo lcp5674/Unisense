@@ -563,20 +563,24 @@ async def sql_infer_eval_samples_create(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[Any]:
     """创建自定义样本（case_id 唯一 + 期望合法性校验），返回落库样本。"""
+    from app.core.exceptions import ValidationError
     from app.services.semantic.sql_infer_eval.schemas import _measures_to_dicts
     from app.services.semantic.sql_infer_eval.service import create_sample
 
-    row = await create_sample(
-        db,
-        case_id=request.case_id,
-        dialect=request.dialect,
-        sql=request.sql,
-        expected_period=request.expected_period,
-        expected_measures=_measures_to_dicts(request.expected_measures),
-        expected_tables=list(request.expected_tables or []),
-        note=request.note,
-        actor_id=user.id,
-    )
+    try:
+        row = await create_sample(
+            db,
+            case_id=request.case_id,
+            dialect=request.dialect,
+            sql=request.sql,
+            expected_period=request.expected_period,
+            expected_measures=_measures_to_dicts(request.expected_measures),
+            expected_tables=list(request.expected_tables or []),
+            note=request.note,
+            actor_id=user.id,
+        )
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from None
     await write_audit(
         db,
         actor_id=user.id,
@@ -604,27 +608,31 @@ async def sql_infer_eval_samples_update(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[Any]:
     """更新自定义样本（仅提交字段变更；内置基线样本只读拒绝）。"""
+    from app.core.exceptions import ValidationError
     from app.services.semantic.sql_infer_eval.schemas import _measures_to_dicts
     from app.services.semantic.sql_infer_eval.service import update_sample
 
-    row = await update_sample(
-        db,
-        sample_id,
-        case_id=request.case_id,
-        dialect=request.dialect,
-        sql=request.sql,
-        expected_period=request.expected_period,
-        expected_measures=(
-            _measures_to_dicts(request.expected_measures)
-            if request.expected_measures is not None
-            else None
-        ),
-        expected_tables=(
-            list(request.expected_tables) if request.expected_tables is not None else None
-        ),
-        note=request.note,
-        enabled=request.enabled,
-    )
+    try:
+        row = await update_sample(
+            db,
+            sample_id,
+            case_id=request.case_id,
+            dialect=request.dialect,
+            sql=request.sql,
+            expected_period=request.expected_period,
+            expected_measures=(
+                _measures_to_dicts(request.expected_measures)
+                if request.expected_measures is not None
+                else None
+            ),
+            expected_tables=(
+                list(request.expected_tables) if request.expected_tables is not None else None
+            ),
+            note=request.note,
+            enabled=request.enabled,
+        )
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from None
     await write_audit(
         db,
         actor_id=user.id,
@@ -651,9 +659,13 @@ async def sql_infer_eval_samples_delete(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[Any]:
     """软删自定义样本（可恢复；内置基线只读拒绝）。"""
+    from app.core.exceptions import ValidationError
     from app.services.semantic.sql_infer_eval.service import delete_sample
 
-    await delete_sample(db, sample_id)
+    try:
+        await delete_sample(db, sample_id)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from None
     await write_audit(
         db,
         actor_id=user.id,
