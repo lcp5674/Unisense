@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -1749,6 +1750,158 @@ async def batch_register_metrics(
     return ok(data=result, trace_id=trace_id)
 
 
+async def _llm_metric_name(
+    db: AsyncSession,
+    effective_table: str | None,
+    effective_measure: str | None,
+    period: str | None,
+    measure_meta: dict[str, Any],
+) -> str | None:
+    """LLM 生成指标中文业务名称（best-effort，不可用返回 None 走规则兜底）。"""
+    try:
+        from app.services.llm.config_service import LlmConfigService
+
+        llm_client = await LlmConfigService(db).build_client()
+        if not getattr(llm_client, "enabled", False) or not effective_table:
+            return None
+        period_cn = {
+            "day": "日", "week": "周", "month": "月",
+            "quarter": "季", "year": "年", "hour": "小时",
+        }.get((period or "day").lower(), "日")
+        prompt = (
+            f"为指标生成中文业务名称。源表={effective_table}，度量列={effective_measure}，"
+            f"统计周期={period_cn}，聚合={measure_meta.get('comment', '') or '见 SQL'}。"
+            f"只返回名称本身（如：日订单金额），不要解释、不要引号、不要 JSON。"
+        )
+        resp = await llm_client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=32,
+        )
+        raw = (resp.get("content") or "").strip().strip("\"'").strip("`").strip()
+        return raw or None
+    except Exception:
+        return None  # LLM 不可用 → 规则兜底
+
+
+async def _suggest_metric_llm_overrides(
+    db: AsyncSession,
+    *,
+    sql: str | None,
+    effective_table: str | None,
+    effective_measure: str | None,
+    parsed_measures: list[dict[str, Any]],
+    parsed_tables: list[str],
+    domain_code: str,
+    definition_mode: str,
+) -> dict[str, Any]:
+    """LLM 全字段推断（SQL 智能推断 LLM 模式）。
+
+    策略：
+    - 语义字段（名称）LLM 直接产出；
+    - 枚举字段（聚合/单位）LLM 产出但必须命中合法白名单（指标模型 aggregation 枚举 +
+      unit 字典 active code），否则回退规则值——防 LLM 幻觉破坏创建（枚举非法会被
+      pydantic/字典校验拦截整批失败，对齐 P1-4 教训）；
+    - 度量列/源表仅表达式模式覆盖（SQL 模式以 SQL 为准，避免与口径主体矛盾）；
+    - LLM 不可用/解析失败 → 空覆盖，完全走规则兜底，不阻断推断。
+    """
+    try:
+        from app.services.llm.config_service import LlmConfigService
+        from app.services.system_dict.service import SystemDictService
+
+        llm_client = await LlmConfigService(db).build_client()
+        if not getattr(llm_client, "enabled", False):
+            return {}
+
+        # 合法枚举白名单（对齐指标模型 agg_type 枚举 / unit 字典 active code）
+        agg_enum = {
+            "SUM", "AVG", "COUNT", "COUNT_DISTINCT",
+            "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE",
+        }
+        unit_codes: set[str] = set()
+        try:
+            for item in await SystemDictService(db).list_by_type("unit", status="active"):
+                unit_codes.add(str(item.code))
+        except Exception:
+            pass  # 字典查询失败 → 单位不覆盖（保持规则值）
+
+        parsed_lines = "\n".join(
+            f"- {m.get('column')}：聚合 {m.get('agg')}"
+            + (f"，来源表 {m.get('table')}" if m.get("table") else "")
+            for m in parsed_measures[:8]
+        ) or "（无解析度量列）"
+        prompt = (
+            "你是数据指标专家。给定一段指标定义 SQL，识别其指标含义，仅返回合法 JSON"
+            "（不要解释、不要 markdown）：\n"
+            '{"name":"中文业务名称","aggregation":"聚合方式code","unit":"单位code",'
+            '"measure_column":"度量列名","source_table":"源表名"}\n'
+            f"业务域：{domain_code or '未指定'}\n"
+            f"SQL：\n{sql or ''}\n"
+            f"解析出的度量列：\n{parsed_lines}\n"
+            f"聚合方式必须取以下之一：{', '.join(sorted(agg_enum))}\n"
+            f"单位必须取以下之一：{', '.join(sorted(unit_codes)) or '任意'}\n"
+            f"measure_column 必须是解析出的度量列之一（不确定用空字符串）。"
+            f"source_table 必须是 SQL 引用的源表（不确定用空字符串）。"
+        )
+        resp = await llm_client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+        )
+        raw = (resp.get("content") or "").strip()
+        if "```" in raw:
+            raw = raw.split("```")[1]
+        raw = raw.strip().strip("`").strip()
+        start, end = raw.find("{"), raw.rfind("}")
+        if start < 0 or end < start:
+            return {}
+        parsed = json.loads(raw[start : end + 1])
+
+        out: dict[str, Any] = {}
+        # 名称：语义字段，清洗后采用
+        name = parsed.get("name")
+        if isinstance(name, str):
+            name = name.strip().strip("'\"").strip()
+            if name and len(name) <= 80:
+                out["name"] = name
+        # 单位：必须命中 unit 字典
+        unit = parsed.get("unit")
+        if isinstance(unit, str) and unit.strip().upper() in unit_codes:
+            out["unit"] = unit.strip().upper()
+        # 聚合：必须命中指标模型枚举；仅表达式模式采用（SQL 模式以 SQL 为准）
+        agg = parsed.get("aggregation")
+        if (
+            isinstance(agg, str)
+            and agg.strip().upper() in agg_enum
+            and definition_mode == "expression"
+        ):
+            out["aggregation"] = agg.strip().upper()
+        # 度量列：必须命中解析出的度量列；仅表达式模式
+        parsed_cols = {str(m.get("column")) for m in parsed_measures}
+        col = parsed.get("measure_column")
+        if (
+            isinstance(col, str)
+            and col.strip()
+            and col.strip() in parsed_cols
+            and definition_mode == "expression"
+        ):
+            out["measure_column"] = col.strip()
+        # 源表：必须命中解析源表或有效源表（防 LLM 幻觉出错误表）；仅表达式模式
+        valid_tables = set(parsed_tables)
+        if effective_table:
+            valid_tables.add(effective_table)
+        tbl = parsed.get("source_table")
+        if (
+            isinstance(tbl, str)
+            and tbl.strip()
+            and tbl.strip() in valid_tables
+            and len(tbl.strip()) <= 256
+            and definition_mode == "expression"
+        ):
+            out["source_table"] = tbl.strip()
+        return out
+    except Exception:
+        return {}  # LLM 不可用/解析失败 → 规则兜底
+
+
 @router.post(
     "/auto-suggest",
     response_model=ApiResponse[Any],
@@ -1891,34 +2044,6 @@ async def auto_suggest_metric(
         except Exception:
             pass  # 富集失败不阻断推断
 
-    # 可选 LLM 命名（best-effort，不可用降级到规则）
-    llm_name: str | None = None
-    try:
-        from app.services.llm.config_service import LlmConfigService
-
-        llm_client = await LlmConfigService(db).build_client()
-        if getattr(llm_client, "enabled", False) and effective_table:
-            period_cn = {
-                "day": "日", "week": "周", "month": "月",
-                "quarter": "季", "year": "年", "hour": "小时",
-            }.get(
-                (period or "day").lower(), "日"
-            )
-            prompt = (
-                f"为指标生成中文业务名称。源表={effective_table}，度量列={effective_measure}，"
-                f"统计周期={period_cn}，聚合={measure_meta.get('comment', '') or '见 SQL'}。"
-                f"只返回名称本身（如：日订单金额），不要解释、不要引号、不要 JSON。"
-            )
-            resp = await llm_client.chat(
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=32,
-            )
-            raw = (resp.get("content") or "").strip().strip("\"'").strip("`").strip()
-            if raw:
-                llm_name = raw
-    except Exception:
-        pass  # LLM 不可用 → 规则兜底
-
     result = auto_fill(
         domain_code=domain_code,
         source_table=effective_table,
@@ -1929,14 +2054,90 @@ async def auto_suggest_metric(
         measure_meta=measure_meta or None,
         table_meta=table_meta or None,
     )
-    # 注入 LLM 名称（走 name 字段的 AI 来源）
-    if llm_name and result["fields"].get("name", {}).get("source") != "column_meta":
-        result["fields"]["name"] = {
-            "value": llm_name,
-            "source": "llm",
-            "confidence": 0.7,
-            "reason": "AI 依据表结构/SQL 生成的业务命名",
-        }
+
+    # LLM 增强：默认仅名称走 LLM；use_llm=True 时全字段 LLM 推断（语义字段直接产出、
+    # 枚举字段白名单校验兜底——防幻觉产出非法字典 code 致创建整批失败，对齐 P1-4）。
+    overrides: dict[str, Any] = {}
+    if request.use_llm:
+        overrides = await _suggest_metric_llm_overrides(
+            db,
+            sql=sql,
+            effective_table=effective_table,
+            effective_measure=effective_measure,
+            parsed_measures=parsed.measures if parsed and parsed.measures else [],
+            parsed_tables=parsed.source_tables if parsed and parsed.source_tables else [],
+            domain_code=domain_code,
+            definition_mode=str(result["fields"].get("definition_mode", {}).get("value") or ""),
+        )
+        for key, val in overrides.items():
+            if key in result["fields"]:
+                result["fields"][key] = {
+                    "value": val,
+                    "source": "llm",
+                    "confidence": 0.7,
+                    "reason": "AI 依据 SQL 语义推断",
+                }
+        # 表达式模式：度量列/聚合被 LLM 覆盖 → 重建口径 JSON（保持一致；SQL 模式以
+        # SQL 为准不重建，避免与口径主体矛盾）。
+        if (
+            ("measure_column" in overrides or "aggregation" in overrides)
+            and result["fields"].get("definition_mode", {}).get("value") == "expression"
+        ):
+            cur_def = result["fields"].get("definition_json", {}).get("value")
+            if isinstance(cur_def, dict):
+                agg = (
+                    overrides.get("aggregation")
+                    or result["fields"].get("aggregation", {}).get("value")
+                    or "SUM"
+                )
+                col = (
+                    overrides.get("measure_column")
+                    or result["fields"].get("measure_column", {}).get("value")
+                    or "*"
+                )
+                tbl = (
+                    overrides.get("source_table")
+                    or result["fields"].get("source_table", {}).get("value")
+                )
+                new_def = dict(cur_def)
+                new_def["expression"] = f"{agg}({col})"
+                new_def["source_fields"] = [{"table": tbl, "column": col}] if tbl else []
+                result["fields"]["definition_json"] = {
+                    "value": new_def,
+                    "source": "llm",
+                    "confidence": 0.7,
+                    "reason": "AI 依据 SQL 语义重建口径",
+                }
+        # 度量列/源表被 LLM 覆盖 → 重算编码建议（保持 Step① 编码与字段一致）
+        if "measure_column" in overrides or "source_table" in overrides:
+            from app.services.semantic.auto_fill import generate_metric_code
+
+            st = (
+                overrides.get("source_table")
+                or result["fields"].get("source_table", {}).get("value")
+            )
+            mc = (
+                overrides.get("measure_column")
+                or result["fields"].get("measure_column", {}).get("value")
+            )
+            if st and mc and period:
+                with contextlib.suppress(Exception):
+                    # 编码重算失败 → 保留规则建议
+                    result["metric_code_suggestion"] = generate_metric_code(
+                        domain_code, st, mc, period
+                    )
+    # 名称兜底：非 LLM 模式，或 LLM 全字段推断未产出名称时，走既有名称 LLM 调用
+    if not overrides.get("name"):
+        llm_name = await _llm_metric_name(
+            db, effective_table, effective_measure, period, measure_meta
+        )
+        if llm_name and result["fields"].get("name", {}).get("source") != "column_meta":
+            result["fields"]["name"] = {
+                "value": llm_name,
+                "source": "llm",
+                "confidence": 0.7,
+                "reason": "AI 依据表结构/SQL 生成的业务命名",
+            }
 
     # 依赖表推断：从血缘图中提取源表的上下游关联表，供「口径定义」自动填充。
     # 方向拆分（修复混向 bug）：源表的上游邻居（入边 source）是加工出它的依赖表，

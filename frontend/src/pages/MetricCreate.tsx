@@ -329,12 +329,17 @@ export function MetricCreate() {
   // SQL 智能推断入口状态
   const [sqlInferText, setSqlInferText] = useState("");
   const [sqlInferring, setSqlInferring] = useState(false);
+  // 当前运行/上次选择的推断模式（false=程序规则，true=LLM 全字段）——用于双按钮 loading 反馈
+  const [sqlInferLlm, setSqlInferLlm] = useState(false);
   // 推断结果回填：各字段来源徽标 + 自动生成的口径定义预览
   const [inferred, setInferred] = useState<Record<string, SuggestionField>>({});
   const [inferredDefinition, setInferredDefinition] = useState<{ json: Record<string, unknown> | null; mode: string | null }>({ json: null, mode: null });
   // 推断结果友好摘要（SQL 智能推断成功后展示，让用户明确知道推断出了什么）
   const [inferSummary, setInferSummary] = useState<AutoSuggestResponse | null>(null);
   const [inferSummaryOpen, setInferSummaryOpen] = useState(false);
+  // SQL 智能推断模式透传：LLM 推断按钮/程序推断按钮共用 handleSqlInfer 流程（含域建议、
+  // 多候选域挑选），用 ref 在候选确认后仍保持用户选择的推断模式
+  const sqlInferUseLlmRef = useRef(false);
   // 逻辑度量推荐（信息最大化）：SQL 推断按度量列名匹配已发布逻辑度量目录，
   // 供原子指标一键继承 measure_id（OneData 原子层 = 逻辑度量 + 聚合方式）。
   const [measureSuggestions, setMeasureSuggestions] = useState<MeasureSuggestion[]>([]);
@@ -847,12 +852,15 @@ export function MetricCreate() {
 
   // 粘贴 SQL 智能推断（独立入口：仅用于推断并回填属性，与最终「口径定义」相互独立）
   // 用指定域跑 SQL 自动推断并回填（域建议后重跑也复用；错误内部消化不阻断）
-  async function runSqlInfer(domainCode: string) {
+  // useLlm=true 走 LLM 全字段推断（后端枚举白名单校验兜底），false 走程序规则推断
+  async function runSqlInfer(domainCode: string, useLlm = false) {
     setSqlInferring(true);
+    setSqlInferLlm(useLlm);
     try {
       const result = await autoSuggestMetric({
         domain_code: domainCode,
         sql: sqlInferText.trim(),
+        use_llm: useLlm || undefined,
       });
       applySuggestion(result);
       setInferSummary(result);
@@ -864,16 +872,17 @@ export function MetricCreate() {
         Array.isArray(parsed) && parsed.length > 1
           ? `（识别到 ${parsed.length} 个度量列，已回填首个「${parsed[0].alias ?? parsed[0].column}」，详见结果弹窗）`
           : "";
+      const modeNote = useLlm ? "（已用 LLM 全字段推断，枚举字段经校验兜底）" : "";
       if (srcTable || measure) {
         message.success(
           srcTable && measure
-            ? `已从 SQL 识别：源表 ${srcTable} · 度量列 ${measure}${parsedNote}`
+            ? `已从 SQL 识别：源表 ${srcTable} · 度量列 ${measure}${parsedNote}${modeNote}`
             : srcTable
-              ? `已从 SQL 识别源表：${srcTable}`
-              : `已从 SQL 识别度量列：${measure}`
+              ? `已从 SQL 识别源表：${srcTable}${modeNote}`
+              : `已从 SQL 识别度量列：${measure}${modeNote}`
         );
       } else {
-        message.success(`已完成 SQL 解析，字段已按规则推断回填${parsedNote}`);
+        message.success(`已完成 SQL 解析，字段已按规则推断回填${parsedNote}${modeNote}`);
       }
     } catch (err) {
       const detail = err instanceof UnisenseApiError ? err.message : "";
@@ -888,9 +897,11 @@ export function MetricCreate() {
   // 粘贴 SQL 智能推断（独立入口：仅用于推断并回填属性，与最终「口径定义」相互独立）。
   // 不再要求先选业务域（FR-010 域建议增强）：未选域时先反向定位/LLM 兜底推断业务域，
   // 预填 Step0 域 Cascader 后继续推断；已选域则交叉校验（不同域提示可切换）。
-  async function handleSqlInfer() {
+  // useLlm=true 走 LLM 全字段推断，false 走程序默认规则推断（SQL 智能推断入口双按钮）。
+  async function handleSqlInfer(useLlm = false) {
     const sql = sqlInferText.trim();
     if (!sql) { message.warning("请先粘贴指标 SQL"); return; }
+    sqlInferUseLlmRef.current = useLlm;
     setSqlInferring(true);
     setDomainSuggesting(true);
     let effectiveDomain = selectedDomain;
@@ -929,17 +940,17 @@ export function MetricCreate() {
     } finally {
       setDomainSuggesting(false);
     }
-    // ② 按最终域跑 SQL 自动推断（域可能刚被建议更新）
-    await runSqlInfer(effectiveDomain || "");
+    // ② 按最终域跑 SQL 自动推断（域可能刚被建议更新；保持用户选择的推断模式）
+    await runSqlInfer(effectiveDomain || "", sqlInferUseLlmRef.current);
   }
 
-  // 多候选域挑一个：应用域建议后用该域重跑 SQL 推断
+  // 多候选域挑一个：应用域建议后用该域重跑 SQL 推断（保持用户选择的推断模式）
   async function handleCandidateConfirm(code: string) {
     const dom = candidateCandidates.find((c) => c.code === code);
     setCandidateOpen(false);
     if (!dom) return;
     await applyDomainSuggestion(dom);
-    await runSqlInfer(dom.code);
+    await runSqlInfer(dom.code, sqlInferUseLlmRef.current);
   }
 
   // ---- SQL 批量解析（FR-010 批量注册增强，场景A/B）----
@@ -2318,16 +2329,31 @@ export function MetricCreate() {
               )}
             </Paragraph>
             {canInferDesc && (
-              <Button
-                type="primary"
-                block
-                style={{ marginTop: 12 }}
-                onClick={handleSqlInfer}
-                disabled={!sqlInferText.trim() || sqlInferring}
-                loading={sqlInferring}
-              >
-                智能推断并回填字段
-              </Button>
+              <Space.Compact block style={{ marginTop: 12 }}>
+                <Button
+                  type="primary"
+                  style={{ flex: 1 }}
+                  onClick={() => handleSqlInfer(false)}
+                  disabled={!sqlInferText.trim() || sqlInferring}
+                  loading={sqlInferring && !sqlInferLlm}
+                >
+                  智能推断并回填字段
+                </Button>
+                <Button
+                  icon={<RobotOutlined />}
+                  style={{ flex: 1 }}
+                  onClick={() => handleSqlInfer(true)}
+                  disabled={!sqlInferText.trim() || sqlInferring}
+                  loading={sqlInferring && sqlInferLlm}
+                >
+                  LLM 推断并回填字段
+                </Button>
+              </Space.Compact>
+            )}
+            {sqlInferLlm && !sqlInferring && (
+              <Paragraph type="secondary" style={{ fontSize: 12, marginTop: 6 }}>
+                LLM 模式：AI 依据 SQL 语义推断名称/聚合/单位/度量列，枚举字段经系统校验兜底（非法自动回退规则），可到各步骤确认或覆盖。
+              </Paragraph>
             )}
             {/* 业务域建议（FR-010 域建议增强）：推断时反向定位/LLM 兜底推断业务域 */}
             {domainSuggesting && (
@@ -2571,6 +2597,23 @@ export function MetricCreate() {
                                       onChange={(v) => handleSqlBatchEdit(c.key, { measure_id: v ?? null })}
                                       data-testid={`sql-batch-measure-${c.key}`}
                                       options={measureOptions.map((o) => ({ value: o.value, label: o.label }))}
+                                    />
+                                    {/* P1-2（第六轮）：批量候选行产品需求方——此前批量流全程无法
+                                        设置责任方（解析器不产出 owner、候选行无控件），批量产物
+                                        OwnerChain 全空；对齐单条 RoleOwnerSelect 的最小形态，仅设
+                                        product_owner（tech/dw 随创建人/域默认）。提交透传
+                                        product_owner_id，后端 Phase1 落 Metric 三方责任 */}
+                                    <Select
+                                      size="small"
+                                      showSearch
+                                      allowClear
+                                      style={{ width: 120 }}
+                                      placeholder="产品负责"
+                                      optionFilterProp="label"
+                                      value={c.product_owner_id ?? undefined}
+                                      onChange={(v) => handleSqlBatchEdit(c.key, { product_owner_id: v ?? null })}
+                                      data-testid={`sql-batch-owner-${c.key}`}
+                                      options={ownerUsers.map((u) => ({ value: u.id, label: u.display_name || u.username }))}
                                     />
                                     {/* P2-10：语句级建议域与当前生效域不一致时提示（跨域脚本） */}
                                     {c.suggested_domain_code && c.suggested_domain_code !== selectedDomain && (

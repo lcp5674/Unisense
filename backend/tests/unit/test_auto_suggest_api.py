@@ -276,6 +276,7 @@ async def test_auto_suggest_multi_stmt_sql_returns_parsed_measures(
     # 源表识别（修复后画像不再为空）
     assert data["source_tables"] == [] or any("doctor_visit" in t for t in data["source_tables"])
 
+
 async def test_auto_suggest_sql_period_inferred_and_passed(
     metrics_client: httpx.AsyncClient,
 ) -> None:
@@ -393,3 +394,180 @@ async def test_auto_suggest_measure_suggestions_matches_published(
     assert resp2.json()["data"]["measure_suggestions"] == []
 
 
+# ---- use_llm LLM 全字段推断（SQL 智能推断入口 LLM 按钮）----
+
+# 单语句 SQL：COUNT(DISTINCT doctor_code) → 度量列 doctor_code / 源表 doctor_visit_agent_info_da
+_LLM_SQL = (
+    "SELECT COUNT(DISTINCT doctor_code) AS doctor_cnt, month_id "
+    "FROM wedw_dw.doctor_visit_agent_info_da GROUP BY month_id"
+)
+
+
+def _mock_auto_fill_expression_result() -> dict:
+    """表达式模式 auto_fill 结果（含 source_table/measure_column，definition_mode=expression）。"""
+    base = _mock_auto_fill_result()
+    base["fields"]["source_table"] = {
+        "value": "wedw_dw.doctor_visit_agent_info_da",
+        "source": "sql_parse",
+        "confidence": 0.9,
+    }
+    base["fields"]["measure_column"] = {
+        "value": "doctor_code",
+        "source": "sql_parse",
+        "confidence": 0.9,
+    }
+    base["fields"]["definition_mode"] = {"value": "expression", "source": "rule", "confidence": 0.8}
+    base["fields"]["definition_json"] = {
+        "value": {
+            "expression": "COUNT(DISTINCT doctor_code)",
+            "source_fields": [
+                {"table": "wedw_dw.doctor_visit_agent_info_da", "column": "doctor_code"}
+            ],
+        },
+        "source": "rule",
+        "confidence": 0.8,
+    }
+    return base
+
+
+def _llm_client(enabled: bool, content: str) -> SimpleNamespace:
+    """构造 LLM 客户端 mock（enabled + chat 返回固定 content）。"""
+    return SimpleNamespace(
+        enabled=enabled,
+        chat=AsyncMock(return_value={"content": content}),
+    )
+
+
+def _unit_dict_mock() -> AsyncMock:
+    """unit 字典 active 项 mock（TIMES/CNY），供 LLM 单位白名单校验。"""
+    return AsyncMock(return_value=[SimpleNamespace(code="TIMES"), SimpleNamespace(code="CNY")])
+
+
+async def test_auto_suggest_use_llm_overrides_valid_fields(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """use_llm=True：LLM 合法字段 → 覆盖规则值（source=llm），表达式模式重建口径、重算编码。"""
+    llm_json = (
+        '{"name":"门诊月活医生数","aggregation":"COUNT_DISTINCT","unit":"TIMES",'
+        '"measure_column":"doctor_code","source_table":"wedw_dw.doctor_visit_agent_info_da"}'
+    )
+    with (
+        patch(
+            "app.services.llm.config_service.LlmConfigService.build_client",
+            new=AsyncMock(return_value=_llm_client(True, llm_json)),
+        ),
+        patch(
+            "app.services.system_dict.service.SystemDictService.list_by_type",
+            new=_unit_dict_mock(),
+        ),
+        patch(
+            "app.services.semantic.auto_fill.auto_fill",
+            return_value=_mock_auto_fill_expression_result(),
+        ),
+        patch(
+            "app.services.lineage.repository.LineageRepository",
+            return_value=MagicMock(edges_for_node=AsyncMock(return_value=[])),
+        ),
+    ):
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/auto-suggest",
+            json={"domain_code": "outpatient", "sql": _LLM_SQL, "use_llm": True},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    f = data["fields"]
+    assert f["name"]["value"] == "门诊月活医生数" and f["name"]["source"] == "llm"
+    assert f["unit"]["value"] == "TIMES" and f["unit"]["source"] == "llm"
+    assert f["aggregation"]["value"] == "COUNT_DISTINCT" and f["aggregation"]["source"] == "llm"
+    assert f["measure_column"]["value"] == "doctor_code" and f["measure_column"]["source"] == "llm"
+    assert f["source_table"]["value"] == "wedw_dw.doctor_visit_agent_info_da"
+    assert f["source_table"]["source"] == "llm"
+    # 表达式模式：口径 JSON 重建为 LLM 度量列/聚合（保持一致）
+    assert f["definition_json"]["value"]["expression"] == "COUNT_DISTINCT(doctor_code)"
+    # 编码建议重算（源表+度量列+周期三齐）
+    assert data["metric_code_suggestion"]
+
+
+async def test_auto_suggest_use_llm_invalid_enum_falls_back(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """use_llm=True：LLM 非法枚举/未知表列 → 回退规则值（防幻觉破坏）；名称仍采用。"""
+    llm_json = (
+        '{"name":"门诊月活医生数","aggregation":"BOGUS_AGG","unit":"NOPE",'
+        '"measure_column":"nonexistent_col","source_table":"not_a_real_table"}'
+    )
+    with (
+        patch(
+            "app.services.llm.config_service.LlmConfigService.build_client",
+            new=AsyncMock(return_value=_llm_client(True, llm_json)),
+        ),
+        patch(
+            "app.services.system_dict.service.SystemDictService.list_by_type",
+            new=_unit_dict_mock(),
+        ),
+        patch(
+            "app.services.semantic.auto_fill.auto_fill",
+            return_value=_mock_auto_fill_expression_result(),
+        ),
+        patch(
+            "app.services.lineage.repository.LineageRepository",
+            return_value=MagicMock(edges_for_node=AsyncMock(return_value=[])),
+        ),
+    ):
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/auto-suggest",
+            json={"domain_code": "outpatient", "sql": _LLM_SQL, "use_llm": True},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    f = data["fields"]
+    # 名称语义字段仍采用 LLM
+    assert f["name"]["value"] == "门诊月活医生数" and f["name"]["source"] == "llm"
+    # 非法枚举/未知表列 → 回退规则值（来源非 llm）
+    assert f["aggregation"]["value"] == "SUM" and f["aggregation"]["source"] != "llm"
+    assert f["unit"]["value"] == "元" and f["unit"]["source"] != "llm"
+    assert f["measure_column"]["value"] == "doctor_code" and f["measure_column"]["source"] != "llm"
+    assert f["source_table"]["value"] == "wedw_dw.doctor_visit_agent_info_da"
+    assert f["source_table"]["source"] != "llm"
+
+
+async def test_auto_suggest_use_llm_llm_unavailable_falls_back(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """use_llm=True 但 LLM 不可用 → 空覆盖完全走规则，不阻断、不 500。"""
+    with (
+        patch(
+            "app.services.llm.config_service.LlmConfigService.build_client",
+            new=AsyncMock(return_value=SimpleNamespace(enabled=False)),
+        ),
+        patch(
+            "app.services.system_dict.service.SystemDictService.list_by_type",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch(
+            "app.services.semantic.auto_fill.auto_fill",
+            return_value=_mock_auto_fill_result(),
+        ),
+        patch(
+            "app.services.lineage.repository.LineageRepository",
+            return_value=MagicMock(edges_for_node=AsyncMock(return_value=[])),
+        ),
+    ):
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/auto-suggest",
+            json={
+                "domain_code": "sales",
+                "source_table": "dwd.sales_detail",
+                "measure_column": "gmv",
+                "period": "day",
+                "use_llm": True,
+            },
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    # LLM 不可用 → 名称保持规则来源
+    assert data["fields"]["name"]["source"] != "llm"
+    assert data["fields"]["aggregation"]["value"] == "SUM"

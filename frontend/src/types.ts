@@ -2727,6 +2727,8 @@ export interface AutoSuggestRequest {
   measure_column?: string | null;
   period?: string | null;
   sql?: string | null;
+  /** 是否启用 LLM 全字段推断（默认走程序规则推断；LLM 产出经枚举白名单校验兜底）。 */
+  use_llm?: boolean;
 }
 
 /** 单个推断字段：含取值、来源、置信度与理由，便于前端展示来源徽标。 */
@@ -2767,7 +2769,6 @@ export interface AutoSuggestResponse {
     sunk?: boolean;
     expression?: string | null;
   }[];
-}
   /** 逻辑度量推荐（信息最大化）：按度量列名匹配已发布逻辑度量目录，供原子指标
    *  一键继承 measure_id。尽力而为——无匹配为空数组，不阻断推断。 */
   measure_suggestions?: MeasureSuggestion[];

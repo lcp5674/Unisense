@@ -642,6 +642,55 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     );
   });
 
+  it("SQL 推断：LLM 推断按钮 → 携带 use_llm=true 调用后端并回填 LLM 字段", async () => {
+    mockedSuggest.mockResolvedValue({
+      metric_code_suggestion: "sales_gmv_day",
+      segments: { domain: "sales", biz_object: "gmv", measure: "gmv", period: "day" },
+      fields: {
+        source_table: { value: "dwd.sales_detail", source: "llm", confidence: 0.7, reason: "AI 依据 SQL 语义推断" },
+        measure_column: { value: "gmv", source: "llm", confidence: 0.7, reason: "AI 依据 SQL 语义推断" },
+        name: { value: "日订单销售额", source: "llm", confidence: 0.7, reason: "AI 依据 SQL 语义推断" },
+        type: { value: "atomic", source: "rule", confidence: 0.8 },
+        granularity: { value: "day", source: "rule", confidence: 0.8 },
+        unit: { value: "CNY", source: "llm", confidence: 0.7 },
+        aggregation: { value: "SUM", source: "llm", confidence: 0.7 },
+        time_semantics: { value: "PERIOD", source: "rule", confidence: 0.6 },
+        freshness: { value: "T1", source: "rule", confidence: 0.5 },
+        dw_layer: { value: "DWD", source: "rule", confidence: 0.8 },
+        additivity: { value: "ADDITIVE", source: "rule", confidence: 0.7 },
+        serving_mode: { value: "BATCH_ONLY", source: "rule", confidence: 0.6 },
+        metric_tier: { value: "T3", source: "rule", confidence: 0.5 },
+        definition_json: {
+          value: { expression: "SUM(gmv)", source_fields: [{ table: "dwd.sales_detail", column: "gmv" }] },
+          source: "llm",
+          confidence: 0.7,
+        },
+        definition_mode: { value: "expression", source: "llm", confidence: 0.7 },
+      },
+      definition_json: { expression: "SUM(gmv)", source_fields: [{ table: "dwd.sales_detail", column: "gmv" }] },
+      definition_mode: "expression",
+    } as never);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openSqlInfer();
+
+    fireEvent.change(screen.getByPlaceholderText(/SELECT SUM\(amount\) AS gmv/), {
+      target: { value: "SELECT SUM(gmv) AS gmv FROM dwd.sales_detail GROUP BY dt, shop_id" },
+    });
+    fireEvent.click(screen.getByText("LLM 推断并回填字段"));
+
+    // LLM 模式：请求携带 use_llm=true
+    await waitFor(() =>
+      expect(mockedSuggest).toHaveBeenCalledWith(
+        expect.objectContaining({ sql: expect.stringContaining("SUM(gmv)"), use_llm: true })
+      )
+    );
+    // LLM 推断名称回填到摘要弹窗
+    await screen.findByText("SQL 智能推断结果");
+    expect(screen.getByText("日订单销售额")).toBeTruthy();
+  });
+
   it("SQL 推断：匹配已发布逻辑度量 → 摘要弹窗推荐 + 一键应用回填 measure_id", async () => {
     mockedSuggest.mockResolvedValue({
       metric_code_suggestion: "sales_doctor_active_cnt_day",
