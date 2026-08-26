@@ -1551,7 +1551,10 @@ describe("MetricDetail 按钮级权限过滤", () => {
       grants: [], expiring_soon: [],
     });
     mockedUpdateGuide.mockResolvedValue({
-      metric_code: "sales_gmv_sum_d", recommended_usage: ["新推荐用法"], cautions: [], related_metrics: [],
+      metric_code: "sales_gmv_sum_d",
+      name: "销售 GMV", domain: "outpatient", type: "sum", granularity: "day",
+      unit: "元", aggregation: "sum", time_semantics: "occurrence", serving_mode: "catalog",
+      recommended_usage: ["新推荐用法"], cautions: [], related_metrics: [],
       guide_source: "manual", guide_updated_at: "2026-08-26T00:00:00",
     });
     renderWithPerms(["metric:create"]);
