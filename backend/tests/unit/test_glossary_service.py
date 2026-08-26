@@ -13,6 +13,7 @@ from app.services.glossary.schemas import (
     TermCreate,
     TermRelationResponse,
     TermStatus,
+    TermUpdate,
     TermVersionResponse,
 )
 from app.services.glossary.service import GlossaryService, _normalize, _overlap_ratio
@@ -353,6 +354,8 @@ def _svc_with_term(
     repo.commit = AsyncMock()
     repo.count_term_versions = AsyncMock(return_value=0)
     repo.save_term_version = AsyncMock()
+    repo.all_terms = AsyncMock(return_value=[])
+    repo.save_conflict = AsyncMock()
     svc._repo = repo
     return svc, repo, t
 
@@ -629,3 +632,77 @@ async def test_create_term_relation_duplicate_raises_conflict() -> None:
         await svc.create_term_relation("c1", payload)
     assert exc.value.error_code == "DUPLICATE_TERM_RELATION"
     repo.save_term_relation.assert_not_awaited()
+
+
+async def test_update_term_forbidden_for_cross_domain_domain_admin() -> None:
+    """域管理员不可更新他域术语（越权加固：域作用域）。"""
+    from app.core.exceptions import AuthError
+
+    svc, _repo, _t = _svc_with_term(TermStatus.DRAFT.value)
+    with pytest.raises(AuthError) as ei:
+        await svc.update_term(
+            "c1",
+            TermUpdate(name="改名"),
+            actor_id=1,
+            role="domain_admin",
+            user_domain="finance",
+        )
+    assert ei.value.error_code == "FORBIDDEN"
+
+
+async def test_update_term_forbidden_for_other_owner() -> None:
+    """metric_owner 不可更新他人术语（owner 校验）。"""
+    from app.core.exceptions import AuthError
+
+    svc, _repo, _t = _svc_with_term(TermStatus.DRAFT.value, owner_id=99)
+    with pytest.raises(AuthError) as ei:
+        await svc.update_term(
+            "c1",
+            TermUpdate(name="改名"),
+            actor_id=1,
+            role="metric_owner",
+            user_domain="user",
+        )
+    assert ei.value.error_code == "FORBIDDEN"
+
+
+async def test_update_term_ok_for_same_domain_domain_admin() -> None:
+    """同域 domain_admin 可更新本域术语（不误伤）。"""
+    svc, repo, t = _svc_with_term(TermStatus.DRAFT.value)
+    resp = await svc.update_term(
+        "c1",
+        TermUpdate(name="改名"),
+        actor_id=1,
+        role="domain_admin",
+        user_domain="user",
+    )
+    assert t.name == "改名"
+    assert resp.status == TermStatus.DRAFT
+    repo.save_term_version.assert_awaited()
+
+
+async def test_create_term_forbidden_cross_domain() -> None:
+    """域管理员不可创建他域术语。"""
+    from app.core.exceptions import AuthError
+
+    db = MagicMock()
+    svc = GlossaryService(db)
+    repo = MagicMock()
+    repo.get_term = AsyncMock(return_value=None)
+    svc._repo = repo
+    payload = TermCreate(name="跨域术语", definition="x", domain="finance", synonyms=[])
+    with pytest.raises(AuthError) as ei:
+        await svc.create_term(payload, actor_id=1, role="domain_admin", user_domain="user")
+    assert ei.value.error_code == "FORBIDDEN"
+
+
+async def test_deprecate_term_forbidden_cross_domain() -> None:
+    """域管理员不可废弃他域术语（deprecate 也纳入域作用域）。"""
+    from app.core.exceptions import AuthError
+
+    svc, _repo, _t = _svc_with_term(TermStatus.PUBLISHED.value)
+    with pytest.raises(AuthError) as ei:
+        await svc.deprecate_term(
+            "c1", actor_id=1, role="domain_admin", user_domain="finance"
+        )
+    assert ei.value.error_code == "FORBIDDEN"

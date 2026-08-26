@@ -60,7 +60,9 @@ async def create_term(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     """创建术语（DRAFT），自动触发同义词/名称冲突检测。"""
-    resp = await GlossaryService(db).create_term(payload, user.id)
+    resp = await GlossaryService(db).create_term(
+        payload, user.id, role=user.role, user_domain=user.domain
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -559,7 +561,9 @@ async def update_term(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    resp = await GlossaryService(db).update_term(term_code, payload, user.id)
+    resp = await GlossaryService(db).update_term(
+        term_code, payload, user.id, role=user.role, user_domain=user.domain
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -580,7 +584,9 @@ async def deprecate_term(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    resp = await GlossaryService(db).deprecate_term(term_code, user.id)
+    resp = await GlossaryService(db).deprecate_term(
+        term_code, user.id, role=user.role, user_domain=user.domain
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -608,7 +614,7 @@ async def reactivate_term(
 ) -> Any:
     """DEPRECATED → DRAFT：回到草稿可编辑，重新提交审核后才发布（不绕过审核）。"""
     resp = await GlossaryService(db).reactivate_term(
-        term_code, actor_id=user.id, role=user.role
+        term_code, actor_id=user.id, role=user.role, user_domain=user.domain
     )
     await write_audit(
         db,
@@ -638,7 +644,7 @@ async def delete_term(
 ) -> Any:
     """软删草稿/废弃术语；仅管理员或原 Owner（service 层校验）。"""
     resp = await GlossaryService(db).delete_term(
-        term_code, actor_id=user.id, role=user.role
+        term_code, actor_id=user.id, role=user.role, user_domain=user.domain
     )
     await write_audit(
         db,
@@ -668,7 +674,7 @@ async def restore_term(
 ) -> Any:
     """回收站恢复软删术语；仅管理员或原 Owner（service 层校验）。"""
     resp = await GlossaryService(db).restore_term(
-        term_code, actor_id=user.id, role=user.role
+        term_code, actor_id=user.id, role=user.role, user_domain=user.domain
     )
     await write_audit(
         db,
@@ -717,7 +723,9 @@ async def create_relation(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    resp = await GlossaryService(db).create_term_relation(term_code, payload)
+    resp = await GlossaryService(db).create_term_relation(
+        term_code, payload, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
     await write_audit(
         db,
         actor_id=user.id,

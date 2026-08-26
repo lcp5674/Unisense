@@ -602,3 +602,123 @@ def _item_exists_for(allowed: str):
     async def _impl(self, dict_type: str, value: str) -> bool:
         return value == allowed
     return _impl
+
+
+class TestDomainAdminScope:
+    """域管理越权守卫：domain_admin 仅可管理本域及其子域（platform_admin 不限）。"""
+
+    def _domain_admin(self, domain: str = "sales") -> MagicMock:
+        user = MagicMock()
+        user.domain = domain
+        user.roles_all.return_value = ["domain_admin"]
+        return user
+
+    def _platform_admin(self) -> MagicMock:
+        user = MagicMock()
+        user.domain = "sales"
+        user.roles_all.return_value = ["platform_admin"]
+        return user
+
+    async def test_update_cross_domain_forbidden(self, svc) -> None:
+        """domain_admin 更新他域（非子域）应拒绝。"""
+        from app.core.exceptions import BusinessError
+        from app.services.subject_domain.schemas import SubjectDomainUpdate
+
+        domain = MagicMock()
+        domain.code = "finance"
+        domain.path = "2"
+        svc._repo.get_by_code = AsyncMock(
+            side_effect=lambda code: MagicMock(code=code, path="1" if code == "sales" else "2")
+        )
+        svc._repo.update = AsyncMock(return_value=domain)
+        svc._repo.name_exists = AsyncMock(return_value=False)
+        with pytest.raises(BusinessError) as ei:
+            await svc.update_domain(
+            "finance", SubjectDomainUpdate(name="财务"), user=self._domain_admin()
+        )
+        assert ei.value.error_code == "FORBIDDEN"
+
+    async def test_update_same_domain_ok(self, svc) -> None:
+        """domain_admin 更新本域应放行。"""
+        domain = MagicMock()
+        domain.code = "sales"
+        domain.path = "1"
+        svc._repo.get_by_code = AsyncMock(
+            side_effect=lambda code: MagicMock(code=code, path="1" if code == "sales" else "2")
+        )
+        svc._repo.update = AsyncMock(return_value=domain)
+        svc._repo.name_exists = AsyncMock(return_value=False)
+        from app.services.subject_domain.schemas import SubjectDomainUpdate
+
+        result = await svc.update_domain(
+            "sales", SubjectDomainUpdate(name="销售域"), user=self._domain_admin()
+        )
+        assert result.code == "sales"
+
+    async def test_update_child_domain_ok(self, svc) -> None:
+        """domain_admin 更新本域子域（path 前缀匹配）应放行。"""
+        domain = MagicMock()
+        domain.code = "sales_store"
+        domain.path = "1.5"
+        svc._repo.get_by_code = AsyncMock(
+            side_effect=lambda code: MagicMock(code=code, path="1" if code == "sales" else "1.5")
+        )
+        svc._repo.update = AsyncMock(return_value=domain)
+        svc._repo.name_exists = AsyncMock(return_value=False)
+        from app.services.subject_domain.schemas import SubjectDomainUpdate
+
+        result = await svc.update_domain(
+            "sales_store", SubjectDomainUpdate(name="门店"), user=self._domain_admin()
+        )
+        assert result.code == "sales_store"
+
+    async def test_platform_admin_cross_domain_ok(self, svc) -> None:
+        """platform_admin 可管理任意域（兜底放行）。"""
+        domain = MagicMock()
+        domain.code = "finance"
+        domain.path = "2"
+        svc._repo.get_by_code = AsyncMock(
+            side_effect=lambda code: MagicMock(code=code, path="1" if code == "sales" else "2")
+        )
+        svc._repo.update = AsyncMock(return_value=domain)
+        svc._repo.name_exists = AsyncMock(return_value=False)
+        from app.services.subject_domain.schemas import SubjectDomainUpdate
+
+        result = await svc.update_domain(
+            "finance", SubjectDomainUpdate(name="财务"), user=self._platform_admin()
+        )
+        assert result.code == "finance"
+
+    async def test_delete_cross_domain_forbidden(self, svc) -> None:
+        """domain_admin 删除他域应拒绝（越权守卫在指标/维度/子域校验之前）。"""
+        from app.core.exceptions import BusinessError
+
+        domain = MagicMock()
+        domain.code = "finance"
+        domain.path = "2"
+        svc._repo.get_by_code = AsyncMock(
+            side_effect=lambda code: MagicMock(code=code, path="1" if code == "sales" else "2")
+        )
+        with pytest.raises(BusinessError) as ei:
+            await svc.delete_domain("finance", user=self._domain_admin())
+        assert ei.value.error_code == "FORBIDDEN"
+
+    async def test_create_subdomain_under_cross_domain_forbidden(self, svc) -> None:
+        """domain_admin 在非本域下创建子域应拒绝。"""
+        from app.core.exceptions import BusinessError
+        from app.services.subject_domain.schemas import SubjectDomainCreate
+
+        parent = MagicMock()
+        parent.id = 5
+        parent.code = "finance"
+        parent.level = 1
+        parent.status = "active"
+        parent.path = "2"
+        svc._repo.get_by_id = AsyncMock(return_value=parent)
+        svc._repo.get_by_code = AsyncMock(
+            side_effect=lambda code: MagicMock(code=code, path="1" if code == "sales" else "2")
+        )
+        data = SubjectDomainCreate(name="财务子域", parent_id=5)
+        with pytest.raises(BusinessError) as ei:
+            await svc.create_domain(data, owner_id=1, user=self._domain_admin())
+        assert ei.value.error_code == "FORBIDDEN"

@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.base_service import BaseService
 from app.core.config import settings
 from app.core.exceptions import (
+    AuthError,
     BusinessError,
     ConflictError,
     NotFoundError,
@@ -129,10 +130,24 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
 
         return await generate_unique_code(base, _exists)
 
-    async def create_term(self, data: TermCreate, actor_id: int | None = None) -> TermResponse:
+    async def create_term(
+        self,
+        data: TermCreate,
+        actor_id: int | None = None,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> TermResponse:
         # 编码自动生成（FR-010：缺省时由系统生成，非人为创造）
         if not data.term_code:
             data.term_code = await self._generate_term_code(data)
+        # 越权守卫：domain_admin/metric_owner 仅可创建本域术语（platform_admin 不限）。
+        if role and role != "platform_admin" and user_domain and data.domain:
+            if user_domain != data.domain:
+                raise AuthError(
+                    f"无权创建他域术语（当前域: {user_domain}，术语域: {data.domain}）",
+                    error_code="FORBIDDEN",
+                    ctx={"user_domain": user_domain, "term_domain": data.domain},
+                )
         existing = await self._repo.get_term(data.term_code)
         if existing is not None:
             raise ConflictError(f"术语编码已存在: {data.term_code}", error_code="TERM_EXISTS")
@@ -242,8 +257,16 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         )
         return TermResponse.from_model(term)
 
-    async def update_term(self, term_code: str, data: Any, actor_id: int) -> TermResponse:
+    async def update_term(
+        self,
+        term_code: str,
+        data: Any,
+        actor_id: int,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> TermResponse:
         term = await self._require_term(term_code)
+        self._assert_term_scope(term, actor_id, role, user_domain)
         # 审核中锁定（REVIEW）：评审人基于当前定义审核，审核中改定义会造成评审失真；
         # 驳回回 DRAFT 后即可修改重提（对齐指标 REVIEW 编辑即撤回的语义）。
         if term.status == TermStatus.REVIEW.value:
@@ -272,8 +295,15 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         await self._repo.commit()
         return TermResponse.from_model(term)
 
-    async def deprecate_term(self, term_code: str, actor_id: int) -> TermResponse:
+    async def deprecate_term(
+        self,
+        term_code: str,
+        actor_id: int,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> TermResponse:
         term = await self._require_term(term_code)
+        self._assert_term_scope(term, actor_id, role, user_domain)
         if term.status == TermStatus.DEPRECATED.value:
             raise BusinessError("术语已废弃", error_code="INVALID_STATE")
         term.status = TermStatus.DEPRECATED.value
@@ -282,13 +312,18 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         return TermResponse.from_model(term)
 
     async def reactivate_term(
-        self, term_code: str, actor_id: int, role: str | None = None
+        self,
+        term_code: str,
+        actor_id: int,
+        role: str | None = None,
+        user_domain: str | None = None,
     ) -> TermResponse:
         """重新启用已废弃术语（DEPRECATED → DRAFT）。
 
         已废弃术语为终态，重新启用后回到草稿态，可编辑后**重新走审核**（与
         DRAFT→REVIEW→PUBLISHED 审核流一致，避免绕过审核直接复活）。仅平台
-        管理员/域管理员或原 Owner 可执行（API 层写角色 + service 层 owner 校验）。
+        管理员/本域域管理员或原 Owner 可执行（API 层写角色 + service 层
+        ``_assert_term_scope`` 域/Owner 校验）。
         """
         term = await self._require_term(term_code)
         if term.status != TermStatus.DEPRECATED.value:
@@ -296,11 +331,7 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
                 f"仅 DEPRECATED 状态可重新启用，当前 {term.status}",
                 error_code="INVALID_STATE",
             )
-        if role not in ("platform_admin", "domain_admin") and term.owner_id != actor_id:
-            raise UnisenseError(
-                "仅平台/域管理员或术语原 Owner 可重新启用",
-                error_code="FORBIDDEN",
-            )
+        self._assert_term_scope(term, actor_id, role, user_domain)
         term.status = TermStatus.DRAFT.value
         await self._snapshot(term, actor_id, "reactivate")
         await self._repo.commit()
@@ -308,7 +339,11 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         return TermResponse.from_model(term)
 
     async def delete_term(
-        self, term_code: str, actor_id: int, role: str | None = None
+        self,
+        term_code: str,
+        actor_id: int,
+        role: str | None = None,
+        user_domain: str | None = None,
     ) -> TermResponse:
         """软删除术语（仅 DRAFT/DEPRECATED 未对外投入状态；REVIEW/PUBLISHED 禁止）。
 
@@ -326,12 +361,8 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
                 "审核中/启用中的资源不可删除",
                 error_code="INVALID_STATE",
             )
-        # 权限：平台/域管理员或原 Owner（生产者）
-        if role not in ("platform_admin", "domain_admin") and term.owner_id != actor_id:
-            raise UnisenseError(
-                "仅平台/域管理员或术语原 Owner 可删除",
-                error_code="FORBIDDEN",
-            )
+        # 权限：平台/本域域管理员或原 Owner（生产者，``_assert_term_scope`` 域/Owner 双校验）
+        self._assert_term_scope(term, actor_id, role, user_domain)
         await self._repo.soft_delete_term(term.id)
         await self._snapshot(term, actor_id, "delete")
         await self._repo.commit()
@@ -339,11 +370,15 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         return TermResponse.from_model(term)
 
     async def restore_term(
-        self, term_code: str, actor_id: int, role: str | None = None
+        self,
+        term_code: str,
+        actor_id: int,
+        role: str | None = None,
+        user_domain: str | None = None,
     ) -> TermResponse:
         """恢复已软删术语（回收站恢复；仅 DRAFT/DEPRECATED 且 deleted_at 置位）。
 
-        仅平台/域管理员或原 Owner 可恢复（对齐删除语义）。清除 deleted_at 使
+        仅平台/本域域管理员或原 Owner 可恢复（对齐删除语义）。清除 deleted_at 使
         术语重新进入正常列表，重新走审核流。
         """
         term = await self._repo.get_term_including_deleted(term_code)
@@ -362,11 +397,7 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
                 f"仅 DRAFT/DEPRECATED 状态的已删术语可恢复，当前 {term.status}",
                 error_code="INVALID_STATE",
             )
-        if role not in ("platform_admin", "domain_admin") and term.owner_id != actor_id:
-            raise UnisenseError(
-                "仅平台/域管理员或术语原 Owner 可恢复",
-                error_code="FORBIDDEN",
-            )
+        self._assert_term_scope(term, actor_id, role, user_domain)
         await self._repo.restore_term(term.id)
         await self._snapshot(term, actor_id, "restore")
         await self._repo.commit()
@@ -392,9 +423,17 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         return _conflict_to_resp(conflict)
 
     async def create_term_relation(
-        self, term_code: str, data: TermRelationCreate
+        self,
+        term_code: str,
+        data: TermRelationCreate,
+        actor_id: int | None = None,
+        role: str | None = None,
+        user_domain: str | None = None,
     ) -> TermRelationResponse:
         term = await self._require_term(term_code)
+        # 越权守卫：仅本人/本域可给源术语建立关系（防跨域污染术语关系网）。
+        if actor_id is not None:
+            self._assert_term_scope(term, actor_id, role, user_domain)
         # 目标术语存在性校验（防孤儿关系落到库）
         target = await self._repo.get_term_by_id(data.target_term_id)
         if target is None:
@@ -552,6 +591,66 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
                     await client.close()
 
     # ---- 内部辅助 ----
+    def _assert_term_scope(
+        self,
+        term: Term,
+        actor_id: int,
+        role: str | None,
+        user_domain: str | None,
+    ) -> None:
+        """术语写操作越权守卫（对齐指标/维度/度量的域作用域 + 生产者 Owner 语义）。
+
+        - ``platform_admin``：放行（全局治理兜底）。
+        - ``domain_admin``：术语域与操作人域一致才可操作（防跨域治理失控）。
+        - ``metric_owner``：仅本人创建的术语（owner 匹配）且域一致（生产者语义）。
+        - 其余角色：一律拒绝。
+
+        术语是业务概念标准层（domain 语义），domain_admin 跨域改删会破坏
+        他域口径治理；owner 校验防 metric_owner 篡改他人术语。
+        """
+        if not role or role == "platform_admin":
+            return
+        term_domain = str(getattr(term, "domain", "") or "")
+        if role == "domain_admin":
+            if user_domain and term_domain and user_domain != term_domain:
+                raise AuthError(
+                    f"无权操作他域术语（当前域: {user_domain}，术语域: {term_domain}）",
+                    error_code="FORBIDDEN",
+                    ctx={
+                        "term_code": term.term_code,
+                        "user_domain": user_domain,
+                        "term_domain": term_domain,
+                    },
+                )
+            return
+        if role == "metric_owner":
+            if term.owner_id != actor_id:
+                raise AuthError(
+                    "无权操作他人术语",
+                    error_code="FORBIDDEN",
+                    ctx={
+                        "term_code": term.term_code,
+                        "actor_id": actor_id,
+                        "owner_id": term.owner_id,
+                    },
+                )
+            if user_domain and term_domain and user_domain != term_domain:
+                raise AuthError(
+                    f"无权操作他域术语（当前域: {user_domain}，术语域: {term_domain}）",
+                    error_code="FORBIDDEN",
+                    ctx={
+                        "term_code": term.term_code,
+                        "user_domain": user_domain,
+                        "term_domain": term_domain,
+                    },
+                )
+            return
+        raise AuthError(
+            "无权操作该术语",
+            error_code="FORBIDDEN",
+            ctx={"term_code": term.term_code, "role": role},
+        )
+
     async def _require_term(self, term_code: str) -> Term:
         """加载术语并校验可操作：不存在或已软删（回收站）均拒绝。
 

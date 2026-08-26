@@ -141,8 +141,27 @@ class SubjectDomainService:
         return roots
 
     async def create_domain(
-        self, data: SubjectDomainCreate, owner_id: int | None = None
+        self,
+        data: SubjectDomainCreate,
+        owner_id: int | None = None,
+        user: Any | None = None,
     ) -> SubjectDomain:
+        # 越权守卫：domain_admin 仅可在本域树内创建（platform_admin 不限）。
+        if user is not None and "platform_admin" not in user.roles_all():
+            ud = getattr(user, "domain", None)
+            if ud:
+                if data.parent_id is not None:
+                    parent = await self._repo.get_by_id(data.parent_id)
+                    if parent is None:
+                        raise NotFoundError(f"父域不存在: {data.parent_id}")
+                    await self._assert_domain_admin_scope(parent.code, user)
+                elif data.code and data.code != ud:
+                    # domain_admin 创建根域：仅允许创建自己所属的域
+                    raise BusinessError(
+                        f"无权创建其他域根节点: {data.code}（当前域: {ud}）",
+                        error_code="FORBIDDEN",
+                        ctx={"code": data.code, "user_domain": ud},
+                    )
         # 层级校验
         level = 1
         parent_path = ""
@@ -239,8 +258,12 @@ class SubjectDomainService:
                 )
         return candidate
 
-    async def update_domain(self, code: str, data: SubjectDomainUpdate) -> SubjectDomain:
+    async def update_domain(
+        self, code: str, data: SubjectDomainUpdate, user: Any | None = None
+    ) -> SubjectDomain:
         domain = await self.get_domain(code)
+        if user is not None:
+            await self._assert_domain_admin_scope(code, user)
         if data.name is not None:
             # 改名时检测同父域同名（排除自身；名称未实际变化则不查）
             if data.name.strip() != (domain.name or "").strip() and await self._repo.name_exists(
@@ -265,8 +288,10 @@ class SubjectDomainService:
         logger.info("domain_updated", code=code)
         return domain
 
-    async def deactivate_domain(self, code: str) -> SubjectDomain:
+    async def deactivate_domain(self, code: str, user: Any | None = None) -> SubjectDomain:
         domain = await self.get_domain(code)
+        if user is not None:
+            await self._assert_domain_admin_scope(code, user)
         # 级联一致性：存在 active 子域时禁止停用父域（须先停用子域），
         # 避免「父 inactive、子仍 active」导致子域下指标在父停用后仍可服务。
         # 与 activate_domain 校验父域 active 对称（fail-closed）。
@@ -283,8 +308,10 @@ class SubjectDomainService:
         logger.info("domain_deactivated", code=code)
         return domain
 
-    async def activate_domain(self, code: str) -> SubjectDomain:
+    async def activate_domain(self, code: str, user: Any | None = None) -> SubjectDomain:
         domain = await self.get_domain(code)
+        if user is not None:
+            await self._assert_domain_admin_scope(code, user)
         # 父域也必须是 active
         if domain.parent_id is not None:
             parent = await self._repo.get_by_id(domain.parent_id)
@@ -295,8 +322,10 @@ class SubjectDomainService:
         logger.info("domain_activated", code=code)
         return domain
 
-    async def delete_domain(self, code: str) -> None:
+    async def delete_domain(self, code: str, user: Any | None = None) -> None:
         domain = await self.get_domain(code)
+        if user is not None:
+            await self._assert_domain_admin_scope(code, user)
 
         # 校验关联指标
         metric_count = await self._repo.get_metric_count(code)
@@ -329,10 +358,14 @@ class SubjectDomainService:
         domain = await self.get_domain(code)
         return domain.defaults_json or {}
 
-    async def update_defaults(self, code: str, data: SubjectDomainDefaultsUpdate) -> SubjectDomain:
+    async def update_defaults(
+        self, code: str, data: SubjectDomainDefaultsUpdate, user: Any | None = None
+    ) -> SubjectDomain:
         """更新域默认值预设；字典枚举字段校验值合法（防配置非法枚举致注册预填失效）。"""
         await _validate_defaults_json(self._db, data.defaults_json)
         domain = await self.get_domain(code)
+        if user is not None:
+            await self._assert_domain_admin_scope(code, user)
         domain.defaults_json = data.defaults_json
         domain = await self._repo.update(domain)
         logger.info("domain_defaults_updated", code=code)
@@ -373,3 +406,32 @@ class SubjectDomainService:
         if domain.status != "active":
             raise BusinessError(f"主题域已停用: {code}", error_code="DOMAIN_INACTIVE")
         return domain
+
+    async def _assert_domain_admin_scope(self, code: str, user: Any) -> None:
+        """域管理越权守卫（X-3 同类加固）：domain_admin 仅可管理本域及其子域。
+
+        - ``platform_admin``（主角色或扩展角色）：放行（全局治理兜底）。
+        - ``user.domain`` 为空（未绑定域）：按现有行为放行（角色门禁兜底）。
+        - 否则目标域须等于本域（``code == user.domain``）或是本域子域
+          （目标域 ``path`` 以本域 ``path + '.'`` 为前缀，域树层级）。
+
+        此前 ``_ADMIN_DEPS`` 仅 platform_admin+domain_admin 角色门禁，任意域
+        domain_admin 可改/停/删任意域——补本域归属校验防跨域治理失控。
+        """
+        if "platform_admin" in user.roles_all():
+            return
+        ud = getattr(user, "domain", None)
+        if not ud:
+            return
+        if code == ud:
+            return
+        domain = await self._repo.get_by_code(code)
+        ud_domain = await self._repo.get_by_code(ud)
+        if domain and ud_domain and domain.path and ud_domain.path:
+            if domain.path.startswith(f"{ud_domain.path}."):
+                return
+        raise BusinessError(
+            f"无权管理其他域: {code}（当前域: {ud}）",
+            error_code="FORBIDDEN",
+            ctx={"code": code, "user_domain": ud},
+        )

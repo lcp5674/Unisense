@@ -171,6 +171,49 @@ async def _get_active_refresh_memory(user_id: int) -> tuple[str, int] | None:
     return None
 
 
+async def revoke_active_refresh(user_id: int) -> None:
+    """登出时吊销该用户当前活跃 refresh token（TD §5 单端登录的对称操作）。
+
+    读取 ``unisense:active_refresh:{user_id}`` 的活跃 refresh jti，将其加入黑名单
+    （TTL = 剩余有效期）并清除活跃映射——登出后该用户的 refresh token 立即失效，
+    无法再续期 access token。此前登出仅拉黑 access token 的 jti，被劫持的
+    refresh 在 7 天有效期内可无限续期（会话吊销缺口）；本函数补上吊销闭环。
+
+    Redis 不可用时降级进程内存（与 ``rotate_active_refresh`` 同语义，多 worker 下
+    仅本进程生效，生产须 Redis）。
+    """
+    now = int(time.time())
+    redis_key = f"unisense:active_refresh:{user_id}"
+    try:
+        from app.db.redis import get_redis
+
+        redis_client = get_redis()
+        val = await redis_client.get(redis_key)
+        if val:
+            parts = str(val).split(":", 1)
+            old_jti = parts[0]
+            old_exp = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+            if old_jti:
+                ttl = (old_exp - now) if old_exp > 0 else REFRESH_TOKEN_TTL_SECONDS
+                if ttl > 0:
+                    await blacklist_token(old_jti, ttl)
+            await redis_client.delete(redis_key)
+            logger.info("refresh_revoked_redis", user_id=user_id, jti=old_jti[:12])
+        return
+    except Exception:
+        _warn_memory_fallback_once(user_id)
+
+    # 内存降级（单进程原子；多 worker 下仅本进程生效，生产须 Redis）
+    old = await _get_active_refresh_memory(user_id)
+    if old is not None:
+        old_jti, old_exp_ts = old
+        old_ttl = (old_exp_ts - now) if old_exp_ts > 0 else REFRESH_TOKEN_TTL_SECONDS
+        if old_ttl > 0:
+            await blacklist_token(old_jti, old_ttl)
+        _memory_active_refresh.pop(user_id, None)
+        logger.info("refresh_revoked_memory", user_id=user_id)
+
+
 #: 单端登录原子轮换 Lua 脚本。Redis 单线程保证「读旧→拉黑旧→写新」原子性，
 #: 消除并发双登录下旧会话未被拉黑的竞态（TD §5）。旧 jti 拉黑 TTL = 其剩余有效期，
 #: 仅旧格式（无 exp）回退默认 TTL。

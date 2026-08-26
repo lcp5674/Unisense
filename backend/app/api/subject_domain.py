@@ -104,7 +104,7 @@ async def create_domain(
 ) -> ApiResponse[SubjectDomainResponse]:
     try:
         # P2-3: 域管理员以认证身份为准（PLAT-2），不信任客户端传入的 owner_id
-        domain = await svc.create_domain(data, owner_id=user.id)
+        domain = await svc.create_domain(data, owner_id=user.id, user=user)
         await write_audit(
             svc._db,
             actor_id=user.id,
@@ -140,7 +140,7 @@ async def update_domain(
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[SubjectDomainResponse]:
     try:
-        domain = await svc.update_domain(code, data)
+        domain = await svc.update_domain(code, data, user=user)
         await write_audit(
             svc._db,
             actor_id=user.id,
@@ -175,9 +175,9 @@ async def toggle_domain_status(
 ) -> ApiResponse[SubjectDomainResponse]:
     try:
         if action == "activate":
-            domain = await svc.activate_domain(code)
+            domain = await svc.activate_domain(code, user=user)
         else:
-            domain = await svc.deactivate_domain(code)
+            domain = await svc.deactivate_domain(code, user=user)
         await write_audit(
             svc._db,
             actor_id=user.id,
@@ -210,7 +210,7 @@ async def delete_domain(
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[dict[str, str]]:
     try:
-        await svc.delete_domain(code)
+        await svc.delete_domain(code, user=user)
         await write_audit(
             svc._db,
             actor_id=user.id,
@@ -258,7 +258,7 @@ async def update_domain_defaults(
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[dict[str, Any]]:
     try:
-        domain = await svc.update_defaults(code, data)
+        domain = await svc.update_defaults(code, data, user=user)
         await write_audit(
             svc._db,
             actor_id=user.id,

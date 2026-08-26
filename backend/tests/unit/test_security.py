@@ -80,3 +80,45 @@ class TestCreateAccessToken:
         token = create_access_token(sub="u-42", role="metric_owner", org_id=0)
         decoded = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
         assert decoded["sub"] == "u-42"
+
+
+class TestRevokeActiveRefresh:
+    """登出吊销 refresh token（内存降级路径验证）。"""
+
+    async def test_revoke_blacklists_and_clears_memory(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import app.core.security as sec
+        import app.db.redis as db_redis
+
+        # 强制走内存降级（Redis 不可用）——security 内延迟导入 app.db.redis.get_redis
+        def _boom(*args, **kwargs):  # noqa: ANN202
+            raise RuntimeError("redis unavailable")
+
+        monkeypatch.setattr(db_redis, "get_redis", _boom)
+        # 预置活跃 refresh 映射
+        user_id = 4242
+        sec._memory_active_refresh[user_id] = ("jti-active-1", 9999999999)
+        try:
+            await sec.revoke_active_refresh(user_id)
+            # 映射被清空
+            assert user_id not in sec._memory_active_refresh
+            # jti 已进黑名单
+            assert await sec.is_token_blacklisted("jti-active-1") is True
+        finally:
+            sec._memory_active_refresh.pop(user_id, None)
+            sec._memory_blacklist.pop("jti-active-1", None)
+
+    async def test_revoke_no_active_refresh_is_noop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import app.core.security as sec
+        import app.db.redis as db_redis
+
+        def _boom(*args, **kwargs):  # noqa: ANN202
+            raise RuntimeError("redis unavailable")
+
+        monkeypatch.setattr(db_redis, "get_redis", _boom)
+        # 无活跃 refresh（未预置）→ 不抛异常、黑名单不变
+        await sec.revoke_active_refresh(999)
+        assert "no-such-jti" not in sec._memory_blacklist

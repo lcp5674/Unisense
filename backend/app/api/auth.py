@@ -28,6 +28,7 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     is_token_blacklisted,
+    revoke_active_refresh,
     rotate_active_refresh,
     verify_password,
 )
@@ -239,20 +240,23 @@ async def logout(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ApiResponse[dict[str, str]]:
-    """登出：将当前 JWT 的 jti 加入黑名单，并落登出审计。
+    """登出：吊销当前会话的 access + refresh token，并落登出审计。
 
-    从请求 Bearer Token 中提取 jti，计算剩余有效期，加入黑名单。
+    从请求 Bearer Token 中提取 jti（access token），计算剩余有效期，加入黑名单；
+    同时吊销该用户当前活跃的 refresh token（``revoke_active_refresh``）——
+    登出后被劫持/残留的 refresh 无法再续期 access token（会话吊销闭环）。
     登出事件（auth.logout）与业务同事务原子提交。
     """
     jti, remaining_ttl = _decode_jti_and_ttl(request)
     await blacklist_token(jti, remaining_ttl)
+    await revoke_active_refresh(user.id)
     await write_audit(
         db,
         actor_id=user.id,
         action="auth.logout",
         entity_type="user",
         entity_id=str(user.id),
-        detail={"username": user.username, "jti": jti[:12]},
+        detail={"username": user.username, "jti": jti[:12], "refresh_revoked": True},
         ip=client_ip(request),
     )
     await db.commit()
