@@ -208,11 +208,20 @@ _SQL_SUGGEST_DEPS = [
     Depends(require_roles(*_WRITE_ROLES)),
     Depends(guard_against_injection_exempt("sql")),
 ]
-# batch-register 候选的 SQL 在嵌套层（candidates[].definition_json 承载 sql/expression），
-# 顶层豁免无效——用路径豁免精确跳过该子树（列表任意元素 + 点号路径）。
+# batch-register 候选的 SQL 在嵌套层（candidates[].definition_json 承载 sql/expression、
+# candidates[].raw_sql 承载候选所属语句整句原始 SQL 原文），顶层豁免无效——用路径豁免
+# 精确跳过这些子树（列表任意元素 + 点号路径）。raw_sql 与 definition_json 同级：
+# 均仅落库存储（Metric.raw_sql 参数化写入，供 batch_id 整批回溯/口径反查），不执行、
+# 不拼接进任何 DB 查询，合法 ETL 的 -- 行注释/;insert 多语句会被注入正则误伤（此前
+# 实测 INJECTION_DETECTED 400）——故一并豁免；其余字段仍全量扫描。
 _SQL_BATCH_REGISTER_DEPS = [
     Depends(require_roles(*_WRITE_ROLES)),
-    Depends(guard_against_injection_exempt_paths("candidates[].definition_json")),
+    Depends(
+        guard_against_injection_exempt_paths(
+            "candidates[].definition_json",
+            "candidates[].raw_sql",
+        )
+    ),
 ]
 # 三层口径 LLM 增强：合法输入就是 SQL/伪 SQL/口径文本（current/sql/dw_definition/
 # pseudo_definition 承载），仅作 LLM prompt 上下文、不拼接进 DB 查询，豁免这些字段

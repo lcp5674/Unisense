@@ -2555,6 +2555,18 @@ export function MetricCreate() {
                 LLM 推断并回填字段
               </Button>
             </div>
+            {/* 批量解析等待提示：大段脚本切分+逐语句画像+域建议可能耗时数秒，
+                按钮 loading 之外给明确进度文案（避免用户以为卡死/重复点击） */}
+            {(sqlBatchParsing || sqlBatchLlmParsing) && (
+              <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                <Spin size="small" />
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {sqlBatchLlmParsing
+                    ? "LLM 正在批量补全候选…（同一 SQL 每次结果一致，请勿关闭窗口）"
+                    : "正在解析 SQL…（大段脚本需数秒，请勿关闭窗口）"}
+                </Typography.Text>
+              </div>
+            )}
             <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
               LLM 模式：AI 对规则解析出的候选做一次批量补全（中文名/周期/非度量过滤），
               枚举字段系统校验兜底，同一 SQL 每次结果一致
@@ -2669,6 +2681,20 @@ export function MetricCreate() {
                                       onChange={(v) => handleSqlBatchEdit(c.key, { aggregation: v })}
                                       options={AGG_OPTIONS}
                                     />
+                                    {/* 批量候选单位可编辑：推断错可行内修正（字典未加载时回退
+                                        Input 手输兜底，与单条表单 dictSelect 同源） */}
+                                    <Select
+                                      size="small"
+                                      showSearch
+                                      allowClear
+                                      style={{ width: 100 }}
+                                      placeholder="单位"
+                                      optionFilterProp="label"
+                                      value={c.unit || undefined}
+                                      onChange={(v) => handleSqlBatchEdit(c.key, { unit: v ?? null })}
+                                      data-testid={`sql-batch-unit-${c.key}`}
+                                      options={dictOptions["unit"] || []}
+                                    />
                                     {/* P2-9：周期可编辑（推断错可行内修正，不必先创建再改） */}
                                     <Select
                                       size="small"
@@ -2676,6 +2702,16 @@ export function MetricCreate() {
                                       value={c.period || "day"}
                                       onChange={(v) => handleSqlBatchEdit(c.key, { period: v })}
                                       data-testid={`sql-batch-period-${c.key}`}
+                                      options={PERIOD_OPTIONS}
+                                    />
+                                    {/* 批量候选粒度可编辑（与周期同源：day/week/month…；推断错
+                                        可行内修正，不必先创建再改） */}
+                                    <Select
+                                      size="small"
+                                      style={{ width: 100 }}
+                                      value={c.granularity || c.period || "day"}
+                                      onChange={(v) => handleSqlBatchEdit(c.key, { granularity: v })}
+                                      data-testid={`sql-batch-granularity-${c.key}`}
                                       options={PERIOD_OPTIONS}
                                     />
                                     {/* OneData 接线（P2）：批量候选关联逻辑度量——SQL 无法推断，
@@ -2720,10 +2756,16 @@ export function MetricCreate() {
                                 ) : (
                                   <Typography.Text style={{ fontSize: 12 }}>{c.name}</Typography.Text>
                                 )}
-                                {/* P0-1：候选编码为空（域未定时后端不 bake-in）→ 提示选域后自动生成 */}
-                                <Typography.Text code style={{ fontSize: 12, flex: 1 }}>
-                                  {c.metric_code || <span className="muted">（选域后自动生成）</span>}
-                                </Typography.Text>
+                                {/* P0-1：候选编码为空（域未定时后端不 bake-in）→ 提示选域后自动生成；
+                                    编码可在线编辑（4 段式：域_业务对象_度量_周期），改后创建即用 */}
+                                <Input
+                                  size="small"
+                                  style={{ width: 240, fontFamily: "monospace" }}
+                                  value={c.metric_code || ""}
+                                  placeholder={selectedDomain ? "指标编码（4 段式，可修改）" : "选域后自动生成"}
+                                  onChange={(e) => handleSqlBatchEdit(c.key, { metric_code: e.target.value })}
+                                  data-testid={`sql-batch-code-${c.key}`}
+                                />
                                 {/* 口径溯源（P2）：候选口径表达式创建前即可核对——Tooltip 展示完整
                                     expression（CASE/窗口等原始结构），不必"先创建再改" */}
                                 {c.type === "atomic" && c.definition_json?.expression ? (
@@ -2759,6 +2801,16 @@ export function MetricCreate() {
                 >
                   批量创建选中指标（{sqlBatchChecked.size}）
                 </Button>
+                {/* 批量创建等待提示：逐条 savepoint 创建 + 冲突预检可能耗时，
+                    给明确进度文案避免用户以为无响应 */}
+                {sqlBatchCreating && (
+                  <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                    <Spin size="small" />
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      正在批量创建 {sqlBatchChecked.size} 个指标为草稿（DRAFT），请稍候…
+                    </Typography.Text>
+                  </div>
+                )}
                 {/* 批量创建结果（复用 batchResult 分桶展示） */}
                 {sqlBatchCreateResult && (
                   <div style={{ marginTop: 16 }}>

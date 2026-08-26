@@ -353,6 +353,34 @@ async def test_batch_register_from_sql_definition_sql_exempted_200(
     assert resp.status_code == 200
 
 
+async def test_batch_register_from_sql_raw_sql_exempted_200(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """候选 raw_sql 承载候选所属语句整句原始 ETL SQL（含 -- 注释 / /* */ / ;insert /
+    多语句等注入特征）→ 路径豁免 → 200（此前漏豁免实测 INJECTION_DETECTED 400）。"""
+    cand = dict(_ATOMIC_CANDIDATE)
+    cand["raw_sql"] = (
+        "set hive.vectorized.execution.enabled=false;\n"
+        "-- 取本年数据\n"
+        "create table if not exists dws_tmp_gmv (dt string, gmv double) stored as orc;\n"
+        "insert overwrite table dws_tmp_gmv /* 口径注释 */\n"
+        "select dt, sum(amount) as gmv from dwd_order_di group by dt;\n"
+        "select dt, gmv from dws_tmp_gmv"
+    )
+    with (
+        patch("app.api.metrics.MetricService") as mock_svc,
+        patch("app.api.metrics.write_audit", new=AsyncMock()),
+    ):
+        mock_svc.return_value.batch_register_from_sql = AsyncMock(
+            return_value={"batch_id": "b", "candidates": []}
+        )
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/batch-register-from-sql",
+            json={"domain": "sales", "candidates": [cand]},
+        )
+    assert resp.status_code == 200
+
+
 async def test_batch_register_from_sql_name_injection_still_blocked_400(
     metrics_client: httpx.AsyncClient,
 ) -> None:

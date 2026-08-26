@@ -1903,8 +1903,9 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     });
     fireEvent.click(screen.getByText("解析候选"));
     await screen.findByText(/共 1 个候选/);
-    // 编码为空 → 展示「选域后自动生成」占位
-    expect(screen.getByText("（选域后自动生成）")).toBeTruthy();
+    // 编码为空 → 输入框为空（已选域，placeholder 提示可修改）
+    const codeInput = screen.getByTestId("sql-batch-code-0:amount") as HTMLInputElement;
+    expect(codeInput.value).toBe("");
     fireEvent.click(screen.getByText(/批量创建选中指标/));
     await waitFor(() => {
       expect(mockedBatchFromSql).toHaveBeenCalled();
@@ -2105,5 +2106,36 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
       const lastCall = calls[calls.length - 1]?.[0] as { use_llm?: boolean };
       expect(lastCall?.use_llm).toBeFalsy();
     });
+  });
+
+  it("批量候选可在线编辑：改单位/粒度/编码后提交创建携带修改值", async () => {
+    // unit 字典 mock（供「单位」行内 Select 选项）
+    mockedDict.mockResolvedValue([{ code: "USD", label: "美元" }] as never);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+
+    // 单位：CNY → 美元 (USD)
+    fireEvent.mouseDown(screen.getByTestId("sql-batch-unit-0:amount").querySelector(".ant-select-selector")!);
+    await clickSelectOption("美元 (USD)");
+    // 粒度：day → 月 (month)
+    fireEvent.mouseDown(screen.getByTestId("sql-batch-granularity-0:amount").querySelector(".ant-select-selector")!);
+    await clickSelectOption("月 (month)");
+    // 编码可编辑
+    fireEvent.change(screen.getByTestId("sql-batch-code-0:amount"), {
+      target: { value: "sales_order_amount_month" },
+    });
+
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+    await waitFor(() => expect(mockedBatchFromSql).toHaveBeenCalled());
+    const payload = mockedBatchFromSql.mock.calls[0][0] as {
+      candidates: Array<{ key: string; unit: string | null; granularity: string | null; metric_code: string }>;
+    };
+    const cand = payload.candidates.find((c) => c.key === "0:amount");
+    expect(cand).toBeTruthy();
+    expect(cand!.unit).toBe("USD");
+    expect(cand!.granularity).toBe("month");
+    expect(cand!.metric_code).toBe("sales_order_amount_month");
   });
 });
