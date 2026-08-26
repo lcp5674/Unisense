@@ -101,6 +101,10 @@ interface EvalDetailRow {
   dim: string;
   expected: string[];
   actual: string[];
+  /** 结构化期望度量（优先于 expected 签名串展示）。 */
+  expectedDetail: MeasureLike[];
+  /** 结构化实际度量（优先于 actual 签名串展示；历史记录可能缺失）。 */
+  actualDetail: MeasureLike[];
   /** 期望有、实际无（期望列标红）。 */
   missing: string[];
   /** 实际有、期望无（实际列标橙）。 */
@@ -108,6 +112,75 @@ interface EvalDetailRow {
   matched: boolean;
   /** 判定列文案（匹配 / N 缺失 · M 多余 / 期望→实际 / —）。 */
   verdict: string;
+}
+
+/** 结构化度量（后端 pred_measures_detail / expected_measures_detail 项）。 */
+interface MeasureLike {
+  column: string;
+  agg: string | null;
+  alias?: string | null;
+  table?: string | null;
+  /** 实际解析签名（后端提供，小写规范化，用于多余判定）。 */
+  signature?: string;
+}
+
+/** 期望度量签名（与后端 ExpectedMeasure.signature 同构，用于缺失判定）。 */
+function expMeasureSignature(m: MeasureLike): string {
+  const parts = [m.column, m.agg ?? "DERIVED"];
+  if (m.alias) parts.push(`alias:${m.alias}`);
+  if (m.table) parts.push(`table:${m.table}`);
+  return parts.join("|");
+}
+
+/** 单条度量卡片：列名 + 聚合 Tag + 别名 + 源表 分开展示（替代 `|` 拼接签名串）。 */
+function MeasureItem({ m, highlight, color }: { m: MeasureLike; highlight?: boolean; color?: string }) {
+  return (
+    <div
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "1px 8px",
+        borderRadius: 6,
+        border: highlight && color ? `1px solid ${color}` : "1px solid #f0f0f0",
+        background: highlight && color ? `${color}14` : "transparent",
+      }}
+    >
+      <Text code>{m.column}</Text>
+      <Tag color={m.agg ? "blue" : "default"} style={{ marginInlineEnd: 0 }}>
+        {m.agg ?? "DERIVED"}
+      </Tag>
+      {m.alias && <Text type="secondary">as {m.alias}</Text>}
+      {m.table && <Text type="secondary">← {m.table}</Text>}
+    </div>
+  );
+}
+
+/** 结构化度量列表：命中高亮判定集合的项按指定色标记（缺失红 / 多余橙）。 */
+function MeasureList({
+  items,
+  isHighlight,
+  color,
+  emptyText = "—",
+}: {
+  items: MeasureLike[];
+  isHighlight: (m: MeasureLike) => boolean;
+  color?: string;
+  emptyText?: string;
+}) {
+  if (!items.length) return <Text type="secondary">{emptyText}</Text>;
+  return (
+    <Space size={[4, 4]} wrap>
+      {items.map((m, i) => (
+        <MeasureItem
+          key={`${m.column}-${m.agg ?? ""}-${m.alias ?? ""}-${m.table ?? ""}-${i}`}
+          m={m}
+          highlight={isHighlight(m)}
+          color={color}
+        />
+      ))}
+    </Space>
+  );
 }
 
 /** 标签列表：命中高亮集合的项按指定色标记（缺失红 / 多余橙）。 */
@@ -419,6 +492,8 @@ export function SqlInferEval() {
     const sample = data?.dataset?.find((d) => d.case_id === record.case_id);
     const expMeasures = sample?.expected_measures ?? [];
     const predMeasures = record.pred_measures ?? [];
+    const expMeasureDetail = sample?.expected_measures_detail ?? [];
+    const predMeasureDetail = record.pred_measures_detail ?? [];
     const expTables = sample?.expected_tables ?? [];
     const predTables = record.pred_tables ?? [];
     const missingM = record.missing_measures ?? [];
@@ -429,12 +504,16 @@ export function SqlInferEval() {
     const tDiff = missingT.length + extraT.length;
     const periodOk = record.period_match === true;
     const periodBad = record.period_match === false;
+    const missingSetM = new Set(missingM);
+    const extraSetM = new Set(extraM);
     const rows: EvalDetailRow[] = [
       {
         key: "measures",
         dim: "度量",
         expected: expMeasures,
         actual: predMeasures,
+        expectedDetail: expMeasureDetail,
+        actualDetail: predMeasureDetail,
         missing: missingM,
         extra: extraM,
         matched: mDiff === 0,
@@ -445,6 +524,8 @@ export function SqlInferEval() {
         dim: "源表",
         expected: expTables,
         actual: predTables,
+        expectedDetail: [],
+        actualDetail: [],
         missing: missingT,
         extra: extraT,
         matched: tDiff === 0,
@@ -455,6 +536,8 @@ export function SqlInferEval() {
         dim: "周期",
         expected: record.expected_period ? [record.expected_period] : [],
         actual: record.pred_period ? [record.pred_period] : [],
+        expectedDetail: [],
+        actualDetail: [],
         missing: periodBad && record.expected_period ? [record.expected_period] : [],
         extra: periodBad && record.pred_period ? [record.pred_period] : [],
         matched: periodOk,
@@ -470,16 +553,31 @@ export function SqlInferEval() {
       {
         title: "期望",
         dataIndex: "expected",
-        render: (list: string[], r) => (
-          <EvalTagList list={list} highlight={new Set(r.missing)} color="error" />
-        ),
+        render: (list: string[], r) =>
+          r.expectedDetail.length ? (
+            <MeasureList
+              items={r.expectedDetail}
+              isHighlight={(m) => missingSetM.has(expMeasureSignature(m))}
+              color="#ff4d4f"
+            />
+          ) : (
+            <EvalTagList list={list} highlight={new Set(r.missing)} color="error" />
+          ),
       },
       {
         title: "实际",
         dataIndex: "actual",
-        render: (list: string[], r) => (
-          <EvalTagList list={list} highlight={new Set(r.extra)} color="warning" emptyText="未识别" />
-        ),
+        render: (list: string[], r) =>
+          r.actualDetail.length ? (
+            <MeasureList
+              items={r.actualDetail}
+              isHighlight={(m) => extraSetM.has(m.signature ?? "")}
+              color="#faad14"
+              emptyText="未识别"
+            />
+          ) : (
+            <EvalTagList list={list} highlight={new Set(r.extra)} color="warning" emptyText="未识别" />
+          ),
       },
       {
         title: "判定",

@@ -2963,6 +2963,8 @@ export interface SqlInferEvalCase {
   /** 完整实际解析结果（期望 vs 实际对照展示；历史记录可能缺失 → 可选）。 */
   pred_measures?: string[];
   pred_tables?: string[];
+  /** 结构化实际度量（与 expected_measures_detail 对称，逐字段展示；历史记录可能缺失）。 */
+  pred_measures_detail?: SqlInferEvalExpectedMeasure[];
   extra_measures: string[];
   missing_measures: string[];
   extra_tables: string[];

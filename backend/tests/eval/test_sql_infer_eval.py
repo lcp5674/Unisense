@@ -47,6 +47,14 @@ def test_doctor_active_month_measures() -> None:
     ) in m.pred_measures
     assert "wedw_dw.doctor_visit_agent_info_da" in m.pred_tables
     assert not (m.missing_measures & m.pred_measures)  # 缺失项不会出现在实际解析中
+    # 结构化实际度量（前端逐字段展示的基础）：与 pred_measures 签名一一对应
+    detail = {d["signature"] for d in m.pred_measures_detail}
+    assert detail == set(m.pred_measures)
+    first = m.pred_measures_detail[0]
+    assert first["column"] == "doctor_code"
+    assert first["agg"] == "COUNT_DISTINCT"
+    assert first["alias"] == "current_month_active_doctor_cnt"
+    assert first["table"] == "wedw_dw.doctor_visit_agent_info_da"
 
 
 def test_spark_window_derived_measure() -> None:
@@ -75,6 +83,8 @@ def test_report_to_dict_includes_predicted() -> None:
     for c in cases:
         assert isinstance(c["pred_measures"], list)
         assert isinstance(c["pred_tables"], list)
+        # 结构化实际度量与签名一一对应
+        assert {d["signature"] for d in c["pred_measures_detail"]} == set(c["pred_measures"])
         # 实际解析全集 = 匹配项 ∪ 多余项；缺失项不在其中
         assert set(c["pred_measures"]).isdisjoint(c["missing_measures"])
         assert set(c["pred_measures"]) >= set(c["extra_measures"])

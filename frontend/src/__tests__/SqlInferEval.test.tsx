@@ -55,6 +55,9 @@ function evalData(): SqlInferEvalData {
           table_recall: 1,
           period_match: true,
           pred_measures: ["amount|SUM|alias:gmv"],
+          pred_measures_detail: [
+            { column: "amount", agg: "SUM", alias: "gmv", table: null, signature: "amount|SUM|alias:gmv" },
+          ],
           pred_tables: ["ods.orders"],
           extra_measures: [],
           missing_measures: [],
@@ -73,6 +76,16 @@ function evalData(): SqlInferEvalData {
           table_recall: 1,
           period_match: true,
           pred_measures: ["doctor_code|COUNT_DISTINCT|alias:current_month_active_doctor_cnt"],
+          pred_measures_detail: [
+            {
+              column: "doctor_code",
+              agg: "COUNT_DISTINCT",
+              alias: "current_month_active_doctor_cnt",
+              table: "wedw_dw.doctor_visit_agent_info_da",
+              signature:
+                "doctor_code|COUNT_DISTINCT|alias:current_month_active_doctor_cnt|table:wedw_dw.doctor_visit_agent_info_da",
+            },
+          ],
           pred_tables: ["wedw_dw.doctor_visit_agent_info_da"],
           extra_measures: [],
           missing_measures: ["doctor_code|COUNT_DISTINCT|alias:last_month_active_doctor_cnt"],
@@ -219,14 +232,13 @@ describe("SqlInferEval", () => {
     expect(await screen.findByText("度量")).toBeTruthy();
     expect(screen.getByText("源表")).toBeTruthy();
     expect(screen.getAllByText("周期").length).toBeGreaterThanOrEqual(1);
-    // 缺失度量红标 Tag（期望有、实际未解析出）
-    expect(
-      await screen.findByText("doctor_code|COUNT_DISTINCT|alias:last_month_active_doctor_cnt"),
-    ).toBeTruthy();
-    // 实际解析结果完整展示（期望列 + 实际列）
-    expect(
-      screen.getAllByText("doctor_code|COUNT_DISTINCT|alias:current_month_active_doctor_cnt").length,
-    ).toBeGreaterThanOrEqual(2);
+    // 缺失度量红标（期望有、实际未解析出）——结构化展示别名
+    expect(await screen.findByText("as last_month_active_doctor_cnt")).toBeTruthy();
+    // 实际解析结果完整展示：列名 + 聚合 Tag + 别名 + 源表 分开展示（期望/实际两列各一条）
+    expect(screen.getAllByText("as current_month_active_doctor_cnt").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("COUNT_DISTINCT").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("doctor_code").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("← wedw_dw.doctor_visit_agent_info_da")).toBeTruthy();
     // 判定列显示差异统计（1 缺失 · 0 多余）
     expect(await screen.findByText("1 缺失 · 0 多余")).toBeTruthy();
     // 图例说明
@@ -240,8 +252,9 @@ describe("SqlInferEval", () => {
     fireEvent.click(await screen.findByText("期望 vs 实际（度量/表/周期）"));
     // 对账表三行判定均为绿色「匹配」
     expect((await screen.findAllByText("匹配")).length).toBeGreaterThanOrEqual(3);
-    // 期望/实际度量完整展示
-    expect(screen.getAllByText("amount|SUM|alias:gmv").length).toBeGreaterThanOrEqual(2);
+    // 期望/实际度量完整展示（列名 + 聚合 Tag + 别名 结构化）
+    expect(screen.getAllByText("as gmv").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("SUM").length).toBeGreaterThanOrEqual(2);
     // 期望/实际源表完整展示
     expect(screen.getAllByText("ods.orders").length).toBeGreaterThanOrEqual(2);
   });

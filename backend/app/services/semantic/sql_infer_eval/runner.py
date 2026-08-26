@@ -46,6 +46,9 @@ class CaseMetrics:
     #: 完整实际解析结果（前端"期望 vs 实际"对照展示用，而非仅差异）。
     pred_measures: frozenset[str] = frozenset()
     pred_tables: frozenset[str] = frozenset()
+    #: 结构化实际度量（column/agg/alias/table + 签名），与 ``expected_measures_detail``
+    #: 对称供前端逐字段展示（替代 `|` 拼接签名串）。
+    pred_measures_detail: tuple[dict[str, object], ...] = ()
     #: 诊断明细（用于失败定位）。
     extra_measures: frozenset[str] = frozenset()
     missing_measures: frozenset[str] = frozenset()
@@ -120,6 +123,16 @@ def evaluate_case(case: SqlInferCase) -> CaseMetrics:
         and pred_tables == exp_tables
         and period_match
     )
+    pred_measures_detail = tuple(
+        {
+            "column": str(m.get("column") or ""),
+            "agg": m.get("agg") or None,
+            "alias": m.get("alias") or None,
+            "table": m.get("table") or None,
+            "signature": _measure_signature(m),
+        }
+        for m in profile.measures
+    )
     return CaseMetrics(
         case_id=case.case_id,
         dialect=case.dialect,
@@ -131,6 +144,7 @@ def evaluate_case(case: SqlInferCase) -> CaseMetrics:
         period_match=period_match,
         pred_measures=frozenset(pred_measures),
         pred_tables=frozenset(pred_tables),
+        pred_measures_detail=pred_measures_detail,
         extra_measures=frozenset(pred_measures - exp_measures),
         missing_measures=frozenset(exp_measures - pred_measures),
         extra_tables=frozenset(pred_tables - exp_tables),
@@ -201,6 +215,9 @@ def report_to_dict(report: EvalReport) -> dict[str, object]:
                 "period_match": m.period_match,
                 "pred_measures": sorted(m.pred_measures),
                 "pred_tables": sorted(m.pred_tables),
+                "pred_measures_detail": [
+                    dict(d) for d in m.pred_measures_detail
+                ],
                 "extra_measures": sorted(m.extra_measures),
                 "missing_measures": sorted(m.missing_measures),
                 "extra_tables": sorted(m.extra_tables),
