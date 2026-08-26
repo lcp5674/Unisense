@@ -6,14 +6,16 @@
 from __future__ import annotations
 
 import json
+from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, require_roles
-from app.api.responses import ApiResponse, ok
+from app.api.responses import ApiResponse, get_trace_id, ok
+from app.core.audit import client_ip, write_audit
 from app.core.key_rotation import get_key_rotation_manager, migrate_legacy_secrets
 from app.db.mysql import get_db_session
 from app.models.data_source import DataSource
@@ -33,11 +35,25 @@ class MigrateRequest(BaseModel):
 async def rotate_key(
     body: RotateKeyRequest,
     user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    http_req: Request,
+    trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[dict[str, object]]:
-    """轮换密钥：旧活跃密钥移入解密列表，新密钥成为活跃密钥。"""
+    """轮换密钥：旧活跃密钥移入解密列表，新密钥成为活跃密钥（密钥链持久化）。"""
     manager = get_key_rotation_manager()
     manager.rotate_key(body.new_raw_key)
     metadata = manager.get_key_metadata()
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="admin_key.rotate",
+        entity_type="key_rotation",
+        entity_id=str(metadata.get("version")),
+        detail={"new_version": metadata.get("version"), "key_expired": metadata.get("is_expired")},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
     return ok(metadata)
 
 
@@ -45,19 +61,26 @@ async def rotate_key(
 async def migrate_secrets(
     body: MigrateRequest,
     user: CurrentUser,
+    http_req: Request,
     db: AsyncSession = Depends(get_db_session),
+    trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[dict[str, object]]:
     """触发旧 SHA-256 加密数据迁移至当前 PBKDF2 活跃密钥。
 
-    真实扫描 ``data_source.connection_config``（未软删）作为存量密文清单——
-    此前 ``_list_func`` 恒返回空列表，迁移完全依赖运维脚本，API 为占位空壳。
+    真实扫描 ``data_source.connection_config``（未软删）与 ``llm_config.api_key_enc``
+    作为存量密文清单——此前仅扫 data_source，llm_config 的 Fernet 密文漏迁移。
     仅迁移活跃密钥无法解密的 legacy 密文（active 可解密者已迁移，跳过避免
     无谓重写）；``dry_run`` 只统计候选条数，不实际重加密。
     """
+    from app.models.llm_config import LlmConfig
+
     result = await db.execute(
         select(DataSource.connection_config).where(DataSource.deleted_at.is_(None))
     )
     all_tokens = [t for t in result.scalars().all() if t]
+
+    llm_result = await db.execute(select(LlmConfig.api_key_enc))
+    all_tokens.extend(t for t in llm_result.scalars().all() if t)
 
     manager = get_key_rotation_manager()
     active = manager.active_fernet
@@ -72,6 +95,17 @@ async def migrate_secrets(
     legacy_tokens = [t for t in all_tokens if _is_legacy(t)]
 
     if body.dry_run:
+        await write_audit(
+            db,
+            actor_id=user.id,
+            action="admin_key.migrate_dry_run",
+            entity_type="key_rotation",
+            entity_id="-",
+            detail={"candidate_count": len(legacy_tokens), "total_secret_rows": len(all_tokens)},
+            ip=client_ip(http_req),
+            trace_id=trace_id,
+        )
+        await db.commit()
         return ok(
             {
                 "dry_run": 1,
@@ -91,6 +125,17 @@ async def migrate_secrets(
         ),
         list_func=lambda: legacy_tokens,
     )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="admin_key.migrate",
+        entity_type="key_rotation",
+        entity_id="-",
+        detail={"migrated": count, "total_secret_rows": len(all_tokens)},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
     return ok({"migrated": count, "total_secret_rows": len(all_tokens)})
 
 

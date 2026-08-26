@@ -9,6 +9,17 @@
 from __future__ import annotations
 
 import os
+import tempfile
+
+# 密钥轮换密钥链隔离：测试环境把 keychain 指向临时文件（不存在）——
+# 避免开发/测试首次 import key_rotation 时向仓库 data/ 落盘密钥链，
+# 也避免测试间/与真实环境共享密钥状态（initialize 优先从 keychain 恢复）。
+_test_keychain = os.path.join(
+    tempfile.gettempdir(), "unisense_test_fernet_keychain.json"
+)
+if os.path.exists(_test_keychain):
+    os.remove(_test_keychain)
+os.environ.setdefault("UNISENSE_KEYCHAIN_PATH", _test_keychain)
 
 
 # 必须在导入 app 之前设置（settings 在导入时即读取环境变量）

@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from cryptography.fernet import Fernet
 
@@ -36,6 +38,44 @@ PBKDF2_ALGORITHM = "sha256"
 # 全部无法解密（数据回归）。固定盐保证跨进程、跨重启派生一致。
 _SALT_RAW = b"unisense-fernet-salt"[:16]
 _SALT_DEV = b"dev-salt-16byte!"
+
+#: 密钥链持久化文件名（默认 backend/data/fernet_keychain.json，gitignore 不入库）。
+#: rotate_key 把完整密钥链（活跃 + 全部解密密钥）落盘，重启后从文件恢复——
+#: 修复「rotate 仅写进程 os.environ、重启丢密钥链导致未迁移数据不可解密」。
+_KEYCHAIN_FILENAME = "fernet_keychain.json"
+
+
+def _keychain_path() -> str:
+    """密钥链文件路径（可经 UNISENSE_KEYCHAIN_PATH 覆盖，默认 backend/data/）。"""
+    env_path = os.environ.get("UNISENSE_KEYCHAIN_PATH", "").strip()
+    if env_path:
+        return env_path
+    base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(base, "data", _KEYCHAIN_FILENAME)
+
+
+def _load_keychain() -> dict[str, Any] | None:
+    """读取持久化密钥链（文件不存在/损坏返回 None）。"""
+    try:
+        with open(_keychain_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _save_keychain(state: dict[str, Any]) -> None:
+    """原子写密钥链（tmp + replace + 0600 权限，防半写/他读）。"""
+    path = _keychain_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
+    except OSError:
+        logger.warning("keychain_persist_failed", path=path)
 
 
 def derive_key_pbkdf2(password: str, salt: bytes | None = None) -> tuple[bytes, bytes]:
@@ -87,12 +127,23 @@ class KeyRotationManager:
         self._key_created_at: datetime | None = None
 
     def initialize(self) -> None:
-        """初始化密钥：构建活跃密钥和解密密钥列表。
+        """初始化密钥：优先从持久化密钥链恢复，否则构建活跃密钥与解密密钥列表。
+
+        密钥链（backend/data/fernet_keychain.json）存在时直接恢复完整密钥链
+        （活跃 + 全部历史解密密钥），保证 rotate 后重启不解密失败；
+        否则按原逻辑从环境/派生构建并落盘（首次初始化即持久化）。
 
         优先使用 PBKDF2 派生；若 UNISENSE_FERNET_KEY 配置了 salt 前缀
         （格式：base64url_salt:base64url_derived_key），则直接使用。
         否则从原始密码材料重新派生。
         """
+        if self._load_from_keychain():
+            logger.info(
+                "key_rotation_loaded_from_keychain",
+                version=self._key_version,
+                decrypt_key_count=len(self._decrypt_fernets),
+            )
+            return
         raw = os.environ.get("UNISENSE_FERNET_KEY", "").strip()
 
         if not raw:
@@ -150,6 +201,51 @@ class KeyRotationManager:
             decrypt_key_count=len(self._decrypt_fernets),
             has_legacy_key=len(self._decrypt_fernets) > 1,
         )
+        # 首次初始化不落盘：env/固定盐派生可跨重启重现活跃密钥，rotate 时才需持久化
+        # 密钥链（避免测试/收集阶段生成 keychain 文件污染环境）。
+
+    def _load_from_keychain(self) -> bool:
+        """从持久化密钥链恢复（活跃 + 全部解密密钥）。失败返回 False 走原初始化。"""
+        data = _load_keychain()
+        if not data or not data.get("active_key_b64"):
+            return False
+        try:
+            active_key = str(data["active_key_b64"]).encode("utf-8")
+            self._active_key = active_key
+            salt_b64 = data.get("active_salt_b64")
+            self._active_salt = (
+                base64.urlsafe_b64decode(str(salt_b64)) if salt_b64 else None
+            )
+            self._active_fernet = Fernet(active_key)
+            decrypt_b64 = data.get("decrypt_keys_b64") or []
+            self._decrypt_keys = [str(k).encode("utf-8") for k in decrypt_b64]
+            self._decrypt_fernets = [Fernet(str(k).encode("utf-8")) for k in decrypt_b64]
+            self._key_version = int(data.get("version", 1))
+            created = data.get("created_at")
+            self._key_created_at = (
+                datetime.fromisoformat(str(created)) if created else None
+            )
+            return True
+        except Exception:
+            logger.warning("keychain_load_failed", exc_info=True)
+            return False
+
+    def _persist(self) -> None:
+        """把当前密钥链（活跃 + 全部解密密钥）原子写入持久化文件。"""
+        state: dict[str, Any] = {
+            "version": self._key_version,
+            "created_at": (
+                self._key_created_at.isoformat() if self._key_created_at else None
+            ),
+            "active_salt_b64": (
+                base64.urlsafe_b64encode(self._active_salt).decode("utf-8")
+                if self._active_salt
+                else None
+            ),
+            "active_key_b64": self._active_key.decode("utf-8") if self._active_key else None,
+            "decrypt_keys_b64": [k.decode("utf-8") for k in self._decrypt_keys],
+        }
+        _save_keychain(state)
 
     @property
     def active_fernet(self) -> Fernet:
@@ -233,7 +329,9 @@ class KeyRotationManager:
         if not new_raw_key:
             raise ValueError("new_raw_key 不能为空")
 
-        new_key, new_salt = derive_key_pbkdf2(new_raw_key)
+        # 确定性盐派生（与 initialize 的 env 路径一致，杜绝随机盐漂移）；
+        # 密钥链经 _persist 落盘，重启后从文件恢复完整解密链（未迁移数据仍可解）。
+        new_key, new_salt = derive_key_pbkdf2(new_raw_key, _SALT_RAW)
         new_fernet = Fernet(new_key)
 
         if self._active_fernet is not None and self._active_key is not None:
@@ -253,6 +351,9 @@ class KeyRotationManager:
         encoded_salt = base64.urlsafe_b64encode(new_salt).decode("utf-8")
         encoded_key = new_key.decode("utf-8")
         os.environ["UNISENSE_FERNET_KEY"] = f"{encoded_salt}:{encoded_key}"
+        # 持久化密钥链：重启后恢复 active + 全部 decrypt 密钥（修复 rotate 仅写进程
+        # 环境变量、重启丢密钥链导致未迁移数据不可解密）
+        self._persist()
 
         logger.info(
             "key_rotated",

@@ -1,0 +1,3 @@
+
+# 密钥轮换持久化密钥链（含活跃+历史密钥材料，严禁入库）
+backend/data/fernet_keychain.json

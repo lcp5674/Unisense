@@ -317,3 +317,33 @@ class TestInit:
             assert kr_module.get_key_rotation_manager() is inst
         finally:
             monkeypatch.setattr(kr_module, "_manager", old)
+
+
+class TestKeychainPersistence:
+    """密钥链持久化：rotate 后落盘，新 manager（模拟重启）恢复完整密钥链。"""
+
+    def test_rotate_persists_and_new_manager_restores(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("UNISENSE_KEYCHAIN_PATH", str(tmp_path / "keychain.json"))
+        m1 = KeyRotationManager()
+        m1.initialize()
+        # 轮换前：env 派生密钥可加密/解密
+        tok1 = m1.encrypt(b"before")
+        assert m1.decrypt_with_any_key(tok1) == b"before"
+
+        m1.rotate_key("new-secret-material-16chars")
+        tok2 = m1.encrypt(b"after")
+        assert m1.decrypt_with_any_key(tok2) == b"after"
+
+        # 新 manager（模拟重启）从 keychain 恢复完整密钥链：
+        # 活跃密钥 = rotate 后新密钥（能解 after），旧密钥仍在解密链（能解 before）
+        m2 = KeyRotationManager()
+        m2.initialize()
+        assert m2._key_version == 2
+        assert len(m2._decrypt_fernets) == len(m1._decrypt_fernets)
+        assert m2.decrypt_with_any_key(tok2) == b"after"
+        assert m2.decrypt_with_any_key(tok1) == b"before"
+        # 恢复后新活跃密钥加密 → m2 可解
+        tok3 = m2.encrypt(b"restored")
+        assert m2.decrypt_with_any_key(tok3) == b"restored"
