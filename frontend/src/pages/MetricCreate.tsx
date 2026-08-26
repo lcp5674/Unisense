@@ -7,11 +7,12 @@ import {
 import {
   createMetric, listCatalogs, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, listMeasureCatalogs, fetchCurrentUser, refineMetricDefinition, UnisenseApiError,
 } from "../api";
-import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, DomainSuggestionCandidate, Dimension, MeasureCatalog, MeasureSuggestion, MetricMountInput, SqlBatchParseResult, SqlBatchCandidate, CurrentUser } from "../types";
+import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, DomainSuggestionCandidate, Dimension, MeasureCatalog, MeasureSuggestion, MetricMountInput, SqlBatchParseResult, SqlBatchCandidate, CurrentUser, ConsumptionGuidePayload } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
 import { MEASURE_FORMAT_LABEL } from "../types";
 import { usePermission } from "../hooks/usePermission";
 import RoleOwnerSelect, { type RoleOwnerValue } from "../components/RoleOwnerSelect";
+import { ListEditor } from "./ConsumptionGuide";
 
 const { Title, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -246,6 +247,8 @@ export function MetricCreate() {
       })
       .catch(() => {});
   }, []);
+  // 消费指南（选填）：创建时透传落库（guide_source=manual）；null=未填写
+  const [guideDraft, setGuideDraft] = useState<ConsumptionGuidePayload | null>(null);
   // 指标类型联动：atomic（原子）基于源表直接聚合，不应有上游依赖指标；derived/composite 才有
   // 用 state 而非 Form.useWatch：向导分步卸载 Form.Item 后，useWatch 与 getFieldsValue() 对未挂载字段
   // 均返回 undefined（antd 仅保留 store，默认取值路径排除未挂载字段），导致跨步骤后
@@ -1441,6 +1444,14 @@ export function MetricCreate() {
       additivity: String(values.additivity || defaultAdditivity) as MetricCreateRequest["additivity"],
       definition_json: definitionJson,
       pii_flag: Boolean(values.pii_flag),
+      // 消费指南（选填）：创建时透传（guide_source=manual）；未填写则省略由后端自动生成
+      consumption_guide: guideDraft
+        ? {
+            recommended_usage: guideDraft.recommended_usage.filter((s) => s.trim()),
+            cautions: guideDraft.cautions.filter((s) => s.trim()),
+            related_metrics: guideDraft.related_metrics.filter((s) => s.trim()),
+          }
+        : undefined,
       // 口径三方责任（可选）：平台用户 id 或外部人员名称兜底（RoleOwnerSelect 组合值拆分）
       product_owner_id: (values.product_owner as RoleOwnerValue | undefined)?.id ?? undefined,
       tech_owner_id: (values.tech_owner as RoleOwnerValue | undefined)?.id ?? undefined,
@@ -1981,6 +1992,53 @@ export function MetricCreate() {
                             </Form.Item>
                           </Col>
                         </Row>
+                      </>
+                    ),
+                  },
+                ]}
+              />
+              <Collapse
+                ghost
+                items={[
+                  {
+                    key: "guide",
+                    label: (
+                      <span>
+                        消费指南（选填）
+                        <Tag style={{ marginLeft: 8 }} color={guideDraft ? "green" : "default"}>
+                          {guideDraft ? "已填写" : "自动生成"}
+                        </Tag>
+                      </span>
+                    ),
+                    children: (
+                      <>
+                        <Alert
+                          type="info"
+                          showIcon
+                          style={{ marginBottom: 12 }}
+                          message="推荐用法/注意事项/关联指标将在指标详情与消费指南页展示；不填写则按指标语义自动生成。"
+                        />
+                        <ListEditor
+                          size="small"
+                          label="推荐使用方式"
+                          value={guideDraft?.recommended_usage ?? []}
+                          onChange={(v) => setGuideDraft((d) => ({ ...(d ?? { cautions: [], related_metrics: [] }), recommended_usage: v }))}
+                          placeholder="如：适用 sales 域 daily 粒度分析"
+                        />
+                        <ListEditor
+                          size="small"
+                          label="注意事项"
+                          value={guideDraft?.cautions ?? []}
+                          onChange={(v) => setGuideDraft((d) => ({ ...(d ?? { recommended_usage: [], related_metrics: [] }), cautions: v }))}
+                          placeholder="如：该指标包含 PII 数据"
+                        />
+                        <ListEditor
+                          size="small"
+                          label="关联指标编码"
+                          value={guideDraft?.related_metrics ?? []}
+                          onChange={(v) => setGuideDraft((d) => ({ ...(d ?? { recommended_usage: [], cautions: [] }), related_metrics: v }))}
+                          placeholder="如：sales_uv_daily"
+                        />
                       </>
                     ),
                   },

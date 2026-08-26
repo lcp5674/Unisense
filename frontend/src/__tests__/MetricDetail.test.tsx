@@ -41,6 +41,7 @@ vi.mock("../api", () => ({
   submitReview: vi.fn(),
   updateMetric: vi.fn(),
   updateMetricDescription: vi.fn(),
+  updateConsumptionGuide: vi.fn(),
   suggestRenameName: vi.fn(),
   inferMetricDescription: vi.fn(),
   refineMetricDefinition: vi.fn(),
@@ -88,6 +89,7 @@ import {
   fetchRelatedMetrics,
   updateMetric,
   updateMetricDescription,
+  updateConsumptionGuide,
   suggestRenameName,
   inferMetricDescription,
   refineMetricDefinition,
@@ -106,6 +108,7 @@ import {
 } from "../api";
 const mockedUpdateMetric = vi.mocked(updateMetric);
 const mockedUpdateDesc = vi.mocked(updateMetricDescription);
+const mockedUpdateGuide = vi.mocked(updateConsumptionGuide);
 const mockedSuggestRename = vi.mocked(suggestRenameName);
 const mockedInferDesc = vi.mocked(inferMetricDescription);
 const mockedRefine = vi.mocked(refineMetricDefinition);
@@ -1517,6 +1520,106 @@ describe("MetricDetail 按钮级权限过滤", () => {
         expect.objectContaining({ name: "销售 GMV", change_reason: "修正口径描述", row_version: metric.row_version }),
       );
     });
+  });
+
+  it("编辑弹窗修改消费指南：先调 updateConsumptionGuide 成功后再调 updateMetric", async () => {
+    mockedUpdateGuide.mockClear();
+    mockedUpdateMetric.mockClear();
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "DRAFT",
+      consumption_guide: { recommended_usage: ["旧推荐用法"], cautions: [], related_metrics: [] },
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedDomainTree.mockResolvedValue([
+      { id: 1, code: "sales", name: "销售域", parent_id: null, level: 1, sort_order: 0, status: "active", metric_count: 0, children: [] },
+    ]);
+    mockedCurrentUser.mockResolvedValue({
+      id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1,
+    });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1, role: "metric_owner", home_domain: "outpatient",
+      allowed_actions: ["read", "write"], ui_actions: ["metric:create"],
+      granted_domains: [], metric_whitelist: [], row_level_restricted: false,
+      grants: [], expiring_soon: [],
+    });
+    mockedUpdateGuide.mockResolvedValue({
+      metric_code: "sales_gmv_sum_d", recommended_usage: ["新推荐用法"], cautions: [], related_metrics: [],
+      guide_source: "manual", guide_updated_at: "2026-08-26T00:00:00",
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    fireEvent.click(await screen.findByRole("button", { name: /编辑/ }));
+    await waitFor(() => expect(document.querySelector(".ant-modal")).toBeTruthy());
+    // 展开「消费指南」Collapse
+    fireEvent.click(document.querySelectorAll(".ant-modal .ant-collapse-header")[0]);
+    await waitFor(() => expect(screen.getByDisplayValue("旧推荐用法")).toBeInTheDocument());
+    // 修改推荐用法 → 触发 editGuideDirty
+    fireEvent.change(screen.getByDisplayValue("旧推荐用法"), { target: { value: "新推荐用法" } });
+    // 填变更原因并保存
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "同步更新消费指南" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => {
+      expect(mockedUpdateGuide).toHaveBeenCalledWith(
+        "sales_gmv_sum_d",
+        expect.objectContaining({ recommended_usage: ["新推荐用法"], row_version: metric.row_version }),
+      );
+    });
+    await waitFor(() => expect(mockedUpdateMetric).toHaveBeenCalled());
+    // 保存顺序：指南先于指标
+    const guideOrder = mockedUpdateGuide.mock.invocationCallOrder[0];
+    const metricOrder = mockedUpdateMetric.mock.invocationCallOrder[0];
+    expect(guideOrder).toBeLessThan(metricOrder);
+  });
+
+  it("编辑弹窗保存：指南未修改时不调用 updateConsumptionGuide", async () => {
+    mockedUpdateGuide.mockClear();
+    mockedUpdateMetric.mockClear();
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "DRAFT",
+      consumption_guide: { recommended_usage: ["旧推荐用法"], cautions: [], related_metrics: [] },
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedDomainTree.mockResolvedValue([
+      { id: 1, code: "sales", name: "销售域", parent_id: null, level: 1, sort_order: 0, status: "active", metric_count: 0, children: [] },
+    ]);
+    mockedCurrentUser.mockResolvedValue({
+      id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1,
+    });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1, role: "metric_owner", home_domain: "outpatient",
+      allowed_actions: ["read", "write"], ui_actions: ["metric:create"],
+      granted_domains: [], metric_whitelist: [], row_level_restricted: false,
+      grants: [], expiring_soon: [],
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    fireEvent.click(await screen.findByRole("button", { name: /编辑/ }));
+    await waitFor(() => expect(document.querySelector(".ant-modal")).toBeTruthy());
+    // 只改名称，不改指南
+    const nameInput = document.querySelector('.ant-modal input[id="name"]') as HTMLInputElement;
+    fireEvent.change(nameInput, { target: { value: "销售 GMV 改名" } });
+    const reasonArea = document.querySelector('.ant-modal textarea[id="change_reason"]') as HTMLTextAreaElement;
+    fireEvent.change(reasonArea, { target: { value: "仅改名称" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => expect(mockedUpdateMetric).toHaveBeenCalled());
+    expect(mockedUpdateGuide).not.toHaveBeenCalled();
   });
 
   it("详情页口径定义卡片展示三层口径（业务/技术/数仓SQL空态）", async () => {

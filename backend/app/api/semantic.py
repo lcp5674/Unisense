@@ -21,6 +21,7 @@ from app.core.audit import client_ip, write_audit
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.models.metric_template import MetricTemplate
+from app.services.semantic.schemas import MetricConsumptionGuideUpdateRequest
 from app.services.semantic.service import MetricService
 
 router = APIRouter(prefix="/semantics", tags=["semantics"])
@@ -671,10 +672,50 @@ async def get_consumption_guide(
     db: AsyncSession = Depends(get_db_session),
 ) -> Any:
     """获取指定指标的消费指南（Service层+缓存）。"""
-    from app.services.semantic.service import MetricService
-
     svc = MetricService(db)
     guide = await svc.get_consumption_guide(metric_code)
+    return ok(data=guide, trace_id=get_trace_id(request))
+
+
+@router.put(
+    "/consumption-guide/{metric_code}",
+    dependencies=_WRITE_DEPS,
+    response_model=ApiResponse,
+    summary="更新指标消费指南（独立于状态机的轻量文档维护，对齐描述编辑）",
+)
+async def update_consumption_guide(
+    request: Request,
+    user: CurrentUser,
+    metric_code: str,
+    body: MetricConsumptionGuideUpdateRequest,
+    db: AsyncSession = Depends(get_db_session),
+) -> Any:
+    """人工维护消费指南（推荐用法/注意事项/关联指标），乐观锁防并发覆盖。"""
+    from app.core.audit import write_audit
+
+    svc = MetricService(db)
+    guide = await svc.update_consumption_guide(
+        metric_code,
+        body,
+        actor_id=user.id,
+        role=user.role,
+        user_domain=user.domain,
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="metric_definition.update",
+        entity_type="metric_consumption_guide",
+        entity_id=metric_code,
+        detail={
+            "usage_count": len(body.recommended_usage),
+            "caution_count": len(body.cautions),
+            "related_count": len(body.related_metrics),
+        },
+        ip=client_ip(request),
+        trace_id=get_trace_id(request),
+    )
+    await db.commit()
     return ok(data=guide, trace_id=get_trace_id(request))
 
 

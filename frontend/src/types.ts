@@ -284,6 +284,8 @@ export interface MetricCreateRequest {
   mount?: MetricMountInput | null;
   pii_flag?: boolean;
   sla?: string | null;
+  /** 消费指南（选填）：创建时随指标落库（guide_source=manual），三组字符串数组 */
+  consumption_guide?: ConsumptionGuidePayload | null;
   /** 口径三方责任（PRD 4.5 补充，均可空）：产品需求方/技术方/数仓开发 */
   product_owner_id?: number | null;
   tech_owner_id?: number | null;
@@ -313,7 +315,8 @@ export interface MetricUpdateRequest {
   non_additive_dimensions?: string[]; // 治理属性：不可加维度
   definition_json?: Record<string, unknown>;
   sla?: string | null;
-  consumption_guide?: Record<string, unknown>;
+  /** 消费指南（选填）：创建时随指标落库（guide_source=manual），三组字符串数组 */
+  consumption_guide?: ConsumptionGuidePayload | null;
   backup_owner_id?: number | null;
   /** 口径三方责任（非破坏性变更，不触发版本确认）：产品需求方/技术方/数仓开发 */
   product_owner_id?: number | null;
@@ -859,6 +862,25 @@ export interface ConsumptionGuideResponse {
   recommended_usage: string[];
   cautions: string[];
   related_metrics: string[];
+  /** 指南来源：auto=自动生成 / manual=人工维护 */
+  guide_source?: "auto" | "manual" | null;
+  /** 人工维护时间（自动生成时为 null/缺省） */
+  guide_updated_at?: string | null;
+}
+
+/** 消费指南三组列表（人工维护的请求/落库结构） */
+export interface ConsumptionGuidePayload {
+  recommended_usage: string[];
+  cautions: string[];
+  related_metrics: string[];
+}
+
+/** 更新消费指南请求（独立于指标状态机；row_version 为可选乐观锁） */
+export interface MetricConsumptionGuideUpdateRequest {
+  recommended_usage: string[];
+  cautions: string[];
+  related_metrics: string[];
+  row_version?: number;
 }
 
 // ============================================================================

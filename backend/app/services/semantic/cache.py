@@ -216,6 +216,25 @@ class MetricCache:
                         break
             except Exception:
                 logger.warning("metric_cache_invalidate_failed", metric_code=metric_code)
+            # 指标定义变更会改变自动生成的指南内容，顺带失效指南缓存（避免 stale）
+            await self.invalidate_guide(metric_code)
+
+    async def invalidate_guide(self, metric_code: str) -> None:
+        """失效消费指南缓存（仅删 guide 键，指标定义缓存不受影响）。
+
+        供 update_consumption_guide（指南人工维护后立即生效）与 invalidate()
+        复用；Redis 不可用时静默跳过，不阻断写路径。
+
+        Args:
+            metric_code: 指标编码。
+        """
+        if not self._enabled:
+            return
+        key = f"{self._GUIDE_PREFIX}{metric_code}"
+        try:
+            await self._redis.delete(key)  # type: ignore[union-attr]
+        except Exception:
+            logger.warning("cache_invalidate_guide_failed", metric_code=metric_code)
 
     async def invalidate_batch(self, metric_codes: list[str]) -> None:
         """批量失效缓存。失败不影响写路径。
@@ -225,7 +244,7 @@ class MetricCache:
         """
         if not self._enabled or not metric_codes:
             return
-        # 批量删除所有版本的键
+        # 批量删除所有版本的键 + 指南缓存键
         try:
             all_keys: list[str] = []
             for code in metric_codes:
@@ -238,6 +257,7 @@ class MetricCache:
                     all_keys.extend(keys)
                     if cursor == 0:
                         break
+                all_keys.append(f"{self._GUIDE_PREFIX}{code}")
             if all_keys:
                 await self._redis.delete(*all_keys)  # type: ignore[union-attr]
         except Exception:

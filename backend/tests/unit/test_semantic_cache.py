@@ -199,7 +199,10 @@ class TestMetricCacheInvalidate:
         redis.scan = AsyncMock(return_value=(0, ["metric:def:M1:v1"]))
         cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
         await cache.invalidate("M1")
-        redis.delete.assert_called_once()
+        # 删版本键 + 顺带失效指南缓存键
+        deleted_keys = [call[0][0] for call in redis.delete.call_args_list]
+        assert "metric:def:M1:v1" in deleted_keys
+        assert "metric:guide:M1" in deleted_keys
 
     async def test_invalidate_redis_error_silent(self) -> None:
         redis = MagicMock()
@@ -303,9 +306,14 @@ class TestVersionKey:
         redis.delete = AsyncMock()
         cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
         await cache.invalidate("M1")
-        # scan+delete 调用确认
+        # scan+delete 调用确认：版本键 + 指南键均被删
         redis.scan.assert_called_once()
-        redis.delete.assert_called_once()
+        deleted_keys: list[str] = []
+        for call in redis.delete.call_args_list:
+            deleted_keys.extend(call[0])
+        assert "metric:def:M1:v1" in deleted_keys
+        assert "metric:def:M1:v2" in deleted_keys
+        assert "metric:guide:M1" in deleted_keys
 
 
 class TestPipelineWarmup:
@@ -373,7 +381,11 @@ class TestInvalidateBatch:
         cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
         await cache.invalidate_batch(["M1"])
         assert redis.scan.call_count == 2
-        redis.delete.assert_awaited_once_with("metric:def:M1:v1", "metric:def:M1:v2")
+        # 版本键 + 指南键一并删除
+        deleted = redis.delete.call_args[0]
+        assert "metric:def:M1:v1" in deleted
+        assert "metric:def:M1:v2" in deleted
+        assert "metric:guide:M1" in deleted
 
     async def test_batch_redis_error_silent(self) -> None:
         redis = MagicMock()
@@ -461,6 +473,23 @@ class TestGuideCache:
         cache = MetricCache(redis=redis, breaker=breaker)
         assert await cache.get_guide("M1") is None
         assert breaker.failures == 1
+
+    async def test_invalidate_guide_removes_only_guide_key(self) -> None:
+        redis = MagicMock()
+        redis.delete = AsyncMock()
+        cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
+        await cache.invalidate_guide("M1")
+        redis.delete.assert_awaited_once_with("metric:guide:M1")
+
+    async def test_invalidate_guide_disabled(self) -> None:
+        cache = MetricCache(redis=None)
+        await cache.invalidate_guide("M1")
+
+    async def test_invalidate_guide_redis_error_silent(self) -> None:
+        redis = MagicMock()
+        redis.delete = AsyncMock(side_effect=ConnectionError("Redis down"))
+        cache = MetricCache(redis=redis, breaker=FakeBreaker(allow=True))
+        await cache.invalidate_guide("M1")  # 不应抛异常
 
     async def test_set_guide_success(self) -> None:
         redis = MagicMock()

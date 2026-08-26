@@ -6,6 +6,7 @@ import {
   Button,
   Card,
   Checkbox,
+  Collapse,
   Descriptions,
   Form,
   Input,
@@ -76,6 +77,7 @@ import {
   suggestRenameName,
   updateMetric,
   updateMetricDescription,
+  updateConsumptionGuide,
   upsertSubscription,
   notifyUnknownDictValues,
   verifyDictValues,
@@ -86,6 +88,7 @@ import type {
   MetricMount,
   SubjectDomainTreeNode,
   CurrentUser,
+  ConsumptionGuidePayload,
   Dimension,
   MetricHealth,
   MetricListResponse,
@@ -107,6 +110,7 @@ import { QualitySnapshot } from "./metric/QualitySnapshot";
 import { LineageImpact } from "./metric/LineageImpact";
 import { VersionHistory } from "./metric/VersionHistory";
 import { buildChangeInfo, changeVersionText, MetricDiffView } from "./metric/ChangeContext";
+import { ListEditor } from "./ConsumptionGuide";
 import { AuditTimeline } from "./metric/AuditTimeline";
 import { RelatedDimensions } from "./metric/RelatedDimensions";
 import { CodeValue } from "../components/CodeValue";
@@ -705,6 +709,9 @@ export function MetricDetail() {
   const [editOpen, setEditOpen] = useState(false);
   const [editForm] = Form.useForm();
   const [editSaving, setEditSaving] = useState(false);
+  // 消费指南（编辑弹窗内嵌）：独立于指标状态机，保存顺序=先指南后指标
+  const [editGuideDraft, setEditGuideDraft] = useState<ConsumptionGuidePayload | null>(null);
+  const [editGuideDirty, setEditGuideDirty] = useState(false);
   const [editGranularityOptions, setEditGranularityOptions] = useState<
     Array<{ value: string; label: string }>
   >([]);
@@ -1203,6 +1210,18 @@ export function MetricDetail() {
     );
     setEditOwnerIdsDirty(new Set());
     setEditDefinitionError(null);
+    // 消费指南回填（编辑弹窗内嵌区块）：从当前 consumption_guide 提取三列表，未填写则空数组
+    const cg = (metric.consumption_guide ?? {}) as {
+      recommended_usage?: unknown[];
+      cautions?: unknown[];
+      related_metrics?: unknown[];
+    };
+    setEditGuideDraft({
+      recommended_usage: Array.isArray(cg.recommended_usage) ? cg.recommended_usage.map(String) : [],
+      cautions: Array.isArray(cg.cautions) ? cg.cautions.map(String) : [],
+      related_metrics: Array.isArray(cg.related_metrics) ? cg.related_metrics.map(String) : [],
+    });
+    setEditGuideDirty(false);
     setEditOpen(true);
   }
 
@@ -1477,10 +1496,20 @@ export function MetricDetail() {
   }
 
   // 实际执行保存（含状态提示）：引导弹窗「仍按原值保存 / 通知管理员并保存」均走此路径。
+  // 保存顺序 = 先指南后指标（计划结论 3）：指南脏则先调 updateConsumptionGuide（独立端点），
+  // 成功后再 updateMetric；指南失败即中止（指标未提交，无半成功）；指标失败时指南已保存。
   async function doSaveEdit(req: MetricUpdateRequest) {
     if (!metric) return;
     setEditSaving(true);
     try {
+      if (editGuideDirty && editGuideDraft) {
+        await updateConsumptionGuide(metric.metric_code, {
+          recommended_usage: editGuideDraft.recommended_usage.filter((s) => s.trim()),
+          cautions: editGuideDraft.cautions.filter((s) => s.trim()),
+          related_metrics: editGuideDraft.related_metrics.filter((s) => s.trim()),
+          row_version: metric.row_version ?? undefined,
+        });
+      }
       await updateMetric(metric.metric_code, req);
       if (metric.status === "REVIEW") {
         message.success("修改已保存，指标已退回草稿，请重新提交评审");
@@ -3243,6 +3272,54 @@ export function MetricDetail() {
               </Tag>
             ))}
           </Space>
+          <Collapse
+            ghost
+            style={{ marginTop: 8 }}
+            items={[
+              {
+                key: "guide",
+                label: (
+                  <span>
+                    消费指南
+                    <Tag style={{ marginLeft: 8 }} color={editGuideDirty ? "green" : "default"}>
+                      {editGuideDirty ? "已修改" : "未修改"}
+                    </Tag>
+                  </span>
+                ),
+                children: (
+                  <>
+                    <Alert
+                      type="info"
+                      showIcon
+                      style={{ marginBottom: 12 }}
+                      message="指南独立于指标状态机保存（不触发版本确认）；修改后随本弹窗一并保存。"
+                    />
+                    <ListEditor
+                      size="small"
+                      label="推荐使用方式"
+                      value={editGuideDraft?.recommended_usage ?? []}
+                      onChange={(v) => { setEditGuideDraft((d) => ({ ...(d ?? { cautions: [], related_metrics: [] }), recommended_usage: v })); setEditGuideDirty(true); }}
+                      placeholder="如：适用 sales 域 daily 粒度分析"
+                    />
+                    <ListEditor
+                      size="small"
+                      label="注意事项"
+                      value={editGuideDraft?.cautions ?? []}
+                      onChange={(v) => { setEditGuideDraft((d) => ({ ...(d ?? { recommended_usage: [], related_metrics: [] }), cautions: v })); setEditGuideDirty(true); }}
+                      placeholder="如：该指标包含 PII 数据"
+                    />
+                    <ListEditor
+                      size="small"
+                      label="关联指标编码"
+                      value={editGuideDraft?.related_metrics ?? []}
+                      onChange={(v) => { setEditGuideDraft((d) => ({ ...(d ?? { recommended_usage: [], cautions: [] }), related_metrics: v })); setEditGuideDirty(true); }}
+                      placeholder="如：sales_uv_daily"
+                    />
+                  </>
+                ),
+              },
+            ]}
+          />
         </Form>
       </Modal>
 

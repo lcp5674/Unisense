@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { ConsumptionGuide } from "../pages/ConsumptionGuide";
 
@@ -7,6 +7,7 @@ import { ConsumptionGuide } from "../pages/ConsumptionGuide";
 vi.mock("../api", () => ({
   fetchConsumptionGuide: vi.fn(),
   getMetric: vi.fn(),
+  updateConsumptionGuide: vi.fn(),
 }));
 
 // Mock useTracking hook（返回稳定引用，避免 effect 依赖反复触发）
@@ -15,8 +16,9 @@ vi.mock("../hooks/useTracking", () => ({
   useTracking: () => ({ track: trackMock }),
 }));
 
-import { fetchConsumptionGuide, getMetric } from "../api";
+import { fetchConsumptionGuide, getMetric, updateConsumptionGuide } from "../api";
 const mockedFetchGuide = vi.mocked(fetchConsumptionGuide);
+const mockedUpdateGuide = vi.mocked(updateConsumptionGuide);
 
 const mockGuideData = {
   metric_code: "finance_revenue_sum_d",
@@ -172,5 +174,40 @@ describe("ConsumptionGuide", () => {
     });
     screen.getByRole("button", { name: /返\s*回/ }).click();
     await screen.findByText("dashboard-page");
+  });
+
+  it("自动生成来源徽标 + 编辑按钮（人工维护标识）", async () => {
+    mockedFetchGuide.mockResolvedValue({ ...mockGuideData, guide_source: "manual", guide_updated_at: "2026-08-26T00:00:00" });
+    renderGuide();
+    await waitFor(() => {
+      expect(screen.getByText("人工维护")).toBeInTheDocument();
+    });
+    // can() 在测试默认环境放行 → 编辑按钮可见
+    expect(screen.getByRole("button", { name: /编辑指南/ })).toBeTruthy();
+  });
+
+  it("编辑指南：打开弹窗 → 增删行 → 保存调用 updateConsumptionGuide（乐观锁）", async () => {
+    mockedFetchGuide.mockResolvedValue({ ...mockGuideData, guide_source: "auto" });
+    mockedUpdateGuide.mockResolvedValue({ ...mockGuideData, guide_source: "manual" });
+    renderGuide();
+    await waitFor(() => {
+      expect(screen.getByText("自动生成")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /编辑指南/ }));
+    await screen.findAllByText("推荐使用方式"); // 页面 Card + Modal 内 label 均命中
+    // 预填当前推荐用法（2 项）+ 注意事项（1）+ 关联指标（1）= 4 个输入框
+    expect(screen.getAllByRole("textbox").length).toBe(4);
+    expect(screen.getByDisplayValue("适用 finance 域 day 粒度分析")).toBeInTheDocument();
+    // 添加一项推荐用法（第一组的「添加一项」）→ 5 个输入框
+    fireEvent.click(screen.getAllByRole("button", { name: /添加一项/ })[0]);
+    expect(screen.getAllByRole("textbox").length).toBe(5);
+    // 保存
+    fireEvent.click(screen.getByRole("button", { name: "保 存" }));
+    await waitFor(() => {
+      expect(mockedUpdateGuide).toHaveBeenCalledWith(
+        "finance_revenue_sum_d",
+        expect.objectContaining({ recommended_usage: mockGuideData.recommended_usage, row_version: 1 }),
+      );
+    });
   });
 });

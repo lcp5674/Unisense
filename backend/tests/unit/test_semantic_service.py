@@ -23,6 +23,7 @@ from app.models.metric import Metric
 from app.services.governance.policy import Decision
 from app.services.semantic.schemas import (
     MetricApproveRequest,
+    MetricConsumptionGuideUpdateRequest,
     MetricCreateRequest,
     MetricDescriptionUpdateRequest,
     MetricEmergencyPublishRequest,
@@ -5081,7 +5082,7 @@ async def test_compare_metrics_similar():
 
 
 async def test_get_consumption_guide_uses_existing():
-    """已有 consumption_guide 直接返回（不生成默认）。"""
+    """已有 consumption_guide 直接返回（presence 判定，缺省补来源元数据）。"""
     svc, repo = _svc_with_repo()
     svc._cache = MagicMock()
     svc._cache.get_guide = AsyncMock(return_value=None)
@@ -5091,7 +5092,10 @@ async def test_get_consumption_guide_uses_existing():
         return_value=make_metric(status="PUBLISHED", consumption_guide=existing_guide)
     )
     guide = await svc.get_consumption_guide("sales_gmv_daily")
-    assert guide is existing_guide
+    # presence 判定：DB 值优先，内容保留 + 补 guide_source（存量无 source 视为 manual）
+    assert guide["recommended_usage"] == ["自定义"]
+    assert guide["guide_source"] == "manual"
+    assert "guide_updated_at" not in guide
 
 
 async def test_get_consumption_guide_pii_caution():
@@ -5120,6 +5124,172 @@ async def test_get_consumption_guide_semi_additive_caution():
     )
     guide = await svc.get_consumption_guide("sales_gmv_daily")
     assert any("store_id" in c for c in guide["cautions"])
+
+
+async def test_update_consumption_guide_sets_manual_source():
+    """消费指南人工维护：manual 标记 + 更新人/时间 + row_version+1 + 清指南缓存。"""
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.invalidate_guide = AsyncMock()
+    existing = make_metric(status="PUBLISHED", row_version=3, version=2)
+    repo.get_by_code = AsyncMock(return_value=existing)
+    updated = make_metric(status="PUBLISHED", row_version=4, version=2)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
+
+    result = await svc.update_consumption_guide(
+        "sales_gmv_daily",
+        MetricConsumptionGuideUpdateRequest(
+            recommended_usage=["按日分析 GMV"],
+            cautions=["含退款前金额"],
+            related_metrics=["sales_uv_daily"],
+            row_version=3,
+        ),
+        actor_id=1,
+        role="metric_owner",
+        user_domain="sales",
+    )
+
+    _, kwargs = repo.update_with_optimistic_lock.call_args
+    assert kwargs["consumption_guide"]["recommended_usage"] == ["按日分析 GMV"]
+    assert kwargs["consumption_guide"]["cautions"] == ["含退款前金额"]
+    assert kwargs["guide_source"] == "manual"
+    assert kwargs["guide_updated_by"] == 1
+    assert kwargs["guide_updated_at"] is not None
+    # 指南维护不触发版本号递增
+    assert "version" not in kwargs
+    svc._cache.invalidate_guide.assert_awaited_once_with("sales_gmv_daily")
+    assert result["guide_source"] == "manual"
+
+
+async def test_update_consumption_guide_optimistic_lock_conflict():
+    """row_version 不一致 → 409 OPTIMISTIC_LOCK_CONFLICT，不写库。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(status="PUBLISHED", row_version=3)
+    )
+    with pytest.raises(ConflictError) as ei:
+        await svc.update_consumption_guide(
+            "sales_gmv_daily",
+            MetricConsumptionGuideUpdateRequest(
+                recommended_usage=["x"], row_version=2
+            ),
+            actor_id=1,
+            role="metric_owner",
+        )
+    assert ei.value.error_code == "OPTIMISTIC_LOCK_CONFLICT"
+    repo.update_with_optimistic_lock.assert_not_called()
+
+
+async def test_update_consumption_guide_blocked_by_pdp():
+    """PDP 拒绝 write → FORBIDDEN，不写库。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric())
+    svc._governance_svc.check_metric_permission = AsyncMock(
+        return_value=Decision(allow=False, reason="no write", error_code="FORBIDDEN")
+    )
+    with pytest.raises(BusinessError) as ei:
+        await svc.update_consumption_guide(
+            "sales_gmv_daily",
+            MetricConsumptionGuideUpdateRequest(recommended_usage=["x"]),
+            actor_id=9,
+            role="viewer",
+        )
+    assert ei.value.error_code == "FORBIDDEN"
+    repo.update_with_optimistic_lock.assert_not_called()
+
+
+async def test_update_consumption_guide_not_owner_raises_auth():
+    """metric_owner 操作他人指标 → AuthError。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(owner_id=1))
+    with pytest.raises(AuthError):
+        await svc.update_consumption_guide(
+            "sales_gmv_daily",
+            MetricConsumptionGuideUpdateRequest(recommended_usage=["x"]),
+            actor_id=99,
+            role="analyst",
+            user_domain="sales",
+        )
+    repo.update_with_optimistic_lock.assert_not_called()
+
+
+async def test_get_consumption_guide_auto_related_metrics():
+    """自动生成分支：血缘一跳推荐（排除自身/非 metric 节点/去重/限量）。"""
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.get_guide = AsyncMock(return_value=None)
+    svc._cache.set_guide = AsyncMock()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(status="PUBLISHED", metric_code="sales_gmv_daily")
+    )
+
+    class _FakeEdge:
+        def __init__(self, source: str, target: str) -> None:
+            self.source_node = source
+            self.target_node = target
+
+    edges = [
+        _FakeEdge("metric:sales_gmv_daily", "metric:sales_uv_daily"),
+        _FakeEdge("table:dws_sales", "metric:sales_gmv_daily"),
+        _FakeEdge("metric:sales_gmv_daily", "metric:sales_gmv_daily"),  # 自环排除
+        _FakeEdge("metric:sales_uv_daily", "metric:sales_gmv_daily"),  # 去重
+        _FakeEdge("metric:sales_gmv_daily", "metric:sales_arpu_daily"),
+        _FakeEdge("metric:sales_gmv_daily", "metric:sales_gmv_weekly"),
+        _FakeEdge("metric:sales_gmv_daily", "metric:sales_gmv_monthly"),
+        _FakeEdge("metric:sales_gmv_daily", "metric:sales_gmv_quarterly"),
+        _FakeEdge("metric:sales_gmv_daily", "metric:sales_gmv_yearly"),
+        _FakeEdge("metric:sales_gmv_daily", "metric:sales_gmv_extra"),  # 超限被截
+    ]
+    with patch(
+        "app.services.lineage.repository.LineageRepository"
+    ) as mock_repo_cls:
+        mock_repo_cls.return_value.edges_for_node = AsyncMock(return_value=edges)
+        guide = await svc.get_consumption_guide("sales_gmv_daily")
+
+    related = guide["related_metrics"]
+    assert related == [
+        "sales_uv_daily",
+        "sales_arpu_daily",
+        "sales_gmv_weekly",
+        "sales_gmv_monthly",
+        "sales_gmv_quarterly",
+        "sales_gmv_yearly",
+    ]
+    assert len(related) == 6  # 限量
+    assert guide["guide_source"] == "auto"
+    svc._cache.set_guide.assert_awaited_once()
+
+
+async def test_create_metric_with_consumption_guide_sets_manual():
+    """创建时携带消费指南 → guide_source=manual 落库。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    created = make_metric()
+    repo.create = AsyncMock(return_value=created)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    payload = make_create_payload(
+        consumption_guide={
+            "recommended_usage": ["创建时指南"],
+            "cautions": [],
+            "related_metrics": [],
+        }
+    )
+    await svc.create_metric(MetricCreateRequest(**payload), owner_id=1)
+    created_metric = repo.create.call_args.args[0]
+    assert created_metric.consumption_guide["recommended_usage"] == ["创建时指南"]
+    assert created_metric.guide_source == "manual"
+
+
+async def test_create_metric_without_guide_uses_auto():
+    """创建时不带消费指南 → guide_source=auto 落库。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    await svc.create_metric(MetricCreateRequest(**make_create_payload()), owner_id=1)
+    created_metric = repo.create.call_args.args[0]
+    assert created_metric.consumption_guide is None
+    assert created_metric.guide_source == "auto"
 
 
 # ---- create_metric 自动补全 / PII 传播 / 编码耗尽 ----

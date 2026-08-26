@@ -1,12 +1,66 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Card, Spin, Alert, Descriptions, Tag, Empty, Space, Button } from "antd";
-import { InfoCircleOutlined, WarningOutlined, LinkOutlined, ArrowLeftOutlined } from "@ant-design/icons";
-import { fetchConsumptionGuide, getMetric } from "../api";
-import type { ConsumptionGuideResponse, MetricResponse } from "../types";
+import { Card, Spin, Alert, Descriptions, Tag, Empty, Space, Button, Modal, Input, Typography, message } from "antd";
+import {
+  InfoCircleOutlined, WarningOutlined, LinkOutlined, ArrowLeftOutlined,
+  EditOutlined, PlusOutlined, DeleteOutlined,
+} from "@ant-design/icons";
+import { fetchConsumptionGuide, getMetric, updateConsumptionGuide } from "../api";
+import type { ConsumptionGuideResponse, ConsumptionGuidePayload, MetricResponse } from "../types";
 import { useTracking } from "../hooks/useTracking";
+import { usePermission } from "../hooks/usePermission";
 import { ObjectView, DEF_FIELD_LABEL } from "../utils/display";
 import { enumLabel, METRIC_TYPE_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, SERVING_MODE_LABEL } from "../utils/enums";
+
+/** 单组字符串列表编辑器（推荐用法/注意事项/关联指标共用，可增删行）。
+ *  供消费指南页（编辑弹窗）与指标创建/编辑页（表单内嵌区块）复用。 */
+export function ListEditor({
+  label, value, onChange, placeholder, size,
+}: {
+  label: string;
+  value: string[];
+  onChange: (next: string[]) => void;
+  placeholder?: string;
+  size?: "small" | "middle";
+}) {
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <Typography.Text strong>{label}</Typography.Text>
+      <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+        {value.map((item, i) => (
+          <div key={i} style={{ display: "flex", gap: 8 }}>
+            <Input
+              size={size}
+              value={item}
+              placeholder={placeholder}
+              onChange={(e) => {
+                const next = [...value];
+                next[i] = e.target.value;
+                onChange(next);
+              }}
+            />
+            <Button
+              type="text"
+              danger
+              icon={<DeleteOutlined />}
+              aria-label={`删除 ${label} 第 ${i + 1} 项`}
+              onClick={() => onChange(value.filter((_, idx) => idx !== i))}
+            />
+          </div>
+        ))}
+        <Button
+          type="dashed"
+          block
+          size={size}
+          icon={<PlusOutlined />}
+          onClick={() => onChange([...value, ""])}
+        >
+          添加一项
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 export function ConsumptionGuide() {
   const { metricCode } = useParams<{ metricCode: string }>();
@@ -16,11 +70,49 @@ export function ConsumptionGuide() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { track } = useTracking();
+  const { can } = usePermission();
+  const canEdit = can("metric:update");
+  // 编辑弹窗状态：三组列表草稿 + 保存中
+  const [editOpen, setEditOpen] = useState(false);
+  const [editDraft, setEditDraft] = useState<ConsumptionGuidePayload>({
+    recommended_usage: [], cautions: [], related_metrics: [],
+  });
+  const [saving, setSaving] = useState(false);
 
   // 统一返回上一入口：优先回退浏览器历史（指标详情等入口），无上一页（URL 直达）时兜底总览仪表
   function handleBack() {
     if (window.history.length > 1) navigate(-1);
     else navigate("/dashboard");
+  }
+
+  function openEdit() {
+    setEditDraft({
+      recommended_usage: [...(guide?.recommended_usage ?? [])],
+      cautions: [...(guide?.cautions ?? [])],
+      related_metrics: [...(guide?.related_metrics ?? [])],
+    });
+    setEditOpen(true);
+  }
+
+  async function saveEdit() {
+    if (!metricCode) return;
+    setSaving(true);
+    try {
+      const updated = await updateConsumptionGuide(metricCode, {
+        recommended_usage: editDraft.recommended_usage.filter((s) => s.trim()),
+        cautions: editDraft.cautions.filter((s) => s.trim()),
+        related_metrics: editDraft.related_metrics.filter((s) => s.trim()),
+        row_version: metric?.row_version ?? undefined,
+      });
+      setGuide((prev) => (prev ? { ...prev, ...updated } : updated));
+      setEditOpen(false);
+      message.success("消费指南已保存");
+      track("consumption_guide_update", metricCode, "metric");
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "保存消费指南失败");
+    } finally {
+      setSaving(false);
+    }
   }
 
   useEffect(() => {
@@ -78,12 +170,20 @@ export function ConsumptionGuide() {
           </Button>
           <div className="page-kicker">Consumption / Guide</div>
           <h2>消费指南 — <span className="mono">{metricCode}</span></h2>
-          <p>推荐的查询方式、注意事项与关联指标——基于指标语义自动生成。</p>
+          <p>推荐的查询方式、注意事项与关联指标——基于指标语义自动生成，可由 Owner/管理员人工维护。</p>
         </div>
         <Space>
           <Tag color="orange">{guide.domain}</Tag>
           <Tag>{enumLabel(METRIC_TYPE_LABEL, guide.type)}</Tag>
           <Tag>{enumLabel(SERVING_MODE_LABEL, guide.serving_mode)}</Tag>
+          <Tag color={guide.guide_source === "manual" ? "green" : "default"}>
+            {guide.guide_source === "manual" ? "人工维护" : "自动生成"}
+          </Tag>
+          {canEdit && (
+            <Button icon={<EditOutlined />} onClick={openEdit}>
+              编辑指南
+            </Button>
+          )}
         </Space>
       </div>
 
@@ -148,6 +248,36 @@ export function ConsumptionGuide() {
           <ObjectView data={metric.definition_json} labels={DEF_FIELD_LABEL} />
         </Card>
       )}
+
+      <Modal
+        title="编辑消费指南"
+        open={editOpen}
+        onCancel={() => setEditOpen(false)}
+        onOk={saveEdit}
+        confirmLoading={saving}
+        okText="保存"
+        width={680}
+        destroyOnClose
+      >
+        <ListEditor
+          label="推荐使用方式"
+          value={editDraft.recommended_usage}
+          onChange={(v) => setEditDraft((d) => ({ ...d, recommended_usage: v }))}
+          placeholder="如：适用 sales 域 daily 粒度分析"
+        />
+        <ListEditor
+          label="注意事项"
+          value={editDraft.cautions}
+          onChange={(v) => setEditDraft((d) => ({ ...d, cautions: v }))}
+          placeholder="如：该指标包含 PII 数据"
+        />
+        <ListEditor
+          label="关联指标编码"
+          value={editDraft.related_metrics}
+          onChange={(v) => setEditDraft((d) => ({ ...d, related_metrics: v }))}
+          placeholder="如：sales_uv_daily"
+        />
+      </Modal>
     </div>
   );
 }

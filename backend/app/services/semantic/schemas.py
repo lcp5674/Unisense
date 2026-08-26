@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from app.services.metric_mount.schemas import MetricMountInput
 
@@ -63,6 +63,52 @@ def _validate_definition_json(v: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(val, str) or not val.strip():
                 raise ValueError(f"{key} 必须为非空字符串")
             v[key] = val.strip()
+    return v
+
+
+def _validate_guide_list(v: list[str], key: str) -> list[str]:
+    """单组消费指南字符串数组校验（≤20 项/每项 ≤200 字符，去空白、去空项）。
+
+    Args:
+        v: 字符串列表。
+        key: 字段名（recommended_usage/cautions/related_metrics，用于报错）。
+
+    Returns:
+        清洗后的列表。
+
+    Raises:
+        ValueError: 非数组、超项数或单项超长。
+    """
+    if not isinstance(v, list):
+        raise ValueError(f"消费指南.{key} 必须为字符串数组")
+    if len(v) > 20:
+        raise ValueError(f"消费指南.{key} 最多 20 项")
+    cleaned: list[str] = []
+    for item in v:
+        text = str(item).strip()
+        if not text:
+            continue
+        if len(text) > 200:
+            raise ValueError(f"消费指南.{key} 单项最多 200 字符")
+        cleaned.append(text)
+    return cleaned
+
+
+def _validate_guide_payload(v: dict[str, Any] | None) -> dict[str, Any] | None:
+    """消费指南结构校验与规范化（对齐 consumption_guide JSON 列语义）。
+
+    recommended_usage/cautions/related_metrics 均为字符串数组：每项去空白、
+    非空、≤200 字符、列表 ≤20 项；非数组或超长拒绝（422）。不改变未提供字段。
+    """
+    if v is None:
+        return v
+    if not isinstance(v, dict):
+        raise ValueError("消费指南必须为对象")
+    for key in ("recommended_usage", "cautions", "related_metrics"):
+        val = v.get(key)
+        if val is None:
+            continue
+        v[key] = _validate_guide_list(val, key)
     return v
 
 
@@ -179,6 +225,14 @@ class MetricCreateRequest(BaseModel):
     # （ETL 脚本原文切片），落 Metric.raw_sql——候选仅落聚合表达式，整句口径原文
     # 可据此反查（batch_id → 口径全文），存量/普通创建为 None。
     raw_sql: str | None = Field(None, description="原始口径 SQL（可空，供 batch_id 溯源）")
+    # 消费指南（可选）：创建时随指标落库（guide_source=manual），结构校验见
+    # _validate_guide_payload（三组字符串数组，≤20 项/每项 ≤200 字符）。
+    consumption_guide: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "消费指南：recommended_usage/cautions/related_metrics 三组字符串数组"
+        ),
+    )
 
     @field_validator("metric_code")
     @classmethod
@@ -202,6 +256,12 @@ class MetricCreateRequest(BaseModel):
     def validate_definition(cls, v: dict[str, Any]) -> dict[str, Any]:
         """口径定义：SQL 语法校验 + source_tables 规范化。"""
         return _validate_definition_json(v)
+
+    @field_validator("consumption_guide")
+    @classmethod
+    def validate_guide(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        """消费指南：结构校验与规范化（三组字符串数组）。"""
+        return _validate_guide_payload(v)
 
     @model_validator(mode="after")
     def validate_definition_by_type(self) -> MetricCreateRequest:
@@ -1039,3 +1099,24 @@ class MetricSourceDroppedRequest(BaseModel):
     """
 
     source_ids: list[str] = Field(..., min_length=1, max_length=200)
+
+
+class MetricConsumptionGuideUpdateRequest(BaseModel):
+    """更新指标消费指南请求（独立于指标状态机的轻量文档维护，对齐描述编辑）。
+
+    三组列表均须为字符串数组（≤20 项/每项 ≤200 字符，结构校验复用
+    _validate_guide_payload）；row_version 为可选乐观锁（与 update_metric 一致，
+    防并发覆盖他人编辑）。
+    """
+
+    recommended_usage: list[str] = Field(
+        default_factory=list, description="推荐使用场景"
+    )
+    cautions: list[str] = Field(default_factory=list, description="注意事项")
+    related_metrics: list[str] = Field(default_factory=list, description="关联指标编码")
+    row_version: int | None = Field(None, ge=1, description="乐观锁（指标当前 row_version）")
+
+    @field_validator("recommended_usage", "cautions", "related_metrics")
+    @classmethod
+    def validate_lists(cls, v: list[str], info: ValidationInfo) -> list[str]:
+        return _validate_guide_list(v, info.field_name)

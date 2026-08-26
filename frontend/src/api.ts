@@ -41,6 +41,7 @@ import {
   ConflictListResponse,
   ConflictResponse,
   ConsumptionGuideResponse,
+  MetricConsumptionGuideUpdateRequest,
   CurrentUser,
   DashboardData,
   DataSource,
@@ -1520,6 +1521,20 @@ export async function instantiateTemplate(
 export async function fetchConsumptionGuide(metricCode: string): Promise<ConsumptionGuideResponse> {
   return request<ConsumptionGuideResponse>(
     `${API_BASE}/semantics/consumption-guide/${encodeURIComponent(metricCode)}`,
+  );
+}
+
+// 更新消费指南（人工维护，独立于指标状态机；row_version 乐观锁防并发覆盖）
+export async function updateConsumptionGuide(
+  metricCode: string,
+  req: MetricConsumptionGuideUpdateRequest,
+): Promise<ConsumptionGuideResponse> {
+  return request<ConsumptionGuideResponse>(
+    `${API_BASE}/semantics/consumption-guide/${encodeURIComponent(metricCode)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(req),
+    },
   );
 }
 

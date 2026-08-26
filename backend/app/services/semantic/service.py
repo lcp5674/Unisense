@@ -35,6 +35,7 @@ from app.services.semantic.cache import MetricCache
 from app.services.semantic.repository import MetricRepository
 from app.services.semantic.schemas import (
     MetricApproveRequest,
+    MetricConsumptionGuideUpdateRequest,
     MetricCreateRequest,
     MetricDescriptionUpdateRequest,
     MetricEmergencyPublishRequest,
@@ -548,6 +549,11 @@ class MetricService(BaseService):
             batch_id=getattr(request, "batch_id", None),
             # 口径溯源（P2）：SQL 批量/口径 SQL 模式携带整句原始口径 SQL，可反查
             raw_sql=getattr(request, "raw_sql", None),
+            # 消费指南：创建时透传（有值视为人工维护 manual，否则 auto 待自动生成）
+            consumption_guide=getattr(request, "consumption_guide", None),
+            guide_source=(
+                "manual" if getattr(request, "consumption_guide", None) else "auto"
+            ),
         )
 
         metric = await self._repo.create(metric)
@@ -1178,6 +1184,14 @@ class MetricService(BaseService):
             if val is not None:
                 updates[field] = val
 
+        # 消费指南随 update_metric 写入时同步来源元数据：指南本质是文档（非口径），
+        # 但存量/并行路径可能经白名单携带——置 manual + 更新人/时间，避免自动生成
+        # 指南与人工值混淆（对齐 description_source 语义）。
+        if "consumption_guide" in updates:
+            updates["guide_source"] = "manual"
+            updates["guide_updated_by"] = actor_id
+            updates["guide_updated_at"] = datetime.now(UTC)
+
         # 口径三方责任 id/name 成对处理（非破坏性变更，不触发版本确认）：
         # 三个责任方支持"平台用户 id ↔ 外部人员名称"互相切换与完全解除，白名单循环
         # `if val is not None` 会跳过显式 null 导致旧值残留，故单独用 model_fields_set
@@ -1648,6 +1662,98 @@ class MetricService(BaseService):
             cleared=not stripped,
         )
         return updated
+
+    async def update_consumption_guide(
+        self,
+        metric_code: str,
+        request: MetricConsumptionGuideUpdateRequest,
+        actor_id: int,
+        role: str,
+        user_domain: str | None = None,
+    ) -> dict[str, Any]:
+        """更新指标消费指南（独立于状态机的轻量文档维护，对齐描述编辑 TD §12.1）。
+
+        与 ``update_metric`` 版本状态机解耦：指南是消费侧文档（推荐用法/注意事项/
+        关联指标），不是口径定义，因此不创建 MetricVersion、不设 PII 复核闸门。
+        权限沿用 owner/admin + PDP write；乐观锁 row_version 防并发覆盖他人编辑。
+
+        Args:
+            metric_code: 指标编码。
+            request: 指南更新请求（三组列表 + 可选 row_version 乐观锁）。
+            actor_id: 操作人 ID。
+            role: 操作人角色。
+            user_domain: 操作人所属域（API 层传入）。
+
+        Returns:
+            合并后的指南字典（含 guide_source/guide_updated_at）。
+
+        Raises:
+            NotFoundError: 指标不存在。
+            AuthError: metric_owner 操作他人指标（越权）。
+            ConflictError: row_version 与当前不一致（乐观锁冲突）。
+            BusinessError: PDP 无 write 权限。
+        """
+        metric = await self.get_metric(metric_code)
+        self._assert_owner_or_admin(metric, actor_id, role)
+
+        expected = getattr(request, "row_version", None)
+        if expected is not None and expected != metric.row_version:
+            raise ConflictError(
+                "指标已被他人修改，请刷新后重试",
+                error_code="OPTIMISTIC_LOCK_CONFLICT",
+                ctx={
+                    "metric_code": metric_code,
+                    "current_row_version": metric.row_version,
+                    "expected_row_version": expected,
+                },
+            )
+
+        decision = await self._gov_svc().check_metric_permission(
+            metric_code=metric_code,
+            action="write",
+            user_id=actor_id,
+            role=role,
+            user_domain=user_domain,
+        )
+        if not decision.allow:
+            raise BusinessError(
+                decision.reason or "无权更新该指标消费指南",
+                error_code=decision.error_code or "FORBIDDEN",
+                ctx={"metric_code": metric_code, "actor_id": actor_id},
+            )
+
+        guide = {
+            "recommended_usage": request.recommended_usage,
+            "cautions": request.cautions,
+            "related_metrics": request.related_metrics,
+        }
+        updated = await self._repo.update_with_optimistic_lock(
+            metric.id,
+            metric.row_version,
+            consumption_guide=guide,
+            guide_source="manual",
+            guide_updated_by=actor_id,
+            guide_updated_at=datetime.now(UTC),
+        )
+        # 指南人工维护后立即失效缓存（invalidate_guide 仅删 guide 键，不动指标定义缓存）
+        await self._cache.invalidate_guide(metric_code)
+
+        logger.info(
+            "metric_consumption_guide_updated",
+            metric_code=metric_code,
+            actor_id=actor_id,
+            usage_count=len(request.recommended_usage),
+            caution_count=len(request.cautions),
+            related_count=len(request.related_metrics),
+        )
+        return {
+            "metric_code": metric_code,
+            **guide,
+            "guide_source": "manual",
+            "guide_updated_at": updated.guide_updated_at.isoformat()
+            if updated.guide_updated_at
+            else None,
+        }
 
     async def bind_metric_term(
         self,
@@ -4971,7 +5077,15 @@ class MetricService(BaseService):
         metric = await self.get_metric(metric_code)
 
         if metric.consumption_guide:
-            guide = metric.consumption_guide
+            # presence 判定（勿依赖 guide_source 列值——存量 update_metric 白名单写入
+            # 的值不带 source，迁移已回填 manual）：DB 值优先，缺省补来源元数据
+            guide = dict(metric.consumption_guide)
+            guide.setdefault("metric_code", metric.metric_code)
+            guide.setdefault("guide_source", metric.guide_source or "manual")
+            if metric.guide_updated_at:
+                guide.setdefault(
+                    "guide_updated_at", metric.guide_updated_at.isoformat()
+                )
         else:
             guide = {
                 "metric_code": metric.metric_code,
@@ -4989,7 +5103,9 @@ class MetricService(BaseService):
                     f"注意{'不可' if metric.additivity == 'NON_ADDITIVE' else '可以'}跨维度聚合",
                 ],
                 "cautions": [],
-                "related_metrics": [],
+                # 血缘一跳自动推荐（本模块核心增强，替代恒空的硬编码 []）
+                "related_metrics": await self._related_metric_codes(metric),
+                "guide_source": "auto",
             }
             if metric.pii_flag:
                 guide["cautions"].append("该指标包含 PII 数据，使用时需遵守数据合规要求")
@@ -5000,6 +5116,51 @@ class MetricService(BaseService):
         # 缓存结果
         await self._cache.set_guide(metric_code, guide)
         return guide
+
+    async def _related_metric_codes(self, metric: Metric, limit: int = 6) -> list[str]:
+        """血缘一跳自动推荐关联指标（消费指南 related_metrics）。
+
+        复用 LineageRepository.edges_for_node（已过滤 deleted_at）的 DERIVED_FROM/
+        CONSUMED_BY/USES_DIMENSION 等指标级边：收集另一端 ``metric:`` 前缀节点、
+        剥前缀、去重、排除自身、限量。随整个自动生成指南一起入 Redis 缓存
+        （TTL 600s），不单独缓存。
+
+        Args:
+            metric: 指标 ORM 对象。
+            limit: 推荐数量上限。
+
+        Returns:
+            关联指标编码列表（无则空）。
+        """
+        try:
+            from app.services.lineage.repository import LineageRepository
+
+            edges = await LineageRepository(
+                db=self._db
+            ).edges_for_node(f"metric:{metric.metric_code}", direction="both")
+        except Exception:
+            # 血缘查询异常不阻断指南生成，降级为空推荐
+            logger.warning(
+                "consumption_guide_related_metrics_failed",
+                metric_code=metric.metric_code,
+                exc_info=True,
+            )
+            return []
+
+        seen: set[str] = set()
+        result: list[str] = []
+        for edge in edges:
+            for node in (edge.source_node, edge.target_node):
+                if not node or not node.startswith("metric:"):
+                    continue
+                code = node[len("metric:"):]
+                if code == metric.metric_code or code in seen:
+                    continue
+                seen.add(code)
+                result.append(code)
+                if len(result) >= limit:
+                    return result
+        return result
 
     # ---- 合规官可达性检查（FR-024 降级路径）----
 

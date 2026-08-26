@@ -1513,6 +1513,39 @@ describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数�
     });
   });
 
+  it("消费指南区块：填写后创建草稿透传 consumption_guide（guide_source=manual 语义）", async () => {
+    mockedCreate.mockResolvedValue({ metric_code: "medical_fee_amt_daily" } as any);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await goToStep(1);
+    fireEvent.mouseDown(screen.getByText("选择或搜索逻辑度量（如 支付金额 pay_amt）"));
+    await clickSelectOption("门诊收费金额 (medical_fee_amt)");
+    await goToStep(2);
+    // 展开「消费指南（选填）」Collapse
+    fireEvent.click(screen.getByText(/消费指南（选填）/));
+    // 推荐用法组添加一项并填写
+    fireEvent.click(screen.getAllByRole("button", { name: /添加一项/ })[0]);
+    const usageInput = screen.getByPlaceholderText(/适用 sales 域 daily 粒度分析/);
+    fireEvent.change(usageInput, { target: { value: "适用门诊域按日分析" } });
+    // 注意事项组添加一项并填写
+    fireEvent.click(screen.getAllByRole("button", { name: /添加一项/ })[1]);
+    const cautionInput = screen.getByPlaceholderText(/该指标包含 PII 数据/);
+    fireEvent.change(cautionInput, { target: { value: "含敏感就诊信息" } });
+    await goToStep(3);
+    fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
+
+    await waitFor(() => {
+      expect(mockedCreate).toHaveBeenCalled();
+      const body = mockedCreate.mock.calls[0][0] as {
+        consumption_guide?: { recommended_usage: string[]; cautions: string[]; related_metrics: string[] };
+      };
+      expect(body.consumption_guide?.recommended_usage).toEqual(["适用门诊域按日分析"]);
+      expect(body.consumption_guide?.cautions).toEqual(["含敏感就诊信息"]);
+      expect(body.consumption_guide?.related_metrics).toEqual([]);
+    });
+  });
+
   it("Step② 三层口径 AI 生成/丰富增强：业务口径有值点「AI 丰富增强」回填", async () => {
     mockedRefine.mockResolvedValue({
       content: "按就诊号去重统计的门诊就诊总人次（含跨院区）",

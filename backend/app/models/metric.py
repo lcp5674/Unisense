@@ -277,6 +277,20 @@ class Metric(Base, BaseModel):
     consumption_guide: Mapped[dict[str, Any] | None] = mapped_column(
         JSON, nullable=True, comment="消费指南"
     )
+    # 指南来源与编辑元数据（对齐 description_source 模式，区分人工维护/自动生成）
+    guide_source: Mapped[str] = mapped_column(
+        Enum("auto", "manual", name="guide_source_enum"),
+        nullable=False,
+        default="auto",
+        server_default="auto",
+        comment="指南来源（auto/manual）",
+    )
+    guide_updated_by: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, comment="指南更新人 ID"
+    )
+    guide_updated_at: Mapped[datetime | None] = mapped_column(
+        nullable=True, comment="指南更新时间"
+    )
     # 治理补充：指标业务描述（对齐 DBCatalog 表级描述模式 TD §12.1，独立于口径/版本）
     description: Mapped[str | None] = mapped_column(
         Text, nullable=True, comment="指标业务描述"
