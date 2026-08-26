@@ -642,6 +642,79 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     );
   });
 
+  it("SQL 推断：匹配已发布逻辑度量 → 摘要弹窗推荐 + 一键应用回填 measure_id", async () => {
+    mockedSuggest.mockResolvedValue({
+      metric_code_suggestion: "sales_doctor_active_cnt_day",
+      segments: { domain: "sales", biz_object: "doctor", measure: "active_cnt", period: "day" },
+      fields: {
+        source_table: { value: "dwd.doctor_visit", source: "sql_parse", confidence: 0.9, reason: "SQL 解析源表" },
+        measure_column: { value: "doctor_code", source: "sql_parse", confidence: 0.9, reason: "SQL 解析度量列" },
+        name: { value: "医生活跃数", source: "sql_parse", confidence: 0.8 },
+        type: { value: "atomic", source: "sql_parse", confidence: 0.85 },
+        granularity: { value: "day", source: "sql_parse", confidence: 0.9 },
+        unit: { value: "人", source: "rule", confidence: 0.68 },
+        aggregation: { value: "COUNT_DISTINCT", source: "sql_parse", confidence: 0.95 },
+        time_semantics: { value: "PERIOD", source: "sql_parse", confidence: 0.6 },
+        freshness: { value: "T1", source: "rule", confidence: 0.5 },
+        dw_layer: { value: "DWD", source: "sql_parse", confidence: 0.8 },
+        additivity: { value: "ADDITIVE", source: "rule", confidence: 0.6 },
+        serving_mode: { value: "BATCH_ONLY", source: "sql_parse", confidence: 0.7 },
+        metric_tier: { value: "T3", source: "fallback", confidence: 0.4 },
+        definition_json: {
+          value: {
+            expression: "COUNT(DISTINCT doctor_code)",
+            source_fields: [{ table: "dwd.doctor_visit", column: "doctor_code" }],
+          },
+          source: "sql_parse",
+          confidence: 0.9,
+        },
+        definition_mode: { value: "expression", source: "sql_parse", confidence: 0.9 },
+      },
+      definition_json: {
+        expression: "COUNT(DISTINCT doctor_code)",
+        source_fields: [{ table: "dwd.doctor_visit", column: "doctor_code" }],
+      },
+      definition_mode: "expression",
+      measure_suggestions: [
+        {
+          id: 7,
+          measure_code: "doctor_active_cnt",
+          name: "医生活跃数",
+          measure_format: "NUMERIC",
+          default_unit: "人",
+          confidence: 1,
+          reason: "度量列「doctor_code」与逻辑度量编码/同义词匹配",
+        },
+      ],
+    } as never);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openSqlInfer();
+    fireEvent.change(screen.getByPlaceholderText(/SELECT SUM\(amount\) AS gmv/), {
+      target: { value: "SELECT COUNT(DISTINCT doctor_code) AS cnt FROM dwd.doctor_visit GROUP BY dt" },
+    });
+    fireEvent.click(screen.getByText("智能推断并回填字段"));
+
+    // 摘要弹窗展示推荐逻辑度量 Tag
+    await screen.findByText("SQL 智能推断结果");
+    await screen.findByText(/推荐逻辑度量/);
+    fireEvent.click(screen.getByText(/医生活跃数 \(doctor_active_cnt\)/));
+    await waitFor(() =>
+      expect(screen.getByText(/已应用逻辑度量「医生活跃数/)).toBeTruthy()
+    );
+
+    // 关闭摘要 → Step1 原子来源：逻辑度量已选中（下拉补进候选并显示选中值）
+    fireEvent.click(screen.getByText("知道了"));
+    await goToStep(1);
+    await waitFor(() => {
+      const item = document.querySelector(
+        '.ant-select-selection-item[title*="doctor_active_cnt"]'
+      ) as HTMLElement | null;
+      expect(item).toBeTruthy();
+    });
+  });
+
   it("SQL 推断：血缘关联表按方向拆分为 依赖表（上游）+ 使用表（下游）回填", async () => {
     mockedSuggest.mockResolvedValue({
       metric_code_suggestion: "sales_order_gmv_day",

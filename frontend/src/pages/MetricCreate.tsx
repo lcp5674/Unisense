@@ -7,7 +7,7 @@ import {
 import {
   createMetric, listCatalogs, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, listMeasureCatalogs, fetchCurrentUser, refineMetricDefinition, UnisenseApiError,
 } from "../api";
-import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, DomainSuggestionCandidate, Dimension, MeasureCatalog, MetricMountInput, SqlBatchParseResult, SqlBatchCandidate, CurrentUser } from "../types";
+import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, DomainSuggestionCandidate, Dimension, MeasureCatalog, MeasureSuggestion, MetricMountInput, SqlBatchParseResult, SqlBatchCandidate, CurrentUser } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
 import { MEASURE_FORMAT_LABEL } from "../types";
 import { usePermission } from "../hooks/usePermission";
@@ -335,6 +335,9 @@ export function MetricCreate() {
   // 推断结果友好摘要（SQL 智能推断成功后展示，让用户明确知道推断出了什么）
   const [inferSummary, setInferSummary] = useState<AutoSuggestResponse | null>(null);
   const [inferSummaryOpen, setInferSummaryOpen] = useState(false);
+  // 逻辑度量推荐（信息最大化）：SQL 推断按度量列名匹配已发布逻辑度量目录，
+  // 供原子指标一键继承 measure_id（OneData 原子层 = 逻辑度量 + 聚合方式）。
+  const [measureSuggestions, setMeasureSuggestions] = useState<MeasureSuggestion[]>([]);
 
   // 业务域建议（FR-010 域建议增强）：SQL 推断时反向定位/LLM 兜底推断业务域。
   // domainSuggestionStatus：unique/llm=已应用；conflict=建议域与当前所选不同；matched=与所选一致；
@@ -606,6 +609,8 @@ export function MetricCreate() {
     if (Object.keys(merged).length > 0) form.setFieldsValue(merged);
     if (shouldSetCode) setSuggestedCode(result.metric_code_suggestion);
     setInferred(fields);
+    // 逻辑度量推荐（信息最大化）：候选交给 UI 展示，用户可一键应用 measure_id
+    setMeasureSuggestions(result.measure_suggestions ?? []);
     const defField = fields.definition_json;
     const modeField = fields.definition_mode;
     setInferredDefinition({
@@ -674,6 +679,40 @@ export function MetricCreate() {
         form.setFieldValue("definition", JSON.stringify(defJson, null, 2));
       }
     }
+  }
+
+  // 一键应用推荐逻辑度量（信息最大化）：SQL 推断匹配到已发布逻辑度量时，
+  // 用户点选即回填 measure_id 并同步 selectedMeasure（继承单位/格式/小数位）。
+  // 若该度量不在已加载 options 中（page_size 截断等），补进下拉保证可显示。
+  function applyMeasureSuggestion(sugg: MeasureSuggestion) {
+    form.setFieldValue("measure_id", sugg.id);
+    let found = measureOptions.find((o) => o.value === sugg.id)?.measure ?? null;
+    if (!found) {
+      found = {
+        id: sugg.id,
+        measure_code: sugg.measure_code,
+        name: sugg.name,
+        measure_format: sugg.measure_format,
+        default_unit: sugg.default_unit,
+        description: null,
+        default_decimal_places: null,
+        source_system: null,
+        synonyms: null,
+        category: "OTHER",
+        stat_caliber: null,
+        domain: "",
+        owner_id: 0,
+        status: "PUBLISHED",
+        created_at: "",
+        updated_at: "",
+      } as MeasureCatalog;
+      setMeasureOptions((prev) => [
+        ...prev,
+        { value: sugg.id, label: `${sugg.name} (${sugg.measure_code})`, measure: found as MeasureCatalog },
+      ]);
+    }
+    setSelectedMeasure(found);
+    message.success(`已应用逻辑度量「${sugg.name} (${sugg.measure_code})」——单位/格式/小数位将继承`);
   }
 
   // 域默认值预填（TD §3.8 主题域默认值）：选域后将该域配置的默认粒度/单位/聚合等
@@ -1610,9 +1649,31 @@ export function MetricCreate() {
                     name="measure_id"
                     label="逻辑度量（度量目录，OneData 原子层）"
                     extra={
-                      selectedMeasure
-                        ? `继承：${MEASURE_FORMAT_LABEL[selectedMeasure.measure_format] ?? selectedMeasure.measure_format} · 单位 ${selectedMeasure.default_unit || "—"} · 小数位 ${selectedMeasure.default_decimal_places ?? "按需"}${selectedMeasure.source_system?.length ? ` · 源头系统 ${selectedMeasure.source_system.join("/")}` : ""}`
-                        : "原子指标 = 逻辑度量 + 聚合方式，不直接绑定物理表；度量格式/单位/小数位由度量目录继承"
+                      <>
+                        {selectedMeasure
+                          ? `继承：${MEASURE_FORMAT_LABEL[selectedMeasure.measure_format] ?? selectedMeasure.measure_format} · 单位 ${selectedMeasure.default_unit || "—"} · 小数位 ${selectedMeasure.default_decimal_places ?? "按需"}${selectedMeasure.source_system?.length ? ` · 源头系统 ${selectedMeasure.source_system.join("/")}` : ""}`
+                          : "原子指标 = 逻辑度量 + 聚合方式，不直接绑定物理表；度量格式/单位/小数位由度量目录继承"}
+                        {measureSuggestions.length > 0 && !selectedMeasure ? (
+                          <div style={{ marginTop: 4 }}>
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                              SQL 推断推荐：
+                            </Typography.Text>
+                            {measureSuggestions.map((s) => (
+                              <Tag
+                                key={s.id}
+                                color="green"
+                                style={{ cursor: "pointer", marginInlineEnd: 6 }}
+                                onClick={() => applyMeasureSuggestion(s)}
+                              >
+                                {s.name}
+                              </Tag>
+                            ))}
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                              （点击应用）
+                            </Typography.Text>
+                          </div>
+                        ) : null}
+                      </>
                     }
                   >
                     <Select
@@ -2744,6 +2805,26 @@ export function MetricCreate() {
               style={{ marginBottom: 12 }}
               message="已根据 SQL 自动回填以下字段，可到②③④步确认或覆盖"
             />
+            {measureSuggestions.length > 0 ? (
+              <div style={{ marginBottom: 12 }}>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  推荐逻辑度量（命中已发布度量目录，点击一键应用为原子指标的继承源）：
+                </Typography.Text>
+                <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {measureSuggestions.map((s) => (
+                    <Tag
+                      key={s.id}
+                      color="green"
+                      style={{ cursor: "pointer", padding: "4px 10px" }}
+                      title={s.reason}
+                      onClick={() => applyMeasureSuggestion(s)}
+                    >
+                      {s.name} ({s.measure_code}) · 匹配度 {Math.round(s.confidence * 100)}%
+                    </Tag>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             <Row gutter={[8, 4]}>
               {[
                 ["source_table", "源表"],

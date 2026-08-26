@@ -2768,6 +2768,22 @@ export interface AutoSuggestResponse {
     expression?: string | null;
   }[];
 }
+  /** 逻辑度量推荐（信息最大化）：按度量列名匹配已发布逻辑度量目录，供原子指标
+   *  一键继承 measure_id。尽力而为——无匹配为空数组，不阻断推断。 */
+  measure_suggestions?: MeasureSuggestion[];
+}
+
+/** SQL 推断推荐的逻辑度量候选（OneData 原子层继承源：原子指标 = 逻辑度量 + 聚合）。 */
+export interface MeasureSuggestion {
+  id: number;
+  measure_code: string;
+  name: string;
+  measure_format: MeasureFormat;
+  default_unit: string;
+  /** 匹配置信度（0~1：列名与度量编码/同义词相等=1，包含关系=0.7） */
+  confidence: number;
+  reason: string;
+}
 
 /** 业务域建议候选（FR-010 域建议增强：反向定位/LLM 兜底）。 */
 export interface DomainSuggestionCandidate {

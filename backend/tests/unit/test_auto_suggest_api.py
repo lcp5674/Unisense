@@ -275,3 +275,121 @@ async def test_auto_suggest_multi_stmt_sql_returns_parsed_measures(
     assert any("COUNT(DISTINCT" in m["expression"] for m in measures)
     # 源表识别（修复后画像不再为空）
     assert data["source_tables"] == [] or any("doctor_visit" in t for t in data["source_tables"])
+
+async def test_auto_suggest_sql_period_inferred_and_passed(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """SQL 截月粒度（substr(create_date,1,7)）→ period 自动接线为 month 传给 auto_fill。
+
+    修复「信息最大化」缺口：此前注册向导 runSqlInfer 只传 domain_code+sql 不传
+    period，导致 metric_code 生成条件（源表+度量列+周期三齐）不满足恒为空、
+    granularity 走规则兜底误判。显式传入 period 时不被 SQL 推断覆盖。
+    """
+    captured: list[dict[str, object]] = []
+
+    def _fake_auto_fill(**kwargs: object) -> dict:
+        captured.append(kwargs)
+        return _mock_auto_fill_result()
+
+    with (
+        patch(
+            "app.services.llm.config_service.LlmConfigService.build_client",
+            new=AsyncMock(return_value=SimpleNamespace(enabled=False)),
+        ),
+        patch(
+            "app.services.semantic.auto_fill.auto_fill",
+            new=_fake_auto_fill,
+        ),
+        patch(
+            "app.services.lineage.repository.LineageRepository",
+            return_value=MagicMock(edges_for_node=AsyncMock(return_value=[])),
+        ),
+    ):
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/auto-suggest",
+            json={"domain_code": "outpatient", "sql": _MULTI_STMT_SQL},
+        )
+        # 显式传入 period 时保持用户指定（不被 SQL 推断覆盖）
+        resp2 = await metrics_client.post(
+            "/api/v1/metric-definitions/auto-suggest",
+            json={
+                "domain_code": "outpatient",
+                "sql": _MULTI_STMT_SQL,
+                "period": "day",
+            },
+        )
+
+    assert resp.status_code == 200
+    assert resp2.status_code == 200
+    # 第一次（无显式 period）：SQL 截月粒度接线 month；第二次：显式 day 保持
+    assert len(captured) == 2
+    assert captured[0].get("period") == "month"
+    assert captured[1].get("period") == "day"
+    assert captured[0].get("source_table")
+    assert captured[0].get("measure_column")
+
+
+async def test_auto_suggest_measure_suggestions_matches_published(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """度量列命中已发布逻辑度量目录 → 返回 measure_suggestions 候选（信息最大化）。
+
+    OneData 下原子指标 = 逻辑度量 + 聚合方式，SQL 只解析出物理列名；端点按
+    度量列名与 measure_code/同义词做语义弱匹配，给用户一键继承 measure_id 的起点。
+    匹配不到返回空列表，不阻断推断。
+    """
+    fake_measure = SimpleNamespace(
+        id=7,
+        measure_code="doctor_active_cnt",
+        name="医生活跃数",
+        measure_format="NUMERIC",
+        default_unit="人",
+        synonyms=["doctor_active_cnt", "doctor_code"],
+    )
+    with (
+        patch(
+            "app.services.llm.config_service.LlmConfigService.build_client",
+            new=AsyncMock(return_value=SimpleNamespace(enabled=False)),
+        ),
+        patch(
+            "app.services.semantic.auto_fill.auto_fill",
+            return_value=_mock_auto_fill_result(),
+        ),
+        patch(
+            "app.services.lineage.repository.LineageRepository",
+            return_value=MagicMock(edges_for_node=AsyncMock(return_value=[])),
+        ),
+        patch(
+            "app.services.measure_catalog.repository.MeasureCatalogRepository"
+        ) as repo_cls,
+    ):
+        repo_cls.return_value.list = AsyncMock(return_value=([fake_measure], 1))
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/auto-suggest",
+            json={
+                "domain_code": "outpatient",
+                "source_table": "wedw_dw.doctor_visit_agent_info_da",
+                "measure_column": "doctor_code",
+            },
+        )
+        # 无匹配度量 → 空列表不阻断
+        repo_cls.return_value.list = AsyncMock(return_value=([], 0))
+        resp2 = await metrics_client.post(
+            "/api/v1/metric-definitions/auto-suggest",
+            json={
+                "domain_code": "outpatient",
+                "source_table": "wedw_dw.doctor_visit_agent_info_da",
+                "measure_column": "no_such_measure_xyz",
+            },
+        )
+
+    assert resp.status_code == 200
+    assert resp2.status_code == 200
+    sugg = resp.json()["data"]["measure_suggestions"]
+    assert isinstance(sugg, list) and len(sugg) == 1
+    assert sugg[0]["measure_code"] == "doctor_active_cnt"
+    assert sugg[0]["id"] == 7
+    assert sugg[0]["confidence"] == 1.0
+    assert resp2.json()["data"]["measure_suggestions"] == []
+
+

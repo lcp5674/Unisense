@@ -1791,12 +1791,67 @@ async def auto_suggest_metric(
 
     # SQL 解析（best-effort；失败不影响后续规则推断）
     parsed = parse_sql_profile(sql) if sql else None
+    # 信息最大化：SQL 解析出的统计周期（time_granularity/时间列 token）自动接线到
+    # period——此前注册向导 runSqlInfer 只传 domain_code+sql 不传 period，导致
+    # metric_code 生成条件（源表+度量列+周期三齐）不满足恒为空、granularity 走规则
+    # 兜底误判。显式传入的 period 优先（用户手动指定为准）。
+    if period is None and parsed is not None:
+        from app.services.semantic.sql_split import _period_from_profile
+
+        period = _period_from_profile(parsed)
     effective_table = source_table
     if (not effective_table) and parsed and parsed.source_tables:
         effective_table = parsed.source_tables[0]
     effective_measure = measure_column
     if (not effective_measure) and parsed and parsed.measures:
         effective_measure = parsed.measures[0]["column"]
+
+    # 逻辑度量推荐（信息最大化）：按度量列名匹配已发布逻辑度量目录（measure_catalog），
+    # 供原子指标一键继承（measure_id）。OneData 下原子指标 = 逻辑度量 + 聚合方式，
+    # SQL 只解析出物理列名，这里做语义弱匹配给用户起点——尽力而为，匹配不到不阻断。
+    measure_suggestions: list[dict[str, Any]] = []
+    if effective_measure:
+        try:
+            from app.services.measure_catalog.repository import MeasureCatalogRepository
+
+            def _norm(s: str) -> str:
+                return "".join(ch for ch in str(s).lower() if ch.isalnum())
+
+            norm_col = _norm(effective_measure)
+            rows, _ = await MeasureCatalogRepository(db).list(
+                domain=domain_code or None, status="PUBLISHED", limit=50
+            )
+            scored: list[tuple[float, Any]] = []
+            for m in rows:
+                hay: list[str] = [m.measure_code]
+                if isinstance(m.synonyms, list):
+                    hay.extend(str(s) for s in m.synonyms if s)
+                best = 0.0
+                for h in hay:
+                    norm_h = _norm(h)
+                    if not norm_h:
+                        continue
+                    if norm_h == norm_col:
+                        best = max(best, 1.0)
+                    elif norm_col and (norm_h in norm_col or norm_col in norm_h):
+                        best = max(best, 0.7)
+                if best > 0:
+                    scored.append((best, m))
+            scored.sort(key=lambda x: (-x[0], x[1].id))
+            for score, m in scored[:3]:
+                measure_suggestions.append(
+                    {
+                        "id": m.id,
+                        "measure_code": m.measure_code,
+                        "name": m.name,
+                        "measure_format": m.measure_format,
+                        "default_unit": m.default_unit,
+                        "confidence": round(score, 2),
+                        "reason": f"度量列「{effective_measure}」与逻辑度量编码/同义词匹配",
+                    }
+                )
+        except Exception:
+            pass  # 度量目录不可用 → 不推荐，不阻断推断
 
     # 列元数据富集（best-effort）：从采集目录取列类型/注释/表刷新频率
     measure_meta: dict[str, Any] = {}
@@ -1925,6 +1980,7 @@ async def auto_suggest_metric(
     # 确认推断是否真正识别成功（多度量脚本不再"只取首个"对用户黑盒——每个度量
     # 的列名与聚合方式都可见，可核对后再进入②③④步确认或覆盖）。
     result["parsed_measures"] = parsed.measures if parsed and parsed.measures else []
+    result["measure_suggestions"] = measure_suggestions
     return ok(data=result, trace_id=trace_id)
 
 
