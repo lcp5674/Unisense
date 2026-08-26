@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -26,6 +27,25 @@ from app.services.semantic.sql_split import (
     split_select_measures,
     split_sql_statements,
 )
+
+
+@pytest.fixture(autouse=True)
+def _mock_llm_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """单元测试不触发真实 LLM 校验层（方案 A 默认全量校验会经 LlmConfigService
+    构建真实 client——LLM 实例 429/超时/重试后返回任意内容会把候选任意改写，
+    致依赖候选精确结构的测试 flaky）。
+
+    校验层本身由 ``test_sql_validation.py`` 单独覆盖；本文件只测 infer_sql_batch
+    的切分/候选/并发逻辑，统一 mock 掉校验层返回 ``None``（LLM 不可用时上层
+    保持规则结果不动的真实语义），测试确定性且不依赖 LLM 实例状态。
+    """
+
+    async def _no_validation(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.services.semantic.sql_validation.llm_validate_measures", _no_validation
+    )
 
 # 多语句 SQL（场景A）：注释 + 两条 SELECT
 _MULTI_SQL = """
@@ -934,6 +954,61 @@ async def test_infer_sql_batch_multiple_domain_no_illegal_code() -> None:
     assert "sales" in codes and "health" in codes
 
 
+async def test_infer_sql_batch_domain_suggest_runs_concurrently() -> None:
+    """两阶段并发：整段域建议为多域时，逐语句域建议并入阶段 2 gather 并发执行。
+
+    修复前逐语句 ``await suggest_domain`` 串行（N 条语句 = N×单次 DB 反查/LLM 兜底
+    墙钟）；修复后阶段 2 并入 gather + 信号量并发。用 active/max_active 追踪验证
+    同时活跃数 ≥2（并发而非串行），且建议域按 idx 回填到候选（suggested_domain_code）
+    与语句摘要（suggested_domain）。LLM 校验层（方案 A）mock 掉避免真实 LLM 依赖。
+    """
+    multiple = {
+        "status": "multiple",
+        "domain": None,
+        "candidates": [],
+        "matched_tables": [],
+    }
+    active = 0
+    max_active = 0
+
+    async def fake_suggest(db_arg, **kwargs):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.05)
+        active -= 1
+        sql = kwargs.get("sql", "")
+        if ";" in sql:
+            return multiple
+        if "user_id" in sql:
+            return {
+                "status": "unique",
+                "domain": {"code": "health"},
+                "candidates": [],
+                "matched_tables": [],
+            }
+        return {
+            "status": "unique",
+            "domain": {"code": "sales"},
+            "candidates": [],
+            "matched_tables": [],
+        }
+
+    with patch(
+        "app.services.semantic.domain_suggest.suggest_domain",
+        new=AsyncMock(side_effect=fake_suggest),
+    ):
+        result = await infer_sql_batch(_fake_db(), sql=_MULTI_SQL, split_mode="statement")
+    assert max_active >= 2  # 逐语句域建议并发而非串行
+    atoms = [c for c in result["candidates"] if c["type"] == "atomic"]
+    assert atoms, "应有原子候选"
+    codes = {c["suggested_domain_code"] for c in atoms}
+    assert "sales" in codes and "health" in codes
+    # 语句摘要回填逐语句建议域
+    stmt_domains = [s["suggested_domain"] for s in result["statements"]]
+    assert "sales" in stmt_domains and "health" in stmt_domains
+
+
 async def test_infer_sql_batch_composite_uses_real_period() -> None:
     """P1-3：月粒度语句的复合候选编码/粒度用实际周期（不再硬编码 _day/day）。"""
     month_sql = (
@@ -1283,7 +1358,9 @@ async def test_infer_sql_batch_derived_ratio_candidate() -> None:
         "ROUND(SUM(amount)/NULLIF(COUNT(DISTINCT user_id),0),2) AS avg_price "
         "FROM ods.orders GROUP BY dt"
     )
-    result = await infer_sql_batch(_fake_db(), sql=sql, split_mode="statement", domain_code="sales")
+    result = await infer_sql_batch(
+        _fake_db(), sql=sql, split_mode="statement", domain_code="sales"
+    )
     derived = [c for c in result["candidates"] if c.get("derived")]
     assert len(derived) == 1, "应产出 1 个派生比率候选"
     d = derived[0]

@@ -1103,14 +1103,17 @@ async def infer_sql_batch(
         not domain_code and suggestion and suggestion.get("status") in ("multiple", "none")
     )
     # ---- 阶段 1：纯规则解析（串行、无 LLM），收集逐语句兜底需求 ----
-    # 两阶段设计：多语句同时触发 LLM 兜底（周期/度量提取）时，阶段 2 用
-    # asyncio.gather 并发执行，把墙钟从「N×单次调用」降到并发数内单次调用——
-    # 对齐 R-2 韧性（避免多语句脚本逐条串行 LLM 兜底拖到几十秒）。行为等价：
-    # 预算语义（阶段 1 先检查后分配）、skipped 分类、候选顺序（阶段 3 按语句
-    # index 合并）均与串行一致。逐语句域建议因内部预算递增且依赖顺序，保持串行。
+    # 两阶段设计：多语句同时触发 LLM 兜底（周期/度量提取/逐语句域建议）时，
+    # 阶段 2 用 asyncio.gather 并发执行，把墙钟从「N×单次调用」降到并发数内
+    # 单次调用——对齐 R-2 韧性（避免多语句脚本逐条串行 LLM 兜底拖到几十秒）。
+    # 行为等价：预算语义（阶段 1 先检查后分配）、skipped 分类、候选顺序（阶段
+    # 3 按语句 index 合并）均与串行一致。逐语句域建议也并入阶段 2 并发——其内部
+    # 预算「检查 used<limit 与 used+=1 之间无 await 分隔」（asyncio 单线程下原子
+    # 安全，不会超发）、结果不依赖调用顺序，与周期/度量兜底同批 gather 安全。
     stmt_records: list[dict[str, Any]] = []
     pending_period: list[int] = []  # 规则有度量但周期不确定 → _llm_infer_period
     pending_measures: list[dict[str, Any]] = []  # 规则无度量且 parse_failed → _llm_infer_measures
+    pending_domain: list[int] = []  # 整段域建议 multiple/none → 逐语句建议域（P2-10）
     for idx, seg in enumerate(segments):
         # P0-A 兜底：单语句画像解析/方言提取意外异常绝不炸整批——降级 skipped
         # 继续后续语句（候选构建本身也有 try 保护，此处覆盖画像层）
@@ -1119,19 +1122,12 @@ async def infer_sql_batch(
         except Exception:  # noqa: BLE001 - 单语句异常仅降级跳过该句
             skipped.append({"index": idx, "sql": seg[:500], "reason": "parse_failed"})
             continue
-        seg_domain_code: str | None = None
         if per_stmt_suggest:
-            from app.services.semantic.domain_suggest import suggest_domain
-
-            try:
-                seg_suggestion = await suggest_domain(
-                    db, sql=seg, llm_budget=llm_budget
-                )
-                if seg_suggestion.get("status") in ("unique", "llm"):
-                    seg_domain_code = seg_suggestion["domain"]["code"]
-            except Exception:
-                seg_domain_code = None  # 逐语句建议失败不影响候选生成
-        statements.append(_statement_meta(idx, seg, profile, suggested_domain=seg_domain_code))
+            # P2-10：跨域脚本逐语句建议域——不在阶段 1 串行 await，收集进
+            # pending_domain，阶段 2 与周期/度量兜底同批 gather 并发执行（避免
+            # N 条语句各自等一次 LLM/DB 反查串行拖慢）；结果按 idx 回填。
+            pending_domain.append(idx)
+        statements.append(_statement_meta(idx, seg, profile))
         if not profile.measures:
             # 规则层无聚合度量：仅对含 SELECT 的语句尝试 LLM 兜底提取（纯 DDL
             # 如 drop/create 非查询语句不浪费 LLM 调用）；LLM 不可用/失败才按
@@ -1155,7 +1151,6 @@ async def infer_sql_batch(
                         "idx": idx,
                         "seg": seg,
                         "profile": profile,
-                        "seg_domain_code": seg_domain_code,
                     }
                 )
             else:
@@ -1188,7 +1183,6 @@ async def infer_sql_batch(
                 "table": table,
                 "base_period": base_period,
                 "needs_period": needs_period,
-                "seg_domain_code": seg_domain_code,
             }
         )
 
@@ -1226,6 +1220,34 @@ async def infer_sql_batch(
         ):
             llm_measures_map[item] = measures
 
+    # 逐语句域建议（P2-10）同批并发：目录/挂载反查命中不耗 LLM；未命中才内部
+    # 检查/递增批级预算（检查+递增无 await 分隔，asyncio 单线程下原子安全）。
+    # 预算分配顺序与串行版略有差异（串行为逐句先域后周期，并发为周期/度量先
+    # 预留、域建议后占用），但预算本是 best-effort 软护栏（防打满配额），不
+    # 影响候选生成正确性；LLM 不可用/异常返回 None（该语句域建议为无，不阻断）。
+    seg_domain_map: dict[int, str | None] = {}
+    if pending_domain:
+        domain_sem = asyncio.Semaphore(_LLM_FALLBACK_CONCURRENCY)
+
+        async def _run_domain(stmt_idx: int) -> tuple[int, str | None]:
+            async with domain_sem:
+                try:
+                    from app.services.semantic.domain_suggest import suggest_domain
+
+                    seg_suggestion = await suggest_domain(
+                        db, sql=segments[stmt_idx], llm_budget=llm_budget
+                    )
+                    if seg_suggestion.get("status") in ("unique", "llm"):
+                        return stmt_idx, seg_suggestion["domain"]["code"]
+                except Exception:
+                    pass  # 逐语句建议失败不影响候选生成
+                return stmt_idx, None
+
+        for stmt_idx, code in await asyncio.gather(
+            *[_run_domain(i) for i in pending_domain]
+        ):
+            seg_domain_map[stmt_idx] = code
+
     # ---- 阶段 3：按语句 index 回填合并候选（顺序与串行一致） ----
     built_by_idx: dict[int, list[dict[str, Any]]] = {}
 
@@ -1247,7 +1269,7 @@ async def infer_sql_batch(
                 domain_code=domain_code,
                 domain_defaults=domain_defaults,
                 time_column=rec["profile"].time_column,
-                suggested_domain_code=rec["seg_domain_code"],
+                suggested_domain_code=seg_domain_map.get(idx),
                 raw_sql=rec["seg"],
             )
             atoms.append(atom)
@@ -1260,7 +1282,7 @@ async def infer_sql_batch(
                 atoms=atoms,
                 domain_code=domain_code,
                 period=period,
-                suggested_domain_code=rec["seg_domain_code"],
+                suggested_domain_code=seg_domain_map.get(idx),
                 raw_sql=rec["seg"],
             )
             if composite:
@@ -1282,7 +1304,7 @@ async def infer_sql_batch(
                         domain_code=domain_code,
                         domain_defaults=domain_defaults,
                         time_column=item["profile"].time_column,
-                        suggested_domain_code=item["seg_domain_code"],
+                        suggested_domain_code=seg_domain_map.get(idx),
                         source="llm",
                         raw_sql=seg,
                     ),
@@ -1297,6 +1319,11 @@ async def infer_sql_batch(
             )
     for stmt_idx in sorted(built_by_idx):
         candidates.extend(built_by_idx[stmt_idx])
+
+    # 回填逐语句建议域到 statements（阶段 2 并发结果，按 idx 写入，前端语句
+    # 折叠标题据此展示「建议域」；候选的 suggested_domain_code 已在构建时注入）
+    for idx in pending_domain:
+        statements[idx]["suggested_domain"] = seg_domain_map.get(idx)
 
     # LLM 校验层（方案 A 默认全量校验，仅规则模式）：规则解析可能「静默解析错」
     # （漏度量/聚合归一错/条件聚合丢失），对规则候选做一次 LLM 封闭选择校验
