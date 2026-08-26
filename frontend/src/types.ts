@@ -3008,6 +3008,8 @@ export interface SqlInferEvalExpectedMeasure {
   agg: string | null;
   alias?: string | null;
   table?: string | null;
+  /** 度量签名串（期望/实际结构化卡片：column|agg|alias:xxx|table:xxx，缺 detail 历史记录回退签名 Tag）。 */
+  signature?: string;
 }
 
 /** 评测集样本（前端逐样本展示 SQL/期望画像/说明/来源标记）。 */
