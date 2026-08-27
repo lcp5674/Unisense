@@ -621,14 +621,20 @@ def _build_atomic_candidate(
     # 注释表优先用 INSERT 目标表（``comment_table``，列注释定义处），ETL 下沉场景
     # 度量源表是内层子查询、与建表目标表不同——回退度量源表反查。
     measure_meta: dict[str, Any] = {}
+    # 行内投影注释（当前语句 SELECT 投影的 `-- 中文`）优先——数仓开发在投影里写的
+    # 字段语义比建表 DDL 注释更贴近这条 SQL 的口径；建表 DDL 注释兜底（同列无行内
+    # 注释时用源表/INSERT 目标表的物理列注释，A-5 行为不变）。
+    inline_comment = str(measure.get("comment") or "").strip()
+    if inline_comment:
+        measure_meta["comment"] = inline_comment
     if column_comments:
         for tbl in (comment_table, measure_table):
             if not tbl:
                 continue
             col_key = str(code_col or col).lower()
             comment = (column_comments.get(str(tbl).split(".")[-1]) or {}).get(col_key)
-            if comment:
-                measure_meta = {"comment": comment}
+            if comment and "comment" not in measure_meta:
+                measure_meta["comment"] = comment
                 break
     # C（A/C 三轮增强）：下沉聚合候选的别名是数仓业务列名，注入 measure_meta 供
     # _infer_name/_measure_label 优先消费——同列多 count（all_order_cnt/

@@ -1820,6 +1820,73 @@ async def test_infer_sql_batch_derived_arithmetic_deps_and_auto_composite() -> N
     assert any(c["type"] == "composite" for c in result2["candidates"]), "含运算应自动合成复合"
 
 
+async def test_infer_sql_batch_inline_projection_comments_fill_name() -> None:
+    """行内投影注释（`-- 中文`）回填候选名称——数仓开发在 SELECT 投影里写的字段
+    语义（总订单数/会话侧栏/转诊预约旧页面）替代列名词表兜底（日订单量），不再
+    出现「日订单量（old_page_transfer_order_cnt）」式无语义名称；外层派生列与
+    内层聚合投影的注释都生效，名称互不相同（无需 C 去重后缀）。"""
+    sql = (
+        "select\n"
+        "      apply_hospital_code as hosp_code, -- 转出医院\n"
+        "      apply_hospital_name as hosp_name, -- 转出医院名称\n"
+        "      all_order_cnt, -- 总订单数\n"
+        "      session_side_order_cnt, -- 会话侧栏\n"
+        "      region_org_order_cnt, -- 区域上级机构订单量\n"
+        "      all_order_cnt - session_side_order_cnt - region_org_order_cnt "
+        "as old_page_transfer_order_cnt -- 转诊预约旧页面\n"
+        "    from (\n"
+        "      select\n"
+        "        apply_hospital_code, -- 转出医院\n"
+        "        apply_hospital_name, -- 转出医院名称\n"
+        "        count(1) as all_order_cnt, -- 总订单数\n"
+        "        count(case when data_source = '2a19427aea8f6ddab7ade3aa74a7b176' "
+        "then id end) as session_side_order_cnt, -- 会话侧栏\n"
+        "        count(case when data_source = "
+        "'2a19427aea8f6ddab7ade3aa74a7b176_institutions' then id end) "
+        "as region_org_order_cnt -- 区域上级机构订单量\n"
+        "      from wedw_dwd.telemedicine_local_bidirectional_referral_record_df\n"
+        "      where date_id = '2026-08-18' and is_deleted = 0\n"
+        "      group by apply_hospital_code, apply_hospital_name\n"
+        "    ) result"
+    )
+    result = await infer_sql_batch(
+        _fake_db(), sql=sql, split_mode="statement", domain_code="hosp",
+    )
+    by_key = {c["key"]: c for c in result["candidates"]}
+    # 内层聚合投影：注释回填名称（不再「日订单量」）
+    assert by_key["0:all_order_cnt"]["name"] == "日总订单数", by_key["0:all_order_cnt"]["name"]
+    assert (
+        by_key["0:session_side_order_cnt"]["name"] == "日会话侧栏"
+    ), by_key["0:session_side_order_cnt"]["name"]
+    assert (
+        by_key["0:region_org_order_cnt"]["name"] == "日区域上级机构订单量"
+    ), by_key["0:region_org_order_cnt"]["name"]
+    # 外层算术派生列：注释「转诊预约旧页面」回填（此前是「日订单量（...）」）
+    derived = by_key["0:old_page_transfer_order_cnt"]
+    assert derived["name"] == "日转诊预约旧页面", derived["name"]
+    assert derived["type"] == "composite"
+    # 三个 count 名称不再雷同，无需 alias 后缀区分
+    assert len({by_key[k]["name"] for k in (
+        "0:all_order_cnt", "0:session_side_order_cnt", "0:region_org_order_cnt"
+    )}) == 3
+
+
+def test_projection_comment_bare_aggregate_and_no_comment() -> None:
+    """投影行尾注释提取：裸聚合（P0-B 被 alias_ 包裹，注释在内层 this）与无注释
+    投影（返回空串不污染 measure）。"""
+    from app.services.semantic.sql_infer import parse_sql_profile
+
+    # 裸聚合 + 行尾注释 → 注释在内层 Sum 节点（P0-B 包裹路径）
+    p = parse_sql_profile("select sum(amount) -- 金额合计\nfrom ods.t")
+    assert p.measures[0]["comment"] == "金额合计"
+    # 裸列 + 行尾注释（Column 自身挂注释）
+    p2 = parse_sql_profile("select apply_hospital_code -- 转出医院\nfrom ods.t")
+    assert p2.measures == []  # 裸列无聚合 → 不产出度量，注释不落候选
+    # 无注释投影 → 空串（不污染 measure）
+    p3 = parse_sql_profile("select sum(amount) as gmv from ods.t")
+    assert p3.measures[0].get("comment", "") == ""
+
+
 async def test_infer_sql_batch_union_and_set_agg_needs_review() -> None:
     """U-1/U-2 完整链路：顶层 UNION 合并候选 + 集合聚合候选带 needs_review（不
     再静默降级 COUNT、不再只取首分支）。"""

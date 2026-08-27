@@ -703,6 +703,23 @@ def _is_wrapped_aggregate(target: exp.Expr) -> bool:
     )
 
 
+def _projection_comment(projection: exp.Expr) -> str:
+    """投影行尾注释（``-- 中文``）提取。
+
+    sqlglot 把 SELECT 投影后的行内注释挂在投影节点（Alias/Column/AggFunc）的
+    ``comments`` 上——数仓开发在 SELECT 里写的「-- 转诊预约旧页面」这类字段语义
+    是候选名称/单位推断的直接来源（比列名词表更权威）。P0-B 裸聚合被
+    ``exp.alias_`` 包裹成新 Alias 时 comments 为空，真实注释在内层 ``this``
+    （Sum）上——先取投影自身、再取 this。
+    """
+    for node in (projection, getattr(projection, "this", None)):
+        for c in getattr(node, "comments", None) or []:
+            text = str(c).strip()
+            if text:
+                return text
+    return ""
+
+
 def _projection_measures(
     select: exp.Select,
     enrich: bool = False,
@@ -728,6 +745,7 @@ def _projection_measures(
     """
     measures: list[dict[str, Any]] = []
     for projection in select.expressions:
+        proj_comment = _projection_comment(projection)
         target = projection.this if isinstance(projection, exp.Alias) else projection
         # U-3：相关/标量子查询投影（``(SELECT max(amt) FROM ods.b b WHERE b.d=a.d) mx``）
         # 不是当前 GROUP BY 的分组聚合——``target.find(exp.AggFunc)`` 会误取内层 MAX
@@ -757,6 +775,7 @@ def _projection_measures(
                     ),
                     "agg": "COUNT_DISTINCT",
                     "needs_review": True,
+                    "comment": proj_comment,
                 }
                 if enrich:
                     bm["alias"] = (
@@ -789,6 +808,7 @@ def _projection_measures(
                     ),
                     "agg": "COUNT_DISTINCT",
                     "needs_review": True,
+                    "comment": proj_comment,
                 }
                 if enrich:
                     cm["alias"] = (
@@ -823,6 +843,7 @@ def _projection_measures(
                     ),
                     "agg": _COND_IF_AGGS[anon_fn],
                     "needs_review": True,
+                    "comment": proj_comment,
                 }
                 if enrich:
                     cond["alias"] = (
@@ -861,6 +882,7 @@ def _projection_measures(
                     am: dict[str, Any] = {
                         "column": _extract_col_name(acol_expr),
                         "agg": an,
+                        "comment": proj_comment,
                     }
                     if enrich:
                         am["alias"] = (
@@ -984,7 +1006,7 @@ def _projection_measures(
             and not isinstance(col_expr, (exp.Column, exp.Star))
         ):
             continue
-        measure: dict[str, Any] = {"column": col_name, "agg": agg_name}
+        measure: dict[str, Any] = {"column": col_name, "agg": agg_name, "comment": proj_comment}
         # Y23/Y15：非 COUNT 聚合带 DISTINCT（``sum(distinct x)`` = 去重后求和/均值）
         # 或聚合参数是多列算术表达式（``sum(a.amt * b.price)``，col 只取首个 Column、
         # 其余列口径丢失）——已保留原聚合名/expression，但口径需人工核对（区别于
@@ -1094,6 +1116,7 @@ def _collect_derived_measures(select: exp.Select) -> list[dict[str, Any]]:
                     "expression": expr_sql,
                     "sunk": True,
                     "deps_aliases": deps,
+                    "comment": _projection_comment(projection),
                 }
             )
             continue
@@ -1149,6 +1172,7 @@ def _collect_derived_measures(select: exp.Select) -> list[dict[str, Any]]:
                 "alias": alias,
                 "expression": expr_sql,
                 "sunk": True,  # 用 alias 作编码锚点防与内嵌聚合度量（同列）撞码
+                "comment": _projection_comment(projection),
             }
         )
     return out
