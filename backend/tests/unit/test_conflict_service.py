@@ -25,6 +25,27 @@ class FakeEvents:
         self.published.append(event)
 
 
+class _FakeDb:
+    """最小 AsyncSession 替身：仅暴露 begin_nested（async context manager）。
+
+    冲突落库 savepoint 隔离所需（conflict/service.py create 分支）；此前 db=object()
+    无 begin_nested 属性，修复后测试需提供。
+    """
+
+    def __init__(self) -> None:
+        self.nested_exits = 0
+
+    def begin_nested(self) -> _FakeDb:
+        return self
+
+    async def __aenter__(self) -> _FakeDb:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> bool:
+        self.nested_exits += 1
+        return False
+
+
 class FakeRepo:
     def __init__(self) -> None:
         self.conflicts: list[Conflict] = []
@@ -136,7 +157,7 @@ def _svc(
     fake_marker = marker if marker is not None else FakeMarker()
     fake_applier = applier if applier is not None else FakeApplier()
     svc = ConflictService(
-        db=object(),
+        db=_FakeDb(),
         metric_conflict_clearer=fake_clearer,
         metric_conflict_marker=fake_marker,
         arbitration_applier=fake_applier,
@@ -161,6 +182,39 @@ async def test_check_creates_open_conflict_and_blocks_on_hard() -> None:
     assert repo.conflicts[0].type == ConflictType.SAME_NAME_DIFF_DEF
     # 非 PII，发 conflict_open 通知
     assert any(e["event_type"] == "conflict_open" for e in events.published)
+
+
+async def test_check_conflict_create_integrity_error_uses_savepoint() -> None:
+    """冲突落库 IntegrityError 走 savepoint 回滚，不污染外层事务（回归防误）。
+
+    此前 except IntegrityError 分支显式 ``self._db.rollback()``——在批量注册的
+    begin_nested 上下文里会回滚**整个外层事务**，主 session 变坏，后续 PII 传播/
+    血缘注册/endpoint commit 全部抛 ``greenlet_spawn has not been called`` →
+    批量注册 500（即使候选已创建）。修复后 create 包在独立 begin_nested 内，
+    只回滚本 savepoint；_FakeDb 无 rollback 方法——若代码仍显式 rollback 会
+    AttributeError 冒泡，测试即失败。
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    svc, repo, events, _, _ = _svc()
+    db = _FakeDb()
+    svc._db = db
+
+    class FailingRepo(FakeRepo):
+        async def create(self, conflict: Conflict) -> Conflict:
+            raise IntegrityError("stmt", {}, Exception("Duplicate entry"))
+
+    svc._repo = FailingRepo()
+    req = ConflictCheckRequest(
+        candidate=MetricInput(metric_code="gmv_total", domain="sales", definition="sum(amount)"),
+        existing=[MetricInput(metric_code="gmv_total", domain="finance", definition="sum(price)")],
+    )
+    result = await svc.check(req.candidate, req.existing)
+    # IntegrityError 被吞（跳过落库），check 正常返回、冲突未落库
+    assert result.blocked is True
+    assert len(svc._repo.conflicts) == 0
+    # savepoint 已退出（回滚本落库）；主 session 未调用全量 rollback
+    assert db.nested_exits >= 1
 
 
 async def test_check_pii_routes_to_governance_not_stored() -> None:
@@ -382,7 +436,7 @@ async def test_close_triggers_clearer_for_historical_ruled() -> None:
 
 
 async def test_arbitrate_without_clearer_is_noop() -> None:
-    svc = ConflictService(db=object())  # 未注入 clearer：联动为 no-op
+    svc = ConflictService(db=_FakeDb())  # 未注入 clearer：联动为 no-op
     repo = FakeRepo()
     events = FakeEvents()
     svc._repo = repo
@@ -425,7 +479,7 @@ async def test_reopen_open_raises() -> None:
 
 
 async def test_reopen_without_marker_is_noop() -> None:
-    svc = ConflictService(db=object())  # 未注入 marker：联动为 no-op
+    svc = ConflictService(db=_FakeDb())  # 未注入 marker：联动为 no-op
     repo = FakeRepo()
     events = FakeEvents()
     svc._repo = repo
@@ -467,7 +521,7 @@ async def test_arbitrate_applier_exception_degrades() -> None:
 
 async def test_arbitrate_without_applier_is_noop() -> None:
     """未注入 arbitration_applier：仲裁正常完成，不联动指标。"""
-    svc = ConflictService(db=object())
+    svc = ConflictService(db=_FakeDb())
     repo = FakeRepo()
     events = FakeEvents()
     svc._repo = repo
@@ -742,7 +796,7 @@ async def test_check_use_llm_false_skips_llm_borderline() -> None:
         return None
 
     llm = FakeLlm()
-    svc = ConflictService(db=object(), llm=llm)
+    svc = ConflictService(db=_FakeDb(), llm=llm)
     repo = FakeRepo()
     events = FakeEvents()
     svc._repo = repo
@@ -782,7 +836,7 @@ async def test_check_use_llm_true_calls_llm_borderline() -> None:
         return None
 
     llm = FakeLlm()
-    svc = ConflictService(db=object(), llm=llm)
+    svc = ConflictService(db=_FakeDb(), llm=llm)
     repo = FakeRepo()
     events = FakeEvents()
     svc._repo = repo

@@ -218,16 +218,22 @@ class ConflictService(BaseService):
             conflict.metric_a = candidate.metric_id
             conflict.metric_b = det.existing_metric_id
             try:
-                await self._repo.create(conflict)
+                # savepoint 隔离：冲突落库失败只回滚本 savepoint，不污染外层业务事务。
+                # 此前直接 create + IntegrityError 时显式 `self._db.rollback()`——在批量
+                # 注册的 begin_nested 上下文里会把**外层事务整体回滚**，主 session 变坏，
+                # 后续 PII 传播/血缘注册/endpoint commit 全部抛
+                # ``greenlet_spawn has not been called`` → 批量注册 500（即使候选已创建）。
+                async with self._db.begin_nested():
+                    await self._repo.create(conflict)
             except IntegrityError:
                 # P11 C-3：并发双落兜底——唯一索引 uk_conflict_active_pair 拦截
-                # 同 pair 同时 OPEN。检测结果照常上报（blocked 语义不变），仅跳过重复落库。
+                # 同 pair 同时 OPEN。savepoint 已自动回滚本落库，检测结果照常上报
+                # （blocked 语义不变），仅跳过重复落库。
                 logger.warning(
                     "conflict_create_concurrent_duplicate 冲突 %s/%s 并发已存在，跳过落库",
                     candidate.metric_code,
                     det.existing_code,
                 )
-                await self._db.rollback()
                 continue
             await self._safe_publish(
                 {
