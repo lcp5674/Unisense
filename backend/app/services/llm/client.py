@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.core.config import settings
 from app.core.metrics import store as metrics_store
 from app.core.resilience import get_circuit_breaker
+from app.services.llm.parse import is_abnormal_llm_text
 
 logger = logging.getLogger(__name__)
 
@@ -427,14 +428,18 @@ class LlmRouterClient:
                     max_tokens=max_tokens,
                     response_format=response_format,
                 )
-                # 空 content 视为该实例不可用（免费模型偶发空返回/网关空响应），
-                # 与抛错同等对待：failover 下一实例并计入失败次数。
-                if not (result.get("content") or "").strip():
+                # 空 content / 异常内容（超长流式垃圾、SSE 信封原文等）视为该实例
+                # 不可用：免费模型偶发空返回、网关把流式原文当响应返回——与抛错同等
+                # 对待，failover 下一实例并计入失败次数（否则非空垃圾被当成功返回，
+                # 干等慢实例 29s 且把垃圾灌进业务字段）。
+                content = result.get("content") or ""
+                if not content.strip() or is_abnormal_llm_text(content):
                     self._consecutive_failures[idx] = self._consecutive_failures.get(idx, 0) + 1
                     if self._consecutive_failures[idx] >= _ROUTER_FAILOVER_THRESHOLD:
                         self._cooldown_until[idx] = time.monotonic() + _ROUTER_COOLDOWN_SECONDS
                         logger.warning(
-                            "LLM 实例 %d 连续返回空内容 %d 次，进入冷却 %ss（由剩余实例承接流量）",
+                            "LLM 实例 %d 连续返回异常内容 %d 次，进入冷却 %ss"
+                            "（由剩余实例承接流量）",
                             idx,
                             self._consecutive_failures[idx],
                             _ROUTER_COOLDOWN_SECONDS,

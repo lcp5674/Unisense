@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.services.semantic.auto_fill import (
+    _cn_column_label,
     auto_fill,
     build_profile,
     extract_biz_object,
@@ -360,3 +361,24 @@ class TestAutoFillBackwardCompat:
         assert f["metric_tier"]["value"] == "T1"
         # 仍保留 SQL 推断的聚合（与域默认一致）
         assert f["aggregation"]["value"] == "SUM"
+
+
+class TestCnColumnLabelMedical:
+    """A-5：医疗词表扩充——建表注释缺失时词表兜底不再产出「doctor次数」等英文残片。"""
+
+    def test_doctor_cnt_maps_to_medical_label(self) -> None:
+        # 计数后缀取主干最后一个 token，命中扩充词表 → 中文标签
+        assert _cn_column_label("current_month_active_doctor_cnt") == "医生数"
+        assert _cn_column_label("last_month_active_doctor_cnt") == "医生数"
+        assert _cn_column_label("nurse_cnt") == "护士数"
+        assert _cn_column_label("hosp_cnt") == "医院数"
+        assert _cn_column_label("inpatient_cnt") == "住院人次"
+        assert _cn_column_label("ward_cnt") == "病区数"
+        assert _cn_column_label("bed_cnt") == "床位数"
+
+    def test_full_token_medical_labels(self) -> None:
+        # 非计数后缀直接命中词表
+        assert _cn_column_label("avg_stay") == "平均住院日"
+        assert _cn_column_label("diagnosis") == "诊断数"
+        assert _cn_column_label("operation") == "手术人次"
+

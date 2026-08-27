@@ -14,16 +14,23 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.services.llm.client import LlmError, LlmRouterClient
+from app.services.llm.parse import MAX_LLM_TEXT_CHARS
 
 
 class _FakeClient:
-    """最小 LLM 客户端替身：可配置每次 chat 成功/抛 LlmError/返回空 content。"""
+    """最小 LLM 客户端替身：可配置每次 chat 成功/抛 LlmError/返回空 content/返回异常内容。"""
 
     def __init__(
-        self, *, always_fail: bool = False, name: str = "fake", empty_content: bool = False
+        self,
+        *,
+        always_fail: bool = False,
+        name: str = "fake",
+        empty_content: bool = False,
+        garbage_content: bool = False,
     ) -> None:
         self._always_fail = always_fail
         self._empty_content = empty_content
+        self._garbage_content = garbage_content
         self.name = name
         self.calls = 0
         self.closed = False
@@ -38,6 +45,13 @@ class _FakeClient:
             raise LlmError(f"{self.name} 不可用")
         if self._empty_content:
             return {"content": "", "model": self.name, "usage": {}}
+        if self._garbage_content:
+            # 超长流式信封原文（> MAX_LLM_TEXT_CHARS），命中 is_abnormal_llm_text
+            return {
+                "content": ('data: {"type": "message"}\n\n' * (MAX_LLM_TEXT_CHARS // 40)),
+                "model": self.name,
+                "usage": {},
+            }
         return {"content": f"ok-{self.name}", "model": self.name, "usage": {}}
 
     async def close(self) -> None:
@@ -91,6 +105,30 @@ class TestFailover:
             result = await router.chat([{"role": "user", "content": "x"}])
             assert result["model"] == "b"
         # a 已冷却（calls=3），第 4 次请求不再尝试 a，直接由 b 承接
+        result = await router.chat([{"role": "user", "content": "x"}])
+        assert result["model"] == "b"
+        assert a.calls == 3
+
+    async def test_failover_when_instance_returns_abnormal_content(self) -> None:
+        """实例返回超长流式垃圾（非空但异常，如网关把 SSE 原文当响应）视为失败，
+        failover 下一实例——不再把 60k 字符垃圾当成功返回灌进业务字段。"""
+        a = _FakeClient(garbage_content=True, name="a")
+        b = _FakeClient(name="b")
+        router = LlmRouterClient([a, b])
+        result = await router.chat([{"role": "user", "content": "x"}])
+        assert result["model"] == "b"  # a 返回异常内容自动切换到 b
+        assert a.calls == 1
+        assert b.calls == 1
+
+    async def test_abnormal_content_triggers_cooldown(self) -> None:
+        """实例连续返回异常内容达到阈值后进入冷却期，后续请求跳过该实例。"""
+        a = _FakeClient(garbage_content=True, name="a")
+        b = _FakeClient(name="b")
+        router = LlmRouterClient([a, b])
+        for _ in range(3):
+            result = await router.chat([{"role": "user", "content": "x"}])
+            assert result["model"] == "b"
+        # a 已冷却（calls=3），第 4 次请求不再尝试 a
         result = await router.chat([{"role": "user", "content": "x"}])
         assert result["model"] == "b"
         assert a.calls == 3
