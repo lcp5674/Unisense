@@ -190,6 +190,9 @@ export function SystemConfig() {
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
   const [modelOptions, setModelOptions] = useState<{ value: string }[]>([]);
   const [modelOpen, setModelOpen] = useState(false);
+  // 用户是否正在手动输入过滤词（区别于程序化 value 如获取模型自动选中/已有模型值）：
+  // 为 true 时下拉按输入过滤，为 false 时显示全部 options（修复"获取模型后看不到全部模型"）
+  const [modelSearching, setModelSearching] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [reordering, setReordering] = useState<{ id: number; dir: -1 | 1 } | null>(null);
   const [testingAll, setTestingAll] = useState(false);
@@ -299,6 +302,7 @@ export function SystemConfig() {
     clearReveal();
     setModelOptions([]);
     setModelOpen(false);
+    setModelSearching(false);
     setModalOpen(true);
   }
 
@@ -318,6 +322,7 @@ export function SystemConfig() {
     clearReveal();
     setModelOptions([]);
     setModelOpen(false);
+    setModelSearching(false);
     setModalOpen(true);
   }
 
@@ -338,6 +343,8 @@ export function SystemConfig() {
         // 当前模型为空时自动选中第一个，并展开下拉供点选/改选（方案 C：像选项框一样可交互）
         const curModel = (form.getFieldValue("model") as string) || "";
         if (!curModel) form.setFieldValue("model", res.models[0]);
+        // 展开时显示全部模型（不按自动选中/已有值过滤）——否则 filterOption 会按输入框值把列表滤成子集
+        setModelSearching(false);
         setModelOpen(true);
         const preview = res.models.slice(0, 5).join("、");
         const suffix = res.models.length > 5 ? ` 等 ${res.models.length} 个` : "";
@@ -885,6 +892,7 @@ export function SystemConfig() {
                   options={modelOptions}
                   open={modelOpen}
                   onDropdownVisibleChange={setModelOpen}
+                  onSearch={(v) => setModelSearching(v.length > 0)}
                   onFocus={() => {
                     // 已有模型列表时聚焦即展开（空值聚焦也可见全部选项）
                     if (modelOptions.length > 0) setModelOpen(true);
@@ -892,11 +900,13 @@ export function SystemConfig() {
                   placeholder="deepseek-chat"
                   className="mono"
                   style={{ width: "100%" }}
-                  filterOption={(inputValue, option) =>
-                    String(option?.value ?? "")
+                  filterOption={(inputValue, option) => {
+                    // 仅在用户主动输入时按输入过滤；程序化 value（获取模型自动选中/已有模型值）不过滤，展示全部
+                    if (!modelSearching) return true;
+                    return String(option?.value ?? "")
                       .toLowerCase()
-                      .includes(inputValue.toLowerCase())
-                  }
+                      .includes(inputValue.toLowerCase());
+                  }}
                 />
               </Form.Item>
               <Button

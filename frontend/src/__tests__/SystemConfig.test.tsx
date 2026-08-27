@@ -501,6 +501,52 @@ describe("SystemConfig LLM 路由配置", () => {
     expect(screen.queryByDisplayValue("hy3")).toBeNull();
   });
 
+  it("获取模型成功：下拉展示全部模型（不被自动选中值过滤成子集）", async () => {
+    mockFetchModels.mockResolvedValue({
+      models: ["hy3", "hy3-pro", "deepseek-chat", "gpt-4o-mini", "glm-4-flash"],
+      supported: true,
+      error: "",
+      latency_ms: 10,
+    });
+    render(<SystemConfig />);
+    fireEvent.click(await screen.findByText("新增 LLM 实例"));
+    fireEvent.change(screen.getByPlaceholderText("https://api.deepseek.com"), {
+      target: { value: "http://127.0.0.1:19091" },
+    });
+    fireEvent.click(screen.getByText("获取模型"));
+    await waitFor(() => {
+      // 自动选中第一个，但下拉必须展示全部模型（修复：程序化 value 不过滤）
+      expect(screen.getByDisplayValue("hy3")).toBeTruthy();
+    });
+    const opts = document.querySelectorAll(
+      ".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option",
+    );
+    expect(opts.length).toBe(5);
+  });
+
+  it("获取模型成功（编辑）：下拉展示全部模型（不被已有模型值过滤）", async () => {
+    mockGet.mockResolvedValue(listData({ items: [PRIMARY_ITEM] }) as never);
+    mockFetchModels.mockResolvedValue({
+      models: ["hy3", "hy3-pro", "deepseek-chat", "gpt-4o-mini", "glm-4-flash"],
+      supported: true,
+      error: "",
+      latency_ms: 10,
+    });
+    render(<SystemConfig />);
+    fireEvent.click(await screen.findByText("编辑"));
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("deepseek-chat")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByText("获取模型"));
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("deepseek-chat")).toBeTruthy();
+    });
+    const opts = document.querySelectorAll(
+      ".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option",
+    );
+    expect(opts.length).toBe(5);
+  });
+
   it("获取模型失败（不支持 /models）：不自动选中、不展开下拉", async () => {
     mockFetchModels.mockResolvedValue({
       models: [],
