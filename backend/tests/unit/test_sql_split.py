@@ -1415,6 +1415,11 @@ async def test_infer_sql_batch_candidates_carry_raw_sql() -> None:
     assert result["candidates"], "应产出候选"
     for c in result["candidates"]:
         assert c.get("raw_sql") == sql, "候选应携带完整语句原文"
+        # Q2：数仓详细口径（dw_definition）= 所属语句完整 SQL——创建后 MetricDetail/
+        # 目录展开「数仓详细口径」区块直接可见，无需用户再手填（此前推断链路未写）
+        assert c["definition_json"].get("dw_definition") == sql, (
+            "候选 definition_json 应含数仓详细口径（dw_definition）"
+        )
 
 
 async def test_infer_sql_batch_derived_ratio_candidate() -> None:

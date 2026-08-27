@@ -56,6 +56,24 @@ def _get_service(db: AsyncSession = Depends(get_session)) -> SystemDictService:
     return SystemDictService(db)
 
 
+async def _refresh_morpheme_cache_if_needed(db: AsyncSession, dict_type: str) -> None:
+    """metric_name_morpheme 字典变更后刷新词根进程内缓存（best-effort，仅当前 worker）。
+
+    词根字典化后，命名校验 ``validate_metric_name`` 读进程内缓存（内置默认 ∪ DB
+    active 词根）；字典管理在线增删/启停用词根后立即刷新，保证新增词根即刻生效、
+    停用词根即刻不再豁免。多 worker 下仅刷新当前 worker（其余 worker 在下次
+    lifespan 或各自字典变更时刷新），与字典校验「每次查 DB」的先例相比已是近实时。
+    """
+    if dict_type != "metric_name_morpheme":
+        return
+    try:
+        from app.services.semantic.conflict_precheck import load_metric_name_morphemes
+
+        await load_metric_name_morphemes(db)
+    except Exception:  # noqa: BLE001 - 刷新失败仅影响当前 worker 缓存，不阻断写操作
+        logger.warning("morpheme_cache_refresh_failed", exc_info=True)
+
+
 @router.get(
     "/types",
     response_model=ApiResponse[list[str]],
@@ -320,6 +338,7 @@ async def create_dict_item(
             trace_id=trace_id,
         )
         await svc._db.commit()
+        await _refresh_morpheme_cache_if_needed(svc._db, dict_type)
         return ok(data=_item_response(item, ref_count), trace_id=trace_id)
     except BusinessError:
         await svc._db.rollback()
@@ -355,6 +374,7 @@ async def update_dict_item(
             trace_id=trace_id,
         )
         await svc._db.commit()
+        await _refresh_morpheme_cache_if_needed(svc._db, dict_type)
         return ok(data=_item_response(item, ref_count), trace_id=trace_id)
     except NotFoundError:
         await svc._db.rollback()
@@ -393,6 +413,7 @@ async def toggle_dict_item_status(
             trace_id=trace_id,
         )
         await svc._db.commit()
+        await _refresh_morpheme_cache_if_needed(svc._db, dict_type)
         return ok(data=_item_response(item, ref_count), trace_id=trace_id)
     except NotFoundError:
         await svc._db.rollback()
@@ -426,6 +447,7 @@ async def delete_dict_item(
             trace_id=trace_id,
         )
         await svc._db.commit()
+        await _refresh_morpheme_cache_if_needed(svc._db, dict_type)
         return ok(data={"detail": "deleted"}, trace_id=trace_id)
     except (NotFoundError, BusinessError):
         await svc._db.rollback()
@@ -471,6 +493,7 @@ async def batch_create_dict_items(
         trace_id=trace_id,
     )
     await svc._db.commit()
+    await _refresh_morpheme_cache_if_needed(svc._db, dict_type)
     return ok(data=result, trace_id=trace_id)
 
 
@@ -510,6 +533,7 @@ async def batch_toggle_dict_items(
         trace_id=trace_id,
     )
     await svc._db.commit()
+    await _refresh_morpheme_cache_if_needed(svc._db, dict_type)
     return ok(data=result, trace_id=trace_id)
 
 
@@ -547,6 +571,7 @@ async def batch_delete_dict_items(
         trace_id=trace_id,
     )
     await svc._db.commit()
+    await _refresh_morpheme_cache_if_needed(svc._db, dict_type)
     return ok(data=result, trace_id=trace_id)
 
 

@@ -812,6 +812,48 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     });
   });
 
+  it("Q2: SQL 推断 SQL 模式自动回填数仓详细口径（dwDefinition）", async () => {
+    mockedSuggest.mockResolvedValue({
+      metric_code_suggestion: "outpatient_doctor_active_month",
+      segments: { domain: "outpatient", biz_object: "doctor", measure: "active", period: "month" },
+      fields: {
+        source_table: { value: "wedw_dw.doctor_visit_agent_info_da", source: "sql_parse", confidence: 0.9, reason: "" },
+        measure_column: { value: "doctor_code", source: "sql_parse", confidence: 0.9, reason: "" },
+        name: { value: "月活", source: "sql_parse", confidence: 0.8 },
+        definition_json: {
+          value: {
+            sql: "SELECT COUNT(DISTINCT doctor_code) AS cnt FROM wedw_dw.doctor_visit_agent_info_da",
+            source_tables: ["wedw_dw.doctor_visit_agent_info_da"],
+          },
+          source: "sql_parse",
+          confidence: 0.9,
+        },
+        definition_mode: { value: "sql", source: "sql_parse", confidence: 0.9 },
+      },
+      definition_json: {
+        sql: "SELECT COUNT(DISTINCT doctor_code) AS cnt FROM wedw_dw.doctor_visit_agent_info_da",
+        source_tables: ["wedw_dw.doctor_visit_agent_info_da"],
+      },
+      definition_mode: "sql",
+    } as never);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openSqlInfer();
+    fireEvent.change(screen.getByPlaceholderText(/SELECT SUM\(amount\) AS gmv/), {
+      target: { value: "SELECT COUNT(DISTINCT doctor_code) AS cnt FROM wedw_dw.doctor_visit_agent_info_da" },
+    });
+    fireEvent.click(screen.getByText("智能推断并回填字段"));
+    await screen.findByText("SQL 智能推断结果");
+    fireEvent.click(screen.getByText("知道了"));
+    // Q2：数仓详细口径（dwDefinition）自动回填推断的完整 SQL——用户无需再手填
+    await goToStep(2);
+    await waitFor(() => {
+      const dw = screen.getByLabelText("数仓SQL口径") as HTMLTextAreaElement;
+      expect(dw.value).toContain("SELECT COUNT(DISTINCT doctor_code)");
+    });
+  });
+
   it("SQL 推断：摘要弹窗展示解析出的度量列清单（列名 + 聚合方式 + 原始表达式）", async () => {
     mockedSuggest.mockResolvedValue({
       metric_code_suggestion: "doctor_active_doctor_count_month",
@@ -2118,7 +2160,7 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     await openBatchMode();
     fireEvent.click(screen.getByText(/批量创建选中指标/));
     await screen.findByText(/批量创建完成：成功 3 \/ 失败 0/);
-    fireEvent.click(screen.getByText("批量提交评审"));
+    fireEvent.click(screen.getByRole("button", { name: /批量提交评审（免核对）/ }));
     await waitFor(() => {
       expect(mockedBatchSubmit).toHaveBeenCalled();
       const payload = mockedBatchSubmit.mock.calls[0][0] as Array<{ code: string }>;
@@ -2267,5 +2309,30 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     expect(cand!.unit).toBe("USD");
     expect(cand!.granularity).toBe("month");
     expect(cand!.metric_code).toBe("sales_order_amount_month");
+  });
+
+  it("Q1: 批量候选「在向导中编辑」完整回填单条向导表单核对", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await openBatchMode();
+    // 候选行出现「在向导中编辑」按钮，点击完整回填单条向导
+    fireEvent.click(screen.getByTestId("sql-batch-to-wizard-0:amount"));
+    // 抽屉关闭 + 定位到单条向导 Step②（指标类型+来源）让用户核对
+    await waitFor(() => expect(screen.getByText("② 选择指标类型")).toBeTruthy());
+    // 源表/度量列已回填到 Step② 原子来源
+    await waitFor(() => {
+      const srcLabel = Array.from(document.querySelectorAll(".ant-form-item-label")).find((el) =>
+        el.textContent?.includes("源表名")
+      );
+      expect(srcLabel?.closest(".ant-form-item")?.textContent).toContain("dwd.sales_detail");
+    });
+    // 编码/名称回填到 Step③ 治理确认（用户可改后手动提交创建）
+    await goToStep(2);
+    await waitFor(() => {
+      expect((screen.getByLabelText("指标编码") as HTMLInputElement).value).toBe(
+        "sales_order_amount_day",
+      );
+      expect((screen.getByLabelText("名称") as HTMLInputElement).value).toBe("日订单金额");
+    });
   });
 });

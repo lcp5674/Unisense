@@ -617,23 +617,19 @@ def _measure_label(profile: dict[str, Any]) -> str:
     return "指标"
 
 
-def _ensure_metric_name_morpheme(name: str) -> str:
-    """保证指标名命中受控词根（TD §12.3 硬卡不误拦合法业务命名）。
+def _metric_name_morpheme_missing(name: str) -> bool:
+    """推断名是否未命中受控词根（决策 2：推断名不硬拒、不污染——保留原样 + 软提示）。
 
-    数仓列注释常为「月活」「日活」等缩写或业务新词（词根表未覆盖），直接作为
-    指标名会被 ``validate_metric_name`` 拦截——SQL 推断/批量注册创建的候选名
-    报 ``METRIC_NAME_NO_MORPHEME`` 422。命中词根原样返回；未命中按语义补业务
-    词根（成交/金额/费用类补「金额」，其余计数/活跃类补「次数」），从源头保证
-    推断名可创建，不依赖词根表穷举。
+    数仓列注释/LLM 产出的推断名是比词根表更权威的业务来源（如「月活留存健康度」
+    语义完全合法、只是词根表未覆盖），未命中词根时正确做法是**保留原样**并在
+    reason 标注软提示（建议人工确认），而不是「追加词根污染名称」或「硬拒」——
+    词根硬卡只留给手动命名（防「新名称/abc」）。词根来源读字典化后的生效集合
+    （``get_controlled_morphemes`` = 内置默认 ∪ 字典管理 active 词根）。
     """
-    from app.services.semantic.conflict_precheck import CONTROLLED_MORPHEMES
+    from app.services.semantic.conflict_precheck import get_controlled_morphemes
 
     lowered = name.lower()
-    if any(m in lowered for m in CONTROLLED_MORPHEMES):
-        return name
-    if any(k in lowered for k in ("成交", "销", "收", "费", "价", "额", "利", "金额")):
-        return f"{name}金额"
-    return f"{name}次数"
+    return not any(m in lowered for m in get_controlled_morphemes())
 
 
 def _infer_name(
@@ -642,7 +638,7 @@ def _infer_name(
     *,
     llm_name: str | None = None,
 ) -> SuggestionField:
-    """指标名称：列注释优先 > AI 生成 > 规则模板；未命中受控词根时兜底补业务词根。"""
+    """指标名称：列注释优先 > AI 生成 > 规则模板；未命中受控词根时保留原样 + 软提示。"""
     period_cn = _period_cn(profile.get("period"), grain)
     if llm_name and llm_name.strip():
         name, source, conf = llm_name.strip(), "llm", 0.7
@@ -660,10 +656,10 @@ def _infer_name(
             measure_label = _measure_label(profile)
             name, source, conf = f"{period_cn}{measure_label}", "rule", 0.5
             reason = f"规则模板：周期「{period_cn}」+ 度量「{measure_label}」"
-    ensured = _ensure_metric_name_morpheme(name)
-    if ensured != name:
-        reason += f"；未命中受控词根，追加「{ensured[len(name):]}」"
-        name = ensured
+    # 决策 2：推断名未命中受控词根时不追加/不硬拒——保留原样，reason 软提示人工确认
+    #（词根硬卡只留给手动命名 create/update；推断名来自数仓注释/LLM，本身更权威）
+    if _metric_name_morpheme_missing(name):
+        reason += "；未命中受控词根（推断名，建议人工确认）"
     return _field(name, source, conf, reason)
 
 

@@ -648,6 +648,11 @@ def _build_atomic_candidate(
         "source_fields": [{"table": measure_table, "column": col}] if measure_table else [],
         "partition_key": time_column,
     }
+    # Q2：数仓详细口径（dw_definition）= 候选所属语句的完整原始 SQL——SQL 智能推断
+    # 得到的指标创建后，口径在 MetricDetail/目录展开「数仓详细口径（数仓开发）」区块
+    # 直接可见，无需用户手动再填（此前推断链路未写 dw_definition，数仓口径恒空）。
+    if raw_sql:
+        definition["dw_definition"] = raw_sql
     # A-1/2 人工核对标识：CASE 条件聚合/窗口函数/下沉子查询度量的口径非简单 SUM(col)，
     # 注册后口径可能不直观（CASE 过滤条件、OVER 窗口语义在 expression 中保留但前端
     # 需提示人工核对）；前端据此加「口径需核对」Tag，避免用户误以为全表聚合。
@@ -772,6 +777,8 @@ def _build_composite_candidate(
             "sql": sql,
             "dependencies": codes,
             "source_tables": profile.source_tables,
+            # Q2：数仓详细口径 = 复合所属语句完整 SQL（与原子候选 dw_definition 语义一致）
+            **({"dw_definition": raw_sql} if raw_sql else {}),
         },
         "definition_mode": "sql",
         "dependencies": codes,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.services.semantic.auto_fill import (
     _cn_column_label,
-    _ensure_metric_name_morpheme,
+    _metric_name_morpheme_missing,
     auto_fill,
     build_profile,
     extract_biz_object,
@@ -384,31 +384,26 @@ class TestCnColumnLabelMedical:
         assert _cn_column_label("operation") == "手术人次"
 
 
-class TestEnsureMetricNameMorpheme:
-    """A-6：推断名未命中受控词根时兜底补业务词根，保证可创建（TD §12.3 硬卡不误拦）。"""
+class TestMetricNameMorphemeMissing:
+    """决策 2：推断名未命中受控词根时**保留原样 + 软提示**（不追加词根、不硬拒）——
+    词根硬卡只留给手动命名；推断名来自数仓注释/LLM，本身更权威。"""
 
-    def test_hits_morpheme_kept_as_is(self) -> None:
-        # 「月活」已补进词根表（活跃缩写系列），命中则原样返回，不追加
-        assert _ensure_metric_name_morpheme("月活") == "月活"
-        assert _ensure_metric_name_morpheme("日活") == "日活"
-        assert _ensure_metric_name_morpheme("门诊挂号人次") == "门诊挂号人次"
-        assert _ensure_metric_name_morpheme("每日收入金额") == "每日收入金额"
+    def test_hits_morpheme_not_missing(self) -> None:
+        # 「月活」已补进词根表（活跃缩写系列），命中则不算缺失
+        assert _metric_name_morpheme_missing("月活") is False
+        assert _metric_name_morpheme_missing("日活") is False
+        assert _metric_name_morpheme_missing("门诊挂号人次") is False
+        assert _metric_name_morpheme_missing("每日收入金额") is False
 
-    def test_money_semantics_appends_amount(self) -> None:
-        # 完全未命中词根的金额语义词 → 补「金额」（命中「金额」词根）。
-        # 含词根的名称（如「药品销售」命中「销售」、「药品成交」命中「药品」）
-        # 不被兜底改写——兜底只作用于真正未命中的名称。
-        assert _ensure_metric_name_morpheme("总成交") == "总成交金额"
-        assert _ensure_metric_name_morpheme("药品销售") == "药品销售"
-        assert _ensure_metric_name_morpheme("药品成交") == "药品成交"
-
-    def test_default_appends_count(self) -> None:
-        # 其余（计数/活跃/未知）→ 补「次数」（命中「次数」词根）
-        assert _ensure_metric_name_morpheme("abc") == "abc次数"
-        assert _ensure_metric_name_morpheme("某指标") == "某指标次数"
+    def test_semantic_words_kept_original(self) -> None:
+        # 完全未命中词根的合法业务新词（如「药品成交」「月活留存健康度」）——
+        # 决策 2 不再追加「金额/次数」污染名称，判定为缺失（前端软提示人工确认）
+        assert _metric_name_morpheme_missing("总成交") is True
+        assert _metric_name_morpheme_missing("abc") is True
+        assert _metric_name_morpheme_missing("某指标") is True
 
     def test_infer_name_comment_morpheme_not_rewritten(self) -> None:
-        # _infer_name 注释分支：「月活」命中词根 → 名称保持「月活」不被兜底改写
+        # _infer_name 注释分支：「月活」命中词根 → 名称保持「月活」不被改写
         f = infer_metric(
             build_profile(
                 source_table="t",
@@ -420,10 +415,11 @@ class TestEnsureMetricNameMorpheme:
         )
         assert f["fields"]["name"]["value"] == "月活"
         assert f["fields"]["name"]["source"] == "column_meta"
-        assert "追加" not in f["fields"]["name"]["reason"]
+        assert "未命中受控词根" not in f["fields"]["name"]["reason"]
 
-    def test_infer_name_fallback_appends_morpheme(self) -> None:
-        # _infer_name 规则分支：无注释英文列名未命中 → 兜底补「次数」并注明 reason
+    def test_infer_name_fallback_keeps_original_with_soft_hint(self) -> None:
+        # _infer_name 规则分支：无注释英文列名未命中 → **保留原样不追加**，
+        # reason 标注软提示「建议人工确认」（此前行为是追加「次数」并注明追加）
         f = infer_metric(
             build_profile(
                 source_table="t",
@@ -434,6 +430,8 @@ class TestEnsureMetricNameMorpheme:
             domain_defaults={},
         )
         name = f["fields"]["name"]["value"]
-        assert name.endswith("次数")
-        assert "未命中受控词根，追加" in f["fields"]["name"]["reason"]
+        # 决策 2：名称保留原样（不再以「次数」结尾；周期前缀「日」仍按既有规则保留）
+        assert not name.endswith("次数")
+        assert name == "日abc metric"
+        assert "未命中受控词根（推断名，建议人工确认）" in f["fields"]["name"]["reason"]
 

@@ -703,6 +703,12 @@ export function MetricCreate() {
       if (defMode === "sql") {
         setMode("sql");
         setSqlText(String(defJson.sql ?? JSON.stringify(defJson, null, 2)));
+        // Q2：SQL 智能推断出的完整 SQL 自动回填「数仓详细口径（数仓开发）」
+        //（dw_definition = 数仓开发指标的详细口径/完整 SQL）——用户未手填时回填，
+        // 创建后 MetricDetail/目录展开「数仓详细口径」区块直接可见，无需再手填
+        setDwDefinition((prev) =>
+          prev.trim() ? prev : String(defJson.sql ?? defJson.dw_definition ?? ""),
+        );
       } else {
         setMode("expression");
         form.setFieldValue("definition", JSON.stringify(defJson, null, 2));
@@ -1166,6 +1172,84 @@ export function MetricCreate() {
 
   function handleSqlBatchDepChange(key: string, deps: string[]) {
     handleSqlBatchEdit(key, { dependencies: deps });
+  }
+
+  // Q1（方案 A）：批量候选「在向导中编辑」——把候选**完整回填到单条向导表单**，
+  // 用户核对修改后按单条流程手动提交创建/审批（此前批量模式是"创建优先"批处理链路，
+  // 候选不进向导表单，创建后主按钮直达批量送审，无法在"对应的框内"核对修改）。
+  // 回填覆盖：编码/名称/类型/源表/度量列/聚合/单位/周期/粒度/逻辑度量/依赖/计算
+  // 表达式/口径（SQL 或 expression）/数仓详细口径（dw_definition）。
+  function loadCandidateIntoWizard(c: SqlBatchCandidate) {
+    // 属性提取为局部 const：闭包内访问 c 的属性会丢失 TS 类型收窄（可变对象属性）
+    const candSourceTable = c.source_table;
+    const candMeasureColumn = c.measure_column;
+    const candType = c.type;
+    const candDeps = c.dependencies;
+    const vals: Record<string, unknown> = {};
+    if (c.metric_code) vals.metric_code = c.metric_code;
+    if (c.name) vals.name = c.name;
+    if (candType) vals.type = candType;
+    if (candSourceTable) vals.source_table = candSourceTable;
+    if (candMeasureColumn) vals.measure_column = candMeasureColumn;
+    if (c.aggregation) vals.aggregation = c.aggregation;
+    if (c.unit) vals.unit = c.unit;
+    if (c.granularity) vals.granularity = c.granularity;
+    if (c.period) vals.period = c.period;
+    if (c.measure_id) vals.measure_id = c.measure_id;
+    if (Object.keys(vals).length > 0) form.setFieldsValue(vals);
+    // 类型联动 + 逻辑度量联动（继承单位/格式/小数位）
+    if (candType) setMetricType(candType);
+    if (c.measure_id) {
+      setSelectedMeasure(
+        measureOptions.find((o) => o.value === c.measure_id)?.measure ?? null,
+      );
+    }
+    // 源表/度量列补进 options（未采集的下拉才有对应项可显示）
+    if (candSourceTable) {
+      setSrcTableSearchOptions((prev) =>
+        prev.some((o) => o.value === candSourceTable)
+          ? prev
+          : [{ value: candSourceTable, label: candSourceTable }, ...prev],
+      );
+    }
+    if (candMeasureColumn) {
+      setColumnOptions((prev) =>
+        prev.some((o) => o.value === candMeasureColumn)
+          ? prev
+          : [...prev, { value: candMeasureColumn, label: candMeasureColumn }],
+      );
+    }
+    // 依赖指标 / 计算表达式（派生/复合）
+    if (Array.isArray(candDeps) && candDeps.length) {
+      setSelectedDeps(candDeps);
+    }
+    if (c.calc_expression) setCalcExpression(c.calc_expression);
+    // 口径定义：SQL 模式（sql 键）→ sqlText；expression 模式 → definition JSON
+    const dj = c.definition_json || {};
+    if (dj.sql) {
+      setMode("sql");
+      setSqlText(String(dj.sql));
+    } else if (dj.expression) {
+      setMode("expression");
+      form.setFieldValue(
+        "definition",
+        JSON.stringify(
+          {
+            expression: dj.expression,
+            ...(Array.isArray(dj.source_fields) ? { source_fields: dj.source_fields } : {}),
+          },
+          null,
+          2,
+        ),
+      );
+    }
+    // 数仓详细口径（Q2）：候选 dw_definition（所属语句完整 SQL）回填，用户可改
+    if (dj.dw_definition) setDwDefinition(String(dj.dw_definition));
+    // 跳转：关闭 SQL 推断抽屉 → 单条模式 → 定位到 Step②（指标类型+来源）让用户核对
+    setSqlInferOpen(false);
+    setSqlBatchMode("single");
+    setCurrentStep(1);
+    message.success(`已将候选「${c.name}」回填到注册向导，请核对修改后按单条流程提交创建`);
   }
 
   function handleSqlBatchExprChange(key: string, expr: string) {
@@ -2998,6 +3082,18 @@ export function MetricCreate() {
                                     <Tag color="orange">需先发布依赖原子</Tag>
                                   </Tooltip>
                                 )}
+                                {/* Q1（方案 A）：批量候选「在向导中编辑」——完整回填单条向导
+                                    表单核对修改（源表/度量列/口径/数仓口径/类型/依赖/表达式/
+                                    编码等），按单条流程手动提交创建——想快就批量、想审就进向导 */}
+                                <Button
+                                  size="small"
+                                  type="link"
+                                  style={{ padding: "0 4px" }}
+                                  data-testid={`sql-batch-to-wizard-${c.key}`}
+                                  onClick={() => loadCandidateIntoWizard(c)}
+                                >
+                                  在向导中编辑
+                                </Button>
                               </div>
                             ))}
                           </div>
@@ -3084,8 +3180,8 @@ export function MetricCreate() {
                             message={`批量创建完成：成功 ${succeeded} / 失败 ${failed}`}
                             description={
                               draftAtoms.length > 0
-                                ? `批次号：${sqlBatchCreateResult.batch_id}（${draftAtoms.length} 个原子指标已创建为 DRAFT，可一键提交评审；复合候选需先发布依赖原子）`
-                                : `批次号：${sqlBatchCreateResult.batch_id}（成功的指标已创建为 DRAFT 草稿）`
+                                ? `批次号：${sqlBatchCreateResult.batch_id}（${draftAtoms.length} 个指标已创建为 DRAFT 草稿。建议逐条点「在向导中编辑」核对编码/名称/口径后手动提交审批；如需快可点下方「批量提交评审（免核对）」；复合候选需先发布依赖原子）`
+                                : `批次号：${sqlBatchCreateResult.batch_id}（成功的指标已创建为 DRAFT 草稿，可在候选行点「在向导中编辑」核对后手动提交审批）`
                             }
                           />
                           <Table
@@ -3117,14 +3213,16 @@ export function MetricCreate() {
                               重试失败项{sqlBatchRetryFailedKeys.length > 0 ? `（${sqlBatchRetryFailedKeys.length}）` : ""}
                             </Button>
                             {/* P1-1：原子 DRAFT 一键送审（对齐宽表批量弹窗的「批量提交评审」直达，
-                                消除「批量注册成功仅提示即结束、需回目录手动勾选提交」的闭环断点） */}
+                                消除「批量注册成功仅提示即结束、需回目录手动勾选提交」的闭环断点）。
+                                Q1（方案 A）：降为**次要按钮**——批量创建后建议逐条「在向导中编辑」
+                                核对（编码/名称/口径/数仓口径/类型/依赖等）再手动提交审批；想快可
+                                一键送审，但不再默认引导直达审批页（此前主按钮直达，绕过了核对环节） */}
                             <Button
-                              type="primary"
                               loading={batchSubmitLoading}
                               disabled={draftAtoms.length === 0}
                               onClick={() => void submitReview()}
                             >
-                              批量提交评审
+                              批量提交评审（免核对）
                             </Button>
                             <Button onClick={handleSqlBatchCreateDone}>
                               完成

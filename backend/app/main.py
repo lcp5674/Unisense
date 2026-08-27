@@ -145,6 +145,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001 - 播种失败不应阻断启动（DB 未就绪/无 platform_admin 均合法）
         logger.warning("ops_subscriptions_seed_failed", exc_info=True)
 
+    # ---- 指标命名词根缓存加载（字典化）：dict_type=metric_name_morpheme active 词根
+    # 合并进进程内缓存，命名校验（validate_metric_name）即时识别字典管理新增词根 ----
+    try:
+        from app.db.mysql import async_session_factory
+        from app.services.semantic.conflict_precheck import load_metric_name_morphemes
+
+        async with async_session_factory() as _session:
+            await load_metric_name_morphemes(_session)
+    except Exception:  # noqa: BLE001 - 词根加载失败不应阻断启动（回退内置默认）
+        logger.warning("metric_name_morpheme_seed_failed", exc_info=True)
+
     # ---- 降级事件上报（TD §5.2.4/§5.2.5）：熔断器 open/close 回调持久化 + 告警 ----
     register_degradation_listener(handle_circuit_signal)
     logger.info("degradation_listener_registered")

@@ -25,6 +25,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.conflict.similarity import detect_conflict
 from app.services.semantic.dependency_checker import DependencyChecker
@@ -52,6 +53,8 @@ RESERVED_WORDS: frozenset[str] = frozenset(
 # 受控词根（词素）表：指标名须命中至少一个词根才视为业务命名（TD §12.3 命名规范强约束）。
 # 统一收敛在常量中，避免散落到业务逻辑；英文词根在匹配时统一小写。
 # 覆盖财务/经营/用户/业务量/度量词根，供 ``validate_metric_name`` 做硬卡校验。
+# 注意：此处为**内置默认词根**；业务可在「系统设置 → 字典管理」经字典
+# dict_type=metric_name_morpheme 在线增删/启停用（见下方 get_controlled_morphemes）。
 CONTROLLED_MORPHEMES: frozenset[str] = frozenset(
     {
         # 财务/经营类
@@ -160,6 +163,57 @@ CONTROLLED_MORPHEMES: frozenset[str] = frozenset(
 # 依赖指标允许被消费的状态（与 DependencyChecker 一致）
 _ALLOWED_DEP_STATUSES = frozenset({"PUBLISHED", "EXPERIMENTAL"})
 
+# ---------------------------------------------------------------------------
+# 词根可管理化（system_dict 字典 dict_type=metric_name_morpheme）：
+# ``CONTROLLED_MORPHEMES`` 作为**内置默认词根**保留；业务/运维可在「系统设置 →
+# 字典管理」在线增删/启停用词根（对齐 measure_category 字典化先例 0094）。
+# 进程内缓存 = 内置默认 ∪ DB active 词根；未加载（None）时仅用内置默认。
+# 缓存刷新落点：main.lifespan 启动加载 + 字典 API 变更 metric_name_morpheme 时刷新
+# （best-effort：多 worker 下仅刷新当前 worker，字典校验本来就是每次查 DB 的先例）。
+# ---------------------------------------------------------------------------
+_MORPHEME_OVERRIDES: set[str] | None = None
+
+
+def get_controlled_morphemes() -> frozenset[str]:
+    """返回当前生效词根集合 = 内置默认 ∪ DB 字典 active 词根（进程内缓存）。
+
+    ``validate_metric_name`` 读取此集合而非直接读常量——字典管理新增/停用的词根
+    立即对命名校验生效，无需发版。未加载（应用未启动完整 lifespan 或测试环境）时
+    回退内置默认，保持既有行为。
+    """
+    if _MORPHEME_OVERRIDES is None:
+        return CONTROLLED_MORPHEMES
+    return frozenset(set(CONTROLLED_MORPHEMES) | _MORPHEME_OVERRIDES)
+
+
+async def load_metric_name_morphemes(db: AsyncSession) -> None:
+    """从 system_dict（dict_type=metric_name_morpheme）加载 active 词根进缓存。
+
+    best-effort：字典表不存在/查询失败时保留内置默认，不阻断调用方
+    （对齐 lifespan 中其他播种任务的降级语义）。
+    """
+    global _MORPHEME_OVERRIDES
+    try:
+        from app.services.system_dict.repository import SystemDictRepository
+
+        items = await SystemDictRepository(db).list_by_type(
+            "metric_name_morpheme", status="active"
+        )
+        _MORPHEME_OVERRIDES = {str(i.code).strip() for i in items if str(i.code).strip()}
+        logger.info(
+            "metric_name_morphemes_loaded",
+            count=len(_MORPHEME_OVERRIDES),
+            total=len(get_controlled_morphemes()),
+        )
+    except Exception:  # noqa: BLE001 - 词根加载失败不应阻断（回退内置默认）
+        logger.warning("metric_name_morphemes_load_failed", exc_info=True)
+
+
+def reset_metric_name_morpheme_cache() -> None:
+    """清空词根缓存（测试隔离/手动刷新用）。"""
+    global _MORPHEME_OVERRIDES
+    _MORPHEME_OVERRIDES = None
+
 #: 已存在口径的加载器：``() -> Awaitable[list[dict]]``，dict 与 conflict.similarity
 #: ``detect_conflict`` 期望的字段形状一致（metric_code/domain/definition/source_tables/...）。
 ExistingLoader = Callable[[], Awaitable[list[dict[str, Any]]]]
@@ -244,6 +298,10 @@ class ConflictPrechecker:
         否则返回明确错误——拦截裸词/无意义命名（如 ``新名称``/``abc``）。
         维度类指标（``metric_type == "dimension"``）豁免：纯维度指标可能不含业务词根。
 
+        词根来源可管理：内置默认词根（``CONTROLLED_MORPHEMES``）∪ 系统字典
+        ``metric_name_morpheme`` 的 active 项（``get_controlled_morphemes`` 读取
+        进程内缓存）——字典管理新增/停用词根即时生效，无需发版。
+
         Args:
             name: 指标名。
             metric_type: 指标类型；``"dimension"`` 时豁免词根校验。
@@ -256,7 +314,7 @@ class ConflictPrechecker:
         if metric_type == "dimension":
             return True, None
         lowered = str(name).lower()
-        for morpheme in CONTROLLED_MORPHEMES:
+        for morpheme in get_controlled_morphemes():
             if morpheme in lowered:
                 return True, None
         return False, (
