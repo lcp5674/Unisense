@@ -26,6 +26,7 @@ P2 增强：
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from typing import Any
@@ -434,6 +435,15 @@ class LlmRouterClient:
                 # 干等慢实例 29s 且把垃圾灌进业务字段）。
                 content = result.get("content") or ""
                 if not content.strip() or is_abnormal_llm_text(content):
+                    # 关键：异常内容必须计入该实例的熔断器（进程级共享单例）——路由
+                    # 实例级失败计数不跨请求（每次 build_client 新建 router 即归零），
+                    # 只有熔断器持久。不 record_failure 则垃圾实例永不熔断，每次请求
+                    # 都先白等它完整返回（如 29s 流式垃圾）才 failover 到健康实例，
+                    # 多语句批量解析叠加后墙钟拖到几十秒。
+                    breaker = getattr(self._instances[idx], "_breaker", None)
+                    if breaker is not None:
+                        with contextlib.suppress(Exception):  # noqa: BLE001 - 熔断记录 best-effort
+                            breaker.record_failure()
                     self._consecutive_failures[idx] = self._consecutive_failures.get(idx, 0) + 1
                     if self._consecutive_failures[idx] >= _ROUTER_FAILOVER_THRESHOLD:
                         self._cooldown_until[idx] = time.monotonic() + _ROUTER_COOLDOWN_SECONDS

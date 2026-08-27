@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -27,10 +27,12 @@ class _FakeClient:
         name: str = "fake",
         empty_content: bool = False,
         garbage_content: bool = False,
+        breaker: Any | None = None,
     ) -> None:
         self._always_fail = always_fail
         self._empty_content = empty_content
         self._garbage_content = garbage_content
+        self._breaker = breaker
         self.name = name
         self.calls = 0
         self.closed = False
@@ -132,6 +134,37 @@ class TestFailover:
         result = await router.chat([{"role": "user", "content": "x"}])
         assert result["model"] == "b"
         assert a.calls == 3
+
+    async def test_abnormal_content_records_breaker_failure(self) -> None:
+        """异常内容必须计入该实例熔断器（进程级共享单例，跨请求持久）——否则路由
+        实例级失败计数随每次 build_client 新建 router 归零，垃圾实例永不熔断，每次
+        请求都先白等它完整返回（如 29s 流式垃圾）才 failover，多语句批量解析叠加
+        拖到几十秒。"""
+        breaker = Mock()
+        a = _FakeClient(garbage_content=True, name="a", breaker=breaker)
+        b = _FakeClient(name="b")
+        router = LlmRouterClient([a, b])
+        result = await router.chat([{"role": "user", "content": "x"}])
+        assert result["model"] == "b"  # a 异常内容 failover 到 b
+        breaker.record_failure.assert_called_once()
+
+    async def test_empty_content_records_breaker_failure(self) -> None:
+        """空 content 同样计入熔断器（免费模型偶发空返回应累积为熔断，而非每次重试）。"""
+        breaker = Mock()
+        a = _FakeClient(empty_content=True, name="a", breaker=breaker)
+        b = _FakeClient(name="b")
+        router = LlmRouterClient([a, b])
+        result = await router.chat([{"role": "user", "content": "x"}])
+        assert result["model"] == "b"
+        breaker.record_failure.assert_called_once()
+
+    async def test_no_breaker_attr_skips_record(self) -> None:
+        """实例无 _breaker 属性（老/第三方客户端）时异常内容仍正常 failover，不炸。"""
+        a = _FakeClient(garbage_content=True, name="a")  # 无 breaker
+        b = _FakeClient(name="b")
+        router = LlmRouterClient([a, b])
+        result = await router.chat([{"role": "user", "content": "x"}])
+        assert result["model"] == "b"
 
     async def test_fallback_to_last_when_all_down(self) -> None:
         a, b = _FakeClient(always_fail=True, name="a"), _FakeClient(always_fail=True, name="b")
