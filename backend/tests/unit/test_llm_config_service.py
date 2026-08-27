@@ -302,6 +302,7 @@ class TestTestConnection:
         assert result.model == "m1"
         assert result.models == ["m1", "m2"]
         assert result.chat is True
+        assert result.models_supported is True
         # 方案 B'：两步探测——GET /models 之后真实 POST 极小 chat 验证可推理
         mock_client.post.assert_awaited_once()
         post_body = mock_client.post.call_args.kwargs["json"]
@@ -731,7 +732,10 @@ class TestFetchModels:
 
 class TestQuickProbe:
     """两步探测的第一步（GET /models）快速失败路径：
-    连通/鉴权/网关错误/不支持 /models 均毫秒级短路返回，不进入真实 chat 探测。
+
+    连通失败/鉴权失败/网关 5xx 毫秒级短路返回，不进入真实 chat 探测；网关未实现
+    /models（404/405/501，如火山方舟/腾讯混元兼容网关）时回落第二步 chat 探测——
+    该端点可选，真实推理才是连通的最终判据（方案 B' 增强）。
     """
 
     async def _svc(self) -> tuple[LlmConfigService, MagicMock]:
@@ -777,22 +781,71 @@ class TestQuickProbe:
         assert "host.docker.internal" in result.error
         mock_client.post.assert_not_awaited()
 
-    async def test_unsupported_models_returns_clear_error(self) -> None:
-        """GET /models 返回 404（网关不支持）→ 明确失败提示，不再回退慢速真实推理。"""
+    async def test_unsupported_models_falls_back_to_chat_probe_success(self) -> None:
+        """GET /models 返回 404（网关未实现，如火山方舟/腾讯混元）→ 回落真实 chat 探测。
+
+        chat 探测通过则整体判连通成功（models_supported=False 标记 /models 不可用，
+        models 为空），不再误报「连通失败」。
+        """
         svc, _ = await self._svc()
         payload = LlmConfigPayload(
-            base_url="https://api.example.com", api_key="sk-x", model="m1", timeout=30
+            base_url="https://ark.cn-beijing.volces.com/api/coding/v3",
+            api_key="sk-x",
+            model="deepseek-v3.1",
+            timeout=30,
         )
         models_resp = MagicMock()
         models_resp.status_code = 404
         models_resp.text = "not found"
+        chat_resp = MagicMock()
+        chat_resp.status_code = 200
+        chat_resp.json.return_value = {"choices": [{"message": {"content": "pong"}}]}
         mock_client = AsyncMock()
         mock_client.get.return_value = models_resp
-        mock_client.post = AsyncMock()
+        mock_client.post.return_value = chat_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.test_connection(payload)
+        assert result.ok is True
+        assert result.chat is True
+        assert result.models_supported is False
+        assert result.models == []
+        mock_client.post.assert_awaited_once()
+        # chat 探测仍走正确的 OpenAI 兼容端点（/v1/chat/completions）
+        chat_url = mock_client.post.call_args[0][0]
+        assert chat_url.endswith("/chat/completions")
+
+    async def test_unsupported_models_chat_failure_returns_clear_error(self) -> None:
+        """GET /models 404 且 chat 探测失败（如 400 Model unavailable）→ 明确报错。
+
+        网关可达但无 /models 端点，且模型不可推理——错误信息须同时说明两点，
+        避免误导为「鉴权失败」（/models 不可用时无法验证鉴权）。
+        """
+        svc, _ = await self._svc()
+        payload = LlmConfigPayload(
+            base_url="https://ark.cn-beijing.volces.com/api/coding/v3",
+            api_key="sk-x",
+            model="deepseek-v3.1",
+            timeout=30,
+        )
+        models_resp = MagicMock()
+        models_resp.status_code = 404
+        models_resp.text = "not found"
+        chat_resp = MagicMock()
+        chat_resp.status_code = 400
+        chat_resp.text = '{"error":"Model is unavailable"}'
+        mock_client = AsyncMock()
+        mock_client.get.return_value = models_resp
+        mock_client.post.return_value = chat_resp
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
             result = await svc.test_connection(payload)
         assert result.ok is False
-        assert "不支持 GET /models" in result.error
-        mock_client.post.assert_not_awaited()
+        assert result.chat is False
+        assert result.models_supported is False
+        assert "未实现 GET /models" in result.error
+        assert "真实推理失败" in result.error
+        assert "400" in result.error
+        mock_client.post.assert_awaited_once()

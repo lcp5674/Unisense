@@ -1824,6 +1824,8 @@ export interface LlmConfigTestResult {
   models?: string[];
   /** 真实推理探测是否通过（true=可推理；false=网关可达但模型不可推理；undefined=未执行） */
   chat?: boolean;
+  /** GET /models 端点是否可用（false=网关未实现该端点，已用真实推理验证连通） */
+  models_supported?: boolean;
 }
 
 export interface LlmConfigSecret {

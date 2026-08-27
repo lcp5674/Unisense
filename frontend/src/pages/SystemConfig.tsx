@@ -96,10 +96,14 @@ function TestResultBadge({ result }: { result: LlmConfigTestResult }) {
     const modelInfo = result.models?.length
       ? ` · 可用模型 ${result.models.length} 个`
       : "";
+    // 网关未实现 GET /models（如火山方舟/腾讯混元）时连通由真实推理验证，明示避免困惑
+    const modelsNote =
+      result.models_supported === false ? " · 网关无 /models，已用真实推理验证连通" : "";
     return (
       <Tag icon={<CheckCircleOutlined />} color="success">
         连通成功 · 推理正常 · {result.latency_ms} ms · {result.model}
         {modelInfo}
+        {modelsNote}
       </Tag>
     );
   }

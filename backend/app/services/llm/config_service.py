@@ -402,8 +402,10 @@ class LlmConfigService:
            验证模型能真实产出推理结果——让「测试通过」等价于「可推理」，避免
            仅 /models 可达但模型实际不可用（如 400 Model unavailable）的假绿。
 
-        第一步失败（鉴权/网络/网关不支持 /models）时直接返回，不触发第二步。
-        网关不支持 /models 端点（404/405/501）时返回明确失败提示。
+        第一步确定性失败（鉴权/网络/网关 5xx）时直接返回，不触发第二步；但
+        网关未实现 /models 端点（404/405/501，如火山方舟/腾讯混元兼容网关）时
+        回落第二步 chat 探测验证连通——/models 为可选端点，真实推理才是连通
+        的最终判据（``_quick_probe`` 以 models_supported=False + ok=True 放行）。
         """
         if not base_url or not api_key:
             return LlmConfigTestResult(
@@ -415,21 +417,25 @@ class LlmConfigService:
         quick = await self._quick_probe(base_url, api_key, timeout, model=model)
         if not quick.ok:
             return quick
-        # 第二步：真实 chat 探测（模型能否产出推理结果）
+        # 第二步：真实 chat 探测（模型能否产出推理结果；/models 不可用时同样回落至此）
         chat = await self._chat_probe(base_url, api_key, model, timeout)
         total_ms = (quick.latency_ms or 0) + (chat.latency_ms or 0)
         if not chat.ok:
+            # /models 可用时说明网关可达且鉴权通过；不可用时网关可达但无该端点（无法验证鉴权）
+            models_note = (
+                "网关可达且鉴权通过（GET /models 正常），但模型真实推理失败："
+                if quick.models_supported is True
+                else "网关可达但未实现 GET /models 端点，且模型真实推理失败："
+            )
             return LlmConfigTestResult(
                 ok=False,
                 latency_ms=total_ms,
                 model=model,
-                error=(
-                    "网关可达且鉴权通过（GET /models 正常），但模型真实推理失败："
-                    f"{chat.error}"
-                ),
+                error=models_note + f"{chat.error}",
                 detail=chat.detail,
                 models=quick.models,
                 chat=False,
+                models_supported=quick.models_supported,
             )
         return LlmConfigTestResult(
             ok=True,
@@ -437,6 +443,7 @@ class LlmConfigService:
             model=model,
             models=quick.models,
             chat=True,
+            models_supported=quick.models_supported,
         )
 
     async def _chat_probe(
@@ -516,9 +523,11 @@ class LlmConfigService:
     ) -> LlmConfigTestResult:
         """两步探测的第一步：GET /models 验证连通 + 鉴权 + 模型可用（毫秒级）。
 
-        成功（HTTP 200）即判第一步通过，并带回可用模型列表；连通失败 / 鉴权失败 /
-        网关 5xx / 网关不支持 /models（404/405/501）均直接返回明确失败原因，
-        由 ``_probe`` 短路返回，不再进入真实 chat 探测。
+        成功（HTTP 200）即判第一步通过，带回可用模型列表（models_supported=True）；
+        连通失败 / 鉴权失败 / 网关 5xx 为确定性失败，返回 ok=False 由 ``_probe``
+        短路返回；网关未实现 /models（404/405/501，如火山方舟/腾讯混元兼容网关）
+        返回 ok=True + models_supported=False（网关可达但无该端点）——放行到第二步
+        真实 chat 探测验证连通，避免把「无 /models 端点」误判为「连通失败」。
         """
         start = time.monotonic()
         try:
@@ -552,6 +561,7 @@ class LlmConfigService:
                 latency_ms=latency_ms,
                 model=model,
                 models=models,
+                models_supported=True,
             )
         if resp.status_code in (401, 403):
             return LlmConfigTestResult(
@@ -569,17 +579,16 @@ class LlmConfigService:
                 error=f"LLM 网关错误（HTTP {resp.status_code}，请求 {req_url}）: {resp.text[:120]}",
                 detail={"status_code": resp.status_code, "request_url": req_url},
             )
-        # 404/405/501 等：网关未实现 /models 端点，无法用快速探测验证连通。
-        # 方案 A' 不再回退真实推理（本地模型可能阻塞数秒），返回明确提示。
+        # 404/405/501 等：网关未实现 /models 端点（火山方舟/腾讯混元等兼容网关）。
+        # 该端点可选，网关可达并不代表不可用——ok=True + models_supported=False
+        # 放行到第二步真实 chat 探测，由 chat 结果判定连通（真实推理才是最终判据）。
         logger.info("llm_models_probe_unsupported: url=%s status=%d", req_url, resp.status_code)
         return LlmConfigTestResult(
-            ok=False,
+            ok=True,
             latency_ms=latency_ms,
             model=model,
-            error=(
-                f"LLM 网关不支持 GET /models 端点（HTTP {resp.status_code}，请求 {req_url}）。"
-                "无法自动验证连通性，请确认接口地址指向 OpenAI 兼容 /v1 服务。"
-            ),
+            models=[],
+            models_supported=False,
             detail={"status_code": resp.status_code, "request_url": req_url},
         )
 

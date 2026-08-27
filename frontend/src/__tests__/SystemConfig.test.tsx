@@ -417,6 +417,44 @@ describe("SystemConfig LLM 路由配置", () => {
     expect(await screen.findByText(/连通成功 · 推理正常 · 88 ms/)).toBeTruthy();
   });
 
+  it("P0 保存后一键启用流：网关无 /models（火山方舟/腾讯混元）→ 连通成功并明示已用真实推理验证", async () => {
+    mockGet.mockResolvedValue(
+      listData({ items: [{ ...PRIMARY_ITEM, id: 1 }] }) as never,
+    );
+    mockCreate.mockResolvedValue({ id: 2 });
+    // 后端两步探测：GET /models 404 → 回落真实 chat 探测通过 → ok=true + models_supported=false
+    mockTest.mockResolvedValue({
+      ok: true,
+      latency_ms: 210,
+      model: "deepseek-v3.1",
+      error: "",
+      models: [],
+      chat: true,
+      models_supported: false,
+    });
+    render(<SystemConfig />);
+    fireEvent.click(await screen.findByText("新增 LLM 实例"));
+    fireEvent.change(await screen.findByPlaceholderText("如：主用 DeepSeek / 备用通义"), {
+      target: { value: "方舟主用" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("https://api.deepseek.com"), {
+      target: { value: "https://ark.cn-beijing.volces.com/api/coding/v3" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "模型名称" }), {
+      target: { value: "deepseek-v3.1" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("sk-..."), {
+      target: { value: "sk-test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => {
+      expect(mockTest).toHaveBeenCalledWith({ instance_id: 2 });
+    });
+    expect(await screen.findByText(/连通成功 · 推理正常 · 210 ms/)).toBeTruthy();
+    // 网关无 /models 时明示连通由真实推理验证（不再是「可用模型 0 个」的困惑）
+    expect(await screen.findByText(/网关无 \/models，已用真实推理验证连通/)).toBeTruthy();
+  });
+
   it("P0 保存后一键启用流：连通失败 → 展示失败徽标 + 去编辑密钥入口", async () => {
     mockGet.mockResolvedValue(
       listData({ items: [{ ...PRIMARY_ITEM, id: 1 }] }) as never,

@@ -125,11 +125,13 @@ class LlmConfigSecretResponse(BaseModel):
 class LlmConfigTestResult(BaseModel):
     """LLM 连通性测试结果（方案 B'：GET /models 快速验证 + 真实 chat 探测）。
 
-    ok=True 表示地址可连、鉴权通过、模型列表可读（GET /models），且模型能真实
-    产出推理结果（POST /chat/completions，极小 max_tokens）——让「测试通过」
-    等价于「可推理」，避免仅 /models 可达但模型实际不可用（如 400 Model
-    unavailable）的假绿；``models`` 为 /models 返回的可用模型 ID 列表，
-    ``chat`` 标记真实推理探测是否通过（None=未执行，如 GET /models 已失败）。
+    ok=True 表示地址可连、鉴权通过，且模型能真实产出推理结果（POST
+    /chat/completions，极小 max_tokens）——让「测试通过」等价于「可推理」，
+    避免仅 /models 可达但模型实际不可用（如 400 Model unavailable）的假绿。
+    部分兼容网关（火山方舟/腾讯混元）未实现 GET /models：此时回落真实 chat
+    探测验证连通，``models_supported=False`` 标记该状态（``models`` 为空）。
+    ``models`` 为 /models 返回的可用模型 ID 列表；``chat`` 标记真实推理探测
+    是否通过（None=未执行，如 GET /models 已失败）。
     """
 
     ok: bool
@@ -140,6 +142,11 @@ class LlmConfigTestResult(BaseModel):
     models: list[str] | None = None
     chat: bool | None = Field(
         None, description="真实推理探测是否通过（None=未执行/无法判定）"
+    )
+    models_supported: bool | None = Field(
+        None,
+        description="GET /models 端点是否可用（None=未探测/探测前已失败；"
+        "False=网关未实现该端点，已回落 chat 探测验证连通）",
     )
 
 
