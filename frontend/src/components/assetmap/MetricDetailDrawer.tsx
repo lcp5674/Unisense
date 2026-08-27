@@ -277,16 +277,27 @@ export function MetricDetailDrawer({ open, metricCode, onClose }: MetricDetailDr
           </Space>
 
           {health && (
-            <Card size="small" title="健康度" style={{ marginBottom: 16 }}>
-              <Space>
-                <Tag color={HEALTH_COLOR[health.level] ?? "default"}>{HEALTH_LABEL[health.level] ?? health.level}</Tag>
-                <span style={{ fontSize: 20, fontWeight: 600 }}>{health.score}</span>
-                <span className="muted">分</span>
-                <span className="muted" style={{ marginLeft: 8 }}>
-                  计算于 {health.calculated_at}
-                </span>
-              </Space>
-            </Card>
+            <Tooltip
+              title={
+                metric.description ? (
+                  <div style={{ maxWidth: 320 }}>
+                    <div className="muted" style={{ fontSize: 12 }}>口径描述</div>
+                    <div style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>{metric.description}</div>
+                  </div>
+                ) : null
+              }
+            >
+              <Card size="small" title="健康度" style={{ marginBottom: 16 }}>
+                <Space>
+                  <Tag color={HEALTH_COLOR[health.level] ?? "default"}>{HEALTH_LABEL[health.level] ?? health.level}</Tag>
+                  <span style={{ fontSize: 20, fontWeight: 600 }}>{health.score}</span>
+                  <span className="muted">分</span>
+                  <span className="muted" style={{ marginLeft: 8 }}>
+                    计算于 {health.calculated_at}
+                  </span>
+                </Space>
+              </Card>
+            </Tooltip>
           )}
 
           <Descriptions column={2} bordered size="small" style={{ marginBottom: 16 }}>

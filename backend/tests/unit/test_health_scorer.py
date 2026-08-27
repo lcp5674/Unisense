@@ -12,12 +12,13 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from app.models.metric import Metric
+from app.models.quality import QualityEventStatus
 from app.services.semantic.health_scorer import HealthScorer, _grade
 
 # ---- Fixtures ----
@@ -31,6 +32,28 @@ def mock_db() -> AsyncMock:
 @pytest.fixture
 def scorer(mock_db: AsyncMock) -> HealthScorer:
     return HealthScorer(mock_db)
+
+
+def _empty_result() -> MagicMock:
+    """构造兼容各维度查询的空结果 mock。
+
+    - _calc_quality: ``result.all()`` → []
+    - _calc_activity: ``result.scalar_one()`` → 0（无查询日志）
+    - _calc_owner_response: ``result.scalars().all()`` → []（无告警事件）
+    - _calc_lineage_coverage: ``result.scalar_one()`` → 0（无血缘边）
+    """
+    r = MagicMock()
+    r.all = MagicMock(return_value=[])
+    r.scalar_one = MagicMock(return_value=0)
+    r.scalars = MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))
+    return r
+
+
+def _result_with_scalar(value: int) -> MagicMock:
+    """构造 ``scalar_one()`` 返回指定值的 execute 结果 mock（活跃度查询）。"""
+    r = _empty_result()
+    r.scalar_one = MagicMock(return_value=value)
+    return r
 
 
 def _make_metric(
@@ -124,21 +147,21 @@ class TestQuality:
     @pytest.mark.asyncio
     async def test_pii_not_reviewed(self, scorer: HealthScorer, mock_db: AsyncMock) -> None:
         # P2-12: _calc_quality 查询近 30 天 quality_event；无异常事件时维持合规基础分
-        mock_db.execute = AsyncMock(return_value=MagicMock(all=lambda: []))
+        mock_db.execute = AsyncMock(return_value=_empty_result())
         metric = _make_metric(pii_flag=True, compliance_reviewed=False)
         score, _ = await scorer._calc_quality(metric)
         assert score == 30
 
     @pytest.mark.asyncio
     async def test_compliance_reviewed(self, scorer: HealthScorer, mock_db: AsyncMock) -> None:
-        mock_db.execute = AsyncMock(return_value=MagicMock(all=lambda: []))
+        mock_db.execute = AsyncMock(return_value=_empty_result())
         metric = _make_metric(compliance_reviewed=True)
         score, _ = await scorer._calc_quality(metric)
         assert score == 90
 
     @pytest.mark.asyncio
     async def test_default_quality(self, scorer: HealthScorer, mock_db: AsyncMock) -> None:
-        mock_db.execute = AsyncMock(return_value=MagicMock(all=lambda: []))
+        mock_db.execute = AsyncMock(return_value=_empty_result())
         metric = _make_metric(pii_flag=False, compliance_reviewed=False)
         score, _ = await scorer._calc_quality(metric)
         assert score == 70
@@ -167,34 +190,157 @@ class TestQuality:
         assert score == 90 - 12
 
 
-class TestOwnerResponse:
-    def test_with_backup(self, scorer: HealthScorer) -> None:
-        metric = _make_metric(backup_owner_id=99)
-        score, _ = scorer._calc_owner_response(metric)
-        assert score == 85
-
-    def test_without_backup(self, scorer: HealthScorer) -> None:
-        metric = _make_metric(backup_owner_id=None)
-        score, _ = scorer._calc_owner_response(metric)
-        assert score == 45
-
-
-class TestLineageCoverage:
-    def test_deps_and_expression(self, scorer: HealthScorer) -> None:
-        metric = _make_metric(definition_json={"dependencies": ["t1"], "expression": "SUM(x)"})
-        score, missing = scorer._calc_lineage_coverage(metric)
+class TestActivity:
+    @pytest.mark.asyncio
+    async def test_recent_update(self, scorer: HealthScorer, mock_db: AsyncMock) -> None:
+        """近 30 天有变更 → 高活跃（不查 query_log）。"""
+        metric = _make_metric(updated_at=datetime.now(UTC))
+        mock_db.execute = AsyncMock(side_effect=AssertionError("不应查询 query_log"))
+        score, missing = await scorer._calc_activity(metric)
         assert score == 80
         assert missing is None
 
-    def test_expression_only(self, scorer: HealthScorer) -> None:
+    @pytest.mark.asyncio
+    async def test_no_update_but_recent_queries(
+        self, scorer: HealthScorer, mock_db: AsyncMock
+    ) -> None:
+        """无近期变更但近 30 天有消费查询 → 高活跃（query_log 真实使用信号）。"""
+        metric = _make_metric(updated_at=datetime.now(UTC) - timedelta(days=60))
+        mock_db.execute = AsyncMock(return_value=_empty_result())
+        mock_db.execute.return_value.scalar_one = MagicMock(return_value=3)
+        score, _ = await scorer._calc_activity(metric)
+        assert score == 80
+
+    @pytest.mark.asyncio
+    async def test_no_update_aged_queries(
+        self, scorer: HealthScorer, mock_db: AsyncMock
+    ) -> None:
+        """近 30 天无查询但近 90 天有 → 中活跃。"""
+        metric = _make_metric(updated_at=datetime.now(UTC) - timedelta(days=120))
+        mock_db.execute = AsyncMock(return_value=_empty_result())
+        # 第一次查询（30 天）返回 0，第二次（90 天）返回 2
+        mock_db.execute.side_effect = [
+            _result_with_scalar(0),
+            _result_with_scalar(2),
+        ]
+        score, _ = await scorer._calc_activity(metric)
+        assert score == 50
+
+    @pytest.mark.asyncio
+    async def test_no_activity(self, scorer: HealthScorer, mock_db: AsyncMock) -> None:
+        """无变更且无查询 → 低活跃。"""
+        metric = _make_metric(updated_at=datetime.now(UTC) - timedelta(days=120))
+        mock_db.execute = AsyncMock(return_value=_empty_result())
+        score, missing = await scorer._calc_activity(metric)
+        assert score == 20
+        assert missing is None
+
+
+class TestOwnerResponse:
+    @pytest.mark.asyncio
+    async def test_with_backup_no_events(
+        self, scorer: HealthScorer, mock_db: AsyncMock
+    ) -> None:
+        """有备份 Owner、近 90 天无告警 → 基础分 85。"""
+        metric = _make_metric(backup_owner_id=99)
+        mock_db.execute = AsyncMock(return_value=_empty_result())
+        score, _ = await scorer._calc_owner_response(metric)
+        assert score == 85
+
+    @pytest.mark.asyncio
+    async def test_without_backup_no_events(
+        self, scorer: HealthScorer, mock_db: AsyncMock
+    ) -> None:
+        metric = _make_metric(backup_owner_id=None)
+        mock_db.execute = AsyncMock(return_value=_empty_result())
+        score, _ = await scorer._calc_owner_response(metric)
+        assert score == 45
+
+    @pytest.mark.asyncio
+    async def test_open_events_deduct(
+        self, scorer: HealthScorer, mock_db: AsyncMock
+    ) -> None:
+        """近 90 天有未 ACK 的 OPEN 告警 → 每件扣分。"""
+        metric = _make_metric(backup_owner_id=99)
+        mock_db.execute = AsyncMock(
+            return_value=MagicMock(
+                scalars=MagicMock(
+                    return_value=MagicMock(
+                        all=MagicMock(
+                            return_value=[
+                                QualityEventStatus.OPEN,
+                                QualityEventStatus.OPEN,
+                            ]
+                        )
+                    )
+                )
+            )
+        )
+        score, _ = await scorer._calc_owner_response(metric)
+        assert score == 85 - 2 * 15
+
+    @pytest.mark.asyncio
+    async def test_all_closed_bonus(
+        self, scorer: HealthScorer, mock_db: AsyncMock
+    ) -> None:
+        """近 90 天告警全部闭环 → 响应及时加分。"""
+        metric = _make_metric(backup_owner_id=99)
+        mock_db.execute = AsyncMock(
+            return_value=MagicMock(
+                scalars=MagicMock(
+                    return_value=MagicMock(
+                        all=MagicMock(
+                            return_value=[
+                                QualityEventStatus.ACK,
+                                QualityEventStatus.RESOLVED,
+                                QualityEventStatus.CLOSED,
+                            ]
+                        )
+                    )
+                )
+            )
+        )
+        score, _ = await scorer._calc_owner_response(metric)
+        assert score == min(100, 85 + 10)
+
+
+class TestLineageCoverage:
+    @pytest.mark.asyncio
+    async def test_real_edges(self, scorer: HealthScorer, mock_db: AsyncMock) -> None:
+        """有真实血缘边（lineage_edge）→ 最高档，即使口径声明缺失。"""
+        metric = _make_metric(definition_json={})
+        mock_db.execute = AsyncMock(return_value=_empty_result())
+        mock_db.execute.return_value.scalar_one = MagicMock(return_value=3)
+        score, missing = await scorer._calc_lineage_coverage(metric)
+        assert score == 90
+        assert missing is None
+
+    @pytest.mark.asyncio
+    async def test_deps_and_expression(
+        self, scorer: HealthScorer, mock_db: AsyncMock
+    ) -> None:
+        """无真实边但有 dependencies + expression → 80。"""
+        metric = _make_metric(definition_json={"dependencies": ["t1"], "expression": "SUM(x)"})
+        mock_db.execute = AsyncMock(return_value=_empty_result())
+        score, missing = await scorer._calc_lineage_coverage(metric)
+        assert score == 80
+        assert missing is None
+
+    @pytest.mark.asyncio
+    async def test_expression_only(
+        self, scorer: HealthScorer, mock_db: AsyncMock
+    ) -> None:
         metric = _make_metric(definition_json={"expression": "SUM(x)"})
-        score, missing = scorer._calc_lineage_coverage(metric)
+        mock_db.execute = AsyncMock(return_value=_empty_result())
+        score, missing = await scorer._calc_lineage_coverage(metric)
         assert score == 50
         assert missing is None
 
-    def test_no_lineage(self, scorer: HealthScorer) -> None:
+    @pytest.mark.asyncio
+    async def test_no_lineage(self, scorer: HealthScorer, mock_db: AsyncMock) -> None:
         metric = _make_metric(definition_json={})
-        score, missing = scorer._calc_lineage_coverage(metric)
+        mock_db.execute = AsyncMock(return_value=_empty_result())
+        score, missing = await scorer._calc_lineage_coverage(metric)
         assert score == 10
         assert "lineage_coverage" in (missing or [])
 
@@ -208,7 +354,7 @@ class TestCalculate:
         metric = _make_metric(pii_flag=False, compliance_reviewed=True)
         mock_db.get = AsyncMock(return_value=metric)
         # P2-12: 质量维度查询 quality_event，无异常事件
-        mock_db.execute = AsyncMock(return_value=MagicMock(all=lambda: []))
+        mock_db.execute = AsyncMock(return_value=_empty_result())
 
         # mock db.merge + flush（calculate不持久化，只返回对象）
         mock_db.merge = AsyncMock()
@@ -231,7 +377,7 @@ class TestCalculate:
             aggregation=None,
         )
         mock_db.get = AsyncMock(return_value=metric)
-        mock_db.execute = AsyncMock(return_value=MagicMock(all=lambda: []))
+        mock_db.execute = AsyncMock(return_value=_empty_result())
         mock_db.merge = AsyncMock()
         mock_db.flush = AsyncMock()
 
@@ -256,7 +402,7 @@ class TestBatchCalculate:
     async def test_batch_partial_success(self, scorer: HealthScorer, mock_db: AsyncMock) -> None:
         metric_ok = _make_metric()
         mock_db.get = AsyncMock(side_effect=[metric_ok, None])
-        mock_db.execute = AsyncMock(return_value=MagicMock(all=lambda: []))
+        mock_db.execute = AsyncMock(return_value=_empty_result())
         mock_db.merge = AsyncMock()
         mock_db.flush = AsyncMock()
 

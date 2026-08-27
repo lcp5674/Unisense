@@ -4620,6 +4620,11 @@ class MetricService(BaseService):
             raise NotFoundError(f"指标不存在: {metric_code}")
         scorer = HealthScorer(self._db)
         health = await scorer.calculate(metric.id)
+        # 详情/目录一致性（TD §12.3）：实时计算后顺带落库——目录页读
+        # metric_health_score 表（每日 cron 快照），详情页实时算。此前实时算
+        # 不落库，cron 未跑或表为空时两边数值可能不一致，加剧"假数据"观感。
+        # 现详情页每次计算即刷新快照，两边同源。
+        await self._repo.save_health_score(health)
         # 红橙指标进整改待办
         if health.level in ("WARNING", "CRITICAL"):
             await self._publish_event(

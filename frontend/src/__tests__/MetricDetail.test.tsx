@@ -789,6 +789,32 @@ describe("MetricDetail", () => {
     expect(screen.getByText(/最近校验：2026年8月18日 11:20/)).toBeTruthy();
   });
 
+  it("健康卡悬停图标展示该指标口径描述", async () => {
+    mockedHealth.mockResolvedValue({
+      metric_id: 1,
+      score: 88,
+      level: "EXCELLENT",
+      completeness_score: 90,
+      activity_score: 85,
+      quality_score: 95,
+      owner_response_score: 80,
+      lineage_coverage_score: 90,
+      missing_dimensions: null,
+      calculated_at: "2026-08-18T03:20:00",
+    });
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      description: "近 30 天线上支付订单总额（不含退款）",
+    });
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    await screen.findByText(/最近校验：/);
+    // 悬停任一健康度图标 → Tooltip 展示维度说明 + 口径描述
+    const cell = document.querySelector(".gauge-cell") as HTMLElement;
+    fireEvent.mouseEnter(cell);
+    expect(await screen.findByText("近 30 天线上支付订单总额（不含退款）")).toBeInTheDocument();
+    expect(screen.getByText("口径描述")).toBeInTheDocument();
+  });
+
   it("健康数据缺失时不展示「最近校验」（空健康静默降级，不误导）", async () => {
     mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
     renderDetail({ pathname: "/detail/sales_gmv_sum_d" });

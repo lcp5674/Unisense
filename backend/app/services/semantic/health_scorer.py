@@ -45,8 +45,9 @@ _WEIGHTS = {
 _COMPLETENESS_DEDUCTION_PER_MISSING = 12
 
 # 活跃度评分
-_ACTIVITY_RECENT_UPDATE = 80  # 近 30 天有更新
-_ACTIVITY_STALE = 20  # 无近期更新
+_ACTIVITY_RECENT_UPDATE = 80  # 近 30 天有变更或消费查询
+_ACTIVITY_QUERY_AGED = 50  # 近 30 天无变更/查询，但近 90 天有消费查询
+_ACTIVITY_STALE = 20  # 无近期变更且无消费查询
 
 # 质量评分
 _QUALITY_PII_UNREVIEWED = 30  # 含 PII 但未合规审核
@@ -58,11 +59,15 @@ _QUALITY_MAJOR_DEDUCT = 25  # P1 每件扣 25
 _QUALITY_MINOR_DEDUCT = 12  # P2 每件扣 12
 
 # Owner 响应评分
-_OWNER_HAS_BACKUP = 85  # 配置了 backup_owner
-_OWNER_NO_BACKUP = 45  # 无 backup_owner
+_OWNER_HAS_BACKUP = 85  # 配置了 backup_owner（基础分）
+_OWNER_NO_BACKUP = 45  # 无 backup_owner（基础分）
+# 质量告警响应闭环（TD §4.1 quality_event.ack_at/resolved_at 真实响应记录）：
+_OWNER_OPEN_EVENT_DEDUCT = 15  # 近 90 天每件未 ACK 的 OPEN 事件扣 15
+_OWNER_ALL_CLOSED_BONUS = 10  # 近 90 天告警全部 ACK/RESOLVE/CLOSE → 响应及时加分
 
 # 血缘覆盖评分
-_LINEAGE_FULL = 80  # 有 dependencies + expression
+_LINEAGE_EDGES = 90  # 有真实血缘边（lineage_edge，TD §12.2）
+_LINEAGE_FULL = 80  # 无真实边但有 dependencies + expression
 _LINEAGE_EXPRESSION_ONLY = 50  # 仅 expression
 _LINEAGE_NONE = 10  # 无血缘信息
 
@@ -114,13 +119,13 @@ class HealthScorer:
         if qual_missing:
             missing_dimensions.append("quality")
 
-        # 4. Owner 响应（简化：基于 backup_owner_id 是否配置）
-        scores["owner_response"], own_missing = self._calc_owner_response(metric)
+        # 4. Owner 响应（backup_owner 配置 + 质量告警响应闭环 quality_event）
+        scores["owner_response"], own_missing = await self._calc_owner_response(metric)
         if own_missing:
             missing_dimensions.append("owner_response")
 
-        # 5. 血缘覆盖（简化：基于 definition_json.dependencies 是否填充）
-        scores["lineage_coverage"], lin_missing = self._calc_lineage_coverage(metric)
+        # 5. 血缘覆盖（真实血缘边 lineage_edge + 口径依赖声明）
+        scores["lineage_coverage"], lin_missing = await self._calc_lineage_coverage(metric)
         if lin_missing:
             missing_dimensions.append("lineage_coverage")
 
@@ -178,10 +183,12 @@ class HealthScorer:
         return score, missing
 
     async def _calc_activity(self, metric: Metric) -> tuple[int, list[str] | None]:
-        """活跃度：近 30 天是否有更新/查询。
+        """活跃度：近 30 天指标变更或消费查询（真实使用信号）。
 
-        近 30 天有更新 → _ACTIVITY_RECENT_UPDATE，
-        无更新 → _ACTIVITY_STALE，无 consume 数据 → 标缺失。
+        数据源：``metric.updated_at``（变更）+ ``query_log``（消费查询日志，
+        TD §12.6——真实执行查询后 best-effort 落库）。此前仅看 updated_at，
+        指标创建后无人编辑则活跃度永远 20——现接入 query_log：近 30 天有变更
+        或查询 → 高活跃；仅近 90 天有查询 → 中活跃；两者皆无 → 低活跃。
         """
         now = datetime.now(UTC)
         if metric.updated_at:
@@ -192,6 +199,39 @@ class HealthScorer:
             )
             if (now - updated).days < 30:
                 return _ACTIVITY_RECENT_UPDATE, None
+
+        # 无近期变更 → 查消费查询日志（真实使用信号）
+        from sqlalchemy import func, select
+
+        from app.models.consume import QueryLog
+
+        since_30 = now - timedelta(days=30)
+        cnt_30 = (
+            await self._db.execute(
+                select(func.count())
+                .select_from(QueryLog)
+                .where(
+                    QueryLog.metric_code == metric.metric_code,
+                    QueryLog.created_at >= since_30,
+                )
+            )
+        ).scalar_one()
+        if cnt_30 > 0:
+            return _ACTIVITY_RECENT_UPDATE, None
+
+        since_90 = now - timedelta(days=90)
+        cnt_90 = (
+            await self._db.execute(
+                select(func.count())
+                .select_from(QueryLog)
+                .where(
+                    QueryLog.metric_code == metric.metric_code,
+                    QueryLog.created_at >= since_90,
+                )
+            )
+        ).scalar_one()
+        if cnt_90 > 0:
+            return _ACTIVITY_QUERY_AGED, None
         return _ACTIVITY_STALE, None
 
     async def _calc_quality(self, metric: Metric) -> tuple[int, list[str] | None]:
@@ -242,19 +282,77 @@ class HealthScorer:
         )
         return max(0, base - deduction), None
 
-    @staticmethod
-    def _calc_owner_response(metric: Metric) -> tuple[int, list[str] | None]:
-        """Owner 响应：基于 backup_owner 是否配置。"""
-        if metric.backup_owner_id is not None:
-            return _OWNER_HAS_BACKUP, None
-        return _OWNER_NO_BACKUP, None
+    async def _calc_owner_response(self, metric: Metric) -> tuple[int, list[str] | None]:
+        """Owner 响应：备份 Owner 配置 + 质量告警响应闭环。
 
-    @staticmethod
-    def _calc_lineage_coverage(metric: Metric) -> tuple[int, list[str] | None]:
-        """血缘覆盖：基于依赖信息是否填充。"""
+        数据源：``backup_owner_id``（兜底配置）+ ``quality_event`` 的
+        ack_at/resolved_at（真实响应记录，TD §4.1）。此前仅看有无 backup_owner，
+        与"响应"无关——现接入告警闭环：近 90 天无告警 → 维持配置基础分；
+        有告警且全部 ACK/RESOLVE/CLOSE → 响应及时加分；有未 ACK 的 OPEN 事件
+        → 每件扣分（Owner 对告警迟迟不响应，响应度低）。
+        """
+        base = (
+            _OWNER_HAS_BACKUP
+            if metric.backup_owner_id is not None
+            else _OWNER_NO_BACKUP
+        )
+
+        from sqlalchemy import select
+
+        from app.models.quality import QualityEvent, QualityEventStatus
+
+        since = datetime.now(UTC) - timedelta(days=90)
+        stmt = (
+            select(QualityEvent.status)
+            .where(
+                QualityEvent.metric_id == metric.id,
+                QualityEvent.created_at >= since,
+            )
+        )
+        rows = list((await self._db.execute(stmt)).scalars().all())
+        total = len(rows)
+        if total == 0:
+            return base, None
+
+        open_unacked = sum(1 for s in rows if s == QualityEventStatus.OPEN)
+        if open_unacked == 0:
+            # 告警全部闭环 → 响应及时
+            return min(100, base + _OWNER_ALL_CLOSED_BONUS), None
+        return max(0, base - open_unacked * _OWNER_OPEN_EVENT_DEDUCT), None
+
+    async def _calc_lineage_coverage(self, metric: Metric) -> tuple[int, list[str] | None]:
+        """血缘覆盖：真实血缘边（lineage_edge）+ 口径依赖声明。
+
+        数据源：``lineage_edge`` 表（TD §12.2，指标节点 ``metric:{code}``）。
+        此前仅看 definition_json 声明，与真实血缘脱节——现查真实血缘边
+        （含失效队列过滤）：有真实边 → 最高档；无真实边才回退口径声明档。
+        """
         definition = metric.definition_json or {}
         has_deps = bool(definition.get("dependencies"))
         has_expr = bool(definition.get("expression"))
+
+        from sqlalchemy import func, or_, select
+
+        from app.models.lineage import LineageEdge
+
+        node = f"metric:{metric.metric_code}"
+        edge_count = (
+            await self._db.execute(
+                select(func.count())
+                .select_from(LineageEdge)
+                .where(
+                    or_(
+                        LineageEdge.source_node == node,
+                        LineageEdge.target_node == node,
+                    ),
+                    LineageEdge.deleted_at.is_(None),
+                    LineageEdge.stale.is_(False),  # 失效队列不计入覆盖
+                )
+            )
+        ).scalar_one()
+
+        if edge_count > 0:
+            return _LINEAGE_EDGES, None
         if has_deps and has_expr:
             return _LINEAGE_FULL, None
         if has_expr:

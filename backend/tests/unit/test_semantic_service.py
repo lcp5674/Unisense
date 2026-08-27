@@ -3860,6 +3860,8 @@ async def test_compute_diff_detects_changes():
 async def test_get_metric_health_critical_emits_event(monkeypatch):
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=make_metric())
+    # get_metric_health 实时计算后落库（详情/目录一致性）
+    repo.save_health_score = AsyncMock(return_value=None)
 
     class _FakeHealth:
         level = "CRITICAL"

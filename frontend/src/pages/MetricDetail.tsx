@@ -2279,7 +2279,7 @@ export function MetricDetail() {
         />
       )}
 
-      {health && <HealthCard health={health} />}
+      {health && <HealthCard health={health} description={metric.description} />}
 
       <Card size="small" style={{ marginBottom: 16 }}>
         <Descriptions column={3} bordered size="small">

@@ -5,10 +5,10 @@ import { formatCnTime } from "../../utils/timeCn";
 // 五维权重（对齐后端 health_scorer._WEIGHTS）
 const DIMS: Array<{ key: keyof Omit<MetricHealth, "metric_id" | "score" | "level" | "missing_dimensions" | "calculated_at">; label: string; hint: string }> = [
   { key: "completeness_score", label: "口径完整度", hint: "一等字段（粒度/单位/聚合/SLA…）齐全率" },
-  { key: "activity_score", label: "活跃度", hint: "近 30 天是否有变更/查询" },
-  { key: "quality_score", label: "质量", hint: "合规审核与 PII 状态" },
-  { key: "owner_response_score", label: "Owner 响应", hint: "是否配置了备份 Owner" },
-  { key: "lineage_coverage_score", label: "血缘覆盖", hint: "口径是否声明依赖与表达式" },
+  { key: "activity_score", label: "活跃度", hint: "近 30 天指标变更或消费查询（query_log 真实使用信号）" },
+  { key: "quality_score", label: "质量", hint: "合规审核状态 + 近 30 天未关闭质量异常扣分" },
+  { key: "owner_response_score", label: "Owner 响应", hint: "备份 Owner 配置 + 质量告警响应闭环（ack/resolve）" },
+  { key: "lineage_coverage_score", label: "血缘覆盖", hint: "真实血缘边（lineage_edge）+ 口径依赖声明" },
 ];
 
 const LEVEL_META: Record<string, { label: string; color: string; pct: number }> = {
@@ -34,37 +34,76 @@ const MISSING_DIM_LABEL: Record<string, string> = {
   lineage_coverage: "血缘覆盖",
 };
 
-export function HealthCard({ health }: { health: MetricHealth }) {
+/** 悬停弹层统一结构：维度说明 + 指标口径描述。 */
+function descBlock(description?: string | null) {
+  if (!description) return null;
+  return (
+    <div style={{ marginTop: 6, maxWidth: 320 }}>
+      <div className="muted" style={{ fontSize: 12 }}>口径描述</div>
+      <div style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>{description}</div>
+    </div>
+  );
+}
+
+export function HealthCard({
+  health,
+  description,
+}: {
+  health: MetricHealth;
+  description?: string | null;
+}) {
   const meta = LEVEL_META[health.level] ?? LEVEL_META.CRITICAL;
 
   return (
     <div className="gauge-grid" style={{ marginBottom: 16 }}>
-      <div className="gauge-cell" data-accent={meta.pct >= 75 ? "ok" : meta.pct >= 50 ? "warn" : "danger"}>
-        <div className="g-label">健康度</div>
-        <div className="g-value">
-          <Progress
-            type="dashboard"
-            percent={health.score}
-            size={110}
-            strokeColor={meta.pct >= 75 ? "#0E7C86" : meta.pct >= 50 ? "#E8862D" : "#D64545"}
-            format={() => (
-              <span style={{ fontSize: 26, fontWeight: 700 }}>{health.score}</span>
-            )}
-          />
+      <Tooltip
+        title={
+          <div>
+            <div>
+              综合分级：{meta.label}（{health.score}/100）
+            </div>
+            {descBlock(description)}
+          </div>
+        }
+      >
+        <div
+          className="gauge-cell"
+          data-accent={meta.pct >= 75 ? "ok" : meta.pct >= 50 ? "warn" : "danger"}
+        >
+          <div className="g-label">健康度</div>
+          <div className="g-value">
+            <Progress
+              type="dashboard"
+              percent={health.score}
+              size={110}
+              strokeColor={meta.pct >= 75 ? "#0E7C86" : meta.pct >= 50 ? "#E8862D" : "#D64545"}
+              format={() => (
+                <span style={{ fontSize: 26, fontWeight: 700 }}>{health.score}</span>
+              )}
+            />
+          </div>
+          <div className="g-sub">
+            <Tag color={meta.color}>{meta.label}</Tag>
+            <span className="muted">总分 / 100</span>
+          </div>
+          <div className="g-sub" style={{ fontSize: 12 }}>
+            <span className="muted">最近校验：{formatCnTime(health.calculated_at)}</span>
+          </div>
         </div>
-        <div className="g-sub">
-          <Tag color={meta.color}>{meta.label}</Tag>
-          <span className="muted">总分 / 100</span>
-        </div>
-        <div className="g-sub" style={{ fontSize: 12 }}>
-          <span className="muted">最近校验：{formatCnTime(health.calculated_at)}</span>
-        </div>
-      </div>
+      </Tooltip>
 
       {DIMS.map((d) => {
         const value = health[d.key] ?? 0;
         return (
-          <Tooltip key={d.key} title={d.hint}>
+          <Tooltip
+            key={d.key}
+            title={
+              <div>
+                <div>{d.hint}</div>
+                {descBlock(description)}
+              </div>
+            }
+          >
             <div
               className="gauge-cell"
               data-accent={value >= 75 ? "ok" : value >= 50 ? "warn" : "danger"}
