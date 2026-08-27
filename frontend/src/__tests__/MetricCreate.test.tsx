@@ -1527,6 +1527,39 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     );
   });
 
+  it("挂载实体：选源表后度量列下拉自动带出该表列（修复选表后列框为空/残留）", async () => {
+    mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
+    mockedCatalogs.mockResolvedValue({
+      items: [
+        makeCatalog("dwd.sales_detail", [
+          { name: "gmv", type: "decimal" },
+          { name: "order_cnt", type: "bigint" },
+        ]),
+      ],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await goToStep(1);
+    fireEvent.click(screen.getByText("派生指标"));
+    // 挂载实体区（Step① 派生分支）：源表 Select 占位符文本唯一定位
+    const mountTableSel = screen
+      .getByText("源表（如 dwd.sales_detail；未采集的可输入完整表名）")
+      .closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(mountTableSel.querySelector(".ant-select-selector") as HTMLElement);
+    await clickSelectOption("dwd.sales_detail");
+    // 选表后挂载度量列下拉应展示该表列（此前 mount_source_table 无 onChange，列框为空/残留别的表列）
+    const mountColSel = screen
+      .getByText("度量列（可直接输入列名）")
+      .closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(mountColSel.querySelector(".ant-select-selector") as HTMLElement);
+    await waitFor(() => expect(screen.getByText("gmv (decimal)")).toBeTruthy());
+    expect(screen.getByText("order_cnt (bigint)")).toBeTruthy();
+  });
+
   it("原子指标未选逻辑度量且未填口径提交 → 前端拦截并提示来源必填", async () => {
     mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
     renderPage();

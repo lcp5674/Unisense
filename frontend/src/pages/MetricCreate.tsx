@@ -656,6 +656,19 @@ export function MetricCreate() {
     handleAutoSuggest();
   }
 
+  // 挂载实体：选源表后加载该表列（供挂载度量列点选）——此前挂载源表无 onChange，
+  // 导致选表后度量列下拉仍为空/残留别的表列；表变更时清空已选列与搜索词。
+  async function handleMountSrcTableChange(entityName: string) {
+    if (!entityName) {
+      setColumnOptions([]);
+      setMountColumnKw("");
+      return;
+    }
+    await loadColumnsForTable(entityName);
+    setMountColumnKw("");
+    form.setFieldValue("mount_source_column", undefined);
+  }
+
   // 选了度量列后触发自动推断
   function handleColumnSelect(value: string) {
     form.setFieldValue("measure_column", value);
@@ -2257,6 +2270,7 @@ export function MetricCreate() {
                               setMountSrcTableKw(q);
                               handleSrcTableSearch(q);
                             }}
+                            onChange={handleMountSrcTableChange}
                             onOpenChange={handleSrcTableDropdown}
                             loading={srcTableSearchLoading}
                             notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表，可手动输入完整表名"}
