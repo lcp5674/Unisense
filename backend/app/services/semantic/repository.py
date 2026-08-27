@@ -147,6 +147,7 @@ class MetricRepository:
         domain: str | None = None,
         status: str | None = None,
         metric_tier: str | None = None,
+        metric_type: str | None = None,
         keyword: str | None = None,
         owner_id: int | None = None,
         approver_id: int | None = None,
@@ -170,6 +171,7 @@ class MetricRepository:
             domain: 域过滤。
             status: 状态过滤。
             metric_tier: 分级过滤。
+            metric_type: 指标类型过滤（atomic/derived/composite）。
             keyword: 关键词搜索（metric_code/name）。
             owner_id: 责任人（Owner）ID 过滤。
             pii_flag: PII 过滤（True 仅 PII，False 仅非 PII，None 不过滤）。
@@ -215,6 +217,8 @@ class MetricRepository:
             conditions.append(Metric.status == status)
         if metric_tier:
             conditions.append(Metric.metric_tier == metric_tier)
+        if metric_type:
+            conditions.append(Metric.type == metric_type)
         if owner_id is not None:
             conditions.append(Metric.owner_id == owner_id)
         if approver_id is not None:

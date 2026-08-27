@@ -308,6 +308,32 @@ async def test_list_metrics_applies_status_and_tier_filters():
     assert len(items) == 1
 
 
+async def test_list_metrics_filters_by_metric_type():
+    """metric_type 服务端过滤：list_metrics(metric_type='atomic') 生成 Metric.type 等值条件。
+
+    派生指标「绑定基础原子指标」下拉靠此条件在 SQL 层只取原子指标，替代前端页内
+    filter(type)——混合类型不再占满单页导致原子指标漏项。
+    """
+    from sqlalchemy.dialects import mysql
+
+    db = _mock_session()
+    db.execute.side_effect = [
+        _result(scalar=0),
+        _result(all_=[]),
+    ]
+    repo = MetricRepository(db)
+
+    await repo.list_metrics(metric_type="atomic", offset=0, limit=10)
+
+    # 第二个 execute 是列表查询（第一个是 count），编译为 MySQL 方言并内联字面量
+    list_stmt = db.execute.call_args_list[1].args[0]
+    literal_sql = str(
+        list_stmt.compile(dialect=mysql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+    # Metric.type 列（带 metric 表前缀）+ ENUM 值 'atomic' 内联为等值条件
+    assert "metric.type = 'atomic'" in literal_sql
+
+
 async def test_list_metrics_escapes_like_wildcards():
     db = _mock_session()
     db.execute.side_effect = [

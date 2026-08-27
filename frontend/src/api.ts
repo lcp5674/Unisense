@@ -598,6 +598,8 @@ export async function listMetrics(params: {
   domain?: string;
   status?: string;
   metric_tier?: string;
+  /** 指标类型过滤：atomic 原子 / derived 派生 / composite 复合（服务端精确过滤） */
+  metric_type?: "atomic" | "derived" | "composite";
   keyword?: string;
   /** 责任人（Owner）ID 过滤（资产地图 Owner 视图下钻） */
   owner_id?: number;
@@ -625,6 +627,7 @@ export async function listMetrics(params: {
     domain: params.domain,
     status: params.status,
     metric_tier: params.metric_tier,
+    metric_type: params.metric_type,
     keyword: params.keyword,
     owner_id: params.owner_id,
     approver_id: params.approver_id,

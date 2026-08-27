@@ -1525,6 +1525,13 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     await waitFor(() =>
       expect(screen.getByText("日活跃医生数 (active_doctor_daily)")).toBeTruthy(),
     );
+    // 服务端类型过滤：基础原子预加载请求必带 metric_type=atomic（替代前端页内 filter，
+    // 混合类型不再占满单页导致原子指标漏项）
+    await waitFor(() =>
+      expect(mockedMetrics).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "PUBLISHED", metric_type: "atomic" }),
+      ),
+    );
   });
 
   it("挂载实体：选源表后度量列下拉自动带出该表列（修复选表后列框为空/残留）", async () => {

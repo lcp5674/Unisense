@@ -1072,6 +1072,7 @@ class MetricService(BaseService):
             domain=params.domain,
             status=params.status,
             metric_tier=params.metric_tier,
+            metric_type=params.metric_type,
             keyword=params.keyword,
             owner_id=params.owner_id,
             approver_id=params.approver_id,

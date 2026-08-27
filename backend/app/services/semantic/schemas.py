@@ -926,6 +926,12 @@ class MetricListParams(BaseModel):
     domain: str | None = None
     status: str | None = None
     metric_tier: str | None = None
+    # 指标类型过滤（OneData 派生指标「绑定基础原子指标」下拉）：服务端按类型精确
+    # 过滤，前端无需在 ≤100 条页内再 filter(type)——原子指标即便超过单页容量也能靠
+    # 关键词 + 类型条件收敛，不会因混合类型占满页而漏掉原子指标。
+    metric_type: Literal["atomic", "derived", "composite"] | None = Field(
+        None, description="指标类型过滤（atomic 原子 / derived 派生 / composite 复合）"
+    )
     keyword: str | None = None
     # 责任人过滤（资产地图 Owner 视图下钻）
     owner_id: int | None = Field(None, ge=1, description="责任人（Owner）ID 过滤")

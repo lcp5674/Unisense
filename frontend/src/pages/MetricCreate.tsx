@@ -227,19 +227,22 @@ const TYPE_HINTS: Record<MetricType, string> = {
 };
 
 // 取「基础原子指标」绑定选项（OneData：派生 = 基础原子 + 业务限定 + 时间周期）。
-// 只列已发布原子指标；keyword 为空返回全部已发布原子指标，非空按编码/名称模糊匹配。
-// page_size 上限为 100（后端 MetricListParams 约束），避免超界 422；剩余靠关键词搜索收敛。
+// 服务端 metric_type=atomic 精确过滤（无需前端再按类型筛）；keyword 为空返回全部已发布
+// 原子指标，非空按编码/名称/描述模糊匹配。page_size 上限 100（后端约束，避免 422）；
+// 类型过滤后整页都是原子指标，不会被派生/复合占满页而漏项，超量再靠关键词收敛。
 async function fetchBaseAtomicOptions(
   keyword?: string,
 ): Promise<Array<{ value: string; label: string }>> {
   const res = await listMetrics({
     status: "PUBLISHED",
+    metric_type: "atomic",
     keyword: keyword && keyword.trim() ? keyword.trim() : undefined,
     page_size: 100,
   });
-  return (res.items ?? [])
-    .filter((m) => m.type === "atomic")
-    .map((m) => ({ value: m.metric_code, label: `${m.name} (${m.metric_code})` }));
+  return (res.items ?? []).map((m) => ({
+    value: m.metric_code,
+    label: `${m.name} (${m.metric_code})`,
+  }));
 }
 
 export function MetricCreate() {

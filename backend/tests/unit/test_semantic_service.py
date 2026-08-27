@@ -1469,6 +1469,18 @@ async def test_list_metrics_passes_lifecycle_date_filters():
     assert called["updated_before"] == updated_before
 
 
+async def test_list_metrics_passes_metric_type_filter():
+    """metric_type 类型过滤透传（派生指标绑定基础原子指标下拉）：params.metric_type
+    须原样传给 repository，由服务端按 Metric.type 精确过滤（替代前端页内 filter）。"""
+    svc, repo = _svc_with_repo()
+    repo.list_metrics = AsyncMock(return_value=([make_metric()], 1))
+
+    await svc.list_metrics(MetricListParams(metric_type="atomic"))
+
+    called = repo.list_metrics.call_args.kwargs
+    assert called["metric_type"] == "atomic"
+
+
 async def test_is_breaking_change_detection():
     svc, _ = _svc_with_repo()
     old = {"expression": "SUM(a)", "dependencies": ["t1"]}
