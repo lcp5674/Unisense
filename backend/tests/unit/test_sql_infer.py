@@ -518,13 +518,17 @@ class TestParseSqlProfile:
 
     def test_dialect_array_and_bool_aggs_normalized(self) -> None:
         """PG/Spark array_agg、PG bool_and/bool_or、BQ ANY_VALUE、Snow APPROX_TOP_K
-        → 近似计数 COUNT（此前产出非法枚举 ARRAYAGG/LOGICALAND/LOGICALOR/ANYVALUE/
-        APPROXTOPK → 批量创建整批失败）。"""
+        → 归一注册枚举（U-2：array_agg 集合聚合 → COUNT_DISTINCT + needs_review，
+        不再静默降级 COUNT；bool_and/bool_or/ANY_VALUE/APPROX_TOP_K → COUNT，避免
+        非法枚举 ARRAYAGG/LOGICALAND/LOGICALOR/ANYVALUE/APPROXTOPK → 批量整批失败）。"""
         p = parse_sql_profile(
             "SELECT array_agg(user_id) AS uids, bool_and(flag) AS ba, bool_or(flag) AS bo "
             "FROM t GROUP BY dept"
         )
-        assert {m["agg"] for m in p.measures} == {"COUNT"}
+        aggs = {m["agg"] for m in p.measures}
+        assert "COUNT_DISTINCT" in aggs
+        assert "COUNT" in aggs
+        assert any(m.get("needs_review") for m in p.measures if m["column"] == "user_id")
         p2 = parse_sql_profile("SELECT ANY_VALUE(status) AS s FROM t GROUP BY dept")
         assert {m["agg"] for m in p2.measures} == {"COUNT"}
         p3 = parse_sql_profile("SELECT APPROX_TOP_K(status, 5) AS t FROM t GROUP BY dept")
@@ -563,21 +567,25 @@ class TestParseSqlProfile:
         assert "COUNT" in aggs
 
     def test_dialect_collect_and_countbig(self) -> None:
-        """Spark collect_list/collect_set（ArrayAgg/ArrayUniqueAgg）→ COUNT；
+        """Spark collect_list/collect_set（ArrayAgg/ArrayUniqueAgg）→ COUNT_DISTINCT
+        （U-2：集合聚合语义=去重集合，不再静默降级 COUNT）+ needs_review；
         T-SQL COUNT_BIG（tsql 方言 Count 类）→ COUNT（hint 用带下划线函数名才触发择优）。"""
         p = parse_sql_profile(
             "SELECT collect_list(user_id) AS u, collect_set(user_id) AS us FROM t GROUP BY dept"
         )
-        assert {m["agg"] for m in p.measures} == {"COUNT"}
+        assert {m["agg"] for m in p.measures} == {"COUNT_DISTINCT"}
+        assert all(m.get("needs_review") for m in p.measures)
         p2 = parse_sql_profile("SELECT COUNT_BIG(*) AS c FROM t")
         assert {m["agg"] for m in p2.measures} == {"COUNT"}
 
     def test_dialect_listagg_and_groupuniq(self) -> None:
-        """Snow LISTAGG（GroupConcat 类）→ COUNT；CH groupUniqArray → COUNT（hint 触发择优）。"""
+        """Snow LISTAGG（GroupConcat 类）、CH groupUniqArray → COUNT_DISTINCT
+        （U-2：串/数组聚合不再静默降级 COUNT，标记 needs_review）。"""
         p = parse_sql_profile(
             "SELECT LISTAGG(status, ',') AS l, groupUniqArray(user_id) AS u FROM t GROUP BY dept"
         )
-        assert {m["agg"] for m in p.measures} == {"COUNT"}
+        assert {m["agg"] for m in p.measures} == {"COUNT_DISTINCT"}
+        assert all(m.get("needs_review") for m in p.measures)
 
     def test_dialect_stat_aggs_skipped_honestly(self) -> None:
         """T-SQL STDEV/VAR、MySQL STD/STDDEV_POP（Stddev/Variance 类）→ 诚实跳过（空画像），
@@ -713,3 +721,93 @@ class TestParseSqlProfile:
         """A7 反例：纯维度 SELECT（无聚合子查询、无算术派生列）不产出假候选。"""
         p = parse_sql_profile("SELECT a, b, a + b AS c FROM ods.t")
         assert p.measures == [], f"纯维度 SELECT 不应产出度量：{p.measures}"
+
+    def test_union_all_branches_merged(self) -> None:
+        """U-1：顶层 UNION ALL 多源合并——两分支度量 + 两侧源表都保留（此前
+        ast.find(Select) 只取首分支 → measures=0 静默 0 候选）。"""
+        sql = (
+            "select d, sum(amt) as amt from ods.a group by d "
+            "union all "
+            "select d, count(distinct uid) as uv from ods.b group by d"
+        )
+        p = parse_sql_profile(sql)
+        aggs = {(m["agg"], m.get("alias") or m["column"]) for m in p.measures}
+        assert ("SUM", "amt") in aggs
+        assert ("COUNT_DISTINCT", "uv") in aggs
+        assert "ods.a" in p.source_tables and "ods.b" in p.source_tables
+        assert "d" in p.group_by
+
+    def test_correlated_subquery_projection_skipped(self) -> None:
+        """U-3：相关子查询标量（(SELECT max(amt) FROM b WHERE b.d=a.d)）不是分组聚合，
+        跳过——只产出真实投影聚合，不把子查询表混进度量源。"""
+        sql = (
+            "select (select max(amt) from ods.b b where b.d=a.d) as mx, "
+            "sum(amt) as s from ods.a a group by a.d"
+        )
+        p = parse_sql_profile(sql)
+        assert len(p.measures) == 1
+        assert p.measures[0]["agg"] == "SUM"
+        assert p.measures[0]["column"] == "amt"
+
+    def test_coalesce_multi_agg_all_collected(self) -> None:
+        """U-4：coalesce(sum(amt), sum(refund), 0) 的两个聚合参数都收集（此前只取
+        首个且 agg=None，sum(refund) 静默丢失）；单聚合 coalesce 仍按格式包裹。"""
+        p = parse_sql_profile("SELECT coalesce(sum(amt), sum(refund), 0) AS x FROM ods.a")
+        aggs = [m["agg"] for m in p.measures]
+        assert aggs.count("SUM") == 2, f"coalesce 双聚合应 2 个 SUM：{p.measures}"
+        cols = {m["column"] for m in p.measures}
+        assert cols == {"amt", "refund"}
+        # 单聚合 coalesce 不受影响
+        p2 = parse_sql_profile("SELECT coalesce(sum(amt), 0) AS x FROM ods.a")
+        assert [m["agg"] for m in p2.measures] == ["SUM"]
+
+    def test_if_semantic_wrap_released(self) -> None:
+        """U-5：if(sum(amt) is null, 0, sum(amt)) 语义包裹（Case 双分支同一聚合）
+        按格式包裹放行，产出 1 个 SUM 且不重复派生。"""
+        p = parse_sql_profile("SELECT if(sum(amt) is null, 0, sum(amt)) AS x FROM ods.a")
+        assert [m["agg"] for m in p.measures] == ["SUM"], f"{p.measures}"
+
+    def test_window_wrapped_agg_marked_review(self) -> None:
+        """U-6：窗口函数包裹（sum(amt) over(...)）产出但标记 needs_review（非分组
+        聚合语义需人工核对）；普通 SUM 分组聚合不受影响。"""
+        p = parse_sql_profile(
+            "SELECT sum(amt) over (partition by d) AS w, sum(amt) AS s "
+            "FROM ods.a GROUP BY d"
+        )
+        by_alias = {m.get("alias"): m for m in p.measures}
+        assert by_alias["w"]["agg"] == "SUM"
+        assert by_alias["w"].get("needs_review"), "窗口列应标记 needs_review"
+        assert by_alias["s"]["agg"] == "SUM"
+        assert not by_alias["s"].get("needs_review")
+
+    def test_cte_name_excluded_from_source_tables(self) -> None:
+        """U-7：CTE 名不视为物理表——WITH base AS (...) SELECT ... FROM base 的
+        source_tables 只含真实物理表 ods.a，不混入 base。"""
+        p = parse_sql_profile(
+            "WITH base AS (SELECT d, sum(amt) AS amt FROM ods.a GROUP BY d) "
+            "SELECT d, amt FROM base"
+        )
+        assert "base" not in p.source_tables, f"{p.source_tables}"
+        assert "ods.a" in p.source_tables
+
+    def test_pivot_aggregation_extracted(self) -> None:
+        """U-8：PIVOT 展开——SELECT * FROM t PIVOT(SUM(amt)...) 的聚合在 Pivot 节点
+        内部，产出 SUM(amt) 度量 + needs_review（此前 measures=0 完全丢失）。"""
+        p = parse_sql_profile(
+            "SELECT * FROM ods.a PIVOT (sum(amt) FOR d IN ('a','b')) p"
+        )
+        assert len(p.measures) == 1
+        assert p.measures[0]["agg"] == "SUM"
+        assert p.measures[0]["column"] == "amt"
+        assert p.measures[0].get("needs_review")
+        assert "ods.a" in p.source_tables
+
+    def test_grouping_sets_dimensions_extracted(self) -> None:
+        """U-9：GROUPING SETS 分组维度进入 group_by（此前 group.expressions 为空 →
+        维度列丢失；ROLLUP 已支持，补齐对齐）。"""
+        p = parse_sql_profile(
+            "SELECT d, region, sum(amt) FROM ods.a "
+            "GROUP BY GROUPING SETS ((d),(region),(d,region))"
+        )
+        assert "d" in p.group_by
+        assert "region" in p.group_by

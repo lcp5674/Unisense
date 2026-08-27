@@ -666,6 +666,11 @@ def _build_atomic_candidate(
         "CASE" in _expr_upper
         or " OVER " in f" {_expr_upper} "
         or measure.get("sunk")
+        # U-6/U-2/U-8：窗口函数包裹 / 集合串聚合 / PIVOT 展开的度量——语义非普通
+        # 分组聚合，由 _projection_measures/_pivot_measures 标记 needs_review，
+        # 候选据此加「口径需核对」Tag（U-2 集合聚合已归一 COUNT_DISTINCT，PIVOT/
+        # 窗口需人工核对聚合语义）
+        or measure.get("needs_review")
     )
     metric_code = result.get("metric_code_suggestion")
     if metric_code and not domain_code:

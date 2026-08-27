@@ -115,8 +115,10 @@ _COMBINED_AGG_MAP = {
 # - uniqExact/uniq → COUNT_DISTINCT（UV 语义）
 # - quantile/quantileExact/percentile_approx → PERCENTILE（分位数）
 # - argMax/argMin → MAX/MIN（参数化首/末值）
-# - topK/groupArray/stringAgg/groupConcat → COUNT（数组/串聚合，近似计数语义，
-#   候选 source=dialect 前端提示人工复核）
+# - U-2：集合/串聚合（collect_set/collect_list/array_agg/group_concat/listagg/
+#   string_agg/group_uniq_array）→ COUNT_DISTINCT（**去重集合语义**，不再静默降级
+#   为 COUNT——「收集商品集合」≠「统计商品数」；候选带 needs_review 提示人工核对
+#   聚合方式），避免产出语义错误的指标被当成对的创建）
 _DIALECT_AGG_MAP = {
     "uniqexact": "COUNT_DISTINCT",
     "uniq": "COUNT_DISTINCT",
@@ -129,22 +131,37 @@ _DIALECT_AGG_MAP = {
     "argmin": "MIN",
     "topk": "COUNT",
     "topkweighted": "COUNT",
-    "grouparray": "COUNT",
-    "groupconcat": "COUNT",
-    "stringagg": "COUNT",
-    "listagg": "COUNT",
+    "grouparray": "COUNT_DISTINCT",  # U-2：数组聚合（去重集合→去重计数）
+    "groupconcat": "COUNT_DISTINCT",  # U-2：串聚合（字符串连接无枚举→去重计数 + needs_review）
+    "stringagg": "COUNT_DISTINCT",
+    "listagg": "COUNT_DISTINCT",
     "anyif": "COUNT",
     "anylast": "COUNT",          # ClickHouse anyLast（匿名聚合函数名形态）
-    "groupuniqarray": "COUNT",   # ClickHouse groupUniqArray（数组去重→近似计数）
+    "groupuniqarray": "COUNT_DISTINCT",  # U-2：ClickHouse groupUniqArray（数组去重）
     "histogram": "COUNT",        # ClickHouse/Trino histogram（分布桶→近似计数）
     "sumwithoverflow": "SUM",    # ClickHouse sumWithOverflow（溢出不换 SUM 语义）
     "avgweighted": "AVG",        # ClickHouse avgWeighted（加权均值）
     "count_big": "COUNT",        # T-SQL COUNT_BIG（Count 类 key 已合法，兜底函数名形态）
-    "collect_list": "COUNT",     # Spark collect_list（数组聚合→近似计数）
-    "collect_set": "COUNT",      # Spark collect_set（去重数组→近似计数）
+    "collect_list": "COUNT_DISTINCT",  # U-2：Spark collect_list（数组聚合→去重计数）
+    "collect_set": "COUNT_DISTINCT",   # U-2：Spark collect_set（去重数组→去重计数）
     "first": "FIRST_VALUE",      # Spark/Hive first（方言下可能 AnonymousAggFunc）
     "last": "LAST_VALUE",        # Spark/Hive last
-    "arrayagg": "COUNT",         # PG/Spark array_agg（数组聚合→近似计数）
+    "arrayagg": "COUNT_DISTINCT",  # U-2：PG/Spark array_agg（数组聚合→去重计数）
+}
+
+# U-2：集合/串聚合函数（sqlglot key 或方言函数名）——语义非简单计数（「收集商品
+# 集合」≠「统计商品数」），候选映射为 COUNT_DISTINCT（去重集合语义）并标记
+# needs_review 强制人工核对聚合方式，避免静默产出语义错误的指标被当成对的创建。
+_SET_STRING_AGG_KEYS = {
+    "COLLECT_SET",
+    "COLLECT_LIST",
+    "ARRAYAGG",
+    "ARRAYUNIQUEAGG",
+    "GROUPCONCAT",
+    "LISTAGG",
+    "STRINGAGG",
+    "GROUPUNIQARRAY",
+    "GROUPARRAY",
 }
 # 无注册枚举可归一的统计聚合（相关性/协方差/回归/标准差/方差）→ 返回 None 跳过
 # 该度量（诚实不产出非法候选，避免注册失败/口径错误），不崩溃不炸整批。
@@ -208,7 +225,18 @@ def _is_write_target(node: exp.Table) -> bool:
 
 
 def _extract_source_tables(ast: exp.Expr) -> list[str]:
-    """表级血缘：读入源表（INSERT/CREATE TABLE AS/UPDATE/MERGE 的源 + 普通 SELECT FROM）。"""
+    """表级血缘：读入源表（INSERT/CREATE TABLE AS/UPDATE/MERGE 的源 + 普通 SELECT FROM）。
+
+    U-7：CTE 名不视为物理表——``WITH base AS (...) SELECT ... FROM base`` 中
+    ``base`` 被 sqlglot 解析为 ``Table(name='base')``（无 catalog/db），混入
+    source_tables 会让血缘挂到不存在的表；收集 CTE 别名集合二次过滤（同时覆盖
+    带前缀引用形态 ``catalog.base`` 的尾段匹配）。
+    """
+    cte_names = {
+        c.alias_or_name.lower()
+        for c in ast.find_all(exp.CTE)
+        if c.alias_or_name
+    }
     tables: list[str] = []
     for node in ast.walk():
         if isinstance(node, exp.Table):
@@ -217,16 +245,43 @@ def _extract_source_tables(ast: exp.Expr) -> list[str]:
                 continue
             name = _norm_table_name(node)
             if name and name not in tables:
+                # U-7：CTE 名（或全名尾段）命中 → 跳过，不视为物理表
+                if name in cte_names or name.split(".")[-1] in cte_names:
+                    continue
                 tables.append(name)
     return tables
 
 
 def _extract_group_by(select: exp.Select) -> list[str]:
-    """GROUP BY 维度列（含位置序号 ``GROUP BY 1, 2`` → 映射回 SELECT 投影列名）。"""
+    """GROUP BY 维度列（含位置序号 ``GROUP BY 1, 2`` → 映射回 SELECT 投影列名）。
+
+    U-9：GROUPING SETS / ROLLUP / CUBE 分组——sqlglot 把分组集合放
+    ``group.args['grouping_sets']``（``GroupingSets`` 节点，expressions 是
+    ``Tuple`` 列表，每个 Tuple 含一或多个维度列），普通维度在
+    ``group.expressions``。GROUPING SETS 的维度应进入 group_by 供周期/维度
+    推断（此前 group.expressions 为空 → 维度列整体丢失，与 ROLLUP 行为不一致）。
+    """
     group = select.args.get("group")
     if not group:
         return []
     cols: list[str] = []
+
+    def _append_column(expr: exp.Expr) -> None:
+        if isinstance(expr, exp.Column):
+            cols.append(expr.name.lower())
+        else:
+            for col in expr.walk():
+                if isinstance(col, exp.Column):
+                    cols.append(col.name.lower())
+                    break
+
+    # U-9：GROUPING SETS / ROLLUP / CUBE 的维度列（从 Tuple 分组集合展开）
+    gs = group.args.get("grouping_sets")
+    if gs:
+        for sets_node in gs:
+            for tup in sets_node.expressions:
+                for item in tup.expressions if isinstance(tup, exp.Tuple) else [tup]:
+                    _append_column(item)
     projections = select.expressions
     for expr in group.expressions:
         # 位置序号 GROUP BY 1 → SELECT 投影第 1 列（Postgres/Trino/Oracle 惯用写法；
@@ -381,13 +436,13 @@ def _agg_display_name(agg: exp.AggFunc) -> str | None:
         return "LAST_VALUE"
     if key.startswith("PERCENTILE"):
         return "PERCENTILE"
-    # 数组/布尔/任意值聚合类（sqlglot 内置子类，key 无下划线）：array_agg→COUNT、
-    # bool_and/bool_or→COUNT、any()/arbitrary()/ANY_VALUE→COUNT、APPROX_TOP_K→COUNT、
-    # collect_set→COUNT——均按「近似计数语义」归一到注册枚举，否则产出非法枚举
-    # （ARRAYAGG/LOGICALAND/LOGICALOR/ANYVALUE/APPROXTOPK/ARRAYUNIQUEAGG）导致
-    # 批量创建整批失败（P1-4 同类缺陷）。
+    # 数组/布尔/任意值聚合类（sqlglot 内置子类，key 无下划线）：array_agg→COUNT_DISTINCT
+    # （U-2：数组聚合=去重集合语义，不再静默降级 COUNT）、bool_and/bool_or→COUNT、
+    # any()/arbitrary()/ANY_VALUE→COUNT、APPROX_TOP_K→COUNT——均按「近似计数语义」
+    # 归一到注册枚举，否则产出非法枚举（ARRAYAGG/LOGICALAND/LOGICALOR/ANYVALUE/
+    # APPROXTOPK/ARRAYUNIQUEAGG）导致批量创建整批失败（P1-4 同类缺陷）。
     if key in ("ARRAYAGG", "ARRAYUNIQUEAGG"):
-        return "COUNT"
+        return "COUNT_DISTINCT"
     if key in ("LOGICALAND", "LOGICALOR"):
         return "COUNT"
     if key == "ANYVALUE":
@@ -460,6 +515,32 @@ def _is_wrapped_aggregate(target: exp.Expr) -> bool:
     if not aggs:
         return False
     if len(aggs) > 1:
+        # U-5：IF/CASE 语义包裹（``if(sum(amt) is null, 0, sum(amt))`` 解析为
+        # Case/If）的多个分支引用**同一聚合**（同 key + 同参数列）——本质是
+        # 默认值/格式兜底而非聚合组合，放行（与单聚合同语义，如「金额合计，
+        # 空置 0」）；不同聚合参数（``coalesce(sum(amt), sum(refund), 0)``）
+        # 由 U-4 独立收集，此处仍视为组合不重复产出。
+        if isinstance(target, (exp.If, exp.Case)):
+            first_key = aggs[0].key.upper()
+            first_col = _extract_col_name(
+                aggs[0].this.expressions[0]
+                if isinstance(aggs[0].this, exp.Distinct) and aggs[0].this.expressions
+                else aggs[0].this
+            )
+            if all(
+                a.key.upper() == first_key
+                and _extract_col_name(
+                    a.this.expressions[0]
+                    if isinstance(a.this, exp.Distinct) and a.this.expressions
+                    else a.this
+                )
+                == first_col
+                for a in aggs
+            ):
+                return not any(
+                    isinstance(n, (exp.Div, exp.Mul, exp.Add, exp.Sub, exp.Mod))
+                    for n in target.walk()
+                )
         return False
     # 单聚合且表达式内无算术组合节点（Div/Mul/Add/Sub/Mod）→ 纯格式包裹/条件聚合
     return not any(
@@ -494,11 +575,56 @@ def _projection_measures(
     measures: list[dict[str, Any]] = []
     for projection in select.expressions:
         target = projection.this if isinstance(projection, exp.Alias) else projection
+        # U-3：相关/标量子查询投影（``(SELECT max(amt) FROM ods.b b WHERE b.d=a.d) mx``）
+        # 不是当前 GROUP BY 的分组聚合——``target.find(exp.AggFunc)`` 会误取内层 MAX
+        # 产出错误聚合候选 + 把子查询表混进源表。跳过（标量子查询属过滤/派生语义，
+        # 由 _collect_derived_measures 按需收集）。
+        if isinstance(target, exp.Subquery):
+            continue
         # 裸聚合投影（P0-B）：非 Alias/Column 但本身是聚合函数（sum/count 等）
         if not isinstance(projection, exp.Alias) and not isinstance(projection, exp.Column):
             if not isinstance(target, exp.AggFunc):
                 continue
             projection = exp.alias_(target, f"_col_{len(measures) + 1}")
+        # U-4：COALESCE 多参数含多个聚合（``coalesce(sum(amt), sum(refund), 0)``）——
+        # 每个聚合参数都是独立度量（回退/兜底口径），全部收集而非只取首个（此前
+        # 只取第一个 sum(amt) 且 agg=None，sum(refund) 静默丢失）；单聚合 coalesce
+        # （``coalesce(sum(amt),0)``）已由 _is_wrapped_aggregate 按格式包裹处理
+        if isinstance(target, exp.Coalesce):
+            # 聚合参数须用 walk() 收集——sqlglot 把首个聚合解析到 Coalesce.this、
+            # 其余在 expressions（``coalesce(sum(amt), sum(refund), 0)`` 的
+            # expressions 只剩 ``[Sum(SUM(refund)), Literal(0)]``）
+            agg_args = [n for n in target.walk() if isinstance(n, exp.AggFunc)]
+            if len(agg_args) > 1:
+                for i, aagg in enumerate(agg_args):
+                    an = _agg_display_name(aagg)
+                    if an is None:
+                        continue
+                    acol_expr = aagg.this
+                    if isinstance(acol_expr, exp.Distinct):
+                        an = "COUNT_DISTINCT"
+                        acol_expr = (
+                            acol_expr.expressions[0] if acol_expr.expressions else None
+                        )
+                    am: dict[str, Any] = {
+                        "column": _extract_col_name(acol_expr),
+                        "agg": an,
+                    }
+                    if enrich:
+                        am["alias"] = (
+                            f"{projection.alias_or_name}_{i + 1}"
+                            if isinstance(projection, exp.Alias)
+                            and projection.alias_or_name
+                            else None
+                        )
+                        am["table"] = _measure_table(select, aagg) or table
+                        am["sunk"] = sunk
+                        try:
+                            am["expression"] = aagg.sql()
+                        except Exception:  # noqa: BLE001 - 序列化失败仅降级简化式
+                            am["expression"] = f"{an}({am['column']})"
+                    measures.append(am)
+                continue
         agg = target.find(exp.AggFunc) if target else None
         if agg is None:
             continue
@@ -551,6 +677,19 @@ def _projection_measures(
                 measure["expression"] = target.sql()
             except Exception:  # noqa: BLE001 - 序列化失败仅降级简化式
                 measure["expression"] = f"{agg_name}({col_name})"
+        # U-6/U-2：窗口函数包裹（``sum(amt) OVER (...)``，窗口计算非 GROUP BY 聚合）
+        # 或集合/串聚合（collect_set/group_concat 等）——语义非普通分组聚合，候选
+        # 标记需人工核对，避免用户误以为全表/分组聚合而直接注册
+        if enrich and target.find(exp.Window) is not None:
+            measure["needs_review"] = True
+        if enrich:
+            _agg_fn = (
+                str(getattr(agg, "this", "")).upper()
+                if isinstance(getattr(agg, "this", ""), str)
+                else agg.key.upper()
+            )
+            if _agg_fn in _SET_STRING_AGG_KEYS:
+                measure["needs_review"] = True
         measures.append(measure)
     return measures
 
@@ -624,6 +763,10 @@ def _collect_derived_measures(select: exp.Select) -> list[dict[str, Any]]:
                 }
             )
             continue
+        # U-4：COALESCE 多聚合参数（``coalesce(sum(amt), sum(refund), 0)``）——
+        # 已由 _projection_measures 逐参数独立收集，此处不重复产出派生候选
+        if isinstance(target, exp.Coalesce) and len(aggs) > 1:
+            continue
         # 单聚合 + 纯格式化包裹/条件过滤（IFNULL(SUM(x),0)/ROUND(SUM(x),2)/
         # COALESCE(COUNT(DISTINCT CASE...),0)）：仍是该聚合本身，已由
         # _projection_measures 捕获，不重复产出派生候选（CASE/IF 是聚合内部
@@ -634,6 +777,28 @@ def _collect_derived_measures(select: exp.Select) -> list[dict[str, Any]]:
                 for n in target.walk()
             )
             if not combined:
+                continue
+        elif isinstance(target, (exp.If, exp.Case)):
+            # U-5：IF/CASE 语义包裹多个分支引用同一聚合（``if(sum(amt) is null,
+            # 0, sum(amt))`` 解析为 Case，两个分支都是 sum(amt)）——是单聚合的
+            # 格式/默认值包裹，已由 _projection_measures 作为独立聚合捕获，
+            # 此处不重复产出派生候选（与 _is_wrapped_aggregate 判定一致）
+            first_key = aggs[0].key.upper()
+            first_col = _extract_col_name(
+                aggs[0].this.expressions[0]
+                if isinstance(aggs[0].this, exp.Distinct) and aggs[0].this.expressions
+                else aggs[0].this
+            )
+            if all(
+                a.key.upper() == first_key
+                and _extract_col_name(
+                    a.this.expressions[0]
+                    if isinstance(a.this, exp.Distinct) and a.this.expressions
+                    else a.this
+                )
+                == first_col
+                for a in aggs
+            ):
                 continue
         col = next(
             (c.name.lower() for c in target.walk() if isinstance(c, exp.Column)), "*"
@@ -655,6 +820,40 @@ def _collect_derived_measures(select: exp.Select) -> list[dict[str, Any]]:
     return out
 
 
+def _pivot_measures(select: exp.Select) -> list[dict[str, Any]]:
+    """U-8：PIVOT 展开的聚合度量提取。
+
+    ``SELECT * FROM ods.a PIVOT(SUM(amt) FOR d IN (...))`` 的聚合在 Pivot 节点
+    内部（``args['expressions']`` = ``[Sum(amt)]``），``*`` 投影找不到 AggFunc →
+    measures=0（此前 PIVOT 完全丢失，连源表也因 walk 异常被误判为空）。从 Pivot
+    聚合表达式提取度量：PIVOT 展开为宽表，聚合方式/口径需人工核对（needs_review）。
+    """
+    out: list[dict[str, Any]] = []
+    for pv in select.find_all(exp.Pivot):
+        for aagg in pv.args.get("expressions") or []:
+            if not isinstance(aagg, exp.AggFunc):
+                continue
+            an = _agg_display_name(aagg)
+            if an is None:
+                continue
+            col_expr = aagg.this
+            if isinstance(col_expr, exp.Distinct):
+                an = "COUNT_DISTINCT"
+                col_expr = col_expr.expressions[0] if col_expr.expressions else None
+            out.append(
+                {
+                    "column": _extract_col_name(col_expr),
+                    "agg": an,
+                    "alias": None,
+                    "table": _measure_table(select, aagg) or _from_table(select),
+                    "sunk": False,
+                    "needs_review": True,
+                    "expression": f"{an}({_extract_col_name(col_expr)}) [PIVOT 展开]",
+                }
+            )
+    return out
+
+
 def _extract_measures(select: exp.Select) -> list[dict[str, Any]]:
     """SELECT 投影度量；外层无聚合时下沉 FROM 子树找聚合投影。
 
@@ -672,7 +871,13 @@ def _extract_measures(select: exp.Select) -> list[dict[str, Any]]:
     决定，避免顶层 measure 误挂 CTE 名）且 ``sunk=False``（编码锚点用真实列）。
     **P0-3d**：顶层聚合承载时额外收集派生比率/条件列（``_collect_derived_measures``）。
     """
+    # U-8：PIVOT 展开的聚合度量（SELECT * FROM t PIVOT(SUM(amt)...) 的聚合在 Pivot
+    # 节点内部而非 SELECT 投影——``*`` 投影找不到 AggFunc → measures=0）；顶层
+    # 投影无度量时用 PIVOT 度量（有普通投影聚合时正常走投影收集，PIVOT 不重复产）
+    pivot_measures = _pivot_measures(select)
     top_aggs = _projection_measures(select, enrich=True, table=None, sunk=False)
+    if pivot_measures and not top_aggs:
+        top_aggs = pivot_measures
     # P0-3d/A7：**无条件**收集派生投影（比率/条件聚合 + 引用已命名聚合列的算术
     # 派生列）——外层宽表透传形态（``select ... all_order_cnt, a-b-c AS d from
     # (聚合子查询)``）外层无聚合（top_aggs 空）但含算术派生列，此前派生收集只在
@@ -1007,6 +1212,57 @@ def _parse_profile_ast(sql: str) -> exp.Expr | None:
     return ast if ast is not None else None
 
 
+def _profile_from_union(ast: exp.Union, sql: str) -> SqlProfile:
+    """U-1：顶层 UNION ALL/UNION 多源合并画像。
+
+    ``SELECT d,sum(amt) FROM a GROUP BY d UNION ALL SELECT d,count(DISTINCT uid)
+    FROM b GROUP BY d`` 是「线上+线下合并」「多子公司合并」等工业最常见的多源表
+    形态——此前 ``ast.find(exp.Select)`` 只取第一个分支且 Union 顶层被跳过 →
+    measures=[] 静默 0 候选（用户误以为 SQL 有问题）。遍历所有 Select 分支合并
+    度量（去重键 alias/column/agg/table，与下沉去重对齐），源表已由
+    ``_extract_source_tables``（walk 遍历 Union 两侧）收集，group_by 取首个有
+    分组的分支，时间粒度/列取首个分支推断。
+    """
+    branches = list(ast.find_all(exp.Select))
+    if not branches:
+        return SqlProfile(sql=sql.strip())
+    measures: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str | None]] = set()
+    for b in branches:
+        for m in _projection_measures(
+            b, enrich=True, table=_from_table(b), sunk=True
+        ):
+            key = (m["alias"] or m["column"], m["agg"], m.get("table"))
+            if key in seen:
+                continue
+            seen.add(key)
+            measures.append(m)
+    group_by: list[str] = []
+    for b in branches:
+        g = _extract_group_by(b)
+        if g:
+            group_by = g
+            break
+    filters: list[str] = []
+    for b in branches:
+        fs = _extract_filters(b)
+        if fs:
+            filters = fs
+            break
+    head = branches[0]
+    time_column = _detect_time_column(head, group_by, filters)
+    time_granularity = _detect_time_granularity(head)
+    return SqlProfile(
+        source_tables=_extract_source_tables(ast),
+        group_by=group_by,
+        measures=measures,
+        filters=filters,
+        time_column=time_column,
+        time_granularity=time_granularity,
+        sql=sql,
+    )
+
+
 def parse_sql_profile(sql: str) -> SqlProfile:
     """解析指标 SQL 为画像。
 
@@ -1027,6 +1283,10 @@ def parse_sql_profile(sql: str) -> SqlProfile:
         return SqlProfile(sql=sql.strip())
 
     select = ast
+    if isinstance(ast, exp.Union):
+        # U-1：顶层 UNION ALL/UNION 多源合并——遍历全部分支合并度量（见
+        # _profile_from_union），不再只取第一个分支
+        return _profile_from_union(ast, sql.strip())
     if isinstance(ast, (exp.Insert, exp.Create, exp.Update, exp.Merge)):
         # 取源查询（CTAS / INSERT INTO ... SELECT）
         sub = ast.find(exp.Select)

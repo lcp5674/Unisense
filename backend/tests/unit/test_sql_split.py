@@ -1804,3 +1804,33 @@ async def test_infer_sql_batch_derived_arithmetic_deps_and_auto_composite() -> N
         synthesize_composite=False,
     )
     assert any(c["type"] == "composite" for c in result2["candidates"]), "含运算应自动合成复合"
+
+
+async def test_infer_sql_batch_union_and_set_agg_needs_review() -> None:
+    """U-1/U-2 完整链路：顶层 UNION 合并候选 + 集合聚合候选带 needs_review（不
+    再静默降级 COUNT、不再只取首分支）。"""
+    # U-1 顶层 UNION ALL → 两分支候选都产出
+    r1 = await infer_sql_batch(
+        _fake_db(),
+        sql=(
+            "select d, sum(amt) as amt from ods.a group by d "
+            "union all "
+            "select d, count(distinct uid) as uv from ods.b group by d"
+        ),
+        split_mode="statement",
+        domain_code="sales",
+    )
+    keys = [c["key"] for c in r1["candidates"]]
+    assert any("amt" in k for k in keys), f"UNION 首分支度量应产出：{keys}"
+    assert any("uv" in k for k in keys), f"UNION 次分支度量应产出：{keys}"
+    # U-2 集合聚合 → COUNT_DISTINCT + needs_review
+    r2 = await infer_sql_batch(
+        _fake_db(),
+        sql="select collect_set(product) as ps, count(1) as c from ods.a",
+        split_mode="statement",
+        domain_code="sales",
+    )
+    by_key = {c["key"]: c for c in r2["candidates"]}
+    ps = next(c for k, c in by_key.items() if "ps" in k)
+    assert ps["aggregation"] == "COUNT_DISTINCT", f"集合聚合应 COUNT_DISTINCT：{ps['aggregation']}"
+    assert ps.get("needs_review"), "集合聚合候选应带口径需核对标识"
