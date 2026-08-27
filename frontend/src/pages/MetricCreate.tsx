@@ -2131,6 +2131,18 @@ export function MetricCreate() {
             // 同步指标类型到 state（覆盖 Segmented 点击/域默认预填/推断回填等所有写入路径；
             // 见 metricType 声明——useWatch 跨步骤卸载后失效，须由 state 持有）
             if ("type" in changed) setMetricType(changed.type as MetricType);
+            // 用户手动修改被推断字段的值 → 清除该字段徽标（徽标只标记「值来自自动推断」；
+            // 程序回填 applySuggestion 经 setFieldsValue 写入的值与推断值一致，不会误清——
+            // 见 applySuggestion；用户改回推断值同样保留徽标，因值确实等于推断结果）
+            for (const [key, val] of Object.entries(changed)) {
+              setInferred((prev) => {
+                const sf = prev[key];
+                if (!sf || sf.value === val) return prev;
+                const next = { ...prev };
+                delete next[key];
+                return next;
+              });
+            }
           }}
           initialValues={{
           type: "atomic", granularity: "day", aggregation: "SUM",

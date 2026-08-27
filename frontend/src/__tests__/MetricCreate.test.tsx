@@ -1835,6 +1835,57 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     );
     expect(mockedCreate).not.toHaveBeenCalled();
   });
+
+  it("推断徽标：选域自动回填后字段显示来源徽标（程序回填不误清）", async () => {
+    mockedSuggest.mockResolvedValue({
+      metric_code_suggestion: "sales_gmv_day",
+      segments: { domain: "sales", biz_object: "order", measure: "gmv", period: "day" },
+      fields: {
+        name: { value: "订单销售额", source: "sql_parse", confidence: 0.8, reason: "SQL 解析名称" },
+        additivity: { value: "SEMI_ADDITIVE", source: "rule", confidence: 0.6, reason: "按域默认规则" },
+      },
+      definition_json: null,
+      definition_mode: null,
+    } as never);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await goToStep(1);
+    // 名称徽标出现（来源=SQL解析，置信度 80%）
+    await waitFor(() => expect(screen.getByText(/SQL解析 · 80%/)).toBeTruthy());
+    // 展开高级治理设置：可加性徽标（规则 · 60%）也出现
+    fireEvent.click(screen.getByText(/高级治理设置/));
+    await waitFor(() => expect(screen.getByText(/规则 · 60%/)).toBeTruthy());
+    // 未做任何手动修改：两个徽标均保留（程序回填不清徽标——防回归）
+    expect(screen.getByText(/SQL解析 · 80%/)).toBeTruthy();
+    expect(screen.getByText(/规则 · 60%/)).toBeTruthy();
+  });
+
+  it("推断徽标：手动修改被推断字段的值 → 仅该字段徽标清除（值被覆盖，徽标不再准确）", async () => {
+    mockedSuggest.mockResolvedValue({
+      metric_code_suggestion: "sales_gmv_day",
+      segments: { domain: "sales", biz_object: "order", measure: "gmv", period: "day" },
+      fields: {
+        name: { value: "订单销售额", source: "sql_parse", confidence: 0.8, reason: "SQL 解析名称" },
+        additivity: { value: "SEMI_ADDITIVE", source: "rule", confidence: 0.6, reason: "按域默认规则" },
+      },
+      definition_json: null,
+      definition_mode: null,
+    } as never);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await goToStep(1);
+    await waitFor(() => expect(screen.getByText(/SQL解析 · 80%/)).toBeTruthy());
+    fireEvent.click(screen.getByText(/高级治理设置/));
+    await waitFor(() => expect(screen.getByText(/规则 · 60%/)).toBeTruthy());
+    // 手动修改名称（改成与推断值不同的值）
+    fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "自定义销售名称" } });
+    // 名称徽标消失（值已被用户覆盖）
+    await waitFor(() => expect(screen.queryByText(/SQL解析 · 80%/)).toBeNull());
+    // 未被修改的可加性徽标保留
+    expect(screen.getByText(/规则 · 60%/)).toBeTruthy();
+  });
 });
 
 describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数仓SQL口径）", () => {
