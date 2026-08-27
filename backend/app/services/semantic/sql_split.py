@@ -613,6 +613,7 @@ def _build_atomic_candidate(
     raw_sql: str | None = None,
     column_comments: dict[str, dict[str, str]] | None = None,
     comment_table: str | None = None,
+    group_by: list[str] | None = None,
 ) -> dict[str, Any]:
     """构建原子候选：expression 模式推断（勿传多度量原 SQL，避免兄弟度量进口径），
     聚合方式覆盖为 SQL 解析值（比列名规则更可靠）。
@@ -740,6 +741,12 @@ def _build_atomic_candidate(
         cand_type = "derived"
     else:
         cand_type = "atomic"
+    # 关联维度候选：GROUP BY 中的非时间分组键（hosp_code/enter_source 等）——
+    # SQL 智能推断维度回填（此前候选无 dimensions 字段，关联维度纯手动）。
+    # 提取规则见 sql_infer.extract_dimension_columns（宽松过滤，仅剔时间形态）。
+    from app.services.semantic.sql_infer import extract_dimension_columns
+
+    dimensions = extract_dimension_columns(group_by or [], time_column)
     return {
         "key": f"{idx}:{alias or col}",
         "metric_code": metric_code,
@@ -747,6 +754,8 @@ def _build_atomic_candidate(
         "type": cand_type,
         "source_table": measure_table,
         "measure_column": col,
+        # 关联维度候选（GROUP BY 非时间键；前端预填「关联维度」多选，可增删）
+        "dimensions": dimensions,
         # 派生比率/条件列（P0-3d）：聚合占位 None——前端展示「派生表达式」而非
         # 伪装成标准聚合；批量创建 Phase1 用 ``or "SUM"`` 占位（口径由 expression
         # 承载），与复合指标占位语义一致
@@ -1238,7 +1247,12 @@ def _apply_candidate_annotations(
                 continue
         name = ann.get("name")
         if name:
-            cand["name"] = name[:128]
+            # 名称净化：LLM 可能把名称包成 JSON 字符串（{"name": "..."}），统一解析
+            from app.services.llm.parse import clean_llm_text_field
+
+            cleaned_name = clean_llm_text_field(name)
+            if cleaned_name:
+                cand["name"] = cleaned_name[:128]
         period = ann.get("period")
         if period and period != cand.get("period"):
             _apply_candidate_period(cand, period)
@@ -1553,6 +1567,7 @@ async def infer_sql_batch(
                 raw_sql=rec["seg"],
                 column_comments=column_comments,
                 comment_table=comment_table,
+                group_by=rec["profile"].group_by,
             )
             atoms.append(atom)
             _push_candidate(idx, atom)

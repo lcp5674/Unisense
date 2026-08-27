@@ -1983,3 +1983,29 @@ async def test_infer_sql_batch_builds_client_once() -> None:
         )
         assert mk_build.call_count == 1, "client 应只构建一次（各兜底复用）"
 
+
+
+def test_infer_sql_batch_sunk_candidate_carries_dimensions() -> None:
+    """A 增强：下沉场景（INSERT 包裹）候选携带 GROUP BY 非时间键维度。
+
+    此前顶层 select 无 GROUP BY（透传投影）→ profile.group_by 恒空 → 候选无
+    dimensions；修复后从含聚合子查询补提 group_by，维度（hosp_code/enter_source）
+    回填候选，供前端「关联维度」预填。
+    """
+    sql = """
+    insert overwrite table wedw_dws.doctor_active_month_di
+    select a.month_id, a.hosp_code, a.enter_source, a.current_month_active_doctor_cnt
+    from (
+        select substr(create_date,1,7) as month_id, hosp_code, enter_source,
+               count(distinct doctor_code) as current_month_active_doctor_cnt
+        from wedw_dw.doctor_visit_agent_info_da
+        group by substr(create_date,1,7), hosp_code, enter_source
+    ) a
+    """
+    res = asyncio.run(infer_sql_batch(None, sql=sql))
+    cands = res["candidates"]
+    assert cands, "应产出候选"
+    for c in cands:
+        assert set(c.get("dimensions") or []) == {"hosp_code", "enter_source"}, (
+            f"候选应携带 GROUP BY 非时间键维度: {c.get('dimensions')}"
+        )

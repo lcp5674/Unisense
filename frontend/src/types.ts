@@ -2868,6 +2868,9 @@ export interface AutoSuggestResponse {
   /** 逻辑度量推荐（信息最大化）：按度量列名匹配已发布逻辑度量目录，供原子指标
    *  一键继承 measure_id。尽力而为——无匹配为空数组，不阻断推断。 */
   measure_suggestions?: MeasureSuggestion[];
+  /** 关联维度候选：GROUP BY 非时间分组键（hosp_code/enter_source 等），
+   *  回填主表单「关联维度」（可增删），提交合入 definition_json.dimensions */
+  dimensions?: string[];
 }
 
 /** SQL 推断推荐的逻辑度量候选（OneData 原子层继承源：原子指标 = 逻辑度量 + 基础统计粒度（日））。 */
@@ -2959,6 +2962,9 @@ export interface SqlBatchCandidate {
   source?: "rule" | "llm" | null;
   /** A-1/2：CASE/窗口/下沉子查询口径需人工核对（expression 非简单 SUM(col)） */
   needs_review?: boolean;
+  /** 关联维度候选：GROUP BY 非时间分组键（hosp_code/enter_source 等），
+      前端预填「关联维度」多选（可增删），提交合入 definition_json.dimensions */
+  dimensions?: string[] | null;
   /** A7：引用已命名聚合列的算术派生候选——被引用的聚合别名（后端已解析为
       dependencies 原子编码；该字段保留源别名供展示/诊断） */
   deps_aliases?: string[] | null;

@@ -1445,6 +1445,32 @@ def _detect_time_column(
     return None
 
 
+def extract_dimension_columns(group_by: list[str], time_column: str | None) -> list[str]:
+    """从 GROUP BY 列中提取维度列（排除时间列/时间表达式）。
+
+    供 SQL 智能推断候选「关联维度」回填：GROUP BY 中的非时间分组键即指标的
+    维度候选（如 ``hosp_code``/``enter_source``）。过滤刻意宽松——只剔除明确的
+    时间形态（精确命中 ``time_column``、含时间 hint/粒度别名、或时间函数包裹），
+    真实业务维度列一律保留（误剔除可编辑性差，宽松更安全）。
+    """
+    if not group_by:
+        return []
+    out: list[str] = []
+    tc = (time_column or "").lower()
+    for g in group_by:
+        gl = g.lower().strip()
+        if not gl or (tc and gl == tc):
+            continue
+        if any(token in gl for token in _TIME_COLUMN_HINTS):
+            continue
+        if any(alias in gl for alias, _ in _TIME_GRAIN_ALIAS):
+            continue
+        if any(fn in gl for fn in ("substr(", "date_format(", "trunc(", "date_trunc(")):
+            continue
+        out.append(g)
+    return out
+
+
 # 方言特有聚合函数名（文本命中才遍历方言择优——避免普通 SQL 每条全方言解析的性能损耗）。
 # 注意函数名带下划线的（COUNT_BIG/collect_list/collect_set/approx_percentile）必须用
 # 真实下划线形式，否则默认方言成功解析（降级非 AggFunc）时 hint 不命中 → 不触发择优
@@ -1703,9 +1729,31 @@ def parse_sql_profile(sql: str) -> SqlProfile:
         source_tables.remove(main)
         source_tables.insert(0, main)
     group_by = _extract_group_by(select)
+    # A 增强（下沉场景）：INSERT ... SELECT 包裹时，顶层 select 常是无 GROUP BY 的
+    # 透传投影（``select a.month_id, a.hosp_code ... from (聚合子查询) a``），真正的
+    # 分组键在含聚合的子查询里——顶层无分组时从聚合层补提 group_by
+    #（关联维度回填/粒度推断依赖它；此前恒空导致下沉 SQL 的维度/时间列无法提取）。
+    if not group_by:
+        for cand in ast.find_all(exp.Select):
+            if cand is select:
+                continue
+            g = _extract_group_by(cand)
+            if g:
+                group_by = g
+                break
     measures = _extract_measures(select)
     filters = _extract_filters(select)
     time_column = _detect_time_column(select, group_by, filters)
+    # A 增强：下沉场景顶层无时间列时从聚合层补提（与 group_by 同源——时间列常与
+    # 分组键同处聚合子查询，顶层透传投影看不到投影别名时间列）。
+    if not time_column and group_by:
+        for cand in ast.find_all(exp.Select):
+            if cand is select:
+                continue
+            tc = _detect_time_column(cand, group_by, _extract_filters(cand))
+            if tc:
+                time_column = tc
+                break
     time_granularity = _detect_time_granularity(select)
     return SqlProfile(
         source_tables=source_tables,

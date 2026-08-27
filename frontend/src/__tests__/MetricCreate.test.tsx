@@ -2076,6 +2076,7 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
         granularity: "day",
         definition_json: { expression: "COUNT(DISTINCT user_id)" },
         definition_mode: "expression",
+        dimensions: ["hosp_code", "enter_source"],
         statement_index: 0,
       },
       {
@@ -2150,6 +2151,24 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     expect(screen.getAllByText("聚合").length).toBeGreaterThan(0);
     expect(screen.getAllByText("关联逻辑度量").length).toBeGreaterThan(0);
     expect(screen.getAllByText("指标编码").length).toBeGreaterThan(0);
+  });
+
+  it("批量解析：候选「关联维度」预填 GROUP BY 推断维度（A 增强，可编辑）", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await openBatchMode();
+
+    // 候选卡片字段区有「关联维度」标签（所有类型候选共用）
+    expect(screen.getAllByText("关联维度").length).toBeGreaterThan(0);
+    // 预填的维度（后端从 GROUP BY 非时间键回填）以多选 Tag 呈现
+    await waitFor(() => {
+      const select = document.querySelector(
+        '[data-testid="sql-batch-dims-0:user_id"]',
+      ) as HTMLElement;
+      expect(select).toBeTruthy();
+      expect(select.textContent || "").toContain("hosp_code");
+      expect(select.textContent || "").toContain("enter_source");
+    });
   });
 
   it("批量解析：粘贴大段 SQL → 解析候选 → 默认勾选原子 + 复合行带发布提示", async () => {

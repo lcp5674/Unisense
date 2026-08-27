@@ -83,12 +83,47 @@ def parse_json_object(raw: str) -> dict[str, Any] | None:
     return parsed
 
 
+def clean_llm_text_field(raw: Any) -> str | None:
+    """清理 LLM 返回的单字段文本：若形如 JSON 对象（``{`` 开头），二次解析并提取
+    ``name/metric_name/title/value`` 字段；普通文本/数字原样返回。
+
+    背景（SQL 智能推断「名称是 json」缺陷）：部分 LLM 在"只返回名称本身"的指令下
+    仍把答案包成 JSON 字符串（如 ``{"metric_name": "月活"}``），解析层此前只做
+    ``strip("'\\"")``，导致名称原样显示成 json 文本。本函数刻意宽松：非 ``{`` 开头
+    直接原样返回（不误伤正常中文名）；``{`` 开头但解析失败/无目标字段也原样返回。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return str(raw).strip() or None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+        except (ValueError, TypeError):
+            return text
+        if isinstance(parsed, dict):
+            for key in ("name", "metric_name", "title", "value"):
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    return str(value).strip()
+    return text
+
+
 def extract_str_field(obj: dict[str, Any], *aliases: str) -> str | None:
-    """按别名顺序抽取首个非空字符串字段；数字也会转为文本兜底。"""
+    """按别名顺序抽取首个非空字符串字段；数字也会转为文本兜底。
+
+    抽取结果统一过 ``clean_llm_text_field``——LLM 结构化输出中单字段可能被 JSON
+    字符串包装（如名称），此处二次净化，普通文本原样返回（不改变既有行为）。
+    """
     for key in aliases:
         value = obj.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            return clean_llm_text_field(value)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             text = str(value).strip()
             if text:

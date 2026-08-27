@@ -784,6 +784,7 @@ export function MetricCreate() {
       related_tables?: string[];
       source_tables?: string[];
       downstream_tables?: string[];
+      dimensions?: string[];
     };
     const upstream = Array.isArray(sugg.source_tables)
       ? sugg.source_tables
@@ -795,6 +796,10 @@ export function MetricCreate() {
     }
     if (Array.isArray(sugg.downstream_tables) && sugg.downstream_tables.length > 0) {
       setDownstreamTables((prev) => Array.from(new Set([...(prev || []), ...sugg.downstream_tables!])));
+    }
+    // 关联维度候选（A 增强）：GROUP BY 非时间键回填「关联维度」（合并保留已选）
+    if (Array.isArray(sugg.dimensions) && sugg.dimensions.length > 0) {
+      setSelectedDims((prev) => Array.from(new Set([...(prev || []), ...sugg.dimensions!])));
     }
     // 未采集表/列推断值补进 options：依赖表/使用表/度量列在下拉中可显示可再选
     //（LLM 推断出的表/列可能尚未被采集进平台，不补进去下拉会没有对应项）
@@ -1400,6 +1405,10 @@ export function MetricCreate() {
       setSelectedDeps(candDeps);
     }
     if (c.calc_expression) setCalcExpression(c.calc_expression);
+    // 关联维度候选（A 增强）：GROUP BY 非时间键回填「关联维度」
+    if (Array.isArray(c.dimensions) && c.dimensions.length) {
+      setSelectedDims(c.dimensions);
+    }
     // 口径定义：SQL 模式（sql 键）→ sqlText；expression 模式 → definition JSON
     const dj = c.definition_json || {};
     if (dj.sql) {
@@ -1557,14 +1566,20 @@ export function MetricCreate() {
       // 派生/复合候选口径：计算表达式 + 依赖指标 → definition_json（对齐单条向导
       // buildDefinitionJson 的 derived/composite 分支；血缘注册读 dependencies 建上游边）
       const buildBatchDefinitionJson = (c: SqlBatchCandidate): Record<string, unknown> => {
-        if (c.type === "atomic") return c.definition_json || {};
+        // 关联维度候选（A 增强）：候选 dimensions 合入 definition_json.dimensions
+        //（血缘据此生成 指标↔维度 边；未填则不覆盖 definition_json 既有 dimensions）
+        const dims =
+          Array.isArray(c.dimensions) && c.dimensions.length
+            ? { dimensions: c.dimensions }
+            : {};
+        if (c.type === "atomic") return { ...(c.definition_json || {}), ...dims };
         // 派生/复合：计算表达式优先覆盖 expression；复合解析候选无 calc 时保留自带
         // sql 口径（对齐单条向导 buildDefinitionJson 的 derived/composite 分支；血缘
         // 注册读 dependencies 建上游边）
         const base = { ...(c.definition_json || {}) };
         const calc = (c.calc_expression || "").trim();
         if (calc) base.expression = calc;
-        return { ...base, dependencies: c.dependencies || [] };
+        return { ...base, ...dims, dependencies: c.dependencies || [] };
       };
       // 派生候选挂载实体（OneData 挂载层）：源表/度量列/粒度/周期/域 → 创建端自动落
       // metric_mount（对齐单条派生向导 mount 收集；复合不设挂载）
@@ -2780,7 +2795,7 @@ export function MetricCreate() {
               </Form.Item>
               <Form.Item
                 label="使用表（下游）"
-                extra="消费这个指标结果的“客户表”（可多选）——血缘据此生成 指标 → 表 下游边"
+                extra="消费这个指标结果的“客户表”（可多选）——血缘据此生成 指标 → 表 下游边。注意：AI 推断回填的是「表级血缘下游」（源表被哪些表消费，来自血缘图），并非“指标被哪些客户表消费”——指标级下游在指标创建、被下游 SQL 引用后由血缘自动补，此处可留空。"
               >
                 <Select
                   mode="multiple" allowClear showSearch
@@ -3603,6 +3618,21 @@ export function MetricCreate() {
                                       )}
                                     </>
                                   )}
+                                  {/* 关联维度（A 增强）：GROUP BY 推断的非时间键预填，可增删——
+                                      提交合入 definition_json.dimensions，血缘据此生成 指标↔维度 边 */}
+                                  <SqlBatchField label="关联维度">
+                                    <Select
+                                      size="small"
+                                      mode="multiple"
+                                      style={{ minWidth: 220 }}
+                                      placeholder="GROUP BY 推断维度（可增删）"
+                                      optionFilterProp="label"
+                                      value={c.dimensions || []}
+                                      onChange={(v) => handleSqlBatchEdit(c.key, { dimensions: v })}
+                                      data-testid={`sql-batch-dims-${c.key}`}
+                                      options={dimensionOptions}
+                                    />
+                                  </SqlBatchField>
                                 </div>
                                 {/* 底部行：指标编码 + 口径表达式（可查看完整口径定义）+ 口径三方责任 */}
                                 <div style={{ display: "flex", gap: 12, rowGap: 8, flexWrap: "wrap", marginTop: 8 }}>
@@ -4674,7 +4704,9 @@ export function MetricCreate() {
                   ) : null}
                   {downstream?.length ? (
                     <div style={{ marginTop: 6 }}>
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>使用表（下游）：</Typography.Text>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        使用表（下游）：<span style={{ color: "rgba(0,0,0,0.35)" }}>表级血缘下游（源表被哪些表消费），非“指标被消费的客户表”——指标级下游创建后由血缘自动补</span>
+                      </Typography.Text>
                       <div style={{ marginTop: 4 }}>
                         {downstream.map((t) => (
                           <Tag key={t} className="mono" style={{ marginBottom: 4 }}>{t}</Tag>

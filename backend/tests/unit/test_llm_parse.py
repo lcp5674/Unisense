@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from app.services.llm.parse import (
+    clean_llm_text_field,
     extract_numeric_field,
     extract_str_field,
     is_abnormal_llm_text,
@@ -70,6 +71,39 @@ def test_extract_str_field_missing_returns_none() -> None:
 def test_extract_str_field_numeric_fallback() -> None:
     # 数字也兜底为文本
     assert extract_str_field({"description": 42}, "description") == "42"
+
+
+def test_clean_llm_text_field_json_wrapped_name() -> None:
+    # LLM 把名称包成 JSON 字符串 → 二次解析提取 name/metric_name/title/value
+    assert clean_llm_text_field('{"metric_name": "月活"}') == "月活"
+    assert clean_llm_text_field('{"name": "日订单金额"}') == "日订单金额"
+    assert clean_llm_text_field('{"title": "活跃医生数"}') == "活跃医生数"
+    assert clean_llm_text_field('{"value": "门诊收费金额"}') == "门诊收费金额"
+
+
+def test_clean_llm_text_field_plain_text_passthrough() -> None:
+    # 普通文本（非 { 开头）原样返回，不误伤正常中文名
+    assert clean_llm_text_field("月活") == "月活"
+    assert clean_llm_text_field("日订单金额") == "日订单金额"
+
+
+def test_clean_llm_text_field_invalid_json_passthrough() -> None:
+    # { 开头但非法 JSON / 无目标字段 → 原样返回（宽松兜底）
+    assert clean_llm_text_field("{not valid json") == "{not valid json"
+    assert clean_llm_text_field('{"other": 1}') == '{"other": 1}'
+
+
+def test_clean_llm_text_field_empty_and_numeric() -> None:
+    assert clean_llm_text_field(None) is None
+    assert clean_llm_text_field("") is None
+    assert clean_llm_text_field("   ") is None
+    assert clean_llm_text_field(42) == "42"
+
+
+def test_extract_str_field_cleans_json_wrapped_value() -> None:
+    # extract_str_field 内部统一净化：字段值本身是 JSON 字符串包装时二次解析
+    obj = {"name": '{"metric_name": "月活"}'}
+    assert extract_str_field(obj, "name") == "月活"
 
 
 def test_extract_numeric_field_range_clip() -> None:

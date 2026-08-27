@@ -2087,7 +2087,13 @@ async def _llm_metric_name(
             messages=[{"role": "user", "content": prompt}],
             max_tokens=32,
         )
-        raw = (resp.get("content") or "").strip().strip("\"'").strip("`").strip()
+        # 名称净化：LLM 可能把名称包成 JSON 字符串（{"metric_name": "..."}）——
+        # 用共享 clean_llm_text_field 二次解析，普通文本原样返回
+        from app.services.llm.parse import clean_llm_text_field
+
+        raw = clean_llm_text_field(resp.get("content"))
+        if raw:
+            raw = raw.strip("`").strip()
         return raw or None
     except Exception:
         return None  # LLM 不可用 → 规则兜底
@@ -2166,12 +2172,12 @@ async def _suggest_metric_llm_overrides(
         parsed = json.loads(raw[start : end + 1])
 
         out: dict[str, Any] = {}
-        # 名称：语义字段，清洗后采用
-        name = parsed.get("name")
-        if isinstance(name, str):
-            name = name.strip().strip("'\"").strip()
-            if name and len(name) <= 80:
-                out["name"] = name
+        # 名称：语义字段，清洗后采用（LLM 可能把名称包成 JSON 字符串，统一净化）
+        from app.services.llm.parse import clean_llm_text_field
+
+        name = clean_llm_text_field(parsed.get("name"))
+        if name and len(name) <= 80:
+            out["name"] = name
         # 单位：必须命中 unit 字典
         unit = parsed.get("unit")
         if isinstance(unit, str) and unit.strip().upper() in unit_codes:
@@ -2511,6 +2517,16 @@ async def auto_suggest_metric(
     result["related_tables"] = related_tables
     result["source_tables"] = source_tables
     result["downstream_tables"] = downstream_tables
+    # 关联维度候选（A 增强）：GROUP BY 非时间键回填「关联维度」——此前单条推断
+    # 不返回 dimensions，前端关联维度纯手动（与批量候选对齐，同一提取规则）
+    if parsed is not None:
+        from app.services.semantic.sql_infer import extract_dimension_columns
+
+        result["dimensions"] = extract_dimension_columns(
+            parsed.group_by, parsed.time_column
+        )
+    else:
+        result["dimensions"] = []
     # SQL 解析出的度量列清单（含聚合方式/来源表/原始表达式），供前端展示让用户
     # 确认推断是否真正识别成功（多度量脚本不再"只取首个"对用户黑盒——每个度量
     # 的列名与聚合方式都可见，可核对后再进入②③④步确认或覆盖）。

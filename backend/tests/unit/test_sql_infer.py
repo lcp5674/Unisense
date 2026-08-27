@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.services.semantic.sql_infer import parse_sql_profile
+from app.services.semantic.sql_infer import extract_dimension_columns, parse_sql_profile
 
 
 class TestParseSqlProfile:
@@ -1137,3 +1137,44 @@ class TestParseSqlProfile:
         assert ms[0].get("needs_review") is True
         assert "ods.a" in p.source_tables and "ods.b" in p.source_tables
 
+
+
+class TestExtractDimensionColumns:
+    """SQL 智能推断关联维度提取（A 增强）：GROUP BY 非时间键回填维度候选。"""
+
+    def test_keeps_business_columns_excludes_time(self) -> None:
+        # 医生月活 SQL：GROUP BY month_id/hosp_code/enter_source，时间列 month_id 剔除
+        dims = extract_dimension_columns(
+            ["month_id", "hosp_code", "enter_source"], "month_id"
+        )
+        assert dims == ["hosp_code", "enter_source"]
+
+    def test_excludes_time_hint_and_function(self) -> None:
+        # 时间 hint 列（create_date/stat_date）与时间函数包裹表达式一律剔除
+        dims = extract_dimension_columns(
+            [
+                "create_date",
+                "stat_month",
+                "substr(create_date,1,7)",
+                "org_id",
+                "channel",
+            ],
+            "create_date",
+        )
+        assert dims == ["org_id", "channel"]
+
+    def test_empty_and_none_safe(self) -> None:
+        assert extract_dimension_columns([], None) == []
+        assert extract_dimension_columns(None, None) == []  # type: ignore[arg-type]
+
+    def test_no_time_column_keeps_all_business(self) -> None:
+        # 无时间列（time_column=None）时 GROUP BY 全部视为维度
+        dims = extract_dimension_columns(["hosp_code", "enter_source"], None)
+        assert dims == ["hosp_code", "enter_source"]
+
+    def test_alias_like_month_id_excluded(self) -> None:
+        # _TIME_GRAIN_ALIAS（month_id/week_id 等）命中即剔除
+        dims = extract_dimension_columns(
+            ["month_id", "region_id", "doctor_code"], "month_id"
+        )
+        assert dims == ["region_id", "doctor_code"]
