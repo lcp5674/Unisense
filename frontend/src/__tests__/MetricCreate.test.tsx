@@ -26,6 +26,8 @@ vi.mock("../api", async () => {
     checkConflict: vi.fn(),
     createMetric: vi.fn(),
     refineMetricDefinition: vi.fn(),
+    getMetric: vi.fn(),
+    updateMetric: vi.fn(),
     // 默认 platform_admin（不受域门禁限制）；跨域预检测试再覆盖为 domain_admin
     fetchCurrentUser: vi.fn().mockResolvedValue({
       id: 1,
@@ -37,8 +39,8 @@ vi.mock("../api", async () => {
   };
 });
 
-import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, checkConflict, createMetric, listMetrics, listMeasureCatalogs, fetchCurrentUser, refineMetricDefinition } from "../api";
-import type { DBCatalog, SubjectDomainTreeNode, AutoSuggestResponse, DomainSuggestionResponse, SqlBatchParseResult } from "../types";
+import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, checkConflict, createMetric, listMetrics, listMeasureCatalogs, fetchCurrentUser, refineMetricDefinition, getMetric, updateMetric } from "../api";
+import type { DBCatalog, SubjectDomainTreeNode, AutoSuggestResponse, DomainSuggestionResponse, SqlBatchParseResult, MetricResponse } from "../types";
 
 const mockedTree = vi.mocked(listDomainTree);
 const mockedDict = vi.mocked(listDictItems);
@@ -54,6 +56,8 @@ const mockedCheckConflict = vi.mocked(checkConflict);
 const mockedCreate = vi.mocked(createMetric);
 const mockedMetrics = vi.mocked(listMetrics);
 const mockedRefine = vi.mocked(refineMetricDefinition);
+const mockedGetMetric = vi.mocked(getMetric);
+const mockedUpdateMetric = vi.mocked(updateMetric);
 
 /** 后端 auto-suggest 永不返回 undefined（auto_fill 兜底成完整对象）——"无建议"即空 fields/空 code 的合法响应。 */
 const NO_SUGGESTION: AutoSuggestResponse = {
@@ -1851,6 +1855,112 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     await screen.findByText(/批量创建完成：成功 3 \/ 失败 0/);
     expect(screen.getByText(/含 1 个复合候选/)).toBeTruthy();
     expect(screen.getByText(/需先逐个发布原子/)).toBeTruthy();
+  });
+
+  /** 快速编辑抽屉用的最小指标详情（getMetric 返回）。 */
+  function makeQuickMetric(code: string): MetricResponse {
+    return {
+      id: 1,
+      metric_code: code,
+      name: code === "sales_order_amount_day" ? "日订单金额" : "日去重用户",
+      domain: "sales",
+      type: "atomic",
+      granularity: "day",
+      unit: "元",
+      currency: "CNY",
+      aggregation: "SUM",
+      time_semantics: "累计",
+      freshness: "T+1",
+      sla: null,
+      dw_layer: "DWS",
+      metric_tier: "T1",
+      serving_mode: "api",
+      additivity: "ADDITIVE",
+      non_additive_dimensions: null,
+      definition_json: { expression: "SUM(amount)", source_fields: ["amount"] },
+      version: 1,
+      row_version: 7,
+      status: "DRAFT",
+      owner_id: 1,
+      backup_owner_id: null,
+      approver_id: null,
+      submitted_by: null,
+      pii_flag: false,
+      compliance_reviewed: false,
+      term_id: null,
+      effective_version: null,
+      consumption_guide: null,
+      successor_code: null,
+      deprecated_at: null,
+      sunset_until: null,
+      emergency_publish: false,
+      emergency_reason: null,
+      emergency_reviewed_at: null,
+      gray_tenant_ids: null,
+      pending_conflict: false,
+      pending_conflict_detail: null,
+      pending_version: false,
+      created_at: "2026-08-27T00:00:00",
+      updated_at: "2026-08-27T00:00:00",
+    };
+  }
+
+  it("批量创建结果：快速编辑抽屉——打开/前后切换/保存走 updateMetric 乐观锁", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "勾选 日订单金额、日去重用户复合" }));
+    await screen.findByText(/已勾选 3 个/);
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+    await screen.findByText(/批量创建完成：成功 3 \/ 失败 0/);
+
+    // 打开第一个候选的快速编辑抽屉：getMetric 拉取当前值回填
+    mockedGetMetric.mockResolvedValue(makeQuickMetric("sales_order_amount_day"));
+    fireEvent.click(screen.getByTestId("sql-batch-quick-edit-sales_order_amount_day"));
+    await waitFor(() => {
+      expect((screen.getByTestId("sql-batch-quick-name") as HTMLInputElement).value).toBe(
+        "日订单金额",
+      );
+    });
+    expect(mockedGetMetric).toHaveBeenCalledWith("sales_order_amount_day");
+    // 位置指示：第 1 / 3 条
+    expect(screen.getByText("1 / 3")).toBeTruthy();
+
+    // 下一条切换 → getMetric 拉取下一候选并回填（不影响当前窗口/页面）
+    mockedGetMetric.mockResolvedValue(makeQuickMetric("sales_order_userid_day"));
+    fireEvent.click(screen.getByTestId("sql-batch-quick-edit-next"));
+    await waitFor(() => {
+      expect((screen.getByTestId("sql-batch-quick-name") as HTMLInputElement).value).toBe(
+        "日去重用户",
+      );
+    });
+    expect(mockedGetMetric).toHaveBeenCalledWith("sales_order_userid_day");
+
+    // 修改名称 + 变更原因（默认已预填），保存 → updateMetric 携带 row_version 乐观锁
+    mockedUpdateMetric.mockResolvedValue({
+      ...makeQuickMetric("sales_order_userid_day"),
+      name: "日去重用户数",
+      row_version: 8,
+    });
+    fireEvent.change(screen.getByTestId("sql-batch-quick-name"), {
+      target: { value: "日去重用户数" },
+    });
+    fireEvent.change(screen.getByTestId("sql-batch-quick-reason"), {
+      target: { value: "批量创建后快速编辑" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => {
+      expect(mockedUpdateMetric).toHaveBeenCalledWith(
+        "sales_order_userid_day",
+        expect.objectContaining({
+          name: "日去重用户数",
+          change_reason: "批量创建后快速编辑",
+          row_version: 7,
+        }),
+      );
+    });
   });
 
   it("批量创建：候选关联逻辑度量（OneData 接线）→ 提交透传 measure_id + 原始 SQL", async () => {

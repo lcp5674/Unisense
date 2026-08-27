@@ -1,13 +1,13 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { BarsOutlined, ArrowLeftOutlined, PlusOutlined, MinusCircleOutlined, RobotOutlined } from "@ant-design/icons";
 import {
   Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Collapse, Divider, Drawer, Form, Input, Modal, Radio, Row, Segmented, Select, Space, Spin, Steps, Switch, Table, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
 import {
-  createMetric, listCatalogs, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, listMeasureCatalogs, fetchCurrentUser, refineMetricDefinition, UnisenseApiError,
+  createMetric, listCatalogs, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, listMeasureCatalogs, fetchCurrentUser, refineMetricDefinition, getMetric, updateMetric, UnisenseApiError,
 } from "../api";
-import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, DomainSuggestionCandidate, Dimension, MeasureCatalog, MeasureSuggestion, MetricMountInput, SqlBatchParseResult, SqlBatchCandidate, CurrentUser, ConsumptionGuidePayload } from "../types";
+import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricBatchRegisterCandidate, MetricResponse, MetricUpdateRequest, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, DomainSuggestionCandidate, Dimension, MeasureCatalog, MeasureSuggestion, MetricMountInput, SqlBatchParseResult, SqlBatchCandidate, CurrentUser, ConsumptionGuidePayload } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
 import { MEASURE_FORMAT_LABEL } from "../types";
 import { usePermission } from "../hooks/usePermission";
@@ -433,6 +433,14 @@ export function MetricCreate() {
   // 批量提交评审指派（复审 P2-10）：默认域评审组，可指定评审用户（对齐单指标提交的 reviewer_type/id）
   const [batchReviewerType, setBatchReviewerType] = useState<"domain" | "user">("domain");
   const [batchReviewerId, setBatchReviewerId] = useState<number | undefined>(undefined);
+  // SQL 批量创建结果「快速编辑」抽屉：当前编辑候选下标（draftCandidates 内）+ 已拉取的指标详情
+  const [quickEditIdx, setQuickEditIdx] = useState<number | null>(null);
+  const [quickEditMetric, setQuickEditMetric] = useState<MetricResponse | null>(null);
+  const [quickEditLoading, setQuickEditLoading] = useState(false);
+  const [quickEditSaving, setQuickEditSaving] = useState(false);
+  const [quickEditExprDirty, setQuickEditExprDirty] = useState(false);
+  const [quickEditDwDirty, setQuickEditDwDirty] = useState(false);
+  const [quickEditForm] = Form.useForm();
   const [batchUsers, setBatchUsers] = useState<Array<{ id: number; username: string; display_name?: string | null }>>([]);
   // 口径三方责任（产品需求方/技术方/数仓开发）用户选项：挂载时加载一次，供三个选人 Select
   const [ownerUsers, setOwnerUsers] = useState<Array<{ id: number; username: string; display_name?: string | null }>>([]);
@@ -1443,11 +1451,147 @@ export function MetricCreate() {
     setSqlBatchCreateResult(null);
     setSqlBatchResult(null);
     setSqlBatchChecked(new Set());
+    setQuickEditIdx(null);
+    setQuickEditMetric(null);
     // 生产就绪：创建完成后清除草稿（避免下次进入恢复已用完的批次）
     try {
       localStorage.removeItem(SQL_BATCH_DRAFT_KEY);
     } catch {
       /* localStorage 不可用静默跳过 */
+    }
+  }
+
+  // ---- SQL 批量创建结果「快速编辑」抽屉 ----
+  // 批量创建完成后，点击结果行「快速编辑」在当前页内打开 Drawer 编辑该 DRAFT 指标
+  // （不跳转详情页、不关闭当前窗口）；上一条/下一条在批内候选间切换。
+  // 每次打开/切换重新 getMetric 拉取最新 row_version，保存走 updateMetric 乐观锁。
+  const draftCandidates = useMemo(
+    () =>
+      sqlBatchCreateResult
+        ? sqlBatchCreateResult.candidates.filter((c) => c.status === "DRAFT")
+        : [],
+    [sqlBatchCreateResult],
+  );
+
+  // SQL 批量创建结果表格列：共享列 + 「快速编辑」操作列（仅 DRAFT 可编辑）
+  const sqlBatchResultColumns = useMemo(
+    () => [
+      ...BATCH_RESULT_COLUMNS,
+      {
+        title: "操作",
+        key: "action",
+        width: 90,
+        render: (_: unknown, c: MetricBatchRegisterCandidate) =>
+          c.status === "DRAFT" ? (
+            <Button
+              size="small"
+              type="link"
+              style={{ padding: "0 4px" }}
+              data-testid={`sql-batch-quick-edit-${c.metric_code}`}
+              onClick={() => {
+                const i = draftCandidates.findIndex((d) => d.metric_code === c.metric_code);
+                if (i >= 0) void openQuickEdit(i);
+              }}
+            >
+              快速编辑
+            </Button>
+          ) : null,
+      },
+    ],
+    [draftCandidates],
+  );
+
+  // 打开/切换到指定候选：拉取最新指标详情回填表单
+  async function openQuickEdit(idx: number) {
+    const c = draftCandidates[idx];
+    if (!c) return;
+    setQuickEditIdx(idx);
+    setQuickEditLoading(true);
+    setQuickEditMetric(null);
+    try {
+      const m = await getMetric(c.metric_code);
+      setQuickEditMetric(m);
+      quickEditForm.setFieldsValue({
+        name: m.name,
+        aggregation: m.aggregation,
+        unit: m.unit,
+        granularity: m.granularity ?? undefined,
+        expression:
+          typeof m.definition_json?.expression === "string" ? m.definition_json.expression : "",
+        dw_definition:
+          typeof m.definition_json?.dw_definition === "string" ? m.definition_json.dw_definition : "",
+        change_reason: "SQL 批量创建后快速编辑",
+      });
+      setQuickEditExprDirty(false);
+      setQuickEditDwDirty(false);
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError
+          ? `加载指标失败：${err.message}（${err.codeZh}）`
+          : "加载指标失败，请稍后重试",
+      );
+      setQuickEditIdx(null);
+    } finally {
+      setQuickEditLoading(false);
+    }
+  }
+
+  // 上一条/下一条切换（循环）
+  function goQuickEdit(offset: number) {
+    if (quickEditIdx === null || draftCandidates.length === 0) return;
+    const next = (quickEditIdx + offset + draftCandidates.length) % draftCandidates.length;
+    void openQuickEdit(next);
+  }
+
+  // 保存快速编辑：单次 updateMetric（名称/单位/聚合/粒度 + 口径表达式/数仓口径 dirty 合入）
+  async function handleQuickEditSave() {
+    if (!quickEditMetric) return;
+    const values = await quickEditForm.validateFields();
+    const changeReason = String(values.change_reason ?? "").trim();
+    if (changeReason.length < 4) {
+      message.warning("变更原因至少 4 个字");
+      return;
+    }
+    const req: MetricUpdateRequest = {
+      name: String(values.name ?? "").trim(),
+      unit: values.unit,
+      aggregation: values.aggregation,
+      // S6：原子不提交粒度（原子 = 逻辑度量 + 基础统计粒度，粒度编辑对原子隐藏）
+      ...(quickEditMetric.type !== "atomic" ? { granularity: values.granularity } : {}),
+      change_reason: changeReason,
+      row_version: quickEditMetric.row_version, // 乐观锁：他人已改则 409 拒绝
+    };
+    // 口径表达式 / 数仓口径：仅 dirty 才合入 definition_json（未改不碰其他口径键）
+    if (quickEditExprDirty || quickEditDwDirty) {
+      const dj = { ...(quickEditMetric.definition_json ?? {}) };
+      const expr = String(values.expression ?? "").trim();
+      const dw = String(values.dw_definition ?? "").trim();
+      if (quickEditExprDirty) {
+        if (expr) dj.expression = expr;
+        else delete dj.expression;
+      }
+      if (quickEditDwDirty) {
+        if (dw) dj.dw_definition = dw;
+        else delete dj.dw_definition;
+      }
+      req.definition_json = dj;
+    }
+    setQuickEditSaving(true);
+    try {
+      const updated = await updateMetric(quickEditMetric.metric_code, req);
+      setQuickEditMetric(updated);
+      quickEditForm.setFieldValue("name", updated.name);
+      setQuickEditExprDirty(false);
+      setQuickEditDwDirty(false);
+      message.success(`已保存「${updated.name}」`);
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError
+          ? `${err.message}（${err.codeZh}）`
+          : "保存失败，请稍后重试",
+      );
+    } finally {
+      setQuickEditSaving(false);
     }
   }
 
@@ -3205,7 +3349,7 @@ export function MetricCreate() {
                             size="small"
                             rowKey="metric_code"
                             dataSource={sqlBatchCreateResult.candidates}
-                            columns={BATCH_RESULT_COLUMNS}
+                            columns={sqlBatchResultColumns}
                             pagination={false}
                             scroll={{ y: 280 }}
                             style={{ marginTop: 12 }}
@@ -3559,6 +3703,137 @@ export function MetricCreate() {
           </Button>
         </div>
       </Modal>
+      </Drawer>
+
+      {/* SQL 批量创建结果「快速编辑」抽屉：当前页内编辑已创建 DRAFT 指标，
+          上一条/下一条切换批内候选（不跳详情页、不影响当前窗口） */}
+      <Drawer
+        title={
+          <Space size={8}>
+            <span>快速编辑</span>
+            {quickEditMetric && (
+              <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+                {quickEditMetric.metric_code}
+              </Typography.Text>
+            )}
+          </Space>
+        }
+        width={560}
+        open={quickEditIdx !== null}
+        onClose={() => setQuickEditIdx(null)}
+        destroyOnClose={false}
+        footer={
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <Space>
+              <Button
+                size="small"
+                disabled={draftCandidates.length <= 1}
+                onClick={() => goQuickEdit(-1)}
+                data-testid="sql-batch-quick-edit-prev"
+              >
+                上一条
+              </Button>
+              <Button
+                size="small"
+                disabled={draftCandidates.length <= 1}
+                onClick={() => goQuickEdit(1)}
+                data-testid="sql-batch-quick-edit-next"
+              >
+                下一条
+              </Button>
+              <span className="muted" style={{ fontSize: 12 }}>
+                {quickEditIdx !== null ? `${quickEditIdx + 1} / ${draftCandidates.length}` : ""}
+              </span>
+            </Space>
+            <Space>
+              <Button onClick={() => setQuickEditIdx(null)}>关闭</Button>
+              <Button
+                type="primary"
+                loading={quickEditSaving}
+                disabled={!quickEditMetric}
+                onClick={() => void handleQuickEditSave()}
+              >
+                保存
+              </Button>
+            </Space>
+          </div>
+        }
+      >
+        {quickEditLoading ? (
+          <div style={{ textAlign: "center", padding: 40 }}>
+            <Spin />
+          </div>
+        ) : quickEditMetric ? (
+          <Form form={quickEditForm} layout="vertical">
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="批内快速编辑"
+              description="只修改此处的常见字段；口径完整编辑（业务口径/伪代码口径/挂载/责任人等）请到指标详情页。保存后按当前版本乐观锁落库，若他人已改会被拒绝。"
+            />
+            <Form.Item
+              name="name"
+              label="指标名称"
+              rules={[{ required: true, message: "请输入指标名称" }]}
+            >
+              <Input placeholder="指标名称" data-testid="sql-batch-quick-name" />
+            </Form.Item>
+            <Row gutter={12}>
+              <Col span={8}>
+                <Form.Item name="aggregation" label="聚合方式">
+                  <Select
+                    options={dictOptions["aggregation"] || []}
+                    allowClear
+                    placeholder="保持不变"
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={8}>
+                <Form.Item name="unit" label="单位">
+                  <Select
+                    options={dictOptions["unit"] || []}
+                    allowClear
+                    placeholder="保持不变"
+                    showSearch
+                  />
+                </Form.Item>
+              </Col>
+              {quickEditMetric.type !== "atomic" && (
+                <Col span={8}>
+                  <Form.Item name="granularity" label="粒度">
+                    <Select
+                      options={dictOptions["granularity"] || []}
+                      allowClear
+                      placeholder="保持不变"
+                    />
+                  </Form.Item>
+                </Col>
+              )}
+            </Row>
+            <Form.Item name="expression" label="计算表达式（口径）">
+              <TextArea
+                rows={3}
+                placeholder="如 COUNT(DISTINCT col)、COALESCE(...)"
+                onChange={() => setQuickEditExprDirty(true)}
+              />
+            </Form.Item>
+            <Form.Item name="dw_definition" label="数仓详细口径（SQL）">
+              <TextArea
+                rows={4}
+                placeholder="数仓落地 SQL（可空）"
+                onChange={() => setQuickEditDwDirty(true)}
+              />
+            </Form.Item>
+            <Form.Item
+              name="change_reason"
+              label="变更原因（必填）"
+              rules={[{ required: true, min: 4, message: "变更原因至少 4 个字" }]}
+            >
+              <Input placeholder="本次修改说明" data-testid="sql-batch-quick-reason" />
+            </Form.Item>
+          </Form>
+        ) : null}
       </Drawer>
 
       {/* 勾选联动提示：取消勾选原子但复合候选仍被勾选时，让用户选择处理方式（FR-010 批量） */}
