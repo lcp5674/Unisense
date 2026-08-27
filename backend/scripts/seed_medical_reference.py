@@ -1,16 +1,18 @@
 """初始化 seed 脚本：清除 E2E/测试参照数据，灌入微医业务参照数据。
 
-以微医实际业务六大主线组织参照数据：医疗（诊疗）、医药（药品）、医保、
-挂号、健康管理、健共体（数字健共体·区域医疗协作）。覆盖三类主数据
-（对齐 TD §12.14/§12.15 / FR-05 / FR-08 / FR-012）：
+以微医实际业务七大主线组织参照数据：医疗（诊疗）、医药（药品）、医保、
+挂号、健康管理、健共体（数字健共体·区域医疗协作）、医生管理（供给侧核心
+资产）。覆盖三类主数据（对齐 TD §12.14/§12.15 / FR-05 / FR-08 / FR-012）：
 - 主题域（subject_domain）：保留既有 7 医疗域 + uncategorized 及微医线上业务
-  一级域（在线问诊/互联网医院/预约挂号/健康管理），新增「健共体」一级域及
-  子域，并为各业务主线补全缺失二级子域。
+  一级域（在线问诊/互联网医院/预约挂号/健康管理），新增「健共体」「医生管理」
+  一级域及子域，并为各业务主线补全缺失二级子域（处方流转/支付方式改革/
+  企业健康/家庭病床）。
 - 术语（term）：清除 8 条 E2E/测试术语及关联（term_version/term_relation/
-  glossary_conflict），灌入六大业务主线核心术语（含健共体协作术语）。
+  glossary_conflict），灌入七大业务主线核心术语（含健共体协作与医生层面术语）。
 - 维度（dimension）：清除 8 条 E2E/测试维度及引用（dimension_member/
-  metric_dimension/reconciliation/dimension_mapping），灌入六大业务主线
-  维度+成员（含健共体转诊/医联体/签约维度）。
+  metric_dimension/reconciliation/dimension_mapping），灌入七大业务主线
+  维度+成员（含健共体转诊/医联体/签约、医生职称/医疗机构等维度）。维度已
+  存在但成员集合与脚本不一致时自动刷新（删旧重灌），保证参照数据与脚本同步。
 
 用法:
     poetry run python -m scripts.seed_medical_reference
@@ -130,21 +132,32 @@ DOMAIN_SEEDS: list[dict[str, Any]] = [
     {"code": "family_doctor_sign", "name": "家医签约", "parent": "health_community", "sort_order": 5},
     {"code": "shared_resource", "name": "资源共享", "parent": "health_community", "sort_order": 6},
     {"code": "public_health", "name": "公共卫生", "parent": "health_community", "sort_order": 7},
+    {"code": "family_bed", "name": "家庭病床", "parent": "health_community", "sort_order": 8},
+    # ---- 医生管理（供给侧核心资产，一级域：资质/排班/绩效/多点执业/团队）----
+    {"code": "doctor_management", "name": "医生管理", "parent": None, "sort_order": 13},
+    {"code": "doctor_qualification", "name": "医生资质", "parent": "doctor_management", "sort_order": 1},
+    {"code": "doctor_schedule", "name": "医生排班", "parent": "doctor_management", "sort_order": 2},
+    {"code": "doctor_performance", "name": "医生绩效", "parent": "doctor_management", "sort_order": 3},
+    {"code": "multi_site_practice", "name": "多点执业", "parent": "doctor_management", "sort_order": 4},
+    {"code": "doctor_team", "name": "医生团队", "parent": "doctor_management", "sort_order": 5},
     # ---- 各业务主线补充子域 ----
     {"code": "exam_lab", "name": "检查检验", "parent": "outpatient", "sort_order": 4},
     {"code": "surgery", "name": "手术", "parent": "outpatient", "sort_order": 5},
     {"code": "drug_inventory", "name": "药品库存", "parent": "medication", "sort_order": 4},
     {"code": "drug_procurement", "name": "药品采购", "parent": "medication", "sort_order": 5},
+    {"code": "prescription_flow", "name": "处方流转", "parent": "medication", "sort_order": 6},
     {"code": "yb_directory", "name": "医保目录", "parent": "medical_insurance", "sort_order": 3},
     {"code": "commercial_insurance", "name": "商业保险", "parent": "medical_insurance", "sort_order": 4},
+    {"code": "drg_dip", "name": "支付方式改革", "parent": "medical_insurance", "sort_order": 5},
     {"code": "sign_in", "name": "签到取号", "parent": "appointment", "sort_order": 4},
     {"code": "health_education", "name": "健康教育", "parent": "health_management", "sort_order": 4},
     {"code": "vaccination", "name": "疫苗接种", "parent": "health_management", "sort_order": 5},
+    {"code": "corporate_health", "name": "企业健康", "parent": "health_management", "sort_order": 6},
 ]
 
 
 # ---------------------------------------------------------------------------
-# 术语（六大业务主线核心术语，39 条，全 PUBLISHED 直灌）
+# 术语（七大业务主线核心术语，61 条，全 PUBLISHED 直灌）
 # ---------------------------------------------------------------------------
 TERM_SEEDS: list[dict[str, Any]] = [
     # 在线问诊
@@ -194,11 +207,35 @@ TERM_SEEDS: list[dict[str, Any]] = [
     {"term_code": "vaccination", "name": "疫苗接种", "definition": "为预防传染病而进行的疫苗预防接种服务。", "domain": "health_management", "synonyms": ["预防接种"], "boundary": None},
     {"term_code": "health_education", "name": "健康教育", "definition": "面向居民开展的疾病预防与健康促进宣教服务。", "domain": "health_management", "synonyms": ["健康宣教"], "boundary": None},
     {"term_code": "register_sign_in", "name": "签到取号", "definition": "患者到院后凭预约信息签到并取得就诊序号。", "domain": "appointment", "synonyms": ["到院签到"], "boundary": None},
+    # 医生管理（供给侧核心资产：资质/职称/执业/排班/绩效/团队）
+    {"term_code": "licensed_doctor", "name": "执业医师", "definition": "依法取得执业医师资格并在医疗机构注册执业的医生。", "domain": "doctor_management", "synonyms": ["执业医生"], "boundary": None},
+    {"term_code": "doctor_title", "name": "医师职称", "definition": "卫生专业技术人员的医师系列职称等级：住院医师（初级）、主治医师（中级）、副主任医师（副高）、主任医师（正高）。", "domain": "doctor_management", "synonyms": ["职称等级"], "boundary": None},
+    {"term_code": "chief_physician", "name": "主任医师", "definition": "正高级医师职称，具有丰富临床经验与疑难病诊治能力。", "domain": "doctor_management", "synonyms": ["正高"], "boundary": None},
+    {"term_code": "associate_chief_physician", "name": "副主任医师", "definition": "副高级医师职称。", "domain": "doctor_management", "synonyms": ["副高"], "boundary": None},
+    {"term_code": "attending_physician", "name": "主治医师", "definition": "中级医师职称，可独立承担门诊与病房诊治工作。", "domain": "doctor_management", "synonyms": ["中级"], "boundary": None},
+    {"term_code": "resident_physician", "name": "住院医师", "definition": "初级医师职称，在上级医师指导下从事临床工作。", "domain": "doctor_management", "synonyms": ["初级"], "boundary": None},
+    {"term_code": "multi_site_practice", "name": "多点执业", "definition": "执业医师在注册主执业机构以外机构执业的制度安排。", "domain": "doctor_management", "synonyms": ["多点执业备案"], "boundary": None},
+    {"term_code": "primary_practice_org", "name": "主执业点", "definition": "执业医师注册的主要执业医疗机构。", "domain": "doctor_management", "synonyms": ["主要执业机构"], "boundary": None},
+    {"term_code": "doctor_schedule", "name": "医生排班", "definition": "医生出诊时间、科室、号源类型的安排计划。", "domain": "doctor_management", "synonyms": ["排班表"], "boundary": None},
+    {"term_code": "expert_clinic", "name": "专家门诊", "definition": "由主任/副主任医师出诊的门诊类型。", "domain": "doctor_management", "synonyms": ["专家号"], "boundary": None},
+    {"term_code": "attending_doctor", "name": "责任医生", "definition": "对患者诊疗全过程负责的医生。", "domain": "doctor_management", "synonyms": ["主管医生"], "boundary": None},
+    {"term_code": "doctor_team", "name": "医生团队", "definition": "由多名医生组成的协作诊疗团队（如专家团队）。", "domain": "doctor_management", "synonyms": ["专家团队"], "boundary": None},
+    {"term_code": "doctor_service_duration", "name": "医生服务时长", "definition": "医生单次问诊/接诊的服务时间，衡量医生服务效率。", "domain": "doctor_management", "synonyms": ["接诊时长"], "boundary": None},
+    # 医药/医保/挂号/健共体补充
+    {"term_code": "prescription_flow", "name": "处方流转", "definition": "医院HIS开具的处方经平台流转至药房配药的业务（处方外流）。", "domain": "medication", "synonyms": ["处方外流"], "boundary": None},
+    {"term_code": "drug_traceability", "name": "药品追溯", "definition": "通过药品追溯码对药品生产、流通、使用全链路追踪。", "domain": "medication", "synonyms": ["药品追溯码"], "boundary": None},
+    {"term_code": "drg", "name": "DRG付费", "definition": "按疾病诊断相关分组对住院费用打包付费的医保支付方式。", "domain": "medical_insurance", "synonyms": ["疾病诊断相关分组"], "boundary": "按病组打包付费"},
+    {"term_code": "dip", "name": "DIP付费", "definition": "按病种分值付费的医保支付方式，依据病种分值计算费用。", "domain": "medical_insurance", "synonyms": ["按病种分值付费"], "boundary": None},
+    {"term_code": "outpatient_pooling", "name": "门诊统筹", "definition": "将职工医保普通门诊费用纳入统筹基金支付的保障制度。", "domain": "medical_insurance", "synonyms": ["门诊共济"], "boundary": None},
+    {"term_code": "cancel_register", "name": "退号", "definition": "患者取消已预约或已挂号的号源。", "domain": "appointment", "synonyms": ["取消挂号"], "boundary": None},
+    {"term_code": "no_show", "name": "爽约", "definition": "患者预约成功但未按约到院就诊且未取消。", "domain": "appointment", "synonyms": ["失约"], "boundary": None},
+    {"term_code": "corporate_health", "name": "企业健康管理", "definition": "面向企业员工提供的体检、健康档案与健康干预一体化服务。", "domain": "health_management", "synonyms": ["员工健康"], "boundary": None},
+    {"term_code": "family_bed", "name": "家庭病床", "definition": "在患者家中设立病床，由基层医生定期上门巡诊的服务形式。", "domain": "health_community", "synonyms": ["家庭病床服务"], "boundary": None},
 ]
 
 
 # ---------------------------------------------------------------------------
-# 维度 + 成员（六大业务主线，18 个维度；SCD0/SCD1/SCD2 三型）
+# 维度 + 成员（七大业务主线，23 个维度；SCD0/SCD1/SCD2 三型）
 # ---------------------------------------------------------------------------
 def _slug(name: str) -> str:
     """中文名 → 拼音风格 slug（科室/病种成员编码）。"""
@@ -230,20 +267,39 @@ def _dept_members() -> list[dict[str, Any]]:
 
 
 def _doctor_members() -> list[dict[str, Any]]:
-    """医生维度成员：代表医生，attributes 含科室/职称（SCD2 跟踪职称变化）。"""
+    """医生维度成员：覆盖主要科室的代表医生，attributes 含科室/职称/执业类型/专家标识（SCD2 跟踪职称变化）。"""
     doctors = [
-        ("张伟", "neike", "主任医师"),
-        ("李娜", "neike", "副主任医师"),
-        ("王强", "waike", "主任医师"),
-        ("赵敏", "fuchanke", "副主任医师"),
-        ("刘洋", "erke", "主治医师"),
-        ("陈静", "zhongyike", "副主任医师"),
-        ("杨光", "xinxueguanneike", "主治医师"),
-        ("周婷", "huxineike", "住院医师"),
+        # (姓名, 科室, 职称, 执业类型 full=全职/multi=多点, 是否专家)
+        ("张伟", "neike", "主任医师", "full", True),
+        ("李娜", "neike", "副主任医师", "full", True),
+        ("王强", "waike", "主任医师", "full", True),
+        ("赵敏", "fuchanke", "副主任医师", "full", True),
+        ("刘洋", "erke", "主治医师", "full", False),
+        ("陈静", "zhongyike", "副主任医师", "full", True),
+        ("杨光", "xinxueguanneike", "主治医师", "full", False),
+        ("周婷", "huxineike", "住院医师", "full", False),
+        ("孙磊", "guke", "副主任医师", "full", True),
+        ("吴芳", "yanke", "主治医师", "full", False),
+        ("郑华", "shenjingneike", "主任医师", "full", True),
+        ("钱进", "pifuke", "主治医师", "multi", False),
+        ("何静", "kouqiangke", "副主任医师", "full", True),
+        ("罗强", "yingxiangke", "主治医师", "full", False),
+        ("梁敏", "jianyanke", "副主任医师", "full", True),
+        ("谢涛", "miniaowaike", "主治医师", "full", False),
     ]
     return [
-        {"code": f"doc_{i + 1:02d}", "name": name, "attributes": {"dept_code": dept, "title": title}}
-        for i, (name, dept, title) in enumerate(doctors)
+        {
+            "code": f"doc_{i + 1:02d}",
+            "name": name,
+            "attributes": {
+                "dept_code": dept,
+                "title": title,
+                "practice_type": "全职" if practice == "full" else "多点",
+                "doctor_level": "专家" if is_expert else "普通",
+                "is_expert": is_expert,
+            },
+        }
+        for i, (name, dept, title, practice, is_expert) in enumerate(doctors)
     ]
 
 
@@ -404,6 +460,60 @@ DIMENSION_SEEDS: list[dict[str, Any]] = [
             {"code": "injection", "name": "注射剂"}, {"code": "granule", "name": "颗粒剂"},
             {"code": "oral_liquid", "name": "口服液"}, {"code": "topical", "name": "外用制剂"},
             {"code": "aerosol", "name": "气雾剂"}, {"code": "eye_drop", "name": "滴眼剂"},
+        ],
+    },
+    {
+        "dim_code": "doctor_title", "name": "医生职称", "domain": "doctor_management", "type": "SCD0",
+        "description": "医师职称等级（参照数据，用于医生服务与绩效分析）。", "members": [
+            {"code": "chief", "name": "主任医师"},
+            {"code": "associate_chief", "name": "副主任医师"},
+            {"code": "attending", "name": "主治医师"},
+            {"code": "resident", "name": "住院医师"},
+            {"code": "physician", "name": "医师"},
+        ],
+    },
+    {
+        "dim_code": "medical_org", "name": "医疗机构", "domain": "health_community", "type": "SCD1",
+        "description": "健共体内医疗机构等级与类型（分级诊疗分析地基）。", "members": [
+            {"code": "tertiary", "name": "三级医院", "attributes": {"org_level": "三级", "org_type": "综合/专科"}},
+            {"code": "secondary", "name": "二级医院", "attributes": {"org_level": "二级", "org_type": "综合"}},
+            {"code": "primary", "name": "一级医院", "attributes": {"org_level": "一级", "org_type": "综合"}},
+            {"code": "community", "name": "社区卫生服务中心", "attributes": {"org_level": "基层", "org_type": "社区"}},
+            {"code": "township", "name": "乡镇卫生院", "attributes": {"org_level": "基层", "org_type": "乡镇"}},
+            {"code": "village_clinic", "name": "村卫生室", "attributes": {"org_level": "基层", "org_type": "村级"}},
+            {"code": "internet_hospital", "name": "互联网医院", "attributes": {"org_level": "线上", "org_type": "互联网"}},
+        ],
+    },
+    {
+        "dim_code": "patient_source_channel", "name": "患者来源渠道", "domain": "online_consultation", "type": "SCD0",
+        "description": "患者触达平台的服务渠道（线上获客分析维度）。", "members": [
+            {"code": "app", "name": "微医APP"},
+            {"code": "wechat_mini", "name": "微信小程序"},
+            {"code": "wechat_oa", "name": "微信公众号"},
+            {"code": "h5", "name": "H5页面"},
+            {"code": "offline_qr", "name": "线下扫码"},
+            {"code": "referral", "name": "转介绍"},
+        ],
+    },
+    {
+        "dim_code": "visit_status", "name": "就诊状态", "domain": "outpatient", "type": "SCD0",
+        "description": "患者就诊流程状态（预约-候诊-就诊-完成漏斗分析维度）。", "members": [
+            {"code": "pending", "name": "待就诊"},
+            {"code": "waiting", "name": "候诊中"},
+            {"code": "visiting", "name": "就诊中"},
+            {"code": "completed", "name": "已完成"},
+            {"code": "cancelled", "name": "已取消"},
+            {"code": "no_show", "name": "爽约"},
+        ],
+    },
+    {
+        "dim_code": "payment_method", "name": "支付方式", "domain": "medical_fee", "type": "SCD0",
+        "description": "患者医疗费用支付工具（交易分析维度）。", "members": [
+            {"code": "wechat", "name": "微信支付"},
+            {"code": "alipay", "name": "支付宝"},
+            {"code": "unionpay", "name": "银联"},
+            {"code": "medical_account", "name": "医保个账"},
+            {"code": "insurance_direct", "name": "商保直付"},
         ],
     },
 ]
@@ -584,8 +694,13 @@ async def seed_terms(db: AsyncSession) -> int:
 # 灌入维度 + 成员
 # ---------------------------------------------------------------------------
 async def seed_dimensions(db: AsyncSession) -> int:
-    """灌入医疗业务维度及成员（PUBLISHED 直灌），返回新增维度数。"""
+    """灌入医疗业务维度及成员（PUBLISHED 直灌），返回新增维度数。
+
+    幂等增强：维度已存在时校验成员集合是否与脚本定义一致（如脚本扩充了成员），
+    不一致则先删旧成员再重灌，保证参照数据与脚本同步；一致则跳过。
+    """
     created = 0
+    refreshed = 0
     existing = {
         row.dim_code
         for row in (
@@ -593,23 +708,53 @@ async def seed_dimensions(db: AsyncSession) -> int:
         ).all()
     }
     for spec in DIMENSION_SEEDS:
-        if spec["dim_code"] in existing:
+        dim_code = spec["dim_code"]
+        if dim_code not in existing:
+            dim = Dimension(
+                dim_code=dim_code,
+                name=spec["name"],
+                domain=spec["domain"],
+                type=spec["type"],
+                description=spec["description"],
+                owner_id=DIM_OWNER_ID,
+                status="PUBLISHED",
+            )
+            db.add(dim)
+            await db.flush()
+            for m in spec["members"]:
+                db.add(
+                    DimensionMember(
+                        dim_code=dim.dim_code,
+                        member_code=m["code"],
+                        member_name=m["name"],
+                        parent_code=None,
+                        path=None,
+                        attributes=m.get("attributes"),
+                        status="PUBLISHED",
+                    )
+                )
+            created += 1
+            logger.info("dimension_created", dim_code=dim_code, members=len(spec["members"]))
             continue
-        dim = Dimension(
-            dim_code=spec["dim_code"],
-            name=spec["name"],
-            domain=spec["domain"],
-            type=spec["type"],
-            description=spec["description"],
-            owner_id=DIM_OWNER_ID,
-            status="PUBLISHED",
+        # 已存在：成员集合不一致则刷新（删旧重灌），保证与脚本定义一致
+        current = set(
+            (
+                await db.execute(
+                    select(DimensionMember.member_code).where(
+                        DimensionMember.dim_code == dim_code,
+                        DimensionMember.deleted_at.is_(None),
+                    )
+                )
+            ).scalars()
         )
-        db.add(dim)
-        await db.flush()
+        expected = {m["code"] for m in spec["members"]}
+        if current == expected:
+            continue
+        await db.execute(delete(DimensionMember).where(DimensionMember.dim_code == dim_code))
         for m in spec["members"]:
             db.add(
                 DimensionMember(
-                    dim_code=dim.dim_code,
+                    dim_code=dim_code,
                     member_code=m["code"],
                     member_name=m["name"],
                     parent_code=None,
@@ -618,9 +763,16 @@ async def seed_dimensions(db: AsyncSession) -> int:
                     status="PUBLISHED",
                 )
             )
-        created += 1
-        logger.info("dimension_created", dim_code=spec["dim_code"], members=len(spec["members"]))
+        refreshed += 1
+        logger.info(
+            "dimension_refreshed",
+            dim_code=dim_code,
+            old_members=len(current),
+            new_members=len(spec["members"]),
+        )
     await db.flush()
+    if refreshed:
+        logger.info("dimensions_refreshed_total", count=refreshed)
     return created
 
 
