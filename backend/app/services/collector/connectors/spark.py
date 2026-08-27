@@ -6,7 +6,8 @@ Spark Thrift Server 暴露 HiveServer2 兼容协议（JDBC ``jdbc:hive2://host:p
 
 - 无增量支持，始终全量
 - 单表 try/catch 跳过容错
-- 生产语义（FR-030）：按 connection_config.database 过滤；为空时枚举全部库
+- 生产语义（FR-030）：采集范围 = 目标库列表 → 显式连接库 → 未配置时枚举全部库；
+  连接库 database 仅作连接凭据（与 Hive 一致）
 - @registry.register("spark") 注册
 
 beeline 命令示例::
@@ -33,11 +34,15 @@ class SparkCollector(HiveCollector):
 
 @registry.register("spark")
 def create_spark_collector(cfg: dict[str, Any]) -> SparkCollector:
-    """Spark 采集器工厂函数。"""
+    """Spark 采集器工厂函数。
+
+    与 Hive 一致：连接库 database 仅作连接凭据，未填为 None（JDBC 用 default 兜底），
+    采集范围由目标库列表/全库枚举决定。
+    """
     return SparkCollector(
         host=cfg.get("host", "127.0.0.1"),
         port=cfg.get("port", 10000),
         user=cfg.get("user", ""),
         password=cfg.get("password", ""),
-        database=cfg.get("database", "default"),
+        database=cfg.get("database") or None,
     )

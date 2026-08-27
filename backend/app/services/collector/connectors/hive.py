@@ -5,7 +5,9 @@
 
 - 无增量支持，始终全量
 - 单表 try/catch 跳过容错
-- 生产语义（FR-030）：按 connection_config.database 过滤；为空时枚举全部库
+- 生产语义（FR-030）：采集范围 = 目标库列表（DataSource.databases）→ 显式连接库 →
+  未配置任何库时枚举全部库；连接库 ``connection_config.database`` 仅作连接凭据（JDBC URL），
+  不参与采集范围（对齐前端「目标库留空=全部库」）
 - @registry.register("hive") 注册
 
 beeline 命令示例::
@@ -45,7 +47,7 @@ class HiveCollector(BaseCollector):
         port: int = 10000,
         user: str = "",
         password: str = "",
-        database: str = "default",
+        database: str | None = None,
         classifier: SensitivityClassifier | None = None,
     ) -> None:
         super().__init__(classifier)
@@ -53,8 +55,11 @@ class HiveCollector(BaseCollector):
         self._port = port
         self._user = user
         self._password = password
-        self._database = database
-        self._jdbc_url = f"jdbc:hive2://{host}:{port}/{database}"
+        # 连接库 database 仅作连接凭据（JDBC URL 用），**不参与采集范围**——
+        # 未显式配置时保持 None（collect 走枚举全部库），与前端
+        # 「连接库仅作连接凭据；目标库留空=全部库」语义及 hive_metastore 对齐。
+        self._database = database or None
+        self._jdbc_url = f"jdbc:hive2://{host}:{port}/{database or 'default'}"
 
     async def _execute(self, sql: str) -> list[list[str]]:
         """通过 beeline CLI 执行 SQL，解析输出为表格数据。
@@ -129,8 +134,9 @@ class HiveCollector(BaseCollector):
     async def collect(self, source: Any) -> CollectResult:
         source_id = getattr(source, "source_id", "?")
 
-        # 目标库优先级：DataSource.databases（多库）→ connection_config.database（单库）
-        # → 枚举全部非系统库
+        # 采集范围优先级：DataSource.databases（多目标库）→ 显式连接库（单库，
+        # 向后兼容裸表名实体）→ 枚举全部库（未配置任何库时，对齐前端「留空=全部库」）。
+        # 连接库 database 不再是隐式采集范围：工厂未填时传 None，绝不默认扫 default 空库。
         if getattr(self, "_databases", None):
             schemas = list(self._databases)
         elif self._database:
@@ -146,12 +152,19 @@ class HiveCollector(BaseCollector):
         failed_specs: list[FailedSpec] = []
 
         for schema in schemas:
-            safe_schema = self._safe_ident(schema)
-            # 获取表列表
+            # 库名校验包进 try：枚举出的非法库名（如含点号）跳过，不拖垮整批
+            try:
+                safe_schema = self._safe_ident(schema)
+            except Exception as exc:  # noqa: BLE001 - 非法库名跳过并记录
+                logger.warning("采集源 %s 库名非法跳过: %s (%s)", source_id, schema, exc)
+                failed_specs.append(FailedSpec(entity_name=schema, error=str(exc)))
+                continue
+            # 获取表列表——失败记入 failed_specs（避免「全部失败却静默 0 表」难排查）
             try:
                 table_rows = await self._execute(f"SHOW TABLES IN {safe_schema}")
             except Exception as exc:
                 logger.warning("采集源 %s 库 %s 表列表失败: %s", source_id, schema, exc)
+                failed_specs.append(FailedSpec(entity_name=schema, error=str(exc)))
                 continue
 
             for row in table_rows:
@@ -223,11 +236,15 @@ class HiveCollector(BaseCollector):
 
 @registry.register("hive")
 def create_hive_collector(cfg: dict[str, Any]) -> HiveCollector:
-    """Hive 采集器工厂函数。"""
+    """Hive 采集器工厂函数。
+
+    连接库 ``database`` 仅作连接凭据：未填时为 None（JDBC URL 用 default 兜底），
+    采集范围由目标库列表/全库枚举决定——避免「默认只扫 default 空库 → 注册 0」。
+    """
     return HiveCollector(
         host=cfg.get("host", "127.0.0.1"),
         port=cfg.get("port", 10000),
         user=cfg.get("user", ""),
         password=cfg.get("password", ""),
-        database=cfg.get("database", "default"),
+        database=cfg.get("database") or None,
     )

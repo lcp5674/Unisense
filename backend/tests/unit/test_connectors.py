@@ -248,6 +248,76 @@ async def test_hive_collector_parses_beeline_output():
     assert result.specs[1].schema_json["columns"][0]["comment"] == ""
 
 
+async def test_hive_collector_enumerates_all_dbs_when_no_database():
+    """未配置连接库时枚举全部库采集（修复默认只扫 default 空库 → 注册 0）。
+
+    前端语义「连接库仅作连接凭据；目标库留空=全部库」：HiveCollector 未显式
+    传 database 时 ``_database`` 为 None，collect 走 SHOW DATABASES 枚举全部库，
+    entity_name 带库前缀（``schema.table``），不再固定扫 default 单库。
+    """
+    collector = HiveCollector(host="hive-host")
+
+    async def mock_execute(sql: str) -> list[list[str]]:
+        if "SHOW DATABASES" in sql:
+            return [["ods"], ["dwd"]]
+        if "SHOW TABLES" in sql:
+            return [["orders"]] if "ods" in sql else [["fee_di"]]
+        if "DESCRIBE" in sql:
+            return [["order_id", "bigint"]]
+        return []
+
+    collector._execute = mock_execute  # type: ignore[assignment]
+    result = await collector.collect(MagicMock(source_id="hive1", domain="test_db"))
+
+    assert isinstance(result, CollectResult)
+    assert len(result.specs) == 2
+    # 枚举全部库 → 实体名带库前缀（跨库不冲突）
+    assert result.specs[0].entity_name == "ods.orders"
+    assert result.specs[1].entity_name == "dwd.fee_di"
+
+
+async def test_hive_collector_records_failed_schema_listing():
+    """SHOW TABLES IN 失败记入 failed_specs（避免「全部失败却静默 0 表」难排查）。"""
+    collector = HiveCollector(host="hive-host")
+
+    async def mock_execute(sql: str) -> list[list[str]]:
+        if "SHOW DATABASES" in sql:
+            return [["ods"], ["locked"]]
+        if "SHOW TABLES" in sql:
+            raise ExternalDependencyError("Permission denied: locked")
+        return []
+
+    collector._execute = mock_execute  # type: ignore[assignment]
+    result = await collector.collect(MagicMock(source_id="hive1", domain="test_db"))
+
+    assert len(result.specs) == 0
+    assert len(result.failed_specs) == 2
+    assert result.failed_specs[0].entity_name == "ods"
+    assert "Permission denied" in result.failed_specs[0].error
+
+
+async def test_hive_and_spark_factory_database_default_none():
+    """工厂未填 database 时传 None（不再默认 'default' 空库），JDBC URL 用 default 兜底。
+
+    回归：此前 ``cfg.get("database", "default")`` 导致连接库恒为 'default'，
+    collect 只扫 default 单库 → 用户未配置任何库时「注册 0」。
+    """
+    from app.services.collector.connectors.hive import create_hive_collector
+    from app.services.collector.connectors.spark import create_spark_collector
+
+    hive = create_hive_collector({"host": "h", "port": 10000})
+    assert hive._database is None
+    assert hive._jdbc_url == "jdbc:hive2://h:10000/default"
+
+    spark = create_spark_collector({"host": "s", "port": 10000})
+    assert spark._database is None
+    assert spark._jdbc_url == "jdbc:hive2://s:10000/default"
+
+    # 显式填连接库仍生效（单库 + 裸表名兼容既有行为）
+    hive_explicit = create_hive_collector({"host": "h", "database": "dwd"})
+    assert hive_explicit._database == "dwd"
+
+
 # ---------- SparkCollector ----------
 
 
