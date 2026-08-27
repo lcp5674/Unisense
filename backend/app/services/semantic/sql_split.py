@@ -35,6 +35,7 @@ from app.services.semantic.sql_infer import (
     _INDUSTRIAL_DIALECTS,
     SqlProfile,
     parse_sql_profile,
+    sql_has_arithmetic,
 )
 
 # 引号字符（单/双/反引号）——分号扫描须跳过字符串/标识符内的分号
@@ -645,14 +646,22 @@ def _build_atomic_candidate(
         metric_code = generate_metric_code(domain_code, measure_table, code_col, period)
     # LLM 兜底场景自带建议名（measure["name"]）优先；规则层（无 name）走 auto_fill
     candidate_name = measure.get("name") or fields["name"]["value"]
-    # OneData 语义类型判定（周期驱动，变体口径）：原子指标 = 逻辑度量 + 基础统计
-    # 粒度（日），不含业务限定与时间周期；派生指标 = 原子指标 + 业务限定 + 时间
-    # 周期（月/周/季/年/小时等非日周期）。
+    # OneData 语义类型判定（周期驱动 + 比率/运算信号，变体口径）：原子指标 = 逻辑
+    # 度量 + 基础统计粒度（日），不含业务限定与时间周期；派生指标 = 原子指标 + 业务
+    # 限定 + 时间周期（月/周/季/年/小时等非日周期）。
     # SQL 解析出的候选天然带业务限定 + 周期，业务限定与非日周期均归派生（对齐用户
     # 建模认知——「本月活跃医生数」= 活跃医生数 + 业务限定 + 月周期）。日粒度作为
-    # 原子常态统计粒度不视为派生周期；``derived`` 字段（比率/条件列）是口径核对
-    # 标记，与类型解耦。前端类型 Select 保留可改（派生↔原子）。
-    cand_type = "derived" if (period and period != "day") else "atomic"
+    # 原子常态统计粒度不视为派生周期。
+    # R1（二次审查）：比率/条件度量（derived=True，如 ROUND(SUM/NULLIF)、CASE 比率等
+    # 无聚合包裹的表达式）在整句含四则运算时归复合（OneData：多指标运算/比率=复合），
+    # 与单条 auto_suggest 的 _infer_type 对齐——修复批量/单条两路径类型分裂；纯条件
+    # 聚合（count(distinct case...)）无算术运算时仍走周期驱动（归派生/原子）。
+    if derived and raw_sql and sql_has_arithmetic(raw_sql):
+        cand_type = "composite"
+    elif period and period != "day":
+        cand_type = "derived"
+    else:
+        cand_type = "atomic"
     return {
         "key": f"{idx}:{alias or col}",
         "metric_code": metric_code,
@@ -687,29 +696,6 @@ def _build_atomic_candidate(
     }
 
 
-def _sql_has_arithmetic(sql: str) -> bool:
-    """语句是否含四则运算/比率结构（复合指标判定依据，B4）。
-
-    复合 = 多指标四则运算/比率（OneData）。两个独立聚合列共存（如
-    ``SELECT SUM(a), SUM(b)``）**不构成**复合——仅当语句含 Div/Mul/Add/Sub/Mod
-    运算时才应合成复合候选，避免把「多度量并列」误判为「指标间运算」。
-    """
-    if not sql:
-        return False
-    try:
-        ast = sqlglot.parse_one(sql)
-        if ast is not None:
-            for node in ast.find_all(exp.Binary):
-                if isinstance(node, (exp.Div, exp.Mul, exp.Add, exp.Sub, exp.Mod)):
-                    return True
-    except Exception:
-        pass
-    # AST 解析失败时退化为正则：剥离注释与字符串字面量后检查算术运算符
-    text = re.sub(r"--[^\n]*|/\*.*?\*/", " ", sql)
-    text = re.sub(r"'[^']*'|\"[^\"]*\"", " ", text)
-    return bool(re.search(r"[*/+\-]", text))
-
-
 def _build_composite_candidate(
     *,
     idx: int,
@@ -729,8 +715,11 @@ def _build_composite_candidate(
     ``raw_sql``（P1-1/P2-5）：复合候选所属语句原始 SQL，批量创建透传落 Metric.raw_sql。
     仅当语句含四则运算/比率时才合成（B4）——无运算的多度量并列不构成复合。
     """
-    if not _sql_has_arithmetic(sql):
+    if not sql_has_arithmetic(sql):
         return None
+    # R1：含算术的比率列已被 _build_atomic_candidate 判为 composite，不应再作为
+    # 合成复合的依赖原子（避免「复合依赖复合」嵌套混乱）。合成复合只基于纯原子候选。
+    atoms = [c for c in atoms if c.get("type") == "atomic"]
     codes = [c["metric_code"] for c in atoms if c.get("metric_code")]
     if len(codes) < 2:
         return None

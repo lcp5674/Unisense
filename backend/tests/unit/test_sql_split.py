@@ -286,7 +286,7 @@ async def test_infer_sql_batch_no_arith_no_composite() -> None:
 
 
 async def test_infer_sql_batch_synthesize_composite_with_arith() -> None:
-    """B4：语句含四则运算（SUM/SUM 比率）→ 合成复合（依赖组内原子）。"""
+    """R1/B4：比率列（SUM/SUM 相除）被自动识别为复合候选，不再「派生列+手工合成」。"""
     arith_sql = (
         "SELECT dt, SUM(amount) AS gmv, "
         "SUM(amount)/COUNT(DISTINCT user_id) AS arpu "
@@ -301,13 +301,14 @@ async def test_infer_sql_batch_synthesize_composite_with_arith() -> None:
     )
     composites = [c for c in result["candidates"] if c["type"] == "composite"]
     atoms = [c for c in result["candidates"] if c["type"] == "atomic"]
-    assert len(atoms) == 2
+    # R1：arpu（含除法）直接判 composite，原子仅剩 gmv；不再合成 "0:composite"
+    # （合成复合只基于纯原子，原子<2 时不合成，避免复合依赖复合）
+    assert len(atoms) == 1
     assert len(composites) == 1
     comp = composites[0]
-    assert comp["key"] == "0:composite"
-    assert comp["metric_code"].startswith("sales_order_")
-    assert set(comp["dependencies"]) == {a["metric_code"] for a in atoms}
-    assert comp["definition_json"]["sql"] == arith_sql
+    assert comp["key"] == "0:arpu"
+    assert comp["aggregation"] is None  # 派生比率列：聚合占位 None
+    assert comp["definition_json"]["expression"]  # 口径由表达式承载
 
 
 async def test_infer_sql_batch_single_measure_no_composite() -> None:

@@ -25,7 +25,7 @@ from typing import Any, TypedDict
 
 import structlog
 
-from app.services.semantic.sql_infer import SqlProfile, parse_sql_profile
+from app.services.semantic.sql_infer import SqlProfile, parse_sql_profile, sql_has_arithmetic
 
 logger = structlog.get_logger("unisense.auto_fill")
 
@@ -353,19 +353,17 @@ def _infer_unit(profile: dict[str, Any]) -> SuggestionField:
 
 
 def _is_ratio_expression(profile: dict[str, Any]) -> bool:
-    """SQL 是否比率/复合表达式（含除法或跨度量运算）。"""
+    """SQL 是否比率/复合表达式（含四则运算/跨度量运算，OneData 复合指标判定）。
+
+    与批量路径 ``_build_composite_candidate`` 共用 ``sql_has_arithmetic``（AST 优先 +
+    正则兜底，含 Div/Mul/Add/Sub/Mod），保证单条/批量两路径的运算检测一致——修复
+    R2：补 *（Mul）/ %（Mod），并覆盖单投影双聚合（如 ``SELECT SUM(a)*SUM(b)``，
+    measures==1 但含乘法运算，此前不判复合）。
+    """
     sql_profile: SqlProfile | None = profile.get("sql_profile")
     if not sql_profile or not sql_profile.sql:
         return False
-    sql = sql_profile.sql.lower()
-    return bool(
-        ("/" in sql and ("sum(" in sql or "count(" in sql))
-        or (
-            sql_profile.measures
-            and len(sql_profile.measures) >= 2
-            and ("/" in sql or "+" in sql or "-" in sql)
-        )
-    )
+    return sql_has_arithmetic(sql_profile.sql)
 
 
 def _infer_type(profile: dict[str, Any]) -> SuggestionField:

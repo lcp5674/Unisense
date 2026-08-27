@@ -4931,8 +4931,9 @@ class MetricService(BaseService):
                 )
 
         # Phase2 派生/复合：savepoint 外先依赖预检，缺依赖直接跳过（不浪费嵌套事务）。
-        # 派生候选（用户将原子在线改为派生：依赖指标 + 计算表达式）与复合同走依赖
-        # 预检 + savepoint 创建；派生额外透传 mount（OneData 挂载层，源表/列/粒度/周期）。
+        # 派生候选（用户将原子在线改为派生：原子指标 + 业务限定 + 时间周期，依赖可选）
+        # 与复合同走依赖预检 + savepoint 创建；派生额外透传 mount（OneData 挂载层，
+        # 源表/列/粒度/周期）——纯周期派生（无依赖、自带口径）无需依赖即可直接创建。
         for cand in request.candidates:
             if cand.type not in ("derived", "composite"):
                 continue

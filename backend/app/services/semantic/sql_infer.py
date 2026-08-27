@@ -825,6 +825,31 @@ _DIALECT_AGG_HINT = re.compile(
 )
 
 
+def sql_has_arithmetic(sql: str) -> bool:
+    """SQL 文本是否含四则运算/比率结构（复合指标判定依据，B4/R2 共享）。
+
+    复合 = 多指标四则运算/比率（OneData）。两个独立聚合列共存（如
+    ``SELECT SUM(a), SUM(b)``）**不构成**复合——仅当语句含 Div/Mul/Add/Sub/Mod
+    运算时才应判复合，避免把「多度量并列」误判为「指标间运算」。该判定被
+    ``sql_split``（批量合成复合候选）与 ``auto_fill``（单条类型推断）共用，
+    保证批量/单条两路径的运算检测一致。
+    """
+    if not sql:
+        return False
+    try:
+        ast = sqlglot.parse_one(sql)
+        if ast is not None:
+            for node in ast.find_all(exp.Binary):
+                if isinstance(node, (exp.Div, exp.Mul, exp.Add, exp.Sub, exp.Mod)):
+                    return True
+    except Exception:
+        pass
+    # AST 解析失败时退化为正则：剥离注释与字符串字面量后检查算术运算符
+    text = re.sub(r"--[^\n]*|/\*.*?\*/", " ", sql)
+    text = re.sub(r"'[^']*'|\"[^\"]*\"", " ", text)
+    return bool(re.search(r"[*/+\-]", text))
+
+
 def _best_dialect_ast(
     sql: str, baseline: exp.Expr | None
 ) -> exp.Expr | None:

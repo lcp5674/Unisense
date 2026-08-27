@@ -358,7 +358,7 @@ def test_atomic_sql_mode_passes():
     assert req.definition_json["sql"]
 
 
-def test_derived_requires_dependencies_and_expression():
+def test_derived_dependencies_optional_but_expression_required():
     """OneData 派生 = 原子 + 时间周期：依赖可选，但须有计算表达式。"""
     # 派生无依赖但有表达式 → 通过（纯周期派生，如「本月活跃医生数」不依赖其他指标）
     req = MetricCreateRequest(

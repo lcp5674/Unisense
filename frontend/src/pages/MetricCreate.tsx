@@ -262,6 +262,9 @@ export function MetricCreate() {
   const [metricType, setMetricType] = useState<MetricType>("atomic");
   const isAtomic = metricType === "atomic";
   const isDerivedOrComposite = metricType === "derived" || metricType === "composite";
+  // R5（二次审查）：仅复合指标强制计算表达式（OneData：复合=多指标运算）；派生纯周期
+  // 指标（无依赖、自带口径）不填公式——计算表达式 Form.Item 红标仅 composite 显示。
+  const isComposite = metricType === "composite";
 
   // 统一返回上一入口：优先回退浏览器历史（总览快捷入口等），无上一页（URL 直达）时兜底总览仪表
   function handleBack() {
@@ -1130,6 +1133,20 @@ export function MetricCreate() {
   // 可把同批候选改为原子/派生/复合，不再受"只能是原子"限制。
   function handleSqlBatchTypeChange(key: string, type: MetricType) {
     handleSqlBatchEdit(key, { type });
+  }
+
+  // R6（二次审查）：周期/粒度驱动联动——原子候选改为非日周期（如 month）时自动升级为
+  // 派生（OneData：原子 = 逻辑度量 + 基础统计粒度（日），非日周期归派生）。避免「原子
+  // 却带非日周期」的语义矛盾（解析候选默认 day，用户改周期即隐含改类型意图）。
+  function handleSqlBatchPeriodChange(
+    key: string,
+    c: SqlBatchCandidate,
+    field: "period" | "granularity",
+    v: string,
+  ) {
+    const patch: Partial<SqlBatchCandidate> = { [field]: v };
+    if (c.type === "atomic" && v !== "day") patch.type = "derived";
+    handleSqlBatchEdit(key, patch);
   }
 
   function handleSqlBatchDepChange(key: string, deps: string[]) {
@@ -2240,7 +2257,7 @@ export function MetricCreate() {
                   {isDerivedOrComposite && (
                     <Form.Item
                       label="计算表达式"
-                      required
+                      required={isComposite}
                       extra="引用上方依赖指标编码的计算式（MEL 语法，如 gmv / order_cnt；复合指标如 SUM(region_in_east_gmv) / SUM(total_gmv)）。"
                     >
                       <Input
@@ -2810,7 +2827,7 @@ export function MetricCreate() {
                                       size="small"
                                       style={{ width: 110 }}
                                       value={c.period || "day"}
-                                      onChange={(v) => handleSqlBatchEdit(c.key, { period: v })}
+                                      onChange={(v) => handleSqlBatchPeriodChange(c.key, c, "period", v)}
                                       data-testid={`sql-batch-period-${c.key}`}
                                       options={PERIOD_OPTIONS}
                                     />
@@ -2820,7 +2837,7 @@ export function MetricCreate() {
                                       size="small"
                                       style={{ width: 100 }}
                                       value={c.granularity || c.period || "day"}
-                                      onChange={(v) => handleSqlBatchEdit(c.key, { granularity: v })}
+                                      onChange={(v) => handleSqlBatchPeriodChange(c.key, c, "granularity", v)}
                                       data-testid={`sql-batch-granularity-${c.key}`}
                                       options={PERIOD_OPTIONS}
                                     />

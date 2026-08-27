@@ -1410,6 +1410,18 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
   });
 
+  it("R5：派生类型下计算表达式无必填红标（仅复合必填表达式）", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await goToStep(1);
+    fireEvent.click(screen.getByText("派生指标"));
+    await goToStep(2);
+    await waitFor(() => expect(screen.getByText("计算表达式")).toBeTruthy());
+    // R5：派生 = 原子 + 业务限定 + 时间周期，计算表达式非必填——Form.Item 无 required 红标
+    const item = screen.getByText("计算表达式").closest(".ant-form-item") as HTMLElement;
+    expect(item.className).not.toContain("ant-form-item-required");
+  });
+
   it("原子指标未选逻辑度量且未填口径提交 → 前端拦截并提示来源必填", async () => {
     mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
     renderPage();
@@ -1956,7 +1968,7 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     });
   });
 
-  it("批量创建：候选周期行内可编辑，提交携带修改后的 period（P2-9）", async () => {
+  it("批量创建：候选周期行内可编辑，提交携带修改后的 period（P2-9/R6）", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
@@ -1971,8 +1983,11 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     await waitFor(() => {
       expect(mockedBatchFromSql).toHaveBeenCalled();
       const body = mockedBatchFromSql.mock.calls[0][0];
-      const atom = body.candidates.find((c: { type: string }) => c.type === "atomic");
+      const atom = body.candidates.find((c: { key: string }) => c.key === "0:amount");
       expect(atom?.period).toBe("month");
+      // R6：原子候选选非日周期 → type 自动联动为派生（原子 = 逻辑度量 + 日粒度，
+      // 非日周期归派生），不再出现「原子却带非日周期」
+      expect(atom?.type).toBe("derived");
     });
   });
 

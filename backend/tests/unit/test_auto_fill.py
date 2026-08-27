@@ -218,6 +218,22 @@ class TestInferMetricSql:
         result = infer_metric(profile)
         assert result["fields"]["type"]["value"] == "composite"
 
+    def test_ratio_type_composite_mul_single_projection(self) -> None:
+        """R2：单投影双聚合（SELECT SUM(a)*SUM(b)）含乘法运算 → 复合指标。
+
+        修复前 `_is_ratio_expression` 只识别 `/` 与 ≥2 度量分支的 `/|+|-`，
+        缺 Mul/Mod，且 measures==1 的单投影双聚合不判复合（与批量路径
+        `_build_composite_candidate` 的 `sql_has_arithmetic` 判定不一致）。
+        """
+        sql = (
+            "SELECT SUM(pay)*SUM(order_cnt) AS weighted "
+            "FROM dwd.sales_detail WHERE dt = DATE_SUB(CURRENT_DATE, INTERVAL 1 DAY)"
+        )
+        profile = build_profile(sql=sql, period="day")
+        profile["domain_code"] = ""
+        result = infer_metric(profile)
+        assert result["fields"]["type"]["value"] == "composite"
+
     def test_semi_additive_for_balance(self) -> None:
         profile = build_profile(
             source_table="dws.account_balance", measure_column="end_bal", period="day"
