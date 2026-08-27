@@ -40,7 +40,7 @@ vi.mock("../api", async () => {
   };
 });
 
-import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, parseSqlBatch, parseSqlTables, batchRegisterFromSql, checkConflict, createMetric, listMetrics, listMeasureCatalogs, fetchCurrentUser, refineMetricDefinition, getMetric, updateMetric } from "../api";
+import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, parseSqlBatch, parseSqlTables, batchRegisterFromSql, checkConflict, createMetric, listMetrics, listMeasureCatalogs, listDimensions, fetchCurrentUser, refineMetricDefinition, getMetric, updateMetric } from "../api";
 import type { DBCatalog, SubjectDomainTreeNode, AutoSuggestResponse, DomainSuggestionResponse, SqlBatchParseResult, MetricResponse } from "../types";
 
 const mockedTree = vi.mocked(listDomainTree);
@@ -1461,6 +1461,31 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     await goToStep(1);
     expect(screen.getByText("关联维度（可选）")).toBeTruthy();
     expect(screen.getByText("选择平台维度（可搜索）")).toBeTruthy();
+  });
+
+  it("关联维度下拉加载平台维度——不带 status 过滤（防 status=active 误用回归：维度状态枚举无 active，传了选项框恒空）", async () => {
+    const mockedDims = vi.mocked(listDimensions);
+    mockedDims.mockResolvedValue({
+      items: [
+        { id: 1, dim_code: "dept", name: "科室", description: "", domain: "sales", owner_id: 1, status: "DRAFT", row_version: 1 },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 200,
+    } as any);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    // 修复核心：listDimensions 调用不得携带 status（此前误传 "active" → 后端 Dimension.status=="active" 精确匹配恒空）
+    await waitFor(() => {
+      expect(mockedDims).toHaveBeenCalled();
+      const lastParams = mockedDims.mock.calls[mockedDims.mock.calls.length - 1]?.[0];
+      expect(lastParams).toBeDefined();
+      expect(lastParams!.status).toBeUndefined();
+    });
+    // 选项框展示 mock 返回的维度（label = `${name} (${dim_code})`）——展开关联维度下拉后断言选项出现
+    await goToStep(1);
+    fireEvent.mouseDown(screen.getByText("选择平台维度（可搜索）"));
+    await waitFor(() => expect(screen.getByText("科室 (dept)")).toBeTruthy());
   });
 
   it("派生指标未选依赖（纯周期派生）提交 → 前端放行（依赖/表达式均可选）", async () => {

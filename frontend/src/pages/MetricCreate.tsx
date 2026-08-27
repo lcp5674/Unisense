@@ -527,9 +527,11 @@ export function MetricCreate() {
     }
   }, [dictOptions, form]);
 
-  // 加载平台活跃维度（维度映射下拉的数据源，来自维度管理模块）
+  // 加载平台维度（关联维度下拉的数据源，来自维度管理模块）。
+  // 注意：不带 status 过滤——维度状态枚举是 DRAFT/REVIEW/PUBLISHED/DEPRECATED（无 "active"），
+  // 传 status="active" 会被后端精确匹配返回空；与维度管理页/MetricDetail 编辑弹窗保持一致展示全部未删除维度。
   useEffect(() => {
-    listDimensions({ status: "active", page_size: 200 })
+    listDimensions({ page_size: 200 })
       .then((res) =>
         setDimensionOptions(
           (res.items ?? []).map((d: Dimension) => ({
