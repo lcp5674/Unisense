@@ -1505,6 +1505,28 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     expect(body.definition_json.base_atomic).toBe("active_doctor_daily");
   });
 
+  it("基础原子指标下拉框默认预置已发布原子指标（无需输入即可点选，修复空值）", async () => {
+    mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
+    // 挂载时预加载应取回已发布原子指标
+    mockedMetrics.mockResolvedValue({
+      items: [
+        { metric_code: "active_doctor_daily", name: "日活跃医生数", type: "atomic", status: "PUBLISHED" },
+      ],
+    } as any);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await goToStep(1);
+    fireEvent.click(screen.getByText("派生指标"));
+    expect(screen.getByText("基础原子指标")).toBeTruthy();
+    // 打开下拉框但不输入关键词——应直接看到挂载时预置的原子指标（修复此前空值必须手打搜索）
+    const baseItem = screen.getByText("基础原子指标").closest(".ant-form-item") as HTMLElement;
+    fireEvent.mouseDown(baseItem.querySelector(".ant-select-selector") as HTMLElement);
+    await waitFor(() =>
+      expect(screen.getByText("日活跃医生数 (active_doctor_daily)")).toBeTruthy(),
+    );
+  });
+
   it("原子指标未选逻辑度量且未填口径提交 → 前端拦截并提示来源必填", async () => {
     mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
     renderPage();

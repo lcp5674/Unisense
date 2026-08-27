@@ -226,6 +226,22 @@ const TYPE_HINTS: Record<MetricType, string> = {
     "多个指标四则运算/比率（如 医生留存率 = 当月活跃 ÷ 上月活跃）。核心配置：依赖指标与计算表达式。",
 };
 
+// 取「基础原子指标」绑定选项（OneData：派生 = 基础原子 + 业务限定 + 时间周期）。
+// 只列已发布原子指标；keyword 为空返回全部已发布原子指标，非空按编码/名称模糊匹配。
+// page_size 上限为 100（后端 MetricListParams 约束），避免超界 422；剩余靠关键词搜索收敛。
+async function fetchBaseAtomicOptions(
+  keyword?: string,
+): Promise<Array<{ value: string; label: string }>> {
+  const res = await listMetrics({
+    status: "PUBLISHED",
+    keyword: keyword && keyword.trim() ? keyword.trim() : undefined,
+    page_size: 100,
+  });
+  return (res.items ?? [])
+    .filter((m) => m.type === "atomic")
+    .map((m) => ({ value: m.metric_code, label: `${m.name} (${m.metric_code})` }));
+}
+
 export function MetricCreate() {
   const navigate = useNavigate();
   const { message } = AntApp.useApp();
@@ -539,6 +555,13 @@ export function MetricCreate() {
         ),
       )
       .catch(() => setMeasureOptions([]));
+    // 初始加载已发布原子指标，作为「基础原子指标」绑定选项（避免下拉框空值）；
+    // 用户未输入关键词时即可直接点选，关键词搜索另走 handleBaseAtomicSearch（防抖）。
+    setBaseAtomicSearching(true);
+    fetchBaseAtomicOptions()
+      .then(setBaseAtomicOptions)
+      .catch(() => setBaseAtomicOptions([]))
+      .finally(() => setBaseAtomicSearching(false));
   }, []);
 
   // 口径定义区：关联数据表搜索（与源表名一致的惰性交互——空关键词加载平台已采集的表，可关键词搜索）
@@ -1651,14 +1674,8 @@ export function MetricCreate() {
     if (baseAtomicSearchTimer.current) clearTimeout(baseAtomicSearchTimer.current);
     baseAtomicSearchTimer.current = setTimeout(() => {
       setBaseAtomicSearching(true);
-      listMetrics({ status: "PUBLISHED", keyword: q.trim() || undefined, page_size: 50 })
-        .then((res) =>
-          setBaseAtomicOptions(
-            (res.items ?? [])
-              .filter((m) => m.type === "atomic")
-              .map((m) => ({ value: m.metric_code, label: `${m.name} (${m.metric_code})` })),
-          ),
-        )
+      fetchBaseAtomicOptions(q)
+        .then(setBaseAtomicOptions)
         .catch(() => {})
         .finally(() => setBaseAtomicSearching(false));
     }, 300);
