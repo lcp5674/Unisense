@@ -503,7 +503,7 @@ describe("SystemConfig LLM 路由配置", () => {
     });
   });
 
-  it("P1 同优先级上移（均为 0）：第 2 位点「上移」→ 目标行 priority+1 推后，位次不再无变化", async () => {
+  it("P1 同优先级上移（均为 0）：第 2 位点「上移」→ 区间重排：主用 priority+1 推后、备用保持 0，位次严格互换", async () => {
     mockGet.mockResolvedValue(
       listData({
         items: [
@@ -516,7 +516,8 @@ describe("SystemConfig LLM 路由配置", () => {
     render(<SystemConfig />);
     await screen.findByText("备用");
     // 两个实例 priority 均为 0（新建默认）——旧逻辑上移 newP=max(0,0-1)=0 被钳回，
-    // 优先级不变、仍按 ID 并列 → 位次无变化。修复后改为把目标行(主用)推后到 p1。
+    // 优先级不变、仍按 ID 并列 → 位次无变化。区间重排：段 [主用,备用] 交换后重写为
+    // 主用=1、备用=0，位次严格互换（主用 1→2、备用 2→1），其余不动。
     fireEvent.click(screen.getByLabelText("上移 备用"));
     await waitFor(() => {
       expect(mockUpdate).toHaveBeenCalledTimes(1);
@@ -526,7 +527,7 @@ describe("SystemConfig LLM 路由配置", () => {
     expect(mockUpdate).not.toHaveBeenCalledWith(2, expect.objectContaining({ priority: 0 }));
   });
 
-  it("P1 同优先级下移（均为 0）：第 1 位点「下移」→ 自身 priority+1，位次实际下移", async () => {
+  it("P1 同优先级下移（均为 0）：第 1 位点「下移」→ 区间重排：自身 priority+1，位次实际下移", async () => {
     mockGet.mockResolvedValue(
       listData({
         items: [
@@ -540,9 +541,63 @@ describe("SystemConfig LLM 路由配置", () => {
     await screen.findByText("备用");
     fireEvent.click(screen.getByLabelText("下移 主用"));
     await waitFor(() => {
-      // 主用(cur, p0) 下移 → priority+1=1，排在备用之后
+      // 主用(cur, p0) 下移 → 段 [主用,备用] 交换后重写：备用=0（不变）、主用=1，位次互换
       expect(mockUpdate).toHaveBeenCalledWith(1, expect.objectContaining({ priority: 1 }));
     });
+  });
+
+  it("P1 严格相邻交换：3 个同优先级实例，上移第 3 位 → 仅第 2/3 位互换、第 1 位完全不动", async () => {
+    mockGet.mockResolvedValue(
+      listData({
+        items: [
+          { ...PRIMARY_ITEM, id: 1, name: "主用", priority: 0 },
+          { ...PRIMARY_ITEM, id: 2, name: "备用", priority: 0 },
+          { ...PRIMARY_ITEM, id: 3, name: "备用2", priority: 0 },
+        ],
+      }) as never,
+    );
+    mockUpdate.mockResolvedValue({ id: 3 });
+    render(<SystemConfig />);
+    await screen.findByText("备用2");
+    // 旧逻辑：把目标行(备用,id2)推后到 p1 → 排序 备用2(0)、主用(0)、备用(1)，主用位次被挤动。
+    // 区间重排：段 [主用,备用,备用2] 交换后重写为 主用=0、备用2=1、备用=2——
+    // 第 1 位主用完全不动，仅备用(2→3) 与 备用2(3→2) 互换。
+    fireEvent.click(screen.getByLabelText("上移 备用2"));
+    await waitFor(() => {
+      expect(mockUpdate).toHaveBeenCalledTimes(2);
+      expect(mockUpdate).toHaveBeenCalledWith(3, expect.objectContaining({ priority: 1 }));
+      expect(mockUpdate).toHaveBeenCalledWith(2, expect.objectContaining({ priority: 2 }));
+    });
+    // 第 1 位（主用 id=1）未被触碰
+    expect(mockUpdate).not.toHaveBeenCalledWith(1, expect.anything());
+  });
+
+  it("P1 连锁重排：同优先级区间后紧跟更高优先级实例，上移区间末位 → 连锁并入下一区间保位次正确", async () => {
+    mockGet.mockResolvedValue(
+      listData({
+        items: [
+          { ...PRIMARY_ITEM, id: 1, name: "主用", priority: 0 },
+          { ...PRIMARY_ITEM, id: 2, name: "备用", priority: 0 },
+          { ...PRIMARY_ITEM, id: 3, name: "备用2", priority: 0 },
+          { ...PRIMARY_ITEM, id: 4, name: "备用3", priority: 1 },
+        ],
+      }) as never,
+    );
+    mockUpdate.mockResolvedValue({ id: 3 });
+    render(<SystemConfig />);
+    await screen.findByText("备用3");
+    // 段 [主用,备用,备用2] (p0) 重排终点=2 撞上 备用3(p1)，必须连锁并入 →
+    // 段 [主用,备用,备用2,备用3] 交换后重写 0,1,2,3：主用=0（跳过）、备用2=1、
+    // 备用=2、备用3=3。位次：主用1、备用2 3→2、备用 2→3、备用3 4 不动。
+    fireEvent.click(screen.getByLabelText("上移 备用2"));
+    await waitFor(() => {
+      expect(mockUpdate).toHaveBeenCalledTimes(3);
+      expect(mockUpdate).toHaveBeenCalledWith(3, expect.objectContaining({ priority: 1 }));
+      expect(mockUpdate).toHaveBeenCalledWith(2, expect.objectContaining({ priority: 2 }));
+      expect(mockUpdate).toHaveBeenCalledWith(4, expect.objectContaining({ priority: 3 }));
+    });
+    // 第 1 位（主用 id=1）未被触碰
+    expect(mockUpdate).not.toHaveBeenCalledWith(1, expect.anything());
   });
 
   it("P1 同优先级冲突：两个实例优先级相同 → 显示冲突警告图标", async () => {

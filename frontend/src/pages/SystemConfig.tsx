@@ -136,6 +136,75 @@ function computeRank(items: LlmConfigItem[], targetId: number): number {
   return idx === -1 ? 0 : idx + 1;
 }
 
+/**
+ * 构造同优先级相邻交换的更新序列（严格「与相邻交换、其余位次不动」）。
+ *
+ * 排序键 (enabled, priority, id) 下，同优先级区间内顺序由 id 决定——只改被移动的
+ * 两个实例无法表达交换且保持其余实例位次（数学上不可能）。因此对「同 enabled 分组
+ * + 同 priority」的连续区间整体重排：段内执行相邻交换后，把段内 priority 重写为从
+ * 区间起点 p 开始的连续递增值（p, p+1, ...），段内其他实例相对位次不变（仅数值变化）、
+ * 段外实例完全不动；若重排终点撞上同组下一区间起点，连锁并入下一区间，直到终点落在
+ * priority 空隙或分组尾。返回 ``{id, priority}`` 更新列表（值未变的实例跳过）；
+ * 优先级空间不足（段内唯一化超出后端 le=100）时返回 null。
+ */
+function buildSamePrioritySwapUpdates(
+  ranked: LlmConfigItem[],
+  idx: number,
+  dir: -1 | 1,
+): { id: number; priority: number }[] | null {
+  const MAX_PRIORITY = 100; // 对齐后端 LlmConfigPayload.priority le=100
+  const cur = ranked[idx];
+  const p = cur.priority;
+  const groupEnabled = cur.enabled;
+  // 同 enabled 分组内连续同 priority 区间的左/右边界
+  let start = idx;
+  while (
+    start > 0 &&
+    ranked[start - 1].enabled === groupEnabled &&
+    ranked[start - 1].priority === p
+  ) {
+    start--;
+  }
+  let end = idx;
+  while (
+    end < ranked.length - 1 &&
+    ranked[end + 1].enabled === groupEnabled &&
+    ranked[end + 1].priority === p
+  ) {
+    end++;
+  }
+  // 连锁扩展：段重排终点 (p + len - 1) 若 >= 同组下一区间起点，并入下一区间
+  while (end < ranked.length - 1 && ranked[end + 1].enabled === groupEnabled) {
+    const nextP = ranked[end + 1].priority;
+    const len = end - start + 1;
+    if (p + len - 1 < nextP) break;
+    while (
+      end < ranked.length - 1 &&
+      ranked[end + 1].enabled === groupEnabled &&
+      ranked[end + 1].priority === nextP
+    ) {
+      end++;
+    }
+  }
+  const len = end - start + 1;
+  if (p + len - 1 > MAX_PRIORITY) return null; // 优先级空间不足
+  // 段内执行相邻交换（cur 与 target 互换位置）
+  const segment = ranked.slice(start, end + 1);
+  const ci = idx - start;
+  const ti = ci + dir;
+  [segment[ci], segment[ti]] = [segment[ti], segment[ci]];
+  // 重写段内 priority = p, p+1, ...；值未变的实例跳过（减少无效更新）
+  const updates: { id: number; priority: number }[] = [];
+  for (let i = 0; i < segment.length; i++) {
+    const item = segment[i];
+    const newP = p + i;
+    if (item.id != null && item.priority !== newP) {
+      updates.push({ id: item.id, priority: newP });
+    }
+  }
+  return updates;
+}
+
 /** 路由状态概览条（P0-1）：当前路由选中谁 · 启用几个 · 已验证连通几个。 */
 function RoutingOverview({
   data,
@@ -524,7 +593,14 @@ export function SystemConfig() {
     };
   }
 
-  /** P1-5：上移/下移一位——与相邻实例交换优先级（同优先级时按移动方向 ±1，钳制 ≥0）。 */
+  /** P1-5：上移/下移一位——严格与相邻实例交换位次、其余实例位次不动。
+   *
+   * 排序键 (enabled, priority, id)：
+   * - 相邻优先级不同：直接交换两者 priority（其余实例 priority 数值与位次均不动）。
+   * - 相邻优先级相同（按 ID 并列）：同优先级连续区间整体重排（见
+   *   ``buildSamePrioritySwapUpdates``）——段内相邻交换后重写为连续递增 priority，
+   *   段内其他实例相对位次不变（仅数值变化），段外实例完全不动。
+   */
   async function moveRank(id: number, dir: -1 | 1) {
     const ranked = (data?.items ?? [])
       .filter((i) => i.id != null && i.source !== "env")
@@ -541,23 +617,21 @@ export function SystemConfig() {
     setReordering({ id, dir });
     try {
       if (cur.priority !== target.priority) {
-        // 交换两个实例的优先级，保持唯一
+        // 相邻优先级不同：直接交换两个 priority（严格相邻交换，其余完全不动）
         await updateLlmConfig(cur.id, { ...payloadFromItem(cur), priority: target.priority });
         await updateLlmConfig(target.id, { ...payloadFromItem(target), priority: cur.priority });
       } else {
-        // 同优先级（按 ID 排序的并列）：打破并列需让移动方严格越过邻位，否则优先级
-        // 不变、仍按 ID 并列 → 位次无变化（上移时 cur.priority=0 被钳回 0 的 no-op 根因）。
-        // 上移：cur 优先级 -1（>0 可减）；cur=0 无法再减时改为把目标行 +1 推后。
-        // 下移：cur 优先级 +1（<100 可加，对齐后端 le=100）；cur=100 无法再加时改为把目标行 -1 提前。
-        const MAX_PRIORITY = 100; // 对齐后端 LlmConfigPayload.priority le=100
-        if (dir === -1 && cur.priority > 0) {
-          await updateLlmConfig(cur.id, { ...payloadFromItem(cur), priority: cur.priority - 1 });
-        } else if (dir === -1) {
-          await updateLlmConfig(target.id, { ...payloadFromItem(target), priority: target.priority + 1 });
-        } else if (dir === 1 && cur.priority < MAX_PRIORITY) {
-          await updateLlmConfig(cur.id, { ...payloadFromItem(cur), priority: cur.priority + 1 });
-        } else {
-          await updateLlmConfig(target.id, { ...payloadFromItem(target), priority: target.priority - 1 });
+        // 同优先级：区间整体重排（严格相邻交换 + 段外不动）
+        const updates = buildSamePrioritySwapUpdates(ranked, idx, dir);
+        if (updates == null) {
+          message.error("位次调整失败：优先级空间不足（实例过多），请先调整部分实例的优先级");
+          return;
+        }
+        for (const u of updates) {
+          const item = ranked.find((i) => i.id === u.id);
+          if (item) {
+            await updateLlmConfig(u.id, { ...payloadFromItem(item), priority: u.priority });
+          }
         }
       }
       message.success(`已将「${cur.name || cur.provider}」${dir === -1 ? "上移" : "下移"}一位（下次请求起效）`);
