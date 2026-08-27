@@ -181,10 +181,17 @@ class CollectorRepository:
         keyword: str | None,
         health_status: str | None = None,
         owner_id: int | None = None,
+        source_status: str | None = None,
         page: int,
         page_size: int,
     ) -> tuple[Sequence[DataSource], int]:
-        base = select(DataSource).where(DataSource.deleted_at.is_(None))
+        base = select(DataSource)
+        # 源状态过滤（对齐 list_catalog_databases 语义）：deleted 查已软删源
+        # （采集目录追溯保留场景），其余默认仅活跃源（deleted_at IS NULL）。
+        if source_status == "deleted":
+            base = base.where(DataSource.deleted_at.isnot(None))
+        else:
+            base = base.where(DataSource.deleted_at.is_(None))
         if domain:
             base = base.where(DataSource.domain == domain)
         if source_type:

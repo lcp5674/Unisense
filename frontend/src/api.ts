@@ -3443,6 +3443,8 @@ export async function listDataSources(params?: {
   health?: string;
   /** 责任人（Owner）ID 过滤（总览仪表 Owner 责任分布下钻） */
   owner_id?: number;
+  /** 源状态过滤：deleted=已软删源，其余默认活跃源（采集目录数据源筛选下拉联动） */
+  source_status?: string;
   page?: number;
   page_size?: number;
 }): Promise<DataSourceListResponse> {
@@ -3452,6 +3454,7 @@ export async function listDataSources(params?: {
     keyword: params?.keyword,
     health_status: params?.health,
     owner_id: params?.owner_id,
+    source_status: params?.source_status,
     page: params?.page ?? 1,
     page_size: params?.page_size ?? 100,
   });

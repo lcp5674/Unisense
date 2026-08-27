@@ -173,6 +173,9 @@ async def list_data_sources(
     keyword: str | None = None,
     health_status: str | None = None,
     owner_id: int | None = Query(None, description="责任人（Owner）ID 过滤"),
+    source_status: str | None = Query(
+        None, description="源状态过滤：deleted=已软删源，其余默认活跃源"
+    ),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
 ) -> ApiResponse[DataSourceListResponse]:
@@ -183,6 +186,7 @@ async def list_data_sources(
         keyword=keyword,
         health_status=health_status,
         owner_id=owner_id,
+        source_status=source_status,
         page=page,
         page_size=page_size,
     )

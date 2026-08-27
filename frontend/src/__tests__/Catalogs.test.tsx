@@ -272,6 +272,49 @@ describe("Catalogs 页面", () => {
     });
   });
 
+  it("采集目录筛选：数据源下拉展示名称与 ID，选中后按 source_id 重新拉取", async () => {
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    // 挂载后数据源下拉选项来自 listDataSources（名称 + ID），打开即可点选（无需手输 Source ID）
+    fireEvent.mouseDown(screen.getByText("全部数据源"));
+    const mysqlOption = await screen.findByText("Unisense MySQL（mysql_unisense）");
+    fireEvent.click(mysqlOption);
+    await waitFor(() => {
+      const calls = mockedList.mock.calls;
+      const lastCall = calls.length > 0 ? calls[calls.length - 1][0] : undefined;
+      expect(lastCall?.source_id).toBe("mysql_unisense");
+    });
+  });
+
+  it("切换「已删除源」后数据源下拉联动加载已删源（listDataSources 透传 source_status=deleted）", async () => {
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    // 初始默认「活跃源」→ listDataSources 透传 source_status=active
+    await waitFor(() => {
+      expect(mockedSources).toHaveBeenCalled();
+    });
+    const firstCalls = mockedSources.mock.calls;
+    expect(firstCalls[firstCalls.length - 1][0]).toMatchObject({ source_status: "active" });
+
+    // 切换到「已删除源」→ listDataSources 重新请求且透传 source_status=deleted（已删源也能按名选）
+    fireEvent.mouseDown(screen.getByText("活跃源"));
+    const deletedOption = await screen.findByText("已删除源");
+    fireEvent.click(deletedOption);
+    await waitFor(() => {
+      const calls = mockedSources.mock.calls;
+      const lastCall = calls[calls.length - 1][0];
+      expect(lastCall).toMatchObject({ source_status: "deleted" });
+    });
+  });
+
   it("从数据源详情 ?source_id=xxx 直达：所有查询都携带 source_id 过滤（避免全量首查竞态覆盖）", async () => {
     render(
       <MemoryRouter initialEntries={["/catalogs?source_id=mysql_unisense"]}>

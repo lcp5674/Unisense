@@ -116,26 +116,18 @@ export function Catalogs() {
     urlOwnerId && /^\d+$/.test(urlOwnerId) ? Number(urlOwnerId) : undefined,
   );
   const [keyword, setKeyword] = useState(urlKw);
-  // C1 搜索防抖：sourceId/keyword 每击键触发 load effect（含分页查询）——
+  // C1 搜索防抖：keyword 每击键触发 load effect（含分页查询）——
   // 输入即时更新（inputValue），查询值延迟 350ms 提交并重置页码。
-  const [sourceIdInput, setSourceIdInput] = useState(urlSourceId);
   const [keywordInput, setKeywordInput] = useState(urlKw);
-  const sourceIdRef = useRef(urlSourceId);
   const keywordRef = useRef(urlKw);
   const searchTimer = useRef<number | null>(null);
   const commitSearchFilters = () => {
-    setSourceId(sourceIdRef.current);
     setKeyword(keywordRef.current);
     setPage(1);
   };
-  const scheduleSearch = (field: "sourceId" | "keyword", value: string) => {
-    if (field === "sourceId") {
-      setSourceIdInput(value);
-      sourceIdRef.current = value;
-    } else {
-      setKeywordInput(value);
-      keywordRef.current = value;
-    }
+  const scheduleSearch = (value: string) => {
+    setKeywordInput(value);
+    keywordRef.current = value;
     if (searchTimer.current !== null) window.clearTimeout(searchTimer.current);
     searchTimer.current = window.setTimeout(commitSearchFilters, 350);
   };
@@ -467,10 +459,16 @@ export function Catalogs() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceId, sourceStatus]);
 
+  // 数据源下拉选项（登记实体/筛选共用）：随源状态联动——active 列活跃源、
+  // deleted 列已软删源（采集目录追溯保留场景，筛选「已删除源」时也能按名选源）。
   async function loadSources() {
     setSourcesLoading(true);
     try {
-      const res = await listDataSources({ page: 1, page_size: 200 });
+      const res = await listDataSources({
+        page: 1,
+        page_size: 200,
+        source_status: sourceStatus || undefined,
+      });
       setSources(res.items);
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载数据源失败");
@@ -478,6 +476,11 @@ export function Catalogs() {
       setSourcesLoading(false);
     }
   }
+
+  useEffect(() => {
+    loadSources();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceStatus]);
 
   async function handleRegister(values: Record<string, unknown>) {
     try {
@@ -744,16 +747,17 @@ export function Catalogs() {
         }
       >
         <Space style={{ marginBottom: 12 }} wrap>
-          <Input
-            placeholder="Source ID"
-            className="mono"
-            style={{ width: 150 }}
-            value={sourceIdInput}
-            onChange={(e) => scheduleSearch("sourceId", e.target.value)}
-            onPressEnter={() => {
-              if (searchTimer.current !== null) window.clearTimeout(searchTimer.current);
-              commitSearchFilters();
-            }}
+          <Select
+            allowClear
+            showSearch
+            placeholder="全部数据源"
+            style={{ width: 220 }}
+            loading={sourcesLoading}
+            value={sourceId || undefined}
+            onChange={(v) => { setSourceId(v || ""); setPage(1); }}
+            optionFilterProp="label"
+            options={sources.map((s) => ({ value: s.source_id, label: `${s.name}（${s.source_id}）` }))}
+            notFoundContent={sourcesLoading ? <span>加载中…</span> : <span>无可用数据源</span>}
           />
           <Select
             allowClear
@@ -797,7 +801,7 @@ export function Catalogs() {
             placeholder="搜索实体"
             style={{ width: 200 }}
             value={keywordInput}
-            onChange={(e) => scheduleSearch("keyword", e.target.value)}
+            onChange={(e) => scheduleSearch(e.target.value)}
             onSearch={() => {
               if (searchTimer.current !== null) window.clearTimeout(searchTimer.current);
               commitSearchFilters();

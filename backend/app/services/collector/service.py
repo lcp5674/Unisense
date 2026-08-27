@@ -531,6 +531,7 @@ class CollectorService(BaseService):
         keyword: str | None = None,
         health_status: str | None = None,
         owner_id: int | None = None,
+        source_status: str | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[DataSourceResponse], int]:
@@ -540,6 +541,7 @@ class CollectorService(BaseService):
             keyword=keyword,
             health_status=health_status,
             owner_id=owner_id,
+            source_status=source_status,
             page=page,
             page_size=page_size,
         )

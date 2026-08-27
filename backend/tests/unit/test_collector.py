@@ -1090,6 +1090,36 @@ async def test_repo_list_sources_no_crash_on_filters():
     assert items
 
 
+async def test_repo_list_sources_filters_by_source_status():
+    """source_status=deleted 时查已软删源，默认仅活跃源（deleted_at IS NULL）。"""
+    captured: dict[str, object] = {}
+    s = _session(all_rows=[MagicMock()], scalar=1)
+    res = s.execute.return_value
+
+    async def _capture(stmt, *args, **kwargs):
+        captured["stmt"] = stmt
+        return res
+
+    s.execute = _capture
+    repo = CollectorRepository(s)
+
+    # deleted → 查已软删源
+    await repo.list_sources(
+        domain=None, source_type=None, keyword=None,
+        source_status="deleted", page=1, page_size=10,
+    )
+    sql = str(captured["stmt"].compile(compile_kwargs={"literal_binds": True}))
+    assert "deleted_at IS NOT NULL" in sql
+
+    # 默认（None）→ 仅活跃源（保持既有行为）
+    await repo.list_sources(
+        domain=None, source_type=None, keyword=None,
+        page=1, page_size=10,
+    )
+    sql = str(captured["stmt"].compile(compile_kwargs={"literal_binds": True}))
+    assert "deleted_at IS NULL" in sql
+
+
 async def test_repo_list_scheduled_sources_filters_disabled() -> None:
     """list_scheduled_sources 仅返回启用中（enabled=True）的源，停用源不进定时调度。"""
     captured: dict[str, object] = {}
@@ -4100,6 +4130,15 @@ async def test_list_sources_backfills_signals() -> None:
     assert items[0].drift_count == 3
 
 
+async def test_list_sources_passes_source_status_to_repo() -> None:
+    """service.list_sources 透传 source_status 给 repository（数据源筛选下拉联动已删源）。"""
+    svc, repo = _svc()
+    repo.list_sources = AsyncMock(return_value=([_make_src_with_config({"host": "h"})], 1))
+    repo.list_sources_signals = AsyncMock(return_value={})
+    await svc.list_sources(page=1, page_size=20, source_status="deleted")
+    assert repo.list_sources.call_args.kwargs["source_status"] == "deleted"
+
+
 async def test_get_health_includes_degraded_info() -> None:
     """健康端点返回 health_metrics 与 degraded_since（黄态展示依据）。"""
     svc, repo = _svc()
@@ -4420,7 +4459,13 @@ async def test_repo_append_run_logs_bulk_adds_and_flushes():
         42,
         [
             {"ts": "2026-08-27T10:00:00", "level": "INFO", "phase": "start", "message": "开始采集"},
-            {"ts": "2026-08-27T10:00:01", "level": "ERROR", "phase": "registering", "entity_name": "t", "message": "注册失败：t"},
+            {
+                "ts": "2026-08-27T10:00:01",
+                "level": "ERROR",
+                "phase": "registering",
+                "entity_name": "t",
+                "message": "注册失败：t",
+            },
         ],
     )
 
@@ -4461,9 +4506,23 @@ async def test_repo_has_run_logs_false_when_zero():
 
 async def test_repo_list_run_logs_paginates_and_orders():
     s = _session(scalar=2)
-    row1 = MagicMock(ts=datetime(2026, 8, 27, tzinfo=UTC), level="INFO", phase="start", entity_name=None, message="开始采集")
-    row2 = MagicMock(ts=datetime(2026, 8, 27, tzinfo=UTC), level="INFO", phase="registering", entity_name="t", message="注册 1/2：t")
-    s.execute = AsyncMock(return_value=MagicMock(scalars=lambda: MagicMock(all=lambda: [row1, row2])))
+    row1 = MagicMock(
+        ts=datetime(2026, 8, 27, tzinfo=UTC),
+        level="INFO",
+        phase="start",
+        entity_name=None,
+        message="开始采集",
+    )
+    row2 = MagicMock(
+        ts=datetime(2026, 8, 27, tzinfo=UTC),
+        level="INFO",
+        phase="registering",
+        entity_name="t",
+        message="注册 1/2：t",
+    )
+    s.execute = AsyncMock(
+        return_value=MagicMock(scalars=lambda: MagicMock(all=lambda: [row1, row2]))
+    )
     repo = CollectorRepository(s)
 
     rows, total = await repo.list_run_logs(42, 0, 10)
