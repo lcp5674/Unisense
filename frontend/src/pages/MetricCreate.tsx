@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useMemo, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { BarsOutlined, ArrowLeftOutlined, PlusOutlined, MinusCircleOutlined, RobotOutlined } from "@ant-design/icons";
+import { BarsOutlined, ArrowLeftOutlined, PlusOutlined, MinusCircleOutlined, RobotOutlined, TeamOutlined } from "@ant-design/icons";
 import { ResizableDrawer } from "../components/ResizableDrawer";
 import {
   Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Collapse, Divider, Drawer, Form, Input, Modal, Radio, Row, Segmented, Select, Space, Spin, Steps, Switch, Table, Tooltip, Typography, App as AntApp, Tag,
@@ -22,6 +22,17 @@ const { TextArea } = Input;
 // 无草稿会话——解析结果 + SQL 输入 + 切分模式/规则 + 合成开关写入 localStorage，
 // 重新进入页面可一键恢复继续创建（"解析 50 个候选关掉页面回来"不再丢失）。
 const SQL_BATCH_DRAFT_KEY = "unisense.sql-batch.draft";
+
+// 批量候选口径三方责任角色 → 候选字段映射（批量设置责任方用：一次给勾选/全部候选
+// 设置某一方责任人，写 id + name 双字段，name 由 ownerUsers 反查填充便于提交透传）。
+const SQL_BATCH_OWNER_ROLES: Record<
+  "product" | "tech" | "dw",
+  { label: string; idField: "product_owner_id" | "tech_owner_id" | "dw_developer_id"; nameField: "product_owner_name" | "tech_owner_name" | "dw_developer_name" }
+> = {
+  product: { label: "产品负责", idField: "product_owner_id", nameField: "product_owner_name" },
+  tech: { label: "技术方", idField: "tech_owner_id", nameField: "tech_owner_name" },
+  dw: { label: "数仓开发", idField: "dw_developer_id", nameField: "dw_developer_name" },
+};
 interface SqlBatchDraft {
   sql: string;
   splitMode: "semicolon" | "statement" | "custom";
@@ -490,6 +501,12 @@ export function MetricCreate() {
   const [sqlBatchCreating, setSqlBatchCreating] = useState(false);
   // P1-1：SQL 批量失败候选的 key 集合（仅重跑失败项，避免全量重跑把已建 DRAFT 再判冲突）
   const [sqlBatchRetryFailedKeys, setSqlBatchRetryFailedKeys] = useState<string[]>([]);
+  // 批量设置责任方（P0-3）：一次给「已勾选/全部」候选设置某一方（产品/技术/数仓）责任人，
+  // 免去逐行 Select 重复操作；角色/负责人/应用范围三要素，清空负责人=移除该角色。
+  const [sqlBatchOwnerOpen, setSqlBatchOwnerOpen] = useState(false);
+  const [sqlBatchOwnerRole, setSqlBatchOwnerRole] = useState<"product" | "tech" | "dw">("product");
+  const [sqlBatchOwnerValue, setSqlBatchOwnerValue] = useState<number | null>(null);
+  const [sqlBatchOwnerScope, setSqlBatchOwnerScope] = useState<"checked" | "all">("checked");
   // 批量注册成功 → 「批量提交评审」直达（复用 /batch-submit，复审 D1）
   const [batchSubmitLoading, setBatchSubmitLoading] = useState(false);
   // 批量提交评审指派（复审 P2-10）：默认域评审组，可指定评审用户（对齐单指标提交的 reviewer_type/id）
@@ -1245,6 +1262,37 @@ export function MetricCreate() {
         candidates: prev.candidates.map((c) => (c.key === key ? { ...c, ...patch } : c)),
       };
     });
+  }
+
+  // 批量设置责任方：一次把某一方（产品/技术/数仓）责任人应用到「已勾选/全部」候选。
+  // 单次 setState 完成（不循环 handleSqlBatchEdit），name 由 ownerUsers 反查填充；
+  // 负责人清空（null）即移除该角色。返回应用数量供 UI 提示。
+  function applySqlBatchOwner(): number {
+    if (!sqlBatchResult) return 0;
+    const role = SQL_BATCH_OWNER_ROLES[sqlBatchOwnerRole];
+    const user = ownerUsers.find((u) => u.id === sqlBatchOwnerValue) ?? null;
+    const patch: Partial<SqlBatchCandidate> = {
+      [role.idField]: sqlBatchOwnerValue,
+      [role.nameField]: user ? user.display_name || user.username : null,
+    };
+    const keys =
+      sqlBatchOwnerScope === "all"
+        ? sqlBatchResult.candidates.map((c) => c.key)
+        : Array.from(sqlBatchChecked);
+    if (keys.length === 0) return 0;
+    setSqlBatchResult((prev) =>
+      prev
+        ? {
+            ...prev,
+            candidates: prev.candidates.map((c) =>
+              keys.includes(c.key) ? { ...c, ...patch } : c,
+            ),
+          }
+        : prev,
+    );
+    setSqlBatchOwnerOpen(false);
+    message.success(`已为 ${keys.length} 个候选批量设置「${role.label}」`);
+    return keys.length;
   }
 
   // 候选编码解析：域未定时后端不 bake-in → 按最终 selectedDomain 生成 4 段编码
@@ -3288,6 +3336,14 @@ export function MetricCreate() {
                     />
                     <Button
                       size="small"
+                      icon={<TeamOutlined />}
+                      onClick={() => setSqlBatchOwnerOpen(true)}
+                      data-testid="sql-batch-open-owner"
+                    >
+                      批量设置责任方
+                    </Button>
+                    <Button
+                      size="small"
                       icon={<BarsOutlined />}
                       onClick={() => {
                         setSqlBatchWizardStep(0);
@@ -3919,7 +3975,18 @@ export function MetricCreate() {
           />
         )}
         {sqlBatchWizardStep === 1 && (
-          <Table
+          <>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+              <Button
+                size="small"
+                icon={<TeamOutlined />}
+                onClick={() => setSqlBatchOwnerOpen(true)}
+                data-testid="sql-batch-wizard-open-owner"
+              >
+                批量设置责任方（已勾选 {sqlBatchChecked.size} 个）
+              </Button>
+            </div>
+            <Table
             data-testid="sql-batch-wizard-t1"
             size="small"
             rowKey="key"
@@ -4060,6 +4127,7 @@ export function MetricCreate() {
               },
             ]}
           />
+          </>
         )}
         {sqlBatchWizardStep === 2 && (
           <div>
@@ -4135,6 +4203,67 @@ export function MetricCreate() {
             下一步
           </Button>
         </div>
+      </Modal>
+
+      {/* 批量设置责任方（P0-3）：一次给「已勾选/全部」候选设置某一方责任人（产品/技术/数仓），
+          免逐行 Select 重复操作；负责人清空=移除该角色，name 由 ownerUsers 反查填充 */}
+      <Modal
+        title="批量设置责任方"
+        open={sqlBatchOwnerOpen}
+        onCancel={() => setSqlBatchOwnerOpen(false)}
+        onOk={() => {
+          if (applySqlBatchOwner() === 0) message.warning("请先勾选候选指标，或切换应用范围为「全部候选」");
+        }}
+        okText="应用"
+        cancelText="取消"
+        width={480}
+        destroyOnClose
+      >
+        <Space direction="vertical" style={{ width: "100%" }} size={16}>
+          <div>
+            <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>责任角色</div>
+            <Segmented
+              block
+              value={sqlBatchOwnerRole}
+              onChange={(v) => setSqlBatchOwnerRole(v as "product" | "tech" | "dw")}
+              options={[
+                { label: "产品负责", value: "product" },
+                { label: "技术方", value: "tech" },
+                { label: "数仓开发", value: "dw" },
+              ]}
+              data-testid="sql-batch-owner-role"
+            />
+          </div>
+          <div>
+            <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+              负责人（清空=移除该角色）
+            </div>
+            <Select
+              style={{ width: "100%" }}
+              showSearch
+              allowClear
+              placeholder="选择平台用户"
+              optionFilterProp="label"
+              value={sqlBatchOwnerValue ?? undefined}
+              onChange={(v) => setSqlBatchOwnerValue(v ?? null)}
+              data-testid="sql-batch-owner-user"
+              options={ownerUsers.map((u) => ({ value: u.id, label: u.display_name || u.username }))}
+            />
+          </div>
+          <div>
+            <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>应用范围</div>
+            <Radio.Group
+              value={sqlBatchOwnerScope}
+              onChange={(e) => setSqlBatchOwnerScope(e.target.value)}
+              data-testid="sql-batch-owner-scope"
+            >
+              <Radio value="checked" disabled={sqlBatchChecked.size === 0}>
+                已勾选候选（{sqlBatchChecked.size} 个）
+              </Radio>
+              <Radio value="all">全部候选（{sqlBatchResult?.candidates.length ?? 0} 个）</Radio>
+            </Radio.Group>
+          </div>
+        </Space>
       </Modal>
       </ResizableDrawer>
 

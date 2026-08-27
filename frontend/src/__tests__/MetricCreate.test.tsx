@@ -3013,4 +3013,57 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     expect(cand!.tech_owner_id).toBe(101);
     expect(cand!.dw_developer_id).toBe(102);
   });
+
+  it("批量设置责任方：勾选多个候选一次设置技术方，提交携带三方责任", async () => {
+    mockedUsers.mockResolvedValue([
+      { id: 101, username: "zhangsan", display_name: "张三", role: "user", domain: "sales", status: "active" },
+      { id: 102, username: "lisi", display_name: "李四", role: "user", domain: "sales", status: "active" },
+    ] as never);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+    // 打开批量设置责任方弹窗（结果区头部入口）
+    fireEvent.click(screen.getByTestId("sql-batch-open-owner"));
+    const ownerModal = within(
+      screen.getByTestId("sql-batch-owner-role").closest(".ant-modal") as HTMLElement,
+    );
+    // 选「技术方」角色
+    fireEvent.click(ownerModal.getByText("技术方"));
+    // 选负责人 张三（ownerUsers 下拉）
+    fireEvent.mouseDown(screen.getByTestId("sql-batch-owner-user").querySelector(".ant-select-selector")!);
+    await clickSelectOption("张三");
+    fireEvent.click(screen.getByRole("button", { name: /应\s*用/ }));
+    // 默认已勾选 2 个原子候选 → 提交 payload 两个候选均带 tech_owner_id=101
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+    await waitFor(() => expect(mockedBatchFromSql).toHaveBeenCalled());
+    const payload = mockedBatchFromSql.mock.calls[0][0] as {
+      candidates: Array<{ key: string; tech_owner_id: number | null }>;
+    };
+    const c1 = payload.candidates.find((c) => c.key === "0:amount");
+    const c2 = payload.candidates.find((c) => c.key === "0:user_id");
+    expect(c1?.tech_owner_id).toBe(101);
+    expect(c2?.tech_owner_id).toBe(101);
+  });
+
+  it("批量设置责任方：应用范围切「全部候选」时未勾选复合候选也生效", async () => {
+    mockedUsers.mockResolvedValue([
+      { id: 101, username: "zhangsan", display_name: "张三", role: "user", domain: "sales", status: "active" },
+    ] as never);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+    fireEvent.click(screen.getByTestId("sql-batch-open-owner"));
+    // 应用范围 → 全部候选（3 个）
+    fireEvent.click(screen.getByText("全部候选（3 个）"));
+    fireEvent.mouseDown(screen.getByTestId("sql-batch-owner-user").querySelector(".ant-select-selector")!);
+    await clickSelectOption("张三");
+    fireEvent.click(screen.getByRole("button", { name: /应\s*用/ }));
+    // 复合候选未勾选也被批量设置：候选行「产品负责」Select 显示「张三」
+    const compositeOwner = screen.getByTestId("sql-batch-owner-0:composite");
+    await waitFor(() => {
+      expect(within(compositeOwner).getByText("张三")).toBeTruthy();
+    });
+  });
 });
