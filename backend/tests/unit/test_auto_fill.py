@@ -396,9 +396,9 @@ class TestMetricNameMorphemeMissing:
         assert _metric_name_morpheme_missing("每日收入金额") is False
 
     def test_semantic_words_kept_original(self) -> None:
-        # 完全未命中词根的合法业务新词（如「药品成交」「月活留存健康度」）——
+        # 完全未命中词根的合法业务新词（如「管理事项」「某专项」）——
         # 决策 2 不再追加「金额/次数」污染名称，判定为缺失（前端软提示人工确认）
-        assert _metric_name_morpheme_missing("总成交") is True
+        assert _metric_name_morpheme_missing("管理事项") is True
         assert _metric_name_morpheme_missing("abc") is True
         assert _metric_name_morpheme_missing("某指标") is True
 

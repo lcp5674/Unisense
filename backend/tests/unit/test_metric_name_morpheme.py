@@ -51,6 +51,59 @@ class TestValidateMetricName:
             ok, err = ConflictPrechecker.validate_metric_name(name)
             assert ok is True, f"{name!r} 应命中活跃缩写词根，实际 err={err!r}"
 
+    def test_production_scenario_morphemes_pass(self) -> None:
+        """生产场景词根覆盖（0103 扩充）：医疗 HIS 全流程/供应链/质量服务/英文业务对象
+        的合法指标名应命中词根，不被 METRIC_NAME_NO_MORPHEME 误拦。"""
+        production_names = [
+            # 医疗/卫健（对应 auto_fill._CN_COLUMN_LABELS 产出的业务对象）
+            "日活跃医生数",
+            "在院护士数",
+            "医院机构数",
+            "科室分布数",
+            "病区床位数",
+            "疾病诊断数",
+            "急诊人次",
+            "体检人次",
+            "病历数",
+            "入院人次",
+            "出院人次",
+            "预约次数",
+            "复诊人次",
+            "诊疗次数",
+            "护理工作量",
+            "康复疗程数",
+            "出院随访率",
+            "门诊转诊数",
+            "抢救成功率",
+            "住院床日数",
+            "次均住院费用",
+            "诊次均费用",
+            # 医保基金
+            "医保统筹支付金额",
+            "自费金额",
+            "个账余额",
+            # 供应链/业务量
+            "发货单量",
+            "签收件数",
+            "退货率",
+            "库存周转天数",
+            "缺货率",
+            # 质量/服务
+            "客户满意度",
+            "工单响应时长",
+            "履约完成率",
+            "风险告警数",
+            # 英文业务对象
+            "active_doctor_cnt",
+            "patient_visit_daily",
+            "hospital_ward_daily",
+            "Daily Payment Amount",
+            "Refund Rate",
+        ]
+        for name in production_names:
+            ok, err = ConflictPrechecker.validate_metric_name(name)
+            assert ok is True, f"{name!r} 应命中生产词根，实际 err={err!r}"
+
     def test_bare_word_rejected_with_clear_error(self) -> None:
         ok, err = ConflictPrechecker.validate_metric_name("新名称")
         assert ok is False
@@ -85,6 +138,11 @@ class TestValidateMetricName:
         assert ConflictPrechecker.CONTROLLED_MORPHEMES is CONTROLLED_MORPHEMES
         assert "收入" in CONTROLLED_MORPHEMES
         assert "订单" in CONTROLLED_MORPHEMES
+        # 0103 生产场景扩充词根（医疗/供应链/质量/英文）
+        assert "医生" in CONTROLLED_MORPHEMES
+        assert "科室" in CONTROLLED_MORPHEMES
+        assert "满意度" in CONTROLLED_MORPHEMES
+        assert "patient" in CONTROLLED_MORPHEMES
 
 
 class TestDictionaryManagedMorphemes:
@@ -96,8 +154,8 @@ class TestDictionaryManagedMorphemes:
         reset_metric_name_morpheme_cache()
         try:
             assert get_controlled_morphemes() == CONTROLLED_MORPHEMES
-            # 未加载 DB 覆盖时，字典新增词根尚未生效
-            ok, _err = ConflictPrechecker.validate_metric_name("医技诊疗")
+            # 未加载 DB 覆盖时，字典新增词根尚未生效（「医技」仅存在于 mock DB，不在内置）
+            ok, _err = ConflictPrechecker.validate_metric_name("医技专项")
             assert ok is False
         finally:
             reset_metric_name_morpheme_cache()
@@ -119,8 +177,9 @@ class TestDictionaryManagedMorphemes:
             # 内置默认保留 + DB 新增合并
             assert "收入" in merged
             assert "医技" in merged
-            # 字典新增词根即时对命名校验生效（无需发版）
-            ok, _err = ConflictPrechecker.validate_metric_name("医技检查")
+            # 字典新增词根即时对命名校验生效（无需发版）——「医技专项」不含任何内置词根，
+            # 仅命中 DB 新增的「医技」，语义精确验证 DB 覆盖生效
+            ok, _err = ConflictPrechecker.validate_metric_name("医技专项")
             assert ok is True
         finally:
             reset_metric_name_morpheme_cache()
