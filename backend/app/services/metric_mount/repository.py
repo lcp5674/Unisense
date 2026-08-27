@@ -32,6 +32,28 @@ class MetricMountRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def list_by_metric(self, metric_id: int) -> list[MetricMount]:
+        """按指标列出全部挂载行（多变体；按 id 升序，稳定默认变体取行）。"""
+        stmt = (
+            select(MetricMount)
+            .where(MetricMount.metric_id == metric_id, MetricMount.deleted_at.is_(None))
+            .order_by(MetricMount.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return list(rows)
+
+    async def get_default_mount(self, metric_id: int) -> MetricMount | None:
+        """默认变体解析（混合渐进消费契约 a 兜底）：default_period 非空行优先
+        （多行取 id 最小），全空则取 id 最小行。多挂载下消费缺省用默认变体，
+        显式 variant 由上层按匹配规则覆盖。"""
+        mounts = await self.list_by_metric(metric_id)
+        if not mounts:
+            return None
+        for m in mounts:
+            if m.default_period:
+                return m
+        return mounts[0]
+
     async def list(
         self,
         metric_id: int | None,

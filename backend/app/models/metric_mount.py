@@ -3,14 +3,15 @@
 对齐 `docs/指标设计以及界限说明.md` 三条硬边界：
 - 粒度由挂载表决定，不进指标定义（§2.3 第 3 条 / §6）——本实体承载 granularity
 - 原子指标不挂物理表；挂载只出现在派生指标上（派生 = 原子 + 时间 + 业务限定 + 挂载）
-- 一个派生指标一个挂载点（首期唯一约束），后续可扩展为多挂载
+- 一个派生指标可挂多个挂载点（多变体：粒度/业务限定/周期组合，2026-08-27 放开
+  uk_mount_metric 唯一约束改普通索引；存量 1:1 数据天然兼容，N=1 特例）
 
-字段：源表/源列（映射原子逻辑度量）/粒度/默认统计周期/业务域。
+字段：源表/源列（映射原子逻辑度量）/粒度/默认统计周期/业务域/业务限定（变体级）。
 """
 
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, ForeignKey, String, UniqueConstraint
+from sqlalchemy import BigInteger, ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.mysql import Base
@@ -38,7 +39,13 @@ class MetricMount(Base, BaseModel):
         String(32), nullable=True, comment="默认统计周期（day/month/quarter…）"
     )
     domain: Mapped[str] = mapped_column(String(64), nullable=False, comment="业务域")
+    #: 业务限定（变体级，OneData 派生 = 基础原子 + 业务限定 + 周期）；缺省继承
+    #: 指标级 definition_json.business_filter（default_business_filter 兜底）。
+    business_filter: Mapped[str | None] = mapped_column(
+        String(512), nullable=True, comment="业务限定（变体级，如 病种=门特；缺省继承指标级）"
+    )
 
     __table_args__ = (
-        UniqueConstraint("metric_id", name="uk_mount_metric"),
+        # 一指标多挂载（多变体）：放开 uk_mount_metric 唯一约束改普通索引
+        Index("idx_mount_metric", "metric_id"),
     )

@@ -31,6 +31,12 @@ class QueryRequest(BaseModel):
     dimensions: list[DimensionExpr] = Field(default_factory=list, description="维度过滤")
     date_range: str = Field(..., description="日期区间（如 2026-01~2026-03）")
     granularity: str | None = Field(None, description="时间粒度（day/week/month/quarter）")
+    # 多变体消费（2026-08-27 放开一指标一挂载）：多挂载指标缺省按默认变体
+    # （default_period 行优先）消费——旧契约零破坏；显式传 variant 可覆盖：
+    # 挂载行 ID（数字）或 "粒度:周期"（如 "医院:day"），命中不存在变体则 422。
+    variant: str | None = Field(
+        None, description="变体标识（多挂载指标显式指定：挂载行 ID 或 '粒度:周期'）"
+    )
     comparison: str | None = Field(None, description="对比方式（MoM/YoY/None）")
     accept_stale: bool = Field(False, description="接受降级缓存结果")
     params: dict[str, Any] = Field(default_factory=dict, description="其他参数")

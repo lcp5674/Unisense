@@ -352,17 +352,77 @@ async def test_build_query_sql_mount_table_authority() -> None:
 
 
 async def test_resolve_mount_table_returns_mount_source() -> None:
-    """_resolve_mount_table 查挂载实体返回 source_table（挂载独立更新后消费 SQL 用最新物理表）。"""
+    """_resolve_mount_table 默认变体解析返回 source_table（挂载独立更新后消费 SQL 用最新物理表）。"""
     svc = _svc(await _client())
     m = _metric_with_source()
     m.id = 7
     mount = MagicMock()
     mount.source_table = "dwd.sales_detail"
     with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
-        mrepo_cls.return_value.get_by_metric = AsyncMock(return_value=mount)
+        mrepo_cls.return_value.get_default_mount = AsyncMock(return_value=mount)
         table = await svc._resolve_mount_table(m)
     assert table == "dwd.sales_detail"
-    mrepo_cls.return_value.get_by_metric.assert_awaited_once_with(7)
+    mrepo_cls.return_value.get_default_mount.assert_awaited_once_with(7)
+
+
+async def test_resolve_mount_table_variant_by_mount_id() -> None:
+    """多挂载指标显式 variant（挂载行 ID）→ 命中对应变体 source_table（混合渐进 b 可覆盖）。"""
+    svc = _svc(await _client())
+    m = _metric_with_source()
+    m.id = 7
+    m1 = MagicMock()
+    m1.id = 1
+    m1.source_table = "dwd.doctor_fee_daily"
+    m1.granularity = "医生"
+    m1.default_period = "day"
+    m2 = MagicMock()
+    m2.id = 2
+    m2.source_table = "dwd.hospital_fee"
+    m2.granularity = "医院"
+    m2.default_period = "day"
+    with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
+        mrepo_cls.return_value.list_by_metric = AsyncMock(return_value=[m1, m2])
+        table = await svc._resolve_mount_table(m, variant="2")
+    assert table == "dwd.hospital_fee"
+
+
+async def test_resolve_mount_table_variant_by_grain_period() -> None:
+    """显式 variant "粒度:周期" → 命中对应变体（多挂载消费契约）。"""
+    svc = _svc(await _client())
+    m = _metric_with_source()
+    m.id = 7
+    m1 = MagicMock()
+    m1.id = 1
+    m1.source_table = "dwd.doctor_fee_daily"
+    m1.granularity = "医生"
+    m1.default_period = "day"
+    m2 = MagicMock()
+    m2.id = 2
+    m2.source_table = "dwd.hospital_fee"
+    m2.granularity = "医院"
+    m2.default_period = "day"
+    with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
+        mrepo_cls.return_value.list_by_metric = AsyncMock(return_value=[m1, m2])
+        table = await svc._resolve_mount_table(m, variant="医院:day")
+    assert table == "dwd.hospital_fee"
+
+
+async def test_resolve_mount_table_variant_not_found() -> None:
+    """显式 variant 命中不存在变体 → 422（BusinessError），不静默回退。"""
+    from app.core.exceptions import BusinessError
+
+    svc = _svc(await _client())
+    m = _metric_with_source()
+    m.id = 7
+    m1 = MagicMock()
+    m1.id = 1
+    m1.source_table = "dwd.doctor_fee_daily"
+    m1.granularity = "医生"
+    m1.default_period = "day"
+    with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
+        mrepo_cls.return_value.list_by_metric = AsyncMock(return_value=[m1])
+        with pytest.raises(BusinessError):
+            await svc._resolve_mount_table(m, variant="999")
 
 
 async def test_resolve_mount_table_falls_back_when_mount_query_fails() -> None:
@@ -371,7 +431,7 @@ async def test_resolve_mount_table_falls_back_when_mount_query_fails() -> None:
     m = _metric_with_source()
     m.id = 7
     with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
-        mrepo_cls.return_value.get_by_metric = AsyncMock(return_value=None)
+        mrepo_cls.return_value.get_default_mount = AsyncMock(return_value=None)
         table = await svc._resolve_mount_table(m)
     assert table is None
 

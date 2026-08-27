@@ -123,17 +123,49 @@ class ConsumeService(BaseService):
         self._fav = FavoriteRepo(db)
 
     # ---- 真实物理口径 SQL 构建 ----
-    async def _resolve_mount_table(self, metric: Any) -> str | None:
+    async def _resolve_mount_table(
+        self, metric: Any, variant: str | None = None
+    ) -> str | None:
         """OneData 挂载层权威（界限文档 §2.3）：派生指标挂载可经挂载 API 独立更新，
         definition_json 的 source_table 冗余可能过期——消费 SQL 以 metric_mount 为准。
-        查询失败或未挂载时返回 None（回退 definition_json）。
+        多挂载（2026-08-27 放开一指标一挂载）变体解析（混合渐进）：
+        - ``variant`` 缺省 → 默认变体（default_period 非空行优先，否则 id 最小行），
+          旧契约零破坏（a 兜底）；
+        - ``variant`` 为数字 → 按挂载行 ID 精确匹配（b 可覆盖）；
+        - ``variant`` 形如 ``粒度:周期``（如 ``医院:day``）→ 按粒度+默认周期匹配；
+        命中不存在变体抛 422；查询失败或未挂载时返回 None（回退 definition_json）。
         """
         try:
             from app.services.metric_mount.repository import MetricMountRepository
 
-            mount = await MetricMountRepository(self._db).get_by_metric(metric.id)
+            _mrepo = MetricMountRepository(self._db)
+            if variant:
+                mounts = await _mrepo.list_by_metric(metric.id)
+                target = None
+                if variant.isdigit():
+                    target = next((m for m in mounts if str(m.id) == variant), None)
+                elif ":" in variant:
+                    grain, _, period = variant.partition(":")
+                    target = next(
+                        (
+                            m
+                            for m in mounts
+                            if m.granularity == grain
+                            and (m.default_period or "") == period
+                        ),
+                        None,
+                    )
+                if target is None:
+                    raise BusinessError(
+                        f"指标 {metric.metric_code} 不存在变体 {variant}",
+                        error_code=ErrorCode.VALIDATION_ERROR,
+                    )
+                return target.source_table if target.source_table else None
+            mount = await _mrepo.get_default_mount(metric.id)
             if mount is not None and isinstance(mount.source_table, str) and mount.source_table:
                 return mount.source_table
+        except BusinessError:
+            raise
         except Exception:  # noqa: BLE001 - best-effort：mount 查询失败回退 definition_json
             pass
         return None
@@ -317,7 +349,7 @@ class ConsumeService(BaseService):
         # 构建真实物理口径 SQL（参数化），而非占位注释；维度授权收敛在 _build_query_sql 内。
         # 维度允许集补充 metric_dimension 绑定表来源（打通维度管理绑定到消费链路）。
         bound_dims = await self._get_bound_dimensions(metric.id)
-        mount_table = await self._resolve_mount_table(metric)
+        mount_table = await self._resolve_mount_table(metric, req.variant)
         sql, sql_params = self._build_query_sql(req, metric, bound_dims, mount_table=mount_table)
         plan = {
             "metric_code": req.metric_code,
@@ -396,7 +428,7 @@ class ConsumeService(BaseService):
         # 构建执行 SQL（真实物理口径，而非占位查询）
         # 维度允许集补充 metric_dimension 绑定表来源（打通维度管理绑定到消费链路）。
         bound_dims = await self._get_bound_dimensions(metric.id)
-        mount_table = await self._resolve_mount_table(metric)
+        mount_table = await self._resolve_mount_table(metric, req.variant)
         sql, params = self._build_query_sql(req, metric, bound_dims, mount_table=mount_table)
 
         # 引擎选择：OLAP 优先，失败/未配置时降级 MySQL 只读执行器

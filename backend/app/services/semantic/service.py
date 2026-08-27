@@ -110,6 +110,63 @@ BREAKING_DEF_FIELDS = (
 # OneData：measure_id（逻辑度量）变更 = 换了"度量什么"，同为破坏性口径变更。
 BREAKING_TOP_LEVEL_FIELDS = ("granularity", "unit", "aggregation", "measure_id")
 
+
+def _pick_default_mount(mounts: list[Any]) -> Any | None:
+    """默认变体行：``default_period`` 非空行优先（多行取首个），否则首行。
+
+    与 ``MetricMountRepository.get_default_mount``（已落库场景）同规则，供创建
+    路径（指标尚未落库，mounts 来自请求）复用。``mounts`` 为空返回 None。
+    """
+    if not mounts:
+        return None
+    for m in mounts:
+        if getattr(m, "default_period", None):
+            return m
+    return mounts[0]
+
+
+def _mount_to_dict(m: Any) -> dict[str, Any]:
+    """挂载 ORM 行 → 快照 dict（版本 diff_json / 转正对齐共用）。"""
+    return {
+        "id": m.id,
+        "source_table": m.source_table,
+        "source_column": m.source_column,
+        "granularity": m.granularity,
+        "default_period": m.default_period,
+        "domain": m.domain,
+        "business_filter": getattr(m, "business_filter", None),
+    }
+
+
+def _mount_input_to_dict(m: Any) -> dict[str, Any]:
+    """挂载输入（MetricMountInput）→ 快照 dict（与 _mount_to_dict 同构，id 可空）。"""
+    return {
+        "id": m.id,
+        "source_table": m.source_table,
+        "source_column": m.source_column,
+        "granularity": m.granularity,
+        "default_period": m.default_period,
+        "domain": m.domain,
+        "business_filter": getattr(m, "business_filter", None),
+    }
+
+
+def _resolve_mount_targets(existing: list[Any], mounts: list[Any]) -> list[Any]:
+    """挂载目标解析：为请求行绑定隐式 id（向后兼容单挂载 upsert 语义）。
+
+    - 请求行已带 id（新前端编辑回传）→ 原样保留，按 id 匹配更新/新增；
+    - 请求全部无 id（旧前端 ``mount`` 单数合并而来）且已有恰好 1 行、请求恰好
+      1 行 → 隐式绑定到该行 id（视为"更新现有挂载"，而非"删旧增新"——否则
+      旧前端每次编辑都会被当成破坏性删行）；
+    - 其余无 id 行 → 新增（id 保持 None，diff 时按新增处理）。
+    """
+    if not mounts:
+        return mounts
+    if all(getattr(m, "id", None) is None for m in mounts):
+        if len(mounts) == 1 and len(existing) == 1:
+            return [mounts[0].model_copy(update={"id": existing[0].id})]
+    return mounts
+
 # 指标间依赖边的 edge_type 映射（register_metric_dependency 由血缘团队负责，
 # 此处按 metric.type 直接写 LineageEdge）。
 # 注意：lineage_edge_type 枚举当前仅含 DERIVED_FROM/LINEAGE_UP/LINEAGE_DOWN/
@@ -521,23 +578,32 @@ class MetricService(BaseService):
         # measure_column 建「指标↔落地表」边——但批量注册/模板实例化等后端构造路径此前
         # 不写这两个键，导致请求传了 source_table 却无血缘边（与前端单条 buildDefinitionJson
         # 合入 ②源表/度量列的行为不一致）。此处后端统一兜底，覆盖全部创建路径。
-        # OneData：派生指标携带 mount（挂载实体）时同样并入——mount 为权威结构化记录，
-        # definition_json 冗余一份供血缘/消费/冲突预检等旧读者读取（二者保持一致）。
+        # OneData：派生指标携带 mounts（挂载实体列表，多变体）时并入默认变体的
+        # source_table/measure_column——mount 为权威结构化记录，definition_json 冗余
+        # 一份供血缘/消费/冲突预检等旧读者读取（二者保持一致）。
+        # 指标级业务限定兜底（default_business_filter）同步写 definition_json.business_filter，
+        # 挂载行 business_filter 缺省继承。
+        _has_mounts = bool(request.type == "derived" and request.mounts)
         if (
             request.source_table
             or request.measure_column
-            or (request.type == "derived" and request.mount)
+            or _has_mounts
+            or request.default_business_filter is not None
         ):
             _defn = dict(request.definition_json or {})
             if request.source_table and not _defn.get("source_table"):
                 _defn["source_table"] = request.source_table
             if request.measure_column and not _defn.get("measure_column"):
                 _defn["measure_column"] = request.measure_column
-            if request.type == "derived" and request.mount:
-                if not _defn.get("source_table") and request.mount.source_table:
-                    _defn["source_table"] = request.mount.source_table
-                if not _defn.get("measure_column") and request.mount.source_column:
-                    _defn["measure_column"] = request.mount.source_column
+            if _has_mounts:
+                _default_mount = _pick_default_mount(request.mounts)
+                if _default_mount is not None:
+                    if not _defn.get("source_table") and _default_mount.source_table:
+                        _defn["source_table"] = _default_mount.source_table
+                    if not _defn.get("measure_column") and _default_mount.source_column:
+                        _defn["measure_column"] = _default_mount.source_column
+            if request.default_business_filter is not None:
+                _defn["business_filter"] = request.default_business_filter
             request.definition_json = _defn
 
         # PII 双源归一化：definition_json.pii 与 pii_flag 保持一致（pii_flag 为权威源）
@@ -552,13 +618,13 @@ class MetricService(BaseService):
             name=request.name,
             domain=request.domain,
             type=request.type,
-            # OneData：粒度下沉挂载实体——派生携带 mount 时由挂载回填（冗余供列表/排序展示），
+            # OneData：粒度下沉挂载实体——派生携带 mounts 时由默认变体回填（冗余供列表/排序展示），
             # 原子/复合不设粒度（granularity 可空）
             granularity=(
                 request.granularity
                 or (
-                    request.mount.granularity
-                    if request.type == "derived" and request.mount
+                    _pick_default_mount(request.mounts).granularity
+                    if request.type == "derived" and request.mounts
                     else None
                 )
             ),
@@ -616,24 +682,28 @@ class MetricService(BaseService):
         )
         await self._repo.create_version(version)
 
-        # OneData 挂载层（界限文档 §2.3 第 3 条）：派生指标携带 mount 时，落 metric_mount
-        # 承载源表/粒度/周期/域——同一事务内 flush，粒度已由构造时回填到 metric。
-        # （mount 的 source_table/measure_column 已在 3b 并入 definition_json，
-        #   血缘/消费/冲突预检等旧读者无需改动；mount 为权威结构化记录。）
-        if request.type == "derived" and request.mount:
+        # OneData 挂载层（界限文档 §2.3 第 3 条）：派生指标携带 mounts（多变体）时，
+        # 每行落一条 metric_mount 承载源表/粒度/周期/域/业务限定——同一事务内 flush，
+        # 粒度已由构造时回填到 metric（默认变体）。
+        # （mounts 的 source_table/measure_column 已在 3b 并入 definition_json，
+        #   血缘/消费/冲突预检等旧读者无需改动；mounts 为权威结构化记录。）
+        if request.type == "derived" and request.mounts:
             from app.models.metric_mount import MetricMount
             from app.services.metric_mount.repository import MetricMountRepository
 
-            await MetricMountRepository(self._db).save(
-                MetricMount(
-                    metric_id=metric.id,
-                    source_table=request.mount.source_table,
-                    source_column=request.mount.source_column,
-                    granularity=request.mount.granularity,
-                    default_period=request.mount.default_period,
-                    domain=request.mount.domain,
+            _mrepo = MetricMountRepository(self._db)
+            for _m in request.mounts:
+                await _mrepo.save(
+                    MetricMount(
+                        metric_id=metric.id,
+                        source_table=_m.source_table,
+                        source_column=_m.source_column,
+                        granularity=_m.granularity,
+                        default_period=_m.default_period,
+                        domain=_m.domain,
+                        business_filter=_m.business_filter,
+                    )
                 )
-            )
 
         logger.info(
             "metric_created",
@@ -803,19 +873,18 @@ class MetricService(BaseService):
             from app.services.conflict.service import ConflictService
 
             # OneData 挂载层权威：把挂载实体的 source_table 并入预检比对（挂载独立
-            # 更新后 definition_json 的 source_tables 冗余可能过期）
+            # 更新后 definition_json 的 source_tables 冗余可能过期；多变体逐行并入）
             source_tables = list(definition.get("source_tables") or [])
             try:
                 from app.services.metric_mount.repository import MetricMountRepository
 
-                _mount = await MetricMountRepository(self._db).get_by_metric(metric.id)
-                if (
-                    _mount is not None
-                    and isinstance(_mount.source_table, str)
-                    and _mount.source_table
-                    and _mount.source_table not in source_tables
-                ):
-                    source_tables.append(_mount.source_table)
+                for _mount in await MetricMountRepository(self._db).list_by_metric(metric.id):
+                    if (
+                        isinstance(_mount.source_table, str)
+                        and _mount.source_table
+                        and _mount.source_table not in source_tables
+                    ):
+                        source_tables.append(_mount.source_table)
             except Exception:  # noqa: BLE001 - best-effort：mount 查询失败仅跳过挂载源表
                 pass
 
@@ -998,29 +1067,40 @@ class MetricService(BaseService):
         return await self._attach_measure_info(MetricResponse.model_validate(metric))
 
     async def _attach_measure_info(self, resp: MetricResponse) -> MetricResponse:
-        """best-effort 填充逻辑度量展示信息（measure_code/measure_name）。
+        """best-effort 填充逻辑度量展示信息（measure_code/measure_name）与多变体挂载列表。
 
         原子指标关联的权威继承源（度量目录）在详情页「逻辑度量」栏展示名称+编码；
         度量已软删/查询异常时降级为仅 measure_id（不阻断详情读取）。
+        多变体挂载（2026-08-27 放开一指标一挂载）：详情页「挂载实体」展示全部
+        mount 行（含业务限定/粒度/周期），编辑页据此回显增删。
         """
-        if resp.measure_id is None:
-            return resp
-        try:
-            from sqlalchemy import select
+        if resp.measure_id is not None:
+            try:
+                from sqlalchemy import select
 
-            from app.models.measure_catalog import MeasureCatalog
+                from app.models.measure_catalog import MeasureCatalog
 
-            row = (
-                await self._db.execute(
-                    select(MeasureCatalog.measure_code, MeasureCatalog.name).where(
-                        MeasureCatalog.id == resp.measure_id
+                row = (
+                    await self._db.execute(
+                        select(MeasureCatalog.measure_code, MeasureCatalog.name).where(
+                            MeasureCatalog.id == resp.measure_id
+                        )
                     )
-                )
-            ).first()
-            if row is not None:
-                resp.measure_code = row[0]
-                resp.measure_name = row[1]
-        except Exception:  # noqa: BLE001 - best-effort：度量查询失败仅降级
+                ).first()
+                if row is not None:
+                    resp.measure_code = row[0]
+                    resp.measure_name = row[1]
+            except Exception:  # noqa: BLE001 - best-effort：度量查询失败仅降级
+                pass
+        # 多变体挂载列表（派生指标详情回填；查询失败/非派生为 None）
+        try:
+            from app.services.metric_mount.repository import MetricMountRepository
+            from app.services.metric_mount.schemas import MetricMountResponse
+
+            mounts = await MetricMountRepository(self._db).list_by_metric(resp.id)
+            if mounts:
+                resp.mounts = [MetricMountResponse.from_model(m) for m in mounts]
+        except Exception:  # noqa: BLE001 - best-effort：挂载查询失败仅降级
             pass
         return resp
 
@@ -1501,39 +1581,22 @@ class MetricService(BaseService):
             updates["reviewer_type"] = None
             updates["reviewer_domain"] = None
 
-        # OneData 挂载层（界限文档 §2.3 第 3 条）：派生指标携带 mount 时 upsert
-        # metric_mount（源表/粒度/周期/域），并回填 metric.granularity（冗余供列表展示）。
-        # 非派生指标提供 mount → 拒绝（原子=逻辑度量不挂表，复合=派生组合不直接挂表）。
-        # PUBLISHED 派生指标改挂载粒度/源表 = 破坏性变更 → PENDING_VERSION 确认流：
-        # 不直接生效，创建 BREAKING 版本 + 14 天消费方确认，确认/超时后由
-        # _promote_pending_version 同步主表 granularity 与 metric_mount（Phase 4 接入）。
-        if request.mount is not None:
+        # OneData 挂载层（界限文档 §2.3 第 3 条）：派生指标携带 mounts（多变体列表，
+        # 2026-08-27 放开一指标一挂载）时全量 diff 对齐 metric_mount——有 id 更新、
+        # 无 id 新增、未出现在请求的软删；并回填默认变体粒度到 metric.granularity
+        # （冗余供列表展示）。非派生指标提供 mounts → 拒绝（原子=逻辑度量不挂表，
+        # 复合=派生组合不直接挂表）。
+        # PUBLISHED 派生指标破坏性变更（删挂载行 / 改已有行粒度或源表）→
+        # PENDING_VERSION 确认流：不直接生效，创建 BREAKING 版本 + 14 天消费方确认，
+        # 确认/超时后由 _promote_pending_version 按 diff_json["mounts"] 快照全量对齐。
+        if request.mounts is not None:
             if metric.type != "derived":
                 raise BusinessError(
                     f"仅派生指标可挂载物理表，当前类型 {metric.type}",
                     error_code="INVALID_MOUNT_TARGET",
                 )
-            from app.models.metric_mount import MetricMount
-            from app.services.metric_mount.repository import MetricMountRepository
-
-            _mrepo = MetricMountRepository(self._db)
-            existing_mount = await _mrepo.get_by_metric(metric.id)
-            # 挂载破坏性变更判定：粒度或源表变化（影响口径/血缘，须消费方确认）
-            mount_diff: dict[str, dict[str, Any]] = {}
-            if existing_mount is not None:
-                for f, old_val, new_val in (
-                    ("granularity", existing_mount.granularity, request.mount.granularity),
-                    ("source_table", existing_mount.source_table, request.mount.source_table),
-                ):
-                    if old_val != new_val:
-                        mount_diff[f] = {
-                            "before": old_val,
-                            "after": new_val,
-                            "change_type": "BREAKING",
-                            "mount_change": True,
-                        }
-
-            if metric.status == "PUBLISHED" and mount_diff:
+            mount_diff, mount_breaking = await self._sync_mounts(metric, request.mounts)
+            if metric.status == "PUBLISHED" and mount_breaking:
                 if await self._repo.has_pending_version(metric.id):
                     raise ConflictError(
                         f"该指标存在待确认的破坏性变更（版本 {metric.version}），"
@@ -1543,7 +1606,7 @@ class MetricService(BaseService):
                 new_version_num = metric.version + 1
                 updates["version"] = new_version_num
                 # 挂载破坏性变更不直接生效：移除主表 granularity 回填、不更新 mount 实体，
-                # 等待确认后由 _promote_pending_version 应用（diff_json 携带 mount_change）。
+                # 等待确认后由 _promote_pending_version 应用（diff_json 携带 mounts 快照）。
                 updates.pop("granularity", None)
                 version = MetricVersion(
                     metric_id=metric.id,
@@ -1577,25 +1640,7 @@ class MetricService(BaseService):
                     fields=list(mount_diff.keys()),
                 )
             else:
-                updates["granularity"] = request.mount.granularity
-                if existing_mount is not None:
-                    existing_mount.source_table = request.mount.source_table
-                    existing_mount.source_column = request.mount.source_column
-                    existing_mount.granularity = request.mount.granularity
-                    existing_mount.default_period = request.mount.default_period
-                    existing_mount.domain = request.mount.domain
-                    await self._db.flush()
-                else:
-                    await _mrepo.save(
-                        MetricMount(
-                            metric_id=metric.id,
-                            source_table=request.mount.source_table,
-                            source_column=request.mount.source_column,
-                            granularity=request.mount.granularity,
-                            default_period=request.mount.default_period,
-                            domain=request.mount.domain,
-                        )
-                    )
+                updates["granularity"] = await self._apply_mounts(metric, request.mounts)
 
         updated = await self._repo.update_with_optimistic_lock(
             metric.id, metric.row_version, **updates
@@ -3942,6 +3987,117 @@ class MetricService(BaseService):
             )
         return None
 
+    async def _sync_mounts(
+        self, metric: Metric, mounts: list[Any]
+    ) -> tuple[dict[str, Any], bool]:
+        """多变体挂载全量 diff 判定（2026-08-27 放开一指标一挂载）。
+
+        返回 ``(diff_json, breaking)``：
+        - ``diff_json``：破坏性变更描述——删除挂载行（``removed_mount_{id}``）或
+          已有行粒度/源表变化（``granularity``/``source_table``，``mount_change``
+          标记）；无破坏性为空 dict。breaking 时额外携带 ``mounts`` 键
+          （before/after 完整快照，供 ``_promote_pending_version`` 转正全量对齐）。
+        - ``breaking``：是否发生破坏性变更（PUBLISHED 时走 PENDING_VERSION 确认流）。
+
+        新增行（无 id）与已有行非粒度/源表字段变更视为非破坏（新变体/口径微调）。
+        """
+        from app.services.metric_mount.repository import MetricMountRepository
+        from app.services.metric_mount.schemas import MetricMountInput
+
+        # 输入规范化：调用方可能传 dict 快照（转正路径 diff_json["mounts"]["after"]）
+        mounts = [
+            m if isinstance(m, MetricMountInput) else MetricMountInput.model_validate(m)
+            for m in mounts
+        ]
+        _mrepo = MetricMountRepository(self._db)
+        existing = await _mrepo.list_by_metric(metric.id)
+        # 隐式 id 绑定（向后兼容旧前端单挂载 upsert）：见 _resolve_mount_targets
+        mounts = _resolve_mount_targets(existing, mounts)
+        existing_by_id = {m.id: m for m in existing}
+        requested_ids = {m.id for m in mounts if m.id is not None}
+
+        diff: dict[str, Any] = {}
+        breaking = False
+        for req in mounts:
+            if req.id is not None and req.id in existing_by_id:
+                old = existing_by_id[req.id]
+                for f in ("granularity", "source_table"):
+                    if getattr(old, f) != getattr(req, f):
+                        diff[f] = {
+                            "before": getattr(old, f),
+                            "after": getattr(req, f),
+                            "change_type": "BREAKING",
+                            "mount_change": True,
+                        }
+                        breaking = True
+        for mid, old in existing_by_id.items():
+            if mid not in requested_ids:
+                diff[f"removed_mount_{mid}"] = {
+                    "before": old.source_table,
+                    "after": None,
+                    "change_type": "BREAKING",
+                    "mount_change": True,
+                }
+                breaking = True
+        if breaking:
+            diff["mounts"] = {
+                "before": [_mount_to_dict(m) for m in existing],
+                "after": [_mount_input_to_dict(r) for r in mounts],
+                "change_type": "BREAKING",
+                "mount_change": True,
+            }
+        return diff, breaking
+
+    async def _apply_mounts(self, metric: Metric, mounts: list[Any]) -> str | None:
+        """直接对齐挂载列表（非破坏路径 / 转正路径共用）：有 id 更新、无 id 新增、
+        未出现在请求的软删；返回目标默认变体粒度（冗余回填 ``metric.granularity``，
+        无挂载返回 None）。"""
+        from app.models.metric_mount import MetricMount
+        from app.services.metric_mount.repository import MetricMountRepository
+        from app.services.metric_mount.schemas import MetricMountInput
+
+        mounts = [
+            m if isinstance(m, MetricMountInput) else MetricMountInput.model_validate(m)
+            for m in mounts
+        ]
+        _mrepo = MetricMountRepository(self._db)
+        existing = await _mrepo.list_by_metric(metric.id)
+        # 隐式 id 绑定（向后兼容旧前端单挂载 upsert）：见 _resolve_mount_targets
+        mounts = _resolve_mount_targets(existing, mounts)
+        existing_by_id = {m.id: m for m in existing}
+        requested_ids = {m.id for m in mounts if m.id is not None}
+
+        for req in mounts:
+            if req.id is not None and req.id in existing_by_id:
+                old = existing_by_id[req.id]
+                old.source_table = req.source_table
+                old.source_column = req.source_column
+                old.granularity = req.granularity
+                old.default_period = req.default_period
+                old.domain = req.domain
+                old.business_filter = req.business_filter
+            else:
+                await _mrepo.save(
+                    MetricMount(
+                        metric_id=metric.id,
+                        source_table=req.source_table,
+                        source_column=req.source_column,
+                        granularity=req.granularity,
+                        default_period=req.default_period,
+                        domain=req.domain,
+                        business_filter=req.business_filter,
+                    )
+                )
+        for mid, old in existing_by_id.items():
+            if mid not in requested_ids:
+                await _mrepo.soft_delete(mid)
+        target = await _mrepo.list_by_metric(metric.id)
+        default_mount = _pick_default_mount(target) if target else None
+        await self._db.flush()
+        if default_mount is None:
+            return None
+        return default_mount.granularity
+
     async def _promote_pending_version(
         self,
         metric: Metric,
@@ -3982,11 +4138,17 @@ class MetricService(BaseService):
         if version_obj.definition_json is not None:
             updates["definition_json"] = version_obj.definition_json
         # top-level 破坏性字段：diff_json 的 after 值回写主表；
-        # 挂载层破坏性变更（mount_change）额外收集，确认后同步 metric_mount 实体
+        # 挂载层破坏性变更（mount_change）额外收集，确认后同步 metric_mount 实体。
+        # 多变体快照（diff_json["mounts"]，2026-08-27 后产出）转正时全量对齐；
+        # 存量单字段变更（granularity/source_table）按字段回写（兼容旧版本记录）。
         mount_updates: dict[str, Any] = {}
+        mounts_snapshot: dict[str, Any] | None = None
         for field, diff in (version_obj.diff_json or {}).items():
             if isinstance(diff, dict) and diff.get("mount_change") and "after" in diff:
-                mount_updates[field] = diff["after"]
+                if field == "mounts":
+                    mounts_snapshot = diff
+                else:
+                    mount_updates[field] = diff["after"]
             if field in BREAKING_TOP_LEVEL_FIELDS and isinstance(diff, dict) and "after" in diff:
                 updates[field] = diff["after"]
 
@@ -3994,8 +4156,15 @@ class MetricService(BaseService):
             metric.id, metric.row_version, **updates
         )
         await self._repo.mark_version_published(metric.id, version, datetime.now(UTC))
-        # 挂载破坏性变更确认生效：同步 metric_mount（粒度/源表）与主表一致
-        if mount_updates:
+        # 挂载破坏性变更确认生效：多变体快照全量对齐（after 即目标挂载列表——
+        # 含 id 的行更新、缺 id 的新增、未出现的软删），目标粒度回填主表冗余列；
+        # 存量单字段变更按字段回写单行（兼容旧版本记录）。
+        if mounts_snapshot is not None and isinstance(mounts_snapshot.get("after"), list):
+            _target_granularity = await self._apply_mounts(metric, mounts_snapshot["after"])
+            await self._repo.update_with_optimistic_lock(
+                metric.id, updated.row_version, granularity=_target_granularity
+            )
+        elif mount_updates:
             from app.services.metric_mount.repository import MetricMountRepository
 
             _mrepo = MetricMountRepository(self._db)

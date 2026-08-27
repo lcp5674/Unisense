@@ -975,11 +975,13 @@ async def test_update_metric_breaking_change():
 def _mount_with(granularity: str = "日", source_table: str = "dwd.sales_detail") -> MagicMock:
     """构造已有 metric_mount mock（默认日粒度挂载 dwd.sales_detail）。"""
     m = MagicMock()
+    m.id = 1
     m.granularity = granularity
     m.source_table = source_table
     m.source_column = "gmv"
     m.default_period = "day"
     m.domain = "sales"
+    m.business_filter = None
     return m
 
 
@@ -1014,7 +1016,7 @@ async def test_update_published_derived_mount_granularity_pending():
         patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls,
         patch("app.services.semantic.pending_version_manager.PendingVersionManager") as pvm_cls,
     ):
-        mrepo_cls.return_value.get_by_metric = AsyncMock(return_value=existing_mount)
+        mrepo_cls.return_value.list_by_metric = AsyncMock(return_value=[existing_mount])
         pvm_cls.return_value.create_pending = AsyncMock()
         await svc.update_metric(
             "sales_gmv_daily", _mount_update(), actor_id=1, role="metric_owner"
@@ -1050,7 +1052,7 @@ async def test_update_published_derived_mount_pending_exists():
         patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls,
         pytest.raises(ConflictError) as exc,
     ):
-        mrepo_cls.return_value.get_by_metric = AsyncMock(return_value=_mount_with())
+        mrepo_cls.return_value.list_by_metric = AsyncMock(return_value=[_mount_with()])
         await svc.update_metric(
             "sales_gmv_daily", _mount_update(), actor_id=1, role="metric_owner"
         )
@@ -1073,7 +1075,7 @@ async def test_update_draft_derived_mount_granularity_applies():
     svc._db.flush = AsyncMock()
 
     with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
-        mrepo_cls.return_value.get_by_metric = AsyncMock(return_value=existing_mount)
+        mrepo_cls.return_value.list_by_metric = AsyncMock(return_value=[existing_mount])
         await svc.update_metric(
             "sales_gmv_daily", _mount_update(), actor_id=1, role="metric_owner"
         )
@@ -1101,7 +1103,7 @@ async def test_update_published_derived_mount_unchanged_applies():
     svc._db.flush = AsyncMock()
 
     with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
-        mrepo_cls.return_value.get_by_metric = AsyncMock(return_value=existing_mount)
+        mrepo_cls.return_value.list_by_metric = AsyncMock(return_value=[existing_mount])
         await svc.update_metric(
             "sales_gmv_daily", _mount_update(granularity="日"), actor_id=1, role="metric_owner"
         )
@@ -1146,6 +1148,280 @@ async def test_promote_pending_version_applies_mount_change():
     assert lock_kwargs["granularity"] == "月"
     # metric_mount.granularity 同步（挂载变更确认后生效）
     assert mount.granularity == "月"
+    assert result is not None
+
+
+async def test_create_derived_multi_mount_persists_all():
+    """2026-08-27 多变体：派生指标一次创建传 mounts 列表 → 每行落 metric_mount（粒度/限定各异）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    created = make_metric(type="derived")
+    created.id = 1
+    repo.create = AsyncMock(return_value=created)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
+        mrepo_cls.return_value.save = AsyncMock(side_effect=lambda m: m)
+        await svc.create_metric(
+            MetricCreateRequest(
+                **make_create_payload(
+                    type="derived",
+                    measure_id=None,
+                    granularity=None,
+                    definition_json={
+                        "dependencies": ["sales_gmv_amount_daily"],
+                        "expression": "sales_gmv_amount_daily",
+                    },
+                    mounts=[
+                        {
+                            "source_table": "dwd.doctor_fee_daily",
+                            "source_column": "fee",
+                            "granularity": "医生",
+                            "default_period": "day",
+                            "domain": "medical",
+                        },
+                        {
+                            "source_table": "dwd.hospital_fee",
+                            "source_column": "fee",
+                            "granularity": "医院",
+                            "default_period": "day",
+                            "domain": "medical",
+                            "business_filter": "场景=住院",
+                        },
+                    ],
+                )
+            ),
+            owner_id=1,
+        )
+
+    # 默认变体粒度回填：default_period 行优先（医生行在前）
+    captured = repo.create.call_args[0][0]
+    assert captured.granularity == "医生"
+    # 每行均落库（2 个变体），business_filter 透传
+    saved = [c.args[0] for c in mrepo_cls.return_value.save.await_args_list]
+    assert len(saved) == 2
+    assert [s.granularity for s in saved] == ["医生", "医院"]
+    assert saved[1].business_filter == "场景=住院"
+    assert all(s.metric_id == 1 for s in saved)
+
+
+async def test_update_draft_derived_mounts_diff_align():
+    """DRAFT 派生指标 mounts 全量 diff：带 id 更新 + 无 id 新增 + 未出现软删。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(
+        status="DRAFT", type="derived", granularity="日", version=1,
+        definition_json={"dependencies": ["sales_gmv_amount_daily"], "expression": "x"},
+    )
+    repo.get_by_code = AsyncMock(return_value=metric)
+    m1 = _mount_with()
+    m2 = MagicMock()
+    m2.id = 2
+    m2.source_table = "dwd.hospital_fee"
+    m2.source_column = "fee"
+    m2.granularity = "医院"
+    m2.default_period = "day"
+    m2.domain = "medical"
+    m2.business_filter = None
+    repo.update_with_optimistic_lock = AsyncMock(return_value=metric)
+    svc._cache.invalidate = AsyncMock()
+    svc._db.flush = AsyncMock()
+    repo.create_version = AsyncMock()
+
+    with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
+        mrepo_cls.return_value.list_by_metric = AsyncMock(return_value=[m1, m2])
+        mrepo_cls.return_value.soft_delete = AsyncMock()
+        mrepo_cls.return_value.save = AsyncMock(side_effect=lambda m: m)
+        await svc.update_metric(
+            "sales_gmv_daily",
+            MetricUpdateRequest(
+                mounts=[
+                    {
+                        "id": 1, "source_table": "dwd.sales_detail", "source_column": "gmv",
+                        "granularity": "月", "default_period": "month", "domain": "sales",
+                    },
+                    {
+                        "source_table": "dwd.drug_fee", "source_column": "fee",
+                        "granularity": "药品", "default_period": "day", "domain": "medical",
+                    },
+                ],
+                change_reason="多变体对齐",
+            ),
+            actor_id=1,
+            role="metric_owner",
+        )
+    # m1 更新（粒度月）、m2 软删、新增药品行
+    assert m1.granularity == "月"
+    mrepo_cls.return_value.soft_delete.assert_awaited_once_with(2)
+    assert mrepo_cls.return_value.save.await_args.args[0].granularity == "药品"
+    # 默认变体粒度回填（month 行优先）
+    lock_kwargs = repo.update_with_optimistic_lock.call_args.kwargs
+    assert lock_kwargs["granularity"] == "月"
+
+
+async def test_update_published_derived_mounts_add_variant_non_breaking():
+    """PUBLISHED 派生指标新增变体（新挂载行无 id）→ 非破坏，直接应用不触发 PENDING。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(
+        status="PUBLISHED", type="derived", granularity="日", version=3,
+        definition_json={"dependencies": ["sales_gmv_amount_daily"], "expression": "x"},
+    )
+    repo.get_by_code = AsyncMock(return_value=metric)
+    existing = _mount_with()
+    repo.create_version = AsyncMock()
+    repo.update_with_optimistic_lock = AsyncMock(return_value=metric)
+    svc._cache.invalidate = AsyncMock()
+    svc._db.flush = AsyncMock()
+
+    with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
+        mrepo_cls.return_value.list_by_metric = AsyncMock(return_value=[existing])
+        mrepo_cls.return_value.save = AsyncMock(side_effect=lambda m: m)
+        await svc.update_metric(
+            "sales_gmv_daily",
+            MetricUpdateRequest(
+                mounts=[
+                    {
+                        "id": 1, "source_table": "dwd.sales_detail", "source_column": "gmv",
+                        "granularity": "日", "default_period": "day", "domain": "sales",
+                    },
+                    {
+                        "source_table": "dwd.hospital_fee", "source_column": "fee",
+                        "granularity": "医院", "default_period": "day", "domain": "medical",
+                        "business_filter": "场景=住院",
+                    },
+                ],
+                change_reason="新增医院变体",
+            ),
+            actor_id=1,
+            role="metric_owner",
+        )
+    # 新增变体非破坏：无 PENDING 版本，直接落库
+    repo.create_version.assert_not_awaited()
+    lock_kwargs = repo.update_with_optimistic_lock.call_args.kwargs
+    assert lock_kwargs["granularity"] == "日"  # 默认变体仍是医生行
+    assert mrepo_cls.return_value.save.await_args.args[0].business_filter == "场景=住院"
+
+
+async def test_update_published_derived_mounts_remove_variant_breaking():
+    """PUBLISHED 派生指标删除变体（挂载行不在请求）→ 破坏性 PENDING + diff_json 携带 mounts 快照。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(
+        status="PUBLISHED", type="derived", granularity="医生", version=3,
+        definition_json={"dependencies": ["sales_gmv_amount_daily"], "expression": "x"},
+    )
+    repo.get_by_code = AsyncMock(return_value=metric)
+    m1 = _mount_with(granularity="医生")
+    m2 = MagicMock()
+    m2.id = 2
+    m2.source_table = "dwd.hospital_fee"
+    m2.source_column = "fee"
+    m2.granularity = "医院"
+    m2.default_period = "day"
+    m2.domain = "medical"
+    m2.business_filter = None
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    repo.update_with_optimistic_lock = AsyncMock(return_value=metric)
+    repo.has_pending_version = AsyncMock(return_value=False)
+    svc._cache.invalidate = AsyncMock()
+
+    with (
+        patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls,
+        patch("app.services.semantic.pending_version_manager.PendingVersionManager") as pvm_cls,
+    ):
+        mrepo_cls.return_value.list_by_metric = AsyncMock(return_value=[m1, m2])
+        pvm_cls.return_value.create_pending = AsyncMock()
+        await svc.update_metric(
+            "sales_gmv_daily",
+            MetricUpdateRequest(
+                mounts=[
+                    {
+                        "id": 1, "source_table": "dwd.sales_detail", "source_column": "gmv",
+                        "granularity": "医生", "default_period": "day", "domain": "sales",
+                    },
+                ],
+                change_reason="下线医院变体",
+            ),
+            actor_id=1,
+            role="metric_owner",
+        )
+    # 删除 m2 → 破坏性：创建 BREAKING + PENDING_CONFIRMATION 版本，diff_json 携带 mounts 快照
+    version_arg = repo.create_version.call_args.args[0]
+    assert version_arg.change_type == "BREAKING"
+    assert version_arg.status == "PENDING_CONFIRMATION"
+    assert "mounts" in version_arg.diff_json
+    assert len(version_arg.diff_json["mounts"]["before"]) == 2
+    assert version_arg.diff_json["mounts"]["after"][0]["id"] == 1
+    pvm_cls.return_value.create_pending.assert_awaited_once()
+    # 不直接改挂载（等确认后转正）——未执行软删
+    mrepo_cls.return_value.soft_delete.assert_not_called()
+
+
+async def test_promote_pending_version_applies_mounts_snapshot():
+    """PENDING 转正按 diff_json["mounts"] 快照全量对齐挂载列表（多变体破坏性变更确认后生效）。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(status="PUBLISHED", type="derived", granularity="医生", row_version=5)
+    version_obj = MagicMock()
+    version_obj.definition_json = metric.definition_json
+    version_obj.diff_json = {
+        "mounts": {
+            "before": [
+                {
+                    "id": 1, "source_table": "dwd.sales_detail", "source_column": "gmv",
+                    "granularity": "医生", "default_period": "day", "domain": "sales",
+                    "business_filter": None,
+                },
+                {
+                    "id": 2, "source_table": "dwd.hospital_fee", "source_column": "fee",
+                    "granularity": "医院", "default_period": "day", "domain": "medical",
+                    "business_filter": "场景=住院",
+                },
+            ],
+            "after": [
+                {
+                    "id": 1, "source_table": "dwd.sales_detail", "source_column": "gmv",
+                    "granularity": "医生", "default_period": "day", "domain": "sales",
+                    "business_filter": None,
+                },
+                {
+                    "id": 3, "source_table": "dwd.drug_fee", "source_column": "fee",
+                    "granularity": "药品", "default_period": "day", "domain": "medical",
+                    "business_filter": "场景=门特",
+                },
+            ],
+            "change_type": "BREAKING",
+            "mount_change": True,
+        },
+    }
+    repo.get_version = AsyncMock(return_value=version_obj)
+    updated = make_metric(status="PUBLISHED", type="derived", row_version=6)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
+    repo.mark_version_published = AsyncMock()
+    svc._cache.invalidate = AsyncMock()
+    svc._register_metric_lineage_full = AsyncMock()
+    svc._db.flush = AsyncMock()
+
+    m1 = _mount_with(granularity="医生")
+    m2 = MagicMock()
+    m2.id = 2
+    m2.source_table = "dwd.hospital_fee"
+    m2.source_column = "fee"
+    m2.granularity = "医院"
+    m2.default_period = "day"
+    m2.domain = "medical"
+    m2.business_filter = "场景=住院"
+    with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
+        mrepo_cls.return_value.list_by_metric = AsyncMock(return_value=[m1, m2])
+        mrepo_cls.return_value.soft_delete = AsyncMock()
+        mrepo_cls.return_value.save = AsyncMock(side_effect=lambda m: m)
+        result = await svc._promote_pending_version(
+            metric, version=6, trigger="consumer_confirm", actor_id=1
+        )
+    # 快照对齐：m2 软删、新增 id=3 药品行、m1 保持
+    mrepo_cls.return_value.soft_delete.assert_awaited_once_with(2)
+    new_mount = mrepo_cls.return_value.save.await_args.args[0]
+    assert new_mount.source_table == "dwd.drug_fee"
+    assert new_mount.business_filter == "场景=门特"
+    # 目标粒度回填主表（第二次 update_with_optimistic_lock）
+    assert repo.update_with_optimistic_lock.call_count == 2
     assert result is not None
 
 

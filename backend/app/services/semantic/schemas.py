@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
-from app.services.metric_mount.schemas import MetricMountInput
+from app.services.metric_mount.schemas import MetricMountInput, MetricMountResponse
 
 # ---- 请求 Schema ----
 
@@ -155,7 +155,17 @@ class MetricCreateRequest(BaseModel):
     # 挂载实体（OneData 挂载层）：派生指标专用——源表/源列/粒度/默认周期/业务域。
     # 创建后 service 自动落 metric_mount 并回填 metric.granularity。
     mount: MetricMountInput | None = Field(
-        None, description="挂载实体（派生指标：源表/列/粒度/周期/域）"
+        None, description="挂载实体（兼容保留：单挂载快捷字段，等价 mounts=[mount]）"
+    )
+    # 多变体挂载（2026-08-27 放开一指标一挂载）：派生指标一次创建可挂多行——
+    # 每行 = 一个变体（粒度/业务限定/周期组合）。缺省取 mount 兼容字段。
+    mounts: list[MetricMountInput] | None = Field(
+        None, description="挂载实体列表（多变体：粒度×业务限定×周期组合）"
+    )
+    # 指标级业务限定兜底（OneData 派生 = 基础原子 + 业务限定 + 周期）：落
+    # definition_json.business_filter，挂载行 business_filter 缺省继承。
+    default_business_filter: str | None = Field(
+        None, max_length=512, description="指标级业务限定兜底（挂载行缺省继承）"
     )
     unit: str | None = Field(
         None,
@@ -272,6 +282,25 @@ class MetricCreateRequest(BaseModel):
         return _validate_guide_payload(v)
 
     @model_validator(mode="after")
+    def _merge_mount_into_mounts(self) -> MetricCreateRequest:
+        """挂载兼容合并（2026-08-27 多变体）：旧字段 ``mount``（单数）并入 ``mounts``。
+
+        - 仅传 ``mount`` → 等价 ``mounts=[mount]``（旧前端单挂载创建不受影响）；
+        - 两者同时提供视为契约冲突（前端应只发 ``mounts``），422 拦截；
+        - 仅派生指标可挂载（原子=逻辑度量不挂表、复合=派生组合不直接挂表），
+          非派生提供挂载在 schema 层即拒绝，与 service 更新路径口径一致。
+        """
+        if self.mounts is None and self.mount is not None:
+            self.mounts = [self.mount]
+        elif self.mounts is not None and self.mount is not None:
+            raise ValueError("mount 与 mounts 不能同时提供，请使用 mounts（多变体列表）")
+        if self.mounts and self.type != "derived":
+            raise ValueError(
+                f"仅派生指标可挂载，当前类型 {self.type}（原子=逻辑度量不挂表，复合=派生组合不直接挂表）"
+            )
+        return self
+
+    @model_validator(mode="after")
     def validate_definition_by_type(self) -> MetricCreateRequest:
         """按指标类型校验口径定义完整性（注册门禁，PRD 4.5 / TD §12.2 / OneData）。
 
@@ -337,7 +366,16 @@ class MetricUpdateRequest(BaseModel):
     )
     # 挂载实体（派生指标）：提供则 upsert metric_mount 并回填 granularity
     mount: MetricMountInput | None = Field(
-        None, description="挂载实体（派生指标：源表/列/粒度/周期/域，提供即 upsert）"
+        None, description="挂载实体（兼容保留：单挂载快捷字段，等价 mounts=[mount]）"
+    )
+    # 多变体挂载（2026-08-27 放开一指标一挂载）：传列表则全量 diff 对齐——
+    # 有 id 更新、无 id 新增、未出现在请求的删除；传 [] 清空全部挂载。
+    mounts: list[MetricMountInput] | None = Field(
+        None, description="挂载实体列表（多变体全量 diff：传 [] 清空）"
+    )
+    # 指标级业务限定兜底：写 definition_json.business_filter，挂载行缺省继承。
+    default_business_filter: str | None = Field(
+        None, max_length=512, description="指标级业务限定兜底（挂载行缺省继承）"
     )
     unit: str | None = Field(None, max_length=32)
     currency: str | None = Field(None, max_length=16, description="币种（治理属性，非破坏性变更）")
@@ -401,6 +439,19 @@ class MetricUpdateRequest(BaseModel):
     def validate_definition(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
         """口径定义：SQL 语法校验 + source_tables 规范化。"""
         return _validate_definition_json(v) if v is not None else v
+
+    @model_validator(mode="after")
+    def _merge_mount_into_mounts(self) -> MetricUpdateRequest:
+        """挂载兼容合并（2026-08-27 多变体）：旧字段 ``mount``（单数）并入 ``mounts``。
+
+        与创建请求同规则：仅 ``mount`` → ``mounts=[mount]``；两者同传 422；
+        非派生指标携带挂载 → 422（原子/复合不挂表）。
+        """
+        if self.mounts is None and self.mount is not None:
+            self.mounts = [self.mount]
+        elif self.mounts is not None and self.mount is not None:
+            raise ValueError("mount 与 mounts 不能同时提供，请使用 mounts（多变体列表）")
+        return self
 
 
 class MetricDescriptionUpdateRequest(BaseModel):
@@ -1008,6 +1059,9 @@ class MetricResponse(BaseModel):
     dw_developer_name: str | None = None
     # 关联业务术语（P2-11：术语绑定，度量口径归属术语治理）
     term_id: int | None = None
+    # 多变体挂载列表（2026-08-27 放开一指标一挂载）：详情接口回填全部挂载行；
+    # 列表接口未回填时为 None（详情/编辑页按需调用 detail 端点）。
+    mounts: list[MetricMountResponse] | None = None
     # 治理追溯：审批人 / 提交人，DB 模型已有，响应透出供目录页显示
     approver_id: int | None = None
     submitted_by: int | None = None

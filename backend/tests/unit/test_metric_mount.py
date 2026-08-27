@@ -141,6 +141,9 @@ async def _svc() -> tuple[MetricMountService, MagicMock]:
     # C2（第七轮）：挂载粒度与主表冗余列同步——service 新增回填/清空调用须 mock
     repo.update_metric_granularity = AsyncMock()
     repo.clear_metric_granularity = AsyncMock()
+    # 2026-08-27 多变体：全量对齐/默认变体解析走 list_by_metric / get_default_mount
+    repo.list_by_metric = AsyncMock(return_value=[])
+    repo.get_default_mount = AsyncMock(return_value=None)
     svc._repo = repo  # noqa: SLF001
     return svc, repo
 
@@ -199,19 +202,42 @@ class TestMountService:
                 )
             )
 
-    async def test_create_mount_unique_per_metric(self) -> None:
+    async def test_create_mount_allows_multi_mount(self) -> None:
+        """2026-08-27 放开一指标一挂载：同一指标可新增第二个挂载（多变体），
+        不再抛 MOUNT_EXISTS（唯一约束已改普通索引）。"""
         svc, repo = await _svc_with_metric("derived")
-        repo.get_by_metric = AsyncMock(return_value=_mount())
-        with pytest.raises(ConflictError):
-            await svc.create_mount(
-                MetricMountCreate(
-                    metric_id=1,
-                    source_table="t",
-                    source_column="c",
-                    granularity="日",
-                    domain="s",
-                )
+        repo.list_by_metric = AsyncMock(return_value=[_mount()])
+        out = await svc.create_mount(
+            MetricMountCreate(
+                metric_id=1,
+                source_table="dwd.hospital_fee",
+                source_column="fee",
+                granularity="医院",
+                default_period="day",
+                domain="sales",
             )
+        )
+        assert out.source_table == "dwd.hospital_fee"
+        repo.save.assert_awaited()
+        # 默认变体粒度回填：已有行 default_period=day 优先（id 最小），冗余列回填其粒度
+        repo.update_metric_granularity.assert_awaited_with(1, "日")
+
+    async def test_create_mount_persists_business_filter(self) -> None:
+        """变体级业务限定透传落库（OneData 派生 = 基础原子 + 业务限定 + 周期）。"""
+        svc, repo = await _svc_with_metric("derived")
+        out = await svc.create_mount(
+            MetricMountCreate(
+                metric_id=1,
+                source_table="dwd.mt_cancer",
+                source_column="occur_amt",
+                granularity="日",
+                default_period="day",
+                domain="medical",
+                business_filter="病种=门特",
+            )
+        )
+        assert out.business_filter == "病种=门特"
+        repo.save.assert_awaited()
 
     async def test_create_mount_requires_existing_metric(self) -> None:
         svc, _ = await _svc()
