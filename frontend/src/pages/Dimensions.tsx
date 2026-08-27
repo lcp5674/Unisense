@@ -784,7 +784,7 @@ function DimensionsTab() {
             <Input className="mono" placeholder="留空自动生成" />
           </Form.Item>
           <Form.Item name="name" label="名称" rules={[{ required: true }]}>
-            <Input placeholder="如 渠道" />
+            <Input placeholder="如 科室" />
           </Form.Item>
           <Form.Item name="domain" label="业务域" rules={[{ required: true }]}>
             <Select
@@ -836,7 +836,7 @@ function DimensionsTab() {
             <Input className="mono" disabled={editTarget?.status !== "DRAFT"} />
           </Form.Item>
           <Form.Item name="name" label="名称" rules={[{ required: true }]}>
-            <Input placeholder="如 渠道" />
+            <Input placeholder="如 科室" />
           </Form.Item>
           <Form.Item name="domain" label="业务域" rules={[{ required: true }]}>
             <Select
@@ -1320,7 +1320,7 @@ function MembersTab() {
           color: "var(--text-2)",
         }}
       >
-        维度值 = 该维度允许的<b>业务取值集合</b>（如「渠道」维度的值：线上 / 线下 / 小程序），
+        维度值 = 该维度允许的<b>业务取值集合</b>（如「科室」维度的值：内科 / 外科 / 儿科），
         用于指标按此维度分组/过滤时校验合法性。这里管理的<b>不是系统用户账号</b>，
         而是维度自身的枚举取值，可手动新增或从数据源表列自动导入。
         <br />
@@ -1494,13 +1494,13 @@ function MembersTab() {
           <Form.Item
             label="表名"
             name="table"
-            extra={<span className="muted" style={{ fontSize: 12 }}>可带库前缀，如 dwd.sales</span>}
+            extra={<span className="muted" style={{ fontSize: 12 }}>可带库前缀，如 dwd.telemedicine</span>}
             rules={[
               { required: true, message: "请输入表名" },
               { pattern: /^[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*$/, message: "表名不合法" },
             ]}
           >
-            <Input className="mono" placeholder="如 dwd.sales" />
+            <Input className="mono" placeholder="如 dwd.telemedicine" />
           </Form.Item>
           <Form.Item
             label="列名"
@@ -1510,7 +1510,7 @@ function MembersTab() {
               { pattern: /^[a-zA-Z_][a-zA-Z0-9_]*$/, message: "列名不合法" },
             ]}
           >
-            <Input className="mono" placeholder="如 channel" />
+            <Input className="mono" placeholder="如 department_id" />
           </Form.Item>
           <Form.Item>
             <Space>
@@ -1778,10 +1778,10 @@ function MappingsTab() {
         指标跨系统对账时需要知道它们等价。
         <br />
         <span className="muted">
-          示例：业务库维度 <code className="mono">channel</code>（取值 app / web） ↔ 数仓维度{" "}
-          <code className="mono">渠道</code>（取值 APP / PC）。
-          创建一条 <Tag color="success">等价</Tag> 映射（source=channel, target=渠道），即可让指标在
-          「渠道」维度上正确对账。
+          示例：业务库维度 <code className="mono">dept_code</code>（取值 dept_01 / dept_02） ↔ 数仓维度{" "}
+          <code className="mono">科室</code>（取值 内科 / 外科）。
+          创建一条 <Tag color="success">等价</Tag> 映射（source=dept_code, target=科室），即可让指标在
+          「科室」维度上正确对账。
         </span>
       </div>
       <div style={{ marginBottom: 12, display: "flex", justifyContent: "flex-end" }}>
@@ -1840,9 +1840,9 @@ function MappingsTab() {
           <Form.Item
             name="expression"
             label="映射表达式"
-            extra={<span className="muted" style={{ fontSize: 12 }}>支持键值对（app=APP）或 SQL 片段（CASE WHEN ...）</span>}
+            extra={<span className="muted" style={{ fontSize: 12 }}>支持键值对（dept_01=neike）或 SQL 片段（CASE WHEN ...）</span>}
           >
-            <Input.TextArea rows={2} className="mono" placeholder="如 app=APP;web=PC" />
+            <Input.TextArea rows={2} className="mono" placeholder="如 dept_01=neike;dept_02=waike" />
           </Form.Item>
         </Form>
       </Modal>
@@ -1869,9 +1869,9 @@ function MappingsTab() {
           <Form.Item
             name="expression"
             label="映射表达式"
-            extra={<span className="muted" style={{ fontSize: 12 }}>支持键值对（app=APP）或 SQL 片段（CASE WHEN ...）</span>}
+            extra={<span className="muted" style={{ fontSize: 12 }}>支持键值对（dept_01=neike）或 SQL 片段（CASE WHEN ...）</span>}
           >
-            <Input.TextArea rows={2} className="mono" placeholder="如 app=APP;web=PC" />
+            <Input.TextArea rows={2} className="mono" placeholder="如 dept_01=neike;dept_02=waike" />
           </Form.Item>
         </Form>
       </Modal>

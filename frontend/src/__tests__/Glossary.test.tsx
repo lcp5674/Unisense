@@ -401,7 +401,7 @@ describe("Glossary 页面", () => {
     );
     await screen.findAllByText("共 2 条");
     fireEvent.click(screen.getAllByText("新建术语")[0]);
-    await screen.findByPlaceholderText("如 成交总额");
+    await screen.findByPlaceholderText("如 门诊挂号人次");
     fireEvent.change(screen.getByLabelText("名称"), { target: { value: "成交总额" } });
     fireEvent.click(screen.getByText(/根据名称生成定义/));
     await waitFor(() => {
@@ -428,7 +428,7 @@ describe("Glossary 页面", () => {
     );
     await screen.findAllByText("共 2 条");
     fireEvent.click(screen.getAllByText("新建术语")[0]);
-    await screen.findByPlaceholderText("如 成交总额");
+    await screen.findByPlaceholderText("如 门诊挂号人次");
     fireEvent.mouseDown(screen.getByLabelText("业务域"));
     await screen.findByText("财务域（finance）");
     fireEvent.click(screen.getByText("财务域（finance）"));

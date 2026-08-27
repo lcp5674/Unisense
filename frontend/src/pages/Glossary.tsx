@@ -698,7 +698,7 @@ function TermsTab() {
             <Input className="mono" placeholder="留空自动生成" />
           </Form.Item>
           <Form.Item name="name" label="名称" rules={[{ required: true }]}>
-            <Input placeholder="如 成交总额" />
+            <Input placeholder="如 门诊挂号人次" />
           </Form.Item>
           <Form.Item
             label="AI 推断"
@@ -731,10 +731,10 @@ function TermsTab() {
             <Input.TextArea rows={3} />
           </Form.Item>
           <Form.Item name="synonyms" label="同义词（逗号分隔）">
-            <Input placeholder="GMV, gross merchandise volume" />
+            <Input placeholder="门诊人次, outpatient visits" />
           </Form.Item>
           <Form.Item name="boundary" label="边界说明">
-            <Input.TextArea rows={2} placeholder="如：不含退款订单" />
+            <Input.TextArea rows={2} placeholder="如：不含退费记录" />
           </Form.Item>
         </Form>
       </Modal>
@@ -800,10 +800,10 @@ function TermsTab() {
             <Input.TextArea rows={3} />
           </Form.Item>
           <Form.Item name="synonyms" label="同义词（逗号分隔）">
-            <Input placeholder="GMV, gross merchandise volume" />
+            <Input placeholder="门诊人次, outpatient visits" />
           </Form.Item>
           <Form.Item name="boundary" label="边界说明">
-            <Input.TextArea rows={2} placeholder="如：不含退款订单" />
+            <Input.TextArea rows={2} placeholder="如：不含退费记录" />
           </Form.Item>
         </Form>
       </Modal>
