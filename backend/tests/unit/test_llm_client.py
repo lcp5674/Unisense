@@ -39,6 +39,32 @@ def _reset_shared_llm_breaker() -> None:
     _LLM_BREAKER._recent_outcomes.clear()
 
 
+class _FakeBreaker:
+    """最小熔断器替身：仅记录 record_failure/record_success 调用次数。
+
+    用于验证「空/垃圾内容必须走 record_failure 而非 record_success」——这是坏实例
+    永不熔断、批量解析墙钟拖到几百秒的根因修复。
+    """
+
+    def __init__(self) -> None:
+        self.failures = 0
+        self.successes = 0
+        self._open = False
+        self._probing = False
+        self._probing_since = None
+        self._opened_at = None
+        self._recent_outcomes: list[bool] = []
+
+    def allow(self) -> bool:
+        return True
+
+    def record_failure(self) -> None:
+        self.failures += 1
+
+    def record_success(self) -> None:
+        self.successes += 1
+
+
 class TestChatCompletionsUrl:
     """base_url 三种合法形态的端点规范化（修复 /v1/v1/... 404 的回归证据）。"""
 
@@ -255,6 +281,80 @@ class TestLlmClient:
         client._client.post = AsyncMock(return_value=mock_response)
         with pytest.raises(LlmError):
             await client.chat([{"role": "user", "content": "Hi"}])
+
+    @pytest.mark.asyncio
+    async def test_chat_empty_content_records_failure(self) -> None:
+        """空 content 必须计为失败并抛错——否则坏实例永不熔断，每次请求白等其完整返回。
+
+        回归保护：此前无条件 record_success() 复位熔断计数，空/垃圾返回被当成功，
+        坏实例永不熔断，多语句批量解析墙钟拖到几百秒（实测 230s）。
+        """
+        breaker = _FakeBreaker()
+        client = LlmClient(
+            base_url="https://api.example.com", api_key="test-key", breaker=breaker
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "", "finish_reason": "stop"}}],
+            "model": "test-model",
+        }
+        client._client = MagicMock()
+        client._client.post = AsyncMock(return_value=mock_response)
+        with pytest.raises(LlmError):
+            await client.chat([{"role": "user", "content": "Hi"}])
+        assert breaker.failures == 1  # record_failure 而非 record_success
+        assert breaker.successes == 0
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_dump_content_records_failure(self) -> None:
+        """流式协议原文垃圾（SSE 信封）必须计为失败并抛错。"""
+        breaker = _FakeBreaker()
+        client = LlmClient(
+            base_url="https://api.example.com", api_key="test-key", breaker=breaker
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": '[\\n {"type":"message","content":"xx"}]' * 300,
+                        "finish_reason": "stop",
+                    }
+                }
+            ],
+            "model": "test-model",
+        }
+        client._client = MagicMock()
+        client._client.post = AsyncMock(return_value=mock_response)
+        with pytest.raises(LlmError):
+            await client.chat([{"role": "user", "content": "Hi"}])
+        assert breaker.failures == 1
+        assert breaker.successes == 0
+
+    @pytest.mark.asyncio
+    async def test_chat_good_content_records_success(self) -> None:
+        """正常内容仍走 record_success（不误伤）。"""
+        breaker = _FakeBreaker()
+        client = LlmClient(
+            base_url="https://api.example.com", api_key="test-key", breaker=breaker
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "正常内容", "finish_reason": "stop"}}],
+            "model": "test-model",
+        }
+        client._client = MagicMock()
+        client._client.post = AsyncMock(return_value=mock_response)
+        result = await client.chat([{"role": "user", "content": "Hi"}])
+        assert result["content"] == "正常内容"
+        assert breaker.successes == 1
+        assert breaker.failures == 0
 
     @pytest.mark.asyncio
     async def test_chat_not_enabled(self) -> None:

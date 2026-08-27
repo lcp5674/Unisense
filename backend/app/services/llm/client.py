@@ -272,6 +272,19 @@ class LlmClient:
 
                 # 解析结构化输出
                 structured = self._parse_structured_output(raw_content)
+                content = structured.content
+
+                # 空 content / 异常内容（超长流式垃圾、SSE 信封原文）必须计为失败并
+                # 抛错——让路由 failover 且熔断器真正累计。此前此处无条件
+                # record_success() 会把失败计数复位（垃圾被当成功返回），坏实例永不
+                # 熔断：每次请求都白等其完整返回（如 29s 流式垃圾）才 failover 到
+                # 健康实例，多语句批量解析叠加后墙钟拖到几百秒（用户实测 230s）。
+                if not content.strip() or is_abnormal_llm_text(raw_content):
+                    self._breaker.record_failure()
+                    metrics_store.observe_llm_call(success=False)
+                    raise LlmError(
+                        "LLM 返回内容为空或异常（流式/超长），已计入熔断"
+                    )
 
                 # 成功 → 复位熔断计数 + 上报 LLM 调用指标（可观测性，P0-2）
                 self._breaker.record_success()
