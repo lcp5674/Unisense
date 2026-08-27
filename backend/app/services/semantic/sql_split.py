@@ -240,13 +240,20 @@ def _split_custom(sql: str, custom_rules: dict[str, Any] | None) -> list[str]:
     return []
 
 
-async def _llm_split(db: Any, sql: str) -> list[str] | None:
-    """LLM 按语义分段（custom 规则未生效时兜底）；不可用/失败返回 None。"""
+async def _llm_split(db: Any, sql: str, client: Any | None = None) -> list[str] | None:
+    """LLM 按语义分段（custom 规则未生效时兜底）；不可用/失败返回 None。
+
+    Args:
+        db: 异步会话（client 缺省时构建用）。
+        client: 复用已构建的 LLM 客户端（批量解析场景由调用方一次构建传入，
+            避免每个兜底重复 DB 查询+解密）；None 时内部构建。
+    """
     try:
         from app.services.llm.config_service import LlmConfigService
         from app.services.llm.parse import parse_sql_split_result
 
-        client = await LlmConfigService(db).build_client()
+        if client is None:
+            client = await LlmConfigService(db).build_client()
         if not getattr(client, "enabled", False):
             return None
         prompt = (
@@ -259,6 +266,7 @@ async def _llm_split(db: Any, sql: str) -> list[str] | None:
         resp = await client.chat(
             messages=[{"role": "user", "content": prompt}],
             max_tokens=2048,
+            retries=1,  # 推断类调用收紧重试：限流重试大概率仍 429，避免叠加放大墙钟
         )
         raw = (resp.get("content") or "").strip()
         parsed = parse_sql_split_result(raw)
@@ -270,7 +278,7 @@ async def _llm_split(db: Any, sql: str) -> list[str] | None:
 
 
 async def _llm_infer_period(
-    db: Any, full_sql: str, focus_sql: str | None = None
+    db: Any, full_sql: str, focus_sql: str | None = None, client: Any | None = None
 ) -> str | None:
     """LLM 从整段 SQL 推断统计周期（规则层无时间信号时兜底）。
 
@@ -279,12 +287,17 @@ async def _llm_infer_period(
     统计周期。传**完整脚本 + 焦点语句**：完整脚本提供上下文（CTE/前置语句/
     注释），LLM 只针对焦点语句下结论——切分后的单段可能已丢失来源上下文。
     不可用/超时/解析失败返回 None（上层降级规则层默认 day）。
+
+    Args:
+        db: 异步会话（client 缺省时构建用）。
+        client: 复用已构建的 LLM 客户端；None 时内部构建。
     """
     try:
         from app.services.llm.config_service import LlmConfigService
         from app.services.llm.parse import parse_period_infer_result
 
-        client = await LlmConfigService(db).build_client()
+        if client is None:
+            client = await LlmConfigService(db).build_client()
         if not getattr(client, "enabled", False):
             return None
         prompt = (
@@ -301,6 +314,7 @@ async def _llm_infer_period(
         resp = await client.chat(
             messages=[{"role": "user", "content": prompt}],
             max_tokens=512,
+            retries=1,  # 推断类调用收紧重试：限流重试大概率仍 429，避免叠加放大墙钟
         )
         raw = (resp.get("content") or "").strip()
         parsed = parse_period_infer_result(raw)
@@ -310,7 +324,7 @@ async def _llm_infer_period(
 
 
 async def _llm_infer_measures(
-    db: Any, full_sql: str, focus_sql: str | None = None
+    db: Any, full_sql: str, focus_sql: str | None = None, client: Any | None = None
 ) -> list[dict[str, Any]] | None:
     """LLM 兜底：规则层解析不出聚合度量时，让 LLM 从 SQL 提取度量清单。
 
@@ -324,9 +338,10 @@ async def _llm_infer_measures(
     （上层降级 skipped，绝不阻断批量解析）。
 
     Args:
-        db: 异步会话（LLM 客户端构建需要）。
+        db: 异步会话（client 缺省时构建用）。
         full_sql: 完整原始 SQL 脚本（上下文）。
         focus_sql: 待提取度量的焦点语句（缺省用完整脚本）。
+        client: 复用已构建的 LLM 客户端；None 时内部构建。
 
     Returns:
         ``[{"column", "agg", "alias"?, "table"?, "period"?, "name"?}]``；
@@ -336,7 +351,8 @@ async def _llm_infer_measures(
         from app.services.llm.config_service import LlmConfigService
         from app.services.llm.parse import parse_sql_measures_result
 
-        client = await LlmConfigService(db).build_client()
+        if client is None:
+            client = await LlmConfigService(db).build_client()
         if not getattr(client, "enabled", False):
             return None
         prompt = (
@@ -358,6 +374,7 @@ async def _llm_infer_measures(
         resp = await client.chat(
             messages=[{"role": "user", "content": prompt}],
             max_tokens=2048,
+            retries=1,  # 推断类调用收紧重试：限流重试大概率仍 429，避免叠加放大墙钟
         )
         raw = (resp.get("content") or "").strip()
         parsed = parse_sql_measures_result(raw)
@@ -370,6 +387,7 @@ async def _llm_annotate_candidates(
     db: Any,
     full_sql: str,
     candidates: list[dict[str, Any]],
+    client: Any | None = None,
 ) -> list[dict[str, Any]] | None:
     """LLM 批量补全候选（use_llm 显式模式）：对规则解析出的候选做**封闭选择**。
 
@@ -398,7 +416,8 @@ async def _llm_annotate_candidates(
         from app.services.llm.config_service import LlmConfigService
         from app.services.llm.parse import parse_sql_candidates_annotations
 
-        client = await LlmConfigService(db).build_client()
+        if client is None:
+            client = await LlmConfigService(db).build_client()
         if not getattr(client, "enabled", False):
             return None
         rows = "\n".join(
@@ -428,6 +447,7 @@ async def _llm_annotate_candidates(
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=2048,
+            retries=1,  # 推断类调用收紧重试：限流重试大概率仍 429，避免叠加放大墙钟
         )
         raw = (resp.get("content") or "").strip()
         parsed = parse_sql_candidates_annotations(raw)
@@ -442,6 +462,7 @@ async def split_sql_statements(
     custom_rules: dict[str, Any] | None = None,
     db: Any = None,
     llm_budget: dict[str, int] | None = None,
+    client: Any | None = None,
 ) -> list[str]:
     """按模式切分多语句 SQL。
 
@@ -452,6 +473,8 @@ async def split_sql_statements(
         db: 异步会话（custom 模式 LLM 兜底需要；None 则跳过 LLM）。
         llm_budget: 批级 LLM 调用预算 ``{"used", "limit"}``（P1-1：custom 切分
             LLM 兜底计入批量限额，防多语句脚本打满 LLM 配额；None 表示不限额）。
+        client: 复用已构建的 LLM 客户端（批量解析场景由调用方一次构建传入）；
+            None 时内部构建。
 
     Returns:
         切分后的语句列表（至少 1 段；极端失败降级整段）。
@@ -467,7 +490,7 @@ async def split_sql_statements(
             if llm_budget is None or llm_budget["used"] < llm_budget["limit"]:
                 if llm_budget is not None:
                     llm_budget["used"] += 1
-                llm_segments = await _llm_split(db, sql)
+                llm_segments = await _llm_split(db, sql, client=client)
             if llm_segments:
                 return llm_segments
     else:  # statement（默认）：语义切分失败时回退引号感知分号切分
@@ -1235,6 +1258,7 @@ async def infer_sql_batch(
     domain_code: str | None = None,
     synthesize_composite: bool = False,
     use_llm: bool = False,
+    validate_measures: bool = False,
 ) -> dict[str, Any]:
     """SQL 批量推断主函数：切分 → 逐语句画像 → 候选生成 → 域建议 → LLM 补全。
 
@@ -1250,6 +1274,10 @@ async def infer_sql_batch(
             过滤）+ 规范收敛（``_apply_candidate_annotations``），整段 SQL 只花
             1 次调用；LLM 不可用/失败保持规则候选不动，绝不阻断。批级 LLM 预算
             相应放宽到 ``_LLM_BATCH_LIMIT_LLM``（规则兜底模式的 4 倍）。
+        validate_measures: 规则模式下是否对候选做一次 LLM 校验层
+            （``llm_validate_measures`` 封闭选择 + 漏检扫描）。默认关闭——该校验
+            固定串行 4-7s，普通「解析候选」不白付（use_llm 模式由
+            ``_llm_annotate_candidates`` 承担更完整补全，不重复校验）。
 
     Returns:
         ``{"statements", "candidates", "skipped", "domain"}``。
@@ -1266,8 +1294,37 @@ async def infer_sql_batch(
     llm_limit = _LLM_BATCH_LIMIT_LLM if use_llm else _LLM_BATCH_LIMIT
     llm_budget = {"used": 0, "limit": llm_limit}
 
+    # A3：构建一次 LLM 客户端供各兜底复用（切分/域建议/周期/度量/补全共用），
+    # 避免每个兜底重复 DB 查询+解密；构建失败降级（各兜底内部仍有保护）。
+    llm_client: Any | None = None
+    if db is not None:
+        try:
+            from app.services.llm.config_service import LlmConfigService
+
+            llm_client = await LlmConfigService(db).build_client()
+        except Exception:  # noqa: BLE001 - 构建失败仅降级，各兜底自行处理
+            llm_client = None
+
+    # A1：整段域建议与切分/阶段1/阶段2 并行（未指定域时）——目录/挂载未命中时
+    # LLM 兜底 4-7s 不再串行阻塞，与阶段 2 的周期/度量兜底重叠；预算「检查
+    # used<limit 与 used+=1 之间无 await 分隔」（asyncio 单线程下原子安全），
+    # 与切分/逐语句兜底并发竞争预算不会超发（best-effort 软护栏）。域建议结果
+    # 在阶段 2 后 await（依赖它确定 domain_code 的候选构建才使用）。
+    domain_task: Any | None = None
+    if not domain_code:
+        from app.services.semantic.domain_suggest import suggest_domain
+
+        domain_task = asyncio.create_task(
+            suggest_domain(db, sql=sql, llm_budget=llm_budget, client=llm_client)
+        )
+
     segments = await split_sql_statements(
-        sql, mode=split_mode, custom_rules=custom_rules, db=db, llm_budget=llm_budget
+        sql,
+        mode=split_mode,
+        custom_rules=custom_rules,
+        db=db,
+        llm_budget=llm_budget,
+        client=llm_client,
     )
     if not segments:
         segments = [sql.strip()]
@@ -1290,16 +1347,9 @@ async def infer_sql_batch(
             ctx={"statement_count": len(segments), "limit": max_batch_statements},
         )
 
-    # 域建议：用户未指定域时整段一次批量建议（目录/挂载反查 + LLM 兜底）
+    # 整段域建议结果待阶段 2 后 await（domain_task）；domain_defaults 推迟到定域后
+    # 加载（阶段 3 候选构建才消费）。用户显式指定域时不建议。
     suggestion: dict[str, Any] | None = None
-    if not domain_code:
-        from app.services.semantic.domain_suggest import suggest_domain
-
-        suggestion = await suggest_domain(db, sql=sql, llm_budget=llm_budget)
-        if suggestion.get("status") in ("unique", "llm"):
-            domain_code = suggestion["domain"]["code"]
-
-    domain_defaults = await _load_domain_defaults(db, domain_code) if domain_code else {}
 
     statements: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
@@ -1307,9 +1357,9 @@ async def infer_sql_batch(
     # P2-10：整段域建议未定/多域时，逐语句反向建议域——跨域脚本各语句表可能
     # 分属不同域（跨域共用 DWD 层表是常态），候选携带语句级建议域供前端提示。
     # 整段唯一/LLM 已定域或用户显式指定域时不重复建议（避免 N 次 DB 查询）。
-    per_stmt_suggest = bool(
-        not domain_code and suggestion and suggestion.get("status") in ("multiple", "none")
-    )
+    # 注意：整段域建议 task 并行中（suggestion 未出），阶段 1 先按「未指定域」
+    # 无条件收集 pending_domain，阶段 2 后 await 整段结果——若 unique/llm 已定域
+    # 则清空 pending_domain（不逐语句），仅 multiple/none 保留逐语句建议。
     # ---- 阶段 1：纯规则解析（串行、无 LLM），收集逐语句兜底需求 ----
     # 两阶段设计：多语句同时触发 LLM 兜底（周期/度量提取/逐语句域建议）时，
     # 阶段 2 用 asyncio.gather 并发执行，把墙钟从「N×单次调用」降到并发数内
@@ -1330,7 +1380,7 @@ async def infer_sql_batch(
         except Exception:  # noqa: BLE001 - 单语句异常仅降级跳过该句
             skipped.append({"index": idx, "sql": seg[:500], "reason": "parse_failed"})
             continue
-        if per_stmt_suggest:
+        if not domain_code:
             # P2-10：跨域脚本逐语句建议域——不在阶段 1 串行 await，收集进
             # pending_domain，阶段 2 与周期/度量兜底同批 gather 并发执行（避免
             # N 条语句各自等一次 LLM/DB 反查串行拖慢）；结果按 idx 回填。
@@ -1406,7 +1456,10 @@ async def infer_sql_batch(
                 # 传完整脚本 + 焦点语句：方言语句字段来源/口径常依赖前置语句
                 # 定义（CTE/SET/变量），只看单段会信息丢失影响推断
                 return stmt_idx, await _llm_infer_period(
-                    db, full_sql=sql, focus_sql=segments[stmt_idx]
+                    db,
+                    full_sql=sql,
+                    focus_sql=segments[stmt_idx],
+                    client=llm_client,
                 )
 
         for stmt_idx, period in await asyncio.gather(
@@ -1420,13 +1473,26 @@ async def infer_sql_batch(
         async def _run_measures(item: dict[str, Any]) -> tuple[int, list[dict[str, Any]] | None]:
             async with measures_sem:
                 return item["idx"], await _llm_infer_measures(
-                    db, full_sql=sql, focus_sql=item["seg"]
+                    db, full_sql=sql, focus_sql=item["seg"], client=llm_client
                 )
 
         for item, measures in await asyncio.gather(
             *[_run_measures(it) for it in pending_measures]
         ):
             llm_measures_map[item] = measures
+
+    # A1：await 整段域建议（与阶段 1/阶段 2 并行结束）——unique/llm 已定域则
+    # 清空 pending_domain（不逐语句建议）；multiple/none 保留逐语句（P2-10）。
+    if domain_task is not None:
+        try:
+            suggestion = await domain_task
+        except Exception:  # noqa: BLE001 - 整段域建议异常不阻断候选生成
+            suggestion = None
+        if suggestion and suggestion.get("status") in ("unique", "llm"):
+            domain_code = suggestion["domain"]["code"]
+            pending_domain = []
+    # 域默认值（编码/名称/单位等）——候选构建（阶段 3）消费；推迟到定域后加载
+    domain_defaults = await _load_domain_defaults(db, domain_code) if domain_code else {}
 
     # 逐语句域建议（P2-10）同批并发：目录/挂载反查命中不耗 LLM；未命中才内部
     # 检查/递增批级预算（检查+递增无 await 分隔，asyncio 单线程下原子安全）。
@@ -1443,7 +1509,10 @@ async def infer_sql_batch(
                     from app.services.semantic.domain_suggest import suggest_domain
 
                     seg_suggestion = await suggest_domain(
-                        db, sql=segments[stmt_idx], llm_budget=llm_budget
+                        db,
+                        sql=segments[stmt_idx],
+                        llm_budget=llm_budget,
+                        client=llm_client,
                     )
                     if seg_suggestion.get("status") in ("unique", "llm"):
                         return stmt_idx, seg_suggestion["domain"]["code"]
@@ -1596,15 +1665,16 @@ async def infer_sql_batch(
     for idx in pending_domain:
         statements[idx]["suggested_domain"] = seg_domain_map.get(idx)
 
-    # LLM 校验层（方案 A 默认全量校验，仅规则模式）：规则解析可能「静默解析错」
+    # LLM 校验层（A2 默认关闭，仅显式开启时执行）：规则解析可能「静默解析错」
     # （漏度量/聚合归一错/条件聚合丢失），对规则候选做一次 LLM 封闭选择校验
     # （is_measure/聚合/源表/周期）+ 漏检扫描，经 ``_apply_candidate_validation``
     # 确定性收敛（白名单/源表回映/置信度）。LLM 不可用/失败保持规则候选不动，
-    # 绝不阻断；整段只花 1 次调用（use_llm 显式模式由 _llm_annotate_candidates
-    # 承担更完整的补全，不再重复校验）。
+    # 绝不阻断；整段只花 1 次调用。**默认关闭**——该校验固定串行 4-7s，普通
+    # 「解析候选」不白付（use_llm 显式模式由 _llm_annotate_candidates 承担更
+    # 完整的补全，不重复校验）。
     validation_summary: dict[str, Any] = {}
     if (
-        not use_llm
+        validate_measures
         and candidates
         and db is not None
         and llm_budget["used"] < llm_budget["limit"]
@@ -1616,7 +1686,11 @@ async def infer_sql_batch(
             {str(c["source_table"]) for c in candidates if c.get("source_table")}
         )
         validation = await llm_validate_measures(
-            db, sql, [_candidate_measure_view(c) for c in candidates], tables_union
+            db,
+            sql,
+            [_candidate_measure_view(c) for c in candidates],
+            tables_union,
+            client=llm_client,
         )
         if validation:
             candidates, validation_summary = _apply_candidate_validation(
@@ -1630,7 +1704,7 @@ async def infer_sql_batch(
     # LLM 判为非度量（高置信度）的候选移入 skipped(llm_not_measure)，前端展示。
     if use_llm and candidates and db is not None and llm_budget["used"] < llm_budget["limit"]:
         llm_budget["used"] += 1
-        annotations = await _llm_annotate_candidates(db, sql, candidates)
+        annotations = await _llm_annotate_candidates(db, sql, candidates, client=llm_client)
         if annotations:
             candidates, llm_skipped = _apply_candidate_annotations(
                 candidates, annotations

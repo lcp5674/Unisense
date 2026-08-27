@@ -109,3 +109,34 @@ async def test_llm_circuit_breaker_recovers_on_success() -> None:
     breaker.record_success()
     assert breaker.state == "closed"
     assert breaker.allow() is True
+
+
+@pytest.mark.asyncio
+async def test_llm_client_chat_retries_override() -> None:
+    """A4: chat 的 retries 参数覆盖全局重试次数——推断类调用传 1 时 429 最多
+    重试 1 次（总 2 次尝试），避免限流重试大概率仍 429 而叠加放大墙钟。"""
+    client = _make_client()
+    post_mock = AsyncMock(return_value=_resp(429))
+    with (
+        patch.object(client._client, "post", new=post_mock),
+        patch("app.services.llm.client.asyncio.sleep", new=AsyncMock()),
+        pytest.raises(LlmError),
+    ):
+        await client.chat([{"role": "user", "content": "hi"}], retries=1)
+    assert post_mock.await_count == 2, "retries=1 → 总计 2 次尝试（1 次重试）"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_llm_client_chat_retries_zero_no_retry() -> None:
+    """A4: retries=0 时完全关闭重试（429 只调 1 次即抛错）。"""
+    client = _make_client()
+    post_mock = AsyncMock(return_value=_resp(429))
+    with (
+        patch.object(client._client, "post", new=post_mock),
+        patch("app.services.llm.client.asyncio.sleep", new=AsyncMock()),
+        pytest.raises(LlmError),
+    ):
+        await client.chat([{"role": "user", "content": "hi"}], retries=0)
+    assert post_mock.await_count == 1, "retries=0 → 不重试"
+    await client.close()

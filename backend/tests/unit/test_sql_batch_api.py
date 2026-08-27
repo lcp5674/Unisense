@@ -569,3 +569,74 @@ async def test_sql_infer_eval_run_records(metrics_client: httpx.AsyncClient) -> 
     assert m.await_args.kwargs["actor_id"] == 1
     audit.assert_awaited_once()
     assert audit.await_args.kwargs["action"] == "metric_definition.sql_infer_eval_run"
+
+
+async def test_parse_sql_batch_redis_cache_second_call_hits(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """C：解析结果 Redis 缓存——同一段 SQL 第二次请求命中缓存，不再触发 LLM 推断。
+
+    用户反复调试同一段 SQL 时秒回（方案 C：key=请求参数 hash，TTL 300s）。
+    """
+    fake_redis = AsyncMock()
+    cache_store: dict[str, str] = {}
+
+    async def fake_get(key: str) -> str | None:
+        return cache_store.get(key)
+
+    async def fake_set(key: str, val: str, ex: int | None = None) -> None:
+        cache_store[key] = val
+
+    fake_redis.get = fake_get
+    fake_redis.set = fake_set
+
+    payload = {
+        "sql": "SELECT dt, SUM(amount) AS gmv FROM dwd_order_di GROUP BY dt",
+        "split_mode": "semicolon",
+    }
+    result = {
+        "statements": [{"index": 0, "sql": payload["sql"]}],
+        "candidates": [],
+        "skipped": [],
+        "domain": None,
+    }
+    infer_calls = {"n": 0}
+
+    async def fake_infer(db: MagicMock, **kwargs: object) -> dict[str, object]:
+        infer_calls["n"] += 1
+        return result
+
+    with (
+        patch("app.api.metrics.get_redis", return_value=fake_redis),
+        patch(
+            "app.services.semantic.sql_split.infer_sql_batch",
+            side_effect=fake_infer,
+        ),
+    ):
+        r1 = await metrics_client.post(
+            "/api/v1/metric-definitions/parse-sql-batch", json=payload
+        )
+        assert r1.status_code == 200
+        assert infer_calls["n"] == 1
+        r2 = await metrics_client.post(
+            "/api/v1/metric-definitions/parse-sql-batch", json=payload
+        )
+        assert r2.status_code == 200
+        assert infer_calls["n"] == 1, "第二次应命中缓存，不再调 infer_sql_batch"
+        assert r2.json()["data"] == result
+    # 不同 SQL（参数变化）→ 缓存键不同，重新推断
+    with (
+        patch("app.api.metrics.get_redis", return_value=fake_redis),
+        patch(
+            "app.services.semantic.sql_split.infer_sql_batch",
+            side_effect=fake_infer,
+        ),
+    ):
+        r3 = await metrics_client.post(
+            "/api/v1/metric-definitions/parse-sql-batch",
+            json={**payload,
+            "sql": "SELECT dt, COUNT(DISTINCT user_id) AS uv FROM dwd_user_di GROUP BY dt",
+        },
+        )
+        assert r3.status_code == 200
+        assert infer_calls["n"] == 2, "参数变化 → 缓存 miss，重新推断"

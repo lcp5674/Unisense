@@ -224,6 +224,7 @@ class LlmClient:
         temperature: float = 0.0,
         max_tokens: int = 1000,
         response_format: dict[str, Any] | None = None,
+        retries: int | None = None,
     ) -> dict[str, Any]:
         """发送聊天请求，返回结构化结果。
 
@@ -232,6 +233,9 @@ class LlmClient:
             temperature: 采样温度
             max_tokens: 最大生成长度
             response_format: 响应格式约束，如 {"type": "json_object"}
+            retries: 额外重试次数（覆盖全局 ``_LLM_MAX_RETRIES``）。推断类调用
+                （SQL 批量解析/域建议等对墙钟敏感、限流重试大概率仍 429）传较小值
+                收紧重试，避免多语句批量解析叠加退避放大到几十秒；None 用全局默认。
 
         Returns:
             结构化结果 dict，包含:
@@ -271,7 +275,8 @@ class LlmClient:
         }
 
         last_exc: Exception | None = None
-        for attempt in range(_LLM_MAX_RETRIES + 1):
+        max_retries = _LLM_MAX_RETRIES if retries is None else max(retries, 0)
+        for attempt in range(max_retries + 1):
             try:
                 resp = await self._client.post(self._chat_url, json=payload)
                 resp.raise_for_status()
@@ -327,7 +332,7 @@ class LlmClient:
                 status = exc.response.status_code if exc.response is not None else 0
                 self._breaker.record_failure()
                 last_exc = exc
-                if attempt < _LLM_MAX_RETRIES and (status >= 500 or status == 429):
+                if attempt < max_retries and (status >= 500 or status == 429):
                     logger.warning("LLM HTTP 错误（将退避重试）: %d，attempt=%d", status, attempt)
                     await asyncio.sleep(_LLM_BACKOFF_BASE * (2**attempt))
                     continue
@@ -355,7 +360,7 @@ class LlmClient:
                 is_connect_error = isinstance(exc, httpx.ConnectError)
                 self._breaker.record_failure()
                 last_exc = exc
-                if attempt < _LLM_MAX_RETRIES and not is_connect_error:
+                if attempt < max_retries and not is_connect_error:
                     logger.warning("LLM 网络错误（将退避重试）: %s，attempt=%d", exc, attempt)
                     await asyncio.sleep(_LLM_BACKOFF_BASE * (2**attempt))
                     continue

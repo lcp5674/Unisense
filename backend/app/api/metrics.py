@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -2589,6 +2590,36 @@ async def parse_sql_batch_metrics(
     """
     from app.services.semantic.sql_split import infer_sql_batch
 
+    # C：解析结果 Redis 缓存（方案 C）——同一段 SQL 反复调试时秒回，不重复触发
+    # 昂贵的 LLM 推断。key = 规范化请求参数 hash；TTL 300s。Redis 不可用降级为
+    # 不缓存（不阻断解析）。LLM 推断结果随模型/目录变化可能过期，TTL 短保证
+    # 新鲜度（调试窗口内生效，不长期陈旧）。
+    redis = None
+    with contextlib.suppress(RuntimeError):
+        redis = get_redis()  # Redis 不可用时降级为不缓存
+    cache_key: str | None = None
+    if redis is not None:
+        cache_key = "metric:sqlbatch:" + hashlib.sha256(
+            json.dumps(
+                {
+                    "sql": request.sql,
+                    "split_mode": request.split_mode,
+                    "custom_rules": request.custom_rules,
+                    "domain_code": request.domain_code,
+                    "synthesize_composite": request.synthesize_composite,
+                    "use_llm": request.use_llm,
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        try:
+            cached = await redis.get(cache_key)
+            if cached:
+                return ok(data=json.loads(cached), trace_id=trace_id)
+        except Exception:  # noqa: BLE001 - 缓存读失败仅降级为实时解析
+            pass
+
     result = await infer_sql_batch(
         db,
         sql=request.sql,
@@ -2598,6 +2629,14 @@ async def parse_sql_batch_metrics(
         synthesize_composite=request.synthesize_composite,
         use_llm=request.use_llm,
     )
+    if redis is not None and cache_key is not None:
+        # 缓存写失败不影响解析结果返回（best-effort）
+        with contextlib.suppress(Exception):
+            await redis.set(
+                cache_key,
+                json.dumps(result, ensure_ascii=False),
+                ex=300,
+            )
     await write_audit(
         db,
         actor_id=user.id,

@@ -164,10 +164,16 @@ async def _llm_suggest(
     tables: list[str],
     sql: str | None,
     domain_map: dict[str, str],
+    client: Any | None = None,
 ) -> DomainCandidate | None:
     """LLM 兜底：目录/挂载均未命中（表未被采集）时从 SQL/表名推断域。
 
     best-effort：LLM 不可用、超时或返回非法域编码一律返回 ``None``（降级为无法建议）。
+
+    Args:
+        db: 异步会话（client 缺省时构建用）。
+        client: 复用已构建的 LLM 客户端（批量解析场景由调用方一次构建传入，
+            避免每个兜底重复 DB 查询+解密）；None 时内部构建。
     """
     if not domain_map:
         return None
@@ -175,7 +181,8 @@ async def _llm_suggest(
         from app.services.llm.config_service import LlmConfigService
         from app.services.llm.parse import parse_domain_infer_result
 
-        client = await LlmConfigService(db).build_client()
+        if client is None:
+            client = await LlmConfigService(db).build_client()
         if not getattr(client, "enabled", False):
             return None
 
@@ -192,6 +199,7 @@ async def _llm_suggest(
         resp = await client.chat(
             messages=[{"role": "user", "content": prompt}],
             max_tokens=128,
+            retries=1,  # 推断类调用收紧重试：限流重试大概率仍 429，避免叠加放大墙钟
         )
         raw = (resp.get("content") or "").strip()
         parsed = parse_domain_infer_result(raw)
@@ -218,6 +226,7 @@ async def suggest_domain(
     sql: str | None = None,
     source_table: str | None = None,
     llm_budget: dict[str, int] | None = None,
+    client: Any | None = None,
 ) -> dict[str, Any]:
     """业务域建议主函数。
 
@@ -229,6 +238,8 @@ async def suggest_domain(
             与度量提取/周期推断共用限额；None 表示不限额，如单条创建场景）。
             ``_llm_suggest`` 仅在目录/挂载未命中时调用，预算用于防止跨域脚本
             逐语句建议打满 LLM 配额（P1-1）。
+        client: 复用已构建的 LLM 客户端（批量解析场景由调用方一次构建传入，
+            避免每个兜底重复构建）；None 时内部构建。
 
     Returns:
         ``{"status", "domain", "candidates", "matched_tables"}``。
@@ -248,7 +259,7 @@ async def suggest_domain(
         if llm_budget is None or llm_budget["used"] < llm_budget["limit"]:
             if llm_budget is not None:
                 llm_budget["used"] += 1
-            llm = await _llm_suggest(db, tables, sql, domain_map)
+            llm = await _llm_suggest(db, tables, sql, domain_map, client=client)
         if llm:
             return {
                 "status": "llm",

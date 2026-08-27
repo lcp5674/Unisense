@@ -146,6 +146,7 @@ async def llm_validate_measures(
     full_sql: str,
     measures: list[dict[str, Any]],
     tables: list[str],
+    client: Any | None = None,
 ) -> dict[str, Any] | None:
     """LLM 校验规则解析出的度量清单（单条 auto-suggest 默认全量校验）。
 
@@ -153,10 +154,11 @@ async def llm_validate_measures(
     度量；失败返回 ``None``（上层保持规则结果不动）。
 
     Args:
-        db: 异步会话（LLM 客户端构建）。
+        db: 异步会话（client 缺省时构建用）。
         full_sql: 完整原始 SQL 脚本。
         measures: 规则解析出的度量（``SqlProfile.measures`` 结构）。
         tables: 规则解析出的源表集合（LLM 只能从其中选择表）。
+        client: 复用已构建的 LLM 客户端；None 时内部构建。
 
     Returns:
         ``parse_sql_validation_result`` 结构（items/missed/period 可选）；
@@ -167,7 +169,8 @@ async def llm_validate_measures(
     except Exception:  # noqa: BLE001 - 校验层不可用不影响规则结果
         return None
     try:
-        client = await LlmConfigService(db).build_client()
+        if client is None:
+            client = await LlmConfigService(db).build_client()
         if not getattr(client, "enabled", False):
             return None
         rows = "\n".join(
@@ -204,6 +207,7 @@ async def llm_validate_measures(
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=2048,
+            retries=1,  # 推断类调用收紧重试：限流重试大概率仍 429，避免叠加放大墙钟
         )
         raw = (resp.get("content") or "").strip()
         return parse_sql_validation_result(raw)

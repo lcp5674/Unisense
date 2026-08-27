@@ -1160,7 +1160,7 @@ async def test_infer_sql_batch_llm_batch_limit() -> None:
         for i in range(_LLM_BATCH_LIMIT + 1)
     ]
     llm_mock = AsyncMock(
-        side_effect=lambda db, full_sql, focus_sql: [
+        side_effect=lambda db, full_sql, focus_sql, client=None: [
             {
                 "column": "unparsable_col0",
                 "agg": "SUM",
@@ -1206,7 +1206,7 @@ async def test_infer_sql_batch_period_fallback_runs_concurrently() -> None:
     active = 0
     max_active = 0
 
-    async def fake_infer_period(db_arg, full_sql, focus_sql):
+    async def fake_infer_period(db_arg, full_sql, focus_sql, client=None):
         nonlocal active, max_active
         active += 1
         max_active = max(max_active, active)
@@ -1254,7 +1254,7 @@ async def test_infer_sql_batch_measures_fallback_runs_concurrently() -> None:
     active = 0
     max_active = 0
 
-    async def fake_infer_measures(db_arg, full_sql, focus_sql):
+    async def fake_infer_measures(db_arg, full_sql, focus_sql, client=None):
         nonlocal active, max_active
         active += 1
         max_active = max(max_active, active)
@@ -1316,7 +1316,7 @@ async def test_infer_sql_batch_mixed_fallback_keeps_statement_order() -> None:
 
     db = _fake_db()
 
-    async def fake_infer_measures(db_arg, full_sql, focus_sql):
+    async def fake_infer_measures(db_arg, full_sql, focus_sql, client=None):
         return [
             {
                 "column": "unparsable_col",
@@ -1617,7 +1617,7 @@ async def test_infer_sql_batch_use_llm_raises_budget() -> None:
     ]
     import re as _re
 
-    def _fake_llm_measures(db, full_sql: str, focus_sql: str) -> list:
+    def _fake_llm_measures(db, full_sql: str, focus_sql: str, client=None) -> list:
         m = _re.search(r"unparsable_col(\d+)", focus_sql)
         num = m.group(1) if m else "0"
         return [
@@ -1915,3 +1915,71 @@ async def test_infer_sql_batch_union_and_set_agg_needs_review() -> None:
     ps = next(c for k, c in by_key.items() if "ps" in k)
     assert ps["aggregation"] == "COUNT_DISTINCT", f"集合聚合应 COUNT_DISTINCT：{ps['aggregation']}"
     assert ps.get("needs_review"), "集合聚合候选应带口径需核对标识"
+
+
+async def test_infer_sql_batch_validate_measures_default_off() -> None:
+    """A2：LLM 校验层默认关闭——普通「解析候选」不再固定串行 4-7s（42s 场景主要
+    构成）；仅显式 ``validate_measures=True`` 才触发一次校验调用。"""
+    from app.services.semantic import sql_validation
+
+    sql = "SELECT dt, SUM(amount) AS gmv FROM dwd_order_di GROUP BY dt"
+    with patch.object(sql_validation, "llm_validate_measures") as mk_val:
+        await infer_sql_batch(
+            _fake_db(), sql=sql, split_mode="semicolon", domain_code="sales"
+        )
+        assert mk_val.call_count == 0, "默认关闭：不应触发校验层"
+    with patch.object(sql_validation, "llm_validate_measures", return_value=None) as mk_val2:
+        await infer_sql_batch(
+            _fake_db(),
+            sql=sql,
+            split_mode="semicolon",
+            domain_code="sales",
+            validate_measures=True,
+        )
+        assert mk_val2.call_count == 1, "显式开启：应触发一次校验层"
+
+
+async def test_infer_sql_batch_domain_suggest_parallel_task() -> None:
+    """A1：整段域建议与切分/阶段1/阶段2 并行——未指定域时启动后台 task（目录/
+    挂载未命中时 LLM 兜底 4-7s 不再串行阻塞）；用户显式指定域时不启动。"""
+    sql = "SELECT dt, SUM(amount) AS gmv FROM dwd_order_di GROUP BY dt"
+
+    async def _fake_task(coro: Any) -> dict[str, Any]:
+        coro.close()  # mock 不调度 coroutine，显式关闭避免 un-awaited 警告
+        return {"status": "unique", "domain": {"code": "sales"}}
+
+    with patch("app.services.semantic.sql_split.asyncio.create_task") as mk_task:
+        mk_task.side_effect = _fake_task
+        result = await infer_sql_batch(_fake_db(), sql=sql, split_mode="semicolon")
+        assert mk_task.call_count == 1, "未指定域：应启动整段域建议 task"
+        assert result["domain"]["code"] == "sales", "域建议结果应回填"
+    with patch("app.services.semantic.sql_split.asyncio.create_task") as mk_task2:
+        await infer_sql_batch(
+            _fake_db(), sql=sql, split_mode="semicolon", domain_code="sales"
+        )
+        assert mk_task2.call_count == 0, "已指定域：不应启动域建议 task"
+
+
+async def test_infer_sql_batch_builds_client_once() -> None:
+    """A3：infer_sql_batch 构建一次 LLM client 供各兜底复用——消除 N 个兜底各自
+    重复 DB 查询+解密（毫秒级成本，但多语句脚本下可叠加）。"""
+    from app.services.semantic.sql_split import infer_sql_batch as _infer
+
+    class _FakeClient:
+        enabled = True
+
+        async def chat(self, **kwargs: Any) -> dict[str, Any]:
+            return {"content": "not-json"}  # 解析失败 → 各兜底降级，不真调 LLM
+
+    with patch(
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        return_value=_FakeClient(),
+    ) as mk_build:
+        await _infer(
+            _fake_db(),
+            sql="SELECT dt, SUM(amount) AS gmv FROM dwd_order_di GROUP BY dt",
+            split_mode="semicolon",
+            domain_code="sales",
+        )
+        assert mk_build.call_count == 1, "client 应只构建一次（各兜底复用）"
+
