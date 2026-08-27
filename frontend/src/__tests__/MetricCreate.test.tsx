@@ -157,21 +157,26 @@ async function pickDomain() {
   });
 }
 
-/** 读取当前向导激活步骤（依据"下一步"按钮文案——Step0/1/2 各有唯一文案，Step3 无下一步）。 */
+/** 读取当前向导激活步骤（依据"下一步"按钮文案——Step0/1 各有唯一文案，Step2 无下一步）。 */
 function currentStepIndex(): number {
-  if (screen.queryByRole("button", { name: "下一步：指标定义" })) return 0;
-  if (screen.queryByRole("button", { name: "下一步：治理与口径" })) return 1;
-  if (screen.queryByRole("button", { name: "下一步：责任方与提交" })) return 2;
-  return 3;
+  if (screen.queryByRole("button", { name: "下一步：指标基本信息" })) return 0;
+  if (screen.queryByRole("button", { name: "下一步：具体实现" })) return 1;
+  return 2;
 }
 
-/** OneData 向导：点击「下一步」前进到目标步骤（检测当前激活步骤，避免重复调用过度推进）。 */
+/** OneData 向导：点击「下一步/上一步」前进/回退到目标步骤（检测当前激活步骤，避免重复调用过度推进）。 */
 async function goToStep(target: number) {
   let guard = 0;
-  while (currentStepIndex() < target && guard < 4) {
-    const btn = screen.queryByRole("button", { name: /下一步/ });
-    if (!btn) break;
-    fireEvent.click(btn);
+  while (currentStepIndex() !== target && guard < 6) {
+    if (currentStepIndex() < target) {
+      const btn = screen.queryByRole("button", { name: /下一步/ });
+      if (!btn) break;
+      fireEvent.click(btn);
+    } else {
+      const prevBtn = screen.queryByRole("button", { name: /上一步/ });
+      if (!prevBtn) break;
+      fireEvent.click(prevBtn);
+    }
     // 给 React 并发渲染足够时间推进步骤
     await new Promise((r) => setTimeout(r, 50));
     guard++;
@@ -633,8 +638,8 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     // 关闭摘要
     fireEvent.click(screen.getByText("知道了"));
 
-    // 源表/度量列已回填到 Step1（指标定义 → 原子来源）——导航过去断言 Select 显示选中值
-    await goToStep(1);
+    // 源表/度量列已回填到 Step2（具体实现 → 原子来源）——导航过去断言 Select 显示选中值
+    await goToStep(2);
     await waitFor(() => {
       const srcInput = document.querySelector('input[id="source_table"]');
       const container = srcInput?.closest(".ant-select") as HTMLElement | null;
@@ -757,9 +762,9 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
       expect(screen.getByText(/已应用逻辑度量「医生活跃数/)).toBeTruthy()
     );
 
-    // 关闭摘要 → Step1 原子来源：逻辑度量已选中（下拉补进候选并显示选中值）
+    // 关闭摘要 → Step2 原子来源：逻辑度量已选中（下拉补进候选并显示选中值）
     fireEvent.click(screen.getByText("知道了"));
-    await goToStep(1);
+    await goToStep(2);
     await waitFor(() => {
       const item = document.querySelector(
         '.ant-select-selection-item[title*="doctor_active_cnt"]'
@@ -800,7 +805,7 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     expect(screen.getAllByText("ads.gmv_report").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByText("知道了"));
 
-    // 回填到 Step③ 口径定义：两个多选 Select 各自承接对应方向的表
+    // 回填到 Step⑦ 关联数据表（Step2 具体实现）：两个多选 Select 各自承接对应方向的表
     await goToStep(2);
     await waitFor(() => {
       const depLabel = Array.from(document.querySelectorAll(".ant-form-item-label")).find(
@@ -850,8 +855,8 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     fireEvent.click(screen.getByText("智能推断并回填字段"));
     await screen.findByText("SQL 智能推断结果");
     fireEvent.click(screen.getByText("知道了"));
-    // Q2：数仓详细口径（dwDefinition）自动回填推断的完整 SQL——用户无需再手填
-    await goToStep(2);
+    // Q2：数仓详细口径（dwDefinition）自动回填推断的完整 SQL——用户无需再手填（在 Step③ 口径定义）
+    await goToStep(1);
     await waitFor(() => {
       const dw = screen.getByLabelText("数仓SQL口径") as HTMLTextAreaElement;
       expect(dw.value).toContain("SELECT COUNT(DISTINCT doctor_code)");
@@ -929,8 +934,8 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
       target: { value: "SELECT SUM(amount) AS gmv FROM dwd.sales_detail GROUP BY dt" },
     });
     fireEvent.click(screen.getByText("智能推断并回填字段"));
-    // 编码字段在向导 Step2（治理确认）——推断完成后导航过去
-    await goToStep(2);
+    // 编码字段在向导 Step1（指标基本信息）——推断完成后导航过去
+    await goToStep(1);
     await waitFor(() => {
       expect(screen.getByText(/系统建议: sales_order_gmv_day/)).toBeTruthy();
     });
@@ -1030,14 +1035,14 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
 
-    // 编码与口径定义在 Step2（治理+口径），预检按钮在 Step3（提交）
-    await goToStep(2);
+    // 编码与口径定义在 Step1（指标基本信息 + 口径定义），预检按钮在 Step2（提交）
+    await goToStep(1);
     const codeInput = screen.getByLabelText("指标编码") as HTMLInputElement;
     fireEvent.change(codeInput, { target: { value: "sales_test" } });
     const defInput = screen.getByLabelText("口径定义 (JSON)") as HTMLTextAreaElement;
     fireEvent.change(defInput, { target: { value: '{"expr": "sum(amount)"}' } });
 
-    await goToStep(3);
+    await goToStep(2);
     fireEvent.click(screen.getByRole("button", { name: /冲突预检/ }));
     // 正确映射：后端 ConflictType 值为 same_name_diff_def → 中文「同名不同义」
     await screen.findByText(/同名不同义/);
@@ -1187,8 +1192,8 @@ describe("MetricCreate 源表选择惰性化", () => {
   it("源表下拉展开时自动加载平台已采集的表（无需先输入关键词）", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
-    // 源表在向导 Step1（指标定义）——导航过去
-    await goToStep(1);
+    // 源表在向导 Step2（具体实现 → 原子来源）——导航过去
+    await goToStep(2);
     // 点击源表 Select 展开下拉（id 在内部 input 上）
     const srcInput = document.querySelector('input[id="source_table"]') as HTMLInputElement;
     fireEvent.mouseDown(srcInput);
@@ -1200,10 +1205,10 @@ describe("MetricCreate 源表选择惰性化", () => {
     await waitFor(() => expect(screen.getAllByText("dwd.shop_dim").length).toBeGreaterThan(0));
   });
 
-  it("关联数据表（口径定义区）下拉展开时同样自动加载平台已采集的表", async () => {
+  it("关联数据表（Step⑦ 关联数据表）下拉展开时同样自动加载平台已采集的表", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
-    // 口径定义在向导 Step2（治理+口径）——导航过去
+    // 关联数据表在向导 Step2（具体实现）——导航过去
     await goToStep(2);
     // 展开「口径定义 → 关联数据表」多选下拉
     const relatedSelect = screen.getAllByText(/展开浏览已接入表/)[0];
@@ -1216,10 +1221,10 @@ describe("MetricCreate 源表选择惰性化", () => {
     await waitFor(() => expect(screen.getAllByText("dwd.shop_dim").length).toBeGreaterThan(0));
   });
 
-  it("关联数据表（口径定义区）支持关键词搜索加载", async () => {
+  it("关联数据表（Step⑦ 关联数据表）支持关键词搜索加载", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
-    // 口径定义在向导 Step2（治理+口径）——导航过去
+    // 关联数据表在向导 Step2（具体实现）——导航过去
     await goToStep(2);
     const relatedSelect = screen.getAllByText(/展开浏览已接入表/)[0];
     fireEvent.mouseDown(relatedSelect);
@@ -1305,8 +1310,8 @@ describe("MetricCreate 未采集表/字段手动输入", () => {
   it("度量列：未采集源表场景下可直接输入自定义列名（注入「未采集」列选项）", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
-    await goToStep(1);
-    // 原子指标 Step1 度量列 Select：直接输入未采集列名
+    await goToStep(2);
+    // 原子指标 Step2 度量列 Select：直接输入未采集列名
     const colInput = document.querySelector('input[id="measure_column"]') as HTMLInputElement;
     fireEvent.mouseDown(colInput);
     fireEvent.change(colInput, { target: { value: "pay_amt" } });
@@ -1369,20 +1374,9 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
   it("默认原子指标：展示逻辑度量与源表/度量列/周期，隐藏依赖指标与计算表达式", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
+    // Step1 指标基本信息：原子下治理字段（粒度/单位/币种/时间语义/新鲜度/数仓层）隐藏，
+    // 聚合方式保留（原子核心算法属性）；计算表达式为派生/复合专属，原子下不出现
     await goToStep(1);
-    // 原子来源配置区（逻辑度量 + 兼容旧式源表/度量列）展示——F3：原子不含时间周期，
-    // 统计周期字段已从原子分支移除（周期归派生/挂载层）
-    expect(screen.getByText("② 原子来源（逻辑度量 + 基础统计粒度）")).toBeTruthy();
-    expect(screen.getByText("逻辑度量（原子指标口径库，OneData 原子层）")).toBeTruthy();
-    expect(screen.getByText("源表名（兼容旧式来源，可选）")).toBeTruthy();
-    expect(screen.getByText("度量列（兼容旧式来源，可选）")).toBeTruthy();
-    expect(screen.queryByText("统计周期（兼容旧式推断，可选）")).toBeNull();
-    // 依赖指标 / 计算表达式为派生/复合专属，原子下不出现
-    expect(screen.queryByText("② 依赖指标")).toBeNull();
-    expect(screen.queryByText("计算表达式")).toBeNull();
-    // OneData（界限文档 §2.3）：原子不挂物理表——治理 Step2 粒度/单位/币种/时间语义/新鲜度/数仓层隐藏，
-    // 聚合方式保留（原子核心算法属性）
-    await goToStep(2);
     expect(screen.queryByText("粒度")).toBeNull();
     expect(screen.queryByText("单位")).toBeNull();
     expect(screen.queryByText("币种（选填）")).toBeNull();
@@ -1390,25 +1384,35 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     expect(screen.queryByText("新鲜度")).toBeNull();
     expect(screen.queryByText("数仓层")).toBeNull();
     expect(screen.getByText("聚合")).toBeTruthy();
+    expect(screen.queryByText("计算表达式")).toBeNull();
     // 展开「高级治理设置」：分级/可加性/服务模式可见
     fireEvent.click(screen.getByText(/高级治理设置/));
     await waitFor(() => expect(screen.getByText("分级")).toBeTruthy());
     expect(screen.getByText("可加性")).toBeTruthy();
     expect(screen.getByText("服务模式")).toBeTruthy();
+    // Step2 具体实现：原子来源配置区（逻辑度量 + 兼容旧式源表/度量列）展示；
+    // 依赖指标为派生/复合专属，原子下不出现
+    await goToStep(2);
+    expect(screen.getByText("⑥ 原子来源（逻辑度量 + 基础统计粒度）")).toBeTruthy();
+    expect(screen.getByText("逻辑度量（原子指标口径库，OneData 原子层）")).toBeTruthy();
+    expect(screen.getByText("源表名（兼容旧式来源，可选）")).toBeTruthy();
+    expect(screen.getByText("度量列（兼容旧式来源，可选）")).toBeTruthy();
+    expect(screen.queryByText("统计周期（兼容旧式推断，可选）")).toBeNull();
+    expect(screen.queryByText("⑥ 依赖指标")).toBeNull();
   });
 
   it("切换到派生指标：展示依赖指标（选填）与计算表达式，隐藏原子来源", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
-    await goToStep(1);
+    await goToStep(2);
     fireEvent.click(screen.getByText("派生指标"));
-    // 依赖指标配置区（Step1）出现，原子专属配置隐藏
-    expect(screen.getByText("② 依赖指标（派生选填）")).toBeTruthy();
-    expect(screen.queryByText("② 原子来源（逻辑度量 + 基础统计粒度）")).toBeNull();
+    // 依赖指标配置区（Step2 具体实现）出现，原子专属配置隐藏
+    expect(screen.getByText("⑥ 依赖指标（派生选填）")).toBeTruthy();
+    expect(screen.queryByText("⑥ 原子来源（逻辑度量 + 基础统计粒度）")).toBeNull();
     expect(screen.queryByText("源表名（兼容旧式来源，可选）")).toBeNull();
     expect(screen.queryByText("度量列（兼容旧式来源，可选）")).toBeNull();
-    // 计算表达式输入在 Step2（口径定义）——受控组件（Form.Item 无 name），label 无 htmlFor，须按文本查询
-    await goToStep(2);
+    // 计算表达式输入在 Step1（口径定义）——受控组件（Form.Item 无 name），label 无 htmlFor，须按文本查询
+    await goToStep(1);
     await waitFor(() => expect(screen.getByText("计算表达式")).toBeTruthy());
   });
 
@@ -1417,12 +1421,12 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
-    await goToStep(1);
-    fireEvent.click(screen.getByText("派生指标"));
-    // 名称在 Step2（治理确认）必填——先填名称再导航到 Step3 提交（依赖指标/计算表达式留空）
     await goToStep(2);
+    fireEvent.click(screen.getByText("派生指标"));
+    // 名称在 Step1（指标基本信息）必填——先填名称再回到 Step2 提交（依赖指标/计算表达式留空）
+    await goToStep(1);
     fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "本月活跃医生数" } });
-    await goToStep(3);
+    await goToStep(2);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
     // F1：派生 = 原子 + 业务限定 + 时间周期，依赖/公式均可选——未选依赖、未填表达式
     // 均不再前端拦截，直接提交（口径合法性由后端类型化校验兜底）
@@ -1438,7 +1442,7 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
-    await goToStep(1);
+    await goToStep(2);
     fireEvent.click(screen.getByText("派生指标"));
     // 在依赖指标多选输入已发布指标编码，回车后从下拉选中
     const depInput = document.querySelector(
@@ -1447,10 +1451,10 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     fireEvent.change(depInput, { target: { value: "sales_gmv_amount_daily" } });
     await waitFor(() => expect(mockedMetrics).toHaveBeenCalled());
     await clickSelectOption("每日 GMV (sales_gmv_amount_daily)");
-    // 名称在 Step2（治理确认）必填——先填名称再导航到 Step3 提交（计算表达式留空）
-    await goToStep(2);
+    // 名称在 Step1（指标基本信息）必填——先填名称再回到 Step2 提交（计算表达式留空）
+    await goToStep(1);
     fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "客单价" } });
-    await goToStep(3);
+    await goToStep(2);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
     // F1：仅复合必填表达式——派生带依赖但缺表达式同样放行提交
     await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
@@ -1459,9 +1463,9 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
   it("R5：派生类型下计算表达式无必填红标（仅复合必填表达式）", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
-    await goToStep(1);
-    fireEvent.click(screen.getByText("派生指标"));
     await goToStep(2);
+    fireEvent.click(screen.getByText("派生指标"));
+    await goToStep(1);
     await waitFor(() => expect(screen.getByText("计算表达式")).toBeTruthy());
     // R5：派生 = 原子 + 业务限定 + 时间周期，计算表达式非必填——Form.Item 无 required 红标
     const item = screen.getByText("计算表达式").closest(".ant-form-item") as HTMLElement;
@@ -1479,7 +1483,7 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
-    await goToStep(1);
+    await goToStep(2);
     fireEvent.click(screen.getByText("派生指标"));
     // OneData：派生 = 基础原子 + 业务限定 + 时间周期——基础原子选择器出现（选填）
     expect(screen.getByText("基础原子指标")).toBeTruthy();
@@ -1492,12 +1496,12 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     fireEvent.change(baseInput, { target: { value: "active" } });
     await waitFor(() => expect(mockedMetrics).toHaveBeenCalled());
     await clickSelectOption("日活跃医生数 (active_doctor_daily)");
-    // 名称在 Step2（治理确认）必填 → Step3 提交
-    await goToStep(2);
+    // 名称在 Step1（指标基本信息）必填 → 回到 Step2 提交
+    await goToStep(1);
     fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), {
       target: { value: "本月医院活跃医生数" },
     });
-    await goToStep(3);
+    await goToStep(2);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
     await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
     const body = mockedCreate.mock.calls[0][0];
@@ -1516,7 +1520,7 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
-    await goToStep(1);
+    await goToStep(2);
     fireEvent.click(screen.getByText("派生指标"));
     expect(screen.getByText("基础原子指标")).toBeTruthy();
     // 打开下拉框但不输入关键词——应直接看到挂载时预置的原子指标（修复此前空值必须手打搜索）
@@ -1550,9 +1554,9 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
-    await goToStep(1);
+    await goToStep(2);
     fireEvent.click(screen.getByText("派生指标"));
-    // 挂载实体区（Step① 派生分支）：源表 Select 占位符文本唯一定位
+    // 挂载实体区（Step⑥ 派生分支）：源表 Select 占位符文本唯一定位
     const mountTableSel = screen
       .getByText("源表（如 dwd.sales_detail；未采集的可输入完整表名）")
       .closest(".ant-select") as HTMLElement;
@@ -1572,10 +1576,10 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
-    // 名称在 Step2（治理确认）必填——先填名称再导航到 Step3 提交（默认 atomic：未选逻辑度量/源表度量列、口径为空）
-    await goToStep(2);
+    // 名称在 Step1（指标基本信息）必填——先填名称再回到 Step2 提交（默认 atomic：未选逻辑度量/源表度量列、口径为空）
+    await goToStep(1);
     fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "GMV" } });
-    await goToStep(3);
+    await goToStep(2);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
     await waitFor(() =>
       expect(screen.getByText("原子指标请选择逻辑度量（推荐）或源表与度量列，或填写口径定义")).toBeTruthy()
@@ -1613,10 +1617,10 @@ describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数�
     });
   });
 
-  it("Step② 展示「业务口径」与「伪代码口径（系统开发）」「数仓SQL口径」输入区", async () => {
+  it("Step③ 展示「业务口径」与「伪代码口径（系统开发）」「数仓SQL口径」输入区", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
-    await goToStep(2);
+    await goToStep(1);
 
     const biz = screen.getByRole("textbox", { name: "业务口径" }) as HTMLTextAreaElement;
     const pseudo = screen.getByRole("textbox", { name: "伪代码口径" }) as HTMLTextAreaElement;
@@ -1636,11 +1640,11 @@ describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数�
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
-    await goToStep(1);
+    await goToStep(2);
     // 选逻辑度量（原子指标 OneData 继承源）
     fireEvent.mouseDown(screen.getByText("选择或搜索逻辑度量（如 支付金额 pay_amt）"));
     await clickSelectOption("门诊收费金额 (medical_fee_amt)");
-    await goToStep(2);
+    await goToStep(1);
     // 填名称 + 三层口径
     fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "门诊收费金额" } });
     fireEvent.change(screen.getByRole("textbox", { name: "业务口径" }), {
@@ -1652,7 +1656,7 @@ describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数�
     fireEvent.change(screen.getByRole("textbox", { name: "数仓SQL口径" }), {
       target: { value: "SELECT visit_date, SUM(real_amount) AS amt FROM dwd.fee_bill_di" },
     });
-    await goToStep(3);
+    await goToStep(2);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
 
     await waitFor(() => {
@@ -1673,10 +1677,10 @@ describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数�
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
-    await goToStep(1);
+    await goToStep(2);
     fireEvent.mouseDown(screen.getByText("选择或搜索逻辑度量（如 支付金额 pay_amt）"));
     await clickSelectOption("门诊收费金额 (medical_fee_amt)");
-    await goToStep(2);
+    await goToStep(1);
     // 展开「消费指南（选填）」Collapse
     fireEvent.click(screen.getByText(/消费指南（选填）/));
     // 推荐用法组添加一项并填写
@@ -1687,7 +1691,7 @@ describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数�
     fireEvent.click(screen.getAllByRole("button", { name: /添加一项/ })[1]);
     const cautionInput = screen.getByPlaceholderText(/该指标包含 PII 数据/);
     fireEvent.change(cautionInput, { target: { value: "含敏感就诊信息" } });
-    await goToStep(3);
+    await goToStep(2);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
 
     await waitFor(() => {
@@ -1701,14 +1705,14 @@ describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数�
     });
   });
 
-  it("Step② 三层口径 AI 生成/丰富增强：业务口径有值点「AI 丰富增强」回填", async () => {
+  it("Step③ 三层口径 AI 生成/丰富增强：业务口径有值点「AI 丰富增强」回填", async () => {
     mockedRefine.mockResolvedValue({
       content: "按就诊号去重统计的门诊就诊总人次（含跨院区）",
       source: "llm",
     });
     renderPage();
     await screen.findByText("注册指标（草稿）");
-    await goToStep(2);
+    await goToStep(1);
     const biz = screen.getByRole("textbox", { name: "业务口径" }) as HTMLTextAreaElement;
     fireEvent.change(biz, { target: { value: "门诊就诊次数" } });
     // 业务口径有值 → 按钮显示「AI 丰富增强」（限定在业务口径 Form.Item 内，避免命中同名按钮）
@@ -2605,17 +2609,17 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     await openBatchMode();
     // 候选行出现「在向导中编辑」按钮，点击完整回填单条向导
     fireEvent.click(screen.getByTestId("sql-batch-to-wizard-0:amount"));
-    // 抽屉关闭 + 定位到单条向导 Step②（指标类型+来源）让用户核对
-    await waitFor(() => expect(screen.getByText("② 选择指标类型")).toBeTruthy());
-    // 源表/度量列已回填到 Step② 原子来源
+    // 抽屉关闭 + 定位到单条向导 Step⑤（选择指标类型）让用户核对
+    await waitFor(() => expect(screen.getByText("⑤ 选择指标类型")).toBeTruthy());
+    // 源表/度量列已回填到 Step⑥ 原子来源
     await waitFor(() => {
       const srcLabel = Array.from(document.querySelectorAll(".ant-form-item-label")).find((el) =>
         el.textContent?.includes("源表名")
       );
       expect(srcLabel?.closest(".ant-form-item")?.textContent).toContain("dwd.sales_detail");
     });
-    // 编码/名称回填到 Step③ 治理确认（用户可改后手动提交创建）
-    await goToStep(2);
+    // 编码/名称回填到 Step② 指标基本信息（用户可改后回 Step2 手动提交创建）
+    await goToStep(1);
     await waitFor(() => {
       expect((screen.getByLabelText("指标编码") as HTMLInputElement).value).toBe(
         "sales_order_amount_day",

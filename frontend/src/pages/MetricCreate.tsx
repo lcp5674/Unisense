@@ -1316,10 +1316,10 @@ export function MetricCreate() {
             ],
       );
     }
-    // 跳转：关闭 SQL 推断抽屉 → 单条模式 → 定位到 Step②（指标类型+来源）让用户核对
+    // 跳转：关闭 SQL 推断抽屉 → 单条模式 → 定位到 Step⑤⑥（指标类型+来源）让用户核对
     setSqlInferOpen(false);
     setSqlBatchMode("single");
-    setCurrentStep(1);
+    setCurrentStep(2);
     message.success(`已将候选「${c.name}」回填到注册向导，请核对修改后按单条流程提交创建`);
   }
 
@@ -1758,20 +1758,20 @@ export function MetricCreate() {
   // OneData 向导：下一步纯前进（不逐级硬校验——避免打断"先粗填再回头改"的构建式流程；
   // 最终提交由 handleSubmit 的类型化必填校验统一兜底，保证错误在真正创建前被拦截）
   function handleNext() {
-    setCurrentStep((s) => Math.min(s + 1, 3));
+    setCurrentStep((s) => Math.min(s + 1, 2));
   }
 
   // 向导步骤导航：每步内容末尾常驻，形成"填完当前步 → 下一步"的引导流。
-  // Step0-2 显示「上一步 + 下一步」，Step3（最后一步）显示「上一步 + 冲突预检 + 创建草稿」。
+  // Step0-1 显示「上一步 + 下一步」，Step2（最后一步）显示「上一步 + 冲突预检 + 创建草稿」。
   const renderStepNav = () => (
     <Form.Item style={{ marginBottom: 0 }}>
       <Space>
         {currentStep > 0 && (
           <Button onClick={() => setCurrentStep(currentStep - 1)}>上一步</Button>
         )}
-        {currentStep < 3 ? (
+        {currentStep < 2 ? (
           <Button type="primary" onClick={handleNext}>
-            {["下一步：指标定义", "下一步：治理与口径", "下一步：责任方与提交"][currentStep]}
+            {["下一步：指标基本信息", "下一步：具体实现"][currentStep]}
           </Button>
         ) : (
           <>
@@ -2058,9 +2058,8 @@ export function MetricCreate() {
         style={{ marginBottom: 20 }}
         items={[
           { title: "业务域", description: "选域并继承域默认值" },
-          { title: "指标定义", description: "类型 + 度量/依赖来源" },
-          { title: "口径确认", description: "自动生成 + 维度/表关联" },
-          { title: "治理/提交", description: "高级治理 + 创建草稿" },
+          { title: "指标基本信息", description: "治理/口径/消费指南/责任方" },
+          { title: "具体实现", description: "类型/来源/挂载/依赖 + 提交" },
         ]}
       />
       <Spin
@@ -2102,9 +2101,9 @@ export function MetricCreate() {
             {renderStepNav()}
             </>)}
 
-            {/* Step 1: 类型 + 来源（OneData 向导） */}
-            {currentStep === 1 && (<>
-            <Card type="inner" title="② 选择指标类型" size="small">
+            {/* Step 2: 具体实现（OneData 向导）—— 类型/来源/挂载/依赖实体 */}
+            {currentStep === 2 && (<>
+            <Card type="inner" title="⑤ 选择指标类型" size="small">
               <Form.Item
                 name="type"
                 label="指标类型"
@@ -2125,7 +2124,7 @@ export function MetricCreate() {
             {/* Step 2: 按类型的来源配置——原子=逻辑度量/源字段；派生/复合=依赖指标（SQL 推断已收敛为工具栏抽屉） */}
             <Card
               type="inner"
-              title={isAtomic ? "② 原子来源（逻辑度量 + 基础统计粒度）" : metricType === "composite" ? "② 依赖指标（复合必填）" : "② 依赖指标（派生选填）"}
+              title={isAtomic ? "⑥ 原子来源（逻辑度量 + 基础统计粒度）" : metricType === "composite" ? "⑥ 依赖指标（复合必填）" : "⑥ 依赖指标（派生选填）"}
               size="small"
               extra={suggesting && <Spin size="small" />}
             >
@@ -2319,13 +2318,83 @@ export function MetricCreate() {
                 </>
               )}
             </Card>
+
+            {/* 关联数据表（Step2：血缘上下游表）——从口径定义卡抽出，随实现步骤展示 */}
+            <Card type="inner" title="⑦ 关联数据表" size="small">
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message="三类表的关系，方向别搞混："
+                description={
+                  <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.8 }}>
+                    <li>
+                      <b>依赖表（上游）</b>：这个指标是靠哪些表“加工”出来的？——如
+                      <span className="mono" style={{ fontSize: 12 }}> dwd.sales_detail</span>
+                      （血缘自动生成 表 → 指标 边）
+                    </li>
+                    <li>
+                      <b>使用表（下游）</b>：哪些表会“消费”这个指标的结果？——如
+                      <span className="mono" style={{ fontSize: 12 }}> ads.gmv_report</span>
+                      （血缘自动生成 指标 → 表 边）
+                    </li>
+                    <li>
+                      <b>挂载实体表（指标的家）</b>（⑥，仅派生指标）：结果存到哪张物理表？
+                      ——区别于上面的“原料”和“客户”。
+                    </li>
+                  </ul>
+                }
+              />
+              <Form.Item
+                label="依赖表（上游）"
+                extra="加工出这个指标的“原料表”（可多选）——血缘据此生成 表 → 指标 上游边"
+              >
+                <Select
+                  mode="multiple" allowClear showSearch
+                  placeholder="展开浏览已接入表，或输入关键词搜索（未采集的可直接录入）"
+                  value={sourceTables}
+                  onChange={(v: string[]) => setSourceTables(v)}
+                  onSearch={(q) => {
+                    setDepTableKw(q);
+                    searchTables(q);
+                  }}
+                  onOpenChange={handleTableDropdown}
+                  loading={tableSearching}
+                  notFoundContent={tableSearching ? <Spin size="small" /> : "无匹配表，可手动输入完整表名"}
+                  options={withUncollectedOption(depTableKw, tableOptions)}
+                  optionRender={tableOptionRender}
+                  filterOption={false}
+                />
+              </Form.Item>
+              <Form.Item
+                label="使用表（下游）"
+                extra="消费这个指标结果的“客户表”（可多选）——血缘据此生成 指标 → 表 下游边"
+              >
+                <Select
+                  mode="multiple" allowClear showSearch
+                  placeholder="展开浏览已接入表，或输入关键词搜索（未采集的可直接录入）"
+                  value={downstreamTables}
+                  onChange={(v: string[]) => setDownstreamTables(v)}
+                  onSearch={(q) => {
+                    setDownTableKw(q);
+                    searchTables(q);
+                  }}
+                  onOpenChange={handleTableDropdown}
+                  loading={tableSearching}
+                  notFoundContent={tableSearching ? <Spin size="small" /> : "无匹配表，可手动输入完整表名"}
+                  options={withUncollectedOption(downTableKw, tableOptions)}
+                  optionRender={tableOptionRender}
+                  filterOption={false}
+                />
+              </Form.Item>
+            </Card>
             {renderStepNav()}
             </>
             )}
 
-            {/* Step 2: 治理确认 + 口径定义（OneData 向导） */}
-            {currentStep === 2 && (<>
-            <Card type="inner" title="③ 确认治理" size="small">
+            {/* Step 1: 指标基本信息（OneData 向导）—— 治理/口径/消费指南/责任方 */}
+            {currentStep === 1 && (<>
+            <Card type="inner" title="② 指标基本信息" size="small">
               <Row gutter={16}>
                 <Col span={12}>
                   <Form.Item
@@ -2382,7 +2451,7 @@ export function MetricCreate() {
                           <>
                             <Row gutter={16}>
                               <Col span={8}>
-                                <Form.Item name="granularity" label="粒度" extra="缺省取挂载粒度（②挂载配置）">
+                                <Form.Item name="granularity" label="粒度" extra="缺省取挂载粒度（⑥挂载配置）">
                                   {dictSelect("granularity", "granularity", "选择粒度")}
                                 </Form.Item>
                               </Col>
@@ -2498,32 +2567,7 @@ export function MetricCreate() {
               />
             </Card>
 
-            {/* 关联数据表 */}
-            <Card type="inner" title="④ 口径定义" size="small">
-              <Alert
-                type="info"
-                showIcon
-                style={{ marginBottom: 12 }}
-                message="三类表的关系，方向别搞混："
-                description={
-                  <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.8 }}>
-                    <li>
-                      <b>依赖表（上游）</b>：这个指标是靠哪些表“加工”出来的？——如
-                      <span className="mono" style={{ fontSize: 12 }}> dwd.sales_detail</span>
-                      （血缘自动生成 表 → 指标 边）
-                    </li>
-                    <li>
-                      <b>使用表（下游）</b>：哪些表会“消费”这个指标的结果？——如
-                      <span className="mono" style={{ fontSize: 12 }}> ads.gmv_report</span>
-                      （血缘自动生成 指标 → 表 边）
-                    </li>
-                    <li>
-                      <b>挂载实体表（指标的家）</b>（Step②，仅派生指标）：结果存到哪张物理表？
-                      ——区别于上面的“原料”和“客户”。
-                    </li>
-                  </ul>
-                }
-              />
+            <Card type="inner" title="③ 口径定义" size="small">
               {inferredDefinition.json && (
                 <Alert
                   type="info"
@@ -2545,48 +2589,6 @@ export function MetricCreate() {
                   }
                 />
               )}
-              <Form.Item
-                label="依赖表（上游）"
-                extra="加工出这个指标的“原料表”（可多选）——血缘据此生成 表 → 指标 上游边"
-              >
-                <Select
-                  mode="multiple" allowClear showSearch
-                  placeholder="展开浏览已接入表，或输入关键词搜索（未采集的可直接录入）"
-                  value={sourceTables}
-                  onChange={(v: string[]) => setSourceTables(v)}
-                  onSearch={(q) => {
-                    setDepTableKw(q);
-                    searchTables(q);
-                  }}
-                  onOpenChange={handleTableDropdown}
-                  loading={tableSearching}
-                  notFoundContent={tableSearching ? <Spin size="small" /> : "无匹配表，可手动输入完整表名"}
-                  options={withUncollectedOption(depTableKw, tableOptions)}
-                  optionRender={tableOptionRender}
-                  filterOption={false}
-                />
-              </Form.Item>
-              <Form.Item
-                label="使用表（下游）"
-                extra="消费这个指标结果的“客户表”（可多选）——血缘据此生成 指标 → 表 下游边"
-              >
-                <Select
-                  mode="multiple" allowClear showSearch
-                  placeholder="展开浏览已接入表，或输入关键词搜索（未采集的可直接录入）"
-                  value={downstreamTables}
-                  onChange={(v: string[]) => setDownstreamTables(v)}
-                  onSearch={(q) => {
-                    setDownTableKw(q);
-                    searchTables(q);
-                  }}
-                  onOpenChange={handleTableDropdown}
-                  loading={tableSearching}
-                  notFoundContent={tableSearching ? <Spin size="small" /> : "无匹配表，可手动输入完整表名"}
-                  options={withUncollectedOption(downTableKw, tableOptions)}
-                  optionRender={tableOptionRender}
-                  filterOption={false}
-                />
-              </Form.Item>
               <Form.Item label="口径定义模式">
                 <Segmented
                   block value={mode}
@@ -2769,12 +2771,10 @@ export function MetricCreate() {
                 </Space>
               </Form.Item>
             </Card>
-            {renderStepNav()}
-            </>
-            )}
+            </>)}
 
-            {/* Step 3: 责任方（OneData 向导） */}
-            {currentStep === 3 && (<>
+            {/* Step 1 续：口径责任方（OneData 向导）—— 责任方属基本信息，随 Step1 */}
+            {currentStep === 1 && (<>
             <Card type="inner" title="④ 口径责任方（可选）" size="small">
               <Row gutter={16}>
                 <Col span={8}>
@@ -3199,7 +3199,7 @@ export function MetricCreate() {
                                     />
                                     {/* OneData 接线（P2）：批量候选关联逻辑度量——SQL 无法推断，
                                         前端选择器补全；提交透传 measure_id，批量原子不再游离逻辑
-                                        度量体系（对齐单条创建 Step②同款控件） */}
+                                        度量体系（对齐单条创建 Step⑥同款控件） */}
                                     <Select
                                       size="small"
                                       showSearch
@@ -4138,7 +4138,7 @@ export function MetricCreate() {
               return (
                 <div style={{ marginTop: 12 }}>
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    血缘推断关联表（已回填到 Step③ 口径定义）：
+                    血缘推断关联表（已回填到 Step⑦ 关联数据表）：
                   </Typography.Text>
                   {upstream?.length ? (
                     <div style={{ marginTop: 6 }}>
