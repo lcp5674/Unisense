@@ -998,9 +998,13 @@ def _classify_no_measure(seg: str, profile: SqlProfile, llm_tried: bool) -> str:
         return "ddl_only"
     # 标准聚合词 + 方言变体前缀（sumMerge/sumIf/countIf/approx_distinct 等）：
     # 只要语句疑似含聚合但规则层未解析出度量，就值得 LLM 兜底（避免 ClickHouse/
-    # StarRocks 等方言聚合被误判「确实无聚合」而跳过）。
+    # StarRocks 等方言聚合被误判「确实无聚合」而跳过）。X 批次：any（any_value）、
+    # mode（mode()）、within（WITHIN GROUP）、concat（group_concat）、collect
+    # （collect_set/list）——这些被规则层诚实跳过（无注册枚举/复杂参数）的聚合
+    # 也应触发 LLM 兜底，避免静默 no_aggregate。
     if re.search(
-        r"\b(sum|count|avg|max|min|median|percentile|distinct)[a-z_]*\b", lower
+        r"\b(sum|count|avg|max|min|median|percentile|distinct|any|mode|within|concat|collect)[a-z_]*\b",
+        lower,
     ):
         return "parse_failed"
     return "no_aggregate"

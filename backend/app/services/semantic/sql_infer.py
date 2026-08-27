@@ -210,6 +210,10 @@ _DIALECT_AGG_SKIP = {
     "stddev", "stddevpop", "stddevsamp", "stddev_samp", "varpop", "varsamp",
     "var_pop", "var_samp", "variance",
     "stdev", "stdevp", "std", "var", "varp",  # T-SQL/MySQL 简写（函数名形态防御）
+    # X6：参数化首/末值（ClickHouse argMax(uid, amt)/argMin——AnonymousAggFunc 的
+    # this 字符串形态）——语义是「amt 最大/最小那一行的 uid」，非 MAX/MIN(uid)；
+    # 映射 MAX/MIN 会产出语义错误的指标，诚实跳过（由 LLM/人工处理）
+    "argmin", "argmax",
 }
 
 
@@ -335,15 +339,16 @@ def _extract_source_tables(ast: exp.Expr) -> list[str]:
                     if cte.alias_or_name.lower() != ref_tail:
                         continue
                     body = cte.this
-                    if isinstance(body, exp.Union):
+                    if isinstance(body, exp.SetOperation):
                         for b in body.find_all(exp.Select):
                             _collect_select_from(b)
                     elif isinstance(body, exp.Select):
                         _collect_select_from(body)
                     break
 
-    if isinstance(ast, exp.Union):
-        # 顶层 UNION 多源合并：各分支 FROM 都是合法源表（U-1 多子公司合并等）
+    if isinstance(ast, exp.SetOperation):
+        # 顶层集合运算（UNION/INTERSECT/EXCEPT）多源合并：各分支 FROM 都是合法
+        # 源表（U-1 多子公司合并、对账交/差查询等）
         for branch in ast.find_all(exp.Select):
             _collect_select_from(branch)
         return tables
@@ -525,11 +530,21 @@ def _agg_display_name(agg: exp.AggFunc) -> str | None:
     key = agg.key.upper()
     if key == "COMBINEDAGGFUNC":
         fn = str(agg.this).lower() if isinstance(agg.this, str) else ""
+        # X6：条件参数化首/末值（argMaxIf(uid, amt, cond)）——语义是「满足条件的
+        # 最大 amt 对应行的 uid」，非 MAX(uid)；诚实跳过（无注册枚举可表达）
+        if fn in ("argmaxif", "argminif"):
+            return None
         return _COMBINED_AGG_MAP.get(fn, "SUM")
     if key == "COUNTIF":
         return "COUNT"
     if key == "APPROXDISTINCT":
         return "COUNT_DISTINCT"
+    # X6：参数化首/末值类（Trino ``min_by(uid, amt)``/``max_by(uid, amt)`` 解析为
+    # ``exp.ArgMin``/``exp.ArgMax``，this 是「按 amt 取极值行」的返回列）——语义是
+    # 「amt 最大/最小那一行的 uid」，不是 MIN/MAX(uid)；返回 None 诚实跳过（由
+    # LLM/人工处理），避免静默产出语义错误的 MIN/MAX 指标被当成对的创建。
+    if key in ("ARGMIN", "ARGMAX"):
+        return None
     # 方言聚合：this 是函数名字符串 → 按函数名归一（corr/stddev/var 等无枚举可归
     # 一 → None 跳过该度量，避免产出非法候选导致批量创建整批失败）
     if isinstance(agg.this, str):
@@ -555,15 +570,16 @@ def _agg_display_name(agg: exp.AggFunc) -> str | None:
         return "PERCENTILE"
     # 数组/布尔/任意值聚合类（sqlglot 内置子类，key 无下划线）：array_agg→COUNT_DISTINCT
     # （U-2：数组聚合=去重集合语义，不再静默降级 COUNT）、bool_and/bool_or→COUNT、
-    # any()/arbitrary()/ANY_VALUE→COUNT、APPROX_TOP_K→COUNT——均按「近似计数语义」
-    # 归一到注册枚举，否则产出非法枚举（ARRAYAGG/LOGICALAND/LOGICALOR/ANYVALUE/
-    # APPROXTOPK/ARRAYUNIQUEAGG）导致批量创建整批失败（P1-4 同类缺陷）。
+    # APPROX_TOP_K→COUNT——均按「近似计数语义」归一到注册枚举，否则产出非法枚举
+    # （ARRAYAGG/LOGICALAND/LOGICALOR/APPROXTOPK/ARRAYUNIQUEAGG）导致批量创建整批失败
+    # （P1-4 同类缺陷）。any_value/any()/arbitrary()（X7）→ None 跳过（语义是「任取
+    # 一值」非计数，映射 COUNT 会产出语义错误的指标）。
     if key in ("ARRAYAGG", "ARRAYUNIQUEAGG"):
         return "COUNT_DISTINCT"
     if key in ("LOGICALAND", "LOGICALOR"):
         return "COUNT"
     if key == "ANYVALUE":
-        return "COUNT"
+        return None
     if key == "APPROXTOPK":
         return "COUNT"
     # 方言统计聚合专用类（Quantile/Corr/Stddev 等，this 是 Column 非字符串）：
@@ -831,6 +847,13 @@ def _projection_measures(
         # DISTINCT 修饰符：sqlglot 将 COUNT(DISTINCT x) 解析为 Count(this=Distinct(...))
         col_expr = agg.this
         multi_distinct_col: str | None = None
+        # X9：``group_concat(DISTINCT x ORDER BY ... SEPARATOR ...)``（MySQL/SQLite
+        # 串聚合）的 ``this`` 是 ``Order(Distinct(x), Ordered(x))`` 包裹（非裸
+        # Distinct）——剥离 Order 取内层 Distinct，与普通 ``group_concat(x)`` 一致
+        # 产出 COUNT_DISTINCT + needs_review；``group_concat(x ORDER BY y)`` 无
+        # Distinct 时 Order.this 即列，同样剥离（避免 W8 复杂参数把 Order 当非列跳过）
+        if isinstance(col_expr, exp.Order):
+            col_expr = col_expr.this
         if isinstance(col_expr, exp.Distinct):
             agg_name = "COUNT_DISTINCT"
             if len(col_expr.expressions or []) > 1:
@@ -1488,16 +1511,18 @@ def _parse_profile_ast(sql: str) -> exp.Expr | None:
     return ast if ast is not None else None
 
 
-def _profile_from_union(ast: exp.Union, sql: str) -> SqlProfile:
-    """U-1：顶层 UNION ALL/UNION 多源合并画像。
+def _profile_from_union(ast: exp.SetOperation, sql: str) -> SqlProfile:
+    """U-1/X-1：顶层集合运算（UNION/INTERSECT/EXCEPT）多源合并画像。
 
     ``SELECT d,sum(amt) FROM a GROUP BY d UNION ALL SELECT d,count(DISTINCT uid)
     FROM b GROUP BY d`` 是「线上+线下合并」「多子公司合并」等工业最常见的多源表
     形态——此前 ``ast.find(exp.Select)`` 只取第一个分支且 Union 顶层被跳过 →
-    measures=[] 静默 0 候选（用户误以为 SQL 有问题）。遍历所有 Select 分支合并
-    度量（去重键 alias/column/agg/table，与下沉去重对齐），源表已由
-    ``_extract_source_tables``（walk 遍历 Union 两侧）收集，group_by 取首个有
-    分组的分支，时间粒度/列取首个分支推断。
+    measures=[] 静默 0 候选（用户误以为 SQL 有问题）；``INTERSECT``/``EXCEPT``
+    （对账/差异查询）是 ``exp.SetOperation`` 子类，同样整段静默 0 候选 + 0 源表。
+    泛化为 ``exp.SetOperation``：遍历所有 Select 分支合并度量（去重键
+    alias/column/agg/table，与下沉去重对齐），源表由 ``_extract_source_tables``
+    （walk 遍历集合两侧）收集，group_by 取首个有分组的分支，时间粒度/列取首个
+    分支推断。
     """
     branches = list(ast.find_all(exp.Select))
     if not branches:
@@ -1559,9 +1584,9 @@ def parse_sql_profile(sql: str) -> SqlProfile:
         return SqlProfile(sql=sql.strip())
 
     select = ast
-    if isinstance(ast, exp.Union):
-        # U-1：顶层 UNION ALL/UNION 多源合并——遍历全部分支合并度量（见
-        # _profile_from_union），不再只取第一个分支
+    if isinstance(ast, exp.SetOperation):
+        # U-1/X-1：顶层集合运算（UNION/INTERSECT/EXCEPT）多源合并——遍历全部
+        # 分支合并度量（见 _profile_from_union），不再只取第一个分支/静默跳过
         return _profile_from_union(ast, sql.strip())
     if isinstance(ast, (exp.Insert, exp.Create, exp.Update, exp.Merge)):
         # 取源查询（CTAS / INSERT INTO ... SELECT）

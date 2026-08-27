@@ -690,8 +690,22 @@ def test_classify_no_measure_categories() -> None:
         == "parse_failed"
     )
     assert (
+        _classify_no_measure("SELECT countIf(x > 0) AS c FROM t", empty, llm_tried=False)
+        == "parse_failed"
+    )
+    # X-6/X-7/X-11：被规则层诚实跳过的聚合（min_by/any_value/mode）也触发 LLM 兜底，
+    # 避免静默 no_aggregate
+    assert (
         _classify_no_measure(
-            "SELECT countIf(x > 0) AS c FROM t", empty, llm_tried=False
+            "SELECT d, any_value(name) AS n FROM t GROUP BY d", empty, llm_tried=False
+        )
+        == "parse_failed"
+    )
+    assert (
+        _classify_no_measure(
+            "SELECT d, mode() WITHIN GROUP (ORDER BY amt) AS m FROM t GROUP BY d",
+            empty,
+            llm_tried=False,
         )
         == "parse_failed"
     )

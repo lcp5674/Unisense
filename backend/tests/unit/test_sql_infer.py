@@ -534,15 +534,19 @@ class TestParseSqlProfile:
         assert "COUNT" in aggs
         assert any(m.get("needs_review") for m in p.measures if m["column"] == "user_id")
         p2 = parse_sql_profile("SELECT ANY_VALUE(status) AS s FROM t GROUP BY dept")
-        assert {m["agg"] for m in p2.measures} == {"COUNT"}
+        # X7：any_value（任取一值）无注册枚举 → 诚实跳过（不产出语义错误的 COUNT 指标）
+        assert {m["agg"] for m in p2.measures} == set()
         p3 = parse_sql_profile("SELECT APPROX_TOP_K(status, 5) AS t FROM t GROUP BY dept")
         assert {m["agg"] for m in p3.measures} == {"COUNT"}
 
     def test_dialect_clickhouse_conditional_extreme(self) -> None:
-        """CH maxIf/minIf/argMaxIf（CombinedAggFunc）→ MAX/MIN。
+        """CH maxIf/minIf → MAX/MIN；argMaxIf → 诚实跳过（X6）。
 
         此前 _COMBINED_AGG_MAP 无 maxif/minif → 兜底归 SUM（语义错误：maxIf 是 MAX
         不是 SUM），且 hint 未命中不触发方言择优 → measures=0 推断退化。
+        ``argMaxIf(amount, ts, cond)`` 语义是「cond 内 ts 最大那一行的 amount」，
+        非 MAX(amount)——映射 MAX 会产出语义错误的指标（X6 与 Trino min_by 同类），
+        诚实跳过由 LLM/人工处理。
         """
         p = parse_sql_profile(
             "SELECT maxIf(amount, status='ok') AS m, minIf(amount, status='ok') AS mn, "
@@ -551,7 +555,8 @@ class TestParseSqlProfile:
         aggs = {(m["column"], m["agg"]) for m in p.measures}
         assert ("amount", "MAX") in aggs
         assert ("amount", "MIN") in aggs
-        assert ("amount", "MAX") in aggs  # argMaxIf 同 MAX
+        # argMaxIf 被诚实跳过：不产出 MAX(amount) 错误候选
+        assert all(m.get("alias") != "a" for m in p.measures)
 
     def test_dialect_ch_overflow_weighted(self) -> None:
         """CH sumWithOverflow → SUM、avgWeighted → AVG（AnonymousAggFunc 函数名形态）。"""
@@ -562,13 +567,14 @@ class TestParseSqlProfile:
 
     def test_dialect_approx_percentile_and_arbitrary(self) -> None:
         """Snow/Spark/Trino approx_percentile → PERCENTILE（hint 缺导致 measures=0 退化）；
-        Trino arbitrary（AnyValue 类）→ COUNT。"""
+        Trino arbitrary（AnyValue 类）→ 诚实跳过（X7：任取一值非计数，映射 COUNT 会
+        产出语义错误的指标；由 LLM 兜底处理）。"""
         p = parse_sql_profile(
             "SELECT approx_percentile(amount, 0.5) AS p50, arbitrary(status) AS s FROM t"
         )
         aggs = {m["agg"] for m in p.measures}
         assert "PERCENTILE" in aggs
-        assert "COUNT" in aggs
+        assert "COUNT" not in aggs
 
     def test_dialect_collect_and_countbig(self) -> None:
         """Spark collect_list/collect_set（ArrayAgg/ArrayUniqueAgg）→ COUNT_DISTINCT
@@ -994,4 +1000,51 @@ class TestParseSqlProfile:
             "LATERAL VIEW explode(sku_list) t AS sku GROUP BY d, sku"
         )
         assert p2.source_tables == ["ods.sale_df"]
+
+    def test_intersect_except_setop_branches_merged(self) -> None:
+        """X-1：INTERSECT/EXCEPT（exp.SetOperation 子类）——对账/差异查询也遍历
+        全部分支合并度量 + 两侧源表（此前只识别 exp.Union，交/差整段静默 0 候选
+        + 0 源表）。"""
+        for op in ("INTERSECT", "EXCEPT", "INTERSECT ALL"):
+            sql = (
+                f"SELECT d, sum(amt) AS s FROM ods.a GROUP BY d {op} "
+                f"SELECT d, sum(amt) FROM ods.b GROUP BY d"
+            )
+            p = parse_sql_profile(sql)
+            assert len(p.measures) == 2, f"{op}: {p.measures}"
+            assert all(m["agg"] == "SUM" for m in p.measures)
+            assert "ods.a" in p.source_tables and "ods.b" in p.source_tables
+            assert "d" in p.group_by
+
+    def test_min_by_max_by_skipped_not_min_max(self) -> None:
+        """X-6：Trino min_by(uid, amt)/max_by(uid, amt)（exp.ArgMin/ArgMax）——
+        语义是「amt 极值那一行的 uid」，非 MIN/MAX(uid)；映射 MIN/MAX 会产出语义
+        错误的指标，诚实跳过（由 LLM 兜底处理）。"""
+        p = parse_sql_profile(
+            "SELECT d, min_by(uid, amt) AS top_user, max_by(uid, amt) AS low_user "
+            "FROM ods.a GROUP BY d"
+        )
+        assert p.measures == [], f"min_by/max_by 应被诚实跳过：{p.measures}"
+
+    def test_any_value_skipped_not_count(self) -> None:
+        """X-7：any_value(name)（exp.AnyValue）——「任取一值」非计数，映射 COUNT
+        会产出语义错误的指标（any_value(name)→COUNT(name) 无意义），诚实跳过。"""
+        p = parse_sql_profile(
+            "SELECT d, any_value(name) AS n FROM ods.a GROUP BY d"
+        )
+        assert p.measures == [], f"any_value 应被诚实跳过：{p.measures}"
+
+    def test_group_concat_distinct_order_extracted(self) -> None:
+        """X-9：MySQL group_concat(DISTINCT x ORDER BY ... SEPARATOR ...)——this 是
+        Order(Distinct(x)) 包裹（非裸 Distinct），剥离后与普通 group_concat 一致
+        产出 COUNT_DISTINCT + needs_review（此前被 W8 复杂参数跳过 → 0 度量）。"""
+        p = parse_sql_profile(
+            "SELECT d, group_concat(DISTINCT product ORDER BY product SEPARATOR ',') "
+            "AS plist FROM ods.a GROUP BY d"
+        )
+        ms = [m for m in p.measures if m.get("alias") == "plist"]
+        assert len(ms) == 1, f"group_concat(DISTINCT) 应产出候选：{p.measures}"
+        assert ms[0]["agg"] == "COUNT_DISTINCT"
+        assert ms[0]["column"] == "product"
+        assert ms[0].get("needs_review") is True
 
