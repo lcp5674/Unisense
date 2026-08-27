@@ -237,6 +237,64 @@ describe("SystemConfig LLM 路由配置", () => {
     });
   });
 
+  it("选择火山方舟/腾讯混元提供商 → 预填 Coding Plan 接口地址与默认模型", async () => {
+    render(<SystemConfig />);
+    fireEvent.click(await screen.findByText("新增 LLM 实例"));
+    // 选择火山方舟（Coding Plan）
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "提供商" }));
+    fireEvent.click(await screen.findByText("火山方舟（Coding Plan）"));
+    await waitFor(() => {
+      expect(
+        screen.getByDisplayValue("https://ark.cn-beijing.volces.com/api/coding/v3"),
+      ).toBeTruthy();
+      expect(screen.getByDisplayValue("deepseek-v3.1")).toBeTruthy();
+    });
+    // 切换到腾讯云混元
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "提供商" }));
+    fireEvent.click(await screen.findByText("腾讯云混元"));
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("https://api.hunyuan.cloud.tencent.com/v1")).toBeTruthy();
+      expect(screen.getByDisplayValue("hunyuan-turbos-latest")).toBeTruthy();
+    });
+  });
+
+  it("获取模型：网关不支持 /models 但平台有内置目录 → 展示目录并提示可手动补充", async () => {
+    mockFetchModels.mockResolvedValue({
+      models: ["deepseek-v3.1", "deepseek-r1-0528", "kimi-k2.5"],
+      supported: true,
+      error: "",
+      latency_ms: 30,
+      source: "catalog",
+      note: "该网关不支持 GET /models 接口，已列出平台内置常用模型；实际可用模型以订阅套餐/控制台为准，可手动输入补充",
+    });
+    render(<SystemConfig />);
+    fireEvent.click(await screen.findByText("新增 LLM 实例"));
+    // 选择火山方舟 → 预填 base_url，同时 provider=ark 传给 fetchLlmModels
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "提供商" }));
+    fireEvent.click(await screen.findByText("火山方舟（Coding Plan）"));
+    await waitFor(() => {
+      expect(
+        screen.getByDisplayValue("https://ark.cn-beijing.volces.com/api/coding/v3"),
+      ).toBeTruthy();
+    });
+    fireEvent.change(screen.getByPlaceholderText("sk-..."), {
+      target: { value: "sk-test" },
+    });
+    fireEvent.click(screen.getByText("获取模型"));
+    await waitFor(() => {
+      expect(mockFetchModels).toHaveBeenCalledWith(
+        expect.objectContaining({
+          provider: "ark",
+          base_url: "https://ark.cn-beijing.volces.com/api/coding/v3",
+        }),
+      );
+      // 展示目录来源提示（而非「获取到 N 个可用模型」）
+      expect(screen.getByText(/已列出平台内置常用模型/)).toBeTruthy();
+      // 下拉被目录模型填充（kimi-k2.5 不在预设/自动选中值中，仅来自目录）
+      expect(screen.getByText("kimi-k2.5")).toBeTruthy();
+    });
+  });
+
   it("编辑实例：点编辑 → 回填表单 → 保存 → 调用 updateLlmConfig", async () => {
     mockGet.mockResolvedValue(listData({ items: [PRIMARY_ITEM] }) as never);
     mockUpdate.mockResolvedValue({ id: 1 });

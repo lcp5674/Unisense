@@ -1837,6 +1837,8 @@ export interface LlmModelsResult {
   supported: boolean;
   error: string;
   latency_ms: number;
+  source?: string; // live=实时拉取 / catalog=内置常用模型目录
+  note?: string; // catalog 时的提示文案
 }
 
 // ============================================================================

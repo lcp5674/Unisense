@@ -262,8 +262,9 @@ async def fetch_llm_models(
     - instance_id：获取已保存实例（用其落库密钥）；
     - base_url/model/api_key/timeout：临时获取（不落库；api_key 留空回落已保存/环境密钥）。
 
-    网关不支持 ``GET /models`` 端点时返回 ``supported=False`` + error，
-    前端提示用户手动输入模型名。
+    网关不支持 ``GET /models`` 端点时：已知平台（火山方舟/腾讯混元等兼容网关
+    未实现 /models）回退到内置常用模型目录（``source="catalog"``）仍可下拉点选；
+    其余网关返回 ``supported=False`` + error，前端提示用户手动输入模型名。
     """
     svc = LlmConfigService(db)
     if payload is not None and payload.instance_id is not None:
@@ -273,6 +274,7 @@ async def fetch_llm_models(
             base_url=payload.base_url,
             api_key=payload.api_key,
             timeout=float(payload.timeout or 30),
+            provider=payload.provider or "custom",
         )
     else:
         effective = await svc.get_effective()
@@ -280,6 +282,7 @@ async def fetch_llm_models(
             base_url=effective["base_url"],
             api_key=effective["api_key"],
             timeout=float(effective["timeout"] or 30),
+            provider=effective["provider"] or "custom",
         )
     return ok(data=result.model_dump(), trace_id=trace_id)
 

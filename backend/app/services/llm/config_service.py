@@ -49,7 +49,39 @@ PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
         "base_url": "https://api.kilo.ai/api/gateway",
         "model": "poolside/laguna-m.1:free",
     },
+    # 火山方舟 Coding Plan：OpenAI 兼容网关（api/coding/v3 为 Coding Plan 专属路径）
+    "ark": {
+        "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+        "model": "deepseek-v3.1",
+    },
+    # 腾讯云混元（Coding Plan 订阅开放更多模型）
+    "tencent": {
+        "base_url": "https://api.hunyuan.cloud.tencent.com/v1",
+        "model": "hunyuan-turbos-latest",
+    },
     "custom": {"base_url": "", "model": ""},
+}
+
+#: 内置常用模型目录（OpenAI 兼容网关不提供 GET /models 端点时的兜底清单）。
+#: 火山方舟 / 腾讯混元的兼容网关均未实现 /models（请求即 404），「获取模型」
+#: 回退到此处常用模型仍可下拉点选，用户也可手动输入补充；实际可用模型
+#: 以订阅套餐/控制台为准（各平台模型名随版本迭代，目录仅作常用参考）。
+PROVIDER_MODEL_CATALOG: dict[str, list[str]] = {
+    "ark": [
+        "deepseek-v3.1",
+        "deepseek-r1-0528",
+        "doubao-seed-1-6-lite",
+        "doubao-seed-1-6-turbo",
+        "kimi-k2.5",
+        "glm-4.7",
+        "minimax-m2",
+    ],
+    "tencent": [
+        "hunyuan-turbos-latest",
+        "hunyuan-turbo-latest",
+        "hunyuan-lite",
+        "hunyuan-code",
+    ],
 }
 
 #: 指向回环地址的 base_url 片段（容器内 127.0.0.1/localhost 指向容器自身，而非宿主机）
@@ -569,13 +601,22 @@ class LlmConfigService:
             base_url=row.base_url,
             api_key=api_key,
             timeout=float(row.timeout or 30),
+            provider=row.provider or "custom",
         )
 
-    async def fetch_models(self, base_url: str, api_key: str, timeout: float) -> LlmModelsResult:
+    async def fetch_models(
+        self,
+        base_url: str,
+        api_key: str,
+        timeout: float,
+        provider: str = "custom",
+    ) -> LlmModelsResult:
         """获取提供商可用模型列表（GET /models）。
 
         api_key 为空时回落已保存/环境密钥（前端编辑留空=保持原密钥）。
-        网关不支持 /models 端点（404/405/501）或请求失败时返回
+        网关不支持 /models 端点（404/405/501）时：已知平台（火山方舟/腾讯混元
+        等兼容网关未实现该端点）回退到内置常用模型目录（``source="catalog"``），
+        让「获取模型」仍能下拉点选；其余错误（鉴权/连通/5xx）原样返回
         ``supported=False`` + error，由调用方提示用户手动输入模型名。
         """
         base_url = base_url.strip()
@@ -612,7 +653,31 @@ class LlmConfigService:
                 ]
             except Exception:  # noqa: BLE001 - 响应结构异常按不支持处理
                 models = []
-            return LlmModelsResult(models=models, supported=True, latency_ms=latency_ms)
+            return LlmModelsResult(
+                models=models, supported=True, source="live", latency_ms=latency_ms
+            )
+        # 网关未实现 /models 端点（404/405/501）：已知平台回退到内置常用模型目录，
+        # 「获取模型」仍能展示可选列表；其余状态码（鉴权/5xx）原样返回不支持。
+        if resp.status_code in (404, 405, 501):
+            catalog = PROVIDER_MODEL_CATALOG.get(provider)
+            if catalog:
+                logger.info(
+                    "llm_models_catalog_fallback: provider=%s url=%s status=%d models=%d",
+                    provider,
+                    req_url,
+                    resp.status_code,
+                    len(catalog),
+                )
+                return LlmModelsResult(
+                    models=list(catalog),
+                    supported=True,
+                    source="catalog",
+                    note=(
+                        "该网关不支持 GET /models 接口，已列出平台内置常用模型；"
+                        "实际可用模型以订阅套餐/控制台为准，可手动输入补充"
+                    ),
+                    latency_ms=latency_ms,
+                )
         return LlmModelsResult(
             supported=False,
             error=f"HTTP {resp.status_code}（请求 {req_url}）: {resp.text[:120]}",

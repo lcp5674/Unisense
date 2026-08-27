@@ -610,6 +610,124 @@ class TestFetchModels:
         assert result.supported is False
         assert "不存在" in result.error
 
+    async def test_fetch_models_catalog_fallback_ark(self) -> None:
+        """火山方舟兼容网关不支持 /models（404）→ 回退内置常用模型目录（source=catalog）。"""
+        from app.services.llm.config_service import PROVIDER_MODEL_CATALOG
+
+        svc, _ = await self._svc()
+        models_resp = MagicMock()
+        models_resp.status_code = 404
+        models_resp.text = "not found"
+        mock_client = AsyncMock()
+        mock_client.get.return_value = models_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.fetch_models(
+                "https://ark.cn-beijing.volces.com/api/coding/v3", "sk-x", 30, provider="ark"
+            )
+        assert result.supported is True
+        assert result.source == "catalog"
+        assert result.models == PROVIDER_MODEL_CATALOG["ark"]
+        assert result.error == ""
+        assert "不支持 GET /models" in result.note
+
+    async def test_fetch_models_catalog_fallback_tencent(self) -> None:
+        """腾讯云混元兼容网关不支持 /models（404）→ 回退内置常用模型目录。"""
+        from app.services.llm.config_service import PROVIDER_MODEL_CATALOG
+
+        svc, _ = await self._svc()
+        models_resp = MagicMock()
+        models_resp.status_code = 404
+        models_resp.text = "not found"
+        mock_client = AsyncMock()
+        mock_client.get.return_value = models_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.fetch_models(
+                "https://api.hunyuan.cloud.tencent.com/v1", "sk-x", 30, provider="tencent"
+            )
+        assert result.supported is True
+        assert result.source == "catalog"
+        assert result.models == PROVIDER_MODEL_CATALOG["tencent"]
+
+    async def test_fetch_models_custom_no_catalog_fallback(self) -> None:
+        """未知/自定义 provider 的网关不支持 /models（404）→ 保持不支持，不套目录。"""
+        svc, _ = await self._svc()
+        models_resp = MagicMock()
+        models_resp.status_code = 404
+        models_resp.text = "not found"
+        mock_client = AsyncMock()
+        mock_client.get.return_value = models_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.fetch_models(
+                "https://api.example.com", "sk-x", 30, provider="custom"
+            )
+        assert result.supported is False
+        assert result.source == "live"
+        assert result.models == []
+
+    async def test_fetch_models_live_does_not_mix_catalog(self) -> None:
+        """网关支持 /models（200）时即使 provider 有目录也返回实时结果（source=live）。"""
+        svc, _ = await self._svc()
+        models_resp = MagicMock()
+        models_resp.status_code = 200
+        models_resp.json.return_value = {"data": [{"id": "real-model"}]}
+        mock_client = AsyncMock()
+        mock_client.get.return_value = models_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.fetch_models(
+                "https://ark.cn-beijing.volces.com/api/coding/v3", "sk-x", 30, provider="ark"
+            )
+        assert result.supported is True
+        assert result.source == "live"
+        assert result.models == ["real-model"]
+
+    async def test_fetch_models_auth_error_no_catalog(self) -> None:
+        """鉴权失败（401）即使 provider 有目录也不回退——目录与鉴权无关，须报错提示。"""
+        svc, _ = await self._svc()
+        models_resp = MagicMock()
+        models_resp.status_code = 401
+        models_resp.text = "unauthorized"
+        mock_client = AsyncMock()
+        mock_client.get.return_value = models_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.fetch_models(
+                "https://ark.cn-beijing.volces.com/api/coding/v3", "sk-bad", 30, provider="ark"
+            )
+        assert result.supported is False
+        assert result.source == "live"
+        assert result.models == []
+        assert "401" in result.error
+
+    async def test_fetch_models_for_instance_ark_catalog(self) -> None:
+        """已保存实例 provider=ark 且网关 404 → 回退目录（provider 从落库行读取）。"""
+        from app.services.llm.config_service import PROVIDER_MODEL_CATALOG
+
+        svc, s = await self._svc()
+        s.execute.return_value.scalar_one_or_none.return_value = _row(
+            provider="ark", base_url="https://ark.cn-beijing.volces.com/api/coding/v3"
+        )
+        models_resp = MagicMock()
+        models_resp.status_code = 404
+        models_resp.text = "not found"
+        mock_client = AsyncMock()
+        mock_client.get.return_value = models_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.llm.config_service.httpx.AsyncClient", return_value=mock_client):
+            result = await svc.fetch_models_for_instance(1)
+        assert result.supported is True
+        assert result.source == "catalog"
+        assert result.models == PROVIDER_MODEL_CATALOG["ark"]
+
 
 class TestQuickProbe:
     """两步探测的第一步（GET /models）快速失败路径：

@@ -3301,6 +3301,7 @@ export async function fetchLlmModels(body?: {
   base_url?: string;
   api_key?: string;
   timeout?: number;
+  provider?: string;
 }): Promise<LlmModelsResult> {
   return request<LlmModelsResult>(`${API_BASE}/ai/config/models`, {
     method: "POST",

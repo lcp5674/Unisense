@@ -56,7 +56,7 @@ const PROVIDER_PRESETS: Record<string, { label: string; base_url: string; model:
   openai: { label: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
   deepseek: { label: "DeepSeek", base_url: "https://api.deepseek.com", model: "deepseek-chat" },
   qwen: {
-    label: "通义千问",
+    label: "阿里云百炼（通义千问）",
     base_url: "https://dashscope.aliyuncs.com/compatible-mode",
     model: "qwen-turbo",
   },
@@ -69,6 +69,18 @@ const PROVIDER_PRESETS: Record<string, { label: string; base_url: string; model:
     label: "kilo.ai",
     base_url: "https://api.kilo.ai/api/gateway",
     model: "poolside/laguna-m.1:free",
+  },
+  // 火山方舟 Coding Plan：OpenAI 兼容网关不提供 GET /models，「获取模型」回退内置常用模型目录
+  ark: {
+    label: "火山方舟（Coding Plan）",
+    base_url: "https://ark.cn-beijing.volces.com/api/coding/v3",
+    model: "deepseek-v3.1",
+  },
+  // 腾讯云混元（Coding Plan 订阅开放更多模型），同样无 /models 端点
+  tencent: {
+    label: "腾讯云混元",
+    base_url: "https://api.hunyuan.cloud.tencent.com/v1",
+    model: "hunyuan-turbos-latest",
   },
   custom: { label: "自定义（任意 OpenAI 兼容端点）", base_url: "", model: "" },
 };
@@ -337,6 +349,7 @@ export function SystemConfig() {
         base_url: values.base_url,
         api_key: apiKey || undefined,
         timeout: (form.getFieldValue("timeout") as number) ?? 30,
+        provider: (form.getFieldValue("provider") as string) || "custom",
       });
       if (res.supported && res.models.length > 0) {
         setModelOptions(res.models.map((m) => ({ value: m })));
@@ -348,7 +361,14 @@ export function SystemConfig() {
         setModelOpen(true);
         const preview = res.models.slice(0, 5).join("、");
         const suffix = res.models.length > 5 ? ` 等 ${res.models.length} 个` : "";
-        message.success(`获取到 ${res.models.length} 个可用模型：${preview}${suffix}`);
+        if (res.source === "catalog") {
+          // 火山方舟/腾讯云混元等兼容网关不提供 /models：展示内置常用模型目录
+          message.info(
+            res.note || "该网关不支持 /models 接口，已列出平台常用模型，可从中选择或手动输入",
+          );
+        } else {
+          message.success(`获取到 ${res.models.length} 个可用模型：${preview}${suffix}`);
+        }
       } else {
         message.warning(
           res.error || "该网关不支持 /models 接口，请手动输入模型名称",
@@ -920,7 +940,7 @@ export function SystemConfig() {
           </Form.Item>
           <div style={{ marginTop: -8, marginBottom: 12 }}>
             <span className="muted" style={{ fontSize: 12 }}>
-              点击「获取模型」从当前接口拉取可用模型列表；网关不支持 /models 时请手动输入。
+              点击「获取模型」从当前接口拉取可用模型列表；网关不支持 /models 时（如火山方舟/腾讯混元）自动列出平台常用模型，也可手动输入。
             </span>
           </div>
           <Form.Item
