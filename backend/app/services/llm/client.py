@@ -29,6 +29,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -73,7 +74,10 @@ def chat_completions_url(base_url: str) -> str:
     base_url 存在三种合法形态，若一律追加 ``/v1/chat/completions`` 会拼出
     ``/v1/v1/...`` 或 ``.../completions/v1/...`` 导致 404：
     - 裸域名/根路径：``https://api.deepseek.com`` → 追加 ``/v1/chat/completions``
-    - 已含版本前缀：``https://api.openai.com/v1`` → 追加 ``/chat/completions``
+    - 已含数字版本段：``https://api.openai.com/v1``、``.../api/plan/v3``
+      → 追加 ``/chat/completions``（火山方舟系 Agent Plan /api/plan/v3、
+      标准 /api/v3、coding /api/coding/v3 的 chat 端点均不带 /v1，
+      版本段后直接 /chat/completions）
     - 已含完整端点：``https://xxx/v1/chat/completions`` → 原样返回
 
     Args:
@@ -87,7 +91,7 @@ def chat_completions_url(base_url: str) -> str:
         return url
     if url.endswith("/chat/completions"):
         return url
-    if url.endswith("/v1"):
+    if re.search(r"/v\d+$", url):
         return f"{url}/chat/completions"
     return f"{url}/v1/chat/completions"
 
@@ -97,7 +101,7 @@ def models_url(base_url: str) -> str:
 
     与 ``chat_completions_url`` 同构，保证与用户配置的 base_url 形态一致：
     - 裸域名/根路径：``https://api.deepseek.com`` → 追加 ``/v1/models``
-    - 已含版本前缀：``https://api.openai.com/v1`` → 追加 ``/models``
+    - 已含数字版本段：``https://api.openai.com/v1``、``.../api/plan/v3`` → 追加 ``/models``
     - 已含完整 chat 端点：``https://xxx/v1/chat/completions`` → 替换为 ``/v1/models``
     - 已含完整 models 端点：``https://xxx/v1/models`` → 原样返回
 
@@ -114,7 +118,7 @@ def models_url(base_url: str) -> str:
         return url
     if url.endswith("/chat/completions"):
         return f"{url[: -len('/chat/completions')]}/models"
-    if url.endswith("/v1"):
+    if re.search(r"/v\d+$", url):
         return f"{url}/models"
     return f"{url}/v1/models"
 

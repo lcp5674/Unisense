@@ -89,6 +89,17 @@ class TestChatCompletionsUrl:
             == "https://api.example.com/v1/chat/completions"
         )
 
+    def test_numeric_version_segment_no_v1_duplicate(self) -> None:
+        # 火山方舟 Agent Plan/标准/coding：版本段 /v3 后直接 /chat/completions（不带 /v1）
+        assert (
+            chat_completions_url("https://ark.cn-beijing.volces.com/api/plan/v3")
+            == "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions"
+        )
+        assert (
+            chat_completions_url("https://ark.cn-beijing.volces.com/api/v3")
+            == "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+        )
+
     def test_trailing_slash_stripped(self) -> None:
         assert (
             chat_completions_url("https://api.deepseek.com/")
@@ -157,6 +168,17 @@ class TestModelsUrl:
     def test_models_endpoint_passthrough(self) -> None:
         assert (
             models_url("https://api.example.com/v1/models") == "https://api.example.com/v1/models"
+        )
+
+    def test_numeric_version_segment_no_v1_duplicate(self) -> None:
+        # 火山方舟 Agent Plan/标准/coding：版本段 /v3 后直接 /models（不带 /v1）
+        assert (
+            models_url("https://ark.cn-beijing.volces.com/api/plan/v3")
+            == "https://ark.cn-beijing.volces.com/api/plan/v3/models"
+        )
+        assert (
+            models_url("https://ark.cn-beijing.volces.com/api/v3")
+            == "https://ark.cn-beijing.volces.com/api/v3/models"
         )
 
     def test_trailing_slash_stripped(self) -> None:
