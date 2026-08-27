@@ -20,13 +20,14 @@ vi.mock("../api", () => ({
 }));
 
 import {
-  listDictTypes, listAllDictItems, createDictItem,
+  listDictTypes, listAllDictItems, createDictItem, updateDictItem,
   batchCreateDictItems, batchToggleDictItems, batchDeleteDictItems,
   inferDictDescription,
 } from "../api";
 const mockedTypes = vi.mocked(listDictTypes);
 const mockedItems = vi.mocked(listAllDictItems);
 const mockedCreate = vi.mocked(createDictItem);
+const mockedUpdate = vi.mocked(updateDictItem);
 const mockedBatchCreate = vi.mocked(batchCreateDictItems);
 const mockedBatchToggle = vi.mocked(batchToggleDictItems);
 const mockedBatchDelete = vi.mocked(batchDeleteDictItems);
@@ -448,5 +449,81 @@ describe("SystemDict 页面", () => {
         "由 AI 生成的描述",
       ),
     );
+  });
+
+  it("表格扩展属性列：非度量格式类型通用 key: value 展示", async () => {
+    const withExtra: SystemDictItem[] = [
+      { ...ITEMS[0], id: 9, code: "daily2", label: "日2", extra: { category: "财务", priority: 3 } },
+    ];
+    mockedTypes.mockResolvedValue(["metric_name_morpheme"]);
+    mockedItems.mockResolvedValue(withExtra);
+    renderDict();
+    await screen.findByRole("tab", { name: /指标命名词根/ });
+    expect(await screen.findByText(/category: 财务/)).toBeInTheDocument();
+    expect(screen.getByText(/priority: 3/)).toBeInTheDocument();
+  });
+
+  it("非度量格式类型：新增弹窗通用扩展属性编辑器，填写后提交携带结构化 extra（数字/布尔自动识别）", async () => {
+    mockedCreate.mockResolvedValue({} as any);
+    renderDict();
+    await screen.findByText("日");
+    fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
+    // 显示名必填，否则表单校验拦截提交
+    fireEvent.change(await screen.findByPlaceholderText("如 人民币元"), { target: { value: "示例" } });
+    // 通用编辑器渲染（属性名/属性值输入）
+    fireEvent.change(await screen.findByTestId("dict-extra-key-0"), { target: { value: "category" } });
+    fireEvent.change(screen.getByTestId("dict-extra-value-0"), { target: { value: "财务" } });
+    // 添加第二行：值「2」自动识别为数字
+    fireEvent.click(screen.getByTestId("dict-extra-add"));
+    fireEvent.change(screen.getByTestId("dict-extra-key-1"), { target: { value: "priority" } });
+    fireEvent.change(screen.getByTestId("dict-extra-value-1"), { target: { value: "2" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
+    const arg = mockedCreate.mock.calls[0][1] as { extra?: Record<string, unknown> };
+    expect(arg.extra).toEqual({ category: "财务", priority: 2 });
+  });
+
+  it("编辑弹窗：通用扩展属性编辑器回填已有 extra，修改后提交新值", async () => {
+    const withExtra: SystemDictItem[] = [
+      { ...ITEMS[0], id: 9, code: "daily2", label: "日2", extra: { category: "财务", priority: 3 } },
+    ];
+    mockedTypes.mockResolvedValue(["metric_name_morpheme"]);
+    mockedItems.mockResolvedValue(withExtra);
+    mockedUpdate.mockResolvedValue({} as any);
+    renderDict();
+    await screen.findByRole("tab", { name: /指标命名词根/ });
+    await screen.findByText("日2");
+    fireEvent.click(screen.getAllByRole("button", { name: /编\s*辑/ })[0]);
+    // 已有 extra 回填为两行
+    await waitFor(() => expect(screen.getByTestId("dict-extra-key-0")).toHaveValue("category"));
+    expect(screen.getByTestId("dict-extra-value-0")).toHaveValue("财务");
+    expect(screen.getByTestId("dict-extra-key-1")).toHaveValue("priority");
+    expect(screen.getByTestId("dict-extra-value-1")).toHaveValue("3");
+    // 修改 priority 值并提交
+    fireEvent.change(screen.getByTestId("dict-extra-value-1"), { target: { value: "5" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => expect(mockedUpdate).toHaveBeenCalled());
+    const [dt, code, payload] = mockedUpdate.mock.calls[0] as [string, string, { extra?: Record<string, unknown> }];
+    expect(dt).toBe("metric_name_morpheme");
+    expect(code).toBe("daily2");
+    expect(payload.extra).toEqual({ category: "财务", priority: 5 });
+  });
+
+  it("编辑弹窗：原始 extra 为空时通用编辑器为空行，可新增属性提交", async () => {
+    mockedTypes.mockResolvedValue(["metric_name_morpheme"]);
+    mockedItems.mockResolvedValue(ITEMS.map((i) => ({ ...i, dict_type: "metric_name_morpheme" })));
+    mockedUpdate.mockResolvedValue({} as any);
+    renderDict();
+    await screen.findByRole("tab", { name: /指标命名词根/ });
+    await screen.findByText("日");
+    fireEvent.click(screen.getAllByRole("button", { name: /编\s*辑/ })[0]);
+    // extra=null → 编辑器仅初始空行
+    await waitFor(() => expect(screen.getByTestId("dict-extra-key-0")).toHaveValue(""));
+    fireEvent.change(screen.getByTestId("dict-extra-key-0"), { target: { value: "category" } });
+    fireEvent.change(screen.getByTestId("dict-extra-value-0"), { target: { value: "经营" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => expect(mockedUpdate).toHaveBeenCalled());
+    const [, , payload] = mockedUpdate.mock.calls[0] as [string, string, { extra?: Record<string, unknown> }];
+    expect(payload.extra).toEqual({ category: "经营" });
   });
 });

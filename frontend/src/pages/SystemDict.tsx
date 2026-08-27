@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
-  Card, Tabs, Table, Button, Modal, Form, Input, InputNumber, Space, Tag, Select, Popconfirm, App as AntApp,
+  Card, Tabs, Table, Button, Modal, Form, Input, InputNumber, Space, Tag, Select, Popconfirm, Collapse, App as AntApp,
 } from "antd";
 import { PlusOutlined, EditOutlined, DeleteOutlined, StopOutlined, CheckCircleOutlined, ArrowLeftOutlined, RobotOutlined } from "@ant-design/icons";
 import {
@@ -53,6 +53,130 @@ interface BatchCreateRow {
   description: string;
 }
 
+// ---- 通用扩展属性（extra）编辑器 ----
+// 参照数据字典项的 extra 是通用 JSON 列，但此前编辑 UI 与表格列都硬编码为
+// 「度量格式（measure_format）」专用（默认单位/小数位）。这里提供对任意类型
+// 通用的 key-value 行编辑器：值支持数字/布尔/JSON 自动识别，可表达嵌套结构。
+interface ExtraRow {
+  key: string;
+  value: string;
+}
+
+function extraToRows(extra: Record<string, unknown> | null | undefined): ExtraRow[] {
+  if (!extra) return [];
+  return Object.entries(extra).map(([k, v]) => ({
+    key: k,
+    value: typeof v === "object" && v !== null ? JSON.stringify(v) : String(v),
+  }));
+}
+
+// 值类型自动识别：数字 → number、true/false → boolean、JSON 文本 → 对象/数组，其余原样字符串
+function parseExtraValue(raw: string): unknown {
+  const t = raw.trim();
+  if (t === "") return "";
+  if (/^-?\d+(\.\d+)?$/.test(t)) return Number(t);
+  if (t === "true") return true;
+  if (t === "false") return false;
+  if ((t.startsWith("{") && t.endsWith("}")) || (t.startsWith("[") && t.endsWith("]"))) {
+    try {
+      return JSON.parse(t);
+    } catch {
+      return t;
+    }
+  }
+  return t;
+}
+
+function rowsToExtra(rows: ExtraRow[]): Record<string, unknown> | null {
+  const extra: Record<string, unknown> = {};
+  for (const r of rows) {
+    const k = r.key.trim();
+    if (!k) continue;
+    extra[k] = parseExtraValue(r.value);
+  }
+  return Object.keys(extra).length > 0 ? extra : null;
+}
+
+// 通用 key-value 扩展属性编辑器。父组件以 key 重挂载驱动初始值（value 仅作初始
+// 快照），内部状态自管、编辑即 onChange 通知外部——避免受控 value 回传重建行。
+function ExtraEditor({
+  value,
+  onChange,
+}: {
+  value?: Record<string, unknown> | null;
+  onChange?: (v: Record<string, unknown> | null) => void;
+}) {
+  const [rows, setRows] = useState<ExtraRow[]>(() => {
+    const init = extraToRows(value);
+    // 无既有 extra 时也保留一个空行，便于直接填写
+    return init.length > 0 ? init : [{ key: "", value: "" }];
+  });
+  function update(next: ExtraRow[]) {
+    setRows(next);
+    onChange?.(rowsToExtra(next));
+  }
+  function addRow() {
+    update([...rows, { key: "", value: "" }]);
+  }
+  function patchRow(i: number, patch: Partial<ExtraRow>) {
+    update(rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  }
+  function removeRow(i: number) {
+    update(rows.filter((_, idx) => idx !== i));
+  }
+  const hasContent = rows.some((r) => r.key.trim() !== "");
+  const preview = hasContent ? rowsToExtra(rows) : null;
+  return (
+    <div>
+      {rows.map((r, i) => (
+        <Space key={i} style={{ display: "flex", marginBottom: 8 }} align="baseline">
+          <Input
+            placeholder="属性名，如 category"
+            value={r.key}
+            onChange={(e) => patchRow(i, { key: e.target.value })}
+            style={{ width: 200 }}
+            data-testid={`dict-extra-key-${i}`}
+          />
+          <Input
+            placeholder="属性值（数字/布尔/JSON 自动识别）"
+            value={r.value}
+            onChange={(e) => patchRow(i, { value: e.target.value })}
+            style={{ width: 300 }}
+            data-testid={`dict-extra-value-${i}`}
+          />
+          <Button
+            type="text"
+            danger
+            icon={<DeleteOutlined />}
+            onClick={() => removeRow(i)}
+            disabled={rows.length === 1}
+            data-testid={`dict-extra-del-${i}`}
+          />
+        </Space>
+      ))}
+      <Button size="small" type="dashed" icon={<PlusOutlined />} onClick={addRow} data-testid="dict-extra-add">
+        添加属性
+      </Button>
+      {preview && (
+        <Collapse
+          ghost
+          size="small"
+          style={{ marginTop: 8 }}
+          items={[{
+            key: "json",
+            label: "原始 JSON",
+            children: (
+              <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                {JSON.stringify(preview, null, 2)}
+              </pre>
+            ),
+          }]}
+        />
+      )}
+    </div>
+  );
+}
+
 export function SystemDict() {
   const { message, modal } = AntApp.useApp();
   const { can } = usePermission();
@@ -75,6 +199,9 @@ export function SystemDict() {
   const [createOpen, setCreateOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [editItem, setEditItem] = useState<SystemDictItem | null>(null);
+  // 通用扩展属性草稿：非 measure_format 类型在新增/编辑弹窗用 ExtraEditor 编辑的 extra
+  const [createExtra, setCreateExtra] = useState<Record<string, unknown> | null>(null);
+  const [editExtra, setEditExtra] = useState<Record<string, unknown> | null>(null);
   const [createForm] = Form.useForm();
   const [editForm] = Form.useForm();
   // 批量操作（按当前 tab 的 dict_type 作用域）：行选 + 批量新增/启停/删除
@@ -145,6 +272,8 @@ export function SystemDict() {
 
   function openCreate() {
     setCreateOpen(true);
+    // 新建默认无扩展属性（度量格式专用字段由表单自带）
+    setCreateExtra(null);
     // 打开弹窗时基于最新项列表重算编码预览，缩小「他端新增同名编码但本页未
     // 刷新」导致的预览滞后窗口（提交仍以后端权威判定为准）。
     refreshItemsQuietly();
@@ -217,10 +346,12 @@ export function SystemDict() {
     try {
       // code 不传由后端按显示名自动生成英文编码（冲突自动追加序号）；
       // 仅「无法自动生成」时手动指定 code 才随表单透传。
+      // extra：度量格式走专用单位/小数位控件组装；其他类型走通用 ExtraEditor 草稿
+      const extra = activeType === "measure_format" ? composeExtra(values) : createExtra;
       await createDictItem(activeType, {
         ...values,
         sort_order: values.sort_order ?? 0,
-        extra: composeExtra(values),
+        extra,
       });
       message.success("新增成功");
       setCreateOpen(false);
@@ -234,9 +365,10 @@ export function SystemDict() {
   async function handleEdit(values: { label?: string; sort_order?: number; description?: string; extra_unit?: string; extra_decimal?: number | null }) {
     if (!editItem) return;
     try {
+      const extra = activeType === "measure_format" ? composeExtra(values) : editExtra;
       await updateDictItem(activeType, editItem.code, {
         ...values,
-        extra: composeExtra(values),
+        extra,
       });
       message.success("更新成功");
       setEditOpen(false);
@@ -380,18 +512,31 @@ export function SystemDict() {
     {
       title: "扩展属性",
       key: "extra",
-      width: 160,
+      width: 200,
       render: (_: unknown, record: SystemDictItem) => {
-        const extra = record.extra as { unit?: unknown; decimal?: unknown } | null;
-        if (!extra) return <span className="muted">—</span>;
-        const unit = extra.unit != null && String(extra.unit) ? String(extra.unit) : null;
-        const decimal = extra.decimal != null ? Number(extra.decimal) : null;
+        const extra = record.extra as Record<string, unknown> | null;
+        if (!extra || Object.keys(extra).length === 0) return <span className="muted">—</span>;
+        // 度量格式：保留单位/小数位语义展示（联动消费方按 unit/decimal 读取）
+        if (activeType === "measure_format") {
+          const unit = extra.unit != null && String(extra.unit) ? String(extra.unit) : null;
+          const decimal = extra.decimal != null ? Number(extra.decimal) : null;
+          return (
+            <span>
+              {unit ? `单位:${unit}` : ""}
+              {unit && decimal != null ? "，" : ""}
+              {decimal != null ? `${decimal}位` : unit ? "" : "—"}
+            </span>
+          );
+        }
+        // 其他类型：通用 key: value 标签展示（对象/数组值 JSON 序列化）
         return (
-          <span>
-            {unit ? `单位:${unit}` : ""}
-            {unit && decimal != null ? "，" : ""}
-            {decimal != null ? `${decimal}位` : unit ? "" : "—"}
-          </span>
+          <Space size={4} wrap>
+            {Object.entries(extra).map(([k, v]) => (
+              <Tag key={k}>
+                {k}: {typeof v === "object" && v !== null ? JSON.stringify(v) : String(v)}
+              </Tag>
+            ))}
+          </Space>
         );
       },
     },
@@ -399,7 +544,7 @@ export function SystemDict() {
       title: "操作", key: "action", width: 200,
       render: (_: unknown, record: SystemDictItem) => (
         <Space size="small">
-          {can("dict:create") && <Button size="small" icon={<EditOutlined />} onClick={() => { setEditItem(record); const ex = (record.extra ?? {}) as { unit?: unknown; decimal?: unknown }; editForm.setFieldsValue({ label: record.label, sort_order: record.sort_order, description: record.description, extra_unit: ex.unit != null ? String(ex.unit) : undefined, extra_decimal: ex.decimal != null ? Number(ex.decimal) : undefined }); setEditOpen(true); }}>编辑</Button>}
+          {can("dict:create") && <Button size="small" icon={<EditOutlined />} onClick={() => { setEditItem(record); setEditExtra((record.extra ?? null) as Record<string, unknown> | null); const ex = (record.extra ?? {}) as { unit?: unknown; decimal?: unknown }; editForm.setFieldsValue({ label: record.label, sort_order: record.sort_order, description: record.description, extra_unit: ex.unit != null ? String(ex.unit) : undefined, extra_decimal: ex.decimal != null ? Number(ex.decimal) : undefined }); setEditOpen(true); }}>编辑</Button>}
           {can("dict:create") && (
             <Button size="small" icon={record.status === "active" ? <StopOutlined /> : <CheckCircleOutlined />} onClick={() => handleToggle(record)}>
               {record.status === "active" ? "停用" : "启用"}
@@ -522,7 +667,7 @@ export function SystemDict() {
           <Form.Item name="sort_order" label="排序" initialValue={0}>
             <InputNumber min={0} />
           </Form.Item>
-          {activeType === "measure_format" && (
+          {activeType === "measure_format" ? (
             <Space size={16} style={{ display: "flex" }}>
               <Form.Item
                 name="extra_unit"
@@ -545,6 +690,13 @@ export function SystemDict() {
                 />
               </Form.Item>
             </Space>
+          ) : (
+            <Form.Item
+              label="扩展属性"
+              extra="按需为字典项补充扩展属性（如 category: 度量词根）；值支持数字/布尔/JSON 自动识别"
+            >
+              <ExtraEditor value={createExtra} onChange={setCreateExtra} key={createOpen ? "create" : "closed"} />
+            </Form.Item>
           )}
           {/* 描述框必须由 Form.Item 直接包裹（不可经 Space.Compact 中转，
               否则 value/onChange 注入被布局容器吞掉——AI 生成回填与手动输入均不生效） */}
@@ -578,7 +730,7 @@ export function SystemDict() {
           <Form.Item name="sort_order" label="排序">
             <InputNumber min={0} />
           </Form.Item>
-          {activeType === "measure_format" && (
+          {activeType === "measure_format" ? (
             <Space size={16} style={{ display: "flex" }}>
               <Form.Item
                 name="extra_unit"
@@ -601,6 +753,13 @@ export function SystemDict() {
                 />
               </Form.Item>
             </Space>
+          ) : (
+            <Form.Item
+              label="扩展属性"
+              extra="按需为字典项补充扩展属性（如 category: 度量词根）；值支持数字/布尔/JSON 自动识别"
+            >
+              <ExtraEditor value={editExtra} onChange={setEditExtra} key={editItem?.code ?? "edit"} />
+            </Form.Item>
           )}
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 24 }}>
             <Form.Item
