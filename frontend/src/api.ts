@@ -781,6 +781,14 @@ export async function restoreMetric(code: string): Promise<MetricResponse> {
   );
 }
 
+// 彻底删除已软删指标（回收站硬删，物理删除不可恢复；仅平台管理员）
+export async function purgeMetric(code: string): Promise<{ metric_code: string }> {
+  return request<{ metric_code: string }>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/purge`,
+    { method: "POST" },
+  );
+}
+
 export async function listVersions(code: string): Promise<MetricVersionResponse[]> {
   return request<MetricVersionResponse[]>(
     `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/versions`,

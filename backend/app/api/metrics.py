@@ -1611,6 +1611,37 @@ async def restore_metric(
 
 
 @router.post(
+    "/{metric_code}/purge",
+    response_model=ApiResponse[dict],
+    summary="彻底删除已软删指标（回收站硬删，仅平台管理员）",
+    # 彻底删除是不可恢复的危险操作：仅平台管理员（对齐 measure_catalog purge 先例）
+    dependencies=[Depends(require_roles("platform_admin")), Depends(guard_against_injection)],
+)
+async def purge_metric(
+    metric_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[dict]:
+    """回收站彻底删除软删指标（物理删除不可恢复）；仅平台管理员。"""
+    await MetricService(db).purge_metric(metric_code, actor_id=user.id, role=user.role)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="metric_definition.purge",
+        entity_type="metric_definition",
+        entity_id=metric_code,
+        detail={"actor_role": user.role},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    # PLAT-3: 业务写入 + 审计同事务原子提交
+    await db.commit()
+    return ok(data={"metric_code": metric_code}, trace_id=trace_id)
+
+
+@router.post(
     "/{metric_code}/promote",
     response_model=ApiResponse[MetricResponse],
     summary="灰度全量发布（FR-020，EXPERIMENTAL → PUBLISHED）",

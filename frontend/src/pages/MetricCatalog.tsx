@@ -33,6 +33,7 @@ import {
   removeFavorite,
   deleteMetric,
   restoreMetric,
+  purgeMetric,
   batchApproveMetrics,
   batchRejectMetrics,
   batchDeprecateMetrics,
@@ -799,6 +800,27 @@ export function MetricCatalog() {
     }
   }
 
+  // 回收站彻底删除已删指标（物理删除不可恢复；仅平台管理员）
+  async function handlePurge(metricCode: string) {
+    setRestoring(metricCode);
+    try {
+      await purgeMetric(metricCode);
+      message.success(`已彻底删除指标 ${metricCode}`);
+      if (items.length <= 1) setDeletedView(false);
+      else setPage(1);
+      load();
+    } catch (err) {
+      const e = err as { message?: string; codeZh?: string };
+      const text =
+        e && typeof e === "object" && typeof e.codeZh === "string" && typeof e.message === "string"
+          ? `${e.message}（${e.codeZh}）`
+          : "彻底删除失败";
+      message.error(text);
+    } finally {
+      setRestoring(null);
+    }
+  }
+
   // 单条删除草稿指标（软删除，仅平台/域管理员或原 Owner；对齐批量删除语义）
   const [deleting, setDeleting] = useState<string | null>(null);
   async function handleSingleDelete(metricCode: string) {
@@ -1238,20 +1260,41 @@ export function MetricCatalog() {
           {
             title: "操作",
             key: "restore",
-            width: 90,
+            width: 150,
             align: "center" as const,
             render: (_: unknown, r: MetricResponse) => (
-              <Button
-                type="link"
-                size="small"
-                disabled={restoring === r.metric_code || !can("metric:create")}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleRestore(r.metric_code);
-                }}
-              >
-                恢复
-              </Button>
+              <Space size={4}>
+                <Button
+                  type="link"
+                  size="small"
+                  disabled={restoring === r.metric_code || !can("metric:create")}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleRestore(r.metric_code);
+                  }}
+                >
+                  恢复
+                </Button>
+                {currentUserRole === "platform_admin" && (
+                  <span onClick={(e) => e.stopPropagation()}>
+                    <Popconfirm
+                      title="确认彻底删除该指标？"
+                      description="物理删除不可恢复，关联版本/维度/健康度/血缘将一并清除"
+                      okButtonProps={{ danger: true }}
+                      onConfirm={() => handlePurge(r.metric_code)}
+                    >
+                      <Button
+                        type="link"
+                        size="small"
+                        danger
+                        disabled={restoring === r.metric_code}
+                      >
+                        彻底删除
+                      </Button>
+                    </Popconfirm>
+                  </span>
+                )}
+              </Space>
             ),
           },
         ]

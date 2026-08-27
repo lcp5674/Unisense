@@ -90,6 +90,17 @@ async def test_restore_metric(metrics_client: httpx.AsyncClient) -> None:
     mock_svc.return_value.restore_metric.assert_awaited_once()
 
 
+async def test_purge_metric(metrics_client: httpx.AsyncClient) -> None:
+    """彻底删除归档指标（仅平台管理员）→ 200 + 审计落库。"""
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        mock_svc.return_value.purge_metric = AsyncMock()
+        resp = await metrics_client.post("/api/v1/metric-definitions/sales_gmv_d/purge")
+    assert resp.status_code == 200
+    mock_svc.return_value.purge_metric.assert_awaited_once_with(
+        "sales_gmv_d", actor_id=1, role="platform_admin"
+    )
+
+
 async def test_promote_metric(metrics_client: httpx.AsyncClient) -> None:
     """灰度全量发布 → 200。"""
     with patch("app.api.metrics.MetricService") as mock_svc:

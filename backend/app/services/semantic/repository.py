@@ -8,17 +8,20 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import ColumnElement, func, or_, select, update
+from sqlalchemy import ColumnElement, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.exceptions import SystemError as AppSystemError
 from app.models.conflict import Conflict
+from app.models.consume import MetricValueSnapshot
 from app.models.data_source import DataSource, DBCatalog
-from app.models.dimension import Dimension
+from app.models.dimension import Dimension, MetricDimension
+from app.models.lineage import LineageEdge
 from app.models.metric import Metric
 from app.models.metric_health import MetricHealthScore
+from app.models.metric_mount import MetricMount
 from app.models.metric_template import MetricTemplate
 from app.models.metric_version import MetricVersion, PendingVersionConfirmation
 from app.models.quality import QualityEvent
@@ -374,6 +377,37 @@ class MetricRepository:
         result = await self._db.execute(stmt)
         if result.rowcount == 0:  # type: ignore[attr-defined]  # CursorResult.rowcount；SQLA 静态类型缺失，运行时存在
             raise NotFoundError(f"指标不存在或未处于已删除状态: {metric_id}")
+
+    async def purge_metric(self, metric_id: int, metric_code: str) -> None:
+        """彻底删除已软删指标（回收站硬删，物理删除不可恢复）。
+
+        级联清理全部关联数据（版本/待确认/维度/健康度/值快照/挂载/血缘边）后
+        删除主行，单事务保证原子性。调用方（service）已校验 deleted_at 置位
+        与平台管理员权限，本方法仅执行物理删除。
+        """
+        node = f"metric:{metric_code}"
+        await self._db.execute(
+            delete(LineageEdge).where(
+                or_(LineageEdge.source_node == node, LineageEdge.target_node == node)
+            )
+        )
+        await self._db.execute(
+            delete(MetricValueSnapshot).where(MetricValueSnapshot.metric_code == metric_code)
+        )
+        await self._db.execute(delete(MetricVersion).where(MetricVersion.metric_id == metric_id))
+        await self._db.execute(
+            delete(PendingVersionConfirmation).where(
+                PendingVersionConfirmation.metric_id == metric_id
+            )
+        )
+        await self._db.execute(
+            delete(MetricDimension).where(MetricDimension.metric_id == metric_id)
+        )
+        await self._db.execute(
+            delete(MetricHealthScore).where(MetricHealthScore.metric_id == metric_id)
+        )
+        await self._db.execute(delete(MetricMount).where(MetricMount.metric_id == metric_id))
+        await self._db.execute(delete(Metric).where(Metric.id == metric_id))
 
     # ---- 版本相关 ----
 

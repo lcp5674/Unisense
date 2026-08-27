@@ -3762,6 +3762,44 @@ class MetricService(BaseService):
         logger.info("metric_restored", metric_code=metric_code, actor_id=actor_id, role=role)
         return metric
 
+    async def purge_metric(
+        self, metric_code: str, actor_id: int, role: str | None = None
+    ) -> None:
+        """彻底删除已软删指标（回收站硬删，物理删除不可恢复；仅平台管理员）。
+
+        回收站完整闭环：恢复（DRAFT）或彻底删除（仅平台管理员）。已软删记录
+        不参与正常列表与写操作（``get_metric`` 已拒绝 deleted_at 置位者），故本
+        方法直取归档记录、仅允许 deleted_at 置位者硬删；关联数据（版本/维度/
+        健康度/值快照/挂载/血缘边）级联物理删除，单事务原子。
+
+        Args:
+            metric_code: 指标编码。
+            actor_id: 操作人 ID。
+            role: 操作人角色（仅平台管理员）。
+
+        Raises:
+            NotFoundError: 指标不存在。
+            BusinessError: 指标未处于已删除状态 / 非平台管理员。
+        """
+        metric = await self._repo.get_archived_by_code(metric_code)
+        if metric is None:
+            raise NotFoundError(f"指标不存在: {metric_code}")
+        if metric.deleted_at is None:
+            raise BusinessError(
+                f"指标 {metric_code} 未处于已删除状态，无需彻底删除",
+                error_code="INVALID_STATE",
+            )
+        if role != "platform_admin":
+            raise BusinessError(
+                "仅平台管理员可彻底删除指标",
+                error_code="FORBIDDEN",
+            )
+        await self._repo.purge_metric(metric.id, metric_code)
+        await self._cache.invalidate(metric_code)
+        logger.info(
+            "metric_purged", metric_code=metric_code, actor_id=actor_id, role=role
+        )
+
     async def review_compliance(self, metric_code: str, actor_id: int, role: str) -> Metric:
         """PII 合规复核（置 compliance_reviewed=True，打通 PII 指标发布闸门）。
 

@@ -3646,6 +3646,36 @@ async def test_restore_metric_success_and_guards():
         await svc.restore_metric("sales_gmv_daily", actor_id=1, role="platform_admin")
 
 
+async def test_purge_metric_guards():
+    # 平台管理员彻底删除已删指标 → 成功（级联清理 + 缓存失效）
+    svc, repo = _svc_with_repo()
+    repo.get_archived_by_code = AsyncMock(
+        return_value=make_metric(status="PUBLISHED", owner_id=1, deleted_at="2026-08-01T00:00:00")
+    )
+    repo.purge_metric = AsyncMock()
+    await svc.purge_metric("sales_gmv_daily", actor_id=1, role="platform_admin")
+    repo.purge_metric.assert_awaited_once_with(1, "sales_gmv_daily")
+
+    # 未删状态 → 拒绝
+    repo.get_archived_by_code = AsyncMock(return_value=make_metric(status="DRAFT", owner_id=1))
+    with pytest.raises(BusinessError) as e:
+        await svc.purge_metric("sales_gmv_daily", actor_id=1, role="platform_admin")
+    assert "未处于已删除状态" in str(e.value)
+
+    # 非平台管理员 → 拒绝
+    repo.get_archived_by_code = AsyncMock(
+        return_value=make_metric(status="DRAFT", owner_id=2, deleted_at="2026-08-01T00:00:00")
+    )
+    with pytest.raises(BusinessError) as e:
+        await svc.purge_metric("sales_gmv_daily", actor_id=2, role="metric_owner")
+    assert "仅平台管理员" in str(e.value)
+
+    # 不存在 → NotFound
+    repo.get_archived_by_code = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError):
+        await svc.purge_metric("sales_gmv_daily", actor_id=1, role="platform_admin")
+
+
 async def test_get_versions():
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=make_metric())

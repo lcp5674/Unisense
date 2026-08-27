@@ -19,6 +19,7 @@ vi.mock("../api", () => ({
   checkMetricDownstream: vi.fn(),
   deleteMetric: vi.fn(),
   restoreMetric: vi.fn(),
+  purgeMetric: vi.fn(),
   fetchMyPermissions: vi.fn(),
   compareMetricsMatrix: vi.fn(),
 }));
@@ -42,6 +43,7 @@ import {
   checkMetricDownstream,
   deleteMetric,
   restoreMetric,
+  purgeMetric,
   fetchMyPermissions,
   compareMetricsMatrix,
 } from "../api";
@@ -1183,6 +1185,7 @@ describe("MetricCatalog 回收站（已删除草稿恢复）", () => {
     mockedCurrentUser.mockResolvedValue({ id: 1, role: "platform_admin" } as any);
     mockedFavorites.mockResolvedValue([]);
     mockedUsers.mockResolvedValue([]);
+    mockedMeasures.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 50 });
     (fetchMyPermissions as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       user_id: 1, role: "platform_admin", home_domain: "", allowed_actions: [], ui_actions: ["metric:create", "metric:deprecate", "metric:edit", "metric:export"],
       granted_domains: [], metric_whitelist: [], row_level_restricted: false, grants: [], expiring_soon: [],
@@ -1222,6 +1225,24 @@ describe("MetricCatalog 回收站（已删除草稿恢复）", () => {
     fireEvent.click(await screen.findByRole("button", { name: /回收站/ }));
     fireEvent.click(await screen.findByRole("button", { name: /恢复/ }));
     await waitFor(() => expect(restoreMock).toHaveBeenCalledWith(metric.metric_code));
+  });
+
+  it("彻底删除需二次确认后调用 purgeMetric（仅平台管理员可见）", async () => {
+    const purgeMock = vi.mocked(purgeMetric).mockResolvedValue({ metric_code: metric.metric_code } as any);
+    mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
+    const user = { id: 1, username: "admin", display_name: "管理员", role: "platform_admin", domain: null, org_id: 1 };
+    render(
+      <MemoryRouter initialEntries={["/catalog"]}>
+        <Routes>
+          <Route path="/catalog" element={<PermissionProvider user={user}><MetricCatalog /></PermissionProvider>} />
+          <Route path="/detail/:code" element={<div>detail</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /回收站/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /彻底删除/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /OK/ }));
+    await waitFor(() => expect(purgeMock).toHaveBeenCalledWith(metric.metric_code));
   });
 
   it("回收站视图导出按钮禁用（含已软删指标，避免误用为正式数据）", async () => {
