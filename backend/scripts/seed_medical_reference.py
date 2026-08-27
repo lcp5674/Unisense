@@ -1,18 +1,19 @@
 """初始化 seed 脚本：清除 E2E/测试参照数据，灌入微医业务参照数据。
 
-以微医实际业务七大主线组织参照数据：医疗（诊疗）、医药（药品）、医保、
-挂号、健康管理、健共体（数字健共体·区域医疗协作）、医生管理（供给侧核心
-资产）。覆盖三类主数据（对齐 TD §12.14/§12.15 / FR-05 / FR-08 / FR-012）：
+以微医实际业务全版图组织参照数据，覆盖十四大业务主线：医疗（诊疗）、医药
+（药品）、医保、挂号、健康管理、健共体（数字健共体·区域医疗协作）、医生
+管理（供给侧核心资产）、保险（商保直付/经纪）、会员权益、医疗AI与数据、
+临床科研、医药供应链、康复护理养老、专科运营、患者服务运营。覆盖三类主数据
+（对齐 TD §12.14/§12.15 / FR-05 / FR-08 / FR-012）：
 - 主题域（subject_domain）：保留既有 7 医疗域 + uncategorized 及微医线上业务
-  一级域（在线问诊/互联网医院/预约挂号/健康管理），新增「健共体」「医生管理」
-  一级域及子域，并为各业务主线补全缺失二级子域（处方流转/支付方式改革/
-  企业健康/家庭病床）。
-- 术语（term）：清除 8 条 E2E/测试术语及关联（term_version/term_relation/
-  glossary_conflict），灌入七大业务主线核心术语（含健共体协作与医生层面术语）。
-- 维度（dimension）：清除 8 条 E2E/测试维度及引用（dimension_member/
-  metric_dimension/reconciliation/dimension_mapping），灌入七大业务主线
-  维度+成员（含健共体转诊/医联体/签约、医生职称/医疗机构等维度）。维度已
-  存在但成员集合与脚本不一致时自动刷新（删旧重灌），保证参照数据与脚本同步。
+  一级域，补齐健共体/医生管理/保险/会员/AI/科研/供应链/养老/专科/患者服务
+  一级域及子域，覆盖企业全部业务线。
+- 术语（term）：清除 E2E/测试术语及关联（term_version/term_relation/
+  glossary_conflict），灌入全业务线核心术语。
+- 维度（dimension）：清除 E2E/测试维度及引用（dimension_member/
+  metric_dimension/reconciliation/dimension_mapping），灌入全业务线
+  维度+成员。维度已存在但成员集合与脚本不一致时自动刷新（删旧重灌），保证
+  参照数据与脚本同步。
 
 用法:
     poetry run python -m scripts.seed_medical_reference
@@ -153,11 +154,64 @@ DOMAIN_SEEDS: list[dict[str, Any]] = [
     {"code": "health_education", "name": "健康教育", "parent": "health_management", "sort_order": 4},
     {"code": "vaccination", "name": "疫苗接种", "parent": "health_management", "sort_order": 5},
     {"code": "corporate_health", "name": "企业健康", "parent": "health_management", "sort_order": 6},
+    # ---- 保险（商保直付/理赔/经纪，一级域）----
+    {"code": "insurance", "name": "保险", "parent": None, "sort_order": 14},
+    {"code": "insurance_policy", "name": "保单", "parent": "insurance", "sort_order": 1},
+    {"code": "insurance_underwriting", "name": "核保", "parent": "insurance", "sort_order": 2},
+    {"code": "insurance_claim", "name": "理赔", "parent": "insurance", "sort_order": 3},
+    {"code": "insurance_direct_settle", "name": "商保直付", "parent": "insurance", "sort_order": 4},
+    {"code": "insurance_broker", "name": "保险经纪", "parent": "insurance", "sort_order": 5},
+    # ---- 会员权益（家庭会员/健康权益/微医通，一级域）----
+    {"code": "membership", "name": "会员权益", "parent": None, "sort_order": 15},
+    {"code": "family_member", "name": "家庭会员", "parent": "membership", "sort_order": 1},
+    {"code": "health_rights", "name": "健康权益", "parent": "membership", "sort_order": 2},
+    {"code": "member_benefit", "name": "会员权益", "parent": "membership", "sort_order": 3},
+    {"code": "member_channel", "name": "会员渠道", "parent": "membership", "sort_order": 4},
+    # ---- 医疗AI与数据（智能导诊/AI辅诊/医疗大模型/大数据，一级域）----
+    {"code": "health_ai", "name": "医疗AI与数据", "parent": None, "sort_order": 16},
+    {"code": "ai_triage", "name": "智能导诊", "parent": "health_ai", "sort_order": 1},
+    {"code": "ai_diagnosis_assist", "name": "AI辅诊", "parent": "health_ai", "sort_order": 2},
+    {"code": "medical_llm", "name": "医疗大模型", "parent": "health_ai", "sort_order": 3},
+    {"code": "health_bigdata", "name": "健康大数据", "parent": "health_ai", "sort_order": 4},
+    {"code": "ai_report", "name": "智能报告", "parent": "health_ai", "sort_order": 5},
+    # ---- 临床科研（真实世界研究/临床试验/科研协作，一级域）----
+    {"code": "clinical_research", "name": "临床科研", "parent": None, "sort_order": 17},
+    {"code": "rws", "name": "真实世界研究", "parent": "clinical_research", "sort_order": 1},
+    {"code": "clinical_trial", "name": "临床试验", "parent": "clinical_research", "sort_order": 2},
+    {"code": "research_collab", "name": "科研协作", "parent": "clinical_research", "sort_order": 3},
+    {"code": "research_data", "name": "科研数据", "parent": "clinical_research", "sort_order": 4},
+    # ---- 医药供应链（药械集采/SPD/器械耗材/DTP，一级域）----
+    {"code": "supply_chain", "name": "医药供应链", "parent": None, "sort_order": 18},
+    {"code": "procurement_center", "name": "药械集采", "parent": "supply_chain", "sort_order": 1},
+    {"code": "spd_logistics", "name": "SPD院内物流", "parent": "supply_chain", "sort_order": 2},
+    {"code": "device_consumable", "name": "器械耗材", "parent": "supply_chain", "sort_order": 3},
+    {"code": "dtp_pharmacy", "name": "DTP药房", "parent": "supply_chain", "sort_order": 4},
+    # ---- 康复护理养老（居家护理/康复/长护险/养老，一级域）----
+    {"code": "care_elderly", "name": "康复护理养老", "parent": None, "sort_order": 19},
+    {"code": "home_care", "name": "居家护理", "parent": "care_elderly", "sort_order": 1},
+    {"code": "rehab", "name": "康复", "parent": "care_elderly", "sort_order": 2},
+    {"code": "long_term_care_ins", "name": "长期护理保险", "parent": "care_elderly", "sort_order": 3},
+    {"code": "elderly_service", "name": "养老服务", "parent": "care_elderly", "sort_order": 4},
+    # ---- 专科运营（肿瘤/妇儿/心理/口腔/中医等跨域专科专病，一级域）----
+    {"code": "specialty_center", "name": "专科运营", "parent": None, "sort_order": 20},
+    {"code": "oncology_center", "name": "肿瘤中心", "parent": "specialty_center", "sort_order": 1},
+    {"code": "women_children_center", "name": "妇儿中心", "parent": "specialty_center", "sort_order": 2},
+    {"code": "mental_health_center", "name": "心理精神", "parent": "specialty_center", "sort_order": 3},
+    {"code": "stomatology_center", "name": "口腔中心", "parent": "specialty_center", "sort_order": 4},
+    {"code": "tcm_center", "name": "中医中心", "parent": "specialty_center", "sort_order": 5},
+    {"code": "chronic_specialty", "name": "慢病专病", "parent": "specialty_center", "sort_order": 6},
+    # ---- 患者服务运营（教育/随访/满意度/投诉，一级域）----
+    {"code": "patient_service", "name": "患者服务运营", "parent": None, "sort_order": 21},
+    {"code": "patient_education", "name": "患者教育", "parent": "patient_service", "sort_order": 1},
+    {"code": "followup_service", "name": "随访服务", "parent": "patient_service", "sort_order": 2},
+    {"code": "satisfaction", "name": "满意度", "parent": "patient_service", "sort_order": 3},
+    {"code": "complaint_service", "name": "投诉服务", "parent": "patient_service", "sort_order": 4},
+    {"code": "patient_care", "name": "患者关怀", "parent": "patient_service", "sort_order": 5},
 ]
 
 
 # ---------------------------------------------------------------------------
-# 术语（七大业务主线核心术语，61 条，全 PUBLISHED 直灌）
+# 术语（全业务线核心术语，95 条，全 PUBLISHED 直灌）
 # ---------------------------------------------------------------------------
 TERM_SEEDS: list[dict[str, Any]] = [
     # 在线问诊
@@ -231,11 +285,56 @@ TERM_SEEDS: list[dict[str, Any]] = [
     {"term_code": "no_show", "name": "爽约", "definition": "患者预约成功但未按约到院就诊且未取消。", "domain": "appointment", "synonyms": ["失约"], "boundary": None},
     {"term_code": "corporate_health", "name": "企业健康管理", "definition": "面向企业员工提供的体检、健康档案与健康干预一体化服务。", "domain": "health_management", "synonyms": ["员工健康"], "boundary": None},
     {"term_code": "family_bed", "name": "家庭病床", "definition": "在患者家中设立病床，由基层医生定期上门巡诊的服务形式。", "domain": "health_community", "synonyms": ["家庭病床服务"], "boundary": None},
+    # 保险（商保直付/经纪/理赔/惠民保）
+    {"term_code": "insurance_broker", "name": "保险经纪", "definition": "为投保人与保险公司提供保险产品咨询、投保与理赔协助的居间服务。", "domain": "insurance", "synonyms": ["保险中介"], "boundary": None},
+    {"term_code": "insurance_policy", "name": "保单", "definition": "投保人与保险人订立保险合同的书面凭证，载明保险责任与保额。", "domain": "insurance", "synonyms": ["保险合同"], "boundary": None},
+    {"term_code": "insurance_underwriting", "name": "核保", "definition": "保险公司对投保申请进行风险评估并决定是否承保及承保条件的环节。", "domain": "insurance", "synonyms": ["承保审核"], "boundary": None},
+    {"term_code": "huimin_insurance", "name": "惠民保", "definition": "地方政府指导、商业保险公司承办的普惠型补充医疗保险。", "domain": "insurance", "synonyms": ["城市定制型商业医疗险"], "boundary": None},
+    {"term_code": "deductible", "name": "免赔额", "definition": "保险合同中约定的由被保险人自行承担、保险人不予赔付的金额。", "domain": "insurance", "synonyms": ["起付线"], "boundary": None},
+    # 会员权益（家庭会员/健康权益/会员等级/微医通）
+    {"term_code": "family_member", "name": "家庭会员", "definition": "以家庭为单位的会员产品，成员共享健康权益与家庭医生服务。", "domain": "membership", "synonyms": ["家庭健康会员"], "boundary": None},
+    {"term_code": "health_rights", "name": "健康权益", "definition": "会员可享有的体检、问诊、药品、健康管理等权益组合。", "domain": "membership", "synonyms": ["权益包"], "boundary": None},
+    {"term_code": "member_level", "name": "会员等级", "definition": "按消费与活跃度划分的会员成长等级（银卡/金卡/铂金等）。", "domain": "membership", "synonyms": ["会员成长值"], "boundary": None},
+    {"term_code": "weiyitong", "name": "微医通", "definition": "微医面向家庭推出的智能健康终端，集成在线问诊、慢病管理等服务。", "domain": "membership", "synonyms": ["健康终端"], "boundary": None},
+    # 医疗AI与数据（智能导诊/AI辅诊/医疗大模型/大数据）
+    {"term_code": "ai_triage", "name": "智能导诊", "definition": "基于症状与病史由AI为患者推荐就诊科室与医生的导诊服务。", "domain": "health_ai", "synonyms": ["AI导诊"], "boundary": None},
+    {"term_code": "ai_diagnosis_assist", "name": "AI辅助诊断", "definition": "AI基于医学影像/病历/检验数据为医生提供诊断建议的辅助工具。", "domain": "health_ai", "synonyms": ["AI辅诊"], "boundary": None},
+    {"term_code": "medical_llm", "name": "医疗大模型", "definition": "面向医疗场景训练的行业大语言模型，支持病历生成、问答与决策支持。", "domain": "health_ai", "synonyms": ["医疗AI大模型"], "boundary": None},
+    {"term_code": "health_bigdata", "name": "健康大数据", "definition": "汇聚诊疗、体检、用药、可穿戴等多源健康数据的分析资产。", "domain": "health_ai", "synonyms": ["医疗大数据"], "boundary": None},
+    {"term_code": "ai_report", "name": "智能报告", "definition": "AI自动生成的影像/检验/体检报告，辅助医生审阅与质控。", "domain": "health_ai", "synonyms": ["AI报告"], "boundary": None},
+    # 临床科研（真实世界研究/临床试验/科研协作）
+    {"term_code": "rws", "name": "真实世界研究", "definition": "在真实诊疗环境中利用常规诊疗数据开展的临床研究。", "domain": "clinical_research", "synonyms": ["RWS", "真实世界证据"], "boundary": None},
+    {"term_code": "clinical_trial", "name": "临床试验", "definition": "在人体中验证药物/器械安全性有效性的系统性研究。", "domain": "clinical_research", "synonyms": ["GCP试验"], "boundary": None},
+    {"term_code": "research_collab", "name": "科研协作", "definition": "医院、药企、科研机构间围绕科研课题的协同合作。", "domain": "clinical_research", "synonyms": ["科研合作"], "boundary": None},
+    {"term_code": "informed_consent", "name": "知情同意", "definition": "受试者在充分了解研究内容与风险后自愿签署同意参加研究。", "domain": "clinical_research", "synonyms": ["知情同意书"], "boundary": None},
+    {"term_code": "research_data", "name": "科研数据", "definition": "用于临床科研的脱敏诊疗数据与随访数据集合。", "domain": "clinical_research", "synonyms": ["科研数据集"], "boundary": None},
+    # 医药供应链（药械集采/SPD/器械耗材/DTP）
+    {"term_code": "drug_centralized_procurement", "name": "药械集采", "definition": "以量换价的药品/耗材集中带量采购模式。", "domain": "supply_chain", "synonyms": ["带量采购"], "boundary": None},
+    {"term_code": "spd", "name": "SPD院内物流", "definition": "医院药品耗材的院内供应链管理（采购-库存-配送-消耗一体化）。", "domain": "supply_chain", "synonyms": ["院内物流"], "boundary": None},
+    {"term_code": "medical_device", "name": "器械耗材", "definition": "医疗机构使用的医疗器械与高值/低值耗材。", "domain": "supply_chain", "synonyms": ["医用耗材"], "boundary": None},
+    {"term_code": "dtp_pharmacy", "name": "DTP药房", "definition": "直接面向患者提供高值/新特药与专业药事服务的院外药房。", "domain": "supply_chain", "synonyms": ["院外药房"], "boundary": None},
+    # 康复护理养老（居家护理/康复/长护险/养老）
+    {"term_code": "home_care", "name": "居家护理", "definition": "由护士/护理员上门为居家人群提供的基础护理与专项护理服务。", "domain": "care_elderly", "synonyms": ["上门护理"], "boundary": None},
+    {"term_code": "rehabilitation", "name": "康复治疗", "definition": "针对功能障碍者开展的物理/作业/言语等康复训练与治疗。", "domain": "care_elderly", "synonyms": ["康复"], "boundary": None},
+    {"term_code": "long_term_care_insurance", "name": "长期护理保险", "definition": "为失能人群长期护理需求提供保障的社会保险/商业保险制度。", "domain": "care_elderly", "synonyms": ["长护险"], "boundary": None},
+    {"term_code": "elderly_service", "name": "养老服务", "definition": "面向老年人的生活照料、健康管理、精神慰藉等综合服务。", "domain": "care_elderly", "synonyms": ["老年服务"], "boundary": None},
+    # 专科运营（肿瘤/妇儿/心理/口腔/中医等跨域专科专病）
+    {"term_code": "oncology_center", "name": "肿瘤中心", "definition": "聚焦肿瘤预防、筛查、诊疗与康复的一体化专科中心。", "domain": "specialty_center", "synonyms": ["肿瘤专科"], "boundary": None},
+    {"term_code": "women_children_center", "name": "妇儿中心", "definition": "覆盖妇女与儿童保健、诊疗的跨科室专科中心。", "domain": "specialty_center", "synonyms": ["妇儿专科"], "boundary": None},
+    {"term_code": "mental_health_clinic", "name": "心理门诊", "definition": "提供心理评估、心理咨询与精神心理疾病诊疗的门诊服务。", "domain": "specialty_center", "synonyms": ["精神心理"], "boundary": None},
+    {"term_code": "chronic_specialty", "name": "专病管理", "definition": "围绕单病种（如高血压/糖尿病/哮喘）的全流程规范化管理。", "domain": "specialty_center", "synonyms": ["单病种管理"], "boundary": None},
+    {"term_code": "tcm_center", "name": "中医中心", "definition": "以中医药诊疗与治未病为特色的专科中心。", "domain": "specialty_center", "synonyms": ["中医专科"], "boundary": None},
+    # 患者服务运营（教育/随访/满意度/投诉）
+    {"term_code": "patient_followup", "name": "患者随访", "definition": "对出院/术后/慢病患者进行的定期跟踪回访与康复指导。", "domain": "patient_service", "synonyms": ["随访管理"], "boundary": None},
+    {"term_code": "patient_satisfaction", "name": "患者满意度", "definition": "患者对医疗服务过程与结果的主观评价水平。", "domain": "patient_service", "synonyms": ["就医满意度"], "boundary": None},
+    {"term_code": "nps", "name": "净推荐值", "definition": "衡量用户推荐意愿的指标（NPS），反映服务口碑。", "domain": "patient_service", "synonyms": ["NPS"], "boundary": None},
+    {"term_code": "patient_education", "name": "患者教育", "definition": "面向患者的疾病预防、用药与康复知识科普宣教。", "domain": "patient_service", "synonyms": ["健康科普"], "boundary": None},
+    {"term_code": "complaint_handling", "name": "投诉处理", "definition": "对患者投诉的受理、调查、反馈与改进闭环。", "domain": "patient_service", "synonyms": ["客诉处理"], "boundary": None},
 ]
 
 
 # ---------------------------------------------------------------------------
-# 维度 + 成员（七大业务主线，23 个维度；SCD0/SCD1/SCD2 三型）
+# 维度 + 成员（全业务线，29 个维度；SCD0/SCD1/SCD2 三型）
 # ---------------------------------------------------------------------------
 def _slug(name: str) -> str:
     """中文名 → 拼音风格 slug（科室/病种成员编码）。"""
@@ -514,6 +613,66 @@ DIMENSION_SEEDS: list[dict[str, Any]] = [
             {"code": "unionpay", "name": "银联"},
             {"code": "medical_account", "name": "医保个账"},
             {"code": "insurance_direct", "name": "商保直付"},
+        ],
+    },
+    {
+        "dim_code": "insurance_product_type", "name": "保险产品类型", "domain": "insurance", "type": "SCD0",
+        "description": "保险业务产品线（商保直付/惠民保/经纪业务分析维度）。", "members": [
+            {"code": "medical", "name": "医疗险"},
+            {"code": "critical_illness", "name": "重疾险"},
+            {"code": "huimin", "name": "惠民保"},
+            {"code": "accident", "name": "意外险"},
+            {"code": "life", "name": "寿险"},
+            {"code": "annuity", "name": "年金险"},
+        ],
+    },
+    {
+        "dim_code": "member_level", "name": "会员等级", "domain": "membership", "type": "SCD0",
+        "description": "会员成长等级（会员运营与权益成本分析维度）。", "members": [
+            {"code": "normal", "name": "普通会员"},
+            {"code": "silver", "name": "银卡会员"},
+            {"code": "gold", "name": "金卡会员"},
+            {"code": "platinum", "name": "铂金会员"},
+            {"code": "family", "name": "家庭会员"},
+        ],
+    },
+    {
+        "dim_code": "specialty_center_type", "name": "专科中心", "domain": "specialty_center", "type": "SCD0",
+        "description": "跨域专科专病中心（专科运营与专病管理分析维度）。", "members": [
+            {"code": "oncology", "name": "肿瘤中心"},
+            {"code": "women_children", "name": "妇儿中心"},
+            {"code": "mental_health", "name": "心理精神"},
+            {"code": "stomatology", "name": "口腔中心"},
+            {"code": "tcm", "name": "中医中心"},
+            {"code": "chronic", "name": "慢病专病"},
+        ],
+    },
+    {
+        "dim_code": "care_service_type", "name": "照护类型", "domain": "care_elderly", "type": "SCD0",
+        "description": "康复护理养老服务类型（养老与长护业务分析维度）。", "members": [
+            {"code": "home_care", "name": "居家护理"},
+            {"code": "rehab", "name": "康复治疗"},
+            {"code": "ltc", "name": "长护险护理"},
+            {"code": "elderly", "name": "养老照护"},
+        ],
+    },
+    {
+        "dim_code": "ai_scene", "name": "AI应用场景", "domain": "health_ai", "type": "SCD0",
+        "description": "医疗AI产品应用场景（AI能力运营与效果分析维度）。", "members": [
+            {"code": "triage", "name": "智能导诊"},
+            {"code": "diag_assist", "name": "AI辅诊"},
+            {"code": "ai_report", "name": "智能报告"},
+            {"code": "record_qc", "name": "病历质控"},
+            {"code": "health_qa", "name": "健康问答"},
+        ],
+    },
+    {
+        "dim_code": "research_type", "name": "科研类型", "domain": "clinical_research", "type": "SCD0",
+        "description": "临床科研项目类型（科研业务与成果分析维度）。", "members": [
+            {"code": "rws", "name": "真实世界研究"},
+            {"code": "clinical_trial", "name": "临床试验"},
+            {"code": "research_collab", "name": "科研协作"},
+            {"code": "data_extraction", "name": "科研数据提取"},
         ],
     },
 ]
