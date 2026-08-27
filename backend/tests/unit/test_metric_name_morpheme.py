@@ -34,6 +34,13 @@ class TestValidateMetricName:
         ok, err = ConflictPrechecker.validate_metric_name("退款率")
         assert ok is True
 
+    def test_active_abbreviation_passes(self) -> None:
+        """A-6：数仓活跃类高频缩写（月活/日活/周活/年活/季活）为合法业务命名，
+        词根表须覆盖——否则 SQL 推断候选 name=「月活」被 METRIC_NAME_NO_MORPHEME 误拦。"""
+        for name in ("月活", "日活", "周活", "年活", "季活", "医生月活"):
+            ok, err = ConflictPrechecker.validate_metric_name(name)
+            assert ok is True, f"{name!r} 应命中活跃缩写词根，实际 err={err!r}"
+
     def test_bare_word_rejected_with_clear_error(self) -> None:
         ok, err = ConflictPrechecker.validate_metric_name("新名称")
         assert ok is False

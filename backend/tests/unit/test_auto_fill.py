@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.services.semantic.auto_fill import (
     _cn_column_label,
+    _ensure_metric_name_morpheme,
     auto_fill,
     build_profile,
     extract_biz_object,
@@ -381,4 +382,58 @@ class TestCnColumnLabelMedical:
         assert _cn_column_label("avg_stay") == "平均住院日"
         assert _cn_column_label("diagnosis") == "诊断数"
         assert _cn_column_label("operation") == "手术人次"
+
+
+class TestEnsureMetricNameMorpheme:
+    """A-6：推断名未命中受控词根时兜底补业务词根，保证可创建（TD §12.3 硬卡不误拦）。"""
+
+    def test_hits_morpheme_kept_as_is(self) -> None:
+        # 「月活」已补进词根表（活跃缩写系列），命中则原样返回，不追加
+        assert _ensure_metric_name_morpheme("月活") == "月活"
+        assert _ensure_metric_name_morpheme("日活") == "日活"
+        assert _ensure_metric_name_morpheme("门诊挂号人次") == "门诊挂号人次"
+        assert _ensure_metric_name_morpheme("每日收入金额") == "每日收入金额"
+
+    def test_money_semantics_appends_amount(self) -> None:
+        # 完全未命中词根的金额语义词 → 补「金额」（命中「金额」词根）。
+        # 含词根的名称（如「药品销售」命中「销售」、「药品成交」命中「药品」）
+        # 不被兜底改写——兜底只作用于真正未命中的名称。
+        assert _ensure_metric_name_morpheme("总成交") == "总成交金额"
+        assert _ensure_metric_name_morpheme("药品销售") == "药品销售"
+        assert _ensure_metric_name_morpheme("药品成交") == "药品成交"
+
+    def test_default_appends_count(self) -> None:
+        # 其余（计数/活跃/未知）→ 补「次数」（命中「次数」词根）
+        assert _ensure_metric_name_morpheme("abc") == "abc次数"
+        assert _ensure_metric_name_morpheme("某指标") == "某指标次数"
+
+    def test_infer_name_comment_morpheme_not_rewritten(self) -> None:
+        # _infer_name 注释分支：「月活」命中词根 → 名称保持「月活」不被兜底改写
+        f = infer_metric(
+            build_profile(
+                source_table="t",
+                measure_column="cnt",
+                period="month",
+                measure_meta={"comment": "月活"},
+            ),
+            domain_defaults={},
+        )
+        assert f["fields"]["name"]["value"] == "月活"
+        assert f["fields"]["name"]["source"] == "column_meta"
+        assert "追加" not in f["fields"]["name"]["reason"]
+
+    def test_infer_name_fallback_appends_morpheme(self) -> None:
+        # _infer_name 规则分支：无注释英文列名未命中 → 兜底补「次数」并注明 reason
+        f = infer_metric(
+            build_profile(
+                source_table="t",
+                measure_column="abc_metric",
+                period="day",
+                measure_meta={},
+            ),
+            domain_defaults={},
+        )
+        name = f["fields"]["name"]["value"]
+        assert name.endswith("次数")
+        assert "未命中受控词根，追加" in f["fields"]["name"]["reason"]
 

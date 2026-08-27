@@ -617,31 +617,54 @@ def _measure_label(profile: dict[str, Any]) -> str:
     return "指标"
 
 
+def _ensure_metric_name_morpheme(name: str) -> str:
+    """保证指标名命中受控词根（TD §12.3 硬卡不误拦合法业务命名）。
+
+    数仓列注释常为「月活」「日活」等缩写或业务新词（词根表未覆盖），直接作为
+    指标名会被 ``validate_metric_name`` 拦截——SQL 推断/批量注册创建的候选名
+    报 ``METRIC_NAME_NO_MORPHEME`` 422。命中词根原样返回；未命中按语义补业务
+    词根（成交/金额/费用类补「金额」，其余计数/活跃类补「次数」），从源头保证
+    推断名可创建，不依赖词根表穷举。
+    """
+    from app.services.semantic.conflict_precheck import CONTROLLED_MORPHEMES
+
+    lowered = name.lower()
+    if any(m in lowered for m in CONTROLLED_MORPHEMES):
+        return name
+    if any(k in lowered for k in ("成交", "销", "收", "费", "价", "额", "利", "金额")):
+        return f"{name}金额"
+    return f"{name}次数"
+
+
 def _infer_name(
     profile: dict[str, Any],
     grain: str | None,
     *,
     llm_name: str | None = None,
 ) -> SuggestionField:
-    """指标名称：列注释优先 > AI 生成 > 规则模板。"""
+    """指标名称：列注释优先 > AI 生成 > 规则模板；未命中受控词根时兜底补业务词根。"""
     period_cn = _period_cn(profile.get("period"), grain)
     if llm_name and llm_name.strip():
-        return _field(llm_name.strip(), "llm", 0.7, "AI 依据表结构/SQL 生成的业务命名")
-    meta: dict[str, Any] = profile.get("measure_meta", {}) or {}
-    comment = str(meta.get("comment", "")).strip()
-    if comment:
-        # 注释已含周期语义（如「月活」「日销售额」）时不再重复加周期前缀——
-        # 避免「月活」+ 月周期拼成「月月活」（A-5：建表注释驱动的名称常见此形态）
-        prefix = period_cn if period_cn and period_cn not in comment else ""
-        return _field(
-            f"{prefix}{comment}", "column_meta", 0.9,
-            f"列注释「{comment}」+ 周期「{period_cn}」→ 名称",
-        )
-    measure_label = _measure_label(profile)
-    return _field(
-        f"{period_cn}{measure_label}", "rule", 0.5,
-        f"规则模板：周期「{period_cn}」+ 度量「{measure_label}」",
-    )
+        name, source, conf = llm_name.strip(), "llm", 0.7
+        reason = "AI 依据表结构/SQL 生成的业务命名"
+    else:
+        meta: dict[str, Any] = profile.get("measure_meta", {}) or {}
+        comment = str(meta.get("comment", "")).strip()
+        if comment:
+            # 注释已含周期语义（如「月活」「日销售额」）时不再重复加周期前缀——
+            # 避免「月活」+ 月周期拼成「月月活」（A-5：建表注释驱动的名称常见此形态）
+            prefix = period_cn if period_cn and period_cn not in comment else ""
+            name, source, conf = f"{prefix}{comment}", "column_meta", 0.9
+            reason = f"列注释「{comment}」+ 周期「{period_cn}」→ 名称"
+        else:
+            measure_label = _measure_label(profile)
+            name, source, conf = f"{period_cn}{measure_label}", "rule", 0.5
+            reason = f"规则模板：周期「{period_cn}」+ 度量「{measure_label}」"
+    ensured = _ensure_metric_name_morpheme(name)
+    if ensured != name:
+        reason += f"；未命中受控词根，追加「{ensured[len(name):]}」"
+        name = ensured
+    return _field(name, source, conf, reason)
 
 
 def _infer_definition(
