@@ -88,6 +88,7 @@ const RISK_LEVEL_LABEL: Record<string, string> = {
 
 const EDGE_TYPE_LABEL: Record<string, string> = {
   DERIVED_FROM: "派生自",
+  BASED_ON: "基于原子",
   CONSUMED_BY: "被消费",
   LINEAGE_UP: "上游关联",
   LINEAGE_DOWN: "下游关联",

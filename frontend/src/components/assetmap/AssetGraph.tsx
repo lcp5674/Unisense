@@ -86,6 +86,7 @@ const TYPE_FALLBACK_COLOR: Record<string, string> = {
 // 边类型配色：偏亮深灰蓝，不同类型区分（血缘总览里 DERIVED_FROM 占绝大多数）
 const EDGE_PALETTE: Record<string, string> = {
   DERIVED_FROM: "#94a3b8",
+  BASED_ON: "#a78bfa",
   CONSUMED_BY: "#60a5fa",
 };
 

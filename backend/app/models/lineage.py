@@ -9,6 +9,8 @@ Neo4j 作为图存储用于影响分析（best-effort，可降级）。
 - EXTERNAL_BREAK：断链登记（源或目标一侧为 external:{system} 占位节点）
 - USES_DIMENSION：指标 ↔ 维度（L3，指标基于维度分析，dimension:{code} 节点）
 - READS_COLUMN：指标 ↔ 字段（L3，指标来源于表的具体字段，column:{db}.{tbl}.{col} 节点）
+- BASED_ON：派生指标 ↔ 基础原子指标（L3，OneData 派生 = 基础原子 + 业务限定 +
+  时间周期——标识"哪个原子指标是此派生的基底"，区别于 DERIVED_FROM 的普通上游引用）
 
 粒度（granularity）：
 - L1：表级血缘
@@ -57,6 +59,7 @@ class LineageEdge(Base, BaseModel):
             "EXTERNAL_BREAK",
             "USES_DIMENSION",
             "READS_COLUMN",
+            "BASED_ON",
             name="lineage_edge_type",
         ),
         nullable=False,
@@ -153,6 +156,7 @@ class LineageEdgeHistory(Base):
             "EXTERNAL_BREAK",
             "USES_DIMENSION",
             "READS_COLUMN",
+            "BASED_ON",
             name="lineage_edge_type",
         ),
         nullable=False,

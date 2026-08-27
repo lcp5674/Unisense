@@ -63,6 +63,13 @@ def _validate_definition_json(v: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(val, str) or not val.strip():
                 raise ValueError(f"{key} 必须为非空字符串")
             v[key] = val.strip()
+    # 5. ``base_atomic``（基础原子指标编码）：派生指标的 OneData 基础原子绑定
+    #    （派生 = 基础原子 + 业务限定 + 时间周期）。选填字符串——存在性/类型
+    #    （必须为原子类型）在 service 层校验（需查 DB），此处仅做格式规范化。
+    if v.get("base_atomic") is not None:
+        if not isinstance(v["base_atomic"], str) or not v["base_atomic"].strip():
+            raise ValueError("基础原子指标（definition_json.base_atomic）必须为非空字符串")
+        v["base_atomic"] = v["base_atomic"].strip()
     return v
 
 

@@ -386,6 +386,41 @@ def test_derived_dependencies_optional_but_expression_required():
     assert req.type == "derived"
 
 
+def test_derived_base_atomic_normalized():
+    """派生 base_atomic：去空白规范化；空/非字符串 → 422（存在性与原子类型由 service 校验）。"""
+    # 正常：带空白的编码被 trim（OneData 基础原子绑定）
+    req = MetricCreateRequest(
+        **_base_payload(
+            type="derived",
+            definition_json={
+                "expression": "SUM(gmv)",
+                "base_atomic": "  active_doctor_daily  ",
+            },
+        )
+    )
+    assert req.definition_json["base_atomic"] == "active_doctor_daily"
+
+    # 纯空白 → 422
+    with pytest.raises(ValidationError) as exc:
+        MetricCreateRequest(
+            **_base_payload(
+                type="derived",
+                definition_json={"expression": "SUM(gmv)", "base_atomic": "  "},
+            )
+        )
+    assert "base_atomic" in str(exc.value)
+
+    # 非字符串（数字）→ 422
+    with pytest.raises(ValidationError) as exc:
+        MetricCreateRequest(
+            **_base_payload(
+                type="derived",
+                definition_json={"expression": "SUM(gmv)", "base_atomic": 123},
+            )
+        )
+    assert "base_atomic" in str(exc.value)
+
+
 def test_composite_requires_dependencies_and_expression():
     """复合指标缺依赖（跨域多指标聚合的前提）或表达式 → 422；齐备 → 通过。"""
     with pytest.raises(ValidationError) as exc:

@@ -2385,7 +2385,9 @@ export function MetricCatalog() {
                               .map((r) =>
                                 r.edge_type === "DERIVED_FROM"
                                   ? `派生指标 ${r.node.replace("metric:", "")}`
-                                  : `消费方 ${r.node.replace("consumer:", "")}`,
+                                  : r.edge_type === "BASED_ON"
+                                    ? `基础原子引用 ${r.node.replace("metric:", "")}`
+                                    : `消费方 ${r.node.replace("consumer:", "")}`,
                               )
                               .join("；") || "引用明细不可见")
                           }

@@ -109,6 +109,7 @@ export const CHANGE_TYPE_LABEL: Record<string, string> = {
 // ---- 指标关联/推荐边类型（详情页「看过此指标的人还看了」等）----
 export const METRIC_RELATION_EDGE_LABEL: Record<string, string> = {
   DERIVED_FROM: "派生自",
+  BASED_ON: "基于原子",
   CONSUMED_BY: "被消费",
   LINEAGE: "关联",
   POPULAR: "热门",

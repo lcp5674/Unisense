@@ -1433,7 +1433,9 @@ class LineageRepository:
         """返回引用指定指标的活跃血缘引用者（deprecate 被引用拦截用）。
 
         以 ``metric:{code}`` 为 source_node 的存活边：``DERIVED_FROM`` → target 为
-        派生该指标的派生指标；``CONSUMED_BY`` → target 为消费方/报表。stale 与
+        派生该指标的派生指标；``BASED_ON`` → target 为以该指标为基础原子的派生指标
+        （OneData 派生 = 基础原子 + 业务限定 + 时间周期）；``CONSUMED_BY`` → target 为
+        消费方/报表。stale 与
         软删边过滤——「被引用」只统计当前生效的引用，废弃被引用指标会让下游
         引用悬空，调用方据此在未指定替代指标时拦截废弃。
 
@@ -1451,7 +1453,9 @@ class LineageRepository:
                     LineageEdge.deleted_at.is_(None),
                     LineageEdge.stale.is_(False),
                     LineageEdge.source_node == f"metric:{metric_code}",
-                    LineageEdge.edge_type.in_(["DERIVED_FROM", "CONSUMED_BY"]),
+                    LineageEdge.edge_type.in_(
+                        ["DERIVED_FROM", "BASED_ON", "CONSUMED_BY"]
+                    ),
                 )
                 .distinct()
             )

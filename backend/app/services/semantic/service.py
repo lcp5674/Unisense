@@ -259,6 +259,45 @@ class MetricService(BaseService):
         except Exception:
             return {}
 
+    async def _validate_base_atomic(self, defn: dict[str, Any] | None) -> None:
+        """校验派生指标的基础原子指标（``definition_json.base_atomic``）。
+
+        OneData（DEV_GUIDE §7a）：派生指标 = 基础原子指标 + 业务限定 + 时间周期。
+        ``base_atomic`` 是派生的**基础原子绑定**（区别于 ``dependencies`` 的普通上游
+        引用）——必须为存在的原子类型指标（未软删）。血缘注册时据此生成
+        ``metric:{base} → metric:{code}`` 的 ``BASED_ON`` 基础边。
+
+        Args:
+            defn: 指标口径定义（definition_json，可为 None）。
+
+        Raises:
+            BusinessError: 提供但非字符串 / 指标不存在 / 非原子类型。
+        """
+        from app.core.exceptions import BusinessError
+
+        code = (defn or {}).get("base_atomic")
+        if not code:
+            return
+        if not isinstance(code, str) or not code.strip():
+            raise BusinessError(
+                "基础原子指标（definition_json.base_atomic）必须为非空字符串",
+                error_code="VALIDATION_ERROR",
+            )
+        code = code.strip()
+        base = await self._repo.get_by_code(code)
+        if base is None or getattr(base, "deleted_at", None) is not None:
+            raise BusinessError(
+                f"基础原子指标不存在: {code}",
+                error_code="BASE_ATOMIC_NOT_FOUND",
+                ctx={"base_atomic": code},
+            )
+        if base.type != "atomic":
+            raise BusinessError(
+                f"基础原子指标必须是原子类型，当前: {base.type}（{code}）",
+                error_code="BASE_ATOMIC_NOT_ATOMIC",
+                ctx={"base_atomic": code, "base_type": base.type},
+            )
+
     async def _validate_dict_field(self, dict_type: str, code: str) -> None:
         """校验单个字典字段值（P1-5 共享逻辑）。
 
@@ -503,6 +542,10 @@ class MetricService(BaseService):
 
         # PII 双源归一化：definition_json.pii 与 pii_flag 保持一致（pii_flag 为权威源）
         definition, pii_flag = _normalize_pii(request.definition_json, request.pii_flag)
+
+        # 基础原子绑定校验（OneData：派生 = 基础原子 + 业务限定 + 时间周期）——
+        # base_atomic 必须为已存在的原子类型指标，血缘据此生成 BASED_ON 基础边
+        await self._validate_base_atomic(definition)
 
         metric = Metric(
             metric_code=request.metric_code,
@@ -1262,6 +1305,8 @@ class MetricService(BaseService):
             old_def = metric.definition_json
             # PII 双源归一化：definition.pii 与 pii_flag 保持一致（pii_flag 为权威源）
             new_def, synced_pii = _normalize_pii(request.definition_json, metric.pii_flag)
+            # 基础原子绑定校验（对齐 create_metric：base_atomic 必须为存在的原子指标）
+            await self._validate_base_atomic(new_def)
             is_breaking = self._is_breaking_change(old_def, new_def) or top_level_breaking
 
             # top-level 破坏性字段 diff（与 elif 分支同构，供 PENDING 转正回写主表）
@@ -2698,12 +2743,13 @@ class MetricService(BaseService):
                 if not isinstance(definition, dict):
                     return
                 dependencies = definition.get("dependencies") or []
-                if (
-                    not isinstance(dependencies, list)
-                    or metric.type == "atomic"
-                    or not dependencies
-                ):
-                    return
+                if not isinstance(dependencies, list) or metric.type == "atomic":
+                    # atomic 无指标间依赖边，直接返回；derived/composite 的 dependencies 为空
+                    # 时下方 for 循环自然跳过（纯周期派生无依赖仍可携带 base_atomic 基础边）
+                    if metric.type == "atomic":
+                        return
+                    if not dependencies and not definition.get("base_atomic"):
+                        return
                 edge_type = _METRIC_DEP_EDGE_TYPE.get(metric.type, "DERIVED_FROM")
                 repo = LineageRepository(self._db)
                 for dep_code in dependencies:
@@ -2716,6 +2762,25 @@ class MetricService(BaseService):
                         granularity="L3",
                         provenance="metric_definition",
                         change_reason="metric_dependency",
+                    )
+
+                # 3) 基础原子边（OneData：派生 = 基础原子 + 业务限定 + 时间周期）——
+                # base_atomic 与普通 dependencies 分开：生成「原子→派生」的 BASED_ON
+                # 基础边（区别于 dependencies 的 DERIVED_FROM 上游引用边），血缘图据此
+                # 可区分「哪个是派生的原子基底」。
+                base_atomic = definition.get("base_atomic")
+                if (
+                    metric.type == "derived"
+                    and isinstance(base_atomic, str)
+                    and base_atomic.strip()
+                ):
+                    await repo.upsert_edge(
+                        source_node=f"metric:{base_atomic.strip()}",
+                        target_node=f"metric:{metric.metric_code}",
+                        edge_type="BASED_ON",
+                        granularity="L3",
+                        provenance="metric_definition",
+                        change_reason="metric_base_atomic",
                     )
         except Exception as exc:  # noqa: BLE001 - 血缘注册失败绝不阻断指标主流程
             logger.warning(
@@ -2943,8 +3008,13 @@ class MetricService(BaseService):
 
         referrers = await LineageRepository(self._db).metric_referrers(metric_code)
         if referrers and successor_code is None:
+            ref_kind = {
+                "DERIVED_FROM": "派生",
+                "BASED_ON": "基础原子（派生基底）",
+                "CONSUMED_BY": "报表/消费",
+            }
             ref_desc = "、".join(
-                f"{r['node']}（{'派生' if r['edge_type'] == 'DERIVED_FROM' else '报表/消费'}）"
+                f"{r['node']}（{ref_kind.get(r['edge_type'], '引用')}）"
                 for r in referrers[:10]
             )
             more = f" 等 {len(referrers)} 个引用者" if len(referrers) > 10 else ""

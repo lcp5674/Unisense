@@ -204,6 +204,87 @@ async def test_create_derived_without_mount_no_mount_created():
     mrepo_cls.return_value.save.assert_not_awaited()
 
 
+async def test_create_derived_base_atomic_validated():
+    """派生指标 base_atomic：存在且为原子类型 → 创建通过（OneData 基础原子绑定）。"""
+    svc, repo = _svc_with_repo()
+    base = make_metric(metric_code="active_doctor_daily", type="atomic")
+    repo.get_by_code = AsyncMock(
+        side_effect=lambda code: base if code == "active_doctor_daily" else None
+    )
+    repo.create = AsyncMock(return_value=make_metric(type="derived"))
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
+        mrepo_cls.return_value.save = AsyncMock()
+        created = await svc.create_metric(
+            MetricCreateRequest(
+                **make_create_payload(
+                    type="derived",
+                    measure_id=None,
+                    definition_json={
+                        "expression": "SUM(gmv)",
+                        "base_atomic": "active_doctor_daily",
+                    },
+                )
+            ),
+            owner_id=1,
+        )
+    assert created is not None
+
+
+async def test_create_derived_base_atomic_not_atomic_rejected():
+    """base_atomic 指向非原子类型指标 → 422 拒绝（BASE_ATOMIC_NOT_ATOMIC）。"""
+    svc, repo = _svc_with_repo()
+    base = make_metric(metric_code="some_derived", type="derived")
+    repo.get_by_code = AsyncMock(
+        side_effect=lambda code: base if code == "some_derived" else None
+    )
+    repo.create = AsyncMock(return_value=make_metric(type="derived"))
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    with pytest.raises(BusinessError) as ei:
+        with patch("app.services.metric_mount.repository.MetricMountRepository"):
+            await svc.create_metric(
+                MetricCreateRequest(
+                    **make_create_payload(
+                        type="derived",
+                        measure_id=None,
+                        definition_json={
+                            "expression": "SUM(gmv)",
+                            "base_atomic": "some_derived",
+                        },
+                    )
+                ),
+                owner_id=1,
+            )
+    assert ei.value.error_code == "BASE_ATOMIC_NOT_ATOMIC"
+
+
+async def test_create_derived_base_atomic_not_found_rejected():
+    """base_atomic 指向不存在的指标 → 422 拒绝（BASE_ATOMIC_NOT_FOUND）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric(type="derived"))
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    with pytest.raises(BusinessError) as ei:
+        with patch("app.services.metric_mount.repository.MetricMountRepository"):
+            await svc.create_metric(
+                MetricCreateRequest(
+                    **make_create_payload(
+                        type="derived",
+                        measure_id=None,
+                        definition_json={
+                            "expression": "SUM(gmv)",
+                            "base_atomic": "ghost_atomic",
+                        },
+                    )
+                ),
+                owner_id=1,
+            )
+    assert ei.value.error_code == "BASE_ATOMIC_NOT_FOUND"
+
+
 async def test_create_metric_merges_source_table_into_definition():
     """top-level source_table/measure_column 须合入 definition_json（血缘差异同步的消费键）。
 
@@ -5927,6 +6008,76 @@ async def test_register_metric_lineage_full_derived_registers_dependency_edges()
         assert calls["metric:fct_order"]["edge_type"] == "DERIVED_FROM"
         assert calls["metric:fct_order"]["granularity"] == "L3"
         assert calls["metric:dim_user"]["target_node"] == "metric:sales_gmv_daily"
+
+
+async def test_register_metric_lineage_full_registers_base_atomic_edge():
+    """derived 指标含 base_atomic：注册「原子→派生」的 BASED_ON 基础边（区别于依赖边）。
+
+    OneData：派生 = 基础原子 + 业务限定 + 时间周期。base_atomic 与 dependencies 分离，
+    各自生成不同边类型——BASED_ON 标识派生的原子基底，DERIVED_FROM 标识普通上游引用。
+    """
+    svc, _repo = _svc_with_repo()
+    metric = make_metric(
+        type="derived",
+        definition_json={
+            "expression": "SUM(x)",
+            "base_atomic": "active_doctor_daily",
+            "source_tables": ["dwd_doctor"],
+        },
+    )
+    with (
+        patch("app.services.lineage.service.LineageService") as mock_ls,
+        patch("app.services.lineage.repository.LineageRepository") as mock_lr,
+    ):
+        lineage_svc = mock_ls.return_value
+        lineage_svc.register_metric_from_definition = AsyncMock(return_value=[])
+        lineage_svc.sync_metric_dimension_edges = AsyncMock(return_value=(0, 0))
+        repo_inst = mock_lr.return_value
+        repo_inst.upsert_edge = AsyncMock()
+
+        await svc._register_metric_lineage_full(metric)
+
+        # 无 dependencies → 仅 1 条边：BASED_ON 基础边
+        assert repo_inst.upsert_edge.await_count == 1
+        call = repo_inst.upsert_edge.call_args.kwargs
+        assert call["source_node"] == "metric:active_doctor_daily"
+        assert call["target_node"] == "metric:sales_gmv_daily"
+        assert call["edge_type"] == "BASED_ON"
+        assert call["granularity"] == "L3"
+        assert call["change_reason"] == "metric_base_atomic"
+
+
+async def test_register_metric_lineage_full_base_atomic_plus_dependencies():
+    """derived 同时含 base_atomic + dependencies：BASED_ON 与 DERIVED_FROM 边并存。"""
+    svc, _repo = _svc_with_repo()
+    metric = make_metric(
+        type="derived",
+        definition_json={
+            "expression": "SUM(a)/SUM(b)",
+            "base_atomic": "active_doctor_daily",
+            "dependencies": ["last_month_doctor_daily"],
+            "source_tables": ["dwd_doctor"],
+        },
+    )
+    with (
+        patch("app.services.lineage.service.LineageService") as mock_ls,
+        patch("app.services.lineage.repository.LineageRepository") as mock_lr,
+    ):
+        lineage_svc = mock_ls.return_value
+        lineage_svc.register_metric_from_definition = AsyncMock(return_value=[])
+        lineage_svc.sync_metric_dimension_edges = AsyncMock(return_value=(0, 0))
+        repo_inst = mock_lr.return_value
+        repo_inst.upsert_edge = AsyncMock()
+
+        await svc._register_metric_lineage_full(metric)
+
+        assert repo_inst.upsert_edge.await_count == 2
+        by_src = {
+            c.kwargs["source_node"]: c.kwargs["edge_type"]
+            for c in repo_inst.upsert_edge.call_args_list
+        }
+        assert by_src["metric:active_doctor_daily"] == "BASED_ON"
+        assert by_src["metric:last_month_doctor_daily"] == "DERIVED_FROM"
 
 
 async def test_register_metric_lineage_full_atomic_skips_dependency_edges():

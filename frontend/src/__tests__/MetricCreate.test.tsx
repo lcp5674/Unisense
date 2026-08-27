@@ -1468,6 +1468,43 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     expect(item.className).not.toContain("ant-form-item-required");
   });
 
+  it("派生指标显示基础原子选择器并提交 base_atomic（OneData 基础原子绑定）", async () => {
+    mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
+    // 基础原子搜索只返回已发布原子指标
+    mockedMetrics.mockResolvedValue({
+      items: [
+        { metric_code: "active_doctor_daily", name: "日活跃医生数", type: "atomic", status: "PUBLISHED" },
+      ],
+    } as any);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await goToStep(1);
+    fireEvent.click(screen.getByText("派生指标"));
+    // OneData：派生 = 基础原子 + 业务限定 + 时间周期——基础原子选择器出现（选填）
+    expect(screen.getByText("基础原子指标")).toBeTruthy();
+    // 在基础原子单选 Select 内输入搜索 → 从下拉选「日活跃医生数」
+    const baseItem = screen.getByText("基础原子指标").closest(".ant-form-item") as HTMLElement;
+    const baseInput = baseItem.querySelector(
+      ".ant-select-selection-search-input",
+    ) as HTMLInputElement;
+    fireEvent.mouseDown(baseItem.querySelector(".ant-select-selector") as HTMLElement);
+    fireEvent.change(baseInput, { target: { value: "active" } });
+    await waitFor(() => expect(mockedMetrics).toHaveBeenCalled());
+    await clickSelectOption("日活跃医生数 (active_doctor_daily)");
+    // 名称在 Step2（治理确认）必填 → Step3 提交
+    await goToStep(2);
+    fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), {
+      target: { value: "本月医院活跃医生数" },
+    });
+    await goToStep(3);
+    fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
+    const body = mockedCreate.mock.calls[0][0];
+    // base_atomic 合入 definition_json（血缘注册据此生成「原子→派生」BASED_ON 基础边）
+    expect(body.definition_json.base_atomic).toBe("active_doctor_daily");
+  });
+
   it("原子指标未选逻辑度量且未填口径提交 → 前端拦截并提示来源必填", async () => {
     mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
     renderPage();
@@ -1797,6 +1834,41 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
       expect(document.body.textContent).toContain("共 3 个候选");
     });
     expect(m().getByRole("button", { name: /批量创建选中指标/ })).toBeTruthy();
+  });
+
+  it("批量编辑向导：步骤③点击「批量创建选中指标」正常触发 batch-register-from-sql（回归：无反应）", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+
+    // 打开批量编辑向导
+    fireEvent.click(screen.getByTestId("sql-batch-open-wizard"));
+    await waitFor(() => {
+      expect(document.body.querySelector(".ant-modal-title")?.textContent || "").toContain("批量编辑向导");
+    });
+    const m = () => within(document.querySelector(".ant-modal") as HTMLElement);
+    // 跳到 Step 2（下一步 × 2）
+    fireEvent.click(m().getByTestId("sql-batch-wizard-next"));
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="sql-batch-wizard-t1"]')).toBeTruthy();
+    });
+    fireEvent.click(m().getByTestId("sql-batch-wizard-next"));
+    await waitFor(() => {
+      expect(document.body.textContent).toContain("共 3 个候选");
+    });
+    // 点击批量创建按钮
+    const btn = m().getByRole("button", { name: /批量创建选中指标/ });
+    expect(btn).toBeTruthy();
+    expect((btn as HTMLButtonElement).disabled).toBe(false);
+    expect((btn as HTMLButtonElement).textContent).toContain("（2）");
+    fireEvent.click(btn);
+    await waitFor(
+      () => {
+        expect(mockedBatchFromSql).toHaveBeenCalled();
+      },
+      { timeout: 3000 },
+    );
   });
 
   it("勾选联动：取消被复合依赖的原子 → 弹窗；「跳过复合」同时取消原子与复合", async () => {

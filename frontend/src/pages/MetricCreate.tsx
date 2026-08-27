@@ -287,6 +287,12 @@ export function MetricCreate() {
   const [depSearching, setDepSearching] = useState(false);
   const depSearchTimer = useRef<ReturnType<typeof setTimeout>>();
   const [selectedDeps, setSelectedDeps] = useState<string[]>([]);
+  // 基础原子指标（base_atomic）：派生指标的 OneData 基础原子绑定（派生 = 基础原子 +
+  // 业务限定 + 时间周期），只搜已发布原子指标；血缘生成「原子→派生」BASED_ON 基础边。
+  const [baseAtomicOptions, setBaseAtomicOptions] = useState<Array<{ value: string; label: string }>>([]);
+  const [baseAtomicSearching, setBaseAtomicSearching] = useState(false);
+  const baseAtomicSearchTimer = useRef<ReturnType<typeof setTimeout>>();
+  const [selectedBaseAtomic, setSelectedBaseAtomic] = useState<string | undefined>(undefined);
 
   // 逻辑度量目录选项（OneData 原子层）：原子指标选择逻辑度量——度量格式/默认单位/小数位/
   // 源头系统/同义词从度量目录继承（PRD FR-02-08），注册页不再重复填写基础度量属性。
@@ -1259,6 +1265,18 @@ export function MetricCreate() {
     }
     // 数仓详细口径（Q2）：候选 dw_definition（所属语句完整 SQL）回填，用户可改
     if (dj.dw_definition) setDwDefinition(String(dj.dw_definition));
+    // 基础原子指标（base_atomic）回填：候选未在搜索选项中时补一条兜底（label 用编码）
+    if (dj.base_atomic) {
+      setSelectedBaseAtomic(String(dj.base_atomic));
+      setBaseAtomicOptions((prev) =>
+        prev.some((o) => o.value === dj.base_atomic)
+          ? prev
+          : [
+              { value: String(dj.base_atomic), label: `基础原子 ${dj.base_atomic}` },
+              ...prev,
+            ],
+      );
+    }
     // 跳转：关闭 SQL 推断抽屉 → 单条模式 → 定位到 Step②（指标类型+来源）让用户核对
     setSqlInferOpen(false);
     setSqlBatchMode("single");
@@ -1345,7 +1363,10 @@ export function MetricCreate() {
       return;
     }
     const checked = sqlBatchResult.candidates.filter((c) => keys.has(c.key));
-    if (checked.length === 0) { message.warning("请至少勾选一个候选指标"); return; }
+    if (checked.length === 0) {
+      message.warning("请先勾选候选指标：在候选列表或「批量编辑向导」步骤①②勾选（默认仅勾选原子候选，派生/复合需手动勾选）");
+      return;
+    }
     // OneData 语义校验（对齐后端 _validate_definition_json）：复合 = 依赖指标 +
     // 计算主体必填；派生 = 有计算主体即可（依赖可选——纯周期派生如「本月活跃医生
     // 数」不依赖其他指标，周期驱动的解析候选自带 expression 口径，无需手填 calc）
@@ -1625,6 +1646,24 @@ export function MetricCreate() {
     }, 300);
   }
 
+  // 基础原子指标远程搜索（防抖）：只列已发布原子指标（OneData 派生 = 基础原子 + 限定 + 周期）
+  function handleBaseAtomicSearch(q: string) {
+    if (baseAtomicSearchTimer.current) clearTimeout(baseAtomicSearchTimer.current);
+    baseAtomicSearchTimer.current = setTimeout(() => {
+      setBaseAtomicSearching(true);
+      listMetrics({ status: "PUBLISHED", keyword: q.trim() || undefined, page_size: 50 })
+        .then((res) =>
+          setBaseAtomicOptions(
+            (res.items ?? [])
+              .filter((m) => m.type === "atomic")
+              .map((m) => ({ value: m.metric_code, label: `${m.name} (${m.metric_code})` })),
+          ),
+        )
+        .catch(() => {})
+        .finally(() => setBaseAtomicSearching(false));
+    }, 300);
+  }
+
   function buildDefinitionJson(values: Record<string, unknown>): Record<string, unknown> | null {
     // 依赖表（上游，加工出指标的表）→ definition_json.source_tables
     const tables = sourceTables.length ? { source_tables: sourceTables } : {};
@@ -1635,6 +1674,10 @@ export function MetricCreate() {
     // 依赖指标 → definition_json.dependencies（血缘注册上游→本指标边，仅 derived/composite）
     const depsField =
       isDerivedOrComposite && selectedDeps.length ? { dependencies: selectedDeps } : {};
+    // 基础原子指标 → definition_json.base_atomic（OneData 派生 = 基础原子 + 限定 + 周期；
+    // 血缘注册生成「原子→派生」BASED_ON 基础边，区别于 dependencies 的 DERIVED_FROM 上游边）
+    const baseField =
+      metricType === "derived" && selectedBaseAtomic ? { base_atomic: selectedBaseAtomic } : {};
     // 原子指标：源表/度量列 → 口径（血缘注册读 definition.source_table 建「指标↔落地表」边）
     const src = String(values.source_table || "").trim();
     const srcField = isAtomic && src ? { source_table: src } : {};
@@ -1648,7 +1691,7 @@ export function MetricCreate() {
     if (mode === "sql") {
       const sql = sqlText.trim();
       if (!sql) { message.error("口径 SQL 模式请输入 SQL 语句"); return null; }
-      return { sql, ...tables, ...downTables, ...srcField, ...measureField, ...dimsField, ...depsField, ...caliberFields };
+      return { sql, ...tables, ...downTables, ...srcField, ...measureField, ...dimsField, ...depsField, ...baseField, ...caliberFields };
     }
     let def: Record<string, unknown>;
     try { def = values.definition ? JSON.parse(String(values.definition)) : {}; }
@@ -1676,7 +1719,7 @@ export function MetricCreate() {
         expr = { expression: `${String(values.aggregation || "SUM")}(${msCol})` };
       }
     }
-    return { ...def, ...expr, ...tables, ...downTables, ...dimsField, ...depsField, ...caliberFields };
+    return { ...def, ...expr, ...tables, ...downTables, ...dimsField, ...depsField, ...baseField, ...caliberFields };
   }
 
   // OneData 向导：下一步纯前进（不逐级硬校验——避免打断"先粗填再回头改"的构建式流程；
@@ -2139,6 +2182,25 @@ export function MetricCreate() {
                 </>
               ) : (
                 <>
+                {metricType === "derived" && (
+                  <Form.Item
+                    label={<span>基础原子指标 <Tag color="purple" style={{ marginLeft: 6 }}>OneData 基础原子</Tag></span>}
+                    extra="【通俗理解】这个派生指标是「基于」哪个原子指标算出来的？如「本月医院活跃医生数」基于「活跃医生数」原子。选填；血缘图会以紫色「基于原子」边标识此绑定（区别于下方普通依赖边）。"
+                  >
+                    <Select
+                      showSearch
+                      filterOption={false}
+                      onSearch={handleBaseAtomicSearch}
+                      loading={baseAtomicSearching}
+                      placeholder="搜索并选择基础原子指标（仅已发布原子指标可选）"
+                      style={{ width: "100%" }}
+                      value={selectedBaseAtomic}
+                      onChange={setSelectedBaseAtomic}
+                      options={baseAtomicOptions}
+                      allowClear
+                    />
+                  </Form.Item>
+                )}
                 <Form.Item
                   label="依赖指标"
                   required={metricType === "composite"}
@@ -3162,6 +3224,7 @@ export function MetricCreate() {
                                     <Select
                                       size="small"
                                       mode="multiple"
+                                      maxTagCount="responsive"
                                       style={{ minWidth: 240 }}
                                       placeholder={c.type === "composite" ? "依赖指标（复合必填）" : "依赖指标（派生可选）"}
                                       optionFilterProp="label"
@@ -3268,11 +3331,18 @@ export function MetricCreate() {
                   block
                   style={{ marginTop: 12 }}
                   loading={sqlBatchCreating}
-                  disabled={sqlBatchChecked.size === 0}
                   onClick={() => void handleSqlBatchCreate()}
                 >
                   批量创建选中指标（{sqlBatchChecked.size}）
                 </Button>
+                {sqlBatchChecked.size === 0 && !sqlBatchCreating && (
+                  <Typography.Text
+                    type="secondary"
+                    style={{ fontSize: 12, display: "block", marginTop: 8, textAlign: "center" }}
+                  >
+                    请先勾选候选指标（在候选列表或「批量编辑向导」步骤①②中勾选，默认仅勾选原子候选）
+                  </Typography.Text>
+                )}
                 {/* 批量创建等待提示：逐条 savepoint 创建 + 冲突预检可能耗时，
                     给明确进度文案避免用户以为无响应 */}
                 {sqlBatchCreating && (
@@ -3405,7 +3475,7 @@ export function MetricCreate() {
         title={`批量编辑向导（${sqlBatchResult?.candidates.length ?? 0} 个候选 · 已勾选 ${sqlBatchChecked.size}）`}
         open={sqlBatchWizardOpen}
         onCancel={() => setSqlBatchWizardOpen(false)}
-        width={940}
+        width={1280}
         footer={null}
       >
         <Steps
@@ -3426,7 +3496,7 @@ export function MetricCreate() {
             rowKey="key"
             dataSource={sqlBatchResult?.candidates || []}
             pagination={{ pageSize: 8, size: "small" }}
-            scroll={{ y: 340 }}
+            scroll={{ x: 960, y: 340 }}
             columns={[
               {
                 title: "勾选", width: 50,
@@ -3540,7 +3610,7 @@ export function MetricCreate() {
             rowKey="key"
             dataSource={sqlBatchResult?.candidates || []}
             pagination={{ pageSize: 8, size: "small" }}
-            scroll={{ y: 340 }}
+            scroll={{ x: 1020, y: 340 }}
             columns={[
               {
                 title: "勾选", width: 50,
@@ -3592,7 +3662,7 @@ export function MetricCreate() {
                 ),
               },
               {
-                title: "依赖指标（复合/派生）", width: 225,
+                title: "依赖指标（复合/派生）", width: 260,
                 render: (_, c: SqlBatchCandidate) =>
                   c.type === "atomic" ? (
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>—</Typography.Text>
@@ -3600,7 +3670,8 @@ export function MetricCreate() {
                     <Select
                       size="small"
                       mode="multiple"
-                      style={{ minWidth: 215 }}
+                      maxTagCount="responsive"
+                      style={{ width: 245, minWidth: 245 }}
                       placeholder={c.type === "composite" ? "依赖（复合必填）" : "依赖（派生可选）"}
                       value={c.dependencies || []}
                       onChange={(v) => handleSqlBatchDepChange(c.key, v)}
@@ -3611,12 +3682,12 @@ export function MetricCreate() {
                   ),
               },
               {
-                title: "计算表达式/口径", width: 180,
+                title: "计算表达式/口径", width: 230,
                 render: (_, c: SqlBatchCandidate) =>
                   c.type === "composite" ? (
                     <Input
                       size="small"
-                      style={{ width: 170, fontFamily: "monospace" }}
+                      style={{ width: 220, fontFamily: "monospace" }}
                       placeholder="如 {原子1} / {原子2}"
                       value={c.calc_expression || ""}
                       onChange={(e) => handleSqlBatchExprChange(c.key, e.target.value)}
@@ -3625,7 +3696,7 @@ export function MetricCreate() {
                     <Tooltip title={`口径：${String(c.definition_json?.expression || c.definition_json?.sql || "")}`}>
                       <Typography.Text
                         type="secondary"
-                        style={{ fontSize: 12, maxWidth: 170, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "help", display: "inline-block", verticalAlign: "middle" }}
+                        style={{ fontSize: 12, maxWidth: 210, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "help", display: "inline-block", verticalAlign: "middle" }}
                       >
                         {String(c.definition_json?.expression || c.definition_json?.sql || "—")}
                       </Typography.Text>
@@ -3666,11 +3737,18 @@ export function MetricCreate() {
                     type="primary"
                     block
                     loading={sqlBatchCreating}
-                    disabled={sqlBatchChecked.size === 0}
                     onClick={() => void handleSqlBatchCreate()}
                   >
                     批量创建选中指标（{sqlBatchChecked.size}）
                   </Button>
+                  {sqlBatchChecked.size === 0 && !sqlBatchCreating && (
+                    <Typography.Text
+                      type="secondary"
+                      style={{ fontSize: 12, textAlign: "center", width: "100%" }}
+                    >
+                      请先在步骤①②勾选候选指标（默认仅勾选原子候选；派生/复合需手动勾选）
+                    </Typography.Text>
+                  )}
                   {sqlBatchCreating && (
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <Spin size="small" />
