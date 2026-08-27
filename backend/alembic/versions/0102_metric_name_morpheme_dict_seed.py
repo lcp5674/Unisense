@@ -20,7 +20,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0102_metric_name_morpheme_dict_seed"
-down_revision = "0101_master_data_row_version"
+down_revision = "0101"
 branch_labels = None
 depends_on = None
 
