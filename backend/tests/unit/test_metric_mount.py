@@ -239,6 +239,33 @@ class TestMountService:
         assert out.business_filter == "病种=门特"
         repo.save.assert_awaited()
 
+    async def test_create_mount_persists_variant_owner(self) -> None:
+        """变体级口径三方责任透传落库（方案 B：多变体可归属不同需求方/开发角色）。"""
+        svc, repo = await _svc_with_metric("derived")
+        out = await svc.create_mount(
+            MetricMountCreate(
+                metric_id=1,
+                source_table="dwd.hospital_fee",
+                source_column="fee",
+                granularity="医院",
+                default_period="day",
+                domain="medical",
+                product_owner_id=11,
+                tech_owner_id=12,
+                dw_developer_id=13,
+                product_owner_name="张三",
+                tech_owner_name="李四",
+                dw_developer_name="王五",
+            )
+        )
+        assert out.product_owner_id == 11
+        assert out.tech_owner_id == 12
+        assert out.dw_developer_id == 13
+        assert out.product_owner_name == "张三"
+        assert out.tech_owner_name == "李四"
+        assert out.dw_developer_name == "王五"
+        repo.save.assert_awaited()
+
     async def test_create_mount_requires_existing_metric(self) -> None:
         svc, _ = await _svc()
         svc._require_metric = AsyncMock(  # noqa: SLF001
@@ -328,6 +355,27 @@ class TestMountService:
         out = await svc.update_mount(1, MetricMountUpdate(granularity="日", source_table="dwd.sales_detail"))
         assert out.granularity == "日"
         assert out.source_table == "dwd.sales_detail"
+        repo.commit.assert_awaited()
+
+    async def test_update_mount_updates_variant_owner(self) -> None:
+        """变体级责任方（治理属性，非破坏性）：已发布指标也可直接更新，不触发拦截。"""
+        svc, repo = await _svc()
+        metric = _metric()
+        metric.status = "PUBLISHED"
+        svc._require_metric = AsyncMock(return_value=metric)  # noqa: SLF001
+        m = _mount()
+        repo.get = AsyncMock(return_value=m)
+        out = await svc.update_mount(
+            1,
+            MetricMountUpdate(
+                product_owner_id=21,
+                tech_owner_name="外部技术协作方",
+                dw_developer_id=23,
+            ),
+        )
+        assert out.product_owner_id == 21
+        assert out.tech_owner_name == "外部技术协作方"
+        assert out.dw_developer_id == 23
         repo.commit.assert_awaited()
 
     async def test_delete_mount_soft_deletes(self) -> None:

@@ -44,6 +44,30 @@ class MetricMount(Base, BaseModel):
     business_filter: Mapped[str | None] = mapped_column(
         String(512), nullable=True, comment="业务限定（变体级，如 病种=门特；缺省继承指标级）"
     )
+    # ---- 变体级口径三方责任（与 metric 表同构，均可空）----
+    # 多挂载（多变体）下不同变体可能归属不同需求方/开发角色（如「医院粒度费用」归
+    # 张三、「药品粒度费用」归李四）。缺省继承指标级责任方——空 = 继承；详情页按
+    # 行展示归属。仅治理属性，不进口径/破坏性判定（审核仍指标级整体走）。
+    product_owner_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, comment="变体级产品需求方用户 ID（缺省继承指标级）"
+    )
+    tech_owner_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, comment="变体级技术方用户 ID（缺省继承指标级）"
+    )
+    dw_developer_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, comment="变体级数仓开发用户 ID（缺省继承指标级）"
+    )
+    # 外部人员名称兜底（对齐 metric 表 product_owner_name 等）：责任方非平台用户时
+    # 直接落名称。展示优先级：id 可解析 → 平台用户；id 空但 name 非空 → 外部人员。
+    product_owner_name: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="变体级产品需求方名称（非平台用户直接填写）"
+    )
+    tech_owner_name: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="变体级技术方名称（非平台用户直接填写）"
+    )
+    dw_developer_name: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="变体级数仓开发名称（非平台用户直接填写）"
+    )
 
     __table_args__ = (
         # 一指标多挂载（多变体）：放开 uk_mount_metric 唯一约束改普通索引

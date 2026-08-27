@@ -135,6 +135,12 @@ def _mount_to_dict(m: Any) -> dict[str, Any]:
         "default_period": m.default_period,
         "domain": m.domain,
         "business_filter": getattr(m, "business_filter", None),
+        "product_owner_id": getattr(m, "product_owner_id", None),
+        "tech_owner_id": getattr(m, "tech_owner_id", None),
+        "dw_developer_id": getattr(m, "dw_developer_id", None),
+        "product_owner_name": getattr(m, "product_owner_name", None),
+        "tech_owner_name": getattr(m, "tech_owner_name", None),
+        "dw_developer_name": getattr(m, "dw_developer_name", None),
     }
 
 
@@ -148,6 +154,12 @@ def _mount_input_to_dict(m: Any) -> dict[str, Any]:
         "default_period": m.default_period,
         "domain": m.domain,
         "business_filter": getattr(m, "business_filter", None),
+        "product_owner_id": getattr(m, "product_owner_id", None),
+        "tech_owner_id": getattr(m, "tech_owner_id", None),
+        "dw_developer_id": getattr(m, "dw_developer_id", None),
+        "product_owner_name": getattr(m, "product_owner_name", None),
+        "tech_owner_name": getattr(m, "tech_owner_name", None),
+        "dw_developer_name": getattr(m, "dw_developer_name", None),
     }
 
 
@@ -4114,6 +4126,12 @@ class MetricService(BaseService):
                 old.default_period = req.default_period
                 old.domain = req.domain
                 old.business_filter = req.business_filter
+                old.product_owner_id = req.product_owner_id
+                old.tech_owner_id = req.tech_owner_id
+                old.dw_developer_id = req.dw_developer_id
+                old.product_owner_name = req.product_owner_name
+                old.tech_owner_name = req.tech_owner_name
+                old.dw_developer_name = req.dw_developer_name
             else:
                 await _mrepo.save(
                     MetricMount(
@@ -4124,6 +4142,12 @@ class MetricService(BaseService):
                         default_period=req.default_period,
                         domain=req.domain,
                         business_filter=req.business_filter,
+                        product_owner_id=req.product_owner_id,
+                        tech_owner_id=req.tech_owner_id,
+                        dw_developer_id=req.dw_developer_id,
+                        product_owner_name=req.product_owner_name,
+                        tech_owner_name=req.tech_owner_name,
+                        dw_developer_name=req.dw_developer_name,
                     )
                 )
         for mid, old in existing_by_id.items():

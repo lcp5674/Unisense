@@ -1463,11 +1463,11 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     expect(screen.getByText("选择平台维度（可搜索）")).toBeTruthy();
   });
 
-  it("关联维度下拉加载平台维度——不带 status 过滤（防 status=active 误用回归：维度状态枚举无 active，传了选项框恒空）", async () => {
+  it("关联维度下拉仅加载已发布维度（status=PUBLISHED 防回归：此前误传 active 选项框恒空，后改为不带 status 展示全部；业务规则要求可关联维度必须已发布）", async () => {
     const mockedDims = vi.mocked(listDimensions);
     mockedDims.mockResolvedValue({
       items: [
-        { id: 1, dim_code: "dept", name: "科室", description: "", domain: "sales", owner_id: 1, status: "DRAFT", row_version: 1 },
+        { id: 1, dim_code: "dept", name: "科室", description: "", domain: "sales", owner_id: 1, status: "PUBLISHED", row_version: 1 },
       ],
       total: 1,
       page: 1,
@@ -1475,14 +1475,14 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     } as any);
     renderPage();
     await screen.findByText("注册指标（草稿）");
-    // 修复核心：listDimensions 调用不得携带 status（此前误传 "active" → 后端 Dimension.status=="active" 精确匹配恒空）
+    // 修复核心：listDimensions 必须携带 status="PUBLISHED"（此前误传 "active" → 后端精确匹配恒空；不带 status 又会展示未发布维度）
     await waitFor(() => {
       expect(mockedDims).toHaveBeenCalled();
       const lastParams = mockedDims.mock.calls[mockedDims.mock.calls.length - 1]?.[0];
       expect(lastParams).toBeDefined();
-      expect(lastParams!.status).toBeUndefined();
+      expect(lastParams!.status).toBe("PUBLISHED");
     });
-    // 选项框展示 mock 返回的维度（label = `${name} (${dim_code})`）——展开关联维度下拉后断言选项出现
+    // 选项框展示 mock 返回的已发布维度（label = `${name} (${dim_code})`）——展开关联维度下拉后断言选项出现
     await goToStep(1);
     fireEvent.mouseDown(screen.getByText("选择平台维度（可搜索）"));
     await waitFor(() => expect(screen.getByText("科室 (dept)")).toBeTruthy());
@@ -1644,6 +1644,10 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
 
   it("多变体挂载：添加变体行可录入多套粒度/限定/周期并随创建提交 mounts 数组", async () => {
     mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
+    // 变体级责任方（方案 B）：第一行产品需求方选平台用户
+    mockedUsers.mockResolvedValue([
+      { id: 101, username: "zhangsan", display_name: "张三", role: "user", domain: "sales", status: "active" },
+    ] as never);
     mockedCatalogs.mockResolvedValue({
       items: [
         makeCatalog("dwd.sales_detail", [
@@ -1661,7 +1665,7 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     await pickDomain();
     await goToStep(2);
     fireEvent.click(screen.getByText("派生指标"));
-    // 第一行变体：选源表 + 度量列 + 粒度 + 业务限定
+    // 第一行变体：选源表 + 度量列 + 粒度（Select 手输注入） + 业务限定 + 产品需求方
     const mountTableSel = screen
       .getByText("源表（如 dwd.sales_detail）")
       .closest(".ant-select") as HTMLElement;
@@ -1672,16 +1676,34 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
       .closest(".ant-select") as HTMLElement;
     fireEvent.mouseDown(mountColSel.querySelector(".ant-select-selector") as HTMLElement);
     await clickSelectOption("gmv (decimal)");
-    fireEvent.change(screen.getByPlaceholderText("粒度（如 日/月/医院）"), {
-      target: { value: "医生" },
-    });
+    // 粒度 Select：showSearch + 手输兜底——输入「医生」后未采集项注入可点选
+    const grainSel1 = screen
+      .getByText("粒度（如 日/月/医院）")
+      .closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(grainSel1.querySelector(".ant-select-selector") as HTMLElement);
+    fireEvent.change(
+      grainSel1.querySelector(".ant-select-selection-search-input") as HTMLInputElement,
+      { target: { value: "医生" } },
+    );
+    await clickSelectOption("医生");
     fireEvent.change(screen.getByPlaceholderText("业务限定（如 病种=门特）"), {
       target: { value: "场景=门诊" },
     });
+    // 第一行产品需求方：选平台用户张三（空=继承指标级；此处显式指定变体级责任方）
+    const productOwnerSel = screen
+      .getByText("产品需求方（空=继承指标级）")
+      .closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(productOwnerSel.querySelector(".ant-select-selector") as HTMLElement);
+    await clickSelectOption("张三（101）");
     // 添加第二行变体：不同表/粒度
     fireEvent.click(screen.getByRole("button", { name: /添加变体/ }));
-    const grainInputs = screen.getAllByPlaceholderText("粒度（如 日/月/医院）");
-    expect(grainInputs.length).toBe(2);
+    // 第一行已选「医生」（placeholder 消失，selector 显示选中值），第二行粒度仍显示 placeholder
+    expect(
+      document.querySelector('.ant-select-selection-item[title="医生"]'),
+    ).toBeTruthy();
+    const grainSel2 = screen
+      .getByText("粒度（如 日/月/医院）")
+      .closest(".ant-select") as HTMLElement;
     const tableSels2 = screen.getAllByText("源表（如 dwd.sales_detail）");
     fireEvent.mouseDown(
       (tableSels2[0].closest(".ant-select") as HTMLElement).querySelector(".ant-select-selector") as HTMLElement,
@@ -1692,7 +1714,12 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
       (colSels2[0].closest(".ant-select") as HTMLElement).querySelector(".ant-select-selector") as HTMLElement,
     );
     await clickSelectOption("fee (decimal)");
-    fireEvent.change(grainInputs[1], { target: { value: "医院" } });
+    fireEvent.mouseDown(grainSel2.querySelector(".ant-select-selector") as HTMLElement);
+    fireEvent.change(
+      grainSel2.querySelector(".ant-select-selection-search-input") as HTMLInputElement,
+      { target: { value: "医院" } },
+    );
+    await clickSelectOption("医院");
     // 名称必填 → 回 Step1 填名称 → 提交
     await goToStep(1);
     fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), {
@@ -1709,11 +1736,54 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
       source_table: "dwd.sales_detail",
       granularity: "医生",
       business_filter: "场景=门诊",
+      // 变体级责任方：第一行产品需求方张三（方案 B）
+      product_owner_id: 101,
+      product_owner_name: null,
     });
     expect(body.mounts![1]).toMatchObject({
       source_table: "dwd.hospital_fee",
       granularity: "医院",
+      // 第二行未设责任方 → 空（缺省继承指标级）
+      product_owner_id: null,
     });
+  });
+
+  it("挂载粒度 Select 化：默认展示字典粒度选项，可直接点选（修复此前仅能手输）", async () => {
+    mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
+    // 按字典类型返回：granularity 返回内置粒度（日/月/医生），其余沿用默认币种
+    mockedDict.mockImplementation((async (dictType: string) => {
+      if (dictType === "granularity") {
+        return [
+          { code: "day", label: "日" },
+          { code: "month", label: "月" },
+          { code: "doctor", label: "医生" },
+        ] as never;
+      }
+      return [{ code: "CNY", label: "元" }] as never;
+    }) as never);
+    mockedCatalogs.mockResolvedValue({
+      items: [makeCatalog("dwd.sales_detail", [{ name: "gmv", type: "decimal" }])],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await goToStep(2);
+    fireEvent.click(screen.getByText("派生指标"));
+    // 粒度下拉打开：字典内置粒度直接可见可点选（无需手输）
+    const grainSel = screen
+      .getByText("粒度（如 日/月/医院）")
+      .closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(grainSel.querySelector(".ant-select-selector") as HTMLElement);
+    await waitFor(() => expect(screen.getByText("日 (day)")).toBeTruthy());
+    expect(screen.getByText("月 (month)")).toBeTruthy();
+    await clickSelectOption("日 (day)");
+    // 选中后行内展示所选粒度（selector 选中值）
+    expect(
+      document.querySelector('.ant-select-selection-item[title="日 (day)"]'),
+    ).toBeTruthy();
   });
 
   it("原子指标未选逻辑度量且未填口径提交 → 前端拦截并提示来源必填", async () => {

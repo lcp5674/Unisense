@@ -1151,6 +1151,13 @@ export interface MetricMount {
   domain: string;
   /** 业务限定（变体级，如 病种=门特；缺省继承指标级） */
   business_filter?: string | null;
+  /** 变体级口径三方责任（均可空；空 = 继承指标级） */
+  product_owner_id?: number | null;
+  tech_owner_id?: number | null;
+  dw_developer_id?: number | null;
+  product_owner_name?: string | null;
+  tech_owner_name?: string | null;
+  dw_developer_name?: string | null;
   /** 所属指标编码/名称/类型（列表接口 LEFT JOIN 回填） */
   metric_code?: string | null;
   metric_name?: string | null;
@@ -1170,6 +1177,13 @@ export interface MetricMountInput {
   domain: string;
   /** 业务限定（变体级，如 病种=门特；缺省继承指标级 definition_json.business_filter） */
   business_filter?: string | null;
+  /** 变体级口径三方责任（对齐 metric 表同构字段，均可空；空 = 继承指标级） */
+  product_owner_id?: number | null;
+  tech_owner_id?: number | null;
+  dw_developer_id?: number | null;
+  product_owner_name?: string | null;
+  tech_owner_name?: string | null;
+  dw_developer_name?: string | null;
 }
 
 /** 挂载实体响应（详情接口回填多变体挂载列表） */
@@ -1182,6 +1196,13 @@ export interface MetricMountResponse {
   default_period: string | null;
   domain: string;
   business_filter?: string | null;
+  /** 变体级口径三方责任（对齐 metric 表同构字段，均可空；空 = 继承指标级） */
+  product_owner_id?: number | null;
+  tech_owner_id?: number | null;
+  dw_developer_id?: number | null;
+  product_owner_name?: string | null;
+  tech_owner_name?: string | null;
+  dw_developer_name?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 }

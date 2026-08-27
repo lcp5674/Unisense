@@ -29,6 +29,19 @@ class MetricMountInput(BaseModel):
     business_filter: str | None = Field(
         None, max_length=512, description="业务限定（变体级，如 病种=门特）"
     )
+    # ---- 变体级口径三方责任（对齐 metric 表同构字段，均可空；空 = 继承指标级）----
+    product_owner_id: int | None = Field(None, ge=1, description="变体级产品需求方用户 ID（缺省继承指标级）")
+    tech_owner_id: int | None = Field(None, ge=1, description="变体级技术方用户 ID（缺省继承指标级）")
+    dw_developer_id: int | None = Field(None, ge=1, description="变体级数仓开发用户 ID（缺省继承指标级）")
+    product_owner_name: str | None = Field(
+        None, max_length=128, description="变体级产品需求方名称（非平台用户直接填写）"
+    )
+    tech_owner_name: str | None = Field(
+        None, max_length=128, description="变体级技术方名称（非平台用户直接填写）"
+    )
+    dw_developer_name: str | None = Field(
+        None, max_length=128, description="变体级数仓开发名称（非平台用户直接填写）"
+    )
 
     @field_validator("source_table", "source_column", "granularity")
     @classmethod
@@ -57,6 +70,13 @@ class MetricMountCreate(BaseModel):
     business_filter: str | None = Field(
         None, max_length=512, description="业务限定（变体级，缺省继承指标级）"
     )
+    # ---- 变体级口径三方责任（均可空；空 = 继承指标级）----
+    product_owner_id: int | None = Field(None, ge=1, description="变体级产品需求方用户 ID（缺省继承指标级）")
+    tech_owner_id: int | None = Field(None, ge=1, description="变体级技术方用户 ID（缺省继承指标级）")
+    dw_developer_id: int | None = Field(None, ge=1, description="变体级数仓开发用户 ID（缺省继承指标级）")
+    product_owner_name: str | None = Field(None, max_length=128, description="变体级产品需求方名称（非平台用户直接填写）")
+    tech_owner_name: str | None = Field(None, max_length=128, description="变体级技术方名称（非平台用户直接填写）")
+    dw_developer_name: str | None = Field(None, max_length=128, description="变体级数仓开发名称（非平台用户直接填写）")
 
     @field_validator("source_table", "source_column", "granularity")
     @classmethod
@@ -73,6 +93,13 @@ class MetricMountUpdate(BaseModel):
     default_period: str | None = Field(None, max_length=32)
     domain: str | None = Field(None, max_length=64)
     business_filter: str | None = Field(None, max_length=512)
+    # ---- 变体级口径三方责任（均可空；空 = 继承指标级）----
+    product_owner_id: int | None = Field(None, ge=1)
+    tech_owner_id: int | None = Field(None, ge=1)
+    dw_developer_id: int | None = Field(None, ge=1)
+    product_owner_name: str | None = Field(None, max_length=128)
+    tech_owner_name: str | None = Field(None, max_length=128)
+    dw_developer_name: str | None = Field(None, max_length=128)
 
 
 class MetricMountResponse(BaseModel):
@@ -84,6 +111,13 @@ class MetricMountResponse(BaseModel):
     default_period: str | None = None
     domain: str
     business_filter: str | None = None
+    #: 变体级口径三方责任（对齐 metric 表同构字段，均可空；空 = 继承指标级）
+    product_owner_id: int | None = None
+    tech_owner_id: int | None = None
+    dw_developer_id: int | None = None
+    product_owner_name: str | None = None
+    tech_owner_name: str | None = None
+    dw_developer_name: str | None = None
     #: 所属指标编码/名称/类型（list 时 LEFT JOIN Metric 回填，治理展示用）
     metric_code: str | None = None
     metric_name: str | None = None
@@ -102,6 +136,12 @@ class MetricMountResponse(BaseModel):
             default_period=getattr(m, "default_period", None),
             domain=m.domain,
             business_filter=getattr(m, "business_filter", None),
+            product_owner_id=getattr(m, "product_owner_id", None),
+            tech_owner_id=getattr(m, "tech_owner_id", None),
+            dw_developer_id=getattr(m, "dw_developer_id", None),
+            product_owner_name=getattr(m, "product_owner_name", None),
+            tech_owner_name=getattr(m, "tech_owner_name", None),
+            dw_developer_name=getattr(m, "dw_developer_name", None),
             metric_code=getattr(metric, "metric_code", None) if metric is not None else None,
             metric_name=getattr(metric, "name", None) if metric is not None else None,
             metric_type=getattr(metric, "type", None) if metric is not None else None,

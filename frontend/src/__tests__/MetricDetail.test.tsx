@@ -2739,6 +2739,9 @@ describe("MetricDetail 按钮级权限过滤", () => {
 
   // 2026-08-27 多变体：详情页挂载卡逐行展示全部变体（不同粒度/限定/周期），业务限定随行展示
   it("详情页逐行展示多变体挂载（粒度/业务限定/周期）", async () => {
+    mockedUsers.mockResolvedValue([
+      { id: 11, username: "lisi", display_name: "李四", role: "user", domain: "medical" },
+    ] as never);
     mockedListMetricMounts.mockResolvedValue({
       items: [
         {
@@ -2750,6 +2753,9 @@ describe("MetricDetail 按钮级权限过滤", () => {
           default_period: "day",
           domain: "medical",
           business_filter: "场景=门诊",
+          // 变体级责任方：平台用户（id 解析显示姓名）
+          product_owner_id: 11,
+          product_owner_name: null,
           created_at: "2026-08-01T00:00:00",
           updated_at: "2026-08-01T00:00:00",
         },
@@ -2762,6 +2768,8 @@ describe("MetricDetail 按钮级权限过滤", () => {
           default_period: "day",
           domain: "medical",
           business_filter: "场景=住院",
+          // 变体级责任方：外部人员（仅名称，非平台用户）
+          tech_owner_name: "外部技术协作方",
           created_at: "2026-08-01T00:00:00",
           updated_at: "2026-08-01T00:00:00",
         },
@@ -2777,6 +2785,9 @@ describe("MetricDetail 按钮级权限过滤", () => {
     expect(screen.getByText("dwd.doctor_fee_daily")).toBeTruthy();
     expect(screen.getByText(/粒度：医生/)).toBeTruthy();
     expect(screen.getByText(/业务限定：场景=门诊/)).toBeTruthy();
+    // 变体级责任方（方案 B）：平台用户 id 解析 → 李四；外部人员仅名称 → 直接展示
+    expect(screen.getByText("产品：李四")).toBeTruthy();
+    expect(screen.getByText("技术：外部技术协作方")).toBeTruthy();
     expect(screen.getByText("dwd.hospital_fee")).toBeTruthy();
     expect(screen.getByText(/粒度：医院/)).toBeTruthy();
     expect(screen.getByText(/业务限定：场景=住院/)).toBeTruthy();

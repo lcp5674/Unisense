@@ -703,6 +703,15 @@ export function MetricDetail() {
   const [unmounting, setUnmounting] = useState(false);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [users, setUsers] = useState<UserBrief[]>([]);
+  // 变体级责任方展示（方案 B）：id 可解析 → 平台用户；id 空但 name 非空 → 外部人员；
+  // 全空 → 继承指标级（挂载行不重复展示）。
+  const mountOwnerText = (uid: number | null | undefined, name?: string | null): string => {
+    if (uid != null) {
+      const u = users.find((x) => x.id === uid);
+      return u ? `${u.display_name || u.username}` : `用户 #${uid}`;
+    }
+    return name || "";
+  };
   const [health, setHealth] = useState<MetricHealth | null>(null);
   const [favorited, setFavorited] = useState(false);
   const [subscribed, setSubscribed] = useState(false);
@@ -828,7 +837,8 @@ export function MetricDetail() {
     };
     const safeDims = async (): Promise<{ items: Dimension[] }> => {
       try {
-        return (await listDimensions({ page_size: 100 })) ?? { items: [] as Dimension[] };
+        // 仅加载已发布维度（与注册向导一致：指标可关联的维度必须是 PUBLISHED）
+        return (await listDimensions({ status: "PUBLISHED", page_size: 100 })) ?? { items: [] as Dimension[] };
       } catch {
         return { items: [] as Dimension[] };
       }
@@ -2384,6 +2394,26 @@ export function MetricDetail() {
                   {m.business_filter ? ` · 业务限定：${m.business_filter}` : ""}
                 </span>
               </Space>
+              {/* 变体级责任方（方案 B）：行内展示归属；全空 = 继承指标级，不重复展示 */}
+              {(m.product_owner_id != null ||
+                m.product_owner_name ||
+                m.tech_owner_id != null ||
+                m.tech_owner_name ||
+                m.dw_developer_id != null ||
+                m.dw_developer_name) && (
+                <span className="muted" style={{ display: "block", fontSize: 12 }}>
+                  责任方：
+                  {m.product_owner_id != null || m.product_owner_name ? (
+                    <Tag style={{ marginLeft: 4 }}>产品：{mountOwnerText(m.product_owner_id, m.product_owner_name)}</Tag>
+                  ) : null}
+                  {m.tech_owner_id != null || m.tech_owner_name ? (
+                    <Tag style={{ marginLeft: 4 }}>技术：{mountOwnerText(m.tech_owner_id, m.tech_owner_name)}</Tag>
+                  ) : null}
+                  {m.dw_developer_id != null || m.dw_developer_name ? (
+                    <Tag style={{ marginLeft: 4 }}>数仓：{mountOwnerText(m.dw_developer_id, m.dw_developer_name)}</Tag>
+                  ) : null}
+                </span>
+              )}
               <Button
                 size="small"
                 danger

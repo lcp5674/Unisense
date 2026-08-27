@@ -361,6 +361,7 @@ export function MetricCreate() {
   const [downTableKw, setDownTableKw] = useState("");      // 使用表（下游）
   const [columnKw, setColumnKw] = useState("");            // 度量列
   const [mountColumnKw, setMountColumnKw] = useState("");  // 挂载度量列
+  const [mountGranularityKw, setMountGranularityKw] = useState(""); // 挂载粒度（字典+手输兜底）
   // 域默认值预填字段集合（TD §3.8）：选域触发 autoSuggest 时这些字段不被推断覆盖
   // （管理员显式配置的域默认值优先于自动推断），SQL 推断等用户主动操作可正常覆盖。
   const domainPrefillRef = useRef<Set<string>>(new Set());
@@ -528,10 +529,10 @@ export function MetricCreate() {
   }, [dictOptions, form]);
 
   // 加载平台维度（关联维度下拉的数据源，来自维度管理模块）。
-  // 注意：不带 status 过滤——维度状态枚举是 DRAFT/REVIEW/PUBLISHED/DEPRECATED（无 "active"），
-  // 传 status="active" 会被后端精确匹配返回空；与维度管理页/MetricDetail 编辑弹窗保持一致展示全部未删除维度。
+  // 业务规则：注册指标可关联的维度必须是「已发布」的（维度状态枚举 DRAFT/REVIEW/PUBLISHED/DEPRECATED，
+  // 传 "active" 会被后端精确匹配返回空——曾因此选项框恒空）；与依赖指标/逻辑度量下拉一致仅展示 PUBLISHED。
   useEffect(() => {
-    listDimensions({ page_size: 200 })
+    listDimensions({ status: "PUBLISHED", page_size: 200 })
       .then((res) =>
         setDimensionOptions(
           (res.items ?? []).map((d: Dimension) => ({
@@ -1890,6 +1891,9 @@ export function MetricCreate() {
       const collected: MetricMountInput[] = rawMounts
         .map((m) => {
           const row = (m ?? {}) as Record<string, unknown>;
+          const rowProduct = row.product_owner as RoleOwnerValue | undefined;
+          const rowTech = row.tech_owner as RoleOwnerValue | undefined;
+          const rowDw = row.dw_developer as RoleOwnerValue | undefined;
           return {
             source_table: String(row.source_table ?? "").trim(),
             source_column: String(row.source_column ?? "").trim(),
@@ -1897,6 +1901,13 @@ export function MetricCreate() {
             default_period: String(row.default_period ?? "") || null,
             domain: selectedDomain,
             business_filter: String(row.business_filter ?? "").trim() || null,
+            // 变体级责任方（方案 B）：空 = 继承指标级
+            product_owner_id: rowProduct?.id ?? null,
+            tech_owner_id: rowTech?.id ?? null,
+            dw_developer_id: rowDw?.id ?? null,
+            product_owner_name: rowProduct?.name ?? null,
+            tech_owner_name: rowTech?.name ?? null,
+            dw_developer_name: rowDw?.name ?? null,
           };
         })
         .filter((m) => m.source_table && m.source_column && m.granularity);
@@ -2371,7 +2382,18 @@ export function MetricCreate() {
                                     name={[name, "granularity"]}
                                     style={{ marginBottom: 0 }}
                                   >
-                                    <Input placeholder="粒度（如 日/月/医院）" maxLength={64} />
+                                    <Select
+                                      showSearch
+                                      allowClear
+                                      placeholder="粒度（如 日/月/医院）"
+                                      onSearch={setMountGranularityKw}
+                                      options={withUncollectedOption(
+                                        mountGranularityKw,
+                                        dictOptions["granularity"] || [],
+                                      )}
+                                      notFoundContent="无匹配粒度，可直接输入（如 医院/药品）"
+                                      filterOption={false}
+                                    />
                                   </Form.Item>
                                 </Col>
                                 <Col span={4}>
@@ -2398,6 +2420,37 @@ export function MetricCreate() {
                                       onClick={() => remove(name)}
                                     />
                                   )}
+                                </Col>
+                              </Row>
+                              {/* 变体级口径三方责任（方案 B）：不同变体可归属不同需求方/开发角色；
+                                  空 = 继承指标级责任方（指标级不填则无） */}
+                              <Row gutter={12} align="middle" style={{ marginTop: 8 }}>
+                                <Col span={8}>
+                                  <Form.Item
+                                    {...restField}
+                                    name={[name, "product_owner"]}
+                                    style={{ marginBottom: 0 }}
+                                  >
+                                    <RoleOwnerSelect users={ownerUsers} placeholder="产品需求方（空=继承指标级）" />
+                                  </Form.Item>
+                                </Col>
+                                <Col span={8}>
+                                  <Form.Item
+                                    {...restField}
+                                    name={[name, "tech_owner"]}
+                                    style={{ marginBottom: 0 }}
+                                  >
+                                    <RoleOwnerSelect users={ownerUsers} placeholder="技术方（空=继承指标级）" />
+                                  </Form.Item>
+                                </Col>
+                                <Col span={8}>
+                                  <Form.Item
+                                    {...restField}
+                                    name={[name, "dw_developer"]}
+                                    style={{ marginBottom: 0 }}
+                                  >
+                                    <RoleOwnerSelect users={ownerUsers} placeholder="数仓开发（空=继承指标级）" />
+                                  </Form.Item>
                                 </Col>
                               </Row>
                             </div>

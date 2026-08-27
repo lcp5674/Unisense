@@ -44,6 +44,12 @@ class MetricMountService(BaseService):
             default_period=data.default_period,
             domain=data.domain,
             business_filter=data.business_filter,
+            product_owner_id=data.product_owner_id,
+            tech_owner_id=data.tech_owner_id,
+            dw_developer_id=data.dw_developer_id,
+            product_owner_name=data.product_owner_name,
+            tech_owner_name=data.tech_owner_name,
+            dw_developer_name=data.dw_developer_name,
         )
         saved = await self._repo.save(mount)
         # 多变体：新增挂载后回填默认变体粒度（冗余展示列），对齐 semantic 创建路径
@@ -104,6 +110,19 @@ class MetricMountService(BaseService):
             mount.domain = data.domain
         if data.business_filter is not None:
             mount.business_filter = data.business_filter
+        # 变体级责任方（治理属性，非破坏性；空值不覆盖——缺省继承指标级语义）
+        if data.product_owner_id is not None:
+            mount.product_owner_id = data.product_owner_id
+        if data.tech_owner_id is not None:
+            mount.tech_owner_id = data.tech_owner_id
+        if data.dw_developer_id is not None:
+            mount.dw_developer_id = data.dw_developer_id
+        if data.product_owner_name is not None:
+            mount.product_owner_name = data.product_owner_name
+        if data.tech_owner_name is not None:
+            mount.tech_owner_name = data.tech_owner_name
+        if data.dw_developer_name is not None:
+            mount.dw_developer_name = data.dw_developer_name
         await self._repo.commit()
         return mount
 
