@@ -147,6 +147,7 @@ import {
   SnapshotResponse,
   CollectionJob,
   CollectionRun,
+  CollectionRunLogItem,
   SourceHealth,
   SourceOverview,
   SourceType,
@@ -3805,6 +3806,29 @@ export async function getCollectionRunSummary(params?: {
 /** 采集运行详情（含失败实体 / 漂移事件 / 降级原因明细）。 */
 export async function getCollectionRunDetail(runId: number): Promise<CollectionRun> {
   return request<CollectionRun>(`${API_BASE}/collection-runs/${runId}`);
+}
+
+/** 采集运行日志分页（采集记录详情页「实时日志」）。
+ *
+ * 读取策略：终态（已回写 DB）读 collection_run_log 表；RUNNING 中或崩溃未收尾
+ * 读 Redis 实时缓冲。返回 source（db/redis/none）与 status 供前端决定是否轮询。
+ */
+export async function getCollectionRunLogs(
+  runId: number,
+  params?: { offset?: number; limit?: number },
+): Promise<{
+  items: CollectionRunLogItem[];
+  total: number;
+  source: "db" | "redis" | "none" | string;
+  status: string;
+}> {
+  const qs = pageQs({ offset: params?.offset ?? 0, limit: params?.limit ?? 200 });
+  return request<{
+    items: CollectionRunLogItem[];
+    total: number;
+    source: "db" | "redis" | "none" | string;
+    status: string;
+  }>(`${API_BASE}/collection-runs/${runId}/logs?${qs}`);
 }
 
 export async function getSourceWatermark(sourceId: string): Promise<Watermark> {

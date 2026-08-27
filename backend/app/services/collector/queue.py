@@ -421,6 +421,81 @@ class RedisJobStore:
 _arq_redis: Any | None = None
 
 
+# ---- 采集运行日志 Redis 实时缓冲 ----
+# 采集期间日志先追加到 Redis List（O(1)、实时可读，供采集记录详情页 RUNNING
+# 轮询展示），任务终态由 worker/API 一次性 bulk 回写 collection_run_log 表并删除
+# 缓冲 key。TTL 与 JobStore 终态对齐（7 天）：崩溃未回写时缓冲自愈，不无限堆积。
+_RUN_LOG_TTL_SECONDS: int = 7 * 24 * 60 * 60
+
+
+def run_log_key(run_id: int) -> str:
+    """采集运行日志 Redis List key（按 run_id 隔离）。"""
+    return f"collect:run_log:{run_id}"
+
+
+async def append_run_log(redis: Any, run_id: int, entry: dict[str, Any]) -> None:
+    """追加一条采集运行日志到 Redis 实时缓冲（RPUSH 保序 + 首次写 TTL）。
+
+    Args:
+        redis: Redis 客户端（ArqRedis/AsyncRedis，均支持 rpush/expire/llen/lrange）。
+        run_id: 采集运行记录 ID。
+        entry: 日志条目（ts/level/phase/entity_name/message），JSON 序列化存储。
+    """
+    import json
+    from datetime import UTC, datetime
+
+    if not entry.get("message"):
+        return
+    payload = {
+        "ts": entry.get("ts") or datetime.now(UTC).isoformat(),
+        "level": str(entry.get("level") or "INFO"),
+        "phase": entry.get("phase"),
+        "entity_name": entry.get("entity_name"),
+        "message": str(entry.get("message"))[:512],
+    }
+    key = run_log_key(run_id)
+    length = await redis.rpush(key, json.dumps(payload, ensure_ascii=False))
+    # 仅首次写入设置 TTL（后续由任务终态回写后显式删除；TTL 是崩溃兜底）
+    if int(length) == 1:
+        await redis.expire(key, _RUN_LOG_TTL_SECONDS)
+
+
+async def read_run_logs(
+    redis: Any, run_id: int, offset: int, limit: int
+) -> tuple[list[dict[str, Any]], int]:
+    """从 Redis 实时缓冲分页读取采集运行日志（时间正序，与执行顺序一致）。
+
+    Returns:
+        (日志条目列表, 总条数)。
+    """
+    import json
+
+    key = run_log_key(run_id)
+    total = int(await redis.llen(key) or 0)
+    if offset >= total or limit <= 0:
+        return [], total
+    raw = await redis.lrange(key, offset, offset + limit - 1)
+    items: list[dict[str, Any]] = []
+    for blob in raw:
+        if isinstance(blob, bytes):
+            blob = blob.decode("utf-8", errors="replace")
+        try:
+            item = json.loads(blob)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(item, dict):
+            items.append(item)
+    return items, total
+
+
+async def delete_run_logs(redis: Any, run_id: int) -> None:
+    """删除采集运行日志 Redis 缓冲（终态回写 DB 后清理，防 Redis 堆积）。"""
+    try:
+        await redis.delete(run_log_key(run_id))
+    except Exception:  # noqa: BLE001 - 清理失败仅记录，不影响主流程
+        logger.warning("run_log_delete_failed: run=%s", run_id)
+
+
 def _get_shared_arq_redis(url: str) -> Any:
     """获取共享的 arq Redis 连接（惰性单例，进程内复用）。
 

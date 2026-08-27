@@ -26,17 +26,19 @@ vi.mock("../api", () => {
     listCollectionRuns: vi.fn(),
     getCollectionRunDetail: vi.fn(),
     getCollectionRunSummary: vi.fn(),
+    getCollectionRunLogs: vi.fn(),
     UnisenseApiError,
   };
 });
 
-import { listDataSources, listDriftLogs, listCollectionRuns, getCollectionRunDetail, getCollectionRunSummary } from "../api";
+import { listDataSources, listDriftLogs, listCollectionRuns, getCollectionRunDetail, getCollectionRunSummary, getCollectionRunLogs } from "../api";
 
 const mockedSources = vi.mocked(listDataSources);
 const mockedRuns = vi.mocked(listCollectionRuns);
 const mockedDrift = vi.mocked(listDriftLogs);
 const mockedRunDetail = vi.mocked(getCollectionRunDetail);
 const mockedSummary = vi.mocked(getCollectionRunSummary);
+const mockedRunLogs = vi.mocked(getCollectionRunLogs);
 
 const source: DataSource = {
   source_id: "mysql_finance",
@@ -146,6 +148,16 @@ describe("CollectionHistory", () => {
       scanned: 100,
       registered: 90,
     });
+    // 运行日志默认 mock：终态（DB 已回写），详情页打开即展示
+    mockedRunLogs.mockResolvedValue({
+      items: [
+        { ts: "2026-08-14T03:00:01+00:00", level: "INFO", phase: "start", entity_name: null, message: "开始采集 mysql_finance（FULL 模式）" },
+        { ts: "2026-08-14T03:00:02+00:00", level: "INFO", phase: "registering", entity_name: "orders", message: "注册 1/54：orders" },
+      ],
+      total: 2,
+      source: "db",
+      status: "COMPLETED",
+    });
   });
 
   it("采集记录 tab：展示统计摘要卡与运行历史表格", async () => {
@@ -207,5 +219,53 @@ describe("CollectionHistory", () => {
     // 抽屉展示指标
     expect(screen.getAllByText("扫描").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("覆盖率")).toBeTruthy();
+  });
+
+  it("点击详情：展示运行日志（终态读 DB）", async () => {
+    render(<MemoryRouter><CollectionHistory /></MemoryRouter>);
+    await screen.findAllByText("采集记录");
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: /详\s*情/ }).length).toBeGreaterThanOrEqual(1);
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: /详\s*情/ })[0]);
+    await screen.findByText("采集运行详情");
+    // 日志 API 被调用（run id 1，首屏 offset 0）
+    expect(mockedRunLogs).toHaveBeenCalledWith(1, expect.objectContaining({ offset: 0 }));
+    // 展示日志内容与总数
+    await waitFor(() => {
+      expect(screen.getByText(/开始采集 mysql_finance/)).toBeTruthy();
+    });
+    expect(screen.getByText(/注册 1\/54：orders/)).toBeTruthy();
+    // 日志总数（表格分页也有「共 N 条」，故用 getAllByText 容忍多处）
+    expect(screen.getAllByText(/共 2 条/).length).toBeGreaterThanOrEqual(1);
+    // 终态不轮询：无「实时更新中」标记
+    expect(screen.queryByText("实时更新中")).toBeNull();
+  });
+
+  it("点击详情：RUNNING 运行展示实时日志（Redis 缓冲 + 实时更新中）", async () => {
+    mockedRunLogs.mockResolvedValue({
+      items: [
+        { ts: "2026-08-14T05:00:01+00:00", level: "INFO", phase: "start", entity_name: null, message: "开始采集 mysql_finance（FULL 模式）" },
+        { ts: "2026-08-14T05:00:02+00:00", level: "ERROR", phase: "registering", entity_name: "broken_tbl", message: "注册失败：broken_tbl — 权限不足" },
+      ],
+      total: 2,
+      source: "redis",
+      status: "RUNNING",
+    });
+    // 详情刷新也返回 RUNNING（触发「实时更新中」标记与轮询）
+    mockedRunDetail.mockResolvedValue({ ...runs[0], status: "RUNNING", detail: { failed_specs: [], drift_events: [] } });
+    render(<MemoryRouter><CollectionHistory /></MemoryRouter>);
+    await screen.findAllByText("采集记录");
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: /详\s*情/ }).length).toBeGreaterThanOrEqual(1);
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: /详\s*情/ })[0]);
+    await screen.findByText("采集运行详情");
+    // 实时日志展示 + RUNNING 标记
+    await waitFor(() => {
+      expect(screen.getByText(/开始采集 mysql_finance/)).toBeTruthy();
+    });
+    expect(screen.getByText("实时更新中")).toBeTruthy();
+    expect(screen.getByText(/注册失败：broken_tbl/)).toBeTruthy();
   });
 });

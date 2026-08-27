@@ -19,8 +19,8 @@ import {
 } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import type { Dayjs } from "dayjs";
-import { listDataSources, listDriftLogs, listCollectionRuns, getCollectionRunDetail, getCollectionRunSummary } from "../api";
-import type { DataSource, CollectionRun } from "../types";
+import { listDataSources, listDriftLogs, listCollectionRuns, getCollectionRunDetail, getCollectionRunSummary, getCollectionRunLogs } from "../api";
+import type { DataSource, CollectionRun, CollectionRunLogItem } from "../types";
 import type { DriftLogItem } from "../api";
 import { formatCnTime } from "../utils/timeCn";
 
@@ -95,6 +95,20 @@ function durationText(seconds?: number | null) {
   return <span className="mono" style={{ fontSize: 12 }}>{seconds}s</span>;
 }
 
+/** 日志时间格式化：ISO → HH:mm:ss（本地时区）。 */
+function formatLogTime(ts?: string | null) {
+  if (!ts) return "";
+  try {
+    const d = new Date(ts);
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${hh}:${mm}:${ss}`;
+  } catch {
+    return ts;
+  }
+}
+
 /** 模式展示：增量降级为全量时标注实际执行模式。 */
 function modeText(run: CollectionRun) {
   if (run.effective_mode && run.effective_mode !== run.mode) {
@@ -129,6 +143,14 @@ export function CollectionHistory() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailRun, setDetailRun] = useState<CollectionRun | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  // 运行日志（实时缓冲 + 终态回写）：RUNNING 轮询增量追加，终态一次展示
+  const [logs, setLogs] = useState<CollectionRunLogItem[]>([]);
+  const [logsTotal, setLogsTotal] = useState(0);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logsSource, setLogsSource] = useState<string>("");
+  const logsRef = useRef<CollectionRunLogItem[]>([]);
+  const logBoxRef = useRef<HTMLDivElement | null>(null);
+  const logPollTimer = useRef<number | null>(null);
   // ---- 变更追踪 tab 状态 ----
   const [driftSourceId, setDriftSourceId] = useState<string>("");
   const [driftEntity, setDriftEntity] = useState<string>("");
@@ -230,23 +252,73 @@ export function CollectionHistory() {
       setDriftPage(1);
     }, 300);
   }, []);
-  // 组件卸载时清理防抖定时器
+  // 组件卸载时清理防抖定时器与日志轮询
   useEffect(() => () => {
     if (driftInputTimer.current !== null) window.clearTimeout(driftInputTimer.current);
+    stopLogPolling();
   }, []);
 
   useEffect(() => { loadSources(); }, [loadSources]);
   useEffect(() => { loadRuns(); }, [loadRuns]);
   useEffect(() => { loadDrift(); }, [loadDrift]);
 
-  /** 打开运行详情抽屉：拉取完整明细（failed_specs / drift_events）。 */
+  /** 停止运行日志轮询（抽屉关闭 / 终态 / 组件卸载时调用）。 */
+  function stopLogPolling() {
+    if (logPollTimer.current !== null) {
+      window.clearInterval(logPollTimer.current);
+      logPollTimer.current = null;
+    }
+  }
+
+  /** 加载运行日志（offset 增量追加 / reset 首屏重置），返回响应供调用方判终态。 */
+  async function loadRunLogs(runId: number, offset: number, reset: boolean) {
+    setLogsLoading(true);
+    try {
+      const res = await getCollectionRunLogs(runId, { offset, limit: 200 });
+      const next = reset ? res.items : [...logsRef.current, ...res.items];
+      logsRef.current = next;
+      setLogs(next);
+      setLogsTotal(res.total);
+      setLogsSource(res.source);
+      // 自动滚到最新日志
+      requestAnimationFrame(() => {
+        if (logBoxRef.current) logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight;
+      });
+      return res;
+    } catch {
+      return null;
+    } finally {
+      setLogsLoading(false);
+    }
+  }
+
+  /** 启动运行日志轮询：RUNNING 期间每 3s 增量追加，终态（回写 DB）自动停止。 */
+  function startLogPolling(runId: number) {
+    stopLogPolling();
+    logPollTimer.current = window.setInterval(async () => {
+      const res = await loadRunLogs(runId, logsRef.current.length, false);
+      if (res && res.status !== "RUNNING" && res.source === "db") {
+        stopLogPolling();
+      }
+    }, 3000);
+  }
+
+  /** 打开运行详情抽屉：拉取完整明细（failed_specs / drift_events）+ 运行日志。 */
   async function openRunDetail(run: CollectionRun) {
+    stopLogPolling();
+    logsRef.current = [];
+    setLogs([]);
+    setLogsTotal(0);
+    setLogsSource("");
     setDetailRun(run);
     setDetailOpen(true);
     setDetailLoading(true);
     try {
       const fresh = await getCollectionRunDetail(run.id);
       if (fresh) setDetailRun(fresh);
+      // 首屏日志：RUNNING 读 Redis 实时缓冲；终态读 DB（已回写）
+      const logRes = await loadRunLogs(fresh?.id ?? run.id, 0, true);
+      if (logRes && logRes.status === "RUNNING") startLogPolling(fresh?.id ?? run.id);
     } catch {
       /* 详情刷新失败保留列表行数据 */
     } finally {
@@ -529,7 +601,7 @@ export function CollectionHistory() {
       <Drawer
         title="采集运行详情"
         open={detailOpen}
-        onClose={() => setDetailOpen(false)}
+        onClose={() => { stopLogPolling(); setDetailOpen(false); }}
         width={680}
       >
         {detail && (
@@ -591,6 +663,63 @@ export function CollectionHistory() {
             {detail.detail?.degrade_reason && (
               <Alert type="warning" showIcon style={{ marginTop: 8 }} message={`增量降级原因：${detail.detail.degrade_reason}`} />
             )}
+            {/* 运行日志：RUNNING 实时轮询（Redis 缓冲），终态读 DB（长期可追溯） */}
+            <div style={{ marginTop: 16 }}>
+              <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
+                <span style={{ fontWeight: 600 }}>运行日志</span>
+                {detail.status === "RUNNING" && (
+                  <Tag color="processing" style={{ marginLeft: 8 }}>实时更新中</Tag>
+                )}
+                {logsSource === "db" && logsTotal > 0 && (
+                  <span className="muted" style={{ marginLeft: 8, fontSize: 12 }}>共 {logsTotal} 条</span>
+                )}
+              </div>
+              <div
+                ref={logBoxRef}
+                style={{
+                  maxHeight: 280,
+                  overflowY: "auto",
+                  background: "#0f172a",
+                  borderRadius: 8,
+                  padding: "8px 12px",
+                  fontFamily: "'SFMono-Regular', Consolas, 'Liberation Mono', monospace",
+                  fontSize: 12,
+                  lineHeight: 1.9,
+                }}
+              >
+                {logs.length === 0 && !logsLoading ? (
+                  <span style={{ color: "#64748b" }}>
+                    {logsSource === "none" ? "该运行无日志（Redis 不可用）" : "暂无日志"}
+                  </span>
+                ) : (
+                  logs.map((log, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        color: log.level === "ERROR" ? "#f87171" : log.level === "WARN" ? "#fbbf24" : "#e2e8f0",
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-all",
+                      }}
+                    >
+                      <span style={{ color: "#64748b" }}>{formatLogTime(log.ts)}</span>{" "}
+                      <span style={{ color: log.level === "ERROR" ? "#f87171" : "#38bdf8" }}>[{log.level}]</span>{" "}
+                      {log.entity_name && <span style={{ color: "#a78bfa" }}>{log.entity_name}</span>} {log.message}
+                    </div>
+                  ))
+                )}
+                {logsLoading && <div style={{ color: "#64748b" }}>加载中…</div>}
+                {logsTotal > logs.length && (
+                  <Button
+                    type="link"
+                    size="small"
+                    style={{ paddingLeft: 0, color: "#93c5fd" }}
+                    onClick={() => loadRunLogs(detail?.id ?? 0, logs.length, false)}
+                  >
+                    加载更多（{logsTotal - logs.length} 条）
+                  </Button>
+                )}
+              </div>
+            </div>
           </>
         )}
         {!detail && <Empty description="无运行数据" />}

@@ -4406,3 +4406,91 @@ async def test_repo_summarize_collection_runs_single_query():
     assert s.execute.await_count == 1
     sql = str(s.execute.call_args.args[0].compile(compile_kwargs={"literal_binds": True}))
     assert "COMPLETED" in sql and "FAILED" in sql
+
+
+# ---------- 采集运行日志（collection_run_log 表） ----------
+
+
+async def test_repo_append_run_logs_bulk_adds_and_flushes():
+    s = _session()
+    s.add_all = MagicMock()
+    repo = CollectorRepository(s)
+
+    await repo.append_run_logs(
+        42,
+        [
+            {"ts": "2026-08-27T10:00:00", "level": "INFO", "phase": "start", "message": "开始采集"},
+            {"ts": "2026-08-27T10:00:01", "level": "ERROR", "phase": "registering", "entity_name": "t", "message": "注册失败：t"},
+        ],
+    )
+
+    s.add_all.assert_called_once()
+    added = s.add_all.call_args.args[0]
+    assert len(added) == 2
+    assert added[0].run_id == 42
+    assert added[0].level == "INFO"
+    assert added[1].level == "ERROR"
+    assert added[1].entity_name == "t"
+    s.flush.assert_awaited_once()
+
+
+async def test_repo_append_run_logs_skips_empty():
+    s = _session()
+    s.add_all = MagicMock()
+    repo = CollectorRepository(s)
+
+    await repo.append_run_logs(42, [])
+
+    s.add_all.assert_not_called()
+    s.flush.assert_not_awaited()
+
+
+async def test_repo_has_run_logs_true_when_count_nonzero():
+    s = _session(scalar=3)
+    repo = CollectorRepository(s)
+
+    assert await repo.has_run_logs(42) is True
+
+
+async def test_repo_has_run_logs_false_when_zero():
+    s = _session(scalar=0)
+    repo = CollectorRepository(s)
+
+    assert await repo.has_run_logs(42) is False
+
+
+async def test_repo_list_run_logs_paginates_and_orders():
+    s = _session(scalar=2)
+    row1 = MagicMock(ts=datetime(2026, 8, 27, tzinfo=UTC), level="INFO", phase="start", entity_name=None, message="开始采集")
+    row2 = MagicMock(ts=datetime(2026, 8, 27, tzinfo=UTC), level="INFO", phase="registering", entity_name="t", message="注册 1/2：t")
+    s.execute = AsyncMock(return_value=MagicMock(scalars=lambda: MagicMock(all=lambda: [row1, row2])))
+    repo = CollectorRepository(s)
+
+    rows, total = await repo.list_run_logs(42, 0, 10)
+
+    assert total == 2
+    assert rows == [row1, row2]
+    # 查询按 run_id 过滤
+    sql = str(s.execute.call_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "collection_run_log" in sql
+    assert "42" in sql
+
+
+async def test_repo_purge_collection_runs_deletes_logs_before_runs():
+    s = _session()
+    res_log = MagicMock()
+    res_log.rowcount = 12  # 级联删除的日志行数
+    res_run = MagicMock()
+    res_run.rowcount = 5  # 删除的运行记录数
+    s.execute = AsyncMock(side_effect=[res_log, res_run])
+    repo = CollectorRepository(s)
+
+    purged = await repo.purge_collection_runs(datetime(2026, 1, 1, tzinfo=UTC))
+
+    assert purged == 5
+    # 先删日志子表、再删主表（外键约束顺序）
+    assert s.execute.await_count == 2
+    sql1 = str(s.execute.call_args_list[0].args[0].compile(compile_kwargs={"literal_binds": True}))
+    sql2 = str(s.execute.call_args_list[1].args[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "collection_run_log" in sql1
+    assert "collection_run" in sql2

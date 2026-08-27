@@ -24,6 +24,11 @@ from typing import Any
 from app.core.exceptions import ExternalDependencyError
 from app.db.mysql import async_session_factory
 from app.services.collector.distributed_lock import CollectionLock
+from app.services.collector.queue import (
+    append_run_log,
+    delete_run_logs,
+    read_run_logs,
+)
 from app.services.collector.repository import CollectorRepository
 from app.services.collector.service import CollectorService
 from app.services.collector.spi import build_collector
@@ -53,12 +58,19 @@ def _make_progress_cb(
     source_id: str,
     actor_id: int,
     mode: str = "FULL",
+    *,
+    run_id: int | None = None,
+    redis: Any | None = None,
 ) -> Callable[[dict[str, Any]], Awaitable[None]]:
     """构造写入 JobStore 的采集进度回调（供 SSE 实时推送）。
 
     每次回调把最新进度快照写入 ``store.set(job_id, "RUNNING", {...})``；
     消息列表保留最近 N 条，Redis/内存中不无限增长。``mode`` 写入 detail，
     保证任务中心在 RUNNING 期间也能展示真实执行模式（不被进度覆盖）。
+
+    ``run_id``/``redis`` 提供时，同步把每条进度追加到采集运行日志 Redis 实时
+    缓冲（``collect:run_log:{run_id}``）——任务终态由 ``_flush_run_logs``
+    一次性回写 ``collection_run_log`` 表，供采集记录详情页长期查看。
     """
     messages: list[str] = []
 
@@ -83,8 +95,122 @@ def _make_progress_cb(
             "RUNNING",
             {"source_id": source_id, "actor_id": actor_id, "mode": mode, "progress": progress},
         )
+        # 采集运行日志实时缓冲（best-effort：Redis 写入失败不影响采集主流程）
+        if redis is not None and run_id is not None and msg:
+            from datetime import UTC, datetime
+
+            try:
+                await append_run_log(
+                    redis,
+                    run_id,
+                    {
+                        "ts": datetime.now(UTC).isoformat(),
+                        "level": "ERROR" if event.get("phase") == "fail" else "INFO",
+                        "phase": event.get("phase"),
+                        "entity_name": event.get("entity_name"),
+                        "message": msg,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 - 日志写入是辅助能力
+                logger.warning("run_log_append_failed: run=%s err=%s", run_id, exc)
 
     return cb
+
+
+def _make_run_log_cb(
+    redis: Any | None, run_id: int | None
+) -> Callable[[dict[str, Any]], Awaitable[None]] | None:
+    """构造仅写采集运行日志实时缓冲的进度回调（同步采集 API 路径用）。
+
+    与 ``_make_progress_cb`` 不同：同步路径无 JobStore，只需把进度追加到
+    Redis 实时缓冲（``collect:run_log:{run_id}``），终态由 API 收尾
+    ``_flush_run_logs`` 回写 DB。Redis 不可用或 run_id 缺失时返回 None。
+
+    Args:
+        redis: Redis 客户端（可空——不可用则日志能力降级为 no-op）。
+        run_id: 采集运行记录 ID（创建失败为 None 时降级 no-op）。
+    """
+    if redis is None or run_id is None:
+        return None
+    from datetime import UTC, datetime
+
+    async def cb(event: dict[str, Any]) -> None:
+        msg = str(event.get("message") or "")
+        if not msg:
+            return
+        try:
+            await append_run_log(
+                redis,
+                run_id,
+                {
+                    "ts": datetime.now(UTC).isoformat(),
+                    "level": "ERROR" if event.get("phase") == "fail" else "INFO",
+                    "phase": event.get("phase"),
+                    "entity_name": event.get("entity_name"),
+                    "message": msg,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - 日志写入是辅助能力
+            logger.warning("run_log_append_failed: run=%s err=%s", run_id, exc)
+
+    return cb
+
+
+async def _flush_run_logs(
+    redis: Any | None,
+    svc: CollectorService | None,
+    run_id: int | None,
+    *,
+    result: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> None:
+    """把 Redis 实时缓冲的采集日志一次性回写 DB 并清理缓冲（任务终态收尾）。
+
+    实时缓冲只存进度事件（start/scanning/registering），终态信息
+    （失败原因 / 失败实体明细）在此处补充为 ERROR 日志一并落库，保证
+    采集记录详情页能完整回看一次采集的全程（含失败细节）。
+
+    Args:
+        redis: Redis 客户端（可空——无缓冲则跳过）。
+        svc: 采集服务（可空——无服务则跳过）。
+        run_id: 采集运行记录 ID（可空——无记录则跳过）。
+        result: 采集结果（成功收尾时提供，补充 failed_specs ERROR 日志）。
+        error: 失败原因（失败收尾时提供，补充一条 ERROR 日志）。
+    """
+    if redis is None or svc is None or run_id is None:
+        return
+    try:
+        entries, _ = await read_run_logs(redis, run_id, 0, -1)
+        from datetime import UTC, datetime
+
+        ts = datetime.now(UTC).isoformat()
+        if error:
+            entries.append(
+                {
+                    "ts": ts,
+                    "level": "ERROR",
+                    "phase": "fail",
+                    "entity_name": None,
+                    "message": f"采集失败：{error[:480]}",
+                }
+            )
+        else:
+            for fs in (result or {}).get("failed_specs") or []:
+                entity = str(fs.get("entity_name") or "")
+                entries.append(
+                    {
+                        "ts": ts,
+                        "level": "ERROR",
+                        "phase": "registering",
+                        "entity_name": entity,
+                        "message": f"注册失败：{entity} — {str(fs.get('error') or '')[:300]}",
+                    }
+                )
+        if entries:
+            await svc.flush_run_logs(run_id, entries)
+        await delete_run_logs(redis, run_id)
+    except Exception as exc:  # noqa: BLE001 - 日志回写是辅助能力，失败不阻断收尾
+        logger.warning("run_log_flush_failed: run=%s err=%s", run_id, exc)
 
 
 async def _check_idempotency(redis: Any | None, job_id: str) -> bool:
@@ -137,12 +263,13 @@ async def _record_task_failure(
     actor_id: int,
     store: Any,
     error: str,
+    redis: Any | None = None,
 ) -> None:
     """采集任务失败/超时的副作用收尾（except Exception 与 CancelledError 共用）。
 
     统一处理：释放 PendingRollback 会话 + 运行记录 FAILED + 健康状态 + JobStore
-    终态——避免超时（``asyncio.CancelledError`` 是 BaseException 不落入
-    ``except Exception``）导致 JobStore 与 collection_run 永久卡 RUNNING。
+    终态 + 运行日志回写——避免超时（``asyncio.CancelledError`` 是 BaseException
+    不落入 ``except Exception``）导致 JobStore 与 collection_run 永久卡 RUNNING。
 
     Args:
         db: 数据库会话（可为 None）。
@@ -153,6 +280,7 @@ async def _record_task_failure(
         actor_id: 触发者 ID。
         store: JobStore（可为 None）。
         error: 失败原因文本。
+        redis: Redis 客户端（可为 None，用于回写运行日志实时缓冲）。
     """
     # 采集异常可能已让 session 进入 PendingRollback（flush/commit 失败）。
     # 必须先 rollback 释放会话，否则 fail_collection_run / update_health_status
@@ -169,6 +297,11 @@ async def _record_task_failure(
             await svc.fail_collection_run(run_id, error)
         except Exception:  # noqa: BLE001 - 失败收尾异常不影响上抛
             logger.warning("collection_run_fail_commit_failed: run=%s", run_id)
+        # 运行日志实时缓冲回写 DB（失败路径补充 ERROR 日志后落库）
+        try:
+            await _flush_run_logs(redis, svc, run_id, error=error)
+        except Exception:  # noqa: BLE001 - 日志回写失败不影响上抛
+            logger.warning("collection_run_log_flush_failed: run=%s", run_id)
     # P2-14: 任务失败定向通知源 Owner（best-effort；独立 session，不干扰失败主流程）
     if svc is not None:
         try:
@@ -349,11 +482,20 @@ async def run_collection_task(
             )
             run_id = None
 
-        # 构造进度回调：worker 侧把 RUNNING 进度写入 JobStore，供 SSE 实时推送
+        # 构造进度回调：worker 侧把 RUNNING 进度写入 JobStore（SSE 实时推送），
+        # 并追加采集运行日志实时缓冲（run_id/redis 提供时）——终态回写 DB。
         progress_cb = (
-            _make_progress_cb(store, job_id, source_id, actor_id, mode=mode)
+            _make_progress_cb(
+                store,
+                job_id,
+                source_id,
+                actor_id,
+                mode=mode,
+                run_id=run_id,
+                redis=redis,
+            )
             if store is not None
-            else None
+            else _make_run_log_cb(redis, run_id)
         )
         # P1-7: 瞬时错误（源库连接/超时/外部依赖）自动退避重试
         result = await _collect_with_retry(
@@ -374,6 +516,8 @@ async def run_collection_task(
         # 采集运行历史：收尾 COMPLETED（回填指标 + 提交）
         if run_id is not None:
             await svc.complete_collection_run(run_id, result)
+            # 运行日志实时缓冲回写 DB（成功路径补充 failed_specs ERROR 日志）
+            await _flush_run_logs(redis, svc, run_id, result=result)
 
         # US5: 成功 → 更新健康状态（service 层已处理）
         if store is not None:
@@ -392,6 +536,7 @@ async def run_collection_task(
             actor_id=actor_id,
             store=store,
             error=str(exc),
+            redis=redis,
         )
         raise
     except asyncio.CancelledError:
@@ -412,6 +557,8 @@ async def run_collection_task(
             if run_id is not None and svc is not None:
                 try:
                     await svc.fail_collection_run(run_id, "任务已取消")
+                    # 取消前执行的进度日志回写（让用户看到任务进行到哪一步）
+                    await _flush_run_logs(redis, svc, run_id, error="任务已取消")
                 except Exception:  # noqa: BLE001 - 取消收尾异常不影响上抛
                     logger.warning("collection_run_cancel_commit_failed: run=%s", run_id)
             raise
@@ -425,6 +572,7 @@ async def run_collection_task(
             actor_id=actor_id,
             store=store,
             error="采集超时或任务取消",
+            redis=redis,
         )
         raise
     finally:

@@ -19,7 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
 from app.core.logging import get_logger
-from app.models.collector_models import CollectionRun, CollectionWatermark, SchemaDriftLog
+from app.models.collector_models import (
+    CollectionRun,
+    CollectionRunLog,
+    CollectionWatermark,
+    SchemaDriftLog,
+)
 from app.models.data_source import ColumnDescription, DataSource, DBCatalog
 from app.models.governance import Classification
 from app.models.user import User
@@ -767,6 +772,70 @@ class CollectorRepository:
             )
         ).scalar_one_or_none()
 
+    async def append_run_logs(
+        self, run_id: int, entries: list[dict[str, Any]]
+    ) -> None:
+        """批量写入采集运行日志（任务终态一次性 bulk 回写，长期可追溯）。
+
+        采集期间日志先写 Redis 实时缓冲（``collect:run_log:{run_id}``），
+        任务完成/失败收尾时由 service 调本方法整体落库——避免采集高频
+        逐条 INSERT 拖慢主流程（上千表场景尤为关键）。
+
+        Args:
+            run_id: 采集运行记录 ID。
+            entries: 日志条目列表 [{ts, level, phase, entity_name, message}]。
+        """
+        if not entries:
+            return
+        self._db.add_all(
+            [
+                CollectionRunLog(
+                    run_id=run_id,
+                    ts=entry.get("ts") or datetime.now(UTC),
+                    level=str(entry.get("level") or "INFO")[:8],
+                    phase=(entry.get("phase") or None)[:32] if entry.get("phase") else None,
+                    entity_name=(entry.get("entity_name") or None)[:256]
+                    if entry.get("entity_name")
+                    else None,
+                    message=str(entry.get("message") or "")[:512],
+                )
+                for entry in entries
+            ]
+        )
+        await self._db.flush()
+
+    async def has_run_logs(self, run_id: int) -> bool:
+        """判断该采集运行是否已落库日志（终态回写后 True，RUNNING 期 False）。"""
+        count = await self._db.scalar(
+            select(func.count())
+            .select_from(CollectionRunLog)
+            .where(
+                CollectionRunLog.run_id == run_id,
+                CollectionRunLog.deleted_at.is_(None),
+            )
+        )
+        return bool(count)
+
+    async def list_run_logs(
+        self, run_id: int, offset: int, limit: int
+    ) -> tuple[list[CollectionRunLog], int]:
+        """采集运行日志分页查询（按时间正序，与采集执行顺序一致）。"""
+        base = select(CollectionRunLog).where(
+            CollectionRunLog.run_id == run_id,
+            CollectionRunLog.deleted_at.is_(None),
+        )
+        total = int(
+            await self._db.scalar(select(func.count()).select_from(base.subquery())) or 0
+        )
+        rows = (
+            await self._db.execute(
+                base.order_by(CollectionRunLog.ts.asc(), CollectionRunLog.id.asc())
+                .offset(offset)
+                .limit(limit)
+            )
+        ).scalars().all()
+        return list(rows), total
+
     async def complete_collection_run(
         self, run_id: int, result: dict[str, Any]
     ) -> CollectionRun | None:
@@ -910,6 +979,15 @@ class CollectorRepository:
         """
         from sqlalchemy import delete
 
+        # 先删子表日志（fk_run_log_run 外键约束，否则 MySQL 拒绝删除主记录），
+        # 再删主记录——保留策略与主记录一致（终态 + 超保留期）。
+        run_ids = select(CollectionRun.id).where(
+            CollectionRun.status.in_(("COMPLETED", "FAILED")),
+            CollectionRun.started_at < before,
+        )
+        await self._db.execute(
+            delete(CollectionRunLog).where(CollectionRunLog.run_id.in_(run_ids))
+        )
         result = await self._db.execute(
             delete(CollectionRun).where(
                 CollectionRun.status.in_(("COMPLETED", "FAILED")),

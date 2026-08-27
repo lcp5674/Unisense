@@ -2600,3 +2600,63 @@ class CollectorService(BaseService):
             owner_names=owner_names,
             include_detail=True,
         )
+
+    async def flush_run_logs(
+        self, run_id: int, entries: list[dict[str, Any]]
+    ) -> None:
+        """把 Redis 实时缓冲的采集日志批量落库（任务终态回写，长期可追溯）。
+
+        采集期间日志先写 Redis（实时可读），收尾一次性 bulk 落 ``collection_run_log``
+        表——避免采集高频逐条 INSERT 拖慢主流程。日志回写失败不阻断采集收尾。
+
+        Args:
+            run_id: 采集运行记录 ID。
+            entries: 日志条目列表 [{ts, level, phase, entity_name, message}]。
+        """
+        try:
+            await self._repo.append_run_logs(run_id, entries)
+            await self._db.commit()
+        except Exception as exc:  # noqa: BLE001 - 日志回写是辅助能力
+            logger.warning(
+                "collection_run_log_flush_failed: run=%s err=%s", run_id, exc
+            )
+
+    async def get_collection_run_logs(
+        self, run_id: int, offset: int = 0, limit: int = 200
+    ) -> dict[str, Any]:
+        """采集运行日志分页查询（采集记录详情页「实时日志」）。
+
+        读取策略：
+        - 已回写 DB（终态）→ 读 ``collection_run_log`` 表（长期可追溯）；
+        - 未回写（RUNNING 中或崩溃未收尾）→ 读 Redis 实时缓冲
+          （``collect:run_log:{run_id}``，RUNNING 期间前端轮询可见）；
+        - Redis 不可用且 DB 无日志 → 空列表。
+
+        Returns:
+            {items: [{ts, level, phase, entity_name, message}], total, source, status}。
+        """
+        run = await self._repo.get_collection_run(run_id)
+        if run is None:
+            raise NotFoundError(f"采集运行记录不存在: {run_id}")
+        # 优先 DB（终态已回写）——长期可追溯
+        if await self._repo.has_run_logs(run_id):
+            rows, total = await self._repo.list_run_logs(run_id, offset, limit)
+            items = [
+                {
+                    "ts": r.ts.isoformat() if r.ts else None,
+                    "level": r.level,
+                    "phase": r.phase,
+                    "entity_name": r.entity_name,
+                    "message": r.message,
+                }
+                for r in rows
+            ]
+            return {"items": items, "total": total, "source": "db", "status": run.status}
+        # 未回写：读 Redis 实时缓冲（RUNNING 中 / 崩溃未收尾）
+        redis = get_redis() if _redis_available() else None
+        if redis is not None:
+            from app.services.collector.queue import read_run_logs
+
+            items, total = await read_run_logs(redis, run_id, offset, limit)
+            return {"items": items, "total": total, "source": "redis", "status": run.status}
+        return {"items": [], "total": 0, "source": "none", "status": run.status}

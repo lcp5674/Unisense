@@ -2265,6 +2265,20 @@ export interface CollectionRun {
   } | null;
 }
 
+/** 采集运行日志条目（采集记录详情页「实时日志」，TD §12.1）。 */
+export interface CollectionRunLogItem {
+  /** 日志时间（ISO；终态读 DB，RUNNING 读 Redis 实时缓冲） */
+  ts: string | null;
+  /** 日志级别：INFO/WARN/ERROR */
+  level: "INFO" | "WARN" | "ERROR" | string;
+  /** 采集阶段：start/scanning/registering/complete/fail */
+  phase?: string | null;
+  /** 关联实体名（逐表注册日志） */
+  entity_name?: string | null;
+  /** 日志内容 */
+  message: string;
+}
+
 // ============================================================================
 // 资产地图（backend /api/v1/assetmap/*）
 // ============================================================================

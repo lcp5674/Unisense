@@ -223,6 +223,49 @@ class CollectionRun(Base, BaseModel):
     )
 
 
+class CollectionRunLog(Base, BaseModel):
+    """采集运行日志明细（采集记录详情页「实时日志」）。
+
+    采集执行期间的进度/阶段/错误逐条落此表，与 ``collection_run`` 主记录
+    一一对应（run_id 外键）。数据流：采集期间先写 Redis List 实时缓冲
+    （``collect:run_log:{run_id}``，前端 RUNNING 时轮询可见），任务终态时
+    一次性 bulk 回写本表——实时性与长期可追溯兼得；purge 采集运行历史时
+    级联清理本表（保留策略一致，默认 90 天）。
+
+    Attributes:
+        run_id: 关联采集运行记录 ID。
+        ts: 日志时间（对齐进度事件发生时刻）。
+        level: 日志级别（INFO/WARN/ERROR）。
+        phase: 采集阶段（start/scanning/registering/complete/fail）。
+        entity_name: 关联实体名（逐表注册日志，可空）。
+        message: 日志内容（截断 512）。
+    """
+
+    __tablename__ = "collection_run_log"
+
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("collection_run.id", name="fk_run_log_run"),
+        nullable=False,
+        index=True,
+        comment="关联采集运行记录 ID",
+    )
+    ts: Mapped[datetime] = mapped_column(DATETIME, nullable=False, comment="日志时间")
+    level: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="INFO", comment="日志级别 INFO/WARN/ERROR"
+    )
+    phase: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, comment="采集阶段 start/scanning/registering/complete/fail"
+    )
+    entity_name: Mapped[str | None] = mapped_column(
+        String(256), nullable=True, comment="关联实体名"
+    )
+    message: Mapped[str] = mapped_column(
+        String(512), nullable=False, comment="日志内容（截断）"
+    )
+
+    __table_args__ = (Index("idx_run_log_run_ts", "run_id", "ts"),)
+
+
 class BatchInferHistory(Base, BaseModel):
     """跨表批量 LLM 推断历史（服务端持久化，跨设备/团队可见）。
 

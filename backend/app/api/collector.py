@@ -86,6 +86,7 @@ from app.services.collector.schemas import (
 )
 from app.services.collector.service import CollectorService
 from app.services.collector.spi import build_collector
+from app.services.collector.tasks import _flush_run_logs, _make_run_log_cb
 
 logger = get_logger("unisense.collector.api")
 
@@ -146,7 +147,7 @@ async def create_data_source(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[DataSourceResponse]:
     svc = _svc(db)
-    resp = await svc.create_source(body, user.id)
+    resp = await svc.create_source(body, user.id, org_id=getattr(user, "org_id", None))
     await write_audit(
         db,
         actor_id=user.id,
@@ -690,15 +691,22 @@ async def collect_source(
         logger.warning("collection_run_start_failed: source=%s", source_id, exc_info=True)
         run_id = None
 
+    # 采集运行日志实时缓冲回调（同步路径无 JobStore，仅写 Redis；终态回写 DB）。
+    # Redis 不可用或 run_id 缺失时返回 None——日志能力降级为 no-op，不影响采集。
+    run_log_cb = _make_run_log_cb(redis, run_id)
+
     try:
         # FR-017: asyncio.timeout(300) 保护
         result = await asyncio.wait_for(
-            svc.collect_and_register(source_id, collector, user.id, mode=body.mode),
+            svc.collect_and_register(
+                source_id, collector, user.id, mode=body.mode, progress_cb=run_log_cb
+            ),
             timeout=300.0,
         )
     except TimeoutError:
         if run_id is not None:
             await svc.fail_collection_run(run_id, "采集超时（300秒）")
+            await _flush_run_logs(redis, svc, run_id, error="采集超时（300秒）")
         raise BusinessError(
             f"数据源 {source_id} 采集超时（300秒），请使用异步调度",
             error_code="COLLECTION_TIMEOUT",
@@ -706,12 +714,14 @@ async def collect_source(
     except Exception as exc:  # noqa: BLE001 - 采集异常需落 FAILED 记录后上抛
         if run_id is not None:
             await svc.fail_collection_run(run_id, str(exc))
+            await _flush_run_logs(redis, svc, run_id, error=str(exc))
         raise
     finally:
         await lock.release(source_id, owner_id)
         await collector.dispose()
     if run_id is not None:
         await svc.complete_collection_run(run_id, result)
+        await _flush_run_logs(redis, svc, run_id, result=result)
     pii_registered = result.get("pii_registered", 0)
     failed_count = result.get("failed_count", 0)
     await write_audit(
@@ -1730,3 +1740,23 @@ async def get_collection_run(
     svc = _svc(db)
     detail = await svc.get_collection_run_detail(run_id)
     return ok(data=CollectionRunResponse(**detail), trace_id=trace_id)
+
+
+@collection_run_router.get("/{run_id}/logs", dependencies=_READ_DEPS)
+async def get_collection_run_logs(
+    run_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    offset: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=500),
+) -> ApiResponse[dict[str, Any]]:
+    """采集运行日志分页（采集记录详情页「实时日志」）。
+
+    读取策略：终态（已回写 DB）读 ``collection_run_log`` 表；RUNNING 中或
+    崩溃未收尾读 Redis 实时缓冲（``collect:run_log:{run_id}``）。返回
+    ``source``（db/redis/none）与 ``status`` 供前端决定是否轮询刷新。
+    """
+    svc = _svc(db)
+    result = await svc.get_collection_run_logs(run_id, offset, limit)
+    return ok(data=result, trace_id=trace_id)
