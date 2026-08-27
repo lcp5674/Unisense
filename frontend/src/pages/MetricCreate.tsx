@@ -387,7 +387,13 @@ export function MetricCreate() {
   const [sqlBatchLlmParsing, setSqlBatchLlmParsing] = useState(false);
   const [sqlBatchResult, setSqlBatchResult] = useState<SqlBatchParseResult | null>(null);
   // 合成复合指标开关（单语句多度量时组内追加复合候选）
-  const [sqlBatchSynthesize, setSqlBatchSynthesize] = useState(false);
+  // B（A/B/C 三轮增强）：合成复合默认开——外层宽表 ETL 的算术派生列（a-b-c）与
+  // 含运算多度量语句默认产出复合候选（后端已自动合成兜底，开关供用户显式关闭
+  // 只要原子的场景）；此前默认 false 让「转诊预约旧页面」这类派生指标静默缺失
+  const [sqlBatchSynthesize, setSqlBatchSynthesize] = useState(true);
+  // 批量编辑向导（问题 2）：把所有候选一次性放进分步向导批量编辑（不再逐条跳单条）
+  const [sqlBatchWizardOpen, setSqlBatchWizardOpen] = useState(false);
+  const [sqlBatchWizardStep, setSqlBatchWizardStep] = useState(0);
   // P2-8：切分模式（semicolon/statement/custom）——后端已实现，前端此前硬编码 statement
   const [sqlBatchSplitMode, setSqlBatchSplitMode] = useState<"semicolon" | "statement" | "custom">(
     "statement"
@@ -2825,6 +2831,17 @@ export function MetricCreate() {
                       checked={sqlBatchSynthesize}
                       onChange={(v) => void handleSqlBatchSynthesizeChange(v)}
                     />
+                    <Button
+                      size="small"
+                      icon={<BarsOutlined />}
+                      onClick={() => {
+                        setSqlBatchWizardStep(0);
+                        setSqlBatchWizardOpen(true);
+                      }}
+                      data-testid="sql-batch-open-wizard"
+                    >
+                      批量编辑向导（全部指标）
+                    </Button>
                   </Space>
                 </div>
                 <Collapse
@@ -3237,6 +3254,311 @@ export function MetricCreate() {
             )}
           </>
         )}
+      {/* 批量编辑向导（问题 2）：把所有候选一次性放进分步向导批量编辑——不再逐条
+          跳单条；复用现有候选 state 与编辑/提交函数（handleSqlBatchEdit/Type/Period/
+          Dep/Expr），Step 0/1 分表格批量编辑，Step 2 汇总提交 */}
+      <Modal
+        title={`批量编辑向导（${sqlBatchResult?.candidates.length ?? 0} 个候选 · 已勾选 ${sqlBatchChecked.size}）`}
+        open={sqlBatchWizardOpen}
+        onCancel={() => setSqlBatchWizardOpen(false)}
+        width={940}
+        footer={null}
+      >
+        <Steps
+          current={sqlBatchWizardStep}
+          onChange={setSqlBatchWizardStep}
+          size="small"
+          style={{ marginBottom: 16 }}
+          items={[
+            { title: "基本信息", description: "类型/编码/名称/聚合/周期/单位" },
+            { title: "口径与责任", description: "逻辑度量/依赖/责任方" },
+            { title: "确认提交", description: "汇总 + 批量创建" },
+          ]}
+        />
+        {sqlBatchWizardStep === 0 && (
+          <Table
+            data-testid="sql-batch-wizard-t0"
+            size="small"
+            rowKey="key"
+            dataSource={sqlBatchResult?.candidates || []}
+            pagination={{ pageSize: 8, size: "small" }}
+            scroll={{ y: 340 }}
+            columns={[
+              {
+                title: "勾选", width: 50,
+                render: (_, c: SqlBatchCandidate) => (
+                  <Checkbox
+                    checked={sqlBatchChecked.has(c.key)}
+                    onChange={(e) => handleSqlBatchToggle(c.key, e.target.checked)}
+                    aria-label={`勾选 ${c.name}`}
+                  />
+                ),
+              },
+              {
+                title: "类型", width: 80,
+                render: (_, c: SqlBatchCandidate) => (
+                  <Select
+                    size="small"
+                    style={{ width: 72 }}
+                    value={c.type}
+                    onChange={(v) => handleSqlBatchTypeChange(c.key, v as MetricType)}
+                    options={[
+                      { value: "atomic", label: "原子" },
+                      { value: "derived", label: "派生" },
+                      { value: "composite", label: "复合" },
+                    ]}
+                  />
+                ),
+              },
+              {
+                title: "名称", width: 160,
+                render: (_, c: SqlBatchCandidate) => (
+                  <Input
+                    size="small"
+                    value={c.name}
+                    onChange={(e) => handleSqlBatchEdit(c.key, { name: e.target.value })}
+                  />
+                ),
+              },
+              {
+                title: "编码", width: 210,
+                render: (_, c: SqlBatchCandidate) => (
+                  <Input
+                    size="small"
+                    style={{ fontFamily: "monospace" }}
+                    value={c.metric_code || ""}
+                    placeholder={selectedDomain ? "4 段式，可修改" : "选域后自动生成"}
+                    onChange={(e) => handleSqlBatchEdit(c.key, { metric_code: e.target.value })}
+                  />
+                ),
+              },
+              {
+                title: "聚合", width: 120,
+                render: (_, c: SqlBatchCandidate) =>
+                  c.type === "atomic" ? (
+                    <Select
+                      size="small"
+                      style={{ width: 110 }}
+                      value={c.aggregation || undefined}
+                      onChange={(v) => handleSqlBatchEdit(c.key, { aggregation: v })}
+                      options={AGG_OPTIONS}
+                    />
+                  ) : (
+                    <Tag color="blue">{c.aggregation || "—"}</Tag>
+                  ),
+              },
+              {
+                title: "周期", width: 90,
+                render: (_, c: SqlBatchCandidate) => (
+                  <Select
+                    size="small"
+                    style={{ width: 80 }}
+                    value={c.period || "day"}
+                    onChange={(v) => handleSqlBatchPeriodChange(c.key, c, "period", v)}
+                    options={PERIOD_OPTIONS}
+                  />
+                ),
+              },
+              {
+                title: "粒度", width: 90,
+                render: (_, c: SqlBatchCandidate) => (
+                  <Select
+                    size="small"
+                    style={{ width: 80 }}
+                    value={c.granularity || c.period || "day"}
+                    onChange={(v) => handleSqlBatchPeriodChange(c.key, c, "granularity", v)}
+                    options={PERIOD_OPTIONS}
+                  />
+                ),
+              },
+              {
+                title: "单位", width: 100,
+                render: (_, c: SqlBatchCandidate) => (
+                  <Select
+                    size="small"
+                    showSearch
+                    allowClear
+                    style={{ width: 90 }}
+                    placeholder="单位"
+                    value={c.unit || undefined}
+                    onChange={(v) => handleSqlBatchEdit(c.key, { unit: v ?? null })}
+                    options={dictOptions["unit"] || []}
+                  />
+                ),
+              },
+            ]}
+          />
+        )}
+        {sqlBatchWizardStep === 1 && (
+          <Table
+            data-testid="sql-batch-wizard-t1"
+            size="small"
+            rowKey="key"
+            dataSource={sqlBatchResult?.candidates || []}
+            pagination={{ pageSize: 8, size: "small" }}
+            scroll={{ y: 340 }}
+            columns={[
+              {
+                title: "勾选", width: 50,
+                render: (_, c: SqlBatchCandidate) => (
+                  <Checkbox
+                    checked={sqlBatchChecked.has(c.key)}
+                    onChange={(e) => handleSqlBatchToggle(c.key, e.target.checked)}
+                    aria-label={`勾选 ${c.name}`}
+                  />
+                ),
+              },
+              {
+                title: "名称", width: 160,
+                render: (_, c: SqlBatchCandidate) => (
+                  <Typography.Text ellipsis style={{ maxWidth: 150 }}>{c.name}</Typography.Text>
+                ),
+              },
+              {
+                title: "逻辑度量", width: 165,
+                render: (_, c: SqlBatchCandidate) =>
+                  c.type === "atomic" ? (
+                    <Select
+                      size="small"
+                      showSearch
+                      allowClear
+                      style={{ width: 155 }}
+                      placeholder="关联逻辑度量"
+                      value={c.measure_id ?? undefined}
+                      onChange={(v) => handleSqlBatchEdit(c.key, { measure_id: v ?? null })}
+                      options={measureOptions.map((o) => ({ value: o.value, label: o.label }))}
+                    />
+                  ) : (
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>非原子</Typography.Text>
+                  ),
+              },
+              {
+                title: "产品负责", width: 120,
+                render: (_, c: SqlBatchCandidate) => (
+                  <Select
+                    size="small"
+                    showSearch
+                    allowClear
+                    style={{ width: 110 }}
+                    placeholder="产品负责"
+                    value={c.product_owner_id ?? undefined}
+                    onChange={(v) => handleSqlBatchEdit(c.key, { product_owner_id: v ?? null })}
+                    options={ownerUsers.map((u) => ({ value: u.id, label: u.display_name || u.username }))}
+                  />
+                ),
+              },
+              {
+                title: "依赖指标（复合/派生）", width: 225,
+                render: (_, c: SqlBatchCandidate) =>
+                  c.type === "atomic" ? (
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>—</Typography.Text>
+                  ) : (
+                    <Select
+                      size="small"
+                      mode="multiple"
+                      style={{ minWidth: 215 }}
+                      placeholder={c.type === "composite" ? "依赖（复合必填）" : "依赖（派生可选）"}
+                      value={c.dependencies || []}
+                      onChange={(v) => handleSqlBatchDepChange(c.key, v)}
+                      options={(sqlBatchResult?.candidates || [])
+                        .filter((x) => x.type !== "composite")
+                        .map((x) => ({ value: resolveCandidateCode(x), label: `${x.name} (${resolveCandidateCode(x)})` }))}
+                    />
+                  ),
+              },
+              {
+                title: "计算表达式/口径", width: 180,
+                render: (_, c: SqlBatchCandidate) =>
+                  c.type === "composite" ? (
+                    <Input
+                      size="small"
+                      style={{ width: 170, fontFamily: "monospace" }}
+                      placeholder="如 {原子1} / {原子2}"
+                      value={c.calc_expression || ""}
+                      onChange={(e) => handleSqlBatchExprChange(c.key, e.target.value)}
+                    />
+                  ) : (
+                    <Tooltip title={`口径：${String(c.definition_json?.expression || c.definition_json?.sql || "")}`}>
+                      <Typography.Text
+                        type="secondary"
+                        style={{ fontSize: 12, maxWidth: 170, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "help", display: "inline-block", verticalAlign: "middle" }}
+                      >
+                        {String(c.definition_json?.expression || c.definition_json?.sql || "—")}
+                      </Typography.Text>
+                    </Tooltip>
+                  ),
+              },
+            ]}
+          />
+        )}
+        {sqlBatchWizardStep === 2 && (
+          <div>
+            {(() => {
+              const total = sqlBatchResult?.candidates.length ?? 0;
+              const atoms = (sqlBatchResult?.candidates || []).filter((c) => c.type === "atomic").length;
+              const derived = (sqlBatchResult?.candidates || []).filter((c) => c.type === "derived").length;
+              const composites = (sqlBatchResult?.candidates || []).filter((c) => c.type === "composite").length;
+              const needReview = (sqlBatchResult?.candidates || []).filter((c) => c.needs_review).length;
+              const noDepsComposites = (sqlBatchResult?.candidates || []).filter(
+                (c) => c.type === "composite" && !(c.dependencies || []).length,
+              ).length;
+              return (
+                <Space direction="vertical" style={{ width: "100%" }}>
+                  <Alert
+                    type="info"
+                    showIcon
+                    message={`共 ${total} 个候选 · 已勾选 ${sqlBatchChecked.size} 个 · 原子 ${atoms} / 派生 ${derived} / 复合 ${composites}`}
+                    description={
+                      <>
+                        {needReview > 0 && <Tag color="orange" style={{ marginInlineEnd: 8 }}>{needReview} 个口径需核对</Tag>}
+                        {noDepsComposites > 0 && <Tag color="red">{noDepsComposites} 个复合缺依赖（需在步骤②选择）</Tag>}
+                        <span className="muted" style={{ fontSize: 12 }}>
+                          勾选候选后将批量创建为 DRAFT 草稿；复合候选需先发布依赖原子后再提交评审。
+                        </span>
+                      </>
+                    }
+                  />
+                  <Button
+                    type="primary"
+                    block
+                    loading={sqlBatchCreating}
+                    disabled={sqlBatchChecked.size === 0}
+                    onClick={() => void handleSqlBatchCreate()}
+                  >
+                    批量创建选中指标（{sqlBatchChecked.size}）
+                  </Button>
+                  {sqlBatchCreating && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <Spin size="small" />
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        正在批量创建 {sqlBatchChecked.size} 个指标为草稿（DRAFT），请稍候…
+                      </Typography.Text>
+                    </div>
+                  )}
+                </Space>
+              );
+            })()}
+          </div>
+        )}
+        {/* 批量向导步骤导航（明确的下一步/上一步按钮，不依赖点击 Steps 标题） */}
+        <div style={{ marginTop: 16, display: "flex", justifyContent: "space-between" }}>
+          <Button
+            disabled={sqlBatchWizardStep === 0}
+            onClick={() => setSqlBatchWizardStep((s) => Math.max(0, s - 1))}
+            data-testid="sql-batch-wizard-prev"
+          >
+            上一步
+          </Button>
+          <Button
+            type="primary"
+            disabled={sqlBatchWizardStep === 2}
+            onClick={() => setSqlBatchWizardStep((s) => Math.min(2, s + 1))}
+            data-testid="sql-batch-wizard-next"
+          >
+            下一步
+          </Button>
+        </div>
+      </Modal>
       </Drawer>
 
       {/* 勾选联动提示：取消勾选原子但复合候选仍被勾选时，让用户选择处理方式（FR-010 批量） */}

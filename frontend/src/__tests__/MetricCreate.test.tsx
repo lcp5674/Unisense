@@ -1736,9 +1736,10 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     await screen.findByText("注册指标（草稿）");
     await openBatchMode();
 
-    // 请求参数：statement 模式 + 合成复合默认关
+    // 请求参数：statement 模式 + 合成复合默认开（A/B/C 三轮增强：外层宽表 ETL 的
+    // 算术派生列与含运算语句默认产出复合候选，不再静默缺失）
     expect(mockedParseSqlBatch).toHaveBeenCalledWith(
-      expect.objectContaining({ split_mode: "statement", synthesize_composite: false })
+      expect.objectContaining({ split_mode: "statement", synthesize_composite: true })
     );
     // 默认勾选 2 个原子（复合未自动勾选）
     expect(screen.getByText(/已勾选 2 个/)).toBeTruthy();
@@ -1749,6 +1750,49 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     expect(screen.getByText("需先发布依赖原子")).toBeTruthy();
     // 语句分组标题
     expect(screen.getByText(/语句 1 · dwd.sales_detail · 3 个候选/)).toBeTruthy();
+  });
+
+  it("批量编辑向导：打开分步向导批量编辑全部候选（不再逐条跳单条）", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await openBatchMode();
+
+    // 打开批量编辑向导（全部候选）
+    const wizardBtn = screen.getByTestId("sql-batch-open-wizard");
+    expect(wizardBtn).toBeTruthy();
+    fireEvent.click(wizardBtn);
+    // Modal 经 portal 渲染到 body（antd 打开态在 jsdom 可能带 aria-hidden，
+    // testing-library 文本查询会排除——用 DOM 级断言更稳）
+    await waitFor(() => {
+      expect(document.body.querySelector(".ant-modal-title")?.textContent || "").toContain("批量编辑向导");
+    });
+    const modal = document.querySelector(".ant-modal") as HTMLElement;
+    expect(modal).toBeTruthy();
+    // 步骤切换后 Modal 内容会被 antd 重挂载，within 引用失效——每次重新定位
+    const m = () => within(document.querySelector(".ant-modal") as HTMLElement);
+    // Step 0 基本信息：表格含 3 个候选名称（Input）
+    expect(m().getByDisplayValue("日订单金额")).toBeTruthy();
+    expect(m().getByDisplayValue("日去重用户")).toBeTruthy();
+    expect(m().getByDisplayValue("日订单金额、日去重用户复合")).toBeTruthy();
+    // 行内批量编辑名称
+    fireEvent.change(m().getByDisplayValue("日订单金额"), {
+      target: { value: "订单金额（改）" },
+    });
+    expect(m().getByDisplayValue("订单金额（改）")).toBeTruthy();
+    // 跳 Step 1 口径与责任（逻辑度量/依赖/责任方表格）——用「下一步」导航按钮
+    fireEvent.click(m().getByTestId("sql-batch-wizard-next"));
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="sql-batch-wizard-t1"]')).toBeTruthy();
+    });
+    const t1 = within(document.querySelector('[data-testid="sql-batch-wizard-t1"]') as HTMLElement);
+    expect(t1.getAllByText("逻辑度量").length).toBeGreaterThanOrEqual(1);
+    expect(t1.getAllByText("产品负责").length).toBeGreaterThanOrEqual(1);
+    // 跳 Step 2 确认提交：汇总 + 创建按钮
+    fireEvent.click(m().getByTestId("sql-batch-wizard-next"));
+    await waitFor(() => {
+      expect(document.body.textContent).toContain("共 3 个候选");
+    });
+    expect(m().getByRole("button", { name: /批量创建选中指标/ })).toBeTruthy();
   });
 
   it("勾选联动：取消被复合依赖的原子 → 弹窗；「跳过复合」同时取消原子与复合", async () => {

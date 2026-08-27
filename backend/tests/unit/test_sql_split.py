@@ -1758,3 +1758,49 @@ async def test_infer_sql_batch_uses_create_table_comments_for_name() -> None:
     )
 
 
+
+async def test_infer_sql_batch_derived_arithmetic_deps_and_auto_composite() -> None:
+    """A7/B/C：外层宽表 ETL——算术派生列（a-b-c）产出复合候选且 dependencies
+    解析到 3 个原子编码；同列多 count 名称附加 alias 区分；语句含运算但无命名
+    派生时 synthesize_composite=False 也自动合成整语句复合。"""
+    sql = (
+        "select all_order_cnt, session_side_order_cnt, region_org_order_cnt, "
+        "all_order_cnt - session_side_order_cnt - region_org_order_cnt as "
+            "old_page_transfer_order_cnt "
+        "from (select count(1) as all_order_cnt, "
+        "count(case when ds='a' then id end) as session_side_order_cnt, "
+        "count(case when ds='b' then id end) as region_org_order_cnt "
+        "from wedw_dwd.telemedicine_local_bidirectional_referral_record_df "
+        "where date_id='2026-08-18' group by hosp_code) result"
+    )
+    result = await infer_sql_batch(
+        _fake_db(), sql=sql, split_mode="statement", domain_code="hosp",
+        synthesize_composite=False,  # 验证 B：不依赖开关也能识别
+    )
+    by_key = {c["key"]: c for c in result["candidates"]}
+    # C：同列多 count 名称附加 alias 区分（不再全部「日订单量」）
+    names = [
+        by_key[k]["name"]
+        for k in ("0:all_order_cnt", "0:session_side_order_cnt", "0:region_org_order_cnt")
+    ]
+    assert len(set(names)) == 3, f"名称应可区分：{names}"
+    # A：算术派生列 → 复合候选 + dependencies 解析到原子编码
+    derived = by_key["0:old_page_transfer_order_cnt"]
+    assert derived["type"] == "composite"
+    deps = derived.get("dependencies") or []
+    assert len(deps) == 3, f"依赖应 3 个原子，实际 {deps}"
+    assert by_key["0:all_order_cnt"]["metric_code"] in deps
+    assert by_key["0:session_side_order_cnt"]["metric_code"] in deps
+    assert by_key["0:region_org_order_cnt"]["metric_code"] in deps
+    # B：含运算无命名派生列 → 自动合成整语句复合（即使开关 False）
+    result2 = await infer_sql_batch(
+        _fake_db(),
+        sql=(
+            "SELECT SUM(amount) AS a, COUNT(DISTINCT uid) AS b, "
+            "SUM(amount)/COUNT(DISTINCT uid) AS ratio FROM ods.t"
+        ),
+        split_mode="statement",
+        domain_code="sales",
+        synthesize_composite=False,
+    )
+    assert any(c["type"] == "composite" for c in result2["candidates"]), "含运算应自动合成复合"

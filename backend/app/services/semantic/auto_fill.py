@@ -581,15 +581,26 @@ def _period_cn(period: str | None, grain: str | None) -> str:
 def _cn_column_label(col: str) -> str | None:
     """业务列名 → 中文标签（命中受控词根）；无法映射返回 None。
 
-    计数后缀列（_cnt/_count/_num/_qty/_quantity）：主干命中词表 → 中文标签；
-    未知主干 → 「xx次数」（含受控词根「次数」）。非计数列：全列名/逐 token 查
-    金额/费用/比率词表。避免生成英文 slug 被命名校验拦截。
+    计数后缀列（_cnt/_count/_num/_qty/_quantity）：**优先整段主干词表**（如
+    ``session_side_order_cnt`` 主干 ``session_side_order`` 若词表有完整映射则用之），
+    其次最长连续 token 后缀（从右往左累积，``side_order``/``order`` 取首个命中），
+    最后退化主干末 token——避免多列同以 ``order`` 结尾时全部落成「订单量」无法
+    区分（A/C 三轮增强：``all_order_cnt``/``session_side_order_cnt``/
+    ``region_org_order_cnt`` 的别名语义差异被词表区分）；未知主干 → 「xx次数」。
+    非计数列：全列名/逐 token 查金额/费用/比率词表。避免生成英文 slug 被命名校验拦截。
     """
     base = col.lower().strip()
     for suf in _COUNT_SUFFIXES:
         if base.endswith(suf):
             stem = base[: -len(suf)]
-            last = stem.split("_")[-1]
+            if stem in _CN_COLUMN_LABELS:
+                return _CN_COLUMN_LABELS[stem]
+            tokens = stem.split("_")
+            for i in range(len(tokens) - 1, -1, -1):
+                cand = "_".join(tokens[i:])
+                if cand in _CN_COLUMN_LABELS:
+                    return _CN_COLUMN_LABELS[cand]
+            last = tokens[-1]
             if not last:
                 return None
             return _CN_COLUMN_LABELS.get(last, f"{last}次数")
@@ -602,12 +613,24 @@ def _cn_column_label(col: str) -> str | None:
 
 
 def _measure_label(profile: dict[str, Any]) -> str:
-    """度量中文标签（用于名称生成）。"""
+    """度量中文标签（用于名称生成）。
+
+    **C（A/C 三轮增强）**：下沉聚合候选（``sunk=True``）的别名是数仓开发写的业务
+    列名（``session_side_order_cnt``），比原始聚合列（``id``/``*``）语义更贴近业务
+    ——有 ``alias`` 且与度量列不同时优先用 alias 生成标签（``_cn_column_label``
+    已支持整段/最长后缀匹配），让同列多 count（``all_order_cnt``/
+    ``session_side_order_cnt``）名称不再全部雷同。
+    """
     meta: dict[str, Any] = profile.get("measure_meta", {}) or {}
     comment = str(meta.get("comment", "")).strip()
     if comment:
         return comment
     measure_column: str | None = profile.get("measure_column")
+    alias = str(meta.get("alias", "")).strip() if meta.get("alias") else ""
+    if alias and alias.lower() != (measure_column or "").lower():
+        alias_label = _cn_column_label(alias) or alias.replace("_", " ")
+        if alias_label:
+            return alias_label
     sql_profile: SqlProfile | None = profile.get("sql_profile")
     if measure_column:
         return _cn_column_label(measure_column) or measure_column.replace("_", " ")

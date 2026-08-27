@@ -566,7 +566,22 @@ def _collect_derived_measures(select: exp.Select) -> list[dict[str, Any]]:
     等维度列）不含聚合不产出假候选。``agg=None`` + ``derived=True`` + 原始
     expression，候选构建标记「口径需核对」，注册聚合占位（口径由 expression 承载，
     对齐复合指标占位语义）；``sunk=True`` 用 alias 作编码锚点防与内嵌聚合度量撞码。
+
+    **A7（第九轮）**：额外收集「引用已命名聚合列的算术派生列」——外层宽表 ETL
+    的 ``all_order_cnt - session_side_order_cnt - region_org_order_cnt AS
+    old_page_transfer_order_cnt``（转诊预约旧页面）这类派生指标**无内嵌聚合**
+    （引用的都是内层子查询已命名的聚合别名列），此前 ``if not aggs: continue``
+    把它整个跳过 → 核心派生指标静默缺失。判定：目标含算术组合节点（Add/Sub/
+    Mul/Div/Mod）且至少一个 Column 引用属于本 SELECT/子查询的聚合投影别名 →
+    产出派生候选（携带 ``deps_aliases`` 供候选构建解析依赖原子编码），口径为
+    完整算术表达式（``agg=None`` + ``derived=True`` 与比率派生同语义）。
     """
+    # 收集本 SELECT 及其子查询的投影别名（A7 识别「引用聚合别名列的算术派生」）
+    known_aliases: set[str] = set()
+    for sub in select.find_all(exp.Select):
+        for proj in sub.expressions:
+            if isinstance(proj, exp.Alias) and proj.alias_or_name:
+                known_aliases.add(proj.alias_or_name.lower())
     out: list[dict[str, Any]] = []
     for projection in select.expressions:
         target = projection.this if isinstance(projection, exp.Alias) else projection
@@ -577,7 +592,38 @@ def _collect_derived_measures(select: exp.Select) -> list[dict[str, Any]]:
             continue  # 纯列透传（gmv 等已由聚合度量捕获）不重复产出
         aggs = [n for n in target.walk() if isinstance(n, exp.AggFunc)]
         if not aggs:
-            continue  # 表达式不含聚合（substr(dt) 维度列等）→ 非度量
+            # A7：无内嵌聚合的算术组合——若其 Column 引用属于聚合别名（引用的都是
+            # 内层已命名的聚合列），则是「引用聚合列的派生指标」而非维度列/普通列
+            # 运算（substr(dt)/a+b 普通列不产出假候选）
+            has_arith = isinstance(
+                target, (exp.Add, exp.Sub, exp.Mul, exp.Div, exp.Mod)
+            ) or any(
+                isinstance(n, (exp.Div, exp.Mul, exp.Add, exp.Sub, exp.Mod))
+                for n in target.walk()
+            )
+            if not has_arith:
+                continue
+            col_refs = [c.name.lower() for c in target.find_all(exp.Column)]
+            deps = [c for c in col_refs if c in known_aliases]
+            if not deps:
+                continue  # 引用普通列的运算（无聚合别名）→ 非度量
+            col = deps[0]
+            try:
+                expr_sql = target.sql()
+            except Exception:  # noqa: BLE001 - 序列化失败仅降级表达式占位
+                expr_sql = alias or col
+            out.append(
+                {
+                    "column": col,
+                    "agg": None,
+                    "derived": True,
+                    "alias": alias,
+                    "expression": expr_sql,
+                    "sunk": True,
+                    "deps_aliases": deps,
+                }
+            )
+            continue
         # 单聚合 + 纯格式化包裹/条件过滤（IFNULL(SUM(x),0)/ROUND(SUM(x),2)/
         # COALESCE(COUNT(DISTINCT CASE...),0)）：仍是该聚合本身，已由
         # _projection_measures 捕获，不重复产出派生候选（CASE/IF 是聚合内部
@@ -626,7 +672,14 @@ def _extract_measures(select: exp.Select) -> list[dict[str, Any]]:
     决定，避免顶层 measure 误挂 CTE 名）且 ``sunk=False``（编码锚点用真实列）。
     **P0-3d**：顶层聚合承载时额外收集派生比率/条件列（``_collect_derived_measures``）。
     """
-    measures = _projection_measures(select, enrich=True, table=None, sunk=False)
+    top_aggs = _projection_measures(select, enrich=True, table=None, sunk=False)
+    # P0-3d/A7：**无条件**收集派生投影（比率/条件聚合 + 引用已命名聚合列的算术
+    # 派生列）——外层宽表透传形态（``select ... all_order_cnt, a-b-c AS d from
+    # (聚合子查询)``）外层无聚合（top_aggs 空）但含算术派生列，此前派生收集只在
+    # ``if top_aggs:`` 分支内调用导致「转诊预约旧页面」静默缺失；无聚合纯维度
+    # SELECT（``SELECT a, b FROM t``）不产出（派生收集内部判定为空）。
+    # 派生列不参与 alias_map 物理列映射（其 col 是聚合别名而非真实物理列）。
+    derived = _collect_derived_measures(select)
     # A-4/P0-3c：全局子查询/CTE 投影别名 → 物理列映射（聚合参数是子查询/CTE 投影
     # 别名时解析为底层物理列——``SUM(x) FROM (SELECT amount AS x ...)`` 的
     # source_fields 若不解析会落 ``[orders, x]``（物理表+不存在的列），血缘/下游
@@ -647,16 +700,17 @@ def _extract_measures(select: exp.Select) -> list[dict[str, Any]]:
                 if isinstance(col_expr, exp.Distinct):
                     col_expr = col_expr.expressions[0] if col_expr.expressions else None
                 alias_map[proj.alias_or_name.lower()] = _extract_col_name(col_expr)
-    if measures:
+    if top_aggs:
+        measures = list(top_aggs)
         if alias_map:
             for m in measures:
                 if m["column"] in alias_map:
                     m["column"] = alias_map[m["column"]]
-        # P0-3d：聚合承载 SELECT 的派生比率/条件列（含嵌套聚合）也产出候选
-        derived = _collect_derived_measures(select)
         if derived:
             measures.extend(derived)
         return measures
+    # 下沉透传形态：外层无聚合 → 下沉子查询收集聚合度量 + 外层派生列（A7）
+    measures: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str | None]] = set()
     for sub in select.find_all(exp.Select):
         if sub is select:
@@ -673,6 +727,8 @@ def _extract_measures(select: exp.Select) -> list[dict[str, Any]]:
                 continue
             seen.add(key)
             measures.append(m)
+    if derived:
+        measures.extend(derived)
     return measures
 
 

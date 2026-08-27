@@ -684,3 +684,32 @@ class TestParseSqlProfile:
         assert ("gmv", "SUM") in plain_keys and ("buyer_cnt", "COUNT_DISTINCT") in plain_keys
         # 派生比率不产内嵌聚合（is_refund 不再作为独立 SUM 提取）
         assert not any(m.get("column") == "is_refund" and not m.get("derived") for m in p.measures)
+
+    def test_named_agg_arithmetic_derived_column_collected(self) -> None:
+        """A7：外层透传 + 内层聚合的宽表 ETL——外层算术派生列（a-b-c AS d）引用
+        已命名聚合别名时也产出派生候选（此前静默缺失），且带 deps_aliases。"""
+        sql = (
+            "select all_order_cnt, session_side_order_cnt, region_org_order_cnt, "
+            "all_order_cnt - session_side_order_cnt - region_org_order_cnt as "
+            "old_page_transfer_order_cnt "
+            "from (select count(1) as all_order_cnt, "
+            "count(case when ds='a' then id end) as session_side_order_cnt, "
+            "count(case when ds='b' then id end) as region_org_order_cnt "
+            "from ods.t where date_id='2026-08-18' "
+            "group by hosp_code) result"
+        )
+        p = parse_sql_profile(sql)
+        aggs = [m for m in p.measures if not m.get("derived")]
+        assert len(aggs) == 3, f"下沉聚合原子应 3 个，实际 {len(aggs)}"
+        derived = [m for m in p.measures if m.get("derived")]
+        assert len(derived) == 1, f"A7 派生列应 1 个，实际 {len(derived)}"
+        d = derived[0]
+        assert d["alias"] == "old_page_transfer_order_cnt"
+        assert d.get("deps_aliases"), "A7 派生候选应携带被引用的聚合别名"
+        assert "all_order_cnt" in d["deps_aliases"]
+        assert "-" in (d["expression"] or ""), "口径应为完整算术表达式"
+
+    def test_named_agg_arithmetic_pure_dimension_no_derived(self) -> None:
+        """A7 反例：纯维度 SELECT（无聚合子查询、无算术派生列）不产出假候选。"""
+        p = parse_sql_profile("SELECT a, b, a + b AS c FROM ods.t")
+        assert p.measures == [], f"纯维度 SELECT 不应产出度量：{p.measures}"

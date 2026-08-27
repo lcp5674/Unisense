@@ -630,6 +630,11 @@ def _build_atomic_candidate(
             if comment:
                 measure_meta = {"comment": comment}
                 break
+    # C（A/C 三轮增强）：下沉聚合候选的别名是数仓业务列名，注入 measure_meta 供
+    # _infer_name/_measure_label 优先消费——同列多 count（all_order_cnt/
+    # session_side_order_cnt）名称不再全部雷同「日订单量」
+    if alias and alias != col:
+        measure_meta = {**measure_meta, "alias": alias}
     profile = build_profile(
         source_table=measure_table,
         measure_column=code_col,
@@ -687,9 +692,14 @@ def _build_atomic_candidate(
     # 单条 _infer_type，两路径对 SELECT SUM(refund_rate)（日粒度）判定分裂（单条复合/
     # 批量原子）；与单条规则完全一致后统一。
     _col_lower = (col or "").lower()
+    # A7：引用已命名聚合列的算术派生列（all_order_cnt - session_side_order_cnt -
+    # region_org_order_cnt）→ 指标间运算归复合（与 _build_composite_candidate 语义
+    # 一致），deps_aliases 供阶段 3 解析依赖原子编码
+    deps_aliases = measure.get("deps_aliases") or []
     if (
         (derived and raw_sql and sql_has_arithmetic(raw_sql))
         or any(k in _col_lower for k in ("rate", "ratio", "pct"))
+        or bool(deps_aliases)
     ):
         cand_type = "composite"
     elif period and period != "day":
@@ -727,6 +737,11 @@ def _build_atomic_candidate(
         # P0-3d：派生比率/条件列（ROUND(SUM/NULLIF)/CASE 比率等无聚合包裹的表达式）
         # ——前端据此展示「派生表达式」并在口径核对区呈现完整 expression
         "derived": derived,
+        # A7：引用已命名聚合列的算术派生候选——被引用的聚合别名（阶段 3 后处理
+        # 解析为依赖原子编码 dependencies；前端据此展示依赖关系/作必填校验）
+        "deps_aliases": deps_aliases or None,
+        # 投影别名（下沉聚合/派生列）：C 名称去重后缀与前端展示的业务标识
+        "alias": alias,
     }
 
 
@@ -1457,7 +1472,62 @@ async def infer_sql_batch(
             )
             atoms.append(atom)
             _push_candidate(idx, atom)
-        if synthesize_composite:
+        # A7：解析「引用已命名聚合列的算术派生候选」的依赖原子编码——deps_aliases
+        # 是内层聚合别名，映射为语句内对应原子候选的 metric_code（dependencies），
+        # 供批量创建血缘注册上游边/前端依赖校验。映射键用候选 alias（业务别名，
+        # 与 deps_aliases 同源）；measure_column 是底层列（count(1) → ``*``）不匹配
+        alias_code_map: dict[str, str] = {}
+        for a in atoms:
+            # 只映射原子候选——派生/复合候选的 measure_column 可能是 deps[0]
+            # （如 old_page_transfer_order_cnt 的 column=region_org_order_cnt），
+            # 若纳入会覆盖原子的别名映射导致依赖错配成自身
+            if a.get("type") != "atomic":
+                continue
+            code = a.get("metric_code")
+            if not code:
+                continue
+            for k in (a.get("alias"), a.get("measure_column")):
+                if k:
+                    alias_code_map[str(k).lower()] = code
+        for atom in atoms:
+            deps = atom.get("deps_aliases") or []
+            if deps:
+                codes = [
+                    c
+                    for c in (
+                        alias_code_map.get(d.lower()) for d in deps
+                    )
+                    if c
+                ]
+                if codes:
+                    atom["dependencies"] = list(dict.fromkeys(codes))
+                atom["type"] = "composite"
+                atom["needs_review"] = True
+        # C（A/C 三轮增强）：语句内候选名称去重——多个 count 候选（all_order_cnt/
+        # session_side_order_cnt/region_org_order_cnt）别名语义无法被词表区分时名称
+        # 仍可能雷同（「日订单量」×3），附加别名后缀让用户可区分（批量向导/行内
+        # 可再改中文）
+        seen_names: dict[str, int] = {}
+        for atom in atoms:
+            nm = str(atom.get("name") or "").strip()
+            if not nm:
+                continue
+            if seen_names.get(nm):
+                suffix = atom.get("alias") or atom.get("measure_column")
+                if suffix:
+                    atom["name"] = f"{nm}（{suffix}）"
+            else:
+                seen_names[nm] = 1
+        # B（A/B/C 三轮增强）：语句含算术/派生列时**自动合成复合**——不再仅依赖
+        # 前端 synthesize_composite 开关（默认 false 曾让「外层派生列」SQL 只出原子）。
+        # 已解析出命名派生候选（A7）时不重复合成整语句复合（避免「转诊预约旧页面」
+        # 之外再多一个拼接复合）；无命名派生但含运算（SELECT SUM(a)/SUM(b)）才自动
+        # 合成整语句复合兜底；用户显式开关仍优先（含全部原子运算视图）。
+        has_named_derived = any(a.get("deps_aliases") for a in atoms)
+        should_auto_composite = (
+            not has_named_derived and sql_has_arithmetic(rec["seg"])
+        )
+        if synthesize_composite or should_auto_composite:
             composite = _build_composite_candidate(
                 idx=idx,
                 sql=rec["seg"],

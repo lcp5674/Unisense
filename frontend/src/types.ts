@@ -2884,6 +2884,11 @@ export interface SqlBatchCandidate {
   source?: "rule" | "llm" | null;
   /** A-1/2：CASE/窗口/下沉子查询口径需人工核对（expression 非简单 SUM(col)） */
   needs_review?: boolean;
+  /** A7：引用已命名聚合列的算术派生候选——被引用的聚合别名（后端已解析为
+      dependencies 原子编码；该字段保留源别名供展示/诊断） */
+  deps_aliases?: string[] | null;
+  /** 投影别名（下沉聚合/派生列业务标识；名称去重后缀与展示用） */
+  alias?: string | null;
   /** P0-2：口径三方责任（复合候选批量创建补齐；原子通常随创建人/域默认） */
   product_owner_id?: number | null;
   tech_owner_id?: number | null;
