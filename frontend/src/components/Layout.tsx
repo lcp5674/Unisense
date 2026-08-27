@@ -8,7 +8,6 @@ import {
   PlusCircleOutlined,
   AuditOutlined,
   CheckSquareOutlined,
-  CheckCircleOutlined,
   ApartmentOutlined,
   HeartOutlined,
   DashboardOutlined,
@@ -16,7 +15,6 @@ import {
   UserOutlined,
   BellOutlined,
   SearchOutlined,
-  DeploymentUnitOutlined,
   ExperimentOutlined,
   PartitionOutlined,
   BookOutlined,
@@ -111,8 +109,7 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
       { key: "/catalog", label: "指标目录", icon: <AppstoreOutlined /> },
       { key: "/templates", label: "指标模板", icon: <FileTextOutlined /> },
       { key: "/create", label: "注册指标", icon: <PlusCircleOutlined /> },
-      { key: "/metrics/review", label: "指标审批", icon: <AuditOutlined /> },
-      { key: "/master-data/review", label: "主数据审批", icon: <CheckCircleOutlined /> },
+      { key: "/approval", label: "审批中心", icon: <AuditOutlined /> },
       { key: "/domains", label: "主题域管理", icon: <ApartmentOutlined /> },
       { key: "/dimensions", label: "维度管理", icon: <PartitionOutlined /> },
       { key: "/measure-catalogs", label: "原子指标口径库", icon: <TagsOutlined /> },
@@ -130,7 +127,6 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
   {
     label: "治理合规",
     children: [
-      { key: "/review", label: "冲突仲裁", icon: <DeploymentUnitOutlined /> },
       { key: "/quality", label: "质量中心", icon: <ExperimentOutlined /> },
     ],
   },
@@ -548,19 +544,23 @@ export function Layout({ user }: { user: CurrentUser }) {
   // 按权限点过滤导航菜单（细粒度管控：替代原 ADMIN_ONLY 角色二值过滤）：
   // 菜单项映射到 ``ROUTE_PERM[path]`` 权限点，用户无该权限点则隐藏；
   // 某组过滤后为空则整组隐藏。无映射的菜单项默认放行（保持向后兼容）。
-  const { can, error: permError } = usePermission();
+  const { can, canAny, error: permError } = usePermission();
   const menuItems = useMemo(() => {
     return NAV_GROUPS.map((g) => ({
       type: "group" as const,
       label: g.label,
       children: g.children
         .filter((c) => {
+          // 审批中心聚合三个审批/仲裁入口：任一相关权限点即放行（无任一权限则隐藏）
+          if (c.key === "/approval") {
+            return canAny(["metric:review", "master-data:review", "review:view"]);
+          }
           const perm = ROUTE_PERM[c.key];
           return perm ? can(perm) : true;
         })
         .map((c) => ({ key: c.key, icon: c.icon, label: c.label })),
     })).filter((g) => g.children.length > 0);
-  }, [can, user.role]);
+  }, [can, canAny, user.role]);
 
   // 首次登录强制改密：必须修改成功才消失（force 弹窗不可关闭）
   const forceChangeRequired = user.must_change_password === true && !forcePwdDone;

@@ -27,9 +27,7 @@ const MetricCompare = lazyNamed(() => import("./pages/MetricCompare"), "MetricCo
 const MetricCreate = lazyNamed(() => import("./pages/MetricCreate"), "MetricCreate");
 const MeasureCatalogs = lazyNamed(() => import("./pages/MeasureCatalogs"), "MeasureCatalogs");
 const SqlInferEval = lazyNamed(() => import("./pages/SqlInferEval"), "SqlInferEval");
-const ReviewWorkbench = lazyNamed(() => import("./pages/ReviewWorkbench"), "ReviewWorkbench");
-const MetricReview = lazyNamed(() => import("./pages/MetricReview"), "MetricReview");
-const MasterDataReview = lazyNamed(() => import("./pages/MasterDataReview"), "MasterDataReview");
+const ApprovalCenter = lazyNamed(() => import("./pages/ApprovalCenter"), "ApprovalCenter");
 const TodoCenter = lazyNamed(() => import("./pages/TodoCenter"), "TodoCenter");
 const LineageView = lazyNamed(() => import("./pages/LineageView"), "LineageView");
 const Favorites = lazyNamed(() => import("./pages/Favorites"), "Favorites");
@@ -285,19 +283,14 @@ export default function App() {
               <Route path="/detail/:code" element={<MetricDetail />} />
               <Route path="/compare" element={<MetricCompare />} />
               <Route path="/create" element={<RequirePerm perm={ROUTE_PERM["/create"]}><MetricCreate /></RequirePerm>} />
-              <Route path="/metrics/review" element={<MetricReview />} />
-              <Route
-                path="/master-data/review"
-                element={
-                  <RequirePerm perm={ROUTE_PERM["/master-data/review"]}>
-                    <MasterDataReview />
-                  </RequirePerm>
-                }
-              />
+              <Route path="/approval" element={<ApprovalCenter />} />
+              {/* 深链兼容：原三个审批/仲裁入口重定向到统一审批中心对应 Tab（保留书签/通知/旧链接） */}
+              <Route path="/metrics/review" element={<Navigate to="/approval?tab=metrics" replace />} />
+              <Route path="/master-data/review" element={<Navigate to="/approval?tab=master-data" replace />} />
               <Route path="/favorites" element={<Favorites />} />
               <Route path="/assetmap" element={<AssetMap />} />
               <Route path="/lineage" element={<LineageView />} />
-              <Route path="/review" element={<ReviewWorkbench />} />
+              <Route path="/review" element={<Navigate to="/approval?tab=conflict" replace />} />
               <Route path="/quality" element={<QualityCenter />} />
               <Route path="/dimensions" element={<Dimensions />} />
               <Route path="/measure-catalogs" element={<RequirePerm perm={ROUTE_PERM["/measure-catalogs"]}><MeasureCatalogs /></RequirePerm>} />

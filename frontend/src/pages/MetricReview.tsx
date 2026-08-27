@@ -340,7 +340,7 @@ function ReviewDetailModal({
   );
 }
 
-export function MetricReview() {
+export function MetricReview({ embedded = false }: { embedded?: boolean } = {}) {
   const [items, setItems] = useState<MetricResponse[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -710,16 +710,18 @@ export function MetricReview() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
-            返回
-          </Button>
-          <div className="page-kicker">指标资产 / 指标审批</div>
-          <h2>指标审批</h2>
-          <p>待评审指标——仅被指派评审人/域评审组可通过或打回。</p>
+      {!embedded && (
+        <div className="page-head">
+          <div>
+            <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
+              返回
+            </Button>
+            <div className="page-kicker">指标资产 / 指标审批</div>
+            <h2>指标审批</h2>
+            <p>待评审指标——仅被指派评审人/域评审组可通过或打回。</p>
+          </div>
         </div>
-      </div>
+      )}
       <Card
         title="指标审批"
         extra={

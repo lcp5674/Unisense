@@ -558,12 +558,12 @@ function actionFor(templateCode: string, payload: Record<string, unknown>): { la
   switch (templateCode) {
     case "metric.submitted":
     case "metric.resubmitted":
-      return { label: "去审批", target: code ?? "/metrics/review" };
-    // 主数据审核流：维度/逻辑度量/术语提交 → 统一主数据审批工作台（一处审批全部主数据）
+      return { label: "去审批", target: code ?? "/approval?tab=metrics" };
+    // 主数据审核流：维度/逻辑度量/术语提交 → 统一审批中心主数据 Tab（一处审批全部主数据）
     case "dimension.submitted":
     case "measure.submitted":
     case "term.submitted":
-      return { label: "去审批", target: "/master-data/review" };
+      return { label: "去审批", target: "/approval?tab=master-data" };
     case "metric.gray_published":
       return { label: "去验证", target: code ?? "/detail" };
     case "metric.breaking_change_pending":
@@ -579,7 +579,7 @@ function actionFor(templateCode: string, payload: Record<string, unknown>): { la
     case "conflict_open":
     case "conflict_escalated":
     case "conflict_reopened":
-      return { label: "去仲裁", target: "/review" };
+      return { label: "去仲裁", target: "/approval?tab=conflict" };
     case "pii_conflict":
     case "pii.review_pending":
       return { label: "去复核", target: "/governance" };
@@ -605,7 +605,7 @@ function actionFor(templateCode: string, payload: Record<string, unknown>): { la
 // 字段值 → 跳转目标：关联对象在通知里可直接点击直达（指标→详情、冲突→仲裁、反馈→反馈中心）。
 function fieldTarget(key: string, value: string): string | null {
   if (key === "metric_code" || key === "指标编码") return `/detail/${encodeURIComponent(value)}`;
-  if (key === "conflict_id" || key === "冲突编号") return "/review";
+  if (key === "conflict_id" || key === "冲突编号") return "/approval?tab=conflict";
   if (key === "feedback_id" || key === "反馈编号") return "/feedback";
   if (key === "source_id" || key === "数据源ID") return "/data-sources";
   return null;
@@ -908,7 +908,7 @@ function NotifListTab() {
       return;
     }
     if (tpl.startsWith("conflict")) {
-      navigate("/review");
+      navigate("/approval?tab=conflict");
       return;
     }
     // 账号安全 / 组织状态 / 授权变更 → 个人中心（用户本人视角：我的账号 / 我的授权）

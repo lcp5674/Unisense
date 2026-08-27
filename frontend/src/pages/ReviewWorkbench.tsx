@@ -166,7 +166,7 @@ function ConflictSummary({ c }: { c: ConflictResponse }) {
   );
 }
 
-export function ReviewWorkbench() {
+export function ReviewWorkbench({ embedded = false }: { embedded?: boolean } = {}) {
   const [items, setItems] = useState<ConflictResponse[]>([]);
   const [status, setStatus] = useState("");
   const [severity, setSeverity] = useState("");
@@ -514,9 +514,11 @@ export function ReviewWorkbench() {
 
   return (
     <div>
-      <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 8 }}>
-        返回
-      </Button>
+      {!embedded && (
+        <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 8 }}>
+          返回
+        </Button>
+      )}
       <Card
         title="审核工作台（冲突仲裁）"
         extra={

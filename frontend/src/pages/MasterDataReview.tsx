@@ -109,7 +109,7 @@ function toItem(kind: ReviewKind, row: Record<string, unknown>): ReviewItem {
   };
 }
 
-export function MasterDataReview() {
+export function MasterDataReview({ embedded = false }: { embedded?: boolean } = {}) {
   const [items, setItems] = useState<ReviewItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
@@ -357,16 +357,18 @@ export function MasterDataReview() {
 
   return (
     <div>
-      <div className="page-head">
-        <div>
-          <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
-            返回
-          </Button>
-          <div className="page-kicker">指标资产 / 主数据审批</div>
-          <h2>主数据审批</h2>
-          <p>维度 / 逻辑度量 / 术语统一审批——被指派评审人或域评审组在此通过或驳回，提交人收到通知后返回修改重提。</p>
+      {!embedded && (
+        <div className="page-head">
+          <div>
+            <Button type="link" icon={<ArrowLeftOutlined />} onClick={handleBack} style={{ padding: 0, marginBottom: 4 }}>
+              返回
+            </Button>
+            <div className="page-kicker">指标资产 / 主数据审批</div>
+            <h2>主数据审批</h2>
+            <p>维度 / 逻辑度量 / 术语统一审批——被指派评审人或域评审组在此通过或驳回，提交人收到通知后返回修改重提。</p>
+          </div>
         </div>
-      </div>
+      )}
       <Card
         title="主数据审批"
         extra={

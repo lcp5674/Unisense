@@ -210,7 +210,7 @@ describe("通知中心 - 深链跳转", () => {
     await waitFor(() => expect(screen.getByText("口径冲突待处理")).toBeInTheDocument());
 
     fireEvent.click(screen.getByText("口径冲突待处理"));
-    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/review"));
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/approval"));
   });
 
   it("未知类型事件优雅降级：不跳转且提示", async () => {
@@ -703,7 +703,7 @@ describe("通知中心 - 收件箱增强（点击已读 / 筛选 / 聚合 / 待�
 
     const card = screen.getByText("口径冲突待处理").closest(".notif-card") as HTMLElement;
     fireEvent.click(withinCard(card, "去仲裁"));
-    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/review"));
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/approval"));
   });
 
   it("非待处理通知不显示行动按钮", async () => {

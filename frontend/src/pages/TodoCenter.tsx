@@ -30,7 +30,7 @@ const KIND_META: Record<Todo["kind"], { label: string; color: string; action: st
     label: "冲突",
     color: "red",
     action: "去仲裁",
-    target: () => "/review",
+    target: () => "/approval?tab=conflict",
   },
   draft: {
     label: "草稿",
@@ -42,7 +42,7 @@ const KIND_META: Record<Todo["kind"], { label: string; color: string; action: st
     label: "待审核",
     color: "gold",
     action: "去审核",
-    target: () => "/metrics/review",
+    target: () => "/approval?tab=metrics",
   },
   quality: {
     label: "质量告警",

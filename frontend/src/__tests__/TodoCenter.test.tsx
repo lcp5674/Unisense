@@ -170,7 +170,7 @@ describe("待办中心 - 聚合与跳转", () => {
     renderPage();
     await screen.findByText(/冲突待仲裁/);
     fireEvent.click(screen.getByRole("button", { name: /去仲裁/ }));
-    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/review"));
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/approval"));
   });
 
   it("草稿项点「查看」跳转指标详情", async () => {
@@ -184,7 +184,7 @@ describe("待办中心 - 聚合与跳转", () => {
     renderPage();
     await screen.findByText(/待审核指标/);
     fireEvent.click(screen.getByRole("button", { name: /去审核/ }));
-    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/metrics/review"));
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/approval"));
   });
 
   it("质量告警项点「去处理」跳转质量中心", async () => {
@@ -225,7 +225,7 @@ describe("待办中心 - 聚合与跳转", () => {
     await screen.findByText(/冲突待仲裁/);
     const item = await screen.findByTestId("todo-item-conflict");
     fireEvent.click(item);
-    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/review"));
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe("/approval"));
   });
 
   it("展示数据源下线待办并按当前用户 Owner 维度查询", async () => {
