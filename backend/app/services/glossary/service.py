@@ -188,9 +188,10 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         offset: int,
         owner_id: int | None = None,
         deleted: bool = False,
+        reviewed_by: int | None = None,
     ) -> tuple[list[TermResponse], int]:
         rows, total = await self._repo.list_terms(
-            domain, status, search, limit, offset, owner_id, deleted
+            domain, status, search, limit, offset, owner_id, deleted, reviewed_by
         )
         return [TermResponse.from_model(t) for t in rows], total
 

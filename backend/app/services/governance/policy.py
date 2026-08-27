@@ -180,6 +180,7 @@ UI_ACTION_REGISTRY: dict[str, dict[str, str]] = {
     "metric:deprecate": {"module": "指标", "label": "废弃指标", "description": "下线并废弃指标"},
     "metric:export": {"module": "指标", "label": "导出指标", "description": "导出指标清单"},
     "metric:review": {"module": "指标", "label": "评审指标", "description": "参与指标口径评审"},
+    "master-data:review": {"module": "指标", "label": "统一主数据审批", "description": "访问统一主数据审批工作台（维度/逻辑度量/术语待我审与我审过的）"},  # noqa: E501
     "metric:emergency-publish": {"module": "指标", "label": "紧急发布", "description": "跳过常规流程紧急发布"},  # noqa: E501
     "metric:rollback": {"module": "指标", "label": "指标回滚", "description": "回滚已发布指标版本"},
     "metric:import": {"module": "指标", "label": "批量导入", "description": "批量注册 / 导入指标"},
@@ -284,6 +285,7 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "catalog:view", "measure-catalogs:view",
             "compare:view", "templates:view", "metric:create", "metric:edit",
             "metric:delete", "metric:approve", "metric:deprecate", "metric:export", "metric:review",
+            "master-data:review",
             "metric:emergency-publish", "metric:rollback", "metric:import",
             "metric:infer-description",
             "assetmap:view", "assetmap:edit", "assetmap:export", "lineage:view",
@@ -332,7 +334,7 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
         {
             "dashboard:view", "todo:view", "notifications:view", "favorites:view",
             "catalog:view", "measure-catalogs:view", "compare:view",
-            "metric:review", "metric:approve",
+            "metric:review", "metric:approve", "master-data:review",
             "quality:view", "review:view", "query:view", "ai:view",
             "dimensions:view", "glossary:view", "feedback:view", "guide:view",
         }

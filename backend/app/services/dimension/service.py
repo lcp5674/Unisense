@@ -140,6 +140,7 @@ class DimensionService(BaseService, MasterDataReviewMixin):
         keyword: str | None = None,
         owner_id: int | None = None,
         *,
+        reviewed_by: int | None = None,
         deleted: bool = False,
         page: int = 1,
         page_size: int = 20,
@@ -147,11 +148,19 @@ class DimensionService(BaseService, MasterDataReviewMixin):
         """分页列出维度，返回 (列表, total)（服务端分页，对齐 glossary）。
 
         deleted=True 时列出已软删记录（回收站视图）。
+        reviewed_by 非空时过滤"我审过的"（通过/驳回人 ID 匹配，供统一主数据审批工作台）。
         """
         limit = min(max(page_size, 1), 200)
         offset = (max(page, 1) - 1) * limit
         return await self._repo.list_dimensions(
-            domain, status, keyword, owner_id, deleted=deleted, limit=limit, offset=offset
+            domain,
+            status,
+            keyword,
+            owner_id,
+            reviewed_by=reviewed_by,
+            deleted=deleted,
+            limit=limit,
+            offset=offset,
         )
 
     async def update_dimension(self, dim_code: str, data: DimensionUpdate) -> Dimension:

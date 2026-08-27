@@ -56,6 +56,10 @@ const EVENT_TYPE_LABEL: Record<string, string> = {
   "metric.gray_published": "指标灰度发布",
   "metric.breaking_change_pending": "指标口径变更待确认",
   "metric.breaking_change_promoted": "指标口径变更已生效",
+  // 主数据审核流（dimension/measure/term → 统一主数据审批工作台）
+  "dimension.submitted": "维度待审核",
+  "measure.submitted": "逻辑度量待审核",
+  "term.submitted": "术语待审核",
   "conflict_open": "口径冲突待处理",
   "conflict_ruled": "口径冲突已裁决",
   "conflict_escalated": "口径冲突已升级",
@@ -473,6 +477,10 @@ const IMPACT_TEXT: Record<string, string> = {
   "metric.gray_published": "指标已灰度发布，请在灰度环境验证口径。",
   "metric.breaking_change_pending": "指标口径将变更，请在确认期内核对消费影响。",
   "metric.breaking_change_promoted": "指标新口径已生效，消费方请关注口径变化。",
+  // 主数据审核流（被指派评审人/域评审组 → 统一主数据审批工作台）
+  "dimension.submitted": "维度已提交审核，等待审批结果。",
+  "measure.submitted": "逻辑度量已提交审核，等待审批结果。",
+  "term.submitted": "术语已提交审核，等待审批结果。",
   conflict_open: "有新的口径冲突待处理，请及时仲裁。",
   conflict_ruled: "口径冲突已裁决，请以权威口径为准。",
   conflict_escalated: "口径冲突已升级，需上级介入裁决。",
@@ -515,6 +523,10 @@ const IMPACT_TEXT: Record<string, string> = {
 const NEEDS_ACTION = new Set<string>([
   "metric.submitted",
   "metric.resubmitted",
+  // 主数据审核流（维度/逻辑度量/术语待审核 → 统一主数据审批工作台）
+  "dimension.submitted",
+  "measure.submitted",
+  "term.submitted",
   "metric.gray_published",
   "metric.rename_required",
   "metric.health_critical",
@@ -547,6 +559,11 @@ function actionFor(templateCode: string, payload: Record<string, unknown>): { la
     case "metric.submitted":
     case "metric.resubmitted":
       return { label: "去审批", target: code ?? "/metrics/review" };
+    // 主数据审核流：维度/逻辑度量/术语提交 → 统一主数据审批工作台（一处审批全部主数据）
+    case "dimension.submitted":
+    case "measure.submitted":
+    case "term.submitted":
+      return { label: "去审批", target: "/master-data/review" };
     case "metric.gray_published":
       return { label: "去验证", target: code ?? "/detail" };
     case "metric.breaking_change_pending":

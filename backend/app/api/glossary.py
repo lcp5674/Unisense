@@ -412,13 +412,16 @@ async def list_terms(
     status: str | None = Query(None),
     search: str | None = Query(None),
     owner_id: int | None = Query(None, description="责任人（Owner）ID 过滤"),
+    reviewed_by: int | None = Query(
+        None, description="我审过的（通过/驳回人 ID 过滤，供统一主数据审批工作台）"
+    ),
     deleted: bool = Query(False, description="是否查看回收站（已软删记录）"),
     # P4 分页边界：page ge=1 防 page=0 负 offset；page_size le=200 防无界全量拉取
     page: int = Query(1, ge=1, le=10000),
     page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
     items, total = await GlossaryService(db).list_terms(
-        domain, status, search, page_size, (page - 1) * page_size, owner_id, deleted
+        domain, status, search, page_size, (page - 1) * page_size, owner_id, deleted, reviewed_by
     )
     return ok(
         data={"items": items, "total": total, "page": page, "page_size": page_size},

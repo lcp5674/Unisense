@@ -1691,6 +1691,7 @@ export async function listDimensions(params?: {
   status?: string;
   keyword?: string;
   owner_id?: number;
+  reviewed_by?: number;
   deleted?: boolean;
   page?: number;
   page_size?: number;
@@ -1700,6 +1701,7 @@ export async function listDimensions(params?: {
     status: params?.status,
     keyword: params?.keyword,
     owner_id: params?.owner_id,
+    reviewed_by: params?.reviewed_by,
     deleted: params?.deleted ? "true" : undefined,
     page: params?.page,
     page_size: params?.page_size ?? 50,
@@ -1904,6 +1906,7 @@ export async function listMeasureCatalogs(params?: {
   status?: string;
   keyword?: string;
   owner_id?: number;
+  reviewed_by?: number;
   deleted?: boolean;
   page?: number;
   page_size?: number;
@@ -1913,6 +1916,7 @@ export async function listMeasureCatalogs(params?: {
     status: params?.status,
     keyword: params?.keyword,
     owner_id: params?.owner_id,
+    reviewed_by: params?.reviewed_by,
     deleted: params?.deleted ? "true" : undefined,
     page: params?.page,
     page_size: params?.page_size ?? 50,
@@ -2366,6 +2370,7 @@ export async function listTerms(params?: {
   status?: string;
   search?: string;
   owner_id?: number;
+  reviewed_by?: number;
   deleted?: boolean;
   page?: number;
   page_size?: number;
@@ -2375,6 +2380,7 @@ export async function listTerms(params?: {
     status: params?.status,
     search: params?.search,
     owner_id: params?.owner_id,
+    reviewed_by: params?.reviewed_by,
     deleted: params?.deleted ? "true" : undefined,
     page: params?.page ?? 1,
     page_size: params?.page_size ?? 20,

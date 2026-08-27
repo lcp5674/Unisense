@@ -117,12 +117,22 @@ async def list_measures(
     status: str | None = Query(None),
     keyword: str | None = Query(None, description="关键词：编码/名称/描述模糊匹配"),
     owner_id: int | None = Query(None, description="负责人 ID 过滤"),
+    reviewed_by: int | None = Query(
+        None, description="我审过的（通过/驳回人 ID 过滤，供统一主数据审批工作台）"
+    ),
     deleted: bool = Query(False, description="是否查看回收站（已软删记录）"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
     items, total = await MeasureCatalogService(db).list_measures(
-        domain, status, keyword, owner_id, deleted=deleted, page=page, page_size=page_size
+        domain,
+        status,
+        keyword,
+        owner_id,
+        reviewed_by=reviewed_by,
+        deleted=deleted,
+        page=page,
+        page_size=page_size,
     )
     converted = [MeasureResponse.from_model(i) for i in items]
     return ok(

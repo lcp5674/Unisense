@@ -88,6 +88,24 @@ class TestTermRepo:
         )
         assert len(rows) == 1
 
+    async def test_list_terms_reviewed_by_filters_approver_or_rejector(
+        self, repo: GlossaryRepository
+    ) -> None:
+        """reviewed_by 过滤"我审过的"：approver_id 或 reject_reviewer_id 匹配（审批工作台）。"""
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = []
+        mock_result.scalar.return_value = 0
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        await repo.list_terms(
+            domain=None, status=None, search=None, limit=10, offset=0, reviewed_by=9
+        )
+        stmt = repo._session.execute.call_args_list[1].args[0]
+        literal_sql = str(
+            stmt.compile(compile_kwargs={"literal_binds": True})
+        )
+        assert "term.approver_id = 9" in literal_sql
+        assert "term.reject_reviewer_id = 9" in literal_sql
+
     async def test_list_terms_search_escapes_wildcards(self, repo: GlossaryRepository) -> None:
         """LIKE 通配符（% / _）须转义，防模糊放大（对齐 FR-035）。"""
         from sqlalchemy.dialects import mysql

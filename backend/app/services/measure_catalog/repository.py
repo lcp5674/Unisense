@@ -61,6 +61,7 @@ class MeasureCatalogRepository:
         keyword: str | None = None,
         owner_id: int | None = None,
         *,
+        reviewed_by: int | None = None,
         deleted: bool = False,
         limit: int = 20,
         offset: int = 0,
@@ -70,6 +71,7 @@ class MeasureCatalogRepository:
         - total 用独立 count（不含 JOIN），与列表共用同一过滤条件，保证分页一致性
         - keyword 参数化 LIKE + 通配符转义（对齐 FR-035：% / _ 须转义，防模糊放大）
         - deleted=True 时列出已软删记录（回收站视图）
+        - reviewed_by 非空时过滤"我审过的"（通过/驳回人 ID 匹配，供统一主数据审批工作台）
         """
         conditions = (
             [MeasureCatalog.deleted_at.is_not(None)]
@@ -82,6 +84,13 @@ class MeasureCatalogRepository:
             conditions.append(MeasureCatalog.status == status)
         if owner_id is not None:
             conditions.append(MeasureCatalog.owner_id == owner_id)
+        if reviewed_by is not None:
+            conditions.append(
+                or_(
+                    MeasureCatalog.approver_id == reviewed_by,
+                    MeasureCatalog.reject_reviewer_id == reviewed_by,
+                )
+            )
         if keyword:
             escaped = keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")
             conditions.append(

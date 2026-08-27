@@ -29,6 +29,7 @@ const MeasureCatalogs = lazyNamed(() => import("./pages/MeasureCatalogs"), "Meas
 const SqlInferEval = lazyNamed(() => import("./pages/SqlInferEval"), "SqlInferEval");
 const ReviewWorkbench = lazyNamed(() => import("./pages/ReviewWorkbench"), "ReviewWorkbench");
 const MetricReview = lazyNamed(() => import("./pages/MetricReview"), "MetricReview");
+const MasterDataReview = lazyNamed(() => import("./pages/MasterDataReview"), "MasterDataReview");
 const TodoCenter = lazyNamed(() => import("./pages/TodoCenter"), "TodoCenter");
 const LineageView = lazyNamed(() => import("./pages/LineageView"), "LineageView");
 const Favorites = lazyNamed(() => import("./pages/Favorites"), "Favorites");
@@ -285,6 +286,14 @@ export default function App() {
               <Route path="/compare" element={<MetricCompare />} />
               <Route path="/create" element={<RequirePerm perm={ROUTE_PERM["/create"]}><MetricCreate /></RequirePerm>} />
               <Route path="/metrics/review" element={<MetricReview />} />
+              <Route
+                path="/master-data/review"
+                element={
+                  <RequirePerm perm={ROUTE_PERM["/master-data/review"]}>
+                    <MasterDataReview />
+                  </RequirePerm>
+                }
+              />
               <Route path="/favorites" element={<Favorites />} />
               <Route path="/assetmap" element={<AssetMap />} />
               <Route path="/lineage" element={<LineageView />} />

@@ -127,6 +127,27 @@ class TestMeasureRepository:
         assert "count(" in count_sql
         assert "LIMIT" in list_sql
 
+    async def test_list_reviewed_by_filters_approver_or_rejector(self, repo, session) -> None:
+        """reviewed_by 过滤"我审过的"：approver_id 或 reject_reviewer_id 匹配（审批工作台）。"""
+        session.execute = AsyncMock(side_effect=[_FakeResult(row=0), _FakeResult(rows=[])])
+        await repo.list(None, "REVIEW", reviewed_by=9)
+        list_sql = str(
+            session.execute.call_args_list[1][0][0].compile(
+                compile_kwargs={"literal_binds": True}
+            )
+        )
+        assert "measure_catalog.approver_id = 9" in list_sql
+        assert "measure_catalog.reject_reviewer_id = 9" in list_sql
+
+    async def test_list_without_reviewed_by_no_extra_condition(self, repo, session) -> None:
+        """reviewed_by 缺省时不追加审核人过滤（既有调用行为不变）。"""
+        session.execute = AsyncMock(side_effect=[_FakeResult(row=0), _FakeResult(rows=[])])
+        await repo.list(None, None)
+        list_sql = str(session.execute.call_args_list[1][0][0].compile())
+        # SELECT 全列查询天然含 approver_id 列名；断言 WHERE 无等号条件即可
+        assert "approver_id =" not in list_sql
+        assert "reject_reviewer_id =" not in list_sql
+
     async def test_count_metrics_by_measure(self, repo, session) -> None:
         session.execute = AsyncMock(return_value=_FakeResult(row=3))
         assert await repo.count_metrics_by_measure(1) == 3

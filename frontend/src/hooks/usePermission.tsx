@@ -118,6 +118,7 @@ export const ROUTE_PERM: Record<string, string> = {
   "/templates": "templates:view",
   "/create": "metric:create",
   "/metrics/review": "metric:review",
+  "/master-data/review": "master-data:review",
   "/assetmap": "assetmap:view",
   "/lineage": "lineage:view",
   "/review": "review:view",

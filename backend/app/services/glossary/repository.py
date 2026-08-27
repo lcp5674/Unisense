@@ -77,6 +77,7 @@ class GlossaryRepository:
         offset: int,
         owner_id: int | None = None,
         deleted: bool = False,
+        reviewed_by: int | None = None,
     ) -> tuple[Iterable[Term], int]:
         # 回收站视图：deleted=True 列出已软删术语；默认列表仅未删
         conditions = [Term.deleted_at.is_not(None) if deleted else Term.deleted_at.is_(None)]
@@ -86,6 +87,13 @@ class GlossaryRepository:
             conditions.append(Term.status == status)
         if owner_id is not None:
             conditions.append(Term.owner_id == owner_id)
+        if reviewed_by is not None:
+            conditions.append(
+                or_(
+                    Term.approver_id == reviewed_by,
+                    Term.reject_reviewer_id == reviewed_by,
+                )
+            )
         if search:
             # 参数化 LIKE + 通配符转义（对齐 FR-035：% / _ 须转义，防模糊放大）
             escaped = search.replace("/", "//").replace("%", "/%").replace("_", "/_")
