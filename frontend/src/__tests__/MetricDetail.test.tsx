@@ -2345,11 +2345,13 @@ describe("MetricDetail 按钮级权限过滤", () => {
   });
 
   it("编辑弹窗遗留粒度/单位值兜底（字典未收录时仍显示并保留，防静默清空）", async () => {
-    // 存量指标粒度 "daily" 不在字典（字典为空），openEdit 应将其作为兜底选项加入，
+    // 存量派生指标粒度 "daily" 不在字典（字典为空），openEdit 应将其作为兜底选项加入，
     // 保存时 granularity/unit 不被静默清空（数据丢失防护）。
+    // （S6：原子粒度编辑框已隐藏、粒度锁死 day——遗留粒度兜底只对派生/复合生效）
     mockedGetMetric.mockResolvedValue({
       ...metric,
       status: "DRAFT",
+      type: "derived",
       granularity: "daily",
       unit: "USD",
     });

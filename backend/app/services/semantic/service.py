@@ -4939,6 +4939,16 @@ class MetricService(BaseService):
                 continue
             code = cand.metric_code
             deps = cand.dependencies or []
+            # S2（三轮审查）：表达式内嵌复合（自动推断的比率/运算列，如
+            # ``SUM(a)/COUNT(b)``）无已发布指标可依赖——复合门禁（schemas.py
+            # 要求 dependencies 非空）会整条 422 拦死 parse→create 闭环。此类
+            # 无依赖复合降级为派生创建（口径/周期/挂载保留）：派生依赖可选、
+            # 表达式承载运算，血缘对无依赖天然安全；真正引用指标的复合仍强制依赖。
+            effective_type = cand.type
+            downgraded = False
+            if cand.type == "composite" and not deps:
+                effective_type = "derived"
+                downgraded = True
             missing: list[str] = []
             for dep in deps:
                 if dep in atom_ok:
@@ -4964,7 +4974,7 @@ class MetricService(BaseService):
                         metric_code=code,
                         name=cand.name,
                         domain=request.domain,
-                        type=cand.type,
+                        type=effective_type,
                         # aggregation 为 schema 必填；派生/复合聚合语义由依赖/表达式承载，
                         # 占位 SUM（对齐批量注册默认聚合）
                         aggregation=cand.aggregation or "SUM",
@@ -4996,7 +5006,16 @@ class MetricService(BaseService):
                         _conflict_llm_budget=conflict_llm_budget,
                     )
                 candidates.append(
-                    {"metric_code": code, "status": "DRAFT", "validation_errors": None}
+                    {
+                        "metric_code": code,
+                        "status": "DRAFT",
+                        "validation_errors": (
+                            "表达式内嵌复合（无依赖）已按派生指标创建；如需作为复合指标，"
+                            "请在前端补充依赖指标后重新创建"
+                            if downgraded
+                            else None
+                        ),
+                    }
                 )
             except PydanticValidationError as exc:
                 candidates.append(

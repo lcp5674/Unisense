@@ -1520,7 +1520,50 @@ async def test_infer_sql_batch_use_llm_filters_not_measure() -> None:
     assert result["candidates"][0]["source"] == "llm"
 
 
-async def test_infer_sql_batch_use_llm_degrades_when_unavailable() -> None:
+async def test_infer_sql_batch_use_llm_keeps_composite_candidate() -> None:
+    """S1（三轮审查）：use_llm 模式复合候选豁免 is_measure 判定——LLM 高置信度把
+    自动复合候选（arpu，measure_column/aggregation 为占位）判为「非度量」时不得剔除
+    （与默认路径 B4.1 豁免对齐，防复合功能在 LLM 批量模式下端到端不可见）。"""
+    arith_sql = (
+        "SELECT dt, SUM(amount) AS gmv, "
+        "SUM(amount)/COUNT(DISTINCT user_id) AS arpu "
+        "FROM dwd_order_di GROUP BY dt"
+    )
+    with patch(
+        "app.services.semantic.sql_split._llm_annotate_candidates",
+        new=AsyncMock(
+            return_value=[
+                {
+                    "key": "0:arpu",
+                    "is_measure": False,
+                    "confidence": 0.9,
+                    "reason": "复合聚合体不是单度量",
+                }
+            ]
+        ),
+    ):
+        result = await infer_sql_batch(
+            _fake_db(), sql=arith_sql, split_mode="statement", domain_code="sales", use_llm=True
+        )
+    # 复合候选不被 is_measure=false 剔除（保持候选，进入 LLM 收敛）
+    comps = [c for c in result["candidates"] if c["type"] == "composite"]
+    assert len(comps) == 1
+    assert comps[0]["key"] == "0:arpu"
+    assert len(result["skipped"]) == 0
+
+
+async def test_infer_sql_batch_colname_ratio_is_composite() -> None:
+    """S3（三轮审查）：批量路径补列名比率规则（rate/ratio/pct→复合）——对齐单条
+    _infer_type，两路径对 SELECT SUM(refund_rate)（日粒度）判定一致（复合）。"""
+    result = await infer_sql_batch(
+        _fake_db(),
+        sql="SELECT dt, SUM(refund_rate) AS refund_rate FROM dwd_order_di GROUP BY dt",
+        split_mode="statement",
+        domain_code="sales",
+    )
+    comps = [c for c in result["candidates"] if c["type"] == "composite"]
+    assert len(comps) == 1
+    assert comps[0]["key"] == "0:refund_rate"
     """use_llm 兜底：LLM 补全不可用/失败（返回 None）→ 保持规则候选不动（source=rule）。"""
     sql = "SELECT dt, SUM(amount) AS gmv FROM dwd_order_di GROUP BY dt"
     with patch(
@@ -1595,4 +1638,118 @@ async def test_infer_sql_batch_use_llm_raises_budget() -> None:
     assert llm_mock.call_count == _LLM_BATCH_LIMIT + 1
     assert len(result["candidates"]) == _LLM_BATCH_LIMIT + 1
     assert all(s["reason"] != "llm_limit" for s in result["skipped"])
+
+
+# ---------------------------------------------------------------- 建表列注释提取（A-5）
+
+
+def test_extract_column_comments_hive_ddl() -> None:
+    """sqlglot 主路径：从 Hive 建表 DDL 提取列注释映射（表名去库前缀、列名小写）。"""
+    from app.services.semantic.sql_split import _extract_column_comments
+
+    sql = """
+    create table if not exists wedw_dws.doctor_active_month_di(
+      month_id string comment '统计月,时间格式yyyy-MM',
+      hosp_code string comment '医院编码',
+      current_month_active_doctor_cnt int comment '月活',
+      last_month_active_doctor_cnt int comment '当月访问的用户在下个月仍活跃，用于统计留存'
+    )
+    stored as orc;
+    """
+    comments = _extract_column_comments(sql)
+    assert comments["doctor_active_month_di"]["month_id"] == "统计月,时间格式yyyy-MM"
+    assert comments["doctor_active_month_di"]["hosp_code"] == "医院编码"
+    assert comments["doctor_active_month_di"]["current_month_active_doctor_cnt"] == "月活"
+    assert (
+        comments["doctor_active_month_di"]["last_month_active_doctor_cnt"]
+        == "当月访问的用户在下个月仍活跃，用于统计留存"
+    )
+
+
+def test_extract_column_comments_regex_fallback() -> None:
+    """正则兜底路径：sqlglot 无法解析时仍能粗提取建表列注释（不抛异常）。"""
+    from app.services.semantic.sql_split import _extract_column_comments
+
+    # 含 sqlglot 不认识的方言片段 → 触发正则兜底
+    sql = """
+    CREATE TABLE IF NOT EXISTS ods_x.t (col_a STRING COMMENT '金额', col_b INT COMMENT '次数')
+    USING PARQUET
+    PARTITIONED BY (dt STRING);
+    """
+    comments = _extract_column_comments(sql)
+    # 表名去库前缀
+    assert "t" in comments
+    assert comments["t"].get("col_a") == "金额"
+    assert comments["t"].get("col_b") == "次数"
+
+
+def test_insert_target_table_extracts_target() -> None:
+    """INSERT 目标表提取（下沉场景注释反查的目标表）。"""
+    from app.services.semantic.sql_split import _insert_target_table
+
+    sql = (
+        "insert overwrite table wedw_dws.doctor_active_month_di "
+        "select a.month_id, a.current_month_active_doctor_cnt "
+        "from (select substr(create_date,1,7) as month_id, "
+        "count(distinct doctor_code) as current_month_active_doctor_cnt "
+        "from wedw_dw.doctor_visit_agent_info_da group by substr(create_date,1,7)) a"
+    )
+    assert _insert_target_table(sql) == "doctor_active_month_di"
+    # 无 INSERT 语句返回 None
+    assert _insert_target_table("select 1") is None
+
+
+async def test_infer_sql_batch_uses_create_table_comments_for_name() -> None:
+    """A-5：建表 DDL 列注释驱动候选名称——「月活」不再落成「月doctor次数」；
+    注释已含周期词（月）时不重复加周期前缀。"""
+    from app.services.semantic.sql_split import (
+        _extract_column_comments,
+        _insert_target_table,
+    )
+
+    sql = """
+    create table if not exists wedw_dws.doctor_active_month_di(
+      month_id string comment '统计月,时间格式yyyy-MM',
+      hosp_code string comment '医院编码',
+      current_month_active_doctor_cnt int comment '月活',
+      last_month_active_doctor_cnt int comment '当月访问的用户在下个月仍活跃，用于统计留存'
+    )
+    stored as orc;
+    insert overwrite table wedw_dws.doctor_active_month_di
+    select a.month_id, a.hosp_code,
+           a.current_month_active_doctor_cnt,
+           a.last_month_active_doctor_cnt
+    from (
+        select substr(create_date,1,7) as month_id, hosp_code,
+               count(distinct doctor_code) as current_month_active_doctor_cnt,
+               count(distinct case when last_visit_date is not null then doctor_code end)
+                   as last_month_active_doctor_cnt
+        from wedw_dw.doctor_visit_agent_info_da
+        group by substr(create_date,1,7), hosp_code
+    ) a
+    """
+    result = await infer_sql_batch(
+        _fake_db(), sql=sql, split_mode="statement", domain_code="sales"
+    )
+    by_key = {c["key"]: c for c in result["candidates"]}
+    # 下沉度量 alias 作注释反查锚点（sunk 场景 code_col=alias）
+    cand = by_key["1:current_month_active_doctor_cnt"]
+    # 建表注释「月活」驱动名称，且注释已含「月」不再重复加周期前缀
+    assert cand["name"] == "月活"
+    assert cand["type"] == "derived"
+    # 无注释列：回退词表（医生数），不因注释缺失而空
+    cand2 = by_key["1:last_month_active_doctor_cnt"]
+    assert cand2["name"] == "当月访问的用户在下个月仍活跃，用于统计留存"
+    # INSERT 目标表提取正常（注释反查所依赖）——传含 insert overwrite 前缀的完整语句
+    assert (
+        _insert_target_table("insert overwrite" + sql.split("insert overwrite")[1])
+        == "doctor_active_month_di"
+    )
+    assert (
+        _extract_column_comments(sql)["doctor_active_month_di"][
+            "current_month_active_doctor_cnt"
+        ]
+        == "月活"
+    )
+
 

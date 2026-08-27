@@ -1355,7 +1355,9 @@ export function MetricDetail() {
       }
       const req: MetricUpdateRequest = {
         name: String(values.name).trim(),
-        granularity: values.granularity,
+        // S6（三轮审查）：原子不提交粒度——原子 = 逻辑度量 + 基础统计粒度（日），
+        // 粒度编辑框已对原子隐藏（对齐创建页原子不设粒度）；不传则后端保留原值（day）
+        granularity: metric.type === "atomic" ? undefined : values.granularity,
         unit: values.unit,
         aggregation: values.aggregation, // 聚合方式属口径变更，与粒度/单位同级（后端触发版本确认）
         ...govPayload,
@@ -1480,7 +1482,9 @@ export function MetricDetail() {
     "sql", "etl_sql", "source_table", "source_tables", "measure_column",
   ];
   function isBreakingEdit(m: MetricResponse, req: MetricUpdateRequest): boolean {
-    if (req.granularity !== m.granularity) return true;
+    // S6（三轮审查）：原子不提交粒度（编辑框已隐藏、粒度锁死 day/存量值）——req.granularity
+    // 恒 undefined，与 m.granularity 必不等，若参与比较会把任何原子编辑误判为破坏性口径变更
+    if (m.type !== "atomic" && req.granularity !== m.granularity) return true;
     if (req.unit !== m.unit) return true;
     if (req.aggregation !== m.aggregation) return true;
     // OneData 原子层：更换/解除逻辑度量属破坏性口径变更（对齐后端 BREAKING_TOP_LEVEL_FIELDS）
@@ -2891,16 +2895,22 @@ export function MetricDetail() {
             </Form.Item>
           )}
           <Space size={16} style={{ width: "100%" }}>
-            <Form.Item name="granularity" label="粒度" style={{ marginBottom: 8, flex: 1 }}>
-              <Select
-                allowClear
-                placeholder="选择粒度"
-                options={editGranularityOptions}
-                showSearch
-                optionFilterProp="label"
-                {...DROPDOWN_FULL_WIDTH}
-              />
-            </Form.Item>
+            {/* S6（三轮审查）：原子不渲染粒度编辑——原子 = 逻辑度量 + 基础统计粒度（日），
+                粒度/周期归派生与挂载实体层（创建页原子同样不设粒度）。编辑原子只能看到
+                单位/聚合方式，无法把原子改成非日粒度（此前无条件渲染 + payload 全类型
+                提交，可静默产出「原子 + 月粒度」）。 */}
+            {metric.type !== "atomic" && (
+              <Form.Item name="granularity" label="粒度" style={{ marginBottom: 8, flex: 1 }}>
+                <Select
+                  allowClear
+                  placeholder="选择粒度"
+                  options={editGranularityOptions}
+                  showSearch
+                  optionFilterProp="label"
+                  {...DROPDOWN_FULL_WIDTH}
+                />
+              </Form.Item>
+            )}
             <Form.Item name="unit" label="单位" style={{ marginBottom: 8, flex: 1 }}>
               <Select
                 allowClear
@@ -3069,6 +3079,9 @@ export function MetricDetail() {
             <>
               <Form.Item
                 label="依赖指标"
+                // S8（三轮审查）：复合必填红标（派生选填）——与创建向导 required 标记一致，
+                // 提交校验（1387）已强制，此处补视觉引导避免用户提交时才被打回
+                required={metric?.type === "composite"}
                 extra="复合必填、派生选填：纯周期派生（如「本月活跃医生数」）可不依赖其他指标；选择后血缘图谱据此生成依赖边。"
                 style={{ marginBottom: 8 }}
               >
@@ -3089,6 +3102,7 @@ export function MetricDetail() {
               </Form.Item>
               <Form.Item
                 label="计算表达式"
+                required={metric?.type === "composite"}
                 extra="引用上方依赖指标编码的计算式（MEL 语法，如 gmv / order_cnt）；留空表示不修改口径表达式。"
                 style={{ marginBottom: 8 }}
               >

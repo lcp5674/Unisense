@@ -63,7 +63,7 @@ E2E_USERS = [
     },
 ]
 
-# OneData 原子层：逻辑度量目录（原子指标 = 逻辑度量 + 聚合方式，不绑物理表）。
+# OneData 原子层：逻辑度量目录（原子指标 = 逻辑度量 + 基础统计粒度（日），不绑物理表）。
 # 度量格式联动默认单位/小数位（AMOUNT→元/2 位；RATIO→小数/4 位；NUMERIC→显式单位/0 位）。
 # 度量目录从电商演示改为医疗实际场景：口径依托 HIS 门诊真实数据（dp元数据.csv：
 # tj_cf_drug_prescription / tj_cf_diagnosis / tj_pharmacy_feebill_master 等）。
@@ -590,7 +590,7 @@ def _fetch_user_ids() -> dict[str, int]:
 def ensure_measure(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
     """幂等创建逻辑度量并发布，返回响应 dict。
 
-    OneData（界限文档 §2.1）：原子指标 = 逻辑度量 + 聚合方式。度量必须 PUBLISHED
+    OneData（界限文档 §2.1）：原子指标 = 逻辑度量 + 基础统计粒度（日）。度量必须 PUBLISHED
     才能被原子指标引用（create_metric 校验 measure 状态）。
     """
     code = spec["code"]

@@ -311,7 +311,9 @@ export function Templates() {
         // 域取自 Cascader 路径叶子（如 ["sales","order"] → "order"），对齐注册指标页 selectedDomain 语义
         domain,
         type: metricType,
-        granularity: String(values.granularity || "day"),
+        // S7（三轮审查）：原子恒为日粒度——原子 = 逻辑度量 + 基础统计粒度（日），
+        // 忽略模板/表单可能预设的非日粒度（原子粒度编辑框已隐藏），防「原子 + 非日粒度」
+        granularity: isAtomic ? "day" : String(values.granularity || "day"),
         unit: String(values.unit || ""),
         aggregation: (String(values.aggregation) as MetricCreateRequest["aggregation"]) ?? "SUM",
         time_semantics: (String(values.time_semantics) as MetricCreateRequest["time_semantics"]) ?? "PERIOD",
@@ -800,13 +802,25 @@ export function Templates() {
                 ) : null
               }
             </Form.Item>
-            <Form.Item name="granularity" label="粒度" rules={[{ required: true, message: "请选择粒度" }]} style={{ width: 240 }}>
-              <Select
-                options={granularityOptions.length ? granularityOptions : undefined}
-                showSearch
-                placeholder={granularityOptions.length ? "选择粒度" : "输入粒度（字典未加载）"}
-                allowClear
-              />
+            {/* S7（三轮审查）：原子不渲染粒度——原子 = 逻辑度量 + 基础统计粒度（日），
+                粒度/周期归派生与挂载实体层（对齐创建页/编辑弹窗原子不设粒度）。派生/复合
+                仍必选粒度（模板预设可继承）。 */}
+            <Form.Item
+              noStyle
+              shouldUpdate={(prev, cur) => prev.type !== cur.type || prev.granularity !== cur.granularity}
+            >
+              {({ getFieldValue }) =>
+                getFieldValue("type") === "atomic" ? null : (
+                  <Form.Item name="granularity" label="粒度" rules={[{ required: true, message: "请选择粒度" }]} style={{ width: 240 }}>
+                    <Select
+                      options={granularityOptions.length ? granularityOptions : undefined}
+                      showSearch
+                      placeholder={granularityOptions.length ? "选择粒度" : "输入粒度（字典未加载）"}
+                      allowClear
+                    />
+                  </Form.Item>
+                )
+              }
             </Form.Item>
             <Form.Item name="unit" label="单位" rules={[{ required: true, message: "请选择单位" }]} style={{ width: 240 }}>
               <Select

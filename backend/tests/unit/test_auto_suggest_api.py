@@ -335,7 +335,7 @@ async def test_auto_suggest_measure_suggestions_matches_published(
 ) -> None:
     """度量列命中已发布逻辑度量目录 → 返回 measure_suggestions 候选（信息最大化）。
 
-    OneData 下原子指标 = 逻辑度量 + 聚合方式，SQL 只解析出物理列名；端点按
+    OneData 下原子指标 = 逻辑度量 + 基础统计粒度（日），SQL 只解析出物理列名；端点按
     度量列名与 measure_code/同义词做语义弱匹配，给用户一键继承 measure_id 的起点。
     匹配不到返回空列表，不阻断推断。
     """

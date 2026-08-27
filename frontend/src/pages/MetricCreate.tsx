@@ -1132,7 +1132,22 @@ export function MetricCreate() {
   // 周期；复合 = 多指标运算）。周期驱动的解析候选已默认派生（如 month 医生月活）；
   // 可把同批候选改为原子/派生/复合，不再受"只能是原子"限制。
   function handleSqlBatchTypeChange(key: string, type: MetricType) {
-    handleSqlBatchEdit(key, { type });
+    const cand = sqlBatchResult?.candidates.find((c) => c.key === key);
+    const patch: Partial<SqlBatchCandidate> = { type };
+    // S5（三轮审查）：改类型为「原子」时反向联动——原子 = 逻辑度量 + 基础统计粒度（日），
+    // 不允许带非日周期。若当前 period/granularity 非 day，回落为 day（对齐 R6 单向升级：
+    // 改周期→升派生；此处改类型为原子→回落周期），避免静默创建「原子+月粒度」并落入
+    // 4 段编码（resolveCandidateCode 会带 _month 后缀），消除原子带非日周期的语义矛盾。
+    if (type === "atomic" && cand) {
+      const period = cand.period && cand.period !== "day" ? "day" : cand.period;
+      const granularity =
+        cand.granularity && cand.granularity !== "day" ? "day" : cand.granularity;
+      if (period !== cand.period || granularity !== cand.granularity) {
+        patch.period = period;
+        patch.granularity = granularity;
+      }
+    }
+    handleSqlBatchEdit(key, patch);
   }
 
   // R6（二次审查）：周期/粒度驱动联动——原子候选改为非日周期（如 month）时自动升级为
@@ -2889,12 +2904,21 @@ export function MetricCreate() {
                                       onChange={(e) => handleSqlBatchEdit(c.key, { name: e.target.value })}
                                     />
                                     {/* 派生/复合依赖指标：从本批原子候选选择（跨语句可选），
-                                        提交合入 definition_json.dependencies → 血缘注册上游边 */}
+                                        提交合入 definition_json.dependencies → 血缘注册上游边。
+                                        派生=可选依赖（纯周期/业务限定派生可不依赖）；复合=必填 */}
+                                    {c.type === "composite" && (
+                                      <span
+                                        data-testid={`sql-batch-req-deps-${c.key}`}
+                                        style={{ color: "#ff4d4f", marginRight: 4 }}
+                                      >
+                                        *
+                                      </span>
+                                    )}
                                     <Select
                                       size="small"
                                       mode="multiple"
                                       style={{ minWidth: 240 }}
-                                      placeholder="依赖指标（从本批原子候选选择）"
+                                      placeholder={c.type === "composite" ? "依赖指标（复合必填）" : "依赖指标（派生可选）"}
                                       optionFilterProp="label"
                                       value={c.dependencies || []}
                                       onChange={(v) => handleSqlBatchDepChange(c.key, v)}
@@ -2903,14 +2927,47 @@ export function MetricCreate() {
                                         (o) => o.value !== resolveCandidateCode(c),
                                       )}
                                     />
-                                    <Input
-                                      size="small"
-                                      style={{ width: 220, fontFamily: "monospace" }}
-                                      placeholder="计算表达式，如 {原子1} / {原子2}"
-                                      value={c.calc_expression || ""}
-                                      onChange={(e) => handleSqlBatchExprChange(c.key, e.target.value)}
-                                      data-testid={`sql-batch-expr-${c.key}`}
-                                    />
+                                    {c.type === "composite" ? (
+                                      <span
+                                        data-testid={`sql-batch-req-expr-${c.key}`}
+                                        style={{ color: "#ff4d4f", marginRight: 4 }}
+                                      >
+                                        *
+                                      </span>
+                                    ) : null}
+                                    {c.type === "composite" ? (
+                                      <Input
+                                        size="small"
+                                        style={{ width: 220, fontFamily: "monospace" }}
+                                        placeholder="计算表达式，如 {原子1} / {原子2}"
+                                        value={c.calc_expression || ""}
+                                        onChange={(e) => handleSqlBatchExprChange(c.key, e.target.value)}
+                                        data-testid={`sql-batch-expr-${c.key}`}
+                                      />
+                                    ) : (
+                                      /* 派生候选：口径由解析出的聚合表达式承载（COUNT/SUM 等
+                                         聚合原语，非指标间运算），只读展示而非「待填」——
+                                         避免与复合指标（依赖+公式）混淆 */
+                                      <>
+                                        {c.definition_json?.expression ? (
+                                          <Tooltip title={`派生口径表达式：${String(c.definition_json.expression)}`}>
+                                            <Typography.Text
+                                              type="secondary"
+                                              style={{ fontSize: 12, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "help", display: "inline-block", verticalAlign: "middle" }}
+                                            >
+                                              {String(c.definition_json.expression)}
+                                            </Typography.Text>
+                                          </Tooltip>
+                                        ) : (
+                                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                                            派生（周期驱动）
+                                          </Typography.Text>
+                                        )}
+                                        <Tag color="blue" style={{ fontSize: 12 }}>
+                                          派生（周期驱动，无公式依赖）
+                                        </Tag>
+                                      </>
+                                    )}
                                   </>
                                 )}
                                 {/* P0-1：候选编码为空（域未定时后端不 bake-in）→ 提示选域后自动生成；
@@ -2924,18 +2981,19 @@ export function MetricCreate() {
                                   data-testid={`sql-batch-code-${c.key}`}
                                 />
                                 {/* 口径溯源（P2）：候选口径表达式创建前即可核对——Tooltip 展示完整
-                                    expression（CASE/窗口等原始结构），不必"先创建再改" */}
-                                {c.type === "atomic" && c.definition_json?.expression ? (
-                                  <Tooltip title={`口径表达式：${String(c.definition_json.expression)}`}>
+                                    expression（CASE/窗口等原始结构），不必"先创建再改"。B：不再仅
+                                    atomic 显示——派生（C 分支只读展示）与复合（完整 SQL 口径）同享 */}
+                                {c.type !== "derived" && (c.definition_json?.expression || c.definition_json?.sql) ? (
+                                  <Tooltip title={`口径表达式：${String(c.definition_json?.expression || c.definition_json?.sql)}`}>
                                     <Typography.Text
                                       type="secondary"
                                       style={{ fontSize: 12, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "help" }}
                                     >
-                                      {String(c.definition_json.expression)}
+                                      {String(c.definition_json?.expression || c.definition_json?.sql)}
                                     </Typography.Text>
                                   </Tooltip>
                                 ) : null}
-                                {(c.type === "composite" || c.type === "derived") && (
+                                {Array.isArray(c.dependencies) && c.dependencies.length > 0 && (
                                   <Tooltip title="派生/复合指标依赖批内原子（DRAFT）；批量提交评审会被「依赖未发布」拦截，需先发布依赖原子后再提交">
                                     <Tag color="orange">需先发布依赖原子</Tag>
                                   </Tooltip>

@@ -1790,18 +1790,61 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     });
   });
 
-  it("批量创建：候选指标类型可在线改为派生 → 依赖指标 + 计算表达式 + 挂载透传", async () => {
+  it("批量创建：候选指标类型可在线改为派生 → 只读口径表达式 + 可选依赖 + 挂载透传", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
     await openBatchMode();
 
-    // 把「0:user_id」原子候选改为派生（类型 Select 在线编辑）
+    // 把「0:user_id」原子候选改为派生（OneData：派生 = 原子 + 业务限定 + 时间周期，
+    // 无公式依赖——口径由解析出的聚合表达式承载，只读展示而非「计算表达式待填」）
     const typeSelect = screen.getByTestId("sql-batch-type-0:user_id").closest(".ant-select") as HTMLElement;
     fireEvent.mouseDown(typeSelect.querySelector(".ant-select-selector") as HTMLElement);
     await clickSelectOption("派生");
 
-    // 非原子候选显示依赖指标多选 + 计算表达式输入
+    // 派生候选：显示解析出的只读口径表达式 + 「派生（周期驱动，无公式依赖）」Tag，
+    // 不再显示计算表达式输入框（公式场景归复合）
+    expect(await screen.findByText("COUNT(DISTINCT user_id)")).toBeTruthy();
+    expect(screen.getByText("派生（周期驱动，无公式依赖）")).toBeTruthy();
+    expect(screen.queryByTestId("sql-batch-expr-0:user_id")).toBeNull();
+
+    // 依赖指标（派生可选）：从本批原子候选选择「日订单金额」
+    const depsSelect = screen.getByTestId("sql-batch-deps-0:user_id").closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(depsSelect.querySelector(".ant-select-selector") as HTMLElement);
+    await clickSelectOption("日订单金额 (sales_order_amount_day)");
+
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+    await waitFor(() => {
+      expect(mockedBatchFromSql).toHaveBeenCalled();
+      const body = mockedBatchFromSql.mock.calls[0][0];
+      const derived = body.candidates.find((c: { key: string }) => c.key === "0:user_id");
+      expect(derived?.type).toBe("derived");
+      // 依赖指标合入 definition_json（血缘据此建上游边）；无 calc_expression → 保留解析口径
+      expect(derived?.definition_json.dependencies).toEqual(["sales_order_amount_day"]);
+      expect(derived?.definition_json.expression).toBe("COUNT(DISTINCT user_id)");
+      // 派生透传挂载实体（OneData 挂载层：源表/列/粒度/周期/域）
+      expect(derived?.mount).toEqual({
+        source_table: "dwd.sales_detail",
+        source_column: "user_id",
+        granularity: "day",
+        default_period: "day",
+        domain: "sales",
+      });
+    });
+  });
+
+  it("批量创建：候选指标类型可在线改为复合 → 依赖指标 + 计算表达式（无挂载）", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+
+    // 把「0:user_id」原子候选改为复合（OneData：多指标运算/公式 = 复合）
+    const typeSelect = screen.getByTestId("sql-batch-type-0:user_id").closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(typeSelect.querySelector(".ant-select-selector") as HTMLElement);
+    await clickSelectOption("复合");
+
+    // 复合候选显示依赖指标多选 + 计算表达式输入
     const exprInput = screen.getByTestId("sql-batch-expr-0:user_id") as HTMLInputElement;
     expect(exprInput).toBeTruthy();
     fireEvent.change(exprInput, { target: { value: "sales_order_amount_day / sales_order_userid_day" } });
@@ -1815,19 +1858,13 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     await waitFor(() => {
       expect(mockedBatchFromSql).toHaveBeenCalled();
       const body = mockedBatchFromSql.mock.calls[0][0];
-      const derived = body.candidates.find((c: { key: string }) => c.key === "0:user_id");
-      expect(derived?.type).toBe("derived");
+      const composite = body.candidates.find((c: { key: string }) => c.key === "0:user_id");
+      expect(composite?.type).toBe("composite");
       // 计算表达式 + 依赖指标合入 definition_json（血缘据此建上游边）
-      expect(derived?.definition_json.expression).toBe("sales_order_amount_day / sales_order_userid_day");
-      expect(derived?.definition_json.dependencies).toEqual(["sales_order_amount_day"]);
-      // 派生透传挂载实体（OneData 挂载层：源表/列/粒度/周期/域）
-      expect(derived?.mount).toEqual({
-        source_table: "dwd.sales_detail",
-        source_column: "user_id",
-        granularity: "day",
-        default_period: "day",
-        domain: "sales",
-      });
+      expect(composite?.definition_json.expression).toBe("sales_order_amount_day / sales_order_userid_day");
+      expect(composite?.definition_json.dependencies).toEqual(["sales_order_amount_day"]);
+      // 复合不设挂载（OneData：挂载实体仅派生承载）
+      expect(composite?.mount).toBeUndefined();
     });
   });
 
@@ -1989,6 +2026,45 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
       // 非日周期归派生），不再出现「原子却带非日周期」
       expect(atom?.type).toBe("derived");
     });
+  });
+
+  it("批量创建：候选改类型为原子 → 非日周期回落为 day（S5 反向联动）", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+    // 先把周期改成 month（R6 自动升派生），再改类型为「原子」→ 周期/粒度应回落 day
+    const periodSelect = (
+      screen.getByTestId("sql-batch-period-0:amount").closest(".ant-select") as HTMLElement
+    );
+    fireEvent.mouseDown(periodSelect.querySelector(".ant-select-selector") as HTMLElement);
+    await clickSelectOption("月 (month)");
+    const typeSelect = (
+      screen.getByTestId("sql-batch-type-0:amount").closest(".ant-select") as HTMLElement
+    );
+    fireEvent.mouseDown(typeSelect.querySelector(".ant-select-selector") as HTMLElement);
+    await clickSelectOption("原子");
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+    await waitFor(() => {
+      expect(mockedBatchFromSql).toHaveBeenCalled();
+      const body = mockedBatchFromSql.mock.calls[0][0];
+      const atom = body.candidates.find((c: { key: string }) => c.key === "0:amount");
+      // S5：改类型为原子 → 非日周期回落 day（原子 = 逻辑度量 + 基础统计粒度（日），
+      // 不允许「原子 + 月粒度」落入 4 段编码）
+      expect(atom?.type).toBe("atomic");
+      expect(atom?.period).toBe("day");
+      expect(atom?.granularity).toBe("day");
+    });
+  });
+
+  it("批量创建：复合候选依赖指标与计算表达式显示必填星号（S8）", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+    // 复合候选行（0:composite）依赖指标与计算表达式均有必填红标星号（对齐创建向导）
+    expect(screen.getByTestId("sql-batch-req-deps-0:composite")).toBeTruthy();
+    expect(screen.getByTestId("sql-batch-req-expr-0:composite")).toBeTruthy();
   });
 
   it("批量创建：失败项可一键重试，仅重跑失败候选（P1-1）", async () => {

@@ -88,7 +88,7 @@ class Metric(Base, BaseModel):
     granularity: Mapped[str | None] = mapped_column(
         String(64), nullable=True, comment="粒度（已下沉挂载实体 metric_mount，保留兼容）"
     )
-    # 逻辑度量引用（OneData 原子层）：原子指标 = 逻辑度量 + 聚合方式，不绑物理表。
+    # 逻辑度量引用（OneData 原子层）：原子指标 = 逻辑度量 + 基础统计粒度（日），不绑物理表。
     # 度量格式/默认单位/小数位/源头系统/同义词由度量目录继承；派生/复合继承自原子，可空。
     measure_id: Mapped[int | None] = mapped_column(
         ForeignKey("measure_catalog.id", name="fk_metric_measure"),

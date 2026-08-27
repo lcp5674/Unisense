@@ -236,7 +236,7 @@ def _create_payload(**overrides) -> MetricCreateRequest:
         "domain": "fin",
         "type": "atomic",
         "granularity": "DAY",
-        # OneData 原子层：原子指标 = 逻辑度量 + 聚合方式（不绑物理表）
+        # OneData 原子层：原子指标 = 逻辑度量 + 基础统计粒度（日）（不绑物理表）
         "measure_id": 1,
         "unit": "元",
         "aggregation": "SUM",

@@ -588,6 +588,8 @@ def _build_atomic_candidate(
     suggested_domain_code: str | None = None,
     source: str = "rule",
     raw_sql: str | None = None,
+    column_comments: dict[str, dict[str, str]] | None = None,
+    comment_table: str | None = None,
 ) -> dict[str, Any]:
     """构建原子候选：expression 模式推断（勿传多度量原 SQL，避免兄弟度量进口径），
     聚合方式覆盖为 SQL 解析值（比列名规则更可靠）。
@@ -613,7 +615,27 @@ def _build_atomic_candidate(
     # 仅为投影别名，若用 alias 会改变既有编码语义（如 SUM(amount) AS gmv → 本应
     # 用 amount 而非 gmv）。
     code_col = alias if (alias and alias != col and measure.get("sunk")) else col
-    profile = build_profile(source_table=measure_table, measure_column=code_col, period=period)
+    # A-5：建表 DDL 列注释反查——数仓开发在 ``create table`` 里写的中文注释是
+    # 名称/单位推断最权威来源（「月活」不再落成「doctor次数」）。按 (表, 列) 反查，
+    # 命中则注入 ``measure_meta.comment``，``_infer_name``/``_infer_unit`` 自动消费。
+    # 注释表优先用 INSERT 目标表（``comment_table``，列注释定义处），ETL 下沉场景
+    # 度量源表是内层子查询、与建表目标表不同——回退度量源表反查。
+    measure_meta: dict[str, Any] = {}
+    if column_comments:
+        for tbl in (comment_table, measure_table):
+            if not tbl:
+                continue
+            col_key = str(code_col or col).lower()
+            comment = (column_comments.get(str(tbl).split(".")[-1]) or {}).get(col_key)
+            if comment:
+                measure_meta = {"comment": comment}
+                break
+    profile = build_profile(
+        source_table=measure_table,
+        measure_column=code_col,
+        period=period,
+        measure_meta=measure_meta,
+    )
     profile["domain_code"] = domain_code or ""
     result = infer_metric(profile, domain_defaults=domain_defaults or {})
     fields = result["fields"]
@@ -656,7 +678,14 @@ def _build_atomic_candidate(
     # 无聚合包裹的表达式）在整句含四则运算时归复合（OneData：多指标运算/比率=复合），
     # 与单条 auto_suggest 的 _infer_type 对齐——修复批量/单条两路径类型分裂；纯条件
     # 聚合（count(distinct case...)）无算术运算时仍走周期驱动（归派生/原子）。
-    if derived and raw_sql and sql_has_arithmetic(raw_sql):
+    # S3（三轮审查）：列名比率规则（rate/ratio/pct→复合）补齐到批量路径——此前只在
+    # 单条 _infer_type，两路径对 SELECT SUM(refund_rate)（日粒度）判定分裂（单条复合/
+    # 批量原子）；与单条规则完全一致后统一。
+    _col_lower = (col or "").lower()
+    if (
+        (derived and raw_sql and sql_has_arithmetic(raw_sql))
+        or any(k in _col_lower for k in ("rate", "ratio", "pct"))
+    ):
         cand_type = "composite"
     elif period and period != "day":
         cand_type = "derived"
@@ -768,6 +797,99 @@ def _statement_meta(
         "group_by": profile.group_by,
         "suggested_domain": suggested_domain,
     }
+
+
+# 建表 DDL 列注释提取的兜底正则（sqlglot 解析失败时用）：先定位 ``create table``
+# 段及其表名，再抓该段内 ``col type comment '...'`` 的列级注释。列注释是数仓开发
+# 在建表 DDL 中写的中文语义，是候选名称/单位推断最权威的来源（优先于词表兜底）。
+_CREATE_TABLE_RE = re.compile(
+    r"create\s+table\s+(?:if\s+not\s+exists\s+)?([`\"\w.]+)", re.IGNORECASE
+)
+_COLUMN_COMMENT_RE = re.compile(
+    r"([`\"\w]+)\s+[^,(\n]*?\bcomment\s*['\"]([^'\"]+)['\"]", re.IGNORECASE | re.DOTALL
+)
+
+
+def _extract_column_comments(sql: str) -> dict[str, dict[str, str]]:
+    """从 SQL 脚本提取建表 DDL 的列注释映射 ``{表名: {列名: 注释}}``。
+
+    批量 SQL 脚本常含 ``create table ... ( col type comment '中文' )`` 建表语句，
+    列注释承载数仓开发写的中文语义——候选名称/单位推断直接消费它，解决
+    「建表有『月活』注释，候选却叫『月doctor次数』」的断链。实现：
+
+    - **sqlglot 主路径**：``sqlglot.parse`` 逐语句找 ``Create``，遍历 ``ColumnDef``
+      的 ``CommentColumnConstraint`` 提取列注释（Hive/MySQL 等方言通用）；
+    - **正则兜底**：sqlglot 解析失败时用 ``_CREATE_TABLE_RE``/``_COLUMN_COMMENT_RE``
+      粗提取（表名定位 + 段内 ``comment '...'`` 抓取）。
+
+    表名去库前缀（INSERT 投影/度量携带的 ``measure_table`` 常不带库前缀）、
+    列名小写归一（候选 ``code_col`` 小写反查）；无注释/异常返回空 dict（不阻断）。
+    """
+    comments: dict[str, dict[str, str]] = {}
+    try:
+        for ast in sqlglot.parse(sql):
+            if ast is None or not isinstance(ast, exp.Create):
+                continue
+            table = ast.this
+            # 带列定义的 Create 其 this 是 Schema（alias_or_name 为空串），实际
+            # 表名在 Schema.this（Table）——否则标准单引号注释 DDL 会被跳过
+            if isinstance(table, exp.Schema):
+                table = table.this
+            table_name = (
+                table.alias_or_name.lower() if hasattr(table, "alias_or_name") else None
+            )
+            if not table_name:
+                continue
+            table_cols = comments.setdefault(table_name, {})
+            for node in ast.find_all(exp.ColumnDef):
+                col = (node.alias_or_name or "").lower()
+                if not col:
+                    continue
+                for c in node.constraints:
+                    k = c.kind
+                    if not isinstance(k, exp.CommentColumnConstraint):
+                        continue
+                    lit = k.this
+                    comment = (
+                        lit.this if isinstance(lit, exp.Literal) else str(lit)
+                    ).strip()
+                    if comment:
+                        table_cols[col] = comment
+    except Exception:  # noqa: BLE001 - sqlglot 解析失败降级正则兜底
+        comments = {}
+        for m in _CREATE_TABLE_RE.finditer(sql):
+            table_name = m.group(1).strip("`\"'").split(".")[-1].lower()
+            segment = sql[m.end() :]
+            end = segment.find(";")
+            if end != -1:
+                segment = segment[:end]
+            table_cols = comments.setdefault(table_name, {})
+            for cm in _COLUMN_COMMENT_RE.finditer(segment):
+                col = cm.group(1).strip("`\"'").lower()
+                comment = cm.group(2).strip()
+                if col and comment:
+                    table_cols[col] = comment
+    return comments
+
+
+def _insert_target_table(statement_sql: str) -> str | None:
+    """提取 INSERT 语句的目标表名（去库前缀小写）。
+
+    ETL 下沉场景候选的度量源表是内层子查询（如 ``doctor_visit_agent_info_da``），
+    而列注释定义在 INSERT 目标表（如 ``doctor_active_month_di``）上——注释反查
+    必须以目标表为准，否则「建表有『月活』注释」对不上「度量来自源表」。sqlglot
+    解析失败/非 INSERT 返回 None（上层回退度量源表反查）。
+    """
+    try:
+        ast = sqlglot.parse_one(statement_sql)
+        for node in ast.find_all(exp.Insert):
+            target = getattr(node, "this", None)
+            name = getattr(target, "alias_or_name", None)
+            if name:
+                return str(name).lower()
+    except Exception:  # noqa: BLE001 - 目标表提取失败不影响候选构建
+        pass
+    return None
 
 
 def _physical_source_tables(statement_sql: str, profile: SqlProfile) -> list[str]:
@@ -1038,7 +1160,12 @@ def _apply_candidate_annotations(
         if ann is None:
             kept.append(cand)
             continue
-        if not ann.get("is_measure", True):
+        if not ann.get("is_measure", True) and cand.get("type") != "composite":
+            # S1（三轮审查）：复合候选是刻意合成的多指标聚合体（依赖 + 口径 SQL/
+            # 表达式），非待 LLM 判定「是否度量」的单列——与默认路径
+            # _apply_candidate_validation 的 B4.1 豁免对齐，防 use_llm 模式把自动
+            # 复合候选（measure_column/aggregation 为占位）当作非度量静默剔除，
+            # 致复合功能在 LLM 批量模式下端到端不可见。
             conf = ann.get("confidence")
             if conf is None or conf >= 0.7:
                 llm_skipped.append(
@@ -1107,6 +1234,11 @@ async def infer_sql_batch(
     )
     if not segments:
         segments = [sql.strip()]
+
+    # A-5：全脚本一次提取建表 DDL 列注释（候选名称/单位推断消费，见
+    # ``_build_atomic_candidate``）——切分后单段 INSERT 看不到建表注释，须从完整
+    # 脚本提取再按 (表, 列) 反查注入。
+    column_comments = _extract_column_comments(sql)
 
     # P1-2：批量解析语句数上限（生产护栏）——超大脚本（数百条语句）会触发逐语句
     # LLM 兜底/域建议拖慢解析，超限直接拒绝，提示用户分批解析（前端友好文案）。
@@ -1298,6 +1430,9 @@ async def infer_sql_batch(
         period = rec["base_period"]
         if rec["needs_period"] and llm_period_map.get(idx):
             period = llm_period_map[idx]
+        # A-5：INSERT 目标表（列注释定义处）——下沉场景度量源表是内层子查询，
+        # 注释反查须以目标表为准
+        comment_table = _insert_target_table(rec["seg"])
         atoms: list[dict[str, Any]] = []
         for measure in rec["profile"].measures:
             atom = _build_atomic_candidate(
@@ -1310,6 +1445,8 @@ async def infer_sql_batch(
                 time_column=rec["profile"].time_column,
                 suggested_domain_code=seg_domain_map.get(idx),
                 raw_sql=rec["seg"],
+                column_comments=column_comments,
+                comment_table=comment_table,
             )
             atoms.append(atom)
             _push_candidate(idx, atom)
@@ -1332,6 +1469,7 @@ async def infer_sql_batch(
         llm_measures = llm_measures_map.get(idx)
         if llm_measures:
             base_period = _period_from_profile(item["profile"])
+            comment_table = _insert_target_table(seg)
             for measure in llm_measures:
                 _push_candidate(
                     idx,
@@ -1346,6 +1484,8 @@ async def infer_sql_batch(
                         suggested_domain_code=seg_domain_map.get(idx),
                         source="llm",
                         raw_sql=seg,
+                        column_comments=column_comments,
+                        comment_table=comment_table,
                     ),
                 )
         else:

@@ -2252,7 +2252,7 @@ async def auto_suggest_metric(
         effective_measure = parsed.measures[0]["column"]
 
     # 逻辑度量推荐（信息最大化）：按度量列名匹配已发布逻辑度量目录（measure_catalog），
-    # 供原子指标一键继承（measure_id）。OneData 下原子指标 = 逻辑度量 + 聚合方式，
+    # 供原子指标一键继承（measure_id）。OneData 下原子指标 = 逻辑度量 + 基础统计粒度（日），
     # SQL 只解析出物理列名，这里做语义弱匹配给用户起点——尽力而为，匹配不到不阻断。
     measure_suggestions: list[dict[str, Any]] = []
     if effective_measure:

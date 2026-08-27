@@ -342,6 +342,30 @@ describe("Templates 页面", () => {
     });
   });
 
+  it("S7：原子模板实例化——不渲染粒度编辑框且提交强制 day 粒度", async () => {
+    mockedInstantiate.mockResolvedValue(CREATED);
+    render(
+      <MemoryRouter>
+        <Templates />
+      </MemoryRouter>,
+    );
+    await screen.findByText("tpl_gmv_daily");
+    fireEvent.click(screen.getAllByText("实例化指标")[0]);
+    await screen.findByText("从模板实例化：GMV 日汇总模板");
+    // S7：原子类型不渲染「粒度」编辑框（原子 = 逻辑度量 + 基础统计粒度（日），
+    // 粒度/周期归派生与挂载实体层）——即使模板预设了非日粒度（TPLS[0].granularity=daily）
+    const modal = document.querySelector(".ant-modal") as HTMLElement;
+    expect(within(modal).queryByText("粒度")).toBeNull();
+    fireEvent.click(screen.getByText("实例化创建"));
+    await waitFor(() => {
+      // 提交强制 day：忽略模板/表单预设的非日粒度，防「原子 + 非日粒度」
+      expect(mockedInstantiate).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ granularity: "day" }),
+      );
+    });
+  });
+
   it("P2-13 编辑模板：打开编辑弹窗回填当前值，保存调用 updateMetricTemplate（PATCH 局部更新）", async () => {
     const updated = { ...TPLS[0], name: "GMV 日汇总模板 V2", version: 2 };
     mockedUpdateMetricTemplate.mockResolvedValue(updated as unknown as MetricTemplate);

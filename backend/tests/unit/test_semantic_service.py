@@ -239,7 +239,7 @@ async def test_create_metric_merges_source_table_into_definition():
 async def test_create_atomic_inherits_unit_from_measure():
     """OneData（界限文档 §2.3）：原子指标关联逻辑度量且未传 unit 时，从度量目录 default_unit 继承。
 
-    原子 = 逻辑度量 + 聚合方式，不绑物理表；单位是逻辑度量的固有属性，注册原子指标
+    原子 = 逻辑度量 + 基础统计粒度（日），不绑物理表；单位是逻辑度量的固有属性，注册原子指标
     时无需手选，由度量目录 default_unit 继承。派生/复合缺省物理属性取默认值。
     """
     svc, repo = _svc_with_repo()
@@ -2010,6 +2010,34 @@ async def test_sql_batch_register_composite_missing_dep_skipped():
     assert "missing_dep" in result["candidates"][1]["validation_errors"]
     # 缺依赖的复合不进 savepoint 创建
     assert repo.create.call_count == 1
+
+
+async def test_sql_batch_register_composite_no_dep_downgraded_to_derived():
+    """S2（三轮审查）：表达式内嵌复合候选（无依赖，如自动推断的比率列 SUM(a)/COUNT(b)）
+    批量创建时降级为派生——复合门禁要求声明依赖（schemas.py），无依赖复合若按 composite
+    创建会被 422 拦死 parse→create 闭环；降级派生（依赖可选、表达式承载运算）保证
+    闭环打通，并给出明确提示。"""
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    request = MetricSqlBatchRegisterRequest(
+        domain="sales",
+        candidates=[
+            _sql_composite("0:arpu", "sales_order_arpu_day", "客单价复合", []),
+        ],
+    )
+    result = await svc.batch_register_from_sql(request, actor_id=1)
+    assert result["candidates"][0]["status"] == "DRAFT"
+    assert result["candidates"][0]["validation_errors"] is not None
+    assert "已按派生指标创建" in result["candidates"][0]["validation_errors"]
+    # 降级派生后仍走 savepoint 创建（不被门禁 422 拦截）
+    assert repo.create.call_count == 1
+    created_req = repo.create.call_args.args[0]
+    assert created_req.type == "derived"
 
 
 async def test_sql_batch_register_db_error_savepoint_isolation():

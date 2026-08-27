@@ -50,6 +50,33 @@ _CN_COLUMN_LABELS: dict[str, str] = {
     "play": "播放次数",
     "login": "登录次数",
     "pay": "支付次数",
+    # 医疗/卫健类（A-5：建表注释缺失时词表兜底，覆盖医疗化常见业务对象）
+    "doctor": "医生数",
+    "physician": "医生数",
+    "nurse": "护士数",
+    "hosp": "医院数",
+    "hospital": "医院数",
+    "org": "机构数",
+    "dept": "科室数",
+    "department": "科室数",
+    "ward": "病区数",
+    "bed": "床位数",
+    "disease": "疾病数",
+    "diagnosis": "诊断数",
+    "symptom": "症状数",
+    "inpatient": "住院人次",
+    "outpatient": "门诊人次",
+    "emergency": "急诊人次",
+    "operation": "手术人次",
+    "surgery": "手术人次",
+    "checkup": "体检人次",
+    "medicine": "药品数",
+    "medical_record": "病历数",
+    "admission": "入院人次",
+    "discharge": "出院人次",
+    "appointment": "预约次数",
+    "bed_occupancy": "床位占用数",
+    "avg_stay": "平均住院日",
     # 金额/费用类
     "amount": "金额",
     "amt": "金额",
@@ -353,17 +380,40 @@ def _infer_unit(profile: dict[str, Any]) -> SuggestionField:
 
 
 def _is_ratio_expression(profile: dict[str, Any]) -> bool:
-    """SQL 是否比率/复合表达式（含四则运算/跨度量运算，OneData 复合指标判定）。
+    """SQL 是否比率/复合表达式（度量投影含四则运算/跨度量运算，OneData 复合判定）。
 
-    与批量路径 ``_build_composite_candidate`` 共用 ``sql_has_arithmetic``（AST 优先 +
-    正则兜底，含 Div/Mul/Add/Sub/Mod），保证单条/批量两路径的运算检测一致——修复
-    R2：补 *（Mul）/ %（Mod），并覆盖单投影双聚合（如 ``SELECT SUM(a)*SUM(b)``，
-    measures==1 但含乘法运算，此前不判复合）。
+    与批量路径共用 ``sql_has_arithmetic``（AST 优先 + 正则兜底，含 Div/Mul/Add/Sub/
+    Mod），保证单条/批量两路径的运算检测一致——修复 R2：补 *（Mul）/ %（Mod），并
+    覆盖单投影双聚合（如 ``SELECT SUM(a)*SUM(b)``，measures==1 但含乘法运算，此前
+    不判复合）。
+
+    S3（三轮审查）：判定限定在 **SELECT 投影表达式**（指标相关），而非整段 SQL
+    文本——``WHERE price * 0.9 > 100`` 这类过滤条件里的运算不是指标间运算，不应
+    触发复合判定；同时覆盖单投影双聚合 ``SELECT SUM(a)*SUM(b)``（投影表达式含 Mul，
+    尽管解析器可能拆成 2 个度量列）。与批量路径「derived 表达式列」的判定面一致。
     """
     sql_profile: SqlProfile | None = profile.get("sql_profile")
     if not sql_profile or not sql_profile.sql:
         return False
-    return sql_has_arithmetic(sql_profile.sql)
+    try:
+        import sqlglot
+        from sqlglot import exp
+
+        ast = sqlglot.parse_one(sql_profile.sql)
+        if ast is not None:
+            for sel in ast.find_all(exp.Select):
+                for proj in sel.expressions:
+                    # 投影表达式序列化后判四则运算（含别名/嵌套聚合结构）
+                    if sql_has_arithmetic(proj.sql()):
+                        return True
+    except Exception:
+        pass
+    # 兜底：AST 解析失败时退化到度量表达式（与批量 derived 表达式判定一致）
+    for m in sql_profile.measures or []:
+        expr = str(m.get("expression") or "").strip()
+        if expr and sql_has_arithmetic(expr):
+            return True
+    return False
 
 
 def _infer_type(profile: dict[str, Any]) -> SuggestionField:
@@ -580,8 +630,11 @@ def _infer_name(
     meta: dict[str, Any] = profile.get("measure_meta", {}) or {}
     comment = str(meta.get("comment", "")).strip()
     if comment:
+        # 注释已含周期语义（如「月活」「日销售额」）时不再重复加周期前缀——
+        # 避免「月活」+ 月周期拼成「月月活」（A-5：建表注释驱动的名称常见此形态）
+        prefix = period_cn if period_cn and period_cn not in comment else ""
         return _field(
-            f"{period_cn}{comment}", "column_meta", 0.9,
+            f"{prefix}{comment}", "column_meta", 0.9,
             f"列注释「{comment}」+ 周期「{period_cn}」→ 名称",
         )
     measure_label = _measure_label(profile)
