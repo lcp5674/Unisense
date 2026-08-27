@@ -1095,14 +1095,22 @@ async def get_description_coverage(
     trace_id: Annotated[str, Depends(get_trace_id)],
     page: int = Query(1, ge=1),
     page_size: int | None = Query(None, ge=1, le=500, description="每页条数；缺省全量"),
+    source_id: str | None = Query(None, description="按数据源过滤（治理面板筛选）"),
+    keyword: str | None = Query(None, description="按表名模糊过滤（治理面板筛选）"),
 ) -> ApiResponse[DescriptionCoverageResponse]:
     """描述缺失统计：表/字段覆盖率 + 按表列缺失字段数（治理优先级排序依据）。
 
-    供资产地图「描述缺失」tab 与采集目录概览卡使用。
+    供资产地图「描述缺失」tab 与采集目录概览卡使用；source_id/keyword 为
+    采集目录治理面板「按数据源、表筛选治理」的服务端过滤（汇总与明细同口径）。
     P1-8: 汇总指标 SQL 端聚合；per_table 支持服务端分页。
     """
     svc = _svc(db)
-    coverage = await svc._repo.get_description_coverage(page=page, page_size=page_size)
+    coverage = await svc._repo.get_description_coverage(
+        page=page,
+        page_size=page_size,
+        source_id=source_id,
+        keyword=keyword,
+    )
     return ok(data=DescriptionCoverageResponse(**coverage), trace_id=trace_id)
 
 

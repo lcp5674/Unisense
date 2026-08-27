@@ -3988,9 +3988,16 @@ export interface InferTableDescriptionResult {
   confidence: number;
 }
 
-/** 描述缺失统计（资产地图「描述缺失」tab / 采集目录概览卡） */
-export async function fetchDescriptionCoverage(): Promise<DescriptionCoverage> {
-  return request<DescriptionCoverage>(`${API_BASE}/catalogs/description-coverage`);
+/** 描述缺失统计（资产地图「描述缺失」tab / 采集目录概览卡）。
+ *  params.source_id / params.keyword：治理面板「按数据源、表筛选治理」的服务端过滤。 */
+export async function fetchDescriptionCoverage(params?: {
+  source_id?: string;
+  keyword?: string;
+}): Promise<DescriptionCoverage> {
+  const qs = pageQs({ source_id: params?.source_id, keyword: params?.keyword });
+  return request<DescriptionCoverage>(
+    `${API_BASE}/catalogs/description-coverage${qs ? `?${qs}` : ""}`,
+  );
 }
 
 /** 人工编辑表级描述 */

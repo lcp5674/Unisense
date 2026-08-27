@@ -286,6 +286,33 @@ async def test_get_description_coverage_endpoint(collector_client: httpx.AsyncCl
     assert data["per_table"][0]["entity_name"] == "ods_order"
 
 
+async def test_get_description_coverage_endpoint_filters(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """GET /catalogs/description-coverage?source_id=&keyword= 透传到 repository。"""
+    fake_svc = MagicMock()
+    fake_svc._repo.get_description_coverage = AsyncMock(
+        return_value={
+            "total_tables": 1,
+            "tables_with_desc": 0,
+            "tables_missing_desc": 1,
+            "total_fields": 2,
+            "fields_with_desc": 0,
+            "fields_missing_desc": 2,
+            "per_table": [],
+        }
+    )
+    with patch("app.api.collector._svc", return_value=fake_svc):
+        resp = await collector_client.get(
+            "/api/v1/catalogs/description-coverage",
+            params={"source_id": "s1", "keyword": "order"},
+        )
+    assert resp.status_code == 200
+    fake_svc._repo.get_description_coverage.assert_awaited_once_with(
+        page=1, page_size=None, source_id="s1", keyword="order"
+    )
+
+
 async def test_update_table_description_endpoint(
     collector_client: httpx.AsyncClient,
 ) -> None:

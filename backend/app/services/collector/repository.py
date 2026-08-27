@@ -1155,7 +1155,11 @@ class CollectorRepository:
         return cat
 
     async def get_description_coverage(
-        self, page: int = 1, page_size: int | None = None
+        self,
+        page: int = 1,
+        page_size: int | None = None,
+        source_id: str | None = None,
+        keyword: str | None = None,
     ) -> dict[str, Any]:
         """描述缺失统计：汇总指标 SQL 端聚合 + per_table 服务端分页。
 
@@ -1166,23 +1170,35 @@ class CollectorRepository:
         - per_table 明细按 page/page_size 服务端分页（page_size=None 返回
           全量，向后兼容旧前端契约）。
 
+        治理筛选（source_id/keyword）：汇总与明细统一按筛选口径收窄——
+        fields_with_desc 也 join db_catalog 限定范围，保证「按数据源/表治理」
+        时统计卡与表格口径一致（筛选后统计卡反映该子集的覆盖率）。
+
         Args:
             page: 页码（≥1）。
             page_size: 每页条数；None 表示全量（向后兼容）。
+            source_id: 数据源过滤（精确匹配）。
+            keyword: 表名模糊过滤（LIKE 通配符转义，对齐 list_catalogs）。
 
         Returns:
             汇总 + per_table（分页后）+ per_table_total/page/page_size。
         """
+        # 软删源过滤：join data_source.deleted_at IS NULL——软删源目录不再计入治理统计；
+        # source_id/keyword 为治理筛选（采集目录治理面板按数据源/表筛选）
+        filters = [DBCatalog.deleted_at.is_(None), DataSource.deleted_at.is_(None)]
+        if source_id:
+            filters.append(DBCatalog.source_id == source_id)
+        if keyword:
+            # LIKE 通配符转义（对齐 FR-035 / list_catalogs：% / _ 须转义防模糊放大）
+            escaped = keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")
+            filters.append(DBCatalog.entity_name.ilike(f"%{escaped}%", escape="/"))
+
         # —— 汇总指标：SQL 端聚合（不装载 db_catalog 大字段）——
-        # 软删源过滤：join data_source.deleted_at IS NULL——软删源目录不再计入治理统计
         total_tables = int(
             await self._db.scalar(
                 select(func.count(DBCatalog.id))
                 .join(DataSource, DataSource.source_id == DBCatalog.source_id)
-                .where(
-                    DBCatalog.deleted_at.is_(None),
-                    DataSource.deleted_at.is_(None),
-                )
+                .where(*filters)
             )
             or 0
         )
@@ -1191,8 +1207,7 @@ class CollectorRepository:
                 select(func.count(DBCatalog.id))
                 .join(DataSource, DataSource.source_id == DBCatalog.source_id)
                 .where(
-                    DBCatalog.deleted_at.is_(None),
-                    DataSource.deleted_at.is_(None),
+                    *filters,
                     DBCatalog.description.is_not(None),
                     DBCatalog.description != "",
                 )
@@ -1206,17 +1221,18 @@ class CollectorRepository:
                 )
             )
             .join(DataSource, DataSource.source_id == DBCatalog.source_id)
-            .where(
-                DBCatalog.deleted_at.is_(None),
-                DataSource.deleted_at.is_(None),
-            )
+            .where(*filters)
         )
         total_fields = int(total_fields_row.scalar() or 0)
         fields_with_desc = int(
             await self._db.scalar(
-                select(func.count(ColumnDescription.id)).where(
+                select(func.count(ColumnDescription.id))
+                .join(DBCatalog, DBCatalog.id == ColumnDescription.catalog_id)
+                .join(DataSource, DataSource.source_id == DBCatalog.source_id)
+                .where(
                     ColumnDescription.deleted_at.is_(None),
                     ColumnDescription.source.in_(("manual", "llm")),
+                    *filters,
                 )
             )
             or 0
@@ -1226,10 +1242,7 @@ class CollectorRepository:
         base = (
             select(DBCatalog)
             .join(DataSource, DataSource.source_id == DBCatalog.source_id)
-            .where(
-                DBCatalog.deleted_at.is_(None),
-                DataSource.deleted_at.is_(None),
-            )
+            .where(*filters)
             .order_by(DBCatalog.id)
         )
         per_table_total = int(

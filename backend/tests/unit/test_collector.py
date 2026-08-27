@@ -4218,6 +4218,31 @@ async def test_repo_get_description_coverage_pagination() -> None:
     assert cov["fields_with_desc"] == 1
 
 
+async def test_repo_get_description_coverage_filters() -> None:
+    """治理筛选：source_id/keyword 过滤应用到汇总与明细，字段覆盖统计 join db_catalog 收窄。"""
+    s = _coverage_session()
+    repo = CollectorRepository(s)
+    cov = await repo.get_description_coverage(source_id="s1", keyword="order")
+
+    # 4 次 scalar（total_tables/tables_with_desc/fields_with_desc/per_table_total）
+    # 的语句均携带 source_id 精确匹配与 entity_name LIKE（治理筛选口径）
+    for call in s.scalar.call_args_list:
+        text = str(call.args[0])
+        assert "source_id" in text
+        assert "LIKE" in text
+    # fields_with_desc（第 3 次 scalar）必须 join db_catalog——否则字段覆盖统计不随
+    # 数据源/表筛选收窄（修复点：原查询仅扫 column_descriptions，筛选会失真）
+    fields_stmt = str(s.scalar.call_args_list[2].args[0])
+    assert "column_descriptions" in fields_stmt
+    assert "JOIN db_catalog" in fields_stmt
+    # 分页明细语句同样过滤
+    page_text = str(s.execute.call_args_list[1].args[0])
+    assert "source_id" in page_text and "LIKE" in page_text
+    # 汇总结果仍按 mock 口径返回（filter 只影响 SQL 构造，不影响 mock 返回值）
+    assert cov["total_tables"] == 2
+    assert cov["fields_with_desc"] == 1
+
+
 # ---------- P2-10/12/13 ----------
 
 

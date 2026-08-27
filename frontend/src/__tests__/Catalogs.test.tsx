@@ -717,6 +717,41 @@ describe("Catalogs 页面", () => {
     });
   });
 
+  it("描述缺失治理面板：按数据源筛选治理（选择数据源后按 source_id 重新拉取）", async () => {
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText("字段描述覆盖率")).toBeTruthy());
+    // 打开数据源下拉（选项来自 listDataSources）并选择 Unisense MySQL
+    openSelectDropdown("coverage-source-filter");
+    await clickSelectOption("Unisense MySQL（mysql_unisense）");
+    await waitFor(() => {
+      expect(fetchDescriptionCoverage).toHaveBeenCalledWith({ source_id: "mysql_unisense" });
+    });
+    // 筛选提示文案出现（统计卡与治理表格按筛选口径计算）
+    expect(screen.getByText(/统计卡与治理表格按所选数据源/)).toBeTruthy();
+  });
+
+  it("描述缺失治理面板：按表名筛选治理（输入关键词防抖后按 keyword 重新拉取）", async () => {
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText("字段描述覆盖率")).toBeTruthy());
+    fireEvent.change(screen.getByTestId("coverage-keyword-filter"), {
+      target: { value: "order" },
+    });
+    // 350ms 防抖后以 keyword 重新拉取
+    await waitFor(() => {
+      expect(fetchDescriptionCoverage).toHaveBeenCalledWith({ keyword: "order" });
+    });
+  });
+
   it("描述缺失治理面板：下钻明细行点击进入治理抽屉（非跳转）", async () => {
     vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
       total_tables: 2,

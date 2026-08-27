@@ -43,6 +43,7 @@ import {
   inferColumnDescription,
   inferDescriptions,
   inferTableDescription,
+  listDataSources,
   updateColumnDescription,
   updateTableDescription,
 } from "../api";
@@ -54,6 +55,7 @@ import type {
 } from "../api";
 import type {
   AssetEntityDetail,
+  DataSource,
   SchemaColumn,
 } from "../types";
 import { SchemaTable } from "./SchemaTable";
@@ -550,6 +552,13 @@ export const DescriptionCoveragePanel = forwardRef<
   const [coverage, setCoverage] = useState<DescriptionCoverage | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // 治理筛选（full 模式）：数据源 + 表名关键词——服务端过滤统计卡与治理表格，
+  // 批量推断/明细下钻天然只在当前筛选范围内（覆盖数据本身来自筛选后接口）
+  const [sourceId, setSourceId] = useState("");
+  const [sources, setSources] = useState<DataSource[]>([]);
+  const [keywordInput, setKeywordInput] = useState("");
+  const [keyword, setKeyword] = useState("");
+  const searchTimerRef = useRef<number | null>(null);
   // 按钮级权限点：无 catalog:infer-description 时隐藏 LLM 推断按钮（后端强制兜底）
   const canInferCatalog = usePermission().can("catalog:infer-description");
   // 编辑描述侧门修复：表级/字段级人工编辑也受 catalog:edit-description 管控
@@ -614,12 +623,24 @@ export const DescriptionCoveragePanel = forwardRef<
     setLoading(true);
     setError(null);
     try {
-      setCoverage(await fetchDescriptionCoverage());
+      setCoverage(
+        await fetchDescriptionCoverage({
+          source_id: sourceId || undefined,
+          keyword: keyword || undefined,
+        }),
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载描述覆盖统计失败");
     } finally {
       setLoading(false);
     }
+  }
+
+  /** 表名搜索防抖（350ms，对齐采集目录主列表）：输入即时更新，查询值延迟提交重新拉取。 */
+  function scheduleKeyword(value: string) {
+    setKeywordInput(value);
+    if (searchTimerRef.current !== null) window.clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = window.setTimeout(() => setKeyword(value), 350);
   }
 
   /**
@@ -642,8 +663,31 @@ export const DescriptionCoveragePanel = forwardRef<
 
   useEffect(() => {
     load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceId, keyword]);
+
+  // 服务端批量历史与筛选无关，仅挂载拉一次
+  useEffect(() => {
     void loadServerHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 治理筛选数据源下拉选项（与采集目录登记实体下拉同源，page_size 200 全量）；
+  // summary 只读总览不展示筛选栏，跳过避免多余请求
+  useEffect(() => {
+    if (isSummary) return;
+    listDataSources({ page: 1, page_size: 200 })
+      .then((res) => setSources(res.items))
+      .catch(() => {});
+  }, [isSummary]);
+
+  // 卸载清理表名搜索防抖定时器
+  useEffect(
+    () => () => {
+      if (searchTimerRef.current !== null) window.clearTimeout(searchTimerRef.current);
+    },
+    [],
+  );
 
   // 暴露 reload 给父组件：采集目录主列表「刷新」按钮共享刷新治理面板（方案 D）
   useImperativeHandle(ref, () => ({ reload: load }));
@@ -1264,6 +1308,48 @@ export const DescriptionCoveragePanel = forwardRef<
             前往采集目录治理
           </Button>
         </div>
+      )}
+
+      {!isSummary && (
+        <Space style={{ marginBottom: 12 }} wrap>
+          <Select
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            placeholder="全部数据源"
+            style={{ width: 220 }}
+            value={sourceId || undefined}
+            onChange={(v) => setSourceId(v || "")}
+            options={sources.map((s) => ({
+              value: s.source_id,
+              label: `${s.name}（${s.source_id}）`,
+            }))}
+            data-testid="coverage-source-filter"
+          />
+          <Input
+            allowClear
+            placeholder="按表名筛选"
+            style={{ width: 200 }}
+            value={keywordInput}
+            onChange={(e) => scheduleKeyword(e.target.value)}
+            data-testid="coverage-keyword-filter"
+          />
+          {(sourceId || keyword) && (
+            <Button
+              size="small"
+              onClick={() => {
+                setSourceId("");
+                setKeyword("");
+                setKeywordInput("");
+              }}
+            >
+              重置筛选
+            </Button>
+          )}
+          <span className="muted" style={{ fontSize: 12 }}>
+            统计卡与治理表格按所选数据源 / 表名口径计算，批量推断仅在筛选范围内勾选
+          </span>
+        </Space>
       )}
 
       <Row gutter={16} style={{ marginBottom: 16 }}>
