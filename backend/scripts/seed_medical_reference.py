@@ -1,12 +1,16 @@
 """初始化 seed 脚本：清除 E2E/测试参照数据，灌入微医业务参照数据。
 
-覆盖三类主数据（对齐 TD §12.14/§12.15 / FR-05 / FR-08 / FR-012）：
-- 主题域（subject_domain）：保留既有 7 医疗域 + uncategorized，补充微医线上业务
-  一级域（在线问诊/互联网医院/预约挂号/健康管理）并为全部一级域补二级子域。
+以微医实际业务六大主线组织参照数据：医疗（诊疗）、医药（药品）、医保、
+挂号、健康管理、健共体（数字健共体·区域医疗协作）。覆盖三类主数据
+（对齐 TD §12.14/§12.15 / FR-05 / FR-08 / FR-012）：
+- 主题域（subject_domain）：保留既有 7 医疗域 + uncategorized 及微医线上业务
+  一级域（在线问诊/互联网医院/预约挂号/健康管理），新增「健共体」一级域及
+  子域，并为各业务主线补全缺失二级子域。
 - 术语（term）：清除 8 条 E2E/测试术语及关联（term_version/term_relation/
-  glossary_conflict），灌入微医核心业务术语。
+  glossary_conflict），灌入六大业务主线核心术语（含健共体协作术语）。
 - 维度（dimension）：清除 8 条 E2E/测试维度及引用（dimension_member/
-  metric_dimension/reconciliation/dimension_mapping），灌入医疗业务维度+成员。
+  metric_dimension/reconciliation/dimension_mapping），灌入六大业务主线
+  维度+成员（含健共体转诊/医联体/签约维度）。
 
 用法:
     poetry run python -m scripts.seed_medical_reference
@@ -76,7 +80,7 @@ _MOCK_TERM_PREFIXES = (
 
 
 # ---------------------------------------------------------------------------
-# 主题域（微医业务：7 医疗域 + 4 线上业务域，均含二级子域）
+# 主题域（六大业务主线：医疗/医药/医保/挂号/健康管理/健共体，均含二级子域）
 # ---------------------------------------------------------------------------
 # 仅声明需「确保存在」的域节点：一级域已存在则跳过（保留 seed_domains_dicts 创建结果），
 # 二级子域按 code 查存在则跳过。parent 用一级域 code 引用，灌入时解析为 id。
@@ -117,11 +121,30 @@ DOMAIN_SEEDS: list[dict[str, Any]] = [
     {"code": "checkup", "name": "体检", "parent": "health_management", "sort_order": 1},
     {"code": "chronic_disease", "name": "慢病管理", "parent": "health_management", "sort_order": 2},
     {"code": "family_doctor", "name": "家庭医生", "parent": "health_management", "sort_order": 3},
+    # ---- 健共体（微医数字健共体：区域医疗协作共同体，一级域）----
+    {"code": "health_community", "name": "健共体", "parent": None, "sort_order": 12},
+    {"code": "medical_alliance", "name": "医联体", "parent": "health_community", "sort_order": 1},
+    {"code": "medical_community", "name": "医共体", "parent": "health_community", "sort_order": 2},
+    {"code": "referral", "name": "双向转诊", "parent": "health_community", "sort_order": 3},
+    {"code": "remote_consult", "name": "远程会诊", "parent": "health_community", "sort_order": 4},
+    {"code": "family_doctor_sign", "name": "家医签约", "parent": "health_community", "sort_order": 5},
+    {"code": "shared_resource", "name": "资源共享", "parent": "health_community", "sort_order": 6},
+    {"code": "public_health", "name": "公共卫生", "parent": "health_community", "sort_order": 7},
+    # ---- 各业务主线补充子域 ----
+    {"code": "exam_lab", "name": "检查检验", "parent": "outpatient", "sort_order": 4},
+    {"code": "surgery", "name": "手术", "parent": "outpatient", "sort_order": 5},
+    {"code": "drug_inventory", "name": "药品库存", "parent": "medication", "sort_order": 4},
+    {"code": "drug_procurement", "name": "药品采购", "parent": "medication", "sort_order": 5},
+    {"code": "yb_directory", "name": "医保目录", "parent": "medical_insurance", "sort_order": 3},
+    {"code": "commercial_insurance", "name": "商业保险", "parent": "medical_insurance", "sort_order": 4},
+    {"code": "sign_in", "name": "签到取号", "parent": "appointment", "sort_order": 4},
+    {"code": "health_education", "name": "健康教育", "parent": "health_management", "sort_order": 4},
+    {"code": "vaccination", "name": "疫苗接种", "parent": "health_management", "sort_order": 5},
 ]
 
 
 # ---------------------------------------------------------------------------
-# 术语（微医核心业务，24 条，全 PUBLISHED 直灌）
+# 术语（六大业务主线核心术语，39 条，全 PUBLISHED 直灌）
 # ---------------------------------------------------------------------------
 TERM_SEEDS: list[dict[str, Any]] = [
     # 在线问诊
@@ -154,11 +177,28 @@ TERM_SEEDS: list[dict[str, Any]] = [
     # 质控
     {"term_code": "medical_record_review", "name": "病历质控", "definition": "对病历书写规范性与完整性的质量控制与评价。", "domain": "quality", "synonyms": ["病案质控"], "boundary": None},
     {"term_code": "rational_drug_use", "name": "合理用药", "definition": "对处方用药安全性、有效性、经济性的审核评价。", "domain": "quality", "synonyms": ["合理用药评价"], "boundary": None},
+    # 健共体（区域医疗协作，微医数字健共体核心）
+    {"term_code": "two_way_referral", "name": "双向转诊", "definition": "上级医院与基层医疗机构之间依病情需要进行的患者上转与下转协作机制。", "domain": "health_community", "synonyms": ["分级转诊"], "boundary": "含上转/下转两个方向"},
+    {"term_code": "upward_referral", "name": "上转", "definition": "基层医疗机构将超出其诊治能力的患者转往上级医院。", "domain": "health_community", "synonyms": ["向上转诊"], "boundary": None},
+    {"term_code": "downward_referral", "name": "下转", "definition": "上级医院将病情稳定进入康复期的患者转往基层或康复机构。", "domain": "health_community", "synonyms": ["向下转诊"], "boundary": None},
+    {"term_code": "medical_alliance", "name": "医联体", "definition": "城市医疗集团、专科联盟等医疗机构间以协同服务为目标的联合体。", "domain": "health_community", "synonyms": ["城市医疗集团", "专科联盟"], "boundary": None},
+    {"term_code": "medical_community", "name": "医共体", "definition": "县域内县、乡、村三级医疗机构一体化管理的医疗共同体。", "domain": "health_community", "synonyms": ["县域医共体"], "boundary": None},
+    {"term_code": "remote_consultation", "name": "远程会诊", "definition": "上级专家通过远程医疗平台为基层患者参与的会诊服务。", "domain": "health_community", "synonyms": ["远程医疗"], "boundary": None},
+    {"term_code": "family_doctor_contract", "name": "家医签约", "definition": "居民与家庭医生服务团队签订基本医疗与健康管理服务协议。", "domain": "health_community", "synonyms": ["家庭医生签约"], "boundary": None},
+    {"term_code": "check_share", "name": "检查检验互认", "definition": "区域内医疗机构间对符合条件的检查检验结果予以互认。", "domain": "health_community", "synonyms": ["结果互认"], "boundary": None},
+    {"term_code": "chronic_followup", "name": "慢病随访", "definition": "对高血压、糖尿病等慢病患者进行的定期随访与健康管理。", "domain": "health_community", "synonyms": ["随访管理"], "boundary": None},
+    # 医药/医保/挂号/健康管理补充
+    {"term_code": "drug_price_comparison", "name": "药品比价", "definition": "对同种药品在不同药房或渠道的销售价格进行比较。", "domain": "medication", "synonyms": ["药价对比"], "boundary": None},
+    {"term_code": "insurance_claim", "name": "商保理赔", "definition": "商业保险公司按保险条款对医疗费用进行的赔付。", "domain": "medical_insurance", "synonyms": ["保险理赔"], "boundary": None},
+    {"term_code": "physical_exam", "name": "体检", "definition": "以健康评估为目的的系统性身体检查服务。", "domain": "health_management", "synonyms": ["健康体检"], "boundary": None},
+    {"term_code": "vaccination", "name": "疫苗接种", "definition": "为预防传染病而进行的疫苗预防接种服务。", "domain": "health_management", "synonyms": ["预防接种"], "boundary": None},
+    {"term_code": "health_education", "name": "健康教育", "definition": "面向居民开展的疾病预防与健康促进宣教服务。", "domain": "health_management", "synonyms": ["健康宣教"], "boundary": None},
+    {"term_code": "register_sign_in", "name": "签到取号", "definition": "患者到院后凭预约信息签到并取得就诊序号。", "domain": "appointment", "synonyms": ["到院签到"], "boundary": None},
 ]
 
 
 # ---------------------------------------------------------------------------
-# 维度 + 成员（医疗业务，12 个维度；SCD0/SCD1/SCD2 三型）
+# 维度 + 成员（六大业务主线，18 个维度；SCD0/SCD1/SCD2 三型）
 # ---------------------------------------------------------------------------
 def _slug(name: str) -> str:
     """中文名 → 拼音风格 slug（科室/病种成员编码）。"""
@@ -316,6 +356,54 @@ DIMENSION_SEEDS: list[dict[str, Any]] = [
             {"code": "normal", "name": "普通号"}, {"code": "expert", "name": "专家号"},
             {"code": "special", "name": "特需号"}, {"code": "emergency", "name": "急诊号"},
             {"code": "followup", "name": "复诊号"},
+        ],
+    },
+    {
+        "dim_code": "register_shift", "name": "出诊时段", "domain": "appointment", "type": "SCD0",
+        "description": "医生出诊班次时段，衡量号源与候诊负荷。", "members": [
+            {"code": "morning", "name": "上午"}, {"code": "afternoon", "name": "下午"},
+            {"code": "night", "name": "夜间"}, {"code": "weekend", "name": "周末"},
+        ],
+    },
+    {
+        "dim_code": "health_community_referral_type", "name": "转诊类型", "domain": "health_community", "type": "SCD0",
+        "description": "健共体内双向转诊方向类型。", "members": [
+            {"code": "upward", "name": "上转"}, {"code": "downward", "name": "下转"},
+            {"code": "horizontal", "name": "平转"}, {"code": "consult", "name": "院间会诊转诊"},
+        ],
+    },
+    {
+        "dim_code": "health_community_alliance_type", "name": "医联体类型", "domain": "health_community", "type": "SCD0",
+        "description": "医联体/医共体组织形态。", "members": [
+            {"code": "city_group", "name": "城市医疗集团"}, {"code": "county_community", "name": "县域医共体"},
+            {"code": "specialty_alliance", "name": "专科联盟"}, {"code": "remote_network", "name": "远程医疗协作网"},
+        ],
+    },
+    {
+        "dim_code": "health_community_sign_status", "name": "家医签约状态", "domain": "health_community", "type": "SCD0",
+        "description": "居民家庭医生签约服务状态。", "members": [
+            {"code": "signed", "name": "已签约"}, {"code": "renew", "name": "待续签"},
+            {"code": "terminated", "name": "已解约"}, {"code": "unsigned", "name": "未签约"},
+        ],
+    },
+    {
+        "dim_code": "checkup_project", "name": "体检项目", "domain": "health_management", "type": "SCD0",
+        "description": "健康体检检查项目类别。", "members": [
+            {"code": "general", "name": "一般检查"}, {"code": "blood_routine", "name": "血常规"},
+            {"code": "urine_routine", "name": "尿常规"}, {"code": "liver_func", "name": "肝功能"},
+            {"code": "renal_func", "name": "肾功能"}, {"code": "blood_lipid", "name": "血脂"},
+            {"code": "blood_glucose", "name": "血糖"}, {"code": "ecg", "name": "心电图"},
+            {"code": "chest_xray", "name": "胸部X线"}, {"code": "abdominal_us", "name": "腹部超声"},
+            {"code": "tumor_marker", "name": "肿瘤标志物"}, {"code": "hp_test", "name": "幽门螺杆菌检测"},
+        ],
+    },
+    {
+        "dim_code": "medication_drug_form", "name": "药品剂型", "domain": "medication", "type": "SCD0",
+        "description": "药品制剂形态。", "members": [
+            {"code": "tablet", "name": "片剂"}, {"code": "capsule", "name": "胶囊剂"},
+            {"code": "injection", "name": "注射剂"}, {"code": "granule", "name": "颗粒剂"},
+            {"code": "oral_liquid", "name": "口服液"}, {"code": "topical", "name": "外用制剂"},
+            {"code": "aerosol", "name": "气雾剂"}, {"code": "eye_drop", "name": "滴眼剂"},
         ],
     },
 ]
