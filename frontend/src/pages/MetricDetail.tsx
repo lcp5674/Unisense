@@ -785,7 +785,7 @@ export function MetricDetail() {
   // 存量 SQL 模式指标（definition_json 含 sql/etl_sql）打开弹窗时自动落到 SQL 模式。
   const [editDefMode, setEditDefMode] = useState<"expression" | "sql">("expression");
   const [editSqlText, setEditSqlText] = useState("");
-  // 口径分角色（对齐注册页 Step③）：系统开发伪代码口径 / 数仓开发详细口径，
+  // 口径分角色（对齐注册页 Step④）：系统开发伪代码口径 / 数仓开发详细口径，
   // 独立于口径主体模式（expression/sql）始终可编辑；dirty 区分"未改保留"与"清空移除"。
   const [editBusinessDefinition, setEditBusinessDefinition] = useState("");
   const [editBusinessDirty, setEditBusinessDirty] = useState(false);

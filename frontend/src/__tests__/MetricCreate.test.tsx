@@ -855,8 +855,8 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     fireEvent.click(screen.getByText("智能推断并回填字段"));
     await screen.findByText("SQL 智能推断结果");
     fireEvent.click(screen.getByText("知道了"));
-    // Q2：数仓详细口径（dwDefinition）自动回填推断的完整 SQL——用户无需再手填（在 Step③ 口径定义）
-    await goToStep(1);
+    // Q2：数仓详细口径（dwDefinition）自动回填推断的完整 SQL——用户无需再手填（在 Step④ 口径定义）
+    await goToStep(2);
     await waitFor(() => {
       const dw = screen.getByLabelText("数仓SQL口径") as HTMLTextAreaElement;
       expect(dw.value).toContain("SELECT COUNT(DISTINCT doctor_code)");
@@ -1035,14 +1035,14 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
 
-    // 编码与口径定义在 Step1（指标基本信息 + 口径定义），预检按钮在 Step2（提交）
+    // 编码在 Step1（② 指标基本信息），口径定义 JSON 在 Step2（④ 口径定义），预检按钮在 Step2（提交）
     await goToStep(1);
     const codeInput = screen.getByLabelText("指标编码") as HTMLInputElement;
     fireEvent.change(codeInput, { target: { value: "sales_test" } });
-    const defInput = screen.getByLabelText("口径定义 (JSON)") as HTMLTextAreaElement;
-    fireEvent.change(defInput, { target: { value: '{"expr": "sum(amount)"}' } });
 
     await goToStep(2);
+    const defInput = screen.getByLabelText("口径定义 (JSON)") as HTMLTextAreaElement;
+    fireEvent.change(defInput, { target: { value: '{"expr": "sum(amount)"}' } });
     fireEvent.click(screen.getByRole("button", { name: /冲突预检/ }));
     // 正确映射：后端 ConflictType 值为 same_name_diff_def → 中文「同名不同义」
     await screen.findByText(/同名不同义/);
@@ -1374,10 +1374,12 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
   it("默认原子指标：展示逻辑度量与源表/度量列/周期，隐藏依赖指标与计算表达式", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
-    // Step1 指标基本信息：原子下治理字段（粒度/单位/币种/时间语义/新鲜度/数仓层）隐藏，
+    // Step1 指标基本信息：粒度作为逻辑概念在顶部可见（原子只读「日 (day)」），
+    // 其余治理字段（单位/币种/时间语义/新鲜度/数仓层）隐藏；
     // 聚合方式保留（原子核心算法属性）；计算表达式为派生/复合专属，原子下不出现
     await goToStep(1);
-    expect(screen.queryByText("粒度")).toBeNull();
+    expect(screen.getByText("粒度")).toBeTruthy();
+    expect(screen.getByText("日 (day)")).toBeTruthy();
     expect(screen.queryByText("单位")).toBeNull();
     expect(screen.queryByText("币种（选填）")).toBeNull();
     expect(screen.queryByText("时间语义")).toBeNull();
@@ -1411,9 +1413,23 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     expect(screen.queryByText("⑥ 原子来源（逻辑度量 + 基础统计粒度）")).toBeNull();
     expect(screen.queryByText("源表名（兼容旧式来源，可选）")).toBeNull();
     expect(screen.queryByText("度量列（兼容旧式来源，可选）")).toBeNull();
-    // 计算表达式输入在 Step1（口径定义）——受控组件（Form.Item 无 name），label 无 htmlFor，须按文本查询
-    await goToStep(1);
+    // 计算表达式输入在 Step2（④ 口径定义）——受控组件（Form.Item 无 name），label 无 htmlFor，须按文本查询
     await waitFor(() => expect(screen.getByText("计算表达式")).toBeTruthy());
+  });
+
+  it("逻辑概念：关联维度在 Step1 ② 展示——expression 与 SQL 两种口径模式均可见", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await goToStep(1);
+    // 关联维度（受控 Select）随逻辑概念展示在 ② 指标基本信息
+    expect(screen.getByText("关联维度（可选）")).toBeTruthy();
+    expect(screen.getByText("选择平台维度（可搜索）")).toBeTruthy();
+    // 切到 SQL 口径定义模式（Step2 ④ 卡）后，Step1 ② 的关联维度仍可见（不再受口径模式门控）
+    await goToStep(2);
+    fireEvent.click(screen.getByText("SQL 模式"));
+    await goToStep(1);
+    expect(screen.getByText("关联维度（可选）")).toBeTruthy();
+    expect(screen.getByText("选择平台维度（可搜索）")).toBeTruthy();
   });
 
   it("派生指标未选依赖（纯周期派生）提交 → 前端放行（依赖/表达式均可选）", async () => {
@@ -1465,7 +1481,6 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     await screen.findByText("注册指标（草稿）");
     await goToStep(2);
     fireEvent.click(screen.getByText("派生指标"));
-    await goToStep(1);
     await waitFor(() => expect(screen.getByText("计算表达式")).toBeTruthy());
     // R5：派生 = 原子 + 业务限定 + 时间周期，计算表达式非必填——Form.Item 无 required 红标
     const item = screen.getByText("计算表达式").closest(".ant-form-item") as HTMLElement;
@@ -1691,10 +1706,10 @@ describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数�
     });
   });
 
-  it("Step③ 展示「业务口径」与「伪代码口径（系统开发）」「数仓SQL口径」输入区", async () => {
+  it("Step④ 展示「业务口径」与「伪代码口径（系统开发）」「数仓SQL口径」输入区", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
-    await goToStep(1);
+    await goToStep(2);
 
     const biz = screen.getByRole("textbox", { name: "业务口径" }) as HTMLTextAreaElement;
     const pseudo = screen.getByRole("textbox", { name: "伪代码口径" }) as HTMLTextAreaElement;
@@ -1715,12 +1730,9 @@ describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数�
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
     await goToStep(2);
-    // 选逻辑度量（原子指标 OneData 继承源）
+    // 选逻辑度量（原子指标 OneData 继承源）+ 填三层口径（Step2 ④ 口径定义）
     fireEvent.mouseDown(screen.getByText("选择或搜索逻辑度量（如 支付金额 pay_amt）"));
     await clickSelectOption("门诊收费金额 (medical_fee_amt)");
-    await goToStep(1);
-    // 填名称 + 三层口径
-    fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "门诊收费金额" } });
     fireEvent.change(screen.getByRole("textbox", { name: "业务口径" }), {
       target: { value: "按就诊号去重统计的门诊收费金额" },
     });
@@ -1730,6 +1742,9 @@ describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数�
     fireEvent.change(screen.getByRole("textbox", { name: "数仓SQL口径" }), {
       target: { value: "SELECT visit_date, SUM(real_amount) AS amt FROM dwd.fee_bill_di" },
     });
+    // 名称在 Step1（② 指标基本信息）必填——填名称后回 Step2 提交
+    await goToStep(1);
+    fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "门诊收费金额" } });
     await goToStep(2);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
 
@@ -1779,14 +1794,14 @@ describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数�
     });
   });
 
-  it("Step③ 三层口径 AI 生成/丰富增强：业务口径有值点「AI 丰富增强」回填", async () => {
+  it("Step④ 三层口径 AI 生成/丰富增强：业务口径有值点「AI 丰富增强」回填", async () => {
     mockedRefine.mockResolvedValue({
       content: "按就诊号去重统计的门诊就诊总人次（含跨院区）",
       source: "llm",
     });
     renderPage();
     await screen.findByText("注册指标（草稿）");
-    await goToStep(1);
+    await goToStep(2);
     const biz = screen.getByRole("textbox", { name: "业务口径" }) as HTMLTextAreaElement;
     fireEvent.change(biz, { target: { value: "门诊就诊次数" } });
     // 业务口径有值 → 按钮显示「AI 丰富增强」（限定在业务口径 Form.Item 内，避免命中同名按钮）
