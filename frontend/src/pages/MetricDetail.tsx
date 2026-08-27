@@ -37,6 +37,7 @@ import {
   RobotOutlined,
   CheckCircleOutlined,
   DeleteOutlined,
+  DatabaseOutlined,
 } from "@ant-design/icons";
 import { usePermission } from "../hooks/usePermission";
 import {
@@ -2376,55 +2377,84 @@ export function MetricDetail() {
             未挂载——该指标未绑定物理表（派生指标 = 原子 + 时间 + 业务限定 + 挂载）。
           </Typography.Text>
         ) : (
-          mounts.map((m) => (
-            <div
-              key={m.id}
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                padding: "4px 0",
-              }}
-            >
-              <Space wrap>
-                <Tag color="blue">{m.source_table}</Tag>
-                <span className="muted">
-                  列：{m.source_column} · 粒度：{m.granularity}
-                  {m.default_period ? ` · 默认周期：${m.default_period}` : ""} · 域：{m.domain}
-                  {m.business_filter ? ` · 业务限定：${m.business_filter}` : ""}
-                </span>
-              </Space>
-              {/* 变体级责任方（方案 B）：行内展示归属；全空 = 继承指标级，不重复展示 */}
-              {(m.product_owner_id != null ||
-                m.product_owner_name ||
-                m.tech_owner_id != null ||
-                m.tech_owner_name ||
-                m.dw_developer_id != null ||
-                m.dw_developer_name) && (
-                <span className="muted" style={{ display: "block", fontSize: 12 }}>
-                  责任方：
-                  {m.product_owner_id != null || m.product_owner_name ? (
-                    <Tag style={{ marginLeft: 4 }}>产品：{mountOwnerText(m.product_owner_id, m.product_owner_name)}</Tag>
-                  ) : null}
-                  {m.tech_owner_id != null || m.tech_owner_name ? (
-                    <Tag style={{ marginLeft: 4 }}>技术：{mountOwnerText(m.tech_owner_id, m.tech_owner_name)}</Tag>
-                  ) : null}
-                  {m.dw_developer_id != null || m.dw_developer_name ? (
-                    <Tag style={{ marginLeft: 4 }}>数仓：{mountOwnerText(m.dw_developer_id, m.dw_developer_name)}</Tag>
-                  ) : null}
-                </span>
-              )}
-              <Button
-                size="small"
-                danger
-                loading={unmounting}
-                icon={<DeleteOutlined />}
-                onClick={() => handleUnmount(m.id)}
+          mounts.map((m) => {
+            // 变体级责任方（方案 B）：任一责任方非空才展示；全空 = 继承指标级，标注不重复列人
+            const hasOwner =
+              m.product_owner_id != null ||
+              m.product_owner_name ||
+              m.tech_owner_id != null ||
+              m.tech_owner_name ||
+              m.dw_developer_id != null ||
+              m.dw_developer_name;
+            return (
+              <div
+                key={m.id}
+                data-testid={`mount-card-${m.id}`}
+                style={{
+                  border: "1px solid #f0f0f0",
+                  borderRadius: 8,
+                  padding: "12px 16px 8px",
+                  marginBottom: 12,
+                  background: "#fafafa",
+                }}
               >
-                解除挂载
-              </Button>
-            </div>
-          ))
+                {/* 卡片头：物理表 + 解除挂载（按钮始终在右上角，不随字段换行） */}
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    marginBottom: 8,
+                    gap: 12,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <Space size={8}>
+                    <DatabaseOutlined style={{ color: "#1677ff" }} />
+                    <Typography.Text strong className="mono" style={{ fontSize: 14 }}>
+                      {m.source_table}
+                    </Typography.Text>
+                    {m.business_filter && <Tag color="orange">业务限定</Tag>}
+                  </Space>
+                  <Button
+                    size="small"
+                    danger
+                    loading={unmounting}
+                    icon={<DeleteOutlined />}
+                    onClick={() => handleUnmount(m.id)}
+                  >
+                    解除挂载
+                  </Button>
+                </div>
+                <Descriptions column={2} size="small">
+                  <Descriptions.Item label="源列">{m.source_column || "—"}</Descriptions.Item>
+                  <Descriptions.Item label="粒度">{m.granularity || "—"}</Descriptions.Item>
+                  <Descriptions.Item label="默认周期">{m.default_period ?? "—"}</Descriptions.Item>
+                  <Descriptions.Item label="业务域">{m.domain || "—"}</Descriptions.Item>
+                  <Descriptions.Item label="业务限定">
+                    {m.business_filter ?? <span className="muted">继承指标级</span>}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="责任方">
+                    {hasOwner ? (
+                      <Space size={4} wrap>
+                        {m.product_owner_id != null || m.product_owner_name ? (
+                          <Tag color="blue">产品：{mountOwnerText(m.product_owner_id, m.product_owner_name)}</Tag>
+                        ) : null}
+                        {m.tech_owner_id != null || m.tech_owner_name ? (
+                          <Tag color="geekblue">技术：{mountOwnerText(m.tech_owner_id, m.tech_owner_name)}</Tag>
+                        ) : null}
+                        {m.dw_developer_id != null || m.dw_developer_name ? (
+                          <Tag color="cyan">数仓：{mountOwnerText(m.dw_developer_id, m.dw_developer_name)}</Tag>
+                        ) : null}
+                      </Space>
+                    ) : (
+                      <span className="muted">继承指标级</span>
+                    )}
+                  </Descriptions.Item>
+                </Descriptions>
+              </div>
+            );
+          })
         )}
       </Card>
 

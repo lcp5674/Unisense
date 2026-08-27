@@ -2733,8 +2733,15 @@ describe("MetricDetail 按钮级权限过滤", () => {
     renderWithPerms(["metric:create"]);
     await screen.findByText("销售 GMV");
     await screen.findByText("挂载实体（OneData 挂载层）");
-    expect(screen.getByText("dwd_outpatient_gmv_df")).toBeTruthy();
-    expect(screen.getByText(/列：amount · 粒度：day/)).toBeTruthy();
+    // 卡片化布局：表名在卡片头，字段以「标签 + 值」网格展示
+    const card = within(screen.getByTestId("mount-card-7"));
+    expect(card.getByText("dwd_outpatient_gmv_df")).toBeTruthy();
+    expect(card.getByText("源列")).toBeTruthy();
+    expect(card.getByText("amount")).toBeTruthy();
+    expect(card.getByText("粒度")).toBeTruthy();
+    expect(card.getByText("outpatient")).toBeTruthy();
+    // 粒度 + 默认周期均为 day（两个值节点）
+    expect(card.getAllByText("day")).toHaveLength(2);
   });
 
   // 2026-08-27 多变体：详情页挂载卡逐行展示全部变体（不同粒度/限定/周期），业务限定随行展示
@@ -2781,17 +2788,20 @@ describe("MetricDetail 按钮级权限过滤", () => {
     renderWithPerms(["metric:create"]);
     await screen.findByText("销售 GMV");
     await screen.findByText("挂载实体（OneData 挂载层）");
-    // 两个变体逐行展示，业务限定随行
-    expect(screen.getByText("dwd.doctor_fee_daily")).toBeTruthy();
-    expect(screen.getByText(/粒度：医生/)).toBeTruthy();
-    expect(screen.getByText(/业务限定：场景=门诊/)).toBeTruthy();
+    // 两个变体各占一张挂载卡，字段按「标签 + 值」网格逐项展示
+    const card1 = within(screen.getByTestId("mount-card-1"));
+    expect(card1.getByText("dwd.doctor_fee_daily")).toBeTruthy();
+    expect(card1.getByText("医生")).toBeTruthy(); // 粒度
+    expect(card1.getByText("场景=门诊")).toBeTruthy(); // 业务限定
     // 变体级责任方（方案 B）：平台用户 id 解析 → 李四；外部人员仅名称 → 直接展示
-    expect(screen.getByText("产品：李四")).toBeTruthy();
-    expect(screen.getByText("技术：外部技术协作方")).toBeTruthy();
-    expect(screen.getByText("dwd.hospital_fee")).toBeTruthy();
-    expect(screen.getByText(/粒度：医院/)).toBeTruthy();
-    expect(screen.getByText(/业务限定：场景=住院/)).toBeTruthy();
-    // 两个解除按钮（每行一个）
+    expect(card1.getByText("产品：李四")).toBeTruthy();
+
+    const card2 = within(screen.getByTestId("mount-card-2"));
+    expect(card2.getByText("dwd.hospital_fee")).toBeTruthy();
+    expect(card2.getByText("医院")).toBeTruthy(); // 粒度
+    expect(card2.getByText("场景=住院")).toBeTruthy(); // 业务限定
+    expect(card2.getByText("技术：外部技术协作方")).toBeTruthy();
+    // 两个解除按钮（每卡一个）
     expect(screen.getAllByRole("button", { name: /解除挂载/ })).toHaveLength(2);
   });
 
