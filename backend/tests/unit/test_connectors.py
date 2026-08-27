@@ -224,7 +224,7 @@ async def test_hive_collector_parses_pyhive_rows():
     collector = HiveCollector(host="hive-host", database="test_db")
 
     # Mock _execute 方法
-    async def mock_execute(sql: str) -> list[list[str]]:
+    async def mock_execute(sql: str, conn=None) -> list[list[str]]:
         if "SHOW TABLES" in sql:
             return [["orders"], ["customers"]]
         if "DESCRIBE" in sql:
@@ -239,6 +239,8 @@ async def test_hive_collector_parses_pyhive_rows():
         return []
 
     collector._execute = mock_execute  # type: ignore[assignment]
+    # 连接复用：collect 每 schema 建一次连接，测试 mock 掉避免真实网络
+    collector._connect_managed = AsyncMock(return_value=object())  # type: ignore[assignment]
     result = await collector.collect(MagicMock(source_id="hive1", domain="test_db"))
 
     assert isinstance(result, CollectResult)
@@ -262,7 +264,7 @@ async def test_hive_collector_enumerates_all_dbs_when_no_database():
     """
     collector = HiveCollector(host="hive-host")
 
-    async def mock_execute(sql: str) -> list[list[str]]:
+    async def mock_execute(sql: str, conn=None) -> list[list[str]]:
         if "SHOW DATABASES" in sql:
             return [["ods"], ["dwd"]]
         if "SHOW TABLES" in sql:
@@ -272,6 +274,7 @@ async def test_hive_collector_enumerates_all_dbs_when_no_database():
         return []
 
     collector._execute = mock_execute  # type: ignore[assignment]
+    collector._connect_managed = AsyncMock(return_value=object())  # type: ignore[assignment]
     result = await collector.collect(MagicMock(source_id="hive1", domain="test_db"))
 
     assert isinstance(result, CollectResult)
@@ -285,7 +288,7 @@ async def test_hive_collector_records_failed_schema_listing():
     """SHOW TABLES IN 失败记入 failed_specs（避免「全部失败却静默 0 表」难排查）。"""
     collector = HiveCollector(host="hive-host")
 
-    async def mock_execute(sql: str) -> list[list[str]]:
+    async def mock_execute(sql: str, conn=None) -> list[list[str]]:
         if "SHOW DATABASES" in sql:
             return [["ods"], ["locked"]]
         if "SHOW TABLES" in sql:
@@ -293,6 +296,7 @@ async def test_hive_collector_records_failed_schema_listing():
         return []
 
     collector._execute = mock_execute  # type: ignore[assignment]
+    collector._connect_managed = AsyncMock(return_value=object())  # type: ignore[assignment]
     result = await collector.collect(MagicMock(source_id="hive1", domain="test_db"))
 
     assert len(result.specs) == 0
@@ -331,6 +335,70 @@ async def test_hive_and_spark_factory_database_default_none():
     )
 
 
+async def test_hive_list_databases_returns_all_dbs():
+    """list_databases 枚举全部库（过滤空行），供创建数据源选择目标库。"""
+    collector = HiveCollector(host="hive-host")
+
+    async def mock_execute(sql: str, conn=None) -> list[list[str]]:
+        assert "SHOW DATABASES" in sql
+        return [["ods"], ["dwd"], [], [""]]
+
+    collector._execute = mock_execute  # type: ignore[assignment]
+    assert await collector.list_databases() == ["ods", "dwd"]
+
+
+async def test_hive_list_tables_groups_by_db():
+    """list_tables 逐库 SHOW TABLES 并按库分组；非法库名跳过不拖垮整批。"""
+    collector = HiveCollector(host="hive-host")
+    seen_sql: list[str] = []
+
+    async def mock_execute(sql: str, conn=None) -> list[list[str]]:
+        seen_sql.append(sql)
+        if "ods" in sql:
+            return [["orders"], ["customers"]]
+        if "dwd" in sql:
+            return [["fee_di"]]
+        return []
+
+    collector._execute = mock_execute  # type: ignore[assignment]
+    collector._connect_managed = AsyncMock(return_value=object())  # type: ignore[assignment]
+    result = await collector.list_tables(["ods", "bad.name", "dwd"])
+    assert result == {"ods": ["orders", "customers"], "dwd": ["fee_di"]}
+    # 非法库名跳过，未对其发出 SHOW TABLES
+    assert not any("bad.name" in s for s in seen_sql)
+
+
+async def test_hive_execute_reuses_conn_without_close():
+    """连接复用：复用路径不关闭连接（调用方管理），单次路径自建自关。
+
+    回归：此前 _execute 每次自建连接且 _query 内部关闭——每张表一次
+    TCP+认证握手导致 wedata_tmp 上千张临时表全量采集耗时数小时。
+    """
+
+    class _FakeConn:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    collector = HiveCollector(host="hive-host")
+    conn = _FakeConn()
+    collector._connect_managed = AsyncMock(return_value=conn)  # type: ignore[assignment]
+    collector._query = MagicMock(return_value=[["ok"]])  # type: ignore[assignment]
+
+    # 复用路径：传入 conn 时不关闭连接
+    await collector._execute("SELECT 1", conn=conn)
+    assert not conn.closed
+    collector._query.assert_called_once_with(conn, "SELECT 1")
+
+    # 单次路径：自建连接并在查询后关闭
+    collector._query.reset_mock()
+    await collector._execute("SELECT 2")
+    assert conn.closed
+    collector._query.assert_called_once_with(conn, "SELECT 2")
+
+
 # ---------- SparkCollector ----------
 
 
@@ -339,7 +407,7 @@ async def test_spark_collector_parses_pyhive_rows():
     collector = SparkCollector(host="spark-host", database="test_db")
 
     # Mock _execute 方法（与 Hive 相同的 SHOW TABLES / DESCRIBE 协议）
-    async def mock_execute(sql: str) -> list[list[str]]:
+    async def mock_execute(sql: str, conn=None) -> list[list[str]]:
         if "SHOW TABLES" in sql:
             return [["orders"], ["customers"]]
         if "DESCRIBE" in sql:
@@ -350,6 +418,7 @@ async def test_spark_collector_parses_pyhive_rows():
         return []
 
     collector._execute = mock_execute  # type: ignore[assignment]
+    collector._connect_managed = AsyncMock(return_value=object())  # type: ignore[assignment]
     result = await collector.collect(MagicMock(source_id="spark1", domain="test_db"))
 
     assert isinstance(result, CollectResult)
@@ -589,12 +658,17 @@ async def test_hive_query_timeout_raises():
     done = asyncio.get_event_loop().create_future()
     done.set_result(_FakeConn())
     pending = asyncio.get_event_loop().create_future()
+    # close 阶段 to_thread 需返回已完成 future——否则 _execute 的
+    # ``finally: await asyncio.to_thread(self._close, conn)`` 会 await 永不
+    # 完成的 pending future 卡死（新 _execute 连接复用重构后单次路径自关连接）。
+    done_close = asyncio.get_event_loop().create_future()
+    done_close.set_result(None)
     with (
         patch.object(
             hive_mod.asyncio,
             "to_thread",
             new_callable=MagicMock,
-            return_value=pending,
+            side_effect=[pending, pending, done_close],
         ),
         # 连接 wait_for 成功（返回已完成的 conn future），查询 wait_for 抛超时
         patch.object(

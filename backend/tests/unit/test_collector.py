@@ -2767,6 +2767,48 @@ async def test_list_tables_failure_returns_empty():
     assert tables == {}
 
 
+async def test_list_databases_passes_allow_private_when_enabled():
+    """内网部署开关 collector_allow_private=true 时，预检路径放行私网（枚举库/测试连接）。
+
+    回归：此前 test_connection/list_databases/list_tables 走 build_from_cfg
+    默认 allow_private=False，Hive 192.168.x.x 私网被 SSRF 拦截 → 枚举库为空。
+    """
+    svc, _repo = _svc()
+    fake_collector = MagicMock()
+    fake_collector.list_databases = AsyncMock(return_value=["db1"])
+    fake_collector.dispose = AsyncMock()
+    with patch.object(svc._settings, "collector_allow_private", True), patch(
+        "app.services.collector.connectors.registry.build_from_cfg",
+        return_value=fake_collector,
+    ) as mock_build:
+        dbs = await svc.list_databases("mysql", {"host": "192.168.1.10"})
+    assert dbs == ["db1"]
+    mock_build.assert_called_once_with(
+        "mysql", {"host": "192.168.1.10"}, allow_private=True
+    )
+
+
+async def test_test_connection_allow_private_default_false():
+    """默认（公网部署）不放开私网：预检路径保持 SSRF 严格模式。"""
+    svc, _repo = _svc()
+
+    class ProbeOkCollector:
+        async def probe(self):
+            from app.services.collector.spi import ProbeResult
+
+            return ProbeResult(ok=True, latency_ms=1)
+
+        async def dispose(self):
+            return None
+
+    with patch(
+        "app.services.collector.connectors.registry.build_from_cfg",
+        return_value=ProbeOkCollector(),
+    ) as mock_build:
+        await svc.test_connection("mysql", {"host": "h"})
+    assert mock_build.call_args.kwargs.get("allow_private") is False
+
+
 async def test_repo_list_catalogs_source_status_active_uses_join():
     """source_status=active 时外连接 DataSource 过滤仅活跃源，并挂瞬态属性。"""
     s = MagicMock()

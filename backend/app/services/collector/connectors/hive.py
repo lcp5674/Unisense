@@ -105,6 +105,10 @@ class HiveCollector(BaseCollector):
     def _query(self, conn: Any, sql: str) -> list[list[str]]:
         """在已建立连接上执行 SQL（同步阻塞，供 ``asyncio.to_thread`` 包装）。
 
+        注意：本方法**不关闭连接**——连接生命周期由调用方管理（``_execute``
+        单次路径自建自关；采集批量路径复用同一连接直到 schema 扫完），避免
+        每张表新建 TCP+认证连接导致全量采集极慢。
+
         Args:
             conn: 由 ``_connect`` 建立的 pyhive 连接。
             sql: 要执行的 SQL。
@@ -122,12 +126,13 @@ class HiveCollector(BaseCollector):
             return [[self._to_str(v) for v in row] for row in rows]
         except Exception as exc:  # noqa: BLE001 - 查询失败统一转 503
             raise ExternalDependencyError(f"Hive 查询失败: {exc}") from exc
-        finally:
-            with contextlib.suppress(Exception):
-                conn.close()
 
     def _sync_query(self, sql: str) -> list[list[str]]:
         """同步执行 SQL（连接 + 查询一体），供测试与单次调用使用。
+
+        自建连接并在查询后关闭（与 ``_execute`` 单次路径语义一致）；
+        采集批量路径请用 ``_connect_managed`` + ``_execute(sql, conn=conn)``
+        复用连接以避免每表一次握手。
 
         Args:
             sql: 要执行的 SQL。
@@ -139,21 +144,48 @@ class HiveCollector(BaseCollector):
             ExternalDependencyError: 连接或查询失败（503 可重试）。
         """
         conn = self._connect()
-        return self._query(conn, sql)
+        try:
+            return self._query(conn, sql)
+        finally:
+            self._close(conn)
 
     @staticmethod
     def _to_str(value: Any) -> str:
         """DB-API 返回值转字符串（None → 空串，与 beeline 空输出一致）。"""
         return "" if value is None else str(value)
 
-    async def _execute(self, sql: str) -> list[list[str]]:
-        """经线程池执行 SQL（pyhive 阻塞 API），连接与查询各自独立超时。
+    async def _connect_managed(self) -> Any:
+        """建立 pyhive 连接并施加连接超时（供 ``_execute`` 与采集批量复用）。
 
-        - 连接超时 ``connect_timeout``（默认 10s）：TCP 握手/认证 hang 快速失败
-        - 查询超时 ``query_timeout``（默认 120s）：慢查询/Hive 队列等待
+        Raises:
+            ExternalDependencyError: 连接超时（503 可重试）。
+        """
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._connect), timeout=self._connect_timeout
+            )
+        except TimeoutError as exc:
+            raise ExternalDependencyError(
+                f"Hive 连接超时 ({self._connect_timeout}s): {self._host}:{self._port}"
+            ) from exc
+
+    @staticmethod
+    def _close(conn: Any) -> None:
+        """静默关闭连接（不抛异常，供线程池包装）。"""
+        with contextlib.suppress(Exception):
+            conn.close()
+
+    async def _execute(self, sql: str, conn: Any | None = None) -> list[list[str]]:
+        """经线程池执行 SQL（pyhive 阻塞 API），支持连接复用。
+
+        - ``conn`` 为 None（单次调用：probe/枚举库）：自建连接并关闭，
+          连接超时 ``connect_timeout`` 与查询超时 ``query_timeout`` 各自独立；
+        - ``conn`` 非 None（采集批量）：复用调用方连接执行查询，仅施加
+          查询超时，连接由调用方管理（本方法不关闭）。
 
         Args:
             sql: 要执行的 SQL。
+            conn: 复用连接（None 时自建）。
 
         Returns:
             数据行列表。
@@ -161,14 +193,16 @@ class HiveCollector(BaseCollector):
         Raises:
             ExternalDependencyError: 连接超时/查询超时/执行失败（503 可重试）。
         """
-        try:
-            conn = await asyncio.wait_for(
-                asyncio.to_thread(self._connect), timeout=self._connect_timeout
-            )
-        except TimeoutError as exc:
-            raise ExternalDependencyError(
-                f"Hive 连接超时 ({self._connect_timeout}s): {self._host}:{self._port}"
-            ) from exc
+        if conn is not None:
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(self._query, conn, sql), timeout=self._query_timeout
+                )
+            except TimeoutError as exc:
+                raise ExternalDependencyError(
+                    f"Hive 查询超时 ({self._query_timeout}s): {sql}"
+                ) from exc
+        conn = await self._connect_managed()
         try:
             return await asyncio.wait_for(
                 asyncio.to_thread(self._query, conn, sql), timeout=self._query_timeout
@@ -177,6 +211,8 @@ class HiveCollector(BaseCollector):
             raise ExternalDependencyError(
                 f"Hive 查询超时 ({self._query_timeout}s): {sql}"
             ) from exc
+        finally:
+            await asyncio.to_thread(self._close, conn)
 
     async def collect(self, source: Any) -> CollectResult:
         source_id = getattr(source, "source_id", "?")
@@ -206,56 +242,112 @@ class HiveCollector(BaseCollector):
                 logger.warning("采集源 %s 库名非法跳过: %s (%s)", source_id, schema, exc)
                 failed_specs.append(FailedSpec(entity_name=schema, error=str(exc)))
                 continue
-            # 获取表列表——失败记入 failed_specs（避免「全部失败却静默 0 表」难排查）
+            # 每个 schema 复用同一连接（消除每表一连接的极慢问题——wedata_tmp
+            # 这类上千张临时表时，逐表 TCP+认证握手会让全量采集耗时数小时）。
+            conn: Any | None = None
             try:
-                table_rows = await self._execute(f"SHOW TABLES IN {safe_schema}")
+                conn = await self._connect_managed()
+                table_rows = await self._execute(f"SHOW TABLES IN {safe_schema}", conn=conn)
             except Exception as exc:
                 logger.warning("采集源 %s 库 %s 表列表失败: %s", source_id, schema, exc)
                 failed_specs.append(FailedSpec(entity_name=schema, error=str(exc)))
+                if conn is not None:
+                    await asyncio.to_thread(self._close, conn)
                 continue
 
-            for row in table_rows:
-                tbl = row[0] if row else None
-                if not tbl:
-                    continue
-                tbl = tbl.strip()
-                single_db = bool(self._database) and not getattr(self, "_databases", None)
-                entity_name = f"{schema}.{tbl}" if not single_db else tbl
-                try:
-                    desc_rows = await self._execute(
-                        f"DESCRIBE {safe_schema}.{self._safe_ident(tbl)}"
-                    )
-                    columns = []
-                    for desc_row in desc_rows:
-                        # DESCRIBE schema.table 输出格式（pyhive 行）：
-                        # 列名 \t 类型 \t [注释]
-                        # 注释列可能为空（仅两列）。
-                        if len(desc_row) >= 2:
-                            col_name = desc_row[0].strip()
-                            col_type = desc_row[1].strip()
-                            col_comment = desc_row[2].strip() if len(desc_row) >= 3 else ""
-                            # 跳过分区信息和表级信息（空行或非列条目）
-                            if col_name and not col_name.startswith("#"):
-                                columns.append(
-                                    {
-                                        "name": col_name,
-                                        "type": col_type,
-                                        "comment": col_comment,
-                                    }
-                                )
-                    schema_json = {"columns": columns}
-                    specs.append(
-                        CatalogSpec(
-                            entity_name=entity_name,
-                            entity_type="TABLE",
-                            schema_json=schema_json,
+            try:
+                for row in table_rows:
+                    tbl = row[0] if row else None
+                    if not tbl:
+                        continue
+                    tbl = tbl.strip()
+                    single_db = bool(self._database) and not getattr(self, "_databases", None)
+                    entity_name = f"{schema}.{tbl}" if not single_db else tbl
+                    try:
+                        desc_rows = await self._execute(
+                            f"DESCRIBE {safe_schema}.{self._safe_ident(tbl)}", conn=conn
                         )
-                    )
-                except Exception as exc:
-                    logger.warning("采集源 %s 表 %s 字段失败: %s", source_id, entity_name, exc)
-                    failed_specs.append(FailedSpec(entity_name=entity_name, error=str(exc)))
+                        columns = []
+                        for desc_row in desc_rows:
+                            # DESCRIBE schema.table 输出格式（pyhive 行）：
+                            # 列名 \t 类型 \t [注释]
+                            # 注释列可能为空（仅两列）。
+                            if len(desc_row) >= 2:
+                                col_name = desc_row[0].strip()
+                                col_type = desc_row[1].strip()
+                                col_comment = (
+                                    desc_row[2].strip() if len(desc_row) >= 3 else ""
+                                )
+                                # 跳过分区信息和表级信息（空行或非列条目）
+                                if col_name and not col_name.startswith("#"):
+                                    columns.append(
+                                        {
+                                            "name": col_name,
+                                            "type": col_type,
+                                            "comment": col_comment,
+                                        }
+                                    )
+                        schema_json = {"columns": columns}
+                        specs.append(
+                            CatalogSpec(
+                                entity_name=entity_name,
+                                entity_type="TABLE",
+                                schema_json=schema_json,
+                            )
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "采集源 %s 表 %s 字段失败: %s", source_id, entity_name, exc
+                        )
+                        failed_specs.append(
+                            FailedSpec(entity_name=entity_name, error=str(exc))
+                        )
+            finally:
+                if conn is not None:
+                    await asyncio.to_thread(self._close, conn)
 
         return CollectResult(specs=specs, failed_specs=failed_specs, source_id=source_id)
+
+    async def list_databases(self) -> list[str]:
+        """枚举实例下全部库（SHOW DATABASES，供创建数据源时选择目标库）。
+
+        与 MySQL 连接器的「非系统库」语义对齐：Hive 无 information_schema 等
+        系统库，``default`` 也可能承载业务表，故返回全部库由前端展示选择。
+
+        Returns:
+            库名列表。
+
+        Raises:
+            ExternalDependencyError: 连接/查询失败（503 可重试）。
+        """
+        rows = await self._execute("SHOW DATABASES")
+        return [row[0].strip() for row in rows if row and row[0].strip()]
+
+    async def list_tables(self, databases: list[str] | None = None) -> dict[str, list[str]]:
+        """枚举指定库（或全部库）下的表，按库分组（供前端级联选表）。
+
+        Args:
+            databases: 要枚举表的库列表；空则由 ``list_databases`` 回退全部库。
+
+        Returns:
+            ``{库: [表名...]}``；非法库名跳过不拖垮整批。
+        """
+        schemas = list(databases) if databases else await self.list_databases()
+        tables_by_db: dict[str, list[str]] = {}
+        for schema in schemas:
+            try:
+                safe_schema = self._safe_ident(schema)
+            except Exception:  # noqa: BLE001 - 非法库名跳过
+                continue
+            conn = await self._connect_managed()
+            try:
+                rows = await self._execute(f"SHOW TABLES IN {safe_schema}", conn=conn)
+                tables_by_db[schema] = [
+                    row[0].strip() for row in rows if row and row[0].strip()
+                ]
+            finally:
+                await asyncio.to_thread(self._close, conn)
+        return tables_by_db
 
     async def probe(self) -> ProbeResult:
         """轻量探活：SELECT 1（经 pyhive 直连）。"""

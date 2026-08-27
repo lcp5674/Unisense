@@ -199,6 +199,8 @@ services:
       UNISENSE_MINIO_ACCESS_KEY: ${UNISENSE_MINIO_ACCESS_KEY:-minioadmin}
       UNISENSE_MINIO_SECRET_KEY: ${UNISENSE_MINIO_SECRET_KEY:-minioadmin}
       UNISENSE_MINIO_BUCKET: ${UNISENSE_MINIO_BUCKET:-unisense-archive}
+      # 采集预检（测试连接/枚举库/列表）SSRF 放行私有网段开关——内网部署设 true
+      UNISENSE_COLLECTOR_ALLOW_PRIVATE: ${UNISENSE_COLLECTOR_ALLOW_PRIVATE:-false}
       # MySQL 查询降级引擎（OLAP 不可用时的只读兜底，指向可执行指标口径的 MySQL 业务库）
       UNISENSE_MYSQL_FALLBACK_URL: ${UNISENSE_MYSQL_FALLBACK_URL:-mysql+aiomysql://e2e:e2e@mysql:3306/e2e_biz?charset=utf8mb4}
       # JWT 密钥（生产必须通过环境变量注入强密钥）
@@ -269,6 +271,8 @@ services:
       UNISENSE_MINIO_ACCESS_KEY: ${UNISENSE_MINIO_ACCESS_KEY:-minioadmin}
       UNISENSE_MINIO_SECRET_KEY: ${UNISENSE_MINIO_SECRET_KEY:-minioadmin}
       UNISENSE_MINIO_BUCKET: ${UNISENSE_MINIO_BUCKET:-unisense-archive}
+      # 采集预检 SSRF 放行私有网段开关（worker 与 backend 同配置）
+      UNISENSE_COLLECTOR_ALLOW_PRIVATE: ${UNISENSE_COLLECTOR_ALLOW_PRIVATE:-false}
       # worker 与 backend 同镜像，须同步注入 JWT_SECRET（否则 Settings 校验必填失败）
       UNISENSE_JWT_SECRET: ${UNISENSE_JWT_SECRET:-dev-jwt-secret-change-in-production-32bytes}
       UNISENSE_JWT_ALGORITHM: HS256

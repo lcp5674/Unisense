@@ -131,6 +131,11 @@ class Settings(BaseSettings):
     # 修复前：硬编码 0.1（10%），无法根据不同数据源调整。
     # 生产建议：稳定表多的库设 0.05（5%），频繁无 UPDATE_TIME 的库设 0.2（20%）。
     collector_mysql_incremental_ratio_threshold: float = 0.1
+    # 采集预检（测试连接/枚举库/枚举表）是否放行私有网段。内网部署（后端与
+    # 源库同内网，如 Hive 192.168.x.x）时设 UNISENSE_COLLECTOR_ALLOW_PRIVATE=true，
+    # 否则 SSRF 严格模式会拒绝 RFC1918 私网导致「枚举库为空/测试连接失败」。
+    # 默认 false 保持公网部署 SSRF 防护不降级。
+    collector_allow_private: bool = False
 
     # ---- 血缘采集通道（TD §12.2）----
     # 增量采集的失效观察期：某条边连续 N 次未被来源通道确认后进入失效队列

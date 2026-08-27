@@ -406,7 +406,9 @@ class CollectorService(BaseService):
         from app.services.collector.connectors import registry
 
         try:
-            collector = registry.build_from_cfg(source_type, cfg)
+            collector = registry.build_from_cfg(
+                source_type, cfg, allow_private=self._settings.collector_allow_private
+            )
             try:
                 probe = await collector.probe()
             finally:
@@ -442,7 +444,9 @@ class CollectorService(BaseService):
         from app.services.collector.connectors import registry
 
         try:
-            collector = registry.build_from_cfg(source_type, cfg)
+            collector = registry.build_from_cfg(
+                source_type, cfg, allow_private=self._settings.collector_allow_private
+            )
             try:
                 return await collector.list_databases()
             finally:
@@ -473,7 +477,9 @@ class CollectorService(BaseService):
         from app.services.collector.connectors import registry
 
         try:
-            collector = registry.build_from_cfg(source_type, cfg)
+            collector = registry.build_from_cfg(
+                source_type, cfg, allow_private=self._settings.collector_allow_private
+            )
             try:
                 return await collector.list_tables(databases)
             finally:
