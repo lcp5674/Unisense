@@ -262,6 +262,8 @@ services:
       UNISENSE_MINIO_ACCESS_KEY: ${UNISENSE_MINIO_ACCESS_KEY:-minioadmin}
       UNISENSE_MINIO_SECRET_KEY: ${UNISENSE_MINIO_SECRET_KEY:-minioadmin}
       UNISENSE_MINIO_BUCKET: ${UNISENSE_MINIO_BUCKET:-unisense-archive}
+      # worker 与 backend 同镜像，须同步注入 JWT_SECRET（否则 Settings 校验必填失败）
+      UNISENSE_JWT_SECRET: ${UNISENSE_JWT_SECRET:-dev-jwt-secret-change-in-production-32bytes}
       UNISENSE_JWT_ALGORITHM: HS256
       UNISENSE_JWT_EXPIRE_MINUTES: 60
       UNISENSE_CORS_ORIGINS: http://localhost:8180,http://frontend:80
