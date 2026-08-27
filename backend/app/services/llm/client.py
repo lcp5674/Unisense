@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 from typing import Any
@@ -259,6 +260,10 @@ class LlmClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
             "response_format": effective_format,
+            # 显式声明非流式（方案 1）：部分网关缺省流式或对省略 stream 字段的请求以
+            # SSE 流式响应，正文（data: {...} 信封帧）被当非流式 JSON 解析即产生
+            # 「流式原文垃圾」。明确告知期望一次性返回，避免网关进入流式路径。
+            "stream": False,
         }
 
         last_exc: Exception | None = None
@@ -266,9 +271,24 @@ class LlmClient:
             try:
                 resp = await self._client.post(self._chat_url, json=payload)
                 resp.raise_for_status()
-                data = resp.json()
-                choice = data["choices"][0]["message"]
-                raw_content = choice.get("content", "")
+                # 方案 2：网关可能忽略 stream:false 仍以 SSE 流式响应（如 codebuddy 调试
+                # 网关把流式帧原文拼进非流式正文）。此时显式消费 SSE 帧聚合 delta，
+                # 避免把 `data: {...}` 信封原文当 JSON 解析出「流式垃圾」。
+                # isinstance 防御：真实响应 headers.get 返回 str；测试替身（MagicMock）
+                # 返回 MagicMock 非 str，恒走非流式分支，不破坏既有 mock 测试。
+                content_type = resp.headers.get("content-type", "")
+                if isinstance(content_type, str) and "text/event-stream" in content_type:
+                    raw_content = await self._consume_sse(resp)
+                    model_name = self._model
+                    finish_reason = "stop"
+                    usage: dict[str, Any] = {}
+                else:
+                    data = resp.json()
+                    choice = data["choices"][0]["message"]
+                    raw_content = choice.get("content", "")
+                    model_name = data.get("model", self._model)
+                    finish_reason = choice.get("finish_reason", "stop")
+                    usage = data.get("usage", {})
 
                 # 解析结构化输出
                 structured = self._parse_structured_output(raw_content)
@@ -294,9 +314,9 @@ class LlmClient:
                     "confidence": structured.confidence,
                     "reasoning": structured.reasoning,
                     "candidates": structured.candidates,
-                    "model": data.get("model", self._model),
-                    "finish_reason": choice.get("finish_reason", "stop"),
-                    "usage": data.get("usage", {}),
+                    "model": model_name,
+                    "finish_reason": finish_reason,
+                    "usage": usage,
                 }
             except httpx.HTTPStatusError as exc:
                 # 4xx（鉴权/参数错）为永久错误，不重试；5xx/429 视为瞬时重试
@@ -341,6 +361,48 @@ class LlmClient:
         # 不应到达；兜底抛出最后一次异常
         metrics_store.observe_llm_call(success=False)
         raise LlmError(f"LLM 请求失败: {last_exc}") from last_exc
+
+    async def _consume_sse(self, resp: httpx.Response) -> str:
+        """消费 SSE 流式响应，聚合 delta content 为完整文本。
+
+        部分网关忽略请求里的 ``stream: false`` 仍以 ``text/event-stream`` 响应（如
+        codebuddy 调试网关把流式帧原文拼进非流式正文）。若直接 ``resp.json()`` 解析
+        会把 ``data: {...}`` 信封帧当响应体，得到「流式原文垃圾」。此方法逐帧消费：
+
+        - 跳过空行、``event:`` / ``:`` 注释行
+        - 解析 ``data: {...}`` 帧，聚合 ``choices[].delta.content`` 与
+          ``reasoning_content`` / ``reasoning``（思考过程）
+        - 遇 ``data: [DONE]`` 结束
+
+        Args:
+            resp: content-type 为 text/event-stream 的 httpx 响应
+
+        Returns:
+            聚合后的完整文本（含思考与正文，供后续统一解析/质量校验）。
+        """
+        parts: list[str] = []
+        async for line in resp.aiter_lines():
+            line = line.strip()
+            if not line or line.startswith("event:") or line.startswith(":"):
+                continue
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data or data == "[DONE]":
+                if data == "[DONE]":
+                    break
+                continue
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            for choice in chunk.get("choices", []):
+                delta = choice.get("delta", {}) or {}
+                for key in ("content", "reasoning_content", "reasoning"):
+                    part = delta.get(key)
+                    if isinstance(part, str) and part:
+                        parts.append(part)
+        return "".join(parts)
 
     def _parse_structured_output(self, raw_content: str) -> LlmStructuredOutput:
         """解析 LLM 输出为结构化结果（委托统一解析器，含 fence 剥离）。"""

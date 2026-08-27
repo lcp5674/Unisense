@@ -239,6 +239,86 @@ class TestLlmClient:
         assert result["content"] == "纯文本口径"
 
     @pytest.mark.asyncio
+    async def test_chat_payload_sets_stream_false(self) -> None:
+        """方案 1：payload 显式 stream:false——避免网关以流式响应、正文被当非流式解析。"""
+        client = LlmClient(base_url="https://api.example.com", api_key="test-key")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.headers = {"content-type": "application/json"}
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "Hello", "finish_reason": "stop"}}],
+            "model": "test-model",
+        }
+        client._client = MagicMock()
+        client._client.post = AsyncMock(return_value=mock_response)
+        await client.chat([{"role": "user", "content": "Hi"}])
+        payload = client._client.post.call_args[1]["json"]
+        assert payload["stream"] is False
+
+    @pytest.mark.asyncio
+    async def test_chat_sse_response_aggregates_delta(self) -> None:
+        """方案 2：网关返回 text/event-stream 时，逐帧聚合 delta 而非把信封原文当 content。"""
+        client = LlmClient(base_url="https://api.example.com", api_key="test-key")
+
+        async def fake_aiter_lines():
+            for line in [
+                'data: {"choices":[{"delta":{"role":"assistant"}}]}',
+                "",
+                'data: {"choices":[{"delta":{"content":"你好"}}]}',
+                "",
+                'data: {"choices":[{"delta":{"content":"世界"}}]}',
+                "",
+                "data: [DONE]",
+                "",
+            ]:
+                yield line
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.headers = {"content-type": "text/event-stream"}
+        mock_response.aiter_lines = fake_aiter_lines
+        client._client = MagicMock()
+        client._client.post = AsyncMock(return_value=mock_response)
+        result = await client.chat([{"role": "user", "content": "Hi"}])
+        # 聚合 delta 得到完整文本，而不是 `data: {...}` 信封原文
+        assert result["content"] == "你好世界"
+        assert result["model"] == client._model
+        # 非流式 JSON 分支未被调用
+        mock_response.json.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_chat_sse_empty_records_failure(self) -> None:
+        """方案 2 边界：SSE 聚合结果为空/含流式信封垃圾时必须计为失败（熔断累计），不当成功返回。"""
+        breaker = _FakeBreaker()
+        client = LlmClient(
+            base_url="https://api.example.com", api_key="test-key", breaker=breaker
+        )
+
+        async def fake_aiter_lines():
+            # 内容本身是流式信封原文垃圾（[DONE] 前仅一个无正文帧）
+            for line in [
+                'data: {"choices":[{"delta":{"role":"assistant"}}]}',
+                "",
+                "data: [DONE]",
+                "",
+            ]:
+                yield line
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.headers = {"content-type": "text/event-stream"}
+        mock_response.aiter_lines = fake_aiter_lines
+        client._client = MagicMock()
+        client._client.post = AsyncMock(return_value=mock_response)
+        with pytest.raises(LlmError):
+            await client.chat([{"role": "user", "content": "Hi"}])
+        assert breaker.failures == 1
+        assert breaker.successes == 0
+
+    @pytest.mark.asyncio
     async def test_chat_uses_normalized_url_when_base_has_v1(self) -> None:
         """base_url 已含 /v1（openai 预设）时，请求端点不得拼出 /v1/v1（回归 404）。"""
         client = LlmClient(base_url="https://api.openai.com/v1", api_key="test-key")
