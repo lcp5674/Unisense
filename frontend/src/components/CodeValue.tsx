@@ -109,7 +109,14 @@ export function CodeValue({
   ].filter(Boolean).join(" ");
   const TagEl = code ? "code" : "span";
   const inner = (
-    <TagEl className={cls} aria-label={value} onClick={onClick}>
+    <TagEl
+      className={cls}
+      aria-label={value}
+      onClick={onClick}
+      // maxWidth 内联覆盖：表格窄列等场景把长编码约束到指定宽度（覆盖 .code-value-long 默认 420px），
+      // 避免撑破列宽；省略文本超宽时由 CSS ellipsis 二次截断兜底
+      style={maxWidth !== undefined ? { maxWidth } : undefined}
+    >
       {display}
     </TagEl>
   );

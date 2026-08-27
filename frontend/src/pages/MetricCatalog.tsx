@@ -49,6 +49,7 @@ import { useTracking } from "../hooks/useTracking";
 import { usePermission } from "../hooks/usePermission";
 import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
 import { MetricCompareModal } from "../components/MetricCompareModal";
+import { CodeValue } from "../components/CodeValue";
 import {
   AGGREGATION_LABEL,
   DW_LAYER_LABEL,
@@ -1219,11 +1220,16 @@ export function MetricCatalog() {
       title: "编码",
       dataIndex: "metric_code",
       key: "metric_code",
-      width: 190,
+      width: 200,
+      // 长编码用 CodeValue：单行中间省略 + hover 完整值 + 复制，避免 nowrap 撑破列宽覆盖相邻列
       render: (text: string) => (
-        <Button type="link" style={{ padding: 0 }} onClick={(e) => { e.stopPropagation(); navigate(`/detail/${text}`); }}>
-          {text}
-        </Button>
+        <CodeValue
+          value={text}
+          maxChars={30}
+          maxWidth={190}
+          target={`/detail/${encodeURIComponent(text)}`}
+          onNavigate={(t) => navigate(t)}
+        />
       ),
     },
     { title: "名称", dataIndex: "name", key: "name", ellipsis: true },

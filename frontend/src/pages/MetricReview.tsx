@@ -18,6 +18,7 @@ import type { CurrentUser, MetricResponse, MetricVersionResponse, SubjectDomainT
 import { formatCnTime } from "../utils/timeCn";
 import { enumLabel, METRIC_TYPE_LABEL, METRIC_STATUS_LABEL } from "../utils/enums";
 import { buildChangeInfo, changeVersionText, MetricDiffView, ReviewChangeSummary } from "./metric/ChangeContext";
+import { CodeValue } from "../components/CodeValue";
 import { usePermission } from "../hooks/usePermission";
 import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
 
@@ -551,11 +552,17 @@ export function MetricReview() {
       title: "编码",
       dataIndex: "metric_code",
       key: "metric_code",
+      width: 220,
       render: (code: string, r: MetricResponse) => (
-        <Space size={6}>
-          <Button type="link" size="small" onClick={() => navigate(`/detail/${code}`)}>
-            {code}
-          </Button>
+        <Space size={6} style={{ maxWidth: "100%" }}>
+          {/* 长编码用 CodeValue：单行中间省略 + hover 完整值 + 复制，避免 nowrap 撑破列宽覆盖相邻列 */}
+          <CodeValue
+            value={code}
+            maxChars={30}
+            maxWidth={195}
+            target={`/detail/${encodeURIComponent(code)}`}
+            onNavigate={(t) => navigate(t)}
+          />
           {/* P0-C：批量注册批次标识——审核人一眼看出"这是一批"（batch 维度可回溯） */}
           {r.batch_id && (
             <Tooltip title={`批量注册批次：${r.batch_id}`}>

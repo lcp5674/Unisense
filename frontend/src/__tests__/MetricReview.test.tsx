@@ -136,6 +136,30 @@ describe("MetricReview 指标审批", () => {
     });
   });
 
+  it("编码列长编码用 CodeValue 中间省略（不渲染为 Button 撑破列宽覆盖相邻列）", async () => {
+    const longCode = "uncategorized_doctor_currentmonthactivedoctorcnt_month";
+    mockedList.mockResolvedValue({
+      items: [{ ...metric, id: 99, metric_code: longCode, batch_id: "sqlbatch_xyz" }],
+      total: 1,
+      page: 1,
+      page_size: 100,
+    });
+    const { container } = renderReview();
+    // CodeValue 长编码：class 锚定 + aria-label 含完整值（屏幕阅读器可达，避免回退到 Button nowrap）
+    const codeEl = await waitFor(() => {
+      const el = container.querySelector<HTMLElement>(".code-value.code-value-long");
+      if (!el) throw new Error("code-value-long not yet rendered");
+      return el;
+    });
+    expect(codeEl.getAttribute("aria-label")).toBe(longCode);
+    expect(codeEl.textContent).toContain("…");
+    expect(codeEl.textContent).not.toBe(longCode);
+    // 重要：不能再渲染为 Button（nowrap 会横向覆盖名称列）
+    expect(screen.queryByRole("button", { name: longCode })).toBeNull();
+    // 名称列内容完整可读，不被覆盖
+    expect(screen.getByText("日销售额")).toBeTruthy();
+  });
+
   it("提供统一的返回按钮（返回上一入口）", async () => {
     renderReview();
     await screen.findByText("sales_gmv_day");
