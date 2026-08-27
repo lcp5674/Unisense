@@ -811,3 +811,92 @@ class TestParseSqlProfile:
         )
         assert "d" in p.group_by
         assert "region" in p.group_by
+
+    def test_bitmap_hll_union_extracted(self) -> None:
+        """V-1：Doris 位图/HLL 去重聚合（bitmap_union/hll_union，工业 UV/DAU 标准
+        写法）解析为 Anonymous 非 AggFunc，此前整段静默 0 候选；现映射 COUNT_DISTINCT
+        + needs_review，列从内层 to_bitmap(uid)/hll_hash(uid) 提取。"""
+        p = parse_sql_profile(
+            "SELECT d, bitmap_union(to_bitmap(uid)) AS uv FROM ods.a GROUP BY d"
+        )
+        assert len(p.measures) == 1, f"{p.measures}"
+        assert p.measures[0]["agg"] == "COUNT_DISTINCT"
+        assert p.measures[0]["column"] == "uid"
+        assert p.measures[0].get("needs_review")
+        assert "ods.a" in p.source_tables
+        p2 = parse_sql_profile(
+            "SELECT d, hll_union(hll_hash(uid)) AS uv FROM ods.a GROUP BY d"
+        )
+        assert p2.measures and p2.measures[0]["agg"] == "COUNT_DISTINCT"
+        assert p2.measures[0]["column"] == "uid"
+
+    def test_nested_aggregate_marked_review(self) -> None:
+        """V-2：嵌套聚合（sum(avg(x)) 聚合的聚合）不再静默产出 SUM(x)——expression
+        保留原结构且标记 needs_review 让用户人工核对（聚合的聚合语义 ≠ SUM(x)）。"""
+        p = parse_sql_profile("SELECT sum(avg(x)) AS s FROM ods.a GROUP BY d")
+        assert len(p.measures) == 1
+        assert p.measures[0]["agg"] == "SUM"
+        assert p.measures[0].get("needs_review"), "嵌套聚合必须标记 needs_review"
+        assert "AVG(" in p.measures[0].get("expression", "").upper()
+        # 普通聚合不误标
+        p2 = parse_sql_profile("SELECT sum(x) AS s FROM ods.a GROUP BY d")
+        assert not p2.measures[0].get("needs_review")
+
+    def test_where_scalar_subquery_not_in_source_tables(self) -> None:
+        """V-3：WHERE 标量子查询（维表/查找表）不混入 source_tables——此前 walk 整棵
+        AST 把 ods.lookup 也收进来，血缘错挂无关表。"""
+        p = parse_sql_profile(
+            "SELECT d, count(1) AS c FROM ods.a "
+            "WHERE d = (SELECT max(d) FROM ods.lookup) GROUP BY d"
+        )
+        assert p.source_tables == ["ods.a"], f"{p.source_tables}"
+
+    def test_cte_source_tables_recursed(self) -> None:
+        """V-3：主 FROM 引用 CTE 时递归收集 CTE 体的 FROM 子树（真实源表在 CTE 体
+        里）；CTE 体 WHERE 内的查找子查询不混入；递归 CTE 不死循环。"""
+        p = parse_sql_profile(
+            "WITH u AS (SELECT d, sum(amt) s FROM ods.a GROUP BY d "
+            "UNION ALL SELECT d, sum(amt) s FROM ods.b GROUP BY d) "
+            "SELECT d, sum(s) AS total FROM u GROUP BY d"
+        )
+        assert "ods.a" in p.source_tables and "ods.b" in p.source_tables, f"{p.source_tables}"
+        p2 = parse_sql_profile(
+            "WITH b AS (SELECT d, sum(amt) s FROM ods.a "
+            "WHERE d IN (SELECT d FROM ods.lookup) GROUP BY d) "
+            "SELECT d, sum(s) t FROM b GROUP BY d"
+        )
+        assert p2.source_tables == ["ods.a"], f"{p2.source_tables}"
+        # 递归 CTE 不抛异常
+        parse_sql_profile(
+            "WITH RECURSIVE c AS (SELECT 1 AS n UNION ALL "
+            "SELECT n+1 FROM c WHERE n<10) SELECT n, count(1) c2 FROM c GROUP BY n"
+        )
+
+    def test_percentile_cont_column_extracted(self) -> None:
+        """V-4：percentile_cont(0.5) WITHIN GROUP (ORDER BY amt)——分位数 Literal 是
+        this，真实列在 ORDER BY；此前列=*，现提取 amt。"""
+        p = parse_sql_profile(
+            "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY amt) AS med FROM ods.a"
+        )
+        assert len(p.measures) == 1, f"{p.measures}"
+        assert p.measures[0]["agg"] == "PERCENTILE"
+        assert p.measures[0]["column"] == "amt", f"{p.measures[0]}"
+
+    def test_multi_column_distinct_merged(self) -> None:
+        """V-5：count(distinct col1, col2) 多列去重（Spark/Hive）——此前只取首列
+        丢失语义；现合并列名展示。"""
+        p = parse_sql_profile("SELECT count(distinct col1, col2) AS c FROM ods.a")
+        assert len(p.measures) == 1
+        assert p.measures[0]["agg"] == "COUNT_DISTINCT"
+        assert p.measures[0]["column"] == "col1+col2", f"{p.measures[0]}"
+
+    def test_cube_dimensions_extracted(self) -> None:
+        """V-6：GROUP BY CUBE(d, region)——维度在 group.args['cube']（与 grouping_sets
+        不同节点），此前 group.expressions 为空 → 维度整体丢失被判全局聚合；现展开
+        进 group_by。"""
+        p = parse_sql_profile(
+            "SELECT d, sum(amt) AS s FROM ods.a GROUP BY CUBE(d, region)"
+        )
+        assert "d" in p.group_by
+        assert "region" in p.group_by
+

@@ -163,6 +163,22 @@ _SET_STRING_AGG_KEYS = {
     "GROUPUNIQARRAY",
     "GROUPARRAY",
 }
+
+# V-1：Doris/StarRocks 位图/HLL 去重聚合（Anonymous 形态，非 AggFunc）——
+# ``bitmap_union(to_bitmap(uid))``/``hll_union(hll_hash(uid))`` 是工业 UV/DAU
+# 计算的标准写法，sqlglot 解析为 ``exp.Anonymous``（``this`` 是函数名字符串，
+# 真实列藏在内层 ``to_bitmap(uid)``），``target.find(exp.AggFunc)`` 返回 None →
+# 此前整段静默 0 候选（用户误以为 SQL 有问题）。按函数名识别，从内层表达式取
+# 真实列，映射去重计数语义（union/intersect/count 均是 UV 口径）+ needs_review
+# 强制人工核对（位图/HLL 是近似/集合语义，非普通 COUNT_DISTINCT）。
+_BITMAP_HLL_AGGS = {
+    "bitmap_union",
+    "hll_union",
+    "bitmap_count",
+    "hll_cardinality",
+    "bitmap_intersect",
+    "group_bitmap_xor",
+}
 # 无注册枚举可归一的统计聚合（相关性/协方差/回归/标准差/方差）→ 返回 None 跳过
 # 该度量（诚实不产出非法候选，避免注册失败/口径错误），不崩溃不炸整批。
 # 含函数名形态（stdev/stdevp/std/var/varp）——某些方言下统计聚合解析为
@@ -231,6 +247,15 @@ def _extract_source_tables(ast: exp.Expr) -> list[str]:
     ``base`` 被 sqlglot 解析为 ``Table(name='base')``（无 catalog/db），混入
     source_tables 会让血缘挂到不存在的表；收集 CTE 别名集合二次过滤（同时覆盖
     带前缀引用形态 ``catalog.base`` 的尾段匹配）。
+
+    **V-3**：仅收集主查询（顶层 UNION 各分支）的 **FROM 子树**内的表——WHERE/
+    JOIN-ON 里的标量/相关子查询（``WHERE d = (SELECT max(d) FROM ods.u)``）是
+    维表/查找表，不是指标数据来源，混入 source_tables 会让血缘错挂一张无关表
+    （此前 walk 整棵 AST 把 ``ods.u`` 也收进来）。FROM 子树内的嵌套子查询（真实
+    事实表/维表 join）仍合法保留。**主 FROM 引用 CTE 时递归收集该 CTE 体的 FROM
+    子树**（``WITH u AS (SELECT ... FROM ods.a UNION ALL SELECT ... FROM ods.b)
+    SELECT ... FROM u`` 的源表在 CTE 体里，只在主 FROM 收不到）——visited 集合
+    防递归 CTE（``WITH RECURSIVE c AS (... FROM c)``）死循环。
     """
     cte_names = {
         c.alias_or_name.lower()
@@ -238,8 +263,14 @@ def _extract_source_tables(ast: exp.Expr) -> list[str]:
         if c.alias_or_name
     }
     tables: list[str] = []
-    for node in ast.walk():
-        if isinstance(node, exp.Table):
+    visited_ctes: set[str] = set()
+
+    def _collect_from(from_node: exp.From | None) -> None:
+        if from_node is None:
+            return
+        for node in from_node.walk():
+            if not isinstance(node, exp.Table):
+                continue
             # 排除被写为目标的表（INSERT INTO target，含带列清单的 Schema 包裹形态）
             if _is_write_target(node):
                 continue
@@ -249,6 +280,49 @@ def _extract_source_tables(ast: exp.Expr) -> list[str]:
                 if name in cte_names or name.split(".")[-1] in cte_names:
                     continue
                 tables.append(name)
+
+    def _collect_select_from(sel: exp.Select) -> None:
+        # FROM + JOIN 子树都是合法源表——sqlglot 把 JOIN（含右侧维表/事实表）存在
+        # select.args['joins'] 而非 From 节点，只走 from 会漏掉 LEFT JOIN 维表
+        # （doctor_active_month 的 disease_care_sys_org_staff_relation_df）。V-3
+        # 排除的是 WHERE/ON 内标量/相关子查询的查找表（不在 FROM/JOIN 子树），
+        # JOIN 的维表/事实表仍属指标数据来源。
+        sources = [sel.args.get("from")] + list(sel.args.get("joins") or [])
+        sources = [s for s in sources if s is not None]
+        for src in sources:
+            _collect_from(exp.From(this=src) if not isinstance(src, exp.From) else src)
+        # 递归收集 FROM/JOIN 引用的 CTE 体（其 FROM/JOIN 内的真实事实表/维表）
+        for src in sources:
+            for node in src.walk():
+                if not isinstance(node, exp.Table):
+                    continue
+                ref = _norm_table_name(node)
+                ref_tail = ref.split(".")[-1]
+                if ref not in cte_names and ref_tail not in cte_names:
+                    continue
+                if ref_tail in visited_ctes:
+                    continue
+                visited_ctes.add(ref_tail)
+                for cte in ast.find_all(exp.CTE):
+                    if cte.alias_or_name.lower() != ref_tail:
+                        continue
+                    body = cte.this
+                    if isinstance(body, exp.Union):
+                        for b in body.find_all(exp.Select):
+                            _collect_select_from(b)
+                    elif isinstance(body, exp.Select):
+                        _collect_select_from(body)
+                    break
+
+    if isinstance(ast, exp.Union):
+        # 顶层 UNION 多源合并：各分支 FROM 都是合法源表（U-1 多子公司合并等）
+        for branch in ast.find_all(exp.Select):
+            _collect_select_from(branch)
+        return tables
+    main = ast if isinstance(ast, exp.Select) else ast.find(exp.Select)
+    if main is None:
+        return tables
+    _collect_select_from(main)
     return tables
 
 
@@ -282,6 +356,19 @@ def _extract_group_by(select: exp.Select) -> list[str]:
             for tup in sets_node.expressions:
                 for item in tup.expressions if isinstance(tup, exp.Tuple) else [tup]:
                     _append_column(item)
+    # V-6：GROUP BY CUBE(a, b)——sqlglot 把 CUBE 维度放 ``group.args['cube']``
+    # （list of ``Cube`` 节点，各含 expressions；与 grouping_sets 不同节点，此前
+    # group.expressions 为空 → 维度整体丢失，被误判为全局聚合无维度）；与
+    # GROUPING SETS 对齐展开进 group_by。
+    cube = group.args.get("cube")
+    if cube:
+        for cube_node in cube:
+            for item in (
+                cube_node.expressions
+                if isinstance(cube_node, exp.Cube)
+                else [cube_node]
+            ):
+                _append_column(item)
     projections = select.expressions
     for expr in group.expressions:
         # 位置序号 GROUP BY 1 → SELECT 投影第 1 列（Postgres/Trino/Oracle 惯用写法；
@@ -586,6 +673,38 @@ def _projection_measures(
             if not isinstance(target, exp.AggFunc):
                 continue
             projection = exp.alias_(target, f"_col_{len(measures) + 1}")
+        # V-1：Doris/StarRocks 位图/HLL 去重聚合（``bitmap_union(to_bitmap(uid))``、
+        # ``hll_union(hll_hash(uid))``——工业 UV/DAU 标准写法）。sqlglot 解析为
+        # ``exp.Anonymous``（非 AggFunc），``target.find(exp.AggFunc)`` 返回 None →
+        # 此前整段静默 0 候选。按函数名识别，从内层表达式取真实列（to_bitmap(uid)
+        # 里的 uid），映射去重计数语义 + needs_review（位图/HLL 是近似/集合语义）。
+        if isinstance(target, exp.Anonymous):
+            anon_fn = str(getattr(target, "this", "") or "").lower()
+            if anon_fn in _BITMAP_HLL_AGGS:
+                inner_col = next(
+                    (c for c in target.walk() if isinstance(c, exp.Column)), None
+                )
+                bm: dict[str, Any] = {
+                    "column": (
+                        _extract_col_name(inner_col) if inner_col is not None else "*"
+                    ),
+                    "agg": "COUNT_DISTINCT",
+                    "needs_review": True,
+                }
+                if enrich:
+                    bm["alias"] = (
+                        projection.alias_or_name
+                        if isinstance(projection, exp.Alias)
+                        else None
+                    )
+                    bm["table"] = _measure_table(select, target) or table
+                    bm["sunk"] = sunk
+                    try:
+                        bm["expression"] = target.sql()
+                    except Exception:  # noqa: BLE001 - 序列化失败仅降级简化式
+                        bm["expression"] = f"COUNT_DISTINCT({bm['column']})"
+                measures.append(bm)
+                continue
         # U-4：COALESCE 多参数含多个聚合（``coalesce(sum(amt), sum(refund), 0)``）——
         # 每个聚合参数都是独立度量（回退/兜底口径），全部收集而非只取首个（此前
         # 只取第一个 sum(amt) 且 agg=None，sum(refund) 静默丢失）；单聚合 coalesce
@@ -638,11 +757,28 @@ def _projection_measures(
         if agg_name is None:
             # 无注册枚举可归一的统计聚合 → 跳过该投影（诚实不产出非法候选）
             continue
+        # V-2：嵌套聚合（``sum(avg(x))``/``sum(count(*))`` 等）——投影里多于一个
+        # AggFunc 时语义是「聚合的聚合」，不是简单 SUM(x)；expression 保留原结构但
+        # 必须标记 needs_review 让用户人工核对（否则静默产出语义错误的 SUM(x) 被
+        # 当成对的创建，U-2 同类最危险场景）。
+        nested_agg = (
+            len(list(target.find_all(exp.AggFunc))) > 1 if target is not None else False
+        )
         # DISTINCT 修饰符：sqlglot 将 COUNT(DISTINCT x) 解析为 Count(this=Distinct(...))
         col_expr = agg.this
+        multi_distinct_col: str | None = None
         if isinstance(col_expr, exp.Distinct):
             agg_name = "COUNT_DISTINCT"
-            col_expr = col_expr.expressions[0] if col_expr.expressions else None
+            if len(col_expr.expressions or []) > 1:
+                # V-5：``count(distinct col1, col2)`` 多列去重（Spark/Hive）——只取
+                # 首列会丢失去重语义；合并列名展示并标记 needs_review（多列去重口径
+                # 需人工确认）。
+                multi_distinct_col = "+".join(
+                    _extract_col_name(e) for e in col_expr.expressions
+                )
+                col_expr = None
+            else:
+                col_expr = col_expr.expressions[0] if col_expr.expressions else None
         # 方言聚合（P0-A）：this 是函数名字符串，真正列参数在 expressions——
         # 取第一个 Column（uniqExact(user_id) → user_id；topK(10)(product) 跳过
         # Literal 取 product；sumMerge(amount_state) → amount_state）
@@ -657,8 +793,20 @@ def _projection_measures(
         # ClickHouse 合并/条件聚合：this 是函数名字符串，真正参数在 expressions[0]
         if isinstance(agg, exp.CombinedAggFunc):
             col_expr = agg.expressions[0] if agg.expressions else None
-        col_name = _extract_col_name(col_expr)
+        # V-4：``percentile_cont(0.5) WITHIN GROUP (ORDER BY amt)``——PercentileCont
+        # 的 ``this`` 是分位数 Literal（0.5），真实列在 ``WithinGroup`` 的 ORDER BY
+        # 里；``_extract_col_name`` 对 Literal 返回 ``*`` 导致列丢失。取投影内第一个
+        # Column（ORDER BY 的 amt）。
+        if agg.key.upper().startswith("PERCENTILE"):
+            col_expr = (
+                next((c for c in target.walk() if isinstance(c, exp.Column)), None)
+                if target is not None
+                else None
+            )
+        col_name = multi_distinct_col or _extract_col_name(col_expr)
         measure: dict[str, Any] = {"column": col_name, "agg": agg_name}
+        if nested_agg:
+            measure["needs_review"] = True
         if enrich:
             measure["alias"] = (
                 projection.alias_or_name if isinstance(projection, exp.Alias) else None
