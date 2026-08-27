@@ -117,6 +117,8 @@ export function MasterDataReview({ embedded = false }: { embedded?: boolean } = 
   const [domainMap, setDomainMap] = useState<Record<string, string>>({});
   // 审批工作台视角：pending=待我审（REVIEW + 我可审）；reviewed=我审过的（reviewed_by 过滤）
   const [view, setView] = useState<"pending" | "reviewed">("pending");
+  // 类型聚焦筛选：all=聚合视图（默认）；dimension/measure/term=只看单一类型
+  const [kindFilter, setKindFilter] = useState<"all" | ReviewKind>("all");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   // 并发查询防竞态：只有最后一次发起的请求允许落地结果
@@ -271,6 +273,10 @@ export function MasterDataReview({ embedded = false }: { embedded?: boolean } = 
     }
   }
 
+  // 类型聚焦筛选：纯前端过滤（items 保持全量，切换即时响应不重新请求）
+  const filteredItems =
+    kindFilter === "all" ? items : items.filter((it) => it.kind === kindFilter);
+
   const columns = [
     {
       title: "类型",
@@ -384,6 +390,19 @@ export function MasterDataReview({ embedded = false }: { embedded?: boolean } = 
                 { label: "我审过的", value: "reviewed" },
               ]}
             />
+            <Segmented
+              value={kindFilter}
+              onChange={(v) => {
+                setKindFilter(v as "all" | ReviewKind);
+                setPage(1);
+              }}
+              options={[
+                { label: "全部", value: "all" },
+                { label: "维度", value: "dimension" },
+                { label: "逻辑度量", value: "measure" },
+                { label: "术语", value: "term" },
+              ]}
+            />
             <Button size="small" icon={<ReloadOutlined />} onClick={load} loading={loading}>
               刷新
             </Button>
@@ -391,14 +410,14 @@ export function MasterDataReview({ embedded = false }: { embedded?: boolean } = 
         }
       >
         <Table
-          dataSource={items}
+          dataSource={filteredItems}
           columns={columns}
           rowKey={(r) => `${r.kind}:${r.code}`}
           loading={loading}
           pagination={{
             current: page,
             pageSize,
-            total: items.length,
+            total: filteredItems.length,
             showSizeChanger: true,
             pageSizeOptions: [10, 20, 50],
             onChange: (p, ps) => {
@@ -409,9 +428,13 @@ export function MasterDataReview({ embedded = false }: { embedded?: boolean } = 
           }}
           locale={{
             emptyText:
-              view === "pending"
-                ? "当前无待您评审的主数据（已全部处理或暂无指派）"
-                : "您还没有评审过主数据",
+              kindFilter !== "all"
+                ? view === "pending"
+                  ? `当前无待您评审的「${KIND_META[kindFilter].label}」`
+                  : `您还没有评审过「${KIND_META[kindFilter].label}」`
+                : view === "pending"
+                  ? "当前无待您评审的主数据（已全部处理或暂无指派）"
+                  : "您还没有评审过主数据",
           }}
         />
         {/* 驳回审核弹窗（复用共享 MasterDataReviewModals 的驳回部分；工作台不涉及提交） */}

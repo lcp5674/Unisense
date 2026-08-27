@@ -171,9 +171,9 @@ describe("MasterDataReview 统一主数据审批工作台", () => {
     // 他人指派的维度、未指派且 reviewer 无兜底权限的术语 → 隐藏
     expect(screen.queryByText("dim_b")).toBeNull();
     expect(screen.queryByText("term_y")).toBeNull();
-    // 三模块聚合：类型标签齐全
-    expect(screen.getByText("维度")).toBeTruthy();
-    expect(screen.getByText("逻辑度量")).toBeTruthy();
+    // 三模块聚合：类型标签齐全（Segmented 筛选选项与表格 Tag 均有类型词，用 getAllByText 断言存在）
+    expect(screen.getAllByText("维度").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("逻辑度量").length).toBeGreaterThan(0);
   });
 
   it("待我审：调三模块 status=REVIEW 拉取（不传 reviewed_by）", async () => {
@@ -274,5 +274,54 @@ describe("MasterDataReview 统一主数据审批工作台", () => {
         reason: "请补充统计口径后重提",
       }),
     );
+  });
+
+  it("类型筛选：默认全部聚合，切换维度/逻辑度量/术语只显示对应类型", async () => {
+    mockedListDims.mockResolvedValue({
+      items: [dim("dim_a", { reviewer_type: "user", reviewer_id: 10 })],
+      total: 1,
+    });
+    mockedListMeasures.mockResolvedValue({
+      items: [measure("meas_x", { reviewer_type: "user", reviewer_id: 10 })],
+      total: 1,
+      page: 1,
+      page_size: 200,
+    });
+    mockedListTerms.mockResolvedValue({
+      items: [term("term_y", { reviewer_type: "user", reviewer_id: 10 })],
+      total: 1,
+      page: 1,
+      page_size: 200,
+    });
+
+    renderReview();
+    // 默认「全部」：三类聚合显示
+    expect(await screen.findByText("dim_a")).toBeTruthy();
+    await screen.findByText("meas_x");
+    await screen.findByText("term_y");
+
+    // 切「维度」：只显示维度（Segmented 选项用 title 定位，避免与表格 Tag 文本冲突）
+    fireEvent.click(screen.getByTitle("维度"));
+    expect(screen.getByText("dim_a")).toBeTruthy();
+    expect(screen.queryByText("meas_x")).toBeNull();
+    expect(screen.queryByText("term_y")).toBeNull();
+
+    // 切「逻辑度量」：只显示度量
+    fireEvent.click(screen.getByTitle("逻辑度量"));
+    expect(screen.queryByText("dim_a")).toBeNull();
+    expect(screen.getByText("meas_x")).toBeTruthy();
+    expect(screen.queryByText("term_y")).toBeNull();
+
+    // 切「术语」：只显示术语
+    fireEvent.click(screen.getByTitle("术语"));
+    expect(screen.queryByText("dim_a")).toBeNull();
+    expect(screen.queryByText("meas_x")).toBeNull();
+    expect(screen.getByText("term_y")).toBeTruthy();
+
+    // 切回「全部」：恢复聚合
+    fireEvent.click(screen.getByTitle("全部"));
+    expect(screen.getByText("dim_a")).toBeTruthy();
+    expect(screen.getByText("meas_x")).toBeTruthy();
+    expect(screen.getByText("term_y")).toBeTruthy();
   });
 });
