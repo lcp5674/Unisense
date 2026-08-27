@@ -264,3 +264,51 @@ async def test_list_metrics_enriches_health_score_from_table() -> None:
     item = resp.json()["data"]["items"][0]
     assert item["health_score"] == 78
     assert item["health_level"] == "GOOD"
+
+
+async def test_list_metrics_rejected_record_returns_200() -> None:
+    """被驳回记录（rejected_at 为 datetime）不应致列表 500。
+
+    回归：MetricResponse.rejected_at 曾声明 str，而 ORM metric.rejected_at 为
+    datetime，model_validate 遇真实驳回记录抛 ValidationError → GET 列表 500。
+    """
+
+    async def fake_db():
+        session = MagicMock()
+
+        async def fake_execute(statement, *args, **kwargs):
+            sql = str(statement.compile(dialect=None))
+            result = MagicMock()
+            if "pending_version_confirmation" in sql:
+                result.scalars.return_value.all.return_value = []
+            elif "metric_health_score" in sql:
+                result.all.return_value = []
+            else:
+                result.scalars.return_value.all.return_value = []
+            return result
+
+        session.execute = AsyncMock(side_effect=fake_execute)
+        session.commit = AsyncMock()
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="viewer", roles_all=lambda: ["viewer"], has_role=lambda r: r == "viewer"
+    )
+    rejected = _metric_snapshot()
+    rejected.rejected_at = datetime(2026, 8, 27, 2, 45, 14)
+    rejected.reject_reason = "口径与上游不一致"
+    with patch(
+        "app.api.metrics.MetricService.list_metrics",
+        new=AsyncMock(return_value=([rejected], 1)),
+    ):
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/metric-definitions?sort_by=updated_at&sort_order=desc")
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    item = resp.json()["data"]["items"][0]
+    # datetime 序列化为 ISO 字符串，前端 formatCnTime 可解析
+    assert item["rejected_at"] == "2026-08-27T02:45:14"
+    assert item["reject_reason"] == "口径与上游不一致"

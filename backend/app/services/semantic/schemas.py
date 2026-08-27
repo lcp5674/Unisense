@@ -1012,7 +1012,9 @@ class MetricResponse(BaseModel):
     # 驳回可追溯（FR-005 闭环）：DRAFT 详情页展示"上次驳回原因"引导提交人修改后重提
     reject_reason: str | None = None
     reject_reviewer_id: int | None = None
-    rejected_at: str | None = None
+    # ORM metric.rejected_at 为 datetime（service reject 落库 datetime.now），
+    # 声明 datetime 使 model_validate 通过，序列化输出 ISO 字符串（前端 formatCnTime 兼容）
+    rejected_at: datetime | None = None
     # 审核通过时间（审批工作台「我审过的」展示处理时间）：metric 表无独立列，
     # 由 list 接口从当前生效版本 metric_version.published_at 批量填充（无迁移）；
     # 驳回场景用 rejected_at，通过场景用 approved_at
