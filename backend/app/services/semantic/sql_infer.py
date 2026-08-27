@@ -124,6 +124,9 @@ _DIALECT_AGG_MAP = {
     "uniq": "COUNT_DISTINCT",
     "quantile": "PERCENTILE",
     "quantileexact": "PERCENTILE",
+    "quantileexactweighted": "PERCENTILE",  # W4：ClickHouse 加权分位（工业营收/时延分位常用）
+    "quantileweighted": "PERCENTILE",  # W4：ClickHouse quantileWeighted
+    "quantileexactweightedinterpolated": "PERCENTILE",  # W4：ClickHouse 插值加权分位
     "percentileapprox": "PERCENTILE",
     "approxquantile": "PERCENTILE",
     "approx_percentile": "PERCENTILE",  # Snowflake/Spark/Trino 分位数（函数名形态）
@@ -179,6 +182,25 @@ _BITMAP_HLL_AGGS = {
     "bitmap_intersect",
     "group_bitmap_xor",
 }
+# W7：条件聚合函数（Spark ``sum_if``/``count_if``、ClickHouse ``sumIf``/``countIf``）
+# ——default 方言下 ``sum_if(status='refund', amt)`` 解析为 ``Anonymous``（非
+# AggFunc），此前 ``target.find(exp.AggFunc)`` 返回 None → 整投影静默丢失（条件
+# 口径指标缺失）；``countIf`` 解析为 ``CountIf`` 类（key=COUNTIF）但列取到条件里
+# 的 status（语义错：布尔条件计数的是满足条件的行 *，不是 status 列）。按函数名
+# 归一到 SUM/COUNT + needs_review（条件口径需人工核对），列取条件后的第一个
+# Column（sum_if 的 expressions=[EQ(status=...), Column(amt)] → amt）。
+_COND_IF_AGGS = {
+    "sum_if": "SUM",
+    "count_if": "COUNT",
+    "sumif": "SUM",
+    "countif": "COUNT",
+}
+# W20：ARRAY JOIN（ClickHouse 数组展开）方言归属提示——hive/default 方言把
+# ``ARRAY JOIN sku_list AS sku`` 的数组名解析成无 db 的 Table（与 ``JOIN b`` 结构
+# 无法区分），混入 source_tables 让血缘挂到不存在的表；clickhouse 方言正确解析为
+# kind='ARRAY' 的 Join（_extract_source_tables 已跳过）。含此关键字时强制 clickhouse。
+_ARRAY_JOIN_HINT = re.compile(r"\bARRAY\s+JOIN\b", re.IGNORECASE)
+
 # 无注册枚举可归一的统计聚合（相关性/协方差/回归/标准差/方差）→ 返回 None 跳过
 # 该度量（诚实不产出非法候选，避免注册失败/口径错误），不崩溃不炸整批。
 # 含函数名形态（stdev/stdevp/std/var/varp）——某些方言下统计聚合解析为
@@ -290,6 +312,12 @@ def _extract_source_tables(ast: exp.Expr) -> list[str]:
         sources = [sel.args.get("from")] + list(sel.args.get("joins") or [])
         sources = [s for s in sources if s is not None]
         for src in sources:
+            # W20：ARRAY JOIN（ClickHouse 数组展开）的 join 节点不是物理表——
+            # hive/default 方言把 ``ARRAY JOIN sku_list AS sku`` 的数组名解析成
+            # Table 混入 source_tables（血缘挂到不存在的表）；clickhouse 方言是
+            # Alias(Column)。kind=ARRAY 的 join 跳过（数组标识符非表）。
+            if isinstance(src, exp.Join) and src.kind == "ARRAY":
+                continue
             _collect_from(exp.From(this=src) if not isinstance(src, exp.From) else src)
         # 递归收集 FROM/JOIN 引用的 CTE 体（其 FROM/JOIN 内的真实事实表/维表）
         for src in sources:
@@ -398,7 +426,9 @@ def _extract_group_by(select: exp.Select) -> list[str]:
                 if isinstance(col, exp.Column):
                     cols.append(col.name.lower())
                     break
-    return cols
+    # W11：GROUPING SETS 多组维度并集去重（``((d,region),(d,channel),())`` 展开
+    # 后 d 重复出现；空集 () 无维度）——分组维度是并集，保留首次出现顺序
+    return list(dict.fromkeys(cols))
 
 
 def _from_table(select: exp.Select) -> str | None:
@@ -705,6 +735,40 @@ def _projection_measures(
                         bm["expression"] = f"COUNT_DISTINCT({bm['column']})"
                 measures.append(bm)
                 continue
+            # W7：条件聚合（default 方言下 ``sum_if(status='refund', amt)`` 解析为
+            # Anonymous 而非 CombinedAggFunc/CountIf）——此前 Anonymous 非 AggFunc
+            # 导致 ``target.find(exp.AggFunc)`` 返回 None、整投影静默丢失（条件口径
+            # 指标缺失）。按函数名归一到 SUM/COUNT + needs_review，列取条件后的
+            # 第一个 Column（sum_if 的 expressions=[EQ(status=...), Column(amt)] → amt）
+            if anon_fn in _COND_IF_AGGS:
+                cond_col = next(
+                    (
+                        c for c in target.expressions
+                        if isinstance(c, exp.Column)
+                    ),
+                    None,
+                )
+                cond: dict[str, Any] = {
+                    "column": (
+                        _extract_col_name(cond_col) if cond_col is not None else "*"
+                    ),
+                    "agg": _COND_IF_AGGS[anon_fn],
+                    "needs_review": True,
+                }
+                if enrich:
+                    cond["alias"] = (
+                        projection.alias_or_name
+                        if isinstance(projection, exp.Alias)
+                        else None
+                    )
+                    cond["table"] = _measure_table(select, target) or table
+                    cond["sunk"] = sunk
+                    try:
+                        cond["expression"] = target.sql()
+                    except Exception:  # noqa: BLE001 - 序列化失败仅降级简化式
+                        cond["expression"] = f"{cond['agg']}({cond['column']})"
+                measures.append(cond)
+                continue
         # U-4：COALESCE 多参数含多个聚合（``coalesce(sum(amt), sum(refund), 0)``）——
         # 每个聚合参数都是独立度量（回退/兜底口径），全部收集而非只取首个（此前
         # 只取第一个 sum(amt) 且 agg=None，sum(refund) 静默丢失）；单聚合 coalesce
@@ -783,7 +847,18 @@ def _projection_measures(
         # 取第一个 Column（uniqExact(user_id) → user_id；topK(10)(product) 跳过
         # Literal 取 product；sumMerge(amount_state) → amount_state）
         if isinstance(agg.this, str):
-            col_expr = next(
+            # W4：``ParameterizedAgg`` 的调用参数在 ``args['params']``
+            # （``quantileExactWeighted(0.5)(amount, weight)`` 的 amount/weight），
+            # ``expressions`` 是分位数/权重参数（Literal 0.5）——先取 params 里的
+            # Column，其次 expressions（uniqExact(user_id) 的 user_id）
+            param_col = next(
+                (
+                    e for e in (getattr(agg, "args", {}).get("params") or [])
+                    if isinstance(e, (exp.Column, exp.Alias))
+                ),
+                None,
+            )
+            col_expr = param_col or next(
                 (
                     e for e in (agg.expressions or [])
                     if isinstance(e, (exp.Column, exp.Alias))
@@ -803,9 +878,32 @@ def _projection_measures(
                 if target is not None
                 else None
             )
+        # W7：布尔条件计数（count_if/countIf(status='paid')，key=COUNTIF）——计数
+        # 的是满足条件的行（*），不是条件里的 status 列；列改 * + needs_review
+        # （布尔条件口径需人工核对，避免注册成「status 值计数」误导）
+        is_cond_count = agg.key.upper() == "COUNTIF"
+        if is_cond_count:
+            col_expr = None
         col_name = multi_distinct_col or _extract_col_name(col_expr)
+        # W8：集合/数组聚合的复杂参数（``collect_list(struct(user_id, amt))``、
+        # ``array_agg(row(...))`` 等明细快照收集）——硬映射 ``COUNT_DISTINCT(user_id)``
+        # 语义完全错误（不是去重 user_id 计数，是收集明细对象数组）；跳过该投影由
+        # LLM/人工处理（纯单列 ``collect_set(x)``/``array_agg(x)`` 的去重集合近似
+        # 仍保留，col_expr 是 Column）
+        _set_agg_key = (
+            str(getattr(agg, "this", "")).upper()
+            if isinstance(getattr(agg, "this", ""), str)
+            else agg.key.upper()
+        )
+        if (
+            _set_agg_key in _SET_STRING_AGG_KEYS
+            and agg_name == "COUNT_DISTINCT"
+            and col_expr is not None
+            and not isinstance(col_expr, (exp.Column, exp.Star))
+        ):
+            continue
         measure: dict[str, Any] = {"column": col_name, "agg": agg_name}
-        if nested_agg:
+        if nested_agg or is_cond_count:
             measure["needs_review"] = True
         if enrich:
             measure["alias"] = (
@@ -1057,7 +1155,10 @@ def _extract_measures(select: exp.Select) -> list[dict[str, Any]]:
         measures = list(top_aggs)
         if alias_map:
             for m in measures:
-                if m["column"] in alias_map:
+                # W16：子查询聚合别名映射到 ``*``（``count(1) AS inner_amt`` → *）
+                # 时不替换——外层 ``sum(inner_amt)`` 引用的是子查询派生列别名，映射
+                # 成 ``*`` 反而丢失列语义（血缘应指向 inner_amt 派生列而非通配符）
+                if m["column"] in alias_map and alias_map[m["column"]] != "*":
                     m["column"] = alias_map[m["column"]]
         if derived:
             measures.extend(derived)
@@ -1071,7 +1172,13 @@ def _extract_measures(select: exp.Select) -> list[dict[str, Any]]:
         for m in _projection_measures(
             sub, enrich=True, table=_from_table(sub), sunk=True
         ):
-            if alias_map and m["column"] in alias_map:
+            # W16：同顶层——``count(1) AS inner_amt`` 映射到 ``*`` 不替换，保留
+            # 子查询派生列别名（血缘指向派生列而非通配符）
+            if (
+                alias_map
+                and m["column"] in alias_map
+                and alias_map[m["column"]] != "*"
+            ):
                 m["column"] = alias_map[m["column"]]
             # P0-3b：去重键含来源表——两个子查询同名列（t1.cnt/t2.cnt）分属不同表
             # 时不再合并丢一支；同表同列同聚合仍合并（UNION 多支同指标）
@@ -1316,6 +1423,27 @@ def _parse_profile_ast(sql: str) -> exp.Expr | None:
        的子句）后按默认方言重试——口径语义不变；
     全部失败返回 ``None``（上层降级空画像，不抛异常）。
     """
+    # W20：ARRAY JOIN（ClickHouse 数组展开）方言归属——hive/default 方言把数组名
+    # 解析成无 db 的 Table 混入 source_tables；clickhouse 方言正确解析为 kind='ARRAY'
+    # 的 Join（_extract_source_tables 跳过）。含此关键字时**优先**用 clickhouse 方言
+    # 解析（先于默认/多语句路径，工业数组展开标准写法，方言归属明确）
+    if _ARRAY_JOIN_HINT.search(sql):
+        try:
+            ck_stmts = sqlglot.parse(
+                sql, read="clickhouse", error_level=sqlglot.ErrorLevel.RAISE
+            )
+            ck_best: exp.Expr | None = None
+            ck_count = 0
+            for stmt in ck_stmts:
+                if stmt is None or stmt.find(exp.Select) is None:
+                    continue
+                count = len(list(stmt.find_all(exp.AggFunc)))
+                if count >= ck_count:
+                    ck_best, ck_count = stmt, count
+            if ck_best is not None:
+                return ck_best
+        except Exception:
+            pass  # clickhouse 解析失败 → 走常规路径
     # 多语句脚本：parse 拆分后选含 Select + 聚合识别最多的产出语句（先于 parse_one，
     # 否则 set/create DDL 开头的 ETL SQL 直接退化为空画像——真实生产 SQL 常见形态）
     try:

@@ -295,7 +295,10 @@ class TestParseSqlProfile:
         assert {m["column"]: m["agg"] for m in p.measures} == {
             "amount_state": "SUM",
             "amount": "SUM",
-            "user_id": "COUNT",
+            # W7：countIf(user_id<>'') 是布尔条件计数——计数满足条件的行（*），
+            # 不是条件里的 user_id 列；列改 * + needs_review（避免注册成
+            # 「user_id 值计数」误导）
+            "*": "COUNT",
         }
 
     def test_oracle_nvl_wrapped_column_extracted(self) -> None:
@@ -394,10 +397,11 @@ class TestParseSqlProfile:
             "topK(5)(product) AS top FROM orders"
         )
         aggs = {(m["column"], m["agg"]) for m in p.measures}
-        # topK(5)(product) 列取 '*'（参数非首个 Column），聚合归 COUNT——三者都不崩溃
+        # W4：topK(5)(product) 列从 ParameterizedAgg 的 params 提取（product 而非
+        # '*'——调用参数列更准确），聚合归 COUNT——三者都不崩溃
         assert ("user_id", "COUNT_DISTINCT") in aggs
         assert ("amount", "PERCENTILE") in aggs
-        assert ("*", "COUNT") in aggs
+        assert ("product", "COUNT") in aggs
         # 不支持的统计聚合（corr/stddev/var）诚实跳过，不产出非法候选
         p2 = parse_sql_profile(
             "SELECT corr(x, y) AS c, stddev(amount) AS sd FROM t"
@@ -899,4 +903,95 @@ class TestParseSqlProfile:
         )
         assert "d" in p.group_by
         assert "region" in p.group_by
+
+    def test_quantile_exact_weighted_normalized(self) -> None:
+        """W4：ClickHouse 加权分位 quantileExactWeighted(0.5)(amount, weight) 归一到
+        PERCENTILE 且列从 ParameterizedAgg 的 params 提取（amount）——此前产出非法
+        枚举 QUANTILEEXACTWEIGHTED（批量创建 pydantic 整批失败）且列 '*'。"""
+        p = parse_sql_profile(
+            "SELECT toDate(event_time) AS d, "
+            "quantileExactWeighted(0.5)(amount, weight) AS p50, "
+            "quantile(0.95)(amount) AS p95 FROM ods.pay_event_df GROUP BY d"
+        )
+        aggs = {m["agg"]: m["column"] for m in p.measures if m["agg"] != "SUM"}
+        assert aggs == {"PERCENTILE": "amount"}
+
+    def test_conditional_aggregates_collected(self) -> None:
+        """W7：条件聚合 count_if/sum_if（default 方言下 sum_if 解析为 Anonymous）——
+        此前 sum_if 静默丢失（Anonymous 非 AggFunc → find 返回 None → 整投影跳过）；
+        countIf 列误取条件里的 status。修复后 count_if → COUNT(*)、sum_if → SUM(amt)
+        且均标记 needs_review（条件口径需人工核对）。"""
+        p = parse_sql_profile(
+            "SELECT d, count_if(status='paid') AS paid_cnt, "
+            "sum_if(status='refund', amt) AS refund_amt "
+            "FROM ods.order_df GROUP BY d"
+        )
+        measures = {(m["agg"], m["column"]) for m in p.measures}
+        assert ("COUNT", "*") in measures  # count_if：布尔条件计数 → 列 *
+        assert ("SUM", "amt") in measures  # sum_if：条件求和 → 列 amt
+        for m in p.measures:
+            assert m.get("needs_review") is True  # 条件口径需人工核对
+
+    def test_collect_list_struct_skipped(self) -> None:
+        """W8：collect_list(struct(user_id, amt)) 明细快照收集——硬映射
+        COUNT_DISTINCT(user_id) 语义完全错误（不是去重计数，是收集明细对象数组）；
+        跳过该投影（纯单列 collect_set(x) 的去重集合近似仍保留）。"""
+        p = parse_sql_profile(
+            "SELECT d, collect_list(struct(user_id, amt)) AS detail, "
+            "sum(amt) AS total FROM ods.fact_df GROUP BY d"
+        )
+        cols = {m["column"] for m in p.measures}
+        assert "user_id" not in cols  # collect_list(struct) 不再产出 COUNT_DISTINCT
+        assert "total" in {m.get("alias", "") for m in p.measures}
+        assert any(m["agg"] == "SUM" for m in p.measures)
+        # 纯单列 collect_set 仍保留去重集合近似
+        p2 = parse_sql_profile(
+            "SELECT d, collect_set(product) AS prods, count(1) AS c FROM ods.f GROUP BY d"
+        )
+        assert any(
+            m["agg"] == "COUNT_DISTINCT" and m["column"] == "product"
+            for m in p2.measures
+        )
+
+    def test_grouping_sets_deduped(self) -> None:
+        """W11：GROUPING SETS 多组并集维度去重——((d,region),(d,channel),()) 展开后
+        d 重复（此前 group_by=[d,region,d,channel]），空集 () 无维度；现去重保序。"""
+        p = parse_sql_profile(
+            "SELECT d, region, channel, sum(amt) AS amt FROM ods.fact_df "
+            "GROUP BY GROUPING SETS ((d, region), (d, channel), ())"
+        )
+        assert p.group_by == ["d", "region", "channel"]
+        assert len(p.group_by) == len(set(p.group_by))
+
+    def test_nested_agg_alias_not_overwritten_to_star(self) -> None:
+        """W16：``sum(inner_amt)`` 引用子查询 ``count(1) AS inner_amt`` 派生别名——
+        alias_map 把 inner_amt 映射到 *（count(1) 无列）后外层列被错误覆盖成 *；
+        映射到 * 不替换，保留 inner_amt 派生列语义（血缘指向派生列而非通配符）。"""
+        p = parse_sql_profile(
+            "SELECT d, sum(inner_amt) AS amt FROM "
+            "(SELECT d, count(1) AS inner_amt FROM "
+            "(SELECT date_id AS d FROM ods.base_df WHERE is_deleted=0) x GROUP BY d) y "
+            "GROUP BY d"
+        )
+        assert any(
+            m["agg"] == "SUM" and m["column"] == "inner_amt" for m in p.measures
+        )
+        assert not any(m["column"] == "*" for m in p.measures)
+
+    def test_array_join_not_in_source_tables(self) -> None:
+        """W20：ClickHouse ARRAY JOIN——hive/default 方言把 ``ARRAY JOIN sku_list``
+        的数组名解析成无 db 的 Table 混入 source_tables（血缘挂到不存在的表）；
+        ARRAY JOIN hint 强制 clickhouse 方言（kind='ARRAY' 被 _extract_source_tables
+        跳过）。LATERAL VIEW（hive 数组展开）不受影响。"""
+        p = parse_sql_profile(
+            "SELECT d, sku, sum(amt) AS amt FROM ods.sale_df "
+            "ARRAY JOIN sku_list AS sku GROUP BY d, sku"
+        )
+        assert p.source_tables == ["ods.sale_df"]
+        assert "sku_list" not in p.source_tables
+        p2 = parse_sql_profile(
+            "SELECT d, sku, sum(amt) AS amt FROM ods.sale_df "
+            "LATERAL VIEW explode(sku_list) t AS sku GROUP BY d, sku"
+        )
+        assert p2.source_tables == ["ods.sale_df"]
 
