@@ -64,6 +64,7 @@ from app.services.semantic.schemas import (
     MetricSourceDroppedRequest,
     MetricSqlBatchRegisterRequest,
     MetricSqlParseRequest,
+    MetricSqlTablesRequest,
     MetricSubmitRequest,
     MetricSuggestDomainRequest,
     MetricTermBindRequest,
@@ -2541,6 +2542,30 @@ async def suggest_domain_metric(
         source_table=request.source_table,
     )
     return ok(data=result, trace_id=trace_id)
+
+
+@router.post(
+    "/parse-tables",
+    response_model=ApiResponse[Any],
+    summary="解析 SQL 提取源表（注册向导依赖表自动回填）",
+    # 纯 sqlglot 纯函数解析（不执行、不落库、不触发 LLM）；sql 承载待解析 SQL 文本
+    # → 豁免注入扫描（对齐 _SQL_SUGGEST_DEPS）。写角色防护：解析结果用于注册向导回填。
+    dependencies=_SQL_SUGGEST_DEPS,
+)
+async def parse_sql_tables_metric(
+    request: MetricSqlTablesRequest,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """输入数仓 SQL/建模口径 → 提取源表清单（FROM/JOIN/子查询/CTE）。
+
+    注册向导「数仓SQL口径」失焦时调用，自动回填「依赖表（上游）」选项框——复用
+    ``parse_sql_profile``（sqlglot 多方言/多语句/CTE 别名过滤，解析失败返回空画像
+    不抛异常），纯只读辅助，不落库、无 LLM 调用。
+    """
+    from app.services.semantic.sql_infer import parse_sql_profile
+
+    parsed = parse_sql_profile(request.sql)
+    return ok(data={"source_tables": parsed.source_tables}, trace_id=trace_id)
 
 
 @router.post(

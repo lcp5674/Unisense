@@ -2871,6 +2871,12 @@ export interface DomainSuggestionResponse {
 // ============================================================================
 
 /** SQL 批量解析请求（场景A 多语句切分 / 场景B 单语句多度量拆分）。 */
+/** SQL 源表解析结果（parse-tables 端点：数仓SQL口径 → 依赖表自动回填）。 */
+export interface SqlParseTablesResult {
+  /** 从 SQL 提取的源表清单（FROM/JOIN/子查询/CTE，去重；非 SQL/解析失败为空列表） */
+  source_tables: string[];
+}
+
 export interface SqlParseRequest {
   /** 大段 SQL 脚本（含多个指标） */
   sql: string;

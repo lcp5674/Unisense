@@ -5,7 +5,7 @@ import {
   Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Collapse, Divider, Drawer, Form, Input, Modal, Radio, Row, Segmented, Select, Space, Spin, Steps, Switch, Table, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
 import {
-  createMetric, listCatalogs, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, listMeasureCatalogs, fetchCurrentUser, refineMetricDefinition, getMetric, updateMetric, UnisenseApiError,
+  createMetric, listCatalogs, autoSuggestMetric, suggestDomain, parseSqlBatch, parseSqlTables, batchRegisterFromSql, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, listMeasureCatalogs, fetchCurrentUser, refineMetricDefinition, getMetric, updateMetric, UnisenseApiError,
 } from "../api";
 import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricBatchRegisterCandidate, MetricResponse, MetricUpdateRequest, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, DomainSuggestionCandidate, Dimension, MeasureCatalog, MeasureSuggestion, MetricMountInput, SqlBatchParseResult, SqlBatchCandidate, CurrentUser, ConsumptionGuidePayload } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
@@ -364,6 +364,9 @@ export function MetricCreate() {
   // 域默认值预填字段集合（TD §3.8）：选域触发 autoSuggest 时这些字段不被推断覆盖
   // （管理员显式配置的域默认值优先于自动推断），SQL 推断等用户主动操作可正常覆盖。
   const domainPrefillRef = useRef<Set<string>>(new Set());
+  // 数仓SQL口径自动回填依赖表：记录最近一次已解析的 SQL——内容未变失焦不重复请求
+  //（防重；解析成功才更新，非 SQL/解析失败后用户改成合法 SQL 仍能再次触发）
+  const dwSqlParseRef = useRef<string>("");
 
   const [prechecking, setPrechecking] = useState(false);
   const [precheckResult, setPrecheckResult] = useState<ConflictCheckResult | null>(null);
@@ -941,6 +944,31 @@ export function MetricCreate() {
       );
     } finally {
       setRefiningField(null);
+    }
+  }
+
+  // 数仓SQL口径失焦 → 解析 SQL 提取源表，自动回填「依赖表（上游）」选项框。
+  // 复用后端 /parse-tables（sqlglot 纯函数解析，容错：非 SQL/解析失败返回空列表）。
+  // 合并保留用户已选（不覆盖），并把未采集表补进 options 保证下拉可显示可再选。
+  async function handleDwSqlParseTables() {
+    const sql = dwDefinition.trim();
+    if (!sql || sql === dwSqlParseRef.current) return;
+    try {
+      const res = await parseSqlTables(sql);
+      const tables = (res.source_tables ?? []).filter((t): t is string => Boolean(t));
+      if (tables.length === 0) return; // 非 SQL/解析失败：静默，不打扰
+      dwSqlParseRef.current = sql;
+      setSourceTables((prev) => Array.from(new Set([...(prev || []), ...tables])));
+      setTableOptions((prev) => {
+        const seen = new Set((prev ?? []).map((o) => o.value));
+        const added = tables
+          .filter((t) => !seen.has(t))
+          .map((t) => ({ value: t, label: t }));
+        return added.length ? [...(prev ?? []), ...added] : prev;
+      });
+      message.success(`已从数仓SQL口径解析出 ${tables.length} 张依赖表`);
+    } catch {
+      // 解析失败静默（用户仍可手动搜索/录入依赖表）
     }
   }
 
@@ -2563,6 +2591,7 @@ export function MetricCreate() {
                     rows={4}
                     value={dwDefinition}
                     onChange={(e) => setDwDefinition(e.target.value)}
+                    onBlur={() => void handleDwSqlParseTables()}
                     placeholder={"如：SELECT visit_date, SUM(real_amount) AS amt\nFROM dwd.fee_bill_di\nWHERE biz_type='outp'\nGROUP BY visit_date"}
                     aria-label="数仓SQL口径"
                     className="mono"

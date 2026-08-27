@@ -768,6 +768,18 @@ class MetricBatchRegisterRequest(BaseModel):
     domain: str = Field(..., max_length=64, description="所属域")
 
 
+class MetricSqlTablesRequest(BaseModel):
+    """SQL 源表解析请求（注册向导：数仓SQL口径失焦自动回填依赖表）。
+
+    轻量只读解析：输入数仓 SQL/建模口径 → 用 sqlglot 提取 FROM/JOIN/子查询/CTE 的
+    源表清单（``source_tables``），供前端自动回填「依赖表（上游）」选项框。不落库、
+    不触发 LLM，纯函数容错——非 SQL/解析失败返回空列表不报错。``sql`` 类型化防非
+    字符串 payload 进解析器触发 ``AttributeError`` → 500。
+    """
+
+    sql: str = Field(..., max_length=65536, description="数仓 SQL/建模口径文本")
+
+
 class MetricSqlParseRequest(BaseModel):
     """SQL 批量解析请求（FR-010 批量注册增强，场景A/B）。
 

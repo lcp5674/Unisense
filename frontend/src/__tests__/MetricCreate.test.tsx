@@ -21,6 +21,7 @@ vi.mock("../api", async () => {
     autoSuggestMetric: vi.fn(),
     suggestDomain: vi.fn(),
     parseSqlBatch: vi.fn(),
+    parseSqlTables: vi.fn(),
     batchRegisterFromSql: vi.fn(),
     getDomainDefaults: vi.fn(),
     checkConflict: vi.fn(),
@@ -39,7 +40,7 @@ vi.mock("../api", async () => {
   };
 });
 
-import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, parseSqlBatch, batchRegisterFromSql, checkConflict, createMetric, listMetrics, listMeasureCatalogs, fetchCurrentUser, refineMetricDefinition, getMetric, updateMetric } from "../api";
+import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, parseSqlBatch, parseSqlTables, batchRegisterFromSql, checkConflict, createMetric, listMetrics, listMeasureCatalogs, fetchCurrentUser, refineMetricDefinition, getMetric, updateMetric } from "../api";
 import type { DBCatalog, SubjectDomainTreeNode, AutoSuggestResponse, DomainSuggestionResponse, SqlBatchParseResult, MetricResponse } from "../types";
 
 const mockedTree = vi.mocked(listDomainTree);
@@ -51,6 +52,7 @@ const mockedUsers = vi.mocked(listUsers);
 const mockedSuggest = vi.mocked(autoSuggestMetric);
 const mockedSuggestDomain = vi.mocked(suggestDomain);
 const mockedParseSqlBatch = vi.mocked(parseSqlBatch);
+const mockedParseSqlTables = vi.mocked(parseSqlTables);
 const mockedBatchFromSql = vi.mocked(batchRegisterFromSql);
 const mockedCheckConflict = vi.mocked(checkConflict);
 const mockedCreate = vi.mocked(createMetric);
@@ -1278,6 +1280,35 @@ describe("MetricCreate 未采集表/字段手动输入", () => {
       expect(tag?.textContent).toContain("ods.unknown_detail");
     });
     expect(screen.queryByText("ods.unknown_detail（未采集，手动输入）")).toBeNull();
+  });
+
+  it("数仓SQL口径失焦 → 自动解析 SQL 提取源表并回填依赖表（上游）", async () => {
+    mockedParseSqlTables.mockResolvedValue({ source_tables: ["dwd.fee_bill_di", "dims.region"] });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await goToStep(2);
+    const dw = screen.getByLabelText("数仓SQL口径") as HTMLTextAreaElement;
+    // blur 前获取依赖表（上游）Select 引用——回填后 placeholder「展开浏览已接入表」会消失，
+    // 届时 getAllByText 只能匹配到使用表（下游），必须提前取引用（与既有未采集表测试一致）
+    const depSelectEl = screen.getAllByText(/展开浏览已接入表/)[0].closest(".ant-select");
+    fireEvent.change(dw, {
+      target: {
+        value:
+          "SELECT dt, SUM(real_amount) AS amt FROM dwd.fee_bill_di LEFT JOIN dims.region r ON r.id = a.region_id GROUP BY dt",
+      },
+    });
+    fireEvent.blur(dw);
+    // 失焦后调用后端解析端点（透传数仓SQL口径文本）
+    await waitFor(() =>
+      expect(mockedParseSqlTables).toHaveBeenCalledWith(expect.stringContaining("dwd.fee_bill_di"))
+    );
+    // 依赖表（上游）自动回填解析出的表（该 Select 出现 tag，无需用户手输）
+    await waitFor(() => {
+      const tags = depSelectEl?.querySelectorAll(".ant-select-selection-item");
+      expect(
+        Array.from(tags ?? []).some((t) => t.textContent?.includes("dwd.fee_bill_di"))
+      ).toBeTruthy();
+    });
   });
 
   it("使用表（下游）：同样支持未采集表手动录入（第 2 个多选下拉）", async () => {

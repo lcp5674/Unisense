@@ -59,6 +59,64 @@ async def metrics_client() -> AsyncIterator[httpx.AsyncClient]:
     app.dependency_overrides.clear()
 
 
+# ---------------------------------------------------------------- parse-tables
+
+
+async def test_parse_sql_tables_extracts_source_tables(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """合法数仓 SQL → 200，source_tables 含 FROM/JOIN 解析出的源表。"""
+    resp = await metrics_client.post(
+        "/api/v1/metric-definitions/parse-tables",
+        json={
+            "sql": (
+                "SELECT dt, SUM(amount) AS gmv FROM dwd.sales_detail a "
+                "LEFT JOIN dims.region b ON a.region_id = b.id GROUP BY dt"
+            )
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert "dwd.sales_detail" in data["source_tables"]
+    assert "dims.region" in data["source_tables"]
+
+
+async def test_parse_sql_tables_non_sql_returns_empty(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """非 SQL/建模口径 → 200 + 空 source_tables（容错不报错）。"""
+    resp = await metrics_client.post(
+        "/api/v1/metric-definitions/parse-tables",
+        json={"sql": "这个指标大致是统计每日就诊人次，剔除退费"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["source_tables"] == []
+
+
+async def test_parse_sql_tables_missing_sql_422(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """sql 缺失 → 422（类型化必填，防非字符串进解析器 500）。"""
+    resp = await metrics_client.post(
+        "/api/v1/metric-definitions/parse-tables",
+        json={},
+    )
+    assert resp.status_code == 422
+
+
+async def test_parse_sql_tables_injection_features_200(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """SQL 含注入特征（-- 注释/UNION）→ 200（sql 字段豁免注入扫描，合法 ETL SQL）。"""
+    resp = await metrics_client.post(
+        "/api/v1/metric-definitions/parse-tables",
+        json={
+            "sql": "SELECT dt, SUM(amt) AS x FROM dwd.fee_bill_di -- 行注释\nUNION ALL SELECT 1, 2"
+        },
+    )
+    assert resp.status_code == 200
+
+
 # ---------------------------------------------------------------- parse-sql-batch
 
 
