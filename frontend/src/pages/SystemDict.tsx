@@ -129,19 +129,19 @@ function ExtraEditor({
   return (
     <div>
       {rows.map((r, i) => (
-        <Space key={i} style={{ display: "flex", marginBottom: 8 }} align="baseline">
+        <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "baseline" }}>
           <Input
             placeholder="属性名，如 category"
             value={r.key}
             onChange={(e) => patchRow(i, { key: e.target.value })}
-            style={{ width: 200 }}
+            style={{ width: 200, flex: "0 0 200px" }}
             data-testid={`dict-extra-key-${i}`}
           />
           <Input
             placeholder="属性值（数字/布尔/JSON 自动识别）"
             value={r.value}
             onChange={(e) => patchRow(i, { value: e.target.value })}
-            style={{ width: 300 }}
+            style={{ flex: 1, minWidth: 0 }}
             data-testid={`dict-extra-value-${i}`}
           />
           <Button
@@ -152,7 +152,7 @@ function ExtraEditor({
             disabled={rows.length === 1}
             data-testid={`dict-extra-del-${i}`}
           />
-        </Space>
+        </div>
       ))}
       <Button size="small" type="dashed" icon={<PlusOutlined />} onClick={addRow} data-testid="dict-extra-add">
         添加属性
