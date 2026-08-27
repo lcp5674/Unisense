@@ -2138,6 +2138,20 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     await screen.findByText(/共 3 个候选/);
   }
 
+  it("批量解析：抽屉可拖宽（ResizableDrawer 手柄）+ 候选卡片化字段标签展示", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await openBatchMode();
+
+    // 抽屉可拖宽：左缘拖拽手柄存在（对齐全站详情抽屉 ResizableDrawer 交互）
+    expect(document.querySelector(".resizable-drawer .drawer-resize-handle")).toBeTruthy();
+    // 候选卡片化：字段以「小标签置顶」形式分组展示（聚合/关联逻辑度量/指标编码），
+    // 不再全部挤在单行 flex——标签是卡片布局的标志性结构
+    expect(screen.getAllByText("聚合").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("关联逻辑度量").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("指标编码").length).toBeGreaterThan(0);
+  });
+
   it("批量解析：粘贴大段 SQL → 解析候选 → 默认勾选原子 + 复合行带发布提示", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");

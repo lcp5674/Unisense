@@ -1,6 +1,7 @@
-import { useEffect, useState, useRef, useMemo } from "react";
+import { useEffect, useState, useRef, useMemo, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { BarsOutlined, ArrowLeftOutlined, PlusOutlined, MinusCircleOutlined, RobotOutlined } from "@ant-design/icons";
+import { ResizableDrawer } from "../components/ResizableDrawer";
 import {
   Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Collapse, Divider, Drawer, Form, Input, Modal, Radio, Row, Segmented, Select, Space, Spin, Steps, Switch, Table, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
@@ -150,6 +151,35 @@ const PERIOD_OPTIONS = [
   { value: "quarter", label: "季 (quarter)" },
   { value: "year", label: "年 (year)" },
 ];
+
+/** SQL 批量候选卡片字段：小标签 + 控件纵向排列，替代单行 flex 拥挤布局。
+ *  label 置顶（11px 次级色）让「这是什么字段」一眼可辨，控件宽度按需自适应。
+ *  required 时在 label 旁渲染红色 *，testId 透传给星号（保留必填标记测试锚点）。 */
+function SqlBatchField({
+  label,
+  required,
+  testId,
+  children,
+}: {
+  label: string;
+  required?: boolean;
+  testId?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <span style={{ fontSize: 11, color: "rgba(0,0,0,0.45)", lineHeight: 1.2, whiteSpace: "nowrap" }}>
+        {label}
+        {required && (
+          <span data-testid={testId} style={{ color: "#ff4d4f", marginLeft: 2 }}>
+            *
+          </span>
+        )}
+      </span>
+      {children}
+    </div>
+  );
+}
 
 interface ColumnInfo {
   name: string;
@@ -3001,12 +3031,16 @@ export function MetricCreate() {
         </Card>
       </Spin>
 
-      {/* OneData 向导：SQL 智能推断收敛为抽屉工具（非主流程步骤，方案 C）；含批量解析模式（FR-010） */}
-      <Drawer
+      {/* OneData 向导：SQL 智能推断收敛为抽屉工具（非主流程步骤，方案 C）；含批量解析模式（FR-010）。
+          可拖宽：ResizableDrawer 左缘手柄左右拖动调整宽度并持久化（对齐全站侧边栏/详情抽屉交互） */}
+      <ResizableDrawer
         title="SQL 智能推断"
         open={sqlInferOpen}
         onClose={() => setSqlInferOpen(false)}
-        width={sqlBatchMode === "batch" ? 760 : 540}
+        storageKey="unisense.drawer.sql-infer.width"
+        defaultWidth={760}
+        minWidth={520}
+        maxWidth={1200}
       >
         <Segmented
           block
@@ -3263,7 +3297,7 @@ export function MetricCreate() {
                   </Space>
                 </div>
                 <Collapse
-                  style={{ marginTop: 8, maxHeight: 360, overflow: "auto" }}
+                  style={{ marginTop: 8, maxHeight: 480, overflow: "auto" }}
                   size="small"
                   defaultActiveKey={sqlBatchResult.statements.map((s) => `stmt-${s.index}`)}
                   items={(() => {
@@ -3291,245 +3325,265 @@ export function MetricCreate() {
                             {cands.map((c) => (
                               <div
                                 key={c.key}
-                                style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", flexWrap: "wrap" }}
+                                style={{
+                                  border: "1px solid #f0f0f0",
+                                  borderRadius: 8,
+                                  padding: "8px 12px",
+                                  marginBottom: 10,
+                                  background: "#fafafa",
+                                }}
                               >
-                                <Checkbox
-                                  checked={sqlBatchChecked.has(c.key)}
-                                  onChange={(e) => handleSqlBatchToggle(c.key, e.target.checked)}
-                                  aria-label={`勾选 ${c.name}`}
-                                />
-                                {/* 指标类型可在线编辑（OneData 语义）：原子 = 逻辑度量 + 基础粒度
-                                    （日）；派生 = 原子 + 时间周期（month/周/季/年，周期驱动默认派生）；
-                                    复合 = 多指标运算。改派生/复合后下方切换为依赖指标 + 计算表达式 */}
-                                <Select
-                                  size="small"
-                                  style={{ width: 96 }}
-                                  value={c.type}
-                                  onChange={(v) => handleSqlBatchTypeChange(c.key, v as MetricType)}
-                                  data-testid={`sql-batch-type-${c.key}`}
-                                  options={[
-                                    { value: "atomic", label: "原子" },
-                                    { value: "derived", label: "派生" },
-                                    { value: "composite", label: "复合" },
-                                  ]}
-                                />
-                                {/* P2-2：LLM 兜底提取的候选加「AI 推断」标识，与规则层可靠产出
-                                    视觉区分——用户可分辨哪些需人工复核（编码/名称/聚合/周期） */}
-                                {c.source === "llm" && (
-                                  <Tooltip title="该候选由 AI 兜底从 SQL 中推断提取（规则层未能解析出度量），编码/名称/聚合/周期建议人工复核后创建">
-                                    <Tag color="gold" style={{ fontSize: 12 }}>AI 推断</Tag>
-                                  </Tooltip>
-                                )}
-                                {/* A-1/2：CASE/窗口/下沉子查询口径候选——expression 保留原始
-                                    结构（非简化 SUM(col)），注册后口径不直观，提示人工核对 */}
-                                {c.needs_review && (
-                                  <Tooltip title="该候选口径含 CASE 条件/窗口函数/子查询下沉，expression 保留原始 SQL 结构——请核对注册后指标口径是否符合预期">
-                                    <Tag color="orange" style={{ fontSize: 12 }}>口径需核对</Tag>
-                                  </Tooltip>
-                                )}
-                                {c.type === "atomic" ? (
-                                  <>
-                                    <Input
-                                      size="small"
-                                      style={{ width: 150 }}
-                                      value={c.name}
-                                      onChange={(e) => handleSqlBatchEdit(c.key, { name: e.target.value })}
-                                    />
-                                    <Select
-                                      size="small"
-                                      style={{ width: 130 }}
-                                      value={c.aggregation || undefined}
-                                      onChange={(v) => handleSqlBatchEdit(c.key, { aggregation: v })}
-                                      options={AGG_OPTIONS}
-                                    />
-                                    {/* 批量候选单位可编辑：推断错可行内修正（字典未加载时回退
-                                        Input 手输兜底，与单条表单 dictSelect 同源） */}
-                                    <Select
-                                      size="small"
-                                      showSearch
-                                      allowClear
-                                      style={{ width: 100 }}
-                                      placeholder="单位"
-                                      optionFilterProp="label"
-                                      value={c.unit || undefined}
-                                      onChange={(v) => handleSqlBatchEdit(c.key, { unit: v ?? null })}
-                                      data-testid={`sql-batch-unit-${c.key}`}
-                                      options={dictOptions["unit"] || []}
-                                    />
-                                    {/* P2-9：周期可编辑（推断错可行内修正，不必先创建再改） */}
-                                    <Select
-                                      size="small"
-                                      style={{ width: 110 }}
-                                      value={c.period || "day"}
-                                      onChange={(v) => handleSqlBatchPeriodChange(c.key, c, "period", v)}
-                                      data-testid={`sql-batch-period-${c.key}`}
-                                      options={PERIOD_OPTIONS}
-                                    />
-                                    {/* 批量候选粒度可编辑（与周期同源：day/week/month…；推断错
-                                        可行内修正，不必先创建再改） */}
-                                    <Select
-                                      size="small"
-                                      style={{ width: 100 }}
-                                      value={c.granularity || c.period || "day"}
-                                      onChange={(v) => handleSqlBatchPeriodChange(c.key, c, "granularity", v)}
-                                      data-testid={`sql-batch-granularity-${c.key}`}
-                                      options={PERIOD_OPTIONS}
-                                    />
-                                    {/* OneData 接线（P2）：批量候选关联逻辑度量——SQL 无法推断，
-                                        前端选择器补全；提交透传 measure_id，批量原子不再游离逻辑
-                                        度量体系（对齐单条创建 Step④同款控件） */}
-                                    <Select
-                                      size="small"
-                                      showSearch
-                                      allowClear
-                                      style={{ width: 160 }}
-                                      placeholder="关联逻辑度量"
-                                      optionFilterProp="label"
-                                      value={c.measure_id ?? undefined}
-                                      onChange={(v) => handleSqlBatchEdit(c.key, { measure_id: v ?? null })}
-                                      data-testid={`sql-batch-measure-${c.key}`}
-                                      options={measureOptions.map((o) => ({ value: o.value, label: o.label }))}
-                                    />
-                                    {/* P1-2（第六轮）：批量候选行产品需求方——此前批量流全程无法
-                                        设置责任方（解析器不产出 owner、候选行无控件），批量产物
-                                        OwnerChain 全空；对齐单条 RoleOwnerSelect 的最小形态，仅设
-                                        product_owner（tech/dw 随创建人/域默认）。提交透传
-                                        product_owner_id，后端 Phase1 落 Metric 三方责任 */}
-                                    <Select
-                                      size="small"
-                                      showSearch
-                                      allowClear
-                                      style={{ width: 120 }}
-                                      placeholder="产品负责"
-                                      optionFilterProp="label"
-                                      value={c.product_owner_id ?? undefined}
-                                      onChange={(v) => handleSqlBatchEdit(c.key, { product_owner_id: v ?? null })}
-                                      data-testid={`sql-batch-owner-${c.key}`}
-                                      options={ownerUsers.map((u) => ({ value: u.id, label: u.display_name || u.username }))}
-                                    />
-                                    {/* P2-10：语句级建议域与当前生效域不一致时提示（跨域脚本） */}
-                                    {c.suggested_domain_code && c.suggested_domain_code !== selectedDomain && (
-                                      <Tooltip title={`该语句表反查建议域为「${c.suggested_domain_code}」，与当前域 ${selectedDomain || "未选"} 不一致；将按当前域创建`}>
-                                        <Tag color="orange" style={{ fontSize: 12 }}>建议域 {c.suggested_domain_code}</Tag>
-                                      </Tooltip>
-                                    )}
-                                  </>
-                                ) : (
-                                  <>
-                                    <Input
-                                      size="small"
-                                      style={{ width: 150 }}
-                                      value={c.name}
-                                      onChange={(e) => handleSqlBatchEdit(c.key, { name: e.target.value })}
-                                    />
-                                    {/* 派生/复合依赖指标：从本批原子候选选择（跨语句可选），
-                                        提交合入 definition_json.dependencies → 血缘注册上游边。
-                                        派生=可选依赖（纯周期/业务限定派生可不依赖）；复合=必填 */}
-                                    {c.type === "composite" && (
-                                      <span
-                                        data-testid={`sql-batch-req-deps-${c.key}`}
-                                        style={{ color: "#ff4d4f", marginRight: 4 }}
+                                {/* 头部行：勾选 + 类型 + 名称 + 状态徽标 + 在向导中编辑 */}
+                                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                  <Checkbox
+                                    checked={sqlBatchChecked.has(c.key)}
+                                    onChange={(e) => handleSqlBatchToggle(c.key, e.target.checked)}
+                                    aria-label={`勾选 ${c.name}`}
+                                  />
+                                  {/* 指标类型可在线编辑（OneData 语义）：原子 = 逻辑度量 + 基础粒度
+                                      （日）；派生 = 原子 + 时间周期（month/周/季/年，周期驱动默认派生）；
+                                      复合 = 多指标运算。改派生/复合后下方切换为依赖指标 + 计算表达式 */}
+                                  <Select
+                                    size="small"
+                                    style={{ width: 96 }}
+                                    value={c.type}
+                                    onChange={(v) => handleSqlBatchTypeChange(c.key, v as MetricType)}
+                                    data-testid={`sql-batch-type-${c.key}`}
+                                    options={[
+                                      { value: "atomic", label: "原子" },
+                                      { value: "derived", label: "派生" },
+                                      { value: "composite", label: "复合" },
+                                    ]}
+                                  />
+                                  <Input
+                                    size="small"
+                                    style={{ width: 220 }}
+                                    value={c.name}
+                                    onChange={(e) => handleSqlBatchEdit(c.key, { name: e.target.value })}
+                                  />
+                                  {/* P2-2：LLM 兜底提取的候选加「AI 推断」标识，与规则层可靠产出
+                                      视觉区分——用户可分辨哪些需人工复核（编码/名称/聚合/周期） */}
+                                  {c.source === "llm" && (
+                                    <Tooltip title="该候选由 AI 兜底从 SQL 中推断提取（规则层未能解析出度量），编码/名称/聚合/周期建议人工复核后创建">
+                                      <Tag color="gold" style={{ fontSize: 12 }}>AI 推断</Tag>
+                                    </Tooltip>
+                                  )}
+                                  {/* A-1/2：CASE/窗口/下沉子查询口径候选——expression 保留原始
+                                      结构（非简化 SUM(col)），注册后口径不直观，提示人工核对 */}
+                                  {c.needs_review && (
+                                    <Tooltip title="该候选口径含 CASE 条件/窗口函数/子查询下沉，expression 保留原始 SQL 结构——请核对注册后指标口径是否符合预期">
+                                      <Tag color="orange" style={{ fontSize: 12 }}>口径需核对</Tag>
+                                    </Tooltip>
+                                  )}
+                                  {/* P2-10：语句级建议域与当前生效域不一致时提示（跨域脚本） */}
+                                  {c.suggested_domain_code && c.suggested_domain_code !== selectedDomain && (
+                                    <Tooltip title={`该语句表反查建议域为「${c.suggested_domain_code}」，与当前域 ${selectedDomain || "未选"} 不一致；将按当前域创建`}>
+                                      <Tag color="orange" style={{ fontSize: 12 }}>建议域 {c.suggested_domain_code}</Tag>
+                                    </Tooltip>
+                                  )}
+                                  {Array.isArray(c.dependencies) && c.dependencies.length > 0 && (
+                                    <Tooltip title="派生/复合指标依赖批内原子（DRAFT）；批量提交评审会被「依赖未发布」拦截，需先发布依赖原子后再提交">
+                                      <Tag color="orange">需先发布依赖原子</Tag>
+                                    </Tooltip>
+                                  )}
+                                  {c.type === "derived" && (
+                                    <Tag color="blue" style={{ fontSize: 12 }}>
+                                      派生（周期驱动，无公式依赖）
+                                    </Tag>
+                                  )}
+                                  {/* Q1（方案 A）：批量候选「在向导中编辑」——完整回填单条向导
+                                      表单核对修改（源表/度量列/口径/数仓口径/类型/依赖/表达式/
+                                      编码等），按单条流程手动提交创建——想快就批量、想审就进向导 */}
+                                  <Button
+                                    size="small"
+                                    type="link"
+                                    style={{ padding: "0 4px" }}
+                                    data-testid={`sql-batch-to-wizard-${c.key}`}
+                                    onClick={() => loadCandidateIntoWizard(c)}
+                                  >
+                                    在向导中编辑
+                                  </Button>
+                                </div>
+                                {/* 字段区：原子 = 聚合/单位/周期/粒度/关联逻辑度量/产品负责；
+                                    派生/复合 = 依赖指标 + 计算表达式（复合）或只读派生口径 */}
+                                <div style={{ display: "flex", gap: 12, rowGap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                                  {c.type === "atomic" ? (
+                                    <>
+                                      <SqlBatchField label="聚合">
+                                        <Select
+                                          size="small"
+                                          style={{ width: 130 }}
+                                          value={c.aggregation || undefined}
+                                          onChange={(v) => handleSqlBatchEdit(c.key, { aggregation: v })}
+                                          options={AGG_OPTIONS}
+                                        />
+                                      </SqlBatchField>
+                                      <SqlBatchField label="单位">
+                                        {/* 批量候选单位可编辑：推断错可行内修正（字典未加载时回退
+                                            Input 手输兜底，与单条表单 dictSelect 同源） */}
+                                        <Select
+                                          size="small"
+                                          showSearch
+                                          allowClear
+                                          style={{ width: 100 }}
+                                          placeholder="单位"
+                                          optionFilterProp="label"
+                                          value={c.unit || undefined}
+                                          onChange={(v) => handleSqlBatchEdit(c.key, { unit: v ?? null })}
+                                          data-testid={`sql-batch-unit-${c.key}`}
+                                          options={dictOptions["unit"] || []}
+                                        />
+                                      </SqlBatchField>
+                                      <SqlBatchField label="周期">
+                                        {/* P2-9：周期可编辑（推断错可行内修正，不必先创建再改） */}
+                                        <Select
+                                          size="small"
+                                          style={{ width: 110 }}
+                                          value={c.period || "day"}
+                                          onChange={(v) => handleSqlBatchPeriodChange(c.key, c, "period", v)}
+                                          data-testid={`sql-batch-period-${c.key}`}
+                                          options={PERIOD_OPTIONS}
+                                        />
+                                      </SqlBatchField>
+                                      <SqlBatchField label="粒度">
+                                        {/* 批量候选粒度可编辑（与周期同源：day/week/month…；推断错
+                                            可行内修正，不必先创建再改） */}
+                                        <Select
+                                          size="small"
+                                          style={{ width: 100 }}
+                                          value={c.granularity || c.period || "day"}
+                                          onChange={(v) => handleSqlBatchPeriodChange(c.key, c, "granularity", v)}
+                                          data-testid={`sql-batch-granularity-${c.key}`}
+                                          options={PERIOD_OPTIONS}
+                                        />
+                                      </SqlBatchField>
+                                      <SqlBatchField label="关联逻辑度量">
+                                        {/* OneData 接线（P2）：批量候选关联逻辑度量——SQL 无法推断，
+                                            前端选择器补全；提交透传 measure_id，批量原子不再游离逻辑
+                                            度量体系（对齐单条创建 Step④同款控件） */}
+                                        <Select
+                                          size="small"
+                                          showSearch
+                                          allowClear
+                                          style={{ width: 160 }}
+                                          placeholder="关联逻辑度量"
+                                          optionFilterProp="label"
+                                          value={c.measure_id ?? undefined}
+                                          onChange={(v) => handleSqlBatchEdit(c.key, { measure_id: v ?? null })}
+                                          data-testid={`sql-batch-measure-${c.key}`}
+                                          options={measureOptions.map((o) => ({ value: o.value, label: o.label }))}
+                                        />
+                                      </SqlBatchField>
+                                      <SqlBatchField label="产品负责">
+                                        {/* P1-2（第六轮）：批量候选行产品需求方——此前批量流全程无法
+                                            设置责任方（解析器不产出 owner、候选行无控件），批量产物
+                                            OwnerChain 全空；对齐单条 RoleOwnerSelect 的最小形态，仅设
+                                            product_owner（tech/dw 随创建人/域默认）。提交透传
+                                            product_owner_id，后端 Phase1 落 Metric 三方责任 */}
+                                        <Select
+                                          size="small"
+                                          showSearch
+                                          allowClear
+                                          style={{ width: 120 }}
+                                          placeholder="产品负责"
+                                          optionFilterProp="label"
+                                          value={c.product_owner_id ?? undefined}
+                                          onChange={(v) => handleSqlBatchEdit(c.key, { product_owner_id: v ?? null })}
+                                          data-testid={`sql-batch-owner-${c.key}`}
+                                          options={ownerUsers.map((u) => ({ value: u.id, label: u.display_name || u.username }))}
+                                        />
+                                      </SqlBatchField>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <SqlBatchField
+                                        label={c.type === "composite" ? "依赖指标（复合必填）" : "依赖指标（派生可选）"}
+                                        required={c.type === "composite"}
+                                        testId={`sql-batch-req-deps-${c.key}`}
                                       >
-                                        *
-                                      </span>
-                                    )}
-                                    <Select
-                                      size="small"
-                                      mode="multiple"
-                                      maxTagCount="responsive"
-                                      style={{ minWidth: 240 }}
-                                      placeholder={c.type === "composite" ? "依赖指标（复合必填）" : "依赖指标（派生可选）"}
-                                      optionFilterProp="label"
-                                      value={c.dependencies || []}
-                                      onChange={(v) => handleSqlBatchDepChange(c.key, v)}
-                                      data-testid={`sql-batch-deps-${c.key}`}
-                                      options={atomicDepOptions.filter(
-                                        (o) => o.value !== resolveCandidateCode(c),
-                                      )}
-                                    />
-                                    {c.type === "composite" ? (
-                                      <span
-                                        data-testid={`sql-batch-req-expr-${c.key}`}
-                                        style={{ color: "#ff4d4f", marginRight: 4 }}
-                                      >
-                                        *
-                                      </span>
-                                    ) : null}
-                                    {c.type === "composite" ? (
-                                      <Input
-                                        size="small"
-                                        style={{ width: 220, fontFamily: "monospace" }}
-                                        placeholder="计算表达式，如 {原子1} / {原子2}"
-                                        value={c.calc_expression || ""}
-                                        onChange={(e) => handleSqlBatchExprChange(c.key, e.target.value)}
-                                        data-testid={`sql-batch-expr-${c.key}`}
-                                      />
-                                    ) : (
-                                      /* 派生候选：口径由解析出的聚合表达式承载（COUNT/SUM 等
-                                         聚合原语，非指标间运算），只读展示而非「待填」——
-                                         避免与复合指标（依赖+公式）混淆 */
-                                      <>
-                                        {c.definition_json?.expression ? (
-                                          <Tooltip title={`派生口径表达式：${String(c.definition_json.expression)}`}>
-                                            <Typography.Text
-                                              type="secondary"
-                                              style={{ fontSize: 12, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "help", display: "inline-block", verticalAlign: "middle" }}
-                                            >
-                                              {String(c.definition_json.expression)}
+                                        {/* 派生/复合依赖指标：从本批原子候选选择（跨语句可选），
+                                            提交合入 definition_json.dependencies → 血缘注册上游边。
+                                            派生=可选依赖（纯周期/业务限定派生可不依赖）；复合=必填 */}
+                                        <Select
+                                          size="small"
+                                          mode="multiple"
+                                          maxTagCount="responsive"
+                                          style={{ minWidth: 240 }}
+                                          placeholder={c.type === "composite" ? "依赖指标（复合必填）" : "依赖指标（派生可选）"}
+                                          optionFilterProp="label"
+                                          value={c.dependencies || []}
+                                          onChange={(v) => handleSqlBatchDepChange(c.key, v)}
+                                          data-testid={`sql-batch-deps-${c.key}`}
+                                          options={atomicDepOptions.filter(
+                                            (o) => o.value !== resolveCandidateCode(c),
+                                          )}
+                                        />
+                                      </SqlBatchField>
+                                      {c.type === "composite" ? (
+                                        <SqlBatchField label="计算表达式" required testId={`sql-batch-req-expr-${c.key}`}>
+                                          <Input
+                                            size="small"
+                                            style={{ width: 220, fontFamily: "monospace" }}
+                                            placeholder="计算表达式，如 {原子1} / {原子2}"
+                                            value={c.calc_expression || ""}
+                                            onChange={(e) => handleSqlBatchExprChange(c.key, e.target.value)}
+                                            data-testid={`sql-batch-expr-${c.key}`}
+                                          />
+                                        </SqlBatchField>
+                                      ) : (
+                                        /* 派生候选：口径由解析出的聚合表达式承载（COUNT/SUM 等
+                                           聚合原语，非指标间运算），只读展示而非「待填」——
+                                           避免与复合指标（依赖+公式）混淆 */
+                                        <SqlBatchField label="派生口径">
+                                          {c.definition_json?.expression ? (
+                                            <Tooltip title={`派生口径表达式：${String(c.definition_json.expression)}`}>
+                                              <Typography.Text
+                                                type="secondary"
+                                                style={{ fontSize: 12, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "help", display: "inline-block", verticalAlign: "middle" }}
+                                              >
+                                                {String(c.definition_json.expression)}
+                                              </Typography.Text>
+                                            </Tooltip>
+                                          ) : (
+                                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                                              派生（周期驱动）
                                             </Typography.Text>
-                                          </Tooltip>
-                                        ) : (
-                                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                                            派生（周期驱动）
-                                          </Typography.Text>
-                                        )}
-                                        <Tag color="blue" style={{ fontSize: 12 }}>
-                                          派生（周期驱动，无公式依赖）
-                                        </Tag>
-                                      </>
-                                    )}
-                                  </>
-                                )}
-                                {/* P0-1：候选编码为空（域未定时后端不 bake-in）→ 提示选域后自动生成；
-                                    编码可在线编辑（4 段式：域_业务对象_度量_周期），改后创建即用 */}
-                                <Input
-                                  size="small"
-                                  style={{ width: 240, fontFamily: "monospace" }}
-                                  value={c.metric_code || ""}
-                                  placeholder={selectedDomain ? "指标编码（4 段式，可修改）" : "选域后自动生成"}
-                                  onChange={(e) => handleSqlBatchEdit(c.key, { metric_code: e.target.value })}
-                                  data-testid={`sql-batch-code-${c.key}`}
-                                />
-                                {/* 口径溯源（P2）：候选口径表达式创建前即可核对——Tooltip 展示完整
-                                    expression（CASE/窗口等原始结构），不必"先创建再改"。B：不再仅
-                                    atomic 显示——派生（C 分支只读展示）与复合（完整 SQL 口径）同享 */}
-                                {c.type !== "derived" && (c.definition_json?.expression || c.definition_json?.sql) ? (
-                                  <Tooltip title={`口径表达式：${String(c.definition_json?.expression || c.definition_json?.sql)}`}>
-                                    <Typography.Text
-                                      type="secondary"
-                                      style={{ fontSize: 12, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "help" }}
-                                    >
-                                      {String(c.definition_json?.expression || c.definition_json?.sql)}
-                                    </Typography.Text>
-                                  </Tooltip>
-                                ) : null}
-                                {Array.isArray(c.dependencies) && c.dependencies.length > 0 && (
-                                  <Tooltip title="派生/复合指标依赖批内原子（DRAFT）；批量提交评审会被「依赖未发布」拦截，需先发布依赖原子后再提交">
-                                    <Tag color="orange">需先发布依赖原子</Tag>
-                                  </Tooltip>
-                                )}
-                                {/* Q1（方案 A）：批量候选「在向导中编辑」——完整回填单条向导
-                                    表单核对修改（源表/度量列/口径/数仓口径/类型/依赖/表达式/
-                                    编码等），按单条流程手动提交创建——想快就批量、想审就进向导 */}
-                                <Button
-                                  size="small"
-                                  type="link"
-                                  style={{ padding: "0 4px" }}
-                                  data-testid={`sql-batch-to-wizard-${c.key}`}
-                                  onClick={() => loadCandidateIntoWizard(c)}
-                                >
-                                  在向导中编辑
-                                </Button>
+                                          )}
+                                        </SqlBatchField>
+                                      )}
+                                    </>
+                                  )}
+                                </div>
+                                {/* 底部行：指标编码 + 口径表达式（Tooltip 展示完整口径） */}
+                                <div style={{ display: "flex", gap: 12, rowGap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                                  <SqlBatchField label="指标编码">
+                                    {/* P0-1：候选编码为空（域未定时后端不 bake-in）→ 提示选域后自动生成；
+                                        编码可在线编辑（4 段式：域_业务对象_度量_周期），改后创建即用 */}
+                                    <Input
+                                      size="small"
+                                      style={{ width: 240, fontFamily: "monospace" }}
+                                      value={c.metric_code || ""}
+                                      placeholder={selectedDomain ? "指标编码（4 段式，可修改）" : "选域后自动生成"}
+                                      onChange={(e) => handleSqlBatchEdit(c.key, { metric_code: e.target.value })}
+                                      data-testid={`sql-batch-code-${c.key}`}
+                                    />
+                                  </SqlBatchField>
+                                  {c.type !== "derived" && (c.definition_json?.expression || c.definition_json?.sql) ? (
+                                    <SqlBatchField label="口径表达式">
+                                      {/* 口径溯源（P2）：候选口径表达式创建前即可核对——Tooltip 展示完整
+                                          expression（CASE/窗口等原始结构），不必"先创建再改"。B：不再仅
+                                          atomic 显示——派生（C 分支只读展示）与复合（完整 SQL 口径）同享 */}
+                                      <Tooltip title={`口径表达式：${String(c.definition_json?.expression || c.definition_json?.sql)}`}>
+                                        <Typography.Text
+                                          type="secondary"
+                                          style={{ fontSize: 12, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "help" }}
+                                        >
+                                          {String(c.definition_json?.expression || c.definition_json?.sql)}
+                                        </Typography.Text>
+                                      </Tooltip>
+                                    </SqlBatchField>
+                                  ) : null}
+                                </div>
                               </div>
                             ))}
                           </div>
@@ -3993,7 +4047,7 @@ export function MetricCreate() {
           </Button>
         </div>
       </Modal>
-      </Drawer>
+      </ResizableDrawer>
 
       {/* SQL 批量创建结果「快速编辑」抽屉：当前页内编辑已创建 DRAFT 指标，
           上一条/下一条切换批内候选（不跳详情页、不影响当前窗口） */}
