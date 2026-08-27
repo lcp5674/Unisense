@@ -73,6 +73,21 @@ class MetricMountService(BaseService):
 
     async def update_mount(self, mount_id: int, data: MetricMountUpdate) -> MetricMount:
         mount = await self.get_mount(mount_id)
+        metric = await self._require_metric(mount.metric_id)
+        # 已发布指标修改挂载粒度/源表 = 破坏性口径变更（对齐 semantic._sync_mounts
+        # 判定：granularity/source_table 变化触发 PENDING_VERSION 消费方确认）：
+        # 禁止绕过确认流直接生效——须经指标更新接口提交（mounts 带 id + 变更原因），
+        # 由 semantic._sync_mounts 判定破坏性走 PENDING_VERSION 消费方确认（14 天）。
+        # 仅实际变更拦截；传相同值或改非破坏字段（度量列/周期/域/限定）放行。
+        if metric.status == "PUBLISHED" and (
+            (data.source_table is not None and data.source_table != mount.source_table)
+            or (data.granularity is not None and data.granularity != mount.granularity)
+        ):
+            raise UnisenseError(
+                "已发布指标修改挂载粒度/源表属破坏性变更，须经消费方确认——请通过"
+                "指标详情「编辑」提交（变更原因必填，确认后生效）",
+                error_code="MOUNT_UPDATE_REQUIRES_CONFIRMATION",
+            )
         if data.source_table is not None:
             mount.source_table = data.source_table
         if data.source_column is not None:

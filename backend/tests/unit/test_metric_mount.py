@@ -262,12 +262,73 @@ class TestMountService:
             await svc.get_mount(1)
 
     async def test_update_mount(self) -> None:
-        svc, repo = await _svc()
+        """DRAFT/REVIEW 指标修改粒度/源表直接生效（非破坏性，无消费方确认期）。"""
+        svc, repo = await _svc_with_metric("derived")
         m = _mount()
         repo.get = AsyncMock(return_value=m)
         out = await svc.update_mount(1, MetricMountUpdate(source_table="dwd.v2", granularity="月"))
         assert out.source_table == "dwd.v2"
         assert out.granularity == "月"
+        repo.commit.assert_awaited()
+
+    @pytest.mark.parametrize(
+        "update",
+        [
+            MetricMountUpdate(granularity="月"),
+            MetricMountUpdate(source_table="dwd.v2"),
+        ],
+    )
+    async def test_update_mount_rejects_published_breaking(self, update: MetricMountUpdate) -> None:
+        """已发布指标修改挂载粒度/源表 = 破坏性口径变更，禁止绕过确认流直接生效。
+
+        与 semantic._sync_mounts 判定一致（granularity/source_table 变化触发
+        PENDING_VERSION 消费方确认）；须经指标更新接口提交（mounts 带 id + 变更原因）。
+        """
+        svc, repo = await _svc()
+        metric = _metric()
+        metric.status = "PUBLISHED"
+        svc._require_metric = AsyncMock(return_value=metric)  # noqa: SLF001
+        repo.get = AsyncMock(return_value=_mount())
+        with pytest.raises(UnisenseError) as exc:
+            await svc.update_mount(1, update)
+        assert exc.value.error_code == "MOUNT_UPDATE_REQUIRES_CONFIRMATION"
+        repo.commit.assert_not_awaited()
+
+    async def test_update_mount_allows_non_breaking_on_published(self) -> None:
+        """已发布指标仅改非破坏字段（业务限定/默认周期/域/度量列）不拦截。"""
+        svc, repo = await _svc()
+        metric = _metric()
+        metric.status = "PUBLISHED"
+        svc._require_metric = AsyncMock(return_value=metric)  # noqa: SLF001
+        m = _mount()
+        repo.get = AsyncMock(return_value=m)
+        out = await svc.update_mount(
+            1,
+            MetricMountUpdate(
+                business_filter="病种=门特",
+                default_period="month",
+                domain="medical",
+                source_column="occur_amt",
+            ),
+        )
+        assert out.business_filter == "病种=门特"
+        assert out.default_period == "month"
+        assert out.domain == "medical"
+        assert out.source_column == "occur_amt"
+        repo.commit.assert_awaited()
+
+    async def test_update_mount_allows_same_value_on_published(self) -> None:
+        """已发布指标传与原值相同的粒度/源表不算变更，放行（幂等更新）。"""
+        svc, repo = await _svc()
+        metric = _metric()
+        metric.status = "PUBLISHED"
+        svc._require_metric = AsyncMock(return_value=metric)  # noqa: SLF001
+        m = _mount()
+        repo.get = AsyncMock(return_value=m)
+        out = await svc.update_mount(1, MetricMountUpdate(granularity="日", source_table="dwd.sales_detail"))
+        assert out.granularity == "日"
+        assert out.source_table == "dwd.sales_detail"
+        repo.commit.assert_awaited()
 
     async def test_delete_mount_soft_deletes(self) -> None:
         """DRAFT/REVIEW 指标直接软删（非破坏性，无消费方确认期）。"""
