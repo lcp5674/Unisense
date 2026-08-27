@@ -392,6 +392,33 @@ async def test_escalate_transitions_to_escalated() -> None:
     assert any(e["event_type"] == "conflict_escalated" for e in events.published)
 
 
+async def test_force_close_open_conflict() -> None:
+    """悬空冲突处置：OPEN 冲突强制关闭 → CLOSED + 留痕 + 事件 + 清指标标记。"""
+    svc, repo, events, clearer, _ = _svc()
+    req = ConflictCheckRequest(
+        candidate=MetricInput(metric_code="gmv_total", domain="sales", definition="sum(amount)"),
+        existing=[MetricInput(metric_code="gmv_total", domain="finance", definition="sum(price)")],
+    )
+    await svc.check(req.candidate, req.existing)
+    assert repo.conflicts
+    conflict_id = repo.conflicts[0].conflict_id
+    conflict = await svc.force_close(conflict_id, actor_id=7)
+    assert conflict.status == ConflictStatus.CLOSED
+    assert conflict.resolved_at is not None
+    assert conflict.decision_json["force_closed"] is True
+    assert conflict.decision_json["force_closed_by"] == 7
+    assert any(e["event_type"] == "conflict_forced_closed" for e in events.published)
+    assert "gmv_total" in clearer.cleared
+
+
+async def test_force_close_rejects_ruled() -> None:
+    """已 RULED 冲突不可强制关闭（走常规 close）。"""
+    svc, _, _, _, _ = _svc()
+    conflict = await _ruled_conflict(svc, svc._repo)
+    with pytest.raises(ConflictError):
+        await svc.force_close(conflict.conflict_id, actor_id=7)
+
+
 async def _ruled_conflict(svc: ConflictService, repo: FakeRepo) -> Conflict:
     """构造一条已 RULED 的冲突（含 metric_codes 候选/现有），返回仲裁后的 conflict。"""
     req = ConflictCheckRequest(

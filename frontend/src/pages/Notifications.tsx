@@ -63,6 +63,8 @@ const EVENT_TYPE_LABEL: Record<string, string> = {
   "conflict_open": "口径冲突待处理",
   "conflict_ruled": "口径冲突已裁决",
   "conflict_escalated": "口径冲突已升级",
+  "conflict_forced_closed": "口径冲突已强制关闭",
+  "conflict_escalation_overdue": "口径冲突升级超时未处置",
   "pii_conflict": "PII 冲突",
   "quality.anomaly": "数据质量异常告警",
   "reconciliation.alert": "对账告警",

@@ -87,6 +87,7 @@ class ConflictResponse(BaseModel):
     arbitrator_id: int | None = None
     decision_json: dict[str, Any] | None = None
     created_at: datetime | None = None
+    updated_at: datetime | None = None
     resolved_at: datetime | None = None
     # B1-1: 前端 types.ts 依赖的字段（从 metric_codes / decision_json / created_at 推导）
     severity: str | None = None
@@ -115,6 +116,7 @@ class ConflictResponse(BaseModel):
             arbitrator_id=m.arbitrator_id,
             decision_json=m.decision_json,
             created_at=m.created_at,
+            updated_at=getattr(m, "updated_at", None),
             resolved_at=m.resolved_at,
             # B1-1: 推导缺失字段；治理字段直接读模型（迁移 0090），
             # 仲裁台据此区分软/硬冲突与来源，而非从 decision_json 猜

@@ -67,6 +67,10 @@ BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     "conflict_open",
     "conflict_ruled",
     "conflict_escalated",
+    # 悬空冲突强制关闭（conflict/service.py force_close 发布，管理员处置留痕）
+    "conflict_forced_closed",
+    # 升级超时强提醒（conflict/sla_tasks.py remind_stale_escalated 定向通知管理员）
+    "conflict_escalation_overdue",
     "pii_conflict",
     "grant.granted",
     "grant.revoked",

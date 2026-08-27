@@ -1562,6 +1562,15 @@ async def delete_metric(
     http_req: Request,
 ) -> ApiResponse[None]:
     """软删除 DRAFT/DEPRECATED 指标；仅平台/域管理员或原 Owner（service 层校验）。"""
+    # 跨服务一致性（TD §12.4）：删除前检查是否被未决冲突引用——候选/现有指标被删后，
+    # 引用它的 OPEN/NEGOTIATING/ESCALATED 冲突会失去对比对象（悬空），必须先处置。
+    pending = await ConflictRepository(db).count_open_for_metric(metric_code)
+    if pending > 0:
+        raise BusinessError(
+            f"指标 {metric_code} 仍被 {pending} 条未决口径冲突引用，"
+            "请先在冲突仲裁台处置（仲裁/关闭/强制关闭）后再删除",
+            error_code="CONFLICT_EXISTS",
+        )
     service = MetricService(db)
     metric = await service.delete_metric(metric_code, actor_id=user.id, role=user.role)
     await write_audit(

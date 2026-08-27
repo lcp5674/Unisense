@@ -532,6 +532,34 @@ async def close_conflict(
 
 
 @router.post(
+    "/{conflict_id}/force-close",
+    dependencies=_GOV_DEPS,
+)
+async def force_close_conflict(
+    conflict_id: str,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """强制关闭未决冲突（悬空处置：关联指标已删，仲裁失去对象）。"""
+    svc = _svc(db, request)
+    conflict = await svc.force_close(conflict_id, actor_id=user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="conflict.force_close",
+        entity_type="conflict",
+        entity_id=conflict_id,
+        detail={},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=ConflictResponse.from_model(conflict).model_dump(), trace_id=trace_id)
+
+
+@router.post(
     "/{conflict_id}/reopen",
     dependencies=_GOV_DEPS,
 )

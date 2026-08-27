@@ -8,7 +8,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.models.conflict import Conflict, ConflictStatus, ConflictType
-from app.services.conflict.sla_tasks import _CONFLICT_SLA_DAYS, auto_escalate_overdue
+from app.services.conflict.sla_tasks import (
+    _CONFLICT_SLA_DAYS,
+    _ESCALATED_REMIND_HOURS,
+    auto_escalate_overdue,
+    remind_stale_escalated,
+)
 
 
 def _conflict(
@@ -98,3 +103,71 @@ async def test_single_failure_does_not_block(monkeypatch: pytest.MonkeyPatch) ->
     result = await auto_escalate_overdue({})
     assert result["scanned"] == 2
     assert result["escalated"] == 1
+
+
+def _escalated_stale() -> Conflict:
+    return Conflict(
+        id=1,
+        conflict_id="CF-X",
+        metric_a=1,
+        metric_b=2,
+        type=ConflictType.SAME_NAME_DIFF_DEF,
+        status=ConflictStatus.ESCALATED,
+        domain="sales",
+        created_at=datetime.now(UTC) - timedelta(days=2),
+        updated_at=datetime.now(UTC) - timedelta(hours=_ESCALATED_REMIND_HOURS + 1),
+    )
+
+
+def _scalars_all(values: list) -> MagicMock:
+    return MagicMock(scalars=lambda: MagicMock(all=lambda: values))
+
+
+async def test_remind_stale_escalated_notifies_admins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """升级超时冲突 → 定向通知平台管理员 + 域管理员。"""
+    stale = _escalated_stale()
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.execute = AsyncMock(
+        side_effect=[
+            _scalars_all([stale]),  # 查冲突
+            _scalars_all([1]),  # 平台管理员
+            _scalars_all([2]),  # 域管理员
+        ]
+    )
+    db.__aenter__ = AsyncMock(return_value=db)
+    db.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr("app.db.mysql.async_session_factory", lambda: db)
+
+    notified: list[tuple[int, str]] = []
+
+    class _FakeNotify:
+        def __init__(self, db: object) -> None:
+            pass
+
+        async def notify_user(self, user_id: int, event_type: str, title: str, body: str | None = None, payload: dict | None = None, *, channel: str = "IN_APP") -> object:
+            notified.append((user_id, event_type))
+            return object()
+
+    monkeypatch.setattr("app.services.notify.service.NotifyService", _FakeNotify)
+
+    result = await remind_stale_escalated({})
+    assert result["scanned"] == 1
+    assert result["notified"] == 2
+    assert sorted(uid for uid, _ in notified) == [1, 2]
+    assert all(et == "conflict_escalation_overdue" for _, et in notified)
+
+
+async def test_remind_stale_escalated_skips_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """48 小时内升级的冲突不提醒（未超时）。"""
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.execute = AsyncMock(return_value=_scalars_all([]))
+    db.__aenter__ = AsyncMock(return_value=db)
+    db.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr("app.db.mysql.async_session_factory", lambda: db)
+
+    result = await remind_stale_escalated({})
+    assert result == {"scanned": 0, "notified": 0}

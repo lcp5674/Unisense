@@ -4675,6 +4675,17 @@ class MetricService(BaseService):
                     "arbitration_mark": archived.arbitration_mark,
                 },
             )
+        if archived is not None:
+            # 普通软删（无仲裁 successor）：对比/仲裁场景下给出「已删除」友好引导，
+            # 而非裸「指标不存在」——冲突候选指标被删后，仲裁台据此提示先处置冲突。
+            raise NotFoundError(
+                f"指标已被删除: {metric_code}",
+                error_code=ErrorCode.METRIC_DELETED,
+                ctx={
+                    "metric_code": metric_code,
+                    "deleted_at": archived.deleted_at.isoformat() if archived.deleted_at else None,
+                },
+            )
         raise NotFoundError(f"指标不存在: {metric_code}")
 
     async def compare_metrics(

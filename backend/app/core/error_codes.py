@@ -32,6 +32,8 @@ class ErrorCode(StrEnum):
     METRIC_NOT_FOUND = "METRIC_NOT_FOUND"
     # 指标因口径仲裁被作废（软删但带 successor），详情直访时给出友好引导而非裸 404
     METRIC_ARCHIVED = "METRIC_ARCHIVED"
+    # 指标被普通软删（无 successor，非仲裁作废），对比/详情给出「已删除」引导而非裸 404
+    METRIC_DELETED = "METRIC_DELETED"
     NOT_FOUND = "NOT_FOUND"
     CONFLICT = "CONFLICT"
     VERSION_CONFLICT = "VERSION_CONFLICT"

@@ -1869,6 +1869,24 @@ async def test_compare_metrics_archived_metric_raises_metric_archived():
     assert exc_info.value.ctx["arbitration_mark"]["status"] == "defeated"
 
 
+async def test_compare_metrics_plain_deleted_metric_raises_metric_deleted():
+    """跨服务一致性：对比中关联指标被普通软删（无仲裁 successor）→ 抛 METRIC_DELETED
+    （携带 deleted_at），供仲裁台提示「指标已删除，建议先处置冲突」而非裸 404。"""
+    svc, repo = _svc_with_repo()
+    m2 = make_metric(metric_code="m2", definition_json={"expression": "SUM(y)"})
+    repo.get_by_code = AsyncMock(side_effect=[None, m2])
+    archived_m1 = make_metric(metric_code="m1", deleted_at=datetime.now(UTC))
+    archived_m1.successor_code = None
+    repo.get_archived_by_code = AsyncMock(return_value=archived_m1)
+
+    from app.core.error_codes import ErrorCode
+
+    with pytest.raises(NotFoundError) as exc_info:
+        await svc.compare_metrics("m1", "m2")
+    assert exc_info.value.error_code == ErrorCode.METRIC_DELETED
+    assert exc_info.value.ctx["deleted_at"] is not None
+
+
 async def test_compare_matrix_all_identical():
     """多指标矩阵：三指标所有字段一致 → 每行 all_identical。"""
     svc, repo = _svc_with_repo()

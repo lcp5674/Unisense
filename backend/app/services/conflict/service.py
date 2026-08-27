@@ -490,6 +490,45 @@ class ConflictService(BaseService):
         await self._sync_metric_conflict_flag(conflict)
         return conflict
 
+    async def force_close(self, conflict_id: str, *, actor_id: int | None = None) -> Conflict:
+        """强制关闭未决冲突（OPEN/NEGOTIATING/ESCALATED → CLOSED，仅治理管理员）。
+
+        悬空冲突处置（TD §12.4 扩展）：冲突关联指标已被普通删除（无仲裁 successor）
+        时，对比/仲裁失去对象、无法按常规状态机流转（close 仅限 RULED），这类冲突
+        卡死在 OPEN/ESCALATED。force_close 允许治理管理员将其置 CLOSED 并留痕
+        （decision_json.force_closed + 关闭人），发布 conflict_forced_closed 事件。
+
+        Raises:
+            ConflictError: 状态不可强制关闭（RULED/CLOSED 走常规 close/保持关闭）。
+        """
+        conflict = await self.get(conflict_id)
+        if conflict.status not in (
+            ConflictStatus.OPEN,
+            ConflictStatus.NEGOTIATING,
+            ConflictStatus.ESCALATED,
+        ):
+            raise ConflictError(
+                f"仅 OPEN/NEGOTIATING/ESCALATED 状态可强制关闭，当前 {conflict.status.value}"
+            )
+        decision_json = dict(conflict.decision_json or {})
+        decision_json["force_closed"] = True
+        decision_json["force_closed_by"] = actor_id
+        conflict = await self._repo.update_status(
+            conflict, ConflictStatus.CLOSED, decision_json=decision_json, resolved=True
+        )
+        # 兜底联动：清除候选指标 pending_conflict 冗余标记（幂等）
+        await self._sync_metric_conflict_flag(conflict)
+        await self._safe_publish(
+            {
+                "event_type": "conflict_forced_closed",
+                "payload": {
+                    "conflict_id": conflict.conflict_id,
+                    "force_closed_by": actor_id,
+                },
+            }
+        )
+        return conflict
+
     async def reopen(self, conflict_id: str) -> Conflict:
         """重新打开已关闭冲突为待处理（CLOSED → OPEN），供重新裁决。
 

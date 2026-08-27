@@ -1170,6 +1170,14 @@ export async function closeConflict(conflictId: string): Promise<ConflictRespons
   });
 }
 
+// 强制关闭未决冲突（悬空处置：关联指标已删，仲裁失去对象；仅治理管理员）
+export async function forceCloseConflict(conflictId: string): Promise<ConflictResponse> {
+  return request<ConflictResponse>(`${API_BASE}/conflicts/${conflictId}/force-close`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
 // 重新打开已关闭冲突（CLOSED → OPEN，供重新裁决）：POST /conflicts/{id}/reopen
 export async function reopenConflict(conflictId: string): Promise<ConflictResponse> {
   return request<ConflictResponse>(`${API_BASE}/conflicts/${conflictId}/reopen`, {

@@ -26,7 +26,7 @@ from app.core.logging import configure_logging
 from app.services.collector.queue import RedisJobStore
 from app.services.collector.repository import CollectorRepository
 from app.services.collector.tasks import run_collection_task
-from app.services.conflict.sla_tasks import auto_escalate_overdue
+from app.services.conflict.sla_tasks import auto_escalate_overdue, remind_stale_escalated
 from app.services.lineage.neo4j_sync import sync_neo4j_assets_task
 from app.services.lineage.scan_tasks import lineage_scan_task
 from app.services.notify.consumers import register_notify_event_consumers
@@ -220,6 +220,7 @@ class WorkerSettings:
         purge_collection_runs_task,
         stale_collection_jobs_task,
         auto_escalate_overdue,
+        remind_stale_escalated,
         sync_neo4j_assets_task,
         lineage_scan_task,
         purge_retained_records,
@@ -309,6 +310,13 @@ class WorkerSettings:
             name="conflict-sla-escalation",
             hour=6,
             minute=0,
+            run_at_startup=True,
+        ),
+        cron(
+            remind_stale_escalated,
+            name="conflict-escalated-reminder",
+            hour=6,
+            minute=5,
             run_at_startup=True,
         ),
         cron(

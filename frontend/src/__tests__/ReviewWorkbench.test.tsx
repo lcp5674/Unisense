@@ -9,6 +9,7 @@ vi.mock("../api", () => ({
   arbitrateConflict: vi.fn(),
   escalateConflict: vi.fn(),
   closeConflict: vi.fn(),
+  forceCloseConflict: vi.fn(),
   reopenConflict: vi.fn(),
   compareMetrics: vi.fn(),
   listConflictRulings: vi.fn(),
@@ -46,6 +47,7 @@ import {
   listConflicts,
   arbitrateConflict,
   closeConflict,
+  forceCloseConflict,
   reopenConflict,
   compareMetrics,
   listConflictRulings,
@@ -55,6 +57,7 @@ import {
 const mockedList = vi.mocked(listConflicts);
 const mockedArbitrate = vi.mocked(arbitrateConflict);
 const mockedClose = vi.mocked(closeConflict);
+const mockedForceClose = vi.mocked(forceCloseConflict);
 const mockedReopen = vi.mocked(reopenConflict);
 const mockedCompare = vi.mocked(compareMetrics);
 const mockedRulings = vi.mocked(listConflictRulings);
@@ -173,6 +176,52 @@ describe("ReviewWorkbench 冲突仲裁", () => {
       expect(mockedClose).toHaveBeenCalledWith("CF-C"),
     );
     expect(mockedList).toHaveBeenCalledTimes(2); // 初始 + 关闭后刷新
+  });
+
+  it("OPEN 冲突可强制关闭（悬空处置）→ 确认后调用 forceCloseConflict", async () => {
+    renderWorkbench();
+    await waitFor(() => expect(screen.getByText("CF-A")).toBeInTheDocument());
+    const openRow = screen.getByText("CF-A").closest("tr") as HTMLElement;
+    fireEvent.click(within(openRow).getByRole("button", { name: /强制关闭/ }));
+    await waitFor(() => expect(screen.getByText(/强制关闭该冲突/)).toBeInTheDocument());
+    // Popconfirm 确认按钮与行内按钮同文案，取最后渲染的（浮层）确认按钮
+    const confirmBtns = screen.getAllByRole("button", { name: /强制关闭/ });
+    fireEvent.click(confirmBtns[confirmBtns.length - 1]);
+    await waitFor(() => expect(mockedForceClose).toHaveBeenCalledWith("CF-A"));
+  });
+
+  it("升级超时红标：ESCALATED 且超 48h 未处置显示「升级超时」", async () => {
+    const overdue = baseConflict({
+      conflict_id: "CF-E",
+      status: "ESCALATED",
+      created_at: new Date(Date.now() - 3 * 86400000).toISOString(),
+      updated_at: new Date(Date.now() - 3 * 86400000).toISOString(),
+    });
+    mockedList.mockResolvedValue({
+      items: [overdue],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    } as ConflictListResponse);
+    renderWorkbench();
+    await waitFor(() => expect(screen.getByText("CF-E")).toBeInTheDocument());
+    const row = screen.getByText("CF-E").closest("tr") as HTMLElement;
+    expect(within(row).getByText("升级超时")).toBeInTheDocument();
+    expect(within(row).getByText("已升级")).toBeInTheDocument();
+  });
+
+  it("对比命中 METRIC_DELETED（指标已删）→ 友好提示建议强制关闭", async () => {
+    mockedCompare.mockRejectedValue(
+      new UnisenseApiError("指标已被删除: sales_gmv_d", "METRIC_DELETED", 404, ""),
+    );
+    renderWorkbench();
+    await waitFor(() => expect(screen.getByText("CF-A")).toBeInTheDocument());
+    const row = screen.getByText("CF-A").closest("tr") as HTMLElement;
+    fireEvent.click(within(row).getByRole("button", { name: /对\s*比/ }));
+    await waitFor(() =>
+      expect(screen.getByText(/关联指标已被删除.*建议先「强制关闭」/)).toBeInTheDocument(),
+    );
+    expect(mockedCompare).toHaveBeenCalledWith("sales_gmv_day", "sales_gmv_d");
   });
 
   it("CLOSED 冲突提供重新打开入口（可对比复看），不再提供仲裁/关闭", async () => {

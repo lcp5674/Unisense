@@ -440,6 +440,7 @@ export interface ConflictResponse {
   detected_at?: string;
   resolved_at?: string | null;
   created_at?: string;
+  updated_at?: string | null;
 }
 
 export interface ConflictListResponse {

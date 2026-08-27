@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { Alert, Button, Card, Input, Modal, Radio, Select, Space, Table, Tag, message } from "antd";
+import { Alert, Button, Card, Input, Modal, Popconfirm, Radio, Select, Space, Table, Tag, message } from "antd";
 import { ArrowLeftOutlined } from "@ant-design/icons";
 import {
   arbitrateConflict,
   closeConflict,
   compareMetrics,
   escalateConflict,
+  forceCloseConflict,
   listConflicts,
   listConflictRulings,
   listUsers,
@@ -37,6 +38,16 @@ const STATUS_COLOR: Record<string, string> = {
   ESCALATED: "error",
 };
 
+// ESCALATED 升级超时判定：距最近状态变更（updated_at，缺省回落 created_at）超过阈值
+function isEscalationOverdue(c: ConflictResponse): boolean {
+  if (c.status !== "ESCALATED") return false;
+  const raw = c.updated_at ?? c.created_at;
+  if (!raw) return false;
+  const ts = new Date(raw).getTime();
+  if (Number.isNaN(ts)) return false;
+  return Date.now() - ts > ESCALATED_TIMEOUT_HOURS * 3600 * 1000;
+}
+
 const CONFLICT_TYPE_LABEL: Record<string, string> = {
   same_name_diff_def: "同名不同义",
   same_def_diff_name: "同义不同名",
@@ -60,6 +71,9 @@ const SOURCE_LABEL: Record<string, string> = {
   manual: "人工预检",
   backfill: "存量回填",
 };
+
+// 升级超时阈值（小时）：ESCALATED 超过该时长仍未处置 → 红标「升级超时」提示
+const ESCALATED_TIMEOUT_HOURS = 48;
 
 // 仲裁决策：choose_existing/choose_candidate 映射后端 choose_canonical；merge/keep_diff 一一对应。
 // keep_diff_rename：保留差异 + 指定一方改名（同名不同义时区分口径，TD §12.4）。
@@ -259,6 +273,13 @@ export function ReviewWorkbench({ embedded = false }: { embedded?: boolean } = {
         );
         return;
       }
+      if (err instanceof UnisenseApiError && err.code === "METRIC_DELETED") {
+        setCompareResult(null);
+        message.warning(
+          "该冲突的关联指标已被删除（非仲裁作废），对比失去对象。建议先「强制关闭」该冲突或删除冲突记录。",
+        );
+        return;
+      }
       message.error(errText(err, "加载差异对比失败"));
     } finally {
       setCompareLoading(false);
@@ -336,6 +357,21 @@ export function ReviewWorkbench({ embedded = false }: { embedded?: boolean } = {
     }
   }
 
+  // 强制关闭未决冲突（悬空处置：关联指标已删、仲裁失去对象时由治理管理员关闭留痕）
+  async function handleForceClose(c: ConflictResponse) {
+    setBusyId(c.conflict_id);
+    try {
+      await forceCloseConflict(c.conflict_id);
+      message.success(`已强制关闭：${c.conflict_id}`);
+      track("review_force_close", c.conflict_id, "conflict");
+      load();
+    } catch (err) {
+      message.error(errText(err, "强制关闭失败"));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   // 重新打开已关闭冲突（CLOSED → OPEN，重新裁决）；候选指标将重新标记「口径冲突待处理」
   async function handleReopen(c: ConflictResponse) {
     if (!c) return;
@@ -408,6 +444,23 @@ export function ReviewWorkbench({ embedded = false }: { embedded?: boolean } = {
         </Button>,
       );
     }
+    // 悬空冲突处置：关联指标已删、仲裁失去对象时，治理管理员可强制关闭留痕
+    if (c.status === "OPEN" || c.status === "NEGOTIATING" || c.status === "ESCALATED") {
+      actions.push(
+        <Popconfirm
+          key="force-close"
+          title="强制关闭该冲突？"
+          description="关联指标已删除或无法常规流转时，由治理管理员强制关闭并留痕。"
+          okText="强制关闭"
+          cancelText="取消"
+          onConfirm={() => handleForceClose(c)}
+        >
+          <Button size="small" disabled={busyId === c.conflict_id || !can("review:close")}>
+            强制关闭
+          </Button>
+        </Popconfirm>,
+      );
+    }
     if (c.status === "RULED") {
       actions.push(
         <Button size="small" disabled={busyId === c.conflict_id || !can("review:close")} onClick={() => handleClose(c)}>
@@ -456,7 +509,12 @@ export function ReviewWorkbench({ embedded = false }: { embedded?: boolean } = {
       title: "状态",
       dataIndex: "status",
       key: "status",
-      render: (s: string) => <Tag color={STATUS_COLOR[s]}>{STATUS_LABEL[s] ?? s}</Tag>,
+      render: (_: unknown, r: ConflictResponse) => (
+        <Space size={4} wrap>
+          <Tag color={STATUS_COLOR[r.status]}>{STATUS_LABEL[r.status] ?? r.status}</Tag>
+          {isEscalationOverdue(r) ? <Tag color="red">升级超时</Tag> : null}
+        </Space>
+      ),
     },
     {
       title: "相似度",
@@ -523,6 +581,13 @@ export function ReviewWorkbench({ embedded = false }: { embedded?: boolean } = {
         title="审核工作台（冲突仲裁）"
         extra={
           <Space>
+            <Button
+              size="small"
+              type={status === "ESCALATED" ? "primary" : "default"}
+              onClick={() => setStatus(status === "ESCALATED" ? "" : "ESCALATED")}
+            >
+              升级队列
+            </Button>
             <Select
               value={severity || undefined}
               onChange={(v) => setSeverity(v || "")}

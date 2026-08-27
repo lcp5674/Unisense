@@ -70,7 +70,11 @@ async def test_get_archived_metric(metrics_client: httpx.AsyncClient) -> None:
 
 async def test_archive_metric(metrics_client: httpx.AsyncClient) -> None:
     """归档（DELETE）→ 200，调用携带角色（管理员或原 Owner）。"""
-    with patch("app.api.metrics.MetricService") as mock_svc:
+    with (
+        patch("app.api.metrics.ConflictRepository") as mock_conflict,
+        patch("app.api.metrics.MetricService") as mock_svc,
+    ):
+        mock_conflict.return_value.count_open_for_metric = AsyncMock(return_value=0)
         mock_svc.return_value.delete_metric = AsyncMock(return_value=_metric())
         mock_svc.return_value.run_lineage_post_commit = AsyncMock()
         resp = await metrics_client.delete("/api/v1/metric-definitions/sales_gmv_d")
@@ -78,6 +82,17 @@ async def test_archive_metric(metrics_client: httpx.AsyncClient) -> None:
     mock_svc.return_value.delete_metric.assert_awaited_once_with(
         "sales_gmv_d", actor_id=1, role="platform_admin"
     )
+
+
+async def test_archive_metric_blocked_by_pending_conflict(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """删除被未决冲突引用的指标 → 400 CONFLICT_EXISTS（悬空冲突防护）。"""
+    with patch("app.api.metrics.ConflictRepository") as mock_conflict:
+        mock_conflict.return_value.count_open_for_metric = AsyncMock(return_value=2)
+        resp = await metrics_client.delete("/api/v1/metric-definitions/sales_gmv_d")
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "CONFLICT_EXISTS"
 
 
 async def test_restore_metric(metrics_client: httpx.AsyncClient) -> None:
