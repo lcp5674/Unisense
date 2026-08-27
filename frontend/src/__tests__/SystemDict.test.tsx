@@ -206,6 +206,18 @@ describe("SystemDict 页面", () => {
     expect(callArg.extra).toEqual({ unit: "%" });
   });
 
+  it("指标命名词根字典类型：tab 与弹窗标题展示中文而非英文编码", async () => {
+    mockedTypes.mockResolvedValue(["metric_name_morpheme"]);
+    mockedItems.mockResolvedValue([]);
+    renderDict();
+    // tab 展示中文「指标命名词根」（DICT_TYPE_LABELS 已注册），而非英文编码 metric_name_morpheme
+    const tab = await screen.findByRole("tab", { name: /指标命名词根/ });
+    expect(tab.textContent).not.toContain("metric_name_morpheme");
+    // 新增弹窗标题同样使用中文类型名
+    fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
+    await screen.findByText(/新增 指标命名词根 参照数据项/);
+  });
+
   it("新增弹窗打开时静默刷新项列表（缩小并发滞后窗口）", async () => {
     renderDict();
     await screen.findByText("日");

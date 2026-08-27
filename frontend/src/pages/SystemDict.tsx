@@ -36,6 +36,9 @@ const DICT_TYPE_LABELS: Record<string, string> = {
   measure_format: "度量格式",
   // 原子指标口径库：源头系统（dict_type=source_system，提供候选，保留自由输入）
   source_system: "源头系统",
+  // 指标命名词根（dict_type=metric_name_morpheme，0102/0103 迁移种入）：指标命名
+  // 校验的受控词根，字典管理在线增删/启停用即时对命名校验生效
+  metric_name_morpheme: "指标命名词根",
 };
 
 // 打开新增弹窗时静默刷新的最小间隔（毫秒）：TTL 内重复打开直接用缓存，避免
