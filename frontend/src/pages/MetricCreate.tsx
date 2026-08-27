@@ -457,6 +457,9 @@ export function MetricCreate() {
   const [sqlBatchSplitMode, setSqlBatchSplitMode] = useState<"semicolon" | "statement" | "custom">(
     "statement"
   );
+  // 口径详情查看：批量候选 definition_json 完整展示（expression/sql/source_tables/
+  // partition_key/dw_definition 等全部字段，含长 SQL 不截断）——当前查看的候选
+  const [defDetailCandidate, setDefDetailCandidate] = useState<SqlBatchCandidate | null>(null);
   // P2-8：custom 模式自定义切分规则（delimiters/start_markers 正则，逗号分隔多规则）
   const [sqlBatchCustomDelimiters, setSqlBatchCustomDelimiters] = useState("");
   const [sqlBatchCustomMarkers, setSqlBatchCustomMarkers] = useState("");
@@ -3474,25 +3477,6 @@ export function MetricCreate() {
                                           options={measureOptions.map((o) => ({ value: o.value, label: o.label }))}
                                         />
                                       </SqlBatchField>
-                                      <SqlBatchField label="产品负责">
-                                        {/* P1-2（第六轮）：批量候选行产品需求方——此前批量流全程无法
-                                            设置责任方（解析器不产出 owner、候选行无控件），批量产物
-                                            OwnerChain 全空；对齐单条 RoleOwnerSelect 的最小形态，仅设
-                                            product_owner（tech/dw 随创建人/域默认）。提交透传
-                                            product_owner_id，后端 Phase1 落 Metric 三方责任 */}
-                                        <Select
-                                          size="small"
-                                          showSearch
-                                          allowClear
-                                          style={{ width: 120 }}
-                                          placeholder="产品负责"
-                                          optionFilterProp="label"
-                                          value={c.product_owner_id ?? undefined}
-                                          onChange={(v) => handleSqlBatchEdit(c.key, { product_owner_id: v ?? null })}
-                                          data-testid={`sql-batch-owner-${c.key}`}
-                                          options={ownerUsers.map((u) => ({ value: u.id, label: u.display_name || u.username }))}
-                                        />
-                                      </SqlBatchField>
                                     </>
                                   ) : (
                                     <>
@@ -3536,14 +3520,24 @@ export function MetricCreate() {
                                            避免与复合指标（依赖+公式）混淆 */
                                         <SqlBatchField label="派生口径">
                                           {c.definition_json?.expression ? (
-                                            <Tooltip title={`派生口径表达式：${String(c.definition_json.expression)}`}>
-                                              <Typography.Text
-                                                type="secondary"
-                                                style={{ fontSize: 12, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "help", display: "inline-block", verticalAlign: "middle" }}
+                                            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                                              <Tooltip title={`派生口径表达式：${String(c.definition_json.expression)}`}>
+                                                <Typography.Text
+                                                  type="secondary"
+                                                  style={{ fontSize: 12, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "help", display: "inline-block", verticalAlign: "middle" }}
+                                                >
+                                                  {String(c.definition_json.expression)}
+                                                </Typography.Text>
+                                              </Tooltip>
+                                              <Button
+                                                size="small"
+                                                type="link"
+                                                style={{ padding: "0 2px", fontSize: 12 }}
+                                                onClick={() => setDefDetailCandidate(c)}
                                               >
-                                                {String(c.definition_json.expression)}
-                                              </Typography.Text>
-                                            </Tooltip>
+                                                查看完整口径
+                                              </Button>
+                                            </div>
                                           ) : (
                                             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                                               派生（周期驱动）
@@ -3554,7 +3548,7 @@ export function MetricCreate() {
                                     </>
                                   )}
                                 </div>
-                                {/* 底部行：指标编码 + 口径表达式（Tooltip 展示完整口径） */}
+                                {/* 底部行：指标编码 + 口径表达式（可查看完整口径定义）+ 口径三方责任 */}
                                 <div style={{ display: "flex", gap: 12, rowGap: 8, flexWrap: "wrap", marginTop: 8 }}>
                                   <SqlBatchField label="指标编码">
                                     {/* P0-1：候选编码为空（域未定时后端不 bake-in）→ 提示选域后自动生成；
@@ -3572,17 +3566,72 @@ export function MetricCreate() {
                                     <SqlBatchField label="口径表达式">
                                       {/* 口径溯源（P2）：候选口径表达式创建前即可核对——Tooltip 展示完整
                                           expression（CASE/窗口等原始结构），不必"先创建再改"。B：不再仅
-                                          atomic 显示——派生（C 分支只读展示）与复合（完整 SQL 口径）同享 */}
-                                      <Tooltip title={`口径表达式：${String(c.definition_json?.expression || c.definition_json?.sql)}`}>
-                                        <Typography.Text
-                                          type="secondary"
-                                          style={{ fontSize: 12, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "help" }}
+                                          atomic 显示——派生（C 分支只读展示）与复合（完整 SQL 口径）同享。
+                                          D：新增「查看完整口径」——definition_json 全部字段（expression/
+                                          sql/source_tables/partition_key/dw_definition 等）不截断展示 */}
+                                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                                        <Tooltip title={`口径表达式：${String(c.definition_json?.expression || c.definition_json?.sql || "")}`}>
+                                          <Typography.Text
+                                            type="secondary"
+                                            style={{ fontSize: 12, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "help", display: "inline-block", verticalAlign: "middle" }}
+                                          >
+                                            {String(c.definition_json?.expression || c.definition_json?.sql || "—")}
+                                          </Typography.Text>
+                                        </Tooltip>
+                                        <Button
+                                          size="small"
+                                          type="link"
+                                          style={{ padding: "0 2px", fontSize: 12 }}
+                                          onClick={() => setDefDetailCandidate(c)}
+                                          data-testid={`sql-batch-def-${c.key}`}
                                         >
-                                          {String(c.definition_json?.expression || c.definition_json?.sql)}
-                                        </Typography.Text>
-                                      </Tooltip>
+                                          查看完整口径
+                                        </Button>
+                                      </div>
                                     </SqlBatchField>
                                   ) : null}
+                                  <SqlBatchField label="产品负责">
+                                    <Select
+                                      size="small"
+                                      showSearch
+                                      allowClear
+                                      style={{ width: 120 }}
+                                      placeholder="产品负责"
+                                      optionFilterProp="label"
+                                      value={c.product_owner_id ?? undefined}
+                                      onChange={(v) => handleSqlBatchEdit(c.key, { product_owner_id: v ?? null })}
+                                      data-testid={`sql-batch-owner-${c.key}`}
+                                      options={ownerUsers.map((u) => ({ value: u.id, label: u.display_name || u.username }))}
+                                    />
+                                  </SqlBatchField>
+                                  <SqlBatchField label="技术方">
+                                    <Select
+                                      size="small"
+                                      showSearch
+                                      allowClear
+                                      style={{ width: 120 }}
+                                      placeholder="技术方"
+                                      optionFilterProp="label"
+                                      value={c.tech_owner_id ?? undefined}
+                                      onChange={(v) => handleSqlBatchEdit(c.key, { tech_owner_id: v ?? null })}
+                                      data-testid={`sql-batch-tech-${c.key}`}
+                                      options={ownerUsers.map((u) => ({ value: u.id, label: u.display_name || u.username }))}
+                                    />
+                                  </SqlBatchField>
+                                  <SqlBatchField label="数仓开发">
+                                    <Select
+                                      size="small"
+                                      showSearch
+                                      allowClear
+                                      style={{ width: 120 }}
+                                      placeholder="数仓开发"
+                                      optionFilterProp="label"
+                                      value={c.dw_developer_id ?? undefined}
+                                      onChange={(v) => handleSqlBatchEdit(c.key, { dw_developer_id: v ?? null })}
+                                      data-testid={`sql-batch-dw-${c.key}`}
+                                      options={ownerUsers.map((u) => ({ value: u.id, label: u.display_name || u.username }))}
+                                    />
+                                  </SqlBatchField>
                                 </div>
                               </div>
                             ))}
@@ -3928,6 +3977,36 @@ export function MetricCreate() {
                 ),
               },
               {
+                title: "技术方", width: 120,
+                render: (_, c: SqlBatchCandidate) => (
+                  <Select
+                    size="small"
+                    showSearch
+                    allowClear
+                    style={{ width: 110 }}
+                    placeholder="技术方"
+                    value={c.tech_owner_id ?? undefined}
+                    onChange={(v) => handleSqlBatchEdit(c.key, { tech_owner_id: v ?? null })}
+                    options={ownerUsers.map((u) => ({ value: u.id, label: u.display_name || u.username }))}
+                  />
+                ),
+              },
+              {
+                title: "数仓开发", width: 120,
+                render: (_, c: SqlBatchCandidate) => (
+                  <Select
+                    size="small"
+                    showSearch
+                    allowClear
+                    style={{ width: 110 }}
+                    placeholder="数仓开发"
+                    value={c.dw_developer_id ?? undefined}
+                    onChange={(v) => handleSqlBatchEdit(c.key, { dw_developer_id: v ?? null })}
+                    options={ownerUsers.map((u) => ({ value: u.id, label: u.display_name || u.username }))}
+                  />
+                ),
+              },
+              {
                 title: "依赖指标（复合/派生）", width: 260,
                 render: (_, c: SqlBatchCandidate) =>
                   c.type === "atomic" ? (
@@ -3959,14 +4038,24 @@ export function MetricCreate() {
                       onChange={(e) => handleSqlBatchExprChange(c.key, e.target.value)}
                     />
                   ) : (
-                    <Tooltip title={`口径：${String(c.definition_json?.expression || c.definition_json?.sql || "")}`}>
-                      <Typography.Text
-                        type="secondary"
-                        style={{ fontSize: 12, maxWidth: 210, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "help", display: "inline-block", verticalAlign: "middle" }}
+                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      <Tooltip title={`口径：${String(c.definition_json?.expression || c.definition_json?.sql || "")}`}>
+                        <Typography.Text
+                          type="secondary"
+                          style={{ fontSize: 12, maxWidth: 150, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "help", display: "inline-block", verticalAlign: "middle" }}
+                        >
+                          {String(c.definition_json?.expression || c.definition_json?.sql || "—")}
+                        </Typography.Text>
+                      </Tooltip>
+                      <Button
+                        size="small"
+                        type="link"
+                        style={{ padding: "0 2px", fontSize: 12 }}
+                        onClick={() => setDefDetailCandidate(c)}
                       >
-                        {String(c.definition_json?.expression || c.definition_json?.sql || "—")}
-                      </Typography.Text>
-                    </Tooltip>
+                        查看口径
+                      </Button>
+                    </div>
                   ),
               },
             ]}
@@ -4048,6 +4137,78 @@ export function MetricCreate() {
         </div>
       </Modal>
       </ResizableDrawer>
+
+      {/* 口径详情：批量候选 definition_json 完整展示（expression/sql/source_tables/
+          partition_key/dw_definition 等全部字段，长 SQL 不截断）——「查看完整口径/查看口径」
+          入口打开；责任方在候选行/向导表格已可设置三方（产品/技术/数仓） */}
+      <Modal
+        title={`口径定义详情：${defDetailCandidate?.name ?? ""}`}
+        open={!!defDetailCandidate}
+        onCancel={() => setDefDetailCandidate(null)}
+        footer={<Button onClick={() => setDefDetailCandidate(null)}>关闭</Button>}
+        width={760}
+      >
+        {defDetailCandidate &&
+          (() => {
+            const dj = defDetailCandidate.definition_json || {};
+            const code = (v: unknown) => (
+              <pre
+                className="mono"
+                style={{
+                  margin: 0,
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                  fontSize: 12,
+                  maxHeight: 200,
+                  overflow: "auto",
+                  background: "#fafafa",
+                  border: "1px solid #f0f0f0",
+                  borderRadius: 6,
+                  padding: "8px 10px",
+                }}
+              >
+                {String(v)}
+              </pre>
+            );
+            const tags = (v: unknown) => (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {(Array.isArray(v) ? v : [v]).map((t, i) => (
+                  <Tag key={i} className="mono" style={{ marginInlineEnd: 0 }}>
+                    {String(t)}
+                  </Tag>
+                ))}
+              </div>
+            );
+            const row = (label: string, body: ReactNode) => (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 12, color: "rgba(0,0,0,0.45)", marginBottom: 4 }}>{label}</div>
+                {body}
+              </div>
+            );
+            const known = new Set(["expression", "sql", "dw_definition", "source_tables", "partition_key", "dependencies"]);
+            return (
+              <div>
+                {dj.expression ? row("口径表达式", code(dj.expression)) : null}
+                {dj.sql ? row("完整 SQL", code(dj.sql)) : null}
+                {dj.dw_definition ? row("数仓详细口径（完整 SQL）", code(dj.dw_definition)) : null}
+                {dj.source_tables ? row("源表", tags(dj.source_tables)) : null}
+                {dj.partition_key ? row("时间列 / 分区键", tags(dj.partition_key)) : null}
+                {dj.dependencies ? row("依赖指标", tags(dj.dependencies)) : null}
+                {Object.entries(dj)
+                  .filter(([k]) => !known.has(k))
+                  .map(([k, v]) => (
+                    <div key={k} style={{ marginBottom: 12 }}>
+                      <div style={{ fontSize: 12, color: "rgba(0,0,0,0.45)", marginBottom: 4 }}>{k}</div>
+                      {typeof v === "string" ? code(v) : tags(Array.isArray(v) ? v : [JSON.stringify(v, null, 2)])}
+                    </div>
+                  ))}
+                {Object.keys(dj).length === 0 && (
+                  <Typography.Text type="secondary">该候选暂无口径定义</Typography.Text>
+                )}
+              </div>
+            );
+          })()}
+      </Modal>
 
       {/* SQL 批量创建结果「快速编辑」抽屉：当前页内编辑已创建 DRAFT 指标，
           上一条/下一条切换批内候选（不跳详情页、不影响当前窗口） */}

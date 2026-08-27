@@ -2208,6 +2208,9 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     const t1 = within(document.querySelector('[data-testid="sql-batch-wizard-t1"]') as HTMLElement);
     expect(t1.getAllByText("逻辑度量").length).toBeGreaterThanOrEqual(1);
     expect(t1.getAllByText("产品负责").length).toBeGreaterThanOrEqual(1);
+    // 口径三方责任完整：技术方/数仓开发列与产品负责并列（此前只有产品负责一列）
+    expect(t1.getAllByText("技术方").length).toBeGreaterThanOrEqual(1);
+    expect(t1.getAllByText("数仓开发").length).toBeGreaterThanOrEqual(1);
     // 跳 Step 2 确认提交：汇总 + 创建按钮
     fireEvent.click(m().getByTestId("sql-batch-wizard-next"));
     await waitFor(() => {
@@ -2940,5 +2943,74 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
       );
       expect(srcLabel?.closest(".ant-form-item")?.textContent).toContain("dwd.sales_detail");
     });
+  });
+
+  it("批量解析：候选「查看完整口径」弹出完整口径定义（expression/source_tables/partition_key/dw_definition 不截断）", async () => {
+    mockedParseSqlBatch.mockResolvedValueOnce({
+      ...SQL_BATCH_RESULT,
+      candidates: SQL_BATCH_RESULT.candidates.map((c) =>
+        c.key === "0:amount"
+          ? {
+              ...c,
+              definition_json: {
+                expression: "SUM(amount)",
+                source_tables: ["dwd.sales_detail"],
+                partition_key: "dt",
+                dw_definition:
+                  "SELECT dt, SUM(amount) AS gmv FROM dwd.sales_detail GROUP BY dt",
+              },
+            }
+          : c,
+      ),
+    });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await openBatchMode();
+    // 点「查看完整口径」→ 弹出完整口径定义 Modal（此前口径只在行内截断展示）
+    fireEvent.click(screen.getByTestId("sql-batch-def-0:amount"));
+    await waitFor(() => {
+      expect(document.body.querySelector(".ant-modal-title")?.textContent || "").toContain("口径定义详情");
+    });
+    const modal = within(document.querySelector(".ant-modal") as HTMLElement);
+    expect(modal.getByText("口径表达式")).toBeTruthy();
+    expect(modal.getByText("SUM(amount)")).toBeTruthy();
+    expect(modal.getByText("源表")).toBeTruthy();
+    expect(modal.getByText("dwd.sales_detail")).toBeTruthy();
+    expect(modal.getByText("时间列 / 分区键")).toBeTruthy();
+    expect(modal.getByText("dt")).toBeTruthy();
+    expect(modal.getByText("数仓详细口径（完整 SQL）")).toBeTruthy();
+    expect(
+      modal.getByText(/SELECT dt, SUM\(amount\) AS gmv FROM dwd\.sales_detail GROUP BY dt/),
+    ).toBeTruthy();
+  });
+
+  it("批量解析：候选行可设置技术方/数仓开发（对齐产品负责），提交携带三方责任", async () => {
+    // 责任方用户选项（ownerUsers 加载 listUsers）
+    mockedUsers.mockResolvedValue([
+      { id: 101, username: "zhangsan", display_name: "张三", role: "user", domain: "sales", status: "active" },
+      { id: 102, username: "lisi", display_name: "李四", role: "user", domain: "sales", status: "active" },
+    ] as never);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+    // 候选卡片底部行出现技术方/数仓开发（此前只有产品负责）
+    expect(screen.getAllByText("技术方").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("数仓开发").length).toBeGreaterThan(0);
+    // 技术方选 张三
+    fireEvent.mouseDown(screen.getByTestId("sql-batch-tech-0:amount").querySelector(".ant-select-selector")!);
+    await clickSelectOption("张三");
+    // 数仓开发选 李四
+    fireEvent.mouseDown(screen.getByTestId("sql-batch-dw-0:amount").querySelector(".ant-select-selector")!);
+    await clickSelectOption("李四");
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+    await waitFor(() => expect(mockedBatchFromSql).toHaveBeenCalled());
+    const payload = mockedBatchFromSql.mock.calls[0][0] as {
+      candidates: Array<{ key: string; tech_owner_id: number | null; dw_developer_id: number | null }>;
+    };
+    const cand = payload.candidates.find((c) => c.key === "0:amount");
+    expect(cand).toBeTruthy();
+    expect(cand!.tech_owner_id).toBe(101);
+    expect(cand!.dw_developer_id).toBe(102);
   });
 });

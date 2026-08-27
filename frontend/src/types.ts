@@ -3006,6 +3006,13 @@ export interface SqlBatchRegisterCandidate {
   raw_sql?: string | null;
   dependencies?: string[] | null;
   mount?: MetricMountInput | null;
+  /** P0-2：口径三方责任（批量创建补齐 OwnerChain，落 Metric 三方责任） */
+  product_owner_id?: number | null;
+  tech_owner_id?: number | null;
+  dw_developer_id?: number | null;
+  product_owner_name?: string | null;
+  tech_owner_name?: string | null;
+  dw_developer_name?: string | null;
 }
 
 /** SQL 批量创建请求（batch-register-from-sql 端点）。 */
