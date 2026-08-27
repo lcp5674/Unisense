@@ -73,8 +73,61 @@ class HiveCollector(BaseCollector):
         self._connect_timeout = connect_timeout
         self._query_timeout = query_timeout
 
+    def _connect(self) -> Any:
+        """建立 pyhive 连接（同步阻塞，供 ``asyncio.to_thread`` 包装）。
+
+        注意：pyhive 0.7.0 的 ``Connection.__init__`` **不接受 ``timeout`` 参数**
+        （传了会 TypeError）——连接超时由 ``_execute`` 的
+        ``asyncio.wait_for(connect_timeout)`` 承担，此处只传连接/认证参数。
+
+        Returns:
+            pyhive 连接对象。
+
+        Raises:
+            ExternalDependencyError: 连接失败（网络/认证）统一转 503（可重试）。
+        """
+        from pyhive import hive as pyhive_hive
+
+        try:
+            return pyhive_hive.connect(
+                host=self._host,
+                port=self._port,
+                username=self._user or None,
+                database=self._database or "default",
+                auth=self._auth,
+                password=self._password or None,
+            )
+        except Exception as exc:  # noqa: BLE001 - 连接失败（网络/认证）统一转 503
+            raise ExternalDependencyError(
+                f"Hive 连接失败 ({self._host}:{self._port}): {exc}"
+            ) from exc
+
+    def _query(self, conn: Any, sql: str) -> list[list[str]]:
+        """在已建立连接上执行 SQL（同步阻塞，供 ``asyncio.to_thread`` 包装）。
+
+        Args:
+            conn: 由 ``_connect`` 建立的 pyhive 连接。
+            sql: 要执行的 SQL。
+
+        Returns:
+            数据行列表（每行为字段字符串列表，不含表头）。
+
+        Raises:
+            ExternalDependencyError: 查询失败（语法/权限）统一转 503（可重试）。
+        """
+        try:
+            cursor = conn.cursor()
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            return [[self._to_str(v) for v in row] for row in rows]
+        except Exception as exc:  # noqa: BLE001 - 查询失败统一转 503
+            raise ExternalDependencyError(f"Hive 查询失败: {exc}") from exc
+        finally:
+            with contextlib.suppress(Exception):
+                conn.close()
+
     def _sync_query(self, sql: str) -> list[list[str]]:
-        """同步执行 SQL（pyhive 阻塞 API），供 ``asyncio.to_thread`` 包装。
+        """同步执行 SQL（连接 + 查询一体），供测试与单次调用使用。
 
         Args:
             sql: 要执行的 SQL。
@@ -85,34 +138,8 @@ class HiveCollector(BaseCollector):
         Raises:
             ExternalDependencyError: 连接或查询失败（503 可重试）。
         """
-        from pyhive import hive as pyhive_hive
-
-        conn = None
-        try:
-            conn = pyhive_hive.connect(
-                host=self._host,
-                port=self._port,
-                username=self._user or None,
-                database=self._database or "default",
-                auth=self._auth,
-                password=self._password or None,
-                timeout=self._connect_timeout,
-            )
-        except Exception as exc:  # noqa: BLE001 - 连接失败（网络/认证）统一转 503
-            raise ExternalDependencyError(
-                f"Hive 连接失败 ({self._host}:{self._port}): {exc}"
-            ) from exc
-        try:
-            cursor = conn.cursor()
-            cursor.execute(sql)
-            rows = cursor.fetchall()
-            return [[self._to_str(v) for v in row] for row in rows]
-        except Exception as exc:  # noqa: BLE001 - 查询失败统一转 503
-            raise ExternalDependencyError(f"Hive 查询失败: {exc}") from exc
-        finally:
-            if conn is not None:
-                with contextlib.suppress(Exception):
-                    conn.close()
+        conn = self._connect()
+        return self._query(conn, sql)
 
     @staticmethod
     def _to_str(value: Any) -> str:
@@ -120,7 +147,10 @@ class HiveCollector(BaseCollector):
         return "" if value is None else str(value)
 
     async def _execute(self, sql: str) -> list[list[str]]:
-        """经线程池执行 SQL（pyhive 阻塞 API），带查询超时。
+        """经线程池执行 SQL（pyhive 阻塞 API），连接与查询各自独立超时。
+
+        - 连接超时 ``connect_timeout``（默认 10s）：TCP 握手/认证 hang 快速失败
+        - 查询超时 ``query_timeout``（默认 120s）：慢查询/Hive 队列等待
 
         Args:
             sql: 要执行的 SQL。
@@ -129,11 +159,19 @@ class HiveCollector(BaseCollector):
             数据行列表。
 
         Raises:
-            ExternalDependencyError: 查询超时或执行失败。
+            ExternalDependencyError: 连接超时/查询超时/执行失败（503 可重试）。
         """
         try:
+            conn = await asyncio.wait_for(
+                asyncio.to_thread(self._connect), timeout=self._connect_timeout
+            )
+        except TimeoutError as exc:
+            raise ExternalDependencyError(
+                f"Hive 连接超时 ({self._connect_timeout}s): {self._host}:{self._port}"
+            ) from exc
+        try:
             return await asyncio.wait_for(
-                asyncio.to_thread(self._sync_query, sql), timeout=self._query_timeout
+                asyncio.to_thread(self._query, conn, sql), timeout=self._query_timeout
             )
         except TimeoutError as exc:
             raise ExternalDependencyError(

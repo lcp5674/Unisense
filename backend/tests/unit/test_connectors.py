@@ -539,8 +539,8 @@ def test_starrocks_url_build():
     assert "9030" in url_str
 
 
-async def test_hive_query_timeout_raises():
-    """P2-15: pyhive 查询超时（asyncio.wait_for 120s）→ ExternalDependencyError。"""
+async def test_hive_connect_timeout_raises():
+    """P2-15: pyhive 连接超时（asyncio.wait_for connect_timeout=10s）→ ExternalDependencyError。"""
     from app.services.collector.connectors import hive as hive_mod
 
     collector = HiveCollector(host="hive-host", database="test_db")
@@ -559,9 +559,74 @@ async def test_hive_query_timeout_raises():
             "wait_for",
             side_effect=TimeoutError("timeout"),
         ),
-        pytest.raises(hive_mod.ExternalDependencyError, match="超时"),
+        pytest.raises(hive_mod.ExternalDependencyError, match="连接超时"),
     ):
         await collector._execute("SELECT 1")
+
+
+async def test_hive_query_timeout_raises():
+    """P2-15: pyhive 查询超时（asyncio.wait_for query_timeout=120s）→ ExternalDependencyError。"""
+    from app.services.collector.connectors import hive as hive_mod
+
+    class _FakeCursor:
+        def execute(self, sql: str) -> None:
+            return None
+
+        def fetchall(self) -> list:
+            return []
+
+    class _FakeConn:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+        def close(self) -> None:
+            self.closed = True
+
+    collector = HiveCollector(host="hive-host", database="test_db")
+    done = asyncio.get_event_loop().create_future()
+    done.set_result(_FakeConn())
+    pending = asyncio.get_event_loop().create_future()
+    with (
+        patch.object(
+            hive_mod.asyncio,
+            "to_thread",
+            new_callable=MagicMock,
+            return_value=pending,
+        ),
+        # 连接 wait_for 成功（返回已完成的 conn future），查询 wait_for 抛超时
+        patch.object(
+            hive_mod.asyncio,
+            "wait_for",
+            side_effect=[done, TimeoutError("timeout")],
+        ),
+        pytest.raises(hive_mod.ExternalDependencyError, match="查询超时"),
+    ):
+        await collector._execute("SELECT 1")
+
+
+async def test_hive_connect_passes_no_timeout_kwarg():
+    """回归：pyhive 0.7.0 的 Connection 不接受 timeout 参数——_connect 不得传。
+
+    此前误传 ``timeout=self._connect_timeout`` 导致真实连接
+    ``TypeError: Connection.__init__() got an unexpected keyword argument 'timeout'``
+    （采集/测试连接全部失败）。断言 connect 调用 kwargs 精确匹配，无 timeout。
+    """
+    from pyhive import hive as pyhive_hive
+
+    collector = HiveCollector(host="hive-host", port=10000, user="u", password="p")
+    with patch.object(pyhive_hive, "connect", return_value=MagicMock()) as mock_connect:
+        collector._connect()
+    kwargs = mock_connect.call_args.kwargs
+    assert "timeout" not in kwargs
+    assert kwargs["host"] == "hive-host"
+    assert kwargs["port"] == 10000
+    assert kwargs["username"] == "u"
+    assert kwargs["password"] == "p"
+    assert kwargs["auth"] == "LDAP"
+    assert kwargs["database"] == "default"
 
 
 async def test_hive_sync_query_returns_string_rows():
