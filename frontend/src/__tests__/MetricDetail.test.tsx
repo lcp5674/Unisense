@@ -2784,8 +2784,14 @@ describe("MetricDetail 按钮级权限过滤", () => {
     expect(screen.getAllByRole("button", { name: /解除挂载/ })).toHaveLength(2);
   });
 
-  // P1-3：挂载实体可管——解除挂载走确认弹窗，确认后调 deleteMetricMount 并刷新
-  it("解除挂载：确认后调 deleteMetricMount 并刷新挂载列表", async () => {
+  // P1-3：挂载实体可管——已发布指标解除挂载 = 破坏性变更，走指标更新接口提交
+  // （mounts 去行 + 变更原因），由后端判定 removed 行破坏性 → PENDING_VERSION 消费方
+  // 确认流（14 天确认后生效），不再直接调 DELETE /metric-mounts 软删。
+  it("已发布指标解除挂载：确认后调 updateMetric（mounts 去行）进入确认流，不直接删除", async () => {
+    // 第二个 describe 无 beforeEach：显式清空 spy 防跨测试残留
+    mockedUpdateMetric.mockClear();
+    mockedDeleteMetricMount.mockClear();
+    mockedGetMetric.mockResolvedValue(metric);
     mockedListMetricMounts.mockResolvedValue({
       items: [
         {
@@ -2810,9 +2816,62 @@ describe("MetricDetail 按钮级权限过滤", () => {
     const beforeMountsCalls = mockedListMetricMounts.mock.calls.length;
     fireEvent.click(screen.getByRole("button", { name: /解除挂载/ }));
     await waitFor(() => expect(document.querySelector(".ant-modal-confirm")).toBeTruthy());
-    // 确认弹窗「解除」为危险按钮（antd 两字按钮会自动加空格 → 用正则）
+    // 已发布指标：确认弹窗标题明确「需消费方确认」，确认按钮为「提交解除」（危险样式）
+    expect(screen.getAllByText("解除挂载（需消费方确认）").length).toBeGreaterThan(0);
+    fireEvent.click(document.querySelector(".ant-modal-confirm .ant-btn-dangerous") as HTMLElement);
+    await waitFor(() => expect(mockedUpdateMetric).toHaveBeenCalled());
+    // mounts 去行（只剩一行 → 空数组）+ 变更原因 + 乐观锁；不直接 DELETE 挂载
+    expect(mockedUpdateMetric).toHaveBeenCalledWith(
+      "sales_gmv_sum_d",
+      expect.objectContaining({
+        mounts: [],
+        change_reason: "解除挂载变体：dwd_outpatient_gmv_df（day）",
+        row_version: 1,
+      }),
+    );
+    expect(mockedDeleteMetricMount).not.toHaveBeenCalled();
+    // 提交后刷新挂载列表（解除前已 load 一次，提交后应多一次）
+    await waitFor(() =>
+      expect(mockedListMetricMounts.mock.calls.length).toBe(beforeMountsCalls + 1),
+    );
+  });
+
+  // DRAFT/REVIEW 指标无消费方确认期：解除挂载保持直接 DELETE 挂载（软删）
+  it("草稿指标解除挂载：确认后直接调 deleteMetricMount 并刷新挂载列表", async () => {
+    // 第二个 describe 无 beforeEach：显式清空 spy 防跨测试残留
+    mockedUpdateMetric.mockClear();
+    mockedDeleteMetricMount.mockClear();
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "DRAFT" });
+    mockedListMetricMounts.mockResolvedValue({
+      items: [
+        {
+          id: 7,
+          metric_id: 1,
+          source_table: "dwd_outpatient_gmv_df",
+          source_column: "amount",
+          granularity: "day",
+          default_period: "day",
+          domain: "outpatient",
+          created_at: "2026-08-01T00:00:00",
+          updated_at: "2026-08-01T00:00:00",
+        },
+      ],
+      total: 1,
+    });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    await screen.findByText("挂载实体（OneData 挂载层）");
+    const beforeMountsCalls = mockedListMetricMounts.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: /解除挂载/ }));
+    await waitFor(() => expect(document.querySelector(".ant-modal-confirm")).toBeTruthy());
+    // 草稿指标：确认弹窗为普通「解除挂载」（无确认期提示；按钮+标题两处匹配）
+    expect(screen.getAllByText("解除挂载").length).toBeGreaterThan(0);
+    expect(screen.queryByText("解除挂载（需消费方确认）")).toBeNull();
     fireEvent.click(document.querySelector(".ant-modal-confirm .ant-btn-dangerous") as HTMLElement);
     await waitFor(() => expect(mockedDeleteMetricMount).toHaveBeenCalledWith(7));
+    expect(mockedUpdateMetric).not.toHaveBeenCalled();
     // 解除成功后刷新挂载列表（解除前已 load 一次，解除后应多一次）
     await waitFor(() =>
       expect(mockedListMetricMounts.mock.calls.length).toBe(beforeMountsCalls + 1),

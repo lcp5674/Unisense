@@ -86,6 +86,7 @@ import {
 import type {
   ArchivedMetricResponse,
   MetricMount,
+  MetricMountInput,
   SubjectDomainTreeNode,
   CurrentUser,
   ConsumptionGuidePayload,
@@ -171,6 +172,21 @@ const EDIT_DICT_TYPE_LABEL: Record<string, string> = {
   time_semantics: "时间语义",
   metric_tier: "指标分级",
 };
+
+// 挂载行 → 指标更新请求内嵌输入（去掉 metric_id/时间戳等只读字段，保留 id 供
+// 后端全量 diff 对齐：有 id 更新、未出现软删）。已发布指标解除挂载走指标更新
+// 接口（mounts 去行）触发 PENDING_VERSION 消费方确认流，而非直接 DELETE 挂载。
+function toMountInput(m: MetricMount): MetricMountInput {
+  return {
+    id: m.id,
+    source_table: m.source_table,
+    source_column: m.source_column,
+    granularity: m.granularity,
+    default_period: m.default_period,
+    domain: m.domain,
+    business_filter: m.business_filter ?? null,
+  };
+}
 
 // Owner 责任链：将 owner_id 渲染为可读的用户名 + 角色
 // 工程责任链：按"需求提出 → 口径定义 → 数仓实现 → 指标注册 → 审核把关"串联，
@@ -998,19 +1014,39 @@ export function MetricDetail() {
     }
   }
 
-  // P1-3：解除挂载（带确认；成功后刷新挂载列表）
+  // P1-3：解除挂载（带确认）。已发布指标解除挂载 = 破坏性口径变更（消费方取数底座
+  // 变化）——不走直接软删，改由指标更新接口提交（mounts 去目标行 + 变更原因），后端
+  // _sync_mounts 判定 removed 行破坏性 → PENDING_VERSION 消费方确认流（14 天，确认后
+  // 生效，确认前挂载仍生效）；DRAFT/REVIEW 指标保持直接解除。
   function handleUnmount(mountId: number) {
+    const target = mounts.find((m) => m.id === mountId);
+    const isPublished = metric?.status === "PUBLISHED";
     Modal.confirm({
-      title: "解除挂载",
-      content: "解除后该指标不再挂载到物理表（OneData 挂载层实体将被删除）。确认继续？",
-      okText: "解除",
+      title: isPublished ? "解除挂载（需消费方确认）" : "解除挂载",
+      content: isPublished
+        ? `解除挂载「${target?.source_table ?? mountId}」属破坏性变更：消费方读取的数据底座将变化。`
+          + "提交后将进入消费方确认期（14 天），确认后生效；确认前挂载仍生效。"
+        : "解除后该指标不再挂载到物理表（OneData 挂载层实体将被删除）。确认继续？",
+      okText: isPublished ? "提交解除" : "解除",
       okButtonProps: { danger: true },
       cancelText: "取消",
       onOk: async () => {
         setUnmounting(true);
         try {
-          await deleteMetricMount(mountId);
-          message.success("已解除挂载");
+          if (isPublished && metric) {
+            // 全量 diff：剩余挂载行原样回传（带 id），后端识别 removed 行 → 破坏性
+            const remaining = mounts.filter((m) => m.id !== mountId).map(toMountInput);
+            const tableDesc = target ? `${target.source_table}（${target.granularity}）` : String(mountId);
+            await updateMetric(metric.metric_code, {
+              mounts: remaining,
+              change_reason: `解除挂载变体：${tableDesc}`,
+              row_version: metric.row_version,
+            });
+            message.success("已提交解除挂载变更，待消费方确认");
+          } else {
+            await deleteMetricMount(mountId);
+            message.success("已解除挂载");
+          }
           if (metric?.id != null) await loadMounts(metric.id);
         } catch (err) {
           message.error(

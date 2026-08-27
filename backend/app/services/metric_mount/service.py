@@ -94,6 +94,16 @@ class MetricMountService(BaseService):
 
     async def delete_mount(self, mount_id: int) -> None:
         mount = await self.get_mount(mount_id)
+        metric = await self._require_metric(mount.metric_id)
+        # 已发布指标解除挂载 = 破坏性口径变更（消费方取数底座变化，等同删源表/改粒度）：
+        # 禁止绕过确认流直接软删——须经指标更新接口提交（mounts 去行 + 变更原因），
+        # 由 semantic._sync_mounts 判定破坏性走 PENDING_VERSION 消费方确认（14 天）。
+        if metric.status == "PUBLISHED":
+            raise UnisenseError(
+                "已发布指标解除挂载属破坏性变更，须经消费方确认——请通过指标详情"
+                "「编辑」提交（变更原因必填，确认后生效）",
+                error_code="MOUNT_DELETE_REQUIRES_CONFIRMATION",
+            )
         await self._repo.soft_delete(mount.id)
         # 多变体：删除一行后回填默认变体粒度；无剩余挂载则清空（挂载不在则粒度无权威来源）
         await self._refresh_granularity(mount.metric_id)

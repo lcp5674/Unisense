@@ -270,8 +270,26 @@ class TestMountService:
         assert out.granularity == "月"
 
     async def test_delete_mount_soft_deletes(self) -> None:
-        svc, repo = await _svc()
+        """DRAFT/REVIEW 指标直接软删（非破坏性，无消费方确认期）。"""
+        svc, repo = await _svc_with_metric("derived")
         repo.get = AsyncMock(return_value=_mount())
         await svc.delete_mount(1)
         repo.soft_delete.assert_awaited_with(1)
         repo.commit.assert_awaited()
+
+    async def test_delete_mount_rejects_published(self) -> None:
+        """已发布指标解除挂载 = 破坏性口径变更，禁止绕过确认流直接软删。
+
+        须经指标更新接口提交（mounts 去行 + 变更原因），由 semantic._sync_mounts
+        判定 removed 行破坏性走 PENDING_VERSION 消费方确认（14 天）。
+        """
+        svc, repo = await _svc()
+        metric = _metric()
+        metric.status = "PUBLISHED"
+        svc._require_metric = AsyncMock(return_value=metric)  # noqa: SLF001
+        repo.get = AsyncMock(return_value=_mount())
+        with pytest.raises(UnisenseError) as exc:
+            await svc.delete_mount(1)
+        assert exc.value.error_code == "MOUNT_DELETE_REQUIRES_CONFIRMATION"
+        repo.soft_delete.assert_not_awaited()
+        repo.commit.assert_not_awaited()
