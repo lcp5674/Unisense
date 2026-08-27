@@ -43,6 +43,7 @@ import {
   inferColumnDescription,
   inferDescriptions,
   inferTableDescription,
+  listCatalogDatabases,
   listDataSources,
   updateColumnDescription,
   updateTableDescription,
@@ -552,10 +553,12 @@ export const DescriptionCoveragePanel = forwardRef<
   const [coverage, setCoverage] = useState<DescriptionCoverage | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // 治理筛选（full 模式）：数据源 + 表名关键词——服务端过滤统计卡与治理表格，
+  // 治理筛选（full 模式）：数据源 + 库 + 表名关键词——服务端过滤统计卡与治理表格，
   // 批量推断/明细下钻天然只在当前筛选范围内（覆盖数据本身来自筛选后接口）
   const [sourceId, setSourceId] = useState("");
   const [sources, setSources] = useState<DataSource[]>([]);
+  const [database, setDatabase] = useState("");
+  const [databases, setDatabases] = useState<string[]>([]);
   const [keywordInput, setKeywordInput] = useState("");
   const [keyword, setKeyword] = useState("");
   const searchTimerRef = useRef<number | null>(null);
@@ -626,6 +629,7 @@ export const DescriptionCoveragePanel = forwardRef<
       setCoverage(
         await fetchDescriptionCoverage({
           source_id: sourceId || undefined,
+          database: database || undefined,
           keyword: keyword || undefined,
         }),
       );
@@ -664,7 +668,7 @@ export const DescriptionCoveragePanel = forwardRef<
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceId, keyword]);
+  }, [sourceId, database, keyword]);
 
   // 服务端批量历史与筛选无关，仅挂载拉一次
   useEffect(() => {
@@ -680,6 +684,14 @@ export const DescriptionCoveragePanel = forwardRef<
       .then((res) => setSources(res.items))
       .catch(() => {});
   }, [isSummary]);
+
+  // 库名下拉选项（entity_name 前缀，随所选数据源联动收窄；无数据源时取全局库列表）
+  useEffect(() => {
+    if (isSummary) return;
+    listCatalogDatabases(sourceId || undefined)
+      .then(setDatabases)
+      .catch(() => {});
+  }, [isSummary, sourceId]);
 
   // 卸载清理表名搜索防抖定时器
   useEffect(
@@ -1326,6 +1338,17 @@ export const DescriptionCoveragePanel = forwardRef<
             }))}
             data-testid="coverage-source-filter"
           />
+          <Select
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            placeholder="全部库"
+            style={{ width: 180 }}
+            value={database || undefined}
+            onChange={(v) => setDatabase(v || "")}
+            options={databases.map((d) => ({ value: d, label: d }))}
+            data-testid="coverage-database-filter"
+          />
           <Input
             allowClear
             placeholder="按表名筛选"
@@ -1334,11 +1357,12 @@ export const DescriptionCoveragePanel = forwardRef<
             onChange={(e) => scheduleKeyword(e.target.value)}
             data-testid="coverage-keyword-filter"
           />
-          {(sourceId || keyword) && (
+          {(sourceId || database || keyword) && (
             <Button
               size="small"
               onClick={() => {
                 setSourceId("");
+                setDatabase("");
                 setKeyword("");
                 setKeywordInput("");
               }}
@@ -1347,7 +1371,7 @@ export const DescriptionCoveragePanel = forwardRef<
             </Button>
           )}
           <span className="muted" style={{ fontSize: 12 }}>
-            统计卡与治理表格按所选数据源 / 表名口径计算，批量推断仅在筛选范围内勾选
+            统计卡与治理表格按所选数据源 / 库 / 表名口径计算，批量推断仅在筛选范围内勾选
           </span>
         </Space>
       )}

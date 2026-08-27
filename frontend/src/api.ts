@@ -28,6 +28,7 @@ import {
   SqlInferEvalData,
   SqlInferEvalRunResult,
   SqlParseRequest,
+  SqlParseTablesResult,
   BatchDeleteRequest,
   BatchSourceResult,
   BatchToggleRequest,
@@ -3989,12 +3990,17 @@ export interface InferTableDescriptionResult {
 }
 
 /** 描述缺失统计（资产地图「描述缺失」tab / 采集目录概览卡）。
- *  params.source_id / params.keyword：治理面板「按数据源、表筛选治理」的服务端过滤。 */
+ *  params.source_id / params.database / params.keyword：治理面板「按数据源、库、表筛选治理」的服务端过滤。 */
 export async function fetchDescriptionCoverage(params?: {
   source_id?: string;
+  database?: string;
   keyword?: string;
 }): Promise<DescriptionCoverage> {
-  const qs = pageQs({ source_id: params?.source_id, keyword: params?.keyword });
+  const qs = pageQs({
+    source_id: params?.source_id,
+    database: params?.database,
+    keyword: params?.keyword,
+  });
   return request<DescriptionCoverage>(
     `${API_BASE}/catalogs/description-coverage${qs ? `?${qs}` : ""}`,
   );
@@ -4781,6 +4787,14 @@ export async function suggestDomain(data: {
   return request<DomainSuggestionResponse>(`${API_BASE}/metric-definitions/suggest-domain`, {
     method: "POST",
     body: JSON.stringify(data),
+  });
+}
+
+/** SQL 源表解析（注册向导：数仓SQL口径失焦自动回填依赖表——轻量只读，不落库、不触发 LLM）。 */
+export async function parseSqlTables(sql: string): Promise<SqlParseTablesResult> {
+  return request<SqlParseTablesResult>(`${API_BASE}/metric-definitions/parse-tables`, {
+    method: "POST",
+    body: JSON.stringify({ sql }),
   });
 }
 

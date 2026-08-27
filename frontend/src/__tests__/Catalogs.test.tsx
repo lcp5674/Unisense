@@ -752,6 +752,28 @@ describe("Catalogs 页面", () => {
     });
   });
 
+  it("描述缺失治理面板：按库筛选治理（选择库后按 database 重新拉取，库下拉随数据源联动）", async () => {
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText("字段描述覆盖率")).toBeTruthy());
+    // 库下拉选项来自 listCatalogDatabases（无数据源时全局库列表）
+    await waitFor(() => expect(mockedDatabases).toHaveBeenCalledWith(undefined));
+    openSelectDropdown("coverage-database-filter");
+    await clickSelectOption("sales");
+    await waitFor(() => {
+      expect(fetchDescriptionCoverage).toHaveBeenCalledWith({ database: "sales" });
+    });
+    // 重置筛选同时清空库
+    fireEvent.click(screen.getByRole("button", { name: /重\s*置\s*筛\s*选/ }));
+    await waitFor(() => {
+      expect(fetchDescriptionCoverage).toHaveBeenCalledWith({});
+    });
+  });
+
   it("描述缺失治理面板：下钻明细行点击进入治理抽屉（非跳转）", async () => {
     vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
       total_tables: 2,

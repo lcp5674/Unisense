@@ -1160,6 +1160,7 @@ class CollectorRepository:
         page_size: int | None = None,
         source_id: str | None = None,
         keyword: str | None = None,
+        database: str | None = None,
     ) -> dict[str, Any]:
         """描述缺失统计：汇总指标 SQL 端聚合 + per_table 服务端分页。
 
@@ -1170,8 +1171,8 @@ class CollectorRepository:
         - per_table 明细按 page/page_size 服务端分页（page_size=None 返回
           全量，向后兼容旧前端契约）。
 
-        治理筛选（source_id/keyword）：汇总与明细统一按筛选口径收窄——
-        fields_with_desc 也 join db_catalog 限定范围，保证「按数据源/表治理」
+        治理筛选（source_id/keyword/database）：汇总与明细统一按筛选口径收窄——
+        fields_with_desc 也 join db_catalog 限定范围，保证「按数据源/库/表治理」
         时统计卡与表格口径一致（筛选后统计卡反映该子集的覆盖率）。
 
         Args:
@@ -1179,6 +1180,7 @@ class CollectorRepository:
             page_size: 每页条数；None 表示全量（向后兼容）。
             source_id: 数据源过滤（精确匹配）。
             keyword: 表名模糊过滤（LIKE 通配符转义，对齐 list_catalogs）。
+            database: 库名过滤（entity_name 前缀精确匹配「库.表」，对齐 list_catalogs）。
 
         Returns:
             汇总 + per_table（分页后）+ per_table_total/page/page_size。
@@ -1192,6 +1194,10 @@ class CollectorRepository:
             # LIKE 通配符转义（对齐 FR-035 / list_catalogs：% / _ 须转义防模糊放大）
             escaped = keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")
             filters.append(DBCatalog.entity_name.ilike(f"%{escaped}%", escape="/"))
+        if database:
+            # 库名 = entity_name 前缀（库.表）；LIKE 通配符转义防模糊放大（对齐 list_catalogs）
+            esc_db = database.replace("/", "//").replace("%", "/%").replace("_", "/_")
+            filters.append(DBCatalog.entity_name.ilike(f"{esc_db}.%", escape="/"))
 
         # —— 汇总指标：SQL 端聚合（不装载 db_catalog 大字段）——
         total_tables = int(

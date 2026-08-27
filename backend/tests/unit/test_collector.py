@@ -4243,6 +4243,39 @@ async def test_repo_get_description_coverage_filters() -> None:
     assert cov["fields_with_desc"] == 1
 
 
+async def test_repo_get_description_coverage_database_filter() -> None:
+    """治理筛选：database 库名过滤——entity_name 前缀精确匹配「库.表」应用到汇总与明细。"""
+    s = _coverage_session()
+    repo = CollectorRepository(s)
+    cov = await repo.get_description_coverage(database="ods")
+
+    # 4 次 scalar + 分页明细语句均携带 entity_name LIKE 'ods.%'（前缀匹配，防库名串库）
+    for call in s.scalar.call_args_list:
+        text = str(call.args[0].compile(compile_kwargs={"literal_binds": True}))
+        assert "entity_name" in text
+        assert "LIKE" in text
+        assert "ods.%" in text
+    page_text = str(
+        s.execute.call_args_list[1].args[0].compile(compile_kwargs={"literal_binds": True})
+    )
+    assert "ods.%" in page_text
+    # 汇总结果不受 filter 影响（mock 口径）
+    assert cov["total_tables"] == 2
+    assert cov["fields_with_desc"] == 1
+
+
+async def test_repo_get_description_coverage_database_escape() -> None:
+    """库名过滤通配符转义：库名含 % / _ 时按字面匹配（对齐 list_catalogs 防模糊放大）。"""
+    s = _coverage_session()
+    repo = CollectorRepository(s)
+    await repo.get_description_coverage(database="a_b%c")
+
+    text = str(s.scalar.call_args_list[0].args[0].compile(compile_kwargs={"literal_binds": True}))
+    # 转义后模式：a/_b/%c.% —— % 与 _ 均被 / 转义，只保留字面前缀
+    assert "a/_b/%c.%" in text
+    assert "ESCAPE" in text
+
+
 # ---------- P2-10/12/13 ----------
 
 
