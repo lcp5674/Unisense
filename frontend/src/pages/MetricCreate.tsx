@@ -1352,10 +1352,11 @@ export function MetricCreate() {
             ],
       );
     }
-    // 跳转：关闭 SQL 推断抽屉 → 单条模式 → 定位到 Step⑤⑥（指标类型+来源）让用户核对
+    // 跳转：关闭 SQL 推断抽屉 → 单条模式 → 定位到 Step① 指标基本信息（类型/粒度前置在此，
+    // 用户先核对类型与回填的编码/名称，再下一步到 Step2 来源/挂载核对）
     setSqlInferOpen(false);
     setSqlBatchMode("single");
-    setCurrentStep(2);
+    setCurrentStep(1);
     message.success(`已将候选「${c.name}」回填到注册向导，请核对修改后按单条流程提交创建`);
   }
 
@@ -2112,7 +2113,7 @@ export function MetricCreate() {
         style={{ marginBottom: 20 }}
         items={[
           { title: "业务域", description: "选域并继承域默认值" },
-          { title: "指标基本信息", description: "名称/粒度/维度/责任方/消费指南" },
+          { title: "指标基本信息", description: "类型/名称/粒度/维度/责任方/消费指南" },
           { title: "具体实现", description: "三层口径/类型/来源/挂载 + 提交" },
         ]}
       />
@@ -2157,30 +2158,12 @@ export function MetricCreate() {
             {renderStepNav()}
             </>)}
 
-            {/* Step 2: 具体实现（OneData 向导）—— 类型/来源/挂载/依赖实体 */}
+            {/* Step 2: 具体实现（OneData 向导）—— 来源/挂载/依赖实体（指标类型已在第 ② 步确定） */}
             {currentStep === 2 && (<>
-            <Card type="inner" title="⑤ 选择指标类型" size="small">
-              <Form.Item
-                name="type"
-                label="指标类型"
-                rules={[{ required: true, message: "请选择指标类型" }]}
-                extra={TYPE_HINTS[(metricType ?? "atomic") as MetricType]}
-              >
-                <Segmented
-                  block
-                  options={[
-                    { value: "atomic", label: "原子指标" },
-                    { value: "derived", label: "派生指标" },
-                    { value: "composite", label: "复合指标" },
-                  ]}
-                />
-              </Form.Item>
-            </Card>
-
             {/* Step 2: 按类型的来源配置——原子=逻辑度量/源字段；派生/复合=依赖指标（SQL 推断已收敛为工具栏抽屉） */}
             <Card
               type="inner"
-              title={isAtomic ? "⑥ 原子来源（逻辑度量 + 基础统计粒度）" : metricType === "composite" ? "⑥ 依赖指标（复合必填）" : "⑥ 依赖指标（派生选填）"}
+              title={isAtomic ? "④ 原子来源（逻辑度量 + 基础统计粒度）" : metricType === "composite" ? "④ 依赖指标（复合必填）" : "④ 依赖指标（派生选填）"}
               size="small"
               extra={suggesting && <Spin size="small" />}
             >
@@ -2467,7 +2450,7 @@ export function MetricCreate() {
               )}
             </Card>
 
-            <Card type="inner" title="④ 口径定义" size="small">
+            <Card type="inner" title="⑤ 口径定义" size="small">
               {inferredDefinition.json && (
                 <Alert
                   type="info"
@@ -2656,7 +2639,7 @@ export function MetricCreate() {
             </Card>
 
             {/* 关联数据表（Step2：血缘上下游表）——从口径定义卡抽出，随实现步骤展示 */}
-            <Card type="inner" title="⑦ 关联数据表" size="small">
+            <Card type="inner" title="⑥ 关联数据表" size="small">
               <Alert
                 type="info"
                 showIcon
@@ -2675,7 +2658,7 @@ export function MetricCreate() {
                       （血缘自动生成 指标 → 表 边）
                     </li>
                     <li>
-                      <b>挂载实体表（指标的家）</b>（⑥，仅派生指标）：结果存到哪张物理表？
+                      <b>挂载实体表（指标的家）</b>（④，仅派生指标）：结果存到哪张物理表？
                       ——区别于上面的“原料”和“客户”。
                     </li>
                   </ul>
@@ -2731,6 +2714,41 @@ export function MetricCreate() {
             {/* Step 1: 指标基本信息（OneData 向导）—— 名称/粒度/维度/责任方/消费指南 */}
             {currentStep === 1 && (<>
             <Card type="inner" title="② 指标基本信息" size="small">
+              {/* Step 1: 指标类型（OneData 第一决策，前置到基本信息卡顶部——此前类型卡在 Step 2，
+                  导致 Step 1 粒度区按默认原子锁死显示「日 (day)」，须切到 Step 2 改类型才可编辑，
+                  交互绕路。类型前置后，粒度区紧随其后按 isAtomic 即时联动） */}
+              <Form.Item
+                name="type"
+                label="指标类型"
+                rules={[{ required: true, message: "请选择指标类型" }]}
+                extra={TYPE_HINTS[(metricType ?? "atomic") as MetricType]}
+              >
+                <Segmented
+                  block
+                  options={[
+                    { value: "atomic", label: "原子指标" },
+                    { value: "derived", label: "派生指标" },
+                    { value: "composite", label: "复合指标" },
+                  ]}
+                />
+              </Form.Item>
+
+              {/* OneData 逻辑概念：粒度（原子固定基础统计粒度「日」，由原子指标口径库/挂载层接管；
+                  派生/复合可自由选择，缺省取挂载粒度）—— 逻辑概念先行，紧随类型即时联动 */}
+              <Row gutter={16}>
+                <Col span={8}>
+                  {isAtomic ? (
+                    <Form.Item label="粒度" extra="原子指标固定基础统计粒度（日），粒度由原子指标口径库/挂载层接管">
+                      <Typography.Text>日 (day)</Typography.Text>
+                    </Form.Item>
+                  ) : (
+                    <Form.Item name="granularity" label="粒度" extra="缺省取挂载粒度（④挂载配置）">
+                      {dictSelect("granularity", "granularity", "选择粒度")}
+                    </Form.Item>
+                  )}
+                </Col>
+              </Row>
+
               <Row gutter={16}>
                 <Col span={12}>
                   <Form.Item
@@ -2767,22 +2785,6 @@ export function MetricCreate() {
                   <Form.Item name="aggregation" label={<span>聚合{fieldBadge("aggregation")}</span>} rules={[{ required: true, message: "请选择聚合方式" }]}>
                     {dictSelect("aggregation", "aggregation", "选择聚合方式")}
                   </Form.Item>
-                </Col>
-              </Row>
-
-              {/* OneData 逻辑概念：粒度（原子固定基础统计粒度「日」，由原子指标口径库/挂载层接管；
-                  派生/复合可自由选择，缺省取挂载粒度）—— 逻辑概念先行，随基本信息展示 */}
-              <Row gutter={16}>
-                <Col span={8}>
-                  {isAtomic ? (
-                    <Form.Item label="粒度" extra="原子指标固定基础统计粒度（日），粒度由原子指标口径库/挂载层接管">
-                      <Typography.Text>日 (day)</Typography.Text>
-                    </Form.Item>
-                  ) : (
-                    <Form.Item name="granularity" label="粒度" extra="缺省取挂载粒度（⑥挂载配置）">
-                      {dictSelect("granularity", "granularity", "选择粒度")}
-                    </Form.Item>
-                  )}
                 </Col>
               </Row>
 
@@ -3363,7 +3365,7 @@ export function MetricCreate() {
                                     />
                                     {/* OneData 接线（P2）：批量候选关联逻辑度量——SQL 无法推断，
                                         前端选择器补全；提交透传 measure_id，批量原子不再游离逻辑
-                                        度量体系（对齐单条创建 Step⑥同款控件） */}
+                                        度量体系（对齐单条创建 Step④同款控件） */}
                                     <Select
                                       size="small"
                                       showSearch
@@ -4302,7 +4304,7 @@ export function MetricCreate() {
               return (
                 <div style={{ marginTop: 12 }}>
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    血缘推断关联表（已回填到 Step⑦ 关联数据表）：
+                    血缘推断关联表（已回填到 Step⑥ 关联数据表）：
                   </Typography.Text>
                   {upstream?.length ? (
                     <div style={{ marginTop: 6 }}>
