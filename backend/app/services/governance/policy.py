@@ -170,6 +170,7 @@ UI_ACTION_REGISTRY: dict[str, dict[str, str]] = {
     "favorites:view": {"module": "总览", "label": "查看收藏", "description": "访问我的收藏"},
     # ---- 指标
     "catalog:view": {"module": "指标", "label": "查看指标目录", "description": "访问指标目录列表"},
+    "measure-catalogs:view": {"module": "指标", "label": "查看原子指标口径库", "description": "访问原子指标口径库（逻辑度量）"},  # noqa: E501
     "compare:view": {"module": "指标", "label": "指标对比", "description": "访问指标对比页"},
     "templates:view": {"module": "指标", "label": "查看指标模板", "description": "访问指标模板页"},
     "metric:create": {"module": "指标", "label": "创建指标", "description": "新增指标（含口径定义）"},  # noqa: E501
@@ -280,7 +281,8 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
         {
             "dashboard:view", "todo:view", "notifications:view", "notifications:publish",
             "favorites:view",
-            "catalog:view", "compare:view", "templates:view", "metric:create", "metric:edit",
+            "catalog:view", "measure-catalogs:view",
+            "compare:view", "templates:view", "metric:create", "metric:edit",
             "metric:delete", "metric:approve", "metric:deprecate", "metric:export", "metric:review",
             "metric:emergency-publish", "metric:rollback", "metric:import",
             "metric:infer-description",
@@ -310,7 +312,7 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
     RoleName.METRIC_OWNER.value: frozenset(
         {
             "dashboard:view", "todo:view", "notifications:view", "favorites:view",
-            "catalog:view", "compare:view", "metric:create", "metric:edit",
+            "catalog:view", "measure-catalogs:view", "compare:view", "metric:create", "metric:edit",
             "metric:delete", "metric:deprecate", "metric:export", "metric:review",
             "metric:infer-description",
             "assetmap:view", "lineage:view", "lineage:write", "lineage:manage-edge",
@@ -329,7 +331,8 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
     RoleName.REVIEWER.value: frozenset(
         {
             "dashboard:view", "todo:view", "notifications:view", "favorites:view",
-            "catalog:view", "compare:view", "metric:review", "metric:approve",
+            "catalog:view", "measure-catalogs:view", "compare:view",
+            "metric:review", "metric:approve",
             "quality:view", "review:view", "query:view", "ai:view",
             "dimensions:view", "glossary:view", "feedback:view", "guide:view",
         }
@@ -337,7 +340,8 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
     RoleName.COMPLIANCE_OFFICER.value: frozenset(
         {
             "dashboard:view", "todo:view", "notifications:view", "favorites:view",
-            "catalog:view", "compare:view", "assetmap:view", "lineage:view",
+            "catalog:view", "measure-catalogs:view", "compare:view",
+            "assetmap:view", "lineage:view",
             "quality:view", "query:view", "ai:view", "dimensions:view", "glossary:view",
             "review:view", "review:arbitrate",
             "governance:view", "pii:review", "pii:validate", "classification:rescan",
@@ -349,7 +353,8 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
     RoleName.ANALYST.value: frozenset(
         {
             "dashboard:view", "todo:view", "notifications:view", "favorites:view",
-            "catalog:view", "compare:view", "assetmap:view", "lineage:view",
+            "catalog:view", "measure-catalogs:view", "compare:view",
+            "assetmap:view", "lineage:view",
             "quality:view", "query:view", "ai:view", "dimensions:view", "glossary:view",
             "feedback:view", "guide:view",
         }
@@ -357,7 +362,8 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
     RoleName.VIEWER.value: frozenset(
         {
             "dashboard:view", "todo:view", "notifications:view", "favorites:view",
-            "catalog:view", "compare:view", "quality:view", "query:view",
+            "catalog:view", "measure-catalogs:view", "compare:view",
+            "quality:view", "query:view",
             "dimensions:view", "glossary:view", "guide:view",
         }
     ),
