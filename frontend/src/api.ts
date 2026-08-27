@@ -1839,10 +1839,12 @@ export async function batchDeleteDimensions(codes: string[]): Promise<BatchResul
 
 export async function listDimensionMappings(
   sourceDimCode?: string,
+  page = 1,
   pageSize = 200,
 ): Promise<{ items: DimensionMapping[]; total: number }> {
   const params = new URLSearchParams();
   if (sourceDimCode) params.set("source_dim_code", sourceDimCode);
+  params.set("page", String(page));
   params.set("page_size", String(pageSize));
   const qs = params.toString();
   return request(`${API_BASE}/dimensions/mappings${qs ? `?${qs}` : ""}`);
@@ -1862,10 +1864,12 @@ export async function createDimensionMapping(body: {
 
 export async function listReconciliations(
   status?: string,
+  page = 1,
   pageSize = 200,
 ): Promise<{ items: Reconciliation[]; total: number }> {
   const params = new URLSearchParams();
   if (status) params.set("status", status);
+  params.set("page", String(page));
   params.set("page_size", String(pageSize));
   const qs = params.toString();
   return request(`${API_BASE}/dimensions/reconciliations${qs ? `?${qs}` : ""}`);

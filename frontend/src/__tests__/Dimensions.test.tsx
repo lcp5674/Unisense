@@ -527,6 +527,44 @@ describe("Dimensions 页面", () => {
     });
   });
 
+  it("维度映射 Tab：服务端分页——首屏 page=1 展示 total，翻页后重新请求 page=2", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listDimensionMappings).mockResolvedValue({
+      items: Array.from({ length: 25 }, (_, i) => ({
+        id: i + 1,
+        source_dim_code: `dim_src_${i}`,
+        target_dim_code: "dim_region",
+        mapping_type: "EQUIVALENT",
+        expression: null,
+        created_by: 1,
+        created_at: "2026-01-01T00:00:00Z",
+      })),
+      total: 25,
+    });
+    render(
+      <MemoryRouter>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole("tab", { name: /维度映射/ }));
+    await screen.findByText("dim_src_0");
+
+    // 首屏：携带 page=1 + pageSize（服务端分页），并展示 total
+    const firstCalls = vi.mocked(listDimensionMappings).mock.calls;
+    expect(firstCalls[firstCalls.length - 1][1]).toBe(1);
+    expect(firstCalls[firstCalls.length - 1][2]).toBe(20);
+    expect(screen.getByText("共 25 条")).toBeInTheDocument();
+
+    // 翻到第 2 页：重新请求 page=2，表格展示第 2 页数据（而非前端只切已拉取数据）
+    fireEvent.click(screen.getByTitle("2"));
+    await screen.findByText("dim_src_20");
+    await waitFor(() => {
+      const calls = vi.mocked(listDimensionMappings).mock.calls;
+      expect(calls[calls.length - 1][1]).toBe(2);
+    });
+  });
+
   it("对账 Tab：指标列展示 metric_code · metric_name（非 #id）", async () => {
     const user = userEvent.setup();
     vi.mocked(listReconciliations).mockResolvedValue({
@@ -546,6 +584,49 @@ describe("Dimensions 页面", () => {
     expect(screen.getByText("sales_gmv · 成交额")).toBeInTheDocument();
     // 不应再显示裸 #id
     expect(screen.queryByText("#7")).not.toBeInTheDocument();
+  });
+
+  it("对账 Tab：服务端分页——首屏 page=1 展示 total，翻页后重新请求 page=2", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listReconciliations).mockResolvedValue({
+      items: Array.from({ length: 25 }, (_, i) => ({
+        id: i + 1,
+        metric_id: 7,
+        metric_code: `sales_gmv_${i}`,
+        metric_name: "成交额",
+        dim_code: "dim_channel",
+        expected_expr: "a",
+        actual_expr: "b",
+        diff_summary: null,
+        status: "PENDING",
+        reviewed_by: null,
+        reviewed_at: null,
+        created_at: "2026-08-01T00:00:00",
+      })),
+      total: 25,
+    });
+    render(
+      <MemoryRouter>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole("tab", { name: /对账/ }));
+    await screen.findByText(/sales_gmv_0/);
+
+    // 首屏：携带 page=1 + pageSize（服务端分页），并展示 total
+    const firstCalls = vi.mocked(listReconciliations).mock.calls;
+    expect(firstCalls[firstCalls.length - 1][1]).toBe(1);
+    expect(firstCalls[firstCalls.length - 1][2]).toBe(20);
+    expect(screen.getByText("共 25 条")).toBeInTheDocument();
+
+    // 翻到第 2 页：重新请求 page=2，表格展示第 2 页数据
+    fireEvent.click(screen.getByTitle("2"));
+    await screen.findByText(/sales_gmv_20/);
+    await waitFor(() => {
+      const calls = vi.mocked(listReconciliations).mock.calls;
+      expect(calls[calls.length - 1][1]).toBe(2);
+    });
   });
 
   it("对账复核权限对齐后端 _GOV_DEPS：非治理角色（metric_owner）复核按钮禁用", async () => {

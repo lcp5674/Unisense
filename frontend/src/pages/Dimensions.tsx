@@ -1630,6 +1630,10 @@ function MappingsTab() {
   const [form] = Form.useForm();
   // 映射表每页条数（持久化，用户可自定义）
   const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.mappings.pageSize", 20);
+  // 服务端分页：页码/总数/防竞态（对齐维度主表模式，避免超过 pageSize 后翻不到）
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const loadSeq = useRef(0);
   // 维度下拉候选（源/目标维度选项框）
   const [dims, setDims] = useState<Dimension[]>([]);
   // 编辑态：复用新建布局，打开时预填当前映射值
@@ -1640,19 +1644,28 @@ function MappingsTab() {
   const [editForm] = Form.useForm();
 
   async function load() {
+    const seq = ++loadSeq.current;
     setLoading(true);
     try {
-      const res = await listDimensionMappings();
+      const res = await listDimensionMappings(undefined, page, pageSize);
+      // 已有更新的请求发起，丢弃本次过时响应（防竞态覆盖）
+      if (seq !== loadSeq.current) return;
       setItems(res.items);
+      setTotal(res.total);
     } catch (err) {
+      if (seq !== loadSeq.current) return;
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }
 
   useEffect(() => {
     load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, pageSize]);
+
+  useEffect(() => {
     listDimensions({ page_size: 200 }).then((r) => setDims(r.items)).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1776,7 +1789,26 @@ function MappingsTab() {
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>新建映射</Button>
         )}
       </div>
-      <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], showTotal: (t: number) => `共 ${t} 条`, onShowSizeChange }} locale={{ emptyText: "暂无维度映射" }} />
+      <Table
+        dataSource={items}
+        columns={columns}
+        rowKey="id"
+        loading={loading}
+        pagination={{
+          current: page,
+          pageSize,
+          total,
+          showSizeChanger: true,
+          onShowSizeChange: (p: number, ps: number) => {
+            setPage(1);
+            onShowSizeChange(p, ps);
+          },
+          onChange: (p: number) => setPage(p),
+          pageSizeOptions: [10, 20, 50, 100],
+          showTotal: (t: number) => `共 ${t} 条`,
+        }}
+        locale={{ emptyText: "暂无维度映射" }}
+      />
 
       <Modal title="新建维度映射" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建" confirmLoading={saving}>
         <Form form={form} layout="vertical" scrollToFirstError onFinish={handleCreate} style={{ marginTop: 8 }}>
@@ -1860,21 +1892,34 @@ function ReconciliationsTab() {
   const [isGov, setIsGov] = useState(false);
   // 对账表每页条数（持久化，用户可自定义）
   const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.reconciliations.pageSize", 20);
+  // 服务端分页：页码/总数/防竞态（对齐维度主表模式，避免超过 pageSize 后翻不到）
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const loadSeq = useRef(0);
 
   async function load() {
+    const seq = ++loadSeq.current;
     setLoading(true);
     try {
-      const res = await listReconciliations();
+      const res = await listReconciliations(undefined, page, pageSize);
+      // 已有更新的请求发起，丢弃本次过时响应（防竞态覆盖）
+      if (seq !== loadSeq.current) return;
       setItems(res.items);
+      setTotal(res.total);
     } catch (err) {
+      if (seq !== loadSeq.current) return;
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载失败");
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }
 
   useEffect(() => {
     load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, pageSize]);
+
+  useEffect(() => {
     listMetrics({ page_size: 100 }).then((r) => setMetrics(r.items)).catch(() => {});
     fetchCurrentUser()
       .then((u) => setIsGov(u.role === "domain_admin" || u.role === "platform_admin"))
@@ -1979,7 +2024,26 @@ function ReconciliationsTab() {
           <Button type="primary" icon={<SendOutlined />} onClick={() => setModalOpen(true)}>提交对账</Button>
         )}
       </div>
-      <Table dataSource={items} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], showTotal: (t: number) => `共 ${t} 条`, onShowSizeChange }} locale={{ emptyText: "暂无对账记录" }} />
+      <Table
+        dataSource={items}
+        columns={columns}
+        rowKey="id"
+        loading={loading}
+        pagination={{
+          current: page,
+          pageSize,
+          total,
+          showSizeChanger: true,
+          onShowSizeChange: (p: number, ps: number) => {
+            setPage(1);
+            onShowSizeChange(p, ps);
+          },
+          onChange: (p: number) => setPage(p),
+          pageSizeOptions: [10, 20, 50, 100],
+          showTotal: (t: number) => `共 ${t} 条`,
+        }}
+        locale={{ emptyText: "暂无对账记录" }}
+      />
 
       <Modal title="提交维度对账" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="提交" confirmLoading={saving}>
         <Form form={form} layout="vertical" scrollToFirstError onFinish={handleCreate} style={{ marginTop: 8 }}>
