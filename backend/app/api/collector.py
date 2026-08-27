@@ -1171,6 +1171,37 @@ async def list_batch_infer_history(
     return ok(data=[_to_history_entry(r) for r in rows], trace_id=trace_id)
 
 
+async def _prune_batch_infer_history(db: AsyncSession, limit: int) -> None:
+    """软删超出最近 limit 条的历史记录。
+
+    MySQL 不支持 NOT IN (SELECT ... ORDER BY ... LIMIT n) 子查询（错误 1235），
+    先物化「保留的最近 N 条」id 列表，再以具体值列表裁剪；keep_ids 为空时
+    跳过（not_in(空) 会渲染为永真条件导致全表软删）。
+    """
+    keep_ids = list(
+        (
+            await db.execute(
+                select(BatchInferHistory.id)
+                .where(BatchInferHistory.deleted_at.is_(None))
+                .order_by(BatchInferHistory.created_at.desc())
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not keep_ids:
+        return
+    await db.execute(
+        update(BatchInferHistory)
+        .where(
+            BatchInferHistory.deleted_at.is_(None),
+            BatchInferHistory.id.not_in(keep_ids),
+        )
+        .values(deleted_at=datetime.now(UTC))
+    )
+
+
 @catalog_router.post("/batch-infer-history", dependencies=_WRITE_DEPS)
 async def create_batch_infer_history(
     body: BatchInferHistoryCreate,
@@ -1193,20 +1224,7 @@ async def create_batch_infer_history(
     )
     db.add(row)
     await db.flush()
-    keep_ids = (
-        select(BatchInferHistory.id)
-        .where(BatchInferHistory.deleted_at.is_(None))
-        .order_by(BatchInferHistory.created_at.desc())
-        .limit(_BATCH_HISTORY_LIMIT)
-    )
-    await db.execute(
-        update(BatchInferHistory)
-        .where(
-            BatchInferHistory.deleted_at.is_(None),
-            BatchInferHistory.id.not_in(keep_ids),
-        )
-        .values(deleted_at=datetime.now(UTC))
-    )
+    await _prune_batch_infer_history(db, _BATCH_HISTORY_LIMIT)
     await write_audit(
         db,
         actor_id=user.id,
