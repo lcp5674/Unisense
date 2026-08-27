@@ -1048,3 +1048,92 @@ class TestParseSqlProfile:
         assert ms[0]["column"] == "product"
         assert ms[0].get("needs_review") is True
 
+    def test_quantile_timing_normalized_to_percentile(self) -> None:
+        """Y2：ClickHouse quantileTiming/quantileTimingWeighted（工业耗时/时延分位
+        ——P95 接口耗时等）——此前缺映射产出非法枚举 QUANTILETIMING → 批量创建
+        pydantic 整批失败（W4 quantileExactWeighted 同类但 quantileTiming 变体被
+        遗漏）；quantile* 前缀统一归一 PERCENTILE + 列从 ParameterizedAgg 提取。"""
+        p = parse_sql_profile(
+            "SELECT d, quantileTiming(0.95)(duration) AS p95 FROM ods.a GROUP BY d"
+        )
+        ms = [m for m in p.measures if m.get("alias") == "p95"]
+        assert len(ms) == 1, f"quantileTiming 应产出候选：{p.measures}"
+        assert ms[0]["agg"] == "PERCENTILE"
+        assert ms[0]["column"] == "duration"
+        p2 = parse_sql_profile(
+            "SELECT d, quantileTimingWeighted(0.5)(duration, weight) AS p50 "
+            "FROM ods.a GROUP BY d"
+        )
+        ms2 = [m for m in p2.measures if m.get("alias") == "p50"]
+        assert ms2 and ms2[0]["agg"] == "PERCENTILE"
+
+    def test_lag_lead_skipped_not_illegal_enum(self) -> None:
+        """Y5：窗口偏移函数 lag/lead over（sqlglot 把 Lag/Lead 定义为 AggFunc 子类）
+        ——语义是「上一/下一行取值」非分组聚合；此前产出非法枚举 LAG/LEAD → 批量
+        创建 pydantic 整批失败。诚实跳过（由 LLM/人工处理）。"""
+        p = parse_sql_profile(
+            "SELECT d, lag(amt) OVER (PARTITION BY d ORDER BY t) AS prev, "
+            "lead(amt) OVER (PARTITION BY d ORDER BY t) AS nxt, "
+            "count(1) AS c FROM ods.a GROUP BY d"
+        )
+        assert all(m["agg"] in ("COUNT",) for m in p.measures), (
+            f"lag/lead 应被诚实跳过（仅剩 COUNT）：{p.measures}"
+        )
+
+    def test_sum_distinct_keeps_sum_with_needs_review(self) -> None:
+        """Y23：``sum(distinct amt)``/``avg(distinct amt)`` 窗口或分组聚合——DISTINCT
+        修饰 ≠ 去重计数，仅 COUNT(DISTINCT x) 才是 COUNT_DISTINCT；SUM/AVG 去重是
+        「去重后求和/均值」，保留原聚合名 + needs_review（此前无条件改 COUNT_DISTINCT
+        致语义错误：sum(distinct amt) 被注册成「去重计数」）。"""
+        p = parse_sql_profile(
+            "SELECT d, sum(distinct amt) AS s FROM ods.a GROUP BY d"
+        )
+        ms = [m for m in p.measures if m.get("alias") == "s"]
+        assert len(ms) == 1 and ms[0]["agg"] == "SUM", (
+            f"sum(distinct) 应保留 SUM：{p.measures}"
+        )
+        assert ms[0]["column"] == "amt"
+        assert ms[0].get("needs_review") is True
+
+    def test_collect_map_wrapped_by_udf_detected(self) -> None:
+        """Y1：Hive 动态分组聚合被外层 UDF 包裹（``map_keys(collect_map(k, v))``——
+        动态 map 聚合取 key 集合）——sqlglot 把 collect_map 解析为嵌套 Anonymous
+        （非 AggFunc），此前整投影静默丢失（动态分组口径指标缺失）；walk 检测
+        collect_* 聚合映射去重集合语义 + needs_review。"""
+        p = parse_sql_profile(
+            "SELECT d, map_keys(collect_map(k, v)) AS ks, count(1) AS c "
+            "FROM ods.a GROUP BY d"
+        )
+        ms = [m for m in p.measures if m.get("alias") == "ks"]
+        assert len(ms) == 1, f"map_keys(collect_map) 应产出候选：{p.measures}"
+        assert ms[0]["agg"] == "COUNT_DISTINCT"
+        assert ms[0]["column"] == "k"
+        assert ms[0].get("needs_review") is True
+
+    def test_multi_column_pivot_all_measures(self) -> None:
+        """Y3：多列 PIVOT（``PIVOT(sum(amt) AS amt_sum, count(1) AS cnt FOR ...)``）
+        ——聚合被 Alias 包裹（exprs=[Alias(Sum), Alias(Count)]），此前 isinstance
+        AggFunc 把 Alias 跳过 → 多列 PIVOT 整段 0 度量；剥离 Alias 后全部聚合产出
+        + needs_review（PIVOT 展开为宽表，口径需人工核对）。"""
+        p = parse_sql_profile(
+            "SELECT * FROM (SELECT d, region, amt FROM ods.a) "
+            "PIVOT (sum(amt) AS amt_sum, count(1) AS cnt FOR region IN ('east','west'))"
+        )
+        aggs = sorted(m["agg"] for m in p.measures)
+        assert aggs == ["COUNT", "SUM"], f"多列 PIVOT 应产出两个度量：{p.measures}"
+        assert all(m.get("needs_review") is True for m in p.measures)
+        assert "ods.a" in p.source_tables
+
+    def test_composite_agg_arg_needs_review(self) -> None:
+        """Y15：聚合参数是多列算术表达式（``sum(a.amt * b.price)``）——col 只取
+        首个 Column、其余列口径丢失，标记 needs_review 让用户人工核对（expression
+        已保留完整；此前无标记，用户可能误以为单列聚合而直接注册）。"""
+        p = parse_sql_profile(
+            "SELECT d, sum(a.amt * b.price) AS rev FROM ods.a a "
+            "JOIN ods.b b ON a.id = b.id GROUP BY d"
+        )
+        ms = [m for m in p.measures if m.get("alias") == "rev"]
+        assert len(ms) == 1 and ms[0]["agg"] == "SUM"
+        assert ms[0].get("needs_review") is True
+        assert "ods.a" in p.source_tables and "ods.b" in p.source_tables
+

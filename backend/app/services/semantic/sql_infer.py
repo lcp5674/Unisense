@@ -195,6 +195,17 @@ _COND_IF_AGGS = {
     "sumif": "SUM",
     "countif": "COUNT",
 }
+# Y1：Hive 集合/动态分组聚合被外层 UDF 包裹（``map_keys(collect_map(k, v))``、
+# ``size(collect_set(x))`` 等）——sqlglot 把 collect_map 等解析为嵌套 ``exp.Anonymous``
+# （非 AggFunc），``target.find(exp.AggFunc)`` 返回 None → 整投影静默丢失（动态
+# 分组/集合口径指标缺失）。walk 检测内层 collect_* 聚合函数名，映射去重集合语义 +
+# needs_review（集合/动态分组口径需人工核对）。
+_COLLECT_ANON_AGGS = {
+    "collect_map",
+    "collect_set",
+    "collect_list",
+    "collect_unique",
+}
 # W20：ARRAY JOIN（ClickHouse 数组展开）方言归属提示——hive/default 方言把
 # ``ARRAY JOIN sku_list AS sku`` 的数组名解析成无 db 的 Table（与 ``JOIN b`` 结构
 # 无法区分），混入 source_tables 让血缘挂到不存在的表；clickhouse 方言正确解析为
@@ -551,6 +562,11 @@ def _agg_display_name(agg: exp.AggFunc) -> str | None:
         fn = agg.this.lower()
         if fn in _DIALECT_AGG_SKIP:
             return None
+        # Y2：ClickHouse quantileTiming/quantileTimingWeighted 等分位变体——统一归一
+        # PERCENTILE（此前缺映射产出非法枚举 QUANTILETIMING → 批量创建 pydantic
+        # 整批失败，W4 同类但 quantileTiming 变体被遗漏）
+        if fn.startswith("quantile"):
+            return "PERCENTILE"
         return _DIALECT_AGG_MAP.get(fn, fn.upper())
     # 首/末值窗口函数：sqlglot key 无下划线（FIRSTVALUE），归一为注册 schema 的
     # 带下划线枚举（MetricCreateRequest.aggregation Literal）——否则批量创建时
@@ -566,6 +582,11 @@ def _agg_display_name(agg: exp.AggFunc) -> str | None:
         return "FIRST_VALUE"
     if key == "LAST":
         return "LAST_VALUE"
+    # Y5：窗口偏移函数（``lag(amt) over (...)``/``lead(amt) over (...)``）——sqlglot
+    # 把 Lag/Lead 定义为 AggFunc 子类，但语义是「上一/下一行取值」非分组聚合；此前
+    # 产出非法枚举 LAG/LEAD → 批量创建 pydantic 整批失败。诚实跳过（由 LLM/人工处理）。
+    if key in ("LAG", "LEAD"):
+        return None
     if key.startswith("PERCENTILE"):
         return "PERCENTILE"
     # 数组/布尔/任意值聚合类（sqlglot 内置子类，key 无下划线）：array_agg→COUNT_DISTINCT
@@ -751,6 +772,38 @@ def _projection_measures(
                         bm["expression"] = f"COUNT_DISTINCT({bm['column']})"
                 measures.append(bm)
                 continue
+            # Y1：Hive 集合/动态分组聚合被外层 UDF 包裹（``map_keys(collect_map(k, v))``
+            # 等）——内层 collect_* 是 Anonymous（非 AggFunc），``target.find(exp.AggFunc)``
+            # 返回 None → 整投影静默丢失；walk 检测映射去重集合语义 + needs_review
+            if any(
+                isinstance(n, exp.Anonymous)
+                and str(getattr(n, "this", "") or "").lower() in _COLLECT_ANON_AGGS
+                for n in target.walk()
+            ):
+                inner_col = next(
+                    (c for c in target.walk() if isinstance(c, exp.Column)), None
+                )
+                cm: dict[str, Any] = {
+                    "column": (
+                        _extract_col_name(inner_col) if inner_col is not None else "*"
+                    ),
+                    "agg": "COUNT_DISTINCT",
+                    "needs_review": True,
+                }
+                if enrich:
+                    cm["alias"] = (
+                        projection.alias_or_name
+                        if isinstance(projection, exp.Alias)
+                        else None
+                    )
+                    cm["table"] = _measure_table(select, target) or table
+                    cm["sunk"] = sunk
+                    try:
+                        cm["expression"] = target.sql()
+                    except Exception:  # noqa: BLE001 - 序列化失败仅降级简化式
+                        cm["expression"] = f"COUNT_DISTINCT({cm['column']})"
+                measures.append(cm)
+                continue
             # W7：条件聚合（default 方言下 ``sum_if(status='refund', amt)`` 解析为
             # Anonymous 而非 CombinedAggFunc/CountIf）——此前 Anonymous 非 AggFunc
             # 导致 ``target.find(exp.AggFunc)`` 返回 None、整投影静默丢失（条件口径
@@ -855,7 +908,13 @@ def _projection_measures(
         if isinstance(col_expr, exp.Order):
             col_expr = col_expr.this
         if isinstance(col_expr, exp.Distinct):
-            agg_name = "COUNT_DISTINCT"
+            # Y23：``sum(distinct x)``/``avg(distinct x)`` 的 DISTINCT 修饰 ≠ 去重计数
+            # ——仅 ``COUNT(DISTINCT x)`` 才是 COUNT_DISTINCT；SUM/AVG 去重是「去重后
+            # 求和/均值」，保留原聚合名并标记 needs_review（此前无条件改
+            # COUNT_DISTINCT 致语义错误：``sum(distinct amt)`` 被注册成「去重计数」，
+            # 用户以为对就创建、实际口径错误——U-2 同类最危险场景）。
+            if agg_name == "COUNT":
+                agg_name = "COUNT_DISTINCT"
             if len(col_expr.expressions or []) > 1:
                 # V-5：``count(distinct col1, col2)`` 多列去重（Spark/Hive）——只取
                 # 首列会丢失去重语义；合并列名展示并标记 needs_review（多列去重口径
@@ -926,7 +985,13 @@ def _projection_measures(
         ):
             continue
         measure: dict[str, Any] = {"column": col_name, "agg": agg_name}
-        if nested_agg or is_cond_count:
+        # Y23/Y15：非 COUNT 聚合带 DISTINCT（``sum(distinct x)`` = 去重后求和/均值）
+        # 或聚合参数是多列算术表达式（``sum(a.amt * b.price)``，col 只取首个 Column、
+        # 其余列口径丢失）——已保留原聚合名/expression，但口径需人工核对（区别于
+        # 普通单列分组聚合，避免用户误以为全表/单列聚合而直接注册）
+        if nested_agg or is_cond_count or (
+            isinstance(agg.this, exp.Distinct) and agg_name != "COUNT_DISTINCT"
+        ) or isinstance(agg.this, (exp.Mul, exp.Div, exp.Add, exp.Sub)):
             measure["needs_review"] = True
         if enrich:
             measure["alias"] = (
@@ -1100,6 +1165,12 @@ def _pivot_measures(select: exp.Select) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for pv in select.find_all(exp.Pivot):
         for aagg in pv.args.get("expressions") or []:
+            # Y3：多列 PIVOT（``PIVOT(sum(amt) AS amt_sum, count(1) AS cnt FOR ...)``）
+            # 的聚合被 ``Alias`` 包裹（exprs=[Alias(Sum), Alias(Count)]）——此前
+            # ``isinstance(aagg, exp.AggFunc)`` 把 Alias 跳过 → 多列 PIVOT 整段 0 度量
+            # （连单列能识别的 PIVOT 在多列形态也全丢）。剥离 Alias 取内层聚合。
+            if isinstance(aagg, exp.Alias):
+                aagg = aagg.this
             if not isinstance(aagg, exp.AggFunc):
                 continue
             an = _agg_display_name(aagg)
