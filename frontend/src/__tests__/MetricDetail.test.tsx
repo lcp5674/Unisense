@@ -2737,6 +2737,53 @@ describe("MetricDetail 按钮级权限过滤", () => {
     expect(screen.getByText(/列：amount · 粒度：day/)).toBeTruthy();
   });
 
+  // 2026-08-27 多变体：详情页挂载卡逐行展示全部变体（不同粒度/限定/周期），业务限定随行展示
+  it("详情页逐行展示多变体挂载（粒度/业务限定/周期）", async () => {
+    mockedListMetricMounts.mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          metric_id: 1,
+          source_table: "dwd.doctor_fee_daily",
+          source_column: "fee",
+          granularity: "医生",
+          default_period: "day",
+          domain: "medical",
+          business_filter: "场景=门诊",
+          created_at: "2026-08-01T00:00:00",
+          updated_at: "2026-08-01T00:00:00",
+        },
+        {
+          id: 2,
+          metric_id: 1,
+          source_table: "dwd.hospital_fee",
+          source_column: "fee",
+          granularity: "医院",
+          default_period: "day",
+          domain: "medical",
+          business_filter: "场景=住院",
+          created_at: "2026-08-01T00:00:00",
+          updated_at: "2026-08-01T00:00:00",
+        },
+      ],
+      total: 2,
+    });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    await screen.findByText("挂载实体（OneData 挂载层）");
+    // 两个变体逐行展示，业务限定随行
+    expect(screen.getByText("dwd.doctor_fee_daily")).toBeTruthy();
+    expect(screen.getByText(/粒度：医生/)).toBeTruthy();
+    expect(screen.getByText(/业务限定：场景=门诊/)).toBeTruthy();
+    expect(screen.getByText("dwd.hospital_fee")).toBeTruthy();
+    expect(screen.getByText(/粒度：医院/)).toBeTruthy();
+    expect(screen.getByText(/业务限定：场景=住院/)).toBeTruthy();
+    // 两个解除按钮（每行一个）
+    expect(screen.getAllByRole("button", { name: /解除挂载/ })).toHaveLength(2);
+  });
+
   // P1-3：挂载实体可管——解除挂载走确认弹窗，确认后调 deleteMetricMount 并刷新
   it("解除挂载：确认后调 deleteMetricMount 并刷新挂载列表", async () => {
     mockedListMetricMounts.mockResolvedValue({

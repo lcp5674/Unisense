@@ -1558,7 +1558,7 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     fireEvent.click(screen.getByText("派生指标"));
     // 挂载实体区（Step⑥ 派生分支）：源表 Select 占位符文本唯一定位
     const mountTableSel = screen
-      .getByText("源表（如 dwd.sales_detail；未采集的可输入完整表名）")
+      .getByText("源表（如 dwd.sales_detail）")
       .closest(".ant-select") as HTMLElement;
     fireEvent.mouseDown(mountTableSel.querySelector(".ant-select-selector") as HTMLElement);
     await clickSelectOption("dwd.sales_detail");
@@ -1569,6 +1569,80 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     fireEvent.mouseDown(mountColSel.querySelector(".ant-select-selector") as HTMLElement);
     await waitFor(() => expect(screen.getByText("gmv (decimal)")).toBeTruthy());
     expect(screen.getByText("order_cnt (bigint)")).toBeTruthy();
+  });
+
+  it("多变体挂载：添加变体行可录入多套粒度/限定/周期并随创建提交 mounts 数组", async () => {
+    mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
+    mockedCatalogs.mockResolvedValue({
+      items: [
+        makeCatalog("dwd.sales_detail", [
+          { name: "gmv", type: "decimal" },
+          { name: "order_cnt", type: "bigint" },
+        ]),
+        makeCatalog("dwd.hospital_fee", [{ name: "fee", type: "decimal" }]),
+      ],
+      total: 2,
+      page: 1,
+      page_size: 20,
+    });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await goToStep(2);
+    fireEvent.click(screen.getByText("派生指标"));
+    // 第一行变体：选源表 + 度量列 + 粒度 + 业务限定
+    const mountTableSel = screen
+      .getByText("源表（如 dwd.sales_detail）")
+      .closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(mountTableSel.querySelector(".ant-select-selector") as HTMLElement);
+    await clickSelectOption("dwd.sales_detail");
+    const mountColSel = screen
+      .getByText("度量列（可直接输入列名）")
+      .closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(mountColSel.querySelector(".ant-select-selector") as HTMLElement);
+    await clickSelectOption("gmv (decimal)");
+    fireEvent.change(screen.getByPlaceholderText("粒度（如 日/月/医院）"), {
+      target: { value: "医生" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("业务限定（如 病种=门特）"), {
+      target: { value: "场景=门诊" },
+    });
+    // 添加第二行变体：不同表/粒度
+    fireEvent.click(screen.getByRole("button", { name: /添加变体/ }));
+    const grainInputs = screen.getAllByPlaceholderText("粒度（如 日/月/医院）");
+    expect(grainInputs.length).toBe(2);
+    const tableSels2 = screen.getAllByText("源表（如 dwd.sales_detail）");
+    fireEvent.mouseDown(
+      (tableSels2[0].closest(".ant-select") as HTMLElement).querySelector(".ant-select-selector") as HTMLElement,
+    );
+    await clickSelectOption("dwd.hospital_fee");
+    const colSels2 = screen.getAllByText("度量列（可直接输入列名）");
+    fireEvent.mouseDown(
+      (colSels2[0].closest(".ant-select") as HTMLElement).querySelector(".ant-select-selector") as HTMLElement,
+    );
+    await clickSelectOption("fee (decimal)");
+    fireEvent.change(grainInputs[1], { target: { value: "医院" } });
+    // 名称必填 → 回 Step1 填名称 → 提交
+    await goToStep(1);
+    fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), {
+      target: { value: "费用金额多变体" },
+    });
+    await goToStep(2);
+    fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
+    const body = mockedCreate.mock.calls[0][0] as {
+      mounts?: Array<Record<string, unknown>>;
+    };
+    expect(body.mounts).toHaveLength(2);
+    expect(body.mounts![0]).toMatchObject({
+      source_table: "dwd.sales_detail",
+      granularity: "医生",
+      business_filter: "场景=门诊",
+    });
+    expect(body.mounts![1]).toMatchObject({
+      source_table: "dwd.hospital_fee",
+      granularity: "医院",
+    });
   });
 
   it("原子指标未选逻辑度量且未填口径提交 → 前端拦截并提示来源必填", async () => {

@@ -2345,6 +2345,7 @@ export function MetricDetail() {
                 <span className="muted">
                   列：{m.source_column} · 粒度：{m.granularity}
                   {m.default_period ? ` · 默认周期：${m.default_period}` : ""} · 域：{m.domain}
+                  {m.business_filter ? ` · 业务限定：${m.business_filter}` : ""}
                 </span>
               </Space>
               <Button

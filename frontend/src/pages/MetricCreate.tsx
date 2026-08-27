@@ -659,9 +659,10 @@ export function MetricCreate() {
     handleAutoSuggest();
   }
 
-  // 挂载实体：选源表后加载该表列（供挂载度量列点选）——此前挂载源表无 onChange，
-  // 导致选表后度量列下拉仍为空/残留别的表列；表变更时清空已选列与搜索词。
-  async function handleMountSrcTableChange(entityName: string) {
+  // 挂载实体（多变体，2026-08-27 放开一指标一挂载）：选源表后加载该表列（供挂载度量列
+  // 点选）——此前挂载源表无 onChange，导致选表后度量列下拉仍为空/残留别的表列；
+  // 表变更时清空该行已选列与搜索词（columnOptions 为共享，供自动推断区与挂载多行点选）。
+  async function handleMountSrcTableChange(entityName: string, rowIndex?: number) {
     if (!entityName) {
       setColumnOptions([]);
       setMountColumnKw("");
@@ -669,7 +670,11 @@ export function MetricCreate() {
     }
     await loadColumnsForTable(entityName);
     setMountColumnKw("");
-    form.setFieldValue("mount_source_column", undefined);
+    if (rowIndex !== undefined) {
+      form.setFieldValue(["mounts", rowIndex, "source_column"], undefined);
+    } else {
+      form.setFieldValue("mount_source_column", undefined);
+    }
   }
 
   // 选了度量列后触发自动推断
@@ -1747,7 +1752,11 @@ export function MetricCreate() {
       // F1：纯周期派生无需手填公式——从挂载源列自动生成「聚合(度量列)」兜底，
       // 保证口径有计算主体（对齐后端类型化校验），用户仍可后续编辑补充。
       // 依赖/公式均可选：派生 = 原子 + 业务限定 + 时间周期。
-      const msCol = String(values.mount_source_column || "").trim();
+      // 多变体：取第一行挂载的度量列生成「聚合(度量列)」兜底口径
+      const firstMount = Array.isArray(values.mounts)
+        ? (values.mounts[0] as Record<string, unknown> | undefined)
+        : undefined;
+      const msCol = String(firstMount?.source_column ?? "").trim();
       if (msCol) {
         expr = { expression: `${String(values.aggregation || "SUM")}(${msCol})` };
       }
@@ -1843,36 +1852,40 @@ export function MetricCreate() {
     setLoading(true);
     const definitionJson = buildDefinitionJson(values);
     if (!definitionJson) { setLoading(false); return; }
-    // OneData 挂载层：派生指标收集挂载配置（源表/列/粒度/周期/域）→ 服务端自动落 metric_mount
-    let mount: MetricMountInput | undefined;
+    // OneData 挂载层（多变体）：派生指标收集挂载配置（源表/列/粒度/周期/域/业务限定，
+    // 每行一个变体）→ 服务端自动落 metric_mount；过滤未填完整的行（至少源表+列+粒度）
+    let mounts: MetricMountInput[] | undefined;
     if (metricType === "derived") {
-      const ms = String(values.mount_source_table || "").trim();
-      const mc = String(values.mount_source_column || "").trim();
-      const mg = String(values.mount_granularity || "").trim();
-      if (ms && mc && mg) {
-        mount = {
-          source_table: ms,
-          source_column: mc,
-          granularity: mg,
-          default_period: String(values.mount_default_period || "") || null,
-          domain: selectedDomain,
-        };
-      }
+      const rawMounts: unknown[] = Array.isArray(values.mounts) ? values.mounts : [];
+      const collected: MetricMountInput[] = rawMounts
+        .map((m) => {
+          const row = (m ?? {}) as Record<string, unknown>;
+          return {
+            source_table: String(row.source_table ?? "").trim(),
+            source_column: String(row.source_column ?? "").trim(),
+            granularity: String(row.granularity ?? "").trim(),
+            default_period: String(row.default_period ?? "") || null,
+            domain: selectedDomain,
+            business_filter: String(row.business_filter ?? "").trim() || null,
+          };
+        })
+        .filter((m) => m.source_table && m.source_column && m.granularity);
+      if (collected.length > 0) mounts = collected;
     }
     const req: MetricCreateRequest = {
       metric_code: values.metric_code ? String(values.metric_code) : undefined,
       name: String(values.name),
       domain: selectedDomain,
       type: String(values.type) as MetricType,
-      // OneData：粒度下沉挂载——原子不设，派生由 mount 承载（主表冗余回填由服务端处理）
+      // OneData：粒度下沉挂载——原子不设，派生由挂载承载（默认变体行；主表冗余回填由服务端处理）
       granularity: isAtomic
         ? undefined
         : values.granularity
           ? String(values.granularity)
-          : mount?.granularity ?? undefined,
+          : mounts?.[0]?.granularity ?? undefined,
       // OneData 原子层：原子指标关联逻辑度量（度量格式/单位/小数位继承）
       measure_id: isAtomic ? selectedMeasure?.id ?? undefined : undefined,
-      mount,
+      mounts,
       // OneData：单位与物理属性——原子由逻辑度量继承/后端默认（不提交）；派生/复合缺省后端兜底
       unit: isAtomic ? undefined : values.unit ? String(values.unit) : undefined,
       currency: isAtomic ? undefined : values.currency ? String(values.currency) : undefined,
@@ -2058,8 +2071,8 @@ export function MetricCreate() {
         style={{ marginBottom: 20 }}
         items={[
           { title: "业务域", description: "选域并继承域默认值" },
-          { title: "指标基本信息", description: "治理/口径/消费指南/责任方" },
-          { title: "具体实现", description: "类型/来源/挂载/依赖 + 提交" },
+          { title: "指标基本信息", description: "名称/粒度/维度/责任方/消费指南" },
+          { title: "具体实现", description: "三层口径/类型/来源/挂载 + 提交" },
         ]}
       />
       <Spin
@@ -2082,6 +2095,8 @@ export function MetricCreate() {
           time_semantics: "PERIOD", freshness: "T1", dw_layer: "DWD",
           metric_tier: "T3", serving_mode: "BATCH_ONLY", // additivity 不硬编码——由字典 active 值动态预填（见上）
           pii_flag: false, period: "day",
+          // 多变体挂载：默认一行（派生指标挂载区 Form.List 初始空则不渲染，须给首行）
+          mounts: [{}],
         }}>
           <Space style={{ width: "100%" }} direction="vertical" size="middle">
             {/* Step 0: 选域（OneData 向导） */}
@@ -2259,315 +2274,117 @@ export function MetricCreate() {
                 {metricType === "derived" && (
                   <Form.Item
                     label={<span>挂载实体表（指标的家）<Tag color="blue" style={{ marginLeft: 6 }}>OneData 挂载层</Tag></span>}
-                    extra="【通俗理解】这个指标计算出来的结果最终存到哪张物理表？这张表就是指标的“家”（落地/物化表），粒度、统计周期也挂在它身上——不是“原料表”，也不是“消费表”。原子/复合指标不挂载。"
+                    extra="【通俗理解】这个指标计算出来的结果最终存到哪张物理表？这张表就是指标的“家”（落地/物化表），粒度、统计周期、业务限定也挂在它身上——不是“原料表”，也不是“消费表”。一个派生指标可挂多个变体（不同粒度/限定/周期组合），每行一个变体；原子/复合指标不挂载。"
                   >
-                    <Row gutter={12}>
-                      <Col span={8}>
-                        <Form.Item name="mount_source_table" noStyle>
-                          <Select
-                            showSearch
-                            allowClear
-                            placeholder="源表（如 dwd.sales_detail；未采集的可输入完整表名）"
-                            onSearch={(q) => {
-                              setMountSrcTableKw(q);
-                              handleSrcTableSearch(q);
-                            }}
-                            onChange={handleMountSrcTableChange}
-                            onOpenChange={handleSrcTableDropdown}
-                            loading={srcTableSearchLoading}
-                            notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表，可手动输入完整表名"}
-                            options={withUncollectedOption(mountSrcTableKw, srcTableSearchOptions)}
-                            optionRender={tableOptionRender}
-                            filterOption={false}
-                          />
-                        </Form.Item>
-                      </Col>
-                      <Col span={6}>
-                        <Form.Item name="mount_source_column" noStyle>
-                          <Select
-                            showSearch
-                            allowClear
-                            placeholder="度量列（可直接输入列名）"
-                            onSearch={setMountColumnKw}
-                            options={withUncollectedOption(mountColumnKw, columnOptions)}
-                            optionRender={tableOptionRender}
-                            notFoundContent={columnOptions.length === 0 ? "未采集列，可直接输入列名" : "无匹配列，可直接输入"}
-                            filterOption={(input, option) =>
-                              (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
-                            }
-                          />
-                        </Form.Item>
-                      </Col>
-                      <Col span={5}>
-                        <Form.Item name="mount_granularity" noStyle>
-                          <Input placeholder="粒度（如 日/月）" maxLength={64} />
-                        </Form.Item>
-                      </Col>
-                      <Col span={5}>
-                        <Form.Item name="mount_default_period" noStyle>
-                          <Select
-                            allowClear
-                            placeholder="默认周期"
-                            options={PERIOD_OPTIONS}
-                          />
-                        </Form.Item>
-                      </Col>
-                    </Row>
+                    <Form.List name="mounts">
+                      {(fields, { add, remove }) => (
+                        <>
+                          {fields.map(({ key, name, ...restField }) => (
+                            <div
+                              key={key}
+                              style={{
+                                marginBottom: 8,
+                                padding: 8,
+                                border: "1px dashed #d9d9d9",
+                                borderRadius: 6,
+                                background: "#fafafa",
+                              }}
+                            >
+                              <Row gutter={12} align="middle">
+                                <Col span={7}>
+                                  <Form.Item
+                                    {...restField}
+                                    name={[name, "source_table"]}
+                                    style={{ marginBottom: 0 }}
+                                  >
+                                    <Select
+                                      showSearch
+                                      allowClear
+                                      placeholder="源表（如 dwd.sales_detail）"
+                                      onSearch={(q) => {
+                                        setMountSrcTableKw(q);
+                                        handleSrcTableSearch(q);
+                                      }}
+                                      onChange={(v) => handleMountSrcTableChange(String(v || ""), name)}
+                                      onOpenChange={handleSrcTableDropdown}
+                                      loading={srcTableSearchLoading}
+                                      notFoundContent={srcTableSearchLoading ? <Spin size="small" /> : "无匹配表，可手动输入完整表名"}
+                                      options={withUncollectedOption(mountSrcTableKw, srcTableSearchOptions)}
+                                      optionRender={tableOptionRender}
+                                      filterOption={false}
+                                    />
+                                  </Form.Item>
+                                </Col>
+                                <Col span={5}>
+                                  <Form.Item
+                                    {...restField}
+                                    name={[name, "source_column"]}
+                                    style={{ marginBottom: 0 }}
+                                  >
+                                    <Select
+                                      showSearch
+                                      allowClear
+                                      placeholder="度量列（可直接输入列名）"
+                                      onSearch={setMountColumnKw}
+                                      options={withUncollectedOption(mountColumnKw, columnOptions)}
+                                      optionRender={tableOptionRender}
+                                      notFoundContent={columnOptions.length === 0 ? "未采集列，可直接输入列名" : "无匹配列，可直接输入"}
+                                      filterOption={(input, option) =>
+                                        (option?.label as string)?.toLowerCase().includes(input.toLowerCase())
+                                      }
+                                    />
+                                  </Form.Item>
+                                </Col>
+                                <Col span={4}>
+                                  <Form.Item
+                                    {...restField}
+                                    name={[name, "granularity"]}
+                                    style={{ marginBottom: 0 }}
+                                  >
+                                    <Input placeholder="粒度（如 日/月/医院）" maxLength={64} />
+                                  </Form.Item>
+                                </Col>
+                                <Col span={4}>
+                                  <Form.Item {...restField} name={[name, "default_period"]} style={{ marginBottom: 0 }}>
+                                    <Select
+                                      allowClear
+                                      placeholder="默认周期"
+                                      options={PERIOD_OPTIONS}
+                                    />
+                                  </Form.Item>
+                                </Col>
+                                <Col span={3}>
+                                  <Form.Item {...restField} name={[name, "business_filter"]} style={{ marginBottom: 0 }}>
+                                    <Input placeholder="业务限定（如 病种=门特）" maxLength={512} />
+                                  </Form.Item>
+                                </Col>
+                                <Col span={1} style={{ textAlign: "center" }}>
+                                  {fields.length > 1 && (
+                                    <Button
+                                      type="text"
+                                      danger
+                                      icon={<MinusCircleOutlined />}
+                                      aria-label="删除该变体挂载"
+                                      onClick={() => remove(name)}
+                                    />
+                                  )}
+                                </Col>
+                              </Row>
+                            </div>
+                          ))}
+                          <Button type="dashed" onClick={() => add()} block icon={<PlusOutlined />}>
+                            添加变体（不同粒度/限定/周期的挂载行）
+                          </Button>
+                        </>
+                      )}
+                    </Form.List>
                   </Form.Item>
                 )}
                 </>
               )}
             </Card>
 
-            {/* 关联数据表（Step2：血缘上下游表）——从口径定义卡抽出，随实现步骤展示 */}
-            <Card type="inner" title="⑦ 关联数据表" size="small">
-              <Alert
-                type="info"
-                showIcon
-                style={{ marginBottom: 12 }}
-                message="三类表的关系，方向别搞混："
-                description={
-                  <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.8 }}>
-                    <li>
-                      <b>依赖表（上游）</b>：这个指标是靠哪些表“加工”出来的？——如
-                      <span className="mono" style={{ fontSize: 12 }}> dwd.sales_detail</span>
-                      （血缘自动生成 表 → 指标 边）
-                    </li>
-                    <li>
-                      <b>使用表（下游）</b>：哪些表会“消费”这个指标的结果？——如
-                      <span className="mono" style={{ fontSize: 12 }}> ads.gmv_report</span>
-                      （血缘自动生成 指标 → 表 边）
-                    </li>
-                    <li>
-                      <b>挂载实体表（指标的家）</b>（⑥，仅派生指标）：结果存到哪张物理表？
-                      ——区别于上面的“原料”和“客户”。
-                    </li>
-                  </ul>
-                }
-              />
-              <Form.Item
-                label="依赖表（上游）"
-                extra="加工出这个指标的“原料表”（可多选）——血缘据此生成 表 → 指标 上游边"
-              >
-                <Select
-                  mode="multiple" allowClear showSearch
-                  placeholder="展开浏览已接入表，或输入关键词搜索（未采集的可直接录入）"
-                  value={sourceTables}
-                  onChange={(v: string[]) => setSourceTables(v)}
-                  onSearch={(q) => {
-                    setDepTableKw(q);
-                    searchTables(q);
-                  }}
-                  onOpenChange={handleTableDropdown}
-                  loading={tableSearching}
-                  notFoundContent={tableSearching ? <Spin size="small" /> : "无匹配表，可手动输入完整表名"}
-                  options={withUncollectedOption(depTableKw, tableOptions)}
-                  optionRender={tableOptionRender}
-                  filterOption={false}
-                />
-              </Form.Item>
-              <Form.Item
-                label="使用表（下游）"
-                extra="消费这个指标结果的“客户表”（可多选）——血缘据此生成 指标 → 表 下游边"
-              >
-                <Select
-                  mode="multiple" allowClear showSearch
-                  placeholder="展开浏览已接入表，或输入关键词搜索（未采集的可直接录入）"
-                  value={downstreamTables}
-                  onChange={(v: string[]) => setDownstreamTables(v)}
-                  onSearch={(q) => {
-                    setDownTableKw(q);
-                    searchTables(q);
-                  }}
-                  onOpenChange={handleTableDropdown}
-                  loading={tableSearching}
-                  notFoundContent={tableSearching ? <Spin size="small" /> : "无匹配表，可手动输入完整表名"}
-                  options={withUncollectedOption(downTableKw, tableOptions)}
-                  optionRender={tableOptionRender}
-                  filterOption={false}
-                />
-              </Form.Item>
-            </Card>
-            {renderStepNav()}
-            </>
-            )}
-
-            {/* Step 1: 指标基本信息（OneData 向导）—— 治理/口径/消费指南/责任方 */}
-            {currentStep === 1 && (<>
-            <Card type="inner" title="② 指标基本信息" size="small">
-              <Row gutter={16}>
-                <Col span={12}>
-                  <Form.Item
-                    name="metric_code"
-                    label="指标编码"
-                    extra={
-                      suggestedCode ? (
-                        <span style={{ marginTop: 4 }}>
-                          <Tag color="blue">系统建议: {suggestedCode}</Tag>
-                          <Button type="link" size="small" style={{ padding: 0 }} onClick={() => form.setFieldValue("metric_code", suggestedCode)}>
-                            一键采纳
-                          </Button>
-                        </span>
-                      ) : (
-                        <span className="mono" style={{ color: "#0E7C86" }}>留空则由系统自动生成</span>
-                      )
-                    }
-                  >
-                    <Input placeholder={suggestedCode ? `点击右侧「一键采纳」使用 ${suggestedCode}` : "4段式: 域_业务对象_度量_周期（留空自动生成）"} maxLength={64} showCount />
-                  </Form.Item>
-                </Col>
-                <Col span={12}>
-                  <Form.Item name="name" label={<span>名称{fieldBadge("name")}</span>} rules={[{ required: true }, { max: 128, message: "名称最长 128 字符" }]}>
-                    <Input placeholder="指标显示名称" maxLength={128} showCount />
-                  </Form.Item>
-                </Col>
-              </Row>
-
-              {/* OneData：聚合方式归属逻辑度量（原子 = 逻辑度量 + 基础统计粒度（日），
-                  聚合是度量固有属性故始终可见）；其余治理字段收敛为"高级设置"——
-                  由域默认值/度量目录/挂载层自动接管；管理/数仓角色默认展开、业务角色默认折叠 */}
-              <Row gutter={16}>
-                <Col span={8}>
-                  <Form.Item name="aggregation" label={<span>聚合{fieldBadge("aggregation")}</span>} rules={[{ required: true, message: "请选择聚合方式" }]}>
-                    {dictSelect("aggregation", "aggregation", "选择聚合方式")}
-                  </Form.Item>
-                </Col>
-              </Row>
-              <Collapse
-                ghost
-                defaultActiveKey={["platform_admin", "domain_admin"].includes(currentRole) ? ["gov"] : []}
-                items={[
-                  {
-                    key: "gov",
-                    label: (
-                      <span>
-                        高级治理设置
-                        <Tag style={{ marginLeft: 8 }} color="blue">已由域默认/原子指标口径库自动接管</Tag>
-                      </span>
-                    ),
-                    children: (
-                      <>
-                        {!isAtomic && (
-                          <>
-                            <Row gutter={16}>
-                              <Col span={8}>
-                                <Form.Item name="granularity" label="粒度" extra="缺省取挂载粒度（⑥挂载配置）">
-                                  {dictSelect("granularity", "granularity", "选择粒度")}
-                                </Form.Item>
-                              </Col>
-                              <Col span={8}>
-                                <Form.Item name="unit" label="单位" extra="缺省继承依赖指标单位">
-                                  {dictSelect("unit", "unit", "选择单位")}
-                                </Form.Item>
-                              </Col>
-                              <Col span={8}>
-                                <Form.Item
-                                  name="currency"
-                                  label="币种（选填）"
-                                  extra="ISO 4217 标准币种，仅交易类指标需要"
-                                >
-                                  {dictSelect("currency", "currency", "选择币种")}
-                                </Form.Item>
-                              </Col>
-                            </Row>
-                            <Row gutter={16}>
-                              <Col span={8}>
-                                <Form.Item name="time_semantics" label="时间语义">
-                                  {dictSelect("time_semantics", "time_semantics", "选择时间语义（缺省 PERIOD）")}
-                                </Form.Item>
-                              </Col>
-                              <Col span={8}>
-                                <Form.Item name="freshness" label="新鲜度">
-                                  {dictSelect("freshness", "freshness", "选择新鲜度（缺省 T1）")}
-                                </Form.Item>
-                              </Col>
-                              <Col span={8}>
-                                <Form.Item name="dw_layer" label="数仓层">
-                                  {dictSelect("dw_layer", "dw_layer", "选择数仓层（缺省 DWD）")}
-                                </Form.Item>
-                              </Col>
-                            </Row>
-                          </>
-                        )}
-                        <Row gutter={16}>
-                          <Col span={8}>
-                            <Form.Item name="additivity" label={<span>可加性{fieldBadge("additivity")}</span>}>
-                              {dictSelect("additivity", "additivity", "选择可加性")}
-                            </Form.Item>
-                          </Col>
-                          <Col span={8}>
-                            <Form.Item name="serving_mode" label={<span>服务模式{fieldBadge("serving_mode")}</span>}>
-                              {dictSelect("serving_mode", "serving_mode", "选择服务模式")}
-                            </Form.Item>
-                          </Col>
-                          <Col span={8}>
-                            <Form.Item name="metric_tier" label={<span>分级{fieldBadge("metric_tier")}</span>}>
-                              {dictSelect("metric_tier", "metric_tier", "选择分级")}
-                            </Form.Item>
-                          </Col>
-                        </Row>
-                        <Row gutter={16}>
-                          <Col span={8}>
-                            <Form.Item name="pii_flag" label="含 PII" valuePropName="checked">
-                              <Checkbox>含 PII</Checkbox>
-                            </Form.Item>
-                          </Col>
-                        </Row>
-                      </>
-                    ),
-                  },
-                ]}
-              />
-              <Collapse
-                ghost
-                items={[
-                  {
-                    key: "guide",
-                    label: (
-                      <span>
-                        消费指南（选填）
-                        <Tag style={{ marginLeft: 8 }} color={guideDraft ? "green" : "default"}>
-                          {guideDraft ? "已填写" : "自动生成"}
-                        </Tag>
-                      </span>
-                    ),
-                    children: (
-                      <>
-                        <Alert
-                          type="info"
-                          showIcon
-                          style={{ marginBottom: 12 }}
-                          message="推荐用法/注意事项/关联指标将在指标详情与消费指南页展示；不填写则按指标语义自动生成。"
-                        />
-                        <ListEditor
-                          size="small"
-                          label="推荐使用方式"
-                          value={guideDraft?.recommended_usage ?? []}
-                          onChange={(v) => setGuideDraft((d) => ({ ...(d ?? { cautions: [], related_metrics: [] }), recommended_usage: v }))}
-                          placeholder="如：适用 sales 域 daily 粒度分析"
-                        />
-                        <ListEditor
-                          size="small"
-                          label="注意事项"
-                          value={guideDraft?.cautions ?? []}
-                          onChange={(v) => setGuideDraft((d) => ({ ...(d ?? { recommended_usage: [], related_metrics: [] }), cautions: v }))}
-                          placeholder="如：该指标包含 PII 数据"
-                        />
-                        <ListEditor
-                          size="small"
-                          label="关联指标编码"
-                          value={guideDraft?.related_metrics ?? []}
-                          onChange={(v) => setGuideDraft((d) => ({ ...(d ?? { recommended_usage: [], cautions: [] }), related_metrics: v }))}
-                          placeholder="如：sales_uv_daily"
-                        />
-                      </>
-                    ),
-                  },
-                ]}
-              />
-            </Card>
-
-            <Card type="inner" title="③ 口径定义" size="small">
+            <Card type="inner" title="④ 口径定义" size="small">
               {inferredDefinition.json && (
                 <Alert
                   type="info"
@@ -2615,24 +2432,6 @@ export function MetricCreate() {
                       />
                     </Form.Item>
                   )}
-                  <Form.Item
-                    label="关联维度（可选）"
-                    extra={
-                      isAtomic
-                        ? "从平台维度清单选择，将写入口径定义 dimensions；血缘图谱据此生成指标↔维度边。"
-                        : "派生/复合指标继承来源指标维度，可在此增补；将写入口径定义 dimensions。"
-                    }
-                  >
-                    <Select
-                      mode="multiple"
-                      placeholder="选择平台维度（可搜索）"
-                      style={{ width: "100%" }}
-                      value={selectedDims}
-                      onChange={setSelectedDims}
-                      options={dimensionOptions}
-                      allowClear
-                    />
-                  </Form.Item>
                   <Form.Item
                     name="definition"
                     label="口径定义 (JSON)"
@@ -2771,11 +2570,292 @@ export function MetricCreate() {
                 </Space>
               </Form.Item>
             </Card>
+
+            {/* 关联数据表（Step2：血缘上下游表）——从口径定义卡抽出，随实现步骤展示 */}
+            <Card type="inner" title="⑦ 关联数据表" size="small">
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message="三类表的关系，方向别搞混："
+                description={
+                  <ul style={{ margin: 0, paddingLeft: 18, lineHeight: 1.8 }}>
+                    <li>
+                      <b>依赖表（上游）</b>：这个指标是靠哪些表“加工”出来的？——如
+                      <span className="mono" style={{ fontSize: 12 }}> dwd.sales_detail</span>
+                      （血缘自动生成 表 → 指标 边）
+                    </li>
+                    <li>
+                      <b>使用表（下游）</b>：哪些表会“消费”这个指标的结果？——如
+                      <span className="mono" style={{ fontSize: 12 }}> ads.gmv_report</span>
+                      （血缘自动生成 指标 → 表 边）
+                    </li>
+                    <li>
+                      <b>挂载实体表（指标的家）</b>（⑥，仅派生指标）：结果存到哪张物理表？
+                      ——区别于上面的“原料”和“客户”。
+                    </li>
+                  </ul>
+                }
+              />
+              <Form.Item
+                label="依赖表（上游）"
+                extra="加工出这个指标的“原料表”（可多选）——血缘据此生成 表 → 指标 上游边"
+              >
+                <Select
+                  mode="multiple" allowClear showSearch
+                  placeholder="展开浏览已接入表，或输入关键词搜索（未采集的可直接录入）"
+                  value={sourceTables}
+                  onChange={(v: string[]) => setSourceTables(v)}
+                  onSearch={(q) => {
+                    setDepTableKw(q);
+                    searchTables(q);
+                  }}
+                  onOpenChange={handleTableDropdown}
+                  loading={tableSearching}
+                  notFoundContent={tableSearching ? <Spin size="small" /> : "无匹配表，可手动输入完整表名"}
+                  options={withUncollectedOption(depTableKw, tableOptions)}
+                  optionRender={tableOptionRender}
+                  filterOption={false}
+                />
+              </Form.Item>
+              <Form.Item
+                label="使用表（下游）"
+                extra="消费这个指标结果的“客户表”（可多选）——血缘据此生成 指标 → 表 下游边"
+              >
+                <Select
+                  mode="multiple" allowClear showSearch
+                  placeholder="展开浏览已接入表，或输入关键词搜索（未采集的可直接录入）"
+                  value={downstreamTables}
+                  onChange={(v: string[]) => setDownstreamTables(v)}
+                  onSearch={(q) => {
+                    setDownTableKw(q);
+                    searchTables(q);
+                  }}
+                  onOpenChange={handleTableDropdown}
+                  loading={tableSearching}
+                  notFoundContent={tableSearching ? <Spin size="small" /> : "无匹配表，可手动输入完整表名"}
+                  options={withUncollectedOption(downTableKw, tableOptions)}
+                  optionRender={tableOptionRender}
+                  filterOption={false}
+                />
+              </Form.Item>
+            </Card>
+            {renderStepNav()}
+            </>
+            )}
+
+            {/* Step 1: 指标基本信息（OneData 向导）—— 名称/粒度/维度/责任方/消费指南 */}
+            {currentStep === 1 && (<>
+            <Card type="inner" title="② 指标基本信息" size="small">
+              <Row gutter={16}>
+                <Col span={12}>
+                  <Form.Item
+                    name="metric_code"
+                    label="指标编码"
+                    extra={
+                      suggestedCode ? (
+                        <span style={{ marginTop: 4 }}>
+                          <Tag color="blue">系统建议: {suggestedCode}</Tag>
+                          <Button type="link" size="small" style={{ padding: 0 }} onClick={() => form.setFieldValue("metric_code", suggestedCode)}>
+                            一键采纳
+                          </Button>
+                        </span>
+                      ) : (
+                        <span className="mono" style={{ color: "#0E7C86" }}>留空则由系统自动生成</span>
+                      )
+                    }
+                  >
+                    <Input placeholder={suggestedCode ? `点击右侧「一键采纳」使用 ${suggestedCode}` : "4段式: 域_业务对象_度量_周期（留空自动生成）"} maxLength={64} showCount />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="name" label={<span>名称{fieldBadge("name")}</span>} rules={[{ required: true }, { max: 128, message: "名称最长 128 字符" }]}>
+                    <Input placeholder="指标显示名称" maxLength={128} showCount />
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              {/* OneData：聚合方式归属逻辑度量（原子 = 逻辑度量 + 基础统计粒度（日），
+                  聚合是度量固有属性故始终可见）；其余治理字段收敛为"高级设置"——
+                  由域默认值/度量目录/挂载层自动接管；管理/数仓角色默认展开、业务角色默认折叠 */}
+              <Row gutter={16}>
+                <Col span={8}>
+                  <Form.Item name="aggregation" label={<span>聚合{fieldBadge("aggregation")}</span>} rules={[{ required: true, message: "请选择聚合方式" }]}>
+                    {dictSelect("aggregation", "aggregation", "选择聚合方式")}
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              {/* OneData 逻辑概念：粒度（原子固定基础统计粒度「日」，由原子指标口径库/挂载层接管；
+                  派生/复合可自由选择，缺省取挂载粒度）—— 逻辑概念先行，随基本信息展示 */}
+              <Row gutter={16}>
+                <Col span={8}>
+                  {isAtomic ? (
+                    <Form.Item label="粒度" extra="原子指标固定基础统计粒度（日），粒度由原子指标口径库/挂载层接管">
+                      <Typography.Text>日 (day)</Typography.Text>
+                    </Form.Item>
+                  ) : (
+                    <Form.Item name="granularity" label="粒度" extra="缺省取挂载粒度（⑥挂载配置）">
+                      {dictSelect("granularity", "granularity", "选择粒度")}
+                    </Form.Item>
+                  )}
+                </Col>
+              </Row>
+
+              {/* OneData 逻辑概念：关联维度（血缘据此生成指标↔维度边）—— expression/SQL 两种口径模式均展示 */}
+              <Form.Item
+                label="关联维度（可选）"
+                extra={
+                  isAtomic
+                    ? "从平台维度清单选择，将写入口径定义 dimensions；血缘图谱据此生成指标↔维度边。"
+                    : "派生/复合指标继承来源指标维度，可在此增补；将写入口径定义 dimensions。"
+                }
+              >
+                <Select
+                  mode="multiple"
+                  placeholder="选择平台维度（可搜索）"
+                  style={{ width: "100%" }}
+                  value={selectedDims}
+                  onChange={setSelectedDims}
+                  options={dimensionOptions}
+                  allowClear
+                />
+              </Form.Item>
+              <Collapse
+                ghost
+                defaultActiveKey={["platform_admin", "domain_admin"].includes(currentRole) ? ["gov"] : []}
+                items={[
+                  {
+                    key: "gov",
+                    label: (
+                      <span>
+                        高级治理设置
+                        <Tag style={{ marginLeft: 8 }} color="blue">已由域默认/原子指标口径库自动接管</Tag>
+                      </span>
+                    ),
+                    children: (
+                      <>
+                        {!isAtomic && (
+                          <>
+                            <Row gutter={16}>
+                              <Col span={8}>
+                                <Form.Item name="unit" label="单位" extra="缺省继承依赖指标单位">
+                                  {dictSelect("unit", "unit", "选择单位")}
+                                </Form.Item>
+                              </Col>
+                              <Col span={8}>
+                                <Form.Item
+                                  name="currency"
+                                  label="币种（选填）"
+                                  extra="ISO 4217 标准币种，仅交易类指标需要"
+                                >
+                                  {dictSelect("currency", "currency", "选择币种")}
+                                </Form.Item>
+                              </Col>
+                            </Row>
+                            <Row gutter={16}>
+                              <Col span={8}>
+                                <Form.Item name="time_semantics" label="时间语义">
+                                  {dictSelect("time_semantics", "time_semantics", "选择时间语义（缺省 PERIOD）")}
+                                </Form.Item>
+                              </Col>
+                              <Col span={8}>
+                                <Form.Item name="freshness" label="新鲜度">
+                                  {dictSelect("freshness", "freshness", "选择新鲜度（缺省 T1）")}
+                                </Form.Item>
+                              </Col>
+                              <Col span={8}>
+                                <Form.Item name="dw_layer" label="数仓层">
+                                  {dictSelect("dw_layer", "dw_layer", "选择数仓层（缺省 DWD）")}
+                                </Form.Item>
+                              </Col>
+                            </Row>
+                          </>
+                        )}
+                        <Row gutter={16}>
+                          <Col span={8}>
+                            <Form.Item name="additivity" label={<span>可加性{fieldBadge("additivity")}</span>}>
+                              {dictSelect("additivity", "additivity", "选择可加性")}
+                            </Form.Item>
+                          </Col>
+                          <Col span={8}>
+                            <Form.Item name="serving_mode" label={<span>服务模式{fieldBadge("serving_mode")}</span>}>
+                              {dictSelect("serving_mode", "serving_mode", "选择服务模式")}
+                            </Form.Item>
+                          </Col>
+                          <Col span={8}>
+                            <Form.Item name="metric_tier" label={<span>分级{fieldBadge("metric_tier")}</span>}>
+                              {dictSelect("metric_tier", "metric_tier", "选择分级")}
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                        <Row gutter={16}>
+                          <Col span={8}>
+                            <Form.Item name="pii_flag" label="含 PII" valuePropName="checked">
+                              <Checkbox>含 PII</Checkbox>
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                      </>
+                    ),
+                  },
+                ]}
+              />
+              <Collapse
+                ghost
+                items={[
+                  {
+                    key: "guide",
+                    label: (
+                      <span>
+                        消费指南（选填）
+                        <Tag style={{ marginLeft: 8 }} color={guideDraft ? "green" : "default"}>
+                          {guideDraft ? "已填写" : "自动生成"}
+                        </Tag>
+                      </span>
+                    ),
+                    children: (
+                      <>
+                        <Alert
+                          type="info"
+                          showIcon
+                          style={{ marginBottom: 12 }}
+                          message="推荐用法/注意事项/关联指标将在指标详情与消费指南页展示；不填写则按指标语义自动生成。"
+                        />
+                        <ListEditor
+                          size="small"
+                          label="推荐使用方式"
+                          value={guideDraft?.recommended_usage ?? []}
+                          onChange={(v) => setGuideDraft((d) => ({ ...(d ?? { cautions: [], related_metrics: [] }), recommended_usage: v }))}
+                          placeholder="如：适用 sales 域 daily 粒度分析"
+                        />
+                        <ListEditor
+                          size="small"
+                          label="注意事项"
+                          value={guideDraft?.cautions ?? []}
+                          onChange={(v) => setGuideDraft((d) => ({ ...(d ?? { recommended_usage: [], related_metrics: [] }), cautions: v }))}
+                          placeholder="如：该指标包含 PII 数据"
+                        />
+                        <ListEditor
+                          size="small"
+                          label="关联指标编码"
+                          value={guideDraft?.related_metrics ?? []}
+                          onChange={(v) => setGuideDraft((d) => ({ ...(d ?? { recommended_usage: [], cautions: [] }), related_metrics: v }))}
+                          placeholder="如：sales_uv_daily"
+                        />
+                      </>
+                    ),
+                  },
+                ]}
+              />
+            </Card>
+
+
             </>)}
 
             {/* Step 1 续：口径责任方（OneData 向导）—— 责任方属基本信息，随 Step1 */}
             {currentStep === 1 && (<>
-            <Card type="inner" title="④ 口径责任方（可选）" size="small">
+            <Card type="inner" title="③ 口径责任方（可选）" size="small">
               <Row gutter={16}>
                 <Col span={8}>
                   <Form.Item name="product_owner" label="产品需求方" extra="口径业务语义提出人">

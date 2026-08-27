@@ -73,6 +73,8 @@ export interface MetricResponse {
   compliance_reviewed: boolean;
   /** 关联业务术语 ID（P2-11：术语治理归属，null=未绑定） */
   term_id: number | null;
+  /** 多变体挂载列表（2026-08-27：详情接口回填全部挂载行；列表接口为 null） */
+  mounts?: MetricMountResponse[] | null;
   /** P0-C：批量注册批次 ID（可空）——列表/详情/审核页展示批次可回溯整批 */
   batch_id?: string | null;
   /** P1-1（第六轮）：原始口径 SQL（批量创建透传落库）——详情页反查 batch_id →
@@ -282,6 +284,11 @@ export interface MetricCreateRequest {
   measure_id?: number | null;
   /** OneData 挂载层：派生指标携带源表/列/粒度/周期/域，服务端自动落 metric_mount */
   mount?: MetricMountInput | null;
+  /** OneData 挂载层（多变体，2026-08-27）：派生指标一次创建可挂多行（粒度/限定/周期组合）；
+      优先于 mount；缺省后端兼容 mount 单数。 */
+  mounts?: MetricMountInput[] | null;
+  /** 指标级业务限定兜底（写 definition_json.business_filter，挂载行缺省继承） */
+  default_business_filter?: string | null;
   pii_flag?: boolean;
   sla?: string | null;
   /** 消费指南（选填）：创建时随指标落库（guide_source=manual），三组字符串数组 */
@@ -304,6 +311,10 @@ export interface MetricUpdateRequest {
   measure_id?: number | null;
   /** OneData 挂载层：派生指标携带则 upsert metric_mount */
   mount?: MetricMountInput | null;
+  /** OneData 挂载层（多变体）：传列表则全量 diff 对齐（有 id 更新/无 id 新增/未出现删除）；传 [] 清空 */
+  mounts?: MetricMountInput[] | null;
+  /** 指标级业务限定兜底（写 definition_json.business_filter，挂载行缺省继承） */
+  default_business_filter?: string | null;
   currency?: string; // 治理属性（非破坏性，不触发版本递增）
   aggregation?: string; // 治理属性：聚合方式
   time_semantics?: string; // 治理属性：时间语义
@@ -1138,6 +1149,8 @@ export interface MetricMount {
   granularity: string;
   default_period: string | null;
   domain: string;
+  /** 业务限定（变体级，如 病种=门特；缺省继承指标级） */
+  business_filter?: string | null;
   /** 所属指标编码/名称/类型（列表接口 LEFT JOIN 回填） */
   metric_code?: string | null;
   metric_name?: string | null;
@@ -1148,11 +1161,29 @@ export interface MetricMount {
 
 /** 挂载实体输入（指标创建/更新请求内嵌，不含 metric_id——由服务端以指标 id 落库） */
 export interface MetricMountInput {
+  /** 已有挂载行 ID（编辑回传，service 全量 diff 对齐用；创建场景为空） */
+  id?: number | null;
   source_table: string;
   source_column: string;
   granularity: string;
   default_period?: string | null;
   domain: string;
+  /** 业务限定（变体级，如 病种=门特；缺省继承指标级 definition_json.business_filter） */
+  business_filter?: string | null;
+}
+
+/** 挂载实体响应（详情接口回填多变体挂载列表） */
+export interface MetricMountResponse {
+  id: number;
+  metric_id: number;
+  source_table: string;
+  source_column: string;
+  granularity: string;
+  default_period: string | null;
+  domain: string;
+  business_filter?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 // ============================================================================
