@@ -57,6 +57,9 @@ dependencies = [
     # 工具
     "python-dateutil~=2.9.0",
     "pyyaml~=6.0",
+    # Hive/Spark 采集：pyhive 纯 Python Thrift 直连 HiveServer2（替代 beeline CLI，
+    # 后端零外部命令依赖；hive_pure_sasl 用 pure-sasl 规避 sasl C 扩展在 Py3.11 无 wheel）
+    "pyhive[hive_pure_sasl]~=0.7.0",
 ]
 
 [tool.poetry]

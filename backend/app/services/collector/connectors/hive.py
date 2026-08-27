@@ -1,24 +1,29 @@
 """Hive 连接器（对齐 TD §12.1 / spec FR-001）。
 
-通过 asyncio.create_subprocess_exec 调用 beeline CLI 执行查询，
-解析表格输出为结构化数据。
+经 pyhive（纯 Python Thrift 客户端）直连 HiveServer2，**不再依赖 beeline CLI**——
+后端零外部命令依赖，密码经连接参数传递（不经命令行/临时文件，无 ``ps`` 暴露面）。
 
 - 无增量支持，始终全量
 - 单表 try/catch 跳过容错
 - 生产语义（FR-030）：采集范围 = 目标库列表（DataSource.databases）→ 显式连接库 →
-  未配置任何库时枚举全部库；连接库 ``connection_config.database`` 仅作连接凭据（JDBC URL），
-  不参与采集范围（对齐前端「目标库留空=全部库」）
+  未配置任何库时枚举全部库；连接库 ``connection_config.database`` 仅作连接凭据
+  （pyhive 会话库），不参与采集范围（对齐前端「目标库留空=全部库」）
+- 认证：有密码默认 LDAP（HiveServer2 标准密码认证，pyhive 要求 password 仅在
+  LDAP/CUSTOM 模式设置），无密码走 NONE；可经 ``auth`` 配置显式覆盖
 - @registry.register("hive") 注册
 
-beeline 命令示例::
+pyhive 调用示例::
 
-    beeline -u jdbc:hive2://host:10000 -e "SHOW TABLES IN schema"
-    beeline -u jdbc:hive2://host:10000 -e "DESCRIBE schema.table"
+    from pyhive import hive
+    conn = hive.connect(host="hive-host", port=10000, username="u",
+                        password="p", auth="LDAP")
+    conn.cursor().execute("SHOW TABLES IN schema")
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import time
@@ -39,7 +44,7 @@ logger = logging.getLogger("unisense.collector.connectors.hive")
 
 
 class HiveCollector(BaseCollector):
-    """Hive 采集器：通过 beeline CLI 异步调用 HiveServer2。"""
+    """Hive 采集器：经 pyhive 直连 HiveServer2（纯 Python，无 CLI 依赖）。"""
 
     def __init__(
         self,
@@ -48,6 +53,9 @@ class HiveCollector(BaseCollector):
         user: str = "",
         password: str = "",
         database: str | None = None,
+        auth: str | None = None,
+        connect_timeout: int = 10,
+        query_timeout: int = 120,
         classifier: SensitivityClassifier | None = None,
     ) -> None:
         super().__init__(classifier)
@@ -55,81 +63,82 @@ class HiveCollector(BaseCollector):
         self._port = port
         self._user = user
         self._password = password
-        # 连接库 database 仅作连接凭据（JDBC URL 用），**不参与采集范围**——
-        # 未显式配置时保持 None（collect 走枚举全部库），与前端
-        # 「连接库仅作连接凭据；目标库留空=全部库」语义及 hive_metastore 对齐。
+        # 连接库 database 仅作连接凭据，**不参与采集范围**——未显式配置时保持
+        # None（collect 走枚举全部库），与前端「连接库仅作连接凭据；目标库留空=全部库」
+        # 语义及 hive_metastore 对齐。
         self._database = database or None
-        self._jdbc_url = f"jdbc:hive2://{host}:{port}/{database or 'default'}"
+        # 认证方式：显式配置优先；否则按是否有密码推断——有密码走 LDAP
+        # （HiveServer2 标准密码认证），无密码走 NONE。
+        self._auth = auth or ("LDAP" if self._password else "NONE")
+        self._connect_timeout = connect_timeout
+        self._query_timeout = query_timeout
 
-    async def _execute(self, sql: str) -> list[list[str]]:
-        """通过 beeline CLI 执行 SQL，解析输出为表格数据。
-
-        P1-6: 密码经临时文件（``--password-file``，0600 权限）传递，
-        避免经命令行 ``-p`` 暴露在 ``ps`` 进程列表中。
+    def _sync_query(self, sql: str) -> list[list[str]]:
+        """同步执行 SQL（pyhive 阻塞 API），供 ``asyncio.to_thread`` 包装。
 
         Args:
-            sql: 要执行的 SQL 语句。
+            sql: 要执行的 SQL。
 
         Returns:
-            解析后的行列表（每行为字段列表）。
+            数据行列表（每行为字段字符串列表，不含表头）。
 
         Raises:
-            ExternalDependencyError: beeline 执行失败。
+            ExternalDependencyError: 连接或查询失败（503 可重试）。
         """
-        args = ["beeline", "-u", self._jdbc_url]
-        password_file: str | None = None
-        if self._user:
-            args.extend(["-n", self._user])
-        if self._password:
-            import os
-            import tempfile
+        from pyhive import hive as pyhive_hive
 
-            fd, password_file = tempfile.mkstemp(prefix="beeline_pwd_")
-            os.write(fd, self._password.encode("utf-8"))
-            os.close(fd)
-            os.chmod(password_file, 0o600)
-            args.extend(["--password-file", password_file])
-        args.extend(["-e", sql, "--outputformat=table2"])
-
+        conn = None
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            conn = pyhive_hive.connect(
+                host=self._host,
+                port=self._port,
+                username=self._user or None,
+                database=self._database or "default",
+                auth=self._auth,
+                password=self._password or None,
+                timeout=self._connect_timeout,
             )
-            try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-            except TimeoutError as exc:
-                # P2-15: 超时后终止子进程，避免 beeline 残留僵尸进程占用资源
-                proc.kill()
-                await proc.wait()
-                raise ExternalDependencyError(f"beeline 执行超时 (120s): {sql}") from exc
-            if proc.returncode != 0:
-                err_msg = stderr.decode("utf-8", errors="replace").strip()
-                raise ExternalDependencyError(f"beeline 执行失败 (rc={proc.returncode}): {err_msg}")
-        except FileNotFoundError as exc:
-            raise ExternalDependencyError("beeline 命令不可用，请确认已安装 Hive 客户端") from exc
+        except Exception as exc:  # noqa: BLE001 - 连接失败（网络/认证）统一转 503
+            raise ExternalDependencyError(
+                f"Hive 连接失败 ({self._host}:{self._port}): {exc}"
+            ) from exc
+        try:
+            cursor = conn.cursor()
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            return [[self._to_str(v) for v in row] for row in rows]
+        except Exception as exc:  # noqa: BLE001 - 查询失败统一转 503
+            raise ExternalDependencyError(f"Hive 查询失败: {exc}") from exc
         finally:
-            if password_file is not None:
-                import contextlib
-                import os
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.close()
 
-                with contextlib.suppress(OSError):
-                    os.unlink(password_file)
+    @staticmethod
+    def _to_str(value: Any) -> str:
+        """DB-API 返回值转字符串（None → 空串，与 beeline 空输出一致）。"""
+        return "" if value is None else str(value)
 
-        # 解析 table2 格式输出（以 | 分隔的表格）
-        lines = stdout.decode("utf-8", errors="replace").strip().splitlines()
-        rows: list[list[str]] = []
-        for line in lines:
-            # 跳过分隔行与空行
-            stripped = line.strip()
-            if not stripped or set(stripped) <= {"+", "-", "|"}:
-                continue
-            fields = [f.strip() for f in stripped.split("|") if f.strip()]
-            if fields:
-                rows.append(fields)
-        # 第一行为表头，跳过
-        return rows[1:] if len(rows) > 1 else []
+    async def _execute(self, sql: str) -> list[list[str]]:
+        """经线程池执行 SQL（pyhive 阻塞 API），带查询超时。
+
+        Args:
+            sql: 要执行的 SQL。
+
+        Returns:
+            数据行列表。
+
+        Raises:
+            ExternalDependencyError: 查询超时或执行失败。
+        """
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._sync_query, sql), timeout=self._query_timeout
+            )
+        except TimeoutError as exc:
+            raise ExternalDependencyError(
+                f"Hive 查询超时 ({self._query_timeout}s): {sql}"
+            ) from exc
 
     async def collect(self, source: Any) -> CollectResult:
         source_id = getattr(source, "source_id", "?")
@@ -180,7 +189,7 @@ class HiveCollector(BaseCollector):
                     )
                     columns = []
                     for desc_row in desc_rows:
-                        # DESCRIBE schema.table 输出格式（TabSeparated）：
+                        # DESCRIBE schema.table 输出格式（pyhive 行）：
                         # 列名 \t 类型 \t [注释]
                         # 注释列可能为空（仅两列）。
                         if len(desc_row) >= 2:
@@ -211,7 +220,7 @@ class HiveCollector(BaseCollector):
         return CollectResult(specs=specs, failed_specs=failed_specs, source_id=source_id)
 
     async def probe(self) -> ProbeResult:
-        """轻量探活：SELECT 1（经 beeline）。"""
+        """轻量探活：SELECT 1（经 pyhive 直连）。"""
         start = time.monotonic()
         try:
             await self._execute("SELECT 1")
@@ -238,8 +247,9 @@ class HiveCollector(BaseCollector):
 def create_hive_collector(cfg: dict[str, Any]) -> HiveCollector:
     """Hive 采集器工厂函数。
 
-    连接库 ``database`` 仅作连接凭据：未填时为 None（JDBC URL 用 default 兜底），
+    连接库 ``database`` 仅作连接凭据：未填时为 None（pyhive 会话库用 default 兜底），
     采集范围由目标库列表/全库枚举决定——避免「默认只扫 default 空库 → 注册 0」。
+    ``auth`` 可选覆盖认证方式（缺省按有无密码推断 LDAP/NONE）。
     """
     return HiveCollector(
         host=cfg.get("host", "127.0.0.1"),
@@ -247,4 +257,5 @@ def create_hive_collector(cfg: dict[str, Any]) -> HiveCollector:
         user=cfg.get("user", ""),
         password=cfg.get("password", ""),
         database=cfg.get("database") or None,
+        auth=cfg.get("auth") or None,
     )

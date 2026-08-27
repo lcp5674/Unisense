@@ -4,8 +4,8 @@
 1. 每种连接器的 collect() 方法 mock 测试（连接+查询+解析+异常处理）
 2. MySQL InformationSchemaCollector 单表容错
 3. PostgresCollector 查询+解析
-4. HiveCollector beeline 输出解析
-5. SparkCollector 复用 beeline 输出解析（Spark Thrift Server / HiveServer2 协议）
+4. HiveCollector pyhive 直连输出解析
+5. SparkCollector 复用 pyhive 直连解析（Spark Thrift Server / HiveServer2 协议）
 6. DorisCollector/StarRocksCollector MySQL 兼容性
 7. ClickHouseCollector HTTP API
 8. KafkaCollector Topic+Schema Registry
@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -214,8 +215,12 @@ async def test_postgres_collector_builds_specs():
 # ---------- HiveCollector ----------
 
 
-async def test_hive_collector_parses_beeline_output():
-    """Hive 采集器解析 beeline 输出（含注释——P0 列元数据补全）。"""
+async def test_hive_collector_parses_pyhive_rows():
+    """Hive 采集器解析 pyhive 查询行（含注释——P0 列元数据补全）。
+
+    原 beeline 版 mock 的即纯数据行（无 table2 表头），与 pyhive fetchall 输出一致，
+    故 mock 数据保持不变；此处验证 collect 对 pyhive 行的解析与注释兜底。
+    """
     collector = HiveCollector(host="hive-host", database="test_db")
 
     # Mock _execute 方法
@@ -297,7 +302,7 @@ async def test_hive_collector_records_failed_schema_listing():
 
 
 async def test_hive_and_spark_factory_database_default_none():
-    """工厂未填 database 时传 None（不再默认 'default' 空库），JDBC URL 用 default 兜底。
+    """工厂未填 database 时传 None（不再默认 'default' 空库），会话库用 default 兜底。
 
     回归：此前 ``cfg.get("database", "default")`` 导致连接库恒为 'default'，
     collect 只扫 default 单库 → 用户未配置任何库时「注册 0」。
@@ -307,22 +312,30 @@ async def test_hive_and_spark_factory_database_default_none():
 
     hive = create_hive_collector({"host": "h", "port": 10000})
     assert hive._database is None
-    assert hive._jdbc_url == "jdbc:hive2://h:10000/default"
+    # 无密码 → 认证 NONE（pyhive 的 password 仅限 LDAP/CUSTOM 模式）
+    assert hive._auth == "NONE"
 
     spark = create_spark_collector({"host": "s", "port": 10000})
     assert spark._database is None
-    assert spark._jdbc_url == "jdbc:hive2://s:10000/default"
+    assert spark._auth == "NONE"
 
     # 显式填连接库仍生效（单库 + 裸表名兼容既有行为）
     hive_explicit = create_hive_collector({"host": "h", "database": "dwd"})
     assert hive_explicit._database == "dwd"
 
+    # 有密码 → 默认 LDAP（HiveServer2 标准密码认证）；显式 auth 可覆盖
+    assert create_hive_collector({"host": "h", "password": "p"})._auth == "LDAP"
+    assert (
+        create_hive_collector({"host": "h", "password": "p", "auth": "CUSTOM"})._auth
+        == "CUSTOM"
+    )
+
 
 # ---------- SparkCollector ----------
 
 
-async def test_spark_collector_parses_beeline_output():
-    """Spark 采集器经 Spark Thrift Server（HiveServer2 协议）解析 beeline 输出。"""
+async def test_spark_collector_parses_pyhive_rows():
+    """Spark 采集器经 Spark Thrift Server（HiveServer2 协议）解析 pyhive 行。"""
     collector = SparkCollector(host="spark-host", database="test_db")
 
     # Mock _execute 方法（与 Hive 相同的 SHOW TABLES / DESCRIBE 协议）
@@ -349,7 +362,7 @@ async def test_spark_collector_default_port_and_register():
     """Spark 采集器默认端口 10000（Spark Thrift Server 官方默认）且已注册到全局 registry。"""
     collector = SparkCollector(host="spark-host")
     assert collector._port == 10000
-    assert collector._jdbc_url == "jdbc:hive2://spark-host:10000/default"
+    assert collector._auth == "NONE"
 
     from app.services.collector.connectors import registry
 
@@ -526,29 +539,103 @@ def test_starrocks_url_build():
     assert "9030" in url_str
 
 
-async def test_hive_run_beeline_timeout_kills_process():
-    """P2-15: beeline 超时后终止子进程（不残留僵尸）。"""
+async def test_hive_query_timeout_raises():
+    """P2-15: pyhive 查询超时（asyncio.wait_for 120s）→ ExternalDependencyError。"""
     from app.services.collector.connectors import hive as hive_mod
 
-    proc = MagicMock()
-    proc.kill = MagicMock()
-    proc.wait = AsyncMock()
-
     collector = HiveCollector(host="hive-host", database="test_db")
+    pending = asyncio.get_event_loop().create_future()
     with (
+        # to_thread 是 async def，patch 默认会建 AsyncMock → 须 new_callable=MagicMock
+        # 强制同步 mock（返回 pending future），避免未 await coroutine 泄漏
         patch.object(
             hive_mod.asyncio,
-            "create_subprocess_exec",
-            AsyncMock(return_value=proc),
+            "to_thread",
+            new_callable=MagicMock,
+            return_value=pending,
         ),
         patch.object(
             hive_mod.asyncio,
             "wait_for",
             side_effect=TimeoutError("timeout"),
-        ),pytest.raises(hive_mod.ExternalDependencyError, match="超时")
+        ),
+        pytest.raises(hive_mod.ExternalDependencyError, match="超时"),
     ):
         await collector._execute("SELECT 1")
 
-    # 超时后子进程被 kill + 回收（不残留僵尸）
-    proc.kill.assert_called_once()
-    proc.wait.assert_awaited_once()
+
+async def test_hive_sync_query_returns_string_rows():
+    """pyhive 查询行转字符串列表（None → 空串，与 beeline 空输出一致）。"""
+    from pyhive import hive as pyhive_hive
+
+    class _FakeCursor:
+        def __init__(self, rows) -> None:
+            self._rows = rows
+
+        def execute(self, sql: str) -> None:
+            return None
+
+        def fetchall(self) -> list:
+            return self._rows
+
+    class _FakeConn:
+        def __init__(self, rows) -> None:
+            self._cursor = _FakeCursor(rows)
+            self.closed = False
+
+        def cursor(self) -> _FakeCursor:
+            return self._cursor
+
+        def close(self) -> None:
+            self.closed = True
+
+    conn = _FakeConn([("a", 1), (None, "b")])
+    collector = HiveCollector(host="hive-host", database="test_db")
+    with patch.object(pyhive_hive, "connect", return_value=conn):
+        rows = collector._sync_query("SHOW TABLES")
+    assert rows == [["a", "1"], ["", "b"]]
+    assert conn.closed is True
+
+
+async def test_hive_sync_query_connect_failure():
+    """连接失败（网络/认证）统一转 ExternalDependencyError（503 可重试）。"""
+    from pyhive import hive as pyhive_hive
+
+    collector = HiveCollector(host="hive-host", user="u", password="p")
+    assert collector._auth == "LDAP"
+    with (
+        patch.object(pyhive_hive, "connect", side_effect=RuntimeError("no route")),
+        pytest.raises(ExternalDependencyError, match="Hive 连接失败"),
+    ):
+        collector._sync_query("SELECT 1")
+
+
+async def test_hive_sync_query_execute_failure():
+    """查询失败（语法/权限）统一转 ExternalDependencyError，连接仍被关闭。"""
+    from pyhive import hive as pyhive_hive
+
+    class _FailingCursor:
+        def execute(self, sql: str) -> None:
+            raise RuntimeError("ParseException: failed")
+
+        def fetchall(self) -> list:
+            return []
+
+    class _FakeConn:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def cursor(self) -> _FailingCursor:
+            return _FailingCursor()
+
+        def close(self) -> None:
+            self.closed = True
+
+    conn = _FakeConn()
+    collector = HiveCollector(host="hive-host", database="test_db")
+    with (
+        patch.object(pyhive_hive, "connect", return_value=conn),
+        pytest.raises(ExternalDependencyError, match="Hive 查询失败"),
+    ):
+        collector._sync_query("SELECT bad")
+    assert conn.closed is True

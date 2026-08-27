@@ -27,6 +27,7 @@ elastic-transport==8.19.0
 elasticsearch==8.15.1
 fastapi==0.115.14
 filelock==3.32.2
+future==1.0.0
 greenlet==3.5.4
 h11==0.16.0
 httpcore==1.0.9
@@ -66,12 +67,14 @@ pip_audit==2.10.1
 platformdirs==4.11.1
 pluggy==1.6.0
 pre_commit==4.6.1
+pure-sasl==0.6.2
 py-serializable==2.1.0
 pycparser==3.0
 pydantic==2.13.4
 pydantic-settings==2.15.0
 pydantic_core==2.46.4
 Pygments==2.20.0
+PyHive==0.7.0
 PyJWT==2.13.0
 PyMySQL==1.1.3
 pyparsing==3.3.2
@@ -97,6 +100,8 @@ sqlparse==0.5.5
 starlette==0.46.2
 structlog==24.4.0
 testcontainers==4.15.0
+thrift==0.24.0
+thrift-sasl==0.4.3
 tomli==2.4.1
 tomli_w==1.2.0
 typing-inspection==0.4.2
