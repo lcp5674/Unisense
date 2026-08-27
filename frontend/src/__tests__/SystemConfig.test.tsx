@@ -503,6 +503,48 @@ describe("SystemConfig LLM 路由配置", () => {
     });
   });
 
+  it("P1 同优先级上移（均为 0）：第 2 位点「上移」→ 目标行 priority+1 推后，位次不再无变化", async () => {
+    mockGet.mockResolvedValue(
+      listData({
+        items: [
+          { ...PRIMARY_ITEM, id: 1, name: "主用", priority: 0 },
+          { ...PRIMARY_ITEM, id: 2, name: "备用", priority: 0 },
+        ],
+      }) as never,
+    );
+    mockUpdate.mockResolvedValue({ id: 2 });
+    render(<SystemConfig />);
+    await screen.findByText("备用");
+    // 两个实例 priority 均为 0（新建默认）——旧逻辑上移 newP=max(0,0-1)=0 被钳回，
+    // 优先级不变、仍按 ID 并列 → 位次无变化。修复后改为把目标行(主用)推后到 p1。
+    fireEvent.click(screen.getByLabelText("上移 备用"));
+    await waitFor(() => {
+      expect(mockUpdate).toHaveBeenCalledTimes(1);
+      expect(mockUpdate).toHaveBeenCalledWith(1, expect.objectContaining({ priority: 1 }));
+    });
+    // 不再发生「把备用自身 priority 写成 0」的无效更新
+    expect(mockUpdate).not.toHaveBeenCalledWith(2, expect.objectContaining({ priority: 0 }));
+  });
+
+  it("P1 同优先级下移（均为 0）：第 1 位点「下移」→ 自身 priority+1，位次实际下移", async () => {
+    mockGet.mockResolvedValue(
+      listData({
+        items: [
+          { ...PRIMARY_ITEM, id: 1, name: "主用", priority: 0 },
+          { ...PRIMARY_ITEM, id: 2, name: "备用", priority: 0 },
+        ],
+      }) as never,
+    );
+    mockUpdate.mockResolvedValue({ id: 1 });
+    render(<SystemConfig />);
+    await screen.findByText("备用");
+    fireEvent.click(screen.getByLabelText("下移 主用"));
+    await waitFor(() => {
+      // 主用(cur, p0) 下移 → priority+1=1，排在备用之后
+      expect(mockUpdate).toHaveBeenCalledWith(1, expect.objectContaining({ priority: 1 }));
+    });
+  });
+
   it("P1 同优先级冲突：两个实例优先级相同 → 显示冲突警告图标", async () => {
     mockGet.mockResolvedValue(
       listData({

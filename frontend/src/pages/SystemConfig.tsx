@@ -545,9 +545,20 @@ export function SystemConfig() {
         await updateLlmConfig(cur.id, { ...payloadFromItem(cur), priority: target.priority });
         await updateLlmConfig(target.id, { ...payloadFromItem(target), priority: cur.priority });
       } else {
-        // 同优先级（按 ID 排序的并列）：仅移动方 ±1，打破并列
-        const newP = dir === -1 ? Math.max(0, cur.priority - 1) : cur.priority + 1;
-        await updateLlmConfig(cur.id, { ...payloadFromItem(cur), priority: newP });
+        // 同优先级（按 ID 排序的并列）：打破并列需让移动方严格越过邻位，否则优先级
+        // 不变、仍按 ID 并列 → 位次无变化（上移时 cur.priority=0 被钳回 0 的 no-op 根因）。
+        // 上移：cur 优先级 -1（>0 可减）；cur=0 无法再减时改为把目标行 +1 推后。
+        // 下移：cur 优先级 +1（<100 可加，对齐后端 le=100）；cur=100 无法再加时改为把目标行 -1 提前。
+        const MAX_PRIORITY = 100; // 对齐后端 LlmConfigPayload.priority le=100
+        if (dir === -1 && cur.priority > 0) {
+          await updateLlmConfig(cur.id, { ...payloadFromItem(cur), priority: cur.priority - 1 });
+        } else if (dir === -1) {
+          await updateLlmConfig(target.id, { ...payloadFromItem(target), priority: target.priority + 1 });
+        } else if (dir === 1 && cur.priority < MAX_PRIORITY) {
+          await updateLlmConfig(cur.id, { ...payloadFromItem(cur), priority: cur.priority + 1 });
+        } else {
+          await updateLlmConfig(target.id, { ...payloadFromItem(target), priority: target.priority - 1 });
+        }
       }
       message.success(`已将「${cur.name || cur.provider}」${dir === -1 ? "上移" : "下移"}一位（下次请求起效）`);
       await load();
