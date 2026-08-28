@@ -67,6 +67,9 @@ DICT_SEEDS: dict[str, list[dict[str, Any]]] = {
         {"code": "prescription", "label": "处方粒度", "sort_order": 26},
         {"code": "pharmacy", "label": "药房粒度", "sort_order": 27},
         {"code": "yb_settle", "label": "医保结算粒度", "sort_order": 28},
+        # 医院（2026-08-28 组合粒度补：用户示例「按月+医院统计订单金额」——hospital
+        # 是医疗最基础实体粒度，推断/注册/消费三侧均可识别）
+        {"code": "hospital", "label": "医院粒度", "sort_order": 29},
     ],
     "unit": [
         {"code": "CNY", "label": "人民币元", "sort_order": 1},

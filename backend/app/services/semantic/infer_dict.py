@@ -75,6 +75,9 @@ DEFAULT_GRAIN_KEYWORDS: dict[str, list[str]] = {
     "visit": ["visit", "就诊"],
     "patient": ["patient", "患者"],
     "doctor": ["doctor", "physician", "医生", "医师", "大夫"],
+    # 医院（2026-08-28 组合粒度补：用户示例「按月+医院统计订单金额」——hospital
+    # 是医疗最基础实体粒度，字典种子同步补 hospital 项）
+    "hospital": ["hospital", "医院"],
     "department": ["dept", "department", "科室", "部门"],
     "disease": ["disease", "icd", "病种", "疾病", "诊断"],
     "prescription": ["prescription", "处方"],

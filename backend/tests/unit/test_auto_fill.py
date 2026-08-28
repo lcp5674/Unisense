@@ -518,6 +518,14 @@ class TestInferDictDriven:
         assert set(grain_dims) == {"doctor_id", "dept_id"}
         assert dims == []
 
+    def test_composite_grain_month_hospital(self) -> None:
+        """组合粒度（用户示例）：GROUP BY month_id, hospital_id → 主粒度 month
+        + 粒度维度 [hospital_id]。"""
+        grain, grain_dims, dims = extract_grain_and_dims(["month_id", "hospital_id"])
+        assert grain == "month"
+        assert grain_dims == ["hospital_id"]
+        assert dims == []
+
     def test_match_platform_dimensions(self) -> None:
         """GROUP BY 非时间键与平台维度匹配：dim_code 子串/前缀命中回填。"""
         platform = [
