@@ -24,6 +24,7 @@ import RoleOwnerSelect, { type RoleOwnerValue } from "../components/RoleOwnerSel
 import { useTracking } from "../hooks/useTracking";
 import { usePermission } from "../hooks/usePermission";
 import { enumLabel, METRIC_TYPE_LABEL, GRANULARITY_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, METRIC_TIER_LABEL } from "../utils/enums";
+import { validateMetricCode } from "../utils/metricCode";
 
 // 域树 → Cascader 选项（对齐注册指标页：树形选择，避免手输域编码）
 function treeToCascaderOptions(nodes: SubjectDomainTreeNode[]): any[] {
@@ -382,7 +383,10 @@ export function Templates() {
     setInstantiateTarget(tpl);
     form.resetFields();
     form.setFieldsValue({
-      metric_code: tpl.code,
+      // 模板 code 是模板标识（如 tpl_gmv_daily，3 段），不是指标编码——仅当其为合法
+      // 4 段指标编码时才预填，否则留空由系统自动生成（后端 MetricCreateRequest 严格
+      // 校验 4 段式，模板 code 直填会 422「当前仅 N 段」）
+      metric_code: validateMetricCode(tpl.code) ? undefined : tpl.code,
       name: tpl.name,
       // Cascader 值须为根→叶完整路径数组；模板域为叶子码，须解析为完整路径
       // （多级域下包单元素 [leafCode] 会显示空——findDomainPath 递归补全路径）
@@ -718,11 +722,25 @@ export function Templates() {
             <Form.Item
               name="metric_code"
               label="指标编码"
+              rules={[
+                {
+                  validator: (_r, v) => {
+                    const err = validateMetricCode(v);
+                    return err ? Promise.reject(new Error(err)) : Promise.resolve();
+                  },
+                },
+              ]}
               extra={
                 instantiateTarget ? (
-                  <span className="muted" style={{ fontSize: 12 }}>
-                    已预填模板编码，若与现有指标重复请修改（如加业务后缀）
-                  </span>
+                  validateMetricCode(instantiateTarget.code) ? (
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      模板编码 {instantiateTarget.code} 非 4 段指标编码，已留空由系统自动生成；如需指定可自行填写
+                    </span>
+                  ) : (
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      已预填模板编码，若与现有指标重复请修改（如加业务后缀）
+                    </span>
+                  )
                 ) : (
                   <span className="mono" style={{ color: "#0E7C86" }}>留空则由系统自动生成</span>
                 )

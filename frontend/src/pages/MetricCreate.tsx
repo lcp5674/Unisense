@@ -10,6 +10,7 @@ import {
 } from "../api";
 import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricBatchRegisterCandidate, MetricResponse, MetricUpdateRequest, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, DomainSuggestionCandidate, Dimension, MeasureCatalog, MeasureSuggestion, MetricMountInput, SqlBatchParseResult, SqlBatchCandidate, CurrentUser, ConsumptionGuidePayload } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
+import { validateMetricCode } from "../utils/metricCode";
 import { MEASURE_FORMAT_LABEL } from "../types";
 import { usePermission } from "../hooks/usePermission";
 import RoleOwnerSelect, { type RoleOwnerValue } from "../components/RoleOwnerSelect";
@@ -1582,6 +1583,15 @@ export function MetricCreate() {
       message.warning("请先勾选候选指标：在候选列表或「批量编辑向导」步骤①②勾选（默认仅勾选派生候选，复合需手动勾选）");
       return;
     }
+    // 编码 4 段预校验（对齐后端 MetricCreateRequest.validate_code）——非法编码提交将
+    // 整批 422 且零创建，先在前端拦截并指出具体候选，避免"提交后整批失败"
+    for (const c of checked) {
+      const codeErr = validateMetricCode(resolveCandidateCode(c));
+      if (codeErr) {
+        message.warning(`候选「${c.name}」指标编码 ${codeErr}（当前: ${resolveCandidateCode(c)}），请修正后再提交`);
+        return;
+      }
+    }
     // OneData 语义校验（对齐后端 _validate_definition_json）：复合 = 依赖指标 +
     // 计算主体必填；派生 = 有计算主体即可（依赖可选——纯周期派生如「本月活跃医生
     // 数」不依赖其他指标，周期驱动的解析候选自带 expression 口径，无需手填 calc）
@@ -1947,6 +1957,7 @@ export function MetricCreate() {
     if (mode === "sql") {
       const sql = sqlText.trim();
       if (!sql) { message.error("口径 SQL 模式请输入 SQL 语句"); return null; }
+      if (sql.length > 16384) { message.error("口径 SQL 长度不能超过 16384 字符，请精简或拆分后提交"); return null; }
       return { sql, ...tables, ...downTables, ...srcField, ...measureField, ...dimsField, ...depsField, ...baseField, ...caliberFields };
     }
     let def: Record<string, unknown>;
@@ -2966,6 +2977,14 @@ export function MetricCreate() {
                   <Form.Item
                     name="metric_code"
                     label="指标编码"
+                    rules={[
+                      {
+                        validator: (_r, v) => {
+                          const err = validateMetricCode(v);
+                          return err ? Promise.reject(new Error(err)) : Promise.resolve();
+                        },
+                      },
+                    ]}
                     extra={
                       suggestedCode ? (
                         <span style={{ marginTop: 4 }}>
@@ -3751,12 +3770,17 @@ export function MetricCreate() {
                                         编码可在线编辑（4 段式：域_业务对象_度量_周期），改后创建即用 */}
                                     <Input
                                       size="small"
-                                      style={{ width: 240, fontFamily: "monospace" }}
+                                      style={{ width: 240, fontFamily: "monospace", ...(validateMetricCode(c.metric_code) ? { borderColor: "#ff4d4f" } : {}) }}
                                       value={c.metric_code || ""}
                                       placeholder={selectedDomain ? "指标编码（4 段式，可修改）" : "选域后自动生成"}
                                       onChange={(e) => handleSqlBatchEdit(c.key, { metric_code: e.target.value })}
                                       data-testid={`sql-batch-code-${c.key}`}
                                     />
+                                    {validateMetricCode(c.metric_code) ? (
+                                      <div style={{ color: "#ff4d4f", fontSize: 12, marginTop: 2 }}>
+                                        {validateMetricCode(c.metric_code)}
+                                      </div>
+                                    ) : null}
                                   </SqlBatchField>
                                   {c.type !== "derived" && (c.definition_json?.expression || c.definition_json?.sql) ? (
                                     <SqlBatchField label="口径表达式">
