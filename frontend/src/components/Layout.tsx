@@ -113,7 +113,6 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
       { key: "/domains", label: "主题域管理", icon: <ApartmentOutlined /> },
       { key: "/dimensions", label: "维度管理", icon: <PartitionOutlined /> },
       { key: "/measure-catalogs", label: "原子指标口径库", icon: <TagsOutlined /> },
-      { key: "/sql-infer-eval", label: "SQL 解析评测", icon: <LineChartOutlined /> },
       { key: "/glossary", label: "术语表", icon: <BookOutlined /> },
     ],
   },
@@ -144,6 +143,12 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
       { key: "/observability", label: "可观测中心", icon: <LineChartOutlined /> },
       { key: "/feedback", label: "用户反馈", icon: <MessageOutlined /> },
       { key: "/tracking-stats", label: "埋点统计", icon: <FundOutlined /> },
+    ],
+  },
+  {
+    label: "工程工具",
+    children: [
+      { key: "/sql-infer-eval", label: "SQL 解析评测", icon: <ExperimentOutlined /> },
     ],
   },
   {

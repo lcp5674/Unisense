@@ -294,7 +294,7 @@ export default function App() {
               <Route path="/quality" element={<QualityCenter />} />
               <Route path="/dimensions" element={<Dimensions />} />
               <Route path="/measure-catalogs" element={<RequirePerm perm={ROUTE_PERM["/measure-catalogs"]}><MeasureCatalogs /></RequirePerm>} />
-              <Route path="/sql-infer-eval" element={<SqlInferEval />} />
+              <Route path="/sql-infer-eval" element={<RequirePerm perm={ROUTE_PERM["/sql-infer-eval"]}><SqlInferEval /></RequirePerm>} />
               <Route path="/glossary" element={<Glossary />} />
               <Route path="/governance" element={<RequirePerm perm={ROUTE_PERM["/governance"]}><Governance /></RequirePerm>} />
               <Route path="/audit" element={<RequirePerm perm={ROUTE_PERM["/audit"]}><AuditLog /></RequirePerm>} />

@@ -882,7 +882,15 @@ export function Catalogs() {
           })}
           pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], onChange: (p, ps) => { setPage(p); setPageSize(ps); }, showTotal: (t) => `共 ${t} 条` }}
           scroll={{ x: "max" }}
-          locale={{ emptyText: "暂无目录实体" }}
+          locale={{
+            emptyText: (
+              <Empty description="暂无目录实体，采集链路尚未产出元数据">
+                <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate("/data-sources")}>
+                  前往数据源管理
+                </Button>
+              </Empty>
+            ),
+          }}
         />
       </Card>
 

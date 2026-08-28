@@ -2147,7 +2147,21 @@ export function MetricCreate() {
       message.success(`创建草稿成功：${created.metric_code}`);
       navigate(`/detail/${created.metric_code}`);
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
+      if (err instanceof UnisenseApiError && err.code === "METRIC_CODE_EXISTS") {
+        // 单条创建失败恢复动作：编码被占用 → 查看已有指标或返回修改（对齐批量流 failureActionOf 的恢复设计）
+        const dupCode = values.metric_code ? String(values.metric_code) : "";
+        Modal.confirm({
+          title: "指标编码已存在",
+          content: dupCode
+            ? `编码「${dupCode}」已被占用。可查看已有指标核对口径，或返回修改编码后重新提交。`
+            : "该指标编码已被占用。可查看已有指标，或返回修改编码后重新提交。",
+          okText: "查看已有指标",
+          cancelText: "返回修改",
+          onOk: () => dupCode && navigate(`/detail/${dupCode}`),
+        });
+      } else {
+        message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "创建失败");
+      }
     } finally {
       setLoading(false);
     }

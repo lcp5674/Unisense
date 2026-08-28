@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Space, Statistic, Row, Col, Descriptions, Alert, Progress, Collapse, Popconfirm, Switch, Divider, Tooltip, Radio } from "antd";
+import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Space, Statistic, Row, Col, Descriptions, Alert, Progress, Collapse, Popconfirm, Switch, Divider, Tooltip, Radio, Empty } from "antd";
 import { PlusOutlined, ThunderboltOutlined, ScheduleOutlined, ReloadOutlined, ApiOutlined, EditOutlined, DatabaseOutlined, DeleteOutlined, StopOutlined, PlayCircleOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import {
   listDataSources,
@@ -1539,7 +1539,17 @@ export function DataSources() {
               load(p, ps);
             },
           }}
-          locale={{ emptyText: "暂无数据源" }}
+          locale={{
+            emptyText: can("data-source:create") ? (
+              <Empty description="暂无数据源，采集链路尚未启动">
+                <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+                  新建数据源
+                </Button>
+              </Empty>
+            ) : (
+              "暂无数据源"
+            ),
+          }}
         />
       </Card>
 
