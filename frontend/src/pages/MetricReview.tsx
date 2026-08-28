@@ -539,9 +539,9 @@ export function MetricReview({ embedded = false }: { embedded?: boolean } = {}) 
         ? await batchApproveMetrics(codes)
         // 批量打回原因（L1）：由评审人在弹窗填写（runBatch(false, reason)），
         // 不再硬编码「批量打回，请修改后重新提交」
-        : await batchRejectMetrics(codes, reason?.trim() || "批量打回，请修改后重新提交");
+        : await batchRejectMetrics(codes, reason?.trim() || "批量驳回，请修改后重新提交");
       const errors = res.results.filter((r) => !r.ok).map((r) => `${r.code}: ${r.message}`);
-      if (res.ok_count) message.success(`${approved ? "通过" : "打回"}成功 ${res.ok_count} 个`);
+      if (res.ok_count) message.success(`${approved ? "通过" : "驳回"}成功 ${res.ok_count} 个`);
       if (errors.length) message.error(errors.slice(0, 3).join("；"));
     } catch (err) {
       message.error(
@@ -725,7 +725,7 @@ export function MetricReview({ embedded = false }: { embedded?: boolean } = {}) 
             </Button>
             <div className="page-kicker">指标资产 / 指标审批</div>
             <h2>指标审批</h2>
-            <p>待评审指标——仅被指派评审人/域评审组可通过或打回。</p>
+            <p>待评审指标——仅被指派评审人/域评审组可通过或驳回。</p>
           </div>
         </div>
       )}
@@ -766,7 +766,7 @@ export function MetricReview({ embedded = false }: { embedded?: boolean } = {}) 
                     setBatchRejectOpen(true);
                   }}
                 >
-                  批量打回
+                  批量驳回
                 </Button>
               </>
             )}
@@ -863,7 +863,7 @@ export function MetricReview({ embedded = false }: { embedded?: boolean } = {}) 
         />
         {/* 批量打回原因弹窗（L1）：对齐单条驳回——原因必填（至少 4 字），提交人据此修改重提 */}
         <Modal
-          title="批量打回"
+          title="批量驳回"
           open={batchRejectOpen}
           onOk={() => {
             if (batchRejectReason.trim().length < 4) {
@@ -874,7 +874,7 @@ export function MetricReview({ embedded = false }: { embedded?: boolean } = {}) 
             void runBatch(false, batchRejectReason);
           }}
           onCancel={() => setBatchRejectOpen(false)}
-          okText="打回"
+          okText="驳回"
           cancelText="取消"
           okButtonProps={{ danger: true }}
         >

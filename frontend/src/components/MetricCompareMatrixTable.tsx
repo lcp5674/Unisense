@@ -60,7 +60,7 @@ function renderValue(v: unknown) {
 // 指标状态 → 中文标签（对齐 MetricDetail 口径）
 const STATUS_LABEL: Record<string, string> = {
   DRAFT: "草稿",
-  EXPERIMENTAL: "实验",
+  EXPERIMENTAL: "灰度",
   REVIEW: "审核中",
   PUBLISHED: "已发布",
   DEPRECATED: "已废弃",

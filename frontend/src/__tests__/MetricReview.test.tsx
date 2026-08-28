@@ -380,7 +380,7 @@ describe("MetricReview 指标审批", () => {
     ).toBeTruthy();
   });
 
-  it("L1：批量打回弹窗须填写原因（对齐单条驳回，不再硬编码）", async () => {
+  it("L1：批量驳回弹窗须填写原因（对齐单条驳回，不再硬编码）", async () => {
     mockedBatchReject.mockResolvedValue({
       ok_count: 1,
       fail_count: 0,
@@ -393,8 +393,8 @@ describe("MetricReview 指标审批", () => {
       ".ant-table-tbody .ant-checkbox-input",
     ) as HTMLInputElement;
     fireEvent.click(checkbox);
-    // 点「批量打回」→ 打开原因弹窗（修复前直接硬编码原因提交，无弹窗）
-    fireEvent.click(await screen.findByRole("button", { name: /批量打回/ }));
+    // 点「批量驳回」→ 打开原因弹窗（修复前直接硬编码原因提交，无弹窗）
+    fireEvent.click(await screen.findByRole("button", { name: /批量驳回/ }));
     await waitFor(() => expect(document.querySelector(".ant-modal")).toBeTruthy());
     // 不填原因点确认 → 拦截并提示
     fireEvent.click(

@@ -51,6 +51,7 @@ import type {
   SqlInferEvalExpectedMeasure,
   SqlInferEvalRunSummary,
 } from "../types";
+import { formatCnTime } from "../utils/timeCn";
 
 const { Paragraph, Text, Title } = Typography;
 
@@ -454,7 +455,7 @@ export function SqlInferEval() {
       title: "运行时间",
       dataIndex: "ran_at",
       width: 180,
-      render: (v: string | null) => (v ? new Date(v).toLocaleString() : "—"),
+      render: (v: string | null) => (v ? formatCnTime(v) : "—"),
     },
     {
       title: "完全匹配",
@@ -680,7 +681,7 @@ export function SqlInferEval() {
               style={{ marginBottom: 16 }}
               message={
                 latest
-                  ? `最近一次记录：${new Date(latest.ran_at ?? "").toLocaleString()} · 完全匹配 ${pct(latest.exact_rate)}% · 耗时 ${latest.elapsed_ms}ms`
+                  ? `最近一次记录：${formatCnTime(latest.ran_at)} · 完全匹配 ${pct(latest.exact_rate)}% · 耗时 ${latest.elapsed_ms}ms`
                   : "评测集为确定性计算（规则解析 vs 人工核对期望），本页实时计算当前成功率；点「运行评测并记录」留存历史用于趋势。"
               }
             />

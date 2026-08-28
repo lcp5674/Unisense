@@ -578,6 +578,7 @@ export function MeasureCatalogs() {
           pageSize,
           total,
           showSizeChanger: true,
+          showTotal: (t) => `共 ${t} 条`,
           onChange: (p, ps) => {
             setPage(p);
             setPageSize(ps);
@@ -826,7 +827,7 @@ export function MeasureCatalogs() {
             name="measure_format"
             label="度量格式"
             rules={[{ required: true }]}
-            extra="决定默认单位与小数位；格式与默认值可在「系统设置 → 字典管理 → 度量格式」维护"
+            extra="决定默认单位与小数位；格式与默认值可在「系统管理 → 数据字典 → 度量格式」维护"
           >
             <Select options={formatOptions} onChange={onFormatChange} />
           </Form.Item>

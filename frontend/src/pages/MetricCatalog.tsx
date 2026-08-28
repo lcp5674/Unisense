@@ -86,7 +86,7 @@ const BATCH_ACTION_LABEL: Record<string, string> = {
   submit: "提交审核",
   delete: "删除",
   approve: "通过",
-  reject: "打回",
+  reject: "驳回",
   deprecate: "废弃",
 };
 
@@ -1897,7 +1897,7 @@ export function MetricCatalog() {
                             : undefined
                       }
                     >
-                      <span>批量打回（评审中）</span>
+                      <span>批量驳回（评审中）</span>
                     </Tooltip>
                   ),
                   icon: <ClockCircleOutlined />,
@@ -2064,7 +2064,7 @@ export function MetricCatalog() {
             placeholder="全部状态"
             options={[
               { value: "DRAFT", label: "草稿" },
-              { value: "EXPERIMENTAL", label: "实验" },
+              { value: "EXPERIMENTAL", label: "灰度" },
               { value: "REVIEW", label: "审核" },
               { value: "PUBLISHED", label: "已发布" },
               { value: "DEPRECATED", label: "已废弃" },
@@ -2290,7 +2290,7 @@ export function MetricCatalog() {
             : batchAction === "approve"
               ? "批量通过"
               : batchAction === "reject"
-                ? "批量打回"
+                ? "批量驳回"
                 : batchAction === "deprecate"
                   ? "批量废弃"
                   : batchAction === "reactivate"
@@ -2307,7 +2307,7 @@ export function MetricCatalog() {
             : batchAction === "approve"
               ? "通过"
               : batchAction === "reject"
-                ? "打回"
+                ? "驳回"
                 : batchAction === "deprecate"
                   ? "废弃"
                   : batchAction === "reactivate"
@@ -2395,7 +2395,7 @@ export function MetricCatalog() {
         {batchAction === "reject" && (
           <div>
             <p>
-              将勾选的 <b>{selected.filter((m) => m.status === "REVIEW").length}</b> 个评审中指标打回草稿
+              将勾选的 <b>{selected.filter((m) => m.status === "REVIEW").length}</b> 个评审中指标驳回至草稿
               （REVIEW → DRAFT）。
             </p>
             <Input.TextArea

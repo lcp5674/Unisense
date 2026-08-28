@@ -30,7 +30,7 @@ const STATUS_COLOR: Record<string, string> = {
 
 const STATUS_LABEL: Record<string, string> = {
   DRAFT: "草稿",
-  EXPERIMENTAL: "实验",
+  EXPERIMENTAL: "灰度",
   REVIEW: "审核",
   PUBLISHED: "已发布",
   DEPRECATED: "已废弃",

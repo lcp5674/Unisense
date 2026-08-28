@@ -281,7 +281,7 @@ const STATUS_LABEL: Record<string, string> = {
   DRAFT: "草稿",
   REVIEW: "评审中",
   PUBLISHED: "已发布",
-  EXPERIMENTAL: "实验",
+  EXPERIMENTAL: "灰度",
   DEPRECATED: "已废弃",
   DATA_SOURCE_DROPPED: "源下线",
 };

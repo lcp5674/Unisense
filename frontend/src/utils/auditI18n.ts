@@ -149,7 +149,7 @@ export const AUDIT_FIELD_LABEL: Record<string, string> = {
 const AUDIT_VALUE_LABEL: Record<string, string> = {
   // 指标状态
   DRAFT: "草稿",
-  EXPERIMENTAL: "实验",
+  EXPERIMENTAL: "灰度",
   REVIEW: "审核",
   PUBLISHED: "已发布",
   DEPRECATED: "已废弃",
@@ -171,7 +171,7 @@ const AUDIT_VALUE_LABEL: Record<string, string> = {
   T1: "T+1",
   // 发布模式
   gray: "灰度",
-  experimental: "实验",
+  experimental: "灰度",
   normal: "正常",
   // 决策 / 状态
   reasonable: "合理",

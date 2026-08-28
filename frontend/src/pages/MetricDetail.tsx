@@ -2798,7 +2798,7 @@ export function MetricDetail() {
         okText="提交评审"
       >
         <Paragraph type="secondary">
-          提交后将进入评审状态（DRAFT → REVIEW），由指定评审人通过或打回。
+          提交后将进入评审状态（DRAFT → REVIEW），由指定评审人通过或驳回。
         </Paragraph>
         <Space wrap style={{ marginTop: 8 }}>
           <Select

@@ -78,7 +78,7 @@ const STATUS_LABEL: Record<string, string> = { DRAFT: "草稿", REVIEW: "审核�
 // 避免用维度状态映射渲染指标状态导致 EXPERIMENTAL/REVIEW/DATA_SOURCE_DROPPED 直出英文。
 const METRIC_STATUS_LABEL: Record<string, string> = {
   DRAFT: "草稿",
-  EXPERIMENTAL: "实验",
+  EXPERIMENTAL: "灰度",
   REVIEW: "审核中",
   PUBLISHED: "已发布",
   DEPRECATED: "已废弃",

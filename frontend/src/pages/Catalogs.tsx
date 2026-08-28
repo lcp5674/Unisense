@@ -10,6 +10,7 @@ import { DescriptionCoveragePanel, type DescriptionCoveragePanelHandle } from ".
 import { useResizableColumns } from "../components/ResizableTable";
 import { usePermission } from "../hooks/usePermission";
 import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
+import { formatCnTime } from "../utils/timeCn";
 
 const SENSITIVITY_LABEL: Record<string, string> = {
   PUBLIC: "公开",
@@ -669,7 +670,7 @@ export function Catalogs() {
       ellipsis: true,
       render: (v: string | null | undefined) =>
         v ? (
-          <Tooltip title={new Date(v).toLocaleString("zh-CN")}>
+          <Tooltip title={formatCnTime(v)}>
             <span className="muted" style={{ fontSize: 12 }}>{formatRelative(v)}</span>
           </Tooltip>
         ) : (

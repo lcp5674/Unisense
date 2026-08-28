@@ -543,7 +543,7 @@ describe("MetricDetail", () => {
     fireEvent.click(btn);
     // 提交评审弹窗打开
     expect(
-      screen.getByText("提交后将进入评审状态（DRAFT → REVIEW），由指定评审人通过或打回。"),
+      screen.getByText("提交后将进入评审状态（DRAFT → REVIEW），由指定评审人通过或驳回。"),
     ).toBeInTheDocument();
     // 提交 → submitReview 以重评审语义调用（未指派 → reviewer_type null）
     fireEvent.click(screen.getByRole("button", { name: "提交评审" }));
