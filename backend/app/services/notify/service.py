@@ -127,6 +127,8 @@ _EVENT_TITLE_CN: dict[str, str] = {
     # T7/T8（审查修复）：后台任务失败 / 缓存失效失败 → 运维告警
     "system.task_failed": "后台任务执行失败",
     "system.cache_invalidate_failed": "指标缓存失效失败",
+    # S4（审查修复）：认证状态（黑名单/单端登录）Redis 降级 → 运维告警
+    "system.auth_state_degraded": "认证状态降级（Redis 不可用）",
 }
 
 _SOURCE_CN: dict[str, str] = {

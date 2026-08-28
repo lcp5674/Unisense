@@ -119,6 +119,8 @@ BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     # T7/T8（审查修复）：后台任务失败 / 缓存失效失败 → 告警事件进通知闭环
     "system.task_failed",
     "system.cache_invalidate_failed",
+    # S4（审查修复）：认证状态降级告警
+    "system.auth_state_degraded",
 )
 
 

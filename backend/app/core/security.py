@@ -129,6 +129,7 @@ async def blacklist_token(jti: str, ttl_seconds: int) -> None:
         expiry_ts = time.time() + ttl_seconds
         _memory_blacklist[jti] = expiry_ts
         logger.warning("jwt_blacklisted_memory_fallback", jti=jti, ttl=ttl_seconds)
+        await _alert_auth_degraded("jwt_blacklist_write_fallback")
 
 
 async def is_token_blacklisted(jti: str) -> bool:
@@ -149,7 +150,8 @@ async def is_token_blacklisted(jti: str) -> bool:
         if result is not None:
             return True
     except Exception:
-        pass
+        # S4：Redis 读取失败 → fail-open（可用性优先）+ 告警提示跨 worker 撤销可能失效
+        await _alert_auth_degraded("jwt_blacklist_read_failed")
 
     now = time.time()
     expired_jtis = [k for k, v in _memory_blacklist.items() if v <= now]
@@ -201,7 +203,7 @@ async def revoke_active_refresh(user_id: int) -> None:
             logger.info("refresh_revoked_redis", user_id=user_id, jti=old_jti[:12])
         return
     except Exception:
-        _warn_memory_fallback_once(user_id)
+        await _warn_memory_fallback_once(user_id)
 
     # 内存降级（单进程原子；多 worker 下仅本进程生效，生产须 Redis）
     old = await _get_active_refresh_memory(user_id)
@@ -257,8 +259,33 @@ return 1
 _MEM_FALLBACK_WARN_WINDOW = 60.0
 _last_mem_fallback_warn: dict[int, float] = {}
 
+#: 认证状态降级告警（S4）：全局限频窗口，避免 Redis 故障期高频降级刷告警。
+_AUTH_DEGRADED_ALERT_WINDOW = 60.0
+_last_auth_degraded_alert: float = 0.0
 
-def _warn_memory_fallback_once(user_id: int) -> None:
+
+async def _alert_auth_degraded(reason: str) -> None:
+    """S4（审查修复）：认证状态（黑名单/单端登录）Redis 降级不再静默——
+    发 ``system.auth_state_degraded`` 告警进通知闭环（平台管理员感知
+    「多 worker 下撤销仅本进程生效」的降级窗口）。限频 60s 防刷屏。"""
+    global _last_auth_degraded_alert
+    now = time.time()
+    if now - _last_auth_degraded_alert < _AUTH_DEGRADED_ALERT_WINDOW:
+        return
+    _last_auth_degraded_alert = now
+    try:
+        from app.core.eventbus import get_eventbus
+
+        await get_eventbus().publish(
+            "system.auth_state_degraded",
+            {"reason": reason},
+            actor_id="",
+        )
+    except Exception:  # noqa: BLE001 - 告警本身失败不阻断认证主流程
+        logger.warning("auth_degraded_alert_publish_failed", reason=reason)
+
+
+async def _warn_memory_fallback_once(user_id: int) -> None:
     """记录单端登录内存降级告警（限频），提示多 worker 下互踢仅本进程生效。"""
     now = time.time()
     if now - _last_mem_fallback_warn.get(user_id, 0.0) < _MEM_FALLBACK_WARN_WINDOW:
@@ -269,6 +296,7 @@ def _warn_memory_fallback_once(user_id: int) -> None:
         user_id=user_id,
         detail="单端登录降级为进程内存（多 worker 下仅本进程生效）；生产环境请确保 Redis 可用",
     )
+    await _alert_auth_degraded("single_login_memory_fallback")
 
 
 async def rotate_active_refresh(
@@ -330,7 +358,7 @@ async def rotate_active_refresh(
         )
         return
     except Exception:
-        _warn_memory_fallback_once(user_id)
+        await _warn_memory_fallback_once(user_id)
 
     # 内存降级（单进程原子；多 worker 下仅本进程生效，生产须 Redis）
     old = await _get_active_refresh_memory(user_id)

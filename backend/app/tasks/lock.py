@@ -7,7 +7,7 @@ arq 的 ``cron`` 无防重入：单 worker 内任务超周期即可并发重跑�
 设计（对齐 collector 的 ``CollectionLock`` 哲学）：
 - key = ``task_lock:{name}``，owner = 随机 UUID，TTL 默认 1h
 - 仅 owner 可释放（Lua 脚本防误删）
-- Redis 不可用/异常时**降级为获取成功**（不因锁故障阻断任务主流程）
+- Redis 不可用/异常时 **fail-safe：跳过本周期**（防多副本双跑；下周期自动恢复）
 """
 
 from __future__ import annotations
@@ -48,17 +48,19 @@ class TaskLock:
 
     async def acquire(self) -> bool:
         if self._redis is None:
-            # Redis 不可用降级：视作获取成功（不阻断任务主流程），须同步置位 acquired。
+            # Redis 不可用 → fail-safe：视作未获锁（跳过本周期）。写副作用任务（归档/清理/巡检）
+            # 双跑危害大于单周期跳过；下个 cron 周期会正常执行。
             logger.warning("task_lock_redis_unavailable", name=self._key)
-            self.acquired = True
-            return True
+            self.acquired = False
+            return False
         try:
             res = await self._redis.set(self._key, self._owner, nx=True, ex=self._ttl)
             self.acquired = res is not None
             return self.acquired
-        except Exception as exc:  # noqa: BLE001 - 锁故障不阻断主流程
+        except Exception as exc:  # noqa: BLE001 - 锁异常 fail-safe：跳过本周期防双跑
             logger.warning("task_lock_acquire_failed", name=self._key, error=str(exc))
-            return True
+            self.acquired = False
+            return False
 
     async def release(self) -> None:
         if self._redis is None or not self.acquired:
