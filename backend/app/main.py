@@ -110,6 +110,7 @@ def _swagger_ui_html(*, openapi_url: str, title: str) -> HTMLResponse:
 <body>
 <div id="swagger-ui"></div>
 <script src="/static/swagger-ui/swagger-ui-bundle.js"></script>
+<script src="/static/swagger-ui/swagger-ui-standalone-preset.js"></script>
 <script src="/static/swagger-ui/swagger-init.js"></script>
 </body>
 </html>"""

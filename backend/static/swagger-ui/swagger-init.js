@@ -21,8 +21,17 @@
   }
 
   var config = readConfig();
-  config.presets = [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset];
-  config.layout = "BaseLayout";
+  // swagger-ui-dist@5.18+ 默认 dom_id 不再指向 #swagger-ui，必须显式指定渲染容器
+  config.dom_id = "#swagger-ui";
+  config.presets = [SwaggerUIBundle.presets.apis];
+  // swagger-ui-dist@5 起 bundle 不再内置 SwaggerUIStandalonePreset，需独立引入
+  // swagger-ui-standalone-preset.js（挂载到全局 window.SwaggerUIStandalonePreset）。
+  // 有则启用完整 StandaloneLayout（顶栏 + 搜索）；缺失时回退 BaseLayout 保证可渲染。
+  if (typeof window.SwaggerUIStandalonePreset !== "undefined") {
+    config.presets.push(window.SwaggerUIStandalonePreset);
+  } else {
+    config.layout = "BaseLayout";
+  }
   // 兜底：meta 缺失时仍指向标准 openapi 地址（本应用固定 /openapi.json）
   if (!config.url) {
     config.url = "/openapi.json";

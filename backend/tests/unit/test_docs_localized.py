@@ -32,6 +32,7 @@ def test_swagger_ui_html_uses_only_local_assets() -> None:
     assert "fastapi.tiangolo" not in html
     # 全部本地静态资源
     assert "/static/swagger-ui/swagger-ui-bundle.js" in html
+    assert "/static/swagger-ui/swagger-ui-standalone-preset.js" in html
     assert "/static/swagger-ui/swagger-init.js" in html
     assert "/static/swagger-ui/swagger-ui.css" in html
     # 初始化配置经 meta 注入（由 swagger-init.js 读取）
@@ -69,6 +70,7 @@ def test_static_swagger_assets_served_locally() -> None:
     for path in (
         "/static/swagger-ui/swagger-ui-bundle.js",
         "/static/swagger-ui/swagger-ui.css",
+        "/static/swagger-ui/swagger-ui-standalone-preset.js",
         "/static/swagger-ui/swagger-init.js",
         "/static/swagger-ui/favicon.png",
         "/static/redoc/redoc.standalone.js",
