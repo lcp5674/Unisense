@@ -939,8 +939,8 @@ class GovernanceService(BaseService):
                 ctx={"metric_code": payload.metric_code, "reviewer_id": reviewer.id},
             )
         if payload.sensitivity_level is SensitivityLevel.UNKNOWN:
-            # UNKNOWN 是分级引擎降级标记（仅落 classification 表），不可作为复核赋值的敏感级别；
-            # 资产终态使用 NEEDS_REVIEW（对齐 db_catalog.sensitivity_level）。
+            # UNKNOWN 是分级引擎降级标记（0109 后两表枚举均已含，但仅降级路径使用），
+            # 不可作为人工复核赋值的敏感级别——人工须给真实级别或 NEEDS_REVIEW。
             raise ValidationError(
                 "敏感级别不可为 UNKNOWN（降级标记），请选择真实级别或 NEEDS_REVIEW",
                 ctx={"metric_code": payload.metric_code},

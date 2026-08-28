@@ -433,9 +433,10 @@ class CollectorRepository:
                 )
             )
         ).scalar_one_or_none()
-        # classification.sensitivity_level 枚举（SensitivityLevel）不含 NEEDS_REVIEW——
-        # 待复核统一落 UNKNOWN（与 db_catalog 的 NEEDS_REVIEW 列语义等价）。
-        level = "UNKNOWN" if sensitivity_level == "NEEDS_REVIEW" else sensitivity_level
+        # 2026-08-28 枚举统一（0109）：classification.sensitivity_level 与 db_catalog
+        # 对齐为 6 值并集，NEEDS_REVIEW 可直接落库——不再映射 UNKNOWN（此前 DB
+        # 缺 NEEDS_REVIEW 时被迫降级，且映射后的 UNKNOWN 又不在 classification 枚举）。
+        level = sensitivity_level
         if existing is not None:
             existing.sensitivity_level = level
             existing.pii_columns = pii_columns

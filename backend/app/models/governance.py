@@ -76,12 +76,20 @@ class GrantStatus(enum.StrEnum):
 
 
 class SensitivityLevel(enum.StrEnum):
-    """敏感级别（与 db_catalog.sensitivity_level 对齐，额外含降级标记 UNKNOWN）。"""
+    """敏感级别统一枚举（单一权威来源，两表共用，2026-08-28 统一）。
+
+    取值 = 真实级别（PUBLIC/INTERNAL/CONFIDENTIAL/PII）+ 待复核（NEEDS_REVIEW）
+    + 降级标记（UNKNOWN）。``db_catalog`` 与 ``classification`` 两表枚举经
+    0109 迁移对齐为本集，消除「模型/DB 交叉错位」——此前 db_catalog 模型含
+    NEEDS_REVIEW 而 DB 含 UNKNOWN、classification 反之，写入对方枚举缺失值
+    触发 Data truncated (1265)。
+    """
 
     PUBLIC = "PUBLIC"
     INTERNAL = "INTERNAL"
     CONFIDENTIAL = "CONFIDENTIAL"
     PII = "PII"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
     UNKNOWN = "UNKNOWN"
 
 

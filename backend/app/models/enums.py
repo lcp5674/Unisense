@@ -31,13 +31,19 @@ class EntityTypeEnum(enum.StrEnum):
 
 
 class SensitivityLevelEnum(enum.StrEnum):
-    """敏感级别枚举（含 NEEDS_REVIEW）。"""
+    """敏感级别枚举（2026-08-28 起为 ``SensitivityLevel`` 权威枚举的别名）。
+
+    两表（db_catalog/classification）枚举已由 0109 迁移统一为 6 值并集，
+    保留本名供 data_source/assetmap 等旧引用；新增敏感级别一律扩展
+    ``app.models.governance.SensitivityLevel``（单一来源）。
+    """
 
     PUBLIC = "PUBLIC"
     INTERNAL = "INTERNAL"
     CONFIDENTIAL = "CONFIDENTIAL"
     PII = "PII"
     NEEDS_REVIEW = "NEEDS_REVIEW"
+    UNKNOWN = "UNKNOWN"
 
 
 class MetricStateEnum(enum.StrEnum):

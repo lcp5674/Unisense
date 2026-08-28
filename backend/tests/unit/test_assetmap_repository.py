@@ -887,7 +887,10 @@ class TestAggregations:
 
         out = await repo.heatmap_matrix()
 
-        assert out["columns"] == ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII", "NEEDS_REVIEW"]
+        # 0109 枚举统一：热力图列含 NEEDS_REVIEW 与 UNKNOWN（6 值并集）
+        assert out["columns"] == [
+            "PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII", "NEEDS_REVIEW", "UNKNOWN",
+        ]
         assert out["cells"] == [
             {"domain": "sales", "sensitivity": "PII", "count": 3, "pii_count": 3},
             {"domain": "sales", "sensitivity": "INTERNAL", "count": 2, "pii_count": 0},

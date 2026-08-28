@@ -618,10 +618,9 @@ async def test_pii_review_unknown_metric() -> None:
 
 
 async def test_pii_review_rejects_unknown_sensitivity() -> None:
-    """UNKNOWN 是分级引擎降级标记（仅落 classification 表），不可作为人工复核赋值的敏感级别。
+    """UNKNOWN 是分级引擎降级标记（0109 后两表枚举均已含），不可作为人工复核赋值。
 
-    对齐 db_catalog.sensitivity_level 的终态 NEEDS_REVIEW（Catalogs/AssetMap/Dashboard），
-    避免治理页把「未知/降级」当真实级别写回资产。
+    人工复核须给真实级别或 NEEDS_REVIEW，避免治理页把「未知/降级」当真实级别写回资产。
     """
     svc, repo, _ = _svc()
     repo.metrics["m1"] = FakeMetric(metric_code="m1", owner_id=5)
