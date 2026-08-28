@@ -2086,6 +2086,15 @@ export function MetricCreate() {
         return;
       }
     }
+    // 数仓开发责任方必填（PRD 4.5 口径落地责任人）：Step ①「③ 口径责任方」——向导分步
+    // 提交时 Step 1 责任方卡已卸载，antd 不校验未挂载字段（Form.Item required 仅作
+    // Step 1 内提示），故在此显式校验：平台用户 id 或外部人员名称至少一项。
+    const dwDev = values.dw_developer as RoleOwnerValue | undefined;
+    if (!dwDev || (dwDev.id == null && !String(dwDev.name ?? "").trim())) {
+      message.warning("请先填写数仓开发责任方（Step ① ③ 口径责任方：数仓建模/血缘维护人）");
+      setCurrentStep(1);
+      return;
+    }
     setLoading(true);
     const definitionJson = buildDefinitionJson(values);
     if (!definitionJson) { setLoading(false); return; }
@@ -3212,7 +3221,7 @@ export function MetricCreate() {
 
             {/* Step 1 续：口径责任方（OneData 向导）—— 责任方属基本信息，随 Step1 */}
             {currentStep === 1 && (<>
-            <Card type="inner" title="③ 口径责任方（可选）" size="small">
+            <Card type="inner" title="③ 口径责任方" size="small">
               <Row gutter={16}>
                 <Col span={8}>
                   <Form.Item name="product_owner" label="产品需求方" extra="口径业务语义提出人">
@@ -3225,7 +3234,12 @@ export function MetricCreate() {
                   </Form.Item>
                 </Col>
                 <Col span={8}>
-                  <Form.Item name="dw_developer" label="数仓开发" extra="数仓建模/血缘维护人">
+                  <Form.Item
+                    name="dw_developer"
+                    label="数仓开发"
+                    extra="数仓建模/血缘维护人"
+                    rules={[{ required: true, message: "请选择或填写数仓开发责任方" }]}
+                  >
                     <RoleOwnerSelect users={ownerUsers} placeholder="选择平台用户或输入外部人员" />
                   </Form.Item>
                 </Col>

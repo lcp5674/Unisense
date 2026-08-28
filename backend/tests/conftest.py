@@ -179,6 +179,8 @@ def make_create_payload(**overrides: object) -> dict:
         "pii_flag": False,
         "compliance_reviewed": False,
         "consumption_guide": None,
+        # 口径三方责任（PRD 4.5）：数仓开发单条创建必填（schema 校验），测试默认带
+        "dw_developer_id": 1,
     }
     defaults.update(overrides)
     return defaults

@@ -167,6 +167,53 @@ async def test_create_atomic_with_mount_rejected():
     assert repo.create.call_count == 0
 
 
+async def test_create_single_dw_developer_required():
+    """注册门禁：单条/向导创建必须指定数仓开发责任方（PRD 4.5 口径落地责任人）。
+
+    ``dw_developer_id``（平台用户）与 ``dw_developer_name``（外部人员）皆空 → schema
+    层 422，``create_metric`` 不落库。外部人员名称兜底（name 非空）视为已指定。"""
+    from pydantic import ValidationError as PydanticValidationError
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    with pytest.raises(PydanticValidationError) as ei:
+        await svc.create_metric(
+            MetricCreateRequest(
+                **make_create_payload(dw_developer_id=None, dw_developer_name=None)
+            ),
+            owner_id=1,
+        )
+    assert "数仓开发责任方为必填" in str(ei.value)
+    assert repo.create.call_count == 0
+
+    # 外部人员名称兜底：name 非空视为已指定，放行
+    repo.create.reset_mock()
+    await svc.create_metric(
+        MetricCreateRequest(
+            **make_create_payload(dw_developer_id=None, dw_developer_name="外部数仓D")
+        ),
+        owner_id=1,
+    )
+    assert repo.create.call_count == 1
+
+
+async def test_create_batch_without_dw_developer_allowed():
+    """批量注册（batch_id 非空）不强制数仓开发——整批共享责任方由候选可带透传，
+    避免单候选缺省导致整批 422（批量责任方治理沿用候选级可选 + 后续补录）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    req = MetricCreateRequest(
+        **make_create_payload(dw_developer_id=None, dw_developer_name=None, batch_id="batch_abc")
+    )
+    assert req.dw_developer_id is None  # schema 放行（不抛异常）
+
+
 async def test_create_metric_persists_responsibility_names():
     """创建时透传外部人员名称（id 为空，纯文本兜底——责任方非平台用户）。"""
     svc, repo = _svc_with_repo()

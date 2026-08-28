@@ -321,6 +321,30 @@ class MetricCreateRequest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_dw_developer_required(self) -> MetricCreateRequest:
+        """数仓开发责任方必填（注册门禁，PRD 4.5）。
+
+        数仓开发 = 口径落地责任人（数仓建模/血缘维护人），单条/向导注册强制要求：
+        ``dw_developer_id``（平台用户）或 ``dw_developer_name``（外部人员名称兜底）
+        至少一项非空——指标从需求到落地必须明确数仓侧负责人（详情页 OwnerChain
+        完整、血缘维护有主）。
+
+        批量注册（``batch_id`` 非空）不在此列强制：整批共享责任方由候选可带透传
+        （候选已声明 dw_developer 字段，前端批量行可填），避免单候选缺省导致整批
+        422——批量责任方治理沿用候选级可选 + 后续补录。
+        """
+        if (
+            self.batch_id is None
+            and self.dw_developer_id is None
+            and self.dw_developer_name is None
+        ):
+            raise ValueError(
+                "数仓开发责任方为必填：请选择平台用户（dw_developer_id）"
+                "或填写外部人员名称（dw_developer_name）"
+            )
+        return self
+
+    @model_validator(mode="after")
     def validate_definition_by_type(self) -> MetricCreateRequest:
         """按指标类型校验口径定义完整性（注册门禁，PRD 4.5 / TD §12.2 / OneData）。
 

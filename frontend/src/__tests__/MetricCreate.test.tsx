@@ -218,6 +218,21 @@ async function clickSelectOption(text: string) {
   });
 }
 
+/**
+ * Step ①「③ 口径责任方」：填写数仓开发责任方（数仓开发必填，PRD 4.5）。
+ * 用外部人员名称输入（不依赖 mockedUsers 用户列表），提交前调用。
+ */
+async function fillDwDeveloper(name = "数仓张三") {
+  const item = screen.getByText("数仓开发").closest(".ant-form-item") as HTMLElement;
+  const selector = item.querySelector(".ant-select-selector") as HTMLElement;
+  fireEvent.mouseDown(selector);
+  const input = item.querySelector(
+    "input.ant-select-selection-search-input",
+  ) as HTMLInputElement;
+  fireEvent.change(input, { target: { value: name } });
+  await clickSelectOption(`外部人员：${name}`);
+}
+
 /** 批量表单公共填充：选域（默认「销售 (sales)」）+ 源表搜索选中 + 填入度量列（tags 逐个 Enter）。 */
 async function fillBatchForm(modal: HTMLElement, measureColumns: string) {
   fireEvent.mouseDown(within(modal).getByText("选择所属业务域（须为 active 域）"));
@@ -1527,11 +1542,36 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     // 名称在 Step1（指标基本信息）必填——先填名称再回到 Step2 提交（依赖指标/计算表达式留空）
     await goToStep(1);
     fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "本月活跃医生数" } });
+    // 数仓开发责任方必填（PRD 4.5）：回 Step 1 责任方卡填写后再提交
+    await fillDwDeveloper();
     await goToStep(2);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
     // F1：派生 = 原子 + 业务限定 + 时间周期，依赖/公式均可选——未选依赖、未填表达式
     // 均不再前端拦截，直接提交（口径合法性由后端类型化校验兜底）
     await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
+  });
+
+  it("未填数仓开发责任方提交 → 前端拦截并提示（PRD 4.5 必填，不调用 createMetric）", async () => {
+    mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await goToStep(1);
+    fireEvent.click(screen.getByText("派生指标"));
+    await goToStep(2);
+    // 名称必填 → 回 Step1 填名称（不填数仓开发）→ 回 Step2 提交
+    await goToStep(1);
+    fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "本月活跃医生数" } });
+    await goToStep(2);
+    fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
+    // 前端 handleSubmit 显式校验拦截（向导分步卸载后 antd 不校验未挂载字段）：
+    // 提示 + 跳回 Step1，不调用 createMetric
+    await screen.findByText(/请先填写数仓开发责任方/);
+    expect(mockedCreate).not.toHaveBeenCalled();
+    // 已跳回 Step1（「下一步：具体实现」按钮可见，责任方卡重新渲染）
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "下一步：具体实现" })).toBeTruthy(),
+    );
   });
 
   it("派生指标已选依赖但缺计算表达式提交 → 前端放行（仅复合必填表达式）", async () => {
@@ -1556,6 +1596,8 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     // 名称在 Step1（指标基本信息）必填——先填名称再回到 Step2 提交（计算表达式留空）
     await goToStep(1);
     fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "客单价" } });
+    // 数仓开发责任方必填（PRD 4.5）：回 Step 1 责任方卡填写后再提交
+    await fillDwDeveloper();
     await goToStep(2);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
     // F1：仅复合必填表达式——派生带依赖但缺表达式同样放行提交
@@ -1604,6 +1646,8 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), {
       target: { value: "本月医院活跃医生数" },
     });
+    // 数仓开发责任方必填（PRD 4.5）：责任方卡填写后再提交
+    await fillDwDeveloper();
     await goToStep(2);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
     await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
@@ -1775,6 +1819,8 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), {
       target: { value: "费用金额多变体" },
     });
+    // 数仓开发责任方必填（PRD 4.5）：Step1 责任方卡填写后再回 Step2 提交
+    await fillDwDeveloper();
     await goToStep(2);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
     await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
@@ -1987,6 +2033,8 @@ describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数�
     // 名称在 Step1（② 指标基本信息）必填——填名称后回 Step2 提交
     await goToStep(1);
     fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), { target: { value: "门诊收费金额" } });
+    // 数仓开发责任方必填（PRD 4.5）：Step1 责任方卡填写后再回 Step2 提交
+    await fillDwDeveloper();
     await goToStep(2);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
 
@@ -2022,6 +2070,8 @@ describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数�
     fireEvent.click(screen.getAllByRole("button", { name: /添加一项/ })[1]);
     const cautionInput = screen.getByPlaceholderText(/该指标包含 PII 数据/);
     fireEvent.change(cautionInput, { target: { value: "含敏感就诊信息" } });
+    // 数仓开发责任方必填（PRD 4.5）：Step1 责任方卡填写后再回 Step2 提交
+    await fillDwDeveloper();
     await goToStep(2);
     fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
 
