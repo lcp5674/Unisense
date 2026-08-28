@@ -2301,6 +2301,10 @@ export interface AssetCatalogSummary {
   by_entity_type: Record<string, number>;
   by_sensitivity: Record<string, number>;
   orphan_assets: number;
+  /** 按数据源分布（source_id / source_name / count，count 降序） */
+  by_source?: Array<{ source_id: string; source_name: string; count: number }>;
+  /** 按库分布（entity_name 首段 / count，count 降序） */
+  by_database?: Array<{ database: string; count: number }>;
 }
 
 export interface AssetClassificationSummary {

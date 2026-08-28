@@ -694,7 +694,13 @@ class TestAggregations:
         r_by_sens.all.return_value = [("PII", 2)]
         r_orphan = MagicMock()
         r_orphan.scalar.return_value = 1
-        s.execute = AsyncMock(side_effect=[r_total, r_by_type, r_by_sens, r_orphan])
+        r_by_source = MagicMock()
+        r_by_source.all.return_value = [("hive_meta", "Hive 元数据", 4), ("mysql_uni", None, 1)]
+        r_by_db = MagicMock()
+        r_by_db.all.return_value = [("wedw_dws", 3), ("wedw_dw", 2)]
+        s.execute = AsyncMock(
+            side_effect=[r_total, r_by_type, r_by_sens, r_orphan, r_by_source, r_by_db]
+        )
 
         out = await repo.catalog_summary()
 
@@ -702,6 +708,36 @@ class TestAggregations:
         assert out["by_entity_type"] == {"table": 3, "field": 2}
         assert out["by_sensitivity"] == {"PII": 2}
         assert out["orphan_assets"] == 1
+        assert out["by_source"] == [
+            {"source_id": "hive_meta", "source_name": "Hive 元数据", "count": 4},
+            {"source_id": "mysql_uni", "source_name": "mysql_uni", "count": 1},
+        ]
+        assert out["by_database"] == [
+            {"database": "wedw_dws", "count": 3},
+            {"database": "wedw_dw", "count": 2},
+        ]
+
+    async def test_catalog_summary_source_database_sql(self) -> None:
+        """按数据源/库聚合的 SQL 形态：join data_source 取名称、substring_index 拆库名。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r = MagicMock()
+        r.scalar.return_value = 0
+        r.all.return_value = []
+        s.execute = AsyncMock(return_value=r)
+
+        await repo.catalog_summary()
+
+        stmts = [
+            str(a.args[0].compile(compile_kwargs={"literal_binds": True}))
+            for a in s.execute.call_args_list
+        ]
+        # 数据源聚合：LEFT JOIN data_source、source_name 兜底、count 降序
+        src_sql = stmts[4]
+        assert "db_catalog" in src_sql and "data_source" in src_sql
+        assert "substring_index" in stmts[5]
+        assert "LIKE" in stmts[5] and "'%.%'" in stmts[5]
+        assert "ORDER BY" in src_sql and "DESC" in src_sql
 
     async def test_heatmap_default_domain(self) -> None:
         s = _session()

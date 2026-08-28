@@ -6,6 +6,15 @@ import { AssetMap } from "../pages/AssetMap";
 
 // Mock API
 vi.mock("../api", () => ({
+  UnisenseApiError: class UnisenseApiError extends Error {
+    code: string;
+    traceId: string;
+    constructor(message: string, code = "INTERNAL_ERROR", traceId = "") {
+      super(message);
+      this.code = code;
+      this.traceId = traceId;
+    }
+  },
   fetchAssetGraph: vi.fn(),
   fetchAssetHeatmap: vi.fn(),
   fetchAssetHeatmapMatrix: vi.fn(),
@@ -1099,6 +1108,31 @@ describe("AssetMap", () => {
 
     await waitFor(() => expect(fetchAssetOrphans).toHaveBeenCalled());
     expect(screen.getByText(/孤儿资产明细/)).toBeInTheDocument();
+  });
+
+  it("overview 展示按数据源/库分布区块（多维度资产统计）", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetSummary).mockResolvedValue({
+      total: 10,
+      by_entity_type: { table: 8, field: 2 },
+      by_sensitivity: { PUBLIC: 6, PII: 4 },
+      orphan_assets: 1,
+      by_source: [
+        { source_id: "hive_meta", source_name: "Hive 元数据", count: 8 },
+        { source_id: "mysql_uni", source_name: "mysql_uni", count: 2 },
+      ],
+      by_database: [
+        { database: "wedw_dws", count: 6 },
+        { database: "wedw_dw", count: 4 },
+      ],
+    });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("概览")).toBeInTheDocument());
+    await user.click(screen.getByText("概览"));
+    await waitFor(() => expect(fetchAssetSummary).toHaveBeenCalled());
+
+    expect(screen.getByText("按数据源分布")).toBeInTheDocument();
+    expect(screen.getByText("按库分布")).toBeInTheDocument();
   });
 
   it("click field node opens field info drawer with table drill entry", async () => {

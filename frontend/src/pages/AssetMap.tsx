@@ -1091,12 +1091,21 @@ function OverviewTab() {
     }
   }
 
-  function drillCatalogs(params?: { entity_type?: string; sensitivity_level?: string }) {
+  function drillCatalogs(params?: {
+    entity_type?: string;
+    sensitivity_level?: string;
+    source_id?: string;
+    database?: string;
+  }) {
     const title = params?.entity_type
       ? `实体类型：${ENTITY_TYPE_LABEL[params.entity_type] ?? params.entity_type}`
       : params?.sensitivity_level
         ? `敏感度：${SENSITIVITY_LABEL[params.sensitivity_level] ?? params.sensitivity_level}`
-        : "目录资产明细";
+        : params?.source_id
+          ? `数据源：${summary?.by_source?.find((s) => s.source_id === params.source_id)?.source_name ?? params.source_id}`
+          : params?.database
+            ? `库：${params.database}`
+            : "目录资产明细";
     return openDrill(title, CATALOG_COLUMNS, async () => {
       const r = await listCatalogs({ ...params, page_size: 200 });
       return r.items as unknown as DrillRow[];
@@ -1247,6 +1256,67 @@ function OverviewTab() {
                   plot.on("element:click", (evt: { data?: { data?: { key?: string } } }) => {
                     const key = evt?.data?.data?.key;
                     if (key) drillCatalogs({ sensitivity_level: key });
+                  });
+                }}
+              />
+            )}
+          </Card>
+        </Col>
+      </Row>
+
+      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+        <Col xs={24} lg={12}>
+          <Card
+            title="按数据源分布"
+            size="small"
+            extra={
+              <span className="muted" style={{ fontSize: 12 }}>
+                点击柱体查看该数据源资产明细
+              </span>
+            }
+          >
+            {!summary.by_source || summary.by_source.length === 0 ? (
+              <Empty description="暂无数据源分布数据" />
+            ) : (
+              <Bar
+                data={summary.by_source.map((s) => ({ key: s.source_name, value: s.count, source_id: s.source_id }))}
+                xField="key"
+                yField="value"
+                height={220}
+                xAxis={{ label: { autoRotate: true } }}
+                onReady={(plot) => {
+                  plot.on("element:click", (evt: { data?: { data?: { source_id?: string } } }) => {
+                    const sid = evt?.data?.data?.source_id;
+                    if (sid) drillCatalogs({ source_id: sid });
+                  });
+                }}
+              />
+            )}
+          </Card>
+        </Col>
+        <Col xs={24} lg={12}>
+          <Card
+            title="按库分布"
+            size="small"
+            extra={
+              <span className="muted" style={{ fontSize: 12 }}>
+                点击柱体查看该库资产明细
+              </span>
+            }
+          >
+            {!summary.by_database || summary.by_database.length === 0 ? (
+              <Empty description="暂无库分布数据" />
+            ) : (
+              <Bar
+                data={summary.by_database.map((d) => ({ key: d.database, value: d.count }))}
+                xField="key"
+                yField="value"
+                height={220}
+                xAxis={{ label: { autoRotate: true } }}
+                onReady={(plot) => {
+                  plot.on("element:click", (evt: { data?: { data?: { key?: string } } }) => {
+                    const db = evt?.data?.data?.key;
+                    if (db) drillCatalogs({ database: db });
                   });
                 }}
               />

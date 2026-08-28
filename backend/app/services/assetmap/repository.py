@@ -689,11 +689,42 @@ class AssetMapRepository:
                 .where(DBCatalog.owner_id.is_(None), DBCatalog.deleted_at.is_(None))
             )
         ).scalar() or 0
+        # 按数据源分布：LEFT JOIN 取源名称（含已软删源，名称保留追溯）；count 降序
+        by_source = (
+            await self._session.execute(
+                select(DBCatalog.source_id, DataSource.name, func.count())
+                .select_from(DBCatalog)
+                .outerjoin(DataSource, DataSource.source_id == DBCatalog.source_id)
+                .where(DBCatalog.deleted_at.is_(None))
+                .group_by(DBCatalog.source_id, DataSource.name)
+                .order_by(func.count().desc())
+            )
+        ).all()
+        # 按库分布：entity_name 首段（库.表/库.表.字段），排除无点号异常行；count 降序
+        db_expr = func.substring_index(DBCatalog.entity_name, ".", 1)
+        by_database = (
+            await self._session.execute(
+                select(db_expr, func.count())
+                .where(
+                    DBCatalog.deleted_at.is_(None),
+                    DBCatalog.entity_name.like("%.%"),
+                )
+                .group_by(db_expr)
+                .order_by(func.count().desc())
+            )
+        ).all()
         return {
             "total": total,
             "by_entity_type": dict(cast("Sequence[tuple[Any, Any]]", by_type)),
             "by_sensitivity": dict(cast("Sequence[tuple[Any, Any]]", by_sens)),
             "orphan_assets": orphans,
+            "by_source": [
+                {"source_id": sid, "source_name": sname or sid, "count": int(cnt or 0)}
+                for sid, sname, cnt in by_source
+            ],
+            "by_database": [
+                {"database": db, "count": int(cnt or 0)} for db, cnt in by_database
+            ],
         }
 
     async def classification_summary(self) -> dict[str, Any]:
