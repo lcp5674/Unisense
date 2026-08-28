@@ -547,9 +547,9 @@ async def test_assign_owner_success() -> None:
 
 
 async def test_assign_owner_release() -> None:
-    """解除归属：owner_id=None 不校验用户，直接清除。"""
+    """解除归属：实体已有 owner、owner_id=None 不校验用户，直接清除。"""
     svc, repo = await _svc()
-    entity = DBCatalog(id=1, entity_name="catalog.sales.orders")
+    entity = DBCatalog(id=1, entity_name="catalog.sales.orders", owner_id=5)
     repo.get_catalog_entity = AsyncMock(return_value=entity)
     repo.assign_owner = AsyncMock(return_value=DBCatalog(id=1, owner_id=None))
     out = await svc.assign_owner(1, owner_id=None)
@@ -586,6 +586,18 @@ async def test_assign_owner_user_missing_raises() -> None:
         raise AssertionError("应抛 NotFoundError")
 
 
+async def test_assign_owner_noop_skips_write() -> None:
+    """owner 未变：不写库、不 bump row_version（避免人为乐观锁 409）。"""
+    svc, repo = await _svc()
+    entity = DBCatalog(id=1, entity_name="catalog.sales.orders", owner_id=9)
+    repo.get_catalog_entity = AsyncMock(return_value=entity)
+    repo.user_exists = AsyncMock(return_value=True)
+    repo.assign_owner = AsyncMock(return_value=DBCatalog(id=1, owner_id=9))
+    out = await svc.assign_owner(1, owner_id=9)
+    assert out == {"entity_id": 1, "owner_id": 9}
+    repo.assign_owner.assert_not_awaited()
+
+
 async def test_reclassify_sensitivity_success() -> None:
     """重分类敏感级：实体存在 → 更新并返回新级别。"""
     svc, repo = await _svc()
@@ -610,6 +622,19 @@ async def test_reclassify_sensitivity_missing_raises() -> None:
         pass
     else:  # pragma: no cover
         raise AssertionError("应抛 NotFoundError")
+
+
+async def test_reclassify_sensitivity_noop_skips_write() -> None:
+    """敏感级未变：不写库、不 bump row_version（避免人为乐观锁 409）。"""
+    svc, repo = await _svc()
+    entity = DBCatalog(id=1, entity_name="catalog.sales.orders", sensitivity_level="PII")
+    repo.get_catalog_entity = AsyncMock(return_value=entity)
+    repo.reclassify_sensitivity = AsyncMock(
+        return_value=DBCatalog(id=1, entity_name="catalog.sales.orders", sensitivity_level="PII")
+    )
+    out = await svc.reclassify_sensitivity(1, "PII")
+    assert out == {"entity_id": 1, "sensitivity_level": "PII"}
+    repo.reclassify_sensitivity.assert_not_awaited()
 
 
 async def test_batch_assign_owner_success() -> None:
@@ -662,6 +687,36 @@ async def test_batch_reclassify_empty_raises() -> None:
         pass
     else:  # pragma: no cover
         raise AssertionError("应抛 NotFoundError")
+
+
+async def test_batch_assign_owner_noop_skips_write() -> None:
+    """批量认领：全部已是目标 owner → 跳过写库，affected=0。"""
+    svc, repo = await _svc()
+    entities = [
+        DBCatalog(id=1, entity_name="catalog.sales.orders", owner_id=9),
+        DBCatalog(id=2, entity_name="catalog.sales.items", owner_id=9),
+    ]
+    repo.user_exists = AsyncMock(return_value=True)
+    repo.list_catalog_entities = AsyncMock(return_value=entities)
+    repo.batch_assign_owner = AsyncMock(return_value=0)
+    out = await svc.batch_assign_owner([1, 2], owner_id=9)
+    assert out["affected"] == 0
+    assert out["total"] == 2
+    repo.batch_assign_owner.assert_not_awaited()
+
+
+async def test_batch_reclassify_noop_skips_write() -> None:
+    """批量重分类：全部已是目标级别 → 跳过写库，affected=0。"""
+    svc, repo = await _svc()
+    entities = [
+        DBCatalog(id=1, entity_name="catalog.sales.orders", sensitivity_level="CONFIDENTIAL")
+    ]
+    repo.list_catalog_entities = AsyncMock(return_value=entities)
+    repo.batch_reclassify = AsyncMock(return_value=0)
+    out = await svc.batch_reclassify([1], "CONFIDENTIAL")
+    assert out["affected"] == 0
+    assert out["total"] == 1
+    repo.batch_reclassify.assert_not_awaited()
 
 
 # ---- 聚合缓存（大规模优化）：cache-aside + 熔断降级 ----

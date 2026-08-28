@@ -1942,6 +1942,64 @@ describe("AssetMap", () => {
     });
   });
 
+  it("数据表行设置：敏感度+责任人同时修改时串行提交（避免 row_version 乐观锁 409 竞态）", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetTables).mockResolvedValue({
+      items: [
+        {
+          id: 5,
+          source_id: "s1",
+          entity_name: "sales.ods",
+          entity_type: "TABLE",
+          sensitivity_level: "INTERNAL",
+          owner_id: null,
+          schema_incomplete: false,
+        },
+      ],
+      total: 1,
+    });
+    // 敏感度接口返回可控 Promise：验证「reclassify 未完成前 assign 不得发起」
+    let resolveReclassify!: (v: { entity_id: number; sensitivity_level: string }) => void;
+    vi.mocked(reclassifyAssetSensitivity).mockReturnValue(
+      new Promise<{ entity_id: number; sensitivity_level: string }>((res) => {
+        resolveReclassify = res;
+      }),
+    );
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("数据表")).toBeInTheDocument());
+    await user.click(screen.getByText("数据表"));
+    await waitFor(() => expect(fetchAssetTables).toHaveBeenCalled());
+
+    const row = screen.getByText("sales.ods").closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("button", { name: /设\s*置/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText("设置资产治理信息")).toBeInTheDocument();
+    });
+    const dialog = screen.getByRole("dialog");
+    // 同时修改敏感度 + 责任人
+    const sensItem = within(dialog).getByText("敏感度").closest(".ant-form-item") as HTMLElement;
+    fireEvent.mouseDown(within(sensItem).getByRole("combobox"));
+    await user.click(await screen.findByText("PII"));
+    const ownerItem = within(dialog).getByText("责任人").closest(".ant-form-item") as HTMLElement;
+    fireEvent.mouseDown(within(ownerItem).getByRole("combobox"));
+    await user.click(await screen.findByText("管理员 (#1)"));
+    await user.click(screen.getByRole("button", { name: /保\s*存/ }));
+
+    // 串行关键断言：reclassify 已发起、assign 尚未发起（未并行 Promise.all）
+    await waitFor(() => expect(reclassifyAssetSensitivity).toHaveBeenCalledWith(5, "PII"));
+    expect(assignAssetOwner).not.toHaveBeenCalled();
+
+    // reclassify 完成后 assign 才执行（此时读取的是 reclassify 提交后的最新 row_version）
+    resolveReclassify({ entity_id: 5, sensitivity_level: "PII" });
+    await waitFor(() => expect(assignAssetOwner).toHaveBeenCalledWith(5, 1));
+
+    // 恢复默认实现，避免影响后续用例
+    vi.mocked(reclassifyAssetSensitivity).mockImplementation(() =>
+      Promise.resolve({ entity_id: 5, sensitivity_level: "PII" }),
+    );
+  });
+
   it("数据表批量设置：勾选多行后批量分配责任人", async () => {
     const user = userEvent.setup();
     vi.mocked(fetchAssetTables).mockResolvedValue({

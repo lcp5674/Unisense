@@ -500,6 +500,9 @@ class AssetMapService(BaseService):
             raise NotFoundError(f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id})
         if owner_id is not None and not await self._repo.user_exists(owner_id):
             raise NotFoundError(f"目标用户不存在: {owner_id}", ctx={"owner_id": owner_id})
+        # 无变化短路：owner 未变不写库、不 bump row_version，避免人为乐观锁冲突
+        if entity.owner_id == owner_id:
+            return {"entity_id": entity.id, "owner_id": entity.owner_id}
         updated = await self._repo.assign_owner(entity, owner_id)
         await _agg_cache_invalidate()
         return {"entity_id": updated.id, "owner_id": updated.owner_id}
@@ -509,6 +512,9 @@ class AssetMapService(BaseService):
         entity = await self._repo.get_catalog_entity(entity_id)
         if entity is None:
             raise NotFoundError(f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id})
+        # 无变化短路：敏感级未变不写库、不 bump row_version（同 assign_owner）
+        if entity.sensitivity_level == level:
+            return {"entity_id": entity.id, "sensitivity_level": entity.sensitivity_level}
         updated = await self._repo.reclassify_sensitivity(entity, level)
         await _agg_cache_invalidate()
         return {"entity_id": updated.id, "sensitivity_level": updated.sensitivity_level}
@@ -522,8 +528,12 @@ class AssetMapService(BaseService):
         entities = await self._repo.list_catalog_entities(entity_ids)
         if not entities:
             raise NotFoundError("指定实体均不存在或已删除")
-        affected = await self._repo.batch_assign_owner(entities, owner_id)
-        await _agg_cache_invalidate()
+        # 仅更新 owner 实际变化的实体：已是该 owner 的行跳过，避免无谓 bump row_version
+        targets = [e for e in entities if e.owner_id != owner_id]
+        affected = 0
+        if targets:
+            affected = await self._repo.batch_assign_owner(targets, owner_id)
+            await _agg_cache_invalidate()
         return {"affected": affected, "owner_id": owner_id, "total": len(entity_ids)}
 
     async def batch_reclassify(self, entity_ids: list[int], level: str) -> dict[str, Any]:
@@ -531,8 +541,12 @@ class AssetMapService(BaseService):
         entities = await self._repo.list_catalog_entities(entity_ids)
         if not entities:
             raise NotFoundError("指定实体均不存在或已删除")
-        affected = await self._repo.batch_reclassify(entities, level)
-        await _agg_cache_invalidate()
+        # 仅更新敏感级实际变化的实体（同 batch_assign_owner 短路语义）
+        targets = [e for e in entities if e.sensitivity_level != level]
+        affected = 0
+        if targets:
+            affected = await self._repo.batch_reclassify(targets, level)
+            await _agg_cache_invalidate()
         return {"affected": affected, "sensitivity_level": level, "total": len(entity_ids)}
 
     # ----------------------------------------------------------------

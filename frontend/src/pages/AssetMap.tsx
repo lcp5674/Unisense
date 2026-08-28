@@ -51,6 +51,7 @@ import {
 } from "@ant-design/icons";
 import { Bar, Pie } from "@ant-design/charts";
 import {
+  UnisenseApiError,
   applyAssetPiiTemplate,
   assignAssetOwner,
   batchAssignAssetOwner,
@@ -3892,31 +3893,29 @@ function TablesTab() {
   async function handleGovSubmit() {
     const values = govForm.getFieldsValue();
     const ids = govEntityIds;
-    const calls: Promise<unknown>[] = [];
     const sens = values.sensitivity_level as string | undefined;
-    if (sens) {
-      calls.push(
-        ids.length > 1
-          ? batchReclassifyAssetSensitivity(ids, sens)
-          : reclassifyAssetSensitivity(ids[0], sens),
-      );
-    }
-    // owner 未动（undefined）不提交；显式「解除归属」→ null
-    if (values.owner_id !== undefined && values.owner_id !== null) {
-      const ownerId = values.owner_id === "__none__" ? null : (values.owner_id as number);
-      calls.push(
-        ids.length > 1
-          ? batchAssignAssetOwner(ids, ownerId)
-          : assignAssetOwner(ids[0], ownerId),
-      );
-    }
-    if (calls.length === 0) {
+    const ownerRaw = values.owner_id;
+    const hasOwner = ownerRaw !== undefined && ownerRaw !== null;
+    const ownerId = ownerRaw === "__none__" ? null : (ownerRaw as number);
+    if (!sens && !hasOwner) {
       message.warning("请选择要设置的责任人或敏感度");
       return;
     }
     setGovSaving(true);
     try {
-      await Promise.all(calls);
+      // 同一实体多字段写必须串行：敏感度/责任人共享 row_version 乐观锁，
+      // 并行提交会竞态——后提交者 WHERE row_version=旧值 匹配 0 行 → 409。
+      // 先改敏感度、再改责任人，第二次读取天然基于第一次提交后的最新版本。
+      if (sens) {
+        await (ids.length > 1
+          ? batchReclassifyAssetSensitivity(ids, sens)
+          : reclassifyAssetSensitivity(ids[0], sens));
+      }
+      if (hasOwner) {
+        await (ids.length > 1
+          ? batchAssignAssetOwner(ids, ownerId)
+          : assignAssetOwner(ids[0], ownerId));
+      }
       message.success(`已更新 ${ids.length} 项资产`);
       setGovOpen(false);
       govForm.resetFields();
@@ -3924,7 +3923,19 @@ function TablesTab() {
       await load();
       govOnSaved?.();
     } catch (err) {
-      message.error(err instanceof Error ? err.message : "保存失败");
+      const conflict =
+        err instanceof UnisenseApiError && err.code === "OPTIMISTIC_LOCK_CONFLICT";
+      message.error(
+        conflict
+          ? "数据已被其他操作修改，已为你刷新最新数据，请重试"
+          : err instanceof Error
+            ? err.message
+            : "保存失败",
+      );
+      if (conflict) {
+        // 乐观锁冲突：刷新最新数据，让用户基于最新版本重试，避免停留在过期状态
+        await load();
+      }
     } finally {
       setGovSaving(false);
     }
