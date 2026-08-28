@@ -139,6 +139,64 @@ DORIS_CTAS_SQL = """CREATE TABLE dws.dept_gmv_di
 DISTRIBUTED BY HASH(month_id) BUCKETS 16
 AS SELECT month_id, dept_code, SUM(amount) AS gmv FROM dwd.sales GROUP BY month_id, dept_code;"""
 
+# ----------------------------------------------------------------
+# 生产模式补充（2026-08-28 覆盖审查）：真实数仓高频形态
+# ----------------------------------------------------------------
+
+# MERGE 增量 upsert（DWS 指标表回写）——USING 子查询聚合须识别，写目标表不混入
+MERGE_UPSERT_SQL = """merge into wedw_dws.dept_fee_mi t
+using (select substr(fee_date,1,7) as month_id, dept_code, sum(real_amount) as fee_amt
+       from wedw_dwd.fee_bill_di group by substr(fee_date,1,7), dept_code) s
+on t.month_id = s.month_id and t.dept_code = s.dept_code
+when matched then update set t.fee_amt = s.fee_amt
+when not matched then insert values (s.month_id, s.dept_code, s.fee_amt)"""
+
+# count(1) 常量计数（Hive 生产最普遍写法）→ COUNT(*)
+COUNT_ONE_SQL = """select month_id, hosp_code, count(1) as visit_cnt
+from wedw_dwd.visit_detail
+group by month_id, hosp_code"""
+
+# row_number 取最新再聚合（拉链/快照去重的标准形态）——CTE + 窗口 + 条件过滤
+ROWNUM_DEDUP_SQL = """with ranked as (
+  select doctor_code, hosp_code, dept_code, visit_date,
+         row_number() over (partition by doctor_code order by visit_date desc) as rn
+  from wedw_dwd.visit_detail
+)
+select substr(visit_date,1,7) as month_id, hosp_code, count(distinct doctor_code) as active_doctor_cnt
+from ranked where rn = 1 group by substr(visit_date,1,7), hosp_code"""
+
+# LATERAL VIEW explode（Hive UDTF 明细展开）——数组列不混入源表
+LATERAL_VIEW_SQL = """select month_id, hosp_code, drug_code, sum(qty) as drug_qty
+from wedw_dwd.prescription_detail
+lateral view explode(split(drug_list, ',')) t as drug_code
+group by month_id, hosp_code, drug_code"""
+
+# 多级 CTE 链（base → roll 逐级汇总）——度量 table 须穿透 CTE 名解析到物理表
+CHAINED_CTE_SQL = """with base as (
+  select dt, hosp_code, dept_code, sum(amount) as day_amt from wedw_dwd.fee_di group by dt, hosp_code, dept_code
+), roll as (
+  select substr(dt,1,7) as month_id, hosp_code, sum(day_amt) as month_amt from base group by substr(dt,1,7), hosp_code
+)
+select month_id, hosp_code, month_amt from roll"""
+
+# Hive 条件 IF 求和（西药/中药费拆分）——同列双语义靠别名区分
+HIVE_IF_SUM_SQL = """select month_id,
+  sum(if(fee_type = '01', real_amount, 0)) as west_med_fee,
+  sum(if(fee_type = '02', real_amount, 0)) as cn_med_fee
+from wedw_dwd.fee_detail group by month_id"""
+
+# 下沉透传改名（外层 a.cnt as active_doctor_cnt）——度量 alias 须升级为外层别名
+OUTER_RENAME_SQL = """insert overwrite table wedw_dws.doctor_active_mi
+select a.month_id, a.hosp_code, a.cnt as active_doctor_cnt
+from (select substr(visit_date,1,7) as month_id, hosp_code, count(distinct doctor_code) as cnt
+      from wedw_dwd.visit_detail group by substr(visit_date,1,7), hosp_code) a"""
+
+# 分区过滤单表（dt 分区 + date_sub/current_date 谓词）
+PARTITION_FILTER_SQL = """select dt, org_code, count(distinct doctor_id) as doc_cnt
+from wedw_dwd.doctor_active_da
+where dt >= date_sub(current_date, 7) and dt <= current_date
+group by dt, org_code"""
+
 
 GOLDEN: tuple[SqlInferCase, ...] = (
     SqlInferCase(
@@ -259,6 +317,101 @@ GOLDEN: tuple[SqlInferCase, ...] = (
         expected_tables=("dwd.sales",),
         expected_period="month",
         note="Doris CTAS + DISTRIBUTED BY 物理属性剥离",
+    ),
+    SqlInferCase(
+        case_id="merge_upsert",
+        dialect="hive",
+        sql=MERGE_UPSERT_SQL,
+        expected_measures=(
+            ExpectedMeasure(column="real_amount", agg="SUM", alias="fee_amt"),
+        ),
+        expected_tables=("wedw_dwd.fee_bill_di",),
+        expected_period="month",
+        note="MERGE 增量 upsert：USING 子查询聚合识别，写目标表不混入源表",
+    ),
+    SqlInferCase(
+        case_id="count_one_literal",
+        dialect="hive",
+        sql=COUNT_ONE_SQL,
+        expected_measures=(
+            ExpectedMeasure(column="*", agg="COUNT", alias="visit_cnt"),
+        ),
+        expected_tables=("wedw_dwd.visit_detail",),
+        expected_period="month",
+        note="count(1) 常量计数（生产最普遍写法）→ COUNT(*)",
+    ),
+    SqlInferCase(
+        case_id="row_number_dedup",
+        dialect="hive",
+        sql=ROWNUM_DEDUP_SQL,
+        expected_measures=(
+            ExpectedMeasure(column="doctor_code", agg="COUNT_DISTINCT", alias="active_doctor_cnt"),
+        ),
+        expected_tables=("wedw_dwd.visit_detail",),
+        expected_period="month",
+        note="row_number 取最新再聚合：CTE + 窗口 + 条件过滤（rn=1）",
+    ),
+    SqlInferCase(
+        case_id="lateral_view_explode",
+        dialect="hive",
+        sql=LATERAL_VIEW_SQL,
+        expected_measures=(
+            ExpectedMeasure(column="qty", agg="SUM", alias="drug_qty"),
+        ),
+        expected_tables=("wedw_dwd.prescription_detail",),
+        expected_period="month",
+        note="LATERAL VIEW explode：UDTF 数组列不混入源表",
+    ),
+    SqlInferCase(
+        case_id="chained_cte",
+        dialect="hive",
+        sql=CHAINED_CTE_SQL,
+        expected_measures=(
+            ExpectedMeasure(column="amount", agg="SUM", alias="day_amt", table="wedw_dwd.fee_di"),
+            ExpectedMeasure(column="amount", agg="SUM", alias="month_amt", table="wedw_dwd.fee_di"),
+        ),
+        expected_tables=("wedw_dwd.fee_di",),
+        expected_period="month",
+        note="多级 CTE 链：度量 table 穿透 CTE 名（base）解析到物理表",
+    ),
+    SqlInferCase(
+        case_id="hive_if_conditional_sum",
+        dialect="hive",
+        sql=HIVE_IF_SUM_SQL,
+        expected_measures=(
+            ExpectedMeasure(column="real_amount", agg="SUM", alias="west_med_fee"),
+            ExpectedMeasure(column="real_amount", agg="SUM", alias="cn_med_fee"),
+        ),
+        expected_tables=("wedw_dwd.fee_detail",),
+        expected_period="month",
+        note="Hive 条件 IF 求和：同列双语义靠别名区分",
+    ),
+    SqlInferCase(
+        case_id="outer_rename_sunk",
+        dialect="hive",
+        sql=OUTER_RENAME_SQL,
+        expected_measures=(
+            ExpectedMeasure(
+                column="doctor_code",
+                agg="COUNT_DISTINCT",
+                alias="active_doctor_cnt",
+                table="wedw_dwd.visit_detail",
+            ),
+        ),
+        expected_tables=("wedw_dwd.visit_detail",),
+        expected_period="month",
+        note="下沉透传改名：度量 alias 升级为外层别名（a.cnt as active_doctor_cnt）",
+    ),
+    SqlInferCase(
+        case_id="partition_filter",
+        dialect="hive",
+        sql=PARTITION_FILTER_SQL,
+        expected_measures=(
+            ExpectedMeasure(column="doctor_id", agg="COUNT_DISTINCT", alias="doc_cnt"),
+        ),
+        expected_tables=("wedw_dwd.doctor_active_da",),
+        expected_period="day",
+        note="dt 分区过滤单表（date_sub/current_date 谓词）→ 日粒度",
     ),
 )
 

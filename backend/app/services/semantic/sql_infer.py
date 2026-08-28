@@ -1219,6 +1219,77 @@ def _pivot_measures(select: exp.Select) -> list[dict[str, Any]]:
     return out
 
 
+def _outer_rename_map(select: exp.Select) -> dict[str, str]:
+    """外层 SELECT 的透传改名映射：内层列/别名 → 外层别名。
+
+    ETL 下沉形态 ``select a.cnt as active_doctor_cnt from (select ...
+    count(distinct doctor_code) as cnt ...) a``——内层聚合别名 ``cnt`` 被外层
+    透传改名为 ``active_doctor_cnt``（与建表 DDL 列注释对齐）。下沉度量的
+    ``alias`` 若停在 ``cnt``，候选命名锚点退化（「月cnt」）、DDL 注释反查失败
+    （A-5 按 (目标表, 列) 反查的是外层列名）。收集 ``Alias(Column)`` 的
+    内外名差异映射，供下沉收集后升级别名。
+    """
+    rename: dict[str, str] = {}
+    for proj in select.expressions:
+        if isinstance(proj, exp.Alias) and isinstance(proj.this, exp.Column):
+            inner = proj.this.name.lower()
+            outer = (proj.alias_or_name or "").lower()
+            if inner and outer and inner != outer and inner not in rename:
+                rename[inner] = outer
+    return rename
+
+
+def _cte_physical_map(ast: exp.Expr) -> dict[str, str]:
+    """CTE 名 → 物理源表映射（递归穿透链式 CTE）。
+
+    多级 CTE（``with base as (from wedw_dwd.fee_di), roll as (from base)
+    select ... from roll``）中 ``_from_table(roll体)`` 返回 CTE 名 ``base``
+    ——下沉度量的 ``table`` 若停在 CTE 名，候选源表/挂载会挂到不存在的表
+    ``base``（血缘/注册错乱）。此处对每个 CTE 解析其体的首个物理 FROM 表，
+    引用其它 CTE 时递归穿透（visited 防环）。
+    """
+    ctes = {
+        c.alias_or_name.lower(): c
+        for c in ast.find_all(exp.CTE)
+        if c.alias_or_name
+    }
+    out: dict[str, str] = {}
+
+    def _resolve(name: str, seen: set[str]) -> str | None:
+        name = name.lower()
+        if name in out:
+            return out[name]
+        if name in seen:
+            return None
+        seen.add(name)
+        cte = ctes.get(name)
+        if cte is None:
+            return None
+        body = cte.this
+        selects = (
+            [body]
+            if isinstance(body, exp.Select)
+            else list(body.find_all(exp.Select))
+            if body is not None
+            else []
+        )
+        for sel in selects:
+            phys = _from_table(sel)
+            if not phys:
+                continue
+            tail = phys.split(".")[-1]
+            if tail in ctes:
+                phys = _resolve(tail, seen) or phys
+            if phys:
+                out[name] = phys
+                return phys
+        return None
+
+    for name in ctes:
+        _resolve(name, set())
+    return out
+
+
 def _extract_measures(select: exp.Select) -> list[dict[str, Any]]:
     """SELECT 投影度量；外层无聚合时下沉 FROM 子树找聚合投影。
 
@@ -1306,6 +1377,20 @@ def _extract_measures(select: exp.Select) -> list[dict[str, Any]]:
                 continue
             seen.add(key)
             measures.append(m)
+    # 外层透传改名升级：``a.cnt as active_doctor_cnt`` 的下沉度量 alias 从内层
+    # ``cnt`` 升级为外层 ``active_doctor_cnt``——候选命名锚点（编码/名称）与建表
+    # DDL 列注释反查（A-5）都用外层列名；deps_aliases 同步映射（复合依赖解析按
+    # 别名找批内已创建编码，别名升级不同步会断链）。
+    rename = _outer_rename_map(select)
+    if rename:
+        for m in measures:
+            if m.get("sunk") and m.get("alias"):
+                upgraded = rename.get(m["alias"].lower())
+                if upgraded:
+                    m["alias"] = upgraded
+            deps = m.get("deps_aliases")
+            if deps:
+                m["deps_aliases"] = [rename.get(d.lower(), d) for d in deps]
     if derived:
         measures.extend(derived)
     return measures
@@ -1743,6 +1828,17 @@ def parse_sql_profile(sql: str) -> SqlProfile:
                 group_by = g
                 break
     measures = _extract_measures(select)
+    # 多级 CTE：下沉度量的 table 可能停在 CTE 名（``from base`` 的 ``base``）——
+    # 递归解析为物理源表，候选源表/挂载/血缘不再挂到不存在的表。
+    cte_phys = _cte_physical_map(ast)
+    if cte_phys:
+        for m in measures:
+            tbl = m.get("table")
+            if not tbl:
+                continue
+            phys = cte_phys.get(tbl.split(".")[-1])
+            if phys and phys != tbl:
+                m["table"] = phys
     filters = _extract_filters(select)
     time_column = _detect_time_column(select, group_by, filters)
     # A 增强：下沉场景顶层无时间列时从聚合层补提（与 group_by 同源——时间列常与
