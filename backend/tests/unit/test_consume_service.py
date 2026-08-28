@@ -65,6 +65,7 @@ def _metric(
     pii: bool = False,
     pii_flag: bool = False,
     compliance_reviewed: bool = False,
+    source_table: str | None = None,
 ) -> Metric:
     m = Metric()
     m.metric_code = code
@@ -82,6 +83,8 @@ def _metric(
         "unit": "yuan",
         "pii": pii,
     }
+    if source_table:
+        m.definition_json["source_table"] = source_table
     return m
 
 
@@ -139,7 +142,9 @@ async def test_authenticate_bad_format() -> None:
 async def test_dry_run_ok() -> None:
     svc = _svc(await _client())
     client = await svc.authenticate_client("acme:s3cr3t")
-    svc._get_metric = AsyncMock(return_value=_metric())
+    svc._get_metric = AsyncMock(
+        return_value=_metric(source_table="dws_metric_gmv")
+    )
     res = await svc.dry_run_query(
         QueryRequest(metric_code="gmv", date_range="2026-01~2026-03"), client
     )
@@ -203,7 +208,9 @@ async def test_dry_run_pii_allowed_when_whitelisted_and_reviewed() -> None:
     client = await svc.authenticate_client("acme:s3cr3t")
     # 已复核的 PII 指标，白名单授权下放行
     svc._get_metric = AsyncMock(
-        return_value=_metric(pii=True, pii_flag=True, compliance_reviewed=True)
+        return_value=_metric(
+        pii=True, pii_flag=True, compliance_reviewed=True, source_table="dws_metric_gmv",
+    )
     )
     res = await svc.dry_run_query(QueryRequest(metric_code="gmv", date_range=""), client)
     assert res.meta["pii"] is True
@@ -225,7 +232,9 @@ async def test_dry_run_pii_whitelisted_but_not_reviewed_blocked() -> None:
 async def test_dry_run_dimension_violation() -> None:
     svc = _svc(await _client())
     client = await svc.authenticate_client("acme:s3cr3t")
-    svc._get_metric = AsyncMock(return_value=_metric(dims=("region",)))
+    svc._get_metric = AsyncMock(
+        return_value=_metric(dims=("region",), source_table="dws_metric_gmv")
+    )
     with pytest.raises(BusinessError) as exc:
         await svc.dry_run_query(
             QueryRequest(
@@ -242,7 +251,7 @@ async def test_dry_run_allows_dimension_from_binding_table() -> None:
     绑定表绑定该指标 → 消费校验放行（绑定即生效，不再是信息孤岛）。"""
     svc = _svc(await _client())
     client = await svc.authenticate_client("acme:s3cr3t")
-    metric = _metric(dims=("region",))  # 口径未声明 city
+    metric = _metric(dims=("region",), source_table="dws_metric_gmv")  # 口径未声明 city
     metric.id = 1
     svc._get_metric = AsyncMock(return_value=metric)
     # 模拟 metric_dimension 绑定表查询：该指标已绑定 city
@@ -265,7 +274,7 @@ async def test_dry_run_rejects_dimension_neither_declared_nor_bound() -> None:
     """既未在口径声明、也未绑定表的维度 → 仍拒绝 FORBIDDEN_DIMENSION（向后兼容）。"""
     svc = _svc(await _client())
     client = await svc.authenticate_client("acme:s3cr3t")
-    metric = _metric(dims=("region",))  # 口径只有 region
+    metric = _metric(dims=("region",), source_table="dws_metric_gmv")  # 口径只有 region
     metric.id = 1
     svc._get_metric = AsyncMock(return_value=metric)
     # 绑定表为空（默认 _svc mock 返回 []），secret_col 既未声明也未绑定
@@ -352,7 +361,8 @@ async def test_build_query_sql_mount_table_authority() -> None:
 
 
 async def test_resolve_mount_table_returns_mount_source() -> None:
-    """_resolve_mount_table 默认变体解析返回 source_table（挂载独立更新后消费 SQL 用最新物理表）。"""
+    """_resolve_mount_table 默认变体解析返回 source_table（挂载独立更新后消费 SQL 用最新
+    物理表）。"""
     svc = _svc(await _client())
     m = _metric_with_source()
     m.id = 7
@@ -436,11 +446,23 @@ async def test_resolve_mount_table_falls_back_when_mount_query_fails() -> None:
     assert table is None
 
 
-async def test_build_query_sql_falls_back_to_metric_table() -> None:
-    """缺省 source_table 时以指标编码推导表名，仍参数化日期与维度。"""
+async def test_build_query_sql_requires_declared_source_table() -> None:
+    """无挂载实体且口径未声明 source_table 时**明确报错**，不再虚构 dws_metric_{code} 表名。
+
+    2026-08-28 根治：虚构表名可能命中 Owner 从未声明的同名物理表（绕过口径约束）
+    或报误导性语法错误——消费方须先补齐挂载/来源表。
+    """
     svc = _svc(await _client())
     req = QueryRequest(metric_code="gmv", date_range="2026-01~2026-03")
-    sql, params = svc._build_query_sql(req, _metric())
+    with pytest.raises(BusinessError) as exc:
+        svc._build_query_sql(req, _metric())
+    assert exc.value.error_code == ErrorCode.VALIDATION_ERROR
+    assert "未声明来源表" in exc.value.message
+
+    # 声明 source_table 后正常生成 SQL（参数化日期）
+    sql, params = svc._build_query_sql(
+        req, _metric(source_table="dws_metric_gmv")
+    )
     assert "dws_metric_gmv" in sql
     assert params["date_from"] == "2026-01"
     assert params["date_to"] == "2026-03"
@@ -454,7 +476,7 @@ async def test_build_query_sql_multi_value_dimension() -> None:
         date_range="",
         dimensions=[{"name": "region", "value": ["EAST", "WEST"]}],
     )
-    sql, params = svc._build_query_sql(req, _metric())
+    sql, params = svc._build_query_sql(req, _metric(source_table="dws_metric_gmv"))
     assert "IN" in sql and ":dim_0" in sql
     assert params["dim_0"] == ["EAST", "WEST"]
 
@@ -471,22 +493,24 @@ async def test_build_query_sql_rejects_unauthorized_dimension() -> None:
         dimensions=[{"name": "secret_col", "value": "v"}],
     )
     with pytest.raises(BusinessError) as exc:
-        svc._build_query_sql(req, _metric(dims=("region",)))
+        svc._build_query_sql(req, _metric(dims=("region",), source_table="dws_metric_gmv"))
     assert exc.value.error_code == ErrorCode.FORBIDDEN_DIMENSION
 
 
-async def test_build_query_sql_rejects_metric_code_identifier_injection() -> None:
-    """metric_code 经 dws_metric_{code} 拼接为表标识符，必须拒绝非法字符（标识符注入）。
+async def test_build_query_sql_metric_code_never_enters_table_name() -> None:
+    """2026-08-28 移除虚构表名：恶意 metric_code 不再拼进表标识符。
 
-    表名无法参数化，过去的写法 ``f"dws_metric_{req.metric_code}"`` 直接插值用户入参，
-    反引号 / 空格 / 分号均可逃逸 `` `...` `` 包裹。现收敛到安全字符集。
+    过去 ``f"dws_metric_{req.metric_code}"`` 直接插值用户入参（反引号/空格/分号
+    可逃逸），现无 source_table 时明确报「未声明来源表」，metric_code 只作绑定参数；
+    表标识符注入防御由 source_table 标识符校验承接（见 source_table 注入测试）。
     """
     svc = _svc(await _client())
     for malicious in ["gmv` WHERE 1=1; DROP TABLE x; --", "gmv net", "gmv\tselect"]:
         req = QueryRequest(metric_code=malicious, date_range="")
         with pytest.raises(BusinessError) as exc:
-            svc._build_query_sql(req, _metric())  # 无 source_table → 走 metric_code 兜底
-        assert exc.value.error_code == ErrorCode.INJECTION_DETECTED
+            svc._build_query_sql(req, _metric())  # 无 source_table → 未声明来源表
+        assert exc.value.error_code == ErrorCode.VALIDATION_ERROR
+        assert "未声明来源表" in exc.value.message
 
 
 async def test_build_query_sql_rejects_source_table_identifier_injection() -> None:
@@ -506,7 +530,7 @@ async def test_build_query_sql_rejects_malformed_date_range() -> None:
     for bad in ["2026-01~~2026-03", "2026-1~2026-03", "abc", "2026-01~", "~2026-03", "2026-13"]:
         req = QueryRequest(metric_code="gmv", date_range=bad)
         with pytest.raises(BusinessError) as exc:
-            svc._build_query_sql(req, _metric())
+            svc._build_query_sql(req, _metric(source_table="dws_metric_gmv"))
         assert exc.value.error_code == ErrorCode.VALIDATION_ERROR
 
 
@@ -514,11 +538,13 @@ async def test_build_query_sql_accepts_valid_date_range() -> None:
     """合法单值与区间日期均可正常参数化（回归：不被误伤）。"""
     svc = _svc(await _client())
     sql_single, params_single = svc._build_query_sql(
-        QueryRequest(metric_code="gmv", date_range="2026-01"), _metric()
+        QueryRequest(metric_code="gmv", date_range="2026-01"),
+        _metric(source_table="dws_metric_gmv")
     )
     assert params_single["date_from"] == params_single["date_to"] == "2026-01"
     sql_range, params_range = svc._build_query_sql(
-        QueryRequest(metric_code="gmv", date_range="2026-01-05~2026-03-20"), _metric()
+        QueryRequest(metric_code="gmv", date_range="2026-01-05~2026-03-20"),
+        _metric(source_table="dws_metric_gmv")
     )
     assert params_range["date_from"] == "2026-01-05" and params_range["date_to"] == "2026-03-20"
 
@@ -527,7 +553,9 @@ async def test_execute_query_rejects_unauthorized_dimension(monkeypatch) -> None
     """execute_query 必须加权维度校验（过去唯有 dry-run 校验，执行路径越权缺口）。"""
     svc = _svc(await _client())
     client = await svc.authenticate_client("acme:s3cr3t")
-    svc._get_metric = AsyncMock(return_value=_metric(dims=("region",)))
+    svc._get_metric = AsyncMock(
+        return_value=_metric(dims=("region",), source_table="dws_metric_gmv")
+    )
     # 绕过 OLAP 不可用 503，直达 SQL 构建层的维度授权校验
     monkeypatch.setattr(
         "app.services.consume.service.settings.olap_url", "http://doris:8030/api/query"
@@ -666,7 +694,7 @@ def _set_olap_ready(monkeypatch, executor: MagicMock) -> None:
 async def test_execute_query_success(monkeypatch) -> None:
     svc = _svc(await _client())
     client = await svc.authenticate_client("acme:s3cr3t")
-    svc._get_metric = AsyncMock(return_value=_metric())
+    svc._get_metric = AsyncMock(return_value=_metric(source_table="dws_metric_gmv"))
     result = SimpleNamespace(rows=[{"region": "EAST"}], total=1, elapsed_ms=3.5, from_cache=False)
     executor = MagicMock()
     executor.execute = AsyncMock(return_value=result)
@@ -686,7 +714,7 @@ async def test_execute_query_success(monkeypatch) -> None:
 async def test_execute_query_executor_exception(monkeypatch) -> None:
     svc = _svc(await _client())
     client = await svc.authenticate_client("acme:s3cr3t")
-    svc._get_metric = AsyncMock(return_value=_metric())
+    svc._get_metric = AsyncMock(return_value=_metric(source_table="dws_metric_gmv"))
     executor = MagicMock()
     executor.execute = AsyncMock(side_effect=RuntimeError("boom"))
     _set_olap_ready(monkeypatch, executor)
@@ -699,7 +727,7 @@ async def test_execute_query_reraises_business_error(monkeypatch) -> None:
     """OLAP 执行器抛出的业务降级错误原样透传。"""
     svc = _svc(await _client())
     client = await svc.authenticate_client("acme:s3cr3t")
-    svc._get_metric = AsyncMock(return_value=_metric())
+    svc._get_metric = AsyncMock(return_value=_metric(source_table="dws_metric_gmv"))
     executor = MagicMock()
     executor.execute = AsyncMock(
         side_effect=BusinessError("引擎降级", error_code=ErrorCode.DEPENDENCY_DEGRADED_ENGINE)
@@ -1109,7 +1137,7 @@ def test_to_doris_sql_unknown_placeholder_preserved() -> None:
 def test_build_query_sql_select_projection_columns() -> None:
     """口径声明 measures 时 SELECT 收敛到维度+度量列，不再 SELECT *。"""
     svc = _svc(MagicMock())
-    m = _metric(dims=("region", "city"))
+    m = _metric(dims=("region", "city"), source_table="dws_metric_gmv")
     m.definition_json = {**m.definition_json, "measures": ["gmv", "order_cnt"]}
     req = QueryRequest(metric_code="gmv", date_range="")
     sql, params = svc._build_query_sql(req, m)
@@ -1122,7 +1150,7 @@ def test_build_query_sql_select_projection_columns() -> None:
 def test_build_query_sql_fallback_star_still_limited() -> None:
     """口径未声明任何投影列时退化为 *，但仍强制 LIMIT 防全表拖回。"""
     svc = _svc(MagicMock())
-    m = _metric(dims=())
+    m = _metric(dims=(), source_table="dws_metric_gmv")
     m.definition_json = {**m.definition_json, "dimensions": []}
     req = QueryRequest(metric_code="gmv", date_range="")
     sql, params = svc._build_query_sql(req, m)
@@ -1134,7 +1162,7 @@ def test_build_query_sql_fallback_star_still_limited() -> None:
 def test_build_query_sql_rejects_illegal_projection_column() -> None:
     """投影列非合法标识符 → INJECTION_DETECTED。"""
     svc = _svc(MagicMock())
-    m = _metric(dims=("region",))
+    m = _metric(dims=("region",), source_table="dws_metric_gmv")
     m.definition_json = {**m.definition_json, "measures": ["gmv`; DROP TABLE t; --"]}
     req = QueryRequest(metric_code="gmv", date_range="")
     with pytest.raises(BusinessError) as exc:

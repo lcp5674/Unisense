@@ -189,7 +189,14 @@ class ConsumeService(BaseService):
             else None
         )
         if not table:
-            table = f"dws_metric_{req.metric_code}"
+            # 2026-08-28：无挂载实体且口径未声明 source_table 时**明确报错**，不再按
+            # 命名约定猜 ``dws_metric_{code}``——虚构表名可能命中 Owner 从未声明的
+            # 同名物理表（绕过口径约束）或报误导性语法错误。消费方须先补齐挂载/来源表。
+            raise BusinessError(
+                f"指标 {req.metric_code} 未声明来源表（无挂载实体且口径未配置 "
+                "source_table），无法生成消费 SQL——请先在指标详情配置挂载或来源表",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
         # 标识符（表名）无法参数化，须收敛到安全字符集，杜绝标识符注入。
         # source_table 由指标 Owner 声明、metric_code 由调用方传入，二者均不可信。
         if not _IDENTIFIER_RE.match(table):
@@ -699,7 +706,8 @@ class ConsumeService(BaseService):
     async def list_snapshots_for_client(
         self, metric_code: str, limit: int, offset: int, client: ApiClient
     ) -> list[SnapshotResponse]:
-        """消费方（X-Api-Key / consume Bearer）读快照：走接入方四级鉴权（对齐 execute_query client 通道）。
+        """消费方（X-Api-Key / consume Bearer）读快照：走接入方四级鉴权
+        （对齐 execute_query client 通道）。
 
         D-2 修复：此前快照端点无 scope_domain/白名单/PII 校验，接入方可跨域读取任意
         指标历史查询数据值——现复用 ``_assert_authorized``（域 → 白名单 → PII 四级，
