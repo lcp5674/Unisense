@@ -56,7 +56,6 @@ import {
   DictItemCreateRequest,
   DictItemUpdateRequest,
   DictUnknownNotifyRequest,
-  DictUnknownRejectRequest,
   DictValueCheckItem,
   DictValuesVerifyResponse,
   Dimension,
@@ -590,12 +589,6 @@ export async function setPreference(key: string, value: unknown): Promise<void> 
   await request<UserPreferenceItem>(`${API_BASE}/me/preferences/${encodeURIComponent(key)}`, {
     method: "PUT",
     body: JSON.stringify({ value }),
-  });
-}
-
-export async function deletePreference(key: string): Promise<void> {
-  await request<UserPreferenceItem>(`${API_BASE}/me/preferences/${encodeURIComponent(key)}`, {
-    method: "DELETE",
   });
 }
 
@@ -1583,10 +1576,6 @@ export async function listTemplates(params?: {
   );
 }
 
-export async function getTemplate(templateId: number): Promise<MetricTemplate> {
-  return request<MetricTemplate>(`${API_BASE}/semantics/templates/${templateId}`);
-}
-
 // 指派/解除指标模板责任人（PATCH /semantics/templates/{id}/owner，owner_id=null 解除）
 export async function updateTemplateOwner(
   templateId: number,
@@ -2011,10 +2000,6 @@ export async function listMeasureCatalogs(params?: {
   return request(`${API_BASE}/measure-catalogs?${qs}`);
 }
 
-export async function getMeasureCatalog(measureCode: string): Promise<MeasureCatalog> {
-  return request(`${API_BASE}/measure-catalogs/${encodeURIComponent(measureCode)}`);
-}
-
 export async function autoSuggestMeasureCatalog(body: {
   name: string;
   description?: string | null;
@@ -2233,40 +2218,6 @@ export async function listMetricMounts(params?: {
     page_size: params?.page_size ?? 50,
   });
   return request(`${API_BASE}/metric-mounts?${qs}`);
-}
-
-export async function getMetricMount(mountId: number): Promise<MetricMount> {
-  return request(`${API_BASE}/metric-mounts/${mountId}`);
-}
-
-export async function createMetricMount(body: {
-  metric_id: number;
-  source_table: string;
-  source_column: string;
-  granularity: string;
-  default_period?: string | null;
-  domain: string;
-}): Promise<MetricMount> {
-  return request<MetricMount>(`${API_BASE}/metric-mounts`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
-}
-
-export async function updateMetricMount(
-  mountId: number,
-  body: {
-    source_table?: string;
-    source_column?: string;
-    granularity?: string;
-    default_period?: string | null;
-    domain?: string;
-  },
-): Promise<MetricMount> {
-  return request<MetricMount>(`${API_BASE}/metric-mounts/${mountId}`, {
-    method: "PUT",
-    body: JSON.stringify(body),
-  });
 }
 
 export async function deleteMetricMount(mountId: number): Promise<void> {
@@ -4737,12 +4688,6 @@ export async function updateDomainDefaults(
   );
 }
 
-export async function getDomainMetrics(
-  code: string,
-): Promise<Array<{ id: number; metric_code: string; name: string; status: string; type: string }>> {
-  return request(`${API_BASE}/domains/${encodeURIComponent(code)}/metrics`);
-}
-
 // ---- 系统字典管理（backend /api/v1/dicts/*）----
 
 export async function listDictTypes(): Promise<string[]> {
@@ -4771,19 +4716,6 @@ export async function notifyUnknownDictValues(
     method: "POST",
     body: JSON.stringify(data),
   });
-}
-
-/** 管理员打回字典收录申请（通知提交人改用字典内值，并办结原待办）。 */
-export async function rejectUnknownDictValue(
-  data: DictUnknownRejectRequest,
-): Promise<{ notification_id: number; handled: boolean }> {
-  return request<{ notification_id: number; handled: boolean }>(
-    `${API_BASE}/dicts/unknown/reject`,
-    {
-      method: "POST",
-      body: JSON.stringify(data),
-    },
-  );
 }
 
 export async function listAllDictItems(dictType: string): Promise<SystemDictItem[]> {
@@ -4891,15 +4823,6 @@ export async function batchDeleteDictItems(
       method: "POST",
       body: JSON.stringify({ codes }),
     },
-  );
-}
-
-export async function getDictItemRefCount(
-  dictType: string,
-  code: string,
-): Promise<{ ref_count: number }> {
-  return request(
-    `${API_BASE}/dicts/${encodeURIComponent(dictType)}/${encodeURIComponent(code)}/ref-count`,
   );
 }
 

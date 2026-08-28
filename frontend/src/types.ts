@@ -936,6 +936,9 @@ export interface QueryRequest {
   dimensions?: DimensionExpr[];
   date_range: string;
   granularity?: string | null;
+  // 多变体消费（后端 2026-08-27 放开一指标多挂载）：显式指定变体
+  // （挂载行 ID 或 "粒度:周期"，如 "医院:day"），缺省按默认变体消费
+  variant?: string | null;
   comparison?: string | null;
   accept_stale?: boolean;
   params?: Record<string, unknown>;
