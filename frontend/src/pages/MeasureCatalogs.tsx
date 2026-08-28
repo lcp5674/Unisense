@@ -351,6 +351,7 @@ export function MeasureCatalogs() {
     try {
       if (editing) {
         await updateMeasureCatalog(editing.measure_code, {
+          row_version: editing.row_version,
           name: values.name,
           domain: values.domain,
           description: values.description ?? null,

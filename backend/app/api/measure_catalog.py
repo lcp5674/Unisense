@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.batch_common import (
@@ -25,7 +26,7 @@ from app.api.batch_common import (
 from app.api.deps import CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
-from app.core.exceptions import AuthError, NotFoundError
+from app.core.exceptions import AuthError, ConflictError, NotFoundError
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
 from app.services.measure_catalog.schemas import (
@@ -104,7 +105,15 @@ async def create_measure(
         detail={},
         trace_id=trace_id,
     )
-    await db.commit()
+    # T4（审查修复）：并发创建同名 → IntegrityError 转 ConflictError（409），
+    # 而非 500。TOCTOU 场景下预检通过后 commit 仍可能撞唯一键。
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise ConflictError(
+            f"逻辑度量编码已存在: {payload.measure_code}", error_code="MEASURE_EXISTS"
+        ) from None
     return ok(data=MeasureResponse.from_model(resp), trace_id=trace_id)
 
 
@@ -215,7 +224,15 @@ async def update_measure(
         detail={},
         trace_id=trace_id,
     )
-    await db.commit()
+    # T4（审查修复）：改编码撞唯一键 → 409（并发 TOCTOU 兜底）
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise ConflictError(
+            f"逻辑度量编码已存在: {payload.measure_code or measure_code}",
+            error_code="MEASURE_EXISTS",
+        ) from None
     return ok(data=MeasureResponse.from_model(resp), trace_id=trace_id)
 
 

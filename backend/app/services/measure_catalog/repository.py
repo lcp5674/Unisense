@@ -24,6 +24,24 @@ class MeasureCatalogRepository:
         stmt = select(MeasureCatalog).where(MeasureCatalog.measure_code == measure_code)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def get_active(self, measure_code: str) -> MeasureCatalog | None:
+        """仅查活跃（未软删）记录——T14（审查修复）：create 预检应只把
+        未软删的同名记录判为占用；软删记录单独识别，避免「编码被回收站
+        永久占位却只报通用已存在」的误导。"""
+        stmt = select(MeasureCatalog).where(
+            MeasureCatalog.measure_code == measure_code,
+            MeasureCatalog.deleted_at.is_(None),
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def get_deleted(self, measure_code: str) -> MeasureCatalog | None:
+        """仅查已软删记录（回收站）。"""
+        stmt = select(MeasureCatalog).where(
+            MeasureCatalog.measure_code == measure_code,
+            MeasureCatalog.deleted_at.is_not(None),
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def get_by_id(self, measure_id: int) -> MeasureCatalog | None:
         stmt = select(MeasureCatalog).where(MeasureCatalog.id == measure_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()

@@ -61,6 +61,11 @@ class MeasureCatalog(Base, BaseModel, ReviewFieldsMixin):
     __tablename__ = "measure_catalog"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # T5（审查修复）：乐观锁行版本——并发编辑 last-write-wins 会使
+    # 破坏性字段判定（格式/单位/小数位联动）失真，对齐 metric/dimension 标准。
+    row_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, comment="乐观锁行版本"
+    )
     measure_code: Mapped[str] = mapped_column(
         String(64), nullable=False, unique=True, comment="逻辑度量编码（英文，如 pay_amt）"
     )

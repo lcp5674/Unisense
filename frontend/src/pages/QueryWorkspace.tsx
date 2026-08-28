@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, Select, Input, Button, Form, Space, Tag, Table, Tabs, Alert, message, Row, Col, Drawer, Empty } from "antd";
 import { PlayCircleOutlined, SafetyCertificateOutlined, KeyOutlined, DatabaseOutlined, ReadOutlined, ArrowLeftOutlined } from "@ant-design/icons";
@@ -134,15 +134,26 @@ export function QueryWorkspace() {
   }, []);
 
   useEffect(() => {
-    listMetrics({ page_size: 100 })
+    // P5（审查修复）：指标下拉改服务端搜索——初始加载前 100 条，搜索时按关键词请求
+    loadMetricOptions("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // P5：指标下拉服务端搜索（防抖 300ms；关键词为空回到前 100 条）
+  const metricSearchTimer = useRef<number | null>(null);
+  function loadMetricOptions(keyword: string) {
+    listMetrics({ keyword: keyword || undefined, page_size: 100 })
       .then((res) =>
         setMetricOptions(
           res.items.map((m) => ({ value: m.metric_code, label: `${m.metric_code} · ${m.name}` })),
         ),
       )
       .catch(() => {});
-  }, []);
-
+  }
+  function handleMetricSearch(kw: string) {
+    if (metricSearchTimer.current !== null) window.clearTimeout(metricSearchTimer.current);
+    metricSearchTimer.current = window.setTimeout(() => loadMetricOptions(kw.trim()), 300);
+  }
   useEffect(() => {
     setTokenOk(!!getConsumeToken());
   }, []);
@@ -314,8 +325,10 @@ export function QueryWorkspace() {
                     value={metricCode}
                     onChange={setMetricCode}
                     options={metricOptions}
-                    placeholder="选择指标编码"
-                    filterOption={(input, opt) => (opt?.label ?? "").toLowerCase().includes(input.toLowerCase())}
+                    placeholder="选择指标编码（输入关键词搜索）"
+                    filterOption={false}
+                    onSearch={handleMetricSearch}
+                    notFoundContent={metricOptions.length === 0 ? "无匹配指标" : undefined}
                   />
                 </Form.Item>
               </Col>

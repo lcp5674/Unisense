@@ -2062,6 +2062,7 @@ export async function createMeasureCatalog(body: {
 export async function updateMeasureCatalog(
   measureCode: string,
   body: {
+    row_version?: number;
     measure_code?: string;
     name?: string;
     domain?: string;

@@ -192,9 +192,15 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
     ) -> MeasureCatalog:
         if not data.measure_code:
             data.measure_code = await self._generate_measure_code(data)
-        if await self._repo.get(data.measure_code) is not None:
+        if await self._repo.get_active(data.measure_code) is not None:
             raise ConflictError(
                 f"逻辑度量编码已存在: {data.measure_code}", error_code="MEASURE_EXISTS"
+            )
+        # T14（审查修复）：软删行占位单独识别——引导先恢复或彻底删除，而非通用「已存在」
+        if await self._repo.get_deleted(data.measure_code) is not None:
+            raise ConflictError(
+                f"逻辑度量编码 {data.measure_code} 在回收站中，请先恢复或彻底删除后重试",
+                error_code="MEASURE_DELETED_EXISTS",
             )
         # 度量格式字典化校验（存在且 active；字典未配置时回退枚举种子值）
         await self._validate_format(data.measure_format)
@@ -261,6 +267,13 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
 
     async def update_measure(self, measure_code: str, data: MeasureUpdate) -> MeasureCatalog:
         measure = await self._require(measure_code)
+        # T5（审查修复）：乐观锁——编辑须携带当前 row_version，过期则拒绝并发覆盖
+        if data.row_version is not None and data.row_version != measure.row_version:
+            raise ConflictError(
+                f"逻辑度量已被他人修改，请刷新后重试（当前版本 {measure.row_version}，"
+                f"提交版本 {data.row_version}）",
+                error_code="ROW_VERSION_CONFLICT",
+            )
         if measure.status == MeasureStatus.DEPRECATED.value:
             raise UnisenseError(
                 f"已废弃逻辑度量不可更新: {measure_code}", error_code="INVALID_STATE"
@@ -313,6 +326,8 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
             measure.category = data.category
         if data.stat_caliber is not None:
             measure.stat_caliber = data.stat_caliber
+        # T5（审查修复）：乐观锁版本递增
+        measure.row_version = (measure.row_version or 1) + 1
         await self._repo.commit()
         return measure
 

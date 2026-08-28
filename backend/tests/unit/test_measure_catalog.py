@@ -207,6 +207,8 @@ async def _svc() -> tuple[MeasureCatalogService, MagicMock]:
     svc = MeasureCatalogService(db)
     repo = MagicMock()
     repo.get = AsyncMock(return_value=None)
+    repo.get_active = AsyncMock(return_value=None)
+    repo.get_deleted = AsyncMock(return_value=None)
     repo.save = AsyncMock(side_effect=lambda m: _persist(m))
     repo.commit = AsyncMock()
     svc._repo = repo  # noqa: SLF001
@@ -250,8 +252,17 @@ class TestMeasureService:
 
     async def test_create_conflict(self) -> None:
         svc, repo = await _svc()
-        repo.get = AsyncMock(return_value=_m("pay_amt"))
+        repo.get_active = AsyncMock(return_value=_m("pay_amt"))
         with pytest.raises(ConflictError):
+            await svc.create_measure(
+                MeasureCreate(measure_code="pay_amt", name="x", domain="y")
+            )
+
+    async def test_create_rejects_deleted_occupied_code(self) -> None:
+        """T14（审查修复）：软删行占位时给出回收站引导，而非通用「已存在」。"""
+        svc, repo = await _svc()
+        repo.get_deleted = AsyncMock(return_value=_m("pay_amt"))
+        with pytest.raises(ConflictError, match="回收站"):
             await svc.create_measure(
                 MeasureCreate(measure_code="pay_amt", name="x", domain="y")
             )
@@ -405,6 +416,19 @@ class TestMeasureService:
         await svc.update_measure("amt", MeasureUpdate(measure_format="RATIO"))
         assert m.default_unit == "小数"
         assert m.default_decimal_places == 4
+
+    async def test_update_optimistic_lock_rejects_stale(self) -> None:
+        """T5（审查修复）：row_version 不匹配时拒绝并发覆盖（乐观锁）。"""
+        svc, repo = await _svc()
+        m = _m("amt")
+        m.row_version = 3
+        repo.get = AsyncMock(return_value=m)
+        with pytest.raises(ConflictError, match="已被他人修改"):
+            await svc.update_measure("amt", MeasureUpdate(name="x", row_version=2))
+        # 匹配时更新并递增
+        await svc.update_measure("amt", MeasureUpdate(name="新名", row_version=3))
+        assert m.name == "新名"
+        assert m.row_version == 4
 
     async def test_deprecated_blocks_update(self) -> None:
         svc, repo = await _svc()

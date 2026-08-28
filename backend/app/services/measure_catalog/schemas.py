@@ -97,6 +97,8 @@ class MeasureCreate(BaseModel):
 
 
 class MeasureUpdate(BaseModel):
+    # T5（审查修复）：乐观锁行版本——编辑须携带当前 row_version，服务端校验防并发覆盖
+    row_version: int | None = Field(None, ge=1, description="乐观锁行版本（编辑时须携带当前值）")
     # 编辑可改编码（仅 DRAFT 状态允许，PUBLISHED/DEPRECATED 由 service 层拦截）
     measure_code: str | None = Field(
         default=None,
@@ -160,6 +162,7 @@ class MeasureResponse(BaseModel):
     domain: str
     owner_id: int
     status: str
+    row_version: int = 1
     # ---- 审核流字段（对齐指标审核流 TD §13）----
     submitted_by: int | None = None
     approver_id: int | None = None
@@ -187,6 +190,7 @@ class MeasureResponse(BaseModel):
             synonyms=getattr(m, "synonyms", None),
             category=getattr(m, "category", "OTHER"),
             stat_caliber=getattr(m, "stat_caliber", None),
+            row_version=getattr(m, "row_version", 1),
             domain=m.domain,
             owner_id=m.owner_id,
             status=m.status,

@@ -76,6 +76,7 @@ const measure: MeasureCatalog = {
   name: "门诊收费金额",
   description: null,
   measure_format: "AMOUNT",
+  row_version: 1,
   default_unit: "CNY",
   default_decimal_places: 2,
   source_system: ["HIS"],

@@ -1102,6 +1102,8 @@ export interface MeasureCatalog extends ReviewFields {
   /** 源头系统（业务系统术语多值） */
   source_system: string[] | null;
   synonyms: string[] | null;
+  /** T5（审查修复）：乐观锁行版本——编辑时回传，他人已改则 409 拒绝 */
+  row_version: number;
   /** 度量分类（FLOW/FEE/DRUG/MEDICAL_INSURANCE/EFFICIENCY/QUALITY/OTHER） */
   category: MeasureCategory;
   /** 统计口径（业务侧如何计算） */
