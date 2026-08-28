@@ -220,6 +220,29 @@ describe("Dashboard", () => {
     expect(probe.location()?.search).toContain("status=RUNNING");
   });
 
+  it("资产卡片：采集任务不可用时明示「采集服务暂不可用」而非伪装 0", async () => {
+    mockedFetchDashboard.mockResolvedValue({
+      ...mockDashboardData,
+      assets: {
+        ...mockDashboardData.assets,
+        collection_task: {
+          total: 0,
+          by_status: {},
+          unavailable: true,
+          message: "采集服务暂不可用，采集任务数可能不完整",
+        },
+      },
+    });
+    const { container } = renderDashboard();
+    await waitFor(() => expect(screen.getByText("采集服务暂不可用")).toBeInTheDocument());
+    // 采集任务卡总数显示 —（而非 0，避免故障被误读为「真无任务」）
+    const card = screen.getByText("采集任务").closest(".asset-card") as HTMLElement;
+    expect(card.querySelector(".ac-total")?.textContent).toBe("—");
+    // 不渲染状态段（避免「0 个排队/采集中」误导）
+    expect(card.querySelector(".ac-statuses")).toBeNull();
+    expect(container.querySelector(".ac-unavailable")).toBeTruthy();
+  });
+
   it("KPI 读数格去重：不再展示与信号条重复的已发布/待审核/草稿中", async () => {
     renderDashboard();
     await waitFor(() => expect(screen.getByText("指标总数")).toBeInTheDocument());

@@ -774,6 +774,9 @@ export interface UserPreferenceList {
 export interface AssetStat {
   total: number;
   by_status: Record<string, number>;
+  /** 采集任务等运行时聚合失败时置位——前端区分「真无数据」与「采集链路故障」 */
+  unavailable?: boolean;
+  message?: string;
 }
 
 /**

@@ -26,7 +26,6 @@ def _make_template(template_id: int = 1, code: str = "tpl_fin_gmv") -> MagicMock
 
 async def test_template_owner_assign_and_errors() -> None:
     """指派/解除责任人 + 404/422 分支（直接调用 API 函数）。"""
-    from fastapi import HTTPException
 
     template = _make_template()
     db = MagicMock()
@@ -79,15 +78,17 @@ async def test_template_owner_assign_and_errors() -> None:
             user=user, template_id=1, request=req, body={"owner_id": 999}, db=db
         )
 
-    # 5) owner_id 非法（0）→ HTTPException 422
+    # 5) owner_id 非法（0）→ ValidationError 422（错误信封收敛后不再抛 HTTPException）
+    from app.core.exceptions import ValidationError
+
     r5 = MagicMock()
     r5.scalar_one_or_none.return_value = _make_template()
     db.execute = AsyncMock(side_effect=[r5])
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(ValidationError) as exc:
         await update_template_owner(
             user=user, template_id=1, request=req, body={"owner_id": 0}, db=db
         )
-    assert exc.value.status_code == 422
+    assert exc.value.error_code == "VALIDATION_ERROR"
 
 
 async def test_instantiate_template_commit_integrity_error() -> None:
@@ -273,7 +274,6 @@ async def test_instantiate_required_fields_satisfied_by_template_default() -> No
 
 async def test_template_active_toggle_and_errors() -> None:
     """启用/停用模板 + 404/422（直接调用 API 函数，对齐 owner 端点测试模式）。"""
-    from fastapi import HTTPException
 
     from app.api.semantic import update_template_active
 
@@ -315,15 +315,17 @@ async def test_template_active_toggle_and_errors() -> None:
             user=user, template_id=999, request=req, body={"is_active": True}, db=db
         )
 
-    # 4) is_active 非布尔 → HTTPException 422
+    # 4) is_active 非布尔 → ValidationError 422（ed84c0ef 错误信封收敛 HTTPException→UnisenseError）
+    from app.core.exceptions import ValidationError
+
     r4 = MagicMock()
     r4.scalar_one_or_none.return_value = _make_template()
     db.execute = AsyncMock(side_effect=[r4])
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(ValidationError) as exc:
         await update_template_active(
             user=user, template_id=1, request=req, body={"is_active": "yes"}, db=db
         )
-    assert exc.value.status_code == 422
+    assert exc.value.error_code == "VALIDATION_ERROR"
 
 
 async def test_instantiate_empty_definition_falls_back_to_template_default() -> None:
@@ -578,3 +580,62 @@ async def test_create_template_commit_integrity_error_maps_conflict() -> None:
     assert ei.value.error_code == "TPL_EXISTS"
     assert "已存在" in ei.value.message
     db.rollback.assert_awaited_once()
+
+
+async def test_dashboard_collection_task_unavailable_on_collector_failure() -> None:
+    """采集服务异常时 collection_task 显式标记 unavailable（不再伪装全零）。
+
+    2026-08-28：此前 except 吞掉异常返回 ``{total: 0, by_status: {}}``，前端无法区分
+    「真无任务」与「采集链路故障」——故障被误读为 0 个采集任务。现置 unavailable 标记。
+    """
+    from unittest.mock import patch
+
+    from app.api.semantic import dashboard
+
+    data = {
+        "metrics": {"total": 1, "by_status": {}},
+        "assets": {"metric": {"total": 1, "by_status": {}}},
+    }
+    db = MagicMock()
+    req = MagicMock()
+    with patch(
+        "app.services.semantic.repository.MetricRepository.aggregate_dashboard",
+        new=AsyncMock(return_value=data),
+    ), patch(
+        "app.services.collector.service.CollectorService.count_jobs_by_status",
+        new=AsyncMock(side_effect=RuntimeError("collector down")),
+    ):
+        resp = await dashboard(request=req, _user=MagicMock(), db=db)
+
+    ct = resp.data["assets"]["collection_task"]
+    assert ct["total"] == 0
+    assert ct["by_status"] == {}
+    assert ct["unavailable"] is True
+    assert "不可用" in ct["message"]
+
+
+async def test_dashboard_collection_task_normal_stats() -> None:
+    """采集服务正常时 collection_task 返回真实任务分布（无 unavailable 标记）。"""
+    from unittest.mock import patch
+
+    from app.api.semantic import dashboard
+
+    data = {
+        "metrics": {"total": 1, "by_status": {}},
+        "assets": {"metric": {"total": 1, "by_status": {}}},
+    }
+    db = MagicMock()
+    req = MagicMock()
+    with patch(
+        "app.services.semantic.repository.MetricRepository.aggregate_dashboard",
+        new=AsyncMock(return_value=data),
+    ), patch(
+        "app.services.collector.service.CollectorService.count_jobs_by_status",
+        new=AsyncMock(return_value={"RUNNING": 1, "COMPLETED": 2}),
+    ):
+        resp = await dashboard(request=req, _user=MagicMock(), db=db)
+
+    ct = resp.data["assets"]["collection_task"]
+    assert ct["total"] == 3
+    assert ct["by_status"] == {"RUNNING": 1, "COMPLETED": 2}
+    assert ct.get("unavailable") is None

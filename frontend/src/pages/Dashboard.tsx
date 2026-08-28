@@ -330,6 +330,8 @@ function AssetCard({
 }) {
   const total = stat?.total ?? 0;
   const byStatus = stat?.by_status ?? {};
+  // 采集链路故障（后端 unavailable 标记）：不伪装成「0 个任务」，明示不可用
+  const unavailable = stat?.unavailable ?? false;
   return (
     <div className="asset-card">
       <button
@@ -339,25 +341,31 @@ function AssetCard({
         title={`查看全部${config.label}`}
       >
         <span className="ac-label">{config.label}</span>
-        <span className="ac-total">{total}</span>
+        <span className="ac-total">{unavailable ? "—" : total}</span>
       </button>
-      <div className="ac-statuses">
-        {config.statuses.map((s) => {
-          const count = byStatus[s.value] ?? 0;
-          return (
-            <button
-              key={s.value}
-              type="button"
-              className={`ac-seg${count > 0 ? " has" : ""}`}
-              onClick={() => navigate(`${config.route}?${config.statusParam}=${s.value}`)}
-              title={`${s.label}：${count} 个（下钻 ${config.label} 目录）`}
-            >
-              <span className="ac-seg-name">{s.label}</span>
-              <span className="ac-seg-count">{count}</span>
-            </button>
-          );
-        })}
-      </div>
+      {unavailable ? (
+        <div className="ac-unavailable" title={stat?.message ?? "采集服务暂不可用"}>
+          <WarningOutlined /> 采集服务暂不可用
+        </div>
+      ) : (
+        <div className="ac-statuses">
+          {config.statuses.map((s) => {
+            const count = byStatus[s.value] ?? 0;
+            return (
+              <button
+                key={s.value}
+                type="button"
+                className={`ac-seg${count > 0 ? " has" : ""}`}
+                onClick={() => navigate(`${config.route}?${config.statusParam}=${s.value}`)}
+                title={`${s.label}：${count} 个（下钻 ${config.label} 目录）`}
+              >
+                <span className="ac-seg-name">{s.label}</span>
+                <span className="ac-seg-count">{count}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

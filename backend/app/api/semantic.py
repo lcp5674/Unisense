@@ -650,7 +650,14 @@ async def dashboard(
             "by_status": job_stats,
         }
     except Exception:  # noqa: BLE001 —— 采集服务异常不影响指标/资产读数
-        data["assets"]["collection_task"] = {"total": 0, "by_status": {}}
+        # 2026-08-28：失败态显式标记 unavailable，前端区分「真无任务」与「采集链路故障」，
+        # 不再伪装成全零（此前故障被误读为「0 个采集任务」）。
+        data["assets"]["collection_task"] = {
+            "total": 0,
+            "by_status": {},
+            "unavailable": True,
+            "message": "采集服务暂不可用，采集任务数可能不完整",
+        }
     return ok(data=data, trace_id=get_trace_id(request))
 
 
