@@ -117,3 +117,74 @@ def test_injectable_rules() -> None:
     assert clf.classify("t", _schema({"name": "clinic"})) == "PII"
     # 注入规则后不再命中内置规则（如 phone）
     assert clf.classify("t", _schema({"name": "phone"})) == "INTERNAL"
+
+
+def test_aggregate_suffix_health_cnt_not_pii() -> None:
+    """*_cnt/*_rate 聚合统计字段不因健康词命中判 PII（用户误报回归）。"""
+    clf = SensitivityClassifier()
+    for col in (
+        "health_exam_cnt",
+        "bmi_check_cnt",
+        "blood_pressure_compliance_rate",
+        "gxy_manage_rate",
+        "chronic_disease_cnt",
+        "disease_population_cnt1",
+        "disease_cnt2",
+        "oper_background_disease_cnt3",
+        "bmi_check_cnt_1d",
+        "d_accpayph_cnt_zjwz_180d",
+    ):
+        assert clf.detect_pii_fields("t", _schema({"name": col})) == [], col
+
+
+def test_aggregate_suffix_comment_trigger_not_pii() -> None:
+    """统计字段即使注释含敏感词（电话/血压）也不判 PII。"""
+    clf = SensitivityClassifier()
+    assert clf.detect_pii_fields(
+        "t", _schema({"name": "call_connected_cnt", "comment": "电话接通数"})
+    ) == []
+    assert clf.detect_pii_fields(
+        "t", _schema({"name": "plan_cnt", "comment": "健康管理计划数"})
+    ) == []
+
+
+def test_heart_rate_value_exempt_from_aggregate_exclusion() -> None:
+    """heart_rate 是个人测量值（值型豁免），即便 *_rate 后缀仍判 PII。"""
+    clf = SensitivityClassifier()
+    hits = clf.detect_pii_fields("t", _schema({"name": "heart_rate"}))
+    assert hits and hits[0].rule == "health"
+    # 心率状态/ID 不以统计后缀结尾，同样保留
+    assert clf.detect_pii_fields("t", _schema({"name": "heart_rate_state"}))[0].rule == "health"
+    # heart_rate 前缀的派生字段（状态/ID）同样豁免统计量词排除
+    assert clf.detect_pii_fields("t", _schema({"name": "heart_rate_status_id"}))[0].rule == "health"
+
+
+def test_aggregate_with_sample_hit_keeps_pii() -> None:
+    """统计字段若样本值命中（实际存个体值，如异常手机号）仍保留 PII。"""
+    clf = SensitivityClassifier()
+    hits = clf.detect_pii_fields(
+        "t", _schema({"name": "phone_cnt", "sample": "13800000000"})
+    )
+    assert hits and hits[0].matched_by == "name+sample"
+
+
+def test_gps_no_substring_false_positive() -> None:
+    """lat 子串不误判 population（词边界修复）。"""
+    clf = SensitivityClassifier()
+    assert clf.detect_pii_fields("t", _schema({"name": "population"})) == []
+    assert clf.detect_pii_fields("t", _schema({"name": "position"})) != []
+    assert clf.detect_pii_fields("t", _schema({"name": "composition"})) == []
+
+
+def test_id_no_no_substring_false_positive() -> None:
+    """id_no 不误判 thyroid_nodules（词边界修复）。"""
+    clf = SensitivityClassifier()
+    assert clf.detect_pii_fields("t", _schema({"name": "thyroid_nodules"})) == []
+    assert clf.detect_pii_fields("t", _schema({"name": "doctor_id_no"}))[0].rule == "id_no"
+
+
+def test_phone_tel_no_substring_false_positive() -> None:
+    """tel 不误判 hotel；真实 tel 字段仍命中。"""
+    clf = SensitivityClassifier()
+    assert clf.detect_pii_fields("t", _schema({"name": "hotel"})) == []
+    assert clf.detect_pii_fields("t", _schema({"name": "apply_tel"}))[0].rule == "phone"

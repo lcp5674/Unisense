@@ -108,6 +108,30 @@ class PiiFieldHit:
     pii: bool = True
 
 
+def _tok(pattern: str) -> str:
+    """把正则片段包成「非字母数字边界」令牌，防子串误判。
+
+    ``(?<![a-zA-Z0-9])...(?![a-zA-Z0-9])`` 与 ``\\b`` 的区别：下划线视为边界
+    （兼容 ``doctor_id_no``、``apply_card_no`` 这类业务命名），同时杜绝
+    ``population`` 命中 ``lat``、``thyroid_nodules`` 命中 ``id_no``、
+    ``hotel`` 命中 ``tel``、``composition`` 命中 ``position`` 等跨词误判。
+    """
+    return f"(?<![a-zA-Z0-9]){pattern}(?![a-zA-Z0-9])"
+
+
+#: 聚合统计量词正则：字段名含此量词 token（可带分桶编号/业务后缀，如 ``_cnt1``、
+#: ``_cnt_1d``、``_cnt_zjwz_180d``）视为聚合指标（存群体计数/比率，不指向个体）。
+#: 命中此类字段时，名称/注释关键词不再判定 PII（除非样本值命中，说明实际存个体值）。
+_AGGREGATE_RE = re.compile(
+    r"_(cnt|count|qty|quantity|rate|ratio|pct|percent|avg|sum|total|amount|amt|times)"
+    r"(?:_[a-z0-9]+(?:_[a-z0-9]+)*|\d*)$",
+    re.I,
+)
+
+#: 值型豁免前缀：即便字段名带统计量词，仍是个人测量值/标识（如 heart_rate 心率）。
+_VALUE_EXEMPT_PREFIXES: tuple[str, ...] = ("heart_rate", "heartrate", "心率")
+
+
 def _compile(rule: PiiRule) -> re.Pattern:
     return re.compile(rule.name_re, re.I)
 
@@ -121,11 +145,13 @@ def _compile_sample(rule: PiiRule) -> re.Pattern | None:
 DEFAULT_PII_RULES: tuple[PiiRule, ...] = (
     PiiRule(
         PiiCategory.ID_CARD, "id_card",
-        r"(id_?card|identity_?no|shenfen|sfz|身份证)", r"^\d{17}[\dXx]$", 0.95,
+        "(" + _tok(r"id_?card") + "|" + _tok(r"identity_?no") + "|shenfen|sfz|身份证)",
+        r"^\d{17}[\dXx]$", 0.95,
     ),
     PiiRule(
         PiiCategory.PHONE, "phone",
-        r"(phone|mobile|tel|telephone|手机|电话|手机号|联系电话)", r"^1[3-9]\d{9}$", 0.9,
+        "(phone|mobile|" + _tok(r"tel") + "|telephone|手机|电话|手机号|联系电话)",
+        r"^1[3-9]\d{9}$", 0.9,
     ),
     PiiRule(
         PiiCategory.EMAIL, "email",
@@ -139,21 +165,26 @@ DEFAULT_PII_RULES: tuple[PiiRule, ...] = (
     ),
     PiiRule(
         PiiCategory.ADDRESS, "address",
-        r"(address|addr|location_detail|地址|住址|居住地|收货地址)", None, 0.7,
+        "(address|" + _tok(r"addr") + "|location_detail|地址|住址|居住地|收货地址)", None, 0.7,
     ),
     PiiRule(
         PiiCategory.BANK_CARD, "bank_card",
-        r"(bank_?card|bankcard|card_?no|account_?no|银行卡|卡号|银行账号)",
+        "(bank_?card|bankcard|" + _tok(r"card_?no") + "|" + _tok(r"account_?no")
+        + "|银行卡|卡号|银行账号)",
         r"^\d{16,19}$", 0.9,
     ),
     PiiRule(
         PiiCategory.DOCUMENT, "id_no",
-        r"(id_no|cert_no|证件号|证件|license_no|驾照)", None, 0.85,
+        "(" + _tok(r"id_no") + "|" + _tok(r"cert_no") + "|证件号|证件|"
+        + _tok(r"license_no") + "|驾照)",
+        None, 0.85,
     ),
     PiiRule(PiiCategory.PASSPORT, "passport", r"(passport|护照)", None, 0.85),
     PiiRule(
         PiiCategory.GPS, "gps",
-        r"(lat|lng|longitude|latitude|geo_?point|position|定位|坐标|经纬度)", None, 0.6,
+        "(" + _tok(r"lat") + "|" + _tok(r"lng") + "|longitude|latitude|geo_?point|"
+        + _tok(r"position") + "|定位|坐标|经纬度)",
+        None, 0.6,
     ),
     PiiRule(
         PiiCategory.HEALTH, "health",
@@ -246,6 +277,11 @@ class SensitivityClassifier:
                 continue
             sample = str(col.get("sample", "") or "")
             comment = str(col.get("comment", "") or "").strip()
+            # 聚合统计字段（*_cnt/*_rate 等，可带分桶编号）存群体计数/比率，不指向个体；
+            # 但 heart_rate（心率）等个人测量值豁免（以值型前缀开头）。
+            is_aggregate = bool(_AGGREGATE_RE.search(name)) and not name.startswith(
+                _VALUE_EXEMPT_PREFIXES
+            )
             for name_re, sample_re, rule in self._pii_compiled:
                 matched_by: str | None = None
                 confidence = rule.confidence
@@ -255,6 +291,9 @@ class SensitivityClassifier:
                         confidence = min(1.0, rule.confidence + 0.05)
                         matched_by = "name+sample"
                 if matched_by is None:
+                    continue
+                # 统计字段不因名称/注释关键词判 PII；仅当样本命中（实际存个体值）才保留
+                if is_aggregate and matched_by != "name+sample":
                     continue
                 hits.append(
                     PiiFieldHit(
