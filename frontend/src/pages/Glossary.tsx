@@ -461,14 +461,19 @@ function TermsTab() {
   async function handleUpdate(values: Record<string, unknown>) {
     if (!editTarget) return;
     try {
-      await updateTerm(editTarget.term_code, {
-        term_code: values.term_code ? String(values.term_code) : undefined,
-        name: String(values.name),
-        definition: String(values.definition),
-        domain: String(values.domain),
-        synonyms: values.synonyms ? String(values.synonyms).split(",").map((s) => s.trim()).filter(Boolean) : [],
-        boundary: values.boundary ? String(values.boundary) : null,
-      });
+      await updateTerm(
+        editTarget.term_code,
+        {
+          term_code: values.term_code ? String(values.term_code) : undefined,
+          name: String(values.name),
+          definition: String(values.definition),
+          domain: String(values.domain),
+          synonyms: values.synonyms ? String(values.synonyms).split(",").map((s) => s.trim()).filter(Boolean) : [],
+          boundary: values.boundary ? String(values.boundary) : null,
+        },
+        // 乐观锁：回传当前 row_version，他人已改则后端 409（防静默覆盖）
+        editTarget.row_version,
+      );
       message.success("术语已更新");
       setEditTarget(null);
       load();

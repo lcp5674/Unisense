@@ -108,6 +108,7 @@ const TERMS: GlossaryTerm[] = [
     status: "DRAFT",
     owner_id: 1,
     version: 1,
+    row_version: 3,
     created_at: "2026-08-13T00:00:00",
     updated_at: "2026-08-13T00:00:00",
   },
@@ -285,6 +286,7 @@ describe("Glossary 页面", () => {
       expect(mockedUpdate).toHaveBeenCalledWith(
         "GMV",
         expect.objectContaining({ name: "成交总额(修订)" }),
+        3, // row_version 乐观锁透传（他人已改则后端 409）
       );
     });
   });
@@ -383,6 +385,7 @@ describe("Glossary 页面", () => {
       expect(mockedUpdate).toHaveBeenCalledWith(
         "GMV",
         expect.objectContaining({ term_code: "GMV_V2" }),
+        3, // row_version 乐观锁透传
       );
     });
   });

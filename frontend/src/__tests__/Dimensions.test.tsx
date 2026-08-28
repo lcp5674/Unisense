@@ -99,6 +99,7 @@ const DIMS: Dimension[] = [
     description: "区域维度",
     owner_id: 1,
     status: "DRAFT",
+    row_version: 2,
     created_at: "2026-08-01T00:00:00",
     updated_at: "2026-08-01T00:00:00",
   },
@@ -286,6 +287,7 @@ describe("Dimensions 页面", () => {
       expect(updateDimension).toHaveBeenCalledWith(
         "dim_region",
         expect.objectContaining({ name: "区域（新）", domain: "finance", type: "SCD1" }),
+        2, // row_version 乐观锁透传（他人已改则后端 409）
       );
     });
     // 保存成功后重新拉取列表

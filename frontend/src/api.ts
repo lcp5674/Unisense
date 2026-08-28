@@ -2329,10 +2329,12 @@ export async function updateDimension(
     description?: string | null;
     dim_code?: string;
   },
+  rowVersion?: number,
 ): Promise<Dimension> {
   return request<Dimension>(`${API_BASE}/dimensions/${encodeURIComponent(dimCode)}`, {
     method: "PUT",
-    body: JSON.stringify(body),
+    // row_version 乐观锁透传（后端 409 防并发覆盖；缺省 undefined 兼容旧调用）
+    body: JSON.stringify({ ...body, row_version: rowVersion ?? undefined }),
   });
 }
 
@@ -2567,10 +2569,12 @@ export async function updateTerm(
     synonyms?: string[];
     boundary?: string | null;
   },
+  rowVersion?: number,
 ): Promise<GlossaryTerm> {
   return request<GlossaryTerm>(`${API_BASE}/terms/${encodeURIComponent(termCode)}`, {
     method: "PUT",
-    body: JSON.stringify(body),
+    // row_version 乐观锁透传（后端 409 防并发覆盖；缺省 undefined 兼容旧调用）
+    body: JSON.stringify({ ...body, row_version: rowVersion ?? undefined }),
   });
 }
 

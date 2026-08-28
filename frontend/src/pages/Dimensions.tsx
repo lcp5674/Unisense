@@ -480,13 +480,18 @@ function DimensionsTab() {
     try {
       // 编码仅 DRAFT 状态可改（后端强校验）；非 DRAFT 时不传编码，避免误改
       const canEditCode = editTarget.status === "DRAFT";
-      await updateDimension(editTarget.dim_code, {
-        ...(canEditCode && values.dim_code ? { dim_code: String(values.dim_code) } : {}),
-        name: values.name ? String(values.name) : undefined,
-        domain: values.domain ? String(values.domain) : undefined,
-        type: values.type ? String(values.type) : undefined,
-        description: values.description ? String(values.description) : null,
-      });
+      await updateDimension(
+        editTarget.dim_code,
+        {
+          ...(canEditCode && values.dim_code ? { dim_code: String(values.dim_code) } : {}),
+          name: values.name ? String(values.name) : undefined,
+          domain: values.domain ? String(values.domain) : undefined,
+          type: values.type ? String(values.type) : undefined,
+          description: values.description ? String(values.description) : null,
+        },
+        // 乐观锁：回传当前 row_version，他人已改则后端 409（防静默覆盖）
+        editTarget.row_version,
+      );
       message.success("维度已更新");
       setEditOpen(false);
       editForm.resetFields();

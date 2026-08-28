@@ -1009,6 +1009,8 @@ export interface Dimension extends ReviewFields {
   status: string;
   created_at: string;
   updated_at: string;
+  /** 跨请求乐观锁（P11 C-2）：编辑时回传当前版本号，他人已改则 409 拒绝 */
+  row_version?: number;
   /** 绑定指标数（列表接口批量回填，默认 0；兼容旧后端缺省场景） */
   metric_count?: number;
 }
@@ -1224,6 +1226,8 @@ export interface GlossaryTerm extends ReviewFields {
   status: string;
   owner_id: number;
   version?: number;
+  /** 跨请求乐观锁（P11 C-2）：编辑时回传当前版本号，他人已改则 409 拒绝 */
+  row_version?: number;
   created_at: string | null;
   updated_at: string | null;
 }
