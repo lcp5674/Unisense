@@ -1204,10 +1204,11 @@ export function MetricDetail() {
     }
     // 聚合方式独立字段（口径变更，与粒度/单位同级）：其选项也需当前值兜底
     // （字典未收录的历史聚合值可显示可保留，防静默清空——对齐治理字段 ensureInOptions）
-    if (metric.aggregation) {
+    const agg = metric.aggregation;
+    if (agg) {
       setEditGovOptions((prev) => ({
         ...prev,
-        aggregation: ensureInOptions(prev.aggregation ?? [], metric.aggregation),
+        aggregation: ensureInOptions(prev.aggregation ?? [], agg),
       }));
     }
     setEditGovValues(govInit);
@@ -2312,7 +2313,13 @@ export function MetricDetail() {
             </Descriptions.Item>
           )}
           <Descriptions.Item label="分级">{enumLabel(METRIC_TIER_LABEL, metric.metric_tier)}</Descriptions.Item>
-          <Descriptions.Item label="聚合">{enumLabel(AGGREGATION_LABEL, metric.aggregation)}</Descriptions.Item>
+          <Descriptions.Item label="聚合">
+            {metric.aggregation ? (
+              enumLabel(AGGREGATION_LABEL, metric.aggregation)
+            ) : (
+              <span className="muted">派生表达式</span>
+            )}
+          </Descriptions.Item>
           <Descriptions.Item label="粒度">{enumLabel(GRANULARITY_LABEL, metric.granularity)}</Descriptions.Item>
           <Descriptions.Item label="单位">{UNIT_LABEL[metric.unit] ?? metric.unit}</Descriptions.Item>
           <Descriptions.Item label="币种">{metric.currency || <span className="muted">—</span>}</Descriptions.Item>

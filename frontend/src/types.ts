@@ -34,7 +34,8 @@ export interface MetricResponse {
   measure_name?: string | null;
   unit: string;
   currency: string | null;
-  aggregation: string;
+  /** 聚合方式（派生/复合无聚合语义时为 null——展示「派生表达式」） */
+  aggregation: string | null;
   time_semantics: string;
   freshness: string;
   sla: string | null;

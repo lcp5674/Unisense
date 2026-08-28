@@ -534,6 +534,11 @@ class MetricService(BaseService):
             # 用推断值补全缺失字段（仅当原值为默认值时覆盖）
             for field_name, suggested_val in suggested.get("defaults", {}).items():
                 if suggested_val is not None:
+                    # 2026-08-28 aggregation 可空：派生/复合「无聚合」语义（None）不得
+                    # 被 auto_fill 的 SUM 推断覆盖——聚合由口径表达式/依赖承载，原子
+                    # 缺省由 3c 段兜底 SUM；auto_fill 的 aggregation 建议仅前端预填展示。
+                    if field_name == "aggregation":
+                        continue
                     current = getattr(request, field_name, None)
                     # 仅当当前值是默认值时才覆盖（保留用户显式设定的值）
                     field_info = request.model_fields.get(field_name)
@@ -599,6 +604,12 @@ class MetricService(BaseService):
                 request.unit = measure.default_unit
             if request.unit is None:
                 request.unit = "TIMES"
+        # 聚合方式（2026-08-28 可空）：原子缺省 SUM（原子 = 逻辑度量实体化，
+        # 默认聚合）；派生/复合缺省保持 None——聚合语义由口径表达式/依赖承载
+        # （客单价 = ROUND(SUM/NULLIF) 整体是除法非 SUM），落库 NULL 详情页
+        # 展示「派生表达式」，不再用假 SUM 占位。
+        if request.aggregation is None and request.type == "atomic":
+            request.aggregation = "SUM"
         if request.time_semantics is None:
             request.time_semantics = "PERIOD"
         if request.freshness is None:
@@ -2079,7 +2090,7 @@ class MetricService(BaseService):
                 f"- 指标类型: {metric.type}",
                 f"- 粒度: {metric.granularity}",
                 f"- 单位: {metric.unit}",
-                f"- 聚合方式: {metric.aggregation}",
+                f"- 聚合方式: {metric.aggregation or '派生表达式'}",
                 f"- 时间语义: {metric.time_semantics}",
                 f"- 数仓层: {metric.dw_layer}",
                 f"- 口径定义: {json.dumps(definition, ensure_ascii=False)[:1500]}",
@@ -5317,9 +5328,11 @@ class MetricService(BaseService):
                         name=cand.name,
                         domain=request.domain,
                         type=effective_type,
-                        # aggregation 为 schema 必填；派生/复合聚合语义由依赖/表达式承载，
-                        # 占位 SUM（对齐批量注册默认聚合）
-                        aggregation=cand.aggregation or "SUM",
+                        # aggregation 可空（2026-08-28）：派生/复合聚合语义由依赖/
+                        # 表达式承载——透传候选值（派生比率/条件列候选为 None 落库
+                        # NULL，详情页展示「派生表达式」），不再 or "SUM" 假占位；
+                        # 原子候选缺省由 create_metric 兜底 SUM。
+                        aggregation=cand.aggregation,
                         definition_json=cand.definition_json,
                         # OneData 挂载层：派生候选透传挂载实体（源表/列/粒度/周期/域，
                         # 创建端自动落 metric_mount——与单条派生向导行为一致）
@@ -5482,7 +5495,7 @@ class MetricService(BaseService):
                 "serving_mode": metric.serving_mode,
                 "recommended_usage": [
                     f"适用 {metric.domain} 域 {metric.granularity} 粒度分析",
-                    f"聚合方式为 {metric.aggregation}，"
+                    f"聚合方式为 {metric.aggregation or '派生表达式'}，"
                     f"注意{'不可' if metric.additivity == 'NON_ADDITIVE' else '可以'}跨维度聚合",
                 ],
                 "cautions": [],

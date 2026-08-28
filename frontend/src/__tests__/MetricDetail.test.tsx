@@ -2616,6 +2616,36 @@ describe("MetricDetail 按钮级权限过滤", () => {
     expect(screen.getByText("pay_amt")).toBeInTheDocument();
   });
 
+  it("详情页派生/复合指标 aggregation=null 展示「派生表达式」而非假 SUM", async () => {
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      pii_flag: false,
+      type: "derived",
+      aggregation: null, // 2026-08-28 派生无聚合语义：落库 NULL，展示「派生表达式」
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1, role: "metric_owner", home_domain: "outpatient",
+      allowed_actions: ["read", "write"], ui_actions: ["metric:read"],
+      granted_domains: [], metric_whitelist: [], row_level_restricted: false, grants: [], expiring_soon: [],
+    });
+    renderWithPerms(["metric:read"]);
+    await screen.findByText("销售 GMV");
+    // 聚合栏展示「派生表达式」（不再显示假 SUM）
+    expect(screen.getByText("派生表达式")).toBeInTheDocument();
+    expect(screen.queryByText("SUM")).not.toBeInTheDocument();
+  });
+
   it("详情页 atomic 未关联逻辑度量显示引导（存量旧式来源）", async () => {
     mockedGetMetric.mockResolvedValue({ ...metric, pii_flag: false, measure_id: null });
     mockedListVersions.mockResolvedValue([]);

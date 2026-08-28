@@ -177,13 +177,16 @@ class MetricCreateRequest(BaseModel):
     )
     currency: str | None = Field(None, max_length=16, description="币种")
     # 与字典种子对齐（10 值）：SUM/AVG/COUNT/COUNT_DISTINCT/LAST_VALUE/FIRST_VALUE
-    # + MAX/MIN/MEDIAN/PERCENTILE（FIRST_VALUE 由 SQL 推断产出，如余额首值场景）
+    # + MAX/MIN/MEDIAN/PERCENTILE（FIRST_VALUE 由 SQL 推断产出，如余额首值场景）。
+    # 2026-08-28 可空：派生/复合指标聚合语义由口径表达式/依赖承载（客单价 =
+    # ROUND(SUM/NULLIF) 整体是除法非 SUM），缺省 None 落 NULL；原子/普通聚合派生
+    # 由 create_metric 兜底真实枚举值（原子缺省 SUM）。
     aggregation: Literal[
         "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "FIRST_VALUE",
         "MAX", "MIN", "MEDIAN", "PERCENTILE",
-    ] = Field(
-        ...,
-        description="聚合方式: SUM/AVG/COUNT/COUNT_DISTINCT/LAST_VALUE/MAX/MIN/MEDIAN/PERCENTILE",
+    ] | None = Field(
+        None,
+        description="聚合方式（派生/复合无聚合语义时缺省 None）",
     )
     # 与字典种子对齐（6 值）：PERIOD/YTD/TTM/AVG + MOM/YOY
     time_semantics: Literal["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"] | None = Field(
@@ -1090,7 +1093,7 @@ class MetricResponse(BaseModel):
     measure_name: str | None = None
     unit: str
     currency: str | None
-    aggregation: str
+    aggregation: str | None
     time_semantics: str
     freshness: str
     sla: str | None

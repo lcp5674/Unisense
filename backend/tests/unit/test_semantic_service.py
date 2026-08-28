@@ -2469,6 +2469,47 @@ async def test_sql_batch_register_success_with_composite():
     assert all(c["validation_errors"] is None for c in result["candidates"])
 
 
+async def test_sql_batch_register_derived_no_agg_persists_none():
+    """派生比率/条件列候选 aggregation=None 批量创建落库 NULL（不再 or "SUM" 假占位）。
+
+    2026-08-28 aggregation 可空：派生/复合聚合语义由口径表达式/依赖承载
+    （客单价 = ROUND(SUM(amount)/NULLIF(COUNT(user_id),0),2) 整体是除法非 SUM），
+    详情页据此展示「派生表达式」而非假 SUM。
+    """
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    # 返回入参对象（真实 DB 路径 repo.create 返回同一 Metric），以便断言落库字段
+    repo.create = AsyncMock(side_effect=lambda m: m)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    request = MetricSqlBatchRegisterRequest(
+        domain="sales",
+        candidates=[
+            SqlBatchCreateCandidate(
+                key="0:ratio",
+                metric_code="sales_avg_value_day",
+                name="日客单价",
+                type="derived",
+                source_table="dwd_order_di",
+                measure_column="amount",
+                aggregation=None,
+                period="day",
+                definition_json={
+                    "expression": "ROUND(SUM(amount)/NULLIF(COUNT(user_id),0),2)",
+                    "source_fields": [{"table": "dwd_order_di", "column": "amount"}],
+                },
+            ),
+        ],
+    )
+    result = await svc.batch_register_from_sql(request, actor_id=1)
+    assert result["candidates"][0]["status"] == "DRAFT"
+    # 落库 Metric.aggregation = None（不再 or "SUM" 假占位，派生语义由表达式承载）
+    created_metric = repo.create.call_args[0][0]
+    assert created_metric.aggregation is None
+
+
 async def test_sql_batch_register_composite_missing_dep_skipped():
     """复合候选依赖缺失（批内未创建 + 库中不存在）→ VALIDATION_ERROR 跳过。"""
     from app.services.semantic.schemas import MetricSqlBatchRegisterRequest

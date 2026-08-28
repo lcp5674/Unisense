@@ -759,8 +759,8 @@ def _build_derived_candidate(
         # 关联维度候选（GROUP BY 非时间键；前端预填「关联维度」多选，可增删）
         "dimensions": dimensions,
         # 派生比率/条件列（P0-3d）：聚合占位 None——前端展示「派生表达式」而非
-        # 伪装成标准聚合；批量创建 Phase1 用 ``or "SUM"`` 占位（口径由 expression
-        # 承载），与复合指标占位语义一致
+        # 伪装成标准聚合；批量创建透传 None 落库 NULL（2026-08-28 aggregation
+        # 可空，口径由 expression 承载），不再 or "SUM" 假占位。
         "aggregation": None if derived else agg,
         "period": period,
         "unit": fields["unit"]["value"],

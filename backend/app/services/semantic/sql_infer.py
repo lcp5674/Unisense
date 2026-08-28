@@ -1059,8 +1059,9 @@ def _collect_derived_measures(select: exp.Select) -> list[dict[str, Any]]:
     表达式投影静默缺失。此处对聚合承载的 SELECT 额外收集：仅收「表达式内仍含
     聚合函数」的派生投影（比率/条件聚合嵌套），纯列/截断表达式（``substr(dt)``
     等维度列）不含聚合不产出假候选。``agg=None`` + ``derived=True`` + 原始
-    expression，候选构建标记「口径需核对」，注册聚合占位（口径由 expression 承载，
-    对齐复合指标占位语义）；``sunk=True`` 用 alias 作编码锚点防与内嵌聚合度量撞码。
+    expression，候选构建标记「口径需核对」，聚合可空（2026-08-28 aggregation
+    nullable，落库 NULL 而非占位；口径由 expression 承载）；``sunk=True`` 用
+    alias 作编码锚点防与内嵌聚合度量撞码。
 
     **A7（第九轮）**：额外收集「引用已命名聚合列的算术派生列」——外层宽表 ETL
     的 ``all_order_cnt - session_side_order_cnt - region_org_order_cnt AS

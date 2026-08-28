@@ -97,8 +97,12 @@ class Metric(Base, BaseModel):
     )
     unit: Mapped[str] = mapped_column(String(32), nullable=False, comment="单位")
     currency: Mapped[str | None] = mapped_column(String(16), nullable=True, comment="币种")
-    # 与字典种子（aggregation 9 值）对齐：补充 MAX/MIN/MEDIAN/PERCENTILE
-    aggregation: Mapped[str] = mapped_column(
+    # 与字典种子（aggregation 9 值）对齐：补充 MAX/MIN/MEDIAN/PERCENTILE。
+    # 2026-08-28：派生/复合指标聚合语义由口径表达式/依赖承载（如客单价 =
+    # ROUND(SUM/NULLIF) 整体是除法非 SUM），aggregation 改可空——派生/复合
+    # 落 NULL（「无聚合」），仅原子/普通聚合派生填真实枚举值，详情页据此
+    # 展示「派生表达式」而非假 SUM。
+    aggregation: Mapped[str | None] = mapped_column(
         Enum(
             "SUM",
             "AVG",
@@ -111,8 +115,8 @@ class Metric(Base, BaseModel):
             "PERCENTILE",
             name="agg_type",
         ),
-        nullable=False,
-        comment="聚合方式",
+        nullable=True,
+        comment="聚合方式（派生/复合无聚合语义时为空）",
     )
     # 与字典种子（time_semantics 6 值）对齐：补充 MOM/YOY
     time_semantics: Mapped[str] = mapped_column(
