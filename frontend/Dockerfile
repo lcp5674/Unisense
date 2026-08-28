@@ -81,9 +81,10 @@ server {
         proxy_read_timeout 300s;
     }
 
-    # API 文档（Swagger UI / Redoc / OpenAPI 规范）：反代到后端
-    # FastAPI 默认 Swagger UI 静态资源从 jsdelivr CDN 加载——该 location 覆盖全局 CSP
-    # 放行 CDN 脚本/样式（页面其余区域仍受全局严格 CSP 保护）。
+    # API 文档（Swagger UI / ReDoc / OpenAPI 规范）：反代到后端
+    # Swagger/ReDoc 静态资源已本地化（后端 /static/，离线可用），后端对 /docs /redoc
+    # 返回本地化精确 CSP（script-src 'self'）。此处隐藏后端 CSP 头并显式设置相同
+    # 本地化策略——避免 nginx 继承 server 级宽松 CSP 形成「双 CSP 头交集」混乱。
     location ~ ^/(docs|redoc|openapi\.json)$ {
         set $backend_upstream http://backend:8000;
         proxy_pass $backend_upstream;
@@ -91,10 +92,25 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; img-src 'self' data: https://cdn.jsdelivr.net; font-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self'; frame-ancestors 'none'" always;
+        proxy_hide_header Content-Security-Policy;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'" always;
         proxy_connect_timeout 30s;
         proxy_read_timeout 60s;
         proxy_send_timeout 60s;
+    }
+
+    # 后端自托管文档静态资源（swagger-ui / redoc）反代——不走 SPA try_files，
+    # 否则 /static/* 会被回退成 index.html 导致文档资源 404。
+    # 使用 ^~ 前缀（优先于下方正则静态资源 location），确保 .js/.css 等命中此处。
+    location ^~ /static/ {
+        set $backend_upstream http://backend:8000;
+        proxy_pass $backend_upstream;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        expires 1d;
+        add_header Cache-Control "public, immutable" always;
     }
 
     # 静态资源缓存

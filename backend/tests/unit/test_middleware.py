@@ -18,6 +18,7 @@ from starlette.responses import PlainTextResponse
 
 from app.core.exceptions import UnisenseError
 from app.core.middleware import (
+    _DOCS_CSP,
     _ERROR_CODE_HTTP_STATUS,
     _RATE_LIMIT_DEFAULT_LIMIT,
     _RATE_LIMIT_DEFAULT_WINDOW,
@@ -30,13 +31,13 @@ from app.core.middleware import (
 )
 
 
-def _request(headers: list[tuple[str, str]] | None = None) -> Request:
+def _request(headers: list[tuple[str, str]] | None = None, path: str = "/api/v1/health") -> Request:
     raw_headers = [(k.lower().encode(), v.encode()) for k, v in (headers or [])]
     scope = {
         "type": "http",
         "method": "GET",
-        "path": "/api/v1/health",
-        "raw_path": b"/api/v1/health",
+        "path": path,
+        "raw_path": path.encode(),
         "query_string": b"",
         "headers": raw_headers,
         "server": ("test", 80),
@@ -172,6 +173,34 @@ class TestSecurityHeadersMiddleware:
         response = await mw.dispatch(request, call_next)
         for key, value in _SECURITY_HEADERS.items():
             assert response.headers[key] == value, key
+
+    async def test_docs_path_uses_localized_csp(self) -> None:
+        """/docs 页面使用本地化 CSP（资源同源、script-src 'self'），其余安全头保持。"""
+        mw = SecurityHeadersMiddleware(lambda *a, **k: None)
+        request = _request(path="/docs")
+
+        async def call_next(req: Request) -> PlainTextResponse:
+            return PlainTextResponse("ok")
+
+        response = await mw.dispatch(request, call_next)
+        assert response.headers["Content-Security-Policy"] == _DOCS_CSP
+        # 其余安全头不受影响
+        assert response.headers["X-Frame-Options"] == "DENY"
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        # 本地化 CSP 不含 'unsafe-inline' 的 script（外置 init 脚本），含 style 注入放行
+        assert "script-src 'self'" in _DOCS_CSP
+        assert "'unsafe-inline'" not in _DOCS_CSP.split("script-src")[1].split(";")[0]
+        assert "style-src 'self' 'unsafe-inline'" in _DOCS_CSP
+
+    async def test_redoc_path_uses_localized_csp(self) -> None:
+        mw = SecurityHeadersMiddleware(lambda *a, **k: None)
+        request = _request(path="/redoc")
+
+        async def call_next(req: Request) -> PlainTextResponse:
+            return PlainTextResponse("ok")
+
+        response = await mw.dispatch(request, call_next)
+        assert response.headers["Content-Security-Policy"] == _DOCS_CSP
 
 
 class _DegradedEngineError(UnisenseError):
@@ -343,7 +372,9 @@ class TestRateLimitMiddleware:
         from app.core.middleware import _rate_limit_bucket
 
         # LLM 生成类端点：60s 窗口 20 次
-        _, win, lim = _rate_limit_bucket(self._req_with_path("/api/v1/metric-definitions/infer-description"))
+        _, win, lim = _rate_limit_bucket(
+            self._req_with_path("/api/v1/metric-definitions/infer-description")
+        )
         assert (win, lim) == (60, 20)
         # 导出/批量/compare：60s 窗口 60 次
         _, win, lim = _rate_limit_bucket(
@@ -360,7 +391,12 @@ class TestRateLimitMiddleware:
         from app.core.config import Settings
         from app.core.middleware import _client_key
 
-        fake_settings = Settings(_env_file=None, env="local", db_url="mysql+pymysql://u:p@localhost:3306/db", jwt_secret="x" * 40)
+        fake_settings = Settings(
+            _env_file=None,
+            env="local",
+            db_url="mysql+pymysql://u:p@localhost:3306/db",
+            jwt_secret="x" * 40,
+        )
         monkeypatch.setattr("app.core.config.settings", fake_settings)
         req = _request([("X-Forwarded-For", "1.2.3.4")])
         assert _client_key(req) != "1.2.3.4"  # 直连 IP（127.0.0.1），非伪造 XFF
@@ -370,7 +406,13 @@ class TestRateLimitMiddleware:
         from app.core.config import Settings
         from app.core.middleware import _client_key
 
-        fake_settings = Settings(_env_file=None, env="local", db_url="mysql+pymysql://u:p@localhost:3306/db", jwt_secret="x" * 40, trusted_proxies="127.0.0.1")
+        fake_settings = Settings(
+            _env_file=None,
+            env="local",
+            db_url="mysql+pymysql://u:p@localhost:3306/db",
+            jwt_secret="x" * 40,
+            trusted_proxies="127.0.0.1",
+        )
         monkeypatch.setattr("app.core.config.settings", fake_settings)
         req = _request([("X-Forwarded-For", "1.2.3.4")])
         assert _client_key(req) == "1.2.3.4"

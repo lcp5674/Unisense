@@ -8,12 +8,17 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_redoc_html
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.admin_key_rotation import router as admin_key_rotation_router
 from app.api.ai import router as ai_router
@@ -69,6 +74,46 @@ from app.services.consume.rate_limiter import init_rate_limiter
 from app.services.notify.consumers import register_notify_event_consumers
 
 logger = structlog.get_logger("unisense.main")
+
+# 自托管 API 文档静态资源目录（swagger-ui-dist / redoc 本地化，离线可用、不依赖 CDN）
+# main.py 位于 backend/app/ 下，static 位于 backend/static/（Dockerfile COPY backend/ 进 /app）
+_STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+# Swagger UI 默认交互参数（可被 /openapi.json 中的 swagger 配置覆盖；与前端交互习惯对齐）
+_SWAGGER_DEFAULTS: dict[str, object] = {
+    "docExpansion": "none",
+    "filter": True,
+    "persistAuthorization": True,
+    "displayRequestDuration": True,
+    "syntaxHighlight": {"theme": "obsidian"},
+}
+
+
+def _swagger_ui_html(*, openapi_url: str, title: str) -> HTMLResponse:
+    """本地化 Swagger UI 页面（无 CDN、无 inline script）。
+
+    初始化配置经 ``<meta name="swagger-config">`` 注入，由
+    ``/static/swagger-ui/swagger-init.js`` 读取并启动 ``SwaggerUIBundle``——
+    使 docs 页面的 CSP 可收紧到 ``script-src 'self'``（无需 ``'unsafe-inline'``）。
+    """
+    config = {**_SWAGGER_DEFAULTS, "url": openapi_url}
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="swagger-config" content='{json.dumps(config, ensure_ascii=False)}'>
+<link rel="stylesheet" href="/static/swagger-ui/swagger-ui.css">
+<link rel="icon" href="/static/swagger-ui/favicon.png">
+<title>{title}</title>
+</head>
+<body>
+<div id="swagger-ui"></div>
+<script src="/static/swagger-ui/swagger-ui-bundle.js"></script>
+<script src="/static/swagger-ui/swagger-init.js"></script>
+</body>
+</html>"""
+    return HTMLResponse(html)
 
 
 @asynccontextmanager
@@ -219,11 +264,32 @@ def create_app() -> FastAPI:
         title="Unisense",
         description="指标语义中台 — 统一指标语义平台",
         version="0.1.0",
-        docs_url="/docs",
-        redoc_url="/redoc",
+        # 自托管 Swagger UI / ReDoc：默认 docs_url 从 jsdelivr CDN 加载资源，
+        # 与全局严格 CSP（default-src 'self'）冲突且内网/离线不可达，改为本地静态资源。
+        docs_url=None,
+        redoc_url=None,
         openapi_url="/openapi.json",
         lifespan=lifespan,
     )
+
+    # 自托管 API 文档静态资源（swagger-ui-dist / redoc，见 backend/static/）
+    app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+
+    @app.get("/docs", include_in_schema=False)
+    async def swagger_ui() -> HTMLResponse:
+        """Swagger UI 交互式 API 文档（本地化静态资源）。"""
+        return _swagger_ui_html(openapi_url="/openapi.json", title="Unisense API 文档")
+
+    @app.get("/redoc", include_in_schema=False)
+    async def redoc_ui() -> HTMLResponse:
+        """ReDoc API 文档（本地化静态资源，关闭 Google Fonts 依赖）。"""
+        return get_redoc_html(
+            openapi_url="/openapi.json",
+            title="Unisense API 文档",
+            redoc_js_url="/static/redoc/redoc.standalone.js",
+            redoc_favicon_url="/static/swagger-ui/favicon.png",
+            with_google_fonts=False,
+        )
 
     # ---- 中间件（顺序：后添加的先执行）----
     # CORS 严格读取 settings.cors_origins_list，allow_credentials=True 时禁止通配符

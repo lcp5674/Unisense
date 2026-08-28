@@ -32,6 +32,22 @@ _SECURITY_HEADERS = {
     "Referrer-Policy": "strict-origin-when-cross-origin",
 }
 
+# 自托管 API 文档页面（/docs /redoc）CSP：资源全部同源（/static/ 本地化，离线可用），
+# 脚本全部为外部文件（script-src 'self'，无 'unsafe-inline'）；Swagger/ReDoc 运行时会向
+# DOM 注入 <style>，故 style-src 需 'unsafe-inline'。frame-ancestors 'none' 防点击劫持。
+_DOCS_CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "font-src 'self' data:; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none'"
+)
+
+# 命中这些路径的响应使用 _DOCS_CSP 替代全局严格 CSP（仅文档页面；API 响应保持严格）
+_DOCS_PATHS = ("/docs", "/redoc")
+
 # error_code → HTTP 状态码覆盖。
 # 鉴权失败（令牌缺失/过期/无效、凭据错误）统一为 401；各类 FORBIDDEN 为 403。
 # 其余错误回落到异常类自身的 http_status（如 404/409/422）。
@@ -177,7 +193,12 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         response = await call_next(request)
         for key, value in _SECURITY_HEADERS.items():
-            response.headers[key] = value
+            # 文档页面（/docs /redoc）使用本地化 CSP（资源同源、script-src 'self'）；
+            # 其余路径保持全局严格策略 default-src 'self'。
+            if key == "Content-Security-Policy" and request.url.path in _DOCS_PATHS:
+                response.headers[key] = _DOCS_CSP
+            else:
+                response.headers[key] = value
         return response
 
 
