@@ -2350,7 +2350,8 @@ export interface AssetMetricDimensionSummary {
     pii_total: number;
     pii_reviewed: number;
     pii_unreviewed: number;
-    review_rate: number;
+    /** null = 无有效 PII 指标（展示「暂无」空态），区别于 0%（有 PII 但全未复核） */
+    review_rate: number | null;
   };
 }
 

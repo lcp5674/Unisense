@@ -1083,6 +1083,36 @@ describe("AssetMap", () => {
     expect(screen.getByText("指标数")).toBeInTheDocument();
   });
 
+  it("overview 指标 PII 合规：无有效 PII 指标时展示空态而非 0%/100%", async () => {
+    const user = userEvent.setup();
+    // 覆盖 beforeEach 默认 mock：PII 合规为空（如唯一 PII 指标已废弃被排除）
+    vi.mocked(fetchAssetMetricDimensions).mockResolvedValue({
+      total: 5,
+      by_type: { atomic: 5 },
+      by_granularity: { day: 5 },
+      by_dw_layer: { DWS: 5 },
+      by_metric_tier: { T1: 5 },
+      by_unit: { cnt: 5 },
+      by_currency: { CNY: 5 },
+      by_aggregation: { SUM: 5 },
+      by_time_semantics: { PERIOD: 5 },
+      by_freshness: { T1: 5 },
+      by_serving_mode: { BATCH_ONLY: 5 },
+      by_additivity: { ADDITIVE: 5 },
+      by_status: { PUBLISHED: 3, DRAFT: 2 },
+      by_domain: { finance: 5 },
+      pii_compliance: { pii_total: 0, pii_reviewed: 0, pii_unreviewed: 0, review_rate: null },
+    });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("概览")).toBeInTheDocument());
+    await user.click(screen.getByText("概览"));
+    await waitFor(() => expect(fetchAssetMetricDimensions).toHaveBeenCalled());
+
+    expect(screen.getByText("指标 PII 合规")).toBeInTheDocument();
+    // 空态文案明确「暂无」，而非误导性 100%/0%
+    expect(screen.getByText("暂无有效 PII 指标（已废弃不参与统计）")).toBeInTheDocument();
+  });
+
   it("overview orphan statistic drills into orphan detail", async () => {
     const user = userEvent.setup();
     vi.mocked(fetchAssetOrphans).mockResolvedValue({

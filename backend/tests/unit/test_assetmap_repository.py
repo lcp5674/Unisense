@@ -987,6 +987,57 @@ class TestAggregations:
         assert out["pii_compliance"]["pii_reviewed"] == 3
         assert out["pii_compliance"]["pii_unreviewed"] == 1
         assert out["pii_compliance"]["review_rate"] == 0.75
+        # 合规统计必须排除 DEPRECATED：已废弃指标不参与 PII 合规分母/分子
+        for i in (0, 1):
+            compiled = str(
+                s.execute.call_args_list[i].args[0].compile(
+                    compile_kwargs={"literal_binds": True}
+                )
+            )
+            assert "pii_flag" in compiled
+            assert "'DEPRECATED'" in compiled
+
+    async def test_metric_dimension_summary_no_pii(self) -> None:
+        """无有效 PII 指标（含废弃被排除后为 0）时 review_rate=None，前端展示空态。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+
+        def dist(*pairs: tuple[str, int]) -> MagicMock:
+            r = MagicMock()
+            r.all.return_value = list(pairs)
+            return r
+
+        r_zero = MagicMock()
+        r_zero.scalar.return_value = 0
+        r_total = MagicMock()
+        r_total.scalar.return_value = 5
+        s.execute = AsyncMock(
+            side_effect=[
+                r_zero,
+                r_zero,
+                r_total,
+                dist(("atomic", 5)),  # type
+                dist(("day", 5)),  # granularity
+                dist(("DWS", 5)),  # dw_layer
+                dist(("T1", 5)),  # tier
+                dist(("cnt", 5)),  # unit
+                dist(("CNY", 5)),  # currency
+                dist(("SUM", 5)),  # aggregation
+                dist(("PERIOD", 5)),  # time_semantics
+                dist(("T1", 5)),  # freshness
+                dist(("BATCH_ONLY", 5)),  # serving_mode
+                dist(("ADDITIVE", 5)),  # additivity
+                dist(("PUBLISHED", 3), ("DRAFT", 2)),  # status（无 DEPRECATED）
+                dist(("sales", 5)),  # domain
+            ]
+        )
+
+        out = await repo.metric_dimension_summary()
+
+        assert out["pii_compliance"]["pii_total"] == 0
+        assert out["pii_compliance"]["pii_reviewed"] == 0
+        assert out["pii_compliance"]["pii_unreviewed"] == 0
+        assert out["pii_compliance"]["review_rate"] is None
 
     async def test_heatmap_matrix(self) -> None:
         """二维热力矩阵：域 × 敏感级别聚合，含 join/group_by 与 PII 判定。"""

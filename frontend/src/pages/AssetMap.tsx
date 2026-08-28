@@ -1408,22 +1408,29 @@ function OverviewTab() {
           })}
           <Col xs={24} sm={12} lg={6}>
             <Card size="small" title="指标 PII 合规" styles={{ body: { padding: "8px 12px" } }}>
-              <Statistic
-                title="合规率"
-                value={
-                  metricDims?.pii_compliance?.review_rate != null
-                    ? Math.round(metricDims.pii_compliance.review_rate * 100)
-                    : 0
-                }
-                suffix="%"
-                valueStyle={{
-                  color: (metricDims?.pii_compliance?.review_rate ?? 0) >= 0.8 ? "#2e9e5b" : "#d64545",
-                }}
-              />
-              <div className="muted" style={{ fontSize: 12 }}>
-                已复核 {metricDims?.pii_compliance?.pii_reviewed ?? 0} /{" "}
-                {metricDims?.pii_compliance?.pii_total ?? 0} 个 PII 指标
-              </div>
+              {metricDims?.pii_compliance?.review_rate == null ? (
+                <>
+                  <Statistic title="合规率" value="—" suffix="" />
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    暂无有效 PII 指标（已废弃不参与统计）
+                  </div>
+                </>
+              ) : (
+                <>
+                  <Statistic
+                    title="合规率"
+                    value={Math.round(metricDims.pii_compliance.review_rate * 100)}
+                    suffix="%"
+                    valueStyle={{
+                      color: metricDims.pii_compliance.review_rate >= 0.8 ? "#2e9e5b" : "#d64545",
+                    }}
+                  />
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    已复核 {metricDims.pii_compliance.pii_reviewed} /{" "}
+                    {metricDims.pii_compliance.pii_total} 个 PII 指标
+                  </div>
+                </>
+              )}
             </Card>
           </Col>
         </Row>

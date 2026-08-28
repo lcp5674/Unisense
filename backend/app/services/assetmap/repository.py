@@ -830,12 +830,18 @@ class AssetMapRepository:
         13 类维度：类型/粒度/分层/分级/单位/币种/聚合/时间语义/新鲜度/服务模式/可加性/状态/域。
         复用 SQL GROUP BY，与热力聚合同源（TD §12.11），避免指标体系口径漂移。
         """
-        # 合规率：已复核 PII 指标 / 全部 PII 指标
+        # 合规率：已复核 PII 指标 / 全部 PII 指标。
+        # 排除 DEPRECATED——已废弃指标已下线、不再对外服务，其复核状态无意义，
+        # 不应参与合规统计（否则废弃测试指标会撑起虚假合规率）。
         pii_total = (
             await self._session.execute(
                 select(func.count())
                 .select_from(Metric)
-                .where(Metric.deleted_at.is_(None), Metric.pii_flag.is_(True))
+                .where(
+                    Metric.deleted_at.is_(None),
+                    Metric.pii_flag.is_(True),
+                    Metric.status != "DEPRECATED",
+                )
             )
         ).scalar() or 0
         pii_reviewed = (
@@ -846,6 +852,7 @@ class AssetMapRepository:
                     Metric.deleted_at.is_(None),
                     Metric.pii_flag.is_(True),
                     Metric.compliance_reviewed.is_(True),
+                    Metric.status != "DEPRECATED",
                 )
             )
         ).scalar() or 0
@@ -873,7 +880,9 @@ class AssetMapRepository:
                 "pii_total": int(pii_total),
                 "pii_reviewed": int(pii_reviewed),
                 "pii_unreviewed": int(pii_total - pii_reviewed),
-                "review_rate": round(float(pii_reviewed) / pii_total, 4) if pii_total else 0.0,
+                # 无 PII 指标时为 None（前端展示「暂无 PII 指标」空态），
+                # 与「有 PII 但 0% 合规」区分开，避免 0/100% 误导。
+                "review_rate": round(float(pii_reviewed) / pii_total, 4) if pii_total else None,
             },
             "total": int(metric_total),
         }
