@@ -872,7 +872,12 @@ describe("DataSources", () => {
 
   it("编辑时提交采样行数（quota.sample_rows）并保留未修改的其他配额项", async () => {
     // 原配置已含 max_scan_rows：后端 quota 为整体覆盖，提交须合并基底不丢字段
-    mockedList.mockResolvedValue({ items: [{ ...source, quota: { max_scan_rows: 5000 } }], total: 1 });
+    mockedList.mockResolvedValue({
+      items: [{ ...source, quota: { max_scan_rows: 5000 } }],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
     mockedUpdate.mockResolvedValue(source);
     renderSources();
     await screen.findByText("mysql_finance");
