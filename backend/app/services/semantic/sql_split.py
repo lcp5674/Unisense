@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections import Counter
 from typing import Any
 
 import sqlglot
@@ -133,11 +134,19 @@ def _split_statement(sql: str) -> list[str]:
     except Exception:
         default_asts = None
     if default_asts is not None:
-        default_segments = [
-            ast.sql().strip()
-            for ast in default_asts
-            if ast is not None and ast.sql().strip()
-        ]
+        # 单语句序列化兜底：默认方言对多方言 DDL（如 ClickHouse ``sumMerge``
+        # 建表）生成可能失败——该语句降级为空串不计入，靠后续工业方言/分号
+        # 切片兜底，绝不因单语句序列化失败炸掉整批（真实实例评测抓出）。
+        default_segments: list[str] = []
+        for ast in default_asts:
+            if ast is None:
+                continue
+            try:
+                text = ast.sql().strip()
+            except Exception:  # noqa: BLE001 - 单语句序列化失败降级
+                text = ""
+            if text:
+                default_segments.append(text)
         if len(default_segments) >= _LLM_SPLIT_MIN_SEGMENTS:
             if len(default_segments) == len(semicolon_segments):
                 return semicolon_segments
@@ -145,13 +154,16 @@ def _split_statement(sql: str) -> list[str]:
     for dialect in _INDUSTRIAL_DIALECTS:
         try:
             asts = sqlglot.parse(sql, dialect=dialect)
-        except Exception:
+        except Exception:  # noqa: BLE001 - 方言解析失败换下一方言
             continue
         segments: list[str] = []
         for ast in asts:
             if ast is None:
                 continue
-            text = ast.sql().strip()
+            try:
+                text = ast.sql().strip()
+            except Exception:  # noqa: BLE001 - 单语句序列化失败降级空串
+                text = ""
             if text:
                 segments.append(text)
         if len(segments) >= _LLM_SPLIT_MIN_SEGMENTS:
@@ -1204,6 +1216,46 @@ def _apply_candidate_validation(
     return kept, summary
 
 
+def _match_candidate_annotation(
+    cand: dict[str, Any],
+    ann_by_key: dict[str, dict[str, Any]],
+    ann_by_idx: dict[str, list[dict[str, Any]]],
+    ann_by_col: dict[str, dict[str, Any]],
+    stmt_cand_counts: dict[str, int],
+    stmt_cands: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    """宽容匹配 LLM annotation 与规则候选（key 形态漂移兜底）。
+
+    LLM 输出的 key 可能是完整 ``0:amount``、仅序号 ``0``（单候选语句）或仅列名
+    ``amount``——严格 ``ann_by_key[cand_key]`` 会静默丢匹配，导致 LLM 补全整体
+    失效（候选无 source=llm、名称不润色、周期不校正），真实实例评测抓出该缺陷。
+    回退规则带歧义防护：
+    - 序号回退：当该语句候选数与序号注解数**完全相等**时，按候选在语句中的出现
+      顺序一一对应（temperature=0 封闭选择下 LLM 输出顺序与 prompt 候选顺序
+      一致，稳定可依赖）；数量不匹配（LLM 漏回/多回）则放弃，保持规则候选，
+      防错配把 is_measure=false 套到错误候选上误删真实度量；
+    - 列名回退：与候选 ``measure_column`` 精确相等才回退。
+    """
+    cand_key = cand.get("key")
+    if cand_key and cand_key in ann_by_key:
+        return ann_by_key[cand_key]
+    stmt_idx = str(cand.get("statement_index", 0))
+    idx_list = ann_by_idx.get(stmt_idx)
+    if idx_list and stmt_cand_counts.get(stmt_idx) == len(idx_list):
+        # 数量完全匹配 → 按该语句候选出现顺序一一对应
+        cands_of_stmt = stmt_cands.get(stmt_idx, [])
+        try:
+            pos = cands_of_stmt.index(cand)
+        except ValueError:
+            pos = -1
+        if 0 <= pos < len(idx_list):
+            return idx_list[pos]
+    col = cand.get("measure_column")
+    if col and col in ann_by_col:
+        return ann_by_col[col]
+    return None
+
+
 def _apply_candidate_annotations(
     candidates: list[dict[str, Any]],
     annotations: list[dict[str, Any]],
@@ -1225,10 +1277,28 @@ def _apply_candidate_annotations(
         ``(收敛后的候选清单, 被 LLM 判为非度量的 skipped 明细)``。
     """
     ann_by_key = {a["key"]: a for a in annotations}
+    # 宽容匹配索引：LLM key 可能只回序号（``0``，单候选语句常见）或列名
+    # （``amount``）而非完整 ``0:amount``——三种形态都建索引，由
+    # ``_match_candidate_annotation`` 按精确→序号→列名回退，防 LLM 补全静默失效。
+    ann_by_idx: dict[str, list[dict[str, Any]]] = {}
+    ann_by_col: dict[str, dict[str, Any]] = {}
+    for a in annotations:
+        k = str(a.get("key", ""))
+        if k.isdigit():
+            ann_by_idx.setdefault(k, []).append(a)
+        else:
+            ann_by_col[k] = a
+    stmt_cand_counts = Counter(str(c.get("statement_index", 0)) for c in candidates)
+    # 语句→候选顺序列表（序号回退按序对应时用）
+    stmt_cands: dict[str, list[dict[str, Any]]] = {}
+    for c in candidates:
+        stmt_cands.setdefault(str(c.get("statement_index", 0)), []).append(c)
     kept: list[dict[str, Any]] = []
     llm_skipped: list[dict[str, Any]] = []
     for cand in candidates:
-        ann = ann_by_key.get(cand["key"])
+        ann = _match_candidate_annotation(
+            cand, ann_by_key, ann_by_idx, ann_by_col, stmt_cand_counts, stmt_cands
+        )
         if ann is None:
             kept.append(cand)
             continue

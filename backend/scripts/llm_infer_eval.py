@@ -30,6 +30,10 @@ from app.db.mysql import async_session_factory
 from app.services.semantic.sql_infer_eval.dataset import GOLDEN
 from app.services.semantic.sql_split import infer_sql_batch
 
+#: 单条用例 LLM 路径超时（秒）——真实免费实例偶发网络错误 + 退避重试可拖到
+#: 数分钟，超时跳过并记录，避免单条卡死拖垮整批评测。
+_CASE_TIMEOUT = 120.0
+
 
 def _cand_sig(c: dict[str, Any]) -> str:
     """候选签名（列|聚合，聚合空按 DERIVED）——与评测集签名口径一致。"""
@@ -61,19 +65,25 @@ def _summarize(cands: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 async def run_case(case: Any) -> dict[str, Any]:
-    """单条用例：规则基线 + LLM 补全（真实实例）。"""
+    """单条用例：规则基线 + LLM 补全（真实实例，带超时保护）。"""
     # 1. 纯规则基线（db=None → 域建议 task 异常被吞降级，零 LLM）
     t0 = time.monotonic()
     rule_res = await infer_sql_batch(None, sql=case.sql, use_llm=False)
     rule_elapsed = time.monotonic() - t0
 
-    # 2. 真实 LLM 补全（容器内 async session + 真实 LLM 实例）
+    # 2. 真实 LLM 补全（容器内 async session + 真实 LLM 实例，整体超时保护）
     t0 = time.monotonic()
     llm_res: dict[str, Any] | None = None
     llm_err: str | None = None
-    try:
+
+    async def _llm_pass() -> dict[str, Any]:
         async with async_session_factory() as db:
-            llm_res = await infer_sql_batch(db, sql=case.sql, use_llm=True)
+            return await infer_sql_batch(db, sql=case.sql, use_llm=True)
+
+    try:
+        llm_res = await asyncio.wait_for(_llm_pass(), timeout=_CASE_TIMEOUT)
+    except TimeoutError:
+        llm_err = f"TimeoutError: 超过 {_CASE_TIMEOUT:.0f}s"
     except Exception as exc:  # noqa: BLE001 - 单条失败不阻断评测
         llm_err = f"{type(exc).__name__}: {exc}"
     llm_elapsed = time.monotonic() - t0
@@ -81,12 +91,26 @@ async def run_case(case: Any) -> dict[str, Any]:
     rule_cands = _summarize(rule_res.get("candidates") or [])
     llm_cands = _summarize(llm_res.get("candidates") or []) if llm_res else []
 
-    rule_sigs = {_cand_sig(c) for c in rule_res.get("candidates") or [] if c.get("type") != "composite"}
-    llm_sigs = {_cand_sig(c) for c in (llm_res or {}).get("candidates") or [] if c.get("type") != "composite"}
+    rule_sigs = {
+        _cand_sig(c)
+        for c in rule_res.get("candidates") or []
+        if c.get("type") != "composite"
+    }
+    llm_sigs = {
+        _cand_sig(c)
+        for c in (llm_res or {}).get("candidates") or []
+        if c.get("type") != "composite"
+    }
 
     llm_applied = any(c.get("source") == "llm" for c in llm_cands)
-    dropped = sorted(rule_sigs - llm_sigs)
-    invented = sorted(llm_sigs - rule_sigs)
+    # LLM 路径整体失败（llm_res=None）时，候选保持规则不动——不是"LLM 剔除"，
+    # 不计入误杀/发明（否则会把全部规则候选误报为被误杀，统计失真）。
+    if llm_res is None:
+        dropped: list[str] = []
+        invented: list[str] = []
+    else:
+        dropped = sorted(rule_sigs - llm_sigs)
+        invented = sorted(llm_sigs - rule_sigs)
 
     name_changes: list[tuple[str, str, str]] = []
     llm_by_key = {c["key"]: c for c in llm_cands}
@@ -140,6 +164,7 @@ def format_report(results: list[dict[str, Any]]) -> str:
     ]
     total_llm_ok = sum(1 for r in results if not r["llm_err"])
     total_applied = sum(1 for r in results if r["llm_applied"])
+    total_failed_degrade = sum(1 for r in results if r["llm_err"])  # LLM 失败→降级规则候选
     total_dropped = sum(len(r["dropped"]) for r in results)
     total_invented = sum(len(r["invented"]) for r in results)
     total_renamed = sum(len(r["name_changes"]) for r in results)
@@ -152,7 +177,8 @@ def format_report(results: list[dict[str, Any]]) -> str:
         "-" * 60,
         f"LLM 路径可用（无异常）: {total_llm_ok}/{len(results)}",
         f"LLM 补全实际生效（候选带 source=llm）: {total_applied}/{len(results)}",
-        f"度量误杀（规则有、LLM 剔除）: {total_dropped}",
+        f"LLM 失败→降级保持规则候选: {total_failed_degrade}",
+        f"度量误杀（LLM 成功但剔除真实度量）: {total_dropped}",
         f"度量发明（LLM 新增）: {total_invented}",
         f"名称被 LLM 润色（规则名→LLM 名）: {total_renamed} 处",
         f"周期匹配规则路径: {period_rule_ok}/{len(results)}",
@@ -167,7 +193,8 @@ def format_report(results: list[dict[str, Any]]) -> str:
             f"耗时: 规则={r['rule_elapsed']}s  LLM={r['llm_elapsed']}s"
             + (f"  [异常: {r['llm_err']}]" if r["llm_err"] else ""),
             f"LLM 补全: {'生效' if r['llm_applied'] else '未生效/降级'}",
-            f"周期: 规则={r['rule_period'] or '-'}  LLM={r['llm_period'] or '-'}  期望={r['expected_period']}",
+            f"周期: 规则={r['rule_period'] or '-'}  LLM={r['llm_period'] or '-'}  "
+            f"期望={r['expected_period']}",
         ]
         if r["dropped"]:
             lines.append(f"  ⚠ 度量误杀: {r['dropped']}")
@@ -193,6 +220,8 @@ async def main_async(args: argparse.Namespace) -> None:
         if not cases:
             print(f"未找到用例: {args.case}")
             return
+    if args.start:
+        cases = cases[args.start :]
     if args.limit:
         cases = cases[: args.limit]
 
@@ -211,6 +240,7 @@ async def main_async(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="LLM 分支真实实例对照评测")
     parser.add_argument("--limit", type=int, default=0, help="只跑前 N 条")
+    parser.add_argument("--start", type=int, default=0, help="跳过前 N 条")
     parser.add_argument("--case", type=str, default="", help="只跑指定 case_id")
     parser.add_argument("--rule-only", action="store_true", help="只跑规则基线（不调 LLM）")
     args = parser.parse_args()

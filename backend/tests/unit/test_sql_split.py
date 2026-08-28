@@ -1584,6 +1584,9 @@ async def test_infer_sql_batch_colname_ratio_is_composite() -> None:
     comps = [c for c in result["candidates"] if c["type"] == "composite"]
     assert len(comps) == 1
     assert comps[0]["key"] == "0:refund_rate"
+
+
+async def test_infer_sql_batch_use_llm_fallback_keeps_rule_candidates() -> None:
     """use_llm 兜底：LLM 补全不可用/失败（返回 None）→ 保持规则候选不动（source=rule）。"""
     sql = "SELECT dt, SUM(amount) AS gmv FROM dwd_order_di GROUP BY dt"
     with patch(
@@ -1596,6 +1599,35 @@ async def test_infer_sql_batch_colname_ratio_is_composite() -> None:
     assert len(result["candidates"]) == 1
     assert result["candidates"][0]["source"] == "rule"
     assert result["candidates"][0]["metric_code"] == "sales_order_amount_day"
+
+
+async def test_infer_sql_batch_use_llm_index_key_fallback_ordered() -> None:
+    """use_llm 宽容匹配（真实实例评测抓出）：LLM 输出 key 仅序号（``0``）而非完整
+    ``0:gmv``/``0:buyer_cnt`` 时，同语句候选数与序号注解数一致 → 按候选出现顺序
+    一一对应，名称润色/source=llm 正常生效（不因 key 形态漂移静默失效）。"""
+    sql = (
+        "SELECT dt, SUM(amount) AS gmv, COUNT(DISTINCT user_id) AS buyer_cnt "
+        "FROM dwd_order_di GROUP BY dt"
+    )
+    with patch(
+        "app.services.semantic.sql_split._llm_annotate_candidates",
+        new=AsyncMock(
+            return_value=[
+                {"key": "0", "is_measure": True, "name": "日支付成交额",
+                 "period": "day", "confidence": 0.9},
+                {"key": "0", "is_measure": True, "name": "日支付买家数",
+                 "period": "day", "confidence": 0.95},
+            ]
+        ),
+    ):
+        result = await infer_sql_batch(
+            _fake_db(), sql=sql, split_mode="statement", domain_code="sales", use_llm=True
+        )
+    by_key = {c["key"]: c for c in result["candidates"]}
+    assert by_key["0:gmv"]["source"] == "llm"
+    assert by_key["0:gmv"]["name"] == "日支付成交额"
+    assert by_key["0:buyer_cnt"]["source"] == "llm"
+    assert by_key["0:buyer_cnt"]["name"] == "日支付买家数"
 
 
 async def test_infer_sql_batch_use_llm_raises_budget() -> None:
