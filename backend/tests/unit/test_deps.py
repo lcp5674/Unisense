@@ -137,3 +137,25 @@ class TestRequireRoles:
         check = deps.require_roles("platform_admin", "domain_admin")
         with pytest.raises(AuthError):
             await check(user, MagicMock())
+
+    async def test_must_change_password_blocks_all_gates(self) -> None:
+        """S1（审查修复）：首次登录强制改密未完成前，受 require_roles 保护的
+        一切端点（含写操作）均应拒绝，即便角色命中。"""
+        user = _make_user(role="platform_admin")
+        user.must_change_password = True
+        check = deps.require_roles("platform_admin", "domain_admin")
+        with pytest.raises(AuthError, match="须先修改初始密码"):
+            await check(user, MagicMock())
+
+    async def test_must_change_password_false_passes(self) -> None:
+        """S1 边界：mock 用户无该属性（MagicMock）或 False 时正常放行。"""
+        user = _make_user(role="platform_admin")
+        check = deps.require_roles("platform_admin")
+        result = await check(user, MagicMock())
+        assert result is user
+        # MagicMock 无属性场景：getattr 默认 False 不触发拦截（roles_all 需配置）
+        fake = MagicMock()
+        fake.roles_all.return_value = ["platform_admin"]
+        fake.must_change_password = MagicMock()
+        result2 = await check(fake, MagicMock())
+        assert result2 is fake

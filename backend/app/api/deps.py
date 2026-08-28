@@ -139,6 +139,15 @@ def require_roles(*allowed_roles: str) -> Callable[..., Awaitable[User]]:
         user: CurrentUser,
         db: Annotated[AsyncSession, Depends(get_db_session)],
     ) -> User:
+        # S1（审查修复）：首次登录强制改密未完成前，禁止访问一切受角色门禁保护的
+        # 端点（含写操作与业务读）。改密端点 /me/password 与 /me 走 CurrentUser，
+        # 不受影响——前端据此引导跳转强制改密页。
+        # 严格 is True：测试 mock 用户（MagicMock）无该字段时不应触发拦截。
+        if getattr(user, "must_change_password", False) is True:
+            raise AuthError(
+                "首次登录须先修改初始密码，请前往修改密码后再继续操作",
+                error_code="PASSWORD_CHANGE_REQUIRED",
+            )
         # 方案 A 多角色：命中用户任意角色（主角色 user.role ∪ user_role 表）即放行。
         if any(r in allowed_roles for r in user.roles_all()):
             return user

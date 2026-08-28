@@ -657,6 +657,11 @@ async def change_my_password(
         trace_id=trace_id,
     )
     await db.commit()
+    # S2（审查修复）：改密后吊销该用户活跃 refresh token——被劫持的 refresh
+    # 在剩余 7 天有效期内不再能续期 access，强制重新登录。
+    from app.core.security import revoke_active_refresh
+
+    await revoke_active_refresh(user.id)
     return ok({"user_id": user.id, "ok": True}, trace_id=trace_id)
 
 
@@ -817,6 +822,11 @@ async def reset_password(
         trace_id=trace_id,
     )
     await db.commit()
+    # S2（审查修复）：管理员重置密码后吊销该用户活跃 refresh token——
+    # 若旧 refresh 被泄露，攻击者不能再续期 access 继续使用旧会话。
+    from app.core.security import revoke_active_refresh
+
+    await revoke_active_refresh(row.id)
     # 定向通知被重置用户（安全感知，防"被重置"）；不含明文密码
     await _notify_user(
         db,

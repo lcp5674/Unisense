@@ -83,6 +83,31 @@ class TestValidateProductionConfig:
         s = _mk(es_password="", minio_secret_key="")
         assert s.env == "prod"
 
+    def test_staging_env_also_enforces_production_checks(self) -> None:
+        """S3（审查修复）：生产校验须覆盖 staging/production 等非 local 取值，
+        而非仅精确匹配 env=='prod'——否则漏配/别名环境会跳过全部安全校验。"""
+        s = Settings(
+            _env_file=None,
+            env="staging",
+            db_url="mysql+pymysql://u:p@localhost:3306/db",
+            jwt_secret="x" * 40,
+            fernet_key="fernet-key-for-prod",
+            olap_url="http://doris:8030",
+            cors_origins="https://app.example.com",
+        )
+        assert s.env == "staging"
+        # staging 同样拒绝短密钥
+        with pytest.raises(ConfigurationError, match="JWT_SECRET"):
+            _mk(env="staging", jwt_secret="short")
+        # local/dev/test 不触发生产校验
+        s_local = Settings(
+            _env_file=None,
+            env="local",
+            db_url="mysql+pymysql://u:p@localhost:3306/db",
+            jwt_secret="short",
+        )
+        assert s_local.env == "local"
+
 
 class TestDorisDerivedFromOlapUrl:
     """P0-1：OLAPExecutor 实际连接用 doris_host/port，生产校验却强制 olap_url 非空——

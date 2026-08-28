@@ -73,6 +73,10 @@ async def check_pending_version_timeouts(ctx: dict[str, Any]) -> list[int]:
                     version=version,
                     exc_info=True,
                 )
+                # T2（审查修复）：单条失败须回滚会话，否则 session 进入
+                # rolled-back 态，后续循环全部抛 PendingRollbackError，
+                # 最终 commit 崩溃 → 整轮结果全丢。
+                await db.rollback()
 
         await db.commit()
 
@@ -125,6 +129,9 @@ async def refresh_health_scores(ctx: dict[str, Any]) -> int:
                     "health_refresh_failed",
                     metric_id=metric.id,
                 )
+                # T2（审查修复）：单条失败回滚会话，避免 rolled-back 态污染
+                # 后续循环（PendingRollbackError）致整轮健康分刷新全丢。
+                await db.rollback()
 
         await db.commit()
 
@@ -257,6 +264,8 @@ async def check_experimental_expiry(ctx: dict[str, Any]) -> list[int]:
                     metric_id=metric.id,
                     exc_info=True,
                 )
+                # T2（审查修复）：单条失败回滚会话，避免污染后续循环与最终 commit。
+                await db.rollback()
 
         await db.commit()
 
@@ -379,6 +388,8 @@ async def check_dsd_overdue(ctx: dict[str, Any]) -> list[int]:
                     metric_id=metric.id,
                     exc_info=True,
                 )
+                # T2（审查修复）：单条失败回滚会话，避免污染后续循环与最终 commit。
+                await db.rollback()
 
         await db.commit()
 

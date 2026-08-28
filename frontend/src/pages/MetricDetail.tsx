@@ -1998,15 +1998,16 @@ export function MetricDetail() {
             onClick={() =>
               Modal.confirm({
                 title: "确认删除指标？",
-                content: `「${metric.name}」（${metric.metric_code}）为 ${metric.status === "DEPRECATED" ? "已废弃" : "DRAFT 草稿"}，删除后进入回收站（可在已归档列表恢复），不再对外可见。确认继续？`,
+                content: `「${metric.name}」（${metric.metric_code}）为 ${metric.status === "DEPRECATED" ? "已废弃" : "DRAFT 草稿"}，删除后进入回收站（可在回收站恢复），不再对外可见。确认继续？`,
                 okText: "确认删除",
                 cancelText: "取消",
                 okButtonProps: { danger: true },
                 onOk: () =>
                   runAction(() => deleteMetric(metric.metric_code), "删除指标").then(() => {
-                    // 删除后提示恢复路径：软删指标进回收站，可在目录页「已归档」视图恢复（复审 P2-9）
-                    message.success("指标已删除，可在指标目录『已归档』视图中恢复");
-                    navigate("/metrics");
+                    // 删除后提示恢复路径：软删指标进回收站，可在指标目录右上角「回收站」恢复
+                    // P1（审查修复）：跳转改 /catalog（/metrics 无对应路由，原实现落入通配符静默跳转）
+                    message.success("指标已删除，可在指标目录右上角『回收站』中恢复");
+                    navigate("/catalog");
                   }),
               })
             }

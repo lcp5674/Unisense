@@ -186,8 +186,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_config(self) -> Settings:
-        """生产环境校验：jwt_secret≥32字符、Fernet密钥必须独立、olap_url必须非空、CORS 禁通配符。"""
-        if self.env == "prod":
+        """生产环境校验：jwt_secret≥32字符、Fernet密钥必须独立、olap_url必须非空、CORS 禁通配符。
+
+        S3（审查修复）：原先仅 env=="prod" 精确匹配生效，staging/production 等取值或
+        漏配（默认 local）会跳过全部校验。改为「非 local/dev/test 一律按生产校验」。
+        """
+        if self.env not in ("local", "dev", "test"):
             if len(self.jwt_secret) < 32:
                 raise ConfigurationError(
                     "生产环境 UNISENSE_JWT_SECRET 必须≥32字符，当前长度="

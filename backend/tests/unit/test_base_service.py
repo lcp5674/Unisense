@@ -55,10 +55,35 @@ class TestWriteAudit:
 
 
 class TestPublishEvent:
-    async def test_publish_event_passthrough(self, eventbus: MagicMock) -> None:
+    async def test_publish_event_collects_until_commit(self, eventbus: MagicMock) -> None:
+        """T1（审查修复）：_publish_event 仅收集到待投递队列，不立即 publish。"""
         svc = BaseService(MagicMock(), eventbus=eventbus)
         await svc._publish_event("metric.created", {"code": "m1"}, actor_id="9")
-        eventbus.publish.assert_awaited_once_with("metric.created", {"code": "m1"}, "9")
+        assert len(svc._pending_events) == 1
+        assert svc._pending_events[0] == ("metric.created", {"code": "m1"}, "9")
+        eventbus.publish.assert_not_awaited()
+
+    async def test_after_commit_flushes_pending_events(self, eventbus: MagicMock) -> None:
+        """T1：after_commit 回调触发异步投递；commit 失败/未 commit 不投递。"""
+        svc = BaseService(MagicMock(), eventbus=eventbus)
+        await svc._publish_event("metric.created", {"code": "m1"}, actor_id="9")
+        await svc._publish_event("metric.updated", {"code": "m1"}, actor_id="9")
+        # 模拟 SQLAlchemy after_commit 回调（同步）
+        svc._on_after_commit(None)
+        # 等待 create_task 派发的异步投递完成
+        import asyncio
+
+        await asyncio.sleep(0.02)
+        assert eventbus.publish.await_count == 2
+        assert svc._pending_events == []
+
+    async def test_no_commit_no_flush(self, eventbus: MagicMock) -> None:
+        """T1：未触发 after_commit（如事务回滚）时事件不投递。"""
+        svc = BaseService(MagicMock(), eventbus=eventbus)
+        await svc._publish_event("metric.created", {"code": "m1"}, actor_id="9")
+        # 不回滚也不提交——仅收集，不投递
+        eventbus.publish.assert_not_awaited()
+        assert len(svc._pending_events) == 1
 
 
 class TestDefaultInjection:

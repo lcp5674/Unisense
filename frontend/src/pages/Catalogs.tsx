@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip, Drawer, Empty, Descriptions, Dropdown, Checkbox, Collapse } from "antd";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip, Drawer, Empty, Descriptions, Dropdown, Checkbox, Collapse, Popconfirm } from "antd";
 import { PlusOutlined, ReloadOutlined, DeleteOutlined, EyeOutlined, SyncOutlined, ArrowLeftOutlined, HeartOutlined, SettingOutlined } from "@ant-design/icons";
 import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, listDataSources, listCatalogDatabases, refreshCatalogEntity, inferColumnDescription, inferDescriptions, updateColumnDescription, listFavorites, addFavorite, removeFavorite, UnisenseApiError } from "../api";
 import type { DBCatalog, DataSource, SchemaColumn } from "../types";
@@ -507,6 +507,28 @@ export function Catalogs() {
     try {
       const res = await bulkDeprecateCatalogs(selected.map((i) => ({ source_id: i.source_id, entity_name: i.entity_name })));
       message.success(`批量废弃成功 ${res.succeeded.length} 项${res.failed.length ? `，失败 ${res.failed.length}` : ""}`);
+      // P2（审查修复）：失败项展示逐条明细，不再只给一个失败计数
+      if (res.failed.length > 0) {
+        Modal.warning({
+          title: `批量废弃 ${res.failed.length} 项失败`,
+          width: 560,
+          content: (
+            <div style={{ maxHeight: 320, overflow: "auto" }}>
+              {res.failed.map((f, i) => {
+                const row = f as Record<string, unknown>;
+                const key = row.entity_name ?? row.source_id ?? JSON.stringify(row);
+                const reason = typeof row.error === "string" ? row.error : row.reason ?? "";
+                return (
+                  <div key={i} style={{ padding: "6px 0", borderBottom: "1px dashed var(--line)", fontSize: 13 }}>
+                    <div style={{ fontWeight: 500 }}>{String(key)}</div>
+                    {reason ? <div style={{ color: "var(--text-tertiary)" }}>{String(reason)}</div> : null}
+                  </div>
+                );
+              })}
+            </div>
+          ),
+        });
+      }
       setSelectedRowKeys([]);
       load();
     } catch (err) {
@@ -808,9 +830,15 @@ export function Catalogs() {
             }}
           />
           {canDeprecateCatalog && selectedRowKeys.length > 0 && (
-            <Button danger icon={<DeleteOutlined />} onClick={handleBulkDeprecate}>
-              批量废弃（{selectedRowKeys.length}）
-            </Button>
+            <Popconfirm
+              title={`确认批量废弃选中的 ${selectedRowKeys.length} 个目录实体？`}
+              description="废弃后实体在治理视图中不再作为活跃资产展示，可重新启用；该操作不可撤销。"
+              okText="确认废弃"
+              cancelText="取消"
+              onConfirm={handleBulkDeprecate}
+            >
+              <Button danger icon={<DeleteOutlined />}>批量废弃（{selectedRowKeys.length}）</Button>
+            </Popconfirm>
           )}
           <Dropdown
             trigger={["click"]}

@@ -6,13 +6,18 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Protocol, runtime_checkable
 
+import structlog
+from sqlalchemy import event as sa_event
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import write_audit
 from app.core.config import Settings
 from app.core.eventbus import EventBus
+
+logger = structlog.get_logger("unisense.base_service")
 
 
 @runtime_checkable
@@ -41,6 +46,14 @@ class BaseService:
         self._db = db
         self._eventbus = eventbus or self._get_default_eventbus()
         self._settings = settings or self._get_default_settings()
+        # T1（审查修复）：事件延迟到事务提交后投递（after_commit），杜绝
+        # publish-before-commit——commit 失败时事件队列不投递，订阅方不会
+        # 收到「已创建/已回滚」但库中不存在的消息。
+        self._pending_events: list[tuple[str, dict[str, Any], str]] = []
+        try:
+            sa_event.listen(db.sync_session, "after_commit", self._on_after_commit)
+        except Exception:  # noqa: BLE001 - 测试 mock 会话或非 SQLAlchemy 会话时忽略
+            pass
 
     async def _write_audit(
         self,
@@ -81,14 +94,44 @@ class BaseService:
         payload: dict[str, Any],
         actor_id: str = "",
     ) -> None:
-        """发布事件（best-effort，失败仅告警）。
+        """收集事件到待投递队列（T1：事务提交后统一投递，见 ``_on_after_commit``）。
 
         Args:
             event_type: 事件类型。
             payload: 事件负载。
             actor_id: 事件发起者 ID。
         """
-        await self._eventbus.publish(event_type, payload, actor_id)
+        self._pending_events.append((event_type, payload, actor_id))
+
+    def _on_after_commit(self, _session: Any) -> None:
+        """SQLAlchemy after_commit 回调：事务提交成功后异步投递待发事件。
+
+        同步回调内不能 await，故 create_task 派发；commit 失败/回滚时本回调
+        不触发，事件队列随 service 实例丢弃（best-effort 语义，不补发）。
+        """
+        if not self._pending_events:
+            return
+        try:
+            asyncio.get_running_loop().create_task(self._flush_pending_events())
+        except RuntimeError:
+            # 无运行循环（CLI/极少数同步场景）：事件丢失，仅告警
+            logger.warning(
+                "event_flush_no_running_loop",
+                pending=len(self._pending_events),
+            )
+
+    async def _flush_pending_events(self) -> None:
+        """逐个投递待发事件并清空队列（best-effort，失败仅告警）。"""
+        events, self._pending_events = self._pending_events, []
+        for event_type, payload, actor_id in events:
+            try:
+                await self._eventbus.publish(event_type, payload, actor_id)
+            except Exception as exc:  # noqa: BLE001 - best-effort 不阻断业务
+                logger.warning(
+                    "event_publish_failed",
+                    event_type=event_type,
+                    error=str(exc),
+                )
 
     @staticmethod
     def _get_default_eventbus() -> EventBus:
