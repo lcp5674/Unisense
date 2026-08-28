@@ -1138,7 +1138,7 @@ async def test_promote_pending_version_applies_mount_change():
 
     mount = _mount_with()
     with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
-        mrepo_cls.return_value.get_by_metric = AsyncMock(return_value=mount)
+        mrepo_cls.return_value.get_default_mount = AsyncMock(return_value=mount)
         result = await svc._promote_pending_version(
             metric, version=6, trigger="consumer_confirm", actor_id=1
         )
@@ -1149,6 +1149,41 @@ async def test_promote_pending_version_applies_mount_change():
     # metric_mount.granularity 同步（挂载变更确认后生效）
     assert mount.granularity == "月"
     assert result is not None
+
+
+async def test_promote_pending_version_multi_mount_uses_default_mount():
+    """多变体（0105 放开一指标多挂载）存量单字段变更转正：走 get_default_mount，
+    回写默认变体，不再因 MultipleResultsFound 500。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(status="PUBLISHED", type="derived", granularity="日", row_version=5)
+    version_obj = MagicMock()
+    version_obj.definition_json = metric.definition_json
+    version_obj.diff_json = {
+        "source_table": {
+            "before": "dwd.sales_detail",
+            "after": "dwd.sales_detail_v2",
+            "change_type": "BREAKING",
+            "mount_change": True,
+        },
+    }
+    repo.get_version = AsyncMock(return_value=version_obj)
+    updated = make_metric(status="PUBLISHED", type="derived", granularity="日", row_version=6)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
+    repo.mark_version_published = AsyncMock()
+    svc._cache.invalidate = AsyncMock()
+    svc._register_metric_lineage_full = AsyncMock()
+    svc._db.flush = AsyncMock()
+
+    default_mount = _mount_with(source_table="dwd.sales_detail")
+    with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
+        mrepo_cls.return_value.get_default_mount = AsyncMock(return_value=default_mount)
+        await svc._promote_pending_version(
+            metric, version=6, trigger="consumer_confirm", actor_id=1
+        )
+
+    # 默认变体挂载行 source_table 回写（多挂载下不再抛 MultipleResultsFound）
+    mrepo_cls.return_value.get_default_mount.assert_awaited_once_with(metric.id)
+    assert default_mount.source_table == "dwd.sales_detail_v2"
 
 
 async def test_create_derived_multi_mount_persists_all():

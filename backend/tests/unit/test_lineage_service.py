@@ -1692,7 +1692,7 @@ async def test_register_metric_from_definition_mount_authority() -> None:
     )
     mount = SimpleNamespace(source_table="dws.gmv_new", source_column="amount")
     with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
-        mrepo_cls.return_value.get_by_metric = AsyncMock(return_value=mount)
+        mrepo_cls.return_value.get_default_mount = AsyncMock(return_value=mount)
         edges = await svc.register_metric_from_definition(metric)
 
     # 表边差异同步使用挂载权威 source_table（而非 definition_json 旧值）
@@ -1705,6 +1705,31 @@ async def test_register_metric_from_definition_mount_authority() -> None:
     assert len(edges) == 1
     assert edges[0].edge_type == "DERIVED_FROM"
     assert edges[0].target_node == "table:dws.gmv_new"
+
+
+async def test_register_metric_from_definition_multi_mount_uses_default_mount() -> None:
+    """多变体（0105 放开一指标多挂载）：血缘取默认变体源表为权威。
+
+    挂载多行时不得走单行查询（MultipleResultsFound 静默回退陈旧 definition_json），
+    须经 get_default_mount 解析默认变体（default_period 优先/id 最小行）。
+    """
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    svc._repo = repo
+    metric = SimpleNamespace(
+        id=42,
+        metric_code="sales_gmv_daily",
+        definition_json={"source_table": "dws.gmv_old", "measure_column": "amount"},
+    )
+    default_mount = SimpleNamespace(source_table="dws.gmv_default", source_column="amount")
+    with patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls:
+        mrepo_cls.return_value.get_default_mount = AsyncMock(return_value=default_mount)
+        edges = await svc.register_metric_from_definition(metric)
+
+    mrepo_cls.return_value.get_default_mount.assert_awaited_once_with(42)
+    table_sync = [c for c in repo.upsert_calls if c.get("op") == "sync_metric_table_edges"]
+    assert table_sync and table_sync[0]["downstream"] == "dws.gmv_default"
+    assert edges[0].target_node == "table:dws.gmv_default"
 
 
 async def test_register_metric_from_definition_downstream_tables() -> None:

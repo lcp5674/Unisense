@@ -104,10 +104,17 @@ class TestMountRepository:
         session.execute = AsyncMock(return_value=_FakeResult(row=obj))
         assert await repo.get(1) is obj
 
-    async def test_get_by_metric(self, repo, session) -> None:
-        obj = _mount()
-        session.execute = AsyncMock(return_value=_FakeResult(row=obj))
-        assert await repo.get_by_metric(1) is obj
+    async def test_get_default_mount_returns_default_period_row(self, repo, session) -> None:
+        """多变体默认变体解析：default_period 非空行优先。"""
+        m1 = _mount(mount_id=1)
+        m1.default_period = None
+        m2 = _mount(mount_id=2)
+        session.execute = AsyncMock(return_value=_FakeResult(rows=[m1, m2]))
+        assert await repo.get_default_mount(1) is m2
+
+    async def test_get_default_mount_empty_returns_none(self, repo, session) -> None:
+        session.execute = AsyncMock(return_value=_FakeResult(rows=[]))
+        assert await repo.get_default_mount(1) is None
 
     async def test_list_filters_and_paginates(self, repo, session) -> None:
         rows = [(_mount(), _metric())]
@@ -134,7 +141,6 @@ async def _svc() -> tuple[MetricMountService, MagicMock]:
     svc = MetricMountService(db)
     repo = MagicMock()
     repo.get = AsyncMock(return_value=None)
-    repo.get_by_metric = AsyncMock(return_value=None)
     repo.save = AsyncMock(side_effect=lambda m: _persist(m))
     repo.soft_delete = AsyncMock()
     repo.commit = AsyncMock()

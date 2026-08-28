@@ -63,7 +63,12 @@ class MetricMountService(BaseService):
         return mount
 
     async def get_mount_by_metric(self, metric_id: int) -> MetricMount | None:
-        return await self._repo.get_by_metric(metric_id)
+        """按指标取默认变体挂载（多变体下取 default_period 优先/id 最小行）。
+
+        2026-08-27 放开一指标多挂载后「取唯一挂载行」语义失效，统一走
+        ``get_default_mount`` 默认变体解析，避免 MultipleResultsFound。
+        """
+        return await self._repo.get_default_mount(metric_id)
 
     async def list_mounts(
         self,

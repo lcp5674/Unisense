@@ -4230,7 +4230,10 @@ class MetricService(BaseService):
             from app.services.metric_mount.repository import MetricMountRepository
 
             _mrepo = MetricMountRepository(self._db)
-            mount = await _mrepo.get_by_metric(metric.id)
+            # 存量单字段变更（granularity/source_table）回写默认变体挂载行——
+            # 多变体下取 default_period 优先/id 最小行，避免 scalar_one 抛
+            # MultipleResultsFound（0105 放开一指标多挂载后 get_by_metric 已移除）。
+            mount = await _mrepo.get_default_mount(metric.id)
             if mount is not None:
                 if "granularity" in mount_updates:
                     mount.granularity = mount_updates["granularity"]

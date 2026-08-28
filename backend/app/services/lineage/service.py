@@ -1291,12 +1291,14 @@ class LineageService(BaseService):
         # OneData 挂载层权威（界限文档 §2.3）：派生指标挂载实体可经挂载 API 独立更新，
         # 此时 definition_json 的 source_table/measure_column 冗余可能过期——血缘以
         # metric_mount 为准，definition_json 兜底（存量无挂载指标）。查询失败不阻断。
+        # 多变体（0105 放开一指标多挂载）取默认变体（default_period 优先/id 最小行），
+        # 避免 scalar_one 抛 MultipleResultsFound 静默回退陈旧 definition_json。
         source_table = definition.get("source_table")
         measure_column = definition.get("measure_column")
         try:
             from app.services.metric_mount.repository import MetricMountRepository
 
-            mount = await MetricMountRepository(self._db).get_by_metric(metric.id)
+            mount = await MetricMountRepository(self._db).get_default_mount(metric.id)
             if mount is not None and isinstance(mount.source_table, str) and mount.source_table:
                 source_table = mount.source_table
                 if isinstance(mount.source_column, str) and mount.source_column:

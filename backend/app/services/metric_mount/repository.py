@@ -26,12 +26,6 @@ class MetricMountRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
-    async def get_by_metric(self, metric_id: int) -> MetricMount | None:
-        stmt = select(MetricMount).where(
-            MetricMount.metric_id == metric_id, MetricMount.deleted_at.is_(None)
-        )
-        return (await self._session.execute(stmt)).scalar_one_or_none()
-
     async def list_by_metric(self, metric_id: int) -> list[MetricMount]:
         """按指标列出全部挂载行（多变体；按 id 升序，稳定默认变体取行）。"""
         stmt = (
