@@ -6,11 +6,13 @@
 - 生产语义（FR-030）：table_schema 取 connection_config.schema（默认 public），
   不再误用业务 domain 作为 schema
 - @registry.register("postgres") 注册
+- 支持全字段样本采样（PII 精度增强：name+sample 双验证）
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -48,6 +50,10 @@ class PostgresCollector(BaseCollector):
         }
     )
 
+    # 采样常量（与 mysql.py 对齐，仅标识符引用符不同）
+    _SAMPLE_BATCH = 20
+    _IDENT_RE = re.compile(r"^[A-Za-z0-9_$]+$")
+
     def __init__(
         self,
         connector: SqlalchemyConnector,
@@ -73,6 +79,65 @@ class PostgresCollector(BaseCollector):
             if name and name not in self._EXCLUDE_SCHEMAS:
                 names.append(str(name))
         return names
+
+    async def _sample_columns(
+        self, entity_name: str, columns: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """对字段执行批量列采样（PII 精度增强：name+sample 双验证）。
+
+        与 ``InformationSchemaCollector._sample_columns`` 同构：每批最多
+        ``_SAMPLE_BATCH`` 列，一次 ``SELECT c1,...,ck ... LIMIT n`` 取 n 行，
+        逐列取第一个非空值，经 ``_mask_sample`` 打码后写入 ``columns[].sample``。
+
+        方言差异（PostgreSQL）：标识符用**双引号**包裹——PG 不支持 MySQL 的反引号，
+        且未加引号的标识符会被折叠为小写，导致驼峰列名查询失败。
+
+        Args:
+            entity_name: 实体名，形如 ``schema.table``；单 schema 模式下可为裸表名
+                （此时回退 ``self._schema`` 定位 schema）。
+            columns: 字段定义列表（name/type/comment 等）。
+
+        Returns:
+            写入 sample 后的字段列表（未开启采样/非法标识符时原样返回）。
+        """
+        if not self._sampling_max_rows or not columns:
+            return columns
+        if "." in entity_name:
+            schema, tbl = entity_name.rsplit(".", 1)
+        else:
+            schema, tbl = self._schema or "", entity_name
+        if not schema or not tbl:
+            return columns
+        if not self._IDENT_RE.match(schema) or not self._IDENT_RE.match(tbl):
+            return columns
+        n = self._sampling_max_rows
+        for start in range(0, len(columns), self._SAMPLE_BATCH):
+            batch = columns[start : start + self._SAMPLE_BATCH]
+            safe: list[tuple[dict[str, Any], str]] = []
+            for col in batch:
+                name = str(col.get("name", "")).strip()
+                if name and self._IDENT_RE.match(name):
+                    safe.append((col, name))
+            if not safe:
+                continue
+            select = ",".join(f'"{name}"' for _, name in safe)
+            where = " OR ".join(f'"{name}" IS NOT NULL' for _, name in safe)
+            sql = f'SELECT {select} FROM "{schema}"."{tbl}" WHERE {where} LIMIT {n}'
+            try:
+                rows = await self._connector.query(sql)
+            except Exception as exc:  # noqa: BLE001 - 采样失败不拖垮采集，仅记录
+                logger.warning("采样失败 entity=%s error=%s", entity_name, exc)
+                continue
+            for col, name in safe:
+                value = ""
+                for r in rows:
+                    v = r.get(name)
+                    if v is not None and str(v) not in ("", "NULL"):
+                        value = str(v)
+                        break
+                if value:
+                    col["sample"] = self._mask_sample(value)
+        return columns
 
     async def collect_entity(self, source: Any, entity_name: str) -> CatalogSpec | None:
         """单表元数据刷新：仅查询目标表列元数据（含 pg_description 注释）。
@@ -125,6 +190,9 @@ class PostgresCollector(BaseCollector):
         ]
         if not cols:
             return None
+        # PII 精度增强：全字段采样（批量列查询，样本打码）
+        if self._sampling_max_rows:
+            await self._sample_columns(f"{schema}.{tbl}", cols)
         return CatalogSpec(
             entity_name=entity_name,
             entity_type="TABLE",
@@ -214,6 +282,9 @@ class PostgresCollector(BaseCollector):
                     continue
                 entity_name = f"{schema}.{tbl}" if not self._schema else tbl
                 cols = columns_by_table.get(tbl, [])
+                # PII 精度增强：全字段采样（批量列查询，样本打码）
+                if self._sampling_max_rows:
+                    await self._sample_columns(f"{schema}.{tbl}", cols)
                 schema_json = {"columns": cols}
                 specs.append(
                     CatalogSpec(

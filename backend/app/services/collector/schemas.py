@@ -145,7 +145,10 @@ class DataSourceUpdateRequest(BaseModel):
     )
     quota: dict[str, Any] | None = Field(
         default=None,
-        description="资源配额（max_concurrency/max_scan_rows，None=不修改）",
+        description=(
+            "资源配额（max_concurrency/max_scan_rows/sample_rows，None=不修改；"
+            "整体覆盖语义，提交时须合并原有配额项）"
+        ),
     )
     databases: list[str] | None = Field(
         default=None,
@@ -296,7 +299,7 @@ class DataSourceResponse(BaseModel):
     exclude_patterns: list[str] | None = None
     health_metrics: dict[str, Any] | None = None
     degraded_since: Any = None
-    # 资源配额（max_concurrency/max_scan_rows，PRD §4.2/§4.11.9）
+    # 资源配额（max_concurrency/max_scan_rows/sample_rows，PRD §4.2/§4.11.9）
     quota: dict[str, Any] = Field(default_factory=dict, description="资源配额")
     # 列表信号（list_sources 批量回填；详情不依赖）
     table_count: int | None = None

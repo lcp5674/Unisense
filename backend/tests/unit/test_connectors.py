@@ -182,6 +182,31 @@ async def test_mysql_collector_single_table_failure_skips():
 # ---------- PostgresCollector ----------
 
 
+class _SamplingPgConnector(_FakeConnector):
+    """记录采样 SQL 并返回样本行的 Postgres 假连接器（可模拟采样失败）。"""
+
+    def __init__(
+        self,
+        tables: list[str],
+        columns: dict[str, list[dict]],
+        sample_rows: list[dict] | None = None,
+        *,
+        fail_sampling: bool = False,
+    ) -> None:
+        super().__init__(tables, columns)
+        self._sample_rows = sample_rows if sample_rows is not None else []
+        self._fail_sampling = fail_sampling
+        self.sample_sql: list[str] = []
+
+    async def query(self, sql: str, params: dict | None = None) -> list[dict]:
+        if " IS NOT NULL" in sql:
+            self.sample_sql.append(sql)
+            if self._fail_sampling:
+                raise RuntimeError("sampling failed")
+            return list(self._sample_rows)
+        return await super().query(sql, params)
+
+
 async def test_postgres_collector_builds_specs():
     """PostgreSQL 采集器正常采集返回 specs（含注释/默认值——P0 列元数据补全）。"""
     conn = _FakeConnector(
@@ -210,6 +235,77 @@ async def test_postgres_collector_builds_specs():
     assert cols[0]["type"] == "varchar"
     # P0 修复：pg_description 注释被采集并拼入 schema_json（供 PII 分类）
     assert cols[0]["comment"] == "用户姓名"
+
+
+async def test_postgres_collector_samples_columns_with_pg_dialect():
+    """Postgres 采样：双引号标识符方言 + 样本打码写入 columns[].sample。"""
+    conn = _SamplingPgConnector(
+        ["users"],
+        {
+            "users": [
+                {"column_name": "phone", "data_type": "varchar"},
+                {"column_name": "user_name", "data_type": "varchar"},
+            ]
+        },
+        sample_rows=[{"phone": "13812345678", "user_name": None}],
+    )
+    collector = PostgresCollector(conn)
+    collector.set_sampling(5)
+    result = await collector.collect(MagicMock(source_id="s1", domain="public"))
+
+    cols = result.specs[0].schema_json["columns"]
+    # PG 方言：标识符用双引号（反引号在 PG 中不被支持）
+    assert len(conn.sample_sql) == 1
+    assert 'FROM "public"."users"' in conn.sample_sql[0]
+    assert '"phone" IS NOT NULL OR "user_name" IS NOT NULL' in conn.sample_sql[0]
+    assert "LIMIT 5" in conn.sample_sql[0]
+    # 手机样本打码，user_name 为 NULL → 不写 sample
+    assert cols[0]["sample"] == "138****5678"
+    assert "sample" not in cols[1]
+
+
+async def test_postgres_collector_skips_sampling_when_disabled():
+    """未开启采样（sample_rows=0）→ 不发采样 SQL、字段无 sample 键。"""
+    conn = _SamplingPgConnector(
+        ["users"], {"users": [{"column_name": "phone", "data_type": "varchar"}]}
+    )
+    collector = PostgresCollector(conn)
+    collector.set_sampling(0)
+    result = await collector.collect(MagicMock(source_id="s1", domain="public"))
+
+    assert conn.sample_sql == []
+    assert "sample" not in result.specs[0].schema_json["columns"][0]
+
+
+async def test_postgres_collector_tolerates_sampling_failure():
+    """采样查询失败 → 仅告警，不拖垮采集（FR-004 容错）。"""
+    conn = _SamplingPgConnector(
+        ["users"],
+        {"users": [{"column_name": "phone", "data_type": "varchar"}]},
+        fail_sampling=True,
+    )
+    collector = PostgresCollector(conn)
+    collector.set_sampling(5)
+    result = await collector.collect(MagicMock(source_id="s1", domain="public"))
+
+    assert len(result.specs) == 1
+    assert "sample" not in result.specs[0].schema_json["columns"][0]
+
+
+async def test_postgres_collect_entity_samples_columns():
+    """单表刷新路径（collect_entity）同样执行采样。"""
+    conn = _SamplingPgConnector(
+        ["users"],
+        {"users": [{"column_name": "id_card", "data_type": "varchar"}]},
+        sample_rows=[{"id_card": "110101199003071234"}],
+    )
+    collector = PostgresCollector(conn, schema="public")
+    collector.set_sampling(5)
+    spec = await collector.collect_entity(MagicMock(source_id="s1"), "users")
+
+    assert spec is not None
+    assert len(conn.sample_sql) == 1
+    assert spec.schema_json["columns"][0]["sample"] == "110101********1234"
 
 
 # ---------- HiveCollector ----------
@@ -509,6 +605,98 @@ async def test_clickhouse_collector_parses_http_response():
     # 旧版 2 列 TabSeparated 兼容：type 兜底、comment/default 为空
     assert cols[1]["type"] == "String"
     assert cols[1]["comment"] == ""
+
+
+async def test_clickhouse_collector_samples_columns_via_http():
+    """ClickHouse 采样：TabSeparated 文本解析 + 样本打码写入 columns[].sample。"""
+    collector = ClickHouseCollector(host="ch-host", database="test_db")
+    sample_sql: list[str] = []
+
+    async def mock_query(sql: str) -> str:
+        if "system.tables" in sql:
+            return "events\n"
+        if "system.columns" in sql:
+            return "phone\tString\nemail\tString\nnickname\tString\n"
+        if " IS NOT NULL" in sql:
+            sample_sql.append(sql)
+            # 列序 = phone,email,nickname：phone 有值；email 首行 NULL 次行有值；
+            # nickname 两行全 NULL（\N）
+            return "13812345678\t\\N\t\\N\n13812345678\ta@b.com\t\\N\n"
+        return ""
+
+    collector._query = mock_query  # type: ignore[assignment]
+    collector.set_sampling(5)
+    result = await collector.collect(MagicMock(source_id="ch1", domain="test_db"))
+
+    cols = result.specs[0].schema_json["columns"]
+    assert len(sample_sql) == 1
+    assert "FROM `test_db`.`events`" in sample_sql[0]
+    assert "LIMIT 5 FORMAT TabSeparated" in sample_sql[0]
+    # 手机打码；email 跳过首行 \N 取次行值；nickname 全 NULL → 不写 sample
+    assert cols[0]["sample"] == "138****5678"
+    assert cols[1]["sample"] == "a***@b.com"
+    assert "sample" not in cols[2]
+
+
+async def test_clickhouse_collector_skips_sampling_when_disabled():
+    """未开启采样 → 不发采样 SQL、字段无 sample 键。"""
+    collector = ClickHouseCollector(host="ch-host", database="test_db")
+    sample_sql: list[str] = []
+
+    async def mock_query(sql: str) -> str:
+        if "system.tables" in sql:
+            return "events\n"
+        if "system.columns" in sql:
+            return "phone\tString\n"
+        sample_sql.append(sql)
+        return "13812345678\n"
+
+    collector._query = mock_query  # type: ignore[assignment]
+    collector.set_sampling(0)
+    result = await collector.collect(MagicMock(source_id="ch1", domain="test_db"))
+
+    assert sample_sql == []
+    assert "sample" not in result.specs[0].schema_json["columns"][0]
+
+
+async def test_clickhouse_collector_tolerates_sampling_failure():
+    """采样查询失败 → 仅告警，不拖垮采集（FR-004 容错）。"""
+    collector = ClickHouseCollector(host="ch-host", database="test_db")
+
+    async def mock_query(sql: str) -> str:
+        if "system.tables" in sql:
+            return "events\n"
+        if "system.columns" in sql:
+            return "phone\tString\n"
+        raise RuntimeError("sampling failed")
+
+    collector._query = mock_query  # type: ignore[assignment]
+    collector.set_sampling(5)
+    result = await collector.collect(MagicMock(source_id="ch1", domain="test_db"))
+
+    assert len(result.specs) == 1
+    assert "sample" not in result.specs[0].schema_json["columns"][0]
+
+
+async def test_clickhouse_collect_entity_samples_columns():
+    """单表刷新路径（collect_entity）同样执行采样。"""
+    collector = ClickHouseCollector(host="ch-host", database="test_db")
+    sample_sql: list[str] = []
+
+    async def mock_query(sql: str) -> str:
+        if "system.columns" in sql:
+            return "id_card\tString\n"
+        sample_sql.append(sql)
+        return "110101199003071234\n"
+
+    collector._query = mock_query  # type: ignore[assignment]
+    collector.set_sampling(5)
+    spec = await collector.collect_entity(MagicMock(source_id="ch1"), "users")
+
+    assert spec is not None
+    assert len(sample_sql) == 1
+    assert "FROM `test_db`.`users`" in sample_sql[0]
+    assert spec.schema_json["columns"][0]["sample"] == "110101********1234"
 
 
 # ---------- KafkaCollector ----------

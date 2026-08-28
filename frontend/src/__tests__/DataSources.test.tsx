@@ -870,6 +870,26 @@ describe("DataSources", () => {
     });
   });
 
+  it("编辑时提交采样行数（quota.sample_rows）并保留未修改的其他配额项", async () => {
+    // 原配置已含 max_scan_rows：后端 quota 为整体覆盖，提交须合并基底不丢字段
+    mockedList.mockResolvedValue({ items: [{ ...source, quota: { max_scan_rows: 5000 } }], total: 1 });
+    mockedUpdate.mockResolvedValue(source);
+    renderSources();
+    await screen.findByText("mysql_finance");
+    fireEvent.click(screen.getByText("管理"));
+    await screen.findByText("数据源：财务库（mysql_finance）");
+    fireEvent.click(screen.getByText("编辑"));
+    await screen.findByText("用途描述");
+    fireEvent.change(screen.getByLabelText("采样行数"), { target: { value: "20" } });
+    fireEvent.click(await screen.findByRole("button", { name: "保 存" }));
+    await waitFor(() => {
+      expect(mockedUpdate).toHaveBeenCalledWith(
+        "mysql_finance",
+        expect.objectContaining({ quota: { max_scan_rows: 5000, sample_rows: 20 } }),
+      );
+    });
+  });
+
   it("立即采集弹窗：填写本次临时白名单后透传 collect-now（仅本次生效）", async () => {
     mockedCollectNow.mockResolvedValue({ job_id: "job-2", status: "QUEUED", mode: "FULL" });
     renderSources();

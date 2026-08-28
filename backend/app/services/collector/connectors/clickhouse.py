@@ -7,11 +7,13 @@
 - 单表 try/catch 跳过容错
 - 生产语义（FR-030）：按 connection_config.database 过滤；为空时枚举全部非系统库
 - @registry.register("clickhouse") 注册
+- 支持全字段样本采样（PII 精度增强：name+sample 双验证）
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -31,6 +33,12 @@ from app.services.collector.spi import (
 logger = logging.getLogger("unisense.collector.connectors.clickhouse")
 
 _CLICKHOUSE_SYSTEM_DBS = ("system", "information_schema", "INFORMATION_SCHEMA", "default")
+
+#: 每批采样列数上限（控制单条采样 SQL 长度；全字段采样按批拆分查询）
+_SAMPLE_BATCH = 20
+
+#: ClickHouse 标识符合法字符（反引号包裹安全；与 _safe_ident 一致，允许连字符）
+_COL_IDENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class ClickHouseCollector(BaseCollector):
@@ -116,6 +124,97 @@ class ClickHouseCollector(BaseCollector):
             await self._client.aclose()
             self._client = None
 
+    @staticmethod
+    def _parse_tsv(text: str, width: int) -> list[list[str]]:
+        """解析 ClickHouse TabSeparated 响应为二维字符串数组。
+
+        每行按制表符切分并对齐到 ``width`` 列（缺列补空串，多列截断）——
+        采样只需按列序号取值，不做类型转换。
+
+        Args:
+            text: ClickHouse 原始响应文本。
+            width: 期望列数（采样列数）。
+
+        Returns:
+            行列表（每行 width 个字符串）。
+        """
+        rows: list[list[str]] = []
+        for line in text.strip().splitlines():
+            if not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) < width:
+                parts = parts + [""] * (width - len(parts))
+            rows.append(parts[:width])
+        return rows
+
+    async def _sample_columns(
+        self, entity_name: str, columns: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """对字段执行批量列采样（PII 精度增强：name+sample 双验证）。
+
+        与 ``InformationSchemaCollector._sample_columns`` 同构：每批最多
+        ``_SAMPLE_BATCH`` 列，一次 ``SELECT c1,...,ck ... LIMIT n`` 取 n 行，
+        逐列取第一个非空值，经 ``_mask_sample`` 打码后写入 ``columns[].sample``。
+
+        方言差异（ClickHouse HTTP API）：结果为 ``FORMAT TabSeparated`` 文本而非
+        行字典数组，需按列序号取值；NULL 以 ``\\N`` 表示，视为空值跳过。
+
+        Args:
+            entity_name: 实体名，形如 ``database.table``；单库模式下可为裸表名
+                （此时回退 ``self._database`` 定位库）。
+            columns: 字段定义列表（name/type/comment 等）。
+
+        Returns:
+            写入 sample 后的字段列表（未开启采样/非法标识符时原样返回）。
+        """
+        if not self._sampling_max_rows or not columns:
+            return columns
+        if "." in entity_name:
+            database, tbl = entity_name.rsplit(".", 1)
+        else:
+            database, tbl = self._database, entity_name
+        if not database or not tbl:
+            return columns
+        try:
+            safe_db = self._safe_ident(database)
+            safe_tbl = self._safe_ident(tbl)
+        except ExternalDependencyError:
+            return columns
+        n = self._sampling_max_rows
+        for start in range(0, len(columns), _SAMPLE_BATCH):
+            batch = columns[start : start + _SAMPLE_BATCH]
+            safe: list[tuple[dict[str, Any], str]] = []
+            for col in batch:
+                name = str(col.get("name", "")).strip()
+                if name and _COL_IDENT_RE.match(name):
+                    safe.append((col, name))
+            if not safe:
+                continue
+            select = ",".join(f"`{name}`" for _, name in safe)
+            where = " OR ".join(f"`{name}` IS NOT NULL" for _, name in safe)
+            sql = (
+                f"SELECT {select} FROM `{safe_db}`.`{safe_tbl}` "
+                f"WHERE {where} LIMIT {n} FORMAT TabSeparated"
+            )
+            try:
+                raw = await self._query(sql)
+            except Exception as exc:  # noqa: BLE001 - 采样失败不拖垮采集，仅记录
+                logger.warning("采样失败 entity=%s error=%s", entity_name, exc)
+                continue
+            rows = self._parse_tsv(raw, len(safe))
+            for idx, (col, _name) in enumerate(safe):
+                value = ""
+                for r in rows:
+                    v = r[idx]
+                    # ClickHouse TabSeparated 以 \N 表示 NULL
+                    if v not in ("", "\\N", "NULL"):
+                        value = v
+                        break
+                if value:
+                    col["sample"] = self._mask_sample(value)
+        return columns
+
     async def collect_entity(self, source: Any, entity_name: str) -> CatalogSpec | None:
         """单表元数据刷新：仅查询目标表列元数据。
 
@@ -163,6 +262,9 @@ class ClickHouseCollector(BaseCollector):
             )
         if not cols:
             return None
+        # PII 精度增强：全字段采样（批量列查询，样本打码）
+        if self._sampling_max_rows:
+            await self._sample_columns(f"{self._database}.{tbl}", cols)
         return CatalogSpec(
             entity_name=entity_name,
             entity_type="TABLE",
@@ -257,6 +359,9 @@ class ClickHouseCollector(BaseCollector):
                                 "default": col_default,
                             }
                         )
+                    # PII 精度增强：全字段采样（批量列查询，样本打码）
+                    if self._sampling_max_rows:
+                        await self._sample_columns(f"{database}.{tbl}", columns)
                     schema_json = {"columns": columns}
                     specs.append(
                         CatalogSpec(

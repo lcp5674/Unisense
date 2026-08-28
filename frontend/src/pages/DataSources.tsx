@@ -1178,6 +1178,7 @@ export function DataSources() {
       form.setFieldsValue({
         quota_max_concurrency: (source.quota as Record<string, unknown>).max_concurrency,
         quota_max_scan_rows: (source.quota as Record<string, unknown>).max_scan_rows,
+        quota_sample_rows: (source.quota as Record<string, unknown>).sample_rows,
       });
     }
     // Owner 候选用户列表
@@ -1258,11 +1259,27 @@ export function DataSources() {
         if (newMode !== (editTarget.collection_mode || "FULL")) {
           payload.collection_mode = newMode;
         }
-        if (values.quota_max_concurrency != null || values.quota_max_scan_rows != null) {
-          payload.quota = {
-            max_concurrency: values.quota_max_concurrency != null ? Number(values.quota_max_concurrency) : undefined,
-            max_scan_rows: values.quota_max_scan_rows != null ? Number(values.quota_max_scan_rows) : undefined,
-          };
+        if (
+          values.quota_max_concurrency != null ||
+          values.quota_max_scan_rows != null ||
+          values.quota_sample_rows != null
+        ) {
+          // 后端 quota 为整体覆盖（src.quota = req.quota），故以原配置为基底合并，
+          // 避免只改一项时连带丢失未提交的其他 quota 键（如 sample_rows）。
+          const base =
+            editTarget.quota && typeof editTarget.quota === "object"
+              ? { ...(editTarget.quota as Record<string, unknown>) }
+              : {};
+          if (values.quota_max_concurrency != null) {
+            base.max_concurrency = Number(values.quota_max_concurrency);
+          }
+          if (values.quota_max_scan_rows != null) {
+            base.max_scan_rows = Number(values.quota_max_scan_rows);
+          }
+          if (values.quota_sample_rows != null) {
+            base.sample_rows = Number(values.quota_sample_rows);
+          }
+          payload.quota = base;
         }
         // 连接配置已回显明文：仅当表单值与原始配置快照不同（即用户实际修改了连接字段）
         // 才提交覆盖，避免纯改名/改域时误覆盖配置并重置健康状态。
@@ -1893,6 +1910,14 @@ export function DataSources() {
             </Form.Item>
             <Form.Item name="quota_max_scan_rows" label="扫描行上限" tooltip="单次扫描行数上限（max_scan_rows），超出拒绝采集" style={{ width: 140 }}>
               <InputNumber min={1} placeholder="默认" style={{ width: "100%" }} />
+            </Form.Item>
+            <Form.Item
+              name="quota_sample_rows"
+              label="采样行数"
+              tooltip="每列采样行数（sample_rows）。留空/0=不采样，PII 仅按字段名+注释识别；设为 N 则采集时对字段执行 SELECT 采样（样本打码存储），启用 PII 名称+样本双验证"
+              style={{ width: 150 }}
+            >
+              <InputNumber min={0} placeholder="不采样" style={{ width: "100%" }} />
             </Form.Item>
           </Space>
           <Space style={{ marginBottom: 8 }}>
