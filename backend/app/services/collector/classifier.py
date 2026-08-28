@@ -131,6 +131,103 @@ _AGGREGATE_RE = re.compile(
 #: 值型豁免前缀：即便字段名带统计量词，仍是个人测量值/标识（如 heart_rate 心率）。
 _VALUE_EXEMPT_PREFIXES: tuple[str, ...] = ("heart_rate", "heartrate", "心率")
 
+#: 人名限定前缀：带此前缀的 ``*_name`` 列是个人姓名（患者/用户/会员/医生…），判 PII。
+_PERSON_NAME_RE = re.compile(
+    r"(patient|user|cust|customer|member|doctor|physician|applicant|contact|owner|"
+    r"receiver|sender|payee|holder|guardian|parent|child|spouse|operator|manager|"
+    r"teacher|nurse|pharmacist|leader|handler|clerk|staff|employee|principal|director|"
+    r"assistant|secretary|student|pupil|"
+    r"家属|患者|用户|会员|医生|申请人|联系人|收款|付款|监护人|家长|子女|配偶|"
+    r"操作员|经办人|护士|教师|老师|学生|学员|负责人|员工|主任|助理|秘书)_?name$",
+    re.I,
+)
+
+#: 机构/地点/技术限定前缀：带此前缀的 ``*_name`` 是机构/地点/对象/技术名
+#: （村名/医院名/表名…），非个人姓名。
+_ENTITY_NAME_RE = re.compile(
+    r"(village|org|dept|department|hospital|company|institution|center|team|group|"
+    r"project|region|area|zone|branch|unit|enterprise|brand|store|warehouse|school|"
+    r"class|community|city|county|province|town|street|clinic|pharmacy|factory|plant|"
+    r"shop|station|building|room|ward|bed|host|server|table|column|schema|db|database|"
+    r"file|job|task|rule|template|config|menu|module|function|dict|param|setting|index|"
+    r"村|社区|部门|机构|医院|单位|项目|组织|科室|学校|班级|地区|区域|城市|区县|省份|"
+    r"街道|药店|诊所|工厂|商店|车站|大楼|房间|病房|床位|菜单|模块|功能|字典|参数|"
+    r"设置|模板|任务|作业|文件|表|索引|库|主机|服务)_?name$",
+    re.I,
+)
+
+#: 人员语义表名：裸 ``name`` 列所在实体含人员语义（患者表/用户表/学生表…）时视为姓名。
+_PERSON_ENTITY_RE = re.compile(
+    r"(patient|user|member|doctor|staff|people|person|customer|client|employee|"
+    r"student|teacher|pupil|nurse|pharmacist|parent|child|spouse|leader|manager|"
+    r"operator|worker|"
+    r"患者|用户|会员|医生|员工|人员|职工|病人|学生|教师|老师|学员|护士|药剂师|"
+    r"家长|子女|配偶|负责人|经理|操作员|工人)",
+    re.I,
+)
+
+#: 机构/地点/技术语义表名：裸 ``name`` 列所在实体含机构语义（村/部门/医院…）时视为机构名。
+_ENTITY_ENTITY_RE = re.compile(
+    r"(village|org|dept|department|hospital|company|institution|center|team|group|"
+    r"project|region|area|zone|branch|unit|enterprise|store|warehouse|school|class|"
+    r"community|city|county|province|town|street|clinic|pharmacy|factory|plant|shop|"
+    r"station|building|room|ward|bed|host|server|table|column|schema|db|database|file|"
+    r"job|task|rule|template|config|menu|module|function|dict|param|setting|index|"
+    r"村|社区|部门|机构|医院|单位|项目|组织|科室|学校|班级|地区|区域|城市|区县|省份|"
+    r"街道|药店|诊所|工厂|商店|车站|大楼|房间|病房|床位|菜单|模块|功能|字典|参数|"
+    r"设置|模板|任务|作业|文件|表|索引|库|主机|服务)",
+    re.I,
+)
+
+#: health 规则「机构/地点/资源」字段：注释命中健康词但字段本身是机构/位置（如
+#: ``org_name`` 注释「医疗机构名称」），不是个人健康数据，应降级不判 PII。
+_HEALTH_ORG_FIELD_RE = re.compile(
+    r"(org|organ|hospital|dept|department|clinic|institution|company|unit|branch|"
+    r"area|region|zone|ward|room|bed|source|"
+    r"机构|医院|科室|部门|单位|病区|病房|房间|床位|来源)",
+    re.I,
+)
+
+#: health 规则「明确健康字段」：字段名本身是个人健康数据（保留 PII）。
+_HEALTH_KEEP_FIELD_RE = re.compile(
+    r"(disease|diagnos|symptom|complaint|blood|pressure|sugar|heart|bmi|"
+    r"病名|诊断|症状|主诉|血压|血糖|心率|体检|化验|检查)",
+    re.I,
+)
+
+
+def _is_health_pii_field(name: str) -> bool:
+    """判断 health 规则命中字段是否为个人健康数据（供注释命中上下文判定）。
+
+    字段名含明确健康词（``disease_name``/``blood_pressure``）→ 保留 PII；
+    字段名是机构/地点/资源（``org_name``/``ward_name``/``hospital_code``）→ 非健康
+    数据（注释里的「医疗」等词来自字段说明），降级；其余保守保留。
+    """
+    if _HEALTH_KEEP_FIELD_RE.search(name):
+        return True
+    return not bool(_HEALTH_ORG_FIELD_RE.search(name))
+
+
+def _is_person_name(name: str, entity_name: str) -> bool:
+    """判断 ``*_name`` 列是否为个人姓名（供 real_name 规则上下文判定）。
+
+    带人名限定前缀（``patient_name``/``用户姓名``）→ 姓名；带机构/地点/技术前缀
+    （``village_name``/``table_name``/``村名``）→ 非姓名；裸 ``name`` 依据表名语义：
+    人员语义表（``patient_info``/``用户表``）→ 姓名；机构语义表（``village_*``/``部门表``）
+    → 非姓名；无法判断 → 保守视为非姓名（留人工复核，宁缺勿滥）。
+    """
+    if _PERSON_NAME_RE.search(name):
+        return True
+    if _ENTITY_NAME_RE.search(name):
+        return False
+    if name.lower() == "name":
+        if _PERSON_ENTITY_RE.search(entity_name):
+            return True
+        if _ENTITY_ENTITY_RE.search(entity_name):
+            return False
+        return False
+    return False
+
 
 def _compile(rule: PiiRule) -> re.Pattern:
     return re.compile(rule.name_re, re.I)
@@ -160,7 +257,7 @@ DEFAULT_PII_RULES: tuple[PiiRule, ...] = (
     ),
     PiiRule(
         PiiCategory.NAME, "real_name",
-        r"(\bname\b|姓名|用户名|user_?name|cust_?name|full_?name|real_?name|昵称)",
+        r"(_?name$|姓名|用户名|昵称)",
         None, 0.7,
     ),
     PiiRule(
@@ -286,7 +383,14 @@ class SensitivityClassifier:
                 matched_by: str | None = None
                 confidence = rule.confidence
                 if name_re.search(name) or (comment and name_re.search(comment)):
-                    matched_by = "name" if name_re.search(name) else "comment"
+                    name_hit = bool(name_re.search(name))
+                    comment_hit = bool(comment and name_re.search(comment))
+                    if name_hit and comment_hit:
+                        matched_by = "name+comment"
+                    elif name_hit:
+                        matched_by = "name"
+                    else:
+                        matched_by = "comment"
                     if sample_re and sample and sample_re.match(sample):
                         confidence = min(1.0, rule.confidence + 0.05)
                         matched_by = "name+sample"
@@ -294,6 +398,22 @@ class SensitivityClassifier:
                     continue
                 # 统计字段不因名称/注释关键词判 PII；仅当样本命中（实际存个体值）才保留
                 if is_aggregate and matched_by != "name+sample":
+                    continue
+                # 裸 name/机构语义 name 需上下文判定（村名/机构名 ≠ 个人姓名）；
+                # 仅对字段名命中特判，注释命中（明确写了「姓名」）不受影响
+                if (
+                    rule.rule_id == "real_name"
+                    and matched_by == "name"
+                    and not _is_person_name(name, entity_name)
+                ):
+                    continue
+                # 机构/地点/资源字段（org_name/ward_name 等）不因注释含「医疗」等
+                # 词判健康 PII；明确健康字段（disease_name/blood_pressure）保留
+                if (
+                    rule.rule_id == "health"
+                    and matched_by == "comment"
+                    and not _is_health_pii_field(name)
+                ):
                     continue
                 hits.append(
                     PiiFieldHit(

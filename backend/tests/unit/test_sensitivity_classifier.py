@@ -188,3 +188,74 @@ def test_phone_tel_no_substring_false_positive() -> None:
     clf = SensitivityClassifier()
     assert clf.detect_pii_fields("t", _schema({"name": "hotel"})) == []
     assert clf.detect_pii_fields("t", _schema({"name": "apply_tel"}))[0].rule == "phone"
+
+
+def test_real_name_bare_name_entity_context() -> None:
+    """裸 name 列依据表名语义判定：机构/地点/无法判断表不判，人员表判。"""
+    clf = SensitivityClassifier()
+    # 村/部门计数表 → 村名/机构名，非个人姓名
+    assert clf.detect_pii_fields(
+        "wedw_tmp.village_department_count_dp_tmp1", _schema({"name": "name", "comment": "村名"})
+    ) == []
+    assert clf.detect_pii_fields(
+        "wedw_tmp.village_department_count_dp_tmp1", _schema({"name": "name"})
+    ) == []
+    # 患者/用户表 → 个人姓名
+    assert (
+        clf.detect_pii_fields("ods.patient_info", _schema({"name": "name"}))[0].rule
+        == "real_name"
+    )
+    assert clf.detect_pii_fields("dwd.sys_user", _schema({"name": "name"}))[0].rule == "real_name"
+    # 学生/教师表 → 个人姓名（人员语义词表覆盖）
+    assert clf.detect_pii_fields("stg.student", _schema({"name": "name"}))[0].rule == "real_name"
+    assert clf.detect_pii_fields("stg.teacher", _schema({"name": "name"}))[0].rule == "real_name"
+    # 无法判断的表（临时导出表）→ 保守不判
+    assert clf.detect_pii_fields("dwd.tmp_export_20260801", _schema({"name": "name"})) == []
+
+
+def test_real_name_prefixed_person_vs_entity() -> None:
+    """带前缀 name 列：人名前缀判 PII，机构/技术前缀不判。"""
+    clf = SensitivityClassifier()
+    person_names = ["patient_name", "user_name", "doctor_name", "contact_name", "applicant_name"]
+    for col in person_names:
+        hits = clf.detect_pii_fields("ods.visit", _schema({"name": col}))
+        assert hits[0].rule == "real_name", col
+    person_names2 = ["student_name", "teacher_name", "member_name", "operator_name"]
+    for col in person_names2:
+        hits = clf.detect_pii_fields("ods.t", _schema({"name": col}))
+        assert hits[0].rule == "real_name", col
+    entity_names = [
+        "village_name", "hospital_name", "dept_name", "org_name", "table_name", "job_name",
+    ]
+    for col in entity_names:
+        assert clf.detect_pii_fields("ods.t", _schema({"name": col})) == [], col
+
+
+def test_real_name_comment_hit_keeps_pii() -> None:
+    """裸 name 列注释明确写「姓名」时仍判 PII（name+comment，不因上下文拦截）。"""
+    clf = SensitivityClassifier()
+    hits = clf.detect_pii_fields(
+        "wedw_tmp.village_department_count_dp_tmp1",
+        _schema({"name": "name", "comment": "姓名"}),
+    )
+    assert hits and hits[0].rule == "real_name" and hits[0].matched_by == "name+comment"
+
+
+def test_health_org_field_comment_not_pii() -> None:
+    """health 规则：机构/地点字段不因注释含「医疗」等词判 PII；健康字段保留。"""
+    clf = SensitivityClassifier()
+    # 机构/病区字段 → 不判（注释「医疗机构名称」「病区名称」命中 health 但字段是机构）
+    schema = _schema(
+        {"name": "org_name", "comment": "医疗机构名称"},
+        {"name": "ward_name", "comment": "病区名称"},
+        {"name": "org_code", "comment": "医疗机构代码"},
+    )
+    assert clf.detect_pii_fields("wedw_dwd.emr_t", schema) == []
+    # 明确健康字段 → 保留（列名含诊断/病名，name 命中不受影响）
+    schema2 = _schema(
+        {"name": "diseasename", "comment": "疾病名称"},
+        {"name": "diagnosis", "comment": "诊断结果"},
+        {"name": "blood_pressure", "comment": "血压值"},
+    )
+    hits = clf.detect_pii_fields("wedw_dwd.emr_t", schema2)
+    assert {h.column for h in hits} == {"diseasename", "diagnosis", "blood_pressure"}
