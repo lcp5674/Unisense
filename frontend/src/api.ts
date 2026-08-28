@@ -635,6 +635,7 @@ export async function listMetrics(params: {
     approver_id: params.approver_id,
     reviewed_by: params.reviewed_by,
     pii_flag: params.pii_flag === undefined ? undefined : String(params.pii_flag),
+    deleted: params.deleted === undefined ? undefined : String(params.deleted),
     created_after: params.created_after,
     updated_before: params.updated_before,
     batch_id: params.batch_id,
