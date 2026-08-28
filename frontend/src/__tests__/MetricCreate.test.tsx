@@ -600,7 +600,7 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
         source_table: { value: "dwd.sales_detail", source: "sql_parse", confidence: 0.9, reason: "SQL 解析源表" },
         measure_column: { value: "gmv", source: "sql_parse", confidence: 0.9, reason: "SQL 解析度量列" },
         name: { value: "订单销售额", source: "sql_parse", confidence: 0.8 },
-        type: { value: "atomic", source: "sql_parse", confidence: 0.85 },
+        type: { value: "derived", source: "sql_parse", confidence: 0.85 },
         granularity: { value: "day", source: "sql_parse", confidence: 0.9 },
         unit: { value: "CNY", source: "rule", confidence: 0.68 },
         aggregation: { value: "SUM", source: "sql_parse", confidence: 0.95 },
@@ -661,7 +661,7 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
         source_table: { value: "dwd.sales_detail", source: "llm", confidence: 0.7, reason: "AI 依据 SQL 语义推断" },
         measure_column: { value: "gmv", source: "llm", confidence: 0.7, reason: "AI 依据 SQL 语义推断" },
         name: { value: "日订单销售额", source: "llm", confidence: 0.7, reason: "AI 依据 SQL 语义推断" },
-        type: { value: "atomic", source: "rule", confidence: 0.8 },
+        type: { value: "derived", source: "rule", confidence: 0.8 },
         granularity: { value: "day", source: "rule", confidence: 0.8 },
         unit: { value: "CNY", source: "llm", confidence: 0.7 },
         aggregation: { value: "SUM", source: "llm", confidence: 0.7 },
@@ -710,7 +710,7 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
         source_table: { value: "dwd.doctor_visit", source: "sql_parse", confidence: 0.9, reason: "SQL 解析源表" },
         measure_column: { value: "doctor_code", source: "sql_parse", confidence: 0.9, reason: "SQL 解析度量列" },
         name: { value: "医生活跃数", source: "sql_parse", confidence: 0.8 },
-        type: { value: "atomic", source: "sql_parse", confidence: 0.85 },
+        type: { value: "derived", source: "sql_parse", confidence: 0.85 },
         granularity: { value: "day", source: "sql_parse", confidence: 0.9 },
         unit: { value: "人", source: "rule", confidence: 0.68 },
         aggregation: { value: "COUNT_DISTINCT", source: "sql_parse", confidence: 0.95 },
@@ -873,7 +873,7 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
         source_table: { value: "wedw_dw.doctor_visit_agent_info_da", source: "sql_parse", confidence: 0.9, reason: "" },
         measure_column: { value: "doctor_code", source: "sql_parse", confidence: 0.9, reason: "" },
         name: { value: "医生活跃次数", source: "sql_parse", confidence: 0.8 },
-        type: { value: "atomic", source: "sql_parse", confidence: 0.85 },
+        type: { value: "derived", source: "sql_parse", confidence: 0.85 },
         granularity: { value: "month", source: "sql_parse", confidence: 0.9 },
         aggregation: { value: "COUNT_DISTINCT", source: "sql_parse", confidence: 0.95 },
       },
@@ -913,8 +913,8 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     expect(screen.getAllByText("last_month_active_doctor_cnt").length).toBeGreaterThan(0);
     expect(screen.getAllByText("COUNT_DISTINCT").length).toBeGreaterThan(1);
     expect(screen.getByText(/COUNT\(DISTINCT t1\.doctor_code\)/)).toBeTruthy();
-    // 多度量提示：可转批量解析分别创建
-    expect(screen.getByText(/识别到 2 个度量列：当前回填首个「current_month_active_doctor_cnt」为原子指标/)).toBeTruthy();
+    // 多度量提示：可转批量解析分别创建（方案 A：SQL 物理口径回填为派生指标）
+    expect(screen.getByText(/识别到 2 个度量列：当前回填首个「current_month_active_doctor_cnt」为派生指标/)).toBeTruthy();
     fireEvent.click(screen.getByText("知道了"));
   });
 
@@ -2052,7 +2052,8 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
         key: "0:amount",
         metric_code: "sales_order_amount_day",
         name: "日订单金额",
-        type: "atomic",
+        // 方案 A：SQL 推断候选一律派生（原子只从逻辑度量目录创建）
+        type: "derived",
         source_table: "dwd.sales_detail",
         measure_column: "amount",
         aggregation: "SUM",
@@ -2067,7 +2068,7 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
         key: "0:user_id",
         metric_code: "sales_order_userid_day",
         name: "日去重用户",
-        type: "atomic",
+        type: "derived",
         source_table: "dwd.sales_detail",
         measure_column: "user_id",
         aggregation: "COUNT_DISTINCT",
@@ -2146,10 +2147,11 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
 
     // 抽屉可拖宽：左缘拖拽手柄存在（对齐全站详情抽屉 ResizableDrawer 交互）
     expect(document.querySelector(".resizable-drawer .drawer-resize-handle")).toBeTruthy();
-    // 候选卡片化：字段以「小标签置顶」形式分组展示（聚合/关联逻辑度量/指标编码），
-    // 不再全部挤在单行 flex——标签是卡片布局的标志性结构
+    // 候选卡片化：字段以「小标签置顶」形式分组展示（聚合/依赖指标/指标编码），
+    // 不再全部挤在单行 flex——标签是卡片布局的标志性结构（方案 A：SQL 候选默认
+    // 派生，字段区含物理属性聚合 + 依赖指标，关联逻辑度量为原子专属）
     expect(screen.getAllByText("聚合").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("关联逻辑度量").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("依赖指标（派生可选）").length).toBeGreaterThan(0);
     expect(screen.getAllByText("指标编码").length).toBeGreaterThan(0);
   });
 
@@ -2437,11 +2439,16 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     });
   });
 
-  it("批量创建：候选关联逻辑度量（OneData 接线）→ 提交透传 measure_id + 原始 SQL", async () => {
+  it("批量创建：候选改类型为原子后可关联逻辑度量 → 提交透传 measure_id + 原始 SQL", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
     await openBatchMode();
+
+    // 方案 A：SQL 候选默认派生，「关联逻辑度量」为原子专属——先把「0:amount」改类型为原子
+    const typeSelect = screen.getByTestId("sql-batch-type-0:amount").closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(typeSelect.querySelector(".ant-select-selector") as HTMLElement);
+    await clickSelectOption("原子");
 
     // 打开「0:amount」候选的逻辑度量选择器，选「门诊收费金额」（id=1）
     const measureSelect = screen.getByTestId("sql-batch-measure-0:amount").closest(".ant-select") as HTMLElement;
@@ -2460,25 +2467,24 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     });
   });
 
-  it("批量创建：候选指标类型可在线改为派生 → 只读口径表达式 + 可选依赖 + 挂载透传", async () => {
+  it("批量创建：候选默认派生（方案 A）→ 只读口径表达式 + 可选依赖 + 挂载透传", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
     await openBatchMode();
 
-    // 把「0:user_id」原子候选改为派生（OneData：派生 = 原子 + 业务限定 + 时间周期，
-    // 无公式依赖——口径由解析出的聚合表达式承载，只读展示而非「计算表达式待填」）
+    // 方案 A：SQL 候选一律派生（原子只从逻辑度量目录创建）——候选默认即派生，
+    // 无公式依赖（口径由解析出的聚合表达式承载，只读展示而非「计算表达式待填」）
     const typeSelect = screen.getByTestId("sql-batch-type-0:user_id").closest(".ant-select") as HTMLElement;
-    fireEvent.mouseDown(typeSelect.querySelector(".ant-select-selector") as HTMLElement);
-    await clickSelectOption("派生");
+    expect(typeSelect.textContent || "").toContain("派生");
 
-    // 派生候选：显示解析出的只读口径表达式 + 「派生（周期驱动，无公式依赖）」Tag，
-    // 不再显示计算表达式输入框（公式场景归复合）
+    // 派生候选：显示解析出的只读口径表达式 + 「派生（周期驱动，无公式依赖）」Tag
+    //（两个基础候选均为派生，Tag 出现多次），不再显示计算表达式输入框（公式场景归复合）
     expect(await screen.findByText("COUNT(DISTINCT user_id)")).toBeTruthy();
-    expect(screen.getByText("派生（周期驱动，无公式依赖）")).toBeTruthy();
+    expect(screen.getAllByText("派生（周期驱动，无公式依赖）").length).toBeGreaterThan(0);
     expect(screen.queryByTestId("sql-batch-expr-0:user_id")).toBeNull();
 
-    // 依赖指标（派生可选）：从本批原子候选选择「日订单金额」
+    // 依赖指标（派生可选）：从本批基础候选选择「日订单金额」
     const depsSelect = screen.getByTestId("sql-batch-deps-0:user_id").closest(".ant-select") as HTMLElement;
     fireEvent.mouseDown(depsSelect.querySelector(".ant-select-selector") as HTMLElement);
     await clickSelectOption("日订单金额 (sales_order_amount_day)");
@@ -2954,13 +2960,12 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
       );
       expect((screen.getByLabelText("名称") as HTMLInputElement).value).toBe("日订单金额");
     });
-    // 源表/度量列已回填到 Step④ 原子来源（回 Step2 核对）
+    // 源表/度量列已回填（方案 A：派生候选物理来源进 Step2 挂载实体区；回 Step2 核对
+    // 挂载卡首行源表 Select 选中值）
     await goToStep(2);
     await waitFor(() => {
-      const srcLabel = Array.from(document.querySelectorAll(".ant-form-item-label")).find((el) =>
-        el.textContent?.includes("源表名")
-      );
-      expect(srcLabel?.closest(".ant-form-item")?.textContent).toContain("dwd.sales_detail");
+      const items = Array.from(document.querySelectorAll(".ant-select-selection-item"));
+      expect(items.some((el) => el.textContent?.includes("dwd.sales_detail"))).toBe(true);
     });
   });
 

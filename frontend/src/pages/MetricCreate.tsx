@@ -522,7 +522,8 @@ export function MetricCreate() {
     setSqlBatchSynthesize(draft.synthesize);
     setSqlBatchResult(draft.result);
     setSqlBatchChecked(
-      new Set(draft.result.candidates.filter((c) => c.type === "atomic").map((c) => c.key)),
+      // 方案 A：SQL 推断候选一律派生（原子只从逻辑度量目录创建）——默认勾选派生基础候选
+      new Set(draft.result.candidates.filter((c) => c.type === "derived").map((c) => c.key)),
     );
     message.info("已恢复上次的 SQL 批量解析草稿，可继续勾选创建");
   }, []);
@@ -1205,7 +1206,8 @@ export function MetricCreate() {
       });
       setSqlBatchResult(result);
       setSqlBatchChecked(
-        new Set(result.candidates.filter((c) => c.type === "atomic").map((c) => c.key))
+        // 方案 A：SQL 推断候选一律派生（原子只从逻辑度量目录创建）——默认勾选派生基础候选
+        new Set(result.candidates.filter((c) => c.type === "derived").map((c) => c.key))
       );
       // 域建议：未选域且后端建议唯一/LLM 域 → 自动应用（对齐 handleSqlInfer 流程）
       const dom = result.domain;
@@ -1411,6 +1413,20 @@ export function MetricCreate() {
     if (c.period) vals.period = c.period;
     if (c.measure_id) vals.measure_id = c.measure_id;
     if (Object.keys(vals).length > 0) form.setFieldsValue(vals);
+    // 方案 A：SQL 候选一律派生——物理来源（源表/列/粒度/周期）回填到挂载实体区
+    //（derived 向导 Step2 用挂载承载物理来源；原子候选走「原子来源」卡顶层源表字段，
+    // 不设挂载）。保证「在向导中编辑」的派生候选能看到并核对物理来源。
+    if (candType && candType !== "atomic" && candSourceTable) {
+      form.setFieldValue("mounts", [
+        {
+          source_table: candSourceTable,
+          source_column: candMeasureColumn ?? undefined,
+          granularity: c.granularity || c.period || "day",
+          default_period: c.period || null,
+          domain: c.suggested_domain_code || selectedDomain || undefined,
+        },
+      ]);
+    }
     // 类型联动 + 逻辑度量联动（继承单位/格式/小数位）
     if (candType) setMetricType(candType);
     if (c.measure_id) {
@@ -1563,7 +1579,7 @@ export function MetricCreate() {
     }
     const checked = sqlBatchResult.candidates.filter((c) => keys.has(c.key));
     if (checked.length === 0) {
-      message.warning("请先勾选候选指标：在候选列表或「批量编辑向导」步骤①②勾选（默认仅勾选原子候选，派生/复合需手动勾选）");
+      message.warning("请先勾选候选指标：在候选列表或「批量编辑向导」步骤①②勾选（默认仅勾选派生候选，复合需手动勾选）");
       return;
     }
     // OneData 语义校验（对齐后端 _validate_definition_json）：复合 = 依赖指标 +
@@ -3449,9 +3465,10 @@ export function MetricCreate() {
                   size="small"
                   defaultActiveKey={sqlBatchResult.statements.map((s) => `stmt-${s.index}`)}
                   items={(() => {
-                    // 派生/复合依赖指标可选项：本批全部原子 + 派生候选（跨语句可选，
-                    // 复合不选作依赖——它是顶层运算结果），label 展示「名称（最终编码）」
-                    const atomicDepOptions = sqlBatchResult.candidates
+                    // 派生/复合依赖指标可选项：本批全部基础候选（方案 A：SQL 候选一律
+                    // 派生——非复合候选，跨语句可选，复合不选作依赖——它是顶层运算结果），
+                    // label 展示「名称（最终编码）」
+                    const baseDepOptions = sqlBatchResult.candidates
                       .filter((c) => c.type !== "composite")
                       .map((c) => ({
                         value: resolveCandidateCode(c),
@@ -3552,10 +3569,11 @@ export function MetricCreate() {
                                     在向导中编辑
                                   </Button>
                                 </div>
-                                {/* 字段区：原子 = 聚合/单位/周期/粒度/关联逻辑度量/产品负责；
-                                    派生/复合 = 依赖指标 + 计算表达式（复合）或只读派生口径 */}
+                                {/* 字段区：方案 A 后 SQL 候选一律派生——物理属性（聚合/单位/
+                                    周期/粒度）对所有非复合候选（原子/派生）显示；关联逻辑度量
+                                    原子专属；依赖指标/计算表达式/派生口径为派生/复合专属 */}
                                 <div style={{ display: "flex", gap: 12, rowGap: 8, flexWrap: "wrap", marginTop: 8 }}>
-                                  {c.type === "atomic" ? (
+                                  {c.type !== "composite" && (
                                     <>
                                       <SqlBatchField label="聚合">
                                         <Select
@@ -3605,32 +3623,35 @@ export function MetricCreate() {
                                           options={PERIOD_OPTIONS}
                                         />
                                       </SqlBatchField>
-                                      <SqlBatchField label="关联逻辑度量">
-                                        {/* OneData 接线（P2）：批量候选关联逻辑度量——SQL 无法推断，
-                                            前端选择器补全；提交透传 measure_id，批量原子不再游离逻辑
-                                            度量体系（对齐单条创建 Step④同款控件） */}
-                                        <Select
-                                          size="small"
-                                          showSearch
-                                          allowClear
-                                          style={{ width: 160 }}
-                                          placeholder="关联逻辑度量"
-                                          optionFilterProp="label"
-                                          value={c.measure_id ?? undefined}
-                                          onChange={(v) => handleSqlBatchEdit(c.key, { measure_id: v ?? null })}
-                                          data-testid={`sql-batch-measure-${c.key}`}
-                                          options={measureOptions.map((o) => ({ value: o.value, label: o.label }))}
-                                        />
-                                      </SqlBatchField>
+                                      {c.type === "atomic" && (
+                                        <SqlBatchField label="关联逻辑度量">
+                                          {/* OneData 接线（P2）：批量候选关联逻辑度量——SQL 无法推断，
+                                              前端选择器补全；提交透传 measure_id，原子候选不再游离逻辑
+                                              度量体系（对齐单条创建 Step④同款控件） */}
+                                          <Select
+                                            size="small"
+                                            showSearch
+                                            allowClear
+                                            style={{ width: 160 }}
+                                            placeholder="关联逻辑度量"
+                                            optionFilterProp="label"
+                                            value={c.measure_id ?? undefined}
+                                            onChange={(v) => handleSqlBatchEdit(c.key, { measure_id: v ?? null })}
+                                            data-testid={`sql-batch-measure-${c.key}`}
+                                            options={measureOptions.map((o) => ({ value: o.value, label: o.label }))}
+                                          />
+                                        </SqlBatchField>
+                                      )}
                                     </>
-                                  ) : (
+                                  )}
+                                  {c.type !== "atomic" && (
                                     <>
                                       <SqlBatchField
                                         label={c.type === "composite" ? "依赖指标（复合必填）" : "依赖指标（派生可选）"}
                                         required={c.type === "composite"}
                                         testId={`sql-batch-req-deps-${c.key}`}
                                       >
-                                        {/* 派生/复合依赖指标：从本批原子候选选择（跨语句可选），
+                                        {/* 派生/复合依赖指标：从本批基础候选选择（跨语句可选），
                                             提交合入 definition_json.dependencies → 血缘注册上游边。
                                             派生=可选依赖（纯周期/业务限定派生可不依赖）；复合=必填 */}
                                         <Select
@@ -3643,7 +3664,7 @@ export function MetricCreate() {
                                           value={c.dependencies || []}
                                           onChange={(v) => handleSqlBatchDepChange(c.key, v)}
                                           data-testid={`sql-batch-deps-${c.key}`}
-                                          options={atomicDepOptions.filter(
+                                          options={baseDepOptions.filter(
                                             (o) => o.value !== resolveCandidateCode(c),
                                           )}
                                         />
@@ -3679,6 +3700,7 @@ export function MetricCreate() {
                                                 type="link"
                                                 style={{ padding: "0 2px", fontSize: 12 }}
                                                 onClick={() => setDefDetailCandidate(c)}
+                                                data-testid={`sql-batch-def-${c.key}`}
                                               >
                                                 查看完整口径
                                               </Button>
@@ -4273,7 +4295,7 @@ export function MetricCreate() {
                       type="secondary"
                       style={{ fontSize: 12, textAlign: "center", width: "100%" }}
                     >
-                      请先在步骤①②勾选候选指标（默认仅勾选原子候选；派生/复合需手动勾选）
+                      请先在步骤①②勾选候选指标（默认仅勾选派生候选；复合需手动勾选）
                     </Typography.Text>
                   )}
                   {sqlBatchCreating && (
@@ -4778,7 +4800,7 @@ export function MetricCreate() {
                       type="info"
                       showIcon
                       style={{ marginTop: 8 }}
-                      message={`识别到 ${pm.length} 个度量列：当前回填首个「${pm[0].alias ?? pm[0].column}」为原子指标；如需分别创建多个原子指标，请使用下方「批量解析」模式勾选创建`}
+                      message={`识别到 ${pm.length} 个度量列：当前回填首个「${pm[0].alias ?? pm[0].column}」为派生指标；如需分别创建多个派生指标，请使用下方「批量解析」模式勾选创建`}
                     />
                   ) : null}
                 </div>

@@ -107,6 +107,66 @@ async def test_create_atomic_passes_measure_id():
     assert captured.measure_id == 7
 
 
+async def test_create_atomic_without_measure_rejected():
+    """方案 B：原子指标缺 measure_id → 422（原子只从逻辑度量目录创建，SQL 推断
+    不再产原子；即使带旧式物理来源（source_table+measure_column 通过 schema 兼容
+    校验），service 层仍拒绝——旧式来源不能替代逻辑度量）。"""
+    from app.core.exceptions import ValidationError
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    with pytest.raises(ValidationError) as ei:
+        await svc.create_metric(
+            MetricCreateRequest(
+                **make_create_payload(
+                    measure_id=None,
+                    source_table="dwd.sales_detail",
+                    measure_column="gmv",
+                )
+            ),
+            owner_id=1,
+        )
+    assert ei.value.error_code == "MEASURE_REQUIRED"
+    assert repo.create.call_count == 0
+
+
+async def test_create_atomic_with_mount_rejected():
+    """方案 B：原子指标携带挂载实体 → 拒绝（挂载是派生指标变体载体，原子不绑物理表）。
+
+    schema 层 model_validator 已先拦截（「仅派生指标可挂载，当前类型 atomic」），
+    service 层 ATOMIC_NO_MOUNT 为纵深防御——此处断言 schema 层错误信息。"""
+    from pydantic import ValidationError as PydanticValidationError
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    with pytest.raises(PydanticValidationError) as ei:
+        await svc.create_metric(
+            MetricCreateRequest(
+                **make_create_payload(
+                    measure_id=1,
+                    mounts=[
+                        {
+                            "source_table": "dwd.sales_detail",
+                            "source_column": "gmv",
+                            "granularity": "日",
+                            "default_period": "day",
+                            "domain": "sales",
+                        }
+                    ],
+                )
+            ),
+            owner_id=1,
+        )
+    assert "仅派生指标可挂载" in str(ei.value)
+    assert repo.create.call_count == 0
+
+
 async def test_create_metric_persists_responsibility_names():
     """创建时透传外部人员名称（id 为空，纯文本兜底——责任方非平台用户）。"""
     svc, repo = _svc_with_repo()
@@ -242,21 +302,22 @@ async def test_create_derived_base_atomic_not_atomic_rejected():
     repo.create = AsyncMock(return_value=make_metric(type="derived"))
     repo.create_version = AsyncMock(return_value=MagicMock())
 
-    with pytest.raises(BusinessError) as ei:
-        with patch("app.services.metric_mount.repository.MetricMountRepository"):
-            await svc.create_metric(
-                MetricCreateRequest(
-                    **make_create_payload(
-                        type="derived",
-                        measure_id=None,
-                        definition_json={
-                            "expression": "SUM(gmv)",
-                            "base_atomic": "some_derived",
-                        },
-                    )
-                ),
-                owner_id=1,
-            )
+    with pytest.raises(BusinessError) as ei, patch(
+        "app.services.metric_mount.repository.MetricMountRepository"
+    ):
+        await svc.create_metric(
+            MetricCreateRequest(
+                **make_create_payload(
+                    type="derived",
+                    measure_id=None,
+                    definition_json={
+                        "expression": "SUM(gmv)",
+                        "base_atomic": "some_derived",
+                    },
+                )
+            ),
+            owner_id=1,
+        )
     assert ei.value.error_code == "BASE_ATOMIC_NOT_ATOMIC"
 
 
@@ -267,21 +328,22 @@ async def test_create_derived_base_atomic_not_found_rejected():
     repo.create = AsyncMock(return_value=make_metric(type="derived"))
     repo.create_version = AsyncMock(return_value=MagicMock())
 
-    with pytest.raises(BusinessError) as ei:
-        with patch("app.services.metric_mount.repository.MetricMountRepository"):
-            await svc.create_metric(
-                MetricCreateRequest(
-                    **make_create_payload(
-                        type="derived",
-                        measure_id=None,
-                        definition_json={
-                            "expression": "SUM(gmv)",
-                            "base_atomic": "ghost_atomic",
-                        },
-                    )
-                ),
-                owner_id=1,
-            )
+    with pytest.raises(BusinessError) as ei, patch(
+        "app.services.metric_mount.repository.MetricMountRepository"
+    ):
+        await svc.create_metric(
+            MetricCreateRequest(
+                **make_create_payload(
+                    type="derived",
+                    measure_id=None,
+                    definition_json={
+                        "expression": "SUM(gmv)",
+                        "base_atomic": "ghost_atomic",
+                    },
+                )
+            ),
+            owner_id=1,
+        )
     assert ei.value.error_code == "BASE_ATOMIC_NOT_FOUND"
 
 
@@ -1337,7 +1399,8 @@ async def test_update_published_derived_mounts_add_variant_non_breaking():
 
 
 async def test_update_published_derived_mounts_remove_variant_breaking():
-    """PUBLISHED 派生指标删除变体（挂载行不在请求）→ 破坏性 PENDING + diff_json 携带 mounts 快照。"""
+    """PUBLISHED 派生指标删除变体（挂载行不在请求）→ 破坏性 PENDING + diff_json
+    携带 mounts 快照。"""
     svc, repo = _svc_with_repo()
     metric = make_metric(
         status="PUBLISHED", type="derived", granularity="医生", version=3,
@@ -2335,15 +2398,16 @@ async def test_batch_register_db_error_middle_col_continues():
 # ---------------------------------------------------------------- SQL 批量注册（场景A/B）
 
 
-def _sql_atomic(
+def _sql_derived(
     key: str, code: str, name: str, col: str, agg: str = "SUM", raw_sql: str | None = None
 ) -> SqlBatchCreateCandidate:
-    """构造 SQL 批量注册原子候选。"""
+    """构造 SQL 批量注册派生候选（方案 A：SQL 物理口径一律派生，原子只从逻辑度量
+    目录创建——批量 SQL 推断候选不再出现 atomic）。"""
     return SqlBatchCreateCandidate(
         key=key,
         metric_code=code,
         name=name,
-        type="atomic",
+        type="derived",
         source_table="dwd_order_di",
         measure_column=col,
         aggregation=agg,
@@ -2386,8 +2450,8 @@ async def test_sql_batch_register_success_with_composite():
     request = MetricSqlBatchRegisterRequest(
         domain="sales",
         candidates=[
-            _sql_atomic("0:amount", "sales_order_amount_day", "日订单金额", "amount", "SUM"),
-            _sql_atomic(
+            _sql_derived("0:amount", "sales_order_amount_day", "日订单金额", "amount", "SUM"),
+            _sql_derived(
                 "0:user_id", "sales_order_userid_day", "日去重用户", "user_id", "COUNT_DISTINCT"
             ),
             _sql_composite(
@@ -2417,7 +2481,7 @@ async def test_sql_batch_register_composite_missing_dep_skipped():
     request = MetricSqlBatchRegisterRequest(
         domain="sales",
         candidates=[
-            _sql_atomic("0:amount", "sales_order_amount_day", "日订单金额", "amount"),
+            _sql_derived("0:amount", "sales_order_amount_day", "日订单金额", "amount"),
             _sql_composite(
                 "0:composite",
                 "sales_order_comp_day",
@@ -2476,8 +2540,8 @@ async def test_sql_batch_register_db_error_savepoint_isolation():
     request = MetricSqlBatchRegisterRequest(
         domain="sales",
         candidates=[
-            _sql_atomic("0:ok", "sales_order_ok_day", "日订单金额", "ok_col"),
-            _sql_atomic("0:bad", "sales_order_bad_day", "日用户数", "bad_col"),
+            _sql_derived("0:ok", "sales_order_ok_day", "日订单金额", "ok_col"),
+            _sql_derived("0:bad", "sales_order_bad_day", "日用户数", "bad_col"),
         ],
     )
     real_create = svc.create_metric
@@ -2509,7 +2573,7 @@ async def test_sql_batch_register_domain_gate():
     svc, _ = _svc_with_repo()
     request = MetricSqlBatchRegisterRequest(
         domain="sales",
-        candidates=[_sql_atomic("0:amount", "sales_order_amount_day", "日订单金额", "amount")],
+        candidates=[_sql_derived("0:amount", "sales_order_amount_day", "日订单金额", "amount")],
     )
     with pytest.raises(BusinessError) as exc:
         await svc.batch_register_from_sql(
@@ -2534,8 +2598,8 @@ async def test_sql_batch_register_catches_pydantic_validation_error():
     request = MetricSqlBatchRegisterRequest(
         domain="sales",
         candidates=[
-            _sql_atomic("0:ok", "sales_order_ok_day", "日订单金额", "ok_col"),
-            _sql_atomic("0:bad", "sales_order_bad_day", "日用户数", "bad_col"),
+            _sql_derived("0:ok", "sales_order_ok_day", "日订单金额", "ok_col"),
+            _sql_derived("0:bad", "sales_order_bad_day", "日用户数", "bad_col"),
         ],
     )
     exc = ValidationError.from_exception_data(
@@ -2593,8 +2657,8 @@ async def test_sql_batch_register_conflict_existing_loaded_once():
     request = MetricSqlBatchRegisterRequest(
         domain="sales",
         candidates=[
-            _sql_atomic("0:amount", "sales_order_amount_day", "日订单金额", "amount"),
-            _sql_atomic("0:user_id", "sales_order_userid_day", "日去重用户", "user_id"),
+            _sql_derived("0:amount", "sales_order_amount_day", "日订单金额", "amount"),
+            _sql_derived("0:user_id", "sales_order_userid_day", "日去重用户", "user_id"),
             _sql_composite(
                 "0:composite",
                 "sales_order_comp_day",
@@ -2632,7 +2696,7 @@ async def test_sql_batch_register_composite_owners_and_unit():
     request = MetricSqlBatchRegisterRequest(
         domain="sales",
         candidates=[
-            _sql_atomic("0:amount", "sales_order_amount_day", "日订单金额", "amount"),
+            _sql_derived("0:amount", "sales_order_amount_day", "日订单金额", "amount"),
             SqlBatchCreateCandidate(
                 key="0:composite",
                 metric_code="sales_order_comp_day",
@@ -2706,7 +2770,7 @@ async def test_sql_batch_register_batch_id_persisted():
     request = MetricSqlBatchRegisterRequest(
         domain="sales",
         candidates=[
-            _sql_atomic("0:amount", "sales_order_amount_day", "日订单金额", "amount"),
+            _sql_derived("0:amount", "sales_order_amount_day", "日订单金额", "amount"),
             _sql_composite(
                 "0:composite",
                 "sales_order_comp_day",
@@ -2732,9 +2796,9 @@ async def test_sql_batch_register_batch_id_persisted():
     assert len(captured) == 2
 
 
-async def test_sql_batch_register_atomic_owners_passed():
-    """P0-2 原子侧：SQL 批量注册原子候选的三方责任透传（此前仅复合补齐，原子
-    责任链空——详情页 OwnerChain 不完整）。"""
+async def test_sql_batch_register_derived_owners_passed():
+    """P0-2 方案 A：SQL 批量注册派生候选的三方责任透传（此前仅复合补齐，基础候选
+    责任链空——详情页 OwnerChain 不完整；方案 A 后 SQL 候选统一派生）。"""
     from app.services.semantic.schemas import (
         MetricSqlBatchRegisterRequest,
         SqlBatchCreateCandidate,
@@ -2752,7 +2816,7 @@ async def test_sql_batch_register_atomic_owners_passed():
                 key="0:amount",
                 metric_code="sales_order_amount_day",
                 name="日订单金额",
-                type="atomic",
+                type="derived",
                 source_table="dwd_order_di",
                 measure_column="amount",
                 aggregation="SUM",
@@ -2780,13 +2844,13 @@ async def test_sql_batch_register_atomic_owners_passed():
 
     result = await svc.batch_register_from_sql(request, actor_id=1)
     assert all(c["status"] == "DRAFT" for c in result["candidates"])
-    atomic_req = captured[0]
-    assert atomic_req.product_owner_id == 10
-    assert atomic_req.tech_owner_id == 11
-    assert atomic_req.dw_developer_id == 12
-    assert atomic_req.product_owner_name == "产品王"
-    assert atomic_req.tech_owner_name == "技术李"
-    assert atomic_req.dw_developer_name == "数仓赵"
+    derived_req = captured[0]
+    assert derived_req.product_owner_id == 10
+    assert derived_req.tech_owner_id == 11
+    assert derived_req.dw_developer_id == 12
+    assert derived_req.product_owner_name == "产品王"
+    assert derived_req.tech_owner_name == "技术李"
+    assert derived_req.dw_developer_name == "数仓赵"
 
 
 async def test_sql_batch_register_raw_sql_persisted():
@@ -2803,7 +2867,7 @@ async def test_sql_batch_register_raw_sql_persisted():
     request = MetricSqlBatchRegisterRequest(
         domain="sales",
         candidates=[
-            _sql_atomic(
+            _sql_derived(
                 "0:amount", "sales_order_amount_day", "日订单金额", "amount", "SUM", raw_sql=raw
             )
         ],
@@ -2835,7 +2899,7 @@ async def test_sql_batch_register_notifies_creator():
     request = MetricSqlBatchRegisterRequest(
         domain="sales",
         candidates=[
-            _sql_atomic("0:amount", "sales_order_amount_day", "日订单金额", "amount")
+            _sql_derived("0:amount", "sales_order_amount_day", "日订单金额", "amount")
         ],
     )
     result = await svc.batch_register_from_sql(request, actor_id=7)
@@ -2862,7 +2926,7 @@ async def test_sql_batch_register_skips_notify_when_all_failed():
     request = MetricSqlBatchRegisterRequest(
         domain="sales",
         candidates=[
-            _sql_atomic("0:amount", "sales_order_amount_day", "日订单金额", "amount")
+            _sql_derived("0:amount", "sales_order_amount_day", "日订单金额", "amount")
         ],
     )
     result = await svc.batch_register_from_sql(request, actor_id=7)
@@ -2883,9 +2947,9 @@ async def test_sql_batch_register_conflict_llm_budget():
     request = MetricSqlBatchRegisterRequest(
         domain="sales",
         candidates=[
-            _sql_atomic("0:a", "sales_order_amount_day", "日订单金额", "amount"),
-            _sql_atomic("0:b", "sales_order_userid_day", "日去重用户", "user_id"),
-            _sql_atomic("0:c", "sales_order_cnt_day", "日订单数", "order_id", agg="COUNT"),
+            _sql_derived("0:a", "sales_order_amount_day", "日订单金额", "amount"),
+            _sql_derived("0:b", "sales_order_userid_day", "日去重用户", "user_id"),
+            _sql_derived("0:c", "sales_order_cnt_day", "日订单数", "order_id", agg="COUNT"),
         ],
     )
     captured: list = []
@@ -6847,8 +6911,8 @@ FULL JOIN (
     parsed = await infer_sql_batch(
         MagicMock(), sql=doris_ctas, split_mode="statement", domain_code="wedw"
     )
-    atoms = [c for c in parsed["candidates"] if c["type"] == "atomic"]
-    assert len(atoms) >= 2, "Doris CTAS 应解析出 ≥2 个原子候选"
+    bases = [c for c in parsed["candidates"] if c["type"] == "derived"]
+    assert len(bases) >= 2, "Doris CTAS 应解析出 ≥2 个派生候选"
 
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=None)
@@ -6862,28 +6926,29 @@ FULL JOIN (
                 key=c["key"],
                 metric_code=c["metric_code"],
                 name=c["name"],
-                type="atomic",
+                type="derived",
                 source_table=c["source_table"],
                 measure_column=c["measure_column"],
                 aggregation=c["aggregation"],
                 period=c["period"],
                 definition_json=c["definition_json"],
             )
-            for c in atoms
+            for c in bases
         ],
     )
     result = await svc.batch_register_from_sql(request, actor_id=1)
-    assert len(result["candidates"]) == len(atoms)
+    assert len(result["candidates"]) == len(bases)
     assert all(c["status"] == "DRAFT" for c in result["candidates"])
     # 候选携带 Doris 口径（expression + source_fields）创建成功
-    assert repo.create.call_count == len(atoms)
+    assert repo.create.call_count == len(bases)
 
 
 async def test_sql_batch_register_derived_phase2_with_mount():
-    """批量注册含派生候选：Phase1 原子 → Phase2 派生（依赖预检 + type=derived + mount）。
+    """批量注册含派生候选：Phase1 基础候选（方案 A：SQL 一律派生）→ Phase2 派生
+    （依赖预检 + type=derived + mount）。
 
-    派生候选（用户把原子在线改为派生：依赖指标 + 计算表达式）走 Phase2 依赖预检，
-    依赖在 Phase1 创建的原子命中 atom_ok → savepoint 创建 type=derived 指标并透传
+    派生候选（用户把基础候选在线改为派生：依赖指标 + 计算表达式）走 Phase2 依赖预检，
+    依赖在 Phase1 创建的基础候选命中 dep_ok → savepoint 创建 type=derived 指标并透传
     挂载实体（OneData 挂载层，源表/列/粒度/周期/域自动落 metric_mount）。
     """
     from app.services.semantic.schemas import (
@@ -6897,11 +6962,11 @@ async def test_sql_batch_register_derived_phase2_with_mount():
     repo.create = AsyncMock(return_value=make_metric())
     repo.create_version = AsyncMock(return_value=MagicMock())
 
-    atom = SqlBatchCreateCandidate(
+    base = SqlBatchCreateCandidate(
         key="0:active",
         metric_code="outpatient_doctor_active_month",
         name="医生活跃数",
-        type="atomic",
+        type="derived",
         source_table="wedw_dws.doctor_active_month_di",
         measure_column="doctor_code",
         aggregation="COUNT_DISTINCT",
@@ -6939,7 +7004,7 @@ async def test_sql_batch_register_derived_phase2_with_mount():
     )
     request = MetricSqlBatchRegisterRequest(
         domain="outpatient",
-        candidates=[atom, derived],
+        candidates=[base, derived],
     )
     # 派生候选带 mount → create_metric 落 metric_mount；mock 环境下其 save 需 AsyncMock
     with patch(
@@ -6947,6 +7012,6 @@ async def test_sql_batch_register_derived_phase2_with_mount():
         new=AsyncMock(return_value=MagicMock()),
     ):
         result = await svc.batch_register_from_sql(request, actor_id=1)
-    # Phase1 原子 + Phase2 派生均创建成功（派生依赖命中 atom_ok，无缺依赖跳过）
+    # Phase1 基础 + Phase2 派生均创建成功（派生依赖命中 dep_ok，无缺依赖跳过）
     assert [c["status"] for c in result["candidates"]] == ["DRAFT", "DRAFT"]
     assert repo.create.call_count == 2

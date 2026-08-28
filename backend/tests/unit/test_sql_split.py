@@ -263,7 +263,7 @@ async def test_infer_sql_batch_multi_statement_candidates() -> None:
     assert "sales_user_userid_day" in codes
     # 原子候选完整字段
     first = result["candidates"][0]
-    assert first["type"] == "atomic"
+    assert first["type"] == "derived"
     assert first["aggregation"] in ("SUM", "COUNT_DISTINCT")
     assert first["definition_json"]["expression"]
     assert first["source_table"] == "dwd_order_di"
@@ -280,7 +280,7 @@ async def test_infer_sql_batch_no_arith_no_composite() -> None:
         synthesize_composite=True,
     )
     composites = [c for c in result["candidates"] if c["type"] == "composite"]
-    atoms = [c for c in result["candidates"] if c["type"] == "atomic"]
+    atoms = [c for c in result["candidates"] if c["type"] == "derived"]
     assert len(atoms) == 2
     assert len(composites) == 0
 
@@ -300,7 +300,7 @@ async def test_infer_sql_batch_synthesize_composite_with_arith() -> None:
         synthesize_composite=True,
     )
     composites = [c for c in result["candidates"] if c["type"] == "composite"]
-    atoms = [c for c in result["candidates"] if c["type"] == "atomic"]
+    atoms = [c for c in result["candidates"] if c["type"] == "derived"]
     # R1：arpu（含除法）直接判 composite，原子仅剩 gmv；不再合成 "0:composite"
     # （合成复合只基于纯原子，原子<2 时不合成，避免复合依赖复合）
     assert len(atoms) == 1
@@ -321,7 +321,7 @@ async def test_infer_sql_batch_single_measure_no_composite() -> None:
         synthesize_composite=True,
     )
     assert len(result["candidates"]) == 1
-    assert result["candidates"][0]["type"] == "atomic"
+    assert result["candidates"][0]["type"] == "derived"
 
 
 async def test_infer_sql_batch_skipped_statement() -> None:
@@ -523,7 +523,7 @@ async def test_infer_sql_batch_doris_ctas_candidates_with_alias_anchor() -> None
     # DROP 无聚合进 skipped（ddl_only 分类），CTAS 下沉出 2 个原子候选
     assert len(result["skipped"]) == 1
     assert result["skipped"][0]["reason"] == "ddl_only"
-    atoms = [c for c in result["candidates"] if c["type"] == "atomic"]
+    atoms = [c for c in result["candidates"] if c["type"] == "derived"]
     assert len(atoms) == 2
     # alias 锚点：同落 biz_data 列的 2 个 case 聚合 → 编码/名称可区分
     codes = {c["metric_code"] for c in atoms}
@@ -625,7 +625,7 @@ async def test_infer_sql_batch_llm_period_unavailable_degrades_day() -> None:
             db, sql="SELECT SUM(amount) AS gmv FROM dwd_order_di",
             split_mode="statement", domain_code="sales",
         )
-    cands = [c for c in result["candidates"] if c["type"] == "atomic"]
+    cands = [c for c in result["candidates"] if c["type"] == "derived"]
     assert cands and all(c["period"] == "day" for c in cands)
 
 
@@ -982,7 +982,7 @@ async def test_infer_sql_batch_multiple_domain_no_illegal_code() -> None:
         )
     # 整段 multiple → 域未生效 → 原子候选 metric_code 为 None（无 _xxx_day 非法编码）
     assert result["domain"]["status"] == "multiple"
-    atoms = [c for c in result["candidates"] if c["type"] == "atomic"]
+    atoms = [c for c in result["candidates"] if c["type"] == "derived"]
     assert atoms, "应有原子候选"
     assert all(c["metric_code"] is None for c in atoms), "多域态不得 bake-in 非法编码"
     # P2-10：候选携带逐语句建议域（第二句 health、第一句 sales）
@@ -1036,7 +1036,7 @@ async def test_infer_sql_batch_domain_suggest_runs_concurrently() -> None:
     ):
         result = await infer_sql_batch(_fake_db(), sql=_MULTI_SQL, split_mode="statement")
     assert max_active >= 2  # 逐语句域建议并发而非串行
-    atoms = [c for c in result["candidates"] if c["type"] == "atomic"]
+    atoms = [c for c in result["candidates"] if c["type"] == "derived"]
     assert atoms, "应有原子候选"
     codes = {c["suggested_domain_code"] for c in atoms}
     assert "sales" in codes and "health" in codes
@@ -1070,11 +1070,11 @@ async def test_infer_sql_batch_composite_uses_real_period() -> None:
     assert all(c["period"] == "month" for c in derived)
 
 
-def test_build_atomic_candidate_empty_domain_code_none() -> None:
-    """P0-1 单测：域为空时原子候选编码为 None（不生成 _xxx_day 非法编码）。"""
-    from app.services.semantic.sql_split import _build_atomic_candidate
+def test_build_derived_candidate_empty_domain_code_none() -> None:
+    """P0-1 单测：域为空时派生候选编码为 None（不生成 _xxx_day 非法编码）。"""
+    from app.services.semantic.sql_split import _build_derived_candidate
 
-    cand = _build_atomic_candidate(
+    cand = _build_derived_candidate(
         idx=0,
         measure={"column": "amount", "agg": "SUM"},
         table="dwd_order_di",
@@ -1085,7 +1085,7 @@ def test_build_atomic_candidate_empty_domain_code_none() -> None:
     )
     assert cand["metric_code"] is None
     # 有域时正常生成
-    cand2 = _build_atomic_candidate(
+    cand2 = _build_derived_candidate(
         idx=0,
         measure={"column": "amount", "agg": "SUM"},
         table="dwd_order_di",
@@ -1098,12 +1098,13 @@ def test_build_atomic_candidate_empty_domain_code_none() -> None:
 
 
 def test_apply_candidate_period_recomputes_type() -> None:
-    """B2：LLM 覆盖周期后类型与周期同步（非日→派生、日→原子；复合保持复合）。"""
+    """B2（方案 A）：LLM 覆盖周期后类型保持派生（日 = 派生最小周期，不降级为原子；
+    复合保持复合）。"""
     from app.services.semantic.sql_split import _apply_candidate_period
 
-    # day → month：类型 atomic → derived
+    # day → month：类型保持 derived
     cand = {
-        "type": "atomic",
+        "type": "derived",
         "period": "day",
         "granularity": "day",
         "metric_code": "sales_order_amount_day",
@@ -1113,7 +1114,7 @@ def test_apply_candidate_period_recomputes_type() -> None:
     assert cand["type"] == "derived"
     assert cand["metric_code"] == "sales_order_amount_month"
 
-    # month → day：类型 derived → atomic
+    # month → day：类型保持 derived（不降级为原子）
     cand2 = {
         "type": "derived",
         "period": "month",
@@ -1122,7 +1123,7 @@ def test_apply_candidate_period_recomputes_type() -> None:
     }
     _apply_candidate_period(cand2, "day")
     assert cand2["period"] == "day"
-    assert cand2["type"] == "atomic"
+    assert cand2["type"] == "derived"
     assert cand2["metric_code"] == "sales_order_amount_day"
 
     # 复合保持复合（周期是其属性，不因覆盖降级）
@@ -1286,7 +1287,7 @@ async def test_infer_sql_batch_measures_fallback_runs_concurrently() -> None:
             db, sql=";".join(parts), split_mode="semicolon", domain_code="sales"
         )
     assert max_active >= 2  # 并发而非串行
-    cands = [c for c in result["candidates"] if c["type"] == "atomic"]
+    cands = [c for c in result["candidates"] if c["type"] == "derived"]
     assert len(cands) == 3
     # 候选按语句 index 顺序回填（与串行一致）
     assert [int(str(c["key"]).split(":")[0]) for c in cands] == [0, 1, 2]
@@ -1341,7 +1342,7 @@ async def test_infer_sql_batch_mixed_fallback_keeps_statement_order() -> None:
         result = await infer_sql_batch(
             db, sql=sql, split_mode="semicolon", domain_code="sales"
         )
-    cands = [c for c in result["candidates"] if c["type"] == "atomic"]
+    cands = [c for c in result["candidates"] if c["type"] == "derived"]
     assert [int(str(c["key"]).split(":")[0]) for c in cands] == [0, 1, 2]
     assert [c["measure_column"] for c in cands] == ["amount", "unparsable_col", "user_id"]
     assert len(result["skipped"]) == 0

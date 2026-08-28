@@ -1229,7 +1229,7 @@ def _extract_measures(select: exp.Select) -> list[dict[str, Any]]:
 
     **A-1/2**：顶层投影也走 ``enrich=True`` 携带原始 ``expression``（如
     ``SUM(CASE WHEN status='paid' THEN amount END)``/``SUM(amount) OVER (...``）——
-    此前顶层候选由 ``_build_atomic_candidate`` 用简化 ``SUM(col)`` 还原口径，
+    此前顶层候选由 ``_build_derived_candidate`` 用简化 ``SUM(col)`` 还原口径，
     CASE 过滤条件/窗口语义被丢弃，注册后指标变全表聚合（数据错误）。
     顶层不传 ``table``（候选的源表由 ``_physical_source_tables`` 过滤 CTE 别名后
     决定，避免顶层 measure 误挂 CTE 名）且 ``sunk=False``（编码锚点用真实列）。

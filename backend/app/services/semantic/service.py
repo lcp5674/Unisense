@@ -174,9 +174,12 @@ def _resolve_mount_targets(existing: list[Any], mounts: list[Any]) -> list[Any]:
     """
     if not mounts:
         return mounts
-    if all(getattr(m, "id", None) is None for m in mounts):
-        if len(mounts) == 1 and len(existing) == 1:
-            return [mounts[0].model_copy(update={"id": existing[0].id})]
+    if (
+        all(getattr(m, "id", None) is None for m in mounts)
+        and len(mounts) == 1
+        and len(existing) == 1
+    ):
+        return [mounts[0].model_copy(update={"id": existing[0].id})]
     return mounts
 
 # 指标间依赖边的 edge_type 映射（register_metric_dependency 由血缘团队负责，
@@ -543,6 +546,24 @@ class MetricService(BaseService):
         # 3a. OneData 原子层校验：原子指标关联的逻辑度量必须存在且已发布
         # （防 FK 500——传不存在 measure_id 时 flush 抛 IntegrityError → 500；
         #  防草稿/软删度量被新指标引用——度量是原子指标的权威继承源，须 PUBLISHED 才可用）。
+        # OneData 语义强卡（对齐界限文档 §2.3）：
+        #  - 原子指标 = 逻辑度量 + 基础统计粒度（日），**只从逻辑度量目录创建**——
+        #    measure_id 必填（SQL 推断路径已不产原子，任何入口缺 measure_id 一律 422）；
+        #  - 原子不绑物理表/挂载——挂载实体（mounts）是派生指标专属载体，原子携带即拒绝。
+        #    源表/度量列（source_table/measure_column）保留为「兼容旧式来源」可选项，
+        #    仅用于血缘展示，不做拦截。
+        if request.type == "atomic" and request.measure_id is None:
+            raise ValidationError(
+                "原子指标必须关联逻辑度量（原子指标只从逻辑度量目录创建，"
+                "不绑定物理表）",
+                error_code="MEASURE_REQUIRED",
+            )
+        if request.type == "atomic" and (request.mounts or request.mount):
+            raise ValidationError(
+                "原子指标不绑定物理表/挂载实体（挂载是派生指标的变体载体；"
+                "原子 = 逻辑度量 + 基础统计粒度日，请改选派生类型）",
+                error_code="ATOMIC_NO_MOUNT",
+            )
         measure: Any = None
         if request.type == "atomic" and request.measure_id is not None:
             measure = await self._measure_repo.get_by_id(request.measure_id)
@@ -4150,7 +4171,7 @@ class MetricService(BaseService):
                         dw_developer_name=req.dw_developer_name,
                     )
                 )
-        for mid, old in existing_by_id.items():
+        for mid in existing_by_id:
             if mid not in requested_ids:
                 await _mrepo.soft_delete(mid)
         target = await _mrepo.list_by_metric(metric.id)
@@ -5303,6 +5324,12 @@ class MetricService(BaseService):
                         # OneData 挂载层：派生候选透传挂载实体（源表/列/粒度/周期/域，
                         # 创建端自动落 metric_mount——与单条派生向导行为一致）
                         mount=cand.mount,
+                        # 方案 A：SQL 基础候选统一派生后全部走 Phase2——源表/度量列/
+                        # raw_sql 必须与 Phase1 对齐透传，否则物理口径（来源表/列/整句
+                        # 原文溯源）丢失（此前仅原子候选 Phase1 透传）。
+                        source_table=cand.source_table,
+                        measure_column=cand.measure_column,
+                        raw_sql=cand.raw_sql,
                         # P1-3：复合候选携带实际统计周期/粒度（不再默认 day 失真）
                         period=cand.period,
                         granularity=cand.granularity,
@@ -5326,6 +5353,11 @@ class MetricService(BaseService):
                         _preloaded_conflict_existing=preloaded_existing,
                         _conflict_llm_budget=conflict_llm_budget,
                     )
+                    # 方案 A：SQL 基础候选统一派生后全部走 Phase2——把创建成功的
+                    # 派生/复合编码也加入批内已创建集合（atom_ok），后续复合候选
+                    # 依赖预检可命中本批已创建的派生基础候选（此前集合只收 Phase1
+                    # 原子，方案 A 后 Phase1 无候选 → 复合恒误报「依赖未创建」）。
+                    atom_ok.add(code)
                 candidates.append(
                     {
                         "metric_code": code,
@@ -5359,11 +5391,11 @@ class MetricService(BaseService):
                     {
                         "metric_code": code,
                         "status": "VALIDATION_ERROR",
-                        "validation_errors": "批量注册复合指标失败（DB 错误），已跳过",
+                        "validation_errors": "批量注册单条失败（DB 错误），已跳过该条",
                     }
                 )
                 logger.warning(
-                    "sql_batch_register_composite_db_error",
+                    "sql_batch_register_candidate_db_error",
                     batch_id=batch_id,
                     metric_code=code,
                     exc_info=True,

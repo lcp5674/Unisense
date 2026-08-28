@@ -99,9 +99,11 @@ class TestAutoFill:
         result = auto_fill(domain_code="test", source_table="dwd.test_table")
         assert result["defaults"].get("dw_layer") == "DWD"
 
-    def test_infer_metric_type_atomic(self) -> None:
+    def test_infer_metric_type_sql_physical_derived(self) -> None:
+        """OneData 语义（方案 A）：SQL 物理口径（列单度量直算）→ 派生指标——
+        原子只从逻辑度量目录创建，SQL 推断一律不产原子。"""
         result = auto_fill(domain_code="test", measure_column="order_count")
-        assert result["defaults"].get("type") == "atomic"
+        assert result["defaults"].get("type") == "derived"
 
     def test_infer_metric_type_ratio_composite(self) -> None:
         """OneData 语义：列名含比率语义（rate/ratio/pct）= 多指标比率 → 复合指标。"""
@@ -118,15 +120,16 @@ class TestAutoFill:
         )
         assert result["defaults"].get("type") == "derived"
 
-    def test_infer_metric_type_period_day_atomic(self) -> None:
-        """OneData 语义：日粒度为基础统计粒度（原子常态），不视为派生周期。"""
+    def test_infer_metric_type_period_day_derived(self) -> None:
+        """OneData 语义（方案 A）：日粒度 = 派生最小周期——SQL 物理口径无论
+        周期一律归派生（原子只从逻辑度量目录创建）。"""
         result = auto_fill(
             domain_code="sales",
             source_table="dwd.sales_detail",
             measure_column="amount",
             period="day",
         )
-        assert result["defaults"].get("type") == "atomic"
+        assert result["defaults"].get("type") == "derived"
 
 
 class TestInferMetricSql:
@@ -151,7 +154,8 @@ class TestInferMetricSql:
         assert f["aggregation"]["value"] == "SUM"
         assert f["aggregation"]["source"] == "sql_parse"
         assert f["granularity"]["value"] == "day"
-        assert f["type"]["value"] == "atomic"
+        # 方案 A：SQL 物理口径（源表+列聚合）→ 派生（原子只从逻辑度量目录创建）
+        assert f["type"]["value"] == "derived"
         assert f["additivity"]["value"] == "ADDITIVE"
         assert f["serving_mode"]["value"] == "BATCH_ONLY"
         assert f["definition_mode"]["value"] == "sql"
@@ -343,7 +347,8 @@ class TestAutoFillBackwardCompat:
         )
         assert result["metric_code_suggestion"] == "sales_sales_amount_day"
         assert result["defaults"]["dw_layer"] == "DWD"
-        assert result["defaults"]["type"] == "atomic"
+        # 方案 A：SQL 物理口径 → 派生（原子只从逻辑度量目录创建）
+        assert result["defaults"]["type"] == "derived"
         # 新字段
         assert "fields" in result
         assert result["definition_mode"] == "sql"

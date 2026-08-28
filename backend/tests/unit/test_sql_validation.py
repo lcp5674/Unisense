@@ -337,5 +337,6 @@ async def test_infer_sql_batch_validation_default_on_and_degrades() -> None:
             domain_code="sales",
         )
     assert result["validation"] == {}  # LLM 不可用 → 无校验摘要，候选照常
-    cands = [c for c in result["candidates"] if c["type"] == "atomic"]
+    # 方案 A：SQL 物理口径候选一律派生（原子只从逻辑度量目录创建）
+    cands = [c for c in result["candidates"] if c["type"] == "derived"]
     assert cands and cands[0]["measure_column"] == "amount"

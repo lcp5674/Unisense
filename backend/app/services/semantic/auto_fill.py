@@ -417,13 +417,13 @@ def _is_ratio_expression(profile: dict[str, Any]) -> bool:
 
 
 def _infer_type(profile: dict[str, Any]) -> SuggestionField:
-    """指标类型：原子/派生/复合（OneData 语义，周期驱动）。
+    """指标类型：派生/复合（OneData 语义，SQL 推断一律不产原子）。
 
-    原子指标 = 逻辑度量 + 基础统计粒度（日），不含业务限定与时间周期（变体口径：
-    把日粒度算进原子的便捷标签）；派生指标 = 原子指标 + 业务限定 + 时间周期
-    （月/周/季/年/小时等非日周期）；复合指标 = 多指标四则运算/比率。
-    SQL 解析出的指标天然带业务限定 + 周期，业务限定与非日周期均归派生（对齐用户
-    建模认知——「本月活跃医生数」= 活跃医生数 + 业务限定 + 月周期）。
+    原子指标 = 逻辑度量 + 基础统计粒度（日），**只从逻辑度量目录创建**，不绑物理表
+    （原子是逻辑抽象，无 SQL 可推断）；派生指标 = 原子指标 + 业务限定 + 时间周期
+    （日周期作为派生最小周期）；复合指标 = 多指标四则运算/比率。
+    SQL 解析出的指标天然绑定源表/度量列（物理口径），无论日粒度与否一律归派生——
+    对齐用户建模认知（「日金额」「日活跃医生数」= 物理口径派生，原子只从逻辑度量目录来）。
     """
     sql_profile: SqlProfile | None = profile.get("sql_profile")
     measure_column: str | None = profile.get("measure_column")
@@ -442,10 +442,19 @@ def _infer_type(profile: dict[str, Any]) -> SuggestionField:
             f"解析出时间周期 {period} → 派生指标（原子指标 + 业务限定 + 时间周期）",
         )
     if sql_profile and sql_profile.measures:
-        return _field("atomic", "sql_parse", 0.85, "单表单聚合直算（日粒度常态）→ 原子指标")
+        return _field(
+            "derived", "sql_parse", 0.85,
+            "SQL 物理口径（源表+列聚合）→ 派生指标（原子只从逻辑度量目录创建）",
+        )
     if measure_column:
-        return _field("atomic", "rule", 0.65, f"列 {measure_column} 单度量直算 → 原子指标")
-    return _field("atomic", "fallback", 0.4, "默认按原子指标")
+        return _field(
+            "derived", "rule", 0.65,
+            f"列 {measure_column} 单度量直算 → 派生指标（原子只从逻辑度量目录创建）",
+        )
+    return _field(
+        "derived", "fallback", 0.4,
+        "SQL 物理口径默认归派生（原子只从逻辑度量目录创建）",
+    )
 
 
 def _infer_time_semantics(profile: dict[str, Any]) -> SuggestionField:

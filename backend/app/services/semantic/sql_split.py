@@ -333,7 +333,7 @@ async def _llm_infer_measures(
     上下文（CTE 定义、前置 SET/变量、注释、兄弟语句），LLM 只从焦点语句中提取
     度量——方言语句的字段来源/口径常依赖前置定义，只看切分后的单段会信息丢失。
     LLM 提取 ``[{column, agg, alias, table, period, name}]``，结构对齐
-    ``_build_atomic_candidate`` 下沉场景可消费的 measure 字段（alias/table 用于
+    ``_build_derived_candidate`` 下沉场景可消费的 measure 字段（alias/table 用于
     区分同列多语义、source_fields 还原口径）。不可用/超时/解析失败返回 ``None``
     （上层降级 skipped，绝不阻断批量解析）。
 
@@ -560,7 +560,7 @@ def split_select_measures(
     """场景B：单语句多度量拆分为 N 个度量候选（共享源表/维度/时间谓词）。
 
     **注意（P2-7）**：本函数当前无任何端点/服务调用（仅测试引用），属保留的
-    场景B 公共 API；``infer_sql_batch`` 内部用 ``_build_atomic_candidate``（功能
+    场景B 公共 API；``infer_sql_batch`` 内部用 ``_build_derived_candidate``（功能
     更全：含编码/口径/别名锚点），不经过本函数。如需启用场景B 独立入口，应
     先对齐候选字段结构（``source_table/measure_column/aggregation/period`` 仅
     覆盖原子候选最小集）。
@@ -599,7 +599,7 @@ def split_select_measures(
 # ----------------------------------------------------------------
 
 
-def _build_atomic_candidate(
+def _build_derived_candidate(
     *,
     idx: int,
     measure: dict[str, Any],
@@ -615,9 +615,12 @@ def _build_atomic_candidate(
     comment_table: str | None = None,
     group_by: list[str] | None = None,
 ) -> dict[str, Any]:
-    """构建原子候选：expression 模式推断（勿传多度量原 SQL，避免兄弟度量进口径），
-    聚合方式覆盖为 SQL 解析值（比列名规则更可靠）。
+    """构建派生候选（SQL 物理口径默认载体）：expression 模式推断（勿传多度量原 SQL，
+    避免兄弟度量进口径），聚合方式覆盖为 SQL 解析值（比列名规则更可靠）。
 
+    OneData 语义：原子指标 = 逻辑度量 + 基础统计粒度（日），只从逻辑度量目录创建，
+    **SQL 推断一律不产原子**——SQL 候选天然绑定源表/度量列（物理口径），日粒度也归
+    派生（派生最小周期）。比率/运算候选由 ``_build_composite_candidate`` 承接。
     ``measure`` 可能来自下沉收集（ETL 透传 INSERT），自带 ``alias/table/expression``：
     key 用 alias 防同列不同语义冲突，源表/口径优先用度量自身携带值。
     ``source``（P2-2）：``rule``（规则层可靠产出）或 ``llm``（LLM 兜底提取，
@@ -714,22 +717,23 @@ def _build_atomic_candidate(
     # LLM 兜底场景自带建议名（measure["name"]）优先；规则层（无 name）走 auto_fill
     candidate_name = measure.get("name") or fields["name"]["value"]
     # OneData 语义类型判定（周期驱动 + 比率/运算信号，变体口径）：原子指标 = 逻辑
-    # 度量 + 基础统计粒度（日），不含业务限定与时间周期；派生指标 = 原子指标 + 业务
-    # 限定 + 时间周期（月/周/季/年/小时等非日周期）。
-    # SQL 解析出的候选天然带业务限定 + 周期，业务限定与非日周期均归派生（对齐用户
-    # 建模认知——「本月活跃医生数」= 活跃医生数 + 业务限定 + 月周期）。日粒度作为
-    # 原子常态统计粒度不视为派生周期。
+    # 度量 + 基础统计粒度（日），**只从逻辑度量目录创建**，不绑物理表；派生指标 =
+    # 原子指标 + 业务限定 + 时间周期（日周期作为派生最小周期）。
+    # SQL 解析出的候选天然绑定源表/度量列（物理口径），无论日粒度与否一律归派生——
+    # 对齐用户建模认知（「日金额」「日活跃医生数」= 物理口径派生；原子只从逻辑度量
+    # 目录来，SQL 无法推断逻辑度量，恒空）。
     # R1（二次审查）：比率/条件度量（derived=True，如 ROUND(SUM/NULLIF)、CASE 比率等
     # 无聚合包裹的表达式）在整句含四则运算时归复合（OneData：多指标运算/比率=复合），
     # 与单条 auto_suggest 的 _infer_type 对齐——修复批量/单条两路径类型分裂；纯条件
-    # 聚合（count(distinct case...)）无算术运算时仍走周期驱动（归派生/原子）。
+    # 聚合（count(distinct case...)）无算术运算时仍走周期驱动（归派生）。
     # S3（三轮审查）：列名比率规则（rate/ratio/pct→复合）补齐到批量路径——此前只在
     # 单条 _infer_type，两路径对 SELECT SUM(refund_rate)（日粒度）判定分裂（单条复合/
-    # 批量原子）；与单条规则完全一致后统一。
+    # 批量基础候选）；与单条规则完全一致后统一（方案 A 后批量基础候选一律派生，
+    # 比率列归复合）。
     _col_lower = (col or "").lower()
     # A7：引用已命名聚合列的算术派生列（all_order_cnt - session_side_order_cnt -
     # region_org_order_cnt）→ 指标间运算归复合（与 _build_composite_candidate 语义
-    # 一致），deps_aliases 供阶段 3 解析依赖原子编码
+    # 一致），deps_aliases 供阶段 3 解析依赖基础候选编码
     deps_aliases = measure.get("deps_aliases") or []
     if (
         (derived and raw_sql and sql_has_arithmetic(raw_sql))
@@ -737,10 +741,8 @@ def _build_atomic_candidate(
         or bool(deps_aliases)
     ):
         cand_type = "composite"
-    elif period and period != "day":
-        cand_type = "derived"
     else:
-        cand_type = "atomic"
+        cand_type = "derived"
     # 关联维度候选：GROUP BY 中的非时间分组键（hosp_code/enter_source 等）——
     # SQL 智能推断维度回填（此前候选无 dimensions 字段，关联维度纯手动）。
     # 提取规则见 sql_infer.extract_dimension_columns（宽松过滤，仅剔时间形态）。
@@ -809,9 +811,11 @@ def _build_composite_candidate(
     """
     if not sql_has_arithmetic(sql):
         return None
-    # R1：含算术的比率列已被 _build_atomic_candidate 判为 composite，不应再作为
-    # 合成复合的依赖原子（避免「复合依赖复合」嵌套混乱）。合成复合只基于纯原子候选。
-    atoms = [c for c in atoms if c.get("type") == "atomic"]
+    # R1：含算术的比率列已被 _build_derived_candidate 判为 composite，不应再作为
+    # 合成复合的依赖（避免「复合依赖复合」嵌套混乱）。合成复合只基于基础候选
+    # （方案 A 后 SQL 基础候选统一为 derived，不再有 atomic——过滤条件同步改为
+    # 排除 composite 本身，保留全部基础候选）。
+    atoms = [c for c in atoms if c.get("type") != "composite"]
     codes = [c["metric_code"] for c in atoms if c.get("metric_code")]
     if len(codes) < 2:
         return None
@@ -1068,14 +1072,13 @@ def _apply_candidate_period(cand: dict[str, Any], period: str) -> None:
             cand["metric_code"] = "_".join(parts)
     cand["period"] = period
     cand["granularity"] = period
-    # B2：周期驱动类型回映——LLM 覆盖周期后类型必须与周期同步（非日→派生、日→原子）；
-    # 复合指标保持复合（周期是其属性，不因周期覆盖降级）。
+    # B2（方案 A）：周期驱动类型回映——SQL 候选一律派生（日 = 派生最小周期），
+    # LLM 覆盖周期仅改变 period/编码，不把日粒度降级为原子（原子只从逻辑度量
+    # 目录创建，SQL 推断不产原子）；复合指标保持复合（周期是其属性，不因周期
+    # 覆盖降级）。
     if cand.get("type") == "composite":
         return
-    if period and period != "day":
-        cand["type"] = "derived"
-    else:
-        cand["type"] = "atomic"
+    cand["type"] = "derived"
 
 
 def _candidate_measure_view(cand: dict[str, Any]) -> dict[str, Any]:
@@ -1344,7 +1347,7 @@ async def infer_sql_batch(
         segments = [sql.strip()]
 
     # A-5：全脚本一次提取建表 DDL 列注释（候选名称/单位推断消费，见
-    # ``_build_atomic_candidate``）——切分后单段 INSERT 看不到建表注释，须从完整
+    # ``_build_derived_candidate``）——切分后单段 INSERT 看不到建表注释，须从完整
     # 脚本提取再按 (表, 列) 反查注入。
     column_comments = _extract_column_comments(sql)
 
@@ -1555,7 +1558,7 @@ async def infer_sql_batch(
         comment_table = _insert_target_table(rec["seg"])
         atoms: list[dict[str, Any]] = []
         for measure in rec["profile"].measures:
-            atom = _build_atomic_candidate(
+            atom = _build_derived_candidate(
                 idx=idx,
                 measure=measure,
                 table=rec["table"],
@@ -1577,10 +1580,13 @@ async def infer_sql_batch(
         # 与 deps_aliases 同源）；measure_column 是底层列（count(1) → ``*``）不匹配
         alias_code_map: dict[str, str] = {}
         for a in atoms:
-            # 只映射原子候选——派生/复合候选的 measure_column 可能是 deps[0]
-            # （如 old_page_transfer_order_cnt 的 column=region_org_order_cnt），
-            # 若纳入会覆盖原子的别名映射导致依赖错配成自身
-            if a.get("type") != "atomic":
+            # 只映射纯基础候选——算术派生候选（deps_aliases 非空）的 measure_column
+            # 可能是 deps[0]（如 old_page_transfer_order_cnt 的 column=
+            # region_org_order_cnt），若纳入会覆盖基础候选的别名映射导致依赖错配成
+            # 自身；复合候选同理跳过。方案 A 后 SQL 基础候选统一为 derived，
+            # 不再有 atomic——改用 deps_aliases 而非 type 区分（旧判定 type=="atomic"
+            # 会把方案 A 后的全部基础候选滤掉导致依赖恒空）。
+            if a.get("type") == "composite" or a.get("deps_aliases"):
                 continue
             code = a.get("metric_code")
             if not code:
@@ -1649,7 +1655,7 @@ async def infer_sql_batch(
             for measure in llm_measures:
                 _push_candidate(
                     idx,
-                    _build_atomic_candidate(
+                    _build_derived_candidate(
                         idx=idx,
                         measure=measure,
                         table=None,
