@@ -93,15 +93,21 @@ class MetricMountRepository:
 
         metric.granularity 是「冗余回填」列（供列表/详情展示），挂载粒度变更须同步，
         否则详情页出现「挂载卡新粒度 vs 主表旧粒度」同页矛盾。
+        T15（审查修复）：仅回填未软删指标（与 _require_metric 过滤一致），
+        防止已删指标被挂载变更"复活"回填。
         """
         await self._session.execute(
-            update(Metric).where(Metric.id == metric_id).values(granularity=granularity)
+            update(Metric)
+            .where(Metric.id == metric_id, Metric.deleted_at.is_(None))
+            .values(granularity=granularity)
         )
 
     async def clear_metric_granularity(self, metric_id: int) -> None:
         """解除挂载后清空 metric.granularity 冗余列（挂载不在则粒度无权威来源）。"""
         await self._session.execute(
-            update(Metric).where(Metric.id == metric_id).values(granularity=None)
+            update(Metric)
+            .where(Metric.id == metric_id, Metric.deleted_at.is_(None))
+            .values(granularity=None)
         )
 
     async def commit(self) -> None:

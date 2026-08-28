@@ -162,7 +162,12 @@ class MetricMountService(BaseService):
         await self._repo.update_metric_granularity(metric_id, default_mount.granularity)
 
     async def _require_metric(self, metric_id: int) -> Metric:
-        stmt = select(Metric).where(Metric.id == metric_id)
+        # T3（审查修复）：过滤软删指标——已删指标不可参与挂载/回填（此前不过滤
+        # deleted_at，已删指标可被"复活"参与挂载并回填冗余粒度列）
+        stmt = select(Metric).where(
+            Metric.id == metric_id,
+            Metric.deleted_at.is_(None),
+        )
         metric = (await self._session.execute(stmt)).scalar_one_or_none()
         if metric is None:
             raise NotFoundError(f"指标不存在: {metric_id}")
