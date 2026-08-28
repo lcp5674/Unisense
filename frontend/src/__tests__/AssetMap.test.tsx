@@ -1198,6 +1198,104 @@ describe("AssetMap", () => {
     expect(calls[calls.length - 1]?.[0]?.pending_review).toBe(true);
   });
 
+  it("overview 待复核明细点击行打开实体详情：展示字段清单（含 PII 命中）与血缘图谱/列表", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetSummary).mockResolvedValue({
+      total: 10,
+      by_entity_type: { table: 8, field: 2 },
+      by_sensitivity: { PUBLIC: 6, PII: 4 },
+      orphan_assets: 1,
+      pii_compliance: {
+        sensitive_total: 4,
+        reviewed: 1,
+        pending: 3,
+        compliance_rate: 25,
+        by_sensitivity: { PII: 3, CONFIDENTIAL: 1 },
+      },
+    });
+    vi.mocked(listCatalogs).mockResolvedValue({
+      items: [
+        {
+          id: 42,
+          entity_name: "wedw_dim.pub_patient",
+          entity_type: "table",
+          source_id: "s1",
+          source_name: "Hive",
+          sensitivity_level: "PII",
+          owner_id: null,
+          schema_incomplete: false,
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 200,
+    } as never);
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 42,
+      entity_name: "wedw_dim.pub_patient",
+      entity_type: "table",
+      source_id: "s1",
+      source_name: "Hive",
+      sensitivity_level: "PII",
+      owner_id: null,
+      schema_incomplete: false,
+      schema_summary: [
+        { name: "patient_id", type: "bigint", comment: "患者ID" },
+        { name: "phone", type: "string", comment: "手机号" },
+      ],
+      pii_flag: true,
+      pii_fields: [
+        {
+          column: "phone",
+          category: "PHONE",
+          rule: "mobile",
+          confidence: 0.98,
+          matched_by: "rule",
+          suppressed: false,
+        },
+      ],
+      pii_field_count: 1,
+      pii_categories: ["PHONE"],
+      lineage_edges: [
+        {
+          source: "table:wedw_ods.telemedicine_visit",
+          target: "table:wedw_dim.pub_patient",
+          edge_type: "ETL",
+          granularity: "table",
+        },
+        {
+          source: "table:wedw_dim.pub_patient",
+          target: "metric:outp_visit_cnt",
+          edge_type: "DERIVED_FROM",
+          granularity: "table",
+        },
+      ],
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-08-01T00:00:00Z",
+    } as never);
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("概览")).toBeInTheDocument());
+    await user.click(screen.getByText("概览"));
+    await waitFor(() => expect(screen.getByText(/待复核 3 项/)).toBeInTheDocument());
+    await user.click(screen.getByText(/待复核 3 项/));
+    await waitFor(() => expect(screen.getByText(/待复核敏感资产明细/)).toBeInTheDocument());
+    await user.click(await screen.findByText("wedw_dim.pub_patient"));
+    await waitFor(() =>
+      expect(screen.getByText(/实体详情：wedw_dim.pub_patient/)).toBeInTheDocument(),
+    );
+    // 字段清单（TABLE 类型展示字段级信息）+ PII 命中标注
+    expect(screen.getByText("字段清单")).toBeInTheDocument();
+    expect(screen.getByText("patient_id")).toBeInTheDocument();
+    expect(screen.getByText(/含 1 个 PII 字段/)).toBeInTheDocument();
+    expect(screen.getByText(/phone（手机\/电话）/)).toBeInTheDocument();
+    // 血缘关系：默认图形 tab + 可切边明细列表
+    expect(screen.getByText(/血缘关系（2 条边）/)).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "边明细列表" }));
+    await waitFor(() =>
+      expect(screen.getByText("table:wedw_ods.telemedicine_visit")).toBeInTheDocument(),
+    );
+  });
+
   it("click field node opens field info drawer with table drill entry", async () => {
     vi.mocked(fetchAssetGraph).mockResolvedValue({
       nodes: [

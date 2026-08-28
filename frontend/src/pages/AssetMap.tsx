@@ -396,6 +396,86 @@ function renderSchemaSummary(summary: SchemaColumn[] | string | null | undefined
   return <span className="muted">-</span>;
 }
 
+/**
+ * 把实体详情的血缘边明细（source/target 为 table:/metric:/field: 前缀节点 id）转为
+ * AssetGraph 可直接消费的图数据。节点按前缀推断类型（默认表），label 去前缀展示。
+ */
+function buildEntityLineageGraph(
+  edges: NonNullable<AssetEntityDetail["lineage_edges"]>,
+): { nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } {
+  const nodeMap = new Map<string, AssetGraphNode>();
+  const graphEdges: AssetGraphEdge[] = [];
+  for (const e of edges) {
+    for (const id of [e.source, e.target]) {
+      if (!nodeMap.has(id)) {
+        const type = id.startsWith("metric:")
+          ? "metric"
+          : id.startsWith("field:")
+            ? "field"
+            : id.startsWith("dimension:")
+              ? "dimension"
+              : id.startsWith("consumer:")
+                ? "consumer"
+                : "table";
+        nodeMap.set(id, { id, type, label: id.replace(/^[a-z]+:/, "") });
+      }
+    }
+    graphEdges.push({ source: e.source, target: e.target, type: e.edge_type || "lineage" });
+  }
+  return { nodes: [...nodeMap.values()], edges: graphEdges };
+}
+
+/**
+ * 实体血缘关系卡片：默认展示血缘图谱（G6 图，直观呈现表→指标流向），
+ * 可切换「边明细列表」查看文字表格（源/目标/类型/粒度）。供各详情抽屉统一复用，
+ * 替代早先仅表格的「血缘边明细」，让血缘关系一目了然。
+ */
+function EntityLineageCard({ edges }: { edges: NonNullable<AssetEntityDetail["lineage_edges"]> }) {
+  const g = useMemo(() => buildEntityLineageGraph(edges), [edges]);
+  return (
+    <Card size="small" title={`血缘关系（${edges.length} 条边）`} style={{ marginTop: 16 }}>
+      <Tabs
+        items={[
+          {
+            key: "graph",
+            label: "血缘图谱",
+            children:
+              g.nodes.length > 0 ? (
+                <AssetGraph
+                  nodes={g.nodes}
+                  edges={g.edges}
+                  height={360}
+                  showFields
+                  fullscreenable={false}
+                />
+              ) : (
+                <Empty description="无血缘图数据" />
+              ),
+          },
+          {
+            key: "list",
+            label: "边明细列表",
+            children: (
+              <Table
+                dataSource={edges}
+                rowKey={(e, i) => `${e.source}-${e.target}-${i}`}
+                size="small"
+                pagination={false}
+                columns={[
+                  { title: "源", dataIndex: "source", ellipsis: true },
+                  { title: "目标", dataIndex: "target", ellipsis: true },
+                  { title: "类型", dataIndex: "edge_type", width: 120 },
+                  { title: "粒度", dataIndex: "granularity", width: 80 },
+                ]}
+              />
+            ),
+          },
+        ]}
+      />
+    </Card>
+  );
+}
+
 const DESCRIPTION_SOURCE_TAG: Record<string, { label: string; color: string }> = {
   manual: { label: "人工编辑", color: "blue" },
   llm: { label: "LLM 推断", color: "purple" },
@@ -799,20 +879,7 @@ function ChangeCatalogDetailDrawer({
           ) : null}
 
           {detail.lineage_edges && detail.lineage_edges.length > 0 && (
-            <Card size="small" title="血缘边明细" style={{ marginTop: 16 }}>
-              <Table
-                dataSource={detail.lineage_edges}
-                rowKey={(e, i) => `${e.source}-${e.target}-${i}`}
-                size="small"
-                pagination={false}
-                columns={[
-                  { title: "源", dataIndex: "source", ellipsis: true },
-                  { title: "目标", dataIndex: "target", ellipsis: true },
-                  { title: "类型", dataIndex: "edge_type", width: 120 },
-                  { title: "粒度", dataIndex: "granularity", width: 80 },
-                ]}
-              />
-            </Card>
+            <EntityLineageCard edges={detail.lineage_edges} />
           )}
 
           {detail.related_metrics && detail.related_metrics.length > 0 && (
@@ -1527,21 +1594,42 @@ function OverviewTab() {
                 </div>
               </Descriptions.Item>
             </Descriptions>
-            {detail.lineage_edges && detail.lineage_edges.length > 0 && (
-              <Card title="血缘边明细" size="small" style={{ marginTop: 16 }}>
-                <Table
-                  dataSource={detail.lineage_edges}
-                  rowKey={(e, i) => `${e.source}-${e.target}-${i}`}
-                  size="small"
-                  pagination={false}
-                  columns={[
-                    { title: "源", dataIndex: "source", ellipsis: true },
-                    { title: "目标", dataIndex: "target", ellipsis: true },
-                    { title: "类型", dataIndex: "edge_type", width: 120 },
-                    { title: "粒度", dataIndex: "granularity", width: 80 },
-                  ]}
-                />
+            {detail.schema_summary != null && (
+              <Card
+                size="small"
+                title={
+                  <Space size={8}>
+                    <span>字段清单</span>
+                    {(detail.pii_field_count ?? 0) > 0 && (
+                      <Tag color="red">含 {detail.pii_field_count} 个 PII 字段</Tag>
+                    )}
+                  </Space>
+                }
+                style={{ marginTop: 16 }}
+              >
+                {(detail.pii_fields ?? []).filter((f) => !f.suppressed).length > 0 && (
+                  <div style={{ marginBottom: 8 }}>
+                    <span className="muted" style={{ marginRight: 8, fontSize: 12 }}>
+                      PII 命中：
+                    </span>
+                    {(detail.pii_fields ?? [])
+                      .filter((f) => !f.suppressed)
+                      .map((f) => (
+                        <Tag
+                          key={f.column}
+                          color={PII_CATEGORY_COLOR[f.category] ?? "red"}
+                          style={{ marginBottom: 4 }}
+                        >
+                          {f.column}（{PII_CATEGORY_LABEL[f.category] ?? f.category}）
+                        </Tag>
+                      ))}
+                  </div>
+                )}
+                {renderSchemaSummary(detail.schema_summary)}
               </Card>
+            )}
+            {detail.lineage_edges && detail.lineage_edges.length > 0 && (
+              <EntityLineageCard edges={detail.lineage_edges} />
             )}
           </>
         ) : null}
@@ -2359,40 +2447,7 @@ function GraphTab() {
               </Space>
             )}
             {(detail.lineage_edges?.length ?? 0) > 0 && (
-              <Card title="血缘边明细" size="small" style={{ marginTop: 16 }}>
-                <Table
-                  dataSource={detail.lineage_edges}
-                  rowKey={(e, i) => `${e.source}-${e.target}-${i}`}
-                  size="small"
-                  pagination={false}
-                  columns={[
-                    {
-                      title: "源",
-                      dataIndex: "source",
-                      key: "source",
-                      ellipsis: true,
-                      render: (v: string) => (
-                        <span className="mono" style={{ fontSize: 12 }}>
-                          {v}
-                        </span>
-                      ),
-                    },
-                    {
-                      title: "目标",
-                      dataIndex: "target",
-                      key: "target",
-                      ellipsis: true,
-                      render: (v: string) => (
-                        <span className="mono" style={{ fontSize: 12 }}>
-                          {v}
-                        </span>
-                      ),
-                    },
-                    { title: "类型", dataIndex: "edge_type", key: "type", width: 120 },
-                    { title: "粒度", dataIndex: "granularity", key: "granularity", width: 80 },
-                  ]}
-                />
-              </Card>
+              <EntityLineageCard edges={detail.lineage_edges!} />
             )}
           </>
         ) : null}
@@ -4555,40 +4610,7 @@ function TablesTab() {
               </Space>
             )}
             {(detail.lineage_edges?.length ?? 0) > 0 && (
-              <Card title="血缘边明细" size="small" style={{ marginTop: 16 }}>
-                <Table
-                  dataSource={detail.lineage_edges}
-                  rowKey={(e, i) => `${e.source}-${e.target}-${i}`}
-                  size="small"
-                  pagination={false}
-                  columns={[
-                    {
-                      title: "源",
-                      dataIndex: "source",
-                      key: "source",
-                      ellipsis: true,
-                      render: (v: string) => (
-                        <span className="mono" style={{ fontSize: 12 }}>
-                          {v}
-                        </span>
-                      ),
-                    },
-                    {
-                      title: "目标",
-                      dataIndex: "target",
-                      key: "target",
-                      ellipsis: true,
-                      render: (v: string) => (
-                        <span className="mono" style={{ fontSize: 12 }}>
-                          {v}
-                        </span>
-                      ),
-                    },
-                    { title: "类型", dataIndex: "edge_type", key: "type", width: 120 },
-                    { title: "粒度", dataIndex: "granularity", key: "granularity", width: 80 },
-                  ]}
-                />
-              </Card>
+              <EntityLineageCard edges={detail.lineage_edges!} />
             )}
             {(detail.related_metrics?.length ?? 0) > 0 && (
               <Card title="关联指标" size="small" style={{ marginTop: 16 }}>
