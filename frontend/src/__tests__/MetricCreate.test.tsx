@@ -3085,4 +3085,121 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
       expect(within(compositeOwner).getByText("张三")).toBeTruthy();
     });
   });
+
+  it("批量创建：点击后显示阻塞进度 Modal，完成后自动关闭（体验优化）", async () => {
+    let resolveCreate!: (v: unknown) => void;
+    mockedBatchFromSql.mockReturnValueOnce(
+      new Promise((res) => {
+        resolveCreate = res;
+      }) as never,
+    );
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+    // 确保勾选 2 个候选（对默认勾选类型免疫：HEAD 默认勾选原子，并行曾改派生——
+    // 已勾选则不动，未勾选才点，避免「点击=取消」语义反转）
+    const cb1 = screen.getByRole("checkbox", { name: "勾选 日订单金额" }) as HTMLInputElement;
+    if (!cb1.checked) fireEvent.click(cb1);
+    const cb2 = screen.getByRole("checkbox", { name: "勾选 日去重用户" }) as HTMLInputElement;
+    if (!cb2.checked) fireEvent.click(cb2);
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+    // 创建中：进度文案出现（抽屉小字 + Modal 大字）
+    await waitFor(() => {
+      expect(screen.getAllByText(/正在批量创建 2 个指标为草稿/).length).toBeGreaterThan(0);
+    });
+    // Modal 面板存在且展示阻塞说明（此前仅按钮 loading + 结果区小字，无明确反馈）
+    const modal = document.querySelector(".ant-modal");
+    expect(modal).toBeTruthy();
+    expect(
+      within(modal as HTMLElement).getByText("逐条校验并写入数据库，请勿关闭窗口"),
+    ).toBeTruthy();
+    // 创建完成后自动关闭（结果区 Alert 出现，进度让位）
+    resolveCreate({ batch_id: "sqlbatch_progress", candidates: [] });
+    await waitFor(() => {
+      expect(screen.getByText(/批量创建完成：成功 0 \/ 失败 0/)).toBeTruthy();
+    });
+  });
+
+  it("批量创建失败项：按失败原因显示具体操作入口——编码冲突→改编码重试、依赖缺失→补依赖重试", async () => {
+    mockedBatchFromSql.mockResolvedValueOnce({
+      batch_id: "sqlbatch_fail2",
+      candidates: [
+        { metric_code: "sales_order_amount_day", status: "DRAFT", validation_errors: null },
+        {
+          metric_code: "sales_order_userid_day",
+          status: "VALIDATION_ERROR",
+          validation_errors: "指标编码已存在",
+        },
+        {
+          metric_code: "sales_order_amountuserid_day",
+          status: "VALIDATION_ERROR",
+          validation_errors: "依赖指标未创建或不存在",
+        },
+      ],
+    });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+    // 确保勾选 2 个原子候选（对默认勾选类型免疫：已勾选则不动，未勾选才点）
+    const cb1 = screen.getByRole("checkbox", { name: "勾选 日订单金额" }) as HTMLInputElement;
+    if (!cb1.checked) fireEvent.click(cb1);
+    const cb2 = screen.getByRole("checkbox", { name: "勾选 日去重用户" }) as HTMLInputElement;
+    if (!cb2.checked) fireEvent.click(cb2);
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+    await screen.findByText(/批量创建完成：成功 1 \/ 失败 2/);
+    // 编码冲突行 → 「改编码重试」；依赖缺失行 → 「补依赖重试」；均带「重试」兜底
+    expect(screen.getByRole("button", { name: "改编码重试" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "补依赖重试" })).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "重试" }).length).toBeGreaterThanOrEqual(2);
+    // 点「改编码重试」→ 完整回填单条向导（此前失败项操作列为空，用户只能干看原因）
+    fireEvent.click(screen.getByRole("button", { name: "改编码重试" }));
+    await waitFor(() => {
+      expect((screen.getByLabelText("指标编码") as HTMLInputElement).value).toBe(
+        "sales_order_userid_day",
+      );
+    });
+  });
+
+  it("批量创建失败项：点行内「重试」仅重跑该失败候选（单条重试）", async () => {
+    mockedBatchFromSql
+      .mockResolvedValueOnce({
+        batch_id: "sqlbatch_fail3",
+        candidates: [
+          { metric_code: "sales_order_amount_day", status: "DRAFT", validation_errors: null },
+          {
+            metric_code: "sales_order_userid_day",
+            status: "VALIDATION_ERROR",
+            validation_errors: "候选参数校验失败",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        batch_id: "sqlbatch_retry1",
+        candidates: [
+          { metric_code: "sales_order_userid_day", status: "DRAFT", validation_errors: null },
+        ],
+      });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+    // 确保勾选 2 个原子候选（对默认勾选类型免疫：已勾选则不动，未勾选才点）
+    const cb1 = screen.getByRole("checkbox", { name: "勾选 日订单金额" }) as HTMLInputElement;
+    if (!cb1.checked) fireEvent.click(cb1);
+    const cb2 = screen.getByRole("checkbox", { name: "勾选 日去重用户" }) as HTMLInputElement;
+    if (!cb2.checked) fireEvent.click(cb2);
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+    await screen.findByText(/批量创建完成：成功 1 \/ 失败 1/);
+    // 点失败行「重试」→ 第二次调用仅含该失败候选（不重跑已成功的）
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => {
+      expect(mockedBatchFromSql).toHaveBeenCalledTimes(2);
+      const body = mockedBatchFromSql.mock.calls[1][0] as {
+        candidates: Array<{ metric_code: string }>;
+      };
+      expect(body.candidates.map((c) => c.metric_code)).toEqual(["sales_order_userid_day"]);
+    });
+  });
 });

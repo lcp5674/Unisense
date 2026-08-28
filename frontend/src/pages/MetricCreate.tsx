@@ -130,6 +130,37 @@ const BATCH_RESULT_COLUMNS = [
   },
 ];
 
+// SQL 批量创建失败原因 → 建议操作入口（按后端 public_error_message 文本特征分类，
+// 后端 validation_errors 无结构化 error_code，关键词覆盖常见失败文案）：
+// 编码冲突→改编码重试；依赖缺失→补依赖重试；DB 错误→重试；其余→在向导中编辑。
+function failureActionOf(
+  msg: string | null,
+): { label: string; tooltip: string; kind: "edit" | "retry" } {
+  const m = msg || "";
+  if (/已存在|已占用|重复/.test(m)) {
+    return {
+      label: "改编码重试",
+      tooltip: "指标编码冲突，已回填注册向导，请修改编码后重新创建",
+      kind: "edit",
+    };
+  }
+  if (/依赖/.test(m)) {
+    return {
+      label: "补依赖重试",
+      tooltip: "依赖指标缺失，已回填注册向导，请补充依赖后重新创建",
+      kind: "edit",
+    };
+  }
+  if (/DB 错误|数据库|连接失败/.test(m)) {
+    return { label: "重试", tooltip: "数据库异常，可直接重试", kind: "retry" };
+  }
+  return {
+    label: "在向导中编辑",
+    tooltip: "已回填注册向导，请修改该候选后重新创建",
+    kind: "edit",
+  };
+}
+
 const DICT_FIELD_MAP: Array<{ dictType: string; field: string; label: string }> = [
   { dictType: "granularity", field: "granularity", label: "粒度" },
   { dictType: "unit", field: "unit", label: "单位" },
@@ -499,6 +530,8 @@ export function MetricCreate() {
   // 批量创建结果（复用 batchResult 分桶展示，但保留复合候选的「需先发布原子」提示）
   const [sqlBatchCreateResult, setSqlBatchCreateResult] = useState<MetricBatchRegisterResult | null>(null);
   const [sqlBatchCreating, setSqlBatchCreating] = useState(false);
+  // 创建进度 Modal：本次提交候选数（重试失败项时 ≠ 勾选数，用实际提交数展示更准确）
+  const [sqlBatchCreatingCount, setSqlBatchCreatingCount] = useState(0);
   // P1-1：SQL 批量失败候选的 key 集合（仅重跑失败项，避免全量重跑把已建 DRAFT 再判冲突）
   const [sqlBatchRetryFailedKeys, setSqlBatchRetryFailedKeys] = useState<string[]>([]);
   // 批量设置责任方（P0-3）：一次给「已勾选/全部」候选设置某一方（产品/技术/数仓）责任人，
@@ -1556,6 +1589,7 @@ export function MetricCreate() {
       }
     }
     setSqlBatchCreating(true);
+    setSqlBatchCreatingCount(checked.length);
     try {
       // 口径溯源（P2）：候选所属语句的整句原始 SQL——候选仅带表达式，原文从语句
       // meta 提取（按 statement_index），批量创建透传落 Metric.raw_sql 可反查口径全文
@@ -1666,32 +1700,72 @@ export function MetricCreate() {
     [sqlBatchCreateResult],
   );
 
-  // SQL 批量创建结果表格列：共享列 + 「快速编辑」操作列（仅 DRAFT 可编辑）
+  // SQL 批量创建结果表格列：共享列 + 「操作」列——DRAFT=快速编辑；失败项按失败
+  // 原因给具体操作入口（编码冲突→改编码、依赖缺失→补依赖、DB 错误→重试、其余→
+  // 在向导中编辑），均回填单条向导（loadCandidateIntoWizard）或单条重跑（submitSqlBatch）。
   const sqlBatchResultColumns = useMemo(
     () => [
       ...BATCH_RESULT_COLUMNS,
       {
         title: "操作",
         key: "action",
-        width: 90,
-        render: (_: unknown, c: MetricBatchRegisterCandidate) =>
-          c.status === "DRAFT" ? (
-            <Button
-              size="small"
-              type="link"
-              style={{ padding: "0 4px" }}
-              data-testid={`sql-batch-quick-edit-${c.metric_code}`}
-              onClick={() => {
-                const i = draftCandidates.findIndex((d) => d.metric_code === c.metric_code);
-                if (i >= 0) void openQuickEdit(i);
-              }}
-            >
-              快速编辑
-            </Button>
-          ) : null,
+        width: 150,
+        render: (_: unknown, c: MetricBatchRegisterCandidate) => {
+          if (c.status === "DRAFT") {
+            return (
+              <Button
+                size="small"
+                type="link"
+                style={{ padding: "0 4px" }}
+                data-testid={`sql-batch-quick-edit-${c.metric_code}`}
+                onClick={() => {
+                  const i = draftCandidates.findIndex((d) => d.metric_code === c.metric_code);
+                  if (i >= 0) void openQuickEdit(i);
+                }}
+              >
+                快速编辑
+              </Button>
+            );
+          }
+          // 失败项：反查原始候选（结果只回 metric_code，需从解析候选按编码定位 key）
+          const orig = sqlBatchResult?.candidates.find((x) => x.metric_code === c.metric_code);
+          const act = failureActionOf(c.validation_errors);
+          const edit = () => {
+            if (!orig) return;
+            loadCandidateIntoWizard(orig);
+            message.info(act.tooltip);
+          };
+          const retry = () => {
+            if (orig) void submitSqlBatch(new Set([orig.key]));
+          };
+          return (
+            <Space size={0} wrap>
+              {act.kind === "retry" ? (
+                <Button size="small" type="link" style={{ padding: "0 4px" }} onClick={retry}>
+                  {act.label}
+                </Button>
+              ) : (
+                <>
+                  <Button
+                    size="small"
+                    type="link"
+                    style={{ padding: "0 4px" }}
+                    title={act.tooltip}
+                    onClick={edit}
+                  >
+                    {act.label}
+                  </Button>
+                  <Button size="small" type="link" style={{ padding: "0 4px" }} onClick={retry}>
+                    重试
+                  </Button>
+                </>
+              )}
+            </Space>
+          );
+        },
       },
     ],
-    [draftCandidates],
+    [draftCandidates, sqlBatchResult, submitSqlBatch, loadCandidateIntoWizard],
   );
 
   // 打开/切换到指定候选：拉取最新指标详情回填表单
@@ -4232,6 +4306,38 @@ export function MetricCreate() {
           >
             下一步
           </Button>
+        </div>
+      </Modal>
+
+      {/* 批量创建进度 Modal（体验优化）：点「批量创建选中指标/重试失败项」后给阻塞
+          反馈——逐条 savepoint 创建可能耗时，此前仅按钮 loading + 结果区小字不醒目，
+          用户易误以为无响应。创建完成/失败自动关闭（sqlBatchCreating 置 false）。 */}
+      <Modal
+        open={sqlBatchCreating}
+        closable={false}
+        maskClosable={false}
+        keyboard={false}
+        footer={null}
+        width={420}
+        centered
+        zIndex={2000}
+      >
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: 12,
+            padding: "24px 8px",
+          }}
+        >
+          <Spin size="large" />
+          <Typography.Text strong>
+            正在批量创建 {sqlBatchCreatingCount} 个指标为草稿（DRAFT）…
+          </Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 12, textAlign: "center" }}>
+            逐条校验并写入数据库，请勿关闭窗口
+          </Typography.Text>
         </div>
       </Modal>
 
