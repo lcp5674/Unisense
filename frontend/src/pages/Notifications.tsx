@@ -6,6 +6,7 @@ import {
   listNotifications,
   listNotifyEvents,
   listSubscriptions,
+  listEventTypes,
   upsertSubscription,
   publishNotifyEvent,
   markNotificationRead,
@@ -169,6 +170,13 @@ const EVENT_ACTION_CN: Record<string, string> = {
   change: "变更",
   notice: "公告",
   anomaly: "异常告警",
+  reactivated: "重新启用",
+  forced_closed: "强制关闭",
+  overdue: "超时",
+  oversized: "超限",
+  task_failed: "任务失败",
+  cache_invalidate_failed: "缓存失效失败",
+  ddl_changed: "DDL变更",
 };
 
 function eventTypeLabel(v: string | null | undefined): string {
@@ -643,12 +651,17 @@ export const EVENT_TYPES = [
   "metric.source_dropped",
   "metric.source_recovered",
   "metric.gray_recycled",
+  // 指标重新启用（DEPRECATED 复活为 DRAFT 后重新送审）
+  "metric.reactivated",
   "quality.anomaly",
   "reconciliation.alert",
   "benchmark.imported",
   "conflict_open",
   "conflict_ruled",
   "conflict_escalated",
+  // 悬空冲突强制关闭 / 升级超时强提醒（管理员处置留痕）
+  "conflict_forced_closed",
+  "conflict_escalation_overdue",
   "pii_conflict",
   "grant.granted",
   "grant.revoked",
@@ -668,6 +681,8 @@ export const EVENT_TYPES = [
   "catalog_schema_drifted",
   "lineage_parsed",
   "lineage_ingested",
+  // DDL 变更事件化：表/列重命名、DROP 的下游治理闭环
+  "lineage.ddl_changed",
   "lineage.change_impacted",
   "lineage.metric_register_failed",
   "catalog.deprecated",
@@ -676,6 +691,11 @@ export const EVENT_TYPES = [
   "catalog.connection_failed",
   "degradation.state_changed",
   "conflict_reopened",
+  // 表增长超阈值（数据保留巡检）
+  "storage.table_oversized",
+  // 后台任务失败 / 缓存失效失败（系统告警）
+  "system.task_failed",
+  "system.cache_invalidate_failed",
   // 账号安全/组织（users.py/organizations.py 定向通知，可订阅）
   "user.created",
   "user.status_changed",
@@ -687,11 +707,11 @@ export const EVENT_TYPES = [
 export const EVENT_TYPE_GROUPS: { label: string; options: { value: string; label: string }[] }[] = [
   {
     label: "指标生命周期",
-    options: ["metric.created", "metric.submitted", "metric.resubmitted", "metric.gray_published", "metric.approved", "metric.rejected", "metric.deprecated", "metric.voided", "metric.promoted", "metric.rolled_back", "metric.emergency_published", "metric.emergency_reviewed", "metric.rename_required", "metric.health_critical", "metric.breaking_change_pending", "metric.breaking_change_promoted", "metric.source_dropped", "metric.source_recovered", "metric.gray_recycled"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
+    options: ["metric.created", "metric.submitted", "metric.resubmitted", "metric.gray_published", "metric.approved", "metric.rejected", "metric.deprecated", "metric.voided", "metric.promoted", "metric.rolled_back", "metric.emergency_published", "metric.emergency_reviewed", "metric.rename_required", "metric.health_critical", "metric.breaking_change_pending", "metric.breaking_change_promoted", "metric.source_dropped", "metric.source_recovered", "metric.gray_recycled", "metric.reactivated"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
   },
   {
     label: "口径冲突",
-    options: ["conflict_open", "conflict_ruled", "conflict_escalated", "conflict_reopened"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
+    options: ["conflict_open", "conflict_ruled", "conflict_escalated", "conflict_reopened", "conflict_forced_closed", "conflict_escalation_overdue"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
   },
   {
     label: "数据质量",
@@ -703,7 +723,7 @@ export const EVENT_TYPE_GROUPS: { label: string; options: { value: string; label
   },
   {
     label: "采集与血缘",
-    options: ["catalog_registered", "catalog_schema_drifted", "lineage_parsed", "lineage_ingested", "lineage.change_impacted", "lineage.metric_register_failed", "catalog.deprecated", "collect.degraded", "collect.failed", "catalog.connection_failed"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
+    options: ["catalog_registered", "catalog_schema_drifted", "lineage_parsed", "lineage_ingested", "lineage.ddl_changed", "lineage.change_impacted", "lineage.metric_register_failed", "catalog.deprecated", "collect.degraded", "collect.failed", "catalog.connection_failed"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
   },
   {
     label: "反馈与满意度",
@@ -711,13 +731,25 @@ export const EVENT_TYPE_GROUPS: { label: string; options: { value: string; label
   },
   {
     label: "系统",
-    options: ["degradation.state_changed"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
+    options: ["degradation.state_changed", "storage.table_oversized", "system.task_failed", "system.cache_invalidate_failed"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
   },
   {
     label: "账号与组织",
     options: ["user.created", "user.status_changed", "user.password_reset", "org.status_changed"].map((v) => ({ value: v, label: eventTypeLabel(v) })),
   },
 ];
+
+// 订阅弹窗分组：静态分组（EVENT_TYPE_GROUPS）+ 后端 EventBus 动态事件并入「其他」。
+// 后端新增业务事件（BUSINESS_EVENT_TYPES 权威来源）无需前端发版即可订阅。
+export function buildEventTypeGroups(extra: string[]): { label: string; options: { value: string; label: string }[] }[] {
+  const known = new Set(EVENT_TYPES);
+  const others = extra.filter((v) => !known.has(v));
+  if (others.length === 0) return EVENT_TYPE_GROUPS;
+  return [
+    ...EVENT_TYPE_GROUPS,
+    { label: "其他", options: others.map((v) => ({ value: v, label: eventTypeLabel(v) })) },
+  ];
+}
 
 // 一键推荐订阅：对绝大多数用户都有价值的核心事件（审批/冲突/质量/权限到期/反馈）。
 // 幂等 upsert——已有订阅覆盖为启用，无订阅新建 in_app。
@@ -1164,6 +1196,21 @@ function SubscriptionsTab() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
+  // 后端 EventBus 动态事件类型（2026-08-28：新增业务事件前端无需发版——
+  // 从 /notify/subscriptions/event-types 拉取，未覆盖的并入「其他」分组）
+  const [extraEventTypes, setExtraEventTypes] = useState<string[]>([]);
+  const eventTypeGroups = useMemo(() => buildEventTypeGroups(extraEventTypes), [extraEventTypes]);
+
+  useEffect(() => {
+    listEventTypes()
+      .then((res) => {
+        const known = new Set(EVENT_TYPES);
+        setExtraEventTypes((res.items ?? []).filter((v) => !known.has(v)));
+      })
+      .catch(() => {
+        /* 事件类型拉取失败：沿用静态分组，不阻断订阅配置 */
+      });
+  }, []);
 
   async function load() {
     setLoading(true);
@@ -1276,7 +1323,7 @@ function SubscriptionsTab() {
               allowClear
               placeholder="按模块选择消息类型"
               optionFilterProp="label"
-              options={EVENT_TYPE_GROUPS.map((g) => ({ label: g.label, options: g.options }))}
+              options={eventTypeGroups.map((g) => ({ label: g.label, options: g.options }))}
             />
           </Form.Item>
           <Form.Item name="threshold" label="告警阈值（可选）" extra="用于数据质量告警，达到该阈值时才推送。">

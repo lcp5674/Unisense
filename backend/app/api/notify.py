@@ -95,6 +95,21 @@ async def unread_count(
     return ok(data={"count": count}, trace_id=trace_id)
 
 
+@router.get("/subscriptions/event-types", dependencies=_READ_DEPS)
+async def list_event_types(
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """可订阅事件类型清单（订阅配置下拉数据源，2026-08-28 新增）。
+
+    从 EventBus 注册表 ``BUSINESS_EVENT_TYPES`` 提取（权威来源）——后端新增
+    业务事件时前端订阅弹窗自动出现，无需发版；此前前端硬编码 60+ 事件且
+    已漂移（缺 metric.reactivated/conflict_forced_closed 等）。
+    """
+    from app.services.notify.consumers import BUSINESS_EVENT_TYPES
+
+    return ok(data={"items": list(BUSINESS_EVENT_TYPES)}, trace_id=trace_id)
+
+
 @router.post(
     "/notifications/{notif_id}/read",
     dependencies=_WRITE_DEPS,

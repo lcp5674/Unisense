@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 from app.core.eventbus import EventBus
 from app.services.notify.consumers import BUSINESS_EVENT_TYPES, register_notify_event_consumers
@@ -29,6 +29,23 @@ def test_register_notify_event_consumers_covers_all_event_types():
 def test_business_event_types_has_no_duplicates():
     """事件类型集合无重复（重复会导致同一事件被消费多次）。"""
     assert len(BUSINESS_EVENT_TYPES) == len(set(BUSINESS_EVENT_TYPES))
+
+
+async def test_list_event_types_endpoint_returns_authoritative_set():
+    """GET /notify/subscriptions/event-types 返回 BUSINESS_EVENT_TYPES 权威清单。
+
+    订阅弹窗下拉数据源（前端动态拉取，后端新增业务事件无需发版）。
+    """
+    from app.api.notify import list_event_types
+
+    out = await list_event_types(trace_id="t")
+    items = out.data["items"]
+    assert items == list(BUSINESS_EVENT_TYPES)
+    # 权威清单可被订阅弹窗直接消费：无重复、含新增事件（metric.reactivated 等）
+    assert len(items) == len(set(items))
+    assert "metric.reactivated" in items
+    assert "conflict_forced_closed" in items
+    assert "storage.table_oversized" in items
 
 
 async def test_worker_startup_injects_eventbus_and_consumers():

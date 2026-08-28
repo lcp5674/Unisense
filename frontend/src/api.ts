@@ -3217,6 +3217,11 @@ export async function listSubscriptions(): Promise<{ items: SubscriptionPref[]; 
   return request(`${API_BASE}/notify/subscriptions`);
 }
 
+/** 可订阅事件类型清单（订阅配置下拉数据源，2026-08-28：后端 EventBus 权威来源）。 */
+export async function listEventTypes(): Promise<{ items: string[] }> {
+  return request(`${API_BASE}/notify/subscriptions/event-types`);
+}
+
 export async function upsertSubscription(body: {
   channel: string;
   event_type?: string | null;

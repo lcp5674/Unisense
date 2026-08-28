@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
-import { Notifications, EVENT_TYPES } from "../pages/Notifications";
+import { Notifications, EVENT_TYPES, buildEventTypeGroups } from "../pages/Notifications";
 import { NOTIF_CHANGED_EVENT } from "../utils/notifBus";
 import type { Notification } from "../types";
 
@@ -24,6 +24,7 @@ vi.mock("../api", () => {
     listNotifications: vi.fn(),
     listNotifyEvents: vi.fn(),
     listSubscriptions: vi.fn(),
+    listEventTypes: vi.fn(),
     upsertSubscription: vi.fn(),
     publishNotifyEvent: vi.fn(),
     markNotificationRead: vi.fn(),
@@ -39,6 +40,7 @@ vi.mock("../api", () => {
 import {
   listNotifications,
   listSubscriptions,
+  listEventTypes,
   markNotificationRead,
   markAllNotificationsRead,
   deleteNotification,
@@ -49,6 +51,7 @@ import {
 } from "../api";
 
 const mockedList = vi.mocked(listNotifications);
+const mockedEventTypes = vi.mocked(listEventTypes);
 const mockedMarkRead = vi.mocked(markNotificationRead);
 const mockedReadAll = vi.mocked(markAllNotificationsRead);
 const mockedDelete = vi.mocked(deleteNotification);
@@ -100,6 +103,7 @@ function renderPage() {
 beforeEach(() => {
   vi.clearAllMocks();
   mockedList.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 10 });
+  mockedEventTypes.mockResolvedValue({ items: [] });
   mockedMarkRead.mockResolvedValue(notif({}));
   mockedReadAll.mockResolvedValue({ ok: true });
   mockedDelete.mockResolvedValue({ ok: true });
@@ -930,6 +934,33 @@ describe("通知中心 - 前后端事件类型中文映射一致性", () => {
     expect(screen.getByText("指标灰度发布")).toBeInTheDocument();
     expect(screen.queryByText("metric.resubmitted")).not.toBeInTheDocument();
     expect(screen.queryByText("lineage.change_impacted")).not.toBeInTheDocument();
+  });
+
+  it("订阅弹窗分组：后端动态事件并入「其他」分组且无需前端发版", async () => {
+    // 纯函数：后端新增未知事件 → 并入「其他」分组；已知事件（已补进 EVENT_TYPES）不重复进「其他」
+    const groups = buildEventTypeGroups(["metric.future_event", "metric.reactivated"]);
+    const other = groups.find((g) => g.label === "其他");
+    expect(other).toBeTruthy();
+    expect(other?.options.map((o) => o.value)).toEqual(["metric.future_event"]);
+    expect(groups.some((g) => g.label === "指标生命周期")).toBe(true);
+  });
+
+  it("订阅弹窗：listEventTypes 被拉取（后端动态事件接入）且静态分组可用", async () => {
+    mockedEventTypes.mockResolvedValue({ items: ["metric.future_event"] });
+    mockedList.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 10 });
+    renderPage();
+    fireEvent.click(screen.getByRole("tab", { name: "订阅设置" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /新增订阅/ })).toBeInTheDocument());
+    // 动态事件类型从后端权威来源拉取（未来新增事件无需前端发版）
+    await waitFor(() => expect(mockedEventTypes).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: /新增订阅/ }));
+    fireEvent.mouseDown(screen.getByLabelText("消息类型"));
+    await waitFor(() => {
+      const dropdown = document.querySelector(".ant-select-dropdown:not(.ant-select-dropdown-hidden)");
+      expect(dropdown).toBeTruthy();
+    });
+    // 静态分组首屏可用（antd 虚拟滚动只渲染首屏，「其他」合并逻辑由纯函数单测覆盖）
+    expect(screen.getByText("指标创建")).toBeInTheDocument();
   });
 
   it("资产订阅超长指标编码：code 单行中间省略 + hover 完整值（不撑破表格列）", async () => {
