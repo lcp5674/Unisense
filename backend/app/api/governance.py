@@ -33,6 +33,7 @@ from app.db.mysql import get_db_session
 from app.services.governance.events import GovernanceEventPublisher
 from app.services.governance.schemas import (
     ActionRegistryItem,
+    ClassificationFalsePositiveRequest,
     ClassificationRescanRequest,
     ErasureRequestCreate,
     ErasureResult,
@@ -532,6 +533,53 @@ async def classification_rescan(
         },
         ip=client_ip(request),
         trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result.model_dump(), trace_id=trace_id)
+
+
+@router.post(
+    "/catalogs/classification/{catalog_id}/false-positive",
+    dependencies=_COMPLIANCE_DEPS,
+)
+async def classification_false_positive(
+    catalog_id: int,
+    payload: ClassificationFalsePositiveRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """误报反馈（COMPL-3）：字段/前缀写入 pii_vocab 豁免词表并重算实体降级。
+
+    治理者在资产地图待复核明细发现误判后一键反馈，无需改代码发版。
+    """
+    svc = _svc(db, request)
+    result = await svc.classification_false_positive(
+        catalog_id=catalog_id,
+        column=payload.column,
+        scope=payload.scope,
+        reason=payload.reason,
+        actor_id=user.id,
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="classification.false_positive",
+        entity_type="db_catalog",
+        entity_id=str(catalog_id),
+        detail={
+            "entity_name": result.entity_name,
+            "column": result.column,
+            "scope": result.scope,
+            "exempted_as": result.exempted_as,
+            "sensitivity_before": result.sensitivity_before,
+            "sensitivity_after": result.sensitivity_after,
+            "reason": payload.reason,
+        },
+        ip=client_ip(request),
+        trace_id=trace_id,
+        pii_access=True,
     )
     await db.commit()
     return ok(data=result.model_dump(), trace_id=trace_id)

@@ -342,3 +342,31 @@ class ErasureResult(BaseModel):
     token_prefix: str = Field(description="脱敏令牌前缀（前 12 位，用于合规复核去标识化）")
     affected_rows: int
     requested_at: datetime
+
+
+class ClassificationFalsePositiveRequest(BaseModel):
+    """``POST /catalogs/classification/{id}/false-positive`` 请求体（误报反馈）。
+
+    误报反馈闭环：把被误判 PII 的字段/前缀写入 ``pii_vocab`` 豁免词表
+    （exempt_field 精确 / exempt_prefix 前缀），并触发该实体重算降级——
+    治理者发现误判后一键豁免，无需改代码发版。
+    """
+
+    column: str = Field(min_length=1, max_length=128, description="被误判为 PII 的字段名")
+    scope: Literal["field", "prefix"] = Field(
+        default="field", description="豁免粒度：field=精确字段名；prefix=字段名前缀"
+    )
+    reason: str = Field(min_length=1, max_length=256, description="误报原因（留痕，必填）")
+
+
+class ClassificationFalsePositiveResult(BaseModel):
+    """误报反馈处理结果。"""
+
+    catalog_id: int
+    entity_name: str
+    column: str
+    scope: str
+    exempted_as: str
+    sensitivity_before: str
+    sensitivity_after: str
+    remaining_pii_columns: list[str]

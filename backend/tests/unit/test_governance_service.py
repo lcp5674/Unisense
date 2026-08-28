@@ -1163,3 +1163,148 @@ async def test_set_user_ui_permissions_empty_clears() -> None:
     data = await svc.set_user_ui_permissions(1, [], 99, None)
     assert data["direct_actions"] == []
     assert data["effective_actions"] == data["role_actions"]
+
+
+# ------------------------------------------------------- 误报反馈（COMPL-3）
+
+
+class _FPFakeDB:
+    """误报反馈专用 FakeDB：按语句区分 catalog / system_dict 查询。"""
+
+    def __init__(self, catalog: FakeCatalog) -> None:
+        self.catalog = catalog
+        self.existing_dict: dict[str, object] = {}
+        self.added: list[object] = []
+
+    async def execute(self, stmt: Any) -> Any:
+        text = str(stmt)
+
+        class _Scalars:
+            def __init__(self, owner: _FPFakeDB) -> None:
+                self._owner = owner
+
+            def all(self) -> list[object]:
+                return list(self._owner.existing_dict.values())
+
+        class _R:
+            def __init__(self, owner: _FPFakeDB) -> None:
+                self._owner = owner
+
+            def scalar_one_or_none(self) -> object:
+                if "db_catalog" in text:
+                    return self._owner.catalog
+                if "system_dict" in text:
+                    # 返回已存在的词表项（首次查询为 None → 触发 add）
+                    return self._owner.existing_dict.get("exempt_field")
+                return None
+
+            def scalars(self) -> _Scalars:
+                return _Scalars(self._owner)
+
+        return _R(self)
+
+    def add(self, obj: object) -> None:
+        self.added.append(obj)
+        # 新增的 SystemDict 记录纳入后续查询（load_pii_vocab 合并豁免词）
+        code = getattr(obj, "code", None)
+        if code:
+            self.existing_dict[code] = obj
+
+    async def flush(self) -> None:
+        return None
+
+    async def commit(self) -> None:
+        return None
+
+
+async def test_classification_false_positive_writes_vocab_and_downgrades() -> None:
+    """误报反馈：字段写入 exempt_field 词表 + 实体重算降级 + 审计留痕。"""
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.collector.classifier import PiiVocab
+
+    svc, repo, events = _svc()
+    cat = FakeCatalog(
+        5,
+        "wedw_tmp.village_department_count_dp_tmp1",
+        {"columns": [{"name": "name", "comment": "村名"}, {"name": "cnt", "comment": "数量"}]},
+        "PII",
+    )
+    fake_db = _FPFakeDB(cat)
+    svc._db = fake_db  # type: ignore[assignment]
+    # 豁免词表已含 name（模拟此前误报反馈），重算时 name 不再判 PII
+    vocab = PiiVocab(exempt_fields=frozenset({"name"}))
+
+    with (
+        patch(
+            "app.services.governance.service.write_audit",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.services.collector.rules.load_pii_vocab",
+            new=AsyncMock(return_value=vocab),
+        ),
+    ):
+        result = await svc.classification_false_positive(
+            catalog_id=5,
+            column="name",
+            scope="field",
+            reason="村名不是个人姓名",
+            actor_id=2,
+        )
+
+    assert result.entity_name == "wedw_tmp.village_department_count_dp_tmp1"
+    assert result.exempted_as == "name"
+    assert result.sensitivity_after == "INTERNAL"
+    assert result.remaining_pii_columns == []
+    # 豁免词表写入（SystemDict add）
+    assert len(fake_db.added) == 1
+    added = fake_db.added[0]
+    assert added.dict_type == "pii_vocab"
+    assert added.code == "exempt_field"
+    assert added.description == "name"
+    # 重算落库 + 敏感级降级
+    assert repo.catalog_updates == [(5, "INTERNAL")]
+    assert len(repo.classifications) == 1
+
+
+async def test_classification_false_positive_prefix_scope() -> None:
+    """前缀豁免：village_phone → village_ 前缀写入 exempt_prefix。"""
+    from unittest.mock import AsyncMock, patch
+
+    from app.services.collector.classifier import PiiVocab
+
+    svc, repo, _ = _svc()
+    cat = FakeCatalog(
+        7,
+        "dwd.org",
+        {"columns": [{"name": "village_phone", "comment": "村电话"}]},
+        "PII",
+    )
+    fake_db = _FPFakeDB(cat)
+    svc._db = fake_db  # type: ignore[assignment]
+    vocab = PiiVocab(exempt_prefixes=("village_",))
+
+    with (
+        patch(
+            "app.services.governance.service.write_audit",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.services.collector.rules.load_pii_vocab",
+            new=AsyncMock(return_value=vocab),
+        ),
+    ):
+        result = await svc.classification_false_positive(
+            catalog_id=7,
+            column="village_phone",
+            scope="prefix",
+            reason="机构/地点字段",
+            actor_id=2,
+        )
+
+    assert result.exempted_as == "village_"
+    assert result.scope == "prefix"
+    added = fake_db.added[0]
+    assert added.code == "exempt_prefix"
+    assert added.description == "village_"

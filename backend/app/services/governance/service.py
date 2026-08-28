@@ -42,6 +42,7 @@ from app.services.governance import policy
 from app.services.governance.events import GovernanceEventPublisher
 from app.services.governance.repository import GovernanceRepository
 from app.services.governance.schemas import (
+    ClassificationFalsePositiveResult,
     ClassificationItem,
     ClassificationRescanRequest,
     ClassificationRescanResult,
@@ -1130,6 +1131,170 @@ class GovernanceService(BaseService):
             degraded=degraded_cnt,
             model_version=policy.RULES_VERSION,
             items=items,
+        )
+
+    async def classification_false_positive(
+        self,
+        catalog_id: int,
+        column: str,
+        scope: str,
+        reason: str,
+        actor_id: int,
+    ) -> ClassificationFalsePositiveResult:
+        """误报反馈（COMPL-3）：把误判字段/前缀写入 pii_vocab 豁免词表并重算实体。
+
+        治理者在资产地图待复核明细发现误判后一键反馈：字段名/前缀写入
+        ``pii_vocab`` 字典的 ``exempt_field``（精确）/``exempt_prefix``（前缀），
+        再用含豁免词表的分类器重算该实体（pii_columns 剔除、敏感级降级）。
+        全链路审计（谁、何时、豁免了什么、原因）。
+
+        Args:
+            catalog_id: 采集目录实体 ID。
+            column: 被误判为 PII 的字段名。
+            scope: field=精确字段名；prefix=字段名前缀（首词 + 下划线）。
+            reason: 误报原因（审计留痕）。
+            actor_id: 操作者用户 ID。
+
+        Returns:
+            处理结果（豁免词、重算前后敏感级、剩余 PII 字段）。
+
+        Raises:
+            NotFoundError: 实体不存在。
+            ValidationError: 参数非法（空字段/非法 scope）。
+        """
+        from sqlalchemy import select
+
+        from app.models.data_source import DBCatalog
+        from app.models.system_dict import SystemDict
+        from app.services.collector.classifier import SensitivityClassifier
+        from app.services.collector.rules import load_pii_rules, load_pii_vocab
+
+        col = column.strip()
+        if not col:
+            raise ValidationError("column 不能为空")
+        if scope not in ("field", "prefix"):
+            raise ValidationError("scope 必须是 field 或 prefix")
+        if not reason.strip():
+            raise ValidationError("reason 不能为空")
+        cat = (
+            await self._db.execute(
+                select(DBCatalog).where(
+                    DBCatalog.id == catalog_id,
+                    DBCatalog.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if cat is None:
+            raise NotFoundError(f"采集目录实体不存在: {catalog_id}")
+
+        # 豁免词：精确字段名 或 首词前缀（village_phone → village_）
+        if scope == "field":
+            exempt_entry = col
+            dict_code = "exempt_field"
+        else:
+            head = col.split("_", 1)[0].strip("_")
+            exempt_entry = f"{head}_" if head else col
+            dict_code = "exempt_prefix"
+
+        # 幂等 upsert 豁免词表（同 code 多词逗号连接，去重排序）
+        existing = (
+            await self._db.execute(
+                select(SystemDict).where(
+                    SystemDict.dict_type == "pii_vocab",
+                    SystemDict.code == dict_code,
+                    SystemDict.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        words = set()
+        if existing and (existing.description or "").strip():
+            words.update(
+                p.strip()
+                for p in str(existing.description).replace("\n", ",").split(",")
+                if p.strip()
+            )
+        words.add(exempt_entry)
+        merged = ",".join(sorted(words))
+        if existing is None:
+            self._db.add(
+                SystemDict(
+                    dict_type="pii_vocab",
+                    code=dict_code,
+                    label="误报豁免字段（精确）" if dict_code == "exempt_field" else "误报豁免前缀",
+                    sort_order=0,
+                    status="active",
+                    description=merged,
+                )
+            )
+        else:
+            existing.description = merged
+
+        # 用含豁免词表的分类器重算该实体
+        pii_rules, conf_rules = await load_pii_rules(self._db)
+        vocab = await load_pii_vocab(self._db)
+        classifier = SensitivityClassifier(
+            rules=pii_rules, confidential_rules=conf_rules, vocab=vocab
+        )
+        before = str(cat.sensitivity_level)
+        hits = policy.detect_pii_columns(cat.schema_json or {}, classifier=classifier)
+        # 误报是「人工确认」的处置：不走 infer_sensitivity 的只升不降保护
+        # （current=PII 时无命中也保持 PII），允许按豁免后真实命中降级。
+        after = policy.infer_sensitivity(hits, current=None)
+        pii_cols = [
+            {
+                "column": h.column,
+                "rule": h.rule,
+                "confidence": h.confidence,
+                "matched_by": h.matched_by,
+            }
+            for h in hits
+        ]
+        await self._repo.upsert_classification(
+            catalog_id=cat.id,
+            level=after,
+            pii_columns=pii_cols,
+            classified_by="false_positive_feedback",
+            model_version=policy.RULES_VERSION,
+        )
+        if after.value != before:
+            await self._repo.update_catalog_sensitivity(cat.id, after)
+            await self._safe_publish(
+                {
+                    "event_type": "classification.changed",
+                    "catalog_id": cat.id,
+                    "entity_name": cat.entity_name,
+                    "before": before,
+                    "after": after.value,
+                    "reason": "false_positive_feedback",
+                }
+            )
+        # 审计：误报豁免（PII 处置留痕）
+        await write_audit(
+            self._db,
+            actor_id=actor_id,
+            action="classification.false_positive",
+            entity_type="catalog",
+            entity_id=str(cat.id),
+            detail={
+                "entity_name": cat.entity_name,
+                "column": col,
+                "scope": scope,
+                "exempted_as": exempt_entry,
+                "sensitivity_before": before,
+                "sensitivity_after": after.value,
+                "reason": reason,
+            },
+            pii_access=True,
+        )
+        return ClassificationFalsePositiveResult(
+            catalog_id=cat.id,
+            entity_name=cat.entity_name,
+            column=col,
+            scope=scope,
+            exempted_as=exempt_entry,
+            sensitivity_before=before,
+            sensitivity_after=after.value,
+            remaining_pii_columns=[h.column for h in hits],
         )
 
     # ---------------------------------------------------------- right to erasure
