@@ -1071,6 +1071,44 @@ async def test_infer_sql_batch_composite_uses_real_period() -> None:
     assert all(c["period"] == "month" for c in derived)
 
 
+async def test_infer_sql_batch_composite_follows_entity_granularity() -> None:
+    """2026-08-28：复合候选粒度跟随派生候选的实体粒度推断——GROUP BY 唯一业务
+    实体键（doctor_id）→ doctor 粒度（此前复合一律挂在语句周期上，无法表达
+    「按医生统计的复合指标」）。"""
+    sql = (
+        "SELECT doctor_id, SUM(amount) AS fee_amt, COUNT(DISTINCT patient_id) AS patient_cnt, "
+        "SUM(amount)/COUNT(DISTINCT patient_id) AS arpu "
+        "FROM dwd_fee_di GROUP BY doctor_id"
+    )
+    result = await infer_sql_batch(
+        _fake_db(), sql=sql, split_mode="statement", domain_code="med",
+        synthesize_composite=True,
+    )
+    comp = next(c for c in result["candidates"] if c["type"] == "composite")
+    assert comp["granularity"] == "doctor", comp
+    # 派生基础候选同样为 doctor 粒度（与复合同源）
+    derived = [c for c in result["candidates"] if c["type"] == "derived"]
+    assert derived
+    assert all(c["granularity"] == "doctor" for c in derived)
+
+
+async def test_infer_sql_batch_composite_keeps_period_grain_when_no_entity() -> None:
+    """2026-08-28：复合候选无业务实体键时粒度兜底（时间粒度由 period 表达），
+    不因周期断言回归。"""
+    sql = (
+        "SELECT substr(create_date,1,7) AS month_id, "
+        "SUM(amount)/COUNT(DISTINCT user_id) AS arpu "
+        "FROM dwd_order_di GROUP BY substr(create_date,1,7)"
+    )
+    result = await infer_sql_batch(
+        _fake_db(), sql=sql, split_mode="statement", domain_code="sales",
+        synthesize_composite=True,
+    )
+    comp = next(c for c in result["candidates"] if c["type"] == "composite")
+    assert comp["granularity"] == "month", comp
+    assert comp["period"] == "month"
+
+
 def test_build_derived_candidate_empty_domain_code_none() -> None:
     """P0-1 单测：域为空时派生候选编码为 None（不生成 _xxx_day 非法编码）。"""
     from app.services.semantic.sql_split import _build_derived_candidate
@@ -1137,6 +1175,17 @@ def test_apply_candidate_period_recomputes_type() -> None:
     _apply_candidate_period(cand3, "month")
     assert cand3["type"] == "composite"
     assert cand3["period"] == "month"
+
+    # 2026-08-28：实体粒度（doctor）是统计主体属性，LLM 周期覆盖不冲掉它
+    cand4 = {
+        "type": "composite",
+        "period": "month",
+        "granularity": "doctor",
+        "metric_code": "med_fee_arpu_month",
+    }
+    _apply_candidate_period(cand4, "day")
+    assert cand4["period"] == "day"
+    assert cand4["granularity"] == "doctor"
 
 
 async def test_infer_sql_batch_llm_batch_limit() -> None:

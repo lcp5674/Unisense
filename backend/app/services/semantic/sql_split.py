@@ -688,6 +688,15 @@ def _build_derived_candidate(
         period=period,
         measure_meta=measure_meta,
     )
+    # 2026-08-28：实体粒度推断依赖 profile["sql_profile"].group_by——build_profile
+    # 未传 sql 时 profile 无 sql_profile，GROUP BY 业务实体键（doctor_id）无法升级
+    # 为实体粒度，批量路径派生/复合粒度恒为时间粒度（day/month）。补挂 group_by/
+    # time_column（与单条 auto_suggest 路径同源，保证两路径实体粒度一致）。
+    if "sql_profile" not in profile and (group_by or time_column):
+        profile["sql_profile"] = SqlProfile(
+            group_by=list(group_by or []),
+            time_column=time_column,
+        )
     profile["domain_code"] = domain_code or ""
     result = infer_metric(
         profile,
@@ -826,12 +835,17 @@ def _build_composite_candidate(
     period: str,
     suggested_domain_code: str | None = None,
     raw_sql: str | None = None,
+    infer_dicts: dict[str, dict[str, list[str]]] | None = None,
 ) -> dict[str, Any] | None:
     """合成复合候选：依赖组内 N 原子编码，口径 SQL=原语句（保留多度量计算结构）。
 
-    编码/粒度使用语句实际统计周期（``period``），不再硬编码 ``_day``/``day``——
+    编码使用语句实际统计周期（``period``），不再硬编码 ``_day``/``day``——
     月粒度 ETL 的复合指标此前生成 ``xxx_day``（粒度 day）与实际口径（month）不符，
     注册后编码与粒度均失真（P1-3 一致性缺陷）。
+    **粒度跟随派生候选的实体粒度推断**（2026-08-28）：复合语句同样有 GROUP BY
+    统计主体——``extract_grain_and_dims`` 时间粒度优先、GROUP BY 唯一业务实体键 →
+    实体粒度（``GROUP BY doctor_id`` 复合 → ``doctor`` 粒度），与派生候选完全同源；
+    无实体键时兜底语句周期（时间粒度），保证复合不再永远挂在周期上。
     ``raw_sql``（P1-1/P2-5）：复合候选所属语句原始 SQL，批量创建透传落 Metric.raw_sql。
     仅当语句含四则运算/比率时才合成（B4）——无运算的多度量并列不构成复合。
     """
@@ -849,6 +863,15 @@ def _build_composite_candidate(
     biz = extract_biz_object(table) if table else "entity"
     groupkey = _group_key([str(c.get("measure_column", "")) for c in atoms])
     names = "、".join(str(c.get("name", "")) for c in atoms)
+    # 粒度跟随派生候选（2026-08-28）：复合语句同样有 GROUP BY 统计主体，用与派生
+    # 候选同一套 extract_grain_and_dims 推断——时间粒度优先，GROUP BY 唯一业务
+    # 实体键 → 实体粒度（doctor 等），无实体键兜底 day（时间粒度由 period 表达）。
+    from app.services.semantic.infer_dict import extract_grain_and_dims
+
+    grain, _ = extract_grain_and_dims(
+        list(profile.group_by or []),
+        (infer_dicts or {}).get("granularity"),
+    )
     return {
         "key": f"{idx}:composite",
         "metric_code": f"{domain_code}_{biz}_{groupkey}_{period}" if domain_code else None,
@@ -860,7 +883,7 @@ def _build_composite_candidate(
         "aggregation": None,
         "period": period,
         "unit": None,
-        "granularity": period,
+        "granularity": grain,
         "definition_json": {
             "sql": sql,
             "dependencies": codes,
@@ -1097,7 +1120,14 @@ def _apply_candidate_period(cand: dict[str, Any], period: str) -> None:
             parts[-1] = period
             cand["metric_code"] = "_".join(parts)
     cand["period"] = period
-    cand["granularity"] = period
+    # 粒度保留实体粒度（2026-08-28）：LLM 周期覆盖仅同步时间粒度（day/week/month…），
+    # 实体粒度（doctor/patient…）是统计主体属性，不因周期变化而变——派生/复合候选
+    # 的实体粒度不再被 LLM 周期覆盖冲掉（与 _build_derived_candidate/
+    # _build_composite_candidate 的 extract_grain_and_dims 推断同源）。
+    from app.services.semantic.infer_dict import TIME_GRAIN_CODES
+
+    if cand.get("granularity") is None or cand.get("granularity") in TIME_GRAIN_CODES:
+        cand["granularity"] = period
     # B2（方案 A）：周期驱动类型回映——SQL 候选一律派生（日 = 派生最小周期），
     # LLM 覆盖周期仅改变 period/编码，不把日粒度降级为原子（原子只从逻辑度量
     # 目录创建，SQL 推断不产原子）；复合指标保持复合（周期是其属性，不因周期
@@ -1744,6 +1774,7 @@ async def infer_sql_batch(
                 period=period,
                 suggested_domain_code=seg_domain_map.get(idx),
                 raw_sql=rec["seg"],
+                infer_dicts=infer_dicts,
             )
             if composite:
                 _push_candidate(idx, composite)
