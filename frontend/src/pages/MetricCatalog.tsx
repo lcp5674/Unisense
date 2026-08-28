@@ -1783,7 +1783,13 @@ export function MetricCatalog() {
               icon={<DeleteOutlined />}
               type={deletedView ? "primary" : "default"}
               danger={deletedView}
-              onClick={() => { setPage(1); setDeletedView((v) => !v); }}
+              onClick={() => {
+                // 切换回收站视图时清空勾选：避免正常列表/回收站的勾选残留
+                // （软删记录 status 仍为 DRAFT，残留勾选会误触发批量删除→重复软删 404）
+                setSelected([]);
+                setPage(1);
+                setDeletedView((v) => !v);
+              }}
             >
               {deletedView ? "返回列表" : "回收站"}
             </Button>
@@ -1989,7 +1995,11 @@ export function MetricCatalog() {
             }}
             trigger={["click"]}
           >
-            <Button icon={<ThunderboltOutlined />} disabled={!selected.length || !canBatchManage}>
+            <Button
+              icon={<ThunderboltOutlined />}
+              disabled={!selected.length || !canBatchManage || deletedView}
+              title={deletedView ? "回收站仅支持单条恢复/彻底删除，批量操作不适用" : undefined}
+            >
               批量操作
             </Button>
           </Dropdown>

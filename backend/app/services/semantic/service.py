@@ -3736,9 +3736,22 @@ class MetricService(BaseService):
 
         Raises:
             NotFoundError: 指标不存在。
-            BusinessError: 指标非 DRAFT/DEPRECATED 状态 / 无删除权限。
+            BusinessError: 指标非 DRAFT/DEPRECATED 状态 / 无删除权限 / 已处于删除状态。
         """
-        metric = await self.get_metric(metric_code)
+        try:
+            metric = await self.get_metric(metric_code)
+        except NotFoundError:
+            # 已软删记录（回收站）再走软删：get_metric 对软删记录 fail-closed 抛
+            # NOT_FOUND，但语义是「重复删除」而非「不存在」——查回收站区分并给清晰提示，
+            # 避免用户把 404 误判为指标丢失（前端批量删除按 status=DRAFT 过滤曾误中软删记录）。
+            archived = await self._repo.get_archived_by_code(metric_code)
+            if archived is not None:
+                raise BusinessError(
+                    f"指标 {metric_code} 已处于删除状态（回收站），无需重复删除；"
+                    "可在回收站恢复或彻底删除",
+                    error_code="ALREADY_DELETED",
+                ) from None
+            raise
         if metric.status not in ("DRAFT", "DEPRECATED"):
             raise BusinessError(
                 f"仅 DRAFT/DEPRECATED 状态的指标可删除（当前 {metric.status}）；"

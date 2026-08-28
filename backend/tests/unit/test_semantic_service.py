@@ -3766,6 +3766,27 @@ async def test_delete_metric_success_and_reject():
         assert exc.value.error_code == "INVALID_STATE"
 
 
+async def test_delete_metric_already_deleted_friendly():
+    """已软删记录（回收站）再走软删 → ALREADY_DELETED 而非裸「指标不存在」。
+
+    回归保护：前端批量删除按 status=DRAFT 过滤曾误中软删记录（软删不改 status），
+    逐条调软删接口导致整批 404「指标不存在」——后端应区分「重复删除」并给清晰提示。
+    """
+    svc, repo = _svc_with_repo()
+    repo.soft_delete = AsyncMock()
+    svc.get_metric = AsyncMock(side_effect=NotFoundError("指标不存在: sales_gmv_daily"))
+    repo.get_archived_by_code = AsyncMock(
+        return_value=make_metric(status="DRAFT", owner_id=1, deleted_at="2026-08-01T00:00:00")
+    )
+
+    with pytest.raises(BusinessError) as exc:
+        await svc.delete_metric("sales_gmv_daily", actor_id=1, role="platform_admin")
+    assert exc.value.error_code == "ALREADY_DELETED"
+    assert "已处于删除状态" in str(exc.value)
+    # 未误调软删
+    repo.soft_delete.assert_not_awaited()
+
+
 async def test_restore_metric_success_and_guards():
     # 平台管理员恢复已删草稿
     svc, repo = _svc_with_repo()
