@@ -752,6 +752,15 @@ async def _issue_quickbi_ticket(
     report_id = str(body.get("reportId") or body.get("report_id") or "").strip()
     if not report_id:
         raise ValidationError("reportId 必填", ctx={"field": "reportId"})
+    # S6（审查修复）：report_id 仅作签发标识不授权，但须防任意字符串/路径注入——
+    # 仅允许报表标识字符集（QuickBI 报表 ID 为字母数字下划线连字符点）
+    import re as _re
+
+    if not _re.fullmatch(r"[A-Za-z0-9_\-\.]{1,128}", report_id):
+        raise ValidationError(
+            "reportId 格式非法（仅允许字母/数字/下划线/连字符/点，≤128 字符）",
+            ctx={"field": "reportId"},
+        )
     dashboard_id = body.get("dashboardId") or body.get("dashboard_id")
     params = body.get("params")
     if params is not None and not isinstance(params, dict):

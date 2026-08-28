@@ -585,6 +585,15 @@ async def erasure_execute(
     命中主体的审计行 ``ip`` / ``detail_json`` 个人标识覆写为 ``ANONYMIZED_<hash>``，
     并写入 ``PII_ANONYMIZED`` 审计留存与 ``erasure_request`` 台账。
     """
+    # S20（审查修复）：禁止自抹审计——执行者不能对自身执行 erasure，
+    # 防止合规官抹去自己的历史审计痕迹（审计完整性兜底）。
+    if payload.subject_user_id == user.id:
+        from app.core.exceptions import ValidationError
+
+        raise ValidationError(
+            "不能对当前登录账号执行被遗忘权（防自抹审计痕迹）",
+            error_code="SELF_ERASURE_FORBIDDEN",
+        )
     svc = _svc(db, request)
     erasure = await svc.execute_erasure(payload.subject_user_id, user.id, payload.reason)
     await write_audit(

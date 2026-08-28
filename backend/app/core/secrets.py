@@ -50,10 +50,13 @@ def _build_key() -> bytes:
         return base64.urlsafe_b64encode(derived)
     # 检查是否为生产环境
     env = os.environ.get("UNISENSE_ENV", "local")
-    if env == "prod":
+    # S14（审查修复）：此前仅 env=="prod" 拒绝 dev 派生——staging/production 等
+    # 取值会落入下方固定公开 dev 密钥，测试环境留存的生产副本数据凭据密文可被
+    # 任何持源码者解密。改为「非 local/dev/test」一律必须独立配置。
+    if env not in ("local", "dev", "test"):
         raise ConfigurationError(
-            "生产环境 UNISENSE_FERNET_KEY 必须独立配置，"
-            "禁止从 JWT_SECRET 派生降级。请设置独立的 Fernet 密钥后重启。"
+            "非本地/开发环境 UNISENSE_FERNET_KEY 必须独立配置，"
+            "禁止从 JWT_SECRET 派生或使用公开 dev 密钥。请设置独立的 Fernet 密钥后重启。"
         )
     # 开发环境：使用 PBKDF2 派生确定性默认密钥（便于本地调试）
     dev_secret = "dev-fernet-key-for-local-testing-only"

@@ -326,6 +326,7 @@ async def list_clients(
 @router.post("/consume/api-clients/{client_id}/token")
 async def issue_token(
     client_id: str,
+    request: Request,
     user: User = Depends(require_roles("platform_admin", "domain_admin")),
     db: AsyncSession = Depends(get_db_session),
 ) -> ApiResponse[dict[str, str]]:
@@ -336,6 +337,20 @@ async def issue_token(
         raise BusinessError("接入方不存在或已吊销", error_code=ErrorCode.AUTH_APIKEY_INVALID)
     token = create_access_token(
         sub=client_id, role="consume", org_id=client.created_by, expire_minutes=60
+    )
+    # S19（审查修复）：接入方凭证签发落审计（此前零审计——凭据签发是敏感操作）
+    from app.api.responses import get_trace_id
+    from app.core.audit import client_ip, write_audit
+
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="consume.issue_token",
+        entity_type="api_client",
+        entity_id=client_id,
+        detail={"expire_minutes": 60},
+        ip=client_ip(request),
+        trace_id=get_trace_id(request),
     )
     await db.commit()
     return ok(data={"access_token": token})

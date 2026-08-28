@@ -457,6 +457,7 @@ async def list_collection_jobs(
 @source_router.get("/{source_id}", dependencies=_READ_DEPS)
 async def get_data_source(
     source_id: str,
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
@@ -468,6 +469,20 @@ async def get_data_source(
     role = user.role.value if hasattr(user.role, "value") else user.role
     include_config = str(role) == "platform_admin"
     resp = await svc.get_source(source_id, include_config=include_config)
+    # S13（审查修复）：平台管理员查看明文凭据属敏感操作，须落审计
+    # （对照 LLM key 回读已有审计；此前凭据披露零审计）
+    if include_config:
+        await write_audit(
+            db,
+            actor_id=user.id,
+            action="data_source.secret_viewed",
+            entity_type="data_source",
+            entity_id=source_id,
+            detail={"include_config": True},
+            ip=client_ip(request),
+            trace_id=trace_id,
+        )
+        await db.commit()
     return ok(data=resp, trace_id=trace_id)
 
 
