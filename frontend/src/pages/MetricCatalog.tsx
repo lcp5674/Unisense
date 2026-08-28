@@ -39,6 +39,7 @@ import {
   batchRejectMetrics,
   batchDeprecateMetrics,
   batchReactivateMetrics,
+  batchPurgeMetrics,
   batchSubmitMetrics,
   checkMetricDownstream,
   type MetricDownstreamCheckResult,
@@ -88,6 +89,7 @@ const BATCH_ACTION_LABEL: Record<string, string> = {
   approve: "通过",
   reject: "驳回",
   deprecate: "废弃",
+  purge: "彻底删除",
 };
 
 // 健康度分级（backend metric_health_score：>=85 EXCELLENT / >=70 GOOD / >=55 WARNING / <55 CRITICAL）
@@ -523,9 +525,9 @@ export function MetricCatalog() {
   // 无权限则禁用导出按钮，防止 viewer/analyst 等角色导出含 PII 口径的指标清单（数据导出权限缺口）。
   const canExport = can("metric:export");
   // 批量操作确认弹窗：null=关闭 / submit=批量提交审核 / delete=批量删除 /
-  // approve=批量通过 / reject=批量打回 / deprecate=批量废弃 / reactivate=批量恢复
+  // approve=批量通过 / reject=批量打回 / deprecate=批量废弃 / reactivate=批量恢复 / purge=回收站批量彻底删除
   const [batchAction, setBatchAction] = useState<
-    "submit" | "delete" | "approve" | "reject" | "deprecate" | "reactivate" | null
+    "submit" | "delete" | "approve" | "reject" | "deprecate" | "reactivate" | "purge" | null
   >(null);
   const [batchBusy, setBatchBusy] = useState(false);
   // 批量操作失败明细：超 3 条时提供「查看明细」弹窗（避免 message 截断导致用户看不到全部失败）
@@ -534,7 +536,7 @@ export function MetricCatalog() {
   // 批量操作失败项的 metric_code（供「重试失败项」一键重选；batchRetryActionRef 记住原操作类型）
   const [batchFailedCodes, setBatchFailedCodes] = useState<string[]>([]);
   const batchRetryActionRef = useRef<
-    "submit" | "delete" | "approve" | "reject" | "deprecate" | "reactivate" | null
+    "submit" | "delete" | "approve" | "reject" | "deprecate" | "reactivate" | "purge" | null
   >(null);
   // 批量提交审核的评审指派（TD §13）
   const [batchReviewerType, setBatchReviewerType] = useState<"user" | "domain" | null>(null);
@@ -1049,6 +1051,16 @@ export function MetricCatalog() {
         const res = await batchReactivateMetrics(targets.map((m) => m.metric_code));
         ok = res.ok_count;
         res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.code}: ${r.message}`); failedCodes.push(r.code); });
+      } else if (batchAction === "purge") {
+        // 回收站批量彻底删除（物理删除不可恢复；仅平台管理员，后端逐条容错）
+        const targets = selected; // 回收站视图下勾选即已软删记录
+        if (!targets.length) {
+          message.warning("请先勾选回收站中的指标");
+          return;
+        }
+        const res = await batchPurgeMetrics(targets.map((m) => m.metric_code));
+        ok = res.ok_count;
+        res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.code}: ${r.message}`); failedCodes.push(r.code); });
       } else {
         // delete：逐条处理（无批量删除端点）
         const targets = selected.filter((m) => m.status === "DRAFT");
@@ -1377,7 +1389,9 @@ export function MetricCatalog() {
                   currentUserRole !== "domain_admin" &&
                   r.owner_id !== currentUserId
                     ? "仅管理员或创建者可删"
-                    : ""}
+                    : r.status === "REVIEW" || r.status === "EXPERIMENTAL" || r.status === "PUBLISHED"
+                      ? "需先打回/下架后在草稿态删除"
+                      : ""}
                 </span>
               ),
           },
@@ -1854,7 +1868,28 @@ export function MetricCatalog() {
         </Dropdown>
         <Dropdown
           menu={{
-              items: [
+              items: deletedView
+                ? [
+                    {
+                      // 回收站批量彻底删除（物理删除不可恢复；仅平台管理员）
+                      key: "purge",
+                      label: (
+                        <Tooltip
+                          title={
+                            currentUserRole !== "platform_admin"
+                              ? "仅平台管理员可彻底删除；回收站中的已软删记录将物理删除不可恢复"
+                              : "物理删除勾选的已软删指标，关联版本/维度/健康度/血缘将一并清除"
+                          }
+                        >
+                          <span>批量彻底删除（回收站）</span>
+                        </Tooltip>
+                      ),
+                      icon: <DeleteOutlined />,
+                      danger: true,
+                      disabled: currentUserRole !== "platform_admin" || !selected.length,
+                    },
+                  ]
+                : [
                 {
                   key: "submit",
                   label: (
@@ -1981,7 +2016,8 @@ export function MetricCatalog() {
                   | "approve"
                   | "reject"
                   | "deprecate"
-                  | "reactivate";
+                  | "reactivate"
+                  | "purge";
                 if (act === "deprecate") {
                   loadSuccessorOptions();
                   // 打开批量废弃面板即审查勾选已发布指标的下游使用情况
@@ -1997,8 +2033,17 @@ export function MetricCatalog() {
           >
             <Button
               icon={<ThunderboltOutlined />}
-              disabled={!selected.length || !canBatchManage || deletedView}
-              title={deletedView ? "回收站仅支持单条恢复/彻底删除，批量操作不适用" : undefined}
+              disabled={
+                !selected.length ||
+                (deletedView ? currentUserRole !== "platform_admin" : !canBatchManage)
+              }
+              title={
+                deletedView
+                  ? currentUserRole !== "platform_admin"
+                    ? "批量彻底删除仅平台管理员可用"
+                    : "回收站批量彻底删除勾选的已软删指标（物理删除不可恢复）"
+                  : undefined
+              }
             >
               批量操作
             </Button>
@@ -2305,7 +2350,9 @@ export function MetricCatalog() {
                   ? "批量废弃"
                   : batchAction === "reactivate"
                     ? "批量恢复已废弃指标"
-                    : "批量删除草稿"
+                    : batchAction === "purge"
+                      ? "批量彻底删除（回收站）"
+                      : "批量删除草稿"
         }
         open={batchAction !== null}
         confirmLoading={batchBusy}
@@ -2322,10 +2369,12 @@ export function MetricCatalog() {
                   ? "废弃"
                   : batchAction === "reactivate"
                     ? "恢复"
-                    : "删除"
+                    : batchAction === "purge"
+                      ? "彻底删除"
+                      : "删除"
         }
         okButtonProps={{
-          danger: batchAction === "delete" || batchAction === "deprecate",
+          danger: batchAction === "delete" || batchAction === "deprecate" || batchAction === "purge",
           // 指定评审用户但未选用户时禁止提交（后端校验 user 类型须有 reviewer_id，前置拦截提升体验）
           disabled:
             batchAction === "submit" && batchReviewerType === "user" && !batchReviewerId,
@@ -2503,6 +2552,12 @@ export function MetricCatalog() {
           <p>
             将删除勾选的 <b>{selected.filter((m) => m.status === "DRAFT").length}</b> 个草稿指标
             （软删除，仅平台/域管理员或指标创建者可执行）。如需找回，可在右上角「回收站」中恢复。
+          </p>
+        )}
+        {batchAction === "purge" && (
+          <p>
+            将<b>物理彻底删除</b>勾选的 <b>{selected.length}</b> 个回收站指标（<b>不可恢复</b>），
+            关联版本 / 维度 / 健康度 / 血缘将一并清除。仅平台管理员可执行。
           </p>
         )}
       </Modal>

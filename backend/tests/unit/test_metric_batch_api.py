@@ -533,3 +533,52 @@ async def test_import_template_download(client):
     assert "text/csv" in resp.headers["content-type"]
     assert "metric_code" in resp.text
     assert "expression" in resp.text
+
+
+async def test_batch_purge_mixed_results(client):
+    """回收站批量彻底删除：逐条收集，未删/非管理员项失败不影响其余（仅平台管理员）。"""
+    with _as_reviewer("platform_admin"), patch("app.api.metrics.MetricService") as mock_svc:
+        instance = mock_svc.return_value
+
+        async def fake_purge(code, **kwargs):
+            if code == "not_deleted":
+                raise BusinessError(
+                    f"指标 {code} 未处于已删除状态，无需彻底删除",
+                    error_code="INVALID_STATE",
+                )
+            return None
+
+        instance.purge_metric = AsyncMock(side_effect=fake_purge)
+
+        resp = await client.post(
+            "/api/v1/metric-definitions/batch-purge",
+            json={"metric_codes": ["sales_gmv_daily", "not_deleted"]},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["ok_count"] == 1
+    assert body["fail_count"] == 1
+    by_code = {r["code"]: r for r in body["results"]}
+    assert by_code["not_deleted"]["ok"] is False
+    assert "无需彻底删除" in by_code["not_deleted"]["message"]
+
+
+async def test_batch_purge_forbidden_for_non_admin(client):
+    """非平台管理员调用 batch-purge → 403（require_roles 门禁）。"""
+    with _as_reviewer("domain_admin"), patch("app.api.metrics.MetricService") as mock_svc:
+        mock_svc.return_value.purge_metric = AsyncMock(return_value=None)
+        resp = await client.post(
+            "/api/v1/metric-definitions/batch-purge",
+            json={"metric_codes": ["sales_gmv_daily"]},
+        )
+    assert resp.status_code == 403
+
+
+async def test_batch_purge_empty_codes_422(client):
+    """空 metric_codes → 422（schema 约束）。"""
+    with _as_reviewer("platform_admin"):
+        resp = await client.post(
+            "/api/v1/metric-definitions/batch-purge", json={"metric_codes": []}
+        )
+    assert resp.status_code == 422

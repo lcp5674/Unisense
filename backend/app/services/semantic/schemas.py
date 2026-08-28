@@ -315,7 +315,8 @@ class MetricCreateRequest(BaseModel):
             raise ValueError("mount 与 mounts 不能同时提供，请使用 mounts（多变体列表）")
         if self.mounts and self.type != "derived":
             raise ValueError(
-                f"仅派生指标可挂载，当前类型 {self.type}（原子=逻辑度量不挂表，复合=派生组合不直接挂表）"
+                "仅派生指标可挂载，当前类型 "
+                f"{self.type}（原子=逻辑度量不挂表，复合=派生组合不直接挂表）"
             )
         return self
 
@@ -573,6 +574,12 @@ class MetricBatchApproveRequest(BaseModel):
         "standard", description="发布模式: standard(全量)/experimental(灰度)"
     )
     gray_tenant_ids: list[int] | None = Field(None, description="灰度白名单租户 ID")
+
+
+class MetricBatchPurgeRequest(BaseModel):
+    """批量彻底删除请求（回收站硬删，仅平台管理员，物理删除不可恢复）。"""
+
+    metric_codes: list[str] = Field(..., min_length=1, max_length=100)
 
 
 class MetricBatchDeprecateItem(BaseModel):

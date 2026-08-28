@@ -20,6 +20,7 @@ vi.mock("../api", () => ({
   deleteMetric: vi.fn(),
   restoreMetric: vi.fn(),
   purgeMetric: vi.fn(),
+  batchPurgeMetrics: vi.fn(),
   fetchMyPermissions: vi.fn(),
   compareMetricsMatrix: vi.fn(),
 }));
@@ -44,6 +45,7 @@ import {
   deleteMetric,
   restoreMetric,
   purgeMetric,
+  batchPurgeMetrics,
   fetchMyPermissions,
   compareMetricsMatrix,
 } from "../api";
@@ -62,6 +64,7 @@ const mockedBatchSubmit = vi.mocked(batchSubmitMetrics);
 const mockedBatchDeprecate = vi.mocked(batchDeprecateMetrics);
 const mockedDownstream = vi.mocked(checkMetricDownstream);
 const mockedDeleteMetric = vi.mocked(deleteMetric);
+const mockedBatchPurge = vi.mocked(batchPurgeMetrics);
 const mockedPermissions = vi.mocked(fetchMyPermissions);
 const mockedMatrix = vi.mocked(compareMetricsMatrix);
 
@@ -1243,6 +1246,41 @@ describe("MetricCatalog 回收站（已删除草稿恢复）", () => {
     fireEvent.click(await screen.findByRole("button", { name: /彻底删除/ }));
     fireEvent.click(await screen.findByRole("button", { name: /OK/ }));
     await waitFor(() => expect(purgeMock).toHaveBeenCalledWith(metric.metric_code));
+  });
+
+  it("回收站批量彻底删除：勾选已删记录 → 批量操作 → 批量彻底删除 → 确认后调用 batchPurgeMetrics", async () => {
+    const purgeBatchMock = mockedBatchPurge.mockResolvedValue({
+      ok_count: 1,
+      fail_count: 0,
+      results: [{ code: "sales_gmv_sum_d", ok: true, message: "" }],
+    } as never);
+    mockedList.mockResolvedValue({
+      items: [{ ...metric, deleted_at: "2026-08-27T08:26:00" } as unknown as MetricResponse],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+    const user = { id: 1, username: "admin", display_name: "管理员", role: "platform_admin", domain: null, org_id: 1 };
+    render(
+      <MemoryRouter initialEntries={["/catalog"]}>
+        <Routes>
+          <Route path="/catalog" element={<PermissionProvider user={user}><MetricCatalog /></PermissionProvider>} />
+          <Route path="/detail/:code" element={<div>detail</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /回收站/ }));
+    await screen.findByText("sales_gmv_sum_d");
+    const selectAll = document.querySelector(".ant-table-selection-column input[type=checkbox]") as Element;
+    fireEvent.click(selectAll);
+    fireEvent.click(screen.getByRole("button", { name: /批量操作/ }));
+    fireEvent.click(screen.getByText("批量彻底删除（回收站）"));
+    await screen.findByText(/物理彻底删除/);
+    const modal = document.querySelector(".ant-modal") as HTMLElement;
+    fireEvent.click(within(modal).getByRole("button", { name: /彻\s*底\s*删\s*除/ }));
+    await waitFor(() => {
+      expect(purgeBatchMock).toHaveBeenCalledWith(["sales_gmv_sum_d"]);
+    });
   });
 
   it("回收站视图导出按钮禁用（含已软删指标，避免误用为正式数据）", async () => {

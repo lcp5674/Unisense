@@ -961,6 +961,14 @@ export async function batchReactivateMetrics(
   });
 }
 
+// 回收站批量彻底删除已软删指标（物理删除不可恢复；仅平台管理员）
+export async function batchPurgeMetrics(metricCodes: string[]): Promise<BatchResult> {
+  return request<BatchResult>(`${API_BASE}/metric-definitions/batch-purge`, {
+    method: "POST",
+    body: JSON.stringify({ metric_codes: metricCodes }),
+  });
+}
+
 // 批量下线下游使用审查：返回每指标的被引用情况（下线弹窗预审用）
 export interface MetricDownstreamReferrer {
   node: string;

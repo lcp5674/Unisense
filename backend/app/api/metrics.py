@@ -51,6 +51,7 @@ from app.services.semantic.schemas import (
     MetricBatchDeprecateRequest,
     MetricBatchImportCandidate,
     MetricBatchImportRequest,
+    MetricBatchPurgeRequest,
     MetricBatchReactivateRequest,
     MetricBatchRegisterRequest,
     MetricCompareMatrixRequest,
@@ -1657,6 +1658,50 @@ async def purge_metric(
     # PLAT-3: 业务写入 + 审计同事务原子提交
     await db.commit()
     return ok(data={"metric_code": metric_code}, trace_id=trace_id)
+
+
+@router.post(
+    "/batch-purge",
+    response_model=ApiResponse[BatchResponse],
+    summary="批量彻底删除已软删指标（回收站硬删，仅平台管理员）",
+    # 彻底删除是不可恢复的危险操作：仅平台管理员（对齐单条 purge / measure_catalog purge 先例）
+    dependencies=[Depends(require_roles("platform_admin")), Depends(guard_against_injection)],
+)
+async def batch_purge_metrics(
+    request: MetricBatchPurgeRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[BatchResponse]:
+    """回收站批量彻底删除软删指标（物理删除不可恢复）；仅平台管理员，逐条容错。
+
+    逐条复用 ``MetricService.purge_metric``（已软删记录才可硬删、级联清理版本/维度/
+    健康度/值快照/挂载/血缘边），失败项随 BatchResponse 返回，不中断后续项。
+    """
+    service = MetricService(db)
+    results = await run_batch(
+        db,
+        units=request.metric_codes,
+        code_of=lambda code: code,
+        run=lambda code: service.purge_metric(code, actor_id=user.id, role=user.role),
+        abort_message="批量彻底删除内部错误，已中止后续项",
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=batch_audit_action("metric_definition.batch_purge", results),
+        entity_type="metric_definition",
+        entity_id=f"batch:{len(request.metric_codes)}",
+        detail={
+            "failed_codes": batch_failed_codes(results),
+            "ok": sum(1 for r in results if r.ok),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=batch_response(results), trace_id=trace_id)
 
 
 @router.post(
