@@ -12,7 +12,8 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import case, func, or_, select, update
+import structlog
+from sqlalchemy import case, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError
@@ -24,6 +25,8 @@ from app.models.governance import Classification, PiiFieldOverride
 from app.models.lineage import LineageEdge
 from app.models.metric import Metric
 from app.models.user import User
+
+logger = structlog.get_logger("unisense.assetmap.repository")
 
 
 def _prune_graph_by_depth(
@@ -68,6 +71,57 @@ def _prune_graph_by_depth(
 class AssetMapRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    # ---- FULLTEXT 表级搜索（审查 T19：LIKE 前导通配符全表扫 → FULLTEXT 加速）----
+    # 进程级能力标志：None=未探测 / True=可用 / False=不可用（SQLite 或索引缺失 → 回退 LIKE）。
+    _fulltext_ok: bool | None = None
+
+    @staticmethod
+    def _catalog_name_like(kw: str) -> Any:
+        """LIKE 回退条件（% / _ 转义防模糊放大）。"""
+        escaped = kw.replace("/", "//").replace("%", "/%").replace("_", "/_")
+        return or_(
+            DBCatalog.entity_name.ilike(f"%{escaped}%", escape="/"),
+            DBCatalog.source_id.ilike(f"%{escaped}%", escape="/"),
+        )
+
+    @staticmethod
+    def _catalog_name_fulltext(kw: str) -> Any:
+        """FULLTEXT 短语条件（ngram 2-gram，短语模式语义≈子串；<2 字符由调用方回退 LIKE）。"""
+        phrase = kw.strip().replace('"', "")
+        return text(
+            "MATCH(db_catalog.entity_name, db_catalog.source_id) AGAINST (:kw IN BOOLEAN MODE)"
+        ).bindparams(kw=f'"{phrase}"')
+
+    async def _catalog_name_cond(self, kw: str) -> Any:
+        """选择表级搜索条件：MySQL + ≥2 字符 → FULLTEXT（一次进程级探测，失败永久回退 LIKE）；
+        其余 → LIKE。"""
+        kw = kw.strip()
+        if not kw:
+            return None
+        if self._fulltext_ok is False or len(kw) < 2:
+            return self._catalog_name_like(kw)
+        try:
+            bind = self._session.get_bind()
+            if bind.dialect.name != "mysql":
+                type(self)._fulltext_ok = False
+                return self._catalog_name_like(kw)
+        except Exception:  # noqa: BLE001 - 探测失败回退 LIKE
+            return self._catalog_name_like(kw)
+        if self._fulltext_ok is None:
+            # 索引是否就绪：LIMIT 0 仅验证可执行、不扫数据（迁移 0113 应用后为 True）
+            try:
+                probe = text(
+                    "SELECT 1 FROM db_catalog WHERE MATCH(entity_name, source_id) "
+                    "AGAINST (:kw IN BOOLEAN MODE) LIMIT 0"
+                ).bindparams(kw="测试")
+                await self._session.execute(probe)
+                type(self)._fulltext_ok = True
+            except Exception:  # noqa: BLE001 - 索引缺失（迁移未应用）/非 MySQL → 回退 LIKE
+                type(self)._fulltext_ok = False
+                logger.warning("assetmap_fulltext_unavailable_fallback_like")
+                return self._catalog_name_like(kw)
+        return self._catalog_name_fulltext(kw)
 
     async def list_tables(
         self,
@@ -116,14 +170,10 @@ class AssetMapRepository:
             if org_id is not None:
                 stmt = stmt.where(DataSource.org_id == org_id)
         if keyword:
-            # LIKE 通配符转义（对齐 collector.list_catalogs：% / _ 须转义防模糊放大）
-            escaped = keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")
-            stmt = stmt.where(
-                or_(
-                    DBCatalog.entity_name.ilike(f"%{escaped}%", escape="/"),
-                    DBCatalog.source_id.ilike(f"%{escaped}%", escape="/"),
-                )
-            )
+            # 表级搜索（T19 审查修复）：FULLTEXT（MySQL ≥2 字符）加速，LIKE 回退
+            cond = await self._catalog_name_cond(keyword)
+            if cond is not None:
+                stmt = stmt.where(cond)
         total = (
             await self._session.execute(select(func.count()).select_from(stmt.subquery()))
         ).scalar() or 0
@@ -177,14 +227,10 @@ class AssetMapRepository:
             if org_id is not None:
                 stmt = stmt.where(DataSource.org_id == org_id)
         if keyword:
-            # LIKE 通配符转义（对齐 collector.list_catalogs：% / _ 须转义防模糊放大）
-            escaped = keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")
-            stmt = stmt.where(
-                or_(
-                    DBCatalog.entity_name.ilike(f"%{escaped}%", escape="/"),
-                    DBCatalog.source_id.ilike(f"%{escaped}%", escape="/"),
-                )
-            )
+            # 表级搜索（T19 审查修复）：FULLTEXT（MySQL ≥2 字符）加速，LIKE 回退
+            cond = await self._catalog_name_cond(keyword)
+            if cond is not None:
+                stmt = stmt.where(cond)
         total = (
             await self._session.execute(select(func.count()).select_from(stmt.subquery()))
         ).scalar() or 0
@@ -1259,10 +1305,10 @@ class AssetMapRepository:
         want_field = entity_type is None or entity_type == "field"
         want_metric = entity_type is None or entity_type == "metric"
 
-        # 表级（entity_name 模糊）
+        # 表级（entity_name/source_id 模糊，FULLTEXT 加速）
         if want_table:
             results.extend(
-                await self._search_catalog_tables(needle, entity_type, limit, org_id=org_id)
+                await self._search_catalog_tables(q, entity_type, limit, org_id=org_id)
             )
         # 字段级（schema_json 字段名模糊）
         if want_field:
@@ -1273,12 +1319,13 @@ class AssetMapRepository:
         return results
 
     async def _search_catalog_tables(
-        self, needle: str, entity_type: str | None, limit: int, org_id: int | None = None
+        self, keyword: str, entity_type: str | None, limit: int, org_id: int | None = None
     ) -> list[dict[str, Any]]:
         """表/视图级搜索结果（含源/责任人/描述/字段数富集）。"""
-        stmt = select(DBCatalog).where(
-            DBCatalog.deleted_at.is_(None), DBCatalog.entity_name.like(needle, escape="/")
-        )
+        cond = await self._catalog_name_cond(keyword)
+        stmt = select(DBCatalog).where(DBCatalog.deleted_at.is_(None))
+        if cond is not None:
+            stmt = stmt.where(cond)
         if entity_type:
             stmt = stmt.where(DBCatalog.entity_type == entity_type)
         # P1 多租户隔离：仅搜索本组织数据源资产
