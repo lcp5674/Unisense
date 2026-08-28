@@ -20,6 +20,12 @@ vi.mock("../api", () => ({
   listDataSources: vi.fn(),
   fetchAssetTables: vi.fn(),
   fetchAssetEntityDetail: vi.fn(),
+  listAllDictItems: vi.fn(),
+  createDictItem: vi.fn(),
+  updateDictItem: vi.fn(),
+  deleteDictItem: vi.fn(),
+  activateDictItem: vi.fn(),
+  deactivateDictItem: vi.fn(),
 }));
 
 import {
@@ -27,6 +33,7 @@ import {
   updateSensitiveRule, setSensitiveRuleStatus,
   validateSensitiveRegex, testSensitiveRule, classificationRescan,
   listDataSources, fetchAssetTables, fetchAssetEntityDetail,
+  listAllDictItems, createDictItem,
 } from "../api";
 const mockedList = vi.mocked(listSensitiveRules);
 const mockedCats = vi.mocked(listSensitiveRuleCategories);
@@ -35,6 +42,8 @@ const mockedUpdate = vi.mocked(updateSensitiveRule);
 const mockedStatus = vi.mocked(setSensitiveRuleStatus);
 const mockedRegex = vi.mocked(validateSensitiveRegex);
 const mockedTest = vi.mocked(testSensitiveRule);
+const mockedListAllDict = vi.mocked(listAllDictItems);
+const mockedCreateDict = vi.mocked(createDictItem);
 
 const CATS = [
   { category: "ID_CARD", label: "身份证号", pii: true },
@@ -380,5 +389,38 @@ describe("SensitiveRules 配置台", () => {
       );
     });
     await screen.findByText(/扫描 10/);
+  });
+
+  it("PII 词表管理：打开展示内置词表项并可新增自定义豁免字段", async () => {
+    mockedListAllDict.mockResolvedValue([]);
+    renderPage();
+    await screen.findByText("敏感规则配置台");
+    fireEvent.click(screen.getByRole("button", { name: /PII\s*词\s*表/ }));
+    await screen.findByText("PII 上下文词表（pii_vocab）");
+    // 无 DB 项时展示内置默认词表项（来源=内置）
+    expect(screen.getByText("person_name_re")).toBeTruthy();
+    expect(screen.getByText("人名前缀词表")).toBeTruthy();
+    expect(screen.getAllByText("内置").length).toBeGreaterThan(0);
+    // 新增自定义豁免字段（误报反馈写入的同一入口）
+    fireEvent.click(screen.getByRole("button", { name: /新增词表项/ }));
+    const dialogs = screen.getAllByRole("dialog");
+    const editor = dialogs[dialogs.length - 1];
+    fireEvent.mouseDown(within(editor).getAllByRole("combobox")[0]);
+    await pickVisibleOption("exempt_field（误报豁免字段（精确））");
+    fireEvent.change(
+      within(editor).getByPlaceholderText(/正则整体/),
+      { target: { value: "phone, village_name" } },
+    );
+    fireEvent.click(within(editor).getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => {
+      expect(mockedCreateDict).toHaveBeenCalledWith(
+        "pii_vocab",
+        expect.objectContaining({
+          code: "exempt_field",
+          label: "误报豁免字段（精确）",
+          description: "phone, village_name",
+        }),
+      );
+    });
   });
 });

@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  App as AntApp, Button, Card, Col, Form, Input, Modal, Progress,
+  Alert, App as AntApp, Button, Card, Col, Form, Input, Modal, Progress,
   Radio, Row, Select, Slider, Space, Table, Tag, Typography,
 } from "antd";
 import {
-  ApiOutlined, CheckCircleOutlined, DeleteOutlined,
+  ApiOutlined, BookOutlined, CheckCircleOutlined, DeleteOutlined,
   EditOutlined, ExperimentOutlined, PlusOutlined, ReloadOutlined,
   SafetyCertificateOutlined, SearchOutlined, StopOutlined,
 } from "@ant-design/icons";
@@ -14,10 +14,12 @@ import {
   updateSensitiveRule, validateSensitiveRegex, classificationRescan,
   batchSetSensitiveRuleStatus, batchSetSensitiveRuleConfidence,
   listDataSources, fetchAssetTables, fetchAssetEntityDetail,
+  activateDictItem, createDictItem, deactivateDictItem,
+  deleteDictItem, listAllDictItems, updateDictItem,
 } from "../api";
 import type {
   SensitiveRuleCategory, SensitiveRuleItem, SensitiveRuleTestResponse,
-  DataSource,
+  DataSource, SystemDictItem, DictItemCreateRequest,
 } from "../types";
 import { usePermission } from "../hooks/usePermission";
 
@@ -45,6 +47,27 @@ const SENSITIVITY_META: Record<string, { color: string; label: string }> = {
   UNKNOWN: { color: "default", label: "未知" },
 };
 
+//: PII 上下文词表元信息（pii_vocab 字典项 → 中文说明/类型/提示）
+const VOCAB_META: Record<string, { label: string; kind: "regex" | "words"; hint: string }> = {
+  person_name_re: { label: "人名前缀词表", kind: "regex", hint: "带此前缀的 *_name 列是个人姓名（patient_name/用户姓名）→ 判 PII" },
+  entity_name_re: { label: "机构/地点前缀词表", kind: "regex", hint: "带此前缀的 *_name 是机构/地点名（village_name/表名）→ 不判 PII" },
+  person_entity_re: { label: "人员语义表名词表", kind: "regex", hint: "裸 name 列所在表含人员语义（patient/用户表）→ 视为姓名" },
+  entity_entity_re: { label: "机构语义表名词表", kind: "regex", hint: "裸 name 列所在表含机构语义（village/部门表）→ 视为机构名" },
+  health_org_re: { label: "健康机构字段词表", kind: "regex", hint: "注释含健康词但字段是机构/位置（org_name/病区）→ 降级不判 PII" },
+  health_keep_re: { label: "明确健康字段词表", kind: "regex", hint: "字段名含健康词（disease_name/血压）→ 保留 PII" },
+  aggregate_re: { label: "聚合统计量词词表", kind: "regex", hint: "字段名含量词（_cnt/_rate/_avg）→ 群体统计不判 PII（heart_rate 豁免）" },
+  value_exempt_prefix: { label: "值型豁免前缀", kind: "words", hint: "即使带量词仍是个人测量值（heart_rate/心率）→ 保留 PII" },
+  exempt_field: { label: "误报豁免字段（精确）", kind: "words", hint: "精确字段名命中则跳过——误报反馈按钮一键写入" },
+  exempt_prefix: { label: "误报豁免前缀", kind: "words", hint: "字段名前缀命中则跳过（灵活豁免）" },
+};
+
+//: 内置词表默认值（展示「内置」来源与恢复默认用）
+const VOCAB_DEFAULTS: Record<string, string> = {
+  value_exempt_prefix: "heart_rate,heartrate,心率",
+  exempt_field: "",
+  exempt_prefix: "",
+};
+
 function confidenceColor(conf: number) {
   if (conf >= 0.85) return "#52c41a";
   if (conf >= 0.7) return "#1677ff";
@@ -60,6 +83,7 @@ export function SensitiveRules() {
   const [rules, setRules] = useState<SensitiveRuleItem[]>([]);
   const [categories, setCategories] = useState<SensitiveRuleCategory[]>([]);
   const [loading, setLoading] = useState(false);
+  const [vocabOpen, setVocabOpen] = useState(false);
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<SensitiveRuleItem | null>(null);
@@ -452,6 +476,9 @@ export function SensitiveRules() {
         <Space>
           <Button icon={<ExperimentOutlined />} onClick={openTester}>
             规则测试台
+          </Button>
+          <Button icon={<BookOutlined />} onClick={() => setVocabOpen(true)}>
+            PII 词表
           </Button>
           {canRescan && (
             <Button icon={<ReloadOutlined />} onClick={() => { setRescanResult(null); rescanForm.resetFields(); setRescanOpen(true); }}>
@@ -870,6 +897,230 @@ export function SensitiveRules() {
           </Card>
         )}
       </Modal>
+
+      <PiiVocabModal
+        open={vocabOpen}
+        onClose={() => setVocabOpen(false)}
+        canEdit={canEdit}
+      />
     </Card>
+  );
+}
+
+/** PII 上下文词表管理（pii_vocab 字典）：并入敏感规则配置台。
+ *
+ * 展示「DB 配置 + 内置默认」合并视图：无 DB 项的展示内置默认（来源=内置），
+ * 有 DB 项的展示自定义内容（来源=自定义）；新增/编辑/删除/启用/停用，
+ * 删除后回退内置默认。修改下次采集/重扫生效（service 每次启动加载一次）。
+ */
+function PiiVocabModal({ open, onClose, canEdit }: { open: boolean; onClose: () => void; canEdit: boolean }) {
+  const { message, modal } = AntApp.useApp();
+  const [items, setItems] = useState<SystemDictItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editing, setEditing] = useState<SystemDictItem | null>(null);
+  const [form] = Form.useForm();
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setItems(await listAllDictItems("pii_vocab"));
+    } catch {
+      message.error("加载 PII 词表失败");
+    } finally {
+      setLoading(false);
+    }
+  }, [message]);
+
+  useEffect(() => {
+    if (open) load();
+  }, [open, load]);
+
+  // 合并展示：DB 项 + 内置默认
+  const rows = useMemo(() => {
+    const dbByCode = new Map(items.map((i) => [i.code, i]));
+    return Object.keys(VOCAB_META).map((code) => {
+      const meta = VOCAB_META[code];
+      const db = dbByCode.get(code);
+      const content =
+        db?.description ?? VOCAB_DEFAULTS[code] ?? "（内置默认正则，未在 DB 配置）";
+      return { code, meta, db, content };
+    });
+  }, [items]);
+
+  function openCreate() {
+    setEditing(null);
+    form.resetFields();
+    form.setFieldsValue({ status: "active" });
+    setEditorOpen(true);
+  }
+
+  function openEdit(item: SystemDictItem) {
+    setEditing(item);
+    form.setFieldsValue({
+      code: item.code,
+      description: item.description ?? "",
+      status: item.status ?? "active",
+    });
+    setEditorOpen(true);
+  }
+
+  async function handleToggle(item: SystemDictItem) {
+    try {
+      if (item.status === "active") {
+        await deactivateDictItem("pii_vocab", item.code);
+      } else {
+        await activateDictItem("pii_vocab", item.code);
+      }
+      message.success("词表项状态已更新");
+      load();
+    } catch {
+      message.error("词表项状态更新失败");
+    }
+  }
+
+  function handleDelete(item: SystemDictItem) {
+    modal.confirm({
+      title: "确认删除该词表项？",
+      content: `删除 "${item.code}" 的自定义配置后，将回退到内置默认词表。`,
+      onOk: async () => {
+        await deleteDictItem("pii_vocab", item.code);
+        message.success("词表项已删除（回退内置默认）");
+        load();
+      },
+    });
+  }
+
+  async function submit() {
+    const values = await form.validateFields();
+    const code = String(values.code ?? "").trim();
+    const meta = VOCAB_META[code];
+    if (!meta) {
+      message.error("请选择有效的词表标识");
+      return;
+    }
+    const payload: DictItemCreateRequest = {
+      code,
+      label: meta.label,
+      description: String(values.description ?? "").trim(),
+    };
+    if (editing) {
+      await updateDictItem("pii_vocab", editing.code, { description: payload.description });
+    } else {
+      await createDictItem("pii_vocab", payload);
+    }
+    message.success(editing ? "词表项已更新，下次采集/重扫生效" : "词表项已创建，下次采集/重扫生效");
+    setEditorOpen(false);
+    load();
+  }
+
+  const columns = [
+    { title: "标识", dataIndex: "code", width: 170, render: (v: string) => <Text code>{v}</Text> },
+    { title: "说明", dataIndex: "label", width: 170, render: (_: unknown, r: { meta: { label: string } }) => r.meta.label },
+    { title: "类型", dataIndex: "kind", width: 70, render: (_: unknown, r: { meta: { kind: string } }) => (r.meta.kind === "regex" ? <Tag>正则</Tag> : <Tag color="blue">词条</Tag>) },
+    { title: "内容", dataIndex: "content", ellipsis: true, render: (v: string) => <Text style={{ fontFamily: "monospace", fontSize: 12 }}>{v}</Text> },
+    {
+      title: "来源", dataIndex: "source", width: 80,
+      render: (_: unknown, r: { db: SystemDictItem | undefined }) =>
+        r.db ? <Tag color="orange">自定义</Tag> : <Tag>内置</Tag>,
+    },
+    {
+      title: "状态", dataIndex: "status", width: 80,
+      render: (_: unknown, r: { db: SystemDictItem | undefined }) =>
+        r.db ? (
+          r.db.status === "active" ? <Tag color="green">启用</Tag> : <Tag>停用</Tag>
+        ) : (
+          <Tag>内置</Tag>
+        ),
+    },
+    ...(canEdit
+      ? [{
+          title: "操作", dataIndex: "action", width: 150,
+          render: (_: unknown, r: { db: SystemDictItem | undefined }) =>
+            r.db ? (
+              <Space size={4}>
+                <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(r.db!)} />
+                <Button size="small" icon={r.db.status === "active" ? <StopOutlined /> : <CheckCircleOutlined />} onClick={() => handleToggle(r.db!)} />
+                <Button size="small" danger icon={<DeleteOutlined />} onClick={() => handleDelete(r.db!)} />
+              </Space>
+            ) : (
+              <Button size="small" icon={<PlusOutlined />} onClick={openCreate}>配置</Button>
+            ),
+        }]
+      : []),
+  ];
+
+  return (
+    <Modal
+      title="PII 上下文词表（pii_vocab）"
+      open={open}
+      onCancel={onClose}
+      footer={
+        <Space>
+          {canEdit && (
+            <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+              新增词表项
+            </Button>
+          )}
+          <Button onClick={onClose}>关闭</Button>
+        </Space>
+      }
+      width={900}
+      destroyOnClose
+    >
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 12 }}
+        message="词表定义「上下文判定」：人名/机构前缀、表语义、健康降级、聚合量词、豁免。与规则（pii_rule）分离——调整词表可豁免误报字段、补充人员/机构词，无需改代码发版。修改下次采集/重扫生效。"
+      />
+      <Table
+        columns={columns}
+        dataSource={rows}
+        rowKey="code"
+        loading={loading}
+        size="small"
+        pagination={false}
+      />
+      <Modal
+        title={editing ? `编辑词表项：${editing.code}` : "新增词表项"}
+        open={editorOpen}
+        onCancel={() => setEditorOpen(false)}
+        onOk={submit}
+        okText="保存"
+        cancelText="取消"
+        width={640}
+        destroyOnClose
+      >
+        <Form form={form} layout="vertical">
+          <Form.Item
+            name="code"
+            label="词表标识"
+            rules={[{ required: true }]}
+            tooltip={editing ? "不可修改" : "选择要配置/覆盖的词表键"}
+          >
+            <Select
+              disabled={!!editing}
+              placeholder="选择词表键"
+              options={Object.keys(VOCAB_META).map((code) => ({
+                value: code,
+                label: `${code}（${VOCAB_META[code].label}）`,
+              }))}
+            />
+          </Form.Item>
+          <Form.Item name="description" label="词表内容" rules={[{ required: true }]}>
+            <Input.TextArea
+              rows={5}
+              placeholder={editing ? "正则整体（正则类）或逗号分隔词条（词条类）" : "正则整体（正则类）或逗号分隔词条（词条类）；留空回退内置"}
+            />
+          </Form.Item>
+          {editing && VOCAB_META[editing.code] && (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {VOCAB_META[editing.code].hint}
+            </Text>
+          )}
+        </Form>
+      </Modal>
+    </Modal>
   );
 }
