@@ -124,6 +124,9 @@ _EVENT_TITLE_CN: dict[str, str] = {
     "pii.review_pending": "PII 复核待办",
     # 表增长超阈值（data_retention.py 巡检发布，运维订阅感知——P11 修复死信告警）
     "storage.table_oversized": "数据表增长超阈值",
+    # T7/T8（审查修复）：后台任务失败 / 缓存失效失败 → 运维告警
+    "system.task_failed": "后台任务执行失败",
+    "system.cache_invalidate_failed": "指标缓存失效失败",
 }
 
 _SOURCE_CN: dict[str, str] = {
@@ -1030,6 +1033,9 @@ class NotifyService(BaseService):
         "collect.failed",
         "catalog.connection_failed",
         "lineage.metric_register_failed",
+        # T7/T8（审查修复）：任务/缓存失效告警同样播种给运维订阅
+        "system.task_failed",
+        "system.cache_invalidate_failed",
     )
 
     async def ensure_ops_subscriptions(self) -> int:

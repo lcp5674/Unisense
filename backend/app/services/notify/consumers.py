@@ -116,6 +116,9 @@ BUSINESS_EVENT_TYPES: tuple[str, ...] = (
     "pii.review_pending",
     # 表增长超阈值（data_retention.py 巡检发布，P11：此前无订阅 → 事件发出即消失的死信告警）
     "storage.table_oversized",
+    # T7/T8（审查修复）：后台任务失败 / 缓存失效失败 → 告警事件进通知闭环
+    "system.task_failed",
+    "system.cache_invalidate_failed",
 )
 
 

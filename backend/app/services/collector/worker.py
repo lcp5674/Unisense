@@ -63,10 +63,39 @@ async def _on_job_start(ctx: dict[str, Any]) -> None:
 
 
 async def _on_job_end(ctx: dict[str, Any]) -> None:
-    """arq 任务结束钩子（P11 C-6）：清理任务级 contextvars，避免串扰后续任务。"""
+    """arq 任务结束钩子（P11 C-6）：清理任务级 contextvars，避免串扰后续任务。
+
+    T8（审查修复）：任务失败（max_tries=1 无重试）时发站内告警通知——
+    质量巡检/健康度/冲突升级等定时任务连续失败若无告警，会静默空转无人知晓。
+    """
     from structlog.contextvars import unbind_contextvars
 
     unbind_contextvars("job_id", "job_name", "trace_id")
+
+    result = ctx.get("result")
+    if isinstance(result, BaseException):
+        job_name = ctx.get("job_name", ctx.get("function", "unknown"))
+        job_id = ctx.get("job_id", "")
+        try:
+            from app.core.eventbus import get_eventbus
+
+            await get_eventbus().publish(
+                "system.task_failed",
+                {
+                    "job_name": job_name,
+                    "job_id": job_id,
+                    "error": str(result)[:500],
+                },
+                actor_id="",
+            )
+            logger.warning(
+                "task_failed_alerted",
+                job_name=job_name,
+                job_id=job_id,
+                error=str(result)[:500],
+            )
+        except Exception as exc:  # noqa: BLE001 - 告警本身失败不阻断 worker
+            logger.warning("task_failed_alert_publish_failed", error=str(exc))
 
 
 #: P1-6 错过调度补偿：每个源的上次触发水位 key 前缀 / 补偿上限 / 补偿窗口。

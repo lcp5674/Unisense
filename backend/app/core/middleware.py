@@ -295,13 +295,21 @@ def _rate_limit_bucket(request: Request) -> tuple[str, int, int]:
 
 
 def _client_key(request: Request) -> str:
-    """客户端标识：优先真实客户端 IP（X-Forwarded-For 首跳），回退直连 IP。"""
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        first = forwarded.split(",")[0].strip()
-        if first:
-            return first
-    return request.client.host if request.client else "unknown"
+    """客户端标识（S5 审查修复）：仅当直连 IP 属于可信代理（trusted_proxies）
+    时才信任 X-Forwarded-For 首跳；否则直接用直连 IP——避免攻击者伪造 XFF
+    绕过按 IP 限流。生产部署反代时应把反代 IP 配入 UNISENSE_TRUSTED_PROXIES。
+    """
+    from app.core.config import settings
+
+    direct_ip = request.client.host if request.client else "unknown"
+    trusted = settings.trusted_proxies_list
+    if trusted and direct_ip in trusted:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            first = forwarded.split(",")[0].strip()
+            if first:
+                return first
+    return direct_ip
 
 
 async def _check_rate_redis(key: str, window: int, limit: int) -> bool:

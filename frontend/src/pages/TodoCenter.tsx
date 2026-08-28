@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, Button, List, Tag, Space, message } from "antd";
 import { fetchCurrentUser, listConflicts, listMetrics, listQualityEvents, UnisenseApiError } from "../api";
+import { usePermission } from "../hooks/usePermission";
 import { useTracking } from "../hooks/useTracking";
 
 const CONFLICT_TYPE_LABEL: Record<string, string> = {
@@ -63,16 +64,20 @@ export function TodoCenter() {
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
   const { track } = useTracking();
+  // P3（审查修复）：无审批权限的用户不展示「指标待审核」待办（避免点入
+  // 审批中心只见空态的死链式体验）
+  const { can } = usePermission();
 
   async function load() {
     setLoading(true);
     try {
       // DSD 待办按当前登录用户的 Owner 维度收敛（源表下线 7 天处理期）
       const me = await fetchCurrentUser();
+      const canReview = can("metric:review");
       const [conflicts, drafts, reviews, qualityAlerts, dropped] = await Promise.all([
         listConflicts({ status: "OPEN", page_size: 50 }),
         listMetrics({ status: "DRAFT", page_size: 50 }),
-        listMetrics({ status: "REVIEW", page_size: 50 }),
+        canReview ? listMetrics({ status: "REVIEW", page_size: 50 }) : Promise.resolve({ items: [] }),
         listQualityEvents({ status: "OPEN", page_size: 50 }),
         listMetrics({ status: "DATA_SOURCE_DROPPED", owner_id: me.id, page_size: 50 }),
       ]);

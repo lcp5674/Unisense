@@ -22,7 +22,15 @@ from app.core.config import settings
 from app.core.exceptions import AuthError
 from app.core.guard import guard_against_injection
 from app.core.logging import get_logger
-from app.core.login_throttle import is_login_blocked, record_login_failure, reset_login_failures
+from app.core.middleware import _client_key  # noqa: PLC2701 - 限流键解析（可信代理）复用
+from app.core.login_throttle import (
+    is_ip_blocked,
+    is_login_blocked,
+    record_ip_failure,
+    record_login_failure,
+    reset_ip_failures,
+    reset_login_failures,
+)
 from app.core.security import (
     blacklist_token,
     create_access_token,
@@ -106,9 +114,11 @@ async def login(
             （统一返回 AUTH_INVALID_CREDENTIALS）。
     """
     # 登录防撞库（TD §5）：按 username+IP 固定窗口限流失败次数，Redis 不可用降级内存，不阻断登录。
-    remote_ip = request.client.host if request.client else ""
+    # S5（审查修复）：双桶——组合桶（username+IP）防单账号爆破 + IP 级独立桶防换账号轰炸；
+    # 客户端 IP 经 trusted_proxies 解析（反代后取真实 IP，避免所有用户同 IP 退化）。
+    remote_ip = _client_key(request)
     throttle_key = f"{body.username}:{remote_ip}"
-    if await is_login_blocked(throttle_key):
+    if await is_login_blocked(throttle_key) or await is_ip_blocked(remote_ip):
         raise AuthError("登录失败次数过多，请稍后再试", error_code="AUTH_RATE_LIMITED")
 
     result = await db.execute(
@@ -119,6 +129,7 @@ async def login(
     # 用户不存在与密码错误返回相同错误码，避免用户枚举。
     if user is None or not await verify_password(body.password, user.password_hash):
         await record_login_failure(throttle_key)
+        await record_ip_failure(remote_ip)
         # 登录失败留痕（安全审计核心事件，GB/T 35273 认证事件要求）。
         # X-4：actor_id 置 None（无对应用户，audit_log.actor_id 已改可空）——
         # 此前 actor_id=0 触发 FK 违规，失败登录返回 500 且失败审计丢失。
@@ -139,6 +150,7 @@ async def login(
         raise AuthError("用户名或密码错误", error_code="AUTH_INVALID_CREDENTIALS")
 
     await reset_login_failures(throttle_key)
+    await reset_ip_failures(remote_ip)
     user.last_login_at = datetime.now(UTC)
     # 登录成功留痕：谁、何时、从哪 IP 登录（认证审计事件）。
     await write_audit(

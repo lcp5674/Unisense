@@ -353,3 +353,24 @@ class TestRateLimitMiddleware:
         # 通用 API 默认
         _, win, lim = _rate_limit_bucket(self._req_with_path("/api/v1/metric-definitions/"))
         assert (win, lim) == (_RATE_LIMIT_DEFAULT_WINDOW, _RATE_LIMIT_DEFAULT_LIMIT)
+
+    def test_client_key_untrusted_proxy_ignores_xff(self, monkeypatch) -> None:
+        """S5（审查修复）：直连 IP 不在 trusted_proxies 时，忽略 X-Forwarded-For——
+        攻击者伪造 XFF 无法绕过按 IP 限流。"""
+        from app.core.config import Settings
+        from app.core.middleware import _client_key
+
+        fake_settings = Settings(_env_file=None, env="local", db_url="mysql+pymysql://u:p@localhost:3306/db", jwt_secret="x" * 40)
+        monkeypatch.setattr("app.core.config.settings", fake_settings)
+        req = _request([("X-Forwarded-For", "1.2.3.4")])
+        assert _client_key(req) != "1.2.3.4"  # 直连 IP（127.0.0.1），非伪造 XFF
+
+    def test_client_key_trusted_proxy_uses_xff(self, monkeypatch) -> None:
+        """S5：直连 IP 属于 trusted_proxies 时，才信任 X-Forwarded-For 首跳。"""
+        from app.core.config import Settings
+        from app.core.middleware import _client_key
+
+        fake_settings = Settings(_env_file=None, env="local", db_url="mysql+pymysql://u:p@localhost:3306/db", jwt_secret="x" * 40, trusted_proxies="127.0.0.1")
+        monkeypatch.setattr("app.core.config.settings", fake_settings)
+        req = _request([("X-Forwarded-For", "1.2.3.4")])
+        assert _client_key(req) == "1.2.3.4"

@@ -28,6 +28,21 @@ from app.services.semantic.schemas import MetricResponse
 logger = get_logger("unisense.semantic.cache")
 
 _TTL_SECONDS = 600  # 10 分钟（对齐 US10 / FR-5 消费性能基线）
+
+
+async def _alert_cache_failure(metric_code: str, reason: str) -> None:
+    """T7（审查修复）：缓存失效失败不再静默——发告警事件进通知闭环
+    （notify 消费者通知平台管理员），避免「旧口径最长服务 600s×N 无告警」。"""
+    try:
+        from app.core.eventbus import get_eventbus
+
+        await get_eventbus().publish(
+            "system.cache_invalidate_failed",
+            {"metric_code": metric_code, "reason": reason},
+            actor_id="",
+        )
+    except Exception:  # noqa: BLE001 - 告警本身失败不阻断失效路径
+        logger.warning("cache_alert_publish_failed", metric_code=metric_code)
 _PREFIX = "metric:def:"  # 键格式: metric:def:{code}:v{version}
 
 # 进程内 per-key 互斥锁（singleflight）：防止同一冷 key 高并发击穿到 DB。
@@ -201,6 +216,7 @@ class MetricCache:
                 await self._redis.delete(key)  # type: ignore[union-attr]
             except Exception:
                 logger.warning("metric_cache_invalidate_failed", metric_code=metric_code)
+                await _alert_cache_failure(metric_code, f"delete version key {version}")
         else:
             # 删除所有版本的键（用 SCAN + DEL）
             pattern = _PREFIX + metric_code + ":v*"
@@ -216,6 +232,7 @@ class MetricCache:
                         break
             except Exception:
                 logger.warning("metric_cache_invalidate_failed", metric_code=metric_code)
+                await _alert_cache_failure(metric_code, "scan/delete all version keys")
             # 指标定义变更会改变自动生成的指南内容，顺带失效指南缓存（避免 stale）
             await self.invalidate_guide(metric_code)
 

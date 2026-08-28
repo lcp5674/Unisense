@@ -426,7 +426,14 @@ export function MetricReview({ embedded = false }: { embedded?: boolean } = {}) 
             },
       );
       if (seq !== loadSeq.current) return;
-      setItems(res.items);
+      // P4（审查修复）：「待我审」视图按评审人身份过滤——未指派/非本人/非本域
+      // 评审组的条目不再淹没视图（域评审员只看到自己可审的）。
+      // total 保留后端值以维持分页器正常；展示行按可审过滤。
+      const shown =
+        view === "pending" && currentUser
+          ? res.items.filter((m) => canReview(m, currentUser))
+          : res.items;
+      setItems(shown);
       setTotal(res.total);
       // 空页回退：深页审批/打回后列表缩短，当前页无数据且非首页时回退上一页
       // （依赖 page 变化自动重查；与指标目录的空页回退语义一致）

@@ -21,6 +21,11 @@ logger = get_logger("unisense.login_throttle")
 MAX_FAILURES = 10
 WINDOW_SECONDS = 15 * 60
 
+#: IP 级桶（S5 审查修复）：独立于 username+IP 组合桶，防攻击者换 username 从同一
+#: IP 轰炸；上限放宽（20 次）避免误伤共享反代 IP 的合法用户，同时限制单 IP 爆破。
+MAX_IP_FAILURES = 20
+IP_WINDOW_SECONDS = 15 * 60
+
 #: 进程内存降级存储：key -> (失败次数, 窗口截止时间戳)。
 _memory: dict[str, tuple[int, float]] = {}
 
@@ -88,3 +93,50 @@ async def reset_login_failures(key: str) -> None:
         await get_redis().delete(_redis_key(key))
     except Exception:
         _memory.pop(key, None)
+
+
+# ---- S5（审查修复）：IP 级独立桶 ----
+_IP_PREFIX = "ip:"
+
+
+def _ip_key(ip: str) -> str:
+    return _IP_PREFIX + ip
+
+
+async def is_ip_blocked(ip: str, *, max_failures: int = MAX_IP_FAILURES) -> bool:
+    """IP 级桶检查：该 IP 在窗口内失败次数是否已达上限（防换账号轰炸）。"""
+    try:
+        from app.db.redis import get_redis
+
+        value = await get_redis().get(_redis_key(_ip_key(ip)))
+        return int(value or 0) >= max_failures
+    except Exception:
+        return _memory_count(_ip_key(ip), now=time.time()) >= max_failures
+
+
+async def record_ip_failure(ip: str, *, window_seconds: int = IP_WINDOW_SECONDS) -> None:
+    """记录一次该 IP 的登录失败。"""
+    rkey = _redis_key(_ip_key(ip))
+    try:
+        from app.db.redis import get_redis
+
+        redis_client = get_redis()
+        current = await redis_client.incr(rkey)
+        if current == 1:
+            await redis_client.expire(rkey, window_seconds)
+    except Exception:
+        now = time.time()
+        _memory[_ip_key(ip)] = (
+            _memory_count(_ip_key(ip), now=now) + 1,
+            now + window_seconds,
+        )
+
+
+async def reset_ip_failures(ip: str) -> None:
+    """登录成功时清除该 IP 失败计数。"""
+    try:
+        from app.db.redis import get_redis
+
+        await get_redis().delete(_redis_key(_ip_key(ip)))
+    except Exception:
+        _memory.pop(_ip_key(ip), None)
