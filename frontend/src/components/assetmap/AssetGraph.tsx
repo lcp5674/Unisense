@@ -157,11 +157,27 @@ function darkenHex(hex: string, amt: number): string {
   return `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
 }
 
-// 节点类型图标（emoji 渲染在节点中心，标签在节点下方，互不干扰）
-function nodeIconText(type?: string): string {
-  if (type === "table") return "🗂️";
-  if (type === "field") return "🔖";
-  return "📈"; // metric
+// —— 节点类型图标（白色线性 SVG，渲染在节点中心，标签在节点下方，互不干扰）——
+// 此前用彩色 emoji（🗂️/🔖/📈），iconFill 对 emoji 无效、跨平台渲染差异大，与渐变填充
+// 不协调。改为内联 SVG data URI：白色描边线性图标（table 表格 / field 字段列 / metric
+// 指标趋势），与「校准仪表」设计系统协调，任意缩放清晰。模块加载时预编码一次，
+// iconSrc 回调仅查表，无每帧计算成本。
+function svgDataUri(svg: string): string {
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
+const NODE_ICON_SRC: Record<string, string> = {
+  table: svgDataUri(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/><path d="M9 9v11"/><path d="M15 9v11"/></svg>`,
+  ),
+  field: svgDataUri(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8.5" y="3" width="7" height="18" rx="2"/><path d="M12 3v18"/></svg>`,
+  ),
+  metric: svgDataUri(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5.5-6.5 4 3.5L20 6"/><path d="M14 6h6v6"/></svg>`,
+  ),
+};
+function nodeIconSrc(type?: string): string {
+  return NODE_ICON_SRC[type ?? "metric"] ?? NODE_ICON_SRC.metric;
 }
 
 /** 图边的展示数据（在 AssetGraphEdge 之上叠加渲染语义字段）。 */
@@ -825,13 +841,23 @@ function GraphCanvas({
                 : (nodeStyleCacheRef.current.get(String(d.id))?.hub as boolean | undefined)
                   ? 0.45
                   : 0.32,
-            // 类型图标：指标 📈 / 表 🗂️ / 字段 🔖，渲染在节点中央
+            // 类型图标：白色线性 SVG（指标=趋势 / 表=表格 / 字段=列），渲染在节点中央；
+            // 尺寸按节点形状收窄（表节点扁、字段节点更扁），避免溢出节点边界
             icon: (d: NodeData) => !(d.data as AssetGraphNode | undefined)?.anchor,
-            iconText: (d: NodeData) =>
-              nodeIconText((d.data as AssetGraphNode | undefined)?.type),
-            iconFontSize: (d: NodeData) =>
-              (d.data as AssetGraphNode | undefined)?.type === "field" ? 12 : 16,
-            iconFill: "#ffffff",
+            iconSrc: (d: NodeData) =>
+              nodeIconSrc((d.data as AssetGraphNode | undefined)?.type),
+            iconWidth: (d: NodeData) =>
+              (d.data as AssetGraphNode | undefined)?.type === "table"
+                ? 14
+                : (d.data as AssetGraphNode | undefined)?.type === "field"
+                  ? 10
+                  : 16,
+            iconHeight: (d: NodeData) =>
+              (d.data as AssetGraphNode | undefined)?.type === "table"
+                ? 14
+                : (d.data as AssetGraphNode | undefined)?.type === "field"
+                  ? 10
+                  : 16,
             // 依赖引用数角标（血缘度 badge）：节点右上角显示该节点被引用的次数，
             // 用户一眼看出哪些是枢纽节点（高血缘度）。compact LOD 模式下隐藏（大图性能）。
             badge: (d: NodeData) => !(d.data as AssetGraphNode | undefined)?.anchor,
