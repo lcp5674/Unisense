@@ -494,8 +494,14 @@ class LlmRouterClient:
         temperature: float = 0.0,
         max_tokens: int = 1000,
         response_format: dict[str, Any] | None = None,
+        retries: int | None = None,
     ) -> dict[str, Any]:
         """按轮询顺序尝试各实例，单实例失败自动切换下一个。
+
+        ``retries`` 透传给单实例（覆盖全局默认重试）——此前缺失导致 SQL 推断
+        等调用方传 ``retries=1`` 时在多实例路由下 ``TypeError`` 被业务层吞掉，
+        use_llm 显式模式（``_llm_annotate_candidates``）整体静默失效（真实实例
+        对照评测 2026-08-28 抓出）。
 
         Raises:
             LlmError: 所有可用实例均失败时抛出（附带最后一个失败原因）。
@@ -512,6 +518,7 @@ class LlmRouterClient:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     response_format=response_format,
+                    retries=retries,
                 )
                 # 空 content / 异常内容（超长流式垃圾、SSE 信封原文等）视为该实例
                 # 不可用：免费模型偶发空返回、网关把流式原文当响应返回——与抛错同等
