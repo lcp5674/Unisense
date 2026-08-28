@@ -32,6 +32,7 @@ from typing import Any
 from app.core.exceptions import ExternalDependencyError
 from app.services.collector.classifier import SensitivityClassifier
 from app.services.collector.connectors.collector_registry import registry
+from app.services.collector.placeholders import is_effective_comment
 from app.services.collector.spi import (
     BaseCollector,
     CatalogSpec,
@@ -275,9 +276,14 @@ class HiveCollector(BaseCollector):
                             if len(desc_row) >= 2:
                                 col_name = desc_row[0].strip()
                                 col_type = desc_row[1].strip()
+                                # 注释列可能为空（仅两列）；Spark Thrift 对无注释列
+                                # 返回占位串 "from deserializer"，归一化为空串，
+                                # 避免被当作真实 DDL 注释（批量推断全跳过）
                                 col_comment = (
                                     desc_row[2].strip() if len(desc_row) >= 3 else ""
                                 )
+                                if not is_effective_comment(col_comment):
+                                    col_comment = ""
                                 # 跳过分区信息和表级信息（空行或非列条目）
                                 if col_name and not col_name.startswith("#"):
                                     columns.append(

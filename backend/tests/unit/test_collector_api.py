@@ -632,6 +632,57 @@ async def test_infer_descriptions_batch_success_concurrent(
     assert all(c["source"] == "llm" for c in upsert_calls)
 
 
+async def test_infer_descriptions_batch_skips_placeholder_comment(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """批量推断：Spark Thrift 占位注释 "from deserializer" 视为无注释，不跳过。
+
+    回归：占位串曾使无注释列被误判「已有 comment」而全部跳过，
+    描述缺失面板显示缺失、推断却全 skipped。
+    """
+    cat = SimpleNamespace(
+        id=1,
+        entity_name="wedw_dim.pub_date_manual",
+        schema_json={
+            "columns": [
+                {"name": "date_id", "type": "string", "comment": "from deserializer"},
+                {"name": "real_desc", "type": "string", "comment": "真实 DDL 注释"},
+                {"name": "empty_desc", "type": "string", "comment": ""},
+            ]
+        },
+    )
+    session = MagicMock()
+    exec_result = MagicMock()
+    exec_result.scalar_one_or_none.return_value = cat
+    session.execute = AsyncMock(return_value=exec_result)
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+
+    async def fake_db() -> AsyncIterator[MagicMock]:
+        yield session
+
+    fake_svc = MagicMock()
+    fake_svc._repo.get_descriptions = AsyncMock(return_value=[])
+    fake_svc._repo.upsert_description = AsyncMock()
+    fake_svc._llm_infer_batch_descriptions = AsyncMock(
+        return_value={"date_id": ("日期ID", 0.9), "empty_desc": ("空描述", 0.8)}
+    )
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    try:
+        with patch("app.api.collector._svc", return_value=fake_svc):
+            resp = await collector_client.post("/api/v1/catalogs/1/infer-descriptions")
+    finally:
+        app.dependency_overrides.pop(deps.get_db_session, None)
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    # 占位注释不再跳过 → 进入推断；真实注释仍跳过；空注释推断
+    assert data["skipped"] == ["real_desc"]
+    assert [i["column_name"] for i in data["inferred"]] == ["date_id", "empty_desc"]
+    assert data["failed"] == []
+
+
 async def test_infer_descriptions_batch_partial_failure(
     collector_client: httpx.AsyncClient,
 ) -> None:

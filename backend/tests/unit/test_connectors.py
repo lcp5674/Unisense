@@ -427,6 +427,38 @@ async def test_spark_collector_parses_pyhive_rows():
     assert result.specs[0].schema_json["columns"][1]["name"] == "amount"
 
 
+async def test_spark_collector_normalizes_placeholder_comment():
+    """Spark Thrift 对无注释列返回占位串 "from deserializer"——归一化为空串。
+
+    否则假注释会污染 schema_json，批量字段推断误判「已有注释」而全部跳过
+    （描述缺失面板显示缺失、推断却全跳过）。
+    """
+    collector = SparkCollector(host="spark-host", database="test_db")
+
+    async def mock_execute(sql: str, conn=None) -> list[list[str]]:
+        if "SHOW TABLES" in sql:
+            return [["orders"]]
+        if "DESCRIBE" in sql:
+            return [
+                ["order_id", "bigint", "from deserializer"],
+                ["amount", "decimal(10,2)", "订单金额"],
+                ["remark", "string", ""],
+            ]
+        return []
+
+    collector._execute = mock_execute  # type: ignore[assignment]
+    collector._connect_managed = AsyncMock(return_value=object())  # type: ignore[assignment]
+    result = await collector.collect(MagicMock(source_id="spark1", domain="test_db"))
+
+    cols = result.specs[0].schema_json["columns"]
+    # 占位串 → 空串（恢复「无注释」语义）
+    assert cols[0]["comment"] == ""
+    # 真实注释保留
+    assert cols[1]["comment"] == "订单金额"
+    # 空串保持空串
+    assert cols[2]["comment"] == ""
+
+
 async def test_spark_collector_default_port_and_register():
     """Spark 采集器默认端口 10000（Spark Thrift Server 官方默认）且已注册到全局 registry。"""
     collector = SparkCollector(host="spark-host")

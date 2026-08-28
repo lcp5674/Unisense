@@ -45,6 +45,7 @@ from app.models.collector_models import BatchInferHistory
 from app.models.data_source import DBCatalog
 from app.services.collector.distributed_lock import CollectionLock
 from app.services.collector.infer_guard import InferInflightGuard
+from app.services.collector.placeholders import is_effective_comment
 from app.services.collector.schemas import (
     BatchDeleteRequest,
     BatchInferHistoryCreate,
@@ -1444,9 +1445,10 @@ async def infer_descriptions_batch(
                 skipped.append(col_name)
                 continue
 
-            # 跳过已有 comment 的字段（除非 comment 为空）
+            # 跳过已有 comment 的字段（除非 comment 为空/采集占位串——如 Spark Thrift
+            # 无注释列的 "from deserializer"，视为无注释，允许推断）
             comment = col.get("comment")
-            if comment and col_name not in existing_map:
+            if is_effective_comment(comment) and col_name not in existing_map:
                 skipped.append(col_name)
                 continue
 
