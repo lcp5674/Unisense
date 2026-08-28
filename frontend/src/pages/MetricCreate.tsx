@@ -2991,7 +2991,9 @@ export function MetricCreate() {
               </Form.Item>
 
               {/* OneData 逻辑概念：粒度（原子固定基础统计粒度「日」，由原子指标口径库/挂载层接管；
-                  派生/复合可自由选择，缺省取挂载粒度）—— 逻辑概念先行，紧随类型即时联动 */}
+                  派生/复合自由选择主粒度，粒度维度（业务实体）在挂载行逐变体配置）——
+                  逻辑概念先行，紧随类型即时联动。方案 A：Step1 仅设「主粒度（兜底）」，
+                  与 Step3 挂载行的「主粒度+粒度维度」组合控件从交互上对齐，避免用户误以为粒度只能单选 */}
               <Row gutter={16}>
                 <Col span={8}>
                   {isAtomic ? (
@@ -2999,8 +3001,12 @@ export function MetricCreate() {
                       <Typography.Text>日 (day)</Typography.Text>
                     </Form.Item>
                   ) : (
-                    <Form.Item name="granularity" label="粒度" extra="缺省取挂载粒度（④挂载配置）">
-                      {dictSelect("granularity", "granularity", "选择粒度")}
+                    <Form.Item
+                      name="granularity"
+                      label="主粒度（兜底）"
+                      extra="粒度 = 主粒度 + 粒度维度。此处仅设主粒度（时间频率，如 月；缺省取挂载粒度）；粒度维度（如 医院/科室）在下一步「挂载实体」行逐变体配置，可多选。"
+                    >
+                      {dictSelect("granularity", "granularity", "选择主粒度")}
                     </Form.Item>
                   )}
                 </Col>
