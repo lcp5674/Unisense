@@ -309,6 +309,112 @@ class TestGuardAgainstInjectionExemptPaths:
                 )
             )
 
+    async def test_conflict_check_definition_paths_exempt(self) -> None:
+        """conflicts/check 的 candidate/existing 口径字段（含 -- 注释 SQL）应放行。
+
+        注册向导"冲突预检"把 sqlText 放进 candidate.definition、完整口径放进
+        definition_json——合法 ETL 的 --/UNION/块注释不得被注入正则误伤。
+        """
+        guard = guard_against_injection_exempt_paths(
+            "candidate.definition",
+            "candidate.definition_json",
+            "existing[].definition",
+            "existing[].definition_json",
+        )
+        await guard(
+            self._request(
+                {
+                    "candidate": {
+                        "metric_code": "doc_active_cnt_month",
+                        "definition": (
+                            "SELECT month_id, COUNT(DISTINCT doctor_code) -- 月活医生\n"
+                            "FROM wedw_dw.doctor_visit_agent_info_da"
+                        ),
+                        "definition_json": {
+                            "sql": (
+                                "SELECT a.month_id, a.hosp_code -- 医院维度\n"
+                                "UNION ALL SELECT id, amount FROM ods.archive"
+                            )
+                        },
+                    },
+                    "existing": [
+                        {
+                            "metric_code": "doc_active_cnt_month",
+                            "definition": "/* 块注释 */ SELECT 1",
+                            "definition_json": {"expression": "sum(amount) -- 金额"},
+                        }
+                    ],
+                }
+            )
+        )  # 不应抛异常
+
+    async def test_conflict_check_other_fields_still_scanned(self) -> None:
+        """conflicts/check 豁免口径后，metric_code 等其余字段仍拦截。"""
+        guard = guard_against_injection_exempt_paths(
+            "candidate.definition",
+            "candidate.definition_json",
+        )
+        with pytest.raises(BusinessError):
+            await guard(
+                self._request(
+                    {
+                        "candidate": {
+                            "metric_code": "x'; DROP TABLE users--",
+                            "definition": "SELECT 1",
+                        }
+                    }
+                )
+            )
+
+    async def test_regex_fields_exempt(self) -> None:
+        """sensitive_rules 的 name_re/sample_re/pattern 正则文本（含 --.* / /* 等）应放行。"""
+        guard = guard_against_injection_exempt("name_re", "sample_re")
+        await guard(
+            self._request(
+                {
+                    "label": "匹配 SQL 注释",
+                    "name_re": "--.*",
+                    "sample_re": r"/\*.*\*/",
+                }
+            )
+        )  # 不应抛异常
+        guard_pattern = guard_against_injection_exempt("pattern")
+        await guard_pattern(self._request({"pattern": r"--.*|\/\*.*\*\/"}))  # 不应抛异常
+
+    async def test_regex_other_fields_still_scanned(self) -> None:
+        """sensitive_rules 豁免正则后，label 等其余字段仍拦截。"""
+        guard = guard_against_injection_exempt("name_re")
+        with pytest.raises(BusinessError):
+            await guard(
+                self._request(
+                    {"label": "x'; DROP TABLE users--", "name_re": "[0-9]+"}
+                )
+            )
+
+    async def test_mapping_expression_exempt(self) -> None:
+        """dimension 映射 expression（含 SQL 注释/函数）应放行，其余字段仍拦截。"""
+        guard = guard_against_injection_exempt("expression")
+        await guard(
+            self._request(
+                {
+                    "source_dim_code": "dept",
+                    "target_dim_code": "org",
+                    "mapping_type": "sql",
+                    "expression": "CASE WHEN code LIKE 'A%' THEN '甲' END -- 映射规则",
+                }
+            )
+        )  # 不应抛异常
+        with pytest.raises(BusinessError):
+            await guard(
+                self._request(
+                    {
+                        "source_dim_code": "x'; DROP TABLE users--",
+                        "mapping_type": "sql",
+                        "expression": "SELECT 1",
+                    }
+                )
+            )
+
     async def test_query_params_still_blocked(self) -> None:
         """query 参数不参与路径豁免，命中仍拦截。"""
         guard = guard_against_injection_exempt_paths("candidates[].definition_json")

@@ -22,7 +22,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
-from app.core.guard import guard_against_injection
+from app.core.guard import (
+    guard_against_injection,
+    guard_against_injection_exempt_paths,
+)
 from app.db.mysql import get_db_session
 from app.models.conflict import Conflict
 from app.models.metric import Metric
@@ -50,6 +53,22 @@ _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_inject
 # 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
 _GOV_DEPS = [Depends(require_roles(*_GOV_ROLES)), Depends(guard_against_injection)]
+# 冲突预检端点（/check）：candidate/existing 的口径字段承载合法 SQL/伪 SQL 文本
+# （definition 纯文本口径 + definition_json 的 sql/expression 等），仅经 sqlglot 纯函数
+# 比对/相似度计算，不执行、不拼接进任何 DB 查询——合法 ETL 的 -- 行注释/UNION/块注释/
+# 多语句会被注入正则误伤（对齐 metrics create/update 的 definition_json/raw_sql 豁免，
+# 修复注册链路最后误伤点）。其余字段与 query 参数仍全量扫描，纵深防御不削弱。
+_CHECK_DEPS = [
+    Depends(require_roles(*_WRITE_ROLES)),
+    Depends(
+        guard_against_injection_exempt_paths(
+            "candidate.definition",
+            "candidate.definition_json",
+            "existing[].definition",
+            "existing[].definition_json",
+        )
+    ),
+]
 
 logger = logging.getLogger("unisense.conflict.api")
 
@@ -337,7 +356,7 @@ def _svc(db: AsyncSession, request: Request) -> ConflictService:
     )
 
 
-@router.post("/check", dependencies=_WRITE_DEPS)
+@router.post("/check", dependencies=_CHECK_DEPS)
 async def check_conflict(
     payload: ConflictCheckRequest,
     request: Request,

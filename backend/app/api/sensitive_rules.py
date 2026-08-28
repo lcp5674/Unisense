@@ -25,7 +25,7 @@ from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
 from app.core.exceptions import ValidationError
-from app.core.guard import guard_against_injection
+from app.core.guard import guard_against_injection, guard_against_injection_exempt
 from app.db.mysql import get_db_session
 from app.services.sensitive_rules.schemas import (
     CategoryItem,
@@ -44,6 +44,17 @@ router = APIRouter(prefix="/sensitive-rules", tags=["敏感规则配置"])
 _WRITE_ROLES = ("platform_admin", "compliance_officer")
 _READ_DEPS = [Depends(require_roles(*ALL_ROLES)), Depends(guard_against_injection)]
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
+# 正则文本豁免：name_re/sample_re/pattern 承载的是正则表达式本身（如专门匹配 SQL
+# 注释的 ``--.*``、块注释 ``/\*``），正则文本不是注入载荷且仅经 re.compile/解析，
+# 不执行、不拼接进任何 DB 查询——全量扫描会误伤合法正则。其余字段仍全量扫描。
+_REGEX_WRITE_DEPS = [
+    Depends(require_roles(*_WRITE_ROLES)),
+    Depends(guard_against_injection_exempt("name_re", "sample_re")),
+]
+_REGEX_CHECK_DEPS = [
+    Depends(require_roles(*ALL_ROLES)),
+    Depends(guard_against_injection_exempt("pattern")),
+]
 
 
 def _svc(db: AsyncSession = Depends(get_db_session)) -> SensitiveRuleService:
@@ -73,7 +84,7 @@ async def list_categories(
 @router.post(
     "/validate-regex",
     response_model=ApiResponse[RegexCheckResponse],
-    dependencies=_READ_DEPS,
+    dependencies=_REGEX_CHECK_DEPS,
 )
 async def validate_regex(
     payload: RegexCheckRequest,
@@ -115,7 +126,7 @@ async def test_rule(
     "",
     response_model=ApiResponse[SensitiveRuleItem],
     status_code=status.HTTP_201_CREATED,
-    dependencies=_WRITE_DEPS,
+    dependencies=_REGEX_WRITE_DEPS,
 )
 async def create_rule(
     payload: SensitiveRuleCreate,
@@ -143,7 +154,7 @@ async def create_rule(
 @router.put(
     "/{rule_id}",
     response_model=ApiResponse[SensitiveRuleItem],
-    dependencies=_WRITE_DEPS,
+    dependencies=_REGEX_WRITE_DEPS,
 )
 async def update_rule(
     rule_id: str,
@@ -270,7 +281,11 @@ async def batch_set_rule_confidence(
         action="sensitive_rule.batch_update_confidence",
         entity_type="sensitive_rule",
         entity_id=f"count={len(rule_ids)}",
-        detail={"confidence": conf_val, "succeeded": result["succeeded"], "failed": result["failed"]},
+        detail={
+            "confidence": conf_val,
+            "succeeded": result["succeeded"],
+            "failed": result["failed"],
+        },
         ip=client_ip(request),
         trace_id=trace_id,
     )

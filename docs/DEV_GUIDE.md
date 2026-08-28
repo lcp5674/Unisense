@@ -414,6 +414,17 @@ frontend/
 
 ---
 
+## 9b. SQL 注入守卫豁免与文本输入约定
+
+全库请求统一挂 `guard_against_injection`（`app/core/guard.py`）纵深防御。**豁免原则**（2026-08-28 全面排查后收敛）：
+
+- **可豁免**：字段值本身就是要处理的文本、且不执行/不拼接进任何 DB 查询的字段——如 `definition_json`/`raw_sql`（指标口径，仅 sqlglot 纯函数解析/落库）、血缘 SQL（`/lineage/parse` 等）、冲突预检的 `candidate.definition`/`definition_json`（`/conflicts/check`）、LLM 口径增强的 `current`/`sql`/`dw_definition`/`pseudo_definition`、正则文本 `name_re`/`sample_re`/`pattern`（sensitive_rules）、维度映射 `expression`。合法 ETL 的 `--` 行注释、`/* */` 块注释、`UNION [ALL] SELECT`、多语句会被注入正则误伤，故此类字段须用 `guard_against_injection_exempt`（顶层）或 `guard_against_injection_exempt_paths`（嵌套，路径须精确）豁免。
+- **不可豁免**：`metric_code`/`name`/`key` 等标识字段与 query 参数——`--` 是有效注入向量，禁止为规避误伤而全局放宽。新增 SQL 承载端点时，参照 `metrics.py` 的 `_SQL_BATCH_REGISTER_DEPS`/`_REFINE_DEPS`、`conflict.py` 的 `_CHECK_DEPS` 写豁免，勿复用全量 `_WRITE_DEPS` 承接 SQL 文本。
+
+**文本输入约定**：普通描述/备注字段**不要写 markdown 表格分隔符 `|---|`**（含 `--`，会被守卫误伤）；确需分隔可用 `｜` 全角或 `&#124;` 转义。历史教训（2026-08-28）：`conflicts/check` 曾与 create/update 同链路遗漏豁免，注册向导点"冲突预检"遇含注释 SQL 即 400 INJECTION_DETECTED。
+
+---
+
 ## 10. API 版本管理规范
 
 - **当前版本**：`v1`（Header `X-API-Version: v1`）。

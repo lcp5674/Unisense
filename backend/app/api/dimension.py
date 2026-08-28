@@ -22,7 +22,10 @@ from app.api.deps import CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
 from app.core.exceptions import AuthError, NotFoundError
-from app.core.guard import guard_against_injection
+from app.core.guard import (
+    guard_against_injection,
+    guard_against_injection_exempt,
+)
 from app.db.mysql import get_db_session
 from app.services.dimension.schemas import (
     DimensionCreate,
@@ -64,6 +67,13 @@ _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_inject
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
 _GOV_DEPS = [Depends(require_roles(*_GOV_ROLES)), Depends(guard_against_injection)]
 _REVIEW_DEPS = [Depends(require_roles(*_REVIEW_ROLES)), Depends(guard_against_injection)]
+# 维度映射表达式豁免：expression 承载映射/转换表达式文本（可含 SQL 注释/函数），
+# 仅落库存储与回显，不执行、不拼接进任何 DB 查询——全量扫描会误伤合法表达式。
+# 其余字段仍全量扫描，纵深防御不削弱。
+_MAPPING_DEPS = [
+    Depends(require_roles(*_WRITE_ROLES)),
+    Depends(guard_against_injection_exempt("expression")),
+]
 
 # 域作用域守卫（P1-10）：domain_admin/metric_owner 仅可操作本域资源，
 # 防跨域越权——此前 API 仅校验角色、无 user.domain 作用域，域管理员可任意增删改他域维度。
@@ -123,7 +133,7 @@ async def _scope_mapping(
 
 # 写操作 + 域作用域守卫（P1-10）：域管理员/指标 Owner 仅可操作本域资源
 _WRITE_SCOPED_DEPS = _WRITE_DEPS + [Depends(_scope_dimension)]
-_MAPPING_SCOPED_DEPS = _WRITE_DEPS + [Depends(_scope_mapping)]
+_MAPPING_SCOPED_DEPS = _MAPPING_DEPS + [Depends(_scope_mapping)]
 
 
 @router.post("", status_code=201, dependencies=_WRITE_DEPS)
@@ -187,7 +197,7 @@ async def list_dimensions(
     )
 
 
-@router.post("/mappings", dependencies=_WRITE_DEPS)
+@router.post("/mappings", dependencies=_MAPPING_DEPS)
 async def create_mapping(
     payload: DimensionMappingCreate,
     db: Annotated[AsyncSession, Depends(get_db_session)],
