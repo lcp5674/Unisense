@@ -39,6 +39,7 @@ vi.mock("../api", () => {
     listDomainTree: vi.fn(),
     listMetrics: vi.fn(),
     listRoleOptions: vi.fn(),
+    listDictItems: vi.fn(),
     getUserPermissions: vi.fn(),
     setUserPermissions: vi.fn(),
     UnisenseApiError,
@@ -59,6 +60,7 @@ import {
   listDomainTree,
   listMetrics,
   listRoleOptions,
+  listDictItems,
   getUserPermissions,
   setUserPermissions,
 } from "../api";
@@ -167,6 +169,9 @@ describe("Governance 权限治理", () => {
     mockDomains.mockResolvedValue([]);
     mockMetrics.mockResolvedValue({ total: 0, page: 1, page_size: 1000, items: [] });
     mockRoleOptions.mockResolvedValue([{ id: 1, name: "viewer", is_custom: false }]);
+    vi.mocked(listDictItems).mockResolvedValue([
+      { id: 1, dict_type: "pii_field_type", code: "user_phone", label: "手机号", sort_order: 1, status: "active", description: null },
+    ] as never);
     mockGetUserPerms.mockResolvedValue({
       user_id: 1,
       role: "viewer",

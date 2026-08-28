@@ -146,6 +146,27 @@ DICT_SEEDS: dict[str, list[dict[str, Any]]] = {
         {"code": "T2", "label": "重要", "sort_order": 2},
         {"code": "T3", "label": "一般", "sort_order": 3},
     ],
+    # PII 复核字段类型（对齐采集规则 DEFAULT_PII_RULES）：治理页复核标注的敏感
+    # 字段类型字典化——后端新增 PII 规则时前端下拉无需发版（2026-08-28）。
+    "pii_field_type": [
+        {"code": "user_phone", "label": "手机号", "sort_order": 1},
+        {"code": "id_card", "label": "身份证号", "sort_order": 2},
+        {"code": "email", "label": "邮箱", "sort_order": 3},
+        {"code": "bank_card", "label": "银行卡号", "sort_order": 4},
+        {"code": "real_name", "label": "真实姓名", "sort_order": 5},
+        {"code": "address", "label": "住址", "sort_order": 6},
+        {"code": "passport", "label": "护照号", "sort_order": 7},
+        {"code": "gps", "label": "定位/GPS", "sort_order": 8},
+    ],
+    # 合规法律依据（受控词表，GDPR 合法基础）：资产保留策略/合规标注的选择依据
+    # 字典化——口径调整时前端无需发版（2026-08-28）。
+    "legal_basis": [
+        {"code": "user_consent", "label": "用户同意", "sort_order": 1},
+        {"code": "contract", "label": "合同必需", "sort_order": 2},
+        {"code": "law", "label": "法定职责", "sort_order": 3},
+        {"code": "legitimate_interest", "label": "正当利益", "sort_order": 4},
+        {"code": "public_interest", "label": "公共利益", "sort_order": 5},
+    ],
 }
 
 # admin 用户 ID（seed_admin.py 创建的默认管理员）

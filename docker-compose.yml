@@ -5,15 +5,15 @@
 # 后端日志：docker compose logs -f backend
 # 前端日志：docker compose logs -f frontend
 #
-# 访问地址：
-#   前端：http://localhost:8080
-#   后端 API 文档：http://localhost:8000/docs
-#   后端健康检查：http://localhost:8000/health
-#   Prometheus 指标：http://localhost:8000/metrics
+# 访问地址（宿主端口，2026-08-28 修正注释与实际映射一致）：
+#   前端：http://localhost:8180
+#   后端 API 文档：http://localhost:8100/docs
+#   后端健康检查：http://localhost:8100/health
+#   Prometheus 指标：http://localhost:8100/metrics
 #
 # 端口避让说明（避免与本机已有 Docker 服务冲突）：
 #   MySQL 偏移至 3307，ES 偏移至 19200，Redis 偏移至 16379
-#   后端 8000，前端 8080
+#   后端 8100（容器 8000），前端 8180（容器 8080）
 
 services:
   # ============ 基础设施（依赖服务）============
@@ -71,7 +71,9 @@ services:
       timeout: 5s
       retries: 5
 
-  # ---- Elasticsearch security setup (create keystore + passwords) ----
+  # ---- Elasticsearch security setup ----
+  # 2026-08-28 说明：ES 8.x 密码经 ELASTIC_PASSWORD env 注入即完成配置，
+  # 本服务仅打印凭据提示（不再执行实际 setup，保留以便查看内置账号密码）。
   elasticsearch-setup:
     image: elasticsearch:8.15.0
     depends_on:

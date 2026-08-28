@@ -93,6 +93,7 @@ import {
   reviewAssetEntity,
   setAssetMaskingPolicy,
   setAssetRetention,
+  listDictItems,
   updateColumnDescription,
   updateMetricDescription,
   updateTableDescription,
@@ -196,7 +197,9 @@ const REVIEW_STATUS_OPTIONS = [
   { value: "reviewed", label: "仅已复核" },
 ];
 
-const LEGAL_BASIS_OPTIONS = [
+// 合规法律依据：优先从字典接口拉取（legal_basis，2026-08-28 字典化——受控词表
+// 调整时前端无需发版）；拉取失败/空时回退以下硬编码兜底。
+const FALLBACK_LEGAL_BASIS_OPTIONS = [
   { value: "user_consent", label: "用户同意" },
   { value: "contract", label: "合同必需" },
   { value: "law", label: "法定职责" },
@@ -5437,11 +5440,26 @@ function PiiDetailDrawer({
   const [masking, setMasking] = useState<string>("none");
   const [retentionDays, setRetentionDays] = useState<number | null>(null);
   const [legalBasis, setLegalBasis] = useState<string | undefined>();
+  // 合规法律依据选项（字典驱动，回退硬编码）
+  const [legalBasisOptions, setLegalBasisOptions] =
+    useState<Array<{ value: string; label: string }>>(FALLBACK_LEGAL_BASIS_OPTIONS);
   // 字段标注弹窗
   const [overrideField, setOverrideField] = useState<AssetPiiField | null>(null);
   const [overrideSuppressed, setOverrideSuppressed] = useState(true);
   const [overrideReason, setOverrideReason] = useState("");
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    listDictItems("legal_basis")
+      .then((items) => {
+        if (items.length > 0) {
+          setLegalBasisOptions(items.map((i) => ({ value: i.code, label: i.label })));
+        }
+      })
+      .catch(() => {
+        /* 字典拉取失败保留硬编码兜底 */
+      });
+  }, []);
 
   useEffect(() => {
     if (open && item) {
@@ -5741,7 +5759,7 @@ function PiiDetailDrawer({
                     placeholder="合法性基础"
                     value={legalBasis}
                     onChange={setLegalBasis}
-                    options={LEGAL_BASIS_OPTIONS}
+                    options={legalBasisOptions}
                   />
                 </Col>
                 <Col span={8}>

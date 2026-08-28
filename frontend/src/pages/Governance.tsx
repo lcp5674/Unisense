@@ -21,6 +21,7 @@ import {
   listDomainTree,
   listMetrics,
   listRoleOptions,
+  listDictItems,
   UnisenseApiError,
 } from "../api";
 import type { ActionRegistryItem, GrantBatchResult, GrantCreate, GrantResponse, PermissionSnapshot, RoleOption, RolePermissionItem, SubjectDomainTreeNode, UserBrief } from "../types";
@@ -158,8 +159,9 @@ const DECISION_LABEL: Record<string, string> = {
   REJECT: "拒绝",
 };
 
-// PII 复核可选字段（对齐后端 PII_RULES 常见敏感字段，替代手动逗号输入）
-const PII_FIELD_OPTIONS = [
+// PII 复核可选字段：优先从字典接口拉取（pii_field_type，2026-08-28 字典化——
+// 后端新增 PII 规则时前端无需发版）；拉取失败/空时回退以下硬编码兜底。
+const FALLBACK_PII_FIELD_OPTIONS = [
   { value: "user_phone", label: "手机号" },
   { value: "id_card", label: "身份证号" },
   { value: "email", label: "邮箱" },
@@ -1213,6 +1215,9 @@ function PiiReviewTab() {
   const [form] = Form.useForm();
   // 指标编码选项（PII 复核目标从已发布指标选择，替代手动输入）
   const [metricOptions, setMetricOptions] = useState<Array<{ value: string; label: string }>>([]);
+  // PII 字段选项（字典驱动，回退硬编码）
+  const [piiFieldOptions, setPiiFieldOptions] =
+    useState<Array<{ value: string; label: string }>>(FALLBACK_PII_FIELD_OPTIONS);
 
   useEffect(() => {
     listMetrics({ status: "PUBLISHED", page: 1, page_size: 100 })
@@ -1222,6 +1227,17 @@ function PiiReviewTab() {
         ),
       )
       .catch(() => setMetricOptions([]));
+    listDictItems("pii_field_type")
+      .then((items) => {
+        if (items.length > 0) {
+          setPiiFieldOptions(
+            items.map((i) => ({ value: i.code, label: `${i.code}（${i.label}）` })),
+          );
+        }
+      })
+      .catch(() => {
+        /* 字典拉取失败保留硬编码兜底 */
+      });
   }, []);
 
   async function handleReview(values: Record<string, unknown>) {
@@ -1292,7 +1308,7 @@ function PiiReviewTab() {
               showSearch
               optionFilterProp="label"
               placeholder="搜索并选择敏感字段"
-              options={PII_FIELD_OPTIONS}
+              options={piiFieldOptions}
               tokenSeparators={[","]}
             />
           </Form.Item>

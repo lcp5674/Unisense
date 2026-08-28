@@ -30,6 +30,7 @@ vi.mock("../api", () => ({
   overrideAssetPiiField: vi.fn(),
   removeAssetPiiOverride: vi.fn(),
   setAssetRetention: vi.fn(),
+  listDictItems: vi.fn(),
   downloadPiiExport: vi.fn(),
   lineageGraph: vi.fn(),
   assignAssetOwner: vi.fn(),
@@ -157,6 +158,7 @@ import {
   overrideAssetPiiField,
   removeAssetPiiOverride,
   setAssetRetention,
+  listDictItems,
 } from "../api";
 
 const mockGraphData = {
@@ -231,6 +233,9 @@ describe("AssetMap", () => {
       ],
       columns: ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII", "NEEDS_REVIEW"],
     });
+    vi.mocked(listDictItems).mockResolvedValue([
+      { id: 1, dict_type: "legal_basis", code: "user_consent", label: "用户同意", sort_order: 1, status: "active", description: null },
+    ] as never);
     vi.mocked(fetchAssetOwnerView).mockResolvedValue(mockOwnerViewData);
     vi.mocked(fetchAssetSummary).mockResolvedValue({
       total: 10,
