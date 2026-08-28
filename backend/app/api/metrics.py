@@ -6,14 +6,18 @@
 from __future__ import annotations
 
 import contextlib
+import csv
 import hashlib
+import io
 import json
+import re as _re
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
+from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,6 +49,8 @@ from app.services.semantic.schemas import (
     MetricAutoSuggestRequest,
     MetricBatchApproveRequest,
     MetricBatchDeprecateRequest,
+    MetricBatchImportCandidate,
+    MetricBatchImportRequest,
     MetricBatchReactivateRequest,
     MetricBatchRegisterRequest,
     MetricCompareMatrixRequest,
@@ -71,6 +77,7 @@ from app.services.semantic.schemas import (
     MetricTermBindRequest,
     MetricUpdateRequest,
     MetricVersionResponse,
+    SqlBatchCreateCandidate,
     VersionConfirmRequest,
     VersionExtendRequest,
     VersionRejectRequest,
@@ -2728,6 +2735,285 @@ async def batch_register_from_sql_metrics(
                 c["metric_code"]
                 for c in result["candidates"]
                 if c["status"] != "DRAFT"
+            ][:20],
+        },
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
+# ----------------------------------------------------------------
+# 通用批量导入（外部 agent / CSV 批量录入，编码名称可缺省自动补全）
+# ----------------------------------------------------------------
+
+_IMPORT_TEMPLATE_HEADER = [
+    "metric_code", "name", "type", "source_table", "measure_column",
+    "aggregation", "unit", "period", "granularity", "measure_id",
+    "expression", "dependencies", "raw_sql",
+]
+
+_VALID_IMPORT_AGG = {
+    "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "FIRST_VALUE",
+    "MAX", "MIN", "MEDIAN", "PERCENTILE",
+}
+
+# 度量列中文兜底词表（缺省名称生成；覆盖常用度量尾词）
+_CN_MEASURE_TAIL = {
+    "cnt": "数", "count": "数", "num": "数", "qty": "量", "amount": "金额",
+    "amt": "金额", "fee": "费用", "cost": "成本", "rate": "率", "ratio": "占比",
+    "avg": "均值", "sum": "合计", "price": "单价", "days": "天数",
+}
+
+
+def _import_metric_code(domain: str, cand: MetricBatchImportCandidate, idx: int) -> str:
+    """自动生成 4 段式编码：{domain}_{对象}_{度量}_{周期}（清洗非法字符 + 截断 64）。"""
+    obj = ""
+    if cand.source_table:
+        _t = cand.source_table.split(".")[-1]
+        _t = _re.sub(r"_(da|di|df|d|f|full|delta|incr?|his|tmp|bak)$", "", _t)
+        _t = _re.sub(r"_\d{6,8}$", "", _t)
+        obj = _t
+    measure = cand.measure_column or f"m{idx}"
+    period = cand.period or "day"
+    code = f"{domain}_{obj}_{measure}_{period}".strip("_")
+    code = _re.sub(r"[^a-z0-9_]", "_", code.lower()).strip("_")
+    return code[:64] or f"{domain}_metric_{idx}"
+
+
+def _import_metric_name(cand: MetricBatchImportCandidate, code: str) -> str:
+    """度量列中文化兜底：current_month_active_doctor_cnt → 活跃医生数。"""
+    col = cand.measure_column or ""
+    if not col:
+        return code
+    parts = col.split("_")
+    if len(parts) >= 2 and parts[-1] in _CN_MEASURE_TAIL:
+        tail = _CN_MEASURE_TAIL[parts[-1]]
+        body = "".join(
+            p for p in parts[:-1]
+            if p not in (
+                "current", "last", "month", "day", "year", "week", "quarter",
+                "total", "avg", "this", "prev",
+            )
+        )
+        name = f"{body or '指标'}{tail}"
+    else:
+        name = col.replace("_", "")
+    return name[:128]
+
+
+def _csv_row_to_import_candidate(row: dict[str, str]) -> MetricBatchImportCandidate:
+    """单行 CSV → 导入候选（非法值抛 ValueError，由调用方按行容错）。"""
+    mtype = (row.get("type") or "atomic").strip().lower()
+    if mtype not in ("atomic", "derived", "composite"):
+        raise ValueError(f"type 非法：{mtype}（应为 atomic/derived/composite）")
+    expression = (row.get("expression") or "").strip()
+    if not expression:
+        raise ValueError("expression（口径表达式）必填")
+    aggregation = (row.get("aggregation") or "").strip().upper() or None
+    if aggregation and aggregation not in _VALID_IMPORT_AGG:
+        raise ValueError(f"aggregation 非法：{aggregation}")
+    deps = [
+        d.strip()
+        for d in (row.get("dependencies") or "").replace(";", "|").split("|")
+        if d.strip()
+    ]
+    measure_id_raw = (row.get("measure_id") or "").strip()
+    measure_id = int(measure_id_raw) if measure_id_raw.isdigit() else None
+    return MetricBatchImportCandidate(
+        metric_code=(row.get("metric_code") or "").strip() or None,
+        name=(row.get("name") or "").strip() or None,
+        type=mtype,
+        source_table=(row.get("source_table") or "").strip() or None,
+        measure_column=(row.get("measure_column") or "").strip() or None,
+        aggregation=aggregation,
+        unit=(row.get("unit") or "").strip() or None,
+        period=(row.get("period") or "").strip() or None,
+        granularity=(row.get("granularity") or "").strip() or None,
+        measure_id=measure_id,
+        expression=expression,
+        dependencies=deps or None,
+        raw_sql=(row.get("raw_sql") or "").strip() or None,
+    )
+
+
+def _enrich_import_candidates(
+    domain: str, candidates: list[MetricBatchImportCandidate],
+) -> list[SqlBatchCreateCandidate]:
+    """补全编码/名称/表达式，转创建端候选（原子先行，复合在后）。"""
+    enriched: list[SqlBatchCreateCandidate] = []
+    for idx, cand in enumerate(candidates, start=1):
+        code = (cand.metric_code or "").strip() or _import_metric_code(domain, cand, idx)
+        name = (cand.name or "").strip() or _import_metric_name(cand, code)
+        definition_json: dict[str, Any] = {}
+        if cand.expression:
+            definition_json["expression"] = cand.expression
+        if cand.dependencies:
+            definition_json["dependencies"] = cand.dependencies
+        enriched.append(
+            SqlBatchCreateCandidate(
+                key=f"import:{idx}:{cand.measure_column or 'metric'}",
+                metric_code=code,
+                name=name,
+                type=cand.type,
+                source_table=cand.source_table,
+                measure_column=cand.measure_column,
+                aggregation=cand.aggregation,
+                unit=cand.unit,
+                period=cand.period,
+                granularity=cand.granularity,
+                measure_id=cand.measure_id,
+                definition_json=definition_json,
+                dependencies=cand.dependencies,
+                raw_sql=cand.raw_sql,
+            )
+        )
+    # 原子先行，复合在后（创建端依赖预检要求）
+    _type_order = {"atomic": 0, "derived": 1, "composite": 2}
+    enriched.sort(key=lambda c: _type_order[c.type])
+    return enriched
+
+
+@router.get(
+    "/imports/template",
+    response_model=None,
+    summary="下载指标批量导入 CSV 模板",
+    dependencies=[Depends(require_roles(*_WRITE_ROLES))],
+)
+async def metric_import_template() -> Response:
+    """返回 CSV 模板（含表头 + 示例行），供外部 agent / 人工填表后调用 import-csv。"""
+    example = (
+        "outp_doctor_active_cnt_month,月活医生数,atomic,wedw_dws.doctor_active_month_di,"
+        "current_month_active_doctor_cnt,COUNT_DISTINCT,人,month,,,COUNT(DISTINCT doctor_code),,"
+        "-- 示例行：metric_code/name 可空（自动生成）；expression 必填；dependencies 用 | 分隔"
+    )
+    text = ",".join(_IMPORT_TEMPLATE_HEADER) + "\n" + example + "\n"
+    return Response(
+        content=text,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="metric_import_template.csv"'},
+    )
+
+
+@router.post(
+    "/batch-import",
+    response_model=ApiResponse[Any],
+    summary="通用批量导入指标（外部 agent / 结构化数据，编码名称可缺省）",
+    dependencies=_SQL_BATCH_REGISTER_DEPS,
+)
+async def batch_import_metrics(
+    request: MetricBatchImportRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """候选清单 + 域 → 补全编码/名称 → 复用 SQL 批量注册逐条创建 DRAFT。
+
+    与 ``batch-register-from-sql`` 的差异：编码/名称可缺省（自动生成）、来源可标注
+    （agent/csv/manual）；创建语义（savepoint 逐条隔离 + 域门禁 + 冲突预检）完全一致。
+    """
+    service = MetricService(db)
+    inner = MetricSqlBatchRegisterRequest(
+        domain=request.domain,
+        candidates=_enrich_import_candidates(request.domain, request.candidates),
+    )
+    result = await service.batch_register_from_sql(
+        inner, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
+    _failed = [c for c in result["candidates"] if c["status"] != "DRAFT"]
+    _action = "metric_definition.batch_import"
+    if _failed:
+        _action += "_failed" if len(_failed) == len(result["candidates"]) else "_partial"
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=_action,
+        entity_type="metric_definition",
+        entity_id=f"batch:{result['batch_id']}",
+        detail={
+            "count": len(result["candidates"]),
+            "domain": request.domain,
+            "source": request.source,
+            "batch_id": result["batch_id"],
+            "ok_count": sum(1 for c in result["candidates"] if c["status"] == "DRAFT"),
+            "failed_count": sum(1 for c in result["candidates"] if c["status"] != "DRAFT"),
+            "failed_codes": [
+                c["metric_code"] for c in result["candidates"] if c["status"] != "DRAFT"
+            ][:20],
+        },
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
+@router.post(
+    "/imports/csv",
+    response_model=ApiResponse[Any],
+    summary="上传 CSV 批量导入指标（逐行解析 + 逐条创建 DRAFT）",
+    dependencies=_SQL_BATCH_REGISTER_DEPS,
+)
+async def import_metrics_csv(
+    file: Annotated[UploadFile, File(description="UTF-8 编码 CSV（表头见 /imports/template）")],
+    domain: Annotated[str, Form(description="所属域")],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """解析 CSV → 构建导入候选 → 复用 batch-import 逐条创建 DRAFT。
+
+    逐行容错：解析失败的行记 ``row_errors`` 返回、不阻断其余行；至少一行有效才执行。
+    """
+    try:
+        content = (await file.read()).decode("utf-8-sig", errors="replace")
+    except Exception:  # noqa: BLE001 - 解码失败按空内容处理，由无有效行分支兜底
+        content = ""
+    candidates: list[MetricBatchImportCandidate] = []
+    row_errors: list[dict[str, Any]] = []
+    reader = csv.DictReader(io.StringIO(content))
+    for i, row in enumerate(reader, start=2):  # 行号从 2 起（1 为表头）
+        if not any((v or "").strip() for v in row.values()):
+            continue
+        try:
+            candidates.append(_csv_row_to_import_candidate(row))
+        except Exception as exc:  # noqa: BLE001 - 单行解析失败容错，不阻断整体
+            row_errors.append({"row": i, "error": str(exc)})
+    if not candidates:
+        raise BusinessError(
+            "CSV 无有效数据行（请先下载模板核对列头与必填列）",
+            error_code="INVALID_CSV",
+            ctx={"row_errors": row_errors[:10]},
+        )
+    service = MetricService(db)
+    inner = MetricSqlBatchRegisterRequest(
+        domain=domain,
+        candidates=_enrich_import_candidates(domain, candidates),
+    )
+    result = await service.batch_register_from_sql(
+        inner, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
+    if row_errors:
+        result["row_errors"] = row_errors
+    _failed = [c for c in result["candidates"] if c["status"] != "DRAFT"]
+    _action = "metric_definition.csv_import"
+    if _failed:
+        _action += "_failed" if len(_failed) == len(result["candidates"]) else "_partial"
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=_action,
+        entity_type="metric_definition",
+        entity_id=f"batch:{result['batch_id']}",
+        detail={
+            "count": len(result["candidates"]),
+            "domain": domain,
+            "source": "csv",
+            "batch_id": result["batch_id"],
+            "ok_count": sum(1 for c in result["candidates"] if c["status"] == "DRAFT"),
+            "failed_count": sum(1 for c in result["candidates"] if c["status"] != "DRAFT"),
+            "row_error_count": len(row_errors),
+            "failed_codes": [
+                c["metric_code"] for c in result["candidates"] if c["status"] != "DRAFT"
             ][:20],
         },
         trace_id=trace_id,

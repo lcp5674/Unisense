@@ -85,6 +85,8 @@ pytest-mock==3.15.1
 python-dateutil==2.9.0.post0
 python-discovery==1.5.1
 python-dotenv==1.2.2
+# FastAPI Form/File 参数依赖（CSV 批量导入端点 /imports/csv 必需）
+python-multipart==0.0.20
 pytz==2026.3.post1
 PyYAML==6.0.3
 redis==5.3.1

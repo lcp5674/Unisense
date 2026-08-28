@@ -156,6 +156,7 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
       { key: "/dicts", label: "数据字典", icon: <TagsOutlined /> },
       { key: "/sensitive-rules", label: "敏感规则", icon: <SafetyCertificateOutlined /> },
       { key: "/system-config", label: "系统配置", icon: <SettingOutlined /> },
+      { key: "api-docs", label: "API 文档", icon: <FileSearchOutlined /> },
     ],
   },
 ];
@@ -638,6 +639,11 @@ export function Layout({ user }: { user: CurrentUser }) {
           selectedKeys={selectedKey ? [selectedKey] : []}
           items={menuItems}
           onClick={({ key }) => {
+            if (key === "api-docs") {
+              // API 文档：Swagger UI（新窗口打开，非路由导航）
+              window.open("/docs", "_blank", "noopener,noreferrer");
+              return;
+            }
             navigate(key);
             // 点击导航立即回顶（即使已停留在当前路由），避免内容停留在上次滚动位置
             contentRef.current?.scrollTo({ top: 0, behavior: "smooth" });

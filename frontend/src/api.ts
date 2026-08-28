@@ -415,13 +415,17 @@ async function refreshAccessToken(): Promise<boolean> {
 
 async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
     "X-Api-Key": SEMANTIC_API_KEY,
     // P2-2（第八轮）：透传 X-Trace-Id——后端 TraceIdMiddleware 读取并随响应回传，
     // 使前端请求与后端日志/审计 trace_id 贯通（排查慢请求/报错无需手工对时间）。
     "X-Trace-Id": crypto.randomUUID(),
     ...(init?.headers as Record<string, string> | undefined),
   };
+  // FormData（文件上传）由浏览器自动生成 multipart boundary——显式 Content-Type
+  // 会破坏 boundary 导致后端 422；JSON 请求才设置默认 Content-Type。
+  if (!(init?.body instanceof FormData)) {
+    headers["Content-Type"] = "application/json";
+  }
   if (init?.consumeAuth) {
     const consumeToken = getConsumeToken();
     let bearer: string | null = consumeToken;
@@ -649,6 +653,79 @@ export async function listMetrics(params: {
 
 export async function getMetric(code: string): Promise<MetricResponse> {
   return request<MetricResponse>(`${API_BASE}/metric-definitions/${encodeURIComponent(code)}`);
+}
+
+// ---- 通用批量导入（外部 agent / CSV，编码名称可缺省自动补全）----
+
+export interface MetricImportResult {
+  batch_id: string;
+  candidates: Array<{
+    metric_code: string;
+    status: string;
+    validation_errors?: string[];
+  }>;
+  row_errors?: Array<{ row: number; error: string }>;
+}
+
+export interface MetricImportCandidateInput {
+  metric_code?: string;
+  name?: string;
+  type?: "atomic" | "derived" | "composite";
+  source_table?: string;
+  measure_column?: string;
+  aggregation?: string;
+  unit?: string;
+  period?: string;
+  granularity?: string;
+  measure_id?: number;
+  expression?: string;
+  dependencies?: string[];
+  raw_sql?: string;
+}
+
+/** 通用批量导入（外部 agent / 结构化数据）：domain + candidates → 逐条创建 DRAFT */
+export async function batchImportMetrics(body: {
+  domain: string;
+  source?: "agent" | "csv" | "manual";
+  candidates: MetricImportCandidateInput[];
+}): Promise<MetricImportResult> {
+  return request<MetricImportResult>(`${API_BASE}/metric-definitions/batch-import`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** 上传 CSV 批量导入：FormData（file + domain），逐行解析 + 逐条创建 DRAFT */
+export async function importMetricsCsv(formData: FormData): Promise<MetricImportResult> {
+  return request<MetricImportResult>(`${API_BASE}/metric-definitions/imports/csv`, {
+    method: "POST",
+    body: formData,
+    // 批量导入可能含多行 + 冲突预检，放宽到 60s
+    timeout: 60000,
+  });
+}
+
+/** 下载指标批量导入 CSV 模板（带鉴权，blob 触发浏览器下载） */
+export async function downloadMetricImportTemplate(): Promise<void> {
+  const res = await fetch(`${API_BASE_URL}${API_BASE}/metric-definitions/imports/template`, {
+    headers: {
+      Authorization: `Bearer ${getToken() ?? ""}`,
+      "X-Api-Key": SEMANTIC_API_KEY,
+      "X-Trace-Id": crypto.randomUUID(),
+    },
+  });
+  if (!res.ok) {
+    throw new UnisenseApiError("模板下载失败", "HTTP_ERROR", res.status, "");
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "metric_import_template.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 // 作废指标详情（供作废引导页展示历史口径 + 跳转权威指标）

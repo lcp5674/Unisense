@@ -875,6 +875,50 @@ class MetricSqlBatchRegisterRequest(BaseModel):
     )
 
 
+class MetricBatchImportCandidate(BaseModel):
+    """通用批量导入候选（外部 agent 结构化数据 / CSV 行），编码与名称可缺省由系统补全。
+
+    字段对齐 ``SqlBatchCreateCandidate`` 的核心集，但 ``metric_code``/``name`` 允许
+    缺省——外部工具不必预生成 4 段式编码，系统按域/源表/度量列自动补全；复合候选
+    的 ``dependencies`` 必填（与创建端校验一致）。
+    """
+
+    metric_code: str | None = Field(
+        None, max_length=64, description="指标编码（4 段式，缺省自动生成）"
+    )
+    name: str | None = Field(
+        None, max_length=128, description="指标名称（缺省按度量列自动生成）"
+    )
+    type: Literal["atomic", "derived", "composite"] = Field(
+        "atomic", description="指标类型（缺省 atomic）"
+    )
+    source_table: str | None = Field(None, max_length=256, description="源表名")
+    measure_column: str | None = Field(None, max_length=128, description="度量列（复合为空）")
+    aggregation: Literal[
+        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "FIRST_VALUE",
+        "MAX", "MIN", "MEDIAN", "PERCENTILE",
+    ] | None = Field(None, description="聚合方式（复合为空）")
+    unit: str | None = Field(None, max_length=32, description="单位")
+    period: str | None = Field(None, max_length=16, description="统计周期（缺省 day）")
+    granularity: str | None = Field(None, max_length=64, description="粒度")
+    measure_id: int | None = Field(None, ge=1, description="关联逻辑度量（原子可选）")
+    expression: str | None = Field(None, description="计算表达式（原子/派生口径，必填）")
+    dependencies: list[str] | None = Field(None, description="依赖指标编码（复合必填）")
+    raw_sql: str | None = Field(None, description="原始 SQL（溯源，可选）")
+
+
+class MetricBatchImportRequest(BaseModel):
+    """通用批量导入请求（外部 agent / CSV 批量录入，编码名称可缺省）。"""
+
+    domain: str = Field(..., max_length=64, description="所属域（批量域门禁与本域校验）")
+    source: Literal["agent", "csv", "manual"] = Field(
+        "manual", description="导入来源（agent 外部智能体 / csv 文件 / manual 手动）"
+    )
+    candidates: list[MetricBatchImportCandidate] = Field(
+        ..., min_length=1, description="候选清单（原子先行，复合在后）"
+    )
+
+
 class MetricTemplateCreateRequest(BaseModel):
     """模板创建请求（对齐 FR-041：Schema 校验替代裸 dict）。
 

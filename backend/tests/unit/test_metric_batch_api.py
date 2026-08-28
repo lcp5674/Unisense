@@ -372,3 +372,164 @@ async def test_downstream_check_returns_per_metric(client):
     assert body[1]["metric_code"] == "sales_uv_daily"
     assert body[1]["referrer_count"] == 0
     assert body[1]["referrers"] == []
+
+
+# ---- 通用批量导入（batch-import / import-csv / template）----
+
+
+async def test_batch_import_auto_fills_code_and_name(client):
+    """batch-import：编码/名称缺省时自动补全，构造的创建端候选携带自动生成的 4 段式编码。"""
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        instance = mock_svc.return_value
+        instance.batch_register_from_sql = AsyncMock(
+            return_value={
+                "batch_id": "sqlbatch_ab12",
+                "candidates": [
+                    {"metric_code": "outp_doctor_active_cnt_month", "status": "DRAFT"},
+                ],
+            }
+        )
+        resp = await client.post(
+            "/api/v1/metric-definitions/batch-import",
+            json={
+                "domain": "outp",
+                "source": "agent",
+                "candidates": [
+                    {
+                        # metric_code/name 缺省——应自动补全
+                        "type": "atomic",
+                        "source_table": "wedw_dws.doctor_active_month_di",
+                        "measure_column": "current_month_active_doctor_cnt",
+                        "aggregation": "COUNT_DISTINCT",
+                        "period": "month",
+                        "expression": "COUNT(DISTINCT doctor_code)",
+                    }
+                ],
+            },
+        )
+    assert resp.status_code == 200
+    inner: MetricSqlBatchRegisterRequest = instance.batch_register_from_sql.call_args.args[0]
+    cand = inner.candidates[0]
+    # 自动补全：outp_{源表末段去通用后缀 _di}_{度量列}_{周期}
+    assert cand.metric_code == "outp_doctor_active_month_current_month_active_doctor_cnt_month"
+    assert cand.name  # 自动生成非空中文名
+    assert cand.definition_json.get("expression") == "COUNT(DISTINCT doctor_code)"
+
+
+async def test_batch_import_reuses_explicit_code_and_name(client):
+    """batch-import：显式编码/名称原样保留，不覆盖。"""
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        instance = mock_svc.return_value
+        instance.batch_register_from_sql = AsyncMock(
+            return_value={
+                "batch_id": "b",
+                "candidates": [{"metric_code": "outp_my_metric_day", "status": "DRAFT"}],
+            }
+        )
+        resp = await client.post(
+            "/api/v1/metric-definitions/batch-import",
+            json={
+                "domain": "outp",
+                "candidates": [
+                    {
+                        "metric_code": "outp_my_metric_day",
+                        "name": "我的指标",
+                        "type": "atomic",
+                        "expression": "SUM(amount)",
+                    }
+                ],
+            },
+        )
+    assert resp.status_code == 200
+    cand = instance.batch_register_from_sql.call_args.args[0].candidates[0]
+    assert cand.metric_code == "outp_my_metric_day"
+    assert cand.name == "我的指标"
+
+
+async def test_import_csv_parses_and_creates(client):
+    """import-csv：上传 CSV 逐行解析为候选，调批量注册创建 DRAFT。"""
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    csv_text = (
+        "metric_code,name,type,source_table,measure_column,aggregation,unit,period,"
+        "granularity,measure_id,expression,dependencies,raw_sql\n"
+        "outp_doctor_active_cnt_month,月活医生数,atomic,wedw_dws.doctor_active_month_di,"
+        "current_month_active_doctor_cnt,COUNT_DISTINCT,人,month,,,COUNT(DISTINCT doctor_code),,\n"
+        ",上月活跃医生数,atomic,wedw_dws.doctor_active_month_di,last_month_active_doctor_cnt,"
+        "COUNT_DISTINCT,人,month,,,COALESCE(COUNT(DISTINCT CASE WHEN x THEN 1 END), 0),,\n"
+    )
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        instance = mock_svc.return_value
+        instance.batch_register_from_sql = AsyncMock(
+            return_value={
+                "batch_id": "csv_b1",
+                "candidates": [
+                    {"metric_code": "outp_doctor_active_cnt_month", "status": "DRAFT"},
+                    {"metric_code": "outp_lastmonth_doctor_active_cnt_month", "status": "DRAFT"},
+                ],
+            }
+        )
+        resp = await client.post(
+            "/api/v1/metric-definitions/imports/csv",
+            files={"file": ("metrics.csv", csv_text.encode("utf-8-sig"), "text/csv")},
+            data={"domain": "outp"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["batch_id"] == "csv_b1"
+    inner: MetricSqlBatchRegisterRequest = instance.batch_register_from_sql.call_args.args[0]
+    assert len(inner.candidates) == 2
+    # 第二行 metric_code 缺省 → 自动补全（源表末段去后缀 + 度量列 + 周期）
+    assert inner.candidates[1].metric_code.endswith("_last_month_active_doctor_cnt_month")
+    assert inner.candidates[1].name == "上月活跃医生数"
+
+
+async def test_import_csv_invalid_rows_reported(client):
+    """import-csv：非法行（expression 必填缺失）记 row_errors，不阻断有效行。"""
+    csv_text = (
+        "metric_code,name,type,source_table,measure_column,aggregation,expression\n"
+        "outp_good_day,好指标,atomic,,col,SUM,SUM(col)\n"
+        "outp_bad_day,坏指标,atomic,,col,SUM,\n"  # expression 空 → 行解析失败
+    )
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        instance = mock_svc.return_value
+        instance.batch_register_from_sql = AsyncMock(
+            return_value={
+                "batch_id": "csv_b2",
+                "candidates": [{"metric_code": "outp_good_day", "status": "DRAFT"}],
+            }
+        )
+        resp = await client.post(
+            "/api/v1/metric-definitions/imports/csv",
+            files={"file": ("m.csv", csv_text.encode("utf-8"), "text/csv")},
+            data={"domain": "outp"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["row_errors"] and body["row_errors"][0]["row"] == 3
+    assert "expression" in body["row_errors"][0]["error"]
+    # 有效行仍创建
+    assert len(instance.batch_register_from_sql.call_args.args[0].candidates) == 1
+
+
+async def test_import_csv_no_valid_rows_400(client):
+    """import-csv：全行非法/空 → 400 INVALID_CSV。"""
+    csv_text = "metric_code,name,type,expression\n"
+    resp = await client.post(
+        "/api/v1/metric-definitions/imports/csv",
+        files={"file": ("empty.csv", csv_text.encode("utf-8"), "text/csv")},
+        data={"domain": "outp"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "INVALID_CSV"
+
+
+async def test_import_template_download(client):
+    """imports/template：返回 CSV 模板（含表头 + 示例行）。"""
+    resp = await client.get("/api/v1/metric-definitions/imports/template")
+    assert resp.status_code == 200
+    assert "text/csv" in resp.headers["content-type"]
+    assert "metric_code" in resp.text
+    assert "expression" in resp.text

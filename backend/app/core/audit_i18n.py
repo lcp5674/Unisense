@@ -204,6 +204,14 @@ _DOT_ACTION_TEMPLATES: dict[str, str] = {
     "feedback.status_update": "更新了{entity}反馈状态",
     "nps.submit": "提交了 NPS 评分",
     "erasure.execute": "执行了{entity}匿名化",
+    "conflict.force_close": "强制关闭了{entity}",
+    "metric_definition.sql_infer_eval_run": "运行了{entity}评测",
+    "metric_definition.sql_infer_eval_sample_create": "创建了{entity}评测样本",
+    "metric_definition.sql_infer_eval_sample_update": "更新了{entity}评测样本",
+    "metric_definition.sql_infer_eval_sample_delete": "删除了{entity}评测样本",
+    "admin_key.rotate": "轮换了{entity}密钥",
+    "admin_key.migrate": "迁移了{entity}密钥",
+    "admin_key.migrate_dry_run": "预演了{entity}密钥迁移",
 }
 
 # ---------------------------------------------------------------------------
@@ -360,6 +368,8 @@ _VERB_TEMPLATES: dict[str, str] = {
     # 批量动作（前缀 batch_）
     "batch_create": "批量创建了{entity}",
     "batch_register": "批量注册了{entity}",
+    "batch_import": "批量导入了{entity}",
+    "csv_import": "通过 CSV 批量导入了{entity}",
     "sql_batch_parse": "解析了{entity}候选（SQL 批量）",
     "sql_batch_register": "从 SQL 批量注册了{entity}",
     "batch_submit": "批量提交了{entity}评审",
@@ -387,6 +397,10 @@ _VERB_TEMPLATES: dict[str, str] = {
     "batch_reject_failed": "批量驳回{entity}失败",
     "batch_deprecate_partial": "部分废弃{entity}（存在失败项）",
     "batch_deprecate_failed": "批量废弃{entity}失败",
+    "batch_import_partial": "部分导入{entity}成功（存在失败项）",
+    "batch_import_failed": "批量导入{entity}失败",
+    "csv_import_partial": "部分 CSV 导入{entity}成功（存在失败项）",
+    "csv_import_failed": "CSV 批量导入{entity}失败",
 }
 
 # ---------------------------------------------------------------------------

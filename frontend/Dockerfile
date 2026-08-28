@@ -81,6 +81,22 @@ server {
         proxy_read_timeout 300s;
     }
 
+    # API 文档（Swagger UI / Redoc / OpenAPI 规范）：反代到后端
+    # FastAPI 默认 Swagger UI 静态资源从 jsdelivr CDN 加载——该 location 覆盖全局 CSP
+    # 放行 CDN 脚本/样式（页面其余区域仍受全局严格 CSP 保护）。
+    location ~ ^/(docs|redoc|openapi\.json)$ {
+        set $backend_upstream http://backend:8000;
+        proxy_pass $backend_upstream;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; img-src 'self' data: https://cdn.jsdelivr.net; font-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self'; frame-ancestors 'none'" always;
+        proxy_connect_timeout 30s;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+    }
+
     # 静态资源缓存
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ {
         root /usr/share/nginx/html;
