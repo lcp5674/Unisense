@@ -209,7 +209,7 @@ describe("MetricCatalog", () => {
       org_id: 1,
     });
     mockedFavorites.mockResolvedValue([]);
-    // 批量下线下游审查：默认无下游（各用例按需覆盖）
+    // 批量废弃下游审查：默认无下游（各用例按需覆盖）
     mockedDownstream.mockResolvedValue([]);
   });
 
@@ -361,7 +361,7 @@ describe("MetricCatalog", () => {
     const calls = mockedList.mock.calls;
     expect(calls.length).toBeGreaterThan(0);
     // 任何一次查询都不得丢失 URL 带来的状态过滤
-    // （跳过批量下线替代指标探针：listMetrics({page_size:100, status:"PUBLISHED"}) 仅 2 键）
+    // （跳过批量废弃替代指标探针：listMetrics({page_size:100, status:"PUBLISHED"}) 仅 2 键）
     for (const c of calls) {
       const p = c[0] ?? {};
       if (Object.keys(p).length === 2 && p.page_size === 100 && p.status === "PUBLISHED") continue;
@@ -710,7 +710,7 @@ describe("MetricCatalog", () => {
     expect(screen.getByText("仅管理员或创建者可删")).toBeTruthy();
   });
 
-  it("批量下线：无下游引用的指标可留空替代指标直接下线（successor_code=null）", async () => {
+  it("批量废弃：无下游引用的指标可留空替代指标直接下线（successor_code=null）", async () => {
     const p = { ...metric, status: "PUBLISHED" as const };
     mockedList.mockResolvedValue({ items: [p], total: 1, page: 1, page_size: 20 });
     mockedDownstream.mockResolvedValue([
@@ -726,11 +726,11 @@ describe("MetricCatalog", () => {
     const selectAll = document.querySelector(".ant-table-selection-column input[type=checkbox]") as Element;
     fireEvent.click(selectAll);
     fireEvent.click(screen.getByRole("button", { name: /批量操作/ }));
-    fireEvent.click(screen.getByText("批量下线（已发布）"));
-    // 下游审查展示：绿色「无下游引用，可安全下线」
-    await screen.findByText("✓ 无下游引用，可安全下线");
+    fireEvent.click(screen.getByText("批量废弃（已发布）"));
+    // 下游审查展示：绿色「无下游引用，可安全废弃」
+    await screen.findByText("✓ 无下游引用，可安全废弃");
     // 不填替代直接确认 → 允许提交（successor_code=null）
-    fireEvent.click(screen.getByRole("button", { name: /下\s*线/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^废\s*弃$/ }));
     await waitFor(() => {
       expect(mockedBatchDeprecate).toHaveBeenCalledWith([
         { metric_code: "sales_gmv_sum_d", successor_code: null },
@@ -738,7 +738,7 @@ describe("MetricCatalog", () => {
     });
   });
 
-  it("批量下线：有下游引用未填替代 → 前端拦截标红（不提交）", async () => {
+  it("批量废弃：有下游引用未填替代 → 前端拦截标红（不提交）", async () => {
     const p = { ...metric, status: "PUBLISHED" as const };
     mockedList.mockResolvedValue({ items: [p], total: 1, page: 1, page_size: 20 });
     mockedDownstream.mockResolvedValue([
@@ -753,17 +753,17 @@ describe("MetricCatalog", () => {
     const selectAll = document.querySelector(".ant-table-selection-column input[type=checkbox]") as Element;
     fireEvent.click(selectAll);
     fireEvent.click(screen.getByRole("button", { name: /批量操作/ }));
-    fireEvent.click(screen.getByText("批量下线（已发布）"));
+    fireEvent.click(screen.getByText("批量废弃（已发布）"));
     // 下游审查展示：橙色「被 1 处下游引用」
     await screen.findByText("⚠ 被 1 处下游引用");
     // 未填替代直接确认 → 前端拦截（标红 + 提示），不提交
-    fireEvent.click(screen.getByRole("button", { name: /下\s*线/ }));
-    await screen.findByText(/以下 1 个指标存在下游引用，须填写替代指标后才能下线/);
+    fireEvent.click(screen.getByRole("button", { name: /^废\s*弃$/ }));
+    await screen.findByText(/以下 1 个指标存在下游引用，须填写替代指标后才能废弃/);
     await screen.findByText("须填写替代指标");
     expect(mockedBatchDeprecate).not.toHaveBeenCalled();
   });
 
-  it("批量下线：有下游引用填写替代指标后正常提交", async () => {
+  it("批量废弃：有下游引用填写替代指标后正常提交", async () => {
     const p = { ...metric, status: "PUBLISHED" as const };
     mockedList.mockResolvedValue({ items: [p], total: 1, page: 1, page_size: 20 });
     mockedDownstream.mockResolvedValue([
@@ -800,7 +800,7 @@ describe("MetricCatalog", () => {
     const selectAll = document.querySelector(".ant-table-selection-column input[type=checkbox]") as Element;
     fireEvent.click(selectAll);
     fireEvent.click(screen.getByRole("button", { name: /批量操作/ }));
-    fireEvent.click(screen.getByText("批量下线（已发布）"));
+    fireEvent.click(screen.getByText("批量废弃（已发布）"));
     await screen.findByText("⚠ 被 1 处下游引用");
     // 选择替代指标 sales_gmv_ratio（作用域限定在弹窗内，避免命中顶部筛选 Select；
     // 点击 .ant-select-item-option 本体才能触发选中，对齐 clickSelectOption 模式）
@@ -817,7 +817,7 @@ describe("MetricCatalog", () => {
       expect(option).toBeTruthy();
       if (option) fireEvent.click(option);
     });
-    fireEvent.click(screen.getByRole("button", { name: /下\s*线/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^废\s*弃$/ }));
     await waitFor(() => {
       expect(mockedBatchDeprecate).toHaveBeenCalledWith([
         { metric_code: "sales_gmv_sum_d", successor_code: "sales_gmv_ratio" },

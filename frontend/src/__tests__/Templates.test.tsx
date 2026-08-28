@@ -331,7 +331,7 @@ describe("Templates 页面", () => {
     await screen.findByText("从模板实例化：GMV 日汇总模板");
     // 原子类型 → 显示逻辑度量下拉，且预填模板 measure_id（TPLS[0].measure_id=1）
     await waitFor(() => {
-      expect(screen.getByText("逻辑度量（OneData 原子层）")).toBeTruthy();
+      expect(screen.getByText("原子指标口径（OneData 原子层）")).toBeTruthy();
     });
     fireEvent.click(screen.getByText("实例化创建"));
     await waitFor(() => {

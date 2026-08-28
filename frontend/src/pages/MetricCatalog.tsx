@@ -87,7 +87,7 @@ const BATCH_ACTION_LABEL: Record<string, string> = {
   delete: "删除",
   approve: "通过",
   reject: "打回",
-  deprecate: "下线",
+  deprecate: "废弃",
 };
 
 // 健康度分级（backend metric_health_score：>=85 EXCELLENT / >=70 GOOD / >=55 WARNING / <55 CRITICAL）
@@ -523,7 +523,7 @@ export function MetricCatalog() {
   // 无权限则禁用导出按钮，防止 viewer/analyst 等角色导出含 PII 口径的指标清单（数据导出权限缺口）。
   const canExport = can("metric:export");
   // 批量操作确认弹窗：null=关闭 / submit=批量提交审核 / delete=批量删除 /
-  // approve=批量通过 / reject=批量打回 / deprecate=批量下线 / reactivate=批量恢复
+  // approve=批量通过 / reject=批量打回 / deprecate=批量废弃 / reactivate=批量恢复
   const [batchAction, setBatchAction] = useState<
     "submit" | "delete" | "approve" | "reject" | "deprecate" | "reactivate" | null
   >(null);
@@ -544,18 +544,18 @@ export function MetricCatalog() {
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<MetricImportResult | null>(null);
   const [importDomain, setImportDomain] = useState("");
-  // 批量打回原因 / 批量下线替代指标映射
+  // 批量打回原因 / 批量废弃替代指标映射
   const [batchRejectReason, setBatchRejectReason] = useState("");
   const [batchSuccessors, setBatchSuccessors] = useState<Record<string, string>>({});
   // P1-3（第六轮）：批量通过支持灰度发布（对齐单条 MetricReview）——
   // standard=标准发布 / experimental=灰度发布（仅指定租户可见）
   const [batchApproveMode, setBatchApproveMode] = useState<"standard" | "experimental">("standard");
   const [batchGrayTenants, setBatchGrayTenants] = useState("");
-  // 批量下线替代指标选项：已发布指标（排除勾选集内编码，防替代自身/互替代）
+  // 批量废弃替代指标选项：已发布指标（排除勾选集内编码，防替代自身/互替代）
   const [batchSuccessorOptions, setBatchSuccessorOptions] = useState<
     Array<{ value: string; label: string }>
   >([]);
-  // 批量下线替代指标选项（惰性：仅在打开批量下线面板时加载一次已发布指标，避免挂载时多余查询）
+  // 批量废弃替代指标选项（惰性：仅在打开批量废弃面板时加载一次已发布指标，避免挂载时多余查询）
   function loadSuccessorOptions() {
     if (batchSuccessorOptions.length) return;
     listMetrics({ page_size: 100, status: "PUBLISHED" })
@@ -566,7 +566,7 @@ export function MetricCatalog() {
       )
       .catch(() => setBatchSuccessorOptions([]));
   }
-  // 批量下线下游使用审查：打开批量下线面板时惰性加载勾选已发布指标的被引用情况
+  // 批量废弃下游使用审查：打开批量废弃面板时惰性加载勾选已发布指标的被引用情况
   const [downstreamMap, setDownstreamMap] = useState<Record<string, MetricDownstreamCheckResult>>({});
   const [downstreamLoading, setDownstreamLoading] = useState(false);
   // 有下游但未填替代指标被前端拦截的行（标红提示）
@@ -1001,7 +1001,7 @@ export function MetricCatalog() {
           intercepted = true;
           setDeprecateBlocked(new Set(blocked.map((m) => m.metric_code)));
           message.error(
-            `以下 ${blocked.length} 个指标存在下游引用，须填写替代指标后才能下线：${blocked
+            `以下 ${blocked.length} 个指标存在下游引用，须填写替代指标后才能废弃：${blocked
               .map((m) => m.metric_code)
               .join("、")}`,
           );
@@ -1909,13 +1909,13 @@ export function MetricCatalog() {
                     <Tooltip
                       title={
                         !selected.some((m) => m.status === "PUBLISHED")
-                          ? "批量下线仅适用于勾选中的已发布（PUBLISHED）指标；当前勾选无已发布指标"
+                          ? "批量废弃仅适用于勾选中的已发布（PUBLISHED）指标；当前勾选无已发布指标"
                           : !canDeprecate
-                            ? "无下线权限（metric:deprecate）"
+                            ? "无废弃权限（metric:deprecate）"
                             : undefined
                       }
                     >
-                      <span>批量下线（已发布）</span>
+                      <span>批量废弃（已发布）</span>
                     </Tooltip>
                   ),
                   icon: <DeleteOutlined />,
@@ -1978,7 +1978,7 @@ export function MetricCatalog() {
                   | "reactivate";
                 if (act === "deprecate") {
                   loadSuccessorOptions();
-                  // 打开批量下线面板即审查勾选已发布指标的下游使用情况
+                  // 打开批量废弃面板即审查勾选已发布指标的下游使用情况
                   setDeprecateBlocked(new Set());
                   loadDownstreamCheck(
                     selected.filter((m) => m.status === "PUBLISHED").map((m) => m.metric_code),
@@ -2292,7 +2292,7 @@ export function MetricCatalog() {
               : batchAction === "reject"
                 ? "批量打回"
                 : batchAction === "deprecate"
-                  ? "批量下线"
+                  ? "批量废弃"
                   : batchAction === "reactivate"
                     ? "批量恢复已废弃指标"
                     : "批量删除草稿"
@@ -2309,7 +2309,7 @@ export function MetricCatalog() {
               : batchAction === "reject"
                 ? "打回"
                 : batchAction === "deprecate"
-                  ? "下线"
+                  ? "废弃"
                   : batchAction === "reactivate"
                     ? "恢复"
                     : "删除"
@@ -2409,10 +2409,10 @@ export function MetricCatalog() {
         {batchAction === "deprecate" && (
           <div>
             <p>
-              将勾选的 <b>{selected.filter((m) => m.status === "PUBLISHED").length}</b> 个已发布指标下线
+              将勾选的 <b>{selected.filter((m) => m.status === "PUBLISHED").length}</b> 个已发布指标废弃
               （PUBLISHED → DEPRECATED）。已先审查每个指标的下游使用情况：
               <b style={{ color: "#fa8c16" }}>有下游引用须填替代指标</b>，
-              <b style={{ color: "#52c41a" }}>无下游引用可安全下线（替代指标选填）</b>。
+              <b style={{ color: "#52c41a" }}>无下游引用可安全废弃（替代指标选填）</b>。
             </p>
             {selected
               .filter((m) => m.status === "PUBLISHED")
@@ -2457,7 +2457,7 @@ export function MetricCatalog() {
                           <Tag color="orange">⚠ 被 {info.referrer_count} 处下游引用</Tag>
                         </Tooltip>
                       ) : (
-                        <Tag color="green">✓ 无下游引用，可安全下线</Tag>
+                        <Tag color="green">✓ 无下游引用，可安全废弃</Tag>
                       )}
                       {blocked && (
                         <span style={{ color: "#ff4d4f", fontSize: 12 }}>须填写替代指标</span>

@@ -753,10 +753,10 @@ export function Templates() {
                 getFieldValue("type") === "atomic" ? (
                   <Form.Item
                     name="measure_id"
-                    label="逻辑度量（OneData 原子层）"
+                    label="原子指标口径（OneData 原子层）"
                     extra={
                       <span className="muted" style={{ fontSize: 12 }}>
-                        原子指标 = 逻辑度量 + 基础统计粒度（日），不绑定业务限定与时间周期；度量格式/单位/小数位实例化时继承
+                        原子指标 = 原子指标口径 + 基础统计粒度（日），不绑定业务限定与时间周期；度量格式/单位/小数位实例化时继承
                       </span>
                     }
                     style={{ width: "100%", marginBottom: 8 }}
@@ -764,7 +764,7 @@ export function Templates() {
                     <Select
                       showSearch
                       allowClear
-                      placeholder="选择或搜索逻辑度量（仅已发布可选，如 支付金额 pay_amt）"
+                      placeholder="选择或搜索原子指标口径（仅已发布可选，如 支付金额 pay_amt）"
                       optionFilterProp="label"
                       options={measureOptions.map((o) => ({ value: o.value, label: o.label }))}
                     />
@@ -900,7 +900,7 @@ export function Templates() {
                 {detailTpl.required_fields?.length ? detailTpl.required_fields.join("、") : <span className="muted">—</span>}
               </Descriptions.Item>
               {/* OneData 预设（方案A）：逻辑度量 / 挂载实体 / 三方责任 */}
-              <Descriptions.Item label="逻辑度量预设">
+              <Descriptions.Item label="原子指标口径预设">
                 {detailTpl.measure_id
                   ? measureOptions.find((o) => o.value === detailTpl.measure_id)?.measure.name
                     ? `${measureOptions.find((o) => o.value === detailTpl.measure_id)?.measure.name} (${measureOptions.find((o) => o.value === detailTpl.measure_id)?.measure.measure_code})`
@@ -975,7 +975,7 @@ export function Templates() {
                 getFieldValue("type") === "atomic" ? (
                   <Form.Item
                     name="measure_id"
-                    label="逻辑度量预设（OneData 原子层）"
+                    label="原子指标口径预设（OneData 原子层）"
                     extra={
                       <span className="muted" style={{ fontSize: 12 }}>
                         仅已发布度量可选；实例化时继承度量格式/单位/小数位
@@ -987,7 +987,7 @@ export function Templates() {
                       showSearch
                       allowClear
                       optionFilterProp="label"
-                      placeholder="选择逻辑度量（仅已发布可选）"
+                      placeholder="选择原子指标口径（仅已发布可选）"
                       options={measureOptions.map((o) => ({ value: o.value, label: o.label }))}
                     />
                   </Form.Item>

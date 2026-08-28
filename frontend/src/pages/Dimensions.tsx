@@ -72,7 +72,7 @@ import {
   useMasterDataReview,
 } from "../components/MasterDataReview";
 
-const STATUS_COLOR: Record<string, string> = { DRAFT: "default", REVIEW: "processing", PUBLISHED: "success", DEPRECATED: "error" };
+const STATUS_COLOR: Record<string, string> = { DRAFT: "default", REVIEW: "warning", PUBLISHED: "success", DEPRECATED: "error" };
 const STATUS_LABEL: Record<string, string> = { DRAFT: "草稿", REVIEW: "审核中", PUBLISHED: "已发布", DEPRECATED: "已废弃" };
 // 指标 6 状态中文标签/颜色（区别于维度 3 状态）：绑定指标列表列渲染使用，
 // 避免用维度状态映射渲染指标状态导致 EXPERIMENTAL/REVIEW/DATA_SOURCE_DROPPED 直出英文。

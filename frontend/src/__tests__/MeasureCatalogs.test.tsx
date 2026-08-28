@@ -134,7 +134,7 @@ function renderCatalogs() {
 }
 
 async function openCreateModal() {
-  fireEvent.click(await screen.findByRole("button", { name: /新建逻辑度量/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /新建原子指标口径/ }));
   const modal = await screen.findByRole("dialog");
   return modal;
 }
@@ -212,7 +212,7 @@ describe("MeasureCatalogs 度量目录 AI 推断", () => {
 
     // 回填断言
     await waitFor(() => {
-      expect(within(modal).getByLabelText("逻辑度量编码（英文，缺省自动生成）")).toHaveValue(
+      expect(within(modal).getByLabelText("原子指标口径编码（英文，缺省自动生成）")).toHaveValue(
         "medical_fee_men_zhen_shou_fei_amount",
       );
     });
@@ -296,6 +296,8 @@ describe("MeasureCatalogs 审核流（提交审核/通过/驳回）", () => {
     vi.clearAllMocks();
     mockedDictItems.mockResolvedValue(MOCK_CATEGORY_DICT);
     mockedDomains.mockResolvedValue([]);
+    // P15 顺带修复：补 list 默认值（此前依赖前序测试泄漏，-t 单跑/重排即失败）
+    mockedList.mockResolvedValue({ items: [measure], total: 1, page: 1, page_size: 20 });
     mockedUsers.mockResolvedValue([
       {
         id: 3,
@@ -439,7 +441,7 @@ describe("MeasureCatalogs 审核流（提交审核/通过/驳回）", () => {
       expect(mockedBatchSubmit).toHaveBeenCalledWith([
         {
           code: "medical_fee_men_zhen_shou_fei",
-          change_reason: "批量提交逻辑度量审核",
+          change_reason: "批量提交原子指标口径审核",
           reviewer_id: null,
           reviewer_type: null,
           reviewer_domain: null,

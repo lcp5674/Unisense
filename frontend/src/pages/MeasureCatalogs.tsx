@@ -51,7 +51,7 @@ import {
 
 const STATUS_COLOR: Record<string, string> = {
   DRAFT: "default",
-  REVIEW: "processing",
+  REVIEW: "warning",
   PUBLISHED: "success",
   DEPRECATED: "error",
 };
@@ -378,7 +378,7 @@ export function MeasureCatalogs() {
           category: values.category ?? "OTHER",
           stat_caliber: values.stat_caliber ?? null,
         });
-        message.success("逻辑度量已创建（草稿）");
+        message.success("原子指标口径已创建（草稿）");
       }
       setModalOpen(false);
       await load();
@@ -495,7 +495,7 @@ export function MeasureCatalogs() {
       extra={
         canWrite ? (
           <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-            新建逻辑度量
+            新建原子指标口径
           </Button>
         ) : null
       }
@@ -545,7 +545,7 @@ export function MeasureCatalogs() {
         <MasterDataBatch
           selected={selected}
           codeKey="measure_code"
-          entityLabel="逻辑度量"
+          entityLabel="原子指标口径"
           actions={[
             { key: "submit", label: "批量提交审核（草稿）" },
             { key: "approve", label: "批量通过（审核中）" },
@@ -649,7 +649,7 @@ export function MeasureCatalogs() {
                 return (
                   <Space size={4}>
                     <Popconfirm
-                      title="确认恢复该逻辑度量？"
+                      title="确认恢复该原子指标口径？"
                       description="恢复后回到原状态（草稿/废弃），可重新走审核流"
                       onConfirm={() => handleRestore(row)}
                     >
@@ -657,7 +657,7 @@ export function MeasureCatalogs() {
                     </Popconfirm>
                     {canPurge && (
                       <Popconfirm
-                        title="确认彻底删除该逻辑度量？"
+                        title="确认彻底删除该原子指标口径？"
                         description="物理删除不可恢复；被指标引用的度量无法彻底删除"
                         okButtonProps={{ danger: true }}
                         onConfirm={() => handlePurge(row)}
@@ -696,7 +696,7 @@ export function MeasureCatalogs() {
                   />
                   {row.status === "PUBLISHED" && (
                     <Popconfirm
-                      title="确认废弃该逻辑度量？"
+                      title="确认废弃该原子指标口径？"
                       description="被指标引用的度量无法废弃"
                       onConfirm={() => handleDeprecate(row)}
                     >
@@ -706,14 +706,14 @@ export function MeasureCatalogs() {
                   {row.status === "DEPRECATED" && (
                     <>
                       <Popconfirm
-                        title="确认重新启用该逻辑度量？"
+                        title="确认重新启用该原子指标口径？"
                         description="回到草稿状态，需重新提交审核后才能发布"
                         onConfirm={() => handleReactivate(row)}
                       >
                         <Button size="small" icon={<RedoOutlined />}>重新启用</Button>
                       </Popconfirm>
                       <Popconfirm
-                        title="确认删除该逻辑度量？"
+                        title="确认删除该原子指标口径？"
                         description="删除后进入回收站，可恢复；被指标引用的度量无法删除"
                         onConfirm={() => handleDelete(row)}
                       >
@@ -723,7 +723,7 @@ export function MeasureCatalogs() {
                   )}
                   {row.status === "DRAFT" && (
                     <Popconfirm
-                      title="确认删除该逻辑度量？"
+                      title="确认删除该原子指标口径？"
                       description="删除后进入回收站，可恢复"
                       onConfirm={() => handleDelete(row)}
                     >
@@ -738,7 +738,7 @@ export function MeasureCatalogs() {
       />
 
       <Modal
-        title={editing ? `编辑逻辑度量 · ${editing.measure_code}` : "新建逻辑度量"}
+        title={editing ? `编辑原子指标口径 · ${editing.measure_code}` : "新建原子指标口径"}
         open={modalOpen}
         onOk={handleSubmit}
         onCancel={() => setModalOpen(false)}
@@ -749,7 +749,7 @@ export function MeasureCatalogs() {
           {!editing && (
             <Form.Item
               name="measure_code"
-              label="逻辑度量编码（英文，缺省自动生成）"
+              label="原子指标口径编码（英文，缺省自动生成）"
               rules={[{ pattern: /^[a-z][a-z0-9_]*$/, message: "小写字母开头，仅小写字母/数字/下划线" }]}
             >
               <Input placeholder="如 pay_amt" maxLength={64} />
@@ -880,7 +880,7 @@ export function MeasureCatalogs() {
 
       {/* 提交审核 + 驳回审核 Modal（共享组件）：度量发布前须评审通过 */}
       <MasterDataReviewModals
-        entityLabel="逻辑度量"
+        entityLabel="原子指标口径"
         submitDescription="度量是原子指标的权威定义（单位/格式/小数位/口径直接传播到下游指标）。提交后由评审人审核通过才可发布；审核期间度量锁定不可编辑，驳回后可修改重提。"
         reviewerDomainOptions={domainOptions}
         user={currentUser}
