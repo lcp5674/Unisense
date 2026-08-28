@@ -2310,6 +2310,15 @@ export interface AssetCatalogSummary {
   by_source?: Array<{ source_id: string; source_name: string; count: number }>;
   /** 按库分布（entity_name 首段 / count，count 降序） */
   by_database?: Array<{ database: string; count: number }>;
+  /** 目录资产 PII 合规（敏感资产 = PII/CONFIDENTIAL，口径对齐 observability pii_review_pending） */
+  pii_compliance?: {
+    sensitive_total: number;
+    reviewed: number;
+    pending: number;
+    /** 合规率 0-100（无敏感资产时 100） */
+    compliance_rate: number;
+    by_sensitivity: Record<string, number>;
+  };
 }
 
 export interface AssetClassificationSummary {

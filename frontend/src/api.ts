@@ -3902,6 +3902,8 @@ export async function listCatalogs(params?: {
   source_status?: "active" | "deleted";
   /** 责任人（Owner）ID 过滤（总览仪表 Owner 责任分布下钻） */
   owner_id?: number;
+  /** 仅未复核敏感资产（PII/CONFIDENTIAL 且未合规复核）——PII 合规卡下钻 */
+  pending_review?: boolean;
   page?: number;
   page_size?: number;
 }): Promise<{ items: DBCatalog[]; total: number; page: number; page_size: number }> {
@@ -3914,6 +3916,8 @@ export async function listCatalogs(params?: {
     keyword: params?.keyword,
     source_status: params?.source_status,
     owner_id: params?.owner_id,
+    pending_review:
+      params?.pending_review === undefined ? undefined : String(params.pending_review),
     page: params?.page ?? 1,
     page_size: params?.page_size ?? 20,
   });

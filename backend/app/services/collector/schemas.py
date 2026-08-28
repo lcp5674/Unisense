@@ -416,6 +416,11 @@ class DBCatalogListParams(BaseModel):
     source_status: str | None = Field(default=None, pattern=r"^(active|deleted|all)$")
     # 责任人（Owner）ID 过滤（总览仪表 Owner 责任分布下钻用）
     owner_id: int | None = Field(default=None, description="责任人（Owner）ID 过滤")
+    # 待复核敏感资产过滤（sensitivity IN (PII,CONFIDENTIAL) 且未合规复核）——
+    # 资产地图 PII 合规卡下钻未复核敏感资产明细用
+    pending_review: bool | None = Field(
+        default=None, description="仅未复核敏感资产（PII/CONFIDENTIAL 且未复核）"
+    )
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1, le=200)
 

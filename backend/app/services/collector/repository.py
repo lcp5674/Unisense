@@ -482,6 +482,12 @@ class CollectorRepository:
             # 库名 = entity_name 前缀（库.表）；LIKE 通配符转义防模糊放大
             esc_db = db_name.replace("/", "//").replace("%", "/%").replace("_", "/_")
             base = base.where(DBCatalog.entity_name.ilike(f"{esc_db}.%", escape="/"))
+        pending_review = getattr(params, "pending_review", None)
+        if pending_review:
+            base = base.where(
+                DBCatalog.sensitivity_level.in_(["PII", "CONFIDENTIAL"]),
+                DBCatalog.compliance_reviewed.is_(False),
+            )
         if params.keyword:
             # 表+字段级搜索：entity_name 模糊 OR schema_json 字段名/注释模糊（CAST 跨方言）
             # LIKE 通配符转义（对齐 FR-035：% / _ 须转义，防模糊放大）。
@@ -536,6 +542,12 @@ class CollectorRepository:
         if db_name:
             esc_db = db_name.replace("/", "//").replace("%", "/%").replace("_", "/_")
             base = base.where(DBCatalog.entity_name.ilike(f"{esc_db}.%", escape="/"))
+        pending_review = getattr(params, "pending_review", None)
+        if pending_review:
+            base = base.where(
+                DBCatalog.sensitivity_level.in_(["PII", "CONFIDENTIAL"]),
+                DBCatalog.compliance_reviewed.is_(False),
+            )
         if params.keyword:
             # 同款修复：/ 作转义符 + 显式 escape="/"（对齐 FR-035，防模糊放大）
             escaped = params.keyword.replace("/", "//").replace("%", "/%").replace("_", "/_")

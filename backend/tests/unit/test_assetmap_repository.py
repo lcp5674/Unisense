@@ -698,8 +698,16 @@ class TestAggregations:
         r_by_source.all.return_value = [("hive_meta", "Hive 元数据", 4), ("mysql_uni", None, 1)]
         r_by_db = MagicMock()
         r_by_db.all.return_value = [("wedw_dws", 3), ("wedw_dw", 2)]
+        r_pii = MagicMock()
+        r_pii.all.return_value = [
+            ("PII", True, 1),
+            ("PII", False, 2),
+            ("CONFIDENTIAL", False, 1),
+        ]
         s.execute = AsyncMock(
-            side_effect=[r_total, r_by_type, r_by_sens, r_orphan, r_by_source, r_by_db]
+            side_effect=[
+                r_total, r_by_type, r_by_sens, r_orphan, r_by_source, r_by_db, r_pii
+            ]
         )
 
         out = await repo.catalog_summary()
@@ -716,6 +724,14 @@ class TestAggregations:
             {"database": "wedw_dws", "count": 3},
             {"database": "wedw_dw", "count": 2},
         ]
+        # 目录资产 PII 合规：敏感 4（PII 3 / CONFIDENTIAL 1）、已复核 1、待复核 3、合规率 25%
+        assert out["pii_compliance"] == {
+            "sensitive_total": 4,
+            "reviewed": 1,
+            "pending": 3,
+            "compliance_rate": 25.0,
+            "by_sensitivity": {"PII": 3, "CONFIDENTIAL": 1},
+        }
 
     async def test_catalog_summary_source_database_sql(self) -> None:
         """按数据源/库聚合的 SQL 形态：join data_source 取名称、substring_index 拆库名。"""
@@ -738,6 +754,11 @@ class TestAggregations:
         assert "substring_index" in stmts[5]
         assert "LIKE" in stmts[5] and "'%.%'" in stmts[5]
         assert "ORDER BY" in src_sql and "DESC" in src_sql
+        # 目录资产 PII 合规聚合：敏感度 IN (PII,CONFIDENTIAL) + 未删 + 按敏感度×复核态分组
+        pii_sql = stmts[6]
+        assert "PII" in pii_sql and "CONFIDENTIAL" in pii_sql
+        assert "compliance_reviewed" in pii_sql
+        assert "GROUP BY" in pii_sql
 
     async def test_heatmap_default_domain(self) -> None:
         s = _session()

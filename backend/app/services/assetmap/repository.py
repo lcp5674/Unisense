@@ -713,6 +713,34 @@ class AssetMapRepository:
                 .order_by(func.count().desc())
             )
         ).all()
+        # 目录资产 PII 合规：敏感资产（PII/CONFIDENTIAL）按敏感度 × 是否已复核聚合，
+        # 合规率 = 已复核 / 敏感总数（无敏感资产视为 100%）。口径与 observability
+        # pii_review_pending 一致（sensitivity_level IN (PII,CONFIDENTIAL) AND 未删）。
+        pii_rows = (
+            await self._session.execute(
+                select(
+                    DBCatalog.sensitivity_level,
+                    DBCatalog.compliance_reviewed,
+                    func.count(),
+                )
+                .where(
+                    DBCatalog.deleted_at.is_(None),
+                    DBCatalog.sensitivity_level.in_(["PII", "CONFIDENTIAL"]),
+                )
+                .group_by(DBCatalog.sensitivity_level, DBCatalog.compliance_reviewed)
+            )
+        ).all()
+        pii_sens: dict[str, int] = {"PII": 0, "CONFIDENTIAL": 0}
+        pii_reviewed = 0
+        pii_pending = 0
+        for sens, reviewed, cnt in pii_rows:
+            n = int(cnt or 0)
+            pii_sens[sens] = pii_sens.get(sens, 0) + n
+            if reviewed:
+                pii_reviewed += n
+            else:
+                pii_pending += n
+        pii_total = pii_reviewed + pii_pending
         return {
             "total": total,
             "by_entity_type": dict(cast("Sequence[tuple[Any, Any]]", by_type)),
@@ -725,6 +753,15 @@ class AssetMapRepository:
             "by_database": [
                 {"database": db, "count": int(cnt or 0)} for db, cnt in by_database
             ],
+            "pii_compliance": {
+                "sensitive_total": pii_total,
+                "reviewed": pii_reviewed,
+                "pending": pii_pending,
+                "compliance_rate": (
+                    round(pii_reviewed / pii_total * 100, 1) if pii_total else 100.0
+                ),
+                "by_sensitivity": pii_sens,
+            },
         }
 
     async def classification_summary(self) -> dict[str, Any]:

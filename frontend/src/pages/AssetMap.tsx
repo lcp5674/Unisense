@@ -1097,16 +1097,19 @@ function OverviewTab() {
     sensitivity_level?: string;
     source_id?: string;
     database?: string;
+    pending_review?: boolean;
   }) {
-    const title = params?.entity_type
-      ? `实体类型：${ENTITY_TYPE_LABEL[params.entity_type] ?? params.entity_type}`
-      : params?.sensitivity_level
-        ? `敏感度：${SENSITIVITY_LABEL[params.sensitivity_level] ?? params.sensitivity_level}`
-        : params?.source_id
-          ? `数据源：${summary?.by_source?.find((s) => s.source_id === params.source_id)?.source_name ?? params.source_id}`
-          : params?.database
-            ? `库：${params.database}`
-            : "目录资产明细";
+    const title = params?.pending_review
+      ? "待复核敏感资产明细"
+      : params?.entity_type
+        ? `实体类型：${ENTITY_TYPE_LABEL[params.entity_type] ?? params.entity_type}`
+        : params?.sensitivity_level
+          ? `敏感度：${SENSITIVITY_LABEL[params.sensitivity_level] ?? params.sensitivity_level}`
+          : params?.source_id
+            ? `数据源：${summary?.by_source?.find((s) => s.source_id === params.source_id)?.source_name ?? params.source_id}`
+            : params?.database
+              ? `库：${params.database}`
+              : "目录资产明细";
     return openDrill(title, CATALOG_COLUMNS, async () => {
       const r = await listCatalogs({ ...params, page_size: 200 });
       return r.items as unknown as DrillRow[];
@@ -1327,6 +1330,48 @@ function OverviewTab() {
       </Row>
 
       <Card
+        size="small"
+        title="目录资产 PII 合规"
+        style={{ marginTop: 16 }}
+        extra={
+          <span className="muted" style={{ fontSize: 12 }}>
+            敏感资产 = PII / CONFIDENTIAL 分类
+          </span>
+        }
+      >
+        <Row gutter={[16, 16]}>
+          <Col xs={24} sm={8}>
+            <Statistic
+              title="合规率"
+              value={summary?.pii_compliance?.compliance_rate ?? 0}
+              precision={1}
+              suffix="%"
+              valueStyle={{
+                color: (summary?.pii_compliance?.compliance_rate ?? 0) >= 80 ? "#2e9e5b" : "#d64545",
+              }}
+            />
+          </Col>
+          <Col xs={24} sm={16}>
+            <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+              已复核 {summary?.pii_compliance?.reviewed ?? 0} /{" "}
+              {summary?.pii_compliance?.sensitive_total ?? 0} 个敏感资产
+              （PII {summary?.pii_compliance?.by_sensitivity?.PII ?? 0} / CONFIDENTIAL{" "}
+              {summary?.pii_compliance?.by_sensitivity?.CONFIDENTIAL ?? 0}）
+            </div>
+            <Space size={[6, 6]} wrap>
+              <Tag
+                color="red"
+                style={{ cursor: "pointer", margin: 0 }}
+                onClick={() => drillCatalogs({ pending_review: true })}
+              >
+                待复核 {summary?.pii_compliance?.pending ?? 0} 项（点击查看明细）
+              </Tag>
+            </Space>
+          </Col>
+        </Row>
+      </Card>
+
+      <Card
         title="指标体系"
         size="small"
         style={{ marginTop: 16 }}
@@ -1361,7 +1406,7 @@ function OverviewTab() {
             );
           })}
           <Col xs={24} sm={12} lg={6}>
-            <Card size="small" title="PII 合规" styles={{ body: { padding: "8px 12px" } }}>
+            <Card size="small" title="指标 PII 合规" styles={{ body: { padding: "8px 12px" } }}>
               <Statistic
                 title="合规率"
                 value={

@@ -1224,6 +1224,45 @@ async def test_repo_list_catalogs_filters_by_domain():
     assert "'sales'" in compiled
 
 
+async def test_repo_list_catalogs_filters_pending_review():
+    """pending_review 过滤：sensitivity IN (PII,CONFIDENTIAL) 且未合规复核。"""
+    s = _session(all_rows=[], scalar=0)
+    repo = CollectorRepository(s)
+    params = SimpleNamespace(
+        source_id=None,
+        entity_type=None,
+        sensitivity_level=None,
+        keyword=None,
+        database=None,
+        pending_review=True,
+        page=1,
+        page_size=20,
+    )
+    await repo.list_catalogs(params)
+    stmt = s.execute.call_args_list[0].args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "PII" in compiled and "CONFIDENTIAL" in compiled
+    assert "compliance_reviewed" in compiled and "0" in compiled
+    # 缺省（False/None）不加过滤
+    s2 = _session(all_rows=[], scalar=0)
+    repo2 = CollectorRepository(s2)
+    await repo2.list_catalogs(
+        SimpleNamespace(
+            source_id=None,
+            entity_type=None,
+            sensitivity_level=None,
+            keyword=None,
+            database=None,
+            page=1,
+            page_size=20,
+        )
+    )
+    stmt2 = s2.execute.call_args_list[0].args[0]
+    compiled2 = str(stmt2.compile(compile_kwargs={"literal_binds": True}))
+    # 缺省不加过滤：WHERE 不含 PII/CONFIDENTIAL 常量（列名在 SELECT 中恒存在，不作断言）
+    assert "PII" not in compiled2 and "CONFIDENTIAL" not in compiled2
+
+
 async def test_repo_list_catalog_databases_returns_distinct_prefix():
     """list_catalog_databases 返回去重库名（entity_name 前缀），可随 source_id 过滤。"""
     s = MagicMock()
