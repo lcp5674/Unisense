@@ -524,7 +524,7 @@ class DriftLogResponse(BaseModel):
     before_signature: str | None = None
     after_signature: str
     before_schema: dict[str, Any] | None = None
-    after_schema: dict[str, Any]
+    after_schema: dict[str, Any] | None = None
     diff_json: dict[str, Any] | None = None
     detected_at: str
 

@@ -122,7 +122,11 @@ async def test_collect_now_passes_temp_filters(
 async def test_drift_logs_endpoint_returns_paged(
     collector_client: httpx.AsyncClient,
 ) -> None:
-    """P1-4: GET /{source_id}/drift-logs 返回分页 drift 记录。"""
+    """P1-4: GET /{source_id}/drift-logs 返回分页 drift 记录。
+
+    P2-17 列表不返回全量 schema：service 将 after_schema 置 None，
+    schema 必须接受 None（回归：曾因 after_schema 必填 dict 致 500）。
+    """
     with patch(
         "app.api.collector.CollectorService.list_drift_logs",
         new_callable=AsyncMock,
@@ -135,7 +139,7 @@ async def test_drift_logs_endpoint_returns_paged(
                     "before_signature": None,
                     "after_signature": "sig2",
                     "before_schema": None,
-                    "after_schema": {"columns": [{"name": "age", "type": "int"}]},
+                    "after_schema": None,
                     "diff_json": {"added": ["age"], "removed": [], "changed": []},
                     "detected_at": "2026-02-01T00:00:00+00:00",
                 }
@@ -151,6 +155,7 @@ async def test_drift_logs_endpoint_returns_paged(
     assert body["total"] == 1
     assert body["items"][0]["entity_name"] == "users"
     assert body["items"][0]["change_type"] == "ADD_COLUMN"
+    assert body["items"][0]["after_schema"] is None
 
 
 async def test_list_jobs_returns_jobs(

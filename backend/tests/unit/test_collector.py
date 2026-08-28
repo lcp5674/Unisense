@@ -2276,6 +2276,8 @@ async def test_list_drift_logs_returns_paged_items():
     assert result["items"][0]["entity_name"] == "users"
     assert result["items"][0]["change_type"] == "ADD_COLUMN"
     assert result["items"][0]["detected_at"] is not None
+    # P2-17: 列表不返回全量 schema（避免懒加载大 JSON），after_schema 恒为 None
+    assert result["items"][0]["after_schema"] is None
 
 
 async def test_list_drift_logs_raises_not_found_for_missing_source():
