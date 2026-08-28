@@ -1854,6 +1854,17 @@ class CollectorService(BaseService):
                 db_setter = getattr(collector, "set_databases", None)
                 if db_setter is not None:
                     db_setter(src.databases)
+            # PII 精度增强：样本采样配置（quota.sample_rows，0/缺省=不采样）。
+            # 采样在连接器内部复用源库连接执行（见各连接器 sample_columns）。
+            sampling_setter = getattr(collector, "set_sampling", None)
+            if sampling_setter is not None:
+                quota_cfg = src.quota or {}
+                sample_rows = (
+                    int(quota_cfg.get("sample_rows") or 0)
+                    if isinstance(quota_cfg, dict)
+                    else 0
+                )
+                sampling_setter(sample_rows)
             result: CollectResult = await collector.collect(src)
         except Exception as exc:
             # P0-4: 健康状态更新必须落库——即使采集失败也要记录 unhealthy，
@@ -2149,6 +2160,18 @@ class CollectorService(BaseService):
                 f"数据源已停用: {source_id}，请先在数据源管理启用后再刷新",
                 error_code="SOURCE_DISABLED",
             )
+
+        # PII 精度增强：样本采样配置注入（与全量采集路径一致，
+        # quota.sample_rows，0/缺省=不采样）
+        sampling_setter = getattr(collector, "set_sampling", None)
+        if sampling_setter is not None:
+            quota_cfg = src.quota or {}
+            sample_rows = (
+                int(quota_cfg.get("sample_rows") or 0)
+                if isinstance(quota_cfg, dict)
+                else 0
+            )
+            sampling_setter(sample_rows)
 
         # 判断连接器是否真实覆盖了 collect_entity（区分「不支持」与「表不存在」）；
         # getattr 兜底防御：不继承 BaseCollector 的自定义采集器视为不支持单实体。

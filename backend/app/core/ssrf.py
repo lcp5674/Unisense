@@ -53,8 +53,9 @@ def _extract_hosts(cfg: dict[str, Any]) -> list[str]:
     """从连接配置提取候选 host 列表（不含端口）。
 
     覆盖：Kafka ``bootstrap_servers``（str 逗号分隔或 list）、``host``（str/list）、
-    ``registry_url``（Schema Registry 真实出站 URL 的 hostname）——任一遗漏都会
-    让 SSRF 校验被旁路（HIGH-4 回归防护）。
+    ``registry_url``（Schema Registry 真实出站 URL 的 hostname）、
+    ``sample_connection.host``（HMS 采样连接指向 HiveServer2，属 SSRF 向量）——
+    任一遗漏都会让 SSRF 校验被旁路（HIGH-4 回归防护）。
     """
     hosts: list[str] = []
     _collect_hostport(hosts, cfg.get(_KAFKA_BOOTSTRAP_KEY))
@@ -64,6 +65,11 @@ def _extract_hosts(cfg: dict[str, Any]) -> list[str]:
         parsed = urllib.parse.urlparse(registry.strip())
         if parsed.hostname:
             hosts.append(parsed.hostname)
+    # 采样连接（hive_metastore 的 sample_connection）指向 HiveServer2，
+    # 采集时会真实连接执行 SELECT——必须与主连接同等 SSRF 校验。
+    sample_conn = cfg.get("sample_connection")
+    if isinstance(sample_conn, dict):
+        _collect_hostport(hosts, sample_conn.get("host"))
     return hosts
 
 

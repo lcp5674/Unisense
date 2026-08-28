@@ -33,6 +33,7 @@ from sqlalchemy.exc import OperationalError
 from app.core.exceptions import ExternalDependencyError
 from app.services.collector.classifier import SensitivityClassifier
 from app.services.collector.connectors.collector_registry import registry
+from app.services.collector.connectors.hive import HiveCollector
 from app.services.collector.connectors.mysql import SqlalchemyConnector
 from app.services.collector.spi import (
     BaseCollector,
@@ -70,7 +71,13 @@ def _in_placeholders(values: list[str]) -> tuple[str, dict[str, str]]:
 
 
 class HiveMetastoreCollector(BaseCollector):
-    """HMS 直连采集器：从 metastore MySQL 库一次 JOIN 全量元数据。"""
+    """HMS 直连采集器：从 metastore MySQL 库一次 JOIN 全量元数据。
+
+    样本采样（可选）：HMS 元数据库只含表结构、不含数据，无法采样——若数据源
+    配置了 ``connection_config.sample_connection``（HiveServer2 连接信息），
+    采集时经 ``HiveCollector`` 直连 HiveServer2 对字段执行 SELECT 采样，样本
+    打码写入 ``schema_json.columns[].sample``（PII name+sample 双验证）。
+    """
 
     def __init__(
         self,
@@ -78,11 +85,20 @@ class HiveMetastoreCollector(BaseCollector):
         classifier: SensitivityClassifier | None = None,
         *,
         database: str | None = None,
+        sampler: HiveCollector | None = None,
     ) -> None:
         super().__init__(classifier)
         self._connector = connector
         # database 为 HMS 库名（连接凭据），采集范围由 _databases/枚举决定
         self._database = database or None
+        # 采样器：可选，指向 HiveServer2（元数据来自 MySQL 时数据只能经 Hive 取）
+        self._sampler = sampler
+
+    def set_sampling(self, max_rows: int = 0) -> None:
+        """注入采样配置并同步给采样器（HiveServer2 直连采样）。"""
+        super().set_sampling(max_rows)
+        if self._sampler is not None:
+            self._sampler.set_sampling(max_rows)
 
     # ---- 库/表枚举（供前端级联选择 + collect 范围）----
 
@@ -309,23 +325,47 @@ class HiveMetastoreCollector(BaseCollector):
 
         specs: list[CatalogSpec] = []
         failed_specs: list[FailedSpec] = []
-        for info in table_rows:
-            db, tbl = str(info.get("db_name") or ""), str(info.get("tbl_name") or "")
-            if not db or not tbl:
-                continue
-            entity_name = f"{db}.{tbl}"
+        # PII 精度增强：配置了 sample_connection 时直连 HiveServer2 采样。
+        # 复用同一连接遍历全部表（避免每表一次 TCP+认证握手）。
+        sampler_conn: Any | None = None
+        if self._sampling_max_rows and self._sampler is not None:
             try:
-                spec = self._build_spec(db, tbl, info, cols_by_table.get((db, tbl), []))
-                if self._keep_table(entity_name):
-                    specs.append(spec)
-            except Exception as exc:
-                logger.warning(
-                    "collect_hms_entity_failed: source=%s entity=%s error=%s",
-                    source_id,
-                    entity_name,
-                    exc,
-                )
-                failed_specs.append(FailedSpec(entity_name=entity_name, error=str(exc)))
+                sampler_conn = await self._sampler._connect_managed()
+            except Exception as exc:  # noqa: BLE001 - 采样连接失败不拖垮元数据采集
+                logger.warning("采样连接失败 source=%s error=%s", source_id, exc)
+        try:
+            for info in table_rows:
+                db, tbl = str(info.get("db_name") or ""), str(info.get("tbl_name") or "")
+                if not db or not tbl:
+                    continue
+                entity_name = f"{db}.{tbl}"
+                try:
+                    spec = self._build_spec(db, tbl, info, cols_by_table.get((db, tbl), []))
+                    if sampler_conn is not None:
+                        try:
+                            await self._sampler._sample_columns(
+                                entity_name, spec.schema_json.get("columns", []), sampler_conn
+                            )
+                        except Exception as exc:  # noqa: BLE001 - 单表采样失败跳过
+                            logger.warning(
+                                "采样失败 source=%s entity=%s error=%s",
+                                source_id,
+                                entity_name,
+                                exc,
+                            )
+                    if self._keep_table(entity_name):
+                        specs.append(spec)
+                except Exception as exc:
+                    logger.warning(
+                        "collect_hms_entity_failed: source=%s entity=%s error=%s",
+                        source_id,
+                        entity_name,
+                        exc,
+                    )
+                    failed_specs.append(FailedSpec(entity_name=entity_name, error=str(exc)))
+        finally:
+            if sampler_conn is not None:
+                await self._sampler._close(sampler_conn)
 
         return CollectResult(specs=specs, failed_specs=failed_specs, source_id=source_id)
 
@@ -366,10 +406,28 @@ def create_hive_metastore_collector(cfg: dict[str, Any]) -> HiveMetastoreCollect
     ``database`` 为 HMS 元数据库名（纯连接凭据），缺省按 ``hive`` 填充——
     与 schemas 层默认值一致，覆盖所有直接 ``build_from_cfg`` 的入口
     （连接预检/枚举/采集），避免 URL 无库导致的 ``1046 No database selected``。
+
+    ``sample_connection``（可选）：指向 HiveServer2 的采样连接——HMS 元数据库
+    只含表结构、不含数据，采样需直连 Hive 计算引擎执行 SELECT。配置后采集时
+    对字段采样（样本打码写入 schema_json.columns[].sample），未配置则不采样。
+    该 host 已纳入 SSRF 校验（ssrf.py _extract_hosts 递归提取）。
     """
     cfg = dict(cfg)
     if not str(cfg.get("database") or "").strip():
         cfg["database"] = "hive"
     url = _build_metastore_url(cfg)
     connector = SqlalchemyConnector(url, connect_timeout=10, query_timeout=60)
-    return HiveMetastoreCollector(connector, database=cfg["database"])
+    sampler: HiveCollector | None = None
+    sample_conn = cfg.get("sample_connection")
+    if isinstance(sample_conn, dict) and str(sample_conn.get("host") or "").strip():
+        sampler = HiveCollector(
+            host=str(sample_conn.get("host", "127.0.0.1")),
+            port=int(sample_conn.get("port") or 10000),
+            user=str(sample_conn.get("user") or ""),
+            password=str(sample_conn.get("password") or ""),
+            database=None,
+            auth=str(sample_conn.get("auth") or "") or None,
+            connect_timeout=10,
+            query_timeout=120,
+        )
+    return HiveMetastoreCollector(connector, database=cfg["database"], sampler=sampler)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.services.collector.classifier import (
     PiiCategory,
     PiiFieldHit,
@@ -259,3 +261,30 @@ def test_health_org_field_comment_not_pii() -> None:
     )
     hits = clf.detect_pii_fields("wedw_dwd.emr_t", schema2)
     assert {h.column for h in hits} == {"diseasename", "diagnosis", "blood_pressure"}
+
+
+# ---- 样本打码（PII 精度增强：mask_sample + 打码样本触发 name+sample）----
+
+
+def test_mask_sample_phone_idcard_email_bankcard() -> None:
+    """mask_sample：手机/身份证/邮箱/银行卡打码保留格式特征，非敏感值原样返回。"""
+    clf = SensitivityClassifier()
+    assert clf.mask_sample("13812341234") == "138****1234"
+    assert clf.mask_sample("110101199001011234") == "110101********1234"
+    assert clf.mask_sample("zhangsan@example.com") == "zh***@example.com"
+    assert clf.mask_sample("6222021234567890") == "6222****7890"
+    # 非敏感值（普通业务值）原样返回
+    assert clf.mask_sample("上海") == "上海"
+    assert clf.mask_sample("2026-08-28") == "2026-08-28"
+    assert clf.mask_sample("") == ""
+
+
+def test_detect_pii_masked_sample_triggers_name_sample() -> None:
+    """打码样本（含掩码标记）也触发 name+sample 双验证（打码证明是敏感列）。"""
+    clf = SensitivityClassifier()
+    hits = clf.detect_pii_fields(
+        "ods.ods_user_phone",
+        _schema({"name": "phone", "comment": "手机号", "sample": "138****1234"}),
+    )
+    assert hits and hits[0].rule == "phone" and hits[0].matched_by == "name+sample"
+    assert hits[0].confidence == pytest.approx(0.95)  # 0.9 + 0.05

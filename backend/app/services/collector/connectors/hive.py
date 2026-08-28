@@ -43,6 +43,9 @@ from app.services.collector.spi import (
 
 logger = logging.getLogger("unisense.collector.connectors.hive")
 
+#: 每批采样列数上限（控制单条采样 SQL 长度；全字段采样按批拆分查询）
+_SAMPLE_BATCH = 20
+
 
 class HiveCollector(BaseCollector):
     """Hive 采集器：经 pyhive 直连 HiveServer2（纯 Python，无 CLI 依赖）。"""
@@ -293,6 +296,9 @@ class HiveCollector(BaseCollector):
                                             "comment": col_comment,
                                         }
                                     )
+                        # PII 精度增强：全字段采样（复用同一连接，批量列查询）
+                        if self._sampling_max_rows:
+                            await self._sample_columns(entity_name, columns, conn)
                         schema_json = {"columns": columns}
                         specs.append(
                             CatalogSpec(
@@ -377,6 +383,90 @@ class HiveCollector(BaseCollector):
         if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
             raise ExternalDependencyError(f"非法标识符: {name!r}")
         return name
+
+    # ---- 样本采样（PII 精度增强：name+sample 双验证）----
+
+    async def _sample_columns(
+        self,
+        entity_name: str,
+        columns: list[dict[str, Any]],
+        conn: Any,
+    ) -> list[dict[str, Any]]:
+        """对字段执行批量列采样（复用调用方连接，避免每列/每表新握手）。
+
+        全字段采样：每批最多 ``_SAMPLE_BATCH`` 列，一次 ``SELECT c1,...,ck ... LIMIT n``
+        取 n 行，逐列取第一个非空值，经 ``_mask_sample`` 打码后写入
+        ``columns[].sample``。列名经 ``_safe_ident`` 校验（防注入），非法列跳过。
+
+        Args:
+            entity_name: 实体（库.表）名。
+            columns: 字段定义列表（name/type/comment）。
+            conn: 复用连接（collect 已建立，避免每表 TCP+认证握手）。
+
+        Returns:
+            写入 sample 后的字段列表（未开启采样时原样返回）。
+        """
+        if not self._sampling_max_rows or not columns or "." not in entity_name:
+            return columns
+        schema, tbl = entity_name.rsplit(".", 1)
+        if not schema or not tbl:
+            return columns
+        try:
+            ident = f"{self._safe_ident(schema)}.{self._safe_ident(tbl)}"
+        except Exception:  # noqa: BLE001 - 非法标识符跳过采样（元数据采集不受影响）
+            return columns
+        n = self._sampling_max_rows
+        for start in range(0, len(columns), _SAMPLE_BATCH):
+            batch = columns[start : start + _SAMPLE_BATCH]
+            safe_names: list[str] = []
+            for col in batch:
+                name = str(col.get("name", "")).strip()
+                if not name:
+                    continue
+                try:
+                    safe_names.append(self._safe_ident(name))
+                except Exception:  # noqa: BLE001 - 非法列名跳过该列采样
+                    continue
+            if not safe_names:
+                continue
+            quoted = ",".join(safe_names)
+            where = " OR ".join(f"{c} IS NOT NULL" for c in safe_names)
+            try:
+                rows = await self._execute(
+                    f"SELECT {quoted} FROM {ident} WHERE {where} LIMIT {n}", conn=conn
+                )
+            except Exception as exc:  # noqa: BLE001 - 采样失败不拖垮采集，仅记录
+                logger.warning("采样失败 source=%s entity=%s error=%s", entity_name, ident, exc)
+                continue
+            for i, col in enumerate(batch):
+                if i >= len(safe_names):
+                    break
+                value = ""
+                for row in rows:
+                    if i < len(row) and row[i] not in (None, "", "NULL"):
+                        value = str(row[i])
+                        break
+                if value:
+                    col["sample"] = self._mask_sample(value)
+        return columns
+
+    async def sample_columns(
+        self, entity_name: str, schema_json: dict[str, Any]
+    ) -> dict[str, Any]:
+        """采样入口（外部调用/手动触发路径）：自建连接采样后关闭。
+
+        ``collect`` 内部走 ``_sample_columns(conn=...)`` 复用连接；本方法供
+        service 层在需要单独采样时调用（自建连接）。
+        """
+        columns = schema_json.get("columns")
+        if not self._sampling_max_rows or not isinstance(columns, list) or not columns:
+            return schema_json
+        conn = await self._connect_managed()
+        try:
+            await self._sample_columns(entity_name, columns, conn)
+        finally:
+            await asyncio.to_thread(self._close, conn)
+        return schema_json
 
 
 @registry.register("hive")

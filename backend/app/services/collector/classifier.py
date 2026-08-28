@@ -338,6 +338,32 @@ def _column_defs(schema_json: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+#: 样本打码掩码常量（打码后保留格式特征，用于 name+sample 验证与展示）。
+_MASK_STAR = "****"
+
+
+def _mask_phone(value: str) -> str:
+    """手机号打码：138****1234（保留前 3 后 4）。"""
+    return f"{value[:3]}{_MASK_STAR}{value[-4:]}"
+
+
+def _mask_id_card(value: str) -> str:
+    """身份证打码：110***********1234（保留前 6 后 4）。"""
+    return f"{value[:6]}{'*' * 8}{value[-4:]}"
+
+
+def _mask_email(value: str) -> str:
+    """邮箱打码：ab***@domain（保留本地前 2 字符）。"""
+    local, _, domain = value.partition("@")
+    head = local[:2] if len(local) > 2 else local[:1] or "x"
+    return f"{head}***@{domain}"
+
+
+def _mask_bank_card(value: str) -> str:
+    """银行卡打码：6222****1234（保留前 4 后 4）。"""
+    return f"{value[:4]}{_MASK_STAR}{value[-4:]}"
+
+
 class SensitivityClassifier:
     """敏感分级分类器（无状态，可注入规则集用于测试/DB 配置）。"""
 
@@ -353,6 +379,32 @@ class SensitivityClassifier:
         )
         self._pii_compiled = [(_compile(r), _compile_sample(r), r) for r in self._pii_rules]
         self._conf_compiled = [(_compile(r), _compile_sample(r), r) for r in self._conf_rules]
+
+    def mask_sample(self, sample: str) -> str:
+        """对样本值打码后存储（PII 识别只需要格式特征，不需要明文）。
+
+        命中敏感格式（手机/身份证/邮箱/银行卡）→ 打码保留格式特征；非敏感值
+        原样返回（普通业务值无需打码，仍可用于 name+sample 验证）。打码值含
+        掩码标记（``****``），``detect_pii_fields`` 据此识别为敏感样本。
+
+        Args:
+            sample: 采集到的原始样本值。
+
+        Returns:
+            打码后的样本值（非敏感值原样返回）。
+        """
+        if not sample:
+            return sample
+        s = sample.strip()
+        if re.fullmatch(r"1[3-9]\d{9}", s):
+            return _mask_phone(s)
+        if re.fullmatch(r"\d{17}[\dXx]", s):
+            return _mask_id_card(s)
+        if re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", s):
+            return _mask_email(s)
+        if re.fullmatch(r"\d{16,19}", s):
+            return _mask_bank_card(s)
+        return s
 
     def detect_pii_fields(
         self, entity_name: str, schema_json: dict[str, Any]
@@ -391,7 +443,11 @@ class SensitivityClassifier:
                         matched_by = "name"
                     else:
                         matched_by = "comment"
-                    if sample_re and sample and sample_re.match(sample):
+                    if sample_re and sample and (
+                        sample_re.match(sample) or _MASK_STAR in sample
+                    ):
+                        # 原始值命中 sample_re，或样本已打码（含掩码标记，证明采样时
+                        # 该列值命中过敏感格式）→ 均视为「名称+样本」双重验证
                         confidence = min(1.0, rule.confidence + 0.05)
                         matched_by = "name+sample"
                 if matched_by is None:

@@ -810,3 +810,47 @@ async def test_hive_sync_query_execute_failure():
     ):
         collector._sync_query("SELECT bad")
     assert conn.closed is True
+
+
+async def test_hive_collector_samples_columns():
+    """Hive 采集：开启采样后批量列 SELECT 采样，值打码写入 sample。"""
+    collector = HiveCollector(host="hive-host")
+
+    async def mock_execute(sql: str, conn=None) -> list[list[str]]:
+        if "SHOW DATABASES" in sql:
+            return [["ods"]]
+        if "SHOW TABLES" in sql:
+            return [["orders"]]
+        if "DESCRIBE" in sql:
+            return [["order_id", "bigint", ""], ["phone", "string", ""]]
+        if sql.lstrip().upper().startswith("SELECT"):
+            # 采样查询：order_id=1, phone=手机号（打码前原始值）
+            return [["1", "13812341234"]]
+        return []
+
+    collector._execute = mock_execute  # type: ignore[assignment]
+    collector._connect_managed = AsyncMock(return_value=object())  # type: ignore[assignment]
+    collector.set_sampling(5)
+    result = await collector.collect(MagicMock(source_id="hive1", domain="d"))
+    cols = {c["name"]: c for c in result.specs[0].schema_json["columns"]}
+    assert cols["order_id"]["sample"] == "1"  # 非敏感值原样
+    assert cols["phone"]["sample"] == "138****1234"  # 手机号打码
+
+
+async def test_hive_collector_no_sampling_when_disabled():
+    """Hive 采集：未开启采样（sample_rows=0）时不做采样查询。"""
+    collector = HiveCollector(host="hive-host")
+
+    async def mock_execute(sql: str, conn=None) -> list[list[str]]:
+        if "SHOW DATABASES" in sql:
+            return [["ods"]]
+        if "SHOW TABLES" in sql:
+            return [["orders"]]
+        if "DESCRIBE" in sql:
+            return [["order_id", "bigint"]]
+        raise AssertionError(f"不应执行采样查询: {sql}")
+
+    collector._execute = mock_execute  # type: ignore[assignment]
+    collector._connect_managed = AsyncMock(return_value=object())  # type: ignore[assignment]
+    result = await collector.collect(MagicMock(source_id="hive1", domain="d"))
+    assert "sample" not in result.specs[0].schema_json["columns"][0]

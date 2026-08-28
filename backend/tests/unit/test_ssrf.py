@@ -285,3 +285,24 @@ async def test_collect_rate_allows_within_window() -> None:
     redis.pipeline.return_value = pipe
     with patch("app.db.redis.get_redis", return_value=redis):
         await check_collect_rate("user:100")  # 不抛异常
+
+
+def test_sample_connection_host_included_in_ssrf_check() -> None:
+    """SSRF：sample_connection.host（HMS 采样连接指向 HiveServer2）纳入校验。
+
+    采样连接采集时会真实连接执行 SELECT——即使主连接放行私有网段，采样连接
+    指向回环/链路本地/保留地址也必须拒绝（防绕过向量）。
+    """
+    with patch(
+        "app.core.ssrf.socket.getaddrinfo",
+        return_value=[(2, 1, 6, "", ("127.0.0.1", 0))],
+    ):
+        with pytest.raises(BusinessError) as exc:
+            validate_connection_host(
+                {
+                    "host": "8.8.8.8",
+                    "sample_connection": {"host": "127.0.0.1", "port": 10000},
+                },
+                allow_private=True,
+            )
+        assert exc.value.error_code == "SSRF_TARGET_FORBIDDEN"

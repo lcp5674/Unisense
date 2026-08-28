@@ -262,3 +262,86 @@ def test_hms_factory_defaults_database_to_hive():
         {"host": "8.8.8.8", "port": 3306, "database": "metastore_db"},
     )
     assert col2._database == "metastore_db"
+
+
+# ---------- 样本采样（PII 精度增强：sample_connection 直连 HiveServer2）----------
+
+
+class _FakeSampler:
+    """模拟 HiveCollector 采样器（记录连接/采样调用，可注入样本行）。"""
+
+    def __init__(self, rows: list[list[str]] | None = None) -> None:
+        self._rows = rows or [["13812341234"]]
+        self.sampled: list[tuple[str, list[dict]]] = []
+        self.closed = 0
+        self.max_rows = 0
+
+    def set_sampling(self, max_rows: int = 0) -> None:
+        self.max_rows = max_rows
+
+    async def _connect_managed(self) -> _FakeSampler:
+        return self
+
+    async def _sample_columns(self, entity_name, columns, conn) -> list[dict]:
+        self.sampled.append((entity_name, list(columns)))
+        # 模拟 Hive 采样：每列注入打码样本（复用 classifier.mask_sample）
+        from app.services.collector.classifier import SensitivityClassifier
+
+        clf = SensitivityClassifier()
+        for i, col in enumerate(columns):
+            if i < len(self._rows[0]):
+                col["sample"] = clf.mask_sample(self._rows[0][i])
+        return columns
+
+    async def _close(self, conn) -> None:
+        self.closed += 1
+
+
+def test_hms_factory_parses_sample_connection():
+    """工厂：配置 sample_connection 时构造 HiveCollector 采样器；未配置则无。"""
+    col = registry.build_from_cfg(
+        "hive_metastore",
+        {
+            "host": "8.8.8.8",
+            "port": 3306,
+            "database": "hive",
+            "sample_connection": {"host": "9.9.9.9", "port": 10000, "user": "hive"},
+        },
+    )
+    assert col._sampler is not None
+    assert col._sampler._host == "9.9.9.9"
+    assert col._sampler._port == 10000
+    # 未配置 sample_connection → 无采样器
+    col2 = registry.build_from_cfg(
+        "hive_metastore", {"host": "8.8.8.8", "port": 3306, "database": "hive"}
+    )
+    assert col2._sampler is None
+
+
+async def test_hms_collect_samples_when_configured():
+    """collect：配置采样器且开启采样时，逐表采样并写入 schema_json.columns[].sample。"""
+    col, _conn = _collector()
+    sampler = _FakeSampler(rows=[["13812341234", "北京"]])
+    col._sampler = sampler
+    col.set_sampling(5)
+    result = await col.collect(_source())
+    # 两张表都被采样（orders 2 列、orders_v 1 列）
+    assert len(sampler.sampled) == 2
+    assert sampler.sampled[0][0] == "ods.orders"
+    specs = {s.entity_name: s for s in result.specs}
+    orders_cols = specs["ods.orders"].schema_json["columns"]
+    by_name = {c["name"]: c for c in orders_cols}
+    # fake 行 [["13812341234", "北京"]]：id→手机号打码、amount→普通值原样
+    assert by_name["id"]["sample"] == "138****1234"
+    assert by_name["amount"]["sample"] == "北京"
+    assert sampler.closed == 1  # 采样连接复用并关闭
+
+
+async def test_hms_collect_no_sampling_without_configure():
+    """collect：未配置采样器时不做采样（元数据采集不受影响）。"""
+    col, _conn = _collector()
+    col.set_sampling(5)
+    result = await col.collect(_source())
+    for s in result.specs:
+        for c in s.schema_json.get("columns", []):
+            assert "sample" not in c

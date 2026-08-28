@@ -49,6 +49,24 @@ def _ensure_hms_database(cfg: dict[str, Any], source_type_value: str) -> None:
         cfg["database"] = _HMS_DEFAULT_DATABASE
 
 
+def _validate_sample_connection(cfg: dict[str, Any], source_type_value: str) -> None:
+    """hive_metastore 可选采样连接（HiveServer2）校验：提供时 host 必填。
+
+    采样连接与元数据连接分离——HMS 元数据库只含表结构、不含数据，采样需直连
+    Hive 计算引擎执行 SELECT。该 host 已纳入 SSRF 校验
+    （``ssrf.py _extract_hosts`` 递归提取 ``sample_connection.host``）。
+    """
+    if source_type_value != "hive_metastore":
+        return
+    sample_conn = cfg.get("sample_connection")
+    if sample_conn is None:
+        return
+    if not isinstance(sample_conn, dict):
+        raise ValueError("sample_connection 必须是对象")
+    if not str(sample_conn.get("host") or "").strip():
+        raise ValueError("sample_connection 必须包含 host 字段")
+
+
 class DataSourceCreateRequest(BaseModel):
     """数据源注册请求。
 
@@ -79,7 +97,9 @@ class DataSourceCreateRequest(BaseModel):
 
         - kafka：需要 ``bootstrap_servers`` 或 ``host``（语义错位修复）；
         - 其余类型：必须包含 ``host``；
-        - hive_metastore：``database``（HMS 元数据库名）缺省按 ``hive`` 填充。
+        - hive_metastore：``database``（HMS 元数据库名）缺省按 ``hive`` 填充；
+        - hive_metastore：可选 ``sample_connection``（HiveServer2 采样连接，提供时
+          host 必填）。
         """
         cfg = self.connection_config
         if not isinstance(cfg, dict):
@@ -95,6 +115,7 @@ class DataSourceCreateRequest(BaseModel):
         elif "host" not in cfg:
             raise ValueError("connection_config 必须包含 host 字段")
         _ensure_hms_database(cfg, source_type_value)
+        _validate_sample_connection(cfg, source_type_value)
         return self
 
 
@@ -153,6 +174,7 @@ class DataSourceUpdateRequest(BaseModel):
         elif "host" not in cfg:
             raise ValueError("connection_config 必须包含 host 字段")
         _ensure_hms_database(cfg, source_type_value)
+        _validate_sample_connection(cfg, source_type_value)
         return self
 
 
@@ -189,6 +211,7 @@ class TestConnectionRequest(BaseModel):
         elif "host" not in cfg:
             raise ValueError("connection_config 必须包含 host 字段")
         _ensure_hms_database(cfg, source_type_value)
+        _validate_sample_connection(cfg, source_type_value)
         return self
 
 
@@ -230,6 +253,7 @@ class ListTablesRequest(BaseModel):
                 raise ValueError("kafka 的 connection_config 必须包含 bootstrap_servers 或 host")
         elif "host" not in cfg:
             raise ValueError("connection_config 必须包含 host 字段")
+        _validate_sample_connection(cfg, source_type_value)
         return self
 
 

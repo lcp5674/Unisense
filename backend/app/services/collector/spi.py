@@ -79,6 +79,7 @@ class BaseCollector(ABC):
         self._include_patterns: list[str] | None = None
         self._exclude_patterns: list[str] | None = None
         self._databases: list[str] | None = None
+        self._sampling_max_rows = 0
 
     @abstractmethod
     async def collect(self, source: Any) -> CollectResult:
@@ -140,6 +141,38 @@ class BaseCollector(ABC):
         连接库 ``connection_config.database`` 为纯连接凭据，不参与采集范围。
         """
         self._databases = databases
+
+    def set_sampling(self, max_rows: int = 0) -> None:
+        """注入样本采样配置（PII 精度增强：name+sample 双验证）。
+
+        ``max_rows`` 为每列采样行数上限（0/负值=不采样）。由 service 层在
+        collect 前从 ``DataSource.quota.sample_rows`` 读取并注入；连接器在
+        采集到字段后按能力执行采样，样本打码写入 ``schema_json.columns[].sample``。
+        """
+        self._sampling_max_rows = max(0, int(max_rows or 0))
+
+    async def sample_columns(
+        self, entity_name: str, schema_json: dict[str, Any]
+    ) -> dict[str, Any]:
+        """对实体字段执行样本采样（可选能力，PII 识别精度增强）。
+
+        默认不采样、原样返回 schema；支持采样的连接器覆盖本方法——对每列执行
+        ``SELECT col ... LIMIT n`` 取代表值，经 ``_mask_sample`` 打码后写入
+        ``columns[].sample``。连接器内部应在 ``collect`` 组装 schema 时调用，
+        以复用已建立的源库连接（避免每表额外握手）。
+
+        Args:
+            entity_name: 实体（库.表）名。
+            schema_json: 含 ``columns`` 列表的 schema 字典。
+
+        Returns:
+            写入 ``sample`` 后的 schema 字典（不支持采样时原样返回）。
+        """
+        return schema_json
+
+    def _mask_sample(self, sample: str) -> str:
+        """对样本值打码（委托 classifier：手机/身份证/邮箱/银行卡掩码）。"""
+        return self._classifier.mask_sample(sample)
 
     async def list_databases(self) -> list[str]:
         """枚举该实例下可采集的非系统数据库（创建数据源时选择目标库）。

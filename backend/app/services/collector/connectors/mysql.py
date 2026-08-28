@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import logging
+import re
 import time
 from typing import Any
 
@@ -46,6 +47,12 @@ _EXCLUDE_SCHEMAS = frozenset(
         "_impala_builtins",
     }
 )
+
+#: 每批采样列数上限（控制单条采样 SQL 长度；全字段采样按批拆分查询）
+_SAMPLE_BATCH = 20
+
+#: MySQL 标识符合法字符（反引号包裹安全，含 $ 允许）
+_IDENT_RE = re.compile(r"^[A-Za-z0-9_$]+$")
 
 
 def _matches_any(name: str, patterns: list[str] | None) -> bool:
@@ -189,6 +196,56 @@ class InformationSchemaCollector(BaseCollector):
         """
         return await self._connector.query(sql, params)
 
+    async def _sample_columns(
+        self, entity_name: str, columns: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """对字段执行批量列采样（PII 精度增强：name+sample 双验证）。
+
+        全字段采样：每批最多 ``_SAMPLE_BATCH`` 列，一次 ``SELECT c1,...,ck ... LIMIT n``
+        取 n 行，逐列取第一个非空值，经 ``_mask_sample`` 打码后写入
+        ``columns[].sample``。库/表/列名经标识符正则校验（反引号包裹，防注入）。
+
+        Args:
+            entity_name: 实体（库.表）名。
+            columns: 字段定义列表（name/type/comment 等）。
+
+        Returns:
+            写入 sample 后的字段列表（未开启采样/非法标识符时原样返回）。
+        """
+        if not self._sampling_max_rows or not columns or "." not in entity_name:
+            return columns
+        schema, tbl = entity_name.rsplit(".", 1)
+        if not _IDENT_RE.match(schema) or not _IDENT_RE.match(tbl):
+            return columns
+        n = self._sampling_max_rows
+        for start in range(0, len(columns), _SAMPLE_BATCH):
+            batch = columns[start : start + _SAMPLE_BATCH]
+            safe: list[tuple[dict[str, Any], str]] = []
+            for col in batch:
+                name = str(col.get("name", "")).strip()
+                if name and _IDENT_RE.match(name):
+                    safe.append((col, name))
+            if not safe:
+                continue
+            select = ",".join(f"`{name}`" for _, name in safe)
+            where = " OR ".join(f"`{name}` IS NOT NULL" for _, name in safe)
+            sql = f"SELECT {select} FROM `{schema}`.`{tbl}` WHERE {where} LIMIT {n}"
+            try:
+                rows = await self._connector.query(sql)
+            except Exception as exc:  # noqa: BLE001 - 采样失败不拖垮采集，仅记录
+                logger.warning("采样失败 entity=%s error=%s", entity_name, exc)
+                continue
+            for col, name in safe:
+                value = ""
+                for r in rows:
+                    v = r.get(name)
+                    if v is not None and str(v) not in ("", "NULL"):
+                        value = str(v)
+                        break
+                if value:
+                    col["sample"] = self._mask_sample(value)
+        return columns
+
     async def collect_entity(self, source: Any, entity_name: str) -> CatalogSpec | None:
         """单表元数据刷新：仅查询目标表的列元数据，不触发全源扫描。
 
@@ -225,6 +282,9 @@ class InformationSchemaCollector(BaseCollector):
         if not cols:
             # 源端无此表 → 无法刷新，由调用方回退全量采集
             return None
+        # PII 精度增强：全字段采样（批量列查询，样本打码）
+        if self._sampling_max_rows:
+            await self._sample_columns(entity_name, cols)
         return CatalogSpec(
             entity_name=entity_name,
             entity_type="TABLE",
@@ -318,6 +378,9 @@ class InformationSchemaCollector(BaseCollector):
                 # 统一 库.表 命名避免跨库同名冲突（连接库为纯凭据，无单库裸表名模式）
                 entity_name = f"{schema}.{tbl}"
                 cols = columns_by_table.get(tbl, [])
+                # PII 精度增强：全字段采样（批量列查询，样本打码）
+                if self._sampling_max_rows:
+                    await self._sample_columns(entity_name, cols)
                 schema_json = {"columns": cols}
                 specs.append(
                     CatalogSpec(

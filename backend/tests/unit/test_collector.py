@@ -13,6 +13,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import BusinessError, ConflictError, NotFoundError
@@ -4599,3 +4600,119 @@ async def test_repo_purge_collection_runs_deletes_logs_before_runs():
     sql2 = str(s.execute.call_args_list[1].args[0].compile(compile_kwargs={"literal_binds": True}))
     assert "collection_run_log" in sql1
     assert "collection_run" in sql2
+
+
+# ---------- sample_connection（HMS 采样连接）校验 ----------
+
+
+def test_create_hms_with_sample_connection_valid():
+    """hive_metastore 带可选 sample_connection（HiveServer2）可通过校验。"""
+    req = DataSourceCreateRequest(
+        source_id="hms_s",
+        name="HMS",
+        source_type="hive_metastore",
+        connection_config={
+            "host": "8.8.8.8",
+            "port": 3306,
+            "database": "hive",
+            "sample_connection": {"host": "9.9.9.9", "port": 10000, "user": "hive"},
+        },
+        domain="d",
+    )
+    assert req.connection_config["sample_connection"]["host"] == "9.9.9.9"
+
+
+def test_create_hms_sample_connection_requires_host():
+    """hive_metastore 提供 sample_connection 但缺 host 时报错。"""
+    with pytest.raises(ValidationError):
+        DataSourceCreateRequest(
+            source_id="hms_s2",
+            name="HMS",
+            source_type="hive_metastore",
+            connection_config={
+                "host": "8.8.8.8",
+                "port": 3306,
+                "database": "hive",
+                "sample_connection": {"user": "hive"},
+            },
+            domain="d",
+        )
+
+
+def test_create_mysql_ignores_sample_connection():
+    """非 hive_metastore 类型不校验 sample_connection（向后兼容，不误伤）。"""
+    req = DataSourceCreateRequest(
+        source_id="m1",
+        name="M",
+        source_type="mysql",
+        connection_config={"host": "8.8.8.8", "sample_connection": "garbage"},
+        domain="d",
+    )
+    assert req.connection_config["sample_connection"] == "garbage"
+
+
+# ---------- MySQL 全字段采样（PII 精度增强）----------
+
+
+class _SamplingConnector:
+    """支持 information_schema 查询与采样查询的假连接器。"""
+
+    def __init__(self, sample_rows: list[dict]) -> None:
+        self._sample_rows = sample_rows
+        self.sample_sqls: list[str] = []
+
+    async def query(self, sql: str, params: dict | None = None) -> list[dict]:
+        if "information_schema.schemata" in sql:
+            return [{"schema_name": "finance"}]
+        if "information_schema.tables" in sql:
+            return [{"table_name": "orders"}]
+        if "information_schema.columns" in sql:
+            return [
+                {
+                    "table_name": "orders",
+                    "column_name": "order_id",
+                    "data_type": "bigint",
+                    "is_nullable": "NO",
+                },
+                {
+                    "table_name": "orders",
+                    "column_name": "phone",
+                    "data_type": "varchar",
+                    "is_nullable": "YES",
+                },
+            ]
+        # 采样查询（SELECT ... FROM finance.orders）
+        self.sample_sqls.append(sql)
+        return self._sample_rows
+
+    async def dispose(self) -> None:
+        return None
+
+
+async def test_mysql_collector_samples_columns():
+    """MySQL 采集：开启采样后批量列 SELECT 采样，值打码写入 sample。"""
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    conn = _SamplingConnector([{"order_id": 1, "phone": "13812341234"}])
+    collector = InformationSchemaCollector(conn)
+    collector.set_sampling(5)
+    result = await collector.collect(MagicMock(source_id="s1"))
+    cols = {c["name"]: c for c in result.specs[0].schema_json["columns"]}
+    assert cols["order_id"]["sample"] == "1"  # 非敏感值原样
+    assert cols["phone"]["sample"] == "138****1234"  # 手机号打码
+    # 采样 SQL 形态：批量列、WHERE 非空、LIMIT 上限
+    sql0 = conn.sample_sqls[0]
+    assert "SELECT `order_id`,`phone` FROM `finance`.`orders`" in sql0
+    assert "LIMIT 5" in sql0
+
+
+async def test_mysql_collector_no_sampling_when_disabled():
+    """MySQL 采集：未开启采样（sample_rows=0）时不做采样查询。"""
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    conn = _SamplingConnector([{"order_id": 1, "phone": "13812341234"}])
+    collector = InformationSchemaCollector(conn)
+    result = await collector.collect(MagicMock(source_id="s1"))
+    assert conn.sample_sqls == []  # 未开启采样不执行采样查询
+    cols = result.specs[0].schema_json["columns"]
+    assert all("sample" not in c for c in cols)
