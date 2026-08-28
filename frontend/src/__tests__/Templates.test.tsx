@@ -470,13 +470,55 @@ describe("Templates 页面", () => {
     // 断言详情弹窗展示描述与必填字段
     await screen.findByText("模板详情：GMV 日汇总模板");
     expect(screen.getByText("按日汇总 GMV")).toBeTruthy();
-    expect(screen.getAllByText("metric_code").length).toBeGreaterThan(0);
+    // 必填字段以中文业务名展示（metric_code → 指标编码）
+    expect(screen.getAllByText("指标编码").length).toBeGreaterThan(0);
     expect(screen.getAllByText("finance").length).toBeGreaterThan(0);
     // 关闭弹窗
     fireEvent.click(screen.getByRole("button", { name: /关\s*闭/ }));
     await waitFor(() => {
       expect(screen.queryByText("模板详情：GMV 日汇总模板")).toBeNull();
     });
+  });
+
+  it("详情弹窗责任方：平台用户 id 解析为姓名（不再是『用户 #N』）", async () => {
+    // 模板预设 product_owner_id=2（users 列表第 2 个 = Bob），name 为空
+    mockedList.mockResolvedValue({
+      items: [{ ...TPLS[0], product_owner_id: 2, product_owner_name: null, tech_owner_id: 1, tech_owner_name: null }],
+      total: 1,
+    });
+    render(
+      <MemoryRouter initialEntries={["/templates"]}>
+        <Templates />
+      </MemoryRouter>,
+    );
+    await screen.findByText("tpl_gmv_daily");
+    fireEvent.click(screen.getAllByText("详情")[0]);
+    await screen.findByText("模板详情：GMV 日汇总模板");
+    // 产品需求方 = Bob（id=2 解析），技术方 = Alice（id=1 解析）
+    expect(screen.getByText("Bob")).toBeTruthy();
+    expect(screen.getByText("Alice")).toBeTruthy();
+    expect(screen.queryByText("用户 #2")).toBeNull();
+    expect(screen.queryByText("用户 #1")).toBeNull();
+  });
+
+  it("编辑弹窗必填字段：下拉展示可选字段清单（指标编码/统计粒度等）", async () => {
+    render(
+      <MemoryRouter>
+        <Templates />
+      </MemoryRouter>,
+    );
+    await screen.findByText("tpl_gmv_daily");
+    fireEvent.click(screen.getAllByText("编辑")[0]);
+    await screen.findByText("编辑模板：tpl_gmv_daily");
+    // 定位必填字段 tags Select（通过 Form.Item label 定位，placeholder 有值时不显示）
+    const reqItem = screen.getByText("必填字段（实例化时强制填写）").closest(".ant-form-item");
+    const reqSelect = reqItem!.querySelector(".ant-select");
+    expect(reqSelect).toBeTruthy();
+    fireEvent.mouseDown(reqSelect!.querySelector(".ant-select-selector")!);
+    // 下拉出现可选字段（中文业务名；虚拟滚动下可见前几项）
+    expect((await screen.findAllByText("指标编码")).length).toBeGreaterThan(0);
+    expect(screen.getByText("指标名称")).toBeTruthy();
+    expect(screen.getByText("统计粒度")).toBeTruthy();
   });
 });
 

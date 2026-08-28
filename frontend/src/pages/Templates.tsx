@@ -57,6 +57,36 @@ function dictToOptions(items: Array<{ code: string; label: string; status: strin
     .map((it) => ({ value: it.code, label: `${it.label} (${it.code})` }));
 }
 
+// 必填字段可选清单（value=MetricCreateRequest 字段名，后端实例化校验按 merged 查该名；
+// label=中文业务名，仅展示。tags 模式仍可自由输入其他字段名）
+const REQUIRED_FIELD_OPTIONS = [
+  { value: "metric_code", label: "指标编码" },
+  { value: "name", label: "指标名称" },
+  { value: "domain", label: "业务域" },
+  { value: "type", label: "指标类型" },
+  { value: "granularity", label: "统计粒度" },
+  { value: "measure_id", label: "逻辑度量" },
+  { value: "mount", label: "挂载实体" },
+  { value: "unit", label: "单位" },
+  { value: "currency", label: "币种" },
+  { value: "aggregation", label: "聚合方式" },
+  { value: "time_semantics", label: "时间语义" },
+  { value: "freshness", label: "新鲜度" },
+  { value: "dw_layer", label: "数仓层" },
+  { value: "metric_tier", label: "指标分级" },
+  { value: "serving_mode", label: "服务模式" },
+  { value: "additivity", label: "可加性" },
+  { value: "definition_json", label: "口径定义" },
+  { value: "pii_flag", label: "PII 标记" },
+  { value: "product_owner_id", label: "产品需求方" },
+  { value: "tech_owner_id", label: "技术方" },
+  { value: "dw_developer_id", label: "数仓开发" },
+];
+
+// 必填字段 code → 中文名（展示用；未收录字段原样返回）
+const requiredFieldLabel = (v: string) =>
+  REQUIRED_FIELD_OPTIONS.find((o) => o.value === v)?.label ?? v;
+
 export function Templates() {
   const [searchParams] = useSearchParams();
   const { can } = usePermission();
@@ -85,6 +115,13 @@ export function Templates() {
   const [favCodes, setFavCodes] = useState<Set<string>>(new Set());
   // 责任人人选（模板「负责人」指派下拉）
   const [users, setUsers] = useState<UserBrief[]>([]);
+  // 责任方展示：外部人员 name 优先，其次平台用户 id→姓名解析（users 列表），兜底 #id
+  const ownerLabel = (id?: number | null, name?: string | null) => {
+    if (name) return name;
+    if (!id) return null;
+    const u = users.find((x) => x.id === id);
+    return u ? u.display_name || u.username || `用户 #${id}` : `用户 #${id}`;
+  };
   const [form] = Form.useForm();
   // P2-13 模板编辑闭环：编辑弹窗 state + 独立表单（不复用实例化 form，语义分离）
   const [editTpl, setEditTpl] = useState<MetricTemplate | null>(null);
@@ -608,7 +645,7 @@ export function Templates() {
     { title: "新鲜度", dataIndex: "freshness", key: "freshness", width: 90, render: (v: string) => enumLabel(FRESHNESS_LABEL, v) },
     { title: "数仓层", dataIndex: "dw_layer", key: "dw_layer", width: 90, render: (v: string) => enumLabel(DW_LAYER_LABEL, v) },
     { title: "分级", dataIndex: "metric_tier", key: "metric_tier", width: 90, render: (v: string) => <Tag>{enumLabel(METRIC_TIER_LABEL, v)}</Tag> },
-    { title: "必填字段", dataIndex: "required_fields", key: "required_fields", render: (v: string[] | null) => (v?.length ? v.join("、") : <span className="muted">—</span>) },
+    { title: "必填字段", dataIndex: "required_fields", key: "required_fields", render: (v: string[] | null) => (v?.length ? v.map(requiredFieldLabel).join("、") : <span className="muted">—</span>) },
     {
       title: "操作",
       key: "actions",
@@ -715,7 +752,7 @@ export function Templates() {
           {instantiateTarget?.required_fields?.length ? (
             <div style={{ marginBottom: 12 }}>
               <Tag color="orange">本模板必填字段</Tag>
-              <span className="muted">{instantiateTarget.required_fields.join("、")}</span>
+              <span className="muted">{instantiateTarget.required_fields.map(requiredFieldLabel).join("、")}</span>
             </div>
           ) : null}
           <Space style={{ width: "100%" }} wrap>
@@ -915,7 +952,7 @@ export function Templates() {
               <Descriptions.Item label="新鲜度">{enumLabel(FRESHNESS_LABEL, detailTpl.freshness) ?? detailTpl.freshness}</Descriptions.Item>
               <Descriptions.Item label="状态">{detailTpl.is_active ? <Tag color="green">启用</Tag> : <Tag>停用</Tag>}</Descriptions.Item>
               <Descriptions.Item label="必填字段" span={2}>
-                {detailTpl.required_fields?.length ? detailTpl.required_fields.join("、") : <span className="muted">—</span>}
+                {detailTpl.required_fields?.length ? detailTpl.required_fields.map(requiredFieldLabel).join("、") : <span className="muted">—</span>}
               </Descriptions.Item>
               {/* OneData 预设（方案A）：逻辑度量 / 挂载实体 / 三方责任 */}
               <Descriptions.Item label="原子指标口径预设">
@@ -929,13 +966,13 @@ export function Templates() {
                 {detailTpl.mount ? `${detailTpl.mount.source_table} / ${detailTpl.mount.source_column} / ${detailTpl.mount.granularity}` : <span className="muted">—</span>}
               </Descriptions.Item>
               <Descriptions.Item label="产品需求方" span={2}>
-                {detailTpl.product_owner_name || (detailTpl.product_owner_id ? `用户 #${detailTpl.product_owner_id}` : <span className="muted">—</span>)}
+                {ownerLabel(detailTpl.product_owner_id, detailTpl.product_owner_name) ?? <span className="muted">—</span>}
               </Descriptions.Item>
               <Descriptions.Item label="技术方" span={2}>
-                {detailTpl.tech_owner_name || (detailTpl.tech_owner_id ? `用户 #${detailTpl.tech_owner_id}` : <span className="muted">—</span>)}
+                {ownerLabel(detailTpl.tech_owner_id, detailTpl.tech_owner_name) ?? <span className="muted">—</span>}
               </Descriptions.Item>
               <Descriptions.Item label="数仓开发" span={2}>
-                {detailTpl.dw_developer_name || (detailTpl.dw_developer_id ? `用户 #${detailTpl.dw_developer_id}` : <span className="muted">—</span>)}
+                {ownerLabel(detailTpl.dw_developer_id, detailTpl.dw_developer_name) ?? <span className="muted">—</span>}
               </Descriptions.Item>
               <Descriptions.Item label="描述" span={2}>
                 {detailTpl.description || <span className="muted">—</span>}
@@ -980,8 +1017,9 @@ export function Templates() {
               <Select
                 mode="tags"
                 tokenSeparators={[",", "，"]}
-                placeholder="输入字段名后回车，如 metric_code、granularity"
+                placeholder="选择或输入字段名后回车，如 metric_code、granularity"
                 maxTagCount={8}
+                options={REQUIRED_FIELD_OPTIONS}
               />
             </Form.Item>
             <Form.Item name="type" label="指标类型预设" style={{ width: 196 }}>
