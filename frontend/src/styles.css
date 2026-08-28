@@ -1947,3 +1947,61 @@ body {
   height: auto;
   line-height: 1.5;
 }
+
+/* ==========================================================================
+   资产地图 / 血缘图谱图例（AssetGraph）：卡片化分组排版 + 响应式
+   ==========================================================================
+   图例容器由 AssetGraph.tsx 渲染为 .asset-graph-legend，内部分组为
+   .legend-group（垂直分隔线）与 .legend-swatch（色块+文本）。卡片化浅底、
+   圆角、细分隔线，提升"高级感"；小屏收紧间距并去掉分隔线。 */
+.asset-graph-legend {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px 24px;
+  flex-wrap: wrap;
+  align-items: center;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.asset-graph-legend .legend-group {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.asset-graph-legend .legend-group + .legend-group::before {
+  content: "";
+  width: 1px;
+  height: 14px;
+  background: var(--line);
+  margin-right: 12px;
+}
+.asset-graph-legend .legend-swatch {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  white-space: nowrap;
+}
+.asset-graph-legend .legend-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  vertical-align: middle;
+}
+@media (max-width: 640px) {
+  .asset-graph-legend {
+    font-size: 11px;
+    gap: 6px 12px;
+    padding: 8px 10px;
+  }
+  .asset-graph-legend .legend-group + .legend-group::before {
+    display: none;
+  }
+}

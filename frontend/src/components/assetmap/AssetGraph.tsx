@@ -56,38 +56,38 @@ const TYPE_LABEL: Record<string, string> = {
 
 const TYPE_OPTIONS = Object.entries(TYPE_LABEL).map(([value, label]) => ({ value, label }));
 
-// 业务域配色：12 色高饱和浓烈色板（Material Design 700 段 + Tailwind 600/700）。
-// 选 MD/Tailwind 700 段而非 500 段的原因：500 段偏亮（如翠绿 #10b981），白字在上面对比度仅 ~2:1，
-// 节点名称几乎不可读；700 段在白色画布上视觉"鲜艳浓烈"、色相饱和度极高，
-// 且与文字的对比度普遍 >4:1（WCAG AA）。同时配合 labelBackground 白底 pill 兜底可读性。
+// 业务域配色：12 色现代低饱和色板（Tailwind 600 段），与「校准仪表」设计系统协调
+// （深蓝底盘 --ink + 数据青 --data + 信号橙 --signal）。600 段是专为白字设计的
+// 深色档（对比度普遍 >4:1，WCAG AA），同时比 700 段更柔和、有高级感；
+// 节点填充再加径向渐变（中心提亮→主色）后层次更立体。labelBackground 白底 pill 兜底可读性。
 const DOMAIN_PALETTE = [
-  "#1976d2", // 蓝（blue 700）
-  "#00897b", // 青绿（teal 700）
-  "#43a047", // 绿（green 700）
-  "#fb8c00", // 橙（orange 700）
-  "#e53935", // 红（red 600）
-  "#8e24aa", // 紫（purple 700）
-  "#039be5", // 天蓝（light blue 700）
-  "#d81b60", // 粉（pink 700）
-  "#f57c00", // 橙黄（orange 800）
-  "#3949ab", // 靛蓝（indigo 700）
-  "#7b1fa2", // 深紫（purple 800）
-  "#00acc1", // 青（cyan 700）
+  "#3b82f6", // 蓝（blue 600）
+  "#0e7490", // 青（cyan 700）
+  "#059669", // 绿（emerald 600）
+  "#d97706", // 琥珀（amber 600）
+  "#dc2626", // 红（red 600）
+  "#7c3aed", // 紫（violet 600）
+  "#0284c7", // 天蓝（sky 600）
+  "#db2777", // 玫红（pink 600）
+  "#ea580c", // 橙（orange 600）
+  "#4f46e5", // 靛蓝（indigo 600）
+  "#9333ea", // 紫罗兰（purple 600）
+  "#0d9488", // 青绿（teal 600）
 ];
 
 // 节点类型兜底色（节点 domain 缺失时使用，按类型区分保证视觉差异）
 const TYPE_FALLBACK_COLOR: Record<string, string> = {
-  metric: "#7b1fa2", // 紫（指标）
-  table: "#1976d2", // 蓝（表/视图）
-  field: "#00897b", // 青绿（字段）
-  unknown: "#546e7a", // 中性灰蓝
+  metric: "#7c3aed", // 紫（指标）
+  table: "#3b82f6", // 蓝（表/视图）
+  field: "#0d9488", // 青绿（字段）
+  unknown: "#64748b", // 中性灰蓝
 };
 
-// 边类型配色：偏亮深灰蓝，不同类型区分（血缘总览里 DERIVED_FROM 占绝大多数）
+// 边类型配色：柔和雾蓝/淡紫/淡青，低饱和不抢节点视觉（血缘总览里 DERIVED_FROM 占绝大多数）
 const EDGE_PALETTE: Record<string, string> = {
-  DERIVED_FROM: "#94a3b8",
-  BASED_ON: "#a78bfa",
-  CONSUMED_BY: "#60a5fa",
+  DERIVED_FROM: "#a3b3c9",
+  BASED_ON: "#b9a8ef",
+  CONSUMED_BY: "#8ec5f6",
 };
 
 // 全局域-色映射表：按域首次出现顺序分配色板中的颜色。
@@ -144,6 +144,16 @@ function lightenHex(hex: string, amt: number): string {
   const r = Math.min(255, ((n >> 16) & 255) + amt);
   const g = Math.min(255, ((n >> 8) & 255) + amt);
   const b = Math.min(255, (n & 255) + amt);
+  return `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
+}
+
+// 颜色压暗：给定 hex 色，向黑色方向压暗 amt（0-255），用于渐变边缘加深
+function darkenHex(hex: string, amt: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  if (Number.isNaN(n)) return hex;
+  const r = Math.max(0, ((n >> 16) & 255) - amt);
+  const g = Math.max(0, ((n >> 8) & 255) - amt);
+  const b = Math.max(0, (n & 255) - amt);
   return `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
 }
 
@@ -605,6 +615,10 @@ function GraphCanvas({
         : n?.domain
           ? _allocateDomainColor(n.domain)
           : TYPE_FALLBACK_COLOR[n?.type ?? "unknown"] ?? TYPE_FALLBACK_COLOR.unknown;
+      // 径向渐变填充：中心提亮 → 0.55 主色 → 边缘压暗，节点呈球面立体感（渐变光晕核心）。
+      // @antv/g 的 r(cx,cy,r) 渐变按 shape bbox 归一化，圆/圆角矩形/椭圆均适用；
+      // 渐变在 useMemo 预计算为字符串，避免每帧重建（性能与纯色一致）。
+      const gradFill = `r(0.5, 0.5, 0.5) 0:${lightenHex(fill, 62)} 0.55:${fill} 1:${darkenHex(fill, 18)}`;
       const stroke = cyc
         ? "#e65100"
         : n?.pii
@@ -613,7 +627,8 @@ function GraphCanvas({
             ? (LAYER_STROKE[layer] ?? "#ffffff")
             : "#ffffff";
       const lineWidth = cyc ? 3.5 : n?.pii ? 3 : layer ? 2.5 : 2;
-      map.set(id, { size, fill, stroke, lineWidth });
+      const hub = !cyc && d >= 8;
+      map.set(id, { size, fill: gradFill, stroke, lineWidth, hub });
     }
     return map;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -674,10 +689,11 @@ function GraphCanvas({
         //  - 全景大图（节点多）→ fitView always：适配填满画布，节点分布均匀。
         autoFit: "center",
         padding: 32,
-        // 大数据量性能优化：
-        //  - animation:false —— 关闭全局动画，缩放/平移/状态切换不再插帧，交互直接重绘最终帧；
-        //  - zoomRange 收窄 —— 限制最小缩放 0.15（避免缩到极小仍全量渲染细节）与最大 8。
-        //  配合下方 compact LOD 状态（缩放低于阈值时隐藏标签/图标/柔光/投影），大幅提升交互帧率。
+        // 全局 animation 保持 false（G6 v5.1.1 启用全局动画在大图 force 布局下会触发
+        // 未就绪 shape 的 draw 调用崩溃 "Cannot read properties of undefined (reading 'draw')"）。
+        // 元素级 enter/exit 配 fade 动画由 G6 内部 stage 系统独立驱动；hover/LOD 状态切换
+        // 均显式 setElementState(..., false) 保持瞬时，性能安全。
+        // 配合下方 compact LOD 状态（缩放低于阈值时隐藏标签/图标/柔光/投影），大幅提升交互帧率。
         animation: false,
         zoomRange: [0.15, 8],
         data: { nodes: [], edges: [] },
@@ -721,22 +737,31 @@ function GraphCanvas({
             shadowColor: (d: NodeData) =>
               cycleNodesRef.current.has(String(d.id))
                 ? "rgba(230,81,0,0.5)"
-                : "rgba(0,0,0,0.28)",
+                : "rgba(15,23,42,0.22)",
             shadowBlur: (d: NodeData) =>
               (d.data as AssetGraphNode | undefined)?.anchor || cycleNodesRef.current.has(String(d.id))
                 ? 0
-                : 8,
+                : 10,
             shadowOffsetY: (d: NodeData) =>
               (d.data as AssetGraphNode | undefined)?.anchor ? 0 : 3,
-            // 柔光 halo：节点填充色提亮版作为外圈，让节点从画布上"发光"、更立体
+            // 柔光 halo：节点填充色提亮版作为外圈，让节点从画布上"发光"、更立体。
+            // 枢纽节点（血缘度≥8）halo 更宽更实，形成"骨干发光"的层次
             halo: (d: NodeData) => !(d.data as AssetGraphNode | undefined)?.anchor,
             haloStroke: (d: NodeData) => {
               const n = d.data as AssetGraphNode | undefined;
               const base = cycleNodesRef.current.has(String(d.id)) ? "#ff8a80" : domainColor(n);
               return lightenHex(base, 90);
             },
-            haloLineWidth: 8,
-            haloStrokeOpacity: 0.4,
+            haloLineWidth: (d: NodeData) =>
+              (nodeStyleCacheRef.current.get(String(d.id))?.hub as boolean | undefined)
+                ? 14
+                : 10,
+            haloStrokeOpacity: (d: NodeData) =>
+              cycleNodesRef.current.has(String(d.id))
+                ? 0.55
+                : (nodeStyleCacheRef.current.get(String(d.id))?.hub as boolean | undefined)
+                  ? 0.6
+                  : 0.42,
             // 类型图标：指标 📈 / 表 🗂️ / 字段 🔖，渲染在节点中央
             icon: (d: NodeData) => !(d.data as AssetGraphNode | undefined)?.anchor,
             iconText: (d: NodeData) =>
@@ -782,7 +807,17 @@ function GraphCanvas({
             cursor: "pointer",
           },
           state: {
-            active: { fill: "#faad14", stroke: "#8c6d00", lineWidth: 2 },
+            // 悬停/搜索高亮：金色描边 + 增强光晕 + 标签加粗，保留径向渐变填充不覆盖，
+            // 高亮节点从图中"点亮"而非被平涂遮盖
+            active: {
+              stroke: "#f59e0b",
+              lineWidth: 3,
+              haloLineWidth: 16,
+              haloStroke: "#fbbf24",
+              haloStrokeOpacity: 0.8,
+              labelFontWeight: 700,
+              labelFill: "#b45309",
+            },
             inactive: { opacity: 0.2 },
             // 大数据量 LOD：缩放低于阈值（applyLod）时批量置为 compact——
             // 隐藏标签/图标/柔光/投影/badge，只保留节点主体与边，显著降低 canvas 重绘开销。
@@ -796,6 +831,14 @@ function GraphCanvas({
               badgeOpacity: 0,
             },
           },
+          // 节点动画：加载淡入、移除淡出。
+          // 不配 update 动画——d3-force 布局自带 tick 迭代，元素 update 时由 G6 内部驱动位置过渡，
+          // 显式再配 update translate 会在 G6 v5.1.1 force 渲染时与未就绪 shape 的 draw 调用冲突（draw undefined）。
+          // 布局切换（key 重挂载）走 enter 淡入，仍构成「流畅过渡」视觉。
+          animation: {
+            enter: [{ fields: ["opacity"] }],
+            exit: [{ fields: ["opacity"] }],
+          },
         },
         edge: {
           style: {
@@ -806,15 +849,24 @@ function GraphCanvas({
                 ? "#e53935" // 真环：红色虚线醒目提示
                 : edgeColor(d?.type);
             },
+            // 粗细与透明度按「两端血缘度总和」分层：骨干边（连接枢纽）清晰突出，
+            // 叶子边淡雅退后，形成"主干醒目、枝叶退让"的视觉层次。
             lineWidth: (e) => {
               const d = e.data as RenderEdge | undefined;
               if (d?.anchorEdge) return 0;
-              return d?.inCycle ? 2.4 : 1.3;
+              const total =
+                (degreeMapRef.current.get(String(e.source)) ?? 0) +
+                (degreeMapRef.current.get(String(e.target)) ?? 0);
+              return d?.inCycle ? 2.4 : total >= 10 ? 1.9 : total >= 5 ? 1.5 : 1.2;
             },
             strokeOpacity: (e) => {
               const d = e.data as RenderEdge | undefined;
               if (d?.anchorEdge) return 0;
-              return d?.inCycle ? 1 : 0.72;
+              if (d?.inCycle) return 1;
+              const total =
+                (degreeMapRef.current.get(String(e.source)) ?? 0) +
+                (degreeMapRef.current.get(String(e.target)) ?? 0);
+              return total >= 10 ? 0.92 : total >= 5 ? 0.75 : 0.52;
             },
             lineDash: (e) => {
               const d = e.data as RenderEdge | undefined;
@@ -828,6 +880,11 @@ function GraphCanvas({
               return d?.bidirectional ? true : false;
             },
             radius: 10,
+          },
+          // 边动画：加载淡入、移除淡出（不随布局位移，避免大量边同时平移的视觉噪音）
+          animation: {
+            enter: [{ fields: ["opacity"] }],
+            exit: [{ fields: ["opacity"] }],
           },
         },
         layout: layoutConfig(layoutMode),
@@ -1407,113 +1464,73 @@ export function AssetGraph({
           </div>
         )}
       </div>
-      <div
-        style={{
-          marginTop: 10,
-          display: "flex",
-          gap: 20,
-          flexWrap: "wrap",
-          fontSize: 12,
-          color: "var(--text-2)",
-          alignItems: "center",
-        }}
-      >
-        <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+      <div className="asset-graph-legend">
+        <div className="legend-group">
           <span className="muted">类型：</span>
-          <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+          <span className="legend-swatch">
             <ShapeSwatch type="metric" /> 指标 {typeCounts.metric ?? 0}
           </span>
-          <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+          <span className="legend-swatch">
             <ShapeSwatch type="table" /> 表 / 视图 {typeCounts.table ?? 0}
           </span>
-          <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+          <span className="legend-swatch">
             <ShapeSwatch type="field" /> 字段 {typeCounts.field ?? 0}
           </span>
         </div>
-        <div>
+        <div className="legend-group">
           <span className="muted">业务域：</span>
           {domains.map((d) => (
-            <span key={d} style={{ marginRight: 8 }}>
-              <span
-                style={{
-                  display: "inline-block",
-                  width: 10,
-                  height: 10,
-                  borderRadius: 3,
-                  background: domainColor({ domain: d }),
-                  marginRight: 4,
-                }}
-              />
+            <span className="legend-swatch" key={d}>
+              <span className="legend-dot" style={{ background: domainColor({ domain: d }) }} />
               {d}
             </span>
           ))}
           {domains.length === 0 && <span className="muted">-</span>}
         </div>
-        <div>
-          <span
-            style={{
-              display: "inline-block",
-              width: 10,
-              height: 10,
-              borderRadius: 3,
-              background: "#c62828",
-              marginRight: 4,
-            }}
-          />
-          <span className="muted">PII 描边 · 节点大小=血缘度 · 圆形/矩形/椭圆=指标/表/字段 · 右上角数字=依赖引用数</span>
+        <div className="legend-group">
+          <span className="legend-swatch">
+            <span className="legend-dot" style={{ background: "#c62828" }} />
+            <span className="muted">PII 描边 · 节点大小=血缘度 · 圆形/矩形/椭圆=指标/表/字段 · 右上角数字=依赖引用数</span>
+          </span>
         </div>
         {hasLayerNodes && (
-          <div>
+          <div className="legend-group">
             <span className="muted">数仓层：</span>
             {Object.entries(LAYER_STROKE).map(([layer, color]) => (
-              <span key={layer} style={{ marginRight: 8 }}>
+              <span className="legend-swatch" key={layer}>
                 <span
-                  style={{
-                    display: "inline-block",
-                    width: 10,
-                    height: 10,
-                    borderRadius: 3,
-                    border: `2.5px solid ${color}`,
-                    background: "rgba(0,0,0,0.06)",
-                    marginRight: 4,
-                    verticalAlign: "middle",
-                  }}
+                  className="legend-dot"
+                  style={{ border: `2.5px solid ${color}`, background: "rgba(0,0,0,0.06)" }}
                 />
                 {layer.toUpperCase()}
               </span>
             ))}
           </div>
         )}
-        <div>
-          <span
-            style={{
-              display: "inline-block",
-              width: 10,
-              height: 10,
-              borderRadius: "50%",
-              border: "3px solid #e65100",
-              background: "#ff8a80",
-              marginRight: 4,
-              verticalAlign: "middle",
-            }}
-          />
-          <span className="muted" style={{ color: "#e65100" }}>
-            环节点（橙色描边）
+        <div className="legend-group">
+          <span className="legend-swatch">
+            <span
+              className="legend-dot"
+              style={{ borderRadius: "50%", border: "3px solid #e65100", background: "#ff8a80" }}
+            />
+            <span className="muted" style={{ color: "#e65100" }}>
+              环节点（橙色描边）
+            </span>
           </span>
         </div>
-        <div>
-          <span
-            style={{
-              display: "inline-block",
-              width: 18,
-              height: 0,
-              borderTop: "2px dashed #e53935",
-              marginRight: 4,
-              verticalAlign: "middle",
-            }}
-          />
-          <span className="muted" style={{ color: "#b71c1c" }}>
-            环边（红色虚线）
+        <div className="legend-group">
+          <span className="legend-swatch">
+            <span
+              style={{
+                display: "inline-block",
+                width: 18,
+                height: 0,
+                borderTop: "2px dashed #e53935",
+              }}
+            />
+            <span className="muted" style={{ color: "#b71c1c" }}>
+              环边（红色虚线）
+            </span>
           </span>
         </div>
       </div>
