@@ -249,6 +249,16 @@ _REFINE_DEPS = [
         )
     ),
 ]
+# 单条创建/更新的口径字段：definition_json 承载 sql/expression/business_filter 等
+# SQL 口径文本、raw_sql 承载 ETL 原文——与批量端点（_SQL_BATCH_REGISTER_DEPS 豁免
+# candidates[].definition_json / candidates[].raw_sql）同源语义，仅落库存储/被 sqlglot
+# 纯函数解析，不执行、不拼接进任何 DB 查询。合法 ETL 的 -- 行注释 / /* */ 块注释 /
+# UNION SELECT / 多语句会被注入正则误伤（此前实测 INJECTION_DETECTED 400），故单条
+# 端点也按顶层字段豁免；metric_code/name/key 等其余字段与 query 参数仍全量扫描。
+_METRIC_WRITE_DEPS = [
+    Depends(require_roles(*_WRITE_ROLES)),
+    Depends(guard_against_injection_exempt("definition_json", "raw_sql")),
+]
 
 
 @router.post(
@@ -256,7 +266,7 @@ _REFINE_DEPS = [
     response_model=ApiResponse[MetricResponse],
     status_code=201,
     summary="创建指标语义定义（FR-05）",
-    dependencies=_WRITE_DEPS,
+    dependencies=_METRIC_WRITE_DEPS,
 )
 async def create_metric(
     request: MetricCreateRequest,
@@ -915,7 +925,7 @@ async def suggest_rename_metric(
     "/{metric_code}",
     response_model=ApiResponse[MetricResponse],
     summary="更新指标语义定义（FR-05，带乐观锁与版本快照）",
-    dependencies=_WRITE_DEPS,
+    dependencies=_METRIC_WRITE_DEPS,
 )
 async def update_metric(
     metric_code: str,

@@ -414,3 +414,51 @@ async def test_get_metric_health_api(metrics_client: httpx.AsyncClient) -> None:
     assert resp.status_code == 200
     assert resp.json()["data"]["level"] == "HEALTHY"
     mock_svc.return_value.get_metric_health.assert_awaited_once_with("sales_gmv_d")
+
+
+async def test_create_allows_legit_sql_in_definition_json(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """单条创建：口径字段（definition_json/raw_sql）含合法 ETL SQL（-- 注释 /
+    UNION SELECT / 块注释）不被注入守卫误伤（回归：此前 400 INJECTION_DETECTED）。
+    """
+    payload = {
+        "name": "门诊收费金额",
+        "domain": "e2e",
+        "type": "atomic",
+        "metric_code": "outp_feeamount_amt_day",
+        "definition_json": {
+            "expression": "SUM(COALESCE(fee_amount, 0))",
+            "sql": "SELECT month_id FROM t -- 行注释\nUNION ALL SELECT month_id FROM t2",
+            "source_table": "wedw_dwd.outp_fee_di",
+            "measure_column": "fee_amount",
+        },
+        "raw_sql": "insert overwrite table x select month_id from t -- 注释",
+    }
+    with (
+        patch("app.api.metrics.MetricService") as mock_svc,
+        patch("app.api.metrics._register_metric_l3_lineage", new_callable=AsyncMock),
+        patch("app.api.metrics.write_audit", new_callable=AsyncMock),
+    ):
+        mock_svc.return_value.create_metric = AsyncMock(
+            return_value=_metric("outp_feeamount_amt_day")
+        )
+        resp = await metrics_client.post("/api/v1/metric-definitions", json=payload)
+    assert resp.status_code == 201
+    mock_svc.return_value.create_metric.assert_awaited_once()
+
+
+async def test_create_still_blocks_injection_in_non_sql_fields(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """单条创建：非口径字段（metric_code）仍被注入守卫拦截——豁免不削弱纵深防御。"""
+    payload = {
+        "name": "门诊收费金额",
+        "domain": "e2e",
+        "type": "atomic",
+        "metric_code": "outp_feeamount_amt_day -- 注入",
+        "definition_json": {"expression": "SUM(fee_amount)"},
+    }
+    resp = await metrics_client.post("/api/v1/metric-definitions", json=payload)
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "INJECTION_DETECTED"
