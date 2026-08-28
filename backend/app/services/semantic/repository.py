@@ -161,6 +161,7 @@ class MetricRepository:
         updated_after: datetime | None = None,
         updated_before: datetime | None = None,
         batch_id: str | None = None,
+        has_downstream: bool | None = None,
         sort_by: str = "updated_at",
         sort_order: str = "desc",
         offset: int = 0,
@@ -240,6 +241,24 @@ class MetricRepository:
         # 批次过滤（P2）：按批量注册批次 ID 精确匹配（SQL/宽表批量创建的指标）
         if batch_id:
             conditions.append(Metric.batch_id == batch_id)
+        # 下游引用过滤（批量废弃前按引用收敛）：语义与 downstream-check 一致——
+        # 活跃边（deleted_at 置位 / stale 不计）中 source_node = "metric:{code}"
+        # 且 edge_type 为 DERIVED_FROM（派生该指标的派生指标）或 CONSUMED_BY（消费方）。
+        if has_downstream is not None:
+            ref_subq = (
+                select(LineageEdge.source_node)
+                .where(
+                    LineageEdge.deleted_at.is_(None),
+                    LineageEdge.stale.is_(False),
+                    LineageEdge.edge_type.in_(["DERIVED_FROM", "CONSUMED_BY"]),
+                )
+                .distinct()
+            )
+            prefixed_code = func.concat("metric:", Metric.metric_code)
+            if has_downstream:
+                conditions.append(prefixed_code.in_(ref_subq))
+            else:
+                conditions.append(~prefixed_code.in_(ref_subq))
         if updated_after is not None:
             conditions.append(Metric.updated_at >= updated_after)
         if updated_before is not None:

@@ -1077,6 +1077,12 @@ class MetricListParams(BaseModel):
     )
     # PII 过滤（热力指标视角下钻：PII 格子 / 非 PII 格子）
     pii_flag: bool | None = Field(None, description="仅 PII / 仅非 PII 指标")
+    # 下游引用过滤（批量废弃前按引用情况收敛）：true 仅保留有活跃下游引用的
+    # 指标（被派生指标 DERIVED_FROM / 消费方 CONSUMED_BY 引用），false 仅无下游。
+    # 血缘语义与 downstream-check 完全一致（deleted_at 置位 / stale 边不计）。
+    has_downstream: bool | None = Field(
+        None, description="下游引用过滤（true 仅有下游 / false 仅无下游 / None 不过滤）"
+    )
     # 已删除过滤（回收站视角）：true 时仅查软删（deleted_at 置位）的草稿指标，供恢复
     deleted: bool = Field(False, description="仅查已软删（回收站）指标")
     # 批次过滤（生产就绪审查 P2）：按批量注册批次 ID 精确匹配——审核/列表页可按

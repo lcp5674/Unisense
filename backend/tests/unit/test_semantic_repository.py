@@ -54,6 +54,12 @@ def _mock_session() -> MagicMock:
     return db
 
 
+def _compiled_sql(db: MagicMock, index: int) -> str:
+    """编译第 index 次 execute 的语句（literal_binds 便于断言过滤条件）。"""
+    stmt = db.execute.call_args_list[index].args[0]
+    return str(stmt.compile(compile_kwargs={"literal_binds": True}))
+
+
 # ---------- create / read ----------
 
 
@@ -159,6 +165,44 @@ async def test_list_metrics_applies_batch_id_filter():
     compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
     assert "batch_id" in compiled
     assert "sqlbatch_abc" in compiled
+
+
+async def test_list_metrics_has_downstream_filters():
+    """下游引用过滤（批量废弃前按引用收敛）：has_downstream=True 仅保留活跃下游引用
+    （DERIVED_FROM/CONSUMED_BY 边，deleted_at/stale 不计）；False 取反；None 不过滤。"""
+    db = _mock_session()
+    m1 = _metric(metric_code="a")
+    db.execute.side_effect = [
+        _result(scalar=1),
+        _result(all_=[m1]),
+    ]
+    repo = MetricRepository(db)
+    await repo.list_metrics(has_downstream=True, offset=0, limit=10)
+    compiled = _compiled_sql(db, 0)
+    # 指标编码拼 metric: 前缀后与活跃血缘边的 source_node 比对（IN 子查询）
+    concat_ok = (
+        "concat('metric:', metric.metric_code)" in compiled
+        or "concat(CAST('metric:'" in compiled
+    )
+    assert concat_ok
+    assert "lineage_edge" in compiled
+    assert "DERIVED_FROM" in compiled
+    assert "CONSUMED_BY" in compiled
+    assert "deleted_at IS NULL" in compiled
+
+    # 无下游 = IN 子查询取反（NOT IN）
+    db2 = _mock_session()
+    db2.execute.side_effect = [_result(scalar=1), _result(all_=[m1])]
+    await MetricRepository(db2).list_metrics(has_downstream=False, offset=0, limit=10)
+    compiled2 = _compiled_sql(db2, 0)
+    assert "NOT" in compiled2
+
+    # 缺省 None 不过滤：编译语句不含 lineage_edge
+    db3 = _mock_session()
+    db3.execute.side_effect = [_result(scalar=1), _result(all_=[m1])]
+    await MetricRepository(db3).list_metrics(offset=0, limit=10)
+    compiled3 = _compiled_sql(db3, 0)
+    assert "lineage_edge" not in compiled3
 
 
 # ---------- update_with_optimistic_lock ----------

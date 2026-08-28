@@ -319,6 +319,39 @@ describe("MetricCatalog", () => {
     });
   });
 
+  it("下游引用筛选：选择「有下游」请求携带 has_downstream=true，「无下游」携带 false", async () => {
+    renderCatalog();
+    await screen.findByText("sales_gmv_sum_d");
+    // 默认不过滤：请求 has_downstream 为 undefined
+    expect(mockedList.mock.calls.every((c) => c[0]?.has_downstream === undefined)).toBe(true);
+    // 选择「有下游」
+    fireEvent.mouseDown(screen.getByText("全部"));
+    const withOption = await screen.findByText("有下游");
+    fireEvent.click(withOption);
+    await waitFor(() => {
+      expect(mockedList).toHaveBeenCalledWith(expect.objectContaining({ has_downstream: true }));
+    });
+    // 切到「无下游」（用下拉项定位，避免与选中值/回显 Tag 重复匹配）
+    fireEvent.mouseDown(
+      document.querySelector(".ant-select-selection-item[title=\"有下游\"]") as Element,
+    );
+    const withoutOption = await screen.findByText("无下游");
+    fireEvent.click(withoutOption);
+    await waitFor(() => {
+      expect(mockedList).toHaveBeenCalledWith(expect.objectContaining({ has_downstream: false }));
+    });
+    // 已应用筛选回显 Tag 可一键清除（用 DOM 查询避免与下拉选项文本重复匹配）
+    const tag = [...document.querySelectorAll(".ant-tag")].find((el) =>
+      el.textContent?.includes("下游引用"),
+    );
+    fireEvent.click(tag?.querySelector(".ant-tag-close-icon") as Element);
+    await waitFor(() => {
+      // 清除后最新一次请求应回到不过滤（历史带 has_downstream 的调用不计）
+      const last = mockedList.mock.calls.at(-1)?.[0];
+      expect(last?.has_downstream === undefined).toBe(true);
+    });
+  });
+
   it("空态给出创建引导", async () => {
     mockedList.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 });
     renderCatalog();

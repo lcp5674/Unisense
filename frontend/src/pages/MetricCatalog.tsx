@@ -457,6 +457,8 @@ export function MetricCatalog() {
   const [myMetricsOnly, setMyMetricsOnly] = useState(false);
   // 合规官默认只看 PII 指标（listMetrics 支持 pii_flag 过滤）
   const [piiOnly, setPiiOnly] = useState(false);
+  // 下游引用过滤（批量废弃前按引用收敛）：all 不过滤 / with 仅有下游 / without 仅无下游
+  const [downstreamFilter, setDownstreamFilter] = useState<"all" | "with" | "without">("all");
   // 按用户群体差异化的可见列（null=角色未就绪/未初始化，渲染全部列避免闪烁）
   const [visibleCols, setVisibleCols] = useState<string[] | null>(null);
   // 角色默认筛选仅应用一次（URL 参数优先，不覆盖用户手动选择）
@@ -705,6 +707,7 @@ export function MetricCatalog() {
     setMyMetricsOnly(false);
     setFavoritesOnly(false);
     setPiiOnly(false);
+    setDownstreamFilter("all");
     setSortBy("updated_at");
     setSortOrder("desc");
     setPage(1);
@@ -763,6 +766,7 @@ export function MetricCatalog() {
         created_after: lifecycleDate.created_after,
         updated_before: lifecycleDate.updated_before,
         batch_id: batchIdFilter || undefined,
+        has_downstream: downstreamFilter === "all" ? undefined : downstreamFilter === "with",
         deleted: deletedView,
         sort_by: sortBy,
         sort_order: sortOrder,
@@ -858,7 +862,7 @@ export function MetricCatalog() {
 
   useEffect(() => {
     load();
-  }, [page, pageSize, status, domain, tier, sortBy, sortOrder, myMetricsOnly, piiOnly, currentUserId, ownerFilter, lifecycleDate, deletedView, batchIdFilter]);
+  }, [page, pageSize, status, domain, tier, sortBy, sortOrder, myMetricsOnly, piiOnly, currentUserId, ownerFilter, lifecycleDate, deletedView, batchIdFilter, downstreamFilter]);
 
   function handleSearch() {
     const kw = inputValue;
@@ -1695,7 +1699,7 @@ export function MetricCatalog() {
   );
 
   const hasFilter = Boolean(
-    keyword || status || domain || tier || ownerFilter || myMetricsOnly || piiOnly || lifecycleFilter || favoritesOnly,
+    keyword || status || domain || tier || ownerFilter || myMetricsOnly || piiOnly || lifecycleFilter || favoritesOnly || downstreamFilter !== "all",
   );
   const emptyGuide = useMemo(
     () => (
@@ -2154,6 +2158,20 @@ export function MetricCatalog() {
               label: `${name}（#${id}）`,
             }))}
           />
+          {/* 下游引用过滤（批量废弃前按引用收敛）：有/无下游一键筛选，
+              勾选「有下游」批量废弃时自动带替代指标，避免逐个翻详情确认 */}
+          <span className="muted" style={{ fontSize: 12, flex: "none" }}>下游引用</span>
+          <Select
+            value={downstreamFilter === "all" ? undefined : downstreamFilter}
+            onChange={(v) => { setDownstreamFilter((v as "with" | "without") || "all"); setPage(1); }}
+            style={{ width: 130 }}
+            allowClear
+            placeholder="全部"
+            options={[
+              { value: "with", label: "有下游" },
+              { value: "without", label: "无下游" },
+            ]}
+          />
           <span style={{ flex: 1 }} />
           <span className="muted" style={{ fontSize: 12, flex: "none" }}>排序</span>
           <Select
@@ -2271,6 +2289,11 @@ export function MetricCatalog() {
             {batchIdFilter && <Tag closable onClose={() => { setBatchIdFilter(""); setPage(1); }}>批次：{batchIdFilter}</Tag>}
             {myMetricsOnly && <Tag closable onClose={() => { setMyMetricsOnly(false); setPage(1); }}>我的指标</Tag>}
             {piiOnly && <Tag closable onClose={() => { setPiiOnly(false); setPage(1); }}>只看 PII</Tag>}
+            {downstreamFilter !== "all" && (
+              <Tag closable onClose={() => { setDownstreamFilter("all"); setPage(1); }}>
+                下游引用：{downstreamFilter === "with" ? "有下游" : "无下游"}
+              </Tag>
+            )}
             {favoritesOnly && <Tag closable onClose={() => { setFavoritesOnly(false); }}>只看收藏</Tag>}
             {/* 按用户群体差异化：当前角色视图只读提示（静默生效，避免用户困惑列为何变化）+ 一键恢复默认 */}
             {currentUserRole && visibleCols !== null && (
