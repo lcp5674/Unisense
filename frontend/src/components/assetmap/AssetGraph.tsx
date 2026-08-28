@@ -45,6 +45,9 @@ interface AssetGraphProps {
   layerBadges?: boolean;
   /** 是否提供「全屏」按钮（图谱全屏展示）。默认 true */
   fullscreenable?: boolean;
+  /** 分层布局方向：TB=自上而下（数仓源头在上、字段在下）；LR=从左到右（源头在左、字段在右）。
+   *  仅影响 hierarchy 布局，force/radial 无方向概念。默认 "TB"（保持既有行为）；可在工具栏手动切换。 */
+  direction?: "TB" | "LR";
 }
 
 const TYPE_LABEL: Record<string, string> = {
@@ -238,7 +241,8 @@ export function layerOf(n: AssetGraphNode): string | null {
  * 聚进多条泳道（血缘方向：ODS → DWD → DWS → ADS/DM → 其他表 → 指标 → 字段）。
  * - 表节点按其名称前缀/指标 dw_layer 推断分层（复用 layerOf）；未识别层级的表归入
  *   ``table`` 带（放在应用层之下、指标之上，避免未分层表打散加工链）；
- * - 锚点链按血缘方向连锚定边，dagre 自然把源（ODS）放最上、字段放最下；
+ * - 锚点链按血缘方向连锚定边，dagre 按 rankdir 排布：TB 时源（ODS）放最上、字段放最下，
+ *   LR 时源（ODS）放最左、字段放最右（方向由用户/父组件切换，锚点链本身与方向无关）；
  * - 每类真实节点经「锚 → 节点」挂载边锚到对应泳道（同层带内仍按血缘边纵向分层，
  *   表→表加工链在层带内保留）；
  * - other/unknown 类型不挂锚（自由参与分层，如上游依赖图的中心节点保持在最上方）。
@@ -543,18 +547,20 @@ function pickVisible(
   };
 }
 
-/** 布局配置：分层（DAG 自上而下）｜力导向（环/交互定位）｜血缘度径向（同心圆，依赖引用数高者居中）。 */
-function layoutConfig(layoutMode: "hierarchy" | "force" | "radial") {
+/** 布局配置：分层（DAG 自上而下或从左到右）｜力导向（环/交互定位）｜血缘度径向（同心圆，依赖引用数高者居中）。 */
+function layoutConfig(layoutMode: "hierarchy" | "force" | "radial", direction: "TB" | "LR" = "TB") {
   if (layoutMode === "hierarchy") {
-    // 分层布局：血缘 DAG 自上而下（表→指标），节点多时比力导向清晰得多
+    // 分层布局：血缘 DAG 自上而下（表→指标）或从左到右，节点多时比力导向清晰得多
     // nodesep/ranksep 收紧（80/70）让 160 节点大图在 zoom 下限 0.35 下能展示更多层级，
     // 避免被压成一条细带；间距按"节点半径+下方标签"最小需求计算留有余量避免文字压字。
+    // rankdir 由 direction 决定：TB 泳道纵向（源在上字段在下）、LR 横向（源在左字段在右）。
+    // align：TB 下 DL（深层靠左）让加工链更紧凑；LR 下 UL（dagre 默认）避免跨层折返。
     return {
       type: "antv-dagre",
-      rankdir: "TB",
-      align: "DL",
-      nodesep: 80,
-      ranksep: 70,
+      rankdir: direction,
+      align: direction === "LR" ? "UL" : "DL",
+      nodesep: direction === "LR" ? 70 : 80,
+      ranksep: direction === "LR" ? 80 : 70,
     };
   }
   if (layoutMode === "radial") {
@@ -590,6 +596,8 @@ interface GraphCanvasProps {
   nodes: AssetGraphNode[];
   edges: RenderEdge[];
   layoutMode: "hierarchy" | "force" | "radial";
+  /** 分层布局方向（仅 hierarchy 生效；force/radial 忽略） */
+  direction: "TB" | "LR";
   height: number;
   searchText: string;
   onNodeClick: (node: AssetGraphNode) => void;
@@ -611,6 +619,7 @@ function GraphCanvas({
   nodes,
   edges,
   layoutMode,
+  direction,
   height,
   searchText,
   onNodeClick,
@@ -1019,7 +1028,7 @@ function GraphCanvas({
             translate: false,
           },
         },
-        layout: layoutConfig(layoutMode),
+        layout: layoutConfig(layoutMode, direction),
         behaviors: ["drag-canvas", "zoom-canvas", "drag-element"],
         // 血缘度提示：悬停节点显示「依赖 N 项（上游）/ 被 M 项引用（下游）」，
         // 与右上角 badge 角标互补——badge 快速看总数，tooltip 细分方向。
@@ -1344,6 +1353,7 @@ export function AssetGraph({
   lanes = false,
   layerBadges = true,
   fullscreenable = true,
+  direction = "TB",
 }: AssetGraphProps) {
   const onNodeClickRef = useRef(onNodeClick);
   onNodeClickRef.current = onNodeClick;
@@ -1366,6 +1376,10 @@ export function AssetGraph({
   // 布局切换瞬态标记：用户点击切换 Select 后立即置 true，GraphCanvas 重挂载并完成 render 后置 false，
   // 期间叠加 Spin 让用户明确感知到"正在重新计算布局"，避免在节点多时误以为"点了没反应"
   const [layoutSwitching, setLayoutSwitching] = useState(false);
+  // 分层布局方向：TB=自上而下（默认，数仓源头在上字段在下）；LR=从左到右（源头在左字段在右）。
+  // 由工具栏「方向」Select 手动切换；prop direction 作为初始值（父组件可指定首屏方向）。
+  const [directionState, setDirectionState] = useState<"TB" | "LR">(direction);
+  useEffect(() => setDirectionState(direction), [direction]);
   // 全屏展示：portal 到 body 的 fixed overlay（复用同一实例 UI 状态，筛选/搜索/布局不丢失）
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
 
@@ -1382,6 +1396,14 @@ export function AssetGraph({
   // 布局切换处理：更新 override + 触发代际 + 显示 loading（GraphCanvas onReady 后自动清除）
   const handleLayoutChange = (v: "hierarchy" | "force" | "radial" | undefined) => {
     setLayoutOverride(v);
+    setLayoutTick((t) => t + 1);
+    setLayoutSwitching(true);
+  };
+
+  // 分层方向切换处理：更新方向 + 触发代际重挂载 + 显示 loading（与布局切换同模式）
+  const handleDirectionChange = (v: "TB" | "LR") => {
+    if (v === directionState) return; // 同一方向不重挂载
+    setDirectionState(v);
     setLayoutTick((t) => t + 1);
     setLayoutSwitching(true);
   };
@@ -1576,6 +1598,18 @@ export function AssetGraph({
             { value: "radial", label: "血缘度径向" },
           ]}
         />
+        {layoutMode === "hierarchy" && (
+          <Select
+            value={directionState}
+            onChange={handleDirectionChange}
+            style={{ minWidth: 132 }}
+            data-testid="asset-graph-direction"
+            options={[
+              { value: "TB", label: "方向：自上而下" },
+              { value: "LR", label: "方向：从左到右" },
+            ]}
+          />
+        )}
         <Button
           size="middle"
           data-testid="asset-graph-show-fields"
@@ -1597,10 +1631,11 @@ export function AssetGraph({
       </div>
       <div style={{ position: "relative", width: "100%" }}>
         <GraphCanvas
-          key={`${layoutMode}-${layoutTick}`}
+          key={`${layoutMode}-${direction}-${layoutTick}`}
           nodes={laneData.nodes}
           edges={laneData.edges}
           layoutMode={layoutMode}
+          direction={directionState}
           height={h}
           searchText={searchText}
           onNodeClick={(n) => onNodeClickRef.current?.(n)}

@@ -187,6 +187,56 @@ describe("AssetGraph 交互", () => {
     expect(ctorConfig.layout?.type).toBe("antv-dagre");
   });
 
+  it("分层布局默认自上而下（TB），工具栏可切换为从左到右（LR）并触发重挂载", async () => {
+    const user = userEvent.setup();
+    const dagNodes: AssetGraphNode[] = [
+      { id: "table:o", label: "ods_orders", type: "table", domain: "sales" },
+      { id: "metric:m", label: "gmv", type: "metric", domain: "sales" },
+    ];
+    const dagEdges: AssetGraphEdge[] = [
+      { source: "table:o", target: "metric:m", type: "DERIVED_FROM" },
+    ];
+    render(<AssetGraph nodes={dagNodes} edges={dagEdges} height={300} />);
+    await waitFor(() => expect(Graph).toHaveBeenCalledTimes(1));
+
+    // 默认方向：自上而下（TB），align=DL
+    let ctorConfig = vi.mocked(Graph).mock.calls[0][0] as {
+      layout?: { type?: string; rankdir?: string; align?: string };
+    };
+    expect(ctorConfig.layout?.type).toBe("antv-dagre");
+    expect(ctorConfig.layout?.rankdir).toBe("TB");
+    expect(ctorConfig.layout?.align).toBe("DL");
+
+    // 工具栏「方向」切换为从左到右
+    const dirSelect = screen.getByTestId("asset-graph-direction");
+    fireEvent.mouseDown(dirSelect.querySelector(".ant-select-selector") as Element);
+    await user.click(await screen.findByText("方向：从左到右"));
+    await user.keyboard("{Escape}");
+
+    // 方向变化 → 代际 +1 → GraphCanvas 重挂载（第 2 次 Graph 构造），rankdir=LR、align=UL
+    await waitFor(() => expect(Graph).toHaveBeenCalledTimes(2));
+    ctorConfig = vi.mocked(Graph).mock.calls[1][0] as {
+      layout?: { type?: string; rankdir?: string; align?: string };
+    };
+    expect(ctorConfig.layout?.type).toBe("antv-dagre");
+    expect(ctorConfig.layout?.rankdir).toBe("LR");
+    expect(ctorConfig.layout?.align).toBe("UL");
+  });
+
+  it("非分层布局（力导向）不显示方向切换控件", async () => {
+    const cycNodes: AssetGraphNode[] = [
+      { id: "table:a", label: "ods_a", type: "table", domain: "sales" },
+      { id: "table:b", label: "ods_b", type: "table", domain: "sales" },
+    ];
+    const cycEdges: AssetGraphEdge[] = [
+      { source: "table:a", target: "table:b", type: "DERIVED_FROM" },
+      { source: "table:b", target: "table:a", type: "DERIVED_FROM" },
+    ];
+    render(<AssetGraph nodes={cycNodes} edges={cycEdges} height={300} layout="force" />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+    expect(screen.queryByTestId("asset-graph-direction")).toBeNull();
+  });
+
   it("渲染中切走再切回布局后数据不丢失——回归：force→hierarchy 图空白", async () => {
     const user = userEvent.setup();
     // 模拟真实 G6：第 1 次渲染（分层）正常 resolve；切到力导向后其 render promise
