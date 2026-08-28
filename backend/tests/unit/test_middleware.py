@@ -191,6 +191,8 @@ class TestSecurityHeadersMiddleware:
         assert "script-src 'self'" in _DOCS_CSP
         assert "'unsafe-inline'" not in _DOCS_CSP.split("script-src")[1].split(";")[0]
         assert "style-src 'self' 'unsafe-inline'" in _DOCS_CSP
+        # 文档页面禁止缓存（接口变更后始终拉取最新）
+        assert response.headers["Cache-Control"] == "no-store"
 
     async def test_redoc_path_uses_localized_csp(self) -> None:
         mw = SecurityHeadersMiddleware(lambda *a, **k: None)
@@ -201,6 +203,33 @@ class TestSecurityHeadersMiddleware:
 
         response = await mw.dispatch(request, call_next)
         assert response.headers["Content-Security-Policy"] == _DOCS_CSP
+        assert response.headers["Cache-Control"] == "no-store"
+
+    async def test_openapi_json_not_cached(self) -> None:
+        """/openapi.json 是动态生成的接口清单，禁止浏览器缓存，保证 docs 同步最新路由。"""
+        mw = SecurityHeadersMiddleware(lambda *a, **k: None)
+        request = _request(path="/openapi.json")
+
+        async def call_next(req: Request) -> PlainTextResponse:
+            return PlainTextResponse('{"openapi": "3.1.0"}')
+
+        response = await mw.dispatch(request, call_next)
+        assert response.headers["Cache-Control"] == "no-store"
+        # openapi.json 属 API 响应，保持全局严格 CSP（非文档页面 CSP）
+        assert response.headers["Content-Security-Policy"] == _SECURITY_HEADERS[
+            "Content-Security-Policy"
+        ]
+
+    async def test_api_json_not_cached_by_docs_rule(self) -> None:
+        """普通 API 响应不受文档 no-store 规则影响（无 Cache-Control 覆盖）。"""
+        mw = SecurityHeadersMiddleware(lambda *a, **k: None)
+        request = _request(path="/api/v1/metrics")
+
+        async def call_next(req: Request) -> PlainTextResponse:
+            return PlainTextResponse("ok")
+
+        response = await mw.dispatch(request, call_next)
+        assert "Cache-Control" not in response.headers
 
 
 class _DegradedEngineError(UnisenseError):

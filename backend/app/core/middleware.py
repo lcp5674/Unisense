@@ -48,6 +48,11 @@ _DOCS_CSP = (
 # 命中这些路径的响应使用 _DOCS_CSP 替代全局严格 CSP（仅文档页面；API 响应保持严格）
 _DOCS_PATHS = ("/docs", "/redoc")
 
+# API 文档相关路径不缓存：/openapi.json 是运行时根据当前注册路由动态生成的，
+# 若被浏览器启发式缓存，接口变更后 Swagger UI 刷新会拿到过期定义（文档不同步）。
+# /docs /redoc 页面与 /openapi.json 统一 no-store，保证每次打开都是最新接口清单。
+_DOCS_CACHE_PATHS = ("/docs", "/redoc", "/openapi.json")
+
 # error_code → HTTP 状态码覆盖。
 # 鉴权失败（令牌缺失/过期/无效、凭据错误）统一为 401；各类 FORBIDDEN 为 403。
 # 其余错误回落到异常类自身的 http_status（如 404/409/422）。
@@ -199,6 +204,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 response.headers[key] = _DOCS_CSP
             else:
                 response.headers[key] = value
+        # 文档相关响应禁止缓存，确保接口变更后 Swagger UI/ReDoc 始终拉取最新定义
+        if request.url.path in _DOCS_CACHE_PATHS:
+            response.headers["Cache-Control"] = "no-store"
         return response
 
 
