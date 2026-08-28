@@ -485,6 +485,13 @@ describe("AssetMap", () => {
 
   it("switches to owner view tab", async () => {
     const user = userEvent.setup();
+    // 图谱含 owner 节点 → 切换 Owner 视图后加载责任人视图
+    vi.mocked(fetchAssetGraph).mockResolvedValue({
+      nodes: [
+        { id: "m1", label: "finance_revenue_sum_d", type: "metric", owner: "1" },
+      ],
+      edges: [],
+    });
     renderAssetMap();
 
     await waitFor(() => {
@@ -1601,11 +1608,31 @@ describe("AssetMap", () => {
 
   it("owner view statistic click drills into owner metric list", async () => {
     const user = userEvent.setup();
+    // 图谱含 owner 节点（责任人 #1 = Bob）→ 加载责任人视图
+    vi.mocked(fetchAssetGraph).mockResolvedValue({
+      nodes: [
+        {
+          id: "m1",
+          label: "finance_revenue_sum_d",
+          type: "metric",
+          domain: "finance",
+          owner: "1",
+        },
+        {
+          id: "m2",
+          label: "finance_cost_sum_d",
+          type: "metric",
+          domain: "finance",
+          owner: "1",
+        },
+      ],
+      edges: [{ source: "m1", target: "m2", type: "derives_from" }],
+    });
     renderAssetMap();
 
     await waitFor(() => expect(screen.getByText("Owner 视图")).toBeInTheDocument());
     await user.click(screen.getByText("Owner 视图"));
-    // mock 无 owner 节点 → 回退责任人 #1，加载视图
+    // 图谱含 owner → 加载责任人视图（Bob）
     await waitFor(() => expect(fetchAssetOwnerView).toHaveBeenCalledWith(1));
 
     // 点击「已发布」统计值 30 → 按 owner_id + status=PUBLISHED 下钻
@@ -1616,6 +1643,20 @@ describe("AssetMap", () => {
       ),
     );
     expect(screen.getByText(/Bob 指标明细（状态：PUBLISHED）/)).toBeInTheDocument();
+  });
+
+  it("owner view without graph owner shows empty placeholder, never fakes owner", async () => {
+    const user = userEvent.setup();
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByText("Owner 视图")).toBeInTheDocument());
+    await user.click(screen.getByText("Owner 视图"));
+    // 图谱无 owner 节点 → 不伪造「责任人 #1」假用户：展示空态占位，且不请求视图
+    await waitFor(() =>
+      expect(screen.getByText("从图谱提取责任人…")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("请选择责任人")).toBeInTheDocument();
+    expect(fetchAssetOwnerView).not.toHaveBeenCalled();
   });
 
   it("description coverage tab (summary) shows stats and 前往采集目录治理 button", async () => {

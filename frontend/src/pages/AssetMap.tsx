@@ -2587,10 +2587,11 @@ function OwnerTab() {
           setOwnerOptions(opts);
           setOwnerId((prev) => prev ?? opts[0].value);
         } else {
-          // 图谱暂无责任人信息时，回退展示责任人 #1
-          const fallback = [{ label: "责任人 #1", value: 1 }];
-          setOwnerOptions(fallback);
-          setOwnerId((prev) => prev ?? 1);
+          // 图谱暂无责任人信息时，不伪造责任人（此前回退「责任人 #1」会指向不存在
+          // 的用户，选中后 fetchAssetOwnerView(1) 必然报错/空白）——保持空选项，
+          // 展示「从图谱提取责任人…」占位，待资产接入 owner 后可下拉选择。
+          setOwnerOptions([]);
+          setOwnerId(undefined);
         }
       })
       .catch(() => {});
