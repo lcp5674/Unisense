@@ -70,6 +70,7 @@ from app.core.middleware import (
 )
 from app.core.resilience import init_circuit_breaker_store, register_degradation_listener
 from app.db.redis import close_redis_pool, init_redis_pool
+from app.openapi_localize import TAGS_ZH, localize_openapi
 from app.services.consume.rate_limiter import init_rate_limiter
 from app.services.notify.consumers import register_notify_event_consumers
 
@@ -88,6 +89,12 @@ _SWAGGER_DEFAULTS: dict[str, object] = {
     "syntaxHighlight": {"theme": "obsidian"},
 }
 
+# OpenAPI 顶层 tags（中文分组名 x-displayName + 分组描述）——供 Swagger UI 左侧分组展示
+_OPENAPI_TAGS: list[dict[str, str]] = [
+    {"name": name, "description": desc, "x-displayName": zh}
+    for name, (zh, desc) in TAGS_ZH.items()
+]
+
 
 def _swagger_ui_html(*, openapi_url: str, title: str) -> HTMLResponse:
     """本地化 Swagger UI 页面（无 CDN、无 inline script）。
@@ -104,6 +111,7 @@ def _swagger_ui_html(*, openapi_url: str, title: str) -> HTMLResponse:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="swagger-config" content='{json.dumps(config, ensure_ascii=False)}'>
 <link rel="stylesheet" href="/static/swagger-ui/swagger-ui.css">
+<link rel="stylesheet" href="/static/swagger-ui/custom.css">
 <link rel="icon" href="/static/swagger-ui/favicon.png">
 <title>{title}</title>
 </head>
@@ -270,6 +278,7 @@ def create_app() -> FastAPI:
         docs_url=None,
         redoc_url=None,
         openapi_url="/openapi.json",
+        openapi_tags=_OPENAPI_TAGS,
         lifespan=lifespan,
     )
 
@@ -363,6 +372,14 @@ def create_app() -> FastAPI:
     app.include_router(feature_flags_router, prefix="/api/v1")
     app.include_router(admin_key_rotation_router, prefix="/api/v1")
     app.include_router(users_router, prefix="/api/v1")
+
+    # ---- OpenAPI 展示层中文化（文档页中文分组/接口描述；不改变 API 契约）----
+    _raw_openapi = app.openapi
+
+    def _localized_openapi() -> dict:
+        return localize_openapi(_raw_openapi())
+
+    app.openapi = _localized_openapi  # type: ignore[method-assign]
 
     return app
 

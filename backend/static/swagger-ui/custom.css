@@ -1,0 +1,362 @@
+/* Unisense API 文档品牌主题（覆盖 swagger-ui.css 默认样式）
+ *
+ * 设计目标：与「指标语义中台」产品调性一致的现代中文 API 文档——
+ *   深蓝品牌顶栏（保留 StandaloneLayout 搜索/折叠功能）、
+ *   中文系统字体栈、圆角卡片式分组、清爽正文排版。
+ */
+
+:root {
+  --un-brand: #2563eb;
+  --un-brand-dark: #1e40af;
+  --un-brand-deep: #0f172a;
+  --un-accent: #06b6d4;
+  --un-bg: #f8fafc;
+  --un-card: #ffffff;
+  --un-border: #e2e8f0;
+  --un-text: #1e293b;
+  --un-text-soft: #64748b;
+}
+
+/* ---------- 全局字体 ---------- */
+.swagger-ui,
+.swagger-ui .opblock-tag,
+.swagger-ui .opblock .opblock-summary-description,
+.swagger-ui .opblock .opblock-summary-path,
+.swagger-ui .model-box,
+.swagger-ui .parameter__name,
+.swagger-ui .responses-inner,
+.swagger-ui .info {
+  font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif !important;
+}
+
+/* ---------- 品牌顶栏（覆盖 StandaloneLayout 默认灰色 topbar） ---------- */
+.swagger-ui .topbar {
+  background: linear-gradient(120deg, var(--un-brand-deep) 0%, var(--un-brand-dark) 55%, var(--un-brand) 100%);
+  box-shadow: 0 2px 12px rgba(15, 23, 42, 0.25);
+  padding: 0;
+  border: none;
+}
+.swagger-ui .topbar .wrapper {
+  max-width: 1460px;
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.swagger-ui .topbar .topbar-wrapper {
+  display: flex;
+  align-items: center;
+  flex: 1;
+}
+.swagger-ui .topbar .link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  max-width: none;
+}
+.swagger-ui .topbar .logo {
+  content: url("/static/swagger-ui/favicon.png");
+  width: 28px;
+  height: 28px;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.3));
+}
+.swagger-ui .topbar .un-brand-text {
+  color: #fff;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+.swagger-ui .topbar .un-brand-sub {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  margin-left: 10px;
+  padding-left: 10px;
+  border-left: 1px solid rgba(255, 255, 255, 0.25);
+  white-space: nowrap;
+}
+/* 顶栏右侧搜索/折叠区 */
+.swagger-ui .topbar .download-url-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+.swagger-ui .topbar .download-url-wrapper input[type="text"] {
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 13px;
+  padding: 6px 12px;
+}
+.swagger-ui .topbar .download-url-wrapper input[type="text"]::placeholder {
+  color: rgba(255, 255, 255, 0.6);
+}
+.swagger-ui .topbar .download-url-button {
+  background: #fff;
+  color: var(--un-brand-dark);
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+/* ---------- 页面背景与内容容器 ---------- */
+.swagger-ui {
+  background: var(--un-bg);
+}
+.swagger-ui .wrapper {
+  max-width: 1460px;
+}
+.swagger-ui .scheme-container {
+  background: var(--un-card);
+  border: 1px solid var(--un-border);
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+  margin: 16px 0;
+  padding: 14px 24px;
+}
+.swagger-ui .scheme-container .schemes-title {
+  color: var(--un-text-soft);
+  font-size: 13px;
+}
+
+/* ---------- 接口分组（tag 卡片） ---------- */
+.swagger-ui .opblock-tag {
+  background: var(--un-card);
+  border: 1px solid var(--un-border);
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  margin: 12px 0;
+  padding: 14px 20px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--un-text);
+  border-bottom: 1px solid var(--un-border);
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+.swagger-ui .opblock-tag:hover {
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.12);
+}
+.swagger-ui .opblock-tag a {
+  color: var(--un-brand);
+  text-decoration: none;
+}
+.swagger-ui .opblock-tag .expand-operation {
+  color: var(--un-text-soft);
+}
+.swagger-ui .opblock-tag.no-desc span {
+  color: var(--un-text-soft);
+  font-weight: 400;
+  font-size: 13px;
+}
+
+/* ---------- 操作块（接口条目卡片） ---------- */
+.swagger-ui .opblock {
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+  margin: 8px 0;
+  border: 1px solid var(--un-border);
+  overflow: hidden;
+}
+.swagger-ui .opblock .opblock-summary {
+  padding: 12px 16px;
+}
+.swagger-ui .opblock .opblock-summary-path {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.swagger-ui .opblock .opblock-summary-description {
+  color: var(--un-text-soft);
+  font-size: 13px;
+}
+/* 方法徽章：统一圆角、加粗 */
+.swagger-ui .opblock .opblock-summary-method {
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  min-width: 72px;
+  text-align: center;
+  padding: 5px 0;
+  letter-spacing: 0.4px;
+}
+.swagger-ui .opblock.opblock-get { background: #f0f9ff; border-color: #bae6fd; }
+.swagger-ui .opblock.opblock-post { background: #f0fdf4; border-color: #bbf7d0; }
+.swagger-ui .opblock.opblock-put { background: #fffbeb; border-color: #fde68a; }
+.swagger-ui .opblock.opblock-delete { background: #fef2f2; border-color: #fecaca; }
+.swagger-ui .opblock.opblock-patch { background: #faf5ff; border-color: #e9d5ff; }
+.swagger-ui .opblock.opblock-get .opblock-summary-method { background: #0ea5e9; }
+.swagger-ui .opblock.opblock-post .opblock-summary-method { background: #22c55e; }
+.swagger-ui .opblock.opblock-put .opblock-summary-method { background: #f59e0b; }
+.swagger-ui .opblock.opblock-delete .opblock-summary-method { background: #ef4444; }
+.swagger-ui .opblock.opblock-patch .opblock-summary-method { background: #a855f7; }
+
+/* ---------- 展开面板 ---------- */
+.swagger-ui .opblock .opblock-section-header {
+  background: #f1f5f9;
+  border-bottom: 1px solid var(--un-border);
+  padding: 10px 20px;
+}
+.swagger-ui .opblock .opblock-section-header h4 {
+  color: var(--un-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+.swagger-ui .tab li {
+  font-size: 13px;
+}
+.swagger-ui .tab li.tabitem {
+  border-radius: 6px 6px 0 0;
+}
+
+/* ---------- 参数与表格 ---------- */
+.swagger-ui table thead tr td,
+.swagger-ui table thead tr th {
+  background: #f1f5f9;
+  color: var(--un-text);
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom: 2px solid var(--un-border);
+}
+.swagger-ui table tbody tr td {
+  border-bottom: 1px solid var(--un-border);
+  font-size: 13px;
+}
+.swagger-ui .parameter__name {
+  color: var(--un-text);
+  font-size: 13px;
+}
+.swagger-ui .parameter__type {
+  color: var(--un-text-soft);
+  font-size: 12px;
+}
+.swagger-ui .parameter__deprecated {
+  color: #f59e0b;
+}
+.swagger-ui .model-title {
+  color: var(--un-text);
+  font-size: 14px;
+  font-weight: 600;
+}
+.swagger-ui .model {
+  border-radius: 8px;
+}
+.swagger-ui .model-box {
+  font-size: 13px;
+}
+
+/* ---------- 响应状态码徽章 ---------- */
+.swagger-ui .responses-inner h4,
+.swagger-ui .responses-inner h5 {
+  color: var(--un-text);
+}
+.swagger-ui .response-col_status {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+/* ---------- 按钮 ---------- */
+.swagger-ui .btn {
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid var(--un-border);
+}
+.swagger-ui .btn.execute {
+  background: var(--un-brand);
+  border-color: var(--un-brand);
+  color: #fff;
+}
+.swagger-ui .btn.execute:hover {
+  background: var(--un-brand-dark);
+}
+.swagger-ui .btn.cancel {
+  background: #fff;
+  color: var(--un-text);
+}
+.swagger-ui .btn.authorize {
+  border-color: var(--un-brand);
+  color: var(--un-brand);
+  border-radius: 6px;
+}
+.swagger-ui .btn.authorize:hover {
+  background: rgba(37, 99, 235, 0.08);
+}
+.swagger-ui .authorization__btn {
+  fill: var(--un-text-soft);
+}
+
+/* ---------- 信息区 ---------- */
+.swagger-ui .info {
+  margin: 24px 0;
+  padding: 20px 24px;
+  background: var(--un-card);
+  border: 1px solid var(--un-border);
+  border-radius: 12px;
+}
+.swagger-ui .info .title {
+  color: var(--un-text);
+  font-size: 26px;
+  font-weight: 700;
+}
+.swagger-ui .info .title small {
+  background: var(--un-brand);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.swagger-ui .info .description p {
+  color: var(--un-text);
+  font-size: 14px;
+  line-height: 1.7;
+}
+.swagger-ui .info .base-url,
+.swagger-ui .info .url {
+  color: var(--un-text-soft);
+  font-size: 13px;
+}
+.swagger-ui .info h5 {
+  color: var(--un-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* ---------- 代码块 ---------- */
+.swagger-ui pre {
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+.swagger-ui .highlight-code {
+  border-radius: 8px;
+}
+
+/* ---------- 滚动条微调 ---------- */
+.swagger-ui ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.swagger-ui ::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+.swagger-ui ::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* ---------- 移动端适配 ---------- */
+@media (max-width: 768px) {
+  .swagger-ui .topbar .un-brand-sub {
+    display: none;
+  }
+  .swagger-ui .topbar .download-url-wrapper {
+    display: none;
+  }
+  .swagger-ui .opblock .opblock-summary-description {
+    display: none;
+  }
+}

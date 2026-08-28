@@ -26,9 +26,11 @@
   config.presets = [SwaggerUIBundle.presets.apis];
   // swagger-ui-dist@5 起 bundle 不再内置 SwaggerUIStandalonePreset，需独立引入
   // swagger-ui-standalone-preset.js（挂载到全局 window.SwaggerUIStandalonePreset）。
-  // 有则启用完整 StandaloneLayout（顶栏 + 搜索）；缺失时回退 BaseLayout 保证可渲染。
+  // 有则启用 StandaloneLayout（品牌顶栏 + 搜索）；缺失时回退 BaseLayout 保证可渲染。
   if (typeof window.SwaggerUIStandalonePreset !== "undefined") {
     config.presets.push(window.SwaggerUIStandalonePreset);
+    // preset 仅注册 StandaloneLayout 组件，必须显式指定 layout 才会启用顶栏
+    config.layout = "StandaloneLayout";
   } else {
     config.layout = "BaseLayout";
   }
@@ -37,4 +39,32 @@
     config.url = "/openapi.json";
   }
   window.ui = SwaggerUIBundle(config);
+
+  // ---- 顶栏品牌化：替换默认 "swagger" 标题为产品名 + 副标题（custom.css 已改 logo 图）----
+  // Swagger UI 的 topbar 由 StandaloneLayout 异步渲染，轮询等待其出现后注入品牌内容；
+  // 回退 BaseLayout（standalone-preset 缺失）时无 topbar，跳过即可（其余美化不受影响）。
+  function brandTopbar() {
+    var link = document.querySelector(".swagger-ui .topbar .link");
+    if (!link) {
+      return false;
+    }
+    var span = link.querySelector("span");
+    if (span) {
+      span.textContent = "Unisense 指标语义中台";
+      span.className = "un-brand-text";
+    }
+    if (!link.querySelector(".un-brand-sub")) {
+      var sub = document.createElement("span");
+      sub.className = "un-brand-sub";
+      sub.textContent = "开放 API 文档 v0.1.0";
+      link.appendChild(sub);
+    }
+    return true;
+  }
+  var brandTries = 0;
+  var brandTimer = setInterval(function () {
+    if (brandTopbar() || ++brandTries > 40) {
+      clearInterval(brandTimer);
+    }
+  }, 100);
 })();
