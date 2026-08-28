@@ -1066,10 +1066,10 @@ export function MetricCatalog() {
         ok = res.ok_count;
         res.results.filter((r) => !r.ok).forEach((r) => { errors.push(`${r.code}: ${r.message}`); failedCodes.push(r.code); });
       } else {
-        // delete：逐条处理（无批量删除端点）
-        const targets = selected.filter((m) => m.status === "DRAFT");
+        // delete：逐条处理（无批量删除端点；后端允许 DRAFT/DEPRECATED）
+        const targets = selected.filter((m) => m.status === "DRAFT" || m.status === "DEPRECATED");
         if (!targets.length) {
-          message.warning("勾选的指标中没有草稿状态可操作");
+          message.warning("勾选的指标中没有草稿/已废弃状态可操作");
           return;
         }
         for (const m of targets) {
@@ -1991,8 +1991,8 @@ export function MetricCatalog() {
                   label: (
                     <Tooltip
                       title={
-                        !selected.some((m) => m.status === "DRAFT")
-                          ? "批量删除仅适用于勾选中的草稿（DRAFT）指标；当前勾选无草稿指标"
+                        !selected.some((m) => m.status === "DRAFT" || m.status === "DEPRECATED")
+                          ? "批量删除仅适用于勾选中的草稿（DRAFT）或已废弃（DEPRECATED）指标；当前勾选无可删指标"
                           : currentUserRole !== "platform_admin" &&
                               currentUserRole !== "domain_admin" &&
                               !selected.some((m) => m.owner_id === currentUserId)
@@ -2000,14 +2000,14 @@ export function MetricCatalog() {
                             : undefined
                       }
                     >
-                      <span>批量删除（草稿）</span>
+                      <span>批量删除（草稿/已废弃）</span>
                     </Tooltip>
                   ),
                   icon: <DeleteOutlined />,
                   danger: true,
-                  // 后端允许平台/域管理员或原 Owner 删除 DRAFT/DEPRECATED；非权限禁用避免 403
+                  // 后端允许平台/域管理员或原 Owner 删除 DRAFT/DEPRECATED（service.delete_metric）；非权限禁用避免 403
                   disabled:
-                    !selected.some((m) => m.status === "DRAFT") ||
+                    !selected.some((m) => m.status === "DRAFT" || m.status === "DEPRECATED") ||
                     (currentUserRole !== "platform_admin" &&
                       currentUserRole !== "domain_admin" &&
                       !selected.some((m) => m.owner_id === currentUserId)),
@@ -2375,7 +2375,7 @@ export function MetricCatalog() {
                     ? "批量恢复已废弃指标"
                     : batchAction === "purge"
                       ? "批量彻底删除（回收站）"
-                      : "批量删除草稿"
+                      : "批量删除草稿/已废弃"
         }
         open={batchAction !== null}
         confirmLoading={batchBusy}
@@ -2573,7 +2573,7 @@ export function MetricCatalog() {
         )}
         {batchAction === "delete" && (
           <p>
-            将删除勾选的 <b>{selected.filter((m) => m.status === "DRAFT").length}</b> 个草稿指标
+            将删除勾选的 <b>{selected.filter((m) => m.status === "DRAFT" || m.status === "DEPRECATED").length}</b> 个草稿/已废弃指标
             （软删除，仅平台/域管理员或指标创建者可执行）。如需找回，可在右上角「回收站」中恢复。
           </p>
         )}

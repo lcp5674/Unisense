@@ -347,7 +347,8 @@ describe("MetricCatalog", () => {
     fireEvent.click(tag?.querySelector(".ant-tag-close-icon") as Element);
     await waitFor(() => {
       // 清除后最新一次请求应回到不过滤（历史带 has_downstream 的调用不计）
-      const last = mockedList.mock.calls.at(-1)?.[0];
+      const calls = mockedList.mock.calls;
+      const last = calls[calls.length - 1]?.[0];
       expect(last?.has_downstream === undefined).toBe(true);
     });
   });
@@ -680,7 +681,33 @@ describe("MetricCatalog", () => {
     const selectAll = document.querySelector(".ant-table-selection-column input[type=checkbox]") as Element;
     fireEvent.click(selectAll);
     fireEvent.click(screen.getByRole("button", { name: /批量操作/ }));
-    fireEvent.click(screen.getByText("批量删除（草稿）"));
+    fireEvent.click(screen.getByText("批量删除（草稿/已废弃）"));
+    await screen.findByText(/将删除勾选的/);
+    fireEvent.click(screen.getByRole("button", { name: "删 除" }));
+    await waitFor(() => {
+      expect(mockedDeleteMetric).toHaveBeenCalledWith("sales_gmv_sum_d");
+    });
+  });
+
+  it("批量操作：勾选已废弃（DEPRECATED）指标也可批量删除（后端允许 DRAFT/DEPRECATED）", async () => {
+    const deprecated = { ...metric, status: "DEPRECATED" as const };
+    mockedList.mockResolvedValue({ items: [deprecated], total: 1, page: 1, page_size: 20 });
+    mockedDeleteMetric.mockResolvedValue({} as never);
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "admin",
+      display_name: "管理员",
+      role: "platform_admin",
+      domain: null,
+      org_id: 1,
+    });
+    renderCatalog();
+    await screen.findByText("sales_gmv_sum_d");
+    const selectAll = document.querySelector(".ant-table-selection-column input[type=checkbox]") as Element;
+    fireEvent.click(selectAll);
+    fireEvent.click(screen.getByRole("button", { name: /批量操作/ }));
+    // 已废弃指标不再让「批量删除」灰置（修复前 disabled）
+    fireEvent.click(screen.getByText("批量删除（草稿/已废弃）"));
     await screen.findByText(/将删除勾选的/);
     fireEvent.click(screen.getByRole("button", { name: "删 除" }));
     await waitFor(() => {
