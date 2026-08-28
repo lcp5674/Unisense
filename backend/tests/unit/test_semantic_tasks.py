@@ -64,6 +64,24 @@ def _mock_db(metrics: list) -> MagicMock:
     return db
 
 
+def _mock_db_health(metrics: list) -> MagicMock:
+    """health 专用 mock：refresh_health_scores 分批加载的 execute 序列。
+
+    T17（审查修复）：execute = COUNT(总数) → 批量查询[metrics] → 批量查询[]（结束）。
+    """
+    db = MagicMock()
+    count_res = MagicMock()
+    count_res.scalar_one.return_value = len(metrics)
+    batch_res = MagicMock()
+    batch_res.scalars.return_value.all.return_value = metrics
+    empty_res = MagicMock()
+    empty_res.scalars.return_value.all.return_value = []
+    db.execute = AsyncMock(side_effect=[count_res, batch_res, empty_res])
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    return db
+
+
 @pytest.fixture
 def _patch_health_refresh_env() -> None:
     """把 refresh_health_scores 的 DB/评分/仓库/通知依赖全部替换为可控 mock。
@@ -92,7 +110,7 @@ async def test_refresh_health_notifies_owner_on_critical(_patch_health_refresh_e
     from app.tasks.semantic_tasks import refresh_health_scores
 
     metric = _metric()
-    db = _mock_db([metric])
+    db = _mock_db_health([metric])
     async_session_factory.return_value = _AsyncCM(db)
 
     scorer = MagicMock()
@@ -129,7 +147,7 @@ async def test_refresh_health_notifies_backup_owner_once_if_same(_patch_health_r
     from app.tasks.semantic_tasks import refresh_health_scores
 
     metric = _metric(owner_id=11, backup_owner_id=11)
-    db = _mock_db([metric])
+    db = _mock_db_health([metric])
     async_session_factory.return_value = _AsyncCM(db)
     scorer = MagicMock()
     scorer.calculate = AsyncMock(return_value=_health("WARNING", 60))
@@ -154,7 +172,7 @@ async def test_refresh_health_healthy_metric_no_notification(_patch_health_refre
     from app.tasks.semantic_tasks import refresh_health_scores
 
     metric = _metric()
-    db = _mock_db([metric])
+    db = _mock_db_health([metric])
     async_session_factory.return_value = _AsyncCM(db)
     scorer = MagicMock()
     scorer.calculate = AsyncMock(return_value=_health("HEALTHY", 95))
@@ -179,7 +197,7 @@ async def test_refresh_health_notify_failure_does_not_break(_patch_health_refres
     from app.tasks.semantic_tasks import refresh_health_scores
 
     metric = _metric()
-    db = _mock_db([metric])
+    db = _mock_db_health([metric])
     async_session_factory.return_value = _AsyncCM(db)
     scorer = MagicMock()
     scorer.calculate = AsyncMock(return_value=_health("CRITICAL", 40))

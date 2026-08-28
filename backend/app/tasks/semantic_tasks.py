@@ -99,43 +99,68 @@ async def refresh_health_scores(ctx: dict[str, Any]) -> int:
 
     count = 0
     async with async_session_factory() as db:
-        # 查询全部活跃指标
-        stmt = select(Metric).where(Metric.deleted_at.is_(None))
-        result = await db.execute(stmt)
-        metrics = result.scalars().all()
+        # T17（审查修复）：分批加载指标（每批 500，按 ID 排序游标）——此前
+        # 一次性全量加载 1 万+ 指标到内存，配合每指标 5-6 条查询形成内存/IO 峰值。
+        from sqlalchemy import func, select
+
+        from app.db.mysql import async_session_factory
+        from app.models.metric import Metric
+        from app.services.semantic.health_scorer import HealthScorer
+        from app.services.semantic.repository import MetricRepository
+
+        total = (
+            await db.execute(
+                select(func.count(Metric.id)).where(Metric.deleted_at.is_(None))
+            )
+        ).scalar_one()
+        batch_size = 500
+        last_id = 0
 
         scorer = HealthScorer(db)
         repo = MetricRepository(db)
 
-        for metric in metrics:
-            try:
-                health = await scorer.calculate(metric.id)
-                await repo.save_health_score(health)
-                count += 1
+        while last_id is not None:
+            stmt = (
+                select(Metric)
+                .where(Metric.deleted_at.is_(None), Metric.id > last_id)
+                .order_by(Metric.id)
+                .limit(batch_size)
+            )
+            batch = (await db.execute(stmt)).scalars().all()
+            if not batch:
+                break
+            for metric in batch:
+                try:
+                    health = await scorer.calculate(metric.id)
+                    await repo.save_health_score(health)
+                    count += 1
 
-                # CRITICAL/WARNING → 定向告警指标 Owner/备份 Owner（P1-5：
-                # 此前仅 log 不通知——每日刷新是发现健康恶化的主路径，恰恰不通知。
-                # notify_user 为定向投递，不依赖订阅偏好，保证 Owner 必达。）
-                if health.level in ("WARNING", "CRITICAL"):
-                    logger.info(
-                        "health_critical_detected",
-                        metric_code=metric.metric_code,
-                        score=health.score,
-                        level=health.level,
+                    # CRITICAL/WARNING → 定向告警指标 Owner/备份 Owner（P1-5：
+                    # 此前仅 log 不通知——每日刷新是发现健康恶化的主路径，恰恰不通知。
+                    # notify_user 为定向投递，不依赖订阅偏好，保证 Owner 必达。）
+                    if health.level in ("WARNING", "CRITICAL"):
+                        logger.info(
+                            "health_critical_detected",
+                            metric_code=metric.metric_code,
+                            score=health.score,
+                            level=health.level,
+                        )
+                        await _notify_health_degraded(db, metric, health)
+                except Exception:
+                    logger.warning(
+                        "health_refresh_failed",
+                        metric_id=metric.id,
                     )
-                    await _notify_health_degraded(db, metric, health)
-            except Exception:
-                logger.warning(
-                    "health_refresh_failed",
-                    metric_id=metric.id,
-                )
-                # T2（审查修复）：单条失败回滚会话，避免 rolled-back 态污染
-                # 后续循环（PendingRollbackError）致整轮健康分刷新全丢。
-                await db.rollback()
+                    # T2（审查修复）：单条失败回滚会话，避免 rolled-back 态污染
+                    # 后续循环（PendingRollbackError）致整轮健康分刷新全丢。
+                    await db.rollback()
+            last_id = batch[-1].id
+            if count >= total:
+                break
 
         await db.commit()
 
-    logger.info("health_scores_refreshed", count=count)
+    logger.info("health_scores_refreshed", count=count, total=total)
     return count
 
 
