@@ -247,6 +247,22 @@ describe("DataSources", () => {
     expect(screen.getByText("MySQL")).toBeTruthy();
   });
 
+  it("类型列表加载失败：明示错误提示而非展示硬编码兜底类型", async () => {
+    // 2026-08-28：类型以接口为唯一权威来源——接口失败置空并标记错误，
+    // 不再兜底硬编码（避免后端下线类型后仍可创建/展示失真类型）。
+    mockedTypes.mockRejectedValue(new Error("network"));
+    renderSources();
+    await waitFor(() => {
+      expect(screen.getByText("mysql_finance")).toBeTruthy();
+    });
+    // 打开新建弹窗 → 类型下拉显示错误提示（而非硬编码 MySQL/Hive 等选项）
+    fireEvent.click(screen.getAllByText("新建数据源")[0]);
+    await screen.findByText("选择数据源类型");
+    fireEvent.mouseDown(screen.getByText("选择数据源类型"));
+    await screen.findByText("数据源类型列表加载失败，请刷新重试");
+    expect(screen.queryByText("MySQL（mysql）")).not.toBeInTheDocument();
+  });
+
   it("创建弹窗显示系统自动生成的 Source ID 预览", async () => {
     await openCreateModal();
     await selectType("MySQL（mysql）");

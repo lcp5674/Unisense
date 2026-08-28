@@ -39,17 +39,9 @@ import { useResizableColumns } from "../components/ResizableTable";
 import { AuditTimeline } from "./metric/AuditTimeline";
 import { usePermission } from "../hooks/usePermission";
 
-const FALLBACK_TYPES: SourceTypeInfo[] = [
-  { source_type: "mysql", label: "MySQL", default_port: 3306, supports_database: true, supports_schema: false, description: "关系型数据库" },
-  { source_type: "postgres", label: "PostgreSQL", default_port: 5432, supports_database: true, supports_schema: true, description: "关系型数据库" },
-  { source_type: "hive", label: "Hive", default_port: 10000, supports_database: true, supports_schema: false, description: "数据仓库" },
-  { source_type: "hive_metastore", label: "Hive Metastore", default_port: 3306, supports_database: true, supports_schema: false, description: "Hive 元数据直连（HMS backend 为 MySQL）" },
-  { source_type: "spark", label: "Spark", default_port: 10000, supports_database: true, supports_schema: false, description: "Spark SQL（Thrift Server）" },
-  { source_type: "doris", label: "Doris", default_port: 9030, supports_database: true, supports_schema: false, description: "MPP 分析库" },
-  { source_type: "clickhouse", label: "ClickHouse", default_port: 8123, supports_database: true, supports_schema: false, description: "列式分析库" },
-  { source_type: "kafka", label: "Kafka", default_port: 9092, supports_database: false, supports_schema: false, description: "消息队列" },
-  { source_type: "starrocks", label: "StarRocks", default_port: 9030, supports_database: true, supports_schema: false, description: "MPP 分析库" },
-];
+// 数据源类型以接口（GET /data-sources/types）为唯一权威来源（2026-08-28 起不再
+// 硬编码兜底——后端新增/下线类型时前端列表曾失真，且可创建后端不支持的类型）。
+// 接口失败显式标记 typesError，UI 明示「类型列表加载失败」而非展示过期硬编码。
 
 function typeInfo(types: SourceTypeInfo[], t: string): SourceTypeInfo | undefined {
   return types.find((x) => x.source_type === t);
@@ -735,7 +727,8 @@ export function DataSources() {
   // 批量调度：cron 输入弹窗
   const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
   const [batchCron, setBatchCron] = useState("0 3 * * *");
-  const [types, setTypes] = useState<SourceTypeInfo[]>(FALLBACK_TYPES);
+  const [types, setTypes] = useState<SourceTypeInfo[]>([]);
+  const [typesError, setTypesError] = useState(false);
   const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
   // 数据库枚举（测试连接通过后自动列出，供选择目标库）
   const [dbOptions, setDbOptions] = useState<string[]>([]);
@@ -816,8 +809,15 @@ export function DataSources() {
   useEffect(() => {
     load();
     listDataSourceTypes()
-      .then((t) => setTypes(t.length ? t : FALLBACK_TYPES))
-      .catch(() => setTypes(FALLBACK_TYPES));
+      .then((t) => {
+        setTypes(t);
+        setTypesError(false);
+      })
+      .catch(() => {
+        // 类型列表加载失败：置空并标记错误，不展示过期硬编码（避免创建后端不支持的类型）
+        setTypes([]);
+        setTypesError(true);
+      });
     // 业务域下拉选项：仅展示启用中的主题域
     listDomainTree("active")
       .then((tree) => setDomainOptions(flattenDomains(tree)))
@@ -1576,6 +1576,7 @@ export function DataSources() {
                 popupMatchSelectWidth={false}
                 dropdownStyle={{ width: 360 }}
                 options={types.map((t) => ({ value: t.source_type, label: `${t.label}（${t.source_type}）` }))}
+                notFoundContent={typesError ? "数据源类型列表加载失败，请刷新重试" : "暂无数据源类型"}
                 optionRender={(opt) => {
                   const t = typeInfo(types, String(opt.value));
                   return (
