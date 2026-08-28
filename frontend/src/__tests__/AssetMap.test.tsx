@@ -47,6 +47,7 @@ vi.mock("../api", () => ({
   batchAssignAssetOwner: vi.fn(),
   batchReclassifyAssetSensitivity: vi.fn(),
   bulkDeprecateCatalogs: vi.fn(),
+  reportClassificationFalsePositive: vi.fn(),
   listUsers: vi.fn(),
   fetchDescriptionCoverage: vi.fn(),
   inferColumnDescription: vi.fn(),
@@ -149,6 +150,7 @@ import {
   batchAssignAssetOwner,
   batchReclassifyAssetSensitivity,
   bulkDeprecateCatalogs,
+  reportClassificationFalsePositive,
   listUsers,
   listCatalogs,
   listCatalogDatabases,
@@ -1294,6 +1296,99 @@ describe("AssetMap", () => {
     await waitFor(() =>
       expect(screen.getByText("table:wedw_ods.telemedicine_visit")).toBeInTheDocument(),
     );
+  });
+
+  it("overview 实体详情 PII 命中支持误报反馈：豁免词表 + 重算刷新", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetSummary).mockResolvedValue({
+      total: 10,
+      by_entity_type: { table: 8, field: 2 },
+      by_sensitivity: { PUBLIC: 6, PII: 4 },
+      orphan_assets: 1,
+      pii_compliance: {
+        sensitive_total: 4,
+        reviewed: 1,
+        pending: 3,
+        compliance_rate: 25,
+        by_sensitivity: { PII: 3, CONFIDENTIAL: 1 },
+      },
+    });
+    vi.mocked(listCatalogs).mockResolvedValue({
+      items: [
+        {
+          id: 42,
+          entity_name: "wedw_dim.pub_patient",
+          entity_type: "table",
+          source_id: "s1",
+          source_name: "Hive",
+          sensitivity_level: "PII",
+          schema_incomplete: false,
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 200,
+    } as never);
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 42,
+      entity_name: "wedw_dim.pub_patient",
+      entity_type: "table",
+      source_id: "s1",
+      source_name: "Hive",
+      sensitivity_level: "PII",
+      owner_id: null,
+      schema_incomplete: false,
+      schema_summary: [{ name: "phone", type: "string", comment: "手机号" }],
+      pii_flag: true,
+      pii_fields: [
+        {
+          column: "phone",
+          category: "PHONE",
+          rule: "mobile",
+          confidence: 0.98,
+          matched_by: "rule",
+          suppressed: false,
+        },
+      ],
+      pii_field_count: 1,
+      pii_categories: ["PHONE"],
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-08-01T00:00:00Z",
+    } as never);
+    vi.mocked(reportClassificationFalsePositive).mockResolvedValue({
+      catalog_id: 42,
+      entity_name: "wedw_dim.pub_patient",
+      column: "phone",
+      scope: "field",
+      exempted_as: "phone",
+      sensitivity_before: "PII",
+      sensitivity_after: "INTERNAL",
+      remaining_pii_columns: [],
+    } as never);
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("概览")).toBeInTheDocument());
+    await user.click(screen.getByText("概览"));
+    await waitFor(() => expect(screen.getByText(/待复核 3 项/)).toBeInTheDocument());
+    await user.click(screen.getByText(/待复核 3 项/));
+    await waitFor(() => expect(screen.getByText(/待复核敏感资产明细/)).toBeInTheDocument());
+    await user.click(await screen.findByText("wedw_dim.pub_patient"));
+    await waitFor(() =>
+      expect(screen.getByText(/实体详情：wedw_dim.pub_patient/)).toBeInTheDocument(),
+    );
+    // 点击 PII 命中「误报」按钮 → 弹确认框 → 填写原因 → 确认豁免
+    await user.click(screen.getByRole("button", { name: /误报/ }));
+    await waitFor(() => expect(screen.getByText("PII 误报反馈")).toBeInTheDocument());
+    await user.type(screen.getByPlaceholderText(/误报原因/), "手机号列实际是业务编码");
+    await user.click(screen.getByRole("button", { name: /确认豁免/ }));
+    await waitFor(() => {
+      expect(reportClassificationFalsePositive).toHaveBeenCalledWith(42, {
+        column: "phone",
+        scope: "field",
+        reason: "手机号列实际是业务编码",
+      });
+    });
+    // 豁免后刷新详情（重新拉取实体详情）
+    await waitFor(() => expect(fetchAssetEntityDetail).toHaveBeenCalledTimes(2));
   });
 
   it("click field node opens field info drawer with table drill entry", async () => {

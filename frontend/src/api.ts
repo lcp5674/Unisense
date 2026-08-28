@@ -2806,6 +2806,26 @@ export async function classificationRescan(body: {
   });
 }
 
+/** 误报反馈：字段/前缀写入 pii_vocab 豁免词表并重算实体降级（COMPL-3）。 */
+export async function reportClassificationFalsePositive(
+  catalogId: number,
+  body: { column: string; scope: "field" | "prefix"; reason: string },
+): Promise<{
+  catalog_id: number;
+  entity_name: string;
+  column: string;
+  scope: string;
+  exempted_as: string;
+  sensitivity_before: string;
+  sensitivity_after: string;
+  remaining_pii_columns: string[];
+}> {
+  return request(`${API_BASE}/catalogs/classification/${catalogId}/false-positive`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 // ---- 敏感规则配置台（backend /api/v1/sensitive-rules/*）----
 export async function listSensitiveRules(): Promise<SensitiveRuleItem[]> {
   return request<SensitiveRuleItem[]>(`${API_BASE}/sensitive-rules`);

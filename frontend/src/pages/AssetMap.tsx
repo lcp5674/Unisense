@@ -16,6 +16,7 @@ import {
   Progress,
   Row,
   Col,
+  Radio,
   Segmented,
   Select,
   Space,
@@ -48,6 +49,7 @@ import {
   ThunderboltOutlined,
   UserOutlined,
   ArrowLeftOutlined,
+  StopOutlined,
 } from "@ant-design/icons";
 import { Bar, Pie } from "@ant-design/charts";
 import {
@@ -73,6 +75,7 @@ import {
   fetchAssetPiiOverview,
   fetchAssetPiiTemplates,
   fetchAssetSearch,
+  reportClassificationFalsePositive,
   fetchAssetSummary,
   fetchAssetTables,
   fetchCurrentUser,
@@ -1118,6 +1121,43 @@ function OverviewTab() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState<AssetEntityDetail | null>(null);
+  // 误报反馈（COMPL-3）：PII 命中字段 → 豁免词表 + 重算降级
+  const [fpTarget, setFpTarget] = useState<{ column: string; category: string } | null>(null);
+  const [fpScope, setFpScope] = useState<"field" | "prefix">("field");
+  const [fpReason, setFpReason] = useState("");
+  const [fpSubmitting, setFpSubmitting] = useState(false);
+  const canReportFp = usePermission().can("classification:rescan");
+
+  async function submitFalsePositive() {
+    if (!detail || !fpTarget) return;
+    const reason = fpReason.trim();
+    if (!reason) {
+      message.warning("请填写误报原因（留痕）");
+      return;
+    }
+    setFpSubmitting(true);
+    try {
+      const res = await reportClassificationFalsePositive(detail.id, {
+        column: fpTarget.column,
+        scope: fpScope,
+        reason,
+      });
+      message.success(
+        `已豁免 ${res.exempted_as}（${res.sensitivity_before} → ${res.sensitivity_after}）`,
+      );
+      setFpTarget(null);
+      setFpReason("");
+      setFpScope("field");
+      // 刷新详情：豁免后 PII 命中减少/敏感级降级
+      setDetail(await fetchAssetEntityDetail(detail.id));
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "误报反馈失败",
+      );
+    } finally {
+      setFpSubmitting(false);
+    }
+  }
 
   useEffect(() => {
     async function load() {
@@ -1615,13 +1655,30 @@ function OverviewTab() {
                     {(detail.pii_fields ?? [])
                       .filter((f) => !f.suppressed)
                       .map((f) => (
-                        <Tag
-                          key={f.column}
-                          color={PII_CATEGORY_COLOR[f.category] ?? "red"}
-                          style={{ marginBottom: 4 }}
-                        >
-                          {f.column}（{PII_CATEGORY_LABEL[f.category] ?? f.category}）
-                        </Tag>
+                        <span key={f.column} style={{ display: "inline-block", marginBottom: 4 }}>
+                          <Tag
+                            color={PII_CATEGORY_COLOR[f.category] ?? "red"}
+                            style={{ marginRight: 2 }}
+                          >
+                            {f.column}（{PII_CATEGORY_LABEL[f.category] ?? f.category}）
+                          </Tag>
+                          {canReportFp && (
+                            <Button
+                              type="text"
+                              size="small"
+                              danger
+                              icon={<StopOutlined />}
+                              style={{ marginRight: 8, height: 20, fontSize: 12 }}
+                              onClick={() => {
+                                setFpTarget({ column: f.column, category: f.category });
+                                setFpScope("field");
+                                setFpReason("");
+                              }}
+                            >
+                              误报
+                            </Button>
+                          )}
+                        </span>
                       ))}
                   </div>
                 )}
@@ -1633,6 +1690,47 @@ function OverviewTab() {
             )}
           </>
         ) : null}
+        {/* 误报反馈（COMPL-3）：PII 命中字段 → 豁免词表 + 重算降级 */}
+        <Modal
+          title="PII 误报反馈"
+          open={!!fpTarget}
+          onCancel={() => setFpTarget(null)}
+          onOk={submitFalsePositive}
+          confirmLoading={fpSubmitting}
+          okText="确认豁免"
+          cancelText="取消"
+          width={520}
+          destroyOnClose
+        >
+          <div style={{ padding: "8px 0 4px" }}>
+            <Space direction="vertical" style={{ width: "100%" }}>
+              <Alert
+                type="warning"
+                showIcon
+                message={`字段「${fpTarget?.column ?? ""}」被识别为 ${
+                  PII_CATEGORY_LABEL[fpTarget?.category ?? ""] ?? "PII"
+                }，确认误报后将写入豁免词表并重算该实体敏感级。`}
+              />
+              <div>
+                <span style={{ marginRight: 12 }}>豁免粒度：</span>
+                <Radio.Group
+                  value={fpScope}
+                  onChange={(e) => setFpScope(e.target.value)}
+                  options={[
+                    { value: "field", label: "精确字段名（仅此字段）" },
+                    { value: "prefix", label: "字段前缀（同前缀全豁免）" },
+                  ]}
+                />
+              </div>
+              <Input.TextArea
+                placeholder="误报原因（必填，审计留痕）"
+                rows={3}
+                value={fpReason}
+                onChange={(e) => setFpReason(e.target.value)}
+              />
+            </Space>
+          </div>
+        </Modal>
       </ResizableDrawer>
     </div>
   );
