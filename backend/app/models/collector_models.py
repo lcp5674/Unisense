@@ -179,10 +179,10 @@ class CollectionRun(Base, BaseModel):
         String(16), nullable=True, comment="实际执行模式（增量降级后回填）"
     )
     status: Mapped[str] = mapped_column(
-        Enum("RUNNING", "COMPLETED", "FAILED", name="collection_run_status_enum"),
+        Enum("RUNNING", "COMPLETED", "FAILED", "CANCELLED", name="collection_run_status_enum"),
         nullable=False,
         default="RUNNING",
-        comment="运行状态",
+        comment="运行状态（CANCELLED：用户主动取消，2026-08-28 起与 JobStore 终态对齐）",
     )
     actor_id: Mapped[int | None] = mapped_column(
         nullable=True, comment="触发人 ID（定时调度为 NULL）"

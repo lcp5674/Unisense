@@ -38,8 +38,11 @@ export const AGGREGATION_LABEL: Record<string, string> = {
   COUNT: "计数",
   COUNT_DISTINCT: "去重计数",
   LAST_VALUE: "末值",
+  FIRST_VALUE: "首值",
   MAX: "最大值",
   MIN: "最小值",
+  MEDIAN: "中位数",
+  PERCENTILE: "百分位",
 };
 
 export const TIME_SEMANTICS_LABEL: Record<string, string> = {
@@ -97,13 +100,14 @@ export const METRIC_STATUS_COLOR: Record<string, string> = {
   DEPRECATED: "error",
 };
 
-/** 指标版本变更类型（MetricVersion.change_type：CREATE/UPDATE/BREAKING；PUBLISH/DEPRECATE 兜底防御） */
+/** 指标版本变更类型（MetricVersion.change_type：CREATE/UPDATE/BREAKING/DEPRECATE/RESTORE；PUBLISH 兜底防御） */
 export const CHANGE_TYPE_LABEL: Record<string, string> = {
   CREATE: "创建",
   UPDATE: "变更",
   BREAKING: "破坏性变更",
   PUBLISH: "发布",
   DEPRECATE: "废弃",
+  RESTORE: "恢复",
 };
 
 // ---- 指标关联/推荐边类型（详情页「看过此指标的人还看了」等）----

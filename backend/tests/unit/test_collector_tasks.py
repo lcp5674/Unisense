@@ -557,10 +557,10 @@ async def test_run_cancelled_writes_failed_and_reraises():
 
 async def test_run_user_cancelled_keeps_cancelled_no_failure_notify():
     """H2: 用户主动取消（JobStore 已 CANCELLED）→ 保持 CANCELLED 终态，
-    不覆盖为 FAILED、不触发失败通知；仅收尾 collection_run。"""
+    不覆盖为 FAILED、不触发失败通知；仅收尾 collection_run（标 CANCELLED）。"""
     svc = MagicMock()
     svc.start_collection_run = AsyncMock(return_value=1)
-    svc.fail_collection_run = AsyncMock()
+    svc.cancel_collection_run = AsyncMock()
     svc.collect_and_register = AsyncMock(side_effect=asyncio.CancelledError())
     db = MagicMock()
     db.commit = AsyncMock()
@@ -582,8 +582,8 @@ async def test_run_user_cancelled_keeps_cancelled_no_failure_notify():
     # 保持 CANCELLED：不写 FAILED、不更新健康为 unhealthy、不触发失败通知
     store.set.assert_not_awaited()
     repo.update_health_status.assert_not_awaited()
-    # 仅收尾 collection_run（标 FAILED + 取消说明）
-    svc.fail_collection_run.assert_awaited_once_with(1, "任务已取消")
+    # 仅收尾 collection_run（标 CANCELLED，2026-08-28 起与 JobStore 终态对齐）
+    svc.cancel_collection_run.assert_awaited_once_with(1)
 
 
 async def test_run_concurrent_lock_skips_when_acquire_fails():

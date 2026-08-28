@@ -2757,15 +2757,22 @@ async def test_list_databases_delegates_to_connector():
     fake_collector.dispose.assert_awaited_once()
 
 
-async def test_list_databases_failure_returns_empty():
-    """连接器构建/枚举失败时返回空列表（不抛出，前端回退手填）。"""
+async def test_list_databases_failure_raises_clear_error():
+    """连接器构建/枚举失败（2026-08-28 起）抛出明确错误，不再静默返回空。
+
+    此前静默返回 [] 令前端无法区分「实例无库」与「连接失败」——连接器不支持
+    枚举（Kafka 等）正常返回空，真实连接失败须让用户看到可排查的错误。
+    """
+    from app.core.exceptions import UnisenseError
+
     svc, _repo = _svc()
     with patch(
         "app.services.collector.connectors.registry.build_from_cfg",
         side_effect=RuntimeError("down"),
-    ):
-        dbs = await svc.list_databases("mysql", {"host": "h"})
-    assert dbs == []
+    ), pytest.raises(UnisenseError) as exc:
+        await svc.list_databases("mysql", {"host": "h"})
+    assert exc.value.error_code == "LIST_DATABASES_FAILED"
+    assert "枚举数据库失败" in exc.value.message
 
 
 async def test_list_tables_delegates_to_connector():

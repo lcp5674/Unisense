@@ -556,7 +556,9 @@ async def run_collection_task(
             logger.info("采集任务已被用户取消 source=%s job=%s", source_id, job_id)
             if run_id is not None and svc is not None:
                 try:
-                    await svc.fail_collection_run(run_id, "任务已取消")
+                    # 2026-08-28：取消收尾标 CANCELLED（与 JobStore 终态对齐），
+                    # 不再标 FAILED——运行历史里取消与真实失败可区分。
+                    await svc.cancel_collection_run(run_id)
                     # 取消前执行的进度日志回写（让用户看到任务进行到哪一步）
                     await _flush_run_logs(redis, svc, run_id, error="任务已取消")
                 except Exception:  # noqa: BLE001 - 取消收尾异常不影响上抛

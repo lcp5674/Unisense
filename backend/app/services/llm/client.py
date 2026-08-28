@@ -599,7 +599,10 @@ class DeterministicFallbackLlmClient:
 
     @property
     def enabled(self) -> bool:
-        return True
+        """降级客户端不可用（2026-08-28 修正：此前恒 True 会误导只查 enabled
+        的调用方误判 LLM 可用，随后 chat 返回空 content）——返回 False 让调用方
+        正确走「无 LLM 能力」分支（跳过推断/明确降级）。"""
+        return False
 
     async def close(self) -> None:
         pass

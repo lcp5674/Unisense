@@ -24,6 +24,7 @@ const STATUS_LABEL: Record<string, string> = {
   RUNNING: "采集中",
   COMPLETED: "已完成",
   FAILED: "失败",
+  CANCELLED: "已取消",
 };
 
 function statusTag(v: string) {
@@ -34,7 +35,9 @@ function statusTag(v: string) {
         ? "error"
         : v === "RUNNING"
           ? "processing"
-          : "default";
+          : v === "CANCELLED"
+            ? "warning"
+            : "default";
   return <Tag color={color}>{STATUS_LABEL[v] ?? v}</Tag>;
 }
 
@@ -273,7 +276,7 @@ export function CollectionTasks() {
             style={{ width: 130 }}
             value={status || undefined}
             onChange={(v?: string) => { setStatus(v ?? ""); setPage(1); }}
-            options={["QUEUED", "RUNNING", "COMPLETED", "FAILED"].map((s) => ({
+            options={["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"].map((s) => ({
               value: s,
               label: STATUS_LABEL[s] ?? s,
             }))}

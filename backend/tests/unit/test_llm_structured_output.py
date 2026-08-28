@@ -184,6 +184,12 @@ class TestDeterministicFallbackStructured:
         assert "candidates" in result
         assert result["model"] == "deterministic-fallback"
 
+    def test_fallback_not_enabled(self) -> None:
+        """降级客户端 enabled=False——只查 enabled 的调用方正确判定 LLM 不可用，
+        不会误判可用后拿到空 content（2026-08-28 修正恒 True 误导）。"""
+        client = DeterministicFallbackLlmClient()
+        assert client.enabled is False
+
     @pytest.mark.asyncio
     async def test_fallback_confidence_triggers_needs_review(self) -> None:
         client = DeterministicFallbackLlmClient()

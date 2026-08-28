@@ -883,6 +883,21 @@ class CollectorRepository:
         await self._db.flush()
         return run
 
+    async def cancel_collection_run(self, run_id: int) -> CollectionRun | None:
+        """用户主动取消收尾：状态 → CANCELLED（2026-08-28 起与 JobStore 终态对齐）。
+
+        此前取消的任务被标 FAILED（「任务已取消」），运行历史与 JobStore 终态
+        无法一一对应——现持久化 CANCELLED，取消与真实失败可区分。
+        """
+        run = await self.get_collection_run(run_id)
+        if run is None:
+            return None
+        run.status = "CANCELLED"
+        run.finished_at = datetime.now(UTC)
+        run.error = "任务已取消"
+        await self._db.flush()
+        return run
+
     async def find_collection_run_by_job_id(self, job_id: str) -> CollectionRun | None:
         """按 job_id 定位仍在 RUNNING 的采集运行记录（H1 stale 清扫收尾用）。"""
         return (
@@ -988,9 +1003,9 @@ class CollectorRepository:
         from sqlalchemy import delete
 
         # 先删子表日志（fk_run_log_run 外键约束，否则 MySQL 拒绝删除主记录），
-        # 再删主记录——保留策略与主记录一致（终态 + 超保留期）。
+        # 再删主记录——保留策略与主记录一致（终态 + 超保留期；CANCELLED 亦为终态）。
         run_ids = select(CollectionRun.id).where(
-            CollectionRun.status.in_(("COMPLETED", "FAILED")),
+            CollectionRun.status.in_(("COMPLETED", "FAILED", "CANCELLED")),
             CollectionRun.started_at < before,
         )
         await self._db.execute(
@@ -998,7 +1013,7 @@ class CollectorRepository:
         )
         result = await self._db.execute(
             delete(CollectionRun).where(
-                CollectionRun.status.in_(("COMPLETED", "FAILED")),
+                CollectionRun.status.in_(("COMPLETED", "FAILED", "CANCELLED")),
                 CollectionRun.started_at < before,
             )
         )

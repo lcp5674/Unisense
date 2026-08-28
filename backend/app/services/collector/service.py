@@ -431,8 +431,10 @@ class CollectorService(BaseService):
     async def list_databases(self, source_type: str, cfg: dict[str, Any]) -> list[str]:
         """枚举实例下可采集的非系统数据库（创建数据源时选择目标库）。
 
-        明文配置构建采集器（与 test_connection 一致），不支持枚举的
-        连接器（如 Kafka）返回空列表，前端回退为手填；任何异常同样返回空。
+        明文配置构建采集器（与 test_connection 一致）。连接器不支持枚举
+        （如 Kafka，spi 默认返回空列表）→ 返回空，前端回退为手填；
+        **真实连接失败（2026-08-28 起）抛出明确错误**——此前静默返回空，
+        前端无法区分「无库」与「连接失败」（用户误以为实例无库可采集）。
 
         Args:
             source_type: 采集器类型。
@@ -440,7 +442,11 @@ class CollectorService(BaseService):
 
         Returns:
             非系统数据库名列表。
+
+        Raises:
+            UnisenseError: 连接器实例化/探测失败（明确错误码，前端可展示）。
         """
+        from app.core.exceptions import UnisenseError as _UnisenseError
         from app.services.collector.connectors import registry
 
         try:
@@ -451,9 +457,15 @@ class CollectorService(BaseService):
                 return await collector.list_databases()
             finally:
                 await collector.dispose()
+        except _UnisenseError:
+            raise
         except Exception as exc:
             logger.warning("list_databases_failed: type=%s err=%s", source_type, exc)
-            return []
+            raise _UnisenseError(
+                f"枚举数据库失败（{source_type} 连接异常），请检查连接配置后重试",
+                error_code="LIST_DATABASES_FAILED",
+                ctx={"source_type": source_type, "detail": _sanitize_conn_error(str(exc))},
+            ) from exc
 
     async def list_tables(
         self,
@@ -2527,6 +2539,11 @@ class CollectorService(BaseService):
         """
         sanitized = _sanitize_conn_error(error or "")[:512]
         await self._repo.fail_collection_run(run_id, sanitized)
+        await self._db.commit()
+
+    async def cancel_collection_run(self, run_id: int) -> None:
+        """用户主动取消收尾（状态 → CANCELLED，2026-08-28 起与 JobStore 终态对齐）。"""
+        await self._repo.cancel_collection_run(run_id)
         await self._db.commit()
 
     async def list_collection_runs(
