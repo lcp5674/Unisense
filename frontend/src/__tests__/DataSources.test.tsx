@@ -396,6 +396,25 @@ describe("DataSources", () => {
     expect((payload.connection_config as Record<string, unknown>).database).toBe("hive");
   });
 
+  it("Hive Metastore 创建时携带采样连接（sample_connection，PII 识别增强）", async () => {
+    await openCreateModal();
+    fireEvent.change(screen.getByPlaceholderText("如 财务 MySQL"), { target: { value: "HMS 采样" } });
+    await selectDomain("财务（finance）");
+    fireEvent.change(screen.getByPlaceholderText("127.0.0.1"), { target: { value: "10.0.0.5" } });
+    await selectType("Hive Metastore（hive_metastore）");
+    // 展开采样连接区并填写 HiveServer2 连接（host 必填，port/user 可选）
+    fireEvent.click(screen.getByText("采样连接（可选，PII 识别增强）"));
+    fireEvent.change(screen.getByPlaceholderText("hive-server"), { target: { value: "10.0.0.6" } });
+    fireEvent.change(screen.getByPlaceholderText("hive"), { target: { value: "hive_user" } });
+    fireEvent.click(screen.getByRole("button", { name: /创\s*建/ }));
+    await waitFor(() => {
+      expect(mockedCreate).toHaveBeenCalled();
+    });
+    const payload = mockedCreate.mock.calls[0][0] as unknown as Record<string, unknown>;
+    const cfg = payload.connection_config as Record<string, unknown>;
+    expect(cfg.sample_connection).toEqual({ host: "10.0.0.6", port: 10000, user: "hive_user" });
+  });
+
   it("详情弹窗提供实时探活（测试连接）", async () => {
     renderSources();
     await waitFor(() => {

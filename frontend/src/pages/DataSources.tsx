@@ -956,6 +956,19 @@ export function DataSources() {
     if (values.schema) cfg.schema = String(values.schema);
     if (values.user) cfg.user = String(values.user);
     if (values.password) cfg.password = String(values.password);
+    // hive_metastore 可选的采样连接（指向 HiveServer2，PII 识别增强）：
+    // HMS 元数据库只含表结构、不含数据，采样需直连 Hive 计算引擎执行 SELECT。
+    // 留空则不采样（保持 name+comment 精度）；提供时 host 必填（后端校验）。
+    if (sourceTypeValue === "hive_metastore") {
+      const sampleHost = String(values.sample_host || "").trim();
+      if (sampleHost) {
+        const sc: Record<string, unknown> = { host: sampleHost };
+        if (values.sample_port) sc.port = Number(values.sample_port);
+        if (values.sample_user) sc.user = String(values.sample_user);
+        if (values.sample_password) sc.password = String(values.sample_password);
+        cfg.sample_connection = sc;
+      }
+    }
     return cfg;
   }
 
@@ -1175,6 +1188,8 @@ export function DataSources() {
         const cfg = d.connection_config ?? null;
         if (cfg && typeof cfg === "object") {
           editConfigRef.current = cfg as Record<string, unknown>;
+          const sc = ((cfg as Record<string, unknown>).sample_connection ??
+            null) as Record<string, unknown> | null;
           form.setFieldsValue({
             host: cfg.host != null ? String(cfg.host) : undefined,
             port: cfg.port != null ? String(cfg.port) : undefined,
@@ -1182,6 +1197,11 @@ export function DataSources() {
             schema: cfg.schema != null ? String(cfg.schema) : undefined,
             user: cfg.user != null ? String(cfg.user) : undefined,
             password: cfg.password != null ? String(cfg.password) : undefined,
+            // hive_metastore 采样连接回显（编辑模式下留空=保持原配置）
+            sample_host: sc?.host != null ? String(sc.host) : undefined,
+            sample_port: sc?.port != null ? String(sc.port) : undefined,
+            sample_user: sc?.user != null ? String(sc.user) : undefined,
+            sample_password: sc?.password != null ? String(sc.password) : undefined,
           });
         }
         // 连接配置就绪（host 可读）后自动枚举库与表，使级联选表立即可见（best-effort）
@@ -1740,6 +1760,57 @@ export function DataSources() {
               <Input.Password className="mono" placeholder="连接密码" />
             </Form.Item>
           </Space>
+          {isHms && (
+            <Collapse
+              ghost
+              style={{ marginBottom: 16 }}
+              items={[
+                {
+                  key: "sampling",
+                  label: "采样连接（可选，PII 识别增强）",
+                  forceRender: true,
+                  children: (
+                    <Space direction="vertical" style={{ width: "100%" }}>
+                      <Alert
+                        type="info"
+                        showIcon
+                        message="HMS 元数据库只含表结构、不含数据；配置 HiveServer2 采样连接后，采集时对字段执行 SELECT 采样（样本打码存储），启用 PII name+sample 双验证。留空则不采样。"
+                      />
+                      <Space size={16} style={{ width: "100%" }} align="start">
+                        <Form.Item
+                          name="sample_host"
+                          label="采样 Host（HiveServer2）"
+                          style={{ width: "100%" }}
+                        >
+                          <Input className="mono" placeholder="hive-server" />
+                        </Form.Item>
+                        <Form.Item
+                          name="sample_port"
+                          label="采样 Port"
+                          initialValue={10000}
+                          style={{ width: 130 }}
+                        >
+                          <Input type="number" className="mono" />
+                        </Form.Item>
+                      </Space>
+                      <Space size={16} style={{ width: "100%" }} align="start">
+                        <Form.Item name="sample_user" label="采样 User" style={{ width: "100%" }}>
+                          <Input className="mono" placeholder="hive" />
+                        </Form.Item>
+                        <Form.Item
+                          name="sample_password"
+                          label="采样 Password"
+                          style={{ width: "100%" }}
+                        >
+                          <Input.Password className="mono" placeholder="采样账号密码（LDAP 认证用，可选）" />
+                        </Form.Item>
+                      </Space>
+                    </Space>
+                  ),
+                },
+              ]}
+            />
+          )}
           <Collapse
             ghost
             style={{ marginBottom: 16 }}
