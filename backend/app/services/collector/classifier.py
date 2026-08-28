@@ -122,29 +122,27 @@ def _tok(pattern: str) -> str:
 #: 聚合统计量词正则：字段名含此量词 token（可带分桶编号/业务后缀，如 ``_cnt1``、
 #: ``_cnt_1d``、``_cnt_zjwz_180d``）视为聚合指标（存群体计数/比率，不指向个体）。
 #: 命中此类字段时，名称/注释关键词不再判定 PII（除非样本值命中，说明实际存个体值）。
-_AGGREGATE_RE = re.compile(
+_AGGREGATE_SRC = (
     r"_(cnt|count|qty|quantity|rate|ratio|pct|percent|avg|sum|total|amount|amt|times)"
-    r"(?:_[a-z0-9]+(?:_[a-z0-9]+)*|\d*)$",
-    re.I,
+    r"(?:_[a-z0-9]+(?:_[a-z0-9]+)*|\d*)$"
 )
 
 #: 值型豁免前缀：即便字段名带统计量词，仍是个人测量值/标识（如 heart_rate 心率）。
 _VALUE_EXEMPT_PREFIXES: tuple[str, ...] = ("heart_rate", "heartrate", "心率")
 
 #: 人名限定前缀：带此前缀的 ``*_name`` 列是个人姓名（患者/用户/会员/医生…），判 PII。
-_PERSON_NAME_RE = re.compile(
+_PERSON_NAME_SRC = (
     r"(patient|user|cust|customer|member|doctor|physician|applicant|contact|owner|"
     r"receiver|sender|payee|holder|guardian|parent|child|spouse|operator|manager|"
     r"teacher|nurse|pharmacist|leader|handler|clerk|staff|employee|principal|director|"
     r"assistant|secretary|student|pupil|"
     r"家属|患者|用户|会员|医生|申请人|联系人|收款|付款|监护人|家长|子女|配偶|"
-    r"操作员|经办人|护士|教师|老师|学生|学员|负责人|员工|主任|助理|秘书)_?name$",
-    re.I,
+    r"操作员|经办人|护士|教师|老师|学生|学员|负责人|员工|主任|助理|秘书)_?name$"
 )
 
 #: 机构/地点/技术限定前缀：带此前缀的 ``*_name`` 是机构/地点/对象/技术名
 #: （村名/医院名/表名…），非个人姓名。
-_ENTITY_NAME_RE = re.compile(
+_ENTITY_NAME_SRC = (
     r"(village|org|dept|department|hospital|company|institution|center|team|group|"
     r"project|region|area|zone|branch|unit|enterprise|brand|store|warehouse|school|"
     r"class|community|city|county|province|town|street|clinic|pharmacy|factory|plant|"
@@ -152,22 +150,20 @@ _ENTITY_NAME_RE = re.compile(
     r"file|job|task|rule|template|config|menu|module|function|dict|param|setting|index|"
     r"村|社区|部门|机构|医院|单位|项目|组织|科室|学校|班级|地区|区域|城市|区县|省份|"
     r"街道|药店|诊所|工厂|商店|车站|大楼|房间|病房|床位|菜单|模块|功能|字典|参数|"
-    r"设置|模板|任务|作业|文件|表|索引|库|主机|服务)_?name$",
-    re.I,
+    r"设置|模板|任务|作业|文件|表|索引|库|主机|服务)_?name$"
 )
 
 #: 人员语义表名：裸 ``name`` 列所在实体含人员语义（患者表/用户表/学生表…）时视为姓名。
-_PERSON_ENTITY_RE = re.compile(
+_PERSON_ENTITY_SRC = (
     r"(patient|user|member|doctor|staff|people|person|customer|client|employee|"
     r"student|teacher|pupil|nurse|pharmacist|parent|child|spouse|leader|manager|"
     r"operator|worker|"
     r"患者|用户|会员|医生|员工|人员|职工|病人|学生|教师|老师|学员|护士|药剂师|"
-    r"家长|子女|配偶|负责人|经理|操作员|工人)",
-    re.I,
+    r"家长|子女|配偶|负责人|经理|操作员|工人)"
 )
 
 #: 机构/地点/技术语义表名：裸 ``name`` 列所在实体含机构语义（村/部门/医院…）时视为机构名。
-_ENTITY_ENTITY_RE = re.compile(
+_ENTITY_ENTITY_SRC = (
     r"(village|org|dept|department|hospital|company|institution|center|team|group|"
     r"project|region|area|zone|branch|unit|enterprise|store|warehouse|school|class|"
     r"community|city|county|province|town|street|clinic|pharmacy|factory|plant|shop|"
@@ -175,40 +171,55 @@ _ENTITY_ENTITY_RE = re.compile(
     r"job|task|rule|template|config|menu|module|function|dict|param|setting|index|"
     r"村|社区|部门|机构|医院|单位|项目|组织|科室|学校|班级|地区|区域|城市|区县|省份|"
     r"街道|药店|诊所|工厂|商店|车站|大楼|房间|病房|床位|菜单|模块|功能|字典|参数|"
-    r"设置|模板|任务|作业|文件|表|索引|库|主机|服务)",
-    re.I,
+    r"设置|模板|任务|作业|文件|表|索引|库|主机|服务)"
 )
 
 #: health 规则「机构/地点/资源」字段：注释命中健康词但字段本身是机构/位置（如
 #: ``org_name`` 注释「医疗机构名称」），不是个人健康数据，应降级不判 PII。
-_HEALTH_ORG_FIELD_RE = re.compile(
+_HEALTH_ORG_SRC = (
     r"(org|organ|hospital|dept|department|clinic|institution|company|unit|branch|"
     r"area|region|zone|ward|room|bed|source|"
-    r"机构|医院|科室|部门|单位|病区|病房|房间|床位|来源)",
-    re.I,
+    r"机构|医院|科室|部门|单位|病区|病房|房间|床位|来源)"
 )
 
 #: health 规则「明确健康字段」：字段名本身是个人健康数据（保留 PII）。
-_HEALTH_KEEP_FIELD_RE = re.compile(
+_HEALTH_KEEP_SRC = (
     r"(disease|diagnos|symptom|complaint|blood|pressure|sugar|heart|bmi|"
-    r"病名|诊断|症状|主诉|血压|血糖|心率|体检|化验|检查)",
-    re.I,
+    r"病名|诊断|症状|主诉|血压|血糖|心率|体检|化验|检查)"
 )
 
 
-def _is_health_pii_field(name: str) -> bool:
-    """判断 health 规则命中字段是否为个人健康数据（供注释命中上下文判定）。
+@dataclass(frozen=True, slots=True)
+class PiiVocab:
+    """PII 上下文词表（可 DB 配置覆盖，system_dict ``pii_vocab``）。
 
-    字段名含明确健康词（``disease_name``/``blood_pressure``）→ 保留 PII；
-    字段名是机构/地点/资源（``org_name``/``ward_name``/``hospital_code``）→ 非健康
-    数据（注释里的「医疗」等词来自字段说明），降级；其余保守保留。
+    与规则（``pii_rule``）分离：规则定义「什么算敏感」（正则+置信度+类别），
+    词表定义「上下文判定」——人名/机构前缀、表语义、健康降级、聚合量词、豁免。
+    治理者可在敏感规则配置台调整词表（豁免误报字段、补充人员/机构词），
+    无需改代码发版。
     """
-    if _HEALTH_KEEP_FIELD_RE.search(name):
-        return True
-    return not bool(_HEALTH_ORG_FIELD_RE.search(name))
+
+    person_name_re: str = _PERSON_NAME_SRC
+    entity_name_re: str = _ENTITY_NAME_SRC
+    person_entity_re: str = _PERSON_ENTITY_SRC
+    entity_entity_re: str = _ENTITY_ENTITY_SRC
+    health_org_re: str = _HEALTH_ORG_SRC
+    health_keep_re: str = _HEALTH_KEEP_SRC
+    aggregate_re: str = _AGGREGATE_SRC
+    value_exempt_prefixes: tuple[str, ...] = _VALUE_EXEMPT_PREFIXES
+    # 豁免：精确字段名（误报反馈一键写入）与字段名前缀（灵活豁免）
+    exempt_fields: frozenset[str] = frozenset()
+    exempt_prefixes: tuple[str, ...] = ()
 
 
-def _is_person_name(name: str, entity_name: str) -> bool:
+def _is_person_name(
+    name: str,
+    entity_name: str,
+    person_name_re: re.Pattern,
+    entity_name_re: re.Pattern,
+    person_entity_re: re.Pattern,
+    entity_entity_re: re.Pattern,
+) -> bool:
     """判断 ``*_name`` 列是否为个人姓名（供 real_name 规则上下文判定）。
 
     带人名限定前缀（``patient_name``/``用户姓名``）→ 姓名；带机构/地点/技术前缀
@@ -216,17 +227,29 @@ def _is_person_name(name: str, entity_name: str) -> bool:
     人员语义表（``patient_info``/``用户表``）→ 姓名；机构语义表（``village_*``/``部门表``）
     → 非姓名；无法判断 → 保守视为非姓名（留人工复核，宁缺勿滥）。
     """
-    if _PERSON_NAME_RE.search(name):
+    if person_name_re.search(name):
         return True
-    if _ENTITY_NAME_RE.search(name):
+    if entity_name_re.search(name):
         return False
     if name.lower() == "name":
-        if _PERSON_ENTITY_RE.search(entity_name):
+        if person_entity_re.search(entity_name):
             return True
-        if _ENTITY_ENTITY_RE.search(entity_name):
+        if entity_entity_re.search(entity_name):
             return False
         return False
     return False
+
+
+def _is_health_pii_field(name: str, keep_re: re.Pattern, org_re: re.Pattern) -> bool:
+    """判断 health 规则命中字段是否为个人健康数据（供注释命中上下文判定）。
+
+    字段名含明确健康词（``disease_name``/``blood_pressure``）→ 保留 PII；
+    字段名是机构/地点/资源（``org_name``/``ward_name``/``hospital_code``）→ 非健康
+    数据（注释里的「医疗」等词来自字段说明），降级；其余保守保留。
+    """
+    if keep_re.search(name):
+        return True
+    return not bool(org_re.search(name))
 
 
 def _compile(rule: PiiRule) -> re.Pattern:
@@ -371,6 +394,7 @@ class SensitivityClassifier:
         self,
         rules: Sequence[PiiRule] | None = None,
         confidential_rules: Sequence[PiiRule] | None = None,
+        vocab: PiiVocab | None = None,
     ) -> None:
         self._pii_rules = tuple(rules) if rules is not None else DEFAULT_PII_RULES
         default_conf = DEFAULT_CONFIDENTIAL_RULES
@@ -379,6 +403,18 @@ class SensitivityClassifier:
         )
         self._pii_compiled = [(_compile(r), _compile_sample(r), r) for r in self._pii_rules]
         self._conf_compiled = [(_compile(r), _compile_sample(r), r) for r in self._conf_rules]
+        # 上下文词表（pii_vocab DB 可配置覆盖；缺省内置默认）
+        v = vocab or PiiVocab()
+        self._person_name_re = re.compile(v.person_name_re, re.I)
+        self._entity_name_re = re.compile(v.entity_name_re, re.I)
+        self._person_entity_re = re.compile(v.person_entity_re, re.I)
+        self._entity_entity_re = re.compile(v.entity_entity_re, re.I)
+        self._health_keep_re = re.compile(v.health_keep_re, re.I)
+        self._health_org_re = re.compile(v.health_org_re, re.I)
+        self._aggregate_re = re.compile(v.aggregate_re, re.I)
+        self._value_exempt_prefixes = v.value_exempt_prefixes
+        self._exempt_fields = v.exempt_fields
+        self._exempt_prefixes = v.exempt_prefixes
 
     def mask_sample(self, sample: str) -> str:
         """对样本值打码后存储（PII 识别只需要格式特征，不需要明文）。
@@ -424,12 +460,15 @@ class SensitivityClassifier:
             name = str(col.get("name", "")).strip()
             if not name:
                 continue
+            # 豁免（误报反馈闭环写入 pii_vocab）：精确字段名或前缀命中 → 跳过不判
+            if name in self._exempt_fields or name.startswith(self._exempt_prefixes):
+                continue
             sample = str(col.get("sample", "") or "")
             comment = str(col.get("comment", "") or "").strip()
             # 聚合统计字段（*_cnt/*_rate 等，可带分桶编号）存群体计数/比率，不指向个体；
             # 但 heart_rate（心率）等个人测量值豁免（以值型前缀开头）。
-            is_aggregate = bool(_AGGREGATE_RE.search(name)) and not name.startswith(
-                _VALUE_EXEMPT_PREFIXES
+            is_aggregate = bool(self._aggregate_re.search(name)) and not name.startswith(
+                self._value_exempt_prefixes
             )
             for name_re, sample_re, rule in self._pii_compiled:
                 matched_by: str | None = None
@@ -460,7 +499,14 @@ class SensitivityClassifier:
                 if (
                     rule.rule_id == "real_name"
                     and matched_by == "name"
-                    and not _is_person_name(name, entity_name)
+                    and not _is_person_name(
+                        name,
+                        entity_name,
+                        self._person_name_re,
+                        self._entity_name_re,
+                        self._person_entity_re,
+                        self._entity_entity_re,
+                    )
                 ):
                     continue
                 # 机构/地点/资源字段（org_name/ward_name 等）不因注释含「医疗」等
@@ -468,7 +514,7 @@ class SensitivityClassifier:
                 if (
                     rule.rule_id == "health"
                     and matched_by == "comment"
-                    and not _is_health_pii_field(name)
+                    and not _is_health_pii_field(name, self._health_keep_re, self._health_org_re)
                 ):
                     continue
                 hits.append(

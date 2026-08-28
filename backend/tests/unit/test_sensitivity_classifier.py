@@ -288,3 +288,41 @@ def test_detect_pii_masked_sample_triggers_name_sample() -> None:
     )
     assert hits and hits[0].rule == "phone" and hits[0].matched_by == "name+sample"
     assert hits[0].confidence == pytest.approx(0.95)  # 0.9 + 0.05
+
+
+# ---- PII 上下文词表注入（pii_vocab 可配置）----
+
+
+def test_vocab_person_name_re_injection() -> None:
+    """注入扩展人名词表：新增前缀（如 孕妇_name）判 PII。"""
+    from app.services.collector.classifier import PiiVocab
+
+    base = PiiVocab()
+    extended = PiiVocab(
+        person_name_re=base.person_name_re.replace(
+            r"家属|患者", r"家属|患者|孕妇"
+        )
+    )
+    clf = SensitivityClassifier(vocab=extended)
+    hits = clf.detect_pii_fields("ods.pregnant_t", _schema({"name": "孕妇_name"}))
+    assert hits and hits[0].rule == "real_name"
+    # 内置默认不含孕妇 → 不判
+    clf2 = SensitivityClassifier()
+    assert clf2.detect_pii_fields("ods.pregnant_t", _schema({"name": "孕妇_name"})) == []
+
+
+def test_vocab_exempt_fields_and_prefixes() -> None:
+    """豁免词表：精确字段名/前缀命中则跳过（误报反馈闭环的核心）。"""
+    from app.services.collector.classifier import PiiVocab
+
+    clf = SensitivityClassifier(
+        vocab=PiiVocab(exempt_fields=frozenset({"phone"}), exempt_prefixes=("village_",))
+    )
+    assert clf.detect_pii_fields("ods.t", _schema({"name": "phone", "comment": "手机号"})) == []
+    assert (
+        clf.detect_pii_fields("ods.t", _schema({"name": "village_phone", "comment": "村电话"}))
+        == []
+    )
+    # 非豁免字段不受影响
+    hits = clf.detect_pii_fields("ods.t", _schema({"name": "mobile", "comment": "手机号"}))
+    assert hits and hits[0].rule == "phone"

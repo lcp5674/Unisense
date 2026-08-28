@@ -219,12 +219,13 @@ class CollectorService(BaseService):
             return
         self._db_rules_loaded = True
         try:
-            from app.services.collector.rules import load_pii_rules
+            from app.services.collector.rules import load_pii_rules, load_pii_vocab
 
             pii_rules, conf_rules = await load_pii_rules(self._db)
+            vocab = await load_pii_vocab(self._db)
             if pii_rules:
                 self._classifier = SensitivityClassifier(
-                    rules=pii_rules, confidential_rules=conf_rules
+                    rules=pii_rules, confidential_rules=conf_rules, vocab=vocab
                 )
                 logger.info("collector_use_db_pii_rules count=%d", len(pii_rules))
         except Exception as exc:  # noqa: BLE001 - 规则加载失败不阻断采集

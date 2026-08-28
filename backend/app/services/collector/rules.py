@@ -25,12 +25,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.models.system_dict import SystemDict
+from app.services.collector import classifier
 from app.services.collector.classifier import (
     DEFAULT_CONFIDENTIAL_RULES,
     DEFAULT_PII_RULES,
     ConfidentialCategory,
     PiiCategory,
     PiiRule,
+    PiiVocab,
 )
 
 logger = get_logger("unisense.collector.rules")
@@ -172,3 +174,87 @@ _CONF_LABEL_BY_RULE_ID: dict[str, str] = {
     "tax": "税务/发票规则",
     "business": "商业敏感规则",
 }
+
+
+# ---- PII 上下文词表（pii_vocab 字典，可配置覆盖内置）----
+
+
+#: pii_vocab 词表键 → 内置正则源（供配置台展示默认值/恢复默认）。
+VOCAB_DEFAULT_SRC: dict[str, str] = {
+    "person_name_re": classifier._PERSON_NAME_SRC,
+    "entity_name_re": classifier._ENTITY_NAME_SRC,
+    "person_entity_re": classifier._PERSON_ENTITY_SRC,
+    "entity_entity_re": classifier._ENTITY_ENTITY_SRC,
+    "health_org_re": classifier._HEALTH_ORG_SRC,
+    "health_keep_re": classifier._HEALTH_KEEP_SRC,
+    "aggregate_re": classifier._AGGREGATE_SRC,
+}
+
+#: pii_vocab 词表键 → 内置词条（逗号分隔列表，供配置台展示/恢复）。
+VOCAB_DEFAULT_WORDS: dict[str, str] = {
+    "value_exempt_prefix": "heart_rate,heartrate,心率",
+}
+
+
+def merge_vocab(raw: dict[str, str]) -> PiiVocab:
+    """按字典项覆盖内置词表，产出生效 PiiVocab。
+
+    Args:
+        raw: ``pii_vocab`` 字典项映射（code → description）。
+            正则类键整体作正则；词条类键按逗号/换行分隔为词列表。
+            空/非法项回退内置默认（fail-safe，配置损坏不阻断采集）。
+    """
+    base = PiiVocab()
+
+    def _re(key: str, default: str) -> str:
+        s = raw.get(key, "").strip()
+        return s or default
+
+    def _words(key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+        s = raw.get(key, "").strip()
+        if not s:
+            return default
+        return tuple(p.strip() for p in s.replace("\n", ",").split(",") if p.strip())
+
+    return PiiVocab(
+        person_name_re=_re("person_name_re", base.person_name_re),
+        entity_name_re=_re("entity_name_re", base.entity_name_re),
+        person_entity_re=_re("person_entity_re", base.person_entity_re),
+        entity_entity_re=_re("entity_entity_re", base.entity_entity_re),
+        health_org_re=_re("health_org_re", base.health_org_re),
+        health_keep_re=_re("health_keep_re", base.health_keep_re),
+        aggregate_re=_re("aggregate_re", base.aggregate_re),
+        value_exempt_prefixes=_words("value_exempt_prefix", base.value_exempt_prefixes),
+        exempt_fields=frozenset(_words("exempt_field", ())),
+        exempt_prefixes=_words("exempt_prefix", ()),
+    )
+
+
+async def load_pii_vocab(session: AsyncSession) -> PiiVocab:
+    """从 system_dict 读取 PII 上下文词表（dict_type=pii_vocab）并合并内置。
+
+    Returns:
+        生效词表（无 DB 项/读取失败时回退内置默认，采集不中断）。
+    """
+    try:
+        rows = (
+            await session.execute(
+                select(SystemDict).where(
+                    SystemDict.dict_type == "pii_vocab",
+                    SystemDict.deleted_at.is_(None),
+                )
+            )
+        ).scalars().all()
+    except Exception as exc:  # noqa: BLE001 - 词表读取失败不阻断采集
+        logger.warning("pii_vocab_load_failed: %s", exc)
+        return PiiVocab()
+    raw: dict[str, str] = {}
+    for item in rows:
+        desc = (item.description or "").strip()
+        if item.status == "active" and desc:
+            code = str(item.code)
+            # 同 code 多行合并（如 exempt_field 多条追加，逗号连接）
+            raw[code] = f"{raw[code]},{desc}" if code in raw else desc
+    if not raw:
+        return PiiVocab()
+    return merge_vocab(raw)

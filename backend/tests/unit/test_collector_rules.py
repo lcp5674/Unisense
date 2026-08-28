@@ -192,3 +192,59 @@ async def test_maybe_load_db_rules_uses_db_rules() -> None:
     # 合并语义：自定义 clinic 命中健康类别判 PII；内置 phone 仍生效
     assert svc._classifier.classify("t", {"columns": [{"name": "clinic"}]}) == "PII"  # noqa: SLF001
     assert svc._classifier.classify("t", {"columns": [{"name": "phone"}]}) == "PII"  # noqa: SLF001
+
+
+# ---- PII 上下文词表（pii_vocab 字典加载）----
+
+
+def test_merge_vocab_overrides_and_keeps_defaults() -> None:
+    """merge_vocab：正则类整体覆盖、词条类分隔、豁免并入、缺省回退内置。"""
+    from app.services.collector.classifier import PiiVocab
+    from app.services.collector.rules import merge_vocab
+
+    v = merge_vocab(
+        {
+            "person_name_re": r"(patient|孕妇)_?name$",
+            "exempt_field": "phone, village_name",
+            "exempt_prefix": "test_",
+            "aggregate_re": "",
+        }
+    )
+    # 正则覆盖生效（孕妇_name 判 PII；原内置 patient 保留）
+    clf = SensitivityClassifier(vocab=v)
+    assert clf.detect_pii_fields("t", {"columns": [{"name": "孕妇_name"}]})
+    assert clf.detect_pii_fields("t", {"columns": [{"name": "patient_name"}]})
+    # 豁免字段/前缀生效
+    assert clf.detect_pii_fields("t", {"columns": [{"name": "phone", "comment": "手机号"}]}) == []
+    assert (
+        clf.detect_pii_fields("t", {"columns": [{"name": "test_phone", "comment": "手机号"}]})
+        == []
+    )
+    # aggregate_re 空 → 回退内置默认（fail-safe）
+    assert v.aggregate_re == PiiVocab().aggregate_re
+
+
+async def test_load_pii_vocab_from_db() -> None:
+    """load_pii_vocab：从 system_dict 读取 pii_vocab 项并合并。"""
+    from app.services.collector.classifier import PiiVocab
+    from app.services.collector.rules import load_pii_vocab
+
+    db = MagicMock()
+    rows = [
+        _dict_item("person_name_re", r"(patient|孕妇|教师)_?name$"),
+        _dict_item("exempt_field", "phone, village_name"),
+        _dict_item("exempt_field", "ward_name"),  # 多行追加
+        _dict_item("inactive_vocab", "ignored", status="inactive"),
+    ]
+    db.execute = AsyncMock(return_value=_rows_mock(rows))
+    v = await load_pii_vocab(db)
+    assert isinstance(v, PiiVocab)
+    clf = SensitivityClassifier(vocab=v)
+    assert clf.detect_pii_fields("t", {"columns": [{"name": "孕妇_name"}]})
+    assert clf.detect_pii_fields("t", {"columns": [{"name": "phone", "comment": "手机号"}]}) == []
+    assert (
+        clf.detect_pii_fields("t", {"columns": [{"name": "ward_name", "comment": "病区名称"}]})
+        == []
+    )
+    # 默认词表（heart_rate 值型豁免）保持
+    assert clf.detect_pii_fields("t", {"columns": [{"name": "heart_rate"}]})
