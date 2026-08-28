@@ -4216,6 +4216,8 @@ export async function fetchAssetTables(params?: {
   owner_id?: number;
   /** Schema 完整性：complete / incomplete */
   schema_status?: "complete" | "incomplete";
+  /** 库名（entity_name 前缀，如 wedw_dws） */
+  database?: string;
   /** 关键字：表名或数据源模糊搜索 */
   keyword?: string;
   limit?: number;
@@ -4228,6 +4230,7 @@ export async function fetchAssetTables(params?: {
     domain: params?.domain,
     owner_id: params?.owner_id,
     schema_status: params?.schema_status,
+    database: params?.database,
     keyword: params?.keyword,
     limit: params?.limit ?? 100,
     offset: params?.offset,
@@ -4245,6 +4248,8 @@ export async function fetchAssetOrphans(params?: {
   sensitivity?: string;
   /** Schema 完整性：complete / incomplete */
   schema_status?: "complete" | "incomplete";
+  /** 库名（entity_name 前缀，如 wedw_dws） */
+  database?: string;
   limit?: number;
   /** 偏移分页（与后端 total 配合做服务端分页，P2-1） */
   offset?: number;
@@ -4256,6 +4261,7 @@ export async function fetchAssetOrphans(params?: {
     entity_type: params?.entity_type,
     sensitivity: params?.sensitivity,
     schema_status: params?.schema_status,
+    database: params?.database,
     limit: params?.limit ?? 200,
     offset: params?.offset,
   });

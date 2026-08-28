@@ -90,6 +90,26 @@ async def test_list_tables_passes_multi_dimension_filters() -> None:
         owner_id=7,
         schema_status="incomplete",
         keyword="ods",
+        database=None,
+        org_id=None,
+        offset=0,
+    )
+
+
+async def test_list_tables_passes_database_filter() -> None:
+    """库名过滤透传：database 原样转发到 repository（对齐采集目录库筛选）。"""
+    svc, repo = await _svc()
+    items, _total = await svc.list_tables(None, None, 100, database="wedw_dws")
+    assert len(items) == 1
+    repo.list_tables.assert_awaited_once_with(
+        None,
+        None,
+        100,
+        domain=None,
+        owner_id=None,
+        schema_status=None,
+        keyword=None,
+        database="wedw_dws",
         org_id=None,
         offset=0,
     )
@@ -116,6 +136,7 @@ async def test_orphan_assets_passes_filters() -> None:
         entity_type="table",
         sensitivity="PII",
         schema_status="incomplete",
+        database=None,
         limit=50,
         org_id=None,
         offset=0,

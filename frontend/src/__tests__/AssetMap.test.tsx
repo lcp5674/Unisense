@@ -60,6 +60,7 @@ vi.mock("../api", () => ({
   updateMetricDescription: vi.fn(),
   inferMetricDescription: vi.fn(),
   listCatalogs: vi.fn(),
+  listCatalogDatabases: vi.fn().mockResolvedValue([]),
   listDataSources: vi.fn(),
   listDomainTree: vi.fn(),
   listMetrics: vi.fn(),
@@ -150,6 +151,7 @@ import {
   bulkDeprecateCatalogs,
   listUsers,
   listCatalogs,
+  listCatalogDatabases,
   listDataSources,
   listDomainTree,
   listMetrics,
@@ -1135,6 +1137,37 @@ describe("AssetMap", () => {
     expect(screen.getByText("按库分布")).toBeInTheDocument();
   });
 
+  it("overview 展示目录资产 PII 合规卡并可下钻待复核明细", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetSummary).mockResolvedValue({
+      total: 10,
+      by_entity_type: { table: 8, field: 2 },
+      by_sensitivity: { PUBLIC: 6, PII: 4 },
+      orphan_assets: 1,
+      pii_compliance: {
+        sensitive_total: 4,
+        reviewed: 1,
+        pending: 3,
+        compliance_rate: 25,
+        by_sensitivity: { PII: 3, CONFIDENTIAL: 1 },
+      },
+    });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("概览")).toBeInTheDocument());
+    await user.click(screen.getByText("概览"));
+    await waitFor(() => expect(fetchAssetSummary).toHaveBeenCalled());
+
+    // 目录资产 PII 合规卡：合规率 + 敏感资产明细
+    expect(screen.getByText("目录资产 PII 合规")).toBeInTheDocument();
+    expect(screen.getByText("25")).toBeInTheDocument();
+    expect(screen.getByText(/已复核 1 \/ 4 个敏感资产/)).toBeInTheDocument();
+    // 点击「待复核」Tag → 下钻未复核敏感资产明细
+    await user.click(screen.getByText(/待复核 3 项/));
+    await waitFor(() => expect(screen.getByText(/待复核敏感资产明细/)).toBeInTheDocument());
+    const calls = vi.mocked(listCatalogs).mock.calls;
+    expect(calls[calls.length - 1]?.[0]?.pending_review).toBe(true);
+  });
+
   it("click field node opens field info drawer with table drill entry", async () => {
     vi.mocked(fetchAssetGraph).mockResolvedValue({
       nodes: [
@@ -1942,6 +1975,48 @@ describe("AssetMap", () => {
     });
   });
 
+  it("数据表行设置：治理弹窗带入明细展示的当前责任人/敏感度（不再留空）", async () => {
+    const user = userEvent.setup();
+    vi.mocked(fetchAssetTables).mockResolvedValue({
+      items: [
+        {
+          id: 5,
+          source_id: "s1",
+          entity_name: "sales.ods",
+          entity_type: "TABLE",
+          // 明细展示已有的当前状态：责任人=管理员(#1)、敏感度=PII
+          sensitivity_level: "PII",
+          owner_id: 1,
+          schema_incomplete: false,
+        },
+      ],
+      total: 1,
+    });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("数据表")).toBeInTheDocument());
+    await user.click(screen.getByText("数据表"));
+    await waitFor(() => expect(fetchAssetTables).toHaveBeenCalled());
+
+    const row = screen.getByText("sales.ods").closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("button", { name: /设\s*置/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText("设置资产治理信息")).toBeInTheDocument();
+    });
+    const dialog = screen.getByRole("dialog");
+    // 责任人/敏感度已带入弹窗（Select 显示当前值，而非留空）
+    const ownerItem = within(dialog).getByText("责任人").closest(".ant-form-item") as HTMLElement;
+    expect(within(ownerItem).getByText("管理员 (#1)")).toBeInTheDocument();
+    const sensItem = within(dialog).getByText("敏感度").closest(".ant-form-item") as HTMLElement;
+    expect(within(sensItem).getByText("PII")).toBeInTheDocument();
+    // 直接保存（值未改）→ 前端提交预填的两个值，后端 no-op 短路不 bump row_version
+    await user.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => {
+      expect(reclassifyAssetSensitivity).toHaveBeenCalledWith(5, "PII");
+      expect(assignAssetOwner).toHaveBeenCalledWith(5, 1);
+    });
+  });
+
   it("数据表行设置：敏感度+责任人同时修改时串行提交（避免 row_version 乐观锁 409 竞态）", async () => {
     const user = userEvent.setup();
     vi.mocked(fetchAssetTables).mockResolvedValue({
@@ -2128,6 +2203,45 @@ describe("AssetMap", () => {
     });
     // 激活筛选计数出现
     expect(screen.getByText(/已筛选/)).toBeInTheDocument();
+  });
+
+  it("数据表目录：库筛选触发按 database 请求（随数据源联动）", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listCatalogDatabases).mockResolvedValue(["wedw_dws", "wedw_dim"]);
+    vi.mocked(fetchAssetTables).mockResolvedValue({
+      items: [
+        {
+          id: 5,
+          source_id: "s1",
+          entity_name: "wedw_dws.ods",
+          entity_type: "TABLE",
+          sensitivity_level: "INTERNAL",
+          owner_id: null,
+          schema_incomplete: false,
+        },
+      ],
+      total: 1,
+    });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("数据表")).toBeInTheDocument());
+    await user.click(screen.getByText("数据表"));
+    await waitFor(() => expect(fetchAssetTables).toHaveBeenCalled());
+    // 库下拉候选随数据源加载（listCatalogDatabases 被调用）
+    await waitFor(() => expect(listCatalogDatabases).toHaveBeenCalled());
+
+    const dbItem = screen.getByText("全部库").closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(within(dbItem).getByRole("combobox"));
+    // antd 下拉选项：包装 div 与内容 div 都含文本，点击内容元素（selector 精确定位）
+    const dbOption = await screen.findByText("wedw_dws", {
+      selector: ".ant-select-item-option-content",
+    });
+    await user.click(dbOption);
+
+    await waitFor(() => {
+      expect(fetchAssetTables).toHaveBeenCalledWith(
+        expect.objectContaining({ database: "wedw_dws" }),
+      );
+    });
   });
 
   it("数据表目录：关键字搜索触发按 keyword 请求", async () => {

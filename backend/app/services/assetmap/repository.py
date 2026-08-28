@@ -132,13 +132,15 @@ class AssetMapRepository:
         owner_id: int | None = None,
         schema_status: str | None = None,
         keyword: str | None = None,
+        database: str | None = None,
         org_id: int | None = None,
         offset: int = 0,
     ) -> tuple[list[DBCatalog], int]:
         """数据表目录多维度过滤（数据表 Tab / CSV 导出共用）。
 
         支持：数据源 / 敏感度 / 业务域（经 data_source 继承）/ 责任人 /
-        Schema 完整性（complete|incomplete）/ 关键字（表名或数据源模糊）。
+        Schema 完整性（complete|incomplete）/ 关键字（表名或数据源模糊）/
+        库名（entity_name 前缀，对齐采集目录 description-coverage 库筛选）。
 
         P2-1：支持 offset 分页并返回真实总数（此前 total=len(items) 为静默
         截断后的假总数）。``offset`` 缺省 0。
@@ -169,6 +171,10 @@ class AssetMapRepository:
             # 多租户隔离（P1 加固）：org_id 非 None 时仅返回本组织数据源资产
             if org_id is not None:
                 stmt = stmt.where(DataSource.org_id == org_id)
+        if database:
+            # 库名 = entity_name 前缀（库.表）；LIKE 通配符转义防模糊放大
+            esc_db = database.replace("/", "//").replace("%", "/%").replace("_", "/_")
+            stmt = stmt.where(DBCatalog.entity_name.ilike(f"{esc_db}.%", escape="/"))
         if keyword:
             # 表级搜索（T19 审查修复）：FULLTEXT（MySQL ≥2 字符）加速，LIKE 回退
             cond = await self._catalog_name_cond(keyword)
@@ -190,6 +196,7 @@ class AssetMapRepository:
         entity_type: str | None = None,
         sensitivity: str | None = None,
         schema_status: str | None = None,
+        database: str | None = None,
         limit: int = 200,
         org_id: int | None = None,
         offset: int = 0,
@@ -197,8 +204,8 @@ class AssetMapRepository:
         """孤儿资产（无责任人）多维度过滤，镜像 ``list_tables``。
 
         支持：关键字 / 数据源 / 业务域（经 data_source 继承）/ 实体类型 /
-        敏感度 / Schema 完整性（complete|incomplete）。无参调用返回全部
-        （概览下钻「孤儿资产明细」兼容）。
+        敏感度 / Schema 完整性（complete|incomplete）/ 库名（entity_name 前缀）。
+        无参调用返回全部（概览下钻「孤儿资产明细」兼容）。
 
         P2-1：支持 offset 分页并返回真实总数（此前 total=len(items) 为静默
         截断后的假总数）。``offset`` 缺省 0。
@@ -226,6 +233,10 @@ class AssetMapRepository:
             # 多租户隔离（P1 加固）：org_id 非 None 时仅返回本组织数据源资产
             if org_id is not None:
                 stmt = stmt.where(DataSource.org_id == org_id)
+        if database:
+            # 库名 = entity_name 前缀（库.表）；LIKE 通配符转义防模糊放大
+            esc_db = database.replace("/", "//").replace("%", "/%").replace("_", "/_")
+            stmt = stmt.where(DBCatalog.entity_name.ilike(f"{esc_db}.%", escape="/"))
         if keyword:
             # 表级搜索（T19 审查修复）：FULLTEXT（MySQL ≥2 字符）加速，LIKE 回退
             cond = await self._catalog_name_cond(keyword)

@@ -149,6 +149,7 @@ async def list_tables(
         None, description="Schema 完整性：complete / incomplete"
     ),
     keyword: str | None = Query(None, description="关键字：表名或数据源模糊搜索"),
+    database: str | None = Query(None, description="库名（entity_name 前缀，如 wedw_dws）"),
     limit: int = Query(100, ge=1, le=200),
     offset: int = Query(0, ge=0, description="偏移分页（与 total 配合服务端分页，P2-1）"),
 ) -> Any:
@@ -161,6 +162,7 @@ async def list_tables(
         owner_id=owner_id,
         schema_status=schema_status,
         keyword=keyword,
+        database=database,
         offset=offset,
     )
     return ok(data={"items": items, "total": total}, trace_id=trace_id)
@@ -179,6 +181,7 @@ async def orphan_assets(
     schema_status: str | None = Query(
         None, description="Schema 完整性：complete / incomplete"
     ),
+    database: str | None = Query(None, description="库名（entity_name 前缀，如 wedw_dws）"),
     limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0, description="偏移分页（与 total 配合服务端分页，P2-1）"),
 ) -> Any:
@@ -191,6 +194,7 @@ async def orphan_assets(
         entity_type=entity_type,
         sensitivity=sensitivity,
         schema_status=schema_status,
+        database=database,
         limit=limit,
         offset=offset,
     )

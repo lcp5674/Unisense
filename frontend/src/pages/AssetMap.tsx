@@ -82,6 +82,7 @@ import {
   inferMetricDescription,
   inferTableDescription,
   listCatalogs,
+  listCatalogDatabases,
   listDataSources,
   listDomainTree,
   listMetrics,
@@ -3178,18 +3179,20 @@ function OrphansTab() {
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // ---- 多维度筛选（关键字/数据源/业务域/实体类型/敏感度/Schema 状态）----
+  // ---- 多维度筛选（关键字/数据源/库/业务域/实体类型/敏感度/Schema 状态）----
   const [keyword, setKeyword] = useState("");
   const [keywordDraft, setKeywordDraft] = useState("");
   const [sourceId, setSourceId] = useState<string | undefined>(undefined);
+  const [database, setDatabase] = useState<string | undefined>(undefined);
   const [domain, setDomain] = useState<string | undefined>(undefined);
   const [entityType, setEntityType] = useState<string | undefined>(undefined);
   const [sensitivity, setSensitivity] = useState<string | undefined>(undefined);
   const [schemaStatus, setSchemaStatus] = useState<
     "complete" | "incomplete" | undefined
   >(undefined);
-  // 筛选候选（数据源 / 业务域 / 责任人）
+  // 筛选候选（数据源 / 库 / 业务域 / 责任人）
   const [sourceOptions, setSourceOptions] = useState<Array<{ label: string; value: string }>>([]);
+  const [databaseOptions, setDatabaseOptions] = useState<Array<{ label: string; value: string }>>([]);
   const [domainOptions, setDomainOptions] = useState<Array<{ label: string; value: string }>>([]);
   const [ownerOptions, setOwnerOptions] = useState<Array<{ label: string; value: number }>>([]);
   // 合规统计（不受筛选影响，认领后刷新）——孤儿总数 / PII 孤儿 / 机密级孤儿
@@ -3208,6 +3211,7 @@ function OrphansTab() {
   const [detail, setDetail] = useState<AssetEntityDetail | null>(null);
   const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.orphans.pageSize", 20);
   const canEdit = usePermission().can("assetmap:edit");
+  const navigate = useNavigate();
 
   async function load() {
     setLoading(true);
@@ -3216,6 +3220,7 @@ function OrphansTab() {
       const r = await fetchAssetOrphans({
         sensitivity,
         source_id: sourceId,
+        database,
         domain,
         entity_type: entityType,
         schema_status: schemaStatus,
@@ -3255,7 +3260,7 @@ function OrphansTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sensitivity, sourceId, domain, entityType, schemaStatus, keyword, page]);
+  }, [sensitivity, sourceId, database, domain, entityType, schemaStatus, keyword, page]);
 
   useEffect(() => {
     loadStats();
@@ -3282,6 +3287,13 @@ function OrphansTab() {
       .catch(() => {});
   }, []);
 
+  // 库名筛选候选（entity_name 前缀；随所选数据源联动收窄，对齐采集目录 description-coverage）
+  useEffect(() => {
+    listCatalogDatabases(sourceId)
+      .then((dbs) => setDatabaseOptions(dbs.map((d) => ({ label: d, value: d }))))
+      .catch(() => setDatabaseOptions([]));
+  }, [sourceId]);
+
   useEffect(() => {
     listDomainTree()
       .then((tree) => setDomainOptions(flattenDomainTree(tree)))
@@ -3303,6 +3315,7 @@ function OrphansTab() {
   const activeFilterCount = [
     keyword,
     sourceId,
+    database,
     domain,
     entityType,
     sensitivity,
@@ -3313,6 +3326,7 @@ function OrphansTab() {
     setKeyword("");
     setKeywordDraft("");
     setSourceId(undefined);
+    setDatabase(undefined);
     setDomain(undefined);
     setEntityType(undefined);
     setSensitivity(undefined);
@@ -3550,6 +3564,18 @@ function OrphansTab() {
         </Space>
       }
     >
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 12 }}
+        message="本页治理范围：资产责任人（Owner）——认领 / 转交无责任人的资产。"
+        description="字段级描述缺失治理请前往「描述缺失」页签，或到「采集目录 → 描述缺失治理」统一治理。"
+        action={
+          <Button type="link" size="small" onClick={() => navigate("/catalogs?from=资产地图")}>
+            前往采集目录
+          </Button>
+        }
+      />
       <Space size={28} wrap style={{ marginBottom: 12 }}>
         <Statistic
           title="孤儿资产"
@@ -3595,6 +3621,22 @@ function OrphansTab() {
             onChange={setSourceId}
             options={sourceOptions}
             optionFilterProp="label"
+          />
+        </Col>
+        <Col>
+          <Select
+            allowClear
+            showSearch
+            placeholder="全部库"
+            style={{ width: 150 }}
+            value={database}
+            onChange={(v) => {
+              setDatabase(v);
+              setPage(1);
+            }}
+            options={databaseOptions}
+            optionFilterProp="label"
+            notFoundContent="无库（请先选择数据源）"
           />
         </Col>
         <Col>
@@ -3809,18 +3851,20 @@ function TablesTab() {
   // 服务端分页（P2-1：后端返回真实 total + offset，前端按页请求，不再一次拉 200 静默截断）
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  // ---- 多维度筛选（数据表目录：关键字/数据源/业务域/敏感度/责任人/Schema 状态）----
+  // ---- 多维度筛选（数据表目录：关键字/数据源/库/业务域/敏感度/责任人/Schema 状态）----
   const [keyword, setKeyword] = useState<string>("");
   const [keywordDraft, setKeywordDraft] = useState<string>("");
   const [sourceId, setSourceId] = useState<string | undefined>(undefined);
+  const [database, setDatabase] = useState<string | undefined>(undefined);
   const [domain, setDomain] = useState<string | undefined>(undefined);
   const [sensitivity, setSensitivity] = useState<string | undefined>(undefined);
   const [ownerId, setOwnerId] = useState<number | undefined>(undefined);
   const [schemaStatus, setSchemaStatus] = useState<
     "complete" | "incomplete" | undefined
   >(undefined);
-  // 筛选选项候选（数据源 / 业务域）
+  // 筛选选项候选（数据源 / 库 / 业务域）
   const [sourceOptions, setSourceOptions] = useState<Array<{ label: string; value: string }>>([]);
+  const [databaseOptions, setDatabaseOptions] = useState<Array<{ label: string; value: string }>>([]);
   const [domainOptions, setDomainOptions] = useState<Array<{ label: string; value: string }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -3843,6 +3887,7 @@ function TablesTab() {
   const canDeprecate = usePermission().can("catalog:deprecate");
   const canEdit = usePermission().can("assetmap:edit");
   const canExport = usePermission().can("assetmap:export");
+  const navigate = useNavigate();
 
   async function load() {
     setLoading(true);
@@ -3851,6 +3896,7 @@ function TablesTab() {
       const r = await fetchAssetTables({
         sensitivity,
         source_id: sourceId,
+        database,
         domain,
         owner_id: ownerId,
         schema_status: schemaStatus,
@@ -3870,7 +3916,7 @@ function TablesTab() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sensitivity, sourceId, domain, ownerId, schemaStatus, keyword, page]);
+  }, [sensitivity, sourceId, database, domain, ownerId, schemaStatus, keyword, page]);
 
   // 数据源筛选候选（含名称，仅活跃源）
   useEffect(() => {
@@ -3885,6 +3931,13 @@ function TablesTab() {
       )
       .catch(() => {});
   }, []);
+
+  // 库名筛选候选（entity_name 前缀；随所选数据源联动收窄，对齐采集目录 description-coverage）
+  useEffect(() => {
+    listCatalogDatabases(sourceId)
+      .then((dbs) => setDatabaseOptions(dbs.map((d) => ({ label: d, value: d }))))
+      .catch(() => setDatabaseOptions([]));
+  }, [sourceId]);
 
   // 业务域筛选候选（域树扁平化）
   useEffect(() => {
@@ -3910,6 +3963,7 @@ function TablesTab() {
   const activeFilterCount = [
     keyword,
     sourceId,
+    database,
     domain,
     sensitivity,
     ownerId,
@@ -3920,6 +3974,7 @@ function TablesTab() {
     setKeyword("");
     setKeywordDraft("");
     setSourceId(undefined);
+    setDatabase(undefined);
     setDomain(undefined);
     setSensitivity(undefined);
     setOwnerId(undefined);
@@ -3928,10 +3983,24 @@ function TablesTab() {
   }
 
   // 打开治理设置 Modal（single 传单个 entity_id；batch 传勾选 id 列表）
-  function openGov(entityIds: number[], onSaved?: () => void) {
+  // prefill：单实体时带入当前责任人/敏感度，让用户直观看到要调整的现状
+  // （批量多实体无统一现状，不预填——保持「留空不修改」语义）
+  function openGov(
+    entityIds: number[],
+    onSaved?: () => void,
+    prefill?: { owner_id?: number | null; sensitivity_level?: string | null },
+  ) {
     setGovEntityIds(entityIds);
     setGovOnSaved(() => onSaved ?? null);
     setGovOpen(true);
+    if (entityIds.length === 1 && prefill) {
+      govForm.setFieldsValue({
+        owner_id: prefill.owner_id ?? undefined,
+        sensitivity_level: prefill.sensitivity_level ?? undefined,
+      });
+    } else {
+      govForm.resetFields();
+    }
   }
 
   // 提交：只发送用户实际填写的字段；owner 选「解除归属」哨兵值 → null
@@ -4071,6 +4140,18 @@ function TablesTab() {
         </Space>
       }
     >
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 12 }}
+        message="本页治理范围：资产级信息（责任人 / 敏感度 / 废弃 / 表描述）。"
+        description="字段级描述缺失治理请前往「描述缺失」页签，或到「采集目录 → 描述缺失治理」统一治理。"
+        action={
+          <Button type="link" size="small" onClick={() => navigate("/catalogs?from=资产地图")}>
+            前往采集目录
+          </Button>
+        }
+      />
       <Row gutter={[8, 8]} style={{ marginBottom: 12 }} align="middle">
         <Col>
           <Input.Search
@@ -4097,6 +4178,22 @@ function TablesTab() {
             onChange={setSourceId}
             options={sourceOptions}
             optionFilterProp="label"
+          />
+        </Col>
+        <Col>
+          <Select
+            allowClear
+            showSearch
+            placeholder="全部库"
+            style={{ width: 160 }}
+            value={database}
+            onChange={(v) => {
+              setDatabase(v);
+              setPage(1);
+            }}
+            options={databaseOptions}
+            optionFilterProp="label"
+            notFoundContent="无库（请先选择数据源）"
           />
         </Col>
         <Col>
@@ -4264,7 +4361,11 @@ function TablesTab() {
                       icon={<SettingOutlined />}
                       disabled={record.id == null}
                       onClick={() => {
-                        if (record.id != null) openGov([record.id]);
+                        if (record.id != null)
+                          openGov([record.id], undefined, {
+                            owner_id: record.owner_id,
+                            sensitivity_level: record.sensitivity_level,
+                          });
                       }}
                     >
                       设置
@@ -4298,7 +4399,12 @@ function TablesTab() {
                     size="small"
                     icon={<SettingOutlined />}
                     style={{ paddingLeft: 8 }}
-                    onClick={() => openGov([detail.id], refreshDetail)}
+                    onClick={() =>
+                      openGov([detail.id], refreshDetail, {
+                        owner_id: detail.owner_id,
+                        sensitivity_level: detail.sensitivity_level,
+                      })
+                    }
                   >
                     设置
                   </Button>
@@ -4523,7 +4629,7 @@ function TablesTab() {
           <Form.Item
             name="owner_id"
             label="责任人"
-            extra="留空表示不修改；选择「解除归属」将清空责任人"
+            extra="单条已带入当前责任人；留空表示不修改；选择「解除归属」将清空责任人"
           >
             <Select
               allowClear

@@ -617,6 +617,42 @@ class TestListTablesAndOrphans:
         assert "schema_incomplete" in compiled
         assert "false" in compiled.lower() or "0" in compiled
 
+    async def test_list_tables_database_filter(self) -> None:
+        """库名过滤：entity_name 前缀 LIKE '{db}.%'（通配符转义 + ESCAPE '/'）。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r = MagicMock()
+        r.scalar.return_value = 0
+        r.scalars.return_value.all.return_value = []
+        s.execute = AsyncMock(return_value=r)
+
+        _rows, _total = await repo.list_tables(None, None, 100, database="wedw_dws")
+
+        stmt = s.execute.call_args_list[1].args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "entity_name" in compiled
+        assert "LIKE" in compiled
+        # ilike 编译为 lower()；_ 被转义为 /_ → wedw/_dws.%
+        assert "wedw/_dws.%" in compiled
+        assert "ESCAPE '/'" in compiled
+
+    async def test_list_tables_database_filter_escapes_wildcards(self) -> None:
+        """库名含 % / _ 通配符时转义，防止模糊放大（对齐采集目录 description-coverage）。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r = MagicMock()
+        r.scalar.return_value = 0
+        r.scalars.return_value.all.return_value = []
+        s.execute = AsyncMock(return_value=r)
+
+        _rows, _total = await repo.list_tables(None, None, 100, database="ods_%_d")
+
+        stmt = s.execute.call_args_list[1].args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        # ods_%_d → ods/_/%/_d（% → /%、_ → /_）
+        assert "ods/_/%/_d.%" in compiled
+        assert "ESCAPE '/'" in compiled
+
     async def test_orphan_assets(self) -> None:
         s = _session()
         repo = AssetMapRepository(s)
@@ -680,6 +716,28 @@ class TestListTablesAndOrphans:
         assert "data_source" in compiled
         assert "sales" in compiled
         assert "deleted_at IS NULL" in compiled
+
+    async def test_orphan_assets_database_filter(self) -> None:
+        """孤儿资产库名过滤：entity_name 前缀 LIKE '{db}.%'（通配符转义）。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r = MagicMock()
+        r.scalar.return_value = 0
+        r.scalars.return_value.all.return_value = []
+        s.execute = AsyncMock(return_value=r)
+
+        rows, _total = await repo.orphan_assets(database="wedw_dim")
+
+        assert rows == []
+        stmt = s.execute.call_args_list[1].args[0]
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "entity_name" in compiled
+        assert "LIKE" in compiled
+        # ilike 编译为 lower()；_ 被转义为 /_ → wedw/_dim.%
+        assert "wedw/_dim.%" in compiled
+        assert "ESCAPE '/'" in compiled
+        # 库过滤不破坏孤儿语义（owner_id IS NULL 仍在）
+        assert "owner_id IS NULL" in compiled
 
 
 class TestAggregations:

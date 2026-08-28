@@ -201,6 +201,7 @@ class AssetMapService(BaseService):
         owner_id: int | None = None,
         schema_status: str | None = None,
         keyword: str | None = None,
+        database: str | None = None,
         offset: int = 0,
     ) -> tuple[list[dict[str, Any]], int]:
         """数据表目录多维度过滤（服务端分页：返回 ``(items, total)``）。
@@ -216,6 +217,7 @@ class AssetMapService(BaseService):
             owner_id=owner_id,
             schema_status=schema_status,
             keyword=keyword,
+            database=database,
             org_id=self._org_id,
             offset=offset,
         )
@@ -232,6 +234,7 @@ class AssetMapService(BaseService):
         entity_type: str | None = None,
         sensitivity: str | None = None,
         schema_status: str | None = None,
+        database: str | None = None,
         limit: int = 200,
         offset: int = 0,
     ) -> tuple[list[dict[str, Any]], int]:
@@ -243,6 +246,7 @@ class AssetMapService(BaseService):
             entity_type=entity_type,
             sensitivity=sensitivity,
             schema_status=schema_status,
+            database=database,
             limit=limit,
             org_id=self._org_id,
             offset=offset,

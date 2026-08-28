@@ -144,5 +144,7 @@ async def test_metric_summary_executes(db_env) -> None:
 
 async def test_orphan_assets_executes(db_env) -> None:
     async with db_env["session_factory"]() as session:
-        items = await AssetMapService(session).orphan_assets()
+        # P2-1 起 service 返回 (items, total) 元组（真实总数 + 分页）
+        items, total = await AssetMapService(session).orphan_assets()
         assert isinstance(items, list)
+        assert isinstance(total, int)
