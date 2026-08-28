@@ -54,6 +54,15 @@ class AuditArchiveLog(Base, TimestampMixin):
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="归档完成时间"
     )
+    # S18（审查修复）：归档文件 sha256 哈希链——content_sha256 为本文件哈希，
+    # prev_sha256 为上一成功归档文件哈希，串成链；MinIO 无 object-lock 时，
+    # 篡改任一文件会破坏链（独立介质核对 prev_sha256 可发现）。
+    content_sha256: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="本归档文件 sha256"
+    )
+    prev_sha256: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="上一归档文件 sha256（哈希链）"
+    )
 
     __table_args__ = (
         Index("idx_audit_archive_date", "archive_date"),
@@ -70,5 +79,7 @@ class AuditArchiveLog(Base, TimestampMixin):
             "status": self.status,
             "error_message": self.error_message,
             "completed_at": self.completed_at,
+            "content_sha256": self.content_sha256,
+            "prev_sha256": self.prev_sha256,
             "created_at": self.created_at,
         }

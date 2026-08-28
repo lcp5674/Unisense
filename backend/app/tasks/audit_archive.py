@@ -16,6 +16,7 @@ L-1 治理（第九轮）：归档为「物理搬迁」闭环——
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
@@ -97,6 +98,24 @@ async def audit_archive_task(ctx: dict[str, Any]) -> dict[str, Any]:
 
             # 导出 + 上传
             jsonl_bytes = _export_jsonl(rows)
+            # S18（审查修复）：sha256 哈希链——本文件哈希 + 上一成功归档哈希
+            content_sha256 = hashlib.sha256(jsonl_bytes).hexdigest()
+            prev_sha256: str | None = None
+            try:
+                prev = (
+                    await db.execute(
+                        select(AuditArchiveLog.content_sha256)
+                        .where(
+                            AuditArchiveLog.status == "SUCCESS",
+                            AuditArchiveLog.content_sha256.is_not(None),
+                        )
+                        .order_by(AuditArchiveLog.id.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                prev_sha256 = prev
+            except Exception:  # noqa: BLE001 - 链查询失败不阻断归档主流程
+                logger.warning("audit_archive_prev_hash_lookup_failed")
             date_prefix = archive_date.strftime("%Y/%m/%d")
             date_stamp = archive_date.strftime("%Y%m%d%H%M%S")
             s3_key = f"audit-archive/{date_prefix}/audit_log_{date_stamp}.jsonl"
@@ -111,6 +130,8 @@ async def audit_archive_task(ctx: dict[str, Any]) -> dict[str, Any]:
                         s3_size_bytes=s3_size,
                         status="FAILED",
                         error_message="MinIO upload failed",
+                        content_sha256=content_sha256,
+                        prev_sha256=prev_sha256,
                     )
                 )
                 await db.commit()
@@ -136,6 +157,8 @@ async def audit_archive_task(ctx: dict[str, Any]) -> dict[str, Any]:
                     s3_size_bytes=s3_size,
                     status="SUCCESS",
                     completed_at=datetime.now(UTC),
+                    content_sha256=content_sha256,
+                    prev_sha256=prev_sha256,
                 )
             )
             await db.commit()

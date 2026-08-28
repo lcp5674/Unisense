@@ -47,12 +47,23 @@ def _validate_definition_json(v: dict[str, Any]) -> dict[str, Any]:
     if sql is not None:
         if not isinstance(sql, str) or not sql.strip():
             raise ValueError("口径 SQL（definition_json.sql）必须为非空字符串")
+        if len(sql) > 16384:
+            raise ValueError("口径 SQL（definition_json.sql）长度不能超过 16384 字符")
         try:
             import sqlglot
 
             sqlglot.parse_one(sql)
         except Exception as exc:  # noqa: BLE001 - sqlglot 语法错误统一 422
             raise ValueError(f"口径 SQL 语法错误: {exc}") from exc
+
+    # T11（审查修复）：口径字段补大小上限——批量端点（batch-register/batch-import）
+    # 可携带任意大字段放大 100 倍，须在 schema 层拦截超长输入。
+    for _key, _limit in (("expression", 4096), ("etl_sql", 16384)):
+        _val = v.get(_key)
+        if _val is not None and (not isinstance(_val, str) or len(_val) > _limit):
+            raise ValueError(
+                f"口径字段（definition_json.{_key}）长度不能超过 {_limit} 字符"
+            )
 
     for key in ("source_tables", "downstream_tables"):
         if v.get(key) is not None:
@@ -62,6 +73,8 @@ def _validate_definition_json(v: dict[str, Any]) -> dict[str, Any]:
         if val is not None:
             if not isinstance(val, str) or not val.strip():
                 raise ValueError(f"{key} 必须为非空字符串")
+            if len(val) > 16384:
+                raise ValueError(f"{key} 长度不能超过 16384 字符")
             v[key] = val.strip()
     # 5. ``base_atomic``（基础原子指标编码）：派生指标的 OneData 基础原子绑定
     #    （派生 = 基础原子 + 业务限定 + 时间周期）。选填字符串——存在性/类型
@@ -245,7 +258,10 @@ class MetricCreateRequest(BaseModel):
     # 口径溯源（生产就绪审查 P2）：SQL 批量/口径 SQL 模式创建时携带整句原始口径 SQL
     # （ETL 脚本原文切片），落 Metric.raw_sql——候选仅落聚合表达式，整句口径原文
     # 可据此反查（batch_id → 口径全文），存量/普通创建为 None。
-    raw_sql: str | None = Field(None, description="原始口径 SQL（可空，供 batch_id 溯源）")
+    # T11（审查修复）：限长 60000（DB Text 64KB 内留余量，防批量端点超长放大）。
+    raw_sql: str | None = Field(
+        None, max_length=60000, description="原始口径 SQL（可空，供 batch_id 溯源）"
+    )
     # 消费指南（可选）：创建时随指标落库（guide_source=manual），结构校验见
     # _validate_guide_payload（三组字符串数组，≤20 项/每项 ≤200 字符）。
     consumption_guide: dict[str, Any] | None = Field(

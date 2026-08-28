@@ -57,15 +57,17 @@ class TestAuditArchiveFlow:
         mock_row.created_at = datetime.now(UTC) - timedelta(days=31)
 
         mock_db = AsyncMock()
-        # 调用序列：COUNT(容量) → 查询[行] → UPDATE → DELETE → 查询[]（结束循环）
+        # 调用序列：COUNT(容量) → 查询[行] → prev_sha256 → UPDATE → DELETE → 查询[]（结束循环）
         count_res = MagicMock()
         count_res.scalar.return_value = 0
+        prev_hash_res = MagicMock()
+        prev_hash_res.scalar_one_or_none.return_value = None
         q1 = MagicMock()
         q1.scalars.return_value.all.return_value = [mock_row]
         q2 = MagicMock()
         q2.scalars.return_value.all.return_value = []
         mock_db.execute = AsyncMock(
-            side_effect=[count_res, q1, MagicMock(), MagicMock(), q2]
+            side_effect=[count_res, q1, prev_hash_res, MagicMock(), MagicMock(), q2]
         )
         mock_db.add = MagicMock()
         mock_db.commit = AsyncMock()
@@ -112,14 +114,16 @@ class TestAuditArchiveFlow:
         mock_db = AsyncMock()
         count_res = MagicMock()
         count_res.scalar.return_value = 0
+        prev_hash = MagicMock()
+        prev_hash.scalar_one_or_none.return_value = None
         q1 = MagicMock()
         q1.scalars.return_value.all.return_value = rows[:2]
         q2 = MagicMock()
         q2.scalars.return_value.all.return_value = rows[2:]
         q3 = MagicMock()
         q3.scalars.return_value.all.return_value = []
-        # COUNT → 每批(查询 → UPDATE → DELETE) → 查询[]（结束）
-        calls = [count_res, q1, MagicMock(), MagicMock(), q2, MagicMock(), MagicMock(), q3]
+        # COUNT → 每批(查询 → prev_sha256 → UPDATE → DELETE) → 查询[]（结束）
+        calls = [count_res, q1, prev_hash, MagicMock(), MagicMock(), q2, prev_hash, MagicMock(), MagicMock(), q3]
         mock_db.execute = AsyncMock(side_effect=calls)
         mock_db.add = MagicMock()
         mock_db.commit = AsyncMock()
