@@ -2436,6 +2436,16 @@ async def auto_suggest_metric(
         except Exception:
             pass  # 富集失败不阻断推断
 
+    # 字典驱动（2026-08-28）：单位/粒度推断关键词从 system_dict 加载（extra.
+    # infer_keywords 覆盖内置默认）——管理员在系统配置维护字典即可影响推断，无需发版。
+    infer_dicts: dict[str, dict[str, list[str]]] | None = None
+    try:
+        from app.services.semantic.infer_dict import load_infer_dicts
+
+        infer_dicts = await load_infer_dicts(db)
+    except Exception:
+        infer_dicts = None  # 加载失败降级内置默认，推断不阻断
+
     result = auto_fill(
         domain_code=domain_code,
         source_table=effective_table,
@@ -2445,6 +2455,7 @@ async def auto_suggest_metric(
         sql=sql,
         measure_meta=measure_meta or None,
         table_meta=table_meta or None,
+        infer_dicts=infer_dicts,
     )
 
     # LLM 增强：默认仅名称走 LLM；use_llm=True 时全字段 LLM 推断（语义字段直接产出、

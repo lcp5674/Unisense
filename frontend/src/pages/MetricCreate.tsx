@@ -3010,8 +3010,8 @@ export function MetricCreate() {
                 }
               >
                 <Select
-                  mode="multiple"
-                  placeholder="选择平台维度（可搜索）"
+                  mode="tags"
+                  placeholder="选择平台维度或输入维度编码（可搜索）"
                   style={{ width: "100%" }}
                   value={selectedDims}
                   onChange={setSelectedDims}
@@ -3733,9 +3733,9 @@ export function MetricCreate() {
                                   <SqlBatchField label="关联维度">
                                     <Select
                                       size="small"
-                                      mode="multiple"
+                                      mode="tags"
                                       style={{ minWidth: 220 }}
-                                      placeholder="GROUP BY 推断维度（可增删）"
+                                      placeholder="GROUP BY 推断维度（可增删/输入）"
                                       optionFilterProp="label"
                                       value={c.dimensions || []}
                                       onChange={(v) => handleSqlBatchEdit(c.key, { dimensions: v })}

@@ -19,6 +19,7 @@ import pytest
 from app.services.llm.parse import parse_period_infer_result, parse_sql_split_result
 from app.services.semantic.sql_infer import parse_sql_profile
 from app.services.semantic.sql_split import (
+    _build_derived_candidate,
     _period_from_profile,
     _period_uncertain,
     _split_semicolon,
@@ -2042,3 +2043,28 @@ def test_infer_sql_batch_sunk_candidate_carries_dimensions() -> None:
         assert set(c.get("dimensions") or []) == {"hosp_code", "enter_source"}, (
             f"候选应携带 GROUP BY 非时间键维度: {c.get('dimensions')}"
         )
+
+
+def test_build_derived_candidate_matches_platform_dimensions() -> None:
+    """2026-08-28 维度关联：候选 dimensions 与平台维度（PUBLISHED）匹配回填。
+
+    GROUP BY 非时间键 doctor_id/hosp_code → 匹配维度目录 dim_code（doctor/
+    hospital），未命中的 enter_source 保留原列名——「关联维度」直挂已治理维度。
+    """
+    cand = _build_derived_candidate(
+        idx=0,
+        measure={"column": "active_doctor_cnt", "agg": "COUNT_DISTINCT", "alias": None},
+        table="wedw_dwd.doctor_active_di",
+        period="month",
+        domain_code="outpatient",
+        domain_defaults={},
+        time_column="month_id",
+        group_by=["month_id", "doctor_id", "hosp_code", "enter_source"],
+        platform_dims=[
+            {"dim_code": "doctor", "name": "医生"},
+            {"dim_code": "hospital", "name": "医院"},
+        ],
+    )
+    assert set(cand["dimensions"]) == {"doctor", "hospital", "enter_source"}, (
+        f"维度应匹配平台维度编码: {cand['dimensions']}"
+    )

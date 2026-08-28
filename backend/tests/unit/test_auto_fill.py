@@ -13,6 +13,10 @@ from app.services.semantic.auto_fill import (
     infer_metric,
     validate_metric_code,
 )
+from app.services.semantic.infer_dict import (
+    extract_grain_and_dims,
+    match_platform_dimensions,
+)
 
 
 class TestExtractBizObject:
@@ -440,3 +444,95 @@ class TestMetricNameMorphemeMissing:
         assert name == "日abc metric"
         assert "未命中受控词根（推断名，建议人工确认）" in f["fields"]["name"]["reason"]
 
+
+
+class TestInferDictDriven:
+    """字典驱动推断（2026-08-28）：单位/粒度关键词来自 infer_dict，业务实体粒度
+    + 平台维度匹配——不硬编码、与字典/维度管理打通。"""
+
+    def test_doctor_count_unit_is_person(self) -> None:
+        """医生计数列（active_doctor_cnt）单位应为 PERSON（人）而非 TIMES（次）。
+
+        修复前：PERSON 关键词无 doctor/医生，列名被 cnt 兜底判成 TIMES。
+        """
+        profile = build_profile(
+            source_table="dwd.doctor_fee_daily",
+            measure_column="active_doctor_cnt",
+            period="day",
+            measure_meta={"name": "active_doctor_cnt", "comment": "月活跃医生数"},
+        )
+        profile["domain_code"] = "outpatient"
+        f = infer_metric(profile)["fields"]
+        assert f["unit"]["value"] == "PERSON"
+        assert f["unit"]["source"] == "column_meta"
+
+    def test_patient_count_unit_is_person(self) -> None:
+        """患者计数列（patient_cnt）同样判 PERSON——人语义优先于计数兜底。"""
+        profile = build_profile(
+            source_table="dwd.visit_detail", measure_column="patient_cnt", period="day"
+        )
+        profile["domain_code"] = "outpatient"
+        assert infer_metric(profile)["fields"]["unit"]["value"] == "PERSON"
+
+    def test_amount_wan_unit_is_cny_wan(self) -> None:
+        """金额量级：列名/注释含「万元」→ CNY_WAN 而非一律 CNY。"""
+        profile = build_profile(
+            source_table="dwd.hospital_fee",
+            measure_column="amt_wan",
+            period="day",
+            measure_meta={"name": "amt_wan", "comment": "费用金额（万元）"},
+        )
+        profile["domain_code"] = "outpatient"
+        f = infer_metric(profile)["fields"]
+        assert f["unit"]["value"] == "CNY_WAN"
+
+    def test_entity_granularity_from_group_by(self) -> None:
+        """GROUP BY doctor_id（无时间键）→ doctor 实体粒度，而非默认 day。
+
+        修复前粒度只看时间 token，业务实体粒度字典形同虚设。
+        """
+        profile = build_profile(
+            sql=(
+                "SELECT doctor_id, COUNT(DISTINCT patient_id) AS active_doctor_cnt "
+                "FROM dwd.fee_detail GROUP BY doctor_id"
+            )
+        )
+        profile["domain_code"] = "outpatient"
+        f = infer_metric(profile)["fields"]
+        assert f["granularity"]["value"] == "doctor"
+        # 该 GROUP BY 键升级为粒度后不再是普通维度
+        assert f["granularity"]["source"] == "sql_parse"
+
+    def test_time_grain_priority_over_entity(self) -> None:
+        """时间粒度优先：GROUP BY dt, doctor_id → day 粒度，doctor_id 归维度。"""
+        grain, dims = extract_grain_and_dims(["dt", "doctor_id"])
+        assert grain == "day"
+        assert dims == ["doctor_id"]
+
+    def test_multi_entity_keys_default_to_day(self) -> None:
+        """多个业务实体键（doctor_id + dept_id）无法唯一判定粒度 → 默认 day。"""
+        grain, dims = extract_grain_and_dims(["doctor_id", "dept_id"])
+        assert grain == "day"
+        assert set(dims) == {"doctor_id", "dept_id"}
+
+    def test_match_platform_dimensions(self) -> None:
+        """GROUP BY 非时间键与平台维度匹配：dim_code 子串/前缀命中回填。"""
+        platform = [
+            {"dim_code": "doctor", "name": "医生"},
+            {"dim_code": "hospital", "name": "医院"},
+            {"dim_code": "department", "name": "科室"},
+        ]
+        out = match_platform_dimensions(
+            ["doctor_id", "hosp_code", "enter_source"], platform
+        )
+        # doctor_id ⊃ doctor → doctor；hosp_code token hosp ⊂ hospital → hospital；
+        # enter_source 无匹配 → 保留原列名
+        assert out == ["doctor", "hospital", "enter_source"]
+
+    def test_infer_unit_from_meta_person_before_times(self) -> None:
+        """纯函数级：人+计数混合语义列（doctor_cnt）判 PERSON 而非 TIMES。"""
+        from app.services.semantic.infer_dict import infer_unit_from_meta
+
+        assert infer_unit_from_meta({"name": "doctor_cnt"}) == "PERSON"
+        assert infer_unit_from_meta({"name": "visit_cnt"}) == "TIMES"
+        assert infer_unit_from_meta({"comment": "费用（万元）"}) == "CNY_WAN"

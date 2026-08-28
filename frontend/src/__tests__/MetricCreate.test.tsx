@@ -1480,13 +1480,13 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     await goToStep(1);
     // 关联维度（受控 Select）随逻辑概念展示在 ② 指标基本信息
     expect(screen.getByText("关联维度（可选）")).toBeTruthy();
-    expect(screen.getByText("选择平台维度（可搜索）")).toBeTruthy();
+    expect(screen.getByText("选择平台维度或输入维度编码（可搜索）")).toBeTruthy();
     // 切到 SQL 口径定义模式（Step2 ④ 卡）后，Step1 ② 的关联维度仍可见（不再受口径模式门控）
     await goToStep(2);
     fireEvent.click(screen.getByText("SQL 模式"));
     await goToStep(1);
     expect(screen.getByText("关联维度（可选）")).toBeTruthy();
-    expect(screen.getByText("选择平台维度（可搜索）")).toBeTruthy();
+    expect(screen.getByText("选择平台维度或输入维度编码（可搜索）")).toBeTruthy();
   });
 
   it("关联维度下拉仅加载已发布维度（status=PUBLISHED 防回归：此前误传 active 选项框恒空，后改为不带 status 展示全部；业务规则要求可关联维度必须已发布）", async () => {
@@ -1510,7 +1510,7 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     });
     // 选项框展示 mock 返回的已发布维度（label = `${name} (${dim_code})`）——展开关联维度下拉后断言选项出现
     await goToStep(1);
-    fireEvent.mouseDown(screen.getByText("选择平台维度（可搜索）"));
+    fireEvent.mouseDown(screen.getByText("选择平台维度或输入维度编码（可搜索）"));
     await waitFor(() => expect(screen.getByText("科室 (dept)")).toBeTruthy());
   });
 

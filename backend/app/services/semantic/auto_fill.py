@@ -25,6 +25,12 @@ from typing import Any, TypedDict
 
 import structlog
 
+from app.services.semantic.infer_dict import (
+    DEFAULT_GRAIN_KEYWORDS,
+    TIME_GRAIN_CODES,
+    extract_grain_and_dims,
+    infer_unit_from_meta,
+)
 from app.services.semantic.sql_infer import SqlProfile, parse_sql_profile, sql_has_arithmetic
 
 logger = structlog.get_logger("unisense.auto_fill")
@@ -315,25 +321,42 @@ def _infer_aggregation(profile: dict[str, Any]) -> SuggestionField:
     return _field(None, "fallback", 0.0, "缺少 SQL 或度量列，无法推断聚合方式")
 
 
-def _infer_granularity(profile: dict[str, Any]) -> SuggestionField:
-    """粒度（时间粒度 token）：来自 GROUP BY 时间列或统计周期。"""
+def _infer_granularity(
+    profile: dict[str, Any],
+    grain_kw: dict[str, list[str]] | None = None,
+) -> SuggestionField:
+    """粒度（字典驱动）：GROUP BY 时间列 → 时间粒度；唯一业务实体键 → 实体粒度。
+
+    关键词来自 ``infer_dict``（内置默认 + system_dict ``extra.infer_keywords``
+    覆盖），时间/业务实体粒度与 ``granularity`` 字典 17 项对齐——GROUP BY
+    ``doctor_id`` 这类统计主体识别为 ``doctor`` 粒度，而非一律归维度。
+
+    Args:
+        profile: build_profile 产出的画像。
+        grain_kw: 粒度关键词映射（code → 关键词）；缺省用内置默认。
+    """
     sql_profile: SqlProfile | None = profile.get("sql_profile")
     period: str | None = profile.get("period")
     group_by: list[str] = sql_profile.group_by if sql_profile else []
-    # 1) GROUP BY 中的时间列
-    for g in group_by:
-        for token in _GRAIN_TOKENS:
-            if token in g.lower():
-                grain = _GRAIN_TOKENS[token]
-                dims = [x for x in group_by if x != g]
-                reason = f"GROUP BY 含时间列 {g} → {grain}"
-                if dims:
-                    reason += f"；复合维度：{grain}×{','.join(dims)}"
-                return _field(grain, "sql_parse", 0.9, reason)
+    grain, dims = extract_grain_and_dims(group_by, grain_kw=grain_kw)
+    if grain != "day":
+        if dims:
+            reason = f"GROUP BY 含 {grain} 粒度键；复合维度：{grain}×{','.join(dims)}"
+        else:
+            reason = f"GROUP BY 粒度键 → {grain}"
+        return _field(grain, "sql_parse", 0.9, reason)
     # 2) 统计周期
     if period:
-        grain = _GRAIN_TOKENS.get(period.lower(), period.lower())
-        return _field(grain, "rule", 0.6, f"统计周期 {period} → 粒度 {grain}")
+        p = period.lower()
+        # period 别名（month/week/day…）反查字典时间粒度 code
+        code: str | None = None
+        for c, kws in DEFAULT_GRAIN_KEYWORDS.items():
+            if c in TIME_GRAIN_CODES and p in kws:
+                code = c
+                break
+        if code is None:
+            code = p if p in DEFAULT_GRAIN_KEYWORDS else "day"
+        return _field(code, "rule", 0.6, f"统计周期 {period} → 粒度 {code}")
     return _field("day", "rule", 0.5, "未识别时间粒度，默认按日（day）")
 
 
@@ -343,39 +366,31 @@ def _col_signal(meta: dict[str, Any], *keywords: str) -> bool:
     return any(k.lower() in hay for k in keywords)
 
 
-def _infer_unit(profile: dict[str, Any]) -> SuggestionField:
-    """单位：列类型/注释/名称三重信号。"""
+def _infer_unit(
+    profile: dict[str, Any],
+    unit_kw: dict[str, list[str]] | None = None,
+) -> SuggestionField:
+    """单位（字典驱动）：列类型/注释/名称三重信号，按字典关键词匹配。
+
+    关键词来自 ``infer_dict``（内置默认 + system_dict ``extra.infer_keywords``
+    覆盖），与 ``unit`` 字典 12 项对齐。修复两类误判：
+    - 计数类列同时含人语义（``active_doctor_cnt``）→ 优先 PERSON（人）而非 TIMES；
+    - 金额量级（列名/注释含「万元/亿」）→ CNY_WAN/CNY_YI 而非一律 CNY。
+
+    Args:
+        profile: build_profile 产出的画像。
+        unit_kw: 单位关键词映射（code → 关键词）；缺省用内置默认。
+    """
     meta: dict[str, Any] = profile.get("measure_meta", {}) or {}
     if meta:
-        src = "column_meta"
-        if _col_signal(
-            meta,
-            "amount", "gmv", "price", "cost", "revenue", "sales", "fee",
-            "金额", "单价", "总价", "余额",
-        ):
-            return _field("CNY", src, 0.85, "列元数据（金额类）→ 单位 CNY")
-        if _col_signal(meta, "rate", "ratio", "pct", "percent", "proportion", "率", "占比"):
-            return _field("PERCENT", src, 0.85, "列元数据（比率类）→ 单位 PERCENT")
-        if _col_signal(meta, "uv", "user", "customer", "member", "account", "人数", "用户"):
-            return _field("PERSON", src, 0.8, "列元数据（人/用户类）→ 单位 PERSON")
-        if _col_signal(meta, "duration", "second", "minute", "时长"):
-            return _field("MINUTE", src, 0.78, "列元数据（时长类）→ 单位 MINUTE")
-        if _col_signal(meta, "cnt", "count", "num", "qty", "quantity", "次数", "数量"):
-            # unit 字典无 COUNT code；TIMES（次）为最通用计数单位，与字典/seed 对齐
-            return _field("TIMES", src, 0.75, "列元数据（计数类）→ 单位 TIMES（次）")
+        code = infer_unit_from_meta(meta, unit_kw)
+        if code:
+            return _field(code, "column_meta", 0.85, f"列元数据命中单位关键词 → {code}")
     measure_column: str | None = profile.get("measure_column")
     if measure_column:
-        col = measure_column.lower()
-        if any(k in col for k in ("rate", "ratio", "pct")):
-            return _field("PERCENT", "rule", 0.7, f"列名含比率语义（{measure_column}）→ PERCENT")
-        if any(k in col for k in ("uv", "user", "customer")):
-            return _field("PERSON", "rule", 0.68, f"列名含用户语义（{measure_column}）→ PERSON")
-        if any(k in col for k in ("amount", "gmv", "price", "cost", "revenue")):
-            return _field("CNY", "rule", 0.68, f"列名含金额语义（{measure_column}）→ CNY")
-        if any(k in col for k in ("cnt", "count", "num")):
-            return _field(
-                "TIMES", "rule", 0.66, f"列名含计数语义（{measure_column}）→ TIMES（次）"
-            )
+        code = infer_unit_from_meta({"name": measure_column}, unit_kw)
+        if code:
+            return _field(code, "rule", 0.7, f"列名命中单位关键词（{measure_column}）→ {code}")
     return _field(None, "fallback", 0.0, "无法从列元数据/名称推断单位，请手动指定")
 
 
@@ -753,6 +768,7 @@ def infer_metric(
     *,
     domain_defaults: dict[str, Any] | None = None,
     llm_name: str | None = None,
+    infer_dicts: dict[str, dict[str, list[str]]] | None = None,
 ) -> dict[str, Any]:
     """多字段指标推断主函数。
 
@@ -760,6 +776,10 @@ def infer_metric(
         profile: build_profile 产出的画像 dict。
         domain_defaults: 域级默认值预设（最高优先级，覆盖所有规则推断）。
         llm_name: LLM 生成的指标名称（可选；提供则作为 name 的 AI 来源，否则规则兜底）。
+        infer_dicts: 推断字典（``{"unit", "granularity"} → code → 关键词），来自
+            ``infer_dict.load_infer_dicts``；缺省用内置默认（与字典种子对齐）。
+            字典驱动：单位/粒度关键词由 system_dict ``extra.infer_keywords`` 维护，
+            不硬编码——管理员在系统配置改字典即可影响推断，无需发版。
 
     Returns:
         {
@@ -771,10 +791,13 @@ def infer_metric(
         }
     """
     domain_defaults = domain_defaults or {}
+    infer_dicts = infer_dicts or {}
+    unit_kw = infer_dicts.get("unit")
+    grain_kw = infer_dicts.get("granularity")
 
     agg_field = _infer_aggregation(profile)
-    grain_field = _infer_granularity(profile)
-    unit_field = _infer_unit(profile)
+    grain_field = _infer_granularity(profile, grain_kw=grain_kw)
+    unit_field = _infer_unit(profile, unit_kw=unit_kw)
     type_field = _infer_type(profile)
     time_sem_field = _infer_time_semantics(profile)
     freshness_field = _infer_freshness(profile)
@@ -877,11 +900,16 @@ def auto_fill(
     sql: str | None = None,
     measure_meta: dict[str, Any] | None = None,
     table_meta: dict[str, Any] | None = None,
+    infer_dicts: dict[str, dict[str, list[str]]] | None = None,
 ) -> dict[str, Any]:
     """自动推断引擎主函数（向后兼容签名）。
 
     返回旧结构 ``{metric_code_suggestion, defaults, segments}`` 并附加
     ``fields`` / ``definition_json`` / ``definition_mode``，供新前端消费。
+
+    Args:
+        infer_dicts: 推断字典（``infer_dict.load_infer_dicts`` 产物）；缺省用
+            内置默认——无 DB 的兼容调用方（service.create_metric）不受影响。
     """
     profile = build_profile(
         source_table=source_table,
@@ -894,7 +922,9 @@ def auto_fill(
     profile["domain_code"] = domain_code
     enriched_defaults = dict(domain_defaults or {})
     enriched_defaults.setdefault("domain", domain_code)
-    result = infer_metric(profile, domain_defaults=enriched_defaults)
+    result = infer_metric(
+        profile, domain_defaults=enriched_defaults, infer_dicts=infer_dicts
+    )
 
     # 组装旧式 defaults（域默认优先，规则推断兜底）
     defaults: dict[str, Any] = {}
