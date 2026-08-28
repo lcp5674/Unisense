@@ -100,7 +100,10 @@ describe("AssetGraph 交互", () => {
       // 匹配节点进入 active 状态，其余 inactive
       expect(graphMock.setElementState).toHaveBeenCalledWith("metric:revenue", "active");
       expect(graphMock.setElementState).toHaveBeenCalledWith("table:orders", "inactive");
-      expect(graphMock.focusElement).toHaveBeenCalledWith("metric:revenue");
+      expect(graphMock.focusElement).toHaveBeenCalledWith("metric:revenue", {
+        duration: 600,
+        easing: "ease-out",
+      });
     });
   });
 

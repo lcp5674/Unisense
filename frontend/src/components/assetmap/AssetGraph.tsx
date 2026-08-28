@@ -378,10 +378,62 @@ function safeSetElementState(
 function safeFocusElement(graph: G6Graph | null | undefined, id: string) {
   if (!graph || graph.destroyed) return;
   try {
-    void graph.focusElement(id).catch(() => {});
+    void graph.focusElement(id, { duration: 600, easing: "ease-out" }).catch(() => {});
   } catch {
     // 个别环境不可用时不阻断
   }
+}
+
+/**
+ * 边流动动画（rAF 直接驱动 lineDashOffset）。
+ *
+ * G6 v5.1.1 的动画系统无法对 lineDashOffset 做**持续**流动：enter/update 的 keyframes
+ * 起止值取自元素当前 attributes（与目标相同），会被 preprocessKeyframes 过滤成无动画；
+ * update stage 又只在数据变更时触发一次。因此改用 requestAnimationFrame 直接驱动
+ * key shape 的 lineDashOffset——@antv/g 的 style 是响应式的，改动后自动重绘。
+ *
+ * 只驱动有 lineDash 的边（骨干/次骨干/环边），数量有限、每帧仅改标量属性，开销可忽略；
+ * 防御式实现：找不到元素/无 getShape 时静默跳过（降级为静态虚线，不影响功能）。
+ * 返回取消函数，组件卸载/数据重载时应调用。
+ */
+function startEdgeFlow(graph: G6Graph | null | undefined, edgeIds: string[]) {
+  if (!graph || graph.destroyed || edgeIds.length === 0) return () => {};
+  const canvas = graph.getCanvas?.();
+  const doc = (canvas?.document ?? undefined) as
+    | { id?: string; children?: unknown[]; getShape?: (name: string) => unknown }
+    | undefined;
+  if (!doc) return () => {};
+  const idSet = new Set(edgeIds);
+  const found: Array<{
+    id?: string;
+    children?: unknown[];
+    getShape?: (name: string) => unknown;
+  }> = [];
+  const walk = (node: unknown): void => {
+    const n = node as { id?: string; children?: unknown[] } | undefined;
+    if (!n) return;
+    if (n.id && idSet.has(String(n.id))) found.push(n as never);
+    const kids = Array.isArray(n.children) ? n.children : [];
+    for (const k of kids) walk(k);
+  };
+  walk(doc);
+  if (found.length === 0) return () => {};
+  let raf = 0;
+  const tick = () => {
+    for (const el of found) {
+      const shape = (el.getShape?.("key") ??
+        (Array.isArray(el.children) ? el.children[0] : undefined)) as
+        | { style?: Record<string, unknown> }
+        | undefined;
+      if (shape?.style) {
+        const cur = typeof shape.style.lineDashOffset === "number" ? shape.style.lineDashOffset : 0;
+        shape.style.lineDashOffset = (cur + 0.5) % 14;
+      }
+    }
+    raf = requestAnimationFrame(tick);
+  };
+  tick();
+  return () => cancelAnimationFrame(raf);
 }
 
 /** 图例中的节点形状示意（指标=圆 / 表=圆角矩形 / 字段=椭圆）。 */
@@ -543,6 +595,8 @@ function GraphCanvas({
   const [renderFailed, setRenderFailed] = useState(false);
   // 图是否渲染完成（state 驱动搜索高亮 effect 在重挂载后自动重跑）
   const [graphReady, setGraphReady] = useState(false);
+  // 边流动动画的取消函数（render 后启动、数据重载/卸载时取消）
+  const edgeFlowCancelRef = useRef<(() => void) | null>(null);
 
   // 血缘度与环检测：style 回调通过 ref 读取最新值（避免闭包捕获旧值）
   const degreeMap = useMemo(() => {
@@ -695,12 +749,14 @@ function GraphCanvas({
         //  - 全景大图（节点多）→ fitView always：适配填满画布，节点分布均匀。
         autoFit: "center",
         padding: 32,
-        // 全局 animation 保持 false（G6 v5.1.1 启用全局动画在大图 force 布局下会触发
-        // 未就绪 shape 的 draw 调用崩溃 "Cannot read properties of undefined (reading 'draw')"）。
-        // 元素级 enter/exit 配 fade 动画由 G6 内部 stage 系统独立驱动；hover/LOD 状态切换
-        // 均显式 setElementState(..., false) 保持瞬时，性能安全。
-        // 配合下方 compact LOD 状态（缩放低于阈值时隐藏标签/图标/柔光/投影），大幅提升交互帧率。
-        animation: false,
+        // 全局 animation 用对象（非 false）激活元素动画管线，使节点/边的 enter/exit 淡入淡出
+        // 真正生效（此前 false 会短路所有元素动画，enter/exit 配置实际从未驱动）。
+        // 关键：必须显式把 node/edge 的 update/translate 置 false——G6 默认主题给两者配了
+        // x/y 位置动画（base.js node.update/translate、edge.translate），全局非 false 时 force
+        // 布局迭代会触发位置插值、shape 未就绪即 draw 崩溃（"Cannot read properties of
+        // undefined (reading 'draw')"）。覆盖为 false 后数据更新/布局迭代保持瞬时，
+        // 仅 enter/exit（透明度）与 hover 状态切换（标量字段，见 node.animation.update）走动画。
+        animation: { duration: 300 },
         zoomRange: [0.15, 8],
         data: { nodes: [], edges: [] },
         node: {
@@ -838,13 +894,29 @@ function GraphCanvas({
               badgeOpacity: 0,
             },
           },
-          // 节点动画：加载淡入、移除淡出。
-          // 不配 update 动画——d3-force 布局自带 tick 迭代，元素 update 时由 G6 内部驱动位置过渡，
-          // 显式再配 update translate 会在 G6 v5.1.1 force 渲染时与未就绪 shape 的 draw 调用冲突（draw undefined）。
-          // 布局切换（key 重挂载）走 enter 淡入，仍构成「流畅过渡」视觉。
+          // 节点动画：加载淡入、移除淡出（透明度过渡，真正生效需全局 animation 非 false）。
+          // update 配**标量字段**（描边/光晕/标签）——hover 状态切换带动画（见 pointerenter 单节点
+          // setElementState(..., true)），视觉上"点亮/熄灭"有 200ms 过渡；不配 x/y 位置字段，
+          // 且 translate 显式 false——force 布局迭代时位置由 G6 内部驱动，位置动画会触发
+          // 未就绪 shape 的 draw 崩溃（draw undefined），保持瞬时才安全。
           animation: {
-            enter: [{ fields: ["opacity"] }],
-            exit: [{ fields: ["opacity"] }],
+            enter: [{ fields: ["opacity"], duration: 350, easing: "ease-out" }],
+            exit: [{ fields: ["opacity"], duration: 200 }],
+            update: [
+              {
+                fields: [
+                  "stroke",
+                  "lineWidth",
+                  "haloLineWidth",
+                  "haloStrokeOpacity",
+                  "labelFontWeight",
+                  "labelFill",
+                ],
+                duration: 200,
+                easing: "ease-out",
+              },
+            ],
+            translate: false,
           },
         },
         edge: {
@@ -875,11 +947,20 @@ function GraphCanvas({
                 (degreeMapRef.current.get(String(e.target)) ?? 0);
               return total >= 10 ? 0.92 : total >= 5 ? 0.75 : 0.52;
             },
+            // 虚线分层：骨干边（连接枢纽，血缘度总和≥10）用「数据流管道」式虚线 + 流动动画
+            //（见 startEdgeFlow），次骨干（≥5）细虚线静态，叶子边实线——与线宽/透明度分层呼应，
+            // 形成"主干流动、枝叶静止"的方向感。环边保留红色虚线警示。
             lineDash: (e) => {
               const d = e.data as RenderEdge | undefined;
               if (d?.anchorEdge) return undefined;
-              return d?.inCycle ? [6, 4] : undefined;
+              if (d?.inCycle) return [6, 4];
+              const total =
+                (degreeMapRef.current.get(String(e.source)) ?? 0) +
+                (degreeMapRef.current.get(String(e.target)) ?? 0);
+              return total >= 10 ? [8, 6] : total >= 5 ? [5, 4] : undefined;
             },
+            // 虚线流动起点（rAF 驱动递增取模）；非虚线边该属性无视觉效果
+            lineDashOffset: 0,
             endArrow: (e) => !(e.data as RenderEdge | undefined)?.anchorEdge,
             startArrow: (e) => {
               const d = e.data as RenderEdge | undefined;
@@ -888,10 +969,15 @@ function GraphCanvas({
             },
             radius: 10,
           },
-          // 边动画：加载淡入、移除淡出（不随布局位移，避免大量边同时平移的视觉噪音）
+          // 边动画：加载淡入、移除淡出。translate 显式 false——force 布局迭代时
+          // 边端点位置由 G6 内部驱动，位置动画会触发 draw 崩溃（与节点同理）。
+          // 流动效果（lineDashOffset）不用 G6 动画系统（keyframes 起止相同会被过滤），
+          // 由渲染完成后的 rAF 手动驱动（见 startEdgeFlow）。
           animation: {
-            enter: [{ fields: ["opacity"] }],
-            exit: [{ fields: ["opacity"] }],
+            enter: [{ fields: ["opacity"], duration: 350, easing: "ease-out" }],
+            exit: [{ fields: ["opacity"], duration: 200 }],
+            update: false,
+            translate: false,
           },
         },
         layout: layoutConfig(layoutMode),
@@ -950,6 +1036,8 @@ function GraphCanvas({
       // 性能优化：pointerenter 高频触发（跨节点移动），用 rAF 节流到每帧只处理最后一次；
       // setElementState 改为**批量 record**（单次调用），替代逐节点循环（160+ 次调用 + 全量重绘
       // 是 rAF 550ms 卡顿的直接来源）。
+      // 中心节点单独 setElementState(..., true) 走 update 标量动画（描边/光晕 200ms 过渡），
+      // 视觉上"点亮"更柔和；邻域其余节点仍批量瞬时，保证大图性能。
       let hoverRaf = 0;
       graph.on<IElementEvent>("node:pointerenter", (evt) => {
         if (!graph || graph.destroyed || !graphReady) return;
@@ -964,11 +1052,14 @@ function GraphCanvas({
             const active = new Set<string>([String(id), ...neighbors.map((n) => String(n.id))]);
             const record: Record<string, string | string[]> = {};
             for (const n of graph.getNodeData()) {
-              record[String(n.id)] = active.has(String(n.id))
-                ? stateWithCompact("active")
-                : stateWithCompact("inactive");
+              if (String(n.id) !== String(id)) {
+                record[String(n.id)] = active.has(String(n.id))
+                  ? stateWithCompact("active")
+                  : stateWithCompact("inactive");
+              }
             }
             void graph.setElementState(record, false).catch(() => {});
+            void graph.setElementState(String(id), stateWithCompact("active"), true).catch(() => {});
           } catch {
             // 高亮为装饰性交互，过渡期失败静默忽略
           }
@@ -998,6 +1089,8 @@ function GraphCanvas({
     return () => {
       // 用闭包 graph（而非 graphRef.current）销毁：即使 destroy 抛异常也确保引用置空，避免留下僵尸实例
       try {
+        edgeFlowCancelRef.current?.();
+        edgeFlowCancelRef.current = null;
         graph?.destroy();
       } catch {
         // 销毁异常不阻断卸载
@@ -1023,23 +1116,24 @@ function GraphCanvas({
     graph.setData(data);
     graph
       .render()
-      .then(() => {
+      .then(async () => {
         if (graph.destroyed) return;
         setGraphReady(true);
         onReadyRef.current();
-        // 按节点规模自适应 fitView：
+        // 按节点规模自适应 fitView（带平滑缩放进入动画）：
         //  - 节点多（全景）→ always 适配填满画布，但大图 always 会把 zoom 压到 <0.2，
         //    节点缩成亚像素、信息全丢；故叠加最小缩放下限 0.35 保证标签可读，
         //    用户可手动滚轮继续缩（<0.35 触发 compact 隐藏重装饰层，标签仍保留）；
         //  - 节点少（聚焦视图）→ overflow 仅在内容超出视口时裁剪，不把少量节点放大填满画布。
+        // 相机方法走 viewport 变换路径，与 force 布局的 shape draw 解耦，动画安全。
         try {
           if (nodeCountRef.current > 5) {
-            graph.fitView({ when: "always" });
+            await graph.fitView({ when: "always" }, { duration: 800, easing: "ease-out" });
             if (typeof graph.getZoom === "function" && graph.getZoom() < 0.35) {
-              void graph.zoomTo?.(0.35, false).catch(() => {});
+              await graph.zoomTo?.(0.35, { duration: 400, easing: "ease-out" });
             }
           } else {
-            graph.fitView({ when: "overflow" });
+            await graph.fitView({ when: "overflow" }, { duration: 800, easing: "ease-out" });
           }
         } catch {
           /* fitView 偶尔在过渡期失败 */
@@ -1047,6 +1141,23 @@ function GraphCanvas({
         // 大数据量 LOD：fitView 缩放下限 0.35 后，初始首屏通常不再触发 compact；
         // 此处保留 applyLod 仅用于用户后续滚轮缩到 < 0.35 时切换重装饰层（标签仍保留）。
         applyLod();
+        // 边流动动画：只驱动有 lineDash 的边（骨干/次骨干/环边）。数据重载时先取消旧的再重启，
+        // 避免上一批元素 shape 引用失效后仍被驱动。
+        edgeFlowCancelRef.current?.();
+        edgeFlowCancelRef.current = startEdgeFlow(
+          graph,
+          edges
+            .filter((e) => {
+              const d = e as RenderEdge | undefined;
+              if (d?.anchorEdge) return false;
+              if (d?.inCycle) return true;
+              const total =
+                (degreeMapRef.current.get(String(e.source)) ?? 0) +
+                (degreeMapRef.current.get(String(e.target)) ?? 0);
+              return total >= 5;
+            })
+            .map((e) => `${e.source}-${e.target}`),
+        );
       })
       .catch((err) => {
         console.error("[AssetGraph] G6 render 失败，降级为表格", err);
@@ -1162,7 +1273,7 @@ function GraphCanvas({
           icon={<FullscreenOutlined />}
           onClick={() => {
             const g = graphRef.current;
-            if (g && !g.destroyed) g.fitView();
+            if (g && !g.destroyed) g.fitView(undefined, { duration: 600, easing: "ease-out" });
           }}
         >
           重置视图
