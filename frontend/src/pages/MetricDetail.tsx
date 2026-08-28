@@ -1776,8 +1776,11 @@ export function MetricDetail() {
         metric.arbitration_mark?.rename_opposite_code ?? undefined,
       );
       setRenameSuggestions(res.suggestions ?? []);
-      if (res.suggestions && res.suggestions.length > 0) {
-        setRenameValue(res.suggestions[0].name);
+      // 仅自动填入 AI 生成（llm）候选——规则兜底（rule）是机械区分名，只展示供
+      // 参考，不自动污染输入框，避免「原名（字段）」被无意识保存为正式名称。
+      const firstLlm = (res.suggestions ?? []).find((s) => s.source === "llm");
+      if (firstLlm) {
+        setRenameValue(firstLlm.name);
       }
       setRenameSuggestLoaded(true);
     } catch (err) {

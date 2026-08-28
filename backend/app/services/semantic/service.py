@@ -5493,11 +5493,10 @@ class MetricService(BaseService):
                 "aggregation": metric.aggregation,
                 "time_semantics": metric.time_semantics,
                 "serving_mode": metric.serving_mode,
-                "recommended_usage": [
-                    f"适用 {metric.domain} 域 {metric.granularity} 粒度分析",
-                    f"聚合方式为 {metric.aggregation or '派生表达式'}，"
-                    f"注意{'不可' if metric.additivity == 'NON_ADDITIVE' else '可以'}跨维度聚合",
-                ],
+                # 无人工维护指南时不拼装模板「推荐用法」（域/粒度/聚合已在基本信息卡
+                # 展示，模板文案会伪装成人工推荐造成误导）；真实推导仅保留事实性注意
+                # 与血缘一跳关联推荐
+                "recommended_usage": [],
                 "cautions": [],
                 # 血缘一跳自动推荐（本模块核心增强，替代恒空的硬编码 []）
                 "related_metrics": await self._related_metric_codes(metric),
@@ -5505,6 +5504,8 @@ class MetricService(BaseService):
             }
             if metric.pii_flag:
                 guide["cautions"].append("该指标包含 PII 数据，使用时需遵守数据合规要求")
+            if metric.additivity == "NON_ADDITIVE":
+                guide["cautions"].append("不可加指标：不可跨维度聚合")
             if metric.additivity == "SEMI_ADDITIVE":
                 dims = metric.non_additive_dimensions or "未指定"
                 guide["cautions"].append(f"半可加指标，不可加维度: {dims}")

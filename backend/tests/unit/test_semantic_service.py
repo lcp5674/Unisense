@@ -4069,7 +4069,9 @@ async def test_get_consumption_guide_generates_and_caches():
 
     guide = await svc.get_consumption_guide("sales_gmv_daily")
     assert guide["metric_code"] == "sales_gmv_daily"
-    assert "recommended_usage" in guide
+    # 无人工维护指南时推荐用法为空（不再拼装模板文案伪装人工推荐）
+    assert guide["recommended_usage"] == []
+    assert guide["guide_source"] == "auto"
     svc._cache.set_guide.assert_awaited_once()
 
 
@@ -5845,6 +5847,22 @@ async def test_get_consumption_guide_auto_related_metrics():
     assert len(related) == 6  # 限量
     assert guide["guide_source"] == "auto"
     svc._cache.set_guide.assert_awaited_once()
+
+
+async def test_get_consumption_guide_auto_non_additive_caution():
+    """自动生成分支：不可加指标的事实性注意进 cautions（非模板推荐用法）。"""
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.get_guide = AsyncMock(return_value=None)
+    svc._cache.set_guide = AsyncMock()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(status="PUBLISHED", additivity="NON_ADDITIVE")
+    )
+
+    guide = await svc.get_consumption_guide("sales_gmv_daily")
+    assert guide["recommended_usage"] == []
+    assert "不可加指标：不可跨维度聚合" in guide["cautions"]
+    assert guide["guide_source"] == "auto"
 
 
 async def test_create_metric_with_consumption_guide_sets_manual():

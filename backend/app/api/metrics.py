@@ -878,7 +878,9 @@ async def suggest_rename_metric(
     except Exception:
         pass  # LLM 故障/未配置：降级规则兜底
 
-    # 2) 规则兜底：LLM 未产出有效候选时，基于上下文生成确定性候选
+    # 2) 规则兜底：LLM 未产出有效候选时，基于上下文生成确定性候选。
+    #    仅当存在真实上下文（度量列/域/对方名称）时生成机械区分名——没有任何
+    #    依据时返回空（前端提示手动命名），不编造「原名·新口径」这类假候选。
     if not suggestions:
         suffixes: list[str] = []
         if measure:
@@ -892,14 +894,6 @@ async def suggest_rename_metric(
                 {
                     "name": f"{cur_name}（{s}）",
                     "reason": f"追加『{s}』以与对方区分同名不同义口径",
-                    "source": "rule",
-                }
-            )
-        if not suggestions:
-            suggestions.append(
-                {
-                    "name": f"{cur_name}·新口径",
-                    "reason": "规则兜底：追加『新口径』以区分同名指标",
                     "source": "rule",
                 }
             )

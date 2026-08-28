@@ -454,6 +454,38 @@ describe("MetricDetail", () => {
     );
   });
 
+  it("仲裁改名弹窗：规则兜底候选（rule）只展示不自动填入输入框", async () => {
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      name: "销售金额",
+      arbitration_mark: {
+        status: "coexist",
+        conflict_id: "CF-RENAME2",
+        decision: "keep_diff",
+        ruled_at: "2026-08-15T04:00:00Z",
+        opposite_code: "sales_gmv_d",
+        rename_required: true,
+        rename_opposite_code: "sales_gmv_d",
+      },
+    });
+    // LLM 不可用 → 规则兜底：机械区分名（不得自动污染输入框）
+    mockedSuggestRename.mockResolvedValue({
+      current_name: "销售金额",
+      suggestions: [{ name: "销售金额（gmv）", reason: "追加『gmv』以区分", source: "rule" }],
+    });
+    mockedUpdateMetric.mockResolvedValue(metric);
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+
+    const renameBtn = await screen.findByRole("button", { name: /去\s*改\s*名/ });
+    fireEvent.click(renameBtn);
+    await screen.findByText("指标改名（响应仲裁要求）");
+    fireEvent.click(screen.getByRole("button", { name: /AI 生成名称建议/ }));
+    expect(await screen.findByText("销售金额（gmv）")).toBeInTheDocument();
+    // rule 候选展示但输入框保持当前名称（未被机械名污染，用户手动决策）
+    const nameInput = screen.getByPlaceholderText("新的指标名称") as HTMLInputElement;
+    expect(nameInput.value).toBe("销售金额");
+  });
+
   it("仲裁作废指标（METRIC_ARCHIVED）直访时展示醒目引导 + 历史详情并可跳转权威指标", async () => {
     localStorage.removeItem("unisense:archived_banner_dismissed");
     const err = Object.assign(

@@ -148,6 +148,42 @@ async def test_suggest_rename_rule_fallback(
     assert "gmv" in suggestions[0]["name"]
 
 
+async def test_suggest_rename_rule_fallback_no_context_returns_empty(
+    metrics_client: httpx.AsyncClient,
+) -> None:
+    """LLM 不可用且无任何上下文（无度量列/域/对方名称）：不编造假候选，返回空。
+
+    生产标准：没有任何依据时不生成「原名·新口径」这类机械拼凑候选，
+    由前端提示用户手动命名（此前会返回假候选并被前端自动填入）。
+    """
+    fake_metric = SimpleNamespace(
+        metric_code="sales_gmv_sum_d",
+        name="销售金额",
+        domain="",
+        definition_json={},
+    )
+    with (
+        patch.object(
+            MetricService,
+            "get_metric_public",
+            new=AsyncMock(return_value=fake_metric),
+        ),
+        patch.object(
+            LlmConfigService,
+            "build_client",
+            new=AsyncMock(return_value=SimpleNamespace(enabled=False)),
+        ),
+    ):
+        resp = await metrics_client.post(
+            "/api/v1/metric-definitions/sales_gmv_sum_d/suggest-rename",
+            json={},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["suggestions"] == []
+
+
 async def test_suggest_rename_metric_missing(
     metrics_client: httpx.AsyncClient,
 ) -> None:
