@@ -41,6 +41,7 @@ class MetricMountService(BaseService):
             source_table=data.source_table,
             source_column=data.source_column,
             granularity=data.granularity,
+            granularity_dims=data.granularity_dims,
             default_period=data.default_period,
             domain=data.domain,
             business_filter=data.business_filter,
@@ -85,18 +86,23 @@ class MetricMountService(BaseService):
     async def update_mount(self, mount_id: int, data: MetricMountUpdate) -> MetricMount:
         mount = await self.get_mount(mount_id)
         metric = await self._require_metric(mount.metric_id)
-        # 已发布指标修改挂载粒度/源表 = 破坏性口径变更（对齐 semantic._sync_mounts
-        # 判定：granularity/source_table 变化触发 PENDING_VERSION 消费方确认）：
-        # 禁止绕过确认流直接生效——须经指标更新接口提交（mounts 带 id + 变更原因），
-        # 由 semantic._sync_mounts 判定破坏性走 PENDING_VERSION 消费方确认（14 天）。
+        # 已发布指标修改挂载粒度/源表/粒度维度 = 破坏性口径变更（对齐
+        # semantic._sync_mounts 判定：granularity/source_table/granularity_dims
+        # 变化触发 PENDING_VERSION 消费方确认）：禁止绕过确认流直接生效——须经
+        # 指标更新接口提交（mounts 带 id + 变更原因），由 semantic._sync_mounts
+        # 判定破坏性走 PENDING_VERSION 消费方确认（14 天）。
         # 仅实际变更拦截；传相同值或改非破坏字段（度量列/周期/域/限定）放行。
         if metric.status == "PUBLISHED" and (
             (data.source_table is not None and data.source_table != mount.source_table)
             or (data.granularity is not None and data.granularity != mount.granularity)
+            or (
+                data.granularity_dims is not None
+                and data.granularity_dims != (mount.granularity_dims or [])
+            )
         ):
             raise UnisenseError(
-                "已发布指标修改挂载粒度/源表属破坏性变更，须经消费方确认——请通过"
-                "指标详情「编辑」提交（变更原因必填，确认后生效）",
+                "已发布指标修改挂载粒度/粒度维度/源表属破坏性变更，须经消费方确认——"
+                "请通过指标详情「编辑」提交（变更原因必填，确认后生效）",
                 error_code="MOUNT_UPDATE_REQUIRES_CONFIRMATION",
             )
         if data.source_table is not None:
@@ -106,6 +112,11 @@ class MetricMountService(BaseService):
         if data.granularity is not None:
             mount.granularity = data.granularity
             # 挂载粒度变更同步回填默认变体粒度（冗余列）
+            await self._refresh_granularity(mount.metric_id)
+        if data.granularity_dims is not None:
+            # 完整替换语义：None=不更新，[]=清空（纯时间粒度），[..]=设置
+            mount.granularity_dims = data.granularity_dims or None
+            # 粒度维度属唯一性构成，变更与改粒度同级——回填默认变体粒度
             await self._refresh_granularity(mount.metric_id)
         if data.default_period is not None:
             mount.default_period = data.default_period

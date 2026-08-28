@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.core.exceptions import ConflictError, NotFoundError, UnisenseError
+from app.core.exceptions import NotFoundError, UnisenseError
 from app.models.metric import Metric
 from app.models.metric_mount import MetricMount
 from app.services.metric_mount.repository import MetricMountRepository
@@ -309,13 +309,14 @@ class TestMountService:
         [
             MetricMountUpdate(granularity="月"),
             MetricMountUpdate(source_table="dwd.v2"),
+            MetricMountUpdate(granularity_dims=["hospital"]),
         ],
     )
     async def test_update_mount_rejects_published_breaking(self, update: MetricMountUpdate) -> None:
-        """已发布指标修改挂载粒度/源表 = 破坏性口径变更，禁止绕过确认流直接生效。
+        """已发布指标修改挂载粒度/源表/粒度维度 = 破坏性口径变更，禁止绕过确认流直接生效。
 
-        与 semantic._sync_mounts 判定一致（granularity/source_table 变化触发
-        PENDING_VERSION 消费方确认）；须经指标更新接口提交（mounts 带 id + 变更原因）。
+        与 semantic._sync_mounts 判定一致（granularity/source_table/granularity_dims
+        变化触发 PENDING_VERSION 消费方确认）；须经指标更新接口提交（mounts 带 id + 变更原因）。
         """
         svc, repo = await _svc()
         metric = _metric()
@@ -358,10 +359,57 @@ class TestMountService:
         svc._require_metric = AsyncMock(return_value=metric)  # noqa: SLF001
         m = _mount()
         repo.get = AsyncMock(return_value=m)
-        out = await svc.update_mount(1, MetricMountUpdate(granularity="日", source_table="dwd.sales_detail"))
+        out = await svc.update_mount(
+            1, MetricMountUpdate(granularity="日", source_table="dwd.sales_detail")
+        )
         assert out.granularity == "日"
         assert out.source_table == "dwd.sales_detail"
         repo.commit.assert_awaited()
+
+    async def test_update_mount_rejects_published_clearing_granularity_dims(self) -> None:
+        """已发布指标清除粒度维度（["hospital"] → []，组合粒度唯一性构成变化）→ 拦截。"""
+        svc, repo = await _svc()
+        metric = _metric()
+        metric.status = "PUBLISHED"
+        svc._require_metric = AsyncMock(return_value=metric)  # noqa: SLF001
+        m = _mount()
+        m.granularity_dims = ["hospital"]
+        repo.get = AsyncMock(return_value=m)
+        with pytest.raises(UnisenseError) as exc:
+            await svc.update_mount(1, MetricMountUpdate(granularity_dims=[]))
+        assert exc.value.error_code == "MOUNT_UPDATE_REQUIRES_CONFIRMATION"
+        repo.commit.assert_not_awaited()
+
+    async def test_update_mount_allows_same_granularity_dims_on_published(self) -> None:
+        """已发布指标粒度维度与原值相同不算变更，放行（幂等更新）。"""
+        svc, repo = await _svc()
+        metric = _metric()
+        metric.status = "PUBLISHED"
+        svc._require_metric = AsyncMock(return_value=metric)  # noqa: SLF001
+        m = _mount()
+        m.granularity_dims = ["hospital"]
+        repo.get = AsyncMock(return_value=m)
+        out = await svc.update_mount(1, MetricMountUpdate(granularity_dims=["hospital"]))
+        assert out.granularity_dims == ["hospital"]
+        repo.commit.assert_awaited()
+
+    async def test_create_mount_persists_granularity_dims(self) -> None:
+        """组合粒度（方案 B）：create 透传粒度维度落库（如 主粒度月 + 粒度维度医院）。"""
+        svc, repo = await _svc_with_metric("derived")
+        out = await svc.create_mount(
+            MetricMountCreate(
+                metric_id=1,
+                source_table="dwd.hospital_fee",
+                source_column="fee",
+                granularity="月",
+                granularity_dims=["hospital"],
+                default_period="month",
+                domain="medical",
+            )
+        )
+        assert out.granularity == "月"
+        assert out.granularity_dims == ["hospital"]
+        repo.save.assert_awaited()
 
     async def test_update_mount_updates_variant_owner(self) -> None:
         """变体级责任方（治理属性，非破坏性）：已发布指标也可直接更新，不触发拦截。"""

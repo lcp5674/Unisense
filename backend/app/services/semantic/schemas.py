@@ -867,6 +867,11 @@ class SqlBatchCreateCandidate(BaseModel):
             "粒度（由推断产出，批量创建落库；OneData 粒度下沉前旧式物理来源承载）"
         ),
     )
+    # 组合粒度（方案 B）：粒度维度 = GROUP BY 业务实体键（推断产出，前端可编辑）。
+    # 批量创建透传落 metric_mount.granularity_dims；与主粒度（时间频率）语义区分。
+    granularity_dims: list[str] | None = Field(
+        None, description="粒度维度（组合粒度唯一性实体列表，如 [\"hospital\"]）"
+    )
     measure_id: int | None = Field(None, ge=1, description="关联逻辑度量（原子可选）")
     # 口径溯源（生产就绪审查 P2）：候选所属语句的整句原始 SQL（原文切片），批量
     # 创建时透传落 Metric.raw_sql——候选口径仅表达式，原文可据此反查（batch_id 溯源）

@@ -338,9 +338,15 @@ def _infer_granularity(
     sql_profile: SqlProfile | None = profile.get("sql_profile")
     period: str | None = profile.get("period")
     group_by: list[str] = sql_profile.group_by if sql_profile else []
-    grain, dims = extract_grain_and_dims(group_by, grain_kw=grain_kw)
+    grain, grain_dims, dims = extract_grain_and_dims(group_by, grain_kw=grain_kw)
     if grain != "day":
-        if dims:
+        if grain_dims:
+            reason = (
+                f"GROUP BY 含 {grain} 粒度键 + 粒度维度 {','.join(grain_dims)}；"
+                f"其余维度：{','.join(dims)}" if dims else
+                f"GROUP BY 含 {grain} 粒度键 + 粒度维度 {','.join(grain_dims)}"
+            )
+        elif dims:
             reason = f"GROUP BY 含 {grain} 粒度键；复合维度：{grain}×{','.join(dims)}"
         else:
             reason = f"GROUP BY 粒度键 → {grain}"
@@ -356,8 +362,39 @@ def _infer_granularity(
                 break
         if code is None:
             code = p if p in DEFAULT_GRAIN_KEYWORDS else "day"
+        if grain_dims:
+            return _field(
+                code, "rule", 0.6,
+                f"统计周期 {period} → 粒度 {code} + 粒度维度 {','.join(grain_dims)}",
+            )
         return _field(code, "rule", 0.6, f"统计周期 {period} → 粒度 {code}")
+    if grain_dims:
+        return _field(
+            "day", "rule", 0.5,
+            f"未识别时间粒度默认按日（day）+ 粒度维度 {','.join(grain_dims)}",
+        )
     return _field("day", "rule", 0.5, "未识别时间粒度，默认按日（day）")
+
+
+def _infer_granularity_dims(
+    profile: dict[str, Any],
+    grain_kw: dict[str, list[str]] | None = None,
+) -> SuggestionField:
+    """粒度维度（组合粒度唯一性构成，方案 B）：GROUP BY 业务实体键全部升级。
+
+    与主粒度（时间频率语义）区分——主粒度表达「什么时候的」，粒度维度表达「谁的」；
+    粒度维度是唯一性构成者（消费 SQL 固定放行/可过滤），普通维度才可下钻。
+    ``extract_grain_and_dims`` 与主粒度推断同源（一次解析两处使用），保证一致。
+    """
+    sql_profile: SqlProfile | None = profile.get("sql_profile")
+    group_by: list[str] = sql_profile.group_by if sql_profile else []
+    _, grain_dims, _ = extract_grain_and_dims(group_by, grain_kw=grain_kw)
+    if grain_dims:
+        return _field(
+            grain_dims, "sql_parse", 0.85,
+            f"GROUP BY 业务实体键 → 粒度维度 {','.join(grain_dims)}",
+        )
+    return _field([], "fallback", 0.5, "无业务实体粒度键，纯时间粒度")
 
 
 def _col_signal(meta: dict[str, Any], *keywords: str) -> bool:
@@ -797,6 +834,7 @@ def infer_metric(
 
     agg_field = _infer_aggregation(profile)
     grain_field = _infer_granularity(profile, grain_kw=grain_kw)
+    grain_dims_field = _infer_granularity_dims(profile, grain_kw=grain_kw)
     unit_field = _infer_unit(profile, unit_kw=unit_kw)
     type_field = _infer_type(profile)
     time_sem_field = _infer_time_semantics(profile)
@@ -838,6 +876,7 @@ def infer_metric(
         "name": name_field,
         "type": type_field,
         "granularity": grain_field,
+        "granularity_dims": grain_dims_field,
         "unit": unit_field,
         "aggregation": agg_field,
         "time_semantics": time_sem_field,

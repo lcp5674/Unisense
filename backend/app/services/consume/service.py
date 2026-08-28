@@ -126,6 +126,17 @@ class ConsumeService(BaseService):
     async def _resolve_mount_table(
         self, metric: Any, variant: str | None = None
     ) -> str | None:
+        """兼容入口：仅返回挂载源表（``_resolve_mount`` 的 table 分量）。
+
+        历史调用点只取源表（OneData 挂载层权威）；组合粒度维度见
+        ``_resolve_mount``。保留本方法避免破坏既有调用。
+        """
+        table, _ = await self._resolve_mount(metric, variant)
+        return table
+
+    async def _resolve_mount(
+        self, metric: Any, variant: str | None = None
+    ) -> tuple[str | None, list[str] | None]:
         """OneData 挂载层权威（界限文档 §2.3）：派生指标挂载可经挂载 API 独立更新，
         definition_json 的 source_table 冗余可能过期——消费 SQL 以 metric_mount 为准。
         多挂载（2026-08-27 放开一指标一挂载）变体解析（混合渐进）：
@@ -133,7 +144,10 @@ class ConsumeService(BaseService):
           旧契约零破坏（a 兜底）；
         - ``variant`` 为数字 → 按挂载行 ID 精确匹配（b 可覆盖）；
         - ``variant`` 形如 ``粒度:周期``（如 ``医院:day``）→ 按粒度+默认周期匹配；
-        命中不存在变体抛 422；查询失败或未挂载时返回 None（回退 definition_json）。
+        命中不存在变体抛 422；查询失败或未挂载时返回 (None, None)（回退 definition_json）。
+
+        返回 ``(源表, 粒度维度列表)``——粒度维度（方案 B）是组合粒度唯一性构成，
+        消费 SQL 的维度过滤须放行这些列（与普通维度同权但语义为粒度维度）。
         """
         try:
             from app.services.metric_mount.repository import MetricMountRepository
@@ -160,15 +174,18 @@ class ConsumeService(BaseService):
                         f"指标 {metric.metric_code} 不存在变体 {variant}",
                         error_code=ErrorCode.VALIDATION_ERROR,
                     )
-                return target.source_table if target.source_table else None
+                return (
+                    target.source_table if target.source_table else None,
+                    getattr(target, "granularity_dims", None) or None,
+                )
             mount = await _mrepo.get_default_mount(metric.id)
             if mount is not None and isinstance(mount.source_table, str) and mount.source_table:
-                return mount.source_table
+                return mount.source_table, getattr(mount, "granularity_dims", None) or None
         except BusinessError:
             raise
         except Exception:  # noqa: BLE001 - best-effort：mount 查询失败回退 definition_json
             pass
-        return None
+        return None, None
 
     def _build_query_sql(
         self,
@@ -176,12 +193,14 @@ class ConsumeService(BaseService):
         metric: Any,
         bound_dims: set[str] | None = None,
         mount_table: str | None = None,
+        mount_dims: list[str] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """将查询请求编译为参数化的 OLAP SQL。
 
         基于指标口径来源字段（definition_json.source_table，缺省用指标编码做表名），
         叠加日期区间与维度过滤，杜绝拼串注入（全部参数化）。
-        挂载层权威：``mount_table`` 由调用方经 ``_resolve_mount_table`` 解析（挂载优先）。
+        挂载层权威：``mount_table`` 由调用方经 ``_resolve_mount_table`` 解析（挂载优先）；
+        ``mount_dims``（粒度维度，方案 B）是组合粒度唯一性构成，维度过滤须放行。
         """
         table = mount_table or (
             metric.definition_json.get("source_table")
@@ -218,15 +237,29 @@ class ConsumeService(BaseService):
             params["date_from"] = parts[0].strip()
             params["date_to"] = parts[1].strip() if len(parts) > 1 else parts[0].strip()
 
+        # 允许维度集：以 definition_json.dimensions 为主来源，再补充
+        # metric_dimension 绑定表（打通维度管理「绑定指标」到消费链路，方案③），
+        # 以及挂载粒度维度（方案 B：组合粒度唯一性构成，消费方可按粒度维度过滤）。
+        allowed_dims = set((metric.definition_json or {}).get("dimensions", []))
+        if bound_dims:
+            allowed_dims |= bound_dims
+        if mount_dims:
+            allowed_dims |= set(mount_dims)
+        # 消费方显式声明粒度维度子集：须是可用粒度维度子集（缺省为空=全部）；
+        # 独立于 req.dimensions 校验（即使无维度过滤也拦截未知粒度维度）。
+        if req.granularity_dims is not None:
+            unknown = set(req.granularity_dims) - allowed_dims
+            if unknown:
+                raise BusinessError(
+                    f"粒度维度 {sorted(unknown)} 不在指标可用粒度维度内"
+                    f"（可用: {sorted(allowed_dims)}）",
+                    error_code=ErrorCode.FORBIDDEN_DIMENSION,
+                )
+
         for i, dim in enumerate(req.dimensions):
             # 维度名属 SQL 标识符（无法参数化），故必须收敛到口径声明的维度集。
             # 过去仅 dry-run 校验，execute_query 路径未校验 → 越权列访问 / 标识符注入缺口。
             # guard 仅扫描字符串 *值*，不防御标识符；此处为纵深防御的最内层。
-            # 允许维度集：以 definition_json.dimensions 为主来源，再补充
-            # metric_dimension 绑定表（打通维度管理「绑定指标」到消费链路，方案③）。
-            allowed_dims = set((metric.definition_json or {}).get("dimensions", []))
-            if bound_dims:
-                allowed_dims |= bound_dims
             if dim.name not in allowed_dims:
                 raise BusinessError(
                     f"维度 {dim.name} 不在指标可用维度内",
@@ -356,8 +389,10 @@ class ConsumeService(BaseService):
         # 构建真实物理口径 SQL（参数化），而非占位注释；维度授权收敛在 _build_query_sql 内。
         # 维度允许集补充 metric_dimension 绑定表来源（打通维度管理绑定到消费链路）。
         bound_dims = await self._get_bound_dimensions(metric.id)
-        mount_table = await self._resolve_mount_table(metric, req.variant)
-        sql, sql_params = self._build_query_sql(req, metric, bound_dims, mount_table=mount_table)
+        mount_table, mount_dims = await self._resolve_mount(metric, req.variant)
+        sql, sql_params = self._build_query_sql(
+            req, metric, bound_dims, mount_table=mount_table, mount_dims=mount_dims
+        )
         plan = {
             "metric_code": req.metric_code,
             "expression_ast": {"raw": expr},
@@ -435,8 +470,10 @@ class ConsumeService(BaseService):
         # 构建执行 SQL（真实物理口径，而非占位查询）
         # 维度允许集补充 metric_dimension 绑定表来源（打通维度管理绑定到消费链路）。
         bound_dims = await self._get_bound_dimensions(metric.id)
-        mount_table = await self._resolve_mount_table(metric, req.variant)
-        sql, params = self._build_query_sql(req, metric, bound_dims, mount_table=mount_table)
+        mount_table, mount_dims = await self._resolve_mount(metric, req.variant)
+        sql, params = self._build_query_sql(
+            req, metric, bound_dims, mount_table=mount_table, mount_dims=mount_dims
+        )
 
         # 引擎选择：OLAP 优先，失败/未配置时降级 MySQL 只读执行器
         result, engine_used = await self._execute_with_fallback(req, sql, params)

@@ -183,6 +183,8 @@ function toMountInput(m: MetricMount): MetricMountInput {
     source_table: m.source_table,
     source_column: m.source_column,
     granularity: m.granularity,
+    // 组合粒度（方案 B）：解除挂载/编辑提交时保留粒度维度，避免被静默丢弃
+    granularity_dims: Array.isArray(m.granularity_dims) ? m.granularity_dims : null,
     default_period: m.default_period,
     domain: m.domain,
     business_filter: m.business_filter ?? null,
@@ -2440,6 +2442,11 @@ export function MetricDetail() {
                 <Descriptions column={2} size="small">
                   <Descriptions.Item label="源列">{m.source_column || "—"}</Descriptions.Item>
                   <Descriptions.Item label="粒度">{m.granularity || "—"}</Descriptions.Item>
+                  <Descriptions.Item label="粒度维度">
+                    {Array.isArray(m.granularity_dims) && m.granularity_dims.length
+                      ? m.granularity_dims.join(" + ")
+                      : <span className="muted">纯时间粒度</span>}
+                  </Descriptions.Item>
                   <Descriptions.Item label="默认周期">{m.default_period ?? "—"}</Descriptions.Item>
                   <Descriptions.Item label="业务域">{m.domain || "—"}</Descriptions.Item>
                   <Descriptions.Item label="业务限定">

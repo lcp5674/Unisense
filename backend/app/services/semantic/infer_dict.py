@@ -5,7 +5,8 @@
    表（与 ``scripts/seed_domains_dicts.py`` 种子对齐）为兜底，字典项 ``extra.
    infer_keywords`` 可覆盖/新增（系统配置字典管理维护即可，无需发版）。
 2. **粒度打通业务实体**——``granularity`` 字典含 8 时间 + 9 业务实体粒度（医生/科室/
-   病种…），GROUP BY 唯一业务实体键应识别为实体粒度，而非一律归维度。
+   病种…），GROUP BY 业务实体键升级为**粒度维度**（组合粒度唯一性构成，2026-08-28
+   方案 B：全部业务实体键升级，不再要求唯一命中）。
 3. **维度关联平台维度管理**——GROUP BY 非时间键推断出的维度列，与维度管理
    （``Dimension`` 目录）的 ``dim_code``/``name`` 匹配，命中回填平台维度编码，血缘
    「指标↔维度」边直挂已治理维度节点。
@@ -92,49 +93,60 @@ _UNIT_PRIORITY: tuple[str, ...] = (
 def extract_grain_and_dims(
     group_by: list[str],
     grain_kw: dict[str, list[str]] | None = None,
-) -> tuple[str, list[str]]:
-    """从 GROUP BY 键提取 ``(粒度, 维度列)``。
+) -> tuple[str, list[str], list[str]]:
+    """从 GROUP BY 键提取 ``(主粒度, 粒度维度, 普通维度)``。
 
+    组合粒度（2026-08-28 方案 B，用户确认「业务实体键全部升级为粒度维度」）：
+    粒度 = 唯一性维度集合——「按月+医院统计订单总金额」的完整粒度是 (month, hospital)，
+    其中主粒度（时间频率语义）表达「什么时候的」，粒度维度（业务实体）表达「谁的」。
     规则（单条/批量共用，保证两路径一致）：
-    1. **时间粒度优先**：任一 GROUP BY 键命中时间粒度关键词 → 该时间粒度，
-       其余键为维度；
-    2. **业务实体粒度**：无时间粒度命中时，若**恰好一个** GROUP BY 键命中业务
-       实体粒度关键词 → 该实体粒度，其余键为维度（如 ``GROUP BY doctor_id`` →
-       ``doctor`` 粒度；多实体键无法唯一判定 → 归维度、粒度默认日）；
-    3. **兜底**：无任何命中 → ``day``，全部键为维度。
+    1. **时间粒度优先**：首个命中时间粒度关键词的键 → 主粒度；**全部**命中业务
+       实体粒度关键词的键 → 粒度维度（不再要求唯一命中——多实体键同为主粒度下
+       的组合粒度构成）；其余键 → 普通维度（可下钻）。
+    2. **无时间粒度**：主粒度兜底 ``day``；业务实体键仍全部升级为粒度维度；
+       其余键 → 普通维度。
+    3. **兜底**：无任何命中 → ``day``，粒度维度空，全部键为普通维度。
 
     Args:
         group_by: GROUP BY 列名列表（原始 SQL 文本）。
         grain_kw: 粒度关键词映射（code → 关键词）；缺省用内置默认。
 
     Returns:
-        ``(grain_code, dims)``——``grain_code`` 为字典 granularity code，
-        ``dims`` 为剩余维度列（已剔除命中的粒度键）。
+        ``(grain_code, grain_dims, normal_dims)``——``grain_code`` 为字典
+        granularity 时间粒度 code，``grain_dims`` 为粒度维度（业务实体键，
+        组合粒度唯一性构成），``normal_dims`` 为普通维度（可下钻）。
     """
     kw = grain_kw or DEFAULT_GRAIN_KEYWORDS
     group_by = [g for g in (group_by or []) if g and str(g).strip()]
     if not group_by:
-        return "day", []
-    # 1) 时间粒度
+        return "day", [], []
+    grain: str = "day"
+    time_found = False
+    grain_dims: list[str] = []
+    normal_dims: list[str] = []
     for g in group_by:
         gl = str(g).lower()
+        # 时间粒度键 → 主粒度（首个命中决定）
+        hit_time = False
         for code, kws in kw.items():
             if code in TIME_GRAIN_CODES and any(k in gl for k in kws):
-                dims = [x for x in group_by if x != g]
-                return code, dims
-    # 2) 业务实体粒度（唯一命中才升级；多命中归维度）
-    hits: list[tuple[str, str]] = []
-    for g in group_by:
-        gl = str(g).lower()
+                if not time_found:
+                    grain = code
+                    time_found = True
+                hit_time = True
+                break
+        if hit_time:
+            continue
+        # 业务实体粒度键 → 粒度维度（全部升级，组合粒度唯一性构成）
+        hit_entity = False
         for code, kws in kw.items():
             if code not in TIME_GRAIN_CODES and any(k in gl for k in kws):
-                hits.append((g, code))
+                grain_dims.append(g)
+                hit_entity = True
                 break
-    if len(hits) == 1:
-        g, code = hits[0]
-        return code, [x for x in group_by if x != g]
-    # 3) 兜底
-    return "day", list(group_by)
+        if not hit_entity:
+            normal_dims.append(g)
+    return grain, grain_dims, normal_dims
 
 
 def infer_unit_from_meta(

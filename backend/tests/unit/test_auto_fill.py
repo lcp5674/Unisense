@@ -487,9 +487,10 @@ class TestInferDictDriven:
         assert f["unit"]["value"] == "CNY_WAN"
 
     def test_entity_granularity_from_group_by(self) -> None:
-        """GROUP BY doctor_id（无时间键）→ doctor 实体粒度，而非默认 day。
+        """GROUP BY doctor_id（无时间键）→ 主粒度 day + 粒度维度 [doctor_id]。
 
-        修复前粒度只看时间 token，业务实体粒度字典形同虚设。
+        方案 B：业务实体键全部升级为粒度维度（组合粒度唯一性构成）——主粒度
+        是时间频率语义（无时间键兜底 day），doctor_id 进粒度维度而非普通维度。
         """
         profile = build_profile(
             sql=(
@@ -499,21 +500,23 @@ class TestInferDictDriven:
         )
         profile["domain_code"] = "outpatient"
         f = infer_metric(profile)["fields"]
-        assert f["granularity"]["value"] == "doctor"
-        # 该 GROUP BY 键升级为粒度后不再是普通维度
-        assert f["granularity"]["source"] == "sql_parse"
+        assert f["granularity"]["value"] == "day"
+        assert f["granularity_dims"]["value"] == ["doctor_id"]
+        assert f["granularity_dims"]["source"] == "sql_parse"
 
     def test_time_grain_priority_over_entity(self) -> None:
-        """时间粒度优先：GROUP BY dt, doctor_id → day 粒度，doctor_id 归维度。"""
-        grain, dims = extract_grain_and_dims(["dt", "doctor_id"])
+        """时间粒度优先：GROUP BY dt, doctor_id → 主粒度 day + 粒度维度 [doctor_id]。"""
+        grain, grain_dims, dims = extract_grain_and_dims(["dt", "doctor_id"])
         assert grain == "day"
-        assert dims == ["doctor_id"]
+        assert grain_dims == ["doctor_id"]
+        assert dims == []
 
     def test_multi_entity_keys_default_to_day(self) -> None:
-        """多个业务实体键（doctor_id + dept_id）无法唯一判定粒度 → 默认 day。"""
-        grain, dims = extract_grain_and_dims(["doctor_id", "dept_id"])
+        """多个业务实体键全部升级为粒度维度：主粒度 day + [doctor_id, dept_id]。"""
+        grain, grain_dims, dims = extract_grain_and_dims(["doctor_id", "dept_id"])
         assert grain == "day"
-        assert set(dims) == {"doctor_id", "dept_id"}
+        assert set(grain_dims) == {"doctor_id", "dept_id"}
+        assert dims == []
 
     def test_match_platform_dimensions(self) -> None:
         """GROUP BY 非时间键与平台维度匹配：dim_code 子串/前缀命中回填。"""

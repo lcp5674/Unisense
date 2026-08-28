@@ -182,6 +182,12 @@ const AGG_OPTIONS = [
   "MAX", "MIN", "MEDIAN", "PERCENTILE",
 ].map((v) => ({ value: v, label: v }));
 
+// 时间粒度 code 集合（对齐后端 infer_dict.TIME_GRAIN_CODES / 字典 granularity 种子）。
+// 方案 B 主粒度（时间频率语义）单选；业务实体粒度（医生/科室…）进「粒度维度」多选。
+const TIME_GRAIN_CODES = new Set([
+  "realtime", "minute", "hour", "day", "week", "month", "quarter", "year",
+]);
+
 // 统计周期选项：与粒度字典（granularity dict）对齐，避免同一"周期"概念两套数据源漂移。
 // 字典种子含 minute/hour/day/week/month/quarter/year/realtime（见 seed_domains_dicts.py）。
 const PERIOD_OPTIONS = [
@@ -1641,14 +1647,16 @@ export function MetricCreate() {
         if (calc) base.expression = calc;
         return { ...base, ...dims, dependencies: c.dependencies || [] };
       };
-      // 派生候选挂载实体（OneData 挂载层）：源表/度量列/粒度/周期/域 → 创建端自动落
-      // metric_mount（对齐单条派生向导 mount 收集；复合不设挂载）
+      // 派生候选挂载实体（OneData 挂载层）：源表/度量列/主粒度/粒度维度/周期/域 →
+      // 创建端自动落 metric_mount（对齐单条派生向导 mount 收集；复合不设挂载）
       const buildBatchMount = (c: SqlBatchCandidate) =>
         c.type === "derived" && c.source_table && c.measure_column
           ? {
               source_table: c.source_table,
               source_column: c.measure_column,
               granularity: c.granularity || c.period || "day",
+              // 组合粒度（方案 B）：GROUP BY 业务实体键 → 粒度维度透传落挂载
+              granularity_dims: c.granularity_dims || null,
               default_period: c.period || null,
               domain: selectedDomain,
             }
@@ -2096,6 +2104,12 @@ export function MetricCreate() {
             source_table: String(row.source_table ?? "").trim(),
             source_column: String(row.source_column ?? "").trim(),
             granularity: String(row.granularity ?? "").trim(),
+            // 组合粒度（方案 B）：粒度维度（tags 多选）透传落挂载
+            granularity_dims: Array.isArray(row.granularity_dims)
+              ? (row.granularity_dims as unknown[])
+                  .map((d) => String(d ?? "").trim())
+                  .filter(Boolean)
+              : null,
             default_period: String(row.default_period ?? "") || null,
             domain: selectedDomain,
             business_filter: String(row.business_filter ?? "").trim() || null,
@@ -2538,7 +2552,7 @@ export function MetricCreate() {
                               }}
                             >
                               <Row gutter={12} align="middle">
-                                <Col span={7}>
+                                <Col span={6}>
                                   <Form.Item
                                     {...restField}
                                     name={[name, "source_table"]}
@@ -2562,7 +2576,7 @@ export function MetricCreate() {
                                     />
                                   </Form.Item>
                                 </Col>
-                                <Col span={5}>
+                                <Col span={4}>
                                   <Form.Item
                                     {...restField}
                                     name={[name, "source_column"]}
@@ -2582,7 +2596,7 @@ export function MetricCreate() {
                                     />
                                   </Form.Item>
                                 </Col>
-                                <Col span={4}>
+                                <Col span={3}>
                                   <Form.Item
                                     {...restField}
                                     name={[name, "granularity"]}
@@ -2591,18 +2605,38 @@ export function MetricCreate() {
                                     <Select
                                       showSearch
                                       allowClear
-                                      placeholder="粒度（如 日/月/医院）"
+                                      placeholder="主粒度（如 月）"
                                       onSearch={setMountGranularityKw}
                                       options={withUncollectedOption(
                                         mountGranularityKw,
-                                        dictOptions["granularity"] || [],
+                                        (dictOptions["granularity"] || []).filter((o) =>
+                                          TIME_GRAIN_CODES.has(o.value),
+                                        ),
                                       )}
-                                      notFoundContent="无匹配粒度，可直接输入（如 医院/药品）"
+                                      notFoundContent="无匹配时间粒度，可直接输入"
                                       filterOption={false}
                                     />
                                   </Form.Item>
                                 </Col>
                                 <Col span={4}>
+                                  <Form.Item
+                                    {...restField}
+                                    name={[name, "granularity_dims"]}
+                                    style={{ marginBottom: 0 }}
+                                  >
+                                    <Select
+                                      mode="tags"
+                                      allowClear
+                                      placeholder="粒度维度（如 医院，可多选）"
+                                      options={(dictOptions["granularity"] || []).filter(
+                                        (o) => !TIME_GRAIN_CODES.has(o.value),
+                                      )}
+                                      notFoundContent="无匹配，可直接输入（如 医院/药品）"
+                                      tokenSeparators={[","]}
+                                    />
+                                  </Form.Item>
+                                </Col>
+                                <Col span={3}>
                                   <Form.Item {...restField} name={[name, "default_period"]} style={{ marginBottom: 0 }}>
                                     <Select
                                       allowClear
@@ -3654,6 +3688,28 @@ export function MetricCreate() {
                                           onChange={(v) => handleSqlBatchPeriodChange(c.key, c, "granularity", v)}
                                           data-testid={`sql-batch-granularity-${c.key}`}
                                           options={PERIOD_OPTIONS}
+                                        />
+                                      </SqlBatchField>
+                                      <SqlBatchField label="粒度维度">
+                                        {/* 组合粒度（方案 B）：GROUP BY 业务实体键（推断预填）；
+                                            可增删/手输（如 医院/药品），提交透传落挂载 granularity_dims */}
+                                        <Select
+                                          size="small"
+                                          mode="tags"
+                                          allowClear
+                                          style={{ width: 160 }}
+                                          placeholder="如 医院"
+                                          value={c.granularity_dims || []}
+                                          onChange={(v) =>
+                                            handleSqlBatchEdit(c.key, {
+                                              granularity_dims: Array.isArray(v) ? v.filter(Boolean) : [],
+                                            })
+                                          }
+                                          data-testid={`sql-batch-granularity-dims-${c.key}`}
+                                          options={(dictOptions["granularity"] || []).filter(
+                                            (o) => !TIME_GRAIN_CODES.has(o.value),
+                                          )}
+                                          tokenSeparators={[","]}
                                         />
                                       </SqlBatchField>
                                       {c.type === "atomic" && (

@@ -2845,6 +2845,8 @@ describe("MetricDetail 按钮级权限过滤", () => {
           source_table: "dwd.doctor_fee_daily",
           source_column: "fee",
           granularity: "医生",
+          // 组合粒度（方案 B）：粒度维度（业务实体）随行展示
+          granularity_dims: ["doctor"],
           default_period: "day",
           domain: "medical",
           business_filter: "场景=门诊",
@@ -2879,14 +2881,16 @@ describe("MetricDetail 按钮级权限过滤", () => {
     // 两个变体各占一张挂载卡，字段按「标签 + 值」网格逐项展示
     const card1 = within(screen.getByTestId("mount-card-1"));
     expect(card1.getByText("dwd.doctor_fee_daily")).toBeTruthy();
-    expect(card1.getByText("医生")).toBeTruthy(); // 粒度
+    expect(card1.getByText("医生")).toBeTruthy(); // 主粒度
+    expect(card1.getByText("doctor")).toBeTruthy(); // 粒度维度（组合粒度）
     expect(card1.getByText("场景=门诊")).toBeTruthy(); // 业务限定
     // 变体级责任方（方案 B）：平台用户 id 解析 → 李四；外部人员仅名称 → 直接展示
     expect(card1.getByText("产品：李四")).toBeTruthy();
 
     const card2 = within(screen.getByTestId("mount-card-2"));
     expect(card2.getByText("dwd.hospital_fee")).toBeTruthy();
-    expect(card2.getByText("医院")).toBeTruthy(); // 粒度
+    expect(card2.getByText("医院")).toBeTruthy(); // 主粒度
+    expect(card2.getByText("纯时间粒度")).toBeTruthy(); // 无粒度维度
     expect(card2.getByText("场景=住院")).toBeTruthy(); // 业务限定
     expect(card2.getByText("技术：外部技术协作方")).toBeTruthy();
     // 两个解除按钮（每卡一个）

@@ -31,6 +31,12 @@ class QueryRequest(BaseModel):
     dimensions: list[DimensionExpr] = Field(default_factory=list, description="维度过滤")
     date_range: str = Field(..., description="日期区间（如 2026-01~2026-03）")
     granularity: str | None = Field(None, description="时间粒度（day/week/month/quarter）")
+    # 组合粒度消费（2026-08-28 方案 B）：指标粒度维度（参与唯一性的业务实体，如
+    # hospital）缺省是消费 SQL 的固定构成；消费方可显式传粒度维度子集声明消费范围
+    # （与挂载 granularity_dims 一致性校验；维度过滤按此收敛）。空 = 全部粒度维度。
+    granularity_dims: list[str] | None = Field(
+        None, description="粒度维度子集（组合粒度唯一性实体，如 [\"hospital\"]）"
+    )
     # 多变体消费（2026-08-27 放开一指标一挂载）：多挂载指标缺省按默认变体
     # （default_period 行优先）消费——旧契约零破坏；显式传 variant 可覆盖：
     # 挂载行 ID（数字）或 "粒度:周期"（如 "医院:day"），命中不存在变体则 422。

@@ -497,6 +497,37 @@ async def test_build_query_sql_rejects_unauthorized_dimension() -> None:
     assert exc.value.error_code == ErrorCode.FORBIDDEN_DIMENSION
 
 
+async def test_build_query_sql_allows_granularity_dims_from_mount() -> None:
+    """组合粒度（方案 B）：挂载粒度维度（hospital）放行维度过滤——粒度维度是
+    唯一性构成者，消费方可按粒度维度筛选（与普通维度同权）。"""
+    svc = _svc(await _client())
+    req = QueryRequest(
+        metric_code="gmv",
+        date_range="",
+        dimensions=[{"name": "hospital", "value": "协和"}],
+    )
+    sql, params = svc._build_query_sql(
+        req, _metric(source_table="dws_metric_gmv"), mount_dims=["hospital"]
+    )
+    assert "hospital = :dim_0" in sql
+    assert params["dim_0"] == "协和"
+
+
+async def test_build_query_sql_rejects_unknown_granularity_dims() -> None:
+    """消费方显式传未知粒度维度（不在挂载粒度维度/口径维度集内）→ FORBIDDEN_DIMENSION。"""
+    svc = _svc(await _client())
+    req = QueryRequest(
+        metric_code="gmv",
+        date_range="",
+        granularity_dims=["hospital"],
+    )
+    with pytest.raises(BusinessError) as exc:
+        svc._build_query_sql(
+            req, _metric(source_table="dws_metric_gmv"), mount_dims=[]
+        )
+    assert exc.value.error_code == ErrorCode.FORBIDDEN_DIMENSION
+
+
 async def test_build_query_sql_metric_code_never_enters_table_name() -> None:
     """2026-08-28 移除虚构表名：恶意 metric_code 不再拼进表标识符。
 

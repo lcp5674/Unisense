@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, ForeignKey, Index, String
+from sqlalchemy import JSON, BigInteger, ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.mysql import Base
@@ -34,7 +34,17 @@ class MetricMount(Base, BaseModel):
         String(255), nullable=False, comment="度量列（映射原子逻辑度量）"
     )
     #: 粒度从 metric.granularity 下沉到此（界限文档 §2.3 第 3 条）
-    granularity: Mapped[str] = mapped_column(String(64), nullable=False, comment="粒度（一行代表什么）")
+    granularity: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="粒度（一行代表什么）"
+    )
+    #: 粒度维度（组合粒度，2026-08-28 方案 B）：参与唯一性的业务实体维度列表——
+    #: 「按月+医院统计订单金额」= 主粒度 month + 粒度维度 ["hospital"]。
+    #: 与主粒度（时间频率）语义区分：主粒度表达「什么时候的」，粒度维度表达「谁的」。
+    #: 空 = 纯时间粒度；多值 = 组合粒度（粒度维度是唯一性构成者，消费 SQL 固定进 GROUP BY）。
+    granularity_dims: Mapped[list[str] | None] = mapped_column(
+        JSON, nullable=True,
+        comment="粒度维度（组合粒度唯一性实体列表，如 [\"hospital\"]）",
+    )
     default_period: Mapped[str | None] = mapped_column(
         String(32), nullable=True, comment="默认统计周期（day/month/quarter…）"
     )

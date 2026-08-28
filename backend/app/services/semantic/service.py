@@ -132,6 +132,7 @@ def _mount_to_dict(m: Any) -> dict[str, Any]:
         "source_table": m.source_table,
         "source_column": m.source_column,
         "granularity": m.granularity,
+        "granularity_dims": getattr(m, "granularity_dims", None),
         "default_period": m.default_period,
         "domain": m.domain,
         "business_filter": getattr(m, "business_filter", None),
@@ -151,6 +152,7 @@ def _mount_input_to_dict(m: Any) -> dict[str, Any]:
         "source_table": m.source_table,
         "source_column": m.source_column,
         "granularity": m.granularity,
+        "granularity_dims": getattr(m, "granularity_dims", None),
         "default_period": m.default_period,
         "domain": m.domain,
         "business_filter": getattr(m, "business_filter", None),
@@ -744,9 +746,18 @@ class MetricService(BaseService):
                         source_table=_m.source_table,
                         source_column=_m.source_column,
                         granularity=_m.granularity,
+                        granularity_dims=_m.granularity_dims,
                         default_period=_m.default_period,
                         domain=_m.domain,
                         business_filter=_m.business_filter,
+                        # 变体级责任方（2026-08-28 方案 B 配套：创建路径与
+                        # _apply_mounts 对齐透传，多变体各自归属不丢）
+                        product_owner_id=_m.product_owner_id,
+                        tech_owner_id=_m.tech_owner_id,
+                        dw_developer_id=_m.dw_developer_id,
+                        product_owner_name=_m.product_owner_name,
+                        tech_owner_name=_m.tech_owner_name,
+                        dw_developer_name=_m.dw_developer_name,
                     )
                 )
 
@@ -4127,6 +4138,15 @@ class MetricService(BaseService):
                             "mount_change": True,
                         }
                         breaking = True
+                # 粒度维度（组合粒度唯一性构成）变化与改粒度/源表同级破坏性
+                if (req.granularity_dims or []) != (old.granularity_dims or []):
+                    diff["granularity_dims"] = {
+                        "before": old.granularity_dims or [],
+                        "after": req.granularity_dims or [],
+                        "change_type": "BREAKING",
+                        "mount_change": True,
+                    }
+                    breaking = True
         for mid, old in existing_by_id.items():
             if mid not in requested_ids:
                 diff[f"removed_mount_{mid}"] = {
@@ -4170,6 +4190,7 @@ class MetricService(BaseService):
                 old.source_table = req.source_table
                 old.source_column = req.source_column
                 old.granularity = req.granularity
+                old.granularity_dims = req.granularity_dims
                 old.default_period = req.default_period
                 old.domain = req.domain
                 old.business_filter = req.business_filter
@@ -4186,6 +4207,7 @@ class MetricService(BaseService):
                         source_table=req.source_table,
                         source_column=req.source_column,
                         granularity=req.granularity,
+                        granularity_dims=req.granularity_dims,
                         default_period=req.default_period,
                         domain=req.domain,
                         business_filter=req.business_filter,

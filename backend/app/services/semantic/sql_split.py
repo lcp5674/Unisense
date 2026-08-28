@@ -800,6 +800,9 @@ def _build_derived_candidate(
         "period": period,
         "unit": fields["unit"]["value"],
         "granularity": fields["granularity"]["value"],
+        # 组合粒度（方案 B）：粒度维度 = GROUP BY 业务实体键（与主粒度同源推断）。
+        # 候选行前端「粒度维度」多选预填；批量创建透传落 metric_mount.granularity_dims。
+        "granularity_dims": fields["granularity_dims"]["value"],
         "definition_json": definition,
         "definition_mode": "expression",
         "statement_index": idx,
@@ -864,11 +867,11 @@ def _build_composite_candidate(
     groupkey = _group_key([str(c.get("measure_column", "")) for c in atoms])
     names = "、".join(str(c.get("name", "")) for c in atoms)
     # 粒度跟随派生候选（2026-08-28）：复合语句同样有 GROUP BY 统计主体，用与派生
-    # 候选同一套 extract_grain_and_dims 推断——时间粒度优先，GROUP BY 唯一业务
-    # 实体键 → 实体粒度（doctor 等），无实体键兜底 day（时间粒度由 period 表达）。
+    # 候选同一套 extract_grain_and_dims 推断——时间粒度优先，GROUP BY 业务实体键 →
+    # 粒度维度（组合粒度，方案 B：全部升级），无实体键兜底 day（时间粒度由 period 表达）。
     from app.services.semantic.infer_dict import extract_grain_and_dims
 
-    grain, _ = extract_grain_and_dims(
+    grain, grain_dims, _ = extract_grain_and_dims(
         list(profile.group_by or []),
         (infer_dicts or {}).get("granularity"),
     )
@@ -884,6 +887,8 @@ def _build_composite_candidate(
         "period": period,
         "unit": None,
         "granularity": grain,
+        # 组合粒度（方案 B）：复合语句 GROUP BY 业务实体键 → 粒度维度
+        "granularity_dims": grain_dims,
         "definition_json": {
             "sql": sql,
             "dependencies": codes,

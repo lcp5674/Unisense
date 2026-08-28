@@ -1044,6 +1044,9 @@ def _mount_with(granularity: str = "日", source_table: str = "dwd.sales_detail"
     m.default_period = "day"
     m.domain = "sales"
     m.business_filter = None
+    # 显式粒度维度（组合粒度，方案 B）：None = 纯时间粒度——不设会触发 MagicMock
+    # 自动属性，在 _sync_mounts 的 granularity_dims 比较中误判为破坏性变更
+    m.granularity_dims = None
     return m
 
 
@@ -1097,6 +1100,53 @@ async def test_update_published_derived_mount_granularity_pending():
     lock_kwargs = repo.update_with_optimistic_lock.call_args.kwargs
     assert "granularity" not in lock_kwargs
     assert existing_mount.granularity == "日"
+
+
+async def test_update_published_derived_mount_granularity_dims_change_breaking():
+    """PUBLISHED 派生指标挂载粒度维度变化（组合粒度唯一性构成，方案 B）→ 破坏性 PENDING。
+
+    与改粒度/源表同级：粒度维度是唯一性构成者（消费 SQL 固定进 GROUP BY），
+    变更须经消费方确认（PENDING_VERSION，14 天）。
+    """
+    svc, repo = _svc_with_repo()
+    metric = make_metric(
+        status="PUBLISHED", type="derived", granularity="月", version=3,
+        definition_json={"dependencies": ["sales_gmv_amount_daily"], "expression": "x"},
+    )
+    repo.get_by_code = AsyncMock(return_value=metric)
+    existing_mount = _mount_with()
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    repo.update_with_optimistic_lock = AsyncMock(return_value=metric)
+    svc._cache.invalidate = AsyncMock()
+
+    with (
+        patch("app.services.metric_mount.repository.MetricMountRepository") as mrepo_cls,
+        patch("app.services.semantic.pending_version_manager.PendingVersionManager") as pvm_cls,
+    ):
+        mrepo_cls.return_value.list_by_metric = AsyncMock(return_value=[existing_mount])
+        pvm_cls.return_value.create_pending = AsyncMock()
+        req = MetricUpdateRequest(
+            mount={
+                "source_table": "dwd.sales_detail",
+                "source_column": "gmv",
+                "granularity": "月",
+                "granularity_dims": ["hospital"],
+                "default_period": "month",
+                "domain": "sales",
+            },
+            change_reason="挂载粒度维度从无变医院",
+        )
+        await svc.update_metric("sales_gmv_daily", req, actor_id=1, role="metric_owner")
+
+    # 创建 BREAKING + PENDING_CONFIRMATION 版本，diff_json 携带 granularity_dims
+    version_arg = repo.create_version.call_args.args[0]
+    assert version_arg.change_type == "BREAKING"
+    assert version_arg.status == "PENDING_CONFIRMATION"
+    assert version_arg.diff_json["granularity_dims"]["after"] == ["hospital"]
+    assert version_arg.diff_json["granularity_dims"]["mount_change"] is True
+    pvm_cls.return_value.create_pending.assert_awaited_once()
+    # 不直接更新 mount 实体（等确认后生效）
+    assert existing_mount.granularity_dims is None
 
 
 async def test_update_published_derived_mount_pending_exists():

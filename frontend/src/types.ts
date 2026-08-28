@@ -1159,6 +1159,7 @@ export interface MetricMount {
   source_table: string;
   source_column: string;
   granularity: string;
+  granularity_dims?: string[] | null;
   default_period: string | null;
   domain: string;
   /** 业务限定（变体级，如 病种=门特；缺省继承指标级） */
@@ -1185,6 +1186,9 @@ export interface MetricMountInput {
   source_table: string;
   source_column: string;
   granularity: string;
+  /** 粒度维度（组合粒度，方案 B）：参与唯一性的业务实体列表（如 ["hospital"]）；
+      空 = 纯时间粒度；与普通维度区分——粒度维度固定进消费 GROUP BY */
+  granularity_dims?: string[] | null;
   default_period?: string | null;
   domain: string;
   /** 业务限定（变体级，如 病种=门特；缺省继承指标级 definition_json.business_filter） */
@@ -1205,6 +1209,7 @@ export interface MetricMountResponse {
   source_table: string;
   source_column: string;
   granularity: string;
+  granularity_dims?: string[] | null;
   default_period: string | null;
   domain: string;
   business_filter?: string | null;
@@ -2961,6 +2966,8 @@ export interface SqlBatchCandidate {
   period: string | null;
   unit: string | null;
   granularity: string | null;
+  /** 粒度维度（组合粒度，方案 B）：GROUP BY 业务实体键，候选行「粒度维度」多选预填 */
+  granularity_dims?: string[] | null;
   /** 口径定义（原子：expression 模式；派生/复合：expression+dependencies） */
   definition_json: Record<string, unknown>;
   definition_mode: string;

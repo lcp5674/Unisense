@@ -1676,6 +1676,18 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
 
   it("多变体挂载：添加变体行可录入多套粒度/限定/周期并随创建提交 mounts 数组", async () => {
     mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
+    // 主粒度下拉需要时间粒度字典（beforeEach 默认空数组）——提供日/月 + 业务实体医生
+    mockedDict.mockImplementation((async (dictType: string) => {
+      if (dictType === "granularity") {
+        return [
+          { code: "day", label: "日" },
+          { code: "month", label: "月" },
+          { code: "doctor", label: "医生" },
+          { code: "hospital", label: "医院" },
+        ] as never;
+      }
+      return [] as never;
+    }) as never);
     // 变体级责任方（方案 B）：第一行产品需求方选平台用户
     mockedUsers.mockResolvedValue([
       { id: 101, username: "zhangsan", display_name: "张三", role: "user", domain: "sales", status: "active" },
@@ -1709,16 +1721,18 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
       .closest(".ant-select") as HTMLElement;
     fireEvent.mouseDown(mountColSel.querySelector(".ant-select-selector") as HTMLElement);
     await clickSelectOption("gmv (decimal)");
-    // 粒度 Select：showSearch + 手输兜底——输入「医生」后未采集项注入可点选
+    // 主粒度 Select：时间粒度点选「日 (day)」
     const grainSel1 = screen
-      .getByText("粒度（如 日/月/医院）")
+      .getByText("主粒度（如 月）")
       .closest(".ant-select") as HTMLElement;
     fireEvent.mouseDown(grainSel1.querySelector(".ant-select-selector") as HTMLElement);
-    fireEvent.change(
-      grainSel1.querySelector(".ant-select-selection-search-input") as HTMLInputElement,
-      { target: { value: "医生" } },
-    );
-    await clickSelectOption("医生");
+    await clickSelectOption("日 (day)");
+    // 粒度维度（方案 B）：业务实体「医生」点选——进粒度维度而非主粒度
+    const dimSel1 = screen
+      .getByText("粒度维度（如 医院，可多选）")
+      .closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(dimSel1.querySelector(".ant-select-selector") as HTMLElement);
+    await clickSelectOption("医生 (doctor)");
     fireEvent.change(screen.getByPlaceholderText("业务限定（如 病种=门特）"), {
       target: { value: "场景=门诊" },
     });
@@ -1730,12 +1744,12 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     await clickSelectOption("张三（101）");
     // 添加第二行变体：不同表/粒度
     fireEvent.click(screen.getByRole("button", { name: /添加变体/ }));
-    // 第一行已选「医生」（placeholder 消失，selector 显示选中值），第二行粒度仍显示 placeholder
+    // 第一行已选主粒度「日 (day)」（placeholder 消失），第二行主粒度仍显示 placeholder
     expect(
-      document.querySelector('.ant-select-selection-item[title="医生"]'),
+      document.querySelector('.ant-select-selection-item[title="日 (day)"]'),
     ).toBeTruthy();
     const grainSel2 = screen
-      .getByText("粒度（如 日/月/医院）")
+      .getByText("主粒度（如 月）")
       .closest(".ant-select") as HTMLElement;
     const tableSels2 = screen.getAllByText("源表（如 dwd.sales_detail）");
     fireEvent.mouseDown(
@@ -1748,11 +1762,12 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     );
     await clickSelectOption("fee (decimal)");
     fireEvent.mouseDown(grainSel2.querySelector(".ant-select-selector") as HTMLElement);
-    fireEvent.change(
-      grainSel2.querySelector(".ant-select-selection-search-input") as HTMLInputElement,
-      { target: { value: "医院" } },
-    );
-    await clickSelectOption("医院");
+    await clickSelectOption("日 (day)");
+    // 第二行粒度维度：点选「医院 (hospital)」
+    const dimSels2 = screen.getAllByText("粒度维度（如 医院，可多选）");
+    const dimSel2 = (dimSels2[0].closest(".ant-select") as HTMLElement);
+    fireEvent.mouseDown(dimSel2.querySelector(".ant-select-selector") as HTMLElement);
+    await clickSelectOption("医院 (hospital)");
     // 名称必填 → 回 Step1 填名称 → 提交
     await goToStep(1);
     fireEvent.change(screen.getByPlaceholderText(/指标显示名称/), {
@@ -1767,7 +1782,9 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     expect(body.mounts).toHaveLength(2);
     expect(body.mounts![0]).toMatchObject({
       source_table: "dwd.sales_detail",
-      granularity: "医生",
+      granularity: "day",
+      // 组合粒度（方案 B）：业务实体「医生」进粒度维度而非主粒度（值=字典 code）
+      granularity_dims: ["doctor"],
       business_filter: "场景=门诊",
       // 变体级责任方：第一行产品需求方张三（方案 B）
       product_owner_id: 101,
@@ -1775,13 +1792,14 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     });
     expect(body.mounts![1]).toMatchObject({
       source_table: "dwd.hospital_fee",
-      granularity: "医院",
+      granularity: "day",
+      granularity_dims: ["hospital"],
       // 第二行未设责任方 → 空（缺省继承指标级）
       product_owner_id: null,
     });
   });
 
-  it("挂载粒度 Select 化：默认展示字典粒度选项，可直接点选（修复此前仅能手输）", async () => {
+  it("挂载粒度 Select 化：主粒度展示时间粒度、粒度维度展示业务实体（方案 B 拆分）", async () => {
     mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
     // 按字典类型返回：granularity 返回内置粒度（日/月/医生），其余沿用默认币种
     mockedDict.mockImplementation((async (dictType: string) => {
@@ -1806,17 +1824,28 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     await goToStep(1);
     fireEvent.click(screen.getByText("派生指标"));
     await goToStep(2);
-    // 粒度下拉打开：字典内置粒度直接可见可点选（无需手输）
+    // 主粒度下拉打开：时间粒度（日/月）直接可见可点选（业务实体医生不在主粒度）
     const grainSel = screen
-      .getByText("粒度（如 日/月/医院）")
+      .getByText("主粒度（如 月）")
       .closest(".ant-select") as HTMLElement;
     fireEvent.mouseDown(grainSel.querySelector(".ant-select-selector") as HTMLElement);
     await waitFor(() => expect(screen.getByText("日 (day)")).toBeTruthy());
     expect(screen.getByText("月 (month)")).toBeTruthy();
+    expect(screen.queryByText("医生 (doctor)")).toBeNull();
     await clickSelectOption("日 (day)");
-    // 选中后行内展示所选粒度（selector 选中值）
+    // 选中后行内展示所选主粒度（selector 选中值）
     expect(
       document.querySelector('.ant-select-selection-item[title="日 (day)"]'),
+    ).toBeTruthy();
+    // 粒度维度下拉打开：业务实体粒度（医生）直接可见可点选
+    const dimSel = screen
+      .getByText("粒度维度（如 医院，可多选）")
+      .closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(dimSel.querySelector(".ant-select-selector") as HTMLElement);
+    await waitFor(() => expect(screen.getByText("医生 (doctor)")).toBeTruthy());
+    await clickSelectOption("医生 (doctor)");
+    expect(
+      document.querySelector('.ant-select-selection-item[title="医生 (doctor)"]'),
     ).toBeTruthy();
   });
 
@@ -2498,11 +2527,13 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
       // 依赖指标合入 definition_json（血缘据此建上游边）；无 calc_expression → 保留解析口径
       expect(derived?.definition_json.dependencies).toEqual(["sales_order_amount_day"]);
       expect(derived?.definition_json.expression).toBe("COUNT(DISTINCT user_id)");
-      // 派生透传挂载实体（OneData 挂载层：源表/列/粒度/周期/域）
+      // 派生透传挂载实体（OneData 挂载层：源表/列/主粒度/粒度维度/周期/域）
       expect(derived?.mount).toEqual({
         source_table: "dwd.sales_detail",
         source_column: "user_id",
         granularity: "day",
+        // 组合粒度（方案 B）：无 GROUP BY 业务实体键 → 粒度维度空
+        granularity_dims: null,
         default_period: "day",
         domain: "sales",
       });

@@ -1072,9 +1072,9 @@ async def test_infer_sql_batch_composite_uses_real_period() -> None:
 
 
 async def test_infer_sql_batch_composite_follows_entity_granularity() -> None:
-    """2026-08-28：复合候选粒度跟随派生候选的实体粒度推断——GROUP BY 唯一业务
-    实体键（doctor_id）→ doctor 粒度（此前复合一律挂在语句周期上，无法表达
-    「按医生统计的复合指标」）。"""
+    """2026-08-28 方案 B：复合候选粒度维度跟随派生候选——GROUP BY 业务实体键
+    （doctor_id）全部升级为粒度维度（此前复合一律挂在语句周期上，无法表达
+    「按医生统计的复合指标」）。无时间键 → 主粒度兜底 day + 粒度维度 [doctor_id]。"""
     sql = (
         "SELECT doctor_id, SUM(amount) AS fee_amt, COUNT(DISTINCT patient_id) AS patient_cnt, "
         "SUM(amount)/COUNT(DISTINCT patient_id) AS arpu "
@@ -1085,11 +1085,13 @@ async def test_infer_sql_batch_composite_follows_entity_granularity() -> None:
         synthesize_composite=True,
     )
     comp = next(c for c in result["candidates"] if c["type"] == "composite")
-    assert comp["granularity"] == "doctor", comp
-    # 派生基础候选同样为 doctor 粒度（与复合同源）
+    assert comp["granularity"] == "day", comp
+    assert comp["granularity_dims"] == ["doctor_id"], comp
+    # 派生基础候选同样为 day 主粒度 + doctor_id 粒度维度（与复合同源）
     derived = [c for c in result["candidates"] if c["type"] == "derived"]
     assert derived
-    assert all(c["granularity"] == "doctor" for c in derived)
+    assert all(c["granularity"] == "day" for c in derived)
+    assert all(c.get("granularity_dims") == ["doctor_id"] for c in derived)
 
 
 async def test_infer_sql_batch_composite_keeps_period_grain_when_no_entity() -> None:
@@ -1106,6 +1108,7 @@ async def test_infer_sql_batch_composite_keeps_period_grain_when_no_entity() -> 
     )
     comp = next(c for c in result["candidates"] if c["type"] == "composite")
     assert comp["granularity"] == "month", comp
+    assert comp["granularity_dims"] in (None, []), comp
     assert comp["period"] == "month"
 
 
