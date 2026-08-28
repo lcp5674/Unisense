@@ -157,23 +157,38 @@ function darkenHex(hex: string, amt: number): string {
   return `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
 }
 
-// —— 节点类型图标（白色线性 SVG，渲染在节点中心，标签在节点下方，互不干扰）——
-// 此前用彩色 emoji（🗂️/🔖/📈），iconFill 对 emoji 无效、跨平台渲染差异大，与渐变填充
-// 不协调。改为内联 SVG data URI：白色描边线性图标（table 表格 / field 字段列 / metric
-// 指标趋势），与「校准仪表」设计系统协调，任意缩放清晰。模块加载时预编码一次，
-// iconSrc 回调仅查表，无每帧计算成本。
+// —— 节点类型图标（Lucide 风格 24x24 线性 SVG，深色半透明圆衬底让白色线条在任意
+// 节点填充色上（深蓝/紫/红/橙/绿）都清晰可辨；端点圆点+圆角+1.5px 精线条提升高级感）——
+// 三档衬底透明度：metric（枢纽）最不透明，field（叶子）最淡——视觉层次对应节点重要度。
+// 模块加载时预编码一次，iconSrc 回调仅查表，无每帧计算成本。
 function svgDataUri(svg: string): string {
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }
+function iconWithBackdrop(iconBody: string, backdropOpacity: number): string {
+  // 24x24 viewBox：圆衬底 r=11 居中，rgba(15,23,42) 是 slate-900 调半透明，节点色透过来仍是高对比白线条
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="rgba(15,23,42,${backdropOpacity})" stroke="rgba(255,255,255,0.18)" stroke-width="0.4"/><g fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${iconBody}</g></svg>`;
+}
 const NODE_ICON_SRC: Record<string, string> = {
+  // 表格：表头分割线 + 两根列分隔线 + 三个列头小圆点（Lucide Table 风格，更精致）
   table: svgDataUri(
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/><path d="M9 9v11"/><path d="M15 9v11"/></svg>`,
+    iconWithBackdrop(
+      `<rect x="3" y="5" width="18" height="14" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="9" y1="10" x2="9" y2="19"/><line x1="15" y1="10" x2="15" y2="19"/><circle cx="6" cy="7.5" r="0.55" fill="#fff" stroke="none"/><circle cx="12" cy="7.5" r="0.55" fill="#fff" stroke="none"/><circle cx="18" cy="7.5" r="0.55" fill="#fff" stroke="none"/>`,
+      0.42,
+    ),
   ),
+  // 字段：竖列矩形 + 三段横线 + 段头圆点（Lucide ListTree 风格，列结构清晰）
   field: svgDataUri(
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8.5" y="3" width="7" height="18" rx="2"/><path d="M12 3v18"/></svg>`,
+    iconWithBackdrop(
+      `<rect x="5" y="3" width="14" height="18" rx="2"/><line x1="5" y1="9" x2="19" y2="9"/><line x1="5" y1="15" x2="19" y2="15"/><circle cx="8" cy="6" r="0.7" fill="#fff" stroke="none"/><circle cx="8" cy="12" r="0.7" fill="#fff" stroke="none"/><circle cx="8" cy="18" r="0.7" fill="#fff" stroke="none"/>`,
+      0.32,
+    ),
   ),
+  // 指标：折线图 + 端点圆 + 坐标轴（Lucide LineChart 风格，数据感强烈）
   metric: svgDataUri(
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5.5-6.5 4 3.5L20 6"/><path d="M14 6h6v6"/></svg>`,
+    iconWithBackdrop(
+      `<line x1="3" y1="20" x2="21" y2="20"/><line x1="3" y1="3" x2="3" y2="20"/><polyline points="7,15 11,11 15,13 20,6"/><circle cx="7" cy="15" r="0.9" fill="#fff" stroke="none"/><circle cx="11" cy="11" r="0.9" fill="#fff" stroke="none"/><circle cx="15" cy="13" r="0.9" fill="#fff" stroke="none"/><circle cx="20" cy="6" r="0.9" fill="#fff" stroke="none"/>`,
+      0.52,
+    ),
   ),
 };
 function nodeIconSrc(type?: string): string {
@@ -841,23 +856,21 @@ function GraphCanvas({
                 : (nodeStyleCacheRef.current.get(String(d.id))?.hub as boolean | undefined)
                   ? 0.45
                   : 0.32,
-            // 类型图标：白色线性 SVG（指标=趋势 / 表=表格 / 字段=列），渲染在节点中央；
+            // 类型图标：Lucide 风格 24x24 线性 SVG（指标=折线+端点圆 / 表=表格+列头圆点 /
+            // 字段=列表+段头圆点），内嵌深色半透明圆衬底让白线条在任意节点填充色上都清晰。
             // 尺寸按节点形状收窄（表节点扁、字段节点更扁），避免溢出节点边界
             icon: (d: NodeData) => !(d.data as AssetGraphNode | undefined)?.anchor,
             iconSrc: (d: NodeData) =>
               nodeIconSrc((d.data as AssetGraphNode | undefined)?.type),
-            iconWidth: (d: NodeData) =>
-              (d.data as AssetGraphNode | undefined)?.type === "table"
-                ? 14
-                : (d.data as AssetGraphNode | undefined)?.type === "field"
-                  ? 10
-                  : 16,
-            iconHeight: (d: NodeData) =>
-              (d.data as AssetGraphNode | undefined)?.type === "table"
-                ? 14
-                : (d.data as AssetGraphNode | undefined)?.type === "field"
-                  ? 10
-                  : 16,
+            iconWidth: (d: NodeData) => {
+              const t = (d.data as AssetGraphNode | undefined)?.type;
+              // 加大 50% 占比：表 20、字段 16、metric 22（接近节点内部直径，比之前 14-16 显著更醒目）
+              return t === "table" ? 20 : t === "field" ? 16 : 22;
+            },
+            iconHeight: (d: NodeData) => {
+              const t = (d.data as AssetGraphNode | undefined)?.type;
+              return t === "table" ? 16 : t === "field" ? 14 : 22;
+            },
             // 依赖引用数角标（血缘度 badge）：节点右上角显示该节点被引用的次数，
             // 用户一眼看出哪些是枢纽节点（高血缘度）。compact LOD 模式下隐藏（大图性能）。
             badge: (d: NodeData) => !(d.data as AssetGraphNode | undefined)?.anchor,
