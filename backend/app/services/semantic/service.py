@@ -541,7 +541,8 @@ class MetricService(BaseService):
                         continue
                     current = getattr(request, field_name, None)
                     # 仅当当前值是默认值时才覆盖（保留用户显式设定的值）
-                    field_info = request.model_fields.get(field_name)
+                    # 注：model_fields 从类访问（实例访问在 Pydantic 2.11+ 弃用）
+                    field_info = type(request).model_fields.get(field_name)
                     if field_info and current == field_info.default and suggested_val != current:
                         setattr(request, field_name, suggested_val)
 
