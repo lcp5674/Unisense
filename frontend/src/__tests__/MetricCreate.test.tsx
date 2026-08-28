@@ -1463,8 +1463,8 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
       granItem = screen.getByText("主粒度（兜底）").closest(".ant-form-item") as HTMLElement;
       expect(granItem.querySelector(".ant-select")).toBeTruthy();
     });
-    // 方案 A 指引：extra 明确「粒度维度（医院/科室）在下一步挂载实体行逐变体配置」——用户不再误以为粒度只能单选
-    expect(screen.getByText(/粒度维度（如 医院\/科室）在下一步「挂载实体」行逐变体配置/)).toBeTruthy();
+    // 方案 A 指引：extra 明确「粒度维度（业务实体，如 医院/科室）在下一步挂载实体行逐变体配置」——用户不再误以为粒度只能单选
+    expect(screen.getByText(/粒度维度（业务实体，如 医院\/科室）在下一步「挂载实体」行逐变体配置/)).toBeTruthy();
     // 类型提示同步为派生语义
     expect(screen.getByText(/原子指标 \+ 业务限定 \+ 时间周期/)).toBeTruthy();
     // 切回原子：粒度恢复只读

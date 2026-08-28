@@ -3004,7 +3004,7 @@ export function MetricCreate() {
                     <Form.Item
                       name="granularity"
                       label="主粒度（兜底）"
-                      extra="粒度 = 主粒度 + 粒度维度。此处仅设主粒度（时间频率，如 月；缺省取挂载粒度）；粒度维度（如 医院/科室）在下一步「挂载实体」行逐变体配置，可多选。"
+                      extra="粒度 = 主粒度 + 粒度维度：此处仅设主粒度（时间频率，如 月/日；留空则默认取挂载实体行的主粒度）；粒度维度（业务实体，如 医院/科室）在下一步「挂载实体」行逐变体配置，可多选。"
                     >
                       {dictSelect("granularity", "granularity", "选择主粒度")}
                     </Form.Item>
