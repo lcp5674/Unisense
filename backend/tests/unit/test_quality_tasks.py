@@ -44,9 +44,25 @@ def _obs(value: str = "0.5", age_hours: float = 1.0) -> QualityObservation:
     )
 
 
+class _FakeRedis:
+    """功能型 fake redis（T9 fail-safe 后任务锁需可用 redis 才真正执行）。"""
+
+    def __init__(self) -> None:
+        self._data: dict[str, str] = {}
+
+    async def set(self, key: str, val: str, nx: bool = False, ex: int | None = None) -> str | None:
+        if nx and key in self._data:
+            return None
+        self._data[key] = val
+        return "OK"
+
+    async def eval(self, script: str, numkeys: int, *args: object) -> int:
+        return 1
+
+
 @pytest.fixture
 def ctx() -> dict:
-    return {}
+    return {"redis": _FakeRedis()}
 
 
 async def _run(
@@ -88,7 +104,9 @@ async def _run(
 
     monkeypatch.setattr("app.services.quality.service.QualityService", _FakeService)
 
-    result = await run_quality_checks(ctx)
+    # T9：传入功能型 redis ctx（旧代码把 pytest fixture 对象当 ctx 传入，Redis 不可用降级
+    # 为 acquired 假绿；fail-safe 后必须真实 dict ctx 才能执行任务体）
+    result = await run_quality_checks({"redis": _FakeRedis()})
     return result, detect
 
 

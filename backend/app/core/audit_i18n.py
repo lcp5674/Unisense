@@ -229,6 +229,9 @@ _VERB_TEMPLATES: dict[str, str] = {
     "read": "查看了{entity}",
     "list": "查询了{entity}列表",
     "export": "导出了{entity}",
+    # 凭据/令牌（S13/S19 审查修复：查看明文凭据、签发消费令牌落审计）
+    "secret_viewed": "查看了{entity}连接凭据",
+    "issue_token": "签发了{entity}消费令牌",
     # 审核流
     "submit": "提交了{entity}评审",
     "approve": "审核通过了{entity}",

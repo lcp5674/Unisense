@@ -12,6 +12,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
+class _FakeRedis:
+    """功能型 fake redis（T9 fail-safe 后任务锁需可用 redis 才真正执行）。"""
+
+    def __init__(self) -> None:
+        self._data: dict[str, str] = {}
+
+    async def set(self, key: str, val: str, nx: bool = False, ex: int | None = None) -> str | None:
+        if nx and key in self._data:
+            return None
+        self._data[key] = val
+        return "OK"
+
+    async def eval(self, script: str, numkeys: int, *args: object) -> int:
+        return 1
+
+
 def _mock_db(execute_results: list) -> AsyncMock:
     """构造 fake db：execute 按调用序列返回结果。"""
     mock_db = AsyncMock()
@@ -46,7 +62,7 @@ class TestPurgeRetainedRecords:
         with patch("app.db.mysql.async_session_factory") as mock_factory:
             mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
             mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
-            result = await purge_retained_records({})
+            result = await purge_retained_records({"redis": _FakeRedis()})
 
         assert result["status"] == "SUCCESS"
         assert result["ruling_record"] == 0
@@ -82,7 +98,7 @@ class TestPurgeRetainedRecords:
         with patch("app.db.mysql.async_session_factory") as mock_factory:
             mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
             mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
-            result = await purge_retained_records({})
+            result = await purge_retained_records({"redis": _FakeRedis()})
 
         assert result["status"] == "SUCCESS"
         assert result["ruling_record"] == 2
@@ -110,7 +126,7 @@ class TestPurgeRetainedRecords:
         with patch("app.db.mysql.async_session_factory") as mock_factory:
             mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
             mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
-            await purge_retained_records({})
+            await purge_retained_records({"redis": _FakeRedis()})
 
         selects = [
             c.args[0]
@@ -152,7 +168,7 @@ class TestCheckTableGrowth:
             mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
             with patch("app.core.eventbus.get_eventbus") as mock_eb:
                 mock_eb.return_value.publish = AsyncMock()
-                result = await check_table_growth({})
+                result = await check_table_growth({"redis": _FakeRedis()})
 
         assert result["status"] == "SUCCESS"
         assert result["oversized"] == []
@@ -179,7 +195,7 @@ class TestCheckTableGrowth:
             mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
             with patch("app.core.eventbus.get_eventbus") as mock_eb:
                 mock_eb.return_value.publish = AsyncMock()
-                result = await check_table_growth({})
+                result = await check_table_growth({"redis": _FakeRedis()})
 
         assert result["status"] == "SUCCESS"
         assert len(result["oversized"]) == 1
@@ -208,7 +224,7 @@ class TestCheckTableGrowth:
             mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
             with patch("app.core.eventbus.get_eventbus") as mock_eb:
                 mock_eb.return_value.publish = AsyncMock(side_effect=RuntimeError("redis down"))
-                result = await check_table_growth({})
+                result = await check_table_growth({"redis": _FakeRedis()})
 
         assert result["status"] == "SUCCESS"
         assert len(result["oversized"]) == 1  # 巡检结果仍返回
@@ -237,7 +253,7 @@ class TestLogRetention:
         with patch("app.db.mysql.async_session_factory") as mock_factory:
             mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
             mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
-            result = await purge_retained_records({})
+            result = await purge_retained_records({"redis": _FakeRedis()})
 
         assert result["query_log"] == 2
         assert result["tracking_event"] == 1

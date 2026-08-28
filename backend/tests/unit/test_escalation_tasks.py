@@ -15,6 +15,22 @@ import pytest
 from app.services.notify.escalation_tasks import check_escalation_retries
 
 
+class _FakeRedis:
+    """功能型 fake redis（T9 fail-safe 后任务锁需可用 redis 才真正执行）。"""
+
+    def __init__(self) -> None:
+        self._data: dict[str, str] = {}
+
+    async def set(self, key: str, val: str, nx: bool = False, ex: int | None = None) -> str | None:
+        if nx and key in self._data:
+            return None
+        self._data[key] = val
+        return "OK"
+
+    async def eval(self, script: str, numkeys: int, *args: object) -> int:
+        return 1
+
+
 def _build_session() -> MagicMock:
     session = MagicMock()
     session.commit = AsyncMock()
@@ -49,7 +65,7 @@ async def test_due_stats_logs_info_and_commits(monkeypatch: pytest.MonkeyPatch) 
     stats = {"due": 2, "resent": 1, "escalated": 1, "maxed_out": 0}
     svc = _patch_deps(monkeypatch, session, stats)
 
-    result = await check_escalation_retries({})
+    result = await check_escalation_retries({"redis": _FakeRedis()})
 
     assert result == stats
     svc.check_retries.assert_awaited_once()
@@ -62,7 +78,7 @@ async def test_no_due_stats_no_log(monkeypatch: pytest.MonkeyPatch) -> None:
     stats = {"due": 0, "resent": 0, "escalated": 0, "maxed_out": 0}
     _patch_deps(monkeypatch, session, stats)
 
-    result = await check_escalation_retries({})
+    result = await check_escalation_retries({"redis": _FakeRedis()})
 
     assert result == stats
     session.commit.assert_awaited_once()
@@ -74,7 +90,7 @@ async def test_session_factory_called_once(monkeypatch: pytest.MonkeyPatch) -> N
     stats = {"due": 1, "resent": 1, "escalated": 0, "maxed_out": 0}
     _patch_deps(monkeypatch, session, stats)
 
-    await check_escalation_retries({})
+    await check_escalation_retries({"redis": _FakeRedis()})
 
     # 会话通过 async with 进入并正常退出
     session.__aenter__.assert_awaited_once()

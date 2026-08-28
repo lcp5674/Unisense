@@ -16,6 +16,23 @@ from app.services.conflict.sla_tasks import (
 )
 
 
+class _FakeRedis:
+    """功能型 fake redis（T9 fail-safe 后任务锁需可用 redis 才真正执行）。"""
+
+    def __init__(self) -> None:
+        self._data: dict[str, str] = {}
+
+    async def set(self, key: str, val: str, nx: bool = False, ex: int | None = None) -> str | None:
+        if nx and key in self._data:
+            return None
+        self._data[key] = val
+        return "OK"
+
+    async def eval(self, script: str, numkeys: int, *args: object) -> int:
+        return 1
+
+
+
 def _conflict(
     conflict_id: str = "CF-001",
     status: ConflictStatus = ConflictStatus.OPEN,
@@ -56,7 +73,7 @@ async def test_auto_escalates_overdue_open(
 
     monkeypatch.setattr("app.services.conflict.service.ConflictService", _FakeSvc)
 
-    result = await auto_escalate_overdue({})
+    result = await auto_escalate_overdue({"redis": _FakeRedis()})
     assert result["scanned"] == 1
     assert result["escalated"] == 1
     assert "CF-001" in escalated_by
@@ -74,7 +91,7 @@ async def test_skips_recent_conflicts(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.db.mysql.async_session_factory", lambda: db)
 
     # 查询带 cutoff 条件（created_at < cutoff）
-    result = await auto_escalate_overdue({})
+    result = await auto_escalate_overdue({"redis": _FakeRedis()})
     assert result == {"scanned": 0, "escalated": 0}
 
 
@@ -100,7 +117,7 @@ async def test_single_failure_does_not_block(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr("app.services.conflict.service.ConflictService", _FakeSvc)
 
-    result = await auto_escalate_overdue({})
+    result = await auto_escalate_overdue({"redis": _FakeRedis()})
     assert result["scanned"] == 2
     assert result["escalated"] == 1
 
@@ -147,13 +164,22 @@ async def test_remind_stale_escalated_notifies_admins(
         def __init__(self, db: object) -> None:
             pass
 
-        async def notify_user(self, user_id: int, event_type: str, title: str, body: str | None = None, payload: dict | None = None, *, channel: str = "IN_APP") -> object:
+        async def notify_user(
+            self,
+            user_id: int,
+            event_type: str,
+            title: str,
+            body: str | None = None,
+            payload: dict | None = None,
+            *,
+            channel: str = "IN_APP",
+        ) -> object:
             notified.append((user_id, event_type))
             return object()
 
     monkeypatch.setattr("app.services.notify.service.NotifyService", _FakeNotify)
 
-    result = await remind_stale_escalated({})
+    result = await remind_stale_escalated({"redis": _FakeRedis()})
     assert result["scanned"] == 1
     assert result["notified"] == 2
     assert sorted(uid for uid, _ in notified) == [1, 2]
@@ -169,5 +195,5 @@ async def test_remind_stale_escalated_skips_fresh(monkeypatch: pytest.MonkeyPatc
     db.__aexit__ = AsyncMock(return_value=False)
     monkeypatch.setattr("app.db.mysql.async_session_factory", lambda: db)
 
-    result = await remind_stale_escalated({})
+    result = await remind_stale_escalated({"redis": _FakeRedis()})
     assert result == {"scanned": 0, "notified": 0}

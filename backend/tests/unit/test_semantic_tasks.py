@@ -28,6 +28,22 @@ class _AsyncCM:
         return None
 
 
+class _FakeRedis:
+    """功能型 fake redis（T9 fail-safe 后任务锁需可用 redis 才真正执行）。"""
+
+    def __init__(self) -> None:
+        self._data: dict[str, str] = {}
+
+    async def set(self, key: str, val: str, nx: bool = False, ex: int | None = None) -> str | None:
+        if nx and key in self._data:
+            return None
+        self._data[key] = val
+        return "OK"
+
+    async def eval(self, script: str, numkeys: int, *args: object) -> int:
+        return 1
+
+
 def _metric(
     code: str = "sales_gmv_d",
     owner_id: int = 11,
@@ -125,7 +141,7 @@ async def test_refresh_health_notifies_owner_on_critical(_patch_health_refresh_e
     notif_svc.notify_user = AsyncMock()
     NotifyService.return_value = notif_svc
 
-    count = await refresh_health_scores({})
+    count = await refresh_health_scores({"redis": _FakeRedis()})
 
     assert count == 1
     # Owner + 备份 Owner 均收到定向告警
@@ -157,7 +173,7 @@ async def test_refresh_health_notifies_backup_owner_once_if_same(_patch_health_r
     notif_svc.notify_user = AsyncMock()
     NotifyService.return_value = notif_svc
 
-    await refresh_health_scores({})
+    await refresh_health_scores({"redis": _FakeRedis()})
 
     assert notif_svc.notify_user.await_count == 1
     assert notif_svc.notify_user.await_args.kwargs["user_id"] == 11
@@ -182,7 +198,7 @@ async def test_refresh_health_healthy_metric_no_notification(_patch_health_refre
     notif_svc.notify_user = AsyncMock()
     NotifyService.return_value = notif_svc
 
-    count = await refresh_health_scores({})
+    count = await refresh_health_scores({"redis": _FakeRedis()})
 
     assert count == 1
     notif_svc.notify_user.assert_not_awaited()
@@ -209,7 +225,7 @@ async def test_refresh_health_notify_failure_does_not_break(_patch_health_refres
     notif_svc.notify_user = AsyncMock(side_effect=RuntimeError("notify down"))
     NotifyService.return_value = notif_svc
 
-    count = await refresh_health_scores({})
+    count = await refresh_health_scores({"redis": _FakeRedis()})
 
     assert count == 1
     repo.save_health_score.assert_awaited_once()
@@ -252,7 +268,7 @@ async def test_check_experimental_expiry_recycles_overage(_patch_gray_expiry_env
     notif_svc.notify_user = AsyncMock()
     NotifyService.return_value = notif_svc
 
-    recycled = await check_experimental_expiry({})
+    recycled = await check_experimental_expiry({"redis": _FakeRedis()})
 
     assert recycled == [metric.id]
     # 通知 Owner + 备份 Owner
@@ -277,7 +293,7 @@ async def test_check_experimental_expiry_no_overage_no_action(_patch_gray_expiry
     MetricService.return_value = svc
     NotifyService.return_value = MagicMock(notify_user=AsyncMock())
 
-    recycled = await check_experimental_expiry({})
+    recycled = await check_experimental_expiry({"redis": _FakeRedis()})
 
     assert recycled == []
     svc.recycle_expired_gray.assert_not_awaited()
@@ -330,7 +346,7 @@ async def test_check_dsd_overdue_notifies_owner_on_overage(_patch_dsd_overdue_en
     notif_svc.notify_user = AsyncMock()
     NotifyService.return_value = notif_svc
 
-    reminded = await check_dsd_overdue({})
+    reminded = await check_dsd_overdue({"redis": _FakeRedis()})
 
     assert reminded == [metric.id]
     # Owner + 备份 Owner 均收到升级提醒
@@ -356,7 +372,7 @@ async def test_check_dsd_overdue_no_metrics_no_notify(_patch_dsd_overdue_env) ->
     notif_svc.notify_user = AsyncMock()
     NotifyService.return_value = notif_svc
 
-    reminded = await check_dsd_overdue({})
+    reminded = await check_dsd_overdue({"redis": _FakeRedis()})
 
     assert reminded == []
     notif_svc.notify_user.assert_not_awaited()
@@ -388,7 +404,7 @@ async def test_check_pending_version_timeouts_accepts_expired() -> None:
         )
         metric_svc_cls.return_value = svc
 
-        promoted = await check_pending_version_timeouts({})
+        promoted = await check_pending_version_timeouts({"redis": _FakeRedis()})
 
         # 两个 (metric_id, version) 分组各调一次，成功即入 promoted
         assert promoted == [1, 2]
@@ -412,7 +428,7 @@ async def test_check_pending_version_timeouts_no_expired() -> None:
         svc.auto_accept_timeout = AsyncMock()
         metric_svc_cls.return_value = svc
 
-        promoted = await check_pending_version_timeouts({})
+        promoted = await check_pending_version_timeouts({"redis": _FakeRedis()})
 
         assert promoted == []
         svc.auto_accept_timeout.assert_not_awaited()
@@ -432,7 +448,7 @@ async def test_check_pending_version_timeouts_accept_failure_isolated() -> None:
         svc.auto_accept_timeout = AsyncMock(side_effect=[None, _metric(status="PUBLISHED")])
         metric_svc_cls.return_value = svc
 
-        promoted = await check_pending_version_timeouts({})
+        promoted = await check_pending_version_timeouts({"redis": _FakeRedis()})
 
         # 第一组返回 None（未转正）不入列，第二组成功入列
         assert promoted == [2]
@@ -449,7 +465,7 @@ async def test_check_emergency_review_overdue_flags_overdue() -> None:
         db = _mock_db([metric])
         factory.return_value = _AsyncCM(db)
 
-        overdue = await check_emergency_review_overdue({})
+        overdue = await check_emergency_review_overdue({"redis": _FakeRedis()})
 
         assert overdue == [metric.id]
 
@@ -462,6 +478,6 @@ async def test_check_emergency_review_overdue_no_metric() -> None:
         db = _mock_db([])
         factory.return_value = _AsyncCM(db)
 
-        overdue = await check_emergency_review_overdue({})
+        overdue = await check_emergency_review_overdue({"redis": _FakeRedis()})
 
         assert overdue == []

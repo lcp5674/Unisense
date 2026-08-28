@@ -14,6 +14,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
+class _FakeRedis:
+    """功能型 fake redis：SET NX EX + eval（对齐 TaskLock 依赖，T9 fail-safe 后必须提供）。"""
+
+    def __init__(self) -> None:
+        self._data: dict[str, str] = {}
+
+    async def set(self, key: str, val: str, nx: bool = False, ex: int | None = None) -> str | None:
+        if nx and key in self._data:
+            return None
+        self._data[key] = val
+        return "OK"
+
+    async def eval(self, script: str, numkeys: int, *args: object) -> int:
+        return 1
+
+
 class TestAuditArchiveFlow:
     """测试审计归档流程（任务自建 DB 会话，patch async_session_factory）。"""
 
@@ -31,7 +47,7 @@ class TestAuditArchiveFlow:
         with patch("app.db.mysql.async_session_factory") as mock_factory:
             mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
             mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
-            result = await audit_archive_task({})
+            result = await audit_archive_task({"redis": _FakeRedis()})
 
         assert result["status"] == "SUCCESS"
         assert result["rows_archived"] == 0
@@ -78,7 +94,7 @@ class TestAuditArchiveFlow:
         ):
             mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
             mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
-            result = await audit_archive_task({})
+            result = await audit_archive_task({"redis": _FakeRedis()})
 
         assert result["status"] == "SUCCESS"
         assert result["rows_archived"] == 1
@@ -123,7 +139,10 @@ class TestAuditArchiveFlow:
         q3 = MagicMock()
         q3.scalars.return_value.all.return_value = []
         # COUNT → 每批(查询 → prev_sha256 → UPDATE → DELETE) → 查询[]（结束）
-        calls = [count_res, q1, prev_hash, MagicMock(), MagicMock(), q2, prev_hash, MagicMock(), MagicMock(), q3]
+        calls = [
+            count_res, q1, prev_hash, MagicMock(), MagicMock(),
+            q2, prev_hash, MagicMock(), MagicMock(), q3,
+        ]
         mock_db.execute = AsyncMock(side_effect=calls)
         mock_db.add = MagicMock()
         mock_db.commit = AsyncMock()
@@ -134,7 +153,7 @@ class TestAuditArchiveFlow:
         ):
             mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
             mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
-            result = await audit_archive_task({})
+            result = await audit_archive_task({"redis": _FakeRedis()})
 
         assert result["status"] == "SUCCESS"
         assert result["rows_archived"] == 3
@@ -170,7 +189,7 @@ class TestAuditArchiveFlow:
         ):
             mock_factory.return_value.__aenter__ = AsyncMock(return_value=mock_db)
             mock_factory.return_value.__aexit__ = AsyncMock(return_value=False)
-            result = await audit_archive_task({})
+            result = await audit_archive_task({"redis": _FakeRedis()})
 
         assert result["status"] == "FAILED"
         assert "MinIO upload failed" in result["error"]
