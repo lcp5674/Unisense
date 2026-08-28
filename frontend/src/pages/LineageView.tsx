@@ -634,7 +634,7 @@ function GraphTab() {
         <AssetGraph
           nodes={data.nodes}
           edges={data.edges}
-          height={560}
+          height={740}
           onNodeClick={handleNodeClick}
           // 血缘总览默认隐藏字段节点，聚焦子图同样隐藏，聚焦指标/表主干
           showFields={false}

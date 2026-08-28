@@ -416,7 +416,11 @@ const MAX_RENDER_NODES = 160;
 // G6 交互（缩放/平移）时全量重绘 canvas，标签/图标/柔光/投影是最重的绘制层。
 // 缩放低于 LOD_COMPACT_ZOOM 时批量切到 compact 状态（隐藏这些层，只留节点主体+边），
 // 放大自动恢复；节点数超过 LOD_LARGE_GRAPH 时初始即 compact，减轻首帧负担。
-const LOD_COMPACT_ZOOM = 0.6;
+// 大数据量下「缩到不可读」反而更糟——信息可见优先于极致帧率。
+// 阈值 0.35 对应 12px 标签约 4px（小但能辨），低于此再隐藏重装饰层（halo/阴影/icon/badge）。
+// 由下方 fitView 最小缩放下限保证大图首屏 zoom ≥ 0.35，compact 通常只在用户主动
+// 滚轮缩小到很小时才触发。
+const LOD_COMPACT_ZOOM = 0.35;
 const LOD_LARGE_GRAPH = 200;
 
 function nodeRank(n: AssetGraphNode): number {
@@ -460,13 +464,14 @@ function pickVisible(
 function layoutConfig(layoutMode: "hierarchy" | "force" | "radial") {
   if (layoutMode === "hierarchy") {
     // 分层布局：血缘 DAG 自上而下（表→指标），节点多时比力导向清晰得多
-    // nodesep/ranksep 大幅加大以容纳「节点下方的完整标签 pill」，避免同 rank 标签互相压字
+    // nodesep/ranksep 收紧（80/70）让 160 节点大图在 zoom 下限 0.35 下能展示更多层级，
+    // 避免被压成一条细带；间距按"节点半径+下方标签"最小需求计算留有余量避免文字压字。
     return {
       type: "antv-dagre",
       rankdir: "TB",
       align: "DL",
-      nodesep: 110,
-      ranksep: 100,
+      nodesep: 80,
+      ranksep: 70,
     };
   }
   if (layoutMode === "radial") {
@@ -615,10 +620,11 @@ function GraphCanvas({
         : n?.domain
           ? _allocateDomainColor(n.domain)
           : TYPE_FALLBACK_COLOR[n?.type ?? "unknown"] ?? TYPE_FALLBACK_COLOR.unknown;
-      // 径向渐变填充：中心提亮 → 0.55 主色 → 边缘压暗，节点呈球面立体感（渐变光晕核心）。
-      // @antv/g 的 r(cx,cy,r) 渐变按 shape bbox 归一化，圆/圆角矩形/椭圆均适用；
-      // 渐变在 useMemo 预计算为字符串，避免每帧重建（性能与纯色一致）。
-      const gradFill = `r(0.5, 0.5, 0.5) 0:${lightenHex(fill, 62)} 0.55:${fill} 1:${darkenHex(fill, 18)}`;
+      // 径向渐变填充：中心提亮 → 0.55 主色 → 边缘微压暗，节点呈轻微球面感。
+      // 提亮/压暗幅度收紧（38/8 而非 62/18）避免小节点下中心过白、边缘过暗导致"脏"或
+      // 与白底标签对比变差；@antv/g 的 r(cx,cy,r) 渐变按 shape bbox 归一化，字符串预计算
+      // 避免每帧重建（性能与纯色一致）。
+      const gradFill = `r(0.5, 0.5, 0.5) 0:${lightenHex(fill, 38)} 0.55:${fill} 1:${darkenHex(fill, 8)}`;
       const stroke = cyc
         ? "#e65100"
         : n?.pii
@@ -745,7 +751,8 @@ function GraphCanvas({
             shadowOffsetY: (d: NodeData) =>
               (d.data as AssetGraphNode | undefined)?.anchor ? 0 : 3,
             // 柔光 halo：节点填充色提亮版作为外圈，让节点从画布上"发光"、更立体。
-            // 枢纽节点（血缘度≥8）halo 更宽更实，形成"骨干发光"的层次
+            // 枢纽节点（血缘度≥8）halo 略宽更实，形成"骨干发光"层次；幅度收紧以免密集
+            // 大图下邻接节点光晕相互侵染、显得"脏乱"。
             halo: (d: NodeData) => !(d.data as AssetGraphNode | undefined)?.anchor,
             haloStroke: (d: NodeData) => {
               const n = d.data as AssetGraphNode | undefined;
@@ -754,14 +761,14 @@ function GraphCanvas({
             },
             haloLineWidth: (d: NodeData) =>
               (nodeStyleCacheRef.current.get(String(d.id))?.hub as boolean | undefined)
-                ? 14
-                : 10,
+                ? 11
+                : 8,
             haloStrokeOpacity: (d: NodeData) =>
               cycleNodesRef.current.has(String(d.id))
-                ? 0.55
+                ? 0.5
                 : (nodeStyleCacheRef.current.get(String(d.id))?.hub as boolean | undefined)
-                  ? 0.6
-                  : 0.42,
+                  ? 0.45
+                  : 0.32,
             // 类型图标：指标 📈 / 表 🗂️ / 字段 🔖，渲染在节点中央
             icon: (d: NodeData) => !(d.data as AssetGraphNode | undefined)?.anchor,
             iconText: (d: NodeData) =>
@@ -819,10 +826,10 @@ function GraphCanvas({
               labelFill: "#b45309",
             },
             inactive: { opacity: 0.2 },
-            // 大数据量 LOD：缩放低于阈值（applyLod）时批量置为 compact——
-            // 隐藏标签/图标/柔光/投影/badge，只保留节点主体与边，显著降低 canvas 重绘开销。
+            // 大数据量 LOD：用户主动滚轮缩到很小时（zoom < 0.35）隐藏重绘制层
+            //（halo/阴影/icon/badge）以保帧率；**标签与白底 pill 始终保留**——
+            // 「节点具体信息」是用户最需要看到的，compact 触发时不能丢掉名字。
             compact: {
-              labelOpacity: 0,
               iconOpacity: 0,
               haloStrokeOpacity: 0,
               haloOpacity: 0,
@@ -1021,19 +1028,24 @@ function GraphCanvas({
         setGraphReady(true);
         onReadyRef.current();
         // 按节点规模自适应 fitView：
-        //  - 节点多（全景）→ always 适配填满画布，分布均匀；
+        //  - 节点多（全景）→ always 适配填满画布，但大图 always 会把 zoom 压到 <0.2，
+        //    节点缩成亚像素、信息全丢；故叠加最小缩放下限 0.35 保证标签可读，
+        //    用户可手动滚轮继续缩（<0.35 触发 compact 隐藏重装饰层，标签仍保留）；
         //  - 节点少（聚焦视图）→ overflow 仅在内容超出视口时裁剪，不把少量节点放大填满画布。
         try {
-          graph.fitView(
-            nodeCountRef.current > 5
-              ? { when: "always" }
-              : { when: "overflow" },
-          );
+          if (nodeCountRef.current > 5) {
+            graph.fitView({ when: "always" });
+            if (typeof graph.getZoom === "function" && graph.getZoom() < 0.35) {
+              void graph.zoomTo?.(0.35, false).catch(() => {});
+            }
+          } else {
+            graph.fitView({ when: "overflow" });
+          }
         } catch {
           /* fitView 偶尔在过渡期失败 */
         }
-        // 大数据量 LOD：fitView 之后按当前缩放应用 compact——
-        // 全景大图会被缩到 zoom<0.6，此时立即隐藏标签/图标/柔光，避免首帧全量绘制卡顿。
+        // 大数据量 LOD：fitView 缩放下限 0.35 后，初始首屏通常不再触发 compact；
+        // 此处保留 applyLod 仅用于用户后续滚轮缩到 < 0.35 时切换重装饰层（标签仍保留）。
         applyLod();
       })
       .catch((err) => {
