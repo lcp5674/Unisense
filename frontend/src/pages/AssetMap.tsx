@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Alert,
@@ -2561,7 +2561,13 @@ function HeatmapTab() {
 
 function OwnerTab() {
   const [ownerId, setOwnerId] = useState<number | undefined>(undefined);
-  const [ownerOptions, setOwnerOptions] = useState<Array<{ label: string; value: number }>>([]);
+  const [ownerIds, setOwnerIds] = useState<number[]>([]);
+  // 责任人真实姓名映射（display_name 优先，回退 username）；拉取失败降级「责任人 #id」
+  const [userMap, setUserMap] = useState<Record<number, string>>({});
+  const ownerOptions = useMemo(
+    () => ownerIds.map((id) => ({ label: userMap[id] ?? `责任人 #${id}`, value: id })),
+    [ownerIds, userMap],
+  );
   const [view, setView] = useState<AssetOwnerView | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2586,16 +2592,25 @@ function OwnerTab() {
           Number(o),
         );
         if (owners.length > 0) {
-          const opts = owners.map((id) => ({ label: `责任人 #${id}`, value: id }));
-          setOwnerOptions(opts);
-          setOwnerId((prev) => prev ?? opts[0].value);
+          setOwnerIds(owners);
+          setOwnerId((prev) => prev ?? owners[0]);
         } else {
           // 图谱暂无责任人信息时，不伪造责任人（此前回退「责任人 #1」会指向不存在
           // 的用户，选中后 fetchAssetOwnerView(1) 必然报错/空白）——保持空选项，
           // 展示「从图谱提取责任人…」占位，待资产接入 owner 后可下拉选择。
-          setOwnerOptions([]);
+          setOwnerIds([]);
           setOwnerId(undefined);
         }
+      })
+      .catch(() => {});
+    // 责任人真实姓名（下拉可读；拉取失败降级「责任人 #id」，不阻塞 Owner 视图）
+    listUsers()
+      .then((users) => {
+        const m: Record<number, string> = {};
+        (users ?? []).forEach((u) => {
+          m[u.id] = u.display_name || u.username;
+        });
+        setUserMap(m);
       })
       .catch(() => {});
   }, []);
@@ -2619,7 +2634,8 @@ function OwnerTab() {
     ]
       .filter(Boolean)
       .join(" · ");
-    const ownerLabel = view?.owner_name ?? `#${ownerId}`;
+    const ownerLabel =
+      ownerId != null ? view?.owner_name ?? userMap[ownerId] ?? `#${ownerId}` : "责任人";
     setDrillTitle(`${ownerLabel} 指标明细${parts ? `（${parts}）` : ""}`);
     setDrillOpen(true);
     setDrillLoading(true);
@@ -2669,7 +2685,8 @@ function OwnerTab() {
     );
   }
 
-  const ownerName = view?.owner_name ?? `责任人 #${ownerId}`;
+  const ownerName =
+    ownerId != null ? view?.owner_name ?? userMap[ownerId] ?? `责任人 #${ownerId}` : "未指定";
   const total = view?.metrics.total ?? 0;
   const published = view?.metrics.published ?? 0;
   const draft = view?.metrics.draft ?? 0;

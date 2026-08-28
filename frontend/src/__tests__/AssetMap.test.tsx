@@ -1664,6 +1664,35 @@ describe("AssetMap", () => {
     expect(fetchAssetOwnerView).not.toHaveBeenCalled();
   });
 
+  it("owner view dropdown resolves real user name instead of '责任人 #N' placeholder", async () => {
+    const user = userEvent.setup();
+    // 图谱含 owner=1，listUsers 返回该用户 display_name=管理员 → 下拉展示真实姓名
+    vi.mocked(fetchAssetGraph).mockResolvedValue({
+      nodes: [
+        {
+          id: "m1",
+          label: "finance_revenue_sum_d",
+          type: "metric",
+          domain: "finance",
+          owner: "1",
+        },
+      ],
+      edges: [],
+    });
+    vi.mocked(fetchAssetOwnerView).mockResolvedValue({
+      ...mockOwnerViewData,
+      owner_name: "管理员",
+    });
+    renderAssetMap();
+
+    await waitFor(() => expect(screen.getByText("Owner 视图")).toBeInTheDocument());
+    await user.click(screen.getByText("Owner 视图"));
+
+    // 下拉与视图名展示真实用户名，而非「责任人 #1」占位
+    await waitFor(() => expect(screen.getAllByText("管理员").length).toBeGreaterThan(0));
+    expect(screen.queryByText("责任人 #1")).not.toBeInTheDocument();
+  });
+
   it("description coverage tab (summary) shows stats and 前往采集目录治理 button", async () => {
     const user = userEvent.setup();
     renderAssetMap();
