@@ -441,18 +441,12 @@ class HiveCollector(BaseCollector):
             for i, col in enumerate(batch):
                 if i >= len(safe_names):
                     break
-                value = ""
-                for row in rows:
-                    if i < len(row) and row[i] not in (None, "", "NULL"):
-                        value = str(row[i])
-                        break
-                if value:
-                    col["sample"] = self._mask_sample(value)
-                    # 类别须在打码前对明文判定：掩码丢失格式特征，
-                    # 事后无法反推是手机号还是身份证（防跨规则误判）
-                    _rule_id = self._sample_rule_id(value)
-                    if _rule_id:
-                        col["sample_rule"] = _rule_id
+                values = [
+                    str(row[i]) for row in rows
+                    if i < len(row) and row[i] not in (None, "", "NULL")
+                ]
+                if values:
+                    self._apply_samples(col, values)
         return columns
 
     async def sample_columns(

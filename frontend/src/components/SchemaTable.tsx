@@ -135,15 +135,28 @@ export function SchemaTable({
     {
       title: "样本值",
       key: "sample",
-      width: 150,
+      width: 220,
       render: (_: unknown, record: SchemaColumn) => {
-        const sample = record.sample;
-        if (!sample) return <span className="muted">-</span>;
+        // 多值样本列表（最多 sample_rows 条，已打码）；兼容存量单值字符串
+        const raw = record.sample;
+        const samples = Array.isArray(raw) ? raw.filter(Boolean) : raw ? [raw] : [];
+        if (samples.length === 0) return <span className="muted">-</span>;
         const ruleLabel = SAMPLE_RULE_LABEL[record.sample_rule ?? ""];
+        const preview = samples.slice(0, 3);
+        const rest = samples.length - preview.length;
         return (
-          <Tooltip title={ruleLabel ? `脱敏样本（识别为${ruleLabel}）` : "脱敏样本"}>
-            <Space size={4}>
-              <span className="mono">{sample}</span>
+          <Tooltip
+            title={
+              ruleLabel
+                ? `脱敏样本（识别为${ruleLabel}）：${samples.join(" / ")}`
+                : `脱敏样本：${samples.join(" / ")}`
+            }
+          >
+            <Space size={4} wrap>
+              {preview.map((s, i) => (
+                <span className="mono" key={i}>{s}</span>
+              ))}
+              {rest > 0 && <span className="muted">+{rest}</span>}
               {ruleLabel && <Tag color="orange">{ruleLabel}</Tag>}
             </Space>
           </Tooltip>

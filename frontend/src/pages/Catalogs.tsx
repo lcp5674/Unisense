@@ -220,8 +220,14 @@ export function Catalogs() {
             : undefined,
           nullable: c.nullable != null ? Boolean(c.nullable) : undefined,
           default: c.default != null ? String(c.default) : undefined,
-          // 脱敏样本值 + 采样命中的敏感类别（立即采样/采集采样后才有）
-          sample: c.sample != null ? String(c.sample) : undefined,
+          // 脱敏样本值（多值列表）+ 采样命中的敏感类别（立即采样/采集采样后才有）；
+          // 兼容存量单值字符串：统一转为列表供字段清单多值展示
+          sample:
+            c.sample != null
+              ? Array.isArray(c.sample)
+                ? c.sample.map((s) => String(s))
+                : [String(c.sample)]
+              : undefined,
           sample_rule: c.sample_rule != null ? String(c.sample_rule) : undefined,
         } as SchemaColumn;
       }

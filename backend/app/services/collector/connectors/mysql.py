@@ -245,14 +245,12 @@ class InformationSchemaCollector(BaseCollector):
                 await self._sample_one_by_one(entity_name, schema, tbl, n, safe)
                 continue
             for col, name in safe:
-                value = ""
-                for r in rows:
-                    v = r.get(name)
-                    if v is not None and str(v) not in ("", "NULL"):
-                        value = str(v)
-                        break
-                if value:
-                    self._apply_sample(col, value)
+                values = [
+                    str(r[name]) for r in rows
+                    if r.get(name) is not None and str(r[name]) not in ("", "NULL")
+                ]
+                if values:
+                    self._apply_samples(col, values)
         return columns
 
     async def _sample_one_by_one(
@@ -283,11 +281,12 @@ class InformationSchemaCollector(BaseCollector):
                     exc,
                 )
                 continue
-            for r in rows:
-                v = r.get(name)
-                if v is not None and str(v) not in ("", "NULL"):
-                    self._apply_sample(col, str(v))
-                    break
+            values = [
+                str(r[name]) for r in rows
+                if r.get(name) is not None and str(r[name]) not in ("", "NULL")
+            ]
+            if values:
+                self._apply_samples(col, values)
 
     async def sample_columns(
         self, entity_name: str, schema_json: dict[str, Any]

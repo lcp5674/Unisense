@@ -182,15 +182,33 @@ class BaseCollector(ABC):
         """
         return self._classifier.classify_sample(sample)
 
-    def _apply_sample(self, col: dict[str, Any], value: str) -> None:
+    def _apply_samples(self, col: dict[str, Any], values: list[str]) -> None:
         """把采样值写入字段定义（打码 + 类别），各连接器共用。
 
-        类别与打码值一并落库：掩码不可逆，事后无法补判类别。
+        保留最多 ``_sampling_max_rows`` 条（按打码值去重）写入 ``columns[].sample``
+        为列表；类别（``sample_rule``）记录首个明文命中的敏感类别——掩码不可逆，
+        事后无法补判类别，故类别必须在打码前对明文判定。
         """
-        col["sample"] = self._mask_sample(value)
-        rule_id = self._sample_rule_id(value)
-        if rule_id:
-            col["sample_rule"] = rule_id
+        seen: set[str] = set()
+        masked: list[str] = []
+        rule_id: str | None = None
+        for v in values:
+            s = str(v).strip()
+            if not s or s == "NULL":
+                continue
+            m = self._mask_sample(s)
+            if m in seen:
+                continue
+            seen.add(m)
+            masked.append(m)
+            if rule_id is None:
+                rule_id = self._sample_rule_id(s)
+            if len(masked) >= self._sampling_max_rows:
+                break
+        if masked:
+            col["sample"] = masked
+            if rule_id:
+                col["sample_rule"] = rule_id
 
     async def list_databases(self) -> list[str]:
         """枚举该实例下可采集的非系统数据库（创建数据源时选择目标库）。

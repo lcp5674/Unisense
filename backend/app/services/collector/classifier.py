@@ -498,7 +498,12 @@ class SensitivityClassifier:
             # 豁免（误报反馈闭环写入 pii_vocab）：精确字段名或前缀命中 → 跳过不判
             if name in self._exempt_fields or name.startswith(self._exempt_prefixes):
                 continue
-            sample = str(col.get("sample", "") or "")
+            # 样本值：采样落库为列表（多值脱敏样本）；存量/手填场景可能为单值字符串
+            raw_sample = col.get("sample", "") or ""
+            if isinstance(raw_sample, list):
+                sample_list = [str(x) for x in raw_sample if x]
+            else:
+                sample_list = [str(raw_sample)] if raw_sample else []
             comment = str(col.get("comment", "") or "").strip()
             # 聚合统计字段（*_cnt/*_rate 等，可带分桶编号）存群体计数/比率，不指向个体；
             # 但 heart_rate（心率）等个人测量值豁免（以值型前缀开头）。
@@ -517,14 +522,14 @@ class SensitivityClassifier:
                 sample_rule = str(col.get("sample_rule", "") or "")
                 sample_hit = bool(
                     sample_re
-                    and sample
+                    and sample_list
                     and (
                         (sample_rule and sample_rule == rule.rule_id)
-                        or sample_re.match(sample)
+                        or any(sample_re.match(s) for s in sample_list)
                     )
                 )
                 # 打码样本（存量无 sample_rule）：只知道"敏感"、不知道"哪类"
-                masked_sensitive = bool(sample and _MASK_STAR in sample)
+                masked_sensitive = bool(any(_MASK_STAR in s for s in sample_list))
                 if name_re.search(name) or (comment and name_re.search(comment)):
                     name_hit = bool(name_re.search(name))
                     comment_hit = bool(comment and name_re.search(comment))
@@ -581,7 +586,7 @@ class SensitivityClassifier:
                         rule=rule.rule_id,
                         confidence=confidence,
                         matched_by=matched_by,
-                        sample=sample,
+                        sample=sample_list[0] if sample_list else "",
                     )
                 )
                 break

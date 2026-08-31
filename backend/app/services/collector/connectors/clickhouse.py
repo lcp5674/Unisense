@@ -211,15 +211,13 @@ class ClickHouseCollector(BaseCollector):
                 continue
             rows = self._parse_tsv(raw, len(safe))
             for idx, (col, _name) in enumerate(safe):
-                value = ""
-                for r in rows:
-                    v = r[idx]
-                    # ClickHouse TabSeparated 以 \N 表示 NULL
-                    if v not in ("", "\\N", "NULL"):
-                        value = v
-                        break
-                if value:
-                    self._apply_sample(col, value)
+                # ClickHouse TabSeparated 以 \N 表示 NULL
+                values = [
+                    r[idx] for r in rows
+                    if len(r) > idx and r[idx] not in ("", "\\N", "NULL")
+                ]
+                if values:
+                    self._apply_samples(col, values)
         return columns
 
     async def _sample_one_by_one(
@@ -246,10 +244,12 @@ class ClickHouseCollector(BaseCollector):
                     exc,
                 )
                 continue
-            for r in self._parse_tsv(raw, 1):
-                if r and r[0] not in ("", "\\N", "NULL"):
-                    self._apply_sample(col, r[0])
-                    break
+            values = [
+                r[0] for r in self._parse_tsv(raw, 1)
+                if r and r[0] not in ("", "\\N", "NULL")
+            ]
+            if values:
+                self._apply_samples(col, values)
 
     async def sample_columns(
         self, entity_name: str, schema_json: dict[str, Any]

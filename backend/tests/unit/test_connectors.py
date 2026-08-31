@@ -260,8 +260,50 @@ async def test_postgres_collector_samples_columns_with_pg_dialect():
     assert '"phone" IS NOT NULL OR "user_name" IS NOT NULL' in conn.sample_sql[0]
     assert "LIMIT 5" in conn.sample_sql[0]
     # 手机样本打码，user_name 为 NULL → 不写 sample
-    assert cols[0]["sample"] == "138****5678"
+    assert cols[0]["sample"] == ["138****5678"]
     assert "sample" not in cols[1]
+
+
+async def test_postgres_collector_keeps_multiple_distinct_samples():
+    """多值采样：同一列保留多条不同样本（去重、按 sample_rows 截断）。"""
+    conn = _SamplingPgConnector(
+        ["users"],
+        {
+            "users": [
+                {"column_name": "phone", "data_type": "varchar"},
+                {"column_name": "user_name", "data_type": "varchar"},
+            ]
+        },
+        sample_rows=[
+            {"phone": "13812345678", "user_name": "张"},
+            {"phone": "13987654321", "user_name": "张"},
+        ],
+    )
+    collector = PostgresCollector(conn)
+    collector.set_sampling(5)
+    result = await collector.collect(MagicMock(source_id="s1", domain="public"))
+
+    cols = result.specs[0].schema_json["columns"]
+    # phone 两行不同值 → 保留 2 条打码样本；user_name 两行同值 → 去重为 1 条
+    assert cols[0]["sample"] == ["138****5678", "139****4321"]
+    assert cols[1]["sample"] == ["张"]
+
+
+async def test_postgres_collector_truncates_samples_to_limit():
+    """采样行数上限：sample_rows 配置限制每列最多保留的样本条数。"""
+    conn = _SamplingPgConnector(
+        ["users"],
+        {"users": [{"column_name": "phone", "data_type": "varchar"}]},
+        sample_rows=[
+            {"phone": f"1381234567{i}"} for i in range(8)  # 8 个不同号码
+        ],
+    )
+    collector = PostgresCollector(conn)
+    collector.set_sampling(3)  # 每列最多 3 条
+    result = await collector.collect(MagicMock(source_id="s1", domain="public"))
+
+    cols = result.specs[0].schema_json["columns"]
+    assert len(cols[0]["sample"]) == 3
 
 
 async def test_postgres_collector_skips_sampling_when_disabled():
@@ -305,7 +347,7 @@ async def test_postgres_collect_entity_samples_columns():
 
     assert spec is not None
     assert len(conn.sample_sql) == 1
-    assert spec.schema_json["columns"][0]["sample"] == "110101********1234"
+    assert spec.schema_json["columns"][0]["sample"] == ["110101********1234"]
 
 
 # ---------- HiveCollector ----------
@@ -633,8 +675,8 @@ async def test_clickhouse_collector_samples_columns_via_http():
     assert "FROM `test_db`.`events`" in sample_sql[0]
     assert "LIMIT 5 FORMAT TabSeparated" in sample_sql[0]
     # 手机打码；email 跳过首行 \N 取次行值；nickname 全 NULL → 不写 sample
-    assert cols[0]["sample"] == "138****5678"
-    assert cols[1]["sample"] == "a***@b.com"
+    assert cols[0]["sample"] == ["138****5678"]
+    assert cols[1]["sample"] == ["a***@b.com"]
     assert "sample" not in cols[2]
 
 
@@ -696,7 +738,7 @@ async def test_clickhouse_collect_entity_samples_columns():
     assert spec is not None
     assert len(sample_sql) == 1
     assert "FROM `test_db`.`users`" in sample_sql[0]
-    assert spec.schema_json["columns"][0]["sample"] == "110101********1234"
+    assert spec.schema_json["columns"][0]["sample"] == ["110101********1234"]
 
 
 # ---------- KafkaCollector ----------
@@ -1021,8 +1063,8 @@ async def test_hive_collector_samples_columns():
     collector.set_sampling(5)
     result = await collector.collect(MagicMock(source_id="hive1", domain="d"))
     cols = {c["name"]: c for c in result.specs[0].schema_json["columns"]}
-    assert cols["order_id"]["sample"] == "1"  # 非敏感值原样
-    assert cols["phone"]["sample"] == "138****1234"  # 手机号打码
+    assert cols["order_id"]["sample"] == ["1"]  # 非敏感值原样
+    assert cols["phone"]["sample"] == ["138****1234"]  # 手机号打码
 
 
 async def test_hive_collector_no_sampling_when_disabled():

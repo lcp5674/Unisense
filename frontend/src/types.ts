@@ -2393,8 +2393,8 @@ export interface SchemaColumn {
   description_source?: DescriptionSource | null;
   nullable?: boolean;
   default?: string;
-  /** 脱敏样本值（采集采样后才有；已打码，如 138****1234） */
-  sample?: string | null;
+  /** 脱敏样本值（采集采样后才有；多值列表，已打码，如 138****1234；兼容旧单值字符串） */
+  sample?: string | string[] | null;
   /** 样本命中的敏感类别（phone/id_card/email/bank_card），由采样时对明文判定 */
   sample_rule?: string | null;
 }

@@ -634,6 +634,40 @@ describe("Catalogs 页面", () => {
     });
   });
 
+  it("字段详情展示多值脱敏样本（采样 rows>1 时）", async () => {
+    // 多值样本列表（新采样落库形态：sample 为 string[]）
+    const multiCols = {
+      ...CATALOGS[0],
+      schema_def: {
+        columns: [
+          {
+            name: "patient_phone",
+            type: "varchar",
+            comment: "患者手机号",
+            sample: ["138****1234", "139****4321", "137****5678"],
+            sample_rule: "phone",
+          },
+        ],
+      },
+    } as DBCatalog;
+    mockedList.mockResolvedValue({ items: [multiCols], total: 1, page: 1, page_size: 20 });
+
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByText("字段详情"));
+    expect(await screen.findByText("patient_phone")).toBeTruthy();
+    // 多条脱敏样本全部渲染
+    expect(screen.getByText("138****1234")).toBeTruthy();
+    expect(screen.getByText("139****4321")).toBeTruthy();
+    expect(screen.getByText("137****5678")).toBeTruthy();
+    // 命中类别标签（SAMPLE_RULE_LABEL：phone → 手机）
+    expect(screen.getByText("手机")).toBeTruthy();
+  });
+
   it("展示采样覆盖率条（表/列占比与双重验证列数）", async () => {
     mockedCoverage.mockResolvedValue({
       source_id: null,

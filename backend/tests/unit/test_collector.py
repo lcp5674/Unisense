@@ -4700,8 +4700,8 @@ async def test_mysql_collector_samples_columns():
     collector.set_sampling(5)
     result = await collector.collect(MagicMock(source_id="s1"))
     cols = {c["name"]: c for c in result.specs[0].schema_json["columns"]}
-    assert cols["order_id"]["sample"] == "1"  # 非敏感值原样
-    assert cols["phone"]["sample"] == "138****1234"  # 手机号打码
+    assert cols["order_id"]["sample"] == ["1"]  # 非敏感值原样
+    assert cols["phone"]["sample"] == ["138****1234"]  # 手机号打码
     # 采样 SQL 形态：批量列、WHERE 非空、LIMIT 上限
     sql0 = conn.sample_sqls[0]
     assert "SELECT `order_id`,`phone` FROM `finance`.`orders`" in sql0
@@ -4741,15 +4741,14 @@ def _sampling_collector(rows: list[dict[str, Any]]):
         async def sample_columns(self, entity_name: str, schema_json: dict[str, Any]):
             cols = schema_json.get("columns") or []
             for col in cols:
-                for row in rows:
-                    v = row.get(str(col.get("name")))
-                    if v not in (None, ""):
-                        # 与真实连接器一致：打码存值 + 打码前记录命中类别
-                        col["sample"] = self._mask_sample(str(v))
-                        rule_id = self._sample_rule_id(str(v))
-                        if rule_id:
-                            col["sample_rule"] = rule_id
-                        break
+                values = [
+                    str(row[str(col.get("name"))])
+                    for row in rows
+                    if row.get(str(col.get("name"))) not in (None, "")
+                ]
+                if values:
+                    # 与真实连接器一致：多值打码存列表 + 打码前记录命中类别
+                    self._apply_samples(col, values)
             return schema_json
 
     return SamplingCollector()
@@ -4777,7 +4776,7 @@ async def test_sample_entity_writes_masked_samples():
     assert result["new_pii_columns"] == ["contact"]
     assert result["cleared_pii_columns"] == []
     # 样本已打码落库（绝不写原始手机号）
-    assert cat.schema_json["columns"][0]["sample"] == "138****1234"
+    assert cat.schema_json["columns"][0]["sample"] == ["138****1234"]
     # PII 明细含脱敏样本，供治理端复核；字段名无语义 → 仅样本命中
     hit = repo.upsert_classification.await_args.args[2][0]
     assert hit["sample"] == "138****1234"
@@ -5014,8 +5013,8 @@ async def test_sample_batch_failure_falls_back_to_per_column():
     assert len(conn.single_sqls) == 3  # 再逐列重试每一列
     # 健康列采到样本（非敏感值原样、敏感值打码）
     by_name = {c["name"]: c for c in out}
-    assert by_name["id"]["sample"] == "1"
-    assert by_name["remark"]["sample"] == "备注"
+    assert by_name["id"]["sample"] == ["1"]
+    assert by_name["remark"]["sample"] == ["备注"]
     # 问题列被隔离跳过，不影响其他列
     assert "sample" not in by_name["phone_number"]
 
@@ -5032,5 +5031,5 @@ async def test_sample_per_column_masks_sensitive_and_records_rule():
     columns = [{"name": "phone_number", "type": "varchar"}]
     out = await collector._sample_columns("finance.orders", columns)
 
-    assert out[0]["sample"] == "138****1234"  # 打码存储
+    assert out[0]["sample"] == ["138****1234"]  # 打码存储
     assert out[0]["sample_rule"] == "phone"  # 类别随打码值落库

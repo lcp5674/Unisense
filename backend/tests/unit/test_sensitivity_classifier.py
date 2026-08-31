@@ -290,6 +290,44 @@ def test_detect_pii_masked_sample_triggers_name_sample() -> None:
     assert hits[0].confidence == pytest.approx(0.95)  # 0.9 + 0.05
 
 
+def test_detect_pii_list_sample_any_hit() -> None:
+    """多值样本（列表）：任一值命中样本正则即触发 name+sample 双验证。"""
+    clf = SensitivityClassifier()
+    hits = clf.detect_pii_fields(
+        "ods.ods_user_phone",
+        _schema({"name": "phone", "comment": "手机号",
+                 "sample": ["普通值", "138****1234", "abc"]}),
+    )
+    assert hits and hits[0].rule == "phone" and hits[0].matched_by == "name+sample"
+    # PiiFieldHit.sample 取首条样本展示
+    assert hits[0].sample == "普通值"
+
+
+def test_detect_pii_list_sample_only_hit() -> None:
+    """多值样本仅样本命中：字段名无语义（contact）但样本类别已记录 → 判 PII。
+
+    打码样本丢失格式特征、无法独立判类别，故「仅样本命中」依赖采样时记录的
+    ``sample_rule``（对明文判定的类别）——这是采样闭环的设计契约。
+    """
+    clf = SensitivityClassifier()
+    hits = clf.detect_pii_fields(
+        "ods.t",
+        _schema({"name": "contact", "sample": ["138****1234", "139****4321"],
+                 "sample_rule": "phone"}),
+    )
+    assert hits and hits[0].rule == "phone" and hits[0].matched_by == "sample"
+
+
+def test_detect_pii_list_sample_masked_any() -> None:
+    """多值样本中任一含掩码标记 → 打码敏感佐证（名称命中时上调置信度）。"""
+    clf = SensitivityClassifier()
+    hits = clf.detect_pii_fields(
+        "ods.t",
+        _schema({"name": "phone", "comment": "手机号", "sample": ["abc", "138****1234"]}),
+    )
+    assert hits and hits[0].matched_by == "name+sample"
+
+
 # ---- PII 上下文词表注入（pii_vocab 可配置）----
 
 
