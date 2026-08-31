@@ -347,6 +347,8 @@ export function MetricCreate() {
   // OneData 向导：当前步骤（0=业务域 1=指标定义 2=口径确认 3=治理/提交）。
   // 分步一屏 + 底部导航，替代原先"编号打补丁"的平铺卡片流（方案 C 重构）。
   const [currentStep, setCurrentStep] = useState(0);
+  // 向导最大已到达步骤（引导流：只能回看已到达的步骤，不能向前跳到未完成的步骤）
+  const [maxStepReached, setMaxStepReached] = useState(0);
   // 当前用户角色（挂载时获取）：管理/数仓角色默认展开高级治理，业务角色默认折叠
   const [currentRole, setCurrentRole] = useState<string>("");
   // 当前用户完整信息（跨域权限预检：domain_admin/metric_owner 仅可操作本域指标）
@@ -521,6 +523,8 @@ export function MetricCreate() {
   // 批量编辑向导（问题 2）：把所有候选一次性放进分步向导批量编辑（不再逐条跳单条）
   const [sqlBatchWizardOpen, setSqlBatchWizardOpen] = useState(false);
   const [sqlBatchWizardStep, setSqlBatchWizardStep] = useState(0);
+  // 批量向导最大已到达步骤（与主向导一致：不能点击 Steps 跳到未完成步骤）
+  const [sqlBatchMaxStep, setSqlBatchMaxStep] = useState(0);
   // P2-8：切分模式（semicolon/statement/custom）——后端已实现，前端此前硬编码 statement
   const [sqlBatchSplitMode, setSqlBatchSplitMode] = useState<"semicolon" | "statement" | "custom">(
     "statement"
@@ -2177,8 +2181,22 @@ export function MetricCreate() {
   // OneData 向导：下一步纯前进（不逐级硬校验——避免打断"先粗填再回头改"的构建式流程；
   // 最终提交由 handleSubmit 的类型化必填校验统一兜底，保证错误在真正创建前被拦截）
   function handleNext() {
-    setCurrentStep((s) => Math.min(s + 1, 2));
+    setCurrentStep((s) => {
+      const next = Math.min(s + 1, 2);
+      setMaxStepReached((m) => Math.max(m, next));
+      return next;
+    });
   }
+
+  // 向导步骤跳转（Steps 点击）：只能回看已到达的步骤（≤ maxStepReached），
+  // 不能向前跳到未完成的步骤——引导流要求一步步完成（下一步/上一步按钮是唯一前进方式）
+  const handleStepJump = (c: number) => {
+    if (c > maxStepReached) {
+      message.info("请按顺序完成当前步骤，再进入下一步");
+      return;
+    }
+    setCurrentStep(c);
+  };
 
   // 向导步骤导航：每步内容末尾常驻，形成"填完当前步 → 下一步"的引导流。
   // Step0-1 显示「上一步 + 下一步」，Step2（最后一步）显示「上一步 + 冲突预检 + 创建草稿」。
@@ -2516,7 +2534,7 @@ export function MetricCreate() {
       </Space>
       <Steps
         current={currentStep}
-        onChange={(c) => setCurrentStep(c)}
+        onChange={handleStepJump}
         style={{ marginBottom: 20 }}
         items={[
           { title: "业务域", description: "选域并继承域默认值" },
@@ -3704,6 +3722,7 @@ export function MetricCreate() {
                       icon={<BarsOutlined />}
                       onClick={() => {
                         setSqlBatchWizardStep(0);
+                        setSqlBatchMaxStep(0);
                         setSqlBatchWizardOpen(true);
                       }}
                       data-testid="sql-batch-open-wizard"
@@ -4256,7 +4275,13 @@ export function MetricCreate() {
       >
         <Steps
           current={sqlBatchWizardStep}
-          onChange={setSqlBatchWizardStep}
+          onChange={(c) => {
+            if (c > sqlBatchMaxStep) {
+              message.info("请按顺序完成当前步骤，再进入下一步");
+              return;
+            }
+            setSqlBatchWizardStep(c);
+          }}
           size="small"
           style={{ marginBottom: 16 }}
           items={[
@@ -4636,7 +4661,13 @@ export function MetricCreate() {
           <Button
             type="primary"
             disabled={sqlBatchWizardStep === 2}
-            onClick={() => setSqlBatchWizardStep((s) => Math.min(2, s + 1))}
+            onClick={() =>
+              setSqlBatchWizardStep((s) => {
+                const next = Math.min(2, s + 1);
+                setSqlBatchMaxStep((m) => Math.max(m, next));
+                return next;
+              })
+            }
             data-testid="sql-batch-wizard-next"
           >
             下一步

@@ -2030,6 +2030,45 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     // 原子分支的只读粒度（label「粒度」+ 无 Select）已消失——不再与「派生指标」选中态撕裂
     expect(screen.queryByText("粒度", { selector: ".ant-form-item-label label" })).toBeNull();
   });
+
+  it("向导步骤不能随意点击跳转——必须按顺序逐步完成（未到达的步骤点击被拦截）", async () => {
+    renderPage();
+    await screen.findByText("① 选择业务域");
+    const stepItems = () => document.querySelectorAll(".ant-steps-item");
+    // 点击第 N 步：antd 将点击绑定在 .ant-steps-item-container（role=button）上
+    const clickStep = (idx: number) => {
+      const el = stepItems()[idx]?.querySelector(".ant-steps-item-container");
+      if (el) fireEvent.click(el);
+    };
+    // 初始在 Step 0（业务域），直接点击第 3 步「具体实现」→ 被拦截，仍停留 Step 0
+    clickStep(2);
+    await waitFor(() => {
+      expect(screen.getByText("请按顺序完成当前步骤，再进入下一步")).toBeTruthy();
+    });
+    expect(screen.getByText("① 选择业务域")).toBeTruthy();
+    expect(screen.queryByText("⑥ 关联数据表")).toBeNull();
+    // 点「下一步」进入 Step 1（指标基本信息）
+    fireEvent.click(screen.getByRole("button", { name: "下一步：指标基本信息" }));
+    await waitFor(() => {
+      expect(screen.getByText("② 指标基本信息")).toBeTruthy();
+    });
+    // 再直接点第 3 步 → 仍被拦截（未到达过，不能向前跳）
+    clickStep(2);
+    await waitFor(() => {
+      expect(screen.queryByText("⑥ 关联数据表")).toBeNull();
+    });
+    expect(screen.getByText("② 指标基本信息")).toBeTruthy();
+    // 点「下一步」进入 Step 2（具体实现）——按顺序到达
+    fireEvent.click(screen.getByRole("button", { name: "下一步：具体实现" }));
+    await waitFor(() => {
+      expect(screen.getByText("⑥ 关联数据表")).toBeTruthy();
+    });
+    // 已到达过 Step 2，可点击 Steps 回看 Step 0（业务域）——回看已到达步骤不受限
+    clickStep(0);
+    await waitFor(() => {
+      expect(screen.getByText("① 选择业务域")).toBeTruthy();
+    });
+  });
 });
 
 describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数仓SQL口径）", () => {
