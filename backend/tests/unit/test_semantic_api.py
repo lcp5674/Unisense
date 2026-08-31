@@ -583,7 +583,7 @@ async def test_instantiate_skips_inapplicable_required_fields() -> None:
 
 
 async def test_instantiate_keeps_applicable_required_fields() -> None:
-    """豁免只针对类型不适用字段：metric_code 对原子适用，仍缺失时照常 422。"""
+    """豁免只针对「类型不适用 + 系统可自动生成」字段：name 适用且缺失仍报必填缺失。"""
     from app.api.semantic import instantiate_template
     from app.core.exceptions import ValidationError
 
@@ -594,12 +594,34 @@ async def test_instantiate_keeps_applicable_required_fields() -> None:
     with patch_obj, pytest.raises(ValidationError) as ei:
         await instantiate_template(
             user=user, template_id=1, request=req,
+            body={"domain": "sales"}, db=db,
+        )
+    # currency 对原子豁免、metric_code 系统可自动生成豁免；name 适用且缺失 → 仍报必填缺失
+    assert "指标名称" in ei.value.message
+    assert "metric_code" not in ei.value.message
+    assert "币种" not in ei.value.message
+    svc_instance.create_metric.assert_not_called()
+
+
+async def test_instantiate_metric_code_missing_auto_generates() -> None:
+    """强韧性：metric_code 是系统可自动生成字段（schema 缺省由 Service 层补全），
+    模板 required_fields 含它但用户留空时不得 422——留空交由 create_metric 自动生成。
+    """
+    from app.api.semantic import instantiate_template
+
+    _tpl, db, patch_obj, svc_instance = _instantiate_template_mock(type_="atomic")
+    _tpl.required_fields = ["name", "domain", "metric_code"]
+    user = MagicMock(id=1)
+    req = MagicMock()
+    with patch_obj:
+        await instantiate_template(
+            user=user, template_id=1, request=req,
             body={"name": "测试", "domain": "sales"}, db=db,
         )
-    # currency 对原子豁免；metric_code 适用且缺失 → 仍报必填缺失
-    assert "metric_code" in ei.value.message
-    assert "currency" not in ei.value.message
-    svc_instance.create_metric.assert_not_called()
+    # metric_code 未提供 → 必填校验通过（豁免），交由 Service 层自动生成
+    assert svc_instance.create_metric.await_count == 1
+    create_req = svc_instance.create_metric.call_args[0][0]
+    assert create_req.metric_code is None
 
 
 async def test_instantiate_bool_false_is_not_missing() -> None:

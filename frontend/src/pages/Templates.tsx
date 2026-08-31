@@ -138,12 +138,16 @@ function inapplicableRequiredFields(
 }
 
 // 表单必填规则：模板 required_fields 含该字段且对当前类型适用 → required（中文提示）；否则空规则。
+// metric_code 例外：系统可自动生成（后端 MetricCreateRequest 缺省由 Service 层补全，
+// 对齐后端 _inapplicable_required_fields 豁免）——模板设为必填表达「建议指定」，但
+// 留空系统兜底生成，前端不强制（否则与「留空自动生成」提示矛盾，提交被 antd 拦截）。
 function requiredRuleFor(
   field: string,
   required: string[],
   inapp: Set<string>,
   label: string,
 ): Array<{ required: boolean; message: string }> {
+  if (field === "metric_code") return [];
   return required.includes(field) && !inapp.has(field)
     ? [{ required: true, message: `请填写${label}` }]
     : [];
@@ -1241,7 +1245,7 @@ export function Templates() {
                 instantiateTarget ? (
                   reqFields.includes("metric_code") && !reqInapp.has("metric_code") ? (
                     <span className="muted" style={{ fontSize: 12 }}>
-                      模板要求必须指定指标编码；模板编码 {instantiateTarget.code} 非 4 段指标编码，请自行填写（如加业务后缀）
+                      模板要求指标编码（留空由系统自动生成）；模板编码 {instantiateTarget.code} 非 4 段，如需指定请按 4 段式填写
                     </span>
                   ) : validateMetricCode(instantiateTarget.code) ? (
                     <span className="muted" style={{ fontSize: 12 }}>

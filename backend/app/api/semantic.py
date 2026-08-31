@@ -78,17 +78,50 @@ def _drop_invalid_literal_presets(merged: dict[str, Any]) -> None:
             del merged[field]
 
 
+# 模板必填字段 code → 中文业务名（对齐前端 REQUIRED_FIELD_OPTIONS；未收录原样返回）。
+# 错误信息/审计展示用——避免向用户暴露英文字段编码（与编辑模板中展示的中文名不一致）。
+REQUIRED_FIELD_LABEL_ZH: dict[str, str] = {
+    "metric_code": "指标编码",
+    "name": "指标名称",
+    "domain": "业务域",
+    "type": "指标类型",
+    "granularity": "统计粒度",
+    "measure_id": "逻辑度量",
+    "mount": "挂载实体",
+    "unit": "单位",
+    "currency": "币种",
+    "aggregation": "聚合方式",
+    "time_semantics": "时间语义",
+    "freshness": "新鲜度",
+    "dw_layer": "数仓层",
+    "metric_tier": "指标分级",
+    "serving_mode": "服务模式",
+    "additivity": "可加性",
+    "definition_json": "口径定义",
+    "pii_flag": "PII 标记",
+    "product_owner_id": "产品需求方",
+    "tech_owner_id": "技术方",
+    "dw_developer_id": "数仓开发",
+}
+
+
 def _inapplicable_required_fields(
     required: list[str], merged_type: Any, merged: dict[str, Any]
 ) -> set[str]:
-    """模板必填但与解析后的指标类型不兼容的字段集合。
+    """模板必填但实例化时无需强制提供的字段集合。
 
-    OneData 语义：粒度/挂载属挂载层（原子恒日、挂载仅派生）、逻辑度量仅原子、
-    原子已选逻辑度量时口径由 measure.stat_caliber 继承（definition_json 可空）。
-    这些字段对当前类型永远无法由实例化表单满足，模板作者误设必填时强制校验只会
-    422 卡死实例化——豁免并在审计中记录，便于治理者修正模板。
+    两类豁免：
+    1. 与解析后的指标类型不兼容（OneData 语义：粒度/挂载属挂载层（原子恒日、
+       挂载仅派生）、逻辑度量仅原子、原子已选逻辑度量时口径由 measure.stat_caliber
+       继承（definition_json 可空））——这些字段对当前类型永远无法由实例化表单满足，
+       模板作者误设必填时强制校验只会 422 卡死实例化；
+    2. 系统可自动生成（metric_code：MetricCreateRequest 缺省由 Service 层按
+       源表/度量列/周期自动生成，前端提示「留空由系统自动生成」）——模板作者设为
+       必填表达「建议指定」，但留空系统兜底生成，不得 422 阻断。
+    豁免在审计中记录，便于治理者修正模板。
     """
-    inapplicable: set[str] = set()
+    # 系统可自动生成（全类型一致）：metric_code 缺失由 Service 层自动补全
+    inapplicable: set[str] = {"metric_code"}
     if merged_type == "atomic":
         # 原子：粒度恒日、无挂载实体、币种由逻辑度量体系承载（对齐注册指标页原子不设币种）
         inapplicable |= {"granularity", "mount", "mounts", "currency"}
@@ -608,7 +641,8 @@ async def instantiate_template(
     if missing:
         from app.core.exceptions import ValidationError
 
-        raise ValidationError(f"必填字段缺失: {', '.join(missing)}")
+        labels = (REQUIRED_FIELD_LABEL_ZH.get(f, f) for f in missing)
+        raise ValidationError(f"必填字段缺失: {', '.join(labels)}")
 
     # 4. 委托 MetricService 创建指标
     from app.services.semantic.schemas import MetricCreateRequest

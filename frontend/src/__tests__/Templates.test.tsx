@@ -427,7 +427,7 @@ describe("Templates 页面", () => {
     // 币种与 PII 开关仍渲染（用户可自愿填写/开关）——币种在提示条（删除线）与表单标签各一处
     expect(screen.getAllByText("币种").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("含 PII")).toBeTruthy();
-    // 填指标编码（metric_code 对原子适用，必须填）
+    // 填指标编码（metric_code 可留空自动生成，此处自愿填写）
     fireEvent.change(screen.getAllByPlaceholderText("留空自动生成")[0], {
       target: { value: "fin_gmv_inst_day" },
     });
@@ -438,6 +438,27 @@ describe("Templates 页面", () => {
         1,
         expect.objectContaining({ pii_flag: false }),
       );
+    });
+  });
+
+  it("模板必填 metric_code 但留空：不强制填写，提交由系统自动生成（对齐后端豁免）", async () => {
+    const tpl = { ...TPLS[0], required_fields: ["metric_code"] };
+    mockedList.mockResolvedValue({ items: [tpl], total: 1 } as never);
+    mockedInstantiate.mockResolvedValue(CREATED);
+    render(
+      <MemoryRouter initialEntries={["/templates"]}>
+        <Templates />
+      </MemoryRouter>,
+    );
+    await screen.findByText("tpl_gmv_daily");
+    fireEvent.click(screen.getAllByText("实例化指标")[0]);
+    await screen.findByText("从模板实例化：GMV 日汇总模板");
+    // 提示语说明「留空由系统自动生成」（不再强制必须填写）
+    expect(screen.getByText(/留空由系统自动生成/)).toBeTruthy();
+    // 直接提交（metric_code 留空）——不被 antd required 规则拦截
+    fireEvent.click(screen.getByText("实例化创建"));
+    await waitFor(() => {
+      expect(mockedInstantiate).toHaveBeenCalledWith(1, expect.objectContaining({}));
     });
   });
 
