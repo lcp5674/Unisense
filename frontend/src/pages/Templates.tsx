@@ -14,6 +14,7 @@ import {
   updateTemplateOwner,
   setTemplateActive,
   updateMetricTemplate,
+  createMetricTemplate,
   listDomainTree,
   listDictItems,
   getDomainDefaults,
@@ -399,6 +400,8 @@ export function Templates() {
   const reqInapp = inapplicableRequiredFields(watchedType, reqFields, watchedMeasureId);
   // P2-13 模板编辑闭环：编辑弹窗 state + 独立表单（不复用实例化 form，语义分离）
   const [editTpl, setEditTpl] = useState<MetricTemplate | null>(null);
+  // 新建模板模式：与编辑弹窗共用同一套 Form/JSX（editTpl=null 且 createOpen=true 时走创建）
+  const [createOpen, setCreateOpen] = useState(false);
   const [editSaving, setEditSaving] = useState(false);
   const [editForm] = Form.useForm();
   // 编辑弹窗默认口径（与实例化弹窗同构：模式切换 + 结构化编辑）
@@ -857,6 +860,17 @@ export function Templates() {
     setModalOpen(true);
   }
 
+  // 新建模板：清空表单（保留域选择为空，由表单必填规则强制），默认口径/必填字段/预设全部从零开始
+  function openCreateTpl() {
+    setCreateOpen(true);
+    setEditTpl(null);
+    editForm.resetFields();
+    editForm.setFieldsValue({ is_active: true });
+    setEditDef({});
+    setEditDefMode("expression");
+    setEditDefError(null);
+  }
+
   // P2-13 模板编辑闭环：打开编辑弹窗并回填当前值（code 不可改——消费端稳定引用）
   function openEditTpl(tpl: MetricTemplate) {
     setEditTpl(tpl);
@@ -990,6 +1004,79 @@ export function Templates() {
     }
   }
 
+  // 提交新建模板（POST /semantics/templates，code 缺省由后端自动生成 tpl_{domain}_{name}）
+  async function handleCreateTpl(values: Record<string, unknown>) {
+    setEditSaving(true);
+    try {
+      const payload: Record<string, unknown> = {};
+      // 域 Cascader 值（路径数组）→ 叶子码（必填，由表单规则保证）
+      if (values.domain) {
+        const path = Array.isArray(values.domain) ? values.domain : [values.domain];
+        payload.domain = path[path.length - 1];
+      }
+      for (const key of [
+        "name", "description", "type", "granularity", "unit", "aggregation",
+        "time_semantics", "freshness", "dw_layer", "serving_mode", "additivity",
+        "metric_tier", "owner_id", "is_active",
+      ]) {
+        if (values[key] !== undefined && values[key] !== null) payload[key] = values[key];
+      }
+      if (values.measure_id !== undefined) {
+        payload.measure_id = values.measure_id ? Number(values.measure_id) : null;
+      }
+      // 挂载预设：派生且三项必填齐全才落 mount，否则不预设
+      if (
+        values.mount_source_table !== undefined ||
+        values.mount_source_column !== undefined ||
+        values.mount_granularity !== undefined ||
+        values.mount_default_period !== undefined
+      ) {
+        const ms = String(values.mount_source_table ?? "").trim();
+        const mc = String(values.mount_source_column ?? "").trim();
+        const mg = String(values.mount_granularity ?? "").trim();
+        if (String(values.type) === "derived" && ms && mc && mg) {
+          payload.mount = {
+            source_table: ms,
+            source_column: mc,
+            granularity: mg,
+            default_period: String(values.mount_default_period ?? "") || null,
+            domain: String(values.mount_domain || payload.domain || ""),
+          };
+        }
+      }
+      // 口径三方责任预设（RoleOwnerSelect 组合值拆分）
+      const ownerKeys: Array<{ formKey: string; idKey: string; nameKey: string }> = [
+        { formKey: "product_owner", idKey: "product_owner_id", nameKey: "product_owner_name" },
+        { formKey: "tech_owner", idKey: "tech_owner_id", nameKey: "tech_owner_name" },
+        { formKey: "dw_developer", idKey: "dw_developer_id", nameKey: "dw_developer_name" },
+      ];
+      for (const { formKey, idKey, nameKey } of ownerKeys) {
+        const v = values[formKey] as RoleOwnerValue | undefined;
+        payload[idKey] = v?.id ?? null;
+        payload[nameKey] = v?.name ?? null;
+      }
+      if (values.required_fields !== undefined) {
+        payload.required_fields = Array.isArray(values.required_fields) ? values.required_fields : [];
+      }
+      if (editDefError) {
+        message.error("默认口径格式错误，请检查后重试");
+        return;
+      }
+      if (Object.keys(editDef).length) {
+        payload.defaults_json = { definition_json: editDef };
+      }
+      const created = await createMetricTemplate(payload);
+      message.success(`模板「${created.name}」已创建（${created.code}）`);
+      track("template_create", created.code, "template");
+      setCreateOpen(false);
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "模板创建失败");
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
   // 详情弹窗：默认口径按模式展示——SQL/表达式模式只看该模式内容（不再暴露完整 JSON），
   // 高级模式（含 base_atomic / 数仓口径等特殊键）才展示完整 JSON 原文
   const detailDef = detailTpl?.defaults_json?.definition_json as Record<string, unknown> | undefined;
@@ -1097,6 +1184,7 @@ export function Templates() {
           <h2>指标模板</h2>
           <p>标准化的指标创建模板——一键实例化，默认口径自动合并。</p>
         </div>
+        <Button type="primary" icon={<PlusOutlined />} onClick={openCreateTpl}>新建模板</Button>
         <Button icon={<PlusOutlined />} onClick={() => load()} loading={loading}>刷新</Button>
       </div>
 
@@ -1576,19 +1664,22 @@ export function Templates() {
         ) : null}
       </Modal>
 
-      {/* P2-13 模板编辑：全字段局部更新（code 只读展示——消费端稳定引用，不可改） */}
+      {/* 模板新建/编辑（共用同一套 Form/JSX：createOpen 走创建，editTpl 走编辑；code 仅编辑时只读展示） */}
       <Modal
-        title={editTpl ? `编辑模板：${editTpl.code}` : "编辑模板"}
-        open={!!editTpl}
-        onCancel={() => setEditTpl(null)}
+        title={createOpen ? "新建模板" : editTpl ? `编辑模板：${editTpl.code}` : "编辑模板"}
+        open={!!editTpl || createOpen}
+        onCancel={() => {
+          setEditTpl(null);
+          setCreateOpen(false);
+        }}
         onOk={() => editForm.submit()}
-        okText="保存修改"
+        okText={createOpen ? "创建模板" : "保存修改"}
         okButtonProps={{ loading: editSaving }}
         confirmLoading={editSaving}
         width={640}
         destroyOnHidden
       >
-        <Form form={editForm} layout="vertical" scrollToFirstError onFinish={handleUpdateTpl} style={{ marginTop: 8 }}>
+        <Form form={editForm} layout="vertical" scrollToFirstError onFinish={createOpen ? handleCreateTpl : handleUpdateTpl} style={{ marginTop: 8 }}>
           <Space style={{ width: "100%" }} wrap align="start">
             <Form.Item name="name" label="模板名称" rules={[{ required: true, message: "请填写名称" }, { max: 128, message: "最长 128 字符" }]} style={{ width: 280 }}>
               <Input maxLength={128} showCount />

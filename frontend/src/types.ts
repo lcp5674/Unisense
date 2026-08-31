@@ -3255,3 +3255,49 @@ export interface GlobalSearchResponse {
   total: number;
 }
 
+
+// —— 指标运营分析（backend metric_stats.py + metrics.py /consistency/stats）——
+export interface MetricReuseItem {
+  metric_code: string;
+  name: string;
+  domain?: string | null;
+  type: string;
+  status: string;
+  derived_by_count: number;
+  consumed_by_count: number;
+  reuse_count: number;
+}
+export interface MetricReuseStats {
+  total: number;
+  referenced: number;
+  zero_reuse: number;
+  items: MetricReuseItem[];
+}
+export interface MetricLedgerZombieItem {
+  metric_code: string;
+  name: string;
+  domain?: string | null;
+  type: string;
+  status: string;
+  last_updated_at?: string | null;
+  days_since_update?: number | null;
+  derived_by_count: number;
+  consumed_by_count: number;
+  reuse_count: number;
+}
+export interface MetricLedgerDuplicateItem {
+  metric_code: string;
+  name: string;
+  domain?: string | null;
+  conflict_score?: number | null;
+  existing_code?: string | null;
+  reason?: string | null;
+}
+export interface MetricLedgerStats {
+  total: number;
+  active_count: number;
+  zombie_count: number;
+  duplicate_count: number;
+  zombies: MetricLedgerZombieItem[];
+  duplicates: MetricLedgerDuplicateItem[];
+}

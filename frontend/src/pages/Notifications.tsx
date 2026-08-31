@@ -15,6 +15,7 @@ import {
   deleteAllNotifications,
   retryNotification,
   markNotificationHandled,
+  rejectUnknownDictValue,
   UnisenseApiError,
 } from "../api";
 import type { Notification, NotifyEventLog, SubscriptionPref } from "../types";
@@ -544,6 +545,7 @@ const NEEDS_ACTION = new Set<string>([
   "metric.source_dropped",
   "metric.gray_recycled",
   "lineage.change_impacted",
+  "dict.notify_unknown",
   "conflict_open",
   "conflict_escalated",
   "conflict_reopened",
@@ -607,6 +609,9 @@ function actionFor(templateCode: string, payload: Record<string, unknown>): { la
     case "grant.expiring_soon":
     case "grant.expired":
       return { label: "去续期", target: "/account" };
+    // 字典未收录值待收录 → 系统配置字典管理（管理员可收录，或在本通知行内「打回」）
+    case "dict.notify_unknown":
+      return { label: "去收录", target: "/system-config" };
     default:
       return null;
   }
@@ -867,6 +872,45 @@ function NotifListTab() {
     }
   }
 
+  // 管理员打回字典收录申请：弹窗填原因 → 调 /dicts/unknown/reject（原通知办结，通知提交人改用字典内值）。
+  function handleRejectUnknown(n: Notification) {
+    let reason = "";
+    Modal.confirm({
+      title: "打回字典收录申请",
+      content: (
+        <div>
+          <p style={{ marginBottom: 8, color: "rgba(15,23,42,0.75)" }}>
+            通知提交人使用了字典未收录值。打回后将通知其改用字典内已收录的值。
+          </p>
+          <Input.TextArea
+            rows={3}
+            placeholder="请输入打回原因（将通知给提交人）"
+            maxLength={200}
+            onChange={(e) => { reason = e.target.value; }}
+          />
+        </div>
+      ),
+      okText: "确认打回",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        if (!reason.trim()) {
+          message.warning("请填写打回原因");
+          throw new Error("reason-required");
+        }
+        try {
+          await rejectUnknownDictValue({ notification_id: n.id, reason: reason.trim() });
+          message.success("已打回，通知已办结");
+          load();
+          notifyNotifChanged();
+        } catch (err) {
+          message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
+          throw err;
+        }
+      },
+    });
+  }
+
   async function handleMarkRead(n: Notification) {
     if (n.read_at) return;
     try {
@@ -1082,6 +1126,9 @@ function NotifListTab() {
             <div className="notif-actions" onClick={(e) => e.stopPropagation()}>
               {needsAction && action && !handled && (
                 <Button size="small" type="primary" ghost onClick={() => navigate(action.target)}>{action.label}</Button>
+              )}
+              {(n.template_code ?? "") === "dict.notify_unknown" && !handled && (
+                <Button size="small" type="link" danger onClick={() => handleRejectUnknown(n)}>打回</Button>
               )}
               {needsAction && !handled && (
                 <Button size="small" type="link" onClick={() => handleMarkHandled(n)}>标记已处理</Button>

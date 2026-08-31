@@ -100,6 +100,8 @@ import {
   BatchSubmitItem,
   MetricCreateRequest,
   MetricListResponse,
+  MetricReuseStats,
+  MetricLedgerStats,
   MetricDimension,
   DimensionMetricBinding,
   MetricCompareResult,
@@ -592,6 +594,13 @@ export async function setPreference(key: string, value: unknown): Promise<void> 
   });
 }
 
+/** 删除用户偏好（软删，幂等）——如恢复侧栏折叠等 UI 状态到默认。 */
+export async function deletePreference(key: string): Promise<void> {
+  await request<void>(`${API_BASE}/me/preferences/${encodeURIComponent(key)}`, {
+    method: "DELETE",
+  });
+}
+
 // ---- 指标定义 ----
 export async function listMetrics(params: {
   domain?: string;
@@ -646,6 +655,19 @@ export async function listMetrics(params: {
     page_size: params.page_size ?? 20,
   });
   return request<MetricListResponse>(`${API_BASE}/metric-definitions?${qs}`);
+}
+
+// 指标运营分析：复用度 / 资产账本 / 口径一致率（backend metric_stats.py + metrics.py）
+export async function fetchMetricReuseStats(): Promise<MetricReuseStats> {
+  return request<MetricReuseStats>(`${API_BASE}/metric-definitions/stats/reuse`);
+}
+
+export async function fetchMetricLedger(): Promise<MetricLedgerStats> {
+  return request<MetricLedgerStats>(`${API_BASE}/metric-definitions/stats/ledger`);
+}
+
+export async function fetchConsistencyStats(): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>(`${API_BASE}/metric-definitions/consistency/stats`);
 }
 
 export async function getMetric(code: string): Promise<MetricResponse> {
@@ -1356,6 +1378,176 @@ export async function lineageNodes(kw?: string, limit = 50): Promise<LineageNode
   return request<LineageNode[]>(`${API_BASE}/lineage/nodes${qs ? `?${qs}` : ""}`);
 }
 
+// ---- 血缘治理开放能力（P2/P3/P4 补齐前端入口）----
+
+export interface LineageHealthDimension {
+  score: number;
+  weight: number;
+  detail: Record<string, unknown>;
+}
+
+export interface LineageHealthResult {
+  overall_score: number;
+  grade: "excellent" | "good" | "fair" | "poor";
+  dimensions: Record<string, LineageHealthDimension>;
+  edge_total: number;
+  metric_total: number;
+  table_total: number;
+  evaluated_at: string;
+}
+
+export interface LineagePathEdgeItem {
+  source: string;
+  target: string;
+  edge_type: string;
+}
+
+export interface LineagePathItem {
+  nodes: string[];
+  edges: LineagePathEdgeItem[];
+  hops: number;
+}
+
+export interface LineagePathResult {
+  source: string;
+  target: string;
+  has_path: boolean;
+  path_count: number;
+  shortest_hops: number | null;
+  paths: LineagePathItem[];
+  truncated: boolean;
+}
+
+export interface LineageTerminalItem {
+  node: string;
+  entity_exists: boolean;
+  hops: number;
+}
+
+export interface LineageTerminalsResult {
+  source: string;
+  total: number;
+  terminals: LineageTerminalItem[];
+}
+
+export interface LineageBatchStatementResult {
+  index: number;
+  status: "ok" | "failed" | "skipped";
+  sql: string;
+  added?: number;
+  updated?: number;
+  error?: string;
+}
+
+export interface LineageParseBatchResult {
+  total_statements: number;
+  succeeded: number;
+  failed: number;
+  total_edges: number;
+  added: number;
+  updated: number;
+  skipped: number;
+  graph_written: boolean;
+  statements: LineageBatchStatementResult[];
+}
+
+export interface LineageScanResult {
+  files: number;
+  statements: number;
+  table_edges: number;
+  field_edges: number;
+  ddl_edges: number;
+  dry_run: boolean;
+  graph_written: boolean;
+}
+
+export interface LineageJsonExportResult {
+  format: string;
+  producer: string;
+  exported_at: string;
+  edge_count: number;
+  edges: Array<Record<string, unknown>>;
+}
+
+// 血缘平台综合健康度（P2 五维评分）
+export async function lineageHealth(): Promise<LineageHealthResult> {
+  return request<LineageHealthResult>(`${API_BASE}/lineage/health`);
+}
+
+// A→B 血缘路径查询（P3）
+export async function lineagePathQuery(
+  source: string,
+  target: string,
+  maxHops = 5,
+  limit = 50,
+): Promise<LineagePathResult> {
+  const qs = pageQs({ source, target, max_hops: maxHops, limit });
+  return request<LineagePathResult>(`${API_BASE}/lineage/path?${qs}`);
+}
+
+// 下游终止节点（断链定位，P3）
+export async function lineagePathTerminals(
+  node: string,
+  maxHops = 5,
+  limit = 100,
+): Promise<LineageTerminalsResult> {
+  const qs = pageQs({ node, max_hops: maxHops, limit });
+  return request<LineageTerminalsResult>(`${API_BASE}/lineage/path/terminals?${qs}`);
+}
+
+// 标准血缘导出（P4：JSON 边明细 / OpenLineage 事件）
+export async function lineageExport(params: {
+  format?: "openlineage" | "json";
+  node?: string;
+  direction?: "upstream" | "downstream" | "both";
+  granularity?: "L1" | "L2" | "L3" | "all";
+  limit?: number;
+  domain?: string;
+}): Promise<LineageJsonExportResult> {
+  const qs = pageQs({
+    format: params.format ?? "json",
+    node: params.node,
+    direction: params.direction ?? "both",
+    granularity: params.granularity ?? "all",
+    limit: params.limit ?? 10000,
+    domain: params.domain,
+  });
+  return request<LineageJsonExportResult>(`${API_BASE}/lineage/export?${qs}`);
+}
+
+// 批量解析多条 SQL 并幂等写入血缘（P2 企业级批量导入）
+export async function lineageParseBatch(body: {
+  dialect?: string;
+  statements?: string[];
+  text?: string;
+  target_table?: string;
+  source_node?: string;
+}): Promise<LineageParseBatchResult> {
+  return request<LineageParseBatchResult>(`${API_BASE}/lineage/parse-batch`, {
+    method: "POST",
+    body: JSON.stringify({ provenance: "sqlglot", ...body }),
+  });
+}
+
+// 库级扫描 SQL 目录（P2 企业级血缘重建）
+export async function lineageScanDirectory(body: {
+  path: string;
+  dialect?: string;
+  dry_run?: boolean;
+  target_table?: string;
+}): Promise<LineageScanResult> {
+  return request<LineageScanResult>(`${API_BASE}/lineage/scan`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// 级联软删某节点相关的全部血缘边（数据源删除时维护一致性）
+export async function deleteLineageEdgesByNode(node: string): Promise<{ deleted: number }> {
+  const qs = pageQs({ node });
+  return request<{ deleted: number }>(`${API_BASE}/lineage/edges?${qs}`, { method: "DELETE" });
+}
+
 // 变更影响预览（what-if）
 export async function lineageImpactPreview(
   metricCode: string,
@@ -1608,6 +1800,42 @@ export async function setTemplateActive(
   return request<MetricTemplate>(`${API_BASE}/semantics/templates/${templateId}/active`, {
     method: "PATCH",
     body: JSON.stringify({ is_active: isActive }),
+  });
+}
+
+// 创建指标模板（POST /semantics/templates，code 缺省由后端自动生成 tpl_{domain}_{name}）
+export async function createMetricTemplate(
+  body: Partial<{
+    code: string;
+    name: string;
+    domain: string;
+    description: string;
+    defaults_json: Record<string, unknown>;
+    required_fields: string[];
+    type: string;
+    granularity: string;
+    unit: string;
+    aggregation: string;
+    time_semantics: string;
+    freshness: string;
+    dw_layer: string;
+    serving_mode: string;
+    additivity: string;
+    metric_tier: string;
+    measure_id: number | null;
+    mount: MetricMountInput | null;
+    product_owner_id: number | null;
+    tech_owner_id: number | null;
+    dw_developer_id: number | null;
+    product_owner_name: string | null;
+    tech_owner_name: string | null;
+    dw_developer_name: string | null;
+    owner_id: number | null;
+  }>,
+): Promise<MetricTemplate> {
+  return request<MetricTemplate>(`${API_BASE}/semantics/templates`, {
+    method: "POST",
+    body: JSON.stringify(body),
   });
 }
 
@@ -3848,6 +4076,14 @@ export async function getCollectionJob(jobId: string): Promise<CollectionJob | n
   );
 }
 
+/** 取消异步采集任务（POST /data-sources/jobs/{job_id}/cancel；已终态幂等返回 canceled=false）。 */
+export async function cancelCollectionJob(jobId: string): Promise<{ job_id: string; canceled: boolean }> {
+  return request<{ job_id: string; canceled: boolean }>(
+    `${API_BASE}/data-sources/jobs/${encodeURIComponent(jobId)}/cancel`,
+    { method: "POST" },
+  );
+}
+
 /** 采集运行历史：分页列出（采集记录页主视图，持久化历史含失败/排障明细）。 */
 export async function listCollectionRuns(params?: {
   source_id?: string;
@@ -4830,6 +5066,21 @@ export async function notifyUnknownDictValues(
     method: "POST",
     body: JSON.stringify(data),
   });
+}
+
+/** 管理员打回字典收录申请（通知提交人改用字典内值）。 */
+export async function rejectUnknownDictValue(data: {
+  notification_id: number;
+  reason: string;
+}): Promise<{ notification_id: number; handled: boolean }> {
+  return request<{ notification_id: number; handled: boolean }>(`${API_BASE}/dicts/unknown/reject`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function listDomainMetrics(code: string): Promise<Array<Record<string, unknown>>> {
+  return request<Array<Record<string, unknown>>>(`${API_BASE}/domains/${encodeURIComponent(code)}/metrics`);
 }
 
 export async function listAllDictItems(dictType: string): Promise<SystemDictItem[]> {

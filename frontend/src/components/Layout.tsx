@@ -143,6 +143,7 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
       { key: "/observability", label: "可观测中心", icon: <LineChartOutlined /> },
       { key: "/feedback", label: "用户反馈", icon: <MessageOutlined /> },
       { key: "/tracking-stats", label: "埋点统计", icon: <FundOutlined /> },
+      { key: "/metric-ops", label: "指标运营分析", icon: <FundOutlined /> },
     ],
   },
   {

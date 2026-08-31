@@ -45,6 +45,7 @@ const Notifications = lazyNamed(() => import("./pages/Notifications"), "Notifica
 const Observability = lazyNamed(() => import("./pages/Observability"), "Observability");
 const FeedbackCenter = lazyNamed(() => import("./pages/FeedbackCenter"), "FeedbackCenter");
 const TrackingStats = lazyNamed(() => import("./pages/TrackingStats"), "TrackingStats");
+const MetricOps = lazyNamed(() => import("./pages/MetricOps"), "MetricOps");
 const AiAssistant = lazyNamed(() => import("./pages/AiAssistant"), "AiAssistant");
 const SystemConfig = lazyNamed(() => import("./pages/SystemConfig"), "SystemConfig");
 const UserManagement = lazyNamed(() => import("./pages/UserManagement"), "UserManagement");
@@ -392,6 +393,7 @@ export default function App() {
               <Route path="/observability" element={<RequirePerm perm={ROUTE_PERM["/observability"]}><Observability /></RequirePerm>} />
               <Route path="/feedback" element={<FeedbackCenter />} />
               <Route path="/tracking-stats" element={<RequirePerm perm={ROUTE_PERM["/tracking-stats"]}><TrackingStats /></RequirePerm>} />
+              <Route path="/metric-ops" element={<RequirePerm perm={ROUTE_PERM["/metric-ops"]}><MetricOps /></RequirePerm>} />
               <Route path="/data-sources" element={<RequirePerm perm={ROUTE_PERM["/data-sources"]}><DataSources /></RequirePerm>} />
               <Route path="/catalogs" element={<RequirePerm perm={ROUTE_PERM["/catalogs"]}><Catalogs /></RequirePerm>} />
               <Route path="/collection-tasks" element={<RequirePerm perm={ROUTE_PERM["/collection-tasks"]}><CollectionTasks /></RequirePerm>} />

@@ -7,15 +7,18 @@ import {
   Card,
   Col,
   Descriptions,
+  Divider,
   Drawer,
   Empty,
   Input,
   Popconfirm,
+  Progress,
   Row,
   Segmented,
   Select,
   Space,
   Statistic,
+  Switch,
   Table,
   Tag,
   Tabs,
@@ -28,6 +31,7 @@ import {
   ArrowUpOutlined,
   CodeOutlined,
   DatabaseOutlined,
+  DownloadOutlined,
   PieChartOutlined,
   PlusOutlined,
   ReloadOutlined,
@@ -37,6 +41,7 @@ import {
 import {
   confirmStaleEdge,
   deleteLineageEdge,
+  deleteLineageEdgesByNode,
   fetchLineageBrokenEdges,
   fetchLineageCoverage,
   fetchLineageEdgeDetail,
@@ -45,11 +50,17 @@ import {
   lineageChannelRuns,
   lineageChannels,
   lineageEdges,
+  lineageExport,
   lineageGraph,
+  lineageHealth,
   lineageImpact,
   lineageImpactPreview,
   lineageNodes,
+  lineageParseBatch,
+  lineagePathQuery,
+  lineagePathTerminals,
   lineageRunDetail,
+  lineageScanDirectory,
   lineageStale,
   parseLineage,
   restoreStaleEdge,
@@ -1977,6 +1988,278 @@ function CoverageTab() {
   );
 }
 
+/** 血缘治理中心（补齐 P2/P3/P4 开放能力前端入口）：健康度 / 路径查询 / 终止点 / 批量解析 / 目录扫描 / 导出 / 级联删 */
+function GovernanceTab() {
+  const [health, setHealth] = useState<import("../api").LineageHealthResult | null>(null);
+  // 路径查询
+  const [pathSrc, setPathSrc] = useState("");
+  const [pathTgt, setPathTgt] = useState("");
+  const [pathResult, setPathResult] = useState<import("../api").LineagePathResult | null>(null);
+  // 终止点
+  const [termNode, setTermNode] = useState("");
+  const [termResult, setTermResult] = useState<import("../api").LineageTerminalsResult | null>(null);
+  // 批量解析
+  const [batchText, setBatchText] = useState("");
+  const [batchResult, setBatchResult] = useState<import("../api").LineageParseBatchResult | null>(null);
+  // 目录扫描
+  const [scanPath, setScanPath] = useState("");
+  const [scanDryRun, setScanDryRun] = useState(true);
+  const [scanResult, setScanResult] = useState<import("../api").LineageScanResult | null>(null);
+  // 导出
+  const [exportFormat, setExportFormat] = useState<"openlineage" | "json">("json");
+  const [exporting, setExporting] = useState(false);
+  // 级联删
+  const [delNode, setDelNode] = useState("");
+  const [busy, setBusy] = useState<"health" | "path" | "term" | "batch" | "scan" | "del" | null>(null);
+
+  const run = async (key: typeof busy, fn: () => Promise<void>) => {
+    setBusy(key);
+    try {
+      await fn();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "血缘治理操作失败");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const HEALTH_DIMS: Array<{ key: string; label: string; color: string }> = [
+    { key: "coverage", label: "覆盖完整度", color: "#1677ff" },
+    { key: "broken", label: "断链率", color: "#fa541c" },
+    { key: "stale", label: "失效率", color: "#faad14" },
+    { key: "freshness", label: "采集新鲜度", color: "#52c41a" },
+    { key: "reconciliation", label: "图-库对账偏差", color: "#722ed1" },
+  ];
+  const GRADE_LABEL: Record<string, string> = { excellent: "优秀", good: "良好", fair: "一般", poor: "较差" };
+  const GRADE_COLOR: Record<string, string> = { excellent: "green", good: "blue", fair: "orange", poor: "red" };
+
+  const downloadExport = (data: import("../api").LineageJsonExportResult) => {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `lineage-export-${exportFormat}-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div>
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 12 }}
+        message="血缘治理中心"
+        description="健康度五维评分、A→B 链路查询、断链终止点定位、批量 SQL 解析入库、SQL 目录扫描重建、标准格式导出与节点级联删除（企业级开放能力）。"
+      />
+
+      {/* 健康度 */}
+      <Card size="small" title="血缘平台健康度" style={{ marginBottom: 12 }}
+        extra={
+          <Button size="small" icon={<ReloadOutlined />} loading={busy === "health"}
+            onClick={() => run("health", async () => setHealth(await lineageHealth()))}>
+            评估
+          </Button>
+        }>
+        {!health ? (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="点击「评估」查看血缘平台综合健康度" />
+        ) : (
+          <Row gutter={[16, 8]}>
+            <Col span={24}>
+              <Space align="center" size={16}>
+                <Statistic title="综合健康度" value={Math.round(health.overall_score)} suffix="/100"
+                  valueStyle={{ color: health.overall_score >= 75 ? "#3f8600" : health.overall_score >= 60 ? "#cf8a00" : "#cf1322" }} />
+                <Tag color={GRADE_COLOR[health.grade] ?? "default"}>{GRADE_LABEL[health.grade] ?? health.grade}</Tag>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  边 {health.edge_total} · 指标 {health.metric_total} · 表 {health.table_total} · 评估于 {new Date(health.evaluated_at).toLocaleString()}
+                </span>
+              </Space>
+            </Col>
+            {HEALTH_DIMS.map(({ key, label, color }) => {
+              const d = health.dimensions[key];
+              return (
+                <Col span={8} key={key}>
+                  <div style={{ fontSize: 12, color: "#666" }}>{label}</div>
+                  <Progress percent={Math.round(d?.score ?? 0)} size="small" strokeColor={color} />
+                </Col>
+              );
+            })}
+          </Row>
+        )}
+      </Card>
+
+      {/* 路径查询 + 终止点 */}
+      <Card size="small" title="血缘路径与断链定位" style={{ marginBottom: 12 }}>
+        <Space wrap align="end" style={{ marginBottom: 8 }}>
+          <div>
+            <div style={{ fontSize: 12, color: "#666", marginBottom: 4 }}>起点节点（可带 metric:/table:/field: 前缀）</div>
+            <Input value={pathSrc} onChange={(e) => setPathSrc(e.target.value)} placeholder="如 metric:sales_gmv_day 或 dwd_order_di" style={{ width: 260 }} allowClear />
+          </div>
+          <div>
+            <div style={{ fontSize: 12, color: "#666", marginBottom: 4 }}>终点节点</div>
+            <Input value={pathTgt} onChange={(e) => setPathTgt(e.target.value)} placeholder="如 table:ads_sales_daily" style={{ width: 220 }} allowClear />
+          </div>
+          <Button type="primary" loading={busy === "path"} disabled={!pathSrc || !pathTgt}
+            onClick={() => run("path", async () => setPathResult(await lineagePathQuery(pathSrc.trim(), pathTgt.trim())))}>
+            查询路径
+          </Button>
+          <div style={{ width: 24 }} />
+          <div>
+            <div style={{ fontSize: 12, color: "#666", marginBottom: 4 }}>起点节点（下游终止点定位）</div>
+            <Input value={termNode} onChange={(e) => setTermNode(e.target.value)} placeholder="如 table:dwd_order_di" style={{ width: 240 }} allowClear />
+          </div>
+          <Button loading={busy === "term"} disabled={!termNode}
+            onClick={() => run("term", async () => setTermResult(await lineagePathTerminals(termNode.trim())))}>
+            查询终止点
+          </Button>
+        </Space>
+        {pathResult && (
+          <div style={{ marginBottom: 8 }}>
+            <Divider style={{ margin: "4px 0" }} plain>路径：{pathResult.source} → {pathResult.target}</Divider>
+            {!pathResult.has_path ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="两节点间不可达（无血缘链路）" />
+            ) : (
+              <>
+                <Space style={{ marginBottom: 8 }}>
+                  <Tag color="blue">可达路径 {pathResult.path_count} 条</Tag>
+                  <Tag color="green">最短 {pathResult.shortest_hops} 跳</Tag>
+                  {pathResult.truncated && <Tag color="orange">已截断（超出上限）</Tag>}
+                </Space>
+                <Table
+                  rowKey={(_, i) => String(i)}
+                  size="small"
+                  pagination={{ pageSize: 10, showSizeChanger: false }}
+                  dataSource={pathResult.paths}
+                  columns={[
+                    { title: "跳数", dataIndex: "hops", width: 70 },
+                    {
+                      title: "链路",
+                      render: (_, r) => (
+                        <Space wrap size={2}>
+                          {r.nodes.map((n, i) => (
+                            <span key={i}>
+                              <Tag style={{ marginRight: 0 }}>{n}</Tag>
+                              {i < r.nodes.length - 1 && <span className="muted" style={{ margin: "0 2px" }}>→</span>}
+                            </span>
+                          ))}
+                        </Space>
+                      ),
+                    },
+                  ]}
+                />
+              </>
+            )}
+          </div>
+        )}
+        {termResult && (
+          <div>
+            <Divider style={{ margin: "4px 0" }} plain>下游终止点：{termResult.source}（共 {termResult.total} 个）</Divider>
+            {termResult.terminals.length === 0 ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无下游死端（该节点链路完整）" />
+            ) : (
+              <Space wrap>
+                {termResult.terminals.map((t) => (
+                  <Tag key={`${t.node}-${t.hops}`} color={t.entity_exists ? "default" : "red"}>
+                    {t.node}{t.entity_exists ? "" : "（断链嫌疑）"}
+                  </Tag>
+                ))}
+              </Space>
+            )}
+          </div>
+        )}
+      </Card>
+
+      {/* 批量解析 + 目录扫描 */}
+      <Card size="small" title="批量血缘重建" style={{ marginBottom: 12 }}>
+        <Space wrap align="end" style={{ marginBottom: 8 }}>
+          <div style={{ minWidth: 420, flex: 1 }}>
+            <div style={{ fontSize: 12, color: "#666", marginBottom: 4 }}>多条 SQL（每行一条，或粘贴多语句文本按分号拆分）</div>
+            <Input.TextArea rows={4} value={batchText} onChange={(e) => setBatchText(e.target.value)}
+              placeholder={"select col1 from db.t1;\ninsert overwrite table db.t2 select * from db.t1;"} />
+          </div>
+          <Button type="primary" loading={busy === "batch"} disabled={!batchText.trim()}
+            onClick={() => run("batch", async () => setBatchResult(await lineageParseBatch({ text: batchText })))}>
+            批量解析入库
+          </Button>
+        </Space>
+        {batchResult && (
+          <Alert
+            style={{ marginBottom: 8 }}
+            type={batchResult.failed > 0 ? "warning" : "success"}
+            showIcon
+            message={`解析 ${batchResult.total_statements} 条：成功 ${batchResult.succeeded} · 失败 ${batchResult.failed} · 新增边 ${batchResult.added} · 更新 ${batchResult.updated} · 跳过 ${batchResult.skipped}`}
+            description={batchResult.graph_written ? "血缘已同步图谱" : "图谱写入未成功（Neo4j 可能不可用）"}
+          />
+        )}
+        <Divider style={{ margin: "8px 0" }} plain>SQL 目录扫描（递归扫描目录批量重建）</Divider>
+        <Space wrap align="end">
+          <div>
+            <div style={{ fontSize: 12, color: "#666", marginBottom: 4 }}>SQL 目录路径（容器内路径）</div>
+            <Input value={scanPath} onChange={(e) => setScanPath(e.target.value)} placeholder="如 /opt/sql/etl" style={{ width: 300 }} allowClear />
+          </div>
+          <div style={{ fontSize: 12, color: "#666" }}>
+            <Switch checked={scanDryRun} onChange={setScanDryRun} /> {scanDryRun ? "仅统计（dry_run）" : "真实写入血缘"}
+          </div>
+          <Button loading={busy === "scan"} disabled={!scanPath.trim()}
+            onClick={() => run("scan", async () => setScanResult(await lineageScanDirectory({ path: scanPath.trim(), dry_run: scanDryRun })))}>
+            扫描
+          </Button>
+        </Space>
+        {scanResult && (
+          <Alert
+            style={{ marginTop: 8 }}
+            type={scanResult.dry_run ? "info" : "success"}
+            showIcon
+            message={`文件 ${scanResult.files} · 语句 ${scanResult.statements} · 表边 ${scanResult.table_edges} · 字段边 ${scanResult.field_edges} · DDL 边 ${scanResult.ddl_edges}`}
+            description={scanResult.dry_run ? "dry_run 仅统计未落库；关闭开关可真实写入" : `已写入血缘（图谱${scanResult.graph_written ? "已同步" : "未同步"}）`}
+          />
+        )}
+      </Card>
+
+      {/* 导出 + 级联删 */}
+      <Card size="small" title="导出与清理">
+        <Space wrap align="end">
+          <div>
+            <div style={{ fontSize: 12, color: "#666", marginBottom: 4 }}>导出格式</div>
+            <Select value={exportFormat} onChange={setExportFormat} style={{ width: 180 }}
+              options={[
+                { value: "json", label: "通用 JSON（边明细）" },
+                { value: "openlineage", label: "OpenLineage 事件" },
+              ]} />
+          </div>
+          <Button icon={<DownloadOutlined />} loading={exporting}
+            onClick={() => {
+              setExporting(true);
+              lineageExport({ format: exportFormat })
+                .then(downloadExport)
+                .catch((err) => message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "血缘导出失败"))
+                .finally(() => setExporting(false));
+            }}>
+            导出血缘
+          </Button>
+          <div style={{ width: 24 }} />
+          <div>
+            <div style={{ fontSize: 12, color: "#666", marginBottom: 4 }}>级联删除节点（软删该节点全部血缘边）</div>
+            <Input value={delNode} onChange={(e) => setDelNode(e.target.value)} placeholder="如 table:legacy_tbl" style={{ width: 240 }} allowClear />
+          </div>
+          <Popconfirm
+            title="级联删除血缘边"
+            description={`将软删「${delNode || "该节点"}」相关的全部血缘边，不可恢复。确认？`}
+            okText="删除" okButtonProps={{ danger: true }} cancelText="取消"
+            disabled={!delNode.trim()}
+            onConfirm={() => run("del", async () => {
+              const r = await deleteLineageEdgesByNode(delNode.trim());
+              message.success(`已级联删除 ${r.deleted} 条血缘边`);
+              setDelNode("");
+            })}>
+            <Button danger loading={busy === "del"} disabled={!delNode.trim()}>级联删除</Button>
+          </Popconfirm>
+        </Space>
+      </Card>
+    </div>
+  );
+}
+
 export function LineageView() {
   const navigate = useNavigate();
 
@@ -1992,6 +2275,7 @@ export function LineageView() {
     { key: "parse", label: <span><CodeOutlined /> SQL 血缘解析</span>, children: <ParseTab /> },
     { key: "channels", label: <span><DatabaseOutlined /> 采集通道</span>, children: <ChannelsTab /> },
     { key: "coverage", label: <span><PieChartOutlined /> 覆盖治理</span>, children: <CoverageTab /> },
+    { key: "governance", label: <span><ApartmentOutlined /> 治理中心</span>, children: <GovernanceTab /> },
   ];
 
   return (

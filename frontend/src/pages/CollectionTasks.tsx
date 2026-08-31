@@ -6,6 +6,7 @@ import {
   Descriptions,
   Drawer,
   Empty,
+  Popconfirm,
   Select,
   Space,
   Table,
@@ -13,8 +14,8 @@ import {
   Tooltip,
   message,
 } from "antd";
-import { ReloadOutlined, ArrowLeftOutlined, RedoOutlined, EyeOutlined } from "@ant-design/icons";
-import { listCollectionJobs, getCollectionJob, collectSourceNow, listDataSources, UnisenseApiError } from "../api";
+import { ReloadOutlined, ArrowLeftOutlined, RedoOutlined, EyeOutlined, StopOutlined } from "@ant-design/icons";
+import { listCollectionJobs, getCollectionJob, collectSourceNow, cancelCollectionJob, listDataSources, UnisenseApiError } from "../api";
 import type { CollectionJob, DataSource } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 import { usePermission } from "../hooks/usePermission";
@@ -75,6 +76,7 @@ export function CollectionTasks() {
   const [status, setStatus] = useState<string>(urlStatus);
   const [loading, setLoading] = useState(false);
   const [retrying, setRetrying] = useState<string | null>(null);
+  const [canceling, setCanceling] = useState<string | null>(null);
   // 任务详情抽屉
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailJob, setDetailJob] = useState<CollectionJob | null>(null);
@@ -168,6 +170,23 @@ export function CollectionTasks() {
     }
   }
 
+  /** 取消任务（P1-7）：排队中取消投递；采集中请求取消；已终态幂等返回 canceled=false */
+  async function handleCancel(job: CollectionJob) {
+    setCanceling(job.job_id);
+    try {
+      const r = await cancelCollectionJob(job.job_id);
+      if (r.canceled) message.success("已请求取消该任务");
+      else message.info("任务已处于终态，无需取消");
+      load();
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "取消失败",
+      );
+    } finally {
+      setCanceling(null);
+    }
+  }
+
   const columns = [
     {
       title: "任务 ID",
@@ -230,6 +249,23 @@ export function CollectionTasks() {
             >
               重试
             </Button>
+          )}
+          {(r.status === "QUEUED" || r.status === "RUNNING") && canCollect && (
+            <Popconfirm
+              title="取消采集任务"
+              description={`确认取消任务 ${r.job_id}？${r.status === "RUNNING" ? "运行中的任务将请求取消并补写失败终态。" : "排队中的任务将取消投递。"}`}
+              okText="取消任务" okButtonProps={{ danger: true }} cancelText="保留"
+              onConfirm={() => handleCancel(r)}
+            >
+              <Button
+                type="link"
+                size="small"
+                icon={<StopOutlined />}
+                loading={canceling === r.job_id}
+              >
+                取消
+              </Button>
+            </Popconfirm>
           )}
         </Space>
       ),

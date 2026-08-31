@@ -2,14 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Button, Card, Col, Row, Tree, Descriptions, Modal, Form, Input, InputNumber, Popconfirm,
-  Space, Tag, App as AntApp, Empty, Spin, TreeSelect, Tooltip, Alert, Select,
+  Space, Tag, App as AntApp, Empty, Spin, TreeSelect, Tooltip, Alert, Select, Table,
 } from "antd";
 import { PlusOutlined, EditOutlined, DeleteOutlined, StopOutlined, CheckCircleOutlined, SettingOutlined, BranchesOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import type { DataNode } from "antd/es/tree";
 import {
   listDomainTree, getDomain, createDomain, updateDomain, deactivateDomain,
   activateDomain, deleteDomain, getDomainDefaults, updateDomainDefaults,
-  listDictItems,
+  listDictItems, listDomainMetrics,
 } from "../api";
 import type { SubjectDomainTreeNode, SubjectDomain } from "../types";
 import { enumLabel, METRIC_TYPE_LABEL, GRANULARITY_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL, METRIC_TIER_LABEL } from "../utils/enums";
@@ -212,6 +212,9 @@ export function SubjectDomain() {
   const [createTitle, setCreateTitle] = useState("新建根域");
   const [editOpen, setEditOpen] = useState(false);
   const [defaultsOpen, setDefaultsOpen] = useState(false);
+  const [domainMetricsOpen, setDomainMetricsOpen] = useState(false);
+  const [domainMetricsLoading, setDomainMetricsLoading] = useState(false);
+  const [domainMetrics, setDomainMetrics] = useState<Array<Record<string, unknown>>>([]);
   const [createForm] = Form.useForm();
   const [editForm] = Form.useForm();
   const [defaultsForm] = Form.useForm();
@@ -383,6 +386,21 @@ export function SubjectDomain() {
     });
   }
 
+  // 查看该域下指标列表
+  async function openDomainMetrics(code: string) {
+    setDomainMetricsOpen(true);
+    setDomainMetricsLoading(true);
+    try {
+      const data = await listDomainMetrics(code);
+      setDomainMetrics(data);
+    } catch (err: any) {
+      message.error(err?.message || "获取域下指标失败");
+      setDomainMetricsOpen(false);
+    } finally {
+      setDomainMetricsLoading(false);
+    }
+  }
+
   // 保存默认值
   async function handleSaveDefaults(values: Record<string, string>) {
     if (!selectedCode) return;
@@ -466,6 +484,7 @@ export function SubjectDomain() {
                 {can("domain:create") && (
                   <Button danger icon={<DeleteOutlined />} onClick={handleDelete}>删除</Button>
                 )}
+                <Button icon={<BranchesOutlined />} onClick={() => detail && openDomainMetrics(detail.code)}>域下指标</Button>
               </Space>
             }>
               <Descriptions column={2} bordered size="small">
@@ -588,6 +607,33 @@ export function SubjectDomain() {
           </Popconfirm>
           <span className="muted" style={{ fontSize: 12 }}>单个字段可点清除图标；清空后注册指标不再预填该域默认值</span>
         </Space>
+      </Modal>
+      <Modal
+        title={`域下指标（${detail?.name ?? ""}）`}
+        open={domainMetricsOpen}
+        onCancel={() => setDomainMetricsOpen(false)}
+        footer={null}
+        width={720}
+      >
+        <Table
+          rowKey={(r) => String((r as { metric_code?: string }).metric_code ?? JSON.stringify(r))}
+          loading={domainMetricsLoading}
+          dataSource={domainMetrics}
+          size="small"
+          pagination={{ pageSize: 10, showSizeChanger: false }}
+          locale={{ emptyText: "该域下暂无指标" }}
+          columns={[
+            { title: "指标编码", dataIndex: "metric_code", width: 220 },
+            { title: "指标名称", dataIndex: "name", width: 220 },
+            {
+              title: "类型",
+              dataIndex: "metric_type",
+              width: 100,
+              render: (v: unknown) => enumLabel(METRIC_TYPE_LABEL, String(v ?? "")) || "—",
+            },
+            { title: "状态", dataIndex: "status", width: 100 },
+          ]}
+        />
       </Modal>
     </div>
   );
