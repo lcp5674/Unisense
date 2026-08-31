@@ -480,23 +480,47 @@ UNISENSE_BACKUP_DATABASES="unisense e2e_biz"       # 多库备份（含降级业
 
 ### 10.3 首次部署
 
-```bash
-# 1. 准备环境文件
-cp .env.example .env && vi .env       # 按 9.2 填写全部密钥
+**启动即完整可用**：backend 容器启动链为
+`alembic upgrade head && python -m scripts.bootstrap && exec uvicorn`，
+下列动作全部自动完成，**无需任何手工脚本或接口调用**。
 
-# 2. 构建并启动
+| 自动完成 | 说明 |
+|----------|------|
+| 数据库迁移 | `alembic upgrade head`，幂等；迁移内已含业务字典、敏感规则、命名词根、粒度等种子 |
+| **管理员账号** | 默认组织（code=default）+ `admin` / platform_admin；密码取 `UNISENSE_SEED_ADMIN_PASSWORD`，未注入则用默认弱口令并打印告警 |
+| **标准主题域** | 预置主题域（门诊/药品/医保/诊断等）+ 业务字典项，责任人为实际 admin id |
+| **ES 索引** | 幂等创建 `metric_idx`/`term_idx`；索引为空或 analyzer 版本变更时自动全量同步 |
+| **Neo4j 资产血缘** | 首日全量对账，补齐资产属性与血缘边（后续漂移由每日定时任务兜底） |
+| MinIO 归档桶 | `audit_archive` 自动创建 |
+
+```bash
+# 1. 准备环境文件（唯一必须的人工步骤：注入密钥）
+cp .env.example .env && vi .env       # 按 10.2 填写全部密钥，务必设置 UNISENSE_SEED_ADMIN_PASSWORD
+
+# 2. 构建并启动（迁移与自举自动执行）
 docker compose --env-file .env up -d --build
 
-# 3. 应用数据库迁移
-docker compose exec backend alembic upgrade head
-
-# 4. 验证
+# 3. 验证
 curl -fsS http://localhost:8100/health            # 应返回 {"status":"ok"}
 curl -fsS -o /dev/null -w '%{http_code}\n' http://localhost:8180
 
-# 5. 修改默认管理员密码（生产必须）
-#    登录 admin / changeme123 → 账户设置 → 修改密码
+# 查看自举结果（四步各自 ok/skipped/failed）
+docker compose logs backend | grep bootstrap_summary
 ```
+
+自举步骤按「阻塞 / 尽力」分级：admin 与主题域属阻塞（失败则退出码 1、容器按
+`restart: unless-stopped` 自动重试）；ES 与 Neo4j 属尽力（可选依赖，失败仅告警
+不阻断启动，服务仍有降级路径）。重复执行幂等，二次启动全部 `skipped`。
+
+**仍需运维决策的配置项**（非初始化动作，属环境对接，无法自动推断）：
+
+- `UNISENSE_MYSQL_FALLBACK_URL`：OLAP 不可用时的 MySQL 只读降级库。默认指向
+  `mysql:3306/e2e_biz`，**该库为演示用途**，生产须指向真实只读业务库（平台不会
+  自动建此库；未配置时 OLAP 降级查询返回 `DEPENDENCY_DEGRADED_ENGINE` 业务错误，
+  不影响进程存活）。
+- `UNISENSE_OLAP_URL`：已有外部 Doris/StarRocks 时配置，否则走 MySQL 降级。
+- 演示数据：需要时用 `docker compose exec backend python scripts/seed_e2e_data.py`
+  显式造数，不随启动自动执行。
 
 ### 10.4 备份与恢复
 
