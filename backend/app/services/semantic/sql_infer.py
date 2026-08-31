@@ -635,14 +635,54 @@ def _extract_col_name(node: exp.Expr | None) -> str:
     if isinstance(node, exp.Distinct):
         inner = node.expressions[0] if node.expressions else None
         return _extract_col_name(inner)
-    if isinstance(node, exp.Case):
-        return next(
-            (c.name.lower() for c in node.walk() if isinstance(c, exp.Column)), "*"
-        )
+    if isinstance(node, exp.Case | exp.If):
+        return _conditional_result_col(node)
     first = next(
         (c.name.lower() for c in node.walk() if isinstance(c, exp.Column)), None
     )
     return first or "*"
+
+
+def _conditional_result_col(node: exp.Case | exp.If) -> str:
+    """从条件表达式（CASE WHEN / Hive IF）的**结果分支**提取度量列名。
+
+    只看 then/else 结果分支，**跳过条件分支**——`SUM(CASE WHEN create_date='x'
+    THEN 1 ELSE 0 END)` 是条件计数，度量列应为 ``*``（无真实度量列，编码/名称锚点
+    改用投影别名），而非条件里的 ``create_date``。
+
+    此前实现对整个 Case 节点取「第一个 Column」，条件计数场景必然命中条件列：
+    同一 SQL 里 N 个 `SUM(CASE WHEN <不同条件> THEN 1 ELSE 0 END)` 全部提取到同一
+    条件列（如 ``create_date``）→ N 个候选撞同一 4 段编码（域_业务对象_createdate_
+    周期）→ 注册 METRIC_CODE_EXISTS / 前端候选编码全相同。Hive ``IF(cond, fee, 0)``
+    解析为 ``exp.If`` 走通用 fallback，同样会误取条件列。
+
+    Args:
+        node: ``exp.Case``（含 ifs/default）或 ``exp.If``（含 true/false）。
+
+    Returns:
+        结果分支内第一个列名（小写）；结果分支全为常量/无列时返回 ``*``。
+    """
+    branches: list[exp.Expression] = []
+    if isinstance(node, exp.Case):
+        for iff in node.args.get("ifs") or []:
+            then = iff.args.get("true")
+            if then is not None:
+                branches.append(then)
+    else:
+        for key in ("true", "false"):
+            branch = node.args.get(key)
+            if branch is not None:
+                branches.append(branch)
+    default = node.args.get("default")
+    if default is not None:
+        branches.append(default)
+    for branch in branches:
+        col = next(
+            (c.name.lower() for c in branch.walk() if isinstance(c, exp.Column)), None
+        )
+        if col:
+            return col
+    return "*"
 
 
 def _is_wrapped_aggregate(target: exp.Expr) -> bool:
@@ -1512,10 +1552,16 @@ def _detect_time_column(
         gl = g.lower()
         if any(token in gl for token, _ in _TIME_GRAIN_ALIAS):
             return g
-    # 2) 投影别名中的时间列
+    # 2) 投影别名中的时间列——**必须排除聚合投影**：数仓惯用周期后缀命名度量
+    #    （`SUM(CASE WHEN ... END) AS expert_consultation_cnt_day`），别名含 day/
+    #    month 等 hint 但语义是「日/月口径的度量」而非时间列。误判会把度量别名当
+    #    分区键（definition_json.partition_key 全落第一个度量别名）并污染维度提取。
+    #    本步的设计目标是非聚合时间表达式（`substr(create_date,1,7) AS month_id`）。
     if select is not None:
         for proj in select.expressions:
             if isinstance(proj, exp.Alias):
+                if any(isinstance(n, exp.AggFunc) for n in proj.this.walk()):
+                    continue
                 alias = proj.alias_or_name
                 if alias and any(h in alias.lower() for h in _TIME_COLUMN_HINTS):
                     return alias
@@ -1527,7 +1573,29 @@ def _detect_time_column(
             for g in group_by:
                 if hint in g:
                     return g
-            return hint
+            # 谓词命中时提取**真实列名**（`A.create_date <= '...'` → create_date）——
+            # 直接返回 hint 词会让 definition_json.partition_key 落成 `date` 这种
+            # 物理表不存在的伪列名（注册后分区键不可用）。
+            col = _predicate_time_column(filters, hint)
+            return col or hint
+    return None
+
+
+def _predicate_time_column(filters: list[str], hint: str) -> str | None:
+    """从 WHERE 谓词原文中提取含时间 hint 的真实列名（去表别名前缀）。
+
+    Args:
+        filters: 谓词原文列表（如 ``["A.create_date <= '${DT}'"]``）。
+        hint: 命中的时间 hint（如 ``date``）。
+
+    Returns:
+        真实列名（小写，去 ``表别名.`` 前缀）；未提取到返回 None。
+    """
+    for pred in filters:
+        for token in re.findall(r"[A-Za-z_][\w.]*", pred):
+            name = token.split(".")[-1].lower()
+            if hint in name:
+                return name
     return None
 
 

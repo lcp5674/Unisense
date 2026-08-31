@@ -655,7 +655,15 @@ def _build_derived_candidate(
     # 影响）。**顶层投影**（sunk=False，含裸聚合生成别名）用真实列作锚点——alias
     # 仅为投影别名，若用 alias 会改变既有编码语义（如 SUM(amount) AS gmv → 本应
     # 用 amount 而非 gmv）。
-    code_col = alias if (alias and alias != col and measure.get("sunk")) else col
+    # **无真实度量列**（``col == "*"``：条件计数 `SUM(CASE WHEN ... THEN 1 END)`、
+    # `count(1)`）同样用 alias 作锚点——投影别名是这类度量唯一的语义载体（数仓
+    # 开发必写 `AS expert_consultation_cnt_day`）。否则 N 个条件计数全落 ``*``
+    # → 撞同一 4 段编码 → 前端候选编码全相同 / 注册 METRIC_CODE_EXISTS。
+    code_col = (
+        alias
+        if (alias and alias != col and (measure.get("sunk") or col == "*"))
+        else col
+    )
     # A-5：建表 DDL 列注释反查——数仓开发在 ``create table`` 里写的中文注释是
     # 名称/单位推断最权威来源（「月活」不再落成「doctor次数」）。按 (表, 列) 反查，
     # 命中则注入 ``measure_meta.comment``，``_infer_name``/``_infer_unit`` 自动消费。

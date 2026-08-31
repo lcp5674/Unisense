@@ -1154,6 +1154,28 @@ describe("MetricCreate SQL 推断业务域建议（FR-010 域建议增强）", (
     );
   });
 
+  it("未选域 SQL 推断：域建议失败（none）→ 弹强制选域 Modal，选域后重跑推断", async () => {
+    // beforeEach 默认 mock 即 NO_DOMAIN_SUGGESTION（none）
+    await openInferWithSql();
+    // 强制选域 Modal 出现（而非静默继续推断）
+    await screen.findByText("请先选择业务域");
+    // 域未定：此时不应已触发 autoSuggest（推断被中断等待选域）
+    expect(mockedSuggest).not.toHaveBeenCalled();
+    // 展开 Select 选「销售」并确认 → 应用域 + 用该域重跑推断
+    fireEvent.mouseDown(screen.getByText("搜索并选择业务域"));
+    fireEvent.click(await screen.findByText("销售 (sales)"));
+    fireEvent.click(screen.getByText("选域并推断"));
+    await waitFor(() =>
+      expect(mockedSuggest).toHaveBeenCalledWith(
+        expect.objectContaining({ domain_code: "sales", sql: expect.stringContaining("SELECT") })
+      )
+    );
+    // 域建议已应用（预填 Step0 域）——Alert 与 message 各渲染一处
+    await waitFor(() =>
+      expect(screen.getAllByText(/已按建议选择业务域：销售/).length).toBeGreaterThan(0)
+    );
+  });
+
   it("未选域 SQL 推断：AI 兜底推断业务域（表未被采集）→ 自动应用并标记 AI 来源", async () => {
     mockedSuggestDomain.mockResolvedValue({
       status: "llm",
@@ -1188,15 +1210,15 @@ describe("MetricCreate SQL 推断业务域建议（FR-010 域建议增强）", (
     expect(screen.getByText("切换为 财务")).toBeTruthy();
   });
 
-  it("未选域 SQL 推断：无法建议业务域 → 提示手动选择，推断照常（空域）", async () => {
+  it("未选域 SQL 推断：域建议失败（none）→ 取消强制选域则中断推断（不触发 autoSuggest）", async () => {
     await openInferWithSql();
-    await screen.findByText("SQL 智能推断结果");
-    expect(screen.getByText(/未能自动推断业务域/)).toBeTruthy();
-    await waitFor(() =>
-      expect(mockedSuggest).toHaveBeenCalledWith(
-        expect.objectContaining({ domain_code: "", sql: expect.stringContaining("SELECT") })
-      )
-    );
+    // 强制选域 Modal 出现
+    await screen.findByText("请先选择业务域");
+    // 取消 → 中断推断：不触发 autoSuggest，无推断结果弹窗
+    const modal = document.querySelector(".ant-modal") as HTMLElement;
+    fireEvent.click(within(modal).getByText(/取\s*消/));
+    await waitFor(() => expect(mockedSuggest).not.toHaveBeenCalled());
+    expect(screen.getByText(/已取消推断：请先选择业务域后再试/)).toBeTruthy();
   });
 });
 

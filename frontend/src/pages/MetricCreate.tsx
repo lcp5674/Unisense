@@ -91,6 +91,16 @@ function findDomainPath(nodes: SubjectDomainTreeNode[], code: string): string[] 
   return null;
 }
 
+// 强制选域：按域编码查树节点（构造 DomainSuggestionCandidate 回填用）。
+function findDomainNode(nodes: SubjectDomainTreeNode[], code: string): SubjectDomainTreeNode | null {
+  for (const n of nodes) {
+    if (n.code === code) return n;
+    const sub = findDomainNode(n.children, code);
+    if (sub) return sub;
+  }
+  return null;
+}
+
 // SQL 批量解析 skipped 原因分类 → 友好文案（对齐后端 _classify_no_measure）。
 const SQL_SKIP_REASON_TEXT: Record<string, string> = {
   ddl_only: "建表/删表等非查询语句（无聚合度量）已跳过",
@@ -482,6 +492,11 @@ export function MetricCreate() {
   const [candidateCandidates, setCandidateCandidates] = useState<DomainSuggestionCandidate[]>([]);
   const [candidateOpen, setCandidateOpen] = useState(false);
   const [candidateChecked, setCandidateChecked] = useState<string>("");
+  // 强制选域（方案 B 补强）：SQL 推断域建议失败（none）且未选域时，弹全部业务域选择器，
+  // 选完才继续推断/解析——避免用户拿无域结果选「未分类」占位导致编码首段 uncategorized。
+  const [forceDomainOpen, setForceDomainOpen] = useState(false);
+  const [forceDomainValue, setForceDomainValue] = useState<string>("");
+  const [forceDomainMode, setForceDomainMode] = useState<"infer" | "batch">("infer");
 
   // 批量注册指标弹窗状态（POST /metric-definitions/batch-register）
   const [batchOpen, setBatchOpen] = useState(false);
@@ -1188,6 +1203,15 @@ export function MetricCreate() {
       } else {
         setDomainSuggestion(null);
         setDomainSuggestionStatus("none");
+        // 域建议失败（none）且未选域 → 强制先选业务域（方案 B 补强）：指标编码首段是
+        // 业务域（4 段式），无域推断会让用户拿「未分类」占位 → 编码首段 uncategorized。
+        if (!effectiveDomain) {
+          setForceDomainMode("infer");
+          setForceDomainValue("");
+          setForceDomainOpen(true);
+          setSqlInferring(false);
+          return;
+        }
       }
     } catch {
       setDomainSuggestion(null);
@@ -1206,6 +1230,45 @@ export function MetricCreate() {
     if (!dom) return;
     await applyDomainSuggestion(dom);
     await runSqlInfer(dom.code, sqlInferUseLlmRef.current);
+  }
+
+  // 强制选域确认（方案 B 补强）：域建议失败后用户手动指定业务域。
+  // infer 模式：应用域后用该域重跑 SQL 推断（域影响后端推断结果）；
+  // batch 模式：候选不依赖域，applyDomainSuggestion 更新 selectedDomain 即可
+  // （resolveCandidateCode 自动用新域拼 4 段编码，无需重新解析）。
+  async function handleForceDomainConfirm() {
+    const code = forceDomainValue;
+    if (!code) {
+      message.warning("请选择业务域");
+      return;
+    }
+    const node = findDomainNode(domainTree, code);
+    setForceDomainOpen(false);
+    if (!node) {
+      message.warning(`业务域「${code}」不可用，请重新选择`);
+      return;
+    }
+    await applyDomainSuggestion({
+      code: node.code,
+      name: node.name,
+      confidence: 1,
+      source: "catalog",
+      reason: "域建议失败后由用户手动指定",
+    });
+    if (forceDomainMode === "infer") {
+      await runSqlInfer(code, sqlInferUseLlmRef.current);
+    } else {
+      message.success(`已选择业务域：${node.name}（${node.code}），候选编码将按此域生成`);
+    }
+  }
+
+  function handleForceDomainCancel() {
+    setForceDomainOpen(false);
+    if (forceDomainMode === "infer") {
+      message.info("已取消推断：请先选择业务域后再试");
+    } else {
+      message.warning("未选择业务域：候选编码无法生成，提交前请到第①步选择业务域");
+    }
   }
 
   // ---- SQL 批量解析（FR-010 批量注册增强，场景A/B）----
@@ -1250,7 +1313,8 @@ export function MetricCreate() {
         // 方案 A：SQL 推断候选一律派生（原子只从逻辑度量目录创建）——默认勾选派生基础候选
         new Set(result.candidates.filter((c) => c.type === "derived").map((c) => c.key))
       );
-      // 域建议：未选域且后端建议唯一/LLM 域 → 自动应用（对齐 handleSqlInfer 流程）
+      // 域建议：未选域且后端建议唯一/LLM 域 → 自动应用（对齐 handleSqlInfer 流程）；
+      // 建议失败（none）→ 强制先选业务域（方案 B 补强），避免无域结果 → uncategorized 编码
       const dom = result.domain;
       if (!selectedDomain && dom) {
         if (dom.code && (dom.status === "unique" || dom.status === "llm")) {
@@ -1264,6 +1328,12 @@ export function MetricCreate() {
         } else if (dom.status === "multiple" && dom.candidates.length > 0) {
           setCandidateCandidates(dom.candidates);
           setCandidateOpen(true);
+        } else if (!dom.code) {
+          // 后端未反查到域（status=none/空）→ 强制先选域；候选不依赖域，确认后
+          // selectedDomain 更新，resolveCandidateCode 自动用新域拼 4 段编码
+          setForceDomainMode("batch");
+          setForceDomainValue("");
+          setForceDomainOpen(true);
         }
       }
       if (result.candidates.length === 0) {
@@ -4823,6 +4893,34 @@ export function MetricCreate() {
             ))}
           </Space>
         </Radio.Group>
+      </Modal>
+
+      {/* 强制选域（方案 B 补强）：SQL 推断域建议失败（none）且未选域时，先选业务域再继续
+          ——避免无域推断让用户拿「未分类」占位 → 编码首段 uncategorized */}
+      <Modal
+        title="请先选择业务域"
+        open={forceDomainOpen}
+        onCancel={handleForceDomainCancel}
+        onOk={handleForceDomainConfirm}
+        okText={forceDomainMode === "infer" ? "选域并推断" : "选域并继续"}
+        cancelText="取消"
+        width={480}
+      >
+        <Paragraph type="secondary" style={{ fontSize: 12 }}>
+          未能从 SQL 自动反查到业务域。指标编码首段是业务域（4 段式），请先指定业务域；
+          选择后将自动继续{forceDomainMode === "infer" ? "SQL 智能推断" : "批量解析"}。
+        </Paragraph>
+        <Select
+          showSearch
+          style={{ width: "100%" }}
+          placeholder="搜索并选择业务域"
+          optionFilterProp="label"
+          value={forceDomainValue || undefined}
+          onChange={setForceDomainValue}
+          options={flattenDomainOptions(domainTree)}
+          loading={domainLoading}
+          autoFocus
+        />
       </Modal>
 
       {/* 推断结果摘要：SQL 智能推断成功后展示，让用户明确知道识别出了什么（惰性设计：给反馈而非只默默回填） */}
