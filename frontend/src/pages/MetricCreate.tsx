@@ -4844,7 +4844,9 @@ export function MetricCreate() {
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {(Array.isArray(v) ? v : [v]).map((t, i) => (
                   <Tag key={i} className="mono" style={{ marginInlineEnd: 0 }}>
-                    {String(t)}
+                    {/* 对象数组（如 source_fields=[{table,column}]）String() 会变 [object Object]，
+                        对象元素序列化为 JSON 可读展示 */}
+                    {t && typeof t === "object" ? JSON.stringify(t) : String(t)}
                   </Tag>
                 ))}
               </div>
@@ -4855,13 +4857,22 @@ export function MetricCreate() {
                 {body}
               </div>
             );
-            const known = new Set(["expression", "sql", "dw_definition", "source_tables", "partition_key", "dependencies"]);
+            const known = new Set(["expression", "sql", "dw_definition", "source_tables", "partition_key", "dependencies", "source_fields"]);
+            // source_fields 为对象数组 [{table, column}]——渲染为「表.列」可读格式
+            const sourceFieldText = (f: unknown) => {
+              if (f && typeof f === "object") {
+                const o = f as { table?: unknown; column?: unknown };
+                return [o.table, o.column].filter((x) => x !== undefined && x !== null).join(".");
+              }
+              return String(f);
+            };
             return (
               <div>
                 {dj.expression ? row("口径表达式", code(dj.expression)) : null}
                 {dj.sql ? row("完整 SQL", code(dj.sql)) : null}
                 {dj.dw_definition ? row("数仓详细口径（完整 SQL）", code(dj.dw_definition)) : null}
                 {dj.source_tables ? row("源表", tags(dj.source_tables)) : null}
+                {dj.source_fields ? row("上游字段（源表.列）", tags((Array.isArray(dj.source_fields) ? dj.source_fields : [dj.source_fields]).map(sourceFieldText))) : null}
                 {dj.partition_key ? row("时间列 / 分区键", tags(dj.partition_key)) : null}
                 {dj.dependencies ? row("依赖指标", tags(dj.dependencies)) : null}
                 {Object.entries(dj)

@@ -3177,6 +3177,8 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
               definition_json: {
                 expression: "SUM(amount)",
                 source_tables: ["dwd.sales_detail"],
+                // source_fields 为对象数组 [{table, column}]——必须渲染为「表.列」而非 [object Object]
+                source_fields: [{ table: "dwd.sales_detail", column: "gmv" }],
                 partition_key: "dt",
                 dw_definition:
                   "SELECT dt, SUM(amount) AS gmv FROM dwd.sales_detail GROUP BY dt",
@@ -3198,6 +3200,10 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     expect(modal.getByText("SUM(amount)")).toBeTruthy();
     expect(modal.getByText("源表")).toBeTruthy();
     expect(modal.getByText("dwd.sales_detail")).toBeTruthy();
+    // source_fields 对象数组渲染为「表.列」而非 [object Object]（此前 String(对象) 变 [object Object]）
+    expect(modal.getByText("上游字段（源表.列）")).toBeTruthy();
+    expect(modal.getByText("dwd.sales_detail.gmv")).toBeTruthy();
+    expect(modal.queryByText("[object Object]")).toBeNull();
     expect(modal.getByText("时间列 / 分区键")).toBeTruthy();
     expect(modal.getByText("dt")).toBeTruthy();
     expect(modal.getByText("数仓详细口径（完整 SQL）")).toBeTruthy();
