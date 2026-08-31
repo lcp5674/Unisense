@@ -251,15 +251,17 @@ function LoginPage({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
           </div>
         </div>
 
-        <div className="login-trust">
-          <span>企业级指标语义中台</span>
-          <span className="dot" />
-          <span>PII 合规</span>
-          <span className="dot" />
-          <span>全链路血缘追溯</span>
+        <div className="login-footbar">
+          <span className="footbar-brand">WeSemantics · 指标语义中台</span>
+          <span className="footbar-sep" />
+          <span className="footbar-trust">
+            <span className="chip">全程操作审计</span>
+            <i className="dot" />
+            <span className="chip">变更灰度发布</span>
+            <i className="dot" />
+            <span className="chip">软删可恢复</span>
+          </span>
         </div>
-
-        <div className="login-foot">WeSemantics · 指标语义中台 v0.1</div>
       </div>
 
       <div className="login-panel">
