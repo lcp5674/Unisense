@@ -5187,17 +5187,14 @@ export function MetricCreate() {
                 {(fields, { add, remove }) => (
                   <>
                     {fields.map(({ key, name, ...restField }) => (
-                      <Space
-                        key={key}
-                        wrap
-                        style={{ display: "flex", marginBottom: 6, width: "100%" }}
-                        align="baseline"
-                      >
+                      // Row/Col 而非 Space：Space 的 .ant-space-item 包裹层会让子项 flex 失效导致溢出
+                      <Row key={key} gutter={8} align="middle" style={{ marginBottom: 6, width: "100%" }}>
+                        <Col flex="1 1 170px" style={{ minWidth: 140 }}>
                         <Form.Item
                           {...restField}
                           name={[name, "dim_name"]}
                           rules={[{ required: true, message: "维度名" }]}
-                          style={{ marginBottom: 0, flex: "1 1 200px", minWidth: 150 }}
+                          style={{ marginBottom: 0 }}
                         >
                           <AutoComplete
                             data-testid="dim-name-auto"
@@ -5211,32 +5208,37 @@ export function MetricCreate() {
                             }
                           />
                         </Form.Item>
-            <Form.Item
-              {...restField}
-              name={[name, "col_name"]}
-              rules={[{ required: true, message: "列名" }]}
-              style={{ marginBottom: 0, flex: "1 1 220px", minWidth: 150 }}
-            >
-              <Select
-                showSearch
-                allowClear
-                placeholder={batchColumnOptions.length > 0 ? "选择源表列" : "先选源表后可选列"}
-                options={batchColumnOptions}
-                loading={batchColLoading}
-                style={{ width: "100%" }}
-                onChange={(colVal) => {
-                  // 列名自动推断维度名预填（仅当该行维度名为空，不覆盖用户已填值）
-                  if (!colVal) return;
-                  const inferred = inferDimFromColumn(String(colVal));
-                  if (inferred) {
-                    const current = batchForm.getFieldValue(["dimension_mapping_list", name, "dim_name"]);
-                    if (!current) batchForm.setFieldValue(["dimension_mapping_list", name, "dim_name"], inferred);
-                  }
-                }}
-              />
-            </Form.Item>
-                        <Button type="text" danger icon={<MinusCircleOutlined />} aria-label="删除该维度映射行" onClick={() => remove(name)} />
-                      </Space>
+                        </Col>
+                        <Col flex="1 1 170px" style={{ minWidth: 140 }}>
+                          <Form.Item
+                            {...restField}
+                            name={[name, "col_name"]}
+                            rules={[{ required: true, message: "列名" }]}
+                            style={{ marginBottom: 0 }}
+                          >
+                            <Select
+                              showSearch
+                              allowClear
+                              placeholder={batchColumnOptions.length > 0 ? "选择源表列" : "先选源表后可选列"}
+                              options={batchColumnOptions}
+                              loading={batchColLoading}
+                              style={{ width: "100%" }}
+                              onChange={(colVal) => {
+                                // 列名自动推断维度名预填（仅当该行维度名为空，不覆盖用户已填值）
+                                if (!colVal) return;
+                                const inferred = inferDimFromColumn(String(colVal));
+                                if (inferred) {
+                                  const current = batchForm.getFieldValue(["dimension_mapping_list", name, "dim_name"]);
+                                  if (!current) batchForm.setFieldValue(["dimension_mapping_list", name, "dim_name"], inferred);
+                                }
+                              }}
+                            />
+                          </Form.Item>
+                        </Col>
+                        <Col flex="none">
+                          <Button type="text" danger icon={<MinusCircleOutlined />} aria-label="删除该维度映射行" onClick={() => remove(name)} />
+                        </Col>
+                      </Row>
                     ))}
                     <Button type="dashed" onClick={() => add()} block icon={<PlusOutlined />}>
                       添加维度映射

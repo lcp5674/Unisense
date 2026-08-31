@@ -1894,48 +1894,53 @@ export function DataSources() {
           <Form.Item name="description" label="用途描述" style={{ width: "100%" }}>
             <Input.TextArea rows={2} placeholder="该数据源的业务用途、责任范围（治理信息，不参与采集）" maxLength={2000} showCount />
           </Form.Item>
-          {/* 弹性宽度 + wrap：固定 px 宽度在窄弹窗内容区会溢出到 Modal 外（Space 默认不换行） */}
-          <Space wrap size={[16, 8]} align="start" style={{ width: "100%" }}>
-            <Form.Item
-              name="owner_id"
-              label="负责人"
-              style={{ flex: "1 1 220px", minWidth: 180, marginBottom: 0 }}
-            >
-              <Select
-                allowClear
-                showSearch
-                placeholder="选择数据源负责人"
-                optionFilterProp="label"
-                options={userOptions
-                  .filter((u) => u.status === "active")
-                  .map((u) => ({ value: u.id, label: `${u.display_name}（${u.username}）` }))}
-              />
-            </Form.Item>
-            <Form.Item
-              name="quota_max_concurrency"
-              label="并发上限"
-              tooltip="扫描并发数（max_concurrency）"
-              style={{ flex: "0 1 120px", minWidth: 100, marginBottom: 0 }}
-            >
-              <InputNumber min={1} placeholder="默认" style={{ width: "100%" }} />
-            </Form.Item>
-            <Form.Item
-              name="quota_max_scan_rows"
-              label="扫描行上限"
-              tooltip="单次扫描行数上限（max_scan_rows），超出拒绝采集"
-              style={{ flex: "0 1 140px", minWidth: 120, marginBottom: 0 }}
-            >
-              <InputNumber min={1} placeholder="默认" style={{ width: "100%" }} />
-            </Form.Item>
-            <Form.Item
-              name="quota_sample_rows"
-              label="采样行数"
-              tooltip="每列采样行数（sample_rows）。留空/0=不采样，PII 仅按字段名+注释识别；设为 N 则采集时对字段执行 SELECT 采样（样本打码存储），启用 PII 名称+样本双验证"
-              style={{ flex: "0 1 150px", minWidth: 130, marginBottom: 0 }}
-            >
-              <InputNumber min={0} placeholder="不采样" style={{ width: "100%" }} />
-            </Form.Item>
-          </Space>
+          {/* 用 Row/Col 而非 Space：Space 会给子项包一层 .ant-space-item，
+              加在 Form.Item 上的 flex/minWidth 作用不到真正的 flex 子项（宽度会塌陷/溢出 Modal） */}
+          <Row gutter={[16, 8]} align="top">
+            <Col flex="1 1 200px" style={{ minWidth: 180 }}>
+              <Form.Item name="owner_id" label="负责人" style={{ marginBottom: 0 }}>
+                <Select
+                  allowClear
+                  showSearch
+                  placeholder="选择数据源负责人"
+                  optionFilterProp="label"
+                  options={userOptions
+                    .filter((u) => u.status === "active")
+                    .map((u) => ({ value: u.id, label: `${u.display_name}（${u.username}）` }))}
+                />
+              </Form.Item>
+            </Col>
+            <Col flex="0 1 120px" style={{ minWidth: 100 }}>
+              <Form.Item
+                name="quota_max_concurrency"
+                label="并发上限"
+                tooltip="扫描并发数（max_concurrency）"
+                style={{ marginBottom: 0 }}
+              >
+                <InputNumber min={1} placeholder="默认" style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col flex="0 1 140px" style={{ minWidth: 120 }}>
+              <Form.Item
+                name="quota_max_scan_rows"
+                label="扫描行上限"
+                tooltip="单次扫描行数上限（max_scan_rows），超出拒绝采集"
+                style={{ marginBottom: 0 }}
+              >
+                <InputNumber min={1} placeholder="默认" style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col flex="0 1 150px" style={{ minWidth: 130 }}>
+              <Form.Item
+                name="quota_sample_rows"
+                label="采样行数"
+                tooltip="每列采样行数（sample_rows）。留空/0=不采样，PII 仅按字段名+注释识别；设为 N 则采集时对字段执行 SELECT 采样（样本打码存储），启用 PII 名称+样本双验证"
+                style={{ marginBottom: 0 }}
+              >
+                <InputNumber min={0} placeholder="不采样" style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+          </Row>
           <Space style={{ marginBottom: 8 }}>
             {can("data-source:test-connection") && (
               <Button icon={<ApiOutlined />} onClick={handleTest}>
