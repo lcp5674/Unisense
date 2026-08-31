@@ -417,7 +417,7 @@ function GrantsTab() {
     { title: "角色", dataIndex: "role_id", key: "role", width: 120, render: (v: number | null) => {
       if (!v) return <Tag>角色挂起</Tag>;
       const r = roleMap.get(v);
-      return r ? <span>{r.name}{r.is_custom ? <Tag style={{ marginLeft: 4 }} color="blue">自定义</Tag> : null}</span> : <span className="mono">#{v}</span>;
+      return r ? <span>{ROLE_LABEL[r.name] ?? r.name}{r.is_custom ? <Tag style={{ marginLeft: 4 }} color="blue">自定义</Tag> : null}</span> : <span className="mono">#{v}</span>;
     } },
     { title: "域", dataIndex: "domain", key: "domain", width: 120, render: (v: string | null) => v ?? <span className="muted">全部</span> },
     { title: "授权类型", dataIndex: "grant_type", key: "type", width: 110, render: (v: string) => <Tag color={v === "READ_WRITE" ? "warning" : v === "WRITE" ? "orange" : "default"}>{GRANT_TYPE_LABEL[v] ?? v}</Tag> },
@@ -513,7 +513,7 @@ function GrantsTab() {
                 style={{ width: 220 }}
                 options={roleOptions.map((r) => ({
                   value: r.id,
-                  label: `${r.name}${r.is_custom ? "（自定义）" : ""}`,
+                  label: `${ROLE_LABEL[r.name] ?? r.name}${r.is_custom ? "（自定义）" : ""}`,
                 }))}
               />
             </Form.Item>

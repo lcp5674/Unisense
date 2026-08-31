@@ -608,8 +608,8 @@ describe("Governance 授权管理 - 角色下拉与按用户授权矩阵", () =>
     mockGrants.mockResolvedValue({ items: [grant], total: 1, page: 1, page_size: 20 });
     renderGov();
     await clickTab("授权管理");
-    // 列表「角色」列显示角色名 viewer（而非裸 #1）
-    await waitFor(() => expect(screen.getByText("viewer")).toBeInTheDocument());
+    // 列表「角色」列显示角色中文名「只读用户」（而非裸 #1 / 英文 viewer）
+    await waitFor(() => expect(screen.getByText("只读用户")).toBeInTheDocument());
     // 打开「新建授权」弹窗，角色字段为 Select（含「选择角色」placeholder）
     await userEvent.click(screen.getByRole("button", { name: /新\s*建\s*授\s*权/ }));
     await waitFor(() => expect(screen.getByText("角色（可留空）")).toBeInTheDocument());
@@ -625,7 +625,7 @@ describe("Governance 授权管理 - 角色下拉与按用户授权矩阵", () =>
     mockGrants.mockResolvedValue({ items: [grant], total: 1, page: 1, page_size: 20 });
     renderGov();
     await clickTab("授权管理");
-    await waitFor(() => expect(screen.getByText("viewer")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("只读用户")).toBeInTheDocument());
     await userEvent.click(screen.getByRole("button", { name: /按\s*钮\s*权\s*限/ }));
     await waitFor(() => expect(screen.getByText(/按用户授权：/)).toBeInTheDocument());
     // 角色已含项 catalog:view 只读（disabled 证明不可在此收窄角色）
