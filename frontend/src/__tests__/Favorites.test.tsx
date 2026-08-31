@@ -23,6 +23,7 @@ vi.mock("../api", () => {
     listFavoriteDetails: vi.fn(),
     addFavorite: vi.fn(),
     removeFavorite: vi.fn(),
+    listMetrics: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -31,11 +32,12 @@ vi.mock("../hooks/useTracking", () => ({
   useTracking: () => ({ track: vi.fn() }),
 }));
 
-import { listFavoriteDetails, addFavorite, removeFavorite, UnisenseApiError } from "../api";
+import { listFavoriteDetails, addFavorite, removeFavorite, listMetrics, UnisenseApiError } from "../api";
 
 const mockedList = vi.mocked(listFavoriteDetails);
 const mockedAdd = vi.mocked(addFavorite);
 const mockedRemove = vi.mocked(removeFavorite);
+const mockedListMetrics = vi.mocked(listMetrics);
 
 function PathSpy() {
   const loc = useLocation();
@@ -76,6 +78,20 @@ function removeBtn() {
   return btn;
 }
 
+/** 在 antd Select 下拉中点击指定 title 的选项（打开下拉后调用）。 */
+async function clickSelectOption(text: string) {
+  await waitFor(() => {
+    const dropdown = document.querySelector(
+      ".ant-select-dropdown:not(.ant-select-dropdown-hidden)",
+    ) as HTMLElement | null;
+    const option = dropdown?.querySelector(
+      `.ant-select-item-option[title="${text}"]`,
+    ) as HTMLElement | null;
+    expect(option).toBeTruthy();
+    if (option) fireEvent.click(option);
+  });
+}
+
 function fav(partial: Partial<FavoriteDetail> & { asset_id: string }): FavoriteDetail {
   return {
     asset_type: "METRIC",
@@ -103,6 +119,7 @@ beforeEach(() => {
   mockedList.mockResolvedValue([]);
   mockedAdd.mockResolvedValue({ asset_type: "METRIC", asset_id: "GMV", pinned: true });
   mockedRemove.mockResolvedValue({ asset_type: "METRIC", asset_id: "GMV", pinned: false });
+  mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 50 });
 });
 
 describe("我的收藏 - 多资产展示", () => {
@@ -179,24 +196,139 @@ describe("我的收藏 - 筛选", () => {
 });
 
 describe("我的收藏 - 操作", () => {
-  it("添加默认按指标类型调用 API", async () => {
+  it("按指标名称搜索选择后添加收藏", async () => {
     mockedList.mockResolvedValue([]);
+    mockedListMetrics.mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          metric_code: "GMV",
+          name: "成交总额",
+          domain: "finance",
+          type: "atomic",
+          granularity: "day",
+          unit: "CNY",
+          currency: "CNY",
+          aggregation: "SUM",
+          time_semantics: "PERIOD",
+          freshness: "T1",
+          dw_layer: "DWD",
+          metric_tier: "T1",
+          serving_mode: "BATCH_ONLY",
+          additivity: "ADDITIVE",
+          non_additive_dimensions: null,
+          definition_json: {},
+          version: 1,
+          row_version: 1,
+          status: "PUBLISHED",
+          owner_id: 1,
+          backup_owner_id: null,
+          approver_id: null,
+          submitted_by: null,
+          pii_flag: false,
+          compliance_reviewed: true,
+          term_id: null,
+          effective_version: 1,
+          consumption_guide: null,
+          successor_code: null,
+          deprecated_at: null,
+          sunset_until: null,
+          emergency_publish: false,
+          emergency_reason: null,
+          emergency_reviewed_at: null,
+          gray_tenant_ids: null,
+          pending_conflict: false,
+          pending_conflict_detail: null,
+          sla: null,
+          pending_version: false,
+          created_at: "2026-08-15T00:00:00",
+          updated_at: "2026-08-15T00:00:00",
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 50,
+    });
     renderPage();
 
-    const input = screen.getByPlaceholderText(/知道编码/);
-    fireEvent.change(input, { target: { value: "GMV" } });
+    // 打开添加下拉（首次打开即加载候选）
+    const selector = document.querySelector(".fav-add-quick .ant-select-selector") as HTMLElement;
+    fireEvent.mouseDown(selector);
+    await clickSelectOption("成交总额 (GMV)");
     fireEvent.click(screen.getByRole("button", { name: /添\s*加/ }));
 
     await waitFor(() => expect(mockedAdd).toHaveBeenCalledWith("METRIC", "GMV"));
   });
 
-  it("添加不存在的资产显示错误提示", async () => {
+  it("未选择指标点添加给出明确提示（不再静默无反应）", async () => {
     mockedList.mockResolvedValue([]);
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: /添\s*加/ }));
+
+    await waitFor(() => expect(screen.findByText(/请先选择要收藏的指标/)).toBeTruthy());
+    expect(mockedAdd).not.toHaveBeenCalled();
+  });
+
+  it("添加失败显示错误提示", async () => {
+    mockedList.mockResolvedValue([]);
+    mockedListMetrics.mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          metric_code: "GMV",
+          name: "成交总额",
+          domain: "finance",
+          type: "atomic",
+          granularity: "day",
+          unit: "CNY",
+          currency: "CNY",
+          aggregation: "SUM",
+          time_semantics: "PERIOD",
+          freshness: "T1",
+          dw_layer: "DWD",
+          metric_tier: "T1",
+          serving_mode: "BATCH_ONLY",
+          additivity: "ADDITIVE",
+          non_additive_dimensions: null,
+          definition_json: {},
+          version: 1,
+          row_version: 1,
+          status: "PUBLISHED",
+          owner_id: 1,
+          backup_owner_id: null,
+          approver_id: null,
+          submitted_by: null,
+          pii_flag: false,
+          compliance_reviewed: true,
+          term_id: null,
+          effective_version: 1,
+          consumption_guide: null,
+          successor_code: null,
+          deprecated_at: null,
+          sunset_until: null,
+          emergency_publish: false,
+          emergency_reason: null,
+          emergency_reviewed_at: null,
+          gray_tenant_ids: null,
+          pending_conflict: false,
+          pending_conflict_detail: null,
+          sla: null,
+          pending_version: false,
+          created_at: "2026-08-15T00:00:00",
+          updated_at: "2026-08-15T00:00:00",
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 50,
+    });
     mockedAdd.mockRejectedValue(new UnisenseApiError("资产不存在: GHOST", "NOT_FOUND", 404, "t"));
     renderPage();
 
-    const input = screen.getByPlaceholderText(/知道编码/);
-    fireEvent.change(input, { target: { value: "GHOST" } });
+    const selector = document.querySelector(".fav-add-quick .ant-select-selector") as HTMLElement;
+    fireEvent.mouseDown(selector);
+    await clickSelectOption("成交总额 (GMV)");
     fireEvent.click(screen.getByRole("button", { name: /添\s*加/ }));
 
     await waitFor(() => expect(screen.findByText(/资产不存在/)).toBeTruthy());

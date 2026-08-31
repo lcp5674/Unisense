@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Card, Empty, Input, message, Segmented, Tag } from "antd";
+import { Button, Card, Empty, Input, Select, message, Segmented, Tag } from "antd";
 import {
   ApartmentOutlined,
   BookOutlined,
@@ -15,6 +15,7 @@ import {
 import {
   addFavorite,
   listFavoriteDetails,
+  listMetrics,
   removeFavorite,
   UnisenseApiError,
 } from "../api";
@@ -288,8 +289,14 @@ export function Favorites() {
   const [loading, setLoading] = useState(false);
   const [tab, setTab] = useState<FavoriteAssetType | "ALL">("ALL");
   const [search, setSearch] = useState("");
-  const [newCode, setNewCode] = useState("");
   const [showDead, setShowDead] = useState(false);
+  // 「添加收藏」：按指标名称远程搜索选择（listMetrics keyword 匹配名称/编码/描述），
+  // 选中后点「添加」收藏——替代此前「手输编码」弱化输入框（用户通常不知道编码）。
+  const [favOptions, setFavOptions] = useState<Array<{ value: string; label: string }>>([]);
+  const [favSelected, setFavSelected] = useState<string | null>(null);
+  const [favSearching, setFavSearching] = useState(false);
+  const [favLoaded, setFavLoaded] = useState(false);
+  const favSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const navigate = useNavigate();
   const { track } = useTracking();
 
@@ -314,13 +321,45 @@ export function Favorites() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 弱化的手输框：默认按指标类型添加（用户通常不记得编码，主路径是去目录收藏）
-  async function handleAdd() {
-    if (!newCode.trim()) return;
+  // 「添加收藏」：按指标名称远程搜索加载候选（已收藏的过滤掉，避免重复添加）。
+  async function loadFavOptions(keyword?: string) {
+    setFavSearching(true);
     try {
-      await addFavorite("METRIC", newCode.trim());
-      setNewCode("");
+      const kw = keyword?.trim();
+      const res = await listMetrics({ keyword: kw || undefined, page_size: 50 });
+      const owned = new Set(items.map((f) => f.asset_id));
+      setFavOptions(
+        (res.items ?? [])
+          .filter((m) => !owned.has(m.metric_code))
+          .map((m) => ({ value: m.metric_code, label: `${m.name} (${m.metric_code})` })),
+      );
+      if (!kw) setFavLoaded(true);
+    } catch {
+      setFavOptions([]);
+    } finally {
+      setFavSearching(false);
+    }
+  }
+
+  // 名称搜索防抖（300ms）：避免输入过程中频繁请求打断
+  function handleFavSearch(q: string) {
+    if (favSearchTimer.current) clearTimeout(favSearchTimer.current);
+    favSearchTimer.current = setTimeout(() => {
+      loadFavOptions(q);
+    }, 300);
+  }
+
+  async function handleAdd() {
+    // 未选择指标时明确提示，不再静默返回（修复「点添加无反应」）
+    if (!favSelected) {
+      message.warning("请先选择要收藏的指标（按名称搜索）");
+      return;
+    }
+    try {
+      await addFavorite("METRIC", favSelected);
+      setFavSelected(null);
       load();
+      loadFavOptions();
       message.success("已添加收藏");
     } catch (err) {
       message.error(
@@ -391,13 +430,21 @@ export function Favorites() {
           <p>集中收藏指标、数据表、术语、维度与指标模板，点击卡片即可直达资产详情。</p>
         </div>
         <div className="fav-add-quick">
-          <Input
-            placeholder="知道编码？直接输入添加（默认按指标）"
-            value={newCode}
-            onChange={(e) => setNewCode(e.target.value)}
-            onPressEnter={handleAdd}
-            style={{ width: 280 }}
+          <Select
+            showSearch
+            allowClear
             size="small"
+            placeholder="按指标名称搜索并选择"
+            style={{ width: 280 }}
+            value={favSelected}
+            onChange={(v) => setFavSelected(v ?? null)}
+            filterOption={false}
+            onSearch={handleFavSearch}
+            onOpenChange={(open) => {
+              if (open && !favLoaded) loadFavOptions();
+            }}
+            loading={favSearching}
+            options={favOptions}
           />
           <Button size="small" icon={<PlusOutlined />} onClick={handleAdd}>
             添加
