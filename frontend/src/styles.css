@@ -260,6 +260,173 @@ body {
 }
 
 /* ==========================================================================
+   登录页动画特效 — 「指标数据流动、口径校准对齐」
+   纯样式层升级（不动 JSX 结构与交互逻辑）：发丝网格缓慢漂移隐喻数据在
+   语义网格中流动对齐；琥珀刻度呼吸呼应「活体读数」；品牌/标题/价值点
+   逐层浮现，提交按钮流光扫过。遵循 prefers-reduced-motion 降级。
+   ========================================================================== */
+
+/* 发丝计量网格缓慢漂移（48px 网格，移动 2 格 = 96px 构成完整循环） */
+.login-chassis::before {
+  animation: ws-grid-drift 90s linear infinite;
+}
+
+/* 琥珀读数刻度呼吸（「活体读数」信号） */
+.login-chassis::after {
+  animation: ws-readout-pulse 3.2s ease-in-out infinite;
+}
+
+/* 品牌区上浮渐入 + 品牌徽标一次扫描光晕 */
+.login-brand {
+  animation: ws-rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.login-brand .brand-mark {
+  position: relative;
+  overflow: hidden;
+}
+.login-brand .brand-mark::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(105deg, transparent 42%, rgba(255, 255, 255, 0.5) 50%, transparent 58%);
+  animation: ws-scan 2.6s ease-in-out 0.9s 1;
+}
+
+/* hero 标题与说明逐行浮现 */
+.login-hero h2 {
+  animation: ws-rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.15s both;
+}
+.login-hero p {
+  animation: ws-rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.25s both;
+}
+
+/* 三个价值点依次上浮（stagger） */
+.login-value .val {
+  animation: ws-rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.login-value .val:nth-child(1) {
+  animation-delay: 0.4s;
+}
+.login-value .val:nth-child(2) {
+  animation-delay: 0.55s;
+}
+.login-value .val:nth-child(3) {
+  animation-delay: 0.7s;
+}
+
+/* 表单卡片浮入 */
+.login-card {
+  animation: ws-card-in 0.6s cubic-bezier(0.22, 1, 0.36, 1) 0.1s both;
+}
+
+/* kicker 琥珀渐变流光文字 */
+.login-card .login-kicker {
+  background: linear-gradient(90deg, var(--signal), #f2a45c, var(--signal));
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: ws-shimmer 3.5s linear infinite;
+}
+
+/* 提交按钮流光扫过 */
+.login-submit {
+  position: relative;
+  overflow: hidden;
+}
+.login-submit::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.32), transparent);
+  animation: ws-scan 3s ease-in-out 1.2s infinite;
+}
+
+/* 页脚渐显 */
+.login-chassis .login-foot {
+  animation: ws-rise 0.7s ease-out 0.85s both;
+}
+
+@keyframes ws-grid-drift {
+  from {
+    background-position: 0 0, 0 0;
+  }
+  to {
+    background-position: 96px 96px, 96px 96px;
+  }
+}
+
+@keyframes ws-readout-pulse {
+  0%,
+  100% {
+    opacity: 0.85;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@keyframes ws-rise {
+  from {
+    opacity: 0;
+    transform: translateY(26px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes ws-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes ws-scan {
+  0% {
+    transform: translateX(-130%);
+  }
+  100% {
+    transform: translateX(230%);
+  }
+}
+
+@keyframes ws-shimmer {
+  from {
+    background-position: 0% 0;
+  }
+  to {
+    background-position: 200% 0;
+  }
+}
+
+/* 用户偏好减弱动画时全部关闭 */
+@media (prefers-reduced-motion: reduce) {
+  .login-chassis::before,
+  .login-chassis::after,
+  .login-brand,
+  .login-brand .brand-mark::after,
+  .login-hero h2,
+  .login-hero p,
+  .login-value .val,
+  .login-card,
+  .login-card .login-kicker,
+  .login-submit::after,
+  .login-chassis .login-foot {
+    animation: none !important;
+  }
+}
+
+/* ==========================================================================
    应用壳 — Header + 侧边导航轨道 + 内容区
    ========================================================================== */
 

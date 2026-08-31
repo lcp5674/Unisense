@@ -625,12 +625,12 @@ export function Layout({ user }: { user: CurrentUser }) {
           }}
         >
           <div className="brand-mark" style={{ width: 32, height: 32, borderRadius: 9, fontSize: 15 }}>
-            U
+            W
           </div>
           {!collapsed && (
             <div>
               <div className="brand-name" style={{ color: "#fff", fontSize: 15 }}>
-                Unisense
+                WeSemantic
               </div>
               <div className="brand-sub" style={{ fontSize: 10, color: "rgba(235,240,247,0.5)" }}>
                 Metric Semantics Hub
@@ -693,10 +693,10 @@ export function Layout({ user }: { user: CurrentUser }) {
             {!collapsed && (
               <>
                 <div className="brand-mark" style={{ width: 30, height: 30, borderRadius: 8, fontSize: 14 }}>
-                  U
+                  W
                 </div>
                 <div>
-                  <div className="brand-name" style={{ fontSize: 15 }}>Unisense</div>
+                  <div className="brand-name" style={{ fontSize: 15 }}>WeSemantic</div>
                 </div>
               </>
             )}
