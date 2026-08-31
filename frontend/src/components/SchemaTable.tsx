@@ -20,6 +20,16 @@ const SAMPLE_RULE_LABEL: Record<string, string> = {
   bank_card: "银行卡",
 };
 
+/** 样本值最多横向铺开的列数（对应数据源配额 sample_rows，超出部分不额外建列） */
+const MAX_SAMPLE_COLS = 8;
+
+/** 归一化样本值：新采样落库为 string[]，存量兼容单值 string */
+function normalizeSamples(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.filter((v): v is string => typeof v === "string" && !!v);
+  if (typeof raw === "string" && raw) return [raw];
+  return [];
+}
+
 function descriptionSourceTag(source?: DescriptionSource | null) {
   if (!source) return null;
   const cfg = SOURCE_TAG_CONFIG[source];
@@ -117,6 +127,14 @@ export function SchemaTable({
     }
   }
 
+  // 样本值横向铺开为「样本 1…N」多列（每格一个值），列数取当前表实际最多条数
+  const sampleCount = Math.min(
+    MAX_SAMPLE_COLS,
+    data.reduce((max, c) => Math.max(max, normalizeSamples(c.sample).length), 0),
+  );
+  // 仅当存在敏感类别命中时才插入「类别」列
+  const hasSampleRule = data.some((c) => !!SAMPLE_RULE_LABEL[c.sample_rule ?? ""]);
+
   const tableColumns: ColumnsType<SchemaColumn> = [
     {
       title: "字段名",
@@ -132,37 +150,36 @@ export function SchemaTable({
       width: 120,
       render: (v: string) => v ? <Tag>{v}</Tag> : <span className="muted">-</span>,
     },
-    {
-      title: "样本值",
-      key: "sample",
-      width: 220,
+    // 敏感类别（由样本明文判定命中的规则，采样时记录 rule_id）
+    ...(hasSampleRule
+      ? [
+          {
+            title: "类别",
+            key: "sample_rule",
+            width: 90,
+            render: (_: unknown, record: SchemaColumn) => {
+              const label = SAMPLE_RULE_LABEL[record.sample_rule ?? ""];
+              return label ? <Tag color="orange">{label}</Tag> : <span className="muted">-</span>;
+            },
+          },
+        ]
+      : []),
+    // 样本 1…N：每列一个脱敏值，值过长时 Tooltip 展示完整内容
+    ...Array.from({ length: sampleCount }, (_, i) => ({
+      title: `样本 ${i + 1}`,
+      key: `sample_${i}`,
+      width: 150,
+      ellipsis: true,
       render: (_: unknown, record: SchemaColumn) => {
-        // 多值样本列表（最多 sample_rows 条，已打码）；兼容存量单值字符串
-        const raw = record.sample;
-        const samples = Array.isArray(raw) ? raw.filter(Boolean) : raw ? [raw] : [];
-        if (samples.length === 0) return <span className="muted">-</span>;
-        const ruleLabel = SAMPLE_RULE_LABEL[record.sample_rule ?? ""];
-        const preview = samples.slice(0, 3);
-        const rest = samples.length - preview.length;
+        const value = normalizeSamples(record.sample)[i];
+        if (!value) return <span className="muted">-</span>;
         return (
-          <Tooltip
-            title={
-              ruleLabel
-                ? `脱敏样本（识别为${ruleLabel}）：${samples.join(" / ")}`
-                : `脱敏样本：${samples.join(" / ")}`
-            }
-          >
-            <Space size={4} wrap>
-              {preview.map((s, i) => (
-                <span className="mono" key={i}>{s}</span>
-              ))}
-              {rest > 0 && <span className="muted">+{rest}</span>}
-              {ruleLabel && <Tag color="orange">{ruleLabel}</Tag>}
-            </Space>
+          <Tooltip title={value}>
+            <span className="mono">{value}</span>
           </Tooltip>
         );
       },
-    },
+    })),
     {
       title: "描述",
       key: "description",

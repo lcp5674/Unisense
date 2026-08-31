@@ -660,12 +660,61 @@ describe("Catalogs 页面", () => {
 
     fireEvent.click(await screen.findByText("字段详情"));
     expect(await screen.findByText("patient_phone")).toBeTruthy();
-    // 多条脱敏样本全部渲染
-    expect(screen.getByText("138****1234")).toBeTruthy();
-    expect(screen.getByText("139****4321")).toBeTruthy();
-    expect(screen.getByText("137****5678")).toBeTruthy();
+    // 多条样本横向铺开为「样本 1…N」独立列，每格一个值
+    expect(screen.getByText("样本 1")).toBeTruthy();
+    expect(screen.getByText("样本 2")).toBeTruthy();
+    expect(screen.getByText("样本 3")).toBeTruthy();
+    expect(screen.queryByText("样本 4")).toBeNull();
+    const cell = (v: string) => screen.getByText(v).closest("td");
+    expect(cell("138****1234")).not.toBe(cell("139****4321"));
+    expect(cell("139****4321")).not.toBe(cell("137****5678"));
     // 命中类别标签（SAMPLE_RULE_LABEL：phone → 手机）
     expect(screen.getByText("手机")).toBeTruthy();
+  });
+
+  it("字段无样本时不展示样本列", async () => {
+    const noSampleCols = {
+      ...CATALOGS[0],
+      schema_def: {
+        columns: [{ name: "order_id", type: "bigint", comment: "订单ID" }],
+      },
+    } as DBCatalog;
+    mockedList.mockResolvedValue({ items: [noSampleCols], total: 1, page: 1, page_size: 20 });
+
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByText("字段详情"));
+    expect(await screen.findByText("order_id")).toBeTruthy();
+    expect(screen.queryByText("样本 1")).toBeNull();
+    expect(screen.queryByText("类别")).toBeNull();
+  });
+
+  it("存量单值样本兼容为样本 1 单列", async () => {
+    const legacyCols = {
+      ...CATALOGS[0],
+      schema_def: {
+        columns: [
+          { name: "id_card_no", type: "varchar", sample: "110101********1234", sample_rule: "id_card" },
+        ],
+      },
+    } as DBCatalog;
+    mockedList.mockResolvedValue({ items: [legacyCols], total: 1, page: 1, page_size: 20 });
+
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByText("字段详情"));
+    expect(await screen.findByText("id_card_no")).toBeTruthy();
+    expect(screen.getByText("样本 1")).toBeTruthy();
+    expect(screen.getByText("110101********1234")).toBeTruthy();
+    expect(screen.getByText("身份证")).toBeTruthy();
   });
 
   it("展示采样覆盖率条（表/列占比与双重验证列数）", async () => {
