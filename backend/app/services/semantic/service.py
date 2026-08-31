@@ -662,6 +662,26 @@ class MetricService(BaseService):
         # base_atomic 必须为已存在的原子类型指标，血缘据此生成 BASED_ON 基础边
         await self._validate_base_atomic(definition)
 
+        # 关联术语校验（创建时绑定）：term_id 须为已存在且未删除的业务术语
+        if request.term_id is not None:
+            from sqlalchemy import select
+
+            from app.models.term import Term
+
+            _term_exists = (
+                await self._db.execute(
+                    select(Term.id).where(
+                        Term.id == request.term_id,
+                        Term.deleted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if _term_exists is None:
+                raise NotFoundError(
+                    f"关联术语不存在: {request.term_id}",
+                    ctx={"term_id": request.term_id},
+                )
+
         metric = Metric(
             metric_code=request.metric_code,
             name=request.name,
@@ -710,6 +730,11 @@ class MetricService(BaseService):
             raw_sql=getattr(request, "raw_sql", None),
             # 消费指南：创建时透传（有值视为人工维护 manual，否则 auto 待自动生成）
             consumption_guide=getattr(request, "consumption_guide", None),
+            # 业务描述：创建时透传（manual 来源；详情页 AI 生成会覆盖为 llm）
+            description=(request.description or None),
+            description_source=("manual" if request.description else None),
+            # 关联术语：创建时绑定（须已存在，前面已校验）
+            term_id=request.term_id,
             guide_source=(
                 "manual" if getattr(request, "consumption_guide", None) else "auto"
             ),

@@ -6,7 +6,7 @@ import {
   Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Collapse, Divider, Drawer, Form, Input, Modal, Radio, Row, Segmented, Select, Space, Spin, Steps, Switch, Table, Tooltip, Typography, App as AntApp, Tag,
 } from "antd";
 import {
-  createMetric, listCatalogs, autoSuggestMetric, suggestDomain, parseSqlBatch, parseSqlTables, batchRegisterFromSql, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, getDomainDefaults, listUsers, listMeasureCatalogs, fetchCurrentUser, refineMetricDefinition, getMetric, updateMetric, UnisenseApiError,
+  createMetric, listCatalogs, autoSuggestMetric, suggestDomain, parseSqlBatch, parseSqlTables, batchRegisterFromSql, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, listTerms, getDomainDefaults, listUsers, listMeasureCatalogs, fetchCurrentUser, refineMetricDefinition, getMetric, updateMetric, UnisenseApiError,
 } from "../api";
 import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricBatchRegisterCandidate, MetricResponse, MetricUpdateRequest, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, DomainSuggestionCandidate, Dimension, MeasureCatalog, MeasureSuggestion, MetricMountInput, SqlBatchParseResult, SqlBatchCandidate, CurrentUser, ConsumptionGuidePayload } from "../types";
 import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
@@ -463,6 +463,10 @@ export function MetricCreate() {
   // 数仓SQL口径自动回填依赖表：记录最近一次已解析的 SQL——内容未变失焦不重复请求
   //（防重；解析成功才更新，非 SQL/解析失败后用户改成合法 SQL 仍能再次触发）
   const dwSqlParseRef = useRef<string>("");
+  // 关联术语（选填）：创建时绑定 metric.term_id——搜索式 Select（防抖 listTerms，仅 PUBLISHED）
+  const [termOptions, setTermOptions] = useState<Array<{ value: number; label: string }>>([]);
+  const [termSearching, setTermSearching] = useState(false);
+  const termSearchTimer = useRef<ReturnType<typeof setTimeout>>();
 
   const [prechecking, setPrechecking] = useState(false);
   const [precheckResult, setPrecheckResult] = useState<ConflictCheckResult | null>(null);
@@ -748,6 +752,25 @@ export function MetricCreate() {
     if (open && srcTableSearchOptions.length === 0 && !srcTableSearchLoading) {
       handleSrcTableSearch("");
     }
+  }
+
+  // 关联术语搜索（选填，创建时绑定）：防抖调用 listTerms（仅 PUBLISHED 可绑定），
+  // 与详情页「关联术语」卡片同款——搜索失败不阻断注册流程。
+  function handleTermSearch(q: string) {
+    if (termSearchTimer.current) clearTimeout(termSearchTimer.current);
+    termSearchTimer.current = setTimeout(async () => {
+      setTermSearching(true);
+      try {
+        const res = await listTerms({ search: q.trim() || undefined, status: "PUBLISHED", page_size: 20 });
+        setTermOptions(
+          (res.items ?? []).map((t) => ({ value: t.id, label: `${t.name}（${t.term_code}）` })),
+        );
+      } catch {
+        // 术语搜索失败不阻断
+      } finally {
+        setTermSearching(false);
+      }
+    }, 300);
   }
 
   // 取某表的列选项（name + type + comment），供主表单与批量注册弹窗复用
@@ -2359,6 +2382,10 @@ export function MetricCreate() {
             related_metrics: guideDraft.related_metrics.filter((s) => s.trim()),
           }
         : undefined,
+      // 业务描述（选填）：创建时透传（manual 来源），空串不提交（保持 null）
+      description: values.description ? String(values.description).trim() : undefined,
+      // 关联术语（选填）：创建时绑定 metric.term_id（详情页可改绑/解绑）
+      term_id: values.term_id ? Number(values.term_id) : undefined,
       // 口径三方责任（可选）：平台用户 id 或外部人员名称兜底（RoleOwnerSelect 组合值拆分）
       product_owner_id: (values.product_owner as RoleOwnerValue | undefined)?.id ?? undefined,
       tech_owner_id: (values.tech_owner as RoleOwnerValue | undefined)?.id ?? undefined,
@@ -3400,6 +3427,53 @@ export function MetricCreate() {
                           onChange={(v) => setGuideDraft((d) => ({ ...(d ?? { recommended_usage: [], cautions: [] }), related_metrics: v }))}
                           placeholder="如：sales_uv_daily"
                         />
+                      </>
+                    ),
+                  },
+                ]}
+              />
+              <Collapse
+                ghost
+                items={[
+                  {
+                    key: "desc_term",
+                    label: (
+                      <span>
+                        业务描述与关联术语（选填）
+                        <Tag style={{ marginLeft: 8 }} color={form.getFieldValue("description") || form.getFieldValue("term_id") ? "green" : "default"}>
+                          {form.getFieldValue("description") || form.getFieldValue("term_id") ? "已填写" : "未填写"}
+                        </Tag>
+                      </span>
+                    ),
+                    children: (
+                      <>
+                        <Alert
+                          type="info"
+                          showIcon
+                          style={{ marginBottom: 12 }}
+                          message="业务描述展示在指标详情页（可留空，后续可 AI 生成或编辑）；关联术语将指标归属到业务术语治理，与详情页「关联术语」一致。"
+                        />
+                        <Form.Item name="description" label="业务描述" style={{ marginBottom: 12 }}>
+                          <Input.TextArea
+                            rows={3}
+                            maxLength={2000}
+                            showCount
+                            placeholder="指标的业务含义、口径背景、适用场景（选填；详情页可 AI 生成补充）"
+                          />
+                        </Form.Item>
+                        <Form.Item name="term_id" label="关联术语" extra="将指标归属到已发布业务术语（搜索选择）">
+                          <Select
+                            data-testid="termSelect"
+                            showSearch
+                            allowClear
+                            placeholder="搜索并选择业务术语（选填）"
+                            filterOption={false}
+                            onSearch={handleTermSearch}
+                            options={termOptions}
+                            loading={termSearching}
+                            notFoundContent={termSearching ? "搜索中…" : "未找到匹配术语"}
+                          />
+                        </Form.Item>
                       </>
                     ),
                   },

@@ -182,6 +182,17 @@ const DROPDOWN_FULL_WIDTH = {
   styles: { popup: { root: { minWidth: 280 } } },
 };
 
+// 域树扁平化（仅 active 域可选）：供「新增挂载变体」弹窗业务域下拉——与注册向导/批量
+// 快速创建语义对齐（停用/非 active 域不提供选择，避免选到后端拒绝的域）。
+function flattenDomainOptions(nodes: SubjectDomainTreeNode[]): Array<{ value: string; label: string }> {
+  return nodes.flatMap((n) => [
+    ...(n.status === "active"
+      ? [{ value: n.code, label: `${n.name} (${n.code})` }]
+      : []),
+    ...flattenDomainOptions(n.children),
+  ]);
+}
+
 // 字典未收录值引导弹窗的字典类型中文名（对齐参照数据管理 DICT_TYPE_LABELS）
 const EDIT_DICT_TYPE_LABEL: Record<string, string> = {
   granularity: "粒度",
@@ -497,8 +508,17 @@ function DefinitionCard({ metric }: { metric: MetricResponse }) {
   const expression = typeof def.expression === "string" ? def.expression : undefined;
   const dependencies = Array.isArray(def.dependencies) ? def.dependencies : [];
   const rawSource = def.source_fields ?? def.source_columns;
+  // 来源字段：source_fields 可能是字符串数组（"表.列" 或列名），也可能是对象数组
+  // [{table, column}]（SQL 推断产物）——对象须渲染为「表.列」，避免 String(obj) 出现
+  // [object Object]（与批量编辑向导「上游字段」渲染同款语义）。
   const sourceFields: string[] = Array.isArray(rawSource)
-    ? rawSource.map((s) => String(s))
+    ? rawSource.map((s) => {
+        if (s && typeof s === "object") {
+          const src = s as { table?: string; column?: string };
+          return [src.table, src.column].filter(Boolean).join(".");
+        }
+        return String(s);
+      })
     : rawSource
       ? [String(rawSource)]
       : [];
@@ -738,6 +758,8 @@ export function MetricDetail() {
   const [addMountProductOwner, setAddMountProductOwner] = useState<RoleOwnerValue | undefined>(undefined);
   const [addMountTechOwner, setAddMountTechOwner] = useState<RoleOwnerValue | undefined>(undefined);
   const [addMountDwDeveloper, setAddMountDwDeveloper] = useState<RoleOwnerValue | undefined>(undefined);
+  // 域树（active 域）：供「新增挂载变体」弹窗业务域下拉选（与注册向导 active 域语义一致）
+  const [domainTree, setDomainTree] = useState<SubjectDomainTreeNode[]>([]);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [users, setUsers] = useState<UserBrief[]>([]);
   // 变体级责任方展示（方案 B）：id 可解析 → 平台用户；id 空但 name 非空 → 外部人员；
@@ -978,6 +1000,7 @@ export function MetricDetail() {
         fetchRelatedMetrics(code).catch(() => [] as RecommendItem[]),
       ]);
       setMetric(m);
+      setDomainTree(domainTree);
       // P1-3：挂载实体加载（best-effort）
       if (m.id != null) loadMounts(m.id);
       setVersions(vs);
@@ -2736,7 +2759,16 @@ export function MetricDetail() {
               />
             </Form.Item>
             <Form.Item name="domain" label="业务域" style={{ marginBottom: 8, minWidth: 160, flex: 1 }}>
-              <Input placeholder="业务域（默认继承指标域）" />
+              <Select
+                data-testid="addMountDomain"
+                showSearch
+                allowClear
+                placeholder="业务域（默认继承指标域，留空继承）"
+                optionFilterProp="label"
+                options={flattenDomainOptions(domainTree)}
+                notFoundContent="无匹配业务域"
+                {...DROPDOWN_FULL_WIDTH}
+              />
             </Form.Item>
           </Space>
           <Form.Item name="business_filter" label="业务限定" style={{ marginBottom: 8 }}>

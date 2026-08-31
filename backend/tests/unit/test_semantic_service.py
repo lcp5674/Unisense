@@ -167,6 +167,56 @@ async def test_create_atomic_with_mount_rejected():
     assert repo.create.call_count == 0
 
 
+async def test_create_persists_description_and_term():
+    """创建透传业务描述与关联术语：description（manual 来源）+ term_id 落 Metric ORM。
+
+    详情页「业务描述」卡片与「关联术语」卡片注册时即可填写，与注册后补录同构。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    # term_id 校验：mock DB 返回存在的术语（scalar_one_or_none 非 None）
+    svc._db.execute = AsyncMock(
+        return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=7))
+    )
+
+    await svc.create_metric(
+        MetricCreateRequest(
+            **make_create_payload(
+                description="每日成交总金额（口径：支付成功订单的实付金额汇总）",
+                term_id=7,
+            )
+        ),
+        owner_id=1,
+    )
+
+    captured = repo.create.call_args[0][0]
+    assert captured.description == "每日成交总金额（口径：支付成功订单的实付金额汇总）"
+    assert captured.description_source == "manual"
+    assert captured.term_id == 7
+
+
+async def test_create_rejects_missing_term():
+    """创建时关联术语不存在 → 404（NotFoundError），不落库。"""
+    from app.core.exceptions import NotFoundError
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+    # term_id 校验：mock DB 返回无术语（scalar_one_or_none=None）
+    svc._db.execute = AsyncMock(
+        return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+    )
+
+    with pytest.raises(NotFoundError) as ei:
+        await svc.create_metric(
+            MetricCreateRequest(**make_create_payload(term_id=999)), owner_id=1
+        )
+    assert ei.value.error_code == "NOT_FOUND"
+    assert repo.create.call_count == 0
+
+
 async def test_create_single_dw_developer_required():
     """注册门禁：单条/向导创建必须指定数仓开发责任方（PRD 4.5 口径落地责任人）。
 

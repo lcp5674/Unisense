@@ -29,6 +29,7 @@ vi.mock("../api", async () => {
     refineMetricDefinition: vi.fn(),
     getMetric: vi.fn(),
     updateMetric: vi.fn(),
+    listTerms: vi.fn(),
     // 默认 platform_admin（不受域门禁限制）；跨域预检测试再覆盖为 domain_admin
     fetchCurrentUser: vi.fn().mockResolvedValue({
       id: 1,
@@ -40,7 +41,7 @@ vi.mock("../api", async () => {
   };
 });
 
-import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, parseSqlBatch, parseSqlTables, batchRegisterFromSql, checkConflict, createMetric, listMetrics, listMeasureCatalogs, listDimensions, fetchCurrentUser, refineMetricDefinition, getMetric, updateMetric, getDomainDefaults } from "../api";
+import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, parseSqlBatch, parseSqlTables, batchRegisterFromSql, checkConflict, createMetric, listMetrics, listMeasureCatalogs, listDimensions, listTerms, fetchCurrentUser, refineMetricDefinition, getMetric, updateMetric, getDomainDefaults } from "../api";
 import type { DBCatalog, SubjectDomainTreeNode, AutoSuggestResponse, DomainSuggestionResponse, SqlBatchParseResult, MetricResponse } from "../types";
 
 const mockedTree = vi.mocked(listDomainTree);
@@ -61,6 +62,7 @@ const mockedRefine = vi.mocked(refineMetricDefinition);
 const mockedDomainDefaults = vi.mocked(getDomainDefaults);
 const mockedGetMetric = vi.mocked(getMetric);
 const mockedUpdateMetric = vi.mocked(updateMetric);
+const mockedListTerms = vi.mocked(listTerms);
 
 /** 后端 auto-suggest 永不返回 undefined（auto_fill 兜底成完整对象）——"无建议"即空 fields/空 code 的合法响应。 */
 const NO_SUGGESTION: AutoSuggestResponse = {
@@ -262,6 +264,7 @@ async function fillBatchForm(modal: HTMLElement, measureColumns: string) {
 // （域默认 type 预填会改变指标类型联动），故在此统一归位默认实现。
 beforeEach(() => {
   mockedDomainDefaults.mockResolvedValue({});
+  mockedListTerms.mockResolvedValue({ items: [] } as any);
 });
 
 describe("MetricCreate 批量注册指标", () => {
@@ -2189,6 +2192,43 @@ describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数�
       expect(body.consumption_guide?.recommended_usage).toEqual(["适用门诊域按日分析"]);
       expect(body.consumption_guide?.cautions).toEqual(["含敏感就诊信息"]);
       expect(body.consumption_guide?.related_metrics).toEqual([]);
+    });
+  });
+
+  it("业务描述与关联术语：填写后创建草稿透传 description/term_id", async () => {
+    mockedCreate.mockResolvedValue({ metric_code: "medical_fee_amt_daily" } as any);
+    mockedListTerms.mockResolvedValue({
+      items: [{ id: 5, name: "门诊收费", term_code: "term_outpatient" }],
+    } as any);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await goToStep(2);
+    fireEvent.mouseDown(screen.getByText("选择或搜索逻辑度量（如 支付金额 pay_amt）"));
+    await clickSelectOption("门诊收费金额 (medical_fee_amt)");
+    await goToStep(1);
+    // 展开「业务描述与关联术语（选填）」Collapse
+    fireEvent.click(screen.getByText(/业务描述与关联术语（选填）/));
+    const desc = screen.getByPlaceholderText(/指标的业务含义、口径背景、适用场景/);
+    fireEvent.change(desc, { target: { value: "门诊收费总金额指标（含退费扣除）" } });
+    // 搜索并选择关联术语（防抖 onSearch → listTerms；Select 用 testid 定位内部 input）
+    const termInput = (screen.getByTestId("termSelect") as HTMLElement).querySelector(
+      "input",
+    ) as HTMLElement;
+    fireEvent.mouseDown(termInput);
+    fireEvent.change(termInput, { target: { value: "门诊" } });
+    await screen.findByText("门诊收费（term_outpatient）");
+    fireEvent.click(screen.getByText("门诊收费（term_outpatient）"));
+    // 数仓开发责任方必填（PRD 4.5）：Step1 责任方卡填写后再回 Step2 提交
+    await fillDwDeveloper();
+    await goToStep(2);
+    fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
+
+    await waitFor(() => {
+      expect(mockedCreate).toHaveBeenCalled();
+      const body = mockedCreate.mock.calls[0][0] as { description?: string; term_id?: number };
+      expect(body.description).toBe("门诊收费总金额指标（含退费扣除）");
+      expect(body.term_id).toBe(5);
     });
   });
 

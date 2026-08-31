@@ -1732,6 +1732,52 @@ describe("MetricDetail 按钮级权限过滤", () => {
     expect(screen.getByText("未填写（可在编辑弹窗补填）")).toBeTruthy();
   });
 
+  it("口径定义卡片：来源字段为对象数组时渲染为「表.列」而非 [object Object]", async () => {
+    // source_fields 是 SQL 推断产物 [{table, column}]——DefinitionCard 须渲染「表.列」，
+    // 不能 String(obj) 出现 [object Object]（与批量编辑向导「上游字段」同款语义）。
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      status: "PUBLISHED",
+      definition_json: {
+        definition: "当日支付成功订单的成交总额",
+        sql: "SELECT SUM(order_amount) AS gmv FROM dwd_order_di GROUP BY dt",
+        source_fields: [
+          { table: "dwd_order_di", column: "order_amount" },
+          { table: "dwd_order_di", column: "gmv" },
+        ],
+      },
+    });
+    mockedListVersions.mockResolvedValue([]);
+    mockedDictItems.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "outpatient",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("销售 GMV");
+    expect(screen.getByText("来源字段")).toBeTruthy();
+    expect(screen.getByText("dwd_order_di.order_amount")).toBeTruthy();
+    expect(screen.getByText("dwd_order_di.gmv")).toBeTruthy();
+    expect(screen.queryByText("[object Object]")).toBeNull();
+  });
+
   it("编辑弹窗关联维度回填并合入口径 definition_json.dimensions", async () => {
     // 第二个 describe 无 beforeEach，显式补全 Promise.all 依赖
     mockedGetMetric.mockResolvedValue({
@@ -3083,6 +3129,59 @@ describe("MetricDetail 按钮级权限过滤", () => {
     await waitFor(() =>
       expect(mockedListMetricMounts.mock.calls.length).toBe(beforeMountsCalls + 1),
     );
+  });
+
+  it("新增挂载变体弹窗：业务域为选项框（展示 active 域，非自由输入）", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, type: "derived" });
+    mockedListMetricMounts.mockResolvedValue({ items: [], total: 0 });
+    mockedDictItems.mockResolvedValue([]);
+    mockedCatalogs.mockResolvedValue({
+      items: [],
+      total: 0,
+      page: 1,
+      page_size: 20,
+    } as never);
+    mockedDomainTree.mockResolvedValue([
+      { code: "outpatient", name: "门诊", status: "active", children: [] },
+      { code: "inpatient", name: "住院", status: "active", children: [] },
+    ] as never);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    // 第二个 describe 无 beforeEach：显式补全 Promise.all 依赖，避免「指标加载失败」
+    mockedListVersions.mockResolvedValue([]);
+    mockedDimensions.mockResolvedValue({ items: [], total: 0 });
+    mockedListMetrics.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "outpatient",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("挂载实体（OneData 挂载层）");
+    fireEvent.click(screen.getByRole("button", { name: /新增挂载变体/ }));
+    await waitFor(() => expect(document.querySelector(".ant-modal-title")).toBeTruthy());
+    // 业务域是 Select（非 Input）：打开下拉应展示 active 域选项
+    fireEvent.mouseDown(
+      (screen.getByTestId("addMountDomain") as HTMLElement).querySelector(
+        ".ant-select-selector",
+      ) as HTMLElement,
+    );
+    // antd Select 下拉 + 选中项可能同时渲染同一文本，用 findAllByText 断言存在
+    expect((await screen.findAllByText("门诊 (outpatient)")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("住院 (inpatient)")).length).toBeGreaterThan(0);
+    // 停用/非 active 域不出现
+    expect(screen.queryByText("停用域 (inactive)")).toBeNull();
   });
 
 });

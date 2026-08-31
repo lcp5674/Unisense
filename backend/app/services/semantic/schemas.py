@@ -270,6 +270,18 @@ class MetricCreateRequest(BaseModel):
             "消费指南：recommended_usage/cautions/related_metrics 三组字符串数组"
         ),
     )
+    # 业务描述（治理补充，可选）：创建时随指标落库（description_source=manual）；
+    # 详情页「AI 生成描述」会覆盖为 llm 来源。传空串/None 均不设置（保持 null）。
+    description: str | None = Field(
+        None,
+        max_length=2000,
+        description="指标业务描述（可空，详情页可 LLM 推断补充）",
+    )
+    # 关联术语（术语治理归属，可选）：创建时绑定 metric.term_id（须为已存在且未删除的
+    # 业务术语，service 层校验）。详情页可解绑/改绑，不触发版本/不参与口径变更。
+    term_id: int | None = Field(
+        None, ge=1, description="关联业务术语 ID（可空，须为已存在术语）"
+    )
 
     @field_validator("metric_code")
     @classmethod

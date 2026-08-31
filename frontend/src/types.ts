@@ -292,6 +292,10 @@ export interface MetricCreateRequest {
   default_business_filter?: string | null;
   pii_flag?: boolean;
   sla?: string | null;
+  /** 业务描述（选填）：创建时随指标落库（description_source=manual），详情页可 LLM 推断补充 */
+  description?: string | null;
+  /** 关联术语（选填）：创建时绑定 metric.term_id（须为已存在业务术语） */
+  term_id?: number | null;
   /** 消费指南（选填）：创建时随指标落库（guide_source=manual），三组字符串数组 */
   consumption_guide?: ConsumptionGuidePayload | null;
   /** 口径三方责任（PRD 4.5 补充，均可空）：产品需求方/技术方/数仓开发 */
