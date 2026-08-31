@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Routes, Route, useSearchParams } from "react-router-dom";
-import { MetricDetail } from "../pages/MetricDetail";
+import { MetricDetail, shouldLoadMoreTermPage } from "../pages/MetricDetail";
 import { PermissionProvider } from "../hooks/usePermission";
 import type { MeasureCatalog, MetricHealth, MetricResponse, MetricVersionResponse, SystemDictItem } from "../types";
 
@@ -1369,6 +1369,82 @@ describe("MetricDetail 按钮级权限过滤", () => {
       grants: [],
       expiring_soon: [],
     });
+  });
+
+  it("关联术语下拉打开即按分页加载（page=1/page_size=20）——滚动触底判定由 shouldLoadMoreTermPage 纯函数覆盖", async () => {
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "PUBLISHED", pii_flag: false, term_id: null });
+    const page1 = Array.from({ length: 20 }, (_, i) => ({
+      id: i + 1,
+      term_code: `T${i + 1}`,
+      name: `术语${i + 1}`,
+      definition: "",
+      domain: "outpatient",
+      synonyms: [],
+      boundary: null,
+      status: "PUBLISHED",
+      owner_id: 1,
+      created_at: null,
+      updated_at: null,
+    }));
+    vi.mocked(listTerms).mockResolvedValue({ items: page1, total: 45, page: 1, page_size: 20 });
+    renderWithPerms(["metric:edit"]);
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
+    const termSelect = await screen.findByText("搜索并绑定业务术语");
+    const termBox = termSelect.closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(termBox);
+    await waitFor(() => expect(listTerms).toHaveBeenCalled());
+    // 打开下拉即按第 1 页、每页 20 条加载（滚动加载的分页参数）
+    const firstCall = vi.mocked(listTerms).mock.calls[0][0];
+    expect(firstCall?.page).toBe(1);
+    expect(firstCall?.page_size).toBe(20);
+  });
+
+  it("shouldLoadMoreTermPage 纯函数——触底/未触底/加载中/已加载完", () => {
+    const base = { scrollTop: 400, clientHeight: 100, scrollHeight: 500, loading: false, loaded: 20, total: 45 };
+    expect(shouldLoadMoreTermPage(base)).toBe(true);
+    // 未触底（距底 > 24px）
+    expect(shouldLoadMoreTermPage({ ...base, scrollTop: 100 })).toBe(false);
+    // 加载中不触发
+    expect(shouldLoadMoreTermPage({ ...base, loading: true })).toBe(false);
+    // 已加载完（loaded >= total）不触发
+    expect(shouldLoadMoreTermPage({ ...base, loaded: 45 })).toBe(false);
+  });
+
+  it("关联术语「全部域」开关——默认仅同域，切换后放开跨域重新加载", async () => {
+    vi.mocked(listTerms).mockImplementation(async (params) => ({
+      items: [
+        {
+          id: 7,
+          term_code: "CJ_AMT",
+          name: "成交金额",
+          definition: "",
+          domain: "medical",
+          synonyms: [],
+          boundary: null,
+          status: "PUBLISHED",
+          owner_id: 1,
+          created_at: null,
+          updated_at: null,
+        },
+      ],
+      total: 1,
+      page: params?.page ?? 1,
+      page_size: 20,
+    }));
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "PUBLISHED", pii_flag: false, term_id: null });
+    renderWithPerms(["metric:edit"]);
+    await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
+    const termSelect = await screen.findByText("搜索并绑定业务术语");
+    const termBox = termSelect.closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(termBox);
+    await waitFor(() => expect(listTerms).toHaveBeenCalled());
+    // 默认「仅同域」：存在带指标业务域的请求
+    expect(vi.mocked(listTerms).mock.calls.some(([p]) => p?.domain === "outpatient")).toBe(true);
+    // 切「全部域」→ 出现不带 domain 的请求（放开跨域）
+    fireEvent.click(screen.getByText("全部域"));
+    await waitFor(() =>
+      expect(vi.mocked(listTerms).mock.calls.some(([p]) => p?.domain === undefined)).toBe(true),
+    );
   });
 
   it("权限快照加载完成前不显示「审批通过」按钮（fail-open 消除）", async () => {

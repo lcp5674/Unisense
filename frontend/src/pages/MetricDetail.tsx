@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { UIEvent as ReactUIEvent } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   Alert,
@@ -120,6 +121,21 @@ import { RelatedDimensions } from "./metric/RelatedDimensions";
 import { CodeValue } from "../components/CodeValue";
 
 const { Paragraph } = Typography;
+
+// 关联术语下拉滚动触底判断（纯函数，可单测）：距底 ≤24px 且未加载完且非加载中 → 追加下一页。
+// 抽成纯函数是为了绕开 jsdom 下 antd 下拉挂载/虚拟列表渲染不稳定，让触底逻辑可独立验证。
+export function shouldLoadMoreTermPage(opts: {
+  scrollTop: number;
+  clientHeight: number;
+  scrollHeight: number;
+  loading: boolean;
+  loaded: number;
+  total: number;
+}): boolean {
+  const { scrollTop, clientHeight, scrollHeight, loading, loaded, total } = opts;
+  if (loading || loaded >= total) return false;
+  return scrollTop + clientHeight >= scrollHeight - 24;
+}
 
 const ROLE_LABEL: Record<string, string> = {
   platform_admin: "平台管理员",
@@ -729,7 +745,13 @@ export function MetricDetail() {
   // 关联术语（P2-11 术语绑定写路径）：搜索式 Select 选项 + 防抖搜索
   const [termOptions, setTermOptions] = useState<Array<{ value: number; label: string; code: string }>>([]);
   const [termSearching, setTermSearching] = useState(false);
+  // 滚动加载 + 全部域开关：termPage/termTotal 驱动下拉触底追加下一页（每页 20 条）；
+  // termScope=domain 默认仅同域术语，all 放开跨域（指标在 A 域、术语建在 B 域的场景）。
+  const [termPage, setTermPage] = useState(1);
+  const [termTotal, setTermTotal] = useState(0);
+  const [termScope, setTermScope] = useState<"domain" | "all">("domain");
   const termSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const termKwRef = useRef<string>("");
   // 仲裁作废指标（METRIC_ARCHIVED）：软删 + successor 的历史链接直访时，
   // 展示「醒目引导 + 历史详情 + 跳转权威指标」，而非仅一张错误卡片
   const [archived, setArchived] = useState<{
@@ -1001,8 +1023,9 @@ export function MetricDetail() {
       ]);
       setMetric(m);
       // 关联术语回显：已绑定术语（term_id）时加载其名称——否则渲染处显示裸 #id。
-      // 与挂载实体加载同属 best-effort，失败不阻塞详情主体。
-      if (m.term_id != null) void loadTermOptions();
+      // 与挂载实体加载同属 best-effort，失败不阻塞详情主体。强制全部域：已绑定术语
+      // 可能属于其他域（跨域绑定），仅同域范围会回显不出名称。
+      if (m.term_id != null) void loadTermOptions(undefined, 1, false, true);
       setDomainTree(domainTree);
       // P1-3：挂载实体加载（best-effort）
       if (m.id != null) loadMounts(m.id);
@@ -1242,25 +1265,34 @@ export function MetricDetail() {
     }
   }
 
-  // 关联术语选项加载（P2-11 术语绑定写路径）：初始回显/下拉打开/搜索共用。
-  // 按指标业务域过滤（术语有 domain 归属，术语库在「治理 → 术语表」维护）；仅 PUBLISHED 可绑定；
-  // 失败不阻断详情流程。term_id 已绑定时加载选项用于名称回显（避免显示裸 #id）。
-  async function loadTermOptions(search?: string) {
+  // 关联术语选项加载（P2-11 术语绑定写路径）：初始回显/下拉打开/搜索/滚动触底共用。
+  // 默认按指标业务域过滤（术语有 domain 归属，术语库在「治理 → 术语表」维护）；切「全部域」
+  // 放开跨域；仅 PUBLISHED 可绑定。page/append 驱动滚动加载（每页 20 条，触底追加下一页并去重）；
+  // forceAllDomains 用于回显——已绑定术语无论哪个域都要能显示名称（避免裸 #id）。
+  async function loadTermOptions(search?: string, page = 1, append = false, forceAllDomains = false) {
     setTermSearching(true);
     try {
+      const kw = search?.trim() || "";
+      if (search !== undefined) termKwRef.current = kw;
       const res = await listTerms({
-        search: search?.trim() || undefined,
-        domain: metric?.domain || undefined,
+        search: kw || undefined,
+        domain: forceAllDomains || termScope === "all" ? undefined : metric?.domain || undefined,
         status: "PUBLISHED",
-        page_size: search?.trim() ? 20 : 50,
+        page,
+        page_size: 20,
       });
-      setTermOptions(
-        (res.items ?? []).map((t) => ({
-          value: t.id,
-          label: `${t.name}（${t.term_code}）`,
-          code: t.term_code,
-        })),
-      );
+      const opts = (res.items ?? []).map((t) => ({
+        value: t.id,
+        label: `${t.name}（${t.term_code}）`,
+        code: t.term_code,
+      }));
+      setTermOptions((prev) => {
+        if (!append) return opts;
+        const seen = new Set(prev.map((x) => x.value));
+        return [...prev, ...opts.filter((x) => !seen.has(x.value))];
+      });
+      setTermPage(res.page ?? page);
+      setTermTotal(res.total ?? opts.length);
     } catch {
       // 术语加载失败不阻断绑定流程
     } finally {
@@ -1268,10 +1300,35 @@ export function MetricDetail() {
     }
   }
 
-  // 关联术语搜索（防抖）：输入关键词时按名称/定义/编码搜索，空关键词加载本域已发布术语
+  // 关联术语搜索（防抖）：输入关键词时按名称/定义/编码搜索，空关键词加载第 1 页（当前域范围）
   function handleTermSearch(q: string) {
     if (termSearchTimer.current) clearTimeout(termSearchTimer.current);
-    termSearchTimer.current = setTimeout(() => void loadTermOptions(q), 300);
+    termSearchTimer.current = setTimeout(() => void loadTermOptions(q, 1, false), 300);
+  }
+
+  // 切换「仅同域 / 全部域」：范围变化后重置到第 1 页重新加载。
+  // 注意 loadTermOptions 闭包读到的是本次渲染的旧 termScope，须以参数显式覆盖本次加载范围。
+  function handleTermScopeChange(scope: "domain" | "all") {
+    setTermScope(scope);
+    termKwRef.current = "";
+    void loadTermOptions(undefined, 1, false, scope === "all");
+  }
+
+  // 下拉滚动触底 → 追加下一页（未加载完且非加载中才触发；判定逻辑抽为纯函数可单测）
+  function handleTermScroll(e: ReactUIEvent<HTMLElement>) {
+    const el = e.currentTarget;
+    if (
+      shouldLoadMoreTermPage({
+        scrollTop: el.scrollTop,
+        clientHeight: el.clientHeight,
+        scrollHeight: el.scrollHeight,
+        loading: termSearching,
+        loaded: termOptions.length,
+        total: termTotal,
+      })
+    ) {
+      void loadTermOptions(termKwRef.current || undefined, termPage + 1, true);
+    }
   }
 
   // 绑定/解绑术语（termId=null 解绑）
@@ -2915,23 +2972,35 @@ export function MetricDetail() {
         {piiMasked ? (
           <span className="muted">该指标含个人信息，术语绑定已隐藏。</span>
         ) : isOwnerOrAdmin && canEdit ? (
-          <Select
-            showSearch
-            allowClear
-            style={{ width: 320 }}
-            placeholder="搜索并绑定业务术语"
-            value={metric.term_id ?? undefined}
-            filterOption={false}
-            onDropdownVisibleChange={(open) => {
-              // 首次打开下拉即加载本域已发布术语，无需先打字搜索
-              if (open && termOptions.length === 0) void loadTermOptions();
-            }}
-            onSearch={handleTermSearch}
-            onChange={(v) => bindTerm(v ?? null)}
-            options={termOptions}
-            loading={termSearching}
-            notFoundContent={termSearching ? "搜索中…" : "未找到匹配术语"}
-          />
+          <Space direction="vertical" style={{ width: 320 }}>
+            <Segmented
+              size="small"
+              value={termScope}
+              onChange={(v) => handleTermScopeChange(v as "domain" | "all")}
+              options={[
+                { label: "仅同域", value: "domain" },
+                { label: "全部域", value: "all" },
+              ]}
+            />
+            <Select
+              showSearch
+              allowClear
+              style={{ width: 320 }}
+              placeholder="搜索并绑定业务术语"
+              value={metric.term_id ?? undefined}
+              filterOption={false}
+              onOpenChange={(open) => {
+                // 首次打开下拉即加载当前域范围已发布术语，无需先打字搜索
+                if (open && termOptions.length === 0) void loadTermOptions();
+              }}
+              onPopupScroll={handleTermScroll}
+              onSearch={handleTermSearch}
+              onChange={(v) => bindTerm(v ?? null)}
+              options={termOptions}
+              loading={termSearching}
+              notFoundContent={termSearching ? "搜索中…" : "未找到匹配术语"}
+            />
+          </Space>
         ) : metric.term_id ? (
           <span>
             已绑定术语{" "}
