@@ -34,7 +34,8 @@ _SECURITY_HEADERS = {
 
 # 自托管 API 文档页面（/docs /redoc）CSP：资源全部同源（/static/ 本地化，离线可用），
 # 脚本全部为外部文件（script-src 'self'，无 'unsafe-inline'）；Swagger/ReDoc 运行时会向
-# DOM 注入 <style>，故 style-src 需 'unsafe-inline'。frame-ancestors 'none' 防点击劫持。
+# DOM 注入 <style>，故 style-src 需 'unsafe-inline'。frame-ancestors 'self' 允许同源
+# 前端（/api-docs iframe）内嵌文档，其余站点仍被阻止（点击劫持防护不削弱）。
 _DOCS_CSP = (
     "default-src 'self'; "
     "script-src 'self'; "
@@ -42,7 +43,7 @@ _DOCS_CSP = (
     "img-src 'self' data:; "
     "font-src 'self' data:; "
     "connect-src 'self'; "
-    "frame-ancestors 'none'"
+    "frame-ancestors 'self'"
 )
 
 # 命中这些路径的响应使用 _DOCS_CSP 替代全局严格 CSP（仅文档页面；API 响应保持严格）
@@ -198,10 +199,17 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         response = await call_next(request)
         for key, value in _SECURITY_HEADERS.items():
-            # 文档页面（/docs /redoc）使用本地化 CSP（资源同源、script-src 'self'）；
-            # 其余路径保持全局严格策略 default-src 'self'。
-            if key == "Content-Security-Policy" and request.url.path in _DOCS_PATHS:
-                response.headers[key] = _DOCS_CSP
+            # 文档页面（/docs /redoc）使用本地化 CSP（资源同源、script-src 'self'），
+            # 并允许同源 iframe 内嵌（前端 /api-docs 的 Swagger 容器），故 X-Frame-Options
+            # 同步放宽为 SAMEORIGIN（与 CSP frame-ancestors 'self' 一致，防点击劫持不削弱——
+            # 非本站点仍无法嵌入）；其余路径保持全局严格策略。
+            if request.url.path in _DOCS_PATHS:
+                if key == "Content-Security-Policy":
+                    response.headers[key] = _DOCS_CSP
+                elif key == "X-Frame-Options":
+                    response.headers[key] = "SAMEORIGIN"
+                else:
+                    response.headers[key] = value
             else:
                 response.headers[key] = value
         # 文档相关响应禁止缓存，确保接口变更后 Swagger UI/ReDoc 始终拉取最新定义

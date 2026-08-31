@@ -49,7 +49,8 @@ def test_docs_returns_localized_csp_and_local_assets() -> None:
     resp = client.get("/docs")
     assert resp.status_code == 200
     assert resp.headers["content-security-policy"] == _DOCS_CSP
-    assert resp.headers["x-frame-options"] == "DENY"
+    # 文档页允许同源 iframe 内嵌（前端 /api-docs），X-Frame-Options 同步 SAMEORIGIN
+    assert resp.headers["x-frame-options"] == "SAMEORIGIN"
     body = resp.text
     assert "cdn.jsdelivr.net" not in body
     assert "/static/swagger-ui/swagger-ui-bundle.js" in body

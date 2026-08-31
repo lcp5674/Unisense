@@ -184,8 +184,9 @@ class TestSecurityHeadersMiddleware:
 
         response = await mw.dispatch(request, call_next)
         assert response.headers["Content-Security-Policy"] == _DOCS_CSP
-        # 其余安全头不受影响
-        assert response.headers["X-Frame-Options"] == "DENY"
+        # 文档页允许同源 iframe 内嵌（前端 /api-docs），X-Frame-Options 同步 SAMEORIGIN
+        assert response.headers["X-Frame-Options"] == "SAMEORIGIN"
+        assert "frame-ancestors 'self'" in _DOCS_CSP
         assert response.headers["X-Content-Type-Options"] == "nosniff"
         # 本地化 CSP 不含 'unsafe-inline' 的 script（外置 init 脚本），含 style 注入放行
         assert "script-src 'self'" in _DOCS_CSP
