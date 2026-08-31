@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, Cascader, message, Space, Descriptions, Popconfirm, Tooltip, Switch, Divider, Segmented, Alert, Collapse } from "antd";
+import type { FormInstance } from "antd";
 import { PlusOutlined, ArrowLeftOutlined, HeartOutlined, ReadOutlined, EditOutlined, QuestionCircleOutlined } from "@ant-design/icons";
 import {
   listTemplates,
@@ -17,6 +18,7 @@ import {
   listDictItems,
   getDomainDefaults,
   listMeasureCatalogs,
+  listCatalogs,
   UnisenseApiError,
 } from "../api";
 import type { MetricCreateRequest, MetricTemplate, MetricType, UserBrief, SubjectDomainTreeNode, MeasureCatalog } from "../types";
@@ -33,6 +35,29 @@ function treeToCascaderOptions(nodes: SubjectDomainTreeNode[]): any[] {
     label: `${n.name} (${n.code})`,
     children: n.children.length > 0 ? treeToCascaderOptions(n.children) : undefined,
   }));
+}
+
+// ===== 挂载实体选项框（源表/列）未采集兜底：与注册指标页同构——
+// 平台已采集的表/列作为选项，未采集的（模板可能预设了库外表）允许输入后选中，
+// 既满足"选项框选择"，又不破坏既有自由输入能力。=====
+type TableSelectOption = { value: string; label: string; uncollected?: boolean };
+function withUncollectedOption(q: string, options: TableSelectOption[]): TableSelectOption[] {
+  const kw = (q ?? "").trim();
+  if (!kw) return options;
+  if (options.some((o) => o.value === kw)) return options;
+  return [{ value: kw, label: kw, uncollected: true }, ...options];
+}
+function tableOptionRender(oriOption: { data?: TableSelectOption }) {
+  const opt = oriOption?.data;
+  if (opt?.uncollected) {
+    return (
+      <span>
+        {opt.label}
+        <span style={{ color: "#d46b08", marginLeft: 6 }}>（未采集，手动输入）</span>
+      </span>
+    );
+  }
+  return opt?.label;
 }
 
 /** 递归查找叶子域编码的完整路径（根→叶，供 Cascader 预填）。
@@ -341,6 +366,15 @@ export function Templates() {
   const [domainOptions, setDomainOptions] = useState<any[]>([]);
   const [granularityOptions, setGranularityOptions] = useState<Array<{ value: string; label: string }>>([]);
   const [unitOptions, setUnitOptions] = useState<Array<{ value: string; label: string }>>([]);
+  // 挂载实体选项框（源表/列/粒度，实例化+编辑两弹窗共用）：源表从采集目录惰性加载，
+  // 选表后带出该表列；粒度用粒度管理字典。未采集值经 withUncollectedOption 兜底可选中。
+  const [mountTableOptions, setMountTableOptions] = useState<TableSelectOption[]>([]);
+  const [mountColumnOptions, setMountColumnOptions] = useState<TableSelectOption[]>([]);
+  const [mountTableSearching, setMountTableSearching] = useState(false);
+  const [mountColumnLoading, setMountColumnLoading] = useState(false);
+  const [mountTableKw, setMountTableKw] = useState("");
+  const [mountColumnKw, setMountColumnKw] = useState("");
+  const [mountGranularityKw, setMountGranularityKw] = useState("");
   // OneData 原子层：已发布逻辑度量（度量目录），供原子模板预设/实例化选择（仅 PUBLISHED 可选）
   const [measureOptions, setMeasureOptions] = useState<Array<{ value: number; label: string; measure: MeasureCatalog }>>([]);
   // 模板详情弹窗（默认口径 / 必填字段 / 描述）
@@ -618,6 +652,67 @@ export function Templates() {
     }
   }
 
+  // ===== 挂载实体选项框（源表/列/粒度，对齐注册指标页惰性选择 + 未采集兜底）=====
+  async function searchMountTables(q: string) {
+    setMountTableSearching(true);
+    try {
+      const res = await listCatalogs({
+        entity_type: "TABLE",
+        keyword: q.trim() || undefined,
+        page_size: 20,
+        source_status: "active",
+      });
+      setMountTableOptions(
+        res.items.map((it) => ({
+          value: it.entity_name,
+          label: it.source_name ? `${it.entity_name}（${it.source_name}）` : it.entity_name,
+        }))
+      );
+    } catch {
+      setMountTableOptions([]);
+    } finally {
+      setMountTableSearching(false);
+    }
+  }
+  function handleMountTableDropdown(open: boolean) {
+    if (open && mountTableOptions.length === 0 && !mountTableSearching) {
+      void searchMountTables("");
+    }
+  }
+  // 取某表列选项（name + type + comment）；未采集/无 schema 返回空，由 withUncollectedOption 兜底。
+  // clearColumn 仅在用户切换源表时置 true（清空旧列），模板回填时置 false（不破坏已回填列）。
+  async function loadMountColumns(table: string, targetForm: FormInstance, clearColumn = false) {
+    setMountColumnLoading(true);
+    setMountColumnKw("");
+    try {
+      const res = await listCatalogs({ entity_type: "TABLE", keyword: table, page_size: 5, source_status: "active" });
+      const catalog = res.items.find((it) => it.entity_name === table);
+      const cols: Array<{ name: string; type?: string; comment?: string }> =
+        (catalog as any)?.schema_def?.columns || (catalog as any)?.schema_json?.columns || [];
+      setMountColumnOptions(
+        cols.map((col) => ({
+          value: col.name,
+          label: col.type ? `${col.name} (${col.type})${col.comment ? " — " + col.comment : ""}` : col.name,
+        }))
+      );
+    } catch {
+      setMountColumnOptions([]);
+    } finally {
+      setMountColumnLoading(false);
+      if (clearColumn) targetForm.setFieldValue("mount_source_column", undefined);
+    }
+  }
+  // 用户切换源表：清空已选列并加载该表列（targetForm 区分实例化/编辑弹窗）
+  function handleMountSrcTableChange(value: string, targetForm: FormInstance) {
+    if (!value) {
+      setMountColumnOptions([]);
+      setMountColumnKw("");
+      targetForm.setFieldValue("mount_source_column", undefined);
+      return;
+    }
+    void loadMountColumns(value, targetForm, true);
+  }
+
   function openInstantiate(tpl: MetricTemplate) {
     setInstantiateTarget(tpl);
     form.resetFields();
@@ -662,6 +757,10 @@ export function Templates() {
     setInstDef(def);
     setInstDefMode(detectDefMode(def));
     setInstDefError(null);
+    // 模板预设了源表：预加载该表列（不清空回填列），列下拉即可点选/回填可见
+    if (tpl.mount?.source_table) {
+      void loadMountColumns(tpl.mount.source_table, form, false);
+    }
     setModalOpen(true);
   }
 
@@ -708,6 +807,10 @@ export function Templates() {
     setEditDef(def);
     setEditDefMode(detectDefMode(def));
     setEditDefError(null);
+    // 模板预设了源表：预加载该表列（不清空回填列），列下拉即可点选/回填可见
+    if (tpl.mount?.source_table) {
+      void loadMountColumns(tpl.mount.source_table, editForm, false);
+    }
   }
 
   // P2-13 提交模板编辑：仅发送实际变更字段（PATCH 语义），成功刷新列表
@@ -1097,13 +1200,46 @@ export function Templates() {
                   >
                     <Space wrap>
                       <Form.Item name="mount_source_table" noStyle>
-                        <Input placeholder="源表（如 dwd.sales_detail）" style={{ width: 220 }} maxLength={255} />
+                        <Select
+                          showSearch
+                          allowClear
+                          loading={mountTableSearching}
+                          placeholder="选择或搜索源表（已采集表，未采集可输入后选中）"
+                          style={{ width: 230 }}
+                          onSearch={setMountTableKw}
+                          onOpenChange={handleMountTableDropdown}
+                          onChange={(v) => handleMountSrcTableChange(v, form)}
+                          optionFilterProp="label"
+                          options={withUncollectedOption(mountTableKw, mountTableOptions)}
+                          optionRender={tableOptionRender}
+                          notFoundContent={mountTableSearching ? "搜索中…" : "无匹配表，可直接输入后选中"}
+                        />
                       </Form.Item>
                       <Form.Item name="mount_source_column" noStyle>
-                        <Input placeholder="度量列" style={{ width: 140 }} maxLength={255} />
+                        <Select
+                          showSearch
+                          allowClear
+                          loading={mountColumnLoading}
+                          placeholder="选择度量列（选源表后自动带出）"
+                          style={{ width: 170 }}
+                          onSearch={setMountColumnKw}
+                          optionFilterProp="label"
+                          options={withUncollectedOption(mountColumnKw, mountColumnOptions)}
+                          optionRender={tableOptionRender}
+                          notFoundContent={mountColumnOptions.length === 0 ? "未采集列，可直接输入列名" : "无匹配列，可直接输入"}
+                        />
                       </Form.Item>
                       <Form.Item name="mount_granularity" noStyle>
-                        <Input placeholder="粒度（如 日/月）" style={{ width: 120 }} maxLength={64} />
+                        <Select
+                          showSearch
+                          allowClear
+                          placeholder="选择粒度（粒度管理）"
+                          style={{ width: 130 }}
+                          onSearch={setMountGranularityKw}
+                          optionFilterProp="label"
+                          options={withUncollectedOption(mountGranularityKw, granularityOptions)}
+                          notFoundContent={granularityOptions.length === 0 ? "粒度字典未加载，可直接输入" : "无匹配粒度，可直接输入"}
+                        />
                       </Form.Item>
                       <Form.Item name="mount_default_period" noStyle>
                         <Select
@@ -1374,13 +1510,46 @@ export function Templates() {
                   <Form.Item label="挂载实体预设（OneData 挂载层）" style={{ width: "100%", marginBottom: 8 }}>
                     <Space wrap>
                       <Form.Item name="mount_source_table" noStyle>
-                        <Input placeholder="源表（如 dwd.sales_detail）" style={{ width: 220 }} maxLength={255} />
+                        <Select
+                          showSearch
+                          allowClear
+                          loading={mountTableSearching}
+                          placeholder="选择或搜索源表（已采集表，未采集可输入后选中）"
+                          style={{ width: 230 }}
+                          onSearch={setMountTableKw}
+                          onOpenChange={handleMountTableDropdown}
+                          onChange={(v) => handleMountSrcTableChange(v, editForm)}
+                          optionFilterProp="label"
+                          options={withUncollectedOption(mountTableKw, mountTableOptions)}
+                          optionRender={tableOptionRender}
+                          notFoundContent={mountTableSearching ? "搜索中…" : "无匹配表，可直接输入后选中"}
+                        />
                       </Form.Item>
                       <Form.Item name="mount_source_column" noStyle>
-                        <Input placeholder="度量列" style={{ width: 140 }} maxLength={255} />
+                        <Select
+                          showSearch
+                          allowClear
+                          loading={mountColumnLoading}
+                          placeholder="选择度量列（选源表后自动带出）"
+                          style={{ width: 170 }}
+                          onSearch={setMountColumnKw}
+                          optionFilterProp="label"
+                          options={withUncollectedOption(mountColumnKw, mountColumnOptions)}
+                          optionRender={tableOptionRender}
+                          notFoundContent={mountColumnOptions.length === 0 ? "未采集列，可直接输入列名" : "无匹配列，可直接输入"}
+                        />
                       </Form.Item>
                       <Form.Item name="mount_granularity" noStyle>
-                        <Input placeholder="粒度（如 日/月）" style={{ width: 120 }} maxLength={64} />
+                        <Select
+                          showSearch
+                          allowClear
+                          placeholder="选择粒度（粒度管理）"
+                          style={{ width: 130 }}
+                          onSearch={setMountGranularityKw}
+                          optionFilterProp="label"
+                          options={withUncollectedOption(mountGranularityKw, granularityOptions)}
+                          notFoundContent={granularityOptions.length === 0 ? "粒度字典未加载，可直接输入" : "无匹配粒度，可直接输入"}
+                        />
                       </Form.Item>
                       <Form.Item name="mount_default_period" noStyle>
                         <Select

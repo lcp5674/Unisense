@@ -34,6 +34,7 @@ vi.mock("../api", () => {
     listDictItems: vi.fn(),
     getDomainDefaults: vi.fn(),
     listMeasureCatalogs: vi.fn(),
+    listCatalogs: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -47,7 +48,7 @@ vi.mock("../hooks/usePermission", () => ({
   usePermission: () => ({ can: () => true }),
 }));
 
-import { listTemplates, createMetric, instantiateTemplate, listFavorites, listUsers, updateTemplateOwner, setTemplateActive, updateMetricTemplate, listDomainTree, listDictItems, listMeasureCatalogs } from "../api";
+import { listTemplates, createMetric, instantiateTemplate, listFavorites, listUsers, updateTemplateOwner, setTemplateActive, updateMetricTemplate, listDomainTree, listDictItems, listMeasureCatalogs, listCatalogs } from "../api";
 
 const mockedList = vi.mocked(listTemplates);
 const mockedCreate = vi.mocked(createMetric);
@@ -60,6 +61,7 @@ const mockedUpdateMetricTemplate = vi.mocked(updateMetricTemplate);
 const mockedDomainTree = vi.mocked(listDomainTree);
 const mockedDictItems = vi.mocked(listDictItems);
 const mockedMeasureCatalogs = vi.mocked(listMeasureCatalogs);
+const mockedListCatalogs = vi.mocked(listCatalogs);
 
 /** 已发布逻辑度量（供原子模板预设/实例化的 measure 下拉与 stat_caliber 预览） */
 const MEASURES: MeasureCatalog[] = [
@@ -197,7 +199,8 @@ const TPLS: MetricTemplate[] = [
 ];
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  // resetAllMocks：清调用记录 + mockImplementation（用例内设置的实现不跨用例泄漏）
+  vi.resetAllMocks();
   mockedList.mockResolvedValue({ items: TPLS, total: TPLS.length });
   mockedListFavorites.mockResolvedValue([]);
   mockedDomainTree.mockResolvedValue([]);
@@ -208,6 +211,8 @@ beforeEach(() => {
     { id: 1, username: "alice", display_name: "Alice", role: "metric_owner", domain: "finance", status: "ACTIVE" },
     { id: 2, username: "bob", display_name: "Bob", role: "metric_owner", domain: "finance", status: "ACTIVE" },
   ]);
+  // 挂载实体选项框：默认无已采集表（用例内按需覆盖）
+  mockedListCatalogs.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 });
 });
 
 describe("Templates 页面", () => {
@@ -756,5 +761,122 @@ describe("Templates 页面", () => {
     // 派生不折叠：无「高级项」入口，模式切换器直接可见
     expect(screen.queryByText("高级：补充物理口径定义（一般留空）")).toBeNull();
     expect(screen.getByText("SQL 模式")).toBeTruthy();
+  });
+
+  describe("挂载实体选项框（派生类型：源表/列/粒度 Select 化）", () => {
+    // 打开实例化弹窗并切换类型为派生（复用既有交互：类型 Select → 点「派生指标」）
+    async function openDerivedInstantiate() {
+      render(
+        <MemoryRouter initialEntries={["/templates"]}>
+          <Templates />
+        </MemoryRouter>,
+      );
+      await screen.findByText("tpl_gmv_daily");
+      fireEvent.click(screen.getAllByText("实例化指标")[0]);
+      await screen.findByText(/从模板实例化：/);
+      const modal = document.querySelector(".ant-modal") as HTMLElement;
+      const typeItem = within(modal).getByText("类型").closest(".ant-form-item") as HTMLElement;
+      fireEvent.mouseDown(typeItem.querySelector(".ant-select-selector")!);
+      fireEvent.click(await screen.findByText("派生指标"));
+      return modal;
+    }
+
+    it("派生类型：源表/度量列/粒度均为选项框（基于采集目录与粒度字典）", async () => {
+      mockedDictItems.mockResolvedValue([
+        { id: 1, dict_type: "granularity", code: "day", label: "日", status: "active", sort_order: 1 },
+        { id: 2, dict_type: "granularity", code: "month", label: "月", status: "active", sort_order: 2 },
+      ] as any);
+      const modal = await openDerivedInstantiate();
+      // 挂载实体区域：3 个 Select（源表/列/粒度），不再是自由 Input
+      const mountItem = within(modal).getByText("挂载实体（指标的家，OneData 挂载层）").closest(".ant-form-item") as HTMLElement;
+      expect(mountItem.querySelectorAll(".ant-select").length).toBeGreaterThanOrEqual(3);
+      expect(mountItem.querySelector("input.ant-input")).toBeNull();
+      // 粒度下拉展开后展示粒度管理字典项（日/月，label=中文 (code)）
+      const granularitySel = mountItem.querySelectorAll(".ant-select")[2] as HTMLElement;
+      fireEvent.mouseDown(granularitySel.querySelector(".ant-select-selector")!);
+      expect(await screen.findByText("月 (month)")).toBeTruthy();
+    });
+
+    it("选源表后：度量列下拉自动带出该表列（name + type + comment）", async () => {
+      mockedListCatalogs.mockImplementation((async (params: any) => {
+        if (params?.keyword === "dwd_sales_detail") {
+          return {
+            items: [
+              {
+                entity_name: "dwd_sales_detail",
+                source_name: "hive",
+                schema_def: {
+                  columns: [
+                    { name: "pay_amt", type: "decimal", comment: "支付金额" },
+                    { name: "order_cnt", type: "bigint", comment: "订单数" },
+                  ],
+                },
+              },
+            ],
+            total: 1,
+            page: 1,
+            page_size: 5,
+          };
+        }
+        return {
+          items: [
+            { entity_name: "dwd_sales_detail", source_name: "hive", schema_def: { columns: [] } },
+            { entity_name: "dwd_order_di", source_name: "hive", schema_def: { columns: [] } },
+          ],
+          total: 2,
+          page: 1,
+          page_size: 20,
+        };
+      }) as any);
+      const modal = await openDerivedInstantiate();
+      const mountItem = within(modal).getByText("挂载实体（指标的家，OneData 挂载层）").closest(".ant-form-item") as HTMLElement;
+      const selects = mountItem.querySelectorAll(".ant-select");
+      // 展开源表下拉（第 1 个 Select）→ 已采集表列表出现（含 source_name）
+      fireEvent.mouseDown(selects[0].querySelector(".ant-select-selector")!);
+      fireEvent.click(await screen.findByText("dwd_sales_detail（hive）"));
+      // 展开列下拉（第 2 个 Select）→ 该表列带出
+      fireEvent.mouseDown(selects[1].querySelector(".ant-select-selector")!);
+      expect(await screen.findByText("pay_amt (decimal) — 支付金额")).toBeTruthy();
+      expect(screen.getByText("order_cnt (bigint) — 订单数")).toBeTruthy();
+    });
+
+    it("未采集源表：输入后选中（未采集兜底），提交携带该表名", async () => {
+      // 点击包含目标文本的 option（多个下拉可能并存未采集提示，须精确到选项元素）
+      async function clickUncollectedOption(text: string) {
+        const opts = await screen.findAllByText(new RegExp(text));
+        const item = opts.find((el) => el.closest(".ant-select-item-option"));
+        if (!item) throw new Error(`未找到 ${text} 的未采集选项`);
+        fireEvent.click(item);
+      }
+      const modal = await openDerivedInstantiate();
+      const mountItem = within(modal).getByText("挂载实体（指标的家，OneData 挂载层）").closest(".ant-form-item") as HTMLElement;
+      const srcSel = mountItem.querySelectorAll(".ant-select")[0] as HTMLElement;
+      // 源表输入未采集表名 → 下拉出现「（未采集，手动输入）」项
+      fireEvent.mouseDown(srcSel.querySelector(".ant-select-selector")!);
+      const srcInput = srcSel.querySelector(".ant-select-selection-search-input") as HTMLInputElement;
+      fireEvent.change(srcInput, { target: { value: "wedw_uncollected_tbl" } });
+      await clickUncollectedOption("wedw_uncollected_tbl");
+      expect(screen.getAllByText(/wedw_uncollected_tbl/).length).toBeGreaterThan(0);
+      // 未采集列：输入后选中（选源表后列下拉为空，未采集兜底可输入）
+      const colSel = mountItem.querySelectorAll(".ant-select")[1] as HTMLElement;
+      fireEvent.mouseDown(colSel.querySelector(".ant-select-selector")!);
+      const colInput = colSel.querySelector(".ant-select-selection-search-input") as HTMLInputElement;
+      fireEvent.change(colInput, { target: { value: "uncollected_col" } });
+      await clickUncollectedOption("uncollected_col");
+      // 粒度：字典未加载时输入 day 选中（未采集兜底）
+      const granSel = mountItem.querySelectorAll(".ant-select")[2] as HTMLElement;
+      fireEvent.mouseDown(granSel.querySelector(".ant-select-selector")!);
+      const granInput = granSel.querySelector(".ant-select-selection-search-input") as HTMLInputElement;
+      fireEvent.change(granInput, { target: { value: "day" } });
+      await clickUncollectedOption("day");
+      // 提交：payload.mount 携带未采集表/列/粒度（不破坏既有自由输入能力）
+      fireEvent.click(screen.getByText("实例化创建"));
+      await waitFor(() => {
+        const payload = mockedInstantiate.mock.calls[0][1] as { mount?: { source_table?: string; source_column?: string; granularity?: string } };
+        expect(payload.mount?.source_table).toBe("wedw_uncollected_tbl");
+        expect(payload.mount?.source_column).toBe("uncollected_col");
+        expect(payload.mount?.granularity).toBe("day");
+      });
+    });
   });
 });
