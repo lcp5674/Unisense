@@ -52,6 +52,7 @@ import type {
   SqlInferEvalRunSummary,
 } from "../types";
 import { formatCnTime } from "../utils/timeCn";
+import { AGGREGATION_LABEL, GRANULARITY_LABEL } from "../utils/enums";
 
 const { Paragraph, Text, Title } = Typography;
 
@@ -881,7 +882,7 @@ export function SqlInferEval() {
                 label="期望周期"
                 rules={[{ required: true, message: "请选择期望周期" }]}
               >
-                <Select options={PERIOD_OPTIONS.map((p) => ({ value: p, label: p }))} />
+                <Select options={PERIOD_OPTIONS.map((p) => ({ value: p, label: GRANULARITY_LABEL[p] ?? p }))} />
               </Form.Item>
             </Col>
             <Col span={12}>
@@ -907,7 +908,7 @@ export function SqlInferEval() {
                         <Select
                           placeholder="聚合"
                           style={{ width: 160 }}
-                          options={AGG_OPTIONS.map((a) => ({ value: a, label: a }))}
+                          options={AGG_OPTIONS.map((a) => ({ value: a, label: AGGREGATION_LABEL[a] ?? a }))}
                           allowClear
                         />
                       </Form.Item>

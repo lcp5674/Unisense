@@ -927,7 +927,7 @@ function DimensionsTab() {
               <Descriptions.Item label="编码">{detailTarget.dim_code}</Descriptions.Item>
               <Descriptions.Item label="名称">{detailTarget.name}</Descriptions.Item>
               <Descriptions.Item label="业务域">{domainMap.get(detailTarget.domain) ?? detailTarget.domain}</Descriptions.Item>
-              <Descriptions.Item label="SCD 类型">{detailTarget.type}</Descriptions.Item>
+              <Descriptions.Item label="SCD 类型">{scdTypeLabel(detailTarget.type)}</Descriptions.Item>
               <Descriptions.Item label="责任人">{ownerName(detailTarget.owner_id)}</Descriptions.Item>
               <Descriptions.Item label="状态">
                 <Tag color={STATUS_COLOR[detailTarget.status]}>{STATUS_LABEL[detailTarget.status] ?? detailTarget.status}</Tag>

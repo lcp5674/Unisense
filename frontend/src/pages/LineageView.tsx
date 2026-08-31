@@ -75,7 +75,7 @@ import { MetricDetailDrawer } from "../components/assetmap/MetricDetailDrawer";
 import { ManualEdgeModal } from "../components/lineage/ManualEdgeModal";
 import { useTracking } from "../hooks/useTracking";
 import { usePermission } from "../hooks/usePermission";
-import { enumLabel, GRANULARITY_LABEL } from "../utils/enums";
+import { enumLabel, GRANULARITY_LABEL, METRIC_STATUS_LABEL } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
 import { formatSql } from "../utils/sqlFormat";
 
@@ -1854,7 +1854,7 @@ function CoverageTab() {
     },
     { title: "名称", dataIndex: "name", key: "name", render: (v?: string) => v || <span className="muted">—</span> },
     { title: "业务域", dataIndex: "domain", key: "domain", render: (v?: string | null) => v || <span className="muted">—</span> },
-    { title: "状态", dataIndex: "status", key: "status", render: (v?: string) => v || <span className="muted">—</span> },
+    { title: "状态", dataIndex: "status", key: "status", render: (v?: string) => (v ? METRIC_STATUS_LABEL[v] ?? v : <span className="muted">—</span>) },
   ];
 
   const brokenColumns = [

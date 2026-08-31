@@ -11,7 +11,7 @@ import {
 } from "../../api";
 import type { QualityEvent, QualityRule, SnapshotResponse } from "../../types";
 import { ThresholdSummary } from "../../utils/display";
-import { RULE_TYPE_LABEL, RULE_MODE_LABEL } from "../../utils/enums";
+import { QUALITY_LEVEL_LABEL, QUALITY_SEVERITY_LABEL, RULE_TYPE_LABEL, RULE_MODE_LABEL } from "../../utils/enums";
 import { formatCnTime, formatCnRange } from "../../utils/timeCn";
 
 const EVENT_STATUS: Record<string, { color: string; label: string }> = {
@@ -65,7 +65,7 @@ export function QualitySnapshot({ metricId, metricCode }: { metricId: number; me
   }
 
   const eventColumns = [
-    { title: "级别", dataIndex: "level", key: "level", width: 80, render: (v: string) => <Tag color={SEVERITY_COLOR[v]}>{v}</Tag> },
+    { title: "级别", dataIndex: "level", key: "level", width: 80, render: (v: string) => <Tag color={SEVERITY_COLOR[v]}>{QUALITY_LEVEL_LABEL[v] ?? v}</Tag> },
     { title: "规则", dataIndex: "rule_type", key: "type", render: (v: string) => <Tag>{RULE_TYPE_LABEL[v] ?? v}</Tag> },
     { title: "观测值", dataIndex: "obs_value", key: "obs", width: 90, render: (v: number | null) => v ?? <span className="muted">—</span> },
     { title: "阈值", dataIndex: "threshold", key: "thr", width: 90, render: (v: number | null) => v ?? <span className="muted">—</span> },
@@ -109,7 +109,7 @@ export function QualitySnapshot({ metricId, metricCode }: { metricId: number; me
       dataIndex: "severity",
       key: "severity",
       width: 90,
-      render: (v: string) => <Tag color={SEVERITY_COLOR[v]}>{v}</Tag>,
+      render: (v: string) => <Tag color={SEVERITY_COLOR[v]}>{QUALITY_SEVERITY_LABEL[v] ?? v}</Tag>,
     },
     {
       title: "启用",

@@ -18,7 +18,7 @@ import {
 import type { MetricHealth, MetricResponse, RecommendItem } from "../../types";
 import { ResizableDrawer } from "../ResizableDrawer";
 import { ManualEdgeModal } from "../lineage/ManualEdgeModal";
-import { AGGREGATION_LABEL, DW_LAYER_LABEL, FRESHNESS_LABEL, GRANULARITY_LABEL, METRIC_TIER_LABEL } from "../../utils/enums";
+import { ADDITIVITY_LABEL, AGGREGATION_LABEL, DW_LAYER_LABEL, FRESHNESS_LABEL, GRANULARITY_LABEL, METRIC_TIER_LABEL, METRIC_TYPE_LABEL, TIME_SEMANTICS_LABEL } from "../../utils/enums";
 
 const STATUS_COLOR: Record<string, string> = {
   DRAFT: "default",
@@ -303,7 +303,7 @@ export function MetricDetailDrawer({ open, metricCode, onClose }: MetricDetailDr
           <Descriptions column={2} bordered size="small" style={{ marginBottom: 16 }}>
             <Descriptions.Item label="指标名称">{metric.name}</Descriptions.Item>
             <Descriptions.Item label="所属域">{metric.domain}</Descriptions.Item>
-            <Descriptions.Item label="类型">{metric.type}</Descriptions.Item>
+            <Descriptions.Item label="类型">{METRIC_TYPE_LABEL[metric.type ?? ""] ?? metric.type ?? "-"}</Descriptions.Item>
             <Descriptions.Item label="聚合方式">
               {metric.aggregation
                 ? (AGGREGATION_LABEL[metric.aggregation] ?? metric.aggregation)
@@ -313,9 +313,9 @@ export function MetricDetailDrawer({ open, metricCode, onClose }: MetricDetailDr
             <Descriptions.Item label="单位">{metric.unit}</Descriptions.Item>
             <Descriptions.Item label="数仓层">{DW_LAYER_LABEL[metric.dw_layer] ?? metric.dw_layer}</Descriptions.Item>
             <Descriptions.Item label="新鲜度">{FRESHNESS_LABEL[metric.freshness] ?? metric.freshness}</Descriptions.Item>
-            <Descriptions.Item label="时间语义">{metric.time_semantics}</Descriptions.Item>
+            <Descriptions.Item label="时间语义">{TIME_SEMANTICS_LABEL[metric.time_semantics ?? ""] ?? metric.time_semantics ?? "-"}</Descriptions.Item>
             <Descriptions.Item label="版本">{metric.version}</Descriptions.Item>
-            <Descriptions.Item label="可加性">{metric.additivity}</Descriptions.Item>
+            <Descriptions.Item label="可加性">{ADDITIVITY_LABEL[metric.additivity ?? ""] ?? metric.additivity ?? "-"}</Descriptions.Item>
             <Descriptions.Item label="Owner ID">{metric.owner_id}</Descriptions.Item>
             <Descriptions.Item label="创建时间">{metric.created_at}</Descriptions.Item>
             <Descriptions.Item label="更新时间">{metric.updated_at}</Descriptions.Item>

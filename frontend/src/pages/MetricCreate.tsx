@@ -9,7 +9,7 @@ import {
   createMetric, listCatalogs, autoSuggestMetric, suggestDomain, parseSqlBatch, parseSqlTables, batchRegisterFromSql, listDomainTree, listDictItems, checkConflict, batchRegisterMetrics, batchSubmitMetrics, listDimensions, listMetrics, listTerms, getDomainDefaults, listUsers, listMeasureCatalogs, fetchCurrentUser, refineMetricDefinition, getMetric, updateMetric, UnisenseApiError,
 } from "../api";
 import type { MetricCreateRequest, MetricBatchRegisterRequest, MetricBatchRegisterResult, MetricBatchRegisterCandidate, MetricResponse, MetricUpdateRequest, MetricType, MetricTier, SubjectDomainTreeNode, ConflictCheckResult, SuggestionField, AutoSuggestResponse, DomainSuggestionCandidate, Dimension, MeasureCatalog, MeasureSuggestion, MetricMountInput, SqlBatchParseResult, SqlBatchCandidate, CurrentUser, ConsumptionGuidePayload } from "../types";
-import { CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
+import { AGGREGATION_LABEL, CONFLICT_TYPE_LABEL, CONFLICT_SEVERITY_LABEL, enumLabel } from "../utils/enums";
 import { validateMetricCode } from "../utils/metricCode";
 import { MEASURE_FORMAT_LABEL } from "../types";
 import { usePermission } from "../hooks/usePermission";
@@ -191,7 +191,7 @@ const DICT_FIELD_MAP: Array<{ dictType: string; field: string; label: string }> 
 const AGG_OPTIONS = [
   "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "FIRST_VALUE",
   "MAX", "MIN", "MEDIAN", "PERCENTILE",
-].map((v) => ({ value: v, label: v }));
+].map((v) => ({ value: v, label: AGGREGATION_LABEL[v] ?? v }));
 
 // 时间粒度 code 集合（对齐后端 infer_dict.TIME_GRAIN_CODES / 字典 granularity 种子）。
 // 方案 B 主粒度（时间频率语义）单选；业务实体粒度（医生/科室…）进「粒度维度」多选。

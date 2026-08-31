@@ -24,7 +24,7 @@ import {
 } from "../api";
 import type { MetricResponse, QualityRule, QualityEvent, QualityBenchmark, ReconciliationRecord } from "../types";
 import { ThresholdSummary } from "../utils/display";
-import { RULE_TYPE_LABEL, RULE_MODE_LABEL, RECONCILIATION_STATUS_LABEL } from "../utils/enums";
+import { QUALITY_LEVEL_LABEL, QUALITY_SEVERITY_LABEL, RULE_TYPE_LABEL, RULE_MODE_LABEL, RECONCILIATION_STATUS_LABEL } from "../utils/enums";
 import { formatCnTime, formatCnDate } from "../utils/timeCn";
 import { usePermission } from "../hooks/usePermission";
 
@@ -126,7 +126,7 @@ function RulesTab() {
     { title: "规则类型", dataIndex: "rule_type", key: "type", width: 140, render: (v: string) => <Tag>{RULE_TYPE_LABEL[v] ?? v}</Tag> },
     { title: "模式", dataIndex: "rule_mode", key: "mode", width: 120, render: (v: string) => RULE_MODE_LABEL[v] ?? v },
     { title: "阈值", dataIndex: "threshold", key: "threshold", render: (v: Record<string, unknown>) => <ThresholdSummary threshold={v} /> },
-    { title: "严重度", dataIndex: "severity", key: "severity", width: 90, render: (v: string) => <Tag color={SEVERITY_COLOR[v]}>{v}</Tag> },
+    { title: "严重度", dataIndex: "severity", key: "severity", width: 90, render: (v: string) => <Tag color={SEVERITY_COLOR[v]}>{QUALITY_SEVERITY_LABEL[v] ?? v}</Tag> },
     {
       title: "启用",
       dataIndex: "enabled",
@@ -245,7 +245,7 @@ function EventsTab() {
   const columns = [
     { title: "ID", dataIndex: "id", key: "id", width: 70 },
     { title: "指标", dataIndex: "metric_id", key: "metric", width: 90, render: (v: number) => <span className="mono">#{v}</span> },
-    { title: "级别", dataIndex: "level", key: "level", width: 80, render: (v: string) => <Tag color={SEVERITY_COLOR[v]}>{v}</Tag> },
+    { title: "级别", dataIndex: "level", key: "level", width: 80, render: (v: string) => <Tag color={SEVERITY_COLOR[v]}>{QUALITY_LEVEL_LABEL[v] ?? v}</Tag> },
     { title: "规则类型", dataIndex: "rule_type", key: "type", width: 130, render: (v: string) => <Tag>{RULE_TYPE_LABEL[v] ?? v}</Tag> },
     { title: "观测值", dataIndex: "obs_value", key: "obs", width: 100, render: (v: number | null) => v ?? <span className="muted">—</span> },
     { title: "阈值", dataIndex: "threshold", key: "thr", width: 100, render: (v: number | null) => v ?? <span className="muted">—</span> },

@@ -145,7 +145,7 @@ export default function MetricImportModal({ open, onClose, domainOptions }: Metr
                     <Tag color="green">已创建（草稿）</Tag>
                   ) : (
                     <Tooltip title={r.validation_errors?.join("；")}>
-                      <Tag color="red">{s}</Tag>
+                      <Tag color="red">{s === "VALIDATION_ERROR" ? "校验失败" : s}</Tag>
                     </Tooltip>
                   ),
               },

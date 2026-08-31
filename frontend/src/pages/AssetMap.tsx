@@ -131,7 +131,7 @@ import type {
 import { useTracking } from "../hooks/useTracking";
 import { PAGE_SIZE_OPTIONS, usePersistentPageSize } from "../hooks/usePersistentPageSize";
 import { SchemaTable } from "../components/SchemaTable";
-import { ENTITY_TYPE_LABEL, SOURCE_HEALTH_LABEL, UNIT_LABEL } from "../utils/enums";
+import { ENTITY_TYPE_LABEL, LINEAGE_EDGE_TYPE_LABEL, METRIC_RELATION_EDGE_LABEL, SOURCE_HEALTH_LABEL, UNIT_LABEL } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
 import { AssetGraph } from "../components/assetmap/AssetGraph";
 import type { AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
@@ -467,7 +467,7 @@ function EntityLineageCard({ edges }: { edges: NonNullable<AssetEntityDetail["li
                 columns={[
                   { title: "源", dataIndex: "source", ellipsis: true },
                   { title: "目标", dataIndex: "target", ellipsis: true },
-                  { title: "类型", dataIndex: "edge_type", width: 120 },
+                  { title: "类型", dataIndex: "edge_type", width: 120, render: (v: string) => LINEAGE_EDGE_TYPE_LABEL[v] ?? v ?? "-" },
                   { title: "粒度", dataIndex: "granularity", width: 80 },
                 ]}
               />
@@ -643,7 +643,7 @@ const METRIC_COLUMNS: ColumnsType<DrillRow> = [
   },
   { title: "名称", dataIndex: "name", ellipsis: true },
   { title: "域", dataIndex: "domain", width: 110 },
-  { title: "状态", dataIndex: "status", width: 100 },
+  { title: "状态", dataIndex: "status", width: 100, render: (v: string) => STATUS_LABEL[v] ?? v ?? "-" },
   {
     title: "PII",
     dataIndex: "pii_flag",
@@ -894,7 +894,7 @@ function ChangeCatalogDetailDrawer({
                 pagination={false}
                 columns={[
                   { title: "指标节点", dataIndex: "metric_node", ellipsis: true },
-                  { title: "关系", dataIndex: "edge_type", width: 140 },
+                  { title: "关系", dataIndex: "edge_type", width: 140, render: (v: string) => METRIC_RELATION_EDGE_LABEL[v] ?? v ?? "-" },
                 ]}
               />
             </Card>
@@ -1013,16 +1013,16 @@ function ChangeMetricDetailDrawer({
             <Descriptions.Item label="指标名称">{metric.name}</Descriptions.Item>
             <Descriptions.Item label="指标编码">{metric.metric_code}</Descriptions.Item>
             <Descriptions.Item label="所属域">{metric.domain}</Descriptions.Item>
-            <Descriptions.Item label="类型">{metric.type}</Descriptions.Item>
-            <Descriptions.Item label="粒度">{metric.granularity}</Descriptions.Item>
-            <Descriptions.Item label="单位">{metric.unit}</Descriptions.Item>
-            <Descriptions.Item label="聚合方式">{metric.aggregation}</Descriptions.Item>
-            <Descriptions.Item label="时间语义">{metric.time_semantics}</Descriptions.Item>
-            <Descriptions.Item label="新鲜度">{metric.freshness}</Descriptions.Item>
-            <Descriptions.Item label="数仓层">{metric.dw_layer}</Descriptions.Item>
-            <Descriptions.Item label="指标分级">{metric.metric_tier}</Descriptions.Item>
-            <Descriptions.Item label="状态">{metric.status}</Descriptions.Item>
-            <Descriptions.Item label="可加性">{metric.additivity}</Descriptions.Item>
+            <Descriptions.Item label="类型">{METRIC_TYPE_LABEL[metric.type ?? ""] ?? metric.type ?? "-"}</Descriptions.Item>
+            <Descriptions.Item label="粒度">{GRANULARITY_LABEL[metric.granularity ?? ""] ?? metric.granularity ?? "-"}</Descriptions.Item>
+            <Descriptions.Item label="单位">{UNIT_LABEL[metric.unit ?? ""] ?? metric.unit ?? "-"}</Descriptions.Item>
+            <Descriptions.Item label="聚合方式">{AGG_LABEL[metric.aggregation ?? ""] ?? metric.aggregation ?? "-"}</Descriptions.Item>
+            <Descriptions.Item label="时间语义">{TIME_SEM_LABEL[metric.time_semantics ?? ""] ?? metric.time_semantics ?? "-"}</Descriptions.Item>
+            <Descriptions.Item label="新鲜度">{FRESHNESS_LABEL[metric.freshness ?? ""] ?? metric.freshness ?? "-"}</Descriptions.Item>
+            <Descriptions.Item label="数仓层">{DW_LAYER_LABEL[metric.dw_layer ?? ""] ?? metric.dw_layer ?? "-"}</Descriptions.Item>
+            <Descriptions.Item label="指标分级">{METRIC_TIER_LABEL[metric.metric_tier ?? ""] ?? metric.metric_tier ?? "-"}</Descriptions.Item>
+            <Descriptions.Item label="状态">{STATUS_LABEL[metric.status ?? ""] ?? metric.status ?? "-"}</Descriptions.Item>
+            <Descriptions.Item label="可加性">{ADDITIVITY_LABEL[metric.additivity ?? ""] ?? metric.additivity ?? "-"}</Descriptions.Item>
             <Descriptions.Item label="PII">
               {metric.pii_flag ? <Tag color="red">PII</Tag> : "否"}
             </Descriptions.Item>
@@ -2291,16 +2291,16 @@ function GraphTab() {
               <Descriptions.Item label="指标名称">{metricData.name}</Descriptions.Item>
               <Descriptions.Item label="指标编码">{metricData.metric_code}</Descriptions.Item>
               <Descriptions.Item label="所属域">{metricData.domain}</Descriptions.Item>
-              <Descriptions.Item label="类型">{metricData.type}</Descriptions.Item>
-              <Descriptions.Item label="粒度">{metricData.granularity}</Descriptions.Item>
-              <Descriptions.Item label="单位">{metricData.unit}</Descriptions.Item>
-              <Descriptions.Item label="聚合方式">{metricData.aggregation}</Descriptions.Item>
-              <Descriptions.Item label="时间语义">{metricData.time_semantics}</Descriptions.Item>
-              <Descriptions.Item label="新鲜度">{metricData.freshness}</Descriptions.Item>
-              <Descriptions.Item label="数仓层">{metricData.dw_layer}</Descriptions.Item>
-              <Descriptions.Item label="指标分级">{metricData.metric_tier}</Descriptions.Item>
-              <Descriptions.Item label="状态">{metricData.status}</Descriptions.Item>
-              <Descriptions.Item label="可加性">{metricData.additivity}</Descriptions.Item>
+              <Descriptions.Item label="类型">{METRIC_TYPE_LABEL[metricData.type ?? ""] ?? metricData.type ?? "-"}</Descriptions.Item>
+              <Descriptions.Item label="粒度">{GRANULARITY_LABEL[metricData.granularity ?? ""] ?? metricData.granularity ?? "-"}</Descriptions.Item>
+              <Descriptions.Item label="单位">{UNIT_LABEL[metricData.unit ?? ""] ?? metricData.unit ?? "-"}</Descriptions.Item>
+              <Descriptions.Item label="聚合方式">{AGG_LABEL[metricData.aggregation ?? ""] ?? metricData.aggregation ?? "-"}</Descriptions.Item>
+              <Descriptions.Item label="时间语义">{TIME_SEM_LABEL[metricData.time_semantics ?? ""] ?? metricData.time_semantics ?? "-"}</Descriptions.Item>
+              <Descriptions.Item label="新鲜度">{FRESHNESS_LABEL[metricData.freshness ?? ""] ?? metricData.freshness ?? "-"}</Descriptions.Item>
+              <Descriptions.Item label="数仓层">{DW_LAYER_LABEL[metricData.dw_layer ?? ""] ?? metricData.dw_layer ?? "-"}</Descriptions.Item>
+              <Descriptions.Item label="指标分级">{METRIC_TIER_LABEL[metricData.metric_tier ?? ""] ?? metricData.metric_tier ?? "-"}</Descriptions.Item>
+              <Descriptions.Item label="状态">{STATUS_LABEL[metricData.status ?? ""] ?? metricData.status ?? "-"}</Descriptions.Item>
+              <Descriptions.Item label="可加性">{ADDITIVITY_LABEL[metricData.additivity ?? ""] ?? metricData.additivity ?? "-"}</Descriptions.Item>
               <Descriptions.Item label="PII">
                 {metricData.pii_flag ? <Tag color="red">PII</Tag> : "否"}
               </Descriptions.Item>
@@ -4734,7 +4734,7 @@ function TablesTab() {
                         </span>
                       ),
                     },
-                    { title: "关系", dataIndex: "edge_type", key: "edge", width: 140 },
+                    { title: "关系", dataIndex: "edge_type", key: "edge", width: 140, render: (v: string) => METRIC_RELATION_EDGE_LABEL[v] ?? v ?? "-" },
                   ]}
                 />
               </Card>
@@ -6316,7 +6316,7 @@ function ChangesTab() {
               return meta ? <Tag color={meta.color}>{meta.label}</Tag> : v;
             },
           },
-          { title: "状态", dataIndex: "status", key: "status", width: 100 },
+          { title: "状态", dataIndex: "status", key: "status", width: 100, render: (v: string) => STATUS_LABEL[v] ?? v ?? "-" },
           { title: "版本", dataIndex: "version", key: "version", width: 70 },
           { title: "域", dataIndex: "domain", key: "domain", width: 100 },
           {
@@ -6554,7 +6554,7 @@ function MyAssetsTab() {
             ),
           },
           { title: "名称", dataIndex: "name", key: "name", ellipsis: true },
-          { title: "状态", dataIndex: "status", key: "status", width: 100 },
+          { title: "状态", dataIndex: "status", key: "status", width: 100, render: (v: string) => STATUS_LABEL[v] ?? v ?? "-" },
           {
             title: "类型",
             dataIndex: "type",
@@ -6567,7 +6567,7 @@ function MyAssetsTab() {
             dataIndex: "granularity",
             key: "granularity",
             width: 90,
-            render: (v: string | undefined) => v ?? "-",
+            render: (v: string | undefined) => GRANULARITY_LABEL[v ?? ""] ?? v ?? "-",
           },
           {
             title: "单位",
@@ -6581,7 +6581,7 @@ function MyAssetsTab() {
             dataIndex: "metric_tier",
             key: "tier",
             width: 70,
-            render: (v: string | undefined) => <Tag color="blue">{v ?? "-"}</Tag>,
+            render: (v: string | undefined) => <Tag color="blue">{METRIC_TIER_LABEL[v ?? ""] ?? v ?? "-"}</Tag>,
           },
           {
             title: "PII",
