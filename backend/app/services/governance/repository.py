@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.data_source import DBCatalog
@@ -95,13 +95,14 @@ class GovernanceRepository:
         return list((await self._db.execute(stmt)).scalars().all())
 
     async def replace_role_permissions(self, role: str, actions: list[str]) -> None:
-        """整表替换某角色的权限点覆盖（先软删既有行，再插入新集合）。"""
-        now = datetime.now(UTC)
-        stmt = (
-            update(RolePermission)
-            .where(RolePermission.role == role, RolePermission.deleted_at.is_(None))
-            .values(deleted_at=now)
-        )
+        """整表替换某角色的权限点覆盖（物理删除该角色全部既有行，再插入新集合）。
+
+        注意必须**物理删除**而非软删：``role_permission`` 的唯一索引
+        ``uk_role_permission_role_action`` 仅含 ``(role, action)`` 两列，软删行仍占用
+        键位，二次保存同一批动作会触发 ``Duplicate entry`` 1062（IntegrityError）。
+        本表是纯配置、无历史追溯需求，整表替换语义与模型 docstring 一致。
+        """
+        stmt = delete(RolePermission).where(RolePermission.role == role)
         await self._db.execute(stmt)
         for action in actions:
             self._db.add(RolePermission(role=role, action=action))

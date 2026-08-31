@@ -992,6 +992,24 @@ async def test_set_role_permissions_accepts_many_actions() -> None:
     assert len(item["ui_custom_actions"]) == 16
 
 
+async def test_set_role_permissions_resave_same_actions() -> None:
+    """同一批动作点二次保存（角色已有覆盖行）不冲突、不重复。
+
+    回归：修复前 replace 用软删（update deleted_at），(role, action) 唯一索引被
+    软删行占用，二次保存触发 Duplicate entry 1062 → 500；现为物理删除+插入。
+    """
+    svc, repo, _ = _svc()
+    actions = ["ai:view", "metric:create", "catalog:view", "dashboard:view"]
+    first = await svc.set_role_permissions("analyst", actions)
+    assert first["ui_custom_actions"] == sorted(actions)
+    # 二次保存同一批（等价于用户再次点击保存）
+    second = await svc.set_role_permissions("analyst", actions)
+    assert second["ui_custom_actions"] == sorted(actions)
+    # 覆盖行只保留一份（无重复追加）
+    perms = [rp for rp in repo.role_permissions if rp.role == "analyst"]
+    assert len(perms) == len(actions)
+
+
 def test_role_permission_update_accepts_many_actions() -> None:
     """schema 层：超过 8 个动作点可通过校验（max_length 放宽到 256）。"""
     actions = [f"module:action{i}" for i in range(20)]

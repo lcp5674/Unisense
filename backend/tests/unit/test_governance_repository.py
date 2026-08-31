@@ -287,3 +287,21 @@ class TestGovernanceRepositoryExtended:
         stmt = str(repo._db.execute.call_args[0][0])
         # 只查未删除行（软删角色不进入授权下拉）
         assert "deleted_at IS NULL" in stmt
+
+    async def test_replace_role_permissions_physical_delete(
+        self, repo: GovernanceRepository
+    ) -> None:
+        """整表替换必须物理删除该角色全部行（含软删残留），而非软删。
+
+        唯一索引 ``uk_role_permission_role_action`` 仅含 (role, action) 两列，软删行
+        仍占用键位——二次保存同一批动作会触发 Duplicate entry 1062（500）。
+        """
+        repo._db.execute = AsyncMock(return_value=self._result(None))
+        await repo.replace_role_permissions("analyst", ["ai:view", "metric:create"])
+        # 第一个 execute 是无条件按 role 的物理删除（不依赖 deleted_at 条件）
+        stmt = str(repo._db.execute.call_args[0][0])
+        assert "DELETE FROM ROLE_PERMISSION" in stmt.upper()
+        assert "deleted_at" not in stmt.lower()
+        # 逐条插入新集合 + flush
+        assert repo._db.add.call_count == 2
+        repo._db.flush.assert_awaited_once()
