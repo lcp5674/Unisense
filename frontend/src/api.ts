@@ -4034,6 +4034,8 @@ export async function sampleCatalogEntity(
   pii_hits: number;
   new_pii_columns: string[];
   cleared_pii_columns: string[];
+  /** 源端编码乱码字段（GBK→UTF-8 替换残留，需源端修复后重采） */
+  mojibake_fields: string[];
 }> {
   const qs = sampleRows ? `?sample_rows=${encodeURIComponent(String(sampleRows))}` : "";
   return request(

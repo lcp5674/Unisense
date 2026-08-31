@@ -643,6 +643,15 @@ export function Catalogs() {
         .filter(Boolean)
         .join("，");
       message.success(`「${fieldDrawerCatalog.entity_name}」${detail || "完成"}`);
+      // 源端编码乱码告警：GBK→UTF-8 替换残留、信息已在源头丢失，需在 Hive 侧修复后重采
+      if (res.mojibake_fields?.length) {
+        message.warning(
+          `「${fieldDrawerCatalog.entity_name}」检测到源端编码乱码字段：${res.mojibake_fields.join(
+            "、"
+          )}（GBK→UTF-8 替换，信息已在源头丢失，请在 Hive 侧修复数据/注释后重新采集）`,
+          6,
+        );
+      }
       // 采样会更新 schema_json（sample/sample_rule）与字段级 PII，重拉最新目录记录回填抽屉
       const freshList = await listCatalogs({
         source_id: fieldDrawerCatalog.source_id,
@@ -1069,6 +1078,20 @@ export function Catalogs() {
         {fieldDrawerCatalog && (() => {
           const isSchemaIncomplete = fieldDrawerCatalog.schema_incomplete;
           const hasNoSchema = fieldColumns.length === 0;
+          // 源端编码乱码标记（schema_json.mojibake：采集/采样时检测到 GBK→UTF-8 替换残留）
+          const mojibakeFields = (() => {
+            const sd = (fieldDrawerCatalog?.schema_def ??
+              (fieldDrawerCatalog as unknown as { schema_json?: unknown }).schema_json) as
+              | Record<string, unknown>
+              | undefined;
+            const m = sd?.mojibake as
+              | { sample_fields?: string[]; comment_fields?: string[] }
+              | undefined;
+            if (!m) return [];
+            return Array.from(
+              new Set([...(m.sample_fields ?? []), ...(m.comment_fields ?? [])]),
+            );
+          })();
 
           return (
             <>
@@ -1186,6 +1209,17 @@ export function Catalogs() {
                   type="warning"
                   showIcon
                   message="Schema 不完整，部分字段信息缺失"
+                  style={{ marginBottom: 12 }}
+                />
+              )}
+              {mojibakeFields.length > 0 && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="检测到源端编码乱码"
+                  description={`字段「${mojibakeFields.join(
+                    "、",
+                  )}」含编码替换符（GBK→UTF-8 转换残留，信息已在源头丢失）。请在 Hive 侧修复数据/注释后重新采集。`}
                   style={{ marginBottom: 12 }}
                 />
               )}

@@ -2317,6 +2317,25 @@ class CollectorService(BaseService):
         schema_json = await collector.sample_columns(entity_name, schema_json)
         sampled = sum(1 for c in schema_json.get("columns", []) if c.get("sample"))
 
+        # 源端编码乱码检测：采样后取连接器登记的乱码字段，标记进 schema_json
+        # （前端详情可展示）并返回 mojibake_fields（前端采样提示告警）。乱码是
+        # 源端 GBK→UTF-8 替换残留、信息已在源头丢失，仅标记不修改样本值。
+        mojibake = getattr(collector, "_take_mojibake", lambda: {})()
+        mojibake_fields: list[str] = []
+        if mojibake:
+            schema_json["mojibake"] = mojibake
+            mojibake_fields = sorted(
+                set(mojibake.get("sample_fields", []))
+                | set(mojibake.get("comment_fields", []))
+            )
+            logger.warning(
+                "样本采样检测到源端编码乱码 source=%s entity=%s fields=%s "
+                "（GBK→UTF-8 替换，信息已在源头丢失，请在 Hive 侧修复后重采）",
+                source_id,
+                entity_name,
+                mojibake_fields,
+            )
+
         # 写回 schema_json（仅更新样本，不触发 drift 判定——结构未变）
         cat.schema_json = schema_json
         flag_modified(cat, "schema_json")
@@ -2342,6 +2361,8 @@ class CollectorService(BaseService):
             # 采样后新增/减少的 PII 命中列（双重验证的收益可视化）
             "new_pii_columns": sorted(after_cols - before_cols),
             "cleared_pii_columns": sorted(before_cols - after_cols),
+            # 源端编码乱码字段（GBK→UTF-8 替换残留，需源端修复后重采）
+            "mojibake_fields": mojibake_fields,
         }
 
     async def schedule_collection(

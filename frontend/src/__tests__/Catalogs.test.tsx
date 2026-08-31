@@ -680,6 +680,32 @@ describe("Catalogs 页面", () => {
     expect(screen.getByText("手机")).toBeTruthy();
   });
 
+  it("字段详情展示源端编码乱码告警（schema_json.mojibake 标记）", async () => {
+    // 采集/采样检测到 GBK→UTF-8 替换残留时，schema_def.mojibake 记录乱码字段
+    const mojiCols = {
+      ...CATALOGS[0],
+      schema_def: {
+        columns: [
+          { name: "item_name", type: "string", comment: "2010��1��5��" },
+          { name: "index_name", type: "string", comment: "正常注释" },
+        ],
+        mojibake: { sample_fields: ["item_name"], comment_fields: ["index_name"] },
+      },
+    } as DBCatalog;
+    mockedList.mockResolvedValue({ items: [mojiCols], total: 1, page: 1, page_size: 20 });
+
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByText("字段详情"));
+    expect(screen.getByText("检测到源端编码乱码")).toBeTruthy();
+    // 乱码字段合并展示（sample + comment 去重后）
+    expect(screen.getByText(/item_name、index_name/)).toBeTruthy();
+  });
+
   it("字段无样本时不展示样本记录表", async () => {
     const noSampleCols = {
       ...CATALOGS[0],

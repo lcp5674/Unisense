@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from app.services.collector.classifier import SensitivityClassifier
+from app.services.collector.mojibake import contains_mojibake
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,11 @@ class BaseCollector(ABC):
         #: 采样熔断状态：连续整表采样失败计数 + 是否已熔断本会话采样
         self._sampling_fail_streak = 0
         self._sampling_disabled = False
+        #: 编码乱码标记（源端 U+FFFD 替换符/GBK 二次转码残留）：采样样本值命中
+        #: 的字段名集合（采样时明文累计，供连接器组装 schema_json 时标记）。
+        self._mojibake_fields: set[str] = set()
+        #: 元数据注释命中乱码的字段名集合（连接器对 DESCRIBE 注释等检测后登记）。
+        self._mojibake_comment_fields: set[str] = set()
 
     @abstractmethod
     async def collect(self, source: Any) -> CollectResult:
@@ -231,6 +237,35 @@ class BaseCollector(ABC):
         """对样本值打码（委托 classifier：手机/身份证/邮箱/银行卡掩码）。"""
         return self._classifier.mask_sample(sample)
 
+    def _note_mojibake_field(self, name: str, *, comment: bool = False) -> None:
+        """登记字段乱码标记（连接器对样本明文/元数据注释检测命中后调用）。
+
+        Args:
+            name: 字段名。
+            comment: True 表示命中在元数据注释（DESCRIBE comment），
+                False 表示命中在采样样本值。
+        """
+        target = self._mojibake_comment_fields if comment else self._mojibake_fields
+        if name:
+            target.add(name)
+
+    def _take_mojibake(self) -> dict[str, list[str]]:
+        """取走并清空本连接器已登记的乱码标记（供连接器组装 schema_json 时写入）。
+
+        Returns:
+            ``{"sample_fields": [...], "comment_fields": [...]}``（均为空时返回 {}）。
+        """
+        sample = sorted(self._mojibake_fields)
+        comment = sorted(self._mojibake_comment_fields)
+        self._mojibake_fields.clear()
+        self._mojibake_comment_fields.clear()
+        result: dict[str, list[str]] = {}
+        if sample:
+            result["sample_fields"] = sample
+        if comment:
+            result["comment_fields"] = comment
+        return result
+
     def _truncate_value(self, text: str) -> str:
         """截断超长样本值（保留前 ``MAX_SAMPLE_VALUE_LEN`` 字符 + ``…`` 标记）。
 
@@ -263,6 +298,10 @@ class BaseCollector(ABC):
             s = self._truncate_value(str(v).strip())
             if not s or s == "NULL":
                 continue
+            # 源端编码乱码检测：打码前对明文判定（掩码会掩盖替换符形态，
+            # 且 U+FFFD 属格式特征，打码后无法反推），命中即登记字段标记。
+            if contains_mojibake(s):
+                self._note_mojibake_field(col.get("name", ""))
             m = self._mask_sample(s)
             if m in seen:
                 continue
@@ -350,6 +389,8 @@ class BaseCollector(ABC):
                 # 大字段截断后再打码/落库（防 schema_json 膨胀）；per_column 存
                 # 截断明文——类别判定只看前 200 字符内的格式特征，截断不损失。
                 truncated = self._truncate_value(text)
+                if contains_mojibake(truncated):
+                    self._note_mojibake_field(name)
                 row[name] = self._mask_sample(truncated)
                 per_column[name].append(truncated)
             sample_rows.append(row)

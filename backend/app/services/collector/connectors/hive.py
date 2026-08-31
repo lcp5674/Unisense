@@ -32,6 +32,7 @@ from typing import Any
 from app.core.exceptions import ExternalDependencyError
 from app.services.collector.classifier import SensitivityClassifier
 from app.services.collector.connectors.collector_registry import registry
+from app.services.collector.mojibake import contains_mojibake
 from app.services.collector.placeholders import is_effective_comment
 from app.services.collector.spi import (
     BaseCollector,
@@ -288,6 +289,11 @@ class HiveCollector(BaseCollector):
                                 )
                                 if not is_effective_comment(col_comment):
                                     col_comment = ""
+                                # 源端注释编码乱码检测（GBK→UTF-8 替换残留）：
+                                # 命中即登记，随 schema_json 标记并在采集日志告警，
+                                # 避免乱码注释静默入库后无法溯源。
+                                if col_comment and contains_mojibake(col_comment):
+                                    self._note_mojibake_field(col_name, comment=True)
                                 # 跳过分区信息和表级信息（空行或非列条目）
                                 if col_name and not col_name.startswith("#"):
                                     columns.append(
@@ -316,10 +322,12 @@ class HiveCollector(BaseCollector):
                                 entity_name, columns, conn
                             )
                             schema_json = {"columns": columns}
+                            self._annotate_mojibake(schema_json, source_id, entity_name)
                             if sample_rows:
                                 schema_json["sample_rows"] = sample_rows
                         else:
                             schema_json = {"columns": columns}
+                            self._annotate_mojibake(schema_json, source_id, entity_name)
                         specs.append(
                             CatalogSpec(
                                 entity_name=entity_name,
@@ -339,6 +347,28 @@ class HiveCollector(BaseCollector):
                     await asyncio.to_thread(self._close, conn)
 
         return CollectResult(specs=specs, failed_specs=failed_specs, source_id=source_id)
+
+    def _annotate_mojibake(
+        self, schema_json: dict[str, Any], source_id: str, entity_name: str
+    ) -> None:
+        """把本表累积的源端编码乱码标记写入 schema_json 并告警。
+
+        命中时：① ``schema_json["mojibake"]`` 记录 sample_fields/comment_fields
+        （前端据此展示「源端存在编码乱码」提示）；② 采集日志 warning 告警，
+        明确「源端 GBK→UTF-8 替换、信息已丢失、请在 Hive 侧修复注释/数据后重采」，
+        避免乱码静默入库无法溯源。
+        """
+        mojibake = self._take_mojibake()
+        if not mojibake:
+            return
+        schema_json["mojibake"] = mojibake
+        logger.warning(
+            "采集源 %s 表 %s 检测到源端编码乱码（GBK→UTF-8 替换，信息已在源头丢失，"
+            "请在 Hive 侧修复注释/数据后重新采集）: %s",
+            source_id,
+            entity_name,
+            mojibake,
+        )
 
     async def list_databases(self) -> list[str]:
         """枚举实例下全部库（SHOW DATABASES，供创建数据源时选择目标库）。

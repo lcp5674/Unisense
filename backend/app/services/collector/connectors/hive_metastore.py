@@ -35,6 +35,7 @@ from app.services.collector.classifier import SensitivityClassifier
 from app.services.collector.connectors.collector_registry import registry
 from app.services.collector.connectors.hive import HiveCollector
 from app.services.collector.connectors.mysql import SqlalchemyConnector
+from app.services.collector.mojibake import contains_mojibake
 from app.services.collector.spi import (
     BaseCollector,
     CatalogSpec,
@@ -276,16 +277,26 @@ class HiveMetastoreCollector(BaseCollector):
         info: dict[str, Any],
         col_rows: list[dict[str, Any]],
     ) -> CatalogSpec:
-        """组装 CatalogSpec：库.表 实体 + 字段（含描述）+ 表描述 + _meta。"""
-        cols = [
-            {
-                "name": str(r.get("column_name") or ""),
-                "type": str(r.get("type_name") or "unknown"),
-                "comment": str(r.get("comment") or ""),
-            }
-            for r in col_rows
-            if r.get("column_name")
-        ]
+        """组装 CatalogSpec：库.表 实体 + 字段（含描述）+ 表描述 + _meta。
+
+        字段注释经源端编码乱码检测（GBK→UTF-8 替换残留）登记，命中时写入
+        ``schema_json["mojibake"]`` 供前端展示「源端存在编码乱码」提示——
+        乱码信息在源头已丢失，仅标记不修改，避免静默入库无法溯源。
+        """
+        cols = []
+        for r in col_rows:
+            if not r.get("column_name"):
+                continue
+            comment = str(r.get("comment") or "")
+            if comment and contains_mojibake(comment):
+                self._note_mojibake_field(str(r.get("column_name")), comment=True)
+            cols.append(
+                {
+                    "name": str(r.get("column_name") or ""),
+                    "type": str(r.get("type_name") or "unknown"),
+                    "comment": comment,
+                }
+            )
         tbl_type = str(info.get("tbl_type") or "MANAGED_TABLE")
         entity_type = "VIEW" if tbl_type in _VIEW_TYPES else "TABLE"
         description = str(info.get("tbl_comment") or "").strip() or None
@@ -295,6 +306,16 @@ class HiveMetastoreCollector(BaseCollector):
             "location": info.get("location") or None,
         }
         schema_json: dict[str, Any] = {"columns": cols}
+        mojibake = self._take_mojibake()
+        if mojibake:
+            schema_json["mojibake"] = mojibake
+            logger.warning(
+                "采集源 %s.%s 检测到源端注释编码乱码（GBK→UTF-8 替换，信息已在源头"
+                "丢失，请在 Hive 侧修复注释后重采）: %s",
+                schema,
+                tbl,
+                mojibake,
+            )
         if any(meta.values()):
             schema_json["_meta"] = {k: v for k, v in meta.items() if v is not None}
         return CatalogSpec(
