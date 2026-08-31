@@ -58,6 +58,7 @@ const SubjectDomain = lazyNamed(() => import("./pages/SubjectDomain"), "SubjectD
 const SystemDict = lazyNamed(() => import("./pages/SystemDict"), "SystemDict");
 const SensitiveRules = lazyNamed(() => import("./pages/SensitiveRules"), "SensitiveRules");
 const Account = lazyNamed(() => import("./pages/Account"), "Account");
+const ApiDocs = lazyNamed(() => import("./pages/ApiDocs"), "ApiDocs");
 import { TrackingProvider } from "./components/TrackingProvider";
 
 const { useApp } = AntApp;
@@ -399,6 +400,7 @@ export default function App() {
               <Route path="/dicts" element={<RequirePerm perm={ROUTE_PERM["/dicts"]}><SystemDict /></RequirePerm>} />
               <Route path="/sensitive-rules" element={<RequirePerm perm={ROUTE_PERM["/sensitive-rules"]}><SensitiveRules /></RequirePerm>} />
               <Route path="/account" element={<Account />} />
+              <Route path="/api-docs" element={<ApiDocs />} />
               <Route path="/guide/:metricCode" element={<ConsumptionGuide />} />
               <Route path="/" element={<Navigate to="/dashboard" replace />} />
               <Route path="*" element={<Navigate to="/dashboard" replace />} />
