@@ -1108,3 +1108,145 @@ async def test_hive_collector_no_sampling_when_disabled():
     collector._connect_managed = AsyncMock(return_value=object())  # type: ignore[assignment]
     result = await collector.collect(MagicMock(source_id="hive1", domain="d"))
     assert "sample" not in result.specs[0].schema_json["columns"][0]
+
+
+# ---------- 采样修复回归（跨连接器审查发现）----------
+
+
+async def test_clickhouse_parse_tsv_named_unescapes_escaped_fields():
+    """ClickHouse TabSeparated 字段内转义（\\t/\\n/\\\\）必须反转义，否则样本值损坏。"""
+    collector = ClickHouseCollector(host="ch-host", database="test_db")
+    # 列名行用真实 tab 分隔；数据行内字段按 ClickHouse 转义规则：
+    # 真实反斜杠 → \\\\（两个反斜杠）；NULL → \\N
+    text = (
+        "addr\tcode\n"
+        "北京\\\\朝阳区\tA-1\n"
+        "\\N\tB-2\n"
+    )
+    rows = collector._parse_tsv_named(text)
+    assert rows == [
+        {"addr": "北京\\朝阳区", "code": "A-1"},
+        {"addr": None, "code": "B-2"},
+    ]
+
+
+async def test_clickhouse_collector_emits_sampling_progress():
+    """ClickHouse 采集：采样阶段发 sampling 进度事件（对齐 MySQL，避免前端卡 0%）。"""
+    collector = ClickHouseCollector(host="ch-host", database="test_db")
+    events: list[dict] = []
+
+    async def mock_query(sql: str) -> str:
+        if "system.tables" in sql:
+            return "events\nlogs\n"
+        if "system.columns" in sql:
+            return "phone\tString\n"
+        if "SELECT" in sql:
+            return "phone\n13812345678\n"
+        return ""
+
+    async def cb(event: dict) -> None:
+        events.append(event)
+
+    collector._query = mock_query  # type: ignore[assignment]
+    collector.set_sampling(5)
+    collector.set_progress_cb(cb)
+    await collector.collect(MagicMock(source_id="ch1", domain="test_db"))
+    sampling = [e for e in events if e["phase"] == "sampling"]
+    assert len(sampling) == 2
+    assert sampling[0]["index"] == 1
+    assert sampling[0]["total"] == 2
+    assert sampling[0]["entity_name"] == "events"
+    assert sampling[1]["index"] == 2
+    assert sampling[1]["entity_name"] == "logs"
+
+
+async def test_postgres_collector_emits_sampling_progress():
+    """Postgres 采集：采样阶段发 sampling 进度事件。"""
+    conn = _SamplingPgConnector(
+        ["users", "orders"],
+        {
+            "users": [{"column_name": "phone", "data_type": "varchar"}],
+            "orders": [{"column_name": "order_id", "data_type": "bigint"}],
+        },
+        sample_rows=[{"phone": "13812345678"}],
+    )
+    collector = PostgresCollector(conn)
+    events: list[dict] = []
+
+    async def cb(event: dict) -> None:
+        events.append(event)
+
+    collector.set_sampling(5)
+    collector.set_progress_cb(cb)
+    await collector.collect(MagicMock(source_id="s1", domain="public"))
+    sampling = [e for e in events if e["phase"] == "sampling"]
+    assert len(sampling) == 2
+    assert sampling[0]["entity_name"] == "users"
+    assert sampling[1]["entity_name"] == "orders"
+    assert sampling[0]["total"] == 2
+
+
+async def test_hive_collector_writes_sample_rows():
+    """Hive 采集：行视图 sample_rows 必须落库（此前只写列式 sample、丢行视图）。"""
+    collector = HiveCollector(host="hive-host")
+
+    async def mock_execute(sql: str, conn=None) -> list[list[str]]:
+        if "SHOW DATABASES" in sql:
+            return [["ods"]]
+        if "SHOW TABLES" in sql:
+            return [["orders"]]
+        if "DESCRIBE" in sql:
+            return [["order_id", "bigint", ""], ["phone", "string", ""]]
+        if sql.lstrip().upper().startswith("SELECT"):
+            return [["1", "13812341234"]]
+        return []
+
+    collector._execute = mock_execute  # type: ignore[assignment]
+    collector._connect_managed = AsyncMock(return_value=object())  # type: ignore[assignment]
+    collector.set_sampling(5)
+    result = await collector.collect(MagicMock(source_id="hive1", domain="d"))
+    assert result.specs[0].schema_json["sample_rows"] == [
+        {"order_id": "1", "phone": "138****1234"}
+    ]
+
+
+async def test_mysql_collector_accepts_hyphen_identifier():
+    """MySQL 系标识符允许连字符：含 - 的列名应进入采样（反引号包裹安全）。"""
+    import app.services.collector.connectors.mysql as mysql_mod
+
+    for name in ("user-name", "phone", "order_id"):
+        assert mysql_mod._IDENT_RE.match(name), f"{name} 应通过标识符校验"
+    # 反引号包裹的含 - 标识符拼入 SQL 无歧义
+    assert f"`{'user-name'}`" == "`user-name`"
+
+
+async def test_postgres_collector_accepts_hyphen_identifier():
+    """Postgres 标识符允许连字符：含 - 的列名可采样（双引号包裹安全）。"""
+    collector = PostgresCollector(MagicMock())
+    for name in ("user-name", "phone", "order_id"):
+        assert collector._IDENT_RE.match(name), f"{name} 应通过标识符校验"
+
+
+async def test_sample_value_truncated_for_large_fields():
+    """大字段（BLOB/TEXT/JSON）样本值截断，防止 schema_json 膨胀。"""
+    conn = _SamplingPgConnector(
+        ["logs"],
+        {
+            "logs": [
+                {"column_name": "payload", "data_type": "jsonb"},
+                {"column_name": "phone", "data_type": "varchar"},
+            ]
+        },
+        sample_rows=[{"payload": "x" * 5000, "phone": "13812345678"}],
+    )
+    collector = PostgresCollector(conn)
+    collector.set_sampling(5)
+    result = await collector.collect(MagicMock(source_id="s1", domain="public"))
+    rows = result.specs[0].schema_json["sample_rows"]
+    assert len(rows[0]["payload"]) <= 201  # 200 截断 + … 标记
+    assert rows[0]["payload"].endswith("…")
+    # 手机号等短敏感值不受截断影响（仍完整打码）
+    assert rows[0]["phone"] == "138****5678"
+    # 列式 sample 同样截断
+    by_name = {c["name"]: c for c in result.specs[0].schema_json["columns"]}
+    assert len(by_name["payload"]["sample"][0]) <= 201

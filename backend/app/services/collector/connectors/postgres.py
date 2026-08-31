@@ -53,7 +53,7 @@ class PostgresCollector(BaseCollector):
 
     # 采样常量（与 mysql.py 对齐，仅标识符引用符不同）
     _SAMPLE_BATCH = 20
-    _IDENT_RE = re.compile(r"^[A-Za-z0-9_$]+$")
+    _IDENT_RE = re.compile(r"^[A-Za-z0-9_$-]+$")
 
     def __init__(
         self,
@@ -292,7 +292,8 @@ class PostgresCollector(BaseCollector):
                         }
                     )
 
-            for row in tables:
+            total_in_schema = len(tables)
+            for idx, row in enumerate(tables, 1):
                 tbl = row.get("table_name")
                 if not tbl:
                     continue
@@ -301,6 +302,17 @@ class PostgresCollector(BaseCollector):
                 # PII 精度增强 + 样本记录视图：全字段行对齐采样（样本打码）
                 schema_json: dict[str, Any] = {"columns": cols}
                 if self._sampling_max_rows:
+                    # 采样阶段进度：整表查询可能很慢（数百张表 × 逐表采样），
+                    # 若只发 scanning 事件前端会停在 0%。逐表发 sampling 进度。
+                    await self._notify_progress(
+                        {
+                            "phase": "sampling",
+                            "index": idx,
+                            "total": total_in_schema,
+                            "entity_name": entity_name,
+                            "message": f"采样 {idx}/{total_in_schema}：{entity_name}",
+                        }
+                    )
                     sample_rows = await self._sample_columns(f"{schema}.{tbl}", cols)
                     if sample_rows:
                         schema_json["sample_rows"] = sample_rows

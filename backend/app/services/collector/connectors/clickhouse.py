@@ -126,11 +126,40 @@ class ClickHouseCollector(BaseCollector):
             self._client = None
 
     @staticmethod
+    def _unescape_tsv(value: str) -> str:
+        """反转义 ClickHouse TabSeparated 字段（``\\t``/``\\n``/``\\r``/``\\\\``）。
+
+        ClickHouse TabSeparated 默认对字段内的制表符/换行/回车/反斜杠做转义
+        （``\\t``/``\\n``/``\\r``/``\\\\``），直接 ``split("\\t")`` 切分不会错位
+        （字段分隔符是真实 tab，字段内 tab 是两字符转义序列），但**不反转义**
+        会让含这些字符的样本值（如带换行的地址、带反斜杠的编码串）损坏。
+        ``\\N``（NULL 字面量）不在此映射内，保留原样供调用方归约为 None。
+        """
+        if "\\" not in value:
+            return value
+        out: list[str] = []
+        i = 0
+        n = len(value)
+        while i < n:
+            ch = value[i]
+            if ch == "\\" and i + 1 < n:
+                nxt = value[i + 1]
+                mapped = {"t": "\t", "n": "\n", "r": "\r", "\\": "\\"}.get(nxt)
+                if mapped is not None:
+                    out.append(mapped)
+                    i += 2
+                    continue
+            out.append(ch)
+            i += 1
+        return "".join(out)
+
+    @staticmethod
     def _parse_tsv(text: str, width: int) -> list[list[str]]:
         """解析 ClickHouse TabSeparated 响应为二维字符串数组。
 
         每行按制表符切分并对齐到 ``width`` 列（缺列补空串，多列截断）——
-        采样只需按列序号取值，不做类型转换。
+        采样只需按列序号取值，不做类型转换。字段内转义（``\\t``/``\\n`` 等）
+        经 ``_unescape_tsv`` 还原，避免含特殊字符的注释/样本值损坏。
 
         Args:
             text: ClickHouse 原始响应文本。
@@ -146,7 +175,7 @@ class ClickHouseCollector(BaseCollector):
             parts = line.split("\t")
             if len(parts) < width:
                 parts = parts + [""] * (width - len(parts))
-            rows.append(parts[:width])
+            rows.append([ClickHouseCollector._unescape_tsv(p) for p in parts[:width]])
         return rows
 
     @staticmethod
@@ -155,7 +184,8 @@ class ClickHouseCollector(BaseCollector):
 
         用带列名格式而非 ``TabSeparated``，是为了让解析**自包含**：调用方无需
         外部传入列名与宽度即可还原每列归属，全列查询与单列补采可共用同一入口。
-        ClickHouse 的 NULL 字面量 ``\\N`` 统一归约为 ``None``。
+        ClickHouse 的 NULL 字面量 ``\\N`` 统一归约为 ``None``；字段内转义
+        （``\\t``/``\\n`` 等）经 ``_unescape_tsv`` 还原。
         """
         lines = [ln for ln in text.strip().splitlines() if ln]
         if len(lines) < 2:
@@ -168,7 +198,11 @@ class ClickHouseCollector(BaseCollector):
                 parts = parts + [""] * (len(names) - len(parts))
             rows.append(
                 {
-                    name: (None if parts[idx] in ("", "\\N") else parts[idx])
+                    name: (
+                        None
+                        if parts[idx] in ("", "\\N")
+                        else ClickHouseCollector._unescape_tsv(parts[idx])
+                    )
                     for idx, name in enumerate(names)
                 }
             )
@@ -369,7 +403,8 @@ class ClickHouseCollector(BaseCollector):
                 line.strip() for line in tables_text.strip().splitlines() if line.strip()
             ]
 
-            for tbl in table_names:
+            total_in_schema = len(table_names)
+            for idx, tbl in enumerate(table_names, 1):
                 if not tbl:
                     continue
                 single_db = bool(self._database) and not getattr(self, "_databases", None)
@@ -406,6 +441,16 @@ class ClickHouseCollector(BaseCollector):
                     # PII 精度增强 + 样本记录视图：全字段行对齐采样（样本打码）
                     schema_json: dict[str, Any] = {"columns": columns}
                     if self._sampling_max_rows:
+                        # 采样阶段进度：逐表发 sampling 事件，避免前端停在 0%
+                        await self._notify_progress(
+                            {
+                                "phase": "sampling",
+                                "index": idx,
+                                "total": total_in_schema,
+                                "entity_name": entity_name,
+                                "message": f"采样 {idx}/{total_in_schema}：{entity_name}",
+                            }
+                        )
                         sample_rows = await self._sample_columns(
                             f"{database}.{tbl}", columns
                         )

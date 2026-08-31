@@ -52,8 +52,9 @@ _EXCLUDE_SCHEMAS = frozenset(
 #: 每批采样列数上限（控制单条采样 SQL 长度；全字段采样按批拆分查询）
 _SAMPLE_BATCH = 20
 
-#: MySQL 标识符合法字符（反引号包裹安全，含 $ 允许）
-_IDENT_RE = re.compile(r"^[A-Za-z0-9_$]+$")
+#: MySQL 标识符合法字符（反引号包裹安全，含 $ 允许；- 在 MySQL 表/列名中
+#: 合法且经反引号包裹无歧义，与 ClickHouse/Hive 的采样标识符规则对齐）
+_IDENT_RE = re.compile(r"^[A-Za-z0-9_$-]+$")
 
 
 def _matches_any(name: str, patterns: list[str] | None) -> bool:

@@ -185,7 +185,11 @@ class HiveMetastoreCollector(BaseCollector):
     # ---- 单表刷新 ----
 
     async def collect_entity(self, source: Any, entity_name: str) -> CatalogSpec | None:
-        """单表元数据刷新：仅查目标表的字段与描述，不触发全源扫描。"""
+        """单表元数据刷新：仅查目标表的字段与描述，不触发全源扫描。
+
+        配置了采样连接（sample_connection）时，对目标表执行行对齐采样——
+        与 ``collect`` 全源路径一致，保证单表刷新后「样本记录」视图可用。
+        """
         if "." not in entity_name:
             return None
         schema, tbl = entity_name.rsplit(".", 1)
@@ -196,7 +200,23 @@ class HiveMetastoreCollector(BaseCollector):
             return None
         info = tbl_rows[0]
         cols = await self._query_columns_one(schema, tbl)
-        return self._build_spec(schema, tbl, info, cols)
+        spec = self._build_spec(schema, tbl, info, cols)
+        if self._sampling_max_rows and self._sampler is not None:
+            try:
+                conn = await self._sampler._connect_managed()
+                try:
+                    sample_rows = await self._sampler._sample_columns(
+                        f"{schema}.{tbl}", spec.schema_json.get("columns", []), conn
+                    )
+                    if sample_rows:
+                        spec.schema_json["sample_rows"] = sample_rows
+                finally:
+                    await self._sampler._close(conn)
+            except Exception as exc:  # noqa: BLE001 - 单表采样失败不阻塞刷新
+                logger.warning(
+                    "单表刷新采样失败 entity=%s error=%s", entity_name, exc
+                )
+        return spec
 
     async def _query_tables_one(self, schema: str, tbl: str) -> list[dict[str, Any]]:
         sql = (
@@ -334,7 +354,8 @@ class HiveMetastoreCollector(BaseCollector):
             except Exception as exc:  # noqa: BLE001 - 采样连接失败不拖垮元数据采集
                 logger.warning("采样连接失败 source=%s error=%s", source_id, exc)
         try:
-            for info in table_rows:
+            total_in_schema = len(table_rows)
+            for idx, info in enumerate(table_rows, 1):
                 db, tbl = str(info.get("db_name") or ""), str(info.get("tbl_name") or "")
                 if not db or not tbl:
                     continue
@@ -343,9 +364,24 @@ class HiveMetastoreCollector(BaseCollector):
                     spec = self._build_spec(db, tbl, info, cols_by_table.get((db, tbl), []))
                     if sampler_conn is not None:
                         try:
-                            await self._sampler._sample_columns(
-                                entity_name, spec.schema_json.get("columns", []), sampler_conn
+                            await self._notify_progress(
+                                {
+                                    "phase": "sampling",
+                                    "index": idx,
+                                    "total": total_in_schema,
+                                    "entity_name": entity_name,
+                                    "message": f"采样 {idx}/{total_in_schema}：{entity_name}",
+                                }
                             )
+                            sample_rows = await self._sampler._sample_columns(
+                                entity_name,
+                                spec.schema_json.get("columns", []),
+                                sampler_conn,
+                            )
+                            # 行视图（返回值）写入 schema_json——只写 columns 的
+                            # 列式 sample 会让前端「样本记录」行视图为空
+                            if sample_rows:
+                                spec.schema_json["sample_rows"] = sample_rows
                         except Exception as exc:  # noqa: BLE001 - 单表采样失败跳过
                             logger.warning(
                                 "采样失败 source=%s entity=%s error=%s",

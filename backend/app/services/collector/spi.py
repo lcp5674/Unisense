@@ -30,6 +30,12 @@ MAX_SAMPLE_ROWS = 200
 #: 防止 ``schema_json.sample_rows`` 膨胀到拖慢列表接口。
 MAX_SAMPLE_CELLS = 4000
 
+#: 单个样本值最大保留长度（字符）。BLOB/TEXT/JSON/Array/Map 等大字段的
+#: ``str()`` 可能达 MB 级，写入 ``sample_rows``/``sample`` 会撑大 ``schema_json``
+#: （DB JSON 列 + API 响应 + 前端渲染），故统一截断——PII 识别只需格式特征
+#: （手机/身份证/邮箱/银行卡均在 20-30 字符内），超长截断不影响识别精度。
+MAX_SAMPLE_VALUE_LEN = 200
+
 #: 采样熔断阈值：连续整表采样失败达到该次数后，本采集会话不再尝试采样。
 #: 典型场景——Doris 对 ODBC 外表（``ODBC_SCAN_NODE`` 不支持）采样查询必败，
 #: 若不熔断，数百张表 × 数十列会在「行对齐失败 → 逐列补采」中空转数千次
@@ -225,6 +231,16 @@ class BaseCollector(ABC):
         """对样本值打码（委托 classifier：手机/身份证/邮箱/银行卡掩码）。"""
         return self._classifier.mask_sample(sample)
 
+    def _truncate_value(self, text: str) -> str:
+        """截断超长样本值（保留前 ``MAX_SAMPLE_VALUE_LEN`` 字符 + ``…`` 标记）。
+
+        大字段（BLOB/TEXT/JSON/Array/Map）的 ``str()`` 可达 MB 级，必须截断
+        再入 ``sample_rows``/``sample``，否则 ``schema_json`` 膨胀拖慢列表接口。
+        """
+        if len(text) > MAX_SAMPLE_VALUE_LEN:
+            return text[:MAX_SAMPLE_VALUE_LEN] + "…"
+        return text
+
     def _sample_rule_id(self, sample: str) -> str | None:
         """判定样本明文命中的敏感类别（rule_id），供采样时随打码值落库。
 
@@ -244,7 +260,7 @@ class BaseCollector(ABC):
         masked: list[str] = []
         rule_id: str | None = None
         for v in values:
-            s = str(v).strip()
+            s = self._truncate_value(str(v).strip())
             if not s or s == "NULL":
                 continue
             m = self._mask_sample(s)
@@ -331,8 +347,11 @@ class BaseCollector(ABC):
                 if text in ("", "NULL"):
                     row[name] = ""
                     continue
-                row[name] = self._mask_sample(text)
-                per_column[name].append(text)
+                # 大字段截断后再打码/落库（防 schema_json 膨胀）；per_column 存
+                # 截断明文——类别判定只看前 200 字符内的格式特征，截断不损失。
+                truncated = self._truncate_value(text)
+                row[name] = self._mask_sample(truncated)
+                per_column[name].append(truncated)
             sample_rows.append(row)
         for col, name in safe:
             if per_column[name]:

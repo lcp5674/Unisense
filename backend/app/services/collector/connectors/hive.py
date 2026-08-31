@@ -259,8 +259,9 @@ class HiveCollector(BaseCollector):
                     await asyncio.to_thread(self._close, conn)
                 continue
 
+            total_in_schema = len(table_rows)
             try:
-                for row in table_rows:
+                for idx, row in enumerate(table_rows, 1):
                     tbl = row[0] if row else None
                     if not tbl:
                         continue
@@ -296,10 +297,29 @@ class HiveCollector(BaseCollector):
                                             "comment": col_comment,
                                         }
                                     )
-                        # PII 精度增强：全字段采样（复用同一连接，批量列查询）
+                        # PII 精度增强：全字段采样（复用同一连接，批量列查询）。
+                        # 行视图（返回值）写入 schema_json——Hive 大表采样在
+                        # Tez/Spark 引擎下走 fetch-operator（非聚合 SELECT LIMIT
+                        # 不触发全表 MapReduce），成本受控，无需 TABLESAMPLE
+                        # （BUCKET 采样仅对分桶表有效、非分桶表会直接报错）。
                         if self._sampling_max_rows:
-                            await self._sample_columns(entity_name, columns, conn)
-                        schema_json = {"columns": columns}
+                            await self._notify_progress(
+                                {
+                                    "phase": "sampling",
+                                    "index": idx,
+                                    "total": total_in_schema,
+                                    "entity_name": entity_name,
+                                    "message": f"采样 {idx}/{total_in_schema}：{entity_name}",
+                                }
+                            )
+                            sample_rows = await self._sample_columns(
+                                entity_name, columns, conn
+                            )
+                            schema_json = {"columns": columns}
+                            if sample_rows:
+                                schema_json["sample_rows"] = sample_rows
+                        else:
+                            schema_json = {"columns": columns}
                         specs.append(
                             CatalogSpec(
                                 entity_name=entity_name,

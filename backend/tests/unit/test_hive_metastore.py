@@ -284,14 +284,18 @@ class _FakeSampler:
 
     async def _sample_columns(self, entity_name, columns, conn) -> list[dict]:
         self.sampled.append((entity_name, list(columns)))
-        # 模拟 Hive 采样：每列注入打码样本（复用 classifier.mask_sample）
+        # 模拟 Hive 采样：每列注入打码样本（复用 classifier.mask_sample），
+        # 返回**行视图**（与真实 HiveCollector 语义一致，供 sample_rows 落库断言）
         from app.services.collector.classifier import SensitivityClassifier
 
         clf = SensitivityClassifier()
+        row: dict[str, str] = {}
         for i, col in enumerate(columns):
             if i < len(self._rows[0]):
-                col["sample"] = clf.mask_sample(self._rows[0][i])
-        return columns
+                masked = clf.mask_sample(self._rows[0][i])
+                col["sample"] = masked
+                row[col["name"]] = masked
+        return [row] if row else []
 
     async def _close(self, conn) -> None:
         self.closed += 1
@@ -319,7 +323,7 @@ def test_hms_factory_parses_sample_connection():
 
 
 async def test_hms_collect_samples_when_configured():
-    """collect：配置采样器且开启采样时，逐表采样并写入 schema_json.columns[].sample。"""
+    """collect：配置采样器且开启采样时，逐表采样并写入 sample 与行视图 sample_rows。"""
     col, _conn = _collector()
     sampler = _FakeSampler(rows=[["13812341234", "北京"]])
     col._sampler = sampler
@@ -334,7 +338,26 @@ async def test_hms_collect_samples_when_configured():
     # fake 行 [["13812341234", "北京"]]：id→手机号打码、amount→普通值原样
     assert by_name["id"]["sample"] == "138****1234"
     assert by_name["amount"]["sample"] == "北京"
+    # 行视图 sample_rows 必须落库（此前 HMS collect 只写列式 sample、丢行视图）
+    assert specs["ods.orders"].schema_json["sample_rows"] == [
+        {"id": "138****1234", "amount": "北京"}
+    ]
     assert sampler.closed == 1  # 采样连接复用并关闭
+
+
+async def test_hms_collect_entity_samples_when_configured():
+    """collect_entity（单表刷新）：配置采样器且开启采样时同样采样并落 sample_rows。"""
+    col, _conn = _collector()
+    sampler = _FakeSampler(rows=[["13812341234", "北京"]])
+    col._sampler = sampler
+    col.set_sampling(5)
+    spec = await col.collect_entity(_source(), "ods.orders")
+    assert spec is not None
+    assert sampler.sampled == [("ods.orders", list(spec.schema_json["columns"]))]
+    assert spec.schema_json["sample_rows"] == [
+        {"id": "138****1234", "amount": "北京"}
+    ]
+    assert sampler.closed == 1
 
 
 async def test_hms_collect_no_sampling_without_configure():
