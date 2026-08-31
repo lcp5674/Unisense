@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import io
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from tests.conftest import make_metric
 
 from app.api import deps
@@ -484,6 +486,81 @@ async def test_import_csv_parses_and_creates(client):
     # 第二行 metric_code 缺省 → 自动补全（源表末段去后缀 + 度量列 + 周期）
     assert inner.candidates[1].metric_code.endswith("_last_month_active_doctor_cnt_month")
     assert inner.candidates[1].name == "上月活跃医生数"
+
+
+async def test_import_xlsx_parses_and_creates(client):
+    """import-csv：上传 xlsx（openpyxl 构造）→ 逐行解析为候选，调批量注册创建 DRAFT。"""
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    openpyxl = pytest.importorskip("openpyxl")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(
+        ["metric_code", "name", "type", "source_table", "measure_column", "aggregation",
+         "unit", "period", "granularity", "measure_id", "expression", "dependencies", "raw_sql"]
+    )
+    ws.append(
+        ["outp_gmv_day", "门诊金额", "derived", "dwd.outp_fee_di", "gmv", "SUM",
+         "元", "day", "", "", "SUM(amount)", "", ""]
+    )
+    ws.append([None] * 13)  # 空行应被跳过
+    ws.append(
+        ["", "第二行", "atomic", "dwd.t2", "cnt", "COUNT",
+         "", "", "", "", "COUNT(1)", "", ""]
+    )
+    buf = io.BytesIO()
+    wb.save(buf)
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        instance = mock_svc.return_value
+        instance.batch_register_from_sql = AsyncMock(
+            return_value={
+                "batch_id": "xlsx_b1",
+                "candidates": [
+                    {"metric_code": "outp_gmv_day", "status": "DRAFT"},
+                    {"metric_code": "dwd_t2_cnt_day", "status": "DRAFT"},
+                ],
+            }
+        )
+        resp = await client.post(
+            "/api/v1/metric-definitions/imports/csv",
+            files={
+                "file": (
+                    "metrics.xlsx",
+                    buf.getvalue(),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+            data={"domain": "outp"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["batch_id"] == "xlsx_b1"
+    inner: MetricSqlBatchRegisterRequest = instance.batch_register_from_sql.call_args.args[0]
+    assert len(inner.candidates) == 2
+    by_code = {c.metric_code: c for c in inner.candidates}
+    assert "outp_gmv_day" in by_code
+    assert by_code["outp_gmv_day"].name == "门诊金额"
+    # 第二行 metric_code 缺省 → 自动补全（原子先行排序，按编码查找断言）
+    assert by_code["outp_t2_cnt_day"].name == "第二行"
+
+
+async def test_import_xlsx_template_download(client):
+    """imports/template?format=xlsx：返回 xlsx 二进制模板（PK 魔数 + 表头行）。"""
+    openpyxl = pytest.importorskip("openpyxl")
+    resp = await client.get(
+        "/api/v1/metric-definitions/imports/template", params={"format": "xlsx"}
+    )
+    assert resp.status_code == 200
+    assert "spreadsheetml" in resp.headers["content-type"]
+    assert resp.content[:2] == b"PK"
+    wb = openpyxl.load_workbook(io.BytesIO(resp.content), read_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    assert list(rows[0]) == [
+        "metric_code", "name", "type", "source_table", "measure_column", "aggregation",
+        "unit", "period", "granularity", "measure_id", "expression", "dependencies", "raw_sql",
+    ]
+    assert len(rows) >= 2  # 表头 + 示例行
 
 
 async def test_import_csv_invalid_rows_reported(client):

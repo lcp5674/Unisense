@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useMemo, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { BarsOutlined, ArrowLeftOutlined, PlusOutlined, MinusCircleOutlined, RobotOutlined, TeamOutlined, AppstoreOutlined } from "@ant-design/icons";
+import { BarsOutlined, ArrowLeftOutlined, PlusOutlined, MinusCircleOutlined, RobotOutlined, TeamOutlined, AppstoreOutlined, UploadOutlined } from "@ant-design/icons";
 import { ResizableDrawer } from "../components/ResizableDrawer";
 import {
   Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Collapse, Divider, Drawer, Form, Input, Modal, Radio, Row, Segmented, Select, Space, Spin, Steps, Switch, Table, Tooltip, Typography, App as AntApp, Tag,
@@ -15,6 +15,7 @@ import { MEASURE_FORMAT_LABEL } from "../types";
 import { usePermission } from "../hooks/usePermission";
 import RoleOwnerSelect, { type RoleOwnerValue } from "../components/RoleOwnerSelect";
 import { ListEditor } from "./ConsumptionGuide";
+import MetricImportModal from "../components/MetricImportModal";
 
 const { Title, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -470,6 +471,9 @@ export function MetricCreate() {
 
   const [prechecking, setPrechecking] = useState(false);
   const [precheckResult, setPrecheckResult] = useState<ConflictCheckResult | null>(null);
+
+  // 批量导入（CSV / Excel xlsx）弹窗：由 MetricImportModal 内部管理域/上传/结果
+  const [importOpen, setImportOpen] = useState(false);
 
   // SQL 智能推断入口状态
   const [sqlInferText, setSqlInferText] = useState("");
@@ -2555,6 +2559,11 @@ export function MetricCreate() {
           <Tooltip title={canBatchRegister ? "批量注册（宽表多度量列 → 批量 DRAFT）" : "仅平台/域管理员与指标 Owner 可批量注册"}>
             <Button type="dashed" icon={<BarsOutlined />} onClick={openBatchModal} disabled={!canBatchRegister}>
               批量注册指标
+            </Button>
+          </Tooltip>
+          <Tooltip title={canCreate ? "上传 CSV 或 Excel（.xlsx）批量创建 DRAFT 指标（编码/名称可缺省自动补全）" : "无批量导入权限（metric:create）"}>
+            <Button icon={<UploadOutlined />} onClick={() => setImportOpen(true)} disabled={!canCreate}>
+              批量导入
             </Button>
           </Tooltip>
         </Space>
@@ -5635,6 +5644,11 @@ export function MetricCreate() {
           </Form>
         )}
       </Modal>
+      <MetricImportModal
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        domainOptions={flattenDomainOptions(domainTree)}
+      />
     </div>
   );
 }

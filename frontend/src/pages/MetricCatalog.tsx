@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { Table, Input, Select, Button, Space, Tag, message, Tooltip, Descriptions, Drawer, Dropdown, Modal, Checkbox, Card, Popconfirm, Radio, Upload, Alert } from "antd";
+import { Table, Input, Select, Button, Space, Tag, message, Tooltip, Descriptions, Drawer, Dropdown, Modal, Checkbox, Card, Popconfirm, Radio } from "antd";
 import {
   ArrowLeftOutlined,
   SearchOutlined,
@@ -44,9 +44,6 @@ import {
   checkMetricDownstream,
   type MetricDownstreamCheckResult,
   listMeasureCatalogs,
-  importMetricsCsv,
-  downloadMetricImportTemplate,
-  type MetricImportResult,
   UnisenseApiError,
 } from "../api";
 import type { MetricResponse, SubjectDomainTreeNode } from "../types";
@@ -56,6 +53,7 @@ import { usePermission } from "../hooks/usePermission";
 import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
 import { MetricCompareModal } from "../components/MetricCompareModal";
 import { CodeValue } from "../components/CodeValue";
+import MetricImportModal from "../components/MetricImportModal";
 import {
   AGGREGATION_LABEL,
   DW_LAYER_LABEL,
@@ -543,11 +541,8 @@ export function MetricCatalog() {
   // 批量提交审核的评审指派（TD §13）
   const [batchReviewerType, setBatchReviewerType] = useState<"user" | "domain" | null>(null);
   const [batchReviewerId, setBatchReviewerId] = useState<number | null>(null);
-  // 批量导入（CSV / 外部 agent）：弹窗、上传中、结果
+  // 批量导入（CSV / Excel xlsx）：弹窗由 MetricImportModal 内部管理（域/上传中/结果）
   const [importOpen, setImportOpen] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [importResult, setImportResult] = useState<MetricImportResult | null>(null);
-  const [importDomain, setImportDomain] = useState("");
   // 批量打回原因 / 批量废弃替代指标映射
   const [batchRejectReason, setBatchRejectReason] = useState("");
   const [batchSuccessors, setBatchSuccessors] = useState<Record<string, string>>({});
@@ -1774,13 +1769,13 @@ export function MetricCatalog() {
               <Button icon={<FileTextOutlined />} onClick={() => navigate("/templates")}>
                 从模板创建
               </Button>
-              <Tooltip title="上传 CSV 或供外部智能体调 /batch-import，批量创建 DRAFT 指标（编码/名称可缺省自动补全）">
-                <Button icon={<UploadOutlined />} onClick={() => { setImportOpen(true); setImportResult(null); }}>
-                  批量导入
-                </Button>
-              </Tooltip>
             </>
           )}
+          <Tooltip title={canCreate ? "上传 CSV 或 Excel（.xlsx）批量创建 DRAFT 指标（编码/名称可缺省自动补全）" : "无批量导入权限（metric:create）"}>
+            <Button icon={<UploadOutlined />} onClick={() => setImportOpen(true)} disabled={!canCreate}>
+              批量导入
+            </Button>
+          </Tooltip>
           <Tooltip title={deletedView ? "回收站数据不可导出（含已软删指标，避免误用为正式数据）" : (canExport ? "将当前筛选结果导出为 CSV" : "无导出权限（metric:export）")}>
             <Button
               icon={<DownloadOutlined />}
@@ -2616,122 +2611,11 @@ export function MetricCatalog() {
           ))}
         </ul>
       </Modal>
-      {/* 批量导入（CSV / 外部 agent）弹窗：上传 CSV 批量创建 DRAFT，逐行容错 + 逐条结果回显 */}
-      <Modal
-        title="批量导入指标"
+      <MetricImportModal
         open={importOpen}
-        onCancel={() => setImportOpen(false)}
-        footer={<Button onClick={() => setImportOpen(false)}>关闭</Button>}
-        width={720}
-      >
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message="批量录入存量指标"
-          description="上传 CSV 批量创建 DRAFT 指标（编码/名称可缺省，系统自动按域/源表/度量列补全）。外部智能体也可直接调用 POST /api/v1/metric-definitions/batch-import 接口对接（字段说明见 API 文档）。"
-        />
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-          <Button icon={<DownloadOutlined />} onClick={() => downloadMetricImportTemplate().catch(() => message.error("模板下载失败"))}>
-            下载 CSV 模板
-          </Button>
-          <Select
-            style={{ width: 220 }}
-            placeholder="选择目标域"
-            value={importDomain || undefined}
-            onChange={(v) => setImportDomain(v)}
-            options={domainOptions}
-            showSearch
-            optionFilterProp="label"
-          />
-        </div>
-        <Upload
-          accept=".csv"
-          showUploadList={false}
-          beforeUpload={(file) => {
-            if (!importDomain) {
-              message.warning("请先选择目标域");
-              return Upload.LIST_IGNORE;
-            }
-            const fd = new FormData();
-            fd.append("file", file);
-            fd.append("domain", importDomain);
-            setImporting(true);
-            setImportResult(null);
-            importMetricsCsv(fd)
-              .then((r) => {
-                setImportResult(r);
-                const ok = r.candidates.filter((c) => c.status === "DRAFT").length;
-                const fail = r.candidates.length - ok;
-                if (r.row_errors?.length) {
-                  message.warning(`导入完成：成功 ${ok} 条，失败 ${fail} 条，解析错误 ${r.row_errors.length} 行`);
-                } else if (fail > 0) {
-                  message.warning(`导入完成：成功 ${ok} 条，失败 ${fail} 条（详见下方明细）`);
-                } else {
-                  message.success(`导入完成：成功 ${ok} 条`);
-                }
-              })
-              .catch((e) => {
-                message.error(e instanceof UnisenseApiError ? e.message : "批量导入失败");
-              })
-              .finally(() => setImporting(false));
-            return Upload.LIST_IGNORE;
-          }}
-        >
-          <Button icon={<UploadOutlined />} loading={importing} disabled={!importDomain}>
-            选择 CSV 文件上传
-          </Button>
-        </Upload>
-        {importResult && (
-          <>
-            <div style={{ borderTop: "1px dashed var(--line)", margin: "14px 0 10px" }} />
-            <div className="muted" style={{ marginBottom: 8, fontSize: 12 }}>
-              批次 {importResult.batch_id}：成功{" "}
-              {importResult.candidates.filter((c) => c.status === "DRAFT").length} 条，失败{" "}
-              {importResult.candidates.filter((c) => c.status !== "DRAFT").length} 条
-              {importResult.row_errors?.length ? `，解析错误 ${importResult.row_errors.length} 行` : ""}
-            </div>
-            {importResult.row_errors && importResult.row_errors.length > 0 && (
-              <Alert
-                type="warning"
-                showIcon
-                style={{ marginBottom: 8 }}
-                message="以下行解析失败（未创建）"
-                description={
-                  <ul style={{ maxHeight: 120, overflow: "auto", paddingLeft: 18, margin: 0 }}>
-                    {importResult.row_errors.map((r) => (
-                      <li key={r.row} className="mono" style={{ fontSize: 12 }}>
-                        第 {r.row} 行：{r.error}
-                      </li>
-                    ))}
-                  </ul>
-                }
-              />
-            )}
-            <Table
-              size="small"
-              rowKey="metric_code"
-              dataSource={importResult.candidates}
-              pagination={false}
-              columns={[
-                { title: "指标编码", dataIndex: "metric_code", ellipsis: true },
-                {
-                  title: "结果",
-                  dataIndex: "status",
-                  render: (s: string, r: { validation_errors?: string[] }) =>
-                    s === "DRAFT" ? (
-                      <Tag color="green">已创建（草稿）</Tag>
-                    ) : (
-                      <Tooltip title={r.validation_errors?.join("；")}>
-                        <Tag color="red">{s}</Tag>
-                      </Tooltip>
-                    ),
-                },
-              ]}
-            />
-          </>
-        )}
-      </Modal>
+        onClose={() => setImportOpen(false)}
+        domainOptions={domainFilterOptions}
+      />
       <MetricCompareModal
         open={compareOpen}
         codes={selected.map((s) => s.metric_code)}

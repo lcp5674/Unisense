@@ -43,6 +43,8 @@ dependencies = [
     # SQL 解析（血缘）
     "sqlglot~=25.0",
     "sqlparse~=0.5.0",
+    # Excel 批量导入解析（openpyxl，纯 Python 无编译依赖）
+    "openpyxl~=3.1.0",
     # 认证
     "pyjwt>=2.13.0,<3.0.0",  # 2026-08-10: 放开兼容发布上界以纳入 2.13.0 安全修复（PYSEC-2026-176/178）
     "bcrypt~=4.2.0",

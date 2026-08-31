@@ -2940,14 +2940,78 @@ def _enrich_import_candidates(
     return enriched
 
 
+def _xlsx_template_bytes() -> bytes:
+    """生成 Excel 批量导入模板（表头加粗 + 示例行 + 列宽自适应），未装 openpyxl 时明确报错。"""
+    try:
+        import openpyxl
+        from openpyxl.utils import get_column_letter
+    except ImportError as exc:  # pragma: no cover - 依赖缺失提示
+        raise BusinessError(
+            "服务器未安装 openpyxl，无法生成 Excel 模板（请更新依赖后重试）",
+            error_code="IMPORT_DEP_MISSING",
+        ) from exc
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "指标导入模板"
+    ws.append(_IMPORT_TEMPLATE_HEADER)
+    for cell in ws[1]:
+        cell.font = openpyxl.styles.Font(bold=True)
+    ws.append(
+        (
+            "outp_doctor_active_cnt_month", "月活医生数", "atomic",
+            "wedw_dws.doctor_active_month_di", "current_month_active_doctor_cnt",
+            "COUNT_DISTINCT", "人", "month", "", "", "COUNT(DISTINCT doctor_code)", "", "",
+        )
+    )
+    for i, h in enumerate(_IMPORT_TEMPLATE_HEADER, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = max(len(h) + 2, 14)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _xlsx_rows_to_dicts(content: bytes) -> list[dict[str, str]]:
+    """解析 xlsx 首个工作表为行 dict 列表（首行表头，空行跳过，值/表头均去空白）。"""
+    try:
+        import openpyxl
+    except ImportError as exc:  # pragma: no cover - 依赖缺失提示
+        raise BusinessError(
+            "服务器未安装 openpyxl，无法解析 Excel 文件（请更新依赖后重试）",
+            error_code="INVALID_XLSX",
+        ) from exc
+    wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    try:
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+    finally:
+        wb.close()
+    if not rows:
+        return []
+    header = [str(c).strip() if c is not None else "" for c in rows[0]]
+    out: list[dict[str, str]] = []
+    for raw in rows[1:]:
+        row = {h: ("" if v is None else str(v).strip()) for h, v in zip(header, raw, strict=False)}
+        if any(row.values()):
+            out.append(row)
+    return out
+
+
 @router.get(
     "/imports/template",
     response_model=None,
-    summary="下载指标批量导入 CSV 模板",
+    summary="下载指标批量导入模板（CSV / Excel）",
     dependencies=[Depends(require_roles(*_WRITE_ROLES))],
 )
-async def metric_import_template() -> Response:
-    """返回 CSV 模板（含表头 + 示例行），供外部 agent / 人工填表后调用 import-csv。"""
+async def metric_import_template(
+    format: Annotated[str, Query(pattern="^(csv|xlsx)$")] = "csv",  # noqa: A002 - FastAPI 查询参数名
+) -> Response:
+    """返回批量导入模板（CSV 文本或 Excel xlsx），含表头 + 示例行。"""
+    if format == "xlsx":
+        return Response(
+            content=_xlsx_template_bytes(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": 'attachment; filename="metric_import_template.xlsx"'},
+        )
     example = (
         "outp_doctor_active_cnt_month,月活医生数,atomic,wedw_dws.doctor_active_month_di,"
         "current_month_active_doctor_cnt,COUNT_DISTINCT,人,month,,,COUNT(DISTINCT doctor_code),,"
@@ -3032,25 +3096,36 @@ async def import_metrics_csv(
     """
     # S11（审查修复）：校验 Content-Type（浏览器/客户端可能不带，白名单含常见值）；
     # 文件为空/非文本由后续解析兜底（无有效行 → INVALID_CSV）。
+    _xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     if file.content_type and file.content_type not in (
         "text/csv",
         "application/csv",
         "application/vnd.ms-excel",
         "text/plain",
         "application/octet-stream",
+        _xlsx_mime,
     ):
         raise BusinessError(
-            f"不支持的文件类型: {file.content_type}（仅支持 UTF-8 CSV）",
+            f"不支持的文件类型: {file.content_type}（仅支持 CSV / Excel .xlsx）",
             error_code="INVALID_CSV",
         )
-    try:
-        content = (await file.read()).decode("utf-8-sig", errors="replace")
-    except Exception:  # noqa: BLE001 - 解码失败按空内容处理，由无有效行分支兜底
-        content = ""
+    content = await file.read()
+    # 二进制 xlsx 与文本 CSV 分流：xlsx 按文件名后缀或 MIME 判定（openpyxl 解析首个工作表）
+    is_xlsx = "spreadsheetml" in (file.content_type or "") or (
+        file.filename or ""
+    ).lower().endswith(".xlsx")
+    rows: list[dict[str, str]] = (
+        _xlsx_rows_to_dicts(content) if is_xlsx
+        else [
+            dict(r)
+            for r in csv.DictReader(
+                io.StringIO(content.decode("utf-8-sig", errors="replace"))
+            )
+        ]
+    )
     candidates: list[MetricBatchImportCandidate] = []
     row_errors: list[dict[str, Any]] = []
-    reader = csv.DictReader(io.StringIO(content))
-    for i, row in enumerate(reader, start=2):  # 行号从 2 起（1 为表头）
+    for i, row in enumerate(rows, start=2):  # 行号从 2 起（1 为表头）
         if not any((v or "").strip() for v in row.values()):
             continue
         try:
@@ -3059,7 +3134,7 @@ async def import_metrics_csv(
             row_errors.append({"row": i, "error": str(exc)})
     if not candidates:
         raise BusinessError(
-            "CSV 无有效数据行（请先下载模板核对列头与必填列）",
+            "导入文件无有效数据行（请先下载模板核对列头与必填列）",
             error_code="INVALID_CSV",
             ctx={"row_errors": row_errors[:10]},
         )

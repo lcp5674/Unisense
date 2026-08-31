@@ -1006,6 +1006,25 @@ describe("MetricCatalog - 按钮级权限点过滤", () => {
     const btn = screen.getByRole("button", { name: /我的收藏/ }) as HTMLButtonElement;
     expect(btn.disabled).toBe(true);
   });
+
+  it("无 metric:create 权限时「批量导入」按钮禁用（可见 + Tooltip 提示，而非隐藏）", async () => {
+    mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
+    renderWithPerm(["metric:export"]);
+    await screen.findByText("sales_gmv_sum_d");
+    const btn = screen.getByRole("button", { name: /批量导入/ }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+  });
+
+  it("具备 metric:create 权限时「批量导入」按钮可用，点击打开导入弹窗", async () => {
+    mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
+    renderWithPerm(["metric:create", "metric:export"]);
+    await screen.findByText("sales_gmv_sum_d");
+    const btn = screen.getByRole("button", { name: /批量导入/ }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+    fireEvent.click(btn);
+    await screen.findByText("批量导入指标");
+    expect(screen.getByText("下载 Excel 模板")).toBeTruthy();
+  });
 });
 
 describe("MetricCatalog URL 筛选直达（分享/刷新保持）", () => {

@@ -702,9 +702,10 @@ export async function importMetricsCsv(formData: FormData): Promise<MetricImport
   });
 }
 
-/** 下载指标批量导入 CSV 模板（带鉴权，blob 触发浏览器下载） */
-export async function downloadMetricImportTemplate(): Promise<void> {
-  const res = await fetch(`${API_BASE_URL}${API_BASE}/metric-definitions/imports/template`, {
+/** 下载指标批量导入模板（CSV / Excel xlsx，带鉴权，blob 触发浏览器下载） */
+export async function downloadMetricImportTemplate(format: "csv" | "xlsx" = "csv"): Promise<void> {
+  const qs = format === "xlsx" ? "?format=xlsx" : "";
+  const res = await fetch(`${API_BASE_URL}${API_BASE}/metric-definitions/imports/template${qs}`, {
     headers: {
       Authorization: `Bearer ${getToken() ?? ""}`,
       "X-Api-Key": SEMANTIC_API_KEY,
@@ -718,7 +719,7 @@ export async function downloadMetricImportTemplate(): Promise<void> {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = "metric_import_template.csv";
+  a.download = format === "xlsx" ? "metric_import_template.xlsx" : "metric_import_template.csv";
   document.body.appendChild(a);
   a.click();
   a.remove();
