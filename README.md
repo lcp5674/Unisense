@@ -462,6 +462,22 @@ curl -X POST http://localhost:8100/api/v1/users/{user_id}/reset-password \
 
 ### 10.2 生产环境变量（必须修改）
 
+**推荐方式：使用生产模板 + 一键密钥生成脚本**（`scripts/gen_prod_secrets.sh` 会生成
+JWT / Fernet / MySQL / ES / MinIO / 种子管理员 / 备份加密等 11 项强密钥，
+并自动通过长度 + 弱凭据黑名单自检）：
+
+```bash
+cp .env.production.example .env.production                 # 1. 复制模板
+bash scripts/gen_prod_secrets.sh --out .env.production      # 2. 生成强密钥（覆盖 11 项）
+vi .env.production                                          # 3. 填 UNISENSE_OLAP_URL / CORS 域名等非密钥项
+docker compose --env-file .env.production up -d --build     # 4. 启动
+```
+
+模板中需要人工确认的非密钥项：`UNISENSE_OLAP_URL`（Doris，见 10.1 说明）、
+`UNISENSE_CORS_ORIGINS`（生产禁止 `*`）、`UNISENSE_IMAGE_TAG`（版本锁定）。
+
+手写方式（备选，需自行保证密钥强度）：
+
 ```bash
 # .env（生产）
 UNISENSE_ENV=prod                                  # 触发生产校验（弱密钥 / CORS 禁通配符等）
@@ -494,11 +510,13 @@ UNISENSE_BACKUP_DATABASES="unisense e2e_biz"       # 多库备份（含降级业
 | MinIO 归档桶 | `audit_archive` 自动创建 |
 
 ```bash
-# 1. 准备环境文件（唯一必须的人工步骤：注入密钥）
-cp .env.example .env && vi .env       # 按 10.2 填写全部密钥，务必设置 UNISENSE_SEED_ADMIN_PASSWORD
+# 1. 准备环境文件（唯一必须的人工步骤：注入密钥，推荐用模板+脚本，见 10.2）
+cp .env.production.example .env.production
+bash scripts/gen_prod_secrets.sh --out .env.production     # 生成 11 项强密钥（自检通过）
+vi .env.production                                         # 填 OLAP_URL / CORS / IMAGE_TAG
 
 # 2. 构建并启动（迁移与自举自动执行）
-docker compose --env-file .env up -d --build
+docker compose --env-file .env.production up -d --build
 
 # 3. 验证
 curl -fsS http://localhost:8100/health            # 应返回 {"status":"ok"}
@@ -548,11 +566,11 @@ gunzip < unisense-YYYYMMDD.sql.gz | docker compose exec -T mysql \
 
 ```bash
 # 升级：拉取代码 → 重建应用容器（镜像 tag 可锁定发布版本）
-docker compose --env-file .env up -d --build backend worker frontend
+docker compose --env-file .env.production up -d --build backend worker frontend
 docker compose exec backend alembic upgrade head
 
 # 回滚：锁定上一版本镜像 tag
-UNISENSE_IMAGE_TAG=<上一版本> docker compose --env-file .env up -d backend worker frontend
+UNISENSE_IMAGE_TAG=<上一版本> docker compose --env-file .env.production up -d backend worker frontend
 docker compose exec backend alembic downgrade -1     # 迁移可逆（up+down+up 已验证）
 ```
 
