@@ -108,6 +108,9 @@ _CN_COLUMN_LABELS: dict[str, str] = {
 _COUNT_SUFFIXES = ("_quantity", "_count", "_cnt", "_num", "_qty")
 # 合法编码字符
 _CODE_SEGMENT_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+#: 编码后 3 段（业务对象/度量/统计周期）段格式：段内**无下划线**——4 段式编码
+#: 以 ``_`` 分隔，仅域段可含下划线（域编码如 ``online_consultation`` 本身带下划线）。
+_TAIL_SEGMENT_PATTERN = re.compile(r"^[a-z][a-z0-9]*$")
 # 4 段式完整编码
 METRIC_CODE_PATTERN = re.compile(
     r"^[a-z][a-z0-9_]*_[a-z][a-z0-9_]*_[a-z][a-z0-9_]*_[a-z][a-z0-9_]*$"
@@ -214,20 +217,45 @@ def extract_measure(measure_column: str) -> str:
 
 
 def generate_metric_code(domain: str, source_table: str, measure_column: str, period: str) -> str:
-    """生成 4 段式指标编码建议。"""
+    """生成 4 段式指标编码建议。
+
+    域段与业务对象/度量/周期一致做**去下划线**规范化（对齐 conflict_precheck
+    ``CODE_PATTERN`` 段内无下划线约束）：域编码如 ``online_consultation`` 本身含
+    下划线，直接拼接会产出 5 段字面（``online_consultation_wy_x_day``），违反
+    「域_业务对象_度量_统计周期」4 段式校验。
+    """
     biz_obj = extract_biz_object(source_table)
     measure = extract_measure(measure_column)
-    return f"{domain}_{biz_obj}_{measure}_{period}"
+    domain_seg = (domain or "domain").replace("_", "").lower() or "domain"
+    return f"{domain_seg}_{biz_obj}_{measure}_{period}"
 
 
 def validate_metric_code(code: str) -> tuple[bool, str]:
-    """校验指标编码 4 段格式。"""
+    """校验指标编码 4 段格式（域段可含下划线，后 3 段须无下划线）。
+
+    域编码（如 ``online_consultation``）本身可含下划线——字面 split 后 >4 段时，
+    取最后 3 段为业务对象/度量/统计周期（须无下划线、小写字母开头），前面所有段
+    合并为域段（可含下划线）。系统生成侧已把域段去下划线，此处宽容手写编码。
+    """
     if not code:
         return False, "指标编码不能为空"
     parts = code.split("_")
-    if len(parts) != 4:
+    if len(parts) < 4:
         return False, f"须符合4段格式（域_业务对象_度量_统计周期），当前{len(parts)}段"
     labels = ["域", "业务对象", "度量", "统计周期"]
+    if len(parts) > 4:
+        tail = parts[-3:]
+        domain_seg = "_".join(parts[:-3])
+        if not _TAIL_SEGMENT_PATTERN.match(tail[0]) or not _TAIL_SEGMENT_PATTERN.match(
+            tail[1]
+        ) or not _TAIL_SEGMENT_PATTERN.match(tail[2]):
+            return False, "后3段（业务对象_度量_统计周期）须小写字母开头+小写字母数字（无下划线）"
+        if not _CODE_SEGMENT_PATTERN.match(domain_seg):
+            return False, "第1段（域）格式错误：须小写字母开头+小写字母数字下划线"
+        for i, part in enumerate([domain_seg, *tail]):
+            if part in RESERVED_WORDS:
+                return False, f"第{i + 1}段（{labels[i]}）使用了保留词: {part}"
+        return True, ""
     for i, part in enumerate(parts):
         if not _CODE_SEGMENT_PATTERN.match(part):
             return False, f"第{i + 1}段（{labels[i]}）格式错误：须小写字母开头+小写字母数字下划线"

@@ -438,7 +438,9 @@ class MetricService(BaseService):
             extract_measure,
         )
 
-        domain = (request.domain or "domain").strip().lower() or "domain"
+        domain = (
+            (request.domain or "domain").strip().lower() or "domain"
+        ).replace("_", "")
         measure = extract_measure(request.measure_column or "value") or "value"
         if request.source_table and request.period:
             biz_obj = extract_biz_object(request.source_table) or "entity"

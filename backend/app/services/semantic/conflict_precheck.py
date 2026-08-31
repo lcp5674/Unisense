@@ -460,33 +460,45 @@ class ConflictPrechecker:
     def validate_code_format(code: str) -> tuple[bool, str | None]:
         """校验 metric_code 格式：4 段式"域_业务对象_度量_统计周期"。
 
-        Args:
-            code: 指标编码。
-
-        Returns:
-            (合法, 错误信息): 合法为 True 时错误信息为 None。
+        域段可含下划线（域编码如 ``online_consultation`` 本身带下划线）：字面
+        split 后 >4 段时，取最后 3 段为业务对象/度量/统计周期（须无下划线），
+        前面所有段合并为域段。系统生成侧已把域段去下划线，此处宽容手写编码。
         """
         if not code:
             return False, "metric_code 不能为空"
 
-        if not CODE_PATTERN.match(code):
-            parts = code.split("_")
-            if len(parts) < 4:
+        parts = code.split("_")
+        if len(parts) < 4:
+            return (
+                False,
+                f"metric_code 须符合 4 段格式（域_业务对象_度量_统计周期），"
+                f"当前仅 {len(parts)} 段",
+            )
+        if len(parts) > 4:
+            # 域段可含下划线：最后 3 段须无下划线（业务对象/度量/周期段规范无下划线），
+            # 前面所有段合并为域段
+            tail = parts[-3:]
+            domain_seg = "_".join(parts[:-3])
+            for seg in tail:
+                if not re.fullmatch(r"[a-z][a-z0-9]*", seg):
+                    return (
+                        False,
+                        "metric_code 后 3 段（业务对象_度量_统计周期）须小写字母开头"
+                        "+小写字母数字（无下划线）",
+                    )
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", domain_seg):
                 return (
                     False,
-                    f"metric_code 须符合 4 段格式（域_业务对象_度量_统计周期），"
-                    f"当前仅 {len(parts)} 段",
+                    "metric_code 第 1 段（域）格式错误：须小写字母开头"
+                    "+小写字母数字下划线",
                 )
-            if len(parts) > 4:
-                return (
-                    False,
-                    f"metric_code 须符合 4 段格式（域_业务对象_度量_统计周期），"
-                    f"当前 {len(parts)} 段过多",
-                )
-            return False, "metric_code 每段须以小写字母开头，仅含小写字母和数字"
+            segments = [domain_seg, *tail]
+        else:
+            if not CODE_PATTERN.match(code):
+                return False, "metric_code 每段须以小写字母开头，仅含小写字母和数字"
+            segments = parts
 
         # 检查保留词（软提醒：不硬阻断，但在校验中提示）
-        segments = code.split("_")
         reserved_hits = [s for s in segments if s.lower() in RESERVED_WORDS]
         if reserved_hits:
             hits = ", ".join(reserved_hits)

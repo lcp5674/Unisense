@@ -1522,7 +1522,12 @@ export function MetricCreate() {
     const measure = (c.code_col || c.alias || c.measure_column || "metric")
       .replace(/_/g, "")
       .toLowerCase();
-    return [selectedDomain, biz || "entity", measure, c.period || "day"].join("_");
+    // 域段与后端 generate_metric_code 一致做去下划线规范化：域编码如
+    // online_consultation 含下划线，直接拼接会把 4 段式编码拆成 5 段字面
+    // （online_consultation_wy_xxx_day），违反「域_业务对象_度量_周期」校验。
+    const domainSeg =
+      (selectedDomain || "domain").replace(/_/g, "").toLowerCase() || "domain";
+    return [domainSeg, biz || "entity", measure, c.period || "day"].join("_");
   }
 
   // 指标类型可在线编辑（OneData 语义：原子 = 逻辑度量 + 基础粒度；派生 = 原子 + 时间

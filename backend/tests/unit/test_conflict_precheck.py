@@ -22,10 +22,26 @@ class TestValidateCodeFormat:
         assert err is not None
         assert "4" in err or "段" in err
 
-    def test_invalid_5segment_code_fails(self) -> None:
+    def test_domain_with_underscore_passes(self) -> None:
+        # 域编码本身可含下划线（如 online_consultation）：字面 >4 段但语义 4 段，
+        # 后 3 段无下划线时合并前面为域段 → 放行
+        ok, err = ConflictPrechecker.validate_code_format(
+            "online_consultation_wy_imageconsultcntday_day"
+        )
+        assert ok is True
+        assert err is None
         ok, err = ConflictPrechecker.validate_code_format("a_b_c_d_e")
+        assert ok is True
+        assert err is None
+
+    def test_multi_segment_bad_tail_fails(self) -> None:
+        # 多段字面但后 3 段（业务对象/度量/周期）含大写或数字开头 → 拒
+        ok, err = ConflictPrechecker.validate_code_format("a_b_c_d_E")
         assert ok is False
-        assert err is not None
+        assert "后 3 段" in err
+        ok, err = ConflictPrechecker.validate_code_format("a_b_c_d_1e")
+        assert ok is False
+        assert "后 3 段" in err
 
     def test_single_segment_fails(self) -> None:
         ok, err = ConflictPrechecker.validate_code_format("sales")
