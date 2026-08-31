@@ -2232,6 +2232,29 @@ describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数�
     });
   });
 
+  it("关联术语：首次打开下拉即加载已发布术语（无需先输入搜索）", async () => {
+    mockedCreate.mockResolvedValue({ metric_code: "medical_fee_amt_daily" } as any);
+    mockedListTerms.mockResolvedValue({
+      items: [
+        { id: 5, name: "门诊收费", term_code: "term_outpatient", domain: "outpatient" },
+        { id: 6, name: "住院收费", term_code: "term_inpatient", domain: "outpatient" },
+      ],
+    } as any);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await goToStep(1);
+    fireEvent.click(screen.getByText(/业务描述与关联术语（选填）/));
+    const termInput = (screen.getByTestId("termSelect") as HTMLElement).querySelector(
+      "input",
+    ) as HTMLElement;
+    // 打开下拉 → onDropdownVisibleChange 触发空搜索加载（带域过滤），无需输入即有选项
+    fireEvent.mouseDown(termInput);
+    await waitFor(() => expect(mockedListTerms).toHaveBeenCalled());
+    await screen.findByText("门诊收费（term_outpatient）");
+    await screen.findByText("住院收费（term_inpatient）");
+  });
+
   it("Step④ 三层口径 AI 生成/丰富增强：业务口径有值点「AI 丰富增强」回填", async () => {
     mockedRefine.mockResolvedValue({
       content: "按就诊号去重统计的门诊就诊总人次（含跨院区）",

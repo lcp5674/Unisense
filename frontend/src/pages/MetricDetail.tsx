@@ -727,7 +727,7 @@ export function MetricDetail() {
   const [descDraft, setDescDraft] = useState("");
   const [descSaving, setDescSaving] = useState(false);
   // 关联术语（P2-11 术语绑定写路径）：搜索式 Select 选项 + 防抖搜索
-  const [termOptions, setTermOptions] = useState<Array<{ value: number; label: string }>>([]);
+  const [termOptions, setTermOptions] = useState<Array<{ value: number; label: string; code: string }>>([]);
   const [termSearching, setTermSearching] = useState(false);
   const termSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 仲裁作废指标（METRIC_ARCHIVED）：软删 + successor 的历史链接直访时，
@@ -1000,6 +1000,9 @@ export function MetricDetail() {
         fetchRelatedMetrics(code).catch(() => [] as RecommendItem[]),
       ]);
       setMetric(m);
+      // 关联术语回显：已绑定术语（term_id）时加载其名称——否则渲染处显示裸 #id。
+      // 与挂载实体加载同属 best-effort，失败不阻塞详情主体。
+      if (m.term_id != null) void loadTermOptions();
       setDomainTree(domainTree);
       // P1-3：挂载实体加载（best-effort）
       if (m.id != null) loadMounts(m.id);
@@ -1239,22 +1242,36 @@ export function MetricDetail() {
     }
   }
 
-  // 关联术语搜索（P2-11 术语绑定写路径）：防抖调用 listTerms（仅 PUBLISHED 可绑定）
+  // 关联术语选项加载（P2-11 术语绑定写路径）：初始回显/下拉打开/搜索共用。
+  // 按指标业务域过滤（术语有 domain 归属，术语库在「治理 → 术语表」维护）；仅 PUBLISHED 可绑定；
+  // 失败不阻断详情流程。term_id 已绑定时加载选项用于名称回显（避免显示裸 #id）。
+  async function loadTermOptions(search?: string) {
+    setTermSearching(true);
+    try {
+      const res = await listTerms({
+        search: search?.trim() || undefined,
+        domain: metric?.domain || undefined,
+        status: "PUBLISHED",
+        page_size: search?.trim() ? 20 : 50,
+      });
+      setTermOptions(
+        (res.items ?? []).map((t) => ({
+          value: t.id,
+          label: `${t.name}（${t.term_code}）`,
+          code: t.term_code,
+        })),
+      );
+    } catch {
+      // 术语加载失败不阻断绑定流程
+    } finally {
+      setTermSearching(false);
+    }
+  }
+
+  // 关联术语搜索（防抖）：输入关键词时按名称/定义/编码搜索，空关键词加载本域已发布术语
   function handleTermSearch(q: string) {
     if (termSearchTimer.current) clearTimeout(termSearchTimer.current);
-    termSearchTimer.current = setTimeout(async () => {
-      setTermSearching(true);
-      try {
-        const res = await listTerms({ search: q.trim() || undefined, status: "PUBLISHED", page_size: 20 });
-        setTermOptions(
-          (res.items ?? []).map((t) => ({ value: t.id, label: `${t.name}（${t.term_code}）` })),
-        );
-      } catch {
-        // 术语搜索失败不阻断绑定流程
-      } finally {
-        setTermSearching(false);
-      }
-    }, 300);
+    termSearchTimer.current = setTimeout(() => void loadTermOptions(q), 300);
   }
 
   // 绑定/解绑术语（termId=null 解绑）
@@ -2905,6 +2922,10 @@ export function MetricDetail() {
             placeholder="搜索并绑定业务术语"
             value={metric.term_id ?? undefined}
             filterOption={false}
+            onDropdownVisibleChange={(open) => {
+              // 首次打开下拉即加载本域已发布术语，无需先打字搜索
+              if (open && termOptions.length === 0) void loadTermOptions();
+            }}
             onSearch={handleTermSearch}
             onChange={(v) => bindTerm(v ?? null)}
             options={termOptions}
@@ -2914,7 +2935,21 @@ export function MetricDetail() {
         ) : metric.term_id ? (
           <span>
             已绑定术语{" "}
-            {termOptions.find((t) => t.value === metric.term_id)?.label ?? `#${metric.term_id}`}
+            {(() => {
+              const t = termOptions.find((x) => x.value === metric.term_id);
+              return t ? (
+                <a
+                  onClick={(e) => {
+                    e.preventDefault();
+                    navigate(`/glossary?kw=${encodeURIComponent(t.code)}`);
+                  }}
+                >
+                  {t.label}
+                </a>
+              ) : (
+                `#${metric.term_id}`
+              );
+            })()}
           </span>
         ) : (
           <span className="muted">未绑定业务术语</span>

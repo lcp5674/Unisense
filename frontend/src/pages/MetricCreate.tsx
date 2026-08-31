@@ -465,7 +465,7 @@ export function MetricCreate() {
   //（防重；解析成功才更新，非 SQL/解析失败后用户改成合法 SQL 仍能再次触发）
   const dwSqlParseRef = useRef<string>("");
   // 关联术语（选填）：创建时绑定 metric.term_id——搜索式 Select（防抖 listTerms，仅 PUBLISHED）
-  const [termOptions, setTermOptions] = useState<Array<{ value: number; label: string }>>([]);
+  const [termOptions, setTermOptions] = useState<Array<{ value: number; label: string; code: string }>>([]);
   const [termSearching, setTermSearching] = useState(false);
   const termSearchTimer = useRef<ReturnType<typeof setTimeout>>();
 
@@ -759,15 +759,20 @@ export function MetricCreate() {
   }
 
   // 关联术语搜索（选填，创建时绑定）：防抖调用 listTerms（仅 PUBLISHED 可绑定），
-  // 与详情页「关联术语」卡片同款——搜索失败不阻断注册流程。
+  // 与详情页「关联术语」卡片同款——搜索失败不阻断注册流程。按已选业务域过滤（术语有 domain 归属）。
   function handleTermSearch(q: string) {
     if (termSearchTimer.current) clearTimeout(termSearchTimer.current);
     termSearchTimer.current = setTimeout(async () => {
       setTermSearching(true);
       try {
-        const res = await listTerms({ search: q.trim() || undefined, status: "PUBLISHED", page_size: 20 });
+        const res = await listTerms({
+          search: q.trim() || undefined,
+          domain: selectedDomain || undefined,
+          status: "PUBLISHED",
+          page_size: q.trim() ? 20 : 50,
+        });
         setTermOptions(
-          (res.items ?? []).map((t) => ({ value: t.id, label: `${t.name}（${t.term_code}）` })),
+          (res.items ?? []).map((t) => ({ value: t.id, label: `${t.name}（${t.term_code}）`, code: t.term_code })),
         );
       } catch {
         // 术语搜索失败不阻断
@@ -3470,13 +3475,17 @@ export function MetricCreate() {
                             placeholder="指标的业务含义、口径背景、适用场景（选填；详情页可 AI 生成补充）"
                           />
                         </Form.Item>
-                        <Form.Item name="term_id" label="关联术语" extra="将指标归属到已发布业务术语（搜索选择）">
+                        <Form.Item name="term_id" label="关联术语" extra="将指标归属到已发布业务术语（搜索选择；术语库在「治理 → 术语表」维护）">
                           <Select
                             data-testid="termSelect"
                             showSearch
                             allowClear
                             placeholder="搜索并选择业务术语（选填）"
                             filterOption={false}
+                            onDropdownVisibleChange={(open) => {
+                              // 首次打开下拉即加载已发布术语（带域过滤），无需先打字搜索
+                              if (open && termOptions.length === 0) handleTermSearch("");
+                            }}
                             onSearch={handleTermSearch}
                             options={termOptions}
                             loading={termSearching}

@@ -218,6 +218,12 @@ function QueryProbe() {
   return <div>{`query-page-${sp.get("metric_code") ?? "none"}`}</div>;
 }
 
+// 关联术语跳转探针：回显 /glossary 的 ?kw= 参数，验证「已绑定术语」点击跳转术语表
+function GlossaryProbe() {
+  const [sp] = useSearchParams();
+  return <div data-testid="glossary-probe">{`/glossary?kw=${sp.get("kw") ?? ""}`}</div>;
+}
+
 describe("MetricDetail", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1266,6 +1272,103 @@ describe("MetricDetail 按钮级权限过滤", () => {
     const option = await screen.findByText(/成交金额（CJ_AMT）/);
     fireEvent.click(option);
     await waitFor(() => expect(vi.mocked(bindMetricTerm)).toHaveBeenCalledWith("sales_gmv_sum_d", 7));
+  });
+
+  it("P2-11: 已绑定术语回显名称（非 #id）并可点击跳转术语表", async () => {
+    mockedListVersions.mockResolvedValue([]);
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedUsers.mockResolvedValue([]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    mockedDomainTree.mockResolvedValue([]);
+    // 非 Owner / 无编辑权限 → 走「已绑定术语」只读展示分支（而非可编辑 Select）
+    mockedCurrentUser.mockResolvedValue({
+      id: 99,
+      username: "lisi",
+      display_name: "李四",
+      role: "viewer",
+      domain: "outpatient",
+      org_id: 1,
+    });
+    mockedMyPerms.mockResolvedValue({
+      user_id: 99,
+      role: "viewer",
+      home_domain: "outpatient",
+      allowed_actions: ["read"],
+      ui_actions: [],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    vi.mocked(listTerms).mockResolvedValue({
+      items: [
+        {
+          id: 7,
+          term_code: "CJ_AMT",
+          name: "成交金额",
+          definition: "订单成交金额",
+          domain: "outpatient",
+          synonyms: [],
+          boundary: null,
+          status: "PUBLISHED",
+          owner_id: 1,
+          created_at: null,
+          updated_at: null,
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+    mockedGetMetric.mockResolvedValue({ ...metric, pii_flag: false, term_id: 7 });
+    render(
+      <MemoryRouter initialEntries={[{ pathname: "/detail/sales_gmv_sum_d" }]}>
+        <Routes>
+          <Route
+            path="/detail/:code"
+            element={
+              <PermissionProvider user={{ id: 99, username: "lisi", display_name: "李四", role: "viewer", domain: "outpatient", org_id: 1 }}>
+                <MetricDetail />
+              </PermissionProvider>
+            }
+          />
+          <Route path="/glossary" element={<GlossaryProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    // 详情加载后自动拉取已绑定术语名称回显——显示「名称（编码）」而非裸 #7
+    const label = await screen.findByText(/成交金额（CJ_AMT）/);
+    expect(screen.queryByText("#7")).not.toBeInTheDocument();
+    // 点击跳转术语表（?kw=术语编码）
+    fireEvent.click(label);
+    await waitFor(() =>
+      expect(screen.getByTestId("glossary-probe")).toHaveTextContent("/glossary?kw=CJ_AMT"),
+    );
+    // 恢复共享 mock（本 describe 无顶层 beforeEach，依赖前序泄漏；本测试自建了 viewer 权限，
+    // 不恢复会泄漏给后续「按钮级权限过滤」用例，导致 Owner 判定失败按钮不渲染）
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "zhangsan",
+      display_name: "张三",
+      role: "metric_owner",
+      domain: "outpatient",
+      org_id: 1,
+    });
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "metric_owner",
+      home_domain: "outpatient",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create", "metric:edit", "metric:deprecate", "catalog:view", "metric:infer-description"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
   });
 
   it("权限快照加载完成前不显示「审批通过」按钮（fail-open 消除）", async () => {
