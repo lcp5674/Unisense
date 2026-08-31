@@ -111,7 +111,12 @@ class RolePermissionUpdate(BaseModel):
     """``PUT /roles/{role}/permissions`` 请求体：覆盖某角色的权限点集合。"""
 
     actions: list[str] = Field(
-        min_length=0, max_length=8, description="权限点集合（空数组=全部回收）"
+        min_length=0,
+        max_length=256,
+        description=(
+            "权限点集合（空数组=全部回收；上限对齐 action-registry 规模+扩展空间，"
+            "合法性由 service 按权威集合校验）"
+        ),
     )
 
 

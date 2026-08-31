@@ -29,6 +29,7 @@ from app.services.governance.schemas import (
     PermissionCheckRequest,
     PiiReviewRequest,
     RoleCreate,
+    RolePermissionUpdate,
 )
 from app.services.governance.service import GovernanceService
 
@@ -960,6 +961,42 @@ async def test_set_role_permissions_rejects_unknown_action() -> None:
     with pytest.raises(ValidationError) as exc:
         await svc.set_role_permissions("viewer", ["read", "sudo"])
     assert exc.value.error_code == "ROLE_PERMISSION_INVALID"
+
+
+async def test_set_role_permissions_accepts_many_actions() -> None:
+    """覆盖角色权限点时支持超过 8 个动作点（对齐 action-registry 规模，不再被过时上限拦截）。"""
+    svc, repo, _ = _svc()
+    actions = [
+        "dashboard:view",
+        "todo:view",
+        "catalog:view",
+        "assetmap:view",
+        "lineage:view",
+        "quality:view",
+        "query:view",
+        "ai:view",
+        "dimensions:view",
+        "glossary:view",
+        "data-sources:view",
+        "catalogs:view",
+        "metric:create",
+        "metric:edit",
+        "metric:review",
+        "metric:export",
+    ]
+    item = await svc.set_role_permissions("analyst", actions)
+    # 资源级动词（read/write/approve/export/review）→ custom_actions；
+    # UI 权限点（模块:功能，如 metric:create）→ ui_custom_actions；均完整保留
+    assert item["custom_actions"] is None
+    assert item["ui_custom_actions"] == sorted(actions)
+    assert len(item["ui_custom_actions"]) == 16
+
+
+def test_role_permission_update_accepts_many_actions() -> None:
+    """schema 层：超过 8 个动作点可通过校验（max_length 放宽到 256）。"""
+    actions = [f"module:action{i}" for i in range(20)]
+    payload = RolePermissionUpdate(actions=actions)
+    assert payload.actions == actions
 
 
 async def test_set_role_permissions_rejects_protected_role() -> None:
