@@ -186,11 +186,17 @@ async def _try_acquire(pool: Any, name: str, ttl: int) -> tuple[str, str]:
 
 
 async def _release(pool: Any, name: str, owner: str) -> None:
-    """仅释放自己持有的锁（校验 owner 防误删他人锁）。"""
+    """仅释放自己持有的锁（校验 owner 防误删他人锁）。
+
+    兼容 ``decode_responses`` 两种配置：池为 True 时 ``get`` 返回 ``str``、
+    为 False 时返回 ``bytes``——统一归一化后再比较。
+    """
     key = f"task_lock:bootstrap:{name}"
     try:
         current = await pool.get(key)
-        if current and current.decode() == owner:
+        if isinstance(current, bytes):
+            current = current.decode()
+        if current and current == owner:
             await pool.delete(key)
     except Exception as exc:  # noqa: BLE001 - 释放失败靠 TTL 兜底
         logger.warning("bootstrap_lock_release_failed", step=name, error=str(exc))
