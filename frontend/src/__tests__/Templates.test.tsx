@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { MemoryRouter, useNavigate, Routes, Route } from "react-router-dom";
 import { Templates } from "../pages/Templates";
-import type { MetricTemplate, MetricResponse } from "../types";
+import type { MetricTemplate, MetricResponse, MeasureCatalog } from "../types";
 
 vi.mock("../api", () => {
   class UnisenseApiError extends Error {
@@ -60,6 +60,29 @@ const mockedUpdateMetricTemplate = vi.mocked(updateMetricTemplate);
 const mockedDomainTree = vi.mocked(listDomainTree);
 const mockedDictItems = vi.mocked(listDictItems);
 const mockedMeasureCatalogs = vi.mocked(listMeasureCatalogs);
+
+/** 已发布逻辑度量（供原子模板预设/实例化的 measure 下拉与 stat_caliber 预览） */
+const MEASURES: MeasureCatalog[] = [
+  {
+    id: 1,
+    measure_code: "pay_amt",
+    name: "支付金额",
+    description: null,
+    measure_format: "AMOUNT",
+    default_unit: "元",
+    default_decimal_places: 2,
+    source_system: null,
+    synonyms: null,
+    row_version: 1,
+    category: "FEE",
+    stat_caliber: "收费明细按结算日期去重后求和",
+    domain: "finance",
+    owner_id: 1,
+    status: "PUBLISHED",
+    created_at: "2026-01-01T00:00:00",
+    updated_at: "2026-01-01T00:00:00",
+  },
+];
 
 const CREATED: MetricResponse = {
   id: 1,
@@ -329,9 +352,9 @@ describe("Templates 页面", () => {
     await screen.findByText("tpl_gmv_daily");
     fireEvent.click(screen.getAllByText("实例化指标")[0]);
     await screen.findByText("从模板实例化：GMV 日汇总模板");
-    // 原子类型 → 显示逻辑度量下拉，且预填模板 measure_id（TPLS[0].measure_id=1）
+    // 原子类型 → 显示逻辑度量下拉（主词「逻辑度量」+ 业务别名「原子指标口径」），且预填模板 measure_id（TPLS[0].measure_id=1）
     await waitFor(() => {
-      expect(screen.getByText("原子指标口径（OneData 原子层）")).toBeTruthy();
+      expect(screen.getByText("逻辑度量（原子指标口径）")).toBeTruthy();
     });
     fireEvent.click(screen.getByText("实例化创建"));
     await waitFor(() => {
@@ -613,6 +636,8 @@ describe("Templates 页面", () => {
     await screen.findByText("tpl_gmv_daily");
     fireEvent.click(screen.getAllByText("编辑")[0]);
     await screen.findByText("编辑模板：tpl_gmv_daily");
+    // 原子模板（TPLS[0].type=atomic）口径由逻辑度量继承 → 编辑器折叠为高级项，先展开
+    fireEvent.click(screen.getByText("高级：补充物理口径定义（一般留空）"));
     const item = screen.getByText("默认口径（实例化时自动合并）").closest(".ant-form-item") as HTMLElement;
     // Segmented 选中项为「SQL 模式」
     const selected = item.querySelector(".ant-segmented-item-selected");
@@ -631,7 +656,9 @@ describe("Templates 页面", () => {
     await screen.findByText("tpl_gmv_daily");
     fireEvent.click(screen.getAllByText("编辑")[0]);
     await screen.findByText("编辑模板：tpl_gmv_daily");
-    fireEvent.click(screen.getByText("SQL 模式"));
+    // 原子模板：编辑器折叠为高级项，先展开再切模式
+    fireEvent.click(screen.getByText("高级：补充物理口径定义（一般留空）"));
+    fireEvent.click(await screen.findByText("SQL 模式"));
     const item = screen.getByText("默认口径（实例化时自动合并）").closest(".ant-form-item") as HTMLElement;
     fireEvent.change(item.querySelector("textarea")!, {
       target: { value: "select sum(amount) from dwd_order_di" },
@@ -655,7 +682,9 @@ describe("Templates 页面", () => {
     await screen.findByText("tpl_gmv_daily");
     fireEvent.click(screen.getAllByText("编辑")[0]);
     await screen.findByText("编辑模板：tpl_gmv_daily");
-    fireEvent.click(screen.getByText("高级 JSON"));
+    // 原子模板：编辑器折叠为高级项，先展开再切模式
+    fireEvent.click(screen.getByText("高级：补充物理口径定义（一般留空）"));
+    fireEvent.click(await screen.findByText("高级 JSON"));
     const item = screen.getByText("默认口径（实例化时自动合并）").closest(".ant-form-item") as HTMLElement;
     fireEvent.change(item.querySelector("textarea")!, { target: { value: "{bad json" } });
     fireEvent.click(screen.getByRole("button", { name: /保存修改/ }));
@@ -674,6 +703,9 @@ describe("Templates 页面", () => {
     const row = screen.getByText("tpl_gmv_daily").closest("tr") as HTMLElement;
     fireEvent.click(within(row).getByRole("button", { name: /实例化指标/ }));
     await screen.findByText(/从模板实例化：/);
+    // 原子类型（TPLS[0].type=atomic）口径由逻辑度量继承 → 编辑器折叠为高级项，先展开再切换模式
+    fireEvent.click(screen.getByText("高级：补充物理口径定义（一般留空）"));
+    await screen.findByText("SQL 模式");
     fireEvent.click(screen.getByText("SQL 模式"));
     const item = screen.getByText("口径定义（可留空用模板默认）").closest(".ant-form-item") as HTMLElement;
     fireEvent.change(item.querySelector("textarea")!, {
@@ -683,5 +715,46 @@ describe("Templates 页面", () => {
     await waitFor(() => expect(mockedInstantiate).toHaveBeenCalled());
     const [, payload] = mockedInstantiate.mock.calls[0];
     expect(payload.definition_json).toEqual({ sql: "select sum(amount) from dwd_order_di" });
+  });
+
+  it("原子类型实例化：口径由逻辑度量继承——口径定义折叠为高级项并只读预览 stat_caliber", async () => {
+    mockedMeasureCatalogs.mockResolvedValue({ items: MEASURES, total: 1, page: 1, page_size: 200 });
+    render(
+      <MemoryRouter initialEntries={["/templates"]}>
+        <Templates />
+      </MemoryRouter>,
+    );
+    await screen.findByText("tpl_gmv_daily");
+    const row = screen.getByText("tpl_gmv_daily").closest("tr") as HTMLElement;
+    fireEvent.click(within(row).getByRole("button", { name: /实例化指标/ }));
+    await screen.findByText(/从模板实例化：/);
+    // 模板预设 measure_id=1（支付金额）→ 只读预览该逻辑度量的统计口径，无需再写物理口径
+    expect(
+      await screen.findByText("已选逻辑度量的统计口径（实例化后自动继承，无需重复填写）"),
+    ).toBeTruthy();
+    expect(screen.getByText("收费明细按结算日期去重后求和")).toBeTruthy();
+    // 物理口径编辑器折叠为「高级」项，默认收起
+    expect(screen.getByText("高级：补充物理口径定义（一般留空）")).toBeTruthy();
+  });
+
+  it("派生类型实例化：口径定义直接展开（不折叠为高级项）", async () => {
+    mockedMeasureCatalogs.mockResolvedValue({ items: MEASURES, total: 1, page: 1, page_size: 200 });
+    render(
+      <MemoryRouter initialEntries={["/templates"]}>
+        <Templates />
+      </MemoryRouter>,
+    );
+    await screen.findByText("tpl_gmv_daily");
+    const row = screen.getByText("tpl_gmv_daily").closest("tr") as HTMLElement;
+    fireEvent.click(within(row).getByRole("button", { name: /实例化指标/ }));
+    await screen.findByText(/从模板实例化：/);
+    // 切类型为派生（派生依赖 expression/sql，口径必须可编辑）
+    const modal = document.querySelector(".ant-modal") as HTMLElement;
+    const typeItem = within(modal).getByText("类型").closest(".ant-form-item") as HTMLElement;
+    fireEvent.mouseDown(typeItem.querySelector(".ant-select-selector")!);
+    fireEvent.click(await screen.findByText("派生指标"));
+    // 派生不折叠：无「高级项」入口，模式切换器直接可见
+    expect(screen.queryByText("高级：补充物理口径定义（一般留空）")).toBeNull();
+    expect(screen.getByText("SQL 模式")).toBeTruthy();
   });
 });

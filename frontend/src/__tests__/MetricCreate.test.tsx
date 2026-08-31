@@ -1454,7 +1454,7 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     // 依赖指标为派生/复合专属，原子下不出现
     await goToStep(2);
     expect(screen.getByText("④ 原子来源（逻辑度量 + 基础统计粒度）")).toBeTruthy();
-    expect(screen.getByText("逻辑度量（原子指标口径库，OneData 原子层）")).toBeTruthy();
+    expect(screen.getByText("逻辑度量（原子指标口径）")).toBeTruthy();
     expect(screen.getByText("源表名（兼容旧式来源，可选）")).toBeTruthy();
     expect(screen.getByText("度量列（兼容旧式来源，可选）")).toBeTruthy();
     expect(screen.queryByText("统计周期（兼容旧式推断，可选）")).toBeNull();

@@ -145,6 +145,17 @@ function withCaliberBody(def: Record<string, unknown>, body: Record<string, unkn
   return next;
 }
 
+/** 所选逻辑度量的「统计口径」（stat_caliber）：
+ *  OneData 下原子指标的口径由逻辑度量承载，实例化时无需再写一份绑定物理表的 SQL
+ *  （另写会绕回「原子绑物理表」）。此处只读预览，供用户确认继承来源。 */
+function measureStatCaliber(
+  options: Array<{ value: number; measure: MeasureCatalog }>,
+  measureId?: number | null,
+): string | null {
+  if (!measureId) return null;
+  return options.find((o) => o.value === measureId)?.measure.stat_caliber ?? null;
+}
+
 /** 口径模式编辑器（受控）：SQL 模式写 {sql}，表达式模式写 {expression, source_tables}，
  *  高级 JSON 保留原文本域兜底（覆盖 base_atomic / dw_definition 等特殊键）。
  *  onChange(next, error) —— error 非空表示高级模式 JSON 非法，父组件提交前须拦截。 */
@@ -1058,10 +1069,10 @@ export function Templates() {
                 getFieldValue("type") === "atomic" ? (
                   <Form.Item
                     name="measure_id"
-                    label="原子指标口径（OneData 原子层）"
+                    label="逻辑度量（原子指标口径）"
                     extra={
                       <span className="muted" style={{ fontSize: 12 }}>
-                        原子指标 = 原子指标口径 + 基础统计粒度（日），不绑定业务限定与时间周期；度量格式/单位/小数位实例化时继承
+                        原子指标 = 逻辑度量（原子指标口径）+ 基础统计粒度（日），不绑定业务限定与时间周期；度量格式/单位/小数位实例化时继承
                       </span>
                     }
                     style={{ width: "100%", marginBottom: 8 }}
@@ -1069,7 +1080,7 @@ export function Templates() {
                     <Select
                       showSearch
                       allowClear
-                      placeholder="选择或搜索原子指标口径（仅已发布可选，如 支付金额 pay_amt）"
+                      placeholder="选择或搜索逻辑度量（原子指标口径，仅已发布可选，如 支付金额 pay_amt）"
                       optionFilterProp="label"
                       options={measureOptions.map((o) => ({ value: o.value, label: o.label }))}
                     />
@@ -1153,19 +1164,66 @@ export function Templates() {
             <Form.Item name="additivity" label="可加性" style={{ width: 240 }}>
               <Select options={["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"].map((v) => ({ value: v }))} />
             </Form.Item>
+            {/* 口径定义：OneData 下原子指标的口径由所选逻辑度量的 stat_caliber 承载，
+                再写一份绑定物理表的 SQL 会绕回「原子绑物理表」——原子类型下折叠为高级项
+                （默认收起）并只读预览继承来的统计口径，避免与「口径」一词混淆。 */}
             <Form.Item
-              label="口径定义（可留空用模板默认）"
-              style={{ width: "100%", marginBottom: 8 }}
+              noStyle
+              shouldUpdate={(prev, cur) => prev.type !== cur.type || prev.measure_id !== cur.measure_id}
             >
-              <DefinitionModeEditor
-                mode={instDefMode}
-                onModeChange={setInstDefMode}
-                value={instDef}
-                onChange={(next, err) => {
-                  setInstDef(next);
-                  setInstDefError(err ?? null);
-                }}
-              />
+              {({ getFieldValue }) => {
+                const isAtomicType = getFieldValue("type") === "atomic";
+                const caliber = measureStatCaliber(measureOptions, getFieldValue("measure_id"));
+                const editor = (
+                  <DefinitionModeEditor
+                    mode={instDefMode}
+                    onModeChange={setInstDefMode}
+                    value={instDef}
+                    onChange={(next, err) => {
+                      setInstDef(next);
+                      setInstDefError(err ?? null);
+                    }}
+                  />
+                );
+                return (
+                  <Form.Item
+                    label="口径定义（可留空用模板默认）"
+                    style={{ width: "100%", marginBottom: 8 }}
+                    extra={
+                      isAtomicType ? (
+                        <span className="muted" style={{ fontSize: 12 }}>
+                          原子指标的口径由所选「逻辑度量（原子指标口径）」继承，<b>一般留空</b>；仅存量旧式指标需补充物理口径
+                        </span>
+                      ) : undefined
+                    }
+                  >
+                    {isAtomicType ? (
+                      <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                        {caliber ? (
+                          <Alert
+                            type="info"
+                            showIcon
+                            message="已选逻辑度量的统计口径（实例化后自动继承，无需重复填写）"
+                            description={<span style={{ whiteSpace: "pre-wrap" }}>{caliber}</span>}
+                          />
+                        ) : null}
+                        <Collapse
+                          ghost
+                          items={[
+                            {
+                              key: "def",
+                              label: <span className="muted" style={{ fontSize: 12 }}>高级：补充物理口径定义（一般留空）</span>,
+                              children: editor,
+                            },
+                          ]}
+                        />
+                      </Space>
+                    ) : (
+                      editor
+                    )}
+                  </Form.Item>
+                );
+              }}
             </Form.Item>
             {/* 口径三方责任（可选）：模板预设的默认责任方，实例化时可改 */}
             <Divider plain style={{ margin: "8px 0" }}>口径三方责任（可选，默认沿用模板预设）</Divider>
@@ -1208,7 +1266,7 @@ export function Templates() {
                 {detailTpl.required_fields?.length ? detailTpl.required_fields.map(requiredFieldLabel).join("、") : <span className="muted">—</span>}
               </Descriptions.Item>
               {/* OneData 预设（方案A）：逻辑度量 / 挂载实体 / 三方责任 */}
-              <Descriptions.Item label="原子指标口径预设">
+              <Descriptions.Item label="逻辑度量（原子指标口径）预设">
                 {detailTpl.measure_id
                   ? measureOptions.find((o) => o.value === detailTpl.measure_id)?.measure.name
                     ? `${measureOptions.find((o) => o.value === detailTpl.measure_id)?.measure.name} (${measureOptions.find((o) => o.value === detailTpl.measure_id)?.measure.measure_code})`
@@ -1296,10 +1354,10 @@ export function Templates() {
                 getFieldValue("type") === "atomic" ? (
                   <Form.Item
                     name="measure_id"
-                    label="原子指标口径预设（OneData 原子层）"
+                    label="逻辑度量（原子指标口径）预设"
                     extra={
                       <span className="muted" style={{ fontSize: 12 }}>
-                        仅已发布度量可选；实例化时继承度量格式/单位/小数位
+                        仅已发布度量可选；实例化时继承度量格式/单位/小数位与统计口径（stat_caliber）
                       </span>
                     }
                     style={{ width: "100%", marginBottom: 8 }}
@@ -1308,7 +1366,7 @@ export function Templates() {
                       showSearch
                       allowClear
                       optionFilterProp="label"
-                      placeholder="选择原子指标口径（仅已发布可选）"
+                      placeholder="选择逻辑度量（原子指标口径，仅已发布可选）"
                       options={measureOptions.map((o) => ({ value: o.value, label: o.label }))}
                     />
                   </Form.Item>
@@ -1379,20 +1437,63 @@ export function Templates() {
             <Form.Item name="is_active" label="状态" valuePropName="checked" style={{ width: 196 }}>
               <Switch checkedChildren="启用" unCheckedChildren="停用" />
             </Form.Item>
+            {/* 默认口径：与实例化弹窗同策略——原子类型下口径由预设逻辑度量的 stat_caliber
+                承载，折叠为高级项（默认收起）并只读预览，避免模板再写一份物理口径。 */}
             <Form.Item
-              label="默认口径（实例化时自动合并）"
-              extra="SQL 模式/表达式模式结构化填写；需定义 base_atomic、数仓口径等特殊键时切「高级 JSON」"
-              style={{ width: "100%" }}
+              noStyle
+              shouldUpdate={(prev, cur) => prev.type !== cur.type || prev.measure_id !== cur.measure_id}
             >
-              <DefinitionModeEditor
-                mode={editDefMode}
-                onModeChange={setEditDefMode}
-                value={editDef}
-                onChange={(next, err) => {
-                  setEditDef(next);
-                  setEditDefError(err ?? null);
-                }}
-              />
+              {({ getFieldValue }) => {
+                const isAtomicType = getFieldValue("type") === "atomic";
+                const caliber = measureStatCaliber(measureOptions, getFieldValue("measure_id"));
+                const editor = (
+                  <DefinitionModeEditor
+                    mode={editDefMode}
+                    onModeChange={setEditDefMode}
+                    value={editDef}
+                    onChange={(next, err) => {
+                      setEditDef(next);
+                      setEditDefError(err ?? null);
+                    }}
+                  />
+                );
+                return (
+                  <Form.Item
+                    label="默认口径（实例化时自动合并）"
+                    extra={
+                      isAtomicType
+                        ? "原子模板的口径由预设「逻辑度量（原子指标口径）」继承，一般留空；需定义 base_atomic 等特殊键时展开下方高级项"
+                        : "SQL 模式/表达式模式结构化填写；需定义 base_atomic、数仓口径等特殊键时切「高级 JSON」"
+                    }
+                    style={{ width: "100%" }}
+                  >
+                    {isAtomicType ? (
+                      <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                        {caliber ? (
+                          <Alert
+                            type="info"
+                            showIcon
+                            message="预设逻辑度量的统计口径（实例化时自动继承）"
+                            description={<span style={{ whiteSpace: "pre-wrap" }}>{caliber}</span>}
+                          />
+                        ) : null}
+                        <Collapse
+                          ghost
+                          items={[
+                            {
+                              key: "def",
+                              label: <span className="muted" style={{ fontSize: 12 }}>高级：补充物理口径定义（一般留空）</span>,
+                              children: editor,
+                            },
+                          ]}
+                        />
+                      </Space>
+                    ) : (
+                      editor
+                    )}
+                  </Form.Item>
+                );
+              }}
             </Form.Item>
             {/* 口径三方责任预设（可选）：实例化时作为指标默认责任方 */}
             <Divider plain style={{ margin: "8px 0" }}>口径三方责任预设（可选）</Divider>

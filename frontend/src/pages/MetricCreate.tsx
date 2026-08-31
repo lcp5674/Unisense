@@ -2451,12 +2451,12 @@ export function MetricCreate() {
                 <>
                   <Form.Item
                     name="measure_id"
-                    label="逻辑度量（原子指标口径库，OneData 原子层）"
+                    label="逻辑度量（原子指标口径）"
                     extra={
                       <>
                         {selectedMeasure
                           ? `继承：${MEASURE_FORMAT_LABEL[selectedMeasure.measure_format] ?? selectedMeasure.measure_format} · 单位 ${selectedMeasure.default_unit || "—"} · 小数位 ${selectedMeasure.default_decimal_places ?? "按需"}${selectedMeasure.source_system?.length ? ` · 源头系统 ${selectedMeasure.source_system.join("/")}` : ""}`
-                          : "原子指标 = 逻辑度量 + 基础统计粒度（日），不绑定业务限定与时间周期；度量格式/单位/小数位由原子指标口径库继承"}
+                          : "原子指标 = 逻辑度量（原子指标口径）+ 基础统计粒度（日），不绑定业务限定与时间周期；度量格式/单位/小数位由「原子指标口径库」的逻辑度量继承"}
                         {measureSuggestions.length > 0 && !selectedMeasure ? (
                           <div style={{ marginTop: 4 }}>
                             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
