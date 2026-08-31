@@ -1715,9 +1715,6 @@ class LineageService(BaseService):
         Returns:
             标记为 PII 继承的边数。
         """
-        # TODO: repo.upsert_edge 当前未暴露 pii_inherited 形参，集成时统一对接
-        # （在 repository 的 upsert_edge 增加 pii_inherited 关键字参数）；此处以
-        # duck typing 透传，重建边即写库标记。
         upsert = self._repo.upsert_edge
         visited: set[str] = set()
         frontier = [node]

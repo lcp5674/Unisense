@@ -87,24 +87,9 @@ services:
       timeout: 5s
       retries: 5
 
-  # ---- Elasticsearch security setup ----
-  # 2026-08-28 说明：ES 8.x 密码经 ELASTIC_PASSWORD env 注入即完成配置，
-  # 本服务仅打印凭据提示（不再执行实际 setup，保留以便查看内置账号密码）。
-  # 仅用于打印 ES 凭据提示（一次性，restart: no）。
-  # 注意：索引创建与数据同步不再由此服务负责——已并入 backend 启动链的
-  # scripts/bootstrap.py（best-effort 步骤），随容器启动自动完成。
-  elasticsearch-setup:
-    image: elasticsearch:8.15.0
-    depends_on:
-      elasticsearch:
-        condition: service_healthy
-    restart: "no"
-    entrypoint: >
-      bash -c '
-        echo "Elasticsearch security already configured via ELASTIC_PASSWORD env var."
-        echo "Built-in elastic user password: ${UNISENSE_ES_PASSWORD:-es_changeme}"
-        echo "Setup complete."
-      '
+  # ---- Elasticsearch ----
+  # 索引创建与数据同步由 backend 启动链的 scripts/bootstrap.py（best-effort）自动完成，
+  # 不再需要独立 setup 服务。
 
   redis:
     image: redis:7-alpine
@@ -236,7 +221,7 @@ services:
       UNISENSE_OLAP_URL: ${UNISENSE_OLAP_URL:-}
       # Doris/StarRocks 直连地址（OLAPExecutor 实际连接参数；未显式配置时由
       # config._derive_doris_from_olap_url 从 UNISENSE_OLAP_URL 自动派生 host/port）
-      UNISENSE_DORIS_HOST: ${UNISENSE_DORIS_HOST:-doris-fe}
+      UNISENSE_DORIS_HOST: ${UNISENSE_DORIS_HOST:-}
       UNISENSE_DORIS_PORT: ${UNISENSE_DORIS_PORT:-8030}
       UNISENSE_DORIS_DATABASE: ${UNISENSE_DORIS_DATABASE:-unisense}
       # MinIO（S3 兼容对象存储，审计归档）——此前 compose 定义了 minio 服务但
@@ -312,7 +297,7 @@ services:
       UNISENSE_ES_USERNAME: elastic
       UNISENSE_ES_PASSWORD: ${UNISENSE_ES_PASSWORD:-es_changeme}
       UNISENSE_OLAP_URL: ${UNISENSE_OLAP_URL:-}
-      UNISENSE_DORIS_HOST: ${UNISENSE_DORIS_HOST:-doris-fe}
+      UNISENSE_DORIS_HOST: ${UNISENSE_DORIS_HOST:-}
       UNISENSE_DORIS_PORT: ${UNISENSE_DORIS_PORT:-8030}
       UNISENSE_DORIS_DATABASE: ${UNISENSE_DORIS_DATABASE:-unisense}
       # MinIO（S3 兼容对象存储，审计归档）——此前 compose 定义了 minio 服务但
@@ -458,7 +443,5 @@ volumes:
   neo4j_data:
   es_data:
   redis_data:
-  doris_fe_data:
-  doris_be_data:
   minio_data:
   unisense_backups:

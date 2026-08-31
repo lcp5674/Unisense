@@ -1,22 +1,15 @@
 """OpenAI 协议兼容的 LLM 客户端。
 
-支持多种 LLM 提供商：
+支持多种 LLM 提供商（OpenAI 兼容接口）：
 - OpenAI（gpt-4/gpt-3.5-turbo）
-- 国内主流：DeepSeek、通义千问、文心一言等（通过 OpenAI 兼容接口）
-- kilo.ai 网关（测试环境）
+- 国内主流：DeepSeek、通义千问、文心一言等
+- kilo.ai 网关 / 火山方舟 Agent Plan / 本地调试网关（codebuddy-proxy）
 
-配置方式：
-  UNISENSE_LLM_PROVIDER=openai|deepseek|kilo          # 提供商
-  UNISENSE_LLM_BASE_URL=https://api.deepseek.com      # 基础 URL
-  UNISENSE_LLM_API_KEY=sk-xxx                         # API 密钥
-  UNISENSE_LLM_MODEL=deepseek-chat                    # 模型名称
-  UNISENSE_LLM_TIMEOUT=30                             # 超时秒数
-
-测试环境密钥（kilo.ai 网关）：
-  UNISENSE_LLM_PROVIDER=kilo
-  UNISENSE_LLM_BASE_URL=https://api.kilo.ai/api/gateway
-  UNISENSE_LLM_API_KEY=eyJhbGciOiJIUzI1NiIs...  # 测试密钥
-  UNISENSE_LLM_MODEL=poolside/laguna-m.1:free
+配置方式（DB 驱动，非环境变量）：
+  实例配置存于 llm_config 表（provider/base_url/api_key_enc/model/priority/
+  enabled/timeout），由 LlmConfigService.build_client() 每次请求读取并构建
+  路由客户端（轮询 + 熔断 + failover）。API 密钥经 SecretManager 加密落库。
+  详见 docs/technical-design.md LLM 章节与系统配置页。
 
 P2 增强：
   chat 方法返回结构化结果（dict 含 content+confidence+reasoning+candidates），

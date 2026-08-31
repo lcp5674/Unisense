@@ -14,7 +14,7 @@
 #   6. 每次变更追加变更记录到 docs/CHANGELOG_MODULES.md（审计链，不可改写历史行）。
 #   7. CI/.gateways.yml 标记 protected，其门槛禁止开发 agent 自改以绕过验证。
 
-updated: "2026-08-15"
+updated: "2026-08-31"
 td_ref: "docs/technical-design.md"
 prd_ref: "docs/proposal.md"
 
@@ -641,8 +641,6 @@ p2_p3_enhancements:
       desc: "更新 CHANGELOG_MODULES.md"
     - id: T078
       desc: "前端 Vitest 组件测试"
-    - id: T079
-      desc: "docker-compose.yml MinIO + Doris DDL"
     - id: T080
       desc: "CircuitBreaker 集成到 OLAPExecutor + Neo4j 调用链"
 

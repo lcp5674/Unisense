@@ -101,7 +101,7 @@ async def _register_metric_l3_lineage(db: AsyncSession, metric: Any) -> None:
 
     让指标节点进入血缘体系，与 DP 血缘（dp_csv）/ SQL 解析（sqlglot）表级血缘
     衔接成「源表 → 指标 → 落地表」完整链路。注册失败不阻断主流程（血缘为辅助
-    能力，可事后用 ``scripts/register_metric_lineage.py`` 补注册），但发布
+    能力，注册逻辑已内置于本函数），但发布
     ``lineage.metric_register_failed`` 事件进入通知闭环——运维/管理员可订阅感知
     血缘静默缺失，而非仅记日志（C7 修复：不再静默吞异常）。
     """

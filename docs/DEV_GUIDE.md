@@ -539,7 +539,7 @@ frontend/
 | `UNISENSE_NEO4J_URL` | Neo4j Bolt 连接串 | `bolt://host:7687` |
 | `UNISENSE_NEO4J_USER` / `_PASSWORD` | Neo4j 认证 | `neo4j` / `***` |
 | `UNISENSE_ES_URL` | Elasticsearch 地址 | `http://host:9200` |
-| `UNISENSE_OLAP_DSN` | OLAP 连接串（Doris/StarRocks） | `doris://host:9030/unisense` |
+| `UNISENSE_OLAP_URL` | OLAP 连接串（Doris/StarRocks，HTTP 形式） | `http://host:8030/unisense` |
 | `UNISENSE_OTLP_ENDPOINT` | OpenTelemetry 上报地址 | `http://otel-collector:4317` |
 | `UNISENSE_JWT_SECRET` | JWT 签名密钥（Secret Manager 注入） | `***` |
 | `UNISENSE_KMS_KEY_ID` | KMS 密钥 ID | `kms-xxxx` |

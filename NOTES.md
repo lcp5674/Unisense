@@ -15,7 +15,7 @@ into canonical ones as they surface.
 - `pytest tests/unit/...` per area.
 - Commit-msg hook `scripts/check_commit_msg.py`: enforces `^[service] action: brief (TD§x.y)?$`.
   - 14 valid service prefixes (one is `consume` — FR-17's owning path).
-- `module-status.yaml` (repo root): canonical module status; FR-17 key = `fr17_capability_degradation`.
+- `docs/module-status.yaml` (canonical module status); FR-17 key = `fr17_capability_degradation`.
 - Spec authority: `TD` (technical design doc) §4.13 / §5.2 / §11; `DEV_GUIDE` §6.3 / §17.
 
 ## Canonical terminology (fuzzy → canonical)
