@@ -12,7 +12,7 @@ Arq 定时任务（每 15 分钟）：扫描 RedisJobStore 中 RUNNING/QUEUED �
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,8 @@ async def stale_collection_jobs_task(ctx: dict[str, Any]) -> dict[str, Any]:
     from app.db.mysql import async_session_factory
     from app.services.collector.queue import RedisJobStore
     from app.services.collector.repository import CollectorRepository
+    from app.services.collector.service import CollectorService
+    from app.services.collector.tasks import _flush_run_logs
 
     redis = ctx.get("redis")
     if redis is None:
@@ -43,6 +45,7 @@ async def stale_collection_jobs_task(ctx: dict[str, Any]) -> dict[str, Any]:
     cleaned = 0
     async with async_session_factory() as db:
         repo = CollectorRepository(db)
+        svc = CollectorService(db)
         for job_id, _status in stale:
             try:
                 await store.set(
@@ -56,7 +59,22 @@ async def stale_collection_jobs_task(ctx: dict[str, Any]) -> dict[str, Any]:
             run = await repo.find_collection_run_by_job_id(job_id)
             if run is not None:
                 await repo.fail_collection_run(run.id, _STALE_ERROR)
+                # 滞留任务的运行日志实时缓冲回写 DB——worker 中断前已产生的
+                # 进度日志（开始/扫描/注册）不丢失，采集记录详情页可回看
+                # 任务进行到哪一步（含中断原因 ERROR 条目）。
+                await _flush_run_logs(redis, svc, run.id, error=_STALE_ERROR)
                 cleaned += 1
+        # DB 侧兜底：worker 崩溃后 arq 可能已清理 JobStore key（JobStore 扫描
+        # 扫不到），但 collection_run 仍 RUNNING/QUEUED——直接按表收尾，避免
+        # 记录永久卡「采集中」。与 JobStore 路径互斥：已 fail 的记录不再命中。
+        db_cutoff = now - timedelta(seconds=_STALE_TIMEOUT_SECONDS)
+        for run in await repo.list_stale_running_runs(db_cutoff):
+            try:
+                await repo.fail_collection_run(run.id, _STALE_ERROR)
+                await _flush_run_logs(redis, svc, run.id, error=_STALE_ERROR)
+                cleaned += 1
+            except Exception:  # noqa: BLE001 - 单条收尾失败不阻断其余
+                logger.warning("stale_db_run_fail_failed: run=%s", run.id)
         await db.commit()
     if stale:
         logger.warning(

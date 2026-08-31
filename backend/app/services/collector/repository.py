@@ -922,6 +922,27 @@ class CollectorRepository:
             )
         ).scalar_one_or_none()
 
+    async def list_stale_running_runs(self, before: datetime) -> list[CollectionRun]:
+        """列出超过阈值仍 RUNNING/QUEUED 的采集运行记录（DB 侧 stale 兜底）。
+
+        worker 崩溃且 arq 已把 JobStore key 清理（JobStore 扫描扫不到）时，
+        本方法直接按 ``collection_run`` 表收尾，避免记录永久卡 RUNNING——
+        否则采集记录详情页长期显示「采集中」且状态统计失真。
+        """
+        return list(
+            (
+                await self._db.execute(
+                    select(CollectionRun).where(
+                        CollectionRun.deleted_at.is_(None),
+                        CollectionRun.status.in_(("RUNNING", "QUEUED")),
+                        CollectionRun.started_at < before,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
     async def list_collection_runs(
         self,
         *,

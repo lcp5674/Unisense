@@ -472,9 +472,15 @@ async def read_run_logs(
 
     key = run_log_key(run_id)
     total = int(await redis.llen(key) or 0)
-    if offset >= total or limit <= 0:
+    if offset >= total or limit == 0:
         return [], total
-    raw = await redis.lrange(key, offset, offset + limit - 1)
+    # limit < 0 表示「读全部」（终态 flush 回写用）：Redis lrange 支持负索引 -1
+    # 表示到尾，无需分页。旧实现把 limit <= 0 一律当空返回，导致
+    # _flush_run_logs(redis, run_id, 0, -1) 永远读到空 entries → 日志丢失。
+    if limit < 0:
+        raw = await redis.lrange(key, offset, -1)
+    else:
+        raw = await redis.lrange(key, offset, offset + limit - 1)
     items: list[dict[str, Any]] = []
     for blob in raw:
         if isinstance(blob, bytes):

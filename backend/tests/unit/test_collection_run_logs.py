@@ -100,6 +100,32 @@ async def test_read_run_logs_empty_when_offset_beyond():
     redis.lrange.assert_not_awaited()
 
 
+async def test_read_run_logs_negative_limit_reads_all():
+    """终态 flush 用 limit=-1 表示「读全部」——必须返回全部而非空。
+
+    回归：旧实现把 limit <= 0 一律当空返回，导致 _flush_run_logs 永远读到
+    空 entries → 已完成任务的运行日志全部丢失（DB 0 条、缓冲被删）。
+    """
+    import json
+
+    redis = MagicMock()
+    redis.llen = AsyncMock(return_value=3)
+    redis.lrange = AsyncMock(
+        return_value=[
+            json.dumps({"ts": "t1", "level": "INFO", "message": "a"}).encode(),
+            json.dumps({"ts": "t2", "level": "INFO", "message": "b"}).encode(),
+            json.dumps({"ts": "t3", "level": "INFO", "message": "c"}).encode(),
+        ]
+    )
+
+    items, total = await read_run_logs(redis, 42, 0, -1)
+
+    assert total == 3
+    assert [i["message"] for i in items] == ["a", "b", "c"]
+    # 负 limit → lrange 以 -1 结尾（Redis 原生「到末尾」语义）
+    redis.lrange.assert_awaited_once_with("collect:run_log:42", 0, -1)
+
+
 async def test_delete_run_logs_deletes_key():
     redis = MagicMock()
     redis.delete = AsyncMock()
@@ -187,7 +213,13 @@ async def test_flush_run_logs_writes_db_and_deletes_buffer():
     svc.flush_run_logs = AsyncMock()
     redis_entries = [
         {"ts": "t1", "level": "INFO", "phase": "start", "message": "开始采集"},
-        {"ts": "t2", "level": "INFO", "phase": "registering", "entity_name": "users", "message": "注册 1/3：users"},
+        {
+            "ts": "t2",
+            "level": "INFO",
+            "phase": "registering",
+            "entity_name": "users",
+            "message": "注册 1/3：users",
+        },
     ]
     with patch(
         "app.services.collector.tasks.read_run_logs",
@@ -198,6 +230,49 @@ async def test_flush_run_logs_writes_db_and_deletes_buffer():
     # 缓冲全部回写 DB（含无失败明细时不追加 ERROR）
     entries = svc.flush_run_logs.call_args.args[1]
     assert len(entries) == 2
+    redis.delete.assert_awaited_once_with("collect:run_log:42")
+
+
+async def test_flush_run_logs_with_real_read_uses_negative_limit_all():
+    """端到端回归：flush 走真实 read_run_logs（limit=-1 读全部）应落库全部。
+
+    旧 bug：read_run_logs(0, -1) 因 limit<=0 直接返回空 → flush 空转 + 删缓冲，
+    已完成任务的运行日志从 DB 消失。此测试不 patch read_run_logs，模拟真实
+    Redis List（llen=3 / lrange 返回 3 条）验证全量回写。
+    """
+    import json
+
+    redis = MagicMock()
+    redis.llen = AsyncMock(return_value=3)
+    redis.lrange = AsyncMock(
+        return_value=[
+            json.dumps(
+                {"ts": "t1", "level": "INFO", "phase": "start", "message": "开始采集"}
+            ).encode(),
+            json.dumps(
+                {"ts": "t2", "level": "INFO", "phase": "scanning", "message": "扫描完成"}
+            ).encode(),
+            json.dumps(
+                {
+                    "ts": "t3",
+                    "level": "INFO",
+                    "phase": "registering",
+                    "message": "注册 1/1：users",
+                }
+            ).encode(),
+        ]
+    )
+    redis.delete = AsyncMock()
+    svc = MagicMock()
+    svc.flush_run_logs = AsyncMock()
+
+    await _flush_run_logs(redis, svc, 42, result={"failed_specs": []})
+
+    entries = svc.flush_run_logs.call_args.args[1]
+    assert len(entries) == 3
+    assert entries[0]["message"] == "开始采集"
+    assert entries[2]["message"] == "注册 1/1：users"
+    # 成功回写后清理缓冲
     redis.delete.assert_awaited_once_with("collect:run_log:42")
 
 
@@ -304,7 +379,13 @@ async def test_service_get_run_logs_prefers_db_when_flushed():
     run = MagicMock(status="COMPLETED")
     repo.get_collection_run = AsyncMock(return_value=run)
     repo.has_run_logs = AsyncMock(return_value=True)
-    row = MagicMock(ts=datetime(2026, 8, 27, tzinfo=UTC), level="INFO", phase="start", entity_name=None, message="开始采集")
+    row = MagicMock(
+        ts=datetime(2026, 8, 27, tzinfo=UTC),
+        level="INFO",
+        phase="start",
+        entity_name=None,
+        message="开始采集",
+    )
     repo.list_run_logs = AsyncMock(return_value=([row], 1))
 
     result = await svc.get_collection_run_logs(42)
