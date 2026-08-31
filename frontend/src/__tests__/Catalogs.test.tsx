@@ -601,6 +601,7 @@ describe("Catalogs 页面", () => {
       pii_hits: 1,
       new_pii_columns: ["patient_phone"],
       cleared_pii_columns: [],
+      mojibake_fields: [],
     });
     // 采样后重拉：patient_phone 带脱敏样本
     const sampledCols = {
