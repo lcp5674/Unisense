@@ -2225,7 +2225,7 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
         granularity: "day",
         definition_json: { expression: "COUNT(DISTINCT user_id)" },
         definition_mode: "expression",
-        dimensions: ["hosp_code", "enter_source"],
+        granularity_dims: ["hosp_code", "enter_source"],
         statement_index: 0,
       },
       {
@@ -2303,17 +2303,17 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     expect(screen.getAllByText("指标编码").length).toBeGreaterThan(0);
   });
 
-  it("批量解析：候选「关联维度」预填 GROUP BY 推断维度（A 增强，可编辑）", async () => {
+  it("批量解析：候选「粒度维度」预填 GROUP BY 非时间键（唯一性构成，可编辑）", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");
     await openBatchMode();
 
-    // 候选卡片字段区有「关联维度」标签（所有类型候选共用）
-    expect(screen.getAllByText("关联维度").length).toBeGreaterThan(0);
-    // 预填的维度（后端从 GROUP BY 非时间键回填）以多选 Tag 呈现
+    // 候选卡片字段区有「粒度维度」标签（组合粒度：GROUP BY 非时间键全部为粒度维度）
+    expect(screen.getAllByText("粒度维度").length).toBeGreaterThan(0);
+    // 预填的粒度维度（后端从 GROUP BY 非时间键回填）以多选 Tag 呈现
     await waitFor(() => {
       const select = document.querySelector(
-        '[data-testid="sql-batch-dims-0:user_id"]',
+        '[data-testid="sql-batch-granularity-dims-0:user_id"]',
       ) as HTMLElement;
       expect(select).toBeTruthy();
       expect(select.textContent || "").toContain("hosp_code");
@@ -2651,8 +2651,8 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
         source_table: "dwd.sales_detail",
         source_column: "user_id",
         granularity: "day",
-        // 组合粒度（方案 B）：无 GROUP BY 业务实体键 → 粒度维度空
-        granularity_dims: null,
+        // 组合粒度（方案 B）：GROUP BY 非时间键（hosp_code/enter_source）全部为粒度维度
+        granularity_dims: ["hosp_code", "enter_source"],
         default_period: "day",
         domain: "sales",
       });

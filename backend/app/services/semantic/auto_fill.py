@@ -353,11 +353,12 @@ def _infer_granularity(
     profile: dict[str, Any],
     grain_kw: dict[str, list[str]] | None = None,
 ) -> SuggestionField:
-    """粒度（字典驱动）：GROUP BY 时间列 → 时间粒度；唯一业务实体键 → 实体粒度。
+    """粒度（字典驱动）：GROUP BY 时间列 → 时间粒度；非时间键 → 粒度维度。
 
     关键词来自 ``infer_dict``（内置默认 + system_dict ``extra.infer_keywords``
-    覆盖），时间/业务实体粒度与 ``granularity`` 字典 17 项对齐——GROUP BY
-    ``doctor_id`` 这类统计主体识别为 ``doctor`` 粒度，而非一律归维度。
+    覆盖），时间粒度与 ``granularity`` 字典时间子集对齐。粒度 = 唯一性集合：
+    GROUP BY 非时间键全部为粒度维度（2026-08-31 收紧，不再按实体关键词拆分
+    普通维度——gender 等键同属唯一性构成）。
 
     Args:
         profile: build_profile 产出的画像。
@@ -408,10 +409,10 @@ def _infer_granularity_dims(
     profile: dict[str, Any],
     grain_kw: dict[str, list[str]] | None = None,
 ) -> SuggestionField:
-    """粒度维度（组合粒度唯一性构成，方案 B）：GROUP BY 业务实体键全部升级。
+    """粒度维度（组合粒度唯一性构成，方案 B）：GROUP BY 非时间键全部升级。
 
-    与主粒度（时间频率语义）区分——主粒度表达「什么时候的」，粒度维度表达「谁的」；
-    粒度维度是唯一性构成者（消费 SQL 固定放行/可过滤），普通维度才可下钻。
+    与主粒度（时间频率语义）区分——主粒度表达「什么时候的」，粒度维度表达
+    「谁的/怎么切的」；粒度维度是唯一性构成者（消费 SQL 固定放行/可过滤）。
     ``extract_grain_and_dims`` 与主粒度推断同源（一次解析两处使用），保证一致。
     """
     sql_profile: SqlProfile | None = profile.get("sql_profile")
@@ -420,9 +421,9 @@ def _infer_granularity_dims(
     if grain_dims:
         return _field(
             grain_dims, "sql_parse", 0.85,
-            f"GROUP BY 业务实体键 → 粒度维度 {','.join(grain_dims)}",
+            f"GROUP BY 非时间键 → 粒度维度 {','.join(grain_dims)}",
         )
-    return _field([], "fallback", 0.5, "无业务实体粒度键，纯时间粒度")
+    return _field([], "fallback", 0.5, "无非时间粒度键，纯时间粒度")
 
 
 def _col_signal(meta: dict[str, Any], *keywords: str) -> bool:

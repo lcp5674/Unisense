@@ -627,7 +627,6 @@ def _build_derived_candidate(
     comment_table: str | None = None,
     group_by: list[str] | None = None,
     infer_dicts: dict[str, dict[str, list[str]]] | None = None,
-    platform_dims: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """构建派生候选（SQL 物理口径默认载体）：expression 模式推断（勿传多度量原 SQL，
     避免兄弟度量进口径），聚合方式覆盖为 SQL 解析值（比列名规则更可靠）。
@@ -778,20 +777,11 @@ def _build_derived_candidate(
         cand_type = "composite"
     else:
         cand_type = "derived"
-    # 关联维度候选：GROUP BY 中的非时间分组键（hosp_code/enter_source 等）——
-    # SQL 智能推断维度回填（此前候选无 dimensions 字段，关联维度纯手动）。
-    # 提取规则见 sql_infer.extract_dimension_columns（宽松过滤，仅剔时间形态）。
-    from app.services.semantic.sql_infer import extract_dimension_columns
-
-    dimensions = extract_dimension_columns(group_by or [], time_column)
-    # 维度关联平台维度管理（2026-08-28）：GROUP BY 非时间键与维度目录
-    # （PUBLISHED）dim_code/name 匹配，命中回填平台维度编码——候选「关联维度」
-    # 直挂已治理维度节点，血缘「指标↔维度」边不再落到未采集自由文本；未命中
-    # 保留原始列名（前端 tags 仍可编辑/手动关联）。
-    if platform_dims:
-        from app.services.semantic.infer_dict import match_platform_dimensions
-
-        dimensions = match_platform_dimensions(dimensions, platform_dims)
+    # 关联维度（可下钻/可筛选）不再由 SQL 推断产出（2026-08-31 收紧）：GROUP BY
+    # 非时间键已全部升级为粒度维度（唯一性集合构成，见 fields.granularity_dims），
+    # SQL 里 GROUP BY 键即唯一性、不存在「还能下钻」；可下钻维度由用户在前端
+    # 「关联维度」tags 手动补充（血缘据此生成 指标↔维度 边）。
+    dimensions: list[str] = []
     return {
         "key": f"{idx}:{alias or col}",
         "metric_code": metric_code,
@@ -1448,10 +1438,8 @@ async def infer_sql_batch(
     # 避免每个兜底重复 DB 查询+解密；构建失败降级（各兜底内部仍有保护）。
     llm_client: Any | None = None
     # 字典驱动（2026-08-28）：单位/粒度关键词从 system_dict 加载（extra.infer_keywords
-    # 覆盖内置默认），平台维度目录供 GROUP BY 维度列匹配（dim_code 回填）——两处
-    # DB 加载均 best-effort，失败降级默认/空，绝不阻断推断。
+    # 覆盖内置默认）。DB 加载 best-effort，失败降级默认，绝不阻断推断。
     infer_dicts: dict[str, dict[str, list[str]]] | None = None
-    platform_dims: list[dict[str, str]] | None = None
     if db is not None:
         try:
             from app.services.llm.config_service import LlmConfigService
@@ -1460,16 +1448,11 @@ async def infer_sql_batch(
         except Exception:  # noqa: BLE001 - 构建失败仅降级，各兜底自行处理
             llm_client = None
         try:
-            from app.services.semantic.infer_dict import (
-                load_infer_dicts,
-                load_platform_dimensions,
-            )
+            from app.services.semantic.infer_dict import load_infer_dicts
 
             infer_dicts = await load_infer_dicts(db)
-            platform_dims = await load_platform_dimensions(db, domain_code)
-        except Exception:  # noqa: BLE001 - 字典/维度加载失败降级，推断不阻断
+        except Exception:  # noqa: BLE001 - 字典加载失败降级，推断不阻断
             infer_dicts = None
-            platform_dims = None
 
     # A1：整段域建议与切分/阶段1/阶段2 并行（未指定域时）——目录/挂载未命中时
     # LLM 兜底 4-7s 不再串行阻塞，与阶段 2 的周期/度量兜底重叠；预算「检查
@@ -1726,7 +1709,6 @@ async def infer_sql_batch(
                 comment_table=comment_table,
                 group_by=rec["profile"].group_by,
                 infer_dicts=infer_dicts,
-                platform_dims=platform_dims,
             )
             atoms.append(atom)
             _push_candidate(idx, atom)
@@ -1826,7 +1808,6 @@ async def infer_sql_batch(
                         column_comments=column_comments,
                         comment_table=comment_table,
                         infer_dicts=infer_dicts,
-                        platform_dims=platform_dims,
                     ),
                 )
         else:

@@ -99,25 +99,32 @@ def extract_grain_and_dims(
 ) -> tuple[str, list[str], list[str]]:
     """从 GROUP BY 键提取 ``(主粒度, 粒度维度, 普通维度)``。
 
-    组合粒度（2026-08-28 方案 B，用户确认「业务实体键全部升级为粒度维度」）：
-    粒度 = 唯一性维度集合——「按月+医院统计订单总金额」的完整粒度是 (month, hospital)，
-    其中主粒度（时间频率语义）表达「什么时候的」，粒度维度（业务实体）表达「谁的」。
+    粒度 = 唯一性维度集合（2026-08-31 用户审查收紧）：``GROUP BY month_id,
+    hospital_id, gender`` 的输出行即 (月, 医院, 性别) 唯一组合——**GROUP BY 的
+    每个非时间键都是粒度（唯一性）构成者**，地位完全平等。此前按「业务实体
+    关键词」把未命中实体词的键（如 gender）降级为可下钻普通维度是武断的——
+    SQL 推断拿不到列的业务角色（同一列在 A 指标是粒度、B 指标是筛选条件），
+    关键词猜测会把唯一性构成者错当可下钻维度。
+
     规则（单条/批量共用，保证两路径一致）：
-    1. **时间粒度优先**：首个命中时间粒度关键词的键 → 主粒度；**全部**命中业务
-       实体粒度关键词的键 → 粒度维度（不再要求唯一命中——多实体键同为主粒度下
-       的组合粒度构成）；其余键 → 普通维度（可下钻）。
-    2. **无时间粒度**：主粒度兜底 ``day``；业务实体键仍全部升级为粒度维度；
-       其余键 → 普通维度。
-    3. **兜底**：无任何命中 → ``day``，粒度维度空，全部键为普通维度。
+    1. **时间粒度优先**：首个命中时间粒度关键词的键 → 主粒度（时间频率语义，
+       表达「什么时候的」）；**其余全部非时间键 → 粒度维度**（表达「谁的/怎么
+       切的」，组合粒度唯一性构成）。
+    2. **无时间粒度**：主粒度兜底 ``day``；非时间键仍全部为粒度维度。
+    3. **普通维度恒空**：可下钻/可筛选的关联维度不再由 GROUP BY 推断——正确
+       来源是 WHERE 筛选条件中的维度列或用户手动补充（SQL 里 GROUP BY 键就是
+       唯一性，不存在「还能下钻」）。
 
     Args:
         group_by: GROUP BY 列名列表（原始 SQL 文本）。
-        grain_kw: 粒度关键词映射（code → 关键词）；缺省用内置默认。
+        grain_kw: 粒度关键词映射（code → 关键词）；缺省用内置默认。仅用于
+            时间粒度判断（实体关键词不再参与粒度维度筛选）。
 
     Returns:
         ``(grain_code, grain_dims, normal_dims)``——``grain_code`` 为字典
-        granularity 时间粒度 code，``grain_dims`` 为粒度维度（业务实体键，
-        组合粒度唯一性构成），``normal_dims`` 为普通维度（可下钻）。
+        granularity 时间粒度 code，``grain_dims`` 为粒度维度（GROUP BY 全部
+        非时间键，唯一性集合构成），``normal_dims`` 恒为空列表（关联维度
+        由用户/WHERE 补充，不在此产出）。
     """
     kw = grain_kw or DEFAULT_GRAIN_KEYWORDS
     group_by = [g for g in (group_by or []) if g and str(g).strip()]
@@ -126,7 +133,6 @@ def extract_grain_and_dims(
     grain: str = "day"
     time_found = False
     grain_dims: list[str] = []
-    normal_dims: list[str] = []
     for g in group_by:
         gl = str(g).lower()
         # 时间粒度键 → 主粒度（首个命中决定）
@@ -140,16 +146,9 @@ def extract_grain_and_dims(
                 break
         if hit_time:
             continue
-        # 业务实体粒度键 → 粒度维度（全部升级，组合粒度唯一性构成）
-        hit_entity = False
-        for code, kws in kw.items():
-            if code not in TIME_GRAIN_CODES and any(k in gl for k in kws):
-                grain_dims.append(g)
-                hit_entity = True
-                break
-        if not hit_entity:
-            normal_dims.append(g)
-    return grain, grain_dims, normal_dims
+        # 非时间键 → 粒度维度（唯一性集合构成，不再按实体关键词拆分）
+        grain_dims.append(g)
+    return grain, grain_dims, []
 
 
 def infer_unit_from_meta(

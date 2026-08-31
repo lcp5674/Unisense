@@ -2107,12 +2107,13 @@ async def test_infer_sql_batch_builds_client_once() -> None:
 
 
 
-def test_infer_sql_batch_sunk_candidate_carries_dimensions() -> None:
-    """A 增强：下沉场景（INSERT 包裹）候选携带 GROUP BY 非时间键维度。
+def test_infer_sql_batch_sunk_candidate_carries_grain_dims() -> None:
+    """2026-08-31 收紧：下沉场景（INSERT 包裹）候选携带 GROUP BY 非时间键。
 
     此前顶层 select 无 GROUP BY（透传投影）→ profile.group_by 恒空 → 候选无
-    dimensions；修复后从含聚合子查询补提 group_by，维度（hosp_code/enter_source）
-    回填候选，供前端「关联维度」预填。
+    粒度维度；修复后从含聚合子查询补提 group_by，非时间键（hosp_code/
+    enter_source）全部进 granularity_dims（唯一性集合构成），dimensions 为空
+    （可下钻关联维度不再由 GROUP BY 推断，改用户手动补充）。
     """
     sql = """
     insert overwrite table wedw_dws.doctor_active_month_di
@@ -2128,16 +2129,20 @@ def test_infer_sql_batch_sunk_candidate_carries_dimensions() -> None:
     cands = res["candidates"]
     assert cands, "应产出候选"
     for c in cands:
-        assert set(c.get("dimensions") or []) == {"hosp_code", "enter_source"}, (
-            f"候选应携带 GROUP BY 非时间键维度: {c.get('dimensions')}"
+        assert set(c.get("granularity_dims") or []) == {"hosp_code", "enter_source"}, (
+            f"候选应携带 GROUP BY 非时间键粒度维度: {c.get('granularity_dims')}"
+        )
+        assert not (c.get("dimensions") or []), (
+            f"关联维度不再由 GROUP BY 推断: {c.get('dimensions')}"
         )
 
 
-def test_build_derived_candidate_matches_platform_dimensions() -> None:
-    """2026-08-28 维度关联：候选 dimensions 与平台维度（PUBLISHED）匹配回填。
+def test_build_derived_candidate_grain_dims_all_non_time_keys() -> None:
+    """2026-08-31 收紧：GROUP BY 非时间键全部为粒度维度，不再按实体关键词拆分。
 
-    GROUP BY 非时间键 doctor_id/hosp_code → 匹配维度目录 dim_code（doctor/
-    hospital），未命中的 enter_source 保留原列名——「关联维度」直挂已治理维度。
+    此前 doctor_id/hosp_code 命中实体关键词进粒度维度、enter_source 未命中进
+    关联维度；新语义下三者（含 enter_source 普通键）全部进 granularity_dims，
+    dimensions 恒空——粒度 = 唯一性集合，SQL 推断无法从关键词判断业务角色。
     """
     cand = _build_derived_candidate(
         idx=0,
@@ -2148,11 +2153,10 @@ def test_build_derived_candidate_matches_platform_dimensions() -> None:
         domain_defaults={},
         time_column="month_id",
         group_by=["month_id", "doctor_id", "hosp_code", "enter_source"],
-        platform_dims=[
-            {"dim_code": "doctor", "name": "医生"},
-            {"dim_code": "hospital", "name": "医院"},
-        ],
     )
-    assert set(cand["dimensions"]) == {"doctor", "hospital", "enter_source"}, (
-        f"维度应匹配平台维度编码: {cand['dimensions']}"
+    assert set(cand["granularity_dims"]) == {"doctor_id", "hosp_code", "enter_source"}, (
+        f"GROUP BY 非时间键应全部为粒度维度: {cand['granularity_dims']}"
+    )
+    assert not (cand["dimensions"] or []), (
+        f"关联维度应恒空（改手动补充）: {cand['dimensions']}"
     )

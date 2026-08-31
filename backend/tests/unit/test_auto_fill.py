@@ -535,7 +535,7 @@ class TestInferDictDriven:
         assert dims == []
 
     def test_multi_entity_keys_default_to_day(self) -> None:
-        """多个业务实体键全部升级为粒度维度：主粒度 day + [doctor_id, dept_id]。"""
+        """GROUP BY 非时间键全部升级为粒度维度：主粒度 day + [doctor_id, dept_id]。"""
         grain, grain_dims, dims = extract_grain_and_dims(["doctor_id", "dept_id"])
         assert grain == "day"
         assert set(grain_dims) == {"doctor_id", "dept_id"}
@@ -547,6 +547,16 @@ class TestInferDictDriven:
         grain, grain_dims, dims = extract_grain_and_dims(["month_id", "hospital_id"])
         assert grain == "month"
         assert grain_dims == ["hospital_id"]
+        assert dims == []
+
+    def test_non_entity_key_becomes_grain_dim(self) -> None:
+        """2026-08-31 收紧：GROUP BY 普通键（gender）同属唯一性构成——不再按
+        实体关键词拆为可下钻维度，全部进粒度维度：month + [hospital_id, gender]。"""
+        grain, grain_dims, dims = extract_grain_and_dims(
+            ["month_id", "hospital_id", "gender"]
+        )
+        assert grain == "month"
+        assert grain_dims == ["hospital_id", "gender"]
         assert dims == []
 
     def test_match_platform_dimensions(self) -> None:
