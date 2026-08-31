@@ -26,7 +26,7 @@ import type { MetricCreateRequest, MetricTemplate, MetricType, UserBrief, Subjec
 import RoleOwnerSelect, { type RoleOwnerValue } from "../components/RoleOwnerSelect";
 import { useTracking } from "../hooks/useTracking";
 import { usePermission } from "../hooks/usePermission";
-import { enumLabel, METRIC_TYPE_LABEL, GRANULARITY_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, METRIC_TIER_LABEL } from "../utils/enums";
+import { enumLabel, METRIC_TYPE_LABEL, GRANULARITY_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, METRIC_TIER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL } from "../utils/enums";
 import { validateMetricCode } from "../utils/metricCode";
 
 // 域树 → Cascader 选项（对齐注册指标页：树形选择，避免手输域编码）
@@ -1498,10 +1498,10 @@ export function Templates() {
               <Select options={["ODS", "DWD", "DWS", "ADS", "DM"].map((v) => ({ value: v, label: DW_LAYER_LABEL[v] ?? v }))} />
             </Form.Item>
             <Form.Item name="serving_mode" label="服务模式" rules={requiredRuleFor("serving_mode", reqFields, reqInapp, "服务模式")} style={{ width: 240 }}>
-              <Select options={["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"].map((v) => ({ value: v }))} />
+              <Select options={["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"].map((v) => ({ value: v, label: SERVING_MODE_LABEL[v] ?? v }))} />
             </Form.Item>
             <Form.Item name="additivity" label="可加性" rules={requiredRuleFor("additivity", reqFields, reqInapp, "可加性")} style={{ width: 240 }}>
-              <Select options={["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"].map((v) => ({ value: v }))} />
+              <Select options={["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"].map((v) => ({ value: v, label: ADDITIVITY_LABEL[v] ?? v }))} />
             </Form.Item>
             <Form.Item name="currency" label="币种" rules={requiredRuleFor("currency", reqFields, reqInapp, "币种")} style={{ width: 240 }}>
               <Select
@@ -1804,10 +1804,10 @@ export function Templates() {
               <Select allowClear options={["ODS", "DWD", "DWS", "ADS", "DM"].map((v) => ({ value: v, label: DW_LAYER_LABEL[v] ?? v }))} placeholder="（不预设）" />
             </Form.Item>
             <Form.Item name="serving_mode" label="服务模式预设" style={{ width: 196 }}>
-              <Select allowClear options={["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"].map((v) => ({ value: v }))} placeholder="（不预设）" />
+              <Select allowClear options={["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"].map((v) => ({ value: v, label: SERVING_MODE_LABEL[v] ?? v }))} placeholder="（不预设）" />
             </Form.Item>
             <Form.Item name="additivity" label="可加性预设" style={{ width: 196 }}>
-              <Select allowClear options={["ADDITIVE", "NON_ADDITIVE", "SEMI_ADDITIVE"].map((v) => ({ value: v }))} placeholder="（不预设）" />
+              <Select allowClear options={["ADDITIVE", "NON_ADDITIVE", "SEMI_ADDITIVE"].map((v) => ({ value: v, label: ADDITIVITY_LABEL[v] ?? v }))} placeholder="（不预设）" />
             </Form.Item>
             <Form.Item name="metric_tier" label="分级预设" style={{ width: 196 }}>
               <Select allowClear options={["T1", "T2", "T3"].map((v) => ({ value: v, label: METRIC_TIER_LABEL[v] ?? v }))} placeholder="（不预设）" />

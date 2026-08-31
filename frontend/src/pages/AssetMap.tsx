@@ -384,6 +384,17 @@ const CHANGE_TYPE_META: Record<string, { label: string; color: string }> = {
   deprecated: { label: "废弃", color: "red" },
 };
 
+// 用户角色中文映射（对齐 Layout/UserManagement 惯例）
+const ROLE_LABEL: Record<string, string> = {
+  platform_admin: "平台管理员",
+  domain_admin: "域管理员",
+  metric_owner: "指标负责人",
+  reviewer: "评审员",
+  compliance_officer: "合规官",
+  analyst: "分析师",
+  viewer: "只读用户",
+};
+
 // 敏感度渲染：历史后端 to_dict 曾剥离该字段，值可能为 null/undefined，此处做防御；
 // 值含 "PII" 一律标红（无论是否精确匹配枚举）。
 function sensitivityTag(s: string | null | undefined) {
@@ -1088,7 +1099,7 @@ function ChangeDriftDetailDrawer({
             <Descriptions.Item label="实体">{item.entity_name}</Descriptions.Item>
             <Descriptions.Item label="数据源">{item.source_id}</Descriptions.Item>
             <Descriptions.Item label="变更类型">
-              <Tag color={isDrop ? "red" : "orange"}>{item.change_type}</Tag>
+              <Tag color={isDrop ? "red" : "orange"}>{CHANGE_TYPE_META[item.change_type]?.label ?? item.change_type}</Tag>
             </Descriptions.Item>
             <Descriptions.Item label="时间">{formatCnTime(item.created_at)}</Descriptions.Item>
           </Descriptions>
@@ -3016,7 +3027,7 @@ function OwnerTab() {
                 <div>
                   <div style={{ fontSize: 18, fontWeight: 600 }}>{ownerName}</div>
                   <Space size={8} wrap>
-                    {view.role && <Tag color="blue">{view.role}</Tag>}
+                    {view.role && <Tag color="blue">{ROLE_LABEL[view.role] ?? view.role}</Tag>}
                     {view.domain && <Tag>{view.domain}</Tag>}
                     <span className="muted" style={{ fontSize: 12 }}>
                       责任人 ID：{view.owner_id}

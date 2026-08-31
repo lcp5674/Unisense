@@ -167,7 +167,7 @@ function RulesTab() {
             <Select options={["static", "dynamic_baseline", "yoy_woy", "cross_source"].map((v) => ({ value: v, label: RULE_MODE_LABEL[v] ?? v }))} />
           </Form.Item>
           <Form.Item name="severity" label="严重度" initialValue="P2">
-            <Select options={["P0", "P1", "P2"].map((v) => ({ value: v, label: v }))} />
+            <Select options={["P0", "P1", "P2"].map((v) => ({ value: v, label: QUALITY_SEVERITY_LABEL[v] ?? v }))} />
           </Form.Item>
           <Form.Item name="threshold" label="阈值 (JSON)" rules={[{ required: true }]}>
             <Input.TextArea rows={3} className="mono" placeholder='{"min": 0, "max": 1000000}' />
