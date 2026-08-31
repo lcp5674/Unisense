@@ -503,10 +503,13 @@ async def create_user(
         must_change_password=True,
         password_hash=await hash_password(payload.password),
     )
+    # 方案 A 多角色：全部角色（含主角色）落 user_role 权威表，供跨请求角色解析。
+    # 注：必须在 db.add/flush 之前（对象仍为 pending）装载集合——pending 对象赋值
+    # 不会触发 lazy load；若 flush 之后再赋值，SQLAlchemy 为计算 delete-orphan 会
+    # emit SELECT user_role，async 上下文报 MissingGreenlet（真实环境 500）。
+    row.role_items = [UserRole(role=r) for r in roles]
     db.add(row)
     await db.flush()
-    # 方案 A 多角色：全部角色（含主角色）落 user_role 权威表，供跨请求角色解析。
-    row.role_items = [UserRole(user_id=row.id, role=r) for r in roles]
     await write_audit(
         db,
         actor_id=user.id,

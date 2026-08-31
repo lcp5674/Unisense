@@ -879,3 +879,29 @@ async def test_multi_role_user_without_platform_admin_forbidden() -> None:
         resp = await client.get("/api/v1/users")
     app.dependency_overrides.clear()
     assert resp.status_code == 403
+
+
+def test_create_user_loads_roles_before_flush() -> None:
+    """回归守卫：create 路径必须在 ``db.add/flush`` **之前**装载 ``role_items``。
+
+    原因（真实环境 500，非 mock 可覆盖）：新建对象在 ``flush()`` 后首次赋值
+    ``row.role_items = [...]`` 时，SQLAlchemy 为计算 delete-orphan 会 emit
+    ``SELECT user_role WHERE user_id = :id`` 触发 lazy load，async 上下文报
+    ``MissingGreenlet`` → ``POST /api/v1/users`` 返回 500。
+
+    本测试用**源码顺序契约**而非 mock session 断言——mock session 不会 emit SQL，
+    因此对该缺陷天然假绿（与 update 路径 delete-orphan 失效同一族教训）。
+    """
+    import inspect
+
+    from app.api import users as users_api
+
+    src = inspect.getsource(users_api.create_user)
+    add_pos = src.find("db.add(row)")
+    assign_pos = src.find("row.role_items")
+    assert add_pos != -1, "未找到 db.add(row)"
+    assert assign_pos != -1, "未找到 row.role_items 装载"
+    assert assign_pos < add_pos, (
+        "row.role_items 必须在 db.add(row)/flush 之前装载（对象仍为 pending），"
+        "否则 delete-orphan 会触发 lazy load 导致 MissingGreenlet 500"
+    )
