@@ -44,7 +44,7 @@
 | 维度 | 现状 |
 |------|------|
 | 领域模块 | **20 个**交付模块（`docs/module-status.yaml` 追踪）：核心 16 个（**15 released** + 1 verified）+ P2/P3 增强 4 个（implemented） |
-| 后端 | 23 个服务目录 / 34 个 API 模块 / **117 个**数据库迁移（当前 head `0117`） |
+| 后端 | 23 个服务目录 / 34 个 API 模块 / 34 个模型模块（**70 张表**）/ **117 个**数据库迁移（当前 head `0117`） |
 | 前端 | **41 个**页面 + 14 个共享组件 |
 | 测试 | 后端 **258 个**测试文件（unit / integration / security / chaos / perf / observability，上次全量约 4000 项通过）+ 前端 **62 个**测试文件（约 1100 项通过） |
 | 质量门禁 | **13 道** CI 强制门禁（`.github/workflows/gateways.yml`） |
@@ -200,7 +200,136 @@ Unisense/
 
 ---
 
-## 七、领域模块作用
+## 七、数据模型设计
+
+MySQL 8.0 为主库，`backend/app/models/` 下 **34 个模型模块、迁移后 70 张表**。以下按业务域列出核心表及其作用。
+
+### 7.1 设计原则
+
+| 原则 | 落地方式 |
+|------|---------|
+| **OneData 分层** | 逻辑度量（原子指标口径库）→ 原子指标 → 派生指标 → 复合指标，口径逐层继承，禁止重复定义 |
+| **软删优先** | 业务实体（指标/维度/术语/度量）一律软删（`deleted_at`），保留追溯能力；仅回收站「彻底删除」物理清理 |
+| **乐观锁** | 指标、逻辑度量等并发编辑实体带 `row_version`，版本冲突返回 409 而非静默覆盖 |
+| **WORM 审计** | `audit_log` 只增不改不删，冷归档后生成 SHA-256 哈希链（审查修复项，见 §10.4） |
+| **口径不可变** | 指标口径变更生成新 `metric_version`，历史版本可回溯，破坏性变更需下游确认 |
+
+### 7.2 核心实体关系
+
+```
+subject_domain(主题域)
+     │ 归属
+     ▼
+  metric(指标主表) ──────► metric_version(版本快照)
+     │ 挂载                      ▲ 变更确认
+     ▼                          │
+metric_mount(挂载实体)    pending_version_confirmation(待确认)
+     │ 引用口径底座
+     ▼
+measure_catalog(逻辑度量/原子指标口径库)
+     │ 口径引用
+     ▼
+ db_catalog(采集目录) ◄──── data_source(数据源)
+     │ 解析产出
+     ▼
+ lineage_edge(血缘边) ──► lineage_edge_history(历史)
+```
+
+**关键链路**：数据源采集产出目录资产 → SQL 解析生成血缘边 → 指标引用逻辑度量定义口径 → 挂载到实体表落地 → 变更生成版本并经下游确认。
+
+### 7.3 分域表清单
+
+**指标域**
+
+| 表 | 作用 |
+|----|------|
+| `metric` | 指标主表（编码 4 段式 `域_业务对象_度量_周期`、类型、状态、责任人、PII 标记） |
+| `metric_version` | 口径版本快照，每次变更留痕，支持回溯与回滚 |
+| `pending_version_confirmation` | 破坏性变更的下游确认单，未确认则不可发布 |
+| `metric_mount` | 指标挂载实体（绑定物理表/字段、粒度、业务限定） |
+| `metric_health_score` | 五维健康度评分（质量/时效/覆盖/规范/热度） |
+| `metric_value_snapshot` | 消费侧指标值快照 |
+| `metric_template` | 指标模板，支持一键实例化 |
+
+**主数据域**
+
+| 表 | 作用 |
+|----|------|
+| `measure_catalog` | 逻辑度量（原子指标口径库）：度量格式、单位、小数位、源头系统、同义词 |
+| `dimension` | 维度定义（含审核字段） |
+| `dimension_member` | 维度成员值 |
+| `dimension_mapping` | 跨系统维度映射（映射表达式） |
+| `metric_dimension` | 指标与维度关联及角色 |
+| `term` | 业务术语库（定义/边界/同义词） |
+| `subject_domain` | 主题域（业务域划分） |
+| `system_dict` | 系统字典（参照数据、指标命名词根、度量分类、源头系统等，可在线扩展） |
+
+**采集与目录域**
+
+| 表 | 作用 |
+|----|------|
+| `data_source` | 数据源配置（连接凭据加密存储） |
+| `db_catalog` | 采集目录（库/表/字段实体、敏感度、描述、合规复核态） |
+| `column_descriptions` | 字段描述覆盖与推断历史 |
+| `collection_run` / `collection_run_log` | 采集运行记录与日志 |
+| `collection_watermark` | 增量采集水位 |
+| `schema_drift_log` | 表结构漂移记录 |
+| `batch_infer_history` | 批量 LLM 推断历史 |
+
+**血缘域**
+
+| 表 | 作用 |
+|----|------|
+| `lineage_edge` | 血缘边（表→表、表→字段、指标→表，支持失效标记） |
+| `lineage_edge_history` | 血缘变更历史 |
+| `lineage_ingest_run` | 血缘摄取任务记录 |
+
+**治理与质量域**
+
+| 表 | 作用 |
+|----|------|
+| `conflict` | 口径冲突记录（相似/互斥判定与状态机） |
+| `ruling_record` | 冲突裁决留痕（含替代指标、理由） |
+| `escalation_record` | 冲突升级记录（超时自动升级，48h 阈值） |
+| `quality_rule` / `quality_event` | 质量规则与质量事件 |
+| `quality_observation` | 质量观测值（用于健康度计算） |
+| `reconciliation_record` | 跨系统对账记录 |
+| `classification` / `pii_field_override` | 分类分级与 PII 字段人工覆盖 |
+
+**用户与权限域**
+
+| 表 | 作用 |
+|----|------|
+| `user` | 用户主表（`user.role` 为主角色冗余） |
+| `user_role` | **多角色关联表**（权威角色源，支持一人多角色如 域管理员+指标负责人+评审员） |
+| `organization` | 团队/组织，可绑定业务域，成员自动继承所属域 |
+| `role` / `role_permission` / `user_permission` | 自定义角色与按钮级权限覆盖 |
+| `grants` | 临时授权（带有效期与到期提醒） |
+
+**审计、通知与可观测**
+
+| 表 | 作用 |
+|----|------|
+| `audit_log` | 审计日志（WORM：只增不改不删，覆盖全部写操作） |
+| `audit_archive_log` | 冷归档记录（含 SHA-256 哈希链，落 MinIO） |
+| `erasure_request` | 被遗忘权请求（合规官执行，禁止自抹审计） |
+| `notification` / `event_log` / `subscription_pref` | 站内通知、事件日志与订阅偏好 |
+| `api_client` / `query_log` | 外部 API 客户端与消费查询日志 |
+| `favorite` / `user_preference` | 收藏与用户偏好（列宽/列序持久化） |
+| `llm_config` | LLM 实例配置（多实例路由、优先级、熔断） |
+| `sql_infer_eval_run` / `sql_infer_eval_sample` | SQL 智能推断评测集与样本 |
+| `tracking_event` / `dependency_health` / `degradation_event` | 追踪埋点、依赖健康度、降级事件 |
+
+### 7.4 关键约束
+
+- **指标编码**：4 段式 `域_业务对象_度量_统计周期`，每段小写字母开头；注册向导/批量候选/模板实例化均有前端实时校验
+- **状态机**：指标 `DRAFT → REVIEW → PUBLISHED → DEPRECATED`（`EXPERIMENTAL` 为灰度）；审批中/灰度中不可直接删除
+- **多角色**：权限判定取 `user.role` ∪ `user_role` 的并集，PDP 决策与前端权限点均按并集计算
+- **注入守卫豁免**：`definition_json`、`raw_sql`、血缘 SQL 等纯解析/存储字段豁免注入扫描，标识字段与 query 参数仍全量校验（详见 `docs/DEV_GUIDE.md` §9b）
+
+---
+
+## 八、领域模块作用
 
 以 `docs/module-status.yaml` 为事实源。**核心模块 16 个**（15 released + 1 verified）：
 
@@ -236,7 +365,7 @@ Unisense/
 
 ---
 
-## 八、快速开始（开发环境）
+## 九、快速开始（开发环境）
 
 ```bash
 # 1. 配置环境变量
@@ -274,11 +403,46 @@ docker compose up -d --build backend frontend     # 代码变更后重建
 
 默认账号：`admin` / `changeme123`（**生产必须修改**）。
 
+<details>
+<summary><b>修改 admin 密码（三种途径，任选其一）</b></summary>
+
+**途径 1：UI 自助改密（推荐）**
+
+登录后右上角用户菜单 →「修改密码」，填当前密码 + 新密码即可。
+
+**途径 2：API 自助改密**
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8100/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"旧密码"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['data']['access_token'])")
+
+curl -X POST http://localhost:8100/api/v1/users/me/password \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"current_password":"旧密码","new_password":"新密码"}'
+```
+
+**途径 3：管理员重置他人密码**（`platform_admin`，重置后强制首登改密）
+
+```bash
+curl -X POST http://localhost:8100/api/v1/users/{user_id}/reset-password \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"new_password":"临时密码"}'
+```
+
+**密码规则**：长度 ≥ 8，且含大写/小写/数字/特殊字符中至少 3 类。
+
+**安全特性**：改密后自动吊销该用户活跃 refresh token（被劫持会话立即失效，审查修复项）；管理员创建/重置的账号 `must_change_password=True`，首登强制改密；改密行为落审计（`user.change_password`）。
+
+**账号禁用**：系统不提供用户物理删除（保留审计追溯），停用走 `PATCH /api/v1/users/{id}/status` 置 `disabled`，禁用后无法登录。
+
+</details>
+
 ---
 
-## 九、生产部署
+## 十、生产部署
 
-### 9.1 资源基线
+### 10.1 资源基线
 
 推荐 **8 核 / 32G / 500GB NVMe**（数据盘独立挂载到 Docker 数据目录）。`docker-compose.yml` 已内置资源限制（可通过 `.env` 覆盖），合计约 **25.5G** 内存上限，留 ~6.5G 给系统与页缓存：
 
@@ -296,7 +460,7 @@ docker compose up -d --build backend frontend     # 代码变更后重建
 
 > **Doris（OLAP）默认为注释状态**：内置 `doris-fe` / `doris-be` 不启用，`consume` 查询走 **MySQL 降级引擎**（`degraded=true` 正常返回）。若已有外部 Doris，配 `UNISENSE_OLAP_URL` 即可下推。
 
-### 9.2 生产环境变量（必须修改）
+### 10.2 生产环境变量（必须修改）
 
 ```bash
 # .env（生产）
@@ -314,7 +478,7 @@ UNISENSE_BACKUP_DATABASES="unisense e2e_biz"       # 多库备份（含降级业
 
 > ⚠️ 生产校验规则：`UNISENSE_ENV` **非 local/dev/test 时**即触发强校验（JWT 弱值、Fernet 与 JWT 复用、CORS 通配符等一律启动失败），避免环境名写成 `staging`/`production` 而绕过。
 
-### 9.3 首次部署
+### 10.3 首次部署
 
 ```bash
 # 1. 准备环境文件
@@ -334,7 +498,7 @@ curl -fsS -o /dev/null -w '%{http_code}\n' http://localhost:8180
 #    登录 admin / changeme123 → 账户设置 → 修改密码
 ```
 
-### 9.4 备份与恢复
+### 10.4 备份与恢复
 
 | 能力 | 机制 | 恢复点目标 |
 |------|------|-----------|
@@ -356,7 +520,7 @@ gunzip < unisense-YYYYMMDD.sql.gz | docker compose exec -T mysql \
 
 > 备份卷 `unisense_backups` 是磁盘最大变量（全量 7 份 + binlog 7 天），**必须监控水位**；紧张时可降 `RETENTION_DAYS`。
 
-### 9.5 升级与回滚
+### 10.5 升级与回滚
 
 ```bash
 # 升级：拉取代码 → 重建应用容器（镜像 tag 可锁定发布版本）
@@ -368,7 +532,7 @@ UNISENSE_IMAGE_TAG=<上一版本> docker compose --env-file .env up -d backend w
 docker compose exec backend alembic downgrade -1     # 迁移可逆（up+down+up 已验证）
 ```
 
-### 9.6 运维要点
+### 10.6 运维要点
 
 - **采集错峰**：全量采集 + LLM 批量推断为峰值负载，`schedule_cron` 建议配凌晨
 - **日志**：backend/worker 走 stdout（JSON 格式），由 Docker 日志驱动收集，建议配 rotation
@@ -377,7 +541,7 @@ docker compose exec backend alembic downgrade -1     # 迁移可逆（up+down+up
 
 ---
 
-## 十、开发规范
+## 十一、开发规范
 
 **所有开发规范集中在 `docs/DEV_GUIDE.md`**（工具无关，Agent / 人均适用）。
 
@@ -391,7 +555,7 @@ docker compose exec backend alembic downgrade -1     # 迁移可逆（up+down+up
 
 ---
 
-## 十一、测试
+## 十二、测试
 
 ```bash
 make unit          # 后端单元测试 + 覆盖率
@@ -409,7 +573,7 @@ cd frontend && npm run test:e2e  # 前端 E2E（Playwright）
 
 ---
 
-## 十二、关键文档
+## 十三、关键文档
 
 | 文档 | 说明 |
 |------|------|
@@ -426,7 +590,7 @@ cd frontend && npm run test:e2e  # 前端 E2E（Playwright）
 
 ---
 
-## 十三、常用命令
+## 十四、常用命令
 
 ```bash
 make help           # 查看所有命令
@@ -440,7 +604,7 @@ make gateways       # 运行全部门禁
 
 ---
 
-## 十四、Git 多远程
+## 十五、Git 多远程
 
 项目配置了双远程（GitHub + 内部 Git），`git push` 默认**双发**：
 
