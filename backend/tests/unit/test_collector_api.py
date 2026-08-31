@@ -210,6 +210,39 @@ async def test_list_jobs_must_precede_source_id_route(
     mock_get.assert_not_awaited()
 
 
+async def test_sampling_coverage_all_must_precede_source_id_route(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """GET /sampling-coverage 必须命中静态端点而非被 /{source_id} 吞掉。
+
+    与 /jobs 同一条布局约束：两段静态路径若注册在 /{source_id} 之后，
+    会被当作 source_id 捕获（查库失败 404）。
+    """
+    with (
+        patch(
+            "app.api.collector.CollectorService.get_sampling_coverage",
+            new_callable=AsyncMock,
+            return_value={
+                "total_entities": 10,
+                "sampled_entities": 0,
+                "total_columns": 100,
+                "sampled_columns": 0,
+                "entity_rate": 0.0,
+                "column_rate": 0.0,
+                "verified_columns": 0,
+            },
+        ) as mock_cov,
+        patch(
+            "app.api.collector.CollectorService.get_source",
+            new_callable=AsyncMock,
+        ) as mock_get,
+    ):
+        resp = await collector_client.get("/api/v1/data-sources/sampling-coverage")
+    assert resp.status_code == 200
+    mock_cov.assert_awaited_once()
+    mock_get.assert_not_awaited()
+
+
 async def test_list_catalog_databases_returns_distinct(
     collector_client: httpx.AsyncClient,
 ) -> None:

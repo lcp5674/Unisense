@@ -454,6 +454,22 @@ async def list_collection_jobs(
     )
 
 
+@source_router.get("/sampling-coverage", dependencies=_READ_DEPS)
+async def get_sampling_coverage_all(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """全库采样覆盖率（不按数据源过滤）：采集目录总览的采样健康度。
+
+    注意：本端点须注册在 ``GET /{source_id}`` 之前——FastAPI 按注册顺序匹配，
+    两段静态路径 ``/sampling-coverage`` 若在 ``/{source_id}`` 之后会被当作
+    source_id 吞掉（404）。与 ``/jobs`` 同一条布局约束。
+    """
+    svc = _svc(db)
+    return ok(data=await svc.get_sampling_coverage(), trace_id=trace_id)
+
+
 @source_router.get("/{source_id}", dependencies=_READ_DEPS)
 async def get_data_source(
     source_id: str,
@@ -1125,17 +1141,6 @@ async def get_sampling_coverage(
     return ok(
         data=await svc.get_sampling_coverage(source_id), trace_id=trace_id
     )
-
-
-@source_router.get("/sampling-coverage", dependencies=_READ_DEPS)
-async def get_sampling_coverage_all(
-    db: Annotated[AsyncSession, Depends(get_db_session)],
-    user: CurrentUser,
-    trace_id: Annotated[str, Depends(get_trace_id)],
-) -> ApiResponse[dict[str, Any]]:
-    """全库采样覆盖率（不按数据源过滤）：采集目录总览的采样健康度。"""
-    svc = _svc(db)
-    return ok(data=await svc.get_sampling_coverage(), trace_id=trace_id)
 
 
 @source_router.get("/{source_id}/drift-logs", dependencies=_READ_DEPS)
