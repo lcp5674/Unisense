@@ -334,6 +334,10 @@ describe("Templates 页面", () => {
     // 打开实例化弹窗（列表有多行，取第一个模板）
     fireEvent.click(screen.getAllByText("实例化指标")[0]);
     await screen.findByText("从模板实例化：GMV 日汇总模板");
+    // 模板 required_fields 含 metric_code：填指标编码（模板编码非 4 段不预填）
+    fireEvent.change(screen.getAllByPlaceholderText("留空自动生成")[0], {
+      target: { value: "fin_gmv_inst_daily" },
+    });
 
     // 提交表单：应调用模板实例化专用接口
     fireEvent.click(screen.getByText("实例化创建"));
@@ -361,6 +365,10 @@ describe("Templates 页面", () => {
     await waitFor(() => {
       expect(screen.getByText("逻辑度量（原子指标口径）")).toBeTruthy();
     });
+    // 模板 required_fields 含 metric_code：填指标编码
+    fireEvent.change(screen.getAllByPlaceholderText("留空自动生成")[0], {
+      target: { value: "fin_gmv_inst_daily" },
+    });
     fireEvent.click(screen.getByText("实例化创建"));
     await waitFor(() => {
       expect(mockedInstantiate).toHaveBeenCalledWith(
@@ -384,12 +392,51 @@ describe("Templates 页面", () => {
     // 粒度/周期归派生与挂载实体层）——即使模板预设了非日粒度（TPLS[0].granularity=daily）
     const modal = document.querySelector(".ant-modal") as HTMLElement;
     expect(within(modal).queryByText("粒度")).toBeNull();
+    // 模板 required_fields 含 metric_code：填指标编码
+    fireEvent.change(screen.getAllByPlaceholderText("留空自动生成")[0], {
+      target: { value: "fin_gmv_inst_daily" },
+    });
     fireEvent.click(screen.getByText("实例化创建"));
     await waitFor(() => {
       // 提交强制 day：忽略模板/表单预设的非日粒度，防「原子 + 非日粒度」
       expect(mockedInstantiate).toHaveBeenCalledWith(
         1,
         expect.objectContaining({ granularity: "day" }),
+      );
+    });
+  });
+
+  it("模板必填 currency/pii_flag：币种标注不适用自动跳过，PII 开关渲染且提交携带默认值", async () => {
+    const tpl = { ...TPLS[0], required_fields: ["metric_code", "currency", "pii_flag"] };
+    mockedList.mockResolvedValue({ items: [tpl], total: 1 } as never);
+    mockedDictItems.mockResolvedValue([
+      { id: 1, dict_type: "currency", code: "CNY", label: "人民币", status: "active", sort_order: 1 },
+      { id: 2, dict_type: "currency", code: "USD", label: "美元", status: "active", sort_order: 2 },
+    ] as any);
+    mockedInstantiate.mockResolvedValue(CREATED);
+    render(
+      <MemoryRouter initialEntries={["/templates"]}>
+        <Templates />
+      </MemoryRouter>,
+    );
+    await screen.findByText("tpl_gmv_daily");
+    fireEvent.click(screen.getAllByText("实例化指标")[0]);
+    await screen.findByText("从模板实例化：GMV 日汇总模板");
+    // 原子类型：currency 不适用 → 必填提示标注「不适用，自动跳过」
+    expect(screen.getByText("（不适用，自动跳过）")).toBeTruthy();
+    // 币种与 PII 开关仍渲染（用户可自愿填写/开关）——币种在提示条（删除线）与表单标签各一处
+    expect(screen.getAllByText("币种").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("含 PII")).toBeTruthy();
+    // 填指标编码（metric_code 对原子适用，必须填）
+    fireEvent.change(screen.getAllByPlaceholderText("留空自动生成")[0], {
+      target: { value: "fin_gmv_inst_day" },
+    });
+    fireEvent.click(screen.getByText("实例化创建"));
+    await waitFor(() => {
+      // currency 豁免不阻塞；pii_flag 默认 false 随请求提交
+      expect(mockedInstantiate).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ pii_flag: false }),
       );
     });
   });
@@ -716,6 +763,10 @@ describe("Templates 页面", () => {
     fireEvent.change(item.querySelector("textarea")!, {
       target: { value: "select sum(amount) from dwd_order_di" },
     });
+    // 模板 required_fields 含 metric_code：填指标编码
+    fireEvent.change(screen.getAllByPlaceholderText("留空自动生成")[0], {
+      target: { value: "fin_gmv_inst_daily" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /实例化创建/ }));
     await waitFor(() => expect(mockedInstantiate).toHaveBeenCalled());
     const [, payload] = mockedInstantiate.mock.calls[0];
@@ -869,6 +920,10 @@ describe("Templates 页面", () => {
       const granInput = granSel.querySelector(".ant-select-selection-search-input") as HTMLInputElement;
       fireEvent.change(granInput, { target: { value: "day" } });
       await clickUncollectedOption("day");
+      // 模板 required_fields 含 metric_code：填指标编码
+      fireEvent.change(screen.getAllByPlaceholderText("留空自动生成")[0], {
+        target: { value: "fin_gmv_inst_weekly" },
+      });
       // 提交：payload.mount 携带未采集表/列/粒度（不破坏既有自由输入能力）
       fireEvent.click(screen.getByText("实例化创建"));
       await waitFor(() => {

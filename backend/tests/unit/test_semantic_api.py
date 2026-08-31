@@ -223,7 +223,9 @@ async def test_instantiate_required_fields_satisfied_by_template_default() -> No
         ("serving_mode", "BATCH_ONLY"), ("additivity", "ADDITIVE"), ("metric_tier", "T3"),
         # OneData 预设列：mock 须显式置 None（否则 MagicMock 泄漏进 merged → 422）
         ("measure_id", None), ("mount", None),
-        ("product_owner_id", None), ("tech_owner_id", None), ("dw_developer_id", None),
+        ("product_owner_id", None), ("tech_owner_id", None),
+        # 数仓开发责任方必填（注册门禁）：预设平台用户 id 满足校验
+        ("dw_developer_id", 2),
         ("product_owner_name", None), ("tech_owner_name", None), ("dw_developer_name", None),
     ):
         setattr(template, f, v)
@@ -350,7 +352,9 @@ async def test_instantiate_empty_definition_falls_back_to_template_default() -> 
         ("serving_mode", "BATCH_ONLY"), ("additivity", "ADDITIVE"), ("metric_tier", "T3"),
         # OneData 预设列：mock 须显式置 None（否则 MagicMock 泄漏进 merged → 422）
         ("measure_id", None), ("mount", None),
-        ("product_owner_id", None), ("tech_owner_id", None), ("dw_developer_id", None),
+        ("product_owner_id", None), ("tech_owner_id", None),
+        # 数仓开发责任方必填（注册门禁）：预设平台用户 id 满足校验
+        ("dw_developer_id", 2),
         ("product_owner_name", None), ("tech_owner_name", None), ("dw_developer_name", None),
     ):
         setattr(template, f, v)
@@ -413,7 +417,10 @@ def _instantiate_template_mock(
         "time_semantics": "PERIOD", "freshness": "T1", "dw_layer": "DWS",
         "serving_mode": "BATCH_ONLY", "additivity": "ADDITIVE", "metric_tier": "T3",
         "measure_id": None, "mount": None,
-        "product_owner_id": None, "tech_owner_id": None, "dw_developer_id": None,
+        "product_owner_id": None, "tech_owner_id": None,
+        # 数仓开发责任方必填（注册门禁 PRD 4.5）：mock 预设平台用户 id，
+        # 否则 MetricCreateRequest 的 validate_dw_developer_required 会 422 全部实例化测试
+        "dw_developer_id": 2,
         "product_owner_name": None, "tech_owner_name": None, "dw_developer_name": None,
     }
     base.update(presets)
@@ -547,6 +554,73 @@ async def test_instantiate_mount_only_applies_for_derived() -> None:
         )
     create_req = svc_instance.create_metric.call_args[0][0]
     assert create_req.mount is None
+
+
+async def test_instantiate_skips_inapplicable_required_fields() -> None:
+    """强韧性：模板必填含「类型不适用」字段时豁免，而非 422 卡死实例化。
+
+    原子模板 required_fields 误设 mount/currency/granularity（原子恒日、无挂载、
+    币种由逻辑度量体系承载）——这些字段对原子类型永远无法由表单满足，
+    豁免后其余必填满足即成功（对应生产 tpl_verify_owner 场景）。
+    """
+
+    from app.api.semantic import instantiate_template
+
+    _tpl, db, patch_obj, svc_instance = _instantiate_template_mock(type_="atomic")
+    _tpl.required_fields = [
+        "name", "domain", "metric_code", "granularity", "mount", "currency",
+    ]
+    user = MagicMock(id=1)
+    req = MagicMock()
+    with patch_obj:
+        await instantiate_template(
+            user=user, template_id=1, request=req,
+            body={"name": "测试", "domain": "sales", "metric_code": "sales_gmv_inst_day"},
+            db=db,
+        )
+    # 豁免 mount/currency/granularity，剩余必填（name/domain/metric_code）满足 → 成功
+    assert svc_instance.create_metric.await_count == 1
+
+
+async def test_instantiate_keeps_applicable_required_fields() -> None:
+    """豁免只针对类型不适用字段：metric_code 对原子适用，仍缺失时照常 422。"""
+    from app.api.semantic import instantiate_template
+    from app.core.exceptions import ValidationError
+
+    _tpl, db, patch_obj, svc_instance = _instantiate_template_mock(type_="atomic")
+    _tpl.required_fields = ["name", "metric_code", "currency"]
+    user = MagicMock(id=1)
+    req = MagicMock()
+    with patch_obj, pytest.raises(ValidationError) as ei:
+        await instantiate_template(
+            user=user, template_id=1, request=req,
+            body={"name": "测试", "domain": "sales"}, db=db,
+        )
+    # currency 对原子豁免；metric_code 适用且缺失 → 仍报必填缺失
+    assert "metric_code" in ei.value.message
+    assert "currency" not in ei.value.message
+    svc_instance.create_metric.assert_not_called()
+
+
+async def test_instantiate_bool_false_is_not_missing() -> None:
+    """必填判定：布尔 False 是显式取值（pii_flag=false 合法），不得判缺失。"""
+    from app.api.semantic import instantiate_template
+
+    _tpl, db, patch_obj, svc_instance = _instantiate_template_mock(type_="atomic")
+    _tpl.required_fields = ["metric_code", "pii_flag"]
+    user = MagicMock(id=1)
+    req = MagicMock()
+    with patch_obj:
+        await instantiate_template(
+            user=user, template_id=1, request=req,
+            body={
+                "name": "测试", "domain": "sales",
+                "metric_code": "sales_gmv_inst_day", "pii_flag": False,
+            },
+            db=db,
+        )
+    # pii_flag=false 显式关闭 PII 是合法取值 → 通过必填校验并创建
+    assert svc_instance.create_metric.await_count == 1
 
 
 async def test_create_template_commit_integrity_error_maps_conflict() -> None:

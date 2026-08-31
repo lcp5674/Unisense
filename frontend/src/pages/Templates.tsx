@@ -112,6 +112,43 @@ const REQUIRED_FIELD_OPTIONS = [
 const requiredFieldLabel = (v: string) =>
   REQUIRED_FIELD_OPTIONS.find((o) => o.value === v)?.label ?? v;
 
+// 模板必填字段中「不适用当前类型」的字段（对齐后端 _inapplicable_required_fields 豁免语义）：
+// 原子：粒度恒日/无挂载/无币种/有逻辑度量时口径继承；派生：无逻辑度量；复合：无逻辑度量/挂载。
+// 这些字段对当前类型永远无法由实例化表单满足，强制必填只会 422 卡死——前端同样豁免并标注。
+function inapplicableRequiredFields(
+  type: string | undefined,
+  required: string[],
+  measureId: number | undefined,
+): Set<string> {
+  const inapp = new Set<string>();
+  if (type === "atomic") {
+    inapp.add("granularity");
+    inapp.add("mount");
+    inapp.add("mounts");
+    inapp.add("currency");
+    if (measureId) inapp.add("definition_json");
+  } else if (type === "derived") {
+    inapp.add("measure_id");
+  } else if (type === "composite") {
+    inapp.add("measure_id");
+    inapp.add("mount");
+    inapp.add("mounts");
+  }
+  return new Set(required.filter((f) => inapp.has(f)));
+}
+
+// 表单必填规则：模板 required_fields 含该字段且对当前类型适用 → required（中文提示）；否则空规则。
+function requiredRuleFor(
+  field: string,
+  required: string[],
+  inapp: Set<string>,
+  label: string,
+): Array<{ required: boolean; message: string }> {
+  return required.includes(field) && !inapp.has(field)
+    ? [{ required: true, message: `请填写${label}` }]
+    : [];
+}
+
 // 模板作用引导样例：说明「模板 = 标准指标样板，一键实例化」，并给出原子/派生/复合三类参考
 const TEMPLATE_SAMPLES: Array<{ tag: string; title: string; preset: string; result: string }> = [
   {
@@ -350,6 +387,12 @@ export function Templates() {
     return u ? u.display_name || u.username || `用户 #${id}` : `用户 #${id}`;
   };
   const [form] = Form.useForm();
+  // 模板必填字段动态校验（对齐后端豁免）：监听 type/measure_id 计算「不适用当前类型」集合，
+  // 用于表单必填标红与提示（不在模板上下文时为空，不改变普通创建行为）。
+  const watchedType = Form.useWatch("type", form);
+  const watchedMeasureId = Form.useWatch("measure_id", form);
+  const reqFields = instantiateTarget?.required_fields ?? [];
+  const reqInapp = inapplicableRequiredFields(watchedType, reqFields, watchedMeasureId);
   // P2-13 模板编辑闭环：编辑弹窗 state + 独立表单（不复用实例化 form，语义分离）
   const [editTpl, setEditTpl] = useState<MetricTemplate | null>(null);
   const [editSaving, setEditSaving] = useState(false);
@@ -366,6 +409,8 @@ export function Templates() {
   const [domainOptions, setDomainOptions] = useState<any[]>([]);
   const [granularityOptions, setGranularityOptions] = useState<Array<{ value: string; label: string }>>([]);
   const [unitOptions, setUnitOptions] = useState<Array<{ value: string; label: string }>>([]);
+  // 币种字典（实例化弹窗：模板 required_fields 含 currency 时可选择；对齐注册指标页 dictSelect）
+  const [currencyOptions, setCurrencyOptions] = useState<Array<{ value: string; label: string }>>([]);
   // 挂载实体选项框（源表/列/粒度，实例化+编辑两弹窗共用）：源表从采集目录惰性加载，
   // 选表后带出该表列；粒度用粒度管理字典。未采集值经 withUncollectedOption 兜底可选中。
   const [mountTableOptions, setMountTableOptions] = useState<TableSelectOption[]>([]);
@@ -403,6 +448,9 @@ export function Templates() {
       .catch(() => {});
     listDictItems("unit")
       .then((items) => setUnitOptions(dictToOptions(items)))
+      .catch(() => {});
+    listDictItems("currency")
+      .then((items) => setCurrencyOptions(dictToOptions(items)))
       .catch(() => {});
     // OneData 原子层：仅已发布逻辑度量可选（度量格式/单位/小数位实例化时继承）
     listMeasureCatalogs({ status: "PUBLISHED", page_size: 200 })
@@ -599,6 +647,9 @@ export function Templates() {
         dw_layer: (String(values.dw_layer) as MetricCreateRequest["dw_layer"]) ?? "DWS",
         serving_mode: (String(values.serving_mode) as MetricCreateRequest["serving_mode"]) ?? "BATCH_ONLY",
         additivity: (String(values.additivity) as MetricCreateRequest["additivity"]) ?? "ADDITIVE",
+        // 币种/PII 标记：实例化弹窗显式可填（模板 required_fields 可要求）；原子币种由后端豁免
+        currency: values.currency ? String(values.currency) : undefined,
+        pii_flag: Boolean(values.pii_flag),
         definition_json: {},
       };
       // OneData 原子层（方案A）：原子指标关联逻辑度量（度量格式/单位/小数位实例化时继承）
@@ -637,6 +688,44 @@ export function Templates() {
       payload.definition_json = Object.keys(instDef).length
         ? instDef
         : ((instantiateTarget?.defaults_json?.definition_json as Record<string, unknown>) ?? {});
+      // 模板必填兜底：definition_json 由外部编辑器承载（非 Form.Item，antd 规则覆盖不到），
+      // 责任方由 RoleOwnerSelect 承载——均需在此显式校验（模板已预设责任方时视为满足）。
+      if (instantiateTarget?.required_fields?.length) {
+        const tpl = instantiateTarget;
+        const tplReq = tpl.required_fields ?? [];
+        // 责任方逐个判断：模板已预设该责任方（id 或 name）→ 后端合并满足；否则须用户填写
+        const ownerPresets: Record<string, boolean> = {
+          product_owner_id: tpl.product_owner_id != null || tpl.product_owner_name != null,
+          tech_owner_id: tpl.tech_owner_id != null || tpl.tech_owner_name != null,
+          dw_developer_id: tpl.dw_developer_id != null || tpl.dw_developer_name != null,
+        };
+        const ownerMissing = (
+          [
+            ["product_owner_id", "product_owner"],
+            ["tech_owner_id", "tech_owner"],
+            ["dw_developer_id", "dw_developer"],
+          ] as const
+        )
+          .filter(
+            ([f, v]) =>
+              tplReq.includes(f) &&
+              !reqInapp.has(f) &&
+              !ownerPresets[f] &&
+              !(values[v] as RoleOwnerValue | undefined)?.id,
+          )
+          .map(([f]) => f);
+        const defMissing =
+          tplReq.includes("definition_json") &&
+          !reqInapp.has("definition_json") &&
+          !payload.definition_json?.def_sql &&
+          !payload.definition_json?.expression;
+        const missingLabels = [...(defMissing ? ["口径定义"] : []), ...ownerMissing.map(requiredFieldLabel)];
+        if (missingLabels.length) {
+          setLoading(false);
+          message.error(`模板必填字段未填写：${missingLabels.join("、")}`);
+          return;
+        }
+      }
       // 从模板实例化：调用专用接口（后端合并模板默认字段）；无模板上下文时退回普通创建指标
       const created = instantiateTarget
         ? await instantiateTemplate(instantiateTarget.id, payload)
@@ -1116,7 +1205,23 @@ export function Templates() {
           {instantiateTarget?.required_fields?.length ? (
             <div style={{ marginBottom: 12 }}>
               <Tag color="orange">本模板必填字段</Tag>
-              <span className="muted">{instantiateTarget.required_fields.map(requiredFieldLabel).join("、")}</span>
+              <span className="muted">
+                {instantiateTarget.required_fields
+                  .map((f) =>
+                    reqInapp.has(f) ? (
+                      <span key={f}>
+                        <s style={{ opacity: 0.55 }}>{requiredFieldLabel(f)}</s>
+                        <span style={{ fontSize: 12, color: "#999" }}>（不适用，自动跳过）</span>
+                        {"、"}
+                      </span>
+                    ) : (
+                      <span key={f}>
+                        {requiredFieldLabel(f)}
+                        {"、"}
+                      </span>
+                    ),
+                  )}
+              </span>
             </div>
           ) : null}
           <Space style={{ width: "100%" }} wrap>
@@ -1124,6 +1229,7 @@ export function Templates() {
               name="metric_code"
               label="指标编码"
               rules={[
+                ...requiredRuleFor("metric_code", reqFields, reqInapp, "指标编码"),
                 {
                   validator: (_r, v) => {
                     const err = validateMetricCode(v);
@@ -1133,7 +1239,11 @@ export function Templates() {
               ]}
               extra={
                 instantiateTarget ? (
-                  validateMetricCode(instantiateTarget.code) ? (
+                  reqFields.includes("metric_code") && !reqInapp.has("metric_code") ? (
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      模板要求必须指定指标编码；模板编码 {instantiateTarget.code} 非 4 段指标编码，请自行填写（如加业务后缀）
+                    </span>
+                  ) : validateMetricCode(instantiateTarget.code) ? (
                     <span className="muted" style={{ fontSize: 12 }}>
                       模板编码 {instantiateTarget.code} 非 4 段指标编码，已留空由系统自动生成；如需指定可自行填写
                     </span>
@@ -1163,7 +1273,7 @@ export function Templates() {
                 onChange={(v) => void handleInstantiateDomainChange(v ?? [])}
               />
             </Form.Item>
-            <Form.Item name="type" label="类型" style={{ width: 240 }}>
+            <Form.Item name="type" label="类型" rules={requiredRuleFor("type", reqFields, reqInapp, "指标类型")} style={{ width: 240 }}>
               <Select options={["atomic", "derived", "composite"].map((v) => ({ value: v, label: METRIC_TYPE_LABEL[v] ?? v }))} />
             </Form.Item>
             {/* OneData 预设（方案A）：按类型条件渲染——原子→逻辑度量；派生→挂载实体 */}
@@ -1173,6 +1283,7 @@ export function Templates() {
                   <Form.Item
                     name="measure_id"
                     label="逻辑度量（原子指标口径）"
+                    rules={requiredRuleFor("measure_id", reqFields, reqInapp, "逻辑度量")}
                     extra={
                       <span className="muted" style={{ fontSize: 12 }}>
                         原子指标 = 逻辑度量（原子指标口径）+ 基础统计粒度（日），不绑定业务限定与时间周期；度量格式/单位/小数位实例化时继承
@@ -1199,7 +1310,7 @@ export function Templates() {
                     }
                   >
                     <Space wrap>
-                      <Form.Item name="mount_source_table" noStyle>
+                      <Form.Item name="mount_source_table" noStyle rules={requiredRuleFor("mount", reqFields, reqInapp, "挂载实体源表")}>
                         <Select
                           showSearch
                           allowClear
@@ -1294,11 +1405,23 @@ export function Templates() {
             <Form.Item name="dw_layer" label="数仓层" rules={[{ required: true, message: "请选择数仓层" }]} style={{ width: 240 }}>
               <Select options={["ODS", "DWD", "DWS", "ADS", "DM"].map((v) => ({ value: v, label: DW_LAYER_LABEL[v] ?? v }))} />
             </Form.Item>
-            <Form.Item name="serving_mode" label="服务模式" style={{ width: 240 }}>
+            <Form.Item name="serving_mode" label="服务模式" rules={requiredRuleFor("serving_mode", reqFields, reqInapp, "服务模式")} style={{ width: 240 }}>
               <Select options={["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"].map((v) => ({ value: v }))} />
             </Form.Item>
-            <Form.Item name="additivity" label="可加性" style={{ width: 240 }}>
+            <Form.Item name="additivity" label="可加性" rules={requiredRuleFor("additivity", reqFields, reqInapp, "可加性")} style={{ width: 240 }}>
               <Select options={["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"].map((v) => ({ value: v }))} />
+            </Form.Item>
+            <Form.Item name="currency" label="币种" rules={requiredRuleFor("currency", reqFields, reqInapp, "币种")} style={{ width: 240 }}>
+              <Select
+                options={currencyOptions.length ? currencyOptions : undefined}
+                showSearch
+                allowClear
+                placeholder={currencyOptions.length ? "选择币种" : "输入币种（字典未加载）"}
+                optionFilterProp="label"
+              />
+            </Form.Item>
+            <Form.Item name="pii_flag" label="含 PII" valuePropName="checked" tooltip="模板要求标识该指标是否含个人敏感信息" style={{ width: 240 }}>
+              <Switch checkedChildren="是" unCheckedChildren="否" />
             </Form.Item>
             {/* 口径定义：OneData 下原子指标的口径由所选逻辑度量的 stat_caliber 承载，
                 再写一份绑定物理表的 SQL 会绕回「原子绑物理表」——原子类型下折叠为高级项
@@ -1509,7 +1632,7 @@ export function Templates() {
                 ) : getFieldValue("type") === "derived" ? (
                   <Form.Item label="挂载实体预设（OneData 挂载层）" style={{ width: "100%", marginBottom: 8 }}>
                     <Space wrap>
-                      <Form.Item name="mount_source_table" noStyle>
+                      <Form.Item name="mount_source_table" noStyle rules={requiredRuleFor("mount", reqFields, reqInapp, "挂载实体源表")}>
                         <Select
                           showSearch
                           allowClear

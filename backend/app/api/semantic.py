@@ -78,6 +78,29 @@ def _drop_invalid_literal_presets(merged: dict[str, Any]) -> None:
             del merged[field]
 
 
+def _inapplicable_required_fields(
+    required: list[str], merged_type: Any, merged: dict[str, Any]
+) -> set[str]:
+    """模板必填但与解析后的指标类型不兼容的字段集合。
+
+    OneData 语义：粒度/挂载属挂载层（原子恒日、挂载仅派生）、逻辑度量仅原子、
+    原子已选逻辑度量时口径由 measure.stat_caliber 继承（definition_json 可空）。
+    这些字段对当前类型永远无法由实例化表单满足，模板作者误设必填时强制校验只会
+    422 卡死实例化——豁免并在审计中记录，便于治理者修正模板。
+    """
+    inapplicable: set[str] = set()
+    if merged_type == "atomic":
+        # 原子：粒度恒日、无挂载实体、币种由逻辑度量体系承载（对齐注册指标页原子不设币种）
+        inapplicable |= {"granularity", "mount", "mounts", "currency"}
+        if merged.get("measure_id"):
+            inapplicable.add("definition_json")
+    elif merged_type == "derived":
+        inapplicable |= {"measure_id"}
+    elif merged_type == "composite":
+        inapplicable |= {"measure_id", "mount", "mounts"}
+    return {f for f in required if f in inapplicable}
+
+
 # ----------------------------------------------------------------
 # 1. 指标模板
 # ----------------------------------------------------------------
@@ -564,7 +587,24 @@ async def instantiate_template(
     # 3. 必填字段校验（对齐 merged：模板默认值亦满足必填——
     #    仅查 body 会误拒"模板默认已提供"的必填字段）
     required = template.required_fields or []
-    missing = [f for f in required if f not in merged or not merged[f]]
+    # 类型不适用字段豁免：模板作者可能预设了与类型冲突的必填字段（如原子要求
+    # mount/粒度/币种、派生要求 measure_id），这些字段对解析后的类型永远无法满足，
+    # 强制必填只会 422 卡死——跳过而非阻断，审计中记录以便治理者修正模板。
+    inapplicable = _inapplicable_required_fields(required, merged.get("type"), merged)
+    # 缺失判定：仅 None/空串/空列表/空字典视为缺失——布尔 False（如 pii_flag=false）
+    # 与数字 0 是显式合法取值，不得判缺失（否则用户显式关闭 PII 反而 422）。
+    missing = [
+        f
+        for f in required
+        if f not in inapplicable
+        and (
+            f not in merged
+            or merged[f] is None
+            or merged[f] == ""
+            or merged[f] == []
+            or merged[f] == {}
+        )
+    ]
     if missing:
         from app.core.exceptions import ValidationError
 
@@ -572,6 +612,12 @@ async def instantiate_template(
 
     # 4. 委托 MetricService 创建指标
     from app.services.semantic.schemas import MetricCreateRequest
+
+    # 口径定义兜底：MetricCreateRequest.definition_json 为必填字段，但原子指标
+    # 已选逻辑度量时口径由 measure.stat_caliber 继承、可合法为空——客户端遗漏该键时
+    # 注入空对象（等价前端恒发 {} 的行为），避免 pydantic 500；派生/复合若需口径内容
+    # 由 validate_definition_by_type 模型校验给出明确 422（非 500）。
+    merged.setdefault("definition_json", {})
 
     # 枚举收严兜底（强韧性）：剔除模板预设中的非法枚举值，避免存量脏模板 422 卡死实例化
     _drop_invalid_literal_presets(merged)
@@ -585,7 +631,10 @@ async def instantiate_template(
         action="template.instantiate",
         entity_type="metric_definition",
         entity_id=str(getattr(metric, "metric_code", "")),
-        detail={"template_id": template_id},
+        detail={
+            "template_id": template_id,
+            "skipped_inapplicable_required": sorted(inapplicable) if inapplicable else None,
+        },
         ip=client_ip(request),
         trace_id=get_trace_id(request),
     )
