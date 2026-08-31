@@ -578,7 +578,22 @@ class ArqCollectionQueue:
         return arq_job_id
 
     async def cancel(self, job_id: str) -> bool:
-        """取消一次采集任务（arq 版：终态不可取消，其余调 ArqRedis.cancel_job）。"""
+        """取消一次采集任务（arq 0.28 版：``Job.abort`` 协作取消 + 主动落 CANCELLED 终态）。
+
+        arq 0.26+ 移除了 ``ArqRedis.cancel_job``，0.28 以 ``arq.jobs.Job.abort``
+        替代：把 job_id 写入 abort 集合，worker 协作检查后抛 ``JobAborted``。
+        对「已入队未运行」的任务 abort 无法确认结果（返回 False），故**无论
+        abort 结果如何**，只要任务非终态，都主动把 JobStore 标记 CANCELLED——
+        展示层立即反映取消，worker 侧由 abort 集合兜底跳过执行。
+
+        Args:
+            job_id: 采集任务 ID。
+
+        Returns:
+            True 表示已请求取消并落 CANCELLED 终态；任务不存在/已终态返回 False。
+        """
+        from arq.jobs import Job
+
         from app.core.config import settings
 
         redis = self._redis or _get_shared_arq_redis(self._redis_url or settings.redis_url)
@@ -587,17 +602,14 @@ class ArqCollectionQueue:
         if existing is None or existing.get("status") in ("COMPLETED", "FAILED", "CANCELLED"):
             return False
         try:
-            cancelled = await redis.cancel_job(job_id)
-        except Exception as exc:
-            logger.warning("collect_job_cancel_failed: job=%s err=%s", job_id, exc)
-            return False
-        if cancelled:
-            # 主动落 CANCELLED 终态：arq 对「已入队未运行」的任务取消后不保证回写
-            # JobStore，而任务中心按 JobStore 展示——避免任务列表滞留 QUEUED。
-            detail = dict(existing.get("detail") or {})
-            detail["error"] = "任务已被用户取消"
-            await store.set(job_id, "CANCELLED", detail)
-        return bool(cancelled)
+            # timeout 兜底：运行中任务快速返回；未运行任务等 10s 后 ResultNotFound。
+            await Job(job_id, redis).abort(timeout=10, poll_delay=0.2)
+        except Exception as exc:  # noqa: BLE001 - abort 请求失败不阻断落 CANCELLED 终态
+            logger.warning("collect_job_abort_failed: job=%s err=%s", job_id, exc)
+        detail = dict(existing.get("detail") or {})
+        detail["error"] = "任务已被用户取消"
+        await store.set(job_id, "CANCELLED", detail)
+        return True
 
     async def get(self, job_id: str) -> dict[str, Any] | None:
         from app.core.config import settings

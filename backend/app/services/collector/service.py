@@ -1873,6 +1873,12 @@ class CollectorService(BaseService):
                     else 0
                 )
                 sampling_setter(sample_rows)
+            # 采样/扫描阶段进度：把进度回调注入连接器，使其在 collect() 内
+            # 逐表采样时发 phase=sampling 进度（否则该阶段只发 phase=start，
+            # 前端会一直停在 0%——Doris 数百表采样可长达数分钟）。
+            progress_setter = getattr(collector, "set_progress_cb", None)
+            if progress_setter is not None:
+                progress_setter(progress_cb)
             result: CollectResult = await collector.collect(src)
         except Exception as exc:
             # P0-4: 健康状态更新必须落库——即使采集失败也要记录 unhealthy，

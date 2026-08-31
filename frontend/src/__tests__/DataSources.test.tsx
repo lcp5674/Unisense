@@ -363,6 +363,45 @@ describe("DataSources", () => {
     expect(screen.getByText("本次采集到的表（2）")).toBeTruthy();
   });
 
+  it("SSE 进度：start 阶段显示中文阶段文案与占位百分比，sampling 阶段按 index/total 推进", async () => {
+    renderSources();
+    await waitFor(() => expect(screen.getByText("管理")).toBeTruthy());
+    fireEvent.click(screen.getByText("管理"));
+    await screen.findByText(/数据源：财务库/);
+    fireEvent.click(screen.getByText("立即采集"));
+    await screen.findByText(/立即采集：财务库/);
+    fireEvent.click(screen.getByText("开始采集"));
+    await waitFor(() => expect(mockedStream).toHaveBeenCalled());
+
+    const handlers = mockedStream.mock.calls[0][1] as {
+      onProgress?: (s: unknown, p: Record<string, unknown> | null) => void;
+      onDone?: (s: { status: string; detail?: Record<string, unknown> | null }) => void;
+    };
+
+    // start 阶段：无 index/total → 占位 5%，展示「准备中」阶段文案
+    handlers.onProgress?.(null, { phase: "start", index: null, total: null, messages: ["开始采集 mysql_finance"] });
+    await screen.findByText(/准备中/);
+    expect(screen.getByText(/准备中 · 5%/)).toBeTruthy();
+
+    // sampling 阶段：连接器逐表发 index/total → 按比例推进并展示表名
+    handlers.onProgress?.(null, {
+      phase: "sampling",
+      index: 3,
+      total: 10,
+      entity_name: "finance.orders",
+      messages: ["采样 3/10：finance.orders"],
+    });
+    await screen.findByText(/采样中/);
+    expect(screen.getByText(/采样中 finance\.orders · 30%/)).toBeTruthy();
+
+    // 终态
+    handlers.onDone?.({
+      status: "COMPLETED",
+      detail: { scanned: 2, registered: 2, pii_registered: 1, failed_count: 0, coverage: 1, mode: "FULL", drift_count: 0, drift_events: [], entities: [] },
+    });
+    await screen.findByText("采集完成：扫描 2 · 注册 2 · PII 1");
+  });
+
   it("创建时省略 source_id（由后端自动生成）", async () => {
     await openCreateModal();
     fireEvent.change(screen.getByPlaceholderText("如 财务 MySQL"), { target: { value: "财务库" } });

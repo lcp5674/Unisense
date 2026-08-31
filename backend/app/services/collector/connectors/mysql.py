@@ -392,7 +392,11 @@ class InformationSchemaCollector(BaseCollector):
                         }
                     )
 
-            for row in tables:
+            # 采样阶段进度：整表查询可能很慢（数百张表 × 逐表采样），若只发
+            # phase=start 前端会一直停在 0%。逐表发 sampling 进度（库内序号/总数
+            # + 表名），让用户看到采集在推进。
+            total_in_schema = len(tables)
+            for idx, row in enumerate(tables, 1):
                 tbl = row.get("table_name")
                 if not tbl:
                     continue
@@ -402,6 +406,15 @@ class InformationSchemaCollector(BaseCollector):
                 # PII 精度增强 + 样本记录视图：全字段行对齐采样（样本打码）
                 schema_json: dict[str, Any] = {"columns": cols}
                 if self._sampling_max_rows:
+                    await self._notify_progress(
+                        {
+                            "phase": "sampling",
+                            "index": idx,
+                            "total": total_in_schema,
+                            "entity_name": entity_name,
+                            "message": f"采样 {idx}/{total_in_schema}：{entity_name}",
+                        }
+                    )
                     sample_rows = await self._sample_columns(entity_name, cols)
                     if sample_rows:
                         schema_json["sample_rows"] = sample_rows

@@ -80,6 +80,16 @@ const DRIFT_CHANGE_LABEL: Record<string, string> = {
   SCHEMA_CHANGED: "结构变更",
 };
 
+/** 采集进度阶段 → 中文文案（SSE progress.phase 映射）。 */
+const COLLECT_PHASE_LABEL: Record<string, string> = {
+  start: "准备中",
+  connecting: "连接源端",
+  scanning: "扫描源端",
+  sampling: "采样中",
+  registering: "注册实体",
+  done: "完成",
+};
+
 const SENSITIVITY_LABEL: Record<string, string> = {
   PUBLIC: "公开",
   INTERNAL: "内部",
@@ -173,13 +183,21 @@ function SourceDetailModal({
   // 组件卸载时取消进行中的 SSE 订阅，避免内存泄漏
   useEffect(() => () => abortRef.current?.(), []);
 
-  // 进度百分比：有实体总数时按 index/total；扫描阶段给 10% 占位
+  // 进度百分比：有实体总数时按 index/total（sampling/registering 阶段）；
+  // 无总数时按阶段给占位值（start 准备中 5%、scanning 扫描源端 10%、
+  // sampling 采样中 30%），避免 RUNNING 期间看起来卡在 0%
   const progressPct =
-    progress?.index && progress?.total
+    progress && typeof progress.index === "number" && typeof progress.total === "number" && progress.total > 0
       ? Math.min(100, Math.round((progress.index / progress.total) * 100))
       : progress?.phase === "scanning"
         ? 10
-        : 0;
+        : progress?.phase === "sampling"
+          ? 30
+          : progress?.phase === "start"
+            ? 5
+            : 0;
+
+  const collectPhaseText = progress?.phase ? (COLLECT_PHASE_LABEL[progress.phase] ?? progress.phase) : "";
 
   /** 统一消费终态任务详情 → 更新结果/健康/水位（SSE onDone 与轮询兜底共用）。 */
   function applyDone(status: { status: string; detail?: Record<string, unknown> | null }) {
@@ -388,7 +406,10 @@ function SourceDetailModal({
           <Progress
             percent={progressPct}
             status={collecting ? "active" : "success"}
-            format={(p) => (progress?.entity_name ? `${progress.entity_name} · ${p}%` : `${p}%`)}
+            format={(p) => {
+              const head = [collectPhaseText, progress?.entity_name].filter(Boolean).join(" ");
+              return head ? `${head} · ${p}%` : `${p}%`;
+            }}
           />
           {progressMessages.length > 0 && (
             <div style={{ maxHeight: 120, overflow: "auto", marginTop: 8 }}>
@@ -469,7 +490,7 @@ function SourceDetailModal({
           size="small"
           title={`变更审计（${driftLogs.length}）`}
           style={{ marginBottom: 12 }}
-          extra={<span className="muted">Schema Drift · GB/T 36073 §6.4</span>}
+          extra={<span className="muted">表结构变更追踪 · 对标 GB/T 36073（数据管理能力成熟度评估模型）</span>}
         >
           <Table
             size="small"

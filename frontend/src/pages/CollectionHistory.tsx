@@ -586,7 +586,7 @@ export function CollectionHistory() {
       title={
         <span>
           采集记录
-          <span className="page-eyebrow">Collection History · 采集运行历史 + Schema 变更追踪 · GB/T 36073 §6.4</span>
+          <span className="page-eyebrow">采集运行历史 + 表结构变更追踪 · 对标 GB/T 36073（数据管理能力成熟度评估模型）</span>
         </span>
       }
     >

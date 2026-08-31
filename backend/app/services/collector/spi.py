@@ -30,6 +30,12 @@ MAX_SAMPLE_ROWS = 200
 #: 防止 ``schema_json.sample_rows`` 膨胀到拖慢列表接口。
 MAX_SAMPLE_CELLS = 4000
 
+#: 采样熔断阈值：连续整表采样失败达到该次数后，本采集会话不再尝试采样。
+#: 典型场景——Doris 对 ODBC 外表（``ODBC_SCAN_NODE`` 不支持）采样查询必败，
+#: 若不熔断，数百张表 × 数十列会在「行对齐失败 → 逐列补采」中空转数千次
+#: 失败查询，采集进度停在 start、看起来像卡死。
+SAMPLE_FAIL_LIMIT = 3
+
 
 @dataclass
 class CatalogSpec:
@@ -93,6 +99,11 @@ class BaseCollector(ABC):
         self._exclude_patterns: list[str] | None = None
         self._databases: list[str] | None = None
         self._sampling_max_rows = 0
+        #: 采样进度回调（service 层注入，供连接器内采样等阶段发进度事件）
+        self._progress_cb: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+        #: 采样熔断状态：连续整表采样失败计数 + 是否已熔断本会话采样
+        self._sampling_fail_streak = 0
+        self._sampling_disabled = False
 
     @abstractmethod
     async def collect(self, source: Any) -> CollectResult:
@@ -164,8 +175,32 @@ class BaseCollector(ABC):
 
         上限在此**统一收敛**为 ``MAX_SAMPLE_ROWS``：配额路径不经过 API 端点的
         ``le`` 校验，若只在上层拦截，保存 1000 行配额仍会打到源库。
+        每次注入同时**重置采样熔断状态**——新采集会话重新尝试采样。
         """
         self._sampling_max_rows = max(0, min(int(max_rows or 0), MAX_SAMPLE_ROWS))
+        self._sampling_fail_streak = 0
+        self._sampling_disabled = False
+
+    def set_progress_cb(
+        self, cb: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    ) -> None:
+        """注入采集进度回调（service 层在 collect 前设置）。
+
+        连接器在 ``collect`` 内扫描/采样等阶段调用 ``_notify_progress``
+        发进度事件（如 ``phase=sampling + index/total + entity_name``），
+        使前端在注册阶段之前也能看到进度在推进（而非停在 0%）。
+        """
+        self._progress_cb = cb
+
+    async def _notify_progress(self, event: dict[str, Any]) -> None:
+        """向采集进度回调发送事件（best-effort：回调失败不影响采集主流程）。"""
+        cb = self._progress_cb
+        if cb is None:
+            return
+        try:
+            await cb(event)
+        except Exception as exc:  # noqa: BLE001 - 进度是辅助能力
+            logger.warning("collector_progress_cb_failed: %s", exc)
 
     async def sample_columns(
         self, entity_name: str, schema_json: dict[str, Any]
@@ -265,6 +300,10 @@ class BaseCollector(ABC):
         n = self._effective_sample_rows(len(names))
         if not n or not names:
             return []
+        # 采样熔断：本会话已确认源端不支持采样（如 Doris ODBC 外表），
+        # 后续表直接跳过，不再发失败查询空转。
+        if self._sampling_disabled:
+            return []
         failed = False
         try:
             rows = await run_query(build_select_sql(names, n), names)
@@ -298,11 +337,56 @@ class BaseCollector(ABC):
         for col, name in safe:
             if per_column[name]:
                 self._apply_samples(col, per_column[name])
-        # 补采：① 整表查询失败 → 逐列降级；② 有行但稀疏列全 NULL → 保 PII 召回。
-        # 空表（rows 为空且未失败）无需补采——源端确无数据，补采也是空。
+        # 补采：① 整表查询失败 → 先探测单列，同因失败则跳过整表补采；② 有行但
+        # 稀疏列全 NULL → 逐列补采（保 PII 召回）。空表（rows 为空且未失败）无需补采。
+        if failed:
+            if not await self._probe_single_column(
+                entity_name, safe, build_one_sql, run_query, n
+            ):
+                # 探测列同样失败 → 源端协议不支持该表（同因），逐列补采只会
+                # 重复失败查询（数百列 × 超时），跳过整表并累计熔断计数。
+                self._sampling_fail_streak += 1
+                if self._sampling_fail_streak >= SAMPLE_FAIL_LIMIT:
+                    self._sampling_disabled = True
+                    logger.warning(
+                        "采样熔断：连续 %d 张表整表采样失败，本会话不再采样",
+                        self._sampling_fail_streak,
+                    )
+                return sample_rows
+            self._sampling_fail_streak = 0
         if failed or rows:
             await self._fill_empty_samples(entity_name, safe, build_one_sql, run_query)
         return sample_rows
+
+    async def _probe_single_column(
+        self,
+        entity_name: str,
+        safe: list[tuple[dict[str, Any], str]],
+        build_one_sql: Callable[[str, int], str],
+        run_query: Callable[[str, list[str]], Awaitable[list[dict[str, Any]]]],
+        n: int,
+    ) -> bool:
+        """整表查询失败后探测第 1 列：判断失败是否为「整表不可查」而非个别列。
+
+        若第 1 列也失败，说明源端协议/表级限制导致该表整体不可采样
+        （如实测 Doris 的 ``ODBC_SCAN_NODE``），逐列补采必然全败——返回 False
+        由调用方跳过整表补采并计入熔断。若第 1 列成功，说明仅部分列异常，
+        返回 True 让调用方继续逐列补采（隔离问题列，健康列仍可采样）。
+        """
+        if not safe:
+            return True
+        _, first_name = safe[0]
+        try:
+            await run_query(build_one_sql(first_name, n), [first_name])
+            return True
+        except Exception as exc:  # noqa: BLE001 - 探测失败即视为整表不可采样
+            logger.warning(
+                "采样单列探测失败（整表跳过补采） entity=%s column=%s error=%s",
+                entity_name,
+                first_name,
+                exc,
+            )
+            return False
 
     def _effective_sample_rows(self, column_count: int) -> int:
         """按行数上限与单元格上限取实际采样行数（宽表自动降行数）。"""

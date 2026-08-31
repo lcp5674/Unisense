@@ -1,13 +1,18 @@
 """分布式锁（对齐 TD §12.1 / spec FR-018）。
 
 Redis SET NX EX 原子命令实现采集并发保护。
-锁 key = ``collect_lock:{source_id}``，TTL = 600 秒，owner_id = job_id。
+锁 key = ``collect_lock:{source_id}``，TTL 默认 120 秒，owner_id = job_id。
 
 设计要点：
 - acquire: SET key owner_id NX EX ttl → 原子获取锁
 - release: Lua 脚本确保只有锁的 owner 才能释放（防误删）
+- refresh: Lua 脚本仅 owner 可续期（任务内心跳，防止长任务锁过期被抢占）
 - is_locked: EXISTS key 检查锁状态
 - Redis 不可用时降级为始终获取成功（不影响主流程）
+
+崩溃安全：任务运行期间每 60s 续期一次（TTL 120s）——worker 进程崩溃/被
+SIGKILL 后，锁在最多 120s 内自然过期，同源后续采集即可恢复；而非旧设计的
+1800s 长 TTL 无续期（崩溃后残留 30 分钟阻塞同源全部采集）。
 """
 
 from __future__ import annotations
@@ -21,6 +26,15 @@ logger = logging.getLogger("unisense.collector.distributed_lock")
 _RELEASE_SCRIPT = """
 if redis.call("GET", KEYS[1]) == ARGV[1] then
     return redis.call("DEL", KEYS[1])
+else
+    return 0
+end
+"""
+
+# Lua 脚本：仅当 key 的值等于 owner_id 时续期（防误续他人锁）
+_REFRESH_SCRIPT = """
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+    return redis.call("PEXPIRE", KEYS[1], ARGV[2])
 else
     return 0
 end
@@ -81,6 +95,32 @@ class CollectionLock:
             return int(result) == 1
         except Exception as exc:
             logger.warning("distributed_lock_release_failed: %s", exc)
+            return True
+
+    async def refresh(self, source_id: str, owner_id: str, ttl: int = 120) -> bool:
+        """续期分布式锁（仅 owner 可续期，防误续他人锁）。
+
+        任务运行期间心跳调用：把锁 TTL 重置为 ``ttl`` 秒。worker 崩溃后
+        心跳停止，锁在 ``ttl`` 内自然过期，同源后续采集可恢复——避免旧设计
+        （1800s 长 TTL 无续期）在 worker 被 SIGKILL 后残留 30 分钟阻塞全源。
+
+        Args:
+            source_id: 数据源标识。
+            owner_id: 锁持有者标识（与 acquire 一致才续期成功）。
+            ttl: 续期后的锁超时时间（秒），默认 120。
+
+        Returns:
+            True 如果续期成功；False 如果锁不存在或不属于此 owner。
+        """
+        if self._redis is None:
+            return True
+
+        try:
+            key = self._lock_key(source_id)
+            result = await self._redis.eval(_REFRESH_SCRIPT, 1, key, owner_id, ttl * 1000)
+            return int(result) == 1
+        except Exception as exc:
+            logger.warning("distributed_lock_refresh_failed: %s", exc)
             return True
 
     async def is_locked(self, source_id: str) -> bool:

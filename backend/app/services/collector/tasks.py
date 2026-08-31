@@ -156,6 +156,33 @@ def _make_run_log_cb(
     return cb
 
 
+async def _lock_heartbeat(
+    lock: CollectionLock,
+    source_id: str,
+    job_id: str,
+    interval: float = 60,
+) -> None:
+    """采集分布式锁心跳：每 ``interval`` 秒续期（TTL 120s），worker 崩溃后锁快速过期。
+
+    旧设计 acquire 时用 1800s 长 TTL 且不续期——worker 被 SIGKILL/崩溃后
+    finally 的 release 不执行，锁残留 30 分钟，同源后续采集全部被
+    SKIPPED_CONCURRENT 跳过（用户点「立即采集」看似卡住）。心跳使锁 TTL
+    始终短（120s），崩溃后最多 2 分钟自然过期，同源可恢复采集。
+    ``interval`` 供测试缩短心跳周期。
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await lock.refresh(source_id, job_id, ttl=120)
+        except Exception as exc:  # noqa: BLE001 - 续期失败下次心跳再试
+            logger.warning(
+                "collect_lock_heartbeat_failed: source=%s job=%s err=%s",
+                source_id,
+                job_id,
+                exc,
+            )
+
+
 async def _flush_run_logs(
     redis: Any | None,
     svc: CollectorService | None,
@@ -414,6 +441,8 @@ async def run_collection_task(
     # P1-5: 同源并发锁（acquire 成功才置 True，finally 按需 release）
     lock: CollectionLock | None = None
     lock_acquired = False
+    #: 锁心跳任务：任务运行期间定期续期，worker 崩溃后锁快速过期
+    lock_heartbeat: asyncio.Task[None] | None = None
 
     # US4: 幂等检查
     if not await _check_idempotency(redis, job_id):
@@ -429,7 +458,7 @@ async def run_collection_task(
         # P1-5: 异步链路并发锁——同源串行化（防定时+手动/多次触发并发采集，
         # 造成水位/DSD 竞态）。获取失败说明同源已有采集任务在运行，本次跳过。
         lock = CollectionLock(redis)
-        if not await lock.acquire(source_id, job_id, ttl=1800):
+        if not await lock.acquire(source_id, job_id, ttl=120):
             logger.warning(
                 "collect_concurrent_skip: source=%s job=%s 同源已有采集任务在运行",
                 source_id,
@@ -448,6 +477,9 @@ async def run_collection_task(
             # SKIPPED 非成功完成，不标记幂等键
             return {"status": "SKIPPED_CONCURRENT"}
         lock_acquired = True
+        # 锁心跳：每 60s 续期（TTL 120s）。worker 崩溃/被 SIGKILL 后心跳停止，
+        # 锁最多 120s 自然过期——同源后续采集可恢复，而非旧设计残留 30 分钟。
+        lock_heartbeat = asyncio.create_task(_lock_heartbeat(lock, source_id, job_id))
 
         svc = ctx.get("svc")
         if svc is None:
@@ -579,6 +611,8 @@ async def run_collection_task(
         raise
     finally:
         # P1-5: 释放同源并发锁（仅 owner 可释放；Redis 不可用时 no-op）
+        if lock_heartbeat is not None:
+            lock_heartbeat.cancel()
         if lock_acquired and lock is not None:
             try:
                 await lock.release(source_id, job_id)

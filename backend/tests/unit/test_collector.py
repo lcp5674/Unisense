@@ -5010,7 +5010,8 @@ async def test_sample_batch_failure_falls_back_to_per_column():
     sample_rows = await collector._sample_columns("finance.orders", columns)
 
     assert conn.batch_attempts == 1  # 先尝试整批
-    assert len(conn.single_sqls) == 3  # 再逐列重试每一列
+    # 1 次单列探测（判断整表是否可采样）+ 逐列补采 3 列
+    assert len(conn.single_sqls) == 1 + len(columns)
     # 整表失败 → 行视图为空（列式 sample 原地写入 columns）
     assert sample_rows == []
     # 健康列采到样本（非敏感值原样、敏感值打码）
@@ -5018,6 +5019,78 @@ async def test_sample_batch_failure_falls_back_to_per_column():
     assert by_name["id"]["sample"] == ["1"]
     assert by_name["remark"]["sample"] == ["备注"]
     # 问题列被隔离跳过，不影响其他列
+    assert "sample" not in by_name["phone_number"]
+
+
+async def test_sample_probe_failure_skips_table_and_circuit_breaks():
+    """整表失败且单列探测也失败 → 跳过整表补采；连续失败熔断本会话采样。
+
+    实测 Doris ODBC 外表：整表查询与单列查询因同一协议原因（ODBC_SCAN_NODE）
+    全部失败。若逐列补采，数百列会空转数千次失败查询，采集卡在采样阶段。
+    新契约：探测第 1 列失败即跳过整表，连续 3 张表后熔断不再尝试。
+    """
+
+    class _AllFailConnector:
+        def __init__(self) -> None:
+            self.batch_attempts = 0
+            self.single_sqls: list[str] = []
+
+        async def query(self, sql: str, params: dict | None = None) -> list[dict]:
+            if "SELECT" in sql and " FROM " in sql and " WHERE " not in sql:
+                self.batch_attempts += 1
+                raise RuntimeError("ODBC_SCAN_NODE unsupported")
+            self.single_sqls.append(sql)
+            raise RuntimeError("ODBC_SCAN_NODE unsupported")
+
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    conn = _AllFailConnector()
+    collector = InformationSchemaCollector(conn)
+    collector.set_sampling(3)
+    columns = [
+        {"name": "id", "type": "bigint"},
+        {"name": "phone", "type": "varchar"},
+        {"name": "name", "type": "varchar"},
+    ]
+    for _ in range(3):
+        sample_rows = await collector._sample_columns("wedw_ods.bad_table", columns)
+        assert sample_rows == []  # 每张表整表失败 → 行视图为空
+
+    # 3 次失败（每表 1 次整表查询 + 1 次单列探测）→ 熔断触发
+    assert conn.batch_attempts == 3
+    assert len(conn.single_sqls) == 3  # 每表仅 1 次探测，未逐列补采
+    assert collector._sampling_disabled is True
+
+    # 熔断后第 4 张表不再发任何采样查询
+    before_batch = conn.batch_attempts
+    before_single = len(conn.single_sqls)
+    sample_rows = await collector._sample_columns("wedw_ods.another_table", columns)
+    assert sample_rows == []
+    assert conn.batch_attempts == before_batch
+    assert len(conn.single_sqls) == before_single
+
+
+async def test_sample_probe_success_still_fills_columns():
+    """整表失败但探测成功（仅部分列异常）→ 仍逐列补采隔离问题列。"""
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    conn = _BatchFailConnector(
+        values={"id": "1", "phone_number": "13812341234", "remark": "备注"},
+        fail_cols={"phone_number"},
+    )
+    collector = InformationSchemaCollector(conn)
+    collector.set_sampling(3)
+    columns = [
+        {"name": "id", "type": "bigint"},
+        {"name": "phone_number", "type": "varchar"},
+        {"name": "remark", "type": "varchar"},
+    ]
+    await collector._sample_columns("finance.orders", columns)
+    # 探测 id 成功（第 1 条）+ 逐列补采 3 列；健康列采到样本
+    assert collector._sampling_fail_streak == 0  # 未累计失败（探测成功重置）
+    by_name = {c["name"]: c for c in columns}
+    assert by_name["id"]["sample"] == ["1"]
+    assert by_name["remark"]["sample"] == ["备注"]
     assert "sample" not in by_name["phone_number"]
 
 

@@ -397,50 +397,72 @@ class TestRedisJobStoreBytesDecode:
 class TestJobCancel:
 
     @pytest.mark.asyncio
-    async def test_arq_cancel_calls_cancel_job(self):
-        """Arq 取消委托给 ArqRedis.cancel_job，并落 CANCELLED 终态。"""
+    async def test_arq_cancel_calls_job_abort(self):
+        """Arq 取消委托给 arq.jobs.Job.abort（arq 0.28 API），并落 CANCELLED 终态。
+
+        arq 0.26+ 移除了 ArqRedis.cancel_job——旧测试 mock 注入该属性掩盖了
+        真实环境 AttributeError（取消一直静默失败返回 False）。0.28 以
+        Job.abort 协作取消：无论 abort 结果如何都落 CANCELLED 终态。
+        """
         mock_redis = AsyncMock()
         mock_redis.hgetall = AsyncMock(
             return_value={"status": "RUNNING", "detail": '{"source_id": "s1"}'}
         )
-        mock_redis.cancel_job = AsyncMock(return_value=True)
-        # 显式注入 redis 实例（不走模块级单例，避免测试间污染）
         queue = ArqCollectionQueue(redis=mock_redis)
-
-        cancelled = await queue.cancel("job-1")
+        mock_job = AsyncMock()
+        mock_job.abort = AsyncMock(return_value=True)
+        with patch("arq.jobs.Job", create=True, return_value=mock_job) as mock_job_cls:
+            cancelled = await queue.cancel("job-1")
 
         assert cancelled is True
-        mock_redis.cancel_job.assert_awaited_once_with("job-1")
+        mock_job_cls.assert_called_once_with("job-1", mock_redis)
+        mock_job.abort.assert_awaited_once()
         # 取消后落 CANCELLED 终态（hset 到 JobStore）
         mock_redis.hset.assert_awaited()
 
     @pytest.mark.asyncio
+    async def test_arq_cancel_abort_failure_still_marks_cancelled(self):
+        """abort 请求抛异常时仍落 CANCELLED 终态（取消请求不因 abort 失败丢失）。"""
+        mock_redis = AsyncMock()
+        mock_redis.hgetall = AsyncMock(
+            return_value={"status": "RUNNING", "detail": '{"source_id": "s1"}'}
+        )
+        queue = ArqCollectionQueue(redis=mock_redis)
+        mock_job = AsyncMock()
+        mock_job.abort = AsyncMock(side_effect=RuntimeError("arq unavailable"))
+        with patch("arq.jobs.Job", create=True, return_value=mock_job):
+            cancelled = await queue.cancel("job-1")
+
+        assert cancelled is True
+        mock_redis.hset.assert_awaited()
+
+    @pytest.mark.asyncio
     async def test_arq_cancel_terminal_job_returns_false(self):
-        """终态任务不可取消（返回 False，不调 cancel_job）。"""
+        """终态任务不可取消（返回 False，不调 abort）。"""
         mock_redis = AsyncMock()
         mock_redis.hgetall = AsyncMock(
             return_value={"status": "COMPLETED", "detail": "{}"}
         )
-        mock_redis.cancel_job = AsyncMock()
         queue = ArqCollectionQueue(redis=mock_redis)
 
-        cancelled = await queue.cancel("job-done")
+        with patch("arq.jobs.Job", create=True) as mock_job_cls:
+            cancelled = await queue.cancel("job-done")
 
         assert cancelled is False
-        mock_redis.cancel_job.assert_not_called()
+        mock_job_cls.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_arq_cancel_nonexistent_returns_false(self):
         """不存在的任务不可取消（返回 False）。"""
         mock_redis = AsyncMock()
         mock_redis.hgetall = AsyncMock(return_value={})
-        mock_redis.cancel_job = AsyncMock()
         queue = ArqCollectionQueue(redis=mock_redis)
 
-        cancelled = await queue.cancel("job-ghost")
+        with patch("arq.jobs.Job", create=True) as mock_job_cls:
+            cancelled = await queue.cancel("job-ghost")
 
         assert cancelled is False
-        mock_redis.cancel_job.assert_not_called()
+        mock_job_cls.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_inmemory_cancel_marks_cancelled(self):
