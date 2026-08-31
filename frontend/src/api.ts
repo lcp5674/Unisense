@@ -3972,6 +3972,51 @@ export async function refreshCatalogEntity(
   });
 }
 
+/** 采样覆盖率：已采样表数/列数与占比（PII 识别精度可观测性）。 */
+export interface SamplingCoverage {
+  source_id: string | null;
+  total_entities: number;
+  sampled_entities: number;
+  entity_coverage: number;
+  total_columns: number;
+  sampled_columns: number;
+  column_coverage: number;
+  /** 经 name+sample 双重验证的列数（精度高于纯名称推断） */
+  verified_columns: number;
+}
+
+export async function fetchSamplingCoverage(
+  sourceId?: string,
+): Promise<SamplingCoverage> {
+  const path = sourceId
+    ? `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/sampling-coverage`
+    : `${API_BASE}/data-sources/sampling-coverage`;
+  return request<SamplingCoverage>(path);
+}
+
+/** 单表立即采样：不重跑全量采集，只补采样本并重算字段级 PII。 */
+export async function sampleCatalogEntity(
+  sourceId: string,
+  entityName: string,
+  sampleRows?: number,
+): Promise<{
+  source_id: string;
+  entity_name: string;
+  columns: number;
+  sampled: number;
+  sample_rows: number;
+  sensitivity_level: string;
+  pii_hits: number;
+  new_pii_columns: string[];
+  cleared_pii_columns: string[];
+}> {
+  const qs = sampleRows ? `?sample_rows=${encodeURIComponent(String(sampleRows))}` : "";
+  return request(
+    `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/entities/${encodeURIComponent(entityName)}/sample${qs}`,
+    { method: "POST" },
+  );
+}
+
 export async function registerCatalog(
   sourceId: string,
   body: {

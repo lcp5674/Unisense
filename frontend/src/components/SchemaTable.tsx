@@ -12,6 +12,14 @@ const SOURCE_TAG_CONFIG: Record<string, { label: string; color: string }> = {
   schema: { label: "采集原始", color: "default" },
 };
 
+/** 样本敏感类别标签（sample_rule → 中文，与后端 classify_sample 的 rule_id 对齐） */
+const SAMPLE_RULE_LABEL: Record<string, string> = {
+  phone: "手机",
+  id_card: "身份证",
+  email: "邮箱",
+  bank_card: "银行卡",
+};
+
 function descriptionSourceTag(source?: DescriptionSource | null) {
   if (!source) return null;
   const cfg = SOURCE_TAG_CONFIG[source];
@@ -123,6 +131,24 @@ export function SchemaTable({
       key: "type",
       width: 120,
       render: (v: string) => v ? <Tag>{v}</Tag> : <span className="muted">-</span>,
+    },
+    {
+      title: "样本值",
+      key: "sample",
+      width: 150,
+      render: (_: unknown, record: SchemaColumn) => {
+        const sample = record.sample;
+        if (!sample) return <span className="muted">-</span>;
+        const ruleLabel = SAMPLE_RULE_LABEL[record.sample_rule ?? ""];
+        return (
+          <Tooltip title={ruleLabel ? `脱敏样本（识别为${ruleLabel}）` : "脱敏样本"}>
+            <Space size={4}>
+              <span className="mono">{sample}</span>
+              {ruleLabel && <Tag color="orange">{ruleLabel}</Tag>}
+            </Space>
+          </Tooltip>
+        );
+      },
     },
     {
       title: "描述",

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Space, Alert, Tooltip, Drawer, Empty, Descriptions, Dropdown, Checkbox, Collapse, Popconfirm } from "antd";
-import { PlusOutlined, ReloadOutlined, DeleteOutlined, EyeOutlined, SyncOutlined, ArrowLeftOutlined, HeartOutlined, SettingOutlined } from "@ant-design/icons";
-import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, listDataSources, listCatalogDatabases, refreshCatalogEntity, inferColumnDescription, inferDescriptions, updateColumnDescription, listFavorites, addFavorite, removeFavorite, UnisenseApiError } from "../api";
+import { PlusOutlined, ReloadOutlined, DeleteOutlined, EyeOutlined, SyncOutlined, ArrowLeftOutlined, HeartOutlined, SettingOutlined, ExperimentOutlined } from "@ant-design/icons";
+import { listCatalogs, registerCatalog, bulkDeprecateCatalogs, listDataSources, listCatalogDatabases, refreshCatalogEntity, inferColumnDescription, inferDescriptions, updateColumnDescription, listFavorites, addFavorite, removeFavorite, sampleCatalogEntity, fetchSamplingCoverage, UnisenseApiError } from "../api";
+import type { SamplingCoverage } from "../api";
 import type { DBCatalog, DataSource, SchemaColumn } from "../types";
 import { enumLabel, ENTITY_TYPE_LABEL } from "../utils/enums";
 import { SchemaTable } from "../components/SchemaTable";
@@ -84,6 +85,8 @@ export function Catalogs() {
   const canEditCatalog = can("catalog:edit-description");
   const canDeprecateCatalog = can("catalog:deprecate");
   const canCollectCatalog = can("data-source:collect");
+  // 采样是采集能力的子集（补采样本而非重跑采集），复用同一写权限，后端 _WRITE_DEPS 兜底
+  const canSampleCatalog = can("data-source:collect");
   const [searchParams] = useSearchParams();
   // URL 直达参数（?kw= / ?source_id=）作为初始筛选，避免「先查全量再过滤」的竞态覆盖
   const urlKw = searchParams.get("kw") ?? "";
@@ -181,6 +184,11 @@ export function Catalogs() {
   const [batchInferLoading, setBatchInferLoading] = useState(false);
   // 单表采集刷新
   const [refreshing, setRefreshing] = useState(false);
+  // 单表立即采样 loading（不重跑全量采集，只补采脱敏样本并重算 PII）
+  const [sampling, setSampling] = useState(false);
+  // 采样覆盖率（当前筛选数据源的已采样表/列占比，全部源时为全局）——PII 识别精度可观测性
+  const [coverage, setCoverage] = useState<SamplingCoverage | null>(null);
+  const [coverageLoading, setCoverageLoading] = useState(false);
 
   function openFieldDetail(record: DBCatalog) {
     setFieldDrawerCatalog(record);
@@ -212,6 +220,9 @@ export function Catalogs() {
             : undefined,
           nullable: c.nullable != null ? Boolean(c.nullable) : undefined,
           default: c.default != null ? String(c.default) : undefined,
+          // 脱敏样本值 + 采样命中的敏感类别（立即采样/采集采样后才有）
+          sample: c.sample != null ? String(c.sample) : undefined,
+          sample_rule: c.sample_rule != null ? String(c.sample_rule) : undefined,
         } as SchemaColumn;
       }
       return { name: String(col) } as SchemaColumn;
@@ -384,6 +395,19 @@ export function Catalogs() {
     panelRef.current?.reload();
   }
 
+  /** 采样覆盖率：跟随当前数据源筛选（无筛选=全局），采样/采集后调用刷新 */
+  async function loadCoverage() {
+    setCoverageLoading(true);
+    try {
+      const cov = await fetchSamplingCoverage(sourceId || undefined);
+      setCoverage(cov);
+    } catch {
+      setCoverage(null);
+    } finally {
+      setCoverageLoading(false);
+    }
+  }
+
   // 来源感知返回：从资产地图（变更追踪/资产地图 Tab）跳入时精确回来源 Tab；
   // 其他入口（总览资产卡片/血缘视图/数据源详情等）回退浏览器历史，无上一页兜底总览仪表
   function handleBack() {
@@ -404,6 +428,12 @@ export function Catalogs() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, pageSize, sourceId, sourceStatus, entityType, sensitivity, keyword, database, ownerId]);
+
+  // 采样覆盖率跟随数据源筛选变化（无筛选=全局），首次进入也加载
+  useEffect(() => {
+    loadCoverage();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceId]);
 
   // 当前用户数据表收藏（TABLE）供行内收藏按钮判断
   useEffect(() => {
@@ -573,6 +603,45 @@ export function Catalogs() {
       );
     } finally {
       setRefreshing(false);
+    }
+  }
+
+  /** 单表立即采样：不重跑全量采集，只补采脱敏样本并重算字段级 PII 命中 */
+  async function handleSampleEntity() {
+    if (!fieldDrawerCatalog) return;
+    setSampling(true);
+    try {
+      const res = await sampleCatalogEntity(fieldDrawerCatalog.source_id, fieldDrawerCatalog.entity_name);
+      const detail = [
+        `采样 ${res.sampled}/${res.columns} 列`,
+        res.pii_hits > 0 ? `新增 ${res.pii_hits} 处 PII 命中` : "",
+        res.cleared_pii_columns.length > 0 ? `清除误判 ${res.cleared_pii_columns.length} 列` : "",
+      ]
+        .filter(Boolean)
+        .join("，");
+      message.success(`「${fieldDrawerCatalog.entity_name}」${detail || "完成"}`);
+      // 采样会更新 schema_json（sample/sample_rule）与字段级 PII，重拉最新目录记录回填抽屉
+      const freshList = await listCatalogs({
+        source_id: fieldDrawerCatalog.source_id,
+        keyword: fieldDrawerCatalog.entity_name,
+        page: 1,
+        page_size: 100,
+      });
+      const fresh = freshList.items.find((i) => i.entity_name === fieldDrawerCatalog?.entity_name);
+      if (fresh) {
+        setFieldDrawerCatalog(fresh);
+        setFieldColumns(parseSchemaColumns(fresh));
+      }
+      loadCoverage();
+      load();
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError
+          ? `${err.message}（${err.codeZh}）`
+          : "采样失败：请确认数据源已开启采样（配额设置采样行数）且连接正常",
+      );
+    } finally {
+      setSampling(false);
     }
   }
 
@@ -858,6 +927,45 @@ export function Catalogs() {
           </Dropdown>
         </Space>
 
+        {/* 采样覆盖率（PII 识别精度可观测性）：跟随数据源筛选，展示已采样表/列占比与双重验证列数 */}
+        {coverage && (
+          <div
+            style={{
+              marginBottom: 12,
+              display: "flex",
+              alignItems: "center",
+              gap: 16,
+              flexWrap: "wrap",
+              fontSize: 12,
+              padding: "6px 12px",
+              background: "rgba(22, 119, 255, 0.04)",
+              borderRadius: 6,
+            }}
+          >
+            <span style={{ fontWeight: 500 }}>采样覆盖率</span>
+            <span>
+              表{" "}
+              <b>
+                {coverage.sampled_entities}/{coverage.total_entities}
+              </b>{" "}
+              （{(coverage.entity_coverage * 100).toFixed(1)}%）
+            </span>
+            <span>
+              列{" "}
+              <b>
+                {coverage.sampled_columns}/{coverage.total_columns}
+              </b>{" "}
+              （{(coverage.column_coverage * 100).toFixed(1)}%）
+            </span>
+            {coverage.verified_columns > 0 && (
+              <span style={{ color: "#52c41a" }}>
+                ✓ {coverage.verified_columns} 列经 name+sample 双重验证
+              </span>
+            )}
+            {coverageLoading && <span className="muted">加载中…</span>}
+          </div>
+        )}
+
         <Table
           dataSource={items}
           columns={resizableColumns}
@@ -950,6 +1058,18 @@ export function Catalogs() {
                   >
                     采集该表
                   </Button>
+                )}
+                {canSampleCatalog && !hasNoSchema && (
+                  <Tooltip title="不重跑全量采集，只对已有字段补采脱敏样本——样本可让 PII 识别从「仅靠字段名推断」升级为「字段名+实际值」双重验证，并发现字段名无语义但实际存敏感值的隐藏 PII">
+                    <Button
+                      icon={<ExperimentOutlined />}
+                      loading={sampling}
+                      onClick={handleSampleEntity}
+                      size="small"
+                    >
+                      立即采样
+                    </Button>
+                  </Tooltip>
                 )}
                 <span className="muted" style={{ fontSize: 12 }}>
                   {hasNoSchema ? "从源端采集字段元数据" : "重新采集，同步源端最新字段"}

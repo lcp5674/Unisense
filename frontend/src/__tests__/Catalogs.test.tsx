@@ -26,6 +26,8 @@ vi.mock("../api", () => {
     listDataSources: vi.fn(),
     listCatalogDatabases: vi.fn(),
     refreshCatalogEntity: vi.fn(),
+    sampleCatalogEntity: vi.fn(),
+    fetchSamplingCoverage: vi.fn(),
     inferColumnDescription: vi.fn(),
     inferDescriptions: vi.fn(),
     updateColumnDescription: vi.fn(),
@@ -43,13 +45,15 @@ vi.mock("../api", () => {
   };
 });
 
-import { listCatalogs, registerCatalog, listDataSources, listCatalogDatabases, refreshCatalogEntity, fetchDescriptionCoverage, fetchAssetEntityDetail, inferDescriptions, inferTableDescription, updateTableDescription, updateColumnDescription, listFavorites, fetchBatchInferHistory, createBatchInferHistory } from "../api";
+import { listCatalogs, registerCatalog, listDataSources, listCatalogDatabases, refreshCatalogEntity, sampleCatalogEntity, fetchSamplingCoverage, fetchDescriptionCoverage, fetchAssetEntityDetail, inferDescriptions, inferTableDescription, updateTableDescription, updateColumnDescription, listFavorites, fetchBatchInferHistory, createBatchInferHistory } from "../api";
 
 const mockedList = vi.mocked(listCatalogs);
 const mockedRegister = vi.mocked(registerCatalog);
 const mockedSources = vi.mocked(listDataSources);
 const mockedDatabases = vi.mocked(listCatalogDatabases);
 const mockedRefresh = vi.mocked(refreshCatalogEntity);
+const mockedSample = vi.mocked(sampleCatalogEntity);
+const mockedCoverage = vi.mocked(fetchSamplingCoverage);
 const mockedListFavorites = vi.mocked(listFavorites);
 
 const SOURCES: DataSource[] = [
@@ -128,6 +132,16 @@ beforeEach(() => {
     per_table: [],
   });
   vi.mocked(fetchBatchInferHistory).mockResolvedValue([]);
+  vi.mocked(fetchSamplingCoverage).mockResolvedValue({
+    source_id: null,
+    total_entities: 0,
+    sampled_entities: 0,
+    entity_coverage: 0,
+    total_columns: 0,
+    sampled_columns: 0,
+    column_coverage: 0,
+    verified_columns: 0,
+  });
   vi.mocked(createBatchInferHistory).mockResolvedValue({
     id: 1,
     actor_id: 1,
@@ -564,6 +578,87 @@ describe("Catalogs 页面", () => {
       expect(screen.getByText("order_id")).toBeTruthy();
     });
     expect(screen.queryByText(/暂无字段信息/)).toBeNull();
+  });
+
+  it("立即采样按钮触发单表采样并回填脱敏样本列", async () => {
+    const withCols = {
+      ...CATALOGS[0],
+      schema_def: {
+        columns: [
+          { name: "patient_phone", type: "varchar", comment: "患者手机号" },
+          { name: "order_amount", type: "decimal" },
+        ],
+      },
+    } as DBCatalog;
+    mockedList.mockResolvedValue({ items: [withCols], total: 1, page: 1, page_size: 20 });
+    mockedSample.mockResolvedValue({
+      source_id: "mysql_unisense",
+      entity_name: "dwd_finance_order",
+      columns: 2,
+      sampled: 1,
+      sample_rows: 5,
+      sensitivity_level: "PII",
+      pii_hits: 1,
+      new_pii_columns: ["patient_phone"],
+      cleared_pii_columns: [],
+    });
+    // 采样后重拉：patient_phone 带脱敏样本
+    const sampledCols = {
+      ...CATALOGS[0],
+      schema_def: {
+        columns: [
+          { name: "patient_phone", type: "varchar", comment: "患者手机号", sample: "138****1234", sample_rule: "phone" },
+          { name: "order_amount", type: "decimal", sample: "99.00", sample_rule: "" },
+        ],
+      },
+    } as DBCatalog;
+    mockedList.mockResolvedValue({ items: [sampledCols], total: 1, page: 1, page_size: 20 });
+
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByText("字段详情"));
+    // 打开抽屉时字段可见（hasNoSchema=false → 立即采样按钮渲染）
+    expect(await screen.findByText("patient_phone")).toBeTruthy();
+
+    fireEvent.click(screen.getByText("立即采样"));
+    await waitFor(() => {
+      expect(mockedSample).toHaveBeenCalledWith("mysql_unisense", "dwd_finance_order");
+    });
+    // 采样后抽屉回填脱敏样本值
+    await waitFor(() => {
+      expect(screen.getByText("138****1234")).toBeTruthy();
+    });
+  });
+
+  it("展示采样覆盖率条（表/列占比与双重验证列数）", async () => {
+    mockedCoverage.mockResolvedValue({
+      source_id: null,
+      total_entities: 10,
+      sampled_entities: 4,
+      entity_coverage: 0.4,
+      total_columns: 100,
+      sampled_columns: 30,
+      column_coverage: 0.3,
+      verified_columns: 5,
+    });
+
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("采样覆盖率")).toBeTruthy();
+    });
+    expect(screen.getByText(/4\/10/)).toBeTruthy();
+    expect(screen.getByText(/30\/100/)).toBeTruthy();
+    expect(screen.getByText(/40\.0%/)).toBeTruthy();
+    expect(screen.getByText(/经 name\+sample 双重验证/)).toBeTruthy();
   });
 
   it("头部展示描述缺失统计卡（字段覆盖率/缺失字段/缺表描述/表总数）", async () => {
