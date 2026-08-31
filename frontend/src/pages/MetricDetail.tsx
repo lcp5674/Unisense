@@ -38,6 +38,7 @@ import {
   CheckCircleOutlined,
   DeleteOutlined,
   DatabaseOutlined,
+  PlusOutlined,
 } from "@ant-design/icons";
 import { usePermission } from "../hooks/usePermission";
 import {
@@ -64,6 +65,7 @@ import {
   listMeasureCatalogs,
   listMetricMounts,
   deleteMetricMount,
+  createMetricMount,
   listMetrics,
   listSubscriptions,
   listTerms,
@@ -153,6 +155,24 @@ const GROUP_DEFAULT_TAB: Record<RoleGroup, string> = {
 
 // 常用变更原因快捷选项：高频操作（改名/紧急发布）的原因输入可一键填充再编辑，避免每次手写
 const COMMON_CHANGE_REASONS = ["口径修正", "字段调整", "粒度调整", "单位变更", "逻辑优化", "需求变更"];
+
+// 时间粒度 code 集合（对齐注册向导 / 后端 infer_dict.TIME_GRAIN_CODES / 字典 granularity 种子）。
+// 方案 B 组合粒度：主粒度（时间频率语义）单选；业务实体粒度（医生/科室…）进「粒度维度」多选。
+const TIME_GRAIN_CODES = new Set([
+  "realtime", "minute", "hour", "day", "week", "month", "quarter", "year",
+]);
+
+// 挂载变体默认统计周期选项（对齐注册向导 PERIOD_OPTIONS / 字典 granularity 种子）。
+const MOUNT_PERIOD_OPTIONS = [
+  { value: "realtime", label: "实时 (realtime)" },
+  { value: "minute", label: "分钟 (minute)" },
+  { value: "hour", label: "小时 (hour)" },
+  { value: "day", label: "日 (day)" },
+  { value: "week", label: "周 (week)" },
+  { value: "month", label: "月 (month)" },
+  { value: "quarter", label: "季 (quarter)" },
+  { value: "year", label: "年 (year)" },
+];
 
 // 弹窗内 Select/AutoComplete 下拉面板自适应内容宽度（popupMatchSelectWidth=false）：
 // 长选项（如「去重计数 (COUNT_DISTINCT)」「供应商粒度 (supplier)」）不再被截断为省略号，
@@ -704,6 +724,20 @@ export function MetricDetail() {
   const [mounts, setMounts] = useState<MetricMount[]>([]);
   const [mountsLoading, setMountsLoading] = useState(false);
   const [unmounting, setUnmounting] = useState(false);
+  // 「新增挂载变体」弹窗（SQL 推断注册的指标同样支持追加多变体）：源表/度量列/主粒度/
+  // 粒度维度/周期/业务限定/变体责任方——与注册向导挂载行同款表单，提交调 POST /metric-mounts。
+  const [addMountOpen, setAddMountOpen] = useState(false);
+  const [addMountForm] = Form.useForm();
+  const [addMountSaving, setAddMountSaving] = useState(false);
+  const [addMountSrcOptions, setAddMountSrcOptions] = useState<
+    Array<{ value: string; label: string }>
+  >([]);
+  const [addMountColumnOptions, setAddMountColumnOptions] = useState<
+    Array<{ value: string; label: string }>
+  >([]);
+  const [addMountProductOwner, setAddMountProductOwner] = useState<RoleOwnerValue | undefined>(undefined);
+  const [addMountTechOwner, setAddMountTechOwner] = useState<RoleOwnerValue | undefined>(undefined);
+  const [addMountDwDeveloper, setAddMountDwDeveloper] = useState<RoleOwnerValue | undefined>(undefined);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [users, setUsers] = useState<UserBrief[]>([]);
   // 变体级责任方展示（方案 B）：id 可解析 → 平台用户；id 空但 name 非空 → 外部人员；
@@ -1076,6 +1110,98 @@ export function MetricDetail() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [code]);
+
+  // 「新增挂载变体」弹窗：源表惰性搜索（对齐编辑弹窗落地表模式——空关键词展开平台已采集表，输入即过滤）
+  async function handleAddMountSrcSearch(q: string) {
+    try {
+      const res = await listCatalogs({ keyword: q.trim() || undefined, source_status: "active" });
+      const items = Array.isArray(res) ? res : res.items ?? [];
+      const opts = items
+        .filter((c: { entity_type?: string }) => !c.entity_type || c.entity_type === "TABLE")
+        .map((c: { entity_name: string; source_name?: string | null }) => ({
+          value: c.entity_name,
+          label: c.source_name ? `${c.entity_name}（${c.source_name}）` : c.entity_name,
+        }));
+      setAddMountSrcOptions(opts);
+    } catch {
+      // 搜索失败静默：可手输完整表名
+    }
+  }
+
+  // 选中源表后加载该表列（供度量列点选，对齐注册向导挂载行）；表变更清空已选列
+  async function handleAddMountSrcSelect(v: string) {
+    addMountForm.setFieldValue("source_column", undefined);
+    if (!v) {
+      setAddMountColumnOptions([]);
+      return;
+    }
+    try {
+      const res = await listCatalogs({
+        entity_type: "TABLE",
+        keyword: v,
+        page_size: 5,
+        source_status: "active",
+      });
+      const items = Array.isArray(res) ? res : res.items ?? [];
+      const catalog = items.find((it: { entity_name: string }) => it.entity_name === v);
+      const cols =
+        (catalog as { schema_def?: { columns?: Array<{ name: string; type?: string; comment?: string }> } } | undefined)
+          ?.schema_def?.columns
+        || (catalog as { schema_json?: { columns?: Array<{ name: string; type?: string; comment?: string }> } } | undefined)
+          ?.schema_json?.columns
+        || [];
+      setAddMountColumnOptions(
+        cols.map((col) => ({
+          value: col.name,
+          label: col.type ? `${col.name} (${col.type})${col.comment ? " — " + col.comment : ""}` : col.name,
+        })),
+      );
+    } catch {
+      setAddMountColumnOptions([]);
+    }
+  }
+
+  // 提交新增挂载变体：POST /metric-mounts（PUBLISHED 新增变体属非破坏——不影响现有消费底座，直接生效）
+  async function handleAddMountSubmit() {
+    if (!metric) return;
+    const values = await addMountForm.validateFields();
+    setAddMountSaving(true);
+    try {
+      await createMetricMount({
+        metric_id: metric.id,
+        source_table: values.source_table,
+        source_column: values.source_column,
+        granularity: values.granularity,
+        granularity_dims:
+          Array.isArray(values.granularity_dims) && values.granularity_dims.length
+            ? values.granularity_dims
+            : null,
+        default_period: values.default_period ?? null,
+        domain: values.domain || metric.domain,
+        business_filter: values.business_filter || null,
+        product_owner_id: addMountProductOwner?.id ?? null,
+        tech_owner_id: addMountTechOwner?.id ?? null,
+        dw_developer_id: addMountDwDeveloper?.id ?? null,
+        product_owner_name: addMountProductOwner?.name ?? null,
+        tech_owner_name: addMountTechOwner?.name ?? null,
+        dw_developer_name: addMountDwDeveloper?.name ?? null,
+      });
+      message.success("已新增挂载变体");
+      setAddMountOpen(false);
+      addMountForm.resetFields();
+      setAddMountColumnOptions([]);
+      setAddMountProductOwner(undefined);
+      setAddMountTechOwner(undefined);
+      setAddMountDwDeveloper(undefined);
+      if (metric?.id != null) await loadMounts(metric.id);
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "新增挂载变体失败",
+      );
+    } finally {
+      setAddMountSaving(false);
+    }
+  }
 
   async function runAction(fn: () => Promise<unknown>, okMsg: string) {
     setBusy(true);
@@ -2384,6 +2510,22 @@ export function MetricDetail() {
         style={{ marginBottom: 16 }}
         title="挂载实体（OneData 挂载层）"
         loading={mountsLoading}
+        extra={
+          metric?.type === "derived" ? (
+            <Button
+              size="small"
+              type="primary"
+              ghost
+              icon={<PlusOutlined />}
+              onClick={() => {
+                addMountForm.setFieldsValue({ domain: metric.domain });
+                setAddMountOpen(true);
+              }}
+            >
+              新增挂载变体
+            </Button>
+          ) : undefined
+        }
       >
         {mounts.length === 0 ? (
           <Typography.Text type="secondary">
@@ -2475,6 +2617,159 @@ export function MetricDetail() {
           })
         )}
       </Card>
+
+      {/* 「新增挂载变体」弹窗：为派生指标追加多变体（SQL 推断注册的指标同样支持）。
+          表单与注册向导挂载行同款——源表/度量列/主粒度/粒度维度/周期/业务域/限定/变体责任方。
+          PUBLISHED 新增变体属非破坏（不影响现有消费底座），直接生效。 */}
+      <Modal
+        title="新增挂载变体"
+        open={addMountOpen}
+        onOk={handleAddMountSubmit}
+        confirmLoading={addMountSaving}
+        onCancel={() => {
+          setAddMountOpen(false);
+          addMountForm.resetFields();
+          setAddMountColumnOptions([]);
+          setAddMountProductOwner(undefined);
+          setAddMountTechOwner(undefined);
+          setAddMountDwDeveloper(undefined);
+        }}
+        okText="新增挂载"
+        cancelText="取消"
+        width={640}
+      >
+        <Paragraph type="secondary" style={{ marginTop: 0 }}>
+          为派生指标追加一个挂载变体（源表 + 粒度组合）。已发布指标新增变体属非破坏性变更——
+          不影响现有消费底座，直接生效；变体级责任方留空则继承指标级。
+        </Paragraph>
+        <Form form={addMountForm} layout="vertical" style={{ marginTop: 8 }}>
+          <Form.Item
+            name="source_table"
+            label="源表"
+            rules={[{ required: true, message: "请选择或输入源表" }]}
+            extra="选择平台已采集表（自动带出列），或直接输入完整表名"
+            style={{ marginBottom: 8 }}
+          >
+            <AutoComplete
+              data-testid="addMountSourceTable"
+              options={addMountSrcOptions}
+              onSearch={(v) => {
+                if (v.trim()) handleAddMountSrcSearch(v.trim());
+              }}
+              onSelect={handleAddMountSrcSelect}
+              onOpenChange={(open) => {
+                if (open && !addMountSrcOptions.length) handleAddMountSrcSearch("");
+              }}
+              placeholder="搜索或输入源表（如 dwd.sales_detail）"
+              allowClear
+              style={{ width: "100%" }}
+              {...DROPDOWN_FULL_WIDTH}
+            />
+          </Form.Item>
+          <Form.Item
+            name="source_column"
+            label="度量列"
+            rules={[{ required: true, message: "请选择或输入度量列" }]}
+            extra={
+              addMountColumnOptions.length
+                ? "选择源表后自动带出该表列；也可直接输入列名"
+                : "选择源表后自动带出列；未采集可直接输入列名"
+            }
+            style={{ marginBottom: 8 }}
+          >
+            <AutoComplete
+              data-testid="addMountSourceColumn"
+              options={addMountColumnOptions}
+              placeholder={
+                addMountColumnOptions.length > 0 ? "选择度量列，或输入自定义列名" : "选择源表后自动带出列"
+              }
+              allowClear
+              style={{ width: "100%" }}
+              {...DROPDOWN_FULL_WIDTH}
+            />
+          </Form.Item>
+          <Space size={16} style={{ width: "100%" }} wrap>
+            <Form.Item
+              name="granularity"
+              label="主粒度"
+              rules={[{ required: true, message: "请选择主粒度" }]}
+              style={{ marginBottom: 8, minWidth: 200, flex: 1 }}
+              extra="时间频率（如 月/日）"
+            >
+              <Select
+                data-testid="addMountGranularity"
+                showSearch
+                placeholder="选择主粒度"
+                options={editGranularityOptions.filter((o) => TIME_GRAIN_CODES.has(o.value))}
+                optionFilterProp="label"
+                {...DROPDOWN_FULL_WIDTH}
+              />
+            </Form.Item>
+            <Form.Item
+              name="granularity_dims"
+              label="粒度维度"
+              style={{ marginBottom: 8, minWidth: 200, flex: 1 }}
+              extra="业务实体（可多选 + 手输，如 医院/科室）"
+            >
+              <Select
+                data-testid="addMountGrainDims"
+                mode="tags"
+                showSearch
+                placeholder="选择或输入粒度维度"
+                options={editGranularityOptions.filter((o) => !TIME_GRAIN_CODES.has(o.value))}
+                optionFilterProp="label"
+                {...DROPDOWN_FULL_WIDTH}
+              />
+            </Form.Item>
+          </Space>
+          <Space size={16} style={{ width: "100%" }} wrap>
+            <Form.Item
+              name="default_period"
+              label="默认周期"
+              style={{ marginBottom: 8, minWidth: 160, flex: 1 }}
+            >
+              <Select
+                allowClear
+                placeholder="选择默认周期"
+                options={MOUNT_PERIOD_OPTIONS}
+                {...DROPDOWN_FULL_WIDTH}
+              />
+            </Form.Item>
+            <Form.Item name="domain" label="业务域" style={{ marginBottom: 8, minWidth: 160, flex: 1 }}>
+              <Input placeholder="业务域（默认继承指标域）" />
+            </Form.Item>
+          </Space>
+          <Form.Item name="business_filter" label="业务限定" style={{ marginBottom: 8 }}>
+            <Input placeholder="变体级业务限定（如 病种=门特；留空继承指标级）" />
+          </Form.Item>
+          <Space size={12} style={{ width: "100%" }} wrap>
+            <Form.Item label="产品需求方" style={{ marginBottom: 8, minWidth: 200, flex: 1 }}>
+              <RoleOwnerSelect
+                value={addMountProductOwner}
+                onChange={setAddMountProductOwner}
+                users={users}
+                placeholder="变体级产品需求方（留空继承指标级）"
+              />
+            </Form.Item>
+            <Form.Item label="技术方" style={{ marginBottom: 8, minWidth: 200, flex: 1 }}>
+              <RoleOwnerSelect
+                value={addMountTechOwner}
+                onChange={setAddMountTechOwner}
+                users={users}
+                placeholder="变体级技术方（留空继承指标级）"
+              />
+            </Form.Item>
+            <Form.Item label="数仓开发" style={{ marginBottom: 8, minWidth: 200, flex: 1 }}>
+              <RoleOwnerSelect
+                value={addMountDwDeveloper}
+                onChange={setAddMountDwDeveloper}
+                users={users}
+                placeholder="变体级数仓开发（留空继承指标级）"
+              />
+            </Form.Item>
+          </Space>
+        </Form>
+      </Modal>
 
       {/* 业务描述（治理补充）：展示已有描述；有权限时可 LLM 推断生成（能力对齐资产地图） */}
       <Card

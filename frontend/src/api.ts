@@ -2236,6 +2236,30 @@ export async function deleteMetricMount(mountId: number): Promise<void> {
   return request<void>(`${API_BASE}/metric-mounts/${mountId}`, { method: "DELETE" });
 }
 
+/** 新增挂载变体（详情页「追加挂载」）：派生指标可追加多个挂载实体（一指标多变体）。
+ *  PUBLISHED 指标新增变体属非破坏（不影响现有消费底座），直接生效。 */
+export async function createMetricMount(payload: {
+  metric_id: number;
+  source_table: string;
+  source_column: string;
+  granularity: string;
+  granularity_dims?: string[] | null;
+  default_period?: string | null;
+  domain: string;
+  business_filter?: string | null;
+  product_owner_id?: number | null;
+  tech_owner_id?: number | null;
+  dw_developer_id?: number | null;
+  product_owner_name?: string | null;
+  tech_owner_name?: string | null;
+  dw_developer_name?: string | null;
+}): Promise<MetricMount> {
+  return request<MetricMount>(`${API_BASE}/metric-mounts`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function listDimensionMembers(
   dimCode: string,
 ): Promise<{ items: DimensionMember[]; total: number }> {

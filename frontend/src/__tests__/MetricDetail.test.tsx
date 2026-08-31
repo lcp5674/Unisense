@@ -16,6 +16,7 @@ vi.mock("../api", () => ({
   listMeasureCatalogs: vi.fn().mockResolvedValue({ items: [], total: 0, page: 1, page_size: 200 }),
   listMetricMounts: vi.fn().mockResolvedValue({ items: [], total: 0 }),
   deleteMetricMount: vi.fn().mockResolvedValue(undefined),
+  createMetricMount: vi.fn().mockResolvedValue({ id: 99, metric_id: 1 }),
   listCatalogs: vi.fn().mockResolvedValue({ items: [] }),
   getMetricHealth: vi.fn(),
   listDictItems: vi.fn(),
@@ -82,6 +83,7 @@ import {
   listMeasureCatalogs,
   listMetricMounts,
   deleteMetricMount,
+  createMetricMount,
   listCatalogs,
   getMetricHealth,
   listUsers,
@@ -125,6 +127,7 @@ const mockedListMetrics = vi.mocked(listMetrics);
 const mockedListMeasureCatalogs = vi.mocked(listMeasureCatalogs);
 const mockedListMetricMounts = vi.mocked(listMetricMounts);
 const mockedDeleteMetricMount = vi.mocked(deleteMetricMount);
+const mockedCreateMetricMount = vi.mocked(createMetricMount);
 const mockedFavorites = vi.mocked(listFavorites);
 const mockedHealth = vi.mocked(getMetricHealth);
 const mockedUsers = vi.mocked(listUsers);
@@ -2986,6 +2989,97 @@ describe("MetricDetail 按钮级权限过滤", () => {
     await waitFor(() => expect(mockedDeleteMetricMount).toHaveBeenCalledWith(7));
     expect(mockedUpdateMetric).not.toHaveBeenCalled();
     // 解除成功后刷新挂载列表（解除前已 load 一次，解除后应多一次）
+    await waitFor(() =>
+      expect(mockedListMetricMounts.mock.calls.length).toBe(beforeMountsCalls + 1),
+    );
+  });
+
+  // 「新增挂载变体」：SQL 推断注册的派生指标同样支持追加多变体（后端 POST /metric-mounts
+  // 早已支持一指标多挂载，此前前端详情页无追加入口——仅展示/解除）。原子不显示（挂载仅派生）。
+  it("原子指标不显示「新增挂载变体」按钮（挂载仅派生指标）", async () => {
+    mockedCreateMetricMount.mockClear();
+    mockedGetMetric.mockResolvedValue({ ...metric, type: "atomic" });
+    mockedListMetricMounts.mockResolvedValue({ items: [], total: 0 });
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("挂载实体（OneData 挂载层）");
+    expect(screen.queryByRole("button", { name: /新增挂载变体/ })).toBeNull();
+  });
+
+  it("派生指标新增挂载变体：填源表/列/主粒度/粒度维度提交 POST /metric-mounts 并刷新挂载列表", async () => {
+    mockedCreateMetricMount.mockClear();
+    mockedGetMetric.mockResolvedValue({ ...metric, type: "derived" });
+    mockedListMetricMounts.mockResolvedValue({ items: [], total: 0 });
+    mockedDictItems.mockResolvedValue([
+      { dict_type: "granularity", code: "day", label: "日", status: "active" },
+      { dict_type: "granularity", code: "month", label: "月", status: "active" },
+      { dict_type: "granularity", code: "hospital", label: "医院", status: "active" },
+    ] as never);
+    mockedCatalogs.mockResolvedValue({
+      items: [
+        {
+          entity_name: "dwd.hospital_fee",
+          entity_type: "TABLE",
+          source_name: "hive",
+          schema_def: { columns: [{ name: "fee", type: "decimal" }] },
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    } as never);
+    mockedDomainTree.mockResolvedValue([]);
+    mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
+    renderWithPerms(["metric:create"]);
+    await screen.findByText("挂载实体（OneData 挂载层）");
+    const beforeMountsCalls = mockedListMetricMounts.mock.calls.length;
+    // 打开「新增挂载变体」弹窗（仅派生指标显示按钮）
+    fireEvent.click(screen.getByRole("button", { name: /新增挂载变体/ }));
+    // Modal title 与挂载卡按钮文本相同，用 .ant-modal-title 定位确认弹窗已打开
+    await waitFor(() => expect(document.querySelector(".ant-modal-title")).toBeTruthy());
+    // 源表：输入触发搜索 → 选中触发列加载（AutoComplete testid 落在外层，取内部 input）
+    fireEvent.change(
+      (screen.getByTestId("addMountSourceTable") as HTMLElement).querySelector("input") as HTMLElement,
+      { target: { value: "dwd.hospital_fee" } },
+    );
+    fireEvent.click(await screen.findByText("dwd.hospital_fee（hive）"));
+    // 度量列：打开下拉（聚焦触发）后点选列选项
+    const colInput = (screen.getByTestId("addMountSourceColumn") as HTMLElement).querySelector(
+      "input",
+    ) as HTMLElement;
+    fireEvent.mouseDown(colInput);
+    fireEvent.focus(colInput);
+    fireEvent.click(await screen.findByText("fee (decimal)"));
+    // 主粒度：打开下拉点选「月 (month)」（字典时间粒度）
+    fireEvent.mouseDown(
+      (screen.getByTestId("addMountGranularity") as HTMLElement).querySelector(
+        ".ant-select-selector",
+      ) as HTMLElement,
+    );
+    fireEvent.click(await screen.findByText("月 (month)"));
+    // 粒度维度：打开下拉点选「医院 (hospital)」（字典业务实体粒度）
+    fireEvent.mouseDown(
+      (screen.getByTestId("addMountGrainDims") as HTMLElement).querySelector(
+        ".ant-select-selector",
+      ) as HTMLElement,
+    );
+    fireEvent.click(await screen.findByText("医院 (hospital)"));
+    // 提交：POST /metric-mounts（payload 含 metric_id + 源表/列/主粒度/粒度维度/域）
+    fireEvent.click(screen.getByRole("button", { name: /^新增挂载$/ }));
+    await waitFor(() => expect(mockedCreateMetricMount).toHaveBeenCalled());
+    expect(mockedCreateMetricMount).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metric_id: 1,
+        source_table: "dwd.hospital_fee",
+        source_column: "fee",
+        granularity: "month",
+        granularity_dims: ["hospital"],
+        default_period: null,
+        domain: "outpatient",
+      }),
+    );
+    // 成功后关闭弹窗并刷新挂载列表（打开前已 load 一次，提交后应多一次）
     await waitFor(() =>
       expect(mockedListMetricMounts.mock.calls.length).toBe(beforeMountsCalls + 1),
     );
