@@ -144,6 +144,75 @@ function LoginPage({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
   return (
     <div className="login-wrap">
       <div className="login-chassis">
+        {/* 血缘流动拓扑背景（纯装饰层，零交互逻辑改动）：数据源→指标→治理→消费 */}
+        <svg
+          className="login-network"
+          viewBox="0 0 800 600"
+          preserveAspectRatio="xMidYMid slice"
+          aria-hidden="true"
+        >
+          <g className="ws-net-edges">
+            <path
+              d="M130 150 C 220 150, 270 190, 350 210"
+              className="ws-edge ws-edge-src"
+              style={{ animationDelay: "0s", animationDuration: "2.6s" }}
+            />
+            <path
+              d="M180 280 C 250 260, 290 230, 350 210"
+              className="ws-edge ws-edge-src"
+              style={{ animationDelay: "0.4s", animationDuration: "3.2s" }}
+            />
+            <path
+              d="M180 280 C 260 300, 300 340, 370 360"
+              className="ws-edge ws-edge-src"
+              style={{ animationDelay: "0.8s", animationDuration: "2.9s" }}
+            />
+            <path
+              d="M140 420 C 230 420, 290 390, 370 360"
+              className="ws-edge ws-edge-src"
+              style={{ animationDelay: "1.2s", animationDuration: "3.5s" }}
+            />
+            <path
+              d="M350 210 C 440 170, 500 150, 580 150"
+              className="ws-edge ws-edge-mid"
+              style={{ animationDelay: "0.2s", animationDuration: "3.8s" }}
+            />
+            <path
+              d="M350 210 C 450 240, 500 320, 590 340"
+              className="ws-edge ws-edge-mid"
+              style={{ animationDelay: "0.6s", animationDuration: "4.2s" }}
+            />
+            <path
+              d="M370 360 C 450 370, 500 350, 590 340"
+              className="ws-edge ws-edge-mid"
+              style={{ animationDelay: "1s", animationDuration: "3.6s" }}
+            />
+            <path
+              d="M580 150 C 640 180, 670 230, 720 250"
+              className="ws-edge ws-edge-dst"
+              style={{ animationDelay: "0.5s", animationDuration: "4.5s" }}
+            />
+            <path
+              d="M590 340 C 640 310, 670 270, 720 250"
+              className="ws-edge ws-edge-dst"
+              style={{ animationDelay: "0.9s", animationDuration: "4s" }}
+            />
+          </g>
+          <g className="ws-net-nodes">
+            <circle cx="130" cy="150" r="5" className="ws-node ws-node-src" style={{ animationDelay: "0s" }} />
+            <circle cx="180" cy="280" r="5" className="ws-node ws-node-src" style={{ animationDelay: "0.5s" }} />
+            <circle cx="140" cy="420" r="5" className="ws-node ws-node-src" style={{ animationDelay: "1s" }} />
+            <circle cx="350" cy="210" r="6.5" className="ws-node ws-node-mid" style={{ animationDelay: "0.3s" }} />
+            <circle cx="370" cy="360" r="6.5" className="ws-node ws-node-mid" style={{ animationDelay: "0.9s" }} />
+            <circle cx="580" cy="150" r="5" className="ws-node ws-node-gov" style={{ animationDelay: "0.6s" }} />
+            <circle cx="590" cy="340" r="5" className="ws-node ws-node-gov" style={{ animationDelay: "1.3s" }} />
+            <circle cx="720" cy="250" r="6" className="ws-node ws-node-dst" style={{ animationDelay: "0.2s" }} />
+            {/* 指标层信号辐射波纹（指标被持续消费/信任传播） */}
+            <circle cx="350" cy="210" r="9" className="ws-ripple" style={{ animationDelay: "0.4s" }} />
+            <circle cx="370" cy="360" r="9" className="ws-ripple" style={{ animationDelay: "1.4s" }} />
+          </g>
+        </svg>
+
         <div className="login-brand">
           <div className="brand-mark">W</div>
           <div>
