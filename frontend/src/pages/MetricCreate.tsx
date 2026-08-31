@@ -1174,13 +1174,14 @@ export function MetricCreate() {
     sqlInferUseLlmRef.current = useLlm;
     setSqlInferring(true);
     setDomainSuggesting(true);
-    let effectiveDomain = selectedDomain;
+    let effectiveDomain =
+      selectedDomain && selectedDomain !== "uncategorized" ? selectedDomain : "";
     // ① 业务域建议——失败不阻断主推断（域建议只是辅助）
     try {
       const suggestion = await suggestDomain({ sql });
       if (suggestion.status === "unique" || suggestion.status === "llm") {
         const dom = suggestion.domain;
-        if (dom) {
+        if (dom && dom.code && dom.code !== "uncategorized") {
           if (!effectiveDomain) {
             await applyDomainSuggestion(dom);
             effectiveDomain = dom.code;
@@ -1313,11 +1314,13 @@ export function MetricCreate() {
         // 方案 A：SQL 推断候选一律派生（原子只从逻辑度量目录创建）——默认勾选派生基础候选
         new Set(result.candidates.filter((c) => c.type === "derived").map((c) => c.key))
       );
-      // 域建议：未选域且后端建议唯一/LLM 域 → 自动应用（对齐 handleSqlInfer 流程）；
-      // 建议失败（none）→ 强制先选业务域（方案 B 补强），避免无域结果 → uncategorized 编码
+      // 域建议：未选域（含「未分类」占位，视同未选——编码首段是业务域，占位域会让
+      // 用户拿 uncategorized 编码）且后端建议唯一/LLM 域 → 自动应用（对齐 handleSqlInfer）；
+      // 建议失败（none）或建议域本身也是未分类 → 强制先选业务域（方案 B 补强）
       const dom = result.domain;
-      if (!selectedDomain && dom) {
-        if (dom.code && (dom.status === "unique" || dom.status === "llm")) {
+      const isPlaceholderDomain = !selectedDomain || selectedDomain === "uncategorized";
+      if (isPlaceholderDomain && dom) {
+        if (dom.code && dom.code !== "uncategorized" && (dom.status === "unique" || dom.status === "llm")) {
           await applyDomainSuggestion({
             code: dom.code,
             name: dom.name || dom.code,
@@ -1328,9 +1331,9 @@ export function MetricCreate() {
         } else if (dom.status === "multiple" && dom.candidates.length > 0) {
           setCandidateCandidates(dom.candidates);
           setCandidateOpen(true);
-        } else if (!dom.code) {
-          // 后端未反查到域（status=none/空）→ 强制先选域；候选不依赖域，确认后
-          // selectedDomain 更新，resolveCandidateCode 自动用新域拼 4 段编码
+        } else if (!dom.code || dom.code === "uncategorized") {
+          // 后端未反查到域（status=none/空）或建议域也是未分类 → 强制先选域；
+          // 候选不依赖域，确认后 selectedDomain 更新，resolveCandidateCode 自动用新域拼 4 段编码
           setForceDomainMode("batch");
           setForceDomainValue("");
           setForceDomainOpen(true);
@@ -1457,7 +1460,11 @@ export function MetricCreate() {
           .replace(/^(dwd_|ods_|dws_|ads_|dim_|tmp_)/, "")
           .split("_")[0]
       : "entity";
-    const measure = (c.measure_column || "metric").replace(/_/g, "").toLowerCase();
+    // 度量段锚点：优先后端编码锚点 code_col（条件计数时=投影别名 AS xxx_cnt_day），
+    // 其次 alias，最后 measure_column——避免条件计数候选全落 "*" 导致编码重复。
+    const measure = (c.code_col || c.alias || c.measure_column || "metric")
+      .replace(/_/g, "")
+      .toLowerCase();
     return [selectedDomain, biz || "entity", measure, c.period || "day"].join("_");
   }
 

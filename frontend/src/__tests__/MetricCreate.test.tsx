@@ -2831,6 +2831,54 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     });
   });
 
+  it("批量创建：条件计数候选编码用 code_col 别名锚点（P：不再全落 metric 撞码）", async () => {
+    mockedParseSqlBatch.mockResolvedValueOnce({
+      ...SQL_BATCH_RESULT,
+      statements: [
+        {
+          index: 0,
+          sql: "SELECT expert_id, SUM(CASE WHEN create_date='2026-01-01' THEN 1 ELSE 0 END) AS expert_consultation_cnt_day FROM wedw_dw.wy_order_info GROUP BY expert_id",
+          source_tables: ["wedw_dw.wy_order_info"],
+          measure_count: 1,
+          group_by: ["expert_id"],
+        },
+      ],
+      candidates: [
+        {
+          ...SQL_BATCH_RESULT.candidates[0],
+          key: "0:expert_consultation_cnt_day",
+          metric_code: null as unknown as string,
+          name: "当日问诊次数",
+          source_table: "wedw_dw.wy_order_info",
+          measure_column: "*",
+          code_col: "expert_consultation_cnt_day",
+          alias: "expert_consultation_cnt_day",
+          definition_json: { expression: "SUM(CASE WHEN create_date='2026-01-01' THEN 1 ELSE 0 END)" },
+          suggested_domain_code: null,
+        },
+      ],
+    });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openSqlInfer();
+    fireEvent.click(screen.getByText("批量解析"));
+    fireEvent.change(screen.getByPlaceholderText(/批量解析：粘贴含多个 SELECT/), {
+      target: {
+        value: "SELECT expert_id, SUM(CASE WHEN create_date='2026-01-01' THEN 1 ELSE 0 END) AS expert_consultation_cnt_day FROM wedw_dw.wy_order_info GROUP BY expert_id",
+      },
+    });
+    fireEvent.click(screen.getByText("解析候选"));
+    await screen.findByText(/共 1 个候选/);
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+    await waitFor(() => {
+      expect(mockedBatchFromSql).toHaveBeenCalled();
+      const body = mockedBatchFromSql.mock.calls[0][0];
+      // 条件计数（measure_column="*"）→ code_col 别名锚点：sales_wy_expertconsultationcntday_day
+      expect(body.candidates[0].metric_code).toBe("sales_wy_expertconsultationcntday_day");
+    });
+  });
+
   it("批量创建：候选周期行内可编辑，提交携带修改后的 period（P2-9/R6）", async () => {
     renderPage();
     await screen.findByText("注册指标（草稿）");

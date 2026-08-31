@@ -851,9 +851,15 @@ def infer_metric(
     eff_table = profile.get("source_table") or (
         sql_profile.source_tables[0] if sql_profile and sql_profile.source_tables else None
     )
-    eff_measure = profile.get("measure_column") or (
-        sql_profile.measures[0]["column"] if sql_profile and sql_profile.measures else None
-    )
+    # 度量列锚点：条件计数（`SUM(CASE WHEN ... THEN 1 END)`）解析列为 ``*``——用投影
+    # 别名作展示/编码载体（`AS expert_consultation_cnt_day`），否则前端回填 ``*``、
+    # 编码第 3 段全落 ``*`` 撞码（对齐批量 _build_derived_candidate 的 code_col 语义）。
+    eff_measure = profile.get("measure_column")
+    if (not eff_measure or eff_measure == "*") and sql_profile and sql_profile.measures:
+        _m0 = sql_profile.measures[0]
+        eff_measure = (
+            (_m0.get("alias") or _m0["column"]) if _m0["column"] == "*" else _m0["column"]
+        )
     table_field = (
         _field(eff_table, "sql_parse" if eff_table != profile.get("source_table") else "input", 0.9,
                "SQL 解析源表" if eff_table != profile.get("source_table") else "用户指定源表")
@@ -903,6 +909,15 @@ def infer_metric(
     period = profile.get("period")
     if not source_table and sql_profile and sql_profile.source_tables:
         source_table = sql_profile.source_tables[0]
+    # 条件计数（解析列 ``*``）用投影别名作编码第 3 段锚点——`AS xxx_cnt_day` 是
+    # 这类度量唯一的语义载体（对齐批量 code_col 语义），否则 5 个条件计数全落 ``*``。
+    if (
+        measure_column == "*"
+        and sql_profile
+        and sql_profile.measures
+        and sql_profile.measures[0].get("alias")
+    ):
+        measure_column = sql_profile.measures[0]["alias"]
     metric_code: str | None = None
     segments = {"domain": domain_code, "biz_object": None, "measure": None, "period": period}
     if source_table and measure_column and period:

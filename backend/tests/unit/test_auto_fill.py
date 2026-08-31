@@ -86,6 +86,29 @@ class TestAutoFill:
         assert result["segments"]["domain"] == "sales"
         assert result["segments"]["biz_object"] == "sales"
 
+    def test_conditional_count_uses_alias_for_code_and_measure(self) -> None:
+        """条件计数（`SUM(CASE WHEN ... THEN 1 END)` 解析列为 ``*``）→ 编码第 3 段
+        与度量列展示用投影别名（`AS expert_consultation_cnt_day`），否则 N 个条件计数
+        全落 ``*`` 撞同一编码 / 前端回填 ``*``（对齐批量 code_col 语义）。"""
+        sql = (
+            "SELECT expert_id, "
+            "SUM(CASE WHEN create_date = '2026-01-01' THEN 1 ELSE 0 END) "
+            "  AS expert_consultation_cnt_day, "
+            "SUM(CASE WHEN consult_target_id = '4' THEN 1 ELSE 0 END) "
+            "  AS special_consult_cnt_day "
+            "FROM wedw_dw.wy_order_info A GROUP BY expert_id"
+        )
+        profile = build_profile(
+            source_table="wedw_dw.wy_order_info",
+            measure_column="*",
+            period="day",
+            sql=sql,
+        )
+        result = infer_metric(profile, domain_defaults={"domain": "medical"})
+        assert result["metric_code_suggestion"] == "medical_wy_expertconsultationcntday_day"
+        assert result["fields"]["measure_column"]["value"] == "expert_consultation_cnt_day"
+        assert result["segments"]["measure"] == "expertconsultationcntday"
+
     def test_with_domain_defaults(self) -> None:
         result = auto_fill(
             domain_code="finance",

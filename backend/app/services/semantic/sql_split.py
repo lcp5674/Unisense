@@ -833,6 +833,12 @@ def _build_derived_candidate(
         "deps_aliases": deps_aliases or None,
         # 投影别名（下沉聚合/派生列）：C 名称去重后缀与前端展示的业务标识
         "alias": alias,
+        # 编码锚点（P：候选 4 段编码第 3 段的度量段来源）——无真实度量列
+        # （``col == "*"`` 条件计数/`count(1)`）时为 alias（`AS xxx_cnt_day`），
+        # 否则为真实列。前端 resolveCandidateCode 优先取此字段，避免 N 个条件
+        # 计数候选全落 ``*`` → 前端拼码重复（此前候选仅暴露 measure_column=col，
+        # 前端拿不到别名锚点，5 个条件计数编码第 3 段全变 metric）。
+        "code_col": code_col,
     }
 
 

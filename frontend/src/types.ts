@@ -3008,6 +3008,10 @@ export interface SqlBatchCandidate {
   deps_aliases?: string[] | null;
   /** 投影别名（下沉聚合/派生列业务标识；名称去重后缀与展示用） */
   alias?: string | null;
+  /** 编码锚点（P：4 段编码第 3 段度量来源）——无真实度量列（条件计数/`count(1)`，
+      measure_column 为 "*"）时为投影别名 AS xxx_cnt_day，否则为真实列。前端
+      resolveCandidateCode 优先取此字段，避免 N 个条件计数候选拼码重复 */
+  code_col?: string | null;
   /** P0-2：口径三方责任（复合候选批量创建补齐；原子通常随创建人/域默认） */
   product_owner_id?: number | null;
   tech_owner_id?: number | null;

@@ -1139,6 +1139,42 @@ def test_build_derived_candidate_empty_domain_code_none() -> None:
     assert cand2["metric_code"] == "sales_order_amount_day"
 
 
+def test_build_derived_candidate_exposes_code_col_alias_for_conditional_count() -> None:
+    """P 编码锚点：条件计数（``col == "*"``）候选的 ``code_col`` = 投影别名——
+    前端 resolveCandidateCode 据此拼 4 段编码（N 个条件计数不再全落 ``*`` 撞码）。"""
+    from app.services.semantic.sql_split import _build_derived_candidate
+
+    cand = _build_derived_candidate(
+        idx=0,
+        measure={
+            "column": "*",
+            "agg": "SUM",
+            "alias": "expert_consultation_cnt_day",
+            "comment": "当日问诊次数",
+        },
+        table="wedw_dw.wy_order_info",
+        period="day",
+        domain_code="medical",
+        domain_defaults={},
+        time_column="dt",
+    )
+    # 条件计数：度量列占位 *、编码锚点=别名
+    assert cand["measure_column"] == "*"
+    assert cand["code_col"] == "expert_consultation_cnt_day"
+    # 普通聚合：编码锚点=真实列
+    cand2 = _build_derived_candidate(
+        idx=0,
+        measure={"column": "amount", "agg": "SUM"},
+        table="dwd_order_di",
+        period="day",
+        domain_code="sales",
+        domain_defaults={},
+        time_column="dt",
+    )
+    assert cand2["measure_column"] == "amount"
+    assert cand2["code_col"] == "amount"
+
+
 def test_apply_candidate_period_recomputes_type() -> None:
     """B2（方案 A）：LLM 覆盖周期后类型保持派生（日 = 派生最小周期，不降级为原子；
     复合保持复合）。"""
