@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, Cascader, message, Space, Descriptions, Popconfirm, Tooltip, Switch, Divider } from "antd";
-import { PlusOutlined, ArrowLeftOutlined, HeartOutlined, ReadOutlined, EditOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, Cascader, message, Space, Descriptions, Popconfirm, Tooltip, Switch, Divider, Segmented, Alert, Collapse } from "antd";
+import { PlusOutlined, ArrowLeftOutlined, HeartOutlined, ReadOutlined, EditOutlined, QuestionCircleOutlined } from "@ant-design/icons";
 import {
   listTemplates,
   createMetric,
@@ -87,6 +87,193 @@ const REQUIRED_FIELD_OPTIONS = [
 const requiredFieldLabel = (v: string) =>
   REQUIRED_FIELD_OPTIONS.find((o) => o.value === v)?.label ?? v;
 
+// 模板作用引导样例：说明「模板 = 标准指标样板，一键实例化」，并给出原子/派生/复合三类参考
+const TEMPLATE_SAMPLES: Array<{ tag: string; title: string; preset: string; result: string }> = [
+  {
+    tag: "原子",
+    title: "门诊支付金额（日）",
+    preset: "类型=原子指标 · 逻辑度量=支付金额(pay_amt) · 聚合=SUM · 单位=元 · 数仓层=DWS · 口径=SQL 模式",
+    result: "实例化得到 DRAFT 原子指标，自动继承逻辑度量的格式/单位/小数位，口径与必填字段按模板预填",
+  },
+  {
+    tag: "派生",
+    title: "科室维度支付金额（月）",
+    preset: "类型=派生指标 · 粒度=月 · 挂载实体=dws_hosp_pay_month（源表/度量列/默认周期） · 口径=表达式 sum(pay_amount)",
+    result: "实例化后自动落 metric_mount 挂载行，并生成「指标↔落地表」血缘边",
+  },
+  {
+    tag: "复合",
+    title: "门诊支付金额占比",
+    preset: "类型=复合指标 · 必填字段=依赖指标 · 口径=表达式 gmv / total_gmv",
+    result: "实例化时若未填依赖/表达式会被拦截，保证复合指标口径完整、可计算",
+  },
+];
+
+/** 口径模式：后端 definition_json 支持 sql / expression 双形态（schemas.py 校验），
+ *  JSON 仅为兜底输入形式——三种模式对齐注册指标页「口径定义模式」交互。 */
+type DefMode = "sql" | "expression" | "advanced";
+
+const DEF_MODE_OPTIONS = [
+  { value: "expression", label: "表达式模式" },
+  { value: "sql", label: "SQL 模式" },
+  { value: "advanced", label: "高级 JSON" },
+];
+
+const DEF_MODE_TAG: Record<DefMode, { label: string; color: string }> = {
+  sql: { label: "SQL 模式", color: "geekblue" },
+  expression: { label: "表达式模式", color: "cyan" },
+  advanced: { label: "高级 JSON", color: "purple" },
+};
+
+/** 口径主内容键（切换模式时仅替换这两个键，其余键如 source_tables/dw_definition 保留）。 */
+const CALIBER_KEYS = new Set(["sql", "expression"]);
+
+/** 依据口径内容反推展示模式（打开弹窗回填时按 sql / expression 判定，对齐注册页推断回填逻辑）。 */
+function detectDefMode(def?: Record<string, unknown> | null): DefMode {
+  if (!def) return "expression";
+  if (typeof def.sql === "string" && def.sql.trim()) return "sql";
+  if (typeof def.expression === "string" && def.expression.trim()) return "expression";
+  // 含其他口径键（base_atomic / dw_definition / pseudo_definition 等）→ 高级模式兜底，避免静默丢弃
+  return Object.keys(def).length ? "advanced" : "expression";
+}
+
+/** 合并口径：清空主口径键后写入当前模式的值（空值不写入，便于彻底清空口径）。 */
+function withCaliberBody(def: Record<string, unknown>, body: Record<string, unknown>): Record<string, unknown> {
+  const next: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(def)) if (!CALIBER_KEYS.has(k)) next[k] = v;
+  for (const [k, v] of Object.entries(body)) if (String(v ?? "").trim()) next[k] = v;
+  return next;
+}
+
+/** 口径模式编辑器（受控）：SQL 模式写 {sql}，表达式模式写 {expression, source_tables}，
+ *  高级 JSON 保留原文本域兜底（覆盖 base_atomic / dw_definition 等特殊键）。
+ *  onChange(next, error) —— error 非空表示高级模式 JSON 非法，父组件提交前须拦截。 */
+function DefinitionModeEditor({
+  mode,
+  onModeChange,
+  value,
+  onChange,
+}: {
+  mode: DefMode;
+  onModeChange: (m: DefMode) => void;
+  value: Record<string, unknown>;
+  onChange: (next: Record<string, unknown>, error?: string | null) => void;
+}) {
+  const [jsonText, setJsonText] = useState(() => JSON.stringify(value ?? {}, null, 2));
+  const [jsonError, setJsonError] = useState<string | null>(null);
+  // 外部值变化（切换弹窗/清空）时同步高级模式的文本域，避免展示旧内容
+  useEffect(() => {
+    if (mode === "advanced") return;
+    setJsonText(JSON.stringify(value ?? {}, null, 2));
+    setJsonError(null);
+  }, [mode, value]);
+
+  const str = (k: string) => (typeof value[k] === "string" ? (value[k] as string) : "");
+  const tables = (k: string) => (Array.isArray(value[k]) ? (value[k] as string[]) : []);
+
+  const applyJson = (text: string) => {
+    setJsonText(text);
+    if (!text.trim()) {
+      setJsonError(null);
+      onChange({}, null);
+      return;
+    }
+    try {
+      const parsed = JSON.parse(text);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        const msg = "口径需为 JSON 对象（如 {\"expression\": \"sum(amount)\"}）";
+        setJsonError(msg);
+        // 错误须回传父组件：否则提交时 editDefError/instDefError 仍为空，非法内容会被静默保存
+        onChange(value, msg);
+        return;
+      }
+      setJsonError(null);
+      onChange(parsed as Record<string, unknown>, null);
+    } catch (e) {
+      const msg = `JSON 格式错误：${e instanceof Error ? e.message : String(e)}`;
+      setJsonError(msg);
+      onChange(value, msg);
+    }
+  };
+
+  return (
+    <div style={{ width: "100%" }}>
+      <Segmented
+        block
+        value={mode}
+        onChange={(v) => onModeChange(v as DefMode)}
+        options={DEF_MODE_OPTIONS}
+      />
+      <div style={{ marginTop: 10 }}>
+        {mode === "sql" ? (
+          <>
+            <Input.TextArea
+              rows={4}
+              className="mono"
+              value={str("sql")}
+              maxLength={16384}
+              placeholder={"select\n  sum(pay_amount) as pay_amt\nfrom dwd_order_di\nwhere dt = '${bizdate}'\ngroup by hosp_code"}
+              onChange={(e) => onChange(withCaliberBody(value, { sql: e.target.value }))}
+            />
+            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+              保存时服务端用 sqlglot 校验语法（非法 SQL 会被拒绝），长度上限 16384 字符
+            </div>
+          </>
+        ) : mode === "expression" ? (
+          <Space direction="vertical" style={{ width: "100%" }} size={8}>
+            <Input
+              className="mono"
+              value={str("expression")}
+              placeholder="聚合/计算表达式，如 sum(pay_amount) 或 gmv / order_cnt"
+              onChange={(e) => onChange(withCaliberBody(value, { expression: e.target.value }))}
+            />
+            <Select
+              mode="tags"
+              style={{ width: "100%" }}
+              value={tables("source_tables")}
+              placeholder="源表（可选）：输入表名后回车，如 dwd_order_di"
+              onChange={(v: string[]) => {
+                if (!v?.length) {
+                  const { source_tables: _drop, ...rest } = value;
+                  onChange(rest);
+                  return;
+                }
+                onChange({ ...value, source_tables: v });
+              }}
+            />
+          </Space>
+        ) : (
+          <>
+            <Input.TextArea
+              rows={4}
+              className="mono"
+              value={jsonText}
+              placeholder='{"expression": "sum(pay_amount)", "source_tables": ["dwd_order_di"], "base_atomic": "active_doctor_daily"}'
+              onChange={(e) => applyJson(e.target.value)}
+            />
+            <Space size={8} style={{ marginTop: 4 }}>
+              <Button
+                size="small"
+                onClick={() => {
+                  try {
+                    setJsonText(JSON.stringify(JSON.parse(jsonText), null, 2));
+                    setJsonError(null);
+                  } catch {
+                    message.error("JSON 格式错误，无法格式化");
+                  }
+                }}
+              >
+                格式化 JSON
+              </Button>
+              {jsonError ? <span style={{ color: "#cf1322", fontSize: 12 }}>{jsonError}</span> : null}
+            </Space>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function Templates() {
   const [searchParams] = useSearchParams();
   const { can } = usePermission();
@@ -111,6 +298,10 @@ export function Templates() {
   const [total, setTotal] = useState(0);
   const [modalOpen, setModalOpen] = useState(false);
   const [instantiateTarget, setInstantiateTarget] = useState<MetricTemplate | null>(null);
+  // 实例化弹窗口径（按模式拆分编辑：sql / expression / advanced JSON，避免手搓 JSON 字符串）
+  const [instDef, setInstDef] = useState<Record<string, unknown>>({});
+  const [instDefMode, setInstDefMode] = useState<DefMode>("expression");
+  const [instDefError, setInstDefError] = useState<string | null>(null);
   // 模板收藏（C 层多资产收藏：TEMPLATE）
   const [favCodes, setFavCodes] = useState<Set<string>>(new Set());
   // 责任人人选（模板「负责人」指派下拉）
@@ -127,6 +318,10 @@ export function Templates() {
   const [editTpl, setEditTpl] = useState<MetricTemplate | null>(null);
   const [editSaving, setEditSaving] = useState(false);
   const [editForm] = Form.useForm();
+  // 编辑弹窗默认口径（与实例化弹窗同构：模式切换 + 结构化编辑）
+  const [editDef, setEditDef] = useState<Record<string, unknown>>({});
+  const [editDefMode, setEditDefMode] = useState<DefMode>("expression");
+  const [editDefError, setEditDefError] = useState<string | null>(null);
   const navigate = useNavigate();
   // 并发查询防竞态：只有最后一次发起的请求允许落地结果
   const loadSeq = useRef(0);
@@ -387,20 +582,16 @@ export function Templates() {
       payload.product_owner_name = (values.product_owner as RoleOwnerValue | undefined)?.name ?? undefined;
       payload.tech_owner_name = (values.tech_owner as RoleOwnerValue | undefined)?.name ?? undefined;
       payload.dw_developer_name = (values.dw_developer as RoleOwnerValue | undefined)?.name ?? undefined;
-      // 口径：弹窗输入优先（用户可接受模板默认或自行补充）；非法 JSON 拦截，避免静默创建"空心/错乱"指标
-      const rawDef = values.definition_json ? String(values.definition_json).trim() : "";
-      if (rawDef) {
-        try {
-          payload.definition_json = JSON.parse(rawDef) as Record<string, unknown>;
-        } catch {
-          setLoading(false);
-          message.error("口径定义 JSON 格式错误，请修正后再提交");
-          return;
-        }
-      } else {
-        payload.definition_json =
-          (instantiateTarget?.defaults_json?.definition_json as Record<string, unknown>) ?? {};
+      // 口径：弹窗按模式结构化编辑（SQL / 表达式 / 高级 JSON）；
+      // 高级模式 JSON 非法已由编辑器拦截提示，留空则回退模板默认口径，避免创建"空心"指标
+      if (instDefError) {
+        setLoading(false);
+        message.error("口径定义格式错误，请修正后再提交");
+        return;
       }
+      payload.definition_json = Object.keys(instDef).length
+        ? instDef
+        : ((instantiateTarget?.defaults_json?.definition_json as Record<string, unknown>) ?? {});
       // 从模板实例化：调用专用接口（后端合并模板默认字段）；无模板上下文时退回普通创建指标
       const created = instantiateTarget
         ? await instantiateTemplate(instantiateTarget.id, payload)
@@ -453,11 +644,13 @@ export function Templates() {
       dw_developer: tpl.dw_developer_id || tpl.dw_developer_name
         ? { id: tpl.dw_developer_id, name: tpl.dw_developer_name }
         : undefined,
-      // 口径预填模板默认（若模板未定义口径则为空，用户可在弹窗内补充——避免实例化出"空心"指标无血缘）
-      definition_json: tpl.defaults_json?.definition_json
-        ? JSON.stringify(tpl.defaults_json.definition_json, null, 2)
-        : "",
     });
+    // 口径预填模板默认（若模板未定义口径则为空，用户可在弹窗内补充——避免实例化出"空心"指标无血缘）；
+    // 按内容反推展示模式（SQL / 表达式 / 高级 JSON），对齐注册指标页口径回填
+    const def = (tpl.defaults_json?.definition_json as Record<string, unknown>) ?? {};
+    setInstDef(def);
+    setInstDefMode(detectDefMode(def));
+    setInstDefError(null);
     setModalOpen(true);
   }
 
@@ -498,10 +691,12 @@ export function Templates() {
       required_fields: tpl.required_fields ?? [],
       owner_id: tpl.owner_id,
       is_active: tpl.is_active,
-      definition_json: tpl.defaults_json?.definition_json
-        ? JSON.stringify(tpl.defaults_json.definition_json, null, 2)
-        : "",
     });
+    // 默认口径：按内容反推模式回填（SQL / 表达式 / 高级 JSON）
+    const def = (tpl.defaults_json?.definition_json as Record<string, unknown>) ?? {};
+    setEditDef(def);
+    setEditDefMode(detectDefMode(def));
+    setEditDefError(null);
   }
 
   // P2-13 提交模板编辑：仅发送实际变更字段（PATCH 语义），成功刷新列表
@@ -564,21 +759,17 @@ export function Templates() {
       if (values.required_fields !== undefined) {
         payload.required_fields = Array.isArray(values.required_fields) ? values.required_fields : [];
       }
-      // 口径 JSON：合法 JSON 才合并进 defaults_json（保留 defaults_json 其他键）
-      if (values.definition_json !== undefined) {
-        const raw = String(values.definition_json).trim();
-        if (raw) {
-          try {
-            const parsed = JSON.parse(raw);
-            payload.defaults_json = { ...editTpl.defaults_json, definition_json: parsed };
-          } catch {
-            message.error("口径 JSON 格式不正确，请检查后重试");
-            return;
-          }
-        } else {
-          const { definition_json: _drop, ...rest } = editTpl.defaults_json ?? {};
-          payload.defaults_json = rest;
-        }
+      // 默认口径：模式化编辑结果写入 defaults_json（保留 defaults_json 其他键）；
+      // 清空口径时移除 definition_json 键（而非写空对象）
+      if (editDefError) {
+        message.error("默认口径格式错误，请检查后重试");
+        return;
+      }
+      if (Object.keys(editDef).length) {
+        payload.defaults_json = { ...editTpl.defaults_json, definition_json: editDef };
+      } else {
+        const { definition_json: _drop, ...rest } = editTpl.defaults_json ?? {};
+        payload.defaults_json = rest;
       }
       const updated = await updateMetricTemplate(editTpl.id, payload);
       message.success(`模板「${updated.name}」已更新（v${updated.version}）`);
@@ -591,6 +782,21 @@ export function Templates() {
       setEditSaving(false);
     }
   }
+
+  // 详情弹窗：默认口径按模式展示——SQL/表达式模式只看该模式内容（不再暴露完整 JSON），
+  // 高级模式（含 base_atomic / 数仓口径等特殊键）才展示完整 JSON 原文
+  const detailDef = detailTpl?.defaults_json?.definition_json as Record<string, unknown> | undefined;
+  const detailDefMode: DefMode = detectDefMode(detailDef);
+  const detailDefBody = !detailDef
+    ? ""
+    : detailDefMode === "sql"
+      ? String(detailDef.sql ?? "")
+      : detailDefMode === "expression"
+        ? String(detailDef.expression ?? "")
+        : JSON.stringify(detailDef, null, 2);
+  const detailDefTables = Array.isArray(detailDef?.source_tables)
+    ? (detailDef?.source_tables as string[])
+    : [];
 
   const columns = [
     { title: "模板编码", dataIndex: "code", key: "code", render: (v: string) => <span className="mono">{v}</span> },
@@ -686,6 +892,50 @@ export function Templates() {
         </div>
         <Button icon={<PlusOutlined />} onClick={() => load()} loading={loading}>刷新</Button>
       </div>
+
+      {/* 模板作用引导 + 参考样例（默认收起，不干扰列表浏览） */}
+      <Collapse
+        ghost
+        style={{ marginBottom: 4 }}
+        items={[
+          {
+            key: "guide",
+            label: (
+              <span>
+                <QuestionCircleOutlined style={{ marginRight: 6 }} />
+                指标模板是什么？点击了解作用与参考样例
+              </span>
+            ),
+            children: (
+              <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                <Alert
+                  type="info"
+                  showIcon
+                  message="模板 = 指标的「样板」，实例化 = 一键克隆出规范指标"
+                  description="模板把域内的标准做法沉淀成一套预置值（指标类型 / 粒度 / 聚合 / 单位 / 数仓层 / 分级，外加默认口径与必填字段）。点「实例化指标」会按模板预填好表单，你微调后即可创建出符合规范的 DRAFT 指标，再走正常的评审 → 发布流程。适合把「同域指标口径统一」这件事固化下来复用，也方便新人照着样板快速完成首次注册。"
+                />
+                <div>
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>参考样例</div>
+                  {TEMPLATE_SAMPLES.map((s) => (
+                    <Card key={s.title} size="small" style={{ marginBottom: 8 }}>
+                      <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                        <Space size={8}>
+                          <Tag color={s.tag === "原子" ? "blue" : s.tag === "派生" ? "cyan" : "purple"}>
+                            {s.tag}指标模板
+                          </Tag>
+                          <span style={{ fontWeight: 600 }}>{s.title}</span>
+                        </Space>
+                        <div className="muted" style={{ fontSize: 12 }}>模板预设：{s.preset}</div>
+                        <div className="muted" style={{ fontSize: 12 }}>实例化后：{s.result}</div>
+                      </Space>
+                    </Card>
+                  ))}
+                </div>
+              </Space>
+            ),
+          },
+        ]}
+      />
 
       <Card>
         <div style={{ display: "flex", gap: 12, marginBottom: 12 }}>
@@ -904,14 +1154,17 @@ export function Templates() {
               <Select options={["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"].map((v) => ({ value: v }))} />
             </Form.Item>
             <Form.Item
-              name="definition_json"
-              label="口径定义（JSON，可留空用模板默认）"
+              label="口径定义（可留空用模板默认）"
               style={{ width: "100%", marginBottom: 8 }}
             >
-              <Input.TextArea
-                rows={3}
-                placeholder='{"expression": "sum(amount)", "source_tables": ["dwd_order_di"]}'
-                className="mono"
+              <DefinitionModeEditor
+                mode={instDefMode}
+                onModeChange={setInstDefMode}
+                value={instDef}
+                onChange={(next, err) => {
+                  setInstDef(next);
+                  setInstDefError(err ?? null);
+                }}
               />
             </Form.Item>
             {/* 口径三方责任（可选）：模板预设的默认责任方，实例化时可改 */}
@@ -978,11 +1231,23 @@ export function Templates() {
                 {detailTpl.description || <span className="muted">—</span>}
               </Descriptions.Item>
             </Descriptions>
-            {detailTpl.defaults_json?.definition_json ? (
+            {detailDef && Object.keys(detailDef).length ? (
               <div>
-                <div style={{ fontWeight: 600, marginBottom: 4 }}>默认口径（实例化时自动合并）</div>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                  默认口径（实例化时自动合并）
+                  <Tag color={DEF_MODE_TAG[detailDefMode].color} style={{ marginLeft: 6 }}>
+                    {DEF_MODE_TAG[detailDefMode].label}
+                  </Tag>
+                </div>
+                {detailDefTables.length ? (
+                  <div style={{ marginBottom: 4 }}>
+                    {detailDefTables.map((t) => (
+                      <Tag key={t}>{t}</Tag>
+                    ))}
+                  </div>
+                ) : null}
                 <pre className="mono" style={{ fontSize: 12, maxHeight: 200, overflow: "auto", background: "#fafafa", padding: 8, borderRadius: 6, margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", maxWidth: "100%", boxSizing: "border-box" }}>
-                  {JSON.stringify(detailTpl.defaults_json.definition_json, null, 2)}
+                  {detailDefBody}
                 </pre>
               </div>
             ) : null}
@@ -1115,12 +1380,19 @@ export function Templates() {
               <Switch checkedChildren="启用" unCheckedChildren="停用" />
             </Form.Item>
             <Form.Item
-              name="definition_json"
-              label="默认口径（JSON，实例化时自动合并）"
-              extra="仅编辑口径子字段；JSON 非法将阻止保存"
+              label="默认口径（实例化时自动合并）"
+              extra="SQL 模式/表达式模式结构化填写；需定义 base_atomic、数仓口径等特殊键时切「高级 JSON」"
               style={{ width: "100%" }}
             >
-              <Input.TextArea rows={3} placeholder='{"expression": "sum(amount)", "source_tables": ["dwd_order_di"]}' className="mono" />
+              <DefinitionModeEditor
+                mode={editDefMode}
+                onModeChange={setEditDefMode}
+                value={editDef}
+                onChange={(next, err) => {
+                  setEditDef(next);
+                  setEditDefError(err ?? null);
+                }}
+              />
             </Form.Item>
             {/* 口径三方责任预设（可选）：实例化时作为指标默认责任方 */}
             <Divider plain style={{ margin: "8px 0" }}>口径三方责任预设（可选）</Divider>

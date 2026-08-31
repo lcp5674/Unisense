@@ -520,7 +520,6 @@ describe("Templates 页面", () => {
     expect(screen.getByText("指标名称")).toBeTruthy();
     expect(screen.getByText("统计粒度")).toBeTruthy();
   });
-});
 
   it("启用/停用模板：点状态 Tag 确认后调用 setTemplateActive 并刷新行状态", async () => {
     mockedSetActive.mockResolvedValue({ ...TPLS[0], is_active: false });
@@ -554,3 +553,135 @@ describe("Templates 页面", () => {
     // Tooltip 提示"已停用"（hover 触发，按钮禁用为核心断言）
     expect(within(row).getByText(/实例化指标/)).toBeTruthy();
   });
+
+  it("模板作用引导：展开后展示作用说明与原子/派生/复合三类参考样例", async () => {
+    render(
+      <MemoryRouter initialEntries={["/templates"]}>
+        <Templates />
+      </MemoryRouter>,
+    );
+    await screen.findByText("tpl_gmv_daily");
+    // 引导默认收起：未展开时不展示样例标题
+    expect(screen.queryByText("门诊支付金额（日）")).toBeNull();
+    const header = screen.getByText(/指标模板是什么/).closest(".ant-collapse-header") as HTMLElement;
+    fireEvent.click(header);
+    // 展开后：作用说明 + 三类样例
+    expect(await screen.findByText(/模板 = 指标的「样板」/)).toBeTruthy();
+    expect(screen.getByText("门诊支付金额（日）")).toBeTruthy();
+    expect(screen.getByText("科室维度支付金额（月）")).toBeTruthy();
+    expect(screen.getByText("门诊支付金额占比")).toBeTruthy();
+  });
+
+  it("详情弹窗默认口径：SQL 模式展示模式标签与 SQL 原文（不再暴露完整 JSON）", async () => {
+    mockedList.mockResolvedValue({
+      items: [
+        {
+          ...TPLS[0],
+          defaults_json: {
+            definition_json: { sql: "select sum(amount) from dwd_order_di", source_tables: ["dwd_order_di"] },
+          },
+        },
+      ],
+      total: 1,
+    });
+    render(
+      <MemoryRouter initialEntries={["/templates"]}>
+        <Templates />
+      </MemoryRouter>,
+    );
+    await screen.findByText("tpl_gmv_daily");
+    fireEvent.click(screen.getAllByText("详情")[0]);
+    await screen.findByText("模板详情：GMV 日汇总模板");
+    // 模式标签 + SQL 原文 + 源表 Tag
+    expect(screen.getByText("SQL 模式")).toBeTruthy();
+    expect(screen.getByText(/select sum\(amount\) from dwd_order_di/)).toBeTruthy();
+    expect(screen.getByText("dwd_order_di")).toBeTruthy();
+    // 不再把完整 JSON（含 "sql": 键名）暴露给用户
+    expect(screen.queryByText(/"sql":/)).toBeNull();
+  });
+
+  it("编辑弹窗默认口径：模板口径含 sql 时回填 SQL 模式并预填内容", async () => {
+    mockedList.mockResolvedValue({
+      items: [{ ...TPLS[0], defaults_json: { definition_json: { sql: "select 1 from t" } } }],
+      total: 1,
+    });
+    render(
+      <MemoryRouter initialEntries={["/templates"]}>
+        <Templates />
+      </MemoryRouter>,
+    );
+    await screen.findByText("tpl_gmv_daily");
+    fireEvent.click(screen.getAllByText("编辑")[0]);
+    await screen.findByText("编辑模板：tpl_gmv_daily");
+    const item = screen.getByText("默认口径（实例化时自动合并）").closest(".ant-form-item") as HTMLElement;
+    // Segmented 选中项为「SQL 模式」
+    const selected = item.querySelector(".ant-segmented-item-selected");
+    expect(selected?.textContent).toContain("SQL 模式");
+    // textarea 预填 SQL（表达式模式渲染的是 input，非 textarea）
+    expect((item.querySelector("textarea") as HTMLTextAreaElement).value).toBe("select 1 from t");
+  });
+
+  it("编辑弹窗默认口径：切换 SQL 模式填写后保存，写入 defaults_json.definition_json={sql}", async () => {
+    mockedUpdateMetricTemplate.mockResolvedValue(TPLS[0]);
+    render(
+      <MemoryRouter initialEntries={["/templates"]}>
+        <Templates />
+      </MemoryRouter>,
+    );
+    await screen.findByText("tpl_gmv_daily");
+    fireEvent.click(screen.getAllByText("编辑")[0]);
+    await screen.findByText("编辑模板：tpl_gmv_daily");
+    fireEvent.click(screen.getByText("SQL 模式"));
+    const item = screen.getByText("默认口径（实例化时自动合并）").closest(".ant-form-item") as HTMLElement;
+    fireEvent.change(item.querySelector("textarea")!, {
+      target: { value: "select sum(amount) from dwd_order_di" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /保存修改/ }));
+    await waitFor(() => expect(mockedUpdateMetricTemplate).toHaveBeenCalled());
+    const payload = mockedUpdateMetricTemplate.mock.calls[0][1] as {
+      defaults_json?: { definition_json?: unknown };
+    };
+    expect(payload.defaults_json?.definition_json).toEqual({
+      sql: "select sum(amount) from dwd_order_di",
+    });
+  });
+
+  it("编辑弹窗默认口径：高级 JSON 模式输入非法 JSON 时阻止保存", async () => {
+    render(
+      <MemoryRouter initialEntries={["/templates"]}>
+        <Templates />
+      </MemoryRouter>,
+    );
+    await screen.findByText("tpl_gmv_daily");
+    fireEvent.click(screen.getAllByText("编辑")[0]);
+    await screen.findByText("编辑模板：tpl_gmv_daily");
+    fireEvent.click(screen.getByText("高级 JSON"));
+    const item = screen.getByText("默认口径（实例化时自动合并）").closest(".ant-form-item") as HTMLElement;
+    fireEvent.change(item.querySelector("textarea")!, { target: { value: "{bad json" } });
+    fireEvent.click(screen.getByRole("button", { name: /保存修改/ }));
+    await waitFor(() => expect(screen.getByText(/JSON 格式错误/)).toBeTruthy());
+    expect(mockedUpdateMetricTemplate).not.toHaveBeenCalled();
+  });
+
+  it("实例化弹窗口径：切 SQL 模式填写后提交给 instantiateTemplate", async () => {
+    mockedInstantiate.mockResolvedValue(CREATED);
+    render(
+      <MemoryRouter initialEntries={["/templates"]}>
+        <Templates />
+      </MemoryRouter>,
+    );
+    await screen.findByText("tpl_gmv_daily");
+    const row = screen.getByText("tpl_gmv_daily").closest("tr") as HTMLElement;
+    fireEvent.click(within(row).getByRole("button", { name: /实例化指标/ }));
+    await screen.findByText(/从模板实例化：/);
+    fireEvent.click(screen.getByText("SQL 模式"));
+    const item = screen.getByText("口径定义（可留空用模板默认）").closest(".ant-form-item") as HTMLElement;
+    fireEvent.change(item.querySelector("textarea")!, {
+      target: { value: "select sum(amount) from dwd_order_di" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /实例化创建/ }));
+    await waitFor(() => expect(mockedInstantiate).toHaveBeenCalled());
+    const [, payload] = mockedInstantiate.mock.calls[0];
+    expect(payload.definition_json).toEqual({ sql: "select sum(amount) from dwd_order_di" });
+  });
+});
