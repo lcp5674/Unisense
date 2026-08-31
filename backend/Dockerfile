@@ -45,5 +45,12 @@ USER appuser
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
     CMD python -c "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=3).status==200 else 1)"
 
-# 启动脚本：先迁移再启动
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+# 启动链（任一环失败即退出，由 compose restart: unless-stopped 自动重试）：
+#   1) alembic upgrade head —— 表结构升到最新（迁移内含字典/词根/敏感规则等种子）
+#   2) python -m scripts.bootstrap —— 部署自举，消除所有人工初始化动作：
+#        阻塞：默认组织 + admin 账号、标准主题域 + 10 类业务字典
+#        尽力：ES 索引创建/同步、Neo4j 资产与血缘首日同步
+#      阻塞步骤失败 → 退出码 1 → 容器重启重试；尽力步骤失败仅告警不阻断
+#   3) exec uvicorn —— exec 让 uvicorn 成为 PID 1，确保优雅接收 SIGTERM
+# 说明：worker 服务用显式 command 覆盖 CMD（docker-compose.yml），不会重复自举。
+CMD ["sh", "-c", "alembic upgrade head && python -m scripts.bootstrap && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]

@@ -176,8 +176,14 @@ DICT_SEEDS: dict[str, list[dict[str, Any]]] = {
 DEFAULT_ADMIN_ID = 1
 
 
-async def seed_domains(db: AsyncSession) -> int:
-    """预置标准主题域，返回新增数。"""
+async def seed_domains(db: AsyncSession, owner_id: int = DEFAULT_ADMIN_ID) -> int:
+    """预置标准主题域，返回新增数。
+
+    Args:
+        db: 复用调用方会话。
+        owner_id: 域责任人。默认 ``DEFAULT_ADMIN_ID``（CLI 行为不变）；部署自举传
+            入 ``seed_admin`` 实际返回的 admin id，避免 admin 自增 id 非 1 时落错人。
+    """
     created = 0
     for d in STANDARD_DOMAINS:
         stmt = select(SubjectDomain).where(
@@ -198,7 +204,7 @@ async def seed_domains(db: AsyncSession) -> int:
             status="active",
             defaults_json={},
             description=f"标准主题域: {d['name']}",
-            owner_id=DEFAULT_ADMIN_ID,
+            owner_id=owner_id,
         )
         db.add(domain)
         await db.flush()

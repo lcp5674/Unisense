@@ -90,6 +90,9 @@ services:
   # ---- Elasticsearch security setup ----
   # 2026-08-28 说明：ES 8.x 密码经 ELASTIC_PASSWORD env 注入即完成配置，
   # 本服务仅打印凭据提示（不再执行实际 setup，保留以便查看内置账号密码）。
+  # 仅用于打印 ES 凭据提示（一次性，restart: no）。
+  # 注意：索引创建与数据同步不再由此服务负责——已并入 backend 启动链的
+  # scripts/bootstrap.py（best-effort 步骤），随容器启动自动完成。
   elasticsearch-setup:
     image: elasticsearch:8.15.0
     depends_on:
@@ -201,8 +204,25 @@ services:
         condition: service_healthy
       neo4j:
         condition: service_healthy
+      # 自举会在启动期创建/同步 ES 索引；缺此依赖时 ES 未就绪会导致该步失败
+      # （best-effort 不阻断启动，但首日检索为空），故纳入启动前就绪依赖。
+      elasticsearch:
+        condition: service_healthy
     environment:
       UNISENSE_ENV: ${UNISENSE_ENV:-dev}
+      # ---- 部署自举（scripts/bootstrap.py，随容器启动自动完成，无需人工介入）----
+      # true=启用；UNISENSE_BOOTSTRAP_STEPS 可裁剪步骤（逗号分隔：admin,domains,es,neo4j）
+      UNISENSE_BOOTSTRAP_ENABLED: ${UNISENSE_BOOTSTRAP_ENABLED:-true}
+      UNISENSE_BOOTSTRAP_STEPS: ${UNISENSE_BOOTSTRAP_STEPS:-admin,domains,es,neo4j}
+      UNISENSE_BOOTSTRAP_ES_SYNC: ${UNISENSE_BOOTSTRAP_ES_SYNC:-true}
+      UNISENSE_BOOTSTRAP_NEO4J_SYNC: ${UNISENSE_BOOTSTRAP_NEO4J_SYNC:-true}
+      # 单步软超时（秒）：Neo4j 全量对账在超大图上可能超时 → 该步标记 failed 但不
+      # 阻断启动，由每日 02:30 定时对账任务兜底；超大图可设 NEO4J_SYNC=false 跳过首启同步。
+      UNISENSE_BOOTSTRAP_TIMEOUT: ${UNISENSE_BOOTSTRAP_TIMEOUT:-120}
+      UNISENSE_BOOTSTRAP_LOCK_WAIT: ${UNISENSE_BOOTSTRAP_LOCK_WAIT:-20}
+      UNISENSE_BOOTSTRAP_ES_SYNC_MAX_DOCS: ${UNISENSE_BOOTSTRAP_ES_SYNC_MAX_DOCS:-50000}
+      # 管理员初始密码（生产必须注入强口令；留空则用默认弱口令并打印告警）
+      UNISENSE_SEED_ADMIN_PASSWORD: ${UNISENSE_SEED_ADMIN_PASSWORD:-}
       # Docker 网络内用服务名 mysql，而非 localhost
       UNISENSE_DB_URL: mysql+pymysql://${UNISENSE_MYSQL_USER:-unisense}:${UNISENSE_MYSQL_PASSWORD:-test}@mysql:3306/${UNISENSE_MYSQL_DATABASE:-unisense}
       UNISENSE_REDIS_URL: redis://redis:6379/0
@@ -260,7 +280,8 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 40s
+      # 自举（admin/主题域 + ES 索引同步）在 uvicorn 之前执行，拉长启动宽限期
+      start_period: 90s
 
   # ============ 采集异步 worker（P0-7：定时调度真实执行者）============
   # 消费后端投递的采集任务 + 每分钟扫描 schedule_cron 触发定时采集
