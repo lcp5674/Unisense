@@ -356,7 +356,11 @@ export function MetricCreate() {
   // 用 state 而非 Form.useWatch：向导分步卸载 Form.Item 后，useWatch 与 getFieldsValue() 对未挂载字段
   // 均返回 undefined（antd 仅保留 store，默认取值路径排除未挂载字段），导致跨步骤后
   // isAtomic/isDerivedOrComposite 整体失效、提交校验跳过、payload 丢失 type。
-  // 通过 Form onValuesChange 同步所有写入路径（Segmented 点击/域默认预填/推断回填）。
+  // 同步覆盖两类写入路径（缺一即状态撕裂）：
+  //   1) 用户交互（Segmented 点击）——Form onValuesChange 自动触发；
+  //   2) 编程式写入（域默认预填/推断回填/候选回填）——antd 的 setFieldsValue **不触发**
+  //      onValuesChange（已实测确认），故必须在这类调用点显式调用 setMetricType，
+  //      否则出现「Segmented 显示派生指标、粒度区仍渲染原子只读日粒度」的状态不一致。
   const [metricType, setMetricType] = useState<MetricType>("atomic");
   const isAtomic = metricType === "atomic";
   const isDerivedOrComposite = metricType === "derived" || metricType === "composite";
@@ -796,7 +800,11 @@ export function MetricCreate() {
     const curCode = String(form.getFieldValue("metric_code") ?? "").trim();
     const shouldSetCode = result.metric_code_suggestion && curCode === "";
     if (shouldSetCode) merged.metric_code = result.metric_code_suggestion;
-    if (Object.keys(merged).length > 0) form.setFieldsValue(merged);
+    if (Object.keys(merged).length > 0) {
+      form.setFieldsValue(merged);
+      // 同域默认预填：setFieldsValue 不触发 onValuesChange，推断回填 type 须显式同步
+      if (typeof merged.type === "string") setMetricType(merged.type as MetricType);
+    }
     if (shouldSetCode) setSuggestedCode(result.metric_code_suggestion);
     setInferred(fields);
     // 逻辑度量推荐（信息最大化）：候选交给 UI 展示，用户可一键应用 measure_id
@@ -811,6 +819,29 @@ export function MetricCreate() {
     // 源表被推断出来后联动加载该表列（供度量列选择，避免用户手动输入）
     const srcTable = merged.source_table;
     if (typeof srcTable === "string" && srcTable) {
+      // 方案 C 后 SQL 推断一律派生：物理来源（源表/度量列/粒度/周期）必须落到挂载行——
+      // 派生分支只收集 mounts 提交（原子分支才用顶层 source_table/measure_column），
+      // 若不回填挂载行，推断出的源表在派生指标上会整体丢失（看不见也提交不出去）。
+      // 与批量候选回填（loadCandidateIntoWizard）同构；仅在挂载源表为空时写入，
+      // 避免覆盖用户已手动录入的变体。
+      const effectiveType = (typeof merged.type === "string" && merged.type) || form.getFieldValue("type");
+      if (effectiveType && effectiveType !== "atomic") {
+        const mounts = (form.getFieldValue("mounts") ?? []) as Array<Record<string, unknown>>;
+        const firstMount = mounts[0] as Record<string, unknown> | undefined;
+        if (!firstMount || !firstMount.source_table) {
+          form.setFieldValue("mounts", [
+            {
+              ...(firstMount ?? {}),
+              source_table: srcTable,
+              source_column: (merged.measure_column as string | undefined) ?? undefined,
+              granularity:
+                (merged.granularity as string | undefined) || (merged.period as string | undefined) || "day",
+              domain: selectedDomain || undefined,
+            },
+            ...mounts.slice(1),
+          ]);
+        }
+      }
       void loadColumnsForTable(srcTable);
       // 保证 Select 能显示回填的源表（options 无该表时下拉会显示空白）
       setSrcTableSearchOptions((prev) =>
@@ -938,6 +969,9 @@ export function MetricCreate() {
       if (Object.keys(prefill).length) {
         domainPrefillRef.current = new Set(Object.keys(prefill));
         form.setFieldsValue(prefill);
+        // 编程式写入不触发 onValuesChange：域默认含 type 时须显式同步，
+        // 否则类型 Segmented 已切派生、粒度区仍按 atomic 渲染只读日粒度（状态撕裂）。
+        if (typeof prefill.type === "string") setMetricType(prefill.type as MetricType);
       } else {
         domainPrefillRef.current = new Set();
       }

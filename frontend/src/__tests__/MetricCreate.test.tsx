@@ -40,7 +40,7 @@ vi.mock("../api", async () => {
   };
 });
 
-import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, parseSqlBatch, parseSqlTables, batchRegisterFromSql, checkConflict, createMetric, listMetrics, listMeasureCatalogs, listDimensions, fetchCurrentUser, refineMetricDefinition, getMetric, updateMetric } from "../api";
+import { listDomainTree, listDictItems, listCatalogs, batchRegisterMetrics, batchSubmitMetrics, listUsers, autoSuggestMetric, suggestDomain, parseSqlBatch, parseSqlTables, batchRegisterFromSql, checkConflict, createMetric, listMetrics, listMeasureCatalogs, listDimensions, fetchCurrentUser, refineMetricDefinition, getMetric, updateMetric, getDomainDefaults } from "../api";
 import type { DBCatalog, SubjectDomainTreeNode, AutoSuggestResponse, DomainSuggestionResponse, SqlBatchParseResult, MetricResponse } from "../types";
 
 const mockedTree = vi.mocked(listDomainTree);
@@ -58,6 +58,7 @@ const mockedCheckConflict = vi.mocked(checkConflict);
 const mockedCreate = vi.mocked(createMetric);
 const mockedMetrics = vi.mocked(listMetrics);
 const mockedRefine = vi.mocked(refineMetricDefinition);
+const mockedDomainDefaults = vi.mocked(getDomainDefaults);
 const mockedGetMetric = vi.mocked(getMetric);
 const mockedUpdateMetric = vi.mocked(updateMetric);
 
@@ -255,6 +256,13 @@ async function fillBatchForm(modal: HTMLElement, measureColumns: string) {
     await clickSelectOption(col);
   }
 }
+
+// 全局默认：域默认值返回空对象（无预填）。注意 vi.clearAllMocks() 只清调用记录、
+// 不重置 mockImplementation——单个用例覆盖 getDomainDefaults 后会泄漏到后续所有用例
+// （域默认 type 预填会改变指标类型联动），故在此统一归位默认实现。
+beforeEach(() => {
+  mockedDomainDefaults.mockResolvedValue({});
+});
 
 describe("MetricCreate 批量注册指标", () => {
   beforeEach(() => {
@@ -655,10 +663,11 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
     // 关闭摘要
     fireEvent.click(screen.getByText("知道了"));
 
-    // 源表/度量列已回填到 Step2（具体实现 → 原子来源）——导航过去断言 Select 显示选中值
+    // 源表已回填到 Step2 挂载实体行（SQL 推断一律派生，物理来源走挂载行而非原子
+    // 来源卡——此前回填到顶层 source_table，派生分支不收集该字段导致源表丢失）
     await goToStep(2);
     await waitFor(() => {
-      const srcInput = document.querySelector('input[id="source_table"]');
+      const srcInput = document.querySelector('input[id="mounts_0_source_table"]');
       const container = srcInput?.closest(".ant-select") as HTMLElement | null;
       expect(container?.textContent).toContain("dwd.sales_detail");
     });
@@ -725,7 +734,10 @@ describe("MetricCreate 粘贴 SQL 智能推断", () => {
         source_table: { value: "dwd.doctor_visit", source: "sql_parse", confidence: 0.9, reason: "SQL 解析源表" },
         measure_column: { value: "doctor_code", source: "sql_parse", confidence: 0.9, reason: "SQL 解析度量列" },
         name: { value: "医生活跃数", source: "sql_parse", confidence: 0.8 },
-        type: { value: "derived", source: "sql_parse", confidence: 0.85 },
+        // 逻辑度量（measure_id）是原子指标专属概念（原子 = 逻辑度量 + 基础统计粒度，
+        // 派生继承自原子）；方案 C 后 SQL 推断一律派生，故本用例显式用 atomic
+        // 以覆盖「匹配已发布逻辑度量 → 推荐 + 一键应用回填」的原子来源卡交互。
+        type: { value: "atomic", source: "sql_parse", confidence: 0.85 },
         granularity: { value: "day", source: "sql_parse", confidence: 0.9 },
         unit: { value: "人", source: "rule", confidence: 0.68 },
         aggregation: { value: "COUNT_DISTINCT", source: "sql_parse", confidence: 0.95 },
@@ -1962,6 +1974,39 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     await waitFor(() => expect(screen.queryByText(/SQL解析 · 80%/)).toBeNull());
     // 未被修改的可加性徽标保留
     expect(screen.getByText(/规则 · 60%/)).toBeTruthy();
+  });
+
+  it("域默认预填指标类型=派生 → 类型与粒度区同步联动（setFieldsValue 不触发 onValuesChange 的状态同步缺陷）", async () => {
+    // 域默认值配置 type=derived（后端 /domains/{code}/defaults 返回自由 JSON 的 defaults_json）
+    mockedDomainDefaults.mockResolvedValue({ type: "derived" } as never);
+    mockedDict.mockImplementation((async (dictType: string) => {
+      if (dictType === "granularity") {
+        return [
+          { code: "day", label: "日" },
+          { code: "month", label: "月" },
+        ] as never;
+      }
+      return [] as never;
+    }) as never);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await goToStep(1);
+    // 域默认已把表单 type 预填为 derived —— Segmented 应显示派生指标选中态
+    await waitFor(() =>
+      expect(document.querySelector(".ant-segmented-item-selected")?.textContent).toContain("派生指标")
+    );
+    // 关键：类型联动粒度区 —— 派生指标应渲染「主粒度（兜底）」可编辑 Select，
+    // 而非原子分支的只读文本「日 (day)」。此前 setFieldsValue 不触发 onValuesChange，
+    // metricType state 停留在 atomic，导致「显示派生指标 + 只读日粒度」的状态撕裂。
+    await waitFor(() => {
+      const granItem = screen
+        .getByText("主粒度（兜底）")
+        .closest(".ant-form-item") as HTMLElement;
+      expect(granItem.querySelector(".ant-select")).toBeTruthy();
+    });
+    // 原子分支的只读粒度（label「粒度」+ 无 Select）已消失——不再与「派生指标」选中态撕裂
+    expect(screen.queryByText("粒度", { selector: ".ant-form-item-label label" })).toBeNull();
   });
 });
 
