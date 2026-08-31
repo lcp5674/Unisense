@@ -5153,17 +5153,22 @@ export function MetricCreate() {
                 {(fields, { add, remove }) => (
                   <>
                     {fields.map(({ key, name, ...restField }) => (
-                      <Space key={key} style={{ display: "flex", marginBottom: 6 }} align="baseline">
+                      <Space
+                        key={key}
+                        wrap
+                        style={{ display: "flex", marginBottom: 6, width: "100%" }}
+                        align="baseline"
+                      >
                         <Form.Item
                           {...restField}
                           name={[name, "dim_name"]}
                           rules={[{ required: true, message: "维度名" }]}
-                          style={{ marginBottom: 0 }}
+                          style={{ marginBottom: 0, flex: "1 1 200px", minWidth: 150 }}
                         >
                           <AutoComplete
                             data-testid="dim-name-auto"
                             placeholder="维度名（可搜索平台维度或手输）"
-                            style={{ width: 200 }}
+                            style={{ width: "100%" }}
                             options={dimensionOptions}
                             filterOption={(input, option) =>
                               String(option?.value ?? "")
@@ -5176,7 +5181,7 @@ export function MetricCreate() {
               {...restField}
               name={[name, "col_name"]}
               rules={[{ required: true, message: "列名" }]}
-              style={{ marginBottom: 0 }}
+              style={{ marginBottom: 0, flex: "1 1 220px", minWidth: 150 }}
             >
               <Select
                 showSearch
@@ -5184,7 +5189,7 @@ export function MetricCreate() {
                 placeholder={batchColumnOptions.length > 0 ? "选择源表列" : "先选源表后可选列"}
                 options={batchColumnOptions}
                 loading={batchColLoading}
-                style={{ width: 220 }}
+                style={{ width: "100%" }}
                 onChange={(colVal) => {
                   // 列名自动推断维度名预填（仅当该行维度名为空，不覆盖用户已填值）
                   if (!colVal) return;

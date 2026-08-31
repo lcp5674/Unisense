@@ -1597,7 +1597,8 @@ export function DataSources() {
         onOk={() => form.submit()}
         confirmLoading={loading}
         okText={editTarget ? "保存" : "创建"}
-        width={620}
+        // 620 放不下「负责人 + 三个配额项」一排，与详情弹窗统一为 720
+        width={720}
       >
         <Form form={form} layout="vertical" onFinish={handleSubmit} style={{ marginTop: 8 }}>
           <Space size={16} style={{ width: "100%" }}>
@@ -1893,8 +1894,13 @@ export function DataSources() {
           <Form.Item name="description" label="用途描述" style={{ width: "100%" }}>
             <Input.TextArea rows={2} placeholder="该数据源的业务用途、责任范围（治理信息，不参与采集）" maxLength={2000} showCount />
           </Form.Item>
-          <Space style={{ width: "100%" }}>
-            <Form.Item name="owner_id" label="负责人" style={{ width: 220 }}>
+          {/* 弹性宽度 + wrap：固定 px 宽度在窄弹窗内容区会溢出到 Modal 外（Space 默认不换行） */}
+          <Space wrap size={[16, 8]} align="start" style={{ width: "100%" }}>
+            <Form.Item
+              name="owner_id"
+              label="负责人"
+              style={{ flex: "1 1 220px", minWidth: 180, marginBottom: 0 }}
+            >
               <Select
                 allowClear
                 showSearch
@@ -1905,17 +1911,27 @@ export function DataSources() {
                   .map((u) => ({ value: u.id, label: `${u.display_name}（${u.username}）` }))}
               />
             </Form.Item>
-            <Form.Item name="quota_max_concurrency" label="并发上限" tooltip="扫描并发数（max_concurrency）" style={{ width: 120 }}>
+            <Form.Item
+              name="quota_max_concurrency"
+              label="并发上限"
+              tooltip="扫描并发数（max_concurrency）"
+              style={{ flex: "0 1 120px", minWidth: 100, marginBottom: 0 }}
+            >
               <InputNumber min={1} placeholder="默认" style={{ width: "100%" }} />
             </Form.Item>
-            <Form.Item name="quota_max_scan_rows" label="扫描行上限" tooltip="单次扫描行数上限（max_scan_rows），超出拒绝采集" style={{ width: 140 }}>
+            <Form.Item
+              name="quota_max_scan_rows"
+              label="扫描行上限"
+              tooltip="单次扫描行数上限（max_scan_rows），超出拒绝采集"
+              style={{ flex: "0 1 140px", minWidth: 120, marginBottom: 0 }}
+            >
               <InputNumber min={1} placeholder="默认" style={{ width: "100%" }} />
             </Form.Item>
             <Form.Item
               name="quota_sample_rows"
               label="采样行数"
               tooltip="每列采样行数（sample_rows）。留空/0=不采样，PII 仅按字段名+注释识别；设为 N 则采集时对字段执行 SELECT 采样（样本打码存储），启用 PII 名称+样本双验证"
-              style={{ width: 150 }}
+              style={{ flex: "0 1 150px", minWidth: 130, marginBottom: 0 }}
             >
               <InputNumber min={0} placeholder="不采样" style={{ width: "100%" }} />
             </Form.Item>
