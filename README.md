@@ -460,29 +460,64 @@ curl -X POST http://localhost:8100/api/v1/users/{user_id}/reset-password \
 
 > **Doris（OLAP）默认为注释状态**：内置 `doris-fe` / `doris-be` 不启用，`consume` 查询走 **MySQL 降级引擎**（`degraded=true` 正常返回）。若已有外部 Doris，配 `UNISENSE_OLAP_URL` 即可下推。
 
-### 10.2 生产环境变量（必须修改）
+### 10.2 密钥生成初始化（生产环境变量）
 
-**推荐方式：使用生产模板 + 一键密钥生成脚本**（`scripts/gen_prod_secrets.sh` 会生成
-JWT / Fernet / MySQL / ES / MinIO / 种子管理员 / 备份加密等 11 项强密钥，
-并自动通过长度 + 弱凭据黑名单自检）：
+生产部署**必须**先完成密钥初始化：用模板 + 一键脚本生成 11 项强密钥，写入
+`.env.production`（已 gitignore，不会入库）。**初始化只需一次**，后续重建容器
+始终从同一文件读取同一组密钥。
+
+**① 一键生成 11 项强密钥**（`scripts/gen_prod_secrets.sh`）
+
+| 生成的密钥项 | 作用 |
+|-------------|------|
+| `UNISENSE_JWT_SECRET` | 登录令牌签名（≥32 字符，生产强校验） |
+| `UNISENSE_FERNET_KEY` | 数据源 / LLM 凭据加密主密钥（**独立于 JWT**） |
+| `UNISENSE_MYSQL_ROOT_PASSWORD` / `UNISENSE_MYSQL_PASSWORD` | MySQL root 与业务账号密码 |
+| `UNISENSE_ES_PASSWORD` | Elasticsearch elastic 密码 |
+| `UNISENSE_NEO4J_PASSWORD` | Neo4j 密码 |
+| `UNISENSE_MINIO_ACCESS_KEY` / `UNISENSE_MINIO_SECRET_KEY` | MinIO 审计归档凭据 |
+| `UNISENSE_BACKUP_ENCRYPTION_KEY` | 备份产物 AES-256 加密密钥 |
+| `UNISENSE_QUICKBI_SIGN_KEY` | QuickBI 嵌入签名密钥 |
+| `UNISENSE_SEED_ADMIN_PASSWORD` | 种子管理员初始密码（**上线后立即改密**） |
+
+脚本三种模式：
 
 ```bash
-cp .env.production.example .env.production                 # 1. 复制模板
-bash scripts/gen_prod_secrets.sh --out .env.production      # 2. 生成强密钥（仅首次执行；文件已存在则拒绝覆盖）
-vi .env.production                                          # 3. 填 UNISENSE_OLAP_URL / CORS 域名等非密钥项
-docker compose --env-file .env.production up -d --build     # 4. 启动
+bash scripts/gen_prod_secrets.sh                              # 打印到 stdout（手动粘贴）
+bash scripts/gen_prod_secrets.sh --out .env.production         # 直接写入（推荐；文件已存在则拒绝覆盖）
+bash scripts/gen_prod_secrets.sh --out .env.production --force # 强制覆盖（先备份 .bak.<时间戳>）
 ```
+
+**生成后自动自检**（任一项失败即中止、不写入任何文件）：
+- 长度达标（JWT ≥32、其余 ≥8）
+- **不命中弱凭据黑名单**（`test`/`es_changeme`/`minioadmin`/`changeme` 等）
+- **URL / Shell 安全**：组件密码用纯字母数字（`@/:?#` 会破坏 `db_url` 解析）、
+  密钥类用十六进制（`$` 会触发 compose 变量插值）——全部规避
+- 种子管理员密码满足系统复杂度（大小写 + 数字 ≥3 类）
+
+**② 四步初始化流程**
+
+```bash
+cp .env.production.example .env.production                  # 1. 复制模板（含全部变量占位）
+bash scripts/gen_prod_secrets.sh --out .env.production       # 2. 生成 11 项强密钥（自检通过；仅首次执行）
+vi .env.production                                           # 3. 填非密钥项：OLAP_URL / CORS / IMAGE_TAG
+docker compose --env-file .env.production up -d --build      # 4. 构建启动（迁移与自举自动执行，见 10.3）
+```
+
+模板中需要人工确认的**非密钥项**：`UNISENSE_OLAP_URL`（Doris，见 10.1 说明）、
+`UNISENSE_CORS_ORIGINS`（生产禁止 `*`）、`UNISENSE_IMAGE_TAG`（版本锁定）、
+`UNISENSE_BOOTSTRAP_ENABLED`（首次部署 `true`，后续建议 `false`）。
 
 > **⚠️ 密钥是生产的「锚点」，务必一次性生成、长期不变**：脚本对已存在的目标文件
 > **默认拒绝覆盖**（需 `--force` 才强制覆盖并先备份为 `.bak.<时间戳>`）。每次
 > `docker compose --env-file .env.production up -d --build` 重建容器都从同一文件
 > 读取**同一组密钥**——这是 JWT 会话稳定、Fernet 能解密存量密文、DB/ES/Neo4j 密码
-> 与数据卷一致的前提。切勿在生产重复执行脚本（会换掉全部密钥导致全员重新登录、
+> 与数据卷一致的前提。**切勿在生产重复执行脚本**（会换掉全部密钥导致全员重新登录、
 > 加密数据源配置无法解密、容器连不上数据库）；确需轮换密钥时务必走
 > `--force` + 同步改数据卷内密码 + Fernet 密钥链（见 §10.5 升级回滚）。
-
-模板中需要人工确认的非密钥项：`UNISENSE_OLAP_URL`（Doris，见 10.1 说明）、
-`UNISENSE_CORS_ORIGINS`（生产禁止 `*`）、`UNISENSE_IMAGE_TAG`（版本锁定）。
+>
+> `.env.production` 含明文密钥：**已 gitignore 不入库**，并请另存至密码管理器；
+> 切勿贴入工单 / 聊天 / 提交信息。
 
 手写方式（备选，需自行保证密钥强度）：
 
@@ -518,20 +553,29 @@ UNISENSE_BACKUP_DATABASES="unisense e2e_biz"       # 多库备份（含降级业
 | MinIO 归档桶 | `audit_archive` 自动创建 |
 
 ```bash
-# 1. 准备环境文件（唯一必须的人工步骤：注入密钥，推荐用模板+脚本，见 10.2）
-cp .env.production.example .env.production
-bash scripts/gen_prod_secrets.sh --out .env.production     # 生成 11 项强密钥（自检通过）
-vi .env.production                                         # 填 OLAP_URL / CORS / IMAGE_TAG
+# ── 第 0 步：机器准备（一次性）────────────────────────────
+#   数据盘独立挂载到 Docker 数据目录；ES/Doris 要求的系统参数：
+sysctl -w vm.max_map_count=262144          # 写入 /etc/sysctl.conf 持久化
+swapoff -a                                  # ES/Doris 禁用 swap
+echo never > /sys/kernel/mm/transparent_hugepage/enabled
+ulimit -n 65536
 
-# 2. 构建并启动（迁移与自举自动执行）
+# ── 第 1 步：密钥生成初始化（唯一必须的人工步骤，见 10.2）──
+cp .env.production.example .env.production                  # 1a. 复制模板
+bash scripts/gen_prod_secrets.sh --out .env.production       # 1b. 生成 11 项强密钥（自检通过；仅首次）
+vi .env.production                                           # 1c. 填 UNISENSE_OLAP_URL / CORS / IMAGE_TAG
+
+# ── 第 2 步：构建并启动（迁移与自举自动执行）──────────────
 docker compose --env-file .env.production up -d --build
 
-# 3. 验证
+# ── 第 3 步：验证 ──────────────────────────────────────────
 curl -fsS http://localhost:8100/health            # 应返回 {"status":"ok"}
 curl -fsS -o /dev/null -w '%{http_code}\n' http://localhost:8180
+docker compose logs backend | grep bootstrap_summary         # 自举四步各自 ok/skipped/failed
 
-# 查看自举结果（四步各自 ok/skipped/failed）
-docker compose logs backend | grep bootstrap_summary
+# ── 第 4 步：上线后立即改种子管理员密码 ────────────────────
+#   admin / UNISENSE_SEED_ADMIN_PASSWORD（脚本生成的强口令）
+#   登录后右上角「修改密码」改密（或 API：POST /api/v1/users/me/password）
 ```
 
 自举步骤按「阻塞 / 尽力」分级：admin 与主题域属阻塞（失败则退出码 1、容器按
