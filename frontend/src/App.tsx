@@ -154,37 +154,50 @@ function LoginPage({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
 
         <div className="login-hero">
           <h2>
-            一套口径，<br />
-            全员 <em>校准</em>。
+            一次定义，<br />
+            处处 <em>可信</em>。
           </h2>
           <p>
-            WeSemantics 指标语义中台让组织里的每一个指标——
-            定义、血缘、治理、消费——都可精确校准、可信追溯。
+            WeSemantics 以语义为锚，把组织里散落的指标口径编织成一张可信之网——
+            定义、血缘、治理、消费，全链路一致、可解释、可追溯。
           </p>
         </div>
 
         <div className="login-value">
           <div className="val">
-            <span className="val-num">100%</span>
-            <span className="val-label">口径统一<br />一套定义，全员对齐</span>
+            <span className="val-num">语义统一</span>
+            <span className="val-label">OneData 逻辑度量<br />一套定义，全员对齐</span>
           </div>
           <div className="val">
-            <span className="val-num">0</span>
-            <span className="val-label">歧义灰度<br />血缘与变更影响全程可溯</span>
+            <span className="val-num">血缘可溯</span>
+            <span className="val-label">指标 → 落地表全链路<br />变更影响一目了然</span>
           </div>
           <div className="val">
-            <span className="val-num">24×7</span>
-            <span className="val-label">治理守护<br />PII 合规与质量告警实时在线</span>
+            <span className="val-num">治理可信</span>
+            <span className="val-label">PII 合规 · 质量告警<br />分级管控实时在线</span>
+          </div>
+          <div className="val">
+            <span className="val-num">AI 智能</span>
+            <span className="val-label">SQL 智能推断 · 口径生成<br />AI 助手全程辅助</span>
           </div>
         </div>
 
-        <div className="login-foot">WeSemantics · Metric Semantics Hub v0.1</div>
+        <div className="login-trust">
+          <span>企业级指标语义中台</span>
+          <span className="dot" />
+          <span>PII 合规</span>
+          <span className="dot" />
+          <span>全链路血缘追溯</span>
+        </div>
+
+        <div className="login-foot">WeSemantics · 指标语义中台 v0.1</div>
       </div>
 
       <div className="login-panel">
         <form className="login-card" onSubmit={handleSubmit}>
-          <div className="login-kicker">Sign in</div>
-          <h1>登录工作台</h1>
+          <div className="login-kicker">Welcome</div>
+          <h1>欢迎回来</h1>
+          <div className="login-subhead">登录以继续您的指标语义治理工作</div>
           <label>
             用户名
             <Input
@@ -214,7 +227,7 @@ function LoginPage({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
             block
             className="login-submit"
           >
-            {loading ? "正在校准…" : "进入工作台"}
+            {loading ? "正在登录…" : "进入语义中台"}
           </Button>
           <div className="login-hint">
             本地默认账号 <span className="mono">admin</span> /{" "}
@@ -258,7 +271,7 @@ export default function App() {
         <div className="login-panel">
           <div className="login-card" style={{ textAlign: "center" }}>
             <div className="brand-mark" style={{ margin: "0 auto 16px" }}>W</div>
-            <div className="muted">正在校准工作台…</div>
+            <div className="muted">正在准备语义中台…</div>
           </div>
         </div>
       </div>
