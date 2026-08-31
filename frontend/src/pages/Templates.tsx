@@ -1357,7 +1357,7 @@ export function Templates() {
                           allowClear
                           placeholder="默认周期"
                           style={{ width: 110 }}
-                          options={["day", "week", "month", "quarter", "year"].map((v) => ({ value: v, label: v }))}
+                          options={["day", "week", "month", "quarter", "year"].map((v) => ({ value: v, label: GRANULARITY_LABEL[v] ?? v }))}
                         />
                       </Form.Item>
                     </Space>
@@ -1679,7 +1679,7 @@ export function Templates() {
                           allowClear
                           placeholder="默认周期"
                           style={{ width: 110 }}
-                          options={["day", "week", "month", "quarter", "year"].map((v) => ({ value: v, label: v }))}
+                          options={["day", "week", "month", "quarter", "year"].map((v) => ({ value: v, label: GRANULARITY_LABEL[v] ?? v }))}
                         />
                       </Form.Item>
                       <Form.Item name="mount_domain" noStyle>
