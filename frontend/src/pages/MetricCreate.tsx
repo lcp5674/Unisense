@@ -1193,8 +1193,17 @@ export function MetricCreate() {
             setDomainSuggestionStatus("matched");
           }
         } else {
+          // unique/llm 但建议域是未分类占位（采集目录把表绑到未分类）——视同无建议：
+          // 未选域则强制先选业务域（编码首段是业务域，占位域会让用户拿 uncategorized 编码）
           setDomainSuggestion(null);
           setDomainSuggestionStatus("none");
+          if (!effectiveDomain) {
+            setForceDomainMode("infer");
+            setForceDomainValue("");
+            setForceDomainOpen(true);
+            setSqlInferring(false);
+            return;
+          }
         }
       } else if (suggestion.status === "multiple") {
         setCandidateCandidates(suggestion.candidates || []);
@@ -1318,7 +1327,9 @@ export function MetricCreate() {
       // 用户拿 uncategorized 编码）且后端建议唯一/LLM 域 → 自动应用（对齐 handleSqlInfer）；
       // 建议失败（none）或建议域本身也是未分类 → 强制先选业务域（方案 B 补强）
       const dom = result.domain;
-      const isPlaceholderDomain = !selectedDomain || selectedDomain === "uncategorized";
+      // 仅「未选域」强制先选业务域——用户手动选了未分类 = 明确选择，尊重不再反复弹；
+      // 未选域 + 后端建议占位域（uncategorized）→ 下方 1334 分支弹强制选域
+      const isPlaceholderDomain = !selectedDomain;
       if (isPlaceholderDomain && dom) {
         if (dom.code && dom.code !== "uncategorized" && (dom.status === "unique" || dom.status === "llm")) {
           await applyDomainSuggestion({
@@ -1453,7 +1464,9 @@ export function MetricCreate() {
   // （对齐后端 generate_metric_code：域_业务对象_度量_周期）。批量创建提交与
   // 「派生/复合依赖指标」选项共用——依赖选项需展示可提交的最终编码。
   function resolveCandidateCode(c: SqlBatchCandidate): string {
-    if (c.metric_code) return c.metric_code;
+    // 占位域编码（uncategorized_*）不算有效编码：用户后续选了真实域必须重拼，
+    // 否则选域后编码首段仍是未分类
+    if (c.metric_code && !c.metric_code.startsWith("uncategorized")) return c.metric_code;
     const rawTable = c.source_table || "";
     const biz = rawTable
       ? (rawTable.split(".").pop() || "")

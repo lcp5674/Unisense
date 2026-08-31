@@ -27,6 +27,11 @@ from sqlalchemy import or_, select
 from app.models.data_source import DataSource, DBCatalog
 from app.models.metric_mount import MetricMount
 
+# 占位域：采集目录把未归类表绑到「未分类」域——它不是真实业务域，绝不作为
+# 自动建议返回（用户手动选择仍允许，编码首段由用户自担）。过滤后走 LLM 兜底
+# 或 none，由前端引导用户选真实域，避免整批指标编码首段全是 uncategorized。
+_PLACEHOLDER_DOMAIN_CODES = {"uncategorized"}
+
 
 class DomainCandidate(TypedDict):
     """域建议候选。"""
@@ -208,6 +213,8 @@ async def _llm_suggest(
         code = parsed["domain_code"]
         if code not in domain_map:
             return None
+        if code in _PLACEHOLDER_DOMAIN_CODES:
+            return None  # LLM 猜未分类占位域无意义——视同无法建议，前端引导选真实域
         return DomainCandidate(
             code=code,
             name=domain_map[code],
@@ -253,6 +260,9 @@ async def suggest_domain(
     matches = await _lookup_tables(db, tables)
     matched_tables = sorted({t for t, _ in matches})
     domains = _aggregate(matches, domain_map)
+    # 未分类占位域不作为建议（见 _PLACEHOLDER_DOMAIN_CODES）——否则采集目录里
+    # 绑定未分类的表会让整批指标被建议到 uncategorized，编码首段全是未分类。
+    domains = [d for d in domains if d["code"] not in _PLACEHOLDER_DOMAIN_CODES]
 
     if not domains:
         llm = None

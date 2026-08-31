@@ -1654,7 +1654,12 @@ async def infer_sql_batch(
             suggestion = await domain_task
         except Exception:  # noqa: BLE001 - 整段域建议异常不阻断候选生成
             suggestion = None
-        if suggestion and suggestion.get("status") in ("unique", "llm"):
+        if (
+            suggestion
+            and suggestion.get("status") in ("unique", "llm")
+            # 占位域不定域：候选编码留空，由前端选域后重拼
+            and suggestion["domain"]["code"] != "uncategorized"
+        ):
             domain_code = suggestion["domain"]["code"]
             pending_domain = []
     # 域默认值（编码/名称/单位等）——候选构建（阶段 3）消费；推迟到定域后加载

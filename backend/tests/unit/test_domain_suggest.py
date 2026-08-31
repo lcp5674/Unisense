@@ -89,6 +89,38 @@ async def test_suggest_unique_from_catalog(domain_map: dict[str, str]) -> None:
     assert result["matched_tables"] == ["dwd.sales_detail"]
 
 
+async def test_suggest_placeholder_domain_filtered_out(domain_map: dict[str, str]) -> None:
+    """唯一命中「未分类」占位域 → 不作为 unique 建议返回（LLM 兜底 / 降级 none）。
+
+    采集目录把未归类表绑到 uncategorized 是常态，若把它当 unique 建议会让整批
+    指标编码首段全是 uncategorized。过滤后应走 LLM 兜底；LLM 不可用则 none。
+    """
+    placeholder = (
+        "dwd.sales_detail",
+        DomainCandidate(
+            code="uncategorized", name="", confidence=0.9, source="catalog", reason="未分类"
+        ),
+    )
+    # LLM 兜底可用 → 返回 llm（真实域）
+    result = await _run_suggest(
+        domain_map,
+        matches=[placeholder],
+        llm=DomainCandidate(
+            code="sales", name="", confidence=0.7, source="llm", reason="LLM 推断"
+        ),
+        source_table="dwd.sales_detail",
+    )
+    assert result["status"] == "llm"
+    assert result["domain"]["code"] == "sales"
+
+    # LLM 不可用 → none（而不是 unique + uncategorized）
+    result_none = await _run_suggest(
+        domain_map, matches=[placeholder], llm=None, source_table="dwd.sales_detail"
+    )
+    assert result_none["status"] == "none"
+    assert result_none["domain"] is None
+
+
 async def test_suggest_unique_from_mount(domain_map: dict[str, str]) -> None:
     """挂载实体命中 → source=mount。"""
     result = await _run_suggest(
