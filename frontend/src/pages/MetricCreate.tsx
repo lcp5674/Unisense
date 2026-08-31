@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useMemo, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { BarsOutlined, ArrowLeftOutlined, PlusOutlined, MinusCircleOutlined, RobotOutlined, TeamOutlined } from "@ant-design/icons";
+import { BarsOutlined, ArrowLeftOutlined, PlusOutlined, MinusCircleOutlined, RobotOutlined, TeamOutlined, AppstoreOutlined } from "@ant-design/icons";
 import { ResizableDrawer } from "../components/ResizableDrawer";
 import {
   Alert, AutoComplete, Button, Card, Checkbox, Cascader, Col, Collapse, Divider, Drawer, Form, Input, Modal, Radio, Row, Segmented, Select, Space, Spin, Steps, Switch, Table, Tooltip, Typography, App as AntApp, Tag,
@@ -567,6 +567,12 @@ export function MetricCreate() {
   const [sqlBatchOwnerRole, setSqlBatchOwnerRole] = useState<"product" | "tech" | "dw">("product");
   const [sqlBatchOwnerValue, setSqlBatchOwnerValue] = useState<number | null>(null);
   const [sqlBatchOwnerScope, setSqlBatchOwnerScope] = useState<"checked" | "all">("checked");
+  // 批量设置粒度（方案 B 组合粒度）：一次给「已勾选/全部」候选设置主粒度（时间单选）
+  // + 粒度维度（业务实体 tags 多选）。同一 SQL 解析的候选粒度本应一致，免逐行重复配置。
+  const [sqlBatchGrainOpen, setSqlBatchGrainOpen] = useState(false);
+  const [sqlBatchGrain, setSqlBatchGrain] = useState<string | null>(null);
+  const [sqlBatchGrainDims, setSqlBatchGrainDims] = useState<string[]>([]);
+  const [sqlBatchGrainScope, setSqlBatchGrainScope] = useState<"checked" | "all">("checked");
   // 批量注册成功 → 「批量提交评审」直达（复用 /batch-submit，复审 D1）
   const [batchSubmitLoading, setBatchSubmitLoading] = useState(false);
   // 批量提交评审指派（复审 P2-10）：默认域评审组，可指定评审用户（对齐单指标提交的 reviewer_type/id）
@@ -1457,6 +1463,44 @@ export function MetricCreate() {
     );
     setSqlBatchOwnerOpen(false);
     message.success(`已为 ${keys.length} 个候选批量设置「${role.label}」`);
+    return keys.length;
+  }
+
+  // 批量设置粒度：一次把主粒度 + 粒度维度应用到「已勾选/全部」候选（方案 B 组合粒度）。
+  // 单次 setState 完成（不循环 handleSqlBatchEdit）；主粒度必选，粒度维度为空=清空。
+  // 返回应用数量供 UI 提示。
+  function applySqlBatchGrain(): number {
+    if (!sqlBatchResult) return 0;
+    if (!sqlBatchGrain) {
+      message.warning("请先选择主粒度（时间频率，如 月）");
+      return 0;
+    }
+    const grainDims = sqlBatchGrainDims.filter(Boolean);
+    const patch: Partial<SqlBatchCandidate> = {
+      granularity: sqlBatchGrain,
+      granularity_dims: grainDims,
+    };
+    const keys =
+      sqlBatchGrainScope === "all"
+        ? sqlBatchResult.candidates.map((c) => c.key)
+        : Array.from(sqlBatchChecked);
+    if (keys.length === 0) return 0;
+    setSqlBatchResult((prev) =>
+      prev
+        ? {
+            ...prev,
+            candidates: prev.candidates.map((c) =>
+              keys.includes(c.key) ? { ...c, ...patch } : c,
+            ),
+          }
+        : prev,
+    );
+    setSqlBatchGrainOpen(false);
+    message.success(
+      `已为 ${keys.length} 个候选批量设置粒度：主粒度 ${sqlBatchGrain}${
+        grainDims.length ? ` + ${grainDims.join("、")}` : ""
+      }`,
+    );
     return keys.length;
   }
 
@@ -3652,14 +3696,6 @@ export function MetricCreate() {
                     />
                     <Button
                       size="small"
-                      icon={<TeamOutlined />}
-                      onClick={() => setSqlBatchOwnerOpen(true)}
-                      data-testid="sql-batch-open-owner"
-                    >
-                      批量设置责任方
-                    </Button>
-                    <Button
-                      size="small"
                       icon={<BarsOutlined />}
                       onClick={() => {
                         setSqlBatchWizardStep(0);
@@ -4225,13 +4261,24 @@ export function MetricCreate() {
           ]}
         />
         {sqlBatchWizardStep === 0 && (
-          <Table
-            data-testid="sql-batch-wizard-t0"
-            size="small"
-            rowKey="key"
-            dataSource={sqlBatchResult?.candidates || []}
-            pagination={{ pageSize: 8, size: "small" }}
-            scroll={{ x: 960, y: 340 }}
+          <>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+              <Button
+                size="small"
+                icon={<AppstoreOutlined />}
+                onClick={() => setSqlBatchGrainOpen(true)}
+                data-testid="sql-batch-wizard-open-grain"
+              >
+                批量设置粒度（已勾选 {sqlBatchChecked.size} 个）
+              </Button>
+            </div>
+            <Table
+              data-testid="sql-batch-wizard-t0"
+              size="small"
+              rowKey="key"
+              dataSource={sqlBatchResult?.candidates || []}
+              pagination={{ pageSize: 8, size: "small" }}
+              scroll={{ x: 1160, y: 340 }}
             columns={[
               {
                 title: "勾选", width: 50,
@@ -4309,7 +4356,7 @@ export function MetricCreate() {
                 ),
               },
               {
-                title: "粒度", width: 90,
+                title: "主粒度", width: 90,
                 render: (_, c: SqlBatchCandidate) => (
                   <Select
                     size="small"
@@ -4317,6 +4364,28 @@ export function MetricCreate() {
                     value={c.granularity || c.period || "day"}
                     onChange={(v) => handleSqlBatchPeriodChange(c.key, c, "granularity", v)}
                     options={PERIOD_OPTIONS}
+                  />
+                ),
+              },
+              {
+                title: "粒度维度", width: 145,
+                render: (_, c: SqlBatchCandidate) => (
+                  <Select
+                    size="small"
+                    mode="tags"
+                    allowClear
+                    style={{ width: 135 }}
+                    placeholder="如 医院"
+                    value={c.granularity_dims || []}
+                    onChange={(v) =>
+                      handleSqlBatchEdit(c.key, {
+                        granularity_dims: Array.isArray(v) ? v.filter(Boolean) : [],
+                      })
+                    }
+                    options={(dictOptions["granularity"] || []).filter(
+                      (o) => !TIME_GRAIN_CODES.has(o.value),
+                    )}
+                    tokenSeparators={[","]}
                   />
                 ),
               },
@@ -4337,6 +4406,7 @@ export function MetricCreate() {
               },
             ]}
           />
+          </>
         )}
         {sqlBatchWizardStep === 1 && (
           <>
@@ -4652,6 +4722,76 @@ export function MetricCreate() {
               value={sqlBatchOwnerScope}
               onChange={(e) => setSqlBatchOwnerScope(e.target.value)}
               data-testid="sql-batch-owner-scope"
+            >
+              <Radio value="checked" disabled={sqlBatchChecked.size === 0}>
+                已勾选候选（{sqlBatchChecked.size} 个）
+              </Radio>
+              <Radio value="all">全部候选（{sqlBatchResult?.candidates.length ?? 0} 个）</Radio>
+            </Radio.Group>
+          </div>
+        </Space>
+      </Modal>
+
+      {/* 批量设置粒度（方案 B 组合粒度）：一次给「已勾选/全部」候选设置主粒度（时间单选）
+          + 粒度维度（业务实体 tags 多选）。同一 SQL 解析的候选粒度本应一致，免逐行重复配置；
+          与「批量设置责任方」同构（角色/值/范围三要素），收敛在批量编辑向导 Step 0 工具条 */}
+      <Modal
+        title="批量设置粒度"
+        open={sqlBatchGrainOpen}
+        onCancel={() => setSqlBatchGrainOpen(false)}
+        onOk={() => {
+          const applied = applySqlBatchGrain();
+          if (applied === 0) {
+            message.warning("请先选择主粒度，或先勾选候选指标 / 切换应用范围为「全部候选」");
+            return false; // 阻止关闭
+          }
+          return undefined;
+        }}
+        okText="应用"
+        cancelText="取消"
+        width={480}
+        destroyOnClose
+      >
+        <Space direction="vertical" style={{ width: "100%" }} size={16}>
+          <div>
+            <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+              主粒度（时间频率，如 月；必选）
+            </div>
+            <Select
+              style={{ width: "100%" }}
+              showSearch
+              placeholder="选择主粒度"
+              optionFilterProp="label"
+              value={sqlBatchGrain ?? undefined}
+              onChange={(v) => setSqlBatchGrain(v ?? null)}
+              data-testid="sql-batch-grain-main"
+              options={PERIOD_OPTIONS}
+            />
+          </div>
+          <div>
+            <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+              粒度维度（业务实体，可多选/手输；清空=移除）
+            </div>
+            <Select
+              style={{ width: "100%" }}
+              mode="tags"
+              allowClear
+              placeholder="如 医院 / 科室"
+              value={sqlBatchGrainDims}
+              onChange={(v) => setSqlBatchGrainDims(Array.isArray(v) ? v.filter(Boolean) : [])}
+              data-testid="sql-batch-grain-dims"
+              options={(dictOptions["granularity"] || []).filter(
+                (o) => !TIME_GRAIN_CODES.has(o.value),
+              )}
+              tokenSeparators={[","]}
+            />
+          </div>
+          <div>
+            <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>应用范围</div>
+            <Radio.Group
+              value={sqlBatchGrainScope}
+              onChange={(e) => setSqlBatchGrainScope(e.target.value)}
+              data-testid="sql-batch-grain-scope"
             >
               <Radio value="checked" disabled={sqlBatchChecked.size === 0}>
                 已勾选候选（{sqlBatchChecked.size} 个）

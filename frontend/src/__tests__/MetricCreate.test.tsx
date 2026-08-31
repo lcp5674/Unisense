@@ -3245,8 +3245,17 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
     await openBatchMode();
-    // 打开批量设置责任方弹窗（结果区头部入口）
-    fireEvent.click(screen.getByTestId("sql-batch-open-owner"));
+    // 打开批量设置责任方弹窗（收敛后入口：批量编辑向导 Step 1 工具条）
+    fireEvent.click(screen.getByTestId("sql-batch-open-wizard"));
+    await waitFor(() => {
+      expect(document.body.querySelector(".ant-modal-title")?.textContent || "").toContain("批量编辑向导");
+    });
+    const wm = () => within(document.querySelector(".ant-modal") as HTMLElement);
+    fireEvent.click(wm().getByTestId("sql-batch-wizard-next"));
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="sql-batch-wizard-t1"]')).toBeTruthy();
+    });
+    fireEvent.click(wm().getByTestId("sql-batch-wizard-open-owner"));
     const ownerModal = within(
       screen.getByTestId("sql-batch-owner-role").closest(".ant-modal") as HTMLElement,
     );
@@ -3276,7 +3285,16 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     await screen.findByText("注册指标（草稿）");
     await pickDomain();
     await openBatchMode();
-    fireEvent.click(screen.getByTestId("sql-batch-open-owner"));
+    fireEvent.click(screen.getByTestId("sql-batch-open-wizard"));
+    await waitFor(() => {
+      expect(document.body.querySelector(".ant-modal-title")?.textContent || "").toContain("批量编辑向导");
+    });
+    const wm = () => within(document.querySelector(".ant-modal") as HTMLElement);
+    fireEvent.click(wm().getByTestId("sql-batch-wizard-next"));
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="sql-batch-wizard-t1"]')).toBeTruthy();
+    });
+    fireEvent.click(wm().getByTestId("sql-batch-wizard-open-owner"));
     // 应用范围 → 全部候选（3 个）
     fireEvent.click(screen.getByText("全部候选（3 个）"));
     fireEvent.mouseDown(screen.getByTestId("sql-batch-owner-user").querySelector(".ant-select-selector")!);
@@ -3286,6 +3304,85 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     const compositeOwner = screen.getByTestId("sql-batch-owner-0:composite");
     await waitFor(() => {
       expect(within(compositeOwner).getByText("张三")).toBeTruthy();
+    });
+  });
+
+  it("批量设置粒度：勾选候选一次设置主粒度+粒度维度，候选行同步（同一 SQL 候选粒度应一致）", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+    // 打开批量编辑向导 → Step 0 → 工具条「批量设置粒度」（顶部入口已收敛到向导内）
+    fireEvent.click(screen.getByTestId("sql-batch-open-wizard"));
+    await waitFor(() => {
+      expect(document.body.querySelector(".ant-modal-title")?.textContent || "").toContain("批量编辑向导");
+    });
+    const wm = () => within(document.querySelector(".ant-modal") as HTMLElement);
+    fireEvent.click(wm().getByTestId("sql-batch-wizard-open-grain"));
+    // 主粒度选「月 (month)」
+    fireEvent.mouseDown(
+      screen.getByTestId("sql-batch-grain-main").querySelector(".ant-select-selector")!,
+    );
+    await clickSelectOption("月 (month)");
+    // 粒度维度手输「医院」（tags；字典 mock 为空，antd 会把输入值作为可建选项展示）
+    const dimsSel = screen.getByTestId("sql-batch-grain-dims");
+    fireEvent.mouseDown(dimsSel.querySelector(".ant-select-selector")!);
+    const dimsInput = dimsSel.querySelector(
+      ".ant-select-selection-search-input",
+    ) as HTMLInputElement;
+    fireEvent.change(dimsInput, { target: { value: "医院" } });
+    await clickSelectOption("医院");
+    // 确认「医院」tag 已进入粒度 Modal，再点应用
+    await waitFor(() => {
+      expect(within(dimsSel).getAllByText("医院").length).toBeGreaterThan(0);
+    });
+    fireEvent.click(screen.getByRole("button", { name: /应\s*用/ }));
+    // 应用后候选行「粒度」Select 显示 月、粒度维度 tags 显示 医院
+    await waitFor(() => {
+      const grainSel = screen.getByTestId("sql-batch-granularity-0:amount");
+      expect(grainSel.querySelector(".ant-select-selection-item")?.textContent).toContain("月");
+    });
+    const candDimsSel = screen.getByTestId("sql-batch-granularity-dims-0:amount");
+    expect(within(candDimsSel).getByText("医院")).toBeTruthy();
+    // 提交 payload：已勾选候选均带 granularity=month + mount.granularity_dims=[医院]
+    fireEvent.click(screen.getByText(/批量创建选中指标/));
+    await waitFor(() => expect(mockedBatchFromSql).toHaveBeenCalled());
+    const payload = mockedBatchFromSql.mock.calls[0][0] as {
+      candidates: Array<{
+        key: string;
+        granularity: string | null;
+        mount?: { granularity_dims?: string[] | null } | null;
+      }>;
+    };
+    expect(payload.candidates.length).toBeGreaterThan(0);
+    for (const c of payload.candidates) {
+      expect(c.granularity).toBe("month");
+      expect(c.mount?.granularity_dims).toEqual(["医院"]);
+    }
+  });
+
+  it("批量编辑向导：Step 0 粒度维度列 tags 可编辑（不再只有时间粒度）", async () => {
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await openBatchMode();
+    fireEvent.click(screen.getByTestId("sql-batch-open-wizard"));
+    await waitFor(() => {
+      expect(document.body.querySelector(".ant-modal-title")?.textContent || "").toContain("批量编辑向导");
+    });
+    // Step 0 表格同时含「主粒度」「粒度维度」两列（与粒度管理/候选列表同步）
+    const t0El = document.querySelector('[data-testid="sql-batch-wizard-t0"]') as HTMLElement;
+    const t0 = within(t0El);
+    expect(t0.getAllByText("主粒度").length).toBeGreaterThan(0);
+    expect(t0.getAllByText("粒度维度").length).toBeGreaterThan(0);
+    // 第一行粒度维度 tags 手输「医院」，表格出现该 tag
+    const dimsInput = t0El.querySelector(
+      ".ant-select-multiple .ant-select-selection-search-input",
+    ) as HTMLInputElement;
+    fireEvent.change(dimsInput, { target: { value: "医院" } });
+    fireEvent.keyDown(dimsInput, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(t0.getAllByText("医院").length).toBeGreaterThan(0);
     });
   });
 
