@@ -93,7 +93,9 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_hide_header Content-Security-Policy;
-        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'" always;
+        # frame-ancestors 'self'：允许同源前端（/api-docs iframe）内嵌 Swagger/ReDoc，
+        # 其余站点仍被阻止（点击劫持防护不削弱）；X-Frame-Options 由后端 SAMEORIGIN 透传。
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'self'" always;
         proxy_connect_timeout 30s;
         proxy_read_timeout 60s;
         proxy_send_timeout 60s;
