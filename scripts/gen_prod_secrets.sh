@@ -3,7 +3,8 @@
 #
 # 用法：
 #   ./scripts/gen_prod_secrets.sh                    # 打印到 stdout（复制粘贴到 .env.production）
-#   ./scripts/gen_prod_secrets.sh --out .env.production  # 直接写入（已存在则先备份为 .bak.<时间戳>）
+#   ./scripts/gen_prod_secrets.sh --out .env.production        # 直接写入（目标已存在则拒绝，防误覆盖）
+#   ./scripts/gen_prod_secrets.sh --out .env.production --force  # 强制覆盖（先备份为 .bak.<时间戳>）
 #
 # 说明：
 #   - 生成的密钥均为「URL/Shell 安全字符集」：
@@ -21,6 +22,7 @@
 set -euo pipefail
 
 OUT_FILE=""
+FORCE=0
 
 # ---- 参数解析 ----
 while [[ $# -gt 0 ]]; do
@@ -28,6 +30,10 @@ while [[ $# -gt 0 ]]; do
     --out)
       OUT_FILE="${2:-}"
       shift 2
+      ;;
+    --force)
+      FORCE=1
+      shift
       ;;
     -h | --help)
       sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
@@ -163,6 +169,15 @@ UNISENSE_SEED_ADMIN_PASSWORD=${SEED_ADMIN_PASSWORD}"
 
 if [[ -n "$OUT_FILE" ]]; then
   if [[ -e "$OUT_FILE" ]]; then
+    # 幂等保护：目标已存在时拒绝覆盖——密钥是生产的「锚点」，误覆盖会导致
+    # JWT 全失效 / Fernet 无法解密存量密文 / DB/ES/Neo4j 密码与数据卷不一致而崩溃。
+    # 确需轮换时显式 --force（先备份再覆盖），并同步改数据卷内密码 + 走 Fernet 密钥链。
+    if [[ $FORCE -ne 1 ]]; then
+      echo "[gen-secrets] 拒绝覆盖：${OUT_FILE} 已存在。" >&2
+      echo "[gen-secrets] 生产环境请勿重复生成密钥（会导致会话全失效、加密数据无法解密、DB 连接失败）。" >&2
+      echo "[gen-secrets] 确需轮换请用 --force（会先备份为 .bak.<时间戳>），并同步改数据卷密码 + Fernet 密钥链。" >&2
+      exit 1
+    fi
     bak="${OUT_FILE}.bak.$(date '+%Y%m%d%H%M%S')"
     cp "$OUT_FILE" "$bak"
     echo "[gen-secrets] 已备份既有文件 -> $bak" >&2

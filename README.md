@@ -468,10 +468,18 @@ JWT / Fernet / MySQL / ES / MinIO / 种子管理员 / 备份加密等 11 项强�
 
 ```bash
 cp .env.production.example .env.production                 # 1. 复制模板
-bash scripts/gen_prod_secrets.sh --out .env.production      # 2. 生成强密钥（覆盖 11 项）
+bash scripts/gen_prod_secrets.sh --out .env.production      # 2. 生成强密钥（仅首次执行；文件已存在则拒绝覆盖）
 vi .env.production                                          # 3. 填 UNISENSE_OLAP_URL / CORS 域名等非密钥项
 docker compose --env-file .env.production up -d --build     # 4. 启动
 ```
+
+> **⚠️ 密钥是生产的「锚点」，务必一次性生成、长期不变**：脚本对已存在的目标文件
+> **默认拒绝覆盖**（需 `--force` 才强制覆盖并先备份为 `.bak.<时间戳>`）。每次
+> `docker compose --env-file .env.production up -d --build` 重建容器都从同一文件
+> 读取**同一组密钥**——这是 JWT 会话稳定、Fernet 能解密存量密文、DB/ES/Neo4j 密码
+> 与数据卷一致的前提。切勿在生产重复执行脚本（会换掉全部密钥导致全员重新登录、
+> 加密数据源配置无法解密、容器连不上数据库）；确需轮换密钥时务必走
+> `--force` + 同步改数据卷内密码 + Fernet 密钥链（见 §10.5 升级回滚）。
 
 模板中需要人工确认的非密钥项：`UNISENSE_OLAP_URL`（Doris，见 10.1 说明）、
 `UNISENSE_CORS_ORIGINS`（生产禁止 `*`）、`UNISENSE_IMAGE_TAG`（版本锁定）。
