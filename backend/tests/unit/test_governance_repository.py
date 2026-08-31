@@ -269,3 +269,21 @@ class TestGovernanceRepositoryExtended:
         assert result.sensitivity_level == SensitivityLevel.PUBLIC
         repo._db.add.assert_called_once_with(result)
         repo._db.refresh.assert_awaited_once_with(result)
+
+    async def test_list_all_roles_returns_builtin_and_custom(
+        self, repo: GovernanceRepository
+    ) -> None:
+        """授权下拉数据源：返回内置登记 + 自定义角色（过滤已删除）。"""
+        roles = [
+            Role(name=RoleName.PLATFORM_ADMIN, is_custom=False),
+            Role(name=RoleName.VIEWER, is_custom=False),
+            Role(name="data_ops", is_custom=True),
+        ]
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = roles
+        repo._db.execute = AsyncMock(return_value=mock_result)
+        result = await repo.list_all_roles()
+        assert result == roles
+        stmt = str(repo._db.execute.call_args[0][0])
+        # 只查未删除行（软删角色不进入授权下拉）
+        assert "deleted_at IS NULL" in stmt

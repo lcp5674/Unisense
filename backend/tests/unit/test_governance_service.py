@@ -115,6 +115,9 @@ class FakeRepo:
     async def list_custom_roles(self) -> list[Role]:
         return [r for r in self.roles if getattr(r, "is_custom", False)]
 
+    async def list_all_roles(self) -> list[Role]:
+        return list(self.roles)
+
     async def count_users_by_role(self, role: str) -> int:
         return int(getattr(self, "user_role_counts", {}).get(role, 0))
 
@@ -1024,6 +1027,23 @@ async def test_create_custom_role_ok() -> None:
     assert "data_analyst" in by_role
     assert by_role["data_analyst"]["is_custom"] is True
     assert by_role["data_analyst"]["ui_effective_actions"] == []
+
+
+async def test_list_role_options_returns_builtin_and_custom() -> None:
+    """授权下拉数据源：内置登记 + 自定义角色并集（与角色管理页一致）。"""
+    svc, repo, _ = _svc()
+    # 预置内置角色登记行（等价迁移 0118 种入）+ 一个自定义角色
+    repo.roles = [
+        Role(name=RoleName.PLATFORM_ADMIN, is_custom=False),
+        Role(name=RoleName.VIEWER, is_custom=False),
+    ]
+    await svc.create_custom_role("data_analyst", "数据分析员")
+    options = await svc.list_role_options()
+    by_name = {o["name"]: o for o in options}
+    assert set(by_name) == {"platform_admin", "viewer", "data_analyst"}
+    assert by_name["platform_admin"]["is_custom"] is False
+    assert by_name["data_analyst"]["is_custom"] is True
+    assert all("id" in o and "name" in o and "is_custom" in o for o in options)
 
 
 async def test_create_custom_role_rejects_reserved_and_invalid() -> None:
