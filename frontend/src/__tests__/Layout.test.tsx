@@ -53,7 +53,7 @@ describe("Layout 侧边栏伸缩（按用户持久化）", () => {
     expect(screen.getByText("指标目录")).toBeInTheDocument();
     expect(screen.getByText("血缘视图")).toBeInTheDocument();
     expect(screen.getByText("权限治理")).toBeInTheDocument();
-    expect(screen.getAllByText("WeSemantic").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("WeSemantics").length).toBeGreaterThan(0);
   });
 
   it("默认展开；点击收起按钮后侧边栏折叠并持久化到该用户", () => {

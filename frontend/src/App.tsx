@@ -72,7 +72,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
 
   componentDidCatch(error: Error, info: { componentStack?: string | null }) {
-    console.error("WeSemantic UI ErrorBoundary:", error, info.componentStack);
+    console.error("WeSemantics UI ErrorBoundary:", error, info.componentStack);
   }
 
   handleReload = () => {
@@ -147,7 +147,7 @@ function LoginPage({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
         <div className="login-brand">
           <div className="brand-mark">W</div>
           <div>
-            <div className="brand-name">WeSemantic</div>
+            <div className="brand-name">WeSemantics</div>
             <div className="brand-sub">Metric Semantics Hub</div>
           </div>
         </div>
@@ -158,7 +158,7 @@ function LoginPage({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
             全员 <em>校准</em>。
           </h2>
           <p>
-            WeSemantic 指标语义中台让组织里的每一个指标——
+            WeSemantics 指标语义中台让组织里的每一个指标——
             定义、血缘、治理、消费——都可精确校准、可信追溯。
           </p>
         </div>
@@ -178,7 +178,7 @@ function LoginPage({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
           </div>
         </div>
 
-        <div className="login-foot">WeSemantic · Metric Semantics Hub v0.1</div>
+        <div className="login-foot">WeSemantics · Metric Semantics Hub v0.1</div>
       </div>
 
       <div className="login-panel">

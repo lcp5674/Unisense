@@ -1,4 +1,4 @@
-// WeSemantic 设计系统 — 「校准仪表」身份
+// WeSemantics 设计系统 — 「校准仪表」身份
 // 六色令牌系统：ink / chassis / paper / surface / line / signal / data
 // signal（琥珀）是品牌主色与活体读数，唯一的视觉冒险；其余保持安静克制。
 // 详见 docs/DEV_GUIDE.md 与 frontend-design 设计提案。
