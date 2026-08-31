@@ -30,7 +30,7 @@ from typing import Any
 from sqlalchemy.engine import URL
 from sqlalchemy.exc import OperationalError
 
-from app.core.exceptions import ExternalDependencyError
+from app.core.exceptions import BusinessError, ExternalDependencyError
 from app.services.collector.classifier import SensitivityClassifier
 from app.services.collector.connectors.collector_registry import registry
 from app.services.collector.connectors.hive import HiveCollector
@@ -368,6 +368,24 @@ class HiveMetastoreCollector(BaseCollector):
                 await self._sampler._close(sampler_conn)
 
         return CollectResult(specs=specs, failed_specs=failed_specs, source_id=source_id)
+
+    async def sample_columns(
+        self, entity_name: str, schema_json: dict[str, Any]
+    ) -> dict[str, Any]:
+        """采样入口：HMS 元数据库只存表结构不含行数据，采样须经 ``sample_connection``
+        直连 HiveServer2 的 ``_sampler``。
+
+        Raises:
+            BusinessError: 未配置采样连接（手动采样路径需明确报错，而非静默不采样）。
+        """
+        if self._sampler is None:
+            raise BusinessError(
+                "该数据源未配置采样连接（sample_connection）：Hive 元数据经 "
+                "Metastore 库采集，而 Metastore 只存表结构不含行数据，采样必须 "
+                "直连 HiveServer2。请在数据源编辑中配置采样连接后重试。",
+                error_code="SAMPLING_NOT_CONFIGURED",
+            )
+        return await self._sampler.sample_columns(entity_name, schema_json)
 
     async def probe(self) -> ProbeResult:
         """轻量探活：SELECT 1（经 HMS 库连接）。"""

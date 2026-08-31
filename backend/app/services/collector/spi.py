@@ -174,6 +174,24 @@ class BaseCollector(ABC):
         """对样本值打码（委托 classifier：手机/身份证/邮箱/银行卡掩码）。"""
         return self._classifier.mask_sample(sample)
 
+    def _sample_rule_id(self, sample: str) -> str | None:
+        """判定样本明文命中的敏感类别（rule_id），供采样时随打码值落库。
+
+        掩码会丢失格式特征（``138****1234`` 无法反推是手机还是身份证），
+        故类别必须在打码前对明文判定并单独存储为 ``columns[].sample_rule``。
+        """
+        return self._classifier.classify_sample(sample)
+
+    def _apply_sample(self, col: dict[str, Any], value: str) -> None:
+        """把采样值写入字段定义（打码 + 类别），各连接器共用。
+
+        类别与打码值一并落库：掩码不可逆，事后无法补判类别。
+        """
+        col["sample"] = self._mask_sample(value)
+        rule_id = self._sample_rule_id(value)
+        if rule_id:
+            col["sample_rule"] = rule_id
+
     async def list_databases(self) -> list[str]:
         """枚举该实例下可采集的非系统数据库（创建数据源时选择目标库）。
 

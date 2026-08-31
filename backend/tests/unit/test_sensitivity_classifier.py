@@ -326,3 +326,88 @@ def test_vocab_exempt_fields_and_prefixes() -> None:
     # 非豁免字段不受影响
     hits = clf.detect_pii_fields("ods.t", _schema({"name": "mobile", "comment": "手机号"}))
     assert hits and hits[0].rule == "phone"
+
+
+# ---- 样本驱动识别（采样增强）：类别须由明文判定，不能靠掩码反推 ----
+
+
+def test_sample_rule_prevents_cross_rule_misclassification():
+    """打码样本须与 sample_rule 配合：否则手机号会被靠前的 id_card 规则误判。
+
+    掩码丢失格式特征（``138****1234`` 既不匹配手机号正则也不匹配身份证正则），
+    仅凭「含掩码标记」无法区分类别——历史上这导致 phone 列被判为 ID_CARD
+    且置信度反被下调（0.9 → 0.8）。
+    """
+    c = SensitivityClassifier()
+    hits = c.detect_pii_fields(
+        "t.orders",
+        {
+            "columns": [
+                {
+                    "name": "phone",
+                    "type": "varchar",
+                    "comment": "",
+                    "sample": "138****1234",
+                    "sample_rule": "phone",
+                }
+            ]
+        },
+    )
+    assert len(hits) == 1
+    assert hits[0].rule == "phone"
+    assert hits[0].category is PiiCategory.PHONE
+    assert hits[0].matched_by == "name+sample"
+    # 双重验证上调置信度（而非被降级）
+    assert hits[0].confidence > 0.9
+
+
+def test_masked_sample_without_rule_does_not_misclassify():
+    """存量打码样本无 sample_rule → 不独立命中（宁缺勿滥，避免类别错判）。"""
+    c = SensitivityClassifier()
+    hits = c.detect_pii_fields(
+        "t.t",
+        {"columns": [{"name": "col_07", "comment": "", "sample": "138****1234"}]},
+    )
+    assert hits == []
+
+
+def test_sample_only_hit_discovers_semantically_blank_column():
+    """字段名无语义但值敏感 → 仅样本命中发现隐藏 PII（采样的核心价值）。"""
+    c = SensitivityClassifier()
+    hits = c.detect_pii_fields(
+        "t.t",
+        {
+            "columns": [
+                {
+                    "name": "col_07",
+                    "comment": "",
+                    "sample": "110101********1234",
+                    "sample_rule": "id_card",
+                }
+            ]
+        },
+    )
+    assert len(hits) == 1
+    assert hits[0].rule == "id_card"
+    assert hits[0].matched_by == "sample"
+    # 仅样本命中下调置信度，边缘情形落 NEEDS_REVIEW 交人工复核
+    assert hits[0].confidence < 0.9
+
+
+def test_classify_sample_matches_mask_sample_semantics():
+    """classify_sample 与 mask_sample 共用判定：打码值必对应已识别类别。"""
+    c = SensitivityClassifier()
+    cases = {
+        "13812341234": "phone",
+        "110101199003071234": "id_card",
+        "ab@example.com": "email",
+        "6222021234567890123": "bank_card",
+        "ORD-2026-001": None,
+    }
+    for raw, rule_id in cases.items():
+        assert c.classify_sample(raw) == rule_id
+        masked = c.mask_sample(raw)
+        if rule_id is None:
+            assert masked == raw  # 非敏感值原样
+        else:
+            assert masked != raw  # 敏感值必须打码

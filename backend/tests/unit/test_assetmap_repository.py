@@ -126,6 +126,8 @@ class TestGetEntityDetail:
                 "name": "id",
                 "type": "BIGINT",
                 "comment": "主键",
+                # 脱敏样本值（未采样时为 None）
+                "sample": None,
                 # 无独立描述记录但有原始 comment → 取 comment、来源 schema（并行会话
                 # 新增的 _merge_descriptions 行为）
                 "description": "主键",
@@ -192,13 +194,32 @@ class TestSummarizeSchema:
         out = AssetMapRepository._summarize_schema(
             {"fields": [{"name": "a", "type": "INT", "comment": None}]}
         )
-        assert out == [{"name": "a", "type": "INT", "comment": None}]
+        # 脱敏样本未采样时为 None（采集侧打码后才有值）
+        assert out == [{"name": "a", "type": "INT", "comment": None, "sample": None}]
 
     def test_columns_list(self) -> None:
         out = AssetMapRepository._summarize_schema(
             {"columns": [{"column": "b", "data_type": "VARCHAR"}]}
         )
-        assert out == [{"name": "b", "type": "VARCHAR", "comment": None}]
+        assert out == [{"name": "b", "type": "VARCHAR", "comment": None, "sample": None}]
+
+    def test_sample_passthrough(self) -> None:
+        """采样开启时脱敏样本值透出（已打码，非原始敏感值）。"""
+        out = AssetMapRepository._summarize_schema(
+            {
+                "columns": [
+                    {"name": "phone", "type": "VARCHAR", "comment": "手机", "sample": "138****5678"}
+                ]
+            }
+        )
+        assert out == [
+            {
+                "name": "phone",
+                "type": "VARCHAR",
+                "comment": "手机",
+                "sample": "138****5678",
+            }
+        ]
 
     def test_non_dict_returns_none(self) -> None:
         assert AssetMapRepository._summarize_schema("raw") is None

@@ -673,6 +673,50 @@ async def refresh_entity(
     return ok(data=result, trace_id=trace_id)
 
 
+@source_router.post("/{source_id}/entities/{entity_name}/sample", dependencies=_WRITE_DEPS)
+async def sample_entity(
+    source_id: str,
+    entity_name: str,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    sample_rows: int | None = Query(None, ge=1, le=200),
+) -> ApiResponse[dict[str, Any]]:
+    """单表样本采样（不重跑全量采集，只补采样本值）。
+
+    样本经打码后写入 ``schema_json.columns[].sample``，并据 ``name+sample``
+    双重验证重算字段级 PII 命中——用于提升 PII 识别精度、纠正仅靠名称的误判。
+    需要数据源已开启采样（``quota.sample_rows > 0``）或本次显式指定 ``sample_rows``。
+    """
+    svc = _svc(db)
+    src = await svc.get_source_orm(source_id)
+    collector = build_collector(src.source_type, src.connection_config)
+    try:
+        result = await svc.sample_entity(
+            source_id, entity_name, user.id, collector, sample_rows
+        )
+    finally:
+        await collector.dispose()
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="db_catalog.sample",
+        entity_type="db_catalog",
+        entity_id=f"{source_id}/{entity_name}",
+        detail={
+            "sample_rows": result["sample_rows"],
+            "sampled": result["sampled"],
+            "pii_hits": result["pii_hits"],
+        },
+        ip=client_ip(request),
+        trace_id=trace_id,
+        pii_access=(result["sensitivity_level"] == "PII"),
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
 @source_router.post("/{source_id}/collect", dependencies=_WRITE_DEPS)
 async def collect_source(
     source_id: str,
@@ -1063,6 +1107,35 @@ async def get_source_overview(
     svc = _svc(db)
     overview = await svc.get_source_overview(source_id)
     return ok(data=overview, trace_id=trace_id)
+
+
+@source_router.get("/{source_id}/sampling-coverage", dependencies=_READ_DEPS)
+async def get_sampling_coverage(
+    source_id: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """采样覆盖率：该源已采样表数/列数与占比（PII 识别精度可观测性）。
+
+    采样是 PII 精度增强的前提——未采样的表只能靠字段名/注释推断。本端点让
+    治理端看清「哪些范围已具备 name+sample 双重验证能力」。
+    """
+    svc = _svc(db)
+    return ok(
+        data=await svc.get_sampling_coverage(source_id), trace_id=trace_id
+    )
+
+
+@source_router.get("/sampling-coverage", dependencies=_READ_DEPS)
+async def get_sampling_coverage_all(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """全库采样覆盖率（不按数据源过滤）：采集目录总览的采样健康度。"""
+    svc = _svc(db)
+    return ok(data=await svc.get_sampling_coverage(), trace_id=trace_id)
 
 
 @source_router.get("/{source_id}/drift-logs", dependencies=_READ_DEPS)

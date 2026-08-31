@@ -4718,3 +4718,319 @@ async def test_mysql_collector_no_sampling_when_disabled():
     assert conn.sample_sqls == []  # 未开启采样不执行采样查询
     cols = result.specs[0].schema_json["columns"]
     assert all("sample" not in c for c in cols)
+
+
+# ---- 单表立即采样（sample_entity）：不重跑采集，只补采样本并重算 PII ----
+
+
+def _sampling_collector(rows: list[dict[str, Any]]):
+    """构造支持采样的假连接器（覆写基类 sample_columns）。"""
+    from app.services.collector.spi import BaseCollector
+
+    class SamplingCollector(BaseCollector):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entities: dict[str, dict[str, Any]] = {}
+
+        def add(self, entity_name: str, columns: list[dict[str, Any]]) -> None:
+            self.entities[entity_name] = columns
+
+        async def collect(self, source: object) -> CollectResult:
+            raise AssertionError("立即采样不应触发全源采集")
+
+        async def sample_columns(self, entity_name: str, schema_json: dict[str, Any]):
+            cols = schema_json.get("columns") or []
+            for col in cols:
+                for row in rows:
+                    v = row.get(str(col.get("name")))
+                    if v not in (None, ""):
+                        # 与真实连接器一致：打码存值 + 打码前记录命中类别
+                        col["sample"] = self._mask_sample(str(v))
+                        rule_id = self._sample_rule_id(str(v))
+                        if rule_id:
+                            col["sample_rule"] = rule_id
+                        break
+            return schema_json
+
+    return SamplingCollector()
+
+
+async def test_sample_entity_writes_masked_samples():
+    """单表采样：样本打码写入 schema_json，并据此重算字段级 PII 命中。"""
+    svc, repo = _svc()
+    cat = MagicMock()
+    cat.id = 7
+    # 字段名 phone 不含明显关键词之外——构造「仅靠名称不命中、样本命中」的场景
+    cat.schema_json = {
+        "columns": [{"name": "contact", "type": "varchar", "comment": ""}]
+    }
+    repo.get_source = AsyncMock(return_value=MagicMock(source_id="s", quota={"sample_rows": 5}))
+    repo.get_catalog = AsyncMock(return_value=cat)
+    collector = _sampling_collector([{"contact": "13812341234"}])
+
+    result = await svc.sample_entity("s", "finance.orders", 1, collector)
+    assert result["entity_name"] == "finance.orders"
+    assert result["sampled"] == 1
+    assert result["sample_rows"] == 5
+    # 采样前无命中；采样后经 name+sample 双重验证识别为 PII
+    assert result["pii_hits"] == 1
+    assert result["new_pii_columns"] == ["contact"]
+    assert result["cleared_pii_columns"] == []
+    # 样本已打码落库（绝不写原始手机号）
+    assert cat.schema_json["columns"][0]["sample"] == "138****1234"
+    # PII 明细含脱敏样本，供治理端复核；字段名无语义 → 仅样本命中
+    hit = repo.upsert_classification.await_args.args[2][0]
+    assert hit["sample"] == "138****1234"
+    assert hit["matched_by"] == "sample"
+
+
+async def test_sample_entity_upgrades_name_hit_to_dual_verified():
+    """字段名已命中关键词时，采样把命中升级为 name+sample 双重验证（置信度 +0.05）。"""
+    svc, repo = _svc()
+    cat = MagicMock()
+    cat.id = 7
+    cat.schema_json = {"columns": [{"name": "phone", "type": "varchar", "comment": ""}]}
+    repo.get_source = AsyncMock(return_value=MagicMock(source_id="s", quota={"sample_rows": 5}))
+    repo.get_catalog = AsyncMock(return_value=cat)
+    collector = _sampling_collector([{"phone": "13812341234"}])
+
+    result = await svc.sample_entity("s", "finance.orders", 1, collector)
+    # 采样前已由名称命中，采样后升级为双重验证（而非新增一列）
+    assert result["pii_hits"] == 1
+    assert result["new_pii_columns"] == []
+    assert result["cleared_pii_columns"] == []
+    hit = repo.upsert_classification.await_args.args[2][0]
+    assert hit["matched_by"] == "name+sample"
+    assert hit["confidence"] > 0.9
+
+
+async def test_sample_entity_raises_when_sampling_disabled():
+    """未开启采样（配额为 0 且未指定行数）→ 明确报错，不静默成功。"""
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(return_value=MagicMock(source_id="s", quota={}))
+    with pytest.raises(BusinessError, match="未开启采样"):
+        await svc.sample_entity("s", "finance.orders", 1, _sampling_collector([]))
+
+
+async def test_sample_entity_raises_when_unsupported_connector():
+    """连接器未覆写采样（继承基类空实现）→ 报错，避免「假装采样成功」。"""
+    from app.services.collector.spi import BaseCollector
+
+    class NoopCollector(BaseCollector):
+        async def collect(self, source: object) -> CollectResult:
+            raise AssertionError("不应触发采集")
+
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(return_value=MagicMock(source_id="s", quota={"sample_rows": 5}))
+    with pytest.raises(BusinessError, match="不支持样本采样"):
+        await svc.sample_entity("s", "finance.orders", 1, NoopCollector())
+
+
+async def test_sample_entity_raises_when_entity_not_in_catalog():
+    """目录中不存在该实体 → NotFoundError 并提示先采集。"""
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(return_value=MagicMock(source_id="s", quota={"sample_rows": 5}))
+    repo.get_catalog = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError, match="目录中不存在实体"):
+        await svc.sample_entity("s", "finance.ghost", 1, _sampling_collector([]))
+
+
+async def test_sample_entity_raises_when_schema_empty():
+    """实体无字段信息 → 明确报错（应先刷新元数据）。"""
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(return_value=MagicMock(source_id="s", quota={"sample_rows": 5}))
+    repo.get_catalog = AsyncMock(return_value=MagicMock(id=1, schema_json={"columns": []}))
+    with pytest.raises(BusinessError, match="尚无字段信息"):
+        await svc.sample_entity("s", "finance.orders", 1, _sampling_collector([]))
+
+
+# ---- 采样覆盖率统计（PII 精度增强可观测性）----
+
+
+def _sampling_coverage_session(
+    *,
+    total_entities: int = 10,
+    sampled_entities: int = 4,
+    total_columns: int = 100,
+    sampled_columns: int = 25,
+    verified_columns: int = 6,
+) -> MagicMock:
+    """构造采样覆盖率统计用 session（5 次 SQL 聚合 scalar）。"""
+    s = MagicMock()
+    s.scalar = AsyncMock(
+        side_effect=[
+            total_entities,
+            sampled_entities,
+            total_columns,
+            sampled_columns,
+            verified_columns,
+        ]
+    )
+    return s
+
+
+async def test_repo_sampling_coverage_sql_shape() -> None:
+    """采样覆盖率走 SQL 端 JSON 聚合：不装载 schema_json 大字段。
+
+    关键：``$.columns[*].sample`` 通配符只返回存在 sample 的元素（MySQL 跳过
+    缺失路径），全无样本的表返回 NULL → ``IS NOT NULL`` 即「已采样表」，
+    ``JSON_LENGTH`` 即「已采样列数」。
+    """
+    s = _sampling_coverage_session()
+    repo = CollectorRepository(s)
+    await repo.get_sampling_coverage("s1")
+
+    assert s.scalar.await_count == 5
+    stmts = [
+        str(c.args[0].compile(compile_kwargs={"literal_binds": True}))
+        for c in s.scalar.call_args_list
+    ]
+    # 实体总数（第 1 次）：仅计数，不涉及 JSON 函数（避免装载 schema_json）
+    assert "count(db_catalog.id)" in stmts[0]
+    assert "json_" not in stmts[0]
+    # 已采样实体数（第 2 次）：靠样本路径 IS NOT NULL 判定
+    assert "$.columns[*].sample" in stmts[1]
+    assert "IS NOT NULL" in stmts[1]
+    # 列数（第 3/4/5 次）走 json_length + json_extract
+    assert "json_length" in stmts[2] and "$.columns" in stmts[2]
+    assert "json_length" in stmts[3] and "$.columns[*].sample" in stmts[3]
+    assert "json_length" in stmts[4] and "$.columns[*].sample_rule" in stmts[4]
+    # 全部语句均按数据源过滤且排除软删
+    for text in stmts:
+        assert "s1" in text
+        assert "deleted_at" in text.lower()
+
+
+async def test_repo_sampling_coverage_rates() -> None:
+    """覆盖率比率计算：4/10 表、25/100 列；空目录返回 0.0 不除零。"""
+    s = _sampling_coverage_session()
+    repo = CollectorRepository(s)
+    cov = await repo.get_sampling_coverage("s1")
+
+    assert cov["total_entities"] == 10
+    assert cov["sampled_entities"] == 4
+    assert cov["entity_coverage"] == 0.4
+    assert cov["total_columns"] == 100
+    assert cov["sampled_columns"] == 25
+    assert cov["column_coverage"] == 0.25
+    assert cov["verified_columns"] == 6
+    assert cov["source_id"] == "s1"
+
+    # 空目录：分母为 0 时比率取 0.0（不抛 ZeroDivisionError）
+    s2 = _sampling_coverage_session(
+        total_entities=0, sampled_entities=0, total_columns=0, sampled_columns=0, verified_columns=0
+    )
+    cov2 = await CollectorRepository(s2).get_sampling_coverage("empty")
+    assert cov2["entity_coverage"] == 0.0
+    assert cov2["column_coverage"] == 0.0
+
+
+async def test_repo_sampling_coverage_all_sources() -> None:
+    """source_id=None：全库口径，不附加数据源过滤。"""
+    s = _sampling_coverage_session()
+    repo = CollectorRepository(s)
+    cov = await repo.get_sampling_coverage()
+    assert cov["source_id"] is None
+    stmts = [
+        str(c.args[0].compile(compile_kwargs={"literal_binds": True}))
+        for c in s.scalar.call_args_list
+    ]
+    for text in stmts:
+        # join 条件形如 data_source.source_id = db_catalog.source_id，
+        # 仅当存在「按源过滤」时才出现 db_catalog.source_id = 'xxx'
+        assert "db_catalog.source_id =" not in text
+
+
+async def test_service_sampling_coverage_requires_source() -> None:
+    """service 层：指定不存在的源 → NotFoundError；全库口径不校验存在性。"""
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError, match="数据源不存在"):
+        await svc.get_sampling_coverage("ghost")
+
+    repo.get_source = AsyncMock(return_value=MagicMock(source_id="s1"))
+    repo.get_sampling_coverage = AsyncMock(return_value={"total_entities": 1})
+    assert (await svc.get_sampling_coverage("s1"))["total_entities"] == 1
+    # 全库口径不调用 get_source
+    await svc.get_sampling_coverage()
+    repo.get_sampling_coverage.assert_awaited_with(None)
+
+
+# ---- 采样韧性：整批查询失败降级逐列重试 ----
+
+
+class _BatchFailConnector:
+    """整批查询失败、单列查询部分成功的假连接器。
+
+    模拟生产实测场景：Doris 因**某一列**的协议兼容问题（如 ``phone_number``
+    触发 ``Packet sequence number wrong``）让整批多列查询失败。若不降级，
+    该表全部列都采不到样本（sampled=0）。
+    """
+
+    def __init__(self, values: dict[str, str], fail_cols: set[str]) -> None:
+        self._values = values
+        self._fail_cols = fail_cols
+        self.batch_attempts = 0
+        self.single_sqls: list[str] = []
+
+    @staticmethod
+    def _cols_of(sql: str) -> list[str]:
+        seg = sql.split("SELECT", 1)[1].split("FROM", 1)[0].strip()
+        return [c.strip().strip("`") for c in seg.split(",")]
+
+    async def query(self, sql: str, params: dict | None = None) -> list[dict]:
+        cols = self._cols_of(sql)
+        if len(cols) > 1:
+            self.batch_attempts += 1
+            raise RuntimeError("Packet sequence number wrong - got 15 expected 1")
+        col = cols[0]
+        self.single_sqls.append(sql)
+        if col in self._fail_cols:
+            raise RuntimeError("Packet sequence number wrong")
+        return [{col: self._values.get(col, "1")}]
+
+
+async def test_sample_batch_failure_falls_back_to_per_column():
+    """整批失败 → 逐列降级：健康列仍采到样本，问题列单独跳过。
+
+    修复前：一批 20 列中任一列查询失败即整批丢弃（该表 sampled=0）。
+    """
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    conn = _BatchFailConnector(
+        values={"id": "1", "phone_number": "13812341234", "remark": "备注"},
+        fail_cols={"phone_number"},
+    )
+    collector = InformationSchemaCollector(conn)
+    collector.set_sampling(3)
+    columns = [
+        {"name": "id", "type": "bigint"},
+        {"name": "phone_number", "type": "varchar"},
+        {"name": "remark", "type": "varchar"},
+    ]
+    out = await collector._sample_columns("finance.orders", columns)
+
+    assert conn.batch_attempts == 1  # 先尝试整批
+    assert len(conn.single_sqls) == 3  # 再逐列重试每一列
+    # 健康列采到样本（非敏感值原样、敏感值打码）
+    by_name = {c["name"]: c for c in out}
+    assert by_name["id"]["sample"] == "1"
+    assert by_name["remark"]["sample"] == "备注"
+    # 问题列被隔离跳过，不影响其他列
+    assert "sample" not in by_name["phone_number"]
+
+
+async def test_sample_per_column_masks_sensitive_and_records_rule():
+    """逐列降级路径同样打码并记录类别（与批量路径行为一致）。"""
+    from app.services.collector.connectors.mysql import InformationSchemaCollector
+
+    conn = _BatchFailConnector(
+        values={"phone_number": "13812341234"}, fail_cols=set()
+    )
+    collector = InformationSchemaCollector(conn)
+    collector.set_sampling(3)
+    columns = [{"name": "phone_number", "type": "varchar"}]
+    out = await collector._sample_columns("finance.orders", columns)
+
+    assert out[0]["sample"] == "138****1234"  # 打码存储
+    assert out[0]["sample_rule"] == "phone"  # 类别随打码值落库

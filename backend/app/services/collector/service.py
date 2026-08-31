@@ -13,6 +13,7 @@ from typing import Any
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.base_service import BaseService
 from app.core.config import Settings
@@ -95,13 +96,19 @@ def _sanitize_conn_error(message: str) -> str:
 
 
 def _hit_to_dict(hit: Any) -> dict[str, Any]:
-    """PiiFieldHit → classification.pii_columns 存储结构（列名/类别/规则/置信度/途径）。"""
+    """PiiFieldHit → classification.pii_columns 存储结构。
+
+    含列名/类别/规则/置信度/匹配途径，以及命中字段的脱敏样本值（``sample``，
+    已打码）——样本是 ``name+sample`` 双重验证的证据来源，供治理端复核误报时
+    查看「这个字段实际存了什么」而无需回源查询。
+    """
     return {
         "column": hit.column,
         "category": hit.category,
         "rule": hit.rule,
         "confidence": round(float(hit.confidence), 4),
         "matched_by": hit.matched_by,
+        "sample": getattr(hit, "sample", "") or "",
     }
 
 
@@ -2223,6 +2230,114 @@ class CollectorService(BaseService):
             "columns": len(spec.schema_json.get("columns", [])),
         }
 
+    async def sample_entity(
+        self,
+        source_id: str,
+        entity_name: str,
+        actor_id: int,
+        collector: BaseCollector,
+        sample_rows: int | None = None,
+    ) -> dict[str, Any]:
+        """单表样本采样（不重跑全量采集，只补采样本值）。
+
+        与 ``refresh_entity`` 的区别：刷新会重扫源端元数据（结构/注释/ETL），
+        本方法仅对**已在目录中的字段**执行 ``SELECT ... LIMIT n`` 取代表值，
+        打码写入 ``schema_json.columns[].sample``，并据此重算字段级 PII 命中
+        （采样后 ``name+sample`` 双重验证可提升置信度、纠正仅靠名称的误判）。
+
+        Args:
+            source_id: 数据源 ID。
+            entity_name: 目录实体名（库.表）。
+            actor_id: 操作者（审计留痕）。
+            collector: 已构建的连接器。
+            sample_rows: 本次采样行数（覆盖 ``quota.sample_rows``；None=取配额）。
+
+        Returns:
+            dict 含 entity_name / columns（字段数）/ sampled（取到样本的列数）
+            / sample_rows / sensitivity_level / pii_hits（命中数）/ upgraded。
+
+        Raises:
+            NotFoundError: 数据源或实体不存在。
+            BusinessError: 连接器不支持采样、未开启采样配额、或采样连接未配置。
+        """
+        src = await self._repo.get_source(source_id)
+        if src is None:
+            raise NotFoundError(f"数据源不存在: {source_id}")
+        if not getattr(src, "enabled", True):
+            raise BusinessError(
+                f"数据源已停用: {source_id}，请先在数据源管理启用后再采样",
+                error_code="SOURCE_DISABLED",
+            )
+        quota_cfg = src.quota or {}
+        quota_rows = int(quota_cfg.get("sample_rows") or 0) if isinstance(quota_cfg, dict) else 0
+        rows = int(sample_rows) if sample_rows is not None else quota_rows
+        if rows <= 0:
+            raise BusinessError(
+                "未开启采样：请先在数据源「配额」中设置采样行数（sample_rows > 0），"
+                "或在本次请求中指定 sample_rows",
+                error_code="SAMPLING_DISABLED",
+            )
+        # 区分「不支持采样」与「支持但没取到值」：未覆盖基类默认实现的连接器
+        # （如 Kafka 无表结构）静默返回原 schema，会让用户误以为采样成功。
+        sample_fn = getattr(type(collector), "sample_columns", None)
+        if sample_fn is None or sample_fn is BaseCollector.sample_columns:
+            raise BusinessError(
+                f"数据源类型 {getattr(src, 'source_type', '')} 不支持样本采样",
+                error_code="SAMPLING_UNSUPPORTED",
+            )
+
+        cat = await self._repo.get_catalog(source_id, entity_name)
+        if cat is None:
+            raise NotFoundError(
+                f"目录中不存在实体: {entity_name}（请先执行一次采集以建立目录记录）"
+            )
+        schema_json = dict(cat.schema_json or {})
+        columns = schema_json.get("columns")
+        if not isinstance(columns, list) or not columns:
+            raise BusinessError(
+                f"实体 {entity_name} 尚无字段信息，请先刷新元数据再采样",
+                error_code="SCHEMA_EMPTY",
+            )
+
+        # 采样前命中集合（用于展示本次采样带来的 PII 识别变化）。
+        # 必须在 sample_columns 之前计算：连接器的采样是**就地**写入
+        # columns[].sample（schema_json 的浅拷贝共享同一列表对象），
+        # 若采样后再算会拿到已被污染的 schema，前后对比恒为空。
+        before_hits = self._classifier.detect_pii_fields(entity_name, schema_json)
+        before_cols = {h.column for h in before_hits}
+
+        collector.set_sampling(rows)
+        await self._maybe_load_db_rules()
+        schema_json = await collector.sample_columns(entity_name, schema_json)
+        sampled = sum(1 for c in schema_json.get("columns", []) if c.get("sample"))
+
+        # 写回 schema_json（仅更新样本，不触发 drift 判定——结构未变）
+        cat.schema_json = schema_json
+        flag_modified(cat, "schema_json")
+        sensitivity = self._classifier.classify(entity_name, schema_json)
+        cat.sensitivity_level = sensitivity
+        hits = self._classifier.detect_pii_fields(entity_name, schema_json)
+        # 仅在「本次有命中」或「此前有命中需清空」时写明细，避免为无命中表
+        # 创建空 classification 记录（与 refresh_entity 行为一致）。
+        if hits or before_hits:
+            await self._repo.upsert_classification(
+                cat.id, sensitivity, [_hit_to_dict(h) for h in hits]
+            )
+        await self._db.flush()
+        after_cols = {h.column for h in hits}
+        return {
+            "source_id": source_id,
+            "entity_name": entity_name,
+            "columns": len(schema_json.get("columns", [])),
+            "sampled": sampled,
+            "sample_rows": rows,
+            "sensitivity_level": sensitivity,
+            "pii_hits": len(hits),
+            # 采样后新增/减少的 PII 命中列（双重验证的收益可视化）
+            "new_pii_columns": sorted(after_cols - before_cols),
+            "cleared_pii_columns": sorted(before_cols - after_cols),
+        }
+
     async def schedule_collection(
         self,
         source_id: str,
@@ -2435,6 +2550,21 @@ class CollectorService(BaseService):
         if not overview:
             raise NotFoundError(f"数据源不存在: {source_id}")
         return overview
+
+    async def get_sampling_coverage(self, source_id: str | None = None) -> dict[str, Any]:
+        """采样覆盖率（PII 精度增强可观测性）：已采样表数/列数与占比。
+
+        Args:
+            source_id: 数据源 ID；None 表示全部数据源（全库口径）。
+
+        Raises:
+            NotFoundError: 指定数据源不存在（全库口径不校验）。
+        """
+        if source_id is not None:
+            src = await self._repo.get_source(source_id)
+            if src is None:
+                raise NotFoundError(f"数据源不存在: {source_id}")
+        return await self._repo.get_sampling_coverage(source_id)
 
     async def list_drift_logs(
         self,

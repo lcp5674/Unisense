@@ -448,6 +448,11 @@ class HiveCollector(BaseCollector):
                         break
                 if value:
                     col["sample"] = self._mask_sample(value)
+                    # 类别须在打码前对明文判定：掩码丢失格式特征，
+                    # 事后无法反推是手机号还是身份证（防跨规则误判）
+                    _rule_id = self._sample_rule_id(value)
+                    if _rule_id:
+                        col["sample_rule"] = _rule_id
         return columns
 
     async def sample_columns(

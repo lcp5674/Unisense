@@ -106,6 +106,9 @@ class PiiFieldHit:
     confidence: float
     matched_by: str  # name | name+sample | comment
     pii: bool = True
+    # 命中字段的脱敏样本值（仅供治理复核展示，已打码；空串表示未采样）。
+    # 与 matched_by == "name+sample" 配合：样本是双重验证的证据来源。
+    sample: str = ""
 
 
 def _tok(pattern: str) -> str:
@@ -416,12 +419,43 @@ class SensitivityClassifier:
         self._exempt_fields = v.exempt_fields
         self._exempt_prefixes = v.exempt_prefixes
 
+    @staticmethod
+    def classify_sample(sample: str) -> str | None:
+        """判定原始样本值命中的敏感格式，返回 ``rule_id``（phone/id_card/...）。
+
+        与 ``mask_sample`` 共用同一套格式判定（单一事实来源，避免两处正则漂移）。
+        采样时调用本方法把 ``rule_id`` 与打码样本一并落库，供
+        ``detect_pii_fields`` **精确**判定类别——掩码会丢失格式特征
+        （``138****1234`` 既不匹配手机号也不匹配身份证正则），仅凭「含掩码标记」
+        无法区分是哪个类别，会让手机号被排在前的 id_card 规则误判。
+
+        Args:
+            sample: 采集到的原始样本值（明文，不落库）。
+
+        Returns:
+            命中的 rule_id；非敏感值返回 None。
+        """
+        if not sample:
+            return None
+        s = sample.strip()
+        if re.fullmatch(r"1[3-9]\d{9}", s):
+            return "phone"
+        if re.fullmatch(r"\d{17}[\dXx]", s):
+            return "id_card"
+        if re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", s):
+            return "email"
+        if re.fullmatch(r"\d{16,19}", s):
+            return "bank_card"
+        return None
+
     def mask_sample(self, sample: str) -> str:
         """对样本值打码后存储（PII 识别只需要格式特征，不需要明文）。
 
         命中敏感格式（手机/身份证/邮箱/银行卡）→ 打码保留格式特征；非敏感值
-        原样返回（普通业务值无需打码，仍可用于 name+sample 验证）。打码值含
-        掩码标记（``****``），``detect_pii_fields`` 据此识别为敏感样本。
+        原样返回（普通业务值无需打码，仍可用于 name+sample 验证）。
+
+        注意：打码结果**不能**反推类别，类别由采样侧调用 ``classify_sample``
+        单独落库为 ``columns[].sample_rule``。
 
         Args:
             sample: 采集到的原始样本值。
@@ -432,13 +466,14 @@ class SensitivityClassifier:
         if not sample:
             return sample
         s = sample.strip()
-        if re.fullmatch(r"1[3-9]\d{9}", s):
+        rule_id = self.classify_sample(s)
+        if rule_id == "phone":
             return _mask_phone(s)
-        if re.fullmatch(r"\d{17}[\dXx]", s):
+        if rule_id == "id_card":
             return _mask_id_card(s)
-        if re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", s):
+        if rule_id == "email":
             return _mask_email(s)
-        if re.fullmatch(r"\d{16,19}", s):
+        if rule_id == "bank_card":
             return _mask_bank_card(s)
         return s
 
@@ -473,6 +508,23 @@ class SensitivityClassifier:
             for name_re, sample_re, rule in self._pii_compiled:
                 matched_by: str | None = None
                 confidence = rule.confidence
+                # 样本命中的三种证据（按可靠性降序）：
+                # 1) sample_rule 精确等于本规则的 rule_id —— 采样时对明文跑过
+                #    classify_sample，类别确定（掩码会丢失格式特征，故必须记录）；
+                # 2) sample_re 匹配未打码的样本值（存量/手填场景）；
+                # 3) 打码样本（含掩码标记）证明该列存敏感值，但**无法区分类别**——
+                #    仅作佐证不可独立命中，否则手机号会被靠前的 id_card 规则误判。
+                sample_rule = str(col.get("sample_rule", "") or "")
+                sample_hit = bool(
+                    sample_re
+                    and sample
+                    and (
+                        (sample_rule and sample_rule == rule.rule_id)
+                        or sample_re.match(sample)
+                    )
+                )
+                # 打码样本（存量无 sample_rule）：只知道"敏感"、不知道"哪类"
+                masked_sensitive = bool(sample and _MASK_STAR in sample)
                 if name_re.search(name) or (comment and name_re.search(comment)):
                     name_hit = bool(name_re.search(name))
                     comment_hit = bool(comment and name_re.search(comment))
@@ -482,17 +534,22 @@ class SensitivityClassifier:
                         matched_by = "name"
                     else:
                         matched_by = "comment"
-                    if sample_re and sample and (
-                        sample_re.match(sample) or _MASK_STAR in sample
-                    ):
-                        # 原始值命中 sample_re，或样本已打码（含掩码标记，证明采样时
-                        # 该列值命中过敏感格式）→ 均视为「名称+样本」双重验证
+                    # 名称/注释已命中 + 样本佐证 → 双重验证，置信度上调。
+                    # 打码样本（类别未知）也可作佐证：类别已由名称确定，不引入误判。
+                    if sample_hit or masked_sensitive:
                         confidence = min(1.0, rule.confidence + 0.05)
                         matched_by = "name+sample"
+                elif sample_hit:
+                    # 仅样本命中：字段名无语义（如 col_07 / contact）但实际存敏感值——
+                    # 这正是采样的核心价值（名称驱动规则无法发现的隐藏 PII）。
+                    # 置信度下调（低于名称命中），高置信规则仍自动判 PII，
+                    # 边缘情形落入 NEEDS_REVIEW 交人工复核（宁缺勿滥）。
+                    matched_by = "sample"
+                    confidence = max(0.0, rule.confidence - 0.15)
                 if matched_by is None:
                     continue
                 # 统计字段不因名称/注释关键词判 PII；仅当样本命中（实际存个体值）才保留
-                if is_aggregate and matched_by != "name+sample":
+                if is_aggregate and "sample" not in matched_by:
                     continue
                 # 裸 name/机构语义 name 需上下文判定（村名/机构名 ≠ 个人姓名）；
                 # 仅对字段名命中特判，注释命中（明确写了「姓名」）不受影响
@@ -524,6 +581,7 @@ class SensitivityClassifier:
                         rule=rule.rule_id,
                         confidence=confidence,
                         matched_by=matched_by,
+                        sample=sample,
                     )
                 )
                 break

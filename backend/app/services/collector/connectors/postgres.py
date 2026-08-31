@@ -126,7 +126,14 @@ class PostgresCollector(BaseCollector):
             try:
                 rows = await self._connector.query(sql)
             except Exception as exc:  # noqa: BLE001 - 采样失败不拖垮采集，仅记录
-                logger.warning("采样失败 entity=%s error=%s", entity_name, exc)
+                # 整批失败时逐列降级：隔离不可查的问题列，避免一列表全表采不到
+                logger.warning(
+                    "采样批次失败，降级逐列重试 entity=%s cols=%d error=%s",
+                    entity_name,
+                    len(safe),
+                    exc,
+                )
+                await self._sample_one_by_one(entity_name, schema, tbl, n, safe)
                 continue
             for col, name in safe:
                 value = ""
@@ -136,8 +143,52 @@ class PostgresCollector(BaseCollector):
                         value = str(v)
                         break
                 if value:
-                    col["sample"] = self._mask_sample(value)
+                    self._apply_sample(col, value)
         return columns
+
+    async def _sample_one_by_one(
+        self,
+        entity_name: str,
+        schema: str,
+        tbl: str,
+        n: int,
+        safe: list[tuple[dict[str, Any], str]],
+    ) -> None:
+        """逐列单独采样（批次查询失败的降级路径），隔离不可查的问题列。"""
+        for col, name in safe:
+            sql = (
+                f'SELECT "{name}" FROM "{schema}"."{tbl}" '
+                f'WHERE "{name}" IS NOT NULL LIMIT {n}'
+            )
+            try:
+                rows = await self._connector.query(sql)
+            except Exception as exc:  # noqa: BLE001 - 单列失败仅跳过该列
+                logger.warning(
+                    "逐列采样失败（跳过该列） entity=%s column=%s error=%s",
+                    entity_name,
+                    name,
+                    exc,
+                )
+                continue
+            for r in rows:
+                v = r.get(name)
+                if v is not None and str(v) not in ("", "NULL"):
+                    self._apply_sample(col, str(v))
+                    break
+
+    async def sample_columns(
+        self, entity_name: str, schema_json: dict[str, Any]
+    ) -> dict[str, Any]:
+        """采样入口（手动触发/单表立即采样路径）。
+
+        ``collect`` 内部已在组装 schema 时调用 ``_sample_columns``；本方法供
+        service 层「不重跑全量采集、只对单表采样」时调用（PG 方言：双引号标识符）。
+        """
+        columns = schema_json.get("columns")
+        if not isinstance(columns, list) or not columns:
+            return schema_json
+        await self._sample_columns(entity_name, columns)
+        return schema_json
 
     async def collect_entity(self, source: Any, entity_name: str) -> CatalogSpec | None:
         """单表元数据刷新：仅查询目标表列元数据（含 pg_description 注释）。

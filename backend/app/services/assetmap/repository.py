@@ -269,6 +269,10 @@ class AssetMapRepository:
                             "name": f.get("name") or f.get("column"),
                             "type": f.get("type") or f.get("data_type"),
                             "comment": f.get("comment"),
+                            # 脱敏样本值（采样开启时才有）：采集侧已用
+                            # classifier.mask_sample 打码（手机 138****5678），
+                            # 不含原始敏感值，可安全暴露给治理端查看。
+                            "sample": f.get("sample"),
                         }
                     )
                 else:

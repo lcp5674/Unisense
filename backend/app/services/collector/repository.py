@@ -1455,6 +1455,91 @@ class CollectorRepository:
         }
 
 
+    async def get_sampling_coverage(self, source_id: str | None = None) -> dict[str, Any]:
+        """采样覆盖率统计（PII 精度增强可观测性）。
+
+        SQL 端聚合，不装载 ``schema_json`` 大字段：用 MySQL JSON 函数统计
+        - 实体（表）维度：目录表数 / 至少一列有样本的表数
+        - 字段维度：总列数 / 有样本的列数 / 经双重验证（sample_rule）的列数
+
+        关键前提（已实测）：``JSON_EXTRACT(schema_json, '$.columns[*].sample')``
+        对**部分列有样本**的表返回存在样本的样本值数组（MySQL 通配符跳过
+        缺失路径），对**全无样本**的表返回 NULL——故 ``IS NOT NULL`` 即
+        「该表已采样」，``JSON_LENGTH`` 即「该表已采样列数」。
+
+        Args:
+            source_id: 数据源过滤（精确匹配）；None 表示全部数据源。
+
+        Returns:
+            dict 含 total_entities/sampled_entities/entity_coverage 与
+            total_columns/sampled_columns/verified_columns/column_coverage。
+        """
+        filters = [DBCatalog.deleted_at.is_(None), DataSource.deleted_at.is_(None)]
+        if source_id:
+            filters.append(DBCatalog.source_id == source_id)
+
+        # 列总数：兼容 columns/fields 两种键（不同连接器写法）
+        cols_len = func.coalesce(
+            func.json_length(func.json_extract(DBCatalog.schema_json, "$.columns")),
+            func.json_length(func.json_extract(DBCatalog.schema_json, "$.fields")),
+            0,
+        )
+        # 已采样列数：通配符只返回存在 sample 的元素（缺失路径被跳过）
+        sampled_len = func.coalesce(
+            func.json_length(func.json_extract(DBCatalog.schema_json, "$.columns[*].sample")),
+            func.json_length(func.json_extract(DBCatalog.schema_json, "$.fields[*].sample")),
+            0,
+        )
+        # 双重验证列数：sample_rule 记录采样时命中的敏感类别（掩码无法反推）
+        verified_len = func.coalesce(
+            func.json_length(
+                func.json_extract(DBCatalog.schema_json, "$.columns[*].sample_rule")
+            ),
+            func.json_length(
+                func.json_extract(DBCatalog.schema_json, "$.fields[*].sample_rule")
+            ),
+            0,
+        )
+        sampled_expr = func.json_extract(DBCatalog.schema_json, "$.columns[*].sample")
+        sampled_expr_fallback = func.json_extract(DBCatalog.schema_json, "$.fields[*].sample")
+
+        def _q(*cols: Any) -> Any:
+            return (
+                select(*cols)
+                .join(DataSource, DataSource.source_id == DBCatalog.source_id)
+                .where(*filters)
+            )
+
+        total_entities = int(
+            await self._db.scalar(_q(func.count(DBCatalog.id))) or 0
+        )
+        sampled_entities = int(
+            await self._db.scalar(
+                _q(func.count(DBCatalog.id)).where(
+                    or_(sampled_expr.is_not(None), sampled_expr_fallback.is_not(None))
+                )
+            )
+            or 0
+        )
+        total_columns = int(await self._db.scalar(_q(func.sum(cols_len))) or 0)
+        sampled_columns = int(await self._db.scalar(_q(func.sum(sampled_len))) or 0)
+        verified_columns = int(await self._db.scalar(_q(func.sum(verified_len))) or 0)
+        return {
+            "source_id": source_id,
+            "total_entities": total_entities,
+            "sampled_entities": sampled_entities,
+            "entity_coverage": (
+                round(sampled_entities / total_entities, 4) if total_entities else 0.0
+            ),
+            "total_columns": total_columns,
+            "sampled_columns": sampled_columns,
+            "column_coverage": (
+                round(sampled_columns / total_columns, 4) if total_columns else 0.0
+            ),
+            # 经 name+sample 双重验证的列（采样识别出敏感格式，精度高于纯名称推断）
+            "verified_columns": verified_columns,
+        }
+
     async def get_source_overview(self, source_id: str) -> dict[str, Any]:
         """资产规模概览聚合（详情页头部）。
 
