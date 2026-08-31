@@ -488,6 +488,106 @@ async def test_import_csv_parses_and_creates(client):
     assert inner.candidates[1].name == "上月活跃医生数"
 
 
+async def test_import_csv_chinese_headers_parsed(client):
+    """import-csv：中文表头 CSV 归一化解析为候选（与英文表头等价）。"""
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    csv_text = (
+        "指标编码(可空),指标名称(可空),指标类型,来源表,度量列,聚合方式,单位,统计周期,粒度,"
+        "逻辑度量ID(可空),口径表达式,依赖指标(可空,|分隔),原始SQL(可空)\n"
+        "outp_gmv_day,门诊金额,derived,dwd.outp_fee_di,gmv,SUM,CNY,day,,,SUM(amount),,\n"
+        ",上月活跃医生数,atomic,wedw_dws.doctor_active_month_di,last_month_active_doctor_cnt,"
+        "COUNT_DISTINCT,PERSON,month,,,COALESCE(COUNT(DISTINCT CASE WHEN x THEN 1 END), 0),,\n"
+    )
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        instance = mock_svc.return_value
+        instance.batch_register_from_sql = AsyncMock(
+            return_value={"batch_id": "cn_b1", "candidates": []}
+        )
+        resp = await client.post(
+            "/api/v1/metric-definitions/imports/csv",
+            files={"file": ("m.csv", csv_text.encode("utf-8"), "text/csv")},
+            data={"domain": "outp"},
+        )
+    assert resp.status_code == 200
+    inner: MetricSqlBatchRegisterRequest = instance.batch_register_from_sql.call_args.args[0]
+    by_code = {c.metric_code: c for c in inner.candidates}
+    assert by_code["outp_gmv_day"].name == "门诊金额"
+    assert by_code["outp_gmv_day"].type == "derived"
+    assert by_code["outp_gmv_day"].unit == "CNY"
+    auto = by_code["outp_doctor_active_month_last_month_active_doctor_cnt_month"]
+    assert auto.name == "上月活跃医生数"
+    assert auto.unit == "PERSON"
+
+
+async def test_import_csv_skips_template_comment_lines(client):
+    """import-csv：模板注释行（-- 开头）被跳过，不产生 row_errors（此前会误报 expression 缺失）。"""
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    csv_text = (
+        "指标编码(可空),指标名称(可空),指标类型,来源表,度量列,聚合方式,单位,统计周期,粒度,"
+        "逻辑度量ID(可空),口径表达式,依赖指标(可空,|分隔),原始SQL(可空)\n"
+        "outp_gmv_day,门诊金额,derived,dwd.outp_fee_di,gmv,SUM,CNY,day,,,SUM(amount),,\n"
+        "-- 示例行：指标编码/指标名称可空；口径表达式必填；依赖指标用 | 分隔\n"
+        "# 另一条注释（# 开头同样跳过）\n"
+    )
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        instance = mock_svc.return_value
+        instance.batch_register_from_sql = AsyncMock(
+            return_value={"batch_id": "cmt_b1", "candidates": []}
+        )
+        resp = await client.post(
+            "/api/v1/metric-definitions/imports/csv",
+            files={"file": ("m.csv", csv_text.encode("utf-8"), "text/csv")},
+            data={"domain": "outp"},
+        )
+    assert resp.status_code == 200
+    inner: MetricSqlBatchRegisterRequest = instance.batch_register_from_sql.call_args.args[0]
+    assert len(inner.candidates) == 1
+    assert resp.json()["data"].get("row_errors") is None
+
+
+async def test_import_xlsx_chinese_headers_parsed(client):
+    """import-csv：中文表头 xlsx 归一化解析为候选（与英文表头等价）。"""
+    from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
+
+    openpyxl = pytest.importorskip("openpyxl")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(
+        ["指标编码(可空)", "指标名称(可空)", "指标类型", "来源表", "度量列", "聚合方式",
+         "单位", "统计周期", "粒度", "逻辑度量ID(可空)", "口径表达式",
+         "依赖指标(可空,|分隔)", "原始SQL(可空)"]
+    )
+    ws.append(
+        ["outp_gmv_day", "门诊金额", "derived", "dwd.outp_fee_di", "gmv", "SUM",
+         "CNY", "day", "", "", "SUM(amount)", "", ""]
+    )
+    buf = io.BytesIO()
+    wb.save(buf)
+    with patch("app.api.metrics.MetricService") as mock_svc:
+        instance = mock_svc.return_value
+        instance.batch_register_from_sql = AsyncMock(
+            return_value={"batch_id": "cnx_b1", "candidates": []}
+        )
+        resp = await client.post(
+            "/api/v1/metric-definitions/imports/csv",
+            files={
+                "file": (
+                    "m.xlsx",
+                    buf.getvalue(),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+            data={"domain": "outp"},
+        )
+    assert resp.status_code == 200
+    inner: MetricSqlBatchRegisterRequest = instance.batch_register_from_sql.call_args.args[0]
+    assert len(inner.candidates) == 1
+    assert inner.candidates[0].metric_code == "outp_gmv_day"
+    assert inner.candidates[0].unit == "CNY"
+
+
 async def test_import_xlsx_parses_and_creates(client):
     """import-csv：上传 xlsx（openpyxl 构造）→ 逐行解析为候选，调批量注册创建 DRAFT。"""
     from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
@@ -545,7 +645,7 @@ async def test_import_xlsx_parses_and_creates(client):
 
 
 async def test_import_xlsx_template_download(client):
-    """imports/template?format=xlsx：返回 xlsx 二进制模板（PK 魔数 + 表头行）。"""
+    """imports/template?format=xlsx：返回 xlsx 模板（中文表头 + 示例行 + 枚举下拉 + 选项字典）。"""
     openpyxl = pytest.importorskip("openpyxl")
     resp = await client.get(
         "/api/v1/metric-definitions/imports/template", params={"format": "xlsx"}
@@ -553,14 +653,30 @@ async def test_import_xlsx_template_download(client):
     assert resp.status_code == 200
     assert "spreadsheetml" in resp.headers["content-type"]
     assert resp.content[:2] == b"PK"
-    wb = openpyxl.load_workbook(io.BytesIO(resp.content), read_only=True)
-    ws = wb.active
+    wb = openpyxl.load_workbook(io.BytesIO(resp.content), read_only=False)
+    ws = wb["指标导入模板"]
     rows = list(ws.iter_rows(values_only=True))
     assert list(rows[0]) == [
-        "metric_code", "name", "type", "source_table", "measure_column", "aggregation",
-        "unit", "period", "granularity", "measure_id", "expression", "dependencies", "raw_sql",
+        "指标编码(可空)", "指标名称(可空)", "指标类型", "来源表", "度量列",
+        "聚合方式", "单位", "统计周期", "粒度", "逻辑度量ID(可空)", "口径表达式",
+        "依赖指标(可空,|分隔)", "原始SQL(可空)",
     ]
     assert len(rows) >= 2  # 表头 + 示例行
+    # 示例行单位用字典 code（PERSON，非中文「人」）
+    assert rows[1][6] == "PERSON"
+    # 枚举下拉已绑定：指标类型列 C 数据行范围 + 单位列 G
+    dvs = ws.data_validations.dataValidation
+    assert any(dv.formula1 == '"atomic,derived,composite"' for dv in dvs)
+    assert any("C2:C1000" in str(dv.sqref) for dv in dvs)
+    unit_dv = '"CNY_WAN,CNY_YI,CNY,USD,EUR,PERCENT,ORDER,PERSON,TIMES,DAY,HOUR,MINUTE"'
+    assert any(dv.formula1 == unit_dv for dv in dvs)
+    assert any("G2:G1000" in str(dv.sqref) for dv in dvs)
+    # 选项字典工作表（字段 → 可选 code）
+    assert "选项字典" in wb.sheetnames
+    hint_rows = list(wb["选项字典"].iter_rows(values_only=True))
+    assert hint_rows[0] == ("字段", "可选值（导入须用 code，勿填中文）")
+    assert any(r[0] == "granularity" for r in hint_rows)
+    assert any(r[0] == "aggregation" and "COUNT_DISTINCT" in r[1] for r in hint_rows)
 
 
 async def test_import_csv_invalid_rows_reported(client):
@@ -604,12 +720,13 @@ async def test_import_csv_no_valid_rows_400(client):
 
 
 async def test_import_template_download(client):
-    """imports/template：返回 CSV 模板（含表头 + 示例行）。"""
+    """imports/template：返回 CSV 模板（中文表头 + 示例行 + 选项说明注释行）。"""
     resp = await client.get("/api/v1/metric-definitions/imports/template")
     assert resp.status_code == 200
     assert "text/csv" in resp.headers["content-type"]
-    assert "metric_code" in resp.text
-    assert "expression" in resp.text
+    assert "指标编码" in resp.text
+    assert "口径表达式" in resp.text
+    assert "-- 示例行" in resp.text
 
 
 async def test_batch_purge_mixed_results(client):

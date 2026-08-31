@@ -72,7 +72,7 @@ export default function MetricImportModal({ open, onClose, domainOptions }: Metr
         showIcon
         style={{ marginBottom: 12 }}
         message="批量录入存量指标"
-        description="上传 CSV 或 Excel（.xlsx）批量创建 DRAFT 指标（编码/名称可缺省，系统自动按域/源表/度量列补全）。外部智能体也可直接调用 POST /api/v1/metric-definitions/batch-import 接口对接（字段说明见 API 文档）。"
+        description="上传 CSV 或 Excel（.xlsx）批量创建 DRAFT 指标。指标编码/名称可缺省，系统自动按域/源表/度量列补全；Excel 模板的指标类型/聚合方式/单位/统计周期/粒度列为下拉选择（含「选项字典」工作表），CSV 为纯文本需手填 code。外部智能体也可直接调用 POST /api/v1/metric-definitions/batch-import 接口对接（字段说明见 API 文档）。"
       />
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
         <Button

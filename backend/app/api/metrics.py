@@ -2813,16 +2813,82 @@ async def batch_register_from_sql_metrics(
 # 通用批量导入（外部 agent / CSV 批量录入，编码名称可缺省自动补全）
 # ----------------------------------------------------------------
 
+# 规范字段名（内部解析键，中英文表头经 _normalize_import_header 归一化到此）
 _IMPORT_TEMPLATE_HEADER = [
     "metric_code", "name", "type", "source_table", "measure_column",
     "aggregation", "unit", "period", "granularity", "measure_id",
     "expression", "dependencies", "raw_sql",
 ]
 
+# 模板导出表头（中文，用户友好；「(可空)」提示缺省自动补全列）
+_IMPORT_TEMPLATE_HEADER_CN = [
+    "指标编码(可空)", "指标名称(可空)", "指标类型", "来源表", "度量列",
+    "聚合方式", "单位", "统计周期", "粒度", "逻辑度量ID(可空)", "口径表达式",
+    "依赖指标(可空,|分隔)", "原始SQL(可空)",
+]
+
+# 中文表头 → 规范字段名（解析兼容中英文表头；英文/未知表头原样保留）
+_IMPORT_HEADER_CN_MAP = {
+    "指标编码": "metric_code",
+    "指标名称": "name",
+    "指标类型": "type",
+    "来源表": "source_table",
+    "度量列": "measure_column",
+    "聚合方式": "aggregation",
+    "单位": "unit",
+    "统计周期": "period",
+    "粒度": "granularity",
+    "逻辑度量id": "measure_id",
+    "口径表达式": "expression",
+    "依赖指标": "dependencies",
+    "原始sql": "raw_sql",
+}
+
 _VALID_IMPORT_AGG = {
     "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "FIRST_VALUE",
     "MAX", "MIN", "MEDIAN", "PERCENTILE",
 }
+
+# Excel 模板下拉值域（对齐字典 code：单位/粒度与 system_dict unit/granularity 种子一致；
+# 聚合方式与 _VALID_IMPORT_AGG 一致；周期为统计周期，非时间语义；类型为指标类型三态）
+_IMPORT_DROPDOWN_VALUES: dict[str, tuple[str, ...]] = {
+    "type": ("atomic", "derived", "composite"),
+    "aggregation": (
+        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "FIRST_VALUE",
+        "MAX", "MIN", "MEDIAN", "PERCENTILE",
+    ),
+    "unit": (
+        "CNY_WAN", "CNY_YI", "CNY", "USD", "EUR", "PERCENT",
+        "ORDER", "PERSON", "TIMES", "DAY", "HOUR", "MINUTE",
+    ),
+    "period": ("day", "hour", "week", "month", "quarter", "year"),
+    "granularity": (
+        "minute", "hour", "day", "week", "month", "quarter", "year", "realtime",
+        "register", "visit", "patient", "doctor", "hospital", "department",
+        "disease", "prescription", "pharmacy", "yb_settle",
+    ),
+}
+
+# 下拉列（表头索引 1 起 → Excel 列字母）
+_IMPORT_DROPDOWN_COLS: dict[str, str] = {
+    "type": "C", "aggregation": "F", "unit": "G", "period": "H", "granularity": "I",
+}
+
+
+def _normalize_import_header(h: str) -> str:
+    """单个表头归一化：中文（容忍中文/英文括号提示，如 (可空)/(可空,|分隔)）→ 规范字段名。
+
+    英文/未知表头原样保留（兼容旧版英文模板）。
+    """
+    raw = (h or "").strip()
+    # 去掉括号后缀（含 "(可空,|分隔)" 等复合提示）与空格，统一小写后查中文映射
+    key = _re.sub(r"[（(].*?[）)]", "", raw).lower().replace(" ", "")
+    return _IMPORT_HEADER_CN_MAP.get(key, raw)
+
+
+def _normalize_import_row(row: dict[str, str]) -> dict[str, str]:
+    """行字段名归一化（中英文表头兼容），CSV / xlsx 解析共用。"""
+    return {_normalize_import_header(k): v for k, v in row.items()}
 
 # 度量列中文兜底词表（缺省名称生成；覆盖常用度量尾词）
 _CN_MEASURE_TAIL = {
@@ -2941,10 +3007,14 @@ def _enrich_import_candidates(
 
 
 def _xlsx_template_bytes() -> bytes:
-    """生成 Excel 批量导入模板（表头加粗 + 示例行 + 列宽自适应），未装 openpyxl 时明确报错。"""
+    """生成 Excel 批量导入模板（中文表头 + 示例行 + 枚举下拉 + 选项字典）。
+
+    未装 openpyxl 时明确报错。
+    """
     try:
         import openpyxl
         from openpyxl.utils import get_column_letter
+        from openpyxl.worksheet.datavalidation import DataValidation
     except ImportError as exc:  # pragma: no cover - 依赖缺失提示
         raise BusinessError(
             "服务器未安装 openpyxl，无法生成 Excel 模板（请更新依赖后重试）",
@@ -2953,18 +3023,38 @@ def _xlsx_template_bytes() -> bytes:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "指标导入模板"
-    ws.append(_IMPORT_TEMPLATE_HEADER)
+    ws.append(_IMPORT_TEMPLATE_HEADER_CN)
     for cell in ws[1]:
         cell.font = openpyxl.styles.Font(bold=True)
     ws.append(
         (
             "outp_doctor_active_cnt_month", "月活医生数", "atomic",
             "wedw_dws.doctor_active_month_di", "current_month_active_doctor_cnt",
-            "COUNT_DISTINCT", "人", "month", "", "", "COUNT(DISTINCT doctor_code)", "", "",
+            "COUNT_DISTINCT", "PERSON", "month", "", "", "COUNT(DISTINCT doctor_code)", "", "",
         )
     )
-    for i, h in enumerate(_IMPORT_TEMPLATE_HEADER, start=1):
+    for i, h in enumerate(_IMPORT_TEMPLATE_HEADER_CN, start=1):
         ws.column_dimensions[get_column_letter(i)].width = max(len(h) + 2, 14)
+    # 枚举列下拉（指标类型/聚合方式/单位/统计周期/粒度），数据行 2..1000 均可点选
+    for field, col_letter in _IMPORT_DROPDOWN_COLS.items():
+        dv = DataValidation(
+            type="list",
+            formula1=f'"{",".join(_IMPORT_DROPDOWN_VALUES[field])}"',
+            allow_blank=True,
+        )
+        dv.error = f"请从下拉列表选择（{field}）"
+        dv.errorTitle = "选项不合法"
+        ws.add_data_validation(dv)
+        dv.add(f"{col_letter}2:{col_letter}1000")
+    # 选项字典工作表（供人工核对可选 code 与含义，导入须用 code 勿填中文）
+    hint_ws = wb.create_sheet("选项字典")
+    hint_ws.append(["字段", "可选值（导入须用 code，勿填中文）"])
+    hint_ws.column_dimensions["A"].width = 18
+    hint_ws.column_dimensions["B"].width = 120
+    for field, values in _IMPORT_DROPDOWN_VALUES.items():
+        hint_ws.append([field, ", ".join(values)])
+    for cell in hint_ws[1]:
+        cell.font = openpyxl.styles.Font(bold=True)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -2987,7 +3077,7 @@ def _xlsx_rows_to_dicts(content: bytes) -> list[dict[str, str]]:
         wb.close()
     if not rows:
         return []
-    header = [str(c).strip() if c is not None else "" for c in rows[0]]
+    header = [_normalize_import_header(str(c).strip()) if c is not None else "" for c in rows[0]]
     out: list[dict[str, str]] = []
     for raw in rows[1:]:
         row = {h: ("" if v is None else str(v).strip()) for h, v in zip(header, raw, strict=False)}
@@ -3014,10 +3104,14 @@ async def metric_import_template(
         )
     example = (
         "outp_doctor_active_cnt_month,月活医生数,atomic,wedw_dws.doctor_active_month_di,"
-        "current_month_active_doctor_cnt,COUNT_DISTINCT,人,month,,,COUNT(DISTINCT doctor_code),,"
-        "-- 示例行：metric_code/name 可空（自动生成）；expression 必填；dependencies 用 | 分隔"
+        "current_month_active_doctor_cnt,COUNT_DISTINCT,PERSON,month,,,"
+        "COUNT(DISTINCT doctor_code),,"
+        "\n-- 示例行：指标编码/指标名称可空（系统自动生成）；口径表达式必填；依赖指标用 | 分隔"
+        "\n-- 选项列取值：指标类型 atomic/derived/composite；聚合方式 SUM/AVG/COUNT/COUNT_DISTINCT/"
+        "LAST_VALUE/FIRST_VALUE/MAX/MIN/MEDIAN/PERCENTILE；单位/周期/粒度用字典 code"
+        "（Excel 模板含下拉与「选项字典」）"
     )
-    text = ",".join(_IMPORT_TEMPLATE_HEADER) + "\n" + example + "\n"
+    text = ",".join(_IMPORT_TEMPLATE_HEADER_CN) + "\n" + example + "\n"
     return Response(
         content=text,
         media_type="text/csv; charset=utf-8",
@@ -3117,7 +3211,7 @@ async def import_metrics_csv(
     rows: list[dict[str, str]] = (
         _xlsx_rows_to_dicts(content) if is_xlsx
         else [
-            dict(r)
+            _normalize_import_row(dict(r))
             for r in csv.DictReader(
                 io.StringIO(content.decode("utf-8-sig", errors="replace"))
             )
@@ -3127,6 +3221,10 @@ async def import_metrics_csv(
     row_errors: list[dict[str, Any]] = []
     for i, row in enumerate(rows, start=2):  # 行号从 2 起（1 为表头）
         if not any((v or "").strip() for v in row.values()):
+            continue
+        # 跳过模板注释行（-- / # 开头；DictReader 会把模板内提示行当数据行解析）
+        _first_val = next((v.strip() for v in row.values() if (v or "").strip()), "")
+        if _first_val.startswith("--") or _first_val.startswith("#"):
             continue
         try:
             candidates.append(_csv_row_to_import_candidate(row))
