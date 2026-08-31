@@ -11,11 +11,24 @@
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from app.services.collector.classifier import SensitivityClassifier
+
+logger = logging.getLogger(__name__)
+
+#: 单次采样行数上限（与 API 端点 ``sample_rows`` 的 ``le`` 约束对齐）。
+#: 采样是「取代表值」而非导出数据：行数越多对源库的扫描压力与 ``schema_json``
+#: 存储膨胀越大，故统一封顶，避免配额路径绕过端点校验。
+MAX_SAMPLE_ROWS = 200
+
+#: 记录视图单元格上限（行数 × 列数）。宽表（数百列）按行截断，
+#: 防止 ``schema_json.sample_rows`` 膨胀到拖慢列表接口。
+MAX_SAMPLE_CELLS = 4000
 
 
 @dataclass
@@ -145,11 +158,14 @@ class BaseCollector(ABC):
     def set_sampling(self, max_rows: int = 0) -> None:
         """注入样本采样配置（PII 精度增强：name+sample 双验证）。
 
-        ``max_rows`` 为每列采样行数上限（0/负值=不采样）。由 service 层在
+        ``max_rows`` 为采样行数上限（0/负值=不采样）。由 service 层在
         collect 前从 ``DataSource.quota.sample_rows`` 读取并注入；连接器在
-        采集到字段后按能力执行采样，样本打码写入 ``schema_json.columns[].sample``。
+        采集到字段后按能力执行采样，样本打码写入 ``schema_json``。
+
+        上限在此**统一收敛**为 ``MAX_SAMPLE_ROWS``：配额路径不经过 API 端点的
+        ``le`` 校验，若只在上层拦截，保存 1000 行配额仍会打到源库。
         """
-        self._sampling_max_rows = max(0, int(max_rows or 0))
+        self._sampling_max_rows = max(0, min(int(max_rows or 0), MAX_SAMPLE_ROWS))
 
     async def sample_columns(
         self, entity_name: str, schema_json: dict[str, Any]
@@ -209,6 +225,128 @@ class BaseCollector(ABC):
             col["sample"] = masked
             if rule_id:
                 col["sample_rule"] = rule_id
+
+    async def _sample_rows_aligned(
+        self,
+        entity_name: str,
+        safe: list[tuple[dict[str, Any], str]],
+        build_select_sql: Callable[[list[str], int], str],
+        build_one_sql: Callable[[str, int], str],
+        run_query: Callable[[str, list[str]], Awaitable[list[dict[str, Any]]]],
+    ) -> list[dict[str, str]]:
+        """**行对齐**采样：一次查询全部列，返回「一行 = 源库一条真实记录」的视图。
+
+        与旧的逐列/分批采样不同，本方法刻意**不加** ``WHERE col IS NOT NULL``
+        过滤：那类过滤会让各列各自取到不同行的非空值，拼出来的「第 i 条样本」
+        在源库并不存在（``phone.sample[0]`` 来自第 1 行、``email.sample[0]``
+        来自第 3 行）。前端若按行展示就会呈现**拼凑出来的假记录**——用户会
+        误以为「该患者的手机号与邮箱是配套的」。故行视图必须整行读取。
+
+        产出两项，语义分离：
+        - 返回值 ``sample_rows``：行对齐的记录视图，NULL 保留为空串占位
+          （不丢弃，否则列会错位），每格经 ``_mask_sample`` 打码。
+        - ``columns[].sample``（经 ``_apply_samples`` 派生）：**列式**样本，
+          取各列在这批行内的全部非空值——PII 识别要的是「每列尽可能多的
+          非空形态」，与展示所需的「真实记录」目标不同，故二者并存。
+
+        Args:
+            entity_name: 实体名，仅用于日志定位。
+            safe: ``(字段字典, 合法列名)`` 列表，列名须已通过标识符白名单校验。
+            build_select_sql: 构造全列查询 SQL 的方言回调 ``(列名列表, 行数)``。
+            build_one_sql: 构造单列补采 SQL 的方言回调 ``(列名, 行数)``。
+            run_query: 执行 SQL 的方言回调 ``(SQL, 本次查询列顺序)``，返回行字典。
+                传入列顺序是因为部分驱动（如 pyhive）返回**元组**而非字典，
+                无此参数便无法把每格还原到正确的字段上（列错位）。
+
+        Returns:
+            打码后的行视图列表；整表查询失败时返回空列表（已自动降级逐列采样）。
+        """
+        names = [name for _, name in safe]
+        n = self._effective_sample_rows(len(names))
+        if not n or not names:
+            return []
+        failed = False
+        try:
+            rows = await run_query(build_select_sql(names, n), names)
+        except Exception as exc:  # noqa: BLE001 - 采样失败不拖垮采集，仅记录
+            # 整表查询失败（如实测 Doris 某列的协议兼容问题）→ 降级逐列补采，
+            # 隔离不可查的问题列，避免「一列出问题导致整表零样本」。
+            logger.warning(
+                "行对齐采样失败，降级逐列采样 entity=%s cols=%d error=%s",
+                entity_name,
+                len(names),
+                exc,
+            )
+            rows = []
+            failed = True
+        # 防御：驱动/测试 mock 未严格服从 LIMIT 时按上限截断，保证行视图行数受控
+        rows = rows[:n]
+        sample_rows: list[dict[str, str]] = []
+        per_column: dict[str, list[str]] = {name: [] for name in names}
+        for raw in rows:
+            row: dict[str, str] = {}
+            for name in names:
+                value = raw.get(name)
+                text = "" if value is None else str(value)
+                # NULL 保留空串占位：丢弃会让该行后续列整体左移（列错位）
+                if text in ("", "NULL"):
+                    row[name] = ""
+                    continue
+                row[name] = self._mask_sample(text)
+                per_column[name].append(text)
+            sample_rows.append(row)
+        for col, name in safe:
+            if per_column[name]:
+                self._apply_samples(col, per_column[name])
+        # 补采：① 整表查询失败 → 逐列降级；② 有行但稀疏列全 NULL → 保 PII 召回。
+        # 空表（rows 为空且未失败）无需补采——源端确无数据，补采也是空。
+        if failed or rows:
+            await self._fill_empty_samples(entity_name, safe, build_one_sql, run_query)
+        return sample_rows
+
+    def _effective_sample_rows(self, column_count: int) -> int:
+        """按行数上限与单元格上限取实际采样行数（宽表自动降行数）。"""
+        n = min(self._sampling_max_rows, MAX_SAMPLE_ROWS)
+        if n <= 0 or column_count <= 0:
+            return 0
+        return max(1, min(n, MAX_SAMPLE_CELLS // column_count))
+
+    async def _fill_empty_samples(
+        self,
+        entity_name: str,
+        safe: list[tuple[dict[str, Any], str]],
+        build_one_sql: Callable[[str, int], str],
+        run_query: Callable[[str, list[str]], Awaitable[list[dict[str, Any]]]],
+    ) -> None:
+        """对行视图内全 NULL 的列做单列补采（仅补列式 ``sample``，不改行视图）。
+
+        行对齐查询不加 ``WHERE`` 过滤，前 n 行内稀疏列可能全为 NULL；此时该列
+        PII 识别将失去样本依据。补采单列非空值可保住识别召回率，且**不写入**
+        ``sample_rows``——补来的值不属于那 n 条记录，写进去就会重新引入假记录。
+        """
+        n = self._effective_sample_rows(len(safe))
+        if not n:
+            return
+        for col, name in safe:
+            if col.get("sample"):
+                continue
+            try:
+                rows = await run_query(build_one_sql(name, n), [name])
+            except Exception as exc:  # noqa: BLE001 - 单列失败仅跳过该列
+                logger.warning(
+                    "单列补采失败（跳过该列） entity=%s column=%s error=%s",
+                    entity_name,
+                    name,
+                    exc,
+                )
+                continue
+            values = [
+                str(r[name])
+                for r in rows
+                if r.get(name) is not None and str(r[name]) not in ("", "NULL")
+            ]
+            if values:
+                self._apply_samples(col, values)
 
     async def list_databases(self) -> list[str]:
         """枚举该实例下可采集的非系统数据库（创建数据源时选择目标库）。

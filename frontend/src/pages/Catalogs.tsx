@@ -189,11 +189,26 @@ export function Catalogs() {
   // 采样覆盖率（当前筛选数据源的已采样表/列占比，全部源时为全局）——PII 识别精度可观测性
   const [coverage, setCoverage] = useState<SamplingCoverage | null>(null);
   const [coverageLoading, setCoverageLoading] = useState(false);
+  // 行对齐样本视图（一行 = 源库一条真实记录，脱敏值）
+  const [sampleRows, setSampleRows] = useState<Record<string, string>[]>([]);
 
   function openFieldDetail(record: DBCatalog) {
     setFieldDrawerCatalog(record);
     setFieldColumns(parseSchemaColumns(record));
+    setSampleRows(parseSampleRows(record));
     setFieldDrawerOpen(true);
+  }
+
+  /** 解析 catalog 的 schema_def/schema_json.sample_rows 为行视图样本 */
+  function parseSampleRows(catalog: DBCatalog): Record<string, string>[] {
+    const schemaDef = (catalog.schema_def ?? (catalog as unknown as { schema_json?: unknown }).schema_json) as
+      | Record<string, unknown>
+      | undefined;
+    const rows = schemaDef?.sample_rows;
+    if (!Array.isArray(rows)) return [];
+    return rows.filter(
+      (r): r is Record<string, string> => typeof r === "object" && r !== null && !Array.isArray(r),
+    ) as Record<string, string>[];
   }
 
   /** 解析 catalog 的 schema_def/schema_json.columns 为 SchemaColumn[] */
@@ -593,11 +608,13 @@ export function Catalogs() {
       if (fresh) {
         setFieldDrawerCatalog(fresh);
         setFieldColumns(parseSchemaColumns(fresh));
+        setSampleRows(parseSampleRows(fresh));
       } else {
         // 源端已无此表（采集对账后被标记废弃）
         setFieldDrawerOpen(false);
         setFieldDrawerCatalog(null);
         setFieldColumns([]);
+        setSampleRows([]);
         message.warning("该实体在源端已不存在，可能已被标记废弃");
       }
       load();
@@ -637,6 +654,7 @@ export function Catalogs() {
       if (fresh) {
         setFieldDrawerCatalog(fresh);
         setFieldColumns(parseSchemaColumns(fresh));
+        setSampleRows(parseSampleRows(fresh));
       }
       loadCoverage();
       load();
@@ -1044,7 +1062,7 @@ export function Catalogs() {
       <Drawer
         title={fieldDrawerCatalog ? `字段详情：${fieldDrawerCatalog.entity_name}` : "字段详情"}
         open={fieldDrawerOpen}
-        onClose={() => { setFieldDrawerOpen(false); setFieldDrawerCatalog(null); setFieldColumns([]); }}
+        onClose={() => { setFieldDrawerOpen(false); setFieldDrawerCatalog(null); setFieldColumns([]); setSampleRows([]); }}
         width={720}
         destroyOnClose={false}
       >
@@ -1182,6 +1200,7 @@ export function Catalogs() {
                   onEdit={handleEdit}
                   onInfer={handleInfer}
                   onBatchInfer={handleBatchInfer}
+                  sampleRows={sampleRows}
                   loading={inferLoading || batchInferLoading}
                 />
               )}

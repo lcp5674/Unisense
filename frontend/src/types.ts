@@ -2433,6 +2433,8 @@ export interface AssetEntityDetail {
   content_signature: string | null;
   /** schema 摘要：结构化字段列表或字符串/null */
   schema_summary?: SchemaColumn[] | string | null;
+  /** 行对齐样本视图（一行 = 源库一条真实记录，脱敏值，空串占位 NULL） */
+  sample_rows?: Record<string, string>[] | null;
   /** 表级业务描述（治理补全，TD §12.1） */
   description?: string | null;
   description_source?: DescriptionSource | null;

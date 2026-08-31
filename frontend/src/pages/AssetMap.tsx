@@ -2495,6 +2495,7 @@ function GraphTab() {
                   onEdit={handleFieldEdit}
                   onInfer={handleFieldInfer}
                   onBatchInfer={handleBatchInfer}
+                  sampleRows={detail.sample_rows ?? []}
                 />
               </Descriptions.Item>
               <Descriptions.Item label="源健康">
@@ -3315,7 +3316,11 @@ function OwnerTab() {
             )}
             {Array.isArray(detail.schema_summary) && detail.schema_summary.length > 0 && (
               <Card size="small" title="字段信息">
-                <SchemaTable columns={detail.schema_summary} editable={false} />
+                <SchemaTable
+                  columns={detail.schema_summary}
+                  editable={false}
+                  sampleRows={detail.sample_rows ?? []}
+                />
               </Card>
             )}
           </>

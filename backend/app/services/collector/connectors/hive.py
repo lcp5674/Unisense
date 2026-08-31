@@ -391,12 +391,13 @@ class HiveCollector(BaseCollector):
         entity_name: str,
         columns: list[dict[str, Any]],
         conn: Any,
-    ) -> list[dict[str, Any]]:
-        """对字段执行批量列采样（复用调用方连接，避免每列/每表新握手）。
+    ) -> list[dict[str, str]]:
+        """对字段执行**行对齐**采样（复用调用方连接，避免每表新握手）。
 
-        全字段采样：每批最多 ``_SAMPLE_BATCH`` 列，一次 ``SELECT c1,...,ck ... LIMIT n``
-        取 n 行，逐列取第一个非空值，经 ``_mask_sample`` 打码后写入
-        ``columns[].sample``。列名经 ``_safe_ident`` 校验（防注入），非法列跳过。
+        一次 ``SELECT c1,...,ck FROM tbl LIMIT n`` 取整表全部列，不加非空过滤，
+        保证「一行 = 源库一条真实记录」。列名经 ``_safe_ident`` 校验（防注入），
+        非法列跳过。行视图经 ``_mask_sample`` 打码返回；列式 ``sample`` 派生、
+        稀疏列补采、整表失败降级逐列，均由基类统一处理。
 
         Args:
             entity_name: 实体（库.表）名。
@@ -404,50 +405,56 @@ class HiveCollector(BaseCollector):
             conn: 复用连接（collect 已建立，避免每表 TCP+认证握手）。
 
         Returns:
-            写入 sample 后的字段列表（未开启采样时原样返回）。
+            打码后的行视图列表（未开启采样/非法标识符时为 ``[]``）。
         """
         if not self._sampling_max_rows or not columns or "." not in entity_name:
-            return columns
+            return []
         schema, tbl = entity_name.rsplit(".", 1)
         if not schema or not tbl:
-            return columns
+            return []
         try:
             ident = f"{self._safe_ident(schema)}.{self._safe_ident(tbl)}"
         except Exception:  # noqa: BLE001 - 非法标识符跳过采样（元数据采集不受影响）
-            return columns
-        n = self._sampling_max_rows
-        for start in range(0, len(columns), _SAMPLE_BATCH):
-            batch = columns[start : start + _SAMPLE_BATCH]
-            safe_names: list[str] = []
-            for col in batch:
-                name = str(col.get("name", "")).strip()
-                if not name:
-                    continue
-                try:
-                    safe_names.append(self._safe_ident(name))
-                except Exception:  # noqa: BLE001 - 非法列名跳过该列采样
-                    continue
-            if not safe_names:
+            return []
+        # 行视图的 key 必须是**原始列名**（``_safe_ident`` 会加反引号，作 key 会
+        # 让前端无法与 columns[].name 对齐）；转义只发生在 SQL 构造处。
+        safe: list[tuple[dict[str, Any], str]] = []
+        for col in columns:
+            name = str(col.get("name", "")).strip()
+            if not name:
                 continue
-            quoted = ",".join(safe_names)
-            where = " OR ".join(f"{c} IS NOT NULL" for c in safe_names)
             try:
-                rows = await self._execute(
-                    f"SELECT {quoted} FROM {ident} WHERE {where} LIMIT {n}", conn=conn
-                )
-            except Exception as exc:  # noqa: BLE001 - 采样失败不拖垮采集，仅记录
-                logger.warning("采样失败 source=%s entity=%s error=%s", entity_name, ident, exc)
+                self._safe_ident(name)
+            except Exception:  # noqa: BLE001 - 非法列名跳过该列采样
                 continue
-            for i, col in enumerate(batch):
-                if i >= len(safe_names):
-                    break
-                values = [
-                    str(row[i]) for row in rows
-                    if i < len(row) and row[i] not in (None, "", "NULL")
-                ]
-                if values:
-                    self._apply_samples(col, values)
-        return columns
+            safe.append((col, name))
+        if not safe:
+            return []
+
+        def select_sql(names: list[str], n: int) -> str:
+            cols = ",".join(self._safe_ident(x) for x in names)
+            return f"SELECT {cols} FROM {ident} LIMIT {n}"
+
+        def one_sql(name: str, n: int) -> str:
+            col = self._safe_ident(name)
+            return f"SELECT {col} FROM {ident} WHERE {col} IS NOT NULL LIMIT {n}"
+
+        async def run_query(sql: str, names: list[str]) -> list[dict[str, Any]]:
+            """pyhive 返回**元组**行，须按本次查询列序还原为字段字典。"""
+            tuples = await self._execute(sql, conn=conn)
+            rows: list[dict[str, Any]] = []
+            for tup in tuples:
+                rows.append(
+                    {
+                        name: (tup[idx] if idx < len(tup) else None)
+                        for idx, name in enumerate(names)
+                    }
+                )
+            return rows
+
+        return await self._sample_rows_aligned(
+            entity_name, safe, select_sql, one_sql, run_query
+        )
 
     async def sample_columns(
         self, entity_name: str, schema_json: dict[str, Any]
@@ -462,9 +469,11 @@ class HiveCollector(BaseCollector):
             return schema_json
         conn = await self._connect_managed()
         try:
-            await self._sample_columns(entity_name, columns, conn)
+            rows = await self._sample_columns(entity_name, columns, conn)
         finally:
             await asyncio.to_thread(self._close, conn)
+        if rows:
+            schema_json["sample_rows"] = rows
         return schema_json
 
 

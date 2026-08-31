@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections.abc import Awaitable
 from typing import Any
 
 import httpx
@@ -148,17 +149,46 @@ class ClickHouseCollector(BaseCollector):
             rows.append(parts[:width])
         return rows
 
+    @staticmethod
+    def _parse_tsv_named(text: str) -> list[dict[str, Any]]:
+        """解析 ``TabSeparatedWithNames`` 响应为行字典（首行为列名）。
+
+        用带列名格式而非 ``TabSeparated``，是为了让解析**自包含**：调用方无需
+        外部传入列名与宽度即可还原每列归属，全列查询与单列补采可共用同一入口。
+        ClickHouse 的 NULL 字面量 ``\\N`` 统一归约为 ``None``。
+        """
+        lines = [ln for ln in text.strip().splitlines() if ln]
+        if len(lines) < 2:
+            return []
+        names = lines[0].split("\t")
+        rows: list[dict[str, Any]] = []
+        for line in lines[1:]:
+            parts = line.split("\t")
+            if len(parts) < len(names):
+                parts = parts + [""] * (len(names) - len(parts))
+            rows.append(
+                {
+                    name: (None if parts[idx] in ("", "\\N") else parts[idx])
+                    for idx, name in enumerate(names)
+                }
+            )
+        return rows
+
+    async def _query_rows(self, sql: str) -> list[dict[str, Any]]:
+        """执行 SQL 并返回行字典（ClickHouse 文本响应 → 结构化行）。"""
+        return self._parse_tsv_named(await self._query(sql))
+
     async def _sample_columns(
         self, entity_name: str, columns: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        """对字段执行批量列采样（PII 精度增强：name+sample 双验证）。
+    ) -> list[dict[str, str]]:
+        """对字段执行**行对齐**采样（记录视图 + PII 精度增强）。
 
-        与 ``InformationSchemaCollector._sample_columns`` 同构：每批最多
-        ``_SAMPLE_BATCH`` 列，一次 ``SELECT c1,...,ck ... LIMIT n`` 取 n 行，
-        逐列取第一个非空值，经 ``_mask_sample`` 打码后写入 ``columns[].sample``。
+        与 ``InformationSchemaCollector._sample_columns`` 同构：一次取整表全部列，
+        不加非空过滤，保证「一行 = 源库一条真实记录」（避免跨行拼凑出假记录）。
 
-        方言差异（ClickHouse HTTP API）：结果为 ``FORMAT TabSeparated`` 文本而非
-        行字典数组，需按列序号取值；NULL 以 ``\\N`` 表示，视为空值跳过。
+        方言差异（ClickHouse HTTP API）：结果为文本而非行字典数组，故经
+        ``_query_rows`` 按 ``TabSeparatedWithNames`` 还原；NULL 以 ``\\N``
+        表示，由解析器归约为 ``None``（行视图中留空占位，避免列错位）。
 
         Args:
             entity_name: 实体名，形如 ``database.table``；单库模式下可为裸表名
@@ -166,90 +196,49 @@ class ClickHouseCollector(BaseCollector):
             columns: 字段定义列表（name/type/comment 等）。
 
         Returns:
-            写入 sample 后的字段列表（未开启采样/非法标识符时原样返回）。
+            打码后的行视图列表（未开启采样/非法标识符时为 ``[]``）。
         """
         if not self._sampling_max_rows or not columns:
-            return columns
+            return []
         if "." in entity_name:
             database, tbl = entity_name.rsplit(".", 1)
         else:
             database, tbl = self._database, entity_name
         if not database or not tbl:
-            return columns
+            return []
         try:
             safe_db = self._safe_ident(database)
             safe_tbl = self._safe_ident(tbl)
         except ExternalDependencyError:
-            return columns
-        n = self._sampling_max_rows
-        for start in range(0, len(columns), _SAMPLE_BATCH):
-            batch = columns[start : start + _SAMPLE_BATCH]
-            safe: list[tuple[dict[str, Any], str]] = []
-            for col in batch:
-                name = str(col.get("name", "")).strip()
-                if name and _COL_IDENT_RE.match(name):
-                    safe.append((col, name))
-            if not safe:
-                continue
-            select = ",".join(f"`{name}`" for _, name in safe)
-            where = " OR ".join(f"`{name}` IS NOT NULL" for _, name in safe)
-            sql = (
-                f"SELECT {select} FROM `{safe_db}`.`{safe_tbl}` "
-                f"WHERE {where} LIMIT {n} FORMAT TabSeparated"
-            )
-            try:
-                raw = await self._query(sql)
-            except Exception as exc:  # noqa: BLE001 - 采样失败不拖垮采集，仅记录
-                # 整批失败时逐列降级：隔离不可查的问题列，避免一列表全表采不到
-                logger.warning(
-                    "采样批次失败，降级逐列重试 entity=%s cols=%d error=%s",
-                    entity_name,
-                    len(safe),
-                    exc,
-                )
-                await self._sample_one_by_one(entity_name, safe_db, safe_tbl, n, safe)
-                continue
-            rows = self._parse_tsv(raw, len(safe))
-            for idx, (col, _name) in enumerate(safe):
-                # ClickHouse TabSeparated 以 \N 表示 NULL
-                values = [
-                    r[idx] for r in rows
-                    if len(r) > idx and r[idx] not in ("", "\\N", "NULL")
-                ]
-                if values:
-                    self._apply_samples(col, values)
-        return columns
+            return []
+        safe: list[tuple[dict[str, Any], str]] = []
+        for col in columns:
+            name = str(col.get("name", "")).strip()
+            if name and _COL_IDENT_RE.match(name):
+                safe.append((col, name))
+        if not safe:
+            return []
 
-    async def _sample_one_by_one(
-        self,
-        entity_name: str,
-        safe_db: str,
-        safe_tbl: str,
-        n: int,
-        safe: list[tuple[dict[str, Any], str]],
-    ) -> None:
-        """逐列单独采样（批次查询失败的降级路径），隔离不可查的问题列。"""
-        for col, name in safe:
-            sql = (
-                f"SELECT `{name}` FROM `{safe_db}`.`{safe_tbl}` "
-                f"WHERE `{name}` IS NOT NULL LIMIT {n} FORMAT TabSeparated"
+        def select_sql(names: list[str], n: int) -> str:
+            cols = ",".join(f"`{x}`" for x in names)
+            return (
+                f"SELECT {cols} FROM `{safe_db}`.`{safe_tbl}` "
+                f"LIMIT {n} FORMAT TabSeparatedWithNames"
             )
-            try:
-                raw = await self._query(sql)
-            except Exception as exc:  # noqa: BLE001 - 单列失败仅跳过该列
-                logger.warning(
-                    "逐列采样失败（跳过该列） entity=%s column=%s error=%s",
-                    entity_name,
-                    name,
-                    exc,
-                )
-                continue
-            values = [
-                r[0] for r in self._parse_tsv(raw, 1)
-                if r and r[0] not in ("", "\\N", "NULL")
-            ]
-            if values:
-                self._apply_samples(col, values)
+
+        def one_sql(name: str, n: int) -> str:
+            return (
+                f"SELECT `{name}` FROM `{safe_db}`.`{safe_tbl}` "
+                f"WHERE `{name}` IS NOT NULL LIMIT {n} FORMAT TabSeparatedWithNames"
+            )
+
+        def run_query(sql: str, _names: list[str]) -> Awaitable[list[dict[str, Any]]]:
+            # TabSeparatedWithNames 自带列名，无需按列序还原
+            return self._query_rows(sql)
+
+        return await self._sample_rows_aligned(
+            entity_name, safe, select_sql, one_sql, run_query
+        )
 
     async def sample_columns(
         self, entity_name: str, schema_json: dict[str, Any]
@@ -257,12 +246,14 @@ class ClickHouseCollector(BaseCollector):
         """采样入口（手动触发/单表立即采样路径）。
 
         ``collect`` 内部已在组装 schema 时调用 ``_sample_columns``；本方法供
-        service 层「不重跑全量采集、只对单表采样」时调用（HTTP API + TabSeparated）。
+        service 层「不重跑全量采集、只对单表采样」时调用（HTTP API + 行视图）。
         """
         columns = schema_json.get("columns")
         if not isinstance(columns, list) or not columns:
             return schema_json
-        await self._sample_columns(entity_name, columns)
+        rows = await self._sample_columns(entity_name, columns)
+        if rows:
+            schema_json["sample_rows"] = rows
         return schema_json
 
     async def collect_entity(self, source: Any, entity_name: str) -> CatalogSpec | None:
@@ -312,13 +303,16 @@ class ClickHouseCollector(BaseCollector):
             )
         if not cols:
             return None
-        # PII 精度增强：全字段采样（批量列查询，样本打码）
+        # PII 精度增强 + 样本记录视图：全字段行对齐采样（样本打码）
+        schema_json: dict[str, Any] = {"columns": cols}
         if self._sampling_max_rows:
-            await self._sample_columns(f"{self._database}.{tbl}", cols)
+            sample_rows = await self._sample_columns(f"{self._database}.{tbl}", cols)
+            if sample_rows:
+                schema_json["sample_rows"] = sample_rows
         return CatalogSpec(
             entity_name=entity_name,
             entity_type="TABLE",
-            schema_json={"columns": cols},
+            schema_json=schema_json,
         )
 
     async def collect(self, source: Any) -> CollectResult:
@@ -409,10 +403,14 @@ class ClickHouseCollector(BaseCollector):
                                 "default": col_default,
                             }
                         )
-                    # PII 精度增强：全字段采样（批量列查询，样本打码）
+                    # PII 精度增强 + 样本记录视图：全字段行对齐采样（样本打码）
+                    schema_json: dict[str, Any] = {"columns": columns}
                     if self._sampling_max_rows:
-                        await self._sample_columns(f"{database}.{tbl}", columns)
-                    schema_json = {"columns": columns}
+                        sample_rows = await self._sample_columns(
+                            f"{database}.{tbl}", columns
+                        )
+                        if sample_rows:
+                            schema_json["sample_rows"] = sample_rows
                     specs.append(
                         CatalogSpec(
                             entity_name=entity_name,

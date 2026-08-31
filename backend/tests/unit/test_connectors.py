@@ -199,7 +199,7 @@ class _SamplingPgConnector(_FakeConnector):
         self.sample_sql: list[str] = []
 
     async def query(self, sql: str, params: dict | None = None) -> list[dict]:
-        if " IS NOT NULL" in sql:
+        if " LIMIT " in sql and "SELECT" in sql:
             self.sample_sql.append(sql)
             if self._fail_sampling:
                 raise RuntimeError("sampling failed")
@@ -254,12 +254,17 @@ async def test_postgres_collector_samples_columns_with_pg_dialect():
     result = await collector.collect(MagicMock(source_id="s1", domain="public"))
 
     cols = result.specs[0].schema_json["columns"]
-    # PG 方言：标识符用双引号（反引号在 PG 中不被支持）
-    assert len(conn.sample_sql) == 1
-    assert 'FROM "public"."users"' in conn.sample_sql[0]
-    assert '"phone" IS NOT NULL OR "user_name" IS NOT NULL' in conn.sample_sql[0]
+    # PG 方言：标识符用双引号；行对齐查询一次取全列、不加非空过滤
+    # 第 1 条 = 行对齐全列查询；第 2 条 = user_name 稀疏列单列补采（保 PII 召回）
+    assert len(conn.sample_sql) == 2
+    assert 'SELECT "phone","user_name" FROM "public"."users"' in conn.sample_sql[0]
     assert "LIMIT 5" in conn.sample_sql[0]
-    # 手机样本打码，user_name 为 NULL → 不写 sample
+    assert '"user_name" IS NOT NULL' in conn.sample_sql[1]
+    # 行视图：一行 = 一条真实记录（user_name 为 NULL → 空串占位，列不错位）
+    assert result.specs[0].schema_json["sample_rows"] == [
+        {"phone": "138****5678", "user_name": ""}
+    ]
+    # 列式 sample：手机打码；user_name 为 NULL → 不写 sample
     assert cols[0]["sample"] == ["138****5678"]
     assert "sample" not in cols[1]
 
@@ -284,7 +289,12 @@ async def test_postgres_collector_keeps_multiple_distinct_samples():
     result = await collector.collect(MagicMock(source_id="s1", domain="public"))
 
     cols = result.specs[0].schema_json["columns"]
-    # phone 两行不同值 → 保留 2 条打码样本；user_name 两行同值 → 去重为 1 条
+    # 行视图保留两条真实记录（user_name 两行同值 → 行视图按行保留、不去重）
+    assert result.specs[0].schema_json["sample_rows"] == [
+        {"phone": "138****5678", "user_name": "张"},
+        {"phone": "139****4321", "user_name": "张"},
+    ]
+    # 列式 sample：phone 两行不同值 → 2 条打码样本；user_name 两行同值 → 去重 1 条
     assert cols[0]["sample"] == ["138****5678", "139****4321"]
     assert cols[1]["sample"] == ["张"]
 
@@ -303,6 +313,8 @@ async def test_postgres_collector_truncates_samples_to_limit():
     result = await collector.collect(MagicMock(source_id="s1", domain="public"))
 
     cols = result.specs[0].schema_json["columns"]
+    # 行视图同样按采样行数截断（驱动未服从 LIMIT 时由基类防御截断）
+    assert len(result.specs[0].schema_json["sample_rows"]) == 3
     assert len(cols[0]["sample"]) == 3
 
 
@@ -348,6 +360,7 @@ async def test_postgres_collect_entity_samples_columns():
     assert spec is not None
     assert len(conn.sample_sql) == 1
     assert spec.schema_json["columns"][0]["sample"] == ["110101********1234"]
+    assert spec.schema_json["sample_rows"] == [{"id_card": "110101********1234"}]
 
 
 # ---------- HiveCollector ----------
@@ -659,11 +672,14 @@ async def test_clickhouse_collector_samples_columns_via_http():
             return "events\n"
         if "system.columns" in sql:
             return "phone\tString\nemail\tString\nnickname\tString\n"
-        if " IS NOT NULL" in sql:
+        if "SELECT" in sql:
             sample_sql.append(sql)
-            # 列序 = phone,email,nickname：phone 有值；email 首行 NULL 次行有值；
-            # nickname 两行全 NULL（\N）
-            return "13812345678\t\\N\t\\N\n13812345678\ta@b.com\t\\N\n"
+            # TabSeparatedWithNames：首行列名 + 数据行（列序 = phone,email,nickname）
+            return (
+                "phone\temail\tnickname\n"
+                "13812345678\t\\N\t\\N\n"
+                "13812345678\ta@b.com\t\\N\n"
+            )
         return ""
 
     collector._query = mock_query  # type: ignore[assignment]
@@ -671,10 +687,17 @@ async def test_clickhouse_collector_samples_columns_via_http():
     result = await collector.collect(MagicMock(source_id="ch1", domain="test_db"))
 
     cols = result.specs[0].schema_json["columns"]
-    assert len(sample_sql) == 1
+    # 第 1 条 = 行对齐全列查询；第 2 条 = nickname 全 NULL 稀疏列单列补采
+    assert len(sample_sql) == 2
     assert "FROM `test_db`.`events`" in sample_sql[0]
-    assert "LIMIT 5 FORMAT TabSeparated" in sample_sql[0]
-    # 手机打码；email 跳过首行 \N 取次行值；nickname 全 NULL → 不写 sample
+    assert "LIMIT 5 FORMAT TabSeparatedWithNames" in sample_sql[0]
+    # 行视图：一行 = 一条真实记录（email 首行 \N、nickname 全 NULL → 空串占位）
+    assert result.specs[0].schema_json["sample_rows"] == [
+        {"phone": "138****5678", "email": "", "nickname": ""},
+        {"phone": "138****5678", "email": "a***@b.com", "nickname": ""},
+    ]
+    # 列式 sample：手机打码（两行同值去重）；email 跳过首行 \N 取次行值；
+    # nickname 全 NULL → 不写 sample
     assert cols[0]["sample"] == ["138****5678"]
     assert cols[1]["sample"] == ["a***@b.com"]
     assert "sample" not in cols[2]
@@ -729,7 +752,7 @@ async def test_clickhouse_collect_entity_samples_columns():
         if "system.columns" in sql:
             return "id_card\tString\n"
         sample_sql.append(sql)
-        return "110101199003071234\n"
+        return "id_card\n110101199003071234\n"
 
     collector._query = mock_query  # type: ignore[assignment]
     collector.set_sampling(5)
@@ -739,6 +762,7 @@ async def test_clickhouse_collect_entity_samples_columns():
     assert len(sample_sql) == 1
     assert "FROM `test_db`.`users`" in sample_sql[0]
     assert spec.schema_json["columns"][0]["sample"] == ["110101********1234"]
+    assert spec.schema_json["sample_rows"] == [{"id_card": "110101********1234"}]
 
 
 # ---------- KafkaCollector ----------

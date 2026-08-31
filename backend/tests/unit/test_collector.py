@@ -5007,20 +5007,22 @@ async def test_sample_batch_failure_falls_back_to_per_column():
         {"name": "phone_number", "type": "varchar"},
         {"name": "remark", "type": "varchar"},
     ]
-    out = await collector._sample_columns("finance.orders", columns)
+    sample_rows = await collector._sample_columns("finance.orders", columns)
 
     assert conn.batch_attempts == 1  # 先尝试整批
     assert len(conn.single_sqls) == 3  # 再逐列重试每一列
+    # 整表失败 → 行视图为空（列式 sample 原地写入 columns）
+    assert sample_rows == []
     # 健康列采到样本（非敏感值原样、敏感值打码）
-    by_name = {c["name"]: c for c in out}
+    by_name = {c["name"]: c for c in columns}
     assert by_name["id"]["sample"] == ["1"]
     assert by_name["remark"]["sample"] == ["备注"]
     # 问题列被隔离跳过，不影响其他列
     assert "sample" not in by_name["phone_number"]
 
 
-async def test_sample_per_column_masks_sensitive_and_records_rule():
-    """逐列降级路径同样打码并记录类别（与批量路径行为一致）。"""
+async def test_sample_masks_sensitive_and_records_rule():
+    """行对齐路径同样打码并记录类别（与降级路径行为一致）。"""
     from app.services.collector.connectors.mysql import InformationSchemaCollector
 
     conn = _BatchFailConnector(
@@ -5029,7 +5031,9 @@ async def test_sample_per_column_masks_sensitive_and_records_rule():
     collector = InformationSchemaCollector(conn)
     collector.set_sampling(3)
     columns = [{"name": "phone_number", "type": "varchar"}]
-    out = await collector._sample_columns("finance.orders", columns)
+    sample_rows = await collector._sample_columns("finance.orders", columns)
 
-    assert out[0]["sample"] == ["138****1234"]  # 打码存储
-    assert out[0]["sample_rule"] == "phone"  # 类别随打码值落库
+    # 单列 = 行对齐直接成功（无批量失败）→ 行视图含真实记录
+    assert sample_rows == [{"phone_number": "138****1234"}]
+    assert columns[0]["sample"] == ["138****1234"]  # 打码存储（原地写入）
+    assert columns[0]["sample_rule"] == "phone"  # 类别随打码值落库

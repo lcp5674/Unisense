@@ -273,6 +273,8 @@ class AssetMapRepository:
                             # classifier.mask_sample 打码（手机 138****5678），
                             # 不含原始敏感值，可安全暴露给治理端查看。
                             "sample": f.get("sample"),
+                            # 样本命中的敏感类别（采样时对明文判定并记录 rule_id）
+                            "sample_rule": f.get("sample_rule"),
                         }
                     )
                 else:
@@ -393,6 +395,8 @@ class AssetMapRepository:
             "schema_incomplete": row.schema_incomplete,
             "content_signature": row.content_signature,
             "schema_summary": schema_summary,
+            # 行对齐样本视图（一行 = 源库一条真实记录，脱敏值，空串占位 NULL）
+            "sample_rows": (row.schema_json or {}).get("sample_rows") or None,
             # 表级业务描述（治理补全，TD §12.1）
             "description": row.description,
             "description_source": row.description_source,

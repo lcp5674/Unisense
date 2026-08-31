@@ -115,6 +115,8 @@ class TestGetEntityDetail:
         assert out["owner_id"] == 5
         assert out["owner_name"] == "李四"
         assert out["column_count"] == 1
+        # 行视图样本（mock 未构造 sample_rows → None，不参与详情展示）
+        assert out["sample_rows"] is None
         assert out["pii_flag"] is True
         assert out["lineage_count"] == 1
         assert out["lineage_edges"][0]["edge_type"] == "DERIVED_FROM"
@@ -128,6 +130,8 @@ class TestGetEntityDetail:
                 "comment": "主键",
                 # 脱敏样本值（未采样时为 None）
                 "sample": None,
+                # 样本命中的敏感类别（未采样时为 None）
+                "sample_rule": None,
                 # 无独立描述记录但有原始 comment → 取 comment、来源 schema（并行会话
                 # 新增的 _merge_descriptions 行为）
                 "description": "主键",
@@ -195,13 +199,17 @@ class TestSummarizeSchema:
             {"fields": [{"name": "a", "type": "INT", "comment": None}]}
         )
         # 脱敏样本未采样时为 None（采集侧打码后才有值）
-        assert out == [{"name": "a", "type": "INT", "comment": None, "sample": None}]
+        assert out == [
+            {"name": "a", "type": "INT", "comment": None, "sample": None, "sample_rule": None}
+        ]
 
     def test_columns_list(self) -> None:
         out = AssetMapRepository._summarize_schema(
             {"columns": [{"column": "b", "data_type": "VARCHAR"}]}
         )
-        assert out == [{"name": "b", "type": "VARCHAR", "comment": None, "sample": None}]
+        assert out == [
+            {"name": "b", "type": "VARCHAR", "comment": None, "sample": None, "sample_rule": None}
+        ]
 
     def test_sample_passthrough(self) -> None:
         """采样开启时脱敏样本值透出（已打码，非原始敏感值）。"""
@@ -218,6 +226,7 @@ class TestSummarizeSchema:
                 "type": "VARCHAR",
                 "comment": "手机",
                 "sample": "138****5678",
+                "sample_rule": None,
             }
         ]
 

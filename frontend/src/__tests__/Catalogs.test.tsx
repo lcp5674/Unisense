@@ -610,6 +610,7 @@ describe("Catalogs 页面", () => {
           { name: "patient_phone", type: "varchar", comment: "患者手机号", sample: "138****1234", sample_rule: "phone" },
           { name: "order_amount", type: "decimal", sample: "99.00", sample_rule: "" },
         ],
+        sample_rows: [{ patient_phone: "138****1234", order_amount: "99.00" }],
       },
     } as DBCatalog;
     mockedList.mockResolvedValue({ items: [sampledCols], total: 1, page: 1, page_size: 20 });
@@ -622,7 +623,8 @@ describe("Catalogs 页面", () => {
 
     fireEvent.click(await screen.findByText("字段详情"));
     // 打开抽屉时字段可见（hasNoSchema=false → 立即采样按钮渲染）
-    expect(await screen.findByText("patient_phone")).toBeTruthy();
+    // patient_phone 出现在字段表与样本表列头（多元素），用 findAllBy 断言
+    expect((await screen.findAllByText("patient_phone")).length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByText("立即采样"));
     await waitFor(() => {
@@ -634,8 +636,8 @@ describe("Catalogs 页面", () => {
     });
   });
 
-  it("字段详情展示多值脱敏样本（采样 rows>1 时）", async () => {
-    // 多值样本列表（新采样落库形态：sample 为 string[]）
+  it("字段详情展示行对齐样本记录（一行 = 一条真实记录）", async () => {
+    // 行视图样本（新采样落库形态：sample_rows 为行字典数组，空串占位 NULL）
     const multiCols = {
       ...CATALOGS[0],
       schema_def: {
@@ -648,6 +650,11 @@ describe("Catalogs 页面", () => {
             sample_rule: "phone",
           },
         ],
+        sample_rows: [
+          { patient_phone: "138****1234" },
+          { patient_phone: "139****4321" },
+          { patient_phone: "137****5678" },
+        ],
       },
     } as DBCatalog;
     mockedList.mockResolvedValue({ items: [multiCols], total: 1, page: 1, page_size: 20 });
@@ -659,20 +666,21 @@ describe("Catalogs 页面", () => {
     );
 
     fireEvent.click(await screen.findByText("字段详情"));
-    expect(await screen.findByText("patient_phone")).toBeTruthy();
-    // 多条样本横向铺开为「样本 1…N」独立列，每格一个值
-    expect(screen.getByText("样本 1")).toBeTruthy();
-    expect(screen.getByText("样本 2")).toBeTruthy();
-    expect(screen.getByText("样本 3")).toBeTruthy();
-    expect(screen.queryByText("样本 4")).toBeNull();
+    // patient_phone 出现在字段表与样本表列头（多元素），用 findAllBy 断言
+    expect((await screen.findAllByText("patient_phone")).length).toBeGreaterThan(0);
+    // 行视图样本表：一行 = 一条记录，三个值各占一行（同一列不同行）
+    expect(screen.getByText("样本记录")).toBeTruthy();
+    expect(screen.getByText("共 3 条 · 一行 = 源库一条真实记录（已脱敏）")).toBeTruthy();
     const cell = (v: string) => screen.getByText(v).closest("td");
     expect(cell("138****1234")).not.toBe(cell("139****4321"));
     expect(cell("139****4321")).not.toBe(cell("137****5678"));
-    // 命中类别标签（SAMPLE_RULE_LABEL：phone → 手机）
+    // 表头下淡色描述带：列头含字段描述（字段表描述列 + 样本表列头描述带，多元素）
+    expect((await screen.findAllByText("患者手机号")).length).toBeGreaterThan(0);
+    // 字段表命中类别标签（SAMPLE_RULE_LABEL：phone → 手机）
     expect(screen.getByText("手机")).toBeTruthy();
   });
 
-  it("字段无样本时不展示样本列", async () => {
+  it("字段无样本时不展示样本记录表", async () => {
     const noSampleCols = {
       ...CATALOGS[0],
       schema_def: {
@@ -689,11 +697,12 @@ describe("Catalogs 页面", () => {
 
     fireEvent.click(await screen.findByText("字段详情"));
     expect(await screen.findByText("order_id")).toBeTruthy();
-    expect(screen.queryByText("样本 1")).toBeNull();
+    expect(screen.queryByText("样本记录")).toBeNull();
     expect(screen.queryByText("类别")).toBeNull();
   });
 
-  it("存量单值样本兼容为样本 1 单列", async () => {
+  it("存量单值样本不渲染行视图、类别列正常", async () => {
+    // 存量数据仅有列式 sample（无 sample_rows）：字段表类别列仍显示，样本表不渲染
     const legacyCols = {
       ...CATALOGS[0],
       schema_def: {
@@ -712,9 +721,8 @@ describe("Catalogs 页面", () => {
 
     fireEvent.click(await screen.findByText("字段详情"));
     expect(await screen.findByText("id_card_no")).toBeTruthy();
-    expect(screen.getByText("样本 1")).toBeTruthy();
-    expect(screen.getByText("110101********1234")).toBeTruthy();
     expect(screen.getByText("身份证")).toBeTruthy();
+    expect(screen.queryByText("样本记录")).toBeNull();
   });
 
   it("展示采样覆盖率条（表/列占比与双重验证列数）", async () => {

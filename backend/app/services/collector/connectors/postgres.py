@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.engine import URL
@@ -82,12 +83,11 @@ class PostgresCollector(BaseCollector):
 
     async def _sample_columns(
         self, entity_name: str, columns: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        """对字段执行批量列采样（PII 精度增强：name+sample 双验证）。
+    ) -> list[dict[str, str]]:
+        """对字段执行**行对齐**采样（记录视图 + PII 精度增强）。
 
-        与 ``InformationSchemaCollector._sample_columns`` 同构：每批最多
-        ``_SAMPLE_BATCH`` 列，一次 ``SELECT c1,...,ck ... LIMIT n`` 取 n 行，
-        逐列取第一个非空值，经 ``_mask_sample`` 打码后写入 ``columns[].sample``。
+        与 ``InformationSchemaCollector._sample_columns`` 同构：一次取整表全部列，
+        不加非空过滤，保证「一行 = 源库一条真实记录」（避免跨行拼凑出假记录）。
 
         方言差异（PostgreSQL）：标识符用**双引号**包裹——PG 不支持 MySQL 的反引号，
         且未加引号的标识符会被折叠为小写，导致驼峰列名查询失败。
@@ -98,82 +98,43 @@ class PostgresCollector(BaseCollector):
             columns: 字段定义列表（name/type/comment 等）。
 
         Returns:
-            写入 sample 后的字段列表（未开启采样/非法标识符时原样返回）。
+            打码后的行视图列表（未开启采样/非法标识符时为 ``[]``）。
         """
         if not self._sampling_max_rows or not columns:
-            return columns
+            return []
         if "." in entity_name:
             schema, tbl = entity_name.rsplit(".", 1)
         else:
             schema, tbl = self._schema or "", entity_name
         if not schema or not tbl:
-            return columns
+            return []
         if not self._IDENT_RE.match(schema) or not self._IDENT_RE.match(tbl):
-            return columns
-        n = self._sampling_max_rows
-        for start in range(0, len(columns), self._SAMPLE_BATCH):
-            batch = columns[start : start + self._SAMPLE_BATCH]
-            safe: list[tuple[dict[str, Any], str]] = []
-            for col in batch:
-                name = str(col.get("name", "")).strip()
-                if name and self._IDENT_RE.match(name):
-                    safe.append((col, name))
-            if not safe:
-                continue
-            select = ",".join(f'"{name}"' for _, name in safe)
-            where = " OR ".join(f'"{name}" IS NOT NULL' for _, name in safe)
-            sql = f'SELECT {select} FROM "{schema}"."{tbl}" WHERE {where} LIMIT {n}'
-            try:
-                rows = await self._connector.query(sql)
-            except Exception as exc:  # noqa: BLE001 - 采样失败不拖垮采集，仅记录
-                # 整批失败时逐列降级：隔离不可查的问题列，避免一列表全表采不到
-                logger.warning(
-                    "采样批次失败，降级逐列重试 entity=%s cols=%d error=%s",
-                    entity_name,
-                    len(safe),
-                    exc,
-                )
-                await self._sample_one_by_one(entity_name, schema, tbl, n, safe)
-                continue
-            for col, name in safe:
-                values = [
-                    str(r[name]) for r in rows
-                    if r.get(name) is not None and str(r[name]) not in ("", "NULL")
-                ]
-                if values:
-                    self._apply_samples(col, values)
-        return columns
+            return []
+        safe: list[tuple[dict[str, Any], str]] = []
+        for col in columns:
+            name = str(col.get("name", "")).strip()
+            if name and self._IDENT_RE.match(name):
+                safe.append((col, name))
+        if not safe:
+            return []
 
-    async def _sample_one_by_one(
-        self,
-        entity_name: str,
-        schema: str,
-        tbl: str,
-        n: int,
-        safe: list[tuple[dict[str, Any], str]],
-    ) -> None:
-        """逐列单独采样（批次查询失败的降级路径），隔离不可查的问题列。"""
-        for col, name in safe:
-            sql = (
+        def select_sql(names: list[str], n: int) -> str:
+            cols = ",".join(f'"{x}"' for x in names)
+            return f'SELECT {cols} FROM "{schema}"."{tbl}" LIMIT {n}'
+
+        def one_sql(name: str, n: int) -> str:
+            return (
                 f'SELECT "{name}" FROM "{schema}"."{tbl}" '
                 f'WHERE "{name}" IS NOT NULL LIMIT {n}'
             )
-            try:
-                rows = await self._connector.query(sql)
-            except Exception as exc:  # noqa: BLE001 - 单列失败仅跳过该列
-                logger.warning(
-                    "逐列采样失败（跳过该列） entity=%s column=%s error=%s",
-                    entity_name,
-                    name,
-                    exc,
-                )
-                continue
-            values = [
-                str(r[name]) for r in rows
-                if r.get(name) is not None and str(r[name]) not in ("", "NULL")
-            ]
-            if values:
-                self._apply_samples(col, values)
+
+        def run_query(sql: str, _names: list[str]) -> Awaitable[list[dict[str, Any]]]:
+            # 驱动已返回行字典，无需按列序还原（``_names`` 仅为元组型驱动保留）
+            return self._connector.query(sql)
+
+        return await self._sample_rows_aligned(
+            entity_name, safe, select_sql, one_sql, run_query
+        )
 
     async def sample_columns(
         self, entity_name: str, schema_json: dict[str, Any]
@@ -186,7 +147,9 @@ class PostgresCollector(BaseCollector):
         columns = schema_json.get("columns")
         if not isinstance(columns, list) or not columns:
             return schema_json
-        await self._sample_columns(entity_name, columns)
+        rows = await self._sample_columns(entity_name, columns)
+        if rows:
+            schema_json["sample_rows"] = rows
         return schema_json
 
     async def collect_entity(self, source: Any, entity_name: str) -> CatalogSpec | None:
@@ -240,13 +203,16 @@ class PostgresCollector(BaseCollector):
         ]
         if not cols:
             return None
-        # PII 精度增强：全字段采样（批量列查询，样本打码）
+        # PII 精度增强 + 样本记录视图：全字段行对齐采样（样本打码）
+        schema_json: dict[str, Any] = {"columns": cols}
         if self._sampling_max_rows:
-            await self._sample_columns(f"{schema}.{tbl}", cols)
+            sample_rows = await self._sample_columns(f"{schema}.{tbl}", cols)
+            if sample_rows:
+                schema_json["sample_rows"] = sample_rows
         return CatalogSpec(
             entity_name=entity_name,
             entity_type="TABLE",
-            schema_json={"columns": cols},
+            schema_json=schema_json,
         )
 
     async def collect(self, source: Any) -> CollectResult:
@@ -332,10 +298,12 @@ class PostgresCollector(BaseCollector):
                     continue
                 entity_name = f"{schema}.{tbl}" if not self._schema else tbl
                 cols = columns_by_table.get(tbl, [])
-                # PII 精度增强：全字段采样（批量列查询，样本打码）
+                # PII 精度增强 + 样本记录视图：全字段行对齐采样（样本打码）
+                schema_json: dict[str, Any] = {"columns": cols}
                 if self._sampling_max_rows:
-                    await self._sample_columns(f"{schema}.{tbl}", cols)
-                schema_json = {"columns": cols}
+                    sample_rows = await self._sample_columns(f"{schema}.{tbl}", cols)
+                    if sample_rows:
+                        schema_json["sample_rows"] = sample_rows
                 specs.append(
                     CatalogSpec(
                         entity_name=entity_name,

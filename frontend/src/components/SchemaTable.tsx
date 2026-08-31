@@ -20,15 +20,8 @@ const SAMPLE_RULE_LABEL: Record<string, string> = {
   bank_card: "银行卡",
 };
 
-/** 样本值最多横向铺开的列数（对应数据源配额 sample_rows，超出部分不额外建列） */
-const MAX_SAMPLE_COLS = 8;
-
-/** 归一化样本值：新采样落库为 string[]，存量兼容单值 string */
-function normalizeSamples(raw: unknown): string[] {
-  if (Array.isArray(raw)) return raw.filter((v): v is string => typeof v === "string" && !!v);
-  if (typeof raw === "string" && raw) return [raw];
-  return [];
-}
+/** 样本记录表默认每页行数 */
+const SAMPLE_ROWS_PAGE_SIZE = 10;
 
 function descriptionSourceTag(source?: DescriptionSource | null) {
   if (!source) return null;
@@ -52,6 +45,8 @@ interface SchemaTableProps {
   onInfer?: (col: SchemaColumn) => void | Promise<void>;
   /** 批量推断回调 */
   onBatchInfer?: () => void | Promise<void>;
+  /** 行对齐样本视图（一行 = 源库一条真实记录，脱敏值，空串占位 NULL） */
+  sampleRows?: Record<string, string>[];
 }
 
 export function SchemaTable({
@@ -63,6 +58,7 @@ export function SchemaTable({
   onEdit,
   onInfer,
   onBatchInfer,
+  sampleRows = [],
 }: SchemaTableProps) {
   // 编辑态：记录正在编辑的字段名
   const [editingName, setEditingName] = useState<string | null>(null);
@@ -127,11 +123,6 @@ export function SchemaTable({
     }
   }
 
-  // 样本值横向铺开为「样本 1…N」多列（每格一个值），列数取当前表实际最多条数
-  const sampleCount = Math.min(
-    MAX_SAMPLE_COLS,
-    data.reduce((max, c) => Math.max(max, normalizeSamples(c.sample).length), 0),
-  );
   // 仅当存在敏感类别命中时才插入「类别」列
   const hasSampleRule = data.some((c) => !!SAMPLE_RULE_LABEL[c.sample_rule ?? ""]);
 
@@ -164,22 +155,6 @@ export function SchemaTable({
           },
         ]
       : []),
-    // 样本 1…N：每列一个脱敏值，值过长时 Tooltip 展示完整内容
-    ...Array.from({ length: sampleCount }, (_, i) => ({
-      title: `样本 ${i + 1}`,
-      key: `sample_${i}`,
-      width: 150,
-      ellipsis: true,
-      render: (_: unknown, record: SchemaColumn) => {
-        const value = normalizeSamples(record.sample)[i];
-        if (!value) return <span className="muted">-</span>;
-        return (
-          <Tooltip title={value}>
-            <span className="mono">{value}</span>
-          </Tooltip>
-        );
-      },
-    })),
     {
       title: "描述",
       key: "description",
@@ -252,6 +227,59 @@ export function SchemaTable({
     },
   ];
 
+  // 样本记录表：行 = 一条源库真实记录，列 = 一个字段，表头下淡色描述带
+  // （描述/类型随列头悬浮可查，不占每行空间；空值以「—」占位避免列错位）
+  const sampleColumns: ColumnsType<Record<string, string>> = data.map((c) => {
+    const desc = c.description || c.comment || "";
+    return {
+      title: (
+        <div style={{ minWidth: 90 }}>
+          <div className="mono">{c.name}</div>
+          <div
+            style={{
+              fontSize: 11,
+              color: "rgba(0,0,0,0.45)",
+              fontWeight: 400,
+              lineHeight: 1.4,
+              maxWidth: 180,
+            }}
+          >
+            {desc ? (
+              <Tooltip title={desc}>
+                <span
+                  style={{
+                    display: "block",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {desc}
+                </span>
+              </Tooltip>
+            ) : (
+              <span className="muted">{c.type || "—"}</span>
+            )}
+          </div>
+        </div>
+      ),
+      dataIndex: c.name,
+      key: c.name,
+      width: 140,
+      ellipsis: true,
+      render: (v: string) => {
+        if (v === undefined || v === null || v === "") {
+          return <span className="muted">—</span>;
+        }
+        return (
+          <Tooltip title={v}>
+            <span className="mono">{v}</span>
+          </Tooltip>
+        );
+      },
+    };
+  });
+
   return (
     <Spin spinning={loading}>
       {inferable && canInfer && onBatchInfer && emptyDescCount > 0 && (
@@ -283,6 +311,40 @@ export function SchemaTable({
         }
         locale={{ emptyText: "暂无字段信息" }}
       />
+      {sampleRows.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <div style={{ marginBottom: 8, fontWeight: 500 }}>
+            样本记录
+            <span
+              style={{
+                fontWeight: 400,
+                color: "rgba(0,0,0,0.45)",
+                marginLeft: 8,
+                fontSize: 12,
+              }}
+            >
+              共 {sampleRows.length} 条 · 一行 = 源库一条真实记录（已脱敏）
+            </span>
+          </div>
+          <Table
+            dataSource={sampleRows}
+            rowKey={(_, idx) => String(idx)}
+            columns={sampleColumns}
+            size="small"
+            scroll={{ x: "max-content" }}
+            pagination={
+              sampleRows.length > SAMPLE_ROWS_PAGE_SIZE
+                ? {
+                    pageSize: SAMPLE_ROWS_PAGE_SIZE,
+                    showSizeChanger: true,
+                    pageSizeOptions: [10, 20, 50],
+                  }
+                : false
+            }
+            locale={{ emptyText: "暂无样本数据" }}
+          />
+        </div>
+      )}
     </Spin>
   );
 }
