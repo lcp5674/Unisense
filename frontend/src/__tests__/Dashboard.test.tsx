@@ -309,18 +309,26 @@ describe("Dashboard", () => {
     const aliceCard = container.querySelectorAll(".owner-card")[0];
     const segs = Array.from(aliceCard!.querySelectorAll(".oc-seg"));
     expect(segs.length).toBe(6);
+    // 段内标注智能显示：宽段（≥15%，指标 73.17%）显示「标签 数量」；中段（≥5%，数据表 9.76% / 术语 6.1%）仅显示数量；
+    // 过窄段（<5%，数据源 4.88% / 维度 3.66% / 模板 2.44%）不渲染文字，避免被 overflow 裁出半字
     expect(segs[0].textContent).toContain("指标");
     expect(segs[0].textContent).toContain("60");
-    expect(segs[1].textContent).toContain("数据表");
-    expect(segs[1].textContent).toContain("8");
-    expect(segs[2].textContent).toContain("数据源");
-    expect(segs[2].textContent).toContain("4");
-    expect(segs[3].textContent).toContain("维度");
-    expect(segs[3].textContent).toContain("3");
-    expect(segs[4].textContent).toContain("术语");
-    expect(segs[4].textContent).toContain("5");
-    expect(segs[5].textContent).toContain("模板");
-    expect(segs[5].textContent).toContain("2");
+    expect(segs[1].textContent).toBe("8");
+    expect(segs[2].textContent).toBe("");
+    expect(segs[3].textContent).toBe("");
+    expect(segs[4].textContent).toBe("5");
+    expect(segs[5].textContent).toBe("");
+    // 完整标注由图例保证：6 类资产标签 + 数量恒完整展示（窄段/0 值段也能看清全维度）
+    const chips = Array.from(aliceCard!.querySelectorAll(".oc-legend .oc-chip"));
+    expect(chips.length).toBe(6);
+    expect(chips.map((c) => c.textContent?.replace(/\s/g, ""))).toEqual([
+      "指标60",
+      "数据表8",
+      "数据源4",
+      "维度3",
+      "术语5",
+      "模板2",
+    ]);
     // 跨资产总计（卡片头部）
     expect(aliceCard!.querySelector(".oc-total")?.textContent).toContain("82");
   });
@@ -504,16 +512,16 @@ describe("Dashboard", () => {
     const segs = Array.from(charlieCard!.querySelectorAll(".oc-seg"));
     // 6 类全渲染（含 0 值的 tables/sources/dimensions/terms/templates）
     expect(segs.length).toBe(6);
-    // 数据表段（index=1）：count=0，含 oc-zero 类，宽度为最小占位 1.5%——文字仅显示 "0"（标签在 title 提示）
+    // 数据表段（index=1）：count=0，含 oc-zero 类，宽度为最小占位 1.5%——过窄段不渲染文字（标签在 title 提示，完整标注见图例）
     const tableSeg = segs[1];
-    expect(tableSeg.textContent).toBe("0");
+    expect(tableSeg.textContent).toBe("");
     expect(tableSeg.className).toContain("oc-zero");
     expect(tableSeg.getAttribute("style") ?? "").toMatch(/1[.,]5/);
     expect(tableSeg.getAttribute("title") ?? "").toContain("数据表");
     expect(tableSeg.getAttribute("title") ?? "").toContain("暂无");
-    // 数据源段（index=2）：同样 0 + oc-zero + 仅显示 "0"
+    // 数据源段（index=2）：同样 0 + oc-zero + 不渲染文字
     const sourceSeg = segs[2];
-    expect(sourceSeg.textContent).toBe("0");
+    expect(sourceSeg.textContent).toBe("");
     expect(sourceSeg.className).toContain("oc-zero");
     expect(sourceSeg.getAttribute("title") ?? "").toContain("数据源");
     // 指标段（index=0）：count=5（>0），无 oc-zero 类

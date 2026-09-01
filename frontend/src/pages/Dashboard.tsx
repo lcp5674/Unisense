@@ -772,27 +772,32 @@ const mix = OWNER_ASSETS.map((a) => ({
                   const isZero = m.count === 0;
                   // 0 值段：最小占位宽度 1.5%（让 6 类完整可见，但不抢视觉权重）
                   const w = isZero ? 1.5 : (m.count / total) * 100;
+                  // 段内标注智能显示：段宽足够才渲染文字，避免窄段被 overflow 裁出半字。
+                  // 「标签 数量」需 ≥15%（约 50px，容纳 3 字标签+数量）；仅数量需 ≥5%（约 16px）。
+                  // 过窄段只留色块，完整标注由图例 .oc-legend 保证（恒完整展示 6 类 + 数量）。
+                  const segText =
+                    w >= 15 ? `${m.label} ${m.count}` : w >= 5 ? `${m.count}` : "";
                   return (
                     <span
                       key={m.key}
-className={`oc-seg ${m.cls}${isZero ? " oc-zero" : ""}`}
-                    style={{ width: `${w.toFixed(2)}%` }}
-                    title={isZero ? `${m.label} ${m.count}（该责任人名下暂无此类资产）` : `${m.label} ${m.count}，点击查看该责任人名下${m.label}`}
-                    role="button"
-                    tabIndex={0}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      navigate(`${m.href}?owner_id=${id}`);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
+                      className={`oc-seg ${m.cls}${isZero ? " oc-zero" : ""}`}
+                      style={{ width: `${w.toFixed(2)}%` }}
+                      title={isZero ? `${m.label} ${m.count}（该责任人名下暂无此类资产）` : `${m.label} ${m.count}，点击查看该责任人名下${m.label}`}
+                      role="button"
+                      tabIndex={0}
+                      onClick={(e) => {
                         e.stopPropagation();
                         navigate(`${m.href}?owner_id=${id}`);
-                      }
-                    }}
-                  >
-                    {isZero ? "0" : `${m.label} ${m.count}`}
-                  </span>
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.stopPropagation();
+                          navigate(`${m.href}?owner_id=${id}`);
+                        }
+                      }}
+                    >
+                      {segText}
+                    </span>
                   );
                 })}
               </span>
