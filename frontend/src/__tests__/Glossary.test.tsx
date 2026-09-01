@@ -308,7 +308,10 @@ describe("Glossary 页面", () => {
     );
 
     await screen.findByText("成交总额");
-    fireEvent.click(screen.getAllByRole("button", { name: /建\s*立\s*关\s*系/ })[0]);
+    // 建立关系收进「更多」下拉：展开 → 点菜单项（限定在术语行内，避开 Tabs 的「更多」）
+    const relRow = screen.getByText("成交总额").closest("tr") as HTMLElement;
+    fireEvent.click(within(relRow).getByRole("button", { name: /更\s*多/ }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /建\s*立\s*关\s*系/ }));
 
     await screen.findByText("建立关系：GMV");
     // 关联目标术语（Select 搜索：下拉选项来自 listTerms；按编码/名称搜索，无需手输 ID）+ 关系类型
@@ -538,7 +541,12 @@ describe("Glossary 页面", () => {
       </MemoryRouter>,
     );
     await screen.findByText("成交总额");
-    fireEvent.click(screen.getAllByText("关系")[0]);
+    // 关系入口收进「更多」下拉：展开 → 点「关系」菜单项（textContent 匹配，避开 icon aria-label 干扰）
+    const graphRow = screen.getByText("成交总额").closest("tr") as HTMLElement;
+    fireEvent.click(within(graphRow).getByRole("button", { name: /更\s*多/ }));
+    const relMenuItem = (await screen.findAllByRole("menuitem")).find((el) => el.textContent?.trim() === "关系");
+    expect(relMenuItem).toBeTruthy();
+    fireEvent.click(relMenuItem as HTMLElement);
 
     // 弹窗标题 + 中心术语 + 统计条（上游/下游计数）+ 关系卡片短标签
     await screen.findByText(/术语关系图谱/);
@@ -562,7 +570,12 @@ describe("Glossary 页面", () => {
       </MemoryRouter>,
     );
     await screen.findByText("成交总额");
-    fireEvent.click(screen.getAllByText("关系")[0]);
+    // 关系入口收进「更多」下拉：展开 → 点「关系」菜单项（textContent 匹配，避开 icon aria-label 干扰）
+    const graphRow2 = screen.getByText("成交总额").closest("tr") as HTMLElement;
+    fireEvent.click(within(graphRow2).getByRole("button", { name: /更\s*多/ }));
+    const relMenuItem2 = (await screen.findAllByRole("menuitem")).find((el) => el.textContent?.trim() === "关系");
+    expect(relMenuItem2).toBeTruthy();
+    fireEvent.click(relMenuItem2 as HTMLElement);
 
     await screen.findByText(/术语关系图谱/);
     expect(screen.getByText(/暂无关联术语/)).toBeTruthy();
@@ -724,8 +737,10 @@ describe("Glossary 生命周期（重新启用/删除/回收站恢复）", () =>
       </MemoryRouter>,
     );
     await screen.findByText("旧术语");
-    fireEvent.click(screen.getByRole("button", { name: /重新启用/ }));
-    fireEvent.click(await screen.findByRole("button", { name: /确 定|确定|OK/ }));
+    // 重新启用收进「更多」下拉：展开 → 点菜单项 → Modal.confirm 确认
+    fireEvent.click(screen.getByRole("button", { name: /更\s*多/ }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /重新启用/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /确\s*认|确定|OK/ }));
     await waitFor(() => expect(mockedReactivate).toHaveBeenCalledWith("AOV_OLD"));
     expect(await screen.findByText(/已重新启用/)).toBeInTheDocument();
   });
@@ -739,8 +754,10 @@ describe("Glossary 生命周期（重新启用/删除/回收站恢复）", () =>
       </MemoryRouter>,
     );
     await screen.findByText("成交总额");
-    fireEvent.click(screen.getByRole("button", { name: /删除/ }));
-    fireEvent.click(await screen.findByRole("button", { name: /确 定|确定|OK/ }));
+    // 删除收进「更多」下拉：展开 → 点菜单项 → Modal.confirm 确认
+    fireEvent.click(screen.getByRole("button", { name: /更\s*多/ }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /删除/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /确\s*认|确定|OK/ }));
     await waitFor(() => expect(mockedDelete).toHaveBeenCalledWith("GMV"));
     expect(await screen.findByText(/已删除/)).toBeInTheDocument();
   });

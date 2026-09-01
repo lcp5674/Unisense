@@ -127,6 +127,18 @@ function RulesTab() {
     }
   }
 
+  // 删除规则二次确认（删除不可逆）
+  function confirmDeleteRule(r: QualityRule) {
+    Modal.confirm({
+      title: `确认删除规则 #${r.id}？`,
+      content: "删除后该指标不再按此规则执行质量检测。",
+      okText: "确认",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: () => handleDelete(r),
+    });
+  }
+
   const columns = [
     { title: "ID", dataIndex: "id", key: "id", width: 70 },
     { title: "指标", dataIndex: "metric_id", key: "metric", width: 90, render: (v: number) => <span className="mono">#{v}</span> },
@@ -148,7 +160,7 @@ function RulesTab() {
       render: (_: unknown, r: QualityRule) => (
         <Space>
           {canConfigRule && <Button size="small" onClick={() => handleToggle(r)}>{r.enabled ? "停用" : "启用"}</Button>}
-          {canConfigRule && <Button size="small" danger onClick={() => handleDelete(r)}>删除</Button>}
+          {canConfigRule && <Button size="small" danger onClick={() => confirmDeleteRule(r)}>删除</Button>}
         </Space>
       ),
     },

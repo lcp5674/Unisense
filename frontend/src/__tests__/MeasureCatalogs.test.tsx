@@ -473,9 +473,10 @@ describe("MeasureCatalogs 生命周期（重新启用/删除/回收站恢复）"
     mockedReactivate.mockResolvedValue({ ...deprecated, status: "DRAFT" });
     renderCatalogs();
 
-    fireEvent.click(await screen.findByRole("button", { name: /重新启用/ }));
-    // Popconfirm 确认
-    fireEvent.click(await screen.findByRole("button", { name: /确 定|确定|OK/ }));
+    // 生命周期操作收进「更多」下拉：展开 → 点「重新启用」→ Modal.confirm 确认
+    fireEvent.click(await screen.findByRole("button", { name: /更\s*多/ }));
+    fireEvent.click(await screen.findByText("重新启用"));
+    fireEvent.click(await screen.findByRole("button", { name: /确\s*认|确定|OK/ }));
 
     await waitFor(() =>
       expect(mockedReactivate).toHaveBeenCalledWith("medical_fee_men_zhen_shou_fei"),
@@ -488,8 +489,10 @@ describe("MeasureCatalogs 生命周期（重新启用/删除/回收站恢复）"
     mockedDelete.mockResolvedValue(measure);
     renderCatalogs();
 
-    fireEvent.click(await screen.findByRole("button", { name: /删除/ }));
-    fireEvent.click(await screen.findByRole("button", { name: /确 定|确定|OK/ }));
+    // 删除收进「更多」下拉：展开 → 点「删除」→ Modal.confirm 确认
+    fireEvent.click(await screen.findByRole("button", { name: /更\s*多/ }));
+    fireEvent.click(await screen.findByText("删除"));
+    fireEvent.click(await screen.findByRole("button", { name: /确\s*认|确定|OK/ }));
 
     await waitFor(() =>
       expect(mockedDelete).toHaveBeenCalledWith("medical_fee_men_zhen_shou_fei"),

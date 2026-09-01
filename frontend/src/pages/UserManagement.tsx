@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Card,
+  Dropdown,
   Form,
   Input,
   Modal,
@@ -15,6 +16,7 @@ import {
 } from "antd";
 import {
   CopyOutlined,
+  DownOutlined,
   LockOutlined,
   PlayCircleOutlined,
   PlusOutlined,
@@ -270,6 +272,19 @@ export function UserManagement() {
     }
   }
 
+  // 「更多」下拉中的停用/启用二次确认
+  function confirmToggleStatus(u: AdminUser) {
+    const disabling = u.status === "active";
+    Modal.confirm({
+      title: disabling ? `禁用用户 ${u.username}？` : `启用用户 ${u.username}？`,
+      content: disabling ? "禁用后该用户将无法登录。" : "启用后该用户恢复登录。",
+      okText: "确认",
+      cancelText: "取消",
+      okButtonProps: disabling ? { danger: true } : undefined,
+      onOk: () => handleToggleStatus(u),
+    });
+  }
+
   async function handleBatchToggle(enabled: boolean) {
     if (selectedRowKeys.length === 0) return;
     const ids = selectedRowKeys.map(Number);
@@ -394,34 +409,49 @@ export function UserManagement() {
     {
       title: "操作",
       key: "actions",
-      width: 220,
+      width: 200,
       render: (_: unknown, u: AdminUser) =>
         canManage ? (
-          <Space size={4}>
+          <Space size={8} wrap>
             {can("user:edit") && (
-              <Button size="small" onClick={() => openEdit(u)}>编辑</Button>
+              <Button size="small" type="link" onClick={() => openEdit(u)}>编辑</Button>
             )}
             {can("user:edit") && (
-              <Button size="small" icon={<SafetyCertificateOutlined />} onClick={() => setPermUser(u)}>
+              <Button size="small" type="link" icon={<SafetyCertificateOutlined />} onClick={() => setPermUser(u)}>
                 授权
               </Button>
             )}
-            {can("user:reset-password") && (
-              <Button size="small" icon={<LockOutlined />} onClick={() => { setResetTarget(u); resetForm.resetFields(); }}>
-                重置密码
+            <Dropdown
+              trigger={["click"]}
+              menu={{
+                items: [
+                  ...(can("user:reset-password")
+                    ? [{ key: "reset", icon: <LockOutlined />, label: "重置密码" }]
+                    : []),
+                  ...(can("user:disable")
+                    ? [
+                        { type: "divider" as const },
+                        {
+                          key: "toggle",
+                          icon: u.status === "active" ? <StopOutlined /> : <PlayCircleOutlined />,
+                          label: u.status === "active" ? "禁用" : "启用",
+                          danger: u.status === "active",
+                        },
+                      ]
+                    : []),
+                ],
+                onClick: ({ key }) => {
+                  if (key === "reset") {
+                    setResetTarget(u);
+                    resetForm.resetFields();
+                  } else if (key === "toggle") confirmToggleStatus(u);
+                },
+              }}
+            >
+              <Button size="small">
+                更多 <DownOutlined />
               </Button>
-            )}
-            {can("user:disable") && (
-              <Popconfirm
-                title={u.status === "active" ? `禁用用户 ${u.username}？` : `启用用户 ${u.username}？`}
-                description={u.status === "active" ? "禁用后该用户将无法登录" : undefined}
-                okText="确认"
-                cancelText="取消"
-                onConfirm={() => handleToggleStatus(u)}
-              >
-                <Button size="small" danger={u.status === "active"}>{u.status === "active" ? "禁用" : "启用"}</Button>
-              </Popconfirm>
-            )}
+            </Dropdown>
           </Space>
         ) : null,
     },

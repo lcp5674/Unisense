@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, Cascader, message, Space, Descriptions, Popconfirm, Tooltip, Switch, Divider, Segmented, Alert, Collapse } from "antd";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, Cascader, message, Space, Descriptions, Popconfirm, Tooltip, Switch, Divider, Segmented, Alert, Collapse, Dropdown } from "antd";
 import type { FormInstance } from "antd";
-import { PlusOutlined, ArrowLeftOutlined, HeartOutlined, ReadOutlined, EditOutlined, QuestionCircleOutlined } from "@ant-design/icons";
+import { PlusOutlined, ArrowLeftOutlined, HeartOutlined, ReadOutlined, EditOutlined, QuestionCircleOutlined, DownOutlined } from "@ant-design/icons";
 import {
   listTemplates,
   createMetric,
@@ -1149,25 +1149,38 @@ export function Templates() {
     {
       title: "操作",
       key: "actions",
-      width: 140,
+      width: 200,
       render: (_: unknown, t: MetricTemplate) => (
-        <Space size={4} wrap>
-          <Button
-            type="link"
-            icon={<HeartOutlined style={{ color: favCodes.has(t.code) ? "#eb2f96" : undefined }} />}
-            onClick={() => toggleFavorite(t)}
-          >
-            {favCodes.has(t.code) ? "已收藏" : "收藏"}
-          </Button>
+        <Space size={8} wrap>
           <Button type="link" icon={<ReadOutlined />} onClick={() => setDetailTpl(t)}>详情</Button>
-          {can("template:assign-owner") && (
-            <Button type="link" icon={<EditOutlined />} onClick={() => openEditTpl(t)}>编辑</Button>
-          )}
           {can("template:instantiate") && (
             <Tooltip title={t.is_active ? undefined : "模板已停用，暂不可实例化"}>
               <Button type="link" disabled={!t.is_active} onClick={() => openInstantiate(t)}>实例化指标</Button>
             </Tooltip>
           )}
+          <Dropdown
+            trigger={["click"]}
+            menu={{
+              items: [
+                {
+                  key: "fav",
+                  icon: <HeartOutlined style={{ color: favCodes.has(t.code) ? "#eb2f96" : undefined }} />,
+                  label: favCodes.has(t.code) ? "取消收藏" : "收藏",
+                },
+                ...(can("template:assign-owner")
+                  ? [{ key: "edit", icon: <EditOutlined />, label: "编辑" }]
+                  : []),
+              ],
+              onClick: ({ key }) => {
+                if (key === "fav") toggleFavorite(t);
+                else if (key === "edit") openEditTpl(t);
+              },
+            }}
+          >
+            <Button size="small">
+              更多 <DownOutlined />
+            </Button>
+          </Dropdown>
         </Space>
       ),
     },

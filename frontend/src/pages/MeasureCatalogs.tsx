@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Alert, App as AntApp, Button, Card, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Tooltip } from "antd";
+import { Alert, App as AntApp, Button, Card, Dropdown, Form, Input, Modal, Popconfirm, Select, Space, Table, Tag, Tooltip } from "antd";
 import {
   DeleteOutlined,
+  DownOutlined,
   EditOutlined,
   PlusOutlined,
   RedoOutlined,
@@ -465,6 +466,39 @@ export function MeasureCatalogs() {
     } catch (e) {
       message.error(errMsg(e, "删除失败"));
     }
+  }
+
+  // 「更多」下拉中的生命周期操作二次确认（废弃/重新启用/删除）
+  function confirmDeprecate(row: MeasureCatalog) {
+    Modal.confirm({
+      title: `确认废弃「${row.name}」？`,
+      content: "被指标引用的度量无法废弃。",
+      okText: "确认",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: () => handleDeprecate(row),
+    });
+  }
+
+  function confirmReactivate(row: MeasureCatalog) {
+    Modal.confirm({
+      title: `确认重新启用「${row.name}」？`,
+      content: "回到草稿状态，需重新提交审核后才能发布。",
+      okText: "确认",
+      cancelText: "取消",
+      onOk: () => handleReactivate(row),
+    });
+  }
+
+  function confirmDelete(row: MeasureCatalog) {
+    Modal.confirm({
+      title: `确认删除「${row.name}」？`,
+      content: "删除后进入回收站，可恢复；被指标引用的度量无法删除。",
+      okText: "确认",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: () => handleDelete(row),
+    });
   }
 
   // 回收站恢复

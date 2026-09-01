@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type Key } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Space, Drawer, Descriptions, Popconfirm, Divider, Tooltip, Alert } from "antd";
-import { DeleteOutlined, EditOutlined, PlusOutlined, RedoOutlined, ReloadOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined, DatabaseOutlined, ThunderboltOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Space, Drawer, Descriptions, Popconfirm, Divider, Tooltip, Alert, Dropdown } from "antd";
+import { DeleteOutlined, EditOutlined, PlusOutlined, RedoOutlined, ReloadOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined, DatabaseOutlined, ThunderboltOutlined, DownOutlined } from "@ant-design/icons";
 import {
   listDimensions,
   createDimension,
@@ -495,6 +495,55 @@ function DimensionsTab() {
     }
   }
 
+  // 「更多」下拉中的危险操作二次确认（废弃/删除）——Modal.confirm 与 Dropdown menu 搭配的标准做法
+  function confirmDeprecate(d: Dimension) {
+    Modal.confirm({
+      title: "确认废弃该维度？",
+      content: "废弃后为终态，可重新启用（回到草稿重新审核）；被指标绑定的维度无法废弃。",
+      okText: "确认",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: () => handleDeprecate(d),
+    });
+  }
+
+  function confirmReactivate(d: Dimension) {
+    Modal.confirm({
+      title: "确认重新启用该维度？",
+      content: "回到草稿状态，需重新提交审核后才能发布。",
+      okText: "确认",
+      cancelText: "取消",
+      onOk: () => handleReactivate(d),
+    });
+  }
+
+  function confirmDelete(d: Dimension) {
+    Modal.confirm({
+      title: "确认删除该维度？",
+      content: "删除后进入回收站，可恢复；被指标绑定的维度无法删除。",
+      okText: "确认",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: () => handleDelete(d),
+    });
+  }
+
+  // 打开「绑定指标」弹窗（下拉菜单复用）：重置表单 + 加载指标候选与默认成员
+  async function openBindMetric(d: Dimension) {
+    bindForm.resetFields();
+    setBindTarget(d);
+    try {
+      const r = await listMetrics({ page_size: 100 });
+      setMetrics(r.items);
+    } catch { /* 静默：已有候选可降级 */ }
+    try {
+      const r = await listDimensionMembers(d.dim_code);
+      setBindMembers(r.items);
+    } catch {
+      setBindMembers([]);
+    }
+  }
+
   // 打开编辑：先拉取最新详情确保基于最新数据（详情端点接线）
   async function openEdit(d: Dimension) {
     setEditTarget(d);
@@ -682,42 +731,23 @@ function DimensionsTab() {
                 onOpenReject={(r) => review.setRejectTarget({ code: r.code, name: r.name })}
               />
             )}
-            {can("dimension:deprecate") && <Button size="small" danger onClick={() => handleDeprecate(d)}>废弃</Button>}
-            {can("dimension:edit") && d.status === "DRAFT" && (
-              <Popconfirm
-                title="确认删除该维度？"
-                description="删除后进入回收站，可恢复"
-                onConfirm={() => handleDelete(d)}
-              >
-                <Button size="small" danger icon={<DeleteOutlined />} aria-label="删除">删除</Button>
-              </Popconfirm>
-            )}
-          </Space>
-        ) : (
-          <Space size={4} wrap>
-            <Button
-              size="small"
-              type="link"
-              icon={<HeartOutlined style={{ color: favCodes.has(d.dim_code) ? "#eb2f96" : undefined }} />}
-              onClick={() => toggleFavorite(d)}
+            <Dropdown
+              trigger={["click"]}
+              menu={{
+                items: menuItems,
+                onClick: ({ key }) => {
+                  if (key === "fav") toggleFavorite(d);
+                  else if (key === "bind") openBindMetric(d);
+                  else if (key === "deprecate") confirmDeprecate(d);
+                  else if (key === "reactivate") confirmReactivate(d);
+                  else if (key === "delete") confirmDelete(d);
+                },
+              }}
             >
-              {favCodes.has(d.dim_code) ? "已收藏" : "收藏"}
-            </Button>
-            <Button size="small" onClick={() => openDetail(d)}>详情</Button>
-            <Popconfirm
-              title="确认重新启用该维度？"
-              description="回到草稿状态，需重新提交审核后才能发布"
-              onConfirm={() => handleReactivate(d)}
-            >
-              <Button size="small" icon={<RedoOutlined />}>重新启用</Button>
-            </Popconfirm>
-            <Popconfirm
-              title="确认删除该维度？"
-              description="删除后进入回收站，可恢复；被指标绑定的维度无法删除"
-              onConfirm={() => handleDelete(d)}
-            >
-              <Button size="small" danger icon={<DeleteOutlined />} aria-label="删除">删除</Button>
-            </Popconfirm>
+              <Button size="small">
+                更多 <DownOutlined />
+              </Button>
+            </Dropdown>
           </Space>
         );
       },
@@ -1535,6 +1565,29 @@ function MembersTab() {
     }
   }
 
+  // 维度成员「更多」下拉中的危险操作二次确认（废弃/删除）
+  function confirmDeprecateMember(m: DimensionMember) {
+    Modal.confirm({
+      title: `废弃成员「${m.member_name}」？`,
+      content: "已废弃成员为终态，不可恢复；存在子成员时无法废弃。",
+      okText: "确认",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: () => handleDeprecateMember(m),
+    });
+  }
+
+  function confirmDeleteMember(m: DimensionMember) {
+    Modal.confirm({
+      title: `删除成员「${m.member_name}」？`,
+      content: "若存在子成员将级联删除整个子树。",
+      okText: "确认",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: () => handleDeleteMember(m),
+    });
+  }
+
   // 成员下拉选项（父级选择框）：展示路径 + 名称，便于识别层级
   function memberOptions(excludeCode?: string) {
     return members
@@ -1774,51 +1827,50 @@ function MembersTab() {
           {
             title: "操作",
             key: "actions",
-            width: 160,
-            render: (_: unknown, m: DimensionMember) => (
-              <Space size={4} wrap>
-                {can("dimension:create") && (
-                  <Tooltip title={`在该成员下添加子成员`}>
-                    <Button size="small" icon={<PlusOutlined />} onClick={() => openCreateMember(m.member_code)}>添加下级</Button>
-                  </Tooltip>
-                )}
-                {can("dimension:edit") &&
-                  (m.status === "DEPRECATED" ? (
-                    <Tooltip title="已废弃成员为终态，不可编辑">
-                      <Button size="small" icon={<EditOutlined />} disabled>编辑</Button>
-                    </Tooltip>
-                  ) : (
-                    <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(m)}>编辑</Button>
-                  ))}
-                {can("dimension:edit") && m.status === "DRAFT" && (
-                  <Button size="small" type="primary" onClick={() => handlePublishMember(m)}>发布</Button>
-                )}
-                {can("dimension:edit") && m.status !== "DEPRECATED" && (
-                  <Popconfirm
-                    title="废弃该成员？"
-                    description="已废弃成员为终态，不可恢复；存在子成员时无法废弃"
-                    okText="废弃"
-                    okButtonProps={{ danger: true }}
-                    trigger="click"
-                    onConfirm={() => handleDeprecateMember(m)}
+            width: 200,
+            render: (_: unknown, m: DimensionMember) => {
+              const menuItems: any[] = [];
+              if (can("dimension:create")) {
+                menuItems.push({ key: "add", icon: <PlusOutlined />, label: "添加下级" });
+              }
+              if (can("dimension:edit") && m.status !== "DEPRECATED") {
+                menuItems.push({ type: "divider" });
+                menuItems.push({ key: "deprecate", icon: <DeleteOutlined />, label: "废弃", danger: true });
+              }
+              if (can("dimension:edit")) {
+                menuItems.push({ key: "delete", icon: <DeleteOutlined />, label: "删除", danger: true });
+              }
+              return (
+                <Space size={8} wrap>
+                  {can("dimension:edit") && m.status === "DRAFT" && (
+                    <Button size="small" type="primary" onClick={() => handlePublishMember(m)}>发布</Button>
+                  )}
+                  {can("dimension:edit") &&
+                    (m.status === "DEPRECATED" ? (
+                      <Tooltip title="已废弃成员为终态，不可编辑">
+                        <Button size="small" icon={<EditOutlined />} disabled>编辑</Button>
+                      </Tooltip>
+                    ) : (
+                      <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(m)}>编辑</Button>
+                    ))}
+                  <Dropdown
+                    trigger={["click"]}
+                    menu={{
+                      items: menuItems,
+                      onClick: ({ key }) => {
+                        if (key === "add") openCreateMember(m.member_code);
+                        else if (key === "deprecate") confirmDeprecateMember(m);
+                        else if (key === "delete") confirmDeleteMember(m);
+                      },
+                    }}
                   >
-                    <Button size="small" danger>废弃</Button>
-                  </Popconfirm>
-                )}
-                {can("dimension:edit") && (
-                  <Popconfirm
-                    title="删除该成员？"
-                    description="若存在子成员将级联删除整个子树"
-                    okText="删除"
-                    okButtonProps={{ danger: true }}
-                    trigger="click"
-                    onConfirm={() => handleDeleteMember(m)}
-                  >
-                    <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
-                  </Popconfirm>
-                )}
-              </Space>
-            ),
+                    <Button size="small">
+                      更多 <DownOutlined />
+                    </Button>
+                  </Dropdown>
+                </Space>
+              );
+            },
           },
         ]}
       />
@@ -2468,6 +2520,18 @@ function MappingsTab() {
     }
   }
 
+  // 维度映射「更多」下拉中的删除二次确认
+  function confirmDeleteMapping(m: DimensionMapping) {
+    Modal.confirm({
+      title: `删除该映射（${m.source_dim_code} ↔ ${m.target_dim_code}）？`,
+      content: "删除后源/目标维度取值不再互相翻译。",
+      okText: "确认",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: () => handleDeleteMapping(m),
+    });
+  }
+
   const columns = [
     { title: "源维度", dataIndex: "source_dim_code", key: "source", render: (v: string) => <span className="mono">{v}</span> },
     { title: "目标维度", dataIndex: "target_dim_code", key: "target", render: (v: string) => <span className="mono">{v}</span> },
@@ -2476,25 +2540,29 @@ function MappingsTab() {
     {
       title: "操作",
       key: "actions",
-      width: 150,
+      width: 200,
       render: (_: unknown, m: DimensionMapping) => (
-        <Space size={4} wrap>
+        <Space size={8} wrap>
           {can("dimension:mapping") && (
-            <Button size="small" icon={<DatabaseOutlined />} onClick={() => openValueMapping(m)}>值级映射</Button>
+            <Button size="small" type="link" icon={<DatabaseOutlined />} onClick={() => openValueMapping(m)}>值级映射</Button>
           )}
           {can("dimension:mapping") && (
-            <Button size="small" icon={<EditOutlined />} onClick={() => openEditMapping(m)}>编辑</Button>
+            <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEditMapping(m)}>编辑</Button>
           )}
           {can("dimension:mapping") && (
-            <Popconfirm
-              title="删除该映射？"
-              okText="删除"
-              okButtonProps={{ danger: true }}
-              trigger="click"
-              onConfirm={() => handleDeleteMapping(m)}
+            <Dropdown
+              trigger={["click"]}
+              menu={{
+                items: [{ key: "delete", icon: <DeleteOutlined />, label: "删除", danger: true }],
+                onClick: ({ key }) => {
+                  if (key === "delete") confirmDeleteMapping(m);
+                },
+              }}
             >
-              <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
-            </Popconfirm>
+              <Button size="small">
+                更多 <DownOutlined />
+              </Button>
+            </Dropdown>
           )}
         </Space>
       ),

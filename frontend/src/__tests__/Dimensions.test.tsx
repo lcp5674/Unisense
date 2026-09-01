@@ -337,12 +337,17 @@ describe("Dimensions 页面", () => {
 
     await screen.findByText("dim_channel");
     const row = screen.getByText("dim_channel").closest("tr") as HTMLElement;
-    await user.click(within(row).getByRole("button", { name: "绑定指标" }));
+    // 绑定指标收进「更多」下拉：展开 → 点菜单项
+    fireEvent.click(within(row).getByRole("button", { name: /更\s*多/ }));
+    await user.click(await screen.findByRole("menuitem", { name: /绑定指标/ }));
 
     await waitFor(() => {
       expect(screen.getByText(/绑定指标 → dim_channel/)).toBeInTheDocument();
     });
-    const dialog = screen.getByRole("dialog");
+    // 页面可能同时存在多个 Modal（审核等），精确取绑定指标弹窗
+    const dialog = (await screen.findAllByRole("dialog")).find((d) =>
+      within(d).queryByText(/绑定指标 → dim_channel/),
+    ) as HTMLElement;
     const metricItem = within(dialog).getByText("指标").closest(".ant-form-item") as HTMLElement;
     fireEvent.mouseDown(within(metricItem).getByRole("combobox"));
     await user.click(await screen.findByText("sales_gmv_day · GMV"));
@@ -507,13 +512,13 @@ describe("Dimensions 页面", () => {
     fireEvent.mouseDown(dimSelect);
     await user.click(await screen.findByText("dim_channel · 渠道"));
     await screen.findByText("华东");
-    // Popconfirm 为 click 触发：点触发按钮 → 浮层出现 → 点「删除」确认
-    // （取最后一个「删除」按钮 = 表格行内删除，避开工具栏「批量删除」）
-    const delBtns = screen.getAllByRole("button", { name: /删\s*除/ });
-    await user.click(delBtns[delBtns.length - 1]);
-    const desc = await screen.findByText(/级联删除整个子树/);
-    const popconfirm = desc.closest(".ant-popover") as HTMLElement;
-    await user.click(within(popconfirm).getByRole("button", { name: /删\s*除/ }));
+    // 删除收进「更多」下拉：展开 → 点菜单项 → Modal.confirm 确认
+    // （取最后一个「更多」= 成员行内，避开维度列表等其他行）
+    const moreBtns = screen.getAllByRole("button", { name: /更\s*多/ });
+    await user.click(moreBtns[moreBtns.length - 1]);
+    await user.click(await screen.findByText("删除"));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: /确\s*认|确定|OK/ }));
 
     await waitFor(() => {
       expect(deleteDimensionMember).toHaveBeenCalledWith("dim_channel", "m1");
@@ -987,8 +992,10 @@ describe("Dimensions 生命周期（重新启用/删除/回收站恢复）", () 
       </MemoryRouter>,
     );
     await screen.findByText("旧维度");
-    fireEvent.click(screen.getByRole("button", { name: /重新启用/ }));
-    fireEvent.click(await screen.findByRole("button", { name: /确 定|确定|OK/ }));
+    // 重新启用收进「更多」下拉：展开 → 点菜单项 → Modal.confirm 确认
+    fireEvent.click(screen.getByRole("button", { name: /更\s*多/ }));
+    fireEvent.click(await screen.findByText("重新启用"));
+    fireEvent.click(await screen.findByRole("button", { name: /确\s*认|确定|OK/ }));
     await waitFor(() => expect(mockedReactivateDim).toHaveBeenCalledWith("dim_old"));
     expect(await screen.findByText(/已重新启用/)).toBeInTheDocument();
   });
@@ -1002,8 +1009,10 @@ describe("Dimensions 生命周期（重新启用/删除/回收站恢复）", () 
       </MemoryRouter>,
     );
     await screen.findByText("区域");
-    fireEvent.click(screen.getByRole("button", { name: /删除/ }));
-    fireEvent.click(await screen.findByRole("button", { name: /确 定|确定|OK/ }));
+    // 删除收进「更多」下拉：展开 → 点菜单项 → Modal.confirm 确认
+    fireEvent.click(screen.getByRole("button", { name: /更\s*多/ }));
+    fireEvent.click(await screen.findByText("删除"));
+    fireEvent.click(await screen.findByRole("button", { name: /确\s*认|确定|OK/ }));
     await waitFor(() => expect(mockedDeleteDim).toHaveBeenCalledWith("dim_region"));
     expect(await screen.findByText(/已删除/)).toBeInTheDocument();
   });

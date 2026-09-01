@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, Rate, message, Tabs, Space, Alert, Tooltip, Row, Col } from "antd";
-import { StarOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, Rate, message, Tabs, Space, Alert, Tooltip, Row, Col, Dropdown } from "antd";
+import { StarOutlined, DownOutlined } from "@ant-design/icons";
 import { listFeedback, submitFeedback, updateFeedbackStatus, clarifyFeedback, submitNps, fetchNpsStats, listUsers, fetchCurrentUser, UnisenseApiError } from "../api";
 import { usePermission } from "../hooks/usePermission";
 import type { CurrentUser, Feedback, NpsStats } from "../types";
@@ -362,26 +362,35 @@ function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
           return <span className="muted">无处置权限</span>;
         }
         return (
-          <Space>
-            <Button
-              size="small"
-              disabled={f.status === "in_progress"}
-              onClick={() => setDraft({ feedback: f, status: "in_progress", note: "" })}
-            >
-              跟进
-            </Button>
-            <Button
-              size="small"
-              onClick={() => setDraft({ feedback: f, status: "clarifying", note: "" })}
-            >
-              待澄清
-            </Button>
+          <Space size={8} wrap>
             <Button size="small" type="primary" onClick={() => setDraft({ feedback: f, status: "adopted", note: "" })}>
               采纳
             </Button>
             <Button size="small" danger onClick={() => setDraft({ feedback: f, status: "rejected", note: "" })}>
               驳回
             </Button>
+            <Dropdown
+              trigger={["click"]}
+              menu={{
+                items: [
+                  {
+                    key: "follow",
+                    label: "跟进",
+                    disabled: f.status === "in_progress",
+                    onClick: () => setDraft({ feedback: f, status: "in_progress", note: "" }),
+                  },
+                  {
+                    key: "clarify",
+                    label: "待澄清",
+                    onClick: () => setDraft({ feedback: f, status: "clarifying", note: "" }),
+                  },
+                ],
+              }}
+            >
+              <Button size="small">
+                更多 <DownOutlined />
+              </Button>
+            </Dropdown>
           </Space>
         );
       },

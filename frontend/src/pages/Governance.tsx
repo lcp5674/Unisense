@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Alert, Descriptions, Checkbox, Popconfirm, Tooltip } from "antd";
-import { PlusOutlined, SafetyCertificateOutlined, ExperimentOutlined, SearchOutlined, AuditOutlined, DeleteOutlined, SettingOutlined, TeamOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Alert, Descriptions, Checkbox, Popconfirm, Tooltip, Dropdown } from "antd";
+import { PlusOutlined, SafetyCertificateOutlined, ExperimentOutlined, SearchOutlined, AuditOutlined, DeleteOutlined, SettingOutlined, TeamOutlined, DownOutlined } from "@ant-design/icons";
 import {
   fetchMyPermissions,
   listGrants,
@@ -342,6 +342,18 @@ function GrantsTab() {
     }
   }
 
+  // 授权「更多」下拉中的回收二次确认（回收不可逆）
+  function confirmRevoke(g: GrantResponse) {
+    Modal.confirm({
+      title: `确认回收该用户（${g.user_id}）的授权？`,
+      content: "回收后该用户立即失去对应权限；需重新授权才能恢复。",
+      okText: "确认",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: () => handleRevoke(g),
+    });
+  }
+
   // 批量授权：将同一授权参数应用到多个用户，生成 GrantCreate 列表
   function buildBatchItems(values: Record<string, unknown>): GrantCreate[] {
     const users = Array.isArray(values.user_ids) ? values.user_ids.map(Number) : [];
@@ -446,12 +458,26 @@ function GrantsTab() {
     {
       title: "操作",
       key: "actions",
-      width: 150,
+      width: 200,
       render: (_: unknown, g: GrantResponse) => (
-        <Space size={4}>
-          {can("grant:create") && <Button size="small" icon={<TeamOutlined />} onClick={() => openGrantForUser(g.user_id)}>给该用户授权</Button>}
-          {can("role:edit") && <Button size="small" icon={<SettingOutlined />} onClick={() => setPermUserId(g.user_id)}>按钮权限</Button>}
-          {g.status === "ACTIVE" && can("grant:revoke") ? <Button size="small" danger onClick={() => handleRevoke(g)}>回收</Button> : null}
+        <Space size={8} wrap>
+          {can("grant:create") && <Button size="small" type="link" icon={<TeamOutlined />} onClick={() => openGrantForUser(g.user_id)}>授权</Button>}
+          {can("role:edit") && <Button size="small" type="link" icon={<SettingOutlined />} onClick={() => setPermUserId(g.user_id)}>按钮权限</Button>}
+          {g.status === "ACTIVE" && can("grant:revoke") && (
+            <Dropdown
+              trigger={["click"]}
+              menu={{
+                items: [{ key: "revoke", icon: <DeleteOutlined />, label: "回收", danger: true }],
+                onClick: ({ key }) => {
+                  if (key === "revoke") confirmRevoke(g);
+                },
+              }}
+            >
+              <Button size="small">
+                更多 <DownOutlined />
+              </Button>
+            </Dropdown>
+          )}
         </Space>
       ),
     },

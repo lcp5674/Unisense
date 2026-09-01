@@ -473,6 +473,8 @@ describe("Templates 页面", () => {
 
     await screen.findByText("tpl_gmv_daily");
     // 打开编辑弹窗（can("template:assign-owner") 已 mock 为 true，编辑按钮可见）
+    // 打开编辑弹窗：先展开「更多」下拉，再点「编辑」菜单项（操作列已收敛为 主操作+更多）
+    fireEvent.click(screen.getAllByText("更多")[0]);
     fireEvent.click(screen.getAllByText("编辑")[0]);
     await screen.findByText("编辑模板：tpl_gmv_daily");
     // 回填当前名称（PATCH 语义：只改 name）
@@ -604,6 +606,8 @@ describe("Templates 页面", () => {
       </MemoryRouter>,
     );
     await screen.findByText("tpl_gmv_daily");
+    // 打开编辑弹窗：先展开「更多」下拉，再点「编辑」菜单项（操作列已收敛为 主操作+更多）
+    fireEvent.click(screen.getAllByText("更多")[0]);
     fireEvent.click(screen.getAllByText("编辑")[0]);
     await screen.findByText("编辑模板：tpl_gmv_daily");
     // 定位必填字段 tags Select（通过 Form.Item label 定位，placeholder 有值时不显示）
@@ -707,6 +711,8 @@ describe("Templates 页面", () => {
       </MemoryRouter>,
     );
     await screen.findByText("tpl_gmv_daily");
+    // 打开编辑弹窗：先展开「更多」下拉，再点「编辑」菜单项（操作列已收敛为 主操作+更多）
+    fireEvent.click(screen.getAllByText("更多")[0]);
     fireEvent.click(screen.getAllByText("编辑")[0]);
     await screen.findByText("编辑模板：tpl_gmv_daily");
     // 原子模板（TPLS[0].type=atomic）口径由逻辑度量继承 → 编辑器折叠为高级项，先展开
@@ -727,6 +733,8 @@ describe("Templates 页面", () => {
       </MemoryRouter>,
     );
     await screen.findByText("tpl_gmv_daily");
+    // 打开编辑弹窗：先展开「更多」下拉，再点「编辑」菜单项（操作列已收敛为 主操作+更多）
+    fireEvent.click(screen.getAllByText("更多")[0]);
     fireEvent.click(screen.getAllByText("编辑")[0]);
     await screen.findByText("编辑模板：tpl_gmv_daily");
     // 原子模板：编辑器折叠为高级项，先展开再切模式
@@ -753,6 +761,8 @@ describe("Templates 页面", () => {
       </MemoryRouter>,
     );
     await screen.findByText("tpl_gmv_daily");
+    // 打开编辑弹窗：先展开「更多」下拉，再点「编辑」菜单项（操作列已收敛为 主操作+更多）
+    fireEvent.click(screen.getAllByText("更多")[0]);
     fireEvent.click(screen.getAllByText("编辑")[0]);
     await screen.findByText("编辑模板：tpl_gmv_daily");
     // 原子模板：编辑器折叠为高级项，先展开再切模式

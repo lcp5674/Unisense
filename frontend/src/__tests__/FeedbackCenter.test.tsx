@@ -149,7 +149,8 @@ describe("FeedbackCenter 用户反馈", () => {
     render(<MemoryRouter><FeedbackCenter /></MemoryRouter>);
     await waitFor(() => expect(screen.getByText(/销售GMV/)).toBeInTheDocument());
     const row = screen.getByText(/销售GMV/).closest("tr") as HTMLElement;
-    expect(within(row).getByText(/跟\s*进/)).toBeInTheDocument();
+    // 跟进/待澄清收进「更多」下拉；采纳/驳回为主操作按钮
+    expect(within(row).getByText(/更\s*多/)).toBeInTheDocument();
     expect(within(row).getByText(/采\s*纳/)).toBeInTheDocument();
     expect(within(row).getByText(/驳\s*回/)).toBeInTheDocument();
   });
@@ -222,15 +223,14 @@ describe("FeedbackCenter 用户反馈", () => {
     render(<MemoryRouter><FeedbackCenter /></MemoryRouter>);
     await waitFor(() => expect(screen.getAllByText(/销售GMV/).length).toBeGreaterThan(0));
 
-    // in_progress 行（id=5）：跟进按钮禁用，采纳/驳回仍可用
+    // in_progress 行（id=5）：跟进/待澄清收进「更多」下拉，采纳/驳回仍可用
     const ipRow = screen.getByText("5").closest("tr") as HTMLElement;
-    expect(within(ipRow).getByRole("button", { name: /跟\s*进/ })).toBeDisabled();
+    expect(within(ipRow).getByRole("button", { name: /更\s*多/ })).not.toBeDisabled();
     expect(within(ipRow).getByRole("button", { name: /采\s*纳/ })).not.toBeDisabled();
 
     // adopted 行（id=2，dashboard）：不再提供处理按钮（操作列留空）
     const adoptedRow = screen.getByText("2").closest("tr") as HTMLElement;
-    expect(within(adoptedRow).queryByRole("button", { name: /采\s*纳/ })).not.toBeInTheDocument();
-    expect(within(adoptedRow).queryByRole("button", { name: /驳\s*回/ })).not.toBeInTheDocument();
+    expect(within(adoptedRow).queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("提交反馈后自动切回列表并刷新（无需手动刷新即可看到新反馈）", async () => {
@@ -271,7 +271,7 @@ describe("FeedbackCenter 处置权限 gate", () => {
     renderWithPerms(["feedback:view"]);
     await waitFor(() => expect(screen.getByText(/销售GMV/)).toBeInTheDocument());
     const row = screen.getByText(/销售GMV/).closest("tr") as HTMLElement;
-    expect(within(row).queryByText(/跟\s*进/)).not.toBeInTheDocument();
+    expect(within(row).queryByText(/更\s*多/)).not.toBeInTheDocument();
     expect(within(row).queryByText(/采\s*纳/)).not.toBeInTheDocument();
     expect(within(row).queryByText(/驳\s*回/)).not.toBeInTheDocument();
     expect(within(row).getByText("无处置权限")).toBeInTheDocument();
@@ -281,7 +281,8 @@ describe("FeedbackCenter 处置权限 gate", () => {
     renderWithPerms(["feedback:view", "feedback:manage"]);
     await waitFor(() => expect(screen.getByText(/销售GMV/)).toBeInTheDocument());
     const row = screen.getByText(/销售GMV/).closest("tr") as HTMLElement;
-    expect(within(row).getByText(/跟\s*进/)).toBeInTheDocument();
+    // 跟进/待澄清收进「更多」下拉；采纳/驳回为主操作
+    expect(within(row).getByText(/更\s*多/)).toBeInTheDocument();
     expect(within(row).getByText(/采\s*纳/)).toBeInTheDocument();
     expect(within(row).getByText(/驳\s*回/)).toBeInTheDocument();
   });

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Descriptions, Popconfirm } from "antd";
-import { PlusOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined, ThunderboltOutlined, LoadingOutlined, ApartmentOutlined, DeleteOutlined, RedoOutlined, ReloadOutlined } from "@ant-design/icons";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Descriptions, Popconfirm, Dropdown } from "antd";
+import { PlusOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined, ThunderboltOutlined, LoadingOutlined, ApartmentOutlined, DeleteOutlined, RedoOutlined, ReloadOutlined, DownOutlined } from "@ant-design/icons";
 import {
   listTerms,
   createTerm,
@@ -423,6 +423,39 @@ function TermsTab() {
     }
   }
 
+  // 「更多」下拉中的危险操作二次确认（废弃/删除/重新启用）
+  function confirmDeprecate(t: GlossaryTerm) {
+    Modal.confirm({
+      title: "确认废弃该术语？",
+      content: "废弃后为终态，可重新启用（回到草稿重新审核）。",
+      okText: "确认",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: () => handleDeprecate(t),
+    });
+  }
+
+  function confirmReactivate(t: GlossaryTerm) {
+    Modal.confirm({
+      title: "确认重新启用该术语？",
+      content: "回到草稿状态，需重新提交审核后才能发布。",
+      okText: "确认",
+      cancelText: "取消",
+      onOk: () => handleReactivate(t),
+    });
+  }
+
+  function confirmDelete(t: GlossaryTerm) {
+    Modal.confirm({
+      title: "确认删除该术语？",
+      content: "删除后进入回收站，可恢复。",
+      okText: "确认",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: () => handleDelete(t),
+    });
+  }
+
   // 回收站恢复
   async function handleRestore(t: GlossaryTerm) {
     try {
@@ -546,31 +579,45 @@ function TermsTab() {
                 description="恢复后回到原状态（草稿/废弃），可重新走审核流"
                 onConfirm={() => handleRestore(t)}
               >
-                <Button size="small" type="primary" icon={<ReloadOutlined />}>
+                <Button size="small" type="primary" icon={<ReloadOutlined />} disabled={!can("glossary:edit")}>
                   恢复
                 </Button>
               </Popconfirm>
             </Space>
           );
         }
+        const isDeprecated = t.status === "DEPRECATED";
+        // 低频管理操作收进「更多」下拉（主操作：详情/编辑/审核/再次发布）
+        const menuItems: any[] = [
+          { key: "relation", icon: <ApartmentOutlined />, label: "关系" },
+          ...(can("glossary:create") ? [{ key: "link", icon: <PlusOutlined />, label: "建立关系" }] : []),
+          {
+            key: "fav",
+            icon: <HeartOutlined style={{ color: favCodes.has(t.term_code) ? "#eb2f96" : undefined }} />,
+            label: favCodes.has(t.term_code) ? "取消收藏" : "收藏",
+          },
+        ];
+        if (isDeprecated) {
+          if (can("glossary:edit")) {
+            menuItems.push({ type: "divider" });
+            menuItems.push({ key: "reactivate", icon: <RedoOutlined />, label: "重新启用" });
+            menuItems.push({ key: "delete", icon: <DeleteOutlined />, label: "删除", danger: true });
+          }
+        } else {
+          if (can("glossary:deprecate")) {
+            menuItems.push({ type: "divider" });
+            menuItems.push({ key: "deprecate", icon: <DeleteOutlined />, label: "废弃", danger: true });
+          }
+          if (t.status === "DRAFT" && can("glossary:edit")) {
+            menuItems.push({ key: "delete", icon: <DeleteOutlined />, label: "删除", danger: true });
+          }
+        }
         return (
-          <Space wrap>
+          <Space size={8} wrap>
             <Button size="small" type="link" onClick={() => openDetail(t)}>详情</Button>
-            {can("glossary:edit") && (
+            {!isDeprecated && can("glossary:edit") && (
               <Button size="small" type="link" onClick={() => openEdit(t)}>编辑</Button>
             )}
-            <Button size="small" type="link" icon={<ApartmentOutlined />} onClick={() => openRelationView(t)}>关系</Button>
-            {can("glossary:create") && (
-              <Button size="small" type="link" onClick={() => openRelation(t)}>建立关系</Button>
-            )}
-            <Button
-              size="small"
-              type="link"
-              icon={<HeartOutlined style={{ color: favCodes.has(t.term_code) ? "#eb2f96" : undefined }} />}
-              onClick={() => toggleFavorite(t)}
-            >
-              {favCodes.has(t.term_code) ? "已收藏" : "收藏"}
-            </Button>
             {can("glossary:edit") && (
               <MasterDataReviewActions
                 row={{
@@ -588,30 +635,27 @@ function TermsTab() {
                 onOpenReject={(r) => review.setRejectTarget({ code: r.code, name: r.name })}
               />
             )}
-            {t.status === "DEPRECATED" && currentUser?.role === "platform_admin" && can("glossary:edit") && (
+            {isDeprecated && currentUser?.role === "platform_admin" && can("glossary:edit") && (
               <Button size="small" type="primary" icon={<SendOutlined />} onClick={() => publishTerm(t.term_code).then(() => { message.success("已重新发布"); load(); })}>再次发布</Button>
             )}
-            {t.status === "DEPRECATED" && can("glossary:edit") && (
-              <Popconfirm
-                title="确认重新启用该术语？"
-                description="回到草稿状态，需重新提交审核后才能发布"
-                onConfirm={() => handleReactivate(t)}
-              >
-                <Button size="small" icon={<RedoOutlined />}>重新启用</Button>
-              </Popconfirm>
-            )}
-            {t.status !== "DEPRECATED" && can("glossary:deprecate") && (
-              <Button size="small" danger onClick={() => handleDeprecate(t)}>废弃</Button>
-            )}
-            {(t.status === "DRAFT" || t.status === "DEPRECATED") && can("glossary:edit") && (
-              <Popconfirm
-                title="确认删除该术语？"
-                description="删除后进入回收站，可恢复"
-                onConfirm={() => handleDelete(t)}
-              >
-                <Button size="small" danger icon={<DeleteOutlined />} aria-label="删除">删除</Button>
-              </Popconfirm>
-            )}
+            <Dropdown
+              trigger={["click"]}
+              menu={{
+                items: menuItems,
+                onClick: ({ key }) => {
+                  if (key === "relation") openRelationView(t);
+                  else if (key === "link") openRelation(t);
+                  else if (key === "fav") toggleFavorite(t);
+                  else if (key === "deprecate") confirmDeprecate(t);
+                  else if (key === "reactivate") confirmReactivate(t);
+                  else if (key === "delete") confirmDelete(t);
+                },
+              }}
+            >
+              <Button size="small">
+                更多 <DownOutlined />
+              </Button>
+            </Dropdown>
           </Space>
         );
       },
