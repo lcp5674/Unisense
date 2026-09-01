@@ -588,13 +588,13 @@ export function UserManagement() {
           <Form.Item name="display_name" label="显示名称" rules={[{ required: true }]}>
             <Input placeholder="如 张三" />
           </Form.Item>
-          <Space size={16} style={{ width: "100%" }} align="start">
+          <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
             <Form.Item
               name="roles"
               label="角色（可多选）"
               initialValue={["viewer"]}
               rules={[{ required: true, message: "至少选择一个角色" }]}
-              style={{ minWidth: 240 }}
+              style={{ flex: 1, minWidth: 0 }}
               extra="主角色自动取权限最高者（如同时选择域管理员+评审员，主角色为域管理员）"
             >
               <Select
@@ -604,7 +604,7 @@ export function UserManagement() {
                 maxTagCount="responsive"
               />
             </Form.Item>
-            <Form.Item name="org_id" label="所属团队" style={{ width: 260 }} extra={undefined}>
+            <Form.Item name="org_id" label="所属团队" style={{ flex: 1, minWidth: 0 }} extra={undefined}>
               <Select
                 allowClear
                 showSearch
@@ -613,7 +613,7 @@ export function UserManagement() {
                 options={orgOptions}
               />
             </Form.Item>
-          </Space>
+          </div>
           {createOrgId ? (
             <div className="muted" style={{ fontSize: 12, marginBottom: 12 }}>
               {inheritedDomainOf(createOrgId)
