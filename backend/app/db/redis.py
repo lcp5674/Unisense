@@ -28,6 +28,11 @@ def create_redis_pool() -> aioredis.Redis:
     kwargs: dict[str, object] = {
         "decode_responses": True,
         "max_connections": 20,
+        # R2（审查修复）：Redis 客户端加显式超时——此前无 socket_timeout，
+        # Redis 遭遇 TCP 黑洞时请求无限期挂起，20 个连接被挂满后全站不可用
+        # （EventBus/缓存/限流/OLAP 结果缓存共用此池）。
+        "socket_connect_timeout": 3.0,
+        "socket_timeout": 5.0,
     }
     if url.startswith("rediss://"):
         import ssl

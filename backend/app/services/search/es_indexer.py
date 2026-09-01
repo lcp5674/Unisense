@@ -217,6 +217,38 @@ class EsIndexer:
         term_count = await self.sync_terms()
         return {"metric_idx": metric_count, "term_idx": term_count}
 
+    async def delete_metric(self, metric_code: str) -> bool:
+        """删除索引中指定指标的文档（B1：purge/软删后调用，保持搜索与库一致）。
+
+        ES 不可用/删除失败时静默跳过并告警（检索路径会自动降级 MySQL LIKE，
+        不阻塞业务主流程）。
+        """
+        if not self.enabled:
+            return False
+        try:
+            await self._es.delete_by_query(
+                _METRIC_INDEX, {"query": {"term": {"metric_code": metric_code}}}
+            )
+            logger.info("es_metric_deleted", metric_code=metric_code)
+            return True
+        except Exception:  # noqa: BLE001
+            logger.warning("es_metric_delete_failed", metric_code=metric_code)
+            return False
+
+    async def delete_term(self, term_code: str) -> bool:
+        """删除索引中指定术语的文档（B1：purge/软删后调用）。"""
+        if not self.enabled:
+            return False
+        try:
+            await self._es.delete_by_query(
+                _TERM_INDEX, {"query": {"term": {"term_code": term_code}}}
+            )
+            logger.info("es_term_deleted", term_code=term_code)
+            return True
+        except Exception:  # noqa: BLE001
+            logger.warning("es_term_delete_failed", term_code=term_code)
+            return False
+
 
 def _join_synonyms(value: Any) -> str:
     """同义词（JSON 数组或字符串）归一为空格分隔文本，供 ES text 字段分词匹配。"""

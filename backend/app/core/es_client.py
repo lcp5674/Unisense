@@ -138,6 +138,32 @@ class EsClient:
             self._breaker.record_failure()
             raise SearchUnavailableError(f"es index failed: {exc}") from exc
 
+    async def delete_by_query(self, index: str, body: dict[str, Any]) -> Any:
+        """按查询删除文档（B1：purge/软删后移除 ES 文档，保持索引与库一致）。
+
+        Args:
+            index: 索引名。
+            body: 删除查询体（如 ``{"query": {"term": {"metric_code": code}}}``）。
+
+        Returns:
+            ES 响应对象。
+
+        Raises:
+            SearchUnavailableError: 客户端禁用或 ES 调用异常。
+            CircuitOpenError: 熔断器开启。
+        """
+        if not self._enabled or self._client is None:
+            raise SearchUnavailableError("elasticsearch client disabled")
+        if not self._breaker.allow():
+            raise CircuitOpenError("es circuit open")
+        try:
+            resp = await self._client.delete_by_query(index=index, body=body, refresh=True)
+            self._breaker.record_success()
+            return resp
+        except Exception as exc:
+            self._breaker.record_failure()
+            raise SearchUnavailableError(f"es delete_by_query failed: {exc}") from exc
+
     async def create_index(self, index: str, body: dict[str, Any] | None = None) -> bool:
         """幂等创建索引（含 mapping；已存在时静默返回 False，不报错）。"""
         if not self._enabled or self._client is None:
