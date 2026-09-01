@@ -478,3 +478,50 @@ async def test_create_client_unique_id_ok() -> None:
         assert r.json()["data"]["client_id"] == "brand_new"
     finally:
         app.dependency_overrides.clear()
+
+
+async def test_issue_token_scope_ownership(monkeypatch) -> None:
+    """S3（审查修复）：签发令牌属主校验——domain_admin 仅可签本域接入方；
+    不限域平台级接入方仅 platform_admin 可签；org_id 取签发人组织而非 created_by。"""
+    captured: dict = {}
+
+    def fake_create_access_token(**kwargs):
+        captured["org_id"] = kwargs.get("org_id")
+        return "token-xyz"
+
+    app.dependency_overrides[deps.get_db_session] = _fake_db_session()
+    monkeypatch.setattr("app.api.consume.create_access_token", fake_create_access_token)
+    monkeypatch.setattr("app.api.consume.write_audit", AsyncMock())
+
+    async def _issue(role: str, user_domain: str | None, scope_domain: str | None) -> int:
+        app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+            id=2,
+            role=role,
+            domain=user_domain,
+            org_id=9,
+            roles_all=lambda: [role],
+        )
+        monkeypatch.setattr(
+            "app.api.consume.ApiClientRepo.get_by_client_id",
+            AsyncMock(return_value=_api_client(scope_domain=scope_domain)),
+        )
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post(
+                "/api/v1/consume/api-clients/acme/token",
+                headers={"Authorization": "Bearer t"},
+            )
+            return r.status_code
+
+    try:
+        # 1) domain_admin 签本域接入方 → 放行，org_id=9（签发人组织）
+        assert await _issue("domain_admin", "acme", "acme") == 200
+        assert captured["org_id"] == 9
+        # 2) domain_admin 签其他域接入方 → 403
+        assert await _issue("domain_admin", "other", "acme") == 403
+        # 3) domain_admin 签不限域平台级接入方 → 403
+        assert await _issue("domain_admin", "acme", None) == 403
+        # 4) platform_admin 签不限域接入方 → 放行
+        assert await _issue("platform_admin", None, None) == 200
+    finally:
+        app.dependency_overrides.clear()

@@ -558,8 +558,20 @@ async def issue_token(
     client = await repo.get_by_client_id(client_id)
     if client is None or client.status != ApiClientStatus.ACTIVE:
         raise BusinessError("接入方不存在或已吊销", error_code=ErrorCode.AUTH_APIKEY_INVALID)
+    # S3（审查修复）：签发属主校验——domain_admin 仅可签发本域接入方；
+    # 不限域（scope_domain 为空）的平台级接入方仅平台管理员可签。
+    role = user.role.value if hasattr(user.role, "value") else user.role
+    if str(role) != "platform_admin":
+        user_domain = getattr(user, "domain", None)
+        if not client.scope_domain or client.scope_domain != user_domain:
+            raise BusinessError(
+                "无权为该接入方签发令牌（仅本域接入方可由域管理员签发）",
+                error_code=ErrorCode.FORBIDDEN,
+            )
+    # org_id 取签发人所属组织（此前误用 client.created_by=创建人 user id，语义错乱）
+    org_id = getattr(user, "org_id", None) or 0
     token = create_access_token(
-        sub=client_id, role="consume", org_id=client.created_by, expire_minutes=expire_minutes
+        sub=client_id, role="consume", org_id=org_id, expire_minutes=expire_minutes
     )
     # S19（审查修复）：接入方凭证签发落审计（此前零审计——凭据签发是敏感操作）
     from app.api.responses import get_trace_id
