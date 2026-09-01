@@ -596,6 +596,9 @@ describe("QueryWorkspace", () => {
     await user.keyboard("2026-08-01{Enter}");
     await user.click(endInput);
     await user.keyboard("2026-08-15{Enter}");
+    // 输入框按 YYYY-MM-DD 数字格式展示（中文日期环境，不出现 Sep/Oct 英文月份）
+    expect(startInput).toHaveValue("2026-08-01");
+    expect(endInput).toHaveValue("2026-08-15");
     // 执行语义校验，断言提交的自定义区间
     await user.click(screen.getByRole("button", { name: /语义校验/ }));
     await waitFor(() => {

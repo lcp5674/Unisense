@@ -1,6 +1,12 @@
 import "@testing-library/jest-dom";
 import { afterEach } from "vitest";
 import { message } from "antd";
+import dayjs from "dayjs";
+import "dayjs/locale/zh-cn";
+
+// dayjs 与生产 main.tsx 保持同一中文 locale：antd DatePicker/RangePicker 面板月份
+// 由 dayjs 生成，不设 zh-cn 会显示英文（Sep/Oct），测试环境须与生产行为一致。
+dayjs.locale("zh-cn");
 
 // antd/rc-motion 出入场动画与 App.message 通知在 jsdom 中依赖 transitionend/
 // requestAnimationFrame 推进，测试在动画完成前结束即触发 React 的 act() 警告

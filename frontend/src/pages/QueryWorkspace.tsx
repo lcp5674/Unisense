@@ -572,6 +572,7 @@ export function QueryWorkspace() {
                           }
                         }}
                         allowClear
+                        format="YYYY-MM-DD"
                         placeholder={["开始日期", "结束日期"]}
                       />
                     )}
