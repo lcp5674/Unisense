@@ -149,9 +149,15 @@ async def is_token_blacklisted(jti: str) -> bool:
         result = await redis_client.get(redis_key)
         if result is not None:
             return True
+    except RuntimeError:
+        # Redis 未初始化（本地/测试环境未配置）→ 维持内存黑名单降级，与 blacklist_token 同语义
+        pass
     except Exception:
-        # S4：Redis 读取失败 → fail-open（可用性优先）+ 告警提示跨 worker 撤销可能失效
+        # S2（审查修复）：认证路径 fail-closed——Redis 已配置但读取失败时保守拒绝（视为已撤销）。
+        # 安全优先于可用性：打满 Redis/抖动期间，已登出或已轮换的 token 不得复活；
+        # 代价是期间所有 token 需重新登录（Redis 恢复后自动正常）。
         await _alert_auth_degraded("jwt_blacklist_read_failed")
+        return True
 
     now = time.time()
     expired_jtis = [k for k, v in _memory_blacklist.items() if v <= now]
