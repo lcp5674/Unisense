@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { App as AntApp } from "antd";
-import { MetricCreate } from "../pages/MetricCreate";
+import { MetricCreate, shouldLoadMoreTermPage } from "../pages/MetricCreate";
 
 // 批量注册依赖后端 POST /metric-definitions/batch-register（对齐 FR-030）
 vi.mock("../api", async () => {
@@ -2253,6 +2253,45 @@ describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数�
     await waitFor(() => expect(mockedListTerms).toHaveBeenCalled());
     await screen.findByText("门诊收费（term_outpatient）");
     await screen.findByText("住院收费（term_inpatient）");
+  });
+
+  it("关联术语滚动触底纯函数 shouldLoadMoreTermPage：触底/未触底/加载中/已加载完", () => {
+    const base = { scrollTop: 80, clientHeight: 200, scrollHeight: 280, loading: false, loaded: 20, total: 40 };
+    // 距底 ≤24px → 追加下一页
+    expect(shouldLoadMoreTermPage(base)).toBe(true);
+    // 未触底 → 不追加
+    expect(shouldLoadMoreTermPage({ ...base, scrollTop: 0 })).toBe(false);
+    // 加载中 → 不追加
+    expect(shouldLoadMoreTermPage({ ...base, loading: true })).toBe(false);
+    // 已加载完 → 不追加
+    expect(shouldLoadMoreTermPage({ ...base, loaded: 40 })).toBe(false);
+  });
+
+  it("关联术语：切「全部域」后请求不带 domain（与详情页同款，放开跨域）", async () => {
+    mockedCreate.mockResolvedValue({ metric_code: "medical_fee_amt_daily" } as any);
+    mockedListTerms.mockResolvedValue({
+      items: [{ id: 5, name: "门诊收费", term_code: "term_outpatient", domain: "outpatient" }],
+    } as any);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await goToStep(1);
+    fireEvent.click(screen.getByText(/业务描述与关联术语（选填）/));
+    // 打开下拉 → 默认「仅同域」加载（带 domain）
+    const termInput = (screen.getByTestId("termSelect") as HTMLElement).querySelector(
+      "input",
+    ) as HTMLElement;
+    fireEvent.mouseDown(termInput);
+    await screen.findByText("门诊收费（term_outpatient）");
+    // 切「全部域」→ 重新加载且不带 domain
+    fireEvent.click(screen.getByText("全部域"));
+    await waitFor(() => {
+      const calls = mockedListTerms.mock.calls;
+      const last = calls[calls.length - 1][0] as { domain?: string; page: number; page_size: number };
+      expect(last.domain).toBeUndefined();
+      expect(last.page).toBe(1);
+      expect(last.page_size).toBe(20);
+    });
   });
 
   it("Step④ 三层口径 AI 生成/丰富增强：业务口径有值点「AI 丰富增强」回填", async () => {

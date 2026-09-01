@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useMemo, type ReactNode } from "react";
+import { useEffect, useState, useRef, useMemo, type ReactNode, type UIEvent as ReactUIEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { BarsOutlined, ArrowLeftOutlined, PlusOutlined, MinusCircleOutlined, RobotOutlined, TeamOutlined, AppstoreOutlined, UploadOutlined } from "@ant-design/icons";
 import { ResizableDrawer } from "../components/ResizableDrawer";
@@ -211,6 +211,22 @@ const PERIOD_OPTIONS = [
   { value: "quarter", label: "季 (quarter)" },
   { value: "year", label: "年 (year)" },
 ];
+
+// 关联术语下拉滚动触底判断（纯函数，可单测）：距底 ≤24px 且未加载完且非加载中 → 追加下一页。
+// 与详情页 MetricDetail「关联术语」同款（2026-09 对齐）；抽纯函数绕开 jsdom 下 antd 下拉
+// 虚拟列表渲染不稳定，让触底逻辑可独立验证。
+export function shouldLoadMoreTermPage(opts: {
+  scrollTop: number;
+  clientHeight: number;
+  scrollHeight: number;
+  loading: boolean;
+  loaded: number;
+  total: number;
+}): boolean {
+  const { scrollTop, clientHeight, scrollHeight, loading, loaded, total } = opts;
+  if (loading || loaded >= total) return false;
+  return scrollTop + clientHeight >= scrollHeight - 24;
+}
 
 /** SQL 批量候选卡片字段：小标签 + 控件纵向排列，替代单行 flex 拥挤布局。
  *  label 置顶（11px 次级色）让「这是什么字段」一眼可辨，控件宽度按需自适应。
@@ -464,9 +480,14 @@ export function MetricCreate() {
   // 数仓SQL口径自动回填依赖表：记录最近一次已解析的 SQL——内容未变失焦不重复请求
   //（防重；解析成功才更新，非 SQL/解析失败后用户改成合法 SQL 仍能再次触发）
   const dwSqlParseRef = useRef<string>("");
-  // 关联术语（选填）：创建时绑定 metric.term_id——搜索式 Select（防抖 listTerms，仅 PUBLISHED）
+  // 关联术语（选填）：创建时绑定 metric.term_ids——多选 Select（防抖 listTerms，仅 PUBLISHED）。
+  // 滚动加载（termPage/termTotal 驱动触底追加，每页 20 条）+「仅同域/全部域」切换，与详情页「关联术语」一致。
   const [termOptions, setTermOptions] = useState<Array<{ value: number; label: string; code: string }>>([]);
   const [termSearching, setTermSearching] = useState(false);
+  const [termPage, setTermPage] = useState(1);
+  const [termTotal, setTermTotal] = useState(0);
+  const [termScope, setTermScope] = useState<"domain" | "all">("domain");
+  const termKwRef = useRef<string>("");
   const termSearchTimer = useRef<ReturnType<typeof setTimeout>>();
 
   const [prechecking, setPrechecking] = useState(false);
@@ -758,28 +779,73 @@ export function MetricCreate() {
     }
   }
 
-  // 关联术语搜索（选填，创建时绑定）：防抖调用 listTerms（仅 PUBLISHED 可绑定），
-  // 与详情页「关联术语」卡片同款——搜索失败不阻断注册流程。按已选业务域过滤（术语有 domain 归属）。
+  // 关联术语下拉滚动触底判断：见模块级 shouldLoadMoreTermPage（与详情页同款，抽纯函数可单测）。
+  // 组件内不再内联定义——export 非法（函数体内不允许 export 语句），定义在模块级（组件外）。
+
+  // 关联术语选项加载（选填，创建时绑定）：初始打开/搜索/滚动触底共用。
+  // 默认按已选业务域过滤（术语有 domain 归属，术语库在「治理 → 术语表」维护）；切「全部域」放开跨域；
+  // 仅 PUBLISHED 可绑定。page/append 驱动滚动加载（每页 20 条，触底追加下一页并去重）；
+  // scope 显式传「仅同域/全部域」——不读 termScope state（React 闭包陈旧：切换回调里 state 尚未更新，
+  // 读旧值会致「切回仅同域仍加载全部域」，2026-09 用户反馈）。搜索失败不阻断注册流程。
+  async function loadTermOptions(search?: string, page = 1, append = false, scope: "domain" | "all" = "domain") {
+    setTermSearching(true);
+    try {
+      const kw = search?.trim() || "";
+      if (search !== undefined) termKwRef.current = kw;
+      const res = await listTerms({
+        search: kw || undefined,
+        domain: scope === "all" ? undefined : selectedDomain || undefined,
+        status: "PUBLISHED",
+        page,
+        page_size: 20,
+      });
+      const opts = (res.items ?? []).map((t) => ({
+        value: t.id,
+        label: `${t.name}（${t.term_code}）`,
+        code: t.term_code,
+      }));
+      setTermOptions((prev) => {
+        if (!append) return opts;
+        const seen = new Set(prev.map((x) => x.value));
+        return [...prev, ...opts.filter((x) => !seen.has(x.value))];
+      });
+      setTermPage(res.page ?? page);
+      setTermTotal(res.total ?? opts.length);
+    } catch {
+      // 术语搜索失败不阻断
+    } finally {
+      setTermSearching(false);
+    }
+  }
+
+  // 关联术语搜索（防抖）：输入关键词按名称/定义/编码搜索，空关键词加载第 1 页（当前域范围）
   function handleTermSearch(q: string) {
     if (termSearchTimer.current) clearTimeout(termSearchTimer.current);
-    termSearchTimer.current = setTimeout(async () => {
-      setTermSearching(true);
-      try {
-        const res = await listTerms({
-          search: q.trim() || undefined,
-          domain: selectedDomain || undefined,
-          status: "PUBLISHED",
-          page_size: q.trim() ? 20 : 50,
-        });
-        setTermOptions(
-          (res.items ?? []).map((t) => ({ value: t.id, label: `${t.name}（${t.term_code}）`, code: t.term_code })),
-        );
-      } catch {
-        // 术语搜索失败不阻断
-      } finally {
-        setTermSearching(false);
-      }
-    }, 300);
+    termSearchTimer.current = setTimeout(() => void loadTermOptions(q, 1, false, termScope), 300);
+  }
+
+  // 切换「仅同域 / 全部域」：范围变化后重置到第 1 页重新加载（显式传本次 scope，不读 state 闭包）
+  function handleTermScopeChange(scope: "domain" | "all") {
+    setTermScope(scope);
+    termKwRef.current = "";
+    void loadTermOptions(undefined, 1, false, scope);
+  }
+
+  // 下拉滚动触底 → 追加下一页（判定逻辑抽为纯函数）
+  function handleTermScroll(e: ReactUIEvent<HTMLElement>) {
+    const el = e.currentTarget;
+    if (
+      shouldLoadMoreTermPage({
+        scrollTop: el.scrollTop,
+        clientHeight: el.clientHeight,
+        scrollHeight: el.scrollHeight,
+        loading: termSearching,
+        loaded: termOptions.length,
+        total: termTotal,
+      })
+    ) {
+      void loadTermOptions(termKwRef.current || undefined, termPage + 1, true, termScope);
+    }
   }
 
   // 取某表的列选项（name + type + comment），供主表单与批量注册弹窗复用
@@ -3480,18 +3546,32 @@ export function MetricCreate() {
                             placeholder="指标的业务含义、口径背景、适用场景（选填；详情页可 AI 生成补充）"
                           />
                         </Form.Item>
+                        {/* Segmented 在 Form.Item 外：antd Form.Item 只向直接子元素注入 value/onChange，
+                            包一层 Space 会切断 Select 的 Form 绑定（term_ids 收集不到）。 */}
+                        <Segmented
+                          size="small"
+                          value={termScope}
+                          onChange={(v) => handleTermScopeChange(v as "domain" | "all")}
+                          options={[
+                            { label: "仅同域", value: "domain" },
+                            { label: "全部域", value: "all" },
+                          ]}
+                          style={{ marginBottom: 8 }}
+                        />
                         <Form.Item name="term_ids" label="关联术语" extra="将指标归属到已发布业务术语（可多选；术语库在「治理 → 术语表」维护）">
                           <Select
                             data-testid="termSelect"
                             showSearch
                             mode="multiple"
                             allowClear
+                            style={{ width: "100%" }}
                             placeholder="搜索并选择业务术语（可多选，选填）"
                             filterOption={false}
-                            onDropdownVisibleChange={(open) => {
-                              // 首次打开下拉即加载已发布术语（带域过滤），无需先打字搜索
-                              if (open && termOptions.length === 0) handleTermSearch("");
+                            onOpenChange={(open) => {
+                              // 首次打开下拉即加载当前域范围已发布术语，无需先打字搜索
+                              if (open && termOptions.length === 0) void loadTermOptions(undefined, 1, false, termScope);
                             }}
+                            onPopupScroll={handleTermScroll}
                             onSearch={handleTermSearch}
                             options={termOptions}
                             loading={termSearching}
