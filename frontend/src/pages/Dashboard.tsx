@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { Button, Card, Popconfirm, Popover, Row, Col, Spin, Alert, Tag, Empty, Tooltip, message } from "antd";
 import {
   AppstoreOutlined,
@@ -33,7 +32,7 @@ import type {
 } from "../types";
 import { METRIC_HEALTH_LEVEL_LABEL } from "../utils/enums";
 import { useTracking } from "../hooks/useTracking";
-import { usePermission } from "../hooks/usePermission";
+import { usePermission, useGuardedNavigate } from "../hooks/usePermission";
 
 const EDGE_TYPE_LABEL: Record<string, string> = {
   DERIVED_FROM: "派生自",
@@ -65,7 +64,7 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 function LifecycleSignalBar({ data }: { data: DashboardData }) {
-  const navigate = useNavigate();
+  const navigate = useGuardedNavigate();
   const total = Math.max(data.total, 1);
 
   // 最热站：有待审 → 审核；有草稿 → 草稿；否则按已发布等
@@ -871,7 +870,7 @@ export function Dashboard() {
   // 业务域编码 → 中文显示名映射（拉取主题域树扁平化；失败静默回退显示编码）
   const [domainNameMap, setDomainNameMap] = useState<Record<string, string>>({});
   const { track } = useTracking();
-  const navigate = useNavigate();
+  const navigate = useGuardedNavigate();
   const { snapshot } = usePermission();
   // 管理角色（platform_admin/domain_admin）看全量 Owner 责任分布；普通用户仅看自己（后端已隔离）
   const isAdmin = snapshot?.role === "platform_admin" || snapshot?.role === "domain_admin";

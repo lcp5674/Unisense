@@ -14,7 +14,9 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, useNavigate } from "react-router-dom";
+import type { NavigateOptions } from "react-router-dom";
+import { message } from "antd";
 import { fetchMyPermissions } from "../api";
 import type { CurrentUser, PermissionSnapshot } from "../types";
 
@@ -183,3 +185,32 @@ export const ROUTE_PERM: Record<string, string> = {
   // 工程工具（开发/评测，仅指标创建相关角色可用）
   "/sql-infer-eval": "metric:create",
 };
+
+/**
+ * 带权限守卫的导航 hook：跳转前按 ``ROUTE_PERM`` 检查目标路由的 view 权限点，
+ * 无权限时**不跳转**（仅轻提示），避免普通用户在总览仪表等入口点击后进入无权限页面。
+ *
+ * - 数字参数（history 后退/前进）不守卫；
+ * - 未在 ``ROUTE_PERM`` 登记的路由（如 ``/detail/:code`` 详情页，页面内部自行鉴权）放行；
+ * - 权限快照未加载完成时 ``can`` fail-open 放行（首屏不误拦），后端 API 强制兜底。
+ */
+export function useGuardedNavigate() {
+  const navigate = useNavigate();
+  const { can } = usePermission();
+  return useCallback(
+    (to: string | number, opts?: NavigateOptions) => {
+      if (typeof to === "number") {
+        navigate(to);
+        return;
+      }
+      const base = to.split("?")[0];
+      const perm = ROUTE_PERM[base];
+      if (perm && !can(perm)) {
+        message.warning("当前账号无权访问该模块");
+        return; // 无权限不跳转
+      }
+      navigate(to, opts);
+    },
+    [navigate, can],
+  );
+}

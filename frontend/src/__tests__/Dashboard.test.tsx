@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
-import { BrowserRouter, MemoryRouter, useLocation } from "react-router-dom";
+import { BrowserRouter, MemoryRouter, useLocation, useNavigate } from "react-router-dom";
+import type { NavigateOptions } from "react-router-dom";
 import { Dashboard } from "../pages/Dashboard";
 
 // Mock API
@@ -25,19 +26,34 @@ vi.mock("../hooks/useTracking", () => ({
 }));
 
 // Mock usePermission（返回管理角色快照——总览仪表 Owner 责任分布的管理视角基线；
-// 非管理角色用例通过修改 mockPermRole 动态切换）
+// 非管理角色用例通过修改 mockPermRole 动态切换）。
+// useGuardedNavigate 用可感知 mockPermRole 的守卫替换（渲染期调用 useNavigate），
+// 使"管理角色跳转 / 普通用户不跳转"可被真实 MemoryRouter location 断言验证。
 let mockPermRole = "platform_admin";
-vi.mock("../hooks/usePermission", () => ({
-  usePermission: () => ({
-    can: () => true,
-    canAny: () => true,
-    canAll: () => true,
-    snapshot: { role: mockPermRole, user_id: 1, ui_actions: [], home_domain: null },
-    loading: false,
-    error: false,
-    refresh: async () => undefined,
-  }),
-}));
+vi.mock("../hooks/usePermission", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../hooks/usePermission")>();
+  return {
+    ...actual,
+    usePermission: () => ({
+      can: () => mockPermRole === "platform_admin" || mockPermRole === "domain_admin",
+      canAny: () => true,
+      canAll: () => true,
+      snapshot: { role: mockPermRole, user_id: 1, ui_actions: [], home_domain: null },
+      loading: false,
+      error: false,
+      refresh: async () => undefined,
+    }),
+    useGuardedNavigate: () => {
+      const navigate = useNavigate();
+      return (to: string | number, opts?: NavigateOptions) => {
+        const isAdmin = mockPermRole === "platform_admin" || mockPermRole === "domain_admin";
+        if (!isAdmin) return; // 非管理角色：不跳转（模拟真实守卫拦截，无反应）
+        if (typeof to === "number") navigate(to);
+        else navigate(to, opts);
+      };
+    },
+  };
+});
 
 import {
   fetchDashboard,
@@ -768,5 +784,47 @@ describe("Dashboard 数据隔离（非管理角色视角）", () => {
     renderDashboard();
     await waitFor(() => expect(screen.getByText("我的资产责任分布")).toBeInTheDocument());
     expect(screen.getByText(/您名下暂无负责的资产/)).toBeInTheDocument();
+  });
+});
+
+describe("总览仪表跳转权限守卫（按钮级）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedFetchDashboard.mockResolvedValue(mockDashboardData);
+    mockedFetchObsOverview.mockResolvedValue(mockOverview as never);
+    vi.mocked(fetchRecommendedMetrics).mockResolvedValue([]);
+    vi.mocked(fetchRecommendedTerms).mockResolvedValue([]);
+    vi.mocked(listDomainTree).mockResolvedValue([]);
+  });
+
+  it("管理角色：点击资产卡片可跳转目录（守卫放行）", async () => {
+    mockPermRole = "platform_admin";
+    const probe = renderWithLocation();
+    await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
+    const head = document.querySelector<HTMLButtonElement>(".asset-card .ac-head");
+    expect(head).not.toBeNull();
+    fireEvent.click(head!);
+    await waitFor(() => expect(probe.location()?.pathname).toBe("/catalog"));
+  });
+
+  it("普通用户：点击资产卡片无反应（守卫拦截，路由不变）", async () => {
+    mockPermRole = "analyst";
+    const probe = renderWithLocation();
+    await waitFor(() => expect(screen.getByText("我的资产责任分布")).toBeInTheDocument());
+    const head = document.querySelector<HTMLButtonElement>(".asset-card .ac-head");
+    fireEvent.click(head!);
+    // 无权限：路由保持 /dashboard，未发生跳转
+    expect(probe.location()?.pathname).toBe("/dashboard");
+  });
+
+  it("普通用户：点击快捷入口（质量中心）无反应", async () => {
+    mockPermRole = "analyst";
+    const probe = renderWithLocation();
+    await waitFor(() => expect(screen.getByText("我的资产责任分布")).toBeInTheDocument());
+    const qualityEntry = screen.getByText("质量中心");
+    const btn = qualityEntry.closest("button");
+    expect(btn).not.toBeNull();
+    fireEvent.click(btn!);
+    expect(probe.location()?.pathname).toBe("/dashboard");
   });
 });
