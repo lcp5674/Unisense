@@ -22,7 +22,6 @@ from app.core.config import settings
 from app.core.exceptions import AuthError
 from app.core.guard import guard_against_injection
 from app.core.logging import get_logger
-from app.core.middleware import _client_key  # noqa: PLC2701 - 限流键解析（可信代理）复用
 from app.core.login_throttle import (
     is_ip_blocked,
     is_login_blocked,
@@ -31,6 +30,7 @@ from app.core.login_throttle import (
     reset_ip_failures,
     reset_login_failures,
 )
+from app.core.middleware import _client_key  # noqa: PLC2701 - 限流键解析（可信代理）复用
 from app.core.security import (
     blacklist_token,
     create_access_token,
@@ -316,6 +316,20 @@ async def refresh(
     user = result.scalar_one_or_none()
     if user is None:
         raise AuthError("用户不存在或已禁用", error_code="AUTH_TOKEN_INVALID")
+
+    # S9（审查修复）：刷新须校验所属组织状态——停用/删除组织的用户不应能换发
+    # 新 access（对齐 get_current_user 的 ORG_DISABLED 拦截；此前仅查用户 active，
+    # 停用组织用户仍能续期，后续请求才被 deps 拒绝，属不一致）。
+    from app.models.user import Organization
+
+    org = (
+        await db.execute(select(Organization).where(Organization.id == user.org_id))
+    ).scalar_one_or_none()
+    if org is None:
+        raise AuthError("所属组织已停用，无法登录", error_code="ORG_DISABLED")
+    org_status = str(org.status.value if hasattr(org.status, "value") else org.status)
+    if org_status in ("suspended", "deleted"):
+        raise AuthError("所属组织已停用，无法登录", error_code="ORG_DISABLED")
 
     # 轮换：旧 refresh token 加入黑名单（防重放），TTL = 剩余有效期
     remaining_ttl = max(int(payload.get("exp", 0)) - int(datetime.now(UTC).timestamp()), 0)

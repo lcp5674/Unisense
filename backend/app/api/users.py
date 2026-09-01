@@ -38,6 +38,15 @@ from app.db.mysql import get_db_session
 from app.models.subject_domain import SubjectDomain
 from app.models.user import Organization, User, UserRole
 
+
+def _escape_like(text: str) -> str:
+    """转义 LIKE 通配符（S5 审查修复）：用户输入 ``%``/``_`` 会放大匹配面/慢查询。
+
+    用 ``/`` 作转义符（转义 //、/% 和 /_），配合 ``ilike(..., escape="/")`` 生效
+    （与 global_search/collector 的既有标准一致）。
+    """
+    return text.replace("/", "//").replace("%", "/%").replace("_", "/_")
+
 router = APIRouter(prefix="/users", tags=["users"])
 
 logger = logging.getLogger("unisense.users.api")
@@ -433,12 +442,13 @@ async def list_admin_users(
     if status:
         base = base.where(User.status == status)
     if keyword:
-        like = f"%{keyword}%"
+        escaped = _escape_like(keyword)
+        like = f"%{escaped}%"
         base = base.where(
             or_(
-                User.username.ilike(like),
-                User.display_name.ilike(like),
-                User.email.ilike(like),
+                User.username.ilike(like, escape="/"),
+                User.display_name.ilike(like, escape="/"),
+                User.email.ilike(like, escape="/"),
             )
         )
     total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar() or 0

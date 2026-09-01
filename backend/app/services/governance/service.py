@@ -282,7 +282,15 @@ class GovernanceService(BaseService):
         （``模块:功能``）经 ``load_ui_role_actions`` 独立合并，避免 UI 配置误伤 PDP 判定。
         每次决策前调用（低频配置查询，RBAC 配置化场景可接受）；被覆盖的角色以
         ``role_permission`` 表为准，未覆盖的沿用 ``policy.ROLE_ACTIONS`` 默认。
+
+        P10（性能审查）：consume dry-run/execute 等高频路径每次 PDP 决策都全表扫
+        ``role_permission``——加进程内短 TTL 缓存（60s），配置变更在 TTL 内自然收敛。
         """
+        from app.services.governance.cache import get_role_actions_cached
+
+        return await get_role_actions_cached(self._load_role_actions_uncached)
+
+    async def _load_role_actions_uncached(self) -> dict[str, frozenset[str]]:
         merged = dict(policy.ROLE_ACTIONS)
         by_role: dict[str, set[str]] = {}
         for row in await self._repo.list_role_permissions():
@@ -298,7 +306,14 @@ class GovernanceService(BaseService):
 
         仅合并 UI 权限点（``模块:功能``）覆盖；自定义角色无默认基线，生效动作
         完全来自 ``role_permission`` 覆盖（未配置即为空集，fail-closed）。
+
+        P10：与 load_role_actions 同款进程内短 TTL 缓存（60s）。
         """
+        from app.services.governance.cache import get_ui_role_actions_cached
+
+        return await get_ui_role_actions_cached(self._load_ui_role_actions_uncached)
+
+    async def _load_ui_role_actions_uncached(self) -> dict[str, frozenset[str]]:
         merged = dict(policy.ROLE_UI_ACTIONS)
         by_role: dict[str, set[str]] = {}
         for row in await self._repo.list_role_permissions():
@@ -329,6 +344,9 @@ class GovernanceService(BaseService):
                 ctx={"role": role, "unknown": unknown},
             )
         await self._repo.replace_role_permissions(role, sorted(set(actions)))
+        from app.services.governance.cache import invalidate_role_actions_cache
+
+        invalidate_role_actions_cache()  # P10：写后主动失效进程内缓存
         for item in await self.list_role_permissions():
             if item["role"] == role:
                 return item
@@ -347,6 +365,9 @@ class GovernanceService(BaseService):
                 ctx={"role": role},
             )
         await self._repo.reset_role_permissions(role)
+        from app.services.governance.cache import invalidate_role_actions_cache
+
+        invalidate_role_actions_cache()  # P10：写后主动失效进程内缓存
         for item in await self.list_role_permissions():
             if item["role"] == role:
                 return item

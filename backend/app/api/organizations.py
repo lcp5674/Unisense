@@ -35,6 +35,14 @@ from app.db.mysql import get_db_session
 from app.models.subject_domain import SubjectDomain
 from app.models.user import Organization, User
 
+
+def _escape_like(text: str) -> str:
+    """转义 LIKE 通配符（S5 审查修复）：用户输入 ``%``/``_`` 会放大匹配面/慢查询。
+
+    用 ``/`` 作转义符（转义 //、/% 和 /_），配合 ``ilike(..., escape="/")`` 生效。
+    """
+    return text.replace("/", "//").replace("%", "/%").replace("_", "/_")
+
 router = APIRouter(prefix="/organizations", tags=["组织管理"])
 
 logger = logging.getLogger("unisense.organizations.api")
@@ -186,9 +194,13 @@ async def list_organizations(
     """组织列表（含用户数统计，软删行排除）。"""
     base = select(Organization).where(Organization.deleted_at.is_(None))
     if keyword:
-        like = f"%{keyword}%"
+        escaped = _escape_like(keyword)
+        like = f"%{escaped}%"
         base = base.where(
-            or_(Organization.name.ilike(like), Organization.code.ilike(like))
+            or_(
+                Organization.name.ilike(like, escape="/"),
+                Organization.code.ilike(like, escape="/"),
+            )
         )
     if status:
         base = base.where(Organization.status == status)

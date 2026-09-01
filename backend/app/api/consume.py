@@ -285,6 +285,28 @@ async def _generate_client_id(repo: ApiClientRepo) -> str:
     raise ConflictError("无法生成唯一接入方 ID，请重试")
 
 
+def _validate_secret_strength(secret: str) -> None:
+    """接入方密钥强度校验（S8 审查修复）：≥8 位且含 大写/小写/数字/特殊 中至少 2 类。
+
+    此前仅 ``min_length=8`` 无熵校验，纯数字/纯字母弱密钥可直接注册——接入方密钥
+    是消费通道凭据，弱密钥可被爆破。机器密钥可接受 2 类（用户密码从严 3 类）。
+    """
+    categories = 0
+    if any(c.isupper() for c in secret):
+        categories += 1
+    if any(c.islower() for c in secret):
+        categories += 1
+    if any(c.isdigit() for c in secret):
+        categories += 1
+    if any(not c.isalnum() for c in secret):
+        categories += 1
+    if categories < 2:
+        raise ValidationError(
+            "接入方密钥须至少包含大写字母/小写字母/数字/特殊字符中的 2 类",
+            error_code="SECRET_WEAK",
+        )
+
+
 @router.post("/consume/api-clients", response_model=ApiResponse[ClientCreatedResponse])
 async def create_client(
     req: ClientCreateRequest,
@@ -293,6 +315,7 @@ async def create_client(
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[ClientCreatedResponse]:
     """平台管理员创建接入方（secret 仅此一次明文返回）。"""
+    _validate_secret_strength(req.secret)
     repo = ApiClientRepo(db)
     # 编码自动生成（FR-010：缺省时由系统生成 app_ 前缀，避免人为创造）
     if not req.client_id:

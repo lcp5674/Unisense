@@ -282,7 +282,8 @@ async def test_login_success_writes_auth_audit(auth_client):
 
 
 async def test_login_failure_writes_auth_failed_audit(auth_client):
-    """登录失败落 auth.login_failed 审计（actor_id=0，entity_id 记录尝试用户名）。"""
+    """登录失败落 auth.login_failed 审计（actor_id=NULL——无对应用户，X-4；
+    entity_id 记录尝试用户名）。"""
     c, session = auth_client
     session.execute.return_value = _result_with(None)
 
@@ -293,7 +294,7 @@ async def test_login_failure_writes_auth_failed_audit(auth_client):
     entries = [a.args[0] for a in session.add.call_args_list if a.args]
     failed = [e for e in entries if getattr(e, "action", None) == "auth.login_failed"]
     assert failed
-    assert failed[0].actor_id == 0
+    assert failed[0].actor_id is None
     assert failed[0].entity_id == "ghost"
 
 
