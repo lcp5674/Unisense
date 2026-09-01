@@ -110,6 +110,7 @@ import {
   MetricReuseStats,
   MetricLedgerStats,
   MetricConsistencyStats,
+  MetricStatsFilters,
   MetricDimension,
   DimensionMetricBinding,
   MetricCompareResult,
@@ -744,16 +745,38 @@ export async function listMetrics(params: {
 }
 
 // 指标运营分析：复用度 / 资产账本 / 口径一致率（backend metric_stats.py + metrics.py）
-export async function fetchMetricReuseStats(): Promise<MetricReuseStats> {
-  return request<MetricReuseStats>(`${API_BASE}/metric-definitions/stats/reuse`);
+function metricStatsQs(filters?: MetricStatsFilters): string {
+  if (!filters) return "";
+  const qs = new URLSearchParams();
+  if (filters.domain) qs.set("domain", filters.domain);
+  if (filters.type) qs.set("type", filters.type);
+  if (filters.status) qs.set("status", filters.status);
+  const s = qs.toString();
+  return s ? `?${s}` : "";
 }
 
-export async function fetchMetricLedger(): Promise<MetricLedgerStats> {
-  return request<MetricLedgerStats>(`${API_BASE}/metric-definitions/stats/ledger`);
+export async function fetchMetricReuseStats(
+  filters?: MetricStatsFilters,
+): Promise<MetricReuseStats> {
+  return request<MetricReuseStats>(
+    `${API_BASE}/metric-definitions/stats/reuse${metricStatsQs(filters)}`,
+  );
 }
 
-export async function fetchConsistencyStats(): Promise<MetricConsistencyStats> {
-  return request<MetricConsistencyStats>(`${API_BASE}/metric-definitions/consistency/stats`);
+export async function fetchMetricLedger(
+  filters?: MetricStatsFilters,
+): Promise<MetricLedgerStats> {
+  return request<MetricLedgerStats>(
+    `${API_BASE}/metric-definitions/stats/ledger${metricStatsQs(filters)}`,
+  );
+}
+
+export async function fetchConsistencyStats(
+  filters?: MetricStatsFilters,
+): Promise<MetricConsistencyStats> {
+  return request<MetricConsistencyStats>(
+    `${API_BASE}/metric-definitions/consistency/stats${metricStatsQs(filters)}`,
+  );
 }
 
 export async function getMetric(code: string): Promise<MetricResponse> {

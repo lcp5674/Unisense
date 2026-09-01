@@ -3369,6 +3369,12 @@ export interface MetricReuseStats {
   zero_reuse: number;
   items: MetricReuseItem[];
 }
+/** 指标运营分析筛选条件（业务域 / 指标类型 / 指标状态）。 */
+export interface MetricStatsFilters {
+  domain?: string;
+  type?: string;
+  status?: string;
+}
 export interface MetricLedgerZombieItem {
   metric_code: string;
   name: string;

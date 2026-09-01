@@ -454,13 +454,21 @@ async def consistency_stats(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
+    domain: Annotated[str | None, Query(description="业务域 code 过滤")] = None,
+    metric_type: Annotated[
+        str | None, Query(alias="type", description="指标类型过滤（atomic/derived/composite）")
+    ] = None,
+    status: Annotated[str | None, Query(description="指标状态过滤")] = None,
 ) -> ApiResponse[dict[str, Any]]:
     """口径治理统计：一致率（口径定义无冲突比例）、部门间冲突数、平均争议解决时长。
 
     基于 conflict 服务模型（created_at → resolved_at）与指标表聚合，供运营大盘量化
-    跨部门口径一致性与争议解决效率。
+    跨部门口径一致性与争议解决效率。支持按业务域/指标类型/指标状态过滤——总口径数
+    按指标属性收敛，冲突计数统计「至少一方属于筛选范围」的记录（无过滤时全平台）。
     """
-    stats = await ConflictRepository(db).consistency_stats()
+    stats = await ConflictRepository(db).consistency_stats(
+        domain=domain, type=metric_type, status=status
+    )
     return ok(data=stats, trace_id=trace_id)
 
 

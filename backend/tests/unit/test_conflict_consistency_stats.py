@@ -82,3 +82,52 @@ class TestConsistencyStats:
         )
         stats = await repo.consistency_stats()
         assert stats["avg_resolve_hours"] == 2.5
+
+    async def test_scoped_to_domain_filters_definitions_and_counts(
+        self, repo: ConflictRepository, db: MagicMock
+    ) -> None:
+        """按业务域过滤：总口径数带 domain 条件；冲突计数统计至少一方在域内。"""
+        db.execute = AsyncMock(
+            side_effect=[
+                _count_result(50),  # total_definitions（sales 域）
+                _count_result(2),  # total_conflicts（至少一方在 sales）
+                _count_result(1),  # conflicted_metrics（sales 域卷入指标）
+                _count_result(1),  # cross_department_conflicts（sales 相关跨域）
+                _count_result(3600),  # 平均 1 小时
+            ]
+        )
+        stats = await repo.consistency_stats(domain="sales")
+
+        assert stats["total_definitions"] == 50
+        assert stats["total_conflicts"] == 2
+        assert stats["conflicted_metrics"] == 1
+        assert stats["consistency_rate_pct"] == 98.0  # (50-1)/50
+        assert stats["cross_department_conflicts"] == 1
+        assert stats["avg_resolve_hours"] == 1.0
+
+        first_stmt = db.execute.await_args_list[0].args[0]
+        sql = str(first_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "metric.domain = 'sales'" in sql
+
+    async def test_scoped_conflicts_join_metric_with_in_scope_or(
+        self, repo: ConflictRepository, db: MagicMock
+    ) -> None:
+        """筛选时 total_conflicts 应 join 指标并带「至少一方在范围」的 OR 条件。"""
+        db.execute = AsyncMock(side_effect=[_count_result(0)] * 5)
+        stats = await repo.consistency_stats(type="derived")
+        assert stats["total_conflicts"] == 0
+
+        conflict_stmt = db.execute.await_args_list[1].args[0]
+        sql = str(conflict_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "JOIN" in sql.upper()
+        assert "'derived'" in sql
+
+    async def test_unscoped_conflicts_no_join(
+        self, repo: ConflictRepository, db: MagicMock
+    ) -> None:
+        """无过滤时 total_conflicts 保持全平台计数（不 join，向后兼容）。"""
+        db.execute = AsyncMock(side_effect=[_count_result(0)] * 5)
+        await repo.consistency_stats()
+        conflict_stmt = db.execute.await_args_list[1].args[0]
+        sql = str(conflict_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "JOIN" not in sql.upper()

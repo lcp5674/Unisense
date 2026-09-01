@@ -205,36 +205,57 @@ class ConflictRepository:
         ).scalar_one_or_none()
         return row if row is not None else None
 
-    async def consistency_stats(self) -> dict[str, Any]:
+    @staticmethod
+    def _consistency_filters(
+        alias: Any, domain: str | None, type: str | None, status: str | None  # noqa: A002 - 筛选参数名对齐前端 query 参数 type
+    ) -> list[Any]:
+        """按业务域/指标类型/指标状态构建指标过滤条件（空列表 = 不过滤）。
+
+        用于一致性统计中按指标属性收敛范围（如「仅统计 sales 域的冲突」）。
+        """
+        conds: list[Any] = []
+        if domain:
+            conds.append(alias.domain == domain)
+        if type:
+            conds.append(alias.type == type)
+        if status:
+            conds.append(alias.status == status)
+        return conds
+
+    async def consistency_stats(
+        self,
+        domain: str | None = None,
+        type: str | None = None,  # noqa: A002 - 筛选参数名对齐前端 query 参数 type
+        status: str | None = None,
+    ) -> dict[str, Any]:
         """口径一致率统计（P1）：总口径数 / 一致率 / 部门间冲突数 / 平均争议解决时长。
+
+        Args:
+            domain/type/status: 可选过滤条件（业务域 code / 指标类型 / 指标状态）。
+                总口径数按指标属性过滤；冲突相关计数仅统计「至少一方属于筛选范围」
+                的冲突记录（无过滤时保持全平台统计，向后兼容）。
 
         聚合风格对齐 observability.repository（多 count + 派生比率）。一致率 =
         未卷入冲突的口径数占比；部门间冲突 = 双方指标分属不同域；平均解决时长 =
         已解决冲突 (resolved_at - created_at) 的小时均值。
         """
-        total_defs = (
-            await self._db.execute(
-                select(func.count()).select_from(Metric).where(Metric.deleted_at.is_(None))
-            )
-        ).scalar() or 0
-        total_conflicts = (
-            await self._db.execute(
-                select(func.count()).select_from(Conflict).where(Conflict.deleted_at.is_(None))
-            )
-        ).scalar() or 0
-        cand = func.json_unquote(func.json_extract(Conflict.metric_codes, "$.candidate"))
-        ext = func.json_unquote(func.json_extract(Conflict.metric_codes, "$.existing"))
-        codes = select(cand.label("code")).where(
-            Conflict.deleted_at.is_(None), cand.is_not(None)
-        ).union(
-            select(ext.label("code")).where(Conflict.deleted_at.is_(None), ext.is_not(None))
-        ).subquery()
-        conflicted = (
-            await self._db.execute(select(func.count()).select_from(codes))
-        ).scalar() or 0
         ma, mb = aliased(Metric), aliased(Metric)
-        cross_dept = (
-            await self._db.execute(
+        fa = self._consistency_filters(ma, domain, type, status)
+        fb = self._consistency_filters(mb, domain, type, status)
+        scoped = bool(fa or fb)
+        # 冲突「至少一方在筛选范围」的 OR 条件（无过滤时不启用，保持原全平台语义）
+        in_scope = or_(*fa, *fb) if scoped else None
+        # 指标属性过滤（总口径数 / 卷入冲突指标数）
+        metric_scope = self._consistency_filters(Metric, domain, type, status)
+
+        total_stmt = select(func.count()).select_from(Metric).where(Metric.deleted_at.is_(None))
+        total_stmt = total_stmt.where(*metric_scope)
+        total_defs = (
+            await self._db.execute(total_stmt)
+        ).scalar() or 0
+
+        if scoped:
+            conflict_stmt = (
                 select(func.count())
                 .select_from(Conflict)
                 .join(ma, ma.id == Conflict.metric_a)
@@ -243,22 +264,83 @@ class ConflictRepository:
                     Conflict.deleted_at.is_(None),
                     ma.deleted_at.is_(None),
                     mb.deleted_at.is_(None),
-                    ma.domain.is_not(None),
-                    mb.domain.is_not(None),
-                    ma.domain != mb.domain,
+                    in_scope,
                 )
             )
+        else:
+            conflict_stmt = (
+                select(func.count()).select_from(Conflict).where(Conflict.deleted_at.is_(None))
+            )
+        total_conflicts = (
+            await self._db.execute(conflict_stmt)
         ).scalar() or 0
-        avg_sec = (
-            await self._db.execute(
+
+        cand = func.json_unquote(func.json_extract(Conflict.metric_codes, "$.candidate"))
+        ext = func.json_unquote(func.json_extract(Conflict.metric_codes, "$.existing"))
+        codes = select(cand.label("code")).where(
+            Conflict.deleted_at.is_(None), cand.is_not(None)
+        ).union(
+            select(ext.label("code")).where(Conflict.deleted_at.is_(None), ext.is_not(None))
+        ).subquery()
+        conflicted_stmt = select(func.count()).select_from(codes)
+        if scoped:
+            conflicted_stmt = conflicted_stmt.join(
+                Metric, Metric.metric_code == codes.c.code
+            ).where(Metric.deleted_at.is_(None), *metric_scope)
+        conflicted = (
+            await self._db.execute(conflicted_stmt)
+        ).scalar() or 0
+
+        cross_stmt = (
+            select(func.count())
+            .select_from(Conflict)
+            .join(ma, ma.id == Conflict.metric_a)
+            .join(mb, mb.id == Conflict.metric_b)
+            .where(
+                Conflict.deleted_at.is_(None),
+                ma.deleted_at.is_(None),
+                mb.deleted_at.is_(None),
+                ma.domain.is_not(None),
+                mb.domain.is_not(None),
+                ma.domain != mb.domain,
+            )
+        )
+        if scoped:
+            cross_stmt = cross_stmt.where(in_scope)
+        cross_dept = (
+            await self._db.execute(cross_stmt)
+        ).scalar() or 0
+
+        if scoped:
+            avg_stmt = (
                 select(
                     func.avg(
                         func.timestampdiff(
                             text("SECOND"), Conflict.created_at, Conflict.resolved_at
                         )
                     )
-                ).where(Conflict.deleted_at.is_(None), Conflict.resolved_at.is_not(None))
+                )
+                .select_from(Conflict)
+                .join(ma, ma.id == Conflict.metric_a)
+                .join(mb, mb.id == Conflict.metric_b)
+                .where(
+                    Conflict.deleted_at.is_(None),
+                    Conflict.resolved_at.is_not(None),
+                    ma.deleted_at.is_(None),
+                    mb.deleted_at.is_(None),
+                    in_scope,
+                )
             )
+        else:
+            avg_stmt = select(
+                func.avg(
+                    func.timestampdiff(
+                        text("SECOND"), Conflict.created_at, Conflict.resolved_at
+                    )
+                )
+            ).where(Conflict.deleted_at.is_(None), Conflict.resolved_at.is_not(None))
+        avg_sec = (
+            await self._db.execute(avg_stmt)
         ).scalar()
         avg_hours = round(float(avg_sec) / 3600, 1) if avg_sec is not None else 0.0
         rate = round((1 - conflicted / total_defs) * 100, 1) if total_defs else 100.0

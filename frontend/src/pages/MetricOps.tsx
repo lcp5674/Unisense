@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
+  Button,
   Card,
   Empty,
   Progress,
+  Select,
+  Space,
   Statistic,
   Table,
   Tabs,
@@ -21,6 +24,7 @@ import {
   fetchMetricReuseStats,
   fetchMetricLedger,
   fetchConsistencyStats,
+  listDomainTree,
 } from "../api";
 import type {
   MetricReuseStats,
@@ -29,6 +33,8 @@ import type {
   MetricLedgerZombieItem,
   MetricLedgerDuplicateItem,
   MetricConsistencyStats,
+  MetricStatsFilters,
+  SubjectDomainTreeNode,
 } from "../types";
 import {
   METRIC_TYPE_LABEL,
@@ -43,7 +49,26 @@ const CONSISTENCY_TIPS =
   "口径一致率 = 未卷入口径冲突的指标数 ÷ 指标总数 × 100%。" +
   "卷入冲突指标数取自全部未删除冲突记录（candidate/existing 去重）；" +
   "部门间冲突指冲突双方业务域不同的记录；" +
-  "平均解决时长为已解决冲突 (resolved_at − created_at) 的小时均值。";
+  "平均解决时长为已解决冲突 (resolved_at − created_at) 的小时均值。" +
+  "应用筛选时：总口径数按筛选范围收敛，冲突计数统计至少一方属于筛选范围的记录。";
+
+/** 指标类型/状态下拉选项（对齐后端枚举）。 */
+const TYPE_OPTIONS = Object.entries(METRIC_TYPE_LABEL).map(([value, label]) => ({
+  value,
+  label,
+}));
+const STATUS_OPTIONS = Object.entries(METRIC_STATUS_LABEL).map(([value, label]) => ({
+  value,
+  label,
+}));
+
+/** 递归展平主题域树 → 下拉选项（含子域）。 */
+function flattenDomainOptions(nodes: SubjectDomainTreeNode[], acc: Array<{ value: string; label: string }>) {
+  for (const n of nodes) {
+    acc.push({ value: n.code, label: n.name });
+    if (n.children?.length) flattenDomainOptions(n.children, acc);
+  }
+}
 
 /** 复用度分桶定义（用于分布统计与着色）。 */
 const REUSE_BUCKETS = [
@@ -74,14 +99,27 @@ export function MetricOps() {
   const [reuse, setReuse] = useState<MetricReuseStats | null>(null);
   const [ledger, setLedger] = useState<MetricLedgerStats | null>(null);
   const [consistency, setConsistency] = useState<MetricConsistencyStats | null>(null);
+  const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
+  const [filters, setFilters] = useState<MetricStatsFilters>({});
+
+  // 业务域选项（主题域树，含子域）
+  useEffect(() => {
+    listDomainTree()
+      .then((tree) => {
+        const acc: Array<{ value: string; label: string }> = [];
+        flattenDomainOptions(tree, acc);
+        setDomainOptions(acc);
+      })
+      .catch(() => setDomainOptions([]));
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const [r, l, c] = await Promise.all([
-        fetchMetricReuseStats(),
-        fetchMetricLedger(),
-        fetchConsistencyStats(),
+        fetchMetricReuseStats(filters),
+        fetchMetricLedger(filters),
+        fetchConsistencyStats(filters),
       ]);
       setReuse(r);
       setLedger(l);
@@ -91,11 +129,15 @@ export function MetricOps() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [filters]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  const hasFilter = Boolean(filters.domain || filters.type || filters.status);
+
+  const resetFilters = () => setFilters({});
 
   /** 复用度分桶分布（零/低/中/高复用指标数）。 */
   const reuseDistribution = useMemo(() => {
@@ -166,6 +208,44 @@ export function MetricOps() {
 
   return (
     <div>
+      <Card size="small" style={{ marginBottom: 16 }}>
+        <Space wrap>
+          <span className="muted">筛选：</span>
+          <Select
+            allowClear
+            showSearch
+            style={{ width: 220 }}
+            placeholder="业务域"
+            value={filters.domain ?? undefined}
+            options={domainOptions}
+            onChange={(v) => setFilters((f) => ({ ...f, domain: v ?? undefined }))}
+          />
+          <Select
+            allowClear
+            style={{ width: 140 }}
+            placeholder="指标类型"
+            value={filters.type ?? undefined}
+            options={TYPE_OPTIONS}
+            onChange={(v) => setFilters((f) => ({ ...f, type: v ?? undefined }))}
+          />
+          <Select
+            allowClear
+            style={{ width: 140 }}
+            placeholder="指标状态"
+            value={filters.status ?? undefined}
+            options={STATUS_OPTIONS}
+            onChange={(v) => setFilters((f) => ({ ...f, status: v ?? undefined }))}
+          />
+          {hasFilter && (
+            <>
+              <Tag color="blue">已筛选</Tag>
+              <Button size="small" onClick={resetFilters}>
+                重置
+              </Button>
+            </>
+          )}
+        </Space>
+      </Card>
       <Row gutter={16} style={{ marginBottom: 16 }}>
         <Col span={4}>
           <Card size="small">
@@ -232,6 +312,7 @@ export function MetricOps() {
             <Tooltip title={CONSISTENCY_TIPS}>
               <InfoCircleOutlined style={{ marginLeft: 6, color: "#8c8c8c" }} />
             </Tooltip>
+            {hasFilter && <Tag color="blue" style={{ marginLeft: 8 }}>筛选范围</Tag>}
           </span>
         }
       >

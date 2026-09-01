@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, within, waitFor } from "@testing-library/react";
+import { render, screen, within, waitFor, fireEvent } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { MetricOps, tablePagination } from "../pages/MetricOps";
 import type {
@@ -12,13 +12,41 @@ vi.mock("../api", () => ({
   fetchMetricReuseStats: vi.fn(),
   fetchMetricLedger: vi.fn(),
   fetchConsistencyStats: vi.fn(),
+  listDomainTree: vi.fn(),
 }));
 
 import {
   fetchMetricReuseStats,
   fetchMetricLedger,
   fetchConsistencyStats,
+  listDomainTree,
 } from "../api";
+
+// 主题域树（含子域，验证筛选下拉来源）
+const DOMAIN_TREE = [
+  {
+    id: 1,
+    code: "sales",
+    name: "销售",
+    parent_id: null,
+    level: 1,
+    sort_order: 1,
+    status: "active",
+    metric_count: 2,
+    children: [],
+  },
+  {
+    id: 2,
+    code: "outpatient",
+    name: "门诊",
+    parent_id: null,
+    level: 1,
+    sort_order: 2,
+    status: "active",
+    metric_count: 2,
+    children: [],
+  },
+];
 
 const REUSE: MetricReuseStats = {
   total: 5,
@@ -69,6 +97,7 @@ describe("MetricOps 指标运营分析", () => {
     vi.mocked(fetchMetricReuseStats).mockResolvedValue(REUSE);
     vi.mocked(fetchMetricLedger).mockResolvedValue(LEDGER);
     vi.mocked(fetchConsistencyStats).mockResolvedValue(CONSISTENCY);
+    vi.mocked(listDomainTree).mockResolvedValue(DOMAIN_TREE);
   });
 
   it("渲染 6 张统计卡（总数/活跃/僵尸/重复/被引用/零复用）", async () => {
@@ -154,5 +183,37 @@ describe("MetricOps 指标运营分析", () => {
     renderPage();
     await waitFor(() => expect(screen.getByText("sales_gmv_day")).toBeTruthy());
     expect(screen.getAllByText(/零复用/).length).toBeGreaterThan(0);
+  });
+
+  it("按业务域筛选：选择域后三个端点带筛选参数重拉，并展示已筛选 Tag", async () => {
+    const { container } = renderPage();
+    await waitFor(() => expect(screen.getByText("指标总数")).toBeTruthy());
+    // 打开业务域下拉并选择「销售」（精确定位下拉选项，避免命中表格同名字段）
+    const selector = container.querySelector(".ant-select-selector") as HTMLElement;
+    fireEvent.mouseDown(selector);
+    const opt = screen.getAllByText("销售").find((e) => e.className.includes("ant-select-item-option-content"));
+    fireEvent.click(opt as HTMLElement);
+    await waitFor(() => expect(screen.getByText("已筛选")).toBeTruthy());
+    expect(vi.mocked(fetchMetricReuseStats)).toHaveBeenLastCalledWith({ domain: "sales" });
+    expect(vi.mocked(fetchMetricLedger)).toHaveBeenLastCalledWith({ domain: "sales" });
+    expect(vi.mocked(fetchConsistencyStats)).toHaveBeenLastCalledWith({ domain: "sales" });
+    // 口径一致率卡片标注「筛选范围」
+    expect(screen.getByText("筛选范围")).toBeTruthy();
+  });
+
+  it("重置筛选：清空三个端点筛选参数并移除已筛选 Tag", async () => {
+    const { container } = renderPage();
+    await waitFor(() => expect(screen.getByText("指标总数")).toBeTruthy());
+    // 先选择类型「原子指标」（表格类型列也显示该中文，需精确取下拉选项）
+    const selector = container.querySelectorAll(".ant-select-selector")[1] as HTMLElement;
+    fireEvent.mouseDown(selector);
+    const opt = screen.getAllByText("原子指标").find((e) => e.className.includes("ant-select-item-option-content"));
+    fireEvent.click(opt as HTMLElement);
+    await waitFor(() => expect(screen.getByText("已筛选")).toBeTruthy());
+    expect(vi.mocked(fetchMetricReuseStats)).toHaveBeenLastCalledWith({ type: "atomic" });
+    // 点重置（antd 两字按钮自动加空格「重 置」）
+    fireEvent.click(screen.getByText(/重\s*置/));
+    await waitFor(() => expect(screen.queryByText("已筛选")).toBeNull());
+    expect(vi.mocked(fetchMetricReuseStats)).toHaveBeenLastCalledWith({});
   });
 });

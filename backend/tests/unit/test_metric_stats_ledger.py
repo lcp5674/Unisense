@@ -41,6 +41,9 @@ def _db_with_metrics(metrics: list) -> MagicMock:
     db = MagicMock()
     result = MagicMock()
     result.scalars.return_value.all.return_value = metrics
+    # _calc_activity 的 query_log 计数默认 0（无消费查询记录）——同步 health_scorer
+    # 接入 query_log 后 scalar_one 的契约，避免 MagicMock 比较 TypeError
+    result.scalar_one.return_value = 0
     db.execute = AsyncMock(return_value=result)
     return db
 
@@ -135,6 +138,24 @@ async def test_ledger_degrades_on_empty_data() -> None:
         "zombies": [],
         "duplicates": [],
     }
+
+
+async def test_ledger_applies_domain_type_status_filters() -> None:
+    """按业务域/指标类型/指标状态过滤时，账本查询带对应 where 条件。"""
+    db = _db_with_metrics([])
+    with patch("app.services.semantic.metric_stats.LineageRepository") as repo_cls:
+        repo = repo_cls.return_value
+        repo.metric_reuse_counts = AsyncMock(return_value={})
+        await MetricStatsService(db).asset_ledger(
+            domain="outpatient", type="derived", status="DRAFT"
+        )
+
+    stmt = db.execute.await_args.args[0]
+    sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "metric.domain = 'outpatient'" in sql
+    assert "metric.type = 'derived'" in sql
+    assert "metric.status = 'DRAFT'" in sql
+    assert "metric.deleted_at IS NULL" in sql
 
 
 async def test_ledger_api_envelope_and_validation() -> None:
