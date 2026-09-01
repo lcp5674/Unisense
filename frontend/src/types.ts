@@ -999,8 +999,8 @@ export interface ClientResponse {
 export interface ClientUpdateRequest {
   scope_domain?: string | null;
   metric_whitelist?: string[] | null;
-  qps?: number;
-  daily_quota?: number;
+  qps?: number | null;
+  daily_quota?: number | null;
 }
 
 export interface ClientBatchRequest {

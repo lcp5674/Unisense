@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ApiClients } from "../pages/ApiClients";
 
@@ -189,6 +189,34 @@ describe("ApiClients", () => {
       expect(mockedUpdateApiClient).toHaveBeenCalledWith(
         "app_abcd1234",
         expect.objectContaining({ metric_whitelist: ["outp_feeamount_day", "outp_doctor_cnt"] }),
+      );
+    });
+  });
+
+  it("编辑客户端：清空授权域与白名单后保存 → PUT 携带空串/空数组（而非 null，避免后端视为不修改而静默失效）", async () => {
+    const user = userEvent.setup();
+    const existing = { ...ACTIVE_CLIENT, scope_domain: "outp", metric_whitelist: ["outp_feeamount_day"] };
+    mockedListApiClients.mockResolvedValue([existing]);
+    mockedUpdateApiClient.mockResolvedValue(existing);
+    render(<ApiClients />);
+    await screen.findByText("app_abcd1234");
+
+    await user.click(screen.getByText("编辑"));
+    const modal = await screen.findByRole("dialog");
+    await within(modal).findByText(/编辑 API 客户端/);
+
+    // 清空授权域下拉（allowClear 的清除按钮）与白名单多选（第二个 clear）
+    const clears = modal.querySelectorAll(".ant-select-clear");
+    expect(clears.length).toBeGreaterThanOrEqual(2);
+    await user.click(clears[0]);
+    await user.click(clears[1]);
+
+    await user.click(await within(modal).findByText(/保\s*存/));
+
+    await waitFor(() => {
+      expect(mockedUpdateApiClient).toHaveBeenCalledWith(
+        "app_abcd1234",
+        expect.objectContaining({ scope_domain: "", metric_whitelist: [] }),
       );
     });
   });

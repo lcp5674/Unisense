@@ -249,13 +249,13 @@ export function ApiClients() {
     setSavingEdit(true);
     try {
       const values = await editForm.validateFields();
+      // 弹窗所见即所得：清空授权域发 ""（后端清空为不限域）、清空白名单发 []（后端清空为域内全量）、
+      // 数字输入框清空发 null（后端视为不修改）——避免「清空」被编码成 null 而静默失效
       const payload: ClientUpdateRequest = {
-        scope_domain: values.scope_domain ? String(values.scope_domain) : null,
-        metric_whitelist: Array.isArray(values.metric_whitelist) && values.metric_whitelist.length
-          ? values.metric_whitelist
-          : null,
-        qps: Number(values.qps ?? 20),
-        daily_quota: Number(values.daily_quota ?? 100000),
+        scope_domain: values.scope_domain ? String(values.scope_domain) : "",
+        metric_whitelist: Array.isArray(values.metric_whitelist) ? values.metric_whitelist : [],
+        qps: values.qps != null ? Number(values.qps) : null,
+        daily_quota: values.daily_quota != null ? Number(values.daily_quota) : null,
       };
       await updateApiClient(editingClient.client_id, payload);
       message.success(`客户端 ${editingClient.client_id} 已更新`);
