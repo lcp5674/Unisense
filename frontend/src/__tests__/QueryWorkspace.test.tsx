@@ -45,11 +45,14 @@ vi.mock("../hooks/useTracking", () => ({
 }));
 
 import {
+  UnisenseApiError,
   consumeDryRun,
+  consumeQuery,
   consumeSemantic,
   listMetrics,
 } from "../api";
 const mockedConsumeDryRun = vi.mocked(consumeDryRun);
+const mockedConsumeQuery = vi.mocked(consumeQuery);
 const mockedConsumeSemantic = vi.mocked(consumeSemantic);
 const mockedListMetrics = vi.mocked(listMetrics);
 
@@ -204,7 +207,25 @@ describe("QueryWorkspace", () => {
     await user.click(screen.getByRole("button", { name: /指标语义/ }));
 
     await waitFor(() => {
-      expect(screen.getByText("加载指标语义失败")).toBeInTheDocument();
+      expect(screen.getByText("操作失败")).toBeInTheDocument();
+    });
+  });
+
+  it("未签发消费令牌时给出签发引导而非技术错误码", async () => {
+    const user = userEvent.setup();
+    mockedConsumeQuery.mockRejectedValue(
+      new UnisenseApiError("X-Api-Key 格式应为 client_id:secret", "AUTH_APIKEY_INVALID", 401, "trace-test"),
+    );
+    renderPage();
+    await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+
+    await user.click(metricSelectInput());
+    await user.click(await screen.findByText(/gmv_net · 净GMV/));
+
+    await user.click(screen.getByRole("button", { name: /查\s*询/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/需要消费令牌：请点击上方『从客户端签发令牌』后重试/)).toBeInTheDocument();
     });
   });
 

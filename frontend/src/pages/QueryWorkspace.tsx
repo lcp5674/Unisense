@@ -38,6 +38,22 @@ const VALUE_FIELD_LABEL: Record<string, string> = {
   count: "数量",
 };
 
+// consume 通道错误提示引导：严格消费方通道（X-Api-Key client_id:secret / consume JWT）
+// 与用户 JWT 不同，未签发消费令牌时后端返回 AUTH_APIKEY_INVALID（"X-Api-Key 格式应为
+// client_id:secret"），对业务用户不直观——这里转成明确操作指引。
+function consumeErrorText(err: unknown): string {
+  if (err instanceof UnisenseApiError) {
+    if (err.code === "AUTH_APIKEY_INVALID" || err.code === "AUTH_APIKEY_MISSING") {
+      return "需要消费令牌：请点击上方『从客户端签发令牌』后重试";
+    }
+    if (err.code === "FORBIDDEN_METRIC") {
+      return err.message || "该指标未发布，不可消费";
+    }
+    return `${err.message}（${err.codeZh}）`;
+  }
+  return "操作失败";
+}
+
 function PlanView({ plan }: { plan: Record<string, unknown> }) {
   return <ObjectView data={plan} />;
 }
@@ -142,7 +158,9 @@ export function QueryWorkspace() {
   // P5：指标下拉服务端搜索（防抖 300ms；关键词为空回到前 100 条）
   const metricSearchTimer = useRef<number | null>(null);
   function loadMetricOptions(keyword: string) {
-    listMetrics({ keyword: keyword || undefined, page_size: 100 })
+    // 消费侧只允许消费 PUBLISHED 指标：未发布（DRAFT/REVIEW）指标在后端 FORBIDDEN_METRIC，
+    // 下拉直接过滤避免用户选到不可消费的指标（403 从源头消除）
+    listMetrics({ keyword: keyword || undefined, page_size: 100, status: "PUBLISHED" })
       .then((res) =>
         setMetricOptions(
           res.items.map((m) => ({ value: m.metric_code, label: `${m.metric_code} · ${m.name}` })),
@@ -178,7 +196,7 @@ export function QueryWorkspace() {
       setQuery(null);
       track("consume_dry_run", metricCode, "metric");
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "校验失败");
+      message.error(consumeErrorText(err));
     } finally {
       setBusy(null);
     }
@@ -207,7 +225,7 @@ export function QueryWorkspace() {
           setDegradedMessage(dgMsg);
         }
       }
-      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "查询失败");
+      message.error(consumeErrorText(err));
     } finally {
       setBusy(null);
     }
@@ -235,7 +253,7 @@ export function QueryWorkspace() {
       setSemanticOpen(true);
       track("consume_semantic", metricCode, "metric");
     } catch (err) {
-      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载指标语义失败");
+      message.error(consumeErrorText(err));
     } finally {
       setBusy(null);
     }
