@@ -206,7 +206,7 @@ export function ApiClients() {
         const { access_token } = await mintClientToken(active.client_id, 60);
         setConsumeToken(access_token);
       }
-      const { items: metrics } = await listMetrics({ status: "PUBLISHED", page_size: 1 });
+      const { items: metrics } = await listMetrics({ status: "PUBLISHED", page_size: 50 });
       if (!metrics.length) {
         setTestResult({
           ok: true,
@@ -214,11 +214,35 @@ export function ApiClients() {
         });
         return;
       }
-      const code = metrics[0].metric_code;
-      const res = await consumeDryRun({ metric_code: code, date_range: "today~today" });
+      // 逐个尝试已发布指标（最多前 10 个）：跳过「未声明来源表」等不可查询的指标，
+      // 找到第一个可成功 dry-run 的即证明令牌/授权/查询链路连通。
+      const today = new Date().toISOString().slice(0, 10);
+      const dateRange = `${today}~${today}`;
+      const candidates = metrics.slice(0, 10);
+      let lastErr: unknown = null;
+      for (const m of candidates) {
+        try {
+          const res = await consumeDryRun({ metric_code: m.metric_code, date_range: dateRange });
+          if (res.status === "ok") {
+            setTestResult({
+              ok: true,
+              message: `客户端 ${active.client_id} 连通正常：指标 ${m.metric_code} dry-run 通过（耗时 ${String((res as { execution_plan?: { elapsed_ms?: number } }).execution_plan?.elapsed_ms ?? "-")} ms）`,
+            });
+            return;
+          }
+          lastErr = res;
+        } catch (err) {
+          lastErr = err;
+          // 「未声明来源表」类业务校验失败 → 该指标不可查询，继续试下一个；其余错误中断
+          if (err instanceof UnisenseApiError && (err.message || "").includes("未声明来源表")) {
+            continue;
+          }
+          break;
+        }
+      }
       setTestResult({
-        ok: res.status === "ok",
-        message: `客户端 ${active.client_id} 连通正常：指标 ${code} dry-run ${res.status === "ok" ? "通过" : "被拒绝"}（耗时 ${String((res as { execution_plan?: { elapsed_ms?: number } }).execution_plan?.elapsed_ms ?? "-")} ms）`,
+        ok: false,
+        message: `已尝试 ${candidates.length} 个已发布指标均无法完成查询连通性验证（可能未配置挂载/来源表）：${lastErr instanceof UnisenseApiError ? lastErr.message : "dry-run 被拒绝"}`,
       });
     } catch (err) {
       setTestResult({ ok: false, message: err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "连通性测试失败" });
