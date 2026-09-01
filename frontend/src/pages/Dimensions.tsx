@@ -1879,7 +1879,7 @@ function MembersTab() {
                 sourceTables.map((t) => ({ value: t.name, label: t.name })),
               )}
               optionRender={manualOptionRender}
-              notFoundContent="无可选表，可直接输入库.表名"
+              notFoundContent={sourceTablesLoading ? "正在加载表…" : "无可选表，可直接输入库.表名"}
               filterOption={false}
               onSearch={setTableKw}
               onChange={(v) => {
@@ -1911,7 +1911,7 @@ function MembersTab() {
                 })),
               )}
               optionRender={manualOptionRender}
-              notFoundContent="无可选列，可直接输入列名"
+              notFoundContent={sourceColumnsLoading ? "正在加载列…" : "无可选列，可直接输入列名"}
               filterOption={false}
               onSearch={setColumnKw}
             />
@@ -2041,7 +2041,7 @@ function MembersTab() {
                 sourceTables.map((t) => ({ value: t.name, label: t.name })),
               )}
               optionRender={manualOptionRender}
-              notFoundContent="无可选表，可直接输入库.表名"
+              notFoundContent={sourceTablesLoading ? "正在加载表…" : "无可选表，可直接输入库.表名"}
               filterOption={false}
               onSearch={setTableKw}
               onChange={(v) => {
@@ -2073,7 +2073,7 @@ function MembersTab() {
                 })),
               )}
               optionRender={manualOptionRender}
-              notFoundContent="无可选列，可直接输入列名"
+              notFoundContent={sourceColumnsLoading ? "正在加载列…" : "无可选列，可直接输入列名"}
               filterOption={false}
               onSearch={setColumnKw}
             />

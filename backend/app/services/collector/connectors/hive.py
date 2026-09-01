@@ -393,23 +393,40 @@ class HiveCollector(BaseCollector):
 
         Returns:
             ``{库: [表名...]}``；非法库名跳过不拖垮整批。
+
+        Raises:
+            ExternalDependencyError: 连接/查询超时（503 可重试，前端降级为手动输入）。
         """
         schemas = list(databases) if databases else await self.list_databases()
-        tables_by_db: dict[str, list[str]] = {}
-        for schema in schemas:
-            try:
-                safe_schema = self._safe_ident(schema)
-            except Exception:  # noqa: BLE001 - 非法库名跳过
-                continue
+
+        async def _enumerate() -> dict[str, list[str]]:
+            # 复用单连接枚举全部库：避免每库一次 pyhive 握手——库多时串行握手
+            # 是前端级联选表「长时间无选项」的主因（N 库 = N 次 TCP+SASL+session）。
             conn = await self._connect_managed()
             try:
-                rows = await self._execute(f"SHOW TABLES IN {safe_schema}", conn=conn)
-                tables_by_db[schema] = [
-                    row[0].strip() for row in rows if row and row[0].strip()
-                ]
+                tables_by_db: dict[str, list[str]] = {}
+                for schema in schemas:
+                    try:
+                        safe_schema = self._safe_ident(schema)
+                    except Exception:  # noqa: BLE001 - 非法库名跳过
+                        continue
+                    rows = await self._execute(f"SHOW TABLES IN {safe_schema}", conn=conn)
+                    tables_by_db[schema] = [
+                        row[0].strip() for row in rows if row and row[0].strip()
+                    ]
+                return tables_by_db
             finally:
                 await asyncio.to_thread(self._close, conn)
-        return tables_by_db
+
+        # 整体兜底超时：连接复用后单库查询通常 <1s，但实例库多 / HS2 慢时仍需
+        # 上限，避免前端长时间空等（超时由调用方降级为手动输入表名）。
+        timeout = min(self._query_timeout, 30)
+        try:
+            return await asyncio.wait_for(_enumerate(), timeout=timeout)
+        except TimeoutError as exc:
+            raise ExternalDependencyError(
+                f"Hive 枚举表超时 ({timeout}s, {len(schemas)} 个库)"
+            ) from exc
 
     async def probe(self) -> ProbeResult:
         """轻量探活：SELECT 1（经 pyhive 直连）。"""

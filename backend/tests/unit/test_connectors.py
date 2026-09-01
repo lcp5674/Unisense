@@ -519,6 +519,43 @@ async def test_hive_list_tables_groups_by_db():
     assert not any("bad.name" in s for s in seen_sql)
 
 
+async def test_hive_list_tables_reuses_single_conn():
+    """list_tables 复用单连接枚举全部库（每库一次握手是级联选表慢的主因）。"""
+    collector = HiveCollector(host="hive-host")
+
+    class _FakeConn:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    conn = _FakeConn()
+    collector._connect_managed = AsyncMock(return_value=conn)  # type: ignore[assignment]
+    collector._execute = AsyncMock(  # type: ignore[assignment]
+        side_effect=lambda sql, conn=None: [["t1"]] if "db1" in sql else [["t2"]],
+    )
+    result = await collector.list_tables(["db1", "db2"])
+    assert result == {"db1": ["t1"], "db2": ["t2"]}
+    # 单连接复用：仅建立一次连接（修复前每库一次 _connect_managed），且最终关闭
+    collector._connect_managed.assert_awaited_once()
+    assert conn.closed
+    assert collector._execute.await_count == 2
+
+
+async def test_hive_list_tables_overall_timeout():
+    """list_tables 整体超时兜底：库多/HS2 慢时抛 ExternalDependencyError 而非无限空等。"""
+    collector = HiveCollector(host="hive-host", query_timeout=1)
+
+    async def _slow_execute(sql: str, conn=None) -> list[list[str]]:
+        await asyncio.sleep(60)
+
+    collector._execute = _slow_execute  # type: ignore[assignment]
+    collector._connect_managed = AsyncMock(return_value=object())  # type: ignore[assignment]
+    with pytest.raises(ExternalDependencyError, match="枚举表超时"):
+        await collector.list_tables(["db1"])
+
+
 async def test_hive_execute_reuses_conn_without_close():
     """连接复用：复用路径不关闭连接（调用方管理），单次路径自建自关。
 
