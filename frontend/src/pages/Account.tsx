@@ -190,7 +190,7 @@ export function Account() {
   const roles = snap?.roles?.length ? snap.roles : me?.role ? [me.role] : [];
 
   return (
-    <div style={{ maxWidth: 1100 }}>
+    <div style={{ width: "100%" }}>
       {/* ============ 顶部个人概览横幅 ============ */}
       <Card
         style={{
@@ -253,7 +253,7 @@ export function Account() {
         }
         style={{ marginBottom: 16 }}
       >
-        <Descriptions column={2} size="middle">
+        <Descriptions column={{ xs: 1, sm: 2, xl: 4 }} size="middle">
           <Descriptions.Item label="用户名">{me?.username}</Descriptions.Item>
           <Descriptions.Item label="显示名称">{me?.display_name}</Descriptions.Item>
           <Descriptions.Item label="所属组织">
@@ -311,9 +311,9 @@ export function Account() {
         {permGroups.length === 0 ? (
           <Tag>无</Tag>
         ) : (
-          <Row gutter={[0, 16]}>
+          <Row gutter={[24, 16]}>
             {permGroups.map(([module, metas]) => (
-              <Col span={24} key={module}>
+              <Col xs={24} md={12} xl={8} key={module}>
                 <Space size={8} style={{ marginBottom: 8 }}>
                   <Tag color={MODULE_COLOR[module] ?? "default"} style={{ minWidth: 56, textAlign: "center" }}>
                     {module}
