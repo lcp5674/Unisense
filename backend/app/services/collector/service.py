@@ -1124,6 +1124,10 @@ class CollectorService(BaseService):
     _CURRENT_DB_KEY = "unisense:sqlquery:db:{actor_id}:{source_id}"
     _CURRENT_DB_TTL = 1800
 
+    #: 未配置 limit（不限行数）时的安全护栏：防大表全量拉取拖垮源库/内存/网络。
+    #: 超过护栏截断并标记 truncated（护栏远高于业务实际需要，仅作防呆兜底）。
+    _MAX_QUERY_ROWS = 1_000_000
+
     @classmethod
     def _parse_one(cls, sql: str) -> sqlglot.exp.Expression | None:
         """解析单条 SQL（默认方言失败再试 mysql，兼容反引号保留字表名）。"""
@@ -1201,7 +1205,7 @@ class CollectorService(BaseService):
             return
 
     async def query_sql(
-        self, source_id: str, sql: str, limit: int = 100, actor_id: int | None = None
+        self, source_id: str, sql: str, limit: int | None = None, actor_id: int | None = None
     ) -> dict[str, Any]:
         """对已注册数据源执行只读查询（平台内部运维/分析，调用方负责审计）。
 
@@ -1211,9 +1215,10 @@ class CollectorService(BaseService):
         - 会话级当前库：``USE <db>`` 写入按用户+数据源的会话状态（不实际执行），
           无库前缀的表名查询自动补当前库前缀——支持
           ``SHOW DATABASES → USE db → SELECT * FROM t`` 三步场景。
-        - SELECT 顶层无 LIMIT 时追加 ``LIMIT n`` 兜底；有则保留，Python 侧再按 n 截断，
-          双保险保证返回行数不超过 limit（SHOW/DESC/EXPLAIN/CHECKSUM 等不追加，
-          行数天然受限或由 Python 侧截断）。
+        - 行数上限：``limit`` 不传/None 表示不限制（不追加 SQL LIMIT、Python 不截断，
+          仅由 ``_MAX_QUERY_ROWS`` 安全护栏防 OOM）；传入正整数则双保险限制：
+          SELECT 顶层无 LIMIT 时追加 ``LIMIT n``，Python 侧再按 n 截断并标记 truncated
+          （SHOW/DESC/EXPLAIN/CHECKSUM 等不追加，行数天然受限或由 Python 侧截断）。
         - 复用连接器 ``build_collector + collector.query``（与维度枚举预览同链路；
           已落库数据源放行内网主机，仍拒回环/链路本地，SSRF 纵深防御一致）。
 
@@ -1252,12 +1257,14 @@ class CollectorService(BaseService):
             # 只覆盖 SELECT/DESC 的表引用；两者双保险互不冲突（显式前缀优先）。
             if current_db:
                 await collector.query(self._safe_use_sql(current_db))
-            # 仅「可解析为 SELECT 且顶层无 LIMIT」才追加（避免破坏 SHOW/DESC/EXPLAIN/
-            # USE/CHECKSUM 等语句语法；解析失败同样不追加，靠 Python 侧截断兜底）
+            # 仅「显式配置了 limit 且可解析为 SELECT 且顶层无 LIMIT」才追加
+            # （避免破坏 SHOW/DESC/EXPLAIN/USE/CHECKSUM 等语句语法；解析失败同样不
+            # 追加，靠 Python 侧截断兜底）。limit 为 None（不限制）时不追加任何 LIMIT。
             parsed_exec = self._parse_one(exec_sql)
             exec_sql = (
                 f"{exec_sql.rstrip().rstrip(';')} LIMIT {int(limit)}"
-                if isinstance(parsed_exec, sqlglot.exp.Select)
+                if limit is not None
+                and isinstance(parsed_exec, sqlglot.exp.Select)
                 and parsed_exec.args.get("limit") is None
                 else exec_sql
             )
@@ -1285,16 +1292,24 @@ class CollectorService(BaseService):
         finally:
             await collector.dispose()
 
-        rows = rows[:limit]
+        # 行数截断：显式 limit 按 limit 截断；未配置（不限）时按安全护栏截断防 OOM
+        hard_cap = self._MAX_QUERY_ROWS if limit is None else limit
+        rows = rows[:hard_cap]
+        truncated = len(rows) >= hard_cap
         columns = list(rows[0].keys()) if rows else []
         return {
             "columns": columns,
             "rows": rows,
             "total": len(rows),
-            "truncated": len(rows) >= limit,
+            "truncated": truncated,
             "elapsed_ms": elapsed_ms,
             "current_db": current_db,
-            "note": None,
+            "note": (
+                f"已达服务端安全护栏上限 {hard_cap} 行，如需继续请添加更精确的 "
+                "WHERE 条件或分页"
+                if limit is None and truncated
+                else None
+            ),
         }
 
     async def register_catalog(

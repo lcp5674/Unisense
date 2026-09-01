@@ -125,7 +125,7 @@ export function QueryWorkspace() {
   const [sqlSources, setSqlSources] = useState<DataSource[]>([]);
   const [sqlSourceId, setSqlSourceId] = useState<string | undefined>(undefined);
   const [sqlText, setSqlText] = useState("SELECT * FROM ");
-  const [sqlLimit, setSqlLimit] = useState(100);
+  const [sqlLimit, setSqlLimit] = useState<number | undefined>(undefined);
   const [sqlResult, setSqlResult] = useState<SqlQueryResponse | null>(null);
   const [sqlBusy, setSqlBusy] = useState(false);
   // 会话级当前库（USE 切换后生效；后端对无库前缀表名自动补当前库前缀）
@@ -847,12 +847,16 @@ export function QueryWorkspace() {
                 </Form.Item>
               </Col>
               <Col xs={24} md={12}>
-                <Form.Item label="返回行数上限">
+                <Form.Item
+                  label="返回行数上限"
+                  extra="留空 = 不限行数（由服务端安全护栏兜底）；填写则按该上限截断。"
+                >
                   <InputNumber
                     min={1}
-                    max={500}
+                    max={1000000}
+                    placeholder="不限"
                     value={sqlLimit}
-                    onChange={(v) => setSqlLimit(v ?? 100)}
+                    onChange={(v) => setSqlLimit(v ?? undefined)}
                     style={{ width: "100%" }}
                   />
                 </Form.Item>
@@ -865,7 +869,7 @@ export function QueryWorkspace() {
                 value={sqlText}
                 onChange={(e) => setSqlText(e.target.value)}
                 placeholder={
-                  "SELECT * FROM db.table WHERE ...\nSHOW DATABASES\nSHOW TABLES FROM db\nDESC db.table\nUSE db\nCHECKSUM TABLE db.table\n\n提示：支持所有非 DDL/DML 只读语句；执行 USE 库名 或点击 SHOW DATABASES 结果行可切换当前库，未限定表名自动使用当前库；SELECT 未写 LIMIT 时自动追加，最多返回所设行数。"
+                  "SELECT * FROM db.table WHERE ...\nSHOW DATABASES\nSHOW TABLES FROM db\nDESC db.table\nUSE db\nCHECKSUM TABLE db.table\n\n提示：支持所有非 DDL/DML 只读语句；执行 USE 库名 或点击 SHOW DATABASES 结果行可切换当前库，未限定表名自动使用当前库；未配置行数上限时不追加 LIMIT（不限行数），配置后未写 LIMIT 的 SELECT 自动追加并按上限截断。"
                 }
               />
             </Form.Item>

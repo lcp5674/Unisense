@@ -5180,6 +5180,44 @@ async def test_query_sql_executes_with_appended_limit():
     assert conn.disposed is True
 
 
+async def test_query_sql_without_limit_returns_all_rows():
+    """limit=None（不配置）时：不追加 SQL LIMIT、Python 不截断、truncated=False。"""
+    svc, repo = _query_svc()
+    src = MagicMock(source_id="s1", source_type="mysql", connection_config="enc")
+    repo.get_source = AsyncMock(return_value=src)
+    rows = [{"v": i} for i in range(120)]  # 超过旧默认 100，验证不再被默认值截断
+    conn = _QueryConnector(rows)
+
+    with patch(
+        "app.services.collector.service.build_collector", return_value=conn
+    ):
+        result = await svc.query_sql("s1", "SELECT v FROM t")
+
+    assert conn.queries[0].strip().rstrip(";").endswith("FROM t")
+    assert "LIMIT" not in conn.queries[0].upper()
+    assert result["total"] == 120
+    assert result["truncated"] is False
+    assert result["note"] is None
+
+
+async def test_query_sql_without_limit_guarded_by_safety_cap():
+    """limit=None 时仍受安全护栏兜底：超过护栏截断并标记 truncated + note。"""
+    svc, repo = _query_svc()
+    src = MagicMock(source_id="s1", source_type="mysql", connection_config="enc")
+    repo.get_source = AsyncMock(return_value=src)
+    conn = _QueryConnector([{"v": i} for i in range(10)])
+
+    with patch(
+        "app.services.collector.service.build_collector", return_value=conn
+    ), patch.object(CollectorService, "_MAX_QUERY_ROWS", 5):
+        result = await svc.query_sql("s1", "SELECT v FROM t")
+
+    assert result["total"] == 5
+    assert result["truncated"] is True
+    assert "安全护栏" in (result["note"] or "")
+    assert "LIMIT" not in conn.queries[0].upper()
+
+
 async def test_query_sql_preserves_existing_limit_and_truncates():
     """已有 LIMIT 不追加；Python 侧按 limit 截断并置 truncated。"""
     svc, repo = _query_svc()

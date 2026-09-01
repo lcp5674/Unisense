@@ -609,6 +609,34 @@ describe("QueryWorkspace", () => {
     });
   });
 
+  it("SQL 查询 Tab：填写行数上限后提交带 limit；留空（不限）提交不带 limit", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+    await user.click(screen.getByText("SQL 查询"));
+    expect(await screen.findByText("数据源只读 SQL 查询")).toBeInTheDocument();
+    // 选择数据源
+    const dsLabel = screen.getByText("数据源", { selector: "label" });
+    const dsItem = dsLabel.closest(".ant-form-item") as HTMLElement;
+    await user.click(within(dsItem).getByRole("combobox"));
+    await user.click(await screen.findByText(/mysql_unisense · 主库/));
+    // 填写行数上限 50
+    const limitLabel = screen.getByText("返回行数上限", { selector: "label" });
+    const limitItem = limitLabel.closest(".ant-form-item") as HTMLElement;
+    await user.clear(within(limitItem).getByRole("spinbutton"));
+    await user.type(within(limitItem).getByRole("spinbutton"), "50");
+    // 输入 SQL 并执行
+    const sqlTextarea = screen.getByPlaceholderText(/SELECT \* FROM db\.table/);
+    await user.clear(sqlTextarea);
+    await user.type(sqlTextarea, "SELECT id FROM t");
+    await user.click(screen.getByRole("button", { name: /执行 SQL/ }));
+    await waitFor(() => {
+      expect(mockedQueryDataSourceSql).toHaveBeenCalledWith(
+        "mysql_unisense", "SELECT id FROM t", 50,
+      );
+    });
+  });
+
   it("SQL 查询 Tab：选数据源 + 写 SQL + 执行 → 展示结果表", async () => {
     const user = userEvent.setup();
     renderPage();
@@ -631,7 +659,7 @@ describe("QueryWorkspace", () => {
       expect(mockedQueryDataSourceSql).toHaveBeenCalledWith(
         "mysql_unisense",
         "SELECT id FROM t WHERE x = 1",
-        100,
+        undefined,
       );
     });
     // 结果表展示
@@ -672,7 +700,7 @@ describe("QueryWorkspace", () => {
     await user.click(screen.getByRole("button", { name: /执行 SQL/ }));
     await waitFor(() => {
       expect(mockedQueryDataSourceSql).toHaveBeenLastCalledWith(
-        "mysql_unisense", "SELECT id FROM customer", 100,
+        "mysql_unisense", "SELECT id FROM customer", undefined,
       );
     });
   });
@@ -707,7 +735,7 @@ describe("QueryWorkspace", () => {
     await user.click(ssbLink);
     await waitFor(() => {
       expect(mockedQueryDataSourceSql).toHaveBeenLastCalledWith(
-        "mysql_unisense", "USE `ssb`", 100,
+        "mysql_unisense", "USE `ssb`", undefined,
       );
     });
     expect(await screen.findByText("ssb", { selector: "strong.mono" })).toBeInTheDocument();

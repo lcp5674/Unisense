@@ -4085,7 +4085,8 @@ export async function queryDataSourceSql(
     `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/sql-query`,
     {
       method: "POST",
-      body: JSON.stringify({ sql, limit: limit ?? 100 }),
+      // limit 未配置时不携带该字段（后端默认 None = 不限行数）
+      body: JSON.stringify(limit == null ? { sql } : { sql, limit }),
     },
   );
 }

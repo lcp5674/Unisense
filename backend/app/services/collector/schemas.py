@@ -762,7 +762,13 @@ class SqlQueryRequest(BaseModel):
         max_length=8000,
         description="只读语句（SELECT / SHOW / DESC / EXPLAIN / USE 等，仅允许单条）",
     )
-    limit: int = Field(default=100, ge=1, le=500, description="返回行数上限")
+    limit: int | None = Field(
+        default=None,
+        ge=1,
+        le=1_000_000,
+        description="返回行数上限；不传/传 null 表示不限制（不追加 SQL LIMIT，"
+        "由服务端安全护栏兜底防 OOM）",
+    )
 
 
 class SqlQueryResponse(BaseModel):
