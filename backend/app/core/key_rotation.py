@@ -54,24 +54,71 @@ def _keychain_path() -> str:
     return os.path.join(base, "data", _KEYCHAIN_FILENAME)
 
 
+def _keychain_master_fernet() -> Fernet | None:
+    """密钥链二次加密主密钥（S7 审查修复）。
+
+    优先取独立 env ``UNISENSE_KEYCHAIN_MASTER_KEY``，未设置时回退用
+    ``UNISENSE_FERNET_KEY`` PBKDF2 派生（与 secrets.py 同 salt/迭代）；两者均
+    未配置返回 None（保留明文落盘 + 告警，向后兼容既有部署）。
+    """
+    raw = os.environ.get("UNISENSE_KEYCHAIN_MASTER_KEY", "").strip() or os.environ.get(
+        "UNISENSE_FERNET_KEY", ""
+    ).strip()
+    if not raw:
+        return None
+    try:
+        derived = hashlib.pbkdf2_hmac(
+            "sha256", raw.encode("utf-8"), _SALT_RAW, PBKDF2_ITERATIONS
+        )
+        return Fernet(base64.urlsafe_b64encode(derived))
+    except Exception:  # noqa: BLE001
+        logger.warning("keychain_master_fernet_failed")
+        return None
+
+
 def _load_keychain() -> dict[str, Any] | None:
-    """读取持久化密钥链（文件不存在/损坏返回 None）。"""
+    """读取持久化密钥链（文件不存在/损坏返回 None；S7 加密态自动解密）。"""
     try:
         with open(_keychain_path(), encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return None
+        if data.get("encrypted"):
+            master = _keychain_master_fernet()
+            if master is None:
+                logger.warning("keychain_encrypted_but_no_master_key")
+                return None
+            try:
+                plain = master.decrypt(str(data["payload"]).encode("utf-8"))
+                inner = json.loads(plain.decode("utf-8"))
+                return inner if isinstance(inner, dict) else None
+            except Exception:  # noqa: BLE001 - 主密钥不匹配/损坏
+                logger.warning("keychain_decrypt_failed", exc_info=True)
+                return None
+        return data
     except Exception:
         return None
 
 
 def _save_keychain(state: dict[str, Any]) -> None:
-    """原子写密钥链（tmp + replace + 0600 权限，防半写/他读）。"""
+    """原子写密钥链（tmp + replace + 0600 权限，防半写/他读）。
+
+    S7（审查修复）：有主密钥时对落盘内容二次加密（Fernet），防容器卷快照/备份
+    泄露即泄露全部历史密钥；无主密钥（既有部署）保持明文并告警。
+    """
     path = _keychain_path()
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        master = _keychain_master_fernet()
+        if master is not None:
+            payload = master.encrypt(json.dumps(state, ensure_ascii=False).encode("utf-8"))
+            out: dict[str, Any] = {"encrypted": True, "payload": payload.decode("utf-8")}
+        else:
+            logger.warning("keychain_plaintext_no_master_key", path=path)
+            out = state
         tmp = f"{path}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(state, f)
+            json.dump(out, f)
         os.replace(tmp, path)
         os.chmod(path, 0o600)
     except OSError:
@@ -148,7 +195,10 @@ class KeyRotationManager:
 
         if not raw:
             env = os.environ.get("UNISENSE_ENV", "local")
-            if env == "prod":
+            # S6（审查修复）：判据对齐 config.validate_production_config——
+            # 此前仅 env=="prod" 精确匹配，staging 等环境会落到公开开发密钥；
+            # 现「非 local/dev/test 一律按生产」拒绝派生降级。
+            if env not in ("local", "dev", "test"):
                 from app.core.config import ConfigurationError
 
                 raise ConfigurationError(
