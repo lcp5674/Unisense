@@ -951,15 +951,26 @@ class CollectorService(BaseService):
     # DML/DDL 有独立 AST 类型（Insert/Update/Delete/Create/Alter/Drop/TruncateTable…）。
     _READONLY_COMMANDS: frozenset[str] = frozenset({"SHOW", "EXPLAIN"})
 
-    # sqlglot 无法解析、但确属只读的语句（HELP/CHECKSUM/CHECK）：
-    # 按「首词白名单 + 去字面量后危险词/多语句扫描」保守放行（双保险）。
-    _RAW_READONLY_PREFIXES: frozenset[str] = frozenset({
-        "SELECT", "SHOW", "EXPLAIN", "DESC", "DESCRIBE",
-        "USE", "HELP", "CHECKSUM", "CHECK",
+    # 解析为 Command 但属写操作/状态变更/维护命令的命令名（黑名单）。
+    # 注：SHOW/EXPLAIN 在 mysql 方言解析为 Show/Describe 类型，不经过此表；
+    #     此表主要兜住默认方言解析与 UNLOCK/RENAME 等无独立类型的命令。
+    _DANGEROUS_COMMANDS: frozenset[str] = frozenset({
+        "OPTIMIZE", "ANALYZE", "REPAIR", "CALL", "PREPARE", "EXECUTE",
+        "DEALLOCATE", "DO", "HANDLER", "LOCK", "UNLOCK", "KILL", "FLUSH",
+        "RESET", "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "START", "XA",
+        "SHUTDOWN", "SYSTEM", "VACUUM", "RENAME", "GRANT", "REVOKE",
     })
 
+    # 明确只读的 AST 类型（黑名单制：扫描危险节点/函数后直接放行，不枚举子类型）。
+    _READONLY_AST_TYPES: tuple[type, ...] = (
+        sqlglot.exp.Select,
+        sqlglot.exp.Describe,  # DESC / EXPLAIN（EXPLAIN 内层语句经 walk 命中危险节点即拒）
+        sqlglot.exp.Use,
+        sqlglot.exp.Show,  # SHOW DATABASES / SHOW TABLES / SHOW CREATE TABLE…
+    )
+
     # 出现在整棵 AST 任一位置的语句级危险节点（写操作/状态变更/锁/写出）。
-    # 注：RENAME TABLE / SAVEPOINT 在本版 sqlglot 解析为 Command，由命令白名单拒绝。
+    # 注：RENAME TABLE / SAVEPOINT 在本版 sqlglot 解析为 Command，由命令黑名单拒绝。
     _DANGEROUS_NODE_TYPES: tuple[type, ...] = (
         sqlglot.exp.Insert,
         sqlglot.exp.Update,
@@ -1005,21 +1016,21 @@ class CollectorService(BaseService):
     def _validate_read_sql(cls, sql: str) -> str:
         """校验 SQL 为单条只读语句，返回原语句。
 
-        支持所有非 DDL/DML 的只读查询：
-        - SELECT（含 WITH/子查询）、DESC/DESCRIBE、USE；
-        - SHOW / EXPLAIN（EXPLAIN 内层语句递归校验，EXPLAIN ANALYZE 仅放行 SELECT）；
-        - sqlglot 无法解析但确属只读的命令（HELP/CHECKSUM/CHECK）走原始文本兜底。
+        黑名单制：不枚举「允许哪些语句」，只拒绝「写操作/状态变更/行锁/写出/危险函数/
+        多语句」——任何非 DDL/DML 的只读语句（SELECT/SHOW/DESC/EXPLAIN/USE/HELP/
+        CHECKSUM/CHECK 等）一律放行，语法正确性交给执行端（源端错误已映射 422）。
 
         拒绝：
         - 多语句、DDL（CREATE/ALTER/DROP/TRUNCATE/RENAME/GRANT/MERGE…）、
           DML（INSERT/UPDATE/DELETE/REPLACE…）、状态变更（SET/KILL/FLUSH…）；
         - SELECT 内 FOR UPDATE/FOR SHARE（Lock）、SELECT INTO（Into）、
           危险函数（SLEEP/GET_LOCK/LOAD_FILE/BENCHMARK）；
-        - 无法解析且首词不在只读白名单的命令
-          （OPTIMIZE/ANALYZE/REPAIR/CALL/PREPARE/EXECUTE/DO/HANDLER…）。
+        - 解析为 Command 且命令名属写/状态/维护的黑名单命令
+          （OPTIMIZE/ANALYZE/REPAIR/CALL/PREPARE/EXECUTE/DO/HANDLER…）；
+        - 无法解析且去字面量后命中危险词/多语句（HELP/CHECKSUM/CHECK 等无危险词放行）。
 
         Raises:
-            ValidationError: 多语句 / 非只读语句 / 危险子句 / 无法解析。
+            ValidationError: 多语句 / 非只读语句 / 危险子句 / 危险函数。
         """
         text = sql.strip()
         if not text:
@@ -1032,44 +1043,47 @@ class CollectorService(BaseService):
                 break
             except Exception:  # noqa: BLE001 - sqlglot 对部分 SQL 抛 ParseError
                 continue
-        if asts is None:
+        if asts is None or not asts or any(ast is None for ast in asts):
+            # 无法解析（HELP/CHECKSUM/CHECK 等）或部分语句解析失败：
+            # 委托原始文本兜底（危险词/多语句扫描），语法正确性交给执行端。
             return cls._validate_raw_read_sql(text)
-        if not asts or any(ast is None for ast in asts):
-            raise ValidationError(
-                "SQL 无法解析，仅支持单条只读查询"
-                "（SELECT / SHOW / DESC / EXPLAIN / USE / HELP / CHECKSUM / CHECK 等）"
-            )
         if len(asts) != 1:
             raise ValidationError("仅支持单条 SQL 语句（不允许分号分隔的多语句）")
         return cls._validate_ast_read(asts[0], text)
 
     @classmethod
     def _validate_ast_read(cls, ast: sqlglot.exp.Expression, text: str) -> str:
-        """对已解析 AST 做只读判定（Command 白名单 / 只读节点 / 危险子句与函数）。"""
+        """对已解析 AST 做只读判定（黑名单制：扫危险节点/函数，不枚举只读类型）。"""
+        # 整棵 AST 危险节点扫描——对任何可解析类型一视同仁（DML/DDL/状态/锁/INTO）。
+        # EXPLAIN INSERT/DELETE 在 mysql 方言解析为 Describe(this=Insert/Delete)，
+        # 其内层语句经此处 walk 命中危险节点即拒绝，无需额外递归。
+        for node in ast.walk():
+            if isinstance(node, cls._DANGEROUS_NODE_TYPES):
+                raise ValidationError(
+                    "仅支持只读查询，不允许写操作/状态变更/行锁/写出"
+                    "（SELECT 内不得含 FOR UPDATE / INTO / DDL / DML）"
+                )
         if isinstance(ast, sqlglot.exp.Command):
             cmd = str(ast.args.get("this") or "").upper()
-            if cmd not in cls._READONLY_COMMANDS:
-                raise ValidationError(
-                    "仅支持只读查询（SELECT / SHOW / DESC / EXPLAIN / USE / HELP / "
-                    "CHECKSUM / CHECK 等），不允许写操作或状态变更"
-                )
-            if cmd == "EXPLAIN":
-                inner = ast.args.get("expression")
-                inner_sql = str(inner.this) if inner is not None else ""
-                inner_sql = re.sub(
-                    r"^(?:(?:EXPLAIN|ANALYZE)\s+)+", "", inner_sql, flags=re.IGNORECASE
-                )
-                if not inner_sql.strip():
-                    raise ValidationError("EXPLAIN 后缺少被解释的语句")
-                cls._validate_read_sql(inner_sql)  # 递归：EXPLAIN INSERT 等被拒绝
-            return text
-        if isinstance(ast, (sqlglot.exp.Select, sqlglot.exp.Describe, sqlglot.exp.Use)):
-            for node in ast.walk():
-                if isinstance(node, cls._DANGEROUS_NODE_TYPES):
-                    raise ValidationError(
-                        "仅支持只读查询，不允许写操作/状态变更/行锁/写出"
-                        "（SELECT 内不得含 FOR UPDATE / INTO / DDL / DML）"
+            if cmd in cls._READONLY_COMMANDS:
+                if cmd == "EXPLAIN":
+                    inner = ast.args.get("expression")
+                    inner_sql = str(inner.this) if inner is not None else ""
+                    inner_sql = re.sub(
+                        r"^(?:(?:EXPLAIN|ANALYZE)\s+)+", "", inner_sql, flags=re.IGNORECASE
                     )
+                    if not inner_sql.strip():
+                        raise ValidationError("EXPLAIN 后缺少被解释的语句")
+                    cls._validate_read_sql(inner_sql)  # 递归：默认方言 EXPLAIN INSERT 被拒
+                return text
+            if cmd in cls._DANGEROUS_COMMANDS:
+                raise ValidationError(
+                    "仅支持只读查询，不允许写操作/状态变更/维护命令"
+                )
+            # 未知命令：委托原始文本兜底扫描（危险词/多语句），避免误放行
+            return cls._validate_raw_read_sql(text)
+        if isinstance(ast, cls._READONLY_AST_TYPES):
+            for node in ast.walk():
                 if isinstance(node, sqlglot.exp.Anonymous) and str(
                     node.args.get("this") or ""
                 ).upper() in cls._DANGEROUS_FUNCS:
@@ -1078,26 +1092,20 @@ class CollectorService(BaseService):
                         f"{str(node.args.get('this')).upper()}（副作用/安全风险）"
                     )
             return text
-        # 其余 AST 类型：先判可解析的 DDL/DML（如 DELETE）给出明确拒绝文案；
-        # 再委托原始文本兜底校验（首词白名单 + 去字面量后危险词/多语句扫描）做最终判定，
-        # 不在此直接放行或拒绝——HELP 通过，FLUSH/UNLOCK/DO/HANDLER 因前缀不在白名单被拒。
-        if isinstance(ast, cls._DANGEROUS_NODE_TYPES):
-            raise ValidationError(
-                "仅支持只读查询（SELECT / SHOW / DESC / EXPLAIN / USE / HELP / "
-                "CHECKSUM / CHECK 等），不允许 DDL/DML 等写操作"
-            )
+        # 其余 AST 形态（如 sqlglot 把 FLUSH TABLES 解析成 Alias）：无法从类型确定只读，
+        # 委托原始文本兜底扫描（FLUSH/UNLOCK 等被危险词拒绝；HELP 等放行交执行端）。
         return cls._validate_raw_read_sql(text)
 
     @classmethod
     def _validate_raw_read_sql(cls, text: str) -> str:
-        """sqlglot 无法解析时的保守兜底：首词白名单 + 去字面量后危险词/多语句扫描。"""
-        m = re.match(r"^\s*([A-Za-z]+)", text)
-        prefix = m.group(1).upper() if m else ""
-        if prefix not in cls._RAW_READONLY_PREFIXES:
-            raise ValidationError(
-                "SQL 无法解析且非已知只读语句（仅支持 SELECT / SHOW / DESC / EXPLAIN / "
-                "USE / HELP / CHECKSUM / CHECK），不允许写操作或状态变更"
-            )
+        """解析失败/形态不明时的保守兜底：去字面量后危险词/多语句扫描。
+
+        黑名单制：不枚举「首词白名单」，只拒绝明确危险词与多语句；
+        其余放行交执行端校验语法（源端错误已映射 422）。
+        """
+        # EXPLAIN 单独无内层语句（sqlglot 解析失败场景）——明确拒绝
+        if re.match(r"^\s*EXPLAIN\s*$", text, re.IGNORECASE):
+            raise ValidationError("EXPLAIN 后缺少被解释的语句")
         residue = cls._SQL_LITERAL_RE.sub(" ", text)
         if ";" in residue:
             raise ValidationError("仅支持单条 SQL 语句（不允许分号分隔的多语句）")
@@ -1110,14 +1118,85 @@ class CollectorService(BaseService):
             )
         return text
 
+    # ---------- 会话级当前库（SHOW DATABASES → USE db → 裸表名查询） ----------
+
+    #: Redis 键：unisense:sqlquery:db:{actor_id}:{source_id}（TTL 30 分钟）。
+    _CURRENT_DB_KEY = "unisense:sqlquery:db:{actor_id}:{source_id}"
+    _CURRENT_DB_TTL = 1800
+
+    @classmethod
+    def _parse_one(cls, sql: str) -> sqlglot.exp.Expression | None:
+        """解析单条 SQL（默认方言失败再试 mysql，兼容反引号保留字表名）。"""
+        for dialect in (None, "mysql"):
+            try:
+                return sqlglot.parse_one(sql, read=dialect)
+            except Exception:  # noqa: BLE001 - sqlglot 对部分 SQL 抛 ParseError
+                continue
+        return None
+
+    @classmethod
+    def _qualify_current_db(cls, sql: str, current_db: str) -> str:
+        """给无库前缀的表名加当前库前缀（基于 AST transform，保留原方言输出）。
+
+        多表 JOIN / 子查询 / DESC / 反引号保留字表名全部覆盖；已有前缀或
+        SHOW TABLES FROM db（db 是 Show 参数而非 Table 节点）不改写。
+        """
+        parsed = cls._parse_one(sql)
+        if parsed is None:
+            return sql
+        changed = False
+        for table in parsed.find_all(sqlglot.exp.Table):
+            if not table.db and not table.catalog:
+                table.set("db", sqlglot.exp.to_identifier(current_db))
+                changed = True
+        return parsed.sql(dialect="mysql") if changed else sql
+
+    async def _get_current_db(
+        self, source_id: str, actor_id: int | None
+    ) -> str | None:
+        """读取会话级当前库（Redis 未初始化/异常时返回 None，不影响查询）。"""
+        if not actor_id:
+            return None
+        redis = get_redis() if _redis_available() else None
+        if redis is None:
+            return None
+        try:
+            val = await redis.get(
+                self._CURRENT_DB_KEY.format(actor_id=actor_id, source_id=source_id)
+            )
+            return val if val else None
+        except Exception:  # noqa: BLE001 - 会话状态读取失败不阻断查询
+            return None
+
+    async def _set_current_db(
+        self, source_id: str, actor_id: int | None, db_name: str
+    ) -> None:
+        """写入会话级当前库（Redis 未初始化/异常时静默跳过）。"""
+        if not actor_id:
+            return
+        redis = get_redis() if _redis_available() else None
+        if redis is None:
+            return
+        try:
+            await redis.set(
+                self._CURRENT_DB_KEY.format(actor_id=actor_id, source_id=source_id),
+                db_name,
+                ex=self._CURRENT_DB_TTL,
+            )
+        except Exception:  # noqa: BLE001 - 会话状态写入失败不阻断查询
+            return
+
     async def query_sql(
-        self, source_id: str, sql: str, limit: int = 100
+        self, source_id: str, sql: str, limit: int = 100, actor_id: int | None = None
     ) -> dict[str, Any]:
         """对已注册数据源执行只读查询（平台内部运维/分析，调用方负责审计）。
 
-        - 用 sqlglot 校验为单条只读语句（SELECT/SHOW/DESC/EXPLAIN/USE/HELP/CHECKSUM/
-          CHECK 等非 DDL/DML 语句），拒绝多语句 / DDL / DML / SELECT INTO / 行锁 /
-          状态变更 / 危险函数。
+        - 黑名单制校验：任何非 DDL/DML 只读语句（SELECT/SHOW/DESC/EXPLAIN/USE/HELP/
+          CHECKSUM/CHECK 等）放行，拒绝多语句 / DDL / DML / SELECT INTO / 行锁 /
+          状态变更 / 危险函数；语法正确性交给执行端（源端错误映射 422）。
+        - 会话级当前库：``USE <db>`` 写入按用户+数据源的会话状态（不实际执行），
+          无库前缀的表名查询自动补当前库前缀——支持
+          ``SHOW DATABASES → USE db → SELECT * FROM t`` 三步场景。
         - SELECT 顶层无 LIMIT 时追加 ``LIMIT n`` 兜底；有则保留，Python 侧再按 n 截断，
           双保险保证返回行数不超过 limit（SHOW/DESC/EXPLAIN/CHECKSUM 等不追加，
           行数天然受限或由 Python 侧截断）。
@@ -1131,22 +1210,37 @@ class CollectorService(BaseService):
         """
         self._validate_read_sql(sql)
         src = await self.get_source_orm(source_id)
+
+        # USE 语句：写入会话级当前库，不实际执行（连接用完即销毁，执行无意义）
+        parsed = self._parse_one(sql)
+        if parsed is not None and isinstance(parsed, sqlglot.exp.Use):
+            db_name = str(parsed.this.name) if parsed.this is not None else ""
+            if not db_name:
+                raise ValidationError("USE 后缺少库名")
+            await self._set_current_db(source_id, actor_id, db_name)
+            return {
+                "columns": [],
+                "rows": [],
+                "total": 0,
+                "truncated": False,
+                "elapsed_ms": 0,
+                "current_db": db_name,
+                "note": f"已切换到库 {db_name}",
+            }
+
+        current_db = await self._get_current_db(source_id, actor_id)
+        exec_sql = self._qualify_current_db(sql, current_db) if current_db else sql
+
         collector = build_collector(src.source_type, src.connection_config)
         try:
             # 仅「可解析为 SELECT 且顶层无 LIMIT」才追加（避免破坏 SHOW/DESC/EXPLAIN/
             # USE/CHECKSUM 等语句语法；解析失败同样不追加，靠 Python 侧截断兜底）
-            parsed = None
-            for dialect in (None, "mysql"):
-                try:
-                    parsed = sqlglot.parse_one(sql, read=dialect)
-                    break
-                except Exception:  # noqa: BLE001 - 只读命令可能无法被 sqlglot 解析
-                    continue
+            parsed_exec = self._parse_one(exec_sql)
             exec_sql = (
-                f"{sql.rstrip().rstrip(';')} LIMIT {int(limit)}"
-                if isinstance(parsed, sqlglot.exp.Select)
-                and parsed.args.get("limit") is None
-                else sql
+                f"{exec_sql.rstrip().rstrip(';')} LIMIT {int(limit)}"
+                if isinstance(parsed_exec, sqlglot.exp.Select)
+                and parsed_exec.args.get("limit") is None
+                else exec_sql
             )
             start = time.perf_counter()
             rows = await collector.query(exec_sql)
@@ -1180,6 +1274,8 @@ class CollectorService(BaseService):
             "total": len(rows),
             "truncated": len(rows) >= limit,
             "elapsed_ms": elapsed_ms,
+            "current_db": current_db,
+            "note": None,
         }
 
     async def register_catalog(

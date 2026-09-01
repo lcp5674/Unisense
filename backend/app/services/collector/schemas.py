@@ -752,9 +752,9 @@ class BatchInferHistoryCreate(BaseModel):
 class SqlQueryRequest(BaseModel):
     """数据源只读 SQL 查询请求（平台内部运维/分析用）。
 
-    sql 仅允许单条只读语句（SELECT / SHOW / DESC / EXPLAIN / USE / HELP / CHECKSUM /
-    CHECK 等非 DDL/DML 语句，服务层用 sqlglot 白名单校验，拒绝 DDL/DML/多语句/
-    状态变更/行锁/写出），limit 兜底返回行数上限。
+    sql 仅允许单条只读语句（黑名单制：SELECT / SHOW / DESC / EXPLAIN / USE / HELP /
+    CHECKSUM / CHECK 等非 DDL/DML 语句放行，服务层用 sqlglot 校验拒绝 DDL/DML/多语句/
+    状态变更/行锁/写出/危险函数），limit 兜底返回行数上限。
     """
 
     sql: str = Field(
@@ -773,6 +773,10 @@ class SqlQueryResponse(BaseModel):
     total: int = Field(default=0, description="实际返回行数")
     truncated: bool = Field(default=False, description="是否被 limit 截断")
     elapsed_ms: int = Field(default=0, description="源库执行耗时（毫秒）")
+    current_db: str | None = Field(
+        default=None, description="会话级当前库（USE 切换后生效，供前端展示）"
+    )
+    note: str | None = Field(default=None, description="提示信息（如 USE 切换成功）")
 
 
 class BatchInferHistoryEntry(BaseModel):

@@ -1029,7 +1029,7 @@ async def test_sql_query_admin_allowed_and_audited(
     assert data["columns"] == ["a", "b"]
     assert data["rows"] == [{"a": 1, "b": 2}]
     assert data["total"] == 1
-    mock_q.assert_awaited_once_with("s1", "SELECT a, b FROM t", 100)
+    mock_q.assert_awaited_once_with("s1", "SELECT a, b FROM t", 100, actor_id=1)
     mock_audit.assert_awaited_once()
     action = mock_audit.await_args.kwargs["action"]
     assert action == "data_source.sql_query"

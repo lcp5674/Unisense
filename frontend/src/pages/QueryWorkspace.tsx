@@ -128,6 +128,8 @@ export function QueryWorkspace() {
   const [sqlLimit, setSqlLimit] = useState(100);
   const [sqlResult, setSqlResult] = useState<SqlQueryResponse | null>(null);
   const [sqlBusy, setSqlBusy] = useState(false);
+  // 会话级当前库（USE 切换后生效；后端对无库前缀表名自动补当前库前缀）
+  const [sqlCurrentDb, setSqlCurrentDb] = useState<string | null>(null);
   const [granularity, setGranularity] = useState<string | undefined>(undefined);
   const [comparison, setComparison] = useState<string | undefined>(undefined);
   const [dimInputs, setDimInputs] = useState<Array<{ name: string; value: string }>>([{ name: "", value: "" }]);
@@ -205,7 +207,8 @@ export function QueryWorkspace() {
       .catch(() => setSqlSources([]));
   }
 
-  // 对选中数据源执行只读语句（后端 sqlglot 校验：非 DDL/DML 只读语句 + 权限 + LIMIT 兜底）
+  // 对选中数据源执行只读语句（后端 sqlglot 校验：非 DDL/DML 只读语句 + 权限 + LIMIT 兜底；
+  // USE 语句由后端写入会话级当前库，无库前缀表名自动补当前库前缀）
   async function handleSqlQuery() {
     if (!sqlSourceId) { message.warning("请选择数据源"); return; }
     const sql = sqlText.trim();
@@ -214,6 +217,9 @@ export function QueryWorkspace() {
     try {
       const res = await queryDataSourceSql(sqlSourceId, sql, sqlLimit);
       setSqlResult(res);
+      // 同步会话级当前库（USE 切换或查询响应携带）
+      if (res.current_db !== undefined) setSqlCurrentDb(res.current_db ?? null);
+      if (res.note) message.success(res.note);
       track("sql_query", sqlSourceId, "data_source");
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "SQL 查询失败");
@@ -221,6 +227,34 @@ export function QueryWorkspace() {
     } finally {
       setSqlBusy(false);
     }
+  }
+
+  // 快速切换当前库：发 USE <db>（后端写会话并返回 current_db），支持 SHOW 结果点击切库
+  async function handleUseDb(db: string) {
+    if (!sqlSourceId) { message.warning("请先选择数据源"); return; }
+    setSqlBusy(true);
+    try {
+      const res = await queryDataSourceSql(sqlSourceId, `USE \`${db.replace(/`/g, "")}\``, sqlLimit);
+      setSqlCurrentDb(res.current_db ?? db);
+      if (res.note) message.success(res.note);
+      setSqlResult(res);
+      track("sql_query", sqlSourceId, "data_source");
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "切换库失败");
+    } finally {
+      setSqlBusy(false);
+    }
+  }
+
+  function clearCurrentDb() {
+    setSqlCurrentDb(null);
+    message.info("已清除当前库，未限定表名的查询需使用「库名.表名」");
+  }
+
+  // SHOW DATABASES / SHOW SCHEMAS 结果首列为库名，可点击快速切库
+  function isDbList(cols: string[]): boolean {
+    const head = (cols[0] ?? "").toLowerCase();
+    return head === "database" || head === "schema" || head === "databases" || head === "schemas";
   }
 
   // 加载 ACTIVE 客户端列表供「消费接入调试」选择器使用；若当前令牌已绑定某客户端
@@ -776,8 +810,23 @@ export function QueryWorkspace() {
             icon={<CodeOutlined />}
             style={{ marginBottom: 16 }}
             message="数据源只读 SQL 查询"
-            description="选择已注册数据源，编写单条只读语句执行（仅平台管理员/域管理员或数据源负责人可用）。支持所有非 DDL/DML 语句：SELECT / SHOW / DESC / EXPLAIN / USE / HELP / CHECKSUM / CHECK 等，拒绝 DDL/DML/多语句/状态变更/行锁（自动 LIMIT 兜底），每次执行均写审计。"
+            description="选择已注册数据源，编写单条只读语句执行（仅平台管理员/域管理员或数据源负责人可用）。支持所有非 DDL/DML 语句：SELECT / SHOW / DESC / EXPLAIN / USE / HELP / CHECKSUM / CHECK 等，拒绝 DDL/DML/多语句/状态变更/行锁（自动 LIMIT 兜底），每次执行均写审计。执行 USE 库名 或点击 SHOW DATABASES 结果行可切换当前库，未限定表名将自动使用当前库。"
           />
+          {sqlCurrentDb && (
+            <Alert
+              type="success"
+              showIcon
+              icon={<DatabaseOutlined />}
+              style={{ marginBottom: 12 }}
+              message={
+                <Space>
+                  <span>当前库：<strong className="mono">{sqlCurrentDb}</strong></span>
+                  <Button size="small" type="link" onClick={clearCurrentDb}>清除</Button>
+                </Space>
+              }
+              description="未限定库名的表（如 SELECT * FROM customer）将自动使用当前库。"
+            />
+          )}
           <Form layout="vertical">
             <Row gutter={[16, 0]}>
               <Col xs={24} md={12}>
@@ -816,7 +865,7 @@ export function QueryWorkspace() {
                 value={sqlText}
                 onChange={(e) => setSqlText(e.target.value)}
                 placeholder={
-                  "SELECT * FROM db.table WHERE ...\nSHOW TABLES FROM db\nDESC db.table\nUSE db\nCHECKSUM TABLE db.table\n\n提示：仅允许单条只读语句（SELECT / SHOW / DESC / EXPLAIN / USE / HELP / CHECKSUM / CHECK 等非 DDL/DML 语句）；SELECT 未写 LIMIT 时自动追加，最多返回所设行数。"
+                  "SELECT * FROM db.table WHERE ...\nSHOW DATABASES\nSHOW TABLES FROM db\nDESC db.table\nUSE db\nCHECKSUM TABLE db.table\n\n提示：支持所有非 DDL/DML 只读语句；执行 USE 库名 或点击 SHOW DATABASES 结果行可切换当前库，未限定表名自动使用当前库；SELECT 未写 LIMIT 时自动追加，最多返回所设行数。"
                 }
               />
             </Form.Item>
@@ -834,6 +883,7 @@ export function QueryWorkspace() {
                 onClick={() => {
                   setSqlText("SELECT * FROM ");
                   setSqlResult(null);
+                  setSqlCurrentDb(null);
                 }}
               >
                 清空
@@ -854,11 +904,27 @@ export function QueryWorkspace() {
                   <Table
                     size="small"
                     dataSource={sqlResult.rows}
-                    columns={sqlResult.columns.map((c) => ({
+                    columns={sqlResult.columns.map((c, ci) => ({
                       title: c,
                       dataIndex: c,
                       key: c,
                       ellipsis: true,
+                      // SHOW DATABASES / SHOW SCHEMAS 结果首列为库名 → 点击快速切库
+                      ...(ci === 0 && isDbList(sqlResult.columns)
+                        ? {
+                            render: (v: unknown) => (
+                              <Button
+                                type="link"
+                                size="small"
+                                style={{ padding: 0 }}
+                                title="点击切换当前库"
+                                onClick={() => handleUseDb(String(v))}
+                              >
+                                {String(v)}
+                              </Button>
+                            ),
+                          }
+                        : {}),
                     }))}
                     rowKey={(_, i) => String(i)}
                     pagination={{ pageSize: 20 }}

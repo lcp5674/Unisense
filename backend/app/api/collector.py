@@ -772,17 +772,18 @@ async def query_source_sql(
 ) -> ApiResponse[SqlQueryResponse]:
     """对已注册数据源执行只读查询（平台内部运维/分析，写审计）。
 
-    仅允许单条只读语句（SELECT / SHOW / DESC / EXPLAIN / USE / HELP / CHECKSUM /
-    CHECK 等非 DDL/DML 语句，服务层 sqlglot 白名单校验，拒绝多语句/DDL/DML/
-    SELECT INTO/行锁/状态变更/危险函数），LIMIT 兜底防止大结果集；
-    仅平台管理员/域管理员或该数据源 Owner 可执行。
+    黑名单制校验：任何非 DDL/DML 只读语句（SELECT / SHOW / DESC / EXPLAIN / USE /
+    HELP / CHECKSUM / CHECK 等）放行，拒绝多语句/DDL/DML/SELECT INTO/行锁/状态变更/
+    危险函数（服务层 sqlglot 校验，语法正确性交给执行端，源端错误映射 422）；
+    ``USE <db>`` 写入会话级当前库，后续无库前缀的表名自动补当前库前缀；
+    LIMIT 兜底防止大结果集；仅平台管理员/域管理员或该数据源 Owner 可执行。
     """
     svc = _svc(db)
     src = await svc.get_source_orm(source_id, org_id=_resolve_org_scope(user))
     is_admin = any(r in _WRITE_ROLES for r in user.roles_all())
     if not is_admin and src.owner_id != user.id:
         raise AuthError("无权查询该数据源（仅平台管理员/域管理员或数据源负责人可执行 SQL）")
-    result = await svc.query_sql(source_id, body.sql, body.limit)
+    result = await svc.query_sql(source_id, body.sql, body.limit, actor_id=user.id)
     await write_audit(
         db,
         actor_id=user.id,

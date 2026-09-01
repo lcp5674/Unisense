@@ -638,4 +638,78 @@ describe("QueryWorkspace", () => {
     expect(await screen.findByText(/查询成功：1 行/)).toBeInTheDocument();
     expect(screen.getByText("测试")).toBeInTheDocument();
   });
+
+  it("SQL 查询 Tab：USE 切换后展示当前库 Tag，未限定表名查询自动补前缀", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+    await user.click(screen.getByText("SQL 查询"));
+    await waitFor(() => expect(screen.getByText("数据源只读 SQL 查询")).toBeInTheDocument());
+    // 选择数据源
+    const dsLabel = screen.getByText("数据源", { selector: "label" });
+    const dsItem = dsLabel.closest(".ant-form-item") as HTMLElement;
+    await user.click(within(dsItem).getByRole("combobox"));
+    await user.click(await screen.findByText(/mysql_unisense · 主库/));
+    const sqlTextarea = screen.getByPlaceholderText(/SELECT \* FROM db\.table/);
+    // 执行 USE ssb → 后端写会话并返回 current_db
+    mockedQueryDataSourceSql.mockResolvedValueOnce({
+      columns: [], rows: [], total: 0, truncated: false, elapsed_ms: 1,
+      current_db: "ssb", note: "已切换到库 ssb",
+    });
+    await user.clear(sqlTextarea);
+    await user.type(sqlTextarea, "USE ssb");
+    await user.click(screen.getByRole("button", { name: /执行 SQL/ }));
+    // 「当前库」Tag 出现（strong.mono 直接文本是库名，唯一匹配）
+    expect(await screen.findByText("ssb", { selector: "strong.mono" })).toBeInTheDocument();
+    expect(screen.getByText(/^当前库：/)).toBeInTheDocument();
+    // 后续未限定表名查询照常提交（后端自动补前缀）
+    mockedQueryDataSourceSql.mockResolvedValueOnce({
+      columns: ["id"], rows: [{ id: 1 }], total: 1, truncated: false, elapsed_ms: 2,
+      current_db: "ssb",
+    });
+    await user.clear(sqlTextarea);
+    await user.type(sqlTextarea, "SELECT id FROM customer");
+    await user.click(screen.getByRole("button", { name: /执行 SQL/ }));
+    await waitFor(() => {
+      expect(mockedQueryDataSourceSql).toHaveBeenLastCalledWith(
+        "mysql_unisense", "SELECT id FROM customer", 100,
+      );
+    });
+  });
+
+  it("SQL 查询 Tab：SHOW DATABASES 结果点击库名 → 自动执行 USE 切换当前库", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+    await user.click(screen.getByText("SQL 查询"));
+    await waitFor(() => expect(screen.getByText("数据源只读 SQL 查询")).toBeInTheDocument());
+    const dsLabel = screen.getByText("数据源", { selector: "label" });
+    const dsItem = dsLabel.closest(".ant-form-item") as HTMLElement;
+    await user.click(within(dsItem).getByRole("combobox"));
+    await user.click(await screen.findByText(/mysql_unisense · 主库/));
+    const sqlTextarea = screen.getByPlaceholderText(/SELECT \* FROM db\.table/);
+    // SHOW DATABASES → 结果首列库名可点击
+    mockedQueryDataSourceSql.mockResolvedValueOnce({
+      columns: ["Database"], rows: [{ Database: "ssb" }, { Database: "sales" }],
+      total: 2, truncated: false, elapsed_ms: 3,
+    });
+    await user.clear(sqlTextarea);
+    await user.type(sqlTextarea, "SHOW DATABASES");
+    await user.click(screen.getByRole("button", { name: /执行 SQL/ }));
+    // antd Button 文本包在 <span> 内，getByText(selector) 匹配直接文本会落空 → 用 role
+    const ssbLink = await screen.findByRole("button", { name: /ssb/ });
+    expect(ssbLink).toBeInTheDocument();
+    // 点击库名 → 自动 USE `ssb`
+    mockedQueryDataSourceSql.mockResolvedValueOnce({
+      columns: [], rows: [], total: 0, truncated: false, elapsed_ms: 1,
+      current_db: "ssb", note: "已切换到库 ssb",
+    });
+    await user.click(ssbLink);
+    await waitFor(() => {
+      expect(mockedQueryDataSourceSql).toHaveBeenLastCalledWith(
+        "mysql_unisense", "USE `ssb`", 100,
+      );
+    });
+    expect(await screen.findByText("ssb", { selector: "strong.mono" })).toBeInTheDocument();
+  });
 });

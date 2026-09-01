@@ -1027,6 +1027,10 @@ export interface SqlQueryResponse {
   total: number;
   truncated: boolean;
   elapsed_ms: number;
+  /** 会话级当前库（USE 切换后生效，供前端展示「当前库」） */
+  current_db?: string | null;
+  /** 提示信息（如 USE 切换成功） */
+  note?: string | null;
 }
 
 // ============================================================================

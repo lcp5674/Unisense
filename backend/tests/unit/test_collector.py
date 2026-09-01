@@ -5251,7 +5251,8 @@ async def test_query_sql_rejects_multi_statement_and_ddl():
 
 
 async def test_query_sql_allows_readonly_commands_without_limit():
-    """SHOW / DESC / EXPLAIN / USE / HELP / CHECKSUM / CHECK 等只读语句放行，且不追加 LIMIT。"""
+    """SHOW / DESC / EXPLAIN / HELP / CHECKSUM / CHECK 等只读语句放行，且不追加 LIMIT。
+    （USE 走会话级当前库特判，不在此执行清单中，见 test_query_sql_use_* 系列）"""
     svc, repo = _query_svc()
     src = MagicMock(source_id="s1", source_type="mysql", connection_config="enc")
     repo.get_source = AsyncMock(return_value=src)
@@ -5267,7 +5268,6 @@ async def test_query_sql_allows_readonly_commands_without_limit():
             "DESC t",
             "EXPLAIN SELECT * FROM t",
             "EXPLAIN ANALYZE SELECT * FROM t",
-            "USE db",
             "HELP 'contents'",
             "CHECKSUM TABLE t",
             "CHECK TABLE t",
@@ -5297,6 +5297,86 @@ async def test_query_sql_allows_readonly_select_variants():
             result = await svc.query_sql("s1", sql, limit=10)
             assert conn.queries[-1].endswith("LIMIT 10"), conn.queries[-1]
             assert result["total"] == 1
+
+
+async def test_query_sql_use_sets_current_db_without_executing():
+    """USE 写入会话级当前库（不实际执行连接查询），返回 current_db 与提示。"""
+    svc, repo = _query_svc()
+    src = MagicMock(source_id="s1", source_type="mysql", connection_config="enc")
+    repo.get_source = AsyncMock(return_value=src)
+    fake_redis = MagicMock()
+    fake_redis.get = AsyncMock(return_value=None)
+    fake_redis.set = AsyncMock()
+    conn = _QueryConnector()
+
+    with patch(
+        "app.services.collector.service.get_redis", return_value=fake_redis
+    ), patch(
+        "app.services.collector.service._redis_available", return_value=True
+    ), patch("app.services.collector.service.build_collector", return_value=conn):
+        result = await svc.query_sql("s1", "USE ssb", limit=10, actor_id=7)
+
+    fake_redis.set.assert_awaited_once()  # 会话状态已写入
+    assert conn.queries == []  # USE 不实际执行
+    assert result["current_db"] == "ssb"
+    assert result["note"] == "已切换到库 ssb"
+    assert result["rows"] == []
+
+
+async def test_query_sql_bare_table_qualifies_with_current_db():
+    """会话已有当前库时，无库前缀的表名自动补前缀（SELECT/JOIN 多表/DESC 均覆盖）。"""
+    svc, repo = _query_svc()
+    src = MagicMock(source_id="s1", source_type="mysql", connection_config="enc")
+    repo.get_source = AsyncMock(return_value=src)
+    fake_redis = MagicMock()
+    fake_redis.get = AsyncMock(return_value="ssb")
+    fake_redis.set = AsyncMock()
+    conn = _QueryConnector([{"a": 1}])
+
+    with patch(
+        "app.services.collector.service.get_redis", return_value=fake_redis
+    ), patch(
+        "app.services.collector.service._redis_available", return_value=True
+    ), patch("app.services.collector.service.build_collector", return_value=conn):
+        await svc.query_sql("s1", "SELECT * FROM customer", limit=10, actor_id=7)
+        await svc.query_sql(
+            "s1",
+            "SELECT c.custkey FROM customer c JOIN orders o ON c.custkey=o.custkey",
+            limit=10,
+            actor_id=7,
+        )
+        await svc.query_sql("s1", "DESC customer", limit=10, actor_id=7)
+
+    assert conn.queries[0] == "SELECT * FROM ssb.customer LIMIT 10"
+    assert conn.queries[1] == (
+        "SELECT c.custkey FROM ssb.customer AS c "
+        "JOIN ssb.orders AS o ON c.custkey = o.custkey LIMIT 10"
+    )
+    assert conn.queries[2] == "DESCRIBE ssb.customer"
+
+
+async def test_query_sql_prefixed_table_not_modified():
+    """已有库前缀的表/已限定的 SHOW 不被改写。"""
+    svc, repo = _query_svc()
+    src = MagicMock(source_id="s1", source_type="mysql", connection_config="enc")
+    repo.get_source = AsyncMock(return_value=src)
+    fake_redis = MagicMock()
+    fake_redis.get = AsyncMock(return_value="ssb")
+    fake_redis.set = AsyncMock()
+    conn = _QueryConnector([{"a": 1}])
+
+    with patch(
+        "app.services.collector.service.get_redis", return_value=fake_redis
+    ), patch(
+        "app.services.collector.service._redis_available", return_value=True
+    ), patch("app.services.collector.service.build_collector", return_value=conn):
+        await svc.query_sql("s1", "SELECT * FROM other_db.customer", limit=10, actor_id=7)
+        await svc.query_sql("s1", "SHOW TABLES FROM other_db", limit=10, actor_id=7)
+        await svc.query_sql("s1", "SHOW CREATE TABLE t", limit=10, actor_id=7)
+
+    assert conn.queries[0] == "SELECT * FROM other_db.customer LIMIT 10"  # 已带前缀不改
+    assert conn.queries[1] == "SHOW TABLES FROM other_db"  # Show 的 db 参数非 Table 节点
+    assert conn.queries[2] == "SHOW CREATE TABLE t"  # 无 Table 节点不改写
 
 
 async def test_query_sql_source_not_found():
