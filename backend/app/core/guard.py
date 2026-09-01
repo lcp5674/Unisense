@@ -36,6 +36,33 @@ _MAX_DEPTH = 10
 # 路径豁免中 list 任意元素的占位段：``candidates[].definition_json`` 的 ``[]`` 部分
 _LIST_ANY = "[*]"
 
+# B4（审查修复）：纯业务文本字段豁免——驳回原因/变更说明/描述/备注等合法业务文本
+# 含 ``--``/``/*``（如「口径错误；参考--附录」「成本--收入」「次日/*结算」）是正常的，
+# 此前被注入正则一律 422（用户完全无法理解哪里非法）。这些字段仅落库展示/通知，
+# 不拼接进任何 DB 查询（SQL 拼接处已参数化，守卫是纵深防御），故对 **字符串值**
+# 豁免扫描；嵌套 dict/list 仍递归扫描（防攻击者把 payload 藏进深层结构绕过）。
+_BUSINESS_TEXT_FIELDS = frozenset(
+    {
+        "reason",
+        "description",
+        "comment",
+        "note",
+        "message",
+        "remark",
+        "feedback",
+        "change_reason",
+        "summary",
+        "definition",
+        "business_definition",
+        "pseudo_definition",
+        "dw_definition",
+        "etl_sql",
+        "title",
+        "content",
+        "instruction",
+    }
+)
+
 
 def _is_suspicious(value: str) -> bool:
     return any(p.search(value) for p in _PATTERNS)
@@ -95,6 +122,10 @@ def _scan_deep(
         for key, v in value.items():
             child_path = current_path + (key,)
             if _is_path_exempt(exempt_paths, child_path):
+                continue
+            # B4（审查修复）：纯业务文本字段的字符串值豁免注入扫描（含 -- /* 属合法
+            # 业务文本）；嵌套 dict/list 仍递归（防深层藏 payload）
+            if key in _BUSINESS_TEXT_FIELDS and isinstance(v, str):
                 continue
             if _scan_deep(v, depth + 1, max_depth, exempt_paths, child_path):
                 return True

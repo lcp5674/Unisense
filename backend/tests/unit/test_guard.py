@@ -440,3 +440,18 @@ class TestGuardAgainstInjectionExemptPaths:
                 }
             )
         )  # 不应抛异常
+
+
+async def test_business_text_field_exempt_from_injection_scan() -> None:
+    """B4（审查修复）：纯业务文本字段（description/reason/comment）含 -- /* 不再被误伤。"""
+    from app.core.guard import _scan_deep
+
+    # 业务文本含 SQL 注释特征 → 豁免
+    assert _scan_deep({"description": "口径错误；参考--附录 次日/*结算"}) is False
+    assert _scan_deep({"reason": "成本--收入 参考/*附录"}) is False
+    assert _scan_deep({"change_reason": "-- 这是合法的变更说明"}) is False
+    # 非业务文本字段（name/code）仍扫描
+    assert _scan_deep({"name": "a--b"}) is True
+    assert _scan_deep({"metric_code": "a/*b"}) is True
+    # 业务文本字段的嵌套 dict 仍递归（防深层藏 payload）
+    assert _scan_deep({"description": {"sql": "a--b"}}) is True
