@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { App as AntApp } from "antd";
-import { Account } from "../pages/Account";
+import { Account, accessibleMenuGroups } from "../pages/Account";
 
 vi.mock("../api", () => {
   class UnisenseApiError extends Error {
@@ -20,15 +21,34 @@ vi.mock("../api", () => {
     fetchCurrentUser: vi.fn(),
     fetchMyPermissions: vi.fn(),
     changePassword: vi.fn(),
+    listMetrics: vi.fn(),
+    listFavorites: vi.fn(),
+    listNotifications: vi.fn(),
+    fetchUnreadCount: vi.fn(),
+    listDataSources: vi.fn(),
     UnisenseApiError,
   };
 });
 
-import { fetchCurrentUser, fetchMyPermissions, changePassword } from "../api";
+import {
+  fetchCurrentUser,
+  fetchMyPermissions,
+  changePassword,
+  listMetrics,
+  listFavorites,
+  listNotifications,
+  fetchUnreadCount,
+  listDataSources,
+} from "../api";
 
 const mockMe = vi.mocked(fetchCurrentUser);
 const mockPerms = vi.mocked(fetchMyPermissions);
 const mockChange = vi.mocked(changePassword);
+const mockListMetrics = vi.mocked(listMetrics);
+const mockFavorites = vi.mocked(listFavorites);
+const mockNotifications = vi.mocked(listNotifications);
+const mockUnread = vi.mocked(fetchUnreadCount);
+const mockSources = vi.mocked(listDataSources);
 
 const ME = {
   id: 1,
@@ -47,12 +67,15 @@ const SNAP = {
   roles: ["platform_admin"],
   home_domain: "finance",
   allowed_actions: ["read", "write", "approve", "export", "review"],
-  ui_actions: ["catalog:view", "metric:create", "user:disable", "custom:probe"],
-  ui_action_meta: [
-    { action: "catalog:view", module: "指标", label: "查看指标目录", description: "访问指标目录列表" },
-    { action: "metric:create", module: "指标", label: "创建指标", description: "新增指标（含口径定义）" },
-    { action: "user:disable", module: "系统", label: "停用用户", description: "停用指定用户账号" },
-    // custom:probe 故意不在 meta 中 → 降级显示编码
+  ui_actions: [
+    "dashboard:view",
+    "catalog:view",
+    "metric:create",
+    "assetmap:view",
+    "query:view",
+    // 无 data-sources:view / users:view 等 → 对应菜单不展示
+    "user:disable",
+    "custom:probe",
   ],
   granted_domains: ["finance"],
   metric_whitelist: [],
@@ -75,19 +98,38 @@ const SNAP = {
   expiring_soon: [],
 };
 
+function renderPage() {
+  return render(
+    <AntApp>
+      <MemoryRouter>
+        <Account />
+      </MemoryRouter>
+    </AntApp>,
+  );
+}
+
 describe("Account 个人中心", () => {
   beforeEach(() => {
     mockMe.mockReset();
     mockPerms.mockReset();
     mockChange.mockReset();
+    mockListMetrics.mockReset();
+    mockFavorites.mockReset();
+    mockNotifications.mockReset();
+    mockUnread.mockReset();
+    mockSources.mockReset();
     mockMe.mockResolvedValue(ME as never);
     mockPerms.mockResolvedValue(SNAP as never);
     mockChange.mockResolvedValue({ ok: true });
+    mockListMetrics.mockResolvedValue({ items: [], total: 12, page: 1, page_size: 1 } as never);
+    mockFavorites.mockResolvedValue([] as never);
+    mockNotifications.mockResolvedValue({ items: [], total: 3, page: 1, page_size: 1 } as never);
+    mockUnread.mockResolvedValue(5 as never);
+    mockSources.mockResolvedValue({ items: [], total: 7, page: 1, page_size: 1 } as never);
   });
 
   it("渲染个人概览横幅：头像首字 / 显示名 / 角色 / 组织域", async () => {
-    render(<AntApp><Account /></AntApp>);
-    // 概览横幅：显示名 + 用户名 + 主角色中文 + 组织 + 域
+    renderPage();
     expect((await screen.findAllByText("管理员")).length).toBeGreaterThan(0);
     expect(screen.getByText("@admin")).toBeTruthy();
     expect(screen.getByText("平台管理员")).toBeTruthy();
@@ -95,48 +137,74 @@ describe("Account 个人中心", () => {
     expect(screen.getByText("· 财务域")).toBeTruthy();
   });
 
-  it("渲染我的账号 / 我的权限 / 我的授权", async () => {
-    render(<AntApp><Account /></AntApp>);
+  it("渲染我的工作台：个人数据快照（负责指标/收藏/待办/未读/负责数据源）", async () => {
+    renderPage();
+    // 工作台标题与标签
+    expect(await screen.findByText("我的工作台")).toBeTruthy();
+    expect(screen.getByText("我负责的指标")).toBeTruthy();
+    expect(screen.getByText("我的收藏")).toBeTruthy();
+    expect(screen.getByText("我的待办")).toBeTruthy();
+    expect(screen.getByText("未读通知")).toBeTruthy();
+    expect(screen.getByText("我负责的数据源")).toBeTruthy();
+    // 数量（来自 owner_id 过滤统计 / 收藏长度 / todo_only 通知 / 未读 / owner 过滤数据源）
+    expect(screen.getByText("12")).toBeTruthy();
+    expect(screen.getByText("3")).toBeTruthy();
+    expect(screen.getByText("5")).toBeTruthy();
+    expect(screen.getByText("7")).toBeTruthy();
+    // 按负责人过滤调用（单条分页取 total）
+    expect(mockListMetrics).toHaveBeenCalledWith({ owner_id: 1, page: 1, page_size: 1 });
+    expect(mockNotifications).toHaveBeenCalledWith({ todo_only: true, page: 1, page_size: 1 });
+    expect(mockSources).toHaveBeenCalledWith({ owner_id: 1, page: 1, page_size: 1 });
+  });
+
+  it("我的权限：可访问功能模块与侧边栏一致（有权限显示、无权限隐藏），资源级动作保留", async () => {
+    renderPage();
     await screen.findByText("@admin");
-    // 账号卡：组织 / 域带编码
-    expect(screen.getByText("默认组织（1）")).toBeTruthy();
-    expect(screen.getByText("财务域（finance）")).toBeTruthy();
-    // 资源级动作中文
+    // 可访问功能模块：有 view 权限点的菜单展示
+    expect(screen.getByText("可访问功能模块")).toBeTruthy();
+    expect(screen.getByText("总览仪表")).toBeTruthy();
+    expect(screen.getByText("指标目录")).toBeTruthy();
+    expect(screen.getByText("注册指标")).toBeTruthy();
+    expect(screen.getByText("资产地图")).toBeTruthy();
+    expect(screen.getByText("查询工作台")).toBeTruthy();
+    // 无权限的菜单不展示（数据源管理 / 用户管理等）
+    expect(screen.queryByText("数据源管理")).toBeNull();
+    expect(screen.queryByText("用户管理")).toBeNull();
+    expect(screen.queryByText("权限治理")).toBeNull();
+    // 按钮级权限点不再展示（中文 label 与英文编码都不出现）
+    expect(screen.queryByText("创建指标")).toBeNull();
+    expect(screen.queryByText("user:disable")).toBeNull();
+    expect(screen.queryByText("custom:probe")).toBeNull();
+    expect(screen.queryByText("其他")).toBeNull();
+    // 资源级动作保留
     expect(screen.getByText("读取")).toBeTruthy();
     expect(screen.getByText("审批")).toBeTruthy();
-    // 按钮级权限点：中文 label（不再是英文编码）
-    expect(screen.getByText("查看指标目录")).toBeTruthy();
-    expect(screen.getByText("创建指标")).toBeTruthy();
-    expect(screen.getByText("停用用户")).toBeTruthy();
-    // 模块分组徽标
-    expect(screen.getByText("指标")).toBeTruthy();
-    expect(screen.getByText("系统")).toBeTruthy();
-    // 未知自定义动作降级显示编码 + 「其他」分组
-    expect(screen.getByText("custom:probe")).toBeTruthy();
-    expect(screen.getByText("其他")).toBeTruthy();
     // 我的授权
     expect(screen.getByText("sales")).toBeTruthy();
     expect(screen.getByText("只读")).toBeTruthy();
   });
 
-  it("按钮级权限点按模块分组渲染（指标组含 2 项、系统组含 1 项）", async () => {
-    render(<AntApp><Account /></AntApp>);
-    await screen.findByText("@admin");
-    // 「指标」模块徽标旁应有「2 项」计数
-    const metricBadge = screen.getByText("指标");
-    const metricSection = metricBadge.closest(".ant-space")?.parentElement;
-    expect(within(metricSection as HTMLElement).getByText("2 项")).toBeTruthy();
-    expect(within(metricSection as HTMLElement).getByText("查看指标目录")).toBeTruthy();
-    expect(within(metricSection as HTMLElement).getByText("创建指标")).toBeTruthy();
-    // 「系统」模块
-    const sysBadge = screen.getByText("系统");
-    const sysSection = sysBadge.closest(".ant-space")?.parentElement;
-    expect(within(sysSection as HTMLElement).getByText("1 项")).toBeTruthy();
-    expect(within(sysSection as HTMLElement).getByText("停用用户")).toBeTruthy();
+  it("accessibleMenuGroups 纯函数：与 ROUTE_PERM 同源判定菜单模块", () => {
+    // 有 catalog:view / metric:create / assetmap:view
+    const groups = accessibleMenuGroups(["catalog:view", "metric:create", "assetmap:view"]);
+    const labels = groups.flatMap((g) => g.children);
+    expect(labels).toContain("指标目录");
+    expect(labels).toContain("注册指标");
+    expect(labels).toContain("资产地图");
+    // 指标运营分析/SQL 解析评测映射 metric:create → 可见
+    expect(labels).toContain("指标运营分析");
+    expect(labels).toContain("SQL 解析评测");
+    // 无 data-sources:view → 数据源管理不出现
+    expect(labels).not.toContain("数据源管理");
+    expect(labels).not.toContain("用户管理");
+    // 无任何权限 → 仅剩「无 ROUTE_PERM 映射默认放行」的菜单（API 文档，与侧边栏行为一致）
+    expect(accessibleMenuGroups([]).flatMap((g) => g.children)).toEqual(["API 文档"]);
+    // 快照未加载（undefined）→ 同样不显示权限菜单
+    expect(accessibleMenuGroups(undefined).flatMap((g) => g.children)).toEqual(["API 文档"]);
   });
 
   it("修改密码：校验两次一致并调用 changePassword", async () => {
-    render(<AntApp><Account /></AntApp>);
+    renderPage();
     await screen.findByText("@admin");
     fireEvent.click(screen.getByRole("button", { name: /修改密码/ }));
 

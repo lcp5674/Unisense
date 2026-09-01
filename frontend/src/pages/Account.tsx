@@ -1,12 +1,16 @@
 /**
- * 个人中心（方案 C 的核心承载页）：我的概览 / 我的账号 / 我的权限 / 我的授权 / 修改密码。
+ * 个人中心（方案 C 的核心承载页，用户视角）：我的工作台 / 我的账号 / 我的权限 / 我的授权 / 修改密码。
  *
  * 账号类通知（user.* / org.* / grant.* / pii.*）的深链目标——用户本人视角，
  * 不再指向管理员管理列表页。数据来源：``GET /auth/me``（含 org_name/domain_name）
- * + ``GET /me/permissions``（ui_actions / ui_action_meta / grants / expiring_soon）。
+ * + ``GET /me/permissions``（allowed_actions / ui_actions / grants / expiring_soon）。
  *
- * 权限展示：按钮级权限点（``ui_actions``）经后端 ``ui_action_meta``（单一事实来源 =
- * 后端 UI_ACTION_REGISTRY）按模块分组渲染中文名；未知自定义动作降级显示编码。
+ * 权限展示（用户视角）：
+ *  - 「可访问功能模块」与左侧菜单（NAV_GROUPS + ROUTE_PERM）同源判定——用户看到的是
+ *    自己在侧边栏真实可见的模块，所见即所得，不再展示按钮级权限点（粒度远细于菜单，
+ *    且大量按钮动作在菜单上不可见，易造成「权限与菜单不一致」的困惑）。
+ *  - 「资源级动作」为 PDP 数据权限（读/写/审批/导出/复核），保留展示。
+ *  - 按钮级权限点（ui_actions）不做面向用户展示（由管理员在权限治理中配置）。
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -24,18 +28,37 @@ import {
   Modal,
   Row,
   Space,
+  Statistic,
   Table,
   Tag,
   Tooltip,
 } from "antd";
 import {
   ApiOutlined,
+  AppstoreOutlined,
+  BellOutlined,
+  CheckSquareOutlined,
+  DatabaseOutlined,
+  HeartOutlined,
   KeyOutlined,
   SafetyCertificateOutlined,
   UserOutlined,
 } from "@ant-design/icons";
-import { changePassword, fetchCurrentUser, fetchMyPermissions, UnisenseApiError } from "../api";
-import type { CurrentUser, GrantResponse, PermissionSnapshot, UiActionMeta } from "../types";
+import { useNavigate } from "react-router-dom";
+import {
+  changePassword,
+  fetchCurrentUser,
+  fetchMyPermissions,
+  fetchUnreadCount,
+  listDataSources,
+  listFavorites,
+  listMetrics,
+  listNotifications,
+  UnisenseApiError,
+} from "../api";
+import type { CurrentUser, GrantResponse, PermissionSnapshot } from "../types";
+import { NAV_GROUPS } from "../components/Layout";
+import { ROUTE_PERM } from "../hooks/usePermission";
 import { formatCnTime } from "../utils/timeCn";
 
 // 内置角色中文名（与用户管理页同源）
@@ -49,7 +72,7 @@ const ROLE_LABEL: Record<string, string> = {
   viewer: "只读用户",
 };
 
-// 资源级动作中文名
+// 资源级动作中文名 / 配色
 const ACTION_LABEL: Record<string, string> = {
   read: "读取",
   write: "写入",
@@ -57,7 +80,6 @@ const ACTION_LABEL: Record<string, string> = {
   export: "导出",
   review: "复核",
 };
-
 const ACTION_COLOR: Record<string, string> = {
   read: "blue",
   write: "green",
@@ -71,24 +93,6 @@ const GRANT_TYPE_LABEL: Record<string, string> = {
   WRITE: "写",
   READ_WRITE: "读写",
 };
-
-// 权限点模块 → 徽标配色（未列出的模块用默认灰）
-const MODULE_COLOR: Record<string, string> = {
-  总览: "blue",
-  指标: "geekblue",
-  资产地图: "cyan",
-  质量中心: "orange",
-  分析: "purple",
-  采集: "green",
-  治理: "magenta",
-  系统: "red",
-};
-
-function grantStatusLabel(status: string): { text: string; color: string } {
-  if (status === "ACTIVE") return { text: "生效", color: "success" };
-  if (status === "EXPIRED") return { text: "已过期", color: "default" };
-  return { text: "已回收", color: "error" };
-}
 
 const GRANT_COLUMNS = [
   { title: "类型", dataIndex: "grant_type", key: "grant_type", width: 100, render: (v: string) => GRANT_TYPE_LABEL[v] ?? v },
@@ -118,16 +122,50 @@ const GRANT_COLUMNS = [
   },
 ];
 
-/** 未知/自定义权限点的降级元数据（后端未注册的动作，保留编码可见性） */
-function fallbackMeta(action: string): UiActionMeta {
-  return { action, module: "其他", label: action, description: "自定义权限点" };
+/** 我的工作台快捷入口清单（数量来自后端过滤统计，点击跳转对应页面） */
+const WORK_ITEMS = [
+  { key: "metrics", label: "我负责的指标", icon: <AppstoreOutlined />, path: "/catalog", color: "#2563eb" },
+  { key: "favorites", label: "我的收藏", icon: <HeartOutlined />, path: "/favorites", color: "#ec4899" },
+  { key: "todos", label: "我的待办", icon: <CheckSquareOutlined />, path: "/todo", color: "#f59e0b" },
+  { key: "unread", label: "未读通知", icon: <BellOutlined />, path: "/notifications", color: "#10b981" },
+  { key: "sources", label: "我负责的数据源", icon: <DatabaseOutlined />, path: "/data-sources", color: "#8b5cf6" },
+] as const;
+
+function grantStatusLabel(status: string): { text: string; color: string } {
+  if (status === "ACTIVE") return { text: "生效", color: "success" };
+  if (status === "EXPIRED") return { text: "已过期", color: "default" };
+  return { text: "已回收", color: "error" };
+}
+
+/**
+ * 可访问功能模块：与侧边栏菜单（NAV_GROUPS + ROUTE_PERM）同源判定。
+ * 只返回用户在侧边栏真实可见的模块分组（过滤掉无权限菜单项、空组隐藏），
+ * 保证「个人中心看到的 = 左侧菜单看到的」。
+ */
+export function accessibleMenuGroups(uiActions: string[] | undefined) {
+  const perms = new Set(uiActions ?? []);
+  return NAV_GROUPS.map((g) => ({
+    label: g.label,
+    children: g.children
+      .filter((c) => {
+        // 审批中心聚合三个审批/仲裁入口：任一相关权限点即放行（与 Layout 菜单一致）
+        if (c.key === "/approval") {
+          return ["metric:review", "master-data:review", "review:view"].some((p) => perms.has(p));
+        }
+        const perm = ROUTE_PERM[c.key];
+        return perm ? perms.has(perm) : true;
+      })
+      .map((c) => c.label),
+  })).filter((g) => g.children.length > 0);
 }
 
 export function Account() {
   const { message } = AntApp.useApp();
+  const navigate = useNavigate();
   const [me, setMe] = useState<CurrentUser | null>(null);
   const [snap, setSnap] = useState<PermissionSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
+  const [work, setWork] = useState<Record<string, number | undefined>>({});
   const [pwdOpen, setPwdOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [pwdForm] = Form.useForm<{ current_password: string; new_password: string; confirm: string }>();
@@ -143,6 +181,26 @@ export function Account() {
       })
       .finally(() => setLoading(false));
   }, [message]);
+
+  // 我的工作台：个人数据快照（按负责人过滤统计，单条分页取 total，失败兜底「—」）
+  useEffect(() => {
+    if (!me?.id) return;
+    let alive = true;
+    Promise.all([
+      listMetrics({ owner_id: me.id, page: 1, page_size: 1 }).then((r) => r.total).catch(() => undefined),
+      listFavorites().then((f) => f.length).catch(() => undefined),
+      listNotifications({ todo_only: true, page: 1, page_size: 1 }).then((r) => r.total).catch(() => undefined),
+      fetchUnreadCount().catch(() => undefined),
+      listDataSources({ owner_id: me.id, page: 1, page_size: 1 }).then((r) => r.total).catch(() => undefined),
+    ]).then(([metrics, favorites, todos, unread, sources]) => {
+      if (alive) setWork({ metrics, favorites, todos, unread, sources });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [me?.id]);
+
+  const menuGroups = useMemo(() => accessibleMenuGroups(snap?.ui_actions), [snap?.ui_actions]);
 
   async function handleChangePwd() {
     const values = await pwdForm.validateFields().catch(() => null);
@@ -166,23 +224,6 @@ export function Account() {
       setSaving(false);
     }
   }
-
-  // 按钮级权限点按模块分组（模块排序：注册表顺序保持中文自然序，「其他」最后）
-  const permGroups = useMemo(() => {
-    const byMeta = new Map((snap?.ui_action_meta ?? []).map((m) => [m.action, m]));
-    const map = new Map<string, UiActionMeta[]>();
-    for (const a of snap?.ui_actions ?? []) {
-      const meta = byMeta.get(a) ?? fallbackMeta(a);
-      const arr = map.get(meta.module) ?? [];
-      arr.push(meta);
-      map.set(meta.module, arr);
-    }
-    return [...map.entries()].sort(([m1], [m2]) => {
-      if (m1 === "其他") return 1;
-      if (m2 === "其他") return -1;
-      return m1.localeCompare(m2, "zh-CN");
-    });
-  }, [snap]);
 
   if (loading) return null;
 
@@ -243,6 +284,41 @@ export function Account() {
         </Row>
       </Card>
 
+      {/* ============ 我的工作台（用户个人数据快照 + 快捷入口） ============ */}
+      <Card
+        title={
+          <Space size={8}>
+            <AppstoreOutlined style={{ color: "#2563eb" }} />
+            我的工作台
+          </Space>
+        }
+        style={{ marginBottom: 16 }}
+      >
+        <Row gutter={[16, 16]}>
+          {WORK_ITEMS.map((item) => (
+            <Col xs={12} md={8} xl={4} key={item.key}>
+              <Card
+                hoverable
+                onClick={() => navigate(item.path)}
+                styles={{ body: { padding: "16px 20px" } }}
+                style={{ borderColor: "#e5e7eb" }}
+              >
+                <Space align="start" size={12}>
+                  <span style={{ fontSize: 22, color: item.color }}>{item.icon}</span>
+                  <div>
+                    <Statistic
+                      value={work[item.key] ?? "—"}
+                      valueStyle={{ fontSize: 22, fontWeight: 600, color: "#1f2937", lineHeight: 1.2 }}
+                    />
+                    <div style={{ color: "#6b7280", fontSize: 13 }}>{item.label}</div>
+                  </div>
+                </Space>
+              </Card>
+            </Col>
+          ))}
+        </Row>
+      </Card>
+
       {/* ============ 我的账号 ============ */}
       <Card
         title={
@@ -269,7 +345,7 @@ export function Account() {
         </Descriptions>
       </Card>
 
-      {/* ============ 我的权限 ============ */}
+      {/* ============ 我的权限（模块级 + 资源级，用户视角） ============ */}
       <Card
         title={
           <Space size={8}>
@@ -279,7 +355,38 @@ export function Account() {
         }
         style={{ marginBottom: 16 }}
       >
-        {/* 资源级动作 */}
+        {/* 可访问功能模块：与左侧菜单一致 */}
+        <div style={{ marginBottom: 8 }}>
+          <Space size={8} style={{ marginBottom: 8 }}>
+            <SafetyCertificateOutlined style={{ color: "#8c8c8c" }} />
+            <span style={{ color: "#595959", fontWeight: 500 }}>可访问功能模块</span>
+            <Tooltip title="与左侧菜单一致——你当前账号能使用的功能模块；未列出的模块你无权访问（不在菜单中显示）">
+              <Tag style={{ cursor: "help", color: "#8c8c8c", borderColor: "#d9d9d9" }}>?</Tag>
+            </Tooltip>
+          </Space>
+        </div>
+        {menuGroups.length === 0 ? (
+          <Tag>无</Tag>
+        ) : (
+          <Row gutter={[24, 16]}>
+            {menuGroups.map((g) => (
+              <Col xs={24} md={12} xl={8} key={g.label}>
+                <div style={{ color: "#8c8c8c", fontSize: 12, marginBottom: 6 }}>{g.label}</div>
+                <Space wrap size={[6, 4]}>
+                  {g.children.map((label) => (
+                    <Tag key={label} color="blue" style={{ padding: "2px 10px", borderColor: "#91caff" }}>
+                      {label}
+                    </Tag>
+                  ))}
+                </Space>
+              </Col>
+            ))}
+          </Row>
+        )}
+
+        <Divider style={{ margin: "16px 0" }} />
+
+        {/* 资源级动作（PDP 数据权限） */}
         <div style={{ marginBottom: 8 }}>
           <Space size={8} style={{ marginBottom: 8 }}>
             <ApiOutlined style={{ color: "#8c8c8c" }} />
@@ -295,51 +402,6 @@ export function Account() {
             {(snap?.allowed_actions ?? []).length === 0 && <Tag>无</Tag>}
           </Space>
         </div>
-
-        <Divider style={{ margin: "16px 0" }} />
-
-        {/* 按钮级权限点（按模块分组，中文展示） */}
-        <div style={{ marginBottom: 8 }}>
-          <Space size={8} style={{ marginBottom: 4 }}>
-            <SafetyCertificateOutlined style={{ color: "#8c8c8c" }} />
-            <span style={{ color: "#595959", fontWeight: 500 }}>按钮级权限点</span>
-            <Tooltip title="按模块分组的功能按钮权限点（路由 / 菜单 / 页面 / 按钮级管控）；悬停单个权限点可查看说明">
-              <Tag style={{ cursor: "help", color: "#8c8c8c", borderColor: "#d9d9d9" }}>?</Tag>
-            </Tooltip>
-          </Space>
-        </div>
-        {permGroups.length === 0 ? (
-          <Tag>无</Tag>
-        ) : (
-          <Row gutter={[24, 16]}>
-            {permGroups.map(([module, metas]) => (
-              <Col xs={24} md={12} xl={8} key={module}>
-                <Space size={8} style={{ marginBottom: 8 }}>
-                  <Tag color={MODULE_COLOR[module] ?? "default"} style={{ minWidth: 56, textAlign: "center" }}>
-                    {module}
-                  </Tag>
-                  <span style={{ color: "#8c8c8c", fontSize: 12 }}>{metas.length} 项</span>
-                </Space>
-                <Space wrap size={[6, 4]}>
-                  {metas.map((m) => (
-                    <Tooltip key={m.action} title={`${m.description}（${m.action}）`}>
-                      <Tag
-                        style={{
-                          cursor: "default",
-                          padding: "2px 10px",
-                          background: m.module === "其他" ? "#fafafa" : undefined,
-                          borderColor: "#d9d9d9",
-                        }}
-                      >
-                        {m.label}
-                      </Tag>
-                    </Tooltip>
-                  ))}
-                </Space>
-              </Col>
-            ))}
-          </Row>
-        )}
       </Card>
 
       {/* ============ 我的授权 ============ */}
