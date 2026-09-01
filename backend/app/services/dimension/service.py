@@ -1240,7 +1240,11 @@ class DimensionService(BaseService, MasterDataReviewMixin):
         safe_col = f"`{column}`"
         sql = f"SELECT DISTINCT {safe_col} FROM {safe_table} LIMIT {int(limit)}"
 
-        collector = registry.build(src.source_type, src.connection_config)
+        collector = registry.build(
+            src.source_type,
+            src.connection_config,
+            allow_private=self._settings.collector_allow_private,
+        )
         try:
             rows = await collector.query(sql)
         except ExternalDependencyError:
@@ -1278,7 +1282,11 @@ class DimensionService(BaseService, MasterDataReviewMixin):
         src = await self._load_source(source_id)
         from app.services.collector.connectors import registry
 
-        collector = registry.build(src.source_type, src.connection_config)
+        collector = registry.build(
+            src.source_type,
+            src.connection_config,
+            allow_private=self._settings.collector_allow_private,
+        )
         try:
             tables_by_db = await collector.list_tables()
         except ExternalDependencyError:
@@ -1314,7 +1322,11 @@ class DimensionService(BaseService, MasterDataReviewMixin):
         tbl = parts[-1]
         from app.services.collector.connectors import registry
 
-        collector = registry.build(src.source_type, src.connection_config)
+        collector = registry.build(
+            src.source_type,
+            src.connection_config,
+            allow_private=self._settings.collector_allow_private,
+        )
         try:
             if src.source_type in {"mysql", "postgres", "starrocks", "doris", "clickhouse"} and db:
                 rows = await collector.query(
@@ -1392,7 +1404,11 @@ class DimensionService(BaseService, MasterDataReviewMixin):
         safe_col = f"`{column}`"
         from app.services.collector.connectors import registry
 
-        collector = registry.build(src.source_type, src.connection_config)
+        collector = registry.build(
+            src.source_type,
+            src.connection_config,
+            allow_private=self._settings.collector_allow_private,
+        )
         try:
             values: list[str] = []
             last: str | None = None
@@ -1437,7 +1453,11 @@ class DimensionService(BaseService, MasterDataReviewMixin):
         sql = f"SELECT COUNT(*) AS total, COUNT({safe_col}) AS non_null FROM {safe_table}"
         from app.services.collector.connectors import registry
 
-        collector = registry.build(src.source_type, src.connection_config)
+        collector = registry.build(
+            src.source_type,
+            src.connection_config,
+            allow_private=self._settings.collector_allow_private,
+        )
         try:
             rows = await collector.query(sql)
         finally:
