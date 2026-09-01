@@ -35,6 +35,7 @@ from app.services.quality.tasks import run_quality_checks
 from app.tasks.audit_archive import audit_archive_task
 from app.tasks.collection_run_purge import purge_collection_runs_task
 from app.tasks.data_retention import check_table_growth, purge_retained_records
+from app.tasks.dimension_snapshot_tasks import refresh_dimension_snapshots_task
 from app.tasks.notify_purge import notify_purge_task
 from app.tasks.semantic_tasks import (
     check_dsd_overdue,
@@ -254,6 +255,7 @@ class WorkerSettings:
         lineage_scan_task,
         purge_retained_records,
         check_table_growth,
+        refresh_dimension_snapshots_task,
     ]
     # 任务级超时（秒）：源库挂起/慢查询拖死 worker 的最终防线。
     # 单查询超时由连接器 query_timeout 兜底（60s），此处约束整个任务上限——
@@ -389,6 +391,13 @@ class WorkerSettings:
             hour=5,
             minute=0,
             run_at_startup=False,
+        ),
+        cron(
+            refresh_dimension_snapshots_task,
+            name="dimension-snapshot-refresh",
+            minute={0, 30},
+            second=0,
+            run_at_startup=True,
         ),
     ]
     on_startup = startup

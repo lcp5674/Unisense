@@ -59,12 +59,24 @@ vi.mock("../api", () => {
     removeFavorite: vi.fn(),
     listDataSources: vi.fn(),
     previewColumnValues: vi.fn(),
+    bindDimensionReference: vi.fn(),
+    refreshDimensionSnapshot: vi.fn(),
+    listDimensionSnapshots: vi.fn(),
+    getDimensionSnapshotLatestRun: vi.fn(),
+    batchPublishDimensionMembers: vi.fn(),
+    batchDeprecateDimensionMembers: vi.fn(),
+    batchDeleteDimensionMembers: vi.fn(),
+    createDimensionMappingValue: vi.fn(),
+    listDimensionMappingValues: vi.fn(),
+    deleteDimensionMappingValue: vi.fn(),
+    getMappingCoverage: vi.fn(),
+    translateDimensionValues: vi.fn(),
     fetchCurrentUser: vi.fn(),
     UnisenseApiError,
   };
 });
 
-import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember, deleteDimensionMember, listDimensionMetrics, listDimensionMappings, updateDimensionMapping, listReconciliations, listUsers, listFavorites, listDataSources, previewColumnValues, fetchCurrentUser, submitDimension, approveDimension, rejectDimension, batchSubmitDimensions, batchDeprecateDimensions, reactivateDimension, deleteDimension, restoreDimension } from "../api";
+import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember, deleteDimensionMember, listDimensionMetrics, listDimensionMappings, updateDimensionMapping, listReconciliations, listUsers, listFavorites, listDataSources, previewColumnValues, fetchCurrentUser, submitDimension, approveDimension, rejectDimension, batchSubmitDimensions, batchDeprecateDimensions, reactivateDimension, deleteDimension, restoreDimension, getDimensionSnapshotLatestRun, batchPublishDimensionMembers } from "../api";
 
 const mockedList = vi.mocked(listDimensions);
 const mockedListFavorites = vi.mocked(listFavorites);
@@ -490,7 +502,9 @@ describe("Dimensions 页面", () => {
     await user.click(await screen.findByText("dim_channel · 渠道"));
     await screen.findByText("华东");
     // Popconfirm 为 click 触发：点触发按钮 → 浮层出现 → 点「删除」确认
-    await user.click(screen.getAllByRole("button", { name: /删\s*除/ })[0]);
+    // （取最后一个「删除」按钮 = 表格行内删除，避开工具栏「批量删除」）
+    const delBtns = screen.getAllByRole("button", { name: /删\s*除/ });
+    await user.click(delBtns[delBtns.length - 1]);
     const desc = await screen.findByText(/级联删除整个子树/);
     const popconfirm = desc.closest(".ant-popover") as HTMLElement;
     await user.click(within(popconfirm).getByRole("button", { name: /删\s*除/ }));
@@ -1007,5 +1021,110 @@ describe("Dimensions 生命周期（重新启用/删除/回收站恢复）", () 
     fireEvent.click(await screen.findByRole("button", { name: /确 定|确定|OK/ }));
     await waitFor(() => expect(mockedRestoreDim).toHaveBeenCalledWith("dim_region"));
     expect(await screen.findByText(/已恢复/)).toBeInTheDocument();
+  });
+});
+
+describe("Dimensions 引用型维度（SNAPSHOT）与成员批量操作", () => {
+  beforeEach(() => {
+    vi.mocked(listDimensions).mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          dim_code: "dim_customer",
+          name: "客户",
+          domain: "sales",
+          type: "SCD2",
+          description: null,
+          owner_id: 1,
+          status: "PUBLISHED",
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+          sync_mode: "snapshot",
+          source_id: "s1",
+          source_table: "dwd.dim_customer",
+          source_column: "customer_id",
+          refresh_interval_hours: 24,
+          last_snapshot_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      total: 1,
+    } as never);
+    vi.mocked(listDimensionMembers).mockResolvedValue({ items: [], total: 0 } as never);
+    vi.mocked(listDataSources).mockResolvedValue({ items: [], total: 0 } as never);
+    vi.mocked(getDimensionSnapshotLatestRun).mockResolvedValue({
+      id: 1,
+      dim_code: "dim_customer",
+      snapshot_at: "2026-01-01T00:00:00Z",
+      status: "SUCCESS",
+      total_count: 100,
+      added_count: 3,
+      removed_count: 1,
+      null_count: 5,
+      null_rate: 0.05,
+      added_sample: ["c1", "c2", "c3"],
+      removed_sample: ["old"],
+      error_msg: null,
+      duration_ms: 1200,
+      created_at: "2026-01-01T00:00:00Z",
+    } as never);
+  });
+
+  it("引用型维度：选择后展示绑定来源与快照数据质量摘要（值总数/新增/消失/空值率）", async () => {
+    render(
+      <MemoryRouter>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("tab", { name: /维度值管理/ }));
+    const dimSelect = await screen.findByRole("combobox");
+    fireEvent.mouseDown(dimSelect);
+    await userEvent.click(await screen.findByText("dim_customer · 客户"));
+
+    // 引用型面板：绑定来源 + 刷新快照按钮 + 质量摘要
+    expect(await screen.findByText(/dwd\.dim_customer\.customer_id/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /刷新快照/ })).toBeInTheDocument();
+    expect(screen.getByText(/值总数/)).toBeInTheDocument();
+    expect(screen.getByText("100")).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
+    // 消失样本 + 空值率 5.00%
+    expect(screen.getByText("old")).toBeInTheDocument();
+    expect(screen.getByText("5.00%")).toBeInTheDocument();
+  });
+
+  it("批量发布：勾选成员后调用 batchPublishDimensionMembers", async () => {
+    vi.mocked(listDimensionMembers).mockResolvedValue({
+      items: [
+        { id: 1, dim_code: "dim_customer", member_code: "c1", member_name: "客户一", parent_code: null, path: null, attributes: null, status: "DRAFT", created_at: "2026-01-01T00:00:00Z" },
+        { id: 2, dim_code: "dim_customer", member_code: "c2", member_name: "客户二", parent_code: null, path: null, attributes: null, status: "DRAFT", created_at: "2026-01-01T00:00:00Z" },
+      ],
+      total: 2,
+    } as never);
+    vi.mocked(batchPublishDimensionMembers).mockResolvedValue({
+      published: 2,
+      skipped: 0,
+      failed: [],
+    } as never);
+
+    render(
+      <MemoryRouter>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("tab", { name: /维度值管理/ }));
+    const dimSelect = await screen.findByRole("combobox");
+    fireEvent.mouseDown(dimSelect);
+    await userEvent.click(await screen.findByText("dim_customer · 客户"));
+    await screen.findByText("客户一");
+
+    // 勾选两行（antd rowSelection：首个 checkbox 为表头全选，点击即全选 c1/c2）
+    const checkboxes = screen.getAllByRole("checkbox");
+    fireEvent.click(checkboxes[0]);
+    await waitFor(() => expect(screen.getByRole("button", { name: /批量发布/ })).toBeEnabled());
+
+    await userEvent.click(screen.getByRole("button", { name: /批量发布/ }));
+    await waitFor(() =>
+      expect(batchPublishDimensionMembers).toHaveBeenCalledWith("dim_customer", ["c1", "c2"]),
+    );
+    expect(await screen.findByText(/已发布 2 个/)).toBeInTheDocument();
   });
 });

@@ -60,12 +60,17 @@ import {
   DictValuesVerifyResponse,
   Dimension,
   DimensionMapping,
+  DimensionMappingValue,
+  DimensionValueSnapshot,
   MeasureCatalog,
   MeasureSuggestResult,
   MetricMount,
   MetricMountInput,
   DimensionMember,
   DimensionExpr,
+  MappingCoverage,
+  SnapshotRun,
+  TranslateResult,
   DryRunResponse,
   ErasureResult,
   EvalSample,
@@ -2692,6 +2697,129 @@ export async function publishAllDimensionMembers(
     `${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/members/batch-publish`,
     { method: "POST" },
   );
+}
+
+/** 绑定引用型值来源（POST /dimensions/{dim}/reference，值集合 = 源表列快照） */
+export async function bindDimensionReference(
+  dimCode: string,
+  body: { source_id: string; table: string; column: string; refresh_interval_hours?: number },
+): Promise<Dimension> {
+  return request<Dimension>(
+    `${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/reference`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+}
+
+/** 刷新引用型维度值快照（POST /dimensions/{dim}/snapshots/refresh） */
+export async function refreshDimensionSnapshot(dimCode: string): Promise<{
+  dim_code: string;
+  snapshot_at: string;
+  total: number;
+  added: string[];
+  removed: string[];
+  null_count: number;
+  null_rate: number | null;
+}> {
+  return request(`${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/snapshots/refresh`, {
+    method: "POST",
+  });
+}
+
+/** 分页列出引用型维度快照值（GET /dimensions/{dim}/snapshots） */
+export async function listDimensionSnapshots(
+  dimCode: string,
+  page = 1,
+  pageSize = 100,
+): Promise<{ items: DimensionValueSnapshot[]; total: number }> {
+  return request(
+    `${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/snapshots?page=${page}&page_size=${pageSize}`,
+  );
+}
+
+/** 最近一次快照刷新运行记录（GET /dimensions/{dim}/snapshots/latest-run） */
+export async function getDimensionSnapshotLatestRun(
+  dimCode: string,
+): Promise<SnapshotRun | null> {
+  return request(
+    `${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/snapshots/latest-run`,
+  );
+}
+
+/** 批量发布成员（POST /dimensions/{dim}/members/batch-publish） */
+export async function batchPublishDimensionMembers(
+  dimCode: string,
+  memberCodes: string[],
+): Promise<{ published: number; skipped: number; failed: { code: string; reason: string }[] }> {
+  return request(
+    `${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/members/batch-publish`,
+    { method: "POST", body: JSON.stringify({ member_codes: memberCodes }) },
+  );
+}
+
+/** 批量废弃成员（POST /dimensions/{dim}/members/batch-deprecate） */
+export async function batchDeprecateDimensionMembers(
+  dimCode: string,
+  memberCodes: string[],
+): Promise<{ deprecated: number; skipped: number; failed: { code: string; reason: string }[] }> {
+  return request(
+    `${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/members/batch-deprecate`,
+    { method: "POST", body: JSON.stringify({ member_codes: memberCodes }) },
+  );
+}
+
+/** 批量删除成员（POST /dimensions/{dim}/members/batch-delete，级联子树并集） */
+export async function batchDeleteDimensionMembers(
+  dimCode: string,
+  memberCodes: string[],
+): Promise<{ deleted: number; failed: { code: string; reason: string }[] }> {
+  return request(
+    `${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/members/batch-delete`,
+    { method: "POST", body: JSON.stringify({ member_codes: memberCodes }) },
+  );
+}
+
+/** 新增值级映射（POST /dimensions/mappings/{mapping_id}/values） */
+export async function createDimensionMappingValue(
+  mappingId: number,
+  body: { source_value: string; target_value: string },
+): Promise<DimensionMappingValue> {
+  return request(
+    `${API_BASE}/dimensions/mappings/${mappingId}/values`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+}
+
+/** 分页列出值级映射（GET /dimensions/mappings/{mapping_id}/values） */
+export async function listDimensionMappingValues(
+  mappingId: number,
+  page = 1,
+  pageSize = 100,
+): Promise<{ items: DimensionMappingValue[]; total: number }> {
+  return request(
+    `${API_BASE}/dimensions/mappings/${mappingId}/values?page=${page}&page_size=${pageSize}`,
+  );
+}
+
+/** 删除值级映射（DELETE /dimensions/mapping-values/{value_id}） */
+export async function deleteDimensionMappingValue(valueId: number): Promise<{ deleted: boolean }> {
+  return request(`${API_BASE}/dimensions/mapping-values/${valueId}`, { method: "DELETE" });
+}
+
+/** 值级映射覆盖率（GET /dimensions/mappings/{mapping_id}/coverage） */
+export async function getMappingCoverage(mappingId: number): Promise<MappingCoverage> {
+  return request(`${API_BASE}/dimensions/mappings/${mappingId}/coverage`);
+}
+
+/** 批量值翻译（POST /dimensions/translate） */
+export async function translateDimensionValues(
+  sourceDimCode: string,
+  targetDimCode: string,
+  values: string[],
+): Promise<{ results: TranslateResult[] }> {
+  return request(`${API_BASE}/dimensions/translate`, {
+    method: "POST",
+    body: JSON.stringify({ source_dim_code: sourceDimCode, target_dim_code: targetDimCode, values }),
+  });
 }
 
 /** 废弃维度成员（POST /dimensions/{dim}/members/{code}/deprecate，→ DEPRECATED） */

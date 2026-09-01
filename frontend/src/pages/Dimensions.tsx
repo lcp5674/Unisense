@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type Key } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Drawer, Descriptions, Popconfirm, Divider, Tooltip } from "antd";
+import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Space, Drawer, Descriptions, Popconfirm, Divider, Tooltip, Alert } from "antd";
 import { DeleteOutlined, EditOutlined, PlusOutlined, RedoOutlined, ReloadOutlined, SendOutlined, ArrowLeftOutlined, HeartOutlined, DatabaseOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import {
   listDimensions,
@@ -45,6 +45,18 @@ import {
   removeFavorite,
   listDataSources,
   previewColumnValues,
+  bindDimensionReference,
+  refreshDimensionSnapshot,
+  listDimensionSnapshots,
+  getDimensionSnapshotLatestRun,
+  batchPublishDimensionMembers,
+  batchDeprecateDimensionMembers,
+  batchDeleteDimensionMembers,
+  createDimensionMappingValue,
+  listDimensionMappingValues,
+  deleteDimensionMappingValue,
+  getMappingCoverage,
+  translateDimensionValues,
   fetchCurrentUser,
   UnisenseApiError,
 } from "../api";
@@ -61,6 +73,11 @@ import type {
   DataSource,
   CurrentUser,
   BatchResult,
+  DimensionValueSnapshot,
+  SnapshotRun,
+  DimensionMappingValue,
+  MappingCoverage,
+  TranslateResult,
 } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
@@ -1114,6 +1131,141 @@ function MembersTab() {
   const [batchPublishing, setBatchPublishing] = useState(false);
   // 导入进度感知：当前处理序号/总数（消除"点了没反应"的长等待）
   const [importProgress, setImportProgress] = useState<{ ok: number; failed: number; done: number; total: number } | null>(null);
+  // 批量操作：rowSelection 勾选的成员编码集合
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
+  const [batchLoading, setBatchLoading] = useState(false);
+  // 引用型维度（sync_mode=snapshot）：绑定表列 + 快照刷新 + 数据质量摘要
+  const [bindOpen, setBindOpen] = useState(false);
+  const [bindForm] = Form.useForm();
+  const [bindSaving, setBindSaving] = useState(false);
+  const [latestRun, setLatestRun] = useState<SnapshotRun | null>(null);
+  const [snapshots, setSnapshots] = useState<DimensionValueSnapshot[]>([]);
+  const [snapshotOpen, setSnapshotOpen] = useState(false);
+  const [snapshotLoading, setSnapshotLoading] = useState(false);
+  const [refreshingSnapshot, setRefreshingSnapshot] = useState(false);
+  // 当前选中维度的完整对象（含 sync_mode/source_* 字段）
+  const currentDim = dims.find((d) => d.dim_code === dimCode) ?? null;
+  const isSnapshot = currentDim?.sync_mode === "snapshot";
+
+  // 引用型维度：选择后加载最近一次快照运行记录
+  useEffect(() => {
+    if (!dimCode || !isSnapshot) {
+      setLatestRun(null);
+      setSnapshots([]);
+      return;
+    }
+    getDimensionSnapshotLatestRun(dimCode)
+      .then((r) => setLatestRun(r))
+      .catch(() => setLatestRun(null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dimCode, isSnapshot]);
+
+  async function loadLatestRun() {
+    if (!dimCode) return;
+    try {
+      setLatestRun(await getDimensionSnapshotLatestRun(dimCode));
+    } catch {
+      setLatestRun(null);
+    }
+  }
+
+  async function handleBindReference(values: Record<string, unknown>) {
+    if (!dimCode || bindSaving) return;
+    setBindSaving(true);
+    try {
+      await bindDimensionReference(dimCode, {
+        source_id: String(values.source_id),
+        table: String(values.table),
+        column: String(values.column),
+        refresh_interval_hours: values.refresh_interval_hours ? Number(values.refresh_interval_hours) : 24,
+      });
+      message.success("已绑定引用型值来源（维度值 = 源表列快照）");
+      setBindOpen(false);
+      bindForm.resetFields();
+      listDimensions({ page_size: 200 }).then((r) => setDims(r.items)).catch(() => {});
+      await loadLatestRun();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "绑定失败");
+    } finally {
+      setBindSaving(false);
+    }
+  }
+
+  async function handleRefreshSnapshot() {
+    if (!dimCode || refreshingSnapshot) return;
+    setRefreshingSnapshot(true);
+    try {
+      const r = await refreshDimensionSnapshot(dimCode);
+      message.success(
+        `快照已刷新：共 ${r.total} 个值，新增 ${r.added.length}，消失 ${r.removed.length}${r.null_count ? `，空值 ${r.null_count}` : ""}`,
+      );
+      await loadLatestRun();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "刷新快照失败");
+    } finally {
+      setRefreshingSnapshot(false);
+    }
+  }
+
+  async function openSnapshotList() {
+    if (!dimCode) return;
+    setSnapshotLoading(true);
+    setSnapshotOpen(true);
+    try {
+      const r = await listDimensionSnapshots(dimCode, 1, 200);
+      setSnapshots(r.items);
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载快照失败");
+    } finally {
+      setSnapshotLoading(false);
+    }
+  }
+
+  // 批量发布/废弃/删除（勾选成员）
+  async function handleBatchPublish() {
+    if (!dimCode || selectedKeys.length === 0 || batchLoading) return;
+    setBatchLoading(true);
+    try {
+      const r = await batchPublishDimensionMembers(dimCode, selectedKeys);
+      message.success(`已发布 ${r.published} 个${r.skipped ? `（跳过 ${r.skipped} 个非草稿）` : ""}${r.failed.length ? `，失败 ${r.failed.length}` : ""}`);
+      setSelectedKeys([]);
+      reload();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "批量发布失败");
+    } finally {
+      setBatchLoading(false);
+    }
+  }
+
+  async function handleBatchDeprecate() {
+    if (!dimCode || selectedKeys.length === 0 || batchLoading) return;
+    setBatchLoading(true);
+    try {
+      const r = await batchDeprecateDimensionMembers(dimCode, selectedKeys);
+      message.success(`已废弃 ${r.deprecated} 个${r.skipped ? `（跳过 ${r.skipped} 个已废弃）` : ""}${r.failed.length ? `，失败 ${r.failed.length}` : ""}`);
+      setSelectedKeys([]);
+      reload();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "批量废弃失败");
+    } finally {
+      setBatchLoading(false);
+    }
+  }
+
+  async function handleBatchDelete() {
+    if (!dimCode || selectedKeys.length === 0 || batchLoading) return;
+    setBatchLoading(true);
+    try {
+      const r = await batchDeleteDimensionMembers(dimCode, selectedKeys);
+      message.success(`已删除 ${r.deleted} 个${r.failed.length ? `，失败 ${r.failed.length}` : ""}`);
+      setSelectedKeys([]);
+      reload();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "批量删除失败");
+    } finally {
+      setBatchLoading(false);
+    }
+  }
 
   useEffect(() => {
     listDimensions({ page_size: 200 }).then((r) => setDims(r.items)).catch(() => {});
@@ -1367,7 +1519,129 @@ function MembersTab() {
               从表自动获取
             </Button>
           )}
+          {can("dimension:create") && (
+            <Button
+              icon={<DatabaseOutlined />}
+              disabled={!dimCode}
+              type={isSnapshot ? "primary" : "default"}
+              onClick={() => {
+                bindForm.setFieldsValue({
+                  source_id: currentDim?.source_id ?? undefined,
+                  table: currentDim?.source_table ?? undefined,
+                  column: currentDim?.source_column ?? undefined,
+                  refresh_interval_hours: currentDim?.refresh_interval_hours ?? 24,
+                });
+                setBindOpen(true);
+              }}
+            >
+              {isSnapshot ? "重新绑定表列" : "绑定表列（引用型）"}
+            </Button>
+          )}
+          {isSnapshot && can("dimension:create") && (
+            <>
+              <Button
+                icon={<ReloadOutlined />}
+                loading={refreshingSnapshot}
+                onClick={handleRefreshSnapshot}
+              >
+                刷新快照
+              </Button>
+              <Button icon={<DatabaseOutlined />} onClick={openSnapshotList}>
+                查看快照值
+              </Button>
+            </>
+          )}
         </Space>
+      </div>
+      {isSnapshot && latestRun && (
+        <div
+          style={{
+            marginBottom: 12,
+            padding: "10px 12px",
+            background: "var(--bg-elevated, #fafafa)",
+            border: "1px solid var(--line-soft, #eef1f5)",
+            borderRadius: 6,
+            fontSize: 13,
+            color: "var(--text-2)",
+            lineHeight: 1.7,
+          }}
+        >
+          <Space size={16} wrap>
+            <span>
+              引用型值来源：<span className="mono">{currentDim?.source_table}.{currentDim?.source_column}</span>
+              {" "}(<span className="muted">{currentDim?.source_id}</span>)
+            </span>
+            <Tag color={latestRun.status === "SUCCESS" ? "success" : latestRun.status === "FAILED" ? "error" : "processing"}>
+              {latestRun.status === "SUCCESS" ? "快照正常" : latestRun.status === "FAILED" ? "最近刷新失败" : "刷新中"}
+            </Tag>
+            <span>值总数 <b>{latestRun.total_count}</b></span>
+            <span>新增 <Tag color="green">{latestRun.added_count}</Tag></span>
+            <span>消失 <Tag color="red">{latestRun.removed_count}</Tag></span>
+            <span>空值率 <Tag color={latestRun.null_rate != null && latestRun.null_rate > 0.05 ? "orange" : "default"}>
+              {latestRun.null_rate != null ? `${(latestRun.null_rate * 100).toFixed(2)}%` : "—"}
+            </Tag></span>
+            <span className="muted">最近刷新：{latestRun.snapshot_at ? formatCnTime(latestRun.snapshot_at) : "—"}</span>
+          </Space>
+          {(latestRun.added_sample?.length || latestRun.removed_sample?.length) ? (
+            <div style={{ marginTop: 4 }}>
+              {latestRun.added_sample?.length ? (
+                <span>
+                  新增样本：{latestRun.added_sample.map((v) => <Tag key={v} className="mono" style={{ marginLeft: 4 }}>{v}</Tag>)}
+                </span>
+              ) : null}
+              {latestRun.removed_sample?.length ? (
+                <span style={{ marginLeft: 8 }}>
+                  消失样本：{latestRun.removed_sample.map((v) => <Tag key={v} className="mono" style={{ marginLeft: 4 }} color="red">{v}</Tag>)}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      )}
+      <div style={{ marginBottom: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <span className="muted" style={{ fontSize: 12 }}>
+          {selectedKeys.length > 0 ? `已选 ${selectedKeys.length} 个成员` : "勾选成员后可批量操作"}
+        </span>
+        {can("dimension:edit") && (
+          <Button
+            size="small"
+            disabled={selectedKeys.length === 0 || batchLoading}
+            loading={batchLoading}
+            onClick={handleBatchPublish}
+          >
+            批量发布
+          </Button>
+        )}
+        {can("dimension:edit") && (
+          <Popconfirm
+            title={`废弃选中的 ${selectedKeys.length} 个成员？`}
+            description="存在子成员/被指标绑定默认值的成员将失败并跳过"
+            okText="批量废弃"
+            okButtonProps={{ danger: true }}
+            trigger="click"
+            disabled={selectedKeys.length === 0 || batchLoading}
+            onConfirm={handleBatchDeprecate}
+          >
+            <Button size="small" danger disabled={selectedKeys.length === 0 || batchLoading}>
+              批量废弃
+            </Button>
+          </Popconfirm>
+        )}
+        {can("dimension:edit") && (
+          <Popconfirm
+            title={`删除选中的 ${selectedKeys.length} 个成员？`}
+            description="级联删除整棵子树；被指标绑定默认值的成员将失败"
+            okText="批量删除"
+            okButtonProps={{ danger: true }}
+            trigger="click"
+            disabled={selectedKeys.length === 0 || batchLoading}
+            onConfirm={handleBatchDelete}
+          >
+            <Button size="small" danger icon={<DeleteOutlined />} disabled={selectedKeys.length === 0 || batchLoading}>
+              批量删除
+            </Button>
+          </Popconfirm>
+        )}
       </div>
       <Table
         dataSource={buildMemberTree(members)}
@@ -1376,6 +1650,11 @@ function MembersTab() {
         size="small"
         pagination={false}
         locale={{ emptyText: "请选择维度查看成员" }}
+        rowSelection={can("dimension:edit") ? {
+          selectedRowKeys: selectedKeys,
+          onChange: (keys: Key[]) => setSelectedKeys(keys.map(String)),
+          preserveSelectedRowKeys: true,
+        } : undefined}
         columns={[
           { title: "成员编码", dataIndex: "member_code", key: "member_code", render: (v: string) => <span className="mono">{v}</span> },
           { title: "名称", dataIndex: "member_name", key: "member_name" },
@@ -1575,6 +1854,98 @@ function MembersTab() {
         )}
       </Modal>
 
+      {/* 绑定引用型值来源：值集合 = 源表列快照（大基数维度，不再逐值维护 member 表） */}
+      <Modal
+        title={`绑定引用型值来源 → ${dimCode ?? ""}`}
+        open={bindOpen}
+        onCancel={() => {
+          setBindOpen(false);
+          bindForm.resetFields();
+        }}
+        onOk={() => bindForm.submit()}
+        okText="绑定"
+        confirmLoading={bindSaving}
+        width={560}
+      >
+        <Form form={bindForm} layout="vertical" scrollToFirstError onFinish={handleBindReference} style={{ marginTop: 8 }}>
+          <div
+            style={{
+              marginBottom: 12,
+              padding: "8px 12px",
+              background: "var(--bg-elevated, #fafafa)",
+              border: "1px solid var(--line-soft, #eef1f5)",
+              borderRadius: 6,
+              fontSize: 12,
+              color: "var(--text-2)",
+              lineHeight: 1.6,
+            }}
+          >
+            引用型 = 维度取值来自<b>维度表列</b>（如客户表 customer_id），值集合为
+            <code className="mono">SELECT DISTINCT</code> 列值快照，<b>无需逐个维护成员</b>。
+            适合客户/商品/医生等<b>大基数维度</b>；刷新快照可自动检测新增/消失值。
+          </div>
+          <Form.Item name="source_id" label="数据源" rules={[{ required: true, message: "请选择数据源" }]}>
+            <Select
+              showSearch
+              optionFilterProp="label"
+              placeholder="选择数据源（须已注册）"
+              options={dataSources.map((s) => ({ value: s.source_id, label: `${s.name}（${s.source_id}）` }))}
+            />
+          </Form.Item>
+          <Form.Item
+            name="table"
+            label="表名"
+            extra={<span className="muted" style={{ fontSize: 12 }}>可带库前缀，如 dwd.dim_customer</span>}
+            rules={[
+              { required: true, message: "请输入表名" },
+              { pattern: /^[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*$/, message: "表名不合法" },
+            ]}
+          >
+            <Input className="mono" placeholder="如 dwd.dim_customer" />
+          </Form.Item>
+          <Form.Item
+            name="column"
+            label="列名"
+            rules={[
+              { required: true, message: "请输入列名" },
+              { pattern: /^[a-zA-Z_][a-zA-Z0-9_]*$/, message: "列名不合法" },
+            ]}
+          >
+            <Input className="mono" placeholder="如 customer_id" />
+          </Form.Item>
+          <Form.Item name="refresh_interval_hours" label="快照刷新间隔（小时）" extra={<span className="muted" style={{ fontSize: 12 }}>系统每 30 分钟扫描到期维度自动刷新；默认 24 小时</span>}>
+            <InputNumber min={1} max={2160} style={{ width: 160 }} />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 引用型维度快照值列表 */}
+      <Modal
+        title={`快照值 → ${dimCode ?? ""}（${snapshots.filter((s) => s.status === "ACTIVE").length} 个当前值）`}
+        open={snapshotOpen}
+        onCancel={() => setSnapshotOpen(false)}
+        footer={null}
+        width={560}
+      >
+        <Table
+          dataSource={snapshots}
+          rowKey="id"
+          size="small"
+          loading={snapshotLoading}
+          pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 条` }}
+          columns={[
+            { title: "值", dataIndex: "value", render: (v: string) => <span className="mono">{v}</span> },
+            { title: "批次", dataIndex: "snapshot_at", width: 170, render: (v: string) => formatCnTime(v) },
+            {
+              title: "状态",
+              dataIndex: "status",
+              width: 100,
+              render: (s: string) => (s === "ACTIVE" ? <Tag color="success">当前批</Tag> : <Tag color="error">已消失</Tag>),
+            },
+          ]}
+        />
+      </Modal>
+
       <Modal
         title={editTarget ? `编辑成员：${editTarget.member_code}` : "编辑成员"}
         open={editOpen}
@@ -1647,6 +2018,104 @@ function MappingsTab() {
   const [editSaving, setEditSaving] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editForm] = Form.useForm();
+
+  // 值级映射：source_value → target_value 逐值对应（供翻译服务消费）
+  const [valueOpen, setValueOpen] = useState(false);
+  const [valueMapping, setValueMapping] = useState<DimensionMapping | null>(null);
+  const [valueItems, setValueItems] = useState<DimensionMappingValue[]>([]);
+  const [valueTotal, setValueTotal] = useState(0);
+  const [valuePage, setValuePage] = useState(1);
+  const [valueLoading, setValueLoading] = useState(false);
+  const [mvForm] = Form.useForm();
+  const [mvSaving, setMvSaving] = useState(false);
+  const [coverage, setCoverage] = useState<MappingCoverage | null>(null);
+  const [coverageLoading, setCoverageLoading] = useState(false);
+  // 翻译预览
+  const [translateText, setTranslateText] = useState("");
+  const [translateResults, setTranslateResults] = useState<TranslateResult[]>([]);
+  const [translating, setTranslating] = useState(false);
+
+  async function loadValueItems(mappingId: number, p = valuePage) {
+    setValueLoading(true);
+    try {
+      const r = await listDimensionMappingValues(mappingId, p, 50);
+      setValueItems(r.items);
+      setValueTotal(r.total);
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载值级映射失败");
+    } finally {
+      setValueLoading(false);
+    }
+  }
+
+  async function loadCoverage(mappingId: number) {
+    setCoverageLoading(true);
+    try {
+      setCoverage(await getMappingCoverage(mappingId));
+    } catch {
+      setCoverage(null);
+    } finally {
+      setCoverageLoading(false);
+    }
+  }
+
+  async function openValueMapping(m: DimensionMapping) {
+    setValueMapping(m);
+    setValueItems([]);
+    setValueTotal(0);
+    setValuePage(1);
+    setCoverage(null);
+    setTranslateText("");
+    setTranslateResults([]);
+    setValueOpen(true);
+    await loadValueItems(m.id, 1);
+    await loadCoverage(m.id);
+  }
+
+  async function handleCreateMappingValue(values: Record<string, unknown>) {
+    if (!valueMapping || mvSaving) return;
+    setMvSaving(true);
+    try {
+      await createDimensionMappingValue(valueMapping.id, {
+        source_value: String(values.source_value),
+        target_value: String(values.target_value),
+      });
+      message.success("值级映射已添加");
+      mvForm.resetFields();
+      await loadValueItems(valueMapping.id);
+      await loadCoverage(valueMapping.id);
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "添加失败");
+    } finally {
+      setMvSaving(false);
+    }
+  }
+
+  async function handleDeleteMappingValue(v: DimensionMappingValue) {
+    if (!valueMapping) return;
+    try {
+      await deleteDimensionMappingValue(v.id);
+      message.success("值级映射已删除");
+      await loadValueItems(valueMapping.id);
+      await loadCoverage(valueMapping.id);
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "删除失败");
+    }
+  }
+
+  async function handleTranslate() {
+    if (!valueMapping || !translateText.trim() || translating) return;
+    setTranslating(true);
+    try {
+      const values = translateText.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean).slice(0, 100);
+      const r = await translateDimensionValues(valueMapping.source_dim_code, valueMapping.target_dim_code, values);
+      setTranslateResults(r.results);
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "翻译失败");
+    } finally {
+      setTranslating(false);
+    }
+  }
 
   async function load() {
     const seq = ++loadSeq.current;
@@ -1745,6 +2214,9 @@ function MappingsTab() {
       width: 150,
       render: (_: unknown, m: DimensionMapping) => (
         <Space size={4} wrap>
+          {can("dimension:mapping") && (
+            <Button size="small" icon={<DatabaseOutlined />} onClick={() => openValueMapping(m)}>值级映射</Button>
+          )}
           {can("dimension:mapping") && (
             <Button size="small" icon={<EditOutlined />} onClick={() => openEditMapping(m)}>编辑</Button>
           )}
@@ -1880,12 +2352,131 @@ function MappingsTab() {
           </Form.Item>
         </Form>
       </Modal>
+
+      {/* 值级映射：source_value → target_value 逐值对应 + 覆盖率 + 翻译预览 */}
+      <Modal
+        title={valueMapping ? `值级映射：${valueMapping.source_dim_code} → ${valueMapping.target_dim_code}` : "值级映射"}
+        open={valueOpen}
+        onCancel={() => setValueOpen(false)}
+        footer={null}
+        width={760}
+      >
+        <div
+          style={{
+            marginBottom: 12,
+            padding: "8px 12px",
+            background: "var(--bg-elevated, #fafafa)",
+            border: "1px solid var(--line-soft, #eef1f5)",
+            borderRadius: 6,
+            fontSize: 12,
+            color: "var(--text-2)",
+            lineHeight: 1.6,
+          }}
+        >
+          值级映射是<b>机器可消费</b>的逐值对应（如 <code className="mono">dept_01 → 内科</code>），
+          供跨系统对账/翻译服务调用；未配置逐值映射的源值由「表达式」仅作人工参考（原样返回）。
+        </div>
+        <Space size={16} wrap style={{ marginBottom: 12 }}>
+          <span>覆盖率：</span>
+          {coverageLoading ? <span className="muted">计算中…</span> : coverage ? (
+            <>
+              <span>
+                已映射 <Tag color={coverage.covered > 0 ? "success" : "default"}>{coverage.covered}</Tag> /{" "}
+                <b>{coverage.total}</b> 个源值
+              </span>
+              <span>
+                未映射{" "}
+                <Tag color={coverage.uncovered.length > 0 ? "warning" : "success"}>
+                  {coverage.uncovered.length}{coverage.uncovered.length >= 50 ? "+" : ""}
+                </Tag>
+              </span>
+              {coverage.uncovered.length > 0 && (
+                <Tooltip title={coverage.uncovered.slice(0, 30).join("、")}>
+                  <span className="muted" style={{ cursor: "help" }}>未映射值清单</span>
+                </Tooltip>
+              )}
+            </>
+          ) : null}
+        </Space>
+        <Form form={mvForm} layout="inline" onFinish={handleCreateMappingValue} style={{ marginBottom: 12 }}>
+          <Form.Item name="source_value" label="源值" rules={[{ required: true, message: "源值必填" }]}>
+            <Input className="mono" placeholder="源值" style={{ width: 200 }} />
+          </Form.Item>
+          <Form.Item name="target_value" label="目标值" rules={[{ required: true, message: "目标值必填" }]}>
+            <Input className="mono" placeholder="目标值" style={{ width: 200 }} />
+          </Form.Item>
+          <Form.Item>
+            <Button type="primary" htmlType="submit" loading={mvSaving} icon={<PlusOutlined />}>添加</Button>
+          </Form.Item>
+        </Form>
+        <Table
+          dataSource={valueItems}
+          rowKey="id"
+          size="small"
+          loading={valueLoading}
+          pagination={{
+            current: valuePage,
+            pageSize: 50,
+            total: valueTotal,
+            onChange: (p: number) => {
+              setValuePage(p);
+              if (valueMapping) loadValueItems(valueMapping.id, p);
+            },
+            showTotal: (t: number) => `共 ${t} 条`,
+          }}
+          columns={[
+            { title: "源值", dataIndex: "source_value", render: (v: string) => <span className="mono">{v}</span> },
+            { title: "目标值", dataIndex: "target_value", render: (v: string) => <span className="mono">{v}</span> },
+            {
+              title: "操作",
+              key: "actions",
+              width: 90,
+              render: (_: unknown, v: DimensionMappingValue) => (
+                <Popconfirm title="删除该值级映射？" okText="删除" okButtonProps={{ danger: true }} onConfirm={() => handleDeleteMappingValue(v)}>
+                  <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
+                </Popconfirm>
+              ),
+            },
+          ]}
+        />
+        <Divider style={{ margin: "12px 0" }} />
+        <div style={{ marginBottom: 8 }}>
+          <span style={{ fontSize: 13, fontWeight: 500 }}>翻译预览</span>
+          <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>
+            输入源值（逗号/空格分隔，最多 100 个）→ 查看翻译结果
+          </span>
+        </div>
+        <Space.Compact style={{ width: "100%", marginBottom: 8 }}>
+          <Input
+            className="mono"
+            placeholder="如 dept_01, dept_02"
+            value={translateText}
+            onChange={(e) => setTranslateText(e.target.value)}
+          />
+          <Button type="primary" loading={translating} onClick={handleTranslate}>翻译</Button>
+        </Space.Compact>
+        {translateResults.length > 0 && (
+          <div>
+            {translateResults.map((r) => (
+              <Tag
+                key={r.source_value}
+                color={r.covered ? "success" : "default"}
+                className="mono"
+                style={{ marginBottom: 4 }}
+              >
+                {r.source_value} → {r.target_value ?? "未配置映射"}{r.covered ? "" : "（表达式参考）"}
+              </Tag>
+            ))}
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
 
 function ReconciliationsTab() {
   const { can } = usePermission();
+  const navigate = useNavigate();
   const [items, setItems] = useState<Reconciliation[]>([]);
   const [metrics, setMetrics] = useState<MetricResponse[]>([]);
   const [loading, setLoading] = useState(false);
@@ -2024,6 +2615,24 @@ function ReconciliationsTab() {
           <Tag color="success">已通过</Tag>口径一致 · <Tag color="error">已驳回</Tag>存在漂移。
         </span>
       </div>
+      {/* 自动数值对账入口：dimension 侧为人工口径对账，质量中心承载自动数值对账 */}
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 12 }}
+        message={
+          <span>
+            本页为<b>人工口径对账</b>（语义端 vs 业务端口径文本复核）。如需<b>自动数值对账</b>
+            （基准值 vs 观测值，系统自动计算 diff 并生成 OK/WARN/ALERT，支持定时执行）——
+            请前往<b>质量中心 → 对账</b>。
+          </span>
+        }
+        action={
+          <Button size="small" icon={<SendOutlined />} onClick={() => navigate("/quality")}>
+            前往质量中心
+          </Button>
+        }
+      />
       <div style={{ marginBottom: 12, display: "flex", justifyContent: "flex-end" }}>
         {can("dimension:reconcile") && (
           <Button type="primary" icon={<SendOutlined />} onClick={() => setModalOpen(true)}>提交对账</Button>

@@ -36,8 +36,13 @@ from app.services.dimension.schemas import (
     DimensionMemberResponse,
     DimensionMemberUpdate,
     DimensionMetricBinding,
+    DimensionReferenceBind,
     DimensionResponse,
     DimensionUpdate,
+    MappingCoverageResponse,
+    MappingValueCreate,
+    MappingValueResponse,
+    MemberBatchRequest,
     MetricDimensionBind,
     MetricDimensionResponse,
     PreviewValuesRequest,
@@ -45,6 +50,10 @@ from app.services.dimension.schemas import (
     ReconciliationResponse,
     ReconciliationReview,
     ReconciliationSubmit,
+    SnapshotRunResponse,
+    SnapshotValueResponse,
+    TranslateRequest,
+    TranslateResponse,
 )
 from app.services.dimension.service import DimensionService
 from app.services.master_data_review.schemas import (
@@ -1202,3 +1211,376 @@ async def list_metric_dimensions(
         data={"items": [MetricDimensionResponse.from_model(i) for i in items], "total": len(items)},
         trace_id=trace_id,
     )
+
+
+# ---------------------------------------------------------------- 引用型维度
+
+
+@router.post(
+    "/{dim_code}/reference",
+    response_model=ApiResponse[DimensionResponse],
+    summary="绑定引用型值来源（维度值 = 源表列快照）",
+    dependencies=_WRITE_SCOPED_DEPS,
+)
+async def bind_dimension_reference(
+    dim_code: str,
+    request: DimensionReferenceBind,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[DimensionResponse]:
+    """将维度切换为引用型：值集合来自源表列快照（不再维护 member 表）。"""
+    dim = await DimensionService(db).bind_dimension_reference(dim_code, request)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.bind_reference",
+        entity_type="dimension",
+        entity_id=dim_code,
+        detail={
+            "source_id": request.source_id,
+            "table": request.table,
+            "column": request.column,
+            "refresh_interval_hours": request.refresh_interval_hours,
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=DimensionResponse.from_model(dim), trace_id=trace_id)
+
+
+@router.post(
+    "/{dim_code}/snapshots/refresh",
+    response_model=ApiResponse[dict],
+    summary="刷新引用型维度值快照",
+    dependencies=_WRITE_SCOPED_DEPS,
+)
+async def refresh_dimension_snapshot(
+    dim_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[dict]:
+    """手动触发快照刷新：拉全量 → diff → 写新批 + run 记录。"""
+    result = await DimensionService(db).refresh_dimension_snapshot(dim_code)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.refresh_snapshot",
+        entity_type="dimension",
+        entity_id=dim_code,
+        detail={
+            "snapshot_at": result.get("snapshot_at"),
+            "total": result.get("total"),
+            "added": len(result.get("added", [])),
+            "removed": len(result.get("removed", [])),
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
+@router.get(
+    "/{dim_code}/snapshots",
+    response_model=ApiResponse[dict],
+    summary="分页列出引用型维度快照值",
+    dependencies=_READ_DEPS,
+)
+async def list_dimension_snapshots(
+    dim_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=500),
+) -> ApiResponse[dict]:
+    items, total = await DimensionService(db).list_dimension_snapshots(
+        dim_code, page=page, page_size=page_size
+    )
+    return ok(
+        data={
+            "items": [
+                SnapshotValueResponse(
+                    id=s.id,
+                    dim_code=s.dim_code,
+                    value=s.value,
+                    snapshot_at=s.snapshot_at,
+                    status=s.status,
+                )
+                for s in items
+            ],
+            "total": total,
+        },
+        trace_id=trace_id,
+    )
+
+
+@router.get(
+    "/{dim_code}/snapshots/latest-run",
+    response_model=ApiResponse[SnapshotRunResponse | None],
+    summary="最近一次快照刷新运行记录",
+    dependencies=_READ_DEPS,
+)
+async def get_latest_snapshot_run(
+    dim_code: str,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[SnapshotRunResponse | None]:
+    run = await DimensionService(db).get_latest_snapshot_run(dim_code)
+    return ok(
+        data=SnapshotRunResponse.from_model(run) if run is not None else None,
+        trace_id=trace_id,
+    )
+
+
+# ---------------------------------------------------------------- 成员批量操作
+
+
+@router.post(
+    "/{dim_code}/members/batch-publish",
+    response_model=ApiResponse[dict],
+    summary="批量发布维度成员",
+    dependencies=_WRITE_SCOPED_DEPS,
+)
+async def batch_publish_members(
+    dim_code: str,
+    request: MemberBatchRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[dict]:
+    result = await DimensionService(db).batch_publish_members(
+        dim_code, request.member_codes
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.batch_publish_members",
+        entity_type="dimension",
+        entity_id=f"{dim_code}:batch:{len(request.member_codes)}",
+        detail={
+            "published": result.get("published"),
+            "skipped": result.get("skipped"),
+            "failed_codes": [f["code"] for f in result.get("failed", [])],
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
+@router.post(
+    "/{dim_code}/members/batch-deprecate",
+    response_model=ApiResponse[dict],
+    summary="批量废弃维度成员",
+    dependencies=_WRITE_SCOPED_DEPS,
+)
+async def batch_deprecate_members(
+    dim_code: str,
+    request: MemberBatchRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[dict]:
+    result = await DimensionService(db).batch_deprecate_members(
+        dim_code, request.member_codes
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.batch_deprecate_members",
+        entity_type="dimension",
+        entity_id=f"{dim_code}:batch:{len(request.member_codes)}",
+        detail={
+            "deprecated": result.get("deprecated"),
+            "skipped": result.get("skipped"),
+            "failed_codes": [f["code"] for f in result.get("failed", [])],
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
+@router.post(
+    "/{dim_code}/members/batch-delete",
+    response_model=ApiResponse[dict],
+    summary="批量删除维度成员（级联子树并集）",
+    dependencies=_WRITE_SCOPED_DEPS,
+)
+async def batch_delete_members(
+    dim_code: str,
+    request: MemberBatchRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[dict]:
+    result = await DimensionService(db).batch_delete_members(
+        dim_code, request.member_codes
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.batch_delete_members",
+        entity_type="dimension",
+        entity_id=f"{dim_code}:batch:{len(request.member_codes)}",
+        detail={
+            "deleted": result.get("deleted"),
+            "failed_codes": [f["code"] for f in result.get("failed", [])],
+        },
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=result, trace_id=trace_id)
+
+
+# ---------------------------------------------------------------- 值级映射
+
+
+@router.post(
+    "/mappings/{mapping_id}/values",
+    response_model=ApiResponse[MappingValueResponse],
+    summary="新增值级映射（source_value → target_value）",
+    dependencies=_MAPPING_SCOPED_DEPS,
+)
+async def create_mapping_value(
+    mapping_id: int,
+    request: MappingValueCreate,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MappingValueResponse]:
+    mv = await DimensionService(db).create_mapping_value(mapping_id, request, user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.create_mapping_value",
+        entity_type="dimension_mapping",
+        entity_id=str(mapping_id),
+        detail={"source_value": request.source_value, "target_value": request.target_value},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data=MappingValueResponse(
+            id=mv.id,
+            mapping_id=mv.mapping_id,
+            source_value=mv.source_value,
+            target_value=mv.target_value,
+            created_by=mv.created_by,
+            created_at=mv.created_at,
+        ),
+        trace_id=trace_id,
+    )
+
+
+@router.get(
+    "/mappings/{mapping_id}/values",
+    response_model=ApiResponse[dict],
+    summary="分页列出值级映射",
+    dependencies=_READ_DEPS,
+)
+async def list_mapping_values(
+    mapping_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=500),
+) -> ApiResponse[dict]:
+    items, total = await DimensionService(db).list_mapping_values(
+        mapping_id, page=page, page_size=page_size
+    )
+    return ok(
+        data={
+            "items": [
+                MappingValueResponse(
+                    id=mv.id,
+                    mapping_id=mv.mapping_id,
+                    source_value=mv.source_value,
+                    target_value=mv.target_value,
+                    created_by=mv.created_by,
+                    created_at=mv.created_at,
+                )
+                for mv in items
+            ],
+            "total": total,
+        },
+        trace_id=trace_id,
+    )
+
+
+@router.delete(
+    "/mapping-values/{value_id}",
+    response_model=ApiResponse[dict],
+    summary="删除值级映射",
+    dependencies=_MAPPING_DEPS,
+)
+async def delete_mapping_value(
+    value_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[dict]:
+    await DimensionService(db).delete_mapping_value(value_id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dimension.delete_mapping_value",
+        entity_type="dimension_mapping",
+        entity_id=str(value_id),
+        detail={},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data={"deleted": True}, trace_id=trace_id)
+
+
+@router.get(
+    "/mappings/{mapping_id}/coverage",
+    response_model=ApiResponse[MappingCoverageResponse],
+    summary="值级映射覆盖率（未映射源值清单）",
+    dependencies=_READ_DEPS,
+)
+async def mapping_coverage(
+    mapping_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[MappingCoverageResponse]:
+    coverage = await DimensionService(db).mapping_coverage(mapping_id)
+    return ok(data=coverage, trace_id=trace_id)
+
+
+@router.post(
+    "/translate",
+    response_model=ApiResponse[TranslateResponse],
+    summary="批量值翻译（源维度值 → 目标维度值）",
+    dependencies=_READ_DEPS,
+)
+async def translate_values(
+    request: TranslateRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[TranslateResponse]:
+    results = await DimensionService(db).translate_values(
+        request.source_dim_code, request.target_dim_code, request.values
+    )
+    return ok(data=TranslateResponse(results=results), trace_id=trace_id)

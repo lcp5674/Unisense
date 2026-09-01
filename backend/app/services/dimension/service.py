@@ -14,7 +14,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
@@ -30,14 +30,20 @@ from app.core.logging import get_logger
 from app.models.dimension import (
     Dimension,
     DimensionMapping,
+    DimensionMappingValue,
     DimensionMember,
+    DimensionSnapshotRun,
     DimensionStatus,
     DimensionType,
+    DimensionValueSnapshot,
     MappingType,
     MetricDimension,
     MetricDimensionRole,
     Reconciliation,
     ReconciliationStatus,
+    SnapshotRunStatus,
+    SnapshotStatus,
+    SyncMode,
 )
 from app.models.metric import Metric
 from app.models.metric_version import MetricVersion
@@ -48,10 +54,14 @@ from app.services.dimension.schemas import (
     DimensionMappingUpdate,
     DimensionMemberCreate,
     DimensionMemberUpdate,
+    DimensionReferenceBind,
     DimensionUpdate,
+    MappingCoverageResponse,
+    MappingValueCreate,
     MetricDimensionBind,
     ReconciliationReview,
     ReconciliationSubmit,
+    TranslateResult,
 )
 from app.services.master_data_review.service import MasterDataReviewMixin
 
@@ -1252,3 +1262,588 @@ class DimensionService(BaseService, MasterDataReviewMixin):
             "total": len(values),
             "truncated": len(values) >= limit,
         }
+
+    # ------------------------------------------------------------ 引用型维度
+
+    @staticmethod
+    def _validate_identifier(name: str) -> None:
+        """校验表名/列名为合法标识符（防注入，逐段非数字开头，可用点分隔库前缀）。"""
+        _id_re = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*$")
+        if not _id_re.match(name):
+            raise ValidationError("表名/列名不合法（仅允许字母数字下划线，可用点分隔库前缀）")
+
+    async def _load_source(self, source_id: str):
+        """加载已注册数据源（不存在抛 404），供引用型拉取/计数复用。"""
+        from app.models.data_source import DataSource
+
+        src = (
+            await self._db.execute(
+                select(DataSource).where(DataSource.source_id == source_id)
+            )
+        ).scalar_one_or_none()
+        if src is None:
+            raise NotFoundError(f"数据源不存在: {source_id}")
+        return src
+
+    async def _fetch_column_values(
+        self, source_id: str, table: str, column: str
+    ) -> list[str]:
+        """从源表列拉取去重非空值全量（keyset 分页，每批 5000，适合百万级大表）。
+
+        首查 ``SELECT DISTINCT col FROM tbl``，之后以 ``WHERE col > :last``
+        翻页；NULL 行被比较语义排除，空值率由 ``_count_null_stats`` 单独统计。
+        """
+        src = await self._load_source(source_id)
+        self._validate_identifier(table)
+        self._validate_identifier(column)
+        safe_table = ".".join(f"`{p}`" for p in table.split("."))
+        safe_col = f"`{column}`"
+        from app.services.collector.connectors import registry
+
+        collector = registry.build(src.source_type, src.connection_config)
+        try:
+            values: list[str] = []
+            last: str | None = None
+            while True:
+                where = f"WHERE {safe_col} > :last" if last is not None else ""
+                sql = (
+                    f"SELECT DISTINCT {safe_col} AS v FROM {safe_table} "
+                    f"{where} ORDER BY {safe_col} LIMIT 5000"
+                )
+                params: dict[str, Any] | None = {"last": last} if last is not None else None
+                rows = await collector.query(sql, params)
+                if not rows:
+                    break
+                batch = [
+                    str(r["v"]).strip()
+                    for r in rows
+                    if r.get("v") is not None and str(r["v"]).strip() != ""
+                ]
+                if not batch:
+                    break
+                values.extend(batch)
+                last = batch[-1]
+                if len(rows) < 5000:
+                    break
+            return list(dict.fromkeys(values))
+        except ExternalDependencyError:
+            raise
+        except Exception as exc:
+            raise UnisenseError(f"拉取维度值快照失败: {exc}") from exc
+        finally:
+            await collector.dispose()
+
+    async def _count_null_stats(
+        self, source_id: str, table: str, column: str
+    ) -> dict[str, int]:
+        """统计源表列的空值数（``COUNT(*) - COUNT(col)``，一次查询两列）。"""
+        src = await self._load_source(source_id)
+        self._validate_identifier(table)
+        self._validate_identifier(column)
+        safe_table = ".".join(f"`{p}`" for p in table.split("."))
+        safe_col = f"`{column}`"
+        sql = f"SELECT COUNT(*) AS total, COUNT({safe_col}) AS non_null FROM {safe_table}"
+        from app.services.collector.connectors import registry
+
+        collector = registry.build(src.source_type, src.connection_config)
+        try:
+            rows = await collector.query(sql)
+        finally:
+            await collector.dispose()
+        row = rows[0] if rows else {}
+        total = int(row.get("total") or 0)
+        non_null = int(row.get("non_null") or 0)
+        return {"total": total, "null_count": max(total - non_null, 0)}
+
+    async def bind_dimension_reference(
+        self, dim_code: str, data: DimensionReferenceBind
+    ) -> Dimension:
+        """绑定引用型值来源（维度值 = 源表列快照，不再维护 member 表）。"""
+        dim = await self._require_active(dim_code)
+        await self._load_source(data.source_id)
+        self._validate_identifier(data.table)
+        self._validate_identifier(data.column)
+        dim.source_id = data.source_id
+        dim.source_table = data.table
+        dim.source_column = data.column
+        dim.sync_mode = SyncMode.SNAPSHOT.value
+        dim.refresh_interval_hours = data.refresh_interval_hours
+        await self._db.commit()
+        return dim
+
+    async def refresh_dimension_snapshot(
+        self, dim_code: str, *, trigger: str = "manual"
+    ) -> dict[str, Any]:
+        """刷新引用型维度值快照：拉全量 → 与上一批 diff → 写新批 + run 记录。
+
+        - 新批次全部 ACTIVE；上一批存在、本批消失的行置 REMOVED（消失值检测）。
+        - 保留最近 2 个批次（``_prune_old_snapshots``），更早批次删除。
+        - 空值率 = ``COUNT(*) - COUNT(col)``，随 run 记录落库。
+        """
+        import time as _time
+
+        dim = await self._require_active(dim_code)
+        if dim.sync_mode != SyncMode.SNAPSHOT.value:
+            raise ValidationError(
+                f"维度未绑定引用型值来源: {dim_code}",
+                error_code="NOT_SNAPSHOT_MODE",
+            )
+        if not dim.source_id or not dim.source_table or not dim.source_column:
+            raise ValidationError(
+                f"维度引用来源信息不完整: {dim_code}", error_code="REFERENCE_INCOMPLETE"
+            )
+        started = _time.monotonic()
+        now = datetime.now(UTC).replace(microsecond=0)
+        run = DimensionSnapshotRun(
+            dim_code=dim_code, snapshot_at=now, status=SnapshotRunStatus.RUNNING.value
+        )
+        self._db.add(run)
+        await self._db.flush()
+        try:
+            values = await self._fetch_column_values(
+                dim.source_id, dim.source_table, dim.source_column
+            )
+            null_stats = await self._count_null_stats(
+                dim.source_id, dim.source_table, dim.source_column
+            )
+            prev_rows = (
+                (
+                    await self._db.execute(
+                        select(DimensionValueSnapshot).where(
+                            DimensionValueSnapshot.dim_code == dim_code,
+                            DimensionValueSnapshot.snapshot_at < now,
+                            DimensionValueSnapshot.status
+                            == SnapshotStatus.ACTIVE.value,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            prev_values = {r.value for r in prev_rows}
+            curr_values = set(values)
+            added = sorted(curr_values - prev_values)
+            removed = sorted(prev_values - curr_values)
+            if values:
+                self._db.add_all(
+                    [
+                        DimensionValueSnapshot(
+                            dim_code=dim_code,
+                            source_id=dim.source_id,
+                            source_table=dim.source_table,
+                            source_column=dim.source_column,
+                            value=v,
+                            snapshot_at=now,
+                            status=SnapshotStatus.ACTIVE.value,
+                        )
+                        for v in values
+                    ]
+                )
+            if removed:
+                removed_set = set(removed)
+                for r in prev_rows:
+                    if r.value in removed_set:
+                        r.status = SnapshotStatus.REMOVED.value
+            await self._prune_old_snapshots(dim_code, now)
+            null_count = null_stats["null_count"]
+            total_count = len(values)
+            null_rate = (
+                round(null_count / max(null_stats["total"], 1), 4)
+                if null_stats["total"]
+                else None
+            )
+            run.status = SnapshotRunStatus.SUCCESS.value
+            run.total_count = total_count
+            run.added_count = len(added)
+            run.removed_count = len(removed)
+            run.null_count = null_count
+            run.null_rate = null_rate
+            run.added_sample = added[:50]
+            run.removed_sample = removed[:50]
+            run.duration_ms = int((_time.monotonic() - started) * 1000)
+            dim.last_snapshot_at = now
+            await self._db.commit()
+            return {
+                "dim_code": dim_code,
+                "snapshot_at": now.isoformat(),
+                "total": total_count,
+                "added": added,
+                "removed": removed,
+                "null_count": null_count,
+                "null_rate": null_rate,
+            }
+        except Exception as exc:
+            await self._db.rollback()
+            self._db.add(run)
+            run.status = SnapshotRunStatus.FAILED.value
+            run.error_msg = str(exc)[:2000]
+            run.duration_ms = int((_time.monotonic() - started) * 1000)
+            await self._db.commit()
+            raise
+
+    async def _prune_old_snapshots(self, dim_code: str, now: datetime) -> None:
+        """保留最近 2 个快照批次，删除更早批次（diff 只需上一批）。"""
+        at_rows = (
+            (
+                await self._db.execute(
+                    select(DimensionValueSnapshot.snapshot_at)
+                    .where(DimensionValueSnapshot.dim_code == dim_code)
+                    .distinct()
+                    .order_by(DimensionValueSnapshot.snapshot_at.desc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if len(at_rows) <= 2:
+            return
+        keep = set(at_rows[:2])
+        old = await self._db.execute(
+            select(DimensionValueSnapshot).where(
+                DimensionValueSnapshot.dim_code == dim_code,
+                DimensionValueSnapshot.snapshot_at.notin_(keep),
+            )
+        )
+        for row in old.scalars():
+            await self._db.delete(row)
+
+    async def list_dimension_snapshots(
+        self, dim_code: str, *, page: int = 1, page_size: int = 100
+    ) -> tuple[list[DimensionValueSnapshot], int]:
+        """分页列出引用型维度快照值（默认按批次倒序 + 值升序）。"""
+        await self._require(dim_code)
+        limit = min(max(page_size, 1), 500)
+        offset = (max(page, 1) - 1) * limit
+        total = (
+            await self._db.execute(
+                select(func.count())
+                .select_from(DimensionValueSnapshot)
+                .where(DimensionValueSnapshot.dim_code == dim_code)
+            )
+        ).scalar_one()
+        rows = (
+            (
+                await self._db.execute(
+                    select(DimensionValueSnapshot)
+                    .where(DimensionValueSnapshot.dim_code == dim_code)
+                    .order_by(
+                        DimensionValueSnapshot.snapshot_at.desc(),
+                        DimensionValueSnapshot.value.asc(),
+                    )
+                    .limit(limit)
+                    .offset(offset)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return list(rows), int(total)
+
+    async def get_latest_snapshot_run(
+        self, dim_code: str
+    ) -> DimensionSnapshotRun | None:
+        """最近一次快照刷新运行记录（无则 None）。"""
+        await self._require(dim_code)
+        return (
+            (
+                await self._db.execute(
+                    select(DimensionSnapshotRun)
+                    .where(DimensionSnapshotRun.dim_code == dim_code)
+                    .order_by(DimensionSnapshotRun.snapshot_at.desc())
+                    .limit(1)
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+    # ------------------------------------------------------------ 成员批量操作
+
+    async def batch_publish_members(
+        self, dim_code: str, member_codes: list[str]
+    ) -> dict[str, Any]:
+        """批量发布成员：逐条复用 publish_member 约束（父级废弃拦截、终态跳过）。
+
+        返回 ``{"published": n, "skipped": n, "failed": [{code, reason}]}``。
+        """
+        await self._require_active(dim_code)
+        published = 0
+        skipped = 0
+        failed: list[dict[str, Any]] = []
+        for code in member_codes:
+            try:
+                member = await self._repo.get_member(dim_code, code)
+                if member is None:
+                    failed.append({"code": code, "reason": "成员不存在"})
+                    continue
+                if member.status == DimensionStatus.PUBLISHED.value:
+                    skipped += 1
+                    continue
+                if member.status == DimensionStatus.DEPRECATED.value:
+                    failed.append({"code": code, "reason": "已废弃成员不可发布"})
+                    continue
+                await self.publish_member(dim_code, code)
+                published += 1
+            except (BusinessError, UnisenseError, NotFoundError, ConflictError) as exc:
+                failed.append({"code": code, "reason": str(exc)})
+        return {"published": published, "skipped": skipped, "failed": failed}
+
+    async def batch_deprecate_members(
+        self, dim_code: str, member_codes: list[str]
+    ) -> dict[str, Any]:
+        """批量废弃成员：逐条复用 deprecate_member 约束（子成员/绑定引用保护）。"""
+        await self._require_active(dim_code)
+        deprecated = 0
+        skipped = 0
+        failed: list[dict[str, Any]] = []
+        for code in member_codes:
+            try:
+                member = await self._repo.get_member(dim_code, code)
+                if member is None:
+                    failed.append({"code": code, "reason": "成员不存在"})
+                    continue
+                if member.status == DimensionStatus.DEPRECATED.value:
+                    skipped += 1
+                    continue
+                await self.deprecate_member(dim_code, code)
+                deprecated += 1
+            except (BusinessError, UnisenseError, NotFoundError, ConflictError) as exc:
+                failed.append({"code": code, "reason": str(exc)})
+        return {"deprecated": deprecated, "skipped": skipped, "failed": failed}
+
+    async def batch_delete_members(
+        self, dim_code: str, member_codes: list[str]
+    ) -> dict[str, Any]:
+        """批量删除成员：先 BFS 收集全部子树并集（父+子去重），再做绑定保护，一次性删。
+
+        ``delete_member`` 是级联子树删除；批量勾选父+子若不并集会重复删——本方法
+        先按 parent_code 建索引，对每个选中成员收集其整棵子树并入集合，随后逐成员
+        校验 default_member 引用保护（对称单条语义），最后一次性物理删除。
+        """
+        await self._require_active(dim_code)
+        members = await self._repo.list_members(dim_code)
+        children: dict[str, list[DimensionMember]] = {}
+        for m in members:
+            if m.parent_code:
+                children.setdefault(m.parent_code, []).append(m)
+        by_code = {m.member_code: m for m in members}
+        to_delete: dict[str, DimensionMember] = {}
+        failed: list[dict[str, Any]] = []
+        for code in member_codes:
+            member = by_code.get(code)
+            if member is None:
+                failed.append({"code": code, "reason": "成员不存在"})
+                continue
+            stack: list[DimensionMember] = [member]
+            seen: set[str] = set()
+            while stack:
+                cur = stack.pop()
+                if cur.member_code in seen:
+                    continue
+                seen.add(cur.member_code)
+                to_delete[cur.member_code] = cur
+                stack.extend(children.get(cur.member_code, []))
+        for doomed in to_delete.values():
+            bound = await self._repo.count_bindings_by_default_member(
+                dim_code, doomed.member_code
+            )
+            if bound > 0:
+                raise BusinessError(
+                    f"成员 {doomed.member_code} 正被 {bound} 个指标绑定为默认值，无法删除；"
+                    f"请先解绑相关指标",
+                    error_code="MEMBER_BOUND_BY_METRICS",
+                )
+        await self._repo.delete_members(list(to_delete.values()))
+        return {"deleted": len(to_delete), "failed": failed}
+
+    # ------------------------------------------------------------ 值级映射
+
+    async def create_mapping_value(
+        self, mapping_id: int, data: MappingValueCreate, actor_id: int | None = None
+    ) -> DimensionMappingValue:
+        mapping = await self._repo.get_mapping(mapping_id)
+        if mapping is None:
+            raise NotFoundError(f"维度映射不存在: {mapping_id}")
+        existing = (
+            await self._db.execute(
+                select(DimensionMappingValue).where(
+                    DimensionMappingValue.mapping_id == mapping_id,
+                    DimensionMappingValue.source_value == data.source_value,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            raise ConflictError(
+                f"源值已配置映射: {data.source_value}",
+                error_code="MAPPING_VALUE_EXISTS",
+            )
+        mv = DimensionMappingValue(
+            mapping_id=mapping_id,
+            source_value=data.source_value,
+            target_value=data.target_value,
+            created_by=actor_id if actor_id is not None else 0,
+        )
+        self._db.add(mv)
+        await self._db.commit()
+        return mv
+
+    async def list_mapping_values(
+        self, mapping_id: int, *, page: int = 1, page_size: int = 100
+    ) -> tuple[list[DimensionMappingValue], int]:
+        mapping = await self._repo.get_mapping(mapping_id)
+        if mapping is None:
+            raise NotFoundError(f"维度映射不存在: {mapping_id}")
+        limit = min(max(page_size, 1), 500)
+        offset = (max(page, 1) - 1) * limit
+        total = (
+            await self._db.execute(
+                select(func.count())
+                .select_from(DimensionMappingValue)
+                .where(DimensionMappingValue.mapping_id == mapping_id)
+            )
+        ).scalar_one()
+        rows = (
+            (
+                await self._db.execute(
+                    select(DimensionMappingValue)
+                    .where(DimensionMappingValue.mapping_id == mapping_id)
+                    .order_by(DimensionMappingValue.source_value.asc())
+                    .limit(limit)
+                    .offset(offset)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return list(rows), int(total)
+
+    async def delete_mapping_value(self, value_id: int) -> None:
+        mv = (
+            await self._db.execute(
+                select(DimensionMappingValue).where(
+                    DimensionMappingValue.id == value_id
+                )
+            )
+        ).scalar_one_or_none()
+        if mv is None:
+            raise NotFoundError(f"值级映射不存在: {value_id}")
+        await self._db.delete(mv)
+        await self._db.commit()
+
+    async def _source_value_set(self, dim_code: str) -> set[str]:
+        """源维度当前值集合：引用型取最新快照 ACTIVE 值，枚举型取成员编码。"""
+        dim = await self._repo.get_dimension(dim_code)
+        if dim is None:
+            raise NotFoundError(f"维度不存在: {dim_code}")
+        if dim.sync_mode == SyncMode.SNAPSHOT.value:
+            latest = await self.get_latest_snapshot_run(dim_code)
+            if latest is None:
+                return set()
+            rows = (
+                (
+                    await self._db.execute(
+                        select(DimensionValueSnapshot.value).where(
+                            DimensionValueSnapshot.dim_code == dim_code,
+                            DimensionValueSnapshot.snapshot_at == latest.snapshot_at,
+                            DimensionValueSnapshot.status == SnapshotStatus.ACTIVE.value,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return set(rows)
+        members = await self._repo.list_members(dim_code)
+        return {m.member_code for m in members}
+
+    async def translate_value(
+        self, source_dim_code: str, target_dim_code: str, value: str
+    ) -> TranslateResult:
+        """单值翻译：值级映射优先，未命中时 expression 仅原样返回（不执行）。"""
+        mapping = (
+            (
+                await self._db.execute(
+                    select(DimensionMapping)
+                    .where(
+                        DimensionMapping.source_dim_code == source_dim_code,
+                        DimensionMapping.target_dim_code == target_dim_code,
+                    )
+                    .order_by(
+                        DimensionMapping.mapping_type
+                        == MappingType.EQUIVALENT.value
+                    )
+                    .limit(1)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if mapping is None:
+            return TranslateResult(
+                source_value=value,
+                target_value=None,
+                covered=False,
+                source_dim_code=source_dim_code,
+                target_dim_code=target_dim_code,
+            )
+        mv = (
+            await self._db.execute(
+                select(DimensionMappingValue).where(
+                    DimensionMappingValue.mapping_id == mapping.id,
+                    DimensionMappingValue.source_value == value,
+                )
+            )
+        ).scalar_one_or_none()
+        if mv is not None:
+            return TranslateResult(
+                source_value=value,
+                target_value=mv.target_value,
+                covered=True,
+                source_dim_code=source_dim_code,
+                target_dim_code=target_dim_code,
+            )
+        # expression 兜底：仅原样返回（值级映射未配置时不做机器翻译）
+        return TranslateResult(
+            source_value=value,
+            target_value=value,
+            covered=False,
+            source_dim_code=source_dim_code,
+            target_dim_code=target_dim_code,
+        )
+
+    async def translate_values(
+        self, source_dim_code: str, target_dim_code: str, values: list[str]
+    ) -> list[TranslateResult]:
+        """批量翻译（供前端翻译预览，逐值走 translate_value）。"""
+        return [
+            await self.translate_value(source_dim_code, target_dim_code, v)
+            for v in values
+        ]
+
+    async def mapping_coverage(self, mapping_id: int) -> MappingCoverageResponse:
+        """值级映射覆盖率：源维度当前值集合中已配置逐值映射的统计与未映射清单。"""
+        mapping = await self._repo.get_mapping(mapping_id)
+        if mapping is None:
+            raise NotFoundError(f"维度映射不存在: {mapping_id}")
+        source_vals = await self._source_value_set(mapping.source_dim_code)
+        configured = (
+            (
+                await self._db.execute(
+                    select(DimensionMappingValue.source_value).where(
+                        DimensionMappingValue.mapping_id == mapping_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        covered_set = set(configured)
+        total = len(source_vals)
+        covered = len(source_vals & covered_set)
+        uncovered = sorted(source_vals - covered_set)[:50]
+        return MappingCoverageResponse(
+            mapping_id=mapping_id,
+            total=total,
+            covered=covered,
+            uncovered=uncovered,
+        )

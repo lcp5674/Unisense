@@ -312,3 +312,131 @@ class PreviewValuesResponse(BaseModel):
     values: list[str] = Field(default_factory=list, description="去重后的枚举值")
     total: int = Field(default=0, description="实际获取条数")
     truncated: bool = Field(default=False, description="是否因达到 limit 被截断（结果不完整）")
+
+
+# ---------------------------------------------------------------- 引用型维度
+
+
+class DimensionReferenceBind(BaseModel):
+    """绑定维度值来源（引用型：值集合来自维度表列快照）。
+
+    绑定后 ``sync_mode`` 置 snapshot，值集合由 ``refresh_dimension_snapshot``
+    从源表列 ``SELECT DISTINCT`` 拉取并版本化落快照表；成员表不再维护该维度值。
+    """
+
+    source_id: str = Field(..., max_length=128, description="数据源 ID（须已注册）")
+    table: str = Field(..., max_length=256, description="维度值来源表（可带库前缀）")
+    column: str = Field(..., max_length=256, description="维度值来源列")
+    refresh_interval_hours: int = Field(
+        default=24, ge=1, le=24 * 90, description="快照刷新间隔（小时，默认 24）"
+    )
+
+
+class SnapshotValueResponse(BaseModel):
+    """引用型维度快照值（单行）。"""
+
+    id: int
+    dim_code: str
+    value: str
+    snapshot_at: datetime
+    status: str
+
+
+class SnapshotRunResponse(BaseModel):
+    """引用型维度快照刷新记录（单次运行统计）。"""
+
+    id: int
+    dim_code: str
+    snapshot_at: datetime
+    status: str
+    total_count: int = 0
+    added_count: int = 0
+    removed_count: int = 0
+    null_count: int = 0
+    null_rate: float | None = None
+    added_sample: list[str] | None = None
+    removed_sample: list[str] | None = None
+    error_msg: str | None = None
+    duration_ms: int | None = None
+    created_at: datetime | None = None
+
+    @classmethod
+    def from_model(cls, m: Any) -> SnapshotRunResponse:
+        return cls(
+            id=m.id,
+            dim_code=m.dim_code,
+            snapshot_at=m.snapshot_at,
+            status=m.status,
+            total_count=m.total_count,
+            added_count=m.added_count,
+            removed_count=m.removed_count,
+            null_count=m.null_count,
+            null_rate=float(m.null_rate) if m.null_rate is not None else None,
+            added_sample=m.added_sample,
+            removed_sample=m.removed_sample,
+            error_msg=getattr(m, "error_msg", None),
+            duration_ms=getattr(m, "duration_ms", None),
+            created_at=getattr(m, "created_at", None),
+        )
+
+
+class MemberBatchRequest(BaseModel):
+    """维度成员批量操作（发布/废弃/删除）请求体。"""
+
+    member_codes: list[str] = Field(
+        ..., min_length=1, max_length=500, description="成员编码列表"
+    )
+
+
+# ---------------------------------------------------------------- 值级映射
+
+
+class MappingValueCreate(BaseModel):
+    """值级维度映射（source_value → target_value 逐值对应）。"""
+
+    source_value: str = Field(..., max_length=512, description="源值")
+    target_value: str = Field(..., max_length=512, description="目标值")
+
+
+class MappingValueResponse(BaseModel):
+    """值级映射记录（单行）。"""
+
+    id: int
+    mapping_id: int
+    source_value: str
+    target_value: str
+    created_by: int
+    created_at: datetime | None = None
+
+
+class MappingCoverageResponse(BaseModel):
+    """值级映射覆盖率（源维度当前值集合中已配置/未配置逐值映射的统计）。"""
+
+    mapping_id: int
+    total: int = Field(default=0, description="源值集合总数")
+    covered: int = Field(default=0, description="已配置逐值映射数")
+    uncovered: list[str] = Field(default_factory=list, description="未映射源值样本")
+
+
+class TranslateRequest(BaseModel):
+    """批量值翻译请求（source 维度值 → target 维度值）。"""
+
+    source_dim_code: str = Field(..., max_length=64, description="源维度编码")
+    target_dim_code: str = Field(..., max_length=64, description="目标维度编码")
+    values: list[str] = Field(..., min_length=1, max_length=500, description="待翻译的源值列表")
+
+
+class TranslateResult(BaseModel):
+    """单值翻译结果。"""
+
+    source_value: str
+    target_value: str | None = Field(default=None, description="翻译结果（未命中/无映射为 None）")
+    covered: bool = Field(default=False, description="是否命中值级映射")
+    source_dim_code: str
+    target_dim_code: str
+
+
+class TranslateResponse(BaseModel):
+    """批量值翻译结果。"""
+
+    results: list[TranslateResult] = Field(default_factory=list)

@@ -1659,3 +1659,310 @@ async def test_dimension_review_blocks_update() -> None:
     except UnisenseError as exc:
         assert exc.error_code == "INVALID_STATE"
         assert "审核中" in str(exc)
+
+
+# ---- 引用型维度（SNAPSHOT 快照 + 值级映射） ----
+
+
+def _snapshot_dim(**kw) -> Dimension:
+    """构造 sync_mode=snapshot 的维度对象。"""
+    defaults = {
+        "dim_code": "dim_customer",
+        "name": "客户",
+        "domain": "sales",
+        "type": "SCD2",
+        "status": "PUBLISHED",
+        "owner_id": 1,
+        "sync_mode": "snapshot",
+        "source_id": "s1",
+        "source_table": "dwd.dim_customer",
+        "source_column": "customer_id",
+        "refresh_interval_hours": 24,
+    }
+    defaults.update(kw)
+    return Dimension(**defaults)
+
+
+async def _snapshot_svc(dim: Dimension | None = None) -> tuple[DimensionService, MagicMock]:
+    """构造引用型测试用 svc：db 为 AsyncMock 化的 MagicMock，支持 execute/flush/commit。"""
+    db = MagicMock()
+    db.execute = AsyncMock()
+    db.flush = AsyncMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    db.add = MagicMock()
+    db.add_all = MagicMock()
+    db.delete = MagicMock()
+    svc = DimensionService(db)
+    repo = MagicMock()
+    repo.get_dimension = AsyncMock(return_value=dim)
+    repo.list_members = AsyncMock(return_value=[])
+    repo.get_member = AsyncMock(return_value=None)
+    repo.count_bindings_by_default_member = AsyncMock(return_value=0)
+    svc._repo = repo
+    return svc, repo
+
+
+def _exec_result(scalars: list | None = None, scalar: object = None) -> MagicMock:
+    """构造 execute 结果：同步 scalars()/scalar_one()/scalar_one_or_none() 链。
+
+    execute 本身是 AsyncMock（await 返回本对象），其后 .scalars().all() 是
+    同步调用链——必须用 MagicMock（AsyncMock 的 .scalars() 会返回 coroutine）。
+    """
+    r = MagicMock()
+    r.scalars.return_value.all.return_value = scalars or []
+    r.scalars.return_value.first.return_value = scalar
+    r.scalar_one.return_value = 0
+    r.scalar_one_or_none.return_value = scalar
+    return r
+
+
+async def test_refresh_dimension_snapshot_full_diff_and_run() -> None:
+    """刷新快照：拉全量 → 与上批 diff → 写新批 ACTIVE + 上批消失置 REMOVED + run 统计落库。"""
+    from datetime import UTC, datetime
+
+    svc, repo = await _snapshot_svc(_snapshot_dim())
+    now = datetime.now(UTC).replace(microsecond=0)
+    # 上批已有值 a/b，本批拉取 a/c → added=[c], removed=[b]
+    prev_row_b = MagicMock(value="b", status="ACTIVE")
+    prev_row_a = MagicMock(value="a", status="ACTIVE")
+    # execute 依次返回：prev_rows 查询 → prune 的 distinct 批次查询（返回 [now, prev]）
+    results = [
+        _exec_result(scalars=[prev_row_a, prev_row_b]),
+        _exec_result(scalars=[now]),
+    ]
+    svc._db.execute.side_effect = results
+    svc._fetch_column_values = AsyncMock(return_value=["a", "c"])
+    svc._count_null_stats = AsyncMock(return_value={"total": 10, "null_count": 2})
+
+    result = await svc.refresh_dimension_snapshot("dim_customer")
+
+    assert result["total"] == 2
+    assert result["added"] == ["c"]
+    assert result["removed"] == ["b"]
+    assert result["null_count"] == 2
+    assert result["null_rate"] == 0.2
+    # 新批次 ACTIVE 行写入
+    added_rows = list(svc._db.add_all.call_args.args[0])
+    assert {r.value for r in added_rows} == {"a", "c"}
+    assert all(r.status == "ACTIVE" for r in added_rows)
+    assert prev_row_b.status == "REMOVED"
+    # run 记录更新为 SUCCESS
+    run = svc._db.add.call_args.args[0]
+    assert run.status == "SUCCESS"
+    assert run.total_count == 2
+    assert run.added_count == 1
+    assert run.removed_count == 1
+    assert run.null_count == 2
+
+
+async def test_refresh_dimension_snapshot_rejects_non_snapshot() -> None:
+    """非引用型维度（sync_mode=none）拒绝刷新快照。"""
+    from app.core.exceptions import ValidationError
+
+    svc, repo = await _snapshot_svc(
+        Dimension(
+            dim_code="dim_x", name="X", domain="s", type="SCD1",
+            status="PUBLISHED", owner_id=1,
+        )
+    )
+    try:
+        await svc.refresh_dimension_snapshot("dim_x")
+        raise AssertionError("应拒绝非引用型刷新")
+    except ValidationError as exc:
+        assert exc.error_code == "NOT_SNAPSHOT_MODE"
+
+
+async def test_refresh_dimension_snapshot_failure_records_run_failed() -> None:
+    """刷新失败：run 记录置 FAILED 并携带 error_msg（不丢失统计口径）。"""
+    from app.core.exceptions import ValidationError
+
+    svc, repo = await _snapshot_svc(_snapshot_dim())
+    svc._fetch_column_values = AsyncMock(
+        side_effect=ValidationError("连接失败", error_code="CONN_ERR")
+    )
+    with pytest.raises(ValidationError):
+        await svc.refresh_dimension_snapshot("dim_customer")
+    # rollback 后重新 add run 置 FAILED
+    run = svc._db.add.call_args.args[0]
+    assert run.status == "FAILED"
+    assert "连接失败" in (run.error_msg or "")
+
+
+async def test_bind_dimension_reference_sets_snapshot_mode() -> None:
+    """绑定引用型值来源：校验数据源 + 标识符，置 sync_mode=snapshot。"""
+    from app.services.dimension.schemas import DimensionReferenceBind
+
+    svc, repo = await _snapshot_svc(
+        Dimension(
+            dim_code="dim_c", name="客户", domain="s", type="SCD1",
+            status="DRAFT", owner_id=1,
+        )
+    )
+    src_row = MagicMock(source_id="s1")
+    svc._db.execute = AsyncMock(return_value=_exec_result(scalar=src_row))
+    dim = await svc.bind_dimension_reference(
+        "dim_c",
+        DimensionReferenceBind(
+            source_id="s1", table="dwd.dim_c", column="id", refresh_interval_hours=48
+        ),
+    )
+    assert dim.sync_mode == "snapshot"
+    assert dim.source_table == "dwd.dim_c"
+    assert dim.refresh_interval_hours == 48
+
+
+async def test_bind_dimension_reference_rejects_bad_identifier() -> None:
+    """绑定非法表名/列名（注入防护）拒绝。"""
+    from app.core.exceptions import ValidationError
+    from app.services.dimension.schemas import DimensionReferenceBind
+
+    svc, repo = await _snapshot_svc(
+        Dimension(
+            dim_code="dim_c", name="客户", domain="s", type="SCD1",
+            status="DRAFT", owner_id=1,
+        )
+    )
+    svc._db.execute = AsyncMock(return_value=_exec_result(scalar=MagicMock(source_id="s1")))
+    with pytest.raises(ValidationError):
+        await svc.bind_dimension_reference(
+            "dim_c",
+        DimensionReferenceBind(
+            source_id="s1", table="dwd.dim_c; DROP TABLE x", column="id"
+        ),
+        )
+
+
+async def test_batch_delete_members_union_dedup() -> None:
+    """批量删除：勾选父+子并集去重，一次性删除整棵子树。"""
+    parent = DimensionMember(
+        id=1, dim_code="d", member_code="p", member_name="父", status="PUBLISHED"
+    )
+    child = DimensionMember(
+        id=2, dim_code="d", member_code="c", member_name="子",
+        parent_code="p", path="p", status="PUBLISHED",
+    )
+    svc, repo = await _snapshot_svc(
+        Dimension(dim_code="d", name="D", domain="s", type="SCD1", status="PUBLISHED", owner_id=1)
+    )
+    repo.list_members = AsyncMock(return_value=[parent, child])
+    repo.delete_members = AsyncMock()
+    result = await svc.batch_delete_members("d", ["p", "c"])
+    assert result["deleted"] == 2
+    deleted = repo.delete_members.call_args.args[0]
+    assert {m.member_code for m in deleted} == {"p", "c"}
+
+
+async def test_batch_delete_members_blocks_bound_default() -> None:
+    """批量删除：子树内成员被指标绑定为默认值时整体拒绝。"""
+    from app.core.exceptions import BusinessError
+
+    parent = DimensionMember(
+        id=1, dim_code="d", member_code="p", member_name="父", status="PUBLISHED"
+    )
+    svc, repo = await _snapshot_svc(
+        Dimension(dim_code="d", name="D", domain="s", type="SCD1", status="PUBLISHED", owner_id=1)
+    )
+    repo.list_members = AsyncMock(return_value=[parent])
+    repo.count_bindings_by_default_member = AsyncMock(return_value=2)
+    with pytest.raises(BusinessError) as ei:
+        await svc.batch_delete_members("d", ["p"])
+    assert ei.value.error_code == "MEMBER_BOUND_BY_METRICS"
+
+
+async def test_batch_publish_members_skips_published() -> None:
+    """批量发布：PUBLISHED 记 skipped，DRAFT 发布。"""
+    draft = DimensionMember(
+        id=1, dim_code="d", member_code="m1", member_name="一", status="DRAFT"
+    )
+    published = DimensionMember(
+        id=2, dim_code="d", member_code="m2", member_name="二", status="PUBLISHED"
+    )
+    svc, repo = await _snapshot_svc(
+        Dimension(dim_code="d", name="D", domain="s", type="SCD1", status="PUBLISHED", owner_id=1)
+    )
+    repo.get_member = AsyncMock(
+        side_effect=lambda code, mc: next(
+            (m for m in [draft, published] if m.member_code == mc), None
+        )
+    )
+    repo.list_members = AsyncMock(return_value=[draft, published])
+    repo.commit = AsyncMock()
+    result = await svc.batch_publish_members("d", ["m1", "m2"])
+    assert result["published"] == 1
+    assert result["skipped"] == 1
+
+
+async def test_translate_value_hit_miss_and_expression_fallback() -> None:
+    """翻译：值级映射命中 covered；未配置映射时 expression 仅原样返回。"""
+    from app.models.dimension import DimensionMapping
+
+    svc, repo = await _snapshot_svc()
+    mapping = DimensionMapping(
+        id=1, source_dim_code="dim_a", target_dim_code="dim_b",
+        mapping_type="EQUIVALENT", expression="dept_01=neike", created_by=1,
+    )
+    # 第一个 execute 查 mapping（返回 mapping），第二个查值级映射（返回 None）
+    svc._db.execute.side_effect = [
+        _exec_result(scalar=mapping),
+        _exec_result(scalar=None),
+    ]
+    r = await svc.translate_value("dim_a", "dim_b", "dept_01")
+    assert r.source_value == "dept_01"
+    assert r.target_value == "dept_01"  # expression 兜底：原样返回
+    assert r.covered is False
+
+    # 命中值级映射
+    from app.models.dimension import DimensionMappingValue
+
+    mv = DimensionMappingValue(
+        id=1, mapping_id=1, source_value="dept_01",
+        target_value="neike", created_by=1,
+    )
+    svc._db.execute.side_effect = [
+        _exec_result(scalar=mapping),
+        _exec_result(scalar=mv),
+    ]
+    r2 = await svc.translate_value("dim_a", "dim_b", "dept_01")
+    assert r2.target_value == "neike"
+    assert r2.covered is True
+
+
+async def test_translate_value_no_mapping_returns_none() -> None:
+    """无任何映射时翻译结果 target_value=None。"""
+    svc, repo = await _snapshot_svc()
+    svc._db.execute = AsyncMock(return_value=_exec_result(scalar=None))
+    r = await svc.translate_value("dim_a", "dim_b", "x")
+    assert r.target_value is None
+    assert r.covered is False
+
+
+async def test_mapping_coverage_enum_source() -> None:
+    """覆盖率：枚举型维度以成员编码为源值集合，未映射清单返回。"""
+    from app.models.dimension import DimensionMapping
+
+    svc, repo = await _snapshot_svc()
+    mapping = DimensionMapping(
+        id=1, source_dim_code="dim_a", target_dim_code="dim_b",
+        mapping_type="EQUIVALENT", created_by=1,
+    )
+    repo.get_dimension = AsyncMock(
+        return_value=Dimension(
+            dim_code="dim_a", name="A", domain="s", type="SCD1",
+            status="PUBLISHED", owner_id=1, sync_mode="none",
+        )
+    )
+    repo.get_mapping = AsyncMock(return_value=mapping)
+    repo.list_members = AsyncMock(
+        return_value=[
+            DimensionMember(id=1, dim_code="dim_a", member_code="x", member_name="x",
+                     status="PUBLISHED"),
+            DimensionMember(id=2, dim_code="dim_a", member_code="y", member_name="y",
+                     status="PUBLISHED"),
+        ]
+    )
+    svc._db.execute = AsyncMock(return_value=_exec_result(scalars=["x"]))
+    cov = await svc.mapping_coverage(1)
+    assert cov.total == 2
+    assert cov.covered == 1
+    assert cov.uncovered == ["y"]

@@ -14,6 +14,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -43,6 +44,28 @@ class DimensionType(enum.StrEnum):
     SCD3 = "SCD3"
     SCD4 = "SCD4"
     SCD6 = "SCD6"
+
+
+class SyncMode(enum.StrEnum):
+    """维度值来源模式。
+
+    - none: 纯枚举型（dimension_member 逐值维护，默认）
+    - snapshot: 引用型（值集合来自维度表列的 SNAPSHOT 快照，独立于 member 表）
+    """
+
+    NONE = "none"
+    SNAPSHOT = "snapshot"
+
+
+class SnapshotStatus(enum.StrEnum):
+    ACTIVE = "ACTIVE"
+    REMOVED = "REMOVED"
+
+
+class SnapshotRunStatus(enum.StrEnum):
+    RUNNING = "RUNNING"
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
 
 
 class DimensionStatus(enum.StrEnum):
@@ -101,6 +124,28 @@ class Dimension(Base, BaseModel, ReviewFieldsMixin):
     # P11 C-2：乐观锁版本（编辑回传当前 row_version，不一致即 409 防并发静默覆盖）
     row_version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default="1", comment="乐观锁版本"
+    )
+    # 引用型（sync_mode=snapshot）：值集合来自维度表列快照，不写 member 表
+    source_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, comment="数据源 ID（引用型值来源）"
+    )
+    source_table: Mapped[str | None] = mapped_column(
+        String(256), nullable=True, comment="维度值来源表"
+    )
+    source_column: Mapped[str | None] = mapped_column(
+        String(256), nullable=True, comment="维度值来源列"
+    )
+    sync_mode: Mapped[str] = mapped_column(
+        Enum(SyncMode, values_callable=lambda e: [m.value for m in e]),
+        nullable=False,
+        default=SyncMode.NONE.value,
+        comment="值来源模式（none 枚举型 / snapshot 引用型）",
+    )
+    refresh_interval_hours: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="快照刷新间隔（小时，默认 24）"
+    )
+    last_snapshot_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="最近一次快照时间"
     )
 
 
@@ -189,4 +234,94 @@ class Reconciliation(Base, BaseModel):
     )
     reviewed_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True, comment="复核时间"
+    )
+
+
+class DimensionValueSnapshot(Base, BaseModel):
+    """引用型维度值快照（版本化：保留最近 2 批，diff 用两批集合差）。
+
+    value 集合来自维度表列（SELECT DISTINCT col FROM tbl），snapshot_at 区分批次；
+    REMOVED 标记上一批存在、本批消失的值（用于「消失值检测」）。
+    """
+
+    __tablename__ = "dimension_value_snapshot"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    dim_code: Mapped[str] = mapped_column(String(64), nullable=False, comment="维度编码")
+    source_id: Mapped[str] = mapped_column(String(128), nullable=False, comment="数据源 ID")
+    source_table: Mapped[str] = mapped_column(String(256), nullable=False, comment="来源表")
+    source_column: Mapped[str] = mapped_column(String(256), nullable=False, comment="来源列")
+    value: Mapped[str] = mapped_column(String(512), nullable=False, comment="维度值")
+    snapshot_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, comment="快照批次时间"
+    )
+    status: Mapped[str] = mapped_column(
+        Enum(SnapshotStatus, values_callable=lambda e: [m.value for m in e]),
+        nullable=False,
+        default=SnapshotStatus.ACTIVE.value,
+        comment="ACTIVE 当前批 / REMOVED 上批有本批消失",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("dim_code", "snapshot_at", "value", name="uk_dim_snapshot_value"),
+    )
+
+
+class DimensionSnapshotRun(Base, BaseModel):
+    """引用型维度快照刷新记录（每次刷新的统计与差异样本）。"""
+
+    __tablename__ = "dimension_snapshot_run"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    dim_code: Mapped[str] = mapped_column(String(64), nullable=False, comment="维度编码")
+    snapshot_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, comment="快照批次时间"
+    )
+    status: Mapped[str] = mapped_column(
+        Enum(SnapshotRunStatus, values_callable=lambda e: [m.value for m in e]),
+        nullable=False,
+        default=SnapshotRunStatus.RUNNING.value,
+        comment="运行状态",
+    )
+    total_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="值总数"
+    )
+    added_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="新增值数"
+    )
+    removed_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="消失值数"
+    )
+    null_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="空值数"
+    )
+    null_rate: Mapped[float | None] = mapped_column(
+        Numeric(5, 4), nullable=True, comment="空值率"
+    )
+    added_sample: Mapped[list[str] | None] = mapped_column(
+        JSON, nullable=True, comment="新增值样本"
+    )
+    removed_sample: Mapped[list[str] | None] = mapped_column(
+        JSON, nullable=True, comment="消失值样本"
+    )
+    error_msg: Mapped[str | None] = mapped_column(Text, nullable=True, comment="失败原因")
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="耗时（毫秒）")
+
+
+class DimensionMappingValue(Base, BaseModel):
+    """值级维度映射（source_value → target_value 逐值对应，供 translate_value 消费）。
+
+    expression 是自由文本仅供人工参考；机器可消费的逐值对应由本表承载。
+    """
+
+    __tablename__ = "dimension_mapping_value"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    mapping_id: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="映射 ID")
+    source_value: Mapped[str] = mapped_column(String(512), nullable=False, comment="源值")
+    target_value: Mapped[str] = mapped_column(String(512), nullable=False, comment="目标值")
+    created_by: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="创建人 ID")
+
+    __table_args__ = (
+        UniqueConstraint("mapping_id", "source_value", name="uk_dim_mapping_value"),
     )

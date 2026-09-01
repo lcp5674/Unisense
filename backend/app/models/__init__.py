@@ -32,7 +32,10 @@ from app.models.dependency_health import (
 from app.models.dimension import (
     Dimension,
     DimensionMapping,
+    DimensionMappingValue,
     DimensionMember,
+    DimensionSnapshotRun,
+    DimensionValueSnapshot,
     MetricDimension,
     Reconciliation,
 )
@@ -104,7 +107,10 @@ __all__ = [
     "DictTypeEnum",
     "Dimension",
     "DimensionMapping",
+    "DimensionMappingValue",
     "DimensionMember",
+    "DimensionSnapshotRun",
+    "DimensionValueSnapshot",
     "DomainStatusEnum",
     "EntityTypeEnum",
     "ErasureRequest",

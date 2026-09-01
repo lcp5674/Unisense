@@ -1027,6 +1027,70 @@ export interface Dimension extends ReviewFields {
   row_version?: number;
   /** 绑定指标数（列表接口批量回填，默认 0；兼容旧后端缺省场景） */
   metric_count?: number;
+  /** 引用型值来源（sync_mode=snapshot 时生效）：数据源/表/列 */
+  source_id?: string | null;
+  source_table?: string | null;
+  source_column?: string | null;
+  /** 值来源模式：none 枚举型 / snapshot 引用型（默认 none） */
+  sync_mode?: string;
+  /** 快照刷新间隔（小时，默认 24） */
+  refresh_interval_hours?: number | null;
+  /** 最近一次快照时间 */
+  last_snapshot_at?: string | null;
+}
+
+/** 引用型维度快照值（单行） */
+export interface DimensionValueSnapshot {
+  id: number;
+  dim_code: string;
+  value: string;
+  snapshot_at: string;
+  status: string;
+}
+
+/** 引用型维度快照刷新运行记录 */
+export interface SnapshotRun {
+  id: number;
+  dim_code: string;
+  snapshot_at: string;
+  status: string;
+  total_count: number;
+  added_count: number;
+  removed_count: number;
+  null_count: number;
+  null_rate: number | null;
+  added_sample: string[] | null;
+  removed_sample: string[] | null;
+  error_msg: string | null;
+  duration_ms: number | null;
+  created_at: string | null;
+}
+
+/** 值级维度映射（source_value → target_value） */
+export interface DimensionMappingValue {
+  id: number;
+  mapping_id: number;
+  source_value: string;
+  target_value: string;
+  created_by: number;
+  created_at: string | null;
+}
+
+/** 值级映射覆盖率 */
+export interface MappingCoverage {
+  mapping_id: number;
+  total: number;
+  covered: number;
+  uncovered: string[];
+}
+
+/** 单值翻译结果 */
+export interface TranslateResult {
+  source_value: string;
+  target_value: string | null;
+  covered: boolean;
+  source_dim_code: string;
+  target_dim_code: string;
 }
 
 export interface DimensionMapping {
