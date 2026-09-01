@@ -175,10 +175,20 @@ async def test_create_persists_description_and_term():
     repo.get_by_code = AsyncMock(return_value=None)
     repo.create = AsyncMock(return_value=make_metric())
     repo.create_version = AsyncMock(return_value=MagicMock())
-    # term_id 校验：mock DB 返回存在的术语（scalar_one_or_none 非 None）
-    svc._db.execute = AsyncMock(
-        return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=7))
+    # term_id 校验：仅 Term 存在性查询返回 [7]，其余查询（字典等）按默认空处理
+    _term_result = MagicMock(
+        scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[7])))
     )
+
+    async def _execute_side(stmt, *a, **kw):
+        _froms = getattr(stmt, "froms", None)
+        if _froms and getattr(_froms[0], "name", "") == "term":
+            return _term_result
+        return MagicMock(
+            scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))
+        )
+
+    svc._db.execute = AsyncMock(side_effect=_execute_side)
 
     await svc.create_metric(
         MetricCreateRequest(
@@ -194,6 +204,7 @@ async def test_create_persists_description_and_term():
     assert captured.description == "每日成交总金额（口径：支付成功订单的实付金额汇总）"
     assert captured.description_source == "manual"
     assert captured.term_id == 7
+    assert captured.term_ids == [7]
 
 
 async def test_create_rejects_missing_term():
@@ -204,9 +215,11 @@ async def test_create_rejects_missing_term():
     repo.get_by_code = AsyncMock(return_value=None)
     repo.create = AsyncMock(return_value=make_metric())
     repo.create_version = AsyncMock(return_value=MagicMock())
-    # term_id 校验：mock DB 返回无术语（scalar_one_or_none=None）
+    # term_id 校验：mock DB 返回无术语（scalars().all() 空）
     svc._db.execute = AsyncMock(
-        return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+        return_value=MagicMock(
+            scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))
+        )
     )
 
     with pytest.raises(NotFoundError) as ei:
@@ -6333,13 +6346,15 @@ async def test_update_metric_description_not_owner_raises_auth():
 
 
 async def test_bind_metric_term_success():
-    """P2-11: 绑定术语 → 写 metric.term_id，不触发版本。"""
+    """P2-11: 绑定术语 → 写 metric.term_id + term_ids（主术语=首项），不触发版本。"""
     svc, repo = _svc_with_repo()
     existing = make_metric(status="PUBLISHED", row_version=3, version=2, term_id=None)
     repo.get_by_code = AsyncMock(return_value=existing)
-    # 术语存在性校验通过：Term.id 查询返回 1
+    # 术语存在性校验通过：Term.id 批量查询返回 [55]
     svc._db.execute = AsyncMock(
-        return_value=MagicMock(scalar_one_or_none=lambda: 1)
+        return_value=MagicMock(
+            scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[55])))
+        )
     )
     updated = make_metric(status="PUBLISHED", row_version=4, version=2, term_id=55)
     repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
@@ -6350,8 +6365,64 @@ async def test_bind_metric_term_success():
 
     _, kwargs = repo.update_with_optimistic_lock.call_args
     assert kwargs["term_id"] == 55
+    assert kwargs["term_ids"] == [55]
     assert "version" not in kwargs  # 绑定不触发版本
     assert result is updated
+
+
+async def test_bind_metric_term_multiple():
+    """P2-11: term_ids 多选全量替换 → 写 term_ids + term_id（主术语=首项）。"""
+    svc, repo = _svc_with_repo()
+    existing = make_metric(status="PUBLISHED", row_version=3, version=2, term_id=None)
+    repo.get_by_code = AsyncMock(return_value=existing)
+    # 批量存在性校验通过：Term.id 查询返回 [7, 55]
+    svc._db.execute = AsyncMock(
+        return_value=MagicMock(
+            scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[7, 55])))
+        )
+    )
+    updated = make_metric(status="PUBLISHED", row_version=4, version=2, term_id=7)
+    repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
+
+    await svc.bind_metric_term(
+        "sales_gmv_daily",
+        None,
+        actor_id=1,
+        role="metric_owner",
+        user_domain="sales",
+        term_ids=[7, 55],
+    )
+
+    _, kwargs = repo.update_with_optimistic_lock.call_args
+    assert kwargs["term_id"] == 7  # 主术语=首项
+    assert kwargs["term_ids"] == [7, 55]
+
+
+async def test_bind_metric_term_missing_raises():
+    """P2-11: term_ids 含不存在术语 → 404，不落库。"""
+    from app.core.exceptions import NotFoundError
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(status="PUBLISHED", term_id=None)
+    )
+    svc._db.execute = AsyncMock(
+        return_value=MagicMock(
+            scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[7])))
+        )
+    )
+
+    with pytest.raises(NotFoundError) as ei:
+        await svc.bind_metric_term(
+            "sales_gmv_daily",
+            None,
+            actor_id=1,
+            role="metric_owner",
+            user_domain="sales",
+            term_ids=[7, 999],
+        )
+    assert "999" in str(ei.value)
+    repo.update_with_optimistic_lock.assert_not_called()
 
 
 async def test_bind_metric_term_unbind():

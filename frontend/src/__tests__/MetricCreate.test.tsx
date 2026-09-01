@@ -2226,9 +2226,9 @@ describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数�
 
     await waitFor(() => {
       expect(mockedCreate).toHaveBeenCalled();
-      const body = mockedCreate.mock.calls[0][0] as { description?: string; term_id?: number };
+      const body = mockedCreate.mock.calls[0][0] as { description?: string; term_ids?: number[] };
       expect(body.description).toBe("门诊收费总金额指标（含退费扣除）");
-      expect(body.term_id).toBe(5);
+      expect(body.term_ids).toEqual([5]);
     });
   });
 

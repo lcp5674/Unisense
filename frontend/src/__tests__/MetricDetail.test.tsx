@@ -36,9 +36,9 @@ vi.mock("../api", () => ({
   piiReview: vi.fn(),
   promoteMetric: vi.fn(),
   rollbackMetric: vi.fn(),
-  // P2-11 术语绑定写路径：listTerms 搜索 + bindMetricTerm 绑定/解绑
+  // P2-11 术语绑定写路径：listTerms 搜索 + bindMetricTerms 绑定/解绑（多术语）
   listTerms: vi.fn(),
-  bindMetricTerm: vi.fn(),
+  bindMetricTerms: vi.fn(),
   submitReview: vi.fn(),
   updateMetric: vi.fn(),
   updateMetricDescription: vi.fn(),
@@ -103,7 +103,7 @@ import {
   promoteMetric,
   rollbackMetric,
   listTerms,
-  bindMetricTerm,
+  bindMetricTerms,
   verifyDictValues,
   notifyUnknownDictValues,
   UnisenseApiError,
@@ -1222,7 +1222,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     await waitFor(() => expect(vi.mocked(rollbackMetric)).toHaveBeenCalledWith("sales_gmv_sum_d"));
   });
 
-  it("P2-11: 关联术语可搜索并绑定——选中术语调用 bindMetricTerm", async () => {
+  it("P2-11: 关联术语可搜索并绑定——选中术语调用 bindMetricTerms（数组）", async () => {
     mockedListVersions.mockResolvedValue([]);
     mockedFavorites.mockResolvedValue([]);
     mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
@@ -1262,7 +1262,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     renderWithPerms(["metric:edit"]);
     await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
     // 打开术语下拉并搜索（antd Select placeholder 是 span 文本，非 input 属性）
-    const termSelect = await screen.findByText("搜索并绑定业务术语");
+    const termSelect = await screen.findByText("搜索并绑定业务术语（可多选）");
     // 限定在术语绑定 Select 内查询 combobox——血缘影响 Tab 内嵌 LineageImpact 有跳数 Select，全局 getByRole 会多匹配
     const termBox = termSelect.closest(".ant-select") as HTMLElement;
     fireEvent.mouseDown(termBox);
@@ -1271,7 +1271,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     // 选中「成交金额」→ 触发绑定（选项标签为「名称（term_code）」）
     const option = await screen.findByText(/成交金额（CJ_AMT）/);
     fireEvent.click(option);
-    await waitFor(() => expect(vi.mocked(bindMetricTerm)).toHaveBeenCalledWith("sales_gmv_sum_d", 7));
+    await waitFor(() => expect(vi.mocked(bindMetricTerms)).toHaveBeenCalledWith("sales_gmv_sum_d", [7]));
   });
 
   it("P2-11: 已绑定术语回显名称（非 #id）并可点击跳转术语表", async () => {
@@ -1389,7 +1389,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     vi.mocked(listTerms).mockResolvedValue({ items: page1, total: 45, page: 1, page_size: 20 });
     renderWithPerms(["metric:edit"]);
     await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
-    const termSelect = await screen.findByText("搜索并绑定业务术语");
+    const termSelect = await screen.findByText("搜索并绑定业务术语（可多选）");
     const termBox = termSelect.closest(".ant-select") as HTMLElement;
     fireEvent.mouseDown(termBox);
     await waitFor(() => expect(listTerms).toHaveBeenCalled());
@@ -1434,7 +1434,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedGetMetric.mockResolvedValue({ ...metric, status: "PUBLISHED", pii_flag: false, term_id: null });
     renderWithPerms(["metric:edit"]);
     await waitFor(() => expect(mockedGetMetric).toHaveBeenCalled());
-    const termSelect = await screen.findByText("搜索并绑定业务术语");
+    const termSelect = await screen.findByText("搜索并绑定业务术语（可多选）");
     const termBox = termSelect.closest(".ant-select") as HTMLElement;
     fireEvent.mouseDown(termBox);
     await waitFor(() => expect(listTerms).toHaveBeenCalled());

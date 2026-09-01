@@ -954,9 +954,10 @@ export function MetricCreate() {
     const defJson = (defField?.value as Record<string, unknown>) ?? null;
     const defMode = (modeField?.value as string) ?? null;
     if (defJson) {
-      if (defMode === "sql") {
+      // 2026-09：SQL 推断回填默认 SQL 模式（defMode 为 sql 或口径含 sql/dw_definition 即 SQL）
+      if (defMode === "sql" || defJson.sql || defJson.dw_definition) {
         setMode("sql");
-        setSqlText(String(defJson.sql ?? JSON.stringify(defJson, null, 2)));
+        setSqlText(String(defJson.sql ?? defJson.dw_definition ?? JSON.stringify(defJson, null, 2)));
         // Q2：SQL 智能推断出的完整 SQL 自动回填「数仓详细口径（数仓开发）」
         //（dw_definition = 数仓开发指标的详细口径/完整 SQL）——用户未手填时回填，
         // 创建后 MetricDetail/目录展开「数仓详细口径」区块直接可见，无需再手填
@@ -1674,11 +1675,13 @@ export function MetricCreate() {
     if (Array.isArray(c.dimensions) && c.dimensions.length) {
       setSelectedDims(c.dimensions);
     }
-    // 口径定义：SQL 模式（sql 键）→ sqlText；expression 模式 → definition JSON
+    // 口径定义：SQL 模式（sql / dw_definition=原始 SQL）→ sqlText；expression 模式 → definition JSON。
+    // 2026-09 用户反馈：SQL 推断回填应默认展示 SQL 模式——候选 definition_json 通常无 sql 键
+    // （sql 在语句级），但有 dw_definition（整句原始 SQL），故二者任一存在即走 SQL 模式。
     const dj = c.definition_json || {};
-    if (dj.sql) {
+    if (dj.sql || dj.dw_definition) {
       setMode("sql");
-      setSqlText(String(dj.sql));
+      setSqlText(String(dj.sql || dj.dw_definition));
     } else if (dj.expression) {
       setMode("expression");
       form.setFieldValue(
@@ -2393,8 +2396,10 @@ export function MetricCreate() {
         : undefined,
       // 业务描述（选填）：创建时透传（manual 来源），空串不提交（保持 null）
       description: values.description ? String(values.description).trim() : undefined,
-      // 关联术语（选填）：创建时绑定 metric.term_id（详情页可改绑/解绑）
-      term_id: values.term_id ? Number(values.term_id) : undefined,
+      // 关联术语（选填）：创建时绑定 term_ids（多选全量，后端主术语=首项写 term_id；详情页可改绑/解绑）
+      term_ids: Array.isArray(values.term_ids)
+        ? values.term_ids.map((v: unknown) => Number(v)).filter((n: number) => Number.isFinite(n) && n > 0)
+        : undefined,
       // 口径三方责任（可选）：平台用户 id 或外部人员名称兜底（RoleOwnerSelect 组合值拆分）
       product_owner_id: (values.product_owner as RoleOwnerValue | undefined)?.id ?? undefined,
       tech_owner_id: (values.tech_owner as RoleOwnerValue | undefined)?.id ?? undefined,
@@ -3454,8 +3459,8 @@ export function MetricCreate() {
                     label: (
                       <span>
                         业务描述与关联术语（选填）
-                        <Tag style={{ marginLeft: 8 }} color={form.getFieldValue("description") || form.getFieldValue("term_id") ? "green" : "default"}>
-                          {form.getFieldValue("description") || form.getFieldValue("term_id") ? "已填写" : "未填写"}
+                        <Tag style={{ marginLeft: 8 }} color={form.getFieldValue("description") || (form.getFieldValue("term_ids")?.length ?? 0) ? "green" : "default"}>
+                          {form.getFieldValue("description") || (form.getFieldValue("term_ids")?.length ?? 0) ? "已填写" : "未填写"}
                         </Tag>
                       </span>
                     ),
@@ -3475,12 +3480,13 @@ export function MetricCreate() {
                             placeholder="指标的业务含义、口径背景、适用场景（选填；详情页可 AI 生成补充）"
                           />
                         </Form.Item>
-                        <Form.Item name="term_id" label="关联术语" extra="将指标归属到已发布业务术语（搜索选择；术语库在「治理 → 术语表」维护）">
+                        <Form.Item name="term_ids" label="关联术语" extra="将指标归属到已发布业务术语（可多选；术语库在「治理 → 术语表」维护）">
                           <Select
                             data-testid="termSelect"
                             showSearch
+                            mode="multiple"
                             allowClear
-                            placeholder="搜索并选择业务术语（选填）"
+                            placeholder="搜索并选择业务术语（可多选，选填）"
                             filterOption={false}
                             onDropdownVisibleChange={(open) => {
                               // 首次打开下拉即加载已发布术语（带域过滤），无需先打字搜索
@@ -4996,7 +5002,17 @@ export function MetricCreate() {
                 {dj.dw_definition ? row("数仓详细口径（完整 SQL）", code(dj.dw_definition)) : null}
                 {dj.source_tables ? row("源表", tags(dj.source_tables)) : null}
                 {dj.source_fields ? row("上游字段（源表.列）", tags((Array.isArray(dj.source_fields) ? dj.source_fields : [dj.source_fields]).map(sourceFieldText))) : null}
-                {dj.partition_key ? row("时间列 / 分区键", tags(dj.partition_key)) : null}
+                {dj.partition_key
+                  ? row(
+                      "时间列 / 分区键",
+                      tags(
+                        (Array.isArray(dj.partition_key)
+                          ? dj.partition_key
+                          : [dj.partition_key]
+                        ).map((p: unknown) => (p && typeof p === "object" ? String((p as { column?: unknown }).column ?? JSON.stringify(p)) : String(p))),
+                      ),
+                    )
+                  : null}
                 {dj.dependencies ? row("依赖指标", tags(dj.dependencies)) : null}
                 {Object.entries(dj)
                   .filter(([k]) => !known.has(k))

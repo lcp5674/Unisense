@@ -831,13 +831,14 @@ export async function updateMetricDescription(
   );
 }
 
-// 绑定/解绑指标↔业务术语（P2-11：术语治理归属写路径；termId=null 解绑）
-export async function bindMetricTerm(code: string, termId: number | null): Promise<MetricResponse> {
+// 绑定/解绑指标↔业务术语（P2-11：术语治理归属写路径；空数组解绑）
+// 2026-09：支持多术语全量替换（term_ids），主术语=首项写 term_id（兼容旧单值语义）
+export async function bindMetricTerms(code: string, termIds: number[]): Promise<MetricResponse> {
   return request<MetricResponse>(
     `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/term`,
     {
       method: "PUT",
-      body: JSON.stringify({ term_id: termId }),
+      body: JSON.stringify({ term_ids: termIds, term_id: termIds[0] ?? null }),
     },
   );
 }

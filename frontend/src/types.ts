@@ -74,6 +74,8 @@ export interface MetricResponse {
   compliance_reviewed: boolean;
   /** 关联业务术语 ID（P2-11：术语治理归属，null=未绑定） */
   term_id: number | null;
+  /** 多术语关联 ID 列表（2026-09：一指标可关联多个业务术语；主术语=首项） */
+  term_ids?: number[] | null;
   /** 多变体挂载列表（2026-08-27：详情接口回填全部挂载行；列表接口为 null） */
   mounts?: MetricMountResponse[] | null;
   /** P0-C：批量注册批次 ID（可空）——列表/详情/审核页展示批次可回溯整批 */
@@ -296,6 +298,8 @@ export interface MetricCreateRequest {
   description?: string | null;
   /** 关联术语（选填）：创建时绑定 metric.term_id（须为已存在业务术语） */
   term_id?: number | null;
+  /** 多术语关联（选填）：全量替换，主术语=首项写 term_id */
+  term_ids?: number[] | null;
   /** 消费指南（选填）：创建时随指标落库（guide_source=manual），三组字符串数组 */
   consumption_guide?: ConsumptionGuidePayload | null;
   /** 口径三方责任（PRD 4.5 补充，均可空）：产品需求方/技术方/数仓开发 */

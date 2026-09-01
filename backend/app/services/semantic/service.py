@@ -662,24 +662,31 @@ class MetricService(BaseService):
         # base_atomic 必须为已存在的原子类型指标，血缘据此生成 BASED_ON 基础边
         await self._validate_base_atomic(definition)
 
-        # 关联术语校验（创建时绑定）：term_id 须为已存在且未删除的业务术语
-        if request.term_id is not None:
+        # 关联术语校验（创建时绑定）：term_id/term_ids 须为已存在且未删除的业务术语。
+        # 多术语（2026-09）：term_ids 全量替换，term_id 缺省取首项（主术语）。
+        _final_term_ids: list[int] = []
+        if request.term_ids is not None:
+            _final_term_ids = [t for t in request.term_ids if t is not None]
+        elif request.term_id is not None:
+            _final_term_ids = [request.term_id]
+        if _final_term_ids:
             from sqlalchemy import select
 
             from app.models.term import Term
 
-            _term_exists = (
+            _term_rows = (
                 await self._db.execute(
                     select(Term.id).where(
-                        Term.id == request.term_id,
+                        Term.id.in_(_final_term_ids),
                         Term.deleted_at.is_(None),
                     )
                 )
-            ).scalar_one_or_none()
-            if _term_exists is None:
+            ).scalars().all()
+            _missing_terms = [t for t in _final_term_ids if t not in set(_term_rows)]
+            if _missing_terms:
                 raise NotFoundError(
-                    f"关联术语不存在: {request.term_id}",
-                    ctx={"term_id": request.term_id},
+                    f"关联术语不存在: {_missing_terms}",
+                    ctx={"term_ids": _missing_terms},
                 )
 
         metric = Metric(
@@ -733,8 +740,10 @@ class MetricService(BaseService):
             # 业务描述：创建时透传（manual 来源；详情页 AI 生成会覆盖为 llm）
             description=(request.description or None),
             description_source=("manual" if request.description else None),
-            # 关联术语：创建时绑定（须已存在，前面已校验）
-            term_id=request.term_id,
+            # 关联术语：创建时绑定（须已存在，前面已校验）——多术语 term_ids 全量，
+            # term_id=主术语（首项）
+            term_id=(_final_term_ids[0] if _final_term_ids else None),
+            term_ids=(_final_term_ids or None),
             guide_source=(
                 "manual" if getattr(request, "consumption_guide", None) else "auto"
             ),
@@ -1938,18 +1947,22 @@ class MetricService(BaseService):
         actor_id: int,
         role: str,
         user_domain: str | None = None,
+        term_ids: list[int] | None = None,
     ) -> Metric:
         """绑定/解绑指标↔业务术语（P2-11：术语绑定写路径）。
 
-        写 ``metric.term_id``（术语治理归属），不触发版本/不参与口径变更；
-        与描述更新同语义——运营层治理补充。传 ``None`` 解绑。
+        写 ``metric.term_id`` + ``metric.term_ids``（术语治理归属），不触发版本/不参与
+        口径变更；与描述更新同语义——运营层治理补充。多术语：``term_ids`` 全量替换
+        （主术语=首项写 term_id）；``term_ids`` 缺省时按旧 ``term_id`` 单值语义
+        （term_ids=[term_id]）；两者皆空/None 解绑。
 
         Args:
             metric_code: 指标编码。
-            term_id: 术语 ID（None=解绑）。
+            term_id: 术语 ID（None=解绑；term_ids 缺省时使用）。
             actor_id: 操作人 ID。
             role: 操作人角色。
             user_domain: 操作人所属域。
+            term_ids: 术语 ID 列表（多选全量替换，可空；主术语=首项写 term_id）。
 
         Raises:
             NotFoundError: 指标/术语不存在。
@@ -1959,17 +1972,29 @@ class MetricService(BaseService):
         metric = await self.get_metric(metric_code)
         self._assert_owner_or_admin(metric, actor_id, role)
 
-        # 术语存在性校验（跨服务：术语在 glossary 域，指标在 semantic 域）
-        if term_id is not None:
+        # 术语存在性校验（跨服务：术语在 glossary 域，指标在 semantic 域）——批量全量校验
+        if term_ids is not None:
+            final_ids = [t for t in term_ids if t is not None]
+            primary = final_ids[0] if final_ids else None
+        elif term_id is not None:
+            final_ids = [term_id]
+            primary = term_id
+        else:
+            final_ids = []
+            primary = None
+        if final_ids:
             from sqlalchemy import select
 
             from app.models.term import Term
 
-            term = (
-                await self._db.execute(select(Term.id).where(Term.id == term_id))
-            ).scalar_one_or_none()
-            if term is None:
-                raise NotFoundError(f"术语不存在: {term_id}", ctx={"term_id": term_id})
+            rows = (
+                await self._db.execute(select(Term.id).where(Term.id.in_(final_ids)))
+            ).scalars().all()
+            missing = [t for t in final_ids if t not in set(rows)]
+            if missing:
+                raise NotFoundError(
+                    f"术语不存在: {missing}", ctx={"term_ids": missing}
+                )
 
         decision = await self._gov_svc().check_metric_permission(
             metric_code=metric_code,
@@ -1986,14 +2011,18 @@ class MetricService(BaseService):
             )
 
         updated = await self._repo.update_with_optimistic_lock(
-            metric.id, metric.row_version, term_id=term_id
+            metric.id,
+            metric.row_version,
+            term_id=primary,
+            term_ids=final_ids or None,
         )
         await self._cache.invalidate(metric_code)
 
         logger.info(
             "metric_term_bound",
             metric_code=metric_code,
-            term_id=term_id,
+            term_id=primary,
+            term_ids=final_ids,
             actor_id=actor_id,
         )
         return updated

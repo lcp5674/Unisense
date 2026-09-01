@@ -1033,7 +1033,7 @@ async def bind_metric_term(
     trace_id: Annotated[str, Depends(get_trace_id)],
     http_req: Request,
 ) -> ApiResponse[MetricResponse]:
-    """写 metric.term_id（传 null 解绑）；校验术语存在；写审计同事务提交。"""
+    """写 metric.term_id + term_ids（传 null/空解绑）；校验术语存在；写审计同事务提交。"""
     service = MetricService(db)
     metric = await service.bind_metric_term(
         metric_code,
@@ -1041,6 +1041,7 @@ async def bind_metric_term(
         actor_id=user.id,
         role=user.role,
         user_domain=user.domain,
+        term_ids=request.term_ids,
     )
     await write_audit(
         db,
@@ -1048,7 +1049,11 @@ async def bind_metric_term(
         action="metric_definition.update",
         entity_type="metric_term",
         entity_id=metric.metric_code,
-        detail={"term_id": request.term_id, "bound": request.term_id is not None},
+        detail={
+            "term_id": metric.term_id,
+            "term_ids": metric.term_ids,
+            "bound": bool(metric.term_ids),
+        },
         ip=client_ip(http_req),
         trace_id=trace_id,
     )

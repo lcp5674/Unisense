@@ -167,7 +167,12 @@ class Metric(Base, BaseModel):
     term_id: Mapped[int | None] = mapped_column(
         ForeignKey("term.id", name="fk_metric_term"),
         nullable=True,
-        comment="关联术语 ID",
+        comment="主术语 ID（多术语时取 term_ids 首项，兼容既有展示/消费）",
+    )
+    # 多术语关联（2026-09 用户反馈：一指标可关联多个业务术语）——JSON 数组存全部
+    # 术语 ID；term_id 保留为「主术语」（= term_ids 首项），既有单术语链路零破坏。
+    term_ids: Mapped[list[int] | None] = mapped_column(
+        JSON, nullable=True, comment="关联术语 ID 列表（多选，主术语=首项）"
     )
 
     # ---- 状态机 ----

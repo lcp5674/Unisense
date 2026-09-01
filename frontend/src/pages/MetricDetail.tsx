@@ -51,7 +51,7 @@ import {
   confirmDeprecateDropped,
   emergencyPublishMetric,
   completeEmergencyReview,
-  bindMetricTerm,
+  bindMetricTerms,
   fetchArchivedMetric,
   fetchCurrentUser,
   fetchRelatedMetrics,
@@ -1025,7 +1025,7 @@ export function MetricDetail() {
       // 关联术语回显：已绑定术语（term_id）时加载其名称——否则渲染处显示裸 #id。
       // 与挂载实体加载同属 best-effort，失败不阻塞详情主体。强制全部域：已绑定术语
       // 可能属于其他域（跨域绑定），仅同域范围会回显不出名称。
-      if (m.term_id != null) void loadTermOptions(undefined, 1, false, true);
+      if (m.term_id != null || (m.term_ids?.length ?? 0) > 0) void loadTermOptions(undefined, 1, false, "all");
       setDomainTree(domainTree);
       // P1-3：挂载实体加载（best-effort）
       if (m.id != null) loadMounts(m.id);
@@ -1268,15 +1268,16 @@ export function MetricDetail() {
   // 关联术语选项加载（P2-11 术语绑定写路径）：初始回显/下拉打开/搜索/滚动触底共用。
   // 默认按指标业务域过滤（术语有 domain 归属，术语库在「治理 → 术语表」维护）；切「全部域」
   // 放开跨域；仅 PUBLISHED 可绑定。page/append 驱动滚动加载（每页 20 条，触底追加下一页并去重）；
-  // forceAllDomains 用于回显——已绑定术语无论哪个域都要能显示名称（避免裸 #id）。
-  async function loadTermOptions(search?: string, page = 1, append = false, forceAllDomains = false) {
+  // scope 显式传「仅同域/全部域」——不读 termScope state（React 闭包陈旧：切换回调里 state 尚未
+  // 更新，读旧值会致「切回仅同域仍加载全部域」，2026-09 用户反馈）。
+  async function loadTermOptions(search?: string, page = 1, append = false, scope: "domain" | "all" = "domain") {
     setTermSearching(true);
     try {
       const kw = search?.trim() || "";
       if (search !== undefined) termKwRef.current = kw;
       const res = await listTerms({
         search: kw || undefined,
-        domain: forceAllDomains || termScope === "all" ? undefined : metric?.domain || undefined,
+        domain: scope === "all" ? undefined : metric?.domain || undefined,
         status: "PUBLISHED",
         page,
         page_size: 20,
@@ -1303,15 +1304,15 @@ export function MetricDetail() {
   // 关联术语搜索（防抖）：输入关键词时按名称/定义/编码搜索，空关键词加载第 1 页（当前域范围）
   function handleTermSearch(q: string) {
     if (termSearchTimer.current) clearTimeout(termSearchTimer.current);
-    termSearchTimer.current = setTimeout(() => void loadTermOptions(q, 1, false), 300);
+    termSearchTimer.current = setTimeout(() => void loadTermOptions(q, 1, false, termScope), 300);
   }
 
   // 切换「仅同域 / 全部域」：范围变化后重置到第 1 页重新加载。
-  // 注意 loadTermOptions 闭包读到的是本次渲染的旧 termScope，须以参数显式覆盖本次加载范围。
+  // 显式传本次 scope（不读 state 闭包），避免「切回仅同域仍加载全部域」。
   function handleTermScopeChange(scope: "domain" | "all") {
     setTermScope(scope);
     termKwRef.current = "";
-    void loadTermOptions(undefined, 1, false, scope === "all");
+    void loadTermOptions(undefined, 1, false, scope);
   }
 
   // 下拉滚动触底 → 追加下一页（未加载完且非加载中才触发；判定逻辑抽为纯函数可单测）
@@ -1327,14 +1328,17 @@ export function MetricDetail() {
         total: termTotal,
       })
     ) {
-      void loadTermOptions(termKwRef.current || undefined, termPage + 1, true);
+      void loadTermOptions(termKwRef.current || undefined, termPage + 1, true, termScope);
     }
   }
 
-  // 绑定/解绑术语（termId=null 解绑）
-  function bindTerm(termId: number | null) {
+  // 绑定/解绑术语（空数组解绑；多术语全量替换）
+  function bindTerms(termIds: number[]) {
     if (!metric) return;
-    void runAction(() => bindMetricTerm(metric.metric_code, termId), termId ? "术语绑定" : "术语解绑");
+    void runAction(
+      () => bindMetricTerms(metric.metric_code, termIds),
+      termIds.length ? "术语绑定" : "术语解绑",
+    );
   }
 
   // 响应仲裁「保留差异+指定改名」：修改指标名称并清除 rename_required 标记
@@ -2962,8 +2966,8 @@ export function MetricDetail() {
         style={{ marginBottom: 16 }}
         title="关联术语"
         extra={
-          isOwnerOrAdmin && canEdit && !piiMasked && metric.term_id ? (
-            <Button size="small" danger onClick={() => bindTerm(null)}>
+          isOwnerOrAdmin && canEdit && !piiMasked && (metric.term_ids?.length || metric.term_id) ? (
+            <Button size="small" danger onClick={() => bindTerms([])}>
               解绑
             </Button>
           ) : null
@@ -2984,39 +2988,52 @@ export function MetricDetail() {
             />
             <Select
               showSearch
+              mode="multiple"
               allowClear
               style={{ width: 320 }}
-              placeholder="搜索并绑定业务术语"
-              value={metric.term_id ?? undefined}
+              placeholder="搜索并绑定业务术语（可多选）"
+              value={metric.term_ids?.length ? metric.term_ids : metric.term_id ? [metric.term_id] : []}
               filterOption={false}
               onOpenChange={(open) => {
                 // 首次打开下拉即加载当前域范围已发布术语，无需先打字搜索
-                if (open && termOptions.length === 0) void loadTermOptions();
+                if (open && termOptions.length === 0) void loadTermOptions(undefined, 1, false, termScope);
               }}
               onPopupScroll={handleTermScroll}
               onSearch={handleTermSearch}
-              onChange={(v) => bindTerm(v ?? null)}
+              onChange={(v) => bindTerms((v ?? []) as number[])}
               options={termOptions}
               loading={termSearching}
               notFoundContent={termSearching ? "搜索中…" : "未找到匹配术语"}
             />
           </Space>
-        ) : metric.term_id ? (
+        ) : (metric.term_ids?.length || metric.term_id) ? (
           <span>
             已绑定术语{" "}
             {(() => {
-              const t = termOptions.find((x) => x.value === metric.term_id);
-              return t ? (
-                <a
-                  onClick={(e) => {
-                    e.preventDefault();
-                    navigate(`/glossary?kw=${encodeURIComponent(t.code)}`);
-                  }}
-                >
-                  {t.label}
-                </a>
+              const boundIds = metric.term_ids?.length
+                ? metric.term_ids
+                : metric.term_id
+                  ? [metric.term_id]
+                  : [];
+              const bound = boundIds
+                .map((id) => termOptions.find((x) => x.value === id))
+                .filter(Boolean) as { value: number; label: string; code: string }[];
+              return bound.length ? (
+                bound.map((t, i) => (
+                  <span key={t.value}>
+                    {i > 0 ? "、" : ""}
+                    <a
+                      onClick={(e) => {
+                        e.preventDefault();
+                        navigate(`/glossary?kw=${encodeURIComponent(t.code)}`);
+                      }}
+                    >
+                      {t.label}
+                    </a>
+                  </span>
+                ))
               ) : (
-                `#${metric.term_id}`
+                `#${boundIds.join("、#")}`
               );
             })()}
           </span>

@@ -282,6 +282,11 @@ class MetricCreateRequest(BaseModel):
     term_id: int | None = Field(
         None, ge=1, description="关联业务术语 ID（可空，须为已存在术语）"
     )
+    # 多术语关联（2026-09 用户反馈：一指标可关联多个业务术语）：term_ids 全量替换，
+    # term_id 缺省取 term_ids 首项（主术语）；两者都空=不关联。
+    term_ids: list[int] | None = Field(
+        None, description="关联业务术语 ID 列表（多选，可空；term_id 缺省取首项）"
+    )
 
     @field_validator("metric_code")
     @classmethod
@@ -532,12 +537,16 @@ class MetricDescriptionUpdateRequest(BaseModel):
 class MetricTermBindRequest(BaseModel):
     """指标↔术语绑定请求（P2-11：术语绑定写路径）。
 
-    绑定指标到已存在的业务术语（``metric.term_id``），传 None 解绑。
+    绑定指标到已存在的业务术语（``metric.term_id`` + ``metric.term_ids``），
+    传 None/空数组解绑。多术语：``term_ids`` 全量替换（主术语=首项，写 term_id）。
     仅 metric_owner / 域管理员 / 平台管理员可操作。
     """
 
     term_id: int | None = Field(
-        None, ge=1, description="术语 ID（传 null 解绑）"
+        None, ge=1, description="术语 ID（传 null 解绑；term_ids 缺省时使用）"
+    )
+    term_ids: list[int] | None = Field(
+        None, description="术语 ID 列表（多选全量替换，可空；主术语=首项写 term_id）"
     )
 
 
@@ -1188,6 +1197,8 @@ class MetricResponse(BaseModel):
     dw_developer_name: str | None = None
     # 关联业务术语（P2-11：术语绑定，度量口径归属术语治理）
     term_id: int | None = None
+    # 多术语关联（2026-09）：term_ids 全量列表；term_id = 主术语（首项）
+    term_ids: list[int] | None = None
     # 多变体挂载列表（2026-08-27 放开一指标一挂载）：详情接口回填全部挂载行；
     # 列表接口未回填时为 None（详情/编辑页按需调用 detail 端点）。
     mounts: list[MetricMountResponse] | None = None
