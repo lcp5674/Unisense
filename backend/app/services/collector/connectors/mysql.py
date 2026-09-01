@@ -111,6 +111,10 @@ class SqlalchemyConnector:
                 raise ExternalDependencyError(
                     f"查询超时（>{self._query_timeout}s）: {sql[:120]}"
                 ) from exc
+            # USE/SET 等无结果集语句：returns_rows=False → 返回空列表（供只读查询工作台
+            # 执行 USE 等会话语句时优雅返回，而非抛「This result object does not return rows」）
+            if not getattr(result, "returns_rows", True):
+                return []
             # MySQL information_schema 列标签为大写（SCHEMA_NAME/TABLE_NAME），
             # 统一规范化为小写，保证下游 row.get("table_name") 键访问稳定。
             return [{k.lower(): v for k, v in row._mapping.items()} for row in result]

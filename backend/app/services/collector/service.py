@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import sqlglot
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError, ResourceClosedError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -1078,9 +1078,14 @@ class CollectorService(BaseService):
                         f"{str(node.args.get('this')).upper()}（副作用/安全风险）"
                     )
             return text
-        # 其余 AST 类型（如 mysql 方言把 HELP 解析为 Alias、FLUSH/UNLOCK 解析为 Alias）：
-        # 委托原始文本兜底校验（首词白名单 + 去字面量后危险词/多语句扫描）做最终判定，
+        # 其余 AST 类型：先判可解析的 DDL/DML（如 DELETE）给出明确拒绝文案；
+        # 再委托原始文本兜底校验（首词白名单 + 去字面量后危险词/多语句扫描）做最终判定，
         # 不在此直接放行或拒绝——HELP 通过，FLUSH/UNLOCK/DO/HANDLER 因前缀不在白名单被拒。
+        if isinstance(ast, cls._DANGEROUS_NODE_TYPES):
+            raise ValidationError(
+                "仅支持只读查询（SELECT / SHOW / DESC / EXPLAIN / USE / HELP / "
+                "CHECKSUM / CHECK 等），不允许 DDL/DML 等写操作"
+            )
         return cls._validate_raw_read_sql(text)
 
     @classmethod
@@ -1148,6 +1153,12 @@ class CollectorService(BaseService):
             elapsed_ms = int((time.perf_counter() - start) * 1000)
         except ExternalDependencyError:
             raise  # 外部依赖错误（连接/查询超时）已语义化，交由 API 层映射
+        except (OperationalError, ProgrammingError) as exc:
+            # 源端拒绝该语句（如 Doris 不支持 CHECKSUM）：属「输入/能力不支持」客户端错误，
+            # 映射为 422 而非 500，透出源端原因便于用户调整
+            raise ValidationError(f"源库拒绝执行该语句: {exc}") from exc
+        except ResourceClosedError as exc:
+            raise ValidationError("该语句未返回结果集（仅支持返回行的只读语句）") from exc
         except Exception as exc:
             raise UnisenseError(f"执行 SQL 查询失败: {exc}") from exc
         finally:

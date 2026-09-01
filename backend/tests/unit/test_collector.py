@@ -5328,3 +5328,34 @@ async def test_query_sql_external_error_propagates():
         return_value=_FailConn(),
     ), pytest.raises(ExternalDependencyError):
         await svc.query_sql("s1", "SELECT * FROM t", limit=10)
+
+
+async def test_query_sql_maps_source_side_errors_to_validation_error():
+    """源端拒绝（OperationalError/ProgrammingError）与无结果集（ResourceClosedError）
+    映射为 ValidationError（422），而非 500——如 Doris 不支持 CHECKSUM。"""
+    svc, repo = _query_svc()
+    src = MagicMock(source_id="s1", source_type="doris", connection_config="enc")
+    repo.get_source = AsyncMock(return_value=src)
+
+    class _FailConn:
+        def __init__(self, exc: Exception) -> None:
+            self._exc = exc
+
+        async def query(self, sql: str, params: dict | None = None):
+            raise self._exc
+
+        async def dispose(self) -> None:
+            return None
+
+    from sqlalchemy.exc import OperationalError, ResourceClosedError
+
+    cases = [
+        OperationalError("stmt", {}, Exception("(1105) Syntax error")),
+        ResourceClosedError("This result object does not return rows"),
+    ]
+    for exc in cases:
+        with patch(
+            "app.services.collector.service.build_collector",
+            return_value=_FailConn(exc),
+        ), pytest.raises(AppValidationError):
+            await svc.query_sql("s1", "CHECKSUM TABLE t", limit=10)
