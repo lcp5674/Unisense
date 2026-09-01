@@ -110,6 +110,7 @@ async def test_me_returns_current_user(auth_client):
     user.role = "analyst"
     user.domain = "sales"
     user.org_id = 2
+    user.must_change_password = False
     app.dependency_overrides[deps.get_current_user] = lambda: user
 
     # me 端点会查询 Organization 与 SubjectDomain 回填名称；mock 返回 None（无记录）即可。
@@ -123,6 +124,31 @@ async def test_me_returns_current_user(auth_client):
     assert data["role"] == "analyst"
     assert data["org_id"] == 2
     assert data["domain"] == "sales"
+    # S1：/me 必须回传 must_change_password（前端据此渲染全屏改密守卫，
+    # 此前 UserInfo 缺该字段导致前端永远拿不到 true → 弹窗/守卫不触发，
+    # 未改密用户被受保护端点 403 淹没显示"加载失败"）。
+    assert data["must_change_password"] is False
+
+
+async def test_me_returns_must_change_password_for_first_login(auth_client):
+    """首次登录（或管理员重置密码）用户 /me 应返回 must_change_password=True。"""
+    c, session = auth_client
+    user = MagicMock()
+    user.id = 8
+    user.username = "bob"
+    user.display_name = "Bob"
+    user.role = "analyst"
+    user.domain = None
+    user.org_id = 2
+    user.must_change_password = True
+    app.dependency_overrides[deps.get_current_user] = lambda: user
+
+    session.execute.side_effect = lambda _stmt: _result_with(None)
+
+    resp = await c.get("/api/v1/auth/me", headers={"Authorization": "Bearer dummy"})
+
+    assert resp.status_code == 200
+    assert resp.json()["data"]["must_change_password"] is True
 
 
 # ---- P0：令牌无感续期（refresh token 换发 + 轮换）----

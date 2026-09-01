@@ -83,6 +83,9 @@ class UserInfo(BaseModel):
     domain_name: str | None = None
     org_id: int
     org_name: str | None = None
+    #: 首次登录/密码到期时需强制改密（前端据此在登录后渲染全屏改密守卫，
+    #: 未改密前不进入业务路由；与登录响应 TokenResponse.must_change_password 同源）。
+    must_change_password: bool = False
 
 
 class UserBrief(BaseModel):
@@ -221,6 +224,7 @@ async def me(
             domain_name=domain_name,
             org_id=user.org_id,
             org_name=org_name,
+            must_change_password=bool(getattr(user, "must_change_password", False)),
         )
     )
 
