@@ -208,6 +208,8 @@ async def _fill_approved_at(
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 # 写端点统一 RBAC + 注入守卫（对齐 semantic.py 的 _WRITE_DEPS 模式）
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
+# B3（审查修复）：/publish 直发通道须管理员（对齐 dimension/measure/term 的 /publish）
+_ADMIN_ROLES = ("platform_admin",)
 
 # ---- SQL 文本承载端点：注入守卫按字段/路径豁免 ----
 # 下述端点的合法输入就是原始 SQL 文本（用户粘贴的指标 SQL/口径表达式），仅经
@@ -1270,7 +1272,7 @@ async def refine_metric_definition(
     "/{metric_code}/publish",
     response_model=ApiResponse[MetricResponse],
     summary="发布指标（FR-07，路由到 approve_metric）",
-    dependencies=_WRITE_DEPS,
+    dependencies=_WRITE_DEPS + [Depends(require_roles(*_ADMIN_ROLES))],
 )
 async def publish_metric(
     metric_code: str,
@@ -1287,7 +1289,7 @@ async def publish_metric(
         target_version=request.version,
     )
     metric = await service.approve_metric(
-        metric_code, approve_req, actor_id=user.id, role=user.role
+        metric_code, approve_req, actor_id=user.id, role=user.role, user_domain=user.domain
     )
     await write_audit(
         db,
