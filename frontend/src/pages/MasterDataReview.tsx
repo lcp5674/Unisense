@@ -121,6 +121,8 @@ export function MasterDataReview({ embedded = false }: { embedded?: boolean } = 
   const [kindFilter, setKindFilter] = useState<"all" | ReviewKind>("all");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  // F1：服务端分页真实总数（三模块 total 之和），翻页可触及全部积压
+  const [serverTotal, setServerTotal] = useState(0);
   // 并发查询防竞态：只有最后一次发起的请求允许落地结果
   const loadSeq = useRef(0);
   const navigate = useNavigate();
@@ -134,17 +136,24 @@ export function MasterDataReview({ embedded = false }: { embedded?: boolean } = 
     const seq = ++loadSeq.current;
     setLoading(true);
     try {
-      const params: Record<string, string | number | undefined> = { page_size: 200 };
+      // F1（审查修复）：此前 page_size 硬编码 200 + 客户端分页，REVIEW 积压超 200 条
+      // 时第 201 条起完全不可见且无提示。改服务端分页透传（page/page_size），
+      // 翻页即取更深层数据；total 用三模块真实总数之和。
+      const params: Record<string, string | number | undefined> = {
+        page,
+        page_size: pageSize,
+      };
       if (view === "pending") params.status = "REVIEW";
       else if (currentUser?.id != null) params.reviewed_by = currentUser.id;
       // 「我审过的」依赖 currentUser：未就绪时不发无 approver 过滤的全量首查
       if (view === "reviewed" && currentUser?.id == null) return;
       const [dims, measures, terms] = await Promise.all([
-        listDimensions(params as { status?: string; page_size?: number; reviewed_by?: number }),
-        listMeasureCatalogs(params as { status?: string; page_size?: number; reviewed_by?: number }),
-        listTerms(params as { status?: string; page_size?: number; reviewed_by?: number }),
+        listDimensions(params as { status?: string; page_size?: number; reviewed_by?: number; page?: number }),
+        listMeasureCatalogs(params as { status?: string; page_size?: number; reviewed_by?: number; page?: number }),
+        listTerms(params as { status?: string; page_size?: number; reviewed_by?: number; page?: number }),
       ]);
       if (seq !== loadSeq.current) return;
+      setServerTotal((dims.total ?? dims.items.length) + (measures.total ?? measures.items.length) + (terms.total ?? terms.items.length));
       const merged: ReviewItem[] = [
         ...dims.items.map((d) =>
           toItem("dimension", {
@@ -235,7 +244,7 @@ export function MasterDataReview({ embedded = false }: { embedded?: boolean } = 
     if (view === "reviewed" && !currentUser) return;
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, currentUser?.id]);
+  }, [view, currentUser?.id, page, pageSize]);
 
   function handleBack() {
     if (window.history.length > 1) navigate(-1);
@@ -417,9 +426,9 @@ export function MasterDataReview({ embedded = false }: { embedded?: boolean } = 
           pagination={{
             current: page,
             pageSize,
-            total: filteredItems.length,
+            total: serverTotal,
             showSizeChanger: true,
-            pageSizeOptions: [10, 20, 50],
+            pageSizeOptions: [10, 20, 50, 100],
             onChange: (p, ps) => {
               setPage(p);
               setPageSize(ps);
