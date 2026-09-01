@@ -1151,6 +1151,20 @@ class CollectorService(BaseService):
                 changed = True
         return parsed.sql(dialect="mysql") if changed else sql
 
+    @classmethod
+    def _safe_use_sql(cls, db_name: str) -> str:
+        """构造安全的 ``USE <db>`` 语句（库名来自会话状态，执行前必须防注入）。
+
+        纯标识符（字母/数字/下划线/$）裸拼接；其余字符反引号包裹并转义
+        内部反引号——与连接器对标识符的转义口径一致。
+        """
+        if not db_name:
+            raise ValidationError("当前库名为空")
+        if re.fullmatch(r"[A-Za-z0-9_$]+", db_name):
+            return f"USE `{db_name}`"
+        escaped = db_name.replace("`", "``")
+        return f"USE `{escaped}`"
+
     async def _get_current_db(
         self, source_id: str, actor_id: int | None
     ) -> str | None:
@@ -1233,6 +1247,11 @@ class CollectorService(BaseService):
 
         collector = build_collector(src.source_type, src.connection_config)
         try:
+            # 会话已有当前库时，先在连接上执行 USE——SHOW TABLES / DESC t 等
+            # 无表节点语句依赖连接「默认库」，AST 表名改写（_qualify_current_db）
+            # 只覆盖 SELECT/DESC 的表引用；两者双保险互不冲突（显式前缀优先）。
+            if current_db:
+                await collector.query(self._safe_use_sql(current_db))
             # 仅「可解析为 SELECT 且顶层无 LIMIT」才追加（避免破坏 SHOW/DESC/EXPLAIN/
             # USE/CHECKSUM 等语句语法；解析失败同样不追加，靠 Python 侧截断兜底）
             parsed_exec = self._parse_one(exec_sql)

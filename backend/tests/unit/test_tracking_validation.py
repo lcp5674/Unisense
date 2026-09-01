@@ -31,6 +31,7 @@ async def test_unknown_event_type_rejected() -> None:
 async def test_allowed_metric_event_accepted() -> None:
     await _call(TrackEventRequest(event_type="metric_detail_view", target_id="gmv_day"))
     await _call(TrackEventRequest(event_type="consume_query", target_id="gmv_day"))
+    await _call(TrackEventRequest(event_type="sql_query", target_id="mysql_unisense"))
 
 
 async def test_context_too_many_keys_rejected() -> None:

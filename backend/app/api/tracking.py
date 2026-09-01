@@ -39,6 +39,7 @@ _ALLOWED_EVENT_TYPES = frozenset(
         "consume_query",
         "consume_dry_run",
         "consume_semantic",
+        "sql_query",
         "consumption_guide_view",
         # 前端 useTracking 实际埋点的事件类型
         "consumption_guide_update",

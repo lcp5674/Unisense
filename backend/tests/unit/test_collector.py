@@ -5347,12 +5347,15 @@ async def test_query_sql_bare_table_qualifies_with_current_db():
         )
         await svc.query_sql("s1", "DESC customer", limit=10, actor_id=7)
 
-    assert conn.queries[0] == "SELECT * FROM ssb.customer LIMIT 10"
-    assert conn.queries[1] == (
+    # 每次调用连接都先切到会话当前库（USE 与应用语句交错），过滤后断言语句序列
+    exec_sqls = [q for q in conn.queries if not q.startswith("USE `")]
+    assert exec_sqls == [
+        "SELECT * FROM ssb.customer LIMIT 10",
         "SELECT c.custkey FROM ssb.customer AS c "
-        "JOIN ssb.orders AS o ON c.custkey = o.custkey LIMIT 10"
-    )
-    assert conn.queries[2] == "DESCRIBE ssb.customer"
+        "JOIN ssb.orders AS o ON c.custkey = o.custkey LIMIT 10",
+        "DESCRIBE ssb.customer",
+    ]
+    assert conn.queries.count("USE `ssb`") == 3  # 三次调用每次都先切库
 
 
 async def test_query_sql_prefixed_table_not_modified():
@@ -5374,9 +5377,42 @@ async def test_query_sql_prefixed_table_not_modified():
         await svc.query_sql("s1", "SHOW TABLES FROM other_db", limit=10, actor_id=7)
         await svc.query_sql("s1", "SHOW CREATE TABLE t", limit=10, actor_id=7)
 
-    assert conn.queries[0] == "SELECT * FROM other_db.customer LIMIT 10"  # 已带前缀不改
-    assert conn.queries[1] == "SHOW TABLES FROM other_db"  # Show 的 db 参数非 Table 节点
-    assert conn.queries[2] == "SHOW CREATE TABLE t"  # 无 Table 节点不改写
+    exec_sqls = [q for q in conn.queries if not q.startswith("USE `")]
+    assert exec_sqls == [
+        "SELECT * FROM other_db.customer LIMIT 10",  # 已带前缀不改
+        "SHOW TABLES FROM other_db",  # Show 的 db 参数非 Table 节点
+        "SHOW CREATE TABLE t",  # 无 Table 节点不改写
+    ]
+    assert conn.queries.count("USE `ssb`") == 3  # 每次调用连接都先切库
+
+
+async def test_query_sql_show_tables_uses_current_db():
+    """会话有当前库时，SHOW TABLES 等无表节点语句先在连接上执行 USE——
+    解决「已 USE 却仍报未配置默认数据库」（AST 表名改写覆盖不到 SHOW）。"""
+    svc, repo = _query_svc()
+    src = MagicMock(source_id="s1", source_type="mysql", connection_config="enc")
+    repo.get_source = AsyncMock(return_value=src)
+    fake_redis = MagicMock()
+    fake_redis.get = AsyncMock(return_value="ssb")
+    fake_redis.set = AsyncMock()
+    conn = _QueryConnector([{"Table": "customer"}])
+
+    with patch(
+        "app.services.collector.service.get_redis", return_value=fake_redis
+    ), patch(
+        "app.services.collector.service._redis_available", return_value=True
+    ), patch("app.services.collector.service.build_collector", return_value=conn):
+        await svc.query_sql("s1", "SHOW TABLES", limit=10, actor_id=7)
+
+    assert conn.queries[0] == "USE `ssb`"  # 连接先切到会话当前库
+    assert conn.queries[1] == "SHOW TABLES"  # 不追加 LIMIT、不改写
+
+
+def test_query_sql_safe_use_sql_escapes_special_db_name():
+    """库名含特殊字符/反引号时反引号包裹并转义（防注入）。"""
+    assert CollectorService._safe_use_sql("ssb") == "USE `ssb`"
+    assert CollectorService._safe_use_sql("my-db") == "USE `my-db`"
+    assert CollectorService._safe_use_sql("a`b") == "USE `a``b`"
 
 
 async def test_query_sql_source_not_found():
