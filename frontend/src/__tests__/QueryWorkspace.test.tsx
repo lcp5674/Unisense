@@ -52,6 +52,7 @@ import {
   consumeQuery,
   consumeSemantic,
   listMetrics,
+  listApiClients,
   getConsumeToken,
   getConsumeTokenExpiry,
   CONSUME_TOKEN_CHANGED_EVENT,
@@ -60,6 +61,7 @@ const mockedConsumeDryRun = vi.mocked(consumeDryRun);
 const mockedConsumeQuery = vi.mocked(consumeQuery);
 const mockedConsumeSemantic = vi.mocked(consumeSemantic);
 const mockedListMetrics = vi.mocked(listMetrics);
+const mockedListApiClients = vi.mocked(listApiClients);
 const mockedGetConsumeToken = vi.mocked(getConsumeToken);
 const mockedGetConsumeTokenExpiry = vi.mocked(getConsumeTokenExpiry);
 
@@ -85,6 +87,54 @@ function renderPage() {
   );
 }
 
+// 构造最小合法 MetricResponse（下拉仅消费 metric_code/name/domain/pii_flag）
+function mkMetric(code: string, name: string, domain: string, pii = false): import("../types").MetricResponse {
+  return {
+    id: 1,
+    metric_code: code,
+    name,
+    domain,
+    type: "atomic",
+    granularity: "day",
+    unit: "元",
+    currency: null,
+    aggregation: "SUM",
+    time_semantics: "PERIOD",
+    freshness: "T1",
+    sla: null,
+    dw_layer: "DWS",
+    metric_tier: "T1",
+    serving_mode: "BATCH_ONLY",
+    additivity: "ADDITIVE",
+    non_additive_dimensions: null,
+    definition_json: {},
+    version: 1,
+    row_version: 1,
+    status: "PUBLISHED",
+    owner_id: 1,
+    backup_owner_id: null,
+    approver_id: null,
+    submitted_by: null,
+    pii_flag: pii,
+    compliance_reviewed: true,
+    term_id: null,
+    effective_version: 1,
+    consumption_guide: null,
+    successor_code: null,
+    deprecated_at: null,
+    sunset_until: null,
+    emergency_publish: false,
+    emergency_reason: null,
+    emergency_reviewed_at: null,
+    gray_tenant_ids: null,
+    pending_conflict: false,
+    pending_conflict_detail: null,
+    pending_version: false,
+    created_at: "2026-08-01T00:00:00",
+    updated_at: "2026-08-01T00:00:00",
+  };
+}
+
 // 定位「指标」Form.Item 内的 Select 搜索输入框（antd 不把 placeholder 放到 input 上）
 function metricSelectInput(): HTMLInputElement {
   const labelEl = screen.getByText("指标", { selector: "label" });
@@ -98,6 +148,8 @@ describe("QueryWorkspace", () => {
     // 令牌 mock 默认「无令牌」；各测试按需覆盖，且不泄漏到后续用例（clearAllMocks 不清 implementation）
     mockedGetConsumeToken.mockReturnValue(null);
     mockedGetConsumeTokenExpiry.mockReturnValue(null);
+    // 默认无 ACTIVE 客户端 → 授权范围无限制（展示全部 PUBLISHED），与既有用例语义一致
+    mockedListApiClients.mockResolvedValue([]);
     mockedListMetrics.mockResolvedValue({
       items: [
         {
@@ -261,6 +313,42 @@ describe("QueryWorkspace", () => {
     mockedGetConsumeTokenExpiry.mockReturnValue(null);
     fireEvent(window, new Event(CONSUME_TOKEN_CHANGED_EVENT));
     await waitFor(() => expect(screen.getByText("需要消费令牌")).toBeInTheDocument());
+  });
+
+  it("指标下拉按接入方授权域收敛：仅展示 scope_domain 内 + 白名单内（PII 需显式白名单）的 PUBLISHED 指标", async () => {
+    const user = userEvent.setup();
+    mockedListApiClients.mockResolvedValue([
+      {
+        client_id: "e2e_app",
+        scope_domain: "outpatient",
+        metric_whitelist: ["outp_patient_cnt", "outp_pii_ok"],
+        qps: 100,
+        daily_quota: 1000,
+        status: "ACTIVE",
+      },
+    ]);
+    mockedListMetrics.mockResolvedValue({
+      items: [
+        mkMetric("outp_patient_cnt", "患者数", "outpatient"), // 域内 + 白名单 → 展示
+        mkMetric("outp_fee_day", "门诊费用", "outpatient"), // 域内但不在白名单 → 隐藏
+        mkMetric("gmv_net", "净GMV", "sales"), // 域外 → 隐藏
+        mkMetric("outp_pii_raw", "原始PII", "outpatient", true), // PII 未显式白名单 → 隐藏
+        mkMetric("outp_pii_ok", "授权PII", "outpatient", true), // PII + 白名单 → 展示
+      ],
+      total: 5,
+      page: 1,
+      page_size: 100,
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+    // 服务端按 scope_domain 过滤
+    expect(mockedListMetrics).toHaveBeenCalledWith(expect.objectContaining({ domain: "outpatient" }));
+    await user.click(metricSelectInput());
+    expect(await screen.findByText(/outp_patient_cnt · 患者数/)).toBeInTheDocument();
+    expect(await screen.findByText(/outp_pii_ok · 授权PII/)).toBeInTheDocument();
+    expect(screen.queryByText(/outp_fee_day · 门诊费用/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/gmv_net · 净GMV/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/outp_pii_raw · 原始PII/)).not.toBeInTheDocument();
   });
 
   it("提供统一的返回按钮（返回上一入口）", async () => {

@@ -95,6 +95,13 @@ export function QueryWorkspace() {
   const canExecute = can("query:execute");
   const [metricOptions, setMetricOptions] = useState<Array<{ value: string; label: string }>>([]);
   const [metricCode, setMetricCode] = useState<string | undefined>(undefined);
+  // 接入方授权范围：取「首个 ACTIVE 客户端」的域/白名单，指标下拉据此收敛——
+  // 与 handleMintToken 使用同一客户端，保证「能看到的指标 = 实际能消费的指标」，
+  // 从源头消除 FORBIDDEN_DOMAIN/FORBIDDEN_METRIC 403（后端仍 fail-closed 兜底）。
+  const [clientScope, setClientScope] = useState<{ domain: string | null; whitelist: string[] | null }>({
+    domain: null,
+    whitelist: null,
+  });
   const [dateRange, setDateRange] = useState("last_30d");
   const [granularity, setGranularity] = useState<string | undefined>(undefined);
   const [comparison, setComparison] = useState<string | undefined>(undefined);
@@ -155,20 +162,53 @@ export function QueryWorkspace() {
   useEffect(() => {
     // P5（审查修复）：指标下拉改服务端搜索——初始加载前 100 条，搜索时按关键词请求
     loadMetricOptions("");
+    loadClientScope();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 拉取首个 ACTIVE 接入方客户端的授权范围（域 + 白名单），供指标下拉收敛。
+  // 取到后显式传入新 scope 重载指标（避免 setClientScope 后闭包读到旧值）。
+  function loadClientScope() {
+    listApiClients()
+      .then((clients) => {
+        const active = clients.find((c) => c.status === "ACTIVE");
+        const scope = {
+          domain: active?.scope_domain ?? null,
+          whitelist: active?.metric_whitelist ?? null,
+        };
+        setClientScope(scope);
+        loadMetricOptions("", scope);
+      })
+      .catch(() => {});
+  }
+
   // P5：指标下拉服务端搜索（防抖 300ms；关键词为空回到前 100 条）
   const metricSearchTimer = useRef<number | null>(null);
-  function loadMetricOptions(keyword: string) {
+  function loadMetricOptions(
+    keyword: string,
+    scope: { domain: string | null; whitelist: string[] | null } = clientScope,
+  ) {
     // 消费侧只允许消费 PUBLISHED 指标：未发布（DRAFT/REVIEW）指标在后端 FORBIDDEN_METRIC，
-    // 下拉直接过滤避免用户选到不可消费的指标（403 从源头消除）
-    listMetrics({ keyword: keyword || undefined, page_size: 100, status: "PUBLISHED" })
-      .then((res) =>
+    // 下拉直接过滤避免用户选到不可消费的指标（403 从源头消除）。
+    // 同时按接入方授权范围收敛：scope_domain 非空 → 仅该域指标；metric_whitelist 非空 →
+    // 仅白名单内指标；PII 指标须在白名单显式列出（与后端 _assert_authorized 同口径）。
+    const wl = scope.whitelist;
+    listMetrics({
+      keyword: keyword || undefined,
+      page_size: 100,
+      status: "PUBLISHED",
+      domain: scope.domain ?? undefined,
+    })
+      .then((res) => {
+        const items = res.items.filter((m) => {
+          if (wl && wl.length > 0 && !wl.includes(m.metric_code)) return false;
+          if (m.pii_flag && !(wl ?? []).includes(m.metric_code)) return false;
+          return true;
+        });
         setMetricOptions(
-          res.items.map((m) => ({ value: m.metric_code, label: `${m.metric_code} · ${m.name}` })),
-        ),
-      )
+          items.map((m) => ({ value: m.metric_code, label: `${m.metric_code} · ${m.name}` })),
+        );
+      })
       .catch(() => {});
   }
   function handleMetricSearch(kw: string) {
@@ -295,6 +335,10 @@ export function QueryWorkspace() {
       setConsumeToken(access_token);
       setTokenOk(true);
       setTokenExpiry(getConsumeTokenExpiry());
+      // 同步授权范围（与下拉收敛使用同一客户端），并刷新指标列表（域/白名单可能已变）
+      const scope = { domain: active.scope_domain ?? null, whitelist: active.metric_whitelist ?? null };
+      setClientScope(scope);
+      loadMetricOptions("", scope);
       message.success(`已使用客户端 ${active.client_id} 签发消费令牌`);
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "签发失败");

@@ -514,9 +514,12 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   }
 
   if (res.status === 401 || res.status === 403) {
-    // 鉴权失效：清 token，交由上层跳登录（消费令牌失效仅清除消费令牌）
+    // 鉴权失效：清 token，交由上层跳登录。
+    // consumeAuth 仅 401（令牌无效/过期）清除消费令牌——403 是授权拒绝（FORBIDDEN_DOMAIN/
+    // FORBIDDEN_METRIC/FORBIDDEN_PII），令牌本身有效，清除会导致后续请求无 Bearer 回落
+    // X-Api-Key 报「需要消费令牌」误导（与下方用户 JWT 的 403 保留登录态同语义）。
     if (init?.consumeAuth) {
-      clearConsumeToken();
+      if (res.status === 401) clearConsumeToken();
     } else if (res.status === 401) {
       // 401：刷新失败或重放仍 401 → 会话彻底失效，清空 access + refresh
       clearAuthTokens();
