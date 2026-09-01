@@ -53,10 +53,12 @@ const REUSE_BUCKETS = [
   { key: "high", label: "高复用（>5）", min: 6, max: Number.MAX_SAFE_INTEGER, color: "#389e0d" },
 ];
 
-/** 统一表格分页：可跳页码、可改条数、显示总数。 */
-function tablePagination(total: number) {
+/** 统一表格分页：可跳页码、可改条数、显示总数。
+ *  注意：必须用 defaultPageSize（非受控）而非 pageSize（受控）——
+ *  受控 pageSize 缺少 onShowSizeChange 同步时，切换条数会被重置回默认值。 */
+export function tablePagination(total: number) {
   return {
-    pageSize: 10,
+    defaultPageSize: 10,
     showSizeChanger: true,
     pageSizeOptions: ["10", "20", "50", "100"],
     showQuickJumper: true,

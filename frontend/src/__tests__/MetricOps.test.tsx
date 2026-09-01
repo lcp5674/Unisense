@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, within, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { MetricOps } from "../pages/MetricOps";
+import { MetricOps, tablePagination } from "../pages/MetricOps";
 import type {
   MetricConsistencyStats,
   MetricLedgerStats,
@@ -127,6 +127,16 @@ describe("MetricOps 指标运营分析", () => {
       expect(quickJumper).toBeTruthy();
       expect(sizeChanger).toBeTruthy();
     });
+  });
+
+  it("分页配置非受控（defaultPageSize 而非受控 pageSize，保证切换条数不重置）", () => {
+    const p = tablePagination(25) as Record<string, unknown>;
+    expect(p.defaultPageSize).toBe(10);
+    expect("pageSize" in p).toBe(false); // 受控 pageSize 会导致切换条数被重置（本次修复点）
+    expect(p.showSizeChanger).toBe(true);
+    expect(p.showQuickJumper).toBe(true);
+    expect(p.showTotal).toBeTypeOf("function");
+    expect(p.total).toBe(25);
   });
 
   it("复用度分析展示分桶分布（零复用/低/中/高）", async () => {
