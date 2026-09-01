@@ -81,6 +81,42 @@ class PostgresCollector(BaseCollector):
                 names.append(str(name))
         return names
 
+    async def list_databases(self) -> list[str]:
+        """枚举实例下全部非系统 schema（供创建数据源/维度弹窗选库）。
+
+        与 MySQL 语义对齐：连接库/schema 为纯连接凭据，列表展示全部可采 schema，
+        由调用方选择目标。
+        """
+        return await self._list_schemas()
+
+    async def list_tables(self, databases: list[str] | None = None) -> dict[str, list[str]]:
+        """枚举指定 schema（或全部非系统 schema）下的 BASE TABLE，按 schema 分组。
+
+        单条 ``table_schema IN (...)`` 批量查询（复用连接池、无逐库往返），
+        与 MySQL 系连接器同模式。
+        """
+        if databases:
+            schemas = list(databases)
+        elif self._schema:
+            schemas = [self._schema]
+        else:
+            schemas = await self._list_schemas()
+        tables_by_db: dict[str, list[str]] = {}
+        if not schemas:
+            return tables_by_db
+        rows = await self._connector.query(
+            "SELECT table_schema, table_name FROM information_schema.tables "
+            "WHERE table_schema IN :schemas AND table_type = :ttype "
+            "ORDER BY table_schema, table_name",
+            {"schemas": tuple(schemas), "ttype": "BASE TABLE"},
+        )
+        for r in rows:
+            schema = r.get("table_schema")
+            tbl = r.get("table_name")
+            if schema and tbl:
+                tables_by_db.setdefault(str(schema), []).append(str(tbl))
+        return tables_by_db
+
     async def _sample_columns(
         self, entity_name: str, columns: list[dict[str, Any]]
     ) -> list[dict[str, str]]:

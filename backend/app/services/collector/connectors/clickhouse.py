@@ -212,6 +212,57 @@ class ClickHouseCollector(BaseCollector):
         """执行 SQL 并返回行字典（ClickHouse 文本响应 → 结构化行）。"""
         return self._parse_tsv_named(await self._query(sql))
 
+    async def list_databases(self) -> list[str]:
+        """枚举实例下全部非系统数据库（供创建数据源/维度弹窗选库）。
+
+        与 ``collect`` 的全库枚举分支同源：查询 ``system.databases`` 并排除
+        ``_CLICKHOUSE_SYSTEM_DBS``（system/information_schema/default）。
+        """
+        try:
+            dbs_text = await self._query(
+                "SELECT name FROM system.databases FORMAT TabSeparated"
+            )
+        except Exception as exc:
+            raise ExternalDependencyError(f"枚举数据库失败: {exc}") from exc
+        return [
+            d.strip()
+            for d in dbs_text.strip().splitlines()
+            if d.strip() and d.strip() not in _CLICKHOUSE_SYSTEM_DBS
+        ]
+
+    async def list_tables(self, databases: list[str] | None = None) -> dict[str, list[str]]:
+        """枚举指定库（或全部非系统库）下的表，按库分组（供前端级联选表）。
+
+        库优先级与 ``collect`` 对齐：显式传入 > ``_databases`` > 连接库 > 枚举全部。
+        逐库查询复用实例级 httpx 连接（HTTP 单连接，无握手成本）。
+        """
+        if databases:
+            dbs = list(databases)
+        elif getattr(self, "_databases", None):
+            dbs = list(self._databases)
+        elif self._database:
+            dbs = [self._database]
+        else:
+            dbs = await self.list_databases()
+        tables_by_db: dict[str, list[str]] = {}
+        for db in dbs:
+            try:
+                safe_db = self._safe_ident(db)
+            except ExternalDependencyError:
+                continue
+            try:
+                tables_text = await self._query(
+                    f"SELECT name FROM system.tables WHERE database = '{safe_db}' "
+                    f"FORMAT TabSeparated"
+                )
+            except Exception as exc:
+                logger.warning("枚举库 %s 表列表失败: %s", db, exc)
+                continue
+            tables_by_db[db] = [
+                line.strip() for line in tables_text.strip().splitlines() if line.strip()
+            ]
+        return tables_by_db
+
     async def _sample_columns(
         self, entity_name: str, columns: list[dict[str, Any]]
     ) -> list[dict[str, str]]:

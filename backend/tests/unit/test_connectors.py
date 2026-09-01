@@ -37,6 +37,14 @@ class _FakeConnector:
 
     async def query(self, sql: str, params: dict | None = None) -> list[dict]:
         if "information_schema.tables" in sql:
+            if "table_schema IN" in sql:
+                # 批量枚举（list_tables 单条 IN 查询）：按传入 schemas 返回带 schema 的行
+                schemas = (params or {}).get("schemas") or ("db1",)
+                rows = []
+                for s in schemas:
+                    for t in self._tables:
+                        rows.append({"table_schema": s, "table_name": t})
+                return rows
             return [{"table_name": t} for t in self._tables]
         if "pg_catalog.pg_attribute" in sql:
             # Postgres 注释查询（pg_description 层）→ 按 (table, column) 返回注释
@@ -177,6 +185,25 @@ async def test_mysql_collector_single_table_failure_skips():
             "default": None,
         }
     ]
+
+
+async def test_mysql_list_tables_batch_groups_by_db():
+    """list_tables 单条 IN 批量查询并按库分组（逐库串行 → 1 次往返）。"""
+    conn = _FakeConnector(["users", "orders"], {})
+    collector = InformationSchemaCollector(conn, database="db1")
+    result = await collector.list_tables(["db1", "db2"])
+    assert result == {
+        "db1": ["users", "orders"],
+        "db2": ["users", "orders"],
+    }
+
+
+async def test_mysql_list_tables_empty_schemas_returns_empty():
+    """list_tables 无可用库时返回空字典（不发查询）。"""
+    conn = _FakeConnector(["users"], {})
+    collector = InformationSchemaCollector(conn, database="db1")
+    with patch.object(collector, "_list_schemas", AsyncMock(return_value=[])):
+        assert await collector.list_tables() == {}
 
 
 # ---------- PostgresCollector ----------
@@ -361,6 +388,42 @@ async def test_postgres_collect_entity_samples_columns():
     assert len(conn.sample_sql) == 1
     assert spec.schema_json["columns"][0]["sample"] == ["110101********1234"]
     assert spec.schema_json["sample_rows"] == [{"id_card": "110101********1234"}]
+
+
+async def test_postgres_list_databases_returns_all_schemas():
+    """list_databases 枚举全部非系统 schema（供创建数据源/维度弹窗选库）。"""
+    conn = _FakeConnector([], {})
+    collector = PostgresCollector(conn)
+
+    async def fake_query(sql: str, params: dict | None = None) -> list[dict]:
+        assert "information_schema.schemata" in sql
+        return [
+            {"schema_name": "public"},
+            {"schema_name": "ods"},
+            {"schema_name": "pg_catalog"},
+        ]
+
+    conn.query = fake_query  # type: ignore[method-assign]
+    assert await collector.list_databases() == ["public", "ods"]
+
+
+async def test_postgres_list_tables_batch_groups_by_schema():
+    """list_tables 单条 IN 批量查询并按 schema 分组（复用连接池、无逐库往返）。"""
+    conn = _FakeConnector(["users", "orders"], {})
+    collector = PostgresCollector(conn, schema="public")
+    result = await collector.list_tables(["public", "ods"])
+    assert result == {
+        "public": ["users", "orders"],
+        "ods": ["users", "orders"],
+    }
+
+
+async def test_postgres_list_tables_falls_back_to_configured_schema():
+    """list_tables 未传库时回退连接配置的 schema（单 schema 模式）。"""
+    conn = _FakeConnector(["users"], {})
+    collector = PostgresCollector(conn, schema="public")
+    result = await collector.list_tables()
+    assert result == {"public": ["users"]}
 
 
 # ---------- HiveCollector ----------
@@ -738,6 +801,49 @@ async def test_clickhouse_collector_samples_columns_via_http():
     assert cols[0]["sample"] == ["138****5678"]
     assert cols[1]["sample"] == ["a***@b.com"]
     assert "sample" not in cols[2]
+
+
+async def test_clickhouse_list_databases_excludes_system_dbs():
+    """list_databases 枚举非系统库（system/information_schema/default 排除）。"""
+    collector = ClickHouseCollector(host="ch-host")
+
+    async def mock_query(sql: str) -> str:
+        assert "system.databases" in sql
+        return "system\ninformation_schema\ndefault\nods\ndwd\n"
+
+    collector._query = mock_query  # type: ignore[assignment]
+    assert await collector.list_databases() == ["ods", "dwd"]
+
+
+async def test_clickhouse_list_tables_groups_by_db():
+    """list_tables 逐库 system.tables 查询并按库分组（复用 HTTP 单连接）。"""
+    collector = ClickHouseCollector(host="ch-host")
+    seen_sql: list[str] = []
+
+    async def mock_query(sql: str) -> str:
+        seen_sql.append(sql)
+        if "ods" in sql:
+            return "orders\ncustomers\n"
+        if "dwd" in sql:
+            return "fee_di\n"
+        return ""
+
+    collector._query = mock_query  # type: ignore[assignment]
+    result = await collector.list_tables(["ods", "bad.db", "dwd"])
+    assert result == {"ods": ["orders", "customers"], "dwd": ["fee_di"]}
+    # 非法库名跳过，未对其发出查询
+    assert not any("bad.db" in s for s in seen_sql)
+
+
+async def test_clickhouse_list_tables_falls_back_to_configured_database():
+    """list_tables 未传库时回退连接库（单库模式）。"""
+    collector = ClickHouseCollector(host="ch-host", database="test_db")
+
+    async def mock_query(sql: str) -> str:
+        return "events\nlogs\n"
+
+    collector._query = mock_query  # type: ignore[assignment]
+    assert await collector.list_tables() == {"test_db": ["events", "logs"]}
 
 
 async def test_clickhouse_collector_skips_sampling_when_disabled():

@@ -176,17 +176,24 @@ class InformationSchemaCollector(BaseCollector):
         """枚举指定库（或全部非系统库）下的 BASE TABLE，按库分组（供前端级联选表）。
 
         ``databases`` 为空时回退枚举全部非系统库；连接器不支持枚举表（如 Kafka）
-        由基类返回空字典，前端隐藏表级选择区。
+        由基类返回空字典，前端隐藏表级选择区。单条 ``table_schema IN (...)``
+        批量查询（复用连接池、无逐库往返），库多时从 N 次查询收敛为 1 次。
         """
         schemas = list(databases) if databases else await self._list_schemas()
         tables_by_db: dict[str, list[str]] = {}
-        for schema in schemas:
-            rows = await self._connector.query(
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = :schema AND table_type = :ttype ORDER BY table_name",
-                {"schema": schema, "ttype": "BASE TABLE"},
-            )
-            tables_by_db[schema] = [str(r["table_name"]) for r in rows if r.get("table_name")]
+        if not schemas:
+            return tables_by_db
+        rows = await self._connector.query(
+            "SELECT table_schema, table_name FROM information_schema.tables "
+            "WHERE table_schema IN :schemas AND table_type = :ttype "
+            "ORDER BY table_schema, table_name",
+            {"schemas": tuple(schemas), "ttype": "BASE TABLE"},
+        )
+        for r in rows:
+            schema = r.get("table_schema")
+            tbl = r.get("table_name")
+            if schema and tbl:
+                tables_by_db.setdefault(str(schema), []).append(str(tbl))
         return tables_by_db
 
     async def query(
