@@ -2032,8 +2032,10 @@ class CollectorService(BaseService):
                 col["description"] = d.description
                 col["description_source"] = d.source
 
-    async def list_catalogs(self, params: DBCatalogListParams) -> DBCatalogListResponse:
-        cats, total = await self._repo.list_catalogs(params)
+    async def list_catalogs(
+        self, params: DBCatalogListParams, org_id: int | None = None
+    ) -> DBCatalogListResponse:
+        cats, total = await self._repo.list_catalogs(params, org_id=org_id)
         # 批量补源维度信息（名称 / 删除状态）：join 路径已带瞬态属性，普通路径批量查询
         source_ids = {c.source_id for c in cats}
         meta = await self._repo.get_sources_meta(list(source_ids)) if source_ids else {}
@@ -2071,18 +2073,27 @@ class CollectorService(BaseService):
         )
 
     async def list_catalog_databases(
-        self, source_id: str | None = None, source_status: str | None = None
+        self,
+        source_id: str | None = None,
+        source_status: str | None = None,
+        org_id: int | None = None,
     ) -> list[str]:
         """目录去重库名列表（供前端库名筛选下拉，可随 source_id / source_status 联动）。"""
-        return await self._repo.list_catalog_databases(source_id, source_status)
+        return await self._repo.list_catalog_databases(source_id, source_status, org_id=org_id)
 
-    async def get_catalog_detail(self, catalog_id: int) -> DBCatalogResponse:
+    async def get_catalog_detail(
+        self, catalog_id: int, org_id: int | None = None
+    ) -> DBCatalogResponse:
         """按主键取目录实体详情（血缘图谱表节点下钻用）。
 
+        Args:
+            catalog_id: 目录实体主键。
+            org_id: 多租户组织 ID；非 None 时跨组织实体视为不存在（404）。
+
         Raises:
-            NotFoundError: 目录实体不存在（含已删除）。
+            NotFoundError: 目录实体不存在（含已删除/跨组织）。
         """
-        cat = await self._repo.get_catalog_by_id(catalog_id)
+        cat = await self._repo.get_catalog_by_id(catalog_id, org_id=org_id)
         if cat is None:
             raise NotFoundError(f"目录实体不存在: {catalog_id}")
         resp = DBCatalogResponse.model_validate(cat)

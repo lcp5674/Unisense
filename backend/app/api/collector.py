@@ -674,7 +674,10 @@ async def list_source_catalogs(
 
         first_msg = exc.errors()[0]["msg"] if exc.errors() else "参数校验失败"
         raise AppValidationError(str(first_msg)) from exc
-    return ok(data=await svc.list_catalogs(params), trace_id=trace_id)
+    return ok(
+        data=await svc.list_catalogs(params, org_id=_resolve_org_scope(user)),
+        trace_id=trace_id,
+    )
 
 
 @source_router.post("/{source_id}/entities/{entity_name}/refresh", dependencies=_WRITE_DEPS)
@@ -1246,7 +1249,10 @@ async def list_catalogs(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[DBCatalogListResponse]:
     svc = _svc(db)
-    return ok(data=await svc.list_catalogs(params), trace_id=trace_id)
+    return ok(
+        data=await svc.list_catalogs(params, org_id=_resolve_org_scope(user)),
+        trace_id=trace_id,
+    )
 
 
 @catalog_router.get("/databases", dependencies=_READ_DEPS)
@@ -1264,7 +1270,11 @@ async def list_catalog_databases(
     """目录去重库名列表（供前端库名筛选下拉，可随 source_id / source_status 联动）。"""
     svc = _svc(db)
     return ok(
-        data={"items": await svc.list_catalog_databases(source_id, source_status)},
+        data={
+            "items": await svc.list_catalog_databases(
+                source_id, source_status, org_id=_resolve_org_scope(user)
+            )
+        },
         trace_id=trace_id,
     )
 
@@ -1273,6 +1283,7 @@ async def list_catalog_databases(
 async def get_description_coverage(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     page: int = Query(1, ge=1),
     page_size: int | None = Query(None, ge=1, le=500, description="每页条数；缺省全量"),
@@ -1285,6 +1296,7 @@ async def get_description_coverage(
     供资产地图「描述缺失」tab 与采集目录概览卡使用；source_id/keyword/database
     为采集目录治理面板「按数据源、库、表筛选治理」的服务端过滤（汇总与明细同口径）。
     P1-8: 汇总指标 SQL 端聚合；per_table 支持服务端分页。
+    多租户隔离：非平台管理员仅统计本组织数据源目录。
     """
     svc = _svc(db)
     coverage = await svc._repo.get_description_coverage(
@@ -1293,6 +1305,7 @@ async def get_description_coverage(
         source_id=source_id,
         keyword=keyword,
         database=database,
+        org_id=_resolve_org_scope(user),
     )
     return ok(data=DescriptionCoverageResponse(**coverage), trace_id=trace_id)
 
@@ -1448,9 +1461,15 @@ async def get_catalog_detail(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[DBCatalogResponse]:
-    """按主键取目录实体详情（血缘图谱表节点下钻展示用）。"""
+    """按主键取目录实体详情（血缘图谱表节点下钻展示用）。
+
+    多租户隔离：非平台管理员跨组织实体视为不存在（404）。
+    """
     svc = _svc(db)
-    return ok(data=await svc.get_catalog_detail(catalog_id), trace_id=trace_id)
+    return ok(
+        data=await svc.get_catalog_detail(catalog_id, org_id=_resolve_org_scope(user)),
+        trace_id=trace_id,
+    )
 
 
 @catalog_router.post("/bulk-deprecate", dependencies=_WRITE_DEPS)

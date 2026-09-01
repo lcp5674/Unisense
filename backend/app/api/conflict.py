@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ALL_ROLES, CurrentUser, require_roles
+from app.api.deps import CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
 from app.core.guard import (
@@ -48,7 +48,9 @@ router = APIRouter(prefix="/conflicts", tags=["conflict"])
 # P2-4: 前端 MetricCreate「冲突预检」对全部写角色可见，platform_admin/domain_admin 也须可调
 _WRITE_ROLES = ("metric_owner", "platform_admin", "domain_admin")
 _GOV_ROLES = ("compliance_officer", "domain_admin", "platform_admin")
-_READ_ROLES = ALL_ROLES
+# 读角色：冲突仲裁数据含指标口径对比（含 DRAFT 指标码），仅治理相关角色可见——
+# 与前端 review:view 权限点基线对齐（viewer/analyst 无 review:view，不应读冲突）。
+_READ_ROLES = ("platform_admin", "domain_admin", "metric_owner", "reviewer", "compliance_officer")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 # 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]

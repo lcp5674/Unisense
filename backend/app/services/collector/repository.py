@@ -289,14 +289,24 @@ class CollectorRepository:
         )
         return res.scalar_one_or_none()
 
-    async def get_catalog_by_id(self, catalog_id: int) -> DBCatalog | None:
-        """按主键取目录实体（血缘图谱表节点下钻详情用）。"""
-        res = await self._db.execute(
-            select(DBCatalog).where(
-                DBCatalog.id == catalog_id,
-                DBCatalog.deleted_at.is_(None),
-            )
+    async def get_catalog_by_id(
+        self, catalog_id: int, org_id: int | None = None
+    ) -> DBCatalog | None:
+        """按主键取目录实体（血缘图谱表节点下钻详情用）。
+
+        Args:
+            catalog_id: 目录实体主键。
+            org_id: 多租户组织 ID；非 None 时校验实体归属本组织（跨组织视为不可见）。
+        """
+        stmt = select(DBCatalog).where(
+            DBCatalog.id == catalog_id,
+            DBCatalog.deleted_at.is_(None),
         )
+        if org_id is not None:
+            stmt = stmt.join(DataSource, DataSource.source_id == DBCatalog.source_id).where(
+                DataSource.org_id == org_id
+            )
+        res = await self._db.execute(stmt)
         return res.scalar_one_or_none()
 
     async def upsert_catalog(
@@ -478,13 +488,20 @@ class CollectorRepository:
             )
         await self._db.flush()
 
-    async def list_catalogs(self, params: Any) -> tuple[Sequence[DBCatalog], int]:
+    async def list_catalogs(
+        self, params: Any, org_id: int | None = None
+    ) -> tuple[Sequence[DBCatalog], int]:
         # "all" 时退化为普通查询（不过滤删除状态，不过滤 source_id）
         source_status = getattr(params, "source_status", None)
         if source_status in ("active", "deleted"):
-            return await self._list_catalogs_with_source_status(params)
+            return await self._list_catalogs_with_source_status(params, org_id=org_id)
 
         base = select(DBCatalog).where(DBCatalog.deleted_at.is_(None))
+        if org_id is not None:
+            # 多租户组织隔离：目录经数据源归属组织过滤（普通分支未 join 源表，补 join）
+            base = base.join(DataSource, DataSource.source_id == DBCatalog.source_id).where(
+                DataSource.org_id == org_id
+            )
         if params.source_id:
             base = base.where(DBCatalog.source_id == params.source_id)
         if params.entity_type:
@@ -536,7 +553,7 @@ class CollectorRepository:
         return res.scalars().all(), total
 
     async def _list_catalogs_with_source_status(
-        self, params: Any
+        self, params: Any, org_id: int | None = None
     ) -> tuple[Sequence[DBCatalog], int]:
         """按源状态过滤目录（active=仅活跃源 / deleted=仅已删除源）。
 
@@ -549,6 +566,9 @@ class CollectorRepository:
             .outerjoin(DataSource, DataSource.source_id == DBCatalog.source_id)
             .where(DBCatalog.deleted_at.is_(None))
         )
+        if org_id is not None:
+            # 多租户组织隔离：外连接下按源归属组织过滤（仅保留本组织源目录）
+            base = base.where(DataSource.org_id == org_id)
         if params.source_id:
             base = base.where(DBCatalog.source_id == params.source_id)
         if params.entity_type:
@@ -642,7 +662,10 @@ class CollectorRepository:
         return {row[0]: (row[1] or row[2]) for row in res.all()}
 
     async def list_catalog_databases(
-        self, source_id: str | None = None, source_status: str | None = None
+        self,
+        source_id: str | None = None,
+        source_status: str | None = None,
+        org_id: int | None = None,
     ) -> list[str]:
         """目录去重库名列表（entity_name 前缀，供前端库名筛选下拉）。
 
@@ -650,20 +673,22 @@ class CollectorRepository:
         - 指定 source_id 时仅统计该源；
         - source_status=active/deleted 时按源删除状态过滤（与列表默认「活跃源」
           对齐，避免已删源的库名出现在活跃下拉中）；
+        - org_id 非 None 时仅统计本组织数据源的目录（多租户隔离）；
         - 无前缀（无 "." 的实体，如 Kafka topic）不计入库名。
         """
         base = select(DBCatalog.entity_name).where(DBCatalog.deleted_at.is_(None))
         if source_id:
             base = base.where(DBCatalog.source_id == source_id)
-        if source_status in ("active", "deleted"):
-            # outerjoin DataSource 按源软删状态过滤：active=仅活跃源 /
-            # deleted=仅已删源；无对应 data_source 记录的行归入 active（同
-            # _list_catalogs_with_source_status 语义，保持两处一致）。
+        if org_id is not None or source_status in ("active", "deleted"):
+            # outerjoin DataSource 按源软删状态/组织过滤：active=仅活跃源 /
+            # deleted=仅已删源；org_id 仅保留本组织源目录
             base = base.outerjoin(DataSource, DataSource.source_id == DBCatalog.source_id)
             if source_status == "active":
                 base = base.where(DataSource.deleted_at.is_(None))
-            else:
+            elif source_status == "deleted":
                 base = base.where(DataSource.deleted_at.isnot(None))
+            if org_id is not None:
+                base = base.where(DataSource.org_id == org_id)
         res = await self._db.execute(base)
         dbs: set[str] = set()
         for (name,) in res.all():
@@ -1319,6 +1344,7 @@ class CollectorRepository:
         source_id: str | None = None,
         keyword: str | None = None,
         database: str | None = None,
+        org_id: int | None = None,
     ) -> dict[str, Any]:
         """描述缺失统计：汇总指标 SQL 端聚合 + per_table 服务端分页。
 
@@ -1344,8 +1370,11 @@ class CollectorRepository:
             汇总 + per_table（分页后）+ per_table_total/page/page_size。
         """
         # 软删源过滤：join data_source.deleted_at IS NULL——软删源目录不再计入治理统计；
-        # source_id/keyword 为治理筛选（采集目录治理面板按数据源/表筛选）
+        # source_id/keyword 为治理筛选（采集目录治理面板按数据源/表筛选）；
+        # org_id 多租户隔离：仅统计本组织数据源目录
         filters = [DBCatalog.deleted_at.is_(None), DataSource.deleted_at.is_(None)]
+        if org_id is not None:
+            filters.append(DataSource.org_id == org_id)
         if source_id:
             filters.append(DBCatalog.source_id == source_id)
         if keyword:

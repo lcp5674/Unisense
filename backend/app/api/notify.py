@@ -26,6 +26,12 @@ router = APIRouter(prefix="/notify", tags=["notify"])
 _WRITE_ROLES = ("metric_owner", "domain_admin", "platform_admin", "system")
 _READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer", "system")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
+# 事件日志（含 payload：指标码/冲突号/actor 名）属运维数据，仅管理+合规角色可见
+# （区别于个人通知列表——通知列表按接收人过滤、任意登录可读）
+_EVENT_LOG_DEPS = [
+    Depends(require_roles("platform_admin", "domain_admin", "compliance_officer")),
+    Depends(guard_against_injection),
+]
 # 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
 
@@ -352,7 +358,7 @@ async def list_subscriptions(
     return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
 
 
-@router.get("/events", dependencies=_READ_DEPS)
+@router.get("/events", dependencies=_EVENT_LOG_DEPS)
 async def list_event_logs(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,

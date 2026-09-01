@@ -349,7 +349,8 @@ async def test_get_description_coverage_endpoint_filters(
         )
     assert resp.status_code == 200
     fake_svc._repo.get_description_coverage.assert_awaited_once_with(
-        page=1, page_size=None, source_id="s1", keyword="order", database=None
+        page=1, page_size=None, source_id="s1", keyword="order", database=None,
+        org_id=None,
     )
 
 
@@ -376,7 +377,8 @@ async def test_get_description_coverage_endpoint_database_filter(
         )
     assert resp.status_code == 200
     fake_svc._repo.get_description_coverage.assert_awaited_once_with(
-        page=1, page_size=None, source_id="s1", keyword="order", database="ods"
+        page=1, page_size=None, source_id="s1", keyword="order", database="ods",
+        org_id=None,
     )
 
 
@@ -1161,3 +1163,36 @@ async def test_org_scope_normal_user_scoped(
     assert resp.status_code == 200
     # 非 platform_admin → 传用户 org_id（_set_current_user 固定 org_id=1）
     mock_gs.assert_awaited_once_with("s1", org_id=1)
+
+
+async def test_list_catalogs_org_scope_normal_user(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """采集目录多租户隔离（S1）：非平台管理员 GET /catalogs 传用户 org_id。"""
+    _set_current_user(5, ["domain_admin"])
+    fake_svc = MagicMock()
+    fake_svc.list_catalogs = AsyncMock(
+        return_value=MagicMock(items=[], total=0, page=1, page_size=20)
+    )
+    with patch("app.api.collector._svc", return_value=fake_svc):
+        resp = await collector_client.get("/api/v1/catalogs")
+    assert resp.status_code == 200
+    fake_svc.list_catalogs.assert_awaited_once()
+    # 非 platform_admin → org_id=1（用户所属组织）
+    assert fake_svc.list_catalogs.await_args.kwargs.get("org_id") == 1
+
+
+async def test_list_catalogs_org_scope_platform_admin(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """采集目录多租户隔离（S1）：平台管理员跨组织（org_id=None 不过滤）。"""
+    # fixture 默认用户即 platform_admin
+    fake_svc = MagicMock()
+    fake_svc.list_catalogs = AsyncMock(
+        return_value=MagicMock(items=[], total=0, page=1, page_size=20)
+    )
+    with patch("app.api.collector._svc", return_value=fake_svc):
+        resp = await collector_client.get("/api/v1/catalogs")
+    assert resp.status_code == 200
+    fake_svc.list_catalogs.assert_awaited_once()
+    assert fake_svc.list_catalogs.await_args.kwargs.get("org_id") is None

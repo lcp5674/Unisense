@@ -680,10 +680,25 @@ async def run_detail(
 
     SQL 解析运行含 SQL 原文 / dialect / target_table / source_node / 表级与字段级
     边明细；批量采集运行含新增/更新边明细。供「运行历史行 → 详情」展示具体信息。
+    SQL 原文属敏感口径信息（可能内嵌过滤条件/表结构推断），仅平台/域管理员可见，
+    其余角色脱敏为占位文本（保留结构，不泄露 SQL 内容）。
     """
     svc = _svc(db)
     run = await svc.get_ingest_run_detail(run_id)
-    return ok(data=run.model_dump(mode="json"), trace_id=trace_id)
+    data = run.model_dump(mode="json")
+    # 非管理角色（platform_admin/domain_admin 之外）剥离 SQL 原文——
+    # detail.sql（单条解析）与 detail.statements[].sql（批量解析）均脱敏
+    if not any(r in ("platform_admin", "domain_admin") for r in user.roles_all()):
+        detail = data.get("detail")
+        if isinstance(detail, dict):
+            if "sql" in detail and isinstance(detail["sql"], str) and detail["sql"]:
+                detail["sql"] = "*** 无权查看 SQL 原文（仅平台/域管理员可见）***"
+            stmts = detail.get("statements")
+            if isinstance(stmts, list):
+                for s in stmts:
+                    if isinstance(s, dict) and isinstance(s.get("sql"), str) and s.get("sql"):
+                        s["sql"] = "*** 无权查看 SQL 原文 ***"
+    return ok(data=data, trace_id=trace_id)
 
 
 @router.get("/stale", dependencies=_READ_DEPS)

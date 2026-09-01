@@ -240,8 +240,12 @@ async def list_users(
 
     任意登录角色可读，仅返回基础字段（id/username/display_name/role/domain/status），
     不暴露 email 与 password_hash，避免敏感信息扩散。
+    多租户隔离：非平台管理员仅返回本组织用户（跨组织不枚举用户目录）。
     """
     stmt = select(User).order_by(User.id)
+    # 多租户隔离（S1）：非平台管理员仅见本组织用户，防跨组织枚举用户目录
+    if not user.has_role("platform_admin"):
+        stmt = stmt.where(User.org_id == user.org_id)
     if role:
         # 方案 A 多角色：主角色或 user_role 扩展角色命中任一即计入。
         stmt = stmt.where(or_(User.role == role, User.role_items.any(UserRole.role == role)))

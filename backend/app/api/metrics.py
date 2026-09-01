@@ -826,14 +826,20 @@ async def suggest_rename_metric(
     from app.services.semantic.service import MetricService
 
     service = MetricService(db)
-    # 指标不存在/已作废时由 get_metric_public 抛标准异常（NOT_FOUND / METRIC_ARCHIVED）
-    metric = await service.get_metric_public(metric_code)
+    # 指标不存在/已作废时由 get_metric_public 抛标准异常（NOT_FOUND / METRIC_ARCHIVED）。
+    # 传 actor/role/user_domain 走 P0-3 行级隔离——否则 get_metric_public(actor=None)
+    # 不过滤可见性，写角色可借本端点读任意他用户 DRAFT 指标（名称/源表/度量列）。
+    metric = await service.get_metric_public(
+        metric_code, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
 
     opposite_code = (request_body or {}).get("opposite_code") or None
     opposite_name: str | None = None
     if opposite_code:
         try:
-            opp = await service.get_metric_public(opposite_code)
+            opp = await service.get_metric_public(
+                opposite_code, actor_id=user.id, role=user.role, user_domain=user.domain
+            )
             opposite_name = opp.name
         except Exception:
             pass  # 对方指标不可读不影响建议（best-effort）

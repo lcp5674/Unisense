@@ -211,12 +211,30 @@ async def get_entity_detail(
     """资产实体详情：表/字段元数据 + 敏感度 + PII + 血缘边数（TD §12.11 流程 #5）。
 
     前端「数据表目录/孤儿资产」详情抽屉调用此端点；实体不存在返回 404。
+    字段级 PII 明细（pii_fields/overrides/合规配置）仅 PII 治理角色可见——
+    viewer/reviewer/metric_owner 等低权限角色只保留表级 ``pii_flag`` 标记，
+    不泄露「哪一列命中哪条 PII 规则」的字段级命中（与 /pii 端点 _PII_READ_DEPS
+    边界对齐，防通过实体详情绕过分级门禁）。
     """
     from app.core.exceptions import NotFoundError
 
     data = await _svc(db, user).get_entity_detail(entity_id)
     if data is None:
         raise NotFoundError(f"资产不存在或已删除: {entity_id}", ctx={"entity_id": entity_id})
+    # PII 治理角色（platform_admin/domain_admin/compliance_officer）可见字段级明细；
+    # 其余角色剥离 PII 明细与合规配置，仅保留表级 pii_flag 布尔标记。
+    if not any(r in _PII_READ_ROLES for r in user.roles_all()) and isinstance(data, dict):
+        for _k in (
+            "pii_fields",
+            "pii_field_count",
+            "pii_categories",
+            "pii_overrides",
+            "masking_policy",
+            "retention_days",
+            "legal_basis",
+            "retention_expires_at",
+        ):
+            data[_k] = [] if _k in ("pii_fields", "pii_categories") else None
     return ok(data=data, trace_id=trace_id)
 
 
