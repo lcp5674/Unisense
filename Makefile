@@ -1,4 +1,4 @@
-.PHONY: help install dev lint type test unit integration security chaos perf contract docsync pre-commit setup-services teardown-services migrate-up migrate-down migrate-verify
+.PHONY: help install dev lint type test unit integration security chaos perf contract docsync pre-commit setup-services teardown-services migrate-up migrate-down migrate-verify schema-check schema-init-check
 
 help: ## 显示所有可用命令
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -65,3 +65,9 @@ migrate-down: ## 回退一步
 
 migrate-verify: ## 验证迁移可逆（up + down + up）
 	poetry run alembic upgrade head && poetry run alembic downgrade -1 && poetry run alembic upgrade head
+
+schema-check: ## 模型↔迁移一致性检查（发布前门禁：现有库直查）
+	poetry run python -m scripts.check_schema_consistency
+
+schema-init-check: ## 干净库初始化模拟（临时库跑 upgrade head 后对比，需建库权限）
+	poetry run python -m scripts.check_schema_consistency --init-check
