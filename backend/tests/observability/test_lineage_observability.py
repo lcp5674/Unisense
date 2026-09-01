@@ -27,7 +27,9 @@ async def owner_client():
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=5, role="metric_owner")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=5, role="metric_owner", roles_all=lambda: ["metric_owner"]
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c

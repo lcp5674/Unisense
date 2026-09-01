@@ -247,9 +247,15 @@ class ObservabilityRepository:
         }
 
     async def api_stats(self) -> dict[str, int]:
+        # P1（性能审查）：action 无索引 + audit_log 为 WORM 只增不减表——无时间窗口
+        # 的全表 GROUP BY 随数据增长线性恶化，且旧日志对「当前 API 画像」无意义。
+        # 加近 30 天窗口（created_at 有索引），扫描范围收敛到近期写入。
+        since = datetime.now(UTC) - timedelta(days=30)
         rows = (
             await self._session.execute(
-                select(AuditLog.action, func.count()).group_by(AuditLog.action)
+                select(AuditLog.action, func.count())
+                .where(AuditLog.created_at >= since)
+                .group_by(AuditLog.action)
             )
         ).all()
         return dict(cast("Sequence[tuple[Any, Any]]", rows))
@@ -293,7 +299,19 @@ class ObservabilityRepository:
         ``org_id`` 非 None 时 PII 待复核数经 ``db_catalog → data_source.org_id`` 按
         组织隔离（平台管理员 org_id=None 全量；其余角色仅见本组织，防 PII 合规计数
         跨组织泄露给任意 viewer）。
+
+        P5（性能审查）：约 15-20 个独立聚合 COUNT 全表，每次请求重算无缓存——
+        加 30s cache-aside（key 含 org_id 区分组织），写操作后可显式失效。
         """
+        from app.core.agg_cache import agg_cached
+
+        return await agg_cached(
+            f"observability:overview:{org_id or 'all'}",
+            lambda: self._overview_uncached(org_id),
+        )
+
+    async def _overview_uncached(self, org_id: int | None = None) -> dict[str, Any]:
+        """overview_stats 的回源实现（缓存未命中时执行全量聚合）。"""
         assets = await self._overview_assets()
         system = await self._overview_system()
         quality = await self._overview_quality()
@@ -492,10 +510,43 @@ class ObservabilityRepository:
         }
 
     async def _overview_quality(self) -> dict[str, Any]:
-        """资产质量：指标健康度分布（EXCELLENT/GOOD/WARNING/CRITICAL）+ 血缘健康。"""
+        """资产质量：指标健康度分布（EXCELLENT/GOOD/WARNING/CRITICAL）+ 血缘健康。
+
+        P3（性能审查）：原实现把全量 MetricHealthScore JOIN Metric 拉到 Python
+        内存算分布/平均分，risks 先全量收集再截断 top5——指标量大后每次 overview
+        全量装载。改为 SQL 层 GROUP BY / AVG / ORDER+LIMIT 聚合，内存只承载
+        聚合结果与 top5 明细。
+        """
+        from sqlalchemy import func, select
+
         # 仅统计健康评分对应指标仍存活（未软删）的记录——覆盖率与资产指标数同口径，
         # 避免历史评分记录（对应指标已删除）导致 coverage_pct > 100% 的数据失真。
-        hs_rows = (
+        live_join = (
+            MetricHealthScore.metric_id == Metric.id,
+            MetricHealthScore.deleted_at.is_(None),
+            Metric.deleted_at.is_(None),
+        )
+        # 1) 按等级分组计数（替代全量行内存遍历）
+        by_level_rows = (
+            await self._session.execute(
+                select(MetricHealthScore.level, func.count())
+                .join(Metric, Metric.id == MetricHealthScore.metric_id)
+                .where(*live_join)
+                .group_by(MetricHealthScore.level)
+            )
+        ).all()
+        by_level = {str(level): int(cnt) for level, cnt in by_level_rows}
+        total_scored = sum(by_level.values())
+        # 2) 平均分（SQL 层 AVG）
+        avg_score = (
+            await self._session.execute(
+                select(func.avg(MetricHealthScore.score))
+                .join(Metric, Metric.id == MetricHealthScore.metric_id)
+                .where(*live_join)
+            )
+        ).scalar() or 0
+        # 3) 低健康 Top5 明细（WARNING/CRITICAL 按分升序取前 5，替代全量收集后截断）
+        risk_rows = (
             await self._session.execute(
                 select(
                     MetricHealthScore.metric_id,
@@ -506,31 +557,23 @@ class ObservabilityRepository:
                     Metric.metric_code,
                 )
                 .join(Metric, Metric.id == MetricHealthScore.metric_id)
-                .where(
-                    MetricHealthScore.deleted_at.is_(None),
-                    Metric.deleted_at.is_(None),
-                )
+                .where(*live_join, MetricHealthScore.level.in_(["WARNING", "CRITICAL"]))
+                .order_by(MetricHealthScore.score.asc())
+                .limit(5)
             )
         ).all()
-        by_level: dict[str, int] = {}
-        total_score = 0
-        risks: list[dict[str, Any]] = []
-        for mid, score, level, missing, mname, mcode in hs_rows:
-            by_level[level] = by_level.get(level, 0) + 1
-            total_score += score
-            if level in ("WARNING", "CRITICAL"):
-                risks.append(
-                    {
-                        "metric_id": mid,
-                        # 指标名/编码随行返回，前端「低健康指标」直接展示业务名称而非裸 ID
-                        "metric_name": mname,
-                        "metric_code": mcode,
-                        "score": score,
-                        "level": level,
-                        "missing_dimensions": missing,
-                    }
-                )
-        risks.sort(key=lambda r: r["score"])
+        risks = [
+            {
+                "metric_id": mid,
+                # 指标名/编码随行返回，前端「低健康指标」直接展示业务名称而非裸 ID
+                "metric_name": mname,
+                "metric_code": mcode,
+                "score": score,
+                "level": str(level),
+                "missing_dimensions": missing,
+            }
+            for mid, score, level, missing, mname, mcode in risk_rows
+        ]
         edges = (
             await self._session.execute(
                 select(func.count())
@@ -559,9 +602,9 @@ class ObservabilityRepository:
         return {
             "metric_health": {
                 "by_level": by_level,
-                "total_scored": len(hs_rows),
-                "avg_score": round(total_score / len(hs_rows)) if hs_rows else 0,
-                "top_risk": risks[:5],
+                "total_scored": total_scored,
+                "avg_score": round(float(avg_score)) if total_scored else 0,
+                "top_risk": risks,
             },
             "lineage": {
                 "edges": edges,

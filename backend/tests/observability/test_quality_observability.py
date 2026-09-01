@@ -47,14 +47,22 @@ async def _client(
     session.rollback = AsyncMock()
     session.flush = AsyncMock()
     session.refresh = AsyncMock()
+    # create_rule 的 _assert_metric_domain 查询返回本域指标（sales），与 mock user 一致
+    _metric = MagicMock()
+    _metric.domain = "sales"
     session.execute = AsyncMock(return_value=MagicMock())
+    session.execute.return_value.scalar_one_or_none.return_value = _metric
 
     async def fake_db() -> AsyncIterator[MagicMock]:
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=uid, role=role, domain="sales"
+        id=uid,
+        role=role,
+        domain="sales",
+        roles_all=lambda: [role],
+        has_role=lambda r: r == role,
     )
 
     async def fake_create(

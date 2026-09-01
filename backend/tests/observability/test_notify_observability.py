@@ -45,7 +45,11 @@ async def _client(uid: int, role: str) -> AsyncIterator[httpx.AsyncClient]:
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=uid, role=role, domain="sales"
+        id=uid,
+        role=role,
+        domain="sales",
+        roles_all=lambda: [role],
+        has_role=lambda r: r == role,
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -95,10 +99,11 @@ async def test_publish_event_writes_audit_record(
 async def test_response_contains_trace_id(
     reader_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def fake_list(self: NotifyService, *args: object, **kwargs: object) -> object:
-        return []
+    async def fake_list_page(self: NotifyService, *args: object, **kwargs: object) -> object:
+        return [], 0
 
-    monkeypatch.setattr(NotifyService, "list_notifications", fake_list)
+    # API 层调用的是 list_notifications_page（此前误 mock 不存在的 list_notifications）
+    monkeypatch.setattr(NotifyService, "list_notifications_page", fake_list_page)
     resp = await reader_client.get("/api/v1/notify/notifications", params={"subscriber_id": 11})
     assert resp.status_code == 200
     body = resp.json()

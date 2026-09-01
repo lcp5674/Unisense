@@ -46,7 +46,11 @@ async def _client(uid: int, role: str) -> AsyncIterator[httpx.AsyncClient]:
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=uid, role=role, domain="sales"
+        id=uid,
+        role=role,
+        domain="sales",
+        roles_all=lambda: [role],
+        has_role=lambda r: r == role,
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:

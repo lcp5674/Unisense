@@ -33,7 +33,11 @@ async def _client(uid: int, role: str) -> AsyncIterator[httpx.AsyncClient]:
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=uid, role=role, domain="sales"
+        id=uid,
+        role=role,
+        domain="sales",
+        roles_all=lambda: [role],
+        has_role=lambda r: r == role,
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -50,7 +54,7 @@ async def reader_client() -> AsyncIterator[httpx.AsyncClient]:
 async def test_response_contains_trace_id(
     reader_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def fake(self: RecommendService, limit: int = 20) -> list:
+    async def fake(self: RecommendService, limit: int = 20, domain: str | None = None) -> list:
         return []
 
     monkeypatch.setattr(RecommendService, "recommend_terms", fake)
