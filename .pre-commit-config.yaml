@@ -26,6 +26,18 @@ repos:
     hooks:
       - id: gitleaks
 
+  # ---- Alembic 迁移链检查（纯标准库静态，秒级）----
+  # 拦截：迁移分叉（多 head）/ 断链 / 孤立 / 文件名撞号（0124/0124 事故前兆）。
+  # 仅在 alembic/versions 下有迁移文件变更时触发；脚本零第三方依赖。
+  - repo: local
+    hooks:
+      - id: migration-chain-check
+        name: alembic migration chain check (single head / no collision)
+        entry: python3 backend/scripts/check_migration_chain.py
+        language: system
+        pass_filenames: false
+        files: ^backend/alembic/versions/.*\.py$
+
   # ---- 通用：尾随空格/文件结尾/UTF-8 ----
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0

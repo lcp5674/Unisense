@@ -117,6 +117,11 @@ jobs:
       - name: Gateways verify (evidence + 测试非空壳)
         run: poetry run python scripts/contract_check.py --mode gateways_verify
       # ---- migration ----
+      # 迁移链静态检查（纯标准库、秒级）：单 head/无断链/无孤立/文件名不撞号。
+      # 防「0124/0124 文件名撞号→分叉前兆」类问题（2026-09 生产评审案例）。
+      - name: Migration chain check (static)
+        run: poetry run python scripts/check_migration_chain.py
+        working-directory: backend
       - name: Migration reversible
         run: |
           poetry run alembic upgrade head
