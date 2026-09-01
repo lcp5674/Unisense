@@ -13,7 +13,6 @@ import {
   Typography,
   Radio,
   Alert,
-  Popconfirm,
   Select,
   Dropdown,
 } from "antd";
@@ -27,6 +26,8 @@ import {
   EditOutlined,
   DeleteOutlined,
   DownOutlined,
+  StopOutlined,
+  CheckCircleOutlined,
 } from "@ant-design/icons";
 import {
   createApiClient,
@@ -290,6 +291,29 @@ export function ApiClients() {
     }
   }
 
+  // 「更多」下拉中的危险操作二次确认（停用/删除）——Modal.confirm 与 Dropdown menu 搭配的标准做法
+  function confirmToggle(r: ClientResponse) {
+    Modal.confirm({
+      title: r.status === "ACTIVE" ? "确认停用该客户端？" : "确认启用该客户端？",
+      content: r.status === "ACTIVE" ? "停用后 X-Api-Key 与已签短效令牌将立即失效。" : "启用后即可恢复消费访问。",
+      okText: "确认",
+      cancelText: "取消",
+      okButtonProps: r.status === "ACTIVE" ? { danger: true } : undefined,
+      onOk: () => handleToggleStatus(r),
+    });
+  }
+
+  function confirmDelete(r: ClientResponse) {
+    Modal.confirm({
+      title: "确认删除该客户端？",
+      content: "软删除（保留审计追溯），删除后不可恢复消费访问。",
+      okText: "确认",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: () => handleDelete(r),
+    });
+  }
+
   async function handleBatch(action: string) {
     if (!selectedKeys.length) {
       message.warning("请先勾选客户端");
@@ -337,38 +361,43 @@ export function ApiClients() {
     {
       title: "操作",
       key: "actions",
-      width: 260,
+      width: 200,
       render: (_: unknown, r: ClientResponse) => (
-        <Space size={4} wrap>
-          <Button size="small" icon={<KeyOutlined />} disabled={r.status !== "ACTIVE" || !canManage} onClick={() => openMint(r)}>
+        <Space size={8}>
+          <Button
+            size="small"
+            type="primary"
+            icon={<KeyOutlined />}
+            disabled={r.status !== "ACTIVE" || !canManage}
+            onClick={() => openMint(r)}
+          >
             签发令牌
           </Button>
-          <Button size="small" icon={<EditOutlined />} disabled={!canManage} onClick={() => openEdit(r)}>
-            编辑
-          </Button>
-          <Popconfirm
-            title={r.status === "ACTIVE" ? "确认停用该客户端？" : "确认启用该客户端？"}
-            description={r.status === "ACTIVE" ? "停用后 X-Api-Key 与已签短效令牌将立即失效。" : "启用后即可恢复消费访问。"}
-            okText="确认"
-            cancelText="取消"
-            onConfirm={() => handleToggleStatus(r)}
+          <Dropdown
+            menu={{
+              items: [
+                { key: "edit", icon: <EditOutlined />, label: "编辑", disabled: !canManage },
+                {
+                  key: "toggle",
+                  icon: r.status === "ACTIVE" ? <StopOutlined /> : <CheckCircleOutlined />,
+                  label: r.status === "ACTIVE" ? "停用" : "启用",
+                  danger: r.status === "ACTIVE",
+                  disabled: !canManage,
+                },
+                { type: "divider" },
+                { key: "delete", icon: <DeleteOutlined />, label: "删除", danger: true, disabled: !canManage },
+              ],
+              onClick: ({ key }) => {
+                if (key === "edit") openEdit(r);
+                else if (key === "toggle") confirmToggle(r);
+                else if (key === "delete") confirmDelete(r);
+              },
+            }}
           >
-            <Button size="small" danger={r.status === "ACTIVE"} disabled={!canManage}>
-              {r.status === "ACTIVE" ? "停用" : "启用"}
+            <Button size="small" disabled={!canManage}>
+              更多 <DownOutlined />
             </Button>
-          </Popconfirm>
-          <Popconfirm
-            title="确认删除该客户端？"
-            description="软删除（保留审计追溯），删除后不可恢复消费访问。"
-            okText="确认"
-            cancelText="取消"
-            okButtonProps={{ danger: true }}
-            onConfirm={() => handleDelete(r)}
-          >
-            <Button size="small" danger icon={<DeleteOutlined />} disabled={!canManage}>
-              删除
-            </Button>
-          </Popconfirm>
+          </Dropdown>
         </Space>
       ),
     },

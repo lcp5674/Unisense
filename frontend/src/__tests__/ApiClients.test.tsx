@@ -151,7 +151,8 @@ describe("ApiClients", () => {
     render(<ApiClients />);
     await screen.findByText("app_abcd1234");
 
-    await user.click(screen.getByText("编辑"));
+    await user.click(screen.getByText("更多"));
+    await user.click(await screen.findByText("编辑"));
     expect(await screen.findByText(/编辑 API 客户端/)).toBeInTheDocument();
 
     // 修改授权域（编辑弹窗有两个下拉：授权域 + 指标白名单多选；取第一个 combobox）
@@ -176,7 +177,8 @@ describe("ApiClients", () => {
     render(<ApiClients />);
     await screen.findByText("app_abcd1234");
 
-    await user.click(screen.getByText("编辑"));
+    await user.click(screen.getByText("更多"));
+    await user.click(await screen.findByText("编辑"));
     expect(await screen.findByText(/编辑 API 客户端/)).toBeInTheDocument();
 
     // 指标白名单多选：回填已有值，再从下拉追加一个指标
@@ -201,7 +203,8 @@ describe("ApiClients", () => {
     render(<ApiClients />);
     await screen.findByText("app_abcd1234");
 
-    await user.click(screen.getByText("编辑"));
+    await user.click(screen.getByText("更多"));
+    await user.click(await screen.findByText("编辑"));
     const modal = await screen.findByRole("dialog");
     await within(modal).findByText(/编辑 API 客户端/);
 
@@ -221,13 +224,14 @@ describe("ApiClients", () => {
     });
   });
 
-  it("停用客户端：Popconfirm 确认后透传 PATCH status", async () => {
+  it("停用客户端：更多菜单 → Modal 确认后透传 PATCH status", async () => {
     const user = userEvent.setup();
     mockedUpdateApiClientStatus.mockResolvedValue({ ...ACTIVE_CLIENT, status: "REVOKED" });
     render(<ApiClients />);
     await screen.findByText("app_abcd1234");
 
-    await user.click(screen.getByText(/停\s*用/));
+    await user.click(screen.getByText("更多"));
+    await user.click(await screen.findByText(/停\s*用/));
     await user.click(await screen.findByRole("button", { name: /确\s*认/ }));
 
     await waitFor(() => {
@@ -235,13 +239,14 @@ describe("ApiClients", () => {
     });
   });
 
-  it("删除客户端：Popconfirm 确认后透传 DELETE", async () => {
+  it("删除客户端：更多菜单 → Modal 确认后透传 DELETE", async () => {
     const user = userEvent.setup();
     mockedDeleteApiClient.mockResolvedValue({ deleted: true });
     render(<ApiClients />);
     await screen.findByText("app_abcd1234");
 
-    await user.click(screen.getByText("删除"));
+    await user.click(screen.getByText("更多"));
+    await user.click(await screen.findByText("删除"));
     await user.click(await screen.findByRole("button", { name: /确\s*认/ }));
 
     await waitFor(() => {
