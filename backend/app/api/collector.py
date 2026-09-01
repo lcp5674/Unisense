@@ -100,6 +100,18 @@ collection_run_router = APIRouter(prefix="/collection-runs", tags=["collector-ru
 #: 数据源/采集写权限：平台级运维仅管理/域管理员（metric_owner 单域指标负责人不操作平台级数据源）。
 _WRITE_ROLES = ("platform_admin", "domain_admin")
 _READ_ROLES = ALL_ROLES
+
+
+def _resolve_org_scope(user) -> int | None:
+    """多租户组织作用域：平台管理员跨组织（None=不按组织过滤），其余按用户所属组织过滤。
+
+    S1 多租户隔离下，platform_admin 是平台级管理员，应能跨组织查看/管理全部数据源；
+    普通用户/域管理员仅能访问其所属组织（org_id）的资源。
+    """
+    if "platform_admin" in user.roles_all():
+        return None
+    # 修复：此前误写成 return _resolve_org_scope(user) 无限递归（非管理员 500）
+    return getattr(user, "org_id", None)
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 # 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
@@ -156,6 +168,7 @@ async def create_data_source(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[DataSourceResponse]:
     svc = _svc(db)
+    # 创建归属：仍按用户所属组织（platform_admin 也归属其 org，保持既有可见性语义）
     resp = await svc.create_source(body, user.id, org_id=getattr(user, "org_id", None))
     await write_audit(
         db,
@@ -196,7 +209,7 @@ async def list_data_sources(
         health_status=health_status,
         owner_id=owner_id,
         source_status=source_status,
-        org_id=getattr(user, "org_id", None),
+        org_id=_resolve_org_scope(user),
         page=page,
         page_size=page_size,
     )
@@ -334,7 +347,9 @@ async def batch_toggle_data_sources(
     source_id 吞掉（与 ``/jobs`` 同理）。
     """
     svc = _svc(db)
-    result = await svc.batch_toggle_sources(body.source_ids, body.enabled, user.id, org_id=getattr(user, "org_id", None))
+    result = await svc.batch_toggle_sources(
+        body.source_ids, body.enabled, user.id, org_id=_resolve_org_scope(user)
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -363,7 +378,9 @@ async def batch_delete_data_sources(
 ) -> ApiResponse[BatchSourceResult]:
     """批量删除数据源（软删，207 语义：单条失败逐项标注，不影响其余）。"""
     svc = _svc(db)
-    result = await svc.batch_delete_sources(body.source_ids, user.id, org_id=getattr(user, "org_id", None))
+    result = await svc.batch_delete_sources(
+        body.source_ids, user.id, org_id=_resolve_org_scope(user)
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -493,7 +510,9 @@ async def get_data_source(
     # 前端掩码回显）。
     role = user.role.value if hasattr(user.role, "value") else user.role
     include_config = str(role) == "platform_admin"
-    resp = await svc.get_source(source_id, include_config=include_config, org_id=getattr(user, "org_id", None))
+    resp = await svc.get_source(
+        source_id, include_config=include_config, org_id=_resolve_org_scope(user)
+    )
     # S13（审查修复）：平台管理员查看明文凭据属敏感操作，须落审计
     # （对照 LLM key 回读已有审计；此前凭据披露零审计）
     if include_config:
@@ -522,7 +541,7 @@ async def update_data_source(
 ) -> ApiResponse[DataSourceResponse]:
     """更新数据源（PATCH 语义：仅更新传入字段；source_id 不可变更）。"""
     svc = _svc(db)
-    resp = await svc.update_source(source_id, body, user.id, org_id=getattr(user, "org_id", None))
+    resp = await svc.update_source(source_id, body, user.id, org_id=_resolve_org_scope(user))
     await write_audit(
         db,
         actor_id=user.id,
@@ -551,7 +570,7 @@ async def check_source_connection(
 ) -> ApiResponse[TestConnectionResult]:
     """FR-030: 存量数据源实时探活（解密配置 → 轻量连接 → 更新健康状态）。"""
     svc = _svc(db)
-    result = await svc.check_connection(source_id, org_id=getattr(user, "org_id", None))
+    result = await svc.check_connection(source_id, org_id=_resolve_org_scope(user))
     await write_audit(
         db,
         actor_id=user.id,
@@ -575,7 +594,7 @@ async def delete_data_source(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[None]:
     svc = _svc(db)
-    await svc.delete_source(source_id, org_id=getattr(user, "org_id", None))
+    await svc.delete_source(source_id, org_id=_resolve_org_scope(user))
     await write_audit(
         db,
         actor_id=user.id,
@@ -673,7 +692,7 @@ async def refresh_entity(
     不支持（Hive 等）时回退为全量采集后仅取目标实体。
     """
     svc = _svc(db)
-    src = await svc.get_source_orm(source_id, org_id=getattr(user, "org_id", None))
+    src = await svc.get_source_orm(source_id, org_id=_resolve_org_scope(user))
     collector = build_collector(src.source_type, src.connection_config)
     try:
         result = await svc.refresh_entity(source_id, entity_name, user.id, collector)
@@ -715,7 +734,7 @@ async def sample_entity(
     需要数据源已开启采样（``quota.sample_rows > 0``）或本次显式指定 ``sample_rows``。
     """
     svc = _svc(db)
-    src = await svc.get_source_orm(source_id, org_id=getattr(user, "org_id", None))
+    src = await svc.get_source_orm(source_id, org_id=_resolve_org_scope(user))
     collector = build_collector(src.source_type, src.connection_config)
     try:
         result = await svc.sample_entity(
@@ -757,7 +776,7 @@ async def query_source_sql(
     LIMIT 兜底防止大结果集；仅平台管理员/域管理员或该数据源 Owner 可执行。
     """
     svc = _svc(db)
-    src = await svc.get_source_orm(source_id, org_id=getattr(user, "org_id", None))
+    src = await svc.get_source_orm(source_id, org_id=_resolve_org_scope(user))
     is_admin = any(r in _WRITE_ROLES for r in user.roles_all())
     if not is_admin and src.owner_id != user.id:
         raise AuthError("无权查询该数据源（仅平台管理员/域管理员或数据源负责人可执行 SQL）")
@@ -792,7 +811,7 @@ async def collect_source(
 ) -> ApiResponse[dict[str, Any]]:
     svc = _svc(db)
     await check_collect_rate(f"user:{user.id}")
-    src = await svc.get_source_orm(source_id, org_id=getattr(user, "org_id", None))
+    src = await svc.get_source_orm(source_id, org_id=_resolve_org_scope(user))
     # 根据 source_type 从 CollectorRegistry 构建采集器
     collector = build_collector(src.source_type, src.connection_config)
 
@@ -933,7 +952,7 @@ async def collect_source_async(
     """
     svc = _svc(db)
     await check_collect_rate(f"user:{user.id}")
-    job_id = await svc.schedule_collection(source_id, user.id, org_id=getattr(user, "org_id", None))
+    job_id = await svc.schedule_collection(source_id, user.id, org_id=_resolve_org_scope(user))
     await write_audit(
         db,
         actor_id=user.id,
@@ -970,7 +989,7 @@ async def collect_now(
     job_id = await svc.schedule_collection(
         source_id,
         user.id,
-        org_id=getattr(user, "org_id", None),
+        org_id=_resolve_org_scope(user),
         mode=body.mode,
         include_patterns=body.include_patterns,
         exclude_patterns=body.exclude_patterns,
@@ -1144,7 +1163,7 @@ async def get_watermark(
     数据源不存在时由 service 抛 404；存在但从未采集时返回空水位。
     """
     svc = _svc(db)
-    watermark = await svc.get_watermark(source_id, org_id=getattr(user, "org_id", None))
+    watermark = await svc.get_watermark(source_id, org_id=_resolve_org_scope(user))
     return ok(data=watermark, trace_id=trace_id)
 
 
@@ -1157,7 +1176,7 @@ async def get_health(
 ) -> ApiResponse[dict[str, Any]]:
     """US5: 数据源健康探活端点（FR-016）。"""
     svc = _svc(db)
-    health_info = await svc.get_health(source_id, org_id=getattr(user, "org_id", None))
+    health_info = await svc.get_health(source_id, org_id=_resolve_org_scope(user))
     return ok(data=health_info, trace_id=trace_id)
 
 
@@ -1170,7 +1189,7 @@ async def get_source_overview(
 ) -> ApiResponse[dict[str, Any]]:
     """资产规模概览：实体类型/PII 分布/字段数/漂移/覆盖率/采集水位。"""
     svc = _svc(db)
-    overview = await svc.get_source_overview(source_id, org_id=getattr(user, "org_id", None))
+    overview = await svc.get_source_overview(source_id, org_id=_resolve_org_scope(user))
     return ok(data=overview, trace_id=trace_id)
 
 
@@ -1207,7 +1226,9 @@ async def list_drift_logs(
     用于前端展示数据源的 schema 漂移历史。
     """
     svc = _svc(db)
-    result = await svc.list_drift_logs(source_id, entity_name, org_id=getattr(user, "org_id", None), page=page, page_size=page_size)
+    result = await svc.list_drift_logs(
+        source_id, entity_name, org_id=_resolve_org_scope(user), page=page, page_size=page_size
+    )
     return ok(
         data=DriftLogListResponse(**result),
         trace_id=trace_id,

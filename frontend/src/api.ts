@@ -200,8 +200,11 @@ const API_BASE_URL: string =
   ((import.meta.env.VITE_API_BASE ??
     import.meta.env.VITE_API_BASE_URL) as string | undefined)?.replace(/\/$/, "") ||
   "";
+// S10（审查修复）：去掉硬编码 dev key——后端全局不校验 X-Api-Key（仅 consume
+// 接入方鉴权校验），硬编码 "dev-semantic-key" 会进生产 bundle 且误导运维以为有
+// 网关层防护。改为仅当显式配置 VITE_SEMANTIC_API_KEY 时发送该头。
 const SEMANTIC_API_KEY: string =
-  (import.meta.env.VITE_SEMANTIC_API_KEY as string | undefined) || "dev-semantic-key";
+  (import.meta.env.VITE_SEMANTIC_API_KEY as string | undefined) || "";
 
 const TOKEN_KEY = "unisense_token";
 
@@ -431,7 +434,7 @@ async function refreshAccessToken(): Promise<boolean> {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-Api-Key": SEMANTIC_API_KEY,
+          ...(SEMANTIC_API_KEY ? { "X-Api-Key": SEMANTIC_API_KEY } : {}),
         },
         body: JSON.stringify({ refresh_token: refreshToken }),
       });
@@ -466,7 +469,7 @@ async function refreshAccessToken(): Promise<boolean> {
 
 async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   const headers: Record<string, string> = {
-    "X-Api-Key": SEMANTIC_API_KEY,
+    ...(SEMANTIC_API_KEY ? { "X-Api-Key": SEMANTIC_API_KEY } : {}),
     // P2-2（第八轮）：透传 X-Trace-Id——后端 TraceIdMiddleware 读取并随响应回传，
     // 使前端请求与后端日志/审计 trace_id 贯通（排查慢请求/报错无需手工对时间）。
     "X-Trace-Id": crypto.randomUUID(),
@@ -540,7 +543,8 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
         res = await fetch(`${API_BASE_URL}${path}`, {
           ...restInit,
           headers,
-          signal: AbortSignal.timeout(_timeoutMs),
+          // 重放时保留调用方 abort signal（此前只传新建超时信号，搜索竞态取消失效）
+          signal: _initSignal ? AbortSignal.any([_initSignal, timeoutSignal]) : timeoutSignal,
         });
       }
     }
@@ -573,6 +577,16 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
     if (!res.ok) {
       throw new UnisenseApiError(`请求失败 (HTTP ${res.status})`, "HTTP_ERROR", res.status, "");
     }
+  }
+
+  // 2xx 但响应体非 JSON（如网关 HTML 错误页）→ 返回可读错误而非 TypeError 崩溃
+  if (res.ok && body === null) {
+    throw new UnisenseApiError(
+      `服务返回了无法解析的响应 (HTTP ${res.status})`,
+      "BAD_RESPONSE",
+      res.status,
+      "",
+    );
   }
 
   if (!res.ok) {
@@ -800,7 +814,7 @@ export async function downloadMetricImportTemplate(format: "csv" | "xlsx" = "csv
   const res = await fetch(`${API_BASE_URL}${API_BASE}/metric-definitions/imports/template${qs}`, {
     headers: {
       Authorization: `Bearer ${getToken() ?? ""}`,
-      "X-Api-Key": SEMANTIC_API_KEY,
+      ...(SEMANTIC_API_KEY ? { "X-Api-Key": SEMANTIC_API_KEY } : {}),
       "X-Trace-Id": crypto.randomUUID(),
     },
   });

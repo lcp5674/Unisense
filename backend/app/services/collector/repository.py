@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -135,7 +136,15 @@ class CollectorRepository:
             src.deleted_at = now
             await self._db.flush()
         finally:
-            await self._db.execute(text("SET FOREIGN_KEY_CHECKS=1"))
+            # B6（审查修复）：恢复 FK_CHECKS 失败（try 内异常使会话进入 pending-rollback，
+            # 恢复语句自身会失败）→ 回滚会话，防止连接带着 FK_CHECKS=0 回到连接池被
+            # 复用（此后该连接的请求全部绕过外键约束）。
+            try:
+                await self._db.execute(text("SET FOREIGN_KEY_CHECKS=1"))
+            except Exception:  # noqa: BLE001 - 恢复失败须告警 + 回滚会话
+                logger.warning("fk_checks_restore_failed_rolling_back", exc_info=True)
+                with contextlib.suppress(Exception):
+                    await self._db.rollback()
         return True
 
     async def set_source_enabled(

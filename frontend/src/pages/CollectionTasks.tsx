@@ -109,10 +109,28 @@ export function CollectionTasks() {
   useEffect(() => {
     setLoading(true);
     load();
-    // 异步任务状态在后台变化，每 5s 轮询刷新（对齐 worker 秒级回写节奏）
-    timerRef.current = setInterval(load, 5000);
+    // 异步任务状态在后台变化，每 5s 轮询刷新（对齐 worker 秒级回写节奏）。
+    // P8（审查修复）：页面隐藏（切换标签/最小化）时暂停轮询，避免无效请求；
+    // 可见时恢复。
+    const startPolling = () => {
+      if (timerRef.current) return;
+      timerRef.current = setInterval(load, 5000);
+    };
+    const stopPolling = () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+    const onVisibility = () => {
+      if (document.hidden) stopPolling();
+      else startPolling();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    startPolling();
     return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
+      stopPolling();
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [load]);
 

@@ -28,8 +28,10 @@ try:
     from elasticsearch import AsyncElasticsearch as _AsyncES
 
     _ESClientClass = _AsyncES
-except ImportError:
-    pass  # pragma: no cover - 环境守卫，由 reload 测试验证
+except ImportError as exc:
+    # R10（审查修复）：区分模块缺失与包损坏——静默 pass 使包损坏时 enabled=False
+    # 且无任何日志，故障期无法定位。
+    logger.warning("es_client_import_failed", error=str(exc))
 
 
 class SearchUnavailableError(Exception):

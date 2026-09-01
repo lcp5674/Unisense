@@ -311,8 +311,13 @@ class HotSettings:
             data = await redis_client.hgetall("unisense:hot_config")
             self._cache = dict(data) if data else {}
             self._cache_at = now
-        except Exception:
-            pass
+        except Exception as exc:
+            # R11（审查修复）：热配置刷新失败不再静默——可能长期提供过期配置
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "feature_flag_refresh_failed_using_stale", error=str(exc)
+            )
 
     def get(self, key: str, default: str = "") -> str:
         return self._cache.get(key, default)

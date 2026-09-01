@@ -79,8 +79,13 @@ def _set_mysql_statement_timeout(dbapi_connection: Any, connection_record: Any) 
         cursor = dbapi_connection.cursor()
         cursor.execute(f"SET SESSION MAX_EXECUTION_TIME = {_DB_MAX_EXECUTION_TIME_MS}")
         cursor.close()
-    except Exception:  # noqa: BLE001 - 语句级超时注入失败不应阻断建连
-        pass
+    except Exception as exc:  # noqa: BLE001 - 语句级超时注入失败不应阻断建连
+        # R12（审查修复）：失败不再静默——该连接此后无语句级超时保护，须告警
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "set_session_max_execution_time_failed", error=str(exc)
+        )
 
 async_session_factory = async_sessionmaker(
     engine,
