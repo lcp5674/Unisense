@@ -689,8 +689,8 @@ export async function deletePreference(key: string): Promise<void> {
 export async function listMetrics(params: {
   domain?: string;
   status?: string;
-  /** 排除的状态列表（资产地图「指标总数」下钻：与统计口径一致排除 DRAFT/DEPRECATED） */
-  exclude_statuses?: string[];
+  /** 排除的状态列表（逗号分隔字符串，如 "DRAFT,DEPRECATED"；资产地图「指标总数」下钻口径对齐） */
+  exclude_statuses?: string;
   metric_tier?: string;
   /** 指标类型过滤：atomic 原子 / derived 派生 / composite 复合（服务端精确过滤） */
   metric_type?: "atomic" | "derived" | "composite";

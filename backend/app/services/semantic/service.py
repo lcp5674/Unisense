@@ -1267,7 +1267,10 @@ class MetricService(BaseService):
             deleted=params.deleted,
             domain=params.domain,
             status=params.status,
-            exclude_statuses=params.exclude_statuses,
+            # query 逗号分隔字符串 → repository 的 list[str]（FastAPI 不暴露模型内 list 字段）
+            exclude_statuses=(
+                params.exclude_statuses.split(",") if params.exclude_statuses else None
+            ),
             metric_tier=params.metric_tier,
             metric_type=params.metric_type,
             keyword=params.keyword,

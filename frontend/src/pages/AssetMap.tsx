@@ -1263,7 +1263,7 @@ function OverviewTab() {
     // 排除 DRAFT/DEPRECATED，否则明细多出草稿/已废弃导致总数与明细不一致。
     return openDrill(status ? "已发布指标明细" : "活跃指标明细", METRIC_COLUMNS, async () => {
       const r = await listMetrics({
-        ...(status ? { status } : { exclude_statuses: ["DRAFT", "DEPRECATED"] }),
+        ...(status ? { status } : { exclude_statuses: "DRAFT,DEPRECATED" }),
         page_size: 200,
       });
       setDrillTotal(r.total);

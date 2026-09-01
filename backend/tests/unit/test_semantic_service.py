@@ -2016,15 +2016,26 @@ async def test_list_metrics_passes_metric_type_filter():
 
 
 async def test_list_metrics_passes_exclude_statuses():
-    """exclude_statuses 透传（资产地图「指标总数」下钻口径对齐）：params.exclude_statuses
-    须原样传给 repository，与统计口径一致排除 DRAFT/DEPRECATED。"""
+    """exclude_statuses 透传（资产地图「指标总数」下钻口径对齐）：query 逗号分隔字符串
+    经 service 拆分为 list[str] 传给 repository，与统计口径一致排除 DRAFT/DEPRECATED。"""
     svc, repo = _svc_with_repo()
     repo.list_metrics = AsyncMock(return_value=([make_metric()], 1))
 
-    await svc.list_metrics(MetricListParams(exclude_statuses=["DRAFT", "DEPRECATED"]))
+    await svc.list_metrics(MetricListParams(exclude_statuses="DRAFT,DEPRECATED"))
 
     called = repo.list_metrics.call_args.kwargs
     assert called["exclude_statuses"] == ["DRAFT", "DEPRECATED"]
+
+
+async def test_list_metrics_exclude_statuses_empty_string_is_none():
+    """空字符串/None 不拆分（退化保护），repository 收到 None 不加过滤条件。"""
+    svc, repo = _svc_with_repo()
+    repo.list_metrics = AsyncMock(return_value=([make_metric()], 1))
+
+    await svc.list_metrics(MetricListParams(exclude_statuses=None))
+
+    called = repo.list_metrics.call_args.kwargs
+    assert called["exclude_statuses"] is None
 
 
 async def test_is_breaking_change_detection():

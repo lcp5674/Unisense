@@ -1110,9 +1110,11 @@ class MetricListParams(BaseModel):
     status: str | None = None
     # 排除状态过滤（资产地图「指标总数」下钻口径对齐）：总览统计排除
     # DRAFT/DEPRECATED（metric_summary by_domain），明细须同口径，否则
-    # 总数与明细条数不一致（明细多出草稿/已废弃）。多值 query（?exclude_statuses=a&b）。
-    exclude_statuses: list[str] | None = Field(
-        None, description="排除的状态列表（多值，如 DRAFT、DEPRECATED）"
+    # 总数与明细条数不一致（明细多出草稿/已废弃）。
+    # 注意：FastAPI 对 Pydantic 模型内 list[str] 字段不暴露为 query 参数，
+    # 故用逗号分隔字符串（service 层拆分为 list 传 repository）。
+    exclude_statuses: str | None = Field(
+        None, description="排除的状态列表（逗号分隔，如 DRAFT,DEPRECATED）"
     )
     metric_tier: str | None = None
     # 指标类型过滤（OneData 派生指标「绑定基础原子指标」下拉）：服务端按类型精确

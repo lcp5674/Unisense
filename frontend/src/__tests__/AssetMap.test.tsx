@@ -1083,7 +1083,7 @@ describe("AssetMap", () => {
     // 口径对齐：无 status 下钻须排除 DRAFT/DEPRECATED（与 by_domain 统计一致），且取 200 上限
     await waitFor(() =>
       expect(listMetrics).toHaveBeenCalledWith(
-        expect.objectContaining({ exclude_statuses: ["DRAFT", "DEPRECATED"], page_size: 200 }),
+        expect.objectContaining({ exclude_statuses: "DRAFT,DEPRECATED", page_size: 200 }),
       ),
     );
     // 标题为「活跃指标明细」（区别于「已发布指标明细」），且抽屉显示后端真实总数
