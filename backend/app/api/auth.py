@@ -23,10 +23,13 @@ from app.core.exceptions import AuthError
 from app.core.guard import guard_against_injection
 from app.core.logging import get_logger
 from app.core.login_throttle import (
+    is_account_blocked,
     is_ip_blocked,
     is_login_blocked,
+    record_account_failure,
     record_ip_failure,
     record_login_failure,
+    reset_account_failures,
     reset_ip_failures,
     reset_login_failures,
 )
@@ -118,7 +121,13 @@ async def login(
     # 客户端 IP 经 trusted_proxies 解析（反代后取真实 IP，避免所有用户同 IP 退化）。
     remote_ip = _client_key(request)
     throttle_key = f"{body.username}:{remote_ip}"
-    if await is_login_blocked(throttle_key) or await is_ip_blocked(remote_ip):
+    # S9（审查修复）：三桶——组合桶（username+IP）+ IP 级桶 + 账号维度桶（纯
+    # username 跨 IP 累计），杜绝换 IP 慢速撞库打同一账号。
+    if (
+        await is_login_blocked(throttle_key)
+        or await is_ip_blocked(remote_ip)
+        or await is_account_blocked(body.username)
+    ):
         raise AuthError("登录失败次数过多，请稍后再试", error_code="AUTH_RATE_LIMITED")
 
     result = await db.execute(
@@ -130,6 +139,7 @@ async def login(
     if user is None or not await verify_password(body.password, user.password_hash):
         await record_login_failure(throttle_key)
         await record_ip_failure(remote_ip)
+        await record_account_failure(body.username)
         # 登录失败留痕（安全审计核心事件，GB/T 35273 认证事件要求）。
         # X-4：actor_id 置 None（无对应用户，audit_log.actor_id 已改可空）——
         # 此前 actor_id=0 触发 FK 违规，失败登录返回 500 且失败审计丢失。
@@ -151,6 +161,7 @@ async def login(
 
     await reset_login_failures(throttle_key)
     await reset_ip_failures(remote_ip)
+    await reset_account_failures(body.username)
     user.last_login_at = datetime.now(UTC)
     # 登录成功留痕：谁、何时、从哪 IP 登录（认证审计事件）。
     await write_audit(

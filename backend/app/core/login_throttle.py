@@ -140,3 +140,56 @@ async def reset_ip_failures(ip: str) -> None:
         await get_redis().delete(_redis_key(_ip_key(ip)))
     except Exception:
         _memory.pop(_ip_key(ip), None)
+
+
+# ---- S9（审查修复）：账号维度独立桶 ----
+# 组合桶（username+IP）与 IP 桶存在盲区：攻击者换 IP 对同一账号慢速撞库
+# （每账号每 IP 9 次/15min，永不触发组合桶上限）。账号维度桶以纯 username 为
+# key，跨 IP 累计失败，杜绝「僵尸网络横向打同一账号」。
+_ACCOUNT_PREFIX = "account:"
+MAX_ACCOUNT_FAILURES = 10
+ACCOUNT_WINDOW_SECONDS = 15 * 60
+
+
+def _account_key(username: str) -> str:
+    return _ACCOUNT_PREFIX + username
+
+
+async def is_account_blocked(username: str, *, max_failures: int = MAX_ACCOUNT_FAILURES) -> bool:
+    """账号维度桶检查：该用户名在窗口内失败次数（跨 IP 累计）是否已达上限。"""
+    key = _account_key(username)
+    try:
+        from app.db.redis import get_redis
+
+        value = await get_redis().get(_redis_key(key))
+        return int(value or 0) >= max_failures
+    except Exception:
+        return _memory_count(key, now=time.time()) >= max_failures
+
+
+async def record_account_failure(
+    username: str, *, window_seconds: int = ACCOUNT_WINDOW_SECONDS
+) -> None:
+    """记录一次该用户名的登录失败（跨 IP 累计）。"""
+    rkey = _redis_key(_account_key(username))
+    try:
+        from app.db.redis import get_redis
+
+        redis_client = get_redis()
+        current = await redis_client.incr(rkey)
+        if current == 1:
+            await redis_client.expire(rkey, window_seconds)
+    except Exception:
+        now = time.time()
+        key = _account_key(username)
+        _memory[key] = (_memory_count(key, now=now) + 1, now + window_seconds)
+
+
+async def reset_account_failures(username: str) -> None:
+    """登录成功时清除该账号失败计数。"""
+    try:
+        from app.db.redis import get_redis
+
+        await get_redis().delete(_redis_key(_account_key(username)))
+    except Exception:
+        _memory.pop(_account_key(username), None)
