@@ -633,6 +633,36 @@ describe("MetricDetail", () => {
     // 有 metric:delete 权限点，但非创建者且非管理员 → 不渲染删除按钮
     await waitFor(() => expect(screen.queryByRole("button", { name: /删\s*除/ })).not.toBeInTheDocument());
   });
+  it("删除：域管理员非 Owner 对废弃指标看不到删除按钮（对齐目录页收紧语义）", async () => {
+    // nowner 场景：domain_admin 非 Owner，指标为他人 DEPRECATED（可删状态）
+    mockedGetMetric.mockResolvedValue({ ...metric, status: "DEPRECATED", owner_id: 2 });
+    // domain_admin 持有 metric:delete 权限点（policy.ROLE_UI_ACTIONS 含此点），但非 Owner 且非平台管理员
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "domain_admin",
+      home_domain: "outpatient",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:create", "metric:edit", "metric:delete", "metric:deprecate"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "nowner",
+      display_name: "域管理员",
+      role: "domain_admin",
+      domain: "outpatient",
+      org_id: 1,
+    });
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    await screen.findByText("销售 GMV");
+    // 有权限点且状态可删，但 domain_admin 非 Owner 且非平台管理员 → 不渲染删除按钮
+    // （详情页 :2231 已从 isAdmin 收紧为 role==="platform_admin"，与后端 delete_metric 一致）
+    await waitFor(() => expect(screen.queryByRole("button", { name: /删\s*除/ })).not.toBeInTheDocument());
+  });
   it("编辑弹窗聚合方式独立字段：回填 + 提交直接携带（非治理属性，走口径变更语义）", async () => {
     // 聚合方式（SUM/AVG）本质是口径变更，与粒度/单位同级——编辑弹窗应独立回填并提交，
     // 而非混入治理属性 dirty 机制（后端据此触发版本确认，修复 aggregation 判定矛盾）。

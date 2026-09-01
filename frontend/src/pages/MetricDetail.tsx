@@ -2148,7 +2148,8 @@ export function MetricDetail() {
   const canEmergency = permReady && can("metric:emergency-publish");
   const canCreate = permReady && can("metric:create");
   const canInferDesc = permReady && can("metric:infer-description");
-  // 删除 DRAFT 草稿（软删）：仅平台管理员（后端 DELETE 端点 platform_admin-only）
+  // 删除 DRAFT/DEPRECATED（软删）：仅平台管理员或原 Owner（按钮叠加下方 role/owner 判断，
+  // 与后端 delete_metric platform_admin-or-owner 语义对齐；域管理员非 Owner 不可删）
   const canDelete = permReady && can("metric:delete");
   // 回滚是高风险操作（灰度→退回上一 PUBLISHED 版本），用专用权限点 metric:rollback 门禁
   // （而非笼统的 metric:edit），与后端 _WRITE_DEPS + PDP owner 校验形成前后端双边界。
@@ -2223,12 +2224,13 @@ export function MetricDetail() {
             {metric.status === "PUBLISHED" ? "发起变更申请" : "编辑"}
           </Button>
         )}
-      {/* 删除 DRAFT/DEPRECATED 指标（软删）：平台/域管理员或指标创建者（原 Owner）可删；
+      {/* 删除 DRAFT/DEPRECATED 指标（软删）：仅平台管理员或指标创建者（原 Owner）可删；
           删除后指标进回收站（archived 列表可恢复）。详情页删除入口消除「单删需回目录批量删」
-          的闭环缺口（复审 D2）；权限对齐后端 delete_metric（管理员或原 Owner） */}
+          的闭环缺口（复审 D2）；权限对齐后端 delete_metric（platform_admin 或原 Owner），
+          域管理员非 Owner 不显示删除按钮（与目录页 canDeleteMetric 收紧语义一致） */}
       {(metric.status === "DRAFT" || metric.status === "DEPRECATED") &&
         canDelete &&
-        (isAdmin || metric.owner_id === currentUser?.id) && (
+        (role === "platform_admin" || metric.owner_id === currentUser?.id) && (
           <Button
             danger
             icon={<DeleteOutlined />}
