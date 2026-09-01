@@ -72,19 +72,15 @@ class BaseService:
         entity_type: str,
         entity_id: str,
         detail: dict[str, Any],
+        ip: str = "",
         trace_id: str = "",
         pii_access: bool = False,
     ) -> None:
         """写入审计记录（仅 add 到会话，由调用方 commit）。
 
-        Args:
-            actor_id: 操作者 ID。
-            action: 操作类型。
-            entity_type: 实体类型。
-            entity_id: 实体 ID。
-            detail: 操作详情。
-            trace_id: 链路追踪 ID。
-            pii_access: 是否涉及 PII 数据访问。
+        S5（审查修复）：新增 ``ip`` 必填语义（事件来源，满足等保「审计记录
+        包含事件来源」）；服务层无法取得 request 时可留空，API 层应尽量透传
+        ``client_ip(request)``。
         """
         await write_audit(
             self._db,
@@ -93,6 +89,7 @@ class BaseService:
             entity_type=entity_type,
             entity_id=entity_id,
             detail=detail,
+            ip=ip,
             trace_id=trace_id,
             pii_access=pii_access,
         )

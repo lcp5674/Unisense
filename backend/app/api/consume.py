@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
-from app.core.audit import write_audit
+from app.core.audit import client_ip, write_audit
 from app.core.error_codes import ErrorCode
 from app.core.exceptions import BusinessError, ConflictError, ValidationError
 from app.core.guard import guard_against_injection
@@ -443,6 +443,7 @@ async def set_client_status(
 @router.delete("/consume/api-clients/{client_id}", response_model=ApiResponse[dict[str, bool]])
 async def delete_client(
     client_id: str,
+    request: Request,
     user: User = Depends(require_roles("platform_admin", "domain_admin")),
     db: AsyncSession = Depends(get_db_session),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
@@ -459,6 +460,7 @@ async def delete_client(
         entity_type="api_client",
         entity_id=client_id,
         detail={"soft_delete": True},
+        ip=client_ip(request),
         trace_id=trace_id,
     )
     await db.commit()
@@ -468,6 +470,7 @@ async def delete_client(
 @router.post("/consume/api-clients/batch", response_model=ApiResponse[dict])
 async def batch_client_action(
     req: ClientBatchRequest,
+    request: Request,
     user: User = Depends(require_roles("platform_admin", "domain_admin")),
     db: AsyncSession = Depends(get_db_session),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
@@ -515,6 +518,7 @@ async def batch_client_action(
         entity_type="api_client",
         entity_id=",".join(req.client_ids),
         detail={"ok_count": ok_count, "fail_count": fail_count},
+        ip=client_ip(request),
         trace_id=trace_id,
     )
     await db.commit()

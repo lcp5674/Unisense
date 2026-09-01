@@ -50,7 +50,8 @@ class TimestampMixin:
 class SoftDeleteMixin:
     """软删除 Mixin，提供 ``deleted_at`` 字段。
 
-    WORM 表（如 audit_log）不继承此 Mixin。
+    WORM 表（如 audit_log）不继承此 Mixin；其冷数据由 ``audit_archive_task``
+    导出 MinIO 后物理删除热表行（AuditArchiveLog 哈希链追溯，S4 一致化）。
     """
 
     deleted_at: Mapped[datetime | None] = mapped_column(

@@ -16,7 +16,9 @@
   （``term.create``…）模板保留，查询层直接命中翻译，历史 WORM 记录仍可读。
 
 设计约束：
-1. 不修改 WORM 表（audit_log 只写不删，禁 UPDATE/DELETE），仅在查询层翻译。
+1. 不修改 WORM 表（audit_log 只追加不修改；冷数据由 ``audit_archive_task`` 导出
+   MinIO 后物理删除热表行，删除由 ``AuditArchiveLog`` 批次记录 + sha256 哈希链追溯，
+   S4 审查修复：声明与实现一致化，删除属受控归档而非随意 UPDATE/DELETE）。
 2. 覆盖全仓所有 action 取值（新点号命名 + 旧 SCREAMING_SNAKE 通用动作 + 旧点号业务动作），
    未命中时提供可读的兜底描述，绝不抛出异常。
 3. detail_json 为自由 dict，翻译时仅提取已知字段做摘要，未知字段忽略。
@@ -339,6 +341,20 @@ _VERB_TEMPLATES: dict[str, str] = {
     "sync_consumer": "同步了{entity}消费关系",
     "confirm_stale": "确认了{entity}为失效",
     "restore_stale": "恢复了{entity}",
+    # 维度成员 / 快照 / 映射（P10 成员管理 + 快照，审查补全）
+    "refresh_snapshot": "刷新了{entity}快照",
+    "batch_delete_members": "批量删除了{entity}成员",
+    "batch_publish_members": "批量发布了{entity}成员",
+    "batch_deprecate_members": "批量废弃了{entity}成员",
+    "create_mapping_value": "创建了{entity}映射值",
+    "delete_mapping_value": "删除了{entity}映射值",
+    "bind_reference": "绑定了{entity}引用",
+    # 采样 / 分类 / 归档（审查补全）
+    "sample": "采样了{entity}样本数据",
+    "false_positive": "标记了{entity}为误报",
+    "sunset_archive": "归档了{entity}（日落）",
+    "sql_query": "对{entity}执行了只读 SQL 查询",
+    "status": "变更了{entity}状态",
     # 用户 / 组织 / 认证
     "change_password": "修改了{entity}密码",
     "reset_password": "重置了{entity}密码",
