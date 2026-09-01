@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button, Card, Segmented, Space, Table, Tag, Tooltip, message } from "antd";
 import { ArrowLeftOutlined, ReloadOutlined } from "@ant-design/icons";
@@ -19,6 +19,7 @@ import {
 } from "../api";
 import type { CurrentUser, SubjectDomainTreeNode } from "../types";
 import { formatCnTime } from "../utils/timeCn";
+import { useUserNames } from "../utils/userNames";
 import {
   canReviewMasterData,
   MasterDataReviewActions,
@@ -64,7 +65,7 @@ function reviewerLabel(
 ): React.ReactNode {
   if (item.reviewer_type === "user" && item.reviewer_id != null) {
     const name = userMap.get(item.reviewer_id);
-    return <Tag color="blue">{name ? `${name}（指定）` : `用户#${item.reviewer_id}`}</Tag>;
+    return <Tag color="blue">{name ? `${name}（指定）` : "未知用户（指定）"}</Tag>;
   }
   if (item.reviewer_type === "domain" && item.reviewer_domain) {
     const dn = domainMap[item.reviewer_domain] ?? item.reviewer_domain;
@@ -114,6 +115,16 @@ export function MasterDataReview({ embedded = false }: { embedded?: boolean } = 
   const [loading, setLoading] = useState(false);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [userMap, setUserMap] = useState<Map<number, string>>(new Map());
+  // 跨组织精确解析：评审人可能不在本组织 /auth/users 列表，
+  // 用 useUserNames 按已知 id 反查真实中文名，避免「用户#id」占位。
+  const reviewUserNames = useUserNames(items.map((i) => i.reviewer_id));
+  const effectiveUserMap = useMemo(() => {
+    const m = new Map(userMap);
+    for (const [idStr, u] of Object.entries(reviewUserNames)) {
+      m.set(Number(idStr), u.display_name || u.username);
+    }
+    return m;
+  }, [userMap, reviewUserNames]);
   const [domainMap, setDomainMap] = useState<Record<string, string>>({});
   // 审批工作台视角：pending=待我审（REVIEW + 我可审）；reviewed=我审过的（reviewed_by 过滤）
   const [view, setView] = useState<"pending" | "reviewed">("pending");
@@ -301,7 +312,7 @@ export function MasterDataReview({ embedded = false }: { embedded?: boolean } = 
       title: "指派评审人",
       key: "reviewer",
       width: 180,
-      render: (_: unknown, r: ReviewItem) => reviewerLabel(r, userMap, domainMap),
+      render: (_: unknown, r: ReviewItem) => reviewerLabel(r, effectiveUserMap, domainMap),
     },
     {
       // 「我审过的」视图：展示我的处理结论（通过/驳回 + 时间 + 原因）；待我审视图不显示

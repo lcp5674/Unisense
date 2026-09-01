@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Alert, Button, Card, Descriptions, Input, Modal, Radio, Segmented, Select, Space, Spin, Table, Tag, Tooltip, message } from "antd";
 import { ArrowLeftOutlined, CheckCircleOutlined, ClockCircleOutlined } from "@ant-design/icons";
@@ -16,6 +16,7 @@ import {
 } from "../api";
 import type { CurrentUser, MetricResponse, MetricVersionResponse, SubjectDomainTreeNode } from "../types";
 import { formatCnTime } from "../utils/timeCn";
+import { useUserNames } from "../utils/userNames";
 import { enumLabel, METRIC_TYPE_LABEL, METRIC_STATUS_LABEL } from "../utils/enums";
 import { buildChangeInfo, changeVersionText, MetricDiffView, ReviewChangeSummary } from "./metric/ChangeContext";
 import { CodeValue } from "../components/CodeValue";
@@ -165,7 +166,7 @@ function reviewerLabel(
 ): React.ReactNode {
   if (metric.reviewer_type === "user" && metric.reviewer_id != null) {
     const name = userMap.get(metric.reviewer_id);
-    return <Tag color="blue">{name ? `${name}（指定）` : `用户#${metric.reviewer_id}`}</Tag>;
+    return <Tag color="blue">{name ? `${name}（指定）` : "未知用户（指定）"}</Tag>;
   }
   if (metric.reviewer_type === "domain" && metric.reviewer_domain) {
     const dn = domainMap[metric.reviewer_domain] ?? metric.reviewer_domain;
@@ -378,6 +379,19 @@ export function MetricReview({ embedded = false }: { embedded?: boolean } = {}) 
   const [busyCode, setBusyCode] = useState<string | null>(null);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [userMap, setUserMap] = useState<Map<number, string>>(new Map());
+  // 跨组织精确解析：评审人/审批人/驳回人可能不在本组织 /auth/users 列表，
+  // 用 useUserNames 按已知 id 反查真实中文名，避免「用户#id」占位。
+  const reviewUserNames = useUserNames(
+    items.flatMap((m) => [m.reviewer_id, m.approver_id, m.reject_reviewer_id]),
+  );
+  // 合并：跨组织解析优先，本组织列表兜底
+  const effectiveUserMap = useMemo(() => {
+    const m = new Map(userMap);
+    for (const [idStr, u] of Object.entries(reviewUserNames)) {
+      m.set(Number(idStr), u.display_name || u.username);
+    }
+    return m;
+  }, [userMap, reviewUserNames]);
   // 域 code → 中文名（「域」列显示中文名，与指标目录一致）
   const [domainMap, setDomainMap] = useState<Record<string, string>>({});
   // 「我审过的」详情弹窗：点击行/查看详情打开，展示我的处理结论 + 完整口径
@@ -632,7 +646,7 @@ export function MetricReview({ embedded = false }: { embedded?: boolean } = {}) 
     {
       title: "指派评审人",
       key: "reviewer",
-      render: (_: unknown, r: MetricResponse) => reviewerLabel(r, userMap, domainMap),
+      render: (_: unknown, r: MetricResponse) => reviewerLabel(r, effectiveUserMap, domainMap),
     },
     {
       // 「我审过的」视图：展示我的处理结论（通过/驳回 + 时间 + 原因）；待我审视图不显示
@@ -939,7 +953,7 @@ export function MetricReview({ embedded = false }: { embedded?: boolean } = {}) 
                 <ReviewDetailModal
                   metric={detailMetric}
                   verdict={v}
-                  userMap={userMap}
+                  userMap={effectiveUserMap}
                   domainMap={domainMap}
                   onClose={() => setDetailMetric(null)}
                 />

@@ -53,6 +53,7 @@ vi.mock("../api", () => {
     listDimensionMetrics: vi.fn(),
     listMetrics: vi.fn(),
     listUsers: vi.fn(),
+  resolveUserNames: vi.fn().mockResolvedValue([]),
     listDomainTree: vi.fn(),
     listFavorites: vi.fn(),
     addFavorite: vi.fn(),

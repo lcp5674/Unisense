@@ -23,6 +23,9 @@ vi.mock("../api", () => ({
   listDimensions: vi.fn(),
   listDomainTree: vi.fn(),
   listUsers: vi.fn(),
+  // 跨组织用户名解析（useUserNames 依赖）：默认空（用户不存在时回落「未知用户」），
+  // 跨组织回归测试中按需返回跨组织用户
+  resolveUserNames: vi.fn().mockResolvedValue([]),
   listSubscriptions: vi.fn(),
   fetchRelatedMetrics: vi.fn(),
   addFavorite: vi.fn(),
@@ -87,6 +90,7 @@ import {
   listCatalogs,
   getMetricHealth,
   listUsers,
+  resolveUserNames,
   listSubscriptions,
   fetchRelatedMetrics,
   updateMetric,
@@ -131,6 +135,7 @@ const mockedCreateMetricMount = vi.mocked(createMetricMount);
 const mockedFavorites = vi.mocked(listFavorites);
 const mockedHealth = vi.mocked(getMetricHealth);
 const mockedUsers = vi.mocked(listUsers);
+const mockedResolveUserNames = vi.mocked(resolveUserNames);
 const mockedSubs = vi.mocked(listSubscriptions);
 const mockedRelated = vi.mocked(fetchRelatedMetrics);
 const mockedVerifyDictValues = vi.mocked(verifyDictValues);
@@ -3466,5 +3471,36 @@ describe("指标详情 - 跨组织 Owner 用户名兜底", () => {
     expect(await screen.findByText("平台管理员")).toBeTruthy();
     // 注：fixture 的 approver_id=3 跨组织不可见时显示「未知用户」（不再出现「用户 #3」），
     // 且后端只回填 owner 最小用户名，不枚举目录——本测试只验证 owner 节点不退化。
+  });
+
+  it("跨组织 owner 通过 /auth/users/by-ids 精确解析出真实中文名（useUserNames 优先于列表兜底）", async () => {
+    // owner_id=9 不在本组织 users 列表（多租户隔离），但后端 by-ids 可精确反查
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      owner_id: 9,
+      owner_username: null,
+      backup_owner_id: null,
+      submitted_by: null,
+      approver_id: null,
+      product_owner_id: 9,
+      tech_owner_id: null,
+      dw_developer_id: null,
+    });
+    mockedUsers.mockResolvedValue([]);
+    mockedResolveUserNames.mockResolvedValue([
+      { id: 9, username: "cross_owner", display_name: "跨组织负责人", role: "metric_owner", domain: "outpatient", status: "active" },
+    ]);
+    // 显式补齐 load 全部依赖
+    mockedListVersions.mockResolvedValue([]);
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedDomainTree.mockResolvedValue([
+      { id: 1, code: "outpatient", name: "门诊", parent_id: null, level: 1, sort_order: 0, status: "active", metric_count: 0, children: [] },
+    ]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    // 跨组织真实中文名（而非「未知用户」「用户 #9」）——owner 与产品需求方同为 id=9，两处节点均解析
+    expect((await screen.findAllByText("跨组织负责人")).length).toBeGreaterThan(0);
   });
 });

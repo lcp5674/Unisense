@@ -1066,8 +1066,17 @@ async def test_resolve_user_names_by_ids_cross_org() -> None:
     """
     session = _make_session()
     # execute 返回两个不同组织的用户（跨组织场景）
-    alice = _make_user(id=1, org_id=1, username="alice", display_name="爱丽丝", role="viewer", domain="finance")
-    bob = _make_user(id=2, org_id=2, username="bob", display_name="鲍勃", role="metric_owner", domain="outpatient")
+    alice = _make_user(
+        id=1, org_id=1, username="alice", display_name="爱丽丝", role="viewer", domain="finance"
+    )
+    bob = _make_user(
+        id=2,
+        org_id=2,
+        username="bob",
+        display_name="鲍勃",
+        role="metric_owner",
+        domain="outpatient",
+    )
     result = MagicMock()
     result.scalars.return_value.all.return_value = [alice, bob]
     session.execute = AsyncMock(return_value=result)

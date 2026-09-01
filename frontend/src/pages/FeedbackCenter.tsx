@@ -6,6 +6,7 @@ import { listFeedback, submitFeedback, updateFeedbackStatus, clarifyFeedback, su
 import { usePermission } from "../hooks/usePermission";
 import type { CurrentUser, Feedback, NpsStats } from "../types";
 import { formatCnTime, timeAgoCn, parseBackendTime } from "../utils/timeCn";
+import { useUserNames } from "../utils/userNames";
 
 // ---- 展示映射（value=英文对接后端，label=中文展示） ----
 
@@ -121,6 +122,15 @@ function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   // 业务化解析：user_id → 用户名（对象名称由服务端 target_name 直接提供，前端不再逐条探测）
   const [usersMap, setUsersMap] = useState<Record<number, string>>({});
+  // 跨组织精确解析：反馈提交人/处理人可能不在本组织 /auth/users 列表，
+  // 用 useUserNames 按已知 id 反查真实中文名，避免回退为「#id」占位。
+  const feedbackUserNames = useUserNames(items.flatMap((f) => [f.user_id, f.resolver_id]));
+  const userName = (id: number | null | undefined): string | null => {
+    if (id == null) return null;
+    const resolved = feedbackUserNames[id];
+    if (resolved) return resolved.display_name || resolved.username;
+    return usersMap[id] ?? null;
+  };
   const navigate = useNavigate();
 
   // 当前登录用户：反馈列表「提交澄清」入口仅提交人本人可见
@@ -213,7 +223,7 @@ function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
       dataIndex: "user_id",
       key: "user",
       width: 100,
-      render: (v: number) => usersMap[v] ?? <span className="muted">#{v}</span>,
+      render: (v: number) => userName(v) ?? <span className="muted">未知用户</span>,
     },
     {
       title: "对象类型",
@@ -308,7 +318,7 @@ function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
       dataIndex: "resolver_id",
       key: "resolver",
       width: 100,
-      render: (v: number | null) => (v !== null ? usersMap[v] ?? <span className="mono">#{v}</span> : <span className="muted">—</span>),
+      render: (v: number | null) => (v !== null ? userName(v) ?? <span className="muted">未知用户</span> : <span className="muted">—</span>),
     },
     {
       title: "处理时间",

@@ -21,6 +21,7 @@ import {
 import type { Notification, NotifyEventLog, SubscriptionPref } from "../types";
 import { NOTIFY_STATUS_LABEL, QUALITY_LEVEL_LABEL } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
+import { useUserNames } from "../utils/userNames";
 import { notifyNotifChanged } from "../utils/notifBus";
 import { usePermission } from "../hooks/usePermission";
 import { CodeValue } from "../components/CodeValue";
@@ -786,6 +787,15 @@ function NotifListTab() {
   const [loading, setLoading] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+  // 跨组织精确解析：通知操作人（actor_id）可能不在本组织 /auth/users 列表，
+  // 用 useUserNames 按已知 id 反查真实中文名，避免回退为「#id」占位。
+  const notifActorNames = useUserNames(items.map((n) => n.actor_id));
+  const actorLabel = (n: Notification): React.ReactNode => {
+    if (n.actor_name) return n.actor_name;
+    if (n.actor_id == null) return null;
+    const u = notifActorNames[n.actor_id];
+    return u ? u.display_name || u.username : "未知用户";
+  };
   // 收件箱筛选：类型 / 已读状态 / 时间段 / 仅待处理（产品化，对应后端筛选参数）
   const [typeFilter, setTypeFilter] = useState<string | undefined>();
   const [readFilter, setReadFilter] = useState<string | undefined>();
@@ -1116,8 +1126,8 @@ function NotifListTab() {
                 <UserOutlined /> {n.actor_name}
               </span>
             ) : n.actor_id != null ? (
-              <span className="notif-meta-item">
-                <UserOutlined /> #{n.actor_id}
+              <span className="notif-meta-item" title="操作人">
+                <UserOutlined /> {actorLabel(n)}
               </span>
             ) : null}
             <span className="notif-meta-item">

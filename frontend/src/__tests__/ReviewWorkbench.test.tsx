@@ -14,6 +14,7 @@ vi.mock("../api", () => ({
   compareMetrics: vi.fn(),
   listConflictRulings: vi.fn(),
   listUsers: vi.fn(),
+  resolveUserNames: vi.fn().mockResolvedValue([]),
   UnisenseApiError: class extends Error {
     code: string;
     traceId: string;

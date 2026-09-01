@@ -26,6 +26,7 @@ import type { MetricCreateRequest, MetricTemplate, MetricType, UserBrief, Subjec
 import RoleOwnerSelect, { type RoleOwnerValue } from "../components/RoleOwnerSelect";
 import { useTracking } from "../hooks/useTracking";
 import { usePermission } from "../hooks/usePermission";
+import { useUserNames } from "../utils/userNames";
 import { enumLabel, METRIC_TYPE_LABEL, GRANULARITY_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, METRIC_TIER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL } from "../utils/enums";
 import { validateMetricCode } from "../utils/metricCode";
 
@@ -384,13 +385,6 @@ export function Templates() {
   const [favCodes, setFavCodes] = useState<Set<string>>(new Set());
   // 责任人人选（模板「负责人」指派下拉）
   const [users, setUsers] = useState<UserBrief[]>([]);
-  // 责任方展示：外部人员 name 优先，其次平台用户 id→姓名解析（users 列表），兜底 #id
-  const ownerLabel = (id?: number | null, name?: string | null) => {
-    if (name) return name;
-    if (!id) return null;
-    const u = users.find((x) => x.id === id);
-    return u ? u.display_name || u.username || "未知用户" : "未知用户";
-  };
   const [form] = Form.useForm();
   // 模板必填字段动态校验（对齐后端豁免）：监听 type/measure_id 计算「不适用当前类型」集合，
   // 用于表单必填标红与提示（不在模板上下文时为空，不改变普通创建行为）。
@@ -431,6 +425,22 @@ export function Templates() {
   const [measureOptions, setMeasureOptions] = useState<Array<{ value: number; label: string; measure: MeasureCatalog }>>([]);
   // 模板详情弹窗（默认口径 / 必填字段 / 描述）
   const [detailTpl, setDetailTpl] = useState<MetricTemplate | null>(null);
+  // 跨组织精确解析：模板责任方可能不在本组织 /auth/users 列表，
+  // 用 useUserNames 按已知 id 反查真实中文名，避免退化为「未知用户」。
+  const tplOwnerNames = useUserNames([
+    detailTpl?.product_owner_id,
+    detailTpl?.tech_owner_id,
+    detailTpl?.dw_developer_id,
+  ]);
+  // 责任方展示：外部人员 name 优先，其次平台用户 id→姓名解析（跨组织 useUserNames 优先，本组织列表兜底）
+  const ownerLabel = (id?: number | null, name?: string | null) => {
+    if (name) return name;
+    if (!id) return null;
+    const fromList = users.find((x) => x.id === id);
+    if (fromList) return fromList.display_name || fromList.username || "未知用户";
+    const u = tplOwnerNames[id];
+    return u ? u.display_name || u.username || "未知用户" : "未知用户";
+  };
   // 域 code → 中文名映射（列表「域」列显示中文名，与指标目录一致）
   const [domainMap, setDomainMap] = useState<Record<string, string>>({});
 

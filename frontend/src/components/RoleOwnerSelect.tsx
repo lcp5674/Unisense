@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Select } from "antd";
 import type { SelectProps } from "antd";
+import { useUserNames } from "../utils/userNames";
 
 /** 责任方值：平台用户（id）或外部人员（name）。id 可解析时优先展示平台用户。 */
 export interface RoleOwnerValue {
@@ -35,6 +36,9 @@ export default function RoleOwnerSelect({
 
   const currentId = value?.id ?? null;
   const currentName = value?.name || null;
+  // 跨组织精确解析：当前已选用户（编辑回显）可能不在本组织 users 列表，
+  // 用 useUserNames 按已知 id 反查真实中文名，避免「未知用户」占位。
+  const selectedUserNames = useUserNames([currentId]);
   // 有 id 用 id 解析（平台用户权威）；仅 name 时按文本展示（外部人员兜底）
   const currentToken =
     currentId != null ? `user:${currentId}` : currentName ? `text:${currentName}` : undefined;
@@ -54,7 +58,7 @@ export default function RoleOwnerSelect({
 
   const userOptions = users.map((u) => ({
     value: `user:${u.id}`,
-    label: `${u.display_name || u.username}（${u.id}）`,
+    label: u.display_name || u.username,
   }));
 
   // 搜索词非空、且未命中任何平台用户、且与当前外部人员名不同 → 提供"外部人员"自由输入项
@@ -87,8 +91,10 @@ export default function RoleOwnerSelect({
         const t = String(token ?? "");
         if (t.startsWith("user:")) {
           const id = Number(t.slice(5));
-          const u = users.find((x) => x.id === id);
-          return u ? `${u.display_name || u.username}` : "未知用户";
+          const fromList = users.find((x) => x.id === id);
+          if (fromList) return fromList.display_name || fromList.username;
+          const resolved = selectedUserNames[id];
+          return resolved ? resolved.display_name || resolved.username : "未知用户";
         }
         if (t.startsWith("text:")) return t.slice(5);
         return t;

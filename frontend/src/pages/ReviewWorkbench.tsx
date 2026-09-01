@@ -20,6 +20,7 @@ import { useTracking } from "../hooks/useTracking";
 import { usePermission } from "../hooks/usePermission";
 import { MetricCompareTable } from "../components/MetricCompareTable";
 import { formatCnTime } from "../utils/timeCn";
+import { useUserNames } from "../utils/userNames";
 import { RULING_DECISION_LABEL } from "../utils/enums";
 
 const STATUS_LABEL: Record<string, string> = {
@@ -208,6 +209,16 @@ export function ReviewWorkbench({ embedded = false }: { embedded?: boolean } = {
   const [rulingsLoading, setRulingsLoading] = useState(false);
   // 仲裁人 ID → 用户名（业务术语化：裁决记录不直出数字 ID，display_name 优先）
   const [userMap, setUserMap] = useState<Record<string, string>>({});
+  // 跨组织精确解析：仲裁人可能不在本组织 /auth/users 列表，
+  // 用 useUserNames 按已知 id 反查真实中文名，避免回退为「#id」占位。
+  const rulingUserNames = useUserNames(rulings.map((r) => r.arbitrator_id));
+  // 合并：跨组织解析优先，本组织列表兜底（后者在仲裁人 id 相同且 display_name 为空时覆盖）
+  const arbitName = (id: number | null | undefined): string | null => {
+    if (id == null) return null;
+    const resolved = rulingUserNames[id];
+    if (resolved) return resolved.display_name || resolved.username;
+    return userMap[String(id)] ?? null;
+  };
 
   const navigate = useNavigate();
   const { track } = useTracking();
@@ -825,7 +836,7 @@ export function ReviewWorkbench({ embedded = false }: { embedded?: boolean } = {
                     key: "arbitrator",
                     width: 110,
                     render: (v: number | null) =>
-                      v != null ? userMap[String(v)] ?? <span className="muted">#{v}</span> : "—",
+                      v != null ? (arbitName(v) ?? <span className="muted">未知用户</span>) : "—",
                   },
                   {
                     title: "裁决时间",

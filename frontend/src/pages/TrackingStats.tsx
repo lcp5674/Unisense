@@ -21,6 +21,7 @@ import dayjs from "dayjs";
 import { fetchTrackingStats, listUsers } from "../api";
 import type { TrackingGroupBy, TrackingStatsResponse, TrackingStatsRow, UserBrief } from "../types";
 import { TRACKING_EVENT_LABEL, TRACKING_TARGET_LABEL } from "../utils/enums";
+import { useUserNames } from "../utils/userNames";
 
 // 分组字段 → 中文标签（对齐后端 tracking.py _GROUP_BY_ALLOWED 白名单）
 const GROUP_BY_LABEL: Record<TrackingGroupBy, string> = {
@@ -71,6 +72,24 @@ export function TrackingStats() {
   const [error, setError] = useState<string | null>(null);
   // actor_id → 用户名（业务术语化：操作用户分组不直出数字 ID）
   const [userMap, setUserMap] = useState<Record<string, string>>({});
+  // 跨组织精确解析：操作用户（actor_id 分组）可能不在本组织 /auth/users 列表，
+  // 用 useUserNames 按已知 id 反查真实中文名，避免回退为原始 ID。
+  const actorIds = useMemo(
+    () =>
+      groupBy === "actor_id"
+        ? (data?.stats ?? []).map((r) => Number(r.group_key)).filter((n) => Number.isFinite(n))
+        : [],
+    [groupBy, data],
+  );
+  const actorUserNames = useUserNames(actorIds);
+  // 合并 userMap（本组织列表）与跨组织解析，供分组展示真实中文名
+  const effectiveUserMap = useMemo(() => {
+    const m: Record<string, string> = { ...userMap };
+    for (const [idStr, u] of Object.entries(actorUserNames)) {
+      m[idStr] = u.display_name || u.username;
+    }
+    return m;
+  }, [userMap, actorUserNames]);
 
   // 加载用户名单一次，供「操作用户」分组显示中文名（display_name 优先）
   useEffect(() => {
@@ -122,7 +141,7 @@ export function TrackingStats() {
 
   const chartData = (data?.stats ?? [])
     .filter((r) => r.event_count > 0)
-    .map((r) => ({ type: groupLabel(r.group_key, groupBy, userMap), count: r.event_count }));
+    .map((r) => ({ type: groupLabel(r.group_key, groupBy, effectiveUserMap), count: r.event_count }));
 
   return (
     <div>
@@ -260,7 +279,7 @@ export function TrackingStats() {
                   dataIndex: "group_key",
                   key: "group_key",
                   ellipsis: true,
-                  render: (v: string) => groupLabel(v, groupBy, userMap),
+                  render: (v: string) => groupLabel(v, groupBy, effectiveUserMap),
                 },
                 ...TABLE_COLUMNS.slice(1),
               ]}

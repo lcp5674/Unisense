@@ -133,6 +133,7 @@ import { PAGE_SIZE_OPTIONS, usePersistentPageSize } from "../hooks/usePersistent
 import { SchemaTable } from "../components/SchemaTable";
 import { ENTITY_TYPE_LABEL, LINEAGE_EDGE_TYPE_LABEL, METRIC_RELATION_EDGE_LABEL, SOURCE_HEALTH_LABEL, UNIT_LABEL } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
+import { useUserNames } from "../utils/userNames";
 import { AssetGraph } from "../components/assetmap/AssetGraph";
 import type { AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
 import { DescriptionCoveragePanel } from "../components/DescriptionCoveragePanel";
@@ -2886,11 +2887,12 @@ function HeatmapTab() {
 function OwnerTab() {
   const [ownerId, setOwnerId] = useState<number | undefined>(undefined);
   const [ownerIds, setOwnerIds] = useState<number[]>([]);
-  // 责任人真实姓名映射（display_name 优先，回退 username）；拉取失败降级「未知用户」
-  const [userMap, setUserMap] = useState<Record<number, string>>({});
+  // 责任人真实姓名映射：useUserNames 按已知 id 跨组织精确解析（display_name 优先，回退 username）。
+  // 与 /auth/users（本组织列表）不同，跨组织 owner 也能解析出真实中文名，不再退化为「未知用户」。
+  const ownerNames = useUserNames(ownerIds);
   const ownerOptions = useMemo(
-    () => ownerIds.map((id) => ({ label: userMap[id] ?? "未知用户", value: id })),
-    [ownerIds, userMap],
+    () => ownerIds.map((id) => ({ label: ownerNames[id]?.display_name || ownerNames[id]?.username || "未知用户", value: id })),
+    [ownerIds, ownerNames],
   );
   const [view, setView] = useState<AssetOwnerView | null>(null);
   const [loading, setLoading] = useState(false);
@@ -2928,16 +2930,7 @@ function OwnerTab() {
         }
       })
       .catch(() => {});
-    // 责任人真实姓名（下拉可读；拉取失败降级「未知用户」，不阻塞 Owner 视图）
-    listUsers()
-      .then((users) => {
-        const m: Record<number, string> = {};
-        (users ?? []).forEach((u) => {
-          m[u.id] = u.display_name || u.username;
-        });
-        setUserMap(m);
-      })
-      .catch(() => {});
+    // 责任人真实姓名：由 useUserNames(ownerIds) 跨组织精确解析，此处无需再拉本组织列表
   }, []);
 
   useEffect(() => {
@@ -2960,7 +2953,7 @@ function OwnerTab() {
       .filter(Boolean)
       .join(" · ");
     const ownerLabel =
-      ownerId != null ? view?.owner_name ?? userMap[ownerId] ?? "未知用户" : "责任人";
+      ownerId != null ? (view?.owner_name ?? (ownerNames[ownerId]?.display_name || ownerNames[ownerId]?.username) ?? "未知用户") : "责任人";
     setDrillTitle(`${ownerLabel} 指标明细${parts ? `（${parts}）` : ""}`);
     setDrillOpen(true);
     setDrillLoading(true);
@@ -3013,7 +3006,7 @@ function OwnerTab() {
   }
 
   const ownerName =
-    ownerId != null ? view?.owner_name ?? userMap[ownerId] ?? "未知用户" : "未指定";
+    ownerId != null ? (view?.owner_name ?? (ownerNames[ownerId]?.display_name || ownerNames[ownerId]?.username) ?? "未知用户") : "未指定";
   const total = view?.metrics.total ?? 0;
   const published = view?.metrics.published ?? 0;
   const draft = view?.metrics.draft ?? 0;

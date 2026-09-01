@@ -13,6 +13,7 @@ vi.mock("../api", () => ({
   submitNps: vi.fn(),
   fetchNpsStats: vi.fn(),
   listUsers: vi.fn(),
+  resolveUserNames: vi.fn().mockResolvedValue([]),
   getMetric: vi.fn(),
   fetchMyPermissions: vi.fn(),
   fetchCurrentUser: vi.fn(),

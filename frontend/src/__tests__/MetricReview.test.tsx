@@ -28,6 +28,7 @@ vi.mock("../api", () => {
     approveMetric: vi.fn(),
     fetchCurrentUser: vi.fn(),
     listUsers: vi.fn(),
+  resolveUserNames: vi.fn().mockResolvedValue([]),
     listDomainTree: vi.fn(),
     batchApproveMetrics: vi.fn(),
     batchRejectMetrics: vi.fn(),

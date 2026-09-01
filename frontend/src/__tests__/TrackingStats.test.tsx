@@ -7,6 +7,7 @@ import { TrackingStats } from "../pages/TrackingStats";
 vi.mock("../api", () => ({
   fetchTrackingStats: vi.fn(),
   listUsers: vi.fn(),
+  resolveUserNames: vi.fn().mockResolvedValue([]),
 }));
 
 // Mock 图表（jsdom 中 Bar 真实渲染依赖 canvas 测量，统一替换为占位节点）

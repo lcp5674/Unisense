@@ -27,6 +27,7 @@ vi.mock("../api", () => {
     addFavorite: vi.fn(),
     removeFavorite: vi.fn(),
     listUsers: vi.fn(),
+  resolveUserNames: vi.fn().mockResolvedValue([]),
     updateTemplateOwner: vi.fn(),
     setTemplateActive: vi.fn(),
     updateMetricTemplate: vi.fn(),

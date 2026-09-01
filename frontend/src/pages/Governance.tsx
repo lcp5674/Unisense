@@ -26,6 +26,7 @@ import {
 } from "../api";
 import type { ActionRegistryItem, GrantBatchResult, GrantCreate, GrantResponse, PermissionSnapshot, RoleOption, RolePermissionItem, SubjectDomainTreeNode, UserBrief } from "../types";
 import { formatCnTime } from "../utils/timeCn";
+import { useUserNames } from "../utils/userNames";
 import { usePermission } from "../hooks/usePermission";
 import { UserPermModal, groupRegistry, categoryOf, UI_CATEGORIES } from "../components/governance/UserPermModal";
 import type { UiCategory } from "../components/governance/UserPermModal";
@@ -278,11 +279,17 @@ function GrantsTab() {
   }, []);
 
   // user_id → 用户名/显示名 映射（授权记录归属可读）
+  // 跨组织精确解析：授权对象可能不在本组织 /auth/users 列表，
+  // 用 useUserNames 按已知 id 反查真实中文名，避免回退为「#id」占位。
+  const grantUserNames = useUserNames(items.map((g) => g.user_id));
   const userMap = useMemo(() => {
     const m = new Map<number, UserBrief>();
     for (const u of users) m.set(u.id, u);
+    for (const [idStr, u] of Object.entries(grantUserNames)) {
+      m.set(Number(idStr), u);
+    }
     return m;
-  }, [users]);
+  }, [users, grantUserNames]);
 
   // role_id → 角色名 映射（授权列表「角色」列显示名称而非裸数字）
   const roleMap = useMemo(() => {
@@ -423,7 +430,7 @@ function GrantsTab() {
             <span className="muted" style={{ fontSize: 12 }}>（{u.display_name}）</span>
           </Space>
         ) : (
-          <span className="mono">#{v}</span>
+          <span className="muted">未知用户</span>
         );
       },
     },

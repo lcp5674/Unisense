@@ -49,6 +49,7 @@ vi.mock("../api", () => ({
   bulkDeprecateCatalogs: vi.fn(),
   reportClassificationFalsePositive: vi.fn(),
   listUsers: vi.fn(),
+  resolveUserNames: vi.fn().mockResolvedValue([]),
   fetchDescriptionCoverage: vi.fn(),
   inferColumnDescription: vi.fn(),
   inferDescriptions: vi.fn(),

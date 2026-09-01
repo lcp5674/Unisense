@@ -33,6 +33,8 @@ vi.mock("../api", () => {
     deleteAllNotifications: vi.fn(),
     retryNotification: vi.fn(),
     markNotificationHandled: vi.fn(),
+    // 跨组织用户名解析：默认返回空（用户已删除等场景回落「未知用户」）
+    resolveUserNames: vi.fn().mockResolvedValue([]),
     UnisenseApiError,
   };
 });
@@ -602,13 +604,14 @@ describe("通知中心 - 信息展示增强", () => {
     expect(screen.getByText("审核员")).toBeInTheDocument();
   });
 
-  it("操作者展示——仅有 ID 无姓名快照时回落 #ID（用户已删除等场景）", async () => {
+  it("操作者展示——仅有 ID 无姓名快照时回落「未知用户」（用户已删除等场景，不再展示 #ID）", async () => {
     const n = notif({ id: 51, template_code: "quality.anomaly", title: "数据质量异常", actor_id: 9, actor_name: null });
     mockedList.mockResolvedValue({ items: [n], total: 1, page: 1, page_size: 10 });
 
     renderPage();
     await waitFor(() => expect(screen.getByText("数据质量异常")).toBeInTheDocument());
-    expect(screen.getByText("#9")).toBeInTheDocument();
+    // 用户记录不存在（已删除）→ 回落中文「未知用户」而非内部 #ID 占位
+    expect(screen.getByText("未知用户")).toBeInTheDocument();
   });
 
   it("操作者展示——系统/定时任务事件无 actor，不渲染操作者项", async () => {

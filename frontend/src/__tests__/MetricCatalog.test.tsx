@@ -8,6 +8,7 @@ vi.mock("../api", () => ({
   listMetrics: vi.fn(),
   fetchDashboard: vi.fn(),
   listUsers: vi.fn(),
+  resolveUserNames: vi.fn().mockResolvedValue([]),
   listMeasureCatalogs: vi.fn(),
   listDomainTree: vi.fn(),
   fetchCurrentUser: vi.fn(),

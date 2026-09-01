@@ -68,6 +68,7 @@ import {
   UNIT_LABEL,
 } from "../utils/enums";
 import { formatCnTime } from "../utils/timeCn";
+import { useUserNames } from "../utils/userNames";
 
 // 解析灰度租户输入（逗号/空格/顿号分隔的正整数列表）；非法项忽略，空返回 []（对齐
 // MetricReview 的灰度租户解析）
@@ -721,9 +722,26 @@ export function MetricCatalog() {
     setPage(1);
   }
 
+  // 跨组织精确解析：列表行上的责任方（owner/备份/三方）可能不在本组织 /auth/users 列表，
+  // 用 useUserNames 按已知 id 反查真实中文名，避免「未知用户」占位。
+  const catalogUserNames = useUserNames(
+    items.flatMap((m) => [
+      m.owner_id,
+      m.backup_owner_id,
+      m.product_owner_id,
+      m.tech_owner_id,
+      m.dw_developer_id,
+    ]),
+  );
   const userName = useMemo(
-    () => (id: number | null | undefined) => (id == null ? "—" : (userMap.get(id) ?? "未知用户")),
-    [userMap],
+    () => (id: number | null | undefined) => {
+      if (id == null) return "—";
+      const fromList = userMap.get(id);
+      if (fromList) return fromList;
+      const u = catalogUserNames[id];
+      return u ? u.display_name || u.username : "未知用户";
+    },
+    [userMap, catalogUserNames],
   );
   // OneData 逻辑度量名（原子指标展示继承的逻辑度量）
   const measureName = useMemo(

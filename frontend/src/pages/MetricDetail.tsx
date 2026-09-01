@@ -109,6 +109,7 @@ import type {
 import { useTracking } from "../hooks/useTracking";
 import { enumLabel, METRIC_TYPE_LABEL, METRIC_TYPE_DESC, METRIC_TIER_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, FRESHNESS_LABEL, DW_LAYER_LABEL, SERVING_MODE_LABEL, ADDITIVITY_LABEL, GRANULARITY_LABEL, UNIT_LABEL, RULING_DECISION_LABEL, METRIC_STATUS_COLOR, METRIC_STATUS_LABEL, METRIC_RELATION_EDGE_LABEL } from "../utils/enums";
 import { formatCnTime, formatCnDate } from "../utils/timeCn";
+import { useUserNames } from "../utils/userNames";
 import { HealthCard } from "./metric/HealthCard";
 import RoleOwnerSelect, { type RoleOwnerValue } from "../components/RoleOwnerSelect";
 import { QualitySnapshot } from "./metric/QualitySnapshot";
@@ -242,9 +243,24 @@ function toMountInput(m: MetricMount): MetricMountInput {
 // 工程责任链：按"需求提出 → 口径定义 → 数仓实现 → 指标注册 → 审核把关"串联，
 // 让一个指标上完整看到谁提需求、谁定口径、谁开发、谁注册、谁审核（PRD 4.5 治理闭环）。
 function OwnerChain({ metric, users }: { metric: MetricResponse; users: UserBrief[] }) {
-  const byId = new Map(users.map((u) => [u.id, u]));
-  // fallbackName：跨组织用户不在 users 列表（/auth/users 多租户隔离）时，
-  // 用后端回填的 owner_username（display_name||username）兜底，避免「未知用户」占位。
+  // 跨组织精确解析：owner 责任链上的用户可能不在本组织 /auth/users 列表，
+  // 用 useUserNames 按已知 id 反查真实中文名（display_name||username），
+  // 避免退化为「未知用户」。users（本组织列表）仅作合并兜底，提供 role/domain Tag。
+  const chainIds = [
+    metric.product_owner_id,
+    metric.tech_owner_id,
+    metric.dw_developer_id,
+    metric.owner_id,
+    metric.submitted_by,
+    metric.approver_id,
+    metric.backup_owner_id,
+  ];
+  const resolved = useUserNames(chainIds);
+  // 合并：跨组织解析优先，本组织列表补充（两者 id 相同时 resolved 覆盖）
+  const byId = new Map<number, UserBrief>();
+  for (const u of users) byId.set(u.id, u);
+  for (const [idStr, u] of Object.entries(resolved)) byId.set(Number(idStr), u);
+  // fallbackName：后端回填的 owner_username（display_name||username）兜底，避免「未知用户」占位。
   function cell(uid: number | null | undefined, fallbackName?: string | null) {
     if (uid == null) return <span className="muted">未配置</span>;
     const u = byId.get(uid);
@@ -792,10 +808,18 @@ export function MetricDetail() {
   const [users, setUsers] = useState<UserBrief[]>([]);
   // 变体级责任方展示（方案 B）：id 可解析 → 平台用户；id 空但 name 非空 → 外部人员；
   // 全空 → 继承指标级（挂载行不重复展示）。
+  // 跨组织精确解析：挂载变体责任方可能不在本组织 /auth/users 列表，
+  // 用 useUserNames 按已知 id 反查真实中文名（display_name||username），避免「未知用户」占位。
+  const mountOwnerNames = useUserNames(
+    mounts.flatMap((m) => [m.product_owner_id, m.tech_owner_id, m.dw_developer_id]),
+  );
   const mountOwnerText = (uid: number | null | undefined, name?: string | null): string => {
     if (uid != null) {
-      const u = users.find((x) => x.id === uid);
-      return u ? `${u.display_name || u.username}` : "未知用户";
+      const u = mountOwnerNames[uid];
+      if (u) return u.display_name || u.username;
+      // 缓存未命中（首次渲染或拉取中）时以列表兜底；列表也缺（跨组织）则由 useUserNames 补上后重渲染
+      const listU = users.find((x) => x.id === uid);
+      return listU ? `${listU.display_name || listU.username}` : "未知用户";
     }
     return name || "";
   };

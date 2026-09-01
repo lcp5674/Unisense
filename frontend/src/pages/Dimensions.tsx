@@ -83,6 +83,7 @@ import type {
   TranslateResult,
 } from "../types";
 import { formatCnTime } from "../utils/timeCn";
+import { useUserNames } from "../utils/userNames";
 import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
 import { usePermission } from "../hooks/usePermission";
 import { MasterDataBatch, type BatchActionKey } from "../components/MasterDataBatch";
@@ -643,8 +644,15 @@ function DimensionsTab() {
   }
 
   // 责任人 ID → 中文名（无记录回退「未知用户」）
-  const ownerName = (ownerId: number) =>
-    users.find((u) => u.id === ownerId)?.display_name ?? "未知用户";
+  // 跨组织精确解析：维度责任人可能不在本组织 /auth/users 列表，
+  // 用 useUserNames 按已知 id 反查真实中文名，避免退化为「未知用户」。
+  const dimOwnerNames = useUserNames(items.map((d) => d.owner_id));
+  const ownerName = (ownerId: number) => {
+    const fromList = users.find((u) => u.id === ownerId);
+    if (fromList) return fromList.display_name || fromList.username;
+    const u = dimOwnerNames[ownerId];
+    return u ? u.display_name || u.username : "未知用户";
+  };
 
   const columns = [
     { title: "编码", dataIndex: "dim_code", key: "dim_code", render: (v: string) => <span className="mono">{v}</span> },

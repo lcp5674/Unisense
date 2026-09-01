@@ -37,6 +37,7 @@ vi.mock("../api", () => {
     classificationRescan: vi.fn(),
     requestErasure: vi.fn(),
     listUsers: vi.fn(),
+  resolveUserNames: vi.fn().mockResolvedValue([]),
     listDomainTree: vi.fn(),
     listMetrics: vi.fn(),
     listRoleOptions: vi.fn(),
