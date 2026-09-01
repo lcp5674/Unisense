@@ -2015,6 +2015,18 @@ async def test_list_metrics_passes_metric_type_filter():
     assert called["metric_type"] == "atomic"
 
 
+async def test_list_metrics_passes_exclude_statuses():
+    """exclude_statuses 透传（资产地图「指标总数」下钻口径对齐）：params.exclude_statuses
+    须原样传给 repository，与统计口径一致排除 DRAFT/DEPRECATED。"""
+    svc, repo = _svc_with_repo()
+    repo.list_metrics = AsyncMock(return_value=([make_metric()], 1))
+
+    await svc.list_metrics(MetricListParams(exclude_statuses=["DRAFT", "DEPRECATED"]))
+
+    called = repo.list_metrics.call_args.kwargs
+    assert called["exclude_statuses"] == ["DRAFT", "DEPRECATED"]
+
+
 async def test_is_breaking_change_detection():
     svc, _ = _svc_with_repo()
     old = {"expression": "SUM(a)", "dependencies": ["t1"]}

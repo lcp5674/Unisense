@@ -1059,6 +1059,57 @@ describe("AssetMap", () => {
     expect(screen.getByText(/目录资产明细/)).toBeInTheDocument();
   });
 
+  it("overview 指标总数下钻：明细排除 DRAFT/DEPRECATED 且展示真实总数", async () => {
+    const user = userEvent.setup();
+    // 指标总数 = by_domain 求和 = 2（finance:2）；明细返回 2 条 + total=2
+    vi.mocked(listMetrics).mockResolvedValue({
+      items: [
+        { key: "m1", metric_code: "finance_revenue_sum_d", name: "收入", status: "PUBLISHED", domain: "finance" },
+        { key: "m2", metric_code: "finance_cost_sum_d", name: "成本", status: "REVIEW", domain: "finance" },
+      ] as never,
+      total: 2,
+      page: 1,
+      page_size: 200,
+    });
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("概览")).toBeInTheDocument());
+    await user.click(screen.getByText("概览"));
+    await waitFor(() => expect(fetchAssetMetricSummary).toHaveBeenCalled());
+
+    // 点击「指标总数」统计值（within 该卡片，避免与页面其他 "2" 冲突）
+    const totalStat = screen.getByText("指标总数").closest(".ant-statistic") as HTMLElement;
+    await user.click(within(totalStat).getByText("2"));
+
+    // 口径对齐：无 status 下钻须排除 DRAFT/DEPRECATED（与 by_domain 统计一致），且取 200 上限
+    await waitFor(() =>
+      expect(listMetrics).toHaveBeenCalledWith(
+        expect.objectContaining({ exclude_statuses: ["DRAFT", "DEPRECATED"], page_size: 200 }),
+      ),
+    );
+    // 标题为「活跃指标明细」（区别于「已发布指标明细」），且抽屉显示后端真实总数
+    expect(screen.getByText(/活跃指标明细/)).toBeInTheDocument();
+    expect(screen.getByText("共 2 条")).toBeInTheDocument();
+  });
+
+  it("overview 已发布指标下钻：仍按 status=PUBLISHED 过滤（不受排除状态影响）", async () => {
+    const user = userEvent.setup();
+    renderAssetMap();
+    await waitFor(() => expect(screen.getByText("概览")).toBeInTheDocument());
+    await user.click(screen.getByText("概览"));
+    await waitFor(() => expect(fetchAssetMetricSummary).toHaveBeenCalled());
+
+    // 点击「已发布指标」统计值（默认 by_status.PUBLISHED = 1）
+    const pubStat = screen.getByText("已发布指标").closest(".ant-statistic") as HTMLElement;
+    await user.click(within(pubStat).getByText("1"));
+
+    await waitFor(() =>
+      expect(listMetrics).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "PUBLISHED" }),
+      ),
+    );
+    expect(screen.getByText(/已发布指标明细/)).toBeInTheDocument();
+  });
+
   it("overview 指标体系展示粒度等 13 类维度并可下钻", async () => {
     const user = userEvent.setup();
     renderAssetMap();

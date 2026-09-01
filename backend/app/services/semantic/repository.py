@@ -188,6 +188,7 @@ class MetricRepository:
         deleted: bool = False,
         domain: str | None = None,
         status: str | None = None,
+        exclude_statuses: list[str] | None = None,
         metric_tier: str | None = None,
         metric_type: str | None = None,
         keyword: str | None = None,
@@ -282,6 +283,10 @@ class MetricRepository:
             conditions.append(Metric.domain == domain)
         if status:
             conditions.append(Metric.status == status)
+        # 排除状态（资产地图「指标总数」下钻：与 metric_summary by_domain 统计口径
+        # 一致排除 DRAFT/DEPRECATED，避免明细多出草稿/已废弃造成总数与明细不一致）
+        if exclude_statuses:
+            conditions.append(Metric.status.not_in(exclude_statuses))
         if metric_tier:
             conditions.append(Metric.metric_tier == metric_tier)
         if metric_type:

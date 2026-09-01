@@ -689,6 +689,8 @@ export async function deletePreference(key: string): Promise<void> {
 export async function listMetrics(params: {
   domain?: string;
   status?: string;
+  /** 排除的状态列表（资产地图「指标总数」下钻：与统计口径一致排除 DRAFT/DEPRECATED） */
+  exclude_statuses?: string[];
   metric_tier?: string;
   /** 指标类型过滤：atomic 原子 / derived 派生 / composite 复合（服务端精确过滤） */
   metric_type?: "atomic" | "derived" | "composite";
@@ -723,6 +725,7 @@ export async function listMetrics(params: {
   const qs = pageQs({
     domain: params.domain,
     status: params.status,
+    exclude_statuses: params.exclude_statuses,
     metric_tier: params.metric_tier,
     metric_type: params.metric_type,
     keyword: params.keyword,

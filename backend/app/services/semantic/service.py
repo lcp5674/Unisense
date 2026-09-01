@@ -1267,6 +1267,7 @@ class MetricService(BaseService):
             deleted=params.deleted,
             domain=params.domain,
             status=params.status,
+            exclude_statuses=params.exclude_statuses,
             metric_tier=params.metric_tier,
             metric_type=params.metric_type,
             keyword=params.keyword,

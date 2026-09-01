@@ -1147,6 +1147,8 @@ function OverviewTab() {
   const [drillTitle, setDrillTitle] = useState("");
   const [drillColumns, setDrillColumns] = useState<ColumnsType<DrillRow>>([]);
   const [drillRows, setDrillRows] = useState<DrillRow[]>([]);
+  // 明细后端真实总数（undefined=未知，DrillDownDrawer 回退已加载行数；避免 100 截断误导）
+  const [drillTotal, setDrillTotal] = useState<number | undefined>(undefined);
   // 下钻行点击 → 实体详情抽屉（FR-18：明细可继续下钻到单表详情）
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -1215,12 +1217,14 @@ function OverviewTab() {
     title: string,
     columns: ColumnsType<DrillRow>,
     loader: () => Promise<DrillRow[]>,
+    total?: number,
   ) {
     setDrillTitle(title);
     setDrillColumns(columns);
     setDrillOpen(true);
     setDrillLoading(true);
     setDrillRows([]);
+    setDrillTotal(total);
     try {
       setDrillRows(await loader());
     } catch (err) {
@@ -1255,8 +1259,14 @@ function OverviewTab() {
   }
 
   function drillMetrics(status?: string) {
-    return openDrill(status ? "已发布指标明细" : "指标明细", METRIC_COLUMNS, async () => {
-      const r = await listMetrics({ ...(status ? { status } : {}), page_size: 100 });
+    // 无 status = 「指标总数」下钻：与总览统计（metric_summary by_domain）同口径，
+    // 排除 DRAFT/DEPRECATED，否则明细多出草稿/已废弃导致总数与明细不一致。
+    return openDrill(status ? "已发布指标明细" : "活跃指标明细", METRIC_COLUMNS, async () => {
+      const r = await listMetrics({
+        ...(status ? { status } : { exclude_statuses: ["DRAFT", "DEPRECATED"] }),
+        page_size: 200,
+      });
+      setDrillTotal(r.total);
       return r.items as unknown as DrillRow[];
     });
   }
@@ -1579,6 +1589,7 @@ function OverviewTab() {
         columns={drillColumns}
         rows={drillRows}
         loading={drillLoading}
+        total={drillTotal}
         onClose={() => setDrillOpen(false)}
         onRow={(row) => ({
           onClick: () => openCatalogDetail(row),
@@ -2649,6 +2660,7 @@ function HeatmapTab() {
   const [drillLoading, setDrillLoading] = useState(false);
   const [drillTitle, setDrillTitle] = useState("");
   const [drillRows, setDrillRows] = useState<DrillRow[]>([]);
+  const [drillTotal, setDrillTotal] = useState<number | undefined>(undefined);
 
   useEffect(() => {
     let cancelled = false;
@@ -2707,13 +2719,16 @@ function HeatmapTab() {
     setDrillOpen(true);
     setDrillLoading(true);
     setDrillRows([]);
+    setDrillTotal(undefined);
     try {
       if (assetType === "metric") {
-        const r = await listMetrics({ domain, pii_flag: sensKey === "PII", page_size: 100 });
+        const r = await listMetrics({ domain, pii_flag: sensKey === "PII", page_size: 200 });
         setDrillRows(r.items as unknown as DrillRow[]);
+        setDrillTotal(r.total);
       } else {
         const r = await listCatalogs({ sensitivity_level: sensKey, domain, page_size: 200 });
         setDrillRows(r.items as unknown as DrillRow[]);
+        setDrillTotal(r.total);
       }
     } catch (err) {
       message.error(err instanceof Error ? err.message : "加载明细失败");
@@ -2861,6 +2876,7 @@ function HeatmapTab() {
         columns={isMetric ? METRIC_COLUMNS : CATALOG_COLUMNS}
         rows={drillRows}
         loading={drillLoading}
+        total={drillTotal}
         onClose={() => setDrillOpen(false)}
       />
     </div>
@@ -2884,6 +2900,7 @@ function OwnerTab() {
   const [drillLoading, setDrillLoading] = useState(false);
   const [drillTitle, setDrillTitle] = useState("");
   const [drillRows, setDrillRows] = useState<DrillRow[]>([]);
+  const [drillTotal, setDrillTotal] = useState<number | undefined>(undefined);
   // 目录资产行点击 → 实体详情抽屉
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -2948,15 +2965,17 @@ function OwnerTab() {
     setDrillOpen(true);
     setDrillLoading(true);
     setDrillRows([]);
+    setDrillTotal(undefined);
     try {
       const r = await listMetrics({
         owner_id: ownerId,
         ...(opts?.status ? { status: opts.status } : {}),
         ...(opts?.domain ? { domain: opts.domain } : {}),
         ...(opts?.piiFlag !== undefined ? { pii_flag: opts.piiFlag } : {}),
-        page_size: 100,
+        page_size: 200,
       });
       setDrillRows(r.items as unknown as DrillRow[]);
+      setDrillTotal(r.total);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "加载指标明细失败");
     } finally {
@@ -3285,6 +3304,7 @@ function OwnerTab() {
         columns={METRIC_COLUMNS}
         rows={drillRows}
         loading={drillLoading}
+        total={drillTotal}
         onClose={() => setDrillOpen(false)}
       />
       {/* 实体详情抽屉：目录资产行点击下钻 */}

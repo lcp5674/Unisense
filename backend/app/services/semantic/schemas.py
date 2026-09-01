@@ -1108,6 +1108,12 @@ class MetricListParams(BaseModel):
 
     domain: str | None = None
     status: str | None = None
+    # 排除状态过滤（资产地图「指标总数」下钻口径对齐）：总览统计排除
+    # DRAFT/DEPRECATED（metric_summary by_domain），明细须同口径，否则
+    # 总数与明细条数不一致（明细多出草稿/已废弃）。多值 query（?exclude_statuses=a&b）。
+    exclude_statuses: list[str] | None = Field(
+        None, description="排除的状态列表（多值，如 DRAFT、DEPRECATED）"
+    )
     metric_tier: str | None = None
     # 指标类型过滤（OneData 派生指标「绑定基础原子指标」下拉）：服务端按类型精确
     # 过滤，前端无需在 ≤100 条页内再 filter(type)——原子指标即便超过单页容量也能靠

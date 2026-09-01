@@ -390,6 +390,44 @@ async def test_list_metrics_applies_status_and_tier_filters():
     assert len(items) == 1
 
 
+async def test_list_metrics_excludes_statuses():
+    """exclude_statuses 生成 Metric.status NOT IN 条件（资产地图「指标总数」下钻
+    与统计口径一致排除 DRAFT/DEPRECATED，防止明细多出草稿/已废弃）。"""
+    from sqlalchemy.dialects import mysql
+
+    db = _mock_session()
+    db.execute.side_effect = [
+        _result(scalar=0),
+        _result(all_=[]),
+    ]
+    repo = MetricRepository(db)
+
+    await repo.list_metrics(
+        exclude_statuses=["DRAFT", "DEPRECATED"], offset=0, limit=10
+    )
+
+    list_stmt = db.execute.call_args_list[1].args[0]
+    literal_sql = str(
+        list_stmt.compile(dialect=mysql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+    assert "metric.status NOT IN ('DRAFT', 'DEPRECATED')" in literal_sql
+
+
+async def test_list_metrics_exclude_statuses_empty_has_no_filter():
+    """空排除列表不加过滤条件（退化保护，避免空 NOT IN 语义歧义）。"""
+    db = _mock_session()
+    db.execute.side_effect = [
+        _result(scalar=0),
+        _result(all_=[]),
+    ]
+    repo = MetricRepository(db)
+
+    await repo.list_metrics(exclude_statuses=[], offset=0, limit=10)
+
+    list_stmt = db.execute.call_args_list[1].args[0]
+    assert "NOT IN" not in _compiled_sql(db, 1)
+
+
 async def test_list_metrics_filters_by_metric_type():
     """metric_type 服务端过滤：list_metrics(metric_type='atomic') 生成 Metric.type 等值条件。
 
