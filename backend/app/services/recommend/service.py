@@ -332,7 +332,12 @@ class RecommendService(BaseService):
                 break
         return result
 
-    async def recommend_terms(self, limit: int) -> list[TermResponse]:
-        """返回已发布术语候选（ORM → TermResponse 转换，避免 Pydantic 序列化 500）。"""
-        terms = await self._repo.published_terms(limit)
+    async def recommend_terms(
+        self, limit: int, domain: str | None = None
+    ) -> list[TermResponse]:
+        """返回已发布术语候选（ORM → TermResponse 转换，避免 Pydantic 序列化 500）。
+
+        ``domain`` 非 None 时仅取本域（P1-5 域收敛，与 ``recommend_metrics`` 对齐）。
+        """
+        terms = await self._repo.published_terms(limit, domain=domain)
         return [TermResponse.from_model(t) for t in terms]

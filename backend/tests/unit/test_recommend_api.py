@@ -60,12 +60,17 @@ async def test_recommend_metrics_uses_authenticated_user_id(client) -> None:
         instance = mock_svc.return_value
         instance.recommend_metrics = AsyncMock(return_value=[_ALLOWED_ITEM])
         app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-            id=42, role="viewer", roles_all=lambda: ["viewer"], has_role=lambda r: r == "viewer"
+            id=42,
+            role="viewer",
+            roles_all=lambda: ["viewer"],
+            has_role=lambda r: r == "viewer",
+            domain="sales",
         )
 
         await client.get("/api/v1/recommend/metrics?limit=5")
 
-    instance.recommend_metrics.assert_awaited_once_with(42, 5)
+    # 非 platform_admin 时须携带本域收敛（P1-5），mock 缺 domain 曾返回 MagicMock 致断言失真
+    instance.recommend_metrics.assert_awaited_once_with(42, 5, domain="sales")
 
 
 async def test_recommend_metrics_analyst_forbidden(client) -> None:
@@ -100,10 +105,47 @@ async def test_recommend_terms_role_allowed_for_viewer(client) -> None:
         instance = mock_svc.return_value
         instance.recommend_terms = AsyncMock(return_value=[TermResponse.from_model(term)])
         app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-            id=1, role="viewer", roles_all=lambda: ["viewer"], has_role=lambda r: r == "viewer"
+            id=1,
+            role="viewer",
+            roles_all=lambda: ["viewer"],
+            has_role=lambda r: r == "viewer",
+            domain="sales",
         )
 
         resp = await client.get("/api/v1/recommend/terms")
 
     assert resp.status_code == 200
     assert resp.json()["data"]["items"][0]["term_code"] == "t1"
+    # P1-5 术语域收敛：非 platform_admin 须携带本域
+    instance.recommend_terms.assert_awaited_once_with(20, domain="sales")
+
+
+async def test_recommend_terms_platform_admin_no_domain(client) -> None:
+    """P1-5：platform_admin 不限域，/recommend/terms 调用不传 domain。"""
+    from app.models.term import Term
+    from app.services.glossary.schemas import TermResponse
+
+    term = Term(
+        id=1,
+        term_code="t1",
+        name="n",
+        definition="d",
+        domain="x",
+        synonyms=[],
+        status="PUBLISHED",
+        owner_id=1,
+    )
+    with patch("app.api.recommend.RecommendService") as mock_svc:
+        instance = mock_svc.return_value
+        instance.recommend_terms = AsyncMock(return_value=[TermResponse.from_model(term)])
+        app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+            id=1,
+            role="platform_admin",
+            roles_all=lambda: ["platform_admin"],
+            has_role=lambda r: r == "platform_admin",
+        )
+
+        resp = await client.get("/api/v1/recommend/terms")
+
+    assert resp.status_code == 200
+    instance.recommend_terms.assert_awaited_once_with(20, domain=None)

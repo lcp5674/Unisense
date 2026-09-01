@@ -70,5 +70,5 @@ async def recommend_terms(
     trace_id: Annotated[str, Depends(get_trace_id)],
     limit: int = Query(20, le=200),
 ) -> Any:
-    items = await RecommendService(db).recommend_terms(limit)
+    items = await RecommendService(db).recommend_terms(limit, domain=_recommend_domain(user))
     return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)

@@ -859,7 +859,7 @@ async def test_aggregate_dashboard_governance_indicators():
         _result(all_=[(1, 2)]),  # owner_tpl
         _result(all_=[(1, 1), (2, 1)]),  # owner_source
         _result(all_=[(1, "Alice"), (2, "Bob")]),  # owner_names
-        _result(all_=[("P0", 1), ("P1", 2), ("P2", 3)]),  # quality by_severity
+        _result(all_=[("P0", 1), ("P1", 2), ("P2", 2)]),  # quality by_severity（仅未关闭 OPEN/ACK，合计 5）
         _result(all_=[("OPEN", 4), ("ACK", 1), ("RESOLVED", 3)]),  # quality by_status
         _result(all_=[(True, 7), (False, 3)]),  # compliance reviewed
         _result(all_=[("OPEN", 2), ("NEGOTIATING", 1), ("ESCALATED", 1), ("RULED", 1)]),  # conflict
@@ -900,10 +900,10 @@ async def test_aggregate_dashboard_governance_indicators():
             "templates": {"total": 0, "by_status": {}},
         },
     }
-    # 质量健康：按严重级分布 + 待处理（OPEN+ACK）
+    # 质量健康：大数字 = 当前待处理事件（by_severity 仅统计 OPEN/ACK，与可观测中心同口径）
     assert result["quality"] == {
-        "total": 6,
-        "by_severity": {"P0": 1, "P1": 2, "P2": 3},
+        "total": 5,
+        "by_severity": {"P0": 1, "P1": 2, "P2": 2},
         "pending": 5,
     }
     # 合规：复核率
@@ -913,9 +913,9 @@ async def test_aggregate_dashboard_governance_indicators():
         "pending": 3,
         "reviewed_ratio": 0.7,
     }
-    # 冲突风险：待仲裁 + 升级中
+    # 冲突风险：未关闭 = OPEN + NEGOTIATING + ESCALATED（RULED 已决不计入）
     assert result["conflict"] == {
-        "total": 5,
+        "total": 4,
         "open": 3,
         "escalated": 1,
         "by_status": {"OPEN": 2, "NEGOTIATING": 1, "ESCALATED": 1, "RULED": 1},
@@ -927,6 +927,49 @@ async def test_aggregate_dashboard_governance_indicators():
         "updated_30d_ratio": 0.6,
     }
     assert db.execute.await_count == 22
+
+
+async def test_aggregate_dashboard_domain_applied_to_owner_and_domain_queries():
+    """?domain=X 时 domain 过滤须贯穿 by_domain 与 Owner 分布全部资产查询，避免口径撕裂。
+
+    回归审查发现：owner_metric 带 domain 过滤但 owner_table/dim/term/tpl/source 与
+    by_domain 不带，同一张 Owner 卡内指标按 X 域、其它资产按全库统计。
+    """
+    db = _mock_session()
+    db.execute.side_effect = [
+        _row_result(total=5, pii_count=1),
+        _result(all_=[("PUBLISHED", 5)]),  # by_status
+        _result(all_=[("T1", 5)]),  # by_tier
+        _result(all_=[("sales", 5)]),  # by_domain
+        _result(all_=[(1, "PUBLISHED", 5)]),  # owner_metric
+        _result(all_=[(1, 5)]),  # owner_table
+        _result(all_=[(1, "PUBLISHED", 2)]),  # owner_dim
+        _result(all_=[(1, "PUBLISHED", 3)]),  # owner_term
+        _result(all_=[(1, 1)]),  # owner_tpl
+        _result(all_=[(1, 2)]),  # owner_source
+        _result(all_=[(1, "Alice")]),  # owner_names
+        _result(all_=[("P1", 1)]),  # quality by_severity
+        _result(all_=[("OPEN", 1)]),  # quality by_status
+        _result(all_=[(True, 5)]),  # compliance
+        _result(all_=[("OPEN", 1)]),  # conflict
+        _result(scalar=5),  # freshness
+        _result(all_=[]),  # table
+        _result(all_=[]),  # source
+        _result(all_=[]),  # dimension
+        _result(all_=[]),  # term
+        _result(all_=[]),  # template
+        _result(all_=[]),  # system_dict
+    ]
+    repo = MetricRepository(db)
+
+    await repo.aggregate_dashboard(domain="sales")
+
+    # 主聚合 + by_domain + Owner 分布 6 查询（指标/表/维度/术语/模板/源）均带 domain 过滤
+    for i in (0, 3, 4, 5, 6, 7, 8, 9):
+        sql = _compiled_sql(db, i)
+        assert "domain = 'sales'" in sql, f"第 {i} 次查询缺 domain 过滤: {sql}"
+    # 对照：by_status / by_tier 属指标聚合，已含 domain（走同一 conditions），
+    # 此处仅确认查询顺序无错位——by_domain 索引 3 之后不再出现未过滤的资产查询
 
 
 # ---------- P1-F/P1-G：冲突预检活动指标加载（排除 DEPRECATED + 分页全量） ----------

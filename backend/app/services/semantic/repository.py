@@ -926,8 +926,10 @@ class MetricRepository:
         tier_rows = (await self._db.execute(tier_stmt)).all()
         by_tier = {row[0]: row[1] for row in tier_rows}
 
-        # 按域分组
+        # 按域分组（对齐主查询：domain 参数同样收敛，避免 ?domain=X 时域分布仍全量）
         domain_conditions: list[ColumnElement[bool]] = [Metric.deleted_at.is_(None)]
+        if domain:
+            domain_conditions.append(Metric.domain == domain)
         if owner_id:
             domain_conditions.append(Metric.owner_id == owner_id)
         domain_stmt = (
@@ -950,35 +952,54 @@ class MetricRepository:
 
         owner_table_stmt = (
             select(DBCatalog.owner_id, func.count().label("cnt"))
-            .where(DBCatalog.owner_id.isnot(None), DBCatalog.deleted_at.is_(None))
+            .join(DataSource, DataSource.source_id == DBCatalog.source_id)
+            .where(
+                DBCatalog.owner_id.isnot(None),
+                DBCatalog.deleted_at.is_(None),
+                *([DataSource.domain == domain] if domain else []),
+            )
             .group_by(DBCatalog.owner_id)
         )
         owner_table_rows = (await self._db.execute(owner_table_stmt)).all()
 
         owner_dim_stmt = (
             select(Dimension.owner_id, Dimension.status, func.count().label("cnt"))
-            .where(Dimension.deleted_at.is_(None))
+            .where(
+                Dimension.deleted_at.is_(None),
+                *([Dimension.domain == domain] if domain else []),
+            )
             .group_by(Dimension.owner_id, Dimension.status)
         )
         owner_dim_rows = (await self._db.execute(owner_dim_stmt)).all()
 
         owner_term_stmt = (
             select(Term.owner_id, Term.status, func.count().label("cnt"))
-            .where(Term.deleted_at.is_(None))
+            .where(
+                Term.deleted_at.is_(None),
+                *([Term.domain == domain] if domain else []),
+            )
             .group_by(Term.owner_id, Term.status)
         )
         owner_term_rows = (await self._db.execute(owner_term_stmt)).all()
 
         owner_tpl_stmt = (
             select(MetricTemplate.owner_id, func.count().label("cnt"))
-            .where(MetricTemplate.owner_id.isnot(None), MetricTemplate.deleted_at.is_(None))
+            .where(
+                MetricTemplate.owner_id.isnot(None),
+                MetricTemplate.deleted_at.is_(None),
+                *([MetricTemplate.domain == domain] if domain else []),
+            )
             .group_by(MetricTemplate.owner_id)
         )
         owner_tpl_rows = (await self._db.execute(owner_tpl_stmt)).all()
 
         owner_source_stmt = (
             select(DataSource.owner_id, func.count().label("cnt"))
-            .where(DataSource.owner_id.isnot(None), DataSource.deleted_at.is_(None))
+            .where(
+                DataSource.owner_id.isnot(None),
+                DataSource.deleted_at.is_(None),
+                *([DataSource.domain == domain] if domain else []),
+            )
             .group_by(DataSource.owner_id)
         )
         owner_source_rows = (await self._db.execute(owner_source_stmt)).all()
@@ -1050,9 +1071,14 @@ class MetricRepository:
             )
 
         # 2) 质量健康：质量事件按严重级分布 + 待处理（OPEN+ACK）
+        #    仅统计未关闭事件（OPEN/ACK），与可观测中心 pending_quality 同口径——
+        #    已关闭（RESOLVED/CLOSED）事件不计入「当前质量健康」大数字
         quality_sev_stmt = (
             select(QualityEvent.level, func.count().label("cnt"))
-            .where(QualityEvent.deleted_at.is_(None))
+            .where(
+                QualityEvent.deleted_at.is_(None),
+                QualityEvent.status.in_(["OPEN", "ACK"]),
+            )
             .group_by(QualityEvent.level)
         )
         quality_sev_rows = (await self._db.execute(quality_sev_stmt)).all()
@@ -1101,6 +1127,7 @@ class MetricRepository:
             "pii_ratio": round(pii_count / max(total, 1), 4),
             "by_owner": by_owner,
             "quality": {
+                # 大数字 = 当前待处理质量事件（by_severity 已过滤 OPEN/ACK）
                 "total": sum(by_severity.values()),
                 "by_severity": by_severity,
                 "pending": quality_pending,
@@ -1112,7 +1139,13 @@ class MetricRepository:
                 "reviewed_ratio": round(compliance_reviewed / max(total, 1), 4),
             },
             "conflict": {
-                "total": sum(conflict_by_status.values()),
+                # 与可观测中心同口径：未关闭 = OPEN + NEGOTIATING + ESCALATED
+                # （RULED/CLOSED 等已决冲突不计入「未关闭冲突总数」）
+                "total": (
+                    conflict_by_status.get("OPEN", 0)
+                    + conflict_by_status.get("NEGOTIATING", 0)
+                    + conflict_by_status.get("ESCALATED", 0)
+                ),
                 "open": conflict_by_status.get("OPEN", 0)
                 + conflict_by_status.get("NEGOTIATING", 0),
                 "escalated": conflict_by_status.get("ESCALATED", 0),

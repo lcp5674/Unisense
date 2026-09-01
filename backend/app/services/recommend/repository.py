@@ -93,8 +93,21 @@ class RecommendRepository:
         rows = (await self._session.execute(stmt)).scalars().all()
         return {str(r) for r in rows if r}
 
-    async def published_terms(self, limit: int) -> list[Term]:
-        stmt = select(Term).where(Term.status == "PUBLISHED").order_by(Term.id.desc()).limit(limit)
+    async def published_terms(self, limit: int, domain: str | None = None) -> list[Term]:
+        """已发布术语候选（软删过滤 + P1-5 域收敛）。
+
+        ``domain`` 非 None 时仅取本域 PUBLISHED 术语——与 ``recent_published_metrics``
+        的域收敛对齐：此前仅过滤 PUBLISHED 不校验域，A 域用户面板会出现他域术语
+        （跨域信息泄漏）；同时补 ``deleted_at IS NULL`` 防作废术语进入推荐。
+        """
+        stmt = (
+            select(Term)
+            .where(Term.status == "PUBLISHED", Term.deleted_at.is_(None))
+            .order_by(Term.id.desc())
+            .limit(limit)
+        )
+        if domain:
+            stmt = stmt.where(Term.domain == domain)
         return list((await self._session.execute(stmt)).scalars().all())
 
     async def popular_metrics(self, limit: int) -> list[tuple[str, int]]:

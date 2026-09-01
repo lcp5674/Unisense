@@ -103,11 +103,20 @@ async def test_recommend_metrics_from_events() -> None:
 
 async def test_recommend_terms() -> None:
     svc, repo = await _svc()
-    items = await svc.recommend_terms(10)
+    items = await svc.recommend_terms(10, domain="sales")
     assert len(items) == 1
     # ORM → TermResponse 转换，保证 API 可序列化（不再 500）
     assert isinstance(items[0], TermResponse)
     assert items[0].term_code == "t1"
+    # P1-5 术语域收敛：domain 透传至 repository
+    repo.published_terms.assert_awaited_once_with(10, domain="sales")
+
+
+async def test_recommend_terms_without_domain() -> None:
+    """platform_admin 不限域：不传 domain 时 repository 收到 domain=None。"""
+    svc, repo = await _svc()
+    await svc.recommend_terms(10)
+    repo.published_terms.assert_awaited_once_with(10, domain=None)
 
 
 async def test_recommend_terms_api_serializable(client) -> None:
