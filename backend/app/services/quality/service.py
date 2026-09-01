@@ -267,10 +267,19 @@ class QualityService(BaseService):
         rule = await self._repo.create_rule(rule)
         return QualityRuleResponse.from_model(rule)
 
-    async def get_rule(self, rule_id: int) -> QualityRuleResponse:
+    async def get_rule(
+        self,
+        rule_id: int,
+        *,
+        domain: str | None = None,
+        is_platform_admin: bool = False,
+    ) -> QualityRuleResponse:
         rule = await self._repo.get_rule(rule_id)
         if rule is None:
             raise NotFoundError(f"quality rule not found: {rule_id}")
+        await self._assert_metric_domain(
+            domain=domain, is_platform_admin=is_platform_admin, metric_id=rule.metric_id
+        )
         return QualityRuleResponse.from_model(rule)
 
     async def list_rules(
@@ -281,9 +290,19 @@ class QualityService(BaseService):
         enabled: bool | None,
         page: int,
         page_size: int,
+        *,
+        domain: str | None = None,
+        is_platform_admin: bool = False,
     ) -> tuple[list[QualityRuleResponse], int]:
         rows, total = await self._repo.list_rules(
-            metric_id, rule_type, severity, enabled, page, page_size
+            metric_id,
+            rule_type,
+            severity,
+            enabled,
+            page,
+            page_size,
+            domain=domain,
+            is_platform_admin=is_platform_admin,
         )
         return [QualityRuleResponse.from_model(r) for r in rows], total
 
@@ -578,8 +597,19 @@ class QualityService(BaseService):
         level: QualitySeverity | None,
         page: int,
         page_size: int,
+        *,
+        domain: str | None = None,
+        is_platform_admin: bool = False,
     ) -> tuple[list[QualityEventResponse], int]:
-        rows, total = await self._repo.list_events(metric_id, status, level, page, page_size)
+        rows, total = await self._repo.list_events(
+            metric_id,
+            status,
+            level,
+            page,
+            page_size,
+            domain=domain,
+            is_platform_admin=is_platform_admin,
+        )
         return [QualityEventResponse.from_model(r) for r in rows], total
 
     async def ack_event(
@@ -727,8 +757,18 @@ class QualityService(BaseService):
         source_id: str | None,
         page: int,
         page_size: int,
+        *,
+        domain: str | None = None,
+        is_platform_admin: bool = False,
     ) -> tuple[list[BenchmarkResponse], int]:
-        rows, total = await self._repo.list_benchmarks(metric_code, source_id, page, page_size)
+        rows, total = await self._repo.list_benchmarks(
+            metric_code,
+            source_id,
+            page,
+            page_size,
+            domain=domain,
+            is_platform_admin=is_platform_admin,
+        )
         return [BenchmarkResponse.from_model(r) for r in rows], total
 
     async def bind_benchmark(
@@ -800,8 +840,18 @@ class QualityService(BaseService):
         metric_code: str | None,
         page: int,
         page_size: int,
+        *,
+        domain: str | None = None,
+        is_platform_admin: bool = False,
     ) -> tuple[list[ReconciliationRecordResponse], int]:
-        rows, total = await self._repo.list_reconciliations(status, metric_code, page, page_size)
+        rows, total = await self._repo.list_reconciliations(
+            status,
+            metric_code,
+            page,
+            page_size,
+            domain=domain,
+            is_platform_admin=is_platform_admin,
+        )
         return [ReconciliationRecordResponse.from_model(r) for r in rows], total
 
     async def confirm_reconciliation(

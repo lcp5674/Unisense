@@ -1333,9 +1333,15 @@ class LineageRepository:
 
     # ---- 血缘覆盖率治理（Task B）----
 
-    async def metric_total(self) -> int:
-        """指标总数（soft 删除过滤）。"""
-        n = await self._db.execute(select(func.count(Metric.id)).where(Metric.deleted_at.is_(None)))
+    async def metric_total(self, domain: str | None = None) -> int:
+        """指标总数（soft 删除过滤）。
+
+        ``domain`` 非空时仅统计该业务域指标（治理统计的读路径域收敛）。
+        """
+        stmt = select(func.count(Metric.id)).where(Metric.deleted_at.is_(None))
+        if domain:
+            stmt = stmt.where(Metric.domain == domain)
+        n = await self._db.execute(stmt)
         return int(n.scalar_one_or_none() or 0)
 
     async def metric_codes_with_lineage(self) -> set[str]:

@@ -53,13 +53,23 @@ class ObservabilityRepository:
         status: str | None,
         page: int,
         page_size: int,
+        org_id: int | None = None,
     ) -> tuple[list[Feedback], int]:
-        """反馈列表（分页 + 状态过滤 + 软删过滤），返回 (items, total)。"""
+        """反馈列表（分页 + 状态过滤 + 软删过滤），返回 (items, total)。
+
+        ``org_id`` 非 None 时按反馈人所属组织隔离（防跨组织反馈/处理意见泄露给
+        任意 viewer，对齐 overview_stats 的 org 隔离语义）；平台管理员 None 全量。
+        """
         # 与其它模块一致的软删语义：deleted_at IS NULL 的记录才展示
         stmt = select(Feedback).where(Feedback.deleted_at.is_(None))
         count_stmt = (
             select(func.count()).select_from(Feedback).where(Feedback.deleted_at.is_(None))
         )
+        if org_id is not None:
+            # Feedback 无 org_id 列，经反馈人 user_id → user.org_id 关联到组织
+            org_user_ids = select(User.id).where(User.org_id == org_id)
+            stmt = stmt.where(Feedback.user_id.in_(org_user_ids))
+            count_stmt = count_stmt.where(Feedback.user_id.in_(org_user_ids))
         if target_type:
             stmt = stmt.where(Feedback.target_type == target_type)
             count_stmt = count_stmt.where(Feedback.target_type == target_type)

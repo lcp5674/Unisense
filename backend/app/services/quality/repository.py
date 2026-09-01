@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.metric import Metric
 from app.models.quality import (
     ExternalBenchmark,
     QualityEvent,
@@ -28,6 +29,18 @@ class QualityRepository:
         self._db = db
 
     # ---- QualityRule ----
+    @staticmethod
+    def _domain_metric_condition(domain: str | None, is_platform_admin: bool) -> list[Any]:
+        """域作用域条件（非管理角色按指标域隔离跨域质量数据）。
+
+        返回 ``Metric.domain == domain`` 的 join 条件列表；平台管理员或未指定域
+        时返回空列表（不隔离）。规则/事件按 ``metric_id`` 关联 Metric，基准/对账
+        按 ``metric_code`` 关联。
+        """
+        if is_platform_admin or not domain:
+            return []
+        return [Metric.domain == domain]
+
     async def create_rule(self, rule: QualityRule) -> QualityRule:
         self._db.add(rule)
         await self._db.flush()
@@ -60,6 +73,8 @@ class QualityRepository:
         enabled: bool | None,
         page: int,
         page_size: int,
+        domain: str | None = None,
+        is_platform_admin: bool = False,
     ) -> tuple[list[QualityRule], int]:
         conditions: list[Any] = [QualityRule.deleted_at.is_(None)]
         if metric_id is not None:
@@ -70,10 +85,17 @@ class QualityRepository:
             conditions.append(QualityRule.severity == severity)
         if enabled is not None:
             conditions.append(QualityRule.enabled == enabled)
-        count_stmt = select(func.count()).select_from(QualityRule).where(*conditions)
+        conditions += self._domain_metric_condition(domain, is_platform_admin)
+        count_stmt = (
+            select(func.count())
+            .select_from(QualityRule)
+            .join(Metric, QualityRule.metric_id == Metric.id)
+            .where(*conditions)
+        )
         total = int((await self._db.execute(count_stmt)).scalar() or 0)
         stmt = (
             select(QualityRule)
+            .join(Metric, QualityRule.metric_id == Metric.id)
             .where(*conditions)
             .order_by(QualityRule.id.desc())
             .offset((page - 1) * page_size)
@@ -143,6 +165,8 @@ class QualityRepository:
         level: QualitySeverity | None,
         page: int,
         page_size: int,
+        domain: str | None = None,
+        is_platform_admin: bool = False,
     ) -> tuple[list[QualityEvent], int]:
         conditions: list[Any] = [QualityEvent.deleted_at.is_(None)]
         if metric_id is not None:
@@ -151,10 +175,17 @@ class QualityRepository:
             conditions.append(QualityEvent.status == status)
         if level is not None:
             conditions.append(QualityEvent.level == level)
-        count_stmt = select(func.count()).select_from(QualityEvent).where(*conditions)
+        conditions += self._domain_metric_condition(domain, is_platform_admin)
+        count_stmt = (
+            select(func.count())
+            .select_from(QualityEvent)
+            .join(Metric, QualityEvent.metric_id == Metric.id)
+            .where(*conditions)
+        )
         total = int((await self._db.execute(count_stmt)).scalar() or 0)
         stmt = (
             select(QualityEvent)
+            .join(Metric, QualityEvent.metric_id == Metric.id)
             .where(*conditions)
             .order_by(QualityEvent.id.desc())
             .offset((page - 1) * page_size)
@@ -352,16 +383,25 @@ class QualityRepository:
         source_id: str | None,
         page: int,
         page_size: int,
+        domain: str | None = None,
+        is_platform_admin: bool = False,
     ) -> tuple[list[ExternalBenchmark], int]:
         conditions: list[Any] = []
         if metric_code is not None:
             conditions.append(ExternalBenchmark.metric_code == metric_code)
         if source_id is not None:
             conditions.append(ExternalBenchmark.source_id == source_id)
-        count_stmt = select(func.count()).select_from(ExternalBenchmark).where(*conditions)
+        conditions += self._domain_metric_condition(domain, is_platform_admin)
+        count_stmt = (
+            select(func.count())
+            .select_from(ExternalBenchmark)
+            .join(Metric, ExternalBenchmark.metric_code == Metric.metric_code)
+            .where(*conditions)
+        )
         total = int((await self._db.execute(count_stmt)).scalar() or 0)
         stmt = (
             select(ExternalBenchmark)
+            .join(Metric, ExternalBenchmark.metric_code == Metric.metric_code)
             .where(*conditions)
             .order_by(ExternalBenchmark.id.desc())
             .offset((page - 1) * page_size)
@@ -409,16 +449,25 @@ class QualityRepository:
         metric_code: str | None,
         page: int,
         page_size: int,
+        domain: str | None = None,
+        is_platform_admin: bool = False,
     ) -> tuple[list[ReconciliationRecord], int]:
         conditions: list[Any] = []
         if status is not None:
             conditions.append(ReconciliationRecord.status == status)
         if metric_code is not None:
             conditions.append(ReconciliationRecord.metric_code == metric_code)
-        count_stmt = select(func.count()).select_from(ReconciliationRecord).where(*conditions)
+        conditions += self._domain_metric_condition(domain, is_platform_admin)
+        count_stmt = (
+            select(func.count())
+            .select_from(ReconciliationRecord)
+            .join(Metric, ReconciliationRecord.metric_code == Metric.metric_code)
+            .where(*conditions)
+        )
         total = int((await self._db.execute(count_stmt)).scalar() or 0)
         stmt = (
             select(ReconciliationRecord)
+            .join(Metric, ReconciliationRecord.metric_code == Metric.metric_code)
             .where(*conditions)
             .order_by(ReconciliationRecord.id.desc())
             .offset((page - 1) * page_size)

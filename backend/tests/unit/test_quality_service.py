@@ -354,6 +354,42 @@ async def test_update_rule_cross_domain_rejected() -> None:
         )
 
 
+async def test_get_rule_cross_domain_rejected() -> None:
+    """get_rule 读路径同样按域守卫（此前任意读角色可读任意规则详情）。"""
+    from app.core.exceptions import AuthError
+
+    svc = _svc()
+    rule = MagicMock()
+    rule.id = 1
+    rule.metric_id = 2
+    svc._repo.get_rule = AsyncMock(return_value=rule)
+    svc._db.execute = AsyncMock()
+    _db_res = MagicMock()
+    _db_res.scalar_one_or_none.return_value = _metric_row("finance")
+    svc._db.execute.return_value = _db_res
+    with pytest.raises(AuthError):
+        await svc.get_rule(1, domain="sales", is_platform_admin=False)
+
+
+async def test_get_rule_same_domain_allowed() -> None:
+    """get_rule 本域规则可读；平台管理员可读任意域。"""
+    svc = _svc()
+    rule = _rule(QualitySeverity.P1, {"max": 100})
+    rule.id = 1
+    rule.metric_id = 2
+    rule.created_by = 1
+    svc._repo.get_rule = AsyncMock(return_value=rule)
+    svc._db.execute = AsyncMock()
+    _db_res = MagicMock()
+    _db_res.scalar_one_or_none.return_value = _metric_row("finance")
+    svc._db.execute.return_value = _db_res
+
+    resp = await svc.get_rule(1, domain="finance", is_platform_admin=False)
+    assert resp.id == 1
+    resp = await svc.get_rule(1, domain="sales", is_platform_admin=True)
+    assert resp.id == 1
+
+
 async def test_ack_event_cross_domain_rejected() -> None:
     """ack_event 对域外指标事件必须拒绝（此前可跨域处置事件）。"""
     from app.core.exceptions import AuthError

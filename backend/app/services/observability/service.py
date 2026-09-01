@@ -64,11 +64,17 @@ class ObservabilityService(BaseService):
         status: str | None,
         page: int,
         page_size: int,
+        org_id: int | None = None,
     ) -> dict[str, Any]:
-        """反馈列表（分页 + 状态过滤），附服务端解析的对象名称映射。"""
+        """反馈列表（分页 + 状态过滤），附服务端解析的对象名称映射。
+
+        ``org_id`` 非 None 时按反馈人所属组织隔离（平台管理员 None 全量）。
+        """
         if page_size > 100:
             page_size = 100
-        items, total = await self._repo.list_feedback(target_type, status, page, page_size)
+        items, total = await self._repo.list_feedback(
+            target_type, status, page, page_size, org_id=org_id
+        )
         # 服务端批量解析对象名称：前端直显，避免逐条探测详情接口的 N+1 请求与 404 噪音
         target_names = await self._repo.resolve_target_names(items)
         return {

@@ -78,6 +78,51 @@ class TestObservabilityRepository:
         assert items == []
         assert total == 0
         assert len(captured) == 2
+
+    async def test_list_feedback_org_scope_filters_by_user_org(
+        self, repo: ObservabilityRepository
+    ) -> None:
+        """org_id 非空时 count + 明细均按反馈人所属组织隔离（join user.org_id）。"""
+        captured: list[Any] = []
+        mock_count = MagicMock()
+        mock_count.scalar.return_value = 2
+        mock_items = MagicMock()
+        mock_items.scalars.return_value.all.return_value = [Feedback(id=1)]
+
+        async def fake_execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+            captured.append(stmt)
+            return mock_count if len(captured) == 1 else mock_items
+
+        repo._session.execute = fake_execute
+        items, total = await repo.list_feedback(None, None, 1, 20, org_id=9)
+        assert len(items) == 1
+        assert total == 2
+        # 两次查询都应携带「反馈人属于组织 9」的子查询条件
+        for stmt in captured:
+            sql = str(stmt)
+            assert "user_id" in sql
+            assert "org_id" in sql
+
+    async def test_list_feedback_no_org_scope_for_admin(
+        self, repo: ObservabilityRepository
+    ) -> None:
+        """平台管理员（org_id=None）不追加组织过滤（全组织可见）。"""
+        captured: list[Any] = []
+        mock_count = MagicMock()
+        mock_count.scalar.return_value = 7
+        mock_items = MagicMock()
+        mock_items.scalars.return_value.all.return_value = []
+
+        async def fake_execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+            captured.append(stmt)
+            return mock_count if len(captured) == 1 else mock_items
+
+        repo._session.execute = fake_execute
+        items, total = await repo.list_feedback(None, None, 1, 20)
+        assert items == []
+        assert total == 7
+        for stmt in captured:
+            assert "org_id" not in str(stmt)
         for stmt in captured:
             assert "deleted_at" in str(stmt)
             assert "IS NULL" in str(stmt)

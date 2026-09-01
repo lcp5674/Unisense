@@ -120,7 +120,16 @@ async def list_rules(
         from app.core.exceptions import ValidationError
 
         raise ValidationError(f"非法 severity: {severity}") from None
-    items, total = await QualityService(db).list_rules(metric_id, rt, sv, enabled, page, page_size)
+    items, total = await QualityService(db).list_rules(
+        metric_id,
+        rt,
+        sv,
+        enabled,
+        page,
+        page_size,
+        domain=user.domain,
+        is_platform_admin=user.has_role("platform_admin"),
+    )
     return ok(
         data={"items": items, "total": total, "page": page, "page_size": page_size},
         trace_id=trace_id,
@@ -134,7 +143,14 @@ async def get_rule(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    return ok(data=await QualityService(db).get_rule(rule_id), trace_id=trace_id)
+    return ok(
+        data=await QualityService(db).get_rule(
+            rule_id,
+            domain=user.domain,
+            is_platform_admin=user.has_role("platform_admin"),
+        ),
+        trace_id=trace_id,
+    )
 
 
 @router.put("/rules/{rule_id}", dependencies=_WRITE_DEPS)
@@ -270,7 +286,15 @@ async def list_events(
         from app.core.exceptions import ValidationError
 
         raise ValidationError(f"非法 level: {level}") from None
-    items, total = await QualityService(db).list_events(metric_id, st, lv, page, page_size)
+    items, total = await QualityService(db).list_events(
+        metric_id,
+        st,
+        lv,
+        page,
+        page_size,
+        domain=user.domain,
+        is_platform_admin=user.has_role("platform_admin"),
+    )
     return ok(
         data={"items": items, "total": total, "page": page, "page_size": page_size},
         trace_id=trace_id,
@@ -432,7 +456,14 @@ async def list_benchmarks(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
-    items, total = await QualityService(db).list_benchmarks(metric_code, source_id, page, page_size)
+    items, total = await QualityService(db).list_benchmarks(
+        metric_code,
+        source_id,
+        page,
+        page_size,
+        domain=user.domain,
+        is_platform_admin=user.has_role("platform_admin"),
+    )
     return ok(
         data={"items": items, "total": total, "page": page, "page_size": page_size},
         trace_id=trace_id,
@@ -507,7 +538,12 @@ async def list_reconciliation_records(
     page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
     items, total = await QualityService(db).list_reconciliations(
-        status, metric_code, page, page_size
+        status,
+        metric_code,
+        page,
+        page_size,
+        domain=user.domain,
+        is_platform_admin=user.has_role("platform_admin"),
     )
     return ok(
         data={"items": items, "total": total, "page": page, "page_size": page_size},

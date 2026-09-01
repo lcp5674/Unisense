@@ -85,7 +85,15 @@ async def list_feedback(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ) -> Any:
-    data = await ObservabilityService(db).list_feedback(target_type, status, page, page_size)
+    """反馈列表（分页 + 状态过滤）。
+
+    平台管理员全组织可见（org_id=None）；其余角色按反馈人所属组织隔离
+    （防跨组织反馈/处理意见泄露给任意 viewer，对齐 /overview 的 org 语义）。
+    """
+    org_id = None if user.has_role("platform_admin") else getattr(user, "org_id", None)
+    data = await ObservabilityService(db).list_feedback(
+        target_type, status, page, page_size, org_id=org_id
+    )
     target_names = data.get("target_names", {})
     items = []
     for i in data["items"]:

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -97,6 +98,64 @@ class TestQualityRuleRepo:
             page_size=10,
         )
         assert len(results) == 1
+
+    async def test_list_rules_domain_scope_joins_metric(self, repo: QualityRepository) -> None:
+        """非管理角色传 domain 时，count + 明细均 join Metric 并按域过滤。"""
+        captured: list[Any] = []
+        mock_count = MagicMock()
+        mock_count.scalar.return_value = 1
+        mock_rows = MagicMock()
+        mock_rows.scalars.return_value.all.return_value = [QualityRule(id=1)]
+
+        async def fake_execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+            captured.append(stmt)
+            return mock_count if len(captured) == 1 else mock_rows
+
+        repo._db.execute = fake_execute
+        results, total = await repo.list_rules(
+            metric_id=None,
+            rule_type=None,
+            severity=None,
+            enabled=None,
+            page=1,
+            page_size=10,
+            domain="outpatient",
+            is_platform_admin=False,
+        )
+        assert len(results) == 1
+        assert total == 1
+        for stmt in captured:
+            sql = str(stmt)
+            assert "JOIN" in sql
+            assert "domain" in sql
+
+    async def test_list_rules_no_domain_scope_for_admin(self, repo: QualityRepository) -> None:
+        """平台管理员不按域过滤（不 join Metric 域条件）。"""
+        captured: list[Any] = []
+        mock_count = MagicMock()
+        mock_count.scalar.return_value = 2
+        mock_rows = MagicMock()
+        mock_rows.scalars.return_value.all.return_value = [QualityRule(id=1), QualityRule(id=2)]
+
+        async def fake_execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+            captured.append(stmt)
+            return mock_count if len(captured) == 1 else mock_rows
+
+        repo._db.execute = fake_execute
+        results, total = await repo.list_rules(
+            metric_id=None,
+            rule_type=None,
+            severity=None,
+            enabled=None,
+            page=1,
+            page_size=10,
+            domain="outpatient",
+            is_platform_admin=True,
+        )
+        assert len(results) == 2
+        assert total == 2
+        for stmt in captured:
+            assert "domain" not in str(stmt)
 
     async def test_update_rule(self, repo: QualityRepository) -> None:
         rule = QualityRule(id=1)
