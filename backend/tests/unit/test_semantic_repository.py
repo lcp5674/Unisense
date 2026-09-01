@@ -587,6 +587,71 @@ async def test_count_review_assigned_matches_designation():
     assert "OR" in sql.upper()
 
 
+async def test_count_review_actionable_platform_admin_full():
+    """可审待审数（TD §13）：platform_admin=全量 REVIEW（不加指派过滤，最终兜底）。"""
+    db = _mock_session()
+    db.execute.return_value = _result(scalar=6)
+    db.execute.return_value.scalar_one.return_value = 6
+    repo = MetricRepository(db)
+
+    cnt = await repo.count_review_actionable(7, "outpatient", "platform_admin")
+
+    assert cnt == 6
+    sql = _compiled_sql(db, 0)
+    # platform_admin 全量：不出现 reviewer 指派过滤条件（仅 status + deleted_at）
+    assert "reviewer_type" not in sql
+
+
+async def test_count_review_actionable_domain_admin_scope():
+    """可审待审数（TD §13）：domain_admin=user 型指派给我 + domain 型同域 + 未指派兜底。"""
+    db = _mock_session()
+    db.execute.return_value = _result(scalar=2)
+    db.execute.return_value.scalar_one.return_value = 2
+    repo = MetricRepository(db)
+
+    cnt = await repo.count_review_actionable(7, "outpatient", "domain_admin")
+
+    assert cnt == 2
+    sql = _compiled_sql(db, 0)
+    assert "reviewer_type" in sql and "reviewer_id" in sql and "reviewer_domain" in sql
+    assert "= 7" in sql and "outpatient" in sql
+    # 未指派兜底：reviewer_type IS NULL 分支存在（域管理员可审未指派指标）
+    assert "REVIEWER_TYPE IS NULL" in sql.upper()
+
+
+async def test_count_review_actionable_reviewer_no_unassigned():
+    """可审待审数（TD §13）：reviewer=user 型指派给我 + domain 型同域，不含未指派兜底。"""
+    db = _mock_session()
+    db.execute.return_value = _result(scalar=1)
+    db.execute.return_value.scalar_one.return_value = 1
+    repo = MetricRepository(db)
+
+    cnt = await repo.count_review_actionable(7, "outpatient", "reviewer")
+
+    assert cnt == 1
+    sql = _compiled_sql(db, 0)
+    assert "reviewer_type" in sql and "reviewer_id" in sql and "reviewer_domain" in sql
+    assert "= 7" in sql and "outpatient" in sql
+    # reviewer 不兜底未指派：不出现 reviewer_type IS NULL 分支
+    assert "REVIEWER_TYPE IS NULL" not in sql.upper()
+
+
+async def test_count_review_actionable_normal_role_zero():
+    """可审待审数（TD §13）：普通角色无可审资格，仅 user 型指派给本人的条目计数。"""
+    db = _mock_session()
+    db.execute.return_value = _result(scalar=0)
+    db.execute.return_value.scalar_one.return_value = 0
+    repo = MetricRepository(db)
+
+    cnt = await repo.count_review_actionable(7, "outpatient", "analyst")
+
+    assert cnt == 0
+    sql = _compiled_sql(db, 0)
+    # 普通角色：不出现 domain/未指派分支（只有 user 型指派条件）
+    assert "REVIEWER_DOMAIN" not in sql.upper()
+    assert "REVIEWER_TYPE IS NULL" not in sql.upper()
+
+
 async def test_list_metrics_asc_sort_and_whitelist_fallback():
     db = _mock_session()
     db.execute.side_effect = [

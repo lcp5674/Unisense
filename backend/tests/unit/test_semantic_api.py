@@ -785,10 +785,14 @@ async def test_dashboard_scopes_regular_user_to_self() -> None:
     captured.clear()
     admin = MagicMock()
     admin.id = 1
+    admin.role = "platform_admin"
     admin.roles_all.return_value = ["platform_admin"]
     with patch(
         "app.services.semantic.repository.MetricRepository.aggregate_dashboard",
         new=_fake_aggregate,
+    ), patch(
+        "app.services.semantic.repository.MetricRepository.count_review_actionable",
+        new=AsyncMock(return_value=0),
     ), patch(
         "app.services.collector.service.CollectorService.count_jobs_by_status",
         new=AsyncMock(return_value={}),
@@ -801,10 +805,14 @@ async def test_dashboard_scopes_regular_user_to_self() -> None:
     captured.clear()
     domain_admin = MagicMock()
     domain_admin.id = 2
+    domain_admin.role = "domain_admin"
     domain_admin.roles_all.return_value = ["domain_admin"]
     with patch(
         "app.services.semantic.repository.MetricRepository.aggregate_dashboard",
         new=_fake_aggregate,
+    ), patch(
+        "app.services.semantic.repository.MetricRepository.count_review_actionable",
+        new=AsyncMock(return_value=0),
     ), patch(
         "app.services.collector.service.CollectorService.count_jobs_by_status",
         new=AsyncMock(return_value={}),
@@ -815,9 +823,10 @@ async def test_dashboard_scopes_regular_user_to_self() -> None:
 
 
 async def test_dashboard_reviewer_gets_assigned_review() -> None:
-    """评审人角色（非管理）：/dashboard 返回指派给当前用户/所在域评审组的待审数（TD §13）。
+    """评审人角色（非管理）：/dashboard 返回可审待审数（TD §13，与审批中心「待我审」同口径）。
 
-    普通用户/管理角色不附加 assigned_review（无评审队列语义），仅 reviewer 角色独立查询。
+    管理角色（domain_admin/platform_admin）同样按「可审」统计——domain_admin=指派给我/本域/
+    未指派兜底；普通用户无评审能力，不附加 assigned_review（前端 ?? 0 不展示）。
     """
     from unittest.mock import patch
 
@@ -832,15 +841,17 @@ async def test_dashboard_reviewer_gets_assigned_review() -> None:
         captured.append((domain, owner_id))
         return dict(data)
 
+    # reviewer 非管理：强制 owner_id=自己 + domain=None（本人资产视角），另附可审待审数
     user = MagicMock()
     user.id = 7
     user.domain = "outpatient"
+    user.role = "reviewer"
     user.roles_all.return_value = ["reviewer"]
     with patch(
         "app.services.semantic.repository.MetricRepository.aggregate_dashboard",
         new=_fake_aggregate,
     ), patch(
-        "app.services.semantic.repository.MetricRepository.count_review_assigned",
+        "app.services.semantic.repository.MetricRepository.count_review_actionable",
         new=AsyncMock(return_value=5),
     ), patch(
         "app.services.collector.service.CollectorService.count_jobs_by_status",
@@ -848,7 +859,7 @@ async def test_dashboard_reviewer_gets_assigned_review() -> None:
     ):
         result = await dashboard(request=req, user=user, db=db)
 
-    # reviewer 非管理：强制 owner_id=自己 + domain=None（本人资产视角），另附指派待审数
+    # reviewer 非管理：强制 owner_id=自己 + domain=None（本人资产视角），另附可审待审数
     assert captured == [(None, 7)]
     assert result.data.get("assigned_review") == 5
 
@@ -857,6 +868,7 @@ async def test_dashboard_reviewer_gets_assigned_review() -> None:
     normal = MagicMock()
     normal.id = 3
     normal.domain = "outpatient"
+    normal.role = "analyst"
     normal.roles_all.return_value = ["analyst"]
     with patch(
         "app.services.semantic.repository.MetricRepository.aggregate_dashboard",
@@ -868,3 +880,25 @@ async def test_dashboard_reviewer_gets_assigned_review() -> None:
         result2 = await dashboard(request=req, user=normal, db=db)
 
     assert "assigned_review" not in result2.data
+
+    # domain_admin（管理角色）：同样附加 assigned_review（可审口径），且透传外部筛选不变
+    captured.clear()
+    da = MagicMock()
+    da.id = 9
+    da.domain = "outpatient"
+    da.role = "domain_admin"
+    da.roles_all.return_value = ["domain_admin"]
+    with patch(
+        "app.services.semantic.repository.MetricRepository.aggregate_dashboard",
+        new=_fake_aggregate,
+    ), patch(
+        "app.services.semantic.repository.MetricRepository.count_review_actionable",
+        new=AsyncMock(return_value=2),
+    ), patch(
+        "app.services.collector.service.CollectorService.count_jobs_by_status",
+        new=AsyncMock(return_value={}),
+    ):
+        result3 = await dashboard(request=req, user=da, db=db, owner_id=5, domain="outpatient")
+
+    assert captured == [("outpatient", 5)], "domain_admin 应透传外部筛选，实际 {captured}"
+    assert result3.data.get("assigned_review") == 2

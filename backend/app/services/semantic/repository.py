@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import ColumnElement, and_, delete, func, or_, select, update
+from sqlalchemy import ColumnElement, and_, delete, func, literal, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -933,6 +933,56 @@ class MetricRepository:
                     and_(Metric.reviewer_type == "user", Metric.reviewer_id == actor_id),
                     and_(Metric.reviewer_type == "domain", Metric.reviewer_domain == user_domain),
                 ),
+            )
+        )
+        return (await self._db.execute(stmt)).scalar_one() or 0
+
+    async def count_review_actionable(
+        self, actor_id: int, user_domain: str | None, role: str
+    ) -> int:
+        """统计当前用户真正可审的待审（REVIEW）指标数（与 _assert_reviewer_authorized 对齐）。
+
+        总览仪表「N 个指标待审核」告警与审批中心「待我审」视图共用此口径——
+        只展示需要自己审批的条目，杜绝「仪表全量 REVIEW、审批中心却空」的口径漂移：
+
+        - ``platform_admin``：全量 REVIEW（最终兜底，可审全部）。
+        - ``reviewer_type=user``：仅 ``reviewer_id`` 指定的用户可审。
+        - ``reviewer_type=domain``：仅同域评审组（``user_domain == reviewer_domain``，
+          且角色为 domain_admin/reviewer）可审。
+        - 未指派（reviewer_type IS NULL）：``domain_admin`` 兜底可审（保持既有语义）。
+        - 其余角色：0（无评审能力）。
+
+        Args:
+            actor_id: 当前用户 ID。
+            user_domain: 当前用户所属域。
+            role: 当前用户主角色（与写路径 _assert_reviewer_authorized 的 role 判定一致）。
+
+        Returns:
+            当前用户可审的 REVIEW 指标数。
+        """
+        conds: list[Any] = []
+        if role == "platform_admin":
+            # platform_admin 全量可审：不加过滤条件（恒真）
+            conds.append(literal(True))
+        else:
+            if role in ("domain_admin", "reviewer"):
+                conds.append(
+                    and_(
+                        Metric.reviewer_type == "domain",
+                        Metric.reviewer_domain == user_domain,
+                    )
+                )
+            if role == "domain_admin":
+                # 未指派：域管理员兜底可审
+                conds.append(and_(Metric.reviewer_type.is_(None)))
+            conds.append(and_(Metric.reviewer_type == "user", Metric.reviewer_id == actor_id))
+        stmt = (
+            select(func.count())
+            .select_from(Metric)
+            .where(
+                Metric.deleted_at.is_(None),
+                Metric.status == "REVIEW",
+                or_(*conds),
             )
         )
         return (await self._db.execute(stmt)).scalar_one() or 0

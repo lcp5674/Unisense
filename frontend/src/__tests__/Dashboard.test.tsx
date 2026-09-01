@@ -68,6 +68,8 @@ const mockedFetchObsOverview = vi.mocked(fetchObsOverview);
 const mockDashboardData = {
   total: 100,
   by_status: { DRAFT: 25, EXPERIMENTAL: 3, REVIEW: 7, PUBLISHED: 60, DEPRECATED: 5 },
+  // 可审待审数（与审批中心「待我审」同口径）：platform_admin 默认=全量 REVIEW 7
+  assigned_review: 7,
   by_tier: { T1: 20, T2: 50, T3: 30 },
   by_domain: { finance: 40, marketing: 30, growth: 20, risk: 10 },
   pii_count: 12,
@@ -289,6 +291,20 @@ describe("Dashboard", () => {
     expect(gaugeLabels).not.toContain("已发布");
     expect(gaugeLabels).not.toContain("待审核");
     expect(gaugeLabels).not.toContain("草稿中");
+  });
+
+  it("管理角色：展示可审待审数（assigned_review），而非全量 by_status.REVIEW（口径对齐审批中心）", async () => {
+    // domain_admin 场景：全量 REVIEW=7（含他人审批），但当前用户可审仅 2（指派给我/本域/未指派兜底）
+    mockPermRole = "domain_admin";
+    mockedFetchDashboard.mockResolvedValue({
+      ...mockDashboardData,
+      by_status: { ...mockDashboardData.by_status, REVIEW: 7 },
+      assigned_review: 2,
+    } as never);
+    renderDashboard();
+    await waitFor(() => expect(screen.getByText(/2 个指标待审核/)).toBeInTheDocument());
+    // 其他用户的审批（全量 7）不在仪表展示
+    expect(screen.queryByText(/7 个指标待审核/)).not.toBeInTheDocument();
   });
 
   it("Owner 责任分布：渲染各 Owner 卡片，待审>0 高亮", async () => {
@@ -771,7 +787,11 @@ describe("Dashboard 数据隔离（非管理角色视角）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockPermRole = "analyst";
-    mockedFetchDashboard.mockResolvedValue(mockDashboardData);
+    // 无评审能力用户：后端不返回 assigned_review（口径 0，前端 ?? 0 不展示评审动作告警）
+    mockedFetchDashboard.mockResolvedValue({
+      ...mockDashboardData,
+      assigned_review: 0,
+    } as never);
     mockedFetchObsOverview.mockResolvedValue(mockOverview as never);
     vi.mocked(fetchRecommendedMetrics).mockResolvedValue([]);
     vi.mocked(fetchRecommendedTerms).mockResolvedValue([]);

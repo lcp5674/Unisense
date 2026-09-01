@@ -736,12 +736,16 @@ async def dashboard(
         domain = None
     repo = MetricRepository(db)
     data = await repo.aggregate_dashboard(domain=domain, owner_id=owner_id)
-    # 评审人（非管理角色）：仪表「指标待审核」只展示指派给当前用户/所在域评审组的
-    # 待审指标（TD §13 评审指派闭环），而非全组织/仅本人名下——独立查询、不入聚合缓存。
-    if not is_admin and "reviewer" in roles:
+    # 评审动作告警口径（TD §13，与 service._assert_reviewer_authorized 完全对齐）：
+    # 管理角色与评审人按「可审」统计——platform_admin=全量，domain_admin=指派给我/本域/
+    # 未指派兜底，reviewer=指派给我/本域；其余角色 0。总览与审批中心「待我审」一致，
+    # 杜绝「仪表全量 REVIEW、审批中心却空」的口径漂移。独立查询、不入聚合缓存。
+    if is_admin or "reviewer" in roles:
         data = {
             **data,
-            "assigned_review": await repo.count_review_assigned(user.id, user.domain),
+            "assigned_review": await repo.count_review_actionable(
+                user.id, user.domain, user.role or ""
+            ),
         }
     # 采集任务：运行时数据（Redis/内存 JobStore），采集服务聚合；失败不阻断仪表盘
     try:
