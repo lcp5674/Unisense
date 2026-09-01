@@ -250,7 +250,7 @@ describe("QueryWorkspace", () => {
     await user.click(screen.getByRole("button", { name: /指标语义/ }));
 
     await waitFor(() => {
-      expect(mockedConsumeSemantic).toHaveBeenCalledWith("gmv_net");
+      expect(mockedConsumeSemantic).toHaveBeenCalledWith("gmv_net", { forceUser: true });
     });
     // 抽屉标题 + 校验项 + 元信息渲染
     await waitFor(() => {
@@ -503,6 +503,37 @@ describe("QueryWorkspace", () => {
     await waitFor(() => {
       expect(mockedConsumeDryRun).toHaveBeenCalledWith(
         expect.objectContaining({ metric_code: "gmv_net" }),
+        { forceUser: true },
+      );
+    });
+  });
+
+  it("指标查询模式强制用户通道（forceUser=true），调试模式才放开消费令牌", async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/query?metric_code=gmv_net"]}>
+        <QueryWorkspace />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+    // 默认「指标查询」模式：明确「内部用户 · 免令牌」标识
+    expect(screen.getByText("内部用户 · 免令牌")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /语义校验/ }));
+    await waitFor(() => {
+      expect(mockedConsumeDryRun).toHaveBeenCalledWith(
+        expect.objectContaining({ metric_code: "gmv_net" }),
+        { forceUser: true },
+      );
+    });
+    // 切到「消费接入调试」：标识变化，请求不再强制用户通道
+    await user.click(screen.getByText("消费接入调试"));
+    await waitFor(() => expect(screen.getByText("模拟接入方")).toBeInTheDocument());
+    mockedConsumeDryRun.mockClear();
+    await user.click(screen.getByRole("button", { name: /语义校验/ }));
+    await waitFor(() => {
+      expect(mockedConsumeDryRun).toHaveBeenCalledWith(
+        expect.objectContaining({ metric_code: "gmv_net" }),
+        { forceUser: false },
       );
     });
   });

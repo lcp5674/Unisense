@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, Select, Input, Button, Form, Space, Tag, Table, Tabs, Alert, message, Row, Col, Drawer, Empty, Segmented } from "antd";
-import { PlayCircleOutlined, SafetyCertificateOutlined, KeyOutlined, DatabaseOutlined, ReadOutlined, ArrowLeftOutlined } from "@ant-design/icons";
+import { PlayCircleOutlined, SafetyCertificateOutlined, KeyOutlined, DatabaseOutlined, ReadOutlined, ArrowLeftOutlined, SearchOutlined, ApiOutlined } from "@ant-design/icons";
 import {
   consumeDryRun,
   consumeQuery,
@@ -303,7 +303,7 @@ export function QueryWorkspace() {
         granularity,
         comparison,
         accept_stale: acceptStale,
-      });
+      }, { forceUser: mode === "query" });
       setDryRun(res);
       setQuery(null);
       track("consume_dry_run", metricCode, "metric");
@@ -325,7 +325,7 @@ export function QueryWorkspace() {
         granularity,
         comparison,
         accept_stale: acceptStale,
-      });
+      }, { forceUser: mode === "query" });
       setQuery(res);
       setDryRun(null);
       track("consume_query", metricCode, "metric");
@@ -347,7 +347,7 @@ export function QueryWorkspace() {
     if (!metricCode) { message.warning("请选择指标"); return; }
     setBusy("snap");
     try {
-      setSnapshots(await listSnapshots(metricCode, 50));
+      setSnapshots(await listSnapshots(metricCode, 50, { forceUser: mode === "query" }));
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载快照失败");
     } finally {
@@ -360,7 +360,7 @@ export function QueryWorkspace() {
     if (!metricCode) { message.warning("请选择指标"); return; }
     setBusy("semantic");
     try {
-      const res = await consumeSemantic(metricCode);
+      const res = await consumeSemantic(metricCode, { forceUser: mode === "query" });
       setSemanticData(res);
       setSemanticOpen(true);
       track("consume_semantic", metricCode, "metric");
@@ -709,14 +709,27 @@ export function QueryWorkspace() {
           <p>基于指标语义的查询——先 dry-run 校验口径，再安全执行。</p>
         </div>
         <div>
-          <Segmented
-            value={mode}
-            onChange={(v) => handleModeChange(v as "query" | "debug")}
-            options={[
-              { label: "指标查询", value: "query" },
-              { label: "消费接入调试", value: "debug" },
-            ]}
-          />
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+            <Segmented
+              value={mode}
+              onChange={(v) => handleModeChange(v as "query" | "debug")}
+              options={[
+                { label: "指标查询", value: "query", icon: <SearchOutlined /> },
+                { label: "消费接入调试", value: "debug", icon: <ApiOutlined /> },
+              ]}
+            />
+            <Tag
+              color={mode === "query" ? "blue" : "purple"}
+              style={{ marginInlineEnd: 0, fontSize: 12 }}
+            >
+              {mode === "query" ? "内部用户 · 免令牌" : "模拟接入方"}
+            </Tag>
+          </div>
+          <div className="muted" style={{ fontSize: 12, textAlign: "right", maxWidth: 420 }}>
+            {mode === "query"
+              ? "以你的登录身份直查全部已发布指标，无需消费令牌与客户端。"
+              : "选择 API 客户端 → 签发令牌 → 以接入方视角调试（按授权域/白名单收敛）。"}
+          </div>
         </div>
       </div>
       <Card><Tabs items={tabItems} /></Card>

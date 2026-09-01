@@ -393,6 +393,9 @@ interface RequestOptions extends RequestInit {
   consumeAuth?: boolean;
   /** consumeAuth 模式下，无消费令牌时回落登录用户 JWT（仅快照等双通道只读端点） */
   consumeFallbackUser?: boolean;
+  /** consumeAuth 模式下强制忽略消费令牌、直接用登录用户 JWT（指标查询模式专用——
+   *  避免残留令牌让后端误判为接入方通道而触发授权域收敛） */
+  consumeForceUser?: boolean;
   /** 自定义主请求超时（毫秒）；缺省用全局 REQUEST_TIMEOUT_MS（30s）。长任务
    * （SQL 批量解析/评测运行等 LLM 场景耗时可达 60-90s）须显式放宽，否则 30s
    * 中止会让用户误以为解析失败。 */
@@ -476,14 +479,20 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   if (init?.consumeAuth) {
     // 过期令牌不发出：先自动清除（触发 CONSUME_TOKEN_CHANGED_EVENT 让 UI 同步），
     // 避免「带过期 Bearer → 401 → 清除 → 组件仍显示已就绪 → 下次请求无 Bearer 报 X-Api-Key 误导」。
+    // consumeForceUser（指标查询模式）：即使存在有效消费令牌也强制忽略，走登录用户 JWT——
+    // 否则残留令牌会让后端误判为接入方通道，触发 scope_domain 授权域收敛（403）。
     let consumeToken = getConsumeToken();
-    const consumeExp = getConsumeTokenExpiry();
-    if (consumeToken && consumeExp !== null && consumeExp <= Date.now()) {
-      clearConsumeToken();
+    if (!init?.consumeForceUser) {
+      const consumeExp = getConsumeTokenExpiry();
+      if (consumeToken && consumeExp !== null && consumeExp <= Date.now()) {
+        clearConsumeToken();
+        consumeToken = null;
+      }
+    } else {
       consumeToken = null;
     }
     let bearer: string | null = consumeToken;
-    if (!bearer && init?.consumeFallbackUser) bearer = getToken();
+    if (!bearer && (init?.consumeFallbackUser || init?.consumeForceUser)) bearer = getToken();
     if (bearer) headers["Authorization"] = `Bearer ${bearer}`;
   } else {
     const token = getToken();
@@ -493,6 +502,7 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   const {
     consumeAuth: _consumeAuth,
     consumeFallbackUser: _consumeFallbackUser,
+    consumeForceUser: _consumeForceUser,
     signal: _initSignal,
     timeout: _initTimeout,
     ...restInit
@@ -1982,37 +1992,39 @@ export async function fetchQuickBITicket(params: {
 }
 
 // ---- 消费服务 ----
-export async function consumeDryRun(req: QueryRequest): Promise<DryRunResponse> {
+export async function consumeDryRun(req: QueryRequest, opts?: { forceUser?: boolean }): Promise<DryRunResponse> {
   return request<DryRunResponse>(`${API_BASE}/consume/query/dry-run`, {
     method: "POST",
     body: JSON.stringify(req),
     // 双通道：有消费令牌用 consume Bearer；无令牌回落登录用户 JWT（后端 get_consume_or_internal_user）
     consumeAuth: true,
     consumeFallbackUser: true,
+    consumeForceUser: opts?.forceUser,
   });
 }
 
-export async function consumeQuery(req: QueryRequest): Promise<QueryResponse> {
+export async function consumeQuery(req: QueryRequest, opts?: { forceUser?: boolean }): Promise<QueryResponse> {
   return request<QueryResponse>(`${API_BASE}/consume/query`, {
     method: "POST",
     body: JSON.stringify(req),
     consumeAuth: true,
     consumeFallbackUser: true,
+    consumeForceUser: opts?.forceUser,
   });
 }
 
 // 消费侧指标语义（只读拉取，GET /consume/metrics/{code}/semantic，返回 DryRunResponse）
-export async function consumeSemantic(code: string): Promise<DryRunResponse> {
+export async function consumeSemantic(code: string, opts?: { forceUser?: boolean }): Promise<DryRunResponse> {
   return request<DryRunResponse>(
     `${API_BASE}/consume/metrics/${encodeURIComponent(code)}/semantic`,
-    { consumeAuth: true, consumeFallbackUser: true },
+    { consumeAuth: true, consumeFallbackUser: true, consumeForceUser: opts?.forceUser },
   );
 }
 
-export async function listSnapshots(code: string, limit = 50): Promise<SnapshotResponse[]> {
+export async function listSnapshots(code: string, limit = 50, opts?: { forceUser?: boolean }): Promise<SnapshotResponse[]> {
   return request<SnapshotResponse[]>(
     `${API_BASE}/consume/metrics/${encodeURIComponent(code)}/snapshots?limit=${limit}`,
-    { consumeAuth: true, consumeFallbackUser: true },
+    { consumeAuth: true, consumeFallbackUser: true, consumeForceUser: opts?.forceUser },
   );
 }
 
