@@ -105,6 +105,18 @@ class ClientCreatedResponse(ClientResponse):
     secret: str = Field(..., description="仅此一次返回")
 
 
+class TokenIssueRequest(BaseModel):
+    """签发消费令牌请求（POST /consume/api-clients/{client_id}/token）。
+
+    有效期可配置（默认 60 分钟，上限 24 小时）——超长有效令牌增加泄露面，
+    故设上限；平台内调试用短效令牌，外部长期集成建议用 X-Api-Key（无过期）。
+    """
+
+    expire_minutes: int = Field(
+        60, ge=5, le=1440, description="令牌有效期（分钟，5~1440，默认 60）"
+    )
+
+
 class SnapshotResponse(BaseModel):
     """结果快照视图（WORM 只读）。"""
 

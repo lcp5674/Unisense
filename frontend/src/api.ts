@@ -2030,10 +2030,13 @@ export async function listApiClients(domain?: string): Promise<ClientResponse[]>
   return request<ClientResponse[]>(`${API_BASE}/consume/api-clients${qs}`);
 }
 
-export async function mintClientToken(clientId: string): Promise<{ access_token: string }> {
+export async function mintClientToken(clientId: string, expireMinutes?: number): Promise<{ access_token: string }> {
   return request<{ access_token: string }>(
     `${API_BASE}/consume/api-clients/${encodeURIComponent(clientId)}/token`,
-    { method: "POST" },
+    {
+      method: "POST",
+      body: JSON.stringify(expireMinutes != null ? { expire_minutes: expireMinutes } : {}),
+    },
   );
 }
 

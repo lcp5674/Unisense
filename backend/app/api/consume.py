@@ -46,6 +46,7 @@ from app.services.consume.schemas import (
     QueryResponse,
     RejectRequest,
     SnapshotResponse,
+    TokenIssueRequest,
 )
 from app.services.consume.service import ConsumeService
 
@@ -329,14 +330,20 @@ async def issue_token(
     request: Request,
     user: User = Depends(require_roles("platform_admin", "domain_admin")),
     db: AsyncSession = Depends(get_db_session),
+    req: TokenIssueRequest | None = None,
 ) -> ApiResponse[dict[str, str]]:
-    """X-Api-Key 换短效 JWT（后续调用可持 Bearer 使用，对齐 TD §5.1）。"""
+    """X-Api-Key 换短效 JWT（后续调用可持 Bearer 使用，对齐 TD §5.1）。
+
+    有效期由调用方指定（5~1440 分钟，默认 60，缺省 body 时用默认值向后兼容）；
+    平台内 QueryWorkspace 调试用，外部消费方长期接入推荐 X-Api-Key（无过期）。
+    """
+    expire_minutes = req.expire_minutes if req is not None else 60
     repo = ApiClientRepo(db)
     client = await repo.get_by_client_id(client_id)
     if client is None or client.status != ApiClientStatus.ACTIVE:
         raise BusinessError("接入方不存在或已吊销", error_code=ErrorCode.AUTH_APIKEY_INVALID)
     token = create_access_token(
-        sub=client_id, role="consume", org_id=client.created_by, expire_minutes=60
+        sub=client_id, role="consume", org_id=client.created_by, expire_minutes=expire_minutes
     )
     # S19（审查修复）：接入方凭证签发落审计（此前零审计——凭据签发是敏感操作）
     from app.api.responses import get_trace_id
@@ -348,7 +355,7 @@ async def issue_token(
         action="consume.issue_token",
         entity_type="api_client",
         entity_id=client_id,
-        detail={"expire_minutes": 60},
+        detail={"expire_minutes": expire_minutes},
         ip=client_ip(request),
         trace_id=get_trace_id(request),
     )

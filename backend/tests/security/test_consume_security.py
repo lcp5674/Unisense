@@ -224,3 +224,57 @@ def _fake_db_session():
         yield session
 
     return fake_db
+
+
+async def test_issue_token_expire_minutes_parameterized(monkeypatch) -> None:
+    """签发令牌有效期参数化：默认 60、自定义透传 create_access_token、超范围 422。"""
+    captured: dict = {}
+
+    def fake_create_access_token(**kwargs):
+        captured["expire_minutes"] = kwargs.get("expire_minutes")
+        return "token-xyz"
+
+    app.dependency_overrides[deps.get_db_session] = _fake_db_session()
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="platform_admin", domain=None, roles_all=lambda: ["platform_admin"]
+    )
+    monkeypatch.setattr("app.api.consume.create_access_token", fake_create_access_token)
+    monkeypatch.setattr("app.api.consume.write_audit", AsyncMock())
+    monkeypatch.setattr(
+        "app.api.consume.ApiClientRepo.get_by_client_id",
+        AsyncMock(return_value=_api_client()),
+    )
+    try:
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            # 未传 body → 默认 60 分钟（向后兼容）
+            r = await c.post(
+                "/api/v1/consume/api-clients/acme/token",
+                headers={"Authorization": "Bearer t"},
+            )
+            assert r.status_code == 200
+            assert captured["expire_minutes"] == 60
+            # 自定义有效期 → 透传 create_access_token
+            r = await c.post(
+                "/api/v1/consume/api-clients/acme/token",
+                json={"expire_minutes": 240},
+                headers={"Authorization": "Bearer t"},
+            )
+            assert r.status_code == 200
+            assert captured["expire_minutes"] == 240
+            # 超范围（>1440）→ 422
+            r = await c.post(
+                "/api/v1/consume/api-clients/acme/token",
+                json={"expire_minutes": 5000},
+                headers={"Authorization": "Bearer t"},
+            )
+            assert r.status_code == 422
+            # 下限（<5）→ 422
+            r = await c.post(
+                "/api/v1/consume/api-clients/acme/token",
+                json={"expire_minutes": 1},
+                headers={"Authorization": "Bearer t"},
+            )
+            assert r.status_code == 422
+    finally:
+        app.dependency_overrides.clear()

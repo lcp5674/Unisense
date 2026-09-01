@@ -1,11 +1,37 @@
 import { useEffect, useState } from "react";
-import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, message, Space, Typography } from "antd";
-import { PlusOutlined, KeyOutlined, CopyOutlined, ReloadOutlined } from "@ant-design/icons";
-import { createApiClient, listApiClients, mintClientToken, UnisenseApiError } from "../api";
+import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, message, Space, Typography, Radio, Alert } from "antd";
+import { PlusOutlined, KeyOutlined, CopyOutlined, ReloadOutlined, ExperimentOutlined, ApiOutlined } from "@ant-design/icons";
+import {
+  createApiClient,
+  listApiClients,
+  mintClientToken,
+  consumeDryRun,
+  listMetrics,
+  setConsumeToken,
+  getConsumeToken,
+  UnisenseApiError,
+} from "../api";
 import { usePermission } from "../hooks/usePermission";
 import type { ClientResponse } from "../types";
 
 const { Paragraph } = Typography;
+
+// 消费令牌有效期选项（分钟）——后端签发端点支持 5~1440，前端提供常用档位
+const TOKEN_TTL_OPTIONS = [
+  { value: 60, label: "60 分钟（默认）" },
+  { value: 240, label: "4 小时" },
+  { value: 720, label: "12 小时" },
+  { value: 1440, label: "24 小时" },
+];
+
+// consume 查询端点清单（供接入指南展示，与 backend/app/api/consume.py 对齐）
+const CONSUME_ENDPOINTS = [
+  { method: "POST", path: "/api/v1/consume/query/dry-run", desc: "语义校验（不执行/不计费）" },
+  { method: "POST", path: "/api/v1/consume/query", desc: "执行指标查询" },
+  { method: "GET", path: "/api/v1/consume/metrics/{code}/semantic", desc: "指标语义（只读）" },
+  { method: "GET", path: "/api/v1/consume/metrics/{code}/snapshots", desc: "结果快照" },
+  { method: "GET", path: "/api/v1/consume/stats/response-time", desc: "查询响应时效" },
+];
 
 export function ApiClients() {
   const { can } = usePermission();
@@ -15,6 +41,14 @@ export function ApiClients() {
   const [modalOpen, setModalOpen] = useState(false);
   const [secret, setSecret] = useState<string | null>(null);
   const [form] = Form.useForm();
+  // 签发令牌弹窗状态
+  const [mintOpen, setMintOpen] = useState(false);
+  const [mintClient, setMintClient] = useState<ClientResponse | null>(null);
+  const [mintTtl, setMintTtl] = useState(60);
+  const [minting, setMinting] = useState(false);
+  // 连通性测试状态
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   async function load() {
     setLoading(true);
@@ -54,13 +88,62 @@ export function ApiClients() {
     }
   }
 
-  async function handleMint(clientId: string) {
+  function openMint(r: ClientResponse) {
+    setMintClient(r);
+    setMintTtl(60);
+    setTestResult(null);
+    setMintOpen(true);
+  }
+
+  async function handleMintConfirm() {
+    if (!mintClient) return;
+    setMinting(true);
     try {
-      const { access_token } = await mintClientToken(clientId);
+      const { access_token } = await mintClientToken(mintClient.client_id, mintTtl);
       navigator.clipboard?.writeText(access_token).catch(() => {});
-      message.success(`已签发令牌并复制到剪贴板（60 分钟有效）`);
+      setConsumeToken(access_token);
+      message.success(`已签发令牌并复制到剪贴板（${mintTtl} 分钟有效）`);
+      setMintOpen(false);
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "签发失败");
+    } finally {
+      setMinting(false);
+    }
+  }
+
+  // 连通性测试：签发令牌 → 用首个已发布指标调 dry-run 验证 consume 全链路
+  async function handleConnectivityTest() {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const clients = await listApiClients();
+      const active = clients.find((c) => c.status === "ACTIVE");
+      if (!active) {
+        setTestResult({ ok: false, message: "没有 ACTIVE 的 API 客户端，请先创建客户端" });
+        return;
+      }
+      if (!getConsumeToken()) {
+        const { access_token } = await mintClientToken(active.client_id, 60);
+        setConsumeToken(access_token);
+      }
+      const { items: metrics } = await listMetrics({ status: "PUBLISHED", page_size: 1 });
+      if (!metrics.length) {
+        setTestResult({
+          ok: true,
+          message: `令牌已签发（客户端 ${active.client_id}），但平台暂无已发布指标，无法执行查询连通性验证`,
+        });
+        return;
+      }
+      const code = metrics[0].metric_code;
+      const res = await consumeDryRun({ metric_code: code, date_range: "today,today" });
+      setTestResult({
+        ok: res.status === "ok",
+        message: `客户端 ${active.client_id} 连通正常：指标 ${code} dry-run ${res.status === "ok" ? "通过" : "被拒绝"}（耗时 ${String((res as { execution_plan?: { elapsed_ms?: number } }).execution_plan?.elapsed_ms ?? "-")} ms）`,
+      });
+    } catch (err) {
+      setTestResult({ ok: false, message: err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "连通性测试失败" });
+    } finally {
+      setTesting(false);
     }
   }
 
@@ -88,7 +171,7 @@ export function ApiClients() {
       key: "actions",
       width: 160,
       render: (_: unknown, r: ClientResponse) => (
-        <Button size="small" icon={<KeyOutlined />} disabled={r.status !== "ACTIVE" || !canManage} onClick={() => handleMint(r.client_id)}>
+        <Button size="small" icon={<KeyOutlined />} disabled={r.status !== "ACTIVE" || !canManage} onClick={() => openMint(r)}>
           签发令牌
         </Button>
       ),
@@ -142,6 +225,88 @@ export function ApiClients() {
             </Form.Item>
           </Space>
         </Form>
+      </Modal>
+
+      <Card
+        style={{ marginTop: 16 }}
+        title={
+          <span>
+            <ApiOutlined /> 接入指南
+          </span>
+        }
+        extra={
+          <Button icon={<ExperimentOutlined />} onClick={handleConnectivityTest} loading={testing}>
+            连通性测试
+          </Button>
+        }
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="两种消费鉴权方式"
+          description="方式一：X-Api-Key: client_id:密钥（长期接入、无过期，密钥仅创建时展示一次）；方式二：行内「签发令牌」换短效 Bearer 令牌（调试用，有效期可选，最长 24 小时）。"
+        />
+        {testResult && (
+          <Alert
+            type={testResult.ok ? "success" : "error"}
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="连通性测试结果"
+            description={testResult.message}
+            closable
+            onClose={() => setTestResult(null)}
+          />
+        )}
+        <Table
+          size="small"
+          dataSource={CONSUME_ENDPOINTS}
+          columns={[
+            { title: "方法", dataIndex: "method", key: "method", width: 80, render: (v: string) => <Tag color={v === "GET" ? "blue" : "green"}>{v}</Tag> },
+            { title: "路径", dataIndex: "path", key: "path", render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v}</span> },
+            { title: "说明", dataIndex: "desc", key: "desc" },
+          ]}
+          pagination={false}
+          rowKey="path"
+          style={{ marginBottom: 12 }}
+        />
+        <Paragraph strong>查询示例（curl）</Paragraph>
+        <pre className="code-block">{`# 方式一：X-Api-Key（长期接入，无过期）
+curl -X POST http://<host>:8180/api/v1/consume/query/dry-run \\
+  -H "Content-Type: application/json" \\
+  -H "X-Api-Key: app_xxxx:你的密钥" \\
+  -d '{"metric_code":"outp_doctor_active_cnt_month","date_range":"2026-08-01,2026-08-31"}'
+
+# 方式二：Bearer 消费令牌（短效调试，本页签发）
+curl -X POST http://<host>:8180/api/v1/consume/query \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer <令牌>" \\
+  -d '{"metric_code":"outp_doctor_active_cnt_month","date_range":"2026-08-01,2026-08-31"}'`}</pre>
+      </Card>
+
+      <Modal
+        title={`签发消费令牌：${mintClient?.client_id ?? ""}`}
+        open={mintOpen}
+        onCancel={() => setMintOpen(false)}
+        onOk={handleMintConfirm}
+        confirmLoading={minting}
+        okText="签发并复制"
+      >
+        <Paragraph type="secondary">
+          令牌将复制到剪贴板，并同步为查询工作台的当前消费令牌（5~1440 分钟有效）。
+        </Paragraph>
+        <div style={{ marginBottom: 8 }}>有效期</div>
+        <Radio.Group
+          value={mintTtl}
+          onChange={(e) => setMintTtl(e.target.value)}
+          options={TOKEN_TTL_OPTIONS}
+        />
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginTop: 12 }}
+          message="有效期越长泄露风险越高，建议按需选择最短时长；外部长期接入推荐 X-Api-Key（无过期）。"
+        />
       </Modal>
 
       <Modal
