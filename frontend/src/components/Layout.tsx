@@ -748,19 +748,28 @@ export function Layout({ user }: { user: CurrentUser }) {
           </Dropdown>
         </Header>
 
-        <Content ref={contentRef} style={{ padding: 24, overflow: "auto" }} className="app-content">
-          {permError && (
-            <Alert
-              type="warning"
-              showIcon
-              closable
-              style={{ marginBottom: 16 }}
-              message="权限数据加载失败"
-              description="您的权限点未能从服务端获取，部分操作按钮可能未按权限隐藏（实际执行仍以后端校验为准）。请刷新页面重试。"
-            />
-          )}
-          <Outlet />
-        </Content>
+          <Content ref={contentRef} style={{ padding: 24, overflow: "auto" }} className="app-content">
+            {permError && (
+              <Alert
+                type="warning"
+                showIcon
+                closable
+                style={{ marginBottom: 16 }}
+                message="权限数据加载失败"
+                description="您的权限点未能从服务端获取，部分操作按钮可能未按权限隐藏（实际执行仍以后端校验为准）。请刷新页面重试。"
+              />
+            )}
+            {forceChangeRequired ? (
+              // 强制改密期间不挂载业务路由：避免各页面被后端 PASSWORD_CHANGE_REQUIRED
+              // 403 淹没（"加载失败"红字噪音）；保留 Layout 框架 + force 弹窗，
+              // 改密成功后 forceChangeRequired=false 自动渲染当前路由。
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%" }} className="muted">
+                请先完成初始密码修改后再使用系统
+              </div>
+            ) : (
+              <Outlet />
+            )}
+          </Content>
       </AntLayout>
 
       <PasswordChangeModal

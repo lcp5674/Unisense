@@ -297,6 +297,7 @@ const ERROR_CODE_ZH: Record<string, string> = {
   AUTH_INVALID_CREDENTIALS: "用户名或密码错误",
   AUTH_APIKEY_MISSING: "缺少访问密钥（X-Api-Key）",
   AUTH_APIKEY_INVALID: "访问密钥无效或已吊销",
+  PASSWORD_CHANGE_REQUIRED: "请先完成初始密码修改",
   FORBIDDEN: "您无权执行该操作",
   FEATURE_DISABLED: "该功能已被平台管理员关闭，请走常规流程",
   FORBIDDEN_DOMAIN: "您无权访问该数据域",

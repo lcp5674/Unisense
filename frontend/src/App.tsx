@@ -2,11 +2,10 @@ import {
   Component, lazy, Suspense, useEffect, useState, type ComponentType, type ReactNode,
 } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { Button, Input, Form, Alert, App as AntApp } from "antd";
+import { Button, Input, App as AntApp } from "antd";
 import {
   apiLogin,
   AUTH_EXPIRED_EVENT,
-  changePassword,
   clearAuthTokens,
   fetchCurrentUser,
   getToken,
@@ -315,84 +314,6 @@ function LoginPage({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
   );
 }
 
-/**
- * 强制改密守卫：must_change_password=true 的用户登录后只渲染本全屏页，
- * 不挂载业务路由（避免未改密前各页面被后端 PASSWORD_CHANGE_REQUIRED 403
- * 淹没、显示"加载失败"噪音）。改密成功后重新拉取 /me（must_change_password
- * 已复位 false）再进入 Layout。
- */
-function ForcePasswordChange({ onDone }: { onDone: (u: CurrentUser) => void }) {
-  const { message } = AntApp.useApp();
-  const [form] = Form.useForm<{ current_password: string; new_password: string; confirm: string }>();
-  const [submitting, setSubmitting] = useState(false);
-
-  async function handleSubmit() {
-    const values = await form.validateFields().catch(() => null);
-    if (!values) return;
-    setSubmitting(true);
-    try {
-      await changePassword({
-        current_password: values.current_password,
-        new_password: values.new_password,
-      });
-      message.success("密码修改成功，正在进入系统…");
-      const me = await fetchCurrentUser();
-      onDone(me);
-    } catch (err) {
-      message.error(
-        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "密码修改失败，请稍后重试",
-      );
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <div className="login-wrap">
-      <div className="login-panel">
-        <div className="login-card">
-          <div className="brand-mark" style={{ margin: "0 auto 16px" }}>W</div>
-          <div className="login-kicker">Security</div>
-          <div className="login-subhead">首次登录须先修改初始密码</div>
-          <Alert
-            type="info"
-            showIcon
-            style={{ marginBottom: 16 }}
-            message="为保障账号安全，首次登录（或管理员重置密码后）须设置新密码后才能使用系统。"
-          />
-          <Form form={form} layout="vertical" autoComplete="off" onFinish={handleSubmit}>
-            <Form.Item name="current_password" label="当前密码（初始密码）" rules={[{ required: true, message: "请输入当前密码" }]}>
-              <Input.Password autoComplete="current-password" placeholder="请输入初始密码" />
-            </Form.Item>
-            <Form.Item name="new_password" label="新密码" rules={[{ required: true, message: "请输入新密码" }]}>
-              <Input.Password autoComplete="new-password" placeholder="请输入新密码（≥8 位且含大小写/数字/特殊字符至少 3 类）" />
-            </Form.Item>
-            <Form.Item
-              name="confirm"
-              label="确认新密码"
-              dependencies={["new_password"]}
-              rules={[
-                { required: true, message: "请再次输入新密码" },
-                ({ getFieldValue }) => ({
-                  validator(_rule, value) {
-                    if (!value || getFieldValue("new_password") === value) return Promise.resolve();
-                    return Promise.reject(new Error("两次输入的新密码不一致"));
-                  },
-                }),
-              ]}
-            >
-              <Input.Password autoComplete="new-password" placeholder="请再次输入新密码" />
-            </Form.Item>
-            <Button type="primary" htmlType="submit" block loading={submitting} style={{ marginTop: 8 }}>
-              确认修改并进入系统
-            </Button>
-          </Form>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function App() {
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [booting, setBooting] = useState(true);
@@ -430,12 +351,6 @@ function App() {
     );
   }
   if (!user) return <LoginPage onLogin={setUser} />;
-
-  // 强制改密守卫：首次登录/被重置密码的用户在改密前不进入业务路由，
-  // 避免各页面被后端 PASSWORD_CHANGE_REQUIRED 403 淹没（"加载失败"噪音）。
-  if (user.must_change_password === true) {
-    return <ForcePasswordChange onDone={setUser} />;
-  }
 
   return (
     <TrackingProvider user={user}>
