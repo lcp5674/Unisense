@@ -5193,18 +5193,53 @@ async def test_query_sql_preserves_existing_limit_and_truncates():
 
 
 async def test_query_sql_rejects_multi_statement_and_ddl():
-    """多语句 / DDL / DML / SELECT INTO 均拒绝。"""
+    """多语句 / DDL / DML / SELECT INTO / 状态变更 / 维护命令均拒绝。"""
     svc, _ = _query_svc()
     for bad in [
         "SELECT * FROM t; DELETE FROM t",
+        "SHOW DATABASES; DELETE FROM t",
         "DELETE FROM t",
         "UPDATE t SET a = 1",
         "INSERT INTO t VALUES (1)",
         "DROP TABLE t",
+        "TRUNCATE TABLE t",
+        "CREATE TABLE t (a int)",
+        "ALTER TABLE t ADD COLUMN b int",
+        "MERGE INTO t USING s ON t.id=s.id WHEN MATCHED THEN UPDATE SET a=s.a",
+        "GRANT SELECT ON db.t TO u",
+        "SET @a = 1",
+        "USE db",
+        "KILL 5",
+        "FLUSH TABLES",
+        "ANALYZE TABLE t",
+        "OPTIMIZE TABLE t",
         "SELECT * INTO OUTFILE '/tmp/x' FROM t",
     ]:
         with pytest.raises(AppValidationError):
             await svc.query_sql("s1", bad, limit=10)
+
+
+async def test_query_sql_allows_readonly_commands_without_limit():
+    """SHOW / DESC / EXPLAIN 等只读语句放行，且不追加 LIMIT（Python 侧截断兜底）。"""
+    svc, repo = _query_svc()
+    src = MagicMock(source_id="s1", source_type="mysql", connection_config="enc")
+    repo.get_source = AsyncMock(return_value=src)
+    conn = _QueryConnector([{"Database": "db1"}, {"Database": "db2"}])
+
+    with patch(
+        "app.services.collector.service.build_collector", return_value=conn
+    ):
+        for sql in [
+            "SHOW DATABASES",
+            "SHOW TABLES FROM db",
+            "SHOW CREATE TABLE t",
+            "DESC t",
+            "EXPLAIN SELECT * FROM t",
+        ]:
+            result = await svc.query_sql("s1", sql, limit=10)
+            assert conn.queries[-1] == sql, f"不应追加 LIMIT: {conn.queries[-1]}"
+            assert result["columns"] == ["Database"]  # 假连接器固定返回
+            assert result["total"] == 2
 
 
 async def test_query_sql_source_not_found():

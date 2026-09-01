@@ -946,53 +946,79 @@ class CollectorService(BaseService):
 
     # ------------------------------------------------------------ 只读 SQL 查询
 
+    # 只读命令白名单：sqlglot 对 SHOW/EXPLAIN 解析为 Command(this=命令名)，
+    # 其余命令（ANALYZE/OPTIMIZE/KILL/SET/USE 等）一律拒绝；DML/DDL 有独立 AST 类型。
+    _READONLY_COMMANDS: frozenset[str] = frozenset({"SHOW", "EXPLAIN"})
+
     @staticmethod
     def _validate_read_sql(sql: str) -> str:
-        """校验 SQL 为单条只读 SELECT，返回原语句（未加 LIMIT，由调用方追加）。
+        """校验 SQL 为单条只读语句（SELECT / SHOW / DESC / EXPLAIN），返回原语句。
+
+        - 白名单制：仅放行 Select / Describe / Command(SHOW|EXPLAIN)；
+        - 拒绝多语句、DDL（CREATE/ALTER/DROP/TRUNCATE/MERGE/GRANT…）、DML
+          （INSERT/UPDATE/DELETE/REPLACE…）与状态变更（SET/USE/KILL/ANALYZE/OPTIMIZE…）；
+        - SELECT 额外拒绝 ``INTO``（禁止写文件/变量）。
 
         Raises:
-            ValidationError: 多语句 / 非 SELECT / SELECT INTO / 无法解析。
+            ValidationError: 多语句 / 非只读语句 / SELECT INTO / 无法解析。
         """
         try:
             asts = sqlglot.parse(sql)
         except Exception as exc:  # noqa: BLE001 - sqlglot 对部分畸形 SQL 抛 ParseError
-            raise ValidationError(f"SQL 无法解析（{exc}），仅支持单条只读 SELECT 查询") from exc
+            raise ValidationError(
+                f"SQL 无法解析（{exc}），仅支持单条只读查询"
+                "（SELECT / SHOW / DESC / EXPLAIN）"
+            ) from exc
         if not asts or any(ast is None for ast in asts):
-            raise ValidationError("SQL 无法解析，仅支持单条只读 SELECT 查询")
+            raise ValidationError(
+                "SQL 无法解析，仅支持单条只读查询（SELECT / SHOW / DESC / EXPLAIN）"
+            )
         if len(asts) != 1:
             raise ValidationError("仅支持单条 SQL 语句（不允许分号分隔的多语句）")
         ast = asts[0]
-        if not isinstance(ast, sqlglot.exp.Select):
-            raise ValidationError("仅支持只读 SELECT 查询（不允许 DDL/DML 等写操作）")
-        if ast.args.get("into") is not None:
+        if isinstance(ast, sqlglot.exp.Command):
+            cmd = str(ast.args.get("this") or "").upper()
+            if cmd not in CollectorService._READONLY_COMMANDS:
+                raise ValidationError(
+                    "仅支持只读查询（SELECT / SHOW / DESC / EXPLAIN），"
+                    "不允许写操作或状态变更"
+                )
+        elif not isinstance(ast, (sqlglot.exp.Select, sqlglot.exp.Describe)):
+            raise ValidationError(
+                "仅支持只读查询（SELECT / SHOW / DESC / EXPLAIN），"
+                "不允许 DDL/DML 等写操作"
+            )
+        if isinstance(ast, sqlglot.exp.Select) and ast.args.get("into") is not None:
             raise ValidationError("不支持 SELECT INTO（禁止写文件/变量）")
         return sql
 
     async def query_sql(
         self, source_id: str, sql: str, limit: int = 100
     ) -> dict[str, Any]:
-        """对已注册数据源执行只读 SELECT（平台内部运维/分析，调用方负责审计）。
+        """对已注册数据源执行只读查询（平台内部运维/分析，调用方负责审计）。
 
-        - 用 sqlglot 校验为单条只读 SELECT（拒绝多语句 / DDL / DML / SELECT INTO）。
-        - 语句无顶层 LIMIT 时追加 ``LIMIT n`` 兜底；有则保留，Python 侧再按 n 截断，
-          双保险保证返回行数不超过 limit。
+        - 用 sqlglot 校验为单条只读语句（SELECT / SHOW / DESC / EXPLAIN），
+          拒绝多语句 / DDL / DML / SELECT INTO / 状态变更。
+        - SELECT 顶层无 LIMIT 时追加 ``LIMIT n`` 兜底；有则保留，Python 侧再按 n 截断，
+          双保险保证返回行数不超过 limit（SHOW/DESC/EXPLAIN 不追加，行数天然受限）。
         - 复用连接器 ``build_collector + collector.query``（与维度枚举预览同链路；
           已落库数据源放行内网主机，仍拒回环/链路本地，SSRF 纵深防御一致）。
 
         Raises:
             NotFoundError: 数据源不存在。
-            ValidationError: SQL 非只读 SELECT / 表名列名不合法。
+            ValidationError: SQL 非只读语句 / 表名列名不合法。
             ExternalDependencyError: 源库连接/查询失败。
         """
         self._validate_read_sql(sql)
         src = await self.get_source_orm(source_id)
         collector = build_collector(src.source_type, src.connection_config)
         try:
-            # 顶层无 LIMIT 才追加（避免子查询 LIMIT 被误判为顶层）
+            # 顶层无 LIMIT 且为 SELECT 才追加（避免子查询 LIMIT 误判；
+            # SHOW/DESC/EXPLAIN 不追加，靠 Python 侧截断兜底）
             parsed = sqlglot.parse_one(sql)
             exec_sql = (
                 f"{sql.rstrip().rstrip(';')} LIMIT {int(limit)}"
-                if parsed.args.get("limit") is None
+                if isinstance(parsed, sqlglot.exp.Select) and parsed.args.get("limit") is None
                 else sql
             )
             start = time.perf_counter()

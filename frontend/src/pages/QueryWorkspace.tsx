@@ -121,7 +121,7 @@ export function QueryWorkspace() {
   const [dateRange, setDateRange] = useState("last_30d");
   // 自定义日期区间（YYYY-MM-DD~YYYY-MM-DD），dateRange === "custom" 时生效
   const [customRange, setCustomRange] = useState<[string, string] | null>(null);
-  // SQL 查询 Tab：选数据源 → 写只读 SELECT → 执行（仅管理员/域管理员/数据源 Owner）
+  // SQL 查询 Tab：选数据源 → 写只读语句（SELECT/SHOW/DESC/EXPLAIN）→ 执行（仅管理员/域管理员/数据源 Owner）
   const [sqlSources, setSqlSources] = useState<DataSource[]>([]);
   const [sqlSourceId, setSqlSourceId] = useState<string | undefined>(undefined);
   const [sqlText, setSqlText] = useState("SELECT * FROM ");
@@ -205,7 +205,7 @@ export function QueryWorkspace() {
       .catch(() => setSqlSources([]));
   }
 
-  // 对选中数据源执行只读 SELECT（后端校验单条 SELECT + 权限 + LIMIT 兜底）
+  // 对选中数据源执行只读语句（后端 sqlglot 白名单校验：SELECT/SHOW/DESC/EXPLAIN + 权限 + LIMIT 兜底）
   async function handleSqlQuery() {
     if (!sqlSourceId) { message.warning("请选择数据源"); return; }
     const sql = sqlText.trim();
@@ -775,7 +775,7 @@ export function QueryWorkspace() {
             icon={<CodeOutlined />}
             style={{ marginBottom: 16 }}
             message="数据源只读 SQL 查询"
-            description="选择已注册数据源，编写单条只读 SELECT 执行（仅平台管理员/域管理员或数据源负责人可用）。SQL 仅允许 SELECT（自动 LIMIT 兜底），每次执行均写审计。"
+            description="选择已注册数据源，编写单条只读语句执行（仅平台管理员/域管理员或数据源负责人可用）。支持 SELECT / SHOW / DESC / EXPLAIN，拒绝 DDL/DML/多语句/状态变更（自动 LIMIT 兜底），每次执行均写审计。"
           />
           <Form layout="vertical">
             <Row gutter={[16, 0]}>
@@ -808,14 +808,14 @@ export function QueryWorkspace() {
                 </Form.Item>
               </Col>
             </Row>
-            <Form.Item label="SQL（仅只读 SELECT）">
+            <Form.Item label="SQL（仅只读语句）">
               <Input.TextArea
                 className="mono"
                 rows={8}
                 value={sqlText}
                 onChange={(e) => setSqlText(e.target.value)}
                 placeholder={
-                  "SELECT * FROM db.table WHERE ...\n\n提示：仅允许单条 SELECT；未写 LIMIT 时自动追加，最多返回所设行数。"
+                  "SELECT * FROM db.table WHERE ...\nSHOW TABLES FROM db\nDESC db.table\n\n提示：仅允许单条只读语句（SELECT / SHOW / DESC / EXPLAIN）；SELECT 未写 LIMIT 时自动追加，最多返回所设行数。"
                 }
               />
             </Form.Item>

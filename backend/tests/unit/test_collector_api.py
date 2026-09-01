@@ -1089,7 +1089,7 @@ async def test_sql_query_forbidden_for_non_owner(
 async def test_sql_query_rejects_dml(
     collector_client: httpx.AsyncClient,
 ) -> None:
-    """非 SELECT（DELETE）被服务层拒绝 → 422，不执行（真实 service 校验）。"""
+    """非只读语句（DELETE）被服务层拒绝 → 422，不执行（真实 service 校验）。"""
     src = MagicMock(source_id="s1", owner_id=1)
     with patch(
         "app.api.collector.CollectorService.get_source_orm",

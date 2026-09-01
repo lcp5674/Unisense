@@ -770,10 +770,11 @@ async def query_source_sql(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[SqlQueryResponse]:
-    """对已注册数据源执行只读 SELECT（平台内部运维/分析，写审计）。
+    """对已注册数据源执行只读查询（平台内部运维/分析，写审计）。
 
-    仅允许单条只读 SELECT（服务层 sqlglot 校验，拒绝多语句/DDL/DML/SELECT INTO），
-    LIMIT 兜底防止大结果集；仅平台管理员/域管理员或该数据源 Owner 可执行。
+    仅允许单条只读语句（SELECT / SHOW / DESC / EXPLAIN，服务层 sqlglot 白名单校验，
+    拒绝多语句/DDL/DML/SELECT INTO/状态变更），LIMIT 兜底防止大结果集；
+    仅平台管理员/域管理员或该数据源 Owner 可执行。
     """
     svc = _svc(db)
     src = await svc.get_source_orm(source_id, org_id=_resolve_org_scope(user))
