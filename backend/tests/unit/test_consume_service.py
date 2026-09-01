@@ -349,6 +349,29 @@ async def test_build_query_sql_parameterized_no_injection() -> None:
     assert "city" in sql and params["dim_0"] == "BJ' OR 1=1 --"
 
 
+async def test_build_query_sql_date_range_both_separators() -> None:
+    """日期区间兼容 `~` 与 `,` 两种分隔符（外部消费方长期契约，前端历史用逗号）。"""
+    svc = _svc(await _client())
+    m = _metric_with_source()
+    for sep in ("~", ","):
+        req = QueryRequest(metric_code="gmv", date_range=f"2026-01-01{sep}2026-03-31")
+        sql, params = svc._build_query_sql(req, m)
+        assert "dt >= :date_from AND dt <= :date_to" in sql
+        assert params["date_from"] == "2026-01-01"
+        assert params["date_to"] == "2026-03-31"
+
+
+async def test_build_query_sql_date_range_invalid_rejected() -> None:
+    """非法日期区间（段数 >2 / 含非日期内容）仍被拒绝——宽松分隔符不放松格式校验。"""
+    svc = _svc(await _client())
+    m = _metric_with_source()
+    for bad in ("2026-01-01~2026-02-28~2026-03-31", "abc", "2026-13~2026-12", "2026-01-01,abc"):
+        req = QueryRequest(metric_code="gmv", date_range=bad)
+        with pytest.raises(BusinessError) as ei:
+            svc._build_query_sql(req, m)
+        assert ei.value.error_code == ErrorCode.VALIDATION_ERROR
+
+
 async def test_build_query_sql_mount_table_authority() -> None:
     """OneData 挂载层权威：mount_table 优先于 definition_json 冗余 source_table。"""
     svc = _svc(await _client())

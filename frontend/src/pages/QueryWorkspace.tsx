@@ -141,7 +141,7 @@ export function QueryWorkspace() {
     else navigate("/dashboard");
   }
 
-  // 将预设键翻译为后端要求的 YYYY-MM-DD,YYYY-MM-DD 格式
+  // 将预设键翻译为后端要求的 YYYY-MM-DD~YYYY-MM-DD 格式（与 schema 描述 / timeCn 注释一致）
   function translateDateRange(key: string): string {
     const today = new Date();
     // 用本地日期格式化（toISOString 是 UTC，本地凌晨会差一天）
@@ -149,19 +149,19 @@ export function QueryWorkspace() {
       `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
     switch (key) {
       case "today":
-        return fmt(today) + "," + fmt(today);
+        return `${fmt(today)}~${fmt(today)}`;
       case "last_7d":
-        return fmt(new Date(today.getTime() - 7 * 86400000)) + "," + fmt(today);
+        return `${fmt(new Date(today.getTime() - 7 * 86400000))}~${fmt(today)}`;
       case "last_30d":
-        return fmt(new Date(today.getTime() - 30 * 86400000)) + "," + fmt(today);
+        return `${fmt(new Date(today.getTime() - 30 * 86400000))}~${fmt(today)}`;
       case "last_90d":
-        return fmt(new Date(today.getTime() - 90 * 86400000)) + "," + fmt(today);
+        return `${fmt(new Date(today.getTime() - 90 * 86400000))}~${fmt(today)}`;
       case "ytd":
-        return today.getFullYear() + "-01-01," + fmt(today);
+        return `${today.getFullYear()}-01-01~${fmt(today)}`;
       case "last_365d":
-        return fmt(new Date(today.getTime() - 365 * 86400000)) + "," + fmt(today);
+        return `${fmt(new Date(today.getTime() - 365 * 86400000))}~${fmt(today)}`;
       default:
-        return key; // 已是 YYYY-MM-DD,YYYY-MM-DD 格式原样返回
+        return key; // 已是 YYYY-MM-DD~YYYY-MM-DD 格式原样返回
     }
   }
 

@@ -228,7 +228,9 @@ class ConsumeService(BaseService):
         params: dict[str, Any] = {"metric_code": req.metric_code}
 
         if req.date_range:
-            parts = req.date_range.split("~")
+            # 兼容两种分隔符：标准 `~`（schema 描述 2026-01~2026-03）与历史前端 `,`
+            # （YYYY-MM-DD,YYYY-MM-DD）——外部消费方 API 为长期契约，两种写法都应接受。
+            parts = re.split(r"[~,]", req.date_range)
             if len(parts) > 2:
                 raise BusinessError("日期区间格式非法", error_code=ErrorCode.VALIDATION_ERROR)
             for part in parts:

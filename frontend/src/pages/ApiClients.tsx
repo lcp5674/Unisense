@@ -214,7 +214,7 @@ export function ApiClients() {
         return;
       }
       const code = metrics[0].metric_code;
-      const res = await consumeDryRun({ metric_code: code, date_range: "today,today" });
+      const res = await consumeDryRun({ metric_code: code, date_range: "today~today" });
       setTestResult({
         ok: res.status === "ok",
         message: `客户端 ${active.client_id} 连通正常：指标 ${code} dry-run ${res.status === "ok" ? "通过" : "被拒绝"}（耗时 ${String((res as { execution_plan?: { elapsed_ms?: number } }).execution_plan?.elapsed_ms ?? "-")} ms）`,
@@ -524,13 +524,13 @@ export function ApiClients() {
 curl -X POST http://<host>:8180/api/v1/consume/query/dry-run \\
   -H "Content-Type: application/json" \\
   -H "X-Api-Key: app_xxxx:你的密钥" \\
-  -d '{"metric_code":"outp_doctor_active_cnt_month","date_range":"2026-08-01,2026-08-31"}'
+  -d '{"metric_code":"outp_doctor_active_cnt_month","date_range":"2026-08-01~2026-08-31"}'
 
 # 方式二：Bearer 消费令牌（短效调试，本页签发）
 curl -X POST http://<host>:8180/api/v1/consume/query \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer <令牌>" \\
-  -d '{"metric_code":"outp_doctor_active_cnt_month","date_range":"2026-08-01,2026-08-31"}'`}</pre>
+  -d '{"metric_code":"outp_doctor_active_cnt_month","date_range":"2026-08-01~2026-08-31"}'`}</pre>
       </Card>
 
       <Modal
