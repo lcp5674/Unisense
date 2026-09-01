@@ -582,6 +582,35 @@ async def test_hive_list_tables_groups_by_db():
     assert not any("bad.name" in s for s in seen_sql)
 
 
+async def test_hive_list_columns():
+    """list_columns：DESCRIBE 解析（反引号安全标识符），跳过分区头行。"""
+    collector = HiveCollector(host="hive-host")
+    seen_sql: list[str] = []
+
+    async def mock_execute(sql: str, conn=None) -> list[list[str]]:
+        seen_sql.append(sql)
+        assert "DESCRIBE" in sql and "`ods`.`orders`" in sql
+        return [
+            ["id", "bigint", ""],
+            ["name", "string", ""],
+            ["# Partition Information", "", ""],
+            ["dt", "string", ""],
+        ]
+
+    collector._execute = mock_execute  # type: ignore[assignment]
+    collector._connect_managed = AsyncMock(return_value=object())  # type: ignore[assignment]
+    cols = await collector.list_columns("ods.orders")
+    assert [c["name"] for c in cols] == ["id", "name", "dt"]
+    assert cols[0]["data_type"] == "bigint"
+    assert cols[2]["data_type"] == "string"
+    assert len(seen_sql) == 1
+    # 非法表名段（含空格）拒绝（防注入）
+    from app.core.exceptions import ExternalDependencyError
+
+    with pytest.raises(ExternalDependencyError):
+        await collector.list_columns("bad name")
+
+
 async def test_hive_list_tables_reuses_single_conn():
     """list_tables 复用单连接枚举全部库（每库一次握手是级联选表慢的主因）。"""
     collector = HiveCollector(host="hive-host")

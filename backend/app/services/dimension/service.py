@@ -1269,11 +1269,18 @@ class DimensionService(BaseService, MasterDataReviewMixin):
 
     # ------------------------------------------------------------ 源库元数据列举
 
-    async def list_source_tables(self, source_id: str) -> list[dict[str, str]]:
-        """列出数据源全部非系统库表（维度值来源表选项框）。
+    async def list_source_tables(
+        self, source_id: str, databases: list[str] | None = None
+    ) -> list[dict[str, str]]:
+        """列出数据源指定库（或全部库）非系统表（维度值来源表选项框）。
 
-        复用连接器的 ``list_tables``（MySQL/Hive 等按库分组枚举）；
+        复用连接器的 ``list_tables(databases=...)``（MySQL/Hive 等按库分组枚举）；
         连接器不支持枚举表（如 Kafka）时返回空列表，前端保留手动输入兜底。
+
+        Args:
+            source_id: 数据源业务 ID。
+            databases: 目标库列表（为空枚举全部库；级联选表时仅枚举所选库，
+                避免 Hive 53 库全量枚举耗时）。
 
         Raises:
             NotFoundError: 数据源不存在。
@@ -1288,7 +1295,7 @@ class DimensionService(BaseService, MasterDataReviewMixin):
             allow_private=self._settings.collector_allow_private,
         )
         try:
-            tables_by_db = await collector.list_tables()
+            tables_by_db = await collector.list_tables(databases)
         except ExternalDependencyError:
             raise
         except Exception as exc:
@@ -1300,6 +1307,30 @@ class DimensionService(BaseService, MasterDataReviewMixin):
             for db, tables in tables_by_db.items()
             for tbl in tables
         ]
+
+    async def list_source_databases(self, source_id: str) -> list[str]:
+        """列出数据源全部非系统库（级联选表的「目标库」选项框，轻量快）。
+
+        Raises:
+            NotFoundError: 数据源不存在。
+            UnisenseError: 源库连接/查询失败。
+        """
+        src = await self._load_source(source_id)
+        from app.services.collector.connectors import registry
+
+        collector = registry.build(
+            src.source_type,
+            src.connection_config,
+            allow_private=self._settings.collector_allow_private,
+        )
+        try:
+            return await collector.list_databases()
+        except ExternalDependencyError:
+            raise
+        except Exception as exc:
+            raise UnisenseError(f"列举数据源库失败: {exc}") from exc
+        finally:
+            await collector.dispose()
 
     async def list_source_columns(self, source_id: str, table: str) -> list[dict[str, str | None]]:
         """列出指定表的全部列（维度值来源列选项框）。
@@ -1344,21 +1375,9 @@ class DimensionService(BaseService, MasterDataReviewMixin):
                     if r.get("column_name")
                 ]
             if src.source_type in {"hive", "spark"}:
-                safe_tbl = ".".join(f"`{p}`" for p in parts)
-                rows = await collector.query(f"DESCRIBE {safe_tbl}")
-                columns: list[dict[str, str | None]] = []
-                for r in rows:
-                    name = r.get("col_name") or r.get("name")
-                    if not name or str(name).startswith("#"):
-                        continue
-                    columns.append(
-                        {
-                            "name": str(name),
-                            "data_type": r.get("data_type"),
-                            "comment": r.get("comment"),
-                        }
-                    )
-                return columns
+                # HiveCollector 无 query 方法（Connector 协议未实现），DESCRIBE 解析
+                # 走连接器自身 list_columns（此前调 collector.query 直接 AttributeError → 500）
+                return await collector.list_columns(table)
             return []
         except ExternalDependencyError:
             raise

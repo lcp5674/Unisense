@@ -2732,10 +2732,20 @@ export async function previewColumnValues(req: {
 }
 
 /** 列出数据源全部表（POST /dimensions/source-tables，维度值来源表选项框） */
-export async function listSourceTables(sourceId: string): Promise<{
+export async function listSourceTables(
+  sourceId: string,
+  databases?: string[],
+): Promise<{
   tables: { database: string; table: string; name: string }[];
 }> {
   return request(`${API_BASE}/dimensions/source-tables`, {
+    method: "POST",
+    body: JSON.stringify({ source_id: sourceId, databases }),
+  });
+}
+
+export async function listSourceDatabases(sourceId: string): Promise<{ databases: string[] }> {
+  return request(`${API_BASE}/dimensions/source-databases`, {
     method: "POST",
     body: JSON.stringify({ source_id: sourceId }),
   });

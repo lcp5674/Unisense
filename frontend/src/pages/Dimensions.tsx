@@ -46,6 +46,7 @@ import {
   listDataSources,
   previewColumnValues,
   listSourceTables,
+  listSourceDatabases,
   listSourceColumns,
   bindDimensionReference,
   refreshDimensionSnapshot,
@@ -1155,6 +1156,9 @@ function MembersTab() {
   const [sourceColumns, setSourceColumns] = useState<{ name: string; data_type: string | null; comment: string | null }[]>([]);
   const [sourceTablesLoading, setSourceTablesLoading] = useState(false);
   const [sourceColumnsLoading, setSourceColumnsLoading] = useState(false);
+  // 级联选表：目标库列表（数据源选中后轻量加载）与加载态
+  const [sourceDatabases, setSourceDatabases] = useState<string[]>([]);
+  const [sourceDatabasesLoading, setSourceDatabasesLoading] = useState(false);
   const [tableKw, setTableKw] = useState("");
   const [columnKw, setColumnKw] = useState("");
   // 导入进度感知：当前处理序号/总数（消除"点了没反应"的长等待）
@@ -1340,15 +1344,31 @@ function MembersTab() {
   }
 
   // 拉取预览：根据所选数据源/表/列，调后端获取去重枚举值
-  // 源库表/列选项框：选数据源加载全部表；选表加载全部列（连接器不支持/失败时保留手动输入）
-  async function loadSourceTables(sourceId: string) {
+  // 源库表/列选项框：选数据源加载全部库；选库加载该库表；选表加载全部列
+  async function loadSourceDatabases(sourceId: string) {
+    if (!sourceId) {
+      setSourceDatabases([]);
+      return;
+    }
+    setSourceDatabasesLoading(true);
+    try {
+      const r = await listSourceDatabases(sourceId);
+      setSourceDatabases(r.databases);
+    } catch {
+      setSourceDatabases([]);
+    } finally {
+      setSourceDatabasesLoading(false);
+    }
+  }
+
+  async function loadSourceTables(sourceId: string, databases?: string[]) {
     if (!sourceId) {
       setSourceTables([]);
       return;
     }
     setSourceTablesLoading(true);
     try {
-      const r = await listSourceTables(sourceId);
+      const r = await listSourceTables(sourceId, databases);
       setSourceTables(r.tables);
     } catch {
       setSourceTables([]);
@@ -1602,7 +1622,17 @@ function MembersTab() {
                 setSourceColumns([]);
                 setTableKw("");
                 setColumnKw("");
-                if (currentDim?.source_id) loadSourceTables(currentDim.source_id);
+                if (currentDim?.source_id) {
+                  loadSourceDatabases(currentDim.source_id);
+                  const tbl = currentDim.source_table ?? "";
+                  const dotIdx = tbl.indexOf(".");
+                  const db = dotIdx > 0 ? tbl.slice(0, dotIdx) : undefined;
+                  if (db) bindForm.setFieldValue("database", db);
+                  if (tbl) {
+                    // 有库前缀：仅枚举该库表（快速）；无库前缀：全量枚举兜底
+                    loadSourceTables(currentDim.source_id, db ? [db] : undefined);
+                  }
+                }
                 if (currentDim?.source_id && currentDim.source_table) {
                   loadSourceColumns(currentDim.source_id, currentDim.source_table);
                 }
@@ -1851,18 +1881,42 @@ function MembersTab() {
                 label: `${s.name}（${s.source_id}）`,
               }))}
               onChange={(v) => {
+                autoForm.setFieldValue("database", undefined);
+                autoForm.setFieldValue("table", undefined);
+                autoForm.setFieldValue("column", undefined);
+                setSourceDatabases([]);
+                setSourceTables([]);
+                setSourceColumns([]);
+                if (v) loadSourceDatabases(String(v));
+              }}
+            />
+          </Form.Item>
+          <Form.Item
+            label="目标库"
+            name="database"
+            extra={<span className="muted" style={{ fontSize: 12 }}>先选库可快速枚举该库表；清空后可手动输入库.表</span>}
+          >
+            <Select
+              showSearch
+              allowClear
+              optionFilterProp="label"
+              loading={sourceDatabasesLoading}
+              placeholder="选择目标库（可跳过，直接输入库.表）"
+              options={sourceDatabases.map((d) => ({ value: d, label: d }))}
+              notFoundContent={sourceDatabasesLoading ? "正在加载库…" : "无可选库，可直接输入库.表"}
+              onChange={(v) => {
                 autoForm.setFieldValue("table", undefined);
                 autoForm.setFieldValue("column", undefined);
                 setSourceTables([]);
                 setSourceColumns([]);
-                if (v) loadSourceTables(String(v));
+                if (v) loadSourceTables(String(autoForm.getFieldValue("source_id")), [String(v)]);
               }}
             />
           </Form.Item>
           <Form.Item
             label="表名"
             name="table"
-            extra={<span className="muted" style={{ fontSize: 12 }}>选择源库表，或直接输入库.表（如 dwd.telemedicine）</span>}
+            extra={<span className="muted" style={{ fontSize: 12 }}>先选目标库快速枚举；也可直接输入库.表（如 dwd.telemedicine）</span>}
             rules={[
               { required: true, message: "请选择表名" },
               { pattern: /^[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*$/, message: "表名不合法" },
@@ -1876,7 +1930,11 @@ function MembersTab() {
               placeholder="选择表，或输入库.表"
               options={withManualOption(
                 tableKw,
-                sourceTables.map((t) => ({ value: t.name, label: t.name })),
+                (() => {
+                  const kw = tableKw.trim().toLowerCase();
+                  const all = sourceTables.map((t) => ({ value: t.name, label: t.name }));
+                  return kw ? all.filter((o) => o.label.toLowerCase().includes(kw)) : all;
+                })(),
               )}
               optionRender={manualOptionRender}
               notFoundContent={sourceTablesLoading ? "正在加载表…" : "无可选表，可直接输入库.表名"}
@@ -1905,10 +1963,14 @@ function MembersTab() {
               placeholder="选择列，或输入列名"
               options={withManualOption(
                 columnKw,
-                sourceColumns.map((c) => ({
-                  value: c.name,
-                  label: `${c.name}${c.data_type ? ` (${c.data_type})` : ""}`,
-                })),
+                (() => {
+                  const kw = columnKw.trim().toLowerCase();
+                  const all = sourceColumns.map((c) => ({
+                    value: c.name,
+                    label: `${c.name}${c.data_type ? ` (${c.data_type})` : ""}`,
+                  }));
+                  return kw ? all.filter((o) => o.label.toLowerCase().includes(kw)) : all;
+                })(),
               )}
               optionRender={manualOptionRender}
               notFoundContent={sourceColumnsLoading ? "正在加载列…" : "无可选列，可直接输入列名"}
@@ -2013,18 +2075,42 @@ function MembersTab() {
               placeholder="选择数据源（须已注册）"
               options={dataSources.map((s) => ({ value: s.source_id, label: `${s.name}（${s.source_id}）` }))}
               onChange={(v) => {
+                bindForm.setFieldValue("database", undefined);
+                bindForm.setFieldValue("table", undefined);
+                bindForm.setFieldValue("column", undefined);
+                setSourceDatabases([]);
+                setSourceTables([]);
+                setSourceColumns([]);
+                if (v) loadSourceDatabases(String(v));
+              }}
+            />
+          </Form.Item>
+          <Form.Item
+            name="database"
+            label="目标库"
+            extra={<span className="muted" style={{ fontSize: 12 }}>先选库可快速枚举该库表；清空后可手动输入库.表</span>}
+          >
+            <Select
+              showSearch
+              allowClear
+              optionFilterProp="label"
+              loading={sourceDatabasesLoading}
+              placeholder="选择目标库（可跳过，直接输入库.表）"
+              options={sourceDatabases.map((d) => ({ value: d, label: d }))}
+              notFoundContent={sourceDatabasesLoading ? "正在加载库…" : "无可选库，可直接输入库.表"}
+              onChange={(v) => {
                 bindForm.setFieldValue("table", undefined);
                 bindForm.setFieldValue("column", undefined);
                 setSourceTables([]);
                 setSourceColumns([]);
-                if (v) loadSourceTables(String(v));
+                if (v) loadSourceTables(String(bindForm.getFieldValue("source_id")), [String(v)]);
               }}
             />
           </Form.Item>
           <Form.Item
             name="table"
             label="表名"
-            extra={<span className="muted" style={{ fontSize: 12 }}>选择源库表，或直接输入库.表（如 dwd.dim_customer）</span>}
+            extra={<span className="muted" style={{ fontSize: 12 }}>先选目标库快速枚举；也可直接输入库.表（如 dwd.dim_customer）</span>}
             rules={[
               { required: true, message: "请选择表名" },
               { pattern: /^[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*$/, message: "表名不合法" },
@@ -2038,7 +2124,11 @@ function MembersTab() {
               placeholder="选择表，或输入库.表"
               options={withManualOption(
                 tableKw,
-                sourceTables.map((t) => ({ value: t.name, label: t.name })),
+                (() => {
+                  const kw = tableKw.trim().toLowerCase();
+                  const all = sourceTables.map((t) => ({ value: t.name, label: t.name }));
+                  return kw ? all.filter((o) => o.label.toLowerCase().includes(kw)) : all;
+                })(),
               )}
               optionRender={manualOptionRender}
               notFoundContent={sourceTablesLoading ? "正在加载表…" : "无可选表，可直接输入库.表名"}
@@ -2067,10 +2157,14 @@ function MembersTab() {
               placeholder="选择列，或输入列名"
               options={withManualOption(
                 columnKw,
-                sourceColumns.map((c) => ({
-                  value: c.name,
-                  label: `${c.name}${c.data_type ? ` (${c.data_type})` : ""}`,
-                })),
+                (() => {
+                  const kw = columnKw.trim().toLowerCase();
+                  const all = sourceColumns.map((c) => ({
+                    value: c.name,
+                    label: `${c.name}${c.data_type ? ` (${c.data_type})` : ""}`,
+                  }));
+                  return kw ? all.filter((o) => o.label.toLowerCase().includes(kw)) : all;
+                })(),
               )}
               optionRender={manualOptionRender}
               notFoundContent={sourceColumnsLoading ? "正在加载列…" : "无可选列，可直接输入列名"}

@@ -315,7 +315,17 @@ class PreviewValuesResponse(BaseModel):
 
 
 class SourceTablesRequest(BaseModel):
-    """列出数据源全部表（维度值来源表选项框）。"""
+    """列出数据源表（维度值来源表选项框，支持按目标库过滤）。"""
+
+    source_id: str = Field(..., max_length=128, description="数据源 ID")
+    databases: list[str] | None = Field(
+        default=None,
+        description="目标库列表（为空枚举全部库；级联选表时仅枚举所选库）",
+    )
+
+
+class SourceDatabasesRequest(BaseModel):
+    """列出数据源全部非系统库（级联选表的「目标库」选项框）。"""
 
     source_id: str = Field(..., max_length=128, description="数据源 ID")
 

@@ -428,6 +428,35 @@ class HiveCollector(BaseCollector):
                 f"Hive 枚举表超时 ({timeout}s, {len(schemas)} 个库)"
             ) from exc
 
+    async def list_columns(self, table: str) -> list[dict[str, str | None]]:
+        """列出指定表的全部列（DESCRIBE 解析，供维度值来源列选项框）。
+
+        Args:
+            table: 表名（可带库前缀，如 ``wedw_dw.doctor_visit_agent_info_da``）。
+
+        Returns:
+            列字典列表（name/data_type/comment；DESCRIBE 分区头行 ``# col_name`` 跳过）。
+
+        Raises:
+            ExternalDependencyError: 连接/查询超时（503 可重试，前端降级手动输入）。
+        """
+        parts = [p for p in table.split(".") if p]
+        safe_tbl = ".".join(f"`{self._safe_ident(p)}`" for p in parts)
+        rows = await self._execute(f"DESCRIBE {safe_tbl}")
+        columns: list[dict[str, str | None]] = []
+        for row in rows:
+            if not row:
+                continue
+            name = (row[0] or "").strip()
+            if not name or name.startswith("#"):
+                continue
+            data_type = (row[1] or "").strip() if len(row) > 1 else None
+            comment = (row[2] or "").strip() if len(row) > 2 else None
+            columns.append(
+                {"name": name, "data_type": data_type or None, "comment": comment or None}
+            )
+        return columns
+
     async def probe(self) -> ProbeResult:
         """轻量探活：SELECT 1（经 pyhive 直连）。"""
         start = time.monotonic()

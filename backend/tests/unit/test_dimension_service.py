@@ -778,7 +778,56 @@ async def test_list_source_tables_groups_by_db() -> None:
     fake_collector.dispose.assert_awaited()
 
 
-async def test_list_source_columns_mysql_via_information_schema() -> None:
+async def test_list_source_tables_filters_by_databases() -> None:
+    """级联选表：databases 透传给连接器，仅枚举所选库（避免全库枚举耗时）。"""
+
+    from unittest.mock import patch
+
+    svc, _ = await _svc()
+    src_mock = MagicMock(source_id="s1", source_type="hive", connection_config="encrypted")
+    db_exec = AsyncMock()
+    db_exec_result = MagicMock()
+    db_exec_result.scalar_one_or_none.return_value = src_mock
+    db_exec.return_value = db_exec_result
+    svc._db.execute = db_exec
+
+    fake_collector = MagicMock()
+    fake_collector.list_tables = AsyncMock(return_value={"dwd": ["a"]})
+    fake_collector.dispose = AsyncMock()
+    with patch(
+        "app.services.collector.connectors.registry.build", return_value=fake_collector
+    ):
+        tables = await svc.list_source_tables("s1", databases=["dwd"])
+
+    assert tables == [{"database": "dwd", "table": "a", "name": "dwd.a"}]
+    fake_collector.list_tables.assert_awaited_once_with(["dwd"])
+    fake_collector.dispose.assert_awaited()
+
+
+async def test_list_source_databases() -> None:
+    """级联选表：目标库列表走连接器轻量 list_databases。"""
+
+    from unittest.mock import patch
+
+    svc, _ = await _svc()
+    src_mock = MagicMock(source_id="s1", source_type="hive", connection_config="encrypted")
+    db_exec = AsyncMock()
+    db_exec_result = MagicMock()
+    db_exec_result.scalar_one_or_none.return_value = src_mock
+    db_exec.return_value = db_exec_result
+    svc._db.execute = db_exec
+
+    fake_collector = MagicMock()
+    fake_collector.list_databases = AsyncMock(return_value=["dwd", "dws", "wedw_dw"])
+    fake_collector.dispose = AsyncMock()
+    with patch(
+        "app.services.collector.connectors.registry.build", return_value=fake_collector
+    ):
+        dbs = await svc.list_source_databases("s1")
+
+    assert dbs == ["dwd", "dws", "wedw_dw"]
+    fake_collector.list_databases.assert_awaited_once()
+    fake_collector.dispose.assert_awaited()
     """MySQL 列列举：information_schema.columns 按 ordinal_position 排序返回列名+类型。"""
 
     from unittest.mock import patch
@@ -825,11 +874,10 @@ async def test_list_source_columns_hive_via_describe() -> None:
     svc._db.execute = db_exec
 
     fake_collector = MagicMock()
-    fake_collector.query = AsyncMock(
+    fake_collector.list_columns = AsyncMock(
         return_value=[
-            {"col_name": "id", "data_type": "bigint", "comment": ""},
-            {"col_name": "# Partition Information", "data_type": "", "comment": ""},
-            {"col_name": "dt", "data_type": "string", "comment": ""},
+            {"name": "id", "data_type": "bigint", "comment": None},
+            {"name": "dt", "data_type": "string", "comment": None},
         ]
     )
     fake_collector.dispose = AsyncMock()
@@ -840,6 +888,7 @@ async def test_list_source_columns_hive_via_describe() -> None:
 
     assert [c["name"] for c in columns] == ["id", "dt"]
     assert columns[0]["data_type"] == "bigint"
+    fake_collector.list_columns.assert_awaited_once_with("ods.orders")
 
 
 async def test_list_source_columns_rejects_illegal_table() -> None:

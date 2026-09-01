@@ -54,6 +54,7 @@ from app.services.dimension.schemas import (
     SnapshotValueResponse,
     SourceColumnsRequest,
     SourceColumnsResponse,
+    SourceDatabasesRequest,
     SourceTablesRequest,
     SourceTablesResponse,
     TranslateRequest,
@@ -411,10 +412,25 @@ async def list_source_tables(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    """列出数据源全部非系统库表（维度值来源表选项框）。"""
-    tables = await DimensionService(db).list_source_tables(payload.source_id)
+    """列出数据源指定库（或全部库）非系统表（维度值来源表选项框）。"""
+    tables = await DimensionService(db).list_source_tables(
+        payload.source_id, databases=payload.databases
+    )
     await db.commit()
     return ok(data=SourceTablesResponse(tables=tables), trace_id=trace_id)
+
+
+@router.post("/source-databases", dependencies=_WRITE_DEPS)
+async def list_source_databases(
+    payload: SourceDatabasesRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """列出数据源全部非系统库（级联选表的「目标库」选项框，轻量快）。"""
+    databases = await DimensionService(db).list_source_databases(payload.source_id)
+    await db.commit()
+    return ok(data={"databases": databases}, trace_id=trace_id)
 
 
 @router.post("/source-columns", dependencies=_WRITE_DEPS)
