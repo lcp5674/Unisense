@@ -809,7 +809,26 @@ describe("MetricCatalog", () => {
     renderCatalog();
     await screen.findByText("sales_gmv_sum_d");
     expect(screen.queryByLabelText("删除指标")).toBeNull();
-    expect(screen.getByText("仅管理员或创建者可删")).toBeTruthy();
+    expect(screen.getByText("仅平台管理员或创建者可删")).toBeTruthy();
+  });
+
+  it("单指标删除：域管理员非 Owner 看不到删除按钮（仅 Owner/平台管理员可删）", async () => {
+    const draft = { ...metric, status: "DRAFT" as const, owner_id: 2 };
+    mockedList.mockResolvedValue({ items: [draft], total: 1, page: 1, page_size: 20 });
+    mockedDeleteMetric.mockResolvedValue({} as never);
+    // 当前用户 domain_admin(id=1)，草稿指标 owner_id=2 → 域管理员非 Owner → 不显示删除按钮
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "u",
+      display_name: "用户",
+      role: "domain_admin",
+      domain: "sales",
+      org_id: 1,
+    });
+    renderCatalog();
+    await screen.findByText("sales_gmv_sum_d");
+    expect(screen.queryByLabelText("删除指标")).toBeNull();
+    expect(screen.getByText("仅平台管理员或创建者可删")).toBeTruthy();
   });
 
   it("批量废弃：无下游引用的指标可留空替代指标直接下线（successor_code=null）", async () => {

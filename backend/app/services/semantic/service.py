@@ -1196,6 +1196,24 @@ class MetricService(BaseService):
                 resp.mounts = [MetricMountResponse.from_model(m) for m in mounts]
         except Exception:  # noqa: BLE001 - best-effort：挂载查询失败仅降级
             pass
+        # 跨组织 Owner 最小用户名（best-effort）：详情页 owner 责任链对非本组织
+        # 用户（/auth/users 多租户隔离不可见）至少能显示 display_name/username，
+        # 避免退化为「用户 #id」。仅暴露单个 owner，不枚举用户目录。
+        if resp.owner_username is None and resp.owner_id is not None:
+            try:
+                from sqlalchemy import select
+
+                from app.models.user import User
+
+                row = (
+                    await self._db.execute(
+                        select(User.display_name, User.username).where(User.id == resp.owner_id)
+                    )
+                ).first()
+                if row is not None:
+                    resp.owner_username = (row[0] or row[1] or None)
+            except Exception:  # noqa: BLE001 - best-effort：用户名查询失败仅降级
+                pass
         return resp
 
     async def get_archived_metric_public(
@@ -3889,13 +3907,14 @@ class MetricService(BaseService):
     ) -> Metric:
         """软删除指标（仅 DRAFT/DEPRECATED 未对外投入状态；REVIEW/PUBLISHED 禁止）。
 
-        删除语义（用户决策）：草稿/废弃这种未对外投入的可交由管理员或生产者
-        （原 Owner）软删；审核中/启用中的资源不可删。软删后可经 restore 恢复。
+        删除语义（用户决策）：草稿/废弃这种未对外投入的可交由平台管理员或生产者
+        （原 Owner）软删；域管理员非 Owner 不可删他人指标；审核中/启用中的资源不可删。
+        软删后可经 restore 恢复。
 
         Args:
             metric_code: 指标编码。
             actor_id: 操作人 ID。
-            role: 操作人角色（平台/域管理员或原 Owner 可删，其余拒绝）。
+            role: 操作人角色（平台管理员或原 Owner 可删，其余拒绝）。
 
         Returns:
             被删除的指标。
@@ -3924,10 +3943,10 @@ class MetricService(BaseService):
                 "审核中/启用中的资源不可删除",
                 error_code="INVALID_STATE",
             )
-        # 权限：平台/域管理员或原 Owner（生产者），对齐 restore 语义
-        if role not in ("platform_admin", "domain_admin") and metric.owner_id != actor_id:
+        # 权限：仅平台管理员或原 Owner（生产者），对齐 restore 语义
+        if role != "platform_admin" and metric.owner_id != actor_id:
             raise BusinessError(
-                "仅平台/域管理员或指标原 Owner 可删除",
+                "仅平台管理员或指标原 Owner 可删除",
                 error_code="FORBIDDEN",
             )
 

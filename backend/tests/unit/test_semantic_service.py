@@ -3937,9 +3937,15 @@ async def test_delete_metric_success_and_reject():
         await svc.delete_metric("sales_gmv_daily", actor_id=2, role="metric_owner")
     assert exc.value.error_code == "FORBIDDEN"
 
-    # 平台/域管理员可删他人草稿
+    # 平台管理员可删他人草稿
     repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", owner_id=2))
-    await svc.delete_metric("sales_gmv_daily", actor_id=9, role="domain_admin")
+    await svc.delete_metric("sales_gmv_daily", actor_id=9, role="platform_admin")
+
+    # 域管理员非 Owner 删他人草稿 → FORBIDDEN（仅 Owner/平台管理员可删）
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", owner_id=2))
+    with pytest.raises(BusinessError) as exc:
+        await svc.delete_metric("sales_gmv_daily", actor_id=9, role="domain_admin")
+    assert exc.value.error_code == "FORBIDDEN"
 
     # 审核中/启用中不可删（INVALID_STATE）
     for status in ("REVIEW", "PUBLISHED"):
