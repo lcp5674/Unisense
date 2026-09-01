@@ -244,13 +244,13 @@ function toMountInput(m: MetricMount): MetricMountInput {
 function OwnerChain({ metric, users }: { metric: MetricResponse; users: UserBrief[] }) {
   const byId = new Map(users.map((u) => [u.id, u]));
   // fallbackName：跨组织用户不在 users 列表（/auth/users 多租户隔离）时，
-  // 用后端回填的 owner_username（display_name||username）兜底，避免「用户 #id」。
+  // 用后端回填的 owner_username（display_name||username）兜底，避免「未知用户」占位。
   function cell(uid: number | null | undefined, fallbackName?: string | null) {
     if (uid == null) return <span className="muted">未配置</span>;
     const u = byId.get(uid);
     return (
       <span>
-        <strong>{u?.display_name || u?.username || fallbackName || `用户 #${uid}`}</strong>
+        <strong>{u?.display_name || u?.username || fallbackName || "未知用户"}</strong>
         {u && <Tag style={{ marginLeft: 6 }}>{ROLE_LABEL[u.role] ?? u.role}</Tag>}
         {u?.domain && <span className="muted"> · {u.domain}</span>}
       </span>
@@ -795,7 +795,7 @@ export function MetricDetail() {
   const mountOwnerText = (uid: number | null | undefined, name?: string | null): string => {
     if (uid != null) {
       const u = users.find((x) => x.id === uid);
-      return u ? `${u.display_name || u.username}` : `用户 #${uid}`;
+      return u ? `${u.display_name || u.username}` : "未知用户";
     }
     return name || "";
   };

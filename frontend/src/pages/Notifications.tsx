@@ -1112,7 +1112,7 @@ function NotifListTab() {
               </span>
             )}
             {n.actor_name ? (
-              <span className="notif-meta-item" title={`操作人 #${n.actor_id ?? ""}`}>
+              <span className="notif-meta-item" title={`操作人：${n.actor_name}`}>
                 <UserOutlined /> {n.actor_name}
               </span>
             ) : n.actor_id != null ? (

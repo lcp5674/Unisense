@@ -722,13 +722,13 @@ export function MetricCatalog() {
   }
 
   const userName = useMemo(
-    () => (id: number | null | undefined) => (id == null ? "—" : (userMap.get(id) ?? `#${id}`)),
+    () => (id: number | null | undefined) => (id == null ? "—" : (userMap.get(id) ?? "未知用户")),
     [userMap],
   );
   // OneData 逻辑度量名（原子指标展示继承的逻辑度量）
   const measureName = useMemo(
     () => (id: number | null | undefined) =>
-      id == null ? "—" : (measureMap.get(id)?.name ?? `#${id}`),
+      id == null ? "—" : (measureMap.get(id)?.name ?? "未知度量"),
     [measureMap],
   );
   const domainName = useMemo(
@@ -2165,7 +2165,7 @@ export function MetricCatalog() {
             optionFilterProp="label"
             options={[...userMap.entries()].map(([id, name]) => ({
               value: id,
-              label: `${name}（#${id}）`,
+              label: name,
             }))}
           />
           {/* 下游引用过滤（批量废弃前按引用收敛）：有/无下游一键筛选，

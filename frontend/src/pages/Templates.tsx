@@ -389,7 +389,7 @@ export function Templates() {
     if (name) return name;
     if (!id) return null;
     const u = users.find((x) => x.id === id);
-    return u ? u.display_name || u.username || `用户 #${id}` : `用户 #${id}`;
+    return u ? u.display_name || u.username || "未知用户" : "未知用户";
   };
   const [form] = Form.useForm();
   // 模板必填字段动态校验（对齐后端豁免）：监听 type/measure_id 计算「不适用当前类型」集合，

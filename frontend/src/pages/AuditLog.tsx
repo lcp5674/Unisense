@@ -29,7 +29,7 @@ function groupSensitiveAccess(items: AuditEntry[]): Array<{ actor: string; count
   const map = new Map<string, { count: number; last_at: string }>();
   for (const e of items) {
     if (!e.pii_access) continue;
-    const actor = e.actor_display ?? `用户 #${e.actor_id}`;
+    const actor = e.actor_display ?? "未知用户";
     const prev = map.get(actor);
     if (!prev) {
       map.set(actor, { count: 1, last_at: e.created_at });
@@ -58,8 +58,8 @@ const EXPORT_RECORD_COLUMNS = [
     title: "操作人",
     dataIndex: "actor_display",
     key: "actor",
-    render: (v: string, r: AuditEntry) => (
-      <span className="mono" style={{ fontSize: 12 }}>{v ?? `用户 #${r.actor_id}`}</span>
+    render: (v: string) => (
+      <span className="mono" style={{ fontSize: 12 }}>{v ?? "未知用户"}</span>
     ),
   },
   {
@@ -233,7 +233,7 @@ export function AuditLog() {
       key: "actor",
       width: 150,
       render: (_: number, r: AuditEntry) => (
-        <span className="mono" style={{ fontSize: 12 }}>{r.actor_display ?? `用户 #${r.actor_id}`}</span>
+        <span className="mono" style={{ fontSize: 12 }}>{r.actor_display ?? "未知用户"}</span>
       ),
     },
     {
@@ -363,7 +363,7 @@ export function AuditLog() {
         />
         <Descriptions column={2} bordered size="small" style={{ marginBottom: 16 }}>
           <Descriptions.Item label="编号">{e.id}</Descriptions.Item>
-          <Descriptions.Item label="操作者">{e.actor_display ?? `用户 #${e.actor_id}`}</Descriptions.Item>
+          <Descriptions.Item label="操作者">{e.actor_display ?? "未知用户"}</Descriptions.Item>
           <Descriptions.Item label="操作对象">
             <Tag>{entityTypeLabel(e.entity_type)}</Tag>
             <span className="mono" style={{ fontSize: 12, marginLeft: 4 }}>{e.entity_id || "—"}</span>

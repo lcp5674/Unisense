@@ -2886,10 +2886,10 @@ function HeatmapTab() {
 function OwnerTab() {
   const [ownerId, setOwnerId] = useState<number | undefined>(undefined);
   const [ownerIds, setOwnerIds] = useState<number[]>([]);
-  // 责任人真实姓名映射（display_name 优先，回退 username）；拉取失败降级「责任人 #id」
+  // 责任人真实姓名映射（display_name 优先，回退 username）；拉取失败降级「未知用户」
   const [userMap, setUserMap] = useState<Record<number, string>>({});
   const ownerOptions = useMemo(
-    () => ownerIds.map((id) => ({ label: userMap[id] ?? `责任人 #${id}`, value: id })),
+    () => ownerIds.map((id) => ({ label: userMap[id] ?? "未知用户", value: id })),
     [ownerIds, userMap],
   );
   const [view, setView] = useState<AssetOwnerView | null>(null);
@@ -2928,7 +2928,7 @@ function OwnerTab() {
         }
       })
       .catch(() => {});
-    // 责任人真实姓名（下拉可读；拉取失败降级「责任人 #id」，不阻塞 Owner 视图）
+    // 责任人真实姓名（下拉可读；拉取失败降级「未知用户」，不阻塞 Owner 视图）
     listUsers()
       .then((users) => {
         const m: Record<number, string> = {};
@@ -2960,7 +2960,7 @@ function OwnerTab() {
       .filter(Boolean)
       .join(" · ");
     const ownerLabel =
-      ownerId != null ? view?.owner_name ?? userMap[ownerId] ?? `#${ownerId}` : "责任人";
+      ownerId != null ? view?.owner_name ?? userMap[ownerId] ?? "未知用户" : "责任人";
     setDrillTitle(`${ownerLabel} 指标明细${parts ? `（${parts}）` : ""}`);
     setDrillOpen(true);
     setDrillLoading(true);
@@ -3013,7 +3013,7 @@ function OwnerTab() {
   }
 
   const ownerName =
-    ownerId != null ? view?.owner_name ?? userMap[ownerId] ?? `责任人 #${ownerId}` : "未指定";
+    ownerId != null ? view?.owner_name ?? userMap[ownerId] ?? "未知用户" : "未指定";
   const total = view?.metrics.total ?? 0;
   const published = view?.metrics.published ?? 0;
   const draft = view?.metrics.draft ?? 0;
@@ -3521,7 +3521,7 @@ function OrphansTab() {
         setOwnerOptions(
           users
             .filter((u) => u.status === "active")
-            .map((u) => ({ label: `${u.display_name || u.username} (#${u.id})`, value: u.id })),
+            .map((u) => ({ label: `${u.display_name || u.username}`, value: u.id })),
         ),
       )
       .catch(() => {});
@@ -4168,7 +4168,7 @@ function TablesTab() {
         setOwnerOptions(
           users
             .filter((u) => u.status === "active")
-            .map((u) => ({ label: `${u.display_name || u.username} (#${u.id})`, value: u.id })),
+            .map((u) => ({ label: `${u.display_name || u.username}`, value: u.id })),
         ),
       )
       .catch(() => {});

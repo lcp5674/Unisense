@@ -2050,7 +2050,7 @@ export interface AuditEntry {
   created_at: string;
   /** 后端 enrich：站在用户角度的中文描述（如「发布了指标定义（版本=v2）」） */
   action_desc?: string;
-  /** 后端 enrich：操作人显示名（联查 user，回退「用户 #id」） */
+  /** 后端 enrich：操作人显示名（联查 user，回退「未知用户」） */
   actor_display?: string;
 }
 

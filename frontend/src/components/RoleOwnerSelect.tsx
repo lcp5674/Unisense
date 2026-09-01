@@ -88,7 +88,7 @@ export default function RoleOwnerSelect({
         if (t.startsWith("user:")) {
           const id = Number(t.slice(5));
           const u = users.find((x) => x.id === id);
-          return u ? `${u.display_name || u.username}（${u.id}）` : `用户 #${id}`;
+          return u ? `${u.display_name || u.username}` : "未知用户";
         }
         if (t.startsWith("text:")) return t.slice(5);
         return t;

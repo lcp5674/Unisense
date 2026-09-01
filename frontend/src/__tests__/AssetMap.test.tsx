@@ -2241,7 +2241,7 @@ describe("AssetMap", () => {
     const dialog = screen.getByRole("dialog");
     const ownerItem = within(dialog).getByText("责任人").closest(".ant-form-item") as HTMLElement;
     fireEvent.mouseDown(within(ownerItem).getByRole("combobox"));
-    await user.click(await screen.findByText("管理员 (#1)"));
+    await user.click(await screen.findByText("管理员"));
     await user.click(screen.getByRole("button", { name: /保\s*存/ }));
 
     await waitFor(() => {
@@ -2258,7 +2258,7 @@ describe("AssetMap", () => {
           source_id: "s1",
           entity_name: "sales.ods",
           entity_type: "TABLE",
-          // 明细展示已有的当前状态：责任人=管理员(#1)、敏感度=PII
+          // 明细展示已有的当前状态：责任人=管理员、敏感度=PII
           sensitivity_level: "PII",
           owner_id: 1,
           schema_incomplete: false,
@@ -2280,7 +2280,7 @@ describe("AssetMap", () => {
     const dialog = screen.getByRole("dialog");
     // 责任人/敏感度已带入弹窗（Select 显示当前值，而非留空）
     const ownerItem = within(dialog).getByText("责任人").closest(".ant-form-item") as HTMLElement;
-    expect(within(ownerItem).getByText("管理员 (#1)")).toBeInTheDocument();
+    expect(within(ownerItem).getByText("管理员")).toBeInTheDocument();
     const sensItem = within(dialog).getByText("敏感度").closest(".ant-form-item") as HTMLElement;
     expect(within(sensItem).getByText("PII")).toBeInTheDocument();
     // 直接保存（值未改）→ 前端提交预填的两个值，后端 no-op 短路不 bump row_version
@@ -2332,7 +2332,7 @@ describe("AssetMap", () => {
     await user.click(await screen.findByText("PII"));
     const ownerItem = within(dialog).getByText("责任人").closest(".ant-form-item") as HTMLElement;
     fireEvent.mouseDown(within(ownerItem).getByRole("combobox"));
-    await user.click(await screen.findByText("管理员 (#1)"));
+    await user.click(await screen.findByText("管理员"));
     await user.click(screen.getByRole("button", { name: /保\s*存/ }));
 
     // 串行关键断言：reclassify 已发起、assign 尚未发起（未并行 Promise.all）
@@ -2391,7 +2391,7 @@ describe("AssetMap", () => {
     const dialog = screen.getByRole("dialog");
     const ownerItem = within(dialog).getByText("责任人").closest(".ant-form-item") as HTMLElement;
     fireEvent.mouseDown(within(ownerItem).getByRole("combobox"));
-    await user.click(await screen.findByText("管理员 (#1)"));
+    await user.click(await screen.findByText("管理员"));
     await user.click(screen.getByRole("button", { name: /保\s*存/ }));
 
     await waitFor(() => {
@@ -2728,7 +2728,7 @@ describe("AssetMap", () => {
     await waitFor(() => expect(screen.getByText("转交资产归属")).toBeInTheDocument());
     const dialog = screen.getByRole("dialog");
     fireEvent.mouseDown(within(dialog).getByRole("combobox"));
-    await user.click(await screen.findByText("管理员 (#1)"));
+    await user.click(await screen.findByText("管理员"));
     await user.click(screen.getByRole("button", { name: /确认转交/ }));
 
     await waitFor(() => {

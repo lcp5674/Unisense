@@ -3434,7 +3434,7 @@ describe("指标详情 - 跨组织 Owner 用户名兜底", () => {
     renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
     // Owner 责任链「指标注册」节点显示后端回填名（而非「用户 #3」）
     expect(await screen.findByText("平台管理员")).toBeTruthy();
-    // 注：fixture 的 approver_id=3 仍显示「用户 #3」属合理降级（审核人跨组织不可见、
-    // 且后端只回填 owner 最小用户名，不枚举目录）——本测试只验证 owner 节点不退化。
+    // 注：fixture 的 approver_id=3 跨组织不可见时显示「未知用户」（不再出现「用户 #3」），
+    // 且后端只回填 owner 最小用户名，不枚举目录——本测试只验证 owner 节点不退化。
   });
 });

@@ -187,7 +187,7 @@ export function AuditTimeline({ entityType, entityId, entityLabel, emptyText }: 
               <span>{entityLabel ?? entityTypeLabel(it.entity_type)}</span>
               <span> · </span>
               <span className="mono">{cleanEntityId(it.entity_id)}</span>
-              <span> · 操作人 {it.actor_display ?? `#${it.actor_id}`}</span>
+              <span> · 操作人 {it.actor_display ?? "未知用户"}</span>
               <span> · {timeAgoCn(it.created_at)}（{formatCnTime(it.created_at)}）</span>
             </div>
             {it.detail_json && Object.keys(it.detail_json).length > 0 && (

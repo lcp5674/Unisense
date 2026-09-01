@@ -667,7 +667,7 @@ function GrantsTab() {
           userId={permUserId}
           userName={(() => {
             const u = userMap.get(permUserId);
-            return u ? `${u.username}（${u.display_name}）` : `用户 #${permUserId}`;
+            return u ? `${u.username}（${u.display_name}）` : "未知用户";
           })()}
           open
           onClose={() => setPermUserId(null)}

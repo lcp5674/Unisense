@@ -126,7 +126,7 @@ async def list_audit_logs(
     items: list[dict[str, Any]] = []
     for log, display_name in rows:
         item = log.to_dict()
-        item["actor_display"] = display_name or f"用户 #{log.actor_id}"
+        item["actor_display"] = display_name or "未知用户"
         item["action_desc"] = describe_audit(log.action, log.entity_type, log.detail_json)
         items.append(item)
 
@@ -185,7 +185,7 @@ async def export_audit_logs(
     records: list[dict[str, Any]] = []
     for log, display_name in rows:
         item = log.to_dict()
-        item["actor_display"] = display_name or f"用户 #{log.actor_id}"
+        item["actor_display"] = display_name or "未知用户"
         item["action_desc"] = describe_audit(log.action, log.entity_type, log.detail_json)
         records.append(item)
 

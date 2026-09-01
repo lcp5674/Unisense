@@ -317,7 +317,7 @@ function DimensionsTab() {
         setDomainMap(m);
       })
       .catch(() => {});
-    // 责任人候选（失败静默：责任人列回退「用户 #id」）
+    // 责任人候选（失败静默：责任人列回退「未知用户」）
     listUsers().then(setUsers).catch(() => {});
     // 当前用户维度收藏（DIMENSION）供行内收藏按钮判断
     listFavorites()
@@ -642,9 +642,9 @@ function DimensionsTab() {
     }
   }
 
-  // 责任人 ID → 中文名（无记录回退「用户 #id」）
+  // 责任人 ID → 中文名（无记录回退「未知用户」）
   const ownerName = (ownerId: number) =>
-    users.find((u) => u.id === ownerId)?.display_name ?? `用户 #${ownerId}`;
+    users.find((u) => u.id === ownerId)?.display_name ?? "未知用户";
 
   const columns = [
     { title: "编码", dataIndex: "dim_code", key: "dim_code", render: (v: string) => <span className="mono">{v}</span> },

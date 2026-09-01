@@ -1198,7 +1198,7 @@ class MetricService(BaseService):
             pass
         # 跨组织 Owner 最小用户名（best-effort）：详情页 owner 责任链对非本组织
         # 用户（/auth/users 多租户隔离不可见）至少能显示 display_name/username，
-        # 避免退化为「用户 #id」。仅暴露单个 owner，不枚举用户目录。
+        # 避免退化为「未知用户」占位。仅暴露单个 owner，不枚举用户目录。
         if resp.owner_username is None and resp.owner_id is not None:
             try:
                 from sqlalchemy import select

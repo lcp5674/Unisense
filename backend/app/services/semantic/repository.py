@@ -1194,7 +1194,7 @@ class MetricRepository:
             # 统一 AssetStat 结构 {total, by_status}：指标/维度/术语有真实状态；
             # 数据表/数据源/模板无状态概念，by_status 留空但结构一致便于前端统一读取。
             return {
-                "name": owner_names.get(owner_id_, f"用户 #{owner_id_}"),
+                "name": owner_names.get(owner_id_, "未知用户"),
                 "total": 0,
                 "metrics": {"total": 0, "by_status": {}},
                 "tables": {"total": 0, "by_status": {}},
