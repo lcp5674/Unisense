@@ -24,7 +24,7 @@ vi.mock("../api", () => {
     createApiClient: vi.fn(),
     listApiClients: vi.fn(),
     mintClientToken: vi.fn(),
-    consumeDryRun: vi.fn(),
+    consumeQuery: vi.fn(),
     listMetrics: vi.fn(),
     setConsumeToken: vi.fn(),
     getConsumeToken: vi.fn(() => null),
@@ -43,7 +43,7 @@ vi.mock("../hooks/usePermission", () => ({
 import {
   listApiClients,
   mintClientToken,
-  consumeDryRun,
+  consumeQuery,
   listMetrics,
   getConsumeToken,
   updateApiClient,
@@ -53,7 +53,7 @@ import {
 } from "../api";
 const mockedListApiClients = vi.mocked(listApiClients);
 const mockedMintClientToken = vi.mocked(mintClientToken);
-const mockedConsumeDryRun = vi.mocked(consumeDryRun);
+const mockedConsumeQuery = vi.mocked(consumeQuery);
 const mockedListMetrics = vi.mocked(listMetrics);
 const mockedGetConsumeToken = vi.mocked(getConsumeToken);
 const mockedUpdateApiClient = vi.mocked(updateApiClient);
@@ -118,7 +118,7 @@ describe("ApiClients", () => {
     });
   });
 
-  it("连通性测试：签发令牌 → 首个已发布指标 dry-run 验证全链路", async () => {
+  it("连通性测试：签发令牌 → 首个已发布指标真实执行验证全链路", async () => {
     const user = userEvent.setup();
     mockedListMetrics.mockResolvedValue({
       items: [{ metric_code: "outp_feeamount_day", name: "门诊收费金额", pii_flag: false }],
@@ -126,11 +126,11 @@ describe("ApiClients", () => {
       page: 1,
       page_size: 1,
     } as never);
-    mockedConsumeDryRun.mockResolvedValue({
+    mockedConsumeQuery.mockResolvedValue({
       metric_code: "outp_feeamount_day",
-      status: "ok",
-      checks: [],
-      execution_plan: { elapsed_ms: 12 },
+      degraded: false,
+      data: { rows: [{ 日期: "2026-09-01" }], total: 1, elapsed_ms: 42, engine: "mysql" },
+      execution_plan: {},
       meta: {},
     } as never);
 
@@ -142,7 +142,9 @@ describe("ApiClients", () => {
     await waitFor(() => {
       expect(mockedMintClientToken).toHaveBeenCalledWith("app_abcd1234", 60);
     });
-    expect(await screen.findByText(/连通正常：指标 outp_feeamount_day dry-run 通过/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/连通正常：指标 outp_feeamount_day 查询成功（返回 1 行 · 引擎 mysql · 执行耗时 42 ms · 链路往返 \d+ ms）/),
+    ).toBeInTheDocument();
   });
 
   it("编辑客户端：预填表单 → 修改授权域 → 保存透传 PUT", async () => {

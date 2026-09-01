@@ -33,7 +33,7 @@ import {
   createApiClient,
   listApiClients,
   mintClientToken,
-  consumeDryRun,
+  consumeQuery,
   listMetrics,
   setConsumeToken,
   getConsumeToken,
@@ -215,38 +215,42 @@ export function ApiClients() {
         return;
       }
       // 逐个尝试已发布指标（最多前 10 个）：跳过「未声明来源表」等不可查询的指标，
-      // 找到第一个可成功 dry-run 的即证明令牌/授权/查询链路连通。
+      // 找到第一个真实执行成功的即证明令牌/授权/查询链路完整连通（含真实执行 + 数据返回）。
       const today = new Date().toISOString().slice(0, 10);
       const dateRange = `${today}~${today}`;
       const candidates = metrics.slice(0, 10);
       let lastErr: unknown = null;
       for (const m of candidates) {
         try {
-          // dry-run 是「不执行」请求，后端不产生执行耗时（execution_plan 无 elapsed_ms）；
-          // 连通性测试展示的是完整链路往返耗时（鉴权 + 校验 + SQL 构建 + 网络），由前端实测。
+          // 真实执行：POST /consume/query 走完整链路（鉴权 → 口径校验 → SQL 构建 → 引擎执行 → 结果返回），
+          // data.elapsed_ms 是后端真实执行耗时，往返耗时由前端实测。
           const t0 = performance.now();
-          const res = await consumeDryRun({ metric_code: m.metric_code, date_range: dateRange });
-          const elapsed = Math.round(performance.now() - t0);
-          if (res.status === "ok") {
-            setTestResult({
-              ok: true,
-              message: `客户端 ${active.client_id} 连通正常：指标 ${m.metric_code} dry-run 通过（耗时 ${elapsed} ms）`,
-            });
-            return;
-          }
-          lastErr = res;
+          const res = await consumeQuery({ metric_code: m.metric_code, date_range: dateRange });
+          const roundTrip = Math.round(performance.now() - t0);
+          const rows = Array.isArray(res.data?.rows) ? res.data.rows : [];
+          const execMs = typeof res.data?.elapsed_ms === "number" ? res.data.elapsed_ms : null;
+          const engine = res.data?.engine ?? "?";
+          setTestResult({
+            ok: true,
+            message:
+              `客户端 ${active.client_id} 连通正常：指标 ${m.metric_code} 查询成功` +
+              `（返回 ${res.data?.total ?? rows.length} 行 · 引擎 ${engine}` +
+              `${execMs != null ? ` · 执行耗时 ${execMs} ms` : ""}` +
+              ` · 链路往返 ${roundTrip} ms）`,
+          });
+          return;
         } catch (err) {
           lastErr = err;
-          // 「未声明来源表」类业务校验失败 → 该指标不可查询，继续试下一个；其余错误中断
+          // 校验/依赖类失败（未声明来源表、挂载缺失、数据源不可达等）→ 该指标不可查询，继续试下一个
           if (err instanceof UnisenseApiError && (err.message || "").includes("未声明来源表")) {
             continue;
           }
-          break;
+          continue;
         }
       }
       setTestResult({
         ok: false,
-        message: `已尝试 ${candidates.length} 个已发布指标均无法完成查询连通性验证（可能未配置挂载/来源表）：${lastErr instanceof UnisenseApiError ? lastErr.message : "dry-run 被拒绝"}`,
+        message: `已尝试 ${candidates.length} 个已发布指标均无法完成查询连通性验证（可能未配置挂载/来源表或底层数据源不可达）：${lastErr instanceof UnisenseApiError ? lastErr.message : "真实查询被拒绝"}`,
       });
     } catch (err) {
       setTestResult({ ok: false, message: err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "连通性测试失败" });
