@@ -1154,8 +1154,16 @@ class CollectorService(BaseService):
         except ExternalDependencyError:
             raise  # 外部依赖错误（连接/查询超时）已语义化，交由 API 层映射
         except (OperationalError, ProgrammingError) as exc:
-            # 源端拒绝该语句（如 Doris 不支持 CHECKSUM）：属「输入/能力不支持」客户端错误，
-            # 映射为 422 而非 500，透出源端原因便于用户调整
+            # 源端拒绝该语句（如 Doris 不支持 CHECKSUM / 未选择数据库）：属「输入/能力不支持」
+            # 客户端错误，映射为 422 而非 500，透出源端原因便于用户调整
+            msg = str(exc)
+            if "No database selected" in msg or "1046" in msg:
+                # 数据源未配置默认库（连接 URL 无 database）时，裸表名会触发源端 1046；
+                # 直接给出可操作指导，而非透出 pymysql 原始报错
+                raise ValidationError(
+                    "该数据源未配置默认数据库，请在 SQL 中使用「库名.表名」限定"
+                    "（如 SELECT * FROM 库名.表名），或先单独执行 USE 库名 后再查询"
+                ) from exc
             raise ValidationError(f"源库拒绝执行该语句: {exc}") from exc
         except ResourceClosedError as exc:
             raise ValidationError("该语句未返回结果集（仅支持返回行的只读语句）") from exc

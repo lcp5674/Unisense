@@ -5359,3 +5359,38 @@ async def test_query_sql_maps_source_side_errors_to_validation_error():
             return_value=_FailConn(exc),
         ), pytest.raises(AppValidationError):
             await svc.query_sql("s1", "CHECKSUM TABLE t", limit=10)
+
+
+async def test_query_sql_no_database_selected_friendly_hint():
+    """数据源未配置默认库时裸表名触发源端 1046：映射为 422 且给出中文操作指导
+    （而非透出 pymysql 原始报错「No database selected」）。"""
+    svc, repo = _query_svc()
+    src = MagicMock(source_id="s1", source_type="doris", connection_config="enc")
+    repo.get_source = AsyncMock(return_value=src)
+
+    class _NoDbConn:
+        async def query(self, sql: str, params: dict | None = None):
+            from sqlalchemy.exc import OperationalError
+
+            raise OperationalError(
+                "stmt",
+                {},
+                Exception(
+                    "(pymysql.err.OperationalError) (1046, 'No database selected')"
+                ),
+            )
+
+        async def dispose(self) -> None:
+            return None
+
+    from app.core.exceptions import ValidationError as BizValidationError
+
+    with patch(
+        "app.services.collector.service.build_collector",
+        return_value=_NoDbConn(),
+    ), pytest.raises(BizValidationError) as ei:
+        await svc.query_sql("s1", "SELECT * FROM dwd_order_di", limit=10)
+    msg = str(ei.value)
+    assert "库名.表名" in msg
+    assert "USE 库名" in msg
+    assert "No database selected" not in msg
