@@ -99,7 +99,14 @@ collection_run_router = APIRouter(prefix="/collection-runs", tags=["collector-ru
 
 #: 数据源/采集写权限：平台级运维仅管理/域管理员（metric_owner 单域指标负责人不操作平台级数据源）。
 _WRITE_ROLES = ("platform_admin", "domain_admin")
-_READ_ROLES = ALL_ROLES
+#: 读权限：采集运维数据（源概览/采集运行/水位/漂移/任务）为平台级治理数据，仅
+#: 管理/域管理员/指标负责人可读——对齐前端 data-sources:view、collection-tasks:view、
+#: collection-history:view、catalogs:view 基线；viewer/reviewer/analyst/compliance 无
+#: 采集页面入口，不应经 API 直读资产规模/PII 分布/采集运行状态。
+_READ_ROLES = ("platform_admin", "domain_admin", "metric_owner")
+#: 源浏览（仅列表/类型）：查询工作台/维度映射需「选数据源」，对任意登录用户开放
+#: （list 已按 org 收敛 + 凭据脱敏，不泄露连接敏感字段）。
+_BROWSE_READ_DEPS = [Depends(require_roles(*ALL_ROLES)), Depends(guard_against_injection)]
 
 
 def _resolve_org_scope(user) -> int | None:
@@ -184,7 +191,7 @@ async def create_data_source(
     return ok(data=resp, trace_id=trace_id)
 
 
-@source_router.get("", dependencies=_READ_DEPS)
+@source_router.get("", dependencies=_BROWSE_READ_DEPS)
 async def list_data_sources(
     request: Request,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -220,7 +227,7 @@ async def list_data_sources(
     )
 
 
-@source_router.get("/types", dependencies=_READ_DEPS)
+@source_router.get("/types", dependencies=_BROWSE_READ_DEPS)
 async def list_source_types(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,

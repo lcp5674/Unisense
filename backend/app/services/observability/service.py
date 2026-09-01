@@ -94,6 +94,17 @@ class ObservabilityService(BaseService):
     async def quality_stats(self) -> dict[str, Any]:
         return await self._repo.quality_stats()
 
+    async def metric_health_stats(
+        self,
+        actor_id: int | None = None,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> dict[str, Any]:
+        """指标健康度摘要（总览仪表卡片数据源，全员可读，P0-3 收敛）。"""
+        return await self._repo.metric_health_stats(
+            actor_id=actor_id, role=role, user_domain=user_domain
+        )
+
     async def api_stats(self) -> dict[str, int]:
         return await self._repo.api_stats()
 

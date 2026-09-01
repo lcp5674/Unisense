@@ -29,8 +29,26 @@ router = APIRouter(prefix="/observability", tags=["observability"])
 # 反馈/NPS 提交为用户自助（任何登录用户可提交建议），不按角色收窄——此前
 # _WRITE_ROLES 排除 analyst/reviewer/compliance_officer，导致页面可点但 403。
 _WRITE_ROLES = ALL_ROLES
-_READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer")
+# 运营统计/大盘（quality/api/notifications/lineage/overview/nps stats）为平台级
+# OPS 遥测（依赖熔断/延迟/错误率、采集成功率、PII 待复核/授权到期风险雷达、审计动作
+# 计数），仅平台/域管理员可读——对齐前端 observability:view 基线，杜绝 viewer/
+# reviewer/metric_owner 绕过菜单直调 API 拉取全局运营数据。
+_READ_ROLES = ("platform_admin", "domain_admin")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
+# 反馈列表读：对齐前端 feedback:view 基线（平台/域管理员、指标负责人、评审、合规、
+# 分析师），viewer 不可见他人反馈。
+_FEEDBACK_READ_DEPS = [
+    Depends(
+        require_roles(
+            "platform_admin", "domain_admin", "metric_owner",
+            "reviewer", "compliance_officer", "analyst",
+        )
+    ),
+    Depends(guard_against_injection),
+]
+# 指标健康度摘要：总览仪表「指标可信度」卡片数据源，全员可读（quality 类元数据，
+# 对齐 quality:view 基线）；敏感 OPS 遥测（system/risks/审计计数）不在此端点。
+_HEALTH_READ_DEPS = [Depends(require_roles(*ALL_ROLES)), Depends(guard_against_injection)]
 # 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
 
@@ -75,7 +93,7 @@ async def submit_feedback(
     return ok(data=FeedbackResponse.from_model(resp), trace_id=trace_id)
 
 
-@router.get("/feedback", dependencies=_READ_DEPS)
+@router.get("/feedback", dependencies=_FEEDBACK_READ_DEPS)
 async def list_feedback(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
@@ -120,6 +138,26 @@ async def quality_metrics(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     return ok(data=await ObservabilityService(db).quality_stats(), trace_id=trace_id)
+
+
+@router.get("/metrics/health", dependencies=_HEALTH_READ_DEPS)
+async def metric_health(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """指标健康度摘要（总览仪表「指标可信度」卡片，全员可读）。
+
+    与 /overview 的 quality.metric_health 同源；非管理角色按 P0-3 可见性收敛，
+    管理角色全量。独立端点避免仪表盘经 /overview 拉取全局 OPS 遥测。
+    """
+    scope: dict[str, Any] = {}
+    if user.role not in ("platform_admin", "domain_admin"):
+        scope = {"actor_id": user.id, "role": user.role, "user_domain": user.domain}
+    return ok(
+        data=await ObservabilityService(db).metric_health_stats(**scope),
+        trace_id=trace_id,
+    )
 
 
 @router.get("/quality-events", dependencies=_READ_DEPS)
@@ -211,7 +249,7 @@ async def submit_nps(
     return ok(data=FeedbackResponse.from_model(resp), trace_id=trace_id)
 
 
-@router.get("/nps/stats", dependencies=_READ_DEPS)
+@router.get("/nps/stats", dependencies=_FEEDBACK_READ_DEPS)
 async def nps_stats(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,

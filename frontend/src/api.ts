@@ -3878,6 +3878,18 @@ export async function fetchObsOverview(): Promise<ObsOverview> {
   return request<ObsOverview>(`${API_BASE}/observability/overview`);
 }
 
+/**
+ * 指标健康度摘要（GET /observability/metrics/health，全员可读、P0-3 收敛）：
+ * 总览仪表「指标可信度」卡片数据源。与 /observability/overview 解耦——后者
+ * 含 system/risks/审计计数等 OPS 遥测，仅管理员可读。
+ */
+export async function fetchObsMetricHealth(): Promise<ObsOverview["quality"]["metric_health"]> {
+  const raw = await request<{ metric_health: ObsOverview["quality"]["metric_health"] }>(
+    `${API_BASE}/observability/metrics/health`,
+  );
+  return raw.metric_health;
+}
+
 // ---- 推荐 ----
 export async function fetchRecommendedMetrics(limit = 20): Promise<RecommendItem[]> {
   return request<{ items: RecommendItem[]; total: number }>(

@@ -12,7 +12,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ALL_ROLES, CurrentUser, require_roles
+from app.api.deps import CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
 from app.core.exceptions import AuthError
@@ -48,7 +48,9 @@ from app.services.lineage.service import LineageService, paginate_edges
 router = APIRouter(prefix="/lineage", tags=["lineage"])
 
 _WRITE_ROLES = ("platform_admin", "domain_admin", "metric_owner")
-_READ_ROLES = ALL_ROLES
+# 读守卫对齐前端 lineage:view 基线（平台/域管理员、指标负责人、合规、分析师）——
+# viewer/reviewer 无血缘页面入口，也不应经 API 直读跨域血缘图/路径/覆盖统计。
+_READ_ROLES = ("platform_admin", "domain_admin", "metric_owner", "compliance_officer", "analyst")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 # 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]

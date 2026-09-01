@@ -1751,3 +1751,57 @@ class TestWriteOps:
         assert entities[0].sensitivity_level == "CONFIDENTIAL"
         assert entities[0].row_version == 2
         s.flush.assert_awaited_once()
+
+
+class TestMetricSummaryVisibility:
+    """metric_summary/metric_dimension_summary P0-3 可见性收敛回归。
+
+    非管理角色（metric_owner/analyst/compliance）须在汇总 SQL 附加与 list_metrics
+    同源的可见性条件（仅公开状态 + 本人私有），杜绝泄露他人 DRAFT/REVIEW 计数。
+    """
+
+    def _rows(self, *pairs) -> MagicMock:
+        r = MagicMock()
+        r.all = MagicMock(return_value=list(pairs))
+        # 聚合标量（pii_total/pii_reviewed/metric_total）走 .scalar()，默认 None → or 0
+        r.scalar = MagicMock(return_value=None)
+        return r
+
+    async def test_metric_summary_admin_no_visibility(self) -> None:
+        s = _session()
+        s.execute = AsyncMock(side_effect=[self._rows(("finance", 3)), self._rows(("REVIEW", 1))])
+        repo = AssetMapRepository(s)
+        out = await repo.metric_summary()  # actor_id=None → 全量
+        assert out["by_domain"] == {"finance": 3}
+        assert out["by_status"] == {"REVIEW": 1}
+        for call in s.execute.call_args_list:
+            stmt = str(call.args[0])
+            # 无可见性条件：不出现 owner_id/backup_owner_id 过滤
+            assert "owner_id" not in stmt and "backup_owner_id" not in stmt
+
+    async def test_metric_summary_non_admin_applies_visibility(self) -> None:
+        s = _session()
+        s.execute = AsyncMock(
+            side_effect=[self._rows(("finance", 2)), self._rows(("PUBLISHED", 2))]
+        )
+        repo = AssetMapRepository(s)
+        out = await repo.metric_summary(actor_id=11, role="metric_owner", user_domain="finance")
+        assert out["by_domain"] == {"finance": 2}
+        assert out["by_status"] == {"PUBLISHED": 2}
+        for call in s.execute.call_args_list:
+            stmt = str(call.args[0])
+            assert "owner_id" in stmt and "backup_owner_id" in stmt
+
+    async def test_metric_dimension_summary_non_admin_applies_visibility(self) -> None:
+        s = _session()
+        # pii_total / pii_reviewed / metric_total + 13 类分布 = 16 次聚合
+        s.execute = AsyncMock(side_effect=[self._rows()] * 16)
+        repo = AssetMapRepository(s)
+        out = await repo.metric_dimension_summary(
+            actor_id=11, role="analyst", user_domain="finance"
+        )
+        assert out["total"] == 0
+        assert s.execute.await_count == 16
+        for call in s.execute.call_args_list:
+            stmt = str(call.args[0])
+            # 非管理角色所有聚合均带可见性条件

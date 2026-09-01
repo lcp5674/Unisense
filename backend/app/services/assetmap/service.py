@@ -183,13 +183,36 @@ class AssetMapService(BaseService):
     async def classification_summary(self) -> dict[str, Any]:
         return await _agg_cached("classification_summary", self._repo.classification_summary)
 
-    async def metric_summary(self) -> dict[str, Any]:
-        return await _agg_cached("metric_summary", self._repo.metric_summary)
+    async def metric_summary(
+        self,
+        actor_id: int | None = None,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> dict[str, Any]:
+        # 管理角色（actor_id=None）走全局聚合缓存；非管理角色按 P0-3 可见性实时计算，
+        # 不缓存（避免跨用户缓存串扰与按用户缓存键爆炸；查询本身廉价）。
+        if actor_id is None:
+            return await _agg_cached("metric_summary", self._repo.metric_summary)
+        return await self._repo.metric_summary(
+            actor_id=actor_id, role=role, user_domain=user_domain
+        )
 
-    async def metric_dimension_summary(self) -> dict[str, Any]:
-        """指标体系聚合：指标多维分布 + PII 合规率（概览 Tab 指标体系区块数据源）。"""
-        return await _agg_cached(
-            "metric_dimension_summary", self._repo.metric_dimension_summary
+    async def metric_dimension_summary(
+        self,
+        actor_id: int | None = None,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> dict[str, Any]:
+        """指标体系聚合：指标多维分布 + PII 合规率（概览 Tab 指标体系区块数据源）。
+
+        管理角色走全局缓存；非管理角色按 P0-3 可见性实时计算（同上，防跨用户串扰）。
+        """
+        if actor_id is None:
+            return await _agg_cached(
+                "metric_dimension_summary", self._repo.metric_dimension_summary
+            )
+        return await self._repo.metric_dimension_summary(
+            actor_id=actor_id, role=role, user_domain=user_domain
         )
 
     async def list_tables(

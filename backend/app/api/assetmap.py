@@ -100,6 +100,17 @@ def _svc(db: AsyncSession, user: User) -> AssetMapService:
     return AssetMapService(db, org_id=org_id)
 
 
+def _metric_visibility_scope(user: User) -> dict[str, Any]:
+    """指标汇总可见性作用域：管理角色全量（None），其余按 P0-3 读路径行级隔离。
+
+    与 list_metrics 明细同源（visibility.py），保证「汇总计数 == 明细可见数」，
+    防止资产地图对 metric_owner/analyst/compliance 泄露他人 DRAFT/REVIEW 私有计数。
+    """
+    if user.role in ("platform_admin", "domain_admin"):
+        return {}
+    return {"actor_id": user.id, "role": user.role, "user_domain": user.domain}
+
+
 
 @router.get("/summary", dependencies=_READ_DEPS)
 async def catalog_summary(
@@ -125,7 +136,10 @@ async def metric_summary(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    return ok(data=await _svc(db, user).metric_summary(), trace_id=trace_id)
+    return ok(
+        data=await _svc(db, user).metric_summary(**_metric_visibility_scope(user)),
+        trace_id=trace_id,
+    )
 
 
 @router.get("/metric-dimensions", dependencies=_READ_DEPS)
@@ -137,8 +151,12 @@ async def metric_dimension_summary(
     """指标体系聚合：指标类型/分层/分级/单位/聚合/时间语义/状态/域分布 + PII 合规率。
 
     概览 Tab「指标体系」区块数据源，每类分布可下钻对应指标明细。
+    非管理角色按 P0-3 可见性收敛（与明细列表同源）。
     """
-    return ok(data=await _svc(db, user).metric_dimension_summary(), trace_id=trace_id)
+    return ok(
+        data=await _svc(db, user).metric_dimension_summary(**_metric_visibility_scope(user)),
+        trace_id=trace_id,
+    )
 
 
 @router.get("/tables", dependencies=_READ_DEPS)

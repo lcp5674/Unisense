@@ -30,6 +30,7 @@ from app.models.quality import QualityEvent, QualityEventStatus
 from app.models.subject_domain import SubjectDomain
 from app.models.term import Term
 from app.models.user import User
+from app.services.semantic.visibility import metric_visibility_conditions
 
 
 class ObservabilityRepository:
@@ -254,6 +255,85 @@ class ObservabilityRepository:
             "by_level": dict(cast("Sequence[tuple[Any, Any]]", by_level)),
             "by_status": dict(cast("Sequence[tuple[Any, Any]]", by_status)),
             "total": sum(cnt for _, cnt in by_status),
+        }
+
+    async def metric_health_stats(
+        self,
+        actor_id: int | None = None,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> dict[str, Any]:
+        """指标健康度摘要（总览仪表「指标可信度」卡片数据源，全员可读）。
+
+        与 /overview 的 quality.metric_health 同源，但独立轻量端点：非管理角色按
+        P0-3 可见性收敛（仅公开状态 + 本人私有），避免仪表盘经 /overview 拉取
+        全局 OPS 遥测；管理角色（actor_id=None）全量。
+        """
+        visibility = metric_visibility_conditions(actor_id, role, user_domain)
+        live_join = (
+            MetricHealthScore.metric_id == Metric.id,
+            MetricHealthScore.deleted_at.is_(None),
+            Metric.deleted_at.is_(None),
+            *visibility,
+        )
+        by_level_rows = (
+            await self._session.execute(
+                select(MetricHealthScore.level, func.count())
+                .join(Metric, Metric.id == MetricHealthScore.metric_id)
+                .where(*live_join)
+                .group_by(MetricHealthScore.level)
+            )
+        ).all()
+        by_level = {str(level): int(cnt) for level, cnt in by_level_rows}
+        total_scored = sum(by_level.values())
+        avg_score = (
+            await self._session.execute(
+                select(func.avg(MetricHealthScore.score))
+                .join(Metric, Metric.id == MetricHealthScore.metric_id)
+                .where(*live_join)
+            )
+        ).scalar() or 0
+        risk_rows = (
+            await self._session.execute(
+                select(
+                    MetricHealthScore.metric_id,
+                    MetricHealthScore.score,
+                    MetricHealthScore.level,
+                    Metric.name,
+                    Metric.metric_code,
+                )
+                .join(Metric, Metric.id == MetricHealthScore.metric_id)
+                .where(*live_join, MetricHealthScore.level.in_(["WARNING", "CRITICAL"]))
+                .order_by(MetricHealthScore.score.asc())
+                .limit(5)
+            )
+        ).all()
+        total_metrics = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(Metric)
+                .where(Metric.deleted_at.is_(None), *visibility)
+            )
+        ).scalar() or 0
+        return {
+            "metric_health": {
+                "by_level": by_level,
+                "total_scored": total_scored,
+                "avg_score": round(float(avg_score)) if total_scored else 0,
+                "coverage_pct": (
+                    round(total_scored / total_metrics * 100, 1) if total_metrics else 0.0
+                ),
+                "top_risk": [
+                    {
+                        "metric_id": mid,
+                        "metric_name": mname,
+                        "metric_code": mcode,
+                        "score": score,
+                        "level": str(level),
+                    }
+                    for mid, score, level, mname, mcode in risk_rows
+                ],
+            }
         }
 
     async def api_stats(self) -> dict[str, int]:

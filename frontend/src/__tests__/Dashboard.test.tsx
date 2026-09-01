@@ -8,6 +8,7 @@ import { Dashboard } from "../pages/Dashboard";
 vi.mock("../api", () => ({
   fetchDashboard: vi.fn(),
   fetchObsOverview: vi.fn(),
+  fetchObsMetricHealth: vi.fn(),
   fetchRecommendedMetrics: vi.fn(),
   fetchRecommendedTerms: vi.fn(),
   listDomainTree: vi.fn(),
@@ -57,13 +58,13 @@ vi.mock("../hooks/usePermission", async (importOriginal) => {
 
 import {
   fetchDashboard,
-  fetchObsOverview,
+  fetchObsMetricHealth,
   fetchRecommendedMetrics,
   fetchRecommendedTerms,
   listDomainTree,
 } from "../api";
 const mockedFetchDashboard = vi.mocked(fetchDashboard);
-const mockedFetchObsOverview = vi.mocked(fetchObsOverview);
+const mockedFetchObsMetricHealth = vi.mocked(fetchObsMetricHealth);
 
 const mockDashboardData = {
   total: 100,
@@ -169,7 +170,7 @@ describe("Dashboard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockedFetchDashboard.mockResolvedValue(mockDashboardData);
-    mockedFetchObsOverview.mockResolvedValue(mockOverview as never);
+    mockedFetchObsMetricHealth.mockResolvedValue(mockOverview.quality.metric_health as never);
     vi.mocked(fetchRecommendedMetrics).mockResolvedValue([]);
     vi.mocked(fetchRecommendedTerms).mockResolvedValue([]);
     // 域列表默认空 → 域映射回退显示编码，不影响既有断言
@@ -792,7 +793,7 @@ describe("Dashboard 数据隔离（非管理角色视角）", () => {
       ...mockDashboardData,
       assigned_review: 0,
     } as never);
-    mockedFetchObsOverview.mockResolvedValue(mockOverview as never);
+    mockedFetchObsMetricHealth.mockResolvedValue(mockOverview.quality.metric_health as never);
     vi.mocked(fetchRecommendedMetrics).mockResolvedValue([]);
     vi.mocked(fetchRecommendedTerms).mockResolvedValue([]);
     vi.mocked(listDomainTree).mockResolvedValue([]);
@@ -837,7 +838,7 @@ describe("总览仪表跳转权限守卫（按钮级）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockedFetchDashboard.mockResolvedValue(mockDashboardData);
-    mockedFetchObsOverview.mockResolvedValue(mockOverview as never);
+    mockedFetchObsMetricHealth.mockResolvedValue(mockOverview.quality.metric_health as never);
     vi.mocked(fetchRecommendedMetrics).mockResolvedValue([]);
     vi.mocked(fetchRecommendedTerms).mockResolvedValue([]);
     vi.mocked(listDomainTree).mockResolvedValue([]);

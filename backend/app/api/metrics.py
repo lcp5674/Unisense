@@ -210,6 +210,13 @@ _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_inject
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
 # B3（审查修复）：/publish 直发通道须管理员（对齐 dimension/measure/term 的 /publish）
 _ADMIN_ROLES = ("platform_admin",)
+# 指标运营统计/评测工具（口径一致率、SQL 推断评测）：前端 /metric-ops、/sql-infer-eval
+# 仅 metric:create 角色可访问，API 同步收紧——viewer/business 等只读角色不应经接口
+# 直读部门间冲突数/评测报告（此前 _READ_DEPS=ALL_ROLES 属越权侧门）。
+_METRIC_OPS_DEPS = [
+    Depends(require_roles("platform_admin", "domain_admin", "metric_owner")),
+    Depends(guard_against_injection),
+]
 
 # ---- SQL 文本承载端点：注入守卫按字段/路径豁免 ----
 # 下述端点的合法输入就是原始 SQL 文本（用户粘贴的指标 SQL/口径表达式），仅经
@@ -448,7 +455,7 @@ async def list_metrics(
     "/consistency/stats",
     response_model=ApiResponse[dict[str, Any]],
     summary="口径一致率统计（P1：总口径数/一致率/部门间冲突/平均解决时长）",
-    dependencies=_READ_DEPS,
+    dependencies=_METRIC_OPS_DEPS,
 )
 async def consistency_stats(
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -476,7 +483,7 @@ async def consistency_stats(
     "/sql-infer-eval",
     response_model=ApiResponse[Any],
     summary="SQL 智能推断评测报告（成功率可视化数据源）",
-    dependencies=_READ_DEPS,
+    dependencies=_METRIC_OPS_DEPS,
 )
 async def sql_infer_eval_report(
     db: Annotated[AsyncSession, Depends(get_db_session)],

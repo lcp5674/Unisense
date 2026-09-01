@@ -16,7 +16,7 @@ import {
 import { Pie, Bar } from "@ant-design/charts";
 import {
   fetchDashboard,
-  fetchObsOverview,
+  fetchObsMetricHealth,
   fetchRecommendedMetrics,
   fetchRecommendedTerms,
   listDomainTree,
@@ -938,9 +938,10 @@ export function Dashboard() {
             return [];
           }),
           fetchRecommendedTerms(5).catch(() => []),
-          // 指标可信度独立拉取可观测聚合，失败静默降级（卡片隐藏），不阻断仪表盘其余读数
-          fetchObsOverview()
-            .then((o) => o?.quality?.metric_health ?? null)
+          // 指标可信度独立拉取健康度摘要（全员可读、P0-3 收敛），失败静默降级
+          // （卡片隐藏），不阻断仪表盘其余读数
+          fetchObsMetricHealth()
+            .then((h) => h ?? null)
             .catch((e) => {
               console.warn("[Dashboard] 指标可信度加载失败", e);
               return null;

@@ -28,6 +28,7 @@ from app.models.quality import QualityEvent
 from app.models.system_dict import SystemDict
 from app.models.term import Term
 from app.models.user import User
+from app.services.semantic.visibility import metric_visibility_conditions
 
 
 class MetricRepository:
@@ -247,38 +248,11 @@ class MetricRepository:
         # 指标目录是数据资产公开目录（已发布/灰度/废弃均可被消费方发现），但
         # 未发布草稿/审核中是指标 Owner 的私有工作区——他人不得窥探（域隔离在
         # 写路径已有，读路径此前完全缺失，任意 viewer 可翻到 DRAFT 完整口径）。
-        if (
-            visible_actor_id is not None
-            and visible_role is not None
-            and visible_role not in ("platform_admin", "domain_admin")
-        ):
-            visibility: list[ColumnElement[bool]] = [
-                Metric.status.in_(("PUBLISHED", "EXPERIMENTAL", "DEPRECATED")),
-                Metric.owner_id == visible_actor_id,
-                Metric.backup_owner_id == visible_actor_id,
-            ]
-            if visible_role == "reviewer":
-                # 仅被指派评审人可看待审（REVIEW）指标（TD §13 治理闭环）：
-                # - reviewer_type=user：仅 reviewer_id 指定的用户可见（评审工作台/目录
-                #   不泄露他人待审项）
-                # - reviewer_type=domain：仅同域评审组可见（reviewer_domain 与用户域一致）
-                # - 未指派：由域管理员兜底评审（reviewer 角色不可见，不在此放行）
-                visibility.append(
-                    and_(
-                        Metric.status == "REVIEW",
-                        or_(
-                            and_(
-                                Metric.reviewer_type == "user",
-                                Metric.reviewer_id == visible_actor_id,
-                            ),
-                            and_(
-                                Metric.reviewer_type == "domain",
-                                Metric.reviewer_domain == visible_user_domain,
-                            ),
-                        ),
-                    )
-                )
-            conditions.append(or_(*visibility))
+        # 复用共享可见性助手（visibility.py），与 assetmap 指标汇总同源，防止
+        # 「列表按可见性过滤、汇总按全量计数」的口径漂移。
+        conditions.extend(
+            metric_visibility_conditions(visible_actor_id, visible_role, visible_user_domain)
+        )
         if domain:
             conditions.append(Metric.domain == domain)
         if status:

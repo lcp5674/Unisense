@@ -25,6 +25,7 @@ from app.models.governance import Classification, PiiFieldOverride
 from app.models.lineage import LineageEdge
 from app.models.metric import Metric
 from app.models.user import User
+from app.services.semantic.visibility import metric_visibility_conditions
 
 logger = structlog.get_logger("unisense.assetmap.repository")
 
@@ -793,15 +794,25 @@ class AssetMapRepository:
         ).all()
         return {"by_sensitivity": dict(cast("Sequence[tuple[Any, Any]]", rows))}
 
-    async def metric_summary(self) -> dict[str, Any]:
+    async def metric_summary(
+        self,
+        actor_id: int | None = None,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> dict[str, Any]:
         # C4（第七轮）：按域分布排除草稿/已废弃（对齐域树活跃指标口径，避免资产地图
         # 「指标总数」把 DRAFT/DEPRECATED 一并计入虚高）；按状态分布保留全量（分布视图）。
+        # P0-3（审查修复）：非管理角色按读路径行级隔离收敛（仅公开状态 + 本人私有
+        # 工作区 + 被指派 REVIEW），与指标明细列表同源，杜绝「列表按可见性过滤、
+        # 汇总按全量计数」泄露他人 DRAFT/REVIEW 私有指标计数。
+        visibility = metric_visibility_conditions(actor_id, role, user_domain)
         by_domain = (
             await self._session.execute(
                 select(Metric.domain, func.count())
                 .where(
                     Metric.deleted_at.is_(None),
                     Metric.status.not_in(("DRAFT", "DEPRECATED")),
+                    *visibility,
                 )
                 .group_by(Metric.domain)
             )
@@ -809,7 +820,7 @@ class AssetMapRepository:
         by_status = (
             await self._session.execute(
                 select(Metric.status, func.count())
-                .where(Metric.deleted_at.is_(None))
+                .where(Metric.deleted_at.is_(None), *visibility)
                 .group_by(Metric.status)
             )
         ).all()
@@ -818,12 +829,19 @@ class AssetMapRepository:
             "by_status": dict(cast("Sequence[tuple[Any, Any]]", by_status)),
         }
 
-    async def _metric_distribution(self, column: Any) -> dict[str, int]:
-        """按指定列聚合指标分布（null 值归入 ``__null__``，前端可显式展示）。"""
+    async def _metric_distribution(
+        self,
+        column: Any,
+        visibility: Sequence[Any] | None = None,
+    ) -> dict[str, int]:
+        """按指定列聚合指标分布（null 值归入 ``__null__``，前端可显式展示）。
+
+        visibility: P0-3 可见性条件（非管理角色传入，空则全量）。
+        """
         rows = (
             await self._session.execute(
                 select(column, func.count())
-                .where(Metric.deleted_at.is_(None))
+                .where(Metric.deleted_at.is_(None), *(visibility or []))
                 .group_by(column)
             )
         ).all()
@@ -832,12 +850,18 @@ class AssetMapRepository:
             out[str(key) if key is not None else "__null__"] = int(cnt or 0)
         return out
 
-    async def metric_dimension_summary(self) -> dict[str, Any]:
+    async def metric_dimension_summary(
+        self,
+        actor_id: int | None = None,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> dict[str, Any]:
         """指标体系聚合：指标多维分布 + PII 合规率。
 
         13 类维度：类型/粒度/分层/分级/单位/币种/聚合/时间语义/新鲜度/服务模式/可加性/状态/域。
         复用 SQL GROUP BY，与热力聚合同源（TD §12.11），避免指标体系口径漂移。
         """
+        visibility = metric_visibility_conditions(actor_id, role, user_domain)
         # 合规率：已复核 PII 指标 / 全部 PII 指标。
         # 排除 DEPRECATED——已废弃指标已下线、不再对外服务，其复核状态无意义，
         # 不应参与合规统计（否则废弃测试指标会撑起虚假合规率）。
@@ -849,6 +873,7 @@ class AssetMapRepository:
                     Metric.deleted_at.is_(None),
                     Metric.pii_flag.is_(True),
                     Metric.status != "DEPRECATED",
+                    *visibility,
                 )
             )
         ).scalar() or 0
@@ -861,29 +886,34 @@ class AssetMapRepository:
                     Metric.pii_flag.is_(True),
                     Metric.compliance_reviewed.is_(True),
                     Metric.status != "DEPRECATED",
+                    *visibility,
                 )
             )
         ).scalar() or 0
         metric_total = (
             await self._session.execute(
-                select(func.count()).select_from(Metric).where(Metric.deleted_at.is_(None))
+                select(func.count()).select_from(Metric).where(
+                    Metric.deleted_at.is_(None), *visibility
+                )
             )
         ).scalar() or 0
 
         return {
-            "by_type": await self._metric_distribution(Metric.type),
-            "by_granularity": await self._metric_distribution(Metric.granularity),
-            "by_dw_layer": await self._metric_distribution(Metric.dw_layer),
-            "by_metric_tier": await self._metric_distribution(Metric.metric_tier),
-            "by_unit": await self._metric_distribution(Metric.unit),
-            "by_currency": await self._metric_distribution(Metric.currency),
-            "by_aggregation": await self._metric_distribution(Metric.aggregation),
-            "by_time_semantics": await self._metric_distribution(Metric.time_semantics),
-            "by_freshness": await self._metric_distribution(Metric.freshness),
-            "by_serving_mode": await self._metric_distribution(Metric.serving_mode),
-            "by_additivity": await self._metric_distribution(Metric.additivity),
-            "by_status": await self._metric_distribution(Metric.status),
-            "by_domain": await self._metric_distribution(Metric.domain),
+            "by_type": await self._metric_distribution(Metric.type, visibility),
+            "by_granularity": await self._metric_distribution(Metric.granularity, visibility),
+            "by_dw_layer": await self._metric_distribution(Metric.dw_layer, visibility),
+            "by_metric_tier": await self._metric_distribution(Metric.metric_tier, visibility),
+            "by_unit": await self._metric_distribution(Metric.unit, visibility),
+            "by_currency": await self._metric_distribution(Metric.currency, visibility),
+            "by_aggregation": await self._metric_distribution(Metric.aggregation, visibility),
+            "by_time_semantics": await self._metric_distribution(
+                Metric.time_semantics, visibility
+            ),
+            "by_freshness": await self._metric_distribution(Metric.freshness, visibility),
+            "by_serving_mode": await self._metric_distribution(Metric.serving_mode, visibility),
+            "by_additivity": await self._metric_distribution(Metric.additivity, visibility),
+            "by_status": await self._metric_distribution(Metric.status, visibility),
+            "by_domain": await self._metric_distribution(Metric.domain, visibility),
             "pii_compliance": {
                 "pii_total": int(pii_total),
                 "pii_reviewed": int(pii_reviewed),
