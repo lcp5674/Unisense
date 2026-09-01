@@ -1675,11 +1675,11 @@ async def test_check_connection_updates_health():
             return None
 
     with patch(
-        "app.services.collector.connectors.registry.build",
+        "app.services.collector.service.build_collector",
         return_value=ProbeOkCollector(),
     ) as mock_build:
         result = await svc.check_connection("s1")
-    mock_build.assert_called_once_with("mysql", "enc", allow_private=True)
+    mock_build.assert_called_once_with("mysql", "enc")
     repo.update_health_status.assert_awaited_once_with("s1", "healthy", error=None)
     assert result.ok is True
     assert result.detail == {"version": "8.0"}
@@ -1702,7 +1702,7 @@ async def test_check_connection_failure_marks_unhealthy():
             return None
 
     with patch(
-        "app.services.collector.connectors.registry.build",
+        "app.services.collector.service.build_collector",
         return_value=ProbeFailCollector(),
     ):
         result = await svc.check_connection("s1")
@@ -5162,7 +5162,7 @@ async def test_query_sql_executes_with_appended_limit():
     conn = _QueryConnector([{"a": 1, "b": 2}, {"a": 3, "b": 4}])
 
     with patch(
-        "app.services.collector.connectors.registry.build", return_value=conn
+        "app.services.collector.service.build_collector", return_value=conn
     ):
         result = await svc.query_sql("s1", "SELECT a, b FROM t WHERE x = 1", limit=10)
 
@@ -5182,7 +5182,7 @@ async def test_query_sql_preserves_existing_limit_and_truncates():
     conn = _QueryConnector(rows)
 
     with patch(
-        "app.services.collector.connectors.registry.build", return_value=conn
+        "app.services.collector.service.build_collector", return_value=conn
     ):
         result = await svc.query_sql("s1", "SELECT v FROM t LIMIT 500", limit=100)
 
@@ -5212,7 +5212,7 @@ async def test_query_sql_source_not_found():
     svc, repo = _query_svc()
     repo.get_source = AsyncMock(return_value=None)
     with patch(
-        "app.services.collector.connectors.registry.build",
+        "app.services.collector.service.build_collector",
     ) as mock_build, pytest.raises(NotFoundError):
         await svc.query_sql("nope", "SELECT 1", limit=10)
     mock_build.assert_not_called()
@@ -5232,7 +5232,7 @@ async def test_query_sql_external_error_propagates():
             return None
 
     with patch(
-        "app.services.collector.connectors.registry.build",
+        "app.services.collector.service.build_collector",
         return_value=_FailConn(),
     ), pytest.raises(ExternalDependencyError):
         await svc.query_sql("s1", "SELECT * FROM t", limit=10)

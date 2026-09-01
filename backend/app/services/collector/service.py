@@ -51,7 +51,7 @@ from app.services.collector.schemas import (
     DBCatalogResponse,
     TestConnectionResult,
 )
-from app.services.collector.spi import BaseCollector, CatalogSpec, CollectResult
+from app.services.collector.spi import BaseCollector, CatalogSpec, CollectResult, build_collector
 from app.services.llm.client import (
     DeterministicFallbackLlmClient,
     LlmClient,
@@ -517,16 +517,16 @@ class CollectorService(BaseService):
             logger.warning("list_tables_failed: type=%s dbs=%s err=%s", source_type, databases, exc)
             return {}
 
-    async def check_connection(self, source_id: str, org_id: int | None = None) -> TestConnectionResult:
+    async def check_connection(
+        self, source_id: str, org_id: int | None = None
+    ) -> TestConnectionResult:
         """存量数据源实时探活：解密配置 → 轻量连接 → 更新健康状态与探活时间。"""
-        from app.services.collector.connectors import registry
-
         src = await self._repo.get_source(source_id, org_id=org_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
         try:
             # 已存数据源探活：放行私有网段（内网库），仍拒回环/链路本地/保留
-            collector = registry.build(src.source_type, src.connection_config, allow_private=True)
+            collector = build_collector(src.source_type, src.connection_config)
             try:
                 probe = await collector.probe()
             finally:
@@ -976,18 +976,17 @@ class CollectorService(BaseService):
         - 用 sqlglot 校验为单条只读 SELECT（拒绝多语句 / DDL / DML / SELECT INTO）。
         - 语句无顶层 LIMIT 时追加 ``LIMIT n`` 兜底；有则保留，Python 侧再按 n 截断，
           双保险保证返回行数不超过 limit。
-        - 复用连接器 ``registry.build + collector.query``（与维度枚举预览同链路）。
+        - 复用连接器 ``build_collector + collector.query``（与维度枚举预览同链路；
+          已落库数据源放行内网主机，仍拒回环/链路本地，SSRF 纵深防御一致）。
 
         Raises:
             NotFoundError: 数据源不存在。
             ValidationError: SQL 非只读 SELECT / 表名列名不合法。
             ExternalDependencyError: 源库连接/查询失败。
         """
-        from app.services.collector.connectors import registry
-
         self._validate_read_sql(sql)
         src = await self.get_source_orm(source_id)
-        collector = registry.build(src.source_type, src.connection_config)
+        collector = build_collector(src.source_type, src.connection_config)
         try:
             # 顶层无 LIMIT 才追加（避免子查询 LIMIT 被误判为顶层）
             parsed = sqlglot.parse_one(sql)
@@ -2660,7 +2659,9 @@ class CollectorService(BaseService):
             ),
         }
 
-    async def get_source_overview(self, source_id: str, org_id: int | None = None) -> dict[str, Any]:
+    async def get_source_overview(
+        self, source_id: str, org_id: int | None = None
+    ) -> dict[str, Any]:
         """资产规模概览（详情页头部）：实体类型/PII 分布/字段数/漂移/水位。"""
         overview = await self._repo.get_source_overview(source_id)
         if not overview:
