@@ -338,6 +338,9 @@ export function Layout({ user }: { user: CurrentUser }) {
   // 修改密码弹窗：普通自助改密 / 首次登录强制改密（成功后置位避免重开）
   const [pwdModalOpen, setPwdModalOpen] = useState(false);
   const [forcePwdDone, setForcePwdDone] = useState(false);
+  // 首次登录强制改密：必须修改成功才消失（force 弹窗不可关闭）。
+  // 提前声明（在 unread-count 轮询等 useEffect 之前），供全局轮询/内容区做改密期间抑制。
+  const forceChangeRequired = user.must_change_password === true && !forcePwdDone;
   const navigate = useNavigate();
   const location = useLocation();
   const { token } = theme.useToken();
@@ -412,7 +415,9 @@ export function Layout({ user }: { user: CurrentUser }) {
 
   // 未读角标：后端精确 COUNT（unread-count），避免拉列表近似在 >100 条时不准。
   // 刷新时机：路由切换 + 通知中心变更事件（同页即时）+ 30s 轮询（跨标签页/跨用户实时性）。
+  // 强制改密期间不请求（改密占位界面无角标意义，且避免无效轮询）。
   useEffect(() => {
+    if (forceChangeRequired) return;
     let cancelled = false;
     const refresh = () => {
       fetchUnreadCount()
@@ -429,7 +434,7 @@ export function Layout({ user }: { user: CurrentUser }) {
       off();
       window.clearInterval(timer);
     };
-  }, [location.pathname]);
+  }, [location.pathname, forceChangeRequired]);
 
   // 全局搜索跳转：按类型路由到对应详情/列表页（列表页支持 ?kw= 定位）
   function handleGoToItem(item: GlobalSearchItem) {
@@ -569,8 +574,7 @@ export function Layout({ user }: { user: CurrentUser }) {
     })).filter((g) => g.children.length > 0);
   }, [can, canAny, user.role]);
 
-  // 首次登录强制改密：必须修改成功才消失（force 弹窗不可关闭）
-  const forceChangeRequired = user.must_change_password === true && !forcePwdDone;
+  // 首次登录强制改密（forceChangeRequired 在组件顶部声明，供全局轮询/内容区抑制）
 
   function handlePasswordModalClose() {
     if (forceChangeRequired) setForcePwdDone(true);

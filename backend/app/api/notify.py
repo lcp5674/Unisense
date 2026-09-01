@@ -80,7 +80,7 @@ async def list_notifications(
     )
 
 
-@router.get("/notifications/unread-count", dependencies=_READ_DEPS)
+@router.get("/notifications/unread-count")
 async def unread_count(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
@@ -88,8 +88,9 @@ async def unread_count(
 ) -> Any:
     """当前用户未读通知总数（Header 角标精确计数）。
 
-    与列表接口的未读口径一致（``read_at IS NULL``），避免前端拉列表
-    近似统计在未读 >100 条时角标不准，也省去每次全量列表的带宽开销。
+    纯个人化布局数据（仅查自己的未读数，PLAT-2 以 user.id 硬隔离），
+    不挂 require_roles：与 /me、/me/permissions 同语义，避免强制改密
+    拦截（PASSWORD_CHANGE_REQUIRED）或角色遗漏（analyst）导致角标 403。
     """
     count = await NotifyService(db).unread_count(user.id)
     return ok(data={"count": count}, trace_id=trace_id)
