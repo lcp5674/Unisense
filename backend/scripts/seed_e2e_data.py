@@ -216,6 +216,7 @@ METRICS: list[dict[str, Any]] = [
                 "FROM ods_his_receipt WHERE delete_flag = 0 GROUP BY dept_id, dt"
             ),
             "source_tables": ["ods_his_receipt"],
+            "source_table": "dws_metric_outp_e2e_visit_day",
             "dimensions": ["dept_id", "dt"],
             "measures": [{"name": "visit_cnt", "aggregation": "COUNT_DISTINCT"}],
             "period": "day",
@@ -241,6 +242,7 @@ METRICS: list[dict[str, Any]] = [
                 "WHERE delete_flag = 0 GROUP BY dept_id, dt"
             ),
             "source_tables": ["ods_his_receipt"],
+            "source_table": "dws_metric_outp_e2e_fee_day",
             "dimensions": ["dept_id", "dt"],
             "measures": [{"name": "fee", "aggregation": "SUM"}],
             "period": "day",
@@ -382,7 +384,7 @@ METRICS: list[dict[str, Any]] = [
         "metric_tier": "T1",
         # OneData 挂载层：派生指标挂载数据集（源表/列/粒度/周期/域），granularity 由 service 从 mount 回填
         "mount": {
-            "source_table": "ads_outp_e2e_fee_day",
+            "source_table": "dws_metric_outp_e2e_avgfee_day",
             "source_column": "avg_fee",
             "granularity": "day",
             "default_period": "day",
@@ -395,6 +397,7 @@ METRICS: list[dict[str, Any]] = [
                 "FROM ads_outp_e2e_fee_day"
             ),
             "source_tables": ["ads_outp_e2e_fee_day"],
+            "source_table": "dws_metric_outp_e2e_avgfee_day",
             "dimensions": ["dt"],
             "measures": [{"name": "avg_fee", "aggregation": "AVG"}],
             "dependencies": ["outp_e2e_fee_day", "outp_e2e_visit_day"],
@@ -928,6 +931,108 @@ def ensure_datasource(api: Api) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 4. 血缘
 # ---------------------------------------------------------------------------
+# E2E 门诊指标（outp_e2e_*）的物理宽表载体：consume 查询引擎（MySQL 降级库）
+# 按 `metric_code` 宽表模型执行（_build_query_sql 固定 WHERE metric_code=…）。
+# 这些表此前只注册了目录元数据、从未建表造数 → 查询 503/400。此处真正建表+造数，
+# 使 E2E 门诊演示指标开箱即查（与 sales_e2e/user_e2e 宽表同模式）。
+OUTP_WIDE_TABLES: dict[str, str] = {
+    "dws_metric_outp_e2e_fee_day": (
+        "CREATE TABLE IF NOT EXISTS dws_metric_outp_e2e_fee_day ("
+        "metric_code varchar(64) NOT NULL, fee decimal(18,2) NOT NULL, "
+        "dept_id varchar(32) NOT NULL, dt date NOT NULL"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    ),
+    "dws_metric_outp_e2e_visit_day": (
+        "CREATE TABLE IF NOT EXISTS dws_metric_outp_e2e_visit_day ("
+        "metric_code varchar(64) NOT NULL, visit_cnt bigint NOT NULL, "
+        "dept_id varchar(32) NOT NULL, dt date NOT NULL"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    ),
+    "dws_metric_outp_e2e_avgfee_day": (
+        "CREATE TABLE IF NOT EXISTS dws_metric_outp_e2e_avgfee_day ("
+        "metric_code varchar(64) NOT NULL, avg_fee decimal(18,2) NOT NULL, "
+        "dt date NOT NULL"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    ),
+}
+
+_OUTP_COLUMNS: dict[str, list[str]] = {
+    "dws_metric_outp_e2e_fee_day": ["metric_code", "fee", "dept_id", "dt"],
+    "dws_metric_outp_e2e_visit_day": ["metric_code", "visit_cnt", "dept_id", "dt"],
+    "dws_metric_outp_e2e_avgfee_day": ["metric_code", "avg_fee", "dt"],
+}
+
+_OUTP_ROWS: dict[str, list[tuple[Any, ...]]] = {
+    "dws_metric_outp_e2e_fee_day": [
+        ("outp_e2e_fee_day", 12340.50, "dept_01", date(2026, 8, 1)),
+        ("outp_e2e_fee_day", 15880.20, "dept_02", date(2026, 8, 1)),
+        ("outp_e2e_fee_day", 13110.00, "dept_01", date(2026, 8, 2)),
+        ("outp_e2e_fee_day", 17090.80, "dept_02", date(2026, 8, 2)),
+        ("outp_e2e_fee_day", 14560.30, "dept_01", date(2026, 8, 3)),
+        ("outp_e2e_fee_day", 16240.90, "dept_02", date(2026, 8, 3)),
+        ("outp_e2e_fee_day", 13890.40, "dept_01", date(2026, 8, 4)),
+        ("outp_e2e_fee_day", 15430.60, "dept_02", date(2026, 8, 4)),
+    ],
+    "dws_metric_outp_e2e_visit_day": [
+        ("outp_e2e_visit_day", 620, "dept_01", date(2026, 8, 1)),
+        ("outp_e2e_visit_day", 790, "dept_02", date(2026, 8, 1)),
+        ("outp_e2e_visit_day", 655, "dept_01", date(2026, 8, 2)),
+        ("outp_e2e_visit_day", 845, "dept_02", date(2026, 8, 2)),
+        ("outp_e2e_visit_day", 680, "dept_01", date(2026, 8, 3)),
+        ("outp_e2e_visit_day", 810, "dept_02", date(2026, 8, 3)),
+        ("outp_e2e_visit_day", 640, "dept_01", date(2026, 8, 4)),
+        ("outp_e2e_visit_day", 770, "dept_02", date(2026, 8, 4)),
+    ],
+    "dws_metric_outp_e2e_avgfee_day": [
+        ("outp_e2e_avgfee_day", 19.90, date(2026, 8, 1)),
+        ("outp_e2e_avgfee_day", 20.10, date(2026, 8, 2)),
+        ("outp_e2e_avgfee_day", 21.40, date(2026, 8, 3)),
+        ("outp_e2e_avgfee_day", 20.70, date(2026, 8, 4)),
+    ],
+}
+
+
+def seed_outp_wide_tables() -> None:
+    """在 consume 查询引擎（MySQL 降级库）建 E2E 门诊宽表并造数（幂等）。
+
+    consume 的 MysqlExecutor 以 ``UNISENSE_MYSQL_FALLBACK_URL`` 为引擎；宽表缺失时
+    E2E 门诊指标查询 503（表不存在）。建表+全量重插保证可重复运行不产生重复数据。
+    """
+    import asyncio
+
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.core.config import settings
+
+    url = settings.mysql_fallback_url
+    if not url:
+        print("[wide] 未配置 UNISENSE_MYSQL_FALLBACK_URL，跳过 E2E 门诊宽表")
+        return
+
+    async def _run() -> None:
+        eng = create_async_engine(url)
+        try:
+            async with eng.begin() as conn:
+                for table, ddl in OUTP_WIDE_TABLES.items():
+                    await conn.execute(text(ddl))
+                for table, rows in _OUTP_ROWS.items():
+                    cols = ", ".join(_OUTP_COLUMNS[table])
+                    ph = ", ".join(f":v{i}" for i in range(len(_OUTP_COLUMNS[table])))
+                    await conn.execute(text(f"DELETE FROM {table}"))
+                    await conn.execute(
+                        text(
+                            f"INSERT INTO {table} ({cols}) VALUES ({ph})"
+                        ),
+                        [{f"v{i}": row[i] for i in range(len(row))} for row in rows],
+                    )
+            print(f"[wide] E2E 门诊宽表就绪（{len(OUTP_WIDE_TABLES)} 张）")
+        finally:
+            await eng.dispose()
+
+    asyncio.run(_run())
+
+
 LINEAGE_SQLS = [
     (
         "INSERT INTO dwd_his_receipt "
@@ -1492,6 +1597,9 @@ def main() -> int:
         metric_ids[spec["code"]] = m.get("id") or 0
     # OneData 存量订正：旧式原子指标（measure_id 为空）补关联逻辑度量（幂等）
     _backfill_legacy_metric_measures(measure_ids)
+    # E2E 门诊指标的物理宽表载体：consume 查询引擎（MySQL 降级库）建表+造数，
+    # 必须在发布前完成——否则指标发布后查询 503（表不存在）。
+    seed_outp_wide_tables()
     # 发布：outp_e2e_register_day / outp_e2e_visit_day / outp_e2e_fee_day /
     #        outp_e2e_drugfee_day / outp_e2e_prescription_day / outp_e2e_piipatient_day /
     #        outp_e2e_deprecated_day
