@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from tests.conftest import make_create_payload, make_metric
 
 from app.api import metrics as metrics_module
+from app.main import app
 
 
 def _mock_service() -> MagicMock:
@@ -58,7 +59,19 @@ async def test_update_metric_writes_audit(client):
         wa.assert_awaited()
 
 
-async def test_publish_metric_writes_audit(client):
+async def test_publish_metric_writes_audit(client, monkeypatch):
+    """B3（审查修复）：/publish 收紧为 platform_admin 门禁——审计仍落。"""
+    from unittest.mock import MagicMock
+
+    from app.api import deps
+
+    # 覆盖当前用户为平台管理员（B3 门禁：/publish 仅 platform_admin）
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     svc = _mock_service()
     with (
         patch.object(metrics_module, "MetricService", return_value=svc),
