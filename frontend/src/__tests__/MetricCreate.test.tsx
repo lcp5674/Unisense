@@ -3308,6 +3308,103 @@ describe("MetricCreate SQL 批量解析（FR-010 批量注册增强）", () => {
     });
   });
 
+  it("批量候选「在向导中编辑」：SQL 模式回填整句 SQL，表达式结构化 JSON 一并回填并在提交时并入 definition_json", async () => {
+    mockedParseSqlBatch.mockResolvedValueOnce({
+      ...SQL_BATCH_RESULT,
+      candidates: SQL_BATCH_RESULT.candidates.map((c) =>
+        c.key === "0:amount"
+          ? {
+              ...c,
+              definition_json: {
+                expression: "SUM(amount)",
+                dw_definition:
+                  "SELECT dt, SUM(amount) AS gmv FROM dwd.sales_detail GROUP BY dt",
+                source_fields: [{ table: "dwd.sales_detail", column: "gmv" }],
+              },
+            }
+          : c,
+      ),
+    });
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await openBatchMode();
+    fireEvent.click(screen.getByTestId("sql-batch-to-wizard-0:amount"));
+    // 回填定位 Step1（指标基本信息）；名称已回填；数仓开发责任方必填
+    await waitFor(() => expect(screen.getByText("指标类型")).toBeTruthy());
+    await fillDwDeveloper();
+    await goToStep(2);
+    // SQL 模式默认展示整句 SQL（dw_definition 兜底 sql；精确匹配 Step2 技术口径 TextArea，
+    // 避免命中 SQL 推断抽屉的相似 placeholder）
+    await waitFor(() => {
+      const sqlInput = screen.getByPlaceholderText(/FROM catalog\.sales\.orders/);
+      expect((sqlInput as HTMLTextAreaElement).value).toContain(
+        "SELECT dt, SUM(amount) AS gmv FROM dwd.sales_detail GROUP BY dt",
+      );
+    });
+    // 提交（SQL 模式）：definition_json 同时含 sql + expression + source_fields（双轨落库）
+    fireEvent.click(screen.getByRole("button", { name: "创建草稿" }));
+    await waitFor(() => {
+      expect(mockedCreate).toHaveBeenCalled();
+      const body = mockedCreate.mock.calls[0][0] as {
+        definition_json: Record<string, unknown>;
+      };
+      expect(String(body.definition_json.sql)).toContain("SELECT dt, SUM(amount) AS gmv");
+      expect(body.definition_json.expression).toBe("SUM(amount)");
+      expect(body.definition_json.source_fields).toEqual([
+        { table: "dwd.sales_detail", column: "gmv" },
+      ]);
+    });
+  });
+
+  it("单条 SQL 推断（选域自动回填）：SQL 模式回填完整 SQL，表达式结构化 JSON 也写入 definition（切表达式模式可见）", async () => {
+    mockedSuggest.mockResolvedValue({
+      metric_code_suggestion: "outpatient_doctor_active_month",
+      segments: { domain: "outpatient", biz_object: "doctor", measure: "active", period: "month" },
+      fields: {
+        name: { value: "月活医生数", source: "sql_parse", confidence: 0.8 },
+        definition_json: {
+          value: {
+            sql: "SELECT COUNT(DISTINCT doctor_code) AS cnt FROM wedw_dw.doctor_visit_agent_info_da",
+            expression: "COUNT(DISTINCT doctor_code)",
+            source_fields: [
+              { table: "wedw_dw.doctor_visit_agent_info_da", column: "doctor_code" },
+            ],
+          },
+          source: "sql_parse",
+          confidence: 0.9,
+        },
+        definition_mode: { value: "sql", source: "sql_parse", confidence: 0.9 },
+      },
+      definition_json: {
+        sql: "SELECT COUNT(DISTINCT doctor_code) AS cnt FROM wedw_dw.doctor_visit_agent_info_da",
+        expression: "COUNT(DISTINCT doctor_code)",
+        source_fields: [
+          { table: "wedw_dw.doctor_visit_agent_info_da", column: "doctor_code" },
+        ],
+      },
+      definition_mode: "sql",
+    } as never);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    // 选域触发 autoSuggest → applySuggestion：SQL 模式 + definition 回填 expression/source_fields
+    await pickDomain();
+    await goToStep(2);
+    // SQL 模式已默认展示（Step2 技术口径 TextArea 回填完整 SQL）
+    await waitFor(() => {
+      const sqlInput = screen.getByPlaceholderText(/FROM catalog\.sales\.orders/);
+      expect((sqlInput as HTMLTextAreaElement).value).toContain(
+        "SELECT COUNT(DISTINCT doctor_code) AS cnt",
+      );
+    });
+    // 切到「表达式（结构化）」：definition JSON 已回填 expression + source_fields（SQL 与表达式双轨保留）
+    fireEvent.click(screen.getByText("表达式（结构化）"));
+    await waitFor(() => {
+      const defInput = screen.getByPlaceholderText(/expression": "sum\(amount\)/) as HTMLTextAreaElement;
+      expect(defInput.value).toContain("COUNT(DISTINCT doctor_code)");
+      expect(defInput.value).toContain("wedw_dw.doctor_visit_agent_info_da");
+    });
+  });
+
   it("批量解析：候选「查看完整口径」弹出完整口径定义（expression/source_tables/partition_key/dw_definition 不截断）", async () => {
     mockedParseSqlBatch.mockResolvedValueOnce({
       ...SQL_BATCH_RESULT,

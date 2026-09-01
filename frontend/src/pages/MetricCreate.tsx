@@ -1030,6 +1030,22 @@ export function MetricCreate() {
         setDwDefinition((prev) =>
           prev.trim() ? prev : String(defJson.sql ?? defJson.dw_definition ?? ""),
         );
+        // 表达式（结构化）口径也回填 definition——SQL 与表达式双轨保留（与批量候选回填
+        // loadCandidateIntoWizard 同构）：用户可切「表达式模式」查看结构化口径，提交（SQL
+        // 模式）时 buildDefinitionJson 并入 expression 结构，不因默认 SQL 展示而丢失。
+        if (defJson.expression || Array.isArray(defJson.source_fields)) {
+          form.setFieldValue(
+            "definition",
+            JSON.stringify(
+              {
+                ...(defJson.expression ? { expression: defJson.expression } : {}),
+                ...(Array.isArray(defJson.source_fields) ? { source_fields: defJson.source_fields } : {}),
+              },
+              null,
+              2,
+            ),
+          );
+        }
       } else {
         setMode("expression");
         form.setFieldValue("definition", JSON.stringify(defJson, null, 2));
@@ -1741,26 +1757,23 @@ export function MetricCreate() {
     if (Array.isArray(c.dimensions) && c.dimensions.length) {
       setSelectedDims(c.dimensions);
     }
-    // 口径定义：SQL 模式（sql / dw_definition=原始 SQL）→ sqlText；expression 模式 → definition JSON。
-    // 2026-09 用户反馈：SQL 推断回填应默认展示 SQL 模式——候选 definition_json 通常无 sql 键
-    // （sql 在语句级），但有 dw_definition（整句原始 SQL），故二者任一存在即走 SQL 模式。
+    // 口径定义：SQL 推断候选默认展示 SQL 模式（sql / dw_definition=整句原始 SQL 任一存在），
+    // 同时把表达式（结构化）口径 JSON（expression/source_fields 等）也回填到 definition 字段——
+    // SQL 与表达式双轨都保留：用户可切「表达式模式」查看结构化口径，提交（SQL 模式）时
+    // buildDefinitionJson 会把 expression 结构并入 definition_json，不因默认 SQL 展示而丢失。
     const dj = c.definition_json || {};
+    const structuredKeys: Record<string, unknown> = {
+      ...(dj.expression ? { expression: dj.expression } : {}),
+      ...(Array.isArray(dj.source_fields) ? { source_fields: dj.source_fields } : {}),
+    };
+    if (Object.keys(structuredKeys).length > 0) {
+      form.setFieldValue("definition", JSON.stringify(structuredKeys, null, 2));
+    }
     if (dj.sql || dj.dw_definition) {
       setMode("sql");
       setSqlText(String(dj.sql || dj.dw_definition));
     } else if (dj.expression) {
       setMode("expression");
-      form.setFieldValue(
-        "definition",
-        JSON.stringify(
-          {
-            expression: dj.expression,
-            ...(Array.isArray(dj.source_fields) ? { source_fields: dj.source_fields } : {}),
-          },
-          null,
-          2,
-        ),
-      );
     }
     // 数仓详细口径（Q2）：候选 dw_definition（所属语句完整 SQL）回填，用户可改
     if (dj.dw_definition) setDwDefinition(String(dj.dw_definition));
@@ -2244,7 +2257,17 @@ export function MetricCreate() {
       const sql = sqlText.trim();
       if (!sql) { message.error("口径 SQL 模式请输入 SQL 语句"); return null; }
       if (sql.length > 16384) { message.error("口径 SQL 长度不能超过 16384 字符，请精简或拆分后提交"); return null; }
-      return { sql, ...tables, ...downTables, ...srcField, ...measureField, ...dimsField, ...depsField, ...baseField, ...caliberFields };
+      // 表达式（结构化）口径：SQL 推断回填时 expression/source_fields 已一并回填到 definition
+      // 字段（loadCandidateIntoWizard）；SQL 模式提交也并入——SQL 与结构化口径双轨落库，
+      // 后端口径详情/血缘均可读 expression 结构，不因默认 SQL 展示而丢失。显式 sql 在
+      // structured 之后展开，表单 SQL 优先（structured 内同名字段不覆盖）。
+      let structured: Record<string, unknown> = {};
+      const defRaw = String(values.definition ?? "").trim();
+      if (defRaw) {
+        try { structured = JSON.parse(defRaw); }
+        catch { message.error("口径定义需为合法 JSON"); return null; }
+      }
+      return { ...structured, sql, ...tables, ...downTables, ...srcField, ...measureField, ...dimsField, ...depsField, ...baseField, ...caliberFields };
     }
     let def: Record<string, unknown>;
     try { def = values.definition ? JSON.parse(String(values.definition)) : {}; }
