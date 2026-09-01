@@ -34,6 +34,7 @@ vi.mock("../api", () => {
     mintClientToken: vi.fn(),
     getConsumeToken: vi.fn(() => null),
     getConsumeTokenExpiry: vi.fn(() => null),
+    getConsumeTokenClientId: vi.fn(() => null),
     setConsumeToken: vi.fn(),
     clearConsumeToken: vi.fn(),
     CONSUME_TOKEN_CHANGED_EVENT: "unisense:consume-token-changed",
@@ -55,6 +56,7 @@ import {
   listApiClients,
   getConsumeToken,
   getConsumeTokenExpiry,
+  getConsumeTokenClientId,
   CONSUME_TOKEN_CHANGED_EVENT,
 } from "../api";
 const mockedConsumeDryRun = vi.mocked(consumeDryRun);
@@ -64,6 +66,7 @@ const mockedListMetrics = vi.mocked(listMetrics);
 const mockedListApiClients = vi.mocked(listApiClients);
 const mockedGetConsumeToken = vi.mocked(getConsumeToken);
 const mockedGetConsumeTokenExpiry = vi.mocked(getConsumeTokenExpiry);
+const mockedGetConsumeTokenClientId = vi.mocked(getConsumeTokenClientId);
 
 const mockSemanticData = {
   metric_code: "gmv_net",
@@ -148,6 +151,7 @@ describe("QueryWorkspace", () => {
     // 令牌 mock 默认「无令牌」；各测试按需覆盖，且不泄漏到后续用例（clearAllMocks 不清 implementation）
     mockedGetConsumeToken.mockReturnValue(null);
     mockedGetConsumeTokenExpiry.mockReturnValue(null);
+    mockedGetConsumeTokenClientId.mockReturnValue(null);
     // 默认无 ACTIVE 客户端 → 授权范围无限制（展示全部 PUBLISHED），与既有用例语义一致
     mockedListApiClients.mockResolvedValue([]);
     mockedListMetrics.mockResolvedValue({
@@ -317,6 +321,8 @@ describe("QueryWorkspace", () => {
 
   it("指标下拉按接入方授权域收敛：仅展示 scope_domain 内 + 白名单内（PII 需显式白名单）的 PUBLISHED 指标", async () => {
     const user = userEvent.setup();
+    // 令牌已绑定 e2e_app → loadClients 自动选中该客户端并按其授权范围收敛
+    mockedGetConsumeTokenClientId.mockReturnValue("e2e_app");
     mockedListApiClients.mockResolvedValue([
       {
         client_id: "e2e_app",
@@ -349,6 +355,37 @@ describe("QueryWorkspace", () => {
     expect(screen.queryByText(/outp_fee_day · 门诊费用/)).not.toBeInTheDocument();
     expect(screen.queryByText(/gmv_net · 净GMV/)).not.toBeInTheDocument();
     expect(screen.queryByText(/outp_pii_raw · 原始PII/)).not.toBeInTheDocument();
+  });
+
+  it("未选择/未绑定客户端时展示全部 PUBLISHED 指标，不被首个 ACTIVE 客户端授权范围绑架", async () => {
+    const user = userEvent.setup();
+    // DB 存在首个 ACTIVE 客户端（e2e_app，sales 域 + 白名单），但令牌未绑定 → 不收敛
+    mockedListApiClients.mockResolvedValue([
+      {
+        client_id: "e2e_app",
+        scope_domain: "sales",
+        metric_whitelist: ["sales_e2e_gmv_day", "sales_e2e_ordercnt_day"],
+        qps: 20,
+        daily_quota: 100000,
+        status: "ACTIVE",
+      },
+    ]);
+    mockedListMetrics.mockResolvedValue({
+      items: [
+        mkMetric("outp_visit_day", "门诊就诊量", "outpatient"),
+        mkMetric("gmv_net", "净GMV", "sales"),
+      ],
+      total: 2,
+      page: 1,
+      page_size: 100,
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+    // 初始不传 domain（不收敛）——全部 PUBLISHED 指标可见
+    expect(mockedListMetrics).toHaveBeenCalledWith(expect.objectContaining({ domain: undefined }));
+    await user.click(metricSelectInput());
+    expect(await screen.findByText(/outp_visit_day · 门诊就诊量/)).toBeInTheDocument();
+    expect(await screen.findByText(/gmv_net · 净GMV/)).toBeInTheDocument();
   });
 
   it("提供统一的返回按钮（返回上一入口）", async () => {

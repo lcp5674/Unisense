@@ -12,6 +12,7 @@ import {
   mintClientToken,
   getConsumeToken,
   getConsumeTokenExpiry,
+  getConsumeTokenClientId,
   setConsumeToken,
   clearConsumeToken,
   CONSUME_TOKEN_CHANGED_EVENT,
@@ -102,6 +103,11 @@ export function QueryWorkspace() {
     domain: null,
     whitelist: null,
   });
+  // ACTIVE 客户端列表 + 用户显式选择的客户端：初始「全部指标（平台内部视角）」，
+  // 仅当用户选中某客户端（或令牌已绑定某客户端）时才按其授权范围收敛——
+  // 不再隐式取「首个 ACTIVE 客户端」，避免 E2E/无关客户端的 scope 绑架指标列表。
+  const [clients, setClients] = useState<ClientResponse[]>([]);
+  const [clientId, setClientId] = useState<string | undefined>(undefined);
   const [dateRange, setDateRange] = useState("last_30d");
   const [granularity, setGranularity] = useState<string | undefined>(undefined);
   const [comparison, setComparison] = useState<string | undefined>(undefined);
@@ -162,24 +168,40 @@ export function QueryWorkspace() {
   useEffect(() => {
     // P5（审查修复）：指标下拉改服务端搜索——初始加载前 100 条，搜索时按关键词请求
     loadMetricOptions("");
-    loadClientScope();
+    loadClients();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 拉取首个 ACTIVE 接入方客户端的授权范围（域 + 白名单），供指标下拉收敛。
-  // 取到后显式传入新 scope 重载指标（避免 setClientScope 后闭包读到旧值）。
-  function loadClientScope() {
+  // 加载 ACTIVE 客户端列表供「消费客户端」选择器使用；若当前令牌已绑定某客户端
+  // （JWT sub），自动选中该客户端并按其授权范围收敛——保证「能看到的 = 能消费的」。
+  // 未绑定任何客户端时保持「全部指标（平台内部视角）」，不再被首个 ACTIVE 客户端绑架。
+  function loadClients() {
     listApiClients()
-      .then((clients) => {
-        const active = clients.find((c) => c.status === "ACTIVE");
-        const scope = {
-          domain: active?.scope_domain ?? null,
-          whitelist: active?.metric_whitelist ?? null,
-        };
-        setClientScope(scope);
-        loadMetricOptions("", scope);
+      .then((list) => {
+        const actives = list.filter((c) => c.status === "ACTIVE");
+        setClients(actives);
+        const bound = getConsumeTokenClientId();
+        const matched = actives.find((c) => c.client_id === bound);
+        if (matched) {
+          setClientId(matched.client_id);
+          const scope = {
+            domain: matched.scope_domain ?? null,
+            whitelist: matched.metric_whitelist ?? null,
+          };
+          setClientScope(scope);
+          loadMetricOptions("", scope);
+        }
       })
       .catch(() => {});
+  }
+
+  // 用户显式切换消费客户端：按其授权范围收敛指标下拉（未选 = 全部指标）
+  function handleClientChange(id: string | undefined) {
+    setClientId(id);
+    const c = clients.find((x) => x.client_id === id);
+    const scope = { domain: c?.scope_domain ?? null, whitelist: c?.metric_whitelist ?? null };
+    setClientScope(scope);
+    loadMetricOptions("", scope);
   }
 
   // P5：指标下拉服务端搜索（防抖 300ms；关键词为空回到前 100 条）
@@ -325,21 +347,20 @@ export function QueryWorkspace() {
 
   async function handleMintToken() {
     try {
-      const clients: ClientResponse[] = await listApiClients();
-      const active = clients.find((c) => c.status === "ACTIVE");
-      if (!active) {
-        message.warning("没有 ACTIVE 的 API 客户端，请先到「API 客户端」创建");
+      const c = clients.find((x) => x.client_id === clientId);
+      if (!c) {
+        message.warning("请先在下方选择消费客户端（ACTIVE 的 API 客户端）");
         return;
       }
-      const { access_token } = await mintClientToken(active.client_id);
+      const { access_token } = await mintClientToken(c.client_id);
       setConsumeToken(access_token);
       setTokenOk(true);
       setTokenExpiry(getConsumeTokenExpiry());
       // 同步授权范围（与下拉收敛使用同一客户端），并刷新指标列表（域/白名单可能已变）
-      const scope = { domain: active.scope_domain ?? null, whitelist: active.metric_whitelist ?? null };
+      const scope = { domain: c.scope_domain ?? null, whitelist: c.metric_whitelist ?? null };
       setClientScope(scope);
       loadMetricOptions("", scope);
-      message.success(`已使用客户端 ${active.client_id} 签发消费令牌`);
+      message.success(`已使用客户端 ${c.client_id} 签发消费令牌`);
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "签发失败");
     }
@@ -403,6 +424,26 @@ export function QueryWorkspace() {
               )
             }
           />
+
+          <Space style={{ marginBottom: 16, width: "100%" }} wrap>
+            <span style={{ display: "inline-flex", alignItems: "center" }}>
+              消费客户端：
+              <Select
+                style={{ width: 300, marginLeft: 8 }}
+                placeholder="全部指标（平台内部视角）"
+                allowClear
+                value={clientId}
+                onChange={handleClientChange}
+                options={clients.map((c) => ({
+                  value: c.client_id,
+                  label: c.scope_domain ? `${c.client_id}（域：${c.scope_domain}）` : c.client_id,
+                }))}
+              />
+            </span>
+            <span className="muted" style={{ fontSize: 12 }}>
+              未选择时展示全部已发布指标；选择客户端后仅展示其授权域/白名单内的指标，签发令牌也使用该客户端。
+            </span>
+          </Space>
 
           <Form layout="vertical">
             <Row gutter={[16, 0]}>

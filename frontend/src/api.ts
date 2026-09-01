@@ -252,6 +252,21 @@ export function getConsumeTokenExpiry(): number | null {
     return null;
   }
 }
+/** 解析消费 JWT 的 sub（= 绑定的 client_id）。非 JWT 或 payload 无 sub 返回 null。 */
+export function getConsumeTokenClientId(): string | null {
+  const raw = getConsumeToken();
+  if (!raw) return null;
+  const parts = raw.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    let b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    const payload = JSON.parse(atob(b64)) as { sub?: unknown };
+    return typeof payload.sub === "string" ? payload.sub : null;
+  } catch {
+    return null;
+  }
+}
 export function setConsumeToken(token: string): void {
   localStorage.setItem(CONSUME_TOKEN_KEY, token);
   emitConsumeTokenChanged();
