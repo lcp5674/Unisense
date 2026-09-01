@@ -414,3 +414,67 @@ async def test_api_client_manage_forbidden_for_non_admin(monkeypatch) -> None:
         assert r.json()["code"] == "FORBIDDEN"
     finally:
         app.dependency_overrides.clear()
+
+
+async def test_create_client_duplicate_id_conflict_409() -> None:
+    """显式指定已存在（含软删）client_id → 409 而非 IntegrityError 500（B3 修复）。
+
+    修复前：仅自动生成路径做冲突检测，用户显式传重复 client_id 时直插唯一键
+    → IntegrityError → 通用 500；软删客户保留原 client_id 占位唯一键，恢复/重建受阻。
+    """
+    async def fake_db():
+        session = MagicMock()
+        session.add = MagicMock()
+        session.commit = AsyncMock()
+        session.flush = AsyncMock()
+        existing = MagicMock()
+        existing.client_id = "acme"
+        session.execute = AsyncMock(return_value=MagicMock())
+        session.execute.return_value.scalar_one_or_none.return_value = existing
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="platform_admin", domain=None, roles_all=lambda: ["platform_admin"]
+    )
+    try:
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post(
+                "/api/v1/consume/api-clients",
+                json={"client_id": "acme", "secret": "secret123"},
+                headers={"Authorization": "Bearer t"},
+            )
+        assert r.status_code == 409, r.text
+        assert r.json()["code"] == "CLIENT_ID_CONFLICT"
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def test_create_client_unique_id_ok() -> None:
+    """显式指定唯一 client_id → 正常创建 200（预检不误杀）。"""
+    async def fake_db():
+        session = MagicMock()
+        session.add = MagicMock()
+        session.commit = AsyncMock()
+        session.flush = AsyncMock()
+        session.execute = AsyncMock(return_value=MagicMock())
+        session.execute.return_value.scalar_one_or_none.return_value = None
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="platform_admin", domain=None, roles_all=lambda: ["platform_admin"]
+    )
+    try:
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post(
+                "/api/v1/consume/api-clients",
+                json={"client_id": "brand_new", "secret": "secret123"},
+                headers={"Authorization": "Bearer t"},
+            )
+        assert r.status_code == 200, r.text
+        assert r.json()["data"]["client_id"] == "brand_new"
+    finally:
+        app.dependency_overrides.clear()

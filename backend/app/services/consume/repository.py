@@ -24,6 +24,15 @@ class ApiClientRepo:
         )
         return (await self._db.execute(stmt)).scalar_one_or_none()
 
+    async def get_any_by_client_id(self, client_id: str) -> ApiClient | None:
+        """按 client_id 取任意记录（**含软删**，B3 创建预检用）。
+
+        软删客户保留原 client_id（唯一键仍占用），创建预检若只查未删行会漏检
+        软删占位 → 直插唯一键冲突落 500。本方法不过滤 deleted_at，命中即冲突。
+        """
+        stmt = select(ApiClient).where(ApiClient.client_id == client_id)
+        return (await self._db.execute(stmt)).scalar_one_or_none()
+
     async def create(self, client: ApiClient) -> ApiClient:
         self._db.add(client)
         await self._db.flush()

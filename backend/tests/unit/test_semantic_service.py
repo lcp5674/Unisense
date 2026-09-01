@@ -7313,3 +7313,49 @@ async def test_sql_batch_register_derived_phase2_with_mount():
     # Phase1 基础 + Phase2 派生均创建成功（派生依赖命中 dep_ok，无缺依赖跳过）
     assert [c["status"] for c in result["candidates"]] == ["DRAFT", "DRAFT"]
     assert repo.create.call_count == 2
+
+
+# ---- B2（审查修复）：PENDING_VERSION 确认人反查真实消费方（query_log）+ Owner 兜底 ----
+
+
+async def test_resolve_pending_consumers_owner_plus_recent_consumers() -> None:
+    """确认人 = Owner（兜底）+ 近 90 天消费过该指标的内部用户（B2）。
+
+    修复前仅 Owner/备份 Owner 自确认，真实下游消费方无确认记录、无法表达反对。
+    """
+    svc, _ = _svc_with_repo()
+    metric = make_metric(owner_id=7, backup_owner_id=8)
+    # query_log 返回 3 行 requester_id：1 个真实消费方 + 1 个与 Owner 重复 + 1 个非法
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = ["42", "7", "not_a_number"]
+    svc._db.execute = AsyncMock(return_value=result)
+    consumers = await svc._resolve_pending_consumers(metric)
+    # Owner 在首位（兜底），真实消费方并入，非法/重复被剔除
+    assert consumers[0] == 7
+    assert 42 in consumers
+    assert consumers.count(7) == 1
+    assert "not_a_number" not in consumers
+
+
+async def test_resolve_pending_consumers_owner_fallback_on_query_error() -> None:
+    """query_log 反查失败时降级为 Owner 兜底，不阻断破坏性变更流程。"""
+    svc, _ = _svc_with_repo()
+    metric = make_metric(owner_id=7, backup_owner_id=8)
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("db down")
+
+    svc._db.execute = AsyncMock(side_effect=_boom)
+    consumers = await svc._resolve_pending_consumers(metric)
+    assert consumers == [7, 8]
+
+
+async def test_resolve_pending_consumers_deduplicates_backup() -> None:
+    """备份 Owner 与反查消费方重合时去重。"""
+    svc, _ = _svc_with_repo()
+    metric = make_metric(owner_id=7, backup_owner_id=42)
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = ["42", "99"]
+    svc._db.execute = AsyncMock(return_value=result)
+    consumers = await svc._resolve_pending_consumers(metric)
+    assert consumers == [7, 42, 99]

@@ -456,3 +456,75 @@ class TestMountService:
         assert exc.value.error_code == "MOUNT_DELETE_REQUIRES_CONFIRMATION"
         repo.soft_delete.assert_not_awaited()
         repo.commit.assert_not_awaited()
+
+    # ---- B4（审查修复）：废弃/数据源下线状态禁止改删挂载；REVIEW 破坏性须撤回 ----
+
+    async def test_update_mount_rejects_deprecated_status(self) -> None:
+        """DEPRECATED 指标禁止修改挂载（此前仅拦 PUBLISHED，废弃指标挂载可被悄悄改动）。"""
+        svc, repo = await _svc()
+        metric = _metric()
+        metric.status = "DEPRECATED"
+        svc._require_metric = AsyncMock(return_value=metric)  # noqa: SLF001
+        repo.get = AsyncMock(return_value=_mount())
+        with pytest.raises(UnisenseError) as exc:
+            await svc.update_mount(1, MetricMountUpdate(source_column="gmv2"))
+        assert exc.value.error_code == "MOUNT_EDIT_FORBIDDEN"
+        repo.commit.assert_not_awaited()
+
+    async def test_update_mount_rejects_data_source_dropped(self) -> None:
+        """DATA_SOURCE_DROPPED 指标禁止修改挂载（退役语义不可绕过）。"""
+        svc, repo = await _svc()
+        metric = _metric()
+        metric.status = "DATA_SOURCE_DROPPED"
+        svc._require_metric = AsyncMock(return_value=metric)  # noqa: SLF001
+        repo.get = AsyncMock(return_value=_mount())
+        with pytest.raises(UnisenseError) as exc:
+            await svc.update_mount(1, MetricMountUpdate(business_filter="x"))
+        assert exc.value.error_code == "MOUNT_EDIT_FORBIDDEN"
+
+    async def test_update_mount_rejects_review_breaking(self) -> None:
+        """REVIEW 指标改挂载粒度/源表须撤回评审——不得经挂载端点绕过「编辑即撤回」。"""
+        svc, repo = await _svc()
+        metric = _metric()
+        metric.status = "REVIEW"
+        svc._require_metric = AsyncMock(return_value=metric)  # noqa: SLF001
+        repo.get = AsyncMock(return_value=_mount())
+        with pytest.raises(UnisenseError) as exc:
+            await svc.update_mount(1, MetricMountUpdate(granularity="月"))
+        assert exc.value.error_code == "MOUNT_UPDATE_REQUIRES_CONFIRMATION"
+        repo.commit.assert_not_awaited()
+
+    async def test_update_mount_allows_non_breaking_on_review(self) -> None:
+        """REVIEW 指标改非破坏字段（业务限定/度量列）不拦截。"""
+        svc, repo = await _svc()
+        metric = _metric()
+        metric.status = "REVIEW"
+        svc._require_metric = AsyncMock(return_value=metric)  # noqa: SLF001
+        m = _mount()
+        repo.get = AsyncMock(return_value=m)
+        out = await svc.update_mount(1, MetricMountUpdate(source_column="gmv2"))
+        assert out.source_column == "gmv2"
+        repo.commit.assert_awaited()
+
+    async def test_delete_mount_rejects_deprecated(self) -> None:
+        """DEPRECATED 指标禁止删除挂载（退役语义由指标生命周期管理）。"""
+        svc, repo = await _svc()
+        metric = _metric()
+        metric.status = "DEPRECATED"
+        svc._require_metric = AsyncMock(return_value=metric)  # noqa: SLF001
+        repo.get = AsyncMock(return_value=_mount())
+        with pytest.raises(UnisenseError) as exc:
+            await svc.delete_mount(1)
+        assert exc.value.error_code == "MOUNT_EDIT_FORBIDDEN"
+        repo.soft_delete.assert_not_awaited()
+
+    async def test_delete_mount_rejects_review(self) -> None:
+        """REVIEW 指标解除挂载须撤回评审（与 PUBLISHED 同级禁止绕过确认流）。"""
+        svc, repo = await _svc()
+        metric = _metric()
+        metric.status = "REVIEW"
+        svc._require_metric = AsyncMock(return_value=metric)  # noqa: SLF001
+        repo.get = AsyncMock(return_value=_mount())
+        with pytest.raises(UnisenseError) as exc:
+            await svc.delete_mount(1)
+        assert exc.value.error_code == "MOUNT_DELETE_REQUIRES_CONFIRMATION"

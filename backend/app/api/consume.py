@@ -18,6 +18,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user, require_roles
@@ -296,6 +297,14 @@ async def create_client(
     # 编码自动生成（FR-010：缺省时由系统生成 app_ 前缀，避免人为创造）
     if not req.client_id:
         req.client_id = await _generate_client_id(repo)
+    else:
+        # B3（审查修复）：显式 client_id 须预检（**含软删**——软删客户保留原
+        # client_id 占位唯一键），命中即 409 而非直插唯一键冲突落 500。
+        if await repo.get_any_by_client_id(req.client_id) is not None:
+            raise ConflictError(
+                f"接入方 ID 已存在（含已停用/已删除记录）: {req.client_id}",
+                error_code="CLIENT_ID_CONFLICT",
+            )
     client = ApiClient(
         client_id=req.client_id,
         client_secret_ref=await hash_password(req.secret),
@@ -306,7 +315,15 @@ async def create_client(
         status=ApiClientStatus.ACTIVE,
         created_by=user.id,
     )
-    created = await repo.create(client)
+    try:
+        created = await repo.create(client)
+    except IntegrityError as exc:
+        # 并发/竞态兜底：唯一键冲突统一转 409（B3，对齐 measure_catalog 做法）
+        await db.rollback()
+        raise ConflictError(
+            f"接入方 ID 已存在: {req.client_id}",
+            error_code="CLIENT_ID_CONFLICT",
+        ) from exc
     await write_audit(
         db,
         actor_id=user.id,

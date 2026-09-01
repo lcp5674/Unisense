@@ -22,6 +22,10 @@ from app.services.metric_mount.schemas import MetricMountCreate, MetricMountUpda
 #: 可挂载的指标类型（原子不挂表、复合不直接挂表）
 _MOUNTABLE_TYPES = ("derived",)
 
+#: 允许编辑挂载的指标状态白名单（B4 审查修复）：废弃/数据源下线指标禁止改删挂载，
+#: 与 semantic.update_metric 的状态守卫对齐（DEPRECATED/DATA_SOURCE_DROPPED 明确禁更）。
+_EDITABLE_STATUSES = ("DRAFT", "REVIEW", "PUBLISHED")
+
 
 class MetricMountService(BaseService):
     def __init__(self, session: AsyncSession) -> None:
@@ -86,23 +90,34 @@ class MetricMountService(BaseService):
     async def update_mount(self, mount_id: int, data: MetricMountUpdate) -> MetricMount:
         mount = await self.get_mount(mount_id)
         metric = await self._require_metric(mount.metric_id)
-        # 已发布指标修改挂载粒度/源表/粒度维度 = 破坏性口径变更（对齐
-        # semantic._sync_mounts 判定：granularity/source_table/granularity_dims
-        # 变化触发 PENDING_VERSION 消费方确认）：禁止绕过确认流直接生效——须经
-        # 指标更新接口提交（mounts 带 id + 变更原因），由 semantic._sync_mounts
-        # 判定破坏性走 PENDING_VERSION 消费方确认（14 天）。
+        # B4（审查修复）：非 DRAFT/REVIEW/PUBLISHED 状态禁止改挂载——废弃/数据源下线
+        # 指标的挂载粒度/源表/度量列/域等不可直改直删（与 semantic.update_metric
+        # 状态守卫对齐，此前仅拦 PUBLISHED，DEPRECATED 指标挂载可被悄悄改动）。
+        if metric.status not in _EDITABLE_STATUSES:
+            raise UnisenseError(
+                f"指标状态 {metric.status} 禁止修改挂载（仅 DRAFT/REVIEW/PUBLISHED 可编辑）",
+                error_code="MOUNT_EDIT_FORBIDDEN",
+            )
+        # 破坏性口径变更（源表/粒度/粒度维度变化）：PUBLISHED 须经消费方确认流，
+        # REVIEW 须经指标编辑接口（编辑即撤回 DRAFT，评审人知情）——挂载端点一律
+        # 禁止绕过确认流直接生效。
         # 仅实际变更拦截；传相同值或改非破坏字段（度量列/周期/域/限定）放行。
-        if metric.status == "PUBLISHED" and (
+        disruptive = (
             (data.source_table is not None and data.source_table != mount.source_table)
             or (data.granularity is not None and data.granularity != mount.granularity)
             or (
                 data.granularity_dims is not None
                 and data.granularity_dims != (mount.granularity_dims or [])
             )
-        ):
+        )
+        if metric.status in ("PUBLISHED", "REVIEW") and disruptive:
             raise UnisenseError(
-                "已发布指标修改挂载粒度/粒度维度/源表属破坏性变更，须经消费方确认——"
-                "请通过指标详情「编辑」提交（变更原因必填，确认后生效）",
+                (
+                    "已发布指标修改挂载粒度/粒度维度/源表属破坏性变更，须经消费方确认"
+                    if metric.status == "PUBLISHED"
+                    else "评审中指标修改挂载粒度/粒度维度/源表须撤回评审——"
+                    "请通过指标详情「编辑」提交（变更原因必填，确认后生效）"
+                ),
                 error_code="MOUNT_UPDATE_REQUIRES_CONFIRMATION",
             )
         if data.source_table is not None:
@@ -145,13 +160,24 @@ class MetricMountService(BaseService):
     async def delete_mount(self, mount_id: int) -> None:
         mount = await self.get_mount(mount_id)
         metric = await self._require_metric(mount.metric_id)
-        # 已发布指标解除挂载 = 破坏性口径变更（消费方取数底座变化，等同删源表/改粒度）：
-        # 禁止绕过确认流直接软删——须经指标更新接口提交（mounts 去行 + 变更原因），
-        # 由 semantic._sync_mounts 判定破坏性走 PENDING_VERSION 消费方确认（14 天）。
-        if metric.status == "PUBLISHED":
+        # B4（审查修复）：非 DRAFT/REVIEW/PUBLISHED 状态禁止删挂载（废弃/下线指标
+        # 不得再解除挂载，退役语义由指标生命周期管理）。
+        if metric.status not in _EDITABLE_STATUSES:
             raise UnisenseError(
-                "已发布指标解除挂载属破坏性变更，须经消费方确认——请通过指标详情"
-                "「编辑」提交（变更原因必填，确认后生效）",
+                f"指标状态 {metric.status} 禁止删除挂载（仅 DRAFT/REVIEW/PUBLISHED 可编辑）",
+                error_code="MOUNT_EDIT_FORBIDDEN",
+            )
+        # 已发布/评审中指标解除挂载 = 破坏性口径变更（消费方取数底座变化，等同
+        # 删源表/改粒度）：禁止绕过确认流直接软删——须经指标更新接口提交
+        # （mounts 去行 + 变更原因），由 semantic._sync_mounts 判定破坏性走
+        # PENDING_VERSION 消费方确认（14 天）或评审撤回。
+        if metric.status in ("PUBLISHED", "REVIEW"):
+            raise UnisenseError(
+                (
+                    "已发布指标解除挂载属破坏性变更，须经消费方确认"
+                    if metric.status == "PUBLISHED"
+                    else "评审中指标解除挂载须撤回评审——请通过指标详情「编辑」提交"
+                ),
                 error_code="MOUNT_DELETE_REQUIRES_CONFIRMATION",
             )
         await self._repo.soft_delete(mount.id)

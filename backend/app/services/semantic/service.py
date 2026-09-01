@@ -1552,11 +1552,9 @@ class MetricService(BaseService):
             if metric.status == "PUBLISHED" and is_breaking:
                 from app.services.semantic.pending_version_manager import PendingVersionManager
 
-                # 消费方 = 指标 Owner（+备份 Owner），负责在 14 天确认期内确认/拒绝；
-                # 生产环境可扩展为经血缘反查下游消费方列表。
-                consumer_ids = [metric.owner_id]
-                if metric.backup_owner_id is not None:
-                    consumer_ids.append(metric.backup_owner_id)
+                # 消费方 = Owner（兜底）+ 近 90 天真实消费方（B2：经 query_log 反查
+                # 内部用户，此前仅 Owner 自确认，治理闭环对消费方名存实亡）。
+                consumer_ids = await self._resolve_pending_consumers(metric)
 
                 pvm = PendingVersionManager(self._db)
                 await pvm.create_pending(metric, version, consumer_ids)
@@ -1626,9 +1624,8 @@ class MetricService(BaseService):
             if metric.status == "PUBLISHED":
                 from app.services.semantic.pending_version_manager import PendingVersionManager
 
-                consumer_ids = [metric.owner_id]
-                if metric.backup_owner_id is not None:
-                    consumer_ids.append(metric.backup_owner_id)
+                # 消费方 = Owner（兜底）+ 近 90 天真实消费方（B2，同 definition_json 分支）
+                consumer_ids = await self._resolve_pending_consumers(metric)
 
                 pvm = PendingVersionManager(self._db)
                 await pvm.create_pending(metric, version, consumer_ids)
@@ -2814,6 +2811,48 @@ class MetricService(BaseService):
                         uid,
                         exc,
                     )
+
+    async def _resolve_pending_consumers(self, metric: Metric) -> list[int]:
+        """解析破坏性变更的确认人：反查真实消费方 + Owner 兜底（B2 审查修复）。
+
+        此前确认人 = Owner（+备份 Owner）——真实下游消费方无确认记录、无法表达
+        反对，治理闭环对消费方名存实亡。现从 ``query_log`` 反查近 90 天消费过该
+        指标的内部用户（requester_type=internal，requester_id=用户 ID），并入确认
+        人列表；Owner 保留为兜底（接入方 client_id 无用户映射，其确认由 Owner 代表，
+        扩展接入方确认模型属后续增强）。反查失败仅告警不阻断变更流程。
+        """
+        from sqlalchemy import select
+
+        from app.models.consume import QueryLog, QueryRequesterType
+
+        consumer_ids = [metric.owner_id]
+        if metric.backup_owner_id is not None:
+            consumer_ids.append(metric.backup_owner_id)
+        try:
+            since = datetime.now(UTC) - timedelta(days=90)
+            stmt = (
+                select(QueryLog.requester_id)
+                .where(
+                    QueryLog.metric_code == metric.metric_code,
+                    QueryLog.requester_type == QueryRequesterType.INTERNAL,
+                    QueryLog.created_at >= since,
+                )
+                .distinct()
+            )
+            rows = (await self._db.execute(stmt)).scalars().all()
+            for rid in rows:
+                try:
+                    uid = int(rid)
+                except (TypeError, ValueError):
+                    continue
+                if uid > 0 and uid not in consumer_ids:
+                    consumer_ids.append(uid)
+        except Exception:  # noqa: BLE001 - 反查失败不阻断破坏性变更流程，Owner 兜底
+            logger.warning(
+                "pending_consumer_resolve_failed",
+                metric_code=metric.metric_code,
+            )
+        return consumer_ids
 
     async def _notify_pending_consumers(
         self,
