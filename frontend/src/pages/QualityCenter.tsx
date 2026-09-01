@@ -39,10 +39,17 @@ const EVENT_STATUS: Record<string, { color: string; label: string }> = {
 
 function useMetrics() {
   const [metrics, setMetrics] = useState<MetricResponse[]>([]);
+  // F6（审查修复）：指标下拉此前仅拉前 100 条 + 客户端过滤——第 101 个指标永远
+  // 无法被选中建质量规则。改服务端搜索（输入即查，防抖由调用方 onSearch 承担）。
+  const load = (kw?: string) => {
+    listMetrics({ page_size: 100, keyword: kw || undefined })
+      .then((r) => setMetrics(r.items))
+      .catch(() => {});
+  };
   useEffect(() => {
-    listMetrics({ page_size: 100 }).then((r) => setMetrics(r.items)).catch(() => {});
+    load();
   }, []);
-  return metrics;
+  return { metrics, load };
 }
 
 function RulesTab() {
@@ -53,7 +60,7 @@ function RulesTab() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
-  const metrics = useMetrics();
+  const { metrics, load: loadMetrics } = useMetrics();
   const { can } = usePermission();
   const canConfigRule = can("quality:config-rule");
 
@@ -158,7 +165,13 @@ function RulesTab() {
       <Modal title="新建质量规则" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="创建">
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
           <Form.Item name="metric_id" label="指标" rules={[{ required: true }]}>
-            <Select showSearch options={metrics.map((m) => ({ value: m.id, label: `${m.metric_code} · ${m.name}` }))} placeholder="选择指标" />
+            <Select
+              showSearch
+              filterOption={false}
+              onSearch={(kw) => loadMetrics(kw || undefined)}
+              options={metrics.map((m) => ({ value: m.id, label: `${m.metric_code} · ${m.name}` }))}
+              placeholder="选择指标（输入编码/名称搜索）"
+            />
           </Form.Item>
           <Form.Item name="rule_type" label="规则类型" rules={[{ required: true }]}>
             <Select options={RULE_TYPES.map((v) => ({ value: v, label: RULE_TYPE_LABEL[v] ?? v }))} />
@@ -188,7 +201,7 @@ function EventsTab() {
   // 手动触发检测弹窗
   const [detectOpen, setDetectOpen] = useState(false);
   const [detectForm] = Form.useForm();
-  const metrics = useMetrics();
+  const { metrics, load: loadMetrics } = useMetrics();
   const { can } = usePermission();
   const canRunCheck = can("quality:run-check");
 
@@ -292,7 +305,13 @@ function EventsTab() {
       <Modal title="手动触发质量检测" open={detectOpen} onCancel={() => setDetectOpen(false)} onOk={() => detectForm.submit()} okText="检测">
         <Form form={detectForm} layout="vertical" onFinish={handleDetect} style={{ marginTop: 8 }}>
           <Form.Item name="metric_id" label="指标" rules={[{ required: true }]}>
-            <Select showSearch options={metrics.map((m) => ({ value: m.id, label: `${m.metric_code} · ${m.name}` }))} placeholder="选择指标" />
+            <Select
+              showSearch
+              filterOption={false}
+              onSearch={(kw) => loadMetrics(kw || undefined)}
+              options={metrics.map((m) => ({ value: m.id, label: `${m.metric_code} · ${m.name}` }))}
+              placeholder="选择指标（输入编码/名称搜索）"
+            />
           </Form.Item>
           <Form.Item name="rule_type" label="规则类型" rules={[{ required: true }]}>
             <Select placeholder="选择规则类型" options={RULE_TYPES.map((v) => ({ value: v, label: RULE_TYPE_LABEL[v] ?? v }))} />

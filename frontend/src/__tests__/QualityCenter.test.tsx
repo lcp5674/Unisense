@@ -157,7 +157,7 @@ describe("QualityCenter 质量中心", () => {
     await waitFor(() => expect(screen.getByText(/手动触发质量检测/)).toBeInTheDocument());
 
     // 选择指标 + 规则类型 + 输入观测值后提交（antd Select 在 selector 上 mouseDown 打开下拉）
-    fireEvent.mouseDown(screen.getByText("选择指标"));
+    fireEvent.mouseDown(screen.getByText(/选择指标/));
     await waitFor(() => expect(screen.getByText(/sales_gmv_day/)).toBeInTheDocument());
     fireEvent.click(screen.getByText(/sales_gmv_day/));
 

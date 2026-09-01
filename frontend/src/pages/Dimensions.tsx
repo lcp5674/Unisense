@@ -2177,6 +2177,13 @@ function MappingsTab() {
   const loadSeq = useRef(0);
   // 维度下拉候选（源/目标维度选项框）
   const [dims, setDims] = useState<Dimension[]>([]);
+  // F6（审查修复）：维度下拉此前仅拉前 200 条 + 客户端过滤（optionFilterProp）——
+  // 第 201 个维度永远无法建立映射。改服务端搜索（输入即查）。
+  const loadDims = (kw?: string) => {
+    listDimensions({ page_size: 200, keyword: kw || undefined })
+      .then((r) => setDims(r.items))
+      .catch(() => {});
+  };
   // 编辑态：复用新建布局，打开时预填当前映射值
   const [editTarget, setEditTarget] = useState<DimensionMapping | null>(null);
   const [editOpen, setEditOpen] = useState(false);
@@ -2305,7 +2312,7 @@ function MappingsTab() {
   }, [page, pageSize]);
 
   useEffect(() => {
-    listDimensions({ page_size: 200 }).then((r) => setDims(r.items)).catch(() => {});
+    loadDims();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2457,8 +2464,9 @@ function MappingsTab() {
           <Form.Item name="source_dim_code" label="源维度" rules={[{ required: true }]}>
             <Select
               showSearch
-              optionFilterProp="label"
-              placeholder="选择源维度"
+              filterOption={false}
+              onSearch={(kw) => loadDims(kw || undefined)}
+              placeholder="选择源维度（输入编码/名称搜索）"
               notFoundContent={dims.length === 0 ? "暂无维度，请先创建" : "无匹配维度"}
               options={dims.map((d) => ({ value: d.dim_code, label: `${d.dim_code} · ${d.name}` }))}
             />
@@ -2466,8 +2474,9 @@ function MappingsTab() {
           <Form.Item name="target_dim_code" label="目标维度" rules={[{ required: true }]}>
             <Select
               showSearch
-              optionFilterProp="label"
-              placeholder="选择目标维度"
+              filterOption={false}
+              onSearch={(kw) => loadDims(kw || undefined)}
+              placeholder="选择目标维度（输入编码/名称搜索）"
               notFoundContent={dims.length === 0 ? "暂无维度，请先创建" : "无匹配维度"}
               options={dims.map((d) => ({ value: d.dim_code, label: `${d.dim_code} · ${d.name}` }))}
             />
