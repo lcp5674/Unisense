@@ -3378,7 +3378,20 @@ export function MetricDetail() {
         open={editOpen}
         onOk={handleSubmitEdit}
         confirmLoading={editSaving}
-        onCancel={() => setEditOpen(false)}
+        onCancel={() => {
+          // F7（审查修复）：编辑弹窗关闭时若有未保存修改须确认（此前直接关闭丢全部输入）
+          if (editForm.isFieldsTouched()) {
+            Modal.confirm({
+              title: "未保存的修改",
+              content: "编辑表单有未保存的修改，关闭将丢失，确定关闭吗？",
+              okText: "放弃修改",
+              cancelText: "继续编辑",
+              onOk: () => setEditOpen(false),
+            });
+            return;
+          }
+          setEditOpen(false);
+        }}
         okText="保存"
         width={760}
         className="metric-edit-modal"
