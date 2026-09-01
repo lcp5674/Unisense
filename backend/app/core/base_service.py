@@ -50,10 +50,19 @@ class BaseService:
         # publish-before-commit——commit 失败时事件队列不投递，订阅方不会
         # 收到「已创建/已回滚」但库中不存在的消息。
         self._pending_events: list[tuple[str, dict[str, Any], str]] = []
+        # R4（审查修复）：after_commit 投递任务的强引用集合——防止 create_task
+        # 返回值被 GC 回收导致事件静默丢失（与 degradation.py 同范式）。
+        self._in_flight_tasks: set[asyncio.Task[Any]] = set()
         try:
             sa_event.listen(db.sync_session, "after_commit", self._on_after_commit)
-        except Exception:  # noqa: BLE001 - 测试 mock 会话或非 SQLAlchemy 会话时忽略
-            pass
+        except Exception as exc:  # noqa: BLE001 - 测试 mock 会话或非 SQLAlchemy 会话时忽略
+            # R4（审查修复）：注册失败不再静默——否则事件永不 flush 且无任何日志，
+            # 治理/通知事件全部消失，运营侧「通知中心收不到升级提醒」无法定位。
+            logger.warning(
+                "after_commit_listener_register_failed",
+                error=str(exc),
+                pending=0,
+            )
 
     async def _write_audit(
         self,
@@ -112,7 +121,11 @@ class BaseService:
         if not self._pending_events:
             return
         try:
-            asyncio.get_running_loop().create_task(self._flush_pending_events())
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(self._flush_pending_events())
+            # R4（审查修复）：保存强引用防 GC，完成后自动移除
+            self._in_flight_tasks.add(task)
+            task.add_done_callback(self._in_flight_tasks.discard)
         except RuntimeError:
             # 无运行循环（CLI/极少数同步场景）：事件丢失，仅告警
             logger.warning(

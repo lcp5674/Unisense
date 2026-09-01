@@ -46,15 +46,20 @@ Handler = Callable[[dict[str, Any]], Any]
 class EventBus:
     """统一事件总线：Redis Pub/Sub + 本地订阅者注册表。
 
-    - publish: 发布事件到 Redis 频道 + 调用本地订阅者
+    - publish: 发布事件到 Redis 频道 + 调度本地订阅者
     - subscribe / unsubscribe: 管理本地订阅者
     - best-effort: publish 失败时仅记录告警日志，不影响主流程
     - TECH-04: 本地订阅者调用失败时指数退避重试，3 次后写 DLQ
+    - R3（审查修复）：本地订阅者调用移入后台任务（fire-and-forget + 强引用），
+      请求路径不再被订阅者失败重试（1+2+4=7s）同步阻塞——事件投递不占请求线程。
     """
 
     def __init__(self, redis_pool: aioredis.Redis | None = None) -> None:
         self._redis = redis_pool
         self._subscribers: dict[str, list[Handler]] = defaultdict(list)
+        # R3/R4（审查修复）：在途后台任务强引用集合——防止 create_task 返回值
+        # 被 GC 回收导致事件静默丢失（与 degradation.py 的 _in_flight_tasks 同范式）
+        self._in_flight_tasks: set[asyncio.Task[Any]] = set()
 
     async def publish(
         self,
@@ -78,10 +83,10 @@ class EventBus:
             "payload": payload,
             "actor_id": actor_id,
         }
-        # 1. 调用本地订阅者（TECH-04: 指数退避重试）
+        # 1. 调度本地订阅者（R3：后台任务执行，不阻塞请求路径；重试/DLQ 在后台完成）
         handlers = self._subscribers.get(event_type, [])
         for handler in handlers:
-            await self._invoke_with_retry(handler, event, event_type)
+            self._spawn_subscriber_task(handler, event, event_type)
 
         # 2. 发布到 Redis Pub/Sub（best-effort）
         if self._redis is not None:
@@ -99,6 +104,55 @@ class EventBus:
                 # TECH-04：发布失败进入死信队列（DLQ 重放时跳过，避免循环）
                 if not _skip_dlq:
                     _enqueue_dlq(event_type, payload, "eventbus.redis_publish_failed")
+
+    def _spawn_subscriber_task(
+        self, handler: Handler, event: dict[str, Any], event_type: str
+    ) -> None:
+        """将订阅者调用投递到后台任务并保存强引用（R3/R4）。
+
+        无运行事件循环（CLI/极少数同步场景）时降级为同步调用——此时退避重试
+        仍会阻塞，但该场景无并发请求可阻塞，可接受。
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning(
+                "eventbus.no_running_loop_sync_fallback",
+                event_type=event_type,
+                handler=handler.__qualname__,
+            )
+            # 无事件循环（CLI/极少数同步场景）：仅同步调用；异步 handler 无法运行，
+            # 记录告警后丢弃（该场景无并发请求，事件语义由调用方兜底）。
+            try:
+                result = handler(event)
+                if hasattr(result, "__await__"):
+                    logger.warning(
+                        "eventbus.async_handler_dropped_no_loop",
+                        event_type=event_type,
+                        handler=handler.__qualname__,
+                    )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "eventbus.sync_handler_failed",
+                    event_type=event_type,
+                    handler=handler.__qualname__,
+                    exc_info=True,
+                )
+            return
+
+        task = loop.create_task(self._invoke_with_retry(handler, event, event_type))
+        self._in_flight_tasks.add(task)
+        task.add_done_callback(self._in_flight_tasks.discard)
+
+    async def drain(self) -> None:
+        """等待全部在途订阅者任务完成（测试与优雅关闭用）。
+
+        事件投递改为后台任务后，测试需先 ``await bus.drain()`` 再断言订阅者
+        副作用；lifespan 关闭时亦应调用以确保事件不丢失。
+        """
+        if not self._in_flight_tasks:
+            return
+        await asyncio.gather(*list(self._in_flight_tasks), return_exceptions=True)
 
     async def _invoke_with_retry(
         self, handler: Handler, event: dict[str, Any], event_type: str

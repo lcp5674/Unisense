@@ -30,6 +30,7 @@ async def test_eventbus_retry_on_handler_failure():
         patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
     ):
         await bus.publish("test.retry", {"key": "value"})
+        await bus.drain()  # R3：等待后台重试任务完成
 
         # 验证重试次数 = len(_RETRY_DELAYS)
         assert call_count == len(_RETRY_DELAYS)
@@ -54,5 +55,6 @@ async def test_eventbus_no_retry_on_success():
 
     bus.subscribe("test.success", success_handler)
     await bus.publish("test.success", {"key": "value"})
+    await bus.drain()  # R3：等待后台订阅者任务完成
 
     assert call_count == 1

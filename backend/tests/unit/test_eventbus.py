@@ -26,6 +26,7 @@ class TestLocalSubscribers:
 
         bus.subscribe("metric.created", handler)
         await bus.publish("metric.created", {"code": "a"}, actor_id="1")
+        await bus.drain()  # R3：订阅者后台执行，等待完成后再断言
 
         assert len(received) == 1
         assert received[0]["event_type"] == "metric.created"
@@ -41,6 +42,7 @@ class TestLocalSubscribers:
 
         bus.subscribe("x", handler)
         await bus.publish("x", {})
+        await bus.drain()  # R3：等待后台订阅者任务完成
         assert done == ["x"]
 
     async def test_handler_failure_does_not_block_others(self) -> None:
@@ -57,6 +59,7 @@ class TestLocalSubscribers:
         bus.subscribe("x", good)
         # 不应抛出异常，且后续 handler 仍被执行
         await bus.publish("x", {})
+        await bus.drain()  # R3：等待后台订阅者任务完成
         assert calls == [1]
 
     async def test_no_subscribers_is_noop(self) -> None:
