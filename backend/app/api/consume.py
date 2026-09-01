@@ -37,9 +37,12 @@ from app.models.consume import (
 from app.models.user import User
 from app.services.consume.repository import ApiClientRepo
 from app.services.consume.schemas import (
+    ClientBatchRequest,
     ClientCreatedResponse,
     ClientCreateRequest,
     ClientResponse,
+    ClientStatusRequest,
+    ClientUpdateRequest,
     DryRunResponse,
     FavoriteRequest,
     FavoriteResponse,
@@ -347,6 +350,176 @@ async def list_clients(
             )
             for r in rows
         ]
+    )
+
+
+@router.put("/consume/api-clients/{client_id}", response_model=ApiResponse[ClientResponse])
+async def update_client(
+    client_id: str,
+    req: ClientUpdateRequest,
+    user: User = Depends(require_roles("platform_admin", "domain_admin")),
+    db: AsyncSession = Depends(get_db_session),
+    trace_id: Annotated[str, Depends(get_trace_id)] = "",
+) -> ApiResponse[ClientResponse]:
+    """编辑接入方授权配置（secret 不可改；None 字段表示不修改）。
+
+    修复 403 痛点：授权域/白名单创建时填错可在此修正，无需重建客户端（重建会换密钥）。
+    """
+    repo = ApiClientRepo(db)
+    row = await repo.get_by_client_id(client_id)
+    if row is None:
+        raise BusinessError("接入方不存在或已删除", error_code=ErrorCode.NOT_FOUND)
+    # 部分更新语义：None 不修改；scope_domain 空串 → 清空为不限域；白名单空数组 → 清空为域内全量
+    if req.scope_domain is not None:
+        row.scope_domain = req.scope_domain or None
+    if req.metric_whitelist is not None:
+        row.metric_whitelist = req.metric_whitelist or None
+    if req.qps is not None:
+        row.qps = req.qps
+    if req.daily_quota is not None:
+        row.daily_quota = req.daily_quota
+    await db.flush()
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="api_client.update",
+        entity_type="api_client",
+        entity_id=client_id,
+        detail={
+            "scope_domain": row.scope_domain,
+            "metric_whitelist_count": len(row.metric_whitelist or []),
+            "qps": row.qps,
+            "daily_quota": row.daily_quota,
+        },
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=_client_response(row))
+
+
+@router.patch("/consume/api-clients/{client_id}/status", response_model=ApiResponse[ClientResponse])
+async def set_client_status(
+    client_id: str,
+    req: ClientStatusRequest,
+    user: User = Depends(require_roles("platform_admin", "domain_admin")),
+    db: AsyncSession = Depends(get_db_session),
+    trace_id: Annotated[str, Depends(get_trace_id)] = "",
+) -> ApiResponse[ClientResponse]:
+    """停用/启用接入方（REVOKED 后已签短效令牌随鉴权失效、X-Api-Key 拒绝）。"""
+    repo = ApiClientRepo(db)
+    row = await repo.update_status(client_id, req.status)
+    if row is None:
+        raise BusinessError("接入方不存在或已删除", error_code=ErrorCode.NOT_FOUND)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="api_client.status",
+        entity_type="api_client",
+        entity_id=client_id,
+        detail={"status": req.status.value},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=_client_response(row))
+
+
+@router.delete("/consume/api-clients/{client_id}", response_model=ApiResponse[dict[str, bool]])
+async def delete_client(
+    client_id: str,
+    user: User = Depends(require_roles("platform_admin", "domain_admin")),
+    db: AsyncSession = Depends(get_db_session),
+    trace_id: Annotated[str, Depends(get_trace_id)] = "",
+) -> ApiResponse[dict[str, bool]]:
+    """软删接入方（置 deleted_at + REVOKED，保留审计追溯；不物理删除）。"""
+    repo = ApiClientRepo(db)
+    row = await repo.soft_delete(client_id)
+    if row is None:
+        raise BusinessError("接入方不存在或已删除", error_code=ErrorCode.NOT_FOUND)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="api_client.delete",
+        entity_type="api_client",
+        entity_id=client_id,
+        detail={"soft_delete": True},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data={"deleted": True})
+
+
+@router.post("/consume/api-clients/batch", response_model=ApiResponse[dict])
+async def batch_client_action(
+    req: ClientBatchRequest,
+    user: User = Depends(require_roles("platform_admin", "domain_admin")),
+    db: AsyncSession = Depends(get_db_session),
+    trace_id: Annotated[str, Depends(get_trace_id)] = "",
+) -> ApiResponse[dict]:
+    """批量操作接入方（enable/disable/delete），逐条容错返回 BatchResponse 语义。"""
+    repo = ApiClientRepo(db)
+    rows = await repo.get_many(req.client_ids)
+    found = {r.client_id: r for r in rows}
+    results: list[dict[str, object]] = []
+    ok_count = fail_count = 0
+    for cid in req.client_ids:
+        row = found.get(cid)
+        if row is None:
+            results.append(
+                {
+                    "client_id": cid,
+                    "ok": False,
+                    "code": "NOT_FOUND",
+                    "message": "接入方不存在或已删除",
+                }
+            )
+            fail_count += 1
+            continue
+        try:
+            if req.action.value == "delete":
+                row.deleted_at = func.now()
+                row.status = ApiClientStatus.REVOKED
+            elif req.action.value == "disable":
+                row.status = ApiClientStatus.REVOKED
+            else:
+                row.status = ApiClientStatus.ACTIVE
+            await db.flush()
+            results.append({"client_id": cid, "ok": True, "status": row.status.value})
+            ok_count += 1
+        except Exception as exc:  # 逐条容错：单条失败不阻断其余
+            results.append(
+                {"client_id": cid, "ok": False, "code": "INTERNAL_ERROR", "message": str(exc)}
+            )
+            fail_count += 1
+            await db.rollback()
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action=f"api_client.batch_{req.action.value}",
+        entity_type="api_client",
+        entity_id=",".join(req.client_ids),
+        detail={"ok_count": ok_count, "fail_count": fail_count},
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        data={
+            "action": req.action.value,
+            "ok_count": ok_count,
+            "fail_count": fail_count,
+            "results": results,
+        }
+    )
+
+
+def _client_response(r: ApiClient) -> ClientResponse:
+    """接入方视图序列化（避免端点重复组装）。"""
+    return ClientResponse(
+        client_id=r.client_id,
+        scope_domain=r.scope_domain,
+        metric_whitelist=r.metric_whitelist,
+        qps=r.qps,
+        daily_quota=r.daily_quota,
+        status=r.status,
     )
 
 
