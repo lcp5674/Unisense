@@ -85,6 +85,7 @@ const mockMetrics = vi.mocked(listMetrics);
 const ACTION_REGISTRY = [
   { action: "catalog:view", module: "指标", label: "查看指标目录", description: "访问指标目录" },
   { action: "metric:create", module: "指标", label: "创建指标", description: "新增指标" },
+  { action: "metric:edit", module: "指标", label: "编辑指标", description: "修改指标" },
   { action: "user:disable", module: "账号", label: "启停用户", description: "启用/禁用用户" },
 ];
 
@@ -477,13 +478,14 @@ describe("Governance 权限治理", () => {
     await screen.findByText("指标资产");
 
     // 「指标资产」分组入口 catalog:view(/catalog) + metric:create(/create) 同属 registry「指标」模块
+    // （该模块另有纯按钮权限点 metric:edit，共 3 项）
     // viewer 已勾选 catalog:view（metric:create 未勾选）→ allOn=false → 显示「全部展开」
     const groupTitle = await screen.findByText("指标资产");
     const groupBox = groupTitle.closest("div") as HTMLElement;
-    const expandLink = within(groupBox).getByText(/全部展开（2 项）/);
+    const expandLink = within(groupBox).getByText(/全部展开（3 项）/);
     await userEvent.click(expandLink);
 
-    // 保存后 viewer 草稿同时包含 metric:create 与 catalog:view
+    // 保存后 viewer 草稿同时包含 metric:create、catalog:view 与 metric:edit
     const saveBtn = screen
       .getAllByRole("button", { name: /保\s*存/ })
       .find((b) => !(b as HTMLButtonElement).disabled);
@@ -491,13 +493,13 @@ describe("Governance 权限治理", () => {
     await waitFor(() =>
       expect(mockSetRoles).toHaveBeenCalledWith(
         "viewer",
-        expect.arrayContaining(["metric:create", "catalog:view"]),
+        expect.arrayContaining(["metric:create", "catalog:view", "metric:edit"]),
       ),
     );
   });
 
-  it("角色管理：取消侧边栏入口时同模块按钮权限点提示「一并停用」", async () => {
-    // viewer 已勾选 catalog:view；手动在按钮 Tab 勾选 metric:create 后再到侧边栏取消「指标目录」
+  it("角色管理：取消侧边栏入口仅联动停用同模块纯按钮权限点、保留其它入口权限点", async () => {
+    // viewer 已勾选 catalog:view；在按钮 Tab 勾选「创建指标」(metric:create=入口权限点) +「编辑指标」(metric:edit=纯按钮权限点)
     mockSetRoles.mockResolvedValue({
       role: "viewer",
       default_actions: ["read"],
@@ -505,7 +507,7 @@ describe("Governance 权限治理", () => {
       effective_actions: ["read"],
       ui_default_actions: ["catalog:view", "dashboard:view"],
       ui_custom_actions: [],
-      ui_effective_actions: ["dashboard:view"],
+      ui_effective_actions: ["catalog:view", "dashboard:view"],
       protected: false,
       is_custom: false,
     });
@@ -516,11 +518,15 @@ describe("Governance 权限治理", () => {
     const configBtns = screen.getAllByRole("button", { name: /配\s*置/ });
     await userEvent.click(configBtns[0]);
     await screen.findByText("创建指标");
-    // 按钮权限点 Tab：勾选「创建指标」
-    const createCb = Array.from(
-      document.querySelectorAll<HTMLElement>(".ant-checkbox-wrapper"),
-    ).find((el) => el.textContent?.includes("创建指标"));
-    fireEvent.click(createCb!.querySelector("input.ant-checkbox-input")!);
+    // 按钮权限点 Tab：勾选「创建指标」+「编辑指标」
+    const clickCb = (text: string) => {
+      const cb = Array.from(
+        document.querySelectorAll<HTMLElement>(".ant-checkbox-wrapper"),
+      ).find((el) => el.textContent?.includes(text));
+      fireEvent.click(cb!.querySelector("input.ant-checkbox-input")!);
+    };
+    clickCb("创建指标");
+    clickCb("编辑指标");
 
     // 切侧边栏入口 Tab → 取消「指标目录」入口（排除按钮 Tab 的「查看指标目录」）
     await clickTab("侧边栏入口");
@@ -534,7 +540,8 @@ describe("Governance 权限治理", () => {
     const confirmBtn = await screen.findByRole("button", { name: /一并停用/ });
     await userEvent.click(confirmBtn);
 
-    // 保存后 viewer 草稿不含 metric:create 与 catalog:view（二者都被移除）
+    // 保存后：catalog:view（主动取消入口）与 metric:edit（纯按钮联动停用）被移除；
+    // metric:create（/create 入口自身的权限点）保留——不误取消同模块其它侧边栏入口
     const saveBtn = screen
       .getAllByRole("button", { name: /保\s*存/ })
       .find((b) => !(b as HTMLButtonElement).disabled);
@@ -542,8 +549,9 @@ describe("Governance 权限治理", () => {
     await waitFor(() => {
       const call = mockSetRoles.mock.calls.find((c) => c[0] === "viewer");
       expect(call).toBeTruthy();
-      expect(call![1]).not.toContain("metric:create");
       expect(call![1]).not.toContain("catalog:view");
+      expect(call![1]).not.toContain("metric:edit");
+      expect(call![1]).toContain("metric:create");
     });
   });
 
@@ -782,6 +790,53 @@ describe("Governance 授权管理 - 角色下拉与按用户授权矩阵", () =>
     await waitFor(() =>
       expect(mockSetUserPerms).toHaveBeenCalledWith(1, expect.objectContaining({ actions: ["metric:create"] })),
     );
+  });
+
+  it("按用户授权侧边栏：取消入口「一并禁用」仅联动纯按钮权限点、保留其它入口权限点", async () => {
+    // 角色 viewer 继承 catalog:view(指标目录入口) + metric:edit(纯按钮权限点)；metric:create(/create 入口) 未被继承
+    mockGetUserPerms.mockResolvedValue({
+      user_id: 1,
+      role: "viewer",
+      role_actions: ["catalog:view", "metric:edit"],
+      direct_actions: [],
+      deny_actions: [],
+      effective_actions: ["catalog:view", "metric:edit"],
+    });
+    const grant = {
+      id: 1, user_id: 1, role_id: 1, domain: "sales", metric_whitelist: null,
+      grant_type: "READ", row_level: false, status: "ACTIVE", expires_at: null,
+      created_at: "2026-08-01T00:00:00", granted_by: 1, reason: null,
+    };
+    mockGrants.mockResolvedValue({ items: [grant], total: 1, page: 1, page_size: 20 });
+    renderGov();
+    await clickTab("授权管理");
+    await waitFor(() => expect(screen.getByText("只读用户")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: /按\s*钮\s*权\s*限/ }));
+    await waitFor(() => expect(screen.getByText(/按用户授权：/)).toBeInTheDocument());
+
+    // 切「侧边栏入口」Tab → 取消「指标目录」入口（排除按钮 Tab 的「查看指标目录」）
+    await clickTab("侧边栏入口");
+    await screen.findByText("指标资产");
+    const catalogCb = Array.from(
+      document.querySelectorAll<HTMLElement>(".ant-checkbox-wrapper"),
+    ).find((el) => el.textContent?.includes("指标目录") && !el.textContent?.includes("查看"));
+    fireEvent.click(catalogCb!.querySelector("input.ant-checkbox-input")!);
+
+    // 弹确认「一并禁用」→ 点一并禁用
+    const confirmBtn = await screen.findByRole("button", { name: /一并禁用/ });
+    await userEvent.click(confirmBtn);
+
+    // 保存：deny 仅含 catalog:view + metric:edit（纯按钮联动），不含 metric:create（/create 入口权限点保留）
+    await userEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => {
+      // 注意：本 describe 的 beforeEach 不 mockReset，calls 跨测试累积——取最后一条（当前测试）调用
+      const call = mockSetUserPerms.mock.calls[mockSetUserPerms.mock.calls.length - 1];
+      expect(call?.[0]).toBe(1);
+      const deny = (call![1] as { deny_actions: string[] }).deny_actions ?? [];
+      expect(deny).toContain("catalog:view");
+      expect(deny).toContain("metric:edit");
+      expect(deny).not.toContain("metric:create");
+    });
   });
 
   it("角色管理：常用组合预设一键套用（域管理员预设勾选 metric:create，仅合并注册表内点）", async () => {

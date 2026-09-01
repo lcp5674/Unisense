@@ -164,11 +164,26 @@ export function UserPermModal({
     });
   }
 
-  /** 某权限点所属 registry 模块下、除自身外的其它权限点（联动停用候选）。 */
+  /** 侧边栏入口自身对应的权限点（ROUTE_PERM 值，如 /create→metric:create）。
+   *
+   * 这类权限点由「入口复选框」独立控制——「一并禁用」只应联动纯按钮权限点，
+   * 若把入口权限点也纳入候选，会误取消同模块其它侧边栏入口（如取消 /catalogs
+   * 却连带取消 /create）。故联动候选须排除全部入口权限点。
+   */
+  const SIDEBAR_GATE_ACTIONS = new Set(Object.values(ROUTE_PERM));
+
+  /** 某权限点所属 registry 模块下、除自身外且非侧边栏入口的其它权限点（联动停用候选）。 */
   function siblingActions(action: string): string[] {
     const mod = registry.find((r) => r.action === action)?.module;
     if (!mod) return [];
-    return registry.filter((r) => r.module === mod && r.action !== action).map((r) => r.action);
+    return registry
+      .filter(
+        (r) =>
+          r.module === mod &&
+          r.action !== action &&
+          !SIDEBAR_GATE_ACTIONS.has(r.action),
+      )
+      .map((r) => r.action);
   }
 
   /** 侧边栏分组对应的全部权限点（入口权限点反查 module → module 并集）。 */
