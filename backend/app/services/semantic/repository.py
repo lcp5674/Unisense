@@ -440,6 +440,19 @@ class MetricRepository:
             delete(MetricHealthScore).where(MetricHealthScore.metric_id == metric_id)
         )
         await self._db.execute(delete(MetricMount).where(MetricMount.metric_id == metric_id))
+        # B2（审查修复）：补齐级联遗漏——质量规则（quality_rule.metric_id）、
+        # 冲突（metric_a/metric_b 引用指标主键）、收藏（favorite.asset_id=业务编码）
+        await self._db.execute(delete(QualityRule).where(QualityRule.metric_id == metric_id))
+        await self._db.execute(
+            delete(Conflict).where(
+                or_(Conflict.metric_a == metric_id, Conflict.metric_b == metric_id)
+            )
+        )
+        await self._db.execute(
+            delete(Favorite).where(
+                Favorite.asset_type == "METRIC", Favorite.asset_id == metric_code
+            )
+        )
         await self._db.execute(delete(Metric).where(Metric.id == metric_id))
 
     # ---- 版本相关 ----
@@ -877,6 +890,20 @@ class MetricRepository:
         }
 
     async def aggregate_dashboard(
+        self, domain: str | None = None, owner_id: int | None = None
+    ) -> dict[str, Any]:
+        """工作台仪表盘聚合（P2 性能审查：约 20 个全表聚合 SQL 无缓存，加 30s cache-aside）。
+
+        key 含 domain/owner 维度区分；写操作（指标/挂载/治理变更）后可显式失效。
+        """
+        from app.core.agg_cache import agg_cached
+
+        return await agg_cached(
+            f"dashboard:{domain or 'all'}:{owner_id or 'all'}",
+            lambda: self._aggregate_dashboard_uncached(domain, owner_id),
+        )
+
+    async def _aggregate_dashboard_uncached(
         self, domain: str | None = None, owner_id: int | None = None
     ) -> dict[str, Any]:
         """单次聚合 SQL 查询仪表盘数据（对齐 FR-043）。

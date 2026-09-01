@@ -3990,6 +3990,14 @@ class MetricService(BaseService):
                 error_code="FORBIDDEN",
             )
         await self._repo.purge_metric(metric.id, metric_code)
+        # B2（审查修复）：purge 后同步删除 ES 索引文档，保持全局搜索与库一致
+        # （此前 ES 无 delete 能力，已彻底删除指标仍出现在搜索结果点击 404）。
+        try:
+            from app.services.search.es_indexer import EsIndexer
+
+            await EsIndexer(self._db).delete_metric(metric_code)
+        except Exception:  # noqa: BLE001 - ES 不可用/删除失败不阻断业务（检索自动降级 MySQL）
+            logger.warning("metric_purge_es_delete_failed", metric_code=metric_code, exc_info=True)
         await self._cache.invalidate(metric_code)
         logger.info(
             "metric_purged", metric_code=metric_code, actor_id=actor_id, role=role
