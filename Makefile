@@ -74,3 +74,9 @@ schema-check: ## 模型↔迁移一致性检查（发布前门禁：现有库直
 
 schema-init-check: ## 干净库初始化模拟（临时库跑 upgrade head 后对比，需建库权限）
 	poetry run python -m scripts.check_schema_consistency --init-check
+
+perm-cleanup: ## 内置角色权限覆盖收敛（基线错位对齐；dry-run 缺省，--apply 写库）
+	poetry run python -m scripts.cleanup_role_permissions
+
+perm-cleanup-apply: ## 内置角色权限覆盖收敛并写库
+	poetry run python -m scripts.cleanup_role_permissions --apply
