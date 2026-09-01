@@ -1557,13 +1557,28 @@ export interface SensitiveRuleTestResponse {
   hits: SensitiveRuleTestHit[];
 }
 
+export interface UiActionMeta {
+  /** 权限点键（模块:功能） */
+  action: string;
+  /** 所属模块（前端分组渲染） */
+  module: string;
+  /** 中文名 */
+  label: string;
+  /** 悬停说明 */
+  description: string;
+}
+
 export interface PermissionSnapshot {
   user_id: number;
   role: string;
+  /** 全部角色（主角色在前，含 user_role 扩展角色，方案 A 多角色；后端始终返回） */
+  roles?: string[];
   home_domain: string | null;
   allowed_actions: string[];
   /** UI 权限点（模块:功能），前端 usePermission 消费；默认+role_permission 覆盖合并 */
   ui_actions: string[];
+  /** UI 权限点中文元数据（action/module/label/description，个人中心分组展示；未知自定义动作降级为 action 本身） */
+  ui_action_meta?: UiActionMeta[];
   granted_domains: string[];
   metric_whitelist: string[];
   row_level_restricted: boolean;

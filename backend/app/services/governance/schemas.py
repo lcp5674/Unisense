@@ -77,6 +77,22 @@ class ActionRegistryItem(BaseModel):
     description: str = ""
 
 
+class UiActionMeta(BaseModel):
+    """UI 权限点中文元数据（``GET /me/permissions`` 附带，供个人中心中文展示）。
+
+    Attributes:
+        action: 权限点键（``模块:功能``）。
+        module: 所属模块（前端分组渲染）。
+        label: 中文名。
+        description: 悬停说明。
+    """
+
+    action: str
+    module: str
+    label: str
+    description: str = ""
+
+
 class UserPermissionResponse(BaseModel):
     """用户按钮权限点视图（角色继承 + 直挂并集，供「按用户授权」矩阵）。
 
@@ -309,6 +325,13 @@ class PermissionSnapshot(BaseModel):
     ui_actions: list[str] = Field(
         default_factory=list,
         description="UI 权限点（模块:功能，前端 usePermission 消费；默认+覆盖合并）",
+    )
+    ui_action_meta: list[UiActionMeta] = Field(
+        default_factory=list,
+        description=(
+            "UI 权限点中文元数据（action/module/label/description，个人中心分组展示；"
+            "未知自定义动作降级为 action 本身）"
+        ),
     )
     granted_domains: list[str]
     metric_whitelist: list[str]

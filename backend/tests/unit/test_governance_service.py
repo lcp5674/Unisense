@@ -30,6 +30,7 @@ from app.services.governance.schemas import (
     PiiReviewRequest,
     RoleCreate,
     RolePermissionUpdate,
+    UiActionMeta,
 )
 from app.services.governance.service import GovernanceService
 
@@ -1165,6 +1166,26 @@ async def test_my_permissions_includes_ui_actions() -> None:
     assert "catalog:view" in snap.ui_actions
     assert "metric:create" not in snap.ui_actions
     assert "read" in snap.allowed_actions  # 资源级动词保持兼容
+
+
+async def test_my_permissions_ui_action_meta_chinese_labels() -> None:
+    """权限快照附带 ui_action_meta 中文元数据：module/label/description 对齐注册表。"""
+    svc, _repo, _ = _svc()
+    snap = await svc.my_permissions(FakeUser(uid=1, role="viewer"))  # type: ignore[arg-type]
+    by_action = {m.action: m for m in snap.ui_action_meta}
+    assert by_action["catalog:view"].label == "查看指标目录"
+    assert by_action["catalog:view"].module == "指标"
+    assert "访问指标目录列表" in by_action["catalog:view"].description
+    # ui_actions 与 ui_action_meta 一一对应
+    assert {m.action for m in snap.ui_action_meta} == set(snap.ui_actions)
+    # 未知/自定义权限点降级为 action 本身、模块归「其他」
+    custom = UiActionMeta(
+        action="custom:probe",
+        module="其他",
+        label="custom:probe",
+        description="自定义权限点",
+    )
+    assert custom.label == "custom:probe"
 
 
 async def test_my_permissions_multi_role_union() -> None:

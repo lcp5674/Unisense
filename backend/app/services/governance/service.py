@@ -59,6 +59,7 @@ from app.services.governance.schemas import (
     PiiReviewResult,
     PiiSecondaryValidationResult,
     RoleCreate,
+    UiActionMeta,
 )
 
 logger = get_logger("unisense.governance.service")
@@ -801,6 +802,27 @@ class GovernanceService(BaseService):
             ui_actions |= set(ui_role_actions.get(r, frozenset()))
             allowed_actions |= set(role_actions.get(r, frozenset()))
         ui_actions -= direct_denies
+        ui_action_meta = [
+            UiActionMeta(
+                action=a,
+                module=(
+                    policy.UI_ACTION_REGISTRY[a]["module"]
+                    if a in policy.UI_ACTION_REGISTRY
+                    else "其他"
+                ),
+                label=(
+                    policy.UI_ACTION_REGISTRY[a]["label"]
+                    if a in policy.UI_ACTION_REGISTRY
+                    else a
+                ),
+                description=(
+                    policy.UI_ACTION_REGISTRY[a].get("description", "")
+                    if a in policy.UI_ACTION_REGISTRY
+                    else "自定义权限点"
+                ),
+            )
+            for a in sorted(ui_actions)
+        ]
         return PermissionSnapshot(
             user_id=user.id,
             role=role_s,
@@ -808,6 +830,7 @@ class GovernanceService(BaseService):
             home_domain=user.domain,
             allowed_actions=sorted(allowed_actions),
             ui_actions=sorted(ui_actions),
+            ui_action_meta=ui_action_meta,
             granted_domains=sorted(domains),
             metric_whitelist=sorted(whitelist),
             row_level_restricted=any(g.row_level for g in effective),
