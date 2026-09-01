@@ -7,6 +7,8 @@ EventLog 无 user 列，不再承担按用户过滤的职责。
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -15,6 +17,10 @@ from app.models.lineage import LineageEdge
 from app.models.metric import Metric
 from app.models.term import Term
 from app.models.tracking import TrackingEvent
+
+#: 行为信号时间窗口（P11 性能审查）：tracking_event 无界增长，全量 GROUP BY/自连接
+#: 随数据量线性恶化；推荐热度/协同过滤用近期行为更具业务语义（90 天）。
+_BEHAVIOR_WINDOW_DAYS = 90
 
 # 与前端埋点事件类型对齐（frontend/src/utils/enums.ts:288-299）。
 # 这些事件以 target_type="metric" 记录用户对指标的行为，是协同过滤与热门聚合的信号源。
@@ -51,6 +57,8 @@ class RecommendRepository:
         """
         te1 = aliased(TrackingEvent, name="te1")
         te2 = aliased(TrackingEvent, name="te2")
+        # P11：自连接无时间窗口会随 tracking_event 无界增长恶化——两端均收敛到 90 天
+        since = datetime.now(UTC) - timedelta(days=_BEHAVIOR_WINDOW_DAYS)
         stmt = (
             select(te2.target_id, func.count(func.distinct(te1.actor_id)).label("co_users"))
             .select_from(te1)
@@ -66,6 +74,8 @@ class RecommendRepository:
                 te2.target_type == "metric",
                 te1.event_type.in_(METRIC_EVENT_TYPES),
                 te2.event_type.in_(METRIC_EVENT_TYPES),
+                te1.created_at >= since,
+                te2.created_at >= since,
             )
             .group_by(te2.target_id)
             .order_by(func.count(func.distinct(te1.actor_id)).desc())
@@ -115,13 +125,18 @@ class RecommendRepository:
 
         聚合 tracking_events 中 ``target_type='metric'`` 且事件类型属于埋点词汇的事件，
         按出现次数降序返回 ``(metric_code, count)``。
+
+        P11（性能审查）：加 90 天时间窗口——tracking_event 无界增长，全量 GROUP BY
+        随数据量线性恶化，且推荐热度用近期行为更符合「当前热门」语义。
         """
+        since = datetime.now(UTC) - timedelta(days=_BEHAVIOR_WINDOW_DAYS)
         stmt = (
             select(TrackingEvent.target_id, func.count().label("cnt"))
             .where(
                 TrackingEvent.target_type == "metric",
                 TrackingEvent.target_id.isnot(None),
                 TrackingEvent.event_type.in_(METRIC_EVENT_TYPES),
+                TrackingEvent.created_at >= since,
             )
             .group_by(TrackingEvent.target_id)
             .order_by(func.count().desc())
