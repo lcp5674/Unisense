@@ -727,12 +727,18 @@ class CollectorRepository:
         return True
 
     async def bulk_deprecate(
-        self, items: list[BulkDeprecateItem]
+        self, items: list[BulkDeprecateItem], org_id: int | None = None
     ) -> tuple[list[BulkDeprecateItem], list[dict[str, Any]]]:
         succeeded: list[BulkDeprecateItem] = []
         failed: list[dict[str, Any]] = []
         for it in items:
             try:
+                # 越权审查修复：org_id 非 None 时先校验数据源归属（跨组织源视为不存在）
+                if org_id is not None:
+                    src = await self.get_source(it.source_id, org_id=org_id)
+                    if src is None:
+                        failed.append({"item": it.model_dump(), "reason": "SOURCE_NOT_FOUND"})
+                        continue
                 if await self.deprecate_catalog(it.source_id, it.entity_name):
                     succeeded.append(it)
                 else:

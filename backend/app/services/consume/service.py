@@ -747,6 +747,9 @@ class ConsumeService(BaseService):
         D-2 修复：此前快照端点无任何 PDP/域校验，任意登录用户可凭 code 跨域读取
         任意指标的历史查询数据值——现接入 ``check_internal_read_permission``，
         platform_admin 直通 / 本域角色按 ROLE_ACTIONS / 跨域须命中 ACTIVE grants。
+        越权审查修复：补 ``_assert_consumable_status`` 状态闸门——EXPERIMENTAL 灰度
+        指标快照仅命中 gray_tenant_ids 的租户可读、DEPRECATED 一律拒绝（对齐
+        execute_query 的 internal 通道语义，此前快照读可绕过灰度/废弃闸门）。
         """
         decision, _matched = await GovernanceService(self._db).check_internal_read_permission(
             user, metric_code
@@ -757,6 +760,10 @@ class ConsumeService(BaseService):
                 error_code=decision.error_code or ErrorCode.FORBIDDEN,
                 ctx={"metric_code": metric_code, "actor_id": user.id},
             )
+        metric = await self._get_metric(metric_code)
+        if metric is None:
+            raise NotFoundError("指标不存在", error_code=ErrorCode.NOT_FOUND)
+        self._assert_consumable_status(metric, client=None, internal_user=user)
         return await self.list_snapshots(metric_code, limit, offset)
 
     async def list_snapshots_for_client(
@@ -768,11 +775,15 @@ class ConsumeService(BaseService):
         D-2 修复：此前快照端点无 scope_domain/白名单/PII 校验，接入方可跨域读取任意
         指标历史查询数据值——现复用 ``_assert_authorized``（域 → 白名单 → PII 四级，
         fail-closed），未经授权一律 FORBIDDEN。
+        越权审查修复：补 ``_assert_consumable_status`` 状态闸门——EXPERIMENTAL 灰度
+        指标对接入方（无租户归属）一律拒绝、DEPRECATED 拒绝（对齐 execute_query 的
+        client 通道语义，此前消费方可读灰度/废弃指标快照）。
         """
         metric = await self._get_metric(metric_code)
         if metric is None:
             raise NotFoundError("指标不存在", error_code=ErrorCode.NOT_FOUND)
         self._assert_authorized(client, metric)
+        self._assert_consumable_status(metric, client=client, internal_user=None)
         return await self.list_snapshots(metric_code, limit, offset)
 
     # ---- 收藏（通用多资产，TD §5.4 favorite）----

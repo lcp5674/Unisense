@@ -349,6 +349,10 @@ async def delete_edges_by_node(
 ) -> ApiResponse[Any]:
     """级联软删某节点相关的全部血缘边（数据源删除时维护一致性）。"""
     svc = _svc(db)
+    # 越权审查修复：级联删边前校验节点域归属（此前无校验，metric_owner 可借
+    # DELETE /edges?node= 级联删除他域节点的全部血缘边——对齐单边删除的
+    # _assert_edge_domain 语义）。platform_admin 放行；节点无法解析域不阻断。
+    await _assert_node_read_access(user, svc, params.node)
     deleted = await svc.delete_by_node(params.node)
     await write_audit(
         db,

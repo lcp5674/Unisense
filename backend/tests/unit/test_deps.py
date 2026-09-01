@@ -54,6 +54,25 @@ class TestGetCurrentUser:
         with pytest.raises(AuthError):
             await deps.get_current_user(db, creds)
 
+    async def test_refresh_token_rejected_as_access(self) -> None:
+        """越权审查修复：refresh token（type=refresh，7 天）不得当 access 使用。"""
+        db = MagicMock()
+        now = datetime.now(UTC)
+        payload = {
+            "sub": "1",
+            "role": "metric_owner",
+            "org_id": 1,
+            "type": "refresh",
+            "jti": "refresh-jti-001",
+            "iat": int(now.timestamp()),
+            "exp": int((now + timedelta(days=7)).timestamp()),
+        }
+        refresh = jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+        creds = MagicMock(credentials=refresh)
+        with pytest.raises(AuthError) as ei:
+            await deps.get_current_user(db, creds)
+        assert ei.value.error_code == "AUTH_TOKEN_TYPE_INVALID"
+
     async def test_user_not_found_raises(self) -> None:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None

@@ -74,6 +74,14 @@ async def get_current_user(
         user_id: int = int(payload.get("sub", 0))
         if user_id == 0:
             raise AuthError("Token 无效", error_code="AUTH_TOKEN_INVALID")
+        # 越权审查修复：JWT type 校验——refresh token（type=refresh，7 天有效）
+        # 不得当作 access token 使用（否则 refresh 泄露 = 7 天全权访问，绕过
+        # access 15 分钟短效设计）。access/consume token 无 type 字段（向后兼容）。
+        if payload.get("type") == "refresh":
+            raise AuthError(
+                "刷新令牌不能直接访问业务接口，请通过 /auth/refresh 换取访问令牌",
+                error_code="AUTH_TOKEN_TYPE_INVALID",
+            )
     except jwt.ExpiredSignatureError:
         raise AuthError("Token 已过期", error_code="AUTH_TOKEN_EXPIRED") from None
     except jwt.InvalidTokenError:

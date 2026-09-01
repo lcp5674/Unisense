@@ -898,14 +898,21 @@ class CollectorService(BaseService):
         return BatchSourceResult(succeeded=succeeded, failed=failed)
 
     async def batch_schedule_sources(
-        self, source_ids: list[str], schedule_cron: str, actor_id: int
+        self,
+        source_ids: list[str],
+        schedule_cron: str,
+        actor_id: int,
+        org_id: int | None = None,
     ) -> BatchSourceResult:
-        """批量设置调度 cron（207 语义，逐条独立处理）。"""
+        """批量设置调度 cron（207 语义，逐条独立处理）。
+
+        越权审查修复：``org_id`` 非 None 时强制按组织过滤（跨组织源记 NOT_FOUND）。
+        """
         succeeded: list[BatchSourceItem] = []
         failed: list[BatchSourceItem] = []
         for sid in source_ids:
             try:
-                src = await self._repo.get_source(sid)
+                src = await self._repo.get_source(sid, org_id=org_id)
                 if src is None:
                     failed.append(
                         BatchSourceItem(
@@ -2108,8 +2115,15 @@ class CollectorService(BaseService):
         resp.source_name = name or cat.source_id
         return resp
 
-    async def bulk_deprecate(self, req: BulkDeprecateRequest, actor_id: int) -> BulkDeprecateResult:
-        succeeded, failed = await self._repo.bulk_deprecate(req.items)
+    async def bulk_deprecate(
+        self, req: BulkDeprecateRequest, actor_id: int, org_id: int | None = None
+    ) -> BulkDeprecateResult:
+        """批量废弃目录实体（207 语义）。
+
+        越权审查修复：``org_id`` 非 None 时强制按组织过滤——跨组织数据源的目录
+        实体记 SOURCE_NOT_FOUND 失败项，不执行废弃。
+        """
+        succeeded, failed = await self._repo.bulk_deprecate(req.items, org_id=org_id)
         for it in succeeded:
             await self._events.publish(
                 "catalog_deprecated",
@@ -2920,14 +2934,16 @@ class CollectorService(BaseService):
         cron: str,
         mode: str | None = None,
         schedule_enabled: bool | None = None,
+        org_id: int | None = None,
     ) -> None:
         """US3: 更新数据源的定时调度配置（schedule_cron [+ collection_mode] [+ 调度启停]）。
 
         ``mode`` 为 None 时保持数据源现有 ``collection_mode`` 不变——采集模式由
         数据源自身的默认采集模式决定（编辑表单设置），调度只负责 cron 与启停。
         ``schedule_enabled`` 为 None 时保持当前状态（兼容仅改 cron 的旧调用）。
+        越权审查修复：``org_id`` 非 None 时强制按组织过滤（跨组织源视为不存在）。
         """
-        src = await self._repo.get_source(source_id)
+        src = await self._repo.get_source(source_id, org_id=org_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
         src.schedule_cron = cron

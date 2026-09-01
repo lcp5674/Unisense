@@ -1049,6 +1049,20 @@ async def test_repo_bulk_deprecate_partial():
     assert len(failed) == 1
 
 
+async def test_repo_bulk_deprecate_cross_org_source_not_found() -> None:
+    """越权审查修复：批量废弃带 org_id——跨组织数据源记 SOURCE_NOT_FOUND（不废弃）。"""
+    repo = CollectorRepository(_session())
+    repo.get_source = AsyncMock(return_value=None)  # 跨组织源不可见
+    items = [
+        BulkDeprecateItem(source_id="other_org_src", entity_name="tbl"),
+    ]
+    succeeded, failed = await repo.bulk_deprecate(items, org_id=5)
+    assert len(succeeded) == 0
+    assert len(failed) == 1
+    assert failed[0]["reason"] == "SOURCE_NOT_FOUND"
+    repo.get_source.assert_awaited_with("other_org_src", org_id=5)
+
+
 async def test_repo_set_source_enabled():
     src = MagicMock()
     src.enabled = False
@@ -4367,6 +4381,26 @@ async def test_batch_schedule_sources_success() -> None:
     result = await svc.batch_schedule_sources(["s1"], "0 2 * * *", actor_id=1)
     assert len(result.succeeded) == 1
     assert src.schedule_cron == "0 2 * * *"
+
+
+async def test_batch_schedule_sources_cross_org_not_found() -> None:
+    """越权审查修复：批量调度带 org_id——跨组织源记 NOT_FOUND（不修改）。"""
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(return_value=None)  # org 过滤后跨组织源不可见
+    result = await svc.batch_schedule_sources(["s1"], "0 2 * * *", actor_id=1, org_id=5)
+    assert len(result.succeeded) == 0
+    assert len(result.failed) == 1
+    assert result.failed[0].error_code == "NOT_FOUND"
+    repo.get_source.assert_awaited_with("s1", org_id=5)
+
+
+async def test_update_schedule_cross_org_not_found() -> None:
+    """越权审查修复：单源调度带 org_id——跨组织源视为不存在（404）。"""
+    svc, repo = _svc()
+    repo.get_source = AsyncMock(return_value=None)
+    with pytest.raises(NotFoundError):
+        await svc.update_schedule("s1", "0 2 * * *", org_id=5)
+    repo.get_source.assert_awaited_with("s1", org_id=5)
 
 
 async def test_repo_get_description_coverage_pagination() -> None:

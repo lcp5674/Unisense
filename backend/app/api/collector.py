@@ -430,7 +430,10 @@ async def batch_schedule_data_sources(
 ) -> ApiResponse[BatchSourceResult]:
     """批量设置调度 cron（207 语义，统一覆盖 schedule_cron）。"""
     svc = _svc(db)
-    result = await svc.batch_schedule_sources(body.source_ids, body.schedule_cron, user.id)
+    # 越权审查修复：批量写强制 org 隔离（对齐 batch-toggle/batch-delete）。
+    result = await svc.batch_schedule_sources(
+        body.source_ids, body.schedule_cron, user.id, org_id=_resolve_org_scope(user)
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -920,8 +923,14 @@ async def schedule_collection(
     """
     svc = _svc(db)
     # P1-7: 仅保存 cron+mode 到 DataSource，不投递采集任务
+    # 越权审查修复：写路径强制 org 隔离（此前 update_schedule 无 org 过滤，
+    # domain_admin 可跨组织改调度——对齐 batch-toggle/batch-delete 的 org 语义）。
     await svc.update_schedule(
-        source_id, body.cron, body.mode, schedule_enabled=body.schedule_enabled
+        source_id,
+        body.cron,
+        body.mode,
+        schedule_enabled=body.schedule_enabled,
+        org_id=_resolve_org_scope(user),
     )
     await write_audit(
         db,
@@ -1501,7 +1510,9 @@ async def bulk_deprecate(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[BulkDeprecateResult]:
     svc = _svc(db)
-    result = await svc.bulk_deprecate(body, user.id)
+    # 越权审查修复：批量废弃强制 org 隔离（此前 bulk_deprecate 无 org 过滤，
+    # domain_admin 可跨组织废弃目录表）。
+    result = await svc.bulk_deprecate(body, user.id, org_id=_resolve_org_scope(user))
     await write_audit(
         db,
         actor_id=user.id,

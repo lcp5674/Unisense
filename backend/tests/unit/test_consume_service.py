@@ -1456,6 +1456,8 @@ async def test_list_snapshots_for_internal_allowed() -> None:
     """内部用户 PDP 放行 → 返回快照。"""
     svc = _svc(await _client())
     svc._snapshots.list_by_metric = AsyncMock(return_value=[_snap()])
+    # 越权审查修复：快照读补状态闸门——PUBLISHED 状态通过
+    svc._get_metric = AsyncMock(return_value=_metric())
     with patch(
         "app.services.consume.service.GovernanceService.check_internal_read_permission",
         new=AsyncMock(
@@ -1468,6 +1470,44 @@ async def test_list_snapshots_for_internal_allowed() -> None:
         out = await svc.list_snapshots_for_internal("gmv", 10, 0, SimpleNamespace(id=1))
     assert len(out) == 1
     assert out[0].generated_by == SnapshotGeneratedBy.MATERIALIZE
+
+
+async def test_list_snapshots_for_internal_experimental_gray_denied() -> None:
+    """越权审查修复：EXPERIMENTAL 灰度指标快照——未命中 gray_tenant_ids 的租户拒绝。"""
+    svc = _svc(await _client())
+    svc._snapshots.list_by_metric = AsyncMock(return_value=[_snap()])
+    m = _metric(status="EXPERIMENTAL")
+    m.gray_tenant_ids = [99]
+    svc._get_metric = AsyncMock(return_value=m)
+    with patch(
+        "app.services.consume.service.GovernanceService.check_internal_read_permission",
+        new=AsyncMock(
+            return_value=(
+                SimpleNamespace(allow=True, restricted=False, reason=None, error_code=None),
+                None,
+            )
+        ),
+    ), pytest.raises(BusinessError) as ei:
+        await svc.list_snapshots_for_internal("gmv", 10, 0, SimpleNamespace(id=1, org_id=1))
+    assert ei.value.error_code == ErrorCode.FORBIDDEN_METRIC
+
+
+async def test_list_snapshots_for_internal_deprecated_denied() -> None:
+    """越权审查修复：DEPRECATED 指标快照——内部用户一律拒绝（对齐 execute_query）。"""
+    svc = _svc(await _client())
+    svc._snapshots.list_by_metric = AsyncMock(return_value=[_snap()])
+    svc._get_metric = AsyncMock(return_value=_metric(status="DEPRECATED"))
+    with patch(
+        "app.services.consume.service.GovernanceService.check_internal_read_permission",
+        new=AsyncMock(
+            return_value=(
+                SimpleNamespace(allow=True, restricted=False, reason=None, error_code=None),
+                None,
+            )
+        ),
+    ), pytest.raises(BusinessError) as ei:
+        await svc.list_snapshots_for_internal("gmv", 10, 0, SimpleNamespace(id=1))
+    assert ei.value.error_code == ErrorCode.FORBIDDEN_DEPRECATED
 
 
 async def test_list_snapshots_for_internal_denied() -> None:

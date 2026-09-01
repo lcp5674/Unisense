@@ -729,6 +729,7 @@ function DimensionsTab() {
                 onApprove={handleApprove}
                 onOpenSubmit={(r) => review.setSubmitTarget({ code: r.code, name: r.name })}
                 onOpenReject={(r) => review.setRejectTarget({ code: r.code, name: r.name })}
+                canSubmit={can("dimension:create") || can("dimension:edit")}
               />
             )}
             <Dropdown
