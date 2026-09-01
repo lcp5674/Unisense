@@ -349,7 +349,11 @@ class FakeRepo:
             "pii_inherited": getattr(e, "pii_inherited", False),
         }
 
-    async def metric_total(self) -> int:
+    async def metric_total(self, domain: str | None = None) -> int:
+        # 域收敛时按 all_metric_rows 的域过滤（对齐 service 层语义）
+        if domain is not None:
+            rows = await self.all_metric_rows()
+            return len([c for c, d in rows if d == domain])
         return self.metric_total_count
 
     async def metric_codes_with_lineage(self) -> set[str]:
@@ -1328,6 +1332,29 @@ async def test_list_nodes_maps_types_and_labels() -> None:
     assert by_id["table:a"].count == 3
 
 
+async def test_list_nodes_domain_filters_foreign_domain() -> None:
+    """读路径域收敛：list_nodes 带 domain 时剔除可解析出域且不在本域的节点。"""
+    from types import SimpleNamespace
+
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    svc._repo.list_nodes = AsyncMock(  # type: ignore[attr-defined]
+        return_value=[("metric:sales_gmv", 5), ("metric:hr_headcount", 3), ("table:shared", 1)]
+    )
+    # 可解析出域：sales_gmv→sales、hr_headcount→hr；table:shared 无法解析（保留）
+    svc.node_meta = AsyncMock(  # type: ignore[method-assign]
+        return_value=[
+            SimpleNamespace(id="metric:sales_gmv", domain="sales"),
+            SimpleNamespace(id="metric:hr_headcount", domain="hr"),
+        ]
+    )
+    nodes = await svc.list_nodes(domain="sales")
+    ids = {n.id for n in nodes}
+    assert "metric:sales_gmv" in ids
+    assert "metric:hr_headcount" not in ids  # 他域节点被剔除
+    assert "table:shared" in ids  # 无法解析域 → 保留（不阻断语义）
+
+
 async def test_confirm_stale_edge_deletes_and_cleans_graph() -> None:
     svc = LineageService(db=_FakeSession())
     repo = FakeIngestRepo()
@@ -1450,6 +1477,41 @@ async def test_coverage_stats_aggregates_counts() -> None:
     assert stats.table_no_downstream == 2
     assert stats.edge_total == 0
     assert stats.broken_edges == 2
+
+
+async def test_coverage_stats_domain_scope_filters_metrics() -> None:
+    """coverage_stats 域收敛：非管理角色仅统计本域指标的血缘完整度。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.metric_total_count = 10  # domain 非空时被 all_metric_rows 的域过滤覆盖
+    repo.metric_rows = [
+        ("a", "outpatient"),
+        ("b", "outpatient"),
+        ("c", "inpatient"),
+    ]
+    repo.codes_with_lineage = ["a", "b", "c"]
+    repo.table_total_count = 5
+    repo.table_no_downstream = 2
+    svc._repo = repo
+    stats = await svc.coverage_stats(domain="outpatient")
+    assert stats.metric_total == 2  # 仅门诊域 2 个
+    assert stats.metric_with_lineage == 2  # a/b 均有血缘
+    assert stats.metric_orphan == 0
+    # 表/边计数为全局血缘基础设施统计，不参与域过滤
+    assert stats.table_total == 5
+
+
+async def test_coverage_stats_no_domain_for_admin() -> None:
+    """coverage_stats 平台管理员（domain=None）统计全量指标。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.metric_total_count = 10
+    repo.codes_with_lineage = ["a", "b"]
+    svc._repo = repo
+    stats = await svc.coverage_stats()
+    assert stats.metric_total == 10
+    assert stats.metric_with_lineage == 2
+    assert stats.metric_orphan == 8
 
 
 async def test_coverage_orphan_metrics() -> None:

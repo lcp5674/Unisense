@@ -315,8 +315,13 @@ class TestListTree:
         child.status = "active"
 
         svc._repo.list_all = AsyncMock(return_value=[root, child])
-        svc._repo.get_metric_count = AsyncMock(side_effect=[3, 5])
-        svc._repo.get_dimension_count = AsyncMock(side_effect=[2, 4])
+        # P14 批量聚合：一次 GROUP BY 返回 dict（替代逐域 N 次单查）
+        svc._repo.count_metrics_by_domains = AsyncMock(
+            return_value={"sales": 3, "sales_order": 5}
+        )
+        svc._repo.count_dimensions_by_domains = AsyncMock(
+            return_value={"sales": 2, "sales_order": 4}
+        )
 
         tree = await svc.list_tree()
         assert len(tree) == 1
@@ -527,6 +532,29 @@ class TestGetDomainMetrics:
         rows = await svc.get_domain_metrics("sales")
         assert len(rows) == 1
         assert rows[0]["metric_code"] == "sales_gmv_amount_day"
+
+    async def test_get_domain_metrics_visible_filter_for_non_admin(self, svc) -> None:
+        """P0-3 行级隔离：非管理角色查询域指标时 SQL 含公开状态/本人 Owner 过滤条件。"""
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        svc._db.execute = AsyncMock(return_value=result)
+
+        await svc.get_domain_metrics("sales", actor_id=7, role="viewer")
+        stmt = svc._db.execute.call_args_list[0].args[0]
+        sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "PUBLISHED" in sql
+        assert "owner_id" in sql and "= 7" in sql
+
+    async def test_get_domain_metrics_admin_no_extra_filter(self, svc) -> None:
+        """管理角色不加可见性过滤（域管理员可见本域全部指标）。"""
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        svc._db.execute = AsyncMock(return_value=result)
+
+        await svc.get_domain_metrics("sales", actor_id=1, role="domain_admin")
+        stmt = svc._db.execute.call_args_list[0].args[0]
+        sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "PUBLISHED" not in sql
 
 
 class TestValidateDomainActive:

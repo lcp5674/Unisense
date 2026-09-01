@@ -2805,9 +2805,17 @@ class CollectorService(BaseService):
         )
 
     async def get_job_status(
-        self, job_id: str, queue: CollectionQueue | None = None
+        self,
+        job_id: str,
+        queue: CollectionQueue | None = None,
+        org_id: int | None = None,
     ) -> dict[str, Any] | None:
-        """查询采集任务状态（队列自带状态存储时直接读取）。"""
+        """查询采集任务状态（队列自带状态存储时直接读取）。
+
+        Args:
+            org_id: 多租户组织隔离——非平台管理员仅可读本组织数据源的任务；
+                任务所属源不可解析或不属于本组织时视为不存在（None）。
+        """
         from app.core.config import settings as _settings
 
         q = queue or create_collection_queue(redis_url=_settings.redis_url)
@@ -2815,7 +2823,18 @@ class CollectorService(BaseService):
         if getter is None:
             return None
         result: dict[str, Any] | None = await getter(job_id)
-        return result
+        if result is None or org_id is None:
+            return result
+        # 解析任务所属数据源：Redis 队列 job_id 形如 collect:{source_id}:{hex}；
+        # detail 亦携带 source_id（双保险）。解析不出源归属 → 非本组织可读。
+        source_id = (
+            result.get("source_id")
+            or (job_id.split(":")[1] if job_id.startswith("collect:") else None)
+        )
+        if not source_id:
+            return None
+        src = await self._repo.get_source(source_id, org_id=org_id)
+        return result if src is not None else None
 
     async def list_jobs(
         self,
@@ -2849,11 +2868,16 @@ class CollectorService(BaseService):
         source_id: str | None = None,
         status: str | None = None,
         queue: CollectionQueue | None = None,
+        org_id: int | None = None,
     ) -> tuple[list[dict[str, Any]], int]:
         """采集任务服务端分页：返回 (items, total)。
 
         total 来自队列 ``count``（与 list 相同过滤），修复前端本地切片导致的
         「超过 50 条任务永远不可见」问题（job 为 ephemeral 数据但任务中心需完整翻页）。
+
+        Args:
+            org_id: 多租户组织隔离——非平台管理员仅返回本组织数据源的任务
+                （job 为运行时数据，按 job 内 source_id 归属过滤）。
         """
         from app.core.config import settings as _settings
 
@@ -2866,6 +2890,11 @@ class CollectorService(BaseService):
             limit=limit, offset=offset, source_id=source_id, status=status
         )
         total = int(await counter(source_id=source_id, status=status)) if counter else len(items)
+        # 多租户隔离：非平台管理员仅保留本组织数据源的任务（job detail 携带 source_id）
+        if org_id is not None:
+            allowed = set(await self._repo.list_source_ids_by_org(org_id))
+            items = [it for it in items if it.get("source_id") in allowed]
+            total = len(items)
         return items, total
 
     async def count_jobs_by_status(self) -> dict[str, int]:
@@ -2971,16 +3000,19 @@ class CollectorService(BaseService):
         self, source_id: str, org_id: int | None = None
     ) -> dict[str, Any]:
         """资产规模概览（详情页头部）：实体类型/PII 分布/字段数/漂移/水位。"""
-        overview = await self._repo.get_source_overview(source_id)
+        overview = await self._repo.get_source_overview(source_id, org_id=org_id)
         if not overview:
             raise NotFoundError(f"数据源不存在: {source_id}")
         return overview
 
-    async def get_sampling_coverage(self, source_id: str | None = None) -> dict[str, Any]:
+    async def get_sampling_coverage(
+        self, source_id: str | None = None, org_id: int | None = None
+    ) -> dict[str, Any]:
         """采样覆盖率（PII 精度增强可观测性）：已采样表数/列数与占比。
 
         Args:
             source_id: 数据源 ID；None 表示全部数据源（全库口径）。
+            org_id: 多租户组织隔离——非平台管理员仅统计本组织数据源。
 
         Raises:
             NotFoundError: 指定数据源不存在（全库口径不校验）。
@@ -2989,7 +3021,7 @@ class CollectorService(BaseService):
             src = await self._repo.get_source(source_id)
             if src is None:
                 raise NotFoundError(f"数据源不存在: {source_id}")
-        return await self._repo.get_sampling_coverage(source_id)
+        return await self._repo.get_sampling_coverage(source_id, org_id=org_id)
 
     async def list_drift_logs(
         self,
@@ -3136,6 +3168,7 @@ class CollectorService(BaseService):
         page_size: int = 20,
         started_after: datetime | None = None,
         started_before: datetime | None = None,
+        org_id: int | None = None,
     ) -> dict[str, Any]:
         """采集运行历史分页列表（按开始时间倒序，批量回填源名/责任人）。"""
         runs, total = await self._repo.list_collection_runs(
@@ -3146,6 +3179,7 @@ class CollectorService(BaseService):
             page_size=page_size,
             started_after=started_after,
             started_before=started_before,
+            org_id=org_id,
         )
         source_ids = {r.source_id for r in runs}
         src_names = await self._repo.get_sources_meta(list(source_ids)) if source_ids else {}
@@ -3172,6 +3206,7 @@ class CollectorService(BaseService):
         trigger: str | None = None,
         started_after: datetime | None = None,
         started_before: datetime | None = None,
+        org_id: int | None = None,
     ) -> dict[str, int]:
         """采集运行历史聚合统计（服务端 SQL 聚合，供前端统计摘要）。"""
         return await self._repo.summarize_collection_runs(
@@ -3180,11 +3215,18 @@ class CollectorService(BaseService):
             trigger=trigger,
             started_after=started_after,
             started_before=started_before,
+            org_id=org_id,
         )
 
-    async def get_collection_run_detail(self, run_id: int) -> dict[str, Any]:
-        """采集运行详情（含失败/漂移明细）。"""
-        run = await self._repo.get_collection_run(run_id)
+    async def get_collection_run_detail(
+        self, run_id: int, org_id: int | None = None
+    ) -> dict[str, Any]:
+        """采集运行详情（含失败/漂移明细）。
+
+        Args:
+            org_id: 多租户组织隔离——非平台管理员仅可读本组织数据源关联的运行。
+        """
+        run = await self._repo.get_collection_run(run_id, org_id=org_id)
         if run is None:
             raise NotFoundError(f"采集运行记录不存在: {run_id}")
         src_names = await self._repo.get_sources_meta([run.source_id])
@@ -3221,7 +3263,11 @@ class CollectorService(BaseService):
             )
 
     async def get_collection_run_logs(
-        self, run_id: int, offset: int = 0, limit: int = 200
+        self,
+        run_id: int,
+        offset: int = 0,
+        limit: int = 200,
+        org_id: int | None = None,
     ) -> dict[str, Any]:
         """采集运行日志分页查询（采集记录详情页「实时日志」）。
 
@@ -3231,10 +3277,13 @@ class CollectorService(BaseService):
           （``collect:run_log:{run_id}``，RUNNING 期间前端轮询可见）；
         - Redis 不可用且 DB 无日志 → 空列表。
 
+        Args:
+            org_id: 多租户组织隔离——非平台管理员仅可读本组织数据源关联的运行日志。
+
         Returns:
             {items: [{ts, level, phase, entity_name, message}], total, source, status}。
         """
-        run = await self._repo.get_collection_run(run_id)
+        run = await self._repo.get_collection_run(run_id, org_id=org_id)
         if run is None:
             raise NotFoundError(f"采集运行记录不存在: {run_id}")
         # 优先 DB（终态已回写）——长期可追溯

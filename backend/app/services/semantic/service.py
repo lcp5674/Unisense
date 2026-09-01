@@ -1198,7 +1198,12 @@ class MetricService(BaseService):
             pass
         return resp
 
-    async def get_archived_metric_public(self, metric_code: str) -> dict[str, Any]:
+    async def get_archived_metric_public(
+        self,
+        metric_code: str,
+        actor_id: int | None = None,
+        role: str | None = None,
+    ) -> dict[str, Any]:
         """作废指标详情（含 successor 指针与历史口径），供作废引导页展示。
 
         对因口径仲裁被软删（deleted_at + successor）的指标，返回其完整历史
@@ -1207,16 +1212,31 @@ class MetricService(BaseService):
 
         Args:
             metric_code: 作废指标编码。
+            actor_id/role: P0-3 读路径行级隔离——原为私有状态（DRAFT/REVIEW）的
+                作废指标仅本人（Owner/副 Owner）与平台/域管理员可见，防跨用户
+                读取他人生成中指标的历史口径。
 
         Returns:
             {"metric": MetricResponse, "successor_code": str|None, "arbitration_mark": dict|None}。
 
         Raises:
-            NotFoundError: 指标不存在或未作废。
+            NotFoundError: 指标不存在/未作废，或当前用户不可见。
         """
         archived = await self._repo.get_archived_by_code(metric_code)
         if archived is None:
             raise NotFoundError(f"指标不存在: {metric_code}")
+        # 私有状态作废指标：非本人/非管理角色视同不可见（防跨用户读历史口径）
+        if archived.status in ("DRAFT", "REVIEW"):
+            is_admin = role in ("platform_admin", "domain_admin")
+            is_owner = (
+                actor_id is not None
+                and (
+                    archived.owner_id == actor_id
+                    or archived.backup_owner_id == actor_id
+                )
+            )
+            if not (is_admin or is_owner):
+                raise NotFoundError(f"指标不存在: {metric_code}")
         return {
             "metric": MetricResponse.model_validate(archived),
             "successor_code": archived.successor_code,
@@ -4814,36 +4834,33 @@ class MetricService(BaseService):
 
     # ---- US8: 健康度评分 ----
 
-    async def get_metric_health(self, metric_code: str) -> Any:
+    async def get_metric_health(
+        self,
+        metric_code: str,
+        actor_id: int | None = None,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> Any:
         """获取指标健康度评分。
 
         Args:
             metric_code: 指标编码。
+            actor_id/role/user_domain: P0-3 读路径行级隔离——私有指标（DRAFT/REVIEW）
+                仅本人/评审可见，防跨用户探测未发布指标存在性与健康维度。
 
         Returns:
             健康度评分对象。
 
         Raises:
-            NotFoundError: 指标不存在。
+            NotFoundError: 指标不存在或当前用户不可见。
         """
         from app.services.semantic.health_scorer import HealthScorer
 
-        metric = await self._repo.get_by_code(metric_code)
-        if metric is None:
-            # 与详情读路径一致：命中「软删 + successor」的作废指标时返回结构化
-            # METRIC_ARCHIVED（携带胜方指针），而非对历史链接直出裸「指标不存在」。
-            archived = await self._repo.get_archived_by_code(metric_code)
-            if archived is not None and archived.successor_code:
-                raise NotFoundError(
-                    f"指标已因口径裁决作废: {metric_code}",
-                    error_code=ErrorCode.METRIC_ARCHIVED,
-                    ctx={
-                        "metric_code": metric_code,
-                        "successor_code": archived.successor_code,
-                        "arbitration_mark": archived.arbitration_mark,
-                    },
-                )
-            raise NotFoundError(f"指标不存在: {metric_code}")
+        # P0-3 行级隔离：经 get_metric_public 校验可见性（含 METRIC_ARCHIVED 友好错误），
+        # 不再直接 get_by_code 裸查（此前任意登录可探测 DRAFT 指标存在性与健康维度）。
+        metric = await self.get_metric_public(
+            metric_code, actor_id=actor_id, role=role, user_domain=user_domain
+        )
         scorer = HealthScorer(self._db)
         health = await scorer.calculate(metric.id)
         # 详情/目录一致性（TD §12.3）：实时计算后顺带落库——目录页读
@@ -5647,25 +5664,40 @@ class MetricService(BaseService):
 
     # ---- US11: 消费指南 ----
 
-    async def get_consumption_guide(self, metric_code: str) -> dict[str, Any]:
+    async def get_consumption_guide(
+        self,
+        metric_code: str,
+        actor_id: int | None = None,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> dict[str, Any]:
         """获取指标消费指南（Service层 + 缓存）。
 
         Args:
             metric_code: 指标编码。
+            actor_id/role/user_domain: P0-3 读路径行级隔离——DRAFT/REVIEW 等私有
+                指标仅本人/评审可见，防跨用户读取未发布指标元数据。
 
         Returns:
             消费指南字典。
 
         Raises:
-            NotFoundError: 指标不存在。
+            NotFoundError: 指标不存在或当前用户不可见。
         """
-        # 先查缓存（须用 get_guide 读 metric:guide: 命名空间，与下方 set_guide 对称；
-        # 误用 get() 会构造 metric:def:guide:{code}:v0 键，与写入键永不相交 → 缓存恒 miss）
+        # 先查缓存（仅公开状态会写入缓存——私有指标不走缓存，避免跨用户缓存泄漏）
         cached = await self._cache.get_guide(metric_code)
         if cached is not None:
             return cached
 
-        metric = await self.get_metric(metric_code)
+        # P0-3 可见性校验（私有指标不可见时抛 NotFound）；随后取 ORM 完整对象
+        # （含 consumption_guide/guide_source 等字段——get_metric_public 返回的
+        # MetricResponse 不含 guide_source，不能直接复用其返回）。
+        await self.get_metric_public(
+            metric_code, actor_id=actor_id, role=role, user_domain=user_domain
+        )
+        metric = await self._repo.get_by_code(metric_code)
+        if metric is None:
+            raise NotFoundError(f"指标不存在: {metric_code}")
 
         if metric.consumption_guide:
             # presence 判定（勿依赖 guide_source 列值——存量 update_metric 白名单写入
@@ -5705,8 +5737,9 @@ class MetricService(BaseService):
                 dims = metric.non_additive_dimensions or "未指定"
                 guide["cautions"].append(f"半可加指标，不可加维度: {dims}")
 
-        # 缓存结果
-        await self._cache.set_guide(metric_code, guide)
+        # 缓存结果：仅公开状态写入（私有指标不缓存，防跨用户可见性泄漏）
+        if metric.status in ("PUBLISHED", "EXPERIMENTAL", "DEPRECATED"):
+            await self._cache.set_guide(metric_code, guide)
         return guide
 
     async def _related_metric_codes(self, metric: Metric, limit: int = 6) -> list[str]:

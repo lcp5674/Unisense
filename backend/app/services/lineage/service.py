@@ -1698,6 +1698,20 @@ class LineageService(BaseService):
                 provenance=None if provenance == "all" else provenance,
                 limit=limit,
             )
+            if domain:
+                # 读路径域收敛：provenance 通道可能导入跨域边，按节点域过滤
+                # （与默认路径的 domain 过滤语义一致，防跨域窥探 PII/未发布口径）。
+                node_ids = {n["id"] for n in nodes}
+                metas = {m.id: m for m in await self.node_meta(node_ids)}
+                nodes = [
+                    n for n in nodes if self._node_domain_visible(metas.get(n["id"]), domain)
+                ]
+                visible = {n["id"] for n in nodes}
+                edges = [
+                    e
+                    for e in edges
+                    if e.get("source") in visible and e.get("target") in visible
+                ]
             return {"nodes": nodes, "edges": edges}
 
         from app.services.assetmap.repository import AssetMapRepository
@@ -1900,18 +1914,32 @@ class LineageService(BaseService):
 
     # ---- 血缘覆盖率治理（Task B）----
 
-    async def coverage_stats(self) -> LineageCoverageResponse:
+    async def coverage_stats(
+        self, domain: str | None = None
+    ) -> LineageCoverageResponse:
         """血缘覆盖率统计（治理看板核心）。
 
         聚合指标/表的血缘完整度、断链边数；孤儿指标数与断链明细另由
         ``coverage_orphan_metrics`` / ``coverage_broken_edges`` 提供。
 
+        Args:
+            domain: 读路径域收敛——非 platform_admin 仅统计本域指标的血缘
+                完整度（platform_admin 传 None 不限制）。表/边相关计数为全局
+                血缘基础设施统计，与业务域正交，不参与域过滤。
+
         Returns:
             ``LineageCoverageResponse`` 各类计数。
         """
         broken = await self._repo.coverage_broken_edges(limit=_MAX_COVERAGE_BROKEN_SCAN)
-        metric_total = await self._repo.metric_total()
-        metric_with_lineage = len(await self._repo.metric_codes_with_lineage())
+        metric_total = await self._repo.metric_total(domain=domain)
+        if domain:
+            domain_rows = await self._repo.all_metric_rows()
+            domain_codes = {c for c, d in domain_rows if d == domain}
+            metric_with_lineage = len(
+                domain_codes & await self._repo.metric_codes_with_lineage()
+            )
+        else:
+            metric_with_lineage = len(await self._repo.metric_codes_with_lineage())
         return LineageCoverageResponse(
             metric_total=metric_total,
             metric_with_lineage=metric_with_lineage,
@@ -1922,34 +1950,51 @@ class LineageService(BaseService):
             broken_edges=len(broken),
         )
 
-    async def coverage_orphan_metrics(self) -> list[CoverageOrphanItem]:
+    async def coverage_orphan_metrics(
+        self, domain: str | None = None
+    ) -> list[CoverageOrphanItem]:
         """无任何血缘边的孤立指标清单（预案式治理对象）。
+
+        Args:
+            domain: 读路径域收敛——非 platform_admin 仅返回本域孤立指标
+                （platform_admin 传 None 不限制）。
 
         Returns:
             ``[{metric_code, domain}]``。
         """
         with_lineage = await self._repo.metric_codes_with_lineage()
+        rows = await self._repo.all_metric_rows()
+        if domain:
+            rows = [(code, d) for code, d in rows if d == domain]
         return [
-            CoverageOrphanItem(metric_code=code, domain=domain)
-            for code, domain in await self._repo.all_metric_rows()
+            CoverageOrphanItem(metric_code=code, domain=domain_)
+            for code, domain_ in rows
             if code not in with_lineage
         ]
 
     async def coverage_broken_edges(
-        self, limit: int = _MAX_COVERAGE_BROKEN_SCAN
+        self,
+        limit: int = _MAX_COVERAGE_BROKEN_SCAN,
+        domain: str | None = None,
     ) -> list[CoverageBrokenEdgeItem]:
         """断链边明细（source 节点对应实体已不存在），供人工修复跳转。
 
         Args:
             limit: 返回条数上限。
+            domain: 读路径域收敛——非 platform_admin 仅返回 source 节点属本域的
+                断链边（节点可解析出域且不在本域则剔除；无法解析的保留）。
 
         Returns:
             ``[CoverageBrokenEdgeItem, ...]``。
         """
         rows = await self._repo.coverage_broken_edges(limit=limit)
+        if domain:
+            rows = await self._filter_by_node_domain(rows, domain, key="source_node")
         return [CoverageBrokenEdgeItem.model_validate(r) for r in rows]
 
-    async def health_score(self) -> LineageHealthResponse:
+    async def health_score(
+        self, domain: str | None = None
+    ) -> LineageHealthResponse:
         """血缘平台综合健康度（P2 企业级治理看板核心）。
 
         五维评分（各 0-100，权重见 docstring）加权总分，维度独立可解释：
@@ -1959,8 +2004,12 @@ class LineageService(BaseService):
         - ``freshness``（15%）：距最近采集的天数线性衰减（30 天满分→0），无记录为 0
         - ``reconciliation``（10%）：图-库边数偏差（|差|/较大者），图不可达时该维度
           不参与总分（其余维度权重归一化）
+
+        Args:
+            domain: 读路径域收敛——非 platform_admin 覆盖/断链维度仅按本域指标
+                统计（platform_admin 传 None 不限制）。
         """
-        cov = await self.coverage_stats()
+        cov = await self.coverage_stats(domain=domain)
         stale_count = await self._repo.stale_edge_count()
         latest_run = await self._repo.latest_ingest_run_time()
 
@@ -2268,20 +2317,76 @@ class LineageService(BaseService):
         return resp
 
     async def list_stale(
-        self, source: str | None = None, limit: int = 200
+        self,
+        source: str | None = None,
+        limit: int = 200,
+        domain: str | None = None,
     ) -> list[StaleEdgeResponse]:
-        """失效队列：连续未被确认、待人工处置的血缘边。"""
+        """失效队列：连续未被确认、待人工处置的血缘边。
+
+        Args:
+            domain: 读路径域收敛——非 platform_admin 仅返回 source 节点属本域的
+                失效边（节点可解析出域且不在本域则剔除；无法解析的保留）。
+        """
         edges = await self._repo.list_stale_edges(source, limit)
+        if domain:
+            edges = await self._filter_by_node_domain(edges, domain, key="source_node")
         return [StaleEdgeResponse.model_validate(e) for e in edges]
 
-    async def list_nodes(self, kw: str | None = None, limit: int = 50) -> list[LineageNodeResponse]:
+    async def list_nodes(
+        self,
+        kw: str | None = None,
+        limit: int = 50,
+        domain: str | None = None,
+    ) -> list[LineageNodeResponse]:
         """血缘候选节点（影响分析/血缘查询选项框预加载与关键词搜索）。
 
         无 ``kw`` 时返回参与边数最多的 top-N 节点（预加载常用节点）；带 ``kw`` 时
         按节点 id 模糊过滤，供用户输入关键词搜索指定节点。
+
+        Args:
+            domain: 读路径域收敛——非 platform_admin 仅返回可解析出域且属本域的
+                节点（与 /impact /edges 的节点域语义一致；无法解析域的保留）。
         """
         rows = await self._repo.list_nodes(kw=kw, limit=limit)
+        if domain:
+            node_ids = {node for node, _ in rows}
+            metas = {m.id: m for m in await self.node_meta(node_ids)}
+            rows = [
+                (node, count)
+                for node, count in rows
+                if self._node_domain_visible(metas.get(node), domain)
+            ]
         return [self._node_to_response(node, count) for node, count in rows]
+
+    async def _filter_by_node_domain(
+        self,
+        items: list[Any],
+        domain: str,
+        key: str = "source_node",
+    ) -> list[Any]:
+        """按节点域过滤血缘条目（断链/失效队列共用）。
+
+        source 节点可解析出域且不在目标域 → 剔除；无法解析（external/未知）
+        或域为空 → 保留（与 ``_assert_node_read_access`` 的「无法判属不阻断」语义一致）。
+        """
+        node_ids = {getattr(it, key) for it in items if getattr(it, key, None)}
+        metas = {m.id: m for m in await self.node_meta(node_ids)}
+        return [
+            it
+            for it in items
+            if self._node_domain_visible(metas.get(getattr(it, key)), domain)
+        ]
+
+    @staticmethod
+    def _node_domain_visible(
+        meta: Any, domain: str
+    ) -> bool:
+        """节点元数据对目标域的可见性：无法解析（None/空域）→ 可见；可解析且属本域 → 可见。"""
+        if meta is None:
+            return True
+        d = getattr(meta, "domain", None)
+        return not d or d == domain
 
     @staticmethod
     def _node_to_response(node: str, count: int) -> LineageNodeResponse:

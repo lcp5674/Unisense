@@ -68,7 +68,12 @@ async def metric_reuse_stats(
     ``reuse_count = derived_by_count + consumed_by_count``；顶部为高复用核心指标，
     尾部为零复用指标（潜在治理对象）。支持按业务域/指标类型/指标状态过滤，
     统计计数与清单基于同一过滤集合。
+
+    X-2 域收敛：domain_admin 的 ``domain`` 过滤参数强制收敛本域（防跨域统计
+    他域 DRAFT 僵尸/重复清单）；platform_admin 可跨域。
     """
+    if user.role == "domain_admin" and user.domain:
+        domain = user.domain
     result = await MetricStatsService(db).reuse_summary(
         domain=domain,
         type=metric_type,
@@ -137,7 +142,11 @@ async def metric_asset_ledger(
     僵尸判定复用 HealthScorer 活跃度维度（近 30 天无更新）+ 零引用；重复建设
     以冲突预检挂载的 SAME_DEF_DIFF_NAME 信号为来源（低耦合，不深挖仲裁侧）。
     支持按业务域/指标类型/指标状态过滤，统计计数与明细基于同一过滤集合。
+
+    X-2 域收敛：domain_admin 的 ``domain`` 过滤参数强制收敛本域；platform_admin 可跨域。
     """
+    if user.role == "domain_admin" and user.domain:
+        domain = user.domain
     result = await MetricStatsService(db).asset_ledger(
         domain=domain,
         type=metric_type,

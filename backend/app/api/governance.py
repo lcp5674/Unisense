@@ -358,10 +358,17 @@ async def list_grants(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[Any]:
-    """授权列表；非管理员仅可查看自己的授权。"""
+    """授权列表；非管理员仅可查看自己的授权。
+
+    X-2 域收敛：domain_admin 仅可查看**本域**授权（强制 domain 收敛，防跨域枚举
+    他域指标白名单/授权关系）；platform_admin 可跨域查看全部。
+    """
     svc = _svc(db, request)
     if user.role not in _GRANT_ADMIN_ROLES:
         params = params.model_copy(update={"user_id": user.id})
+    elif user.role == "domain_admin" and user.domain:
+        # domain_admin 是本域治理者：授权清单收敛本域（含 domain 过滤参数强制本域）
+        params = params.model_copy(update={"domain": user.domain})
     rows, total = await svc.list_grants(params)
     return ok(
         data={

@@ -3726,6 +3726,30 @@ async def test_repo_list_collection_runs_paginated():
     assert total == 7
 
 
+async def test_repo_list_collection_runs_org_scope_filters_by_org():
+    """多租户组织隔离：org_id 非 None 时 join DataSource 并按 org_id 过滤。"""
+    db = _session(all_rows=[], scalar=0)
+    repo = CollectorRepository(db)
+    await repo.list_collection_runs(
+        source_id=None, status=None, trigger=None, page=1, page_size=20, org_id=9
+    )
+    stmt = db.execute.call_args_list[0].args[0]
+    sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "data_source" in sql.lower()
+    assert "org_id" in sql and "= 9" in sql
+
+
+async def test_repo_get_collection_run_org_scope_filters_by_org():
+    """多租户组织隔离：get_collection_run 带 org_id 时 join 数据源归属过滤。"""
+    db = _session(scalar_one_or_none=None)
+    repo = CollectorRepository(db)
+    await repo.get_collection_run(7, org_id=9)
+    stmt = db.execute.call_args_list[0].args[0]
+    sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "data_source" in sql.lower()
+    assert "org_id" in sql and "= 9" in sql
+
+
 # ---- 采集运行历史（CollectionRun）service 测试 ----
 
 async def test_svc_collection_run_lifecycle_commit():
@@ -4965,9 +4989,9 @@ async def test_service_sampling_coverage_requires_source() -> None:
     repo.get_source = AsyncMock(return_value=MagicMock(source_id="s1"))
     repo.get_sampling_coverage = AsyncMock(return_value={"total_entities": 1})
     assert (await svc.get_sampling_coverage("s1"))["total_entities"] == 1
-    # 全库口径不调用 get_source
+    # 全库口径不调用 get_source（org_id 默认 None 透传）
     await svc.get_sampling_coverage()
-    repo.get_sampling_coverage.assert_awaited_with(None)
+    repo.get_sampling_coverage.assert_awaited_with(None, org_id=None)
 
 
 # ---- 采样韧性：整批查询失败降级逐列重试 ----

@@ -192,6 +192,18 @@ class CollectorRepository:
         await self._db.flush()
         return src
 
+    async def list_source_ids_by_org(self, org_id: int) -> list[str]:
+        """按组织返回数据源 ID 列表（多租户隔离——任务列表按源归属过滤用）。"""
+        rows = (
+            await self._db.execute(
+                select(DataSource.source_id).where(
+                    DataSource.org_id == org_id,
+                    DataSource.deleted_at.is_(None),
+                )
+            )
+        ).scalars().all()
+        return list(rows)
+
     async def list_sources(
         self,
         *,
@@ -831,15 +843,24 @@ class CollectorRepository:
         await self._db.flush()
         return run
 
-    async def get_collection_run(self, run_id: int) -> CollectionRun | None:
-        """按主键取采集运行记录（详情接口）。"""
-        return (
-            await self._db.execute(
-                select(CollectionRun).where(
-                    CollectionRun.id == run_id, CollectionRun.deleted_at.is_(None)
-                )
+    async def get_collection_run(
+        self, run_id: int, org_id: int | None = None
+    ) -> CollectionRun | None:
+        """按主键取采集运行记录（详情接口）。
+
+        Args:
+            run_id: 采集运行记录 ID。
+            org_id: 多租户组织隔离——非平台管理员仅可读本组织数据源关联的运行
+                （platform_admin 传 None 不限制）。
+        """
+        stmt = select(CollectionRun).where(
+            CollectionRun.id == run_id, CollectionRun.deleted_at.is_(None)
+        )
+        if org_id is not None:
+            stmt = stmt.join(DataSource, DataSource.source_id == CollectionRun.source_id).where(
+                DataSource.org_id == org_id
             )
-        ).scalar_one_or_none()
+        return (await self._db.execute(stmt)).scalar_one_or_none()
 
     async def append_run_logs(
         self, run_id: int, entries: list[dict[str, Any]]
@@ -1002,9 +1023,19 @@ class CollectorRepository:
         page_size: int,
         started_after: datetime | None = None,
         started_before: datetime | None = None,
+        org_id: int | None = None,
     ) -> tuple[Sequence[CollectionRun], int]:
-        """查询采集运行历史（按开始时间倒序，分页；可按 source/status/trigger/时间区间过滤）。"""
+        """查询采集运行历史（按开始时间倒序，分页；可按 source/status/trigger/时间区间过滤）。
+
+        Args:
+            org_id: 多租户组织隔离——非平台管理员仅返回本组织数据源关联的运行
+                （platform_admin 传 None 不限制）。
+        """
         base = select(CollectionRun).where(CollectionRun.deleted_at.is_(None))
+        if org_id is not None:
+            base = base.join(DataSource, DataSource.source_id == CollectionRun.source_id).where(
+                DataSource.org_id == org_id
+            )
         if source_id:
             base = base.where(CollectionRun.source_id == source_id)
         if status:
@@ -1033,6 +1064,7 @@ class CollectorRepository:
         trigger: str | None,
         started_after: datetime | None = None,
         started_before: datetime | None = None,
+        org_id: int | None = None,
     ) -> dict[str, int]:
         """采集运行历史聚合统计（服务端 SQL 聚合，替代前端分页拉全量）。
 
@@ -1040,8 +1072,15 @@ class CollectorRepository:
         total/completed/failed/scanned/registered。前端此前用 ``page_size=200``
         拉全量在客户端聚合，总数 > 200 时成功/失败数只取前 200 条，与 ``total``
         口径矛盾（TD §12.1 统计一致性）。服务端一次 ``GROUP BY`` 等价聚合消除该矛盾。
+
+        Args:
+            org_id: 多租户组织隔离——非平台管理员仅统计本组织数据源关联的运行。
         """
         base = select(CollectionRun).where(CollectionRun.deleted_at.is_(None))
+        if org_id is not None:
+            base = base.join(DataSource, DataSource.source_id == CollectionRun.source_id).where(
+                DataSource.org_id == org_id
+            )
         if source_id:
             base = base.where(CollectionRun.source_id == source_id)
         if status:
@@ -1529,7 +1568,9 @@ class CollectorRepository:
         }
 
 
-    async def get_sampling_coverage(self, source_id: str | None = None) -> dict[str, Any]:
+    async def get_sampling_coverage(
+        self, source_id: str | None = None, org_id: int | None = None
+    ) -> dict[str, Any]:
         """采样覆盖率统计（PII 精度增强可观测性）。
 
         SQL 端聚合，不装载 ``schema_json`` 大字段：用 MySQL JSON 函数统计
@@ -1543,12 +1584,15 @@ class CollectorRepository:
 
         Args:
             source_id: 数据源过滤（精确匹配）；None 表示全部数据源。
+            org_id: 多租户组织隔离——非平台管理员仅统计本组织数据源采样覆盖。
 
         Returns:
             dict 含 total_entities/sampled_entities/entity_coverage 与
             total_columns/sampled_columns/verified_columns/column_coverage。
         """
         filters = [DBCatalog.deleted_at.is_(None), DataSource.deleted_at.is_(None)]
+        if org_id is not None:
+            filters.append(DataSource.org_id == org_id)
         if source_id:
             filters.append(DBCatalog.source_id == source_id)
 
@@ -1614,13 +1658,18 @@ class CollectorRepository:
             "verified_columns": verified_columns,
         }
 
-    async def get_source_overview(self, source_id: str) -> dict[str, Any]:
+    async def get_source_overview(
+        self, source_id: str, org_id: int | None = None
+    ) -> dict[str, Any]:
         """资产规模概览聚合（详情页头部）。
 
         一次查询汇总：实体类型分布、PII 敏感级分布、字段总数、漂移数、
         覆盖率、最近采集水位。数据源不存在返回 None 由 service 判定 404。
+
+        Args:
+            org_id: 多租户组织隔离——非平台管理员仅可读本组织数据源概览。
         """
-        src = await self.get_source(source_id)
+        src = await self.get_source(source_id, org_id=org_id)
         if src is None:
             return {}
         base = DBCatalog.deleted_at.is_(None)

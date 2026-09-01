@@ -777,13 +777,21 @@ async def dashboard(
 )
 async def get_consumption_guide(
     request: Request,
-    _user: CurrentUser,
+    user: CurrentUser,
     metric_code: str,
     db: AsyncSession = Depends(get_db_session),
 ) -> Any:
-    """获取指定指标的消费指南（Service层+缓存）。"""
+    """获取指定指标的消费指南（Service层+缓存）。
+
+    P0-3 读路径行级隔离：DRAFT/REVIEW 私有指标仅本人/评审可见，防跨用户读取。
+    """
     svc = MetricService(db)
-    guide = await svc.get_consumption_guide(metric_code)
+    guide = await svc.get_consumption_guide(
+        metric_code,
+        actor_id=user.id,
+        role=user.role,
+        user_domain=user.domain,
+    )
     return ok(data=guide, trace_id=get_trace_id(request))
 
 

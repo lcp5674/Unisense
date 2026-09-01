@@ -776,7 +776,9 @@ async def get_archived_metric(
     作废引导页展示「指标详情 + 跳转权威指标」，而非仅一张错误卡片。
     """
     service = MetricService(db)
-    data = await service.get_archived_metric_public(metric_code)
+    data = await service.get_archived_metric_public(
+        metric_code, actor_id=user.id, role=user.role
+    )
     metric = data["metric"]
     # PII 访问审计（对齐详情端点语义，标记 archived 来源）
     if metric.pii_flag:
@@ -2018,9 +2020,14 @@ async def get_metric_health(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[MetricHealthResponse]:
-    """五维加权健康度评分：口径完整度/活跃度/质量/Owner响应/血缘覆盖。"""
+    """五维加权健康度评分：口径完整度/活跃度/质量/Owner响应/血缘覆盖。
+
+    P0-3 行级隔离：私有指标（DRAFT/REVIEW）仅本人/评审可见，防跨用户探测。
+    """
     service = MetricService(db)
-    health = await service.get_metric_health(metric_code)
+    health = await service.get_metric_health(
+        metric_code, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
     await db.commit()
     return ok(data=MetricHealthResponse.model_validate(health), trace_id=trace_id)
 
@@ -3453,16 +3460,56 @@ async def batch_reject_metrics(
 async def check_metrics_downstream(
     request: MetricDownstreamCheckRequest,
     db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[list[MetricDownstreamCheckResult]]:
     """批量下线弹窗预审用：一次查询返回多指标活跃下游引用者。
 
     供前端在下线前展示「有下游（须填替代） / 无下游（可安全下线）」提示；
     最终废弃仍由 deprecate_metric 的 METRIC_REFERENCED 兜底拦截。
+
+    P0-3 行级隔离：非管理角色仅可见公开状态或本人负责的引用指标（DRAFT/REVIEW
+    私有派生指标不对他人暴露引用关系）。
     """
+    from app.models.metric import Metric
+
     from app.services.lineage.repository import LineageRepository
 
     referrers = await LineageRepository(db).metric_referrers_batch(request.metric_codes)
+    # 过滤私有（DRAFT/REVIEW）引用指标：非管理角色仅保留本人 Owner/副 Owner 的
+    if user.role not in ("platform_admin", "domain_admin"):
+        metric_refs = {
+            r["node"][len("metric:") :]
+            for refs in referrers.values()
+            for r in refs
+            if r["node"].startswith("metric:")
+        }
+        visible: set[str] = set()
+        if metric_refs:
+            rows = (
+                await db.execute(
+                    select(
+                        Metric.metric_code, Metric.status,
+                        Metric.owner_id, Metric.backup_owner_id,
+                    ).where(Metric.metric_code.in_(metric_refs))
+                )
+            ).all()
+            visible = {
+                r[0]
+                for r in rows
+                if r[1] in ("PUBLISHED", "EXPERIMENTAL", "DEPRECATED")
+                or r[2] == user.id
+                or r[3] == user.id
+            }
+        for code, refs in referrers.items():
+            referrers[code] = [
+                r
+                for r in refs
+                if not (
+                    r["node"].startswith("metric:")
+                    and r["node"][len("metric:") :] not in visible
+                )
+            ]
     results = [
         MetricDownstreamCheckResult(
             metric_code=code,

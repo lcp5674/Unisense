@@ -284,8 +284,11 @@ async def update_domain_defaults(
 )
 async def get_domain_metrics(
     code: str,
+    user: CurrentUser,
     svc: SubjectDomainService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[list[dict[str, Any]]]:
-    data = await svc.get_domain_metrics(code)
+    data = await svc.get_domain_metrics(
+        code, actor_id=user.id, role=user.role
+    )
     return ok(data=data, trace_id=trace_id)

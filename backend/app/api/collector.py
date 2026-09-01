@@ -471,7 +471,11 @@ async def list_collection_jobs(
     """
     svc = _svc(db)
     items, total = await svc.list_jobs_paged(
-        limit=limit, offset=offset, source_id=source_id, status=status
+        limit=limit,
+        offset=offset,
+        source_id=source_id,
+        status=status,
+        org_id=_resolve_org_scope(user),
     )
     page = offset // limit + 1 if limit else 1
     return ok(
@@ -493,7 +497,10 @@ async def get_sampling_coverage_all(
     source_id 吞掉（404）。与 ``/jobs`` 同一条布局约束。
     """
     svc = _svc(db)
-    return ok(data=await svc.get_sampling_coverage(), trace_id=trace_id)
+    return ok(
+        data=await svc.get_sampling_coverage(org_id=_resolve_org_scope(user)),
+        trace_id=trace_id,
+    )
 
 
 @source_router.get("/{source_id}", dependencies=_READ_DEPS)
@@ -1037,7 +1044,7 @@ async def get_collection_job(
 ) -> ApiResponse[dict[str, Any]]:
     """查询异步采集任务状态（进度 / 结果）。"""
     svc = _svc(db)
-    status = await svc.get_job_status(job_id)
+    status = await svc.get_job_status(job_id, org_id=_resolve_org_scope(user))
     if status is None:
         raise NotFoundError(f"采集任务不存在: {job_id}", ctx={"job_id": job_id})
     return ok(data=status, trace_id=trace_id)
@@ -1101,6 +1108,14 @@ async def stream_collection_job(
     """
     from app.core.config import settings as _settings
     from app.services.collector.queue import create_collection_queue
+
+    # 多租户隔离：SSE 流订阅前先校验任务归属（非平台管理员仅可订阅本组织数据源任务）
+    svc = _svc(db)
+    if await svc.get_job_status(job_id, org_id=_resolve_org_scope(user)) is None:
+        return StreamingResponse(
+            iter([_sse_event("error", {"message": f"采集任务不存在: {job_id}"})]),
+            media_type="text/event-stream",
+        )
 
     async def event_gen() -> Any:
         q = create_collection_queue(redis_url=_settings.redis_url)
@@ -1213,7 +1228,10 @@ async def get_sampling_coverage(
     """
     svc = _svc(db)
     return ok(
-        data=await svc.get_sampling_coverage(source_id), trace_id=trace_id
+        data=await svc.get_sampling_coverage(
+            source_id, org_id=_resolve_org_scope(user)
+        ),
+        trace_id=trace_id,
     )
 
 
@@ -1336,22 +1354,24 @@ def _to_history_entry(r: BatchInferHistory) -> BatchInferHistoryEntry:
 @catalog_router.get("/batch-infer-history", dependencies=_READ_DEPS)
 async def list_batch_infer_history(
     db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
     limit: int = Query(_BATCH_HISTORY_LIMIT, ge=1, le=100, description="返回条数"),
 ) -> ApiResponse[list[BatchInferHistoryEntry]]:
-    """批量推断历史（服务端持久化，跨设备/团队可见，按时间倒序）。"""
-    rows = (
-        (
-            await db.execute(
-                select(BatchInferHistory)
-                .where(BatchInferHistory.deleted_at.is_(None))
-                .order_by(BatchInferHistory.created_at.desc())
-                .limit(limit)
-            )
-        )
-        .scalars()
-        .all()
+    """批量推断历史（服务端持久化，跨设备/团队可见，按时间倒序）。
+
+    多租户可见性：platform_admin 可见全部历史；其余角色仅可见**本人**发起的
+    批量推断历史（含表清单/身份信息，避免跨用户窥探他人采集推断范围）。
+    """
+    stmt = (
+        select(BatchInferHistory)
+        .where(BatchInferHistory.deleted_at.is_(None))
+        .order_by(BatchInferHistory.created_at.desc())
+        .limit(limit)
     )
+    if "platform_admin" not in user.roles_all():
+        stmt = stmt.where(BatchInferHistory.actor_id == user.id)
+    rows = (await db.execute(stmt)).scalars().all()
     return ok(data=[_to_history_entry(r) for r in rows], trace_id=trace_id)
 
 
@@ -1907,6 +1927,7 @@ async def list_collection_runs(
         page_size=page_size,
         started_after=_parse_run_time_param(started_after),
         started_before=_parse_run_time_param(started_before),
+        org_id=_resolve_org_scope(user),
     )
     return ok(data=CollectionRunListResponse(**result), trace_id=trace_id)
 
@@ -1934,6 +1955,7 @@ async def collection_run_summary(
         trigger=trigger,
         started_after=_parse_run_time_param(started_after),
         started_before=_parse_run_time_param(started_before),
+        org_id=_resolve_org_scope(user),
     )
     return ok(data=result, trace_id=trace_id)
 
@@ -1947,7 +1969,7 @@ async def get_collection_run(
 ) -> ApiResponse[CollectionRunResponse]:
     """采集运行详情（含失败实体 / 漂移事件 / 降级原因明细）。"""
     svc = _svc(db)
-    detail = await svc.get_collection_run_detail(run_id)
+    detail = await svc.get_collection_run_detail(run_id, org_id=_resolve_org_scope(user))
     return ok(data=CollectionRunResponse(**detail), trace_id=trace_id)
 
 
@@ -1967,5 +1989,7 @@ async def get_collection_run_logs(
     ``source``（db/redis/none）与 ``status`` 供前端决定是否轮询刷新。
     """
     svc = _svc(db)
-    result = await svc.get_collection_run_logs(run_id, offset, limit)
+    result = await svc.get_collection_run_logs(
+        run_id, offset, limit, org_id=_resolve_org_scope(user)
+    )
     return ok(data=result, trace_id=trace_id)

@@ -4246,6 +4246,8 @@ async def test_get_consumption_guide_generates_and_caches():
     svc._cache = MagicMock()
     svc._cache.get_guide = AsyncMock(return_value=None)
     svc._cache.set_guide = AsyncMock()
+    svc._cache.get = AsyncMock(return_value=None)
+    svc._cache.set = AsyncMock()
     repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED"))
 
     guide = await svc.get_consumption_guide("sales_gmv_daily")
@@ -4263,6 +4265,22 @@ async def test_get_consumption_guide_cache_hit():
     guide = await svc.get_consumption_guide("sales_gmv_daily")
     assert guide == {"metric_code": "cached"}
     repo.get_by_code.assert_not_called()
+
+
+async def test_get_consumption_guide_private_metric_invisible():
+    """P0-3 行级隔离：DRAFT 私有指标对非属主用户返回 NotFound（防跨用户读未发布指标元数据）。"""
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.get_guide = AsyncMock(return_value=None)
+    svc._cache.get = AsyncMock(return_value=None)
+    svc._cache.set = AsyncMock()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(status="DRAFT", owner_id=99, backup_owner_id=None)
+    )
+    with pytest.raises(NotFoundError):
+        await svc.get_consumption_guide("sales_gmv_daily", actor_id=1, role="viewer")
+    # 属主本人可见（不抛异常）
+    await svc.get_consumption_guide("sales_gmv_daily", actor_id=99, role="viewer")
 
 
 async def test_validate_domain_active_degraded(monkeypatch):
@@ -4467,7 +4485,9 @@ async def test_get_archived_metric_public_returns_detail_with_successor():
     }
     repo.get_archived_by_code = AsyncMock(return_value=archived)
 
-    data = await svc.get_archived_metric_public("sales_e2e_conflictb_day")
+    data = await svc.get_archived_metric_public(
+        "sales_e2e_conflictb_day", actor_id=1, role="platform_admin"
+    )
 
     assert data["successor_code"] == "sales_e2e_conflicta_day"
     assert data["arbitration_mark"]["decision"] == "merge"
@@ -5948,6 +5968,8 @@ async def test_get_consumption_guide_uses_existing():
     svc._cache = MagicMock()
     svc._cache.get_guide = AsyncMock(return_value=None)
     svc._cache.set_guide = AsyncMock()
+    svc._cache.get = AsyncMock(return_value=None)
+    svc._cache.set = AsyncMock()
     existing_guide = {"metric_code": "sales_gmv_daily", "recommended_usage": ["自定义"]}
     repo.get_by_code = AsyncMock(
         return_value=make_metric(status="PUBLISHED", consumption_guide=existing_guide)
@@ -5965,6 +5987,8 @@ async def test_get_consumption_guide_pii_caution():
     svc._cache = MagicMock()
     svc._cache.get_guide = AsyncMock(return_value=None)
     svc._cache.set_guide = AsyncMock()
+    svc._cache.get = AsyncMock(return_value=None)
+    svc._cache.set = AsyncMock()
     repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED", pii_flag=True))
     guide = await svc.get_consumption_guide("sales_gmv_daily")
     assert any("PII" in c for c in guide["cautions"])
@@ -5976,6 +6000,8 @@ async def test_get_consumption_guide_semi_additive_caution():
     svc._cache = MagicMock()
     svc._cache.get_guide = AsyncMock(return_value=None)
     svc._cache.set_guide = AsyncMock()
+    svc._cache.get = AsyncMock(return_value=None)
+    svc._cache.set = AsyncMock()
     repo.get_by_code = AsyncMock(
         return_value=make_metric(
             status="PUBLISHED",
@@ -6080,6 +6106,8 @@ async def test_get_consumption_guide_auto_related_metrics():
     svc._cache = MagicMock()
     svc._cache.get_guide = AsyncMock(return_value=None)
     svc._cache.set_guide = AsyncMock()
+    svc._cache.get = AsyncMock(return_value=None)
+    svc._cache.set = AsyncMock()
     repo.get_by_code = AsyncMock(
         return_value=make_metric(status="PUBLISHED", metric_code="sales_gmv_daily")
     )
@@ -6127,6 +6155,8 @@ async def test_get_consumption_guide_auto_non_additive_caution():
     svc._cache = MagicMock()
     svc._cache.get_guide = AsyncMock(return_value=None)
     svc._cache.set_guide = AsyncMock()
+    svc._cache.get = AsyncMock(return_value=None)
+    svc._cache.set = AsyncMock()
     repo.get_by_code = AsyncMock(
         return_value=make_metric(status="PUBLISHED", additivity="NON_ADDITIVE")
     )

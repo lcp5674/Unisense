@@ -496,8 +496,12 @@ async def coverage(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[LineageCoverageResponse]:
-    """血缘覆盖率统计：指标/表血缘完整度、孤儿子数与断链边数（治理看板）。"""
-    stats = await _svc(db).coverage_stats()
+    """血缘覆盖率统计：指标/表血缘完整度、孤儿子数与断链边数（治理看板）。
+
+    非 platform_admin 仅统计本域指标的血缘完整度（读路径域收敛，防跨域
+    指标血缘覆盖泄露给任意 viewer）。
+    """
+    stats = await _svc(db).coverage_stats(domain=_effective_read_domain(user, None))
     return ok(data=stats.model_dump(mode="json"), trace_id=trace_id)
 
 
@@ -508,7 +512,9 @@ async def coverage_orphans(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[list[CoverageOrphanItem]]:
     """无任何血缘边的孤立指标清单（预案式治理。"""
-    orphans = await _svc(db).coverage_orphan_metrics()
+    orphans = await _svc(db).coverage_orphan_metrics(
+        domain=_effective_read_domain(user, None)
+    )
     return ok(data=[o.model_dump(mode="json") for o in orphans], trace_id=trace_id)
 
 
@@ -520,7 +526,9 @@ async def coverage_broken(
     limit: int = Query(200, ge=1, le=2000, description="返回断链边条数上限"),
 ) -> ApiResponse[list[CoverageBrokenEdgeItem]]:
     """断链边明细：source 节点对应的目录/指标实体已不存在（供人工修复跳转）。"""
-    broken = await _svc(db).coverage_broken_edges(limit=limit)
+    broken = await _svc(db).coverage_broken_edges(
+        limit=limit, domain=_effective_read_domain(user, None)
+    )
     return ok(data=[b.model_dump(mode="json") for b in broken], trace_id=trace_id)
 
 
@@ -533,8 +541,11 @@ async def lineage_health(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[LineageHealthResponse]:
-    """血缘平台综合健康度：覆盖/断链/失效/新鲜度/对账偏差五维评分 + 总分 + 等级。"""
-    health = await _svc(db).health_score()
+    """血缘平台综合健康度：覆盖/断链/失效/新鲜度/对账偏差五维评分 + 总分 + 等级。
+
+    非 platform_admin 覆盖/断链维度仅按本域指标统计（读路径域收敛）。
+    """
+    health = await _svc(db).health_score(domain=_effective_read_domain(user, None))
     return ok(data=health.model_dump(mode="json"), trace_id=trace_id)
 
 
@@ -578,7 +589,10 @@ async def lineage_path_terminals(
     每个终止节点标注对应实体是否存在（``entity_exists=False`` 即断链嫌疑——
     实体已删但历史边残留），供治理定位断链链路。
     """
-    result = await _svc(db).terminal_nodes(node=node, max_hops=max_hops, limit=limit)
+    svc = _svc(db)
+    # 读路径节点域收敛：非 platform_admin 校验起点节点归属（防止跨域探测终止节点）
+    await _assert_node_read_access(user, svc, node)
+    result = await svc.terminal_nodes(node=node, max_hops=max_hops, limit=limit)
     return ok(data=result.model_dump(mode="json"), trace_id=trace_id)
 
 
@@ -686,8 +700,10 @@ async def run_detail(
     svc = _svc(db)
     run = await svc.get_ingest_run_detail(run_id)
     data = run.model_dump(mode="json")
-    # 非管理角色（platform_admin/domain_admin 之外）剥离 SQL 原文——
-    # detail.sql（单条解析）与 detail.statements[].sql（批量解析）均脱敏
+    # 非管理角色（platform_admin/domain_admin 之外）剥离 SQL 原文与明细快照——
+    # detail.sql（单条解析）与 detail.statements[].sql（批量解析）均脱敏；
+    # 边明细（table_lineage/field_lineage/added_edges/removed_edges，含表达式原文
+    # 与节点 ID）与落点/执行人身份同样属跨域敏感信息，一并剥离。
     if not any(r in ("platform_admin", "domain_admin") for r in user.roles_all()):
         detail = data.get("detail")
         if isinstance(detail, dict):
@@ -698,6 +714,19 @@ async def run_detail(
                 for s in stmts:
                     if isinstance(s, dict) and isinstance(s.get("sql"), str) and s.get("sql"):
                         s["sql"] = "*** 无权查看 SQL 原文 ***"
+            # 剥离明细快照中跨域/身份敏感键（保留 error 供排障）
+            for _k in (
+                "table_lineage",
+                "field_lineage",
+                "added_edges",
+                "removed_edges",
+                "source_node",
+                "target_node",
+                "actor_id",
+                "actor_name",
+                "target_table",
+            ):
+                detail.pop(_k, None)
     return ok(data=data, trace_id=trace_id)
 
 
@@ -710,7 +739,9 @@ async def list_stale(
 ) -> ApiResponse[Any]:
     """失效队列：连续未被采集确认、待人工处置的血缘边。"""
     svc = _svc(db)
-    edges = await svc.list_stale(params.source, params.limit)
+    edges = await svc.list_stale(
+        params.source, params.limit, domain=_effective_read_domain(user, None)
+    )
     return ok(
         data=[e.model_dump(mode="json") for e in edges],
         trace_id=trace_id,
@@ -731,7 +762,9 @@ async def list_nodes(
     模糊过滤，供用户输入关键词搜索指定节点（table:/metric:/field: 前缀节点）。
     """
     svc = _svc(db)
-    nodes = await svc.list_nodes(kw=kw, limit=limit)
+    nodes = await svc.list_nodes(
+        kw=kw, limit=limit, domain=_effective_read_domain(user, None)
+    )
     return ok(
         data=[n.model_dump(mode="json") for n in nodes],
         trace_id=trace_id,

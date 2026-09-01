@@ -25,6 +25,8 @@ def _base_payload(**overrides) -> dict:
         "metric_tier": "T2",
         "serving_mode": "BATCH_ONLY",
         "additivity": "ADDITIVE",
+        # 单条创建数仓开发必填（PRD 4.5 口径三方责任），默认补平台用户 id=1
+        "dw_developer_id": 1,
         "definition_json": {"expression": "SUM(amount)"},
     }
     payload.update(overrides)

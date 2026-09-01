@@ -413,7 +413,10 @@ async def test_get_metric_health_api(metrics_client: httpx.AsyncClient) -> None:
         resp = await metrics_client.get("/api/v1/metric-definitions/sales_gmv_d/health")
     assert resp.status_code == 200
     assert resp.json()["data"]["level"] == "HEALTHY"
-    mock_svc.return_value.get_metric_health.assert_awaited_once_with("sales_gmv_d")
+    # P0-3 行级隔离：健康度读取透传 actor/role/user_domain（私有指标仅本人/管理可见）
+    mock_svc.return_value.get_metric_health.assert_awaited_once_with(
+        "sales_gmv_d", actor_id=1, role="platform_admin", user_domain=None
+    )
 
 
 async def test_create_allows_legit_sql_in_definition_json(
@@ -427,6 +430,8 @@ async def test_create_allows_legit_sql_in_definition_json(
         "domain": "e2e",
         "type": "atomic",
         "metric_code": "outp_feeamount_amt_day",
+        # 单条创建数仓开发必填（PRD 4.5 口径三方责任）
+        "dw_developer_id": 1,
         "definition_json": {
             "expression": "SUM(COALESCE(fee_amount, 0))",
             "sql": "SELECT month_id FROM t -- 行注释\nUNION ALL SELECT month_id FROM t2",

@@ -371,9 +371,20 @@ class SubjectDomainService:
         logger.info("domain_defaults_updated", code=code)
         return domain
 
-    async def get_domain_metrics(self, code: str) -> list[dict[str, Any]]:
-        """获取域下指标列表。"""
-        from sqlalchemy import select
+    async def get_domain_metrics(
+        self,
+        code: str,
+        actor_id: int | None = None,
+        role: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """获取域下指标列表。
+
+        P0-3 读路径行级隔离（对齐 list_metrics）：管理角色（platform_admin/
+        domain_admin）可见域内全部；其余角色仅可见公开状态（PUBLISHED/
+        EXPERIMENTAL/DEPRECATED）+ 本人 Owner/副 Owner 的私有指标——防止
+        跨用户读取他人生成中的 DRAFT/REVIEW 指标元数据。
+        """
+        from sqlalchemy import or_, select
 
         from app.models.metric import Metric
 
@@ -385,6 +396,14 @@ class SubjectDomainService:
             )
             .order_by(Metric.metric_code)
         )
+        if actor_id is not None and role not in ("platform_admin", "domain_admin"):
+            stmt = stmt.where(
+                or_(
+                    Metric.status.in_(("PUBLISHED", "EXPERIMENTAL", "DEPRECATED")),
+                    Metric.owner_id == actor_id,
+                    Metric.backup_owner_id == actor_id,
+                )
+            )
         result = await self._db.execute(stmt)
         metrics = list(result.scalars().all())
         return [

@@ -350,7 +350,20 @@ def test_batch_audit_action_levels():
 
 
 async def test_downstream_check_returns_per_metric(client):
-    """批量下线下游审查端点：一次查询返回每指标引用者数量与明细。"""
+    """批量下线下游审查端点：一次查询返回每指标引用者数量与明细。
+
+    覆盖为 platform_admin——下游引用者中可能含私有（DRAFT/REVIEW）派生指标，
+    非管理角色的 P0-3 行级过滤会剔除不可见引用者（该过滤逻辑由
+    test_semantic_service/test_semantic_repository 独立覆盖）。
+    """
+    from app.api import deps
+
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
     with patch(
         "app.services.lineage.repository.LineageRepository.metric_referrers_batch"
     ) as mock_batch:
