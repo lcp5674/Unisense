@@ -157,58 +157,82 @@ class EsIndexer:
         return True
 
     async def sync_metrics(self) -> int:
-        """全量灌入指标（含关联逻辑度量同义词）；按 metric_code 作为 doc_id upsert。"""
-        rows = (
-            await self._session.execute(
-                select(Metric, MeasureCatalog.synonyms)
-                .outerjoin(MeasureCatalog, Metric.measure_id == MeasureCatalog.id)
-                .where(Metric.deleted_at.is_(None))
-            )
-        ).all()
+        """全量灌入指标（含关联逻辑度量同义词）；按 metric.id 作为 doc_id upsert。
+
+        P1（审查修复）：按 ID 分批游标加载（每批 500）+ Bulk API 批量写入——
+        此前全表一次载入内存（10 万指标 + selectin 全量版本大 JSON 可达数 GB）并
+        逐条串行 HTTP（10 万 × 5ms ≈ 500s）。
+        """
         count = 0
-        for metric, synonyms in rows:
-            await self._es.index(
-                _METRIC_INDEX,
-                {
-                    "id": metric.id,
-                    "metric_code": metric.metric_code,
-                    "name": metric.name,
-                    "description": metric.description or "",
-                    "domain": metric.domain,
-                    "status": metric.status,
-                    "pii_flag": bool(metric.pii_flag),
-                    "owner_id": metric.owner_id,
-                    "backup_owner_id": metric.backup_owner_id,
-                    "synonyms": _join_synonyms(synonyms),
-                },
-                doc_id=str(metric.id),
-            )
-            count += 1
+        last_id = 0
+        _BATCH = 500
+        while True:
+            rows = (
+                await self._session.execute(
+                    select(Metric, MeasureCatalog.synonyms)
+                    .outerjoin(MeasureCatalog, Metric.measure_id == MeasureCatalog.id)
+                    .where(Metric.deleted_at.is_(None), Metric.id > last_id)
+                    .order_by(Metric.id)
+                    .limit(_BATCH)
+                )
+            ).all()
+            if not rows:
+                break
+            docs: list[dict[str, Any]] = []
+            for metric, synonyms in rows:
+                docs.append(
+                    {
+                        "id": metric.id,
+                        "metric_code": metric.metric_code,
+                        "name": metric.name,
+                        "description": metric.description or "",
+                        "domain": metric.domain,
+                        "status": metric.status,
+                        "pii_flag": bool(metric.pii_flag),
+                        "owner_id": metric.owner_id,
+                        "backup_owner_id": metric.backup_owner_id,
+                        "synonyms": _join_synonyms(synonyms),
+                    }
+                )
+                last_id = metric.id
+            count += await self._es.bulk(_METRIC_INDEX, docs, doc_id="id")
+            if len(rows) < _BATCH:
+                break
         return count
 
     async def sync_terms(self) -> int:
-        """全量灌入术语；按 term_code 作为 doc_id upsert。"""
-        rows = (
-            await self._session.execute(
-                select(Term).where(Term.deleted_at.is_(None))
-            )
-        ).scalars().all()
+        """全量灌入术语；按 term.id 作为 doc_id upsert（P1：分批 + Bulk）。"""
         count = 0
-        for term in rows:
-            await self._es.index(
-                _TERM_INDEX,
-                {
-                    "id": term.id,
-                    "term_code": term.term_code,
-                    "name": term.name,
-                    "definition": term.definition or "",
-                    "domain": term.domain,
-                    "status": term.status,
-                    "synonyms": _join_synonyms(term.synonyms),
-                },
-                doc_id=str(term.id),
-            )
-            count += 1
+        last_id = 0
+        _BATCH = 500
+        while True:
+            rows = (
+                await self._session.execute(
+                    select(Term)
+                    .where(Term.deleted_at.is_(None), Term.id > last_id)
+                    .order_by(Term.id)
+                    .limit(_BATCH)
+                )
+            ).scalars().all()
+            if not rows:
+                break
+            docs: list[dict[str, Any]] = []
+            for term in rows:
+                docs.append(
+                    {
+                        "id": term.id,
+                        "term_code": term.term_code,
+                        "name": term.name,
+                        "definition": term.definition or "",
+                        "domain": term.domain,
+                        "status": term.status,
+                        "synonyms": _join_synonyms(term.synonyms),
+                    }
+                )
+                last_id = term.id
+            count += await self._es.bulk(_TERM_INDEX, docs, doc_id="id")
+            if len(rows) < _BATCH:
+                break
         return count
 
     async def sync_all(self) -> dict[str, int]:

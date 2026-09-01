@@ -76,6 +76,7 @@ def _es_client() -> MagicMock:
     es.delete_index = AsyncMock(return_value=True)
     es.get_mapping = AsyncMock(return_value=None)  # 默认索引不存在 → 需创建
     es.index = AsyncMock()
+    es.bulk = AsyncMock(return_value=1)  # P1：批量写入返回成功数
     return es
 
 
@@ -146,11 +147,12 @@ async def test_sync_metrics_indexes_with_synonyms() -> None:
     indexer = EsIndexer(session, es_client=es)
     count = await indexer.sync_metrics()
     assert count == 1
-    index, doc = es.index.call_args.args
+    es.bulk.assert_awaited_once()
+    index, docs = es.bulk.call_args.args
     assert index == _METRIC_INDEX
-    assert doc["metric_code"] == "sales_gmv_day"
-    assert doc["synonyms"] == "支付金额 pay"
-    assert es.index.call_args.kwargs["doc_id"] == "1"
+    assert docs[0]["metric_code"] == "sales_gmv_day"
+    assert docs[0]["synonyms"] == "支付金额 pay"
+    assert es.bulk.call_args.kwargs["doc_id"] == "id"
 
 
 async def test_sync_terms_indexes() -> None:
@@ -161,18 +163,19 @@ async def test_sync_terms_indexes() -> None:
     indexer = EsIndexer(session, es_client=es)
     count = await indexer.sync_terms()
     assert count == 1
-    index, doc = es.index.call_args.args
+    es.bulk.assert_awaited_once()
+    index, docs = es.bulk.call_args.args
     assert index == _TERM_INDEX
-    assert doc["term_code"] == "gmv"
-    assert doc["synonyms"] == "成交额 GMV"
+    assert docs[0]["term_code"] == "gmv"
+    assert docs[0]["synonyms"] == "成交额 GMV"
 
 
 async def test_sync_all_reports_counts() -> None:
     """sync_all 返回各索引写入数。"""
     session = MagicMock()
-    # 第一次调用 = sync_metrics（1 行），第二次 = sync_terms（空）
+    # sync_metrics 分批：第一轮 1 行 → 第二轮空 break；sync_terms 首轮即空
     session.execute = AsyncMock(
-        side_effect=[_rows_result([(_metric(), None)]), _rows_result([])]
+        side_effect=[_rows_result([(_metric(), None)]), _rows_result([]), _rows_result([])]
     )
     es = _es_client()
     indexer = EsIndexer(session, es_client=es)

@@ -95,6 +95,15 @@ def _extract(sql: str, column: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _extract_in_list(sql: str, column: str) -> list[str] | None:
+    """提取 ``column IN ('a', 'b')`` 列表（P2 分层 BFS 批量边查询用）。"""
+    m = re.search(rf"\b{column}\s+IN\s*\(([^)]*)\)", sql, re.IGNORECASE)
+    if not m:
+        return None
+    items = [x.strip().strip("'\"") for x in m.group(1).split(",") if x.strip()]
+    return items or None
+
+
 class _MetaRow:
     """节点元数据查询行（resolve_node_meta 用）：metric 或 db_catalog 行。"""
 
@@ -299,6 +308,17 @@ class _FakeDB:
                     r
                     for r in self._rows
                     if r.source_node == src and getattr(r, "deleted_at", None) is None
+                ]
+            )
+        # P2（审查修复）：批量下游边 source_node IN (...) 查询（分层 BFS）
+        if " FROM lineage_edge " in sql and "source_node in" in sql.lower():
+            src_in = _extract_in_list(sql, "source_node")
+            return _Result(
+                [
+                    r
+                    for r in self._rows
+                    if getattr(r, "source_node", None) in (src_in or [])
+                    and getattr(r, "deleted_at", None) is None
                 ]
             )
         dst = _extract(sql, "target_node")

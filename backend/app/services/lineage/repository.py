@@ -616,6 +616,24 @@ class LineageRepository:
             .all()
         )
 
+    async def _edges_from_many(self, nodes: list[str]) -> list[LineageEdge]:
+        """批量取多个 source_node 的下游边（P2：分层 BFS 用，一次查询替代 N 次）。"""
+        if not nodes:
+            return []
+        return list(
+            (
+                await self._db.execute(
+                    select(LineageEdge).where(
+                        LineageEdge.source_node.in_(nodes),
+                        LineageEdge.deleted_at.is_(None),
+                        LineageEdge.stale.is_(False),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
     async def _edges_to(self, node: str) -> list[LineageEdge]:
         # P1-2：stale 失效边不再参与影响分析
         return list(
@@ -1811,18 +1829,17 @@ class LineageRepository:
         """
         if max_hops < 1:
             return set()
-        adj: dict[str, list[LineageEdge]] = {}
+        # P2（审查修复）：DFS 改为分层 BFS——每层对当前全部节点批量取下游边
+        # （_edges_from_many 一次 IN 查询），此前每访问一个节点发一次 SELECT，
+        # 1000 节点 × 2ms ≈ 2s+ 串行。
         affected: set[str] = set()
-
-        async def _downstream(n: str) -> list[LineageEdge]:
-            if n not in adj:
-                adj[n] = await self._edges_from(n)
-            return adj[n]
-
-        async def _dfs(n: str, depth: int, visited: set[str]) -> None:
-            if len(affected) >= limit or depth >= max_hops:
-                return
-            for e in await _downstream(n):
+        current_layer = [node]
+        visited: set[str] = {node}
+        depth = 0
+        while current_layer and depth < max_hops and len(affected) < limit:
+            edges = await self._edges_from_many(current_layer)
+            next_layer: list[str] = []
+            for e in edges:
                 t = e.target_node
                 if t in visited:
                     continue
@@ -1830,10 +1847,11 @@ class LineageRepository:
                 if t.startswith("table:") or t.startswith("metric:"):
                     affected.add(t)
                     if len(affected) >= limit:
-                        return
-                await _dfs(t, depth + 1, visited)
+                        break
+                next_layer.append(t)
+            current_layer = next_layer
+            depth += 1
 
-        await _dfs(node, 0, {node})
         if node.startswith("table:") or node.startswith("metric:"):
             affected.add(node)
         if not affected:

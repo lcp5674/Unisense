@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -618,6 +619,27 @@ class LineageService(BaseService):
             graph_edges.append((sn, tn, "DERIVED_FROM"))
         return added, updated, skipped, graph_edges
 
+    def _process_scan_file(
+        self, path: str, explicit_dialect: str | None
+    ) -> tuple[int, str, list[Any], list[Any], list[Any]] | None:
+        """同步处理单个 SQL 文件（供 asyncio.to_thread 在线程池执行，P3）。
+
+        Returns:
+            ``(stmts, dialect, te, fe, de)``；文件超限返回 None（跳过）。
+            读取失败抛 OSError，解析失败抛异常（均由调用方记录到 file_results）。
+        """
+        # P1 加固：文件大小上限，防止超大文件整读耗尽内存（CPU DoS）
+        if os.path.getsize(path) > _MAX_SCAN_FILE_BYTES:
+            return None
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            content = fh.read()
+        stmts = self._count_statements(content)
+        dialect = explicit_dialect or self._infer_scan_dialect(content)
+        te = extract_table_lineage(content, dialect)
+        fe = extract_field_lineage(content, dialect)
+        de = extract_ddl_lineage(content, dialect)
+        return stmts, dialect, te, fe, de
+
     async def scan_directory(
         self, req: LineageScanRequest, actor_id: int | None = None
     ) -> LineageScanResponse:
@@ -694,32 +716,35 @@ class LineageService(BaseService):
         ddl_all: list[Any] = []
         file_results: list[LineageScanFileResult] = []
         succeeded = 0
-        for path in files:
-            try:
-                # P1 加固：文件大小上限，防止超大文件整读耗尽内存（CPU DoS）
-                if os.path.getsize(path) > _MAX_SCAN_FILE_BYTES:
+        # P3（审查修复）：文件读取 + sqlglot 解析是同步 IO/CPU 密集操作，全部移入
+        # 线程池（asyncio.to_thread）避免阻塞事件循环——此前扫描 500 个文件期间
+        # 该 worker 无法响应任何请求（含 /ready 探针，可能触发误摘除）。
+        # 并发上限 8 防止同时开太多线程。
+        sem = asyncio.Semaphore(8)
+
+        async def _process(path: str) -> None:
+            nonlocal succeeded
+            async with sem:
+                try:
+                    result = await asyncio.to_thread(
+                        self._process_scan_file, path, req.dialect
+                    )
+                except OSError as exc:
+                    file_results.append(LineageScanFileResult(path=path, error=f"读取失败: {exc}"))
+                    return
+                except Exception as exc:  # noqa: BLE001 - 防御（parser 内部已降级）
+                    file_results.append(
+                        LineageScanFileResult(path=path, statements=0, error=str(exc))
+                    )
+                    return
+                if result is None:  # 文件超限跳过
                     file_results.append(
                         LineageScanFileResult(
                             path=path, error=f"文件超限（>{_MAX_SCAN_FILE_BYTES} 字节），已跳过"
                         )
                     )
-                    continue
-                with open(path, encoding="utf-8", errors="replace") as fh:
-                    content = fh.read()
-            except OSError as exc:
-                file_results.append(LineageScanFileResult(path=path, error=f"读取失败: {exc}"))
-                continue
-            stmts = self._count_statements(content)
-            dialect = req.dialect or self._infer_scan_dialect(content)
-            try:
-                te = extract_table_lineage(content, dialect)
-                fe = extract_field_lineage(content, dialect)
-                de = extract_ddl_lineage(content, dialect)
-            except Exception as exc:  # pragma: no cover - 防御（parser 内部已降级）
-                file_results.append(
-                    LineageScanFileResult(path=path, statements=stmts, error=str(exc))
-                )
-                continue
+                    return
+            stmts, dialect, te, fe, de = result
             table_edges.extend(te)
             field_edges.extend(fe)
             ddl_all.extend(de)
@@ -733,6 +758,8 @@ class LineageService(BaseService):
                 )
             )
             succeeded += 1
+
+        await asyncio.gather(*(_process(p) for p in files))
 
         graph_written = False
         if not req.dry_run and (table_edges or field_edges or ddl_all):

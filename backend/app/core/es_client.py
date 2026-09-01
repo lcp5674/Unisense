@@ -164,6 +164,48 @@ class EsClient:
             self._breaker.record_failure()
             raise SearchUnavailableError(f"es delete_by_query failed: {exc}") from exc
 
+    async def bulk(
+        self, index: str, documents: list[dict[str, Any]], *, doc_id: str = "id"
+    ) -> int:
+        """批量索引文档（Bulk API，P1：替代逐条串行 index）。
+
+        Args:
+            index: 索引名。
+            documents: 文档字典列表（须含 ``doc_id`` 指定的 id 字段）。
+            doc_id: 文档 id 字段名（默认 "id"），对应 ES 的 ``_id``。
+
+        Returns:
+            成功写入的文档数（errors 逐条累计为 0 才算成功）。
+
+        Raises:
+            SearchUnavailableError: 客户端禁用或 ES 调用异常。
+            CircuitOpenError: 熔断器开启。
+        """
+        if not self._enabled or self._client is None:
+            raise SearchUnavailableError("elasticsearch client disabled")
+        if not self._breaker.allow():
+            raise CircuitOpenError("es circuit open")
+        if not documents:
+            return 0
+        try:
+            operations: list[dict[str, Any]] = []
+            for doc in documents:
+                operations.append({"index": {"_index": index, "_id": str(doc.get(doc_id))}})
+                operations.append(doc)
+            resp = await self._client.bulk(operations=operations, refresh=True)
+            self._breaker.record_success()
+            items = resp.get("items") or []
+            success = 0
+            for item in items:
+                if (item.get("index") or {}).get("status", 500) < 300:
+                    success += 1
+            if success != len(items):
+                logger.warning("es_bulk_partial_failures", success=success, total=len(items))
+            return success
+        except Exception as exc:
+            self._breaker.record_failure()
+            raise SearchUnavailableError(f"es bulk failed: {exc}") from exc
+
     async def create_index(self, index: str, body: dict[str, Any] | None = None) -> bool:
         """幂等创建索引（含 mapping；已存在时静默返回 False，不报错）。"""
         if not self._enabled or self._client is None:
