@@ -71,6 +71,9 @@ function MetricsTab() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
+  // F4（审查修复）：加载失败不再静默吞错——首载失败展示错误态+重试，
+  // 刷新失败保留旧数据并提示「数据可能过期」（此前失败 KPI 全显 0，运维误判平台健康）
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   async function load(silent = false) {
     if (silent) {
@@ -92,8 +95,10 @@ function MetricsTab() {
       setLineage(l);
       setEvents(e.items ?? []);
       setLastUpdatedAt(new Date().toISOString());
-    } catch {
-      // 保留旧数据，静默失败不打断页面
+      setLoadError(null);
+    } catch (err) {
+      // F4：保留旧数据 + 明确错误提示（首载失败时旧数据为空 → 渲染错误态）
+      setLoadError(err instanceof Error ? err.message : "加载失败，请重试");
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -116,6 +121,25 @@ function MetricsTab() {
 
   return (
     <div>
+      {/* F4：加载失败提示（首载失败无旧数据 → 展示错误态 + 重试；刷新失败保留旧数据 → 提示可能过期） */}
+      {loadError && (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="数据加载失败"
+          description={
+            lastUpdatedAt
+              ? `接口异常（${loadError}），当前展示的是 ${formatCnTimeSec(lastUpdatedAt)} 的数据，可能过期。`
+              : `${loadError}。请重试，若持续失败请检查服务状态。`
+          }
+          action={
+            <Button size="small" onClick={() => load(true)}>
+              重试
+            </Button>
+          }
+        />
+      )}
       {/* 数据获取时间 + 手动刷新（刷新前后秒级时间变化即反馈） */}
       <Row justify="space-between" align="middle" style={{ marginBottom: 12 }}>
         <span className="muted" style={{ fontSize: 12 }}>

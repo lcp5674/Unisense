@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Alert,
   AutoComplete,
@@ -262,6 +263,9 @@ function RoutingOverview({
 
 export function SystemConfig() {
   const [form] = Form.useForm();
+  // F2（审查修复）：审计记录跳转改 SPA 内导航（window.open 新标签既破坏
+  // SPA 内导航，又让 ?entity_type= 深链参数在无痕会话中丢失）
+  const navigate = useNavigate();
   const [data, setData] = useState<LlmConfigList | null>(null);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
@@ -1118,7 +1122,7 @@ export function SystemConfig() {
                     type="link"
                     icon={<LinkOutlined />}
                     onClick={() => {
-                      window.open("/audit?entity_type=llm_config", "_blank");
+                      navigate("/audit?entity_type=llm_config");
                     }}
                   >
                     审计记录

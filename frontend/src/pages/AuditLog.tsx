@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Alert, Card, Table, Tag, Input, Select, Button, Space, Tabs, Tooltip, Modal, Descriptions, message } from "antd";
 import { DownloadOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import { exportAudit, listAudit, UnisenseApiError } from "../api";
@@ -140,7 +141,10 @@ export function AuditLog() {
   // F-1（第十一轮）：每页条数持久化（对齐 MetricCatalog/Dimensions 模式）
   const { pageSize, onShowSizeChange } = usePersistentPageSize("unisense.auditLog.pageSize", 20);
   const setPageSize = (ps: number) => onShowSizeChange(0, ps);
-  const [entityType, setEntityType] = useState("");
+  // F2（审查修复）：支持深链 ?entity_type=xxx 作为初始筛选（SystemConfig「审计记录」
+  // 从 LLM 配置页跳转后应直达该实体的审计，此前参数被丢弃落全量页）
+  const [searchParams] = useSearchParams();
+  const [entityType, setEntityType] = useState<string>(searchParams.get("entity_type") ?? "");
   const [actorKeyword, setActorKeyword] = useState("");
   const [traceId, setTraceId] = useState("");
   const [piiOnly, setPiiOnly] = useState<boolean | undefined>(undefined);

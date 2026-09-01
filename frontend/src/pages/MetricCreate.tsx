@@ -398,9 +398,37 @@ export function MetricCreate() {
   const isComposite = metricType === "composite";
 
   // 统一返回上一入口：优先回退浏览器历史（总览快捷入口等），无上一页（URL 直达）时兜底总览仪表
+  // F7（审查修复）：向导填完十多个必填字段后误点返回/浏览器后退会全部丢失——未保存离开保护
+  const [submitted, setSubmitted] = useState(false);
+  const isDirty = () => !submitted && form.isFieldsTouched();
+  useEffect(() => {
+    function onBeforeUnload(e: BeforeUnloadEvent) {
+      if (isDirty()) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    }
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [submitted]);
+
   function handleBack() {
-    if (window.history.length > 1) navigate(-1);
-    else navigate("/dashboard");
+    const goBack = () => {
+      if (window.history.length > 1) navigate(-1);
+      else navigate("/dashboard");
+    };
+    if (isDirty()) {
+      Modal.confirm({
+        title: "未保存的修改",
+        content: "当前表单有未保存的修改，离开将丢失，确定离开吗？",
+        okText: "离开",
+        cancelText: "留在本页",
+        onOk: goBack,
+      });
+      return;
+    }
+    goBack();
   }
 
   const [domainTree, setDomainTree] = useState<SubjectDomainTreeNode[]>([]);
@@ -2500,6 +2528,7 @@ export function MetricCreate() {
     try {
       const created = await createMetric(req);
       message.success(`创建草稿成功：${created.metric_code}`);
+      setSubmitted(true); // F7：提交成功标记已保存，解除未保存离开拦截
       navigate(`/detail/${created.metric_code}`);
     } catch (err) {
       if (err instanceof UnisenseApiError && err.code === "METRIC_CODE_EXISTS") {

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { AuditLog } from "../pages/AuditLog";
+import { MemoryRouter } from "react-router-dom";
 import { PermissionProvider } from "../hooks/usePermission";
 import type { AuditEntry } from "../types";
 
@@ -38,9 +39,13 @@ const ENTRY: AuditEntry = {
 
 function renderPage() {
   return render(
-    <PermissionProvider user={{ id: 1, username: "admin", display_name: "管理员", role: "platform_admin", domain: null, org_id: 1 } as never}>
-      <AuditLog />
-    </PermissionProvider>,
+    <MemoryRouter>
+      <PermissionProvider
+        user={{ id: 1, username: "admin", display_name: "管理员", role: "platform_admin", domain: null, org_id: 1 } as never}
+      >
+        <AuditLog />
+      </PermissionProvider>
+    </MemoryRouter>,
   );
 }
 

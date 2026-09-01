@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { act, render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { SystemConfig } from "../pages/SystemConfig";
+import { MemoryRouter } from "react-router-dom";
 import { PermissionProvider } from "../hooks/usePermission";
 
 vi.mock("../api", () => {
@@ -102,7 +103,7 @@ describe("SystemConfig LLM 路由配置", () => {
     mockGet.mockResolvedValue(
       listData({ items: [PRIMARY_ITEM] }) as never,
     );
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     expect(await screen.findByText("LLM 路由配置")).toBeTruthy();
     // 概览条显示「当前路由：主用」+ 表格行也含「主用」→ 至少两处
     expect((await screen.findAllByText("主用")).length).toBeGreaterThanOrEqual(1);
@@ -135,6 +136,7 @@ describe("SystemConfig LLM 路由配置", () => {
       <PermissionProvider user={{ id: 2, username: "viewer", display_name: "访客", role: "viewer", domain: null, org_id: 1 } as never}>
         <SystemConfig />
       </PermissionProvider>,
+      { wrapper: MemoryRouter },
     );
     await screen.findByText("LLM 路由配置");
     await waitFor(() => {
@@ -153,7 +155,7 @@ describe("SystemConfig LLM 路由配置", () => {
       model: "deepseek-chat",
       error: "",
     });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     const testBtn = await screen.findByText("测试");
     fireEvent.click(testBtn);
     await waitFor(() => {
@@ -164,7 +166,7 @@ describe("SystemConfig LLM 路由配置", () => {
 
   it("新增实例：打开弹窗 → 填写 → 保存 → 调用 createLlmConfig", async () => {
     mockCreate.mockResolvedValue({ id: 2 });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     fireEvent.click(await screen.findByText("新增 LLM 实例"));
     // 弹窗表单
     fireEvent.change(await screen.findByPlaceholderText("如：主用 DeepSeek / 备用通义"), {
@@ -199,7 +201,7 @@ describe("SystemConfig LLM 路由配置", () => {
       error: "",
       latency_ms: 36,
     });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     fireEvent.click(await screen.findByText("新增 LLM 实例"));
     fireEvent.change(screen.getByPlaceholderText("https://api.deepseek.com"), {
       target: { value: "http://127.0.0.1:19091" },
@@ -223,7 +225,7 @@ describe("SystemConfig LLM 路由配置", () => {
       error: "HTTP 404: not found",
       latency_ms: 8,
     });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     fireEvent.click(await screen.findByText("新增 LLM 实例"));
     fireEvent.change(screen.getByPlaceholderText("https://api.deepseek.com"), {
       target: { value: "http://127.0.0.1:19091" },
@@ -238,7 +240,7 @@ describe("SystemConfig LLM 路由配置", () => {
   });
 
   it("选择火山方舟/腾讯混元提供商 → 预填 Coding Plan 接口地址与默认模型", async () => {
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     fireEvent.click(await screen.findByText("新增 LLM 实例"));
     // 选择火山方舟（Coding Plan）
     fireEvent.mouseDown(screen.getByRole("combobox", { name: "提供商" }));
@@ -267,7 +269,7 @@ describe("SystemConfig LLM 路由配置", () => {
       source: "catalog",
       note: "该网关不支持 GET /models 接口，已列出平台内置常用模型；实际可用模型以订阅套餐/控制台为准，可手动输入补充",
     });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     fireEvent.click(await screen.findByText("新增 LLM 实例"));
     // 选择火山方舟 → 预填 base_url，同时 provider=ark 传给 fetchLlmModels
     fireEvent.mouseDown(screen.getByRole("combobox", { name: "提供商" }));
@@ -298,7 +300,7 @@ describe("SystemConfig LLM 路由配置", () => {
   it("编辑实例：点编辑 → 回填表单 → 保存 → 调用 updateLlmConfig", async () => {
     mockGet.mockResolvedValue(listData({ items: [PRIMARY_ITEM] }) as never);
     mockUpdate.mockResolvedValue({ id: 1 });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     fireEvent.click(await screen.findByText("编辑"));
     await waitFor(() => {
       expect(screen.getByDisplayValue("https://api.deepseek.com")).toBeTruthy();
@@ -321,7 +323,7 @@ describe("SystemConfig LLM 路由配置", () => {
   it("删除实例：点删除 → 确认弹窗 → 确定 → 调用 deleteLlmConfig", async () => {
     mockGet.mockResolvedValue(listData({ items: [PRIMARY_ITEM] }) as never);
     mockDelete.mockResolvedValue({ id: 1 });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     fireEvent.click(await screen.findByText("删除"));
     // 确认弹窗（可控 Modal）出现，限定在弹窗内点击确认按钮
     const modal = await screen.findByText("删除 LLM 实例");
@@ -338,7 +340,7 @@ describe("SystemConfig LLM 路由配置", () => {
     mockSecret.mockResolvedValue({ id: 1, api_key: "sk-revealed" });
     vi.useFakeTimers();
     try {
-      render(<SystemConfig />);
+      render(<SystemConfig />, { wrapper: MemoryRouter });
       await act(async () => {
         await Promise.resolve();
       });
@@ -365,7 +367,7 @@ describe("SystemConfig LLM 路由配置", () => {
 
   it("P0 概览条：展示当前路由、启用数与已验证连通数", async () => {
     mockGet.mockResolvedValue(listData({ items: [PRIMARY_ITEM] }) as never);
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     const overview = await screen.findByTestId("routing-overview");
     expect(within(overview).getByText(/当前路由/)).toBeTruthy();
     expect(within(overview).getByText("主用")).toBeTruthy();
@@ -382,7 +384,7 @@ describe("SystemConfig LLM 路由配置", () => {
         ],
       }) as never,
     );
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     await screen.findByText("备用");
     expect(screen.getByText("第 1 位")).toBeTruthy();
     expect(screen.getByText("第 2 位")).toBeTruthy();
@@ -394,7 +396,7 @@ describe("SystemConfig LLM 路由配置", () => {
     );
     mockCreate.mockResolvedValue({ id: 2 });
     mockTest.mockResolvedValue({ ok: true, latency_ms: 88, model: "qwen-turbo", error: "" });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     fireEvent.click(await screen.findByText("新增 LLM 实例"));
     fireEvent.change(await screen.findByPlaceholderText("如：主用 DeepSeek / 备用通义"), {
       target: { value: "备用通义" },
@@ -432,7 +434,7 @@ describe("SystemConfig LLM 路由配置", () => {
       chat: true,
       models_supported: false,
     });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     fireEvent.click(await screen.findByText("新增 LLM 实例"));
     fireEvent.change(await screen.findByPlaceholderText("如：主用 DeepSeek / 备用通义"), {
       target: { value: "方舟主用" },
@@ -461,7 +463,7 @@ describe("SystemConfig LLM 路由配置", () => {
     );
     mockCreate.mockResolvedValue({ id: 2 });
     mockTest.mockResolvedValue({ ok: false, latency_ms: 0, model: "qwen-turbo", error: "HTTP 401" });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     fireEvent.click(await screen.findByText("新增 LLM 实例"));
     fireEvent.change(await screen.findByPlaceholderText("如：主用 DeepSeek / 备用通义"), {
       target: { value: "备用通义" },
@@ -493,7 +495,7 @@ describe("SystemConfig LLM 路由配置", () => {
       }) as never,
     );
     mockUpdate.mockResolvedValue({ id: 2 });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     await screen.findByText("备用");
     fireEvent.click(screen.getByLabelText("上移 备用"));
     await waitFor(() => {
@@ -513,7 +515,7 @@ describe("SystemConfig LLM 路由配置", () => {
       }) as never,
     );
     mockUpdate.mockResolvedValue({ id: 2 });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     await screen.findByText("备用");
     // 两个实例 priority 均为 0（新建默认）——旧逻辑上移 newP=max(0,0-1)=0 被钳回，
     // 优先级不变、仍按 ID 并列 → 位次无变化。区间重排：段 [主用,备用] 交换后重写为
@@ -537,7 +539,7 @@ describe("SystemConfig LLM 路由配置", () => {
       }) as never,
     );
     mockUpdate.mockResolvedValue({ id: 1 });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     await screen.findByText("备用");
     fireEvent.click(screen.getByLabelText("下移 主用"));
     await waitFor(() => {
@@ -557,7 +559,7 @@ describe("SystemConfig LLM 路由配置", () => {
       }) as never,
     );
     mockUpdate.mockResolvedValue({ id: 3 });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     await screen.findByText("备用2");
     // 旧逻辑：把目标行(备用,id2)推后到 p1 → 排序 备用2(0)、主用(0)、备用(1)，主用位次被挤动。
     // 区间重排：段 [主用,备用,备用2] 交换后重写为 主用=0、备用2=1、备用=2——
@@ -584,7 +586,7 @@ describe("SystemConfig LLM 路由配置", () => {
       }) as never,
     );
     mockUpdate.mockResolvedValue({ id: 3 });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     await screen.findByText("备用3");
     // 段 [主用,备用,备用2] (p0) 重排终点=2 撞上 备用3(p1)，必须连锁并入 →
     // 段 [主用,备用,备用2,备用3] 交换后重写 0,1,2,3：主用=0（跳过）、备用2=1、
@@ -609,14 +611,14 @@ describe("SystemConfig LLM 路由配置", () => {
         ],
       }) as never,
     );
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     await screen.findByText("备用");
     expect(screen.getAllByTestId("priority-conflict").length).toBeGreaterThanOrEqual(1);
   });
 
   it("P1 删除影响：删除当前路由且唯一启用实例 → 提示将处于未配置状态", async () => {
     mockGet.mockResolvedValue(listData({ items: [{ ...PRIMARY_ITEM, id: 1 }] }) as never);
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     fireEvent.click(await screen.findByText("删除"));
     const modal = await screen.findByText("删除 LLM 实例");
     const modalBox = modal.closest(".ant-modal") as HTMLElement;
@@ -639,7 +641,7 @@ describe("SystemConfig LLM 路由配置", () => {
       }
       return Promise.resolve({ ok: false, latency_ms: 0, model: "qwen-turbo", error: "HTTP 401" });
     });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     fireEvent.click(await screen.findByText("全部测试"));
     await waitFor(() => {
       expect(mockTest).toHaveBeenCalledWith({ instance_id: 1 });
@@ -655,7 +657,7 @@ describe("SystemConfig LLM 路由配置", () => {
       error: "",
       latency_ms: 36,
     });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     fireEvent.click(await screen.findByText("新增 LLM 实例"));
     fireEvent.change(screen.getByPlaceholderText("https://api.deepseek.com"), {
       target: { value: "http://127.0.0.1:19091" },
@@ -681,7 +683,7 @@ describe("SystemConfig LLM 路由配置", () => {
       error: "",
       latency_ms: 20,
     });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     fireEvent.click(await screen.findByText("编辑"));
     await waitFor(() => {
       expect(screen.getByDisplayValue("deepseek-chat")).toBeTruthy();
@@ -701,7 +703,7 @@ describe("SystemConfig LLM 路由配置", () => {
       error: "",
       latency_ms: 10,
     });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     fireEvent.click(await screen.findByText("新增 LLM 实例"));
     fireEvent.change(screen.getByPlaceholderText("https://api.deepseek.com"), {
       target: { value: "http://127.0.0.1:19091" },
@@ -725,7 +727,7 @@ describe("SystemConfig LLM 路由配置", () => {
       error: "",
       latency_ms: 10,
     });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     fireEvent.click(await screen.findByText("编辑"));
     await waitFor(() => {
       expect(screen.getByDisplayValue("deepseek-chat")).toBeTruthy();
@@ -747,7 +749,7 @@ describe("SystemConfig LLM 路由配置", () => {
       error: "HTTP 404: not found",
       latency_ms: 8,
     });
-    render(<SystemConfig />);
+    render(<SystemConfig />, { wrapper: MemoryRouter });
     fireEvent.click(await screen.findByText("新增 LLM 实例"));
     fireEvent.change(screen.getByPlaceholderText("https://api.deepseek.com"), {
       target: { value: "http://127.0.0.1:19091" },
