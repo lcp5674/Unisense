@@ -14,6 +14,15 @@ import { ThresholdSummary } from "../../utils/display";
 import { QUALITY_LEVEL_LABEL, QUALITY_SEVERITY_LABEL, RULE_TYPE_LABEL, RULE_MODE_LABEL } from "../../utils/enums";
 import { formatCnTime, formatCnRange } from "../../utils/timeCn";
 
+/** 快照读取的「无权限」错误码集合（FORBIDDEN 系列）：覆盖域/白名单/PII/废弃/灰度拒绝。 */
+const SNAPSHOT_FORBIDDEN_CODES = new Set([
+  "FORBIDDEN",
+  "FORBIDDEN_DOMAIN",
+  "FORBIDDEN_METRIC",
+  "FORBIDDEN_PII",
+  "FORBIDDEN_DEPRECATED",
+]);
+
 const EVENT_STATUS: Record<string, { color: string; label: string }> = {
   OPEN: { color: "error", label: "开启" },
   ACK: { color: "processing", label: "已确认" },
@@ -45,7 +54,7 @@ export function QualitySnapshot({ metricId, metricCode }: { metricId: number; me
           .catch((err: unknown) => ({
             data: [] as SnapshotResponse[],
             error:
-              err instanceof UnisenseApiError && err.code === "FORBIDDEN"
+              err instanceof UnisenseApiError && SNAPSHOT_FORBIDDEN_CODES.has(err.code)
                 ? err.message
                 : null,
           })),

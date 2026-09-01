@@ -748,8 +748,9 @@ class ConsumeService(BaseService):
         任意指标的历史查询数据值——现接入 ``check_internal_read_permission``，
         platform_admin 直通 / 本域角色按 ROLE_ACTIONS / 跨域须命中 ACTIVE grants。
         越权审查修复：补 ``_assert_consumable_status`` 状态闸门——EXPERIMENTAL 灰度
-        指标快照仅命中 gray_tenant_ids 的租户可读、DEPRECATED 一律拒绝（对齐
-        execute_query 的 internal 通道语义，此前快照读可绕过灰度/废弃闸门）。
+        指标快照仅命中 gray_tenant_ids 的租户可读；DEPRECATED 普通内部用户拒绝、
+        平台管理员放行（历史快照审计回溯）（对齐 execute_query 的 internal 通道
+        语义，此前快照读可绕过灰度/废弃闸门）。
         """
         decision, _matched = await GovernanceService(self._db).check_internal_read_permission(
             user, metric_code
@@ -763,7 +764,17 @@ class ConsumeService(BaseService):
         metric = await self._get_metric(metric_code)
         if metric is None:
             raise NotFoundError("指标不存在", error_code=ErrorCode.NOT_FOUND)
-        self._assert_consumable_status(metric, client=None, internal_user=user)
+        # DEPRECATED 历史快照：平台管理员放行（审计/回溯是管理员职责，PDP 已直通），
+        # 普通内部用户拒绝（防止任意登录用户凭 code 读取废弃指标历史数据）；
+        # 其余状态（EXPERIMENTAL 灰度等）走统一状态闸门。
+        if metric.status == "DEPRECATED":
+            if not user.has_role("platform_admin"):
+                raise BusinessError(
+                    f"指标状态 {metric.status} 不可消费",
+                    error_code=ErrorCode.FORBIDDEN_DEPRECATED,
+                )
+        else:
+            self._assert_consumable_status(metric, client=None, internal_user=user)
         return await self.list_snapshots(metric_code, limit, offset)
 
     async def list_snapshots_for_client(
