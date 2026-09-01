@@ -859,7 +859,7 @@ async def test_aggregate_dashboard_governance_indicators():
         _result(all_=[(1, 2)]),  # owner_tpl
         _result(all_=[(1, 1), (2, 1)]),  # owner_source
         _result(all_=[(1, "Alice"), (2, "Bob")]),  # owner_names
-        _result(all_=[("P0", 1), ("P1", 2), ("P2", 2)]),  # quality by_severity（仅未关闭 OPEN/ACK，合计 5）
+        _result(all_=[("P0", 1), ("P1", 2), ("P2", 2)]),  # quality by_severity（仅未关闭，合计 5）
         _result(all_=[("OPEN", 4), ("ACK", 1), ("RESOLVED", 3)]),  # quality by_status
         _result(all_=[(True, 7), (False, 3)]),  # compliance reviewed
         _result(all_=[("OPEN", 2), ("NEGOTIATING", 1), ("ESCALATED", 1), ("RULED", 1)]),  # conflict
