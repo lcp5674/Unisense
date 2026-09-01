@@ -348,7 +348,9 @@ async def list_metrics(
 ) -> ApiResponse[MetricListResponse]:
     """支持域/状态/分级/关键词过滤与分页。"""
     service = MetricService(db)
-    metrics, total = await service.list_metrics(params, actor_id=user.id, role=user.role)
+    metrics, total = await service.list_metrics(
+        params, actor_id=user.id, role=user.role, user_domain=user.domain
+    )
     # 审核通过时间（审批工作台「我审过的」视图）：metric 表无 approved_at 列，
     # 从当前生效版本（effective_version）的 metric_version.published_at 批量填充——
     # 仅评审历史过滤（reviewed_by）场景需要，避免每次列表多一次版本查询。
@@ -716,7 +718,7 @@ async def get_metric(
 ) -> ApiResponse[MetricResponse]:
     service = MetricService(db)
     metric = await service.get_metric_public(
-        metric_code, actor_id=user.id, role=user.role
+        metric_code, actor_id=user.id, role=user.role, user_domain=user.domain
     )
     # PII 访问审计（对齐 TD §15.4 审计合规，data_classification=PII）
     if metric.pii_flag:

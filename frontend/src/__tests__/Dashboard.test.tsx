@@ -793,6 +793,24 @@ describe("Dashboard 数据隔离（非管理角色视角）", () => {
     await waitFor(() => expect(screen.getByText("我的资产责任分布")).toBeInTheDocument());
     expect(screen.getByText(/您名下暂无负责的资产/)).toBeInTheDocument();
   });
+
+  it("普通用户：不展示「指标待审核」评审动作告警（无评审能力，TD §13）", async () => {
+    renderDashboard();
+    await waitFor(() => expect(screen.getByText("我的资产责任分布")).toBeInTheDocument());
+    // 本人名下审核中状态在 Owner 分布体现，但评审动作告警（去评审）不出现
+    expect(screen.queryByText(/个指标待审核/)).not.toBeInTheDocument();
+  });
+
+  it("评审人：展示指派给我的待审数（assigned_review，TD §13）", async () => {
+    mockPermRole = "reviewer";
+    mockedFetchDashboard.mockResolvedValue({
+      ...mockDashboardData,
+      assigned_review: 5,
+    } as never);
+    renderDashboard();
+    await waitFor(() => expect(screen.getByText(/5 个指标待审核/)).toBeInTheDocument());
+    expect(screen.queryByText(/7 个指标待审核/)).not.toBeInTheDocument();
+  });
 });
 
 describe("总览仪表跳转权限守卫（按钮级）", () => {

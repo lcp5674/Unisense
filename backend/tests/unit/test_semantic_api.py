@@ -812,3 +812,59 @@ async def test_dashboard_scopes_regular_user_to_self() -> None:
         await dashboard(request=req, user=domain_admin, db=db, owner_id=5, domain="outpatient")
 
     assert captured == [("outpatient", 5)], f"domain_admin 应透传外部筛选，实际 {captured}"
+
+
+async def test_dashboard_reviewer_gets_assigned_review() -> None:
+    """评审人角色（非管理）：/dashboard 返回指派给当前用户/所在域评审组的待审数（TD §13）。
+
+    普通用户/管理角色不附加 assigned_review（无评审队列语义），仅 reviewer 角色独立查询。
+    """
+    from unittest.mock import patch
+
+    from app.api.semantic import dashboard
+
+    data = {"metrics": {"total": 0, "by_status": {}}, "assets": {}}
+    db = MagicMock()
+    req = MagicMock()
+    captured: list[tuple] = []
+
+    async def _fake_aggregate(self, domain=None, owner_id=None):
+        captured.append((domain, owner_id))
+        return dict(data)
+
+    user = MagicMock()
+    user.id = 7
+    user.domain = "outpatient"
+    user.roles_all.return_value = ["reviewer"]
+    with patch(
+        "app.services.semantic.repository.MetricRepository.aggregate_dashboard",
+        new=_fake_aggregate,
+    ), patch(
+        "app.services.semantic.repository.MetricRepository.count_review_assigned",
+        new=AsyncMock(return_value=5),
+    ), patch(
+        "app.services.collector.service.CollectorService.count_jobs_by_status",
+        new=AsyncMock(return_value={}),
+    ):
+        result = await dashboard(request=req, user=user, db=db)
+
+    # reviewer 非管理：强制 owner_id=自己 + domain=None（本人资产视角），另附指派待审数
+    assert captured == [(None, 7)]
+    assert result.data.get("assigned_review") == 5
+
+    # 普通用户（analyst）：不附加 assigned_review
+    captured.clear()
+    normal = MagicMock()
+    normal.id = 3
+    normal.domain = "outpatient"
+    normal.roles_all.return_value = ["analyst"]
+    with patch(
+        "app.services.semantic.repository.MetricRepository.aggregate_dashboard",
+        new=_fake_aggregate,
+    ), patch(
+        "app.services.collector.service.CollectorService.count_jobs_by_status",
+        new=AsyncMock(return_value={}),
+    ):
+        result2 = await dashboard(request=req, user=normal, db=db)
+
+    assert "assigned_review" not in result2.data

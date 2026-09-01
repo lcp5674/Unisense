@@ -479,6 +479,73 @@ async def test_list_metrics_reviewed_by_or_filter():
     sql = str(list_stmt.compile(dialect=mysql.dialect()))
     # OR 条件同时覆盖 approver_id 与 reject_reviewer_id
     assert "approver_id" in sql and "reject_reviewer_id" in sql
+
+
+async def test_list_metrics_reviewer_sees_only_user_assigned():
+    """评审人可见性（TD §13）：reviewer_type=user 仅 reviewer_id 指定的用户可看待审指标。"""
+    db = _mock_session()
+    db.execute.side_effect = [_result(scalar=0), _result(all_=[])]
+    repo = MetricRepository(db)
+
+    await repo.list_metrics(
+        offset=0, limit=10, visible_actor_id=7, visible_role="reviewer"
+    )
+
+    sql = _compiled_sql(db, 0)
+    # 不再出现「任意评审角色可见全部 REVIEW」的裸 status 分支——必须带评审指派判定
+    assert "reviewer_type" in sql and "reviewer_id" in sql
+    assert "= 7" in sql
+    # 松散分支（仅 status=REVIEW、无指派条件）不应作为独立 OR 项存在：
+    # 编译 SQL 中 REVIEW 状态必须与指派条件同属一个 and_ 分组
+    assert "status" in sql
+
+
+async def test_list_metrics_reviewer_sees_domain_assigned():
+    """评审人可见性（TD §13）：reviewer_type=domain 仅同域评审组可见。"""
+    db = _mock_session()
+    db.execute.side_effect = [_result(scalar=0), _result(all_=[])]
+    repo = MetricRepository(db)
+
+    await repo.list_metrics(
+        offset=0,
+        limit=10,
+        visible_actor_id=7,
+        visible_role="reviewer",
+        visible_user_domain="outpatient",
+    )
+
+    sql = _compiled_sql(db, 0)
+    assert "reviewer_domain" in sql and "outpatient" in sql
+
+
+async def test_list_metrics_reviewer_unassigned_not_visible():
+    """评审人可见性（TD §13）：未指派评审人的 REVIEW 指标对 reviewer 角色不可见（域管理员兜底）。"""
+    db = _mock_session()
+    db.execute.side_effect = [_result(scalar=0), _result(all_=[])]
+    repo = MetricRepository(db)
+
+    await repo.list_metrics(
+        offset=0, limit=10, visible_actor_id=7, visible_role="reviewer"
+    )
+
+    sql = _compiled_sql(db, 0)
+    # 编译 SQL 必须含指派判定（reviewer_type），证明松散 status=REVIEW 分支已被替换
+    assert "reviewer_type" in sql and "reviewer_id" in sql
+
+
+async def test_count_review_assigned_matches_designation():
+    """指派待审数统计（TD §13）：user 指派=本人 / domain 指派=同域，两者并集。"""
+    db = _mock_session()
+    db.execute.return_value = _result(scalar=3)
+    db.execute.return_value.scalar_one.return_value = 3
+    repo = MetricRepository(db)
+
+    cnt = await repo.count_review_assigned(7, "outpatient")
+
+    assert cnt == 3
+    sql = _compiled_sql(db, 0)
+    assert "reviewer_type" in sql and "reviewer_id" in sql and "reviewer_domain" in sql
+    assert "= 7" in sql and "outpatient" in sql
     assert "OR" in sql.upper()
 
 

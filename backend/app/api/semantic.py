@@ -726,7 +726,8 @@ async def dashboard(
     from app.services.semantic.repository import MetricRepository
 
     roles = user.roles_all()
-    if "platform_admin" in roles or "domain_admin" in roles:
+    is_admin = "platform_admin" in roles or "domain_admin" in roles
+    if is_admin:
         # 管理角色：保留外部筛选（全量治理视角）
         pass
     else:
@@ -735,6 +736,13 @@ async def dashboard(
         domain = None
     repo = MetricRepository(db)
     data = await repo.aggregate_dashboard(domain=domain, owner_id=owner_id)
+    # 评审人（非管理角色）：仪表「指标待审核」只展示指派给当前用户/所在域评审组的
+    # 待审指标（TD §13 评审指派闭环），而非全组织/仅本人名下——独立查询、不入聚合缓存。
+    if not is_admin and "reviewer" in roles:
+        data = {
+            **data,
+            "assigned_review": await repo.count_review_assigned(user.id, user.domain),
+        }
     # 采集任务：运行时数据（Redis/内存 JobStore），采集服务聚合；失败不阻断仪表盘
     try:
         from app.services.collector.service import CollectorService

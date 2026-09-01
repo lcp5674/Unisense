@@ -879,6 +879,8 @@ export function Dashboard() {
   const { snapshot } = usePermission();
   // 管理角色（platform_admin/domain_admin）看全量 Owner 责任分布；普通用户仅看自己（后端已隔离）
   const isAdmin = snapshot?.role === "platform_admin" || snapshot?.role === "domain_admin";
+  // 评审人角色：仅被指派评审人可看到「指标待审核」动作（TD §13 评审指派闭环）
+  const isReviewer = snapshot?.role === "reviewer";
 
   // 推荐曝光上报：仅对首次进入列表的推荐项上报 recommend_view；
   // 负反馈移除后该指标不再出现在列表中，后续渲染不会补报。
@@ -995,7 +997,14 @@ export function Dashboard() {
   if (error) return <Alert type="error" message="加载失败" description={error} showIcon />;
   if (!data) return null;
 
-  const reviewCount = data.by_status.REVIEW ?? 0;
+  // 指标待审核（评审动作告警）按角色收敛：管理员=全量待审（治理视角）；
+  // 评审人=指派给我的待审（assigned_review）；普通用户无评审能力，不展示评审动作
+  // （本人名下审核中状态已由 Owner 责任分布体现，属资产状态而非评审队列）。
+  const reviewCount = isAdmin
+    ? (data.by_status.REVIEW ?? 0)
+    : isReviewer
+      ? (data.assigned_review ?? 0)
+      : 0;
   const piiRatio = Math.round(data.pii_ratio * 100);
   const domainCount = Object.keys(data.by_domain ?? {}).length;
   const assetTypeCount = Object.keys(data.assets ?? {}).length;

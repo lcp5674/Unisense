@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import ColumnElement, delete, func, or_, select, update
+from sqlalchemy import ColumnElement, and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -208,6 +208,7 @@ class MetricRepository:
         limit: int = 20,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
+        visible_user_domain: str | None = None,
     ) -> tuple[list[Metric], int]:
         """分页查询指标列表。
 
@@ -232,6 +233,8 @@ class MetricRepository:
                 （DRAFT/REVIEW）+ 评审角色（REVIEW 待审）可见；其余不可见。
                 管理角色（platform_admin/domain_admin）传 None 即不加过滤。
             visible_role: 调用者角色（配合 visible_actor_id 判定 reviewer 放行）。
+            visible_user_domain: 调用者所属域（配合 visible_role=reviewer 判定
+                domain 指派的同域评审组可见性）。
 
         Returns:
             (指标列表, 总数)。
@@ -254,8 +257,26 @@ class MetricRepository:
                 Metric.backup_owner_id == visible_actor_id,
             ]
             if visible_role == "reviewer":
-                # 评审人可看待审（REVIEW）指标——评审工作台需展示全部待审项
-                visibility.append(Metric.status == "REVIEW")
+                # 仅被指派评审人可看待审（REVIEW）指标（TD §13 治理闭环）：
+                # - reviewer_type=user：仅 reviewer_id 指定的用户可见（评审工作台/目录
+                #   不泄露他人待审项）
+                # - reviewer_type=domain：仅同域评审组可见（reviewer_domain 与用户域一致）
+                # - 未指派：由域管理员兜底评审（reviewer 角色不可见，不在此放行）
+                visibility.append(
+                    and_(
+                        Metric.status == "REVIEW",
+                        or_(
+                            and_(
+                                Metric.reviewer_type == "user",
+                                Metric.reviewer_id == visible_actor_id,
+                            ),
+                            and_(
+                                Metric.reviewer_type == "domain",
+                                Metric.reviewer_domain == visible_user_domain,
+                            ),
+                        ),
+                    )
+                )
             conditions.append(or_(*visibility))
         if domain:
             conditions.append(Metric.domain == domain)
@@ -882,6 +903,34 @@ class MetricRepository:
         )
         rows = (await self._db.execute(stmt)).all()
         return {str(row[0]): row[1] for row in rows}
+
+    async def count_review_assigned(self, actor_id: int, user_domain: str | None) -> int:
+        """统计指派给当前用户/所在域评审组的待审（REVIEW）指标数（TD §13）。
+
+        - ``reviewer_type=user``：仅 ``reviewer_id`` 指定的用户可见/可审。
+        - ``reviewer_type=domain``：仅同域评审组可见（reviewer_domain 与用户域一致）。
+        - 未指派（reviewer_type IS NULL）：由域管理员兜底评审，reviewer 角色不可见，不在此统计。
+
+        Args:
+            actor_id: 当前用户 ID。
+            user_domain: 当前用户所属域。
+
+        Returns:
+            指派给该用户/其域评审组的 REVIEW 指标数。
+        """
+        stmt = (
+            select(func.count())
+            .select_from(Metric)
+            .where(
+                Metric.deleted_at.is_(None),
+                Metric.status == "REVIEW",
+                or_(
+                    and_(Metric.reviewer_type == "user", Metric.reviewer_id == actor_id),
+                    and_(Metric.reviewer_type == "domain", Metric.reviewer_domain == user_domain),
+                ),
+            )
+        )
+        return (await self._db.execute(stmt)).scalar_one() or 0
 
     async def _aggregate_assets(self) -> dict[str, dict[str, Any]]:
         """聚合各类数据资产的计数与状态分布（对齐 TD §12.11 资产总览）。

@@ -1113,6 +1113,7 @@ class MetricService(BaseService):
         metric_code: str,
         actor_id: int | None = None,
         role: str | None = None,
+        user_domain: str | None = None,
     ) -> MetricResponse:
         """经缓存获取指标详情（API 读路径，含 cache-aside + 熔断降级）。
 
@@ -1125,6 +1126,7 @@ class MetricService(BaseService):
             actor_id: 读路径行级隔离（P0-3）——当前用户 ID；None 表示内部调用
                 （不过滤，端点层必传）。
             role: 当前用户角色（配合 actor_id 判定管理角色/评审人放行）。
+            user_domain: 当前用户所属域（评审指派 domain 类型判定同域评审组可见性）。
 
         Returns:
             指标详情响应。
@@ -1135,7 +1137,7 @@ class MetricService(BaseService):
         cached = await self._cache.get(metric_code)
         if cached is not None:
             resp = MetricResponse.model_validate(cached)
-            self._assert_metric_visible(resp, actor_id, role)
+            self._assert_metric_visible(resp, actor_id, role, user_domain)
             return await self._attach_measure_info(resp)
         metric = await self._repo.get_by_code(metric_code)
         if metric is None:
@@ -1154,7 +1156,7 @@ class MetricService(BaseService):
                     },
                 )
             raise NotFoundError(f"指标不存在: {metric_code}")
-        self._assert_metric_visible(metric, actor_id, role)
+        self._assert_metric_visible(metric, actor_id, role, user_domain)
         await self._cache.set(metric)
         return await self._attach_measure_info(MetricResponse.model_validate(metric))
 
@@ -1226,6 +1228,7 @@ class MetricService(BaseService):
         params: MetricListParams,
         actor_id: int | None = None,
         role: str | None = None,
+        user_domain: str | None = None,
     ) -> tuple[list[Metric], int]:
         """分页查询指标列表。
 
@@ -1234,6 +1237,7 @@ class MetricService(BaseService):
             actor_id: 读路径行级隔离（P0-3）——当前用户 ID；None 表示内部调用
                 （不过滤，端点层必传）。
             role: 当前用户角色（配合 actor_id 判定管理角色/评审人放行）。
+            user_domain: 当前用户所属域（评审指派 domain 类型判定同域评审组可见性）。
 
         Returns:
             (指标列表, 总数)。
@@ -1263,6 +1267,7 @@ class MetricService(BaseService):
             limit=params.page_size,
             visible_actor_id=actor_id,
             visible_role=role,
+            visible_user_domain=user_domain,
         )
 
     async def update_metric(
@@ -4613,18 +4618,23 @@ class MetricService(BaseService):
         return status in ("PUBLISHED", "EXPERIMENTAL", "DEPRECATED")
 
     def _assert_metric_visible(
-        self, metric: Metric, actor_id: int | None, role: str | None
+        self,
+        metric: Metric,
+        actor_id: int | None,
+        role: str | None,
+        user_domain: str | None = None,
     ) -> None:
         """读路径可见性守卫（P0-3）：未发布指标仅本人/管理角色可见。
 
         DRAFT/REVIEW 是指标 Owner 的私有工作区；他人读取一律按「不存在」处理
         （不泄露指标存在性，避免攻击者枚举草稿编码）。管理角色与评审人
-        （REVIEW 待审，评审工作台需展示）放行。已发布/灰度/废弃公开。
+        （REVIEW 待审且为被指派评审人，TD §13 评审指派闭环）放行。已发布/灰度/废弃公开。
 
         Args:
             metric: 指标对象（或含 status/owner_id 的响应对象）。
             actor_id: 当前用户 ID；None 表示内部调用（不过滤，端点层必传）。
             role: 当前用户角色。
+            user_domain: 当前用户所属域（评审指派 domain 类型判定同域评审组可见性）。
 
         Raises:
             NotFoundError: 未发布指标对当前用户不可见。
@@ -4638,7 +4648,18 @@ class MetricService(BaseService):
         if metric.owner_id == actor_id or metric.backup_owner_id == actor_id:
             return
         if role == "reviewer" and metric.status == "REVIEW":
-            return
+            # 仅被指派评审人可读待审指标（TD §13，与 _assert_reviewer_authorized 写路径一致）：
+            # - reviewer_type=user：仅 reviewer_id 指定的用户
+            # - reviewer_type=domain：仅同域评审组（user_domain 与 reviewer_domain 一致）
+            # - 未指派：域管理员兜底（reviewer 角色不在此放行）
+            if metric.reviewer_type == "user" and metric.reviewer_id == actor_id:
+                return
+            if (
+                metric.reviewer_type == "domain"
+                and metric.reviewer_domain
+                and user_domain == metric.reviewer_domain
+            ):
+                return
         raise NotFoundError(f"指标不存在: {metric.metric_code}")
 
     def _assert_owner_or_admin(self, metric: Metric, actor_id: int, role: str) -> None:
@@ -4847,7 +4868,11 @@ class MetricService(BaseService):
     # ---- US9: 指标对比 ----
 
     async def _get_metric_for_compare(
-        self, metric_code: str, actor_id: int | None = None, role: str | None = None
+        self,
+        metric_code: str,
+        actor_id: int | None = None,
+        role: str | None = None,
+        user_domain: str | None = None,
     ) -> Metric:
         """读取用于对比的指标；对已作废指标返回友好 METRIC_ARCHIVED。
 
@@ -4867,7 +4892,7 @@ class MetricService(BaseService):
         """
         metric = await self._repo.get_by_code(metric_code)
         if metric is not None:
-            self._assert_metric_visible(metric, actor_id, role)
+            self._assert_metric_visible(metric, actor_id, role, user_domain)
             return metric
         archived = await self._repo.get_archived_by_code(metric_code)
         if archived is not None and archived.successor_code:

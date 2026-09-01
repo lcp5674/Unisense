@@ -801,6 +801,8 @@ export interface DashboardData {
   by_domain: Record<string, number>;
   pii_count: number;
   pii_ratio: number;
+  /** 评审人视角：指派给当前用户/所在域评审组的待审（REVIEW）指标数（TD §13，非管理 reviewer 角色返回） */
+  assigned_review?: number;
   /** Owner 责任分布（跨资产）：指标/数据表/数据源/维度/术语/指标模板按责任人聚合 */
   by_owner?: Record<
     number,

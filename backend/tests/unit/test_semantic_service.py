@@ -4503,6 +4503,97 @@ async def test_get_metric_public_deleted_without_successor_still_not_found():
     assert exc_info.value.error_code == "NOT_FOUND"
 
 
+async def test_get_metric_public_reviewer_user_assigned_visible():
+    """评审人详情可见性（TD §13）：reviewer_type=user 指派本人的 REVIEW 指标可见。"""
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.get = AsyncMock(return_value=None)
+    svc._cache.set = AsyncMock()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(
+            status="REVIEW", owner_id=1, reviewer_type="user", reviewer_id=7
+        )
+    )
+
+    resp = await svc.get_metric_public(
+        "sales_gmv_daily", actor_id=7, role="reviewer", user_domain="sales"
+    )
+
+    assert resp.metric_code == "sales_gmv_daily"
+
+
+async def test_get_metric_public_reviewer_user_assigned_other_forbidden():
+    """评审人详情可见性（TD §13）：user 指派给他人 → 非被指派评审人按不存在处理。"""
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.get = AsyncMock(return_value=None)
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(
+            status="REVIEW", owner_id=1, reviewer_type="user", reviewer_id=8
+        )
+    )
+
+    with pytest.raises(NotFoundError):
+        await svc.get_metric_public(
+            "sales_gmv_daily", actor_id=7, role="reviewer", user_domain="sales"
+        )
+
+
+async def test_get_metric_public_reviewer_domain_assigned_visible():
+    """评审人详情可见性（TD §13）：reviewer_type=domain 同域评审员可见。"""
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.get = AsyncMock(return_value=None)
+    svc._cache.set = AsyncMock()
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(
+            status="REVIEW",
+            owner_id=1,
+            reviewer_type="domain",
+            reviewer_domain="outpatient",
+        )
+    )
+
+    resp = await svc.get_metric_public(
+        "sales_gmv_daily", actor_id=7, role="reviewer", user_domain="outpatient"
+    )
+
+    assert resp.metric_code == "sales_gmv_daily"
+
+
+async def test_get_metric_public_reviewer_domain_assigned_other_domain_forbidden():
+    """评审人详情可见性（TD §13）：domain 指派他域 → 非本域评审员按不存在处理。"""
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.get = AsyncMock(return_value=None)
+    repo.get_by_code = AsyncMock(
+        return_value=make_metric(
+            status="REVIEW",
+            owner_id=1,
+            reviewer_type="domain",
+            reviewer_domain="inpatient",
+        )
+    )
+
+    with pytest.raises(NotFoundError):
+        await svc.get_metric_public(
+            "sales_gmv_daily", actor_id=7, role="reviewer", user_domain="outpatient"
+        )
+
+
+async def test_get_metric_public_reviewer_unassigned_forbidden():
+    """评审人详情可见性（TD §13）：未指派评审人的 REVIEW 指标对 reviewer 角色不可见。"""
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.get = AsyncMock(return_value=None)
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="REVIEW", owner_id=1))
+
+    with pytest.raises(NotFoundError):
+        await svc.get_metric_public(
+            "sales_gmv_daily", actor_id=7, role="reviewer", user_domain="outpatient"
+        )
+
+
 async def test_emergency_publish_success():
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT", pii_flag=False))
