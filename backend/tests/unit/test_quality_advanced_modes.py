@@ -311,7 +311,8 @@ async def test_confirm_repair_records_confirmation() -> None:
     }
     svc._repo.get_event = AsyncMock(return_value=ev)
     svc._repo.save_event = AsyncMock(return_value=ev)
-    resp = await svc.confirm_repair(ev.id, user_id=7)
+    svc._assert_metric_domain = AsyncMock()  # noqa: SLF001 - 域校验有独立用例
+    resp = await svc.confirm_repair(ev.id, user_id=7, domain="sales", is_platform_admin=False)
     assert resp.repair_suggestion is not None
     assert resp.repair_suggestion["confirmed_by"] == 7
     assert resp.repair_suggestion["confirmed_at"] is not None
@@ -327,5 +328,6 @@ async def test_confirm_repair_rejects_non_open() -> None:
     ev = _make_event()
     ev.status = QualityEventStatus.ACK
     svc._repo.get_event = AsyncMock(return_value=ev)
+    svc._assert_metric_domain = AsyncMock()  # noqa: SLF001 - 域校验有独立用例
     with pytest.raises(ValidationError):
-        await svc.confirm_repair(ev.id, user_id=7)
+        await svc.confirm_repair(ev.id, user_id=7, domain="sales", is_platform_admin=False)

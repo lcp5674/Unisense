@@ -145,7 +145,12 @@ async def update_rule(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    resp = await QualityService(db).update_rule(rule_id, payload)
+    resp = await QualityService(db).update_rule(
+        rule_id,
+        payload,
+        domain=user.domain,
+        is_platform_admin=user.has_role("platform_admin"),
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -166,7 +171,9 @@ async def delete_rule(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    await QualityService(db).delete_rule(rule_id)
+    await QualityService(db).delete_rule(
+        rule_id, domain=user.domain, is_platform_admin=user.has_role("platform_admin")
+    )
     await write_audit(
         db,
         actor_id=user.id,
@@ -281,7 +288,13 @@ async def ack_event(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    resp = await QualityService(db).ack_event(event_id, payload.note, user.id)
+    resp = await QualityService(db).ack_event(
+        event_id,
+        payload.note,
+        user.id,
+        domain=user.domain,
+        is_platform_admin=user.has_role("platform_admin"),
+    )
     # PLAT-3: 审计须先于 commit，与业务同事务原子提交（避免业务落盘而审计随会话关闭丢失）
     await write_audit(
         db,
@@ -306,7 +319,9 @@ async def resolve_event(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    resp = await QualityService(db).resolve_event(event_id, user.id)
+    resp = await QualityService(db).resolve_event(
+        event_id, user.id, domain=user.domain, is_platform_admin=user.has_role("platform_admin")
+    )
     # PLAT-3: 审计先于 commit，同事务原子提交
     await write_audit(
         db,
@@ -331,7 +346,9 @@ async def close_event(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    resp = await QualityService(db).close_event(event_id, user.id)
+    resp = await QualityService(db).close_event(
+        event_id, user.id, domain=user.domain, is_platform_admin=user.has_role("platform_admin")
+    )
     # PLAT-3: 审计先于 commit，同事务原子提交
     await write_audit(
         db,
@@ -357,7 +374,9 @@ async def confirm_repair(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     """Owner 确认已线下修复（TD §4.8.5 闭环）：在修复建议中记录确认留痕。"""
-    resp = await QualityService(db).confirm_repair(event_id, user.id)
+    resp = await QualityService(db).confirm_repair(
+        event_id, user.id, domain=user.domain, is_platform_admin=user.has_role("platform_admin")
+    )
     # PLAT-3: 审计先于 commit，同事务原子提交
     await write_audit(
         db,
@@ -456,7 +475,9 @@ async def run_reconciliation(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     """执行一次对账：基准值 vs 平台观测值，自动判定差异状态（ALERT 触发告警）。"""
-    resp = await QualityService(db).run_reconciliation(payload, user.id)
+    resp = await QualityService(db).run_reconciliation(
+        payload, user.id, domain=user.domain, is_platform_admin=user.has_role("platform_admin")
+    )
     # PLAT-3: 审计先于 commit，同事务原子提交
     await write_audit(
         db,
@@ -506,7 +527,13 @@ async def confirm_reconciliation(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     """Owner 确认差异（reasonable 合理 / caliber_error 口径有误→走变更）。"""
-    resp = await QualityService(db).confirm_reconciliation(record_id, payload, user.id)
+    resp = await QualityService(db).confirm_reconciliation(
+        record_id,
+        payload,
+        user.id,
+        domain=user.domain,
+        is_platform_admin=user.has_role("platform_admin"),
+    )
     # PLAT-3: 审计先于 commit，同事务原子提交
     await write_audit(
         db,

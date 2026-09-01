@@ -17,7 +17,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_service import BaseService
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import AuthError, NotFoundError, ValidationError
 from app.models.quality import (
     ExternalBenchmark,
     QualityEvent,
@@ -209,6 +209,44 @@ class QualityService(BaseService):
                             error_code="QUALITY_THRESHOLD_INVALID",
                         ) from exc
 
+    async def _assert_metric_domain(
+        self,
+        *,
+        domain: str | None,
+        is_platform_admin: bool,
+        metric_id: int | None = None,
+        metric_code: str | None = None,
+    ) -> None:
+        """指标域归属校验（P0 安全修复 S1）：platform_admin 放行；其余角色须本域。
+
+        此前 update_rule/delete_rule/事件处置/对账确认不校验归属——域 A 的
+        metric_owner/domain_admin 可对域 B 指标改阈值、处置事件、确认差异，
+        污染对账与告警。校验统一下沉 service 层：即使 API 层角色门禁被绕过，
+        service 直调路径仍强制归属校验（fail-closed）。
+        """
+        if is_platform_admin:
+            return
+        from sqlalchemy import select
+
+        from app.models.metric import Metric
+
+        if metric_id is not None:
+            stmt = select(Metric).where(Metric.id == metric_id, Metric.deleted_at.is_(None))
+        elif metric_code is not None:
+            stmt = select(Metric).where(
+                Metric.metric_code == metric_code, Metric.deleted_at.is_(None)
+            )
+        else:
+            return
+        metric = (await self._db.execute(stmt)).scalar_one_or_none()
+        if metric is None:
+            raise NotFoundError("指标不存在")
+        if metric.domain != domain:
+            raise AuthError(
+                f"无权操作域外指标（当前域: {domain}，指标域: {metric.domain}）",
+                error_code="FORBIDDEN",
+            )
+
     async def create_rule(self, payload: QualityRuleCreate, user_id: int) -> QualityRuleResponse:
         if payload.threshold is None or not isinstance(payload.threshold, dict):
             raise ValidationError(
@@ -249,7 +287,14 @@ class QualityService(BaseService):
         )
         return [QualityRuleResponse.from_model(r) for r in rows], total
 
-    async def update_rule(self, rule_id: int, payload: QualityRuleUpdate) -> QualityRuleResponse:
+    async def update_rule(
+        self,
+        rule_id: int,
+        payload: QualityRuleUpdate,
+        *,
+        domain: str | None,
+        is_platform_admin: bool,
+    ) -> QualityRuleResponse:
         if payload.threshold is not None and (
             not isinstance(payload.threshold, dict) or len(payload.threshold) == 0
         ):
@@ -259,6 +304,9 @@ class QualityService(BaseService):
         rule = await self._repo.get_rule(rule_id)
         if rule is None:
             raise NotFoundError(f"quality rule not found: {rule_id}")
+        await self._assert_metric_domain(
+            domain=domain, is_platform_admin=is_platform_admin, metric_id=rule.metric_id
+        )
         if payload.threshold is not None:
             effective_mode = payload.rule_mode or rule.rule_mode
             self._validate_threshold(effective_mode, payload.threshold)
@@ -274,10 +322,15 @@ class QualityService(BaseService):
         )
         return QualityRuleResponse.from_model(rule)
 
-    async def delete_rule(self, rule_id: int) -> None:
+    async def delete_rule(
+        self, rule_id: int, *, domain: str | None, is_platform_admin: bool
+    ) -> None:
         rule = await self._repo.get_rule(rule_id)
         if rule is None:
             raise NotFoundError(f"quality rule not found: {rule_id}")
+        await self._assert_metric_domain(
+            domain=domain, is_platform_admin=is_platform_admin, metric_id=rule.metric_id
+        )
         await self._repo.delete_rule(rule)
 
     # ---- 检测引擎（静态阈值 + 动态基线 + 同环比 + 跨源）----
@@ -529,10 +582,21 @@ class QualityService(BaseService):
         rows, total = await self._repo.list_events(metric_id, status, level, page, page_size)
         return [QualityEventResponse.from_model(r) for r in rows], total
 
-    async def ack_event(self, event_id: int, note: str, user_id: int) -> QualityEventResponse:
+    async def ack_event(
+        self,
+        event_id: int,
+        note: str,
+        user_id: int,
+        *,
+        domain: str | None,
+        is_platform_admin: bool,
+    ) -> QualityEventResponse:
         event = await self._repo.get_event(event_id)
         if event is None:
             raise NotFoundError(f"quality event not found: {event_id}")
+        await self._assert_metric_domain(
+            domain=domain, is_platform_admin=is_platform_admin, metric_id=event.metric_id
+        )
         if event.status != QualityEventStatus.OPEN:
             raise ValidationError(
                 f"event {event_id} status={event.status.value}, only OPEN can ACK",
@@ -543,10 +607,20 @@ class QualityService(BaseService):
         )
         return QualityEventResponse.from_model(event)
 
-    async def resolve_event(self, event_id: int, user_id: int) -> QualityEventResponse:
+    async def resolve_event(
+        self,
+        event_id: int,
+        user_id: int,
+        *,
+        domain: str | None,
+        is_platform_admin: bool,
+    ) -> QualityEventResponse:
         event = await self._repo.get_event(event_id)
         if event is None:
             raise NotFoundError(f"quality event not found: {event_id}")
+        await self._assert_metric_domain(
+            domain=domain, is_platform_admin=is_platform_admin, metric_id=event.metric_id
+        )
         if event.status != QualityEventStatus.ACK:
             raise ValidationError(
                 f"event {event_id} status={event.status.value}, only ACK can RESOLVE",
@@ -555,10 +629,20 @@ class QualityService(BaseService):
         event = await self._repo.transition_event(event, QualityEventStatus.RESOLVED, user_id)
         return QualityEventResponse.from_model(event)
 
-    async def close_event(self, event_id: int, user_id: int) -> QualityEventResponse:
+    async def close_event(
+        self,
+        event_id: int,
+        user_id: int,
+        *,
+        domain: str | None,
+        is_platform_admin: bool,
+    ) -> QualityEventResponse:
         event = await self._repo.get_event(event_id)
         if event is None:
             raise NotFoundError(f"quality event not found: {event_id}")
+        await self._assert_metric_domain(
+            domain=domain, is_platform_admin=is_platform_admin, metric_id=event.metric_id
+        )
         if event.status != QualityEventStatus.RESOLVED:
             raise ValidationError(
                 f"event {event_id} status={event.status.value}, only RESOLVED can CLOSE",
@@ -567,7 +651,14 @@ class QualityService(BaseService):
         event = await self._repo.transition_event(event, QualityEventStatus.CLOSED, user_id)
         return QualityEventResponse.from_model(event)
 
-    async def confirm_repair(self, event_id: int, user_id: int) -> QualityEventResponse:
+    async def confirm_repair(
+        self,
+        event_id: int,
+        user_id: int,
+        *,
+        domain: str | None,
+        is_platform_admin: bool,
+    ) -> QualityEventResponse:
         """Owner 确认已线下修复（TD §4.8.5 闭环）：在修复建议中记录确认留痕。
 
         修复后复检由下一次观测触发 detect 自然闭环（不在此自动改数）。
@@ -575,6 +666,9 @@ class QualityService(BaseService):
         event = await self._repo.get_event(event_id)
         if event is None:
             raise NotFoundError(f"quality event not found: {event_id}")
+        await self._assert_metric_domain(
+            domain=domain, is_platform_admin=is_platform_admin, metric_id=event.metric_id
+        )
         if event.status != QualityEventStatus.OPEN:
             raise ValidationError(
                 f"event {event_id} status={event.status.value}, only OPEN can confirm repair",
@@ -654,12 +748,20 @@ class QualityService(BaseService):
         return BenchmarkResponse.from_model(bench)
 
     async def run_reconciliation(
-        self, payload: ReconciliationRun, user_id: int
+        self,
+        payload: ReconciliationRun,
+        user_id: int,
+        *,
+        domain: str | None,
+        is_platform_admin: bool,
     ) -> ReconciliationRecordResponse:
         """执行一次对账：基准值 vs 平台观测值，自动判定差异状态。"""
         bench = await self._repo.get_benchmark(payload.benchmark_id)
         if bench is None:
             raise NotFoundError(f"benchmark not found: {payload.benchmark_id}")
+        await self._assert_metric_domain(
+            domain=domain, is_platform_admin=is_platform_admin, metric_code=bench.metric_code
+        )
         tolerance = bench.tolerance_pct if bench.tolerance_pct is not None else _DEFAULT_TOLERANCE
         if bench.bench_value == 0:
             raise ValidationError("bench_value 为 0，无法计算差异率", error_code="BENCH_VALUE_ZERO")
@@ -703,12 +805,21 @@ class QualityService(BaseService):
         return [ReconciliationRecordResponse.from_model(r) for r in rows], total
 
     async def confirm_reconciliation(
-        self, record_id: int, payload: ReconciliationConfirm, user_id: int
+        self,
+        record_id: int,
+        payload: ReconciliationConfirm,
+        user_id: int,
+        *,
+        domain: str | None,
+        is_platform_admin: bool,
     ) -> ReconciliationRecordResponse:
         """Owner 确认差异（reasonable 合理 / caliber_error 口径有误→走变更）。"""
         rec = await self._repo.get_reconciliation(record_id)
         if rec is None:
             raise NotFoundError(f"reconciliation record not found: {record_id}")
+        await self._assert_metric_domain(
+            domain=domain, is_platform_admin=is_platform_admin, metric_code=rec.metric_code
+        )
         if rec.status == ReconciliationStatus.CONFIRMED:
             raise ValidationError(
                 f"record {record_id} already CONFIRMED", error_code="RECON_ALREADY_CONFIRMED"
@@ -768,9 +879,7 @@ class QualityService(BaseService):
             ratio = ratios.get(bucket["metric_tier"], 0.0)
             ids = bucket["benchmark_ids"]
             # 抽样以指标为粒度：T1 全量；T2/T3 按比例放行整条指标（含其全部基准）
-            if ratio >= 1.0:
-                chosen = ids
-            elif ratio > 0.0 and rng.random() < ratio:
+            if ratio >= 1.0 or ratio > 0.0 and rng.random() < ratio:
                 chosen = ids
             else:
                 continue

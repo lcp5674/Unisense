@@ -99,10 +99,13 @@ async def test_update_rule_validates_threshold_against_mode() -> None:
     )
     svc._repo.get_rule = AsyncMock(return_value=existing)  # noqa: SLF001
     svc._repo.update_rule = AsyncMock(return_value=existing)  # noqa: SLF001
+    svc._assert_metric_domain = AsyncMock()  # noqa: SLF001 - 域校验有独立用例
     with pytest.raises(ValidationError):
         await svc.update_rule(
             1,
             QualityRuleUpdate(threshold={"op": ">", "value": "xx"}),
+            domain="sales",
+            is_platform_admin=False,
         )
 
 

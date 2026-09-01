@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from datetime import date
 from decimal import Decimal
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -109,6 +110,8 @@ def _make_service() -> tuple[QualityService, FakeRepo, FakePublisher]:
     pub = FakePublisher()
     svc._repo = repo  # noqa: SLF001 - 测试注入
     svc._publisher = pub  # noqa: SLF001
+    # 域归属校验放行（S1 安全校验有独立用例，本组聚焦对账逻辑）
+    svc._assert_metric_domain = AsyncMock()  # noqa: SLF001
     return svc, repo, pub
 
 
@@ -172,26 +175,38 @@ async def test_run_reconciliation_status_thresholds() -> None:
 
     # 完全吻合 → OK
     ok = await svc.run_reconciliation(
-        ReconciliationRun(benchmark_id=1, metric_value=Decimal("100")), user_id=1
+        ReconciliationRun(benchmark_id=1, metric_value=Decimal("100")),
+        user_id=1,
+        domain="sales",
+        is_platform_admin=False,
     )
     assert ok.status == ReconciliationStatus.OK
     assert ok.diff_pct == Decimal("0")
 
     # 差异 1.00% = 容忍率 → OK（边界）
     warn_ok = await svc.run_reconciliation(
-        ReconciliationRun(benchmark_id=1, metric_value=Decimal("101")), user_id=1
+        ReconciliationRun(benchmark_id=1, metric_value=Decimal("101")),
+        user_id=1,
+        domain="sales",
+        is_platform_admin=False,
     )
     assert warn_ok.status == ReconciliationStatus.OK
 
     # 差异 2.00% = 2 倍容忍率 → WARN（边界）
     warn = await svc.run_reconciliation(
-        ReconciliationRun(benchmark_id=1, metric_value=Decimal("102")), user_id=1
+        ReconciliationRun(benchmark_id=1, metric_value=Decimal("102")),
+        user_id=1,
+        domain="sales",
+        is_platform_admin=False,
     )
     assert warn.status == ReconciliationStatus.WARN
 
     # 差异 3.00% > 2 倍容忍率 → ALERT + 告警事件
     alert = await svc.run_reconciliation(
-        ReconciliationRun(benchmark_id=1, metric_value=Decimal("103")), user_id=1
+        ReconciliationRun(benchmark_id=1, metric_value=Decimal("103")),
+        user_id=1,
+        domain="sales",
+        is_platform_admin=False,
     )
     assert alert.status == ReconciliationStatus.ALERT
     assert any(e["event_type"] == "reconciliation.alert" for e in pub.events)
@@ -202,7 +217,10 @@ async def test_run_reconciliation_default_tolerance_when_none() -> None:
     repo.benchmarks.append(_benchmark(bench_value=Decimal("100"), tolerance=None))
     # 容忍率默认 1.00，差异 2% → WARN
     rec = await svc.run_reconciliation(
-        ReconciliationRun(benchmark_id=1, metric_value=Decimal("102")), user_id=1
+        ReconciliationRun(benchmark_id=1, metric_value=Decimal("102")),
+        user_id=1,
+        domain="sales",
+        is_platform_admin=False,
     )
     assert rec.status == ReconciliationStatus.WARN
 
@@ -212,20 +230,28 @@ async def test_run_reconciliation_zero_bench_value_rejected() -> None:
     repo.benchmarks.append(_benchmark(bench_value=Decimal("0"), tolerance=None))
     with pytest.raises(ValidationError):
         await svc.run_reconciliation(
-            ReconciliationRun(benchmark_id=1, metric_value=Decimal("5")), user_id=1
-        )
+        ReconciliationRun(benchmark_id=1, metric_value=Decimal("5")),
+        user_id=1,
+        domain="sales",
+        is_platform_admin=False,
+    )
 
 
 async def test_confirm_reconciliation_sets_decision_and_guards_double_confirm() -> None:
     svc, repo, _ = _make_service()
     repo.benchmarks.append(_benchmark())
     rec = await svc.run_reconciliation(
-        ReconciliationRun(benchmark_id=1, metric_value=Decimal("103")), user_id=1
+        ReconciliationRun(benchmark_id=1, metric_value=Decimal("103")),
+        user_id=1,
+        domain="sales",
+        is_platform_admin=False,
     )
     confirmed = await svc.confirm_reconciliation(
         rec.id,
         ReconciliationConfirm(decision="caliber_error", owner_note="口径有误，走变更"),
         user_id=9,
+        domain="sales",
+        is_platform_admin=False,
     )
     assert confirmed.status == ReconciliationStatus.CONFIRMED
     assert confirmed.decision == "caliber_error"
@@ -234,7 +260,11 @@ async def test_confirm_reconciliation_sets_decision_and_guards_double_confirm() 
     # 已确认不可重复确认
     with pytest.raises(ValidationError):
         await svc.confirm_reconciliation(
-            rec.id, ReconciliationConfirm(decision="reasonable"), user_id=9
+            rec.id,
+            ReconciliationConfirm(decision="reasonable"),
+            user_id=9,
+            domain="sales",
+            is_platform_admin=False,
         )
 
 

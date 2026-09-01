@@ -388,13 +388,7 @@ class ConsumeService(BaseService):
         metric = await self._get_metric(req.metric_code)
         if metric is None:
             raise NotFoundError(f"指标 {req.metric_code} 不存在")
-        if metric.status != "PUBLISHED":
-            code = (
-                ErrorCode.FORBIDDEN_DEPRECATED
-                if metric.status == "DEPRECATED"
-                else ErrorCode.FORBIDDEN_METRIC
-            )
-            raise BusinessError(f"指标状态 {metric.status} 不可消费", error_code=code)
+        self._assert_consumable_status(metric, client=client, internal_user=internal_user)
         if internal_user is None:
             if client is None:
                 raise BusinessError("缺少消费凭证", error_code=ErrorCode.AUTH_APIKEY_MISSING)
@@ -464,13 +458,7 @@ class ConsumeService(BaseService):
         metric = await self._get_metric(req.metric_code)
         if metric is None:
             raise NotFoundError(f"指标 {req.metric_code} 不存在")
-        if metric.status != "PUBLISHED":
-            code = (
-                ErrorCode.FORBIDDEN_DEPRECATED
-                if metric.status == "DEPRECATED"
-                else ErrorCode.FORBIDDEN_METRIC
-            )
-            raise BusinessError(f"指标状态 {metric.status} 不可消费", error_code=code)
+        self._assert_consumable_status(metric, client=client, internal_user=internal_user)
         row_grant: dict[str, Any] | None = None
         if internal_user is None:
             if client is None:
@@ -1103,6 +1091,37 @@ class ConsumeService(BaseService):
             rows,
             cls._metric_pii_columns(metric),
             cls._metric_masking_policy(metric),
+        )
+
+    @staticmethod
+    def _assert_consumable_status(
+        metric: Metric, *, client: ApiClient | None, internal_user: User | None
+    ) -> None:
+        """指标状态消费门禁（P0 修复 B1）：PUBLISHED 全量；EXPERIMENTAL 灰度放行。
+
+        修复前 EXPERIMENTAL（灰度发布）指标无任何消费通道——审核人按灰度模式发布
+        试点指标并写入 gray_tenant_ids 后，被授权租户在 QueryWorkspace/consume/query
+        全部 403，试点只能 promote 全量或等 30 天回收，灰度业务闭环空转。
+        现按 gray_tenant_ids（组织 ID 列表）校验内部用户 org_id 命中后放行；
+        未命中或接入方（ApiClient 无租户归属）保持拒绝，灰度语义「仅对指定租户可见」
+        不变（fail-closed）。DEPRECATED 维持原有专用错误码。
+        """
+        if metric.status == "PUBLISHED":
+            return
+        if metric.status == "DEPRECATED":
+            raise BusinessError(
+                f"指标状态 {metric.status} 不可消费", error_code=ErrorCode.FORBIDDEN_DEPRECATED
+            )
+        if metric.status == "EXPERIMENTAL":
+            gray = [int(x) for x in (metric.gray_tenant_ids or [])]
+            if internal_user is not None and internal_user.org_id in gray:
+                return
+            raise BusinessError(
+                "灰度指标仅对指定租户开放，当前租户未命中灰度白名单",
+                error_code=ErrorCode.FORBIDDEN_METRIC,
+            )
+        raise BusinessError(
+            f"指标状态 {metric.status} 不可消费", error_code=ErrorCode.FORBIDDEN_METRIC
         )
 
     @classmethod

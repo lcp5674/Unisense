@@ -38,7 +38,12 @@ def _session() -> MagicMock:
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
     session.flush = AsyncMock()
+    # S1 域校验（service 层 _assert_metric_domain）查询返回本域指标（sales），
+    # 与 mock user.domain="sales" 一致，放行域校验聚焦 RBAC 断言。
+    metric = MagicMock()
+    metric.domain = "sales"
     session.execute = AsyncMock(return_value=MagicMock())
+    session.execute.return_value.scalar_one_or_none.return_value = metric
     return session
 
 
@@ -50,7 +55,13 @@ async def _client(uid: int, role: str) -> AsyncIterator[httpx.AsyncClient]:
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=uid, role=role, domain="sales"
+        id=uid,
+        role=role,
+        domain="sales",
+        # require_roles 走 roles_all()：缺省会返回 MagicMock（不可 JSON 序列化 → 403
+        # 被 ctx 序列化失败吞成 500），须显式返回角色列表（对齐 test_consume_security）。
+        roles_all=lambda: [role],
+        has_role=lambda r: r == role,
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -207,7 +218,11 @@ async def test_detect_triggered_writes_audit_before_commit(
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=9, role="compliance_officer", domain="sales"
+        id=9,
+        role="compliance_officer",
+        domain="sales",
+        roles_all=lambda: ["compliance_officer"],
+        has_role=lambda r: r == "compliance_officer",
     )
     event = QualityEventResponse(
         id=42,

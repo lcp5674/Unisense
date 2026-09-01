@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.db.mysql import Base
+from app.models.metric import Metric
 from app.models.quality import QualityEvent, QualityRule  # noqa: F401 - 注册模型供 drop_all
 from app.models.user import Organization, User
 from app.services.quality.schemas import QualityRuleCreate
@@ -43,9 +44,27 @@ def _seed(session_factory) -> int:
                 password_hash="x",
                 display_name="qowner",
                 role="metric_owner",
+                domain="sales",
                 status="active",
             )
             s.add(user)
+            await s.flush()
+            metric = Metric(
+                metric_code="qtest_metric",
+                name="质量测试指标",
+                domain="sales",
+                type="atomic",
+                unit="次",
+                freshness="T1",
+                dw_layer="DWS",
+                serving_mode="BATCH_ONLY",
+                additivity="ADDITIVE",
+                time_semantics="PERIOD",
+                definition_json={},
+                owner_id=user.id,
+                status="PUBLISHED",
+            )
+            s.add(metric)
             await s.flush()
             await s.commit()
             return user.id
@@ -154,20 +173,30 @@ async def test_rule_create_and_event_lifecycle(db_env) -> None:
         assert event.level.value == "P0"
         assert event.status.value == "OPEN"
 
-        acked = await svc.ack_event(event.id, "已确认误报，数据已修复", db_env["owner_id"])
+        acked = await svc.ack_event(
+            event.id,
+            "已确认误报，数据已修复",
+            db_env["owner_id"],
+            domain="sales",
+            is_platform_admin=False,
+        )
         await session.commit()
         assert acked.status.value == "ACK"
         assert acked.ack_note == "已确认误报，数据已修复"
         assert acked.ack_by == db_env["owner_id"]
         assert acked.ack_at is not None
 
-        resolved = await svc.resolve_event(event.id, db_env["owner_id"])
+        resolved = await svc.resolve_event(
+            event.id, db_env["owner_id"], domain="sales", is_platform_admin=False
+        )
         await session.commit()
         assert resolved.status.value == "RESOLVED"
         assert resolved.resolved_by == db_env["owner_id"]
         assert resolved.resolved_at is not None
 
-        closed = await svc.close_event(event.id, db_env["owner_id"])
+        closed = await svc.close_event(
+            event.id, db_env["owner_id"], domain="sales", is_platform_admin=False
+        )
         await session.commit()
         assert closed.status.value == "CLOSED"
         assert closed.closed_by == db_env["owner_id"]

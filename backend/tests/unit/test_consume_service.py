@@ -1566,3 +1566,120 @@ async def test_save_snapshot_dedupes_same_caliber() -> None:
     )
     svc._snapshots.create.assert_not_awaited()  # 已存在 → 不重复写
     assert resp.metric_code == "gmv"
+
+
+# ---- P0 修复 B1：EXPERIMENTAL 灰度指标消费通道（gray_tenant_ids 命中放行）----
+
+
+async def test_dry_run_experimental_gray_tenant_allowed(monkeypatch) -> None:
+    """灰度指标：内部用户 org_id 命中 gray_tenant_ids → dry-run 放行。
+
+    修复前 EXPERIMENTAL 指标一律 FORBIDDEN_METRIC，灰度发布闭环空转。
+    """
+    from app.services.governance.policy import Decision
+
+    svc = _svc(await _client())
+    m = _metric(status="EXPERIMENTAL", source_table="dws_metric_gmv")
+    m.gray_tenant_ids = [1, 3]
+    svc._get_metric = AsyncMock(return_value=m)
+
+    async def _allow(*args, **kwargs):
+        return (Decision(allow=True, reason="allowed"), None)
+
+    monkeypatch.setattr(
+        "app.services.consume.service.GovernanceService.check_internal_read_permission",
+        _allow,
+    )
+    from app.models.user import User
+
+    user = User(id=9, username="alice", org_id=1)
+    res = await svc.dry_run_query(
+        QueryRequest(metric_code="gmv", date_range="2026-01~2026-03"),
+        internal_user=user,
+    )
+    assert res.status == "ok"
+    assert res.meta["status"] == "EXPERIMENTAL"
+
+
+async def test_dry_run_experimental_non_gray_tenant_rejected() -> None:
+    """灰度指标：org_id 未命中 gray_tenant_ids → 拒绝（灰度仅对指定租户可见）。"""
+    svc = _svc(await _client())
+    m = _metric(status="EXPERIMENTAL")
+    m.gray_tenant_ids = [1, 3]
+    svc._get_metric = AsyncMock(return_value=m)
+    from app.models.user import User
+
+    user = User(id=9, username="alice", org_id=2)
+    with pytest.raises(BusinessError) as exc:
+        await svc.dry_run_query(
+            QueryRequest(metric_code="gmv", date_range=""), internal_user=user
+        )
+    assert exc.value.error_code == ErrorCode.FORBIDDEN_METRIC
+
+
+async def test_dry_run_experimental_empty_gray_rejected() -> None:
+    """灰度指标：gray_tenant_ids 为空 → 不向任何租户开放（fail-closed）。"""
+    svc = _svc(await _client())
+    m = _metric(status="EXPERIMENTAL")
+    m.gray_tenant_ids = []
+    svc._get_metric = AsyncMock(return_value=m)
+    from app.models.user import User
+
+    user = User(id=9, username="alice", org_id=1)
+    with pytest.raises(BusinessError) as exc:
+        await svc.dry_run_query(
+            QueryRequest(metric_code="gmv", date_range=""), internal_user=user
+        )
+    assert exc.value.error_code == ErrorCode.FORBIDDEN_METRIC
+
+
+async def test_dry_run_experimental_api_client_rejected() -> None:
+    """灰度指标：接入方（ApiClient 无租户归属）一律拒绝，防止绕过租户白名单。"""
+    svc = _svc(await _client())
+    client = await svc.authenticate_client("acme:s3cr3t")
+    m = _metric(status="EXPERIMENTAL")
+    m.gray_tenant_ids = [1]
+    svc._get_metric = AsyncMock(return_value=m)
+    with pytest.raises(BusinessError) as exc:
+        await svc.dry_run_query(QueryRequest(metric_code="gmv", date_range=""), client)
+    assert exc.value.error_code == ErrorCode.FORBIDDEN_METRIC
+
+
+async def test_execute_experimental_gray_tenant_allowed(monkeypatch) -> None:
+    """灰度指标：命中租户的内部用户 execute_query 放行并正常执行。"""
+    from types import SimpleNamespace
+
+    from app.services.governance.policy import Decision
+
+    svc = _svc(await _client())
+    m = _metric(status="EXPERIMENTAL", source_table="dws_metric_gmv")
+    m.gray_tenant_ids = [1]
+    svc._get_metric = AsyncMock(return_value=m)
+    svc._snapshots = MagicMock()
+    svc._snapshots.get_by_unique = AsyncMock(return_value=None)
+    svc._snapshots.create = AsyncMock()
+
+    async def _allow(*args, **kwargs):
+        return (Decision(allow=True, reason="allowed"), None)
+
+    monkeypatch.setattr(
+        "app.services.consume.service.GovernanceService.check_internal_read_permission",
+        _allow,
+    )
+    monkeypatch.setattr(
+        "app.services.consume.service.ConsumeService._execute_with_fallback",
+        AsyncMock(
+            return_value=(
+                SimpleNamespace(rows=[], total=0, elapsed_ms=1, from_cache=False),
+                "mysql",
+            )
+        ),
+    )
+    from app.models.user import User
+
+    user = User(id=9, username="alice", org_id=1)
+    res = await svc.execute_query(
+        QueryRequest(metric_code="gmv", date_range=""), internal_user=user
+    )
+    assert res.degraded is True
+    assert res.data["engine"] == "mysql"
