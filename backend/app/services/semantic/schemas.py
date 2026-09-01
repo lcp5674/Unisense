@@ -1153,7 +1153,7 @@ class MetricListParams(BaseModel):
     sort_by: Literal["updated_at", "created_at", "version", "metric_code", "name"] = "updated_at"
     sort_order: Literal["asc", "desc"] = "desc"
     page: int = Field(1, ge=1, le=1000)
-    page_size: int = Field(20, ge=1, le=100)
+    page_size: int = Field(20, ge=1, le=200)
 
 
 # ---- 响应 Schema ----

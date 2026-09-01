@@ -312,3 +312,49 @@ async def test_list_metrics_rejected_record_returns_200() -> None:
     # datetime 序列化为 ISO 字符串，前端 formatCnTime 可解析
     assert item["rejected_at"] == "2026-08-27T02:45:14"
     assert item["reject_reason"] == "口径与上游不一致"
+
+
+async def test_list_metrics_accepts_page_size_200() -> None:
+    """page_size=200 应被接受（对齐平台其他列表端点上限）。
+
+    回归：MetricListParams.page_size 曾 le=100，前端 ApiClients 以 page_size=200
+    拉取 PUBLISHED 指标列表被 422 拒绝（GET /metric-definitions?status=PUBLISHED&
+    page_size=200）。放宽到 200 与 collector/conflict/governance/lineage/assetmap/
+    dimension 各列表端点上限一致。
+    """
+
+    async def fake_db():
+        session = MagicMock()
+
+        async def fake_execute(statement, *args, **kwargs):
+            sql = str(statement.compile(dialect=None))
+            result = MagicMock()
+            if "pending_version_confirmation" in sql:
+                result.scalars.return_value.all.return_value = []
+            elif "metric_health_score" in sql:
+                result.all.return_value = []
+            else:
+                result.scalars.return_value.all.return_value = []
+            return result
+
+        session.execute = AsyncMock(side_effect=fake_execute)
+        session.commit = AsyncMock()
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="viewer", roles_all=lambda: ["viewer"], has_role=lambda r: r == "viewer"
+    )
+    with patch(
+        "app.api.metrics.MetricService.list_metrics",
+        new=AsyncMock(return_value=([], 0)),
+    ):
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp_ok = await c.get("/api/v1/metric-definitions?page=1&page_size=200")
+            resp_over = await c.get("/api/v1/metric-definitions?page=1&page_size=201")
+    app.dependency_overrides.clear()
+
+    assert resp_ok.status_code == 200
+    # 201 超过上限仍被 schema 拒绝（边界保持）
+    assert resp_over.status_code == 422
