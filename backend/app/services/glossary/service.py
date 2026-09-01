@@ -179,6 +179,36 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
             raise NotFoundError(f"术语不存在: {term_code}")
         return TermResponse.from_model(term)
 
+    async def get_term_visible(
+        self, term_code: str, actor_id: int | None = None, role: str | None = None
+    ) -> TermResponse:
+        """读取术语详情（读路径行级隔离 P0-3，对齐指标 _assert_metric_visible）。
+
+        未发布（DRAFT/REVIEW）仅本人/管理角色/评审人（REVIEW 待审）可见；
+        他人读取一律按「不存在」处理（不泄露存在性）。
+        """
+        term = await self._repo.get_term(term_code)
+        if term is None:
+            raise NotFoundError(f"术语不存在: {term_code}")
+        self._assert_term_visible(term, actor_id, role)
+        return TermResponse.from_model(term)
+
+    def _assert_term_visible(
+        self, term: Term, actor_id: int | None, role: str | None
+    ) -> None:
+        """读路径可见性守卫（对齐指标 _assert_metric_visible 的 DRAFT/REVIEW 语义）。"""
+        if actor_id is None or role is None:
+            return  # 内部调用无鉴权上下文——端点层必传 actor/role
+        if term.status in ("PUBLISHED", "DEPRECATED"):
+            return
+        if role in ("platform_admin", "domain_admin"):
+            return
+        if term.owner_id == actor_id:
+            return
+        if role == "reviewer" and term.status == "REVIEW":
+            return
+        raise NotFoundError(f"术语不存在: {term.term_code}")
+
     async def list_terms(
         self,
         domain: str | None,
@@ -189,9 +219,20 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         owner_id: int | None = None,
         deleted: bool = False,
         reviewed_by: int | None = None,
+        visible_actor_id: int | None = None,
+        visible_role: str | None = None,
     ) -> tuple[list[TermResponse], int]:
         rows, total = await self._repo.list_terms(
-            domain, status, search, limit, offset, owner_id, deleted, reviewed_by
+            domain,
+            status,
+            search,
+            limit,
+            offset,
+            owner_id,
+            deleted,
+            reviewed_by,
+            visible_actor_id=visible_actor_id,
+            visible_role=visible_role,
         )
         return [TermResponse.from_model(t) for t in rows], total
 

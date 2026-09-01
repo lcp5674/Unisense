@@ -143,6 +143,36 @@ class DimensionService(BaseService, MasterDataReviewMixin):
             raise NotFoundError(f"维度不存在: {dim_code}")
         return dim
 
+    async def get_dimension_visible(
+        self, dim_code: str, actor_id: int | None = None, role: str | None = None
+    ) -> Dimension:
+        """读取维度详情（读路径行级隔离 P0-3，对齐指标 _assert_metric_visible）。
+
+        未发布（DRAFT/REVIEW）仅本人/管理角色/评审人（REVIEW 待审）可见；
+        他人读取一律按「不存在」处理（不泄露存在性）。
+        """
+        dim = await self._repo.get_dimension(dim_code)
+        if dim is None:
+            raise NotFoundError(f"维度不存在: {dim_code}")
+        self._assert_dimension_visible(dim, actor_id, role)
+        return dim
+
+    def _assert_dimension_visible(
+        self, dim: Dimension, actor_id: int | None, role: str | None
+    ) -> None:
+        """读路径可见性守卫（对齐指标 _assert_metric_visible 的 DRAFT/REVIEW 语义）。"""
+        if actor_id is None or role is None:
+            return  # 内部调用无鉴权上下文——端点层必传 actor/role
+        if dim.status in ("PUBLISHED", "DEPRECATED"):
+            return
+        if role in ("platform_admin", "domain_admin"):
+            return
+        if dim.owner_id == actor_id:
+            return
+        if role == "reviewer" and dim.status == "REVIEW":
+            return
+        raise NotFoundError(f"维度不存在: {dim.dim_code}")
+
     async def list_dimensions(
         self,
         domain: str | None,
@@ -154,11 +184,14 @@ class DimensionService(BaseService, MasterDataReviewMixin):
         deleted: bool = False,
         page: int = 1,
         page_size: int = 20,
+        visible_actor_id: int | None = None,
+        visible_role: str | None = None,
     ) -> tuple[list[tuple[Dimension, int]], int]:
         """分页列出维度，返回 (列表, total)（服务端分页，对齐 glossary）。
 
         deleted=True 时列出已软删记录（回收站视图）。
         reviewed_by 非空时过滤"我审过的"（通过/驳回人 ID 匹配，供统一主数据审批工作台）。
+        visible_actor_id/visible_role：读路径行级隔离（P0-3，对齐指标）透传。
         """
         limit = min(max(page_size, 1), 200)
         offset = (max(page, 1) - 1) * limit
@@ -171,6 +204,8 @@ class DimensionService(BaseService, MasterDataReviewMixin):
             deleted=deleted,
             limit=limit,
             offset=offset,
+            visible_actor_id=visible_actor_id,
+            visible_role=visible_role,
         )
 
     async def update_dimension(self, dim_code: str, data: DimensionUpdate) -> Dimension:

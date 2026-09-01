@@ -199,6 +199,8 @@ async def list_dimensions(
         deleted=deleted,
         page=page,
         page_size=page_size,
+        visible_actor_id=user.id,
+        visible_role=user.role,
     )
     converted = []
     for dim, metric_count in items:
@@ -455,7 +457,9 @@ async def get_dimension(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    resp = await DimensionService(db).get_dimension(dim_code)
+    resp = await DimensionService(db).get_dimension_visible(
+        dim_code, actor_id=user.id, role=user.role
+    )
     return ok(data=DimensionResponse.from_model(resp), trace_id=trace_id)
 
 

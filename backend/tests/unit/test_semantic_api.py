@@ -694,6 +694,9 @@ async def test_dashboard_collection_task_unavailable_on_collector_failure() -> N
     }
     db = MagicMock()
     req = MagicMock()
+    user = MagicMock()
+    user.id = 7
+    user.roles_all.return_value = ["analyst"]
     with patch(
         "app.services.semantic.repository.MetricRepository.aggregate_dashboard",
         new=AsyncMock(return_value=data),
@@ -701,7 +704,7 @@ async def test_dashboard_collection_task_unavailable_on_collector_failure() -> N
         "app.services.collector.service.CollectorService.count_jobs_by_status",
         new=AsyncMock(side_effect=RuntimeError("collector down")),
     ):
-        resp = await dashboard(request=req, _user=MagicMock(), db=db)
+        resp = await dashboard(request=req, user=user, db=db)
 
     ct = resp.data["assets"]["collection_task"]
     assert ct["total"] == 0
@@ -722,6 +725,9 @@ async def test_dashboard_collection_task_normal_stats() -> None:
     }
     db = MagicMock()
     req = MagicMock()
+    user = MagicMock()
+    user.id = 7
+    user.roles_all.return_value = ["analyst"]
     with patch(
         "app.services.semantic.repository.MetricRepository.aggregate_dashboard",
         new=AsyncMock(return_value=data),
@@ -729,9 +735,80 @@ async def test_dashboard_collection_task_normal_stats() -> None:
         "app.services.collector.service.CollectorService.count_jobs_by_status",
         new=AsyncMock(return_value={"RUNNING": 1, "COMPLETED": 2}),
     ):
-        resp = await dashboard(request=req, _user=MagicMock(), db=db)
+        resp = await dashboard(request=req, user=user, db=db)
 
     ct = resp.data["assets"]["collection_task"]
     assert ct["total"] == 3
     assert ct["by_status"] == {"RUNNING": 1, "COMPLETED": 2}
     assert ct.get("unavailable") is None
+
+
+async def test_dashboard_scopes_regular_user_to_self() -> None:
+    """数据隔离：普通用户（非 admin）请求 /dashboard 强制 owner_id=自己、忽略外部参数。
+
+    - 外部传入 owner_id=99 / domain=sales 应被忽略，实际以 owner_id=user.id、domain=None 聚合
+    - 管理角色（platform_admin/domain_admin）保留外部筛选（全量治理视角）
+    """
+    from unittest.mock import patch
+
+    from app.api.semantic import dashboard
+
+    data = {
+        "metrics": {"total": 0, "by_status": {}},
+        "assets": {"metric": {"total": 0, "by_status": {}}},
+    }
+    db = MagicMock()
+    req = MagicMock()
+
+    captured: list[tuple] = []
+
+    async def _fake_aggregate(self, domain=None, owner_id=None):
+        captured.append((domain, owner_id))
+        return data
+
+    # 普通用户：即使外部传 owner_id=99&domain=sales，也被强制收拢到自己
+    user = MagicMock()
+    user.id = 7
+    user.roles_all.return_value = ["analyst"]
+    with patch(
+        "app.services.semantic.repository.MetricRepository.aggregate_dashboard",
+        new=_fake_aggregate,
+    ), patch(
+        "app.services.collector.service.CollectorService.count_jobs_by_status",
+        new=AsyncMock(return_value={}),
+    ):
+        await dashboard(request=req, user=user, db=db, owner_id=99, domain="sales")
+
+    assert captured == [(None, 7)], f"普通用户应强制 owner_id=自己且忽略 domain，实际 {captured}"
+
+    # 管理角色：保留外部筛选（owner_id=99&domain=sales 透传）
+    captured.clear()
+    admin = MagicMock()
+    admin.id = 1
+    admin.roles_all.return_value = ["platform_admin"]
+    with patch(
+        "app.services.semantic.repository.MetricRepository.aggregate_dashboard",
+        new=_fake_aggregate,
+    ), patch(
+        "app.services.collector.service.CollectorService.count_jobs_by_status",
+        new=AsyncMock(return_value={}),
+    ):
+        await dashboard(request=req, user=admin, db=db, owner_id=99, domain="sales")
+
+    assert captured == [("sales", 99)], f"管理角色应透传外部筛选，实际 {captured}"
+
+    # domain_admin 同样视为管理角色（域治理视角）
+    captured.clear()
+    domain_admin = MagicMock()
+    domain_admin.id = 2
+    domain_admin.roles_all.return_value = ["domain_admin"]
+    with patch(
+        "app.services.semantic.repository.MetricRepository.aggregate_dashboard",
+        new=_fake_aggregate,
+    ), patch(
+        "app.services.collector.service.CollectorService.count_jobs_by_status",
+        new=AsyncMock(return_value={}),
+    ):
+        await dashboard(request=req, user=domain_admin, db=db, owner_id=5, domain="outpatient")
+
+    assert captured == [("outpatient", 5)], f"domain_admin 应透传外部筛选，实际 {captured}"

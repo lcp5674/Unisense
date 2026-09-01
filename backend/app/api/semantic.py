@@ -709,7 +709,7 @@ async def instantiate_template(
 )
 async def dashboard(
     request: Request,
-    _user: CurrentUser,
+    user: CurrentUser,
     domain: str | None = None,
     owner_id: int | None = None,
     db: AsyncSession = Depends(get_db_session),
@@ -718,9 +718,21 @@ async def dashboard(
 
     ``assets`` 覆盖指标/数据表/数据源/维度/术语/指标模板/数据字典（DB 聚合），
     采集任务为运行时 JobStore 数据，由采集服务聚合后并入，避免 semantic 仓储耦合 collector。
+
+    数据隔离（P0-3 对齐）：非管理角色（非 platform_admin/domain_admin）强制 ``owner_id=当前用户``，
+    且忽略外部传入的 owner_id/domain 参数——仪表盘只展示"我负责的资产"，杜绝越权枚举他人
+    Owner 责任分布/下钻他人数据；管理角色保留全量治理视角。
     """
     from app.services.semantic.repository import MetricRepository
 
+    roles = user.roles_all()
+    if "platform_admin" in roles or "domain_admin" in roles:
+        # 管理角色：保留外部筛选（全量治理视角）
+        pass
+    else:
+        # 普通用户：强制只看自己负责的资产（忽略外部 owner_id/domain 防越权）
+        owner_id = user.id
+        domain = None
     repo = MetricRepository(db)
     data = await repo.aggregate_dashboard(domain=domain, owner_id=owner_id)
     # 采集任务：运行时数据（Redis/内存 JobStore），采集服务聚合；失败不阻断仪表盘

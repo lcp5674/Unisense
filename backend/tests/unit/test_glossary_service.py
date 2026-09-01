@@ -442,6 +442,52 @@ async def test_restore_term_requires_deleted() -> None:
     assert ei.value.error_code == "INVALID_STATE"
 
 
+async def test_get_term_visible_public_for_anyone() -> None:
+    """已发布术语对任何登录用户可见（消费场景）。"""
+
+    svc, _repo, _t = _svc_with_term(TermStatus.PUBLISHED.value, owner_id=3)
+    resp = await svc.get_term_visible("c1", actor_id=7, role="analyst")
+    assert resp.term_code == "c1"
+    # 管理角色/owner/reviewer 均可见
+    await svc.get_term_visible("c1", actor_id=7, role="platform_admin")
+    await svc.get_term_visible("c1", actor_id=3, role="analyst")
+    await svc.get_term_visible("c1", actor_id=9, role="reviewer")
+
+
+async def test_get_term_visible_draft_only_owner_or_admin() -> None:
+    """草稿术语仅本人/管理角色可见；他人读取按不存在处理（不泄露存在性）。"""
+    from app.core.exceptions import NotFoundError
+
+    svc, _repo, _t = _svc_with_term(TermStatus.DRAFT.value, owner_id=3)
+    # 本人可见
+    await svc.get_term_visible("c1", actor_id=3, role="analyst")
+    # 管理角色可见
+    await svc.get_term_visible("c1", actor_id=1, role="platform_admin")
+    # 他人不可见（NotFound，非 403——不泄露存在性）
+    with pytest.raises(NotFoundError):
+        await svc.get_term_visible("c1", actor_id=7, role="analyst")
+    # reviewer 对 DRAFT 不可见（仅 REVIEW 待审放行）
+    with pytest.raises(NotFoundError):
+        await svc.get_term_visible("c1", actor_id=9, role="reviewer")
+
+
+async def test_get_term_visible_review_reviewer_sees() -> None:
+    """待审（REVIEW）术语：评审人可见（审批工作台）；普通他人不可见。"""
+    from app.core.exceptions import NotFoundError
+
+    svc, _repo, _t = _svc_with_term(TermStatus.REVIEW.value, owner_id=3)
+    await svc.get_term_visible("c1", actor_id=9, role="reviewer")
+    with pytest.raises(NotFoundError):
+        await svc.get_term_visible("c1", actor_id=7, role="analyst")
+
+
+async def test_get_term_visible_internal_no_context_passthrough() -> None:
+    """内部调用（actor/role 均为 None）不过滤——端点层必传鉴权上下文。"""
+    svc, _repo, _t = _svc_with_term(TermStatus.DRAFT.value, owner_id=3)
+    resp = await svc.get_term_visible("c1")
+    assert resp.term_code == "c1"
+
+
 async def test_infer_term_suggestion_success() -> None:
     """LLM 推断术语定义/同义词/边界说明：LLM 返回结构化 JSON → 解析成功。"""
     db = MagicMock()

@@ -9,7 +9,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import ColumnElement, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.glossary import GlossaryConflict, TermRelation, TermVersion
@@ -78,9 +78,26 @@ class GlossaryRepository:
         owner_id: int | None = None,
         deleted: bool = False,
         reviewed_by: int | None = None,
+        visible_actor_id: int | None = None,
+        visible_role: str | None = None,
     ) -> tuple[Iterable[Term], int]:
         # 回收站视图：deleted=True 列出已软删术语；默认列表仅未删
         conditions = [Term.deleted_at.is_not(None) if deleted else Term.deleted_at.is_(None)]
+        # P0-3 读路径行级隔离（对齐指标 list_metrics）：术语 DRAFT/REVIEW 是创建者私有
+        # 工作区，他人不得窥探；公开状态（PUBLISHED/DEPRECATED）可被发现。
+        if (
+            visible_actor_id is not None
+            and visible_role is not None
+            and visible_role not in ("platform_admin", "domain_admin")
+        ):
+            visibility: list[ColumnElement[bool]] = [
+                Term.status.in_(("PUBLISHED", "DEPRECATED")),
+                Term.owner_id == visible_actor_id,
+            ]
+            if visible_role == "reviewer":
+                # 评审人可看待审（REVIEW）术语——统一主数据审批工作台需展示全部待审项
+                visibility.append(Term.status == "REVIEW")
+            conditions.append(or_(*visibility))
         if domain:
             conditions.append(Term.domain == domain)
         if status:

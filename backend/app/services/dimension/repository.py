@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.dimension import (
@@ -61,6 +61,8 @@ class DimensionRepository:
         deleted: bool = False,
         limit: int = 20,
         offset: int = 0,
+        visible_actor_id: int | None = None,
+        visible_role: str | None = None,
     ) -> tuple[list[tuple[Dimension, int]], int]:
         """分页列出维度并附带绑定指标数，返回 (列表, total)。
 
@@ -69,12 +71,30 @@ class DimensionRepository:
         - 对齐 glossary 的服务端分页（page/page_size），消除全量拉回的性能隐患
         - deleted=True 时列出已软删记录（回收站视图）
         - reviewed_by 非空时过滤"我审过的"（通过/驳回人 ID 匹配，供统一主数据审批工作台）
+        - visible_actor_id/visible_role：读路径行级隔离（P0-3，对齐指标）——非管理角色
+          仅可见公开状态（PUBLISHED/DEPRECATED）+ 本人负责的未发布（DRAFT/REVIEW）；
+          评审人可看待审（REVIEW）。管理角色传 None 即不加过滤。
         """
         conditions = (
             [Dimension.deleted_at.is_not(None)]
             if deleted
             else [Dimension.deleted_at.is_(None)]
         )
+        # P0-3 读路径行级隔离（对齐指标 list_metrics）：维度 DRAFT/REVIEW 是创建者私有
+        # 工作区，他人不得窥探；公开状态（PUBLISHED/DEPRECATED）可被发现。
+        if (
+            visible_actor_id is not None
+            and visible_role is not None
+            and visible_role not in ("platform_admin", "domain_admin")
+        ):
+            visibility: list[ColumnElement[bool]] = [
+                Dimension.status.in_(("PUBLISHED", "DEPRECATED")),
+                Dimension.owner_id == visible_actor_id,
+            ]
+            if visible_role == "reviewer":
+                # 评审人可看待审（REVIEW）维度——统一主数据审批工作台需展示全部待审项
+                visibility.append(Dimension.status == "REVIEW")
+            conditions.append(or_(*visibility))
         if domain:
             conditions.append(Dimension.domain == domain)
         if status:

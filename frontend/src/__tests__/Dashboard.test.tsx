@@ -24,6 +24,21 @@ vi.mock("../hooks/useTracking", () => ({
   useTracking: () => ({ track: trackMock }),
 }));
 
+// Mock usePermission（返回管理角色快照——总览仪表 Owner 责任分布的管理视角基线；
+// 非管理角色用例通过修改 mockPermRole 动态切换）
+let mockPermRole = "platform_admin";
+vi.mock("../hooks/usePermission", () => ({
+  usePermission: () => ({
+    can: () => true,
+    canAny: () => true,
+    canAll: () => true,
+    snapshot: { role: mockPermRole, user_id: 1, ui_actions: [], home_domain: null },
+    loading: false,
+    error: false,
+    refresh: async () => undefined,
+  }),
+}));
+
 import {
   fetchDashboard,
   fetchObsOverview,
@@ -725,5 +740,33 @@ describe("Dashboard 推荐卡片", () => {
     });
     // 列表无新增重复项
     expect(screen.getAllByText("m1")).toHaveLength(1);
+  });
+});
+
+describe("Dashboard 数据隔离（非管理角色视角）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockPermRole = "analyst";
+    mockedFetchDashboard.mockResolvedValue(mockDashboardData);
+    mockedFetchObsOverview.mockResolvedValue(mockOverview as never);
+    vi.mocked(fetchRecommendedMetrics).mockResolvedValue([]);
+    vi.mocked(fetchRecommendedTerms).mockResolvedValue([]);
+    vi.mocked(listDomainTree).mockResolvedValue([]);
+  });
+
+  it("普通用户：Owner 责任分布标题为「我的资产责任分布」而非「Owner 责任分布」", async () => {
+    renderDashboard();
+    await waitFor(() => expect(screen.getByText("我的资产责任分布")).toBeInTheDocument());
+    expect(screen.queryByText("Owner 责任分布")).not.toBeInTheDocument();
+  });
+
+  it("普通用户：后端返回空 by_owner 时展示空状态引导而非隐藏区块", async () => {
+    mockedFetchDashboard.mockResolvedValue({
+      ...mockDashboardData,
+      by_owner: {},
+    } as never);
+    renderDashboard();
+    await waitFor(() => expect(screen.getByText("我的资产责任分布")).toBeInTheDocument());
+    expect(screen.getByText(/您名下暂无负责的资产/)).toBeInTheDocument();
   });
 });

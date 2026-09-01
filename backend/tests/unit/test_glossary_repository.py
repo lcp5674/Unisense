@@ -123,6 +123,75 @@ class TestTermRepo:
         assert "ESCAPE '/'" in literal_sql
         assert "100%_x" not in literal_sql
 
+    async def test_list_terms_visible_regular_user_hides_others_draft(
+        self, repo: GlossaryRepository
+    ) -> None:
+        """P0-3 读路径行级隔离：普通用户仅可见公开（PUBLISHED/DEPRECATED）+ 本人 DRAFT/REVIEW。"""
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = []
+        mock_result.scalar.return_value = 0
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        await repo.list_terms(
+            domain=None,
+            status=None,
+            search=None,
+            limit=10,
+            offset=0,
+            visible_actor_id=7,
+            visible_role="analyst",
+        )
+        stmt = repo._session.execute.call_args_list[1].args[0]
+        literal_sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "term.status IN ('PUBLISHED', 'DEPRECATED')" in literal_sql
+        assert "term.owner_id = 7" in literal_sql
+        # analyst 非 reviewer：REVIEW 仅本人可见（不额外放行全部 REVIEW）
+        assert "term.status = 'REVIEW'" not in literal_sql.replace(
+            "term.status IN ('PUBLISHED', 'DEPRECATED')", ""
+        )
+
+    async def test_list_terms_visible_reviewer_sees_review(
+        self, repo: GlossaryRepository
+    ) -> None:
+        """评审人可看待审（REVIEW）术语——统一主数据审批工作台需展示全部待审项。"""
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = []
+        mock_result.scalar.return_value = 0
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        await repo.list_terms(
+            domain=None,
+            status=None,
+            search=None,
+            limit=10,
+            offset=0,
+            visible_actor_id=9,
+            visible_role="reviewer",
+        )
+        stmt = repo._session.execute.call_args_list[1].args[0]
+        literal_sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "term.status = 'REVIEW'" in literal_sql
+
+    async def test_list_terms_visible_admin_no_filter(self, repo: GlossaryRepository) -> None:
+        """管理角色不加可见性过滤（全量治理视角），外部 owner_id 仍透传。"""
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = []
+        mock_result.scalar.return_value = 0
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        await repo.list_terms(
+            domain=None,
+            status=None,
+            search=None,
+            limit=10,
+            offset=0,
+            owner_id=3,
+            visible_actor_id=1,
+            visible_role="platform_admin",
+        )
+        stmt = repo._session.execute.call_args_list[1].args[0]
+        literal_sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "term.owner_id = 3" in literal_sql
+        assert "PUBLISHED" not in literal_sql
+        assert "DRAFT" not in literal_sql
+
     async def test_delete_term(self, repo: GlossaryRepository) -> None:
         term = Term(term_code="T1")
         await repo.delete_term(term)

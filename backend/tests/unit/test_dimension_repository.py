@@ -152,6 +152,41 @@ class TestDimensionCRUD:
         assert "100/%/_x" in stmt
         assert "ESCAPE '/'" in stmt
 
+    async def test_list_dimensions_visible_regular_user_hides_others_draft(
+        self, repo, session
+    ) -> None:
+        """P0-3 读路径行级隔离：普通用户仅可见公开（PUBLISHED/DEPRECATED）+ 本人 DRAFT/REVIEW。"""
+        session.execute = AsyncMock(side_effect=[_FakeResult(row=0), _FakeResult(rows=[])])
+        await repo.list_dimensions(None, None, visible_actor_id=7, visible_role="analyst")
+        stmt = _rows_stmt(session)
+        # 公开状态 + 本人负责的未发布（DRAFT/REVIEW）——他人 DRAFT 不可见
+        assert "dimension.status IN ('PUBLISHED', 'DEPRECATED')" in stmt
+        assert "dimension.owner_id = 7" in stmt
+        # analyst 非 reviewer：REVIEW 仅本人可见（不额外放行全部 REVIEW）
+        assert "dimension.status = 'REVIEW'" not in stmt.replace(
+            "dimension.status IN ('PUBLISHED', 'DEPRECATED')", ""
+        )
+
+    async def test_list_dimensions_visible_reviewer_sees_review(
+        self, repo, session
+    ) -> None:
+        """评审人可看待审（REVIEW）维度——统一主数据审批工作台需展示全部待审项。"""
+        session.execute = AsyncMock(side_effect=[_FakeResult(row=0), _FakeResult(rows=[])])
+        await repo.list_dimensions(None, None, visible_actor_id=9, visible_role="reviewer")
+        stmt = _rows_stmt(session)
+        assert "dimension.status = 'REVIEW'" in stmt
+
+    async def test_list_dimensions_visible_admin_no_filter(self, repo, session) -> None:
+        """管理角色不加可见性过滤（全量治理视角），外部 owner_id 仍透传。"""
+        session.execute = AsyncMock(side_effect=[_FakeResult(row=0), _FakeResult(rows=[])])
+        await repo.list_dimensions(
+            None, None, owner_id=3, visible_actor_id=1, visible_role="platform_admin"
+        )
+        stmt = _rows_stmt(session)
+        assert "dimension.owner_id = 3" in stmt
+        assert "PUBLISHED" not in stmt
+        assert "DRAFT" not in stmt
+
 
 class TestMemberCRUD:
     async def test_save_member_adds_and_flushes(self, repo, session) -> None:

@@ -421,7 +421,16 @@ async def list_terms(
     page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
     items, total = await GlossaryService(db).list_terms(
-        domain, status, search, page_size, (page - 1) * page_size, owner_id, deleted, reviewed_by
+        domain,
+        status,
+        search,
+        page_size,
+        (page - 1) * page_size,
+        owner_id,
+        deleted,
+        reviewed_by,
+        visible_actor_id=user.id,
+        visible_role=user.role,
     )
     return ok(
         data={"items": items, "total": total, "page": page, "page_size": page_size},
@@ -447,7 +456,12 @@ async def get_term(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    return ok(data=await GlossaryService(db).get_term(term_code), trace_id=trace_id)
+    return ok(
+        data=await GlossaryService(db).get_term_visible(
+            term_code, actor_id=user.id, role=user.role
+        ),
+        trace_id=trace_id,
+    )
 
 
 @router.post("/{term_code}/submit", dependencies=_WRITE_DEPS)

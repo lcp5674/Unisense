@@ -33,6 +33,7 @@ import type {
 } from "../types";
 import { METRIC_HEALTH_LEVEL_LABEL } from "../utils/enums";
 import { useTracking } from "../hooks/useTracking";
+import { usePermission } from "../hooks/usePermission";
 
 const EDGE_TYPE_LABEL: Record<string, string> = {
   DERIVED_FROM: "派生自",
@@ -669,18 +670,52 @@ function OwnerHotBadge({
   );
 }
 
-function OwnerDistribution({ data, navigate }: { data: DashboardData; navigate: (to: string) => void }) {
+function OwnerDistribution({
+  data,
+  navigate,
+  isAdmin,
+}: {
+  data: DashboardData;
+  navigate: (to: string) => void;
+  isAdmin: boolean;
+}) {
   const owners = Object.entries(data.by_owner ?? {}).sort((a, b) => b[1].total - a[1].total);
-  if (owners.length === 0) return null;
+  const title = isAdmin ? "Owner 责任分布" : "我的资产责任分布";
+  const hint = isAdmin
+    ? "跨资产构成（指标/数据表/数据源/维度/术语/模板），点击资产段直达对应目录、点卡片查看其指标目录"
+    : "仅展示您作为责任人（Owner）负责的资产构成，点击资产段直达对应目录";
+  // 非管理角色且无任何责任资产：展示引导而非空白（普通用户通常不是资产 Owner）
+  if (owners.length === 0) {
+    if (isAdmin) return null;
+    return (
+      <Card
+        style={{ marginBottom: 20 }}
+        styles={{ body: { paddingTop: 16, paddingBottom: 16 } }}
+        title={
+          <span style={{ fontSize: 15, fontWeight: 600 }}>
+            {title}
+            <span className="muted" style={{ fontWeight: 400, fontSize: 12, marginLeft: 8 }}>
+              {hint}
+            </span>
+          </span>
+        }
+      >
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description="您名下暂无负责的资产——可浏览下方资产总览或前往指标目录消费已发布指标"
+        />
+      </Card>
+    );
+  }
   return (
     <Card
       style={{ marginBottom: 20 }}
       styles={{ body: { paddingTop: 16, paddingBottom: 16 } }}
       title={
         <span style={{ fontSize: 15, fontWeight: 600 }}>
-          Owner 责任分布
+          {title}
           <span className="muted" style={{ fontWeight: 400, fontSize: 12, marginLeft: 8 }}>
-            跨资产构成（指标/数据表/数据源/维度/术语/模板），点击资产段直达对应目录、点卡片查看其指标目录
+            {hint}
           </span>
         </span>
       }
@@ -837,6 +872,9 @@ export function Dashboard() {
   const [domainNameMap, setDomainNameMap] = useState<Record<string, string>>({});
   const { track } = useTracking();
   const navigate = useNavigate();
+  const { snapshot } = usePermission();
+  // 管理角色（platform_admin/domain_admin）看全量 Owner 责任分布；普通用户仅看自己（后端已隔离）
+  const isAdmin = snapshot?.role === "platform_admin" || snapshot?.role === "domain_admin";
 
   // 推荐曝光上报：仅对首次进入列表的推荐项上报 recommend_view；
   // 负反馈移除后该指标不再出现在列表中，后续渲染不会补报。
@@ -993,8 +1031,8 @@ export function Dashboard() {
       {/* 指标可信度：健康度四档分布（红黄绿）+ 覆盖率 + 低健康 Top（复用可观测中心聚合） */}
       {metricHealth ? <MetricCredibilityCard h={metricHealth} navigate={navigate} /> : null}
 
-      {/* Owner 责任分布：按责任人查看指标规模与待审积压 */}
-      <OwnerDistribution data={data} navigate={navigate} />
+      {/* Owner 责任分布：按责任人查看指标规模与待审积压（管理角色全量 / 普通用户仅自己） */}
+      <OwnerDistribution data={data} navigate={navigate} isAdmin={isAdmin} />
 
       {/* 资产总览：全资产计数 + 状态下钻（与生命周期信号条一致的交互） */}
       <Card

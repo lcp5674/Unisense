@@ -1018,6 +1018,7 @@ class MetricRepository:
                 DBCatalog.owner_id.isnot(None),
                 DBCatalog.deleted_at.is_(None),
                 *([DataSource.domain == domain] if domain else []),
+                *([DBCatalog.owner_id == owner_id] if owner_id is not None else []),
             )
             .group_by(DBCatalog.owner_id)
         )
@@ -1028,6 +1029,7 @@ class MetricRepository:
             .where(
                 Dimension.deleted_at.is_(None),
                 *([Dimension.domain == domain] if domain else []),
+                *([Dimension.owner_id == owner_id] if owner_id is not None else []),
             )
             .group_by(Dimension.owner_id, Dimension.status)
         )
@@ -1038,6 +1040,7 @@ class MetricRepository:
             .where(
                 Term.deleted_at.is_(None),
                 *([Term.domain == domain] if domain else []),
+                *([Term.owner_id == owner_id] if owner_id is not None else []),
             )
             .group_by(Term.owner_id, Term.status)
         )
@@ -1049,6 +1052,7 @@ class MetricRepository:
                 MetricTemplate.owner_id.isnot(None),
                 MetricTemplate.deleted_at.is_(None),
                 *([MetricTemplate.domain == domain] if domain else []),
+                *([MetricTemplate.owner_id == owner_id] if owner_id is not None else []),
             )
             .group_by(MetricTemplate.owner_id)
         )
@@ -1060,6 +1064,7 @@ class MetricRepository:
                 DataSource.owner_id.isnot(None),
                 DataSource.deleted_at.is_(None),
                 *([DataSource.domain == domain] if domain else []),
+                *([DataSource.owner_id == owner_id] if owner_id is not None else []),
             )
             .group_by(DataSource.owner_id)
         )

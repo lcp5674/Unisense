@@ -2130,3 +2130,61 @@ async def test_mapping_coverage_enum_source() -> None:
     assert cov.total == 2
     assert cov.covered == 1
     assert cov.uncovered == ["y"]
+
+
+async def test_get_dimension_visible_public_for_anyone() -> None:
+    """已发布维度对任何登录用户可见（消费场景）。"""
+
+    svc, repo = await _svc()
+    dim = _persist(Dimension(dim_code="dim_region", name="地区", domain="geo", type="SCD2",
+                             owner_id=3, status="PUBLISHED"))
+    repo.get_dimension = AsyncMock(return_value=dim)
+    resp = await svc.get_dimension_visible("dim_region", actor_id=7, role="analyst")
+    assert resp.dim_code == "dim_region"
+    # 管理角色/owner/reviewer 均可见
+    await svc.get_dimension_visible("dim_region", actor_id=7, role="platform_admin")
+    await svc.get_dimension_visible("dim_region", actor_id=3, role="analyst")
+    await svc.get_dimension_visible("dim_region", actor_id=9, role="reviewer")
+
+
+async def test_get_dimension_visible_draft_only_owner_or_admin() -> None:
+    """草稿维度仅本人/管理角色可见；他人读取按不存在处理（不泄露存在性）。"""
+    from app.core.exceptions import NotFoundError
+
+    svc, repo = await _svc()
+    dim = _persist(Dimension(dim_code="dim_region", name="地区", domain="geo", type="SCD2",
+                             owner_id=3, status="DRAFT"))
+    repo.get_dimension = AsyncMock(return_value=dim)
+    # 本人可见
+    await svc.get_dimension_visible("dim_region", actor_id=3, role="analyst")
+    # 管理角色可见
+    await svc.get_dimension_visible("dim_region", actor_id=1, role="platform_admin")
+    # 他人不可见（NotFound，非 403——不泄露存在性）
+    with pytest.raises(NotFoundError):
+        await svc.get_dimension_visible("dim_region", actor_id=7, role="analyst")
+    # reviewer 对 DRAFT 不可见（仅 REVIEW 待审放行）
+    with pytest.raises(NotFoundError):
+        await svc.get_dimension_visible("dim_region", actor_id=9, role="reviewer")
+
+
+async def test_get_dimension_visible_review_reviewer_sees() -> None:
+    """待审（REVIEW）维度：评审人可见（审批工作台）；普通他人不可见。"""
+    from app.core.exceptions import NotFoundError
+
+    svc, repo = await _svc()
+    dim = _persist(Dimension(dim_code="dim_region", name="地区", domain="geo", type="SCD2",
+                             owner_id=3, status="REVIEW"))
+    repo.get_dimension = AsyncMock(return_value=dim)
+    await svc.get_dimension_visible("dim_region", actor_id=9, role="reviewer")
+    with pytest.raises(NotFoundError):
+        await svc.get_dimension_visible("dim_region", actor_id=7, role="analyst")
+
+
+async def test_get_dimension_visible_internal_no_context_passthrough() -> None:
+    """内部调用（actor/role 均为 None）不过滤——端点层必传鉴权上下文。"""
+    svc, repo = await _svc()
+    dim = _persist(Dimension(dim_code="dim_region", name="地区", domain="geo", type="SCD2",
+                             owner_id=3, status="DRAFT"))
+    repo.get_dimension = AsyncMock(return_value=dim)
+    resp = await svc.get_dimension_visible("dim_region")
+    assert resp.dim_code == "dim_region"
