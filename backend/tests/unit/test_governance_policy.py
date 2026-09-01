@@ -401,3 +401,43 @@ def test_decide_multi_role_pii_review_compliance_officer() -> None:
         Resource(domain="sales", sensitivity="PII", compliance_reviewed=False),
     )
     assert d.allow, d.reason
+
+
+# ---------- 角色 UI 权限点基线错位修复（前后端一致） ----------
+
+
+def test_domain_admin_baseline_excludes_platform_only_actions() -> None:
+    """domain_admin 基线不再授予平台级写权限点（组织/字典/敏感规则）——
+    后端对应写端点仅 platform_admin（/compliance_officer），避免「按钮可见但 403」。
+    """
+    baseline = ROLE_UI_ACTIONS[RoleName.DOMAIN_ADMIN.value]
+    assert not (
+        {"org:create", "org:edit", "org:disable", "dict:create", "sensitive-rules:edit"} & baseline
+    )
+    # 保留治理相关 view（组织可见/字典可见/敏感规则可见仍可）
+    assert "organizations:view" in baseline
+    assert "dicts:view" in baseline
+    assert "sensitive-rules:view" in baseline
+
+
+def test_metric_owner_baseline_excludes_conflict_close() -> None:
+    """metric_owner 是冲突当事方：基线不授予 review:close/reopen（关闭/重开属治理裁决），
+    后端 _GOV_DEPS 亦不含 metric_owner，避免「按钮 403」。escalate（升级）保留。"""
+    baseline = ROLE_UI_ACTIONS[RoleName.METRIC_OWNER.value]
+    assert not ({"review:close", "review:reopen"} & baseline)
+    assert "review:escalate" in baseline
+
+
+def test_compliance_officer_baseline_includes_conflict_close() -> None:
+    """compliance_officer 参与冲突仲裁：基线补 review:close/reopen（后端 _GOV_DEPS 含之），
+    使「关闭已裁决冲突」按钮对其可见、语义闭环。"""
+    baseline = ROLE_UI_ACTIONS[RoleName.COMPLIANCE_OFFICER.value]
+    assert "review:close" in baseline
+    assert "review:reopen" in baseline
+
+
+def test_compliance_officer_baseline_keeps_sensitive_rules_and_audit_export() -> None:
+    """compliance_officer 保留敏感规则配置与审计导出（后端写端点/导出端点允许）。"""
+    baseline = ROLE_UI_ACTIONS[RoleName.COMPLIANCE_OFFICER.value]
+    assert "sensitive-rules:edit" in baseline
+    assert "audit:export" in baseline

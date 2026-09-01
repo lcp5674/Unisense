@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, get_current_user, require_roles
+from app.api.deps import ALL_ROLES, CurrentUser, get_current_user, require_roles
 from app.api.responses import get_trace_id, ok
 from app.core.audit import write_audit
 from app.core.guard import guard_against_injection
@@ -26,7 +26,9 @@ from app.services.observability.service import ObservabilityService
 
 router = APIRouter(prefix="/observability", tags=["observability"])
 
-_WRITE_ROLES = ("metric_owner", "domain_admin", "platform_admin", "viewer")
+# 反馈/NPS 提交为用户自助（任何登录用户可提交建议），不按角色收窄——此前
+# _WRITE_ROLES 排除 analyst/reviewer/compliance_officer，导致页面可点但 403。
+_WRITE_ROLES = ALL_ROLES
 _READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 # 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）

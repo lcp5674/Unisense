@@ -23,9 +23,23 @@ from app.services.notify.service import NotifyService
 
 router = APIRouter(prefix="/notify", tags=["notify"])
 
-_WRITE_ROLES = ("metric_owner", "domain_admin", "platform_admin", "system")
-_READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer", "system")
+# 投递状态管理（mark_sent/failed/retry/handled）为系统/管理操作；metric_owner 无
+# notifications:publish 权限点，不授予广播能力（见 _PUBLISH_DEPS）。
+_WRITE_ROLES = ("domain_admin", "platform_admin", "system")
+_READ_ROLES = (
+    "metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer", "system",
+    "compliance_officer", "analyst",
+)
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
+# 广播通知：对齐前端 notifications:publish 基线（仅 platform_admin/domain_admin）——
+# 此前 _WRITE_ROLES 含 metric_owner，其可绕过前端直调广播 API。
+_PUBLISH_DEPS = [
+    Depends(require_roles("platform_admin", "domain_admin")),
+    Depends(guard_against_injection),
+]
+# 用户自助操作（标记已读/删除自己的通知/订阅管理）：任何登录用户管理自己的数据，
+# 不按角色收窄（reviewer/viewer/analyst/compliance 同样需要标记已读）。
+_SELF_DEPS = [Depends(guard_against_injection)]
 # 事件日志（含 payload：指标码/冲突号/actor 名）属运维数据，仅管理+合规角色可见
 # （区别于个人通知列表——通知列表按接收人过滤、任意登录可读）
 _EVENT_LOG_DEPS = [
@@ -36,7 +50,7 @@ _EVENT_LOG_DEPS = [
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
 
 
-@router.post("/events", status_code=201, dependencies=_WRITE_DEPS)
+@router.post("/events", status_code=201, dependencies=_PUBLISH_DEPS)
 async def publish_event(
     payload: EventPublish,
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -119,7 +133,7 @@ async def list_event_types(
 
 @router.post(
     "/notifications/{notif_id}/read",
-    dependencies=_WRITE_DEPS,
+    dependencies=_SELF_DEPS,
 )
 async def mark_read(
     notif_id: int,
@@ -147,7 +161,7 @@ async def mark_read(
 
 @router.post(
     "/notifications/read-all",
-    dependencies=_WRITE_DEPS,
+    dependencies=_SELF_DEPS,
 )
 async def mark_all_read(
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -170,7 +184,7 @@ async def mark_all_read(
 
 @router.delete(
     "/notifications/{notif_id}",
-    dependencies=_WRITE_DEPS,
+    dependencies=_SELF_DEPS,
 )
 async def delete_notification(
     notif_id: int,
@@ -198,7 +212,7 @@ async def delete_notification(
 
 @router.delete(
     "/notifications",
-    dependencies=_WRITE_DEPS,
+    dependencies=_SELF_DEPS,
 )
 async def delete_all_notifications(
     db: Annotated[AsyncSession, Depends(get_db_session)],
@@ -333,7 +347,7 @@ async def mark_handled(
     return ok(data=NotificationResponse.from_model(resp), trace_id=trace_id)
 
 
-@router.put("/subscriptions", dependencies=_WRITE_DEPS)
+@router.put("/subscriptions", dependencies=_SELF_DEPS)
 async def upsert_subscription(
     payload: SubscriptionUpsert,
     db: Annotated[AsyncSession, Depends(get_db_session)],

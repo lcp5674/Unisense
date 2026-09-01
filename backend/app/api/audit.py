@@ -31,6 +31,13 @@ router = APIRouter(prefix="/audit", tags=["audit"])
 _READ_ROLES = ("platform_admin", "domain_admin", "compliance_officer")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 
+#: 审计导出权限：对齐前端 audit:export 基线（仅 platform_admin/compliance_officer）——
+#: domain_admin 有 audit:view 可查可看，但导出留档是合规职责，不授予避免「有权限无按钮」。
+_EXPORT_DEPS = [
+    Depends(require_roles("platform_admin", "compliance_officer")),
+    Depends(guard_against_injection),
+]
+
 #: 导出单次上限：防一次性拉取全表压垮 DB/网络（合规留档按需分批）。
 _EXPORT_LIMIT_MAX = 10_000
 
@@ -134,7 +141,7 @@ async def list_audit_logs(
     )
 
 
-@router.get("/export", dependencies=_READ_DEPS)
+@router.get("/export", dependencies=_EXPORT_DEPS)
 async def export_audit_logs(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,

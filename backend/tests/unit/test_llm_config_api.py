@@ -91,7 +91,32 @@ async def test_get_config_list(llm_client: httpx.AsyncClient) -> None:
     assert data["effective"]["source"] == "db"
 
 
-async def test_get_config_can_edit_false_for_viewer() -> None:
+async def test_get_config_can_edit_false_for_reviewer() -> None:
+    """reviewer 有 ai:view 可访问 AI 配置（can_edit=false）；viewer 基线无 ai:view 被拒。
+
+    此前 /ai/config 依赖曾用 _WRITE_ROLES（含 viewer），viewer 可读；现对齐 ai:view
+    基线——reviewer/compliance/analyst 可进页面只读，viewer 403。
+    """
+    session = _make_session()
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="reviewer", roles_all=lambda: ["reviewer"], has_role=lambda r: r == "reviewer"
+    )
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/ai/config")
+    data = resp.json()["data"]
+    assert data["can_edit"] is False
+    assert len(data["items"]) == 0
+    app.dependency_overrides.clear()
+
+
+async def test_get_config_denied_for_viewer() -> None:
+    """viewer 基线无 ai:view：AI 配置读被拒（403）。"""
     session = _make_session()
 
     async def fake_db():
@@ -104,10 +129,8 @@ async def test_get_config_can_edit_false_for_viewer() -> None:
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         resp = await c.get("/api/v1/ai/config")
-    data = resp.json()["data"]
-    assert data["can_edit"] is False
-    assert len(data["items"]) == 0
     app.dependency_overrides.clear()
+    assert resp.status_code == 403
 
 
 async def test_get_config_secret_returns_plaintext() -> None:

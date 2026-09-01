@@ -380,3 +380,30 @@ class TestWriteAudit:
         entry = session.add.call_args.args[0]
         assert len(entry.entity_id) == 64
         assert entry.entity_id.startswith("sales_e2e_channel_dimension:")
+
+
+async def test_export_audit_denied_for_domain_admin() -> None:
+    """审计导出对齐 audit:export 基线：domain_admin 有 audit:view 可查但不可导出（403）。
+
+    此前 /audit/export 用 _READ_DEPS（含 domain_admin），但前端 audit:export 仅授
+    compliance_officer → domain_admin「有权限无按钮」；现导出端点收窄为
+    platform_admin/compliance_officer，与前端按钮语义闭环。
+    """
+    session = _export_session()
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=2,
+        role="domain_admin",
+        roles_all=lambda: ["domain_admin"],
+        has_role=lambda r: r == "domain_admin",
+    )
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/audit/export")
+    app.dependency_overrides.clear()
+
+    assert resp.status_code == 403

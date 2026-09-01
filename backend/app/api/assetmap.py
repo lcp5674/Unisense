@@ -66,8 +66,15 @@ def _is_platform_admin(user: User) -> bool:
     return user.has_role("platform_admin")
 
 
-_READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer")
+# 读能力对齐前端 assetmap:view 基线（platform_admin/domain_admin/metric_owner/
+# compliance_officer/analyst）；reviewer/viewer 基线无 assetmap:view，不授予读。
+_READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "compliance_officer", "analyst")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
+
+# 资产导出：对齐前端 assetmap:export 基线（仅 platform_admin/domain_admin）——
+# 避免低权限读角色经 /export.csv 全量导出资产清单。
+_EXPORT_ROLES = ("platform_admin", "domain_admin")
+_EXPORT_DEPS = [Depends(require_roles(*_EXPORT_ROLES)), Depends(guard_against_injection)]
 
 # 写能力仅限治理角色（认领/重分类/批量会影响资产归属与合规口径）
 _WRITE_ROLES = ("platform_admin", "domain_admin")
@@ -401,7 +408,7 @@ async def my_assets(
     return ok(data=data, trace_id=trace_id)
 
 
-@router.get("/export.csv", dependencies=_READ_DEPS)
+@router.get("/export.csv", dependencies=_EXPORT_DEPS)
 async def export_tables(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,

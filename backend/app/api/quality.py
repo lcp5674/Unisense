@@ -64,9 +64,15 @@ async def _assert_metric_domain(
             error_code="FORBIDDEN",
         )
 
-_WRITE_ROLES = ("metric_owner", "domain_admin", "platform_admin")
-_GOV_ROLES = ("metric_owner", "domain_admin", "platform_admin", "compliance_officer")
-_READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "compliance_officer", "viewer")
+# 写/治理能力对齐前端 quality:config-rule / quality:run-check 基线（仅 platform_admin/
+# domain_admin）——metric_owner/compliance_officer 无对应权限点，后端不额外放行。
+_WRITE_ROLES = ("domain_admin", "platform_admin")
+_GOV_ROLES = ("domain_admin", "platform_admin")
+# 读对齐前端 quality:view 基线（全部内置角色）：补 reviewer/analyst。
+_READ_ROLES = (
+    "metric_owner", "domain_admin", "platform_admin", "compliance_officer",
+    "viewer", "reviewer", "analyst",
+)
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 # 写端点统一挂注入守卫（纵深防御：ORM 参数化兜底之外拦截注入 payload）
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]

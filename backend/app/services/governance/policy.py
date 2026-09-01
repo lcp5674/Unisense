@@ -303,11 +303,13 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "catalogs:view", "collection-tasks:view", "collection-history:view",
             "catalog:deprecate", "catalog:edit-description", "catalog:infer-description",
             "template:create", "template:instantiate", "template:assign-owner",
-            "organizations:view", "org:create", "org:edit", "org:disable",
+            # 组织/字典/敏感规则为平台级治理（后端仅 platform_admin/compliance_officer 可写），
+            # domain_admin 不授予写权限点，避免「按钮可见但 403」（基线对齐后端 require_roles）。
+            "organizations:view",
             "governance:view", "grant:create", "grant:revoke", "grant:export",
-            "audit:view", "domains:view", "domain:create", "dicts:view", "dict:create",
+            "audit:view", "domains:view", "domain:create", "dicts:view",
             "api-clients:view", "api-clients:manage", "system-config:view",
-            "sensitive-rules:view", "sensitive-rules:edit", "observability:view",
+            "sensitive-rules:view", "observability:view",
             "tracking-stats:view", "feedback:view", "feedback:manage", "guide:view",
             "pii:review",
         }
@@ -319,8 +321,9 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "metric:delete", "metric:deprecate", "metric:export", "metric:review",
             "metric:infer-description",
             "assetmap:view", "lineage:view", "lineage:write", "lineage:manage-edge",
-            "quality:view", "review:view", "review:escalate", "review:close",
-            "review:reopen",
+            "quality:view", "review:view", "review:escalate",
+            # metric_owner 是冲突当事方：关闭/重开属治理裁决动作（后端 _GOV_DEPS 仅
+            # compliance_officer/domain_admin/platform_admin），不授予避免「按钮 403」。
             "query:view", "query:execute", "ai:view", "ai:nl2sql", "dimensions:view",
             "dimension:create", "dimension:edit", "dimension:deprecate",
             "dimension:mapping", "dimension:reconcile",
@@ -347,7 +350,9 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "catalog:view", "measure-catalogs:view", "compare:view",
             "assetmap:view", "lineage:view",
             "quality:view", "query:view", "ai:view", "dimensions:view", "glossary:view",
-            "review:view", "review:arbitrate",
+            # 合规官参与冲突仲裁，关闭/重开已裁决冲突是其职责延伸
+            # （后端 _GOV_DEPS 含 compliance_officer）。
+            "review:view", "review:arbitrate", "review:close", "review:reopen",
             "governance:view", "pii:review", "pii:validate", "classification:rescan",
             "erasure:execute", "audit:view", "audit:export",
             "sensitive-rules:view", "sensitive-rules:edit",

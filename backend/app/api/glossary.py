@@ -40,7 +40,10 @@ router = APIRouter(prefix="/terms", tags=["glossary"])
 
 _WRITE_ROLES = ("metric_owner", "domain_admin", "platform_admin")
 _GOV_ROLES = ("domain_admin", "platform_admin")
-_READ_ROLES = ("metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer")
+_READ_ROLES = (
+    "metric_owner", "domain_admin", "platform_admin", "reviewer", "viewer",
+    "compliance_officer", "analyst",
+)
 # 审核端点角色门禁（对齐指标审核流）：平台管理员/域管理员/评审员可审
 _REVIEW_ROLES = ("platform_admin", "domain_admin", "reviewer")
 # 直发通道仅平台管理员（系统/种子/批量导入兜底），业务用户发布须走 submit+approve 审核流

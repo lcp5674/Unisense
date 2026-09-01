@@ -131,6 +131,23 @@ async def get_consume_or_internal_user(
     raise BusinessError("缺少认证凭证", error_code=ErrorCode.AUTH_APIKEY_MISSING)
 
 
+#: 内部用户执行查询允许的角色（与前端 ``query:execute`` 权限点基线一致：
+#: platform_admin/domain_admin/metric_owner；viewer/analyst 等经接入方令牌通道消费）。
+_INTERNAL_QUERY_ROLES = frozenset({"platform_admin", "domain_admin", "metric_owner"})
+
+
+def _ensure_internal_query_permission(user: User) -> None:
+    """内部用户通道校验：仅 ``query:execute`` 角色可经 /consume/query 执行查询。
+
+    /consume/query 与 /dry-run 是双通道（接入方 + 内部用户回落），接入方通道走四级闸门
+    与限流不受此限；内部用户回落通道此前无 require_roles（viewer 等可绕过前端直调 API 全量
+    执行指标查询）。此处对齐前端 ``query:execute`` 权限点与内部查询端点
+    （/consume/metrics/{code}/query 已 require_roles 同集），使后端强制与前端按钮语义闭环。
+    """
+    if not (_INTERNAL_QUERY_ROLES & set(user.roles_all())):
+        raise BusinessError("当前角色无权执行指标查询", error_code=ErrorCode.FORBIDDEN)
+
+
 @router.post("/consume/query/dry-run", response_model=ApiResponse[DryRunResponse])
 async def dry_run(
     req: QueryRequest,
@@ -145,6 +162,7 @@ async def dry_run(
     if hasattr(_auth, "client_id"):
         data = await svc.dry_run_query(req, client=_auth)
     else:
+        _ensure_internal_query_permission(_auth)
         data = await svc.dry_run_query(req, internal_user=_auth)
     return ok(data=data)
 
@@ -175,6 +193,7 @@ async def query(
         if is_client:
             res = await svc.execute_query(req, client=_auth)
         else:
+            _ensure_internal_query_permission(_auth)
             res = await svc.execute_query(req, internal_user=_auth)
     except Exception as exc:
         duration_ms = int((time.perf_counter() - start) * 1000)

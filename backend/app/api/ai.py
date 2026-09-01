@@ -39,8 +39,16 @@ from app.services.llm.schemas import (
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
-_WRITE_ROLES = ("metric_owner", "domain_admin", "platform_admin", "analyst", "viewer")
-_READ_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
+# 读（AI 助手页面）对齐前端 ai:view 基线：platform_admin/domain_admin/metric_owner/
+# reviewer/compliance_officer/analyst；viewer 基线无 ai:view，不授予。
+_READ_ROLES = (
+    "metric_owner", "domain_admin", "platform_admin", "reviewer",
+    "compliance_officer", "analyst",
+)
+_READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
+# nl2sql 执行对齐前端 ai:nl2sql 基线（仅 platform_admin/domain_admin/metric_owner）。
+_NL2SQL_ROLES = ("platform_admin", "domain_admin", "metric_owner")
+_NL2SQL_DEPS = [Depends(require_roles(*_NL2SQL_ROLES)), Depends(guard_against_injection)]
 #: LLM 平台配置为平台级集成，仅管理员可读写/测试
 _CONFIG_ADMIN_DEPS = [
     Depends(require_roles("platform_admin", "domain_admin")),
@@ -48,7 +56,7 @@ _CONFIG_ADMIN_DEPS = [
 ]
 
 
-@router.post("/nl2sql", dependencies=_READ_DEPS)
+@router.post("/nl2sql", dependencies=_NL2SQL_DEPS)
 async def nl2sql(
     payload: NL2SQLRequest,
     db: Annotated[AsyncSession, Depends(get_db_session)],

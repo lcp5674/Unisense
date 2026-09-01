@@ -21,6 +21,7 @@ from httpx import ASGITransport
 from app.api import deps
 from app.api.consume import get_consume_or_internal_user
 from app.main import app
+from app.models.user import User
 from app.services.consume.schemas import DryRunResponse, QueryResponse
 
 
@@ -86,7 +87,9 @@ async def internal_query_client() -> AsyncIterator[httpx.AsyncClient]:
     )
     svc.record_query_log = AsyncMock()
 
-    user = MagicMock(id=7, username="internal_analyst", roles_all=lambda: ["analyst"])
+    # spec=User 使 hasattr(_auth, "client_id") 为 False，正确走内部用户通道
+    user = MagicMock(spec=User, id=7, username="internal_owner")
+    user.roles_all.return_value = ["metric_owner"]
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[get_consume_or_internal_user] = lambda: user
@@ -120,3 +123,38 @@ async def test_internal_user_dry_run_via_dual_channel(
     )
     assert resp.status_code == 200
     assert resp.json()["data"]["status"] == "ok"
+
+
+async def test_internal_low_role_query_rejected() -> None:
+    """内部低权限角色（analyst）经 /consume/query 被拒（403）——query:execute 后端强制闭环。
+
+    此前内部用户回落通道无 require_roles，analyst/viewer 可绕过前端直调 API 全量执行
+    指标查询；现与前端 query:execute 权限点及内部查询端点角色集对齐，仅
+    platform_admin/domain_admin/metric_owner 可经双通道内部用户分支执行。
+    """
+
+    async def fake_db():
+        yield MagicMock()
+
+    svc = MagicMock()
+    svc.execute_query = AsyncMock(
+        return_value=QueryResponse(metric_code="outp_visit_day", data={"rows": [], "total": 0})
+    )
+    svc.record_query_log = AsyncMock()
+
+    user = MagicMock(spec=User, id=7, username="internal_analyst")
+    user.roles_all.return_value = ["analyst"]
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[get_consume_or_internal_user] = lambda: user
+    app.dependency_overrides[deps.get_current_user] = lambda: user
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        with patch("app.api.consume.ConsumeService", return_value=svc):
+            resp = await c.post(
+                "/api/v1/consume/query",
+                json={"metric_code": "outp_visit_day", "date_range": "2026-08"},
+            )
+    app.dependency_overrides.clear()
+    assert resp.status_code == 403
+    svc.execute_query.assert_not_awaited()
