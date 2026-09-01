@@ -121,6 +121,8 @@ class ConflictService(BaseService):
         """
         detections: list[DetectionOut] = []
         blocked = False
+        # R7（审查修复）：LLM 语义补位失败降级为词法判定时置 True（响应体标注）
+        degraded = False
         existing_list = await self._drop_self_references(candidate, existing_list)
         for ex in existing_list:
             cand_dict = candidate.model_dump()
@@ -143,6 +145,7 @@ class ConflictService(BaseService):
                 except Exception as exc:  # noqa: BLE001 - LLM 异常降级为词法判定
                     logger.warning("冲突 LLM 补位失败（降级）：%s", exc)
                     confirmed = None
+                    degraded = True
                 if confirmed is True:
                     det = detect_conflict(cand_dict, ext_dict, llm_judge=lambda a, b: True)
             if det is None:
@@ -246,7 +249,7 @@ class ConflictService(BaseService):
                     },
                 }
             )
-        return ConflictCheckResult(detections=detections, blocked=blocked)
+        return ConflictCheckResult(detections=detections, blocked=blocked, degraded=degraded)
 
     async def _drop_self_references(
         self, candidate: MetricInput, existing_list: list[MetricInput]

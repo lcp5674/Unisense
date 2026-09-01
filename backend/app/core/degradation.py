@@ -399,6 +399,20 @@ def handle_circuit_signal(signal: DegradationSignal) -> None:
         consecutive_failures=health["consecutive_failures"],
         circuit_opened_at=health["circuit_opened_at"],
     )
+    # R6（审查修复）：同步降级注册表——此前 degradation_registry.register_down
+    # 在业务代码零调用（仅限流器 clear_degradation），健康端点读不到真实降级。
+    # 熔断 DEGRADED/PROBING → register_down；HEALTHY → clear_degradation。
+    try:
+        from app.core.degradation_registry import get_degradation_registry
+
+        registry = get_degradation_registry()
+        component = f"circuit_breaker:{dependency_id}"
+        if signal.event_state == "HEALTHY":
+            registry.clear_degradation(component)
+        else:
+            registry.register_down(component, signal.reason)
+    except Exception:  # noqa: BLE001 - registry 同步失败不影响主链路
+        logger.warning("degradation_registry_sync_failed", exc_info=True)
 
 
 # 防止 fire-and-forget 任务因无强引用被 GC 提前回收（asyncio 已知陷阱：

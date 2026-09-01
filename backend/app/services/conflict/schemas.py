@@ -43,6 +43,9 @@ class DetectionOut(BaseModel):
 class ConflictCheckResult(BaseModel):
     detections: list[DetectionOut]
     blocked: bool
+    # R7（审查修复）：LLM 语义补位失败降级为词法判定时置 True——此前降级
+    # 静默，「无冲突」与「LLM 确认无冲突」不可区分，用户据此上线重复口径。
+    degraded: bool = False
 
 
 class ArbitrateRequest(BaseModel):
