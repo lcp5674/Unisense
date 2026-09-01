@@ -222,11 +222,15 @@ export function ApiClients() {
       let lastErr: unknown = null;
       for (const m of candidates) {
         try {
+          // dry-run 是「不执行」请求，后端不产生执行耗时（execution_plan 无 elapsed_ms）；
+          // 连通性测试展示的是完整链路往返耗时（鉴权 + 校验 + SQL 构建 + 网络），由前端实测。
+          const t0 = performance.now();
           const res = await consumeDryRun({ metric_code: m.metric_code, date_range: dateRange });
+          const elapsed = Math.round(performance.now() - t0);
           if (res.status === "ok") {
             setTestResult({
               ok: true,
-              message: `客户端 ${active.client_id} 连通正常：指标 ${m.metric_code} dry-run 通过（耗时 ${String((res as { execution_plan?: { elapsed_ms?: number } }).execution_plan?.elapsed_ms ?? "-")} ms）`,
+              message: `客户端 ${active.client_id} 连通正常：指标 ${m.metric_code} dry-run 通过（耗时 ${elapsed} ms）`,
             });
             return;
           }
