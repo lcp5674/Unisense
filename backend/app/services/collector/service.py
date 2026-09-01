@@ -7,17 +7,26 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+import sqlglot
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.base_service import BaseService
 from app.core.config import Settings
-from app.core.exceptions import BusinessError, ConflictError, NotFoundError, ValidationError
+from app.core.exceptions import (
+    BusinessError,
+    ConflictError,
+    ExternalDependencyError,
+    NotFoundError,
+    UnisenseError,
+    ValidationError,
+)
 from app.core.logging import get_logger
 from app.core.secrets import SecretManager
 from app.db.redis import get_redis
@@ -927,6 +936,78 @@ class CollectorService(BaseService):
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
         return src
+
+    # ------------------------------------------------------------ 只读 SQL 查询
+
+    @staticmethod
+    def _validate_read_sql(sql: str) -> str:
+        """校验 SQL 为单条只读 SELECT，返回原语句（未加 LIMIT，由调用方追加）。
+
+        Raises:
+            ValidationError: 多语句 / 非 SELECT / SELECT INTO / 无法解析。
+        """
+        try:
+            asts = sqlglot.parse(sql)
+        except Exception as exc:  # noqa: BLE001 - sqlglot 对部分畸形 SQL 抛 ParseError
+            raise ValidationError(f"SQL 无法解析（{exc}），仅支持单条只读 SELECT 查询") from exc
+        if not asts or any(ast is None for ast in asts):
+            raise ValidationError("SQL 无法解析，仅支持单条只读 SELECT 查询")
+        if len(asts) != 1:
+            raise ValidationError("仅支持单条 SQL 语句（不允许分号分隔的多语句）")
+        ast = asts[0]
+        if not isinstance(ast, sqlglot.exp.Select):
+            raise ValidationError("仅支持只读 SELECT 查询（不允许 DDL/DML 等写操作）")
+        if ast.args.get("into") is not None:
+            raise ValidationError("不支持 SELECT INTO（禁止写文件/变量）")
+        return sql
+
+    async def query_sql(
+        self, source_id: str, sql: str, limit: int = 100
+    ) -> dict[str, Any]:
+        """对已注册数据源执行只读 SELECT（平台内部运维/分析，调用方负责审计）。
+
+        - 用 sqlglot 校验为单条只读 SELECT（拒绝多语句 / DDL / DML / SELECT INTO）。
+        - 语句无顶层 LIMIT 时追加 ``LIMIT n`` 兜底；有则保留，Python 侧再按 n 截断，
+          双保险保证返回行数不超过 limit。
+        - 复用连接器 ``registry.build + collector.query``（与维度枚举预览同链路）。
+
+        Raises:
+            NotFoundError: 数据源不存在。
+            ValidationError: SQL 非只读 SELECT / 表名列名不合法。
+            ExternalDependencyError: 源库连接/查询失败。
+        """
+        from app.services.collector.connectors import registry
+
+        self._validate_read_sql(sql)
+        src = await self.get_source_orm(source_id)
+        collector = registry.build(src.source_type, src.connection_config)
+        try:
+            # 顶层无 LIMIT 才追加（避免子查询 LIMIT 被误判为顶层）
+            parsed = sqlglot.parse_one(sql)
+            exec_sql = (
+                f"{sql.rstrip().rstrip(';')} LIMIT {int(limit)}"
+                if parsed.args.get("limit") is None
+                else sql
+            )
+            start = time.perf_counter()
+            rows = await collector.query(exec_sql)
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
+        except ExternalDependencyError:
+            raise  # 外部依赖错误（连接/查询超时）已语义化，交由 API 层映射
+        except Exception as exc:
+            raise UnisenseError(f"执行 SQL 查询失败: {exc}") from exc
+        finally:
+            await collector.dispose()
+
+        rows = rows[:limit]
+        columns = list(rows[0].keys()) if rows else []
+        return {
+            "columns": columns,
+            "rows": rows,
+            "total": len(rows),
+            "truncated": len(rows) >= limit,
+            "elapsed_ms": elapsed_ms,
+        }
 
     async def register_catalog(
         self, req: DBCatalogCreateRequest, actor_id: int

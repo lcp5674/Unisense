@@ -153,6 +153,7 @@ import {
   RulingRecord,
   ScheduleResult,
   SnapshotResponse,
+  SqlQueryResponse,
   CollectionJob,
   CollectionRun,
   CollectionRunLogItem,
@@ -4045,6 +4046,24 @@ export async function createDataSource(req: DataSourceCreateRequest): Promise<Da
     method: "POST",
     body: JSON.stringify(req),
   });
+}
+
+/**
+ * 对已注册数据源执行只读 SELECT（平台内部运维/分析，仅管理员/域管理员/数据源 Owner）。
+ * sql 仅允许单条只读 SELECT（后端 sqlglot 校验，拒绝多语句/DDL/DML）。
+ */
+export async function queryDataSourceSql(
+  sourceId: string,
+  sql: string,
+  limit?: number,
+): Promise<SqlQueryResponse> {
+  return request<SqlQueryResponse>(
+    `${API_BASE}/data-sources/${encodeURIComponent(sourceId)}/sql-query`,
+    {
+      method: "POST",
+      body: JSON.stringify({ sql, limit: limit ?? 100 }),
+    },
+  );
 }
 
 export async function updateDataSource(

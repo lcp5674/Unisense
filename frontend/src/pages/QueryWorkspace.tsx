@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Select, Input, Button, Form, Space, Tag, Table, Tabs, Alert, message, Row, Col, Drawer, Empty, Segmented } from "antd";
-import { PlayCircleOutlined, SafetyCertificateOutlined, KeyOutlined, DatabaseOutlined, ReadOutlined, ArrowLeftOutlined, SearchOutlined, ApiOutlined } from "@ant-design/icons";
+import { Card, Select, Input, InputNumber, Button, Form, Space, Tag, Table, Tabs, Alert, message, Row, Col, Drawer, Empty, Segmented, DatePicker } from "antd";
+import { PlayCircleOutlined, SafetyCertificateOutlined, KeyOutlined, DatabaseOutlined, ReadOutlined, ArrowLeftOutlined, SearchOutlined, ApiOutlined, CodeOutlined } from "@ant-design/icons";
+import dayjs from "dayjs";
 import {
   consumeDryRun,
   consumeQuery,
@@ -9,6 +10,8 @@ import {
   listMetrics,
   listSnapshots,
   listApiClients,
+  listDataSources,
+  queryDataSourceSql,
   mintClientToken,
   getConsumeToken,
   getConsumeTokenExpiry,
@@ -18,7 +21,7 @@ import {
   CONSUME_TOKEN_CHANGED_EVENT,
   UnisenseApiError,
 } from "../api";
-import type { DimensionExpr, DryRunResponse, QueryResponse, SnapshotResponse, ClientResponse } from "../types";
+import type { DimensionExpr, DryRunResponse, QueryResponse, SnapshotResponse, ClientResponse, DataSource, SqlQueryResponse } from "../types";
 import { useTracking } from "../hooks/useTracking";
 import { usePermission } from "../hooks/usePermission";
 import { ObjectView, kvText } from "../utils/display";
@@ -116,6 +119,15 @@ export function QueryWorkspace() {
   const [clients, setClients] = useState<ClientResponse[]>([]);
   const [clientId, setClientId] = useState<string | undefined>(undefined);
   const [dateRange, setDateRange] = useState("last_30d");
+  // 自定义日期区间（YYYY-MM-DD~YYYY-MM-DD），dateRange === "custom" 时生效
+  const [customRange, setCustomRange] = useState<[string, string] | null>(null);
+  // SQL 查询 Tab：选数据源 → 写只读 SELECT → 执行（仅管理员/域管理员/数据源 Owner）
+  const [sqlSources, setSqlSources] = useState<DataSource[]>([]);
+  const [sqlSourceId, setSqlSourceId] = useState<string | undefined>(undefined);
+  const [sqlText, setSqlText] = useState("SELECT * FROM ");
+  const [sqlLimit, setSqlLimit] = useState(100);
+  const [sqlResult, setSqlResult] = useState<SqlQueryResponse | null>(null);
+  const [sqlBusy, setSqlBusy] = useState(false);
   const [granularity, setGranularity] = useState<string | undefined>(undefined);
   const [comparison, setComparison] = useState<string | undefined>(undefined);
   const [dimInputs, setDimInputs] = useState<Array<{ name: string; value: string }>>([{ name: "", value: "" }]);
@@ -147,6 +159,11 @@ export function QueryWorkspace() {
     // 用本地日期格式化（toISOString 是 UTC，本地凌晨会差一天）
     const fmt = (d: Date) =>
       `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    if (key === "custom") {
+      // 自定义区间：用户 RangePicker 选择；未选则回退近 30 天
+      if (customRange && customRange[0] && customRange[1]) return `${customRange[0]}~${customRange[1]}`;
+      return `${fmt(new Date(today.getTime() - 30 * 86400000))}~${fmt(today)}`;
+    }
     switch (key) {
       case "today":
         return `${fmt(today)}~${fmt(today)}`;
@@ -177,8 +194,34 @@ export function QueryWorkspace() {
     // 初始为「指标查询」模式：展示全部已发布指标（内部用户视角），不做客户端收敛。
     loadMetricOptions("", { domain: null, whitelist: null });
     loadClients();
+    loadSqlSources();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 加载数据源列表供 SQL 查询 Tab 选择（支持库/表类型过滤的能力提示）
+  function loadSqlSources() {
+    listDataSources({ page_size: 200 })
+      .then((res) => setSqlSources(res.items))
+      .catch(() => setSqlSources([]));
+  }
+
+  // 对选中数据源执行只读 SELECT（后端校验单条 SELECT + 权限 + LIMIT 兜底）
+  async function handleSqlQuery() {
+    if (!sqlSourceId) { message.warning("请选择数据源"); return; }
+    const sql = sqlText.trim();
+    if (!sql) { message.warning("请输入 SQL"); return; }
+    setSqlBusy(true);
+    try {
+      const res = await queryDataSourceSql(sqlSourceId, sql, sqlLimit);
+      setSqlResult(res);
+      track("sql_query", sqlSourceId, "data_source");
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "SQL 查询失败");
+      setSqlResult(null);
+    } finally {
+      setSqlBusy(false);
+    }
+  }
 
   // 加载 ACTIVE 客户端列表供「消费接入调试」选择器使用；若当前令牌已绑定某客户端
   // （JWT sub），在调试模式下自动选中该客户端并按其授权范围收敛——保证「能看到的 = 能消费的」。
@@ -502,11 +545,37 @@ export function QueryWorkspace() {
               </Col>
               <Col xs={24} md={12}>
                 <Form.Item label="日期范围">
-                  <Select
-                    value={dateRange}
-                    onChange={setDateRange}
-                    options={["today", "last_7d", "last_30d", "last_90d", "ytd", "last_365d"].map((v) => ({ value: v, label: DATE_RANGE_LABEL[v] ?? v }))}
-                  />
+                  <Space.Compact style={{ width: "100%" }}>
+                    <Select
+                      style={{ width: "100%" }}
+                      value={dateRange}
+                      onChange={setDateRange}
+                      options={[
+                        ...["today", "last_7d", "last_30d", "last_90d", "ytd", "last_365d"].map((v) => ({
+                          value: v,
+                          label: DATE_RANGE_LABEL[v] ?? v,
+                        })),
+                        { value: "custom", label: "自定义" },
+                      ]}
+                    />
+                    {dateRange === "custom" && (
+                      <DatePicker.RangePicker
+                        style={{ width: "100%" }}
+                        value={
+                          customRange
+                            ? [dayjs(customRange[0]), dayjs(customRange[1])]
+                            : null
+                        }
+                        onChange={(_, dateStrings) => {
+                          if (dateStrings[0] && dateStrings[1]) {
+                            setCustomRange([dateStrings[0], dateStrings[1]]);
+                          }
+                        }}
+                        allowClear
+                        placeholder={["开始日期", "结束日期"]}
+                      />
+                    )}
+                  </Space.Compact>
                 </Form.Item>
               </Col>
               <Col xs={24} md={8}>
@@ -692,6 +761,114 @@ export function QueryWorkspace() {
               <Empty description="暂无语义数据" />
             )}
           </Drawer>
+        </div>
+      ),
+    },
+    {
+      key: "sql",
+      label: "SQL 查询",
+      children: (
+        <div>
+          <Alert
+            type="info"
+            showIcon
+            icon={<CodeOutlined />}
+            style={{ marginBottom: 16 }}
+            message="数据源只读 SQL 查询"
+            description="选择已注册数据源，编写单条只读 SELECT 执行（仅平台管理员/域管理员或数据源负责人可用）。SQL 仅允许 SELECT（自动 LIMIT 兜底），每次执行均写审计。"
+          />
+          <Form layout="vertical">
+            <Row gutter={[16, 0]}>
+              <Col xs={24} md={12}>
+                <Form.Item label="数据源">
+                  <Select
+                    showSearch
+                    value={sqlSourceId}
+                    onChange={setSqlSourceId}
+                    placeholder="选择数据源"
+                    options={sqlSources.map((s) => ({
+                      value: s.source_id,
+                      label: `${s.source_id} · ${s.name}（${s.source_type}）`,
+                    }))}
+                    filterOption={(input, opt) =>
+                      String(opt?.label ?? "").toLowerCase().includes(input.toLowerCase())
+                    }
+                  />
+                </Form.Item>
+              </Col>
+              <Col xs={24} md={12}>
+                <Form.Item label="返回行数上限">
+                  <InputNumber
+                    min={1}
+                    max={500}
+                    value={sqlLimit}
+                    onChange={(v) => setSqlLimit(v ?? 100)}
+                    style={{ width: "100%" }}
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
+            <Form.Item label="SQL（仅只读 SELECT）">
+              <Input.TextArea
+                className="mono"
+                rows={8}
+                value={sqlText}
+                onChange={(e) => setSqlText(e.target.value)}
+                placeholder={
+                  "SELECT * FROM db.table WHERE ...\n\n提示：仅允许单条 SELECT；未写 LIMIT 时自动追加，最多返回所设行数。"
+                }
+              />
+            </Form.Item>
+            <Space>
+              <Button
+                type="primary"
+                icon={<PlayCircleOutlined />}
+                onClick={handleSqlQuery}
+                loading={sqlBusy}
+                disabled={!canExecute}
+              >
+                执行 SQL
+              </Button>
+              <Button
+                onClick={() => {
+                  setSqlText("SELECT * FROM ");
+                  setSqlResult(null);
+                }}
+              >
+                清空
+              </Button>
+            </Space>
+          </Form>
+
+          {sqlResult && (
+            <div style={{ marginTop: 20 }}>
+              <Alert
+                type="success"
+                showIcon
+                message={`查询成功：${sqlResult.total} 行${sqlResult.truncated ? "（已截断）" : ""} · 耗时 ${sqlResult.elapsed_ms} ms`}
+                style={{ marginBottom: 12 }}
+              />
+              <Card size="small" title="查询结果">
+                {sqlResult.rows.length > 0 ? (
+                  <Table
+                    size="small"
+                    dataSource={sqlResult.rows}
+                    columns={sqlResult.columns.map((c) => ({
+                      title: c,
+                      dataIndex: c,
+                      key: c,
+                      ellipsis: true,
+                    }))}
+                    rowKey={(_, i) => String(i)}
+                    pagination={{ pageSize: 20 }}
+                    scroll={{ x: "max-content" }}
+                  />
+                ) : (
+                  <Empty description="无结果数据" />
+                )}
+              </Card>
+            </div>
+          )}
         </div>
       ),
     },

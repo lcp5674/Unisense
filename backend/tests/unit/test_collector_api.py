@@ -981,3 +981,121 @@ async def test_test_connection_hive_metastore_passes_validation(
     body = resp.json()["data"]
     assert body["ok"] is True
     assert body["source_type"] == "hive_metastore"
+
+
+# ---------- 只读 SQL 查询端点（/sql-query） ----------
+
+
+def _set_current_user(user_id: int, roles: list[str]) -> None:
+    """测试内覆盖当前用户（默认 fixture 为 platform_admin）。"""
+
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=user_id,
+        role=roles[0],
+        roles_all=lambda: roles,
+        has_role=lambda r: r in roles,
+    )
+
+
+async def test_sql_query_admin_allowed_and_audited(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """平台管理员执行 SELECT：200 + 结果结构 + 审计落库。"""
+    src = MagicMock(source_id="s1", owner_id=2)
+    with patch(
+        "app.api.collector.CollectorService.get_source_orm",
+        new_callable=AsyncMock,
+        return_value=src,
+    ), patch(
+        "app.api.collector.CollectorService.query_sql",
+        new_callable=AsyncMock,
+        return_value={
+            "columns": ["a", "b"],
+            "rows": [{"a": 1, "b": 2}],
+            "total": 1,
+            "truncated": False,
+            "elapsed_ms": 5,
+        },
+    ) as mock_q, patch("app.api.collector.write_audit", new_callable=AsyncMock) as mock_audit:
+        resp = await collector_client.post(
+            "/api/v1/data-sources/s1/sql-query",
+            json={"sql": "SELECT a, b FROM t", "limit": 100},
+        )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["columns"] == ["a", "b"]
+    assert data["rows"] == [{"a": 1, "b": 2}]
+    assert data["total"] == 1
+    mock_q.assert_awaited_once_with("s1", "SELECT a, b FROM t", 100)
+    mock_audit.assert_awaited_once()
+    action = mock_audit.await_args.kwargs["action"]
+    assert action == "data_source.sql_query"
+
+
+async def test_sql_query_owner_allowed(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """数据源 Owner（非管理员）可查询自己的源。"""
+    _set_current_user(5, ["analyst"])
+    src = MagicMock(source_id="s1", owner_id=5)
+    with patch(
+        "app.api.collector.CollectorService.get_source_orm",
+        new_callable=AsyncMock,
+        return_value=src,
+    ), patch(
+        "app.api.collector.CollectorService.query_sql",
+        new_callable=AsyncMock,
+        return_value={
+            "columns": ["a"],
+            "rows": [{"a": 1}],
+            "total": 1,
+            "truncated": False,
+            "elapsed_ms": 3,
+        },
+    ) as mock_q:
+        resp = await collector_client.post(
+            "/api/v1/data-sources/s1/sql-query",
+            json={"sql": "SELECT a FROM t", "limit": 10},
+        )
+    assert resp.status_code == 200
+    mock_q.assert_awaited_once()
+
+
+async def test_sql_query_forbidden_for_non_owner(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """非管理员且非 Owner → 403，query_sql 不被调用。"""
+    _set_current_user(9, ["analyst"])
+    src = MagicMock(source_id="s1", owner_id=5)
+    with patch(
+        "app.api.collector.CollectorService.get_source_orm",
+        new_callable=AsyncMock,
+        return_value=src,
+    ), patch(
+        "app.api.collector.CollectorService.query_sql",
+        new_callable=AsyncMock,
+    ) as mock_q:
+        resp = await collector_client.post(
+            "/api/v1/data-sources/s1/sql-query",
+            json={"sql": "SELECT * FROM t", "limit": 10},
+        )
+    assert resp.status_code == 403
+    mock_q.assert_not_called()
+
+
+async def test_sql_query_rejects_dml(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """非 SELECT（DELETE）被服务层拒绝 → 422，不执行（真实 service 校验）。"""
+    src = MagicMock(source_id="s1", owner_id=1)
+    with patch(
+        "app.api.collector.CollectorService.get_source_orm",
+        new_callable=AsyncMock,
+        return_value=src,
+    ):
+        resp = await collector_client.post(
+            "/api/v1/data-sources/s1/sql-query",
+            json={"sql": "DELETE FROM t", "limit": 10},
+        )
+    # 服务层抛 ValidationError → API 映射 422
+    assert resp.status_code == 422

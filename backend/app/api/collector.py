@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
-from app.core.exceptions import BusinessError, ConflictError, NotFoundError
+from app.core.exceptions import AuthError, BusinessError, ConflictError, NotFoundError
 from app.core.guard import guard_against_injection, guard_against_injection_exempt
 from app.core.logging import get_logger
 from app.core.probe_throttle import check_collect_rate, check_probe_rate
@@ -78,6 +78,8 @@ from app.services.collector.schemas import (
     InferTableDescriptionResponse,
     ListTablesRequest,
     ScheduleRequest,
+    SqlQueryRequest,
+    SqlQueryResponse,
     TableDescriptionRequest,
     TableDescriptionResponse,
     TestConnectionRequest,
@@ -106,6 +108,12 @@ _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_inje
 _PROBE_DEPS = [
     Depends(require_roles(*_WRITE_ROLES)),
     Depends(guard_against_injection_exempt("connection_config")),
+]
+# 只读 SQL 查询：任意登录用户可访问，但 handler 内校验「平台管理员/域管理员 或 数据源 Owner」。
+# sql 字段整体豁免注入扫描（SQL 本身即合法载荷，含 -- 等是正常语法），其余字段仍全量扫描。
+_SQL_QUERY_DEPS = [
+    Depends(require_roles(*ALL_ROLES)),
+    Depends(guard_against_injection_exempt("sql")),
 ]
 
 
@@ -731,6 +739,45 @@ async def sample_entity(
     )
     await db.commit()
     return ok(data=result, trace_id=trace_id)
+
+
+@source_router.post("/{source_id}/sql-query", dependencies=_SQL_QUERY_DEPS)
+async def query_source_sql(
+    source_id: str,
+    body: SqlQueryRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[SqlQueryResponse]:
+    """对已注册数据源执行只读 SELECT（平台内部运维/分析，写审计）。
+
+    仅允许单条只读 SELECT（服务层 sqlglot 校验，拒绝多语句/DDL/DML/SELECT INTO），
+    LIMIT 兜底防止大结果集；仅平台管理员/域管理员或该数据源 Owner 可执行。
+    """
+    svc = _svc(db)
+    src = await svc.get_source_orm(source_id)
+    is_admin = any(r in _WRITE_ROLES for r in user.roles_all())
+    if not is_admin and src.owner_id != user.id:
+        raise AuthError("无权查询该数据源（仅平台管理员/域管理员或数据源负责人可执行 SQL）")
+    result = await svc.query_sql(source_id, body.sql, body.limit)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="data_source.sql_query",
+        entity_type="data_source",
+        entity_id=source_id,
+        detail={
+            "sql": body.sql[:500],
+            "limit": body.limit,
+            "rows": result["total"],
+            "truncated": result["truncated"],
+        },
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=SqlQueryResponse(**result), trace_id=trace_id)
 
 
 @source_router.post("/{source_id}/collect", dependencies=_WRITE_DEPS)

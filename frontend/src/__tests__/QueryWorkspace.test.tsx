@@ -31,6 +31,8 @@ vi.mock("../api", () => {
     listMetrics: vi.fn(),
     listSnapshots: vi.fn(),
     listApiClients: vi.fn(),
+    listDataSources: vi.fn(),
+    queryDataSourceSql: vi.fn(),
     mintClientToken: vi.fn(),
     getConsumeToken: vi.fn(() => null),
     getConsumeTokenExpiry: vi.fn(() => null),
@@ -54,6 +56,8 @@ import {
   consumeSemantic,
   listMetrics,
   listApiClients,
+  listDataSources,
+  queryDataSourceSql,
   getConsumeToken,
   getConsumeTokenExpiry,
   getConsumeTokenClientId,
@@ -64,6 +68,8 @@ const mockedConsumeQuery = vi.mocked(consumeQuery);
 const mockedConsumeSemantic = vi.mocked(consumeSemantic);
 const mockedListMetrics = vi.mocked(listMetrics);
 const mockedListApiClients = vi.mocked(listApiClients);
+const mockedListDataSources = vi.mocked(listDataSources);
+const mockedQueryDataSourceSql = vi.mocked(queryDataSourceSql);
 const mockedGetConsumeToken = vi.mocked(getConsumeToken);
 const mockedGetConsumeTokenExpiry = vi.mocked(getConsumeTokenExpiry);
 const mockedGetConsumeTokenClientId = vi.mocked(getConsumeTokenClientId);
@@ -154,6 +160,39 @@ describe("QueryWorkspace", () => {
     mockedGetConsumeTokenClientId.mockReturnValue(null);
     // 默认无 ACTIVE 客户端 → 授权范围无限制（展示全部 PUBLISHED），与既有用例语义一致
     mockedListApiClients.mockResolvedValue([]);
+    // SQL 查询 Tab：默认一个数据源 + 空结果（各测试按需覆盖）
+    mockedListDataSources.mockResolvedValue({
+      items: [
+        {
+          source_id: "mysql_unisense",
+          name: "主库",
+          source_type: "mysql",
+          domain: "sales",
+          cluster_id: null,
+          coverage: 0.8,
+          health_status: "healthy",
+          connection_config_present: true,
+          databases: null,
+          schedule_cron: null,
+          schedule_enabled: false,
+          collection_mode: "FULL",
+          enabled: true,
+          created_by: 1,
+          created_at: "2026-08-01T00:00:00",
+          updated_at: "2026-08-01T00:00:00",
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 200,
+    });
+    mockedQueryDataSourceSql.mockResolvedValue({
+      columns: ["id", "name"],
+      rows: [{ id: 1, name: "测试" }],
+      total: 1,
+      truncated: false,
+      elapsed_ms: 5,
+    });
     mockedListMetrics.mockResolvedValue({
       items: [
         {
@@ -536,5 +575,64 @@ describe("QueryWorkspace", () => {
         { forceUser: false },
       );
     });
+  });
+
+  it("自定义日期范围：选「自定义」后展示 RangePicker，提交 YYYY-MM-DD~YYYY-MM-DD", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+    // 先选指标（否则 dry-run 早退）
+    await user.click(metricSelectInput());
+    await user.click(await screen.findByText(/gmv_net · 净GMV/));
+    // 选中「自定义」选项
+    const rangeLabel = screen.getByText("日期范围", { selector: "label" });
+    const rangeItem = rangeLabel.closest(".ant-form-item") as HTMLElement;
+    await user.click(within(rangeItem).getByRole("combobox"));
+    await user.click(await screen.findByText("自定义"));
+    // RangePicker 出现（双输入框占位符）
+    const startInput = await screen.findByPlaceholderText("开始日期");
+    const endInput = screen.getByPlaceholderText("结束日期");
+    await user.click(startInput);
+    await user.keyboard("2026-08-01{Enter}");
+    await user.click(endInput);
+    await user.keyboard("2026-08-15{Enter}");
+    // 执行语义校验，断言提交的自定义区间
+    await user.click(screen.getByRole("button", { name: /语义校验/ }));
+    await waitFor(() => {
+      expect(mockedConsumeDryRun).toHaveBeenCalledWith(
+        expect.objectContaining({ date_range: "2026-08-01~2026-08-15" }),
+        { forceUser: true },
+      );
+    });
+  });
+
+  it("SQL 查询 Tab：选数据源 + 写 SQL + 执行 → 展示结果表", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+    // 切到 SQL 查询 Tab
+    await user.click(screen.getByText("SQL 查询"));
+    expect(await screen.findByText("数据源只读 SQL 查询")).toBeInTheDocument();
+    // 选择数据源（点击选项内容 div —— antd 下拉选项的完整 label）
+    const dsLabel = screen.getByText("数据源", { selector: "label" });
+    const dsItem = dsLabel.closest(".ant-form-item") as HTMLElement;
+    await user.click(within(dsItem).getByRole("combobox"));
+    await user.click(await screen.findByText(/mysql_unisense · 主库/));
+    // 输入 SQL
+    const sqlTextarea = screen.getByPlaceholderText(/SELECT \* FROM db\.table/);
+    await user.clear(sqlTextarea);
+    await user.type(sqlTextarea, "SELECT id FROM t WHERE x = 1");
+    // 执行
+    await user.click(screen.getByRole("button", { name: /执行 SQL/ }));
+    await waitFor(() => {
+      expect(mockedQueryDataSourceSql).toHaveBeenCalledWith(
+        "mysql_unisense",
+        "SELECT id FROM t WHERE x = 1",
+        100,
+      );
+    });
+    // 结果表展示
+    expect(await screen.findByText(/查询成功：1 行/)).toBeInTheDocument();
+    expect(screen.getByText("测试")).toBeInTheDocument();
   });
 });

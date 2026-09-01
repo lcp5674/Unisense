@@ -16,7 +16,15 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 
-from app.core.exceptions import BusinessError, ConflictError, NotFoundError
+from app.core.exceptions import (
+    BusinessError,
+    ConflictError,
+    ExternalDependencyError,
+    NotFoundError,
+)
+from app.core.exceptions import (
+    ValidationError as AppValidationError,
+)
 from app.core.secrets import SecretManager
 from app.services.collector.classifier import SensitivityClassifier
 from app.services.collector.drift_detector import compute_content_signature
@@ -5110,3 +5118,121 @@ async def test_sample_masks_sensitive_and_records_rule():
     assert sample_rows == [{"phone_number": "138****1234"}]
     assert columns[0]["sample"] == ["138****1234"]  # 打码存储（原地写入）
     assert columns[0]["sample_rule"] == "phone"  # 类别随打码值落库
+
+
+# ---------- 只读 SQL 查询（query_sql） ----------
+
+
+class _QueryConnector:
+    """query_sql 测试用假连接器（记录 SQL，返回固定行）。"""
+
+    def __init__(self, rows: list[dict] | None = None) -> None:
+        self._rows = rows or [{"a": 1, "b": 2}]
+        self.queries: list[str] = []
+        self.disposed = False
+
+    async def query(self, sql: str, params: dict | None = None) -> list[dict]:
+        self.queries.append(sql)
+        return self._rows
+
+    async def dispose(self) -> None:
+        self.disposed = True
+
+
+def _query_svc() -> tuple[CollectorService, MagicMock]:
+    """构造带 mock 仓库的服务（repo.get_source 可配置）。"""
+    with patch("app.services.collector.service.CollectorRepository") as mock_repo:
+        db = MagicMock()
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
+        db.flush = AsyncMock()
+        svc = CollectorService(db=db)
+        repo = mock_repo.return_value
+        repo.get_source = AsyncMock(return_value=None)
+        repo.update_health_status = AsyncMock()
+        repo.get_watermark = AsyncMock(return_value=None)
+        return svc, repo
+
+
+async def test_query_sql_executes_with_appended_limit():
+    """顶层无 LIMIT 时追加 LIMIT，返回列/行/耗时，连接器释放。"""
+    svc, repo = _query_svc()
+    src = MagicMock(source_id="s1", source_type="mysql", connection_config="enc")
+    repo.get_source = AsyncMock(return_value=src)
+    conn = _QueryConnector([{"a": 1, "b": 2}, {"a": 3, "b": 4}])
+
+    with patch(
+        "app.services.collector.connectors.registry.build", return_value=conn
+    ):
+        result = await svc.query_sql("s1", "SELECT a, b FROM t WHERE x = 1", limit=10)
+
+    assert conn.queries[0].endswith("LIMIT 10")
+    assert result["columns"] == ["a", "b"]
+    assert result["total"] == 2
+    assert result["truncated"] is False
+    assert conn.disposed is True
+
+
+async def test_query_sql_preserves_existing_limit_and_truncates():
+    """已有 LIMIT 不追加；Python 侧按 limit 截断并置 truncated。"""
+    svc, repo = _query_svc()
+    src = MagicMock(source_id="s1", source_type="postgres", connection_config="enc")
+    repo.get_source = AsyncMock(return_value=src)
+    rows = [{"v": i} for i in range(200)]
+    conn = _QueryConnector(rows)
+
+    with patch(
+        "app.services.collector.connectors.registry.build", return_value=conn
+    ):
+        result = await svc.query_sql("s1", "SELECT v FROM t LIMIT 500", limit=100)
+
+    assert "LIMIT 500" in conn.queries[0]
+    assert "LIMIT 100" not in conn.queries[0]
+    assert result["total"] == 100
+    assert result["truncated"] is True
+
+
+async def test_query_sql_rejects_multi_statement_and_ddl():
+    """多语句 / DDL / DML / SELECT INTO 均拒绝。"""
+    svc, _ = _query_svc()
+    for bad in [
+        "SELECT * FROM t; DELETE FROM t",
+        "DELETE FROM t",
+        "UPDATE t SET a = 1",
+        "INSERT INTO t VALUES (1)",
+        "DROP TABLE t",
+        "SELECT * INTO OUTFILE '/tmp/x' FROM t",
+    ]:
+        with pytest.raises(AppValidationError):
+            await svc.query_sql("s1", bad, limit=10)
+
+
+async def test_query_sql_source_not_found():
+    """数据源不存在抛 NotFoundError（不触发连接器）。"""
+    svc, repo = _query_svc()
+    repo.get_source = AsyncMock(return_value=None)
+    with patch(
+        "app.services.collector.connectors.registry.build",
+    ) as mock_build, pytest.raises(NotFoundError):
+        await svc.query_sql("nope", "SELECT 1", limit=10)
+    mock_build.assert_not_called()
+
+
+async def test_query_sql_external_error_propagates():
+    """源库连接/查询失败抛 ExternalDependencyError（不吞错）。"""
+    svc, repo = _query_svc()
+    src = MagicMock(source_id="s1", source_type="mysql", connection_config="enc")
+    repo.get_source = AsyncMock(return_value=src)
+
+    class _FailConn:
+        async def query(self, sql: str, params: dict | None = None):
+            raise ExternalDependencyError("connection timeout")
+
+        async def dispose(self) -> None:
+            return None
+
+    with patch(
+        "app.services.collector.connectors.registry.build",
+        return_value=_FailConn(),
+    ), pytest.raises(ExternalDependencyError):
+        await svc.query_sql("s1", "SELECT * FROM t", limit=10)

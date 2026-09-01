@@ -749,6 +749,28 @@ class BatchInferHistoryCreate(BaseModel):
     )
 
 
+class SqlQueryRequest(BaseModel):
+    """数据源只读 SQL 查询请求（平台内部运维/分析用）。
+
+    sql 仅允许单条只读 SELECT（服务层用 sqlglot 校验），limit 兜底返回行数上限。
+    """
+
+    sql: str = Field(
+        min_length=1, max_length=8000, description="只读 SELECT 语句（仅允许单条查询）"
+    )
+    limit: int = Field(default=100, ge=1, le=500, description="返回行数上限")
+
+
+class SqlQueryResponse(BaseModel):
+    """数据源只读 SQL 查询结果。"""
+
+    columns: list[str] = Field(default_factory=list, description="结果列名（按首行 key 顺序）")
+    rows: list[dict[str, Any]] = Field(default_factory=list, description="结果行（字典列表）")
+    total: int = Field(default=0, description="实际返回行数")
+    truncated: bool = Field(default=False, description="是否被 limit 截断")
+    elapsed_ms: int = Field(default=0, description="源库执行耗时（毫秒）")
+
+
 class BatchInferHistoryEntry(BaseModel):
     """批量推断历史单条记录（含操作人快照，团队治理动作可追溯）。"""
 

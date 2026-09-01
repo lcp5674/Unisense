@@ -1020,6 +1020,15 @@ export interface SnapshotResponse {
   generated_by: string;
 }
 
+/** 数据源只读 SQL 查询结果（POST /data-sources/{id}/sql-query） */
+export interface SqlQueryResponse {
+  columns: string[];
+  rows: Array<Record<string, unknown>>;
+  total: number;
+  truncated: boolean;
+  elapsed_ms: number;
+}
+
 // ============================================================================
 // 维度服务（backend /api/v1/dimensions/*）
 // ============================================================================
