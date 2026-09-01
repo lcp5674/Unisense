@@ -41,6 +41,7 @@ vi.mock("../hooks/usePermission", () => ({
 }));
 
 import {
+  createApiClient,
   listApiClients,
   mintClientToken,
   consumeQuery,
@@ -51,6 +52,7 @@ import {
   deleteApiClient,
   batchApiClientAction,
 } from "../api";
+const mockedCreateApiClient = vi.mocked(createApiClient);
 const mockedListApiClients = vi.mocked(listApiClients);
 const mockedMintClientToken = vi.mocked(mintClientToken);
 const mockedConsumeQuery = vi.mocked(consumeQuery);
@@ -197,7 +199,7 @@ describe("ApiClients", () => {
     });
   });
 
-  it("编辑客户端：清空授权域与白名单后保存 → PUT 携带空串/空数组（而非 null，避免后端视为不修改而静默失效）", async () => {
+  it("编辑客户端：清空白名单（保留授权域）→ PUT 携带 []（而非 null，避免后端视为不修改而静默失效）", async () => {
     const user = userEvent.setup();
     const existing = { ...ACTIVE_CLIENT, scope_domain: "outp", metric_whitelist: ["outp_feeamount_day"] };
     mockedListApiClients.mockResolvedValue([existing]);
@@ -210,10 +212,9 @@ describe("ApiClients", () => {
     const modal = await screen.findByRole("dialog");
     await within(modal).findByText(/编辑 API 客户端/);
 
-    // 清空授权域下拉（allowClear 的清除按钮）与白名单多选（第二个 clear）
+    // 仅清空白名单多选（第二个 clear）——授权域保留，避免双空被最小授权范围校验拦截
     const clears = modal.querySelectorAll(".ant-select-clear");
     expect(clears.length).toBeGreaterThanOrEqual(2);
-    await user.click(clears[0]);
     await user.click(clears[1]);
 
     await user.click(await within(modal).findByText(/保\s*存/));
@@ -221,9 +222,31 @@ describe("ApiClients", () => {
     await waitFor(() => {
       expect(mockedUpdateApiClient).toHaveBeenCalledWith(
         "app_abcd1234",
-        expect.objectContaining({ scope_domain: "", metric_whitelist: [] }),
+        expect.objectContaining({ scope_domain: "outp", metric_whitelist: [] }),
       );
     });
+  });
+
+  it("编辑客户端：清空成双空被最小授权范围校验拦截（不调用 PUT）", async () => {
+    const user = userEvent.setup();
+    const existing = { ...ACTIVE_CLIENT, scope_domain: "outp", metric_whitelist: ["outp_feeamount_day"] };
+    mockedListApiClients.mockResolvedValue([existing]);
+    render(<ApiClients />);
+    await screen.findByText("app_abcd1234");
+
+    await user.click(screen.getByText("更多"));
+    await user.click(await screen.findByText("编辑"));
+    const modal = await screen.findByRole("dialog");
+    await within(modal).findByText(/编辑 API 客户端/);
+
+    const clears = modal.querySelectorAll(".ant-select-clear");
+    await user.click(clears[0]);
+    await user.click(clears[1]);
+
+    await user.click(await within(modal).findByText(/保\s*存/));
+
+    expect(await screen.findByText("作用域与指标白名单至少填一个（最小授权范围）")).toBeInTheDocument();
+    expect(mockedUpdateApiClient).not.toHaveBeenCalled();
   });
 
   it("停用客户端：更多菜单 → Modal 确认后透传 PATCH status", async () => {
@@ -276,5 +299,89 @@ describe("ApiClients", () => {
     await waitFor(() => {
       expect(screen.getByText(/批量停用成功：1 个客户端/)).toBeInTheDocument();
     });
+  });
+
+  it("R8：双空客户端显示「未配置授权范围」标记与汇总警告", async () => {
+    render(<ApiClients />);
+    await screen.findByText("app_abcd1234");
+    // 行内警告 Tag
+    expect(screen.getByText("未配置授权范围")).toBeInTheDocument();
+    // 顶部汇总警告 Alert
+    expect(screen.getByText("1 个客户端未配置授权范围")).toBeInTheDocument();
+  });
+
+  it("R8：创建客户端双空（不填域也不填白名单）→ 前端校验拦截，不调用创建接口", async () => {
+    const user = userEvent.setup();
+    render(<ApiClients />);
+    await screen.findByText("app_abcd1234");
+
+    await user.click(screen.getByText("新建客户端"));
+    await screen.findByText("新建 API 客户端");
+
+    await user.type(screen.getByPlaceholderText(/至少 8 位/), "secret123");
+    await user.click(screen.getByRole("button", { name: /创\s*建/ }));
+
+    expect(await screen.findByText("作用域与指标白名单至少填一个（最小授权范围）")).toBeInTheDocument();
+    expect(mockedCreateApiClient).not.toHaveBeenCalled();
+  });
+
+  it("R8：创建客户端仅填指标白名单（不填域）→ 提交透传 metric_whitelist + scope_domain null", async () => {
+    const user = userEvent.setup();
+    mockedCreateApiClient.mockResolvedValue({
+      ...ACTIVE_CLIENT,
+      client_id: "app_new_123",
+      metric_whitelist: ["outp_feeamount_day"],
+      secret: "secret123",
+    } as never);
+    render(<ApiClients />);
+    await screen.findByText("app_abcd1234");
+
+    await user.click(screen.getByText("新建客户端"));
+    await screen.findByText("新建 API 客户端");
+
+    await user.type(screen.getByPlaceholderText(/至少 8 位/), "secret123");
+    // 创建弹窗第一个 combobox 是授权域，第二个是指标白名单多选
+    const combos = screen.getAllByRole("combobox");
+    await user.click(combos[1]);
+    await user.click(await screen.findByTitle("outp_feeamount_day（门诊收费金额）"));
+    await user.click(screen.getByRole("button", { name: /创\s*建/ }));
+
+    await waitFor(() => {
+      expect(mockedCreateApiClient).toHaveBeenCalledWith(
+        expect.objectContaining({
+          secret: "secret123",
+          scope_domain: null,
+          metric_whitelist: ["outp_feeamount_day"],
+        }),
+      );
+    });
+  });
+
+  it("R8：编辑历史双空客户端仅改配额 → PUT 省略授权字段（保留存量，仅警告）", async () => {
+    const user = userEvent.setup();
+    render(<ApiClients />);
+    await screen.findByText("app_abcd1234");
+
+    await user.click(screen.getByText("更多"));
+    await user.click(await screen.findByText("编辑"));
+    const modal = await screen.findByRole("dialog");
+    await within(modal).findByText(/编辑 API 客户端/);
+
+    // 只改 QPS（第一个 spinbutton），不动授权
+    const spins = within(modal).getAllByRole("spinbutton");
+    await user.clear(spins[0]);
+    await user.type(spins[0], "50");
+    await user.click(await within(modal).findByText(/保\s*存/));
+
+    await waitFor(() => {
+      expect(mockedUpdateApiClient).toHaveBeenCalledWith(
+        "app_abcd1234",
+        expect.objectContaining({ qps: 50 }),
+      );
+    });
+    // 不得携带授权字段——历史双空保留，仅标记警告
+    const call = mockedUpdateApiClient.mock.calls[0][1] as Record<string, unknown>;
+    expect(call.scope_domain).toBeUndefined();
+    expect(call.metric_whitelist).toBeUndefined();
   });
 });

@@ -16,6 +16,7 @@ import {
   Select,
   Dropdown,
 } from "antd";
+import type { FormInstance } from "antd";
 import {
   PlusOutlined,
   KeyOutlined,
@@ -63,6 +64,25 @@ const BATCH_ACTIONS = [
   { key: "disable", label: "批量停用" },
   { key: "delete", label: "批量删除", danger: true },
 ];
+
+// R8（审查修复）：最小授权范围——作用域与指标白名单至少填一个。
+// 双空时后端四级闸门四个条件全不触发，将获得全部非 PII 指标消费权（越权缺口）。
+// allowEmptyInitial=true 时放行「初始即双空」的历史客户端（保持存量，仅标记警告），
+// 但「原本有授权 → 清成双空」仍拦截。
+function validateScopeRequired(
+  form: FormInstance,
+  _: unknown,
+  value: unknown,
+  allowEmptyInitial = false,
+) {
+  const wl = form.getFieldValue("metric_whitelist");
+  const hasDomain = typeof value === "string" && value.length > 0;
+  const hasWhitelist = Array.isArray(wl) && wl.length > 0;
+  if (hasDomain || hasWhitelist || allowEmptyInitial) {
+    return Promise.resolve();
+  }
+  return Promise.reject(new Error("作用域与指标白名单至少填一个（最小授权范围）"));
+}
 
 // consume 查询端点清单（供接入指南展示，与 backend/app/api/consume.py 对齐）
 const CONSUME_ENDPOINTS = [
@@ -282,14 +302,24 @@ export function ApiClients() {
     setSavingEdit(true);
     try {
       const values = await editForm.validateFields();
-      // 弹窗所见即所得：清空授权域发 ""（后端清空为不限域）、清空白名单发 []（后端清空为域内全量）、
-      // 数字输入框清空发 null（后端视为不修改）——避免「清空」被编码成 null 而静默失效
-      const payload: ClientUpdateRequest = {
-        scope_domain: values.scope_domain ? String(values.scope_domain) : "",
-        metric_whitelist: Array.isArray(values.metric_whitelist) ? values.metric_whitelist : [],
-        qps: values.qps != null ? Number(values.qps) : null,
-        daily_quota: values.daily_quota != null ? Number(values.daily_quota) : null,
-      };
+      const hasDomain = typeof values.scope_domain === "string" && values.scope_domain.length > 0;
+      const hasWhitelist = Array.isArray(values.metric_whitelist) && values.metric_whitelist.length > 0;
+      // R8：历史双空客户端（初始即无授权范围）且本次仍未补充任何授权 → 不传授权字段，
+      // 后端视为「不修改」而保留存量（仅标记警告，不强制破坏）；否则显式同步当前值
+      //（后端校验：合并后双空将被拒绝，防止把已有授权清成双空）。
+      const initialBothEmpty = !editingClient.scope_domain && !(editingClient.metric_whitelist?.length);
+      const payload: ClientUpdateRequest =
+        initialBothEmpty && !hasDomain && !hasWhitelist
+          ? {
+              qps: values.qps != null ? Number(values.qps) : null,
+              daily_quota: values.daily_quota != null ? Number(values.daily_quota) : null,
+            }
+          : {
+              scope_domain: hasDomain ? String(values.scope_domain) : "",
+              metric_whitelist: hasWhitelist ? values.metric_whitelist : [],
+              qps: values.qps != null ? Number(values.qps) : null,
+              daily_quota: values.daily_quota != null ? Number(values.daily_quota) : null,
+            };
       await updateApiClient(editingClient.client_id, payload);
       message.success(`客户端 ${editingClient.client_id} 已更新`);
       setEditOpen(false);
@@ -371,9 +401,22 @@ export function ApiClients() {
     }
   }
 
+  const unscopedCount = items.filter((c) => !c.scope_domain && !(c.metric_whitelist?.length)).length;
+
   const columns = [
     { title: "Client ID", dataIndex: "client_id", key: "client_id", render: (v: string) => <span className="mono">{v}</span> },
-    { title: "作用域域", dataIndex: "scope_domain", key: "scope_domain", render: (v: string | null) => v ?? <span className="muted">全部</span> },
+    {
+      title: "作用域域",
+      dataIndex: "scope_domain",
+      key: "scope_domain",
+      render: (v: string | null, r: ClientResponse) => {
+        // R8：双空=未配置授权范围（可消费全部非 PII 指标）→ 醒目警告标记
+        if (!v && !(r.metric_whitelist?.length)) {
+          return <Tag color="warning">未配置授权范围</Tag>;
+        }
+        return v ?? <span className="muted">全部</span>;
+      },
+    },
     {
       title: "指标白名单",
       dataIndex: "metric_whitelist",
@@ -468,6 +511,15 @@ export function ApiClients() {
           </Space>
         }
       >
+        {unscopedCount > 0 && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message={`${unscopedCount} 个客户端未配置授权范围`}
+            description="作用域与指标白名单均为空的客户端将可消费全部非 PII 指标的历史数据值（最小授权原则）。请尽快编辑补充授权范围；新建客户端已强制至少填其一。"
+          />
+        )}
         <Table
           dataSource={items}
           columns={columns}
@@ -503,19 +555,25 @@ export function ApiClients() {
           </Form.Item>
           <Form.Item
             name="scope_domain"
-            label="作用域（业务域，留空为全部）"
-            extra="从主题域选择，避免手填错值导致查询 403「指标不在授权域内」"
+            label="作用域（业务域）"
+            dependencies={["metric_whitelist"]}
+            rules={[{ validator: (_, v) => validateScopeRequired(form, _, v) }]}
+            extra="与指标白名单至少填一个（最小授权范围）；双空 = 全部非 PII 指标消费权，已禁止"
           >
             <Select
               allowClear
               showSearch
-              placeholder="选择业务域（留空为全部）"
+              placeholder="选择业务域（可留空，但白名单必填）"
               options={domainOptions}
               optionFilterProp="label"
               notFoundContent={domainOptions.length ? undefined : "主题域加载中或为空"}
             />
           </Form.Item>
-          <Form.Item name="metric_whitelist" label="指标白名单（可多选，留空为全部）" extra="从已发布指标中选择，避免手填编码与指标域不符导致查询 403">
+          <Form.Item
+            name="metric_whitelist"
+            label="指标白名单（可多选）"
+            extra="从已发布指标中选择，避免手填编码与指标域不符导致查询 403；与作用域至少填一个"
+          >
             <Select
               mode="multiple"
               allowClear
@@ -610,19 +668,35 @@ curl -X POST http://<host>:8180/api/v1/consume/query \\
         <Form form={editForm} layout="vertical" style={{ marginTop: 8 }}>
           <Form.Item
             name="scope_domain"
-            label="作用域（业务域，留空为全部）"
-            extra="修改后按新授权域生效；密钥不可修改（如需换密钥请删除重建）"
+            label="作用域（业务域）"
+            dependencies={["metric_whitelist"]}
+            rules={[
+              {
+                validator: (_, v) =>
+                  validateScopeRequired(
+                    editForm,
+                    _,
+                    v,
+                    !editingClient?.scope_domain && !(editingClient?.metric_whitelist?.length),
+                  ),
+              },
+            ]}
+            extra="与指标白名单至少保留一个（最小授权范围），双空将无法提交；密钥不可修改（如需换密钥请删除重建）"
           >
             <Select
               allowClear
               showSearch
-              placeholder="选择业务域（留空为全部）"
+              placeholder="选择业务域（可留空，但白名单必填）"
               options={domainOptions}
               optionFilterProp="label"
               notFoundContent={domainOptions.length ? undefined : "主题域加载中或为空"}
             />
           </Form.Item>
-          <Form.Item name="metric_whitelist" label="指标白名单（可多选，留空为全部）" extra="从已发布指标中选择，已下线/删除的存量编码会保留显示">
+          <Form.Item
+            name="metric_whitelist"
+            label="指标白名单（可多选）"
+            extra="从已发布指标中选择，已下线/删除的存量编码会保留显示；与作用域至少填一个"
+          >
             <Select
               mode="multiple"
               allowClear

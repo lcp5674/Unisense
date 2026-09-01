@@ -436,7 +436,7 @@ async def test_api_admin_rbac_and_injection_guard(app_client, db_env) -> None:
         # 普通 metric_owner 调用管理端点 → 403
         r = await ac.post(
             "/api/v1/consume/api-clients",
-            json={"client_id": "x", "secret": "y"},
+            json={"client_id": "x", "secret": "y", "scope_domain": "sales"},
             headers={"Authorization": f"Bearer {owner_token}"},
         )
         assert r.status_code == 403

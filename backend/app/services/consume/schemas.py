@@ -10,7 +10,7 @@ import enum
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.models.consume import ApiClientStatus, FavoriteAssetType, SnapshotGeneratedBy
 
@@ -95,6 +95,16 @@ class ClientCreateRequest(BaseModel):
     metric_whitelist: list[str] | None = None
     qps: int = Field(20, ge=1, le=1000)
     daily_quota: int = Field(100_000, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_scope(self) -> ClientCreateRequest:
+        """最小授权范围（R8 修复，审查发现）：scope_domain 与 metric_whitelist 双空时，
+        接入方四级闸门四个条件全不触发，将获得任意非 PII 指标的全量消费权（越权缺口）。
+        创建时强制至少其一，杜绝管理员漏配即获得超出预期的消费权。
+        """
+        if not self.scope_domain and not self.metric_whitelist:
+            raise ValueError("scope_domain 与 metric_whitelist 至少须填写一个（最小授权范围）")
+        return self
 
 
 class ClientResponse(BaseModel):

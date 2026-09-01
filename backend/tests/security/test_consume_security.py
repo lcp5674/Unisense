@@ -76,7 +76,7 @@ async def test_admin_endpoint_requires_admin_role_403() -> None:
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             r = await c.post(
                 "/api/v1/consume/api-clients",
-                json={"client_id": "x", "secret": "y"},
+                json={"client_id": "x", "secret": "y", "scope_domain": "sales"},
                 headers={"Authorization": "Bearer t"},
             )
         assert r.status_code == 403
@@ -323,6 +323,58 @@ async def test_update_api_client_ok(monkeypatch) -> None:
         app.dependency_overrides.clear()
 
 
+async def test_update_api_client_clear_to_empty_422(monkeypatch) -> None:
+    """R8（审查修复）：编辑时**显式**把授权域与白名单清成双空 → 422 CLIENT_SCOPE_EMPTY。
+
+    防把已有授权清成双空（= 任意非 PII 指标全量消费权）；纯配额修改不受影响。
+    """
+    client = _api_client(scope_domain="sales")  # 默认白名单 ("M1",)，非双空
+    app.dependency_overrides[deps.get_db_session] = _fake_admin_db()
+    app.dependency_overrides[deps.get_current_user] = _admin_user
+    monkeypatch.setattr("app.api.consume.write_audit", AsyncMock())
+    monkeypatch.setattr(
+        "app.api.consume.ApiClientRepo.get_by_client_id", AsyncMock(return_value=client)
+    )
+    try:
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.put(
+                "/api/v1/consume/api-clients/acme",
+                json={"scope_domain": "", "metric_whitelist": [], "qps": 50},
+                headers={"Authorization": "Bearer t"},
+            )
+        assert r.status_code == 422, r.text
+        assert r.json()["code"] == "CLIENT_SCOPE_EMPTY"
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def test_update_api_client_keep_historical_empty_ok(monkeypatch) -> None:
+    """R8：历史双空客户端仅改配额（不传授权字段）→ 200，保留存量双空（仅治理页警告）。"""
+    client = _api_client(whitelist=None, scope_domain=None)  # 双空历史客户端
+    app.dependency_overrides[deps.get_db_session] = _fake_admin_db()
+    app.dependency_overrides[deps.get_current_user] = _admin_user
+    monkeypatch.setattr("app.api.consume.write_audit", AsyncMock())
+    monkeypatch.setattr(
+        "app.api.consume.ApiClientRepo.get_by_client_id", AsyncMock(return_value=client)
+    )
+    try:
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.put(
+                "/api/v1/consume/api-clients/acme",
+                json={"qps": 30, "daily_quota": 50000},
+                headers={"Authorization": "Bearer t"},
+            )
+        assert r.status_code == 200, r.text
+        assert r.json()["data"]["qps"] == 30
+        # 双空保留
+        assert client.scope_domain is None
+        assert client.metric_whitelist is None
+    finally:
+        app.dependency_overrides.clear()
+
+
 async def test_api_client_status_toggle(monkeypatch) -> None:
     """停用/启用接入方：PATCH status 透传并落审计。"""
     client = _api_client()
@@ -442,7 +494,7 @@ async def test_create_client_duplicate_id_conflict_409() -> None:
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             r = await c.post(
                 "/api/v1/consume/api-clients",
-                json={"client_id": "acme", "secret": "secret123"},
+                json={"client_id": "acme", "secret": "secret123", "scope_domain": "sales"},
                 headers={"Authorization": "Bearer t"},
             )
         assert r.status_code == 409, r.text
@@ -471,11 +523,40 @@ async def test_create_client_unique_id_ok() -> None:
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             r = await c.post(
                 "/api/v1/consume/api-clients",
-                json={"client_id": "brand_new", "secret": "secret123"},
+                json={"client_id": "brand_new", "secret": "secret123", "scope_domain": "sales"},
                 headers={"Authorization": "Bearer t"},
             )
         assert r.status_code == 200, r.text
         assert r.json()["data"]["client_id"] == "brand_new"
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def test_create_client_empty_scope_422() -> None:
+    """R8（审查修复）：scope_domain 与 metric_whitelist 双空 → 422（最小授权范围）。
+
+    双空时接入方四级闸门四个条件全不触发，将获得任意非 PII 指标的全量消费权
+    （越权缺口）。创建时强制至少其一，杜绝管理员漏配即获得超出预期的消费权。
+    """
+    async def fake_db():
+        session = MagicMock()
+        session.commit = AsyncMock()
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="platform_admin", domain=None, roles_all=lambda: ["platform_admin"]
+    )
+    try:
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post(
+                "/api/v1/consume/api-clients",
+                json={"client_id": "acme2", "secret": "secret123"},
+                headers={"Authorization": "Bearer t"},
+            )
+        assert r.status_code == 422, r.text
+        assert "最小授权范围" in r.text
     finally:
         app.dependency_overrides.clear()
 

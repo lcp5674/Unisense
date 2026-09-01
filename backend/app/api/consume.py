@@ -418,6 +418,18 @@ async def update_client(
         row.qps = req.qps
     if req.daily_quota is not None:
         row.daily_quota = req.daily_quota
+    # R8（审查修复）：最小授权范围——双空=任意非 PII 指标全量消费权。
+    # 仅当本次请求**显式**改动授权字段（scope_domain/metric_whitelist 任一非 None）且合并后
+    # 双空才拒绝（防把已有授权清成双空）；纯配额修改（授权字段均未传）时保留历史双空客户端
+    # （治理页警告标记，不强制破坏存量——创建时才强制最小授权范围）。
+    if not row.scope_domain and not row.metric_whitelist and (
+        req.scope_domain is not None or req.metric_whitelist is not None
+    ):
+        raise ValidationError(
+            "scope_domain 与 metric_whitelist 至少须保留一个（最小授权范围），"
+            "如需调整请先填写其一再清空另一项",
+            error_code="CLIENT_SCOPE_EMPTY",
+        )
     await db.flush()
     await write_audit(
         db,
