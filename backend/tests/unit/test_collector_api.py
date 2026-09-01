@@ -86,7 +86,7 @@ async def test_collect_now_triggers_immediate_collection(
     assert body["status"] == "QUEUED"
     assert body["mode"] == "FULL"
     mock_schedule.assert_awaited_once_with(
-        "s1", 1, org_id=1, mode="FULL", include_patterns=None, exclude_patterns=None
+        "s1", 1, org_id=None, mode="FULL", include_patterns=None, exclude_patterns=None
     )
 
 
@@ -114,7 +114,7 @@ async def test_collect_now_passes_temp_filters(
     mock_schedule.assert_awaited_once_with(
         "s1",
         1,
-        org_id=1,
+        org_id=None,
         mode="INCREMENTAL",
         include_patterns=["ods_*"],
         exclude_patterns=["tmp_*"],
@@ -993,6 +993,7 @@ def _set_current_user(user_id: int, roles: list[str]) -> None:
 
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
         id=user_id,
+        org_id=1,
         role=roles[0],
         roles_all=lambda: roles,
         has_role=lambda r: r in roles,
@@ -1101,3 +1102,62 @@ async def test_sql_query_rejects_dml(
         )
     # 服务层抛 ValidationError → API 映射 422
     assert resp.status_code == 422
+
+# ---------- 多租户组织作用域（_resolve_org_scope） ----------
+
+
+async def test_org_scope_admin_cross_org(collector_client: httpx.AsyncClient) -> None:
+    """platform_admin 跨组织放行：get_source_orm 传 org_id=None（不过滤）。"""
+    src = MagicMock(source_id="s1", owner_id=2)
+    with patch(
+        "app.api.collector.CollectorService.get_source_orm",
+        new_callable=AsyncMock,
+        return_value=src,
+    ) as mock_gs, patch(
+        "app.api.collector.CollectorService.query_sql",
+        new_callable=AsyncMock,
+        return_value={
+            "columns": ["a"],
+            "rows": [{"a": 1}],
+            "total": 1,
+            "truncated": False,
+            "elapsed_ms": 3,
+        },
+    ):
+        resp = await collector_client.post(
+            "/api/v1/data-sources/s1/sql-query",
+            json={"sql": "SELECT a FROM t", "limit": 10},
+        )
+    assert resp.status_code == 200
+    # fixture 用户为 platform_admin → org_id=None（跨组织）
+    mock_gs.assert_awaited_once_with("s1", org_id=None)
+
+
+async def test_org_scope_normal_user_scoped(
+    collector_client: httpx.AsyncClient,
+) -> None:
+    """非管理员按组织过滤：get_source_orm 传 org_id=1（用户所属组织）。"""
+    _set_current_user(5, ["analyst"])
+    src = MagicMock(source_id="s1", owner_id=5)
+    with patch(
+        "app.api.collector.CollectorService.get_source_orm",
+        new_callable=AsyncMock,
+        return_value=src,
+    ) as mock_gs, patch(
+        "app.api.collector.CollectorService.query_sql",
+        new_callable=AsyncMock,
+        return_value={
+            "columns": ["a"],
+            "rows": [{"a": 1}],
+            "total": 1,
+            "truncated": False,
+            "elapsed_ms": 3,
+        },
+    ):
+        resp = await collector_client.post(
+            "/api/v1/data-sources/s1/sql-query",
+            json={"sql": "SELECT a FROM t", "limit": 10},
+        )
+    assert resp.status_code == 200
+    # 非 platform_admin → 传用户 org_id（_set_current_user 固定 org_id=1）
+    mock_gs.assert_awaited_once_with("s1", org_id=1)
