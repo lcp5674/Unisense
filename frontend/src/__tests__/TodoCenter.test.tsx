@@ -278,3 +278,23 @@ describe("待办中心 - 聚合与跳转", () => {
     expect(screen.queryByText(/近期草稿.*已超期/)).toBeNull();
   });
 });
+
+describe("F3 - 待办计数与超限提示", () => {
+  it("计数标签显示后端 total（超 50 条不误导）+ 溢出提示 + 前往查看跳列表", async () => {
+    mockedConflicts.mockResolvedValue({
+      items: [{ conflict_id: "C-1", candidate_metric_code: "A", existing_metric_code: "B", type: "same_name_diff_def", status: "OPEN" }],
+      total: 60,
+      page: 1,
+      page_size: 50,
+    } as ConflictListResponse);
+    renderPage();
+    // 标签显示后端 total=60（而非已加载条数）
+    expect(await screen.findByText(/冲突 60/)).toBeTruthy();
+    // 溢出提示出现（冲突 60 条 > 50）
+    expect(await screen.findByText(/部分待办较多，当前仅展示每类前 50 条/)).toBeTruthy();
+    expect(screen.getByText(/冲突共 60 条/)).toBeTruthy();
+    // 点击「前往查看」跳冲突仲裁台
+    fireEvent.click(screen.getByRole("button", { name: /前往查看/ }));
+    expect(await screen.findByTestId("path")).toHaveTextContent("/approval");
+  });
+});

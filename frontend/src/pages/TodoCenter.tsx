@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Card, Button, List, Tag, Space, message } from "antd";
+import { Card, Button, List, Tag, Space, Alert, message } from "antd";
 import { fetchCurrentUser, listConflicts, listMetrics, listQualityEvents, UnisenseApiError } from "../api";
 import { usePermission } from "../hooks/usePermission";
 import { useTracking } from "../hooks/useTracking";
@@ -26,8 +26,7 @@ interface Todo {
 }
 
 // 各类待办的中文名 / 标签色 / 跳转目标 / 操作按钮文案（生产业务术语）
-const KIND_META: Record<Todo["kind"], { label: string; color: string; action: string; target: (t: Todo) => string }> = {
-  conflict: {
+const KIND_META: Record<Todo["kind"], { label: string; color: string; action: string; target: (t: Todo) => string }> = {  conflict: {
     label: "冲突",
     color: "red",
     action: "去仲裁",
@@ -59,9 +58,21 @@ const KIND_META: Record<Todo["kind"], { label: string; color: string; action: st
   },
 };
 
+// F3：超 50 条时「查看全部」跳转目标（draft/dsd 单条 target 依赖 code，此处走列表页）
+const OVERFLOW_TARGET: Record<Todo["kind"], string> = {
+  conflict: "/approval?tab=conflict",
+  draft: "/metrics?status=DRAFT",
+  review: "/approval?tab=metrics",
+  quality: "/quality",
+  dsd: "/metrics?status=DATA_SOURCE_DROPPED",
+};
+
 export function TodoCenter() {
   const [todos, setTodos] = useState<Todo[]>([]);
   const [loading, setLoading] = useState(false);
+  // F3（审查修复）：每类只取前 50 条，计数标签此前按已加载条数统计（只统计前 50，
+  // 超 50 后运维误判无积压）。现计数走后端 total，超限给「查看全部」入口。
+  const [totals, setTotals] = useState<Record<string, number>>({});
   const navigate = useNavigate();
   const { track } = useTracking();
   // P3（审查修复）：无审批权限的用户不展示「指标待审核」待办（避免点入
@@ -77,7 +88,7 @@ export function TodoCenter() {
       const [conflicts, drafts, reviews, qualityAlerts, dropped] = await Promise.all([
         listConflicts({ status: "OPEN", page_size: 50 }),
         listMetrics({ status: "DRAFT", page_size: 50 }),
-        canReview ? listMetrics({ status: "REVIEW", page_size: 50 }) : Promise.resolve({ items: [] }),
+        canReview ? listMetrics({ status: "REVIEW", page_size: 50 }) : Promise.resolve({ items: [], total: 0 }),
         listQualityEvents({ status: "OPEN", page_size: 50 }),
         listMetrics({ status: "DATA_SOURCE_DROPPED", owner_id: me.id, page_size: 50 }),
       ]);
@@ -124,6 +135,13 @@ export function TodoCenter() {
         });
       }
       setTodos(list);
+      setTotals({
+        conflict: conflicts.total ?? conflicts.items.length,
+        draft: drafts.total ?? drafts.items.length,
+        review: reviews.total ?? reviews.items.length,
+        quality: qualityAlerts.total ?? qualityAlerts.items.length,
+        dsd: dropped.total ?? dropped.items.length,
+      });
       track("todo_center_view", undefined, "todo");
     } catch (err) {
       message.error(
@@ -139,8 +157,14 @@ export function TodoCenter() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 各类计数（用于分类汇总展示）
-  const countByKind = (kind: Todo["kind"]) => todos.filter((t) => t.kind === kind).length;
+  // 各类计数：走后端 total（F3：不再用已加载条数，避免超 50 时误导）
+  const countByKind = (kind: Todo["kind"]) => totals[kind] ?? 0;
+  // 每类最多加载条数（超出给「查看全部」入口）
+  const TODO_PAGE_SIZE = 50;
+  // 有超限类时展示的提示：列出超限类及查看全部入口
+  const overflowKinds = (Object.keys(KIND_META) as unknown as Todo["kind"][]).filter(
+    (k) => (totals[k] ?? 0) > TODO_PAGE_SIZE,
+  );
 
   return (
     <div>
@@ -152,6 +176,27 @@ export function TodoCenter() {
           </Tag>
         ))}
       </Space>
+      {/* F3：超 50 条时给出「查看全部」入口，避免积压不可达 */}
+      {overflowKinds.length > 0 && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="部分待办较多，当前仅展示每类前 50 条"
+          description={overflowKinds.map((k) => `${KIND_META[k].label}共 ${totals[k]} 条`).join("；")}
+          action={
+            <Button
+              size="small"
+              onClick={() => {
+                const first = overflowKinds[0];
+                navigate(OVERFLOW_TARGET[first], { state: { from: "todo" } });
+              }}
+            >
+              前往查看
+            </Button>
+          }
+        />
+      )}
       <List
         loading={loading}
         dataSource={todos}

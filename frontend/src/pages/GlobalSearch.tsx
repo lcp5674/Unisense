@@ -42,8 +42,21 @@ const TYPE_ORDER: GlobalSearchType[] = [
   "measure",
 ];
 
-function emptyGroups(): Record<GlobalSearchType, GlobalSearchItem[]> {
-  return {
+// F5（审查修复）：每类结果仅展示前 10 条，total 与实际可访问数不符——为每类加
+// 「查看该类全部」入口，跳列表页带 ?kw= 定位（排 11 名后的结果不再永远无法到达）。
+const TYPE_LIST_PATH: Partial<Record<GlobalSearchType, string>> = {
+  metric: "/metrics",
+  dimension: "/dimensions",
+  term: "/glossary",
+  template: "/templates",
+  data_source: "/data-sources",
+  catalog: "/catalogs",
+  field: "/catalogs",
+  measure: "/measure-catalogs",
+  subject_domain: "/domains",
+};
+
+function emptyGroups(): Record<GlobalSearchType, GlobalSearchItem[]> {  return {
     metric: [],
     dimension: [],
     term: [],
@@ -192,6 +205,18 @@ export function GlobalSearch() {
                 <Space size={8}>
                   <Tag color={TYPE_COLOR[type]}>{TYPE_LABEL[type]}</Tag>
                   <span style={{ fontSize: 13, color: "rgba(0,0,0,0.45)" }}>{items.length} 条</span>
+                  {TYPE_LIST_PATH[type] && (
+                    <Button
+                      size="small"
+                      type="link"
+                      style={{ padding: 0, fontSize: 12 }}
+                      onClick={() =>
+                        navigate(`${TYPE_LIST_PATH[type]}?kw=${encodeURIComponent(q.trim())}`)
+                      }
+                    >
+                      查看该类全部
+                    </Button>
+                  )}
                 </Space>
               }
               style={{ marginBottom: 16 }}
