@@ -929,6 +929,7 @@ function ChangeMetricDetailDrawer({
   const navigate = useNavigate();
   const [metric, setMetric] = useState<MetricResponse | null>(null);
   const [snapshots, setSnapshots] = useState<SnapshotResponse[]>([]);
+  const [snapshotForbidden, setSnapshotForbidden] = useState(false);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -940,13 +941,24 @@ function ChangeMetricDetailDrawer({
     setLoading(true);
     setMetric(null);
     setSnapshots([]);
+    setSnapshotForbidden(false);
     Promise.all([
       getMetric(item.metric_code),
-      listSnapshots(item.metric_code, 50).catch(() => []),
+      listSnapshots(item.metric_code, 50)
+        .then((snaps) => {
+          setSnapshots(snaps);
+          setSnapshotForbidden(false);
+          return snaps;
+        })
+        .catch((err: unknown) => {
+          if (err instanceof UnisenseApiError && err.code === "FORBIDDEN") {
+            setSnapshotForbidden(true);
+          }
+          return [] as SnapshotResponse[];
+        }),
     ])
-      .then(([m, snaps]) => {
+      .then(([m]) => {
         setMetric(m);
-        setSnapshots(snaps);
       })
       .catch((err) => message.error(err instanceof Error ? err.message : "加载指标详情失败"))
       .finally(() => setLoading(false));
@@ -1055,7 +1067,14 @@ function ChangeMetricDetailDrawer({
             <DefinitionsDetail def={metric.definition_json} />
           </Card>
           <Card size="small" title="数值快照">
-            {snapshots.length === 0 ? (
+            {snapshotForbidden ? (
+              <Alert
+                type="warning"
+                showIcon
+                message="无权限查看该指标消费快照"
+                description="当前账号未获得该指标所属域的数据读取授权，如需查看请联系域管理员配置授权（grants）或指标白名单。"
+              />
+            ) : snapshots.length === 0 ? (
               <Empty description="暂无查询快照" />
             ) : (
               <Table

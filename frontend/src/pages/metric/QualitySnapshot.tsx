@@ -31,6 +31,7 @@ export function QualitySnapshot({ metricId, metricCode }: { metricId: number; me
   const [events, setEvents] = useState<QualityEvent[]>([]);
   const [rules, setRules] = useState<QualityRule[]>([]);
   const [snapshots, setSnapshots] = useState<SnapshotResponse[]>([]);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   async function load() {
@@ -39,11 +40,20 @@ export function QualitySnapshot({ metricId, metricCode }: { metricId: number; me
       const [ev, ru, sn] = await Promise.all([
         listQualityEvents({ metric_id: metricId, page_size: 20 }).catch(() => ({ items: [] as QualityEvent[] })),
         listQualityRules({ metric_id: metricId, page_size: 20 }).catch(() => ({ items: [] as QualityRule[] })),
-        listSnapshots(metricCode, 10).catch(() => [] as SnapshotResponse[]),
+        listSnapshots(metricCode, 10)
+          .then((d) => ({ data: d, error: null as string | null }))
+          .catch((err: unknown) => ({
+            data: [] as SnapshotResponse[],
+            error:
+              err instanceof UnisenseApiError && err.code === "FORBIDDEN"
+                ? err.message
+                : null,
+          })),
       ]);
       setEvents(ev.items);
       setRules(ru.items);
-      setSnapshots(sn);
+      setSnapshots(sn.data);
+      setSnapshotError(sn.error);
     } finally {
       setLoading(false);
     }
@@ -165,8 +175,15 @@ export function QualitySnapshot({ metricId, metricCode }: { metricId: number; me
         },
         {
           key: "snapshots",
-          label: `消费快照 (${snapshots.length})`,
-          children: (
+          label: snapshotError ? "消费快照（无权限）" : `消费快照 (${snapshots.length})`,
+          children: snapshotError ? (
+            <Alert
+              type="warning"
+              showIcon
+              message="无权限查看该指标消费快照"
+              description={`${snapshotError}。当前账号未获得该指标所属域的数据读取授权，如需查看请联系域管理员配置授权（grants）或指标白名单。`}
+            />
+          ) : (
             <Table
               dataSource={snapshots}
               columns={snapshotColumns}
