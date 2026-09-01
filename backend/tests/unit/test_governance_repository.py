@@ -305,3 +305,27 @@ class TestGovernanceRepositoryExtended:
         # 逐条插入新集合 + flush
         assert repo._db.add.call_count == 2
         repo._db.flush.assert_awaited_once()
+
+    async def test_replace_user_ui_permissions_physical_delete(
+        self, repo: GovernanceRepository
+    ) -> None:
+        """整表替换必须物理删除该用户全部行，而非软删。
+
+        唯一索引 ``uk_user_permission_user_action_effect`` 由 (user_id, action, effect)
+        三列构成；软删行（deleted_at 非空）仍占用键位——用户再次打开授权弹窗保存
+        同一 action（含 deny）会触发 Duplicate entry 1062（500，线上已复现）。
+        """
+        repo._db.execute = AsyncMock(return_value=self._result(None))
+        await repo.replace_user_ui_permissions(
+            1, ["metric:create"], 99, "专项授权", deny_actions=["ai:view"]
+        )
+        # 第一个 execute 是无条件按 user_id 的物理删除（不依赖 deleted_at 条件）
+        stmt = str(repo._db.execute.call_args[0][0])
+        assert "DELETE FROM USER_PERMISSION" in stmt.upper()
+        assert "deleted_at" not in stmt.lower()
+        # allow 1 条 + deny 1 条 = 2 次 add，effect 正确
+        assert repo._db.add.call_count == 2
+        added = [c.args[0] for c in repo._db.add.call_args_list]
+        effects = {getattr(a, "effect", "allow") for a in added}
+        assert "deny" in effects
+        repo._db.flush.assert_awaited_once()

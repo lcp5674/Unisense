@@ -142,8 +142,9 @@ class RolePermission(Base, BaseModel):
 class UserPermission(Base, BaseModel):
     """用户直挂按钮权限点表（TD §12.5 增强）。
 
-    记录对用户**直接挂载**的按钮级权限点（不经角色间接授权）。``(user_id, action)``
-    唯一，语义为「整表替换该用户直挂动作」（先删该用户全部行，再插入新集合）。
+    记录对用户**直接挂载**的按钮级权限点（不经角色间接授权）。``(user_id, action,
+    effect)`` 唯一，语义为「整表替换该用户直挂动作」（repository 先物理删除该用户
+    全部行，再插入新集合，避免软删行占据唯一键导致二次保存冲突）。
 
     ``effect`` 区分正向授权（allow）与负向收窄（deny）：``my_permissions`` 先取
     「角色继承 ∪ 直挂 allow」并集，再**减去直挂 deny**（deny 优先于 grant，
@@ -177,7 +178,10 @@ class UserPermission(Base, BaseModel):
 
     __table_args__ = (
         Index("idx_user_permission_user", "user_id"),
-        UniqueConstraint("user_id", "action", name="uk_user_permission_user_action"),
+        UniqueConstraint(
+            "user_id", "action", "effect",
+            name="uk_user_permission_user_action_effect",
+        ),
     )
 
 

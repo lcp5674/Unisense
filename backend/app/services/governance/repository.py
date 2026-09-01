@@ -153,19 +153,17 @@ class GovernanceRepository:
         reason: str | None,
         deny_actions: list[str] | None = None,
     ) -> None:
-        """整表替换某用户直挂的 UI 权限点（先软删既有行，再插入新集合）。
+        """整表替换某用户直挂的 UI 权限点（先物理删除既有行，再插入新集合）。
 
         Args:
             actions: 正向授权（allow）权限点。
             deny_actions: 负向收窄（deny）权限点；缺省为空。
         """
-        now = datetime.now(UTC)
-        stmt = (
-            update(UserPermission)
-            .where(UserPermission.user_id == user_id, UserPermission.deleted_at.is_(None))
-            .values(deleted_at=now)
+        # 物理删除而非软删：软删行（deleted_at 非空）仍占据 (user_id, action,
+        # effect) 唯一键，二次保存重建同一 action 会撞唯一约束（Duplicate entry 500）。
+        await self._db.execute(
+            delete(UserPermission).where(UserPermission.user_id == user_id)
         )
-        await self._db.execute(stmt)
         for action in actions:
             self._db.add(
                 UserPermission(
