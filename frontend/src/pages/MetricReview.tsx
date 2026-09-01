@@ -22,65 +22,55 @@ import { CodeValue } from "../components/CodeValue";
 import { usePermission } from "../hooks/usePermission";
 import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
 
-function openReviewModal(
-  metric: MetricResponse,
-  approved: boolean,
-  onOk: (reason: string, mode?: "standard" | "experimental", grayTenants?: number[]) => Promise<void>,
-) {
-  let reason = "";
-  let mode = "standard" as "standard" | "experimental";
-  let grayTenants = "";
-  Modal.confirm({
-    title: approved ? `通过评审：${metric.metric_code}` : `驳回：${metric.metric_code}`,
-    content: (
-      <div>
-        <p style={{ marginBottom: 12 }}>
-          {approved
-            ? "通过后该指标将进入已发布状态；也可选择灰度发布（评审通过但先对指定租户生效）。"
-            : "驳回后该指标将退回草稿状态，请填写驳回原因（提交人据此修改重提）。"}
-        </p>
-        {/* 变更上下文摘要：本次审批是新增/变更/破坏性/重评审（自加载版本历史） */}
-        <ReviewChangeSummary metric={metric} />
-        {approved && (
-          <div style={{ marginBottom: 12 }}>
-            <Radio.Group
-              value={mode}
-              onChange={(e) => {
-                mode = e.target.value as "standard" | "experimental";
-              }}
-              style={{ marginBottom: 8 }}
-            >
-              <Radio value="standard">标准发布（全部消费方）</Radio>
-              <Radio value="experimental">灰度发布（仅指定租户）</Radio>
-            </Radio.Group>
-            {mode === "experimental" && (
-              <Input
-                placeholder="灰度租户 ID（逗号分隔，如 101,102；留空则灰度但不指定租户）"
-                onChange={(e) => {
-                  grayTenants = e.target.value;
-                }}
-              />
-            )}
-          </div>
-        )}
-        <Input.TextArea
-          rows={3}
-          placeholder={approved ? "变更原因（可选）" : "驳回原因（必填，至少 4 字）"}
-          onChange={(e) => {
-            reason = e.target.value;
-          }}
-        />
-      </div>
-    ),
-    okText: approved ? "通过" : "驳回",
-    cancelText: "取消",
-    okButtonProps: approved ? { type: "primary" as const } : { danger: true },
-    // 驳回必须填原因：返回 Promise，拒绝时 Modal 不关闭（不提交）
-    onOk: () =>
-      new Promise<void>((resolve, reject) => {
+// 评审弹窗（通过/驳回）：受控组件。原实现用 Modal.confirm + 静态 JSX + 闭包变量，
+// 导致「灰度发布」Radio 点击只改闭包、React 不重渲染——选中态不切换、租户输入框不出现（用户无反馈）。
+// 改为 useState 驱动的受控 Modal，Radio 选中态即时切换、灰度租户输入框随 mode 显隐。
+function ReviewModal({
+  metric,
+  approved,
+  open,
+  onClose,
+  onSubmit,
+}: {
+  metric: MetricResponse;
+  approved: boolean;
+  open: boolean;
+  onClose: () => void;
+  onSubmit: (
+    reason: string,
+    mode?: "standard" | "experimental",
+    grayTenants?: number[],
+  ) => Promise<void>;
+}) {
+  const [mode, setMode] = useState<"standard" | "experimental">("standard");
+  const [grayTenants, setGrayTenants] = useState("");
+  const [reason, setReason] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  // 每次打开重置为默认值（避免上次残留）
+  useEffect(() => {
+    if (open) {
+      setMode("standard");
+      setGrayTenants("");
+      setReason("");
+      setSubmitting(false);
+    }
+  }, [open]);
+
+  return (
+    <Modal
+      title={approved ? `通过评审：${metric.metric_code}` : `驳回：${metric.metric_code}`}
+      open={open}
+      onCancel={() => {
+        if (!submitting) onClose();
+      }}
+      okText={approved ? "通过" : "驳回"}
+      cancelText="取消"
+      okButtonProps={approved ? { type: "primary" } : { danger: true }}
+      confirmLoading={submitting}
+      onOk={() => {
+        // 驳回必须填原因
         if (!approved && reason.trim().length < 4) {
           message.warning("驳回原因至少 4 字，请补充说明");
-          reject();
           return;
         }
         // 灰度发布：租户 ID 须为数字（此前非数字被静默丢弃，用户误以为全部生效）
@@ -92,21 +82,62 @@ function openReviewModal(
             .filter((t) => !/^\d+$/.test(t));
           if (invalid.length) {
             message.warning(`灰度租户 ID 须为数字：${invalid.join("、")}，请修正后重试`);
-            reject();
             return;
           }
         }
-        resolve();
-      }).then(() => {
         const tenants = grayTenants
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean)
           .map(Number)
           .filter((n) => !Number.isNaN(n));
-        return onOk(reason, approved ? mode : undefined, approved && mode === "experimental" ? tenants : undefined);
-      }),
-  });
+        setSubmitting(true);
+        void Promise.resolve(
+          onSubmit(reason, approved ? mode : undefined, approved && mode === "experimental" ? tenants : undefined),
+        )
+          .catch(() => {
+            // onSubmit 内部已处理错误提示，此处仅防止 unhandled rejection
+          })
+          .finally(() => {
+            setSubmitting(false);
+            onClose();
+          });
+      }}
+    >
+      <p style={{ marginBottom: 12 }}>
+        {approved
+          ? "通过后该指标将进入已发布状态；也可选择灰度发布（评审通过但先对指定租户生效）。"
+          : "驳回后该指标将退回草稿状态，请填写驳回原因（提交人据此修改重提）。"}
+      </p>
+      {/* 变更上下文摘要：本次审批是新增/变更/破坏性/重评审（自加载版本历史） */}
+      <ReviewChangeSummary metric={metric} />
+      {approved && (
+        <div style={{ marginBottom: 12 }}>
+          <Radio.Group
+            value={mode}
+            onChange={(e) => setMode(e.target.value as "standard" | "experimental")}
+            style={{ marginBottom: 8 }}
+          >
+            <Radio value="standard">标准发布（全部消费方）</Radio>
+            <Radio value="experimental">灰度发布（仅指定租户）</Radio>
+          </Radio.Group>
+          {mode === "experimental" && (
+            <Input
+              placeholder="灰度租户 ID（逗号分隔，如 101,102；留空则灰度但不指定租户）"
+              value={grayTenants}
+              onChange={(e) => setGrayTenants(e.target.value)}
+            />
+          )}
+        </div>
+      )}
+      <Input.TextArea
+        rows={3}
+        value={reason}
+        placeholder={approved ? "变更原因（可选）" : "驳回原因（必填，至少 4 字）"}
+        onChange={(e) => setReason(e.target.value)}
+      />
+    </Modal>
+  );
 }
 
 // 评审人身份判定（TD §13）：仅被指派评审人可通过/打回；platform_admin 兜底
@@ -351,6 +382,11 @@ export function MetricReview({ embedded = false }: { embedded?: boolean } = {}) 
   const [domainMap, setDomainMap] = useState<Record<string, string>>({});
   // 「我审过的」详情弹窗：点击行/查看详情打开，展示我的处理结论 + 完整口径
   const [detailMetric, setDetailMetric] = useState<MetricResponse | null>(null);
+  // 评审弹窗（通过/驳回）——受控组件，支持灰度发布选择
+  const [reviewModal, setReviewModal] = useState<{
+    metric: MetricResponse;
+    approved: boolean;
+  } | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
   const [batchBusy, setBatchBusy] = useState(false);
   // 批量打回原因（L1）：批量打回须填写原因（对齐单条驳回），提交人据此修改重提
@@ -688,11 +724,7 @@ export function MetricReview({ embedded = false }: { embedded?: boolean } = {}) 
               size="small"
               type="primary"
               disabled={!allowed || piiPending || busyCode === r.metric_code}
-              onClick={() =>
-                openReviewModal(r, true, (reason, mode, grayTenants) =>
-                  handleReview(r, true, reason, mode, grayTenants),
-                )
-              }
+              onClick={() => setReviewModal({ metric: r, approved: true })}
             >
               通过
             </Button>
@@ -700,7 +732,7 @@ export function MetricReview({ embedded = false }: { embedded?: boolean } = {}) 
               size="small"
               danger
               disabled={!allowed || busyCode === r.metric_code}
-              onClick={() => openReviewModal(r, false, (reason) => handleReview(r, false, reason))}
+              onClick={() => setReviewModal({ metric: r, approved: false })}
             >
               驳回
             </Button>
@@ -886,6 +918,18 @@ export function MetricReview({ embedded = false }: { embedded?: boolean } = {}) 
             onChange={(e) => setBatchRejectReason(e.target.value)}
           />
         </Modal>
+        {/* 评审弹窗（通过/驳回）：受控组件——灰度发布 Radio 选中态即时切换、租户输入框随 mode 显隐 */}
+        {reviewModal ? (
+          <ReviewModal
+            metric={reviewModal.metric}
+            approved={reviewModal.approved}
+            open
+            onClose={() => setReviewModal(null)}
+            onSubmit={(reason, mode, grayTenants) =>
+              handleReview(reviewModal.metric, reviewModal.approved, reason, mode, grayTenants)
+            }
+          />
+        ) : null}
         {/* 「我审过的」评审记录详情弹窗：处理结论（通过/驳回+原因+时间）+ 完整口径 */}
         {detailMetric && view === "reviewed"
           ? (() => {

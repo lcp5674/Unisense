@@ -339,7 +339,7 @@ describe("MetricReview 指标审批", () => {
     });
     // 默认标准发布提交 → approveMetric 带 mode=standard、无灰度租户
     const confirmBtn = document.querySelector(
-      ".ant-modal-confirm-btns .ant-btn-primary",
+      ".ant-modal-footer .ant-btn-primary",
     ) as HTMLElement;
     expect(confirmBtn).toBeTruthy();
     fireEvent.click(confirmBtn);
@@ -351,7 +351,7 @@ describe("MetricReview 指标审批", () => {
     });
   });
 
-  it("灰度发布输入非数字租户 ID 时提示且不提交", async () => {
+  it("灰度发布：点击后租户输入框即时出现，填非法租户提示且不提交", async () => {
     mockedApprove.mockResolvedValue(metric);
     renderReview();
     await screen.findByText("sales_gmv_day");
@@ -359,16 +359,18 @@ describe("MetricReview 指标审批", () => {
     await waitFor(() => {
       expect(screen.getByText("灰度发布（仅指定租户）")).toBeTruthy();
     });
-    // 切换为灰度发布
+    // 默认（标准发布）下不应有灰度租户输入框
+    expect(screen.queryByPlaceholderText(/灰度租户 ID/)).toBeNull();
+    // 切换为灰度发布 → 输入框即时出现（受控组件，修复"点击无反馈"）
     fireEvent.click(screen.getByText("灰度发布（仅指定租户）"));
-    // 输入含非数字租户 ID
-    const input = document.querySelector(
-      ".ant-modal-confirm-content input",
-    ) as HTMLInputElement;
+    const input = (await screen.findByPlaceholderText(
+      /灰度租户 ID/,
+    )) as HTMLInputElement;
     expect(input).toBeTruthy();
+    // 输入含非数字租户 ID
     fireEvent.change(input, { target: { value: "101,abc,102" } });
     const confirmBtn = document.querySelector(
-      ".ant-modal-confirm-btns .ant-btn-primary",
+      ".ant-modal-footer .ant-btn-primary",
     ) as HTMLElement;
     fireEvent.click(confirmBtn);
     // 非数字被拒绝 → 不提交、弹窗不关闭
@@ -376,7 +378,7 @@ describe("MetricReview 指标审批", () => {
       expect(mockedApprove).not.toHaveBeenCalled();
     });
     expect(
-      document.querySelector(".ant-modal-confirm-btns .ant-btn-primary"),
+      document.querySelector(".ant-modal-footer .ant-btn-primary"),
     ).toBeTruthy();
   });
 
