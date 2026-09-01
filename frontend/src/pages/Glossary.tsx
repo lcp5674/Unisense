@@ -535,7 +535,7 @@ function TermsTab() {
     {
       title: "操作",
       key: "actions",
-      width: 420,
+      width: 260,
       render: (_: unknown, t: GlossaryTerm) => {
         // 回收站视图：仅展示恢复（软删项不提供编辑/审核等操作）
         if (deleted) {
@@ -783,10 +783,19 @@ function TermsTab() {
           <Form.Item name="name" label="名称" rules={[{ required: true }]}>
             <Input />
           </Form.Item>
-          <Form.Item label="AI 推断" style={{ marginBottom: 12 }}>
+          <Form.Item
+            label="AI 推断"
+            style={{ marginBottom: 12 }}
+            extra={
+              can("glossary:infer")
+                ? undefined
+                : "无 glossary:infer 权限，AI 推断不可用（消耗 LLM 资源）"
+            }
+          >
             <Button
               icon={inferring ? <LoadingOutlined /> : <ThunderboltOutlined />}
               loading={inferring}
+              disabled={!can("glossary:infer")}
               onClick={() => inferFromName(editForm, setInferring)}
             >
               根据名称重新生成定义 / 同义词 / 边界建议

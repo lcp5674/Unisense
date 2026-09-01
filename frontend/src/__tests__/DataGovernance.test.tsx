@@ -177,6 +177,7 @@ describe("Governance 权限治理", () => {
       role: "viewer",
       role_actions: ["catalog:view"],
       direct_actions: [],
+      deny_actions: [],
       effective_actions: ["catalog:view"],
     });
     mockSetUserPerms.mockResolvedValue({
@@ -184,6 +185,7 @@ describe("Governance 权限治理", () => {
       role: "viewer",
       role_actions: ["catalog:view"],
       direct_actions: ["metric:create"],
+      deny_actions: [],
       effective_actions: ["catalog:view", "metric:create"],
     });
   });
@@ -485,15 +487,15 @@ describe("Governance 权限治理", () => {
     await clickTab("授权管理");
     await screen.findByText(/爱丽丝/); // 用户列显示用户名（user_id → username 映射，display_name 带括号）
 
-    // 操作列有「给该用户授权」按钮（在授权页内直接授权，不再跳转用户管理全局页）
+    // 操作列有「授权」主按钮（在授权页内直接授权，不再跳转用户管理全局页）
     const grantBtn = screen
-      .getAllByRole("button", { name: /给该用户授权/ })
-      .find((b) => !(b as HTMLButtonElement).disabled);
+      .getAllByRole("button")
+      .find((b) => b.textContent?.replace(/\s/g, "") === "授权" && !(b as HTMLButtonElement).disabled);
     expect(grantBtn).toBeTruthy();
     // 指标白名单列展示
     expect(screen.getByText("sales_gmv")).toBeTruthy();
 
-    // 点击「给该用户授权」→ 打开批量授权弹窗并预填该用户（user_ids=[1]）
+    // 点击「授权」→ 打开批量授权弹窗并预填该用户（user_ids=[1]）
     await userEvent.click(grantBtn!);
     expect(await screen.findByText("批量授权（同一参数应用到多个用户）")).toBeInTheDocument();
     expect(screen.getByText("alice（爱丽丝）")).toBeTruthy();
@@ -570,8 +572,10 @@ describe("Governance Tab 级权限过滤", () => {
     renderWithPerms(["governance:view", "grant:create"], [grant]);
     await waitFor(() => expect(screen.getByRole("tab", { name: "授权管理" })).toBeInTheDocument());
     await userEvent.click(screen.getByRole("tab", { name: "授权管理" }));
-    // 「给该用户授权」可见（grant:create），「回收」不显示（缺 grant:revoke）
-    await waitFor(() => expect(screen.getByText("给该用户授权")).toBeInTheDocument());
+    // 「授权」主按钮可见（grant:create），「回收」收进「更多」下拉且无 revoke 时不可见
+    await waitFor(() =>
+      expect(screen.getAllByRole("button").some((b) => b.textContent?.replace(/\s/g, "") === "授权")).toBe(true),
+    );
     expect(screen.queryByText(/回\s*收/)).not.toBeInTheDocument();
   });
 
@@ -584,9 +588,13 @@ describe("Governance Tab 级权限过滤", () => {
     renderWithPerms(["governance:view", "grant:create", "grant:revoke"], [grant]);
     await waitFor(() => expect(screen.getByRole("tab", { name: "授权管理" })).toBeInTheDocument());
     await userEvent.click(screen.getByRole("tab", { name: "授权管理" }));
-    // 先确认列表行已渲染（「给该用户授权」按钮），再断言「回收」出现
-    await waitFor(() => expect(screen.getByText("给该用户授权")).toBeInTheDocument());
-    expect(screen.getByText(/回\s*收/)).toBeInTheDocument();
+    // 先确认列表行已渲染（「授权」主按钮），再展开「更多」下拉断言「回收」出现
+    await waitFor(() =>
+      expect(screen.getAllByRole("button").some((b) => b.textContent?.replace(/\s/g, "") === "授权")).toBe(true),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /更\s*多/ }));
+    const revokeItem = (await screen.findAllByRole("menuitem")).find((el) => el.textContent?.trim() === "回收");
+    expect(revokeItem).toBeTruthy();
   });
 
   it("按钮级：仅 pii:review 无 classification:rescan 时，PII 复核不显示分类重扫按钮", async () => {
@@ -599,6 +607,47 @@ describe("Governance Tab 级权限过滤", () => {
 });
 
 describe("Governance 授权管理 - 角色下拉与按用户授权矩阵", () => {
+  beforeEach(() => {
+    // 独立顶层 describe：需补齐 Governance 渲染所需的默认 mock（否则 useEffect 调 listRoleOptions 等返回 undefined 崩溃）
+    mockPerms.mockResolvedValue({
+      user_id: 1,
+      role: "platform_admin",
+      home_domain: null,
+      allowed_actions: ["read", "write", "approve", "export", "review"],
+      ui_actions: ["*"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
+    mockGrants.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 });
+    mockUsers.mockResolvedValue(USERS);
+    mockDomains.mockResolvedValue([]);
+    mockMetrics.mockResolvedValue({ total: 0, page: 1, page_size: 1000, items: [] });
+    mockRoleOptions.mockResolvedValue([{ id: 1, name: "viewer", is_custom: false }]);
+    mockActionRegistry.mockResolvedValue(ACTION_REGISTRY);
+    vi.mocked(listDictItems).mockResolvedValue([
+      { id: 1, dict_type: "pii_field_type", code: "user_phone", label: "手机号", sort_order: 1, status: "active", description: null },
+    ] as never);
+    mockGetUserPerms.mockResolvedValue({
+      user_id: 1,
+      role: "viewer",
+      role_actions: ["catalog:view"],
+      direct_actions: [],
+      deny_actions: [],
+      effective_actions: ["catalog:view"],
+    });
+    mockSetUserPerms.mockResolvedValue({
+      user_id: 1,
+      role: "viewer",
+      role_actions: ["catalog:view"],
+      direct_actions: ["metric:create"],
+      deny_actions: [],
+      effective_actions: ["catalog:view", "metric:create"],
+    });
+  });
+
   it("角色列显示角色名（非数字 ID）；授权弹窗角色为下拉选项", async () => {
     const grant = {
       id: 1, user_id: 1, role_id: 1, domain: "sales", metric_whitelist: null,
@@ -628,12 +677,12 @@ describe("Governance 授权管理 - 角色下拉与按用户授权矩阵", () =>
     await waitFor(() => expect(screen.getByText("只读用户")).toBeInTheDocument());
     await userEvent.click(screen.getByRole("button", { name: /按\s*钮\s*权\s*限/ }));
     await waitFor(() => expect(screen.getByText(/按用户授权：/)).toBeInTheDocument());
-    // 角色已含项 catalog:view 只读（disabled 证明不可在此收窄角色）
+    // 角色已含项 catalog:view 默认勾选（组件为三态语义：取消「角色」项=仅对该用户禁用收窄，非 disabled 旧断言已过时）
     const viewCheckbox = screen.getByRole("checkbox", { name: /查看指标目录/ });
-    expect(viewCheckbox).toBeDisabled();
-    // 直挂区 metric:create（创建指标）可勾选并保存
+    expect(viewCheckbox).toBeChecked();
+    // 直挂区 metric:create（创建指标）默认未勾选、可勾选并保存
     const createCheckbox = screen.getByRole("checkbox", { name: /创建指标/ });
-    expect(createCheckbox).not.toBeDisabled();
+    expect(createCheckbox).not.toBeChecked();
     await userEvent.click(createCheckbox);
     await userEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
     await waitFor(() =>

@@ -51,20 +51,23 @@ export function MasterDataReviewActions(props: {
   submitTip?: string;
   /** 审核通过提示文案 */
   approveTip?: string;
+  /** 是否允许提交审核（父级按钮权限点控制，缺省放行） */
+  canSubmit?: boolean;
   onApprove: (row: ReviewRow) => void;
   onOpenSubmit: (row: ReviewRow) => void;
   onOpenReject: (row: ReviewRow) => void;
 }) {
-  const { row, user, busyCode, submitTip, approveTip, onApprove, onOpenSubmit, onOpenReject } = props;
+  const { row, user, busyCode, submitTip, approveTip, canSubmit = true, onApprove, onOpenSubmit, onOpenReject } = props;
   const canReview = canReviewMasterData(row, user);
   return (
     <>
       {row.status === "DRAFT" && (
-        <Tooltip title={submitTip ?? "提交审核（发布前须评审通过）"}>
+        <Tooltip title={canSubmit ? (submitTip ?? "提交审核（发布前须评审通过）") : "无提交审核权限"}>
           <Button
             size="small"
             type="primary"
             icon={<SendOutlined />}
+            disabled={!canSubmit}
             onClick={() => onOpenSubmit(row)}
           >
             提交审核

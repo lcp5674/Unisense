@@ -1427,6 +1427,7 @@ export interface UserPermissionResponse {
   role: string;
   role_actions: string[];
   direct_actions: string[];
+  deny_actions: string[];
   effective_actions: string[];
 }
 

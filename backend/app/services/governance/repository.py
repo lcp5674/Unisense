@@ -128,14 +128,22 @@ class GovernanceRepository:
 
     # ------------------------------------------------------ user permission
 
-    async def list_user_ui_permissions(self, user_id: int) -> set[str]:
-        """返回某用户直挂的 UI 权限点集合（未删除行）。"""
+    async def list_user_ui_permissions(self, user_id: int) -> tuple[set[str], set[str]]:
+        """返回某用户直挂的 UI 权限点（按 effect 分为 allow/deny 两组，未删除行）。
+
+        Returns:
+            ``(allows, denies)``：正向授权集合与负向收窄集合。
+        """
         stmt = (
-            select(UserPermission.action)
+            select(UserPermission.action, UserPermission.effect)
             .where(UserPermission.user_id == user_id, UserPermission.deleted_at.is_(None))
         )
         rows = await self._db.execute(stmt)
-        return {str(r) for r in rows.scalars().all()}
+        allows: set[str] = set()
+        denies: set[str] = set()
+        for action, effect in rows.all():
+            (denies if effect == "deny" else allows).add(str(action))
+        return allows, denies
 
     async def replace_user_ui_permissions(
         self,
@@ -143,8 +151,14 @@ class GovernanceRepository:
         actions: list[str],
         granted_by: int | None,
         reason: str | None,
+        deny_actions: list[str] | None = None,
     ) -> None:
-        """整表替换某用户直挂的 UI 权限点（先软删既有行，再插入新集合）。"""
+        """整表替换某用户直挂的 UI 权限点（先软删既有行，再插入新集合）。
+
+        Args:
+            actions: 正向授权（allow）权限点。
+            deny_actions: 负向收窄（deny）权限点；缺省为空。
+        """
         now = datetime.now(UTC)
         stmt = (
             update(UserPermission)
@@ -156,6 +170,16 @@ class GovernanceRepository:
             self._db.add(
                 UserPermission(
                     user_id=user_id, action=action, granted_by=granted_by, reason=reason
+                )
+            )
+        for action in deny_actions or []:
+            self._db.add(
+                UserPermission(
+                    user_id=user_id,
+                    action=action,
+                    effect="deny",
+                    granted_by=granted_by,
+                    reason=reason,
                 )
             )
         await self._db.flush()

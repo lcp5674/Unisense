@@ -361,37 +361,37 @@ export default function App() {
               <Routes>
                 <Route element={<Layout user={user} />}>
               <Route path="/dashboard" element={<Dashboard />} />
-              <Route path="/todo" element={<TodoCenter />} />
-              <Route path="/notifications" element={<Notifications />} />
-              <Route path="/catalog" element={<MetricCatalog />} />
+              <Route path="/todo" element={<RequirePerm perm={ROUTE_PERM["/todo"]}><TodoCenter /></RequirePerm>} />
+              <Route path="/notifications" element={<RequirePerm perm={ROUTE_PERM["/notifications"]}><Notifications /></RequirePerm>} />
+              <Route path="/catalog" element={<RequirePerm perm={ROUTE_PERM["/catalog"]}><MetricCatalog /></RequirePerm>} />
               <Route path="/search" element={<GlobalSearch />} />
-              <Route path="/templates" element={<Templates />} />
+              <Route path="/templates" element={<RequirePerm perm={ROUTE_PERM["/templates"]}><Templates /></RequirePerm>} />
               <Route path="/detail/:code" element={<MetricDetail />} />
-              <Route path="/compare" element={<MetricCompare />} />
+              <Route path="/compare" element={<RequirePerm perm={ROUTE_PERM["/compare"]}><MetricCompare /></RequirePerm>} />
               <Route path="/create" element={<RequirePerm perm={ROUTE_PERM["/create"]}><MetricCreate /></RequirePerm>} />
-              <Route path="/approval" element={<ApprovalCenter />} />
+              <Route path="/approval" element={<RequirePerm perms={["metric:review", "master-data:review", "review:view"]}><ApprovalCenter /></RequirePerm>} />
               {/* 深链兼容：原三个审批/仲裁入口重定向到统一审批中心对应 Tab（保留书签/通知/旧链接） */}
               <Route path="/metrics/review" element={<Navigate to="/approval?tab=metrics" replace />} />
               <Route path="/master-data/review" element={<Navigate to="/approval?tab=master-data" replace />} />
-              <Route path="/favorites" element={<Favorites />} />
-              <Route path="/assetmap" element={<AssetMap />} />
-              <Route path="/lineage" element={<LineageView />} />
+              <Route path="/favorites" element={<RequirePerm perm={ROUTE_PERM["/favorites"]}><Favorites /></RequirePerm>} />
+              <Route path="/assetmap" element={<RequirePerm perm={ROUTE_PERM["/assetmap"]}><AssetMap /></RequirePerm>} />
+              <Route path="/lineage" element={<RequirePerm perm={ROUTE_PERM["/lineage"]}><LineageView /></RequirePerm>} />
               <Route path="/review" element={<Navigate to="/approval?tab=conflict" replace />} />
-              <Route path="/quality" element={<QualityCenter />} />
-              <Route path="/dimensions" element={<Dimensions />} />
+              <Route path="/quality" element={<RequirePerm perm={ROUTE_PERM["/quality"]}><QualityCenter /></RequirePerm>} />
+              <Route path="/dimensions" element={<RequirePerm perm={ROUTE_PERM["/dimensions"]}><Dimensions /></RequirePerm>} />
               <Route path="/measure-catalogs" element={<RequirePerm perm={ROUTE_PERM["/measure-catalogs"]}><MeasureCatalogs /></RequirePerm>} />
               <Route path="/sql-infer-eval" element={<RequirePerm perm={ROUTE_PERM["/sql-infer-eval"]}><SqlInferEval /></RequirePerm>} />
-              <Route path="/glossary" element={<Glossary />} />
+              <Route path="/glossary" element={<RequirePerm perm={ROUTE_PERM["/glossary"]}><Glossary /></RequirePerm>} />
               <Route path="/governance" element={<RequirePerm perm={ROUTE_PERM["/governance"]}><Governance /></RequirePerm>} />
               <Route path="/audit" element={<RequirePerm perm={ROUTE_PERM["/audit"]}><AuditLog /></RequirePerm>} />
-              <Route path="/query" element={<QueryWorkspace />} />
+              <Route path="/query" element={<RequirePerm perm={ROUTE_PERM["/query"]}><QueryWorkspace /></RequirePerm>} />
               <Route path="/api-clients" element={<RequirePerm perm={ROUTE_PERM["/api-clients"]}><ApiClients /></RequirePerm>} />
-              <Route path="/ai" element={<AiAssistant />} />
+              <Route path="/ai" element={<RequirePerm perm={ROUTE_PERM["/ai"]}><AiAssistant /></RequirePerm>} />
               <Route path="/system-config" element={<RequirePerm perm={ROUTE_PERM["/system-config"]}><SystemConfig /></RequirePerm>} />
               <Route path="/users" element={<RequirePerm perm={ROUTE_PERM["/users"]}><UserManagement /></RequirePerm>} />
               <Route path="/organizations" element={<RequirePerm perm={ROUTE_PERM["/organizations"]}><OrgManagement /></RequirePerm>} />
               <Route path="/observability" element={<RequirePerm perm={ROUTE_PERM["/observability"]}><Observability /></RequirePerm>} />
-              <Route path="/feedback" element={<FeedbackCenter />} />
+              <Route path="/feedback" element={<RequirePerm perm={ROUTE_PERM["/feedback"]}><FeedbackCenter /></RequirePerm>} />
               <Route path="/tracking-stats" element={<RequirePerm perm={ROUTE_PERM["/tracking-stats"]}><TrackingStats /></RequirePerm>} />
               <Route path="/metric-ops" element={<RequirePerm perm={ROUTE_PERM["/metric-ops"]}><MetricOps /></RequirePerm>} />
               <Route path="/data-sources" element={<RequirePerm perm={ROUTE_PERM["/data-sources"]}><DataSources /></RequirePerm>} />
@@ -403,7 +403,7 @@ export default function App() {
               <Route path="/sensitive-rules" element={<RequirePerm perm={ROUTE_PERM["/sensitive-rules"]}><SensitiveRules /></RequirePerm>} />
               <Route path="/account" element={<Account />} />
               <Route path="/api-docs" element={<ApiDocs />} />
-              <Route path="/guide/:metricCode" element={<ConsumptionGuide />} />
+              <Route path="/guide/:metricCode" element={<RequirePerm perm={ROUTE_PERM["/guide/:metricCode"]}><ConsumptionGuide /></RequirePerm>} />
               <Route path="/" element={<Navigate to="/dashboard" replace />} />
               <Route path="*" element={<Navigate to="/dashboard" replace />} />
               </Route>

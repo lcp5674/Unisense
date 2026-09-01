@@ -2618,6 +2618,7 @@ export function MetricDetail() {
               type="primary"
               ghost
               icon={<PlusOutlined />}
+              disabled={!canEdit}
               onClick={() => {
                 addMountForm.setFieldsValue({ domain: metric.domain });
                 setAddMountOpen(true);
@@ -2677,6 +2678,7 @@ export function MetricDetail() {
                     danger
                     loading={unmounting}
                     icon={<DeleteOutlined />}
+                    disabled={!canEdit}
                     onClick={() => handleUnmount(m.id)}
                   >
                     解除挂载

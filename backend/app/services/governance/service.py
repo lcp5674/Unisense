@@ -379,7 +379,9 @@ class GovernanceService(BaseService):
         """查询用户按钮权限点（角色继承 + 直挂并集，供「按用户授权」矩阵）。
 
         Returns:
-            dict: ``user_id / role / role_actions / direct_actions / effective_actions``。
+            dict: ``user_id / role / role_actions / direct_actions / deny_actions /
+            effective_actions``；``effective = (角色继承 ∪ 直挂 allow) − 直挂 deny``
+            （deny 优先于 grant，fail-closed）。
         """
         user = await self._ensure_user_exists(user_id)
         role_s = _role_to_str(user.role)
@@ -388,14 +390,16 @@ class GovernanceService(BaseService):
         role_actions = frozenset().union(
             *(ui_role_actions.get(r, frozenset()) for r in all_roles)
         )
-        direct = await self._repo.list_user_ui_permissions(user_id)
+        direct_allows, direct_denies = await self._repo.list_user_ui_permissions(user_id)
+        effective = (set(role_actions) | direct_allows) - direct_denies
         return {
             "user_id": user_id,
             "role": role_s,
             "roles": all_roles,
             "role_actions": sorted(role_actions),
-            "direct_actions": sorted(direct),
-            "effective_actions": sorted(set(role_actions) | direct),
+            "direct_actions": sorted(direct_allows),
+            "deny_actions": sorted(direct_denies),
+            "effective_actions": sorted(effective),
         }
 
     async def set_user_ui_permissions(
@@ -404,8 +408,9 @@ class GovernanceService(BaseService):
         actions: list[str],
         actor_id: int,
         reason: str | None = None,
+        deny_actions: list[str] | None = None,
     ) -> dict[str, Any]:
-        """整表替换某用户直挂的按钮权限点（支持清空）。
+        """整表替换某用户直挂的按钮权限点（支持正向 allow 与负向 deny，均支持清空）。
 
         Raises:
             ValidationError: 含未知权限点（不在 UI 动作注册表内）。
@@ -418,7 +423,11 @@ class GovernanceService(BaseService):
                 ctx={"user_id": user_id, "unknown": unknown},
             )
         await self._repo.replace_user_ui_permissions(
-            user_id, sorted(set(actions)), actor_id, reason
+            user_id,
+            sorted(set(actions)),
+            actor_id,
+            reason,
+            deny_actions=sorted(set(deny_actions or [])),
         )
         return await self.get_user_ui_permissions(user_id)
 
@@ -782,14 +791,16 @@ class GovernanceService(BaseService):
         all_roles = user.roles_all()
         role_actions = await self.load_role_actions()
         ui_role_actions = await self.load_ui_role_actions()
-        direct_actions = await self._repo.list_user_ui_permissions(user.id)
+        direct_allows, direct_denies = await self._repo.list_user_ui_permissions(user.id)
         # 方案 A 多角色：所有角色（主角色 + user_role 扩展）的权限点取并集，
         # 避免多角色用户只按单角色查 ui_actions 导致其它角色权限缺失。
-        ui_actions: set[str] = set(direct_actions)
+        # 用户级负向收窄（deny）优先于角色继承与直挂授权（fail-closed）。
+        ui_actions: set[str] = set(direct_allows)
         allowed_actions: set[str] = set()
         for r in all_roles:
             ui_actions |= set(ui_role_actions.get(r, frozenset()))
             allowed_actions |= set(role_actions.get(r, frozenset()))
+        ui_actions -= direct_denies
         return PermissionSnapshot(
             user_id=user.id,
             role=role_s,

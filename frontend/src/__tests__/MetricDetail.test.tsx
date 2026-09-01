@@ -3132,6 +3132,18 @@ describe("MetricDetail 按钮级权限过滤", () => {
     // 第二个 describe 无 beforeEach：显式清空 spy 防跨测试残留
     mockedUpdateMetric.mockClear();
     mockedDeleteMetricMount.mockClear();
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "custom",
+      home_domain: "outpatient",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:edit", "metric:create", "catalog:view"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
     mockedGetMetric.mockResolvedValue(metric);
     mockedListMetricMounts.mockResolvedValue({
       items: [
@@ -3151,7 +3163,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     });
     mockedDomainTree.mockResolvedValue([]);
     mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
-    renderWithPerms(["metric:create"]);
+    renderWithPerms(["metric:create", "metric:edit"]);
     await screen.findByText("销售 GMV");
     await screen.findByText("挂载实体（OneData 挂载层）");
     const beforeMountsCalls = mockedListMetricMounts.mock.calls.length;
@@ -3182,6 +3194,18 @@ describe("MetricDetail 按钮级权限过滤", () => {
     // 第二个 describe 无 beforeEach：显式清空 spy 防跨测试残留
     mockedUpdateMetric.mockClear();
     mockedDeleteMetricMount.mockClear();
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "custom",
+      home_domain: "outpatient",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:edit", "metric:create", "catalog:view"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
     mockedGetMetric.mockResolvedValue({ ...metric, status: "DRAFT" });
     mockedListMetricMounts.mockResolvedValue({
       items: [
@@ -3201,7 +3225,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     });
     mockedDomainTree.mockResolvedValue([]);
     mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
-    renderWithPerms(["metric:create"]);
+    renderWithPerms(["metric:create", "metric:edit"]);
     await screen.findByText("销售 GMV");
     await screen.findByText("挂载实体（OneData 挂载层）");
     const beforeMountsCalls = mockedListMetricMounts.mock.calls.length;
@@ -3227,13 +3251,25 @@ describe("MetricDetail 按钮级权限过滤", () => {
     mockedListMetricMounts.mockResolvedValue({ items: [], total: 0 });
     mockedDomainTree.mockResolvedValue([]);
     mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
-    renderWithPerms(["metric:create"]);
+    renderWithPerms(["metric:create", "metric:edit"]);
     await screen.findByText("挂载实体（OneData 挂载层）");
     expect(screen.queryByRole("button", { name: /新增挂载变体/ })).toBeNull();
   });
 
   it("派生指标新增挂载变体：填源表/列/主粒度/粒度维度提交 POST /metric-mounts 并刷新挂载列表", async () => {
     mockedCreateMetricMount.mockClear();
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "custom",
+      home_domain: "outpatient",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:edit", "metric:create", "catalog:view"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
     mockedGetMetric.mockResolvedValue({ ...metric, type: "derived" });
     mockedListMetricMounts.mockResolvedValue({ items: [], total: 0 });
     mockedDictItems.mockResolvedValue([
@@ -3256,7 +3292,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
     } as never);
     mockedDomainTree.mockResolvedValue([]);
     mockedCurrentUser.mockResolvedValue({ id: 1, username: "zhangsan", display_name: "张三", role: "metric_owner", domain: "outpatient", org_id: 1 });
-    renderWithPerms(["metric:create"]);
+    renderWithPerms(["metric:create", "metric:edit"]);
     await screen.findByText("挂载实体（OneData 挂载层）");
     const beforeMountsCalls = mockedListMetricMounts.mock.calls.length;
     // 打开「新增挂载变体」弹窗（仅派生指标显示按钮）
@@ -3311,6 +3347,18 @@ describe("MetricDetail 按钮级权限过滤", () => {
   });
 
   it("新增挂载变体弹窗：业务域为选项框（展示 active 域，非自由输入）", async () => {
+    mockedMyPerms.mockResolvedValue({
+      user_id: 1,
+      role: "custom",
+      home_domain: "outpatient",
+      allowed_actions: ["read", "write"],
+      ui_actions: ["metric:edit", "metric:create", "catalog:view"],
+      granted_domains: [],
+      metric_whitelist: [],
+      row_level_restricted: false,
+      grants: [],
+      expiring_soon: [],
+    });
     mockedGetMetric.mockResolvedValue({ ...metric, type: "derived" });
     mockedListMetricMounts.mockResolvedValue({ items: [], total: 0 });
     mockedDictItems.mockResolvedValue([]);
@@ -3346,7 +3394,7 @@ describe("MetricDetail 按钮级权限过滤", () => {
       grants: [],
       expiring_soon: [],
     });
-    renderWithPerms(["metric:create"]);
+    renderWithPerms(["metric:create", "metric:edit"]);
     await screen.findByText("挂载实体（OneData 挂载层）");
     fireEvent.click(screen.getByRole("button", { name: /新增挂载变体/ }));
     await waitFor(() => expect(document.querySelector(".ant-modal-title")).toBeTruthy());

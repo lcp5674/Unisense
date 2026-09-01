@@ -84,7 +84,7 @@ function siderWidthStorageKey(userId: number): string {
 }
 
 // 分组导航：覆盖后端全部功能域
-const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: string; icon: React.ReactNode }> }> = [
+export const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: string; icon: React.ReactNode }> }> = [
   {
     label: "工作台",
     children: [

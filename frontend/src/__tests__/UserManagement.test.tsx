@@ -145,6 +145,7 @@ describe("UserManagement 用户管理", () => {
       role: "platform_admin",
       role_actions: ["*"],
       direct_actions: [],
+      deny_actions: [],
       effective_actions: ["*"],
     });
     mockSetUserPerm.mockResolvedValue({
@@ -152,6 +153,7 @@ describe("UserManagement 用户管理", () => {
       role: "platform_admin",
       role_actions: ["*"],
       direct_actions: [],
+      deny_actions: [],
       effective_actions: ["*"],
     });
     mockActionRegistry.mockResolvedValue([
@@ -170,10 +172,9 @@ describe("UserManagement 用户管理", () => {
     expect(screen.getAllByText("平台管理员").length).toBeGreaterThan(0); // 页面标题 + 表格行
     expect(screen.getByText("禁用")).toBeTruthy(); // 状态 Tag
     expect(screen.getByText("创建用户")).toBeTruthy();
-    // 管理操作按钮（编辑 / 重置密码 / 启用）
-    expect(screen.getAllByText("编 辑").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("重置密码").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("启 用").length).toBeGreaterThan(0);
+    // 管理操作按钮（编辑为主操作；重置密码/启用/禁用收进「更多」下拉）
+    expect(screen.getAllByRole("button", { name: /编\s*辑/ }).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/更\s*多/).length).toBeGreaterThan(0);
   });
 
   it("viewer：只读视图，无管理操作与创建按钮", async () => {
@@ -264,7 +265,11 @@ describe("UserManagement 用户管理", () => {
     render(<UserManagement />);
     await screen.findByText("alice");
 
-    fireEvent.click(screen.getAllByText("禁 用")[0]);
+    // 禁用收进「更多」下拉：展开 admin 行（active）→ 点「禁用」菜单项 → Modal.confirm 确认
+    fireEvent.click(screen.getAllByText(/更\s*多/)[0]);
+    const toggleItem = (await screen.findAllByRole("menuitem")).find((el) => el.textContent?.trim() === "禁用");
+    expect(toggleItem).toBeTruthy();
+    fireEvent.click(toggleItem as HTMLElement);
     const confirmBtn = await screen.findByText("确 认");
     fireEvent.click(confirmBtn);
     await waitFor(() => {
@@ -279,7 +284,11 @@ describe("UserManagement 用户管理", () => {
     render(<UserManagement />);
     await screen.findByText("alice");
 
-    fireEvent.click(screen.getAllByText("重置密码")[1]); // alice（id=2）行
+    // 重置密码收进「更多」下拉：展开 alice 行（第二行）→ 点「重置密码」菜单项
+    fireEvent.click(screen.getAllByText(/更\s*多/)[1]);
+    const resetItem = (await screen.findAllByRole("menuitem")).find((el) => el.textContent?.trim() === "重置密码");
+    expect(resetItem).toBeTruthy();
+    fireEvent.click(resetItem as HTMLElement);
     const input = await screen.findByPlaceholderText("至少 8 位");
     fireEvent.change(input, { target: { value: "newsecret123" } });
     fireEvent.click(screen.getByText("重 置"));
@@ -293,7 +302,11 @@ describe("UserManagement 用户管理", () => {
     render(<UserManagement />);
     await screen.findByText("alice");
 
-    fireEvent.click(screen.getAllByText("重置密码")[1]); // alice（id=2）行
+    // 重置密码收进「更多」下拉：展开 alice 行（第二行）→ 点「重置密码」菜单项
+    fireEvent.click(screen.getAllByText(/更\s*多/)[1]);
+    const resetItem = (await screen.findAllByRole("menuitem")).find((el) => el.textContent?.trim() === "重置密码");
+    expect(resetItem).toBeTruthy();
+    fireEvent.click(resetItem as HTMLElement);
     fireEvent.click(await screen.findByText("生成随机密码"));
 
     const input = await screen.findByPlaceholderText("至少 8 位");

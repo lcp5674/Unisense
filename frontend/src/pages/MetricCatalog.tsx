@@ -456,8 +456,10 @@ export function MetricCatalog() {
   // 当前用户群体（consumer/producer/governance/admin）：决定列默认视图与明细抽屉信息密度
   const roleGroup = ROLE_GROUP[currentUserRole] ?? "admin";
   // 删除权限：平台/域管理员，或指标创建者（原 Owner）；仅非发布状态可删（DRAFT/DEPRECATED，
-  // 后端 INVALID_STATE 兜底），对齐维度/度量「草稿/废弃可由管理员或生产者处理」的决策
+  // 后端 INVALID_STATE 兜底），对齐维度/度量「草稿/废弃可由管理员或生产者处理」的决策；
+  // 且须持有 metric:delete 权限点（角色管理勾掉该点 → 删除按钮隐藏/禁用）
   const canDeleteMetric = (r: MetricResponse) =>
+    can("metric:delete") &&
     (r.status === "DRAFT" || r.status === "DEPRECATED") &&
     (currentUserRole === "platform_admin" ||
       currentUserRole === "domain_admin" ||
@@ -1315,7 +1317,7 @@ export function MetricCatalog() {
                 >
                   恢复
                 </Button>
-                {currentUserRole === "platform_admin" && (
+                {currentUserRole === "platform_admin" && can("metric:delete") && (
                   <span onClick={(e) => e.stopPropagation()}>
                     <Popconfirm
                       title="确认彻底删除该指标？"
@@ -2001,13 +2003,15 @@ export function MetricCatalog() {
                   label: (
                     <Tooltip
                       title={
-                        !selected.some((m) => m.status === "DRAFT" || m.status === "DEPRECATED")
-                          ? "批量删除仅适用于勾选中的草稿（DRAFT）或已废弃（DEPRECATED）指标；当前勾选无可删指标"
-                          : currentUserRole !== "platform_admin" &&
-                              currentUserRole !== "domain_admin" &&
-                              !selected.some((m) => m.owner_id === currentUserId)
-                            ? "仅平台/域管理员或指标创建者（Owner）可删除；当前勾选非你创建的指标"
-                            : undefined
+                        !can("metric:delete")
+                          ? "无删除权限（metric:delete）"
+                          : !selected.some((m) => m.status === "DRAFT" || m.status === "DEPRECATED")
+                            ? "批量删除仅适用于勾选中的草稿（DRAFT）或已废弃（DEPRECATED）指标；当前勾选无可删指标"
+                            : currentUserRole !== "platform_admin" &&
+                                currentUserRole !== "domain_admin" &&
+                                !selected.some((m) => m.owner_id === currentUserId)
+                              ? "仅平台/域管理员或指标创建者（Owner）可删除；当前勾选非你创建的指标"
+                              : undefined
                       }
                     >
                       <span>批量删除（草稿/已废弃）</span>
@@ -2017,6 +2021,7 @@ export function MetricCatalog() {
                   danger: true,
                   // 后端允许平台/域管理员或原 Owner 删除 DRAFT/DEPRECATED（service.delete_metric）；非权限禁用避免 403
                   disabled:
+                    !can("metric:delete") ||
                     !selected.some((m) => m.status === "DRAFT" || m.status === "DEPRECATED") ||
                     (currentUserRole !== "platform_admin" &&
                       currentUserRole !== "domain_admin" &&

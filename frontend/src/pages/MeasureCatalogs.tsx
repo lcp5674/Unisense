@@ -654,7 +654,7 @@ export function MeasureCatalogs() {
                       description="恢复后回到原状态（草稿/废弃），可重新走审核流"
                       onConfirm={() => handleRestore(row)}
                     >
-                      <Button size="small" type="primary" icon={<ReloadOutlined />}>恢复</Button>
+                      <Button size="small" type="primary" icon={<ReloadOutlined />} disabled={!canWrite}>恢复</Button>
                     </Popconfirm>
                     {canPurge && (
                       <Popconfirm
@@ -670,14 +670,14 @@ export function MeasureCatalogs() {
                 );
               }
               return (
-                <Space size={4}>
+                <Space size={4} wrap>
                   {row.status === "REVIEW" ? (
                     <Tooltip title="审核中，锁定不可编辑；驳回后即可修改">
                       <Button size="small" icon={<EditOutlined />} disabled />
                     </Tooltip>
                   ) : (
-                    <Tooltip title="编辑（DRAFT 可改编码）">
-                      <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)} />
+                    <Tooltip title={canWrite ? "编辑（DRAFT 可改编码）" : "无编辑权限"}>
+                      <Button size="small" icon={<EditOutlined />} disabled={!canWrite} onClick={() => openEdit(row)} />
                     </Tooltip>
                   )}
                   <MasterDataReviewActions
@@ -691,45 +691,41 @@ export function MeasureCatalogs() {
                     }}
                     user={currentUser}
                     busyCode={review.busyCode}
+                    canSubmit={canWrite}
                     onApprove={handleApprove}
                     onOpenSubmit={(r) => review.setSubmitTarget({ code: r.code, name: r.name })}
                     onOpenReject={(r) => review.setRejectTarget({ code: r.code, name: r.name })}
                   />
-                  {row.status === "PUBLISHED" && (
-                    <Popconfirm
-                      title="确认废弃该原子指标口径？"
-                      description="被指标引用的度量无法废弃"
-                      onConfirm={() => handleDeprecate(row)}
+                  {/* 生命周期操作（废弃/重新启用/删除）收进「更多」下拉，避免与编辑/审核按钮挤在一起 */}
+                  {(row.status === "PUBLISHED" || row.status === "DEPRECATED" || row.status === "DRAFT") && (
+                    <Dropdown
+                      trigger={["click"]}
+                      menu={{
+                        items: [
+                          ...(row.status === "PUBLISHED"
+                            ? [{ key: "deprecate", icon: <StopOutlined />, label: "废弃", danger: true }]
+                            : []),
+                          ...(row.status === "DEPRECATED"
+                            ? [
+                                { key: "reactivate", icon: <RedoOutlined />, label: "重新启用" },
+                                { key: "delete", icon: <DeleteOutlined />, label: "删除", danger: true },
+                              ]
+                            : []),
+                          ...(row.status === "DRAFT"
+                            ? [{ key: "delete", icon: <DeleteOutlined />, label: "删除", danger: true }]
+                            : []),
+                        ],
+                        onClick: ({ key }) => {
+                          if (key === "deprecate") confirmDeprecate(row);
+                          else if (key === "reactivate") confirmReactivate(row);
+                          else if (key === "delete") confirmDelete(row);
+                        },
+                      }}
                     >
-                      <Button size="small" danger icon={<StopOutlined />} />
-                    </Popconfirm>
-                  )}
-                  {row.status === "DEPRECATED" && (
-                    <>
-                      <Popconfirm
-                        title="确认重新启用该原子指标口径？"
-                        description="回到草稿状态，需重新提交审核后才能发布"
-                        onConfirm={() => handleReactivate(row)}
-                      >
-                        <Button size="small" icon={<RedoOutlined />}>重新启用</Button>
-                      </Popconfirm>
-                      <Popconfirm
-                        title="确认删除该原子指标口径？"
-                        description="删除后进入回收站，可恢复；被指标引用的度量无法删除"
-                        onConfirm={() => handleDelete(row)}
-                      >
-                        <Button size="small" danger icon={<DeleteOutlined />} aria-label="删除" />
-                      </Popconfirm>
-                    </>
-                  )}
-                  {row.status === "DRAFT" && (
-                    <Popconfirm
-                      title="确认删除该原子指标口径？"
-                      description="删除后进入回收站，可恢复"
-                      onConfirm={() => handleDelete(row)}
-                    >
-                      <Button size="small" danger icon={<DeleteOutlined />} aria-label="删除" />
-                    </Popconfirm>
+                    <Button size="small" disabled={!canWrite}>
+                      更多 <DownOutlined />
+                    </Button>
+                    </Dropdown>
                   )}
                 </Space>
               );

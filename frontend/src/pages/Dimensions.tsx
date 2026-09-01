@@ -614,59 +614,58 @@ function DimensionsTab() {
     {
       title: "操作",
       key: "actions",
-      width: 320,
+      width: 260,
       render: (_: unknown, d: Dimension) => {
         if (deleted) {
           return (
-            <Space size={4}>
-              <Popconfirm
-                title="确认恢复该维度？"
-                description="恢复后回到原状态（草稿/废弃），可重新走审核流"
-                onConfirm={() => handleRestore(d)}
-              >
-                <Button size="small" type="primary" icon={<ReloadOutlined />}>
-                  恢复
-                </Button>
-              </Popconfirm>
-            </Space>
+            <Popconfirm
+              title="确认恢复该维度？"
+              description="恢复后回到原状态（草稿/废弃），可重新走审核流"
+              onConfirm={() => handleRestore(d)}
+            >
+              <Button size="small" type="primary" icon={<ReloadOutlined />} disabled={!can("dimension:edit")}>
+                恢复
+              </Button>
+            </Popconfirm>
           );
         }
-        return d.status !== "DEPRECATED" ? (
-          <Space size={4} wrap>
-            <Button
-              size="small"
-              type="link"
-              icon={<HeartOutlined style={{ color: favCodes.has(d.dim_code) ? "#eb2f96" : undefined }} />}
-              onClick={() => toggleFavorite(d)}
-            >
-              {favCodes.has(d.dim_code) ? "已收藏" : "收藏"}
+        const isDeprecated = d.status === "DEPRECATED";
+        // 主操作：详情/编辑 + 审核动作（状态相关）；低频管理操作收进「更多」下拉
+        const menuItems: any[] = [
+          {
+            key: "fav",
+            icon: <HeartOutlined style={{ color: favCodes.has(d.dim_code) ? "#eb2f96" : undefined }} />,
+            label: favCodes.has(d.dim_code) ? "取消收藏" : "收藏",
+          },
+        ];
+        if (!isDeprecated) {
+          if (can("dimension:edit")) {
+            menuItems.push({ key: "bind", icon: <DatabaseOutlined />, label: "绑定指标" });
+          }
+          if (can("dimension:deprecate")) {
+            menuItems.push({ type: "divider" });
+            menuItems.push({ key: "deprecate", icon: <DeleteOutlined />, label: "废弃", danger: true });
+          }
+        } else {
+          menuItems.push({ type: "divider" });
+          if (can("dimension:edit")) {
+            menuItems.push({ key: "reactivate", icon: <RedoOutlined />, label: "重新启用" });
+          }
+        }
+        if (can("dimension:edit") && (d.status === "DRAFT" || isDeprecated)) {
+          menuItems.push({ key: "delete", icon: <DeleteOutlined />, label: "删除", danger: true });
+        }
+        return (
+          <Space size={8} wrap>
+            <Button size="small" type="link" onClick={() => openDetail(d)}>
+              详情
             </Button>
-            <Button size="small" onClick={() => openDetail(d)}>详情</Button>
-            {can("dimension:edit") && <Button size="small" onClick={() => openEdit(d)}>编辑</Button>}
-            {can("dimension:edit") && (
-              <Button
-                size="small"
-                onClick={async () => {
-                  bindForm.resetFields();
-                  setBindTarget(d);
-                  // 打开时重新加载指标候选（确保与指标目录一致，带状态标签可区分）
-                  try {
-                    const r = await listMetrics({ page_size: 100 });
-                    setMetrics(r.items);
-                  } catch { /* 静默：已有候选可降级 */ }
-                  // 加载该维度成员作为「默认成员」下拉候选
-                  try {
-                    const r = await listDimensionMembers(d.dim_code);
-                    setBindMembers(r.items);
-                  } catch {
-                    setBindMembers([]);
-                  }
-                }}
-              >
-                绑定指标
+            {!isDeprecated && can("dimension:edit") && (
+              <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEdit(d)}>
+                编辑
               </Button>
             )}
-            {can("dimension:edit") && (
+            {!isDeprecated && (
               <MasterDataReviewActions
                 row={{
                   code: d.dim_code,

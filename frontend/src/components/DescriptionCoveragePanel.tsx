@@ -1478,7 +1478,7 @@ export const DescriptionCoveragePanel = forwardRef<
           style={{ marginBottom: 12 }}
           message={`上次批量推断有 ${lastFailed.length} 张表未完成（${lastFailed.map((f) => f.entity_name).slice(0, 3).join("、")}${lastFailed.length > 3 ? "…" : ""}）`}
           action={
-            <Button size="small" onClick={relaunchLastFailed}>
+            <Button size="small" disabled={!canInferCatalog} onClick={relaunchLastFailed}>
               重新勾选并重试
             </Button>
           }

@@ -29,6 +29,7 @@ import { formatCnTime } from "../utils/timeCn";
 import { usePermission } from "../hooks/usePermission";
 import { UserPermModal, groupRegistry, categoryOf, UI_CATEGORIES } from "../components/governance/UserPermModal";
 import type { UiCategory } from "../components/governance/UserPermModal";
+import { SidebarPermPanel } from "../components/governance/SidebarPermPanel";
 
 // 主题域树 → 扁平化下拉选项（保留层级缩进，与用户管理/数据源页「业务域」下拉同款实现）
 function flattenDomains(
@@ -997,7 +998,7 @@ function RolesTab() {
             <Button
               size="small"
               icon={<SettingOutlined />}
-              disabled={r.protected}
+              disabled={r.protected || !can("role:edit")}
               onClick={() => setUiConfigRole(r.role)}
             >
               配置
@@ -1051,6 +1052,8 @@ function RolesTab() {
   // 按钮级配置弹窗的搜索词与动作类型分类（先模块后类型，帮助授权者快速定位按钮）
   const [uiSearch, setUiSearch] = useState("");
   const [uiCategory, setUiCategory] = useState<UiCategory>("all");
+  // 配置弹窗视图：buttons=按钮权限点矩阵 / sidebar=侧边栏入口授权
+  const [uiTab, setUiTab] = useState<"buttons" | "sidebar">("buttons");
   const uiGrouped = useMemo(() => {
     const kw = uiSearch.trim().toLowerCase();
     return grouped
@@ -1130,6 +1133,10 @@ function RolesTab() {
         open={uiConfigRole !== null}
         onCancel={() => setUiConfigRole(null)}
         onOk={() => {
+          if (!can("role:edit")) {
+            message.warning("无角色编辑权限（role:edit）");
+            return;
+          }
           if (uiConfigRole) void handleSave(uiConfigRole);
         }}
         okText="保存"
@@ -1142,67 +1149,95 @@ function RolesTab() {
           style={{ marginBottom: 12 }}
           message="按模块勾选按钮级权限点（菜单显隐 / 页面按钮 / 组件）。可搜索按钮名/权限点并按类型筛选，快速定位；保存后写入 role_permission 覆盖表并即时生效；资源级本域权限点在上一列配置，二者保存时一并提交。"
         />
-        <div style={{ marginBottom: 12 }}>
-          <span className="muted" style={{ fontSize: 12, marginRight: 8 }}>
-            常用组合（一键套用后仍可微调）：
-          </span>
-          <Space wrap>
-            {ROLE_PRESETS.map((p) => (
-              <Tooltip key={p.key} title={p.description}>
-                <Button size="small" onClick={() => uiConfigRole && applyPreset(uiConfigRole, p)}>
-                  {p.name}
-                </Button>
-              </Tooltip>
-            ))}
-          </Space>
-        </div>
-        <Space direction="vertical" style={{ width: "100%", marginBottom: 12 }} size={8}>
-          <Input.Search
-            placeholder="搜索按钮名称或权限点（如：导出 / audit:export）"
-            allowClear
-            value={uiSearch}
-            onChange={(e) => setUiSearch(e.target.value)}
-          />
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <Tabs
-              size="small"
-              activeKey={uiCategory}
-              onChange={(k) => setUiCategory(k as UiCategory)}
-              items={UI_CATEGORIES.map((c) => ({ key: c.key, label: c.label }))}
-              tabBarStyle={{ marginBottom: 0, flex: 1 }}
-            />
-            <span className="muted" style={{ whiteSpace: "nowrap", fontSize: 12 }}>
-              已勾选 {uiConfigRole ? checkedUiActions(uiConfigRole).length : 0} 项
-            </span>
-          </div>
-        </Space>
-        <div style={{ maxHeight: 420, overflow: "auto" }}>
-          {uiGrouped.length === 0 ? (
-            <div className="muted" style={{ textAlign: "center", padding: 24 }}>
-              无匹配的权限点
-            </div>
-          ) : (
-            uiGrouped.map((g) => (
-              <div key={g.module} style={{ marginBottom: 14 }}>
-                <div style={{ fontWeight: 600, marginBottom: 6 }}>{g.module}</div>
-                <Checkbox.Group
-                  value={uiConfigRole ? checkedUiActions(uiConfigRole) : []}
-                  onChange={(vals) => {
-                    if (uiConfigRole) setUiDraft((prev) => ({ ...prev, [uiConfigRole]: [...vals] as string[] }));
-                  }}
-                >
-                  <Space wrap>
-                    {g.items.map((it) => (
-                      <Tooltip key={it.action} title={`${it.description}（${it.action}）`}>
-                        <Checkbox value={it.action}>{it.label}</Checkbox>
-                      </Tooltip>
-                    ))}
+        <Tabs
+          activeKey={uiTab}
+          onChange={(k) => setUiTab(k as "buttons" | "sidebar")}
+          items={[
+            {
+              key: "buttons",
+              label: "按钮权限点",
+              children: (
+                <>
+                  <div style={{ marginBottom: 12 }}>
+                    <span className="muted" style={{ fontSize: 12, marginRight: 8 }}>
+                      常用组合（一键套用后仍可微调）：
+                    </span>
+                    <Space wrap>
+                      {ROLE_PRESETS.map((p) => (
+                        <Tooltip key={p.key} title={p.description}>
+                          <Button size="small" onClick={() => uiConfigRole && applyPreset(uiConfigRole, p)}>
+                            {p.name}
+                          </Button>
+                        </Tooltip>
+                      ))}
+                    </Space>
+                  </div>
+                  <Space direction="vertical" style={{ width: "100%", marginBottom: 12 }} size={8}>
+                    <Input.Search
+                      placeholder="搜索按钮名称或权限点（如：导出 / audit:export）"
+                      allowClear
+                      value={uiSearch}
+                      onChange={(e) => setUiSearch(e.target.value)}
+                    />
+                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <Tabs
+                        size="small"
+                        activeKey={uiCategory}
+                        onChange={(k) => setUiCategory(k as UiCategory)}
+                        items={UI_CATEGORIES.map((c) => ({ key: c.key, label: c.label }))}
+                        tabBarStyle={{ marginBottom: 0, flex: 1 }}
+                      />
+                      <span className="muted" style={{ whiteSpace: "nowrap", fontSize: 12 }}>
+                        已勾选 {uiConfigRole ? checkedUiActions(uiConfigRole).length : 0} 项
+                      </span>
+                    </div>
                   </Space>
-                </Checkbox.Group>
-              </div>
-            ))
-          )}
-        </div>
+                  <div style={{ maxHeight: 420, overflow: "auto" }}>
+                    {uiGrouped.length === 0 ? (
+                      <div className="muted" style={{ textAlign: "center", padding: 24 }}>
+                        无匹配的权限点
+                      </div>
+                    ) : (
+                      uiGrouped.map((g) => (
+                        <div key={g.module} style={{ marginBottom: 14 }}>
+                          <div style={{ fontWeight: 600, marginBottom: 6 }}>{g.module}</div>
+                          <Checkbox.Group
+                            value={uiConfigRole ? checkedUiActions(uiConfigRole) : []}
+                            onChange={(vals) => {
+                              if (uiConfigRole) setUiDraft((prev) => ({ ...prev, [uiConfigRole]: [...vals] as string[] }));
+                            }}
+                          >
+                            <Space wrap>
+                              {g.items.map((it) => (
+                                <Tooltip key={it.action} title={`${it.description}（${it.action}）`}>
+                                  <Checkbox value={it.action}>{it.label}</Checkbox>
+                                </Tooltip>
+                              ))}
+                            </Space>
+                          </Checkbox.Group>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </>
+              ),
+            },
+            {
+              key: "sidebar",
+              label: "侧边栏入口",
+              children: (
+                <div style={{ maxHeight: 420, overflow: "auto" }}>
+                  <SidebarPermPanel
+                    checked={uiConfigRole ? checkedUiActions(uiConfigRole) : []}
+                    onChange={(next) =>
+                      uiConfigRole && setUiDraft((prev) => ({ ...prev, [uiConfigRole]: next }))
+                    }
+                  />
+                </div>
+              ),
+            },
+          ]}
+        />
       </Modal>
     </div>
   );

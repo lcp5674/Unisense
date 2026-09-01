@@ -3244,10 +3244,10 @@ export async function getUserPermissions(
   return request<UserPermissionResponse>(`${API_BASE}/users/${userId}/permissions`);
 }
 
-/** 整表替换用户直挂按钮权限点（backend PUT /api/v1/users/{id}/permissions）。 */
+/** 整表替换用户直挂按钮权限点（正向授权 + 负向收窄，backend PUT /api/v1/users/{id}/permissions）。 */
 export async function setUserPermissions(
   userId: number,
-  body: { actions: string[]; reason?: string | null },
+  body: { actions: string[]; deny_actions?: string[]; reason?: string | null },
 ): Promise<UserPermissionResponse> {
   return request<UserPermissionResponse>(`${API_BASE}/users/${userId}/permissions`, {
     method: "PUT",

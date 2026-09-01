@@ -71,7 +71,7 @@ export function ConsumptionGuide() {
   const [error, setError] = useState<string | null>(null);
   const { track } = useTracking();
   const { can } = usePermission();
-  const canEdit = can("metric:update");
+  const canEdit = can("metric:edit");
   // 编辑弹窗状态：三组列表草稿 + 保存中
   const [editOpen, setEditOpen] = useState(false);
   const [editDraft, setEditDraft] = useState<ConsumptionGuidePayload>({

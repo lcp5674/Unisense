@@ -163,7 +163,7 @@ describe("MetricCatalog", () => {
       role: "platform_admin",
       home_domain: null,
       allowed_actions: ["read", "write", "approve", "deprecate"],
-      ui_actions: ["metric:create", "metric:approve", "metric:deprecate"],
+      ui_actions: ["metric:create", "metric:approve", "metric:deprecate", "metric:delete"],
       granted_domains: [],
       metric_whitelist: [],
       row_level_restricted: false,
@@ -1308,7 +1308,7 @@ describe("MetricCatalog 回收站（已删除草稿恢复）", () => {
     mockedUsers.mockResolvedValue([]);
     mockedMeasures.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 50 });
     (fetchMyPermissions as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      user_id: 1, role: "platform_admin", home_domain: "", allowed_actions: [], ui_actions: ["metric:create", "metric:deprecate", "metric:edit", "metric:export"],
+      user_id: 1, role: "platform_admin", home_domain: "", allowed_actions: [], ui_actions: ["metric:create", "metric:deprecate", "metric:edit", "metric:export", "metric:delete"],
       granted_domains: [], metric_whitelist: [], row_level_restricted: false, grants: [], expiring_soon: [],
     });
   });
@@ -1443,7 +1443,7 @@ describe("列宽拖拽（resizable columns）", () => {
       role: "platform_admin",
       home_domain: null,
       allowed_actions: ["read", "write", "approve", "deprecate"],
-      ui_actions: ["metric:create", "metric:approve", "metric:deprecate"],
+      ui_actions: ["metric:create", "metric:approve", "metric:deprecate", "metric:delete"],
       granted_domains: [],
       metric_whitelist: [],
       row_level_restricted: false,
@@ -1569,7 +1569,7 @@ describe("MetricCatalog 按用户群体差异化（OneData 治理）", () => {
       role: "platform_admin",
       home_domain: null,
       allowed_actions: ["read", "write", "approve", "deprecate"],
-      ui_actions: ["metric:create", "metric:approve", "metric:deprecate"],
+      ui_actions: ["metric:create", "metric:approve", "metric:deprecate", "metric:delete"],
       granted_domains: [],
       metric_whitelist: [],
       row_level_restricted: false,

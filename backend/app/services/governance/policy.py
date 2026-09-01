@@ -217,6 +217,7 @@ UI_ACTION_REGISTRY: dict[str, dict[str, str]] = {
     "glossary:create": {"module": "分析", "label": "新建术语", "description": "创建 / 建立关系术语"},  # noqa: E501
     "glossary:edit": {"module": "分析", "label": "编辑术语", "description": "编辑 / 提交 / 发布术语"},  # noqa: E501
     "glossary:deprecate": {"module": "分析", "label": "废弃术语", "description": "废弃 / 批量废弃术语"},  # noqa: E501
+    "template:create": {"module": "指标", "label": "新建模板", "description": "新建指标模板"},  # noqa: E501
     "template:instantiate": {"module": "指标", "label": "实例化模板", "description": "从指标模板创建实例"},  # noqa: E501
     "template:assign-owner": {"module": "指标", "label": "设置模板负责人", "description": "为指标模板指派负责人"},  # noqa: E501
     # ---- 数据源 / 采集
@@ -301,7 +302,7 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "data-source:delete", "data-source:test-connection", "data-source:collect",
             "catalogs:view", "collection-tasks:view", "collection-history:view",
             "catalog:deprecate", "catalog:edit-description", "catalog:infer-description",
-            "template:instantiate", "template:assign-owner",
+            "template:create", "template:instantiate", "template:assign-owner",
             "organizations:view", "org:create", "org:edit", "org:disable",
             "governance:view", "grant:create", "grant:revoke", "grant:export",
             "audit:view", "domains:view", "domain:create", "dicts:view", "dict:create",
@@ -326,7 +327,8 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "glossary:view", "glossary:infer", "glossary:create", "glossary:edit",
             "glossary:deprecate",
             "data-sources:view", "catalogs:view", "collection-tasks:view",
-            "collection-history:view", "template:instantiate", "template:assign-owner",
+            "collection-history:view", "template:create", "template:instantiate",
+            "template:assign-owner",
             "feedback:view", "guide:view",
         }
     ),

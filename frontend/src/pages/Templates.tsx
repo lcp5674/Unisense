@@ -1184,7 +1184,7 @@ export function Templates() {
           <h2>指标模板</h2>
           <p>标准化的指标创建模板——一键实例化，默认口径自动合并。</p>
         </div>
-        <Button type="primary" icon={<PlusOutlined />} onClick={openCreateTpl}>新建模板</Button>
+        <Button type="primary" icon={<PlusOutlined />} disabled={!can("template:create")} onClick={openCreateTpl}>新建模板</Button>
         <Button icon={<PlusOutlined />} onClick={() => load()} loading={loading}>刷新</Button>
       </div>
 

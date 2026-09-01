@@ -261,11 +261,16 @@ async def set_user_permissions(
     """整表替换用户直挂的按钮权限点（空列表=清空直挂，回退为仅角色继承）。
 
     仅 ``platform_admin`` 可配；未知权限点返回 ``USER_PERMISSION_INVALID``。
+    ``deny_actions`` 为负向收窄（用户级禁用，优先于角色继承与直挂授权）。
     写操作落审计。
     """
     svc = _svc(db, request)
     data = await svc.set_user_ui_permissions(
-        user_id, payload.actions, actor_id=user.id, reason=payload.reason
+        user_id,
+        payload.actions,
+        actor_id=user.id,
+        reason=payload.reason,
+        deny_actions=payload.deny_actions,
     )
     await write_audit(
         db,
@@ -273,7 +278,11 @@ async def set_user_permissions(
         action="user.update_permissions",
         entity_type="user",
         entity_id=str(user_id),
-        detail={"actions": payload.actions, "reason": payload.reason},
+        detail={
+            "actions": payload.actions,
+            "deny_actions": payload.deny_actions,
+            "reason": payload.reason,
+        },
         ip=client_ip(request),
         trace_id=trace_id,
     )

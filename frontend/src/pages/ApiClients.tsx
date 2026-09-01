@@ -545,7 +545,12 @@ export function ApiClients() {
           </span>
         }
         extra={
-          <Button icon={<ExperimentOutlined />} onClick={handleConnectivityTest} loading={testing}>
+          <Button
+            icon={<ExperimentOutlined />}
+            onClick={handleConnectivityTest}
+            loading={testing}
+            disabled={!canManage}
+          >
             连通性测试
           </Button>
         }

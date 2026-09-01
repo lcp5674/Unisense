@@ -84,14 +84,16 @@ class UserPermissionResponse(BaseModel):
         user_id: 用户 ID。
         role: 用户当前角色。
         role_actions: 角色继承的 UI 权限点（默认基线 + 覆盖）。
-        direct_actions: 用户直挂的 UI 权限点（``user_permission`` 表）。
-        effective_actions: 并集（前端矩阵回显勾选）。
+        direct_actions: 用户直挂的 UI 权限点（``user_permission`` 表，正向授权）。
+        deny_actions: 用户级负向收窄的 UI 权限点（``effect=deny``，优先于授权）。
+        effective_actions: 生效并集（``(角色继承 ∪ 直挂) − 直挂 deny``）。
     """
 
     user_id: int
     role: str
     role_actions: list[str] = Field(default_factory=list)
     direct_actions: list[str] = Field(default_factory=list)
+    deny_actions: list[str] = Field(default_factory=list)
     effective_actions: list[str] = Field(default_factory=list)
 
 
@@ -99,11 +101,13 @@ class UserPermissionUpdateRequest(BaseModel):
     """用户直挂按钮权限点更新请求。
 
     Attributes:
-        actions: 直挂的 UI 权限点集合（整表替换，空=清空直挂）。
+        actions: 直挂授权的 UI 权限点（整表替换，空=清空直挂授权）。
+        deny_actions: 用户级禁用的 UI 权限点（``effect=deny``，空=清空禁用）。
         reason: 直挂授权事由（审计留痕）。
     """
 
     actions: list[str] = Field(default_factory=list)
+    deny_actions: list[str] = Field(default_factory=list)
     reason: str | None = Field(default=None, max_length=512)
 
 

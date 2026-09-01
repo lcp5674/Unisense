@@ -143,8 +143,10 @@ class FakeRepo:
         return before - len(self.role_permissions)
 
     # user permission（用户直挂按钮权限点）
-    async def list_user_ui_permissions(self, user_id: int) -> set[str]:
-        return set(getattr(self, "user_permissions", {}).get(user_id, set()))
+    async def list_user_ui_permissions(self, user_id: int) -> tuple[set[str], set[str]]:
+        allows = set(getattr(self, "user_permissions", {}).get(user_id, set()))
+        denies = set(getattr(self, "user_permission_denies", {}).get(user_id, set()))
+        return allows, denies
 
     async def replace_user_ui_permissions(
         self,
@@ -152,10 +154,14 @@ class FakeRepo:
         actions: list[str],
         granted_by: int | None,
         reason: str | None,
+        deny_actions: list[str] | None = None,
     ) -> None:
         if not hasattr(self, "user_permissions"):
             self.user_permissions = {}
+        if not hasattr(self, "user_permission_denies"):
+            self.user_permission_denies = {}
         self.user_permissions[user_id] = set(actions)
+        self.user_permission_denies[user_id] = set(deny_actions or [])
 
     # grant
     async def create_grant(self, grant: Grant) -> Grant:
@@ -1238,6 +1244,29 @@ async def test_set_user_ui_permissions_empty_clears() -> None:
     data = await svc.set_user_ui_permissions(1, [], 99, None)
     assert data["direct_actions"] == []
     assert data["effective_actions"] == data["role_actions"]
+
+
+async def test_user_deny_overrides_role_inheritance() -> None:
+    """用户级负向收窄（deny）优先于角色继承：deny 角色基线权限点后 effective 与快照均不含。"""
+    svc, repo, _ = _svc()
+    # viewer 基线含 catalog:view；用户级 deny catalog:view
+    await repo.replace_user_ui_permissions(1, [], 99, None, deny_actions=["catalog:view"])
+    data = await svc.get_user_ui_permissions(1)
+    assert "catalog:view" in data["role_actions"]  # 角色继承仍存在
+    assert "catalog:view" in data["deny_actions"]  # 直挂 deny 回显
+    assert "catalog:view" not in data["effective_actions"]  # deny 优先于 grant
+    # my_permissions 快照同样被收窄
+    snap = await svc.my_permissions(FakeUser(uid=1, role="viewer"))  # type: ignore[arg-type]
+    assert "catalog:view" not in snap.ui_actions
+
+
+async def test_user_deny_can_be_recovered() -> None:
+    """deny 可恢复：清空 deny 后角色继承权限点重新生效。"""
+    svc, repo, _ = _svc()
+    await repo.replace_user_ui_permissions(1, [], 99, None, deny_actions=["catalog:view"])
+    data = await svc.set_user_ui_permissions(1, [], 99, None)  # deny_actions 缺省=清空
+    assert data["deny_actions"] == []
+    assert "catalog:view" in data["effective_actions"]
 
 
 # ------------------------------------------------------- 误报反馈（COMPL-3）

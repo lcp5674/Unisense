@@ -95,11 +95,28 @@ export function usePermission(): PermissionApi {
   return useContext(PermissionContext);
 }
 
-/** 路由守卫：无权限点时重定向总览（替代按角色的 RequireRole）。 */
-export function RequirePerm({ perm, children }: { perm: string; children: ReactNode }) {
-  const { can } = usePermission();
-  if (!can(perm)) {
-    return <Navigate to="/dashboard" replace />;
+/** 路由守卫：无权限点时重定向总览（替代按角色的 RequireRole）。
+ *
+ * ``perm`` 传单个权限点；``perms`` 传数组时按「任一命中（canAny）」放行
+ * （用于聚合入口如审批中心）。仅当快照已加载且权限不足时才重定向，
+ * 快照加载中/失败 fail-open 放行（后端强制兜底）。
+ */
+export function RequirePerm({
+  perm,
+  perms,
+  children,
+}: {
+  perm?: string;
+  perms?: string[];
+  children: ReactNode;
+}) {
+  const { can, canAny, snapshot } = usePermission();
+  if (snapshot !== null) {
+    if (perms) {
+      if (!canAny(perms)) return <Navigate to="/dashboard" replace />;
+    } else if (perm && !can(perm)) {
+      return <Navigate to="/dashboard" replace />;
+    }
   }
   return <>{children}</>;
 }

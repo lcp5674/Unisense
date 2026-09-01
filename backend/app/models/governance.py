@@ -145,12 +145,15 @@ class UserPermission(Base, BaseModel):
     记录对用户**直接挂载**的按钮级权限点（不经角色间接授权）。``(user_id, action)``
     唯一，语义为「整表替换该用户直挂动作」（先删该用户全部行，再插入新集合）。
 
-    ``my_permissions`` 将「角色继承的 ui_actions」与「用户直挂的 ui_actions」做并集
-    返回给前端 ``usePermission``——支持「以角色间接授权为主 + 用户直挂按钮为辅」。
+    ``effect`` 区分正向授权（allow）与负向收窄（deny）：``my_permissions`` 先取
+    「角色继承 ∪ 直挂 allow」并集，再**减去直挂 deny**（deny 优先于 grant，
+    fail-closed）——支持管理员对个别用户收窄某权限点（如禁止某个用户导出），
+    而不影响同角色其它用户。
 
     Attributes:
         user_id: 用户 ID（关联 user.id）。
         action: UI 权限点（``模块:功能``，取自 ``policy.UI_ACTION_REGISTRY`` 键）。
+        effect: 授权效果（``allow`` 正向授权 / ``deny`` 负向收窄，默认 allow）。
         granted_by: 授权操作人 ID（审计留痕）。
         reason: 直挂授权事由（审计留痕）。
     """
@@ -160,6 +163,12 @@ class UserPermission(Base, BaseModel):
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="用户 ID")
     action: Mapped[str] = mapped_column(  # noqa: E501
         String(32), nullable=False, comment="UI 权限点（模块:功能）"
+    )
+    effect: Mapped[str] = mapped_column(
+        String(8),
+        nullable=False,
+        server_default="allow",
+        comment="授权效果: allow 正向授权 / deny 负向收窄",
     )
     granted_by: Mapped[int | None] = mapped_column(
         BigInteger, nullable=True, comment="授权操作人 ID"

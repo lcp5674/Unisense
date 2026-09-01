@@ -1990,6 +1990,7 @@ function CoverageTab() {
 
 /** 血缘治理中心（补齐 P2/P3/P4 开放能力前端入口）：健康度 / 路径查询 / 终止点 / 批量解析 / 目录扫描 / 导出 / 级联删 */
 function GovernanceTab() {
+  const { can } = usePermission();
   const [health, setHealth] = useState<import("../api").LineageHealthResult | null>(null);
   // 路径查询
   const [pathSrc, setPathSrc] = useState("");
@@ -2177,7 +2178,7 @@ function GovernanceTab() {
             <Input.TextArea rows={4} value={batchText} onChange={(e) => setBatchText(e.target.value)}
               placeholder={"select col1 from db.t1;\ninsert overwrite table db.t2 select * from db.t1;"} />
           </div>
-          <Button type="primary" loading={busy === "batch"} disabled={!batchText.trim()}
+          <Button type="primary" loading={busy === "batch"} disabled={!batchText.trim() || !can("lineage:write")}
             onClick={() => run("batch", async () => setBatchResult(await lineageParseBatch({ text: batchText })))}>
             批量解析入库
           </Button>
@@ -2200,7 +2201,7 @@ function GovernanceTab() {
           <div style={{ fontSize: 12, color: "#666" }}>
             <Switch checked={scanDryRun} onChange={setScanDryRun} /> {scanDryRun ? "仅统计（dry_run）" : "真实写入血缘"}
           </div>
-          <Button loading={busy === "scan"} disabled={!scanPath.trim()}
+          <Button loading={busy === "scan"} disabled={!scanPath.trim() || !can("lineage:write")}
             onClick={() => run("scan", async () => setScanResult(await lineageScanDirectory({ path: scanPath.trim(), dry_run: scanDryRun })))}>
             扫描
           </Button>
@@ -2227,7 +2228,7 @@ function GovernanceTab() {
                 { value: "openlineage", label: "OpenLineage 事件" },
               ]} />
           </div>
-          <Button icon={<DownloadOutlined />} loading={exporting}
+          <Button icon={<DownloadOutlined />} loading={exporting} disabled={!can("assetmap:export")}
             onClick={() => {
               setExporting(true);
               lineageExport({ format: exportFormat })
@@ -2246,13 +2247,13 @@ function GovernanceTab() {
             title="级联删除血缘边"
             description={`将软删「${delNode || "该节点"}」相关的全部血缘边，不可恢复。确认？`}
             okText="删除" okButtonProps={{ danger: true }} cancelText="取消"
-            disabled={!delNode.trim()}
+            disabled={!delNode.trim() || !can("lineage:manage-edge")}
             onConfirm={() => run("del", async () => {
               const r = await deleteLineageEdgesByNode(delNode.trim());
               message.success(`已级联删除 ${r.deleted} 条血缘边`);
               setDelNode("");
             })}>
-            <Button danger loading={busy === "del"} disabled={!delNode.trim()}>级联删除</Button>
+            <Button danger loading={busy === "del"} disabled={!delNode.trim() || !can("lineage:manage-edge")}>级联删除</Button>
           </Popconfirm>
         </Space>
       </Card>
