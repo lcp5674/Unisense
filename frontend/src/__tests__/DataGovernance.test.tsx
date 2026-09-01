@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { within } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { Governance } from "../pages/Governance";
@@ -451,6 +452,99 @@ describe("Governance 权限治理", () => {
       if (okBtn) fireEvent.click(okBtn);
     });
     await waitFor(() => expect(mockDeleteRole).toHaveBeenCalledWith("data_analyst"));
+  });
+
+  it("角色管理：侧边栏入口 Tab 模块级「全部展开」——一键勾选该模块全部权限点并保存", async () => {
+    mockSetRoles.mockResolvedValue({
+      role: "viewer",
+      default_actions: ["read"],
+      custom_actions: ["read"],
+      effective_actions: ["read"],
+      ui_default_actions: ["catalog:view", "dashboard:view"],
+      ui_custom_actions: ["catalog:view", "metric:create"],
+      ui_effective_actions: ["catalog:view", "dashboard:view", "metric:create"],
+      protected: false,
+      is_custom: false,
+    });
+    renderGov();
+    await clickTab("角色管理");
+    await screen.findByText("只读用户");
+
+    // 打开 viewer 行「配置」→ 切「侧边栏入口」Tab
+    const configBtns = screen.getAllByRole("button", { name: /配\s*置/ });
+    await userEvent.click(configBtns[0]);
+    await clickTab("侧边栏入口");
+    await screen.findByText("指标资产");
+
+    // 「指标资产」分组入口 catalog:view(/catalog) + metric:create(/create) 同属 registry「指标」模块
+    // viewer 已勾选 catalog:view（metric:create 未勾选）→ allOn=false → 显示「全部展开」
+    const groupTitle = await screen.findByText("指标资产");
+    const groupBox = groupTitle.closest("div") as HTMLElement;
+    const expandLink = within(groupBox).getByText(/全部展开（2 项）/);
+    await userEvent.click(expandLink);
+
+    // 保存后 viewer 草稿同时包含 metric:create 与 catalog:view
+    const saveBtn = screen
+      .getAllByRole("button", { name: /保\s*存/ })
+      .find((b) => !(b as HTMLButtonElement).disabled);
+    await userEvent.click(saveBtn!);
+    await waitFor(() =>
+      expect(mockSetRoles).toHaveBeenCalledWith(
+        "viewer",
+        expect.arrayContaining(["metric:create", "catalog:view"]),
+      ),
+    );
+  });
+
+  it("角色管理：取消侧边栏入口时同模块按钮权限点提示「一并停用」", async () => {
+    // viewer 已勾选 catalog:view；手动在按钮 Tab 勾选 metric:create 后再到侧边栏取消「指标目录」
+    mockSetRoles.mockResolvedValue({
+      role: "viewer",
+      default_actions: ["read"],
+      custom_actions: ["read"],
+      effective_actions: ["read"],
+      ui_default_actions: ["catalog:view", "dashboard:view"],
+      ui_custom_actions: [],
+      ui_effective_actions: ["dashboard:view"],
+      protected: false,
+      is_custom: false,
+    });
+    renderGov();
+    await clickTab("角色管理");
+    await screen.findByText("只读用户");
+
+    const configBtns = screen.getAllByRole("button", { name: /配\s*置/ });
+    await userEvent.click(configBtns[0]);
+    await screen.findByText("创建指标");
+    // 按钮权限点 Tab：勾选「创建指标」
+    const createCb = Array.from(
+      document.querySelectorAll<HTMLElement>(".ant-checkbox-wrapper"),
+    ).find((el) => el.textContent?.includes("创建指标"));
+    fireEvent.click(createCb!.querySelector("input.ant-checkbox-input")!);
+
+    // 切侧边栏入口 Tab → 取消「指标目录」入口（排除按钮 Tab 的「查看指标目录」）
+    await clickTab("侧边栏入口");
+    await screen.findByText("指标资产");
+    const catalogCb = Array.from(
+      document.querySelectorAll<HTMLElement>(".ant-checkbox-wrapper"),
+    ).find((el) => el.textContent?.includes("指标目录") && !el.textContent?.includes("查看"));
+    fireEvent.click(catalogCb!.querySelector("input.ant-checkbox-input")!);
+
+    // 弹确认「一并停用」→ 点一并停用按钮
+    const confirmBtn = await screen.findByRole("button", { name: /一并停用/ });
+    await userEvent.click(confirmBtn);
+
+    // 保存后 viewer 草稿不含 metric:create 与 catalog:view（二者都被移除）
+    const saveBtn = screen
+      .getAllByRole("button", { name: /保\s*存/ })
+      .find((b) => !(b as HTMLButtonElement).disabled);
+    await userEvent.click(saveBtn!);
+    await waitFor(() => {
+      const call = mockSetRoles.mock.calls.find((c) => c[0] === "viewer");
+      expect(call).toBeTruthy();
+      expect(call![1]).not.toContain("metric:create");
+      expect(call![1]).not.toContain("catalog:view");
+    });
   });
 
   it("授权管理：用户列显示用户名、指标白名单为选项框、可在页内给该用户授权", async () => {

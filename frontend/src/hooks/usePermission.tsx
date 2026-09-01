@@ -73,6 +73,22 @@ export function PermissionProvider({
     void refresh();
   }, [user?.id, refresh]);
 
+  // 权限快照实时生效：60s 轮询 + 窗口聚焦刷新——管理员调整角色/用户权限后，
+  // 已在线用户无需重新登录即可在下一个周期/切回页面时看到变化。
+  useEffect(() => {
+    const timer = setInterval(() => {
+      void refresh();
+    }, 60_000);
+    const onFocus = () => {
+      void refresh();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [refresh]);
+
   const value = useMemo<PermissionApi>(() => {
     const perms = new Set(snapshot?.ui_actions ?? []);
     return {

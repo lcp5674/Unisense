@@ -9,8 +9,7 @@ import {
   Tag,
   Tooltip,
   message,
-} from "antd";
-import { getUserPermissions, listActionRegistry, setUserPermissions, UnisenseApiError } from "../../api";
+} from "antd";import { getUserPermissions, listActionRegistry, setUserPermissions, UnisenseApiError } from "../../api";
 import type { ActionRegistryItem, UserPermissionResponse } from "../../types";
 import { ROUTE_PERM } from "../../hooks/usePermission";
 import { NAV_GROUPS } from "../Layout";
@@ -142,6 +141,47 @@ export function UserPermModal({
     });
   }
 
+  /** 批量三态切换（模块收起/展开、联动停用共用）：checked=true 展开、false 收起。 */
+  function batchToggle(actions: string[], checked: boolean) {
+    setDenyDraft((prev) => {
+      const next = new Set(prev);
+      for (const a of actions) {
+        if (checked) next.delete(a);
+        else if (roleSet.has(a)) next.add(a);
+      }
+      return next;
+    });
+    setDirectDraft((prev) => {
+      const next = new Set(prev);
+      for (const a of actions) {
+        if (checked) {
+          if (!roleSet.has(a)) next.add(a);
+        } else {
+          next.delete(a);
+        }
+      }
+      return next;
+    });
+  }
+
+  /** 某权限点所属 registry 模块下、除自身外的其它权限点（联动停用候选）。 */
+  function siblingActions(action: string): string[] {
+    const mod = registry.find((r) => r.action === action)?.module;
+    if (!mod) return [];
+    return registry.filter((r) => r.module === mod && r.action !== action).map((r) => r.action);
+  }
+
+  /** 侧边栏分组对应的全部权限点（入口权限点反查 module → module 并集）。 */
+  function sidebarGroupActions(g: (typeof NAV_GROUPS)[number]): string[] {
+    const entryActions = new Set(
+      g.children.map((c) => ROUTE_PERM[c.key]).filter((p): p is string => Boolean(p)),
+    );
+    const mods = new Set(
+      registry.filter((r) => entryActions.has(r.action)).map((r) => r.module),
+    );
+    return registry.filter((r) => mods.has(r.module)).map((r) => r.action);
+  }
+
   /** 侧边栏入口授权视图：按菜单树勾选 view 权限点（三态语义与按钮矩阵一致）。 */
   function renderSidebar() {
     return (
@@ -149,9 +189,23 @@ export function UserPermModal({
         {NAV_GROUPS.map((g) => {
           const children = g.children.filter((c) => ROUTE_PERM[c.key]);
           if (children.length === 0) return null;
+          const groupAll = sidebarGroupActions(g);
+          const effective = (a: string) =>
+            denyDraft.has(a) ? false : roleSet.has(a) || directDraft.has(a);
+          const allOn = groupAll.length > 0 && groupAll.every((a) => effective(a));
           return (
             <div key={g.label} style={{ marginBottom: 14 }}>
-              <div style={{ fontWeight: 600, marginBottom: 6 }}>{g.label}</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                <span style={{ fontWeight: 600 }}>{g.label}</span>
+                {groupAll.length > 0 && (
+                  <a
+                    style={{ fontSize: 12, color: "#1677ff" }}
+                    onClick={() => batchToggle(groupAll, !allOn)}
+                  >
+                    {allOn ? "全部收起" : "全部展开"}（{groupAll.length} 项）
+                  </a>
+                )}
+              </div>
               <Space wrap>
                 {children.map((c) => {
                   const action = ROUTE_PERM[c.key];
@@ -163,7 +217,36 @@ export function UserPermModal({
                       key={c.key}
                       title={`${action}——${denied ? "已对该用户禁用此入口，点击恢复" : "取消勾选=隐藏该侧边栏入口（用户级收窄）"}`}
                     >
-                      <Checkbox checked={checked} onChange={(e) => toggleAction(action, e.target.checked)}>
+                      <Checkbox
+                        checked={checked}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            toggleAction(action, true);
+                            return;
+                          }
+                          // 取消入口：同模块下仍被角色继承的按钮权限点提示联动停用
+                          const siblings = siblingActions(action).filter((a) => roleSet.has(a) && !denyDraft.has(a));
+                          if (siblings.length === 0) {
+                            toggleAction(action, false);
+                            return;
+                          }
+                          const labels = registry
+                            .filter((r) => siblings.includes(r.action))
+                            .slice(0, 3)
+                            .map((r) => r.label)
+                            .join("、");
+                          Modal.confirm({
+                            title: `取消侧边栏入口「${c.label}」？`,
+                            content: `该入口将对该用户隐藏。其所在模块下仍有 ${siblings.length} 个按钮权限点被角色继承（如 ${labels}…），是否一并禁用该用户？`,
+                            okText: "一并禁用",
+                            cancelText: "仅隐藏入口",
+                            onOk: () => {
+                              batchToggle([action, ...siblings], false);
+                            },
+                            onCancel: () => toggleAction(action, false),
+                          });
+                        }}
+                      >
                         {c.label}
                         {denied ? (
                           <Tag color="red" style={{ marginLeft: 2 }}>

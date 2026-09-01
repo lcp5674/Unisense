@@ -1258,6 +1258,7 @@ function RolesTab() {
                     onChange={(next) =>
                       uiConfigRole && setUiDraft((prev) => ({ ...prev, [uiConfigRole]: next }))
                     }
+                    registry={registry}
                   />
                 </div>
               ),
