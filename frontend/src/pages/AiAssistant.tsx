@@ -30,6 +30,10 @@ const EXAMPLES = [
   "统计 marketing 域新增用户数，同比上月",
 ];
 
+// 产品状态开关：AI 助手当前处于内测阶段，暂不面向用户开放。
+// 正式开放后将此常量置为 true 即可恢复输入与生成（无需改动其它逻辑）。
+const AI_AVAILABLE = false;
+
 export function AiAssistant() {
   const [nlQuery, setNlQuery] = useState("");
   const [metricScope, setMetricScope] = useState("");
@@ -89,6 +93,15 @@ export function AiAssistant() {
       </div>
 
       <Card>
+        {!AI_AVAILABLE && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="AI 助手暂未开放使用"
+            description="AI 助手正处于内部测试阶段，暂不面向用户开放。正式开放后，将支持以自然语言查询指标并生成安全 SQL（自动锚定已注册指标口径）。"
+          />
+        )}
         <Form layout="vertical">
           <Form.Item label="自然语言查询">
             <TextArea
@@ -97,6 +110,7 @@ export function AiAssistant() {
               onChange={(e) => setNlQuery(e.target.value)}
               placeholder="如：最近 30 天 finance 域收入总额，按日粒度"
               style={{ fontSize: 14 }}
+              disabled={!AI_AVAILABLE}
             />
           </Form.Item>
           <Form.Item label="指标范围（逗号分隔，可选）">
@@ -105,6 +119,7 @@ export function AiAssistant() {
               value={metricScope}
               onChange={(e) => setMetricScope(e.target.value)}
               placeholder="finance_revenue_sum_d, finance_cost_sum_d"
+              disabled={!AI_AVAILABLE}
             />
           </Form.Item>
           <Space style={{ marginBottom: 12 }}>
@@ -113,7 +128,7 @@ export function AiAssistant() {
               icon={<RobotOutlined />}
               loading={loading}
               onClick={handleSubmit}
-              disabled={!canNl2Sql}
+              disabled={!AI_AVAILABLE || !canNl2Sql}
               style={{ marginLeft: 12 }}
             >
               生成 SQL
@@ -131,8 +146,10 @@ export function AiAssistant() {
           {EXAMPLES.map((ex) => (
             <Tag
               key={ex}
-              style={{ cursor: "pointer", marginBottom: 4 }}
-              onClick={() => setNlQuery(ex)}
+              style={{ cursor: AI_AVAILABLE ? "pointer" : "not-allowed", marginBottom: 4 }}
+              onClick={() => {
+                if (AI_AVAILABLE) setNlQuery(ex);
+              }}
             >
               {ex}
             </Tag>

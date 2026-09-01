@@ -20,6 +20,7 @@ import {
   fetchObsOverview,
   fetchRecommendedMetrics,
   fetchRecommendedTerms,
+  listDomainTree,
 } from "../api";
 import type {
   AssetStat,
@@ -28,6 +29,7 @@ import type {
   OwnerAssetStat,
   RecommendItem,
   GlossaryTerm,
+  SubjectDomainTreeNode,
 } from "../types";
 import { METRIC_HEALTH_LEVEL_LABEL } from "../utils/enums";
 import { useTracking } from "../hooks/useTracking";
@@ -127,14 +129,20 @@ function GaugeCell({
   );
 }
 
-function DomainChart({ byDomain }: { byDomain: Record<string, number> }) {
+function DomainChart({
+  byDomain,
+  nameMap,
+}: {
+  byDomain: Record<string, number>;
+  nameMap: Record<string, string>;
+}) {
   const data = useMemo(
     () =>
       Object.entries(byDomain)
-        .map(([domain, count]) => ({ type: domain, value: count }))
+        .map(([domain, count]) => ({ type: nameMap[domain] ?? domain, value: count }))
         .sort((a, b) => b.value - a.value)
         .slice(0, 8),
-    [byDomain],
+    [byDomain, nameMap],
   );
   if (data.length === 0) return <Empty description="暂无域分布数据" />;
   const config = {
@@ -193,7 +201,7 @@ const QUICK_ENTRIES = [
   {
     icon: <RobotOutlined />,
     title: "AI 助手",
-    desc: "自然语言转 SQL，锚定指标口径",
+    desc: "内测中，暂未开放使用",
     to: "/ai",
   },
   {
@@ -825,6 +833,8 @@ export function Dashboard() {
   const [metricHealth, setMetricHealth] = useState<MetricHealth | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // 业务域编码 → 中文显示名映射（拉取主题域树扁平化；失败静默回退显示编码）
+  const [domainNameMap, setDomainNameMap] = useState<Record<string, string>>({});
   const { track } = useTracking();
   const navigate = useNavigate();
 
@@ -907,6 +917,30 @@ export function Dashboard() {
     }
     load();
   }, [track]);
+
+  // 拉取主题域树 → code→name 映射（域编码中文化展示用）；失败静默回退英文编码
+  useEffect(() => {
+    let alive = true;
+    listDomainTree()
+      .then((nodes) => {
+        if (!alive) return;
+        const map: Record<string, string> = {};
+        const walk = (list: SubjectDomainTreeNode[]) => {
+          for (const n of list) {
+            map[n.code] = n.name;
+            if (n.children?.length) walk(n.children);
+          }
+        };
+        walk(nodes);
+        setDomainNameMap(map);
+      })
+      .catch(() => {
+        // 域列表不可用时保留编码展示，不阻断仪表盘其余数据
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   if (loading) {
     return (
@@ -1019,7 +1053,7 @@ export function Dashboard() {
       <Row gutter={[20, 20]} style={{ marginBottom: 20 }}>
         <Col xs={24} lg={12}>
           <Card title="业务域分布" styles={{ body: { paddingTop: 8 } }}>
-            <DomainChart byDomain={data.by_domain ?? {}} />
+            <DomainChart byDomain={data.by_domain ?? {}} nameMap={domainNameMap} />
           </Card>
         </Col>
         <Col xs={24} lg={12}>
@@ -1150,7 +1184,7 @@ export function Dashboard() {
                   <span className="muted" style={{ fontSize: 12, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {t.definition}
                   </span>
-                  <Tag>{t.domain}</Tag>
+                  <Tag>{domainNameMap[t.domain] ?? t.domain}</Tag>
                 </div>
               ))
             )}

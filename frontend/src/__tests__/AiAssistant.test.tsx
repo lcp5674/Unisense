@@ -42,38 +42,24 @@ function renderAi() {
   );
 }
 
-describe("AiAssistant 自然语言查询", () => {
+describe("AiAssistant 未开放状态", () => {
   beforeEach(() => {
     mockNl2Sql.mockReset();
   });
 
-  it("生成 SQL：调用 aiNl2Sql 并展示生成的 SQL", async () => {
-    mockNl2Sql.mockResolvedValue({
-      sql: "SELECT ... FROM dwd_finance_order",
-      safe: true,
-      notes: ["命中指标 finance_revenue_sum_d"],
-      method: "keyword",
-      anchored: ["finance_revenue_sum_d"],
-      params: {},
-      execute: false,
-    });
+  it("展示「暂未开放使用」说明", async () => {
     renderAi();
-    const textarea = screen.getByPlaceholderText(/如：最近 30 天 finance 域收入总额/) as HTMLTextAreaElement;
-    fireEvent.change(textarea, { target: { value: "最近 30 天 finance 域收入总额，按日粒度" } });
-    fireEvent.click(screen.getByText("生成 SQL"));
-    await waitFor(() => {
-      expect(mockNl2Sql).toHaveBeenCalledWith({
-        nl_query: "最近 30 天 finance 域收入总额，按日粒度",
-        metric_scope: null,
-      });
-    });
-    expect(await screen.findByText(/SELECT \.\.\./)).toBeTruthy();
-    expect(screen.getByText(/关键词匹配/)).toBeTruthy();
+    expect(await screen.findByText("AI 助手暂未开放使用")).toBeTruthy();
+    expect(screen.getByText(/内部测试阶段/)).toBeTruthy();
   });
 
-  it("空输入时提示，不调用接口", async () => {
+  it("输入框与「生成 SQL」按钮禁用，点击生成不调用接口", async () => {
     renderAi();
-    fireEvent.click(screen.getByText("生成 SQL"));
+    const textarea = screen.getByPlaceholderText(/如：最近 30 天 finance 域收入总额/) as HTMLTextAreaElement;
+    expect(textarea.disabled).toBe(true);
+    const btn = screen.getByRole("button", { name: /生成 SQL/ }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    fireEvent.click(btn);
     await waitFor(() => {
       expect(mockNl2Sql).not.toHaveBeenCalled();
     });
@@ -113,7 +99,7 @@ describe("AiAssistant 自然语言查询", () => {
   });
 });
 
-describe("AiAssistant ai:nl2sql 按钮级权限点", () => {
+describe("AiAssistant 未开放压过权限点", () => {
   const mockedPerms = vi.mocked(fetchMyPermissions);
   function renderAiWithPerms(ui_actions: string[]) {
     mockedPerms.mockResolvedValue({
@@ -143,9 +129,9 @@ describe("AiAssistant ai:nl2sql 按钮级权限点", () => {
     expect(btn.disabled).toBe(true);
   });
 
-  it("具备 ai:nl2sql 权限点时「生成 SQL」按钮可用", async () => {
+  it("未开放时即使具备 ai:nl2sql 权限，「生成 SQL」按钮仍禁用（产品未开放优先）", async () => {
     renderAiWithPerms(["ai:view", "ai:nl2sql"]);
     const btn = (await screen.findByRole("button", { name: /生成 SQL/ })) as HTMLButtonElement;
-    expect(btn.disabled).toBe(false);
+    expect(btn.disabled).toBe(true);
   });
 });

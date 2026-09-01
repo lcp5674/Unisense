@@ -9,6 +9,7 @@ vi.mock("../api", () => ({
   fetchObsOverview: vi.fn(),
   fetchRecommendedMetrics: vi.fn(),
   fetchRecommendedTerms: vi.fn(),
+  listDomainTree: vi.fn(),
 }));
 
 // Mock 图表库（jsdom 无 canvas 环境）
@@ -28,6 +29,7 @@ import {
   fetchObsOverview,
   fetchRecommendedMetrics,
   fetchRecommendedTerms,
+  listDomainTree,
 } from "../api";
 const mockedFetchDashboard = vi.mocked(fetchDashboard);
 const mockedFetchObsOverview = vi.mocked(fetchObsOverview);
@@ -137,6 +139,8 @@ describe("Dashboard", () => {
     mockedFetchObsOverview.mockResolvedValue(mockOverview as never);
     vi.mocked(fetchRecommendedMetrics).mockResolvedValue([]);
     vi.mocked(fetchRecommendedTerms).mockResolvedValue([]);
+    // 域列表默认空 → 域映射回退显示编码，不影响既有断言
+    vi.mocked(listDomainTree).mockResolvedValue([]);
   });
 
   it("shows loading state initially", () => {
@@ -634,6 +638,43 @@ describe("Dashboard 推荐卡片", () => {
 
     await waitFor(() => expect(screen.getByText(/暂无推荐（去指标目录逛逛/)).toBeInTheDocument());
     expect(screen.getByText(/很快就有专属推荐/)).toBeInTheDocument();
+  });
+
+  it("推荐术语的域 Tag 展示中文名（listDomainTree 映射，非英文编码）", async () => {
+    vi.mocked(listDomainTree).mockResolvedValue([
+      {
+        id: 1,
+        code: "outpatient",
+        name: "门诊",
+        parent_id: null,
+        level: 1,
+        sort_order: 0,
+        status: "active",
+        metric_count: 0,
+        children: [],
+      },
+    ]);
+    vi.mocked(fetchRecommendedTerms).mockResolvedValue([
+      {
+        id: 1,
+        term_code: "t_outpatient",
+        name: "挂号术语",
+        definition: "门诊相关业务术语",
+        domain: "outpatient",
+        synonyms: [],
+        boundary: null,
+        status: "PUBLISHED",
+        owner_id: 1,
+        created_at: null,
+        updated_at: null,
+      },
+    ]);
+    renderDashboard();
+
+    await waitFor(() => expect(screen.getByText("挂号术语")).toBeInTheDocument());
+    // 域 Tag 中文化：显示「门诊」而非英文编码 outpatient
+    await waitFor(() => expect(screen.getByText("门诊")).toBeInTheDocument());
+    expect(screen.queryByText("outpatient")).not.toBeInTheDocument();
   });
 
   it("查看更多推荐：点击后拉取更多并去重合并", async () => {

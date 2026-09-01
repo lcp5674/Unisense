@@ -133,7 +133,7 @@ const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; label: s
     label: "消费接入",
     children: [
       { key: "/query", label: "查询工作台", icon: <ConsoleSqlOutlined /> },
-      { key: "/ai", label: "AI 助手", icon: <RobotOutlined /> },
+      { key: "/ai", label: "AI 助手（内测中）", icon: <RobotOutlined /> },
       { key: "/api-clients", label: "API 客户端", icon: <KeyOutlined /> },
     ],
   },
