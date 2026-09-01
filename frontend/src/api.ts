@@ -34,9 +34,11 @@ import {
   BatchToggleRequest,
   ClientCreateRequest,
   ClientCreatedResponse,
+  ClientBatchRequest,
   ConflictCheckRequest,
   ConflictCheckResult,
   ClientResponse,
+  ClientUpdateRequest,
   RenameSuggestResponse,
   CollectNowResult,
   CollectResult,
@@ -1984,7 +1986,9 @@ export async function consumeDryRun(req: QueryRequest): Promise<DryRunResponse> 
   return request<DryRunResponse>(`${API_BASE}/consume/query/dry-run`, {
     method: "POST",
     body: JSON.stringify(req),
+    // 双通道：有消费令牌用 consume Bearer；无令牌回落登录用户 JWT（后端 get_consume_or_internal_user）
     consumeAuth: true,
+    consumeFallbackUser: true,
   });
 }
 
@@ -1993,6 +1997,7 @@ export async function consumeQuery(req: QueryRequest): Promise<QueryResponse> {
     method: "POST",
     body: JSON.stringify(req),
     consumeAuth: true,
+    consumeFallbackUser: true,
   });
 }
 
@@ -2000,7 +2005,7 @@ export async function consumeQuery(req: QueryRequest): Promise<QueryResponse> {
 export async function consumeSemantic(code: string): Promise<DryRunResponse> {
   return request<DryRunResponse>(
     `${API_BASE}/consume/metrics/${encodeURIComponent(code)}/semantic`,
-    { consumeAuth: true },
+    { consumeAuth: true, consumeFallbackUser: true },
   );
 }
 
@@ -2061,6 +2066,38 @@ export async function mintClientToken(clientId: string, expireMinutes?: number):
       body: JSON.stringify(expireMinutes != null ? { expire_minutes: expireMinutes } : {}),
     },
   );
+}
+
+export async function updateApiClient(clientId: string, req: ClientUpdateRequest): Promise<ClientResponse> {
+  return request<ClientResponse>(`${API_BASE}/consume/api-clients/${encodeURIComponent(clientId)}`, {
+    method: "PUT",
+    body: JSON.stringify(req),
+  });
+}
+
+export async function updateApiClientStatus(clientId: string, status: string): Promise<ClientResponse> {
+  return request<ClientResponse>(`${API_BASE}/consume/api-clients/${encodeURIComponent(clientId)}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+}
+
+export async function deleteApiClient(clientId: string): Promise<{ deleted: boolean }> {
+  return request<{ deleted: boolean }>(`${API_BASE}/consume/api-clients/${encodeURIComponent(clientId)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function batchApiClientAction(req: ClientBatchRequest): Promise<{
+  action: string;
+  ok_count: number;
+  fail_count: number;
+  results: { client_id: string; ok: boolean; code?: string; message?: string; status?: string }[];
+}> {
+  return request(`${API_BASE}/consume/api-clients/batch`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
 }
 
 // ---- 维度 ----

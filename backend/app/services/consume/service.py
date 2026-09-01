@@ -370,7 +370,18 @@ class ConsumeService(BaseService):
             )
 
     # ---- dry-run ----
-    async def dry_run_query(self, req: QueryRequest, client: ApiClient) -> DryRunResponse:
+    async def dry_run_query(
+        self,
+        req: QueryRequest,
+        client: ApiClient | None = None,
+        internal_user: User | None = None,
+    ) -> DryRunResponse:
+        """口径校验 + 执行计划（不执行/不写/不计费/不缓存）。
+
+        双通道鉴权（与 ``execute_query`` 对齐）：
+        - client（接入方）：走接入方四级闸门（scope_domain → 白名单 → PII → 合规复核）。
+        - internal_user（内部登录用户）：走 PDP 数据权限 + PII 合规复核闸门（COMPL-1）。
+        """
         checks: list[dict[str, Any]] = []
         metric = await self._get_metric(req.metric_code)
         if metric is None:
@@ -382,7 +393,25 @@ class ConsumeService(BaseService):
                 else ErrorCode.FORBIDDEN_METRIC
             )
             raise BusinessError(f"指标状态 {metric.status} 不可消费", error_code=code)
-        self._assert_authorized(client, metric)
+        if internal_user is None:
+            if client is None:
+                raise BusinessError("缺少消费凭证", error_code=ErrorCode.AUTH_APIKEY_MISSING)
+            self._assert_authorized(client, metric)
+        else:
+            if self.is_pii(metric) and not metric.compliance_reviewed:
+                raise BusinessError(
+                    "PII 指标未通过合规复核，禁止消费",
+                    error_code=ErrorCode.FORBIDDEN_PII,
+                )
+            decision, _ = await GovernanceService(
+                self._db
+            ).check_internal_read_permission(internal_user, req.metric_code)
+            if not decision.allow:
+                raise BusinessError(
+                    decision.reason or "无权限查询该指标",
+                    error_code=decision.error_code or ErrorCode.FORBIDDEN,
+                    ctx={"metric_code": req.metric_code, "actor_id": internal_user.id},
+                )
         grain = (metric.definition_json or {}).get("grain")
         checks.append({"check": "granularity", "ok": True, "detail": f"指标粒度 {grain}"})
         expr = (metric.definition_json or {}).get("expression", "")

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Card, Select, Input, Button, Form, Space, Tag, Table, Tabs, Alert, message, Row, Col, Drawer, Empty } from "antd";
+import { Card, Select, Input, Button, Form, Space, Tag, Table, Tabs, Alert, message, Row, Col, Drawer, Empty, Segmented } from "antd";
 import { PlayCircleOutlined, SafetyCertificateOutlined, KeyOutlined, DatabaseOutlined, ReadOutlined, ArrowLeftOutlined } from "@ant-design/icons";
 import {
   consumeDryRun,
@@ -44,8 +44,12 @@ const VALUE_FIELD_LABEL: Record<string, string> = {
 // consume 通道错误提示引导：严格消费方通道（X-Api-Key client_id:secret / consume JWT）
 // 与用户 JWT 不同，未签发消费令牌时后端返回 AUTH_APIKEY_INVALID（"X-Api-Key 格式应为
 // client_id:secret"），对业务用户不直观——这里转成明确操作指引。
-function consumeErrorText(err: unknown): string {
+// mode="query"（内部用户 JWT 查询）时不提示「需要消费令牌」，直接展示后端错误信息。
+function consumeErrorText(err: unknown, mode: "query" | "debug" = "debug"): string {
   if (err instanceof UnisenseApiError) {
+    if (mode === "query") {
+      return `${err.message}（${err.codeZh}）`;
+    }
     if (err.code === "AUTH_APIKEY_INVALID" || err.code === "AUTH_APIKEY_MISSING") {
       return "需要消费令牌：请点击上方『从客户端签发令牌』后重试";
     }
@@ -94,6 +98,9 @@ function QueryResultTable({ data }: { data: Record<string, unknown> }) {
 export function QueryWorkspace() {
   const { can } = usePermission();
   const canExecute = can("query:execute");
+  // 双入口：query=指标查询（内部用户 JWT，无需令牌/客户端，展示全部已发布指标）；
+  // debug=消费接入调试（选客户端→签发令牌→以接入方视角收敛与调试）。
+  const [mode, setMode] = useState<"query" | "debug">("query");
   const [metricOptions, setMetricOptions] = useState<Array<{ value: string; label: string }>>([]);
   const [metricCode, setMetricCode] = useState<string | undefined>(undefined);
   // 接入方授权范围：取「首个 ACTIVE 客户端」的域/白名单，指标下拉据此收敛——
@@ -167,14 +174,15 @@ export function QueryWorkspace() {
 
   useEffect(() => {
     // P5（审查修复）：指标下拉改服务端搜索——初始加载前 100 条，搜索时按关键词请求
-    loadMetricOptions("");
+    // 初始为「指标查询」模式：展示全部已发布指标（内部用户视角），不做客户端收敛。
+    loadMetricOptions("", { domain: null, whitelist: null });
     loadClients();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 加载 ACTIVE 客户端列表供「消费客户端」选择器使用；若当前令牌已绑定某客户端
-  // （JWT sub），自动选中该客户端并按其授权范围收敛——保证「能看到的 = 能消费的」。
-  // 未绑定任何客户端时保持「全部指标（平台内部视角）」，不再被首个 ACTIVE 客户端绑架。
+  // 加载 ACTIVE 客户端列表供「消费接入调试」选择器使用；若当前令牌已绑定某客户端
+  // （JWT sub），在调试模式下自动选中该客户端并按其授权范围收敛——保证「能看到的 = 能消费的」。
+  // 指标查询模式不自动收敛（内部用户看全部已发布指标）。
   function loadClients() {
     listApiClients()
       .then((list) => {
@@ -182,7 +190,7 @@ export function QueryWorkspace() {
         setClients(actives);
         const bound = getConsumeTokenClientId();
         const matched = actives.find((c) => c.client_id === bound);
-        if (matched) {
+        if (matched && mode === "debug") {
           setClientId(matched.client_id);
           const scope = {
             domain: matched.scope_domain ?? null,
@@ -193,6 +201,24 @@ export function QueryWorkspace() {
         }
       })
       .catch(() => {});
+  }
+
+  // 双入口切换：指标查询（全量）/ 消费接入调试（按所选/令牌绑定客户端收敛）
+  function handleModeChange(m: "query" | "debug") {
+    setMode(m);
+    if (m === "query") {
+      setClientScope({ domain: null, whitelist: null });
+      loadMetricOptions("", { domain: null, whitelist: null });
+    } else {
+      // 调试模式：优先令牌绑定的客户端，其次用户显式选择的客户端；都无则全量。
+      const bound = getConsumeTokenClientId();
+      const boundClient = clients.find((c) => c.client_id === bound);
+      const c = boundClient ?? clients.find((x) => x.client_id === clientId);
+      if (c) setClientId(c.client_id);
+      const scope = { domain: c?.scope_domain ?? null, whitelist: c?.metric_whitelist ?? null };
+      setClientScope(scope);
+      loadMetricOptions("", scope);
+    }
   }
 
   // 用户显式切换消费客户端：按其授权范围收敛指标下拉（未选 = 全部指标）
@@ -282,7 +308,7 @@ export function QueryWorkspace() {
       setQuery(null);
       track("consume_dry_run", metricCode, "metric");
     } catch (err) {
-      message.error(consumeErrorText(err));
+      message.error(consumeErrorText(err, mode));
     } finally {
       setBusy(null);
     }
@@ -311,7 +337,7 @@ export function QueryWorkspace() {
           setDegradedMessage(dgMsg);
         }
       }
-      message.error(consumeErrorText(err));
+      message.error(consumeErrorText(err, mode));
     } finally {
       setBusy(null);
     }
@@ -339,7 +365,7 @@ export function QueryWorkspace() {
       setSemanticOpen(true);
       track("consume_semantic", metricCode, "metric");
     } catch (err) {
-      message.error(consumeErrorText(err));
+      message.error(consumeErrorText(err, mode));
     } finally {
       setBusy(null);
     }
@@ -399,51 +425,64 @@ export function QueryWorkspace() {
               onClose={() => setDegraded(false)}
             />
           )}
-          <Alert
-            type={tokenOk ? "success" : "warning"}
-            showIcon
-            icon={<KeyOutlined />}
-            style={{ marginBottom: 16 }}
-            message={tokenOk ? "消费令牌已就绪（角色 consume）" : "需要消费令牌"}
-            description={
-              tokenOk ? (
-                <span>
-                  当前使用客户端令牌调用 /consume/query。
-                  {tokenExpiry ? ` 令牌剩余 ${Math.max(0, Math.round((tokenExpiry - Date.now()) / 60000))} 分钟。` : ""}{" "}
-                  <a onClick={() => { clearConsumeToken(); setTokenOk(false); setTokenExpiry(null); }}>清除令牌</a>
-                </span>
-              ) : (
-                <span>
-                  /consume/query 由 API 客户端（X-Api-Key + consume JWT）鉴权。可到「API 客户端」创建后一键签发。
-                </span>
-              )
-            }
-            action={
-              !tokenOk && canExecute && (
-                <Button size="small" onClick={handleMintToken}>从客户端签发令牌</Button>
-              )
-            }
-          />
-
-          <Space style={{ marginBottom: 16, width: "100%" }} wrap>
-            <span style={{ display: "inline-flex", alignItems: "center" }}>
-              消费客户端：
-              <Select
-                style={{ width: 300, marginLeft: 8 }}
-                placeholder="全部指标（平台内部视角）"
-                allowClear
-                value={clientId}
-                onChange={handleClientChange}
-                options={clients.map((c) => ({
-                  value: c.client_id,
-                  label: c.scope_domain ? `${c.client_id}（域：${c.scope_domain}）` : c.client_id,
-                }))}
+          {mode === "debug" ? (
+            <>
+              <Alert
+                type={tokenOk ? "success" : "warning"}
+                showIcon
+                icon={<KeyOutlined />}
+                style={{ marginBottom: 16 }}
+                message={tokenOk ? "消费令牌已就绪（角色 consume）" : "需要消费令牌"}
+                description={
+                  tokenOk ? (
+                    <span>
+                      当前使用客户端令牌调用 /consume/query。
+                      {tokenExpiry ? ` 令牌剩余 ${Math.max(0, Math.round((tokenExpiry - Date.now()) / 60000))} 分钟。` : ""}{" "}
+                      <a onClick={() => { clearConsumeToken(); setTokenOk(false); setTokenExpiry(null); }}>清除令牌</a>
+                    </span>
+                  ) : (
+                    <span>
+                      /consume/query 由 API 客户端（X-Api-Key + consume JWT）鉴权。可到「API 客户端」创建后一键签发。
+                    </span>
+                  )
+                }
+                action={
+                  !tokenOk && canExecute && (
+                    <Button size="small" onClick={handleMintToken}>从客户端签发令牌</Button>
+                  )
+                }
               />
-            </span>
-            <span className="muted" style={{ fontSize: 12 }}>
-              未选择时展示全部已发布指标；选择客户端后仅展示其授权域/白名单内的指标，签发令牌也使用该客户端。
-            </span>
-          </Space>
+
+              <Space style={{ marginBottom: 16, width: "100%" }} wrap>
+                <span style={{ display: "inline-flex", alignItems: "center" }}>
+                  消费客户端：
+                  <Select
+                    style={{ width: 300, marginLeft: 8 }}
+                    placeholder="全部指标（平台内部视角）"
+                    allowClear
+                    value={clientId}
+                    onChange={handleClientChange}
+                    options={clients.map((c) => ({
+                      value: c.client_id,
+                      label: c.scope_domain ? `${c.client_id}（域：${c.scope_domain}）` : c.client_id,
+                    }))}
+                  />
+                </span>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  未选择时展示全部已发布指标；选择客户端后仅展示其授权域/白名单内的指标，签发令牌也使用该客户端。
+                </span>
+              </Space>
+            </>
+          ) : (
+            <Alert
+              type="info"
+              showIcon
+              icon={<SafetyCertificateOutlined />}
+              style={{ marginBottom: 16 }}
+              message="指标查询（平台内部视角）"
+              description="使用你的登录身份直接查询已发布指标，无需消费令牌；如需以接入方视角调试消费接口（选客户端→签发令牌→按授权域收敛），请切换到上方『消费接入调试』。"
+            />
+          )}
 
           <Form layout="vertical">
             <Row gutter={[16, 0]}>
@@ -668,6 +707,16 @@ export function QueryWorkspace() {
           <div className="page-kicker">Consumption / Query</div>
           <h2>查询工作台</h2>
           <p>基于指标语义的查询——先 dry-run 校验口径，再安全执行。</p>
+        </div>
+        <div>
+          <Segmented
+            value={mode}
+            onChange={(v) => handleModeChange(v as "query" | "debug")}
+            options={[
+              { label: "指标查询", value: "query" },
+              { label: "消费接入调试", value: "debug" },
+            ]}
+          />
         </div>
       </div>
       <Card><Tabs items={tabItems} /></Card>

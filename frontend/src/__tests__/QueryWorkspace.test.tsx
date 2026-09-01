@@ -277,13 +277,16 @@ describe("QueryWorkspace", () => {
     });
   });
 
-  it("未签发消费令牌时给出签发引导而非技术错误码", async () => {
+  it("未签发消费令牌时给出签发引导而非技术错误码（消费接入调试模式）", async () => {
     const user = userEvent.setup();
     mockedConsumeQuery.mockRejectedValue(
       new UnisenseApiError("X-Api-Key 格式应为 client_id:secret", "AUTH_APIKEY_INVALID", 401, "trace-test"),
     );
     renderPage();
     await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+
+    // 切到「消费接入调试」模式（该模式展示令牌状态与签发引导）
+    await user.click(screen.getByText("消费接入调试"));
 
     await user.click(metricSelectInput());
     await user.click(await screen.findByText(/gmv_net · 净GMV/));
@@ -295,20 +298,28 @@ describe("QueryWorkspace", () => {
     });
   });
 
-  it("有未过期令牌时展示『已就绪』与剩余分钟", async () => {
+  it("有未过期令牌时展示『已就绪』与剩余分钟（消费接入调试模式）", async () => {
+    const user = userEvent.setup();
     mockedGetConsumeToken.mockReturnValue("fake-consume-jwt");
     mockedGetConsumeTokenExpiry.mockReturnValue(Date.now() + 3600000);
     renderPage();
+    await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+
+    // 切到「消费接入调试」模式后令牌状态 Alert 才展示
+    await user.click(screen.getByText("消费接入调试"));
     await waitFor(() =>
       expect(screen.getByText("消费令牌已就绪（角色 consume）")).toBeInTheDocument(),
     );
     expect(screen.getByText(/令牌剩余 60 分钟/)).toBeInTheDocument();
   });
 
-  it("消费令牌被清除（request 401 触发）后 UI 实时回到『需要消费令牌』", async () => {
+  it("消费令牌被清除（request 401 触发）后 UI 实时回到『需要消费令牌』（消费接入调试模式）", async () => {
+    const user = userEvent.setup();
     mockedGetConsumeToken.mockReturnValue("fake-consume-jwt");
     mockedGetConsumeTokenExpiry.mockReturnValue(Date.now() + 3600000);
     renderPage();
+    await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+    await user.click(screen.getByText("消费接入调试"));
     await waitFor(() =>
       expect(screen.getByText("消费令牌已就绪（角色 consume）")).toBeInTheDocument(),
     );
@@ -321,7 +332,7 @@ describe("QueryWorkspace", () => {
 
   it("指标下拉按接入方授权域收敛：仅展示 scope_domain 内 + 白名单内（PII 需显式白名单）的 PUBLISHED 指标", async () => {
     const user = userEvent.setup();
-    // 令牌已绑定 e2e_app → loadClients 自动选中该客户端并按其授权范围收敛
+    // 令牌已绑定 e2e_app → 切到调试模式时自动选中该客户端并按其授权范围收敛
     mockedGetConsumeTokenClientId.mockReturnValue("e2e_app");
     mockedListApiClients.mockResolvedValue([
       {
@@ -347,14 +358,57 @@ describe("QueryWorkspace", () => {
     });
     renderPage();
     await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+    // 切到「消费接入调试」：令牌绑定 e2e_app → 自动选中并按授权域收敛
+    await user.click(screen.getByText("消费接入调试"));
     // 服务端按 scope_domain 过滤
-    expect(mockedListMetrics).toHaveBeenCalledWith(expect.objectContaining({ domain: "outpatient" }));
+    await waitFor(() =>
+      expect(mockedListMetrics).toHaveBeenCalledWith(expect.objectContaining({ domain: "outpatient" })),
+    );
     await user.click(metricSelectInput());
     expect(await screen.findByText(/outp_patient_cnt · 患者数/)).toBeInTheDocument();
     expect(await screen.findByText(/outp_pii_ok · 授权PII/)).toBeInTheDocument();
     expect(screen.queryByText(/outp_fee_day · 门诊费用/)).not.toBeInTheDocument();
     expect(screen.queryByText(/gmv_net · 净GMV/)).not.toBeInTheDocument();
     expect(screen.queryByText(/outp_pii_raw · 原始PII/)).not.toBeInTheDocument();
+  });
+
+  it("指标查询模式：初始展示全部指标、无令牌/客户端 UI，切换后恢复收敛", async () => {
+    const user = userEvent.setup();
+    // 存在首个 ACTIVE 客户端（sales 域 + 白名单）且令牌未绑定——query 模式不被绑架
+    mockedListApiClients.mockResolvedValue([
+      {
+        client_id: "e2e_app",
+        scope_domain: "sales",
+        metric_whitelist: ["sales_e2e_gmv_day"],
+        qps: 20,
+        daily_quota: 100000,
+        status: "ACTIVE",
+      },
+    ]);
+    mockedListMetrics.mockResolvedValue({
+      items: [
+        mkMetric("outp_visit_day", "门诊就诊量", "outpatient"),
+        mkMetric("gmv_net", "净GMV", "sales"),
+      ],
+      total: 2,
+      page: 1,
+      page_size: 100,
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+    // 指标查询模式：全量（不传 domain）+ 展示内部视角说明，不渲染令牌/客户端 UI
+    expect(mockedListMetrics).toHaveBeenCalledWith(expect.objectContaining({ domain: undefined }));
+    expect(screen.getByText("指标查询（平台内部视角）")).toBeInTheDocument();
+    expect(screen.queryByText("需要消费令牌")).not.toBeInTheDocument();
+    expect(screen.queryByText(/消费客户端/)).not.toBeInTheDocument();
+    // 下拉可见全部已发布指标
+    await user.click(metricSelectInput());
+    expect(await screen.findByText(/outp_visit_day · 门诊就诊量/)).toBeInTheDocument();
+    expect(await screen.findByText(/gmv_net · 净GMV/)).toBeInTheDocument();
+    // 切到调试模式：出现令牌/客户端 UI
+    await user.click(screen.getByText("消费接入调试"));
+    await waitFor(() => expect(screen.getByText("需要消费令牌")).toBeInTheDocument());
+    expect(screen.getByText(/消费客户端/)).toBeInTheDocument();
   });
 
   it("未选择/未绑定客户端时展示全部 PUBLISHED 指标，不被首个 ACTIVE 客户端授权范围绑架", async () => {

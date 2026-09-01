@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import secrets
 import time
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials
+from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, get_current_user, require_roles
@@ -111,8 +112,15 @@ async def get_consume_or_internal_user(
     if api_key or credentials is not None:
         try:
             return await _authenticate_consume(db=db, api_key=api_key, authorization=authorization)
-        except BusinessError:
-            pass
+        except BusinessError as exc:
+            if exc.error_code == ErrorCode.RATE_LIMITED:
+                # 限流/配额耗尽：fail-closed，禁止回落用户通道（否则限流保护被绕过）。
+                raise
+            if credentials is None:
+                # 无用户 JWT 兜底：消费方凭证明确但无效/吊销 → fail-closed 抛出。
+                raise
+            # 存在用户 JWT：consume 凭证对 consume 域无效（如前端全局 X-Api-Key 默认头）
+            # 或用户 JWT 非 consume 角色 → 回落登录用户通道。
     # 回落到内部登录用户只读通道
     if credentials is not None:
         return await get_current_user(db, credentials)
@@ -122,37 +130,55 @@ async def get_consume_or_internal_user(
 @router.post("/consume/query/dry-run", response_model=ApiResponse[DryRunResponse])
 async def dry_run(
     req: QueryRequest,
-    client: ApiClient = Depends(get_consume_client),
+    _auth: ApiClient | User = Depends(get_consume_or_internal_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> ApiResponse[DryRunResponse]:
-    """dry-run：口径校验 + 执行计划 + 元信息标注（不执行/不写/不计费/不缓存）。"""
+    """dry-run：口径校验 + 执行计划 + 元信息标注（不执行/不写/不计费/不缓存）。
+
+    双通道：接入方（X-Api-Key / consume Bearer）或内部登录用户（用户 JWT）。
+    """
     svc = ConsumeService(db)
-    return ok(data=await svc.dry_run_query(req, client))
+    if hasattr(_auth, "client_id"):
+        data = await svc.dry_run_query(req, client=_auth)
+    else:
+        data = await svc.dry_run_query(req, internal_user=_auth)
+    return ok(data=data)
 
 
 @router.post("/consume/query", response_model=ApiResponse[QueryResponse])
 async def query(
     req: QueryRequest,
-    client: ApiClient = Depends(get_consume_client),
+    _auth: ApiClient | User = Depends(get_consume_or_internal_user),
     db: AsyncSession = Depends(get_db_session),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[QueryResponse]:
-    """语义查询：OLAP 不可用时降级 503；成功则返回执行计划 + 元信息并写审计。
+    """语义查询（双通道）：OLAP 不可用时降级 503；成功则返回执行计划 + 元信息并写审计。
+
+    - 接入方（X-Api-Key / consume Bearer）：走接入方四级闸门 + 限流。
+    - 内部登录用户（用户 JWT）：走 PDP 数据权限 + PII 合规复核闸门。
 
     响应时效 KPI：真实查询耗时在 API 层计时，成功/失败均 best-effort 落
     ``query_log``（独立事务，失败不阻断响应）。
     """
     svc = ConsumeService(db)
+    is_client = hasattr(_auth, "client_id")
+    requester_type = QueryRequesterType.API_CLIENT if is_client else QueryRequesterType.INTERNAL
+    requester_id = _auth.client_id if is_client else str(_auth.id)
+    requester_name = _auth.client_id if is_client else _auth.username
+    action = "metric.query" if is_client else "metric.query_internal"
     start = time.perf_counter()
     try:
-        res = await svc.execute_query(req, client)
+        if is_client:
+            res = await svc.execute_query(req, client=_auth)
+        else:
+            res = await svc.execute_query(req, internal_user=_auth)
     except Exception as exc:
         duration_ms = int((time.perf_counter() - start) * 1000)
         await svc.record_query_log(
             metric_code=req.metric_code,
-            requester_type=QueryRequesterType.API_CLIENT,
-            requester_id=client.client_id,
-            requester_name=client.client_id,
+            requester_type=requester_type,
+            requester_id=requester_id,
+            requester_name=requester_name,
             duration_ms=duration_ms,
             status="error",
             error_code=getattr(exc, "error_code", None) or type(exc).__name__,
@@ -160,27 +186,27 @@ async def query(
         raise
     duration_ms = int((time.perf_counter() - start) * 1000)
     # PII 数据分级审计（对齐 TD §15.4：PII 访问必须留痕 data_classification=PII）
-    # 执行方为接入方本体（client.id），而非其创建者（created_by），避免审计归属伪造（PLAT-2）。
     is_pii = bool((res.meta or {}).get("pii", False))
+    detail: dict[str, Any] = {"data_classification": "PII" if is_pii else "INTERNAL"}
+    if is_client:
+        # 执行方为接入方本体（client.id），而非其创建者（created_by），避免审计归属伪造（PLAT-2）。
+        detail["client"] = _auth.client_id
     await write_audit(
         db,
-        actor_id=client.id,
-        action="metric.query",
+        actor_id=_auth.id,
+        action=action,
         entity_type="metric",
         entity_id=req.metric_code,
-        detail={
-            "client": client.client_id,
-            "data_classification": "PII" if is_pii else "INTERNAL",
-        },
+        detail=detail,
         trace_id=trace_id,
         pii_access=is_pii,
     )
     await db.commit()
     await svc.record_query_log(
         metric_code=req.metric_code,
-        requester_type=QueryRequesterType.API_CLIENT,
-        requester_id=client.client_id,
-        requester_name=client.client_id,
+        requester_type=requester_type,
+        requester_id=requester_id,
+        requester_name=requester_name,
         duration_ms=duration_ms,
         status="ok",
     )
@@ -366,12 +392,17 @@ async def issue_token(
 @router.get("/consume/metrics/{code}/semantic", response_model=ApiResponse[DryRunResponse])
 async def get_semantic(
     code: str,
-    client: ApiClient = Depends(get_consume_client),
+    _auth: ApiClient | User = Depends(get_consume_or_internal_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> ApiResponse[DryRunResponse]:
-    """只读语义拉取（接入方用，受 scope 约束）。"""
+    """只读语义拉取（双通道）：接入方受 scope 约束；内部用户走 PDP 权限。"""
     svc = ConsumeService(db)
-    return ok(data=await svc.dry_run_query(QueryRequest(metric_code=code, date_range=""), client))
+    req = QueryRequest(metric_code=code, date_range="")
+    if hasattr(_auth, "client_id"):
+        data = await svc.dry_run_query(req, client=_auth)
+    else:
+        data = await svc.dry_run_query(req, internal_user=_auth)
+    return ok(data=data)
 
 
 @router.get("/consume/metrics/{code}/snapshots", response_model=ApiResponse[list[SnapshotResponse]])
@@ -390,7 +421,7 @@ async def list_metric_snapshots(
     - 内部登录用户（User）：走 PDP 数据权限（平台直通 / 本域 ROLE_ACTIONS / 跨域 grants）。
     """
     svc = ConsumeService(db)
-    if isinstance(_auth, ApiClient):
+    if hasattr(_auth, "client_id"):
         data = await svc.list_snapshots_for_client(code, limit, offset, _auth)
     else:
         data = await svc.list_snapshots_for_internal(code, limit, offset, _auth)

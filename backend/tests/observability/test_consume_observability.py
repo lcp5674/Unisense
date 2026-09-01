@@ -15,7 +15,7 @@ import pytest
 from httpx import ASGITransport
 
 from app.api import consume as consume_api
-from app.api.deps import get_db_session
+from app.api.deps import get_current_user, get_db_session
 from app.main import app
 from app.models.consume import ApiClient
 from app.services.consume.schemas import QueryResponse
@@ -23,14 +23,16 @@ from app.services.consume.schemas import QueryResponse
 logger = logging.getLogger(__name__)
 
 
-class _FakeClient:
-    id = 1
-    client_id = "cli_obs"
-    scope_domain = "M1"
-    metric_whitelist = ["M1"]
-    qps = 100
-    daily_quota = 100_000
-    created_by = 1
+def _make_fake_client() -> ApiClient:
+    c = ApiClient()
+    c.id = 1
+    c.client_id = "cli_obs"
+    c.scope_domain = "M1"
+    c.metric_whitelist = ["M1"]
+    c.qps = 100
+    c.daily_quota = 100_000
+    c.created_by = 1
+    return c
 
 
 @pytest.fixture
@@ -45,15 +47,22 @@ async def obs_client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[httpx.Asy
         yield db
 
     app.dependency_overrides[get_db_session] = fake_db
+    app.dependency_overrides[get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        username="admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
 
-    fake_client = _FakeClient()
+    fake_client = _make_fake_client()
 
     async def fake_auth() -> ApiClient:
         return fake_client  # type: ignore[return-value]
 
-    app.dependency_overrides[consume_api.get_consume_client] = fake_auth
+    app.dependency_overrides[consume_api.get_consume_or_internal_user] = fake_auth
 
-    async def fake_exec(req, cli):  # noqa: ANN001
+    async def fake_exec(req, **kwargs):  # noqa: ANN001, ANN003 - client / internal_user 二选一
         return QueryResponse(metric_code="M1", data={"value": 42})
 
     monkeypatch.setattr(consume_api.ConsumeService, "execute_query", staticmethod(fake_exec))

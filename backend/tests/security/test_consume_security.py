@@ -16,7 +16,7 @@ import pytest
 from httpx import ASGITransport
 
 from app.api import deps
-from app.api.consume import get_consume_client
+from app.api.consume import get_consume_or_internal_user
 from app.core.error_codes import ErrorCode
 from app.core.exceptions import BusinessError
 from app.core.security import hash_password
@@ -69,7 +69,7 @@ async def test_admin_endpoint_requires_admin_role_403() -> None:
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=1, role="metric_owner", domain="sales"
+        id=1, role="metric_owner", domain="sales", roles_all=lambda: ["metric_owner"]
     )
     try:
         transport = ASGITransport(app=app)
@@ -122,7 +122,7 @@ async def test_pii_access_audit_contains_data_classification(monkeypatch) -> Non
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[get_consume_client] = lambda: _api_client(whitelist=["M1"])
+    app.dependency_overrides[get_consume_or_internal_user] = lambda: _api_client(whitelist=["M1"])
     monkeypatch.setattr(
         ConsumeService,
         "execute_query",
@@ -174,7 +174,7 @@ async def test_internal_query_rejects_viewer_403() -> None:
     须经 consume 客户端令牌通道消费数据。"""
     app.dependency_overrides[deps.get_db_session] = _fake_db_session()
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=2, role="viewer", domain="sales"
+        id=2, role="viewer", domain="sales", roles_all=lambda: ["viewer"]
     )
     try:
         transport = ASGITransport(app=app)
@@ -194,7 +194,7 @@ async def test_internal_query_allowed_for_metric_owner(monkeypatch) -> None:
     """metric_owner（前端 query:execute 默认基线角色）可执行内部查询。"""
     app.dependency_overrides[deps.get_db_session] = _fake_db_session()
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=3, role="metric_owner", domain="sales"
+        id=3, role="metric_owner", domain="sales", roles_all=lambda: ["metric_owner"]
     )
     monkeypatch.setattr(
         ConsumeService,

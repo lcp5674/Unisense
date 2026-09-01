@@ -76,7 +76,7 @@ async def api_client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[httpx.Asy
     app.dependency_overrides[get_db_session] = fake_db
     _patch_client_store(monkeypatch)
 
-    async def fake_exec(req, cli):  # noqa: ANN001
+    async def fake_exec(req, **kwargs):  # noqa: ANN001, ANN003 - client / internal_user 二选一
         return QueryResponse(metric_code="M1", data={"value": 1})
 
     monkeypatch.setattr(consume_api.ConsumeService, "execute_query", staticmethod(fake_exec))
