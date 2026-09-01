@@ -121,6 +121,14 @@ class User(Base, BaseModel):
     must_change_password: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, comment="首次登录须强制改密"
     )
+    totp_secret: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+        comment="TOTP 双因子密钥（Fernet 加密存储，setup 时写入、confirm 时启用）",
+    )
+    totp_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, comment="是否已启用 TOTP 双因子认证"
+    )
 
     org: Mapped[Organization] = relationship("Organization", back_populates="users")
     #: 多角色关联（方案 A）：权威角色源为 ``user_role`` 表；``user.role`` 为主角色冗余。

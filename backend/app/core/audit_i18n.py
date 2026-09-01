@@ -363,6 +363,13 @@ _VERB_TEMPLATES: dict[str, str] = {
     "login": "登录了系统",
     "logout": "退出了系统",
     "login_failed": "登录失败",
+    # 双因子认证（P2 加固：TOTP 设置/校验/重置审计闭环）
+    "login_2fa_required": "登录需双因子验证",
+    "login_2fa_failed": "双因子验证失败",
+    "setup_2fa": "发起了{entity}双因子认证设置",
+    "enable_2fa": "启用了{entity}双因子认证",
+    "disable_2fa": "关闭了{entity}双因子认证",
+    "reset_2fa": "重置了{entity}双因子认证",
     # 通知
     "mark_read": "标记{entity}为已读",
     "mark_all_read": "标记全部{entity}为已读",

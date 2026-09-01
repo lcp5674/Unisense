@@ -34,6 +34,13 @@ from app.core.audit import client_ip, write_audit
 from app.core.exceptions import AuthError, ConflictError, NotFoundError, ValidationError
 from app.core.guard import guard_against_injection
 from app.core.security import hash_password, verify_password
+from app.core.totp import (
+    decrypt_secret,
+    encrypt_secret,
+    generate_totp_secret,
+    totp_uri,
+    verify_totp,
+)
 from app.db.mysql import get_db_session
 from app.models.subject_domain import SubjectDomain
 from app.models.user import Organization, User, UserRole
@@ -122,6 +129,7 @@ class UserAdmin(BaseModel):
     status: str
     last_login_at: str | None = None
     created_at: str | None = None
+    totp_enabled: bool = Field(default=False, description="是否已启用 TOTP 双因子认证")
 
 
 class UserCreateRequest(BaseModel):
@@ -222,6 +230,18 @@ class UserChangePasswordRequest(BaseModel):
 
     current_password: str = Field(..., min_length=1, description="当前密码")
     new_password: str = Field(..., min_length=1, max_length=128, description="新密码")
+
+
+class Setup2faRequest(BaseModel):
+    """发起 TOTP 双因子设置请求体（重验密码防会话劫持启用 2FA 反锁账号）。"""
+
+    current_password: str = Field(..., min_length=1, description="当前密码")
+
+
+class TotpCodeRequest(BaseModel):
+    """TOTP 动态码请求体（启用确认 / 关闭验证）。"""
+
+    totp_code: str = Field(..., min_length=1, description="身份验证器动态码（6位）")
 
 
 async def _get_user(db: AsyncSession, user_id: int) -> User | None:
@@ -383,6 +403,7 @@ def _to_admin(row: User, org_name: str | None = None) -> UserAdmin:
         status=row.status,
         last_login_at=row.last_login_at.isoformat() if row.last_login_at else None,
         created_at=row.created_at.isoformat() if row.created_at else None,
+        totp_enabled=bool(getattr(row, "totp_enabled", False)),
     )
 
 
@@ -678,6 +699,114 @@ async def change_my_password(
     return ok({"user_id": user.id, "ok": True}, trace_id=trace_id)
 
 
+@router.post("/me/2fa/setup", dependencies=[Depends(guard_against_injection)])
+async def setup_my_2fa(
+    payload: Setup2faRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """发起 TOTP 双因子设置：生成密钥并加密落库（未启用），返回 otpauth URI。
+
+    重验当前密码（防会话劫持者恶意启用 2FA 反锁账号）；已启用时幂等返回当前
+    otpauth URI（基于已存密钥重新生成）。确认启用走 ``/me/2fa/confirm``。
+    """
+    if not await verify_password(payload.current_password, user.password_hash):
+        raise AuthError("当前密码错误", error_code="PASSWORD_INCORRECT")
+
+    secret = None
+    if user.totp_secret:
+        secret = decrypt_secret(user.totp_secret)
+    if not secret:
+        secret = generate_totp_secret()
+        user.totp_secret = encrypt_secret(secret)
+    account = user.username or f"user-{user.id}"
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="user.setup_2fa",
+        entity_type="user",
+        entity_id=str(user.id),
+        detail={"username": user.username},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(
+        {"secret": secret, "otpauth_uri": totp_uri(secret, account), "enabled": user.totp_enabled},
+        trace_id=trace_id,
+    )
+
+
+@router.post("/me/2fa/confirm", dependencies=[Depends(guard_against_injection)])
+async def confirm_my_2fa(
+    payload: TotpCodeRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """确认启用 TOTP 双因子：校验动态码与待启用密钥匹配后置 enabled=True。
+
+    需先经 ``/me/2fa/setup`` 生成密钥；未设置密钥或动态码错误均拒绝启用。
+    """
+    if not user.totp_secret:
+        raise ValidationError(
+            "尚未生成双因子密钥，请先完成设置", error_code="AUTH_TOTP_NOT_SETUP"
+        )
+    secret = decrypt_secret(user.totp_secret)
+    if secret is None or not verify_totp(secret, payload.totp_code):
+        raise AuthError("动态验证码错误，请重新输入", error_code="AUTH_TOTP_INVALID")
+    if not user.totp_enabled:
+        user.totp_enabled = True
+        await write_audit(
+            db,
+            actor_id=user.id,
+            action="user.enable_2fa",
+            entity_type="user",
+            entity_id=str(user.id),
+            detail={"username": user.username},
+            ip=client_ip(request),
+            trace_id=trace_id,
+        )
+    await db.commit()
+    return ok({"enabled": True}, trace_id=trace_id)
+
+
+@router.post("/me/2fa/disable", dependencies=[Depends(guard_against_injection)])
+async def disable_my_2fa(
+    payload: TotpCodeRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """关闭 TOTP 双因子：须校验当前动态码（证明持有验证器，防他人代关）。
+
+    设备丢失无法提供动态码时，由平台管理员经 ``/{user_id}/2fa/reset`` 强制重置。
+    """
+    if not user.totp_enabled:
+        raise ValidationError("该账号未启用双因子认证", error_code="AUTH_TOTP_NOT_ENABLED")
+    secret = decrypt_secret(user.totp_secret) if user.totp_secret else None
+    if secret is None or not verify_totp(secret, payload.totp_code):
+        raise AuthError("动态验证码错误，请重新输入", error_code="AUTH_TOTP_INVALID")
+    user.totp_secret = None
+    user.totp_enabled = False
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="user.disable_2fa",
+        entity_type="user",
+        entity_id=str(user.id),
+        detail={"username": user.username},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok({"enabled": False}, trace_id=trace_id)
+
+
 @router.put("/{user_id}", dependencies=_ADMIN_DEPS)
 async def update_user(
     user_id: int,
@@ -853,3 +982,48 @@ async def reset_password(
         payload={"user_id": row.id, "username": row.username, "source": "user_admin"},
     )
     return ok({"user_id": row.id, "ok": True}, trace_id=trace_id)
+
+
+@router.post("/{user_id}/2fa/reset", dependencies=_ADMIN_DEPS)
+async def reset_user_2fa(
+    user_id: int,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """管理员强制关闭某用户的双因子认证（设备丢失/动态码失联的应急通道）。
+
+    清除密钥与启用标记，后续该用户登录不再要求动态码（可重新设置）。
+    落审计 + 定向通知（安全感知，防"被静默关闭 2FA"）。
+    """
+    row = await _get_user(db, user_id)
+    if row is None:
+        raise NotFoundError("用户不存在", error_code="USER_NOT_FOUND")
+    if not row.totp_enabled:
+        raise ValidationError("该用户未启用双因子认证", error_code="AUTH_TOTP_NOT_ENABLED")
+    row.totp_secret = None
+    row.totp_enabled = False
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="user.reset_2fa",
+        entity_type="user",
+        entity_id=str(row.id),
+        detail={"username": row.username, "operator": user.username},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    await _notify_user(
+        db,
+        user_id=row.id,
+        event_type="user.twofa_reset",
+        title="双因子认证已被管理员重置",
+        body=(
+            f"您的账号 {row.username} 的双因子认证已被管理员关闭。"
+            "如非本人操作请联系平台管理员；可登录后在个人中心重新开启。"
+        ),
+        payload={"user_id": row.id, "username": row.username, "source": "user_admin"},
+    )
+    return ok({"user_id": row.id, "enabled": False}, trace_id=trace_id)

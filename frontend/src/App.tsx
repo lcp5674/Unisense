@@ -5,6 +5,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Button, Input, App as AntApp } from "antd";
 import {
   apiLogin,
+  apiLogin2fa,
   AUTH_EXPIRED_EVENT,
   clearAuthTokens,
   fetchCurrentUser,
@@ -122,6 +123,8 @@ function PageLoading() {
 function LoginPage({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [totpStep, setTotpStep] = useState(false);
+  const [totpCode, setTotpCode] = useState("");
   const [loading, setLoading] = useState(false);
   const { message } = useApp();
 
@@ -133,7 +136,14 @@ function LoginPage({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
     }
     setLoading(true);
     try {
-      await apiLogin(username.trim(), password);
+      const res = await apiLogin(username.trim(), password);
+      // P2（2FA）：账号启用双因子时第一步仅返回挑战标记，切换到动态码输入步骤。
+      if (res.totp_required) {
+        setTotpStep(true);
+        setLoading(false);
+        message.info("该账号已启用双因子认证，请输入身份验证器动态码");
+        return;
+      }
       const me = await fetchCurrentUser();
       onLogin(me);
     } catch (err) {
@@ -141,6 +151,29 @@ function LoginPage({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleTotpSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!totpCode.trim()) {
+      message.warning("请输入动态验证码");
+      return;
+    }
+    setLoading(true);
+    try {
+      await apiLogin2fa(username.trim(), password, totpCode.trim());
+      const me = await fetchCurrentUser();
+      onLogin(me);
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "双因子验证失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function backToPassword() {
+    setTotpStep(false);
+    setTotpCode("");
   }
 
   return (
@@ -267,31 +300,50 @@ function LoginPage({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
       </div>
 
       <div className="login-panel">
-        <form className="login-card" onSubmit={handleSubmit}>
+        <form className="login-card" onSubmit={totpStep ? handleTotpSubmit : handleSubmit}>
           <div className="login-kicker">Welcome</div>
-          <h1>欢迎回来</h1>
-          <div className="login-subhead">登录以继续您的指标语义治理工作</div>
+          <h1>{totpStep ? "双因子验证" : "欢迎回来"}</h1>
+          <div className="login-subhead">
+            {totpStep
+              ? "输入身份验证器中的 6 位动态码以完成登录"
+              : "登录以继续您的指标语义治理工作"}
+          </div>
           <label>
             用户名
             <Input
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              autoFocus
+              disabled={totpStep}
               autoComplete="username"
               placeholder="请输入用户名"
               size="large"
             />
           </label>
-          <label>
-            密码
-            <Input.Password
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="current-password"
-              placeholder="请输入密码"
-              size="large"
-            />
-          </label>
+          {totpStep ? (
+            <label>
+              动态验证码
+              <Input
+                value={totpCode}
+                onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                autoFocus
+                autoComplete="one-time-code"
+                placeholder="6 位动态码"
+                size="large"
+                suffix={<Button type="link" size="small" onClick={backToPassword}>返回</Button>}
+              />
+            </label>
+          ) : (
+            <label>
+              密码
+              <Input.Password
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                placeholder="请输入密码"
+                size="large"
+              />
+            </label>
+          )}
           <Button
             type="primary"
             htmlType="submit"
@@ -300,14 +352,22 @@ function LoginPage({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
             block
             className="login-submit"
           >
-            {loading ? "正在登录…" : "进入语义中台"}
+            {loading
+              ? totpStep
+                ? "正在验证…"
+                : "正在登录…"
+              : totpStep
+                ? "完成验证"
+                : "进入语义中台"}
           </Button>
-          <div className="login-hint">
-            本地默认账号 <span className="mono">admin</span> /{" "}
-            <span className="mono">changeme123</span>
-            <br />
-            生产环境请使用管理员分配的凭据
-          </div>
+          {!totpStep && (
+            <div className="login-hint">
+              本地默认账号 <span className="mono">admin</span> /{" "}
+              <span className="mono">changeme123</span>
+              <br />
+              生产环境请使用管理员分配的凭据
+            </div>
+          )}
         </form>
       </div>
     </div>
@@ -402,7 +462,7 @@ function App() {
               <Route path="/dicts" element={<RequirePerm perm={ROUTE_PERM["/dicts"]}><SystemDict /></RequirePerm>} />
               <Route path="/sensitive-rules" element={<RequirePerm perm={ROUTE_PERM["/sensitive-rules"]}><SensitiveRules /></RequirePerm>} />
               <Route path="/account" element={<Account />} />
-              <Route path="/api-docs" element={<ApiDocs />} />
+              <Route path="/api-docs" element={<RequirePerm perm={ROUTE_PERM["/api-docs"]}><ApiDocs /></RequirePerm>} />
               <Route path="/guide/:metricCode" element={<RequirePerm perm={ROUTE_PERM["/guide/:metricCode"]}><ConsumptionGuide /></RequirePerm>} />
               <Route path="/" element={<Navigate to="/dashboard" replace />} />
               <Route path="*" element={<Navigate to="/dashboard" replace />} />

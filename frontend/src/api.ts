@@ -629,14 +629,41 @@ function pageQs(params: Record<string, string | number | string[] | undefined>):
 }
 
 // ---- 鉴权 ----
-export async function apiLogin(username: string, password: string): Promise<string> {
+export interface LoginResult {
+  access_token: string;
+  refresh_token: string;
+  token_type: string;
+  must_change_password?: boolean;
+  /** 账号启用 TOTP 双因子：为 true 时本步不发令牌，需继续调 apiLogin2fa。 */
+  totp_required?: boolean;
+}
+
+export async function apiLogin(username: string, password: string): Promise<LoginResult> {
+  const data = await request<LoginResult>(`${API_BASE}/auth/login`, {
+    method: "POST",
+    body: JSON.stringify({ username, password }),
+  });
+  // 仅当第一步直接签发令牌（未启用双因子）时才写入；totp_required 时交由第二步处理。
+  if (data.access_token) {
+    setToken(data.access_token);
+    if (data.refresh_token) setRefreshToken(data.refresh_token);
+  }
+  return data;
+}
+
+/** 双因子登录第二步：密码 + 动态码校验通过后签发令牌。 */
+export async function apiLogin2fa(
+  username: string,
+  password: string,
+  totpCode: string,
+): Promise<string> {
   const data = await request<{
     access_token: string;
     refresh_token: string;
     token_type: string;
-  }>(`${API_BASE}/auth/login`, {
+  }>(`${API_BASE}/auth/login/2fa`, {
     method: "POST",
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ username, password, totp_code: totpCode }),
   });
   setToken(data.access_token);
   if (data.refresh_token) setRefreshToken(data.refresh_token);
@@ -660,6 +687,41 @@ export async function changePassword(body: {
   return request<{ ok: boolean }>(`${API_BASE}/users/me/password`, {
     method: "POST",
     body: JSON.stringify(body),
+  });
+}
+
+/** 发起 TOTP 双因子设置：返回密钥与 otpauth URI（未启用，待 confirm）。 */
+export async function setupMy2fa(currentPassword: string): Promise<{
+  secret: string;
+  otpauth_uri: string;
+  enabled: boolean;
+}> {
+  return request<{ secret: string; otpauth_uri: string; enabled: boolean }>(
+    `${API_BASE}/users/me/2fa/setup`,
+    { method: "POST", body: JSON.stringify({ current_password: currentPassword }) },
+  );
+}
+
+/** 确认启用 TOTP 双因子：动态码校验通过后启用。 */
+export async function confirmMy2fa(totpCode: string): Promise<{ enabled: boolean }> {
+  return request<{ enabled: boolean }>(`${API_BASE}/users/me/2fa/confirm`, {
+    method: "POST",
+    body: JSON.stringify({ totp_code: totpCode }),
+  });
+}
+
+/** 关闭 TOTP 双因子：须校验当前动态码。 */
+export async function disableMy2fa(totpCode: string): Promise<{ enabled: boolean }> {
+  return request<{ enabled: boolean }>(`${API_BASE}/users/me/2fa/disable`, {
+    method: "POST",
+    body: JSON.stringify({ totp_code: totpCode }),
+  });
+}
+
+/** 管理员强制关闭某用户双因子（设备丢失应急通道）。 */
+export async function resetUser2fa(userId: number): Promise<{ enabled: boolean }> {
+  return request<{ enabled: boolean }>(`${API_BASE}/users/${userId}/2fa/reset`, {
+    method: "POST",
   });
 }
 
@@ -1273,6 +1335,21 @@ export async function extendMetricVersion(code: string, version: number): Promis
 export async function listUsers(role?: string): Promise<UserBrief[]> {
   const qs = role ? `?role=${encodeURIComponent(role)}` : "";
   return request<UserBrief[]>(`${API_BASE}/auth/users${qs}`);
+}
+
+/** 按 id 精确解析用户名（跨组织，展示已知 id 的真实中文名）。
+ *
+ * 与 listUsers 的区别：本接口按已知的精确 id 反查用户、**不按组织过滤**——
+ * 跨组织用户（Owner/责任人/操作人等）不在本组织列表中时，前端此前会退化为
+ * 「未知用户」；此接口保证任何已存在用户都能解析出真实中文名（display_name||username）。
+ * 仅返回基础字段（UserBrief），不暴露 email；单次最多 200 个 id。
+ */
+export async function resolveUserNames(ids: number[]): Promise<UserBrief[]> {
+  if (!ids.length) return [];
+  const uniq = [...new Set(ids)];
+  return request<UserBrief[]>(
+    `${API_BASE}/auth/users/by-ids?ids=${encodeURIComponent(uniq.join(","))}`,
+  );
 }
 
 // ---- 用户管理（backend /api/v1/users，platform_admin 专属）----

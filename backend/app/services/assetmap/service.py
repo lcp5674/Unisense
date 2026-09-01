@@ -437,8 +437,8 @@ class AssetMapService(BaseService):
                 error_code="INVALID_HEATMAP_DIMENSION",
             )
         return await _agg_cached(
-            f"heatmap:{dimension}",
-            lambda: self._repo.heatmap_aggregation(dimension),
+            f"heatmap:{dimension}:{self._org_id or 'all'}",
+            lambda: self._repo.heatmap_aggregation(dimension, org_id=self._org_id),
         )
 
     async def heatmap_matrix(self, asset_type: str = "catalog") -> dict[str, Any]:
@@ -446,11 +446,11 @@ class AssetMapService(BaseService):
 
         Args:
             asset_type: 资产视角（catalog=目录资产 / metric=指标资产），
-                并入缓存键避免两视角串数据。
+                并入缓存键避免两视角串数据；org_id 并入键防跨组织串读（P2 加固）。
         """
         return await _agg_cached(
-            f"heatmap-matrix:{asset_type}",
-            lambda: self._repo.heatmap_matrix(asset_type=asset_type),
+            f"heatmap-matrix:{asset_type}:{self._org_id or 'all'}",
+            lambda: self._repo.heatmap_matrix(asset_type=asset_type, org_id=self._org_id),
         )
 
     async def get_owner_view(self, owner_id: int) -> dict[str, Any]:
@@ -487,8 +487,8 @@ class AssetMapService(BaseService):
         )
 
     async def recent_changes(self, days: int = 7, limit: int = 50) -> dict[str, Any]:
-        """变更追踪流：最近 N 天新增/变更的目录与指标。"""
-        return await self._repo.recent_changes(days, limit)
+        """变更追踪流：最近 N 天新增/变更的目录与指标（按组织隔离，P2 加固）。"""
+        return await self._repo.recent_changes(days, limit, org_id=self._org_id)
 
     async def my_assets(self, owner_id: int, limit: int = 50) -> dict[str, Any]:
         """我的资产：当前用户负责的目录与指标。"""

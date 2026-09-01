@@ -273,6 +273,7 @@ UI_ACTION_REGISTRY: dict[str, dict[str, str]] = {
     "feedback:view": {"module": "总览", "label": "查看用户反馈", "description": "访问用户反馈"},
     "feedback:manage": {"module": "总览", "label": "处置用户反馈", "description": "跟进 / 采纳 / 驳回反馈"},  # noqa: E501
     "guide:view": {"module": "总览", "label": "查看使用指南", "description": "访问使用指南"},
+    "system:docs": {"module": "系统", "label": "查看 API 文档", "description": "访问 OpenAPI 接口文档（含端点/请求/响应契约）"},  # noqa: E501
 }
 
 #: 角色 → UI 权限点默认基线（与 ``ROLE_ACTIONS`` 正交：前者供前端 UI 管控，
@@ -312,6 +313,7 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "sensitive-rules:view", "observability:view",
             "tracking-stats:view", "feedback:view", "feedback:manage", "guide:view",
             "pii:review",
+            "system:docs",
         }
     ),
     RoleName.METRIC_OWNER.value: frozenset(

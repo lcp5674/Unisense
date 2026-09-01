@@ -1805,3 +1805,64 @@ class TestMetricSummaryVisibility:
         for call in s.execute.call_args_list:
             stmt = str(call.args[0])
             # 非管理角色所有聚合均带可见性条件
+            assert "owner_id" in stmt and "backup_owner_id" in stmt
+
+
+class TestOrgScopedAggregations:
+    """heatmap/changes 多租户 org 隔离（P2 加固）：org_id 非空时 SQL 含组织过滤。"""
+
+    def _sql(self, s: MagicMock, index: int | None = None) -> str:
+        calls = s.execute.call_args_list
+        call = calls[index] if index is not None else calls[0]
+        return str(call.args[0].compile(compile_kwargs={"literal_binds": True}))
+
+    async def test_heatmap_sensitivity_joins_data_source_org(self) -> None:
+        s = _session()
+        repo = AssetMapRepository(s)
+        r = MagicMock()
+        r.all.return_value = []
+        s.execute = AsyncMock(return_value=r)
+
+        await repo.heatmap_aggregation("sensitivity", org_id=3)
+
+        sql = self._sql(s)
+        assert "data_source" in sql and "org_id" in sql and "3" in sql
+
+    async def test_heatmap_metric_branches_join_user_org(self) -> None:
+        s = _session()
+        repo = AssetMapRepository(s)
+        r = MagicMock()
+        r.all.return_value = []
+        s.execute = AsyncMock(return_value=r)
+
+        await repo.heatmap_aggregation("owner", org_id=3)
+
+        sql = self._sql(s)
+        assert "JOIN" in sql and "user" in sql and "org_id" in sql and "3" in sql
+
+    async def test_recent_changes_all_subqueries_org_scoped(self) -> None:
+        s = _session()
+        repo = AssetMapRepository(s)
+        r = MagicMock()
+        r.all.return_value = []
+        s.execute = AsyncMock(return_value=r)
+
+        await repo.recent_changes(7, 10, org_id=3)
+
+        # catalog / metric / drift 三个子查询均须带 org 过滤
+        for i in range(3):
+            sql = self._sql(s, i)
+            assert "org_id" in sql and "3" in sql, f"subquery {i} missing org filter: {sql}"
+
+    async def test_recent_changes_without_org_no_filter(self) -> None:
+        s = _session()
+        repo = AssetMapRepository(s)
+        r = MagicMock()
+        r.all.return_value = []
+        s.execute = AsyncMock(return_value=r)
+
+        await repo.recent_changes(7, 10)
+
+        for i in range(3):
+            sql = self._sql(s, i)
+            assert "org_id" not in sql, f"subquery {i} should not filter org: {sql}"

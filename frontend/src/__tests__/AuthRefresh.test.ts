@@ -59,8 +59,9 @@ describe("apiLogin 存储 access + refresh", () => {
       "fetch",
       vi.fn(async () => okResponse(loginBody())),
     );
-    const token = await apiLogin("admin", "secret");
-    expect(token).toBe("access-1");
+    const res = await apiLogin("admin", "secret");
+    expect(res.access_token).toBe("access-1");
+    expect(res.totp_required).toBeFalsy();
     expect(getToken()).toBe("access-1");
     expect(getRefreshToken()).toBe("refresh-1");
   });

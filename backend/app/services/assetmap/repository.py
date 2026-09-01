@@ -1120,28 +1120,34 @@ class AssetMapRepository:
             return nodes, edges
         return nodes + field_nodes, edges
 
-    async def heatmap_matrix(self, asset_type: str = "catalog") -> dict[str, Any]:
+    async def heatmap_matrix(
+        self, asset_type: str = "catalog", org_id: int | None = None
+    ) -> dict[str, Any]:
         """二维热力矩阵：业务域 × 敏感级别的资产分布。
 
         Args:
             asset_type: 资产视角。``catalog``=目录资产（db_catalog 表/视图/字段，
                 域从 ``data_source.domain`` 继承）；``metric``=指标资产
                 （metric.pii_flag → PII / 内部 两列）。
+            org_id: 多租户隔离（P2 加固）：非平台管理员仅统计本组织资产——
+                catalog 经 ``data_source.org_id``、metric 经 ``user.org_id``（Owner 归属）。
 
         ``columns`` 固定为完整敏感级枚举（catalog）或 PII/内部（metric），
         保证前端坐标轴稳定（空矩阵也返回全轴）。
         """
         if asset_type == "metric":
-            rows = (
-                await self._session.execute(
-                    select(
-                        Metric.domain,
-                        Metric.pii_flag,
-                        func.count().label("total"),
-                    )
-                    .where(Metric.deleted_at.is_(None))
-                    .group_by(Metric.domain, Metric.pii_flag)
+            stmt = (
+                select(
+                    Metric.domain,
+                    Metric.pii_flag,
+                    func.count().label("total"),
                 )
+                .where(Metric.deleted_at.is_(None))
+            )
+            if org_id is not None:
+                stmt = stmt.join(User, User.id == Metric.owner_id).where(User.org_id == org_id)
+            rows = (
+                await self._session.execute(stmt.group_by(Metric.domain, Metric.pii_flag))
             ).all()
             cells = [
                 {
@@ -1153,16 +1159,22 @@ class AssetMapRepository:
                 for r in rows
             ]
             return {"cells": cells, "columns": ["INTERNAL", "PII"]}
+        catalog_stmt = (
+            select(
+                DataSource.domain,
+                DBCatalog.sensitivity_level,
+                func.count().label("total"),
+            )
+            .join(DataSource, DataSource.source_id == DBCatalog.source_id)
+            .where(DBCatalog.deleted_at.is_(None))
+        )
+        if org_id is not None:
+            catalog_stmt = catalog_stmt.where(
+                DataSource.deleted_at.is_(None), DataSource.org_id == org_id
+            )
         catalog_rows = (
             await self._session.execute(
-                select(
-                    DataSource.domain,
-                    DBCatalog.sensitivity_level,
-                    func.count().label("total"),
-                )
-                .join(DataSource, DataSource.source_id == DBCatalog.source_id)
-                .where(DBCatalog.deleted_at.is_(None))
-                .group_by(DataSource.domain, DBCatalog.sensitivity_level)
+                catalog_stmt.group_by(DataSource.domain, DBCatalog.sensitivity_level)
             )
         ).all()
         cells = [
@@ -1179,55 +1191,66 @@ class AssetMapRepository:
             "columns": [e.value for e in SensitivityLevelEnum],
         }
 
-    async def heatmap_aggregation(self, dimension: str) -> dict[str, Any]:
+    async def heatmap_aggregation(
+        self, dimension: str, org_id: int | None = None
+    ) -> dict[str, Any]:
         """按维度聚合返回热力桶数据。
 
         Args:
             dimension: 聚合维度 domain / sensitivity / owner / dw_layer。
+            org_id: 多租户隔离（P2 加固）：非平台管理员仅统计本组织资产——
+                sensitivity 经 ``data_source.org_id``、指标类维度经
+                ``user.org_id``（Owner 归属）。
         """
         if dimension == "sensitivity":
+            stmt = select(DBCatalog.sensitivity_level, func.count()).where(
+                DBCatalog.deleted_at.is_(None)
+            )
+            if org_id is not None:
+                stmt = stmt.join(
+                    DataSource, DataSource.source_id == DBCatalog.source_id
+                ).where(DataSource.deleted_at.is_(None), DataSource.org_id == org_id)
             rows = (
-                await self._session.execute(
-                    select(DBCatalog.sensitivity_level, func.count())
-                    .where(DBCatalog.deleted_at.is_(None))
-                    .group_by(DBCatalog.sensitivity_level)
-                )
+                await self._session.execute(stmt.group_by(DBCatalog.sensitivity_level))
             ).all()
             buckets = [{"key": r[0], "count": r[1]} for r in rows]
         elif dimension == "owner":
-            rows = (
-                await self._session.execute(
-                    select(
-                        Metric.owner_id,
-                        func.count().label("total"),
-                        func.sum(case((Metric.pii_flag.is_(True), 1), else_=0)).label("pii_count"),
-                    )
-                    .where(Metric.deleted_at.is_(None))
-                    .group_by(Metric.owner_id)
+            stmt = (
+                select(
+                    Metric.owner_id,
+                    func.count().label("total"),
+                    func.sum(case((Metric.pii_flag.is_(True), 1), else_=0)).label("pii_count"),
                 )
+                .where(Metric.deleted_at.is_(None))
+            )
+            if org_id is not None:
+                stmt = stmt.join(User, User.id == Metric.owner_id).where(User.org_id == org_id)
+            rows = (
+                await self._session.execute(stmt.group_by(Metric.owner_id))
             ).all()
             buckets = [{"key": str(r[0]), "total": r[1], "pii_count": int(r[2] or 0)} for r in rows]
         elif dimension == "dw_layer":
+            stmt = select(Metric.dw_layer, func.count()).where(Metric.deleted_at.is_(None))
+            if org_id is not None:
+                stmt = stmt.join(User, User.id == Metric.owner_id).where(User.org_id == org_id)
             rows = (
-                await self._session.execute(
-                    select(Metric.dw_layer, func.count())
-                    .where(Metric.deleted_at.is_(None))
-                    .group_by(Metric.dw_layer)
-                )
+                await self._session.execute(stmt.group_by(Metric.dw_layer))
             ).all()
             buckets = [{"key": r[0], "count": r[1]} for r in rows]
         else:
             # 默认按 domain 聚合
-            rows = (
-                await self._session.execute(
-                    select(
-                        Metric.domain,
-                        func.count().label("total"),
-                        func.sum(case((Metric.pii_flag.is_(True), 1), else_=0)).label("pii_count"),
-                    )
-                    .where(Metric.deleted_at.is_(None))
-                    .group_by(Metric.domain)
+            stmt = (
+                select(
+                    Metric.domain,
+                    func.count().label("total"),
+                    func.sum(case((Metric.pii_flag.is_(True), 1), else_=0)).label("pii_count"),
                 )
+                .where(Metric.deleted_at.is_(None))
+            )
+            if org_id is not None:
+                stmt = stmt.join(User, User.id == Metric.owner_id).where(User.org_id == org_id)
+            rows = (
+                await self._session.execute(stmt.group_by(Metric.domain))
             ).all()
             buckets = [{"key": r[0], "total": r[1], "pii_count": int(r[2] or 0)} for r in rows]
 
@@ -2380,44 +2403,54 @@ class AssetMapRepository:
         rows = (await self._session.execute(stmt.limit(5000))).scalars().all()
         return list(rows)
 
-    async def recent_changes(self, days: int, limit: int) -> dict[str, Any]:
+    async def recent_changes(
+        self, days: int, limit: int, org_id: int | None = None
+    ) -> dict[str, Any]:
         """变更追踪流：最近 N 天新增/变更的目录与指标。
 
         富化：目录带 created_at 推断 ``change_type``（created/updated）+ 源/责任人名；
         指标带版本号/描述/状态推断变更类型；接入 ``schema_drift_log`` 变更内容
         （列增删/类型变更 diff）。
 
+        Args:
+            days: 追溯天数。
+            limit: 各子列表上限。
+            org_id: 多租户隔离（P2 加固）：非平台管理员仅统计本组织变更——
+                catalog/drift 经 ``data_source.org_id``、metric 经 ``user.org_id``。
+
         Returns:
             ``{catalogs, metrics, drift, days}``
         """
         cutoff = datetime.now(UTC) - timedelta(days=days)
-        catalogs = await self._recent_catalog_changes(cutoff, limit)
-        metrics = await self._recent_metric_changes(cutoff, limit)
-        drift = await self._recent_drift(cutoff, limit)
+        catalogs = await self._recent_catalog_changes(cutoff, limit, org_id)
+        metrics = await self._recent_metric_changes(cutoff, limit, org_id)
+        drift = await self._recent_drift(cutoff, limit, org_id)
         return {"catalogs": catalogs, "metrics": metrics, "drift": drift, "days": days}
 
     async def _recent_catalog_changes(
-        self, cutoff: datetime, limit: int
+        self, cutoff: datetime, limit: int, org_id: int | None = None
     ) -> list[dict[str, Any]]:
         """最近变更的目录资产（created/updated 由 created_at vs updated_at 推断）。"""
+        stmt = select(
+            DBCatalog.id,
+            DBCatalog.entity_name,
+            DBCatalog.entity_type,
+            DBCatalog.sensitivity_level,
+            DBCatalog.owner_id,
+            DBCatalog.source_id,
+            DBCatalog.created_at,
+            DBCatalog.updated_at,
+        ).where(
+            DBCatalog.deleted_at.is_(None),
+            DBCatalog.updated_at >= cutoff,
+        )
+        if org_id is not None:
+            stmt = stmt.join(
+                DataSource, DataSource.source_id == DBCatalog.source_id
+            ).where(DataSource.deleted_at.is_(None), DataSource.org_id == org_id)
         rows = (
             await self._session.execute(
-                select(
-                    DBCatalog.id,
-                    DBCatalog.entity_name,
-                    DBCatalog.entity_type,
-                    DBCatalog.sensitivity_level,
-                    DBCatalog.owner_id,
-                    DBCatalog.source_id,
-                    DBCatalog.created_at,
-                    DBCatalog.updated_at,
-                )
-                .where(
-                    DBCatalog.deleted_at.is_(None),
-                    DBCatalog.updated_at >= cutoff,
-                )
-                .order_by(DBCatalog.updated_at.desc())
-                .limit(limit)
+                stmt.order_by(DBCatalog.updated_at.desc()).limit(limit)
             )
         ).all()
         items = [
@@ -2444,25 +2477,25 @@ class AssetMapRepository:
         return await self.enrich_catalog_items(items)
 
     async def _recent_metric_changes(
-        self, cutoff: datetime, limit: int
+        self, cutoff: datetime, limit: int, org_id: int | None = None
     ) -> list[dict[str, Any]]:
         """最近变更的指标（change_type 由状态机推断：废弃/新增/更新）。"""
+        stmt = select(
+            Metric.metric_code,
+            Metric.name,
+            Metric.status,
+            Metric.domain,
+            Metric.pii_flag,
+            Metric.version,
+            Metric.description,
+            Metric.owner_id,
+            Metric.updated_at,
+        ).where(Metric.deleted_at.is_(None), Metric.updated_at >= cutoff)
+        if org_id is not None:
+            stmt = stmt.join(User, User.id == Metric.owner_id).where(User.org_id == org_id)
         rows = (
             await self._session.execute(
-                select(
-                    Metric.metric_code,
-                    Metric.name,
-                    Metric.status,
-                    Metric.domain,
-                    Metric.pii_flag,
-                    Metric.version,
-                    Metric.description,
-                    Metric.owner_id,
-                    Metric.updated_at,
-                )
-                .where(Metric.deleted_at.is_(None), Metric.updated_at >= cutoff)
-                .order_by(Metric.updated_at.desc())
-                .limit(limit)
+                stmt.order_by(Metric.updated_at.desc()).limit(limit)
             )
         ).all()
         owner_ids = {r.owner_id for r in rows if r.owner_id is not None}
@@ -2499,21 +2532,25 @@ class AssetMapRepository:
             for r in rows
         ]
 
-    async def _recent_drift(self, cutoff: datetime, limit: int) -> list[dict[str, Any]]:
+    async def _recent_drift(
+        self, cutoff: datetime, limit: int, org_id: int | None = None
+    ) -> list[dict[str, Any]]:
         """最近 schema 漂移记录（列增删/类型变更 diff，TD §12.1 变更审计）。"""
+        stmt = select(
+            SchemaDriftLog.id,
+            SchemaDriftLog.source_id,
+            SchemaDriftLog.entity_name,
+            SchemaDriftLog.change_type,
+            SchemaDriftLog.diff_json,
+            SchemaDriftLog.created_at,
+        ).where(SchemaDriftLog.created_at >= cutoff)
+        if org_id is not None:
+            stmt = stmt.join(
+                DataSource, DataSource.source_id == SchemaDriftLog.source_id
+            ).where(DataSource.deleted_at.is_(None), DataSource.org_id == org_id)
         rows = (
             await self._session.execute(
-                select(
-                    SchemaDriftLog.id,
-                    SchemaDriftLog.source_id,
-                    SchemaDriftLog.entity_name,
-                    SchemaDriftLog.change_type,
-                    SchemaDriftLog.diff_json,
-                    SchemaDriftLog.created_at,
-                )
-                .where(SchemaDriftLog.created_at >= cutoff)
-                .order_by(SchemaDriftLog.created_at.desc())
-                .limit(limit)
+                stmt.order_by(SchemaDriftLog.created_at.desc()).limit(limit)
             )
         ).all()
         return [

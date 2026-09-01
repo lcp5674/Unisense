@@ -180,6 +180,8 @@ export const ROUTE_PERM: Record<string, string> = {
   "/system-config": "system-config:view",
   "/observability": "observability:view",
   "/tracking-stats": "tracking-stats:view",
+  // 系统 API 文档（OpenAPI 契约，仅平台/域管理员可见）
+  "/api-docs": "system:docs",
   // 指标运营分析（复用度/资产账本/一致率）——只读统计，指标目录相关角色可用
   "/metric-ops": "metric:create",
   // 工程工具（开发/评测，仅指标创建相关角色可用）

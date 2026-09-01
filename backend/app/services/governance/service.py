@@ -347,7 +347,7 @@ class GovernanceService(BaseService):
         await self._repo.replace_role_permissions(role, sorted(set(actions)))
         from app.services.governance.cache import invalidate_role_actions_cache
 
-        invalidate_role_actions_cache()  # P10：写后主动失效进程内缓存
+        await invalidate_role_actions_cache()  # P2：写后主动失效（Redis 版本号多 worker 一致）
         for item in await self.list_role_permissions():
             if item["role"] == role:
                 return item
@@ -368,7 +368,7 @@ class GovernanceService(BaseService):
         await self._repo.reset_role_permissions(role)
         from app.services.governance.cache import invalidate_role_actions_cache
 
-        invalidate_role_actions_cache()  # P10：写后主动失效进程内缓存
+        await invalidate_role_actions_cache()  # P2：写后主动失效（Redis 版本号多 worker 一致）
         for item in await self.list_role_permissions():
             if item["role"] == role:
                 return item

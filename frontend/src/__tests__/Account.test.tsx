@@ -21,6 +21,9 @@ vi.mock("../api", () => {
     fetchCurrentUser: vi.fn(),
     fetchMyPermissions: vi.fn(),
     changePassword: vi.fn(),
+    setupMy2fa: vi.fn(),
+    confirmMy2fa: vi.fn(),
+    disableMy2fa: vi.fn(),
     listMetrics: vi.fn(),
     listFavorites: vi.fn(),
     listNotifications: vi.fn(),
@@ -34,6 +37,9 @@ import {
   fetchCurrentUser,
   fetchMyPermissions,
   changePassword,
+  setupMy2fa,
+  confirmMy2fa,
+  disableMy2fa,
   listMetrics,
   listFavorites,
   listNotifications,
@@ -197,10 +203,10 @@ describe("Account 个人中心", () => {
     // 无 data-sources:view → 数据源管理不出现
     expect(labels).not.toContain("数据源管理");
     expect(labels).not.toContain("用户管理");
-    // 无任何权限 → 仅剩「无 ROUTE_PERM 映射默认放行」的菜单（API 文档，与侧边栏行为一致）
-    expect(accessibleMenuGroups([]).flatMap((g) => g.children)).toEqual(["API 文档"]);
+    // 无任何权限 → 所有菜单均被权限点过滤（含 API 文档 system:docs，不再默认放行）
+    expect(accessibleMenuGroups([]).flatMap((g) => g.children)).toEqual([]);
     // 快照未加载（undefined）→ 同样不显示权限菜单
-    expect(accessibleMenuGroups(undefined).flatMap((g) => g.children)).toEqual(["API 文档"]);
+    expect(accessibleMenuGroups(undefined).flatMap((g) => g.children)).toEqual([]);
   });
 
   it("修改密码：校验两次一致并调用 changePassword", async () => {
@@ -223,5 +229,16 @@ describe("Account 个人中心", () => {
         new_password: "NewPass123!",
       }),
     );
+  });
+
+  it("双因子认证卡片：未开启时显示开启按钮，点击弹出设置弹窗", async () => {
+    renderPage();
+    await screen.findByText("@admin");
+    // 卡片标题与状态
+    expect(screen.getByText("双因子认证")).toBeTruthy();
+    expect(screen.getByText("未开启")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /开启双因子认证/ }));
+    // 弹窗要求输入当前密码（防会话劫持）
+    expect(screen.getByPlaceholderText("当前密码")).toBeTruthy();
   });
 });

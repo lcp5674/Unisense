@@ -47,6 +47,8 @@ import {
 import { useNavigate } from "react-router-dom";
 import {
   changePassword,
+  confirmMy2fa,
+  disableMy2fa,
   fetchCurrentUser,
   fetchMyPermissions,
   fetchUnreadCount,
@@ -54,6 +56,7 @@ import {
   listFavorites,
   listMetrics,
   listNotifications,
+  setupMy2fa,
   UnisenseApiError,
 } from "../api";
 import type { CurrentUser, GrantResponse, PermissionSnapshot } from "../types";
@@ -169,6 +172,13 @@ export function Account() {
   const [pwdOpen, setPwdOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [pwdForm] = Form.useForm<{ current_password: string; new_password: string; confirm: string }>();
+  // 双因子认证（TOTP）自服务：enable=开启（两步：重验密码生成密钥 → 动态码确认）、disable=关闭（校验动态码）
+  const [tfaOpen, setTfaOpen] = useState(false);
+  const [tfaMode, setTfaMode] = useState<"enable" | "disable">("enable");
+  const [tfaPassword, setTfaPassword] = useState("");
+  const [tfaSetup, setTfaSetup] = useState<{ secret: string; otpauth_uri: string } | null>(null);
+  const [tfaCode, setTfaCode] = useState("");
+  const [tfaSaving, setTfaSaving] = useState(false);
 
   useEffect(() => {
     Promise.all([fetchCurrentUser(), fetchMyPermissions()])
@@ -222,6 +232,74 @@ export function Account() {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "修改失败");
     } finally {
       setSaving(false);
+    }
+  }
+
+  // ---------- 双因子认证（TOTP）自服务 ----------
+  function openEnableTfa() {
+    setTfaMode("enable");
+    setTfaPassword("");
+    setTfaSetup(null);
+    setTfaCode("");
+    setTfaOpen(true);
+  }
+
+  function openDisableTfa() {
+    setTfaMode("disable");
+    setTfaCode("");
+    setTfaOpen(true);
+  }
+
+  async function handleTfaSetup() {
+    if (!tfaPassword) {
+      message.warning("请输入当前密码以确认身份");
+      return;
+    }
+    setTfaSaving(true);
+    try {
+      const res = await setupMy2fa(tfaPassword);
+      setTfaSetup({ secret: res.secret, otpauth_uri: res.otpauth_uri });
+      message.success("密钥已生成，请用身份验证器扫描或手动录入后输入动态码确认");
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "生成密钥失败");
+    } finally {
+      setTfaSaving(false);
+    }
+  }
+
+  async function handleTfaConfirm() {
+    if (!tfaCode.trim()) {
+      message.warning("请输入动态验证码");
+      return;
+    }
+    setTfaSaving(true);
+    try {
+      await confirmMy2fa(tfaCode.trim());
+      message.success("双因子认证已启用");
+      setTfaOpen(false);
+      setMe(await fetchCurrentUser());
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "启用失败");
+    } finally {
+      setTfaSaving(false);
+    }
+  }
+
+  async function handleTfaDisable() {
+    if (!tfaCode.trim()) {
+      message.warning("请输入动态验证码");
+      return;
+    }
+    setTfaSaving(true);
+    try {
+      await disableMy2fa(tfaCode.trim());
+      message.success("双因子认证已关闭");
+      setTfaOpen(false);
+      setMe(await fetchCurrentUser());
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "关闭失败");
+    } finally {
+      setTfaSaving(false);
     }
   }
 
@@ -428,6 +506,36 @@ export function Account() {
         />
       </Card>
 
+      {/* ============ 双因子认证 ============ */}
+      <Card
+        title={
+          <Space size={8}>
+            <SafetyCertificateOutlined style={{ color: "#2563eb" }} />
+            双因子认证
+          </Space>
+        }
+        style={{ marginBottom: 16 }}
+      >
+        <div style={{ marginBottom: 12 }}>
+          <Tag color={me?.totp_enabled ? "success" : "default"}>
+            {me?.totp_enabled ? "已开启" : "未开启"}
+          </Tag>
+          <span style={{ marginLeft: 8, color: "#666" }}>
+            开启后登录需额外输入身份验证器动态码（TOTP），防止密码泄露后被未授权登录。
+          </span>
+        </div>
+        <Space>
+          <Button icon={<SafetyCertificateOutlined />} onClick={openEnableTfa}>
+            {me?.totp_enabled ? "重新设置" : "开启双因子认证"}
+          </Button>
+          {me?.totp_enabled && (
+            <Button danger onClick={openDisableTfa}>
+              关闭双因子认证
+            </Button>
+          )}
+        </Space>
+      </Card>
+
       {/* ============ 修改密码 ============ */}
       <Modal
         title="修改密码"
@@ -463,6 +571,80 @@ export function Account() {
             <Input.Password placeholder="再次输入新密码" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* ============ 双因子认证（TOTP） ============ */}
+      <Modal
+        title={tfaMode === "enable" ? "开启双因子认证" : "关闭双因子认证"}
+        open={tfaOpen}
+        onCancel={() => setTfaOpen(false)}
+        footer={
+          tfaMode === "disable" ? (
+            <Button type="primary" danger loading={tfaSaving} onClick={handleTfaDisable}>
+              确认关闭
+            </Button>
+          ) : tfaSetup ? (
+            <Button type="primary" loading={tfaSaving} onClick={handleTfaConfirm}>
+              确认启用
+            </Button>
+          ) : (
+            <Button type="primary" loading={tfaSaving} onClick={handleTfaSetup}>
+              生成密钥
+            </Button>
+          )
+        }
+      >
+        {tfaMode === "disable" ? (
+          <div>
+            <p style={{ color: "#666", marginBottom: 12 }}>
+              请输入身份验证器中的当前动态码以确认关闭（设备丢失可联系平台管理员强制重置）。
+            </p>
+            <Input
+              value={tfaCode}
+              onChange={(e) => setTfaCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+              placeholder="6 位动态码"
+              size="large"
+            />
+          </div>
+        ) : tfaSetup ? (
+          <div>
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="在身份验证器（Google Authenticator 等）中添加以下账号"
+              description={
+                <div style={{ wordBreak: "break-all" }}>
+                  <div style={{ marginBottom: 8 }} className="mono">
+                    {tfaSetup.otpauth_uri}
+                  </div>
+                  <div>
+                    密钥：<span className="mono">{tfaSetup.secret}</span>
+                  </div>
+                </div>
+              }
+            />
+            <Input
+              value={tfaCode}
+              onChange={(e) => setTfaCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+              placeholder="输入验证器生成的 6 位动态码"
+              size="large"
+            />
+          </div>
+        ) : (
+          <div>
+            <p style={{ color: "#666", marginBottom: 12 }}>
+              为确认身份，请输入当前登录密码（防止会话被劫持后恶意开启双因子反锁账号）。
+            </p>
+            <Input.Password
+              value={tfaPassword}
+              onChange={(e) => setTfaPassword(e.target.value)}
+              placeholder="当前密码"
+              autoComplete="current-password"
+              size="large"
+            />
+          </div>
+        )}
       </Modal>
     </div>
   );

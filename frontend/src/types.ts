@@ -765,6 +765,8 @@ export interface CurrentUser {
   org_name?: string | null;
   /** 是否首次登录需强制改密（后端登录/me 响应携带，前端据此弹不可关闭的改密弹窗） */
   must_change_password?: boolean;
+  /** 是否已启用 TOTP 双因子认证（个人中心展示/管理开关） */
+  totp_enabled?: boolean;
 }
 
 // 用户偏好（backend /api/v1/me/preferences，key → JSON value，按用户持久化）

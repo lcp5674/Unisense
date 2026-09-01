@@ -905,3 +905,222 @@ def test_create_user_loads_roles_before_flush() -> None:
         "row.role_items 必须在 db.add(row)/flush 之前装载（对象仍为 pending），"
         "否则 delete-orphan 会触发 lazy load 导致 MissingGreenlet 500"
     )
+
+
+# ---------------------------------------------------------------------------
+# 双因子认证（TOTP）自服务 + 管理员重置（P2 加固）
+# ---------------------------------------------------------------------------
+
+
+async def _me_2fa_client(user: User) -> httpx.AsyncClient:
+    """以指定 User 作为当前登录用户构造客户端（自服务端点）。"""
+    session = MagicMock()
+
+    async def _execute(*args: object, **kwargs: object) -> MagicMock:
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = user
+        return result
+
+    session.execute = AsyncMock(side_effect=_execute)
+    session.commit = AsyncMock()
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: user
+    transport = ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://test")
+
+
+def _totp_user(secret: str | None = None, enabled: bool = False) -> User:
+    """构造带加密 TOTP 密钥的用户（默认已生成密钥、未启用；enabled=True 表示已启用）。"""
+    from app.core.totp import encrypt_secret, generate_totp_secret
+
+    return _make_user(
+        totp_secret=encrypt_secret(secret if secret is not None else generate_totp_secret()),
+        totp_enabled=enabled,
+    )
+
+
+def _code_for(secret: str) -> str:
+    import time
+
+    from app.core.totp import _base32_decode, _hotp
+
+    return _hotp(_base32_decode(secret), int(time.time() // 30))
+
+
+async def test_setup_2fa_wrong_password_rejected() -> None:
+    user = _totp_user()
+    client = await _me_2fa_client(user)
+    async with client:
+        with patch("app.api.users.verify_password", return_value=False):
+            resp = await client.post(
+                "/api/v1/users/me/2fa/setup", json={"current_password": "wrong"}
+            )
+    assert resp.status_code == 401  # PASSWORD_INCORRECT 映射为 401
+    assert resp.json()["code"] == "PASSWORD_INCORRECT"
+    app.dependency_overrides.clear()
+
+
+async def test_setup_2fa_returns_secret_and_uri() -> None:
+    user = _totp_user()
+    client = await _me_2fa_client(user)
+    async with client:
+        with patch("app.api.users.verify_password", return_value=True):
+            resp = await client.post(
+                "/api/v1/users/me/2fa/setup", json={"current_password": "p@ss"}
+            )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["secret"] and len(data["secret"]) == 32
+    assert data["otpauth_uri"].startswith("otpauth://totp/")
+    assert data["enabled"] is False
+    assert user.totp_secret  # 密钥已加密落库
+    app.dependency_overrides.clear()
+
+
+async def test_confirm_2fa_enables_with_valid_code() -> None:
+    from app.core.totp import decrypt_secret
+
+    user = _totp_user()
+    secret = user.totp_secret
+    assert secret
+    client = await _me_2fa_client(user)
+    async with client:
+        resp = await client.post(
+            "/api/v1/users/me/2fa/confirm",
+            json={"totp_code": _code_for(decrypt_secret(secret) or "")},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["enabled"] is True
+    assert user.totp_enabled is True
+    app.dependency_overrides.clear()
+
+
+async def test_confirm_2fa_wrong_code_rejected() -> None:
+    user = _totp_user()
+    client = await _me_2fa_client(user)
+    async with client:
+        resp = await client.post("/api/v1/users/me/2fa/confirm", json={"totp_code": "000000"})
+    assert resp.status_code == 403
+    assert resp.json()["code"] == "AUTH_TOTP_INVALID"
+    assert user.totp_enabled is False
+    app.dependency_overrides.clear()
+
+
+async def test_disable_2fa_requires_code_and_disables() -> None:
+    from app.core.totp import decrypt_secret
+
+    user = _totp_user(enabled=True)
+    secret = user.totp_secret
+    assert secret
+    client = await _me_2fa_client(user)
+    async with client:
+        resp = await client.post(
+            "/api/v1/users/me/2fa/disable",
+            json={"totp_code": _code_for(decrypt_secret(secret) or "")},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["enabled"] is False
+    assert user.totp_enabled is False
+    assert user.totp_secret is None
+    app.dependency_overrides.clear()
+
+
+async def test_admin_reset_2fa_forces_disable() -> None:
+    user = _totp_user(enabled=True)
+    session = MagicMock()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = user
+    session.execute = AsyncMock(return_value=result)
+    session.commit = AsyncMock()
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="platform_admin",
+        roles_all=lambda: ["platform_admin"],
+        has_role=lambda r: r == "platform_admin",
+    )
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/api/v1/users/2/2fa/reset")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["enabled"] is False
+    assert user.totp_enabled is False
+    assert user.totp_secret is None
+    app.dependency_overrides.clear()
+
+
+async def test_resolve_user_names_by_ids_cross_org() -> None:
+    """by-ids 跨组织解析：非管理员也能按已知 id 拿到其他组织用户的真实中文名。
+
+    这是「展示已知 id → 中文名」的权威解析通道（Owner 责任链/责任人列），
+    与 /auth/users（本组织列表）互补——跨组织 id 在此可按精确 id 反查名字，
+    但仅返回基础字段（不暴露 email/password_hash），且无法借此枚举目录。
+    """
+    session = _make_session()
+    # execute 返回两个不同组织的用户（跨组织场景）
+    alice = _make_user(id=1, org_id=1, username="alice", display_name="爱丽丝", role="viewer", domain="finance")
+    bob = _make_user(id=2, org_id=2, username="bob", display_name="鲍勃", role="metric_owner", domain="outpatient")
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = [alice, bob]
+    session.execute = AsyncMock(return_value=result)
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=3,
+        role="viewer",
+        roles_all=lambda: ["viewer"],
+        has_role=lambda r: False,
+    )
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/v1/auth/users/by-ids?ids=1,2")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert [u["id"] for u in data] == [1, 2]
+    assert data[0]["display_name"] == "爱丽丝"
+    assert data[1]["display_name"] == "鲍勃"
+    # 最小信息：绝不暴露 email/password_hash
+    assert "email" not in data[0]
+    assert "password_hash" not in data[0]
+    app.dependency_overrides.clear()
+
+
+async def test_resolve_user_names_unknown_and_empty_ids() -> None:
+    """by-ids 边界：查无的 id 跳过（不 404）、空/非数字 id 返回空列表。"""
+    session = _make_session()
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = []
+    session.execute = AsyncMock(return_value=result)
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1,
+        role="viewer",
+        roles_all=lambda: ["viewer"],
+        has_role=lambda r: False,
+    )
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # 查无该 id（用户已删）→ 空列表而非 404
+        resp = await client.get("/api/v1/auth/users/by-ids?ids=999")
+        assert resp.status_code == 200
+        assert resp.json()["data"] == []
+        # 非数字/空 → 空列表
+        resp2 = await client.get("/api/v1/auth/users/by-ids?ids=abc,")
+        assert resp2.status_code == 200
+        assert resp2.json()["data"] == []
+    app.dependency_overrides.clear()

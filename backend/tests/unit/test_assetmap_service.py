@@ -177,7 +177,7 @@ async def test_heatmap_passthrough() -> None:
     )
     out = await svc.get_heatmap(dimension="domain")
     assert out["buckets"][0]["total"] == 3
-    repo.heatmap_aggregation.assert_awaited_once_with("domain")
+    repo.heatmap_aggregation.assert_awaited_once_with("domain", org_id=None)
 
 
 async def test_heatmap_rejects_invalid_dimension() -> None:
@@ -519,7 +519,7 @@ async def test_recent_changes_passthrough() -> None:
     repo.recent_changes = AsyncMock(return_value={"catalogs": [], "metrics": [], "days": 7})
     out = await svc.recent_changes(days=7, limit=50)
     assert out["days"] == 7
-    repo.recent_changes.assert_awaited_once_with(7, 50)
+    repo.recent_changes.assert_awaited_once_with(7, 50, org_id=None)
 
 
 async def test_my_assets_passthrough() -> None:

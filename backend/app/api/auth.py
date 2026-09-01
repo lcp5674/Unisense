@@ -43,6 +43,7 @@ from app.core.security import (
     rotate_active_refresh,
     verify_password,
 )
+from app.core.totp import decrypt_secret, verify_totp
 from app.db.mysql import get_db_session
 from app.models.user import User, UserRole
 
@@ -60,10 +61,21 @@ class LoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     """登录成功响应（Bearer Token + 刷新令牌）。"""
 
-    access_token: str = Field(..., description="JWT 访问令牌")
+    access_token: str = Field(default="", description="JWT 访问令牌")
     token_type: str = Field(default="bearer", description="令牌类型")
     refresh_token: str = Field(default="", description="JWT 刷新令牌（7天有效，登录/刷新时签发）")
     must_change_password: bool = Field(default=False, description="首次登录/密码到期时需强制改密")
+    #: P2（2FA）：账号启用 TOTP 双因子时，登录第一步返回该标记（不发令牌），
+    #: 前端展示动态码输入框后调用 /auth/login/2fa 完成第二步。
+    totp_required: bool = Field(default=False, description="需继续完成 TOTP 双因子验证")
+
+
+class Login2faRequest(BaseModel):
+    """双因子登录请求体（密码 + 动态码，无状态挑战：第二步重验密码防重放）。"""
+
+    username: str = Field(..., min_length=1, description="用户名")
+    password: str = Field(..., min_length=1, description="密码")
+    totp_code: str = Field(..., min_length=1, description="身份验证器动态码（6位）")
 
 
 class RefreshRequest(BaseModel):
@@ -86,6 +98,8 @@ class UserInfo(BaseModel):
     #: 首次登录/密码到期时需强制改密（前端据此在登录后渲染全屏改密守卫，
     #: 未改密前不进入业务路由；与登录响应 TokenResponse.must_change_password 同源）。
     must_change_password: bool = False
+    #: 是否已启用 TOTP 双因子认证（前端个人中心展示/管理开关）。
+    totp_enabled: bool = False
 
 
 class UserBrief(BaseModel):
@@ -165,6 +179,23 @@ async def login(
     await reset_login_failures(throttle_key)
     await reset_ip_failures(remote_ip)
     await reset_account_failures(body.username)
+
+    # P2（2FA）：账号启用 TOTP 双因子时，第一步仅返回挑战标记、不签发令牌；
+    # 前端展示动态码输入框后调 /auth/login/2fa 完成第二步（无状态挑战，
+    # 第二步重验密码 + 校验动态码，防已捕获动态码重放）。
+    if bool(getattr(user, "totp_enabled", False)):
+        await write_audit(
+            db,
+            actor_id=user.id,
+            action="auth.login_2fa_required",
+            entity_type="user",
+            entity_id=body.username,
+            detail={"username": body.username},
+            ip=client_ip(request),
+        )
+        await db.commit()
+        return ok(TokenResponse(totp_required=True, must_change_password=False))
+
     user.last_login_at = datetime.now(UTC)
     # 登录成功留痕：谁、何时、从哪 IP 登录（认证审计事件）。
     await write_audit(
@@ -187,6 +218,103 @@ async def login(
             access_token=token,
             refresh_token=refresh,
             # 字段由用户模型提供（agent-users 并行接入），未就绪时默认 False，防御式读取。
+            must_change_password=bool(getattr(user, "must_change_password", False)),
+        )
+    )
+
+
+@router.post("/login/2fa", dependencies=[Depends(guard_against_injection)])
+async def login_2fa(
+    body: Login2faRequest,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ApiResponse[TokenResponse]:
+    """双因子登录第二步：密码 + TOTP 动态码校验通过后签发 JWT。
+
+    与 ``/auth/login`` 同款三桶限流与失败留痕；无状态挑战——第二步重验密码
+    （防已捕获动态码脱离密码单独重放），再校验动态码（容忍前后 1 周期时钟漂移）。
+
+    Raises:
+        AuthError: 限流（AUTH_RATE_LIMITED）/ 凭证错误（AUTH_INVALID_CREDENTIALS）/
+            未启用双因子（AUTH_TOTP_NOT_ENABLED）/ 动态码错误（AUTH_TOTP_INVALID）。
+    """
+    remote_ip = _client_key(request)
+    throttle_key = f"{body.username}:{remote_ip}"
+    if (
+        await is_login_blocked(throttle_key)
+        or await is_ip_blocked(remote_ip)
+        or await is_account_blocked(body.username)
+    ):
+        raise AuthError("登录失败次数过多，请稍后再试", error_code="AUTH_RATE_LIMITED")
+
+    result = await db.execute(
+        select(User).where(User.username == body.username, User.status == "active")
+    )
+    user = result.scalar_one_or_none()
+    if user is None or not await verify_password(body.password, user.password_hash):
+        await record_login_failure(throttle_key)
+        await record_ip_failure(remote_ip)
+        await record_account_failure(body.username)
+        try:
+            await write_audit(
+                db,
+                actor_id=None,
+                action="auth.login_failed",
+                entity_type="user",
+                entity_id=body.username,
+                detail={"reason": "invalid_credentials", "username": body.username},
+                ip=client_ip(request),
+            )
+            await db.commit()
+        except Exception:  # noqa: BLE001 - 审计失败不阻断 401
+            logger.warning("login_failed_audit_error", username=body.username, exc_info=True)
+        raise AuthError("用户名或密码错误", error_code="AUTH_INVALID_CREDENTIALS")
+
+    if not bool(getattr(user, "totp_enabled", False)):
+        raise AuthError("该账号未启用双因子认证", error_code="AUTH_TOTP_NOT_ENABLED")
+
+    secret = decrypt_secret(user.totp_secret) if user.totp_secret else None
+    if secret is None or not verify_totp(secret, body.totp_code):
+        await record_login_failure(throttle_key)
+        await record_ip_failure(remote_ip)
+        await record_account_failure(body.username)
+        try:
+            await write_audit(
+                db,
+                actor_id=user.id,
+                action="auth.login_2fa_failed",
+                entity_type="user",
+                entity_id=body.username,
+                detail={"reason": "invalid_totp_code", "username": body.username},
+                ip=client_ip(request),
+            )
+            await db.commit()
+        except Exception:  # noqa: BLE001 - 审计失败不阻断 401
+            logger.warning("login_2fa_failed_audit_error", username=body.username, exc_info=True)
+        raise AuthError("动态验证码错误，请重新输入", error_code="AUTH_TOTP_INVALID")
+
+    await reset_login_failures(throttle_key)
+    await reset_ip_failures(remote_ip)
+    await reset_account_failures(body.username)
+    user.last_login_at = datetime.now(UTC)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="auth.login",
+        entity_type="user",
+        entity_id=body.username,
+        detail={"username": body.username, "mfa": "totp"},
+        ip=client_ip(request),
+    )
+    await db.commit()
+
+    token = create_access_token(sub=user.id, role=user.role, org_id=user.org_id)
+    refresh = create_refresh_token(sub=user.id, role=user.role, org_id=user.org_id)
+    await rotate_active_refresh(user.id, refresh)
+    return ok(
+        TokenResponse(
+            access_token=token,
+            refresh_token=refresh,
             must_change_password=bool(getattr(user, "must_change_password", False)),
         )
     )
@@ -225,6 +353,7 @@ async def me(
             org_id=user.org_id,
             org_name=org_name,
             must_change_password=bool(getattr(user, "must_change_password", False)),
+            totp_enabled=bool(getattr(user, "totp_enabled", False)),
         )
     )
 
@@ -261,6 +390,57 @@ async def list_users(
                 status=u.status,
             )
             for u in rows
+        ]
+    )
+
+
+@router.get("/users/by-ids")
+async def resolve_user_names(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    ids: str = Query(
+        ...,
+        min_length=1,
+        max_length=1200,
+        description="逗号分隔的用户 id 列表（如 1,2,3），单次最多 200 个",
+    ),
+    _: None = Depends(require_roles(*ALL_ROLES)),
+) -> ApiResponse[list[UserBrief]]:
+    """按 id 精确解析用户名（跨组织，供展示已知 id 的真实中文名）。
+
+    与 ``GET /auth/users`` 的区别：本端点按调用方**已知的精确 id** 反查用户，
+    **不按组织过滤**——用于 Owner 责任链、责任人/操作人等「已知 owner_id /
+    actor_id 但要显示真实姓名」的场景（跨组织用户不在本组织列表中时，
+    前端此前会退化为「用户 #id」占位）。
+
+    安全边界：
+    - 仅返回调用方**显式提供**的 id 对应的用户（无法借此枚举用户目录）；
+    - 仍只暴露基础字段（id/username/display_name/role/domain/status），
+      不返回 email/password_hash，与 ``UserBrief`` 同构；
+    - 单次最多 200 个 id，超长部分忽略（防滥用）。
+    """
+    raw = [p for p in ids.split(",") if p.strip().isdigit()][:200]
+    if not raw:
+        return ok([])
+    target_ids = list(dict.fromkeys(int(x) for x in raw))
+    rows = (
+        await db.execute(select(User).where(User.id.in_(target_ids)))
+    ).scalars().all()
+    by_id = {u.id: u for u in rows}
+    # 按调用方提供的 id 顺序返回；查无（用户已删/不存在）的 id 跳过，
+    # 由调用方以「未知用户」兜底——这是用户记录缺失，而非权限可见性问题。
+    return ok(
+        [
+            UserBrief(
+                id=u.id,
+                username=u.username,
+                display_name=u.display_name,
+                role=u.role,
+                domain=u.domain,
+                status=u.status,
+            )
+            for u in (by_id.get(i) for i in target_ids)
+            if u is not None
         ]
     )
 
