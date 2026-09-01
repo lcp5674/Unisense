@@ -66,12 +66,20 @@ class CollectorRepository:
     def __init__(self, db: AsyncSession) -> None:
         self._db = db
 
-    async def get_source(self, source_id: str) -> DataSource | None:
-        res = await self._db.execute(
-            select(DataSource).where(
-                DataSource.source_id == source_id, DataSource.deleted_at.is_(None)
-            )
+    async def get_source(self, source_id: str, org_id: int | None = None) -> DataSource | None:
+        """按 source_id 查数据源。
+
+        Args:
+            source_id: 数据源业务 ID。
+            org_id: 所属组织 ID。非 None 时强制按组织过滤（多租户隔离，S1）；
+                None 表示平台内部/worker 路径（不按组织过滤，仅限受信调用方）。
+        """
+        stmt = select(DataSource).where(
+            DataSource.source_id == source_id, DataSource.deleted_at.is_(None)
         )
+        if org_id is not None:
+            stmt = stmt.where(DataSource.org_id == org_id)
+        res = await self._db.execute(stmt)
         return res.scalar_one_or_none()
 
     async def create_source(self, source: DataSource) -> DataSource:
@@ -79,7 +87,7 @@ class CollectorRepository:
         await self._db.flush()
         return source
 
-    async def soft_delete_source(self, source_id: str) -> bool:
+    async def soft_delete_source(self, source_id: str, org_id: int | None = None) -> bool:
         """软删除数据源，并释放 ``source_id`` 唯一约束以允许重建同名源。
 
         P0-1/P0-3/P2-9 修复：
@@ -94,7 +102,7 @@ class CollectorRepository:
             尚不存在的新值会立即触发 FK 1452。因此整个级联改名在事务内临时关闭
             ``FOREIGN_KEY_CHECKS``（会话级开关，事务提交即失效，无并发风险）。
         """
-        src = await self.get_source(source_id)
+        src = await self.get_source(source_id, org_id=org_id)
         if src is None:
             return False
         now = datetime.now(UTC)
@@ -130,9 +138,11 @@ class CollectorRepository:
             await self._db.execute(text("SET FOREIGN_KEY_CHECKS=1"))
         return True
 
-    async def set_source_enabled(self, source_id: str, enabled: bool) -> DataSource | None:
+    async def set_source_enabled(
+        self, source_id: str, enabled: bool, org_id: int | None = None
+    ) -> DataSource | None:
         """设置数据源启用状态（批量启停逐条复用；不存在返回 None）。"""
-        src = await self.get_source(source_id)
+        src = await self.get_source(source_id, org_id=org_id)
         if src is None:
             return None
         src.enabled = enabled
@@ -182,10 +192,15 @@ class CollectorRepository:
         health_status: str | None = None,
         owner_id: int | None = None,
         source_status: str | None = None,
+        org_id: int | None = None,
         page: int,
         page_size: int,
     ) -> tuple[Sequence[DataSource], int]:
         base = select(DataSource)
+        # S1 多租户隔离：org_id 非 None 时强制按组织过滤（用户驱动列表路径）；
+        # None 表示平台内部/worker 路径（不按组织过滤，仅限受信调用方）。
+        if org_id is not None:
+            base = base.where(DataSource.org_id == org_id)
         # 源状态过滤（对齐 list_catalog_databases 语义）：deleted 查已软删源
         # （采集目录追溯保留场景），其余默认仅活跃源（deleted_at IS NULL）。
         if source_status == "deleted":

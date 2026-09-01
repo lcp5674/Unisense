@@ -36,6 +36,7 @@ async def collector_client() -> AsyncIterator[httpx.AsyncClient]:
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
         id=1,
+        org_id=1,
         role="platform_admin",
         roles_all=lambda: ["platform_admin"],
         has_role=lambda r: r == "platform_admin",
@@ -85,7 +86,7 @@ async def test_collect_now_triggers_immediate_collection(
     assert body["status"] == "QUEUED"
     assert body["mode"] == "FULL"
     mock_schedule.assert_awaited_once_with(
-        "s1", 1, mode="FULL", include_patterns=None, exclude_patterns=None
+        "s1", 1, org_id=1, mode="FULL", include_patterns=None, exclude_patterns=None
     )
 
 
@@ -113,6 +114,7 @@ async def test_collect_now_passes_temp_filters(
     mock_schedule.assert_awaited_once_with(
         "s1",
         1,
+        org_id=1,
         mode="INCREMENTAL",
         include_patterns=["ods_*"],
         exclude_patterns=["tmp_*"],

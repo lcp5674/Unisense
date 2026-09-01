@@ -517,11 +517,11 @@ class CollectorService(BaseService):
             logger.warning("list_tables_failed: type=%s dbs=%s err=%s", source_type, databases, exc)
             return {}
 
-    async def check_connection(self, source_id: str) -> TestConnectionResult:
+    async def check_connection(self, source_id: str, org_id: int | None = None) -> TestConnectionResult:
         """存量数据源实时探活：解密配置 → 轻量连接 → 更新健康状态与探活时间。"""
         from app.services.collector.connectors import registry
 
-        src = await self._repo.get_source(source_id)
+        src = await self._repo.get_source(source_id, org_id=org_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
         try:
@@ -561,6 +561,7 @@ class CollectorService(BaseService):
         health_status: str | None = None,
         owner_id: int | None = None,
         source_status: str | None = None,
+        org_id: int | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[DataSourceResponse], int]:
@@ -571,6 +572,7 @@ class CollectorService(BaseService):
             health_status=health_status,
             owner_id=owner_id,
             source_status=source_status,
+            org_id=org_id,
             page=page,
             page_size=page_size,
         )
@@ -588,8 +590,10 @@ class CollectorService(BaseService):
             item.failed_count = sig.get("failed_count")
         return items, total
 
-    async def get_source(self, source_id: str, include_config: bool = False) -> DataSourceResponse:
-        src = await self._repo.get_source(source_id)
+    async def get_source(
+        self, source_id: str, include_config: bool = False, org_id: int | None = None
+    ) -> DataSourceResponse:
+        src = await self._repo.get_source(source_id, org_id=org_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
         # 明文连接配置仅平台管理员可读（由 API 层按角色决定 include_config）；
@@ -627,7 +631,7 @@ class CollectorService(BaseService):
         return merged
 
     async def update_source(
-        self, source_id: str, req: DataSourceUpdateRequest, actor_id: int
+        self, source_id: str, req: DataSourceUpdateRequest, actor_id: int, org_id: int | None = None
     ) -> DataSourceResponse:
         """更新数据源（PATCH 语义：仅更新传入字段）。
 
@@ -644,7 +648,7 @@ class CollectorService(BaseService):
             NotFoundError: 数据源不存在。
             BusinessError: source_type 未注册。
         """
-        src = await self._repo.get_source(source_id)
+        src = await self._repo.get_source(source_id, org_id=org_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
 
@@ -716,12 +720,12 @@ class CollectorService(BaseService):
         await self._db.flush()
         return self._to_source_response(src)
 
-    async def delete_source(self, source_id: str) -> None:
-        if not await self._repo.soft_delete_source(source_id):
+    async def delete_source(self, source_id: str, org_id: int | None = None) -> None:
+        if not await self._repo.soft_delete_source(source_id, org_id=org_id):
             raise NotFoundError(f"数据源不存在: {source_id}")
 
     async def batch_toggle_sources(
-        self, source_ids: list[str], enabled: bool, actor_id: int
+        self, source_ids: list[str], enabled: bool, actor_id: int, org_id: int | None = None
     ) -> BatchSourceResult:
         """批量启用/停用数据源（逐条独立处理，单条失败不影响其余）。
 
@@ -740,7 +744,7 @@ class CollectorService(BaseService):
         failed: list[BatchSourceItem] = []
         for sid in source_ids:
             try:
-                src = await self._repo.set_source_enabled(sid, enabled)
+                src = await self._repo.set_source_enabled(sid, enabled, org_id=org_id)
                 if src is None:
                     failed.append(
                         BatchSourceItem(
@@ -764,7 +768,7 @@ class CollectorService(BaseService):
         return BatchSourceResult(succeeded=succeeded, failed=failed)
 
     async def batch_delete_sources(
-        self, source_ids: list[str], actor_id: int
+        self, source_ids: list[str], actor_id: int, org_id: int | None = None
     ) -> BatchSourceResult:
         """批量删除数据源（软删，逐条独立处理，单条失败不影响其余）。
 
@@ -779,7 +783,7 @@ class CollectorService(BaseService):
         failed: list[BatchSourceItem] = []
         for sid in source_ids:
             try:
-                src = await self._repo.get_source(sid)
+                src = await self._repo.get_source(sid, org_id=org_id)
                 if src is None:
                     failed.append(
                         BatchSourceItem(
@@ -930,9 +934,12 @@ class CollectorService(BaseService):
                 )
         return BatchSourceResult(succeeded=succeeded, failed=failed)
 
-    async def get_source_orm(self, source_id: str) -> DataSource:
-        """取原始 DataSource（供采集编排还原连接配置，不对外暴露明文）。"""
-        src = await self._repo.get_source(source_id)
+    async def get_source_orm(self, source_id: str, org_id: int | None = None) -> DataSource:
+        """取原始 DataSource（供采集编排还原连接配置，不对外暴露明文）。
+
+        S1 多租户隔离：org_id 非 None 时按组织过滤，跨组织返回 NOT_FOUND。
+        """
+        src = await self._repo.get_source(source_id, org_id=org_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
         return src
@@ -2452,6 +2459,7 @@ class CollectorService(BaseService):
         actor_id: int,
         queue: CollectionQueue | None = None,
         *,
+        org_id: int | None = None,
         mode: str = "FULL",
         include_patterns: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
@@ -2470,7 +2478,7 @@ class CollectorService(BaseService):
         Raises:
             NotFoundError: 数据源不存在。
         """
-        src = await self._repo.get_source(source_id)
+        src = await self._repo.get_source(source_id, org_id=org_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
         if not getattr(src, "enabled", True):
@@ -2593,14 +2601,14 @@ class CollectorService(BaseService):
             src.schedule_enabled = schedule_enabled
         await self._db.flush()
 
-    async def get_watermark(self, source_id: str) -> dict[str, Any]:
+    async def get_watermark(self, source_id: str, org_id: int | None = None) -> dict[str, Any]:
         """US3: 获取数据源采集水位（FR-014）。
 
         数据源不存在时抛 ``NotFoundError``；存在但从未采集时返回空水位
         （``last_collected_at=None``、计数为 0），而非 404——与 ``get_health``
         语义一致，使前端可正常展示「从未采集」。
         """
-        src = await self._repo.get_source(source_id)
+        src = await self._repo.get_source(source_id, org_id=org_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
         watermark = await self._repo.get_watermark(source_id)
@@ -2622,14 +2630,14 @@ class CollectorService(BaseService):
             "failed_count": watermark.failed_count,
         }
 
-    async def get_health(self, source_id: str) -> dict[str, Any]:
+    async def get_health(self, source_id: str, org_id: int | None = None) -> dict[str, Any]:
         """US5: 获取数据源健康状态（FR-016）。
 
         P1-3 修复：返回真实 ``last_error`` / ``last_health_check``，
         ``uptime_check`` 为存储态健康判断（离线健康，非实时探活）。
         三期：DEGRADED（黄态）时附带 health_metrics / degraded_since。
         """
-        src = await self._repo.get_source(source_id)
+        src = await self._repo.get_source(source_id, org_id=org_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
         watermark = await self._repo.get_watermark(source_id)
@@ -2652,7 +2660,7 @@ class CollectorService(BaseService):
             ),
         }
 
-    async def get_source_overview(self, source_id: str) -> dict[str, Any]:
+    async def get_source_overview(self, source_id: str, org_id: int | None = None) -> dict[str, Any]:
         """资产规模概览（详情页头部）：实体类型/PII 分布/字段数/漂移/水位。"""
         overview = await self._repo.get_source_overview(source_id)
         if not overview:
@@ -2679,6 +2687,7 @@ class CollectorService(BaseService):
         source_id: str,
         entity_name: str | None = None,
         *,
+        org_id: int | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> dict[str, Any]:
@@ -2686,7 +2695,7 @@ class CollectorService(BaseService):
 
         数据源不存在时抛 ``NotFoundError``；存在但无 drift 记录时返回空列表。
         """
-        src = await self._repo.get_source(source_id)
+        src = await self._repo.get_source(source_id, org_id=org_id)
         if src is None:
             raise NotFoundError(f"数据源不存在: {source_id}")
         rows, total = await self._repo.list_drift_logs(
