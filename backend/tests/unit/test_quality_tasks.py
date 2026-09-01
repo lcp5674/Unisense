@@ -80,7 +80,10 @@ async def _run(
 
     repo = MagicMock()
     repo.list_all_enabled_rules = AsyncMock(return_value=rules)
-    repo.latest_observation = AsyncMock(return_value=latest_obs)
+    # P6（审查修复）：批量取观测方法 mock（返回 {metric_id: obs}）
+    repo.latest_observations_for_metrics = AsyncMock(
+        return_value={latest_obs.metric_id: latest_obs} if latest_obs is not None else {}
+    )
 
     # async_session_factory 是 async_sessionmaker：同步调用返回 AsyncSession，
     # 再经 async with session 进入异步上下文管理。

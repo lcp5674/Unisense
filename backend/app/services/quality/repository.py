@@ -188,6 +188,26 @@ class QualityRepository:
         )
         return list((await self._db.execute(stmt)).scalars().all())
 
+    async def latest_observations_for_metrics(
+        self, metric_ids: list[int]
+    ) -> dict[int, QualityObservation]:
+        """批量取多个指标的最新观测（P6：一次 IN 查询替代 N 次单查）。"""
+        if not metric_ids:
+            return {}
+        stmt = (
+            select(QualityObservation)
+            .where(
+                QualityObservation.metric_id.in_(metric_ids),
+                QualityObservation.deleted_at.is_(None),
+            )
+            .order_by(QualityObservation.metric_id, QualityObservation.obs_time.desc())
+        )
+        rows = (await self._db.execute(stmt)).scalars().all()
+        result: dict[int, QualityObservation] = {}
+        for r in rows:
+            result.setdefault(r.metric_id, r)
+        return result
+
     async def latest_observation(self, metric_id: int) -> QualityObservation | None:
         """取某指标最近一次观测（按时间倒序取 1 条）。
 

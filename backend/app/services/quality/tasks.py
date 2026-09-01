@@ -55,9 +55,14 @@ async def run_quality_checks(ctx: dict[str, Any]) -> dict[str, int]:
         triggered = 0
         skipped_no_obs = 0
 
+        # P6（审查修复）：批量取全部相关指标的最新观测（一次 IN 查询），
+        # 此前同指标挂多条规则时逐条 latest_observation → N 次串行 SELECT。
+        metric_ids = sorted({mid for mid, _ in combos})
+        latest_map = await repo.latest_observations_for_metrics(metric_ids)
+
         for metric_id, rule_type in combos:
             # 取该指标最近一次观测（最新，非升序前 N 条的末条）
-            latest = await repo.latest_observation(metric_id)
+            latest = latest_map.get(metric_id)
             if latest is None:
                 skipped_no_obs += 1
                 continue

@@ -143,6 +143,45 @@ class MetricRepository:
         )
         return result.scalar_one_or_none()
 
+    # ---- FULLTEXT 关键词搜索（审查 P4：LIKE 前导通配符全表扫 → FULLTEXT 加速）----
+    # 进程级能力标志：None=未探测 / True=可用 / False=不可用（SQLite 或索引缺失 → 回退 LIKE）。
+    _fulltext_ok: bool | None = None
+
+    @staticmethod
+    def _metric_search_like(kw: str) -> Any:
+        """LIKE 回退条件（autoescape 防 %/_ 模糊放大；匹配编码/名称/描述）。"""
+        return (
+            (Metric.metric_code.contains(kw, autoescape=True))
+            | (Metric.name.contains(kw, autoescape=True))
+            | (Metric.description.contains(kw, autoescape=True))
+        )
+
+    @staticmethod
+    def _metric_search_fulltext(kw: str) -> Any:
+        """FULLTEXT 短语条件（ngram 2-gram，短语模式语义≈子串）。"""
+        phrase = kw.strip().replace('"', "")
+        return text(
+            "MATCH(metric.name, metric.description, metric.metric_code) "
+            "AGAINST (:kw IN BOOLEAN MODE)"
+        ).bindparams(kw=f'"{phrase}"')
+
+    async def _metric_search_cond(self, kw: str) -> Any:
+        """选择关键词条件：MySQL + ≥2 字符 → FULLTEXT（一次进程级探测，失败永久回退 LIKE）；
+        其余 → LIKE。"""
+        kw = kw.strip()
+        if not kw:
+            return None
+        if self._fulltext_ok is False or len(kw) < 2:
+            return self._metric_search_like(kw)
+        try:
+            bind = self._session.get_bind()
+            if bind.dialect.name != "mysql":
+                type(self)._fulltext_ok = False
+                return self._metric_search_like(kw)
+        except Exception:  # noqa: BLE001 - 探测失败回退 LIKE
+            return self._metric_search_like(kw)
+        return self._metric_search_fulltext(kw)
+
     async def list_metrics(
         self,
         *,
@@ -278,18 +317,13 @@ class MetricRepository:
                 )
             )
         if keyword:
-            # LIKE 通配符转义（对齐 FR-035：% 和 _ 须转义）。
-            # 修复前：手动 replace 成 \%/\_ 但 contains() 不生成 ESCAPE 子句，
-            # MySQL 默认把 \ 当普通字符、%/_ 仍当通配符 → 转义实际失效，
-            # 搜含 %/_ 的关键词（如 order_cnt、100%）会模糊放大匹配。
-            # autoescape=True 由 SQLAlchemy 自动转义 %/_/\ 并生成 ESCAPE '\\' 子句。
-            # keyword 同时匹配描述（对齐维度/模板的"编码/名称/描述"搜索契约，
-            # 用户常记得业务描述而非编码——"记得描述搜不到指标"是高频断点）。
-            conditions.append(
-                (Metric.metric_code.contains(keyword, autoescape=True))
-                | (Metric.name.contains(keyword, autoescape=True))
-                | (Metric.description.contains(keyword, autoescape=True))
-            )
+            # P4（审查修复）：关键词优先走 FULLTEXT（MySQL ngram，≥2 字符），
+            # 避免 LIKE '%kw%' 前导通配符致 B-tree 索引失效 → count+列表 2 次全表扫；
+            # 非 MySQL/<2 字符/探测失败回退 LIKE（autoescape 防 %/_ 模糊放大）。
+            # keyword 同时匹配编码/名称/描述（对齐"编码/名称/描述"搜索契约）。
+            cond = await self._metric_search_cond(keyword)
+            if cond is not None:
+                conditions.append(cond)
 
         # 总数
         count_stmt = select(func.count()).select_from(Metric).where(*conditions)

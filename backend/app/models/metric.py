@@ -362,8 +362,11 @@ class Metric(Base, BaseModel):
     )
 
     # ---- 关系 ----
+    # P5（审查修复）：lazy="selectin"→"select"——列表查询不再无条件追加一条
+    # 拉取全量版本大 JSON（definition_json/diff_json）的查询，MetricResponse 无
+    # versions 字段、拉回来即丢弃（每页 20 指标 × 5 版本 = 多余 100 行大 JSON）。
     versions: Mapped[list[MetricVersion]] = relationship(
-        "MetricVersion", back_populates="metric", lazy="selectin"
+        "MetricVersion", back_populates="metric", lazy="select"
     )
 
     __table_args__ = (
