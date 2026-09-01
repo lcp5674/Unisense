@@ -76,6 +76,15 @@ describe("ApiClients", () => {
     mockedListApiClients.mockResolvedValue([ACTIVE_CLIENT]);
     mockedMintClientToken.mockResolvedValue({ access_token: "consume-token-xyz" });
     mockedGetConsumeToken.mockReturnValue(null);
+    mockedListMetrics.mockResolvedValue({
+      items: [
+        { metric_code: "outp_feeamount_day", name: "门诊收费金额", pii_flag: false },
+        { metric_code: "outp_doctor_cnt", name: "医生数", pii_flag: false },
+      ],
+      total: 2,
+      page: 1,
+      page_size: 200,
+    } as never);
   });
 
   it("列表渲染客户端并展示接入指南（端点清单 + curl 示例）", async () => {
@@ -145,8 +154,9 @@ describe("ApiClients", () => {
     await user.click(screen.getByText("编辑"));
     expect(await screen.findByText(/编辑 API 客户端/)).toBeInTheDocument();
 
-    // 修改授权域（Modal 渲染在 body，用 combobox 打开下拉，再选主题域）
-    await user.click(screen.getByRole("combobox"));
+    // 修改授权域（编辑弹窗有两个下拉：授权域 + 指标白名单多选；取第一个 combobox）
+    const combos = screen.getAllByRole("combobox");
+    await user.click(combos[0]);
     await user.click(await screen.findByTitle("门诊 (outp)"));
     await user.click(await screen.findByText(/保\s*存/));
 
@@ -154,6 +164,31 @@ describe("ApiClients", () => {
       expect(mockedUpdateApiClient).toHaveBeenCalledWith(
         "app_abcd1234",
         expect.objectContaining({ scope_domain: "outp", qps: 20, daily_quota: 100000 }),
+      );
+    });
+  });
+
+  it("编辑客户端：指标白名单为下拉多选，追加指标后保存透传数组", async () => {
+    const user = userEvent.setup();
+    const existing = { ...ACTIVE_CLIENT, metric_whitelist: ["outp_feeamount_day"] };
+    mockedListApiClients.mockResolvedValue([existing]);
+    mockedUpdateApiClient.mockResolvedValue(existing);
+    render(<ApiClients />);
+    await screen.findByText("app_abcd1234");
+
+    await user.click(screen.getByText("编辑"));
+    expect(await screen.findByText(/编辑 API 客户端/)).toBeInTheDocument();
+
+    // 指标白名单多选：回填已有值，再从下拉追加一个指标
+    const combos = screen.getAllByRole("combobox");
+    await user.click(combos[1]);
+    await user.click(await screen.findByTitle("outp_doctor_cnt（医生数）"));
+    await user.click(await screen.findByText(/保\s*存/));
+
+    await waitFor(() => {
+      expect(mockedUpdateApiClient).toHaveBeenCalledWith(
+        "app_abcd1234",
+        expect.objectContaining({ metric_whitelist: ["outp_feeamount_day", "outp_doctor_cnt"] }),
       );
     });
   });

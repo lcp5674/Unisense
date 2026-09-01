@@ -97,6 +97,8 @@ export function ApiClients() {
   const [batchBusy, setBatchBusy] = useState(false);
   // 主题域选项（scope_domain 下拉，避免手填错值导致 403）
   const [domainOptions, setDomainOptions] = useState<{ value: string; label: string }[]>([]);
+  // 指标白名单选项（供新建/编辑弹窗下拉多选，替代手动逗号输入；与 Governance 授权弹窗同源）
+  const [metricOptions, setMetricOptions] = useState<{ value: string; label: string }[]>([]);
   const [editForm] = Form.useForm();
 
   useEffect(() => {
@@ -114,6 +116,14 @@ export function ApiClients() {
       })
       .catch(() => {
         /* 主题域加载失败不阻断页面，scope_domain 仍可手填 */
+      });
+    // 指标白名单选项：拉取已发布指标（编码 + 名称，供搜索多选）
+    listMetrics({ status: "PUBLISHED", page: 1, page_size: 200 })
+      .then((res) =>
+        setMetricOptions(res.items.map((m) => ({ value: m.metric_code, label: `${m.metric_code}（${m.name}）` }))),
+      )
+      .catch(() => {
+        /* 指标加载失败不阻断页面，白名单仍可手动输入已有值 */
       });
   }, []);
 
@@ -140,7 +150,9 @@ export function ApiClients() {
         client_id: values.client_id ? String(values.client_id) : undefined,
         secret: String(values.secret),
         scope_domain: values.scope_domain ? String(values.scope_domain) : null,
-        metric_whitelist: values.metric_whitelist ? String(values.metric_whitelist).split(",").map((s) => s.trim()).filter(Boolean) : null,
+        metric_whitelist: Array.isArray(values.metric_whitelist) && values.metric_whitelist.length
+          ? values.metric_whitelist
+          : null,
         qps: Number(values.qps ?? 20),
         daily_quota: Number(values.daily_quota ?? 100000),
       });
@@ -216,9 +228,16 @@ export function ApiClients() {
 
   function openEdit(r: ClientResponse) {
     setEditingClient(r);
+    // 白名单中不在当前已发布选项列表的旧编码（停用/下架/删除）也并入选项，避免回填显示裸编码
+    setMetricOptions((prev) => {
+      const existing = new Set(prev.map((o) => o.value));
+      const missing = (r.metric_whitelist ?? []).filter((c) => !existing.has(c));
+      if (!missing.length) return prev;
+      return [...prev, ...missing.map((c) => ({ value: c, label: `${c}（已下线或非发布态）` }))];
+    });
     editForm.setFieldsValue({
       scope_domain: r.scope_domain ?? undefined,
-      metric_whitelist: r.metric_whitelist?.join(", ") ?? "",
+      metric_whitelist: r.metric_whitelist ?? undefined,
       qps: r.qps,
       daily_quota: r.daily_quota,
     });
@@ -232,7 +251,9 @@ export function ApiClients() {
       const values = await editForm.validateFields();
       const payload: ClientUpdateRequest = {
         scope_domain: values.scope_domain ? String(values.scope_domain) : null,
-        metric_whitelist: values.metric_whitelist ? String(values.metric_whitelist).split(",").map((s: string) => s.trim()).filter(Boolean) : null,
+        metric_whitelist: Array.isArray(values.metric_whitelist) && values.metric_whitelist.length
+          ? values.metric_whitelist
+          : null,
         qps: Number(values.qps ?? 20),
         daily_quota: Number(values.daily_quota ?? 100000),
       };
@@ -433,8 +454,16 @@ export function ApiClients() {
               notFoundContent={domainOptions.length ? undefined : "主题域加载中或为空"}
             />
           </Form.Item>
-          <Form.Item name="metric_whitelist" label="指标白名单（逗号分隔，留空为全部）">
-            <Input placeholder="finance_revenue_sum_d, finance_cost_sum_d" />
+          <Form.Item name="metric_whitelist" label="指标白名单（可多选，留空为全部）" extra="从已发布指标中选择，避免手填编码与指标域不符导致查询 403">
+            <Select
+              mode="multiple"
+              allowClear
+              showSearch
+              placeholder="选择已发布指标（编码）"
+              options={metricOptions}
+              optionFilterProp="label"
+              notFoundContent={metricOptions.length ? undefined : "已发布指标加载中或为空"}
+            />
           </Form.Item>
           <Space size={16}>
             <Form.Item name="qps" label="QPS" initialValue={20}>
@@ -527,8 +556,16 @@ curl -X POST http://<host>:8180/api/v1/consume/query \\
               notFoundContent={domainOptions.length ? undefined : "主题域加载中或为空"}
             />
           </Form.Item>
-          <Form.Item name="metric_whitelist" label="指标白名单（逗号分隔，留空为全部）">
-            <Input placeholder="finance_revenue_sum_d, finance_cost_sum_d" />
+          <Form.Item name="metric_whitelist" label="指标白名单（可多选，留空为全部）" extra="从已发布指标中选择，已下线/删除的存量编码会保留显示">
+            <Select
+              mode="multiple"
+              allowClear
+              showSearch
+              placeholder="选择已发布指标（编码）"
+              options={metricOptions}
+              optionFilterProp="label"
+              notFoundContent={metricOptions.length ? undefined : "已发布指标加载中或为空"}
+            />
           </Form.Item>
           <Space size={16}>
             <Form.Item name="qps" label="QPS">
