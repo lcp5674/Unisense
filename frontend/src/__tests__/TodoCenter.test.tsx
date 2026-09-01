@@ -298,3 +298,37 @@ describe("F3 - 待办计数与超限提示", () => {
     expect(await screen.findByTestId("path")).toHaveTextContent("/approval");
   });
 });
+
+describe("待办中心 - 草稿待办职责收敛", () => {
+  it("domain_admin/platform_admin 治理全域草稿：请求不带 owner_id", async () => {
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "alice",
+      display_name: "Alice",
+      role: "domain_admin",
+      domain: "finance",
+      org_id: 1,
+    });
+    renderPage();
+    await screen.findByText(/草稿待完善/);
+    const draftCall = mockedMetrics.mock.calls.find(([p]) => p?.status === "DRAFT");
+    expect(draftCall).toBeTruthy();
+    expect(draftCall![0]?.owner_id).toBeUndefined();
+  });
+
+  it("metric_owner/普通用户只看自己负责的草稿：请求带 owner_id=me.id（不再看到他人跨域草稿）", async () => {
+    mockedCurrentUser.mockResolvedValue({
+      id: 7,
+      username: "owner",
+      display_name: "Owner",
+      role: "metric_owner",
+      domain: "sales",
+      org_id: 1,
+    });
+    renderPage();
+    await screen.findByText(/草稿待完善/);
+    const draftCall = mockedMetrics.mock.calls.find(([p]) => p?.status === "DRAFT");
+    expect(draftCall).toBeTruthy();
+    expect(draftCall![0]?.owner_id).toBe(7);
+  });
+});

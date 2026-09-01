@@ -3412,3 +3412,29 @@ describe("MetricDetail 按钮级权限过滤", () => {
   });
 
 });
+
+describe("指标详情 - 跨组织 Owner 用户名兜底", () => {
+  it("users 列表不含 owner（/auth/users 多租户隔离）时，显示后端回填的 owner_username 而非「用户 #id」", async () => {
+    mockedGetMetric.mockResolvedValue({
+      ...metric,
+      owner_id: 3,
+      owner_username: "平台管理员",
+      backup_owner_id: null,
+    });
+    mockedUsers.mockResolvedValue([]);
+    // 显式补齐 load 全部依赖，排除 beforeEach 实现被 clear 的干扰
+    mockedListVersions.mockResolvedValue([]);
+    mockedFavorites.mockResolvedValue([]);
+    mockedHealth.mockResolvedValue(null as unknown as MetricHealth);
+    mockedDomainTree.mockResolvedValue([
+      { id: 1, code: "outpatient", name: "门诊", parent_id: null, level: 1, sort_order: 0, status: "active", metric_count: 0, children: [] },
+    ]);
+    mockedSubs.mockResolvedValue({ items: [], total: 0 });
+    mockedRelated.mockResolvedValue([]);
+    renderDetail({ pathname: "/detail/sales_gmv_sum_d" });
+    // Owner 责任链「指标注册」节点显示后端回填名（而非「用户 #3」）
+    expect(await screen.findByText("平台管理员")).toBeTruthy();
+    // 注：fixture 的 approver_id=3 仍显示「用户 #3」属合理降级（审核人跨组织不可见、
+    // 且后端只回填 owner 最小用户名，不枚举目录）——本测试只验证 owner 节点不退化。
+  });
+});

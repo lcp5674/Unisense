@@ -1199,6 +1199,9 @@ class MetricResponse(BaseModel):
     row_version: int
     status: str
     owner_id: int
+    # 跨组织 Owner 最小用户名（display_name||username）：详情/列表序列化时 best-effort
+    # 从 user 表回填，仅暴露单个 owner 的名字，不破坏 /auth/users 多租户目录隔离
+    owner_username: str | None = None
     backup_owner_id: int | None
     # 口径三方责任（PRD 4.5 补充）：产品需求方/技术方/数仓开发（user.id，均可空）
     product_owner_id: int | None = None

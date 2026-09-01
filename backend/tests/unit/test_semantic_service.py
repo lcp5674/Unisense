@@ -4458,6 +4458,51 @@ async def test_get_metric_public_attaches_measure_info():
     assert resp2.measure_code is None
 
 
+async def test_get_metric_public_attaches_owner_username():
+    """get_metric_public：跨组织 Owner 最小用户名（display_name||username）best-effort 回填。
+
+    /auth/users 多租户隔离下非本组织用户不可见，详情页依赖该字段展示 Owner 名，
+    避免退化为「用户 #id」。度量查询无命中（first=None）+ user 查询命中。
+    """
+    from app.services.semantic.schemas import MetricResponse
+
+    svc, repo = _svc_with_repo()
+    svc._cache = MagicMock()
+    svc._cache.get = AsyncMock(return_value=None)
+    svc._cache.set = AsyncMock()
+    repo.get_by_code = AsyncMock(return_value=make_metric(owner_id=3))
+    # execute 顺序：measure(无命中) → mounts(空) → user(display_name/username)
+    no_hit = MagicMock(first=MagicMock(return_value=None))
+    empty_mounts = MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[]))))
+    svc._db.execute = AsyncMock(
+        side_effect=[
+            no_hit,
+            empty_mounts,
+            MagicMock(first=MagicMock(return_value=("平台管理员", "admin"))),
+        ]
+    )
+
+    resp = await svc.get_metric_public("sales_gmv_daily")
+    assert isinstance(resp, MetricResponse)
+    assert resp.owner_id == 3
+    assert resp.owner_username == "平台管理员"
+    # display_name 为空时回退 username
+    svc._db.execute = AsyncMock(
+        side_effect=[
+            no_hit,
+            empty_mounts,
+            MagicMock(first=MagicMock(return_value=("", "admin"))),
+        ]
+    )
+    resp2 = await svc.get_metric_public("sales_gmv_daily")
+    assert resp2.owner_username == "admin"
+    # user 查询失败降级：owner_username 保持 None，不阻断详情
+    svc._db.execute = AsyncMock(side_effect=Exception("db down"))
+    resp3 = await svc.get_metric_public("sales_gmv_daily")
+    assert resp3.owner_id == 3
+    assert resp3.owner_username is None
+
+
 async def test_get_metric_public_not_found():
     svc, repo = _svc_with_repo()
     svc._cache = MagicMock()

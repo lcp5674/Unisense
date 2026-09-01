@@ -85,9 +85,16 @@ export function TodoCenter() {
       // DSD 待办按当前登录用户的 Owner 维度收敛（源表下线 7 天处理期）
       const me = await fetchCurrentUser();
       const canReview = can("metric:review");
+      // 草稿待办按职责收敛：平台/域管理员治理全域草稿；metric_owner/普通用户
+      // 只看「自己负责的草稿」（owner_id=me.id）——避免把他人跨域草稿列进待办，
+      // 点入后 Owner 责任链/快照被 PDP 拒绝（403）的断链体验。
+      const isGovernanceAdmin = me.role === "platform_admin" || me.role === "domain_admin";
+      const draftReq = isGovernanceAdmin
+        ? { status: "DRAFT", page_size: 50 }
+        : { status: "DRAFT", owner_id: me.id, page_size: 50 };
       const [conflicts, drafts, reviews, qualityAlerts, dropped] = await Promise.all([
         listConflicts({ status: "OPEN", page_size: 50 }),
-        listMetrics({ status: "DRAFT", page_size: 50 }),
+        listMetrics(draftReq),
         canReview ? listMetrics({ status: "REVIEW", page_size: 50 }) : Promise.resolve({ items: [], total: 0 }),
         listQualityEvents({ status: "OPEN", page_size: 50 }),
         listMetrics({ status: "DATA_SOURCE_DROPPED", owner_id: me.id, page_size: 50 }),

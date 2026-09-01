@@ -243,20 +243,22 @@ function toMountInput(m: MetricMount): MetricMountInput {
 // 让一个指标上完整看到谁提需求、谁定口径、谁开发、谁注册、谁审核（PRD 4.5 治理闭环）。
 function OwnerChain({ metric, users }: { metric: MetricResponse; users: UserBrief[] }) {
   const byId = new Map(users.map((u) => [u.id, u]));
-  function cell(uid: number | null | undefined) {
+  // fallbackName：跨组织用户不在 users 列表（/auth/users 多租户隔离）时，
+  // 用后端回填的 owner_username（display_name||username）兜底，避免「用户 #id」。
+  function cell(uid: number | null | undefined, fallbackName?: string | null) {
     if (uid == null) return <span className="muted">未配置</span>;
     const u = byId.get(uid);
     return (
       <span>
-        <strong>{u?.display_name || `用户 #${uid}`}</strong>
+        <strong>{u?.display_name || u?.username || fallbackName || `用户 #${uid}`}</strong>
         {u && <Tag style={{ marginLeft: 6 }}>{ROLE_LABEL[u.role] ?? u.role}</Tag>}
         {u?.domain && <span className="muted"> · {u.domain}</span>}
       </span>
     );
   }
   // 责任方展示：平台用户（id 可解析）优先；id 为空但有 name → 外部人员（非平台用户直接输入名称）
-  function cellOwner(uid: number | null | undefined, name?: string | null) {
-    if (uid != null) return cell(uid);
+  function cellOwner(uid: number | null | undefined, name?: string | null, fallbackName?: string | null) {
+    if (uid != null) return cell(uid, fallbackName);
     if (name) {
       return (
         <span>
@@ -274,25 +276,29 @@ function OwnerChain({ metric, users }: { metric: MetricResponse; users: UserBrie
       role: "产品需求方",
       uid: metric.product_owner_id,
       name: metric.product_owner_name,
+      ownerFallback: undefined,
     },
     {
       stage: "口径定义",
       role: "技术方",
       uid: metric.tech_owner_id,
       name: metric.tech_owner_name,
+      ownerFallback: undefined,
     },
     {
       stage: "数仓实现",
       role: "数仓开发",
       uid: metric.dw_developer_id,
       name: metric.dw_developer_name,
+      ownerFallback: undefined,
     },
-    { stage: "指标注册", role: "指标 Owner", uid: metric.owner_id, name: null },
+    { stage: "指标注册", role: "指标 Owner", uid: metric.owner_id, name: null, ownerFallback: metric.owner_username },
     {
       stage: "审核把关",
       role: "提交人 / 审批人",
       uid: null,
       name: null,
+      ownerFallback: undefined,
       extra: (
         <span>
           {cell(metric.submitted_by)}
@@ -310,7 +316,7 @@ function OwnerChain({ metric, users }: { metric: MetricResponse; users: UserBrie
             <span>
               <Tag color="blue" style={{ marginRight: 6 }}>{c.stage}</Tag>
               <span className="muted">{c.role}：</span>
-              {c.extra ?? cellOwner(c.uid, c.name)}
+              {c.extra ?? cellOwner(c.uid, c.name, c.ownerFallback)}
             </span>
           ),
         }))}

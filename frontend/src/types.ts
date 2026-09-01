@@ -49,6 +49,8 @@ export interface MetricResponse {
   row_version: number;
   status: MetricStatus;
   owner_id: number;
+  /** 跨组织 Owner 最小用户名（backend best-effort 回填 display_name||username） */
+  owner_username?: string | null;
   backup_owner_id: number | null;
   /** 口径三方责任（PRD 4.5 补充）：产品需求方/技术方/数仓开发（user.id，均可空） */
   product_owner_id?: number | null;
@@ -801,7 +803,8 @@ export interface DashboardData {
   by_domain: Record<string, number>;
   pii_count: number;
   pii_ratio: number;
-  /** 评审人视角：指派给当前用户/所在域评审组的待审（REVIEW）指标数（TD §13，非管理 reviewer 角色返回） */
+  /** 当前用户「可审」的待审（REVIEW）指标数（TD §13，与审批中心待我审同口径）：
+   * platform_admin=全量；domain_admin=指派给我/本域/未指派兜底；reviewer=指派给我/本域；其余 0 */
   assigned_review?: number;
   /** Owner 责任分布（跨资产）：指标/数据表/数据源/维度/术语/指标模板按责任人聚合 */
   by_owner?: Record<
