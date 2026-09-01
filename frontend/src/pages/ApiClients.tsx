@@ -1,6 +1,33 @@
 import { useEffect, useState } from "react";
-import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, message, Space, Typography, Radio, Alert } from "antd";
-import { PlusOutlined, KeyOutlined, CopyOutlined, ReloadOutlined, ExperimentOutlined, ApiOutlined } from "@ant-design/icons";
+import {
+  Card,
+  Table,
+  Tag,
+  Button,
+  Modal,
+  Form,
+  Input,
+  InputNumber,
+  message,
+  Space,
+  Typography,
+  Radio,
+  Alert,
+  Popconfirm,
+  Select,
+  Dropdown,
+} from "antd";
+import {
+  PlusOutlined,
+  KeyOutlined,
+  CopyOutlined,
+  ReloadOutlined,
+  ExperimentOutlined,
+  ApiOutlined,
+  EditOutlined,
+  DeleteOutlined,
+  DownOutlined,
+} from "@ant-design/icons";
 import {
   createApiClient,
   listApiClients,
@@ -10,9 +37,14 @@ import {
   setConsumeToken,
   getConsumeToken,
   UnisenseApiError,
+  updateApiClient,
+  updateApiClientStatus,
+  deleteApiClient,
+  batchApiClientAction,
+  listDomainTree,
 } from "../api";
 import { usePermission } from "../hooks/usePermission";
-import type { ClientResponse } from "../types";
+import type { ClientResponse, ClientUpdateRequest, SubjectDomainTreeNode } from "../types";
 
 const { Paragraph } = Typography;
 
@@ -22,6 +54,13 @@ const TOKEN_TTL_OPTIONS = [
   { value: 240, label: "4 小时" },
   { value: 720, label: "12 小时" },
   { value: 1440, label: "24 小时" },
+];
+
+// 批量操作菜单项
+const BATCH_ACTIONS = [
+  { key: "enable", label: "批量启用" },
+  { key: "disable", label: "批量停用" },
+  { key: "delete", label: "批量删除", danger: true },
 ];
 
 // consume 查询端点清单（供接入指南展示，与 backend/app/api/consume.py 对齐）
@@ -49,6 +88,34 @@ export function ApiClients() {
   // 连通性测试状态
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  // 编辑弹窗状态
+  const [editOpen, setEditOpen] = useState(false);
+  const [editingClient, setEditingClient] = useState<ClientResponse | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+  // 批量选择状态
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
+  const [batchBusy, setBatchBusy] = useState(false);
+  // 主题域选项（scope_domain 下拉，避免手填错值导致 403）
+  const [domainOptions, setDomainOptions] = useState<{ value: string; label: string }[]>([]);
+  const [editForm] = Form.useForm();
+
+  useEffect(() => {
+    listDomainTree()
+      .then((tree: SubjectDomainTreeNode[]) => {
+        const opts: { value: string; label: string }[] = [];
+        const walk = (nodes: SubjectDomainTreeNode[]) => {
+          for (const n of nodes) {
+            if (n.code) opts.push({ value: n.code, label: `${n.name} (${n.code})` });
+            if (n.children?.length) walk(n.children);
+          }
+        };
+        walk(tree);
+        setDomainOptions(opts);
+      })
+      .catch(() => {
+        /* 主题域加载失败不阻断页面，scope_domain 仍可手填 */
+      });
+  }, []);
 
   async function load() {
     setLoading(true);
@@ -147,6 +214,86 @@ export function ApiClients() {
     }
   }
 
+  function openEdit(r: ClientResponse) {
+    setEditingClient(r);
+    editForm.setFieldsValue({
+      scope_domain: r.scope_domain ?? undefined,
+      metric_whitelist: r.metric_whitelist?.join(", ") ?? "",
+      qps: r.qps,
+      daily_quota: r.daily_quota,
+    });
+    setEditOpen(true);
+  }
+
+  async function handleEditSave() {
+    if (!editingClient) return;
+    setSavingEdit(true);
+    try {
+      const values = await editForm.validateFields();
+      const payload: ClientUpdateRequest = {
+        scope_domain: values.scope_domain ? String(values.scope_domain) : null,
+        metric_whitelist: values.metric_whitelist ? String(values.metric_whitelist).split(",").map((s: string) => s.trim()).filter(Boolean) : null,
+        qps: Number(values.qps ?? 20),
+        daily_quota: Number(values.daily_quota ?? 100000),
+      };
+      await updateApiClient(editingClient.client_id, payload);
+      message.success(`客户端 ${editingClient.client_id} 已更新`);
+      setEditOpen(false);
+      load();
+    } catch (err) {
+      if (err instanceof Error && "errorFields" in err) return; // 表单校验错误，静默
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "更新失败");
+    } finally {
+      setSavingEdit(false);
+    }
+  }
+
+  async function handleToggleStatus(r: ClientResponse) {
+    const target = r.status === "ACTIVE" ? "REVOKED" : "ACTIVE";
+    try {
+      await updateApiClientStatus(r.client_id, target);
+      message.success(`客户端 ${r.client_id} 已${target === "ACTIVE" ? "启用" : "停用"}`);
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "操作失败");
+    }
+  }
+
+  async function handleDelete(r: ClientResponse) {
+    try {
+      await deleteApiClient(r.client_id);
+      message.success(`客户端 ${r.client_id} 已删除（软删，可追溯）`);
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "删除失败");
+    }
+  }
+
+  async function handleBatch(action: string) {
+    if (!selectedKeys.length) {
+      message.warning("请先勾选客户端");
+      return;
+    }
+    setBatchBusy(true);
+    try {
+      const res = await batchApiClientAction({ action: action as "enable" | "disable" | "delete", client_ids: selectedKeys });
+      const actionLabel = action === "enable" ? "启用" : action === "disable" ? "停用" : "删除";
+      if (res.fail_count > 0) {
+        message.warning(
+          `批量${actionLabel}完成：成功 ${res.ok_count} / 失败 ${res.fail_count}（${res.results.filter((r) => !r.ok).map((r) => r.client_id).join(", ")}）`,
+        );
+      } else {
+        message.success(`批量${actionLabel}成功：${res.ok_count} 个客户端`);
+      }
+      setSelectedKeys([]);
+      load();
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "批量操作失败");
+    } finally {
+      setBatchBusy(false);
+    }
+  }
+
   const columns = [
     { title: "Client ID", dataIndex: "client_id", key: "client_id", render: (v: string) => <span className="mono">{v}</span> },
     { title: "作用域域", dataIndex: "scope_domain", key: "scope_domain", render: (v: string | null) => v ?? <span className="muted">全部</span> },
@@ -169,11 +316,39 @@ export function ApiClients() {
     {
       title: "操作",
       key: "actions",
-      width: 160,
+      width: 260,
       render: (_: unknown, r: ClientResponse) => (
-        <Button size="small" icon={<KeyOutlined />} disabled={r.status !== "ACTIVE" || !canManage} onClick={() => openMint(r)}>
-          签发令牌
-        </Button>
+        <Space size={4} wrap>
+          <Button size="small" icon={<KeyOutlined />} disabled={r.status !== "ACTIVE" || !canManage} onClick={() => openMint(r)}>
+            签发令牌
+          </Button>
+          <Button size="small" icon={<EditOutlined />} disabled={!canManage} onClick={() => openEdit(r)}>
+            编辑
+          </Button>
+          <Popconfirm
+            title={r.status === "ACTIVE" ? "确认停用该客户端？" : "确认启用该客户端？"}
+            description={r.status === "ACTIVE" ? "停用后 X-Api-Key 与已签短效令牌将立即失效。" : "启用后即可恢复消费访问。"}
+            okText="确认"
+            cancelText="取消"
+            onConfirm={() => handleToggleStatus(r)}
+          >
+            <Button size="small" danger={r.status === "ACTIVE"} disabled={!canManage}>
+              {r.status === "ACTIVE" ? "停用" : "启用"}
+            </Button>
+          </Popconfirm>
+          <Popconfirm
+            title="确认删除该客户端？"
+            description="软删除（保留审计追溯），删除后不可恢复消费访问。"
+            okText="确认"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => handleDelete(r)}
+          >
+            <Button size="small" danger icon={<DeleteOutlined />} disabled={!canManage}>
+              删除
+            </Button>
+          </Popconfirm>
+        </Space>
       ),
     },
   ];
@@ -191,8 +366,42 @@ export function ApiClients() {
         </Button>}
       </div>
 
-      <Card extra={<Button icon={<ReloadOutlined />} onClick={load} loading={loading}>刷新</Button>}>
-        <Table dataSource={items} columns={columns} rowKey="client_id" loading={loading} pagination={false} locale={{ emptyText: "暂无 API 客户端" }} />
+      <Card
+        extra={
+          <Space>
+            <Dropdown
+              menu={{
+                items: BATCH_ACTIONS,
+                onClick: ({ key }) => handleBatch(key),
+              }}
+              disabled={!selectedKeys.length || !canManage || batchBusy}
+            >
+              <Button loading={batchBusy}>
+                批量操作 <DownOutlined />
+              </Button>
+            </Dropdown>
+            <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
+              刷新
+            </Button>
+          </Space>
+        }
+      >
+        <Table
+          dataSource={items}
+          columns={columns}
+          rowKey="client_id"
+          loading={loading}
+          pagination={false}
+          rowSelection={
+            canManage
+              ? {
+                  selectedRowKeys: selectedKeys,
+                  onChange: (keys) => setSelectedKeys(keys as string[]),
+                }
+              : undefined
+          }
+          locale={{ emptyText: "暂无 API 客户端" }}
+        />
       </Card>
 
       <Modal
@@ -210,8 +419,19 @@ export function ApiClients() {
           <Form.Item name="secret" label="密钥" rules={[{ required: true, min: 8 }]}>
             <Input.Password placeholder="至少 8 位" />
           </Form.Item>
-          <Form.Item name="scope_domain" label="作用域（业务域，留空为全部）">
-            <Input placeholder="如 finance" />
+          <Form.Item
+            name="scope_domain"
+            label="作用域（业务域，留空为全部）"
+            extra="从主题域选择，避免手填错值导致查询 403「指标不在授权域内」"
+          >
+            <Select
+              allowClear
+              showSearch
+              placeholder="选择业务域（留空为全部）"
+              options={domainOptions}
+              optionFilterProp="label"
+              notFoundContent={domainOptions.length ? undefined : "主题域加载中或为空"}
+            />
           </Form.Item>
           <Form.Item name="metric_whitelist" label="指标白名单（逗号分隔，留空为全部）">
             <Input placeholder="finance_revenue_sum_d, finance_cost_sum_d" />
@@ -283,6 +503,43 @@ curl -X POST http://<host>:8180/api/v1/consume/query \\
   -H "Authorization: Bearer <令牌>" \\
   -d '{"metric_code":"outp_doctor_active_cnt_month","date_range":"2026-08-01,2026-08-31"}'`}</pre>
       </Card>
+
+      <Modal
+        title={`编辑 API 客户端：${editingClient?.client_id ?? ""}`}
+        open={editOpen}
+        onCancel={() => setEditOpen(false)}
+        onOk={handleEditSave}
+        confirmLoading={savingEdit}
+        okText="保存"
+      >
+        <Form form={editForm} layout="vertical" style={{ marginTop: 8 }}>
+          <Form.Item
+            name="scope_domain"
+            label="作用域（业务域，留空为全部）"
+            extra="修改后按新授权域生效；密钥不可修改（如需换密钥请删除重建）"
+          >
+            <Select
+              allowClear
+              showSearch
+              placeholder="选择业务域（留空为全部）"
+              options={domainOptions}
+              optionFilterProp="label"
+              notFoundContent={domainOptions.length ? undefined : "主题域加载中或为空"}
+            />
+          </Form.Item>
+          <Form.Item name="metric_whitelist" label="指标白名单（逗号分隔，留空为全部）">
+            <Input placeholder="finance_revenue_sum_d, finance_cost_sum_d" />
+          </Form.Item>
+          <Space size={16}>
+            <Form.Item name="qps" label="QPS">
+              <InputNumber min={1} max={1000} style={{ width: 120 }} />
+            </Form.Item>
+            <Form.Item name="daily_quota" label="日配额">
+              <InputNumber min={1} style={{ width: 160 }} />
+            </Form.Item>
+          </Space>
+        </Form>
+      </Modal>
 
       <Modal
         title={`签发消费令牌：${mintClient?.client_id ?? ""}`}

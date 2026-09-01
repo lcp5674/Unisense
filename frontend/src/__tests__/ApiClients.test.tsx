@@ -28,6 +28,11 @@ vi.mock("../api", () => {
     listMetrics: vi.fn(),
     setConsumeToken: vi.fn(),
     getConsumeToken: vi.fn(() => null),
+    updateApiClient: vi.fn(),
+    updateApiClientStatus: vi.fn(),
+    deleteApiClient: vi.fn(),
+    batchApiClientAction: vi.fn(),
+    listDomainTree: vi.fn(() => Promise.resolve([{ code: "outp", name: "门诊", children: [] }])),
   };
 });
 
@@ -41,12 +46,20 @@ import {
   consumeDryRun,
   listMetrics,
   getConsumeToken,
+  updateApiClient,
+  updateApiClientStatus,
+  deleteApiClient,
+  batchApiClientAction,
 } from "../api";
 const mockedListApiClients = vi.mocked(listApiClients);
 const mockedMintClientToken = vi.mocked(mintClientToken);
 const mockedConsumeDryRun = vi.mocked(consumeDryRun);
 const mockedListMetrics = vi.mocked(listMetrics);
 const mockedGetConsumeToken = vi.mocked(getConsumeToken);
+const mockedUpdateApiClient = vi.mocked(updateApiClient);
+const mockedUpdateApiClientStatus = vi.mocked(updateApiClientStatus);
+const mockedDeleteApiClient = vi.mocked(deleteApiClient);
+const mockedBatchApiClientAction = vi.mocked(batchApiClientAction);
 
 const ACTIVE_CLIENT = {
   client_id: "app_abcd1234",
@@ -121,5 +134,77 @@ describe("ApiClients", () => {
       expect(mockedMintClientToken).toHaveBeenCalledWith("app_abcd1234", 60);
     });
     expect(await screen.findByText(/连通正常：指标 outp_feeamount_day dry-run 通过/)).toBeInTheDocument();
+  });
+
+  it("编辑客户端：预填表单 → 修改授权域 → 保存透传 PUT", async () => {
+    const user = userEvent.setup();
+    mockedUpdateApiClient.mockResolvedValue({ ...ACTIVE_CLIENT, scope_domain: "outp" });
+    render(<ApiClients />);
+    await screen.findByText("app_abcd1234");
+
+    await user.click(screen.getByText("编辑"));
+    expect(await screen.findByText(/编辑 API 客户端/)).toBeInTheDocument();
+
+    // 修改授权域（Modal 渲染在 body，用 combobox 打开下拉，再选主题域）
+    await user.click(screen.getByRole("combobox"));
+    await user.click(await screen.findByTitle("门诊 (outp)"));
+    await user.click(await screen.findByText(/保\s*存/));
+
+    await waitFor(() => {
+      expect(mockedUpdateApiClient).toHaveBeenCalledWith(
+        "app_abcd1234",
+        expect.objectContaining({ scope_domain: "outp", qps: 20, daily_quota: 100000 }),
+      );
+    });
+  });
+
+  it("停用客户端：Popconfirm 确认后透传 PATCH status", async () => {
+    const user = userEvent.setup();
+    mockedUpdateApiClientStatus.mockResolvedValue({ ...ACTIVE_CLIENT, status: "REVOKED" });
+    render(<ApiClients />);
+    await screen.findByText("app_abcd1234");
+
+    await user.click(screen.getByText(/停\s*用/));
+    await user.click(await screen.findByRole("button", { name: /确\s*认/ }));
+
+    await waitFor(() => {
+      expect(mockedUpdateApiClientStatus).toHaveBeenCalledWith("app_abcd1234", "REVOKED");
+    });
+  });
+
+  it("删除客户端：Popconfirm 确认后透传 DELETE", async () => {
+    const user = userEvent.setup();
+    mockedDeleteApiClient.mockResolvedValue({ deleted: true });
+    render(<ApiClients />);
+    await screen.findByText("app_abcd1234");
+
+    await user.click(screen.getByText("删除"));
+    await user.click(await screen.findByRole("button", { name: /确\s*认/ }));
+
+    await waitFor(() => {
+      expect(mockedDeleteApiClient).toHaveBeenCalledWith("app_abcd1234");
+    });
+  });
+
+  it("批量操作：勾选 → 批量停用 → 透传 batch 端点", async () => {
+    const user = userEvent.setup();
+    mockedBatchApiClientAction.mockResolvedValue({ action: "disable", ok_count: 1, fail_count: 0, results: [{ client_id: "app_abcd1234", ok: true, status: "REVOKED" }] });
+    render(<ApiClients />);
+    await screen.findByText("app_abcd1234");
+
+    // 勾选首行
+    const checkboxes = screen.getAllByRole("checkbox");
+    await user.click(checkboxes[0]);
+
+    // 打开批量操作菜单
+    await user.click(screen.getByText(/批量操作/));
+    await user.click(await screen.findByText("批量停用"));
+
+    await waitFor(() => {
+      expect(mockedBatchApiClientAction).toHaveBeenCalledWith({ action: "disable", client_ids: ["app_abcd1234"] });
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/批量停用成功：1 个客户端/)).toBeInTheDocument();
+    });
   });
 });

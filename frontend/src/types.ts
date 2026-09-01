@@ -996,6 +996,18 @@ export interface ClientResponse {
   status: string;
 }
 
+export interface ClientUpdateRequest {
+  scope_domain?: string | null;
+  metric_whitelist?: string[] | null;
+  qps?: number;
+  daily_quota?: number;
+}
+
+export interface ClientBatchRequest {
+  action: "enable" | "disable" | "delete";
+  client_ids: string[];
+}
+
 export interface SnapshotResponse {
   id: number;
   metric_code: string;

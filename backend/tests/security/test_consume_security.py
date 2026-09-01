@@ -278,3 +278,139 @@ async def test_issue_token_expire_minutes_parameterized(monkeypatch) -> None:
             assert r.status_code == 422
     finally:
         app.dependency_overrides.clear()
+
+
+def _fake_admin_db():
+    """管理端点测试用假 DB session（含 flush/commit）。"""
+
+    async def fake_db():
+        session = MagicMock()
+        session.flush = AsyncMock()
+        session.commit = AsyncMock()
+        yield session
+
+    return fake_db
+
+
+def _admin_user() -> MagicMock:
+    return MagicMock(id=1, role="platform_admin", domain=None, roles_all=lambda: ["platform_admin"])
+
+
+async def test_update_api_client_ok(monkeypatch) -> None:
+    """编辑接入方：PUT 更新授权域/配额透传，审计落库。"""
+    client = _api_client(scope_domain="sales")
+    app.dependency_overrides[deps.get_db_session] = _fake_admin_db()
+    app.dependency_overrides[deps.get_current_user] = _admin_user
+    monkeypatch.setattr("app.api.consume.write_audit", AsyncMock())
+    monkeypatch.setattr(
+        "app.api.consume.ApiClientRepo.get_by_client_id", AsyncMock(return_value=client)
+    )
+    try:
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.put(
+                "/api/v1/consume/api-clients/acme",
+                json={"scope_domain": "finance", "qps": 50, "daily_quota": 200000},
+                headers={"Authorization": "Bearer t"},
+            )
+        assert r.status_code == 200
+        assert r.json()["data"]["scope_domain"] == "finance"
+        # 行对象已被就地更新（mock 引用同一对象）
+        assert client.scope_domain == "finance"
+        assert client.qps == 50
+        assert client.daily_quota == 200000
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def test_api_client_status_toggle(monkeypatch) -> None:
+    """停用/启用接入方：PATCH status 透传并落审计。"""
+    client = _api_client()
+    app.dependency_overrides[deps.get_db_session] = _fake_admin_db()
+    app.dependency_overrides[deps.get_current_user] = _admin_user
+    monkeypatch.setattr("app.api.consume.write_audit", AsyncMock())
+    monkeypatch.setattr(
+        "app.api.consume.ApiClientRepo.get_by_client_id", AsyncMock(return_value=client)
+    )
+    try:
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.patch(
+                "/api/v1/consume/api-clients/acme/status",
+                json={"status": "REVOKED"},
+                headers={"Authorization": "Bearer t"},
+            )
+        assert r.status_code == 200
+        assert client.status == ApiClientStatus.REVOKED
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def test_api_client_delete_soft(monkeypatch) -> None:
+    """删除接入方：软删（deleted_at 置位 + REVOKED），返回 deleted=true。"""
+    client = _api_client()
+    app.dependency_overrides[deps.get_db_session] = _fake_admin_db()
+    app.dependency_overrides[deps.get_current_user] = _admin_user
+    monkeypatch.setattr("app.api.consume.write_audit", AsyncMock())
+    monkeypatch.setattr(
+        "app.api.consume.ApiClientRepo.get_by_client_id", AsyncMock(return_value=client)
+    )
+    try:
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.delete(
+                "/api/v1/consume/api-clients/acme", headers={"Authorization": "Bearer t"}
+            )
+        assert r.status_code == 200
+        assert r.json()["data"] == {"deleted": True}
+        assert client.status == ApiClientStatus.REVOKED
+        assert client.deleted_at is not None
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def test_api_client_batch_mixed(monkeypatch) -> None:
+    """批量操作：存在与不存在混合，逐条容错返回 ok/fail 计数。"""
+    existing = _api_client()
+    app.dependency_overrides[deps.get_db_session] = _fake_admin_db()
+    app.dependency_overrides[deps.get_current_user] = _admin_user
+    monkeypatch.setattr("app.api.consume.write_audit", AsyncMock())
+    monkeypatch.setattr(
+        "app.api.consume.ApiClientRepo.get_many",
+        AsyncMock(return_value=[existing]),
+    )
+    try:
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post(
+                "/api/v1/consume/api-clients/batch",
+                json={"action": "disable", "client_ids": ["acme", "ghost"]},
+                headers={"Authorization": "Bearer t"},
+            )
+        body = r.json()
+        assert r.status_code == 200
+        assert body["data"]["ok_count"] == 1
+        assert body["data"]["fail_count"] == 1
+        assert existing.status == ApiClientStatus.REVOKED
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def test_api_client_manage_forbidden_for_non_admin(monkeypatch) -> None:
+    """非平台/域管理员调管理端点 → 403（RBAC 写闸门）。"""
+    app.dependency_overrides[deps.get_db_session] = _fake_admin_db()
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=2, role="metric_owner", domain="sales", roles_all=lambda: ["metric_owner"]
+    )
+    try:
+        transport = ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.put(
+                "/api/v1/consume/api-clients/acme",
+                json={"scope_domain": "finance"},
+                headers={"Authorization": "Bearer t"},
+            )
+        assert r.status_code == 403
+        assert r.json()["code"] == "FORBIDDEN"
+    finally:
+        app.dependency_overrides.clear()

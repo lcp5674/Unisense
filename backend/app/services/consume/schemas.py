@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import enum
 from datetime import datetime
 from typing import Any
 
@@ -115,6 +116,47 @@ class TokenIssueRequest(BaseModel):
     expire_minutes: int = Field(
         60, ge=5, le=1440, description="令牌有效期（分钟，5~1440，默认 60）"
     )
+
+
+class ClientUpdateRequest(BaseModel):
+    """编辑接入方（PUT /consume/api-clients/{client_id}）。
+
+    secret 不可编辑（密钥只创建时展示一次，如泄露须重建客户端）；
+    仅更新授权配置与配额。None 字段表示不修改（部分更新语义）。
+    """
+
+    scope_domain: str | None = Field(
+        None, max_length=64, description="授权域（NULL=不限域）；传空串表示清空为不限域"
+    )
+    metric_whitelist: list[str] | None = Field(
+        None, description="指标白名单（NULL=不修改）；传空数组表示清空为域内全量"
+    )
+    qps: int | None = Field(None, ge=1, le=1000, description="单接入方 QPS 配额")
+    daily_quota: int | None = Field(None, ge=1, description="单接入方日查询配额")
+
+
+class ClientStatusRequest(BaseModel):
+    """停用/启用接入方（PATCH /consume/api-clients/{client_id}/status）。"""
+
+    status: ApiClientStatus = Field(..., description="目标状态：ACTIVE 启用 / REVOKED 停用")
+
+
+class ClientBatchAction(enum.StrEnum):
+    """批量操作动作（POST /consume/api-clients/batch）。"""
+
+    ENABLE = "enable"
+    DISABLE = "disable"
+    DELETE = "delete"
+
+
+class ClientBatchRequest(BaseModel):
+    """批量操作接入方（POST /consume/api-clients/batch）。
+
+    action + client_ids；逐条容错返回（batch_common 语义）。
+    """
+
+    action: ClientBatchAction = Field(..., description="批量动作：enable/disable/delete")
+    client_ids: list[str] = Field(..., min_length=1, max_length=100, description="接入方 ID 列表")
 
 
 class SnapshotResponse(BaseModel):

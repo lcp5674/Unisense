@@ -9,7 +9,7 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.consume import ApiClient, Favorite, MetricValueSnapshot
+from app.models.consume import ApiClient, ApiClientStatus, Favorite, MetricValueSnapshot
 
 
 class ApiClientRepo:
@@ -41,6 +41,32 @@ class ApiClientRepo:
         if domain:
             stmt = stmt.where(ApiClient.scope_domain == domain)
         return int((await self._db.execute(stmt)).scalar_one() or 0)
+
+    async def get_many(self, client_ids: list[str]) -> list[ApiClient]:
+        """批量按 client_id 取未删接入方（顺序无关，供批量操作用）。"""
+        stmt = select(ApiClient).where(
+            ApiClient.client_id.in_(client_ids), ApiClient.deleted_at.is_(None)
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
+
+    async def update_status(self, client_id: str, status: ApiClientStatus) -> ApiClient | None:
+        """停用/启用接入方（仅未删记录可操作）。"""
+        row = await self.get_by_client_id(client_id)
+        if row is None:
+            return None
+        row.status = status
+        await self._db.flush()
+        return row
+
+    async def soft_delete(self, client_id: str) -> ApiClient | None:
+        """软删接入方：置 deleted_at + REVOKED（保留审计追溯，已签短效令牌随状态失效）。"""
+        row = await self.get_by_client_id(client_id)
+        if row is None:
+            return None
+        row.deleted_at = func.now()
+        row.status = ApiClientStatus.REVOKED
+        await self._db.flush()
+        return row
 
 
 class SnapshotRepo:
