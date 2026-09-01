@@ -3395,3 +3395,19 @@ export interface MetricLedgerStats {
   zombies: MetricLedgerZombieItem[];
   duplicates: MetricLedgerDuplicateItem[];
 }
+
+/** 口径一致率统计（对齐后端 ConflictRepository.consistency_stats 返回）。 */
+export interface MetricConsistencyStats {
+  /** 参与统计的指标总数（未删除） */
+  total_definitions: number;
+  /** 冲突记录总数 */
+  total_conflicts: number;
+  /** 卷入冲突的指标数（去重 candidate+existing） */
+  conflicted_metrics: number;
+  /** 口径一致率百分比（未卷入冲突指标数 ÷ 指标总数 × 100） */
+  consistency_rate_pct: number;
+  /** 部门间（业务域不同）冲突数 */
+  cross_department_conflicts: number;
+  /** 已解决冲突的平均解决时长（小时） */
+  avg_resolve_hours: number;
+}

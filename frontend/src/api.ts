@@ -109,6 +109,7 @@ import {
   MetricListResponse,
   MetricReuseStats,
   MetricLedgerStats,
+  MetricConsistencyStats,
   MetricDimension,
   DimensionMetricBinding,
   MetricCompareResult,
@@ -751,8 +752,8 @@ export async function fetchMetricLedger(): Promise<MetricLedgerStats> {
   return request<MetricLedgerStats>(`${API_BASE}/metric-definitions/stats/ledger`);
 }
 
-export async function fetchConsistencyStats(): Promise<Record<string, unknown>> {
-  return request<Record<string, unknown>>(`${API_BASE}/metric-definitions/consistency/stats`);
+export async function fetchConsistencyStats(): Promise<MetricConsistencyStats> {
+  return request<MetricConsistencyStats>(`${API_BASE}/metric-definitions/consistency/stats`);
 }
 
 export async function getMetric(code: string): Promise<MetricResponse> {
