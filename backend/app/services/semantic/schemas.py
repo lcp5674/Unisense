@@ -1140,6 +1140,11 @@ class MetricListParams(BaseModel):
     batch_id: str | None = Field(
         None, max_length=64, description="批量注册批次 ID 精确过滤（可空）"
     )
+    # 健康度档位过滤（仪表盘/可观测中心健康度分布下钻）：按 metric_health_score.level
+    # 精确匹配。注意"无健康评分"的指标不命中任何档位（与目录页健康列空值语义一致）。
+    health_level: Literal["EXCELLENT", "GOOD", "WARNING", "CRITICAL"] | None = Field(
+        None, description="健康度档位过滤（EXCELLENT/GOOD/WARNING/CRITICAL，可空）"
+    )
     # 生命周期快筛（TD §13）：按创建/更新时间区间过滤（ISO 日期或 datetime）
     created_after: datetime | None = Field(None, description="创建时间 ≥ 该值（生命周期快筛）")
     created_before: datetime | None = Field(None, description="创建时间 ≤ 该值")

@@ -1256,6 +1256,7 @@ class MetricService(BaseService):
             updated_before=params.updated_before,
             batch_id=params.batch_id,
             has_downstream=params.has_downstream,
+            health_level=params.health_level,
             sort_by=params.sort_by,
             sort_order=params.sort_order,
             offset=offset,

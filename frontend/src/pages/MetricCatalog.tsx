@@ -103,6 +103,11 @@ const HEALTH_COLOR: Record<string, string> = {
   WARNING: "orange",
   CRITICAL: "red",
 };
+// 健康度档位筛选选项（仪表盘/可观测中心分布下钻 ?health= 同源）
+const HEALTH_OPTIONS = (Object.keys(HEALTH_LABEL) as Array<keyof typeof HEALTH_LABEL>).map((k) => ({
+  value: k,
+  label: HEALTH_LABEL[k],
+}));
 
 const TIER_OPTIONS = ["T1", "T2", "T3"].map((v) => ({ value: v, label: METRIC_TIER_LABEL[v] ?? v }));
 const SORT_OPTIONS = [
@@ -398,6 +403,11 @@ export function MetricCatalog() {
   const urlDomain = searchParams.get("domain") ?? "";
   const urlTier = searchParams.get("tier") ?? "";
   const urlLifecycle = searchParams.get("lifecycle") ?? "";
+  // 健康度档位下钻（仪表盘/可观测中心健康度分布 → /catalog?health=WARNING）：
+  // 服务端按 metric_health_score.level 精确过滤（后端 MetricListParams.health_level）。
+  // 仅接受合法档位值，手输非法值（如 ?health=foo）忽略，避免触发后端 422。
+  const rawHealth = searchParams.get("health") ?? "";
+  const urlHealth = HEALTH_OPTIONS.some((o) => o.value === rawHealth) ? rawHealth : "";
   // P2-6（第六轮）：批次筛选——SQL/宽表批量创建的指标带 batch_id，列表页此前只有
   // 展示 Tag 无法按批次收敛（审核页已支持，列表页漏）；进 URL 可分享/刷新保持
   const urlBatchId = searchParams.get("batch_id") ?? "";
@@ -419,6 +429,7 @@ export function MetricCatalog() {
     searchParams.get("sort_order") === "asc" ? "asc" : "desc",
   );
   const [batchIdFilter, setBatchIdFilter] = useState(urlBatchId);
+  const [healthFilter, setHealthFilter] = useState(urlHealth);
   const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
   // 主题域 code → status（active/inactive），供域下拉标识停用域
   const [domainStatusMap, setDomainStatusMap] = useState<Map<string, string>>(new Map());
@@ -477,6 +488,7 @@ export function MetricCatalog() {
         if (tier) next.set("tier", tier); else next.delete("tier");
         if (lifecycleFilter) next.set("lifecycle", lifecycleFilter); else next.delete("lifecycle");
         if (batchIdFilter) next.set("batch_id", batchIdFilter); else next.delete("batch_id");
+        if (healthFilter) next.set("health", healthFilter); else next.delete("health");
         if (sortBy !== "updated_at") next.set("sort_by", sortBy); else next.delete("sort_by");
         if (sortOrder !== "desc") next.set("sort_order", sortOrder); else next.delete("sort_order");
         return next;
@@ -484,7 +496,7 @@ export function MetricCatalog() {
       { replace: true },
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyword, status, domain, tier, lifecycleFilter, batchIdFilter, sortBy, sortOrder]);
+  }, [keyword, status, domain, tier, lifecycleFilter, batchIdFilter, healthFilter, sortBy, sortOrder]);
 
   // URL 直达 ?lifecycle= 时（分享/刷新），按快筛 key 计算真实日期区间；
   // 与 handleLifecycle 交互共用同一日期口径（created_7d=7天前起 / stale_30d=30天前止）
@@ -697,6 +709,7 @@ export function MetricCatalog() {
     setTier("");
     setOwnerFilter("");
     setBatchIdFilter("");
+    setHealthFilter("");
     setLifecycleFilter(null);
     setLifecycleDate({});
     setMyMetricsOnly(false);
@@ -744,8 +757,9 @@ export function MetricCatalog() {
     if (urlTier && urlTier !== tier) setTier(urlTier);
     if (urlLifecycle && urlLifecycle !== lifecycleFilter) setLifecycleFilter(urlLifecycle);
     if (urlBatchId && urlBatchId !== batchIdFilter) setBatchIdFilter(urlBatchId);
-    if (urlKw || urlStatus || urlOwnerId || urlDomain || urlTier || urlLifecycle || urlBatchId) setPage(1);
-  }, [urlKw, urlStatus, urlOwnerId, urlDomain, urlTier, urlLifecycle, urlBatchId]);
+    if (urlHealth && urlHealth !== healthFilter) setHealthFilter(urlHealth);
+    if (urlKw || urlStatus || urlOwnerId || urlDomain || urlTier || urlLifecycle || urlBatchId || urlHealth) setPage(1);
+  }, [urlKw, urlStatus, urlOwnerId, urlDomain, urlTier, urlLifecycle, urlBatchId, urlHealth]);
 
   async function load(overrideKeyword?: string) {
     const seq = ++loadSeq.current;
@@ -762,6 +776,7 @@ export function MetricCatalog() {
         updated_before: lifecycleDate.updated_before,
         batch_id: batchIdFilter || undefined,
         has_downstream: downstreamFilter === "all" ? undefined : downstreamFilter === "with",
+        health_level: (healthFilter || undefined) as "EXCELLENT" | "GOOD" | "WARNING" | "CRITICAL" | undefined,
         deleted: deletedView,
         sort_by: sortBy,
         sort_order: sortOrder,
@@ -857,7 +872,7 @@ export function MetricCatalog() {
 
   useEffect(() => {
     load();
-  }, [page, pageSize, status, domain, tier, sortBy, sortOrder, myMetricsOnly, piiOnly, currentUserId, ownerFilter, lifecycleDate, deletedView, batchIdFilter, downstreamFilter]);
+  }, [page, pageSize, status, domain, tier, sortBy, sortOrder, myMetricsOnly, piiOnly, currentUserId, ownerFilter, lifecycleDate, deletedView, batchIdFilter, downstreamFilter, healthFilter]);
 
   function handleSearch() {
     const kw = inputValue;
@@ -1694,7 +1709,7 @@ export function MetricCatalog() {
   );
 
   const hasFilter = Boolean(
-    keyword || status || domain || tier || ownerFilter || myMetricsOnly || piiOnly || lifecycleFilter || favoritesOnly || downstreamFilter !== "all",
+    keyword || status || domain || tier || ownerFilter || myMetricsOnly || piiOnly || lifecycleFilter || favoritesOnly || downstreamFilter !== "all" || healthFilter,
   );
   const emptyGuide = useMemo(
     () => (
@@ -2167,6 +2182,17 @@ export function MetricCatalog() {
               { value: "without", label: "无下游" },
             ]}
           />
+          {/* 健康度档位筛选（仪表盘/可观测中心健康度分布下钻 ?health= 同源）：
+              按 metric_health_score.level 服务端精确过滤，未评分指标不命中任何档位 */}
+          <span className="muted" style={{ fontSize: 12, flex: "none" }}>健康度</span>
+          <Select
+            value={healthFilter || undefined}
+            onChange={(v) => { setHealthFilter(v || ""); setPage(1); }}
+            style={{ width: 130 }}
+            allowClear
+            placeholder="全部健康度"
+            options={HEALTH_OPTIONS}
+          />
           <span style={{ flex: 1 }} />
           <span className="muted" style={{ fontSize: 12, flex: "none" }}>排序</span>
           <Select
@@ -2282,6 +2308,11 @@ export function MetricCatalog() {
             )}
             {ownerFilter && <Tag closable onClose={() => { setOwnerFilter(""); setPage(1); }}>责任人下钻</Tag>}
             {batchIdFilter && <Tag closable onClose={() => { setBatchIdFilter(""); setPage(1); }}>批次：{batchIdFilter}</Tag>}
+            {healthFilter && (
+              <Tag closable onClose={() => { setHealthFilter(""); setPage(1); }}>
+                健康度：{HEALTH_LABEL[healthFilter] ?? healthFilter}
+              </Tag>
+            )}
             {myMetricsOnly && <Tag closable onClose={() => { setMyMetricsOnly(false); setPage(1); }}>我的指标</Tag>}
             {piiOnly && <Tag closable onClose={() => { setPiiOnly(false); setPage(1); }}>只看 PII</Tag>}
             {downstreamFilter !== "all" && (

@@ -1132,6 +1132,39 @@ body {
   color: var(--danger);
 }
 
+/* ---- 指标可信度卡下钻交互（方案 A 闭环）----
+   档位 pill / 低健康项改为可点击 button：hover 提亮提示可下钻，
+   低健康项无 metric_code 时禁用（无法直达详情） */
+.gov-card .gov-sev-link {
+  cursor: pointer;
+  font-family: inherit;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, filter 0.12s ease;
+}
+.gov-card .gov-sev-link:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  filter: brightness(1.06);
+}
+.gov-card .gov-risk-link {
+  width: 100%;
+  cursor: pointer;
+  background: none;
+  border: none;
+  text-align: left;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  transition: background 0.15s ease;
+}
+.gov-card .gov-risk-link:hover {
+  background: var(--line-soft);
+}
+.gov-card .gov-risk-link:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 /* Owner 责任分布：责任人卡片网格——头像 + 资产构成条 + 生命周期色点 */
 .owner-grid {
   display: grid;

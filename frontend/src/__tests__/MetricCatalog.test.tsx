@@ -446,6 +446,45 @@ describe("MetricCatalog", () => {
     }
   });
 
+  it("从仪表盘/可观测中心 ?health=xx 直达：查询携带健康度档位过滤", async () => {
+    mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
+    render(
+      <MemoryRouter initialEntries={["/catalog?health=WARNING"]}>
+        <Routes>
+          <Route path="/catalog" element={<MetricCatalog />} />
+          <Route path="/detail/:code" element={<div>detail</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findAllByText("共 1 条");
+    const calls = mockedList.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) {
+      const p = c[0] ?? {};
+      // 兜底全量查询（批量废弃替代指标选项）不携带 health 过滤，跳过
+      if (p.page_size === 100 && p.status === "PUBLISHED") continue;
+      expect(c[0]).toMatchObject({ health_level: "WARNING" });
+    }
+  });
+
+  it("筛选面板提供健康度档位筛选：选择后查询携带 health_level 且 URL 回显", async () => {
+    mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
+    renderCatalog();
+    await screen.findAllByText("共 1 条");
+
+    fireEvent.mouseDown(screen.getByText("全部健康度"));
+    const warningOption = await screen.findByText("警告");
+    fireEvent.click(warningOption);
+
+    await waitFor(() => {
+      expect(mockedList).toHaveBeenCalledWith(
+        expect.objectContaining({ health_level: "WARNING" }),
+      );
+    });
+    // 已应用筛选 Tag 回显
+    expect(screen.getByText(/健康度：警告/)).toBeInTheDocument();
+  });
+
   it("防竞态：迟到的全量响应不覆盖已筛选结果", async () => {
     let resolveFull!: (v: MetricListResponse) => void;
     const fullPromise = new Promise<MetricListResponse>((r) => {

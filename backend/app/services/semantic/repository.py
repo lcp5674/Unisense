@@ -162,6 +162,7 @@ class MetricRepository:
         updated_before: datetime | None = None,
         batch_id: str | None = None,
         has_downstream: bool | None = None,
+        health_level: str | None = None,
         sort_by: str = "updated_at",
         sort_order: str = "desc",
         offset: int = 0,
@@ -181,6 +182,8 @@ class MetricRepository:
             pii_flag: PII 过滤（True 仅 PII，False 仅非 PII，None 不过滤）。
             created_after/created_before: 创建时间区间过滤（生命周期快筛）。
             updated_after/updated_before: 更新时间区间过滤（生命周期快筛）。
+            health_level: 健康度档位过滤（EXCELLENT/GOOD/WARNING/CRITICAL）；无健康评分
+                的指标不命中任何档位（与目录页健康列空值语义一致）。
             sort_by: 排序字段（白名单映射，防注入）。
             sort_order: 排序方向（asc/desc）。
             offset: 偏移量。
@@ -263,6 +266,17 @@ class MetricRepository:
             conditions.append(Metric.updated_at >= updated_after)
         if updated_before is not None:
             conditions.append(Metric.updated_at <= updated_before)
+        # 健康度档位过滤（仪表盘/可观测中心分布下钻）：命中 metric_health_score.level 的
+        # 指标。用 IN 子查询而非 JOIN，避免影响主查询基数（count/list 语义一致）；
+        # 无健康评分记录（未评分/评分任务未跑）的指标不命中任何档位。
+        if health_level:
+            conditions.append(
+                Metric.id.in_(
+                    select(MetricHealthScore.metric_id).where(
+                        MetricHealthScore.level == health_level
+                    )
+                )
+            )
         if keyword:
             # LIKE 通配符转义（对齐 FR-035：% 和 _ 须转义）。
             # 修复前：手动 replace 成 \%/\_ 但 contains() 不生成 ESCAPE 子句，

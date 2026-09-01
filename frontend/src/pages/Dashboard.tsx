@@ -455,9 +455,11 @@ function MetricCredibilityCard({ h, navigate }: { h: MetricHealth; navigate: (to
   const totalScored = h.total_scored ?? 0;
   const coverage = h.coverage_pct ?? 0;
   const risks = h.top_risk ?? [];
-  // 绿档可信率：EXCELLENT+GOOD 占已评分指标的比例，作为「业务可信度」的直观读数
+  // 绿档可信率：EXCELLENT+GOOD 占已评分指标的比例，作为「业务可信度」的主读数
+  // （覆盖率在"每日强制全量评分"机制下恒为 100%，无区分度，只作次要信息）
   const totalHealth = METRIC_HEALTH_ORDER.reduce((sum, l) => sum + (byLevel[l] ?? 0), 0);
   const credibleRate = totalHealth > 0 ? Math.round(((byLevel.EXCELLENT ?? 0) + (byLevel.GOOD ?? 0)) / totalHealth * 100) : 0;
+  const credibleCount = (byLevel.EXCELLENT ?? 0) + (byLevel.GOOD ?? 0);
 
   return (
     <Card
@@ -467,33 +469,52 @@ function MetricCredibilityCard({ h, navigate }: { h: MetricHealth; navigate: (to
         <span style={{ fontSize: 15, fontWeight: 600 }}>
           指标可信度
           <span className="muted" style={{ fontWeight: 400, fontSize: 12, marginLeft: 8 }}>
-            基于健康度五维评分（口径完整度 / 活跃度 / 质量 / Owner 响应 / 血缘覆盖）—— 点击进入可观测中心
+            基于健康度五维评分（口径完整度 / 活跃度 / 质量 / Owner 响应 / 血缘覆盖）—— 点击档位下钻指标目录，点击低健康指标直达详情
           </span>
         </span>
       }
     >
-      <button
+      {/* 外层用 div（role=button）承载"进入可观测中心"，内部档位/低健康项用真实
+          button 独立下钻——避免 button 嵌套 button 的非法 HTML 与冒泡冲突 */}
+      <div
         className="gov-card gov-card-wide"
         data-tone="health"
-        type="button"
+        role="button"
+        tabIndex={0}
         onClick={() => navigate("/observability")}
+        onKeyDown={(e) => {
+          if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+            e.preventDefault();
+            navigate("/observability");
+          }
+        }}
         title="进入可观测中心查看完整健康明细"
       >
         <div className="gov-head">
           <span className="gov-label">
-            <SafetyCertificateOutlined /> 健康度分布
+            <SafetyCertificateOutlined /> 绿档可信率
           </span>
-          <span className="gov-total">{coverage}%</span>
+          <span className="gov-total">{credibleRate}%</span>
         </div>
         <div className="gov-sevs">
           {METRIC_HEALTH_ORDER.map((l) => (
-            <span key={l} className="gov-sev" data-sev={l}>
+            <button
+              key={l}
+              type="button"
+              className="gov-sev gov-sev-link"
+              data-sev={l}
+              title={`查看${METRIC_HEALTH_LEVEL_LABEL[l] ?? l}健康度的指标`}
+              onClick={(e) => {
+                e.stopPropagation();
+                navigate(`/catalog?health=${l}`);
+              }}
+            >
               {METRIC_HEALTH_LEVEL_LABEL[l] ?? l} <b>{byLevel[l] ?? 0}</b>
-            </span>
+            </button>
           ))}
         </div>
         <div className="gov-sub">
-          健康覆盖率 {coverage}% · 已评分 {totalScored} 项 · 绿档可信 {credibleRate}%
+          健康覆盖率 {coverage}% · 已评分 {totalScored} 项 · 可信档 {credibleCount} 项
         </div>
         {risks.length > 0 && (
           <div className="gov-risks">
@@ -501,16 +522,26 @@ function MetricCredibilityCard({ h, navigate }: { h: MetricHealth; navigate: (to
               <WarningOutlined /> 低健康指标 Top {risks.length}（按评分升序）
             </div>
             {risks.map((r) => (
-              <div key={r.metric_id} className="gov-risk-item">
+              <button
+                key={r.metric_id}
+                type="button"
+                className="gov-risk-item gov-risk-link"
+                disabled={!r.metric_code}
+                title={r.metric_code ? `查看 ${r.metric_name ?? r.metric_code} 详情` : "该指标无编码，无法直达详情"}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (r.metric_code) navigate(`/detail/${r.metric_code}`);
+                }}
+              >
                 <span className="gov-risk-name" title={r.metric_code ?? undefined}>
                   {r.metric_name ?? r.metric_code ?? `指标 #${r.metric_id}`}
                 </span>
                 <span className="gov-risk-score">{r.score} 分</span>
-              </div>
+              </button>
             ))}
           </div>
         )}
-      </button>
+      </div>
     </Card>
   );
 }

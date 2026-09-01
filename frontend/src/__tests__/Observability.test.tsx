@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { Observability } from "../pages/Observability";
 
 // Mock API（可观测端点，含质量事件明细）
@@ -162,7 +163,11 @@ beforeEach(() => {
 
 describe("Observability 可观测中心", () => {
   it("平台概览支持手动刷新与切回 Tab 自动刷新（时效性）", async () => {
-    render(<Observability />);
+    render(
+      <MemoryRouter initialEntries={["/observability"]}>
+        <Observability />
+      </MemoryRouter>,
+    );
     await waitFor(() => expect(screen.getByText("数据源健康")).toBeInTheDocument());
     const callsAfterMount = mockedOverview.mock.calls.length;
     expect(callsAfterMount).toBeGreaterThanOrEqual(1);
@@ -180,7 +185,11 @@ describe("Observability 可观测中心", () => {
   });
 
   it("默认展示平台概览 Tab：系统健康/风险雷达/资产规模，全部业务标签", async () => {
-    render(<Observability />);
+    render(
+      <MemoryRouter initialEntries={["/observability"]}>
+        <Observability />
+      </MemoryRouter>,
+    );
     await waitFor(() => expect(screen.getAllByText("核心依赖健康").length).toBeGreaterThan(0));
 
     // 顶部状态条
@@ -232,7 +241,11 @@ describe("Observability 可观测中心", () => {
   });
 
   it("平台概览企业级：指标健康度/血缘健康/趋势 全业务标签展示", async () => {
-    render(<Observability />);
+    render(
+      <MemoryRouter initialEntries={["/observability"]}>
+        <Observability />
+      </MemoryRouter>,
+    );
     await waitFor(() => expect(screen.getAllByText("核心依赖健康").length).toBeGreaterThan(0));
 
     // 指标健康度卡
@@ -263,7 +276,11 @@ describe("Observability 可观测中心", () => {
   });
 
   it("运行指标 Tab 的 API 动作分布用中文标签而非技术 action", async () => {
-    render(<Observability />);
+    render(
+      <MemoryRouter initialEntries={["/observability"]}>
+        <Observability />
+      </MemoryRouter>,
+    );
     await waitFor(() => expect(screen.getByText("平台概览")).toBeInTheDocument());
     fireEvent.click(screen.getByText("运行指标"));
 
@@ -280,7 +297,11 @@ describe("Observability 可观测中心", () => {
       by_status: { OPEN: 2 },
       total: 6,
     } as never);
-    render(<Observability />);
+    render(
+      <MemoryRouter initialEntries={["/observability"]}>
+        <Observability />
+      </MemoryRouter>,
+    );
     await waitFor(() => expect(screen.getByText("平台概览")).toBeInTheDocument());
     fireEvent.click(screen.getByText("运行指标"));
 
@@ -340,7 +361,11 @@ describe("Observability 可观测中心", () => {
       ],
       total: 2,
     } as never);
-    render(<Observability />);
+    render(
+      <MemoryRouter initialEntries={["/observability"]}>
+        <Observability />
+      </MemoryRouter>,
+    );
     await waitFor(() => expect(screen.getByText("平台概览")).toBeInTheDocument());
     fireEvent.click(screen.getByText("运行指标"));
 
@@ -406,7 +431,11 @@ describe("Observability 可观测中心", () => {
       ],
       total: 1,
     } as never);
-    render(<Observability />);
+    render(
+      <MemoryRouter initialEntries={["/observability"]}>
+        <Observability />
+      </MemoryRouter>,
+    );
     await waitFor(() => expect(screen.getByText("平台概览")).toBeInTheDocument());
     fireEvent.click(screen.getByText("运行指标"));
 
@@ -422,7 +451,11 @@ describe("Observability 可观测中心", () => {
   });
 
   it("平台概览展示数据获取时间（上海时区精确到秒），刷新后时间更新", async () => {
-    render(<Observability />);
+    render(
+      <MemoryRouter initialEntries={["/observability"]}>
+        <Observability />
+      </MemoryRouter>,
+    );
     await waitFor(() => expect(screen.getByText("数据源健康")).toBeInTheDocument());
     // 数据获取时间展示（上海时区 + 精确到秒的完整时间，非 ISO 串）
     expect(screen.getByText(/数据更新于/)).toBeInTheDocument();
@@ -439,7 +472,11 @@ describe("Observability 可观测中心", () => {
   });
 
   it("运行指标 Tab 也提供刷新按钮与数据获取时间（一致的数据时效反馈）", async () => {
-    render(<Observability />);
+    render(
+      <MemoryRouter initialEntries={["/observability"]}>
+        <Observability />
+      </MemoryRouter>,
+    );
     await waitFor(() => expect(screen.getByText("平台概览")).toBeInTheDocument());
     fireEvent.click(screen.getByText("运行指标"));
     await waitFor(() => expect(screen.getByText("API 动作分布")).toBeInTheDocument());
@@ -454,5 +491,47 @@ describe("Observability 可观测中心", () => {
     const before = mockedQualityEvents.mock.calls.length;
     fireEvent.click(refreshButtons[refreshButtons.length - 1]);
     await waitFor(() => expect(mockedQualityEvents.mock.calls.length).toBeGreaterThan(before));
+  });
+
+  it("指标健康度卡：点击档位 Tag 下钻指标目录 ?health=", async () => {
+    let captured: { pathname: string; search: string } | null = null;
+    function Probe() {
+      captured = useLocation();
+      return null;
+    }
+    render(
+      <MemoryRouter initialEntries={["/observability"]}>
+        <Probe />
+        <Observability />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText("指标健康度")).toBeInTheDocument());
+
+    // WARNING 档位 Tag（by_level.WARNING = 8）点击下钻指标目录
+    fireEvent.click(screen.getByText("警告"));
+    await waitFor(() => {
+      expect(captured?.pathname).toBe("/catalog");
+      expect(captured?.search).toContain("health=WARNING");
+    });
+  });
+
+  it("指标健康度卡：点击低健康指标直达详情", async () => {
+    let captured: { pathname: string } | null = null;
+    function Probe() {
+      captured = useLocation();
+      return null;
+    }
+    render(
+      <MemoryRouter initialEntries={["/observability"]}>
+        <Probe />
+        <Observability />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText("低健康GMV日")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("低健康GMV日"));
+    await waitFor(() => {
+      expect(captured?.pathname).toBe("/detail/low_health_gmv_day");
+    });
   });
 });

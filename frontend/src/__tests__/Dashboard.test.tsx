@@ -553,6 +553,35 @@ describe("Dashboard", () => {
     fireEvent.click(screen.getByText("质量健康"));
     expect(probe.location()?.pathname).toBe("/quality");
   });
+
+  it("指标可信度卡：主读数显示绿档可信率而非覆盖率（修复误导）", async () => {
+    renderDashboard();
+    // mockOverview by_level = { EXCELLENT: 40, GOOD: 35, WARNING: 18, CRITICAL: 7 } →
+    // 绿档可信率 = (40+35)/100 = 75%；覆盖率 100% 只作次要信息（每日强制全量评分，无区分度）
+    await waitFor(() => expect(screen.getByText("绿档可信率")).toBeInTheDocument());
+    expect(screen.getByText("75%")).toBeInTheDocument();
+    expect(screen.getByText(/健康覆盖率 100%/)).toBeInTheDocument();
+  });
+
+  it("指标可信度卡：点击健康度档位下钻指标目录 ?health=", async () => {
+    const probe = renderWithLocation();
+    await waitFor(() => expect(screen.getByText("绿档可信率")).toBeInTheDocument());
+
+    // WARNING 档位 pill（文案「警告 18」）可点击下钻，且不冒泡触发外层跳可观测中心
+    fireEvent.click(screen.getByText(/警告/));
+    expect(probe.location()?.pathname).toBe("/catalog");
+    expect(probe.location()?.search).toContain("health=WARNING");
+  });
+
+  it("指标可信度卡：点击低健康指标直达详情", async () => {
+    const probe = renderWithLocation();
+    await waitFor(() =>
+      expect(screen.getByText("低健康指标 Top 2（按评分升序）")).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByText("坏账率"));
+    expect(probe.location()?.pathname).toBe("/detail/bad_debt_rate");
+  });
 });
 
 describe("Dashboard 推荐卡片", () => {

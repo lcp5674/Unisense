@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Alert, Button, Card, Tag, Tabs, Statistic, Row, Col, Space, Tooltip } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import {
@@ -499,15 +500,23 @@ function CollectionCard({ c }: { c: ObsOverview["system"]["collection"] }) {
   );
 }
 
-/** 指标健康度卡：分布 / 覆盖率 / 平均分 + 低健康 Top 指标（治理风险聚焦） */
+/** 指标健康度卡：分布 / 覆盖率 / 平均分 + 低健康 Top 指标（治理风险聚焦）。
+ *  档位 Tag 点击下钻指标目录（/catalog?health=xx），低健康指标点击直达详情。 */
 function MetricHealthCard({ h }: { h: ObsOverview["quality"]["metric_health"] }) {
+  const navigate = useNavigate();
+  const drillByLevel = (level: string) => navigate(`/catalog?health=${level}`);
   return (
     <Card title="指标健康度" size="small">
       <Row gutter={[8, 8]}>
         {Object.entries(h.by_level).map(([k, v]) => (
           <Col span={12} key={k}>
             <div style={rowStyle}>
-              <Tag color={k === "EXCELLENT" ? "green" : k === "GOOD" ? "blue" : k === "WARNING" ? "orange" : "red"}>
+              <Tag
+                color={k === "EXCELLENT" ? "green" : k === "GOOD" ? "blue" : k === "WARNING" ? "orange" : "red"}
+                style={{ cursor: "pointer" }}
+                onClick={() => drillByLevel(k)}
+                title={`查看${METRIC_HEALTH_LEVEL_LABEL[k] ?? k}健康度的指标`}
+              >
                 {METRIC_HEALTH_LEVEL_LABEL[k] ?? k}
               </Tag>
               <span className="mono">{v}</span>
@@ -527,10 +536,22 @@ function MetricHealthCard({ h }: { h: ObsOverview["quality"]["metric_health"] })
       {h.top_risk.length ? (
         <div style={{ marginTop: 8 }}>
           <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4, color: "var(--danger)" }}>
-            低健康指标 Top {h.top_risk.length}（按评分升序）
+            低健康指标 Top {h.top_risk.length}（按评分升序，点击直达详情）
           </div>
           {h.top_risk.map((r) => (
-            <div key={r.metric_id} style={{ ...rowStyle, padding: "4px 0" }}>
+            <div
+              key={r.metric_id}
+              style={{
+                ...rowStyle,
+                padding: "4px 0",
+                cursor: r.metric_code ? "pointer" : "default",
+                borderRadius: 6,
+              }}
+              title={r.metric_code ? `查看 ${r.metric_name ?? r.metric_code} 详情` : "该指标无编码，无法直达详情"}
+              onClick={() => {
+                if (r.metric_code) navigate(`/detail/${r.metric_code}`);
+              }}
+            >
               <span>
                 {r.metric_name ? (
                   <Tooltip title={r.metric_code ?? undefined}>

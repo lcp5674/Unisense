@@ -678,6 +678,8 @@ export async function listMetrics(params: {
   has_downstream?: boolean;
   /** 批次过滤（生产就绪审查 P2）：按批量注册批次 ID 精确匹配（审核/列表按"这一批"收敛） */
   batch_id?: string;
+  /** 健康度档位过滤（仪表盘/可观测中心健康度分布下钻）：EXCELLENT/GOOD/WARNING/CRITICAL */
+  health_level?: "EXCELLENT" | "GOOD" | "WARNING" | "CRITICAL";
   sort_by?: "updated_at" | "created_at" | "version" | "metric_code" | "name";
   sort_order?: "asc" | "desc";
   page?: number;
@@ -698,6 +700,7 @@ export async function listMetrics(params: {
     created_after: params.created_after,
     updated_before: params.updated_before,
     batch_id: params.batch_id,
+    health_level: params.health_level,
     sort_by: params.sort_by,
     sort_order: params.sort_order,
     page: params.page ?? 1,

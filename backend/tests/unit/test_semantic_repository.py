@@ -190,6 +190,44 @@ async def test_list_metrics_has_downstream_filters():
     assert "CONSUMED_BY" in compiled
     assert "deleted_at IS NULL" in compiled
 
+
+async def test_list_metrics_applies_health_level_filter():
+    """健康度档位过滤（仪表盘/可观测中心分布下钻）：health_level 命中
+    metric_health_score.level 的指标（IN 子查询，count/list 语义一致）；
+    不传时不过滤（无该子查询）。"""
+    db = _mock_session()
+    m1 = _metric(metric_code="a")
+    db.execute.side_effect = [
+        _result(scalar=1),
+        _result(all_=[m1]),
+    ]
+    repo = MetricRepository(db)
+
+    items, total = await repo.list_metrics(health_level="WARNING", offset=0, limit=10)
+
+    assert total == 1
+    assert items == [m1]
+    compiled = _compiled_sql(db, 0)
+    assert "metric_health_score" in compiled
+    assert "WARNING" in compiled
+    assert "metric.id IN" in compiled
+
+
+async def test_list_metrics_without_health_level_has_no_health_join():
+    """健康度不过滤时，count 查询不应出现 health 子查询（避免多余开销）。"""
+    db = _mock_session()
+    m1 = _metric(metric_code="a")
+    db.execute.side_effect = [
+        _result(scalar=1),
+        _result(all_=[m1]),
+    ]
+    repo = MetricRepository(db)
+
+    await repo.list_metrics(offset=0, limit=10)
+
+    compiled = _compiled_sql(db, 0)
+    assert "metric_health_score" not in compiled
+
     # 无下游 = IN 子查询取反（NOT IN）
     db2 = _mock_session()
     db2.execute.side_effect = [_result(scalar=1), _result(all_=[m1])]
