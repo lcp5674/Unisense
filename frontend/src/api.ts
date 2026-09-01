@@ -227,14 +227,38 @@ export function clearAuthTokens(): void {
 
 // 消费服务客户端访问令牌（role=consume 的 JWT），由 /consume/api-clients/{id}/token 签发
 const CONSUME_TOKEN_KEY = "unisense_consume_token";
+/** 消费令牌写入/清除事件：request() 在 401 时清除令牌、或令牌被过期自清理时，
+ * 组件（如 QueryWorkspace 的「令牌已就绪」状态）需实时同步，否则 UI 显示假就绪。
+ */
+export const CONSUME_TOKEN_CHANGED_EVENT = "unisense:consume-token-changed";
+function emitConsumeTokenChanged(): void {
+  window.dispatchEvent(new Event(CONSUME_TOKEN_CHANGED_EVENT));
+}
 export function getConsumeToken(): string | null {
   return localStorage.getItem(CONSUME_TOKEN_KEY);
 }
+/** 解析消费 JWT 的 exp（毫秒时间戳）。非 JWT 或 payload 无 exp 返回 null。 */
+export function getConsumeTokenExpiry(): number | null {
+  const raw = getConsumeToken();
+  if (!raw) return null;
+  const parts = raw.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    let b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    const payload = JSON.parse(atob(b64)) as { exp?: unknown };
+    return typeof payload.exp === "number" ? payload.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
 export function setConsumeToken(token: string): void {
   localStorage.setItem(CONSUME_TOKEN_KEY, token);
+  emitConsumeTokenChanged();
 }
 export function clearConsumeToken(): void {
   localStorage.removeItem(CONSUME_TOKEN_KEY);
+  emitConsumeTokenChanged();
 }
 
 // 后端 error_code → 中文可读描述（供全站错误提示展示，避免英文技术码直出给业务用户）
@@ -428,7 +452,14 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
     headers["Content-Type"] = "application/json";
   }
   if (init?.consumeAuth) {
-    const consumeToken = getConsumeToken();
+    // 过期令牌不发出：先自动清除（触发 CONSUME_TOKEN_CHANGED_EVENT 让 UI 同步），
+    // 避免「带过期 Bearer → 401 → 清除 → 组件仍显示已就绪 → 下次请求无 Bearer 报 X-Api-Key 误导」。
+    let consumeToken = getConsumeToken();
+    const consumeExp = getConsumeTokenExpiry();
+    if (consumeToken && consumeExp !== null && consumeExp <= Date.now()) {
+      clearConsumeToken();
+      consumeToken = null;
+    }
     let bearer: string | null = consumeToken;
     if (!bearer && init?.consumeFallbackUser) bearer = getToken();
     if (bearer) headers["Authorization"] = `Bearer ${bearer}`;

@@ -33,8 +33,10 @@ vi.mock("../api", () => {
     listApiClients: vi.fn(),
     mintClientToken: vi.fn(),
     getConsumeToken: vi.fn(() => null),
+    getConsumeTokenExpiry: vi.fn(() => null),
     setConsumeToken: vi.fn(),
     clearConsumeToken: vi.fn(),
+    CONSUME_TOKEN_CHANGED_EVENT: "unisense:consume-token-changed",
   };
 });
 
@@ -50,11 +52,16 @@ import {
   consumeQuery,
   consumeSemantic,
   listMetrics,
+  getConsumeToken,
+  getConsumeTokenExpiry,
+  CONSUME_TOKEN_CHANGED_EVENT,
 } from "../api";
 const mockedConsumeDryRun = vi.mocked(consumeDryRun);
 const mockedConsumeQuery = vi.mocked(consumeQuery);
 const mockedConsumeSemantic = vi.mocked(consumeSemantic);
 const mockedListMetrics = vi.mocked(listMetrics);
+const mockedGetConsumeToken = vi.mocked(getConsumeToken);
+const mockedGetConsumeTokenExpiry = vi.mocked(getConsumeTokenExpiry);
 
 const mockSemanticData = {
   metric_code: "gmv_net",
@@ -88,6 +95,9 @@ function metricSelectInput(): HTMLInputElement {
 describe("QueryWorkspace", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // 令牌 mock 默认「无令牌」；各测试按需覆盖，且不泄漏到后续用例（clearAllMocks 不清 implementation）
+    mockedGetConsumeToken.mockReturnValue(null);
+    mockedGetConsumeTokenExpiry.mockReturnValue(null);
     mockedListMetrics.mockResolvedValue({
       items: [
         {
@@ -227,6 +237,30 @@ describe("QueryWorkspace", () => {
     await waitFor(() => {
       expect(screen.getByText(/需要消费令牌：请点击上方『从客户端签发令牌』后重试/)).toBeInTheDocument();
     });
+  });
+
+  it("有未过期令牌时展示『已就绪』与剩余分钟", async () => {
+    mockedGetConsumeToken.mockReturnValue("fake-consume-jwt");
+    mockedGetConsumeTokenExpiry.mockReturnValue(Date.now() + 3600000);
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByText("消费令牌已就绪（角色 consume）")).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/令牌剩余 60 分钟/)).toBeInTheDocument();
+  });
+
+  it("消费令牌被清除（request 401 触发）后 UI 实时回到『需要消费令牌』", async () => {
+    mockedGetConsumeToken.mockReturnValue("fake-consume-jwt");
+    mockedGetConsumeTokenExpiry.mockReturnValue(Date.now() + 3600000);
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByText("消费令牌已就绪（角色 consume）")).toBeInTheDocument(),
+    );
+    // 模拟 request() 在 401 时 clearConsumeToken：localStorage 空 + 派发变更事件
+    mockedGetConsumeToken.mockReturnValue(null);
+    mockedGetConsumeTokenExpiry.mockReturnValue(null);
+    fireEvent(window, new Event(CONSUME_TOKEN_CHANGED_EVENT));
+    await waitFor(() => expect(screen.getByText("需要消费令牌")).toBeInTheDocument());
   });
 
   it("提供统一的返回按钮（返回上一入口）", async () => {

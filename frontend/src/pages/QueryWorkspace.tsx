@@ -11,8 +11,10 @@ import {
   listApiClients,
   mintClientToken,
   getConsumeToken,
+  getConsumeTokenExpiry,
   setConsumeToken,
   clearConsumeToken,
+  CONSUME_TOKEN_CHANGED_EVENT,
   UnisenseApiError,
 } from "../api";
 import type { DimensionExpr, DryRunResponse, QueryResponse, SnapshotResponse, ClientResponse } from "../types";
@@ -103,6 +105,7 @@ export function QueryWorkspace() {
   const [snapshots, setSnapshots] = useState<SnapshotResponse[]>([]);
   const [busy, setBusy] = useState<"dry" | "query" | "snap" | "semantic" | null>(null);
   const [tokenOk, setTokenOk] = useState(!!getConsumeToken());
+  const [tokenExpiry, setTokenExpiry] = useState<number | null>(getConsumeTokenExpiry());
   const [degraded, setDegraded] = useState(false);
   const [degradedMessage, setDegradedMessage] = useState("");
   // 指标语义（只读拉取 GET /consume/metrics/{code}/semantic）抽屉状态
@@ -172,9 +175,30 @@ export function QueryWorkspace() {
     if (metricSearchTimer.current !== null) window.clearTimeout(metricSearchTimer.current);
     metricSearchTimer.current = window.setTimeout(() => loadMetricOptions(kw.trim()), 300);
   }
+  // 消费令牌状态与 localStorage 强一致：request() 在 401/过期时可能清除令牌，
+  // 组件需实时同步，避免 UI 显示「已就绪」而实际无令牌（后续请求报 X-Api-Key 误导）。
   useEffect(() => {
-    setTokenOk(!!getConsumeToken());
+    const sync = () => {
+      setTokenOk(!!getConsumeToken());
+      setTokenExpiry(getConsumeTokenExpiry());
+    };
+    sync();
+    window.addEventListener(CONSUME_TOKEN_CHANGED_EVENT, sync);
+    return () => window.removeEventListener(CONSUME_TOKEN_CHANGED_EVENT, sync);
   }, []);
+
+  // 令牌过期自动失效：每分钟检查一次，过期即清除并回到「需要消费令牌」状态
+  useEffect(() => {
+    if (!tokenExpiry) return;
+    const timer = window.setInterval(() => {
+      if (tokenExpiry <= Date.now()) {
+        clearConsumeToken();
+        setTokenOk(false);
+        setTokenExpiry(null);
+      }
+    }, 60000);
+    return () => window.clearInterval(timer);
+  }, [tokenExpiry]);
 
   function buildRequest(): DimensionExpr[] {
     return dimInputs.filter((d) => d.name.trim() && d.value.trim()).map((d) => ({ name: d.name.trim(), value: d.value.trim() }));
@@ -270,6 +294,7 @@ export function QueryWorkspace() {
       const { access_token } = await mintClientToken(active.client_id);
       setConsumeToken(access_token);
       setTokenOk(true);
+      setTokenExpiry(getConsumeTokenExpiry());
       message.success(`已使用客户端 ${active.client_id} 签发消费令牌`);
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "签发失败");
@@ -318,8 +343,9 @@ export function QueryWorkspace() {
             description={
               tokenOk ? (
                 <span>
-                  当前使用客户端令牌调用 /consume/query。{" "}
-                  <a onClick={() => { clearConsumeToken(); setTokenOk(false); }}>清除令牌</a>
+                  当前使用客户端令牌调用 /consume/query。
+                  {tokenExpiry ? ` 令牌剩余 ${Math.max(0, Math.round((tokenExpiry - Date.now()) / 60000))} 分钟。` : ""}{" "}
+                  <a onClick={() => { clearConsumeToken(); setTokenOk(false); setTokenExpiry(null); }}>清除令牌</a>
                 </span>
               ) : (
                 <span>
