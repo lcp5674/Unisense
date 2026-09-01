@@ -52,6 +52,10 @@ from app.services.dimension.schemas import (
     ReconciliationSubmit,
     SnapshotRunResponse,
     SnapshotValueResponse,
+    SourceColumnsRequest,
+    SourceColumnsResponse,
+    SourceTablesRequest,
+    SourceTablesResponse,
     TranslateRequest,
     TranslateResponse,
 )
@@ -398,6 +402,34 @@ async def preview_dimension_values(
     )
     await db.commit()
     return ok(data=PreviewValuesResponse(**resp), trace_id=trace_id)
+
+
+@router.post("/source-tables", dependencies=_WRITE_DEPS)
+async def list_source_tables(
+    payload: SourceTablesRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """列出数据源全部非系统库表（维度值来源表选项框）。"""
+    tables = await DimensionService(db).list_source_tables(payload.source_id)
+    await db.commit()
+    return ok(data=SourceTablesResponse(tables=tables), trace_id=trace_id)
+
+
+@router.post("/source-columns", dependencies=_WRITE_DEPS)
+async def list_source_columns(
+    payload: SourceColumnsRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """列出指定表的全部列（维度值来源列选项框）。"""
+    columns = await DimensionService(db).list_source_columns(
+        source_id=payload.source_id, table=payload.table
+    )
+    await db.commit()
+    return ok(data=SourceColumnsResponse(columns=columns), trace_id=trace_id)
 
 
 @router.get("/{dim_code}", dependencies=[Depends(require_roles(*_READ_ROLES))])

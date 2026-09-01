@@ -59,6 +59,8 @@ vi.mock("../api", () => {
     removeFavorite: vi.fn(),
     listDataSources: vi.fn(),
     previewColumnValues: vi.fn(),
+    listSourceTables: vi.fn(),
+    listSourceColumns: vi.fn(),
     bindDimensionReference: vi.fn(),
     refreshDimensionSnapshot: vi.fn(),
     listDimensionSnapshots: vi.fn(),
@@ -76,7 +78,7 @@ vi.mock("../api", () => {
   };
 });
 
-import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember, deleteDimensionMember, listDimensionMetrics, listDimensionMappings, updateDimensionMapping, listReconciliations, listUsers, listFavorites, listDataSources, previewColumnValues, fetchCurrentUser, submitDimension, approveDimension, rejectDimension, batchSubmitDimensions, batchDeprecateDimensions, reactivateDimension, deleteDimension, restoreDimension, getDimensionSnapshotLatestRun, batchPublishDimensionMembers } from "../api";
+import { listDimensions, listMetrics, getDimension, updateDimension, bindMetricDimension, listDomainTree, listDimensionMembers, updateDimensionMember, deleteDimensionMember, listDimensionMetrics, listDimensionMappings, updateDimensionMapping, listReconciliations, listUsers, listFavorites, listDataSources, previewColumnValues, listSourceTables, listSourceColumns, fetchCurrentUser, submitDimension, approveDimension, rejectDimension, batchSubmitDimensions, batchDeprecateDimensions, reactivateDimension, deleteDimension, restoreDimension, getDimensionSnapshotLatestRun, batchPublishDimensionMembers } from "../api";
 
 const mockedList = vi.mocked(listDimensions);
 const mockedListFavorites = vi.mocked(listFavorites);
@@ -142,6 +144,8 @@ beforeEach(() => {
   });
   vi.mocked(listDataSources).mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100 });
   vi.mocked(previewColumnValues).mockResolvedValue({ values: [], total: 0, truncated: false });
+  vi.mocked(listSourceTables).mockResolvedValue({ tables: [] });
+  vi.mocked(listSourceColumns).mockResolvedValue({ columns: [] });
   // 详情抽屉/成员删除/映射编辑等新功能默认值（避免组件内 .then 到 undefined）
   vi.mocked(listDimensionMetrics).mockResolvedValue({ items: [], total: 0 });
   vi.mocked(listDimensionMappings).mockResolvedValue({ items: [], total: 0 });
@@ -1126,5 +1130,107 @@ describe("Dimensions 引用型维度（SNAPSHOT）与成员批量操作", () => 
       expect(batchPublishDimensionMembers).toHaveBeenCalledWith("dim_customer", ["c1", "c2"]),
     );
     expect(await screen.findByText(/已发布 2 个/)).toBeInTheDocument();
+  });
+
+  it("从表自动获取：选数据源后表为选项框、选表后列为选项框（源库元数据列举）", async () => {
+    vi.mocked(listDataSources).mockResolvedValue({
+      items: [{ source_id: "s1", name: "MySQL", source_type: "mysql" }],
+      total: 1,
+      page: 1,
+      page_size: 100,
+    } as never);
+    vi.mocked(listSourceTables).mockResolvedValue({
+      tables: [
+        { database: "dwd", table: "dim_customer", name: "dwd.dim_customer" },
+        { database: "dwd", table: "orders", name: "dwd.orders" },
+      ],
+    } as never);
+    vi.mocked(listSourceColumns).mockResolvedValue({
+      columns: [
+        { name: "customer_id", data_type: "bigint", comment: null },
+        { name: "customer_name", data_type: "varchar", comment: null },
+      ],
+    } as never);
+
+    render(
+      <MemoryRouter>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("tab", { name: /维度值管理/ }));
+    const dimSelect = await screen.findByRole("combobox");
+    fireEvent.mouseDown(dimSelect);
+    await userEvent.click(await screen.findByText("dim_customer · 客户"));
+    await userEvent.click(await screen.findByRole("button", { name: /从表自动获取/ }));
+
+    // 弹窗内：数据源 → 表选项框（源库表经 listSourceTables 列举）
+    const dialog = await screen.findByRole("dialog");
+    let combos = within(dialog).getAllByRole("combobox");
+    fireEvent.mouseDown(combos[0]);
+    await userEvent.click(await screen.findByText("MySQL（s1）"));
+    await waitFor(() => expect(listSourceTables).toHaveBeenCalledWith("s1"));
+    fireEvent.mouseDown(within(dialog).getAllByRole("combobox")[1]);
+    // 点击 .ant-select-item-option 本体（title=选项文本）才能触发选中（antd 虚拟列表多副本）
+    await waitFor(() => {
+      const dropdown = document.querySelector(
+        ".ant-select-dropdown:not(.ant-select-dropdown-hidden)",
+      ) as HTMLElement | null;
+      const option = dropdown?.querySelector(
+        '.ant-select-item-option[title="dwd.dim_customer"]',
+      ) as HTMLElement | null;
+      expect(option).toBeTruthy();
+      if (option) fireEvent.click(option);
+    });
+
+    // 选表后 → 列选项框（经 listSourceColumns 列举，显示 列名 (类型)）
+    await waitFor(() =>
+      expect(listSourceColumns).toHaveBeenCalledWith("s1", "dwd.dim_customer"),
+    );
+    combos = within(dialog).getAllByRole("combobox");
+    fireEvent.mouseDown(combos[2]);
+    await waitFor(() => {
+      const dropdown = document.querySelector(
+        ".ant-select-dropdown:not(.ant-select-dropdown-hidden)",
+      ) as HTMLElement | null;
+      expect(
+        dropdown?.querySelector('.ant-select-item-option[title="customer_id (bigint)"]'),
+      ).toBeTruthy();
+      expect(
+        dropdown?.querySelector('.ant-select-item-option[title="customer_name (varchar)"]'),
+      ).toBeTruthy();
+    });
+  });
+
+  it("绑定引用型：打开预填已绑定的源表列并预加载表/列选项", async () => {
+    vi.mocked(listDataSources).mockResolvedValue({
+      items: [{ source_id: "s1", name: "MySQL", source_type: "mysql" }],
+      total: 1,
+      page: 1,
+      page_size: 100,
+    } as never);
+    vi.mocked(listSourceTables).mockResolvedValue({
+      tables: [{ database: "dwd", table: "dim_customer", name: "dwd.dim_customer" }],
+    } as never);
+    vi.mocked(listSourceColumns).mockResolvedValue({
+      columns: [{ name: "customer_id", data_type: "bigint", comment: null }],
+    } as never);
+
+    render(
+      <MemoryRouter>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+    await userEvent.click(await screen.findByRole("tab", { name: /维度值管理/ }));
+    const dimSelect = await screen.findByRole("combobox");
+    fireEvent.mouseDown(dimSelect);
+    await userEvent.click(await screen.findByText("dim_customer · 客户"));
+    await userEvent.click(await screen.findByRole("button", { name: /重新绑定表列/ }));
+
+    // 打开即预加载表/列（dim_customer 已绑定 dwd.dim_customer.customer_id）
+    await waitFor(() => expect(listSourceTables).toHaveBeenCalledWith("s1"));
+    await waitFor(() =>
+      expect(listSourceColumns).toHaveBeenCalledWith("s1", "dwd.dim_customer"),
+    );
+    expect(await screen.findByText("绑定引用型值来源 → dim_customer")).toBeInTheDocument();
   });
 });

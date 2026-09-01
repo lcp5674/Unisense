@@ -1263,6 +1263,98 @@ class DimensionService(BaseService, MasterDataReviewMixin):
             "truncated": len(values) >= limit,
         }
 
+    # ------------------------------------------------------------ 源库元数据列举
+
+    async def list_source_tables(self, source_id: str) -> list[dict[str, str]]:
+        """列出数据源全部非系统库表（维度值来源表选项框）。
+
+        复用连接器的 ``list_tables``（MySQL/Hive 等按库分组枚举）；
+        连接器不支持枚举表（如 Kafka）时返回空列表，前端保留手动输入兜底。
+
+        Raises:
+            NotFoundError: 数据源不存在。
+            UnisenseError: 源库连接/查询失败。
+        """
+        src = await self._load_source(source_id)
+        from app.services.collector.connectors import registry
+
+        collector = registry.build(src.source_type, src.connection_config)
+        try:
+            tables_by_db = await collector.list_tables()
+        except ExternalDependencyError:
+            raise
+        except Exception as exc:
+            raise UnisenseError(f"列举数据源表失败: {exc}") from exc
+        finally:
+            await collector.dispose()
+        return [
+            {"database": db, "table": tbl, "name": f"{db}.{tbl}"}
+            for db, tables in tables_by_db.items()
+            for tbl in tables
+        ]
+
+    async def list_source_columns(self, source_id: str, table: str) -> list[dict[str, str | None]]:
+        """列出指定表的全部列（维度值来源列选项框）。
+
+        按数据源类型分派元数据查询：
+        - MySQL/PostgreSQL/StarRocks/Doris/ClickHouse：``information_schema.columns``
+          （按 ordinal_position 排序，仅取列名 + 数据类型，避免方言注释差异）。
+        - Hive/Spark：``DESCRIBE db.table``（解析 col_name/data_type，跳过分区头行）。
+        - 其他类型（Kafka 等无表列概念）：返回空列表，前端保留手动输入兜底。
+
+        Raises:
+            NotFoundError: 数据源不存在。
+            ValidationError: 表名不合法。
+            UnisenseError: 源库连接/查询失败。
+        """
+        src = await self._load_source(source_id)
+        self._validate_identifier(table)
+        parts = table.split(".")
+        db = parts[0] if len(parts) > 1 else None
+        tbl = parts[-1]
+        from app.services.collector.connectors import registry
+
+        collector = registry.build(src.source_type, src.connection_config)
+        try:
+            if src.source_type in {"mysql", "postgres", "starrocks", "doris", "clickhouse"} and db:
+                rows = await collector.query(
+                    "SELECT column_name, data_type FROM information_schema.columns "
+                    "WHERE table_schema = :db AND table_name = :tbl ORDER BY ordinal_position",
+                    {"db": db, "tbl": tbl},
+                )
+                return [
+                    {
+                        "name": str(r["column_name"]),
+                        "data_type": r.get("data_type"),
+                        "comment": None,
+                    }
+                    for r in rows
+                    if r.get("column_name")
+                ]
+            if src.source_type in {"hive", "spark"}:
+                safe_tbl = ".".join(f"`{p}`" for p in parts)
+                rows = await collector.query(f"DESCRIBE {safe_tbl}")
+                columns: list[dict[str, str | None]] = []
+                for r in rows:
+                    name = r.get("col_name") or r.get("name")
+                    if not name or str(name).startswith("#"):
+                        continue
+                    columns.append(
+                        {
+                            "name": str(name),
+                            "data_type": r.get("data_type"),
+                            "comment": r.get("comment"),
+                        }
+                    )
+                return columns
+            return []
+        except ExternalDependencyError:
+            raise
+        except Exception as exc:
+            raise UnisenseError(f"列举数据源列失败: {exc}") from exc
+        finally:
+            await collector.dispose()
+
     # ------------------------------------------------------------ 引用型维度
 
     @staticmethod

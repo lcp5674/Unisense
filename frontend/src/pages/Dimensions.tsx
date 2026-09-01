@@ -45,6 +45,8 @@ import {
   removeFavorite,
   listDataSources,
   previewColumnValues,
+  listSourceTables,
+  listSourceColumns,
   bindDimensionReference,
   refreshDimensionSnapshot,
   listDimensionSnapshots,
@@ -133,6 +135,25 @@ const SCD_TYPE_OPTIONS = [
 // 缓慢变化维类型反查中文（列表「类型」列展示，与新建下拉同源，避免裸枚举）
 function scdTypeLabel(v: string): string {
   return SCD_TYPE_OPTIONS.find((o) => o.value === v)?.label ?? v;
+}
+
+// 源库表/列选项框：手动输入的未在列表值作为「（手动输入）」选项（对齐指标挂载的未采集兜底模式）
+function withManualOption(q: string, options: { value: string; label: string }[]) {
+  const kw = (q ?? "").trim();
+  if (!kw || options.some((o) => o.value === kw)) return options;
+  return [{ value: kw, label: kw, manual: true }, ...options];
+}
+function manualOptionRender(oriOption: { data?: { label?: string; manual?: boolean } }) {
+  const opt = oriOption?.data;
+  if (opt?.manual) {
+    return (
+      <span>
+        {opt.label}
+        <span style={{ color: "#d46b08", marginLeft: 6 }}>（手动输入）</span>
+      </span>
+    );
+  }
+  return opt?.label ?? null;
 }
 
 // 指标-维度关联角色（对齐后端 MetricDimensionRole 枚举，业务术语化：中文优先 + 英文溯源）
@@ -1129,6 +1150,13 @@ function MembersTab() {
   const [previewTruncated, setPreviewTruncated] = useState(false);
   const [importing, setImporting] = useState(false);
   const [batchPublishing, setBatchPublishing] = useState(false);
+  // 源库表/列选项框（从表自动获取 + 绑定引用型共用）：选数据源加载表、选表加载列
+  const [sourceTables, setSourceTables] = useState<{ database: string; table: string; name: string }[]>([]);
+  const [sourceColumns, setSourceColumns] = useState<{ name: string; data_type: string | null; comment: string | null }[]>([]);
+  const [sourceTablesLoading, setSourceTablesLoading] = useState(false);
+  const [sourceColumnsLoading, setSourceColumnsLoading] = useState(false);
+  const [tableKw, setTableKw] = useState("");
+  const [columnKw, setColumnKw] = useState("");
   // 导入进度感知：当前处理序号/总数（消除"点了没反应"的长等待）
   const [importProgress, setImportProgress] = useState<{ ok: number; failed: number; done: number; total: number } | null>(null);
   // 批量操作：rowSelection 勾选的成员编码集合
@@ -1312,6 +1340,41 @@ function MembersTab() {
   }
 
   // 拉取预览：根据所选数据源/表/列，调后端获取去重枚举值
+  // 源库表/列选项框：选数据源加载全部表；选表加载全部列（连接器不支持/失败时保留手动输入）
+  async function loadSourceTables(sourceId: string) {
+    if (!sourceId) {
+      setSourceTables([]);
+      return;
+    }
+    setSourceTablesLoading(true);
+    try {
+      const r = await listSourceTables(sourceId);
+      setSourceTables(r.tables);
+    } catch {
+      setSourceTables([]);
+      message.warning("列举数据源表失败，可手动输入表名");
+    } finally {
+      setSourceTablesLoading(false);
+    }
+  }
+
+  async function loadSourceColumns(sourceId: string, table: string) {
+    if (!sourceId || !table) {
+      setSourceColumns([]);
+      return;
+    }
+    setSourceColumnsLoading(true);
+    try {
+      const r = await listSourceColumns(sourceId, table);
+      setSourceColumns(r.columns);
+    } catch {
+      setSourceColumns([]);
+      message.warning("列举表列失败，可手动输入列名");
+    } finally {
+      setSourceColumnsLoading(false);
+    }
+  }
+
   async function handlePreview(values: Record<string, unknown>) {
     if (!dimCode) return;
     setAutoLoading(true);
@@ -1513,6 +1576,10 @@ function MembersTab() {
                 autoForm.resetFields();
                 setPreviewValues([]);
                 setPreviewTruncated(false);
+                setSourceTables([]);
+                setSourceColumns([]);
+                setTableKw("");
+                setColumnKw("");
                 setAutoOpen(true);
               }}
             >
@@ -1531,6 +1598,14 @@ function MembersTab() {
                   column: currentDim?.source_column ?? undefined,
                   refresh_interval_hours: currentDim?.refresh_interval_hours ?? 24,
                 });
+                setSourceTables([]);
+                setSourceColumns([]);
+                setTableKw("");
+                setColumnKw("");
+                if (currentDim?.source_id) loadSourceTables(currentDim.source_id);
+                if (currentDim?.source_id && currentDim.source_table) {
+                  loadSourceColumns(currentDim.source_id, currentDim.source_table);
+                }
                 setBindOpen(true);
               }}
             >
@@ -1749,6 +1824,8 @@ function MembersTab() {
           setAutoOpen(false);
           autoForm.resetFields();
           setPreviewValues([]);
+          setSourceTables([]);
+          setSourceColumns([]);
         }}
         width={640}
         footer={null}
@@ -1773,28 +1850,71 @@ function MembersTab() {
                 value: s.source_id,
                 label: `${s.name}（${s.source_id}）`,
               }))}
+              onChange={(v) => {
+                autoForm.setFieldValue("table", undefined);
+                autoForm.setFieldValue("column", undefined);
+                setSourceTables([]);
+                setSourceColumns([]);
+                if (v) loadSourceTables(String(v));
+              }}
             />
           </Form.Item>
           <Form.Item
             label="表名"
             name="table"
-            extra={<span className="muted" style={{ fontSize: 12 }}>可带库前缀，如 dwd.telemedicine</span>}
+            extra={<span className="muted" style={{ fontSize: 12 }}>选择源库表，或直接输入库.表（如 dwd.telemedicine）</span>}
             rules={[
-              { required: true, message: "请输入表名" },
+              { required: true, message: "请选择表名" },
               { pattern: /^[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*$/, message: "表名不合法" },
             ]}
           >
-            <Input className="mono" placeholder="如 dwd.telemedicine" />
+            <Select
+              showSearch
+              allowClear
+              optionFilterProp="label"
+              loading={sourceTablesLoading}
+              placeholder="选择表，或输入库.表"
+              options={withManualOption(
+                tableKw,
+                sourceTables.map((t) => ({ value: t.name, label: t.name })),
+              )}
+              optionRender={manualOptionRender}
+              notFoundContent="无可选表，可直接输入库.表名"
+              filterOption={false}
+              onSearch={setTableKw}
+              onChange={(v) => {
+                autoForm.setFieldValue("column", undefined);
+                setSourceColumns([]);
+                if (v) loadSourceColumns(String(autoForm.getFieldValue("source_id")), String(v));
+              }}
+            />
           </Form.Item>
           <Form.Item
             label="列名"
             name="column"
             rules={[
-              { required: true, message: "请输入列名" },
+              { required: true, message: "请选择列名" },
               { pattern: /^[a-zA-Z_][a-zA-Z0-9_]*$/, message: "列名不合法" },
             ]}
           >
-            <Input className="mono" placeholder="如 department_id" />
+            <Select
+              showSearch
+              allowClear
+              optionFilterProp="label"
+              loading={sourceColumnsLoading}
+              placeholder="选择列，或输入列名"
+              options={withManualOption(
+                columnKw,
+                sourceColumns.map((c) => ({
+                  value: c.name,
+                  label: `${c.name}${c.data_type ? ` (${c.data_type})` : ""}`,
+                })),
+              )}
+              optionRender={manualOptionRender}
+              notFoundContent="无可选列，可直接输入列名"
+              filterOption={false}
+              onSearch={setColumnKw}
+            />
           </Form.Item>
           <Form.Item>
             <Space>
@@ -1861,6 +1981,8 @@ function MembersTab() {
         onCancel={() => {
           setBindOpen(false);
           bindForm.resetFields();
+          setSourceTables([]);
+          setSourceColumns([]);
         }}
         onOk={() => bindForm.submit()}
         okText="绑定"
@@ -1890,28 +2012,71 @@ function MembersTab() {
               optionFilterProp="label"
               placeholder="选择数据源（须已注册）"
               options={dataSources.map((s) => ({ value: s.source_id, label: `${s.name}（${s.source_id}）` }))}
+              onChange={(v) => {
+                bindForm.setFieldValue("table", undefined);
+                bindForm.setFieldValue("column", undefined);
+                setSourceTables([]);
+                setSourceColumns([]);
+                if (v) loadSourceTables(String(v));
+              }}
             />
           </Form.Item>
           <Form.Item
             name="table"
             label="表名"
-            extra={<span className="muted" style={{ fontSize: 12 }}>可带库前缀，如 dwd.dim_customer</span>}
+            extra={<span className="muted" style={{ fontSize: 12 }}>选择源库表，或直接输入库.表（如 dwd.dim_customer）</span>}
             rules={[
-              { required: true, message: "请输入表名" },
+              { required: true, message: "请选择表名" },
               { pattern: /^[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*$/, message: "表名不合法" },
             ]}
           >
-            <Input className="mono" placeholder="如 dwd.dim_customer" />
+            <Select
+              showSearch
+              allowClear
+              optionFilterProp="label"
+              loading={sourceTablesLoading}
+              placeholder="选择表，或输入库.表"
+              options={withManualOption(
+                tableKw,
+                sourceTables.map((t) => ({ value: t.name, label: t.name })),
+              )}
+              optionRender={manualOptionRender}
+              notFoundContent="无可选表，可直接输入库.表名"
+              filterOption={false}
+              onSearch={setTableKw}
+              onChange={(v) => {
+                bindForm.setFieldValue("column", undefined);
+                setSourceColumns([]);
+                if (v) loadSourceColumns(String(bindForm.getFieldValue("source_id")), String(v));
+              }}
+            />
           </Form.Item>
           <Form.Item
             name="column"
             label="列名"
             rules={[
-              { required: true, message: "请输入列名" },
+              { required: true, message: "请选择列名" },
               { pattern: /^[a-zA-Z_][a-zA-Z0-9_]*$/, message: "列名不合法" },
             ]}
           >
-            <Input className="mono" placeholder="如 customer_id" />
+            <Select
+              showSearch
+              allowClear
+              optionFilterProp="label"
+              loading={sourceColumnsLoading}
+              placeholder="选择列，或输入列名"
+              options={withManualOption(
+                columnKw,
+                sourceColumns.map((c) => ({
+                  value: c.name,
+                  label: `${c.name}${c.data_type ? ` (${c.data_type})` : ""}`,
+                })),
+              )}
+              optionRender={manualOptionRender}
+              notFoundContent="无可选列，可直接输入列名"
+              filterOption={false}
+              onSearch={setColumnKw}
+            />
           </Form.Item>
           <Form.Item name="refresh_interval_hours" label="快照刷新间隔（小时）" extra={<span className="muted" style={{ fontSize: 12 }}>系统每 30 分钟扫描到期维度自动刷新；默认 24 小时</span>}>
             <InputNumber min={1} max={2160} style={{ width: 160 }} />

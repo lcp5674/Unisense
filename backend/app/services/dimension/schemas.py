@@ -314,6 +314,51 @@ class PreviewValuesResponse(BaseModel):
     truncated: bool = Field(default=False, description="是否因达到 limit 被截断（结果不完整）")
 
 
+class SourceTablesRequest(BaseModel):
+    """列出数据源全部表（维度值来源表选项框）。"""
+
+    source_id: str = Field(..., max_length=128, description="数据源 ID")
+
+
+class SourceTableItem(BaseModel):
+    """数据源下表项。"""
+
+    database: str = Field(..., description="库名")
+    table: str = Field(..., description="表名")
+    name: str = Field(..., description="库.表 完整名（供选项框 value）")
+
+
+class SourceTablesResponse(BaseModel):
+    """数据源表列表。"""
+
+    tables: list[SourceTableItem] = Field(default_factory=list, description="按库分组的表列表")
+
+
+class SourceColumnsRequest(BaseModel):
+    """列出指定表的全部列（维度值来源列选项框）。"""
+
+    source_id: str = Field(..., max_length=128, description="数据源 ID")
+    table: str = Field(..., max_length=256, description="表名（可带库前缀，如 dwd.dim_customer）")
+
+
+class SourceColumnItem(BaseModel):
+    """表下列项。"""
+
+    name: str = Field(..., description="列名")
+    data_type: str | None = Field(
+        default=None, description="数据类型（information_schema/ DESCRIBE 可得时）"
+    )
+    comment: str | None = Field(default=None, description="列注释（可得时）")
+
+
+class SourceColumnsResponse(BaseModel):
+    """表的列列表。"""
+
+    columns: list[SourceColumnItem] = Field(
+        default_factory=list, description="按 ordinal_position 排序的列列表"
+    )
+
+
 # ---------------------------------------------------------------- 引用型维度
 
 

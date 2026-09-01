@@ -2716,6 +2716,27 @@ export async function previewColumnValues(req: {
   );
 }
 
+/** 列出数据源全部表（POST /dimensions/source-tables，维度值来源表选项框） */
+export async function listSourceTables(sourceId: string): Promise<{
+  tables: { database: string; table: string; name: string }[];
+}> {
+  return request(`${API_BASE}/dimensions/source-tables`, {
+    method: "POST",
+    body: JSON.stringify({ source_id: sourceId }),
+  });
+}
+
+/** 列出指定表的全部列（POST /dimensions/source-columns，维度值来源列选项框） */
+export async function listSourceColumns(
+  sourceId: string,
+  table: string,
+): Promise<{ columns: { name: string; data_type: string | null; comment: string | null }[] }> {
+  return request(`${API_BASE}/dimensions/source-columns`, {
+    method: "POST",
+    body: JSON.stringify({ source_id: sourceId, table }),
+  });
+}
+
 /** 删除维度成员（DELETE /dimensions/{dim_code}/members/{member_code}，可能级联删除子树） */
 export async function deleteDimensionMember(
   dimCode: string,

@@ -749,6 +749,121 @@ async def test_preview_column_values_queries_source() -> None:
     assert result["truncated"] is False
 
 
+async def test_list_source_tables_groups_by_db() -> None:
+    """源库表列举：按库分组展开为 库.表 完整名（维度值来源表选项框）。"""
+
+    from unittest.mock import patch
+
+    svc, _ = await _svc()
+    src_mock = MagicMock(source_id="s1", source_type="mysql", connection_config="encrypted")
+    db_exec = AsyncMock()
+    db_exec_result = MagicMock()
+    db_exec_result.scalar_one_or_none.return_value = src_mock
+    db_exec.return_value = db_exec_result
+    svc._db.execute = db_exec
+
+    fake_collector = MagicMock()
+    fake_collector.list_tables = AsyncMock(return_value={"dwd": ["a", "b"], "dws": ["c"]})
+    fake_collector.dispose = AsyncMock()
+    with patch(
+        "app.services.collector.connectors.registry.build", return_value=fake_collector
+    ):
+        tables = await svc.list_source_tables("s1")
+
+    assert tables == [
+        {"database": "dwd", "table": "a", "name": "dwd.a"},
+        {"database": "dwd", "table": "b", "name": "dwd.b"},
+        {"database": "dws", "table": "c", "name": "dws.c"},
+    ]
+    fake_collector.dispose.assert_awaited()
+
+
+async def test_list_source_columns_mysql_via_information_schema() -> None:
+    """MySQL 列列举：information_schema.columns 按 ordinal_position 排序返回列名+类型。"""
+
+    from unittest.mock import patch
+
+    svc, _ = await _svc()
+    src_mock = MagicMock(source_id="s1", source_type="mysql", connection_config="encrypted")
+    db_exec = AsyncMock()
+    db_exec_result = MagicMock()
+    db_exec_result.scalar_one_or_none.return_value = src_mock
+    db_exec.return_value = db_exec_result
+    svc._db.execute = db_exec
+
+    fake_collector = MagicMock()
+    fake_collector.query = AsyncMock(
+        return_value=[
+            {"column_name": "id", "data_type": "bigint"},
+            {"column_name": "name", "data_type": "varchar"},
+        ]
+    )
+    fake_collector.dispose = AsyncMock()
+    with patch(
+        "app.services.collector.connectors.registry.build", return_value=fake_collector
+    ):
+        columns = await svc.list_source_columns("s1", "dwd.dim_customer")
+
+    assert columns == [
+        {"name": "id", "data_type": "bigint", "comment": None},
+        {"name": "name", "data_type": "varchar", "comment": None},
+    ]
+    fake_collector.query.assert_awaited()
+
+
+async def test_list_source_columns_hive_via_describe() -> None:
+    """Hive 列列举：DESCRIBE 输出解析，跳过分区头行。"""
+
+    from unittest.mock import patch
+
+    svc, _ = await _svc()
+    src_mock = MagicMock(source_id="s1", source_type="hive", connection_config="encrypted")
+    db_exec = AsyncMock()
+    db_exec_result = MagicMock()
+    db_exec_result.scalar_one_or_none.return_value = src_mock
+    db_exec.return_value = db_exec_result
+    svc._db.execute = db_exec
+
+    fake_collector = MagicMock()
+    fake_collector.query = AsyncMock(
+        return_value=[
+            {"col_name": "id", "data_type": "bigint", "comment": ""},
+            {"col_name": "# Partition Information", "data_type": "", "comment": ""},
+            {"col_name": "dt", "data_type": "string", "comment": ""},
+        ]
+    )
+    fake_collector.dispose = AsyncMock()
+    with patch(
+        "app.services.collector.connectors.registry.build", return_value=fake_collector
+    ):
+        columns = await svc.list_source_columns("s1", "ods.orders")
+
+    assert [c["name"] for c in columns] == ["id", "dt"]
+    assert columns[0]["data_type"] == "bigint"
+
+
+async def test_list_source_columns_rejects_illegal_table() -> None:
+    """非法表名（含分号）在连接源库前被拦截（防注入）。"""
+
+    from unittest.mock import patch
+
+    svc, _ = await _svc()
+    src_mock = MagicMock(source_id="s1", source_type="mysql", connection_config="encrypted")
+    db_exec = AsyncMock()
+    db_exec_result = MagicMock()
+    db_exec_result.scalar_one_or_none.return_value = src_mock
+    db_exec.return_value = db_exec_result
+    svc._db.execute = db_exec
+
+    with patch("app.services.collector.connectors.registry.build") as mock_build:
+        try:
+            await svc.list_source_columns("s1", "dwd.t; drop table x")
+            raise AssertionError("应拒绝非法表名")
+        except ValidationError as exc:
+            assert "不合法" in str(exc)
+    mock_build.assert_not_called()
+
+
 # ---- 跨服务打通：绑定指标后回写指标声明维度（方案③ 单向打通）----
 def _metric_with_dims(
     status: str, dims: list[str], metric_id: int = 42, bound: list[str] | None = None
