@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.metric import Metric
@@ -39,8 +39,57 @@ class MetricStatsService:
         self._db = db
         self._repo = LineageRepository(db)
 
-    async def reuse_summary(self) -> dict[str, Any]:
+    @staticmethod
+    def _metric_filters(
+        domain: str | None,
+        type: str | None,  # noqa: A002 - 筛选参数名对齐前端 query 参数 type
+        status: str | None,
+        visible_actor_id: int | None = None,
+        visible_role: str | None = None,
+    ) -> list[Any]:
+        """按业务域/指标类型/指标状态构建 Metric 过滤条件（空列表 = 不过滤）。
+
+        追加读路径行级隔离（P0-3，对齐 list_metrics）：非管理角色仅统计
+        公开状态（PUBLISHED/EXPERIMENTAL/DEPRECATED）+ 本人 Owner/副 Owner 的
+        未发布指标；评审人额外放行 REVIEW。管理角色/未传上下文不加过滤。
+        """
+        conds: list[Any] = []
+        if domain:
+            conds.append(Metric.domain == domain)
+        if type:
+            conds.append(Metric.type == type)
+        if status:
+            conds.append(Metric.status == status)
+        if (
+            visible_actor_id is not None
+            and visible_role is not None
+            and visible_role not in ("platform_admin", "domain_admin")
+        ):
+            vis: list[Any] = [
+                Metric.status.in_(("PUBLISHED", "EXPERIMENTAL", "DEPRECATED")),
+                Metric.owner_id == visible_actor_id,
+                Metric.backup_owner_id == visible_actor_id,
+            ]
+            if visible_role == "reviewer":
+                vis.append(Metric.status == "REVIEW")
+            conds.append(or_(*vis))
+        return conds
+
+    async def reuse_summary(
+        self,
+        domain: str | None = None,
+        type: str | None = None,  # noqa: A002 - 筛选参数名对齐前端 query 参数 type
+        status: str | None = None,
+        visible_actor_id: int | None = None,
+        visible_role: str | None = None,
+    ) -> dict[str, Any]:
         """每个指标的被引用统计清单（P0：数仓视角复用度）。
+
+        Args:
+            domain/type/status: 可选过滤条件（业务域 code / 指标类型 / 指标状态），
+                统计卡与清单均基于同一过滤集合。
+            visible_actor_id/visible_role: 读路径行级隔离（P0-3）——非管理角色仅
+                统计公开状态 + 本人负责的未发布指标，杜绝经统计侧门窥探他人草稿。
 
         Returns:
             ``{"total", "referenced", "zero_reuse", "items"}``；``items`` 为每个
@@ -49,17 +98,19 @@ class MetricStatsService:
             CONSUMED_BY 引用数）+ ``reuse_count``（总复用度），按复用度降序
             （并列按 metric_code 升序），高复用核心指标与零复用指标一目了然。
         """
-        metrics = (
-            await self._db.execute(
-                select(
-                    Metric.metric_code,
-                    Metric.name,
-                    Metric.domain,
-                    Metric.type,
-                    Metric.status,
-                ).where(Metric.deleted_at.is_(None))
+        stmt = select(
+            Metric.metric_code,
+            Metric.name,
+            Metric.domain,
+            Metric.type,
+            Metric.status,
+        ).where(Metric.deleted_at.is_(None))
+        stmt = stmt.where(
+            *self._metric_filters(
+                domain, type, status, visible_actor_id, visible_role
             )
-        ).all()
+        )
+        metrics = (await self._db.execute(stmt)).all()
         reuse = await self._repo.metric_reuse_counts()
         items: list[dict[str, Any]] = []
         for code, name, domain, mtype, status in metrics:
@@ -85,8 +136,21 @@ class MetricStatsService:
             "items": items,
         }
 
-    async def asset_ledger(self) -> dict[str, Any]:
+    async def asset_ledger(
+        self,
+        domain: str | None = None,
+        type: str | None = None,  # noqa: A002 - 筛选参数名对齐前端 query 参数 type
+        status: str | None = None,
+        visible_actor_id: int | None = None,
+        visible_role: str | None = None,
+    ) -> dict[str, Any]:
         """指标资产账本（P1：管理者视角的活跃/僵尸/重复建设清单）。
+
+        Args:
+            domain/type/status: 可选过滤条件（业务域 code / 指标类型 / 指标状态），
+                活跃/僵尸/重复建设统计与明细均基于同一过滤集合。
+            visible_actor_id/visible_role: 读路径行级隔离（P0-3）——非管理角色仅
+                统计公开状态 + 本人负责的未发布指标，僵尸/重复清单不暴露他人草稿。
 
         僵尸判定**复用 HealthScorer 活跃度维度**（近 30 天无更新 → ``_ACTIVITY_STALE``）
         且零引用（``reuse_count == 0``）——长期无更新也无派生/报表引用的指标；
@@ -97,9 +161,13 @@ class MetricStatsService:
             ``{"total", "active_count", "zombie_count", "duplicate_count",
             "zombies", "duplicates"}``；僵尸明细含最后更新与被引用次数。
         """
-        metrics = (
-            await self._db.execute(select(Metric).where(Metric.deleted_at.is_(None)))
-        ).scalars().all()
+        stmt = select(Metric).where(Metric.deleted_at.is_(None))
+        stmt = stmt.where(
+            *self._metric_filters(
+                domain, type, status, visible_actor_id, visible_role
+            )
+        )
+        metrics = (await self._db.execute(stmt)).scalars().all()
         reuse = await self._repo.metric_reuse_counts()
         scorer = HealthScorer(self._db)
         zombies: list[dict[str, Any]] = []

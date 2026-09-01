@@ -21,7 +21,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import ALL_ROLES, CurrentUser, require_roles
+from app.api.deps import CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
 from app.core.exceptions import ValidationError
@@ -42,7 +42,12 @@ from app.services.sensitive_rules.service import SensitiveRuleService
 router = APIRouter(prefix="/sensitive-rules", tags=["敏感规则配置"])
 
 _WRITE_ROLES = ("platform_admin", "compliance_officer")
-_READ_DEPS = [Depends(require_roles(*ALL_ROLES)), Depends(guard_against_injection)]
+# 越权审查修复：PII 检测规则（正则+置信度）属合规敏感配置，读面从前「任意登录
+# 用户可读」收紧为治理角色（与前端 ROUTE_PERM "sensitive-rules:view" 的分配一致：
+# platform_admin/domain_admin/compliance_officer），杜绝低权限用户经 API 侧门
+# 读取检测规则后构造规避 PII 检测的样本。
+_READ_ROLES = ("platform_admin", "domain_admin", "compliance_officer")
+_READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
 # 正则文本豁免：name_re/sample_re/pattern 承载的是正则表达式本身（如专门匹配 SQL
 # 注释的 ``--.*``、块注释 ``/\*``），正则文本不是注入载荷且仅经 re.compile/解析，
@@ -52,7 +57,7 @@ _REGEX_WRITE_DEPS = [
     Depends(guard_against_injection_exempt("name_re", "sample_re")),
 ]
 _REGEX_CHECK_DEPS = [
-    Depends(require_roles(*ALL_ROLES)),
+    Depends(require_roles(*_READ_ROLES)),
     Depends(guard_against_injection_exempt("pattern")),
 ]
 

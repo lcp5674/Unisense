@@ -614,3 +614,68 @@ class TestGlobalSearchVisibility:
         body = es.search.call_args.args[1]
         assert "bool" not in body["query"]
         assert "multi_match" in body["query"]
+
+
+class TestGlobalSearchVisibility:
+    """全局搜索读路径行级隔离（越权审查修复）：维度/术语分支透传可见性。"""
+
+    async def test_dimension_term_search_applies_visibility(self) -> None:
+        """非管理角色搜索：dimension/term 查询携带可见性过滤（防搜索侧门窥探草稿）。"""
+        s = _session()
+        repo = _repo(s)
+        s.execute = AsyncMock(
+            side_effect=[
+                _all_result(),  # metric（无命中）
+                _rows_result(),  # dimension（无命中）
+                _rows_result(),  # term（无命中）
+                _rows_result(),  # template
+                _rows_result(),  # data_source
+                _rows_result(),  # catalog
+                _rows_result(),  # field
+                _rows_result(),  # subject_domain
+                _rows_result(),  # measure
+            ]
+        )
+        await repo.search(
+            "sales",
+            limit=5,
+            visible_actor_id=9,
+            visible_role="metric_owner",
+        )
+        dim_sql = str(
+            s.execute.call_args_list[1][0][0].compile(
+                compile_kwargs={"literal_binds": True}
+            )
+        )
+        term_sql = str(
+            s.execute.call_args_list[2][0][0].compile(
+                compile_kwargs={"literal_binds": True}
+            )
+        )
+        assert "dimension.status IN ('PUBLISHED', 'DEPRECATED')" in dim_sql
+        assert "dimension.owner_id = 9" in dim_sql
+        assert "term.status IN ('PUBLISHED', 'DEPRECATED')" in term_sql
+        assert "term.owner_id = 9" in term_sql
+
+    async def test_search_admin_no_visibility(self) -> None:
+        """管理角色搜索不加可见性过滤（治理视角全量）。"""
+        s = _session()
+        repo = _repo(s)
+        s.execute = AsyncMock(
+            side_effect=[
+                _all_result(),
+                _rows_result(),
+                _rows_result(),
+                _rows_result(),
+                _rows_result(),
+                _rows_result(),
+                _rows_result(),
+                _rows_result(),
+                _rows_result(),
+            ]
+        )
+        await repo.search("sales", limit=5, visible_actor_id=1, visible_role="platform_admin")
+        dim_sql = str(s.execute.call_args_list[1][0][0].compile())
+        term_sql = str(s.execute.call_args_list[2][0][0].compile())
+        assert "IN ('PUBLISHED', 'DEPRECATED')" not in dim_sql
+        assert "IN ('PUBLISHED', 'DEPRECATED')" not in term_sql

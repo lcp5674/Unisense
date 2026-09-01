@@ -160,8 +160,19 @@ class GlobalSearchRepository:
                 visible_actor_id=visible_actor_id,
                 visible_role=visible_role,
             ),
-            self._search_dimensions(needles, limit),
-            self._search_terms(needles, limit, raw_q=raw_q),
+            self._search_dimensions(
+                needles,
+                limit,
+                visible_actor_id=visible_actor_id,
+                visible_role=visible_role,
+            ),
+            self._search_terms(
+                needles,
+                limit,
+                raw_q=raw_q,
+                visible_actor_id=visible_actor_id,
+                visible_role=visible_role,
+            ),
             self._search_templates(needles, limit),
             self._search_data_sources(needles, limit),
             self._search_catalogs(needles, limit),
@@ -285,7 +296,14 @@ class GlobalSearchRepository:
             for m, reason in rows
         ]
 
-    async def _search_dimensions(self, needles: list[str], limit: int) -> list[dict[str, Any]]:
+    async def _search_dimensions(
+        self,
+        needles: list[str],
+        limit: int,
+        *,
+        visible_actor_id: int | None = None,
+        visible_role: str | None = None,
+    ) -> list[dict[str, Any]]:
         stmt = (
             select(Dimension)
             .where(
@@ -298,6 +316,11 @@ class GlobalSearchRepository:
             )
             .limit(limit)
         )
+        # P0-3 读路径行级隔离（对齐 dimension list_dimensions）：维度 DRAFT/REVIEW
+        # 是创建者私有工作区，他人不得经搜索侧门窥探；公开状态可被发现。
+        visibility = self._dimension_visibility(visible_actor_id, visible_role)
+        if visibility is not None:
+            stmt = stmt.where(visibility)
         rows = (await self._session.execute(stmt)).scalars().all()
         return [
             {
@@ -311,12 +334,42 @@ class GlobalSearchRepository:
             for d in rows
         ]
 
+    def _dimension_visibility(
+        self, visible_actor_id: int | None, visible_role: str | None
+    ) -> Any | None:
+        """维度读路径行级隔离（对齐 dimension/repository.py P0-3）。"""
+        if (
+            visible_actor_id is not None
+            and visible_role is not None
+            and visible_role not in ("platform_admin", "domain_admin")
+        ):
+            vis: list[Any] = [
+                Dimension.status.in_(("PUBLISHED", "DEPRECATED")),
+                Dimension.owner_id == visible_actor_id,
+            ]
+            if visible_role == "reviewer":
+                vis.append(Dimension.status == "REVIEW")
+            return or_(*vis)
+        return None
+
     async def _search_terms(
-        self, needles: list[str], limit: int, raw_q: str | None = None
+        self,
+        needles: list[str],
+        limit: int,
+        raw_q: str | None = None,
+        *,
+        visible_actor_id: int | None = None,
+        visible_role: str | None = None,
     ) -> list[dict[str, Any]]:
         """术语检索：ES 优先（相关度排序），ES 禁用/异常/未命中时降级 MySQL LIKE。"""
         if raw_q:
-            es_items = await self._es_search_assets("term", raw_q, limit)
+            es_items = await self._es_search_assets(
+                "term",
+                raw_q,
+                limit,
+                visible_actor_id=visible_actor_id,
+                visible_role=visible_role,
+            )
             if es_items is not None:
                 return es_items
         stmt = (
@@ -335,6 +388,10 @@ class GlobalSearchRepository:
             )
             .limit(limit)
         )
+        # P0-3 读路径行级隔离（对齐 glossary list_terms）：术语 DRAFT/REVIEW 私有。
+        visibility = self._term_visibility(visible_actor_id, visible_role)
+        if visibility is not None:
+            stmt = stmt.where(visibility)
         rows = (await self._session.execute(stmt)).scalars().all()
         return [
             {
@@ -347,6 +404,24 @@ class GlobalSearchRepository:
             }
             for t in rows
         ]
+
+    def _term_visibility(
+        self, visible_actor_id: int | None, visible_role: str | None
+    ) -> Any | None:
+        """术语读路径行级隔离（对齐 glossary/repository.py P0-3）。"""
+        if (
+            visible_actor_id is not None
+            and visible_role is not None
+            and visible_role not in ("platform_admin", "domain_admin")
+        ):
+            vis: list[Any] = [
+                Term.status.in_(("PUBLISHED", "DEPRECATED")),
+                Term.owner_id == visible_actor_id,
+            ]
+            if visible_role == "reviewer":
+                vis.append(Term.status == "REVIEW")
+            return or_(*vis)
+        return None
 
     async def _es_search_assets(
         self,

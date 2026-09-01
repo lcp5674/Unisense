@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import ALL_ROLES, CurrentUser, require_roles
 from app.api.responses import ApiResponse, get_trace_id, ok
 from app.core.audit import client_ip, write_audit
-from app.core.exceptions import BusinessError, NotFoundError
+from app.core.exceptions import AuthError, BusinessError, NotFoundError
 from app.core.guard import guard_against_injection, guard_against_injection_exempt
 from app.db.mysql import get_db_session as get_session
 from app.services.system_dict.schemas import (
@@ -196,9 +196,18 @@ async def list_dict_items(
 )
 async def list_all_dict_items(
     dict_type: str,
+    user: CurrentUser,
     svc: SystemDictService = Depends(_get_service),
     trace_id: Annotated[str, Depends(get_trace_id)] = "",
 ) -> ApiResponse[list[DictItemResponse]]:
+    # 越权审查修复：pii_rule（PII 检测正则+置信度+类别）属合规敏感配置，仅治理
+    # 角色（平台管理员/域管理员/合规官）可经 /all 读取含 inactive 全量；普通登录
+    # 用户不得窥探（否则可据正则构造绕过 PII 检测的样本）。
+    if dict_type == "pii_rule" and not any(
+        r in ("platform_admin", "domain_admin", "compliance_officer")
+        for r in user.roles_all()
+    ):
+        raise AuthError("无权读取 PII 敏感规则配置", error_code="FORBIDDEN")
     data = await svc.list_all_by_type(dict_type)
     items = [_item_response(item, await svc.get_ref_count(dict_type, item.code)) for item in data]
     return ok(data=items, trace_id=trace_id)

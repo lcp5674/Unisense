@@ -236,6 +236,39 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
             raise NotFoundError(f"逻辑度量不存在: {measure_code}")
         return measure
 
+    async def get_measure_visible(
+        self,
+        measure_code: str,
+        actor_id: int | None = None,
+        role: str | None = None,
+    ) -> MeasureCatalog:
+        """读取逻辑度量详情（读路径行级隔离 P0-3，对齐指标/术语）。
+
+        未发布（DRAFT/REVIEW）仅本人/管理角色/评审人（REVIEW 待审）可见；
+        他人读取一律按「不存在」处理（不泄露存在性）。
+        """
+        measure = await self._repo.get(measure_code)
+        if measure is None:
+            raise NotFoundError(f"逻辑度量不存在: {measure_code}")
+        self._assert_measure_visible(measure, actor_id, role)
+        return measure
+
+    def _assert_measure_visible(
+        self, measure: MeasureCatalog, actor_id: int | None, role: str | None
+    ) -> None:
+        """读路径可见性守卫（对齐指标 _assert_metric_visible 的 DRAFT/REVIEW 语义）。"""
+        if actor_id is None or role is None:
+            return  # 内部调用无鉴权上下文——端点层必传 actor/role
+        if measure.status in ("PUBLISHED", "DEPRECATED"):
+            return
+        if role in ("platform_admin", "domain_admin"):
+            return
+        if measure.owner_id == actor_id:
+            return
+        if role == "reviewer" and measure.status == "REVIEW":
+            return
+        raise NotFoundError(f"逻辑度量不存在: {measure.measure_code}")
+
     async def list_measures(
         self,
         domain: str | None,
@@ -247,10 +280,14 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
         deleted: bool = False,
         page: int = 1,
         page_size: int = 20,
+        visible_actor_id: int | None = None,
+        visible_role: str | None = None,
     ) -> tuple[list[MeasureCatalog], int]:
         """分页列出逻辑度量，返回 (列表, total)（服务端分页，对齐 dimension）。
 
         reviewed_by 非空时过滤"我审过的"（通过/驳回人 ID 匹配，供统一主数据审批工作台）。
+        visible_actor_id/visible_role：读路径行级隔离（P0-3）——非管理角色仅可见
+        公开状态 + 本人负责的未发布度量；评审人可看待审（REVIEW）。
         """
         limit = min(max(page_size, 1), 200)
         offset = (max(page, 1) - 1) * limit
@@ -263,6 +300,8 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
             deleted=deleted,
             limit=limit,
             offset=offset,
+            visible_actor_id=visible_actor_id,
+            visible_role=visible_role,
         )
 
     async def update_measure(self, measure_code: str, data: MeasureUpdate) -> MeasureCatalog:

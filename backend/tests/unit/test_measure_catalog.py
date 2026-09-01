@@ -946,3 +946,74 @@ class TestMeasureInferSynonyms:
         with _patch_llm(enabled=True, content=garbage)[0], pytest.raises(BusinessError) as ei:
             await svc.infer_synonyms("门诊收费金额")
         assert ei.value.error_code == "LLM_INFER_UNAVAILABLE"
+
+
+# ---------- P0-3 读路径行级隔离（越权审查修复） ----------
+
+
+class TestMeasureReadVisibility:
+    """逻辑度量列表/详情读路径行级隔离（对齐指标/维度/术语 P0-3）。"""
+
+    async def test_list_visible_filters_non_admin(self, repo, session) -> None:
+        """非管理角色列表：仅公开状态 + 本人负责的未发布度量。"""
+        session.execute = AsyncMock(side_effect=[_FakeResult(row=0), _FakeResult(rows=[])])
+        await repo.list(
+            None, None, visible_actor_id=9, visible_role="metric_owner"
+        )
+        list_sql = str(
+            session.execute.call_args_list[1][0][0].compile(
+                compile_kwargs={"literal_binds": True}
+            )
+        )
+        assert "measure_catalog.status IN ('PUBLISHED', 'DEPRECATED')" in list_sql
+        assert "measure_catalog.owner_id = 9" in list_sql
+
+    async def test_list_reviewer_sees_review(self, repo, session) -> None:
+        """评审人额外放行 REVIEW 待审项。"""
+        session.execute = AsyncMock(side_effect=[_FakeResult(row=0), _FakeResult(rows=[])])
+        await repo.list(
+            None, None, visible_actor_id=7, visible_role="reviewer"
+        )
+        list_sql = str(
+            session.execute.call_args_list[1][0][0].compile(
+                compile_kwargs={"literal_binds": True}
+            )
+        )
+        assert "measure_catalog.status = 'REVIEW'" in list_sql
+
+    async def test_list_admin_no_filter(self, repo, session) -> None:
+        """管理角色不加可见性过滤（治理视角全量）。"""
+        session.execute = AsyncMock(side_effect=[_FakeResult(row=0), _FakeResult(rows=[])])
+        await repo.list(
+            None, None, visible_actor_id=1, visible_role="platform_admin"
+        )
+        list_sql = str(session.execute.call_args_list[1][0][0].compile())
+        assert "IN ('PUBLISHED', 'DEPRECATED')" not in list_sql
+
+    async def test_get_measure_visible_owner_sees_draft(self) -> None:
+        """本人可见自己的 DRAFT 度量。"""
+        svc, repo = await _svc()
+        repo.get = AsyncMock(return_value=_m("pay_amt", status="DRAFT", owner_id=9))
+        out = await svc.get_measure_visible("pay_amt", actor_id=9, role="metric_owner")
+        assert out.measure_code == "pay_amt"
+
+    async def test_get_measure_visible_other_hidden(self) -> None:
+        """他人 DRAFT 度量按「不存在」处理（不泄露存在性）。"""
+        svc, repo = await _svc()
+        repo.get = AsyncMock(return_value=_m("pay_amt", status="DRAFT", owner_id=9))
+        with pytest.raises(NotFoundError):
+            await svc.get_measure_visible("pay_amt", actor_id=3, role="analyst")
+
+    async def test_get_measure_visible_reviewer_sees_review(self) -> None:
+        """评审人可读 REVIEW 待审度量。"""
+        svc, repo = await _svc()
+        repo.get = AsyncMock(return_value=_m("pay_amt", status="REVIEW", owner_id=9))
+        out = await svc.get_measure_visible("pay_amt", actor_id=7, role="reviewer")
+        assert out.measure_code == "pay_amt"
+
+    async def test_get_measure_visible_published_anyone(self) -> None:
+        """公开状态任何人可读。"""
+        svc, repo = await _svc()
+        repo.get = AsyncMock(return_value=_m("pay_amt", status="PUBLISHED", owner_id=9))
+        out = await svc.get_measure_visible("pay_amt", actor_id=3, role="viewer")
+        assert out.measure_code == "pay_amt"

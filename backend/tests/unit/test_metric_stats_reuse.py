@@ -96,6 +96,41 @@ async def test_reuse_summary_degrades_when_lineage_unavailable() -> None:
     assert result["items"][0]["reuse_count"] == 0
 
 
+async def test_reuse_summary_applies_domain_type_status_filters() -> None:
+    """按业务域/指标类型/指标状态过滤时，查询语句带对应 where 条件。"""
+    db = _db_with_metrics([])
+    with patch("app.services.semantic.metric_stats.LineageRepository") as repo_cls:
+        repo = repo_cls.return_value
+        repo.metric_reuse_counts = AsyncMock(return_value={})
+        await MetricStatsService(db).reuse_summary(
+            domain="sales", type="atomic", status="PUBLISHED"
+        )
+
+    stmt = db.execute.await_args.args[0]
+    sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "metric.domain = 'sales'" in sql
+    assert "metric.type = 'atomic'" in sql
+    assert "metric.status = 'PUBLISHED'" in sql
+    assert "metric.deleted_at IS NULL" in sql
+
+
+async def test_reuse_summary_no_filters_keeps_plain_query() -> None:
+    """不过滤时查询不携带任何指标属性 where 条件（仅软删过滤）。"""
+    db = _db_with_metrics([("m1", "指标1", "sales", "atomic", "PUBLISHED")])
+    with patch("app.services.semantic.metric_stats.LineageRepository") as repo_cls:
+        repo = repo_cls.return_value
+        repo.metric_reuse_counts = AsyncMock(return_value={})
+        await MetricStatsService(db).reuse_summary()
+
+    stmt = db.execute.await_args.args[0]
+    sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    # 仅软删过滤，不携带任何指标属性 where 条件（SELECT 列名含 domain/type/status 属正常）
+    assert "WHERE metric.deleted_at IS NULL" in sql
+    assert "AND metric.domain" not in sql
+    assert "AND metric.type" not in sql
+    assert "AND metric.status" not in sql
+
+
 # ---- API ----
 
 
@@ -138,3 +173,53 @@ async def test_reuse_api_envelope_and_validation() -> None:
     assert data.total == 1
     assert data.items[0].reuse_count == 3
     assert data.items[0].consumed_by_count == 1
+
+
+# ---- 读路径行级隔离（越权审查修复） ----
+
+
+async def test_reuse_summary_applies_visibility_for_non_admin() -> None:
+    """非管理角色统计：查询携带可见性条件（公开状态 + 本人负责），防经统计侧门窥探草稿。"""
+    db = _db_with_metrics([])
+    with patch("app.services.semantic.metric_stats.LineageRepository") as repo_cls:
+        repo = repo_cls.return_value
+        repo.metric_reuse_counts = AsyncMock(return_value={})
+        await MetricStatsService(db).reuse_summary(
+            visible_actor_id=9, visible_role="metric_owner"
+        )
+
+    stmt = db.execute.await_args.args[0]
+    sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "metric.status IN ('PUBLISHED', 'EXPERIMENTAL', 'DEPRECATED')" in sql
+    assert "metric.owner_id = 9" in sql
+    assert "metric.backup_owner_id = 9" in sql
+
+
+async def test_reuse_summary_reviewer_sees_review() -> None:
+    """评审人统计额外放行 REVIEW 待审项。"""
+    db = _db_with_metrics([])
+    with patch("app.services.semantic.metric_stats.LineageRepository") as repo_cls:
+        repo = repo_cls.return_value
+        repo.metric_reuse_counts = AsyncMock(return_value={})
+        await MetricStatsService(db).reuse_summary(
+            visible_actor_id=7, visible_role="reviewer"
+        )
+
+    stmt = db.execute.await_args.args[0]
+    sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "metric.status = 'REVIEW'" in sql
+
+
+async def test_reuse_summary_admin_no_visibility() -> None:
+    """管理角色统计不加可见性过滤（治理视角全量）。"""
+    db = _db_with_metrics([])
+    with patch("app.services.semantic.metric_stats.LineageRepository") as repo_cls:
+        repo = repo_cls.return_value
+        repo.metric_reuse_counts = AsyncMock(return_value={})
+        await MetricStatsService(db).reuse_summary(
+            visible_actor_id=1, visible_role="platform_admin"
+        )
+
+    stmt = db.execute.await_args.args[0]
+    sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "IN ('PUBLISHED', 'EXPERIMENTAL', 'DEPRECATED')" not in sql

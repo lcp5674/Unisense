@@ -142,6 +142,8 @@ async def list_measures(
         deleted=deleted,
         page=page,
         page_size=page_size,
+        visible_actor_id=user.id,
+        visible_role=user.role,
     )
     converted = [MeasureResponse.from_model(i) for i in items]
     return ok(
@@ -202,7 +204,9 @@ async def get_measure(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    resp = await MeasureCatalogService(db).get_measure(measure_code)
+    resp = await MeasureCatalogService(db).get_measure_visible(
+        measure_code, actor_id=user.id, role=user.role
+    )
     return ok(data=MeasureResponse.from_model(resp), trace_id=trace_id)
 
 

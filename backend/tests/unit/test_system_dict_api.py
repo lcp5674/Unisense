@@ -284,3 +284,51 @@ async def test_infer_description_invalid_422(dict_client: httpx.AsyncClient) -> 
         json={"dict_type": "unit", "label": ""},
     )
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------- PII 规则读守卫（越权审查修复）
+
+
+@pytest.fixture
+async def analyst_client() -> AsyncIterator[httpx.AsyncClient]:
+    """普通登录用户（analyst）：验证 pii_rule 只读守卫。"""
+
+    async def fake_db() -> AsyncIterator[MagicMock]:
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=MagicMock())
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=9,
+        role="analyst",
+        domain="sales",
+        roles_all=lambda: ["analyst"],
+        has_role=lambda r: r == "analyst",
+    )
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
+    app.dependency_overrides.clear()
+
+
+async def test_pii_rule_all_blocked_for_analyst(
+    analyst_client: httpx.AsyncClient,
+) -> None:
+    """越权审查修复：非治理角色读取 pii_rule 全量（含 PII 检测正则+置信度）→ 403。"""
+    resp = await analyst_client.get("/api/v1/dicts/pii_rule/all")
+    assert resp.status_code == 403
+    assert resp.json()["code"] == "FORBIDDEN"
+
+
+async def test_regular_dict_all_allowed_for_analyst(
+    analyst_client: httpx.AsyncClient,
+) -> None:
+    """普通字典类型不受影响（analyst 仍可读 granularity 全量）。"""
+    fake_svc = MagicMock()
+    fake_svc.list_all_by_type = AsyncMock(return_value=[])
+    fake_svc.get_ref_count = AsyncMock(return_value=0)
+    app.dependency_overrides[system_dict._get_service] = lambda: fake_svc
+    resp = await analyst_client.get("/api/v1/dicts/granularity/all")
+    assert resp.status_code == 200
+    assert resp.json()["data"] == []

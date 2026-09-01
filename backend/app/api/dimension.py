@@ -1046,6 +1046,11 @@ async def list_members(
     trace_id: Annotated[str, Depends(get_trace_id)],
     dim_code: str,
 ) -> Any:
+    # 越权审查修复：父维度可见性守卫——他人 DRAFT/REVIEW 维度的成员值属私有
+    # 工作区，非 owner/管理/评审人不泄露（对齐 get_dimension_visible）。
+    await DimensionService(db).get_dimension_visible(
+        dim_code, actor_id=user.id, role=user.role
+    )
     items = await DimensionService(db).list_members(dim_code)
     return ok(
         data={"items": [DimensionMemberResponse.from_model(i) for i in items], "total": len(items)},
@@ -1235,6 +1240,11 @@ async def list_dimension_metrics(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     # 治理追溯：查看该维度被哪些指标消费（绑定关系 + 指标信息）
+    # 越权审查修复：父维度可见性守卫（对齐 list_members）——他人 DRAFT/REVIEW
+    # 维度的绑定指标不泄露。
+    await DimensionService(db).get_dimension_visible(
+        dim_code, actor_id=user.id, role=user.role
+    )
     items = await DimensionService(db).list_dimension_metrics(dim_code)
     converted = [
         DimensionMetricBinding(

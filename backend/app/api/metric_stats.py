@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -57,13 +57,25 @@ async def metric_reuse_stats(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
+    domain: Annotated[str | None, Query(description="业务域 code 过滤")] = None,
+    metric_type: Annotated[
+        str | None, Query(alias="type", description="指标类型过滤（atomic/derived/composite）")
+    ] = None,
+    status: Annotated[str | None, Query(description="指标状态过滤")] = None,
 ) -> ApiResponse[MetricReuseResponse]:
     """返回每个指标的被引用情况（被多少派生指标/报表引用），按总复用度降序。
 
     ``reuse_count = derived_by_count + consumed_by_count``；顶部为高复用核心指标，
-    尾部为零复用指标（潜在治理对象）。
+    尾部为零复用指标（潜在治理对象）。支持按业务域/指标类型/指标状态过滤，
+    统计计数与清单基于同一过滤集合。
     """
-    result = await MetricStatsService(db).reuse_summary()
+    result = await MetricStatsService(db).reuse_summary(
+        domain=domain,
+        type=metric_type,
+        status=status,
+        visible_actor_id=user.id,
+        visible_role=user.role,
+    )
     return ok(data=MetricReuseResponse.model_validate(result), trace_id=trace_id)
 
 
@@ -114,11 +126,23 @@ async def metric_asset_ledger(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
+    domain: Annotated[str | None, Query(description="业务域 code 过滤")] = None,
+    metric_type: Annotated[
+        str | None, Query(alias="type", description="指标类型过滤（atomic/derived/composite）")
+    ] = None,
+    status: Annotated[str | None, Query(description="指标状态过滤")] = None,
 ) -> ApiResponse[MetricLedgerResponse]:
     """返回活跃/僵尸指标数与每个僵尸指标详情（最后一次更新、被引用次数）。
 
     僵尸判定复用 HealthScorer 活跃度维度（近 30 天无更新）+ 零引用；重复建设
     以冲突预检挂载的 SAME_DEF_DIFF_NAME 信号为来源（低耦合，不深挖仲裁侧）。
+    支持按业务域/指标类型/指标状态过滤，统计计数与明细基于同一过滤集合。
     """
-    result = await MetricStatsService(db).asset_ledger()
+    result = await MetricStatsService(db).asset_ledger(
+        domain=domain,
+        type=metric_type,
+        status=status,
+        visible_actor_id=user.id,
+        visible_role=user.role,
+    )
     return ok(data=MetricLedgerResponse.model_validate(result), trace_id=trace_id)

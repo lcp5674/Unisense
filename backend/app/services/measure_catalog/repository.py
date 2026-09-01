@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -83,6 +84,8 @@ class MeasureCatalogRepository:
         deleted: bool = False,
         limit: int = 20,
         offset: int = 0,
+        visible_actor_id: int | None = None,
+        visible_role: str | None = None,
     ) -> tuple[list[MeasureCatalog], int]:
         """分页列出逻辑度量，返回 (列表, total)。
 
@@ -90,12 +93,29 @@ class MeasureCatalogRepository:
         - keyword 参数化 LIKE + 通配符转义（对齐 FR-035：% / _ 须转义，防模糊放大）
         - deleted=True 时列出已软删记录（回收站视图）
         - reviewed_by 非空时过滤"我审过的"（通过/驳回人 ID 匹配，供统一主数据审批工作台）
+        - visible_actor_id/visible_role：读路径行级隔离（P0-3，对齐指标/维度/术语）——
+          非管理角色仅可见公开状态（PUBLISHED/DEPRECATED）+ 本人负责的未发布
+          （DRAFT/REVIEW）；评审人可看待审（REVIEW）。管理角色传 None 即不加过滤。
         """
         conditions = (
             [MeasureCatalog.deleted_at.is_not(None)]
             if deleted
             else [MeasureCatalog.deleted_at.is_(None)]
         )
+        # P0-3 读路径行级隔离（对齐 dimension/glossary）：度量 DRAFT/REVIEW 是创建者
+        # 私有工作区，他人不得窥探；公开状态（PUBLISHED/DEPRECATED）可被发现。
+        if (
+            visible_actor_id is not None
+            and visible_role is not None
+            and visible_role not in ("platform_admin", "domain_admin")
+        ):
+            visibility: list[Any] = [
+                MeasureCatalog.status.in_(("PUBLISHED", "DEPRECATED")),
+                MeasureCatalog.owner_id == visible_actor_id,
+            ]
+            if visible_role == "reviewer":
+                visibility.append(MeasureCatalog.status == "REVIEW")
+            conditions.append(or_(*visibility))
         if domain:
             conditions.append(MeasureCatalog.domain == domain)
         if status:
