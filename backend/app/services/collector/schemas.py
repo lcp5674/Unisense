@@ -752,14 +752,15 @@ class BatchInferHistoryCreate(BaseModel):
 class SqlQueryRequest(BaseModel):
     """数据源只读 SQL 查询请求（平台内部运维/分析用）。
 
-    sql 仅允许单条只读语句（SELECT / SHOW / DESC / EXPLAIN，服务层用 sqlglot 白名单
-    校验，拒绝 DDL/DML/多语句/状态变更），limit 兜底返回行数上限。
+    sql 仅允许单条只读语句（SELECT / SHOW / DESC / EXPLAIN / USE / HELP / CHECKSUM /
+    CHECK 等非 DDL/DML 语句，服务层用 sqlglot 白名单校验，拒绝 DDL/DML/多语句/
+    状态变更/行锁/写出），limit 兜底返回行数上限。
     """
 
     sql: str = Field(
         min_length=1,
         max_length=8000,
-        description="只读语句（SELECT / SHOW / DESC / EXPLAIN，仅允许单条）",
+        description="只读语句（SELECT / SHOW / DESC / EXPLAIN / USE 等，仅允许单条）",
     )
     limit: int = Field(default=100, ge=1, le=500, description="返回行数上限")
 

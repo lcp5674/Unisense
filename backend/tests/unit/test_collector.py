@@ -1758,6 +1758,13 @@ class _MultiSchemaConnector:
         if "information_schema.schemata" in sql:
             return [{"schema_name": s} for s in self._schemas]
         if "information_schema.tables" in sql:
+            if "table_schema IN" in sql:
+                # list_tables 批量 IN 查询：按传入 schemas 返回带 schema 的行
+                rows = []
+                for s in params.get("schemas") or []:
+                    for t in self._tables_by_schema.get(s, []):
+                        rows.append({"table_schema": s, "table_name": t})
+                return rows
             return [{"table_name": t} for t in self._tables_by_schema.get(params.get("schema"), [])]
         if "information_schema.columns" in sql:
             # P1-1/P1-2: 批量列查询返回 {table_name, column_name, data_type, is_nullable}
@@ -5193,34 +5200,58 @@ async def test_query_sql_preserves_existing_limit_and_truncates():
 
 
 async def test_query_sql_rejects_multi_statement_and_ddl():
-    """多语句 / DDL / DML / SELECT INTO / 状态变更 / 维护命令均拒绝。"""
+    """多语句 / DDL / DML / SELECT INTO / 行锁 / 状态变更 / 维护命令 / 危险函数均拒绝。"""
     svc, _ = _query_svc()
     for bad in [
         "SELECT * FROM t; DELETE FROM t",
         "SHOW DATABASES; DELETE FROM t",
+        "CHECKSUM TABLE t; DELETE FROM t",
         "DELETE FROM t",
         "UPDATE t SET a = 1",
         "INSERT INTO t VALUES (1)",
+        "REPLACE INTO t VALUES (1)",
         "DROP TABLE t",
         "TRUNCATE TABLE t",
         "CREATE TABLE t (a int)",
         "ALTER TABLE t ADD COLUMN b int",
+        "RENAME TABLE a TO b",
         "MERGE INTO t USING s ON t.id=s.id WHEN MATCHED THEN UPDATE SET a=s.a",
         "GRANT SELECT ON db.t TO u",
         "SET @a = 1",
-        "USE db",
+        "SET GLOBAL max_connections = 100",
+        "USE db; SELECT * FROM t",
         "KILL 5",
         "FLUSH TABLES",
         "ANALYZE TABLE t",
         "OPTIMIZE TABLE t",
-        "SELECT * INTO OUTFILE '/tmp/x' FROM t",
+        "CALL p()",
+        "PREPARE stmt FROM 'SELECT 1'",
+        "EXECUTE stmt",
+        "BEGIN",
+        "COMMIT",
+        "ROLLBACK",
+        "SELECT * FROM t FOR UPDATE",
+        "SELECT * FROM t FOR SHARE",
+        "SELECT * INTO @v FROM t",
+        "SELECT a, b INTO OUTFILE '/tmp/x' FROM t",
+        "SELECT SLEEP(1)",
+        "SELECT GET_LOCK('x', 10)",
+        "SELECT LOAD_FILE('/etc/passwd')",
+        "EXPLAIN INSERT INTO t VALUES (1)",
+        "EXPLAIN DELETE FROM t",
+        "EXPLAIN",
+        "LOCK TABLES t READ",
+        "UNLOCK TABLES",
+        "DO SLEEP(1)",
+        "HANDLER t OPEN",
+        "VACUUM",
     ]:
         with pytest.raises(AppValidationError):
             await svc.query_sql("s1", bad, limit=10)
 
 
 async def test_query_sql_allows_readonly_commands_without_limit():
-    """SHOW / DESC / EXPLAIN 等只读语句放行，且不追加 LIMIT（Python 侧截断兜底）。"""
+    """SHOW / DESC / EXPLAIN / USE / HELP / CHECKSUM / CHECK 等只读语句放行，且不追加 LIMIT。"""
     svc, repo = _query_svc()
     src = MagicMock(source_id="s1", source_type="mysql", connection_config="enc")
     repo.get_source = AsyncMock(return_value=src)
@@ -5235,11 +5266,37 @@ async def test_query_sql_allows_readonly_commands_without_limit():
             "SHOW CREATE TABLE t",
             "DESC t",
             "EXPLAIN SELECT * FROM t",
+            "EXPLAIN ANALYZE SELECT * FROM t",
+            "USE db",
+            "HELP 'contents'",
+            "CHECKSUM TABLE t",
+            "CHECK TABLE t",
         ]:
             result = await svc.query_sql("s1", sql, limit=10)
             assert conn.queries[-1] == sql, f"不应追加 LIMIT: {conn.queries[-1]}"
             assert result["columns"] == ["Database"]  # 假连接器固定返回
             assert result["total"] == 2
+
+
+async def test_query_sql_allows_readonly_select_variants():
+    """SELECT 变体（WITH/子查询/反引号保留字表名/字面量含危险词）放行，且追加 LIMIT。"""
+    svc, repo = _query_svc()
+    src = MagicMock(source_id="s1", source_type="mysql", connection_config="enc")
+    repo.get_source = AsyncMock(return_value=src)
+    conn = _QueryConnector([{"a": 1}])
+
+    with patch(
+        "app.services.collector.service.build_collector", return_value=conn
+    ):
+        for sql in [
+            "WITH x AS (SELECT 1 AS v) SELECT * FROM x",
+            "SELECT * FROM t JOIN s ON t.id = s.id",
+            "SELECT * FROM `update`",  # 反引号保留字表名（mysql 方言兜底解析）
+            "SELECT * FROM t WHERE action = 'delete'",  # 字面量里的词不误报
+        ]:
+            result = await svc.query_sql("s1", sql, limit=10)
+            assert conn.queries[-1].endswith("LIMIT 10"), conn.queries[-1]
+            assert result["total"] == 1
 
 
 async def test_query_sql_source_not_found():

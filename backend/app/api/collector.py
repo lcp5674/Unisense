@@ -772,8 +772,9 @@ async def query_source_sql(
 ) -> ApiResponse[SqlQueryResponse]:
     """对已注册数据源执行只读查询（平台内部运维/分析，写审计）。
 
-    仅允许单条只读语句（SELECT / SHOW / DESC / EXPLAIN，服务层 sqlglot 白名单校验，
-    拒绝多语句/DDL/DML/SELECT INTO/状态变更），LIMIT 兜底防止大结果集；
+    仅允许单条只读语句（SELECT / SHOW / DESC / EXPLAIN / USE / HELP / CHECKSUM /
+    CHECK 等非 DDL/DML 语句，服务层 sqlglot 白名单校验，拒绝多语句/DDL/DML/
+    SELECT INTO/行锁/状态变更/危险函数），LIMIT 兜底防止大结果集；
     仅平台管理员/域管理员或该数据源 Owner 可执行。
     """
     svc = _svc(db)
