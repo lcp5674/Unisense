@@ -421,6 +421,75 @@ async def check_dsd_overdue(ctx: dict[str, Any]) -> list[int]:
     return reminded
 
 
+@task_locked("sunset-expiry")
+async def check_sunset_expiry(ctx: dict[str, Any]) -> list[int]:
+    """日落期执行者（每日 cron，B7 审查修复）。
+
+    查找 DEPRECATED 且 ``sunset_until`` 已过期的指标：软删归档（置 deleted_at）
+    + 审计留痕——此前 ``sunset_until`` 写入后无执行者，废弃指标永久滞留目录。
+    软删保留行与审计追溯，目录/消费/推荐自然不可见；Owner 可经「重新启用」
+    （reactivate_metric）恢复后重新走审核流。
+
+    Returns:
+        被归档的指标 metric_id 列表。
+    """
+    from sqlalchemy import select, update
+
+    from app.core.audit import write_audit
+    from app.db.mysql import async_session_factory
+    from app.models.metric import Metric
+
+    archived: list[int] = []
+    today = datetime.now(UTC).date()
+
+    async with async_session_factory() as db:
+        stmt = select(Metric).where(
+            Metric.status == "DEPRECATED",
+            Metric.sunset_until.is_not(None),
+            Metric.sunset_until < today,
+            Metric.deleted_at.is_(None),
+        )
+        result = await db.execute(stmt)
+        metrics = result.scalars().all()
+
+        for metric in metrics:
+            try:
+                await db.execute(
+                    update(Metric)
+                    .where(Metric.id == metric.id)
+                    .values(deleted_at=datetime.now(UTC))
+                )
+                await write_audit(
+                    db,
+                    actor_id=0,
+                    action="metric.sunset_archive",
+                    entity_type="metric",
+                    entity_id=metric.metric_code,
+                    detail={
+                        "metric_code": metric.metric_code,
+                        "sunset_until": str(metric.sunset_until),
+                    },
+                )
+                archived.append(metric.id)
+                logger.warning(
+                    "metric_sunset_archived",
+                    metric_code=metric.metric_code,
+                    metric_id=metric.id,
+                )
+            except Exception:
+                logger.warning(
+                    "metric_sunset_archive_failed",
+                    metric_id=metric.id,
+                    exc_info=True,
+                )
+                # T2：单条失败回滚会话，避免污染后续循环与最终 commit。
+                await db.rollback()
+
+        await db.commit()
+
+    return archived
+
+
 # Arq Worker 注册
 functions = [
     check_pending_version_timeouts,
@@ -428,6 +497,7 @@ functions = [
     check_emergency_review_overdue,
     check_experimental_expiry,
     check_dsd_overdue,
+    check_sunset_expiry,
 ]
 
 # 注意：以下 cron_jobs（dict 格式）仅为语义任务清单参考，实际调度注册
@@ -439,4 +509,5 @@ cron_jobs = [
     {"func": check_emergency_review_overdue, "cron": "0 * * * *"},  # 每小时
     {"func": check_experimental_expiry, "cron": "0 4 * * *"},  # 每日凌晨4点
     {"func": check_dsd_overdue, "cron": "30 3 * * *"},  # 每日凌晨3点30分（健康刷新后）
+    {"func": check_sunset_expiry, "cron": "45 3 * * *"},  # 每日凌晨3点45分（日落归档）
 ]

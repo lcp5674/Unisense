@@ -43,6 +43,7 @@ from app.tasks.semantic_tasks import (
     check_emergency_review_overdue,
     check_experimental_expiry,
     check_pending_version_timeouts,
+    check_sunset_expiry,
     refresh_health_scores,
 )
 from app.tasks.stale_collection_jobs import stale_collection_jobs_task
@@ -244,6 +245,7 @@ class WorkerSettings:
         check_emergency_review_overdue,
         check_experimental_expiry,
         check_dsd_overdue,
+        check_sunset_expiry,
         run_quality_checks,
         check_escalation_retries,
         audit_archive_task,
@@ -308,6 +310,13 @@ class WorkerSettings:
             name="dsd-overdue",
             hour=3,
             minute=30,
+            run_at_startup=False,
+        ),
+        cron(
+            check_sunset_expiry,
+            name="sunset-expiry",
+            hour=3,
+            minute=45,
             run_at_startup=False,
         ),
         cron(

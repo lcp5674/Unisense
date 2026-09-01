@@ -637,13 +637,35 @@ class LineageService(BaseService):
         Returns:
             ``LineageScanResponse`` 汇总（文件/语句/边数/成功失败/逐文件明细）。
         """
+        # S2（审查修复）：扫描根目录固化——拒绝用户自选任意路径（此前沙箱根即
+        # 用户自选目录自身，metric_owner 可指向 /etc、/app、/proc 等解析任意扩展名
+        # 文件，泄露容器文件系统布局与部分文件内容）。现强制 req.path 解析后位于
+        # 配置根 UNISENSE_LINEAGE_SCAN_DIR（realpath 前缀判定，子目录放行）；
+        # 未配置根时 fail-closed 拒绝一切扫描（定时任务配根后自然通过）。
+        configured_root = (
+            os.path.realpath(settings.lineage_scan_dir) if settings.lineage_scan_dir else ""
+        )
+        if not configured_root:
+            raise ValidationError(
+                "未配置血缘扫描根目录（UNISENSE_LINEAGE_SCAN_DIR），禁止扫描",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
+        sandbox_root = os.path.realpath(req.path)
+        if not (
+            sandbox_root == configured_root
+            or sandbox_root.startswith(configured_root + os.sep)
+        ):
+            raise ValidationError(
+                f"扫描路径不在允许的根目录内: {req.path}（仅可扫描 "
+                f"{configured_root} 及其子目录）",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
         # 路径沙箱：先查原始路径含 ``..`` 组件（abspath 会归一化掉它），再确认目录存在
         if ".." in re.split(r"[\\/]", req.path) or not os.path.isdir(req.path):
             raise ValidationError(
                 f"扫描路径无效或不存在: {req.path}", error_code=ErrorCode.VALIDATION_ERROR
             )
         # P1 加固：以 realpath 确立沙箱根，防止树内符号链接指向目录外文件（信息泄露/越权读取）
-        sandbox_root = os.path.realpath(req.path)
         if not os.path.isdir(sandbox_root):
             raise ValidationError(
                 f"扫描路径无效或不存在: {req.path}", error_code=ErrorCode.VALIDATION_ERROR

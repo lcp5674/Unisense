@@ -1667,10 +1667,39 @@ class MetricService(BaseService):
         # DRAFT 并清空评审指派——否则评审人看到的是已提交旧版本，修改静默不生效
         # 且无重新提审。提交人编辑后需重新提交评审（触发新指派与通知）。
         if metric.status == "REVIEW":
+            withdrawn_reviewer_id = metric.reviewer_id
             updates["status"] = "DRAFT"
             updates["reviewer_id"] = None
             updates["reviewer_type"] = None
             updates["reviewer_domain"] = None
+            # B5（审查修复）：编辑即撤回须事件化 + 定向通知已受理评审人——此前
+            # 静默撤回，评审人已开始评审却悄然从工作台消失，提交方与评审方沟通
+            # 断链（对比 submit/approve/reject 均有事件+定向通知）。best-effort，
+            # 失败不阻断编辑。
+            if withdrawn_reviewer_id is not None:
+                await self._publish_event(
+                    "metric.review_withdrawn",
+                    {
+                        "metric_code": metric_code,
+                        "domain": metric.domain,
+                        "withdrawn_by": actor_id,
+                        "reviewer_id": withdrawn_reviewer_id,
+                    },
+                    actor_id=str(actor_id),
+                )
+                await self._notify_metric_stakeholders(
+                    "metric.review_withdrawn",
+                    "指标评审已撤回",
+                    metric_code=metric_code,
+                    domain=metric.domain,
+                    submitter_id=actor_id,
+                    assigned_reviewer_id=withdrawn_reviewer_id,
+                    payload={
+                        "metric_code": metric_code,
+                        "domain": metric.domain,
+                        "reason": "评审中指标被编辑，已撤回重提（编辑后需重新提交评审）",
+                    },
+                )
 
         # OneData 挂载层（界限文档 §2.3 第 3 条）：派生指标携带 mounts（多变体列表，
         # 2026-08-27 放开一指标一挂载）时全量 diff 对齐 metric_mount——有 id 更新、

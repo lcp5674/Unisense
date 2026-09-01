@@ -481,3 +481,61 @@ async def test_check_emergency_review_overdue_no_metric() -> None:
         overdue = await check_emergency_review_overdue({"redis": _FakeRedis()})
 
         assert overdue == []
+
+
+# ---- B7（审查修复）：日落期执行者（DEPRECATED 超期软删归档）----
+
+
+@pytest.fixture
+def _patch_sunset_env() -> None:
+    """check_sunset_expiry 依赖替换为可控 mock（函数体内 import）。"""
+    patches = [patch("app.db.mysql.async_session_factory")]
+    for p in patches:
+        p.start()
+    yield
+    for p in patches:
+        p.stop()
+
+
+async def test_check_sunset_expiry_archives_overdue(_patch_sunset_env) -> None:
+    """DEPRECATED 且 sunset_until 已过期 → 软删归档 + 审计留痕（B7）。
+
+    修复前 sunset_until 写入后无执行者，废弃指标永久滞留目录。
+    """
+    from unittest.mock import patch
+
+    from app.db.mysql import async_session_factory
+    from app.tasks.semantic_tasks import check_sunset_expiry
+
+    metric = _metric(status="DEPRECATED")
+    metric.sunset_until = _dt.date(2020, 1, 1)
+    db = _mock_db([metric])
+    async_session_factory.return_value = _AsyncCM(db)
+
+    with patch("app.core.audit.write_audit") as mock_audit:
+        archived = await check_sunset_expiry({"redis": _FakeRedis()})
+
+    assert archived == [metric.id]
+    # 软删（UPDATE metric SET deleted_at）已执行
+    executed = [str(c.args[0]) for c in db.execute.await_args_list]
+    assert any("UPDATE metric" in s for s in executed), executed
+    # 审计留痕已写入
+    mock_audit.assert_awaited_once()
+
+
+async def test_check_sunset_expiry_skips_not_due(_patch_sunset_env) -> None:
+    """无到期命中（SQL 过滤：DEPRECATED 且 sunset_until < today）→ 不归档。"""
+    from unittest.mock import patch
+
+    from app.db.mysql import async_session_factory
+    from app.tasks.semantic_tasks import check_sunset_expiry
+
+    # SQL 层已按状态与日落日期过滤，mock 返回空结果 → 任务无动作
+    db = _mock_db([])
+    async_session_factory.return_value = _AsyncCM(db)
+
+    with patch("app.core.audit.write_audit") as mock_audit:
+        archived = await check_sunset_expiry({"redis": _FakeRedis()})
+
+    assert archived == []
+    mock_audit.assert_not_awaited()

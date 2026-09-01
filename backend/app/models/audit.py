@@ -19,7 +19,10 @@ class AuditLog(Base, TimestampMixin):
     """操作审计日志（WORM：只写不删）。
 
     全写操作审计：actor/action/entity/detail/ip/trace_id。
-    禁止 UPDATE/DELETE（MySQL 触发器强制，对齐 TD §4.1）。
+    禁止 UPDATE/DELETE（MySQL 触发器强制，迁移 0122 建：
+    - 未归档行禁止 DELETE；
+    - 未归档行禁止修改核心字段，仅允许 archived 翻转；
+    - 已归档行允许物理删除——归档搬迁（MinIO 冷存 + SHA-256 哈希链）是唯一删除路径）。
     不继承 SoftDeleteMixin（不可删除）。
 
     Attributes:

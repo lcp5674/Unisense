@@ -96,11 +96,12 @@ async def test_skips_recent_conflicts(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_single_failure_does_not_block(monkeypatch: pytest.MonkeyPatch) -> None:
-    """单条升级失败不阻断整批（其余仍升级）。"""
+    """单条升级失败不阻断整批（其余仍升级），且失败条目回滚会话（B8）。"""
     c1 = _conflict("CF-A")
     c2 = _conflict("CF-B")
     db = MagicMock()
     db.commit = AsyncMock()
+    db.rollback = AsyncMock()
     db.execute = AsyncMock(return_value=MagicMock(scalars=lambda: MagicMock(all=lambda: [c1, c2])))
     db.__aenter__ = AsyncMock(return_value=db)
     db.__aexit__ = AsyncMock(return_value=False)
@@ -120,6 +121,8 @@ async def test_single_failure_does_not_block(monkeypatch: pytest.MonkeyPatch) ->
     result = await auto_escalate_overdue({"redis": _FakeRedis()})
     assert result["scanned"] == 2
     assert result["escalated"] == 1
+    # B8：失败条目必须回滚会话，否则后续 commit 抛 PendingRollbackError
+    db.rollback.assert_awaited_once()
 
 
 def _escalated_stale() -> Conflict:

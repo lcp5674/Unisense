@@ -32,7 +32,9 @@ async def analyst_client():
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=5, role="analyst")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=5, role="analyst", roles_all=lambda: ["analyst"]
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
@@ -50,7 +52,29 @@ async def owner_client():
         yield session
 
     app.dependency_overrides[deps.get_db_session] = fake_db
-    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(id=5, role="metric_owner")
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=5, role="metric_owner", roles_all=lambda: ["metric_owner"]
+    )
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c, session
+
+
+@pytest.fixture
+async def admin_client():
+    """平台管理员客户端（/export 已收紧为治理/合规角色，metric_owner 无权导出）。"""
+    session = MagicMock()
+    session.add = MagicMock()
+    session.commit = AsyncMock()
+    session.execute = AsyncMock(return_value=MagicMock())
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, role="platform_admin", roles_all=lambda: ["platform_admin"]
+    )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c, session
@@ -186,9 +210,9 @@ async def test_parse_batch_still_blocks_injection_in_other_fields(owner_client, 
     svc.parse_batch.assert_not_awaited()
 
 
-async def test_export_blocks_injection_in_node_query(owner_client, monkeypatch):
+async def test_export_blocks_injection_in_node_query(admin_client, monkeypatch):
     """/export 的 node query 参数仍受注入守卫（非 SQL 文本字段，与 /parse 的 sql 不同）。"""
-    client, _ = owner_client
+    client, _ = admin_client
     svc = AsyncMock()
     monkeypatch.setattr("app.api.lineage._svc", lambda db: svc)
     resp = await client.get(
@@ -200,9 +224,9 @@ async def test_export_blocks_injection_in_node_query(owner_client, monkeypatch):
     svc.export_lineage.assert_not_awaited()
 
 
-async def test_export_accepts_legit_node(owner_client, monkeypatch):
+async def test_export_accepts_legit_node(admin_client, monkeypatch):
     """合法节点 id（table:dws.orders）+ 过滤参数正常导出（200）。"""
-    client, _ = owner_client
+    client, _ = admin_client
     svc = AsyncMock()
     svc.export_lineage.return_value = []
     monkeypatch.setattr("app.api.lineage._svc", lambda db: svc)

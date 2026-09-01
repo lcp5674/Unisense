@@ -2645,9 +2645,10 @@ def _write_scan_file(dirpath: str, name: str, content: str) -> str:
     return path
 
 
-async def test_scan_directory_dry_run_stats() -> None:
+async def test_scan_directory_dry_run_stats(monkeypatch: pytest.MonkeyPatch) -> None:
     """库级扫描 dry_run：递归收集文件 + 表级/字段级/DDL 边统计，不落库。"""
     with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setattr("app.services.lineage.service.settings.lineage_scan_dir", td)
         _write_scan_file(td, "a.sql", "INSERT INTO dws.t SELECT a.id FROM ods.a")
         _write_scan_file(td, "b.hql", "CREATE TABLE dws.u LIKE ods.s")
         _write_scan_file(td, "c.sql", "SELECT 1")  # 无血缘边
@@ -2671,9 +2672,10 @@ async def test_scan_directory_dry_run_stats() -> None:
         assert svc._repo.upsert_calls == []
 
 
-async def test_scan_directory_persist_writes_edges() -> None:
+async def test_scan_directory_persist_writes_edges(monkeypatch: pytest.MonkeyPatch) -> None:
     """库级扫描非 dry_run：批量写入 DML 边 + 结构性 DDL 边 + 图同步。"""
     with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setattr("app.services.lineage.service.settings.lineage_scan_dir", td)
         _write_scan_file(td, "a.sql", "INSERT INTO dws.t SELECT a.id FROM ods.a")
         _write_scan_file(td, "b.sql", "CREATE TABLE dws.u LIKE ods.s")
         svc = LineageService(db=_FakeSession())
@@ -2690,17 +2692,62 @@ async def test_scan_directory_persist_writes_edges() -> None:
         assert any(getattr(r, "source", None) == "scan" for r in svc._repo.runs)
 
 
-async def test_scan_directory_rejects_path_traversal() -> None:
-    """路径沙箱：拒绝 ``..`` 相对路径穿越。"""
-    svc = LineageService(db=_FakeSession())
-    svc._repo = FakeRepo()
-    with pytest.raises(ValidationError):
-        await svc.scan_directory(LineageScanRequest(path="/tmp/../etc"), actor_id=1)
+async def test_scan_directory_rejects_path_traversal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """路径沙箱：拒绝 ``..`` 相对路径穿越（在合法根内仍拦截）。"""
+    with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setattr("app.services.lineage.service.settings.lineage_scan_dir", td)
+        svc = LineageService(db=_FakeSession())
+        svc._repo = FakeRepo()
+        with pytest.raises(ValidationError):
+            await svc.scan_directory(
+                LineageScanRequest(path=os.path.join(td, "..", "etc")), actor_id=1
+            )
 
 
-async def test_scan_directory_infers_hive_dialect() -> None:
+async def test_scan_directory_rejects_outside_configured_root() -> None:
+    """S2：扫描路径不在配置根内必须拒绝（目录固化，防任意目录读取）。"""
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as outside:
+        # 配置根 = td，请求路径 = 另一个目录（outside）
+        import app.services.lineage.service as lineage_service_module
+
+        monkeypatch_ctx = pytest.MonkeyPatch()
+        monkeypatch_ctx.setattr(
+            lineage_service_module.settings, "lineage_scan_dir", td
+        )
+        try:
+            svc = LineageService(db=_FakeSession())
+            svc._repo = FakeRepo()
+            with pytest.raises(ValidationError) as exc:
+                await svc.scan_directory(
+                    LineageScanRequest(path=outside, dry_run=True), actor_id=1
+                )
+            assert "允许的根目录" in str(exc.value.message)
+        finally:
+            monkeypatch_ctx.undo()
+
+
+async def test_scan_directory_rejects_unconfigured_root() -> None:
+    """S2：未配置扫描根时 fail-closed 拒绝一切扫描。"""
+    import app.services.lineage.service as lineage_service_module
+
+    monkeypatch_ctx = pytest.MonkeyPatch()
+    monkeypatch_ctx.setattr(lineage_service_module.settings, "lineage_scan_dir", "")
+    try:
+        svc = LineageService(db=_FakeSession())
+        svc._repo = FakeRepo()
+        with pytest.raises(ValidationError) as exc:
+            await svc.scan_directory(
+                LineageScanRequest(path="/tmp", dry_run=True), actor_id=1
+            )
+        assert "未配置血缘扫描根目录" in str(exc.value.message)
+    finally:
+        monkeypatch_ctx.undo()
+
+
+async def test_scan_directory_infers_hive_dialect(monkeypatch: pytest.MonkeyPatch) -> None:
     """方言启发式：含 LATERAL VIEW 的 .hql 按 hive 解析（字段级正确）。"""
     with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setattr("app.services.lineage.service.settings.lineage_scan_dir", td)
         _write_scan_file(
             td,
             "e.hql",

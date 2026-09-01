@@ -79,6 +79,10 @@ async def auto_escalate_overdue(ctx: dict[str, Any]) -> dict[str, int]:
                     conflict_id=conflict.conflict_id,
                     error=str(exc),
                 )
+                # B8（审查修复）：单条失败须回滚会话——否则 escalate 中途 flush 失败后
+                # 会话进入 rolled-back 态，后续条目与最终 commit 抛 PendingRollbackError
+                # （对齐 semantic_tasks.check_experimental_expiry 的 T2 已修模式）。
+                await db.rollback()
         await db.commit()
 
     logger.info("conflict_sla_escalation_done", scanned=scanned, escalated=escalated)
