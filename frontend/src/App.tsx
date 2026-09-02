@@ -360,14 +360,6 @@ function LoginPage({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
                 ? "完成验证"
                 : "进入语义中台"}
           </Button>
-          {!totpStep && (
-            <div className="login-hint">
-              本地默认账号 <span className="mono">admin</span> /{" "}
-              <span className="mono">changeme123</span>
-              <br />
-              生产环境请使用管理员分配的凭据
-            </div>
-          )}
         </form>
       </div>
     </div>

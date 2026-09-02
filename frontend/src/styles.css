@@ -311,14 +311,6 @@ body {
   font-weight: 600;
 }
 
-.login-hint {
-  margin-top: 18px;
-  font-size: 12px;
-  color: var(--muted);
-  text-align: center;
-  line-height: 1.7;
-}
-
 /* ==========================================================================
    登录页动画特效 — 「指标数据流动、口径校准对齐」
    纯样式层升级（不动 JSX 结构与交互逻辑）：发丝网格缓慢漂移隐喻数据在
