@@ -422,6 +422,12 @@ class NotifyService(BaseService):
         # B1 相关性收敛：metric.* 事件仅通知与事件指标相关的人（owner/提交人/评审人/
         # 同域域管理员/平台管理员/watch 该指标的用户），无关订阅者不再收到广播。
         subs = await self._filter_metric_related_subscribers(data.event_type, data.payload, subs)
+        # C9（生产反馈）：conflict_* 治理事件同样按冲突域收敛——此前仅 metric.* 收敛，
+        # conflict_open 等广播给全部启用了订阅的治理角色，其他域 domain_admin（如
+        # outpatient 域的 nowner）会收到 medication 域冲突通知，点击跳转关联 DRAFT 指标
+        # 却因无该域读权限得到「指标不存在」，通知与数据可见性口径不一致。
+        if data.event_type.startswith("conflict") or data.event_type.startswith("conflict_"):
+            subs = await self._filter_conflict_subscribers(data.event_type, data.payload, subs)
         created = 0
         delivered = 0
         for sub in subs:
@@ -604,6 +610,41 @@ class NotifyService(BaseService):
             related.update(await self._repo.list_admin_ids())
         except Exception:  # noqa: BLE001 - 管理员解析失败不阻断
             logger.warning("notify_metric_related_admin_resolve_failed", exc_info=True)
+        return [sub for sub in subs if sub.asset_type or sub.user_id in related]
+
+    async def _filter_conflict_subscribers(
+        self,
+        event_type: str,
+        payload: dict[str, Any] | None,
+        subs: list[SubscriptionPref],
+    ) -> list[SubscriptionPref]:
+        """C9 冲突事件域收敛：``conflict_*`` 仅通知冲突域相关治理角色。
+
+        与 ``_filter_metric_related_subscribers`` 同语义——冲突是治理事件，由冲突域
+        domain_admin 兜底处置、platform_admin 全平台兜底；其余域的治理角色（订阅了
+        事件类型但非冲突域）不再收到跨域冲突广播（避免「收到与我无关冲突 → 点击跳
+        转他域 DRAFT 指标却 404」的通知/数据口径撕裂）。资产订阅者（watch 该冲突关
+        联资产）与 payload 缺失 domain 时保守保留原订阅者（不误伤，不阻断事件扇出）。
+
+        Args:
+            event_type: 冲突事件类型（conflict_open/conflict_ruled/...）。
+            payload: 事件负载（含 ``domain`` 冲突域）。
+            subs: 已订阅该事件类型的用户偏好列表。
+
+        Returns:
+            收敛后的订阅者列表。
+        """
+        if not event_type.startswith("conflict") and not event_type.startswith("conflict_"):
+            return subs
+        domain = (payload or {}).get("domain")
+        if not domain:
+            return subs
+        try:
+            related: set[int] = set(await self._repo.list_domain_admins(domain))
+            related.update(await self._repo.list_admin_ids())
+        except Exception:  # noqa: BLE001 - best-effort：域管理员解析失败保守放行
+            logger.warning("notify_conflict_admin_resolve_failed", exc_info=True)
+            return subs
         return [sub for sub in subs if sub.asset_type or sub.user_id in related]
 
     async def handle_business_event(self, event: dict[str, Any]) -> dict[str, int]:

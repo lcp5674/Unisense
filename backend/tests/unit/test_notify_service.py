@@ -707,3 +707,50 @@ async def test_publish_event_dedup_asset_and_event_subscriber() -> None:
         EventPublish(event_type="lineage.ddl_changed", payload={"metric_code": "gmv"})
     )
     assert out["notifications"] == 1  # 合并去重，只发一条
+
+
+async def test_conflict_open_scoped_to_conflict_domain() -> None:
+    """C9：conflict_* 事件按冲突域收敛——仅冲突域 domain_admin + platform_admin
+    收到；其他域治理角色（订阅了该事件但非冲突域）不再收到跨域冲突广播。
+
+    背景（生产反馈）：nowner（outpatient 域 domain_admin）收到 medication 域
+    conflict_open 通知，点击跳转关联 DRAFT 指标却无该域读权限 → 「指标不存在」，
+    通知与数据可见性口径不一致。"""
+    svc, repo = _svc()
+    repo.list_domain_admins = AsyncMock(return_value=[1])  # medication 域 domain_admin
+    repo.list_admin_ids = AsyncMock(return_value=[3])  # platform_admin
+    # 订阅者：user1(medication域)、user4(outpatient域 domain_admin)、user3(platform_admin)
+    repo.list_enabled_subscriptions = AsyncMock(
+        return_value=[
+            SubscriptionPref(user_id=1, channel="IN_APP", event_type="conflict_open", enabled=True),
+            SubscriptionPref(user_id=4, channel="IN_APP", event_type="conflict_open", enabled=True),
+            SubscriptionPref(user_id=3, channel="IN_APP", event_type="conflict_open", enabled=True),
+        ]
+    )
+    saved: list[int] = []
+    repo.save_notification = AsyncMock(side_effect=lambda n: (saved.append(n.subscriber_id), n)[1])
+    await svc.publish_event(
+        EventPublish(
+            event_type="conflict_open",
+            source="semantic",
+            payload={"conflict_id": "CF-1", "domain": "medication", "type": "same_def_diff_name"},
+        )
+    )
+    assert set(saved) == {1, 3}  # medication 域 admin + 平台 admin；outpatient 的 user4 被收敛掉
+
+
+async def test_conflict_open_without_domain_keeps_all() -> None:
+    """C9：conflict_* 事件 payload 缺失 domain 时保守放行全部订阅者（不误伤）。"""
+    svc, repo = _svc()
+    repo.list_enabled_subscriptions = AsyncMock(
+        return_value=[
+            SubscriptionPref(user_id=1, channel="IN_APP", event_type="conflict_open", enabled=True),
+            SubscriptionPref(user_id=4, channel="IN_APP", event_type="conflict_open", enabled=True),
+        ]
+    )
+    saved: list[int] = []
+    repo.save_notification = AsyncMock(side_effect=lambda n: (saved.append(n.subscriber_id), n)[1])
+    await svc.publish_event(
+        EventPublish(event_type="conflict_open", source="semantic", payload={"conflict_id": "CF-2"})
+    )
+    assert set(saved) == {1, 4}

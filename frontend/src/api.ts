@@ -946,6 +946,9 @@ export async function batchRegisterMetrics(
     {
       method: "POST",
       body: JSON.stringify(req),
+      // C9：批量逐条创建可能超过全局 30s 超时（此前 13 列 98s 被 abort 致「显示超时
+      // 但后端实际完成并通知」）——批量任务显式放宽到 180s，配合后端 LLM 预算降 0。
+      timeout: 180000,
     },
   );
 }
@@ -5724,6 +5727,8 @@ export async function batchRegisterFromSql(
     {
       method: "POST",
       body: JSON.stringify(req),
+      // C9：批量逐条创建可能超过全局 30s 超时，显式放宽到 180s（见 batchRegisterMetrics）
+      timeout: 180000,
     },
   );
 }

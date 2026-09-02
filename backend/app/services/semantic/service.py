@@ -5241,7 +5241,11 @@ class MetricService(BaseService):
             preloaded_existing = None
         # 批级 LLM 补位预算（P0-2）：N 列每个 use_llm=True 的补位可能触发数百上千次
         # LLM 调用——预算耗尽后降级纯词法判定；单条创建不受限。
-        conflict_llm_budget = {"used": 0, "limit": 10}
+        # C9（生产反馈）：批量路径预算降为 0——每条 LLM 语义补位 8-18s，N 候选（高度
+        # 相似的同源口径家族）会把总耗时拖到 60-120s+，远超前端超时（30s）致「批量注册
+        # 超时」而任务仍在后台跑完。批量登记以速度优先：冲突检测走纯词法（<1s/条），
+        # 语义级复核留给创建后的冲突中心/提交评审时的人工预检（use_llm 由调用方显式开）。
+        conflict_llm_budget = {"used": 0, "limit": 0}
 
         for col in request.measure_columns:
             # 使用 auto_fill 引擎生成编码建议
@@ -5435,7 +5439,8 @@ class MetricService(BaseService):
             preloaded_existing = None
         # 批级 LLM 补位预算（P0-2）：N 候选每个 use_llm=True 的补位可能触发数百上千次
         # LLM 调用（成本/超时风险）——预算耗尽后降级纯词法判定；单条创建不受限。
-        conflict_llm_budget = {"used": 0, "limit": 10}
+        # C9（生产反馈）：预算降为 0——批量登记以速度优先，语义复核留给冲突中心/送审。
+        conflict_llm_budget = {"used": 0, "limit": 0}
 
         # Phase1 原子：逐候选 savepoint 创建；业务/编码冲突记 VALIDATION_ERROR 继续
         atom_ok: set[str] = set()

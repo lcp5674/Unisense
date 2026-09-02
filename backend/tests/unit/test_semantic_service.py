@@ -3191,8 +3191,12 @@ async def test_sql_batch_register_skips_notify_when_all_failed():
 
 
 async def test_sql_batch_register_conflict_llm_budget():
-    """P0-2：SQL 批量注册的冲突预检共享批级 LLM 预算——超过预算后 create_metric
-    降级纯词法（use_llm=False），防批量路径数百上千次 LLM 调用（成本/超时风险）。"""
+    """C9：SQL 批量注册的冲突预检共享批级 LLM 预算且默认 limit=0（纯词法）。
+
+    此前 limit=10 使批量路径每条候选触发 LLM 语义补位（8-18s/条），N 候选总耗时
+    60-120s+ 远超前端 30s 超时 → 「批量注册超时」而任务仍在后台跑完（生产反馈）。
+    批量登记以速度优先：limit=0 降级纯词法，语义复核留给冲突中心/送审人工预检。
+    """
     from app.services.semantic.schemas import MetricSqlBatchRegisterRequest
 
     svc, repo = _svc_with_repo()
@@ -3218,8 +3222,8 @@ async def test_sql_batch_register_conflict_llm_budget():
 
     result = await svc.batch_register_from_sql(request, actor_id=1)
     assert all(c["status"] == "DRAFT" for c in result["candidates"])
-    # 每个候选都拿到共享预算 dict（同引用、limit=10）——批级共享设计成立
-    assert all(isinstance(b, dict) and b["limit"] == 10 for b in captured)
+    # 每个候选都拿到共享预算 dict（同引用、limit=0）——批级共享 + 纯词法成立
+    assert all(isinstance(b, dict) and b["limit"] == 0 for b in captured)
     # 3 个候选共享同一预算对象（create_metric 被替换，used 递增由真实路径内部驱动）
     assert len({id(b) for b in captured}) == 1
     assert captured[-1]["used"] == 0
