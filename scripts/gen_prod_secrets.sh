@@ -3,8 +3,10 @@
 #
 # 用法：
 #   ./scripts/gen_prod_secrets.sh                    # 打印到 stdout（复制粘贴到 .env.production）
-#   ./scripts/gen_prod_secrets.sh --out .env.production        # 直接写入（目标已存在则拒绝，防误覆盖）
-#   ./scripts/gen_prod_secrets.sh --out .env.production --force  # 强制覆盖（先备份为 .bak.<时间戳>）
+#   ./scripts/gen_prod_secrets.sh --out .env.production        # 目标不存在→写全新密钥文件；
+#                                                              # 目标为模板占位（<generated-by-script>）→就地填充密钥行、保留非密钥配置；
+#                                                              # 目标已是真实密钥文件→拒绝覆盖（防误覆盖，幂等保护）
+#   ./scripts/gen_prod_secrets.sh --out .env.production --force  # 强制整文件覆盖（先备份为 .bak.<时间戳>）
 #
 # 说明：
 #   - 生成的密钥均为「URL/Shell 安全字符集」：
@@ -167,13 +169,61 @@ UNISENSE_BACKUP_ENCRYPTION_KEY=${BACKUP_ENCRYPTION_KEY}
 UNISENSE_QUICKBI_SIGN_KEY=${QUICKBI_SIGN_KEY}
 UNISENSE_SEED_ADMIN_PASSWORD=${SEED_ADMIN_PASSWORD}"
 
+# 判定目标文件是否为「模板待填充」：密钥行仍是模板占位（<generated-by-script>）或空值。
+# 模板的 UNISENSE_JWT_SECRET 行必为占位字面量；真实密钥文件不可能仍保留占位。
+# 注：BSD grep 不支持 ERE 空分支 (x|)，故拆成两条独立匹配。
+is_template() {
+  grep -Eq '^UNISENSE_JWT_SECRET=<generated-by-script>$' "$1" \
+    || grep -Eq '^UNISENSE_JWT_SECRET=$' "$1"
+}
+
+# 就地填充模板：以 CONTENT 为 key→value 源，仅替换目标文件中命中的密钥行，
+# 其余行（非密钥项、注释）原样保留——支持「cp 模板 → 生成密钥」两步流程。
+# 目标文件缺失的密钥行（模板漏维护）追加到文件尾兜底。
+merge_into_template() {
+  local f="$1" tmp missing="" line k
+  tmp="${f}.tmp.$$"
+  awk -F= '
+    NR == FNR {
+      if ($0 !~ /^[[:space:]]*#/ && index($0, "=") > 0) {
+        key = $1; sub(/[[:space:]]+$/, "", key)
+        map[key] = substr($0, index($0, "=") + 1)
+      }
+      next
+    }
+    {
+      key = $1; sub(/[[:space:]]+$/, "", key)
+      if (key in map) print key "=" map[key]; else print
+    }
+  ' <(printf '%s\n' "$CONTENT") "$f" > "$tmp"
+  # 模板缺失的密钥项追加到文件尾（如旧模板漏 NEO4J/QUICKBI 行），避免 compose 落弱默认值
+  while IFS= read -r line; do
+    case "$line" in
+      \#*|"") continue ;;
+      *) k="${line%%=*}"; grep -q "^${k}=" "$tmp" || missing+="$line"$'\n' ;;
+    esac
+  done < <(printf '%s\n' "$CONTENT")
+  if [[ -n "$missing" ]]; then
+    printf '\n# ---- 以下密钥项原文件缺失，由 gen_prod_secrets.sh 补齐 ----\n%s' "$missing" >> "$tmp"
+  fi
+  chmod 600 "$tmp"
+  mv "$tmp" "$f"
+}
+
 if [[ -n "$OUT_FILE" ]]; then
+  if [[ -e "$OUT_FILE" ]] && is_template "$OUT_FILE"; then
+    # 模板就地填充：保留非密钥配置行，仅替换密钥占位（README 10.2 推荐流程）
+    merge_into_template "$OUT_FILE"
+    echo "[gen-secrets] 已就地填充模板 ${OUT_FILE}（11 项密钥占位已替换，非密钥配置行保留）" >&2
+    echo "[gen-secrets] 自检通过：长度达标、未命中弱凭据黑名单、URL/Shell 安全" >&2
+    exit 0
+  fi
   if [[ -e "$OUT_FILE" ]]; then
-    # 幂等保护：目标已存在时拒绝覆盖——密钥是生产的「锚点」，误覆盖会导致
-    # JWT 全失效 / Fernet 无法解密存量密文 / DB/ES/Neo4j 密码与数据卷不一致而崩溃。
-    # 确需轮换时显式 --force（先备份再覆盖），并同步改数据卷内密码 + 走 Fernet 密钥链。
+    # 幂等保护：目标已存在且非模板（已是真实密钥文件）时拒绝覆盖——密钥是生产的
+    # 「锚点」，误覆盖会导致 JWT 全失效 / Fernet 无法解密存量密文 / DB/ES/Neo4j
+    # 密码与数据卷不一致而崩溃。确需轮换时显式 --force（先备份再覆盖）。
     if [[ $FORCE -ne 1 ]]; then
-      echo "[gen-secrets] 拒绝覆盖：${OUT_FILE} 已存在。" >&2
+      echo "[gen-secrets] 拒绝覆盖：${OUT_FILE} 已存在（非模板，密钥已初始化）。" >&2
       echo "[gen-secrets] 生产环境请勿重复生成密钥（会导致会话全失效、加密数据无法解密、DB 连接失败）。" >&2
       echo "[gen-secrets] 确需轮换请用 --force（会先备份为 .bak.<时间戳>），并同步改数据卷密码 + Fernet 密钥链。" >&2
       exit 1

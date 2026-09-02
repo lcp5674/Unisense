@@ -480,12 +480,15 @@ curl -X POST http://localhost:8100/api/v1/users/{user_id}/reset-password \
 | `UNISENSE_QUICKBI_SIGN_KEY` | QuickBI 嵌入签名密钥 |
 | `UNISENSE_SEED_ADMIN_PASSWORD` | 种子管理员初始密码（**上线后立即改密**） |
 
-脚本三种模式：
+脚本三种模式（`--out` 对目标文件**区分三种状态**）：
 
 ```bash
 bash scripts/gen_prod_secrets.sh                              # 打印到 stdout（手动粘贴）
-bash scripts/gen_prod_secrets.sh --out .env.production         # 直接写入（推荐；文件已存在则拒绝覆盖）
-bash scripts/gen_prod_secrets.sh --out .env.production --force # 强制覆盖（先备份 .bak.<时间戳>）
+bash scripts/gen_prod_secrets.sh --out .env.production         # 推荐：目标为【模板占位】→就地填充 11 项密钥行、
+                                                               #      非密钥配置行与注释全部保留（见下方四步流程）；
+                                                               #      目标【不存在】→写全新密钥文件；
+                                                               #      目标【已是真实密钥】→拒绝覆盖（幂等保护）
+bash scripts/gen_prod_secrets.sh --out .env.production --force # 强制整文件覆盖（先备份 .bak.<时间戳>；仅密钥轮换用）
 ```
 
 **生成后自动自检**（任一项失败即中止、不写入任何文件）：
@@ -495,14 +498,34 @@ bash scripts/gen_prod_secrets.sh --out .env.production --force # 强制覆盖（
   密钥类用十六进制（`$` 会触发 compose 变量插值）——全部规避
 - 种子管理员密码满足系统复杂度（大小写 + 数字 ≥3 类）
 
-**② 四步初始化流程**
+**② 四步初始化流程（顺序固定：先复制模板，再就地填充密钥）**
 
 ```bash
 cp .env.production.example .env.production                  # 1. 复制模板（含全部变量占位）
-bash scripts/gen_prod_secrets.sh --out .env.production       # 2. 生成 11 项强密钥（自检通过；仅首次执行）
+bash scripts/gen_prod_secrets.sh --out .env.production       # 2. 就地填充 11 项强密钥（脚本识别模板占位，
+                                                             #    仅替换 <generated-by-script> 密钥行，其余保留；自检通过）
 vi .env.production                                           # 3. 填非密钥项：OLAP_URL / CORS / IMAGE_TAG
 docker compose --env-file .env.production up -d --build      # 4. 构建启动（迁移与自举自动执行，见 10.3）
 ```
+
+> **为什么必须先复制模板、再执行脚本？** 脚本对「模板占位文件」与「已初始化的真实密钥文件」区分处理：
+> 目标文件密钥行仍是 `<generated-by-script>` 占位（即刚 `cp` 出来的模板）→ **就地填充**，只替换 11 项密钥行，
+> `UNISENSE_ENV` / `UNISENSE_OLAP_URL` / `UNISENSE_CORS_ORIGINS` / `UNISENSE_BOOTSTRAP_*` 等非密钥配置行与全部注释
+> **原样保留**——因此按上述顺序执行不会丢失模板里的任何信息。
+>
+> 目标文件密钥行已是随机值（即已初始化过）→ **拒绝覆盖**（幂等保护，防误重生成换掉锚点密钥）；确需轮换才 `--force`。
+>
+> ⚠️ **若误先执行了脚本**（生成了只有 11 项密钥、缺非密钥配置的文件），按是否已部署分两种补救：
+> - **尚未用该密钥部署过**（数据卷未固化旧密钥）→ 可安全重来：`cp .env.production.example .env.production` 覆盖为模板，
+>   再执行第 2 步就地填充（会生成一组新密钥，因旧密钥未投入使用，无影响）；
+> - **已部署过**（数据卷已固化密钥）→ **切勿重生成**（会换掉锚点密钥导致 DB/ES/Neo4j 连不上、存量密文无法解密），
+>   只需把模板中的非密钥配置行补进现有文件（密钥行保持不动）：
+>
+>   ```bash
+>   # 把模板里非密钥项与注释合并进已初始化的 .env.production（跳过 11 个密钥键）
+>   grep -vE '^UNISENSE_(JWT_SECRET|FERNET_KEY|MYSQL_ROOT_PASSWORD|MYSQL_PASSWORD|ES_PASSWORD|NEO4J_PASSWORD|MINIO_ACCESS_KEY|MINIO_SECRET_KEY|SEED_ADMIN_PASSWORD|BACKUP_ENCRYPTION_KEY|QUICKBI_SIGN_KEY)=' \
+>     .env.production.example >> .env.production
+>   ```
 
 模板中需要人工确认的**非密钥项**：`UNISENSE_OLAP_URL`（Doris，见 10.1 说明）、
 `UNISENSE_CORS_ORIGINS`（生产禁止 `*`）、`UNISENSE_IMAGE_TAG`（版本锁定）、
@@ -513,8 +536,9 @@ docker compose --env-file .env.production up -d --build      # 4. 构建启动�
 > 无需手动传参）——避免官方 PyPI 网络超时导致构建失败；需要切换时在 `.env.production`
 > 设 `PIP_INDEX_URL` 覆盖即可。
 
-> **⚠️ 密钥是生产的「锚点」，务必一次性生成、长期不变**：脚本对已存在的目标文件
-> **默认拒绝覆盖**（需 `--force` 才强制覆盖并先备份为 `.bak.<时间戳>`）。每次
+> **⚠️ 密钥是生产的「锚点」，务必一次性生成、长期不变**：脚本对**已初始化的真实密钥文件**
+> **默认拒绝覆盖**（需 `--force` 才强制覆盖并先备份为 `.bak.<时间戳>`）；仅对模板占位文件就地填充。
+> 每次
 > `docker compose --env-file .env.production up -d --build` 重建容器都从同一文件
 > 读取**同一组密钥**——这是 JWT 会话稳定、Fernet 能解密存量密文、DB/ES/Neo4j 密码
 > 与数据卷一致的前提。**切勿在生产重复执行脚本**（会换掉全部密钥导致全员重新登录、
@@ -567,8 +591,8 @@ echo never > /sys/kernel/mm/transparent_hugepage/enabled
 ulimit -n 65536
 
 # ── 第 1 步：密钥生成初始化（唯一必须的人工步骤，见 10.2）──
-cp .env.production.example .env.production                  # 1a. 复制模板
-bash scripts/gen_prod_secrets.sh --out .env.production       # 1b. 生成 11 项强密钥（自检通过；仅首次）
+cp .env.production.example .env.production                  # 1a. 复制模板（含全部变量占位）
+bash scripts/gen_prod_secrets.sh --out .env.production       # 1b. 就地填充 11 项强密钥（保留非密钥配置；自检通过）
 vi .env.production                                           # 1c. 填 UNISENSE_OLAP_URL / CORS / IMAGE_TAG
 
 # ── 第 2 步：构建并启动（迁移与自举自动执行）──────────────
