@@ -32,6 +32,8 @@ services:
       - mysql_data:/var/lib/mysql
       - unisense_binlog:/var/lib/mysql-binlog
     # 开启 binlog（ROW 格式）供增量备份（RPO ≤ 15min）；binlog 独立卷供 backup 服务只读归档
+    # log-bin-trust-function-creators=1：迁移会以业务账号建触发器/函数（WORM 审计等），
+    # binlog 开启时非 SUPER 账号需此变量，否则 alembic 迁移 1419 失败（全新卷必现）
     command: >-
       --default-authentication-plugin=caching_sha2_password
       --character-set-server=utf8mb4
@@ -42,6 +44,7 @@ services:
       --log-bin=/var/lib/mysql-binlog/binlog
       --binlog-format=ROW
       --binlog_expire_logs_seconds=604800
+      --log-bin-trust-function-creators=1
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 10s

@@ -662,6 +662,8 @@ def ensure_metric(
         "additivity": "SEMI_ADDITIVE",
         "serving_mode": "BATCH_ONLY",
         "definition_json": spec["definition_json"],
+        # 数仓开发责任方为注册必填（指标注册向导/API 校验）；seed 环境统一挂 admin（id=1）
+        "dw_developer_id": 1,
     }
     # 原子指标：引用逻辑度量（measure_id_code → measure_ids 数值 id）
     measure_code = spec.get("measure_id_code")
@@ -1437,9 +1439,12 @@ def seed_consume(api: Api) -> None:
         print(f"[consume] 创建 API 客户端 {created.get('client_id')}")
     else:
         print("[consume] API 客户端已存在")
-    # 收藏
+    # 收藏（C 层多资产收藏：asset_type 枚举 + asset_id=业务编码）
     try:
-        api.post("/consume/me/favorites", {"metric_code": "outp_e2e_fee_day"})
+        api.post(
+            "/consume/me/favorites",
+            {"asset_type": "METRIC", "asset_id": "outp_e2e_fee_day"},
+        )
         print("[consume] 收藏 outp_e2e_fee_day")
     except SeedError as e:
         print(f"[consume] 收藏跳过：{e}")
@@ -1457,20 +1462,25 @@ def _path_exists(api: Api, path: str) -> bool:
 # 13. 行为埋点（推荐协同过滤底座）
 # ---------------------------------------------------------------------------
 def seed_tracking(api: Api, metric_ids: dict[str, int]) -> None:
-    for event_type in ["favorite", "browse", "search"]:
+    # 事件类型须命中 tracking API 白名单（P2-8 画像污染加固后不再接受任意字符串）
+    for event_type, target_type in [
+        ("favorites_view", "metric"),
+        ("metric_detail_view", "metric"),
+        ("metric_search", "metric"),
+    ]:
         try:
             api.post(
                 "/tracking/event",
                 {
                     "event_type": event_type,
-                    "target_type": "metric",
+                    "target_type": target_type,
                     "target_id": "outp_e2e_fee_day",
                     "context": {"source": "e2e_seed"},
                 },
             )
         except SeedError as e:
             print(f"[tracking] {event_type} 跳过：{e}")
-    print("[tracking] 埋点 favorite/browse/search")
+    print("[tracking] 埋点 favorites_view/metric_detail_view/metric_search")
 
 
 # ---------------------------------------------------------------------------
