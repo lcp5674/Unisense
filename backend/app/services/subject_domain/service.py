@@ -430,27 +430,43 @@ class SubjectDomainService:
         """域管理越权守卫（X-3 同类加固）：domain_admin 仅可管理本域及其子域。
 
         - ``platform_admin``（主角色或扩展角色）：放行（全局治理兜底）。
-        - ``user.domain`` 为空（未绑定域）：按现有行为放行（角色门禁兜底）。
-        - 否则目标域须等于本域（``code == user.domain``）或是本域子域
-          （目标域 ``path`` 以本域 ``path + '.'`` 为前缀，域树层级）。
+        - 权限域取并集 ``domains_all()``（团队继承 ∪ 显式指定）；无任何权限域
+          时 fail-closed 拒绝——此前 ``if not ud: return`` 会放行 domain=NULL 的
+          domain_admin 管理任意主题域（越权实测）。
+        - 目标域须 ∈ 权限域，或是任一权限域子域（目标域 ``path`` 以权限域
+          ``path + '.'`` 为前缀，域树层级）。
 
         此前 ``_ADMIN_DEPS`` 仅 platform_admin+domain_admin 角色门禁，任意域
         domain_admin 可改/停/删任意域——补本域归属校验防跨域治理失控。
         """
         if "platform_admin" in user.roles_all():
             return
-        ud = getattr(user, "domain", None)
-        if not ud:
-            return
-        if code == ud:
+        uds = (
+            list(user.domains_all())
+            if hasattr(user, "domains_all")
+            else [d for d in [getattr(user, "domain", None)] if d]
+        )
+        if not uds:
+            raise BusinessError(
+                "当前账号未绑定任何业务域，无权管理主题域",
+                error_code="FORBIDDEN",
+                ctx={"code": code},
+            )
+        if code in uds:
             return
         domain = await self._repo.get_by_code(code)
-        ud_domain = await self._repo.get_by_code(ud)
-        if domain and ud_domain and domain.path and ud_domain.path:
-            if domain.path.startswith(f"{ud_domain.path}."):
+        for ud in uds:
+            ud_domain = await self._repo.get_by_code(ud)
+            if (
+                domain
+                and ud_domain
+                and domain.path
+                and ud_domain.path
+                and domain.path.startswith(f"{ud_domain.path}.")
+            ):
                 return
         raise BusinessError(
-            f"无权管理其他域: {code}（当前域: {ud}）",
+            f"无权管理其他域: {code}（当前权限域: {uds}）",
             error_code="FORBIDDEN",
-            ctx={"code": code, "user_domain": ud},
+            ctx={"code": code, "user_domains": uds},
         )

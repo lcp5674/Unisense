@@ -638,6 +638,7 @@ class TestDomainAdminScope:
     def _domain_admin(self, domain: str = "sales") -> MagicMock:
         user = MagicMock()
         user.domain = domain
+        user.domains_all.return_value = [domain]
         user.roles_all.return_value = ["domain_admin"]
         return user
 

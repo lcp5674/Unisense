@@ -740,7 +740,7 @@ async def dashboard(
         data = {
             **data,
             "assigned_review": await repo.count_review_actionable(
-                user.id, user.domain, user.role or ""
+                user.id, user.domains_all(), user.role or ""
             ),
         }
     # 采集任务：运行时数据（Redis/内存 JobStore），采集服务聚合；失败不阻断仪表盘

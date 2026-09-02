@@ -34,7 +34,11 @@ async def _client(uid: int, role: str) -> AsyncIterator[httpx.AsyncClient]:
 
     app.dependency_overrides[deps.get_db_session] = fake_db
     app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
-        id=uid, role=role, domain="sales"
+        id=uid,
+        role=role,
+        domain="sales",
+        roles_all=MagicMock(return_value=[role]),
+        domains_all=MagicMock(return_value=["sales"]),
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -131,8 +135,6 @@ async def test_review_reconciliation_ignores_client_reviewer_id(
 
 async def test_create_dimension_cross_domain_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     """P1-10：domain_admin 仅可在本域建维度，跨域创建被拒绝（403 FORBIDDEN）。"""
-    import app.services.dimension.service as dsvc
-
     async for admin in _client(9, "domain_admin"):  # 固定 user.domain="sales"
         resp = await admin.post(
             "/api/v1/dimensions",
@@ -191,3 +193,32 @@ async def test_domain_admin_can_update_own_domain(
         )
         # 域守卫放行；后续失败属 DB mock 副作用，与域作用域无关
         assert resp.status_code != 403
+
+
+async def test_null_domain_user_cannot_create_cross_domain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """P0 越权回归（第四轮审查）：domain=NULL 的 metric_owner 此前因
+    ``_assert_domain_scope`` 的 ``and user.domain`` 短路可跨任意域创建维度
+    （真实 API 实测 201）；现应 fail-closed 拒绝（403 FORBIDDEN）。
+    """
+    session = _session()
+
+    async def fake_db() -> AsyncIterator[MagicMock]:
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=99,
+        role="metric_owner",
+        domain=None,
+        domains_all=MagicMock(return_value=[]),  # 团队域亦为空 → 无任何权限域
+        roles_all=MagicMock(return_value=["metric_owner"]),
+    )
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.post(
+            "/api/v1/dimensions",
+            json={**_DIM_BODY, "domain": "sales"},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["code"] == "FORBIDDEN"
+    app.dependency_overrides.clear()

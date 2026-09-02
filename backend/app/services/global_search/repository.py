@@ -176,6 +176,7 @@ class GlobalSearchRepository:
                 raw_q=raw_q,
                 visible_actor_id=visible_actor_id,
                 visible_role=visible_role,
+                visible_user_domains=visible_user_domains,
             ),
             self._search_templates(needles, limit),
             self._search_data_sources(needles, limit),
@@ -210,29 +211,44 @@ class GlobalSearchRepository:
         return or_(*conds) if conds else None
 
     def _es_visibility_filter(
-        self, visible_actor_id: int | None, visible_role: str | None
+        self,
+        visible_actor_id: int | None,
+        visible_role: str | None,
+        visible_user_domains: list[str] | None = None,
+        *,
+        asset_type: str = "metric",
     ) -> list[dict[str, Any]]:
         """ES 查询层可见性过滤（与 MySQL 路径同一语义，跨引擎一致）。
 
         ES 索引（metric_idx）含 owner_id/backup_owner_id 字段（es_indexer 同步），
-        非管理角色在查询层用 bool.filter 收敛可见范围；管理角色返回空列表（不过滤）。
+        管理/非管理角色在查询层用 bool.filter 收敛可见范围；platform_admin 返回
+        空列表（不过滤）。
+
+        domain_admin 按多域并集（visible_user_domains）收敛本域 + 本人负责——
+        此前返回空（不过滤）致跨域搜到他人 DRAFT/REVIEW 草稿（搜索侧门）。
+        术语（term_idx）无 owner 字段且 MySQL 路径对 domain_admin 不过滤
+        （术语无指派机制，评审人看待审全部是设计），ES 路径保持一致不收紧。
         """
-        if (
-            visible_actor_id is not None
-            and visible_role is not None
-            and visible_role not in ("platform_admin", "domain_admin")
-        ):
-            clauses: list[dict[str, Any]] = [
+        if visible_actor_id is None or visible_role is None:
+            return []
+        if visible_role == "platform_admin":
+            return []
+        clauses: list[dict[str, Any]] = []
+        if visible_role == "domain_admin":
+            # 域管理员：本域（多域并集）+ 本人负责（对齐 metric_visibility_conditions）
+            if asset_type == "metric":
+                if visible_user_domains:
+                    clauses.append({"terms": {"domain": visible_user_domains}})
+                clauses.append({"term": {"owner_id": visible_actor_id}})
+                clauses.append({"term": {"backup_owner_id": visible_actor_id}})
+        else:
+            # 非管理角色：公开状态 + 本人负责
+            clauses = [
                 {"terms": {"status": ["PUBLISHED", "EXPERIMENTAL", "DEPRECATED"]}},
                 {"term": {"owner_id": visible_actor_id}},
                 {"term": {"backup_owner_id": visible_actor_id}},
             ]
-            if visible_role == "reviewer":
-                # reviewer 强制走 MySQL 精确指派过滤（_search_metrics 跳过 ES），
-                # ES 索引无 reviewer 指派字段，此处不再放行裸 REVIEW——防御兜底。
-                pass
-            return [{"bool": {"should": clauses, "minimum_should_match": 1}}]
-        return []
+        return [{"bool": {"should": clauses, "minimum_should_match": 1}}]
 
     async def _search_metrics(
         self,
@@ -266,6 +282,7 @@ class GlobalSearchRepository:
                 limit,
                 visible_actor_id=visible_actor_id,
                 visible_role=visible_role,
+                visible_user_domains=visible_user_domains,
             )
             if es_items is not None:
                 return es_items
@@ -372,6 +389,7 @@ class GlobalSearchRepository:
         *,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
+        visible_user_domains: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """术语检索：ES 优先（相关度排序），ES 禁用/异常/未命中时降级 MySQL LIKE。"""
         if raw_q:
@@ -381,6 +399,7 @@ class GlobalSearchRepository:
                 limit,
                 visible_actor_id=visible_actor_id,
                 visible_role=visible_role,
+                visible_user_domains=visible_user_domains,
             )
             if es_items is not None:
                 return es_items
@@ -443,10 +462,12 @@ class GlobalSearchRepository:
         *,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
+        visible_user_domains: list[str] | None = None,
     ) -> list[dict[str, Any]] | None:
         """经 ES 检索指标/术语（multi_match 跨 code/name/description/synonyms，相关度排序）。
 
         可见性（D-1）：非管理角色在 bool.filter 层收敛可见范围（公开状态 + 本人负责），
+        domain_admin 按多域并集收敛本域；platform_admin 不过滤。
         与 MySQL 路径同一语义；管理角色不过滤。
 
         Returns:
@@ -469,7 +490,12 @@ class GlobalSearchRepository:
                     "fuzziness": "AUTO",
                 }
             }
-            filters = self._es_visibility_filter(visible_actor_id, visible_role)
+            filters = self._es_visibility_filter(
+                visible_actor_id,
+                visible_role,
+                visible_user_domains,
+                asset_type=asset_type,
+            )
             if filters:
                 body: dict[str, Any] = {
                     "query": {"bool": {"must": match_query, "filter": filters}}
