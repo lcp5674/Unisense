@@ -552,7 +552,8 @@ UNISENSE_BACKUP_DATABASES="unisense e2e_biz"       # 多库备份（含降级业
 |----------|------|
 | 数据库迁移 | `alembic upgrade head`，幂等；迁移内已含业务字典、敏感规则、命名词根、粒度等种子 |
 | **管理员账号** | 默认组织（code=default）+ `admin` / platform_admin；密码取 `UNISENSE_SEED_ADMIN_PASSWORD`，未注入则用默认弱口令并打印告警 |
-| **标准主题域** | 预置主题域（门诊/药品/医保/诊断等）+ 业务字典项，责任人为实际 admin id |
+| **标准主题域 + 基础字典** | bootstrap domains 步骤预置标准主题域（门诊/药品/医保/诊断等）+ 12 类 `system_dict` 基础字典项，责任人为实际 admin id |
+| **业务参照数据（维度/术语/业务主题域）** | **不随启动自动灌入**——由 `seed-reference` 服务显式一步初始化（见第 2.5 步），幂等可重复执行 |
 | **ES 索引** | 幂等创建 `metric_idx`/`term_idx`；索引为空或 analyzer 版本变更时自动全量同步 |
 | **Neo4j 资产血缘** | 首日全量对账，补齐资产属性与血缘边（后续漂移由每日定时任务兜底） |
 | MinIO 归档桶 | `audit_archive` 自动创建 |
@@ -572,6 +573,10 @@ vi .env.production                                           # 1c. 填 UNISENSE_
 
 # ── 第 2 步：构建并启动（迁移与自举自动执行）──────────────
 docker compose --env-file .env.production up -d --build
+
+# ── 第 2.5 步：参照数据初始化（首次部署执行一次，幂等可重复）──
+#   维度(52) / 术语(127) / 业务主题域(119) + 基础字典(12 类，兜底 bootstrap 关闭场景)
+docker compose --env-file .env.production --profile seed run --rm seed-reference
 
 # ── 第 3 步：验证 ──────────────────────────────────────────
 curl -fsS http://localhost:8100/health            # 应返回 {"status":"ok"}

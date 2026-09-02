@@ -437,6 +437,54 @@ services:
         done
     restart: unless-stopped
 
+  # ============ 参照数据 seed（一次性初始化，profiles: seed）============
+  # 维度管理 / 术语 / 主题域 / 数据字典的基础数据自动初始化：
+  #   docker compose --profile seed run --rm seed-reference
+  # 依次执行两个幂等 seed（重复执行安全，0 新增）：
+  #   1. scripts.seed_domains_dicts     —— 标准主题域 + 12 类 system_dict 基础字典
+  #      （backend bootstrap 的 domains 步骤启动时已自动执行；此处兜底其关闭场景）
+  #   2. scripts.seed_medical_reference —— 业务主题域(119) + 术语(127) + 维度(52)
+  # 镜像复用 unisense/backend（scripts 已随 COPY backend/ 入镜像），依赖 mysql healthy。
+  seed-reference:
+    image: unisense/backend:${UNISENSE_IMAGE_TAG:-dev}
+    profiles: ["seed"]
+    mem_limit: ${UNISENSE_SEED_MEM:-1g}
+    cpus: ${UNISENSE_SEED_CPUS:-0.5}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      UNISENSE_ENV: ${UNISENSE_ENV:-dev}
+      UNISENSE_DB_URL: mysql+pymysql://${UNISENSE_MYSQL_USER:-unisense}:${UNISENSE_MYSQL_PASSWORD:-test}@mysql:3306/${UNISENSE_MYSQL_DATABASE:-unisense}
+      UNISENSE_REDIS_URL: redis://redis:6379/0
+      UNISENSE_NEO4J_URL: bolt://neo4j:7687
+      UNISENSE_NEO4J_USER: ${UNISENSE_NEO4J_USER:-neo4j}
+      UNISENSE_NEO4J_PASSWORD: ${UNISENSE_NEO4J_PASSWORD:-test1234}
+      UNISENSE_ES_URL: http://elasticsearch:9200
+      UNISENSE_ES_USERNAME: elastic
+      UNISENSE_ES_PASSWORD: ${UNISENSE_ES_PASSWORD:-es_changeme}
+      UNISENSE_OLAP_URL: ${UNISENSE_OLAP_URL:-}
+      # 与 backend 同镜像，须同步注入 JWT_SECRET（否则 Settings 校验必填失败）
+      UNISENSE_JWT_SECRET: ${UNISENSE_JWT_SECRET:-dev-jwt-secret-change-in-production-32bytes}
+      UNISENSE_JWT_ALGORITHM: HS256
+      UNISENSE_JWT_EXPIRE_MINUTES: 60
+      UNISENSE_CORS_ORIGINS: http://localhost:8180,http://frontend:80
+      UNISENSE_LOG_LEVEL: INFO
+      UNISENSE_LOG_FORMAT: json
+      UNISENSE_LLM_BASE_URL: ${UNISENSE_LLM_BASE_URL:-}
+      UNISENSE_LLM_API_KEY: ${UNISENSE_LLM_API_KEY:-}
+      UNISENSE_LLM_DEFAULT_MODEL: ${UNISENSE_LLM_DEFAULT_MODEL:-deepseek-chat}
+      UNISENSE_NOTIFY_WEBHOOK_URL: ${UNISENSE_NOTIFY_WEBHOOK_URL:-}
+      UNISENSE_FERNET_KEY: ${UNISENSE_FERNET_KEY:-}
+    # 顺序执行两个幂等 seed：标准域/字典 → 业务主题域/术语/维度
+    command:
+      - sh
+      - -c
+      - >-
+        python -m scripts.seed_domains_dicts &&
+        python -m scripts.seed_medical_reference
+    restart: "no"
+
 volumes:
   mysql_data:
   unisense_binlog:
