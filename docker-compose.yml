@@ -171,9 +171,9 @@ services:
       context: .
       dockerfile: backend/Dockerfile
       args:
-        # 可选 Python 包镜像源（官方 PyPI 不稳/内网时设 PIP_INDEX_URL，如清华源；
-        # 默认空=官方源，CI/生产行为不变）
-        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+        # Python 包镜像源：默认清华源（国内构建快）；需切换时在 .env 设
+        # PIP_INDEX_URL 覆盖（如公司内网源）
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
     # S-3（第九轮）：发布/回滚载体——设 UNISENSE_IMAGE_TAG=<发布版本> 时
     # 直接拉取已推送镜像（回滚 = 换 tag），否则本地构建（dev）。
     image: unisense/backend:${UNISENSE_IMAGE_TAG:-dev}
@@ -278,8 +278,8 @@ services:
       context: .
       dockerfile: backend/Dockerfile
       args:
-        # 与 backend 同镜像，透传同一可选镜像源参数
-        PIP_INDEX_URL: ${PIP_INDEX_URL:-}
+        # 与 backend 同镜像，透传同一 Python 包镜像源（默认清华源）
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
     # 与 backend 同一镜像（worker 复用 backend 镜像，tag 跟随发布版本）
     image: unisense/backend:${UNISENSE_IMAGE_TAG:-dev}
     container_name: unisense-worker

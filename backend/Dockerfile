@@ -10,9 +10,9 @@ WORKDIR /build
 
 # 复制依赖清单（requirements.txt 由 poetry export 生成；过滤可编辑安装项）
 COPY backend/requirements.txt ./requirements.txt
-# 可选 Python 包镜像源（官方 PyPI 不稳/内网环境时构建注入，如
-# --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple；默认空=官方源）
-ARG PIP_INDEX_URL=""
+# Python 包镜像源：默认清华源（国内构建快、避免官方 PyPI 网络超时）。
+# 需要切换时用 --build-arg PIP_INDEX_URL=<其他源> 覆盖（如公司内网源）。
+ARG PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
 ENV PIP_INDEX_URL=$PIP_INDEX_URL
 # 过滤 -e git+ssh://... 可编辑安装（容器内无法 SSH 克隆）
 RUN grep -v "^-e git+" requirements.txt > requirements.filtered.txt && \
