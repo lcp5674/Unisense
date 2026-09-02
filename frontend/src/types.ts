@@ -2072,6 +2072,65 @@ export interface LlmConfigSecret {
   api_key: string;
 }
 
+// ---- 查询引擎（OLAP/MySQL 降级）DB 配置（方案 A，系统配置页）----
+
+export interface QueryEngineConfigRow {
+  id: number | null;
+  olap_url: string;
+  doris_host: string;
+  doris_port: number;
+  doris_database: string;
+  doris_user: string;
+  has_doris_password: boolean;
+  has_mysql_fallback: boolean;
+  enabled: boolean;
+  updated_by: number | null;
+  updated_at: string | null;
+}
+
+export interface QueryEngineEffective {
+  source: "db" | "env" | "none";
+  olap_url: string;
+  doris_host: string;
+  doris_port: number;
+  doris_database: string;
+  doris_user: string;
+  has_doris_password: boolean;
+  has_mysql_fallback: boolean;
+  olap_configured: boolean;
+  mysql_fallback_configured: boolean;
+  updated_by: number | null;
+  updated_at: string | null;
+  note: string;
+}
+
+export interface QueryEngineView {
+  row: QueryEngineConfigRow | null;
+  effective: QueryEngineEffective;
+  can_edit: boolean;
+}
+
+export interface QueryEnginePayload {
+  olap_url: string;
+  doris_host: string;
+  doris_port: number;
+  doris_database: string;
+  doris_user: string;
+  /** 留空表示保持原值 */
+  doris_password: string;
+  /** 留空表示保持原值 */
+  mysql_fallback_url: string;
+  enabled: boolean;
+}
+
+export interface QueryEngineTestResult {
+  ok: boolean;
+  engine: "olap" | "mysql";
+  latency_ms: number;
+  error: string;
+  detail?: Record<string, unknown> | null;
+}
+
 // 一键获取模型列表结果（backend /api/v1/ai/config/models）
 export interface LlmModelsResult {
   models: string[];

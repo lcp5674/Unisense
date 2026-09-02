@@ -133,6 +133,9 @@ import {
   ObsMetricsQuality,
   ObsOverview,
   PermissionCheckResult,
+  QueryEnginePayload,
+  QueryEngineTestResult,
+  QueryEngineView,
   PermissionSnapshot,
   PiiReviewResult,
   QualityBenchmark,
@@ -5777,4 +5780,32 @@ export async function refineMetricDefinition(
       body: JSON.stringify(data),
     },
   );
+}
+
+// ---- 查询引擎（OLAP/MySQL 降级）DB 配置（方案 A，系统配置页）----
+
+/** 读取查询引擎配置视图（DB 行脱敏 + 生效状态 + 可编辑标记）。任意登录可读。 */
+export async function getQueryEngineConfig(): Promise<QueryEngineView> {
+  return request<QueryEngineView>(`${API_BASE}/query-engine/config`);
+}
+
+/** 保存查询引擎配置（整行 upsert；密码/URL 留空保持原值）。仅 platform_admin。 */
+export async function saveQueryEngineConfig(
+  body: QueryEnginePayload,
+): Promise<{ id: number }> {
+  return request<{ id: number }>(`${API_BASE}/query-engine/config`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+/** 测试查询引擎连通性（engine=olap/mysql；payload 可空=测生效配置）。仅 platform_admin。 */
+export async function testQueryEngineConfig(body: {
+  engine: "olap" | "mysql";
+  payload?: Partial<QueryEnginePayload>;
+}): Promise<QueryEngineTestResult> {
+  return request<QueryEngineTestResult>(`${API_BASE}/query-engine/config/test`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }

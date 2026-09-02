@@ -51,6 +51,7 @@ import type {
   LlmConfigTestResult,
 } from "../types";
 import { usePermission } from "../hooks/usePermission";
+import QueryEngineConfigCard from "../components/QueryEngineConfigCard";
 
 // OpenAI 协议兼容提供商的预设（对齐后端 services/llm/config_service.py PROVIDER_DEFAULTS）
 const PROVIDER_PRESETS: Record<string, { label: string; base_url: string; model: string }> = {
@@ -952,6 +953,8 @@ export function SystemConfig() {
           )}
         </div>
       </Card>
+
+      <QueryEngineConfigCard />
 
       <Modal
         title={editing ? `编辑 LLM 实例${editing.name ? `（${editing.name}）` : ""}` : "新增 LLM 实例"}
