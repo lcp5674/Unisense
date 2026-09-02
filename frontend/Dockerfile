@@ -126,9 +126,11 @@ EOF
 
 EXPOSE 8080
 
-# S-2：非 root 运行 nginx master
-USER nginx
-
+# S-2：nginx 官方形态 = master 以 root 运行（读配置/绑 80→8080/写 pid），worker 由
+# nginx.conf 的 `user nginx;` 自动降权处理请求。曾用 `USER nginx` 把 master 也降权
+# （过度加固），但 CentOS 7 老内核(3.10) overlay2 上非 root master 写镜像层 pid
+# (/tmp/nginx.pid) 触发目录 copy-up 返回 EPERM → 容器崩溃重启。移除 USER nginx 恢复
+# 官方形态；worker 降权不变（安全面与官方 nginx 镜像一致）。
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
     CMD wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1
 
