@@ -368,6 +368,11 @@ services:
     # S-3：发布/回滚载体（与 backend 同 tag 策略）
     image: unisense/frontend:${UNISENSE_IMAGE_TAG:-dev}
     container_name: unisense-frontend
+    # CentOS 7 老内核(3.10) overlay2：非 root（nginx uid 101）向镜像层 root 所有的 /tmp
+    # 写 pid 文件(/tmp/nginx.pid, Dockerfile:34)触发目录 copy-up → EPERM → master 崩溃重启。
+    # tmpfs 挂载使 /tmp 恒为内存盘(1777 可写)，绕开 overlay copy-up（生产 Linux 必需）。
+    tmpfs:
+      - /tmp
     # 宿主 8180 → 容器 8080（nginx 降权后监听非特权端口 8080；宿主端口保持 8180 不变）
     ports: ["8180:8080"]
     mem_limit: ${UNISENSE_FRONTEND_MEM:-0.5g}
