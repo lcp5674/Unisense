@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { ConsumptionGuide } from "../pages/ConsumptionGuide";
+import type { MetricResponse } from "../types";
 
 // Mock API
 vi.mock("../api", () => ({
@@ -36,7 +37,7 @@ const mockGuideData = {
 };
 
 /** 默认指标 mock（beforeEach 默认注入，单测可覆盖 definition_json 等字段） */
-const mockMetric = {
+const mockMetric: MetricResponse = {
   id: 1,
   metric_code: "finance_revenue_sum_d",
   name: "财务域收入汇总",
