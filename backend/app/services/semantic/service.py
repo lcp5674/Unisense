@@ -1955,6 +1955,18 @@ class MetricService(BaseService):
         metric = await self.get_metric(metric_code)
         self._assert_owner_or_admin(metric, actor_id, role)
 
+        # 废弃冻结（对齐 update_metric 的 DEPRECATED 状态拦截，且不豁免 admin）：
+        # 消费指南是面向消费者的使用文档（推荐用法/注意事项/关联指标），废弃指标已不可消费，
+        # 不应再被编辑——否则会残留「推荐使用」的过期信息，干扰废弃指标重评审恢复的判断。
+        # 如需更新指南，应先将指标从 DEPRECATED 重新提交评审恢复后再改。
+        if metric.status not in ("DRAFT", "REVIEW", "PUBLISHED"):
+            raise BusinessError(
+                f"指标状态 {metric.status} 不允许编辑消费指南；"
+                "废弃指标不可编辑消费指南，如需恢复请重新提交评审",
+                error_code="METRIC_DEPRECATED",
+                ctx={"metric_code": metric_code, "status": metric.status},
+            )
+
         expected = getattr(request, "row_version", None)
         if expected is not None and expected != metric.row_version:
             raise ConflictError(

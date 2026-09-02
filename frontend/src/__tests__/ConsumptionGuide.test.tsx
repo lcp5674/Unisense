@@ -210,4 +210,58 @@ describe("ConsumptionGuide", () => {
       );
     });
   });
+
+  it("DEPRECATED 指标：显示废弃提示且无编辑指南按钮（废弃冻结）", async () => {
+    mockedFetchGuide.mockResolvedValue({ ...mockGuideData, guide_source: "manual" });
+    vi.mocked(getMetric).mockResolvedValue({
+      id: 1,
+      metric_code: "finance_revenue_sum_d",
+      name: "财务域收入汇总",
+      domain: "finance",
+      type: "atomic",
+      granularity: "day",
+      unit: "元",
+      currency: null,
+      aggregation: "SUM",
+      time_semantics: "PERIOD",
+      freshness: "T1",
+      dw_layer: "DWS",
+      sla: null,
+      metric_tier: "T1",
+      serving_mode: "BATCH_ONLY",
+      additivity: "ADDITIVE",
+      non_additive_dimensions: null,
+      definition_json: { expr: "sum(amount)" },
+      version: 2,
+      row_version: 2,
+      status: "DEPRECATED",
+      owner_id: 1,
+      backup_owner_id: null,
+      approver_id: null,
+      submitted_by: null,
+      pii_flag: true,
+      compliance_reviewed: true,
+      term_id: null,
+      effective_version: 1,
+      consumption_guide: null,
+      successor_code: null,
+      deprecated_at: "2026-08-20T00:00:00",
+      sunset_until: null,
+      emergency_publish: false,
+      emergency_reason: null,
+      emergency_reviewed_at: null,
+      gray_tenant_ids: null,
+      pending_conflict: false,
+      pending_conflict_detail: null,
+      pending_version: false,
+      created_at: "2026-08-01T00:00:00",
+      updated_at: "2026-08-20T00:00:00",
+    });
+    renderGuide();
+    await waitFor(() => {
+      expect(screen.getAllByText(/指标已废弃/).length).toBeGreaterThan(0);
+    });
+    expect(screen.getByText(/不可消费，消费指南仅供审计回溯/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /编辑指南/ })).not.toBeInTheDocument();
+  });
 });

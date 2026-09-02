@@ -354,9 +354,10 @@ async function fetchBaseAtomicOptions(
 export function MetricCreate() {
   const navigate = useNavigate();
   const { message } = AntApp.useApp();
-  // 批量注册按钮级权限：批量注册权限点（metric:import），后端接口强制为最终边界
+  // 批量注册按钮级权限：批量注册权限点（metric:import）或创建权限（metric:create，批量导入本质是批量创建）。
+  // 与指标目录页「批量导入」按钮（can("metric:create") || can("metric:import")）保持同一口径，避免两页分裂。
   const { can } = usePermission();
-  const canBatchRegister = can("metric:import");
+  const canBatchRegister = can("metric:import") || can("metric:create");
   const canCreate = can("metric:create");
   const canInferDesc = can("metric:infer-description");
   const [loading, setLoading] = useState(false);

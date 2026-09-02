@@ -1368,6 +1368,31 @@ describe("MetricCatalog 回收站（已删除草稿恢复）", () => {
     await waitFor(() => expect(restoreMock).toHaveBeenCalledWith(metric.metric_code));
   });
 
+  it("非平台管理员且非 Owner：恢复按钮禁用（后端 restore 仅管理员或原 Owner，防可点必 403）", async () => {
+    mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });
+    mockedCurrentUser.mockResolvedValue({ id: 2, role: "metric_owner" } as any);
+    const user = { id: 2, username: "alice", display_name: "爱丽丝", role: "metric_owner", domain: null, org_id: 1 };
+    (fetchMyPermissions as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      user_id: 2, role: "metric_owner", home_domain: "", allowed_actions: [],
+      ui_actions: ["metric:create", "metric:edit", "metric:delete", "metric:deprecate", "metric:export"],
+      granted_domains: [], metric_whitelist: [], row_level_restricted: false, grants: [], expiring_soon: [],
+    });
+    render(
+      <MemoryRouter initialEntries={["/catalog"]}>
+        <Routes>
+          <Route path="/catalog" element={<PermissionProvider user={user}><MetricCatalog /></PermissionProvider>} />
+          <Route path="/detail/:code" element={<div>detail</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /回收站/ }));
+    await waitFor(() => {
+      const restoreBtn = screen.getByRole("button", { name: /恢复/ });
+      expect(restoreBtn).toBeTruthy();
+      expect(restoreBtn).toBeDisabled();
+    });
+  });
+
   it("彻底删除需二次确认后调用 purgeMetric（仅平台管理员可见）", async () => {
     const purgeMock = vi.mocked(purgeMetric).mockResolvedValue({ metric_code: metric.metric_code } as any);
     mockedList.mockResolvedValue({ items: [metric], total: 1, page: 1, page_size: 20 });

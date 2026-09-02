@@ -6174,6 +6174,37 @@ async def test_update_consumption_guide_not_owner_raises_auth():
     repo.update_with_optimistic_lock.assert_not_called()
 
 
+async def test_update_consumption_guide_deprecated_blocked_even_for_owner():
+    """DEPRECATED 指标不可编辑消费指南——owner 亦拦截（废弃冻结，对齐 update_metric）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DEPRECATED", owner_id=9))
+    with pytest.raises(BusinessError) as ei:
+        await svc.update_consumption_guide(
+            "sales_gmv_daily",
+            MetricConsumptionGuideUpdateRequest(recommended_usage=["x"]),
+            actor_id=9,
+            role="metric_owner",
+            user_domain="sales",
+        )
+    assert ei.value.error_code == "METRIC_DEPRECATED"
+    repo.update_with_optimistic_lock.assert_not_called()
+
+
+async def test_update_consumption_guide_deprecated_blocked_for_admin():
+    """DEPRECATED 指标消费指南编辑连平台管理员也拦截（需先恢复再改，对齐口径冻结）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DEPRECATED"))
+    with pytest.raises(BusinessError) as ei:
+        await svc.update_consumption_guide(
+            "sales_gmv_daily",
+            MetricConsumptionGuideUpdateRequest(recommended_usage=["x"]),
+            actor_id=1,
+            role="platform_admin",
+        )
+    assert ei.value.error_code == "METRIC_DEPRECATED"
+    repo.update_with_optimistic_lock.assert_not_called()
+
+
 async def test_get_consumption_guide_auto_related_metrics():
     """自动生成分支：血缘一跳推荐（排除自身/非 metric 节点/去重/限量）。"""
     svc, repo = _svc_with_repo()

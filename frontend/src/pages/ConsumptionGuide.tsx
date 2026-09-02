@@ -71,7 +71,8 @@ export function ConsumptionGuide() {
   const [error, setError] = useState<string | null>(null);
   const { track } = useTracking();
   const { can } = usePermission();
-  const canEdit = can("metric:edit");
+  const canEdit = can("metric:edit") && metric?.status !== "DEPRECATED";
+  const isDeprecated = metric?.status === "DEPRECATED";
   // 编辑弹窗状态：三组列表草稿 + 保存中
   const [editOpen, setEditOpen] = useState(false);
   const [editDraft, setEditDraft] = useState<ConsumptionGuidePayload>({
@@ -186,6 +187,16 @@ export function ConsumptionGuide() {
           )}
         </Space>
       </div>
+
+      {isDeprecated && (
+        <Alert
+          type="warning"
+          showIcon
+          message="指标已废弃（DEPRECATED）"
+          description="该指标已废弃，不可消费，消费指南仅供审计回溯；如需更新指南，请先将指标重新提交评审恢复。"
+          style={{ marginBottom: 20 }}
+        />
+      )}
 
       <Card title="指标基本信息" style={{ marginBottom: 20 }}>
         <Descriptions column={3} bordered size="small">

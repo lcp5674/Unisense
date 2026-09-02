@@ -1162,6 +1162,9 @@ export function MetricCatalog() {
           pii_flag: piiOnly || undefined,
           created_after: lifecycleDate.created_after,
           updated_before: lifecycleDate.updated_before,
+          batch_id: batchIdFilter || undefined,
+          has_downstream: downstreamFilter === "all" ? undefined : downstreamFilter === "with",
+          health_level: (healthFilter || undefined) as "EXCELLENT" | "GOOD" | "WARNING" | "CRITICAL" | undefined,
           deleted: deletedView,
           sort_by: sortBy,
           sort_order: sortOrder,
@@ -1325,7 +1328,13 @@ export function MetricCatalog() {
                 <Button
                   type="link"
                   size="small"
-                  disabled={restoring === r.metric_code || !can("metric:create")}
+                  // 恢复仅平台管理员或原 Owner 可执行（后端 restore_metric 强校验）；
+                  // 门禁对齐删除权限点（metric:delete），避免对他人软删记录「可点必 403」
+                  disabled={
+                    restoring === r.metric_code ||
+                    !can("metric:delete") ||
+                    (currentUserRole !== "platform_admin" && r.owner_id !== currentUserId)
+                  }
                   onClick={(e) => {
                     e.stopPropagation();
                     handleRestore(r.metric_code);
@@ -1803,8 +1812,8 @@ export function MetricCatalog() {
               </Button>
             </>
           )}
-          <Tooltip title={canCreate ? "上传 CSV 或 Excel（.xlsx）批量创建 DRAFT 指标（编码/名称可缺省自动补全）" : "无批量导入权限（metric:create）"}>
-            <Button icon={<UploadOutlined />} onClick={() => setImportOpen(true)} disabled={!canCreate}>
+          <Tooltip title={canCreate || can("metric:import") ? "上传 CSV 或 Excel（.xlsx）批量创建 DRAFT 指标（编码/名称可缺省自动补全）" : "无批量导入权限（metric:create/metric:import）"}>
+            <Button icon={<UploadOutlined />} onClick={() => setImportOpen(true)} disabled={!canCreate && !can("metric:import")}>
               批量导入
             </Button>
           </Tooltip>
@@ -1823,22 +1832,24 @@ export function MetricCatalog() {
               刷新
             </Button>
           </Tooltip>
-          <Tooltip title={deletedView ? "返回正常指标列表" : "查看已软删的草稿指标（回收站，可恢复）"}>
-            <Button
-              icon={<DeleteOutlined />}
-              type={deletedView ? "primary" : "default"}
-              danger={deletedView}
-              onClick={() => {
-                // 切换回收站视图时清空勾选：避免正常列表/回收站的勾选残留
-                // （软删记录 status 仍为 DRAFT，残留勾选会误触发批量删除→重复软删 404）
-                setSelected([]);
-                setPage(1);
-                setDeletedView((v) => !v);
-              }}
-            >
-              {deletedView ? "返回列表" : "回收站"}
-            </Button>
-          </Tooltip>
+          {can("metric:delete") && (
+            <Tooltip title={deletedView ? "返回正常指标列表" : "查看已软删的草稿指标（回收站，可恢复；仅删除权限可见）"}>
+              <Button
+                icon={<DeleteOutlined />}
+                type={deletedView ? "primary" : "default"}
+                danger={deletedView}
+                onClick={() => {
+                  // 切换回收站视图时清空勾选：避免正常列表/回收站的勾选残留
+                  // （软删记录 status 仍为 DRAFT，残留勾选会误触发批量删除→重复软删 404）
+                  setSelected([]);
+                  setPage(1);
+                  setDeletedView((v) => !v);
+                }}
+              >
+                {deletedView ? "返回列表" : "回收站"}
+              </Button>
+            </Tooltip>
+          )}
           <Tooltip title="勾选 2~6 个指标进行矩阵对比（每行字段、每列指标）">
             <Button
               type="primary"
@@ -1984,14 +1995,25 @@ export function MetricCatalog() {
                           ? "批量废弃仅适用于勾选中的已发布（PUBLISHED）指标；当前勾选无已发布指标"
                           : !canDeprecate
                             ? "无废弃权限（metric:deprecate）"
-                            : undefined
+                            : currentUserRole !== "platform_admin" &&
+                                currentUserRole !== "domain_admin" &&
+                                !selected.some((m) => m.owner_id === currentUserId)
+                              ? "仅平台/域管理员或指标 Owner 可废弃；当前勾选含非你负责的已发布指标"
+                              : undefined
                       }
                     >
                       <span>批量废弃（已发布）</span>
                     </Tooltip>
                   ),
                   icon: <DeleteOutlined />,
-                  disabled: !selected.some((m) => m.status === "PUBLISHED") || !canDeprecate,
+                  // 后端 deprecate_metric 走 _assert_owner_or_admin + PDP：platform_admin/domain_admin 放行，
+                  // metric_owner 仅本人/副 Owner；非管理且勾选含他人指标时禁用避免逐条 403
+                  disabled:
+                    !selected.some((m) => m.status === "PUBLISHED") ||
+                    !canDeprecate ||
+                    (currentUserRole !== "platform_admin" &&
+                      currentUserRole !== "domain_admin" &&
+                      !selected.some((m) => m.owner_id === currentUserId)),
                 },
                 {
                   // P2-1：批量恢复已废弃指标（DEPRECATED → DRAFT，对齐维度/逻辑度量/术语批量重新启用）
@@ -2003,14 +2025,24 @@ export function MetricCatalog() {
                           ? "批量恢复仅适用于勾选中的已废弃（DEPRECATED）指标；当前勾选无已废弃指标"
                           : !canDeprecate
                             ? "无恢复权限（metric:deprecate）"
-                            : undefined
+                            : currentUserRole !== "platform_admin" &&
+                                currentUserRole !== "domain_admin" &&
+                                !selected.some((m) => m.owner_id === currentUserId)
+                              ? "仅平台/域管理员或指标 Owner 可恢复；当前勾选含非你负责的已废弃指标"
+                              : undefined
                       }
                     >
                       <span>批量恢复（已废弃）</span>
                     </Tooltip>
                   ),
                   icon: <ReloadOutlined />,
-                  disabled: !selected.some((m) => m.status === "DEPRECATED") || !canDeprecate,
+                  // 后端 reactivate_metric 同样走 _assert_owner_or_admin + PDP（对齐 deprecate）
+                  disabled:
+                    !selected.some((m) => m.status === "DEPRECATED") ||
+                    !canDeprecate ||
+                    (currentUserRole !== "platform_admin" &&
+                      currentUserRole !== "domain_admin" &&
+                      !selected.some((m) => m.owner_id === currentUserId)),
                 },
                 { type: "divider" },
                 {
