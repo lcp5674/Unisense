@@ -612,7 +612,7 @@ function GraphTab() {
         <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
           刷新
         </Button>
-        <Select
+        <Select showSearch
           value={provenance}
           onChange={setProvenance}
           style={{ width: 180 }}
@@ -1003,7 +1003,7 @@ function ImpactTab() {
             ),
           }))}
         />
-        <Select
+        <Select showSearch
           value={direction}
           onChange={(v) => setDirection(v)}
           style={{ width: 140 }}
@@ -1200,7 +1200,7 @@ function ParseTab() {
   return (
     <div>
       <Space style={{ marginBottom: 12 }} wrap>
-        <Select
+        <Select showSearch
           value={dialect}
           onChange={setDialect}
           style={{ width: 160 }}
@@ -2222,7 +2222,7 @@ function GovernanceTab() {
         <Space wrap align="end">
           <div>
             <div style={{ fontSize: 12, color: "#666", marginBottom: 4 }}>导出格式</div>
-            <Select value={exportFormat} onChange={setExportFormat} style={{ width: 180 }}
+            <Select showSearch value={exportFormat} onChange={setExportFormat} style={{ width: 180 }}
               options={[
                 { value: "json", label: "通用 JSON（边明细）" },
                 { value: "openlineage", label: "OpenLineage 事件" },

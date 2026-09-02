@@ -1506,7 +1506,7 @@ export function DataSources() {
               load(1, pageSize);
             }}
           />
-          <Select
+          <Select showSearch
             allowClear
             placeholder="全部健康状态"
             style={{ width: 140 }}
@@ -1638,7 +1638,7 @@ export function DataSources() {
           </Space>
           <Space size={16} style={{ width: "100%" }}>
             <Form.Item name="source_type" label="类型" rules={[{ required: true }]} style={{ width: "100%" }}>
-              <Select
+              <Select showSearch
                 placeholder="选择数据源类型"
                 onChange={handleTypeChange}
                 listHeight={400}
@@ -2032,7 +2032,7 @@ export function DataSources() {
         confirmLoading={batchLoading}
       >
         <Space direction="vertical" style={{ width: "100%" }}>
-          <Select
+          <Select showSearch
             value={batchCron}
             onChange={(v) => setBatchCron(v)}
             style={{ width: "100%" }}

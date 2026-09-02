@@ -1549,7 +1549,7 @@ export function AssetGraph({
           alignItems: "center",
         }}
       >
-        <Select
+        <Select showSearch
           mode="multiple"
           allowClear
           placeholder="按类型筛选"
@@ -1560,7 +1560,7 @@ export function AssetGraph({
           maxTagCount="responsive"
           data-testid="asset-graph-type-filter"
         />
-        <Select
+        <Select showSearch
           allowClear
           placeholder="依赖 ≥ 0"
           style={{ minWidth: 130 }}
@@ -1585,7 +1585,7 @@ export function AssetGraph({
           onChange={(e) => setSearchText(e.target.value)}
           data-testid="asset-graph-search"
         />
-        <Select
+        <Select showSearch
           allowClear
           placeholder="布局：自动"
           style={{ minWidth: 130 }}
@@ -1599,7 +1599,7 @@ export function AssetGraph({
           ]}
         />
         {layoutMode === "hierarchy" && (
-          <Select
+          <Select showSearch
             value={directionState}
             onChange={handleDirectionChange}
             style={{ minWidth: 132 }}

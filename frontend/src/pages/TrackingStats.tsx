@@ -165,7 +165,7 @@ export function TrackingStats() {
       >
         <Space wrap>
           <span className="muted">分组：</span>
-          <Select
+          <Select showSearch
             style={{ width: 140 }}
             value={groupBy}
             onChange={setGroupBy}

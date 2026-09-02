@@ -835,7 +835,7 @@ export function MetricReview({ embedded = false }: { embedded?: boolean } = {}) 
               syncFilter(kw, domain, batchId);
             }}
           />
-          <Select
+          <Select showSearch
             allowClear
             placeholder="按域筛选"
             style={{ width: 180 }}

@@ -673,7 +673,7 @@ function TermsTab() {
           onChange={(e) => setSearch(e.target.value)}
           onSearch={() => { setPage(1); load(); }}
         />
-        <Select
+        <Select showSearch
           allowClear
           placeholder="全部状态"
           style={{ width: 140 }}
@@ -681,7 +681,7 @@ function TermsTab() {
           onChange={(v) => { setStatus(v || ""); setPage(1); }}
           options={[{ value: "DRAFT", label: "草稿" }, { value: "REVIEW", label: "审核中" }, { value: "PUBLISHED", label: "已发布" }, { value: "DEPRECATED", label: "已废弃" }]}
         />
-        <Select
+        <Select showSearch
           value={deleted ? "trash" : undefined}
           placeholder="回收站"
           allowClear
@@ -1080,7 +1080,7 @@ function TermsTab() {
             />
           </Form.Item>
           <Form.Item name="relation_type" label="关系类型" rules={[{ required: true }]}>
-            <Select options={Object.entries(RELATION_TYPE_LABEL).map(([v, label]) => ({ value: v, label }))} />
+            <Select showSearch options={Object.entries(RELATION_TYPE_LABEL).map(([v, label]) => ({ value: v, label }))} />
           </Form.Item>
         </Form>
       </Modal>

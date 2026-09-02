@@ -977,7 +977,7 @@ export function SystemConfig() {
             rules={[{ required: true, message: "请选择提供商" }]}
             style={{ marginBottom: 12 }}
           >
-            <Select
+            <Select showSearch
               options={Object.entries(PROVIDER_PRESETS).map(([value, p]) => ({
                 value,
                 label: p.label,

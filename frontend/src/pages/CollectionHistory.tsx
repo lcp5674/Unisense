@@ -457,7 +457,7 @@ export function CollectionHistory() {
           filterOption={(input, opt) => ((opt?.label as string ?? "").toLowerCase().includes(input.toLowerCase()))}
           options={sources.map((s) => ({ value: s.source_id, label: `${s.name} (${s.source_id})` }))}
         />
-        <Select
+        <Select showSearch
           allowClear
           placeholder="全部状态"
           style={{ width: 120 }}
@@ -465,7 +465,7 @@ export function CollectionHistory() {
           onChange={(v) => { setRunStatus(v ?? ""); setRunPage(1); }}
           options={["RUNNING", "COMPLETED", "FAILED"].map((s) => ({ value: s, label: RUN_STATUS_LABEL[s].label }))}
         />
-        <Select
+        <Select showSearch
           allowClear
           placeholder="全部触发"
           style={{ width: 110 }}

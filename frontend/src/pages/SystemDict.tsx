@@ -612,7 +612,7 @@ export function SystemDict() {
             已选 {selectedRowKeys.length} 项
           </span>
         )}
-        <Select
+        <Select showSearch
           allowClear
           placeholder="全部状态"
           style={{ width: 140 }}
@@ -678,7 +678,7 @@ export function SystemDict() {
                 <Input placeholder="如 元" maxLength={32} />
               </Form.Item>
               <Form.Item name="extra_decimal" label="默认小数位" style={{ width: 160 }}>
-                <Select
+                <Select showSearch
                   allowClear
                   placeholder="按需"
                   options={[
@@ -741,7 +741,7 @@ export function SystemDict() {
                 <Input placeholder="如 元" maxLength={32} />
               </Form.Item>
               <Form.Item name="extra_decimal" label="默认小数位" style={{ width: 160 }}>
-                <Select
+                <Select showSearch
                   allowClear
                   placeholder="按需"
                   options={[

@@ -884,7 +884,7 @@ export function Catalogs() {
             options={sources.map((s) => ({ value: s.source_id, label: `${s.name}（${s.source_id}）` }))}
             notFoundContent={sourcesLoading ? <span>加载中…</span> : <span>无可用数据源</span>}
           />
-          <Select
+          <Select showSearch
             allowClear
             placeholder="全部源状态"
             style={{ width: 130 }}
@@ -895,7 +895,7 @@ export function Catalogs() {
               { value: "deleted", label: "已删除源" },
             ]}
           />
-          <Select
+          <Select showSearch
             allowClear
             placeholder="全部库名"
             style={{ width: 160 }}
@@ -906,7 +906,7 @@ export function Catalogs() {
             options={databases.map((d) => ({ value: d, label: d }))}
             notFoundContent={databasesLoading ? <span>加载中…</span> : <span>无可用库名</span>}
           />
-          <Select
+          <Select showSearch
             allowClear
             placeholder="全部类型"
             style={{ width: 120 }}
@@ -914,7 +914,7 @@ export function Catalogs() {
             onChange={(v) => { setEntityType(v || ""); setPage(1); }}
             options={["TABLE", "VIEW", "FIELD"].map((v) => ({ value: v, label: enumLabel(ENTITY_TYPE_LABEL, v) }))}
           />
-          <Select
+          <Select showSearch
             allowClear
             placeholder="全部敏感度"
             style={{ width: 140 }}
@@ -1059,7 +1059,7 @@ export function Catalogs() {
             <Input className="mono" placeholder="如 dwd_finance_order" />
           </Form.Item>
           <Form.Item name="entity_type" label="类型" initialValue="TABLE">
-            <Select options={["TABLE", "VIEW", "FIELD"].map((v) => ({ value: v, label: enumLabel(ENTITY_TYPE_LABEL, v) }))} />
+            <Select showSearch options={["TABLE", "VIEW", "FIELD"].map((v) => ({ value: v, label: enumLabel(ENTITY_TYPE_LABEL, v) }))} />
           </Form.Item>
           <Form.Item name="etl_sql" label="ETL SQL（可选）">
             <Input.TextArea rows={3} className="mono" />

@@ -533,7 +533,7 @@ export function QueryWorkspace() {
               <Space style={{ marginBottom: 16, width: "100%" }} wrap>
                 <span style={{ display: "inline-flex", alignItems: "center" }}>
                   消费客户端：
-                  <Select
+                  <Select showSearch
                     style={{ width: 300, marginLeft: 8 }}
                     placeholder="全部指标（平台内部视角）"
                     allowClear
@@ -580,7 +580,7 @@ export function QueryWorkspace() {
               <Col xs={24} md={12}>
                 <Form.Item label="日期范围">
                   <Space.Compact style={{ width: "100%" }}>
-                    <Select
+                    <Select showSearch
                       style={{ width: "100%" }}
                       value={dateRange}
                       onChange={setDateRange}
@@ -615,7 +615,7 @@ export function QueryWorkspace() {
               </Col>
               <Col xs={24} md={8}>
                 <Form.Item label="粒度">
-                  <Select
+                  <Select showSearch
                     allowClear
                     value={granularity}
                     onChange={setGranularity}
@@ -626,7 +626,7 @@ export function QueryWorkspace() {
               </Col>
               <Col xs={24} md={8}>
                 <Form.Item label="对比">
-                  <Select
+                  <Select showSearch
                     allowClear
                     value={comparison}
                     onChange={setComparison}
@@ -637,7 +637,7 @@ export function QueryWorkspace() {
               </Col>
               <Col xs={24} md={8}>
                 <Form.Item label="允许陈旧数据">
-                  <Select value={acceptStale ? "true" : "false"} onChange={(v) => setAcceptStale(v === "true")} options={[{ value: "false", label: "否" }, { value: "true", label: "是" }]} />
+                  <Select showSearch value={acceptStale ? "true" : "false"} onChange={(v) => setAcceptStale(v === "true")} options={[{ value: "false", label: "否" }, { value: "true", label: "是" }]} />
                 </Form.Item>
               </Col>
             </Row>

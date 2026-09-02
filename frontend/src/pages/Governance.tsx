@@ -498,7 +498,7 @@ function GrantsTab() {
   return (
     <div>
       <Space style={{ marginBottom: 12 }}>
-        <Select
+        <Select showSearch
           allowClear
           placeholder="全部状态"
           style={{ width: 140 }}
@@ -556,10 +556,10 @@ function GrantsTab() {
           </Space>
           <Space size={16} style={{ width: "100%" }}>
             <Form.Item name="grant_type" label="授权类型" initialValue="READ">
-              <Select style={{ width: 160 }} options={[{ value: "READ", label: "只读" }, { value: "WRITE", label: "写" }, { value: "READ_WRITE", label: "读写" }]} />
+              <Select showSearch style={{ width: 160 }} options={[{ value: "READ", label: "只读" }, { value: "WRITE", label: "写" }, { value: "READ_WRITE", label: "读写" }]} />
             </Form.Item>
             <Form.Item name="row_level" label="行级受限">
-              <Select style={{ width: 160 }} options={[{ value: false, label: "否" }, { value: true, label: "是" }]} />
+              <Select showSearch style={{ width: 160 }} options={[{ value: false, label: "否" }, { value: true, label: "是" }]} />
             </Form.Item>
           </Space>
           <Form.Item name="domain" label="授权域（留空为全部）">
@@ -618,10 +618,10 @@ function GrantsTab() {
           </Form.Item>
           <Space size={16} style={{ width: "100%" }}>
             <Form.Item name="grant_type" label="授权类型" initialValue="READ">
-              <Select style={{ width: 160 }} options={[{ value: "READ", label: "只读" }, { value: "WRITE", label: "写" }, { value: "READ_WRITE", label: "读写" }]} />
+              <Select showSearch style={{ width: 160 }} options={[{ value: "READ", label: "只读" }, { value: "WRITE", label: "写" }, { value: "READ_WRITE", label: "读写" }]} />
             </Form.Item>
             <Form.Item name="row_level" label="行级受限">
-              <Select style={{ width: 160 }} options={[{ value: false, label: "否" }, { value: true, label: "是" }]} />
+              <Select showSearch style={{ width: 160 }} options={[{ value: false, label: "否" }, { value: true, label: "是" }]} />
             </Form.Item>
           </Space>
           <Form.Item name="domain" label="授权域（留空为全部）">
@@ -1374,13 +1374,13 @@ function PiiReviewTab() {
             />
           </Form.Item>
           <Form.Item name="decision" label="决定" rules={[{ required: true }]} initialValue="APPROVE">
-            <Select options={[{ value: "APPROVE", label: "通过（合规复核通过）" }, { value: "REJECT", label: "拒绝（退回）" }]} />
+            <Select showSearch options={[{ value: "APPROVE", label: "通过（合规复核通过）" }, { value: "REJECT", label: "拒绝（退回）" }]} />
           </Form.Item>
           <Form.Item name="sensitivity_level" label="敏感度" initialValue="PII">
-            <Select options={["PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII"].map((v) => ({ value: v, label: SENSITIVITY_LABEL[v] ?? v }))} />
+            <Select showSearch options={["PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII"].map((v) => ({ value: v, label: SENSITIVITY_LABEL[v] ?? v }))} />
           </Form.Item>
           <Form.Item name="masking_policy" label="脱敏策略">
-            <Select allowClear options={[{ value: "none", label: "无" }, { value: "mask", label: "掩码" }, { value: "hash", label: "哈希" }, { value: "deny", label: "拒绝访问" }]} />
+            <Select showSearch allowClear options={[{ value: "none", label: "无" }, { value: "mask", label: "掩码" }, { value: "hash", label: "哈希" }, { value: "deny", label: "拒绝访问" }]} />
           </Form.Item>
           <Form.Item name="pii_columns" label="PII 字段（可多选，留空=沿用识别结果）">
             <Select
@@ -1712,7 +1712,7 @@ function CheckTab() {
                         />
                       </Form.Item>
                       <Form.Item name="action" label="动作" rules={[{ required: true }]}>
-                        <Select style={{ width: 130 }} options={["read", "write", "approve", "export", "review"].map((v) => ({ value: v, label: ACTION_LABEL[v] ?? v }))} />
+                        <Select showSearch style={{ width: 130 }} options={["read", "write", "approve", "export", "review"].map((v) => ({ value: v, label: ACTION_LABEL[v] ?? v }))} />
                       </Form.Item>
                       <Form.Item name="domain" label="域">
                         <Select allowClear showSearch optionFilterProp="label" style={{ width: 160 }} placeholder="全部域" options={domainOptions} />

@@ -411,7 +411,7 @@ function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
     <div>
       <Space style={{ marginBottom: 12 }} wrap>
         <span className="muted">类型：</span>
-        <Select
+        <Select showSearch
           allowClear
           placeholder="全部类型"
           style={{ width: 120 }}
@@ -420,7 +420,7 @@ function FeedbackTab({ refreshToken }: { refreshToken?: number }) {
           onChange={changeType}
         />
         <span className="muted">状态：</span>
-        <Select
+        <Select showSearch
           allowClear
           placeholder="全部状态"
           style={{ width: 120 }}
@@ -535,13 +535,13 @@ function SubmitFeedbackTab({ onSubmitted }: { onSubmitted?: () => void }) {
     <Card title="提交反馈" size="small">
       <Form form={form} layout="vertical" onFinish={handleSubmit} style={{ maxWidth: 520 }}>
         <Form.Item name="target_type" label="对象类型" rules={[{ required: true }]} initialValue="metric">
-          <Select options={TYPE_FILTER_OPTIONS} />
+          <Select showSearch options={TYPE_FILTER_OPTIONS} />
         </Form.Item>
         <Form.Item name="category" label="分类" initialValue="improvement">
-          <Select options={CATEGORY_OPTIONS} />
+          <Select showSearch options={CATEGORY_OPTIONS} />
         </Form.Item>
         <Form.Item name="priority" label="优先级" initialValue="medium">
-          <Select options={PRIORITY_OPTIONS} />
+          <Select showSearch options={PRIORITY_OPTIONS} />
         </Form.Item>
         <Form.Item name="rating" label="评分">
           <Rate count={5} />
@@ -638,7 +638,7 @@ function NpsTab() {
         </div>
         <Form form={form} layout="vertical" onFinish={handleSubmit}>
           <Form.Item name="target_type" label="对象类型" initialValue="platform">
-            <Select options={TYPE_FILTER_OPTIONS} />
+            <Select showSearch options={TYPE_FILTER_OPTIONS} />
           </Form.Item>
           <Form.Item name="comment" label="原因（可选）">
             <Input.TextArea rows={2} />

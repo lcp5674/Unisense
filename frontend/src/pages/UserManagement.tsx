@@ -513,7 +513,7 @@ export function UserManagement() {
 
       <Card styles={{ body: { paddingTop: 8 } }}>
         <Space style={{ marginBottom: 12 }} wrap>
-          <Select
+          <Select showSearch
             mode="multiple"
             allowClear
             placeholder="全部角色（可多选）"
@@ -523,7 +523,7 @@ export function UserManagement() {
             options={roleOptions}
             maxTagCount="responsive"
           />
-          <Select
+          <Select showSearch
             allowClear
             placeholder="全部状态"
             style={{ width: 130 }}
@@ -632,7 +632,7 @@ export function UserManagement() {
               style={{ flex: 1, minWidth: 0 }}
               extra="主角色自动取权限最高者（如同时选择域管理员+评审员，主角色为域管理员）"
             >
-              <Select
+              <Select showSearch
                 mode="multiple"
                 options={roleOptions}
                 placeholder="选择一个或多个角色"
@@ -720,7 +720,7 @@ export function UserManagement() {
             rules={[{ required: true, message: "至少选择一个角色" }]}
             extra="主角色自动取权限最高者；移除「平台管理员」将失去平台级管理权"
           >
-            <Select
+            <Select showSearch
               mode="multiple"
               options={roleOptions}
               placeholder="选择一个或多个角色"

@@ -599,7 +599,7 @@ export function ReviewWorkbench({ embedded = false }: { embedded?: boolean } = {
             >
               升级队列
             </Button>
-            <Select
+            <Select showSearch
               value={severity || undefined}
               onChange={(v) => setSeverity(v || "")}
               style={{ width: 140 }}
@@ -610,7 +610,7 @@ export function ReviewWorkbench({ embedded = false }: { embedded?: boolean } = {
                 { value: "soft", label: "软冲突·建议复核" },
               ]}
             />
-            <Select
+            <Select showSearch
               value={status || undefined}
               onChange={(v) => setStatus(v || "")}
               style={{ width: 140 }}
@@ -726,7 +726,7 @@ export function ReviewWorkbench({ embedded = false }: { embedded?: boolean } = {
                 {decision === "keep_diff_rename" && (
                   <div style={{ marginTop: 8 }}>
                     <span className="muted">指定需要改名的指标（通知其 Owner 在详情页改名）：</span>
-                    <Select
+                    <Select showSearch
                       style={{ width: 260, marginTop: 4 }}
                       placeholder="选择需要改名的指标"
                       value={renameTarget || undefined}

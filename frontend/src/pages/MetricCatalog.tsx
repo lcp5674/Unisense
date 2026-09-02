@@ -2166,7 +2166,7 @@ export function MetricCatalog() {
           }}
         >
           <span className="muted" style={{ fontSize: 12, flex: "none" }}>业务域</span>
-          <Select
+          <Select showSearch
             value={domain || undefined}
             onChange={(v) => { setDomain(v || ""); setPage(1); }}
             style={{ width: 140 }}
@@ -2175,7 +2175,7 @@ export function MetricCatalog() {
             options={domainFilterOptions}
           />
           <span className="muted" style={{ fontSize: 12, flex: "none" }}>状态</span>
-          <Select
+          <Select showSearch
             value={status || undefined}
             onChange={(v) => { setStatus(v || ""); setPage(1); }}
             style={{ width: 140 }}
@@ -2191,7 +2191,7 @@ export function MetricCatalog() {
             ]}
           />
           <span className="muted" style={{ fontSize: 12, flex: "none" }}>分级</span>
-          <Select
+          <Select showSearch
             value={tier || undefined}
             onChange={(v) => { setTier(v || ""); setPage(1); }}
             style={{ width: 120 }}
@@ -2221,7 +2221,7 @@ export function MetricCatalog() {
           {/* 下游引用过滤（批量废弃前按引用收敛）：有/无下游一键筛选，
               勾选「有下游」批量废弃时自动带替代指标，避免逐个翻详情确认 */}
           <span className="muted" style={{ fontSize: 12, flex: "none" }}>下游引用</span>
-          <Select
+          <Select showSearch
             value={downstreamFilter === "all" ? undefined : downstreamFilter}
             onChange={(v) => { setDownstreamFilter((v as "with" | "without") || "all"); setPage(1); }}
             style={{ width: 130 }}
@@ -2235,7 +2235,7 @@ export function MetricCatalog() {
           {/* 健康度档位筛选（仪表盘/可观测中心健康度分布下钻 ?health= 同源）：
               按 metric_health_score.level 服务端精确过滤，未评分指标不命中任何档位 */}
           <span className="muted" style={{ fontSize: 12, flex: "none" }}>健康度</span>
-          <Select
+          <Select showSearch
             value={healthFilter || undefined}
             onChange={(v) => { setHealthFilter(v || ""); setPage(1); }}
             style={{ width: 130 }}
@@ -2245,7 +2245,7 @@ export function MetricCatalog() {
           />
           <span style={{ flex: 1 }} />
           <span className="muted" style={{ fontSize: 12, flex: "none" }}>排序</span>
-          <Select
+          <Select showSearch
             value={sortBy}
             onChange={setSortBy}
             style={{ width: 140 }}
@@ -2489,7 +2489,7 @@ export function MetricCatalog() {
               评审指派（可选）：指定评审用户或域评审组，审批页仅被指派者可评审
             </p>
             <Space wrap>
-              <Select
+              <Select showSearch
                 style={{ width: 160 }}
                 placeholder="不指派（域管理员兜底）"
                 allowClear

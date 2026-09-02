@@ -324,7 +324,7 @@ export function CollectionTasks() {
             }))}
             optionFilterProp="label"
           />
-          <Select
+          <Select showSearch
             allowClear
             placeholder="全部状态"
             style={{ width: 130 }}

@@ -186,7 +186,7 @@ export function OrgManagement() {
             onChange={(e) => { setKeyword(e.target.value); setPage(1); }}
             allowClear
           />
-          <Select
+          <Select showSearch
             allowClear
             placeholder="全部状态"
             style={{ width: 140 }}

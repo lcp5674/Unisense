@@ -433,7 +433,7 @@ export function AuditLog() {
                 }
               >
         <Space style={{ marginBottom: 12 }} wrap>
-          <Select
+          <Select showSearch
             allowClear
             placeholder="全部操作对象类型"
             style={{ width: 200 }}
@@ -461,7 +461,7 @@ export function AuditLog() {
             onChange={(e) => setTraceId(e.target.value)}
             onPressEnter={() => { setPage(1); load(); }}
           />
-          <Select
+          <Select showSearch
             allowClear
             placeholder="敏感数据筛选"
             style={{ width: 160 }}

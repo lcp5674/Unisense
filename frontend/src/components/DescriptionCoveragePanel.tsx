@@ -1764,7 +1764,7 @@ export const DescriptionCoveragePanel = forwardRef<
                       <span className="muted" style={{ fontSize: 12 }}>
                         并发数
                       </span>
-                      <Select
+                      <Select showSearch
                         size="small"
                         value={batchConcurrency}
                         onChange={setBatchConcurrency}

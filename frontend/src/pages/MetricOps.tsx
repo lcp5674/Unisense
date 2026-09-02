@@ -220,7 +220,7 @@ export function MetricOps() {
             options={domainOptions}
             onChange={(v) => setFilters((f) => ({ ...f, domain: v ?? undefined }))}
           />
-          <Select
+          <Select showSearch
             allowClear
             style={{ width: 140 }}
             placeholder="指标类型"
@@ -228,7 +228,7 @@ export function MetricOps() {
             options={TYPE_OPTIONS}
             onChange={(v) => setFilters((f) => ({ ...f, type: v ?? undefined }))}
           />
-          <Select
+          <Select showSearch
             allowClear
             style={{ width: 140 }}
             placeholder="指标状态"

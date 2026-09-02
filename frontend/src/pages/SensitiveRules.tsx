@@ -660,7 +660,7 @@ export function SensitiveRules() {
                 label="命中类别"
                 rules={[{ required: true, message: "请选择命中类别" }]}
               >
-                <Select
+                <Select showSearch
                   placeholder="选择命中类别"
                   options={(editorPii ? piiCategories : confCategories).map((c) => ({
                     value: c.category,
@@ -1099,7 +1099,7 @@ function PiiVocabModal({ open, onClose, canEdit }: { open: boolean; onClose: () 
             rules={[{ required: true }]}
             tooltip={editing ? "不可修改" : "选择要配置/覆盖的词表键"}
           >
-            <Select
+            <Select showSearch
               disabled={!!editing}
               placeholder="选择词表键"
               options={Object.keys(VOCAB_META).map((code) => ({

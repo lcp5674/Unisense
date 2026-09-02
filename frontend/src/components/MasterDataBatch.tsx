@@ -255,7 +255,7 @@ export function MasterDataBatch<T extends object>(props: MasterDataBatchProps<T>
               <Input.TextArea rows={2} maxLength={200} />
             </Form.Item>
             <Form.Item name="reviewer_type" label="评审指派（可选）" extra="不指定则由域管理员兜底评审">
-              <Select
+              <Select showSearch
                 allowClear
                 placeholder="不指派（域管理员兜底）"
                 options={[

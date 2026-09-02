@@ -544,7 +544,7 @@ export function MeasureCatalogs() {
             setKeyword(v || undefined);
           }}
         />
-        <Select
+        <Select showSearch
           placeholder="业务域"
           allowClear
           style={{ width: 200 }}
@@ -554,7 +554,7 @@ export function MeasureCatalogs() {
             setDomain(v);
           }}
         />
-        <Select
+        <Select showSearch
           placeholder="状态"
           allowClear
           style={{ width: 140 }}
@@ -564,7 +564,7 @@ export function MeasureCatalogs() {
             setStatus(v);
           }}
         />
-        <Select
+        <Select showSearch
           value={deleted ? "trash" : undefined}
           placeholder="回收站"
           allowClear
@@ -844,7 +844,7 @@ export function MeasureCatalogs() {
             rules={[{ required: true, message: "请选择度量分类" }]}
             extra="按业务视角组织原子指标口径：流量/费用/药品/医保/效率/质量"
           >
-            <Select options={categoryOptions} placeholder="选择度量分类" />
+            <Select showSearch options={categoryOptions} placeholder="选择度量分类" />
           </Form.Item>
           <Form.Item
             name="stat_caliber"
@@ -859,14 +859,14 @@ export function MeasureCatalogs() {
             rules={[{ required: true }]}
             extra="决定默认单位与小数位；格式与默认值可在「系统管理 → 数据字典 → 度量格式」维护"
           >
-            <Select options={formatOptions} onChange={onFormatChange} />
+            <Select showSearch options={formatOptions} onChange={onFormatChange} />
           </Form.Item>
           <Space size={16} style={{ display: "flex" }}>
             <Form.Item name="default_unit" label="默认单位" style={{ width: 200 }}>
               <Input placeholder="金额默认 元" maxLength={32} />
             </Form.Item>
             <Form.Item name="default_decimal_places" label="默认小数位" style={{ width: 160 }}>
-              <Select
+              <Select showSearch
                 allowClear
                 placeholder="按需"
                 options={[
@@ -884,7 +884,7 @@ export function MeasureCatalogs() {
             )}
           </Space>
           <Form.Item name="source_system" label="源头系统（业务系统术语，多选）">
-            <Select
+            <Select showSearch
               mode="tags"
               placeholder="选择或输入后回车添加"
               tokenSeparators={[","]}
@@ -897,7 +897,7 @@ export function MeasureCatalogs() {
               label="同义词（统一查询/查重匹配）"
               style={{ flex: 1, marginBottom: 0 }}
             >
-              <Select mode="tags" placeholder="输入后回车添加" tokenSeparators={[","]} />
+              <Select showSearch mode="tags" placeholder="输入后回车添加" tokenSeparators={[","]} />
             </Form.Item>
             <Button icon={<RobotOutlined />} loading={synonymLoading} onClick={handleInferSynonyms}>
               AI 生成同义词

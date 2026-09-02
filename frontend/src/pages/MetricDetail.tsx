@@ -2863,7 +2863,7 @@ export function MetricDetail() {
               label="默认周期"
               style={{ marginBottom: 8, minWidth: 160, flex: 1 }}
             >
-              <Select
+              <Select showSearch
                 allowClear
                 placeholder="选择默认周期"
                 options={MOUNT_PERIOD_OPTIONS}
@@ -3290,7 +3290,7 @@ export function MetricDetail() {
           提交后将进入评审状态（DRAFT → REVIEW），由指定评审人通过或驳回。
         </Paragraph>
         <Space wrap style={{ marginTop: 8 }}>
-          <Select
+          <Select showSearch
             style={{ width: 180 }}
             placeholder="评审指派（可选）"
             allowClear

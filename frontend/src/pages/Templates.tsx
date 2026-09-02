@@ -306,7 +306,7 @@ function DefinitionModeEditor({
               placeholder="聚合/计算表达式，如 sum(pay_amount) 或 gmv / order_cnt"
               onChange={(e) => onChange(withCaliberBody(value, { expression: e.target.value }))}
             />
-            <Select
+            <Select showSearch
               mode="tags"
               style={{ width: "100%" }}
               value={tables("source_tables")}
@@ -1134,7 +1134,7 @@ export function Templates() {
       key: "owner_id",
       width: 150,
       render: (_: number | null, t: MetricTemplate) => (
-        <Select
+        <Select showSearch
           size="small"
           style={{ width: 132 }}
           placeholder="未指派"
@@ -1273,7 +1273,7 @@ export function Templates() {
               setPage(1);
             }}
           />
-          <Select
+          <Select showSearch
             style={{ width: 130 }}
             value={isActive}
             onChange={(v?: string) => {
@@ -1389,7 +1389,7 @@ export function Templates() {
               />
             </Form.Item>
             <Form.Item name="type" label="类型" rules={requiredRuleFor("type", reqFields, reqInapp, "指标类型")} style={{ width: 240 }}>
-              <Select options={["atomic", "derived", "composite"].map((v) => ({ value: v, label: METRIC_TYPE_LABEL[v] ?? v }))} />
+              <Select showSearch options={["atomic", "derived", "composite"].map((v) => ({ value: v, label: METRIC_TYPE_LABEL[v] ?? v }))} />
             </Form.Item>
             {/* OneData 预设（方案A）：按类型条件渲染——原子→逻辑度量；派生→挂载实体 */}
             <Form.Item noStyle shouldUpdate={(prev, cur) => prev.type !== cur.type}>
@@ -1468,7 +1468,7 @@ export function Templates() {
                         />
                       </Form.Item>
                       <Form.Item name="mount_default_period" noStyle>
-                        <Select
+                        <Select showSearch
                           allowClear
                           placeholder="默认周期"
                           style={{ width: 110 }}
@@ -1509,22 +1509,22 @@ export function Templates() {
               />
             </Form.Item>
             <Form.Item name="aggregation" label="聚合" rules={[{ required: true, message: "请选择聚合方式" }]} style={{ width: 240 }}>
-              <Select options={["SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE"].map((v) => ({ value: v, label: AGGREGATION_LABEL[v] ?? v }))} />
+              <Select showSearch options={["SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE"].map((v) => ({ value: v, label: AGGREGATION_LABEL[v] ?? v }))} />
             </Form.Item>
             <Form.Item name="time_semantics" label="时间语义" rules={[{ required: true, message: "请选择时间语义" }]} style={{ width: 240 }}>
-              <Select options={["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"].map((v) => ({ value: v, label: TIME_SEMANTICS_LABEL[v] ?? v }))} />
+              <Select showSearch options={["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"].map((v) => ({ value: v, label: TIME_SEMANTICS_LABEL[v] ?? v }))} />
             </Form.Item>
             <Form.Item name="freshness" label="新鲜度" rules={[{ required: true, message: "请选择新鲜度" }]} style={{ width: 240 }}>
-              <Select options={["REALTIME", "T0", "T1", "HOURLY"].map((v) => ({ value: v, label: FRESHNESS_LABEL[v] ?? v }))} />
+              <Select showSearch options={["REALTIME", "T0", "T1", "HOURLY"].map((v) => ({ value: v, label: FRESHNESS_LABEL[v] ?? v }))} />
             </Form.Item>
             <Form.Item name="dw_layer" label="数仓层" rules={[{ required: true, message: "请选择数仓层" }]} style={{ width: 240 }}>
-              <Select options={["ODS", "DWD", "DWS", "ADS", "DM"].map((v) => ({ value: v, label: DW_LAYER_LABEL[v] ?? v }))} />
+              <Select showSearch options={["ODS", "DWD", "DWS", "ADS", "DM"].map((v) => ({ value: v, label: DW_LAYER_LABEL[v] ?? v }))} />
             </Form.Item>
             <Form.Item name="serving_mode" label="服务模式" rules={requiredRuleFor("serving_mode", reqFields, reqInapp, "服务模式")} style={{ width: 240 }}>
-              <Select options={["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"].map((v) => ({ value: v, label: SERVING_MODE_LABEL[v] ?? v }))} />
+              <Select showSearch options={["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"].map((v) => ({ value: v, label: SERVING_MODE_LABEL[v] ?? v }))} />
             </Form.Item>
             <Form.Item name="additivity" label="可加性" rules={requiredRuleFor("additivity", reqFields, reqInapp, "可加性")} style={{ width: 240 }}>
-              <Select options={["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"].map((v) => ({ value: v, label: ADDITIVITY_LABEL[v] ?? v }))} />
+              <Select showSearch options={["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"].map((v) => ({ value: v, label: ADDITIVITY_LABEL[v] ?? v }))} />
             </Form.Item>
             <Form.Item name="currency" label="币种" rules={requiredRuleFor("currency", reqFields, reqInapp, "币种")} style={{ width: 240 }}>
               <Select
@@ -1714,7 +1714,7 @@ export function Templates() {
               <Input.TextArea rows={2} maxLength={500} showCount placeholder="模板用途、适用场景说明" />
             </Form.Item>
             <Form.Item name="required_fields" label="必填字段（实例化时强制填写）" style={{ width: "100%" }}>
-              <Select
+              <Select showSearch
                 mode="tags"
                 tokenSeparators={[",", "，"]}
                 placeholder="选择或输入字段名后回车，如 metric_code、granularity"
@@ -1723,7 +1723,7 @@ export function Templates() {
               />
             </Form.Item>
             <Form.Item name="type" label="指标类型预设" style={{ width: 196 }}>
-              <Select allowClear options={["atomic", "derived", "composite"].map((v) => ({ value: v, label: METRIC_TYPE_LABEL[v] ?? v }))} placeholder="（不预设）" />
+              <Select showSearch allowClear options={["atomic", "derived", "composite"].map((v) => ({ value: v, label: METRIC_TYPE_LABEL[v] ?? v }))} placeholder="（不预设）" />
             </Form.Item>
             {/* OneData 预设（方案A）：按类型条件渲染——原子→逻辑度量；派生→挂载实体 */}
             <Form.Item noStyle shouldUpdate={(prev, cur) => prev.type !== cur.type}>
@@ -1793,7 +1793,7 @@ export function Templates() {
                         />
                       </Form.Item>
                       <Form.Item name="mount_default_period" noStyle>
-                        <Select
+                        <Select showSearch
                           allowClear
                           placeholder="默认周期"
                           style={{ width: 110 }}
@@ -1815,25 +1815,25 @@ export function Templates() {
               <Select allowClear options={unitOptions} showSearch placeholder="（不预设）" />
             </Form.Item>
             <Form.Item name="aggregation" label="聚合方式预设" style={{ width: 196 }}>
-              <Select allowClear options={["SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE"].map((v) => ({ value: v, label: AGGREGATION_LABEL[v] ?? v }))} placeholder="（不预设）" />
+              <Select showSearch allowClear options={["SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "MAX", "MIN", "MEDIAN", "PERCENTILE"].map((v) => ({ value: v, label: AGGREGATION_LABEL[v] ?? v }))} placeholder="（不预设）" />
             </Form.Item>
             <Form.Item name="time_semantics" label="时间语义预设" style={{ width: 196 }}>
-              <Select allowClear options={["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"].map((v) => ({ value: v, label: TIME_SEMANTICS_LABEL[v] ?? v }))} placeholder="（不预设）" />
+              <Select showSearch allowClear options={["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"].map((v) => ({ value: v, label: TIME_SEMANTICS_LABEL[v] ?? v }))} placeholder="（不预设）" />
             </Form.Item>
             <Form.Item name="freshness" label="新鲜度预设" style={{ width: 196 }}>
-              <Select allowClear options={["REALTIME", "T0", "T1", "HOURLY"].map((v) => ({ value: v, label: FRESHNESS_LABEL[v] ?? v }))} placeholder="（不预设）" />
+              <Select showSearch allowClear options={["REALTIME", "T0", "T1", "HOURLY"].map((v) => ({ value: v, label: FRESHNESS_LABEL[v] ?? v }))} placeholder="（不预设）" />
             </Form.Item>
             <Form.Item name="dw_layer" label="数仓层预设" style={{ width: 196 }}>
-              <Select allowClear options={["ODS", "DWD", "DWS", "ADS", "DM"].map((v) => ({ value: v, label: DW_LAYER_LABEL[v] ?? v }))} placeholder="（不预设）" />
+              <Select showSearch allowClear options={["ODS", "DWD", "DWS", "ADS", "DM"].map((v) => ({ value: v, label: DW_LAYER_LABEL[v] ?? v }))} placeholder="（不预设）" />
             </Form.Item>
             <Form.Item name="serving_mode" label="服务模式预设" style={{ width: 196 }}>
-              <Select allowClear options={["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"].map((v) => ({ value: v, label: SERVING_MODE_LABEL[v] ?? v }))} placeholder="（不预设）" />
+              <Select showSearch allowClear options={["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"].map((v) => ({ value: v, label: SERVING_MODE_LABEL[v] ?? v }))} placeholder="（不预设）" />
             </Form.Item>
             <Form.Item name="additivity" label="可加性预设" style={{ width: 196 }}>
-              <Select allowClear options={["ADDITIVE", "NON_ADDITIVE", "SEMI_ADDITIVE"].map((v) => ({ value: v, label: ADDITIVITY_LABEL[v] ?? v }))} placeholder="（不预设）" />
+              <Select showSearch allowClear options={["ADDITIVE", "NON_ADDITIVE", "SEMI_ADDITIVE"].map((v) => ({ value: v, label: ADDITIVITY_LABEL[v] ?? v }))} placeholder="（不预设）" />
             </Form.Item>
             <Form.Item name="metric_tier" label="分级预设" style={{ width: 196 }}>
-              <Select allowClear options={["T1", "T2", "T3"].map((v) => ({ value: v, label: METRIC_TIER_LABEL[v] ?? v }))} placeholder="（不预设）" />
+              <Select showSearch allowClear options={["T1", "T2", "T3"].map((v) => ({ value: v, label: METRIC_TIER_LABEL[v] ?? v }))} placeholder="（不预设）" />
             </Form.Item>
             <Form.Item name="owner_id" label="负责人" style={{ width: 196 }}>
               <Select

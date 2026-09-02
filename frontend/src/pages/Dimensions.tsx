@@ -778,7 +778,7 @@ function DimensionsTab() {
             setKeyword("");
           }}
         />
-        <Select
+        <Select showSearch
           placeholder="状态筛选"
           allowClear
           style={{ width: 140 }}
@@ -791,7 +791,7 @@ function DimensionsTab() {
             { value: "DEPRECATED", label: "已废弃" },
           ]}
         />
-        <Select
+        <Select showSearch
           value={deleted ? "trash" : undefined}
           placeholder="回收站"
           allowClear
@@ -880,7 +880,7 @@ function DimensionsTab() {
             />
           </Form.Item>
           <Form.Item name="type" label="缓慢变化维类型">
-            <Select options={SCD_TYPE_OPTIONS} placeholder="选择类型" />
+            <Select showSearch options={SCD_TYPE_OPTIONS} placeholder="选择类型" />
           </Form.Item>
           <Form.Item name="description" label="描述">
             <Input.TextArea rows={2} />
@@ -932,7 +932,7 @@ function DimensionsTab() {
             />
           </Form.Item>
           <Form.Item name="type" label="缓慢变化维类型">
-            <Select options={SCD_TYPE_OPTIONS} placeholder="选择类型" />
+            <Select showSearch options={SCD_TYPE_OPTIONS} placeholder="选择类型" />
           </Form.Item>
           <Form.Item name="description" label="描述">
             <Input.TextArea rows={2} />
@@ -968,7 +968,7 @@ function DimensionsTab() {
             />
           </Form.Item>
           <Form.Item name="role" label="维度角色" extra="标识该指标如何消费此维度">
-            <Select options={ROLE_OPTIONS} placeholder="选择角色" />
+            <Select showSearch options={ROLE_OPTIONS} placeholder="选择角色" />
           </Form.Item>
           <Form.Item name="default_member" label="默认成员">
             <Select
@@ -1628,7 +1628,7 @@ function MembersTab() {
         维度值需与指标口径声明的维度保持一致——指标在维度管理绑定后，消费查询即按此维度校验过滤。
       </div>
       <div style={{ marginBottom: 12, display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-        <Select
+        <Select showSearch
           placeholder="选择维度"
           style={{ width: 260 }}
           value={dimCode}
@@ -2302,7 +2302,7 @@ function MembersTab() {
             />
           </Form.Item>
           <Form.Item name="status" label="状态">
-            <Select
+            <Select showSearch
               options={[
                 { value: "DRAFT", label: "草稿" },
                 { value: "PUBLISHED", label: "已发布" },
@@ -2656,7 +2656,7 @@ function MappingsTab() {
             label="映射类型"
             extra={<span className="muted" style={{ fontSize: 12 }}>等价 = 源/目标取值一一对应（如 app↔APP）；部分 = 存在一对多或需表达式换算</span>}
           >
-            <Select options={[{ value: "EQUIVALENT", label: "等价" }, { value: "PARTIAL", label: "部分" }]} />
+            <Select showSearch options={[{ value: "EQUIVALENT", label: "等价" }, { value: "PARTIAL", label: "部分" }]} />
           </Form.Item>
           <Form.Item
             name="expression"
@@ -2685,7 +2685,7 @@ function MappingsTab() {
             label="映射类型"
             extra={<span className="muted" style={{ fontSize: 12 }}>等价 = 源/目标取值一一对应（如 app↔APP）；部分 = 存在一对多或需表达式换算</span>}
           >
-            <Select options={[{ value: "EQUIVALENT", label: "等价" }, { value: "PARTIAL", label: "部分" }]} />
+            <Select showSearch options={[{ value: "EQUIVALENT", label: "等价" }, { value: "PARTIAL", label: "部分" }]} />
           </Form.Item>
           <Form.Item
             name="expression"

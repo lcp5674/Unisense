@@ -2222,7 +2222,7 @@ function GraphTab() {
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }} align="middle">
         <Col>
           <span className="muted">来源：</span>
-          <Select
+          <Select showSearch
             style={{ width: 210 }}
             value={graphSource}
             onChange={setGraphSource}
@@ -2238,7 +2238,7 @@ function GraphTab() {
         </Col>
         <Col>
           <span className="muted">域筛选：</span>
-          <Select
+          <Select showSearch
             allowClear
             placeholder="全部域"
             style={{ width: 200 }}
@@ -3070,7 +3070,7 @@ function OwnerTab() {
         size="small"
         extra={
           ownerOptions.length > 0 ? (
-            <Select
+            <Select showSearch
               style={{ width: 180 }}
               value={ownerId}
               onChange={setOwnerId}
@@ -3900,7 +3900,7 @@ function OrphansTab() {
           />
         </Col>
         <Col>
-          <Select
+          <Select showSearch
             allowClear
             placeholder="全部类型"
             style={{ width: 110 }}
@@ -3910,7 +3910,7 @@ function OrphansTab() {
           />
         </Col>
         <Col>
-          <Select
+          <Select showSearch
             allowClear
             placeholder="全部敏感度"
             style={{ width: 130 }}
@@ -3923,7 +3923,7 @@ function OrphansTab() {
           />
         </Col>
         <Col>
-          <Select
+          <Select showSearch
             allowClear
             placeholder="Schema 状态"
             style={{ width: 140 }}
@@ -4457,7 +4457,7 @@ function TablesTab() {
           />
         </Col>
         <Col>
-          <Select
+          <Select showSearch
             allowClear
             placeholder="全部敏感度"
             style={{ width: 140 }}
@@ -4485,7 +4485,7 @@ function TablesTab() {
           />
         </Col>
         <Col>
-          <Select
+          <Select showSearch
             allowClear
             placeholder="Schema 状态"
             style={{ width: 150 }}
@@ -4846,7 +4846,7 @@ function TablesTab() {
             label="责任人"
             extra="单条已带入当前责任人；留空表示不修改；选择「解除归属」将清空责任人"
           >
-            <Select
+            <Select showSearch
               allowClear
               placeholder="选择责任人"
               options={[
@@ -4856,7 +4856,7 @@ function TablesTab() {
             />
           </Form.Item>
           <Form.Item name="sensitivity_level" label="敏感度" extra="留空表示不修改">
-            <Select
+            <Select showSearch
               placeholder="选择敏感级别"
               options={Object.keys(SENSITIVITY_LABEL).map((k) => ({
                 value: k,
@@ -4914,7 +4914,7 @@ function SearchTab() {
           onChange={(e) => setQ(e.target.value)}
           onPressEnter={doSearch}
         />
-        <Select
+        <Select showSearch
           allowClear
           placeholder="全部类型"
           style={{ width: 160 }}
@@ -5621,7 +5621,7 @@ function PiiTab() {
             />
           </Col>
           <Col>
-            <Select
+            <Select showSearch
               allowClear
               placeholder="复核状态"
               style={{ width: 130 }}
@@ -5635,7 +5635,7 @@ function PiiTab() {
             />
           </Col>
           <Col>
-            <Select
+            <Select showSearch
               allowClear
               placeholder="PII 类别"
               style={{ width: 150 }}
@@ -5851,7 +5851,7 @@ function PiiTemplateModal({
       />
       <Form layout="vertical">
         <Form.Item label="分级模板" required>
-          <Select value={templateId} onChange={setTemplateId} options={templates.map((t) => ({ value: t.id, label: t.name }))} />
+          <Select showSearch value={templateId} onChange={setTemplateId} options={templates.map((t) => ({ value: t.id, label: t.name }))} />
         </Form.Item>
         {templates.find((t) => t.id === templateId) && (
           <Form.Item label="模板说明">
@@ -5861,7 +5861,7 @@ function PiiTemplateModal({
           </Form.Item>
         )}
         <Form.Item label="作用范围" required>
-          <Select
+          <Select showSearch
             value={scope}
             onChange={setScope}
             options={[
@@ -6113,7 +6113,7 @@ function PiiDetailDrawer({
                 <Col span={10}>
                   <Space>
                     <span style={{ color: "#888" }}>脱敏策略</span>
-                    <Select
+                    <Select showSearch
                       style={{ width: 120 }}
                       value={masking}
                       onChange={setMasking}
@@ -6217,7 +6217,7 @@ function PiiDetailDrawer({
                   />
                 </Col>
                 <Col span={10}>
-                  <Select
+                  <Select showSearch
                     allowClear
                     style={{ width: "100%" }}
                     placeholder="合法性基础"
@@ -6275,7 +6275,7 @@ function ChangesTab() {
       title={`最近 ${data.days} 天资产变更`}
       size="small"
       extra={
-        <Select
+        <Select showSearch
           value={days}
           onChange={setDays}
           style={{ width: 120 }}

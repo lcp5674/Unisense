@@ -212,7 +212,7 @@ export function MasterDataReviewModals(props: {
             label="评审指派（可选）"
             extra="不指定则由域管理员兜底评审"
           >
-            <Select
+            <Select showSearch
               allowClear
               placeholder="不指派（域管理员兜底）"
               options={[

@@ -176,7 +176,7 @@ export function ManualEdgeModal({
       />
       <Form form={form} layout="vertical" initialValues={{ edge_type: "DERIVED_FROM" }}>
         <Form.Item label="登记方向">
-          <Select
+          <Select showSearch
             value={direction}
             onChange={(v) => setDirection(v as "upstream" | "downstream")}
             options={[
@@ -208,7 +208,7 @@ export function ManualEdgeModal({
           />
         </Form.Item>
         <Form.Item name="edge_type" label="边类型" required>
-          <Select
+          <Select showSearch
             options={MANUAL_EDGE_TYPE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
             onChange={() => setEdgeTypeChanged(true)}
           />

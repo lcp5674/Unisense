@@ -186,13 +186,13 @@ function RulesTab() {
             />
           </Form.Item>
           <Form.Item name="rule_type" label="规则类型" rules={[{ required: true }]}>
-            <Select options={RULE_TYPES.map((v) => ({ value: v, label: RULE_TYPE_LABEL[v] ?? v }))} />
+            <Select showSearch options={RULE_TYPES.map((v) => ({ value: v, label: RULE_TYPE_LABEL[v] ?? v }))} />
           </Form.Item>
           <Form.Item name="rule_mode" label="规则模式" initialValue="static">
-            <Select options={["static", "dynamic_baseline", "yoy_woy", "cross_source"].map((v) => ({ value: v, label: RULE_MODE_LABEL[v] ?? v }))} />
+            <Select showSearch options={["static", "dynamic_baseline", "yoy_woy", "cross_source"].map((v) => ({ value: v, label: RULE_MODE_LABEL[v] ?? v }))} />
           </Form.Item>
           <Form.Item name="severity" label="严重度" initialValue="P2">
-            <Select options={["P0", "P1", "P2"].map((v) => ({ value: v, label: QUALITY_SEVERITY_LABEL[v] ?? v }))} />
+            <Select showSearch options={["P0", "P1", "P2"].map((v) => ({ value: v, label: QUALITY_SEVERITY_LABEL[v] ?? v }))} />
           </Form.Item>
           <Form.Item name="threshold" label="阈值 (JSON)" rules={[{ required: true }]}>
             <Input.TextArea rows={3} className="mono" placeholder='{"min": 0, "max": 1000000}' />
@@ -301,7 +301,7 @@ function EventsTab() {
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
-        <Select
+        <Select showSearch
           allowClear
           placeholder="全部状态"
           style={{ width: 140 }}
@@ -326,10 +326,10 @@ function EventsTab() {
             />
           </Form.Item>
           <Form.Item name="rule_type" label="规则类型" rules={[{ required: true }]}>
-            <Select placeholder="选择规则类型" options={RULE_TYPES.map((v) => ({ value: v, label: RULE_TYPE_LABEL[v] ?? v }))} />
+            <Select showSearch placeholder="选择规则类型" options={RULE_TYPES.map((v) => ({ value: v, label: RULE_TYPE_LABEL[v] ?? v }))} />
           </Form.Item>
           <Form.Item name="rule_mode" label="规则模式">
-            <Select allowClear placeholder="默认按规则自身模式" options={["static", "dynamic_baseline", "yoy_woy", "cross_source"].map((v) => ({ value: v, label: RULE_MODE_LABEL[v] ?? v }))} />
+            <Select showSearch allowClear placeholder="默认按规则自身模式" options={["static", "dynamic_baseline", "yoy_woy", "cross_source"].map((v) => ({ value: v, label: RULE_MODE_LABEL[v] ?? v }))} />
           </Form.Item>
           <Form.Item name="obs_value" label="观测值" rules={[{ required: true }]}>
             <InputNumber style={{ width: 200 }} />

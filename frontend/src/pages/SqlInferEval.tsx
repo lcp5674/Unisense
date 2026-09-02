@@ -827,7 +827,7 @@ export function SqlInferEval() {
             </Col>
             <Col span={12}>
               <Form.Item name="dialect" label="方言">
-                <Select
+                <Select showSearch
                   options={[
                     "hive", "spark", "oracle", "clickhouse", "trino", "postgres",
                     "mysql", "doris", "starrocks", "other",
@@ -882,12 +882,12 @@ export function SqlInferEval() {
                 label="期望周期"
                 rules={[{ required: true, message: "请选择期望周期" }]}
               >
-                <Select options={PERIOD_OPTIONS.map((p) => ({ value: p, label: GRANULARITY_LABEL[p] ?? p }))} />
+                <Select showSearch options={PERIOD_OPTIONS.map((p) => ({ value: p, label: GRANULARITY_LABEL[p] ?? p }))} />
               </Form.Item>
             </Col>
             <Col span={12}>
               <Form.Item name="expected_tables" label="期望源表（回车添加）">
-                <Select mode="tags" placeholder="如 ods.orders" tokenSeparators={[","]} />
+                <Select showSearch mode="tags" placeholder="如 ods.orders" tokenSeparators={[","]} />
               </Form.Item>
             </Col>
           </Row>
@@ -905,7 +905,7 @@ export function SqlInferEval() {
                         <Input placeholder="度量列" style={{ width: 170 }} />
                       </Form.Item>
                       <Form.Item name={[name, "agg"]} noStyle>
-                        <Select
+                        <Select showSearch
                           placeholder="聚合"
                           style={{ width: 160 }}
                           options={AGG_OPTIONS.map((a) => ({ value: a, label: AGGREGATION_LABEL[a] ?? a }))}

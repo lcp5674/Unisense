@@ -180,7 +180,7 @@ export function LineageImpact({ metricCode }: { metricCode: string }) {
               { label: "双向", value: "both" },
             ]}
           />
-          <Select
+          <Select showSearch
             size="small"
             style={{ width: 84 }}
             value={maxHops}

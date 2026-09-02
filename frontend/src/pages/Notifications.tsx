@@ -1161,7 +1161,7 @@ function NotifListTab() {
     <div>
       {/* 收件箱筛选：消息类型 / 已读状态 / 时间段 / 仅待处理 / 同类聚合 */}
       <div className="notif-filterbar">
-        <Select
+        <Select showSearch
           size="small"
           allowClear
           placeholder="全部类型"
@@ -1170,7 +1170,7 @@ function NotifListTab() {
           style={{ minWidth: 170 }}
           options={EVENT_TYPES.map((c) => ({ value: c, label: eventTypeLabel(c) }))}
         />
-        <Select
+        <Select showSearch
           size="small"
           allowClear
           placeholder="全部状态"
@@ -1182,7 +1182,7 @@ function NotifListTab() {
             { value: "read", label: "已读" },
           ]}
         />
-        <Select
+        <Select showSearch
           size="small"
           allowClear
           placeholder="全部时间"
@@ -1368,14 +1368,14 @@ function SubscriptionsTab() {
       <Modal title="新增订阅" open={modalOpen} onCancel={() => setModalOpen(false)} onOk={() => form.submit()} okText="保存">
         <Form form={form} layout="vertical" onFinish={handleCreate} style={{ marginTop: 8 }}>
           <Form.Item name="channel" label="送达方式" rules={[{ required: true }]}>
-            <Select options={CHANNELS.map((c) => ({ value: c, label: CHANNEL_LABEL[c] ?? c }))} />
+            <Select showSearch options={CHANNELS.map((c) => ({ value: c, label: CHANNEL_LABEL[c] ?? c }))} />
           </Form.Item>
           <Form.Item
             name="event_type"
             label="消息类型"
             rules={[{ required: true, message: "请至少选择一个消息类型" }]}
           >
-            <Select
+            <Select showSearch
               mode="multiple"
               allowClear
               placeholder="按模块选择消息类型"
@@ -1449,13 +1449,13 @@ function PublishTab() {
       <Card title="发送消息" size="small">
         <Form form={form} layout="vertical" onFinish={handlePublish}>
           <Form.Item name="event_type" label="消息类型" rules={[{ required: true }]}>
-            <Select options={EVENT_TYPES.map((c) => ({ value: c, label: eventTypeLabel(c) }))} />
+            <Select showSearch options={EVENT_TYPES.map((c) => ({ value: c, label: eventTypeLabel(c) }))} />
           </Form.Item>
           <Form.Item name="source" label="所属模块">
-            <Select allowClear options={["metric", "lineage", "quality", "governance", "semantic", "system", "scheduler"].map((c) => ({ value: c, label: SOURCE_LABEL[c] ?? c }))} />
+            <Select showSearch allowClear options={["metric", "lineage", "quality", "governance", "semantic", "system", "scheduler"].map((c) => ({ value: c, label: SOURCE_LABEL[c] ?? c }))} />
           </Form.Item>
           <Form.Item name="level" label="重要程度" initialValue="INFO">
-            <Select options={["INFO", "WARN", "ERROR"].map((c) => ({ value: c, label: QUALITY_LEVEL_LABEL[c] ?? c }))} />
+            <Select showSearch options={["INFO", "WARN", "ERROR"].map((c) => ({ value: c, label: QUALITY_LEVEL_LABEL[c] ?? c }))} />
           </Form.Item>
           <Form.Item name="note" label="补充说明">
             <Input.TextArea rows={2} />
