@@ -137,7 +137,15 @@ async def quality_metrics(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    return ok(data=await ObservabilityService(db).quality_stats(), trace_id=trace_id)
+    """质量事件统计（level/status 分布）。
+
+    域收敛（第三轮审查）：platform_admin 全量；domain_admin 按本域（user.domain）
+    收敛，防跨域读他域质量事件统计。
+    """
+    domain = None if user.role == "platform_admin" else user.domain
+    return ok(
+        data=await ObservabilityService(db).quality_stats(domain=domain), trace_id=trace_id
+    )
 
 
 @router.get("/metrics/health", dependencies=_HEALTH_READ_DEPS)
@@ -148,11 +156,13 @@ async def metric_health(
 ) -> Any:
     """指标健康度摘要（总览仪表「指标可信度」卡片，全员可读）。
 
-    与 /overview 的 quality.metric_health 同源；非管理角色按 P0-3 可见性收敛，
-    管理角色全量。独立端点避免仪表盘经 /overview 拉取全局 OPS 遥测。
+    与 /overview 的 quality.metric_health 同源；非平台管理员按 P0-3 可见性收敛
+    （domain_admin 亦按域收敛——绑定域仅本域+本人负责、未绑定域退化个人视角，
+    与 visibility.py 读路径一致），平台管理员全量。独立端点避免仪表盘经
+    /overview 拉取全局 OPS 遥测。
     """
     scope: dict[str, Any] = {}
-    if user.role not in ("platform_admin", "domain_admin"):
+    if user.role != "platform_admin":
         scope = {"actor_id": user.id, "role": user.role, "user_domain": user.domain}
     return ok(
         data=await ObservabilityService(db).metric_health_stats(**scope),
@@ -167,8 +177,13 @@ async def quality_events_list(
     trace_id: Annotated[str, Depends(get_trace_id)],
     limit: int = Query(20, ge=1, le=100),
 ) -> Any:
-    """最近质量事件明细：level/status/metric_id/created_at。"""
-    items = await ObservabilityService(db).quality_events(limit)
+    """最近质量事件明细：level/status/metric_id/created_at。
+
+    域收敛（第三轮审查）：platform_admin 全量；domain_admin 按本域（user.domain）
+    收敛，防跨域读他域质量事件（指标名/修复建议/处理人）。
+    """
+    domain = None if user.role == "platform_admin" else user.domain
+    items = await ObservabilityService(db).quality_events(limit, domain=domain)
     return ok(data={"items": items, "total": len(items)}, trace_id=trace_id)
 
 

@@ -263,6 +263,51 @@ class TestObservabilityRepository:
         assert stats["by_status"] == {"P0": 2, "P1": 1}
         assert stats["total"] == 3
 
+    async def test_quality_stats_domain_scope(self, repo: ObservabilityRepository) -> None:
+        """第三轮审查：域管理员按本域收敛——SQL 含 Metric.domain 过滤（join Metric）。"""
+        mock_result = MagicMock()
+        mock_result.all.return_value = []
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        await repo.quality_stats(domain="medical_fee")
+        for call in repo._session.execute.call_args_list:
+            stmt = str(call.args[0])
+            assert "JOIN" in stmt.upper() and "domain" in stmt
+
+    async def test_quality_events_domain_scope(self, repo: ObservabilityRepository) -> None:
+        """第三轮审查：质量事件按域收敛——SQL 含 Metric.domain 过滤。"""
+        from decimal import Decimal
+
+        event = MagicMock(
+            id=1,
+            level=MagicMock(value="P0"),
+            status=MagicMock(value="OPEN"),
+            rule_type=MagicMock(value="ACCURACY"),
+            obs_value=Decimal("85.2"),
+            threshold=Decimal("99.0"),
+            metric_id=5,
+            ack_by=None,
+            resolved_by=None,
+            closed_by=None,
+            ack_note=None,
+            ack_at=None,
+            resolved_at=None,
+            closed_at=None,
+            repair_suggestion=None,
+            created_at=None,
+        )
+        mock_events = MagicMock()
+        mock_events.scalars.return_value = iter([event])
+        mock_metrics = MagicMock()
+        mock_metrics.all.return_value = []
+        mock_users = MagicMock()
+        mock_users.all.return_value = []
+        repo._session.execute = AsyncMock(
+            side_effect=[mock_events, mock_metrics, mock_users]
+        )
+        await repo.quality_events(20, domain="medical_fee")
+        stmt = str(repo._session.execute.call_args_list[0].args[0])
+        assert "domain" in stmt and "JOIN" in stmt.upper()
+
     async def test_api_stats(self, repo: ObservabilityRepository) -> None:
         mock_result = MagicMock()
         mock_result.all.return_value = [("CREATE", 5), ("UPDATE", 3)]

@@ -88,11 +88,13 @@ class ObservabilityService(BaseService):
     async def nps_stats(self) -> dict[str, Any]:
         return await self._repo.nps_stats()
 
-    async def quality_events(self, limit: int = 20) -> list[dict[str, Any]]:
-        return await self._repo.quality_events(limit)
+    async def quality_events(
+        self, limit: int = 20, domain: str | None = None
+    ) -> list[dict[str, Any]]:
+        return await self._repo.quality_events(limit, domain=domain)
 
-    async def quality_stats(self) -> dict[str, Any]:
-        return await self._repo.quality_stats()
+    async def quality_stats(self, domain: str | None = None) -> dict[str, Any]:
+        return await self._repo.quality_stats(domain=domain)
 
     async def metric_health_stats(
         self,

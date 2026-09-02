@@ -361,7 +361,14 @@ async def search_assets(
     limit: int = Query(20, ge=1, le=200),
 ) -> Any:
     """全局资产搜索：目录 + 指标统一结果（资产地图核心工具能力）。"""
-    data = await _svc(db, user).search_assets(q, entity_type=asset_type, limit=limit)
+    data = await _svc(db, user).search_assets(
+        q,
+        entity_type=asset_type,
+        limit=limit,
+        actor_id=user.id,
+        role=user.role,
+        user_domain=user.domain,
+    )
     return ok(data={"items": data, "total": len(data)}, trace_id=trace_id)
 
 
@@ -410,7 +417,13 @@ async def recent_changes(
     limit: int = Query(50, ge=1, le=200),
 ) -> Any:
     """变更追踪流：最近 N 天新增/变更的目录与指标。"""
-    data = await _svc(db, user).recent_changes(days=days, limit=limit)
+    data = await _svc(db, user).recent_changes(
+        days=days,
+        limit=limit,
+        actor_id=user.id,
+        role=user.role,
+        user_domain=user.domain,
+    )
     return ok(data=data, trace_id=trace_id)
 
 

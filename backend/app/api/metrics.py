@@ -472,7 +472,12 @@ async def consistency_stats(
     基于 conflict 服务模型（created_at → resolved_at）与指标表聚合，供运营大盘量化
     跨部门口径一致性与争议解决效率。支持按业务域/指标类型/指标状态过滤——总口径数
     按指标属性收敛，冲突计数统计「至少一方属于筛选范围」的记录（无过滤时全平台）。
+
+    X-2 域收敛（第三轮审查，对齐 metric_stats）：domain_admin 的 ``domain`` 过滤参数
+    强制收敛本域（防跨域统计他域冲突数）；platform_admin 可跨域。
     """
+    if user.role == "domain_admin" and user.domain:
+        domain = user.domain
     stats = await ConflictRepository(db).consistency_stats(
         domain=domain, type=metric_type, status=status
     )

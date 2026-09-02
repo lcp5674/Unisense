@@ -1308,6 +1308,78 @@ class TestSearchAssets:
         assert out == []
         s.execute.assert_not_awaited()
 
+    async def test_search_metric_applies_visibility(self) -> None:
+        """第三轮审查：非管理角色搜索指标复用 P0-3 可见性条件（防跨组织/他人私有）。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_met = MagicMock()
+        r_met.scalars.return_value.all.return_value = []
+        s.execute = AsyncMock(side_effect=[r_met])
+
+        await repo.search_assets(
+            "sales", "metric", 20, actor_id=4, role="metric_owner", user_domain="sales"
+        )
+
+        stmt = str(s.execute.call_args_list[0].args[0])
+        # 可见性条件落地：公开状态 + 本人 owner/backup
+        assert "status IN" in stmt or "status.in_" in stmt
+        assert "owner_id" in stmt and "backup_owner_id" in stmt
+
+    async def test_search_metric_applies_org_filter(self) -> None:
+        """第三轮审查：指标搜索按 owner 组织隔离（join User.org_id）。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_met = MagicMock()
+        r_met.scalars.return_value.all.return_value = []
+        s.execute = AsyncMock(side_effect=[r_met])
+
+        await repo.search_assets("sales", "metric", 20, org_id=1)
+
+        stmt = str(s.execute.call_args_list[0].args[0])
+        assert "JOIN" in stmt.upper() and "org_id" in stmt
+
+    async def test_catalog_summary_org_filter(self) -> None:
+        """第三轮审查：资产目录汇总按组织隔离（source_id IN 本组织数据源）。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        # 先查本组织 source_id（1 行），再依次 6 个聚合查询
+        r_src = MagicMock()
+        r_src.scalars.return_value.all.return_value = ["s1"]
+        r_total = MagicMock()
+        r_total.scalar.return_value = 10
+        r_agg = MagicMock()
+        r_agg.all.return_value = []
+        s.execute = AsyncMock(
+            side_effect=[r_src, r_total, r_agg, r_agg, r_agg, r_agg, r_agg, r_agg]
+        )
+
+        await repo.catalog_summary(org_id=1)
+
+        # 首个查询取本组织 source_id；后续聚合均带 source_id IN 过滤
+        assert "org_id" in str(s.execute.call_args_list[0].args[0])
+        for call in s.execute.call_args_list[1:]:
+            assert "source_id IN" in str(call.args[0])
+
+    async def test_recent_changes_applies_visibility(self) -> None:
+        """第三轮审查：变更追踪指标流复用 P0-3 可见性（同组织他人 DRAFT/REVIEW 不进流）。"""
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_cat = MagicMock()
+        r_cat.all.return_value = []
+        r_met = MagicMock()
+        r_met.all.return_value = []
+        r_drift = MagicMock()
+        r_drift.all.return_value = []
+        s.execute = AsyncMock(side_effect=[r_cat, r_met, r_drift])
+
+        out = await repo.recent_changes(
+            7, 50, org_id=1, actor_id=4, role="metric_owner", user_domain="sales"
+        )
+
+        assert out["days"] == 7
+        met_stmt = str(s.execute.call_args_list[1].args[0])
+        assert "owner_id" in met_stmt and "backup_owner_id" in met_stmt
+
 
 class TestHealthSummary:
     async def test_aggregates_all(self) -> None:

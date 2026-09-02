@@ -129,7 +129,9 @@ async def get_mount(
     mount, metric = row
     # 用户级可见性（对齐列表口径）：非管理角色不得查看他人私有指标（DRAFT/REVIEW
     # 未指派）的挂载详情——挂载含源表/业务限定/责任方，属指标元数据一部分。
-    if metric is not None and not metric_is_visible(
+    # 指标物理不存在（metric is None）时同样拒绝：挂载指向的指标已不可追溯，
+    # 不允许仅凭挂载行继续读取源表/业务限定（第三轮审查补严）。
+    if metric is None or not metric_is_visible(
         metric, user.id, user.role, user.domain
     ):
         raise NotFoundError(f"挂载不存在: {mount_id}")

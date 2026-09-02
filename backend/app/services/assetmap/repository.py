@@ -682,23 +682,40 @@ class AssetMapRepository:
                 it["owner_name"] = usr_map.get(oid)
         return items
 
-    async def catalog_summary(self) -> dict[str, Any]:
+    async def catalog_summary(self, org_id: int | None = None) -> dict[str, Any]:
+        """资产目录汇总（总数/类型/敏感级/孤儿/源分布/库分布/PII 合规）。
+
+        第三轮审查：按组织隔离（与 tables/orphans 等端点同源）——此前未过滤导致
+        org1 的 metric_owner 经 /summary 看到全平台 22951 资产与 PII 合规计数
+        （实测：summary=22951 vs tables=406）。platform_admin（org_id=None）全量。
+        """
+        cond = [DBCatalog.deleted_at.is_(None)]
+        if org_id is not None:
+            # 本组织数据源资产范围：先取 org 内 source_id，再统一过滤（一次关联查询）
+            org_sources = (
+                await self._session.execute(
+                    select(DataSource.source_id).where(
+                        DataSource.deleted_at.is_(None), DataSource.org_id == org_id
+                    )
+                )
+            ).scalars().all()
+            cond.append(DBCatalog.source_id.in_(org_sources))
         total = (
             await self._session.execute(
-                select(func.count()).select_from(DBCatalog).where(DBCatalog.deleted_at.is_(None))
+                select(func.count()).select_from(DBCatalog).where(*cond)
             )
         ).scalar() or 0
         by_type = (
             await self._session.execute(
                 select(DBCatalog.entity_type, func.count())
-                .where(DBCatalog.deleted_at.is_(None))
+                .where(*cond)
                 .group_by(DBCatalog.entity_type)
             )
         ).all()
         by_sens = (
             await self._session.execute(
                 select(DBCatalog.sensitivity_level, func.count())
-                .where(DBCatalog.deleted_at.is_(None))
+                .where(*cond)
                 .group_by(DBCatalog.sensitivity_level)
             )
         ).all()
@@ -706,7 +723,7 @@ class AssetMapRepository:
             await self._session.execute(
                 select(func.count())
                 .select_from(DBCatalog)
-                .where(DBCatalog.owner_id.is_(None), DBCatalog.deleted_at.is_(None))
+                .where(*cond, DBCatalog.owner_id.is_(None))
             )
         ).scalar() or 0
         # 按数据源分布：LEFT JOIN 取源名称（含已软删源，名称保留追溯）；count 降序
@@ -715,7 +732,7 @@ class AssetMapRepository:
                 select(DBCatalog.source_id, DataSource.name, func.count())
                 .select_from(DBCatalog)
                 .outerjoin(DataSource, DataSource.source_id == DBCatalog.source_id)
-                .where(DBCatalog.deleted_at.is_(None))
+                .where(*cond)
                 .group_by(DBCatalog.source_id, DataSource.name)
                 .order_by(func.count().desc())
             )
@@ -725,10 +742,7 @@ class AssetMapRepository:
         by_database = (
             await self._session.execute(
                 select(db_expr, func.count())
-                .where(
-                    DBCatalog.deleted_at.is_(None),
-                    DBCatalog.entity_name.like("%.%"),
-                )
+                .where(*cond, DBCatalog.entity_name.like("%.%"))
                 .group_by(db_expr)
                 .order_by(func.count().desc())
             )
@@ -743,10 +757,7 @@ class AssetMapRepository:
                     DBCatalog.compliance_reviewed,
                     func.count(),
                 )
-                .where(
-                    DBCatalog.deleted_at.is_(None),
-                    DBCatalog.sensitivity_level.in_(["PII", "CONFIDENTIAL"]),
-                )
+                .where(*cond, DBCatalog.sensitivity_level.in_(["PII", "CONFIDENTIAL"]))
                 .group_by(DBCatalog.sensitivity_level, DBCatalog.compliance_reviewed)
             )
         ).all()
@@ -784,13 +795,25 @@ class AssetMapRepository:
             },
         }
 
-    async def classification_summary(self) -> dict[str, Any]:
-        rows = (
-            await self._session.execute(
-                select(Classification.sensitivity_level, func.count()).group_by(
-                    Classification.sensitivity_level
+    async def classification_summary(self, org_id: int | None = None) -> dict[str, Any]:
+        """敏感分类汇总（按敏感级计数），按组织隔离（经 catalog_id 关联资产源）。"""
+        stmt = select(Classification.sensitivity_level, func.count()).group_by(
+            Classification.sensitivity_level
+        )
+        if org_id is not None:
+            org_sources = (
+                await self._session.execute(
+                    select(DataSource.source_id).where(
+                        DataSource.deleted_at.is_(None), DataSource.org_id == org_id
+                    )
                 )
+            ).scalars().all()
+            stmt = (
+                stmt.join(DBCatalog, DBCatalog.id == Classification.catalog_id)
+                .where(DBCatalog.source_id.in_(org_sources))
             )
+        rows = (
+            await self._session.execute(stmt)
         ).all()
         return {"by_sensitivity": dict(cast("Sequence[tuple[Any, Any]]", rows))}
 
@@ -1436,7 +1459,14 @@ class AssetMapRepository:
         return text.replace("/", "//").replace("%", "/%").replace("_", "/_")
 
     async def search_assets(
-        self, q: str, entity_type: str | None, limit: int, org_id: int | None = None
+        self,
+        q: str,
+        entity_type: str | None,
+        limit: int,
+        org_id: int | None = None,
+        actor_id: int | None = None,
+        role: str | None = None,
+        user_domain: str | None = None,
     ) -> list[dict[str, Any]]:
         """全局资产搜索：表/字段/指标三级，返回完整信息（源/责任人/口径/描述）。
 
@@ -1462,9 +1492,14 @@ class AssetMapRepository:
         # 字段级（schema_json 字段名模糊）
         if want_field:
             results.extend(await self._search_fields(q, limit, org_id=org_id))
-        # 指标级（metric_code / name 模糊）
+        # 指标级（metric_code / name 模糊，P0-3 可见性 + 组织隔离）
         if want_metric:
-            results.extend(await self._search_metrics(needle, limit))
+            results.extend(
+                await self._search_metrics(
+                    needle, limit, org_id=org_id, actor_id=actor_id, role=role,
+                    user_domain=user_domain,
+                )
+            )
         return results
 
     async def _search_catalog_tables(
@@ -1562,12 +1597,32 @@ class AssetMapRepository:
                         return await self.enrich_catalog_items(results)
         return await self.enrich_catalog_items(results)
 
-    async def _search_metrics(self, needle: str, limit: int) -> list[dict[str, Any]]:
-        """指标级搜索结果（含治理一等字段：类型/粒度/单位/聚合/新鲜度/分级/分层）。"""
+    async def _search_metrics(
+        self,
+        needle: str,
+        limit: int,
+        org_id: int | None = None,
+        actor_id: int | None = None,
+        role: str | None = None,
+        user_domain: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """指标级搜索结果（含治理一等字段：类型/粒度/单位/聚合/新鲜度/分级/分层）。
+
+        第三轮审查：与全局 /search 同源——复用 ``metric_visibility_conditions`` 按
+        P0-3 行级隔离（非管理角色仅公开状态 + 本人私有 + 被指派 REVIEW），并按组织
+        隔离（owner 归属组织）。此前裸查会经资产地图搜索泄露跨组织/未指派他人
+        DRAFT/REVIEW 私有指标（实测：org1 metric_owner 可搜到 org2 管理员 DRAFT）。
+        """
         stmt = select(Metric).where(
             Metric.deleted_at.is_(None),
-            or_(Metric.metric_code.like(needle, escape="/"), Metric.name.like(needle, escape="/")),
+            or_(
+                Metric.metric_code.like(needle, escape="/"),
+                Metric.name.like(needle, escape="/"),
+            ),
+            *metric_visibility_conditions(actor_id, role, user_domain),
         )
+        if org_id is not None:
+            stmt = stmt.join(User, User.id == Metric.owner_id).where(User.org_id == org_id)
         rows = (await self._session.execute(stmt.limit(limit))).scalars().all()
         owner_ids = {m.owner_id for m in rows if m.owner_id is not None}
         usr_map: dict[int, str] = {}
@@ -2404,7 +2459,13 @@ class AssetMapRepository:
         return list(rows)
 
     async def recent_changes(
-        self, days: int, limit: int, org_id: int | None = None
+        self,
+        days: int,
+        limit: int,
+        org_id: int | None = None,
+        actor_id: int | None = None,
+        role: str | None = None,
+        user_domain: str | None = None,
     ) -> dict[str, Any]:
         """变更追踪流：最近 N 天新增/变更的目录与指标。
 
@@ -2417,13 +2478,18 @@ class AssetMapRepository:
             limit: 各子列表上限。
             org_id: 多租户隔离（P2 加固）：非平台管理员仅统计本组织变更——
                 catalog/drift 经 ``data_source.org_id``、metric 经 ``user.org_id``。
+            actor_id/role/user_domain: P0-3 指标可见性收敛（第三轮审查）——非管理
+                角色仅见公开状态 + 本人私有 + 被指派 REVIEW，防同组织他人
+                DRAFT/REVIEW 进入变更流。
 
         Returns:
             ``{catalogs, metrics, drift, days}``
         """
         cutoff = datetime.now(UTC) - timedelta(days=days)
         catalogs = await self._recent_catalog_changes(cutoff, limit, org_id)
-        metrics = await self._recent_metric_changes(cutoff, limit, org_id)
+        metrics = await self._recent_metric_changes(
+            cutoff, limit, org_id, actor_id=actor_id, role=role, user_domain=user_domain
+        )
         drift = await self._recent_drift(cutoff, limit, org_id)
         return {"catalogs": catalogs, "metrics": metrics, "drift": drift, "days": days}
 
@@ -2477,9 +2543,20 @@ class AssetMapRepository:
         return await self.enrich_catalog_items(items)
 
     async def _recent_metric_changes(
-        self, cutoff: datetime, limit: int, org_id: int | None = None
+        self,
+        cutoff: datetime,
+        limit: int,
+        org_id: int | None = None,
+        actor_id: int | None = None,
+        role: str | None = None,
+        user_domain: str | None = None,
     ) -> list[dict[str, Any]]:
-        """最近变更的指标（change_type 由状态机推断：废弃/新增/更新）。"""
+        """最近变更的指标（change_type 由状态机推断：废弃/新增/更新）。
+
+        第三轮审查：复用 ``metric_visibility_conditions`` 按 P0-3 收敛——此前仅按组织
+        过滤，同组织他人 DRAFT/REVIEW（含描述/口径）会进入变更流（与 list_metrics
+        可见性口径不一致）。
+        """
         stmt = select(
             Metric.metric_code,
             Metric.name,
@@ -2490,7 +2567,11 @@ class AssetMapRepository:
             Metric.description,
             Metric.owner_id,
             Metric.updated_at,
-        ).where(Metric.deleted_at.is_(None), Metric.updated_at >= cutoff)
+        ).where(
+            Metric.deleted_at.is_(None),
+            Metric.updated_at >= cutoff,
+            *metric_visibility_conditions(actor_id, role, user_domain),
+        )
         if org_id is not None:
             stmt = stmt.join(User, User.id == Metric.owner_id).where(User.org_id == org_id)
         rows = (

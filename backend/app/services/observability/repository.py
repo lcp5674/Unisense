@@ -161,22 +161,27 @@ class ObservabilityRepository:
             "score": score,
         }
 
-    async def quality_events(self, limit: int = 20) -> list[dict[str, Any]]:
+    async def quality_events(
+        self, limit: int = 20, domain: str | None = None
+    ) -> list[dict[str, Any]]:
         """最近质量事件明细（供运营中心明细面板）。
 
         字段对齐 QualityEvent 模型：补全观测值/阈值/规则类型/操作留痕/修复建议，
         并批量 JOIN Metric 取得指标名（避免 N+1），让运营一眼看清"什么指标、
         因为什么规则、观测值多少/阈值多少、当前谁在处理"。
+
+        domain: 第三轮审查——域管理员按本域收敛（join Metric 过滤），platform_admin
+            传 None 全量，防 domain_admin 跨域读他域质量事件（指标名/修复建议）。
         """
-        events = list(
-            (
-                await self._session.execute(
-                    select(QualityEvent)
-                    .order_by(QualityEvent.created_at.desc(), QualityEvent.id.desc())
-                    .limit(limit)
-                )
-            ).scalars()
+        stmt = select(QualityEvent).order_by(
+            QualityEvent.created_at.desc(), QualityEvent.id.desc()
         )
+        if domain is not None:
+            stmt = (
+                stmt.join(Metric, Metric.id == QualityEvent.metric_id)
+                .where(Metric.deleted_at.is_(None), Metric.domain == domain)
+            )
+        events = list((await self._session.execute(stmt.limit(limit))).scalars())
         # 批量取关联指标名（一次 IN 查询，避免逐条查）
         metric_ids = {e.metric_id for e in events if e.metric_id}
         metric_names: dict[int, str] = {}
@@ -240,15 +245,23 @@ class ObservabilityRepository:
             for e in events
         ]
 
-    async def quality_stats(self) -> dict[str, Any]:
+    async def quality_stats(self, domain: str | None = None) -> dict[str, Any]:
+        """质量事件统计（level/status 分布），按域收敛（第三轮审查，对齐 events）。"""
+        def _apply(stmt: Any) -> Any:
+            if domain is not None:
+                stmt = stmt.join(Metric, Metric.id == QualityEvent.metric_id).where(
+                    Metric.deleted_at.is_(None), Metric.domain == domain
+                )
+            return stmt
+
         by_level = (
             await self._session.execute(
-                select(QualityEvent.level, func.count()).group_by(QualityEvent.level)
+                _apply(select(QualityEvent.level, func.count())).group_by(QualityEvent.level)
             )
         ).all()
         by_status = (
             await self._session.execute(
-                select(QualityEvent.status, func.count()).group_by(QualityEvent.status)
+                _apply(select(QualityEvent.status, func.count())).group_by(QualityEvent.status)
             )
         ).all()
         return {
