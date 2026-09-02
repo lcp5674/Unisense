@@ -738,11 +738,38 @@ async def test_execute_deprecated_metric_forbidden() -> None:
 
 
 # ---- execute：OLAP 执行器成功 / 异常 ----
-def _set_olap_ready(monkeypatch, executor: MagicMock) -> None:
+def _engine_eff(*, olap: bool = False, mysql: bool = False) -> dict:
+    """构造查询引擎生效配置（方案 A 后：consume 由 DB/env 生效配置驱动引擎）。"""
+    return {
+        "source": "db" if (olap or mysql) else "none",
+        "olap_url": "http://doris:8030" if olap else "",
+        "doris_host": "doris" if olap else "",
+        "doris_port": 8030,
+        "doris_database": "",
+        "doris_user": "",
+        "doris_password": "",
+        "mysql_fallback_url": "mysql+aiomysql://u:p@h:3306/db" if mysql else "",
+        "olap_configured": olap,
+        "mysql_fallback_configured": mysql,
+        "updated_by": None,
+        "updated_at": None,
+    }
+
+
+def _set_engines(monkeypatch, *, olap=None, mysql=None) -> None:
+    """注入引擎执行器：patch _engine_effective 生效配置 + _ensure_engines 返回执行器。"""
     monkeypatch.setattr(
-        "app.services.consume.service.settings.olap_url", "http://doris:8030/api/query"
+        ConsumeService,
+        "_engine_effective",
+        AsyncMock(return_value=_engine_eff(olap=olap is not None, mysql=mysql is not None)),
     )
-    monkeypatch.setattr("app.services.consume.service._get_olap_executor", lambda: executor)
+    monkeypatch.setattr(
+        consume_module, "_ensure_engines", AsyncMock(return_value=(olap, mysql))
+    )
+
+
+def _set_olap_ready(monkeypatch, executor: MagicMock) -> None:
+    _set_engines(monkeypatch, olap=executor)
 
 
 async def test_execute_query_success(monkeypatch) -> None:
@@ -1253,9 +1280,7 @@ async def test_execute_mysql_fallback_when_olap_unconfigured(monkeypatch) -> Non
     svc._snapshots.get_by_unique = AsyncMock(return_value=None)
     svc._snapshots.create = AsyncMock()
     fake = _FakeMysqlExecutor()
-    monkeypatch.setattr("app.services.consume.service.settings.olap_url", "")
-    monkeypatch.setattr("app.services.consume.service.settings.mysql_fallback_url", "mysql+aiomysql://u:p@h:3306/db")
-    monkeypatch.setattr("app.services.consume.service._get_mysql_executor", lambda: fake)
+    _set_engines(monkeypatch, mysql=fake)
 
     res = await svc.execute_query(QueryRequest(metric_code="gmv", date_range=""), client)
 
@@ -1303,9 +1328,7 @@ async def test_execute_internal_user_pii_reviewed_ok(monkeypatch) -> None:
     svc._snapshots.get_by_unique = AsyncMock(return_value=None)
     svc._snapshots.create = AsyncMock()
     fake = _FakeMysqlExecutor()
-    monkeypatch.setattr("app.services.consume.service.settings.olap_url", "")
-    monkeypatch.setattr("app.services.consume.service.settings.mysql_fallback_url", "mysql+aiomysql://u:p@h/db")
-    monkeypatch.setattr("app.services.consume.service._get_mysql_executor", lambda: fake)
+    _set_engines(monkeypatch, mysql=fake)
     # 内部用户查询已接入 PDP 闸门：放行（allow=True，无行级授权命中）
     from app.services.governance.policy import Decision
 

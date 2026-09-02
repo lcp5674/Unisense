@@ -131,16 +131,26 @@ async def test_observe_query_result_on_mysql_success() -> None:
     """OLAP 未配置 → MySQL 降级路径执行成功 → observe_query_result(True) 触发。"""
     from types import SimpleNamespace
 
-    from app.services.consume.service import ConsumeService, _get_mysql_executor
+    from app.services.consume.service import ConsumeService
 
     svc = ConsumeService(MagicMock())
     mysql_executor = MagicMock()
     mysql_executor.enabled = True
     mysql_executor.execute = AsyncMock(return_value=MagicMock(rows=[], total=0))
+    eff = {
+        "source": "env", "doris_host": "", "doris_port": 8030, "doris_database": "",
+        "doris_user": "", "doris_password": "", "mysql_fallback_url": "mysql+aiomysql://u:p@h/db",
+        "olap_configured": False, "mysql_fallback_configured": True,
+    }
 
     with (
-        patch.object(_get_mysql_executor.__globals__["settings"], "olap_url", ""),
-        patch("app.services.consume.service._get_mysql_executor", return_value=mysql_executor),
+        patch.object(
+            ConsumeService, "_engine_effective", new=AsyncMock(return_value=eff)
+        ),
+        patch(
+            "app.services.consume.service._ensure_engines",
+            new=AsyncMock(return_value=(None, mysql_executor)),
+        ),
         patch("app.core.metrics.store.observe_query_result") as observe,
     ):
         result, engine = await svc._execute_with_fallback(
@@ -165,10 +175,20 @@ async def test_observe_query_result_on_engine_failure() -> None:
     mysql_executor = MagicMock()
     mysql_executor.enabled = True
     mysql_executor.execute = AsyncMock(side_effect=RuntimeError("mysql down"))
+    eff = {
+        "source": "env", "doris_host": "", "doris_port": 8030, "doris_database": "",
+        "doris_user": "", "doris_password": "", "mysql_fallback_url": "mysql+aiomysql://u:p@h/db",
+        "olap_configured": False, "mysql_fallback_configured": True,
+    }
 
     with (
-        patch.object(ConsumeService.__init__.__globals__["settings"], "olap_url", ""),
-        patch("app.services.consume.service._get_mysql_executor", return_value=mysql_executor),
+        patch.object(
+            ConsumeService, "_engine_effective", new=AsyncMock(return_value=eff)
+        ),
+        patch(
+            "app.services.consume.service._ensure_engines",
+            new=AsyncMock(return_value=(None, mysql_executor)),
+        ),
         patch("app.core.metrics.store.observe_query_result") as observe,
         pytest.raises(BusinessError) as exc_info,
     ):

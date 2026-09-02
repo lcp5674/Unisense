@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -55,9 +56,69 @@ from app.services.governance.service import GovernanceService  # noqa: F401 供�
 
 # 限流器在 lifespan 中通过 init_rate_limiter 动态初始化（Redis/InMemory 热切换）；
 # 运行期统经 get_rate_limiter() 查阅，避免在 import 期冻结失效的快照（C6）。
-_executor: Any | None = None
 logger = get_logger("unisense.consume")
 
+# 兼容旧单例（_get_olap_executor/_get_mysql_executor 仅存供测试/外部直接调用）
+_executor: Any | None = None
+
+# 引擎执行器按「生效配置指纹」缓存重建（方案 A：DB 配置化热生效）。
+# 配置（host/port/db/user/password/fallback URL）变化 → 指纹变化 → 重建执行器，
+# 保存后下一查询即用新配置；跨 worker 由 QueryEngineConfigService 30s TTL 收敛。
+_engines_state: dict[str, Any] = {"fp": "", "olap": None, "mysql": None}
+
+
+def _engine_fingerprint(eff: dict[str, Any]) -> str:
+    """生成引擎配置指纹（host/port/db/user/password/fallback URL 任一变化即不同）。"""
+    payload = [
+        eff.get("doris_host", ""),
+        eff.get("doris_port", 8030),
+        eff.get("doris_database", ""),
+        eff.get("doris_user", ""),
+        eff.get("doris_password", ""),
+        eff.get("mysql_fallback_url", ""),
+    ]
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()  # noqa: S324 - 非安全用途，仅指纹
+
+
+async def _close_engine(engine: Any | None) -> None:
+    """关闭引擎连接池（best-effort：重建时旧引擎可能仍有在途请求，失败仅告警）。"""
+    if engine is None:
+        return
+    try:
+        await engine.close()
+    except Exception:  # noqa: BLE001 - 关闭失败不影响新引擎使用
+        logger.debug("engine_close_failed", exc_info=True)
+
+
+async def _ensure_engines(eff: dict[str, Any]) -> tuple[Any | None, Any | None]:
+    """按生效配置返回 (olap_executor, mysql_executor)；指纹变化自动重建并关旧。"""
+    fp = _engine_fingerprint(eff)
+    if fp == _engines_state["fp"]:
+        return _engines_state["olap"], _engines_state["mysql"]
+    from app.services.consume.mysql_executor import MysqlExecutor
+    from app.services.consume.olap_executor import OLAPExecutor
+
+    olap = None
+    if eff.get("olap_configured"):
+        olap = OLAPExecutor(
+            doris_host=eff.get("doris_host") or None,
+            doris_port=eff.get("doris_port") or 8030,
+            doris_database=eff.get("doris_database") or None,
+            doris_user=eff.get("doris_user") or None,
+            doris_password=eff.get("doris_password") or None,
+        )
+    mysql = None
+    if eff.get("mysql_fallback_configured"):
+        mysql = MysqlExecutor(url=eff.get("mysql_fallback_url"))
+    old_olap, old_mysql = _engines_state["olap"], _engines_state["mysql"]
+    _engines_state.update(fp=fp, olap=olap, mysql=mysql)
+    # 关闭旧引擎连接池（延迟到下一事件循环 tick，避免打断当前在途请求）
+    if old_olap is not None and old_olap is not olap:
+        asyncio.create_task(_close_engine(old_olap))
+    if old_mysql is not None and old_mysql is not mysql:
+        asyncio.create_task(_close_engine(old_mysql))
+    return olap, mysql
 # 标识符白名单：表名 / 列名无法参数化，必须收敛到安全字符集（长度对齐 DB 列 String(64)），
 # 杜绝标识符注入（反引号 / 空格 / 分号等皆可逃逸 `` `...` `` 包裹）。维度名另有口径声明集二次校验。
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
@@ -92,7 +153,11 @@ def _validate_date_part(part: str) -> None:
 
 
 def _get_olap_executor() -> Any:
-    """返回进程内共享的 OLAPExecutor 单例（复用连接池，避免每请求新建客户端泄漏）。"""
+    """返回进程内共享的 OLAPExecutor 单例（复用连接池，避免每请求新建客户端泄漏）。
+
+    Deprecated: 由 :func:`_ensure_engines`（按生效配置指纹重建）取代，保留供
+    旧测试/外部直接调用兼容——默认仍按 env 配置构建。
+    """
     global _executor
     if _executor is None:
         from app.services.consume.olap_executor import OLAPExecutor
@@ -105,7 +170,10 @@ _mysql_executor: Any | None = None
 
 
 def _get_mysql_executor() -> Any:
-    """返回进程内共享的 MysqlExecutor 单例（OLAP 不可用时的只读降级引擎）。"""
+    """返回进程内共享的 MysqlExecutor 单例（OLAP 不可用时的只读降级引擎）。
+
+    Deprecated: 由 :func:`_ensure_engines` 取代，保留供旧测试/外部直接调用兼容。
+    """
     global _mysql_executor
     if _mysql_executor is None:
         from app.services.consume.mysql_executor import MysqlExecutor
@@ -556,6 +624,16 @@ class ConsumeService(BaseService):
                 exc_info=True,
             )
 
+    async def _engine_effective(self) -> dict[str, Any]:
+        """获取查询引擎生效配置（DB 配置优先、env 兜底；进程 30s TTL 缓存）。
+
+        方案 A：管理员在系统配置页保存 Doris/MySQL-fallback 连接后，本方法返回
+        DB 配置（跨 worker 最长 30s 收敛），``_ensure_engines`` 按指纹重建执行器。
+        """
+        from app.services.query_engine.config_service import QueryEngineConfigService
+
+        return await QueryEngineConfigService(self._db).get_effective()
+
     async def _execute_with_fallback(
         self,
         req: QueryRequest,
@@ -564,18 +642,21 @@ class ConsumeService(BaseService):
     ) -> tuple[Any, str]:
         """执行查询并返回 (OLAPResult, 引擎标识)，OLAP 不可用时降级 MySQL。
 
+        引擎配置来源：DB 配置（query_engine_config）优先、env 兜底（方案 A）——
+        任一配置了 OLAP（doris_host 非空）即先试 OLAP：
         - OLAP 配置且执行成功 → ("olap")；
-        - OLAP 失败或未配置 → 尝试 MySQL 降级（配置了 mysql_fallback_url 时）→ ("mysql")；
+        - OLAP 失败或未配置 → 尝试 MySQL 降级（配置了 fallback URL 时）→ ("mysql")；
         - 两者均不可用 → 抛 DEPENDENCY_DEGRADED_ENGINE。
         """
         from app.services.consume.olap_executor import DorisSqlError
 
+        eff = await self._engine_effective()
+        olap_executor, mysql_executor = await _ensure_engines(eff)
         olap_tried = False
-        if settings.olap_url:
+        if olap_executor is not None:
             olap_tried = True
             try:
-                executor = _get_olap_executor()
-                result = await executor.execute(sql, params)
+                result = await olap_executor.execute(sql, params)
                 _observe_query_result(True)
                 return result, "olap"
             except DorisSqlError as exc:
@@ -589,8 +670,7 @@ class ConsumeService(BaseService):
             except Exception as exc:
                 logger.warning("olap_execute_failed_fallback_mysql", error=str(exc))
 
-        mysql_executor = _get_mysql_executor()
-        if mysql_executor.enabled:
+        if mysql_executor is not None:
             try:
                 result = await mysql_executor.execute(sql, params)
                 _observe_query_result(True)
@@ -606,7 +686,7 @@ class ConsumeService(BaseService):
                 ) from exc
 
         # 无任何可用引擎：仅当 OLAP **已配置但执行失败**时才标记依赖降级——
-        # 未配置（olap_url 为空）是平台部署选择而非依赖故障，不应写入 dependency_health
+        # 未配置（无 doris_host）是平台部署选择而非依赖故障，不应写入 dependency_health
         # DEGRADED（否则与周期探针的「未启用」状态来回覆盖，看板误报降级）。
         if olap_tried:
             fire_degradation_event("OLAP", "olap", "DEGRADED", "olap_failed")

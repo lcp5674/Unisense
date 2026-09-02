@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -131,12 +132,16 @@ class OLAPExecutor:
         doris_host: str | None = None,
         doris_port: int | None = None,
         doris_database: str | None = None,
+        doris_user: str | None = None,
+        doris_password: str | None = None,
         timeout: float = 30.0,
         redis: Any | None = None,
     ) -> None:
         self._host = doris_host or settings.doris_host
         self._port = doris_port or settings.doris_port
         self._database = doris_database or settings.doris_database
+        self._user = doris_user or getattr(settings, "doris_user", "") or ""
+        self._password = doris_password or getattr(settings, "doris_password", "") or ""
         self._timeout = timeout
         self._client: httpx.AsyncClient | None = None
         # 使用全局共享熔断器实例，确保跨请求状态一致
@@ -287,10 +292,18 @@ class OLAPExecutor:
 
         request_timeout = timeout or self._timeout
 
+        headers = {"Content-Type": "application/json"}
+        if self._user:
+            # Doris FE HTTP basic auth（配置了用户名时才附加）
+            token = base64.b64encode(
+                f"{self._user}:{self._password}".encode()
+            ).decode("ascii")
+            headers["Authorization"] = f"Basic {token}"
+
         response = await client.post(
             url,
             params=request_params,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             timeout=request_timeout,
         )
 
