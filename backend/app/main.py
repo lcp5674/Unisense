@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -55,6 +56,7 @@ from app.api.users import router as users_router
 from app.core.config import ConfigurationError, settings
 from app.core.degradation import ensure_dependency_health_seed, handle_circuit_signal
 from app.core.degradation_registry import init_degradation_registry
+from app.core.dependency_probe import dependency_probe_loop
 from app.core.dlq import get_dlq, init_dlq
 from app.core.eventbus import init_eventbus
 from app.core.feature_flags import get_feature_flag_manager, init_feature_flag_manager
@@ -222,6 +224,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await ensure_dependency_health_seed()
     logger.info("dependency_health_seeded")
 
+    # ---- 周期依赖健康探针（TD §4.13 实时健康态）：dependency_health 此前只被
+    # 启动种子/熔断器事件/consume 降级写入、无周期刷新 → 真实可达却停留历史降级态
+    # （「只降不升」误报）。启动周期任务，每 60s 实测 LLM/OLAP/GRAPH/ES 并写回真实状态。
+    _dep_probe_task = asyncio.create_task(dependency_probe_loop())
+    logger.info("dependency_probe_task_started")
+
     # ---- 限流器初始化（Redis 可用时启用分布式限流，否则 InMemory 降级）----
     init_rate_limiter(redis_pool)
     logger.info("rate_limiter_initialized")
@@ -234,6 +242,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
     # ---- 关闭 ----
+    _dep_probe_task.cancel()
     await get_dlq().stop()
     await close_redis_pool()
     logger.info("app_shutting_down")

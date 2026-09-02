@@ -573,6 +573,8 @@ class ObservabilityRepository:
                     "latency_p95_ms": d.latency_p95_ms,
                     "error_rate_pct": d.error_rate_pct,
                     "last_check_at": d.last_check_at,
+                    # 探针扩展信息（enabled=false 表示未配置未启用，前端展示「未启用」）
+                    "meta": d.meta,
                 }
             )
         run_rows = (

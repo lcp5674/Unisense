@@ -605,9 +605,11 @@ class ConsumeService(BaseService):
                     ctx={"retry_after": 30, "accept_stale": req.accept_stale},
                 ) from exc
 
-        # 无任何可用引擎
-        reason = "olap_failed" if olap_tried else "olap_not_configured"
-        fire_degradation_event("OLAP", "olap", "DEGRADED", reason)
+        # 无任何可用引擎：仅当 OLAP **已配置但执行失败**时才标记依赖降级——
+        # 未配置（olap_url 为空）是平台部署选择而非依赖故障，不应写入 dependency_health
+        # DEGRADED（否则与周期探针的「未启用」状态来回覆盖，看板误报降级）。
+        if olap_tried:
+            fire_degradation_event("OLAP", "olap", "DEGRADED", "olap_failed")
         _observe_query_result(False)
         raise BusinessError(
             "OLAP 执行引擎不可用，查询降级",

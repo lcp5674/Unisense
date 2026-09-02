@@ -380,11 +380,10 @@ class TestObservabilityRepository:
                 ),
                 rows(("COMPLETED", 6), ("RUNNING", 2)),  # collection_run by status
                 scalar(now),  # watermark max last_collected_at
-                # ---- quality ----
-                rows(
-                    (1, 70, "GOOD", None, "指标A", "metric_a"),
-                    (2, 65, "WARNING", ["sla"], "指标B", "metric_b"),
-                ),  # health rows: (mid, score, level, missing, name, code)
+                # ---- quality（P3 性能审查后：by_level 分组计数 + avg + top5 拆为 3 次）----
+                rows(("GOOD", 1), ("WARNING", 1)),  # by_level 分组计数 (level, count)
+                scalar(68),  # 平均分
+                rows((2, 65, "WARNING", ["sla"], "指标B", "metric_b")),  # 低健康 Top5
                 scalar(58),  # lineage edges
                 scalar(0),  # stale edges
                 one((58, now)),  # ingest (count, max run_at)
@@ -501,15 +500,17 @@ class TestObservabilityRepository:
                 dep_empty(),  # 12 dependency_health
                 rows(("COMPLETED", 2)),  # 13 采集运行状态
                 scalar(None),  # 14 watermark max
-                rows((1, 70, "GOOD", None, "指标A", "metric_a")),  # 15 指标健康度
-                scalar(58),  # 16 血缘边
-                scalar(0),  # 17 失效边
-                one((58, None)),  # 18 血缘接入
-                scalar(305),  # 19 PII 待复核
-                scalar(0),  # 20 授权到期
-                scalar(3),  # 21 schema 漂移
-                rows(("2026-08-11", 1)),  # 22 指标趋势
-                rows(("2026-08-11", 1)),  # 23 采集趋势
+                rows(("GOOD", 1), ("WARNING", 1)),  # 15 指标健康度 by_level（P3 拆分）
+                scalar(68),  # 16 平均分
+                rows((2, 68, "WARNING", ["sla"], "指标B", "metric_b")),  # 17 低健康 Top5
+                scalar(58),  # 18 血缘边
+                scalar(0),  # 19 失效边
+                one((58, None)),  # 20 血缘接入
+                scalar(305),  # 21 PII 待复核
+                scalar(0),  # 22 授权到期
+                scalar(3),  # 23 schema 漂移
+                rows(("2026-08-11", 1)),  # 24 指标趋势
+                rows(("2026-08-11", 1)),  # 25 采集趋势
             ][len(captured) - 1]
             return results
 
