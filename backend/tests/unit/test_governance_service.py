@@ -438,6 +438,24 @@ async def test_revoke_domain_admin_no_domain_forbidden() -> None:
         )
 
 
+async def test_revoke_null_domain_admin_any_domain_allowed() -> None:
+    """方案 A：domain_admin 无任何权限域 = 不限域 → 可回收任意域授权。"""
+    svc, _, _ = _svc(FakeUser(uid=1, role="domain_admin", domain="sales"))
+    actor = FakeUser(uid=1, role="domain_admin", domain=None)
+    # 不抛异常（空域放行）
+    svc._assert_revoke_scope(actor, _grant(2, "sales"))
+    svc._assert_revoke_scope(actor, _grant(2, "hr"))
+
+
+async def test_grant_null_domain_admin_any_domain_allowed() -> None:
+    """方案 A：domain_admin 无任何权限域 = 不限域 → 可授予任意域授权。"""
+    svc, _, _ = _svc(FakeUser(uid=1, role="domain_admin", domain="sales"))
+    actor = FakeUser(uid=1, role="domain_admin", domain=None)
+    # 不抛异常（空域放行）
+    svc._assert_grant_scope(actor, _payload(domain="sales"))
+    svc._assert_grant_scope(actor, _payload(domain="hr"))
+
+
 async def test_revoke_owner_self_ok() -> None:
     svc, _, _ = _svc(FakeUser(uid=10, role="analyst", domain="sales"))
     # 授权本人（不论角色）可回收自己的授权

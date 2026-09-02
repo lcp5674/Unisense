@@ -430,11 +430,10 @@ class SubjectDomainService:
         """域管理越权守卫（X-3 同类加固）：domain_admin 仅可管理本域及其子域。
 
         - ``platform_admin``（主角色或扩展角色）：放行（全局治理兜底）。
-        - 权限域取并集 ``domains_all()``（团队继承 ∪ 显式指定）；无任何权限域
-          时 fail-closed 拒绝——此前 ``if not ud: return`` 会放行 domain=NULL 的
-          domain_admin 管理任意主题域（越权实测）。
-        - 目标域须 ∈ 权限域，或是任一权限域子域（目标域 ``path`` 以权限域
-          ``path + '.'`` 为前缀，域树层级）。
+        - 权限域取并集 ``domains_all()``（团队继承 ∪ 显式指定）；**无任何权限域 =
+          不限域（方案 A）**——放行，可管理全部主题域（数据范围不限制）。
+        - 有权限域时：目标域须 ∈ 权限域，或是任一权限域子域（目标域 ``path``
+          以权限域 ``path + '.'`` 为前缀，域树层级）。
 
         此前 ``_ADMIN_DEPS`` 仅 platform_admin+domain_admin 角色门禁，任意域
         domain_admin 可改/停/删任意域——补本域归属校验防跨域治理失控。
@@ -447,11 +446,8 @@ class SubjectDomainService:
             else [d for d in [getattr(user, "domain", None)] if d]
         )
         if not uds:
-            raise BusinessError(
-                "当前账号未绑定任何业务域，无权管理主题域",
-                error_code="FORBIDDEN",
-                ctx={"code": code},
-            )
+            # 无任何权限域 = 不限域（方案 A）：不限制数据范围，放行
+            return
         if code in uds:
             return
         domain = await self._repo.get_by_code(code)

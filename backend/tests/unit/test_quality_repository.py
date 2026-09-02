@@ -157,11 +157,11 @@ class TestQualityRuleRepo:
         for stmt in captured:
             assert "domain" not in str(stmt)
 
-    async def test_list_rules_no_domain_fail_closed(self, repo: QualityRepository) -> None:
-        """用户级越权修复：非管理角色域为空（未指派域）→ 恒假条件（不泄露任何域数据）。
+    async def test_list_rules_no_domain_unbounded(self, repo: QualityRepository) -> None:
+        """方案 A：非管理角色域为空 = 不限域 → 不加域过滤（数据范围不限制）。
 
-        此前 ``not domain → 不隔离`` 会让 domain=None 的 viewer/analyst 全量读
-        质量规则/事件/基准/对账（跨域越权）。
+        此前 ``not domain → false()`` 会把 domain=NULL（不限域）用户的质量
+        数据全量屏蔽（误拒）；空域语义为「数据范围不限制」。
         """
         captured: list[Any] = []
         mock_count = MagicMock()
@@ -186,8 +186,9 @@ class TestQualityRuleRepo:
         )
         assert len(results) == 0
         assert total == 0
-        # 恒假条件（false）出现在过滤条件中
-        assert "false" in str(captured[0]).lower()
+        # 空域不限：无 false 恒假条件、无 domain 过滤
+        assert "false" not in str(captured[0]).lower()
+        assert "domain" not in str(captured[0]).lower()
 
     async def test_update_rule(self, repo: QualityRepository) -> None:
         rule = QualityRule(id=1)

@@ -653,7 +653,7 @@ export function UserManagement() {
             <div className="muted" style={{ fontSize: 12, marginBottom: 12 }}>
               {inheritedDomainOf(createOrgId)
                 ? <>该团队绑定业务域「<span className="mono">{inheritedDomainOf(createOrgId)}</span>」，新成员未显式指定时将自动继承该域。</>
-                : <>该团队未绑定业务域，新成员未显式指定时将无默认业务域（需经授权才能访问指标）。</>}
+                : <>该团队未绑定业务域，新成员未显式指定时业务域为空 = 不限域（数据范围不限制，可按角色查看/治理全部业务域数据）。</>}
             </div>
           ) : null}
           <Form.Item
@@ -734,7 +734,7 @@ export function UserManagement() {
               editOrgId ? (
                 inheritedDomainOf(editOrgId)
                   ? <>该团队绑定业务域「<span className="mono">{inheritedDomainOf(editOrgId)}</span>」，保存后该用户域将自动切换继承。</>
-                  : <>该团队未绑定业务域，保存后该用户将无默认业务域（需经授权访问指标）。</>
+                  : <>该团队未绑定业务域，保存后该用户业务域为空 = 不限域（数据范围不限制，可按角色查看/治理全部业务域数据）。</>
               ) : undefined
             }
           >
@@ -753,7 +753,7 @@ export function UserManagement() {
               editOrgId
                 ? inheritedDomainOf(editOrgId)
                   ? <>留空自动继承该团队业务域「<span className="mono">{inheritedDomainOf(editOrgId)}</span>」；选择则与团队域取并集（权限域 = 团队继承 ∪ 显式指定）。</>
-                  : <>该团队未绑定业务域；留空则无默认业务域（需经授权访问指标），选择则显式指定。</>
+                  : <>该团队未绑定业务域；留空则业务域为空 = 不限域（数据范围不限制），选择则显式指定。</>
                 : "可空；留空自动继承所属团队业务域，选择则与团队域取并集"
             }
           >

@@ -22,8 +22,8 @@ def metric_visibility_conditions(
     - ``platform_admin``（平台级）或未提供调用者上下文 → 空列表（全域治理视角）；
     - ``domain_admin``：按 ``user_domains``（权限域并集：团队继承 ∪ 显式指定）收敛
       治理范围——绑定任一域时本域（全部状态，本域私有 DRAFT/REVIEW 是其治理对象）
-      + 本人负责的指标（跨域 Owner/副 Owner）；**无任何权限域时退化为个人视角**
-      （公开 + 本人负责），不再全域可见（修复「无域域管理员看到全平台草稿/待审核」）；
+      + 本人负责的指标（跨域 Owner/副 Owner）；**无任何权限域 = 不限域（方案 A）**，
+      即全量治理视角（不加过滤，与 platform_admin 同数据范围、动作集仍受角色约束）；
     - 其余角色：公开状态（PUBLISHED/EXPERIMENTAL/DEPRECATED）+ 本人 Owner/副 Owner
       （DRAFT/REVIEW 私有工作区）+ reviewer 额外放行被指派的 REVIEW 待审项
       （reviewer_type=user 指定 reviewer_id / reviewer_type=domain 同域评审组，
@@ -41,8 +41,8 @@ def metric_visibility_conditions(
                     Metric.backup_owner_id == actor_id,
                 )
             ]
-        # 无任何权限域：无治理范围，退化为个人视角
-        return _personal_visibility(actor_id, role, user_domains)
+        # 无任何权限域 = 不限域（方案 A）：不加过滤，全量治理视角
+        return []
     return _personal_visibility(actor_id, role, user_domains)
 
 
@@ -89,14 +89,16 @@ def metric_is_visible(
     """
     if actor_id is None or role is None or role == "platform_admin":
         return True
-    if role == "domain_admin" and user_domains:
+    if role == "domain_admin":
+        if not user_domains:
+            # 无任何权限域 = 不限域（方案 A）：全量治理视角
+            return True
         # 域管理员治理范围 = 权限域 + 本人负责（与列表条件同源）
         return (
             metric.domain in user_domains
             or metric.owner_id == actor_id
             or metric.backup_owner_id == actor_id
         )
-    # 无任何权限域：退化为个人视角
     if metric.status in ("PUBLISHED", "EXPERIMENTAL", "DEPRECATED"):
         return True
     if metric.owner_id == actor_id or metric.backup_owner_id == actor_id:

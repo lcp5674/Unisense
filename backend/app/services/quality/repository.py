@@ -6,7 +6,7 @@ import json
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import false, func, or_, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.metric import Metric
@@ -35,14 +35,13 @@ class QualityRepository:
 
         返回 ``Metric.domain == domain`` 的 join 条件列表；平台管理员全量。
 
-        用户级隔离（fail-closed）：非管理角色域为空（未指派域）时返回恒假条件
-        ——此前 ``not domain → []`` 会让 domain=None 的 viewer/analyst 全量读
-        质量规则/事件/基准/对账（跨域越权），改为不泄露任何域数据。
+        用户级隔离（方案 A）：非管理角色域为空（未指派域 = 不限域）时不过滤——
+        数据范围不限制（与前端「不限域」展示一致）。
         """
         if is_platform_admin:
             return []
         if not domain:
-            return [false()]
+            return []
         return [Metric.domain == domain]
 
     async def create_rule(self, rule: QualityRule) -> QualityRule:

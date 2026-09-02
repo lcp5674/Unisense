@@ -83,6 +83,18 @@ def test_same_domain_role_allowed() -> None:
     assert d.allow is True
 
 
+def test_null_domain_admin_global_scope() -> None:
+    """方案 A：domain_admin 无任何权限域 = 不限域 → 数据范围不限制，可治理任意域。"""
+    d = decide(Subject(1, "domain_admin"), "approve", Resource(domain="sales"))
+    assert d.allow is True
+
+
+def test_null_domain_viewer_still_cannot_write() -> None:
+    """方案 A：空域只放宽数据范围，不改变角色动作集——viewer 仍不能 write 任意域。"""
+    d = decide(Subject(1, "viewer"), "write", Resource(domain="sales"))
+    assert d.allow is False
+
+
 def test_viewer_cannot_write_in_own_domain() -> None:
     d = decide(Subject(1, "viewer", domain="sales"), "write", Resource(domain="sales"))
     assert d.allow is False

@@ -105,7 +105,8 @@ class MeasureCatalogRepository:
         )
         # P0-3 读路径行级隔离（对齐 dimension/glossary）：度量 DRAFT/REVIEW 是创建者
         # 私有工作区，他人不得窥探；公开状态（PUBLISHED/DEPRECATED）可被发现。
-        # 域管理员域收敛：绑定域 → 本域（全状态）+ 本人负责；未绑定域 → 退化个人视角。
+        # 域管理员域收敛：绑定域 → 本域（全状态）+ 本人负责；无权限域 = 不限域
+        # （方案 A）→ 全量治理视角（不加过滤，数据范围不限制）。
         if visible_actor_id is not None and visible_role is not None:
             visibility: list[Any]
             if visible_role == "platform_admin":
@@ -117,10 +118,7 @@ class MeasureCatalogRepository:
                         MeasureCatalog.owner_id == visible_actor_id,
                     ]
                     if visible_user_domains
-                    else [
-                        MeasureCatalog.status.in_(("PUBLISHED", "DEPRECATED")),
-                        MeasureCatalog.owner_id == visible_actor_id,
-                    ]
+                    else []
                 )
             else:
                 visibility = [

@@ -1006,8 +1006,8 @@ class TestMeasureReadVisibility:
         assert "measure_catalog.owner_id = 2" in list_sql
         assert "IN ('PUBLISHED', 'DEPRECATED')" not in list_sql
 
-    async def test_list_domain_admin_no_domain_personal_view(self, repo, session) -> None:
-        """未绑定域的 domain_admin → 退化个人视角（公开 + 本人负责），不泄露他人 DRAFT。"""
+    async def test_list_domain_admin_no_domain_global(self, repo, session) -> None:
+        """无权限域的 domain_admin = 不限域（方案 A）→ 不加可见性过滤（全量治理）。"""
         session.execute = AsyncMock(side_effect=[_FakeResult(row=0), _FakeResult(rows=[])])
         await repo.list(
             None, None, visible_actor_id=2, visible_role="domain_admin",
@@ -1018,9 +1018,9 @@ class TestMeasureReadVisibility:
                 compile_kwargs={"literal_binds": True}
             )
         )
-        assert "measure_catalog.status IN ('PUBLISHED', 'DEPRECATED')" in list_sql
-        assert "measure_catalog.owner_id = 2" in list_sql
-        assert "measure_catalog.domain IN ('outpatient')" not in list_sql
+        assert "PUBLISHED" not in list_sql
+        assert "measure_catalog.owner_id = 2" not in list_sql
+        assert "measure_catalog.domain IN" not in list_sql
 
     async def test_get_measure_visible_owner_sees_draft(self) -> None:
         """本人可见自己的 DRAFT 度量。"""

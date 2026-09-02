@@ -216,10 +216,10 @@ class TestTermRepo:
         assert "term.owner_id = 2" in literal_sql
         assert "PUBLISHED" not in literal_sql
 
-    async def test_list_terms_visible_domain_admin_no_domain_personal_view(
+    async def test_list_terms_visible_domain_admin_no_domain_global(
         self, repo: GlossaryRepository
     ) -> None:
-        """未绑定域的 domain_admin → 退化个人视角（公开 + 本人负责），不泄露他人 DRAFT。"""
+        """无权限域的 domain_admin = 不限域（方案 A）→ 不加可见性过滤（全量治理）。"""
         mock_result = MagicMock()
         mock_result.scalars.return_value.all.return_value = []
         mock_result.scalar.return_value = 0
@@ -236,9 +236,9 @@ class TestTermRepo:
         )
         stmt = repo._session.execute.call_args_list[1].args[0]
         literal_sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
-        assert "term.status IN ('PUBLISHED', 'DEPRECATED')" in literal_sql
-        assert "term.owner_id = 2" in literal_sql
-        assert "term.domain IN ('outpatient')" not in literal_sql
+        assert "PUBLISHED" not in literal_sql
+        assert "term.owner_id = 2" not in literal_sql
+        assert "term.domain IN" not in literal_sql
 
     async def test_delete_term(self, repo: GlossaryRepository) -> None:
         term = Term(term_code="T1")

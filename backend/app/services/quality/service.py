@@ -241,7 +241,8 @@ class QualityService(BaseService):
         metric = (await self._db.execute(stmt)).scalar_one_or_none()
         if metric is None:
             raise NotFoundError("指标不存在")
-        if metric.domain != domain:
+        # 方案 A：domain 为空（=不限域）放行；有域时指标域必须 == 该域
+        if domain and metric.domain != domain:
             raise AuthError(
                 f"无权操作域外指标（当前域: {domain}，指标域: {metric.domain}）",
                 error_code="FORBIDDEN",

@@ -39,14 +39,13 @@ _SCOPED_ROLES = ("domain_admin", "metric_owner")
 
 def _assert_domain_scope(user: CurrentUser, resource_domain: str) -> None:
     # 方案 A 多角色：任一角色命中作用域角色即受域约束（主角色或 user_role 扩展）。
-    # 多域并集（团队继承 ∪ 显式指定，domains_all()）：资源域必须 ∈ 权限域；
-    # 无任何权限域时 fail-closed 拒绝一切域操作——此前 `and user.domain` 短路
-    # 会放行 domain=NULL 的 domain_admin/metric_owner 跨任意域写（越权实测）。
+    # 多域并集（团队继承 ∪ 显式指定，domains_all()）：有权限域时资源域必须 ∈ 权限域；
+    # 无任何权限域 = 不限域（方案 A，前端展示「不限域」）→ 放行，不做域收敛。
     if any(r in _SCOPED_ROLES for r in user.roles_all()):
         domains = user.domains_all()
-        if not domains or resource_domain not in domains:
+        if domains and resource_domain not in domains:
             raise AuthError(
-                f"无权限操作其他域的资源（资源域 {resource_domain}，当前权限域 {domains or '无'}）",
+                f"无权限操作其他域的资源（资源域 {resource_domain}，当前权限域 {domains}）",
                 error_code="FORBIDDEN",
             )
 

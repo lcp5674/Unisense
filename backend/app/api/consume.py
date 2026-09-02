@@ -620,10 +620,21 @@ async def issue_token(
         raise BusinessError("接入方不存在或已吊销", error_code=ErrorCode.AUTH_APIKEY_INVALID)
     # S3（审查修复）：签发属主校验——domain_admin 仅可签发本域接入方；
     # 不限域（scope_domain 为空）的平台级接入方仅平台管理员可签。
+    # 方案 A：domain_admin 无任何权限域 = 不限域 → 可签发任意指定域接入方；
+    # 有权限域（domains_all 并集）时 scope_domain 必须 ∈ 权限域。
     role = user.role.value if hasattr(user.role, "value") else user.role
     if str(role) != "platform_admin":
-        user_domain = getattr(user, "domain", None)
-        if not client.scope_domain or client.scope_domain != user_domain:
+        if not client.scope_domain:
+            raise BusinessError(
+                "无权为该接入方签发令牌（不限域接入方仅平台管理员可签发）",
+                error_code=ErrorCode.FORBIDDEN,
+            )
+        actor_domains = (
+            list(user.domains_all())
+            if hasattr(user, "domains_all")
+            else [d for d in [getattr(user, "domain", None)] if d]
+        )
+        if actor_domains and client.scope_domain not in actor_domains:
             raise BusinessError(
                 "无权为该接入方签发令牌（仅本域接入方可由域管理员签发）",
                 error_code=ErrorCode.FORBIDDEN,

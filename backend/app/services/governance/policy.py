@@ -497,13 +497,15 @@ def decide(
     if is_platform_admin:
         return Decision(True, "platform_admin 跨域运维直通", masking=masking)
 
-    # 同域判定（方案 B 增强）：subject.domains（团队继承∪显式指定并集）命中资源域即视为同域；
+    # 同域判定（方案 B 增强 + 方案 A）：subject.domains（团队继承∪显式指定并集）
+    # 命中资源域即视为同域；**无任何权限域 = 不限域（方案 A）→ 视为全域同域**
+    # （数据范围不限制，动作集仍由 role_actions 判定）；资源无域时同样匹配。
     # 未提供 domains 时回退单主域兼容（存量 Subject 构造点）。
     subject_domains = subject.domains or ((subject.domain,) if subject.domain else ())
     same_domain = (
-        bool(subject_domains)
-        and resource.domain is not None
-        and resource.domain in subject_domains
+        resource.domain is None
+        or not subject_domains
+        or resource.domain in subject_domains
     )
     if same_domain and act in role_actions_for_role:
         owner_mismatch = (

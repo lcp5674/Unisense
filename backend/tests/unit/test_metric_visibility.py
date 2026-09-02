@@ -35,15 +35,10 @@ def test_domain_admin_bound_domain_scoped() -> None:
     assert "owner_id" in sql and "backup_owner_id" in sql
 
 
-def test_domain_admin_unbound_domain_personal() -> None:
-    """domain_admin 未绑定域：退化为个人视角（公开 + 本人负责），不再全域可见。"""
+def test_domain_admin_unbound_domain_global() -> None:
+    """domain_admin 无任何权限域 = 不限域（方案 A）：全量治理视角（不加过滤）。"""
     conds = metric_visibility_conditions(1, "domain_admin", None)
-    assert len(conds) == 1
-    sql = _sql(conds[0])
-    assert "PUBLISHED" in sql and "EXPERIMENTAL" in sql and "DEPRECATED" in sql
-    assert "owner_id" in sql and "backup_owner_id" in sql
-    # 个人视角不含「本域」条件（无域可收敛）
-    assert "metric.domain = " not in sql and "domain = '" not in sql
+    assert conds == []
 
 
 def test_non_admin_owner_visibility() -> None:

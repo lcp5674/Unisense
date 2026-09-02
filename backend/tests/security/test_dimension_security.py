@@ -195,10 +195,10 @@ async def test_domain_admin_can_update_own_domain(
         assert resp.status_code != 403
 
 
-async def test_null_domain_user_cannot_create_cross_domain(monkeypatch: pytest.MonkeyPatch) -> None:
-    """P0 越权回归（第四轮审查）：domain=NULL 的 metric_owner 此前因
-    ``_assert_domain_scope`` 的 ``and user.domain`` 短路可跨任意域创建维度
-    （真实 API 实测 201）；现应 fail-closed 拒绝（403 FORBIDDEN）。
+async def test_null_domain_user_can_create_cross_domain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """方案 A（第五轮修正）：domain=NULL 的 metric_owner = 不限域（数据范围不限制）——
+    ``_assert_domain_scope`` 有权限域才校验 ∈，无任何权限域放行——可跨域创建维度
+    （此前第四轮误按 fail-closed 拒绝，违反产品「空域=不限域」语义）。
     """
     session = _session()
 
@@ -210,7 +210,7 @@ async def test_null_domain_user_cannot_create_cross_domain(monkeypatch: pytest.M
         id=99,
         role="metric_owner",
         domain=None,
-        domains_all=MagicMock(return_value=[]),  # 团队域亦为空 → 无任何权限域
+        domains_all=MagicMock(return_value=[]),  # 无任何权限域 = 不限域
         roles_all=MagicMock(return_value=["metric_owner"]),
     )
     transport = ASGITransport(app=app)
@@ -219,6 +219,6 @@ async def test_null_domain_user_cannot_create_cross_domain(monkeypatch: pytest.M
             "/api/v1/dimensions",
             json={**_DIM_BODY, "domain": "sales"},
         )
-        assert resp.status_code == 403
-        assert resp.json()["code"] == "FORBIDDEN"
+        # 域守卫放行（不限域）；后续失败属 DB mock 副作用，与域作用域无关
+        assert resp.status_code != 403
     app.dependency_overrides.clear()

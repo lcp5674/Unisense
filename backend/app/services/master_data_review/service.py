@@ -299,7 +299,8 @@ class MasterDataReviewMixin:
                         "reviewer_domain": entity.reviewer_domain,
                     },
                 )
-            if entity.reviewer_domain not in (user_domains or []):
+            # 方案 A：无任何权限域 = 不限域 → 评审组成员放行；有权限域时须命中指派域
+            if user_domains and entity.reviewer_domain not in user_domains:
                 raise AuthError(
                     f"仅 {entity.reviewer_domain} 域评审组成员可评审该{self._review_entity_name}",
                     error_code="FORBIDDEN_REVIEWER",
@@ -317,7 +318,8 @@ class MasterDataReviewMixin:
                 ctx={self._review_code_attr: code, "role": role},
             )
         entity_domain = self._review_domain(entity)
-        if entity_domain and entity_domain not in (user_domains or []):
+        # 方案 A：无任何权限域 = 不限域 → 域管理员可审任意域未指派实体
+        if user_domains and entity_domain and entity_domain not in user_domains:
             raise AuthError(
                 f"无权评审他域{self._review_entity_name}（当前域: {user_domains}，"
                 f"实体域: {entity_domain}）",

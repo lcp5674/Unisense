@@ -29,6 +29,7 @@ def _as_user(role: str, domain: str | None = "finance"):
                 domain=domain,
                 roles_all=lambda: [role],
                 has_role=lambda r: r == role,
+                domains_all=lambda: [domain] if domain else [],
             )
 
         def __exit__(self, *exc: object) -> None:
@@ -37,6 +38,7 @@ def _as_user(role: str, domain: str | None = "finance"):
                 role="metric_owner",
                 roles_all=lambda: ["metric_owner"],
                 has_role=lambda r: r == "metric_owner",
+                domains_all=lambda: [],
             )
 
     return _Ctx()

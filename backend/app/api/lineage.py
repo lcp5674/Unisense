@@ -109,13 +109,21 @@ def _svc(db: Any) -> LineageService:
 def _assert_edge_domain(user: User, domains: set[str]) -> None:
     """域归属校验（P1 IDOR 加固）：platform_admin 全局放行；
     其余角色命中边任一解析域才允许；两端均无解析域时不阻断（无法判属）。
+
+    方案 A：无任何权限域 = 不限域 → 放行；有权限域（domains_all 并集）时须
+    命中边任一解析域。
     """
     # 方案 A 多角色：任一角色为 platform_admin 即全局放行。
     if user.has_role("platform_admin") or not domains:
         return
-    if user.domain not in domains:
+    uds = (
+        list(user.domains_all())
+        if hasattr(user, "domains_all")
+        else [d for d in [getattr(user, "domain", None)] if d]
+    )
+    if uds and not (set(uds) & set(domains)):
         raise AuthError(
-            f"无权操作域外血缘边（当前域: {user.domain}）", error_code="FORBIDDEN"
+            f"无权操作域外血缘边（当前权限域: {uds}）", error_code="FORBIDDEN"
         )
 
 
@@ -133,15 +141,24 @@ async def _assert_node_read_access(user: User, svc: LineageService, node: str) -
     """读路径节点域收敛（X-2）：platform_admin 放行；其余角色若节点可解析出域
     且不在本域则拒绝——防止 viewer/analyst 借 /impact /edges /path 探测任意
     未发布/他域指标口径。节点无法解析（external/未知）时不阻断（无法判属）。
+
+    方案 A：无任何权限域 = 不限域 → 放行；有权限域时节点域须 ∈ 权限域。
     """
     if user.has_role("platform_admin"):
+        return
+    uds = (
+        list(user.domains_all())
+        if hasattr(user, "domains_all")
+        else [d for d in [getattr(user, "domain", None)] if d]
+    )
+    if not uds:
         return
     metas = await svc.node_meta({node})
     for m in metas:
         d = getattr(m, "domain", None)
-        if d and d != user.domain:
+        if d and d not in uds:
             raise AuthError(
-                f"无权读取域外血缘节点（当前域: {user.domain}，节点域: {d}）",
+                f"无权读取域外血缘节点（当前权限域: {uds}，节点域: {d}）",
                 error_code="FORBIDDEN",
             )
 

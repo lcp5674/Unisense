@@ -32,8 +32,9 @@ class Organization(Base, BaseModel):
         String(64), nullable=False, unique=True, comment="组织编码（唯一）"
     )
     #: 团队可绑定的业务域（方案 B）：用户侧「所属域 + 所属组织」合并为「所属团队」，
-    #: 团队绑定域后其成员用户的 ``user.domain`` 自动继承；可为空 = 不限域（成员无默认域，
-    #: 需经 grants 授权才能操作指标）。仅存主题域 code（与 ``user.domain`` 同口径，不设外键）。
+    #: 团队绑定域后其成员用户的 ``user.domain`` 自动继承；可为空 = 不限域（方案 A，
+    #: 数据范围不限制——成员无默认主域，但权限判定按角色动作集 + 数据范围不限执行）。
+    #: 仅存主题域 code（与 ``user.domain`` 同口径，不设外键）。
     domain: Mapped[str | None] = mapped_column(
         String(64), nullable=True, comment="所属业务域（可空=不限域，成员自动继承）"
     )

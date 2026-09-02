@@ -42,6 +42,9 @@ async def _assert_metric_domain(
 
     此前 create_rule/import_benchmark 不校验指标归属——域 A 的 metric_owner 可对
     域 B 指标注册规则/导入基准，污染对账与告警。
+
+    方案 A：无任何权限域 = 不限域 → 放行；有权限域（domains_all 并集）时指标域
+    必须 ∈ 权限域。
     """
     if user.has_role("platform_admin"):
         return
@@ -58,9 +61,14 @@ async def _assert_metric_domain(
     metric = (await db.execute(stmt)).scalar_one_or_none()
     if metric is None:
         raise NotFoundError("指标不存在")
-    if metric.domain != user.domain:
+    domains = (
+        list(user.domains_all())
+        if hasattr(user, "domains_all")
+        else [d for d in [getattr(user, "domain", None)] if d]
+    )
+    if domains and metric.domain not in domains:
         raise AuthError(
-            f"无权操作域外指标（当前域: {user.domain}，指标域: {metric.domain}）",
+            f"无权操作域外指标（当前权限域: {domains}，指标域: {metric.domain}）",
             error_code="FORBIDDEN",
         )
 

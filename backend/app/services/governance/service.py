@@ -581,8 +581,10 @@ class GovernanceService(BaseService):
         与 ``_assert_revoke_scope`` 对称，弥补原 grant 无 actor 范围校验的提权漏洞：
 
         - ``platform_admin``：可全局授权；
-        - ``domain_admin``：仅可授予 **本域**（``payload.domain == actor.domain``）；
-          未指定域（``domain is None``）或跨域一律拒绝（fail-closed）；
+        - ``domain_admin``：无任何权限域 = 不限域（方案 A）→ 可授予任意域授权；
+          有权限域（domains_all 并集）时仅可授予权限域内的授权
+          （``payload.domain ∈ domains_all``）；未指定授权域（仅白名单）保守拒绝
+          （无法验证范围是否在权限域内）；
         - 其余角色：禁止授权（fail-closed，纵深防御）。
 
         Raises:
@@ -592,14 +594,22 @@ class GovernanceService(BaseService):
         if role == "platform_admin":
             return
         if role == "domain_admin":
-            if payload.domain and payload.domain == actor.domain:
+            actor_domains = (
+                list(actor.domains_all())
+                if hasattr(actor, "domains_all")
+                else [d for d in [getattr(actor, "domain", None)] if d]
+            )
+            # 方案 A：无任何权限域 = 不限域 → 可授予任意域授权
+            if not actor_domains:
+                return
+            if payload.domain and payload.domain in actor_domains:
                 return
             raise AuthError(
                 "域管理员仅可授予本域授权",
                 error_code="FORBIDDEN",
                 ctx={
                     "grant_domain": payload.domain,
-                    "actor_domain": actor.domain,
+                    "actor_domains": actor_domains,
                     "user_id": payload.user_id,
                 },
             )
@@ -738,8 +748,10 @@ class GovernanceService(BaseService):
         回收权限须收敛到授权目标归属/域，防止越权回收：
 
         - ``platform_admin``：全局可回收；
-        - ``domain_admin``：仅可回收 **本域** 授权（``grant.domain == actor.domain``）；
-          无域归属的授权（``domain is None``）视为跨域，须由平台管理员回收（fail-closed）；
+        - ``domain_admin``：无任何权限域 = 不限域（方案 A）→ 可回收任意域授权；
+          有权限域（domains_all 并集）时仅可回收权限域内授权
+          （``grant.domain ∈ domains_all``）；无域归属的授权（``domain is None``）
+          视为跨域，须由平台管理员回收（fail-closed）；
         - 其它角色（analyst / metric_owner / reviewer / compliance_officer / viewer）：
           仅可回收 **本人** 授权（``grant.user_id == actor.id``）。
 
@@ -749,12 +761,20 @@ class GovernanceService(BaseService):
         if role == "platform_admin":
             return
         if role == "domain_admin":
-            if grant.domain and grant.domain == actor.domain:
+            actor_domains = (
+                list(actor.domains_all())
+                if hasattr(actor, "domains_all")
+                else [d for d in [getattr(actor, "domain", None)] if d]
+            )
+            # 方案 A：无任何权限域 = 不限域 → 可回收任意域授权
+            if not actor_domains:
+                return
+            if grant.domain and grant.domain in actor_domains:
                 return
             raise AuthError(
                 "域管理员仅可回收本域授权",
                 error_code="FORBIDDEN",
-                ctx={"grant_domain": grant.domain, "actor_domain": actor.domain},
+                ctx={"grant_domain": grant.domain, "actor_domains": actor_domains},
             )
         # 非管理员：仅可回收本人授权
         if grant.user_id == actor.id:
