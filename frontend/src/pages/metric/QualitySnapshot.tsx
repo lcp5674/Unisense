@@ -13,6 +13,33 @@ import type { QualityEvent, QualityRule, SnapshotResponse } from "../../types";
 import { ThresholdSummary } from "../../utils/display";
 import { QUALITY_LEVEL_LABEL, QUALITY_SEVERITY_LABEL, RULE_TYPE_LABEL, RULE_MODE_LABEL } from "../../utils/enums";
 import { formatCnTime, formatCnRange } from "../../utils/timeCn";
+import { usePermission } from "../../hooks/usePermission";
+
+/** 指标状态中文（消费上下文，仅快照区用） */
+const CONSUMABLE_STATUS_LABEL: Record<string, string> = {
+  DRAFT: "草稿",
+  REVIEW: "审核中",
+  PUBLISHED: "已发布",
+  EXPERIMENTAL: "灰度发布",
+  DEPRECATED: "已废弃",
+};
+
+/**
+ * 快照读的「不可消费」前置判定：返回非空即跳过快照请求（不发注定 403 的请求）。
+ * - DRAFT/REVIEW：未发布，任何角色不可消费
+ * - DEPRECATED：仅平台管理员可审计回溯，非管理员直接拦截
+ * - 其余状态（PUBLISHED/EXPERIMENTAL）不前置拦截，交后端状态闸门（灰度白名单等）
+ */
+function snapshotBlockReason(status: string | undefined, isAdmin: boolean): string | null {
+  if (!status) return null;
+  if (status === "DRAFT" || status === "REVIEW") {
+    return `指标当前为「${CONSUMABLE_STATUS_LABEL[status] ?? status}」状态，未发布，暂无消费快照`;
+  }
+  if (status === "DEPRECATED" && !isAdmin) {
+    return "指标已废弃（DEPRECATED），仅平台管理员可审计回溯历史快照";
+  }
+  return null;
+}
 
 /** 快照读取的「无权限」错误码集合（FORBIDDEN 系列）：覆盖域/白名单/PII/废弃/灰度拒绝。 */
 const SNAPSHOT_FORBIDDEN_CODES = new Set([
@@ -36,7 +63,17 @@ const SEVERITY_COLOR: Record<string, string> = {
   P2: "blue",
 };
 
-export function QualitySnapshot({ metricId, metricCode }: { metricId: number; metricCode: string }) {
+export function QualitySnapshot({
+  metricId,
+  metricCode,
+  status,
+}: {
+  metricId: number;
+  metricCode: string;
+  status?: string;
+}) {
+  const { snapshot: perm } = usePermission();
+  const isAdmin = perm?.roles?.includes("platform_admin") ?? false;
   const [events, setEvents] = useState<QualityEvent[]>([]);
   const [rules, setRules] = useState<QualityRule[]>([]);
   const [snapshots, setSnapshots] = useState<SnapshotResponse[]>([]);
@@ -45,11 +82,10 @@ export function QualitySnapshot({ metricId, metricCode }: { metricId: number; me
 
   async function load() {
     setLoading(true);
-    try {
-      const [ev, ru, sn] = await Promise.all([
-        listQualityEvents({ metric_id: metricId, page_size: 20 }).catch(() => ({ items: [] as QualityEvent[] })),
-        listQualityRules({ metric_id: metricId, page_size: 20 }).catch(() => ({ items: [] as QualityRule[] })),
-        listSnapshots(metricCode, 10)
+    const blocked = snapshotBlockReason(status, isAdmin);
+    const snapPromise = blocked
+      ? Promise.resolve({ data: [] as SnapshotResponse[], error: blocked as string | null })
+      : listSnapshots(metricCode, 10)
           .then((d) => ({ data: d, error: null as string | null }))
           .catch((err: unknown) => ({
             data: [] as SnapshotResponse[],
@@ -57,7 +93,12 @@ export function QualitySnapshot({ metricId, metricCode }: { metricId: number; me
               err instanceof UnisenseApiError && SNAPSHOT_FORBIDDEN_CODES.has(err.code)
                 ? err.message
                 : null,
-          })),
+          }));
+    try {
+      const [ev, ru, sn] = await Promise.all([
+        listQualityEvents({ metric_id: metricId, page_size: 20 }).catch(() => ({ items: [] as QualityEvent[] })),
+        listQualityRules({ metric_id: metricId, page_size: 20 }).catch(() => ({ items: [] as QualityRule[] })),
+        snapPromise,
       ]);
       setEvents(ev.items);
       setRules(ru.items);
@@ -71,7 +112,7 @@ export function QualitySnapshot({ metricId, metricCode }: { metricId: number; me
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [metricId, metricCode]);
+  }, [metricId, metricCode, status, isAdmin]);
 
   async function act(fn: () => Promise<unknown>, okMsg: string) {
     try {
@@ -184,13 +225,17 @@ export function QualitySnapshot({ metricId, metricCode }: { metricId: number; me
         },
         {
           key: "snapshots",
-          label: snapshotError ? "消费快照（无权限）" : `消费快照 (${snapshots.length})`,
+          label: snapshotError ? "消费快照（不可用）" : `消费快照 (${snapshots.length})`,
           children: snapshotError ? (
             <Alert
               type="warning"
               showIcon
-              message="无权限查看该指标消费快照"
-              description={`${snapshotError}。当前账号未获得该指标所属域的数据读取授权，如需查看请联系域管理员配置授权（grants）或指标白名单。`}
+              message="该指标消费快照当前不可查看"
+              description={
+                status === "DRAFT" || status === "REVIEW" || (status === "DEPRECATED" && !isAdmin)
+                  ? `${snapshotError}。指标发布（PUBLISHED）后即可在消费侧查看历史快照。`
+                  : `${snapshotError}。当前账号未获得该指标所属域的数据读取授权，如需查看请联系域管理员配置授权（grants）或指标白名单。`
+              }
             />
           ) : (
             <Table

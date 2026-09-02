@@ -928,9 +928,12 @@ function ChangeMetricDetailDrawer({
   onClose: () => void;
 }) {
   const navigate = useNavigate();
+  const { snapshot: perm } = usePermission();
+  const isAdmin = perm?.roles?.includes("platform_admin") ?? false;
   const [metric, setMetric] = useState<MetricResponse | null>(null);
   const [snapshots, setSnapshots] = useState<SnapshotResponse[]>([]);
   const [snapshotForbidden, setSnapshotForbidden] = useState(false);
+  const [snapshotBlockedReason, setSnapshotBlockedReason] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -943,27 +946,40 @@ function ChangeMetricDetailDrawer({
     setMetric(null);
     setSnapshots([]);
     setSnapshotForbidden(false);
-    Promise.all([
-      getMetric(item.metric_code),
-      listSnapshots(item.metric_code, 50)
-        .then((snaps) => {
-          setSnapshots(snaps);
-          setSnapshotForbidden(false);
-          return snaps;
-        })
-        .catch((err: unknown) => {
-          if (err instanceof UnisenseApiError && err.code === "FORBIDDEN") {
-            setSnapshotForbidden(true);
-          }
-          return [] as SnapshotResponse[];
-        }),
-    ])
-      .then(([m]) => {
+    setSnapshotBlockedReason(null);
+    getMetric(item.metric_code)
+      .then((m) => {
         setMetric(m);
+        // 不可消费指标（未发布/废弃且非管理员）不发注定 403 的快照请求
+        const blocked =
+          m.status === "DRAFT" || m.status === "REVIEW"
+            ? `指标当前为「${m.status === "DRAFT" ? "草稿" : "审核中"}」状态，未发布，暂无消费快照`
+            : m.status === "DEPRECATED" && !isAdmin
+              ? "指标已废弃（DEPRECATED），仅平台管理员可审计回溯历史快照"
+              : null;
+        if (blocked) {
+          setSnapshotBlockedReason(blocked);
+          setSnapshotForbidden(true);
+          return;
+        }
+        return listSnapshots(item.metric_code, 50)
+          .then((snaps) => {
+            setSnapshots(snaps);
+            setSnapshotForbidden(false);
+            setSnapshotBlockedReason(null);
+            return snaps;
+          })
+          .catch((err: unknown) => {
+            if (err instanceof UnisenseApiError && err.code === "FORBIDDEN") {
+              setSnapshotForbidden(true);
+              setSnapshotBlockedReason(null);
+            }
+            return [] as SnapshotResponse[];
+          });
       })
       .catch((err) => message.error(err instanceof Error ? err.message : "加载指标详情失败"))
       .finally(() => setLoading(false));
-  }, [item]);
+  }, [item, isAdmin]);
 
   const snapshotColumns: ColumnsType<SnapshotResponse> = [
     { title: "周期", dataIndex: "date_range", key: "date_range", width: 150 },
@@ -1072,8 +1088,11 @@ function ChangeMetricDetailDrawer({
               <Alert
                 type="warning"
                 showIcon
-                message="无权限查看该指标消费快照"
-                description="当前账号未获得该指标所属域的数据读取授权，如需查看请联系域管理员配置授权（grants）或指标白名单。"
+                message={snapshotBlockedReason ? "该指标消费快照当前不可查看" : "无权限查看该指标消费快照"}
+                description={
+                  snapshotBlockedReason ??
+                  "当前账号未获得该指标所属域的数据读取授权，如需查看请联系域管理员配置授权（grants）或指标白名单。"
+                }
               />
             ) : snapshots.length === 0 ? (
               <Empty description="暂无查询快照" />
@@ -1787,6 +1806,8 @@ function GraphTab() {
   const canEditDesc = usePermission().can("catalog:edit-description");
   const canEditMetric = usePermission().can("metric:edit");
   const canQuery = usePermission().can("query:execute");
+  const permSnapshot = usePermission().snapshot;
+  const isAdmin = permSnapshot?.roles?.includes("platform_admin") ?? false;
   const [graphData, setGraphData] = useState<{
     nodes: AssetGraphNode[];
     edges: AssetGraphEdge[];
@@ -1816,6 +1837,7 @@ function GraphTab() {
   const [metricLoading, setMetricLoading] = useState(false);
   const [metricData, setMetricData] = useState<MetricResponse | null>(null);
   const [metricSnapshots, setMetricSnapshots] = useState<SnapshotResponse[]>([]);
+  const [metricSnapshotBlocked, setMetricSnapshotBlocked] = useState<string | null>(null);
   const [metricQuerying, setMetricQuerying] = useState(false);
   const [metricQueryRows, setMetricQueryRows] = useState<Record<string, unknown>[] | null>(null);
   const [metricQueryMeta, setMetricQueryMeta] = useState<{ engine: string; total: number } | null>(
@@ -1991,12 +2013,23 @@ function GraphTab() {
     setMetricDescEditing(false);
     setMetricQueryRows(null);
     setMetricQueryMeta(null);
+    setMetricSnapshotBlocked(null);
     try {
-      const [m, snaps] = await Promise.all([
-        getMetric(code),
-        listSnapshots(code, 50).catch(() => []),
-      ]);
+      const m = await getMetric(code);
       setMetricData(m);
+      // 不可消费指标（未发布/废弃且非管理员）不发注定 403 的快照请求
+      const blocked =
+        m.status === "DRAFT" || m.status === "REVIEW"
+          ? `指标当前为「${m.status === "DRAFT" ? "草稿" : "审核中"}」状态，未发布，暂无消费快照`
+          : m.status === "DEPRECATED" && !isAdmin
+            ? "指标已废弃（DEPRECATED），仅平台管理员可审计回溯历史快照"
+            : null;
+      if (blocked) {
+        setMetricSnapshotBlocked(blocked);
+        setMetricSnapshots([]);
+        return;
+      }
+      const snaps = await listSnapshots(code, 50).catch(() => [] as SnapshotResponse[]);
       setMetricSnapshots(snaps);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "加载指标详情失败");
@@ -2403,7 +2436,14 @@ function GraphTab() {
                   )}
                 </Card>
               ) : null}
-              {metricSnapshots.length === 0 ? (
+              {metricSnapshotBlocked ? (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="该指标消费快照当前不可查看"
+                  description={`${metricSnapshotBlocked}。指标发布（PUBLISHED）后即可在消费侧查看历史快照。`}
+                />
+              ) : metricSnapshots.length === 0 ? (
                 <Empty description="暂无查询快照（点击「查询最新数据」即刻生成）" />
               ) : (
                 <Table
