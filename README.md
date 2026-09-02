@@ -506,7 +506,12 @@ docker compose --env-file .env.production up -d --build      # 4. 构建启动�
 
 模板中需要人工确认的**非密钥项**：`UNISENSE_OLAP_URL`（Doris，见 10.1 说明）、
 `UNISENSE_CORS_ORIGINS`（生产禁止 `*`）、`UNISENSE_IMAGE_TAG`（版本锁定）、
+`PIP_INDEX_URL`（Python 包镜像源，**默认清华源**，如公司有内网源可改）、
 `UNISENSE_BOOTSTRAP_ENABLED`（首次部署 `true`，后续建议 `false`）。
+
+> **构建镜像默认使用清华 PyPI 源**（`PIP_INDEX_URL`，compose/Dockerfile 已内置默认值，
+> 无需手动传参）——避免官方 PyPI 网络超时导致构建失败；需要切换时在 `.env.production`
+> 设 `PIP_INDEX_URL` 覆盖即可。
 
 > **⚠️ 密钥是生产的「锚点」，务必一次性生成、长期不变**：脚本对已存在的目标文件
 > **默认拒绝覆盖**（需 `--force` 才强制覆盖并先备份为 `.bak.<时间戳>`）。每次
@@ -697,22 +702,3 @@ make gateways       # 运行全部门禁
 ```
 
 ---
-
-## 十五、Git 多远程
-
-项目配置了双远程（GitHub + 内部 Git），`git push` 默认**双发**：
-
-```bash
-# origin：GitHub（push 双发到内部 Git）
-#   git@github.com:lcp5674/Unisense.git
-#   git@git.guahao-inc.com:licp/unisense.git（push 目标追加）
-# internal：内部 Git
-#   git@git.guahao-inc.com:licp/unisense.git
-
-git remote -v               # 查看全部远程
-git push                    # 同时推送到 GitHub + 内部 Git
-git push internal master    # 单独推送内部 Git
-git fetch internal          # 拉取内部 Git 分支
-```
-
-> 双发时若一侧失败不会回滚另一侧，失败后需单独 `git push internal` 补齐。
