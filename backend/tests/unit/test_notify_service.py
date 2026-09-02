@@ -24,6 +24,10 @@ def _svc() -> tuple[NotifyService, MagicMock]:
     repo.list_subscriptions = AsyncMock(return_value=[])
     repo.get_user_display_name = AsyncMock(return_value="操作者")
     repo.find_recent_notification = AsyncMock(return_value=None)
+    repo.find_recent_notification_by_object = AsyncMock(return_value=None)
+    repo.list_domain_admins = AsyncMock(return_value=[])
+    repo.list_admin_ids = AsyncMock(return_value=[])
+    repo.list_asset_subscribers = AsyncMock(return_value=[])
     repo.commit = AsyncMock()
     svc._repo = repo  # noqa: SLF001
     return svc, repo
@@ -390,6 +394,172 @@ async def test_publish_event_dedup_skips_recent() -> None:
     assert out["notifications"] == 0
     assert out["delivered"] == 0
     repo.save_notification.assert_not_called()
+
+
+# ---- A1 对象级去重（同一指标 10 分钟内重复事件只保留一条）----
+
+
+async def test_publish_event_object_dedup_skips_same_metric() -> None:
+    """A1：同指标同类型事件窗口内已通知 → 跳过（消除"同一指标多次提醒"）。"""
+    svc, repo = _svc()
+    repo.list_enabled_subscriptions = AsyncMock(
+        return_value=[
+            SubscriptionPref(
+                user_id=10, channel="IN_APP", event_type="metric.submitted", enabled=True
+            )
+        ]
+    )
+    repo.find_recent_notification_by_object = AsyncMock(
+        return_value=Notification(
+            subscriber_id=10,
+            channel="IN_APP",
+            template_code="metric.submitted",
+            title="指标待审核",
+        )
+    )
+    out = await svc.publish_event(
+        EventPublish(
+            event_type="metric.submitted",
+            source="metric",
+            payload={"metric_code": "sales_gmv_daily", "domain": "sales"},
+        )
+    )
+    assert out["notifications"] == 0
+    repo.save_notification.assert_not_called()
+
+
+async def test_publish_event_object_dedup_allows_different_metrics() -> None:
+    """A1：不同指标各发一条（对象级去重不互相挤掉）。"""
+    svc, repo = _svc()
+    repo.list_enabled_subscriptions = AsyncMock(
+        return_value=[
+            SubscriptionPref(
+                user_id=10, channel="IN_APP", event_type="metric.submitted", enabled=True
+            )
+        ]
+    )
+    out = await svc.publish_event(
+        EventPublish(
+            event_type="metric.submitted",
+            source="metric",
+            payload={"metric_code": "sales_gmv_daily", "domain": "sales"},
+        )
+    )
+    assert out["notifications"] == 1
+    repo.find_recent_notification_by_object.assert_awaited_once()
+
+
+async def test_notify_user_object_dedup_returns_existing() -> None:
+    """A1：定向通道（notify_user）同指标窗口内已发 → 返回已有通知，不再重复创建。"""
+    svc, repo = _svc()
+    existing = Notification(
+        subscriber_id=10,
+        channel="in_app",
+        template_code="metric.submitted",
+        title="指标待审核",
+        status="PENDING",
+    )
+    existing.id = 99
+    repo.find_recent_notification_by_object = AsyncMock(return_value=existing)
+    out = await svc.notify_user(
+        10, "metric.submitted", "指标待审核", payload={"metric_code": "sales_gmv_daily"}
+    )
+    assert out.id == 99
+    repo.save_notification.assert_not_called()
+
+
+# ---- B1 相关性收敛（metric.* 事件仅通知与事件指标相关的人）----
+
+
+def _metric_db(owner_id: int = 10) -> MagicMock:
+    db = MagicMock()
+    db.execute = AsyncMock(
+        return_value=MagicMock(
+            first=MagicMock(return_value=(owner_id, None, None, "sales", None))
+        )
+    )
+    return db
+
+
+async def test_publish_event_metric_correlated_filter_keeps_related_only() -> None:
+    """B1：无关订阅者被过滤；owner/平台管理员/watch 该指标的用户保留。"""
+    svc, repo = _svc()
+    repo.list_enabled_subscriptions = AsyncMock(
+        return_value=[
+            SubscriptionPref(
+                user_id=20, channel="IN_APP", event_type="metric.submitted", enabled=True
+            ),  # 无关用户（非 owner/非 admin/非域管理员）
+            SubscriptionPref(
+                user_id=10, channel="IN_APP", event_type="metric.submitted", enabled=True
+            ),  # owner
+            SubscriptionPref(
+                user_id=1, channel="IN_APP", event_type="metric.submitted", enabled=True
+            ),  # platform_admin
+        ]
+    )
+    repo.list_asset_subscribers = AsyncMock(
+        return_value=[
+            SubscriptionPref(
+                user_id=30, channel="IN_APP", asset_type="METRIC",
+                asset_id="sales_gmv_daily", enabled=True,
+            )
+        ]
+    )
+    repo.list_admin_ids = AsyncMock(return_value=[1])
+    svc._db = _metric_db(owner_id=10)  # noqa: SLF001
+    out = await svc.publish_event(
+        EventPublish(
+            event_type="metric.submitted",
+            source="metric",
+            payload={"metric_code": "sales_gmv_daily", "domain": "sales"},
+        )
+    )
+    assert out["notifications"] == 3  # owner 10 + platform_admin 1 + watch 30
+    ids = {c.args[0].subscriber_id for c in repo.save_notification.call_args_list}
+    assert ids == {10, 1, 30}
+
+
+async def test_publish_event_metric_domain_admin_kept() -> None:
+    """B1：同域 domain_admin 保留（治理兜底收本域指标事件）。"""
+    svc, repo = _svc()
+    repo.list_enabled_subscriptions = AsyncMock(
+        return_value=[
+            SubscriptionPref(
+                user_id=5, channel="IN_APP", event_type="metric.submitted", enabled=True
+            )
+        ]
+    )
+    repo.list_domain_admins = AsyncMock(return_value=[5])
+    svc._db = _metric_db(owner_id=10)  # noqa: SLF001
+    out = await svc.publish_event(
+        EventPublish(
+            event_type="metric.submitted",
+            source="metric",
+            payload={"metric_code": "sales_gmv_daily", "domain": "sales"},
+        )
+    )
+    assert out["notifications"] == 1
+    assert repo.save_notification.await_args.args[0].subscriber_id == 5
+
+
+async def test_publish_event_non_metric_not_filtered() -> None:
+    """B1：非 metric.* 事件不收敛（质量告警等仍按订阅扇出）。"""
+    svc, repo = _svc()
+    repo.list_enabled_subscriptions = AsyncMock(
+        return_value=[
+            SubscriptionPref(
+                user_id=20, channel="IN_APP", event_type="quality.anomaly", enabled=True
+            )
+        ]
+    )
+    out = await svc.publish_event(
+        EventPublish(
+            event_type="quality.anomaly",
+            source="quality",
+            payload={"metric_code": "sales_gmv_daily", "level": "P1"},
+        )
+    )
+    assert out["notifications"] == 1
 
 
 async def test_purge_expired_delegates_to_repo() -> None:

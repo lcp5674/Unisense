@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.notify import EventLog, Notification, NotifyStatus, SubscriptionPref
@@ -167,6 +167,59 @@ class NotifyRepository:
             .limit(1)
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def find_recent_notification_by_object(
+        self,
+        subscriber_id: int,
+        template_code: str,
+        object_key: str,
+        window_seconds: int,
+    ) -> Notification | None:
+        """查询订阅者近 N 秒内是否已有同「业务对象」的同类型未处理通知（对象级去重）。
+
+        与 ``find_recent_notification`` 的区别：除 ``(user, event_type)`` 外还按
+        payload 中的业务对象键（metric_code/conflict_id/table_name 等）精确匹配——
+        同一指标 10 分钟内重复提交只保留一条；不同指标各自成条（不再互相挤掉）。
+        """
+        since = datetime.now(UTC) - timedelta(seconds=window_seconds)
+        conds = [
+            func.json_unquote(func.json_extract(Notification.payload, f"$.{k}")) == object_key
+            for k in OBJECT_KEY_FIELDS
+        ]
+        stmt = (
+            select(Notification)
+            .where(
+                Notification.subscriber_id == subscriber_id,
+                Notification.template_code == template_code,
+                Notification.created_at >= since,
+                Notification.handled_at.is_(None),
+                or_(*conds),
+            )
+            .order_by(Notification.id.desc())
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def list_domain_admins(self, domain: str) -> list[int]:
+        """查询指定域的全部启用 domain_admin 用户 ID（主角色或 user_role 扩展角色）。
+
+        域归属以 ``User.domain`` 为准（user_role 表无 domain 列，多角色域管理员
+        仍按主记录域过滤）；供事件相关性收敛（同域治理兜底接收本域指标事件）。
+        """
+        stmt = (
+            select(User.id)
+            .where(
+                or_(
+                    and_(User.role == "domain_admin", User.domain == domain),
+                    User.role_items.any(
+                        UserRole.role == "domain_admin", User.domain == domain
+                    ),
+                ),
+                User.status == "active",
+            )
+            .order_by(User.id)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
 
     async def count_unread(self, subscriber_id: int) -> int:
         """订阅者未读通知总数（全局角标用，精确计数而非列表近似）。

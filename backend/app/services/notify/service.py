@@ -35,7 +35,7 @@ from app.models.notify import (
     NotifyStatus,
     SubscriptionPref,
 )
-from app.services.notify.repository import NotifyRepository
+from app.services.notify.repository import OBJECT_KEY_FIELDS, NotifyRepository
 from app.services.notify.schemas import (
     _ALLOWED_LEVELS,
     _ALLOWED_SOURCES,
@@ -298,6 +298,22 @@ def _humanize_payload(payload: dict[str, Any] | None) -> str | None:
     return "\n".join(lines) if lines else None
 
 
+def _extract_object_key(payload: dict[str, Any] | None) -> str | None:
+    """从事件 payload 提取业务对象键（供对象级去重 / 通知聚焦）。
+
+    按 ``OBJECT_KEY_FIELDS`` 优先级取第一个非空键值（metric_code 优先，
+    其次 conflict_id/feedback_id/source_id/table_name/catalog_id/grant_id）。
+    取不到时返回 None（无对象级语义的事件退化为按 (user, event_type) 去重）。
+    """
+    if not payload:
+        return None
+    for key in OBJECT_KEY_FIELDS:
+        value = payload.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
 # 通知外发 HTTP 客户端共享单例：避免按请求实例化导致连接池/文件描述符泄漏。
 _HTTP_CLIENT: httpx.AsyncClient | None = None
 
@@ -307,7 +323,9 @@ _DELIVERY_MAX_ATTEMPTS = 3
 _DELIVERY_BACKOFF_BASE = 0.2  # 秒，指数退避基数
 # 去重防风暴窗口（秒）：同类型通知在窗口内对同一订阅人只保留一条。
 # 采集降级/质量告警等高频事件反复触发时，避免逐条刷屏（TD §12.9 通知风暴治理）。
-_DEDUP_WINDOW_SECONDS = 60
+# 60s → 600s：指标驳回重提循环/采集异常等场景下，同一业务对象（指标/冲突/表）在
+# 10 分钟内的重复事件只保留一条（对象级去重见 find_recent_notification_by_object）。
+_DEDUP_WINDOW_SECONDS = 600
 # SMTP 单次投递超时（避免 aiosmtplib 无超时导致协程永久挂起阻塞 fan-out）
 _SMTP_TIMEOUT = 10
 
@@ -369,6 +387,9 @@ class NotifyService(BaseService):
         actor_name = data.actor_name
         if actor_id is not None and not actor_name:
             actor_name = await self._repo.get_user_display_name(actor_id)
+        # 对象级去重键（metric_code 优先）：同指标 10 分钟内重复事件只保留一条，
+        # 不同指标各自成条（不再互相挤掉）；无对象键退化为 (user, event_type) 去重。
+        object_key = _extract_object_key(data.payload)
         event = EventLog(
             event_type=data.event_type,
             source=data.source,
@@ -398,13 +419,14 @@ class NotifyService(BaseService):
             for s in asset_subs:
                 merged.setdefault((s.user_id, s.channel), s)
             subs = list(merged.values())
+        # B1 相关性收敛：metric.* 事件仅通知与事件指标相关的人（owner/提交人/评审人/
+        # 同域域管理员/平台管理员/watch 该指标的用户），无关订阅者不再收到广播。
+        subs = await self._filter_metric_related_subscribers(data.event_type, data.payload, subs)
         created = 0
         delivered = 0
         for sub in subs:
-            # 去重防风暴：窗口内已存在同类型未处理通知则跳过（高频事件只保留一条）
-            recent = await self._repo.find_recent_notification(
-                sub.user_id, data.event_type, _DEDUP_WINDOW_SECONDS
-            )
+            # 去重防风暴：窗口内同类型（同业务对象）未处理通知已存在则跳过
+            recent = await self._find_recent(sub.user_id, data.event_type, object_key)
             if recent is not None:
                 logger.info(
                     "notify_dedup_skipped",
@@ -445,9 +467,9 @@ class NotifyService(BaseService):
                 recipient_id = 0
             subscriber_ids = {s.user_id for s in subs}
             if recipient_id and recipient_id not in subscriber_ids:
-                # 定向投递同样受去重窗口约束：窗口内已收到同类型通知则不重复打扰
-                recent = await self._repo.find_recent_notification(
-                    recipient_id, data.event_type, _DEDUP_WINDOW_SECONDS
+                # 定向投递同样受对象级去重窗口约束：窗口内同对象已收到同类型则不重复打扰
+                recent = await self._find_recent(
+                    recipient_id, data.event_type, object_key
                 )
                 if recent is not None:
                     logger.info(
@@ -507,6 +529,82 @@ class NotifyService(BaseService):
             keys.append(("TABLE", str(table)))
         seen: set[tuple[str, str]] = set()
         return [k for k in keys if not (k in seen or seen.add(k))]
+
+    async def _find_recent(
+        self,
+        user_id: int,
+        event_type: str,
+        object_key: str | None,
+    ) -> Notification | None:
+        """统一去重查询：有业务对象键走对象级去重，否则退化为 (user, event_type) 去重。
+
+        广播（publish_event）与定向（notify_user）共用同一语义，避免两条通道
+        对同一指标各发一条（同一指标 10 分钟内的重复事件只保留一条）。
+        """
+        if object_key:
+            return await self._repo.find_recent_notification_by_object(
+                user_id, event_type, object_key, _DEDUP_WINDOW_SECONDS
+            )
+        return await self._repo.find_recent_notification(
+            user_id, event_type, _DEDUP_WINDOW_SECONDS
+        )
+
+    async def _filter_metric_related_subscribers(
+        self,
+        event_type: str,
+        payload: dict[str, Any] | None,
+        subs: list[SubscriptionPref],
+    ) -> list[SubscriptionPref]:
+        """B1 相关性收敛：``metric.*`` 事件仅通知与事件指标相关的人（best-effort）。
+
+        订阅模型是「按事件类型广播」——任何订阅了「指标待审核」的用户会收到全平台
+        所有指标的通知，与指标归属无关（通知中心刷出大量"与我无关"的提醒）。此处
+        按事件指标收敛订阅者，只保留：
+        - 指标 owner / 副 owner / 提交人 / 被指派评审人（payload 或 DB）；
+        - 同域 domain_admin（治理兜底，收本域指标事件）；
+        - platform_admin（治理兜底，收全平台）；
+        - 资产订阅者（主动 watch 该指标/表的用户）恒保留；
+        其余无关订阅者（如其他域的 viewer 订阅了事件类型）不再收到该指标通知。
+        指标不存在/查询失败时返回原订阅者（保守不误伤，不阻断事件扇出）。
+        """
+        if not event_type.startswith("metric.") or not payload:
+            return subs
+        metric_code = payload.get("metric_code")
+        if not metric_code:
+            return subs
+        try:
+            stmt = select(
+                Metric.owner_id,
+                Metric.backup_owner_id,
+                Metric.submitted_by,
+                Metric.domain,
+                Metric.reviewer_id,
+            ).where(Metric.metric_code == metric_code)
+            row = (await self._db.execute(stmt)).first()
+            if row is None:
+                return subs
+            owner_id, backup_owner_id, submitted_by, domain, reviewer_id = row
+        except Exception:  # noqa: BLE001 - best-effort 不阻断事件扇出
+            logger.warning(
+                "notify_metric_related_filter_failed", metric_code=metric_code, exc_info=True
+            )
+            return subs
+        related: set[int] = {
+            uid for uid in (owner_id, backup_owner_id, submitted_by, reviewer_id) if uid
+        }
+        for raw in (payload.get("submitter_id"), payload.get("reviewer_id")):
+            try:
+                if raw is not None:
+                    related.add(int(raw))
+            except (TypeError, ValueError):
+                continue
+        try:
+            if domain:
+                related.update(await self._repo.list_domain_admins(domain))
+            related.update(await self._repo.list_admin_ids())
+        except Exception:  # noqa: BLE001 - 管理员解析失败不阻断
+            logger.warning("notify_metric_related_admin_resolve_failed", exc_info=True)
+        return [sub for sub in subs if sub.asset_type or sub.user_id in related]
 
     async def handle_business_event(self, event: dict[str, Any]) -> dict[str, int]:
         """消费 EventBus 业务事件（quality/conflict/governance），落 EventLog 并按订阅扇出投递。
@@ -855,6 +953,19 @@ class NotifyService(BaseService):
             status=NotifyStatus.PENDING.value,
             ref_type="event",
         )
+        # A1 对象级去重：同业务对象（指标/冲突/表）10 分钟内同类型定向通知只发一条，
+        # 避免「广播+定向」双通道 / 驳回重提循环对同一指标重复打扰（返回已有通知）。
+        object_key = _extract_object_key(payload)
+        recent = await self._find_recent(user_id, event_type, object_key)
+        if recent is not None:
+            logger.info(
+                "notify_user_dedup_skipped",
+                user_id=user_id,
+                event_type=event_type,
+                object_key=object_key,
+                recent_id=recent.id,
+            )
+            return recent
         await self._repo.save_notification(notif)
         ok = await self._dispatch(notif, notif.channel)
         notif.status = NotifyStatus.SENT.value if ok else NotifyStatus.FAILED.value
