@@ -378,4 +378,33 @@ describe("待办中心 - 冲突/质量待办个人收敛", () => {
     expect(mockedConflicts.mock.calls[0]?.[0]?.related_only).toBeUndefined();
     expect(mockedQuality.mock.calls[0]?.[0]?.mine_only).toBeUndefined();
   });
+
+  it("domain_admin 未绑定域：退化为个人收敛（草稿带 owner_id、冲突/质量带 related_only/mine_only）", async () => {
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "nowner",
+      display_name: "NoOwner",
+      role: "domain_admin",
+      domain: null,
+      org_id: 1,
+    });
+    mockedConflicts.mockResolvedValue({
+      items: [],
+      total: 0,
+      page: 1,
+      page_size: 50,
+    } as ConflictListResponse);
+    mockedQuality.mockResolvedValue({
+      items: [],
+      total: 0,
+      page: 1,
+      page_size: 50,
+    } as { items: QualityEvent[]; total: number; page: number; page_size: number });
+    renderPage();
+    await screen.findByText(/草稿待完善/);
+    const draftCall = mockedMetrics.mock.calls.find(([p]) => p?.status === "DRAFT");
+    expect(draftCall![0]?.owner_id).toBe(1);
+    expect(mockedConflicts.mock.calls[0]?.[0]?.related_only).toBe(true);
+    expect(mockedQuality.mock.calls[0]?.[0]?.mine_only).toBe(true);
+  });
 });

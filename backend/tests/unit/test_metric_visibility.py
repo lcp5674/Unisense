@@ -18,12 +18,31 @@ def _sql(cond: ColumnElement[bool]) -> str:
     return str(cond.compile(dialect=mysql.dialect(), compile_kwargs={"literal_binds": True}))
 
 
-def test_admin_roles_get_no_filter() -> None:
-    """管理角色（platform_admin/domain_admin）不附加可见性过滤（全量治理视角）。"""
-    for role in ("platform_admin", "domain_admin"):
-        assert metric_visibility_conditions(1, role, "finance") == []
+def test_platform_admin_gets_no_filter() -> None:
+    """platform_admin 不附加可见性过滤（平台级全域治理视角）。"""
+    assert metric_visibility_conditions(1, "platform_admin", "finance") == []
     # 缺少调用者上下文同样不过滤
     assert metric_visibility_conditions(None, "metric_owner", "finance") == []
+
+
+def test_domain_admin_bound_domain_scoped() -> None:
+    """domain_admin 绑定域：治理范围收敛为本域 + 本人负责（不再全域可见）。"""
+    conds = metric_visibility_conditions(1, "domain_admin", "finance")
+    assert len(conds) == 1
+    sql = _sql(conds[0])
+    assert "domain = 'finance'" in sql
+    assert "owner_id" in sql and "backup_owner_id" in sql
+
+
+def test_domain_admin_unbound_domain_personal() -> None:
+    """domain_admin 未绑定域：退化为个人视角（公开 + 本人负责），不再全域可见。"""
+    conds = metric_visibility_conditions(1, "domain_admin", None)
+    assert len(conds) == 1
+    sql = _sql(conds[0])
+    assert "PUBLISHED" in sql and "EXPERIMENTAL" in sql and "DEPRECATED" in sql
+    assert "owner_id" in sql and "backup_owner_id" in sql
+    # 个人视角不含「本域」条件（无域可收敛）
+    assert "metric.domain = " not in sql and "domain = '" not in sql
 
 
 def test_non_admin_owner_visibility() -> None:
@@ -50,13 +69,27 @@ def test_reviewer_visibility_includes_assigned_review() -> None:
 
 
 def test_assetmap_visibility_scope_admin_global() -> None:
-    """assetmap 汇总作用域：管理角色返回空（走全局聚合缓存）。"""
+    """assetmap 汇总作用域：platform_admin 返回空（走全局聚合缓存）。"""
     from unittest.mock import MagicMock
 
-    for role in ("platform_admin", "domain_admin"):
-        u = MagicMock()
-        u.role = role
-        assert _metric_visibility_scope(u) == {}
+    u = MagicMock()
+    u.role = "platform_admin"
+    assert _metric_visibility_scope(u) == {}
+
+
+def test_assetmap_visibility_scope_domain_admin_scoped() -> None:
+    """assetmap 汇总作用域：domain_admin 返回作用域（按域收敛，不再全局）。"""
+    from unittest.mock import MagicMock
+
+    u = MagicMock()
+    u.role = "domain_admin"
+    u.id = 1
+    u.domain = "finance"
+    assert _metric_visibility_scope(u) == {
+        "actor_id": 1,
+        "role": "domain_admin",
+        "user_domain": "finance",
+    }
 
 
 def test_assetmap_visibility_scope_non_admin_scoped() -> None:

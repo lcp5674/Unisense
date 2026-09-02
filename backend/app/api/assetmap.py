@@ -101,12 +101,12 @@ def _svc(db: AsyncSession, user: User) -> AssetMapService:
 
 
 def _metric_visibility_scope(user: User) -> dict[str, Any]:
-    """指标汇总可见性作用域：管理角色全量（None），其余按 P0-3 读路径行级隔离。
-
-    与 list_metrics 明细同源（visibility.py），保证「汇总计数 == 明细可见数」，
-    防止资产地图对 metric_owner/analyst/compliance 泄露他人 DRAFT/REVIEW 私有计数。
+    """指标汇总可见性作用域：platform_admin 全量（None），其余（含 domain_admin）
+    按 P0-3 读路径行级隔离——domain_admin 由 visibility.py 按 user.domain 收敛
+    治理范围（未绑定域退化为个人视角），与 list_metrics 明细同源，
+    保证「汇总计数 == 明细可见数」。
     """
-    if user.role in ("platform_admin", "domain_admin"):
+    if user.role == "platform_admin":
         return {}
     return {"actor_id": user.id, "role": user.role, "user_domain": user.domain}
 

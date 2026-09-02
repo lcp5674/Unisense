@@ -88,7 +88,10 @@ export function TodoCenter() {
       // 草稿待办按职责收敛：平台/域管理员治理全域草稿；metric_owner/普通用户
       // 只看「自己负责的草稿」（owner_id=me.id）——避免把他人跨域草稿列进待办，
       // 点入后 Owner 责任链/快照被 PDP 拒绝（403）的断链体验。
-      const isGovernanceAdmin = me.role === "platform_admin" || me.role === "domain_admin";
+      // domain_admin 须绑定业务域才视为治理管理员——未绑定域（domain 为空）的
+      // 域管理员无治理范围，退化为个人视角（与后端 visibility 收敛一致）。
+      const isGovernanceAdmin =
+        me.role === "platform_admin" || (me.role === "domain_admin" && !!me.domain);
       const draftReq = isGovernanceAdmin
         ? { status: "DRAFT", page_size: 50 }
         : { status: "DRAFT", owner_id: me.id, page_size: 50 };

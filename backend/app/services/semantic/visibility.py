@@ -19,14 +19,39 @@ def metric_visibility_conditions(
 ) -> list[ColumnElement[bool]]:
     """构造 P0-3 读路径行级隔离条件（返回空列表 = 不加过滤，全量可见）。
 
-    - 管理角色（platform_admin/domain_admin）或未提供调用者上下文 → 空列表；
+    - ``platform_admin``（平台级）或未提供调用者上下文 → 空列表（全域治理视角）；
+    - ``domain_admin``：按 ``user_domain`` 收敛治理范围——绑定域时仅本域（全部状态，
+      本域私有 DRAFT/REVIEW 是其治理对象）+ 本人负责的指标（跨域 Owner/副 Owner）；
+      **未绑定域（user_domain 为空）退化为个人视角**（公开 + 本人负责），
+      不再全域可见（修复「无域域管理员看到全平台草稿/待审核」的越权可见）；
     - 其余角色：公开状态（PUBLISHED/EXPERIMENTAL/DEPRECATED）+ 本人 Owner/副 Owner
       （DRAFT/REVIEW 私有工作区）+ reviewer 额外放行被指派的 REVIEW 待审项
       （reviewer_type=user 指定 reviewer_id / reviewer_type=domain 同域评审组，
       未指派由域管理员兜底，reviewer 不可见）。
     """
-    if actor_id is None or role is None or role in ("platform_admin", "domain_admin"):
+    if actor_id is None or role is None or role == "platform_admin":
         return []
+    if role == "domain_admin":
+        if user_domain:
+            # 域管理员治理范围 = 本域（全部状态）+ 本人负责指标（跨域不遗漏）
+            return [
+                or_(
+                    Metric.domain == user_domain,
+                    Metric.owner_id == actor_id,
+                    Metric.backup_owner_id == actor_id,
+                )
+            ]
+        # 未绑定域：无治理范围，退化为个人视角
+        return _personal_visibility(actor_id, role, user_domain)
+    return _personal_visibility(actor_id, role, user_domain)
+
+
+def _personal_visibility(
+    actor_id: int,
+    role: str,
+    user_domain: str | None,
+) -> list[ColumnElement[bool]]:
+    """个人视角可见性：公开状态 + 本人 Owner/副 Owner + reviewer 被指派 REVIEW。"""
     visibility: list[ColumnElement[bool]] = [
         Metric.status.in_(("PUBLISHED", "EXPERIMENTAL", "DEPRECATED")),
         Metric.owner_id == actor_id,
@@ -49,3 +74,36 @@ def metric_visibility_conditions(
             )
         )
     return [or_(*visibility)]
+
+
+def metric_is_visible(
+    metric: Metric,
+    actor_id: int | None,
+    role: str | None,
+    user_domain: str | None,
+) -> bool:
+    """单条指标可见性判定（纯 Python，与 :func:`metric_visibility_conditions` 同源）。
+
+    供单资源端点（详情/挂载详情等）在加载实体后校验当前用户是否可见——
+    避免「列表过滤了、详情不校验」的侧门（与列表/汇总口径一致）。
+    """
+    if actor_id is None or role is None or role == "platform_admin":
+        return True
+    if role == "domain_admin" and user_domain:
+        # 域管理员治理范围 = 本域 + 本人负责（与列表条件同源）
+        return (
+            metric.domain == user_domain
+            or metric.owner_id == actor_id
+            or metric.backup_owner_id == actor_id
+        )
+    # 未绑定域：退化为个人视角
+    if metric.status in ("PUBLISHED", "EXPERIMENTAL", "DEPRECATED"):
+        return True
+    if metric.owner_id == actor_id or metric.backup_owner_id == actor_id:
+        return True
+    if role == "reviewer" and metric.status == "REVIEW":
+        if metric.reviewer_type == "user" and metric.reviewer_id == actor_id:
+            return True
+        if metric.reviewer_type == "domain" and metric.reviewer_domain == user_domain:
+            return True
+    return False
