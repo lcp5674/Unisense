@@ -850,6 +850,12 @@ function ImpactTab() {
       setNodeLoading(false);
     }
   }
+  // 节点输入远程检索防抖：Select onSearch 每次击键 300ms 静默后直查（进入 Tab 预加载不走防抖）
+  const nodeSearchTimer = useRef<number | null>(null);
+  const loadNodesDebounced = (kw?: string) => {
+    if (nodeSearchTimer.current) window.clearTimeout(nodeSearchTimer.current);
+    nodeSearchTimer.current = window.setTimeout(() => void loadNodes(kw), 300);
+  };
 
   // 进入 Tab 即预加载候选节点
   useEffect(() => {
@@ -985,8 +991,8 @@ function ImpactTab() {
           }}
           onSearch={(v) => {
             setSearchWord(v);
-            // 输入关键词 → 远程搜索候选节点
-            void loadNodes(v);
+            // 输入关键词 → 远程搜索候选节点（防抖 300ms，避免逐字打接口）
+            loadNodesDebounced(v);
           }}
           onChange={(v) => setNode(v ?? "")}
           onKeyDown={(e) => {

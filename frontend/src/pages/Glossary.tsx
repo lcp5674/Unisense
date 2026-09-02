@@ -302,6 +302,12 @@ function TermsTab() {
       setRelationLoading(false);
     }
   }
+  // 关系目标搜索防抖：Select onSearch 每次击键 300ms 静默后直查（onFocus 空载不走防抖）
+  const relationSearchTimer = useRef<number | null>(null);
+  const loadRelationOptionsDebounced = (searchKw?: string) => {
+    if (relationSearchTimer.current) window.clearTimeout(relationSearchTimer.current);
+    relationSearchTimer.current = window.setTimeout(() => void loadRelationOptions(searchKw), 300);
+  };
 
   // 术语收藏切换（行内心形）
   async function toggleFavorite(t: GlossaryTerm) {
@@ -1074,7 +1080,7 @@ function TermsTab() {
               placeholder="搜索术语编码或名称…"
               options={relationOptions}
               filterOption={false}
-              onSearch={(kw) => loadRelationOptions(kw)}
+              onSearch={(kw) => loadRelationOptionsDebounced(kw)}
               onFocus={() => loadRelationOptions()}
               optionFilterProp="label"
             />

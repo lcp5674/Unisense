@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Alert, Button, Card, Empty, message, Select, Spin } from "antd";
 import { ArrowLeftOutlined, SwapOutlined } from "@ant-design/icons";
@@ -109,12 +109,17 @@ export function MetricCompare() {
     }
   }
 
+  // 对比候选指标远程检索防抖：Select onSearch 每次击键 300ms 静默后直查
+  const searchTimer = useRef<number | null>(null);
   function handleSearch(keyword: string) {
-    setSearching(true);
-    listMetrics({ page: 1, page_size: 100, keyword: keyword || undefined })
-      .then((res) => setCandidates(res.items ?? []))
-      .catch(() => setCandidates([]))
-      .finally(() => setSearching(false));
+    if (searchTimer.current) window.clearTimeout(searchTimer.current);
+    searchTimer.current = window.setTimeout(() => {
+      setSearching(true);
+      listMetrics({ page: 1, page_size: 100, keyword: keyword || undefined })
+        .then((res) => setCandidates(res.items ?? []))
+        .catch(() => setCandidates([]))
+        .finally(() => setSearching(false));
+    }, 300);
   }
 
   const nameByCode = useMemo(() => {

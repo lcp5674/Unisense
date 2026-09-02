@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, message, Tabs, Space, Alert } from "antd";
 import { PlusOutlined, ReloadOutlined, ThunderboltOutlined, LinkOutlined, ArrowLeftOutlined } from "@ant-design/icons";
@@ -40,16 +40,22 @@ const EVENT_STATUS: Record<string, { color: string; label: string }> = {
 function useMetrics() {
   const [metrics, setMetrics] = useState<MetricResponse[]>([]);
   // F6（审查修复）：指标下拉此前仅拉前 100 条 + 客户端过滤——第 101 个指标永远
-  // 无法被选中建质量规则。改服务端搜索（输入即查，防抖由调用方 onSearch 承担）。
+  // 无法被选中建质量规则。改服务端搜索（输入即查）。防抖在 hook 内统一承担：
+  // onSearch 每次击键触发 loadDebounced，300ms 静默后真正发请求（避免逐字打爆接口）。
+  const searchTimer = useRef<number | null>(null);
   const load = (kw?: string) => {
     listMetrics({ page_size: 100, keyword: kw || undefined })
       .then((r) => setMetrics(r.items))
       .catch(() => {});
   };
+  const loadDebounced = (kw?: string) => {
+    if (searchTimer.current) window.clearTimeout(searchTimer.current);
+    searchTimer.current = window.setTimeout(() => load(kw), 300);
+  };
   useEffect(() => {
     load();
   }, []);
-  return { metrics, load };
+  return { metrics, load, loadDebounced };
 }
 
 function RulesTab() {
@@ -60,7 +66,7 @@ function RulesTab() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [form] = Form.useForm();
-  const { metrics, load: loadMetrics } = useMetrics();
+  const { metrics, loadDebounced: loadMetrics } = useMetrics();
   const { can } = usePermission();
   const canConfigRule = can("quality:config-rule");
 
@@ -213,7 +219,7 @@ function EventsTab() {
   // 手动触发检测弹窗
   const [detectOpen, setDetectOpen] = useState(false);
   const [detectForm] = Form.useForm();
-  const { metrics, load: loadMetrics } = useMetrics();
+  const { metrics, loadDebounced: loadMetrics } = useMetrics();
   const { can } = usePermission();
   const canRunCheck = can("quality:run-check");
 

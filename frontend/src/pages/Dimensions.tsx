@@ -2338,6 +2338,13 @@ function MappingsTab() {
       .then((r) => setDims(r.items))
       .catch(() => {});
   };
+  // 维度映射选择器（源/目标维度）远程检索防抖：onSearch 每次击键 300ms 静默后直查，
+  // 避免逐字打 listDimensions 接口；初始/聚焦加载仍走即时版 loadDims。
+  const dimSearchTimer = useRef<number | null>(null);
+  const loadDimsDebounced = (kw?: string) => {
+    if (dimSearchTimer.current) window.clearTimeout(dimSearchTimer.current);
+    dimSearchTimer.current = window.setTimeout(() => loadDims(kw), 300);
+  };
   // 编辑态：复用新建布局，打开时预填当前映射值
   const [editTarget, setEditTarget] = useState<DimensionMapping | null>(null);
   const [editOpen, setEditOpen] = useState(false);
@@ -2635,7 +2642,7 @@ function MappingsTab() {
             <Select
               showSearch
               filterOption={false}
-              onSearch={(kw) => loadDims(kw || undefined)}
+              onSearch={(kw) => loadDimsDebounced(kw || undefined)}
               placeholder="选择源维度（输入编码/名称搜索）"
               notFoundContent={dims.length === 0 ? "暂无维度，请先创建" : "无匹配维度"}
               options={dims.map((d) => ({ value: d.dim_code, label: `${d.dim_code} · ${d.name}` }))}
@@ -2645,7 +2652,7 @@ function MappingsTab() {
             <Select
               showSearch
               filterOption={false}
-              onSearch={(kw) => loadDims(kw || undefined)}
+              onSearch={(kw) => loadDimsDebounced(kw || undefined)}
               placeholder="选择目标维度（输入编码/名称搜索）"
               notFoundContent={dims.length === 0 ? "暂无维度，请先创建" : "无匹配维度"}
               options={dims.map((d) => ({ value: d.dim_code, label: `${d.dim_code} · ${d.name}` }))}

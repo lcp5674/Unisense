@@ -2,7 +2,7 @@
 // 支持从当前节点（表/指标）「添加上游」或「添加下游」，目标节点可关键词搜索或手动输入，
 // 并在登记时给出清晰的节点类型/所需信息说明。
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   AutoComplete,
@@ -98,6 +98,12 @@ export function ManualEdgeModal({
       setSearching(false);
     }
   }
+  // 目标节点输入防抖：AutoComplete onSearch 每次击键 300ms 静默后直查（onFocus 空载不走防抖）
+  const nodeSearchTimer = useRef<number | null>(null);
+  const loadNodesDebounced = (kw: string) => {
+    if (nodeSearchTimer.current) window.clearTimeout(nodeSearchTimer.current);
+    nodeSearchTimer.current = window.setTimeout(() => void loadNodes(kw), 300);
+  };
 
   function onTargetChange(target: string) {
     if (edgeTypeChanged) return;
@@ -199,7 +205,7 @@ export function ManualEdgeModal({
         >
           <AutoComplete
             options={options.map((n) => ({ value: n.id, label: n.label }))}
-            onSearch={loadNodes}
+            onSearch={loadNodesDebounced}
             onSelect={(v) => onTargetChange(v)}
             onFocus={() => void loadNodes("")}
             placeholder="输入关键词搜索，或手动输入 table:db.orders"
