@@ -27,13 +27,12 @@ FROM nginx:alpine
 # 复制构建产物
 COPY --from=builder /build/dist /usr/share/nginx/html
 
-# pid 写 /dev/null——nginx 官方社区绕开「pid 文件写失败」的标准手段：
-# /dev/null 是字符设备，open/write 直接走设备驱动，不经过任何文件系统/overlay 写路径，
-# 任何用户（root 或 nginx）都不可能 EPERM。
-# 背景：生产机 CentOS 7 老内核(3.10)+Docker 26.1.4（官方不支持组合）上，nginx 写
-# /tmp/nginx.pid 与 /var/run/nginx.pid 均 EPERM 崩溃重启（root 手工 echo 写同一目录却
-# 成功——该环境下 pid 文件写入行为不可靠，根因在 daemon/内核层，无法镜像层修复）；
-# pid 对容器运行无实际用途（docker stop 走信号，不用 nginx -s reload/stop），故置 /dev/null。
+# pid 置 /dev/null 仅为兜底（防 pid 残留）；真正根治是 compose 层 `master_process off`
+# 单进程模式（nginx 不再创建 pid 文件）——见 docker-compose.yml frontend 服务注释。
+# 背景（铁证）：生产机 CentOS 7 内核 3.10 + Docker 26.1.4（官方不支持组合）上，nginx 写
+# pid 文件（/tmp、/var/run、/dev/null 全部）均 EPERM 崩溃重启，而同容器内 shell
+# `echo > /dev/null` 成功——nginx 写 pid 用 pwrite 系统调用（echo 用 write），拦截发生在
+# syscall 层（seccomp/安全 Agent/内核兼容），与写到哪里无关，镜像层无法修复。
 RUN chown -R nginx:nginx /var/cache/nginx /var/run && \
     sed -i 's|^pid .*|pid /dev/null;|' /etc/nginx/nginx.conf
 
@@ -132,9 +131,10 @@ EXPOSE 8080
 
 # S-2：nginx 官方形态 = master 以 root 运行（读配置/绑 80→8080），worker 由
 # nginx.conf 的 `user nginx;` 自动降权处理请求。曾用 `USER nginx` 把 master 也降权
-# （过度加固）导致 CentOS 7 老内核(3.10) 上写 pid EPERM 崩溃；后 pid 改 /var/run 仍
-# EPERM（该环境 pid 文件写入行为不可靠，见文件头注释），最终 pid 置 /dev/null 根治。
-# 移除 USER nginx 恢复官方形态；worker 降权不变（安全面与官方镜像一致）。
+# （过度加固）导致 CentOS 7 老内核(3.10) 上写 pid EPERM 崩溃；经多轮验证（pid 改
+# /tmp、/var/run、/dev/null 全 EPERM）确认根因在 syscall 层非目录/权限，最终由 compose
+# `master_process off` 单进程模式根治（不再写 pid）。移除 USER nginx 恢复官方形态；
+# worker 降权不变（安全面与官方镜像一致）。
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
     CMD wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1
 
