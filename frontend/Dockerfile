@@ -28,11 +28,11 @@ FROM nginx:alpine
 COPY --from=builder /build/dist /usr/share/nginx/html
 
 # nginx:alpine 官方形态：pid 写 /var/run/nginx.pid（镜像内 nginx.conf 默认配置），
-# master 以 root 运行、worker 由 `user nginx;` 降权。曾因生产机 Docker 26 + CentOS 7
-# 老内核(3.10)（官方不支持组合）seccomp 异常，nginx 写 pid（pwrite 系统调用）被 EPERM
-# 拦截而崩溃，做过 pid 改 /tmp、/var/run、/dev/null 与 master_process off 多轮绕开——
-# 根因在运行时 syscall 层、非镜像问题。Docker 24（官方支持 el7 的末版）seccomp 正常，
-# 无需任何绕开，恢复官方形态。生产机务必用 Docker 24，勿用 Docker 26 跑 CentOS 7。
+# master 以 root 运行、worker 由 `user nginx;` 降权。曾遇生产机 nginx 写 pid（pwrite
+# 系统调用）被 EPERM 拦截崩溃，做过 pid 改 /tmp、/var/run、/dev/null 与 master_process
+# off 多轮绕开——实测铁证（seccomp=unconfined 下正常启动）：根因是宿主 Docker 默认
+# seccomp profile 拦截 pwrite，与 Docker 26/24 版本无关，非镜像问题。解法在 compose
+# 层 security_opt: seccomp=unconfined（仅前端静态容器放开），镜像保持官方形态。
 RUN chown -R nginx:nginx /var/cache/nginx /var/run
 
 # nginx 配置：SPA 路由 + API 反代到后端
@@ -130,8 +130,8 @@ EXPOSE 8080
 
 # S-2：nginx 官方形态 = master 以 root 运行（读配置/绑端口），worker 由 nginx.conf 的
 # `user nginx;` 自动降权处理请求。曾用 `USER nginx` 把 master 也降权（过度加固），配合
-# Docker 26 + CentOS 7 老内核(3.10) 的 seccomp 异常导致写 pid EPERM 崩溃；Docker 24 下
-# 已恢复官方形态（worker 降权不变，安全面与官方镜像一致）。
+# 宿主 seccomp profile 拦截 pwrite 导致写 pid EPERM 崩溃；已恢复官方形态（worker 降权
+# 不变，安全面与官方镜像一致），seccomp 放行由 compose 层 security_opt 承担。
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
     CMD wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1
 

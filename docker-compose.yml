@@ -368,11 +368,14 @@ services:
     # S-3：发布/回滚载体（与 backend 同 tag 策略）
     image: unisense/frontend:${UNISENSE_IMAGE_TAG:-dev}
     container_name: unisense-frontend
-    # nginx:alpine 官方形态（无 command 覆盖、无 user/tmpfs 特殊配置）——镜像内
-    # nginx.conf 默认 pid /var/run/nginx.pid，master root + worker 降权，任何环境可跑。
-    # 曾因 Docker 26 + CentOS 7 老内核(3.10)（官方不支持组合）seccomp 异常，nginx 写
-    # pid 被 EPERM 拦截崩溃，做过 tmpfs/user:0/pid 改 /dev/null/master_process off 等
-    # 多轮绕开；Docker 24（官方支持 el7 末版）下已全部移除，生产机务必用 Docker 24。
+    # nginx:alpine 官方形态（master root + worker 降权，pid /var/run/nginx.pid）。
+    # 曾误判 Docker 版本问题，做过 tmpfs/user:0/pid 改 /dev/null/master_process off 等
+    # 多轮绕开；实测铁证（seccomp=unconfined 下 nginx 正常启动）：根因是宿主 Docker
+    # 默认 seccomp profile 拦截 nginx 写 pid 用的 pwrite() 系统调用（shell write 正常、
+    # pwrite 被 EPERM），与 Docker 26/24 版本无关。seccomp=unconfined 仅对前端静态
+    # 资源容器放开（不削弱 backend/db 等），是确定性解法。
+    security_opt:
+      - seccomp=unconfined
     # 宿主 8180 → 容器 8080（nginx 监听非特权端口 8080；宿主端口保持 8180 不变）
     ports: ["8180:8080"]
     mem_limit: ${UNISENSE_FRONTEND_MEM:-0.5g}
