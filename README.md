@@ -583,6 +583,13 @@ UNISENSE_BACKUP_DATABASES="unisense e2e_biz"       # 多库备份（含降级业
 | MinIO 归档桶 | `audit_archive` 自动创建 |
 
 ```bash
+# ── 获取代码（一次性，全新机器）────────────────────────────
+#   从内网仓库拉取。注意：main 为最新代码分支；master 是 GitLab 新建仓库时的
+#   占位分支（protected，勿使用）。若 GitLab 已将默认分支改为 main，
+#   可省略 -b main：
+git clone -b main git@git.guahao-inc.com:licp/unisense.git
+cd unisense
+
 # ── 第 0 步：机器准备（一次性）────────────────────────────
 #   数据盘独立挂载到 Docker 数据目录；ES/Doris 要求的系统参数：
 sysctl -w vm.max_map_count=262144          # 写入 /etc/sysctl.conf 持久化
