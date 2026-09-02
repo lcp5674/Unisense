@@ -17,8 +17,25 @@
 
 services:
   # ============ 基础设施（依赖服务）============
+  # ---- MySQL binlog 独立卷权限初始化（一次性，幂等）----
+  # mysql:8.0 官方镜像 entrypoint 只 chown 数据目录 /var/lib/mysql，不处理自定义挂载点；
+  # unisense_binlog 命名卷首次创建为 root:root，mysql 用户(uid=999)无写权限 → 全新卷启动
+  # 失败（errno 13 Permission denied）。此 init 容器在 mysql 启动前 chown 该卷，
+  # 完成后 mysql 才启动（depends_on service_completed_successfully）；chown 幂等，
+  # 后续每次 up 无副作用（卷权限已正确时立即退出）。
+  mysql-init:
+    image: mysql:8.0
+    container_name: unisense-mysql-init
+    entrypoint: ["chown", "-R", "999:999", "/var/lib/mysql-binlog"]
+    volumes:
+      - unisense_binlog:/var/lib/mysql-binlog
+    restart: "no"
+
   mysql:
     image: mysql:8.0
+    depends_on:
+      mysql-init:
+        condition: service_completed_successfully
     environment:
       MYSQL_ROOT_PASSWORD: ${UNISENSE_MYSQL_ROOT_PASSWORD:-test}
       MYSQL_DATABASE: ${UNISENSE_MYSQL_DATABASE:-unisense}

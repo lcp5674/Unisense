@@ -595,12 +595,15 @@ cp .env.production.example .env.production                  # 1a. 复制模板�
 bash scripts/gen_prod_secrets.sh --out .env.production       # 1b. 就地填充 11 项强密钥（保留非密钥配置；自检通过）
 vi .env.production                                           # 1c. 填 UNISENSE_OLAP_URL / CORS / IMAGE_TAG
 
-# ── 第 1.5 步：binlog 独立卷权限初始化（仅首次部署，幂等）────────
-#   mysql 以 uid=999 写 binlog 卷 /var/lib/mysql-binlog（独立卷，镜像 entrypoint
-#   不自动 chown）；不执行此步则全新卷下 mysql 启动失败（errno 13 Permission denied）：
-docker volume create unisense_unisense_binlog 2>/dev/null || true
-docker run --rm -v unisense_unisense_binlog:/var/lib/mysql-binlog alpine \
-  chown -R 999:999 /var/lib/mysql-binlog
+# ── 第 1.5 步：binlog 独立卷权限初始化（compose 已自动，无需手工）────────
+#   mysql 以 uid=999 写 binlog 卷 /var/lib/mysql-binlog（独立卷，官方镜像 entrypoint
+#   不自动 chown 自定义挂载点）。docker-compose.yml 已内置一次性 mysql-init 服务：
+#   mysql 启动前自动 chown 该卷（depends_on service_completed_successfully，幂等），
+#   `docker compose up -d` 全自动，**无需执行任何手工命令**。
+#   仅当不使用本 compose（裸机/自编编排部署）时才需手动初始化一次：
+#   docker volume create unisense_unisense_binlog 2>/dev/null || true
+#   docker run --rm -v unisense_unisense_binlog:/var/lib/mysql-binlog alpine \
+#     chown -R 999:999 /var/lib/mysql-binlog
 
 # ── 第 2 步：构建并启动（迁移与自举自动执行）──────────────
 docker compose --env-file .env.production up -d --build
