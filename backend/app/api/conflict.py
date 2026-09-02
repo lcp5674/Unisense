@@ -45,6 +45,40 @@ from app.services.semantic.service import MetricService
 
 router = APIRouter(prefix="/conflicts", tags=["conflict"])
 
+
+async def _assert_conflict_related(db: AsyncSession, user: CurrentUser, conflict: Conflict) -> None:
+    """用户级归属校验（升级等个人操作）：metric_owner 仅可升级本人相关冲突。
+
+    管理角色（platform_admin/domain_admin）放行；metric_owner 需冲突任一指标
+    的 Owner/副 Owner 或本人仲裁——此前 escalate 无归属校验，metric_owner 可
+    凭 conflict_id 升级任意他人冲突（越权操作）。
+    """
+    if user.has_role("platform_admin") or user.has_role("domain_admin"):
+        return
+    if not user.has_role("metric_owner"):
+        return
+    from sqlalchemy import select
+
+    from app.models.metric import Metric
+
+    ids = [conflict.metric_a, conflict.metric_b]
+    ids = [i for i in ids if i is not None]
+    if not ids:
+        return
+    rows = (
+        await db.execute(select(Metric).where(Metric.id.in_(ids)))
+    ).scalars().all()
+    if any(
+        m.owner_id == user.id or m.backup_owner_id == user.id for m in rows
+    ) or conflict.arbitrator_id == user.id:
+        return
+    from app.core.exceptions import AuthError
+
+    raise AuthError(
+        "无权升级他人指标的冲突（仅冲突指标 Owner/副 Owner 或管理角色可升级）",
+        error_code="FORBIDDEN",
+    )
+
 # P2-4: 前端 MetricCreate「冲突预检」对全部写角色可见，platform_admin/domain_admin 也须可调
 _WRITE_ROLES = ("metric_owner", "platform_admin", "domain_admin")
 _GOV_ROLES = ("compliance_officer", "domain_admin", "platform_admin")
@@ -514,6 +548,8 @@ async def escalate_conflict(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[Any]:
     svc = _svc(db, request)
+    # 用户级归属校验：metric_owner 仅可升级本人相关冲突（管理角色放行）
+    await _assert_conflict_related(db, user, await svc.get(conflict_id))
     conflict = await svc.escalate(conflict_id, payload)
     await write_audit(
         db,

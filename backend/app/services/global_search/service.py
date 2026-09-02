@@ -30,6 +30,7 @@ class GlobalSearchService(BaseService):
         *,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
+        visible_user_domain: str | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         """跨 9 类资源聚合搜索，按类型分组返回（每类至多 limit 条）。
 
@@ -39,6 +40,7 @@ class GlobalSearchService(BaseService):
             visible_actor_id: 可见性过滤（P0-3 行级隔离，D-1）——非管理角色仅检索
                 公开状态 + 本人负责的未发布资产；管理角色传 None 不过滤。
             visible_role: 调用者角色（配合 visible_actor_id 判定 reviewer 放行）。
+            visible_user_domain: 调用者域（reviewer 按域评审组放行，对齐指标目录）。
 
         Returns:
             分组结构 ``{"metric": [...], "dimension": [...], ...}``。
@@ -48,4 +50,5 @@ class GlobalSearchService(BaseService):
             limit,
             visible_actor_id=visible_actor_id,
             visible_role=visible_role,
+            visible_user_domain=visible_user_domain,
         )

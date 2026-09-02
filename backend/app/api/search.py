@@ -56,7 +56,11 @@ async def global_search(
     他人 DRAFT/REVIEW 草稿与 PII 标记。
     """
     data = await GlobalSearchService(db).search(
-        q.strip(), limit=limit, visible_actor_id=user.id, visible_role=user.role
+        q.strip(),
+        limit=limit,
+        visible_actor_id=user.id,
+        visible_role=user.role,
+        visible_user_domain=user.domain,
     )
     total = sum(len(items) for items in data.values())
     return ok(data={"groups": data, "total": total}, trace_id=trace_id)

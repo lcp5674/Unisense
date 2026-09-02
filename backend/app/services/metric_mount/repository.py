@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.metric import Metric
 from app.models.metric_mount import MetricMount
+from app.services.semantic.visibility import metric_visibility_conditions
 
 
 class MetricMountRepository:
@@ -25,6 +27,19 @@ class MetricMountRepository:
             MetricMount.id == mount_id, MetricMount.deleted_at.is_(None)
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def get_with_metric(self, mount_id: int) -> tuple[MetricMount, Metric | None] | None:
+        """按 ID 取挂载并 LEFT JOIN Metric（详情/编辑用，供可见性校验）。"""
+        stmt = (
+            select(MetricMount, Metric)
+            .outerjoin(Metric, Metric.id == MetricMount.metric_id)
+            .where(MetricMount.id == mount_id, MetricMount.deleted_at.is_(None))
+        )
+        row = (await self._session.execute(stmt)).one_or_none()
+        if row is None:
+            return None
+        mount, metric = row
+        return mount, metric
 
     async def list_by_metric(self, metric_id: int) -> list[MetricMount]:
         """按指标列出全部挂载行（多变体；按 id 升序，稳定默认变体取行）。"""
@@ -55,19 +70,34 @@ class MetricMountRepository:
         *,
         limit: int = 20,
         offset: int = 0,
+        visible_actor_id: int | None = None,
+        visible_role: str | None = None,
+        visible_user_domain: str | None = None,
     ) -> tuple[list[tuple[MetricMount, Metric | None]], int]:
         """分页列出挂载并 LEFT JOIN Metric 取指标信息，返回 (列表, total)。
 
-        total 用独立 count（不含 JOIN），与列表共用同一过滤条件，保证分页一致性。
+        total 与列表共用同一过滤条件（含可见性），保证分页一致性。
+
+        可见性（用户级隔离）：非管理角色仅可见公开指标 + 本人负责/指派的指标
+        挂载——viewer 不得经挂载列表窥探他人 DRAFT/REVIEW 指标的源表/业务限定。
         """
         conditions = [MetricMount.deleted_at.is_(None)]
         if metric_id is not None:
             conditions.append(MetricMount.metric_id == metric_id)
         if domain:
             conditions.append(MetricMount.domain == domain)
+        visibility = metric_visibility_conditions(
+            visible_actor_id, visible_role, visible_user_domain
+        )
+        joins: list[tuple[Any, Any]] = []
+        if visibility:
+            joins.append((Metric, Metric.id == MetricMount.metric_id))
+            conditions.append(or_(*visibility))
         count_stmt = (
             select(func.count()).select_from(MetricMount).where(*conditions)
         )
+        for target, onclause in joins:
+            count_stmt = count_stmt.join(target, onclause)
         total = (await self._session.execute(count_stmt)).scalar() or 0
         stmt = (
             select(MetricMount, Metric)

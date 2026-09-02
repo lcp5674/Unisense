@@ -499,7 +499,7 @@ class TestGlobalSearchService:
 
         assert out["metric"][0]["type"] == "metric"
         svc._repo.search.assert_awaited_once_with(
-            "sales", 5, visible_actor_id=None, visible_role=None
+            "sales", 5, visible_actor_id=None, visible_role=None, visible_user_domain=None
         )
 
 
@@ -575,10 +575,23 @@ class TestGlobalSearchVisibility:
         assert repo._visibility_conditions(None, None) is None
 
     async def test_visibility_conditions_reviewer_extra_review(self) -> None:
-        """reviewer 额外放行 REVIEW（评审工作台需看待审项）。"""
+        """reviewer 仅放行**指派给本人/本域**的 REVIEW（对齐指标目录权威判定）。"""
         repo = _repo(_session())
-        cond = self._render(repo._visibility_conditions(7, "reviewer"))
+        cond = self._render(
+            repo._visibility_conditions(7, "reviewer", "outpatient")
+        )
         assert "REVIEW" in cond
+        # 精确指派：user 型 reviewer_id=7 或 domain 型 reviewer_domain=outpatient
+        assert "reviewer_type" in cond and "reviewer_id" in cond
+        assert "reviewer_domain" in cond and "outpatient" in cond
+
+    async def test_visibility_conditions_reviewer_without_domain_no_bare_review(self) -> None:
+        """reviewer 无域时不放行「裸 REVIEW」——未指派待审指标不得经搜索侧门泄露。"""
+        repo = _repo(_session())
+        cond = self._render(repo._visibility_conditions(7, "reviewer", None))
+        assert "REVIEW" in cond
+        # 不含裸 `status == 'REVIEW'`（无 reviewer_type 约束的裸放行）
+        assert "reviewer_type" in cond
 
     async def test_es_search_applies_visibility_filter(self) -> None:
         """非管理角色 ES 查询用 bool.filter 收敛可见范围（与 MySQL 同语义）。"""

@@ -35,6 +35,7 @@ from app.models.metric_template import MetricTemplate
 from app.models.subject_domain import SubjectDomain
 from app.models.term import Term
 from app.services.search.synonyms import SYNONYM_MAP
+from app.services.semantic.visibility import metric_visibility_conditions
 
 
 def _escape_like(text: str) -> str:
@@ -108,6 +109,7 @@ class GlobalSearchRepository:
         *,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
+        visible_user_domain: str | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         """跨 9 类资源聚合搜索，按类型分组返回。
 
@@ -118,6 +120,7 @@ class GlobalSearchRepository:
                 公开状态（PUBLISHED/EXPERIMENTAL/DEPRECATED）+ 本人 Owner/副 Owner
                 的未发布资产；管理角色传 None 即不加过滤（对齐指标目录语义）。
             visible_role: 调用者角色（配合 visible_actor_id 判定 reviewer 放行）。
+            visible_user_domain: 调用者域（reviewer 按域评审组放行，对齐指标目录）。
 
         Returns:
             ``{"metric": [...], "dimension": [...], ...}`` 分组结构；
@@ -159,6 +162,7 @@ class GlobalSearchRepository:
                 raw_q=raw_q,
                 visible_actor_id=visible_actor_id,
                 visible_role=visible_role,
+                visible_user_domain=visible_user_domain,
             ),
             self._search_dimensions(
                 needles,
@@ -182,33 +186,32 @@ class GlobalSearchRepository:
         )
         return groups
 
-    def _visibility_conditions(self, visible_actor_id: int | None, visible_role: str | None) -> Any | None:
-        """指标读路径行级隔离（对齐 semantic/repository.py P0-3）。
+    def _visibility_conditions(
+        self,
+        visible_actor_id: int | None,
+        visible_role: str | None,
+        visible_user_domain: str | None = None,
+    ) -> Any | None:
+        """指标读路径行级隔离（与 semantic/visibility.py 同源，P0-3）。
 
-        非管理角色（platform_admin/domain_admin 之外）仅可检索：
+        非管理角色仅可检索：
         - 公开状态（PUBLISHED/EXPERIMENTAL/DEPRECATED）；
         - 本人 Owner/副 Owner 的未发布资产（DRAFT/REVIEW 私有工作区不向他人泄露）；
-        - reviewer 额外放行 REVIEW（评审工作台需查看待审项）。
+        - reviewer 额外放行**指派给本人/本域**的 REVIEW（reviewer_type=user 指定
+          reviewer_id / reviewer_type=domain 同域评审组，未指派由域管理员兜底——
+          与指标目录/审批中心权威判定一致，杜绝经搜索侧门检索他人未指派待审指标）。
 
         Returns:
             SQLAlchemy OR 条件；管理角色/未传上下文返回 None（不加过滤）。
         """
-        if (
-            visible_actor_id is not None
-            and visible_role is not None
-            and visible_role not in ("platform_admin", "domain_admin")
-        ):
-            visibility: list[Any] = [
-                Metric.status.in_(("PUBLISHED", "EXPERIMENTAL", "DEPRECATED")),
-                Metric.owner_id == visible_actor_id,
-                Metric.backup_owner_id == visible_actor_id,
-            ]
-            if visible_role == "reviewer":
-                visibility.append(Metric.status == "REVIEW")
-            return or_(*visibility)
-        return None
+        conds = metric_visibility_conditions(
+            visible_actor_id, visible_role, visible_user_domain
+        )
+        return or_(*conds) if conds else None
 
-    def _es_visibility_filter(self, visible_actor_id: int | None, visible_role: str | None) -> list[dict[str, Any]]:
+    def _es_visibility_filter(
+        self, visible_actor_id: int | None, visible_role: str | None
+    ) -> list[dict[str, Any]]:
         """ES 查询层可见性过滤（与 MySQL 路径同一语义，跨引擎一致）。
 
         ES 索引（metric_idx）含 owner_id/backup_owner_id 字段（es_indexer 同步），
@@ -225,7 +228,9 @@ class GlobalSearchRepository:
                 {"term": {"backup_owner_id": visible_actor_id}},
             ]
             if visible_role == "reviewer":
-                clauses.append({"term": {"status": "REVIEW"}})
+                # reviewer 强制走 MySQL 精确指派过滤（_search_metrics 跳过 ES），
+                # ES 索引无 reviewer 指派字段，此处不再放行裸 REVIEW——防御兜底。
+                pass
             return [{"bool": {"should": clauses, "minimum_should_match": 1}}]
         return []
 
@@ -237,6 +242,7 @@ class GlobalSearchRepository:
         *,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
+        visible_user_domain: str | None = None,
     ) -> list[dict[str, Any]]:
         """指标检索：ES 优先（相关度排序），ES 禁用/异常/未命中时降级 MySQL LIKE。
 
@@ -248,8 +254,12 @@ class GlobalSearchRepository:
         ``_es_visibility_filter`` 收敛——低权限用户不得经搜索侧门检索他人未发布
         草稿/审核中指标（此前全局搜索无任何可见性过滤，DRAFT/REVIEW + PII 标记
         可被任意 viewer 检索，绕过指标目录行级隔离）。
+
+        reviewer 例外：ES 索引不含 reviewer 指派字段（reviewer_type/reviewer_id/
+        reviewer_domain），ES 的裸 REVIEW 放行会把未指派给当前评审人的待审指标
+        经搜索侧门泄露——评审人检索强制走 MySQL 精确指派过滤路径。
         """
-        if raw_q:
+        if raw_q and visible_role != "reviewer":
             es_items = await self._es_search_assets(
                 "metric",
                 raw_q,
@@ -264,7 +274,9 @@ class GlobalSearchRepository:
         desc_match = _like_any(Metric.description, needles)
         syn_match = _like_any(MeasureCatalog.synonyms.cast(String), needles)
         conditions: list[Any] = [Metric.deleted_at.is_(None)]
-        visibility = self._visibility_conditions(visible_actor_id, visible_role)
+        visibility = self._visibility_conditions(
+            visible_actor_id, visible_role, visible_user_domain
+        )
         if visibility is not None:
             conditions.append(visibility)
         conditions.append(or_(code_match, name_match, desc_match, syn_match))

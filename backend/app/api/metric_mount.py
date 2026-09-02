@@ -23,6 +23,7 @@ from app.services.metric_mount.schemas import (
     MetricMountUpdate,
 )
 from app.services.metric_mount.service import MetricMountService
+from app.services.semantic.visibility import metric_is_visible
 
 router = APIRouter(prefix="/metric-mounts", tags=["metric_mount"])
 
@@ -98,7 +99,13 @@ async def list_mounts(
     page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
     items, total = await MetricMountService(db).list_mounts(
-        metric_id, domain, page=page, page_size=page_size
+        metric_id,
+        domain,
+        page=page,
+        page_size=page_size,
+        visible_actor_id=user.id,
+        visible_role=user.role,
+        visible_user_domain=user.domain,
     )
     converted = [
         MetricMountResponse.from_model(mount, metric) for mount, metric in items
@@ -116,8 +123,17 @@ async def get_mount(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
-    resp = await MetricMountService(db).get_mount(mount_id)
-    return ok(data=MetricMountResponse.from_model(resp), trace_id=trace_id)
+    row = await MetricMountService(db).get_mount_with_metric(mount_id)
+    if row is None:
+        raise NotFoundError(f"挂载不存在: {mount_id}")
+    mount, metric = row
+    # 用户级可见性（对齐列表口径）：非管理角色不得查看他人私有指标（DRAFT/REVIEW
+    # 未指派）的挂载详情——挂载含源表/业务限定/责任方，属指标元数据一部分。
+    if metric is not None and not metric_is_visible(
+        metric, user.id, user.role, user.domain
+    ):
+        raise NotFoundError(f"挂载不存在: {mount_id}")
+    return ok(data=MetricMountResponse.from_model(mount, metric), trace_id=trace_id)
 
 
 @router.put("/{mount_id}", dependencies=_SCOPED_DEPS)

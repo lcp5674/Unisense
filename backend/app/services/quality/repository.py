@@ -6,7 +6,7 @@ import json
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import false, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.metric import Metric
@@ -33,12 +33,16 @@ class QualityRepository:
     def _domain_metric_condition(domain: str | None, is_platform_admin: bool) -> list[Any]:
         """域作用域条件（非管理角色按指标域隔离跨域质量数据）。
 
-        返回 ``Metric.domain == domain`` 的 join 条件列表；平台管理员或未指定域
-        时返回空列表（不隔离）。规则/事件按 ``metric_id`` 关联 Metric，基准/对账
-        按 ``metric_code`` 关联。
+        返回 ``Metric.domain == domain`` 的 join 条件列表；平台管理员全量。
+
+        用户级隔离（fail-closed）：非管理角色域为空（未指派域）时返回恒假条件
+        ——此前 ``not domain → []`` 会让 domain=None 的 viewer/analyst 全量读
+        质量规则/事件/基准/对账（跨域越权），改为不泄露任何域数据。
         """
-        if is_platform_admin or not domain:
+        if is_platform_admin:
             return []
+        if not domain:
+            return [false()]
         return [Metric.domain == domain]
 
     async def create_rule(self, rule: QualityRule) -> QualityRule:

@@ -40,6 +40,15 @@ class MetricMountService(BaseService):
                 f"仅派生指标可挂载物理表，当前类型 {metric.type}（原子/复合不挂载）",
                 error_code="INVALID_MOUNT_TARGET",
             )
+        # 指标域一致性（用户级越权修复）：挂载 domain 必须等于指标 domain——
+        # 否则域管理员可用「本域挂载 + 跨域指标」组合绕过域作用域守卫（_assert_domain_scope
+        # 只校验挂载行 domain），变相操作跨域指标。
+        if metric.domain != data.domain:
+            raise UnisenseError(
+                f"挂载业务域 {data.domain} 与指标所属域 {metric.domain} 不一致，"
+                f"请以指标域为准",
+                error_code="MOUNT_DOMAIN_MISMATCH",
+            )
         mount = MetricMount(
             metric_id=data.metric_id,
             source_table=data.source_table,
@@ -67,6 +76,12 @@ class MetricMountService(BaseService):
             raise NotFoundError(f"挂载不存在: {mount_id}")
         return mount
 
+    async def get_mount_with_metric(
+        self, mount_id: int
+    ) -> tuple[MetricMount, Metric | None] | None:
+        """取挂载并 LEFT JOIN 指标（详情/编辑用，供可见性校验）。"""
+        return await self._repo.get_with_metric(mount_id)
+
     async def get_mount_by_metric(self, metric_id: int) -> MetricMount | None:
         """按指标取默认变体挂载（多变体下取 default_period 优先/id 最小行）。
 
@@ -82,10 +97,21 @@ class MetricMountService(BaseService):
         *,
         page: int = 1,
         page_size: int = 20,
+        visible_actor_id: int | None = None,
+        visible_role: str | None = None,
+        visible_user_domain: str | None = None,
     ) -> tuple[list[tuple[MetricMount, Metric | None]], int]:
         limit = min(max(page_size, 1), 200)
         offset = (max(page, 1) - 1) * limit
-        return await self._repo.list(metric_id, domain, limit=limit, offset=offset)
+        return await self._repo.list(
+            metric_id,
+            domain,
+            limit=limit,
+            offset=offset,
+            visible_actor_id=visible_actor_id,
+            visible_role=visible_role,
+            visible_user_domain=visible_user_domain,
+        )
 
     async def update_mount(self, mount_id: int, data: MetricMountUpdate) -> MetricMount:
         mount = await self.get_mount(mount_id)
@@ -97,6 +123,14 @@ class MetricMountService(BaseService):
             raise UnisenseError(
                 f"指标状态 {metric.status} 禁止修改挂载（仅 DRAFT/REVIEW/PUBLISHED 可编辑）",
                 error_code="MOUNT_EDIT_FORBIDDEN",
+            )
+        # 指标域一致性（与 create 同源）：不允许把挂载域改成与指标域不一致——
+        # 否则域管理员可把挂载域改成本域绕过域作用域守卫，变相操作跨域指标。
+        if data.domain is not None and data.domain != metric.domain:
+            raise UnisenseError(
+                f"挂载业务域 {data.domain} 与指标所属域 {metric.domain} 不一致，"
+                f"请以指标域为准",
+                error_code="MOUNT_DOMAIN_MISMATCH",
             )
         # 破坏性口径变更（源表/粒度/粒度维度变化）：PUBLISHED 须经消费方确认流，
         # REVIEW 须经指标编辑接口（编辑即撤回 DRAFT，评审人知情）——挂载端点一律

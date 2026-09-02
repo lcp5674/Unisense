@@ -1079,10 +1079,19 @@ async def cancel_collection_job(
     - 已入队未运行：取消投递；
     - 运行中：请求取消（worker 收到 CancelledError 补写 FAILED 终态）；
     - 任务不存在或已终态：幂等返回 ``canceled=False``（不报 404）。
+
+    组织级归属校验（用户级越权修复）：先经 ``get_job_status(org_id=...)`` 确认
+    任务属于当前组织（跨组织任务不可见）——此前直接 ``q.cancel(job_id)`` 无归属
+    校验，任意写角色可凭 job_id 取消其他组织任务。
     """
     from app.core.config import settings as _settings
     from app.services.collector.queue import create_collection_queue
 
+    svc = _svc(db)
+    org_id = _resolve_org_scope(user)
+    status = await svc.get_job_status(job_id, org_id=org_id)
+    if status is None:
+        return ok(data={"job_id": job_id, "canceled": False}, trace_id=trace_id)
     q = create_collection_queue(redis_url=_settings.redis_url)
     cancelled = await q.cancel(job_id)
     if cancelled:

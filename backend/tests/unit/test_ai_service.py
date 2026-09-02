@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -174,3 +175,32 @@ async def test_ask_execute_true_without_llm_sql_still_safe() -> None:
     assert out["execute"] is False
     assert "execute_result" not in out
     assert "execute_error" not in out
+
+
+async def test_vocabulary_only_public_metrics() -> None:
+    """用户级越权修复：AI 词汇表仅取未删除的公开状态指标（不含他人 DRAFT/REVIEW 私有码）。"""
+    from app.services.ai.repository import AiRepository
+
+    class _Row:
+        def __init__(self, code: str, name: str) -> None:
+            self.metric_code = code
+            self.name = name
+
+    session = MagicMock()
+    terms_result = MagicMock()
+    terms_result.scalars.return_value.all.return_value = ["术语A"]
+    metrics_result = MagicMock()
+    metrics_result.all.return_value = [_Row("pub_code", "公开名"), _Row("draft_code", "草稿名")]
+    executed: list[str] = []
+
+    async def fake_execute(stmt: object) -> MagicMock:
+        executed.append(str(stmt))
+        return terms_result if len(executed) == 1 else metrics_result
+
+    session.execute = fake_execute
+    vocab = await AiRepository(session).vocabulary()
+    assert "术语A" in vocab
+    assert "pub_code" in vocab and "公开名" in vocab
+    # 指标查询必须带 status + deleted_at 过滤（公开状态白名单）
+    metric_sql = executed[1].lower()
+    assert "status" in metric_sql and "deleted_at" in metric_sql

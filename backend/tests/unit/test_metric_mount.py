@@ -195,6 +195,21 @@ class TestMountService:
                 )
             )
 
+    async def test_create_mount_rejects_cross_domain(self) -> None:
+        """用户级越权修复：挂载域必须与指标域一致（防跨域挂载绕过域守卫）。"""
+        svc, _ = await _svc_with_metric("derived")  # metric.domain == "sales"
+        with pytest.raises(UnisenseError) as ei:
+            await svc.create_mount(
+                MetricMountCreate(
+                    metric_id=1,
+                    source_table="dwd.sales_detail",
+                    source_column="gmv",
+                    granularity="日",
+                    domain="medical",
+                )
+            )
+        assert ei.value.error_code == "MOUNT_DOMAIN_MISMATCH"
+
     async def test_create_mount_rejects_composite(self) -> None:
         svc, _ = await _svc_with_metric("composite")
         with pytest.raises(UnisenseError):
@@ -238,7 +253,7 @@ class TestMountService:
                 source_column="occur_amt",
                 granularity="日",
                 default_period="day",
-                domain="medical",
+                domain="sales",
                 business_filter="病种=门特",
             )
         )
@@ -255,7 +270,7 @@ class TestMountService:
                 source_column="fee",
                 granularity="医院",
                 default_period="day",
-                domain="medical",
+                domain="sales",
                 product_owner_id=11,
                 tech_owner_id=12,
                 dw_developer_id=13,
@@ -341,15 +356,27 @@ class TestMountService:
             MetricMountUpdate(
                 business_filter="病种=门特",
                 default_period="month",
-                domain="medical",
+                domain="sales",
                 source_column="occur_amt",
             ),
         )
         assert out.business_filter == "病种=门特"
         assert out.default_period == "month"
-        assert out.domain == "medical"
+        assert out.domain == "sales"
         assert out.source_column == "occur_amt"
         repo.commit.assert_awaited()
+
+    async def test_update_mount_rejects_cross_domain(self) -> None:
+        """用户级越权修复：update 不允许把挂载域改成与指标域不一致。"""
+        svc, repo = await _svc()
+        metric = _metric()
+        metric.status = "PUBLISHED"
+        svc._require_metric = AsyncMock(return_value=metric)  # noqa: SLF001
+        m = _mount()
+        repo.get = AsyncMock(return_value=m)
+        with pytest.raises(UnisenseError) as ei:
+            await svc.update_mount(1, MetricMountUpdate(domain="medical"))
+        assert ei.value.error_code == "MOUNT_DOMAIN_MISMATCH"
 
     async def test_update_mount_allows_same_value_on_published(self) -> None:
         """已发布指标传与原值相同的粒度/源表不算变更，放行（幂等更新）。"""
@@ -404,7 +431,7 @@ class TestMountService:
                 granularity="月",
                 granularity_dims=["hospital"],
                 default_period="month",
-                domain="medical",
+                domain="sales",
             )
         )
         assert out.granularity == "月"

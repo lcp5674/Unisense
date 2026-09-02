@@ -221,6 +221,8 @@ async def record_observation(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     """写入一次质量观测样本（采集 / 产出分区就绪时调用），供动态基线 / 同环比 / 跨源检测复用。"""
+    # 指标域归属校验（对齐规则/基准写路径）：域管理员不得向跨域指标写观测样本
+    await _assert_metric_domain(db, user, metric_code=payload.metric_code)
     resp = await QualityService(db).record_observation(payload)
     await write_audit(
         db,
@@ -243,6 +245,8 @@ async def detect(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> Any:
     """质量检测引擎入口（一期：静态阈值评估；命中落异常事件并告警）。"""
+    # 指标域归属校验：域管理员不得对跨域指标触发检测
+    await _assert_metric_domain(db, user, metric_id=payload.metric_id)
     resp = await QualityService(db).detect(
         payload.metric_id,
         payload.rule_type,

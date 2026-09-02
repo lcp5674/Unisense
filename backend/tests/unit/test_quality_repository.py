@@ -157,6 +157,38 @@ class TestQualityRuleRepo:
         for stmt in captured:
             assert "domain" not in str(stmt)
 
+    async def test_list_rules_no_domain_fail_closed(self, repo: QualityRepository) -> None:
+        """用户级越权修复：非管理角色域为空（未指派域）→ 恒假条件（不泄露任何域数据）。
+
+        此前 ``not domain → 不隔离`` 会让 domain=None 的 viewer/analyst 全量读
+        质量规则/事件/基准/对账（跨域越权）。
+        """
+        captured: list[Any] = []
+        mock_count = MagicMock()
+        mock_count.scalar.return_value = 0
+        mock_rows = MagicMock()
+        mock_rows.scalars.return_value.all.return_value = []
+
+        async def fake_execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
+            captured.append(stmt)
+            return mock_count if len(captured) == 1 else mock_rows
+
+        repo._db.execute = fake_execute
+        results, total = await repo.list_rules(
+            metric_id=None,
+            rule_type=None,
+            severity=None,
+            enabled=None,
+            page=1,
+            page_size=10,
+            domain=None,
+            is_platform_admin=False,
+        )
+        assert len(results) == 0
+        assert total == 0
+        # 恒假条件（false）出现在过滤条件中
+        assert "false" in str(captured[0]).lower()
+
     async def test_update_rule(self, repo: QualityRepository) -> None:
         rule = QualityRule(id=1)
         result = await repo.update_rule(rule, enabled=False, severity=QualitySeverity.P2)
@@ -227,7 +259,8 @@ class TestQualityEventRepo:
         mock_rows.scalars.return_value.all.return_value = [QualityEvent(id=1)]
         repo._db.execute = AsyncMock(side_effect=[mock_count, mock_rows])
         results, total = await repo.list_events(
-            metric_id=None, status=None, level=None, page=1, page_size=10, actor_id=7
+            metric_id=None, status=None, level=None, page=1, page_size=10,
+            actor_id=7, domain="outpatient", is_platform_admin=False,
         )
         assert len(results) == 1
         assert total == 1
