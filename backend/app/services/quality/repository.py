@@ -6,7 +6,7 @@ import json
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.metric import Metric
@@ -167,6 +167,7 @@ class QualityRepository:
         page_size: int,
         domain: str | None = None,
         is_platform_admin: bool = False,
+        actor_id: int | None = None,
     ) -> tuple[list[QualityEvent], int]:
         conditions: list[Any] = [QualityEvent.deleted_at.is_(None)]
         if metric_id is not None:
@@ -176,6 +177,12 @@ class QualityRepository:
         if level is not None:
             conditions.append(QualityEvent.level == level)
         conditions += self._domain_metric_condition(domain, is_platform_admin)
+        # 个人工作台（待办中心）收敛：仅本人名下（Owner/副 Owner）指标的质量事件，
+        # 避免把本域他人指标告警混入个人待办。
+        if actor_id is not None:
+            conditions.append(
+                or_(Metric.owner_id == actor_id, Metric.backup_owner_id == actor_id)
+            )
         count_stmt = (
             select(func.count())
             .select_from(QualityEvent)

@@ -276,6 +276,9 @@ async def list_events(
     metric_id: int | None = Query(None),
     status: str | None = Query(None),
     level: str | None = Query(None),
+    # 个人工作台（待办中心）场景：非管理角色仅返回本人名下指标（Owner/副 Owner）
+    # 的质量事件，避免把本域他人指标告警混入个人待办。
+    mine_only: bool = Query(False, description="仅本人名下指标的质量事件"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
 ) -> Any:
@@ -300,6 +303,7 @@ async def list_events(
         page_size,
         domain=user.domain,
         is_platform_admin=user.has_role("platform_admin"),
+        actor_id=user.id if mine_only else None,
     )
     return ok(
         data={"items": items, "total": total, "page": page, "page_size": page_size},

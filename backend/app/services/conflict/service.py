@@ -299,7 +299,9 @@ class ConflictService(BaseService):
             filtered.append(ex)
         return filtered
 
-    async def list_conflicts(self, params: Any) -> tuple[list[Conflict], int]:
+    async def list_conflicts(
+        self, params: Any, related_actor_id: int | None = None
+    ) -> tuple[list[Conflict], int]:
         return await self._repo.list_conflicts(
             params.status,
             params.type,
@@ -307,6 +309,7 @@ class ConflictService(BaseService):
             params.page,
             params.page_size,
             severity=getattr(params, "severity", None),
+            related_actor_id=related_actor_id,
         )
 
     async def get(self, conflict_id: str) -> Conflict:

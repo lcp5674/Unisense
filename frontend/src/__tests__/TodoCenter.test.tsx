@@ -332,3 +332,50 @@ describe("待办中心 - 草稿待办职责收敛", () => {
     expect(draftCall![0]?.owner_id).toBe(7);
   });
 });
+
+describe("待办中心 - 冲突/质量待办个人收敛", () => {
+  it("metric_owner（非治理）：冲突与质量待办按个人收敛（related_only/mine_only=true）", async () => {
+    mockedCurrentUser.mockResolvedValue({
+      id: 7,
+      username: "owner",
+      display_name: "Owner",
+      role: "metric_owner",
+      domain: "sales",
+      org_id: 1,
+    });
+    mockedConflicts.mockResolvedValue({
+      items: [
+        { conflict_id: "C-1", candidate_metric_code: "A", existing_metric_code: "B", type: "same_name_diff_def", status: "OPEN" } as unknown as ConflictListResponse["items"][number],
+      ],
+      total: 1,
+      page: 1,
+      page_size: 50,
+    } as ConflictListResponse);
+    mockedQuality.mockResolvedValue({
+      items: [{ id: 7, metric_id: 3, level: "P1", rule_type: "COMPLETENESS", status: "OPEN" } as QualityEvent],
+      total: 1,
+      page: 1,
+      page_size: 50,
+    } as { items: QualityEvent[]; total: number; page: number; page_size: number });
+    renderPage();
+    await screen.findByText(/冲突待仲裁/);
+    await screen.findByText(/质量告警待处理/);
+    expect(mockedConflicts.mock.calls[0]?.[0]?.related_only).toBe(true);
+    expect(mockedQuality.mock.calls[0]?.[0]?.mine_only).toBe(true);
+  });
+
+  it("domain_admin（治理）：冲突与质量待办保持全域/域收敛（不带 related_only/mine_only）", async () => {
+    mockedCurrentUser.mockResolvedValue({
+      id: 1,
+      username: "admin",
+      display_name: "Admin",
+      role: "domain_admin",
+      domain: "finance",
+      org_id: 1,
+    });
+    renderPage();
+    await screen.findByText(/草稿待完善/);
+    expect(mockedConflicts.mock.calls[0]?.[0]?.related_only).toBeUndefined();
+    expect(mockedQuality.mock.calls[0]?.[0]?.mine_only).toBeUndefined();
+  });
+});

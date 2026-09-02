@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -38,6 +38,7 @@ class ConflictRepository:
         page: int,
         page_size: int,
         severity: str | None = None,
+        related_actor_id: int | None = None,
     ) -> tuple[list[Conflict], int]:
         conditions: list[Any] = [Conflict.deleted_at.is_(None)]
         if status is not None:
@@ -48,7 +49,29 @@ class ConflictRepository:
             conditions.append(Conflict.domain == domain)
         if severity is not None:
             conditions.append(Conflict.severity == severity)
+        # 个人工作台收敛：冲突任一指标的 Owner/副 Owner 或本人仲裁的冲突。
+        # 非空时 join Metric（metric_a/metric_b）按 actor 归属过滤，避免把
+        # 全平台 OPEN 冲突（他人指标）列进个人待办。
+        joins: list[Any] = []
+        if related_actor_id is not None:
+            ma = aliased(Metric)
+            mb = aliased(Metric)
+            joins = [
+                (ma, Conflict.metric_a == ma.id),
+                (mb, Conflict.metric_b == mb.id),
+            ]
+            conditions.append(
+                or_(
+                    Conflict.arbitrator_id == related_actor_id,
+                    and_(Conflict.metric_a.is_not(None), ma.owner_id == related_actor_id),
+                    and_(Conflict.metric_a.is_not(None), ma.backup_owner_id == related_actor_id),
+                    and_(Conflict.metric_b.is_not(None), mb.owner_id == related_actor_id),
+                    and_(Conflict.metric_b.is_not(None), mb.backup_owner_id == related_actor_id),
+                )
+            )
         count_stmt = select(func.count()).select_from(Conflict).where(*conditions)
+        for target, onclause in joins:
+            count_stmt = count_stmt.join(target, onclause)
         total = int((await self._db.execute(count_stmt)).scalar() or 0)
         stmt = (
             select(Conflict)
@@ -57,6 +80,8 @@ class ConflictRepository:
             .offset((page - 1) * page_size)
             .limit(page_size)
         )
+        for target, onclause in joins:
+            stmt = stmt.join(target, onclause)
         rows = (await self._db.execute(stmt)).scalars().all()
         return list(rows), total
 

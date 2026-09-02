@@ -96,6 +96,37 @@ class TestListConflicts:
         assert len(rows) == 1
         assert total == 1
 
+    async def test_related_actor_filters_to_mine(
+        self, repo: ConflictRepository, db: MagicMock
+    ) -> None:
+        """个人工作台收敛：related_actor_id 非空时 join 指标表按 Owner/副 Owner 过滤，
+        不把全平台 OPEN 冲突（他人指标）混入个人待办。"""
+        mock_count = MagicMock()
+        mock_count.scalar.return_value = 1
+        mock_rows = MagicMock()
+        mock_rows.scalars.return_value.all.return_value = [Conflict(conflict_id="c1")]
+        db.execute = AsyncMock(side_effect=[mock_count, mock_rows])
+        rows, total = await repo.list_conflicts(
+            status=ConflictStatus.OPEN,
+            ctype=None,
+            domain=None,
+            page=1,
+            page_size=10,
+            related_actor_id=7,
+        )
+        assert len(rows) == 1
+        assert total == 1
+        # count 语句：join 指标表且带 Owner/副 Owner/仲裁人 归属条件
+        compiled = str(
+            db.execute.call_args_list[0].args[0].compile(
+                compile_kwargs={"literal_binds": True}
+            )
+        )
+        assert "metric" in compiled
+        assert "owner_id = 7" in compiled
+        assert "backup_owner_id = 7" in compiled
+        assert "arbitrator_id = 7" in compiled
+
 
 class TestUpdateStatus:
     async def test_update_with_all_fields(self, repo: ConflictRepository) -> None:

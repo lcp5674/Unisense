@@ -600,6 +600,7 @@ class QualityService(BaseService):
         *,
         domain: str | None = None,
         is_platform_admin: bool = False,
+        actor_id: int | None = None,
     ) -> tuple[list[QualityEventResponse], int]:
         rows, total = await self._repo.list_events(
             metric_id,
@@ -609,6 +610,7 @@ class QualityService(BaseService):
             page_size,
             domain=domain,
             is_platform_admin=is_platform_admin,
+            actor_id=actor_id,
         )
         return [QualityEventResponse.from_model(r) for r in rows], total
 

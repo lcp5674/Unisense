@@ -1415,12 +1415,14 @@ export async function resetUserPassword(
 export async function listConflicts(params: {
   status?: string;
   severity?: string;
+  related_only?: boolean;
   page?: number;
   page_size?: number;
 }): Promise<ConflictListResponse> {
   const qs = pageQs({
     status: params.status,
     severity: params.severity,
+    related_only: params.related_only === undefined ? undefined : String(params.related_only),
     page: params.page ?? 1,
     page_size: params.page_size ?? 20,
   });
@@ -3611,6 +3613,7 @@ export async function listQualityEvents(params?: {
   metric_id?: number;
   status?: string;
   level?: string;
+  mine_only?: boolean;
   page?: number;
   page_size?: number;
 }): Promise<{ items: QualityEvent[]; total: number; page: number; page_size: number }> {
@@ -3618,6 +3621,7 @@ export async function listQualityEvents(params?: {
     metric_id: params?.metric_id,
     status: params?.status,
     level: params?.level,
+    mine_only: params?.mine_only === undefined ? undefined : String(params?.mine_only),
     page: params?.page ?? 1,
     page_size: params?.page_size ?? 20,
   });

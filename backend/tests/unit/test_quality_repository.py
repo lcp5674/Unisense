@@ -218,6 +218,25 @@ class TestQualityEventRepo:
         assert len(results) == 3
         assert total == 3
 
+    async def test_list_events_actor_filter(self, repo: QualityRepository) -> None:
+        """个人工作台收敛：actor_id 非空时按指标 Owner/副 Owner 过滤，
+        避免把本域他人指标的质量告警混入个人待办。"""
+        mock_count = MagicMock()
+        mock_count.scalar.return_value = 1
+        mock_rows = MagicMock()
+        mock_rows.scalars.return_value.all.return_value = [QualityEvent(id=1)]
+        repo._db.execute = AsyncMock(side_effect=[mock_count, mock_rows])
+        results, total = await repo.list_events(
+            metric_id=None, status=None, level=None, page=1, page_size=10, actor_id=7
+        )
+        assert len(results) == 1
+        assert total == 1
+        compiled = str(repo._db.execute.call_args_list[0].args[0].compile(
+            compile_kwargs={"literal_binds": True}
+        ))
+        assert "owner_id = 7" in compiled
+        assert "backup_owner_id = 7" in compiled
+
     async def test_transition_event_ack(self, repo: QualityRepository) -> None:
         event = QualityEvent(id=1, status=QualityEventStatus.OPEN)
         result = await repo.transition_event(

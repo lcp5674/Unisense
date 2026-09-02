@@ -93,10 +93,23 @@ export function TodoCenter() {
         ? { status: "DRAFT", page_size: 50 }
         : { status: "DRAFT", owner_id: me.id, page_size: 50 };
       const [conflicts, drafts, reviews, qualityAlerts, dropped] = await Promise.all([
-        listConflicts({ status: "OPEN", page_size: 50 }),
+        // 个人工作台收敛：非治理角色只看「与我相关的冲突」（冲突任一指标 Owner/副 Owner
+        // 或本人仲裁），避免把全平台 OPEN 冲突（他人指标）混入个人待办；治理管理员
+        // 保持全域列表（治理工作台视角）。
+        listConflicts({
+          status: "OPEN",
+          page_size: 50,
+          related_only: isGovernanceAdmin ? undefined : true,
+        }),
         listMetrics(draftReq),
         canReview ? listMetrics({ status: "REVIEW", page_size: 50 }) : Promise.resolve({ items: [], total: 0 }),
-        listQualityEvents({ status: "OPEN", page_size: 50 }),
+        // 个人工作台收敛：非治理角色只看本人名下指标的质量告警（后端按 Owner/副 Owner
+        // 过滤），避免本域他人指标告警混入；治理管理员按域收敛保持现状。
+        listQualityEvents({
+          status: "OPEN",
+          page_size: 50,
+          mine_only: isGovernanceAdmin ? undefined : true,
+        }),
         listMetrics({ status: "DATA_SOURCE_DROPPED", owner_id: me.id, page_size: 50 }),
       ]);
       const list: Todo[] = [];
@@ -119,10 +132,14 @@ export function TodoCenter() {
         });
       }
       for (const m of reviews.items) {
+        // 语义区分：reviewer 角色的「待审核」= 需要本人审核的指标；metric_owner 等
+        // 非评审角色看到的 REVIEW 列表是「自己提交、待平台/域管理员审核」的指标
+        // （后端对非 reviewer 已按 owner 收敛，不会混入他人指标）。
+        const isReviewer = me.role === "reviewer";
         list.push({
           kind: "review",
-          title: `指标待审核：${m.name}`,
-          meta: `${m.metric_code} · ${m.domain}`,
+          title: isReviewer ? `指标待审核：${m.name}` : `我提交的审核中：${m.name}`,
+          meta: `${m.metric_code} · ${m.domain}${isReviewer ? "" : " · 待平台/域管理员审核"}`,
           code: m.metric_code,
         });
       }

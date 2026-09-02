@@ -448,7 +448,11 @@ async def list_conflicts(
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[Any]:
     svc = _svc(db, request)
-    rows, total = await svc.list_conflicts(params)
+    # 个人工作台（待办中心）场景：related_only=True 时仅返回与当前用户相关的
+    # 冲突（冲突任一指标 Owner/副 Owner 或本人仲裁）；治理仲裁台不传保持全域。
+    rows, total = await svc.list_conflicts(
+        params, related_actor_id=user.id if params.related_only else None
+    )
     return ok(
         data={
             "items": [ConflictResponse.from_model(r).model_dump() for r in rows],

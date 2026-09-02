@@ -73,6 +73,9 @@ class ConflictListParams(BaseModel):
     type: ConflictType | None = None
     domain: str | None = None
     severity: Literal["hard", "soft"] | None = None
+    # 个人工作台（待办中心）场景：仅返回与当前用户相关的冲突（冲突任一指标
+    # 的 Owner/副 Owner 或本人仲裁的）。治理仲裁台不传，保持全域列表。
+    related_only: bool = False
     page: int = Field(1, ge=1)
     page_size: int = Field(20, ge=1, le=200)
 
