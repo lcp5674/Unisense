@@ -368,13 +368,11 @@ services:
     # S-3：发布/回滚载体（与 backend 同 tag 策略）
     image: unisense/frontend:${UNISENSE_IMAGE_TAG:-dev}
     container_name: unisense-frontend
-    # 单进程模式（master_process off）：nginx 不再创建/写 pid 文件，从源头绕开
-    # 「CentOS 7 老内核(3.10)+Docker 26 下 pwrite 被 syscall 层拦截 → EPERM 崩溃」。
-    # 铁证：同容器内 shell `echo > /dev/null` 成功，nginx `pwrite() /dev/null` 却 EPERM——
-    # nginx 写 pid 用 pwrite 系统调用（echo 用 write），拦截发生在 syscall 层（seccomp/
-    # 安全Agent/内核兼容），与写到哪里无关（/tmp、/var/run、/dev/null 均实测 EPERM）。
-    # 单进程事件驱动对静态资源/反代足够；前端仅服务静态文件，无多进程需求。
-    command: ["nginx", "-g", "daemon off; master_process off;"]
+    # nginx:alpine 官方形态（无 command 覆盖、无 user/tmpfs 特殊配置）——镜像内
+    # nginx.conf 默认 pid /var/run/nginx.pid，master root + worker 降权，任何环境可跑。
+    # 曾因 Docker 26 + CentOS 7 老内核(3.10)（官方不支持组合）seccomp 异常，nginx 写
+    # pid 被 EPERM 拦截崩溃，做过 tmpfs/user:0/pid 改 /dev/null/master_process off 等
+    # 多轮绕开；Docker 24（官方支持 el7 末版）下已全部移除，生产机务必用 Docker 24。
     # 宿主 8180 → 容器 8080（nginx 监听非特权端口 8080；宿主端口保持 8180 不变）
     ports: ["8180:8080"]
     mem_limit: ${UNISENSE_FRONTEND_MEM:-0.5g}

@@ -27,14 +27,13 @@ FROM nginx:alpine
 # 复制构建产物
 COPY --from=builder /build/dist /usr/share/nginx/html
 
-# pid 置 /dev/null 仅为兜底（防 pid 残留）；真正根治是 compose 层 `master_process off`
-# 单进程模式（nginx 不再创建 pid 文件）——见 docker-compose.yml frontend 服务注释。
-# 背景（铁证）：生产机 CentOS 7 内核 3.10 + Docker 26.1.4（官方不支持组合）上，nginx 写
-# pid 文件（/tmp、/var/run、/dev/null 全部）均 EPERM 崩溃重启，而同容器内 shell
-# `echo > /dev/null` 成功——nginx 写 pid 用 pwrite 系统调用（echo 用 write），拦截发生在
-# syscall 层（seccomp/安全 Agent/内核兼容），与写到哪里无关，镜像层无法修复。
-RUN chown -R nginx:nginx /var/cache/nginx /var/run && \
-    sed -i 's|^pid .*|pid /dev/null;|' /etc/nginx/nginx.conf
+# nginx:alpine 官方形态：pid 写 /var/run/nginx.pid（镜像内 nginx.conf 默认配置），
+# master 以 root 运行、worker 由 `user nginx;` 降权。曾因生产机 Docker 26 + CentOS 7
+# 老内核(3.10)（官方不支持组合）seccomp 异常，nginx 写 pid（pwrite 系统调用）被 EPERM
+# 拦截而崩溃，做过 pid 改 /tmp、/var/run、/dev/null 与 master_process off 多轮绕开——
+# 根因在运行时 syscall 层、非镜像问题。Docker 24（官方支持 el7 的末版）seccomp 正常，
+# 无需任何绕开，恢复官方形态。生产机务必用 Docker 24，勿用 Docker 26 跑 CentOS 7。
+RUN chown -R nginx:nginx /var/cache/nginx /var/run
 
 # nginx 配置：SPA 路由 + API 反代到后端
 RUN cat > /etc/nginx/conf.d/default.conf <<'EOF'
@@ -129,12 +128,10 @@ EOF
 
 EXPOSE 8080
 
-# S-2：nginx 官方形态 = master 以 root 运行（读配置/绑 80→8080），worker 由
-# nginx.conf 的 `user nginx;` 自动降权处理请求。曾用 `USER nginx` 把 master 也降权
-# （过度加固）导致 CentOS 7 老内核(3.10) 上写 pid EPERM 崩溃；经多轮验证（pid 改
-# /tmp、/var/run、/dev/null 全 EPERM）确认根因在 syscall 层非目录/权限，最终由 compose
-# `master_process off` 单进程模式根治（不再写 pid）。移除 USER nginx 恢复官方形态；
-# worker 降权不变（安全面与官方镜像一致）。
+# S-2：nginx 官方形态 = master 以 root 运行（读配置/绑端口），worker 由 nginx.conf 的
+# `user nginx;` 自动降权处理请求。曾用 `USER nginx` 把 master 也降权（过度加固），配合
+# Docker 26 + CentOS 7 老内核(3.10) 的 seccomp 异常导致写 pid EPERM 崩溃；Docker 24 下
+# 已恢复官方形态（worker 降权不变，安全面与官方镜像一致）。
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
     CMD wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1
 
