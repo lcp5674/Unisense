@@ -755,6 +755,11 @@ async def get_metric(
         )
     # PLAT-3: PII 访问审计须提交持久化，否则随会话关闭被回滚（合规审计静默丢失）
     await db.commit()
+    # 快照读权限前置标记：详情响应带 can_read_snapshot，前端据此直接展示引导文案、
+    # 不发注定 403 的快照请求（探测失败按无权限处理，不阻断详情本身）
+    from app.services.consume.service import ConsumeService
+
+    can_read_snapshot = await ConsumeService(db).can_read_snapshot_internal(user, metric_code)
     # PII 读分级：非敏感角色脱敏口径（保留键结构，值替换为 ***）
     data: MetricResponse = metric
     if metric.pii_flag and not any(r in _SENSITIVE_ROLES for r in user.roles_all()):
@@ -763,8 +768,11 @@ async def get_metric(
                 "definition_json": redact_definition(metric.definition_json),
                 # PII 业务描述脱敏（与口径同级），非敏感角色不可见
                 "description": None,
+                "can_read_snapshot": can_read_snapshot,
             }
         )
+    else:
+        data = metric.model_copy(update={"can_read_snapshot": can_read_snapshot})
     return ok(data=data, trace_id=trace_id)
 
 
@@ -3484,7 +3492,6 @@ async def check_metrics_downstream(
     私有派生指标不对他人暴露引用关系）。
     """
     from app.models.metric import Metric
-
     from app.services.lineage.repository import LineageRepository
 
     referrers = await LineageRepository(db).metric_referrers_batch(request.metric_codes)

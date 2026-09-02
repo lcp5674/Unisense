@@ -320,12 +320,13 @@ async def _assert_org_active(db: AsyncSession, org_id: int) -> Organization:
 
 
 def _resolve_team_domain(org: Organization, fallback: str | None) -> str | None:
-    """方案 B：用户所属域由所属团队（组织）继承。
+    """方案 B：用户所属域 = 显式指定优先，未指定时由所属团队（组织）继承。
 
-    团队绑定业务域则成员自动继承团队域；团队不限域时允许显式兜底域（兼容旧客户端），
-    否则为 None（不限定域，需经 grants 授权才能操作指标）。
+    ``fallback``（用户表单显式选填的业务域）优先——管理员可给单个用户指定/覆盖
+    业务域（如团队未绑定域、或用户跨域工作）；未显式指定（None）才继承团队域；
+    团队也不限域则为 None（不限定域，需经 grants 授权才能操作指标）。
     """
-    return org.domain or fallback or None
+    return fallback or org.domain or None
 
 
 async def _assert_role_valid(db: AsyncSession, role: str) -> None:

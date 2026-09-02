@@ -1746,3 +1746,80 @@ async def test_execute_experimental_gray_tenant_allowed(monkeypatch) -> None:
     )
     assert res.degraded is True
     assert res.data["engine"] == "mysql"
+
+
+# ---- can_read_snapshot_internal（详情页 can_read_snapshot 前置标记）----
+async def test_can_read_snapshot_internal_pdp_denied(monkeypatch) -> None:
+    """PDP 拒绝（跨域无授权）→ False：详情页据此直接展示引导、不发注定 403 的请求。"""
+    from app.models.user import User
+    from app.services.governance.policy import Decision
+
+    svc = _svc(await _client())
+    svc._get_metric = AsyncMock(return_value=_metric(status="PUBLISHED"))
+
+    async def _deny(*args, **kwargs):
+        return (Decision(allow=False, reason="跨域无授权", error_code="FORBIDDEN"), None)
+
+    monkeypatch.setattr(
+        "app.services.consume.service.GovernanceService.check_internal_read_permission",
+        _deny,
+    )
+    user = User(id=9, username="alice", org_id=1)
+    assert await svc.can_read_snapshot_internal(user, "gmv") is False
+
+
+async def test_can_read_snapshot_internal_published_allowed(monkeypatch) -> None:
+    """PDP 放行 + PUBLISHED → True（本域角色正常读快照）。"""
+    from app.models.user import User
+    from app.services.governance.policy import Decision
+
+    svc = _svc(await _client())
+    svc._get_metric = AsyncMock(return_value=_metric(status="PUBLISHED"))
+
+    async def _allow(*args, **kwargs):
+        return (Decision(allow=True, reason="allowed"), None)
+
+    monkeypatch.setattr(
+        "app.services.consume.service.GovernanceService.check_internal_read_permission",
+        _allow,
+    )
+    user = User(id=9, username="alice", org_id=1)
+    assert await svc.can_read_snapshot_internal(user, "gmv") is True
+
+
+async def test_can_read_snapshot_internal_deprecated_non_admin(monkeypatch) -> None:
+    """DEPRECATED + 非平台管理员 → False（废弃快照仅管理员审计回溯）。"""
+    from app.models.user import User
+    from app.services.governance.policy import Decision
+
+    svc = _svc(await _client())
+    svc._get_metric = AsyncMock(return_value=_metric(status="DEPRECATED"))
+
+    async def _allow(*args, **kwargs):
+        return (Decision(allow=True, reason="allowed"), None)
+
+    monkeypatch.setattr(
+        "app.services.consume.service.GovernanceService.check_internal_read_permission",
+        _allow,
+    )
+    user = User(id=9, username="alice", org_id=1, role="domain_admin")
+    assert await svc.can_read_snapshot_internal(user, "gmv") is False
+
+
+async def test_can_read_snapshot_internal_deprecated_admin(monkeypatch) -> None:
+    """DEPRECATED + 平台管理员 → True（历史快照审计回溯放行）。"""
+    from app.models.user import User
+    from app.services.governance.policy import Decision
+
+    svc = _svc(await _client())
+    svc._get_metric = AsyncMock(return_value=_metric(status="DEPRECATED"))
+
+    async def _allow(*args, **kwargs):
+        return (Decision(allow=True, reason="allowed"), None)
+
+    monkeypatch.setattr(
+        "app.services.consume.service.GovernanceService.check_internal_read_permission",
+        _allow,
+    )
+    user = User(id=9, username="admin", org_id=1, role="platform_admin")
+    assert await svc.can_read_snapshot_internal(user, "gmv") is True

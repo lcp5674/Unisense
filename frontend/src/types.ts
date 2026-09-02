@@ -74,6 +74,10 @@ export interface MetricResponse {
   approved_at?: string | null;
   pii_flag: boolean;
   compliance_reviewed: boolean;
+  /** 快照读权限前置标记（详情端点计算，PDP read + 状态闸门）：true=可读快照、
+      false=无权限（前端据此直接展示引导文案、不发注定 403 的快照请求）、
+      undefined=列表等非详情端点未计算 */
+  can_read_snapshot?: boolean | null;
   /** 关联业务术语 ID（P2-11：术语治理归属，null=未绑定） */
   term_id: number | null;
   /** 多术语关联 ID 列表（2026-09：一指标可关联多个业务术语；主术语=首项） */

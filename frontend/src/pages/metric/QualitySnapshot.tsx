@@ -67,10 +67,13 @@ export function QualitySnapshot({
   metricId,
   metricCode,
   status,
+  canReadSnapshot,
 }: {
   metricId: number;
   metricCode: string;
   status?: string;
+  /** 详情端点带的前置标记：false=无快照读权限（PDP），直接展示引导、不发注定 403 的请求 */
+  canReadSnapshot?: boolean | null;
 }) {
   const { snapshot: perm } = usePermission();
   const isAdmin = perm?.roles?.includes("platform_admin") ?? false;
@@ -82,7 +85,14 @@ export function QualitySnapshot({
 
   async function load() {
     setLoading(true);
-    const blocked = snapshotBlockReason(status, isAdmin);
+    // 前置判定：状态级（DRAFT/REVIEW/DEPRECATED）或 PDP 级（can_read_snapshot=false）
+    // 命中任一即直接展示引导文案，不发注定 403 的快照请求（消除控制台 403 红字）。
+    const statusBlocked = snapshotBlockReason(status, isAdmin);
+    const blocked =
+      statusBlocked ??
+      (canReadSnapshot === false
+        ? "当前账号未获得该指标所属域的数据读取授权，如需查看请联系域管理员配置授权（grants）或指标白名单。"
+        : null);
     const snapPromise = blocked
       ? Promise.resolve({ data: [] as SnapshotResponse[], error: blocked as string | null })
       : listSnapshots(metricCode, 10)

@@ -49,6 +49,24 @@ describe("QualitySnapshot 消费快照前置拦截", () => {
     await waitFor(() => expect(listSnapshots).toHaveBeenCalledWith("fee_day", 10));
   });
 
+  it("PUBLISHED 但 canReadSnapshot=false：不发快照请求，直接展示授权引导", async () => {
+    render(
+      <QualitySnapshot metricId={1} metricCode="fee_day" status="PUBLISHED" canReadSnapshot={false} />,
+    );
+    await screen.findByText("消费快照（不可用）");
+    fireEvent.click(screen.getByRole("tab", { name: "消费快照（不可用）" }));
+    expect(listSnapshots).not.toHaveBeenCalled();
+    expect(await screen.findByText(/未获得该指标所属域的数据读取授权/)).toBeTruthy();
+    expect(screen.getByText(/配置授权（grants）或指标白名单/)).toBeTruthy();
+  });
+
+  it("canReadSnapshot=true：正常发起快照请求", async () => {
+    render(
+      <QualitySnapshot metricId={1} metricCode="fee_day" status="PUBLISHED" canReadSnapshot={true} />,
+    );
+    await waitFor(() => expect(listSnapshots).toHaveBeenCalledWith("fee_day", 10));
+  });
+
   it("DEPRECATED 且平台管理员：仍发起快照请求（审计回溯）", async () => {
     mockRoles = ["platform_admin"];
     render(<QualitySnapshot metricId={1} metricCode="outp_e2e_drugfee_day" status="DEPRECATED" />);

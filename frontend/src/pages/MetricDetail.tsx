@@ -3088,7 +3088,7 @@ export function MetricDetail() {
         <Tabs
           defaultActiveKey={GROUP_DEFAULT_TAB[group]}
           items={[
-            { key: "quality", label: "质量快照", children: <QualitySnapshot metricId={metric.id} metricCode={metric.metric_code} status={metric.status} /> },
+            { key: "quality", label: "质量快照", children: <QualitySnapshot metricId={metric.id} metricCode={metric.metric_code} status={metric.status} canReadSnapshot={metric.can_read_snapshot} /> },
             { key: "lineage", label: "血缘影响", children: <LineageImpact key={`${metric.metric_code}-v${metric.row_version ?? 0}`} metricCode={metric.metric_code} /> },
             { key: "versions", label: `版本历史 (${versions.length})`, children: <VersionHistory metricCode={metric.metric_code} versions={versions} effectiveVersion={metric.effective_version} onChanged={load} canConfirm={canCreate} /> },
             { key: "dims", label: "关联维度", children: <RelatedDimensions key={`dims-${metric.row_version ?? 0}`} metricId={metric.id} /> },

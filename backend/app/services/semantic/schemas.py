@@ -1242,6 +1242,10 @@ class MetricResponse(BaseModel):
     description_updated_at: datetime | None = None
     pii_flag: bool
     compliance_reviewed: bool
+    # 快照读权限前置标记（详情端点计算，PDP read + 状态闸门）：True=可读快照、
+    # False=无权限（前端据此直接展示引导文案、不发注定 403 的快照请求）、
+    # None=列表等非详情端点未计算。仅详情响应填充，列表接口为 None。
+    can_read_snapshot: bool | None = None
     effective_version: int | None
     consumption_guide: dict[str, Any] | None
     successor_code: str | None

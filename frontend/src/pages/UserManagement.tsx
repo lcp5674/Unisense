@@ -31,6 +31,7 @@ import {
   createUser,
   fetchCurrentUser,
   listAdminUsers,
+  listDomainTree,
   listOrganizations,
   listRolePermissions,
   resetUserPassword,
@@ -40,6 +41,7 @@ import {
 import type {
   AdminUser,
   CurrentUser,
+  SubjectDomainTreeNode,
   UserBatchStatusResult,
   UserCreateRequest,
   UserUpdateRequest,
@@ -111,6 +113,8 @@ export function UserManagement() {
   const [resetForm] = Form.useForm();
   // 团队下拉（方案 B：所属域由团队自动继承，不再单独选择）；带 domain 供「继承域」提示
   const [orgOptions, setOrgOptions] = useState<Array<{ value: number; label: string; domain: string | null }>>([]);
+  // 业务域下拉（active 主题域；用户可显式指定，留空=继承所属团队域）
+  const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
   // 自定义角色（方案 A：后端 GET /roles 返回 is_custom 标记；创建/编辑用户角色下拉合并展示）
   const [customRoles, setCustomRoles] = useState<string[]>([]);
   const [generatedPassword, setGeneratedPassword] = useState("");
@@ -182,6 +186,23 @@ export function UserManagement() {
   }, []);
 
   useEffect(() => {
+    // 业务域下拉：仅 active 主题域（树形拍平；停用域不可指定，防指定失效域）
+    listDomainTree("active")
+      .then((tree) => {
+        const flat: Array<{ value: string; label: string }> = [];
+        const walk = (nodes: SubjectDomainTreeNode[]) => {
+          for (const n of nodes) {
+            flat.push({ value: n.code, label: `${n.name}（${n.code}）` });
+            if (n.children?.length) walk(n.children);
+          }
+        };
+        walk(tree);
+        setDomainOptions(flat);
+      })
+      .catch(() => setDomainOptions([]));
+  }, []);
+
+  useEffect(() => {
     // 自定义角色下拉：GET /roles 返回全部角色（内置 + 自定义，is_custom 标记）
     listRolePermissions()
       .then((items) => setCustomRoles(items.filter((i) => i.is_custom).map((i) => i.role)))
@@ -217,6 +238,7 @@ export function UserManagement() {
         role: roleList[0],
         roles: roleList,
         org_id: values.org_id ? Number(values.org_id) : undefined,
+        domain: values.domain ? String(values.domain) : undefined,
         password: String(values.password),
       };
       await createUser(payload);
@@ -248,6 +270,7 @@ export function UserManagement() {
         role: roleList[0],
         roles: roleList,
         org_id: values.org_id ? Number(values.org_id) : undefined,
+        domain: values.domain ? String(values.domain) : undefined,
       };
       await updateUser(editTarget.id, payload);
       message.success("用户已更新");
@@ -341,6 +364,7 @@ export function UserManagement() {
       email: u.email,
       roles: u.roles?.length ? u.roles : [u.role],
       org_id: u.org_id ?? undefined,
+      domain: u.domain ?? undefined,
     });
   }
 
@@ -617,10 +641,23 @@ export function UserManagement() {
           {createOrgId ? (
             <div className="muted" style={{ fontSize: 12, marginBottom: 12 }}>
               {inheritedDomainOf(createOrgId)
-                ? <>该团队绑定业务域「<span className="mono">{inheritedDomainOf(createOrgId)}</span>」，新成员将自动继承该域。</>
-                : <>该团队未绑定业务域，新成员无默认业务域（需经授权才能访问指标）。</>}
+                ? <>该团队绑定业务域「<span className="mono">{inheritedDomainOf(createOrgId)}</span>」，新成员未显式指定时将自动继承该域。</>
+                : <>该团队未绑定业务域，新成员未显式指定时将无默认业务域（需经授权才能访问指标）。</>}
             </div>
           ) : null}
+          <Form.Item
+            name="domain"
+            label="业务域"
+            extra="可空；留空自动继承所属团队业务域，选择则显式指定（覆盖团队继承）"
+          >
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="留空自动继承所属团队业务域"
+              options={domainOptions}
+            />
+          </Form.Item>
           <Form.Item
             name="password"
             label="初始密码"
@@ -697,7 +734,26 @@ export function UserManagement() {
               options={orgOptions}
             />
           </Form.Item>
-          <div className="muted" style={{ fontSize: 12 }}>用户名不可修改；业务域由所属团队自动继承；密码请使用「重置密码」单独操作。</div>
+          <Form.Item
+            name="domain"
+            label="业务域"
+            extra={
+              editOrgId
+                ? inheritedDomainOf(editOrgId)
+                  ? <>留空自动继承该团队业务域「<span className="mono">{inheritedDomainOf(editOrgId)}</span>」；选择则显式指定（覆盖团队继承）。</>
+                  : <>该团队未绑定业务域；留空则无默认业务域（需经授权访问指标），选择则显式指定。</>
+                : "可空；留空自动继承所属团队业务域，选择则显式指定（覆盖团队继承）"
+            }
+          >
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              placeholder="留空自动继承所属团队业务域"
+              options={domainOptions}
+            />
+          </Form.Item>
+          <div className="muted" style={{ fontSize: 12 }}>用户名不可修改；业务域留空继承所属团队；密码请使用「重置密码」单独操作。</div>
         </Form>
       </Modal>
 

@@ -779,6 +779,30 @@ class ConsumeService(BaseService):
             self._assert_consumable_status(metric, client=None, internal_user=user)
         return await self.list_snapshots(metric_code, limit, offset)
 
+    async def can_read_snapshot_internal(self, user: User, metric_code: str) -> bool:
+        """快照读权限前置探测（详情页 ``can_read_snapshot`` 标记用）。
+
+        与 ``list_snapshots_for_internal`` 同源判定（PDP read + 状态闸门），但不抛异常、
+        不拉数据——指标详情端点据此带 ``can_read_snapshot``，前端无权限时直接展示
+        引导文案、不发注定 403 的快照请求。探测失败一律按无权限处理（fail-closed），
+        不阻断详情页本身（详情对 PUBLISHED 公开，快照读是更严格的数据权限）。
+        """
+        try:
+            decision, _matched = await GovernanceService(self._db).check_internal_read_permission(
+                user, metric_code
+            )
+            if not decision.allow:
+                return False
+            metric = await self._get_metric(metric_code)
+            if metric is None:
+                return False
+            if metric.status == "DEPRECATED":
+                return user.has_role("platform_admin")
+            self._assert_consumable_status(metric, client=None, internal_user=user)
+            return True
+        except Exception:  # noqa: BLE001 - 前置探测失败按无权限处理（fail-closed），不阻断详情
+            return False
+
     async def list_snapshots_for_client(
         self, metric_code: str, limit: int, offset: int, client: ApiClient
     ) -> list[SnapshotResponse]:
