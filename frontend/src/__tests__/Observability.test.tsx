@@ -240,6 +240,68 @@ describe("Observability 可观测中心", () => {
     expect(screen.queryByText("RUNNING")).not.toBeInTheDocument();
   });
 
+  it("未启用依赖（meta.enabled=false）展示「未启用」且不计入降级统计", async () => {
+    // OLAP 未配置（探针写 meta.enabled=false）——应显示「未启用」而非降级/不可用
+    const withDisabled = {
+      ...overview,
+      system: {
+        ...overview.system,
+        dependencies: {
+          ...overview.system.dependencies,
+          items: [
+            {
+              dependency_type: "LLM",
+              dependency_id: "llm",
+              status: "DEGRADED",
+              circuit_state: "HALF_OPEN",
+              consecutive_failures: 5,
+              latency_p95_ms: null,
+              error_rate_pct: 0,
+              last_check_at: "2026-08-14T07:05:13",
+            },
+            {
+              dependency_type: "OLAP",
+              dependency_id: "olap",
+              status: "HEALTHY",
+              circuit_state: "CLOSED",
+              consecutive_failures: 0,
+              latency_p95_ms: null,
+              error_rate_pct: 0,
+              last_check_at: "2026-09-02T03:00:00",
+              meta: { enabled: false, note: "未配置，未启用" },
+            },
+            {
+              dependency_type: "GRAPH",
+              dependency_id: "graph",
+              status: "HEALTHY",
+              circuit_state: "CLOSED",
+              consecutive_failures: 0,
+              latency_p95_ms: null,
+              error_rate_pct: 0,
+              last_check_at: "2026-09-02T03:00:00",
+            },
+          ],
+        },
+      },
+    };
+    mockedOverview.mockResolvedValue(withDisabled as any);
+    render(
+      <MemoryRouter initialEntries={["/observability"]}>
+        <Observability />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getAllByText("核心依赖健康").length).toBeGreaterThan(0));
+
+    // 已启用 2 个（LLM 降级 + GRAPH 健康）→ 1/2 正常、1 个降级、1 个未启用
+    expect(screen.getByText("1/2")).toBeInTheDocument();
+    expect(screen.getByText(/降级\/不可用 1 个/)).toBeInTheDocument();
+    expect(screen.getByText(/1 个未启用/)).toBeInTheDocument();
+    // 依赖卡：OLAP 显示「未启用」+ 说明，GRAPH 显示「正常」
+    expect(screen.getByText("未启用")).toBeInTheDocument();
+    expect(screen.getByText("未配置，未启用")).toBeInTheDocument();
+    expect(screen.getAllByText("正常").length).toBeGreaterThanOrEqual(1);
+  });
+
   it("平台概览企业级：指标健康度/血缘健康/趋势 全业务标签展示", async () => {
     render(
       <MemoryRouter initialEntries={["/observability"]}>

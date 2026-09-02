@@ -1882,6 +1882,8 @@ export interface ObsOverview {
         latency_p95_ms: number | null;
         error_rate_pct: number;
         last_check_at: string | null;
+        /** 探针扩展信息：enabled=false 表示依赖未配置（展示「未启用」，不计入降级统计） */
+        meta?: { enabled?: boolean; note?: string } | null;
       }>;
     };
     collection: {

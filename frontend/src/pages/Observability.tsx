@@ -379,20 +379,31 @@ const DEP_TYPE_LABEL: Record<string, string> = {
 function StatusStrip({ o }: { o: ObsOverview }) {
   const deps = o.system.dependencies;
   const coll = o.system.collection;
-  const healthy = deps.by_status.HEALTHY ?? 0;
-  const degraded = (deps.by_status.DEGRADED ?? 0) + (deps.by_status.UNAVAILABLE ?? 0);
+  // 未启用依赖（meta.enabled=false，如 OLAP 未配置）不计入健康/降级统计，
+  // 单独提示「N 个未启用」——未配置是部署选择而非故障，避免误报降级。
+  const enabledItems = deps.items.filter((d) => d.meta?.enabled !== false);
+  const disabledCount = deps.items.length - enabledItems.length;
+  const byStatus: Record<string, number> = {};
+  for (const d of enabledItems) {
+    byStatus[d.status] = (byStatus[d.status] ?? 0) + 1;
+  }
+  const healthy = byStatus.HEALTHY ?? 0;
+  const degraded = (byStatus.DEGRADED ?? 0) + (byStatus.UNAVAILABLE ?? 0);
   return (
     <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
       <Col xs={12} lg={6}>
         <Card size="small">
           <Statistic
             title="核心依赖健康"
-            value={deps.total ? `${healthy}/${deps.total}` : "—"}
-            suffix={deps.total ? "正常" : ""}
+            value={enabledItems.length ? `${healthy}/${enabledItems.length}` : "—"}
+            suffix={enabledItems.length ? "正常" : ""}
             valueStyle={{ color: degraded > 0 ? "var(--warn)" : "var(--ok)" }}
           />
           {degraded > 0 ? (
             <div style={{ fontSize: 12, color: "var(--warn)" }}>降级/不可用 {degraded} 个</div>
+          ) : null}
+          {disabledCount > 0 ? (
+            <div style={{ fontSize: 12, color: "var(--muted)" }}>{disabledCount} 个未启用</div>
           ) : null}
         </Card>
       </Col>
@@ -445,6 +456,7 @@ function DependencyCard({ deps }: { deps: ObsOverview["system"]["dependencies"] 
         <div style={rowStyle}>暂无依赖探测</div>
       ) : (
         deps.items.map((d) => {
+          const disabled = d.meta?.enabled === false;
           const unhealthy = d.status !== "HEALTHY";
           const open = d.circuit_state === "OPEN";
           return (
@@ -458,24 +470,36 @@ function DependencyCard({ deps }: { deps: ObsOverview["system"]["dependencies"] 
                 gap: 4,
                 padding: "8px 10px",
                 marginBottom: 6,
-                border: `1px solid ${open ? "var(--danger)" : "var(--line-soft)"}`,
+                border: `1px solid ${open ? "var(--danger)" : disabled ? "var(--line-soft)" : "var(--line-soft)"}`,
                 borderRadius: 6,
-                background: open ? "rgba(214,69,69,0.06)" : unhealthy ? "rgba(199,119,0,0.05)" : undefined,
+                background: open ? "rgba(214,69,69,0.06)" : disabled ? undefined : unhealthy ? "rgba(199,119,0,0.05)" : undefined,
               }}
             >
               <Space size={6} wrap>
                 <span style={{ fontWeight: 600 }}>{DEP_TYPE_LABEL[d.dependency_type] ?? d.dependency_type}</span>
-                <Tag color={d.status === "HEALTHY" ? "success" : d.status === "DEGRADED" ? "warning" : "error"}>
-                  {DEP_STATUS_LABEL[d.status] ?? d.status}
-                </Tag>
-                <Tag color={open ? "error" : d.circuit_state === "HALF_OPEN" ? "warning" : "default"}>
-                  {CIRCUIT_STATE_LABEL[d.circuit_state] ?? d.circuit_state}
-                </Tag>
+                {disabled ? (
+                  <Tag>未启用</Tag>
+                ) : (
+                  <Tag color={d.status === "HEALTHY" ? "success" : d.status === "DEGRADED" ? "warning" : "error"}>
+                    {DEP_STATUS_LABEL[d.status] ?? d.status}
+                  </Tag>
+                )}
+                {!disabled && (
+                  <Tag color={open ? "error" : d.circuit_state === "HALF_OPEN" ? "warning" : "default"}>
+                    {CIRCUIT_STATE_LABEL[d.circuit_state] ?? d.circuit_state}
+                  </Tag>
+                )}
               </Space>
               <div style={{ fontSize: 12, color: "var(--muted)" }}>
-                {d.consecutive_failures > 0 ? <span>连续失败 {d.consecutive_failures} 次 · </span> : null}
-                {d.latency_p95_ms != null ? <span>P95 {d.latency_p95_ms}ms · </span> : null}
-                <span>错误率 {d.error_rate_pct}%</span>
+                {disabled ? (
+                  <span>{d.meta?.note ?? "未配置，未启用"}</span>
+                ) : (
+                  <>
+                    {d.consecutive_failures > 0 ? <span>连续失败 {d.consecutive_failures} 次 · </span> : null}
+                    {d.latency_p95_ms != null ? <span>P95 {d.latency_p95_ms}ms · </span> : null}
+                    <span>错误率 {d.error_rate_pct}%</span>
+                  </>
+                )}
                 {d.last_check_at ? (
                   <span>
                     {" "}
