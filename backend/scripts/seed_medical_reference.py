@@ -207,10 +207,14 @@ DOMAIN_SEEDS: list[dict[str, Any]] = [
     {"code": "satisfaction", "name": "满意度", "parent": "patient_service", "sort_order": 3},
     {"code": "complaint_service", "name": "投诉服务", "parent": "patient_service", "sort_order": 4},
     {"code": "patient_care", "name": "患者关怀", "parent": "patient_service", "sort_order": 5},
-    # ---- 公共（横切基础参照：日期/地区，不归属业务线，一级域）----
+    # ---- 公共（横切基础参照：日期/地区/时间/组织/币种/客户，不归属业务线，一级域）----
     {"code": "common", "name": "公共", "parent": None, "sort_order": 22},
     {"code": "common_date", "name": "公共日期", "parent": "common", "sort_order": 1},
     {"code": "common_region", "name": "公共地区", "parent": "common", "sort_order": 2},
+    {"code": "common_time", "name": "公共时间", "parent": "common", "sort_order": 3},
+    {"code": "common_org", "name": "公共组织", "parent": "common", "sort_order": 4},
+    {"code": "common_currency", "name": "公共币种", "parent": "common", "sort_order": 5},
+    {"code": "common_customer", "name": "公共客户", "parent": "common", "sort_order": 6},
 ]
 
 
@@ -340,6 +344,10 @@ TERM_SEEDS: list[dict[str, Any]] = [
     {"term_code": "administrative_division", "name": "行政区划", "definition": "国家为分级管理划分的省、市、区县等行政区域体系。", "domain": "common", "synonyms": ["行政区"], "boundary": None},
     {"term_code": "natural_day", "name": "自然日", "definition": "以自然 24 小时为单位的日历日，是日期维度按日分析的最小切片。", "domain": "common", "synonyms": ["日历日"], "boundary": None},
     {"term_code": "workday", "name": "工作日", "definition": "一周中安排正常工作的日期（通常周一至周五），区分自然日以支持排班/就诊/配送等运营分析。", "domain": "common", "synonyms": ["上班日"], "boundary": "节假日调休由日期维度属性承载，不单独建维度"},
+    {"term_code": "time_dimension", "name": "日内时间维度", "definition": "以日内时刻（时/分）为分析切片的公共维度，提供时段/班次/高峰属性，用于分时就诊、预约高峰、夜间急诊等日内分析；与日期维度（跨天）互补，日+时组合即完整时间戳。", "domain": "common", "synonyms": ["时间维度", "日内时段"], "boundary": "与日期维度不同：日期维度描述跨天日期切片，日内时间维度描述一天内的时刻切片"},
+    {"term_code": "org_dimension", "name": "组织维度", "definition": "按企业管理层级（集团/分公司/部门/团队）组织的公共维度，用于人效、成本、预算归口等内部经营分析；区别于临床科室（医疗业务视角）。", "domain": "common", "synonyms": ["行政组织", "dim_org"], "boundary": "不承载临床科室/医生，科室由科室维度表达"},
+    {"term_code": "currency_dimension", "name": "币种维度", "definition": "以币种为成员的公共维度，提供币种代码/符号/汇率基准等属性，用于金额类指标的多币种结算（对外结算/保险理赔/跨境合作）。", "domain": "common", "synonyms": ["币种", "dim_currency"], "boundary": "不承载汇率明细，汇率由财务系统实时提供"},
+    {"term_code": "customer_dimension", "name": "客户维度", "definition": "以商业合作主体（企业健管/保险/医院/政府/渠道）为成员的公共维度，区别于患者（临床个体）；用于商业客户经营分析（合同、营收、合作模式）。", "domain": "common", "synonyms": ["商业客户", "B端客户"], "boundary": "不承载患者个体，患者由患者维度表达"},
 ]
 
 
@@ -568,6 +576,230 @@ def _region_code(name: str) -> str:
         "雁塔区": "yanta", "碑林区": "beilin", "渝中区": "yuzhong", "江北区": "jiangbei",
     }
     return table.get(name, name)
+
+
+# ---------------------------------------------------------------------------
+# 公共时间/组织/币种/客户 维度成员
+# ---------------------------------------------------------------------------
+_TIME_PERIODS: list[tuple[str, str, int, int, str, bool]] = [
+    # (code, 名称, 起始小时, 结束小时, 班次, 是否就诊高峰)
+    ("lingchen", "凌晨", 0, 5, "夜班", False),
+    ("qingchen", "清晨", 6, 7, "早班", False),
+    ("shangwu", "上午", 8, 11, "早班", True),
+    ("zhongwu", "中午", 12, 13, "白班", False),
+    ("xiawu", "下午", 14, 17, "白班", True),
+    ("bangwan", "傍晚", 18, 19, "中班", False),
+    ("yejian", "夜间", 20, 22, "中班", False),
+    ("shenye", "深夜", 23, 23, "夜班", False),
+]
+
+
+def _time_members() -> list[dict[str, Any]]:
+    """时间维度成员：时段 → 小时 两级层级（8 时段 + 24 小时）。
+
+    设计取舍：分钟/秒为物理时间戳承载（dim_time 明细 1440 行/天），
+    维度管理只灌时段/小时层级节点，属性含班次/高峰标识。
+    """
+    members: list[dict[str, Any]] = []
+    for p_code, p_name, start, end, shift, peak in _TIME_PERIODS:
+        members.append(
+            {
+                "code": p_code,
+                "name": p_name,
+                "attributes": {"level": "period", "start_hour": start, "end_hour": end, "shift": shift, "is_peak": peak},
+            }
+        )
+        for h in range(start, end + 1):
+            members.append(
+                {
+                    "code": f"hour_{h:02d}",
+                    "name": f"{h:02d}时",
+                    "parent_code": p_code,
+                    "attributes": {"level": "hour", "hour": h, "shift": shift, "is_peak": peak},
+                }
+            )
+    return members
+
+
+_ORG_SEEDS: dict[str, dict[str, Any]] = {
+    # code -> 组织节点（level=group 集团 / branch 分公司）
+    "weiyi_group": {"name": "微医集团", "level": "group", "region": "杭州"},
+    "hangzhou_hq": {"name": "杭州总部", "level": "branch", "parent": "weiyi_group", "region": "杭州"},
+    "tianjin_branch": {"name": "天津分公司", "level": "branch", "parent": "weiyi_group", "region": "天津"},
+    "jinan_branch": {"name": "济南分公司", "level": "branch", "parent": "weiyi_group", "region": "济南"},
+    "beijing_branch": {"name": "北京分公司", "level": "branch", "parent": "weiyi_group", "region": "北京"},
+    "shanghai_branch": {"name": "上海分公司", "level": "branch", "parent": "weiyi_group", "region": "上海"},
+    "shenzhen_branch": {"name": "深圳分公司", "level": "branch", "parent": "weiyi_group", "region": "深圳"},
+}
+
+_ORG_DEPARTMENTS: dict[str, list[tuple[str, str]]] = {
+    # branch_code -> [(dept_code, 部门名)]
+    "weiyi_group": [
+        ("medical_ops", "医疗运营部"), ("tech_rd", "技术研发部"), ("product_design", "产品设计部"),
+        ("data_intel", "数据智能部"), ("marketing", "市场品牌部"), ("business_coop", "商务合作部"),
+        ("finance", "财务部"), ("hr", "人力资源部"), ("compliance", "合规法务部"),
+    ],
+    "hangzhou_hq": [
+        ("medical_ops", "医疗运营部"), ("tech_rd", "技术研发部"), ("product_design", "产品设计部"),
+        ("data_intel", "数据智能部"), ("finance", "财务部"),
+    ],
+    "tianjin_branch": [("hc_ops", "健共体运营部"), ("medical_ops", "医疗运营部"), ("business_coop", "商务合作部"), ("admin", "综合管理部")],
+    "jinan_branch": [("hc_ops", "健共体运营部"), ("public_health", "公共卫生部"), ("medical_ops", "医疗运营部"), ("admin", "综合管理部")],
+    "beijing_branch": [("ioh_ops", "互联网医院运营部"), ("business_coop", "商务合作部"), ("admin", "综合管理部")],
+    "shanghai_branch": [("insurance_coop", "保险合作部"), ("business_coop", "商务合作部"), ("admin", "综合管理部")],
+    "shenzhen_branch": [("smart_med", "智慧医疗部"), ("business_coop", "商务合作部"), ("admin", "综合管理部")],
+}
+
+_ORG_TEAMS: dict[str, list[tuple[str, str]]] = {
+    # dept_code -> [(team_code, 团队名)]
+    "weiyi_group_tech_rd": [("platform_arch", "平台架构组"), ("biz_dev", "业务研发组"), ("data_platform", "数据平台组")],
+    "weiyi_group_data_intel": [("dw", "数据仓库组"), ("algo", "算法组")],
+}
+
+
+def _org_members() -> list[dict[str, Any]]:
+    """组织维度成员：集团 → 分公司 → 部门 → 团队 四级层级（SCD1 跟踪组织调整）。"""
+    members: list[dict[str, Any]] = []
+    for code, spec in _ORG_SEEDS.items():
+        members.append(
+            {
+                "code": code,
+                "name": spec["name"],
+                "parent_code": spec.get("parent"),
+                "attributes": {"level": spec["level"], "region": spec["region"], "org_type": "总部" if spec["level"] == "group" else "分公司"},
+            }
+        )
+    for branch_code, depts in _ORG_DEPARTMENTS.items():
+        for dept_code, dept_name in depts:
+            full = f"{branch_code}_{dept_code}"
+            members.append(
+                {
+                    "code": full,
+                    "name": dept_name,
+                    "parent_code": branch_code,
+                    "attributes": {"level": "department", "org_type": "部门"},
+                }
+            )
+            for team_code, team_name in _ORG_TEAMS.get(full, []):
+                members.append(
+                    {
+                        "code": f"{full}_{team_code}",
+                        "name": team_name,
+                        "parent_code": full,
+                        "attributes": {"level": "team", "org_type": "团队"},
+                    }
+                )
+    return members
+
+
+_CURRENCY_SEEDS: list[tuple[str, str, str, bool]] = [
+    # (code, 名称, 符号, 是否本位币)
+    ("cny", "人民币", "¥", True),
+    ("usd", "美元", "$", False),
+    ("hkd", "港币", "HK$", False),
+    ("eur", "欧元", "€", False),
+    ("gbp", "英镑", "£", False),
+    ("jpy", "日元", "JP¥", False),
+    ("sgd", "新加坡元", "S$", False),
+    ("krw", "韩元", "₩", False),
+    ("aud", "澳元", "A$", False),
+    ("cad", "加元", "C$", False),
+    ("chf", "瑞士法郎", "Fr", False),
+    ("twd", "新台币", "NT$", False),
+    ("thb", "泰铢", "฿", False),
+    ("myr", "林吉特", "RM", False),
+    ("aed", "迪拉姆", "AED", False),
+]
+
+
+def _currency_members() -> list[dict[str, Any]]:
+    """币种维度成员：平铺 15 种常用币种，属性含符号/本位币标识（SCD0）。"""
+    return [
+        {
+            "code": code,
+            "name": name,
+            "attributes": {"level": "currency", "symbol": symbol, "is_base": is_base},
+        }
+        for code, name, symbol, is_base in _CURRENCY_SEEDS
+    ]
+
+
+_CUSTOMER_SEEDS: dict[str, dict[str, Any]] = {
+    # type_code -> {name: 类型名, customers: [(customer_code, 客户名, 区域, 合作模式)]}
+    "corporate_health": {
+        "name": "企业健康管理",
+        "customers": [
+            ("east_manufacturing", "华东先进制造集团", "华东", "年度健管服务"),
+            ("south_retail", "华南连锁零售集团", "华南", "员工体检套餐"),
+            ("north_energy", "华北能源集团", "华北", "职业健康监护"),
+            ("west_mining", "西部矿业集团", "西北", "年度健管服务"),
+            ("southeast_tech", "东南互联网科技集团", "华东", "弹性福利平台"),
+        ],
+    },
+    "insurance_coop": {
+        "name": "保险合作",
+        "customers": [
+            ("life_coop", "寿险合作机构", "全国", "商保直付网络"),
+            ("property_coop", "财险合作机构", "全国", "健康险理赔"),
+            ("health_coop", "健康险合作机构", "全国", "带病体保险"),
+            ("huiminbao_ops", "惠民保运营机构", "多地", "惠民保运营服务"),
+        ],
+    },
+    "hospital_client": {
+        "name": "医院客户",
+        "customers": [
+            ("tertiary_alliance", "三甲医院联盟", "全国", "互联网医院共建"),
+            ("private_group", "民营医院集团", "华东", "HIS/运营服务"),
+            ("ioh_co_build", "互联网医院共建方", "多地", "平台共建运营"),
+            ("chc_alliance", "社区卫生服务中心联盟", "浙江", "健共体协作"),
+        ],
+    },
+    "gov_agency": {
+        "name": "政府机构",
+        "customers": [
+            ("provincial_hc", "省级卫健委", "浙江", "数字健共体"),
+            ("municipal_mi", "市级医保局", "多地", "医保智能审核"),
+            ("district_cdc", "区级疾控中心", "天津", "公共卫生监测"),
+            ("hc_committee", "健共体管理委员会", "山东", "区域医疗协作"),
+        ],
+    },
+    "channel_partner": {
+        "name": "渠道伙伴",
+        "customers": [
+            ("pharma_channel", "药企渠道伙伴", "全国", "处方流转合作"),
+            ("hm_platform", "健康管理平台伙伴", "全国", "API 供数"),
+            ("smart_hw", "智能硬件伙伴", "全国", "健康数据接入"),
+            ("broker_partner", "保险经纪伙伴", "全国", "产品代销"),
+        ],
+    },
+}
+
+
+def _customer_members() -> list[dict[str, Any]]:
+    """客户维度成员：客户类型 → 具体客户 两级层级（SCD1 跟踪合作状态）。
+
+    设计取舍：客户为商业合作主体（B 端），与患者（临床个体）区分；
+    客户明细主数据（合同/联系人）由客户主数据表承载，维度管理只承载分析层级。
+    """
+    members: list[dict[str, Any]] = []
+    for type_code, spec in _CUSTOMER_SEEDS.items():
+        members.append(
+            {
+                "code": type_code,
+                "name": spec["name"],
+                "attributes": {"level": "type"},
+            }
+        )
+        for cust_code, cust_name, region, mode in spec["customers"]:
+            members.append(
+                {
+                    "code": f"{type_code}_{cust_code}",
+                    "name": cust_name,
+                    "parent_code": type_code,
+                    "attributes": {"level": "customer", "region": region, "cooperation_mode": mode},
+                }
+            )
+    return members
 
 
 DIMENSION_SEEDS: list[dict[str, Any]] = [
@@ -826,6 +1058,26 @@ DIMENSION_SEEDS: list[dict[str, Any]] = [
         "dim_code": "common_region", "name": "地区", "domain": "common", "type": "SCD1",
         "description": "公共地区维度（dim_region 参照）：省→市→区县三级层级（parent_code/path），覆盖微医核心业务区域，用于按地域分析问诊/挂号/药品/健共体协作等业务量。SCD1 覆盖行政区划调整更名。",
         "members": _region_members(),
+    },
+    {
+        "dim_code": "common_time", "name": "时间", "domain": "common", "type": "SCD0",
+        "description": "公共时间维度（日内）：时段→小时两级层级（凌晨/清晨/上午/中午/下午/傍晚/夜间/深夜 8 时段 + 24 小时），属性含班次（早/白/中/夜班）与就诊高峰标识，用于分时就诊/预约高峰/夜间急诊等日内分析；分钟/秒由物理时间戳承载，与日期维度（跨天）互补。",
+        "members": _time_members(),
+    },
+    {
+        "dim_code": "common_org", "name": "组织", "domain": "common", "type": "SCD1",
+        "description": "公共组织维度（dim_org 参照）：集团→分公司→部门→团队四级层级（parent_code/path），覆盖微医集团及杭州/天津/济南/北京/上海/深圳分公司组织架构，用于人效/成本/预算归口等内部经营分析；区别于临床科室（医疗业务视角）。SCD1 跟踪组织调整。",
+        "members": _org_members(),
+    },
+    {
+        "dim_code": "common_currency", "name": "币种", "domain": "common", "type": "SCD0",
+        "description": "公共币种维度（dim_currency 参照）：人民币/美元/港币/欧元/英镑/日元等 15 种常用币种，属性含符号与本位币标识（人民币），用于金额类指标的多币种结算（对外结算/保险理赔/跨境合作）。",
+        "members": _currency_members(),
+    },
+    {
+        "dim_code": "common_customer", "name": "客户", "domain": "common", "type": "SCD1",
+        "description": "公共客户维度（dim_customer 参照）：客户类型→具体客户两级层级（企业健康管理/保险合作/医院客户/政府机构/渠道伙伴），覆盖商业合作主体，区别于患者（临床个体）；用于商业客户经营分析（合同/营收/合作模式）。SCD1 跟踪合作状态变化。",
+        "members": _customer_members(),
     },
 ]
 
