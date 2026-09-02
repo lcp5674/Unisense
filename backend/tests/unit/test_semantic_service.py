@@ -2386,6 +2386,55 @@ async def test_batch_register_success():
     assert all(c["status"] == "DRAFT" for c in result["candidates"])
 
 
+async def test_batch_register_shared_governance_fields_applied():
+    """方案 A+B：整批共享治理字段（description/sla/pii_flag/分级/服务模式/可加性）注入每候选创建。
+
+    修复前批量注册仅填源表+列，创建的 DRAFT 治理字段（业务描述/SLA/PII 等）全缺省，
+    与单条注册向导字段差巨大。修复后共享字段一次填、N 候选全部继承。
+    """
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)  # 无重名
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    from typing import Any
+
+    from app.services.semantic.schemas import MetricBatchRegisterRequest
+
+    request = MetricBatchRegisterRequest(
+        source_table="dwd.sales_detail",
+        measure_columns=["gmv", "order_cnt"],
+        domain="sales",
+        description="共享业务描述",
+        sla="T+1 08:00",
+        pii_flag=True,
+        metric_tier="T2",
+        serving_mode="BATCH_REALTIME_DUAL",
+        additivity="SEMI_ADDITIVE",
+    )
+
+    captured: list[Any] = []
+    orig = svc.create_metric
+
+    async def spy(req: Any, **kwargs: Any) -> Any:
+        captured.append(req)
+        return await orig(req, **kwargs)
+
+    svc.create_metric = spy  # type: ignore[method-assign]
+
+    result = await svc.batch_register_metrics(request, actor_id=1)
+
+    assert len(result["candidates"]) == 2
+    assert len(captured) == 2
+    for req in captured:
+        assert req.description == "共享业务描述"
+        assert req.sla == "T+1 08:00"
+        assert req.pii_flag is True
+        assert req.metric_tier == "T2"
+        assert req.serving_mode == "BATCH_REALTIME_DUAL"
+        assert req.additivity == "SEMI_ADDITIVE"
+
+
 async def test_batch_register_conflict_existing_loaded_once():
     """L3：批量注册冲突预检比对对象只加载一次（循环外预加载 + 逐列增量）。
 

@@ -384,6 +384,13 @@ export interface MetricBatchRegisterRequest {
   llm_prefill?: boolean;
   /** 所属域（必填，须为 active 域） */
   domain: string;
+  /** 整批共享治理信息（方案 A+B）：一次填、N 个度量列候选创建时全部继承 */
+  description?: string | null;
+  sla?: string | null;
+  pii_flag?: boolean;
+  metric_tier?: "T1" | "T2" | "T3" | null;
+  serving_mode?: "BATCH_ONLY" | "REALTIME_ONLY" | "BATCH_REALTIME_DUAL" | null;
+  additivity?: "ADDITIVE" | "SEMI_ADDITIVE" | "NON_ADDITIVE" | null;
 }
 
 /** 批量注册结果中的单条候选（成功=DRAFT，失败=VALIDATION_ERROR） */

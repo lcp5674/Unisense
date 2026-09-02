@@ -5302,9 +5302,15 @@ class MetricService(BaseService):
                         time_semantics=defaults.get("time_semantics", "PERIOD"),
                         freshness=defaults.get("freshness", "T1"),
                         dw_layer=defaults.get("dw_layer", "DWD"),
-                        metric_tier=defaults.get("metric_tier", "T3"),
-                        serving_mode=defaults.get("serving_mode", "BATCH_ONLY"),
-                        additivity=defaults.get("additivity", "ADDITIVE"),
+                        # 整批共享治理信息（方案 A+B）：共享值优先，缺省回退域默认——
+                        # 让批量注册的 DRAFT 与单条向导一样带全治理字段，不再批量缺省裸奔
+                        metric_tier=request.metric_tier or defaults.get("metric_tier", "T3"),
+                        serving_mode=request.serving_mode
+                        or defaults.get("serving_mode", "BATCH_ONLY"),
+                        additivity=request.additivity or defaults.get("additivity", "ADDITIVE"),
+                        sla=request.sla,
+                        description=request.description,
+                        pii_flag=request.pii_flag,
                         definition_json=_defn,
                         source_table=request.source_table,
                         measure_column=col,

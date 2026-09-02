@@ -837,6 +837,26 @@ class MetricBatchRegisterRequest(BaseModel):
     # （与单条注册一致）；LLM 命名预填（auto_fill 的 llm_name 入参）为后续增强，当前未接线。
     llm_prefill: bool = Field(True, description="是否启用自动推断预填（规则引擎，兼容保留）")
     domain: str = Field(..., max_length=64, description="所属域")
+    # 整批共享治理信息（方案 A+B，2026-09）：一次填写、N 个度量列候选创建时全部继承，
+    # 缩小批量注册与单条注册向导的字段差。仅治理信息类共享（不影响 auto_fill 对每列的
+    # 物理口径推断 type/granularity/aggregation/unit 等）；metric_tier/serving_mode/
+    # additivity 共享值优先、缺省回退域默认。
+    description: str | None = Field(
+        None,
+        max_length=2000,
+        description="整批共享业务描述（写入各候选 description，落 description_source=manual）",
+    )
+    sla: str | None = Field(None, max_length=128, description="整批共享 SLA 契约")
+    pii_flag: bool = Field(False, description="整批共享是否含 PII")
+    metric_tier: Literal["T1", "T2", "T3"] | None = Field(
+        None, description="整批共享指标分级（缺省回退域默认 T3）"
+    )
+    serving_mode: Literal["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"] | None = Field(
+        None, description="整批共享服务模式（缺省回退域默认 BATCH_ONLY）"
+    )
+    additivity: Literal["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"] | None = Field(
+        None, description="整批共享可加性（缺省回退域默认 ADDITIVE）"
+    )
 
 
 class MetricSqlTablesRequest(BaseModel):

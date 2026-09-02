@@ -346,6 +346,13 @@ describe("MetricCreate 批量注册指标", () => {
         domain: "sales",
         llm_prefill: true,
         dimension_mapping: undefined,
+        // 整批共享治理信息（方案 A+B）：未展开折叠时均缺省（undefined/false）
+        description: undefined,
+        sla: undefined,
+        pii_flag: false,
+        metric_tier: undefined,
+        serving_mode: undefined,
+        additivity: undefined,
       });
     });
 
@@ -355,6 +362,83 @@ describe("MetricCreate 批量注册指标", () => {
       expect(screen.getByText("批量注册完成：成功 2 / 失败 0")).toBeTruthy();
       expect(screen.getByText("sales_gmv_day")).toBeTruthy();
       expect(screen.getByText("sales_order_cnt_day")).toBeTruthy();
+    });
+  });
+
+  it("方案A+B：批量注册展开「治理信息」填整批共享字段 → 提交 payload 携带 description/sla/pii_flag", async () => {
+    mockedBatch.mockResolvedValue({
+      batch_id: "batch_gov1",
+      candidates: [{ metric_code: "sales_gmv_day", status: "DRAFT", validation_errors: null }],
+    });
+    renderPage();
+    const modal = await openBatchModal();
+    await fillBatchForm(modal, "gmv");
+    // 展开「治理信息（整批共享，选填）」折叠并填写共享字段
+    fireEvent.click(within(modal).getByText("治理信息（整批共享，选填）"));
+    const desc = within(modal).getByPlaceholderText(/指标的业务含义/);
+    fireEvent.change(desc, { target: { value: "本批共享业务描述" } });
+    const sla = within(modal).getByPlaceholderText(/T\+1 08:00/);
+    fireEvent.change(sla, { target: { value: "T+1 08:00 前产出" } });
+    fireEvent.click(within(modal).getByRole("switch"));
+    fireEvent.click(within(modal).getByText("提交批量注册"));
+    await waitFor(() => {
+      expect(mockedBatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          source_table: "dwd.sales_detail",
+          measure_columns: ["gmv"],
+          domain: "sales",
+          description: "本批共享业务描述",
+          sla: "T+1 08:00 前产出",
+          pii_flag: true,
+        }),
+      );
+    });
+  });
+
+  it("方案A+B：批量注册结果 DRAFT 行「快速编辑」打开批内抽屉并保存（复用 SQL 批量同款）", async () => {
+    mockedBatch.mockResolvedValue({
+      batch_id: "batch_qe1",
+      candidates: [{ metric_code: "sales_gmv_day", status: "DRAFT", validation_errors: null }],
+    });
+    mockedGetMetric.mockResolvedValue({
+      metric_code: "sales_gmv_day",
+      name: "日订单金额",
+      domain: "sales",
+      type: "derived",
+      granularity: "day",
+      unit: "元",
+      aggregation: "SUM",
+      definition_json: { expression: "SUM(gmv)" },
+      row_version: 7,
+      status: "DRAFT",
+    } as unknown as MetricResponse);
+    renderPage();
+    const modal = await openBatchModal();
+    await fillBatchForm(modal, "gmv");
+    fireEvent.click(within(modal).getByText("提交批量注册"));
+    await screen.findByText("批量注册完成：成功 1 / 失败 0");
+    // 结果行「快速编辑」→ 打开批内抽屉（getMetric 拉取详情回填）
+    fireEvent.click(screen.getByTestId("batch-quick-edit-sales_gmv_day"));
+    await waitFor(() => {
+      expect((screen.getByTestId("sql-batch-quick-name") as HTMLInputElement).value).toBe(
+        "日订单金额",
+      );
+    });
+    // 改名称 + 变更原因（预设「批量注册后快速编辑」）→ 保存走 updateMetric 乐观锁
+    mockedUpdateMetric.mockResolvedValue({
+      metric_code: "sales_gmv_day",
+      name: "日订单金额（改）",
+      row_version: 8,
+    } as unknown as MetricResponse);
+    fireEvent.change(screen.getByTestId("sql-batch-quick-name"), {
+      target: { value: "日订单金额（改）" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => {
+      expect(mockedUpdateMetric).toHaveBeenCalledWith(
+        "sales_gmv_day",
+        expect.objectContaining({ name: "日订单金额（改）", row_version: 7 }),
+      );
     });
   });
 

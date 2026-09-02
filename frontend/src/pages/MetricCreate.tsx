@@ -2080,13 +2080,12 @@ export function MetricCreate() {
   // 批量创建完成后，点击结果行「快速编辑」在当前页内打开 Drawer 编辑该 DRAFT 指标
   // （不跳转详情页、不关闭当前窗口）；上一条/下一条在批内候选间切换。
   // 每次打开/切换重新 getMetric 拉取最新 row_version，保存走 updateMetric 乐观锁。
-  const draftCandidates = useMemo(
-    () =>
-      sqlBatchCreateResult
-        ? sqlBatchCreateResult.candidates.filter((c) => c.status === "DRAFT")
-        : [],
-    [sqlBatchCreateResult],
-  );
+  // 批量结果「快速编辑」抽屉候选：SQL 批量创建结果 或 宽表批量注册结果（互斥，
+  // 各自打开时清空另一个；宽表批量结果区也复用同一抽屉补全 DRAFT 治理信息）。
+  const draftCandidates = useMemo(() => {
+    const src = sqlBatchCreateResult ?? batchResult;
+    return src ? src.candidates.filter((c) => c.status === "DRAFT") : [];
+  }, [sqlBatchCreateResult, batchResult]);
 
   // SQL 批量创建结果表格列：共享列 + 「操作」列——DRAFT=快速编辑；失败项按失败
   // 原因给具体操作入口（编码冲突→改编码、依赖缺失→补依赖、DB 错误→重试、其余→
@@ -2156,6 +2155,38 @@ export function MetricCreate() {
     [draftCandidates, sqlBatchResult, submitSqlBatch, loadCandidateIntoWizard],
   );
 
+  // 宽表批量注册结果列：共享列 + 「操作」——DRAFT 行「快速编辑」（复用批内抽屉逐条补全
+  // 治理信息，不必跳单条向导/详情）；失败行仅展示原因（下方「重试失败项」按钮已覆盖，
+  // 宽表批量失败无 SQL 原始候选可反查，不提供「在向导中编辑」入口）。
+  const batchRegisterResultColumns = useMemo(
+    () => [
+      ...BATCH_RESULT_COLUMNS,
+      {
+        title: "操作",
+        key: "action",
+        width: 110,
+        render: (_: unknown, c: MetricBatchRegisterCandidate) =>
+          c.status === "DRAFT" ? (
+            <Button
+              size="small"
+              type="link"
+              style={{ padding: "0 4px" }}
+              data-testid={`batch-quick-edit-${c.metric_code}`}
+              onClick={() => {
+                const i = draftCandidates.findIndex((d) => d.metric_code === c.metric_code);
+                if (i >= 0) void openQuickEdit(i);
+              }}
+            >
+              快速编辑
+            </Button>
+          ) : (
+            <span className="muted">—</span>
+          ),
+      },
+    ],
+    [draftCandidates],
+  );
+
   // 打开/切换到指定候选：拉取最新指标详情回填表单
   async function openQuickEdit(idx: number) {
     const c = draftCandidates[idx];
@@ -2175,7 +2206,7 @@ export function MetricCreate() {
           typeof m.definition_json?.expression === "string" ? m.definition_json.expression : "",
         dw_definition:
           typeof m.definition_json?.dw_definition === "string" ? m.definition_json.dw_definition : "",
-        change_reason: "SQL 批量创建后快速编辑",
+        change_reason: "批量注册后快速编辑",
       });
       setQuickEditExprDirty(false);
       setQuickEditDwDirty(false);
@@ -2590,6 +2621,7 @@ export function MetricCreate() {
   function openBatchModal() {
     batchForm.resetFields();
     setBatchResult(null);
+    setSqlBatchCreateResult(null); // 与 SQL 批量创建结果互斥：宽表批量打开时抽屉候选不串源
     setBatchColumnOptions([]);
     if (selectedDomain) batchForm.setFieldValue("domain", selectedDomain);
     setBatchOpen(true);
@@ -2671,6 +2703,13 @@ export function MetricCreate() {
       domain: String(values.domain),
       llm_prefill: true,
       dimension_mapping: dimensionMapping,
+      // 整批共享治理信息（方案 A+B）：一次填、N 候选创建时全部继承（缩小与单条向导的字段差）
+      description: values.description ? String(values.description).trim() : undefined,
+      sla: values.sla ? String(values.sla).trim() : undefined,
+      pii_flag: Boolean(values.pii_flag),
+      metric_tier: (values.metric_tier as MetricBatchRegisterRequest["metric_tier"]) || undefined,
+      serving_mode: (values.serving_mode as MetricBatchRegisterRequest["serving_mode"]) || undefined,
+      additivity: (values.additivity as MetricBatchRegisterRequest["additivity"]) || undefined,
     };
     setBatchResult(null);
     setBatchSubmitting(true);
@@ -5613,7 +5652,7 @@ export function MetricCreate() {
               size="small"
               rowKey="metric_code"
               dataSource={batchResult.candidates}
-              columns={BATCH_RESULT_COLUMNS}
+              columns={batchRegisterResultColumns}
               pagination={false}
               style={{ marginTop: 16 }}
               locale={{ emptyText: "无注册结果" }}
@@ -5834,6 +5873,88 @@ export function MetricCreate() {
                 )}
               </Form.List>
             </Form.Item>
+            {/* 方案 A+B：整批共享治理信息——一次填、N 个度量列候选创建时全部继承，
+                缩小批量注册与单条注册向导的字段差（业务描述/术语等单指标差异在创建后
+                结果行「快速编辑」逐条补，或详情页完善） */}
+            <Collapse
+              ghost
+              style={{ marginBottom: 8 }}
+              items={[
+                {
+                  key: "batch_gov",
+                  label: (
+                    <span>
+                      治理信息（整批共享，选填）
+                      <Tag style={{ marginLeft: 8 }} color={batchForm.getFieldValue("description") || batchForm.getFieldValue("sla") || batchForm.getFieldValue("pii_flag") ? "green" : "default"}>
+                        {batchForm.getFieldValue("description") || batchForm.getFieldValue("sla") || batchForm.getFieldValue("pii_flag") ? "已填写" : "未填写"}
+                      </Tag>
+                    </span>
+                  ),
+                  children: (
+                    <>
+                      <Alert
+                        type="info"
+                        showIcon
+                        style={{ marginBottom: 12 }}
+                        message="以下治理信息一次填写、本批全部度量列创建的指标共同继承（与单条注册向导一致）。单指标差异（名称/编码/关联术语/责任方等）创建后在结果行「快速编辑」逐条补全，或到指标详情页完善。"
+                      />
+                      <Form.Item name="description" label="业务描述" style={{ marginBottom: 12 }}>
+                        <Input.TextArea
+                          rows={2}
+                          maxLength={2000}
+                          showCount
+                          placeholder="指标的业务含义、口径背景、适用场景（选填；本批指标共享此描述）"
+                        />
+                      </Form.Item>
+                      <Row gutter={12}>
+                        <Col span={12}>
+                          <Form.Item name="sla" label="SLA 契约" style={{ marginBottom: 12 }}>
+                            <Input placeholder="如 T+1 08:00 前产出（选填）" />
+                          </Form.Item>
+                        </Col>
+                        <Col span={12}>
+                          <Form.Item name="pii_flag" label="含 PII" valuePropName="checked" style={{ marginBottom: 12 }}>
+                            <Switch checkedChildren="含 PII" unCheckedChildren="不含" />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+                      <Row gutter={12}>
+                        <Col span={8}>
+                          <Form.Item name="metric_tier" label="指标分级" style={{ marginBottom: 12 }}>
+                            <Select
+                              allowClear
+                              placeholder="缺省 T3"
+                              options={dictOptions["metric_tier"] || []}
+                              optionFilterProp="label"
+                            />
+                          </Form.Item>
+                        </Col>
+                        <Col span={8}>
+                          <Form.Item name="serving_mode" label="服务模式" style={{ marginBottom: 12 }}>
+                            <Select
+                              allowClear
+                              placeholder="缺省 BATCH_ONLY"
+                              options={dictOptions["serving_mode"] || []}
+                              optionFilterProp="label"
+                            />
+                          </Form.Item>
+                        </Col>
+                        <Col span={8}>
+                          <Form.Item name="additivity" label="可加性" style={{ marginBottom: 12 }}>
+                            <Select
+                              allowClear
+                              placeholder="缺省 ADDITIVE"
+                              options={dictOptions["additivity"] || []}
+                              optionFilterProp="label"
+                            />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+                    </>
+                  ),
+                },
+              ]}
+            />
             <Space>
               <Button type="primary" htmlType="submit" loading={batchSubmitting}>
                 提交批量注册
