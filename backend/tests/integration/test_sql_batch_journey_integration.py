@@ -234,7 +234,7 @@ def test_sql_batch_full_journey(db_env) -> None:
                 request,
                 actor_id=owner_id,
                 role="metric_owner",
-                user_domain="fin",
+                user_domains=["fin"],
             )
             batch_id = result["batch_id"]
             assert result["candidates"], "应返回候选结果"
@@ -261,7 +261,7 @@ def test_sql_batch_full_journey(db_env) -> None:
                     MetricSubmitRequest(change_reason="批量旅程集成测试提交评审"),
                     actor_id=owner_id,
                     role="metric_owner",
-                    user_domain="fin",
+                    user_domains=["fin"],
                 )
                 assert m.status == "REVIEW", f"{code} 应处于 REVIEW，实际 {m.status}"
                 # 批次标识与原始口径 SQL 已落库（口径溯源闭合）
@@ -280,7 +280,7 @@ def test_sql_batch_full_journey(db_env) -> None:
                     MetricApproveRequest(mode="standard"),
                     actor_id=reviewer_id,
                     role="domain_admin",
-                    user_domain="fin",
+                    user_domains=["fin"],
                 )
                 assert m.status == "PUBLISHED", f"{code} 应发布为 PUBLISHED，实际 {m.status}"
                 assert m.effective_version is not None, "发布后应有生效版本"
@@ -313,7 +313,7 @@ def test_sql_batch_journey_owner_domain_gate(db_env) -> None:
                     request,
                     actor_id=owner_id,
                     role="metric_owner",
-                    user_domain="fin",
+                    user_domains=["fin"],
                 )
         assert exc_info.value.error_code == "FORBIDDEN"
 

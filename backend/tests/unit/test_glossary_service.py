@@ -737,7 +737,7 @@ async def test_update_term_forbidden_for_cross_domain_domain_admin() -> None:
             TermUpdate(name="改名"),
             actor_id=1,
             role="domain_admin",
-            user_domain="finance",
+            user_domains=["finance"],
         )
     assert ei.value.error_code == "FORBIDDEN"
 
@@ -753,7 +753,7 @@ async def test_update_term_forbidden_for_other_owner() -> None:
             TermUpdate(name="改名"),
             actor_id=1,
             role="metric_owner",
-            user_domain="user",
+            user_domains=["user"],
         )
     assert ei.value.error_code == "FORBIDDEN"
 
@@ -766,7 +766,7 @@ async def test_update_term_ok_for_same_domain_domain_admin() -> None:
         TermUpdate(name="改名"),
         actor_id=1,
         role="domain_admin",
-        user_domain="user",
+        user_domains=["user"],
     )
     assert t.name == "改名"
     assert resp.status == TermStatus.DRAFT
@@ -784,7 +784,7 @@ async def test_create_term_forbidden_cross_domain() -> None:
     svc._repo = repo
     payload = TermCreate(name="跨域术语", definition="x", domain="finance", synonyms=[])
     with pytest.raises(AuthError) as ei:
-        await svc.create_term(payload, actor_id=1, role="domain_admin", user_domain="user")
+        await svc.create_term(payload, actor_id=1, role="domain_admin", user_domains=["user"])
     assert ei.value.error_code == "FORBIDDEN"
 
 
@@ -795,6 +795,6 @@ async def test_deprecate_term_forbidden_cross_domain() -> None:
     svc, _repo, _t = _svc_with_term(TermStatus.PUBLISHED.value)
     with pytest.raises(AuthError) as ei:
         await svc.deprecate_term(
-            "c1", actor_id=1, role="domain_admin", user_domain="finance"
+            "c1", actor_id=1, role="domain_admin", user_domains=["finance"]
         )
     assert ei.value.error_code == "FORBIDDEN"

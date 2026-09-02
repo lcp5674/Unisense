@@ -39,6 +39,7 @@ async def metrics_client() -> AsyncIterator[httpx.AsyncClient]:
         domain=None,
         roles_all=lambda: ["platform_admin"],
         has_role=lambda r: r == "platform_admin",
+        domains_all=lambda: None,
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -59,7 +60,8 @@ async def test_bind_metric_term_success(metrics_client: httpx.AsyncClient) -> No
     assert resp.status_code == 200
     assert resp.json()["data"]["term_id"] == 55
     mock_svc.return_value.bind_metric_term.assert_awaited_once_with(
-        "sales_gmv_daily", 55, actor_id=1, role="platform_admin", user_domain=None
+        "sales_gmv_daily", 55, actor_id=1, role="platform_admin", user_domains=None,
+        term_ids=None,
     )
 
 

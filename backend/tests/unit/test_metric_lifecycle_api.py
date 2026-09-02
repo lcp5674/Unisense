@@ -40,6 +40,7 @@ async def metrics_client() -> AsyncIterator[httpx.AsyncClient]:
         domain=None,
         roles_all=lambda: ["platform_admin"],
         has_role=lambda r: r == "platform_admin",
+        domains_all=lambda: None,
     )
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -123,7 +124,7 @@ async def test_promote_metric(metrics_client: httpx.AsyncClient) -> None:
         resp = await metrics_client.post("/api/v1/metric-definitions/sales_gmv_d/promote")
     assert resp.status_code == 200
     mock_svc.return_value.promote_metric.assert_awaited_once_with(
-        "sales_gmv_d", actor_id=1, role="platform_admin", user_domain=None
+        "sales_gmv_d", actor_id=1, role="platform_admin", user_domains=None
     )
 
 
@@ -134,7 +135,7 @@ async def test_rollback_metric(metrics_client: httpx.AsyncClient) -> None:
         resp = await metrics_client.post("/api/v1/metric-definitions/sales_gmv_d/rollback")
     assert resp.status_code == 200
     mock_svc.return_value.rollback_metric.assert_awaited_once_with(
-        "sales_gmv_d", actor_id=1, role="platform_admin", user_domain=None
+        "sales_gmv_d", actor_id=1, role="platform_admin", user_domains=None
     )
 
 
@@ -288,6 +289,7 @@ async def test_mark_source_dropped_owner_forbidden(
         domain="sales",
         roles_all=lambda: ["metric_owner"],
         has_role=lambda r: r == "metric_owner",
+        domains_all=lambda: None,
     )
     with patch("app.api.metrics.MetricService") as mock_svc:
         mock_svc.return_value.mark_source_dropped = AsyncMock(return_value=0)
@@ -386,7 +388,7 @@ async def test_extend_version_api(metrics_client: httpx.AsyncClient) -> None:
         )
     assert resp.status_code == 200
     mock_svc.return_value.extend_version.assert_awaited_once_with(
-        "sales_gmv_d", 1, actor_id=1, role="platform_admin", user_domain=None
+        "sales_gmv_d", 1, actor_id=1, role="platform_admin", user_domains=None
     )
 
 
@@ -415,7 +417,7 @@ async def test_get_metric_health_api(metrics_client: httpx.AsyncClient) -> None:
     assert resp.json()["data"]["level"] == "HEALTHY"
     # P0-3 行级隔离：健康度读取透传 actor/role/user_domain（私有指标仅本人/管理可见）
     mock_svc.return_value.get_metric_health.assert_awaited_once_with(
-        "sales_gmv_d", actor_id=1, role="platform_admin", user_domain=None
+        "sales_gmv_d", actor_id=1, role="platform_admin", user_domains=None
     )
 
 

@@ -395,12 +395,12 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
         request: Any,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> MeasureCatalog:
         """提交度量审核（DRAFT → REVIEW，复用主数据审核流 TD §13）。"""
         measure = await self._require(measure_code)
         await self._submit_review(
-            measure, request, actor_id, role, user_domain, code=measure_code
+            measure, request, actor_id, role, user_domains, code=measure_code
         )
         return measure
 
@@ -410,12 +410,12 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
         request: Any,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> MeasureCatalog:
         """审核通过度量（REVIEW → PUBLISHED，复用主数据审核流 FR-004）。"""
         measure = await self._require(measure_code)
         await self._approve_review(
-            measure, request, actor_id, role, user_domain, code=measure_code
+            measure, request, actor_id, role, user_domains, code=measure_code
         )
         return measure
 
@@ -425,12 +425,12 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
         request: Any,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> MeasureCatalog:
         """审核驳回度量（REVIEW → DRAFT，复用主数据审核流 FR-005）。"""
         measure = await self._require(measure_code)
         await self._reject_review(
-            measure, request, actor_id, role, user_domain, code=measure_code
+            measure, request, actor_id, role, user_domains, code=measure_code
         )
         return measure
 

@@ -685,7 +685,7 @@ class TestMeasureReviewFlow:
         svc, _ = await _review_svc(_m("amt", status="DRAFT"))
         with pytest.raises(UnisenseError):
             await svc.approve_measure(
-                "amt", MeasureApproveRequest(), 9, "domain_admin", user_domain="sales"
+                "amt", MeasureApproveRequest(), 9, "domain_admin", user_domains=["sales"]
             )
 
     async def test_approve_self_review_blocked(self) -> None:
@@ -700,7 +700,7 @@ class TestMeasureReviewFlow:
         m = _m("amt", status="REVIEW", submitted_by=1)
         svc, _ = await _review_svc(m)
         out = await svc.approve_measure(
-            "amt", MeasureApproveRequest(comment="口径合理"), 9, "domain_admin", user_domain="sales"
+            "amt", MeasureApproveRequest(comment="口径合理"), 9, "domain_admin", user_domains=["sales"]
         )
         assert out.status == "PUBLISHED"
         assert out.approver_id == 9
@@ -712,7 +712,7 @@ class TestMeasureReviewFlow:
         # 非被指派评审人（domain_admin 兜底不覆盖 user 指派）被拒
         with pytest.raises(UnisenseError):
             await svc.approve_measure(
-                "amt", MeasureApproveRequest(), 5, "domain_admin", user_domain="sales"
+                "amt", MeasureApproveRequest(), 5, "domain_admin", user_domains=["sales"]
             )
         # 被指派者通过
         out = await svc.approve_measure("amt", MeasureApproveRequest(), 9, "reviewer")
@@ -730,11 +730,11 @@ class TestMeasureReviewFlow:
         # 异域评审被拒
         with pytest.raises(UnisenseError):
             await svc.approve_measure(
-                "amt", MeasureApproveRequest(), 5, "reviewer", user_domain="sales"
+                "amt", MeasureApproveRequest(), 5, "reviewer", user_domains=["sales"]
             )
         # 同域评审通过
         out = await svc.approve_measure(
-            "amt", MeasureApproveRequest(), 5, "reviewer", user_domain="medical_fee"
+            "amt", MeasureApproveRequest(), 5, "reviewer", user_domains=["medical_fee"]
         )
         assert out.status == "PUBLISHED"
 
@@ -744,7 +744,7 @@ class TestMeasureReviewFlow:
         svc, _ = await _review_svc(m)
         with pytest.raises(UnisenseError) as exc:
             await svc.approve_measure(
-                "amt", MeasureApproveRequest(), 9, "domain_admin", user_domain="marketing"
+                "amt", MeasureApproveRequest(), 9, "domain_admin", user_domains=["marketing"]
             )
         assert exc.value.error_code == "FORBIDDEN_REVIEWER"
 
@@ -756,7 +756,7 @@ class TestMeasureReviewFlow:
                 MeasureRejectRequest(reason="口径不清"),
                 9,
                 "domain_admin",
-                user_domain="sales",
+                user_domains=["sales"],
             )
 
     async def test_reject_sets_draft_with_reason(self) -> None:
@@ -767,7 +767,7 @@ class TestMeasureReviewFlow:
             MeasureRejectRequest(reason="统计口径与业务不符"),
             9,
             "domain_admin",
-            user_domain="sales",
+            user_domains=["sales"],
         )
         assert out.status == "DRAFT"
         assert out.reject_reason == "统计口径与业务不符"

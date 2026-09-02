@@ -883,7 +883,7 @@ class MetricRepository:
         rows = (await self._db.execute(stmt)).all()
         return {str(row[0]): row[1] for row in rows}
 
-    async def count_review_assigned(self, actor_id: int, user_domain: str | None) -> int:
+    async def count_review_assigned(self, actor_id: int, user_domains: list[str] | None) -> int:
         """统计指派给当前用户/所在域评审组的待审（REVIEW）指标数（TD §13）。
 
         - ``reviewer_type=user``：仅 ``reviewer_id`` 指定的用户可见/可审。
@@ -892,7 +892,7 @@ class MetricRepository:
 
         Args:
             actor_id: 当前用户 ID。
-            user_domain: 当前用户所属域。
+            user_domains: 当前用户所属域。
 
         Returns:
             指派给该用户/其域评审组的 REVIEW 指标数。
@@ -905,14 +905,17 @@ class MetricRepository:
                 Metric.status == "REVIEW",
                 or_(
                     and_(Metric.reviewer_type == "user", Metric.reviewer_id == actor_id),
-                    and_(Metric.reviewer_type == "domain", Metric.reviewer_domain == user_domain),
+                    and_(
+                        Metric.reviewer_type == "domain",
+                        Metric.reviewer_domain.in_(user_domains or []),
+                    ),
                 ),
             )
         )
         return (await self._db.execute(stmt)).scalar_one() or 0
 
     async def count_review_actionable(
-        self, actor_id: int, user_domain: str | None, role: str
+        self, actor_id: int, user_domains: list[str] | None, role: str
     ) -> int:
         """统计当前用户真正可审的待审（REVIEW）指标数（与 _assert_reviewer_authorized 对齐）。
 
@@ -921,14 +924,14 @@ class MetricRepository:
 
         - ``platform_admin``：全量 REVIEW（最终兜底，可审全部）。
         - ``reviewer_type=user``：仅 ``reviewer_id`` 指定的用户可审。
-        - ``reviewer_type=domain``：仅同域评审组（``user_domain == reviewer_domain``，
+        - ``reviewer_type=domain``：仅同域评审组（``user_domains == reviewer_domain``，
           且角色为 domain_admin/reviewer）可审。
         - 未指派（reviewer_type IS NULL）：``domain_admin`` 兜底可审（保持既有语义）。
         - 其余角色：0（无评审能力）。
 
         Args:
             actor_id: 当前用户 ID。
-            user_domain: 当前用户所属域。
+            user_domains: 当前用户所属域。
             role: 当前用户主角色（与写路径 _assert_reviewer_authorized 的 role 判定一致）。
 
         Returns:
@@ -943,7 +946,7 @@ class MetricRepository:
                 conds.append(
                     and_(
                         Metric.reviewer_type == "domain",
-                        Metric.reviewer_domain == user_domain,
+                        Metric.reviewer_domain.in_(user_domains or []),
                     )
                 )
             if role == "domain_admin":

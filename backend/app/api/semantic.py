@@ -790,7 +790,7 @@ async def get_consumption_guide(
         metric_code,
         actor_id=user.id,
         role=user.role,
-        user_domain=user.domain,
+        user_domains=user.domains_all(),
     )
     return ok(data=guide, trace_id=get_trace_id(request))
 
@@ -817,7 +817,7 @@ async def update_consumption_guide(
         body,
         actor_id=user.id,
         role=user.role,
-        user_domain=user.domain,
+        user_domains=user.domains_all(),
     )
     await write_audit(
         db,

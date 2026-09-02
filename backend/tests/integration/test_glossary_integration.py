@@ -158,7 +158,7 @@ async def test_term_lifecycle_draft_published_deprecated(db_env) -> None:
             ReviewSubmitRequest(change_reason="完善定义后提审"),
             actor_id=db_env["owner_id"],
             role="platform_admin",
-            user_domain="sales",
+            user_domains=["sales"],
         )
         assert submitted.status.value == "REVIEW"
 
@@ -168,7 +168,7 @@ async def test_term_lifecycle_draft_published_deprecated(db_env) -> None:
             ReviewApproveRequest(),
             actor_id=db_env["owner_id"],
             role="platform_admin",
-            user_domain="sales",
+            user_domains=["sales"],
         )
         assert published.status.value == "PUBLISHED"
 

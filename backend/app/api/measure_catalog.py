@@ -286,7 +286,7 @@ async def submit_measure(
     """DRAFT → REVIEW，提交审核（度量是原子指标继承源，发布须先审）。"""
     service = MeasureCatalogService(db)
     measure = await service.submit_measure(
-        measure_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+        measure_code, request, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     await write_audit(
         db,
@@ -319,7 +319,7 @@ async def approve_measure(
     """REVIEW → PUBLISHED，审核通过（评审人身份校验 + 自审禁止）。"""
     service = MeasureCatalogService(db)
     measure = await service.approve_measure(
-        measure_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+        measure_code, request, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     await write_audit(
         db,
@@ -352,7 +352,7 @@ async def reject_measure(
     """REVIEW → DRAFT，驳回审核（驳回原因落库并通知提交人）。"""
     service = MeasureCatalogService(db)
     measure = await service.reject_measure(
-        measure_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+        measure_code, request, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     await write_audit(
         db,
@@ -545,7 +545,7 @@ async def batch_submit_measures(
             ),
             actor_id=user.id,
             role=user.role,
-            user_domain=user.domain,
+            user_domains=user.domains_all(),
         )
 
     results = await run_batch(
@@ -597,7 +597,7 @@ async def batch_approve_measures(
             MeasureApproveRequest(),
             actor_id=user.id,
             role=user.role,
-            user_domain=user.domain,
+            user_domains=user.domains_all(),
         ),
         abort_message="批量通过内部错误，已中止后续项",
     )
@@ -642,7 +642,7 @@ async def batch_reject_measures(
             MeasureRejectRequest(reason=request.reason),
             actor_id=user.id,
             role=user.role,
-            user_domain=user.domain,
+            user_domains=user.domains_all(),
         ),
         abort_message="批量驳回内部错误，已中止后续项",
     )

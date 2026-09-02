@@ -13,9 +13,9 @@
         _review_code_attr = "dim_code"
         _review_status_enum = DimensionStatus
 
-        async def submit_dimension(self, dim_code, request, actor_id, role, user_domain):
+        async def submit_dimension(self, dim_code, request, actor_id, role, user_domains):
             dim = await self._require(dim_code)
-            await self._submit_review(dim, request, actor_id, role, user_domain, code=dim_code)
+            await self._submit_review(dim, request, actor_id, role, user_domains, code=dim_code)
             return dim
 
 可选钩子：
@@ -68,7 +68,7 @@ class MasterDataReviewMixin:
         request: Any,
         actor_id: int,
         role: str | None,
-        user_domain: str | None,
+        user_domains: list[str] | None,
         *,
         code: str | None = None,
     ) -> None:
@@ -141,7 +141,7 @@ class MasterDataReviewMixin:
         request: Any,
         actor_id: int,
         role: str | None,
-        user_domain: str | None,
+        user_domains: list[str] | None,
         *,
         code: str | None = None,
     ) -> None:
@@ -150,7 +150,7 @@ class MasterDataReviewMixin:
         评审人身份校验 + 自审禁止（管理员豁免）+ 状态机校验。
         """
         code = code or self._review_code(entity)
-        self._assert_reviewer_authorized(entity, actor_id, role or "", user_domain)
+        self._assert_reviewer_authorized(entity, actor_id, role or "", user_domains)
         # 自审禁止：提交人与审核人不得为同一人；管理员豁免（小团队单管理员兜底）
         if (
             role not in ("platform_admin", "domain_admin")
@@ -192,7 +192,7 @@ class MasterDataReviewMixin:
         request: Any,
         actor_id: int,
         role: str | None,
-        user_domain: str | None,
+        user_domains: list[str] | None,
         *,
         code: str | None = None,
     ) -> None:
@@ -201,7 +201,7 @@ class MasterDataReviewMixin:
         驳回原因落库（可追溯），通知提交人引导修改后重提。
         """
         code = code or self._review_code(entity)
-        self._assert_reviewer_authorized(entity, actor_id, role or "", user_domain)
+        self._assert_reviewer_authorized(entity, actor_id, role or "", user_domains)
         if (
             role not in ("platform_admin", "domain_admin")
             and entity.submitted_by is not None
@@ -269,7 +269,7 @@ class MasterDataReviewMixin:
         entity: Any,
         actor_id: int,
         role: str,
-        user_domain: str | None,
+        user_domains: list[str] | None,
     ) -> None:
         """评审人身份校验：仅被指派评审人可通过/打回主数据（对齐指标 TD §13）。
 
@@ -299,15 +299,15 @@ class MasterDataReviewMixin:
                         "reviewer_domain": entity.reviewer_domain,
                     },
                 )
-            if user_domain != entity.reviewer_domain:
+            if entity.reviewer_domain not in (user_domains or []):
                 raise AuthError(
                     f"仅 {entity.reviewer_domain} 域评审组成员可评审该{self._review_entity_name}",
                     error_code="FORBIDDEN_REVIEWER",
-                    ctx={self._review_code_attr: code, "user_domain": user_domain},
+                    ctx={self._review_code_attr: code, "user_domains": user_domains},
                 )
             return
         # 未指派：域管理员兜底（保持"仅管理角色可审"语义）。
-        # X-3 越权加固：未指派分支此前只查 role==domain_admin 不校验 user_domain——
+        # X-3 越权加固：未指派分支此前只查 role==domain_admin 不校验 user_domains——
         # 任意域 domain_admin 可跨域审批/打回他域未指派主数据。现补本域归属校验：
         # 实体可解析出域且不在评审人本域时拒绝（对齐指标批量审批的 PDP 域闸门）。
         if role != "domain_admin":
@@ -317,14 +317,14 @@ class MasterDataReviewMixin:
                 ctx={self._review_code_attr: code, "role": role},
             )
         entity_domain = self._review_domain(entity)
-        if entity_domain and user_domain != entity_domain:
+        if entity_domain and entity_domain not in (user_domains or []):
             raise AuthError(
-                f"无权评审他域{self._review_entity_name}（当前域: {user_domain}，"
+                f"无权评审他域{self._review_entity_name}（当前域: {user_domains}，"
                 f"实体域: {entity_domain}）",
                 error_code="FORBIDDEN_REVIEWER",
                 ctx={
                     self._review_code_attr: code,
-                    "user_domain": user_domain,
+                    "user_domains": user_domains,
                     "entity_domain": entity_domain,
                 },
             )

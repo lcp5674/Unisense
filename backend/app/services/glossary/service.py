@@ -135,7 +135,7 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         data: TermCreate,
         actor_id: int | None = None,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> TermResponse:
         # 编码自动生成（FR-010：缺省时由系统生成，非人为创造）
         if not data.term_code:
@@ -144,14 +144,14 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         if (
             role
             and role != "platform_admin"
-            and user_domain
+            and user_domains
             and data.domain
-            and user_domain != data.domain
+            and data.domain not in (user_domains or [])
         ):
             raise AuthError(
-                    f"无权创建他域术语（当前域: {user_domain}，术语域: {data.domain}）",
+                    f"无权创建他域术语（当前域: {user_domains}，术语域: {data.domain}）",
                     error_code="FORBIDDEN",
-                    ctx={"user_domain": user_domain, "term_domain": data.domain},
+                    ctx={"user_domains": user_domains, "term_domain": data.domain},
                 )
         existing = await self._repo.get_term(data.term_code)
         if existing is not None:
@@ -244,7 +244,7 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         request: Any,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> TermResponse:
         """提交术语审核（DRAFT → REVIEW，复用主数据审核流 TD §13）。
 
@@ -252,7 +252,7 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         """
         term = await self._require_term(term_code)
         await self._submit_review(
-            term, request, actor_id, role, user_domain, code=term_code
+            term, request, actor_id, role, user_domains, code=term_code
         )
         return TermResponse.from_model(term)
 
@@ -281,12 +281,12 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         request: Any,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> TermResponse:
         """审核通过术语（REVIEW → PUBLISHED，复用主数据审核流 FR-004）。"""
         term = await self._require_term(term_code)
         await self._approve_review(
-            term, request, actor_id, role, user_domain, code=term_code
+            term, request, actor_id, role, user_domains, code=term_code
         )
         await self._snapshot(term, actor_id, "approve")
         return TermResponse.from_model(term)
@@ -297,12 +297,12 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         request: Any,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> TermResponse:
         """审核驳回术语（REVIEW → DRAFT，复用主数据审核流 FR-005）。"""
         term = await self._require_term(term_code)
         await self._reject_review(
-            term, request, actor_id, role, user_domain, code=term_code
+            term, request, actor_id, role, user_domains, code=term_code
         )
         return TermResponse.from_model(term)
 
@@ -312,10 +312,10 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         data: Any,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> TermResponse:
         term = await self._require_term(term_code)
-        self._assert_term_scope(term, actor_id, role, user_domain)
+        self._assert_term_scope(term, actor_id, role, user_domains)
         # P11 C-2：跨请求乐观锁——前端编辑弹窗回传 row_version，不一致说明他人已改 → 409
         expected = getattr(data, "row_version", None)
         if expected is not None and expected != term.row_version:
@@ -363,10 +363,10 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         term_code: str,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> TermResponse:
         term = await self._require_term(term_code)
-        self._assert_term_scope(term, actor_id, role, user_domain)
+        self._assert_term_scope(term, actor_id, role, user_domains)
         if term.status == TermStatus.DEPRECATED.value:
             raise BusinessError("术语已废弃", error_code="INVALID_STATE")
         term.status = TermStatus.DEPRECATED.value
@@ -379,7 +379,7 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         term_code: str,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> TermResponse:
         """重新启用已废弃术语（DEPRECATED → DRAFT）。
 
@@ -394,7 +394,7 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
                 f"仅 DEPRECATED 状态可重新启用，当前 {term.status}",
                 error_code="INVALID_STATE",
             )
-        self._assert_term_scope(term, actor_id, role, user_domain)
+        self._assert_term_scope(term, actor_id, role, user_domains)
         term.status = TermStatus.DRAFT.value
         await self._snapshot(term, actor_id, "reactivate")
         await self._repo.commit()
@@ -406,7 +406,7 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         term_code: str,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> TermResponse:
         """软删除术语（仅 DRAFT/DEPRECATED 未对外投入状态；REVIEW/PUBLISHED 禁止）。
 
@@ -425,7 +425,7 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
                 error_code="INVALID_STATE",
             )
         # 权限：平台/本域域管理员或原 Owner（生产者，``_assert_term_scope`` 域/Owner 双校验）
-        self._assert_term_scope(term, actor_id, role, user_domain)
+        self._assert_term_scope(term, actor_id, role, user_domains)
         await self._repo.soft_delete_term(term.id)
         await self._snapshot(term, actor_id, "delete")
         await self._repo.commit()
@@ -437,7 +437,7 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         term_code: str,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> TermResponse:
         """恢复已软删术语（回收站恢复；仅 DRAFT/DEPRECATED 且 deleted_at 置位）。
 
@@ -460,7 +460,7 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
                 f"仅 DRAFT/DEPRECATED 状态的已删术语可恢复，当前 {term.status}",
                 error_code="INVALID_STATE",
             )
-        self._assert_term_scope(term, actor_id, role, user_domain)
+        self._assert_term_scope(term, actor_id, role, user_domains)
         await self._repo.restore_term(term.id)
         await self._snapshot(term, actor_id, "restore")
         await self._repo.commit()
@@ -491,12 +491,12 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         data: TermRelationCreate,
         actor_id: int | None = None,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> TermRelationResponse:
         term = await self._require_term(term_code)
         # 越权守卫：仅本人/本域可给源术语建立关系（防跨域污染术语关系网）。
         if actor_id is not None:
-            self._assert_term_scope(term, actor_id, role, user_domain)
+            self._assert_term_scope(term, actor_id, role, user_domains)
         # 目标术语存在性校验（防孤儿关系落到库）
         target = await self._repo.get_term_by_id(data.target_term_id)
         if target is None:
@@ -659,7 +659,7 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         term: Term,
         actor_id: int,
         role: str | None,
-        user_domain: str | None,
+        user_domains: list[str] | None,
     ) -> None:
         """术语写操作越权守卫（对齐指标/维度/度量的域作用域 + 生产者 Owner 语义）。
 
@@ -675,13 +675,13 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
             return
         term_domain = str(getattr(term, "domain", "") or "")
         if role == "domain_admin":
-            if user_domain and term_domain and user_domain != term_domain:
+            if user_domains and term_domain and term_domain not in (user_domains or []):
                 raise AuthError(
-                    f"无权操作他域术语（当前域: {user_domain}，术语域: {term_domain}）",
+                    f"无权操作他域术语（当前域: {user_domains}，术语域: {term_domain}）",
                     error_code="FORBIDDEN",
                     ctx={
                         "term_code": term.term_code,
-                        "user_domain": user_domain,
+                        "user_domains": user_domains,
                         "term_domain": term_domain,
                     },
                 )
@@ -697,13 +697,13 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
                         "owner_id": term.owner_id,
                     },
                 )
-            if user_domain and term_domain and user_domain != term_domain:
+            if user_domains and term_domain and term_domain not in (user_domains or []):
                 raise AuthError(
-                    f"无权操作他域术语（当前域: {user_domain}，术语域: {term_domain}）",
+                    f"无权操作他域术语（当前域: {user_domains}，术语域: {term_domain}）",
                     error_code="FORBIDDEN",
                     ctx={
                         "term_code": term.term_code,
-                        "user_domain": user_domain,
+                        "user_domains": user_domains,
                         "term_domain": term_domain,
                     },
                 )

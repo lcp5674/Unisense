@@ -645,7 +645,7 @@ async def submit_dimension(
     """DRAFT → REVIEW，提交审核（维度是下游指标绑定/消费校验的权威来源，发布须先审）。"""
     service = DimensionService(db)
     dim = await service.submit_dimension(
-        dim_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+        dim_code, request, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     await write_audit(
         db,
@@ -678,7 +678,7 @@ async def approve_dimension(
     """REVIEW → PUBLISHED，审核通过（评审人身份校验 + 自审禁止）。"""
     service = DimensionService(db)
     dim = await service.approve_dimension(
-        dim_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+        dim_code, request, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     await write_audit(
         db,
@@ -711,7 +711,7 @@ async def reject_dimension(
     """REVIEW → DRAFT，驳回审核（驳回原因落库并通知提交人）。"""
     service = DimensionService(db)
     dim = await service.reject_dimension(
-        dim_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+        dim_code, request, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     await write_audit(
         db,
@@ -762,7 +762,7 @@ async def batch_submit_dimensions(
             ),
             actor_id=user.id,
             role=user.role,
-            user_domain=user.domain,
+            user_domains=user.domains_all(),
         )
 
     results = await run_batch(
@@ -814,7 +814,7 @@ async def batch_approve_dimensions(
             ReviewApproveRequest(),
             actor_id=user.id,
             role=user.role,
-            user_domain=user.domain,
+            user_domains=user.domains_all(),
         ),
         abort_message="批量通过内部错误，已中止后续项",
     )
@@ -859,7 +859,7 @@ async def batch_reject_dimensions(
             ReviewRejectRequest(reason=request.reason),
             actor_id=user.id,
             role=user.role,
-            user_domain=user.domain,
+            user_domains=user.domains_all(),
         ),
         abort_message="批量驳回内部错误，已中止后续项",
     )

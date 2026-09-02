@@ -466,7 +466,7 @@ class MetricService(BaseService):
         request: MetricCreateRequest,
         owner_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
         _preloaded_conflict_existing: list[Any] | None = None,
         _conflict_llm_budget: dict[str, int] | None = None,
     ) -> Metric:
@@ -479,7 +479,7 @@ class MetricService(BaseService):
             request: 创建请求。
             owner_id: 创建人（Owner）ID。
             role: 创建人角色（P1-6：域管理员/Owner 仅可创建本域指标）。
-            user_domain: 创建人所属域（域作用域校验；None 表示未绑定域，不拦截）。
+            user_domains: 创建人所属域（域作用域校验；None 表示未绑定域，不拦截）。
 
         Returns:
             创建的指标。
@@ -493,15 +493,15 @@ class MetricService(BaseService):
         # 唯独 create 无校验，任意创建者可跨域建指标，owner 域与请求域不校验）。
         if (
             role in ("domain_admin", "metric_owner")
-            and user_domain
-            and request.domain != user_domain
+            and user_domains
+            and request.domain not in (user_domains or [])
         ):
             raise BusinessError(
                 f"{'域管理员' if role == 'domain_admin' else '指标 Owner'}仅可创建本域指标",
                 error_code="FORBIDDEN",
                 ctx={
                     "request_domain": request.domain,
-                    "user_domain": user_domain,
+                    "user_domains": user_domains,
                     "role": role,
                 },
             )
@@ -1113,7 +1113,7 @@ class MetricService(BaseService):
         metric_code: str,
         actor_id: int | None = None,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> MetricResponse:
         """经缓存获取指标详情（API 读路径，含 cache-aside + 熔断降级）。
 
@@ -1126,7 +1126,7 @@ class MetricService(BaseService):
             actor_id: 读路径行级隔离（P0-3）——当前用户 ID；None 表示内部调用
                 （不过滤，端点层必传）。
             role: 当前用户角色（配合 actor_id 判定管理角色/评审人放行）。
-            user_domain: 当前用户所属域（评审指派 domain 类型判定同域评审组可见性）。
+            user_domains: 当前用户所属域（评审指派 domain 类型判定同域评审组可见性）。
 
         Returns:
             指标详情响应。
@@ -1137,7 +1137,7 @@ class MetricService(BaseService):
         cached = await self._cache.get(metric_code)
         if cached is not None:
             resp = MetricResponse.model_validate(cached)
-            self._assert_metric_visible(resp, actor_id, role, user_domain)
+            self._assert_metric_visible(resp, actor_id, role, user_domains)
             return await self._attach_measure_info(resp)
         metric = await self._repo.get_by_code(metric_code)
         if metric is None:
@@ -1156,7 +1156,7 @@ class MetricService(BaseService):
                     },
                 )
             raise NotFoundError(f"指标不存在: {metric_code}")
-        self._assert_metric_visible(metric, actor_id, role, user_domain)
+        self._assert_metric_visible(metric, actor_id, role, user_domains)
         await self._cache.set(metric)
         return await self._attach_measure_info(MetricResponse.model_validate(metric))
 
@@ -1319,7 +1319,7 @@ class MetricService(BaseService):
         request: MetricUpdateRequest,
         actor_id: int,
         role: str,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> Metric:
         """更新指标（乐观锁）。
 
@@ -1331,7 +1331,7 @@ class MetricService(BaseService):
             request: 更新请求。
             actor_id: 操作人 ID。
             role: 操作人角色。
-            user_domain: 操作人所属域（API 层传入，避免 service 内额外查 DB）。
+            user_domains: 操作人所属域（API 层传入，避免 service 内额外查 DB）。
 
         Returns:
             更新后的指标。
@@ -1374,7 +1374,7 @@ class MetricService(BaseService):
             action="write",
             user_id=actor_id,
             role=role,
-            user_domain=user_domain,
+            user_domains=user_domains,
         )
         if not decision.allow:
             raise BusinessError(
@@ -1853,7 +1853,7 @@ class MetricService(BaseService):
         request: MetricDescriptionUpdateRequest,
         actor_id: int,
         role: str,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> Metric:
         """更新指标业务描述（治理补充 TD §12.1，不触发版本/不参与口径变更）。
 
@@ -1866,7 +1866,7 @@ class MetricService(BaseService):
             request: 描述更新请求（空串=清除描述）。
             actor_id: 操作人 ID。
             role: 操作人角色。
-            user_domain: 操作人所属域（API 层传入）。
+            user_domains: 操作人所属域（API 层传入）。
 
         Raises:
             NotFoundError: 指标不存在。
@@ -1894,7 +1894,7 @@ class MetricService(BaseService):
             action="write",
             user_id=actor_id,
             role=role,
-            user_domain=user_domain,
+            user_domains=user_domains,
         )
         if not decision.allow:
             raise BusinessError(
@@ -1929,7 +1929,7 @@ class MetricService(BaseService):
         request: MetricConsumptionGuideUpdateRequest,
         actor_id: int,
         role: str,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> dict[str, Any]:
         """更新指标消费指南（独立于状态机的轻量文档维护，对齐描述编辑 TD §12.1）。
 
@@ -1942,7 +1942,7 @@ class MetricService(BaseService):
             request: 指南更新请求（三组列表 + 可选 row_version 乐观锁）。
             actor_id: 操作人 ID。
             role: 操作人角色。
-            user_domain: 操作人所属域（API 层传入）。
+            user_domains: 操作人所属域（API 层传入）。
 
         Returns:
             合并后的指南字典（含 guide_source/guide_updated_at）。
@@ -1985,7 +1985,7 @@ class MetricService(BaseService):
             action="write",
             user_id=actor_id,
             role=role,
-            user_domain=user_domain,
+            user_domains=user_domains,
         )
         if not decision.allow:
             raise BusinessError(
@@ -2033,7 +2033,7 @@ class MetricService(BaseService):
         term_id: int | None,
         actor_id: int,
         role: str,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
         term_ids: list[int] | None = None,
     ) -> Metric:
         """绑定/解绑指标↔业务术语（P2-11：术语绑定写路径）。
@@ -2048,7 +2048,7 @@ class MetricService(BaseService):
             term_id: 术语 ID（None=解绑；term_ids 缺省时使用）。
             actor_id: 操作人 ID。
             role: 操作人角色。
-            user_domain: 操作人所属域。
+            user_domains: 操作人所属域。
             term_ids: 术语 ID 列表（多选全量替换，可空；主术语=首项写 term_id）。
 
         Raises:
@@ -2088,7 +2088,7 @@ class MetricService(BaseService):
             action="write",
             user_id=actor_id,
             role=role,
-            user_domain=user_domain,
+            user_domains=user_domains,
         )
         if not decision.allow:
             raise BusinessError(
@@ -2133,7 +2133,7 @@ class MetricService(BaseService):
         metric_code: str,
         actor_id: int,
         role: str,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
         force: bool = False,
     ) -> Metric:
         """用 LLM 推断指标业务描述并落库（TD §12.1，不触发版本/不参与口径变更）。
@@ -2145,7 +2145,7 @@ class MetricService(BaseService):
             metric_code: 指标编码。
             actor_id: 操作人 ID。
             role: 操作人角色。
-            user_domain: 操作人所属域（API 层传入）。
+            user_domains: 操作人所属域（API 层传入）。
             force: 强制重新推断。默认 False 时若已存在 LLM 推断描述则短路返回
                 （避免重复调用 LLM 造成耗时与成本浪费）；True 时忽略已有描述重新生成。
 
@@ -2162,7 +2162,7 @@ class MetricService(BaseService):
             action="write",
             user_id=actor_id,
             role=role,
-            user_domain=user_domain,
+            user_domains=user_domains,
         )
         if not decision.allow:
             raise BusinessError(
@@ -2308,7 +2308,7 @@ class MetricService(BaseService):
         request: MetricSubmitRequest,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> Metric:
         """提交指标审核（DRAFT → REVIEW，对齐 FR-003）。
 
@@ -2317,7 +2317,7 @@ class MetricService(BaseService):
             request: 提交请求。
             actor_id: 操作人 ID。
             role: 操作人角色（PDP 域权限判定用）。
-            user_domain: 操作人所属域（API 层传入，避免 service 内额外查 DB）。
+            user_domains: 操作人所属域（API 层传入，避免 service 内额外查 DB）。
 
         Returns:
             提交后的指标。
@@ -2339,7 +2339,7 @@ class MetricService(BaseService):
             action="write",
             user_id=actor_id,
             role=role or "",
-            user_domain=user_domain,
+            user_domains=user_domains,
             skip_pii_gate=True,
         )
         if not decision.allow:
@@ -2481,7 +2481,7 @@ class MetricService(BaseService):
         request: MetricApproveRequest,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> Metric:
         """审核通过指标（REVIEW → PUBLISHED/EXPERIMENTAL，对齐 FR-004）。
 
@@ -2493,7 +2493,7 @@ class MetricService(BaseService):
             request: 审核请求（含 mode/gray_tenant_ids/target_version）。
             actor_id: 操作人 ID。
             role: 操作人角色（platform_admin/domain_admin 豁免自审禁止）。
-            user_domain: 操作人所属域（API 层传入，避免 service 内额外查 DB）。
+            user_domains: 操作人所属域（API 层传入，避免 service 内额外查 DB）。
 
         自审豁免：approve/reject 端点仅 platform_admin/domain_admin 可调用，管理员拥有
         最终审核权，允许审核自己提交的指标（小团队/单管理员场景的兜底）；
@@ -2516,7 +2516,7 @@ class MetricService(BaseService):
         metric = await self.get_metric(metric_code)
 
         # 评审人身份校验（TD §13）：仅被指派评审人（或 platform_admin 兜底）可通过
-        self._assert_reviewer_authorized(metric, actor_id, role or "", user_domain)
+        self._assert_reviewer_authorized(metric, actor_id, role or "", user_domains)
 
         # 自审禁止（对齐治理 COMPL-2）：提交人与审核人不得为同一人；管理员豁免
         if (
@@ -2538,7 +2538,7 @@ class MetricService(BaseService):
             action="approve",
             user_id=actor_id,
             role=role or "metric_owner",
-            user_domain=user_domain,
+            user_domains=user_domains,
             skip_pii_gate=True,
         )
         if not decision.allow:
@@ -2742,7 +2742,7 @@ class MetricService(BaseService):
         request: MetricRejectRequest,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> Metric:
         """审核驳回指标（REVIEW → DRAFT，对齐 FR-005）。
 
@@ -2751,7 +2751,7 @@ class MetricService(BaseService):
             request: 驳回请求（含 reason）。
             actor_id: 操作人 ID。
             role: 操作人角色（platform_admin/domain_admin 豁免自审禁止，同 approve_metric）。
-            user_domain: 操作人所属域（评审人身份校验用）。
+            user_domains: 操作人所属域（评审人身份校验用）。
 
         Returns:
             驳回后的指标。
@@ -2764,7 +2764,7 @@ class MetricService(BaseService):
         metric = await self.get_metric(metric_code)
 
         # 评审人身份校验（TD §13）：仅被指派评审人（或 platform_admin 兜底）可打回
-        self._assert_reviewer_authorized(metric, actor_id, role or "", user_domain)
+        self._assert_reviewer_authorized(metric, actor_id, role or "", user_domains)
 
         # 自审禁止（对齐治理 COMPL-2）：提交人与审核人不得为同一人；管理员豁免
         if (
@@ -3223,7 +3223,7 @@ class MetricService(BaseService):
         successor_code: str | None,
         actor_id: int,
         role: str,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> Metric:
         """废弃指标（PUBLISHED → DEPRECATED，对齐 FR-002/FR-039）。
 
@@ -3254,7 +3254,7 @@ class MetricService(BaseService):
             action="write",
             user_id=actor_id,
             role=role,
-            user_domain=user_domain,
+            user_domains=user_domains,
             skip_pii_gate=True,
         )
         if not decision.allow:
@@ -3356,7 +3356,7 @@ class MetricService(BaseService):
         metric_code: str,
         actor_id: int,
         role: str,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> Metric:
         """重新启用已废弃指标（DEPRECATED → DRAFT，P2-1 对齐维度 batch-reactivate）。
 
@@ -3373,7 +3373,7 @@ class MetricService(BaseService):
             action="write",
             user_id=actor_id,
             role=role,
-            user_domain=user_domain,
+            user_domains=user_domains,
             skip_pii_gate=True,
         )
         if not decision.allow:
@@ -3417,7 +3417,7 @@ class MetricService(BaseService):
         metric_code: str,
         actor_id: int,
         role: str,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> Metric:
         """灰度全量发布（EXPERIMENTAL → PUBLISHED，对齐 FR-020）。
 
@@ -3429,7 +3429,7 @@ class MetricService(BaseService):
             actor_id: 操作人 ID。
             role: 操作人角色（P0-2：灰度发布会修改主表口径生效状态，
                 须与废弃/恢复同级校验 Owner 归属 + PDP 域权限）。
-            user_domain: 操作人所属域（domain_admin 域作用域校验）。
+            user_domains: 操作人所属域（domain_admin 域作用域校验）。
 
         Returns:
             全量发布后的指标。
@@ -3449,7 +3449,7 @@ class MetricService(BaseService):
             action="write",
             user_id=actor_id,
             role=role,
-            user_domain=user_domain,
+            user_domains=user_domains,
             skip_pii_gate=True,
         )
         if not decision.allow:
@@ -3569,7 +3569,7 @@ class MetricService(BaseService):
         metric_code: str,
         actor_id: int,
         role: str,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> Metric:
         """灰度回滚（EXPERIMENTAL → 回退上一 PUBLISHED 版本，对齐 FR-020）。
 
@@ -3582,7 +3582,7 @@ class MetricService(BaseService):
             actor_id: 操作人 ID。
             role: 操作人角色（P0-2：回滚会改写主表口径，须与废弃/恢复同级
                 校验 Owner 归属 + PDP 域权限）。
-            user_domain: 操作人所属域（domain_admin 域作用域校验）。
+            user_domains: 操作人所属域（domain_admin 域作用域校验）。
 
         Returns:
             回滚后的指标。
@@ -3601,7 +3601,7 @@ class MetricService(BaseService):
             action="write",
             user_id=actor_id,
             role=role,
-            user_domain=user_domain,
+            user_domains=user_domains,
             skip_pii_gate=True,
         )
         if not decision.allow:
@@ -4611,7 +4611,7 @@ class MetricService(BaseService):
         version: int,
         actor_id: int,
         role: str,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> Metric:
         """Owner 请求版本确认延期（FR-008，+7 天，最多延期 1 次）。
 
@@ -4622,7 +4622,7 @@ class MetricService(BaseService):
             role: 操作人角色（P1-1：延期会推迟他人消费方的确认期限，
                 须校验 Owner 归属 + PDP 域权限，否则任意 metric_owner/
                 domain_admin 可越权延后他人破坏性变更确认期）。
-            user_domain: 操作人所属域（domain_admin 域作用域校验）。
+            user_domains: 操作人所属域（domain_admin 域作用域校验）。
 
         Returns:
             更新后的指标。
@@ -4641,7 +4641,7 @@ class MetricService(BaseService):
             action="write",
             user_id=actor_id,
             role=role,
-            user_domain=user_domain,
+            user_domains=user_domains,
             skip_pii_gate=True,
         )
         if not decision.allow:
@@ -4678,7 +4678,7 @@ class MetricService(BaseService):
         metric: Metric,
         actor_id: int | None,
         role: str | None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> None:
         """读路径可见性守卫（P0-3）：未发布指标仅本人/管理角色可见。
 
@@ -4690,7 +4690,7 @@ class MetricService(BaseService):
             metric: 指标对象（或含 status/owner_id 的响应对象）。
             actor_id: 当前用户 ID；None 表示内部调用（不过滤，端点层必传）。
             role: 当前用户角色。
-            user_domain: 当前用户所属域（评审指派 domain 类型判定同域评审组可见性）。
+            user_domains: 当前用户所属域（评审指派 domain 类型判定同域评审组可见性）。
 
         Raises:
             NotFoundError: 未发布指标对当前用户不可见。
@@ -4704,9 +4704,9 @@ class MetricService(BaseService):
         if role == "domain_admin":
             # 域管理员读路径域收敛（对齐 visibility.metric_is_visible）：
             # 绑定域 → 本域（全状态）+ 本人负责；未绑定域 → 退化个人视角（公开+本人负责）
-            if user_domain:
+            if user_domains:
                 if (
-                    metric.domain == user_domain
+                    metric.domain in (user_domains or [])
                     or metric.owner_id == actor_id
                     or metric.backup_owner_id == actor_id
                 ):
@@ -4719,14 +4719,14 @@ class MetricService(BaseService):
         if role == "reviewer" and metric.status == "REVIEW":
             # 仅被指派评审人可读待审指标（TD §13，与 _assert_reviewer_authorized 写路径一致）：
             # - reviewer_type=user：仅 reviewer_id 指定的用户
-            # - reviewer_type=domain：仅同域评审组（user_domain 与 reviewer_domain 一致）
+            # - reviewer_type=domain：仅同域评审组（user_domains 与 reviewer_domain 一致）
             # - 未指派：域管理员兜底（reviewer 角色不在此放行）
             if metric.reviewer_type == "user" and metric.reviewer_id == actor_id:
                 return
             if (
                 metric.reviewer_type == "domain"
                 and metric.reviewer_domain
-                and user_domain == metric.reviewer_domain
+                and metric.reviewer_domain in (user_domains or [])
             ):
                 return
         raise NotFoundError(f"指标不存在: {metric.metric_code}")
@@ -4770,7 +4770,7 @@ class MetricService(BaseService):
         metric: Metric,
         actor_id: int,
         role: str,
-        user_domain: str | None,
+        user_domains: list[str] | None,
     ) -> None:
         """评审人身份校验：仅被指派评审人可通过/打回指标（TD §13 治理闭环）。
 
@@ -4786,7 +4786,7 @@ class MetricService(BaseService):
             metric: 指标对象。
             actor_id: 操作人 ID。
             role: 操作人角色。
-            user_domain: 操作人所属域。
+            user_domains: 操作人所属域。
 
         Raises:
             AuthError: 非被指派评审人。
@@ -4813,11 +4813,11 @@ class MetricService(BaseService):
                         "reviewer_domain": metric.reviewer_domain,
                     },
                 )
-            if user_domain != metric.reviewer_domain:
+            if metric.reviewer_domain not in (user_domains or []):
                 raise AuthError(
                     f"仅 {metric.reviewer_domain} 域评审组成员可评审该指标",
                     error_code="FORBIDDEN_REVIEWER",
-                    ctx={"metric_code": metric.metric_code, "user_domain": user_domain},
+                    ctx={"metric_code": metric.metric_code, "user_domains": user_domains},
                 )
             return
 
@@ -4888,13 +4888,13 @@ class MetricService(BaseService):
         metric_code: str,
         actor_id: int | None = None,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> Any:
         """获取指标健康度评分。
 
         Args:
             metric_code: 指标编码。
-            actor_id/role/user_domain: P0-3 读路径行级隔离——私有指标（DRAFT/REVIEW）
+            actor_id/role/user_domains: P0-3 读路径行级隔离——私有指标（DRAFT/REVIEW）
                 仅本人/评审可见，防跨用户探测未发布指标存在性与健康维度。
 
         Returns:
@@ -4908,7 +4908,7 @@ class MetricService(BaseService):
         # P0-3 行级隔离：经 get_metric_public 校验可见性（含 METRIC_ARCHIVED 友好错误），
         # 不再直接 get_by_code 裸查（此前任意登录可探测 DRAFT 指标存在性与健康维度）。
         metric = await self.get_metric_public(
-            metric_code, actor_id=actor_id, role=role, user_domain=user_domain
+            metric_code, actor_id=actor_id, role=role, user_domains=user_domains
         )
         scorer = HealthScorer(self._db)
         health = await scorer.calculate(metric.id)
@@ -4938,7 +4938,7 @@ class MetricService(BaseService):
         metric_code: str,
         actor_id: int | None = None,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> Metric:
         """读取用于对比的指标；对已作废指标返回友好 METRIC_ARCHIVED。
 
@@ -4958,7 +4958,7 @@ class MetricService(BaseService):
         """
         metric = await self._repo.get_by_code(metric_code)
         if metric is not None:
-            self._assert_metric_visible(metric, actor_id, role, user_domain)
+            self._assert_metric_visible(metric, actor_id, role, user_domains)
             return metric
         archived = await self._repo.get_archived_by_code(metric_code)
         if archived is not None and archived.successor_code:
@@ -5188,7 +5188,7 @@ class MetricService(BaseService):
         request: Any,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> dict[str, Any]:
         """批量注册指标。
 
@@ -5198,7 +5198,7 @@ class MetricService(BaseService):
             request: 批量注册请求(含source_table+measure_columns+domain)。
             actor_id: 操作人ID。
             role: 操作人角色（P1-6：域管理员/Owner 仅可批量注册本域指标）。
-            user_domain: 操作人所属域。
+            user_domains: 操作人所属域。
 
         Returns:
             {batch_id, candidates: [{metric_code, status, validation_errors}]}.
@@ -5213,15 +5213,15 @@ class MetricService(BaseService):
         # P1-6 批量注册域门禁：与单条 create 同级（域管理员/Owner 仅可本域批量注册）
         if (
             role in ("domain_admin", "metric_owner")
-            and user_domain
-            and request.domain != user_domain
+            and user_domains
+            and request.domain not in (user_domains or [])
         ):
             raise BusinessError(
                 f"{'域管理员' if role == 'domain_admin' else '指标 Owner'}仅可批量注册本域指标",
                 error_code="FORBIDDEN",
                 ctx={
                     "request_domain": request.domain,
-                    "user_domain": user_domain,
+                    "user_domains": user_domains,
                     "role": role,
                 },
             )
@@ -5312,7 +5312,7 @@ class MetricService(BaseService):
                         create_req,
                         owner_id=actor_id,
                         role=role,
-                        user_domain=user_domain,
+                        user_domains=user_domains,
                         _preloaded_conflict_existing=preloaded_existing,
                         _conflict_llm_budget=conflict_llm_budget,
                     )
@@ -5384,7 +5384,7 @@ class MetricService(BaseService):
         request: Any,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> dict[str, Any]:
         """从 SQL 解析候选批量注册指标（FR-010 批量注册增强，场景A/B）。
 
@@ -5397,7 +5397,7 @@ class MetricService(BaseService):
             request: 批量注册请求（domain + candidates，原子先行复合在后）。
             actor_id: 操作人ID。
             role: 操作人角色（域管理员/Owner 仅可批量注册本域指标）。
-            user_domain: 操作人所属域。
+            user_domains: 操作人所属域。
 
         Returns:
             {batch_id, candidates: [{metric_code, status, validation_errors}]}.
@@ -5414,13 +5414,13 @@ class MetricService(BaseService):
         # 域门禁（与单条 create / batch_register 同级）
         if (
             role in ("domain_admin", "metric_owner")
-            and user_domain
-            and request.domain != user_domain
+            and user_domains
+            and request.domain not in (user_domains or [])
         ):
             raise BusinessError(
                 f"{'域管理员' if role == 'domain_admin' else '指标 Owner'}仅可批量注册本域指标",
                 error_code="FORBIDDEN",
-                ctx={"request_domain": request.domain, "user_domain": user_domain, "role": role},
+                ctx={"request_domain": request.domain, "user_domains": user_domains, "role": role},
             )
         await self._validate_domain_active(request.domain)
 
@@ -5478,7 +5478,7 @@ class MetricService(BaseService):
                         create_req,
                         owner_id=actor_id,
                         role=role,
-                        user_domain=user_domain,
+                        user_domains=user_domains,
                         _preloaded_conflict_existing=preloaded_existing,
                         _conflict_llm_budget=conflict_llm_budget,
                     )
@@ -5623,7 +5623,7 @@ class MetricService(BaseService):
                         create_req,
                         owner_id=actor_id,
                         role=role,
-                        user_domain=user_domain,
+                        user_domains=user_domains,
                         _preloaded_conflict_existing=preloaded_existing,
                         _conflict_llm_budget=conflict_llm_budget,
                     )
@@ -5718,13 +5718,13 @@ class MetricService(BaseService):
         metric_code: str,
         actor_id: int | None = None,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> dict[str, Any]:
         """获取指标消费指南（Service层 + 缓存）。
 
         Args:
             metric_code: 指标编码。
-            actor_id/role/user_domain: P0-3 读路径行级隔离——DRAFT/REVIEW 等私有
+            actor_id/role/user_domains: P0-3 读路径行级隔离——DRAFT/REVIEW 等私有
                 指标仅本人/评审可见，防跨用户读取未发布指标元数据。
 
         Returns:
@@ -5742,7 +5742,7 @@ class MetricService(BaseService):
         # （含 consumption_guide/guide_source 等字段——get_metric_public 返回的
         # MetricResponse 不含 guide_source，不能直接复用其返回）。
         await self.get_metric_public(
-            metric_code, actor_id=actor_id, role=role, user_domain=user_domain
+            metric_code, actor_id=actor_id, role=role, user_domains=user_domains
         )
         metric = await self._repo.get_by_code(metric_code)
         if metric is None:

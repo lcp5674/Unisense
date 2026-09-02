@@ -290,7 +290,7 @@ async def create_metric(
         request,
         owner_id=user.id,
         role=user.role,
-        user_domain=user.domain,
+        user_domains=user.domains_all(),
     )
     await write_audit(
         db,
@@ -738,7 +738,7 @@ async def get_metric(
 ) -> ApiResponse[MetricResponse]:
     service = MetricService(db)
     metric = await service.get_metric_public(
-        metric_code, actor_id=user.id, role=user.role, user_domain=user.domain
+        metric_code, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     # PII 访问审计（对齐 TD §15.4 审计合规，data_classification=PII）
     if metric.pii_flag:
@@ -860,7 +860,7 @@ async def suggest_rename_metric(
     # 传 actor/role/user_domain 走 P0-3 行级隔离——否则 get_metric_public(actor=None)
     # 不过滤可见性，写角色可借本端点读任意他用户 DRAFT 指标（名称/源表/度量列）。
     metric = await service.get_metric_public(
-        metric_code, actor_id=user.id, role=user.role, user_domain=user.domain
+        metric_code, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
 
     opposite_code = (request_body or {}).get("opposite_code") or None
@@ -868,7 +868,7 @@ async def suggest_rename_metric(
     if opposite_code:
         try:
             opp = await service.get_metric_public(
-                opposite_code, actor_id=user.id, role=user.role, user_domain=user.domain
+                opposite_code, actor_id=user.id, role=user.role, user_domains=user.domains_all()
             )
             opposite_name = opp.name
         except Exception:
@@ -978,7 +978,7 @@ async def update_metric(
     """变更口径时自动识别破坏性变更并递增版本号；乐观锁防止并发覆盖。"""
     service = MetricService(db)
     metric = await service.update_metric(
-        metric_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+        metric_code, request, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     # 审计 detail 补充「治理属性变更」：指标创建后治理字段（数仓层/时效/时间语义/
     # 分级/聚合/币种）现可编辑（R39 补全），审计需记录本次更新了哪些治理字段及新值，
@@ -1040,7 +1040,7 @@ async def update_metric_description(
     """资产地图/指标详情补充描述；空串清除；写审计与业务同事务提交。"""
     service = MetricService(db)
     metric = await service.update_metric_description(
-        metric_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+        metric_code, request, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     await write_audit(
         db,
@@ -1080,7 +1080,7 @@ async def bind_metric_term(
         request.term_id,
         actor_id=user.id,
         role=user.role,
-        user_domain=user.domain,
+        user_domains=user.domains_all(),
         term_ids=request.term_ids,
     )
     await write_audit(
@@ -1130,7 +1130,7 @@ async def infer_metric_description(
             metric_code,
             actor_id=user.id,
             role=user.role,
-            user_domain=user.domain,
+            user_domains=user.domains_all(),
             force=force,
         )
     await write_audit(
@@ -1327,7 +1327,7 @@ async def publish_metric(
         target_version=request.version,
     )
     metric = await service.approve_metric(
-        metric_code, approve_req, actor_id=user.id, role=user.role, user_domain=user.domain
+        metric_code, approve_req, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     await write_audit(
         db,
@@ -1370,7 +1370,7 @@ async def deprecate_metric(
         successor_code=request.successor_code,
         actor_id=user.id,
         role=user.role,
-        user_domain=user.domain,
+        user_domains=user.domains_all(),
     )
     await write_audit(
         db,
@@ -1407,7 +1407,7 @@ async def submit_metric(
     """DRAFT → REVIEW，提交审核。状态机校验，非法跃迁返回 409。"""
     service = MetricService(db)
     metric = await service.submit_metric(
-        metric_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+        metric_code, request, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     await write_audit(
         db,
@@ -1443,7 +1443,7 @@ async def approve_metric(
     """REVIEW → PUBLISHED(standard) / EXPERIMENTAL(experimental)。含 PII 门禁 + 依赖校验。"""
     service = MetricService(db)
     metric = await service.approve_metric(
-        metric_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+        metric_code, request, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     await write_audit(
         db,
@@ -1482,7 +1482,7 @@ async def reject_metric(
     """REVIEW → DRAFT，驳回审核。须填驳回原因，通知 Owner。"""
     service = MetricService(db)
     metric = await service.reject_metric(
-        metric_code, request, actor_id=user.id, role=user.role, user_domain=user.domain
+        metric_code, request, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     await write_audit(
         db,
@@ -1592,7 +1592,7 @@ async def extend_version(
         request.version,
         actor_id=user.id,
         role=user.role,
-        user_domain=user.domain,
+        user_domains=user.domains_all(),
     )
     await write_audit(
         db,
@@ -1778,7 +1778,7 @@ async def promote_metric(
         metric_code,
         actor_id=user.id,
         role=user.role,
-        user_domain=user.domain,
+        user_domains=user.domains_all(),
     )
     await write_audit(
         db,
@@ -1816,7 +1816,7 @@ async def rollback_metric(
         metric_code,
         actor_id=user.id,
         role=user.role,
-        user_domain=user.domain,
+        user_domains=user.domains_all(),
     )
     await write_audit(
         db,
@@ -2046,7 +2046,7 @@ async def get_metric_health(
     """
     service = MetricService(db)
     health = await service.get_metric_health(
-        metric_code, actor_id=user.id, role=user.role, user_domain=user.domain
+        metric_code, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     await db.commit()
     return ok(data=MetricHealthResponse.model_validate(health), trace_id=trace_id)
@@ -2136,7 +2136,7 @@ async def batch_register_metrics(
     """批量注册：LLM 预填 + 逐条校验 + 共享 batch_id。"""
     service = MetricService(db)
     result = await service.batch_register_metrics(
-        request, actor_id=user.id, role=user.role, user_domain=user.domain
+        request, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     # 审计 action 区分 full/partial/failed（此前恒记成功，全败也无法从 action 追溯）
     _failed = [c for c in result["candidates"] if c["status"] != "DRAFT"]
@@ -2822,7 +2822,7 @@ async def batch_register_from_sql_metrics(
     """
     service = MetricService(db)
     result = await service.batch_register_from_sql(
-        request, actor_id=user.id, role=user.role, user_domain=user.domain
+        request, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     # 审计 action 区分 full/partial/failed（此前恒记成功，全败也无法从 action 追溯）
     _failed = [c for c in result["candidates"] if c["status"] != "DRAFT"]
@@ -3192,7 +3192,7 @@ async def batch_import_metrics(
         candidates=_enrich_import_candidates(request.domain, request.candidates),
     )
     result = await service.batch_register_from_sql(
-        inner, actor_id=user.id, role=user.role, user_domain=user.domain
+        inner, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     _failed = [c for c in result["candidates"] if c["status"] != "DRAFT"]
     _action = "metric_definition.batch_import"
@@ -3292,7 +3292,7 @@ async def import_metrics_csv(
         candidates=_enrich_import_candidates(domain, candidates),
     )
     result = await service.batch_register_from_sql(
-        inner, actor_id=user.id, role=user.role, user_domain=user.domain
+        inner, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     if row_errors:
         result["row_errors"] = row_errors
@@ -3358,7 +3358,7 @@ async def batch_submit_metrics(
             ),
             actor_id=user.id,
             role=user.role,
-            user_domain=user.domain,
+            user_domains=user.domains_all(),
         ),
         abort_message="批量提交内部错误，已中止后续项",
     )
@@ -3404,7 +3404,7 @@ async def batch_approve_metrics(
             MetricApproveRequest(mode=request.mode, gray_tenant_ids=request.gray_tenant_ids),
             actor_id=user.id,
             role=user.role,
-            user_domain=user.domain,
+            user_domains=user.domains_all(),
         ),
         abort_message="批量通过内部错误，已中止后续项",
     )
@@ -3450,7 +3450,7 @@ async def batch_reject_metrics(
             MetricRejectRequest(reason=request.reason),
             actor_id=user.id,
             role=user.role,
-            user_domain=user.domain,
+            user_domains=user.domains_all(),
         ),
         abort_message="批量驳回内部错误，已中止后续项",
     )
@@ -3564,7 +3564,7 @@ async def batch_deprecate_metrics(
             item.successor_code,
             actor_id=user.id,
             role=user.role,
-            user_domain=user.domain,
+            user_domains=user.domains_all(),
         ),
         abort_message="批量下线内部错误，已中止后续项",
     )
@@ -3610,7 +3610,7 @@ async def reactivate_metric(
     """DEPRECATED → DRAFT（重新启用后走审核流，对齐维度单条 reactivate）。"""
     service = MetricService(db)
     metric = await service.reactivate_metric(
-        metric_code, actor_id=user.id, role=user.role, user_domain=user.domain
+        metric_code, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     await write_audit(
         db,
@@ -3646,7 +3646,7 @@ async def batch_reactivate_metrics(
         units=request.metric_codes,
         code_of=lambda code: code,
         run=lambda code: service.reactivate_metric(
-            code, actor_id=user.id, role=user.role, user_domain=user.domain
+            code, actor_id=user.id, role=user.role, user_domains=user.domains_all()
         ),
         abort_message="批量恢复内部错误，已中止后续项",
     )

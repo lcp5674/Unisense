@@ -578,7 +578,7 @@ async def test_count_review_assigned_matches_designation():
     db.execute.return_value.scalar_one.return_value = 3
     repo = MetricRepository(db)
 
-    cnt = await repo.count_review_assigned(7, "outpatient")
+    cnt = await repo.count_review_assigned(7, ["outpatient"])
 
     assert cnt == 3
     sql = _compiled_sql(db, 0)
@@ -594,7 +594,7 @@ async def test_count_review_actionable_platform_admin_full():
     db.execute.return_value.scalar_one.return_value = 6
     repo = MetricRepository(db)
 
-    cnt = await repo.count_review_actionable(7, "outpatient", "platform_admin")
+    cnt = await repo.count_review_actionable(7, ["outpatient"], "platform_admin")
 
     assert cnt == 6
     sql = _compiled_sql(db, 0)
@@ -609,7 +609,7 @@ async def test_count_review_actionable_domain_admin_scope():
     db.execute.return_value.scalar_one.return_value = 2
     repo = MetricRepository(db)
 
-    cnt = await repo.count_review_actionable(7, "outpatient", "domain_admin")
+    cnt = await repo.count_review_actionable(7, ["outpatient"], "domain_admin")
 
     assert cnt == 2
     sql = _compiled_sql(db, 0)
@@ -626,7 +626,7 @@ async def test_count_review_actionable_reviewer_no_unassigned():
     db.execute.return_value.scalar_one.return_value = 1
     repo = MetricRepository(db)
 
-    cnt = await repo.count_review_actionable(7, "outpatient", "reviewer")
+    cnt = await repo.count_review_actionable(7, ["outpatient"], "reviewer")
 
     assert cnt == 1
     sql = _compiled_sql(db, 0)
@@ -643,7 +643,7 @@ async def test_count_review_actionable_normal_role_zero():
     db.execute.return_value.scalar_one.return_value = 0
     repo = MetricRepository(db)
 
-    cnt = await repo.count_review_actionable(7, "outpatient", "analyst")
+    cnt = await repo.count_review_actionable(7, ["outpatient"], "analyst")
 
     assert cnt == 0
     sql = _compiled_sql(db, 0)

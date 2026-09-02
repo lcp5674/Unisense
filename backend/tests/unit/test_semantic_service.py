@@ -92,6 +92,38 @@ async def test_create_metric_happy_path():
     assert result.row_version == 1
 
 
+async def test_create_metric_domain_admin_allows_union_domains():
+    """写路径域门禁走权限域并集：domain_admin 拥有 [sales, finance] 时可创建 finance 域指标。"""
+    from app.core.exceptions import BusinessError
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.create = AsyncMock(return_value=make_metric())
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    # 双域并集：finance ∈ [sales, finance] → 放行
+    result = await svc.create_metric(
+        MetricCreateRequest(**make_create_payload(domain="finance")),
+        owner_id=1,
+        role="domain_admin",
+        user_domains=["sales", "finance"],
+    )
+    assert result is not None
+    repo.create.assert_awaited_once()
+
+    # 单域：finance ∉ [sales] → 拒绝（域门禁）
+    repo.create.reset_mock()
+    with pytest.raises(BusinessError) as exc:
+        await svc.create_metric(
+            MetricCreateRequest(**make_create_payload(domain="finance")),
+            owner_id=1,
+            role="domain_admin",
+            user_domains=["sales"],
+        )
+    assert exc.value.error_code == "FORBIDDEN"
+    repo.create.assert_not_awaited()
+
+
 async def test_create_atomic_passes_measure_id():
     """OneData：原子指标创建透传 measure_id（逻辑度量引用）。"""
     svc, repo = _svc_with_repo()
@@ -1105,7 +1137,7 @@ async def test_update_metric_blocked_by_pdp_decision():
                 ),
                 actor_id=1,  # owner：通过 _assert_owner_or_admin
                 role="metric_owner",
-                user_domain="other_domain",
+                user_domains=["other_domain"],
             )
 
         assert exc.value.error_code == "FORBIDDEN_DOMAIN"
@@ -1800,7 +1832,7 @@ async def test_deprecate_metric_blocked_by_pdp_cross_domain():
                 "sales_gmv_v2",
                 actor_id=2,
                 role="domain_admin",
-                user_domain="finance",  # 跨域：指标在 sales 域
+                user_domains=["finance"],  # 跨域：指标在 sales 域
             )
         assert exc.value.error_code == "FORBIDDEN_DOMAIN"
         repo.update_with_optimistic_lock.assert_not_called()
@@ -1968,7 +2000,7 @@ async def test_reactivate_metric_blocked_by_pdp_cross_domain():
         )
         with pytest.raises(BusinessError) as exc:
             await svc.reactivate_metric(
-                "sales_gmv_daily", actor_id=1, role="domain_admin", user_domain="finance"
+                "sales_gmv_daily", actor_id=1, role="domain_admin", user_domains=["finance"]
             )
         assert exc.value.error_code == "FORBIDDEN_DOMAIN"
         mock_repo_cls.return_value.update_with_optimistic_lock.assert_not_called()
@@ -2801,7 +2833,7 @@ async def test_sql_batch_register_domain_gate():
     )
     with pytest.raises(BusinessError) as exc:
         await svc.batch_register_from_sql(
-            request, actor_id=1, role="domain_admin", user_domain="finance"
+            request, actor_id=1, role="domain_admin", user_domains=["finance"]
         )
     assert exc.value.error_code == "FORBIDDEN"
 
@@ -3420,7 +3452,7 @@ async def test_submit_metric_saves_user_reviewer():
         MetricSubmitRequest(change_reason="提交审核", reviewer_id=7, reviewer_type="user"),
         actor_id=1,
         role="metric_owner",
-        user_domain="sales",
+        user_domains=["sales"],
     )
     kwargs = repo.update_with_optimistic_lock.call_args.kwargs
     assert kwargs["reviewer_id"] == 7
@@ -3448,7 +3480,7 @@ async def test_submit_metric_clears_reject_reason():
         MetricSubmitRequest(change_reason="已修正粒度，重新提审"),
         actor_id=1,
         role="metric_owner",
-        user_domain="sales",
+        user_domains=["sales"],
     )
     kwargs = repo.update_with_optimistic_lock.call_args.kwargs
     assert kwargs["reject_reason"] is None
@@ -3469,7 +3501,7 @@ async def test_submit_metric_domain_reviewer_defaults_to_metric_domain():
         MetricSubmitRequest(change_reason="提交审核", reviewer_type="domain"),
         actor_id=1,
         role="metric_owner",
-        user_domain="sales",
+        user_domains=["sales"],
     )
     kwargs = repo.update_with_optimistic_lock.call_args.kwargs
     assert kwargs["reviewer_type"] == "domain"
@@ -3517,7 +3549,7 @@ async def test_approve_metric_domain_team_same_domain_allowed():
         MetricApproveRequest(mode="standard", target_version=1),
         actor_id=50,
         role="reviewer",
-        user_domain="sales",
+        user_domains=["sales"],
     )
     assert result.status == "PUBLISHED"
 
@@ -3533,7 +3565,7 @@ async def test_approve_metric_domain_team_wrong_domain_rejected():
             MetricApproveRequest(mode="standard", target_version=1),
             actor_id=50,
             role="reviewer",
-            user_domain="finance",
+            user_domains=["finance"],
         )
     assert exc.value.error_code == "FORBIDDEN_REVIEWER"
 
@@ -3549,7 +3581,7 @@ async def test_approve_metric_domain_team_non_reviewer_role_rejected():
             MetricApproveRequest(mode="standard", target_version=1),
             actor_id=50,
             role="metric_owner",
-            user_domain="sales",
+            user_domains=["sales"],
         )
     assert exc.value.error_code == "FORBIDDEN_REVIEWER"
 
@@ -3565,7 +3597,7 @@ async def test_approve_metric_unassigned_non_domain_admin_rejected():
             MetricApproveRequest(mode="standard", target_version=1),
             actor_id=50,
             role="reviewer",
-            user_domain="sales",
+            user_domains=["sales"],
         )
     assert exc.value.error_code == "FORBIDDEN_REVIEWER"
 
@@ -3651,7 +3683,7 @@ async def test_submit_metric_success():
         MetricSubmitRequest(change_reason="提交审核"),
         actor_id=1,
         role="metric_owner",
-        user_domain="sales",
+        user_domains=["sales"],
     )
     assert result.status == "REVIEW"
     assert repo.update_with_optimistic_lock.call_args.kwargs["submitted_by"] == 1
@@ -3670,7 +3702,7 @@ async def test_submit_metric_blocked_when_definition_empty():
             MetricSubmitRequest(change_reason="提交审核"),
             actor_id=1,
             role="metric_owner",
-            user_domain="sales",
+            user_domains=["sales"],
         )
     assert exc.value.error_code == "DEFINITION_INCOMPLETE"
     repo.update_with_optimistic_lock.assert_not_called()
@@ -3694,7 +3726,7 @@ async def test_submit_metric_blocked_by_pdp_decision():
                 MetricSubmitRequest(change_reason="提交审核"),
                 actor_id=1,
                 role="metric_owner",
-                user_domain="other_domain",
+                user_domains=["other_domain"],
             )
 
         assert exc.value.error_code == "FORBIDDEN"
@@ -3712,7 +3744,7 @@ async def test_submit_metric_publishes_event():
         MetricSubmitRequest(change_reason="提交审核"),
         actor_id=1,
         role="metric_owner",
-        user_domain="sales",
+        user_domains=["sales"],
     )
     svc._publish_event.assert_awaited_once()
     assert svc._publish_event.call_args.args[0] == "metric.submitted"
@@ -4610,7 +4642,7 @@ async def test_get_metric_public_reviewer_user_assigned_visible():
     )
 
     resp = await svc.get_metric_public(
-        "sales_gmv_daily", actor_id=7, role="reviewer", user_domain="sales"
+        "sales_gmv_daily", actor_id=7, role="reviewer", user_domains=["sales"]
     )
 
     assert resp.metric_code == "sales_gmv_daily"
@@ -4629,7 +4661,7 @@ async def test_get_metric_public_reviewer_user_assigned_other_forbidden():
 
     with pytest.raises(NotFoundError):
         await svc.get_metric_public(
-            "sales_gmv_daily", actor_id=7, role="reviewer", user_domain="sales"
+            "sales_gmv_daily", actor_id=7, role="reviewer", user_domains=["sales"]
         )
 
 
@@ -4649,7 +4681,7 @@ async def test_get_metric_public_reviewer_domain_assigned_visible():
     )
 
     resp = await svc.get_metric_public(
-        "sales_gmv_daily", actor_id=7, role="reviewer", user_domain="outpatient"
+        "sales_gmv_daily", actor_id=7, role="reviewer", user_domains=["outpatient"]
     )
 
     assert resp.metric_code == "sales_gmv_daily"
@@ -4671,7 +4703,7 @@ async def test_get_metric_public_reviewer_domain_assigned_other_domain_forbidden
 
     with pytest.raises(NotFoundError):
         await svc.get_metric_public(
-            "sales_gmv_daily", actor_id=7, role="reviewer", user_domain="outpatient"
+            "sales_gmv_daily", actor_id=7, role="reviewer", user_domains=["outpatient"]
         )
 
 
@@ -4684,7 +4716,7 @@ async def test_get_metric_public_reviewer_unassigned_forbidden():
 
     with pytest.raises(NotFoundError):
         await svc.get_metric_public(
-            "sales_gmv_daily", actor_id=7, role="reviewer", user_domain="outpatient"
+            "sales_gmv_daily", actor_id=7, role="reviewer", user_domains=["outpatient"]
         )
 
 
@@ -5318,7 +5350,7 @@ async def test_submit_metric_invalid_transition():
             MetricSubmitRequest(change_reason="提交评审"),
             actor_id=1,
             role="metric_owner",
-            user_domain="sales",
+            user_domains=["sales"],
         )
     assert exc.value.error_code == "INVALID_TRANSITION"
 
@@ -6107,7 +6139,7 @@ async def test_update_consumption_guide_sets_manual_source():
         ),
         actor_id=1,
         role="metric_owner",
-        user_domain="sales",
+        user_domains=["sales"],
     )
 
     _, kwargs = repo.update_with_optimistic_lock.call_args
@@ -6169,7 +6201,7 @@ async def test_update_consumption_guide_not_owner_raises_auth():
             MetricConsumptionGuideUpdateRequest(recommended_usage=["x"]),
             actor_id=99,
             role="analyst",
-            user_domain="sales",
+            user_domains=["sales"],
         )
     repo.update_with_optimistic_lock.assert_not_called()
 
@@ -6184,7 +6216,7 @@ async def test_update_consumption_guide_deprecated_blocked_even_for_owner():
             MetricConsumptionGuideUpdateRequest(recommended_usage=["x"]),
             actor_id=9,
             role="metric_owner",
-            user_domain="sales",
+            user_domains=["sales"],
         )
     assert ei.value.error_code == "METRIC_DEPRECATED"
     repo.update_with_optimistic_lock.assert_not_called()
@@ -6501,7 +6533,7 @@ async def test_update_metric_description_sets_manual_source():
         MetricDescriptionUpdateRequest(description="  每日成交总额（含退款前）  "),
         actor_id=1,
         role="metric_owner",
-        user_domain="sales",
+        user_domains=["sales"],
     )
 
     _, kwargs = repo.update_with_optimistic_lock.call_args
@@ -6562,7 +6594,7 @@ async def test_update_metric_description_not_owner_raises_auth():
             MetricDescriptionUpdateRequest(description="他人指标"),
             actor_id=99,
             role="analyst",
-            user_domain="sales",
+            user_domains=["sales"],
         )
     repo.update_with_optimistic_lock.assert_not_called()
 
@@ -6586,7 +6618,7 @@ async def test_bind_metric_term_success():
     repo.update_with_optimistic_lock = AsyncMock(return_value=updated)
 
     result = await svc.bind_metric_term(
-        "sales_gmv_daily", 55, actor_id=1, role="metric_owner", user_domain="sales"
+        "sales_gmv_daily", 55, actor_id=1, role="metric_owner", user_domains=["sales"]
     )
 
     _, kwargs = repo.update_with_optimistic_lock.call_args
@@ -6615,7 +6647,7 @@ async def test_bind_metric_term_multiple():
         None,
         actor_id=1,
         role="metric_owner",
-        user_domain="sales",
+        user_domains=["sales"],
         term_ids=[7, 55],
     )
 
@@ -6644,7 +6676,7 @@ async def test_bind_metric_term_missing_raises():
             None,
             actor_id=1,
             role="metric_owner",
-            user_domain="sales",
+            user_domains=["sales"],
             term_ids=[7, 999],
         )
     assert "999" in str(ei.value)
@@ -6662,7 +6694,7 @@ async def test_bind_metric_term_unbind():
     svc._db.execute = AsyncMock(side_effect=AssertionError("不应查询术语"))
 
     await svc.bind_metric_term(
-        "sales_gmv_daily", None, actor_id=1, role="metric_owner", user_domain="sales"
+        "sales_gmv_daily", None, actor_id=1, role="metric_owner", user_domains=["sales"]
     )
 
     _, kwargs = repo.update_with_optimistic_lock.call_args
@@ -6679,7 +6711,7 @@ async def test_bind_metric_term_term_not_found():
 
     with pytest.raises(NotFoundError) as exc:
         await svc.bind_metric_term(
-            "sales_gmv_daily", 999, actor_id=1, role="metric_owner", user_domain="sales"
+            "sales_gmv_daily", 999, actor_id=1, role="metric_owner", user_domains=["sales"]
         )
     assert exc.value.error_code == "NOT_FOUND"
     repo.update_with_optimistic_lock.assert_not_called()
@@ -6692,7 +6724,7 @@ async def test_bind_metric_term_not_owner_raises_auth():
 
     with pytest.raises(AuthError):
         await svc.bind_metric_term(
-            "sales_gmv_daily", 55, actor_id=99, role="analyst", user_domain="sales"
+            "sales_gmv_daily", 55, actor_id=99, role="analyst", user_domains=["sales"]
         )
     repo.update_with_optimistic_lock.assert_not_called()
 
@@ -6720,7 +6752,7 @@ async def test_infer_metric_description_llm_success_sets_llm_source():
     )
     with patch.object(svc, "_build_llm_client", AsyncMock(return_value=fake)):
         result = await svc.infer_metric_description(
-            "sales_gmv_daily", actor_id=1, role="metric_owner", user_domain="sales"
+            "sales_gmv_daily", actor_id=1, role="metric_owner", user_domains=["sales"]
         )
 
     _, kwargs = repo.update_with_optimistic_lock.call_args
@@ -6769,7 +6801,7 @@ async def test_infer_metric_description_blocked_by_pdp():
 
     with pytest.raises(BusinessError) as ei:
         await svc.infer_metric_description(
-            "sales_gmv_daily", actor_id=1, role="metric_owner", user_domain="sales"
+            "sales_gmv_daily", actor_id=1, role="metric_owner", user_domains=["sales"]
         )
     assert ei.value.error_code == "FORBIDDEN"
     repo.update_with_optimistic_lock.assert_not_called()
@@ -6781,7 +6813,7 @@ async def test_infer_metric_description_not_owner_raises_auth():
 
     with pytest.raises(AuthError):
         await svc.infer_metric_description(
-            "sales_gmv_daily", actor_id=99, role="analyst", user_domain="sales"
+            "sales_gmv_daily", actor_id=99, role="analyst", user_domains=["sales"]
         )
     repo.update_with_optimistic_lock.assert_not_called()
 
@@ -6799,7 +6831,7 @@ async def test_infer_metric_description_skips_existing_llm_without_force():
         svc, "_llm_infer_metric_description", AsyncMock(return_value=None)
     ) as mock_infer:
         result = await svc.infer_metric_description(
-            "sales_gmv_daily", actor_id=1, role="metric_owner", user_domain="sales"
+            "sales_gmv_daily", actor_id=1, role="metric_owner", user_domains=["sales"]
         )
 
     assert result is existing
@@ -6823,7 +6855,7 @@ async def test_infer_metric_description_force_regenerates_existing_llm():
     fake = _llm_client('{"description": "新描述", "confidence": 0.9}')
     with patch.object(svc, "_build_llm_client", AsyncMock(return_value=fake)):
         result = await svc.infer_metric_description(
-            "sales_gmv_daily", actor_id=1, role="metric_owner", user_domain="sales", force=True
+            "sales_gmv_daily", actor_id=1, role="metric_owner", user_domains=["sales"], force=True
         )
 
     _, kwargs = repo.update_with_optimistic_lock.call_args
@@ -6854,7 +6886,7 @@ async def test_deprecated_metric_can_resubmit_for_review():
         MetricSubmitRequest(change_reason="废弃后重新评审"),
         actor_id=1,
         role="metric_owner",
-        user_domain="sales",
+        user_domains=["sales"],
     )
 
     assert result.status == "REVIEW"
@@ -6875,7 +6907,7 @@ async def test_published_metric_resubmit_still_blocked():
             MetricSubmitRequest(change_reason="不应允许"),
             actor_id=1,
             role="metric_owner",
-            user_domain="sales",
+            user_domains=["sales"],
         )
     assert exc.value.error_code == "INVALID_TRANSITION"
 
@@ -6902,7 +6934,7 @@ async def test_submit_notifies_specific_reviewer_when_assigned():
         ),
         actor_id=1,
         role="metric_owner",
-        user_domain="sales",
+        user_domains=["sales"],
     )
 
     calls = svc._notify_metric_stakeholders.call_args_list
@@ -6927,7 +6959,7 @@ async def test_deprecated_resubmit_publishes_resubmitted_event():
         MetricSubmitRequest(change_reason="重新评审"),
         actor_id=1,
         role="metric_owner",
-        user_domain="sales",
+        user_domains=["sales"],
     )
 
     published = svc._publish_event.call_args.args[0]

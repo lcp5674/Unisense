@@ -277,7 +277,7 @@ async def test_create_then_publish_promotes_version(db_env):
             MetricSubmitRequest(change_reason="首次提交审核"),
             actor_id=owner_id,
             role="metric_owner",
-            user_domain="fin",
+            user_domains=["fin"],
         )
         await session.commit()
 
@@ -286,7 +286,7 @@ async def test_create_then_publish_promotes_version(db_env):
             MetricApproveRequest(mode="standard", target_version=1),
             actor_id=reviewer_id,
             role="domain_admin",
-            user_domain="fin",
+            user_domains=["fin"],
         )
         await session.commit()
 
@@ -347,7 +347,7 @@ async def test_pii_flow_deadlock_resolved(db_env):
             MetricSubmitRequest(change_reason="提交含PII指标审核"),
             actor_id=owner_id,
             role="metric_owner",
-            user_domain="fin",
+            user_domains=["fin"],
         )
         await session.commit()
 
@@ -358,7 +358,7 @@ async def test_pii_flow_deadlock_resolved(db_env):
                 MetricApproveRequest(mode="standard"),
                 actor_id=reviewer_id,
                 role="domain_admin",
-                user_domain="fin",
+                user_domains=["fin"],
             )
         assert exc.value.error_code == "COMPLIANCE_BLOCKED"
 
@@ -375,7 +375,7 @@ async def test_pii_flow_deadlock_resolved(db_env):
             MetricApproveRequest(mode="standard"),
             actor_id=reviewer_id,
             role="domain_admin",
-            user_domain="fin",
+            user_domains=["fin"],
         )
         await session.commit()
         assert published.status == "PUBLISHED"
@@ -463,7 +463,7 @@ async def test_full_lifecycle_e2e(db_env):
             MetricSubmitRequest(change_reason="提交评审"),
             actor_id=owner_id,
             role="metric_owner",
-            user_domain="fin",
+            user_domains=["fin"],
         )
         await session.commit()
         assert submitted.status == "REVIEW"
@@ -474,7 +474,7 @@ async def test_full_lifecycle_e2e(db_env):
             MetricApproveRequest(mode="standard"),
             actor_id=reviewer_id,
             role="domain_admin",
-            user_domain="fin",
+            user_domains=["fin"],
         )
         await session.commit()
         assert approved.status == "PUBLISHED"
@@ -492,7 +492,7 @@ async def test_full_lifecycle_e2e(db_env):
             ),
             actor_id=owner_id,
             role="metric_owner",
-            user_domain="fin",
+            user_domains=["fin"],
         )
         await session.commit()
         # PUBLISHED + breaking → metric 主表不变，版本记录 PENDING_CONFIRMATION
@@ -526,7 +526,7 @@ async def test_gray_release_and_promote_e2e(db_env):
             MetricSubmitRequest(change_reason="灰度评审"),
             actor_id=owner_id,
             role="metric_owner",
-            user_domain="fin",
+            user_domains=["fin"],
         )
         await session.commit()
 
@@ -536,14 +536,14 @@ async def test_gray_release_and_promote_e2e(db_env):
             MetricApproveRequest(mode="experimental", gray_tenant_ids=[1, 2]),
             actor_id=reviewer_id,
             role="domain_admin",
-            user_domain="fin",
+            user_domains=["fin"],
         )
         await session.commit()
         assert gray.status == "EXPERIMENTAL"
 
         # promote → PUBLISHED
         promoted = await svc.promote_metric(
-            "fin_gray_flow_day", actor_id=owner_id, role="metric_owner", user_domain="fin"
+            "fin_gray_flow_day", actor_id=owner_id, role="metric_owner", user_domains=["fin"]
         )
         await session.commit()
         assert promoted.status == "PUBLISHED"

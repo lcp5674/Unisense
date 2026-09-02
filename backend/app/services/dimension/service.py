@@ -284,12 +284,12 @@ class DimensionService(BaseService, MasterDataReviewMixin):
         request: Any,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> Dimension:
         """提交维度审核（DRAFT → REVIEW，复用主数据审核流 TD §13）。"""
         dim = await self._require(dim_code)
         await self._submit_review(
-            dim, request, actor_id, role, user_domain, code=dim_code
+            dim, request, actor_id, role, user_domains, code=dim_code
         )
         return dim
 
@@ -299,12 +299,12 @@ class DimensionService(BaseService, MasterDataReviewMixin):
         request: Any,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> Dimension:
         """审核通过维度（REVIEW → PUBLISHED，复用主数据审核流 FR-004）。"""
         dim = await self._require(dim_code)
         await self._approve_review(
-            dim, request, actor_id, role, user_domain, code=dim_code
+            dim, request, actor_id, role, user_domains, code=dim_code
         )
         return dim
 
@@ -314,12 +314,12 @@ class DimensionService(BaseService, MasterDataReviewMixin):
         request: Any,
         actor_id: int,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> Dimension:
         """审核驳回维度（REVIEW → DRAFT，复用主数据审核流 FR-005）。"""
         dim = await self._require(dim_code)
         await self._reject_review(
-            dim, request, actor_id, role, user_domain, code=dim_code
+            dim, request, actor_id, role, user_domains, code=dim_code
         )
         return dim
 

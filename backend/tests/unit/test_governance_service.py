@@ -839,7 +839,7 @@ async def test_check_metric_permission_allows_same_domain_owner() -> None:
     svc, repo, _ = _svc()
     repo.metrics["m1"] = FakeMetric(metric_code="m1", domain="sales", owner_id=5)
     decision = await svc.check_metric_permission(
-        metric_code="m1", action="write", user_id=5, role="metric_owner", user_domain="sales"
+        metric_code="m1", action="write", user_id=5, role="metric_owner", user_domains=["sales"]
     )
     assert decision.allow is True
 
@@ -848,7 +848,7 @@ async def test_check_metric_permission_blocks_cross_domain() -> None:
     svc, repo, _ = _svc()
     repo.metrics["m1"] = FakeMetric(metric_code="m1", domain="sales", owner_id=5)
     decision = await svc.check_metric_permission(
-        metric_code="m1", action="write", user_id=5, role="metric_owner", user_domain="finance"
+        metric_code="m1", action="write", user_id=5, role="metric_owner", user_domains=["finance"]
     )
     assert decision.allow is False
     assert decision.error_code == "FORBIDDEN"
@@ -860,7 +860,7 @@ async def test_check_metric_permission_blocks_unreviewed_pii() -> None:
         metric_code="m1", domain="sales", owner_id=5, pii_flag=True, compliance_reviewed=False
     )
     decision = await svc.check_metric_permission(
-        metric_code="m1", action="read", user_id=5, role="metric_owner", user_domain="sales"
+        metric_code="m1", action="read", user_id=5, role="metric_owner", user_domains=["sales"]
     )
     assert decision.allow is False
     assert decision.error_code == "FORBIDDEN_PII"
@@ -882,7 +882,7 @@ async def test_check_metric_permission_skip_pii_gate_allows_submit_flow() -> Non
     )
     # 默认（不跳过）→ PII 门禁拦截
     blocked = await svc.check_metric_permission(
-        metric_code="m1", action="write", user_id=5, role="metric_owner", user_domain="sales"
+        metric_code="m1", action="write", user_id=5, role="metric_owner", user_domains=["sales"]
     )
     assert blocked.allow is False
     assert blocked.error_code == "FORBIDDEN_PII"
@@ -892,7 +892,7 @@ async def test_check_metric_permission_skip_pii_gate_allows_submit_flow() -> Non
         action="write",
         user_id=5,
         role="metric_owner",
-        user_domain="sales",
+        user_domains=["sales"],
         skip_pii_gate=True,
     )
     assert allowed.allow is True
@@ -902,7 +902,7 @@ async def test_check_metric_permission_skip_pii_gate_allows_submit_flow() -> Non
         action="write",
         user_id=5,
         role="metric_owner",
-        user_domain="finance",
+        user_domains=["finance"],
         skip_pii_gate=True,
     )
     assert cross.allow is False
@@ -933,7 +933,7 @@ async def test_set_role_permissions_overrides_effective_and_decision() -> None:
 
     # 默认 reviewer 不可导出（基线无 export）
     denied = await svc.check_metric_permission(
-        metric_code="m1", action="export", user_id=1, role="reviewer", user_domain="sales"
+        metric_code="m1", action="export", user_id=1, role="reviewer", user_domains=["sales"]
     )
     assert denied.allow is False
     # 覆盖 reviewer 追加 export
@@ -943,7 +943,7 @@ async def test_set_role_permissions_overrides_effective_and_decision() -> None:
 
     # 覆盖后 reviewer 本域可导出（load_role_actions 合并生效）
     allowed = await svc.check_metric_permission(
-        metric_code="m1", action="export", user_id=1, role="reviewer", user_domain="sales"
+        metric_code="m1", action="export", user_id=1, role="reviewer", user_domains=["sales"]
     )
     assert allowed.allow is True
 
@@ -956,12 +956,12 @@ async def test_set_role_permissions_revokes_action() -> None:
     )
     await svc.set_role_permissions("domain_admin", ["read", "approve", "export"])
     d = await svc.check_metric_permission(
-        metric_code="m1", action="write", user_id=1, role="domain_admin", user_domain="sales"
+        metric_code="m1", action="write", user_id=1, role="domain_admin", user_domains=["sales"]
     )
     assert d.allow is False
     # 本域 read 仍放行
     d2 = await svc.check_metric_permission(
-        metric_code="m1", action="read", user_id=1, role="domain_admin", user_domain="sales"
+        metric_code="m1", action="read", user_id=1, role="domain_admin", user_domains=["sales"]
     )
     assert d2.allow is True
 

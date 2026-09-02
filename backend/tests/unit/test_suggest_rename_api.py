@@ -65,7 +65,7 @@ async def test_suggest_rename_llm_candidates(
 ) -> None:
     """LLM 可用：返回 source=llm 候选，并把 rename_opposite_code 作为对方上下文。"""
 
-    async def _get_metric(code: str) -> SimpleNamespace:
+    async def _get_metric(code: str, **kwargs: object) -> SimpleNamespace:
         if code == "sales_gmv_d":
             # 对方指标：同名不同义（不同口径名称）
             return SimpleNamespace(
