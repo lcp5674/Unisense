@@ -158,3 +158,20 @@ async def test_internal_low_role_query_rejected() -> None:
     app.dependency_overrides.clear()
     assert resp.status_code == 403
     svc.execute_query.assert_not_awaited()
+
+
+async def test_list_api_clients_domain_admin_forbidden() -> None:
+    """接入方列表收窄：domain_admin 无 platform_admin 角色 → 403（ApiClient 无组织归属）。"""
+    async def fake_db():
+        yield MagicMock()
+
+    user = MagicMock(spec=User, id=5, role="domain_admin")
+    user.roles_all.return_value = ["domain_admin"]
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: user
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/consume/api-clients")
+    app.dependency_overrides.clear()
+    assert resp.status_code == 403

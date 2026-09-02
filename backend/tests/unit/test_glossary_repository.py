@@ -192,6 +192,54 @@ class TestTermRepo:
         assert "PUBLISHED" not in literal_sql
         assert "DRAFT" not in literal_sql
 
+    async def test_list_terms_visible_domain_admin_scoped_to_own_domain(
+        self, repo: GlossaryRepository
+    ) -> None:
+        """域管理员读路径域收敛：绑定域 → 本域（全状态）+ 本人负责，不再全量可见。"""
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = []
+        mock_result.scalar.return_value = 0
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        await repo.list_terms(
+            domain=None,
+            status=None,
+            search=None,
+            limit=10,
+            offset=0,
+            visible_actor_id=2,
+            visible_role="domain_admin",
+            visible_user_domain="outpatient",
+        )
+        stmt = repo._session.execute.call_args_list[1].args[0]
+        literal_sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "term.domain = 'outpatient'" in literal_sql
+        assert "term.owner_id = 2" in literal_sql
+        assert "PUBLISHED" not in literal_sql
+
+    async def test_list_terms_visible_domain_admin_no_domain_personal_view(
+        self, repo: GlossaryRepository
+    ) -> None:
+        """未绑定域的 domain_admin → 退化个人视角（公开 + 本人负责），不泄露他人 DRAFT。"""
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = []
+        mock_result.scalar.return_value = 0
+        repo._session.execute = AsyncMock(return_value=mock_result)
+        await repo.list_terms(
+            domain=None,
+            status=None,
+            search=None,
+            limit=10,
+            offset=0,
+            visible_actor_id=2,
+            visible_role="domain_admin",
+            visible_user_domain=None,
+        )
+        stmt = repo._session.execute.call_args_list[1].args[0]
+        literal_sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "term.status IN ('PUBLISHED', 'DEPRECATED')" in literal_sql
+        assert "term.owner_id = 2" in literal_sql
+        assert "term.domain = 'outpatient'" not in literal_sql
+
     async def test_delete_term(self, repo: GlossaryRepository) -> None:
         term = Term(term_code="T1")
         await repo.delete_term(term)

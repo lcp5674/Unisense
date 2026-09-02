@@ -801,11 +801,12 @@ async def test_dashboard_scopes_regular_user_to_self() -> None:
 
     assert captured == [("sales", 99)], f"管理角色应透传外部筛选，实际 {captured}"
 
-    # domain_admin 同样视为管理角色（域治理视角）
+    # domain_admin 域收敛：绑定域 → 本域（忽略外部 owner_id/domain），未绑定域 → 个人视角
     captured.clear()
     domain_admin = MagicMock()
     domain_admin.id = 2
     domain_admin.role = "domain_admin"
+    domain_admin.domain = "outpatient"
     domain_admin.roles_all.return_value = ["domain_admin"]
     with patch(
         "app.services.semantic.repository.MetricRepository.aggregate_dashboard",
@@ -819,7 +820,30 @@ async def test_dashboard_scopes_regular_user_to_self() -> None:
     ):
         await dashboard(request=req, user=domain_admin, db=db, owner_id=5, domain="outpatient")
 
-    assert captured == [("outpatient", 5)], f"domain_admin 应透传外部筛选，实际 {captured}"
+    assert captured == [("outpatient", None)], (
+        f"domain_admin 绑定域应收敛本域并忽略外部 owner_id，实际 {captured}"
+    )
+
+    # domain_admin 未绑定域 → 退化个人视角（与 metric 列表语义一致）
+    captured.clear()
+    domain_admin_none = MagicMock()
+    domain_admin_none.id = 2
+    domain_admin_none.role = "domain_admin"
+    domain_admin_none.domain = None
+    domain_admin_none.roles_all.return_value = ["domain_admin"]
+    with patch(
+        "app.services.semantic.repository.MetricRepository.aggregate_dashboard",
+        new=_fake_aggregate,
+    ), patch(
+        "app.services.semantic.repository.MetricRepository.count_review_actionable",
+        new=AsyncMock(return_value=0),
+    ), patch(
+        "app.services.collector.service.CollectorService.count_jobs_by_status",
+        new=AsyncMock(return_value={}),
+    ):
+        await dashboard(request=req, user=domain_admin_none, db=db, owner_id=5, domain="outpatient")
+
+    assert captured == [(None, 2)], f"domain_admin 未绑定域应退化个人视角，实际 {captured}"
 
 
 async def test_dashboard_reviewer_gets_assigned_review() -> None:
@@ -881,7 +905,7 @@ async def test_dashboard_reviewer_gets_assigned_review() -> None:
 
     assert "assigned_review" not in result2.data
 
-    # domain_admin（管理角色）：同样附加 assigned_review（可审口径），且透传外部筛选不变
+    # domain_admin（管理角色）：同样附加 assigned_review（可审口径），且聚合按本域收敛
     captured.clear()
     da = MagicMock()
     da.id = 9
@@ -900,5 +924,7 @@ async def test_dashboard_reviewer_gets_assigned_review() -> None:
     ):
         result3 = await dashboard(request=req, user=da, db=db, owner_id=5, domain="outpatient")
 
-    assert captured == [("outpatient", 5)], "domain_admin 应透传外部筛选，实际 {captured}"
+    assert captured == [("outpatient", None)], (
+        "domain_admin 绑定域应收敛本域并忽略外部 owner_id，实际 " + str(captured)
+    )
     assert result3.data.get("assigned_review") == 2

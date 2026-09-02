@@ -727,9 +727,18 @@ async def dashboard(
 
     roles = user.roles_all()
     is_admin = "platform_admin" in roles or "domain_admin" in roles
-    if is_admin:
-        # 管理角色：保留外部筛选（全量治理视角）
+    if "platform_admin" in roles:
+        # 平台管理员：保留外部筛选（全平台治理视角）
         pass
+    elif "domain_admin" in roles:
+        # 域管理员：域收敛（对齐 visibility.metric_visibility_conditions）——
+        # 绑定域 → 本域全状态统计；未绑定域 → 退化为个人视角（只统计本人负责的资产）
+        if user.domain:
+            domain = user.domain
+            owner_id = None
+        else:
+            domain = None
+            owner_id = user.id
     else:
         # 普通用户：强制只看自己负责的资产（忽略外部 owner_id/domain 防越权）
         owner_id = user.id

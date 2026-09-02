@@ -86,6 +86,44 @@ async def test_list_audit_logs_with_filters(audit_client: httpx.AsyncClient) -> 
     assert resp.json()["data"]["page_size"] == 20
 
 
+async def test_list_audit_logs_domain_admin_scoped_to_own_org() -> None:
+    """组织收敛：非平台管理员（domain_admin）仅可见本组织审计日志（含他人 PII 访问不越权）。"""
+    from app.api.audit import list_audit_logs
+
+    session = MagicMock()
+    count_result = MagicMock()
+    count_result.scalar_one.return_value = 1
+    rows_result = MagicMock()
+    rows_result.all.return_value = [(_make_log(), "域管理员")]
+    session.execute = AsyncMock(side_effect=[count_result, rows_result])
+
+    user = MagicMock(
+        id=2,
+        role="domain_admin",
+        org_id=1,
+        roles_all=lambda: ["domain_admin"],
+        has_role=lambda r: r == "domain_admin",
+    )
+    resp = await list_audit_logs(
+        db=session,
+        user=user,
+        trace_id="t-org",
+        actor_id=None,
+        actor_keyword=None,
+        entity_type=None,
+        entity_id=None,
+        trace_id_filter=None,
+        pii_access=None,
+        page=1,
+        page_size=20,
+    )
+    # 主查询 SQL 应包含 user.org_id = 1（组织收敛，join User 后按归属过滤）
+    stmt = session.execute.call_args_list[1].args[0]
+    literal_sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "org_id = 1" in literal_sql
+    assert resp.data["total"] == 1
+
+
 async def test_list_audit_logs_with_actor_keyword(audit_client: httpx.AsyncClient) -> None:
     """操作人姓名/用户名模糊搜索（企业级检索：记姓名而非数字 ID）。"""
     resp = await audit_client.get("/api/v1/audit", params={"actor_keyword": "管理员"})

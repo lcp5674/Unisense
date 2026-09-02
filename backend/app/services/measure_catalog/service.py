@@ -282,12 +282,14 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
         page_size: int = 20,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
+        visible_user_domain: str | None = None,
     ) -> tuple[list[MeasureCatalog], int]:
         """分页列出逻辑度量，返回 (列表, total)（服务端分页，对齐 dimension）。
 
         reviewed_by 非空时过滤"我审过的"（通过/驳回人 ID 匹配，供统一主数据审批工作台）。
-        visible_actor_id/visible_role：读路径行级隔离（P0-3）——非管理角色仅可见
-        公开状态 + 本人负责的未发布度量；评审人可看待审（REVIEW）。
+        visible_actor_id/visible_role/visible_user_domain：读路径行级隔离（P0-3）——
+        非管理角色仅可见公开状态 + 本人负责的未发布度量；评审人可看待审（REVIEW）；
+        域管理员按 user_domain 收敛本域（未绑定域退化个人视角）。
         """
         limit = min(max(page_size, 1), 200)
         offset = (max(page, 1) - 1) * limit
@@ -302,6 +304,7 @@ class MeasureCatalogService(BaseService, MasterDataReviewMixin):
             offset=offset,
             visible_actor_id=visible_actor_id,
             visible_role=visible_role,
+            visible_user_domain=visible_user_domain,
         )
 
     async def update_measure(self, measure_code: str, data: MeasureUpdate) -> MeasureCatalog:

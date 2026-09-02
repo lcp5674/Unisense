@@ -4686,8 +4686,21 @@ class MetricService(BaseService):
             return  # 内部调用无鉴权上下文——端点层必传 actor/role
         if self._is_public_metric_status(metric.status):
             return
-        if role in ("platform_admin", "domain_admin"):
+        if role == "platform_admin":
             return
+        if role == "domain_admin":
+            # 域管理员读路径域收敛（对齐 visibility.metric_is_visible）：
+            # 绑定域 → 本域（全状态）+ 本人负责；未绑定域 → 退化个人视角（公开+本人负责）
+            if user_domain:
+                if (
+                    metric.domain == user_domain
+                    or metric.owner_id == actor_id
+                    or metric.backup_owner_id == actor_id
+                ):
+                    return
+            elif metric.owner_id == actor_id or metric.backup_owner_id == actor_id:
+                return
+            raise NotFoundError(f"指标不存在: {metric.metric_code}")
         if metric.owner_id == actor_id or metric.backup_owner_id == actor_id:
             return
         if role == "reviewer" and metric.status == "REVIEW":

@@ -186,12 +186,13 @@ class DimensionService(BaseService, MasterDataReviewMixin):
         page_size: int = 20,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
+        visible_user_domain: str | None = None,
     ) -> tuple[list[tuple[Dimension, int]], int]:
         """分页列出维度，返回 (列表, total)（服务端分页，对齐 glossary）。
 
         deleted=True 时列出已软删记录（回收站视图）。
         reviewed_by 非空时过滤"我审过的"（通过/驳回人 ID 匹配，供统一主数据审批工作台）。
-        visible_actor_id/visible_role：读路径行级隔离（P0-3，对齐指标）透传。
+        visible_actor_id/visible_role/visible_user_domain：读路径行级隔离（P0-3，对齐指标）透传。
         """
         limit = min(max(page_size, 1), 200)
         offset = (max(page, 1) - 1) * limit
@@ -206,6 +207,7 @@ class DimensionService(BaseService, MasterDataReviewMixin):
             offset=offset,
             visible_actor_id=visible_actor_id,
             visible_role=visible_role,
+            visible_user_domain=visible_user_domain,
         )
 
     async def update_dimension(self, dim_code: str, data: DimensionUpdate) -> Dimension:

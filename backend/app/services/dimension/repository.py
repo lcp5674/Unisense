@@ -63,6 +63,7 @@ class DimensionRepository:
         offset: int = 0,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
+        visible_user_domain: str | None = None,
     ) -> tuple[list[tuple[Dimension, int]], int]:
         """分页列出维度并附带绑定指标数，返回 (列表, total)。
 
@@ -82,19 +83,33 @@ class DimensionRepository:
         )
         # P0-3 读路径行级隔离（对齐指标 list_metrics）：维度 DRAFT/REVIEW 是创建者私有
         # 工作区，他人不得窥探；公开状态（PUBLISHED/DEPRECATED）可被发现。
-        if (
-            visible_actor_id is not None
-            and visible_role is not None
-            and visible_role not in ("platform_admin", "domain_admin")
-        ):
-            visibility: list[ColumnElement[bool]] = [
-                Dimension.status.in_(("PUBLISHED", "DEPRECATED")),
-                Dimension.owner_id == visible_actor_id,
-            ]
-            if visible_role == "reviewer":
-                # 评审人可看待审（REVIEW）维度——统一主数据审批工作台需展示全部待审项
-                visibility.append(Dimension.status == "REVIEW")
-            conditions.append(or_(*visibility))
+        # 域管理员域收敛：绑定域 → 本域（全状态）+ 本人负责；未绑定域 → 退化个人视角。
+        if visible_actor_id is not None and visible_role is not None:
+            visibility: list[ColumnElement[bool]]
+            if visible_role == "platform_admin":
+                visibility = []
+            elif visible_role == "domain_admin":
+                visibility = (
+                    [
+                        Dimension.domain == visible_user_domain,
+                        Dimension.owner_id == visible_actor_id,
+                    ]
+                    if visible_user_domain
+                    else [
+                        Dimension.status.in_(("PUBLISHED", "DEPRECATED")),
+                        Dimension.owner_id == visible_actor_id,
+                    ]
+                )
+            else:
+                visibility = [
+                    Dimension.status.in_(("PUBLISHED", "DEPRECATED")),
+                    Dimension.owner_id == visible_actor_id,
+                ]
+                if visible_role == "reviewer":
+                    # 评审人可看待审（REVIEW）维度——统一主数据审批工作台需展示全部待审项
+                    visibility.append(Dimension.status == "REVIEW")
+            if visibility:
+                conditions.append(or_(*visibility))
         if domain:
             conditions.append(Dimension.domain == domain)
         if status:

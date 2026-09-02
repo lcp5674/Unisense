@@ -147,6 +147,7 @@ async def list_measures(
         page_size=page_size,
         visible_actor_id=user.id,
         visible_role=user.role,
+        visible_user_domain=user.domain,
     )
     converted = [MeasureResponse.from_model(i) for i in items]
     return ok(

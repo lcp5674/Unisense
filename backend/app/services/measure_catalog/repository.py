@@ -86,6 +86,7 @@ class MeasureCatalogRepository:
         offset: int = 0,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
+        visible_user_domain: str | None = None,
     ) -> tuple[list[MeasureCatalog], int]:
         """分页列出逻辑度量，返回 (列表, total)。
 
@@ -104,18 +105,32 @@ class MeasureCatalogRepository:
         )
         # P0-3 读路径行级隔离（对齐 dimension/glossary）：度量 DRAFT/REVIEW 是创建者
         # 私有工作区，他人不得窥探；公开状态（PUBLISHED/DEPRECATED）可被发现。
-        if (
-            visible_actor_id is not None
-            and visible_role is not None
-            and visible_role not in ("platform_admin", "domain_admin")
-        ):
-            visibility: list[Any] = [
-                MeasureCatalog.status.in_(("PUBLISHED", "DEPRECATED")),
-                MeasureCatalog.owner_id == visible_actor_id,
-            ]
-            if visible_role == "reviewer":
-                visibility.append(MeasureCatalog.status == "REVIEW")
-            conditions.append(or_(*visibility))
+        # 域管理员域收敛：绑定域 → 本域（全状态）+ 本人负责；未绑定域 → 退化个人视角。
+        if visible_actor_id is not None and visible_role is not None:
+            visibility: list[Any]
+            if visible_role == "platform_admin":
+                visibility = []
+            elif visible_role == "domain_admin":
+                visibility = (
+                    [
+                        MeasureCatalog.domain == visible_user_domain,
+                        MeasureCatalog.owner_id == visible_actor_id,
+                    ]
+                    if visible_user_domain
+                    else [
+                        MeasureCatalog.status.in_(("PUBLISHED", "DEPRECATED")),
+                        MeasureCatalog.owner_id == visible_actor_id,
+                    ]
+                )
+            else:
+                visibility = [
+                    MeasureCatalog.status.in_(("PUBLISHED", "DEPRECATED")),
+                    MeasureCatalog.owner_id == visible_actor_id,
+                ]
+                if visible_role == "reviewer":
+                    visibility.append(MeasureCatalog.status == "REVIEW")
+            if visibility:
+                conditions.append(or_(*visibility))
         if domain:
             conditions.append(MeasureCatalog.domain == domain)
         if status:

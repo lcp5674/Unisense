@@ -990,6 +990,38 @@ class TestMeasureReadVisibility:
         list_sql = str(session.execute.call_args_list[1][0][0].compile())
         assert "IN ('PUBLISHED', 'DEPRECATED')" not in list_sql
 
+    async def test_list_domain_admin_scoped_to_own_domain(self, repo, session) -> None:
+        """域管理员读路径域收敛：绑定域 → 本域（全状态）+ 本人负责，不再全量可见。"""
+        session.execute = AsyncMock(side_effect=[_FakeResult(row=0), _FakeResult(rows=[])])
+        await repo.list(
+            None, None, visible_actor_id=2, visible_role="domain_admin",
+            visible_user_domain="outpatient",
+        )
+        list_sql = str(
+            session.execute.call_args_list[1][0][0].compile(
+                compile_kwargs={"literal_binds": True}
+            )
+        )
+        assert "measure_catalog.domain = 'outpatient'" in list_sql
+        assert "measure_catalog.owner_id = 2" in list_sql
+        assert "IN ('PUBLISHED', 'DEPRECATED')" not in list_sql
+
+    async def test_list_domain_admin_no_domain_personal_view(self, repo, session) -> None:
+        """未绑定域的 domain_admin → 退化个人视角（公开 + 本人负责），不泄露他人 DRAFT。"""
+        session.execute = AsyncMock(side_effect=[_FakeResult(row=0), _FakeResult(rows=[])])
+        await repo.list(
+            None, None, visible_actor_id=2, visible_role="domain_admin",
+            visible_user_domain=None,
+        )
+        list_sql = str(
+            session.execute.call_args_list[1][0][0].compile(
+                compile_kwargs={"literal_binds": True}
+            )
+        )
+        assert "measure_catalog.status IN ('PUBLISHED', 'DEPRECATED')" in list_sql
+        assert "measure_catalog.owner_id = 2" in list_sql
+        assert "measure_catalog.domain = 'outpatient'" not in list_sql
+
     async def test_get_measure_visible_owner_sees_draft(self) -> None:
         """本人可见自己的 DRAFT 度量。"""
         svc, repo = await _svc()

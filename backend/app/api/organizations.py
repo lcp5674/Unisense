@@ -193,6 +193,10 @@ async def list_organizations(
 ) -> ApiResponse[dict[str, Any]]:
     """组织列表（含用户数统计，软删行排除）。"""
     base = select(Organization).where(Organization.deleted_at.is_(None))
+    # 组织收敛：非平台管理员仅可见本组织（domain_admin 的组织治理范围是自己的组织，
+    # 与 collector._resolve_org_scope 同语义；未绑定组织的用户看到空列表）。
+    if "platform_admin" not in user.roles_all() and user.org_id is not None:
+        base = base.where(Organization.id == user.org_id)
     if keyword:
         escaped = _escape_like(keyword)
         like = f"%{escaped}%"

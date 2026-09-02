@@ -80,24 +80,39 @@ class GlossaryRepository:
         reviewed_by: int | None = None,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
+        visible_user_domain: str | None = None,
     ) -> tuple[Iterable[Term], int]:
         # 回收站视图：deleted=True 列出已软删术语；默认列表仅未删
         conditions = [Term.deleted_at.is_not(None) if deleted else Term.deleted_at.is_(None)]
         # P0-3 读路径行级隔离（对齐指标 list_metrics）：术语 DRAFT/REVIEW 是创建者私有
         # 工作区，他人不得窥探；公开状态（PUBLISHED/DEPRECATED）可被发现。
-        if (
-            visible_actor_id is not None
-            and visible_role is not None
-            and visible_role not in ("platform_admin", "domain_admin")
-        ):
-            visibility: list[ColumnElement[bool]] = [
-                Term.status.in_(("PUBLISHED", "DEPRECATED")),
-                Term.owner_id == visible_actor_id,
-            ]
-            if visible_role == "reviewer":
-                # 评审人可看待审（REVIEW）术语——统一主数据审批工作台需展示全部待审项
-                visibility.append(Term.status == "REVIEW")
-            conditions.append(or_(*visibility))
+        # 域管理员域收敛：绑定域 → 本域（全状态）+ 本人负责；未绑定域 → 退化个人视角。
+        if visible_actor_id is not None and visible_role is not None:
+            visibility: list[ColumnElement[bool]]
+            if visible_role == "platform_admin":
+                visibility = []
+            elif visible_role == "domain_admin":
+                visibility = (
+                    [
+                        Term.domain == visible_user_domain,
+                        Term.owner_id == visible_actor_id,
+                    ]
+                    if visible_user_domain
+                    else [
+                        Term.status.in_(("PUBLISHED", "DEPRECATED")),
+                        Term.owner_id == visible_actor_id,
+                    ]
+                )
+            else:
+                visibility = [
+                    Term.status.in_(("PUBLISHED", "DEPRECATED")),
+                    Term.owner_id == visible_actor_id,
+                ]
+                if visible_role == "reviewer":
+                    # 评审人可看待审（REVIEW）术语——统一主数据审批工作台需展示全部待审项
+                    visibility.append(Term.status == "REVIEW")
+            if visibility:
+                conditions.append(or_(*visibility))
         if domain:
             conditions.append(Term.domain == domain)
         if status:

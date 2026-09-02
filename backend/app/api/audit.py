@@ -108,6 +108,13 @@ async def list_audit_logs(
         User, User.id == AuditLog.actor_id
     )
 
+    # 组织收敛：非平台管理员仅可见本组织操作日志（审计是组织级合规数据，
+    # domain_admin/compliance_officer 不应越权查看他组织审计，含他人 PII 访问/IP）。
+    roles = user.roles_all()
+    if "platform_admin" not in roles and user.org_id is not None:
+        stmt = stmt.where(User.org_id == user.org_id)
+        count_stmt = count_stmt.where(User.org_id == user.org_id)
+
     stmt, count_stmt = _apply_filters(
         stmt,
         count_stmt,

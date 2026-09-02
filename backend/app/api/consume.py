@@ -392,7 +392,9 @@ async def create_client(
 @router.get("/consume/api-clients", response_model=ApiResponse[list[ClientResponse]])
 async def list_clients(
     domain: str | None = Query(default=None),
-    user: User = Depends(require_roles("platform_admin", "domain_admin")),
+    # 接入方是平台级消费凭据（client_id/scope/白名单/配额），仅平台管理员可枚举；
+    # ApiClient 无组织归属，domain_admin 不应越权查看全部接入方配置。
+    user: User = Depends(require_roles("platform_admin")),
     db: AsyncSession = Depends(get_db_session),
 ) -> ApiResponse[list[ClientResponse]]:
     repo = ApiClientRepo(db)

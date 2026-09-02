@@ -296,6 +296,39 @@ async def test_viewer_forbidden_from_organizations() -> None:
     assert resp.status_code == 403
 
 
+async def test_list_organizations_domain_admin_scoped_to_own_org() -> None:
+    """组织收敛：domain_admin 仅可见本组织（与 collector._resolve_org_scope 同语义）。"""
+    from app.api.organizations import list_organizations
+
+    session = MagicMock()
+    count_result = MagicMock()
+    count_result.scalar.return_value = 1
+    org = _make_org(id=2, code="sales_dept", name="销售部")
+    rows_result = MagicMock()
+    rows_result.scalars.return_value.all.return_value = [org]
+    counts_result = MagicMock()
+    counts_result.all.return_value = [(2, 5)]
+    session.execute = AsyncMock(
+        side_effect=[count_result, rows_result, counts_result]
+    )
+
+    user = MagicMock(
+        id=5,
+        role="domain_admin",
+        org_id=2,
+        roles_all=lambda: ["domain_admin"],
+        has_role=lambda r: r == "domain_admin",
+    )
+    resp = await list_organizations(
+        db=session, user=user, trace_id="t-org", keyword=None, status=None, page=1, page_size=50
+    )
+    # 主查询 SQL 应包含 organization.id = 2（组织收敛）
+    stmt = session.execute.call_args_list[1].args[0]
+    literal_sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "id = 2" in literal_sql
+    assert resp.data["total"] == 1
+
+
 # ---------------------------------------------------------------------------
 # 组织状态变更定向通知（轨道D：NotifyService.notify_user best-effort）
 # ---------------------------------------------------------------------------
