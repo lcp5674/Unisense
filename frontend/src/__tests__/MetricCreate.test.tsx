@@ -1568,6 +1568,37 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
     await waitFor(() => expect(screen.getByText("科室 (dept)")).toBeTruthy());
   });
 
+  it("关联维度输入关键词实时检索平台维度（防抖远程拉取 keyword，不再受首次 200 条上限）", async () => {
+    const mockedDims = vi.mocked(listDimensions);
+    mockedDims.mockResolvedValue({
+      items: [
+        { id: 1, dim_code: "dept", name: "科室", description: "", domain: "sales", owner_id: 1, status: "PUBLISHED", row_version: 1 },
+        { id: 2, dim_code: "hospital", name: "医院", description: "", domain: "sales", owner_id: 1, status: "PUBLISHED", row_version: 1 },
+      ],
+      total: 2,
+      page: 1,
+      page_size: 50,
+    } as any);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await goToStep(1);
+    const select = screen.getByText("选择平台维度或输入维度编码（可搜索）").closest(".ant-select") as HTMLElement;
+    fireEvent.mouseDown(select.querySelector(".ant-select-selector") as HTMLElement);
+    const input = select.querySelector("input.ant-select-selection-search-input") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "科室" } });
+    // 防抖 300ms 后触发远程检索：listDimensions 携带 keyword + status=PUBLISHED（实时按关键词获取，非本地 200 条过滤）
+    await waitFor(() => {
+      const calls = mockedDims.mock.calls;
+      const last = calls[calls.length - 1]?.[0];
+      expect(last).toBeDefined();
+      expect(last!.keyword).toBe("科室");
+      expect(last!.status).toBe("PUBLISHED");
+      expect(last!.page_size).toBe(50);
+    });
+    // 检索结果替换选项：输入「科室」后下拉展示命中项（label = 名称 (编码)）
+    await waitFor(() => expect(screen.getByText("科室 (dept)")).toBeTruthy());
+  });
+
   it("派生指标未选依赖（纯周期派生）提交 → 前端放行（依赖/表达式均可选）", async () => {
     mockedCreate.mockResolvedValue({ metric_code: "sales_gmv_day" } as any);
     renderPage();

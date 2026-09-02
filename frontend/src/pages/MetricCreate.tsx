@@ -440,6 +440,8 @@ export function MetricCreate() {
   const [dictLoading, setDictLoading] = useState(false);
   // 平台维度清单（维度映射下拉）：来自维度管理模块，支持搜索 + 手动输入兜底
   const [dimensionOptions, setDimensionOptions] = useState<Array<{ value: string; label: string }>>([]);
+  const [dimSearching, setDimSearching] = useState(false);
+  const dimSearchTimer = useRef<ReturnType<typeof setTimeout>>();
   // 主表单口径定义区选中的维度（合入 definition_json.dimensions，避免手写 JSON 编码错误）
   const [selectedDims, setSelectedDims] = useState<string[]>([]);
   // 依赖指标（dependencies）：派生/复合指标的上游，从已发布指标搜索选择
@@ -750,6 +752,38 @@ export function MetricCreate() {
       .catch(() => setBaseAtomicOptions([]))
       .finally(() => setBaseAtomicSearching(false));
   }, []);
+
+  // 关联维度选项远程检索（关键词实时从维度管理拉取）：主表单/批量候选「关联维度」、
+  // 「批量注册」维度列映射的维度名 三处共用。业务规则：仅 PUBLISHED 维度可关联（与初始
+  // 加载一致）；输入关键词按 编码/名称 模糊检索，空关键词回载全量（200）。tags 模式已选
+  // 值不依赖 options（直接回显文本），检索替换 options 不影响已选值展示。
+  async function loadDimensionOptions(q: string) {
+    setDimSearching(true);
+    try {
+      const kw = q.trim();
+      const res = await listDimensions({
+        status: "PUBLISHED",
+        keyword: kw || undefined,
+        page_size: kw ? 50 : 200,
+      });
+      setDimensionOptions(
+        (res.items ?? []).map((d: Dimension) => ({
+          value: d.dim_code,
+          label: `${d.name} (${d.dim_code})`,
+        })),
+      );
+    } catch {
+      // 检索失败保留既有选项，不阻断录入
+    } finally {
+      setDimSearching(false);
+    }
+  }
+
+  // 关联维度关键词搜索（防抖）：输入时按关键词实时检索平台维度（不依赖首次加载的 200 条上限）
+  function handleDimensionSearch(q: string) {
+    if (dimSearchTimer.current) clearTimeout(dimSearchTimer.current);
+    dimSearchTimer.current = setTimeout(() => void loadDimensionOptions(q), q.trim() ? 300 : 0);
+  }
 
   // 口径定义区：关联数据表搜索（与源表名一致的惰性交互——空关键词加载平台已采集的表，可关键词搜索）
   async function searchTables(q: string) {
@@ -2989,7 +3023,7 @@ export function MetricCreate() {
                                     name={[name, "granularity_dims"]}
                                     style={{ marginBottom: 0 }}
                                   >
-                                    <Select
+                                    <Select showSearch
                                       mode="tags"
                                       allowClear
                                       placeholder="粒度维度（如 医院，可多选）"
@@ -3003,7 +3037,7 @@ export function MetricCreate() {
                                 </Col>
                                 <Col span={3}>
                                   <Form.Item {...restField} name={[name, "default_period"]} style={{ marginBottom: 0 }}>
-                                    <Select
+                                    <Select showSearch
                                       allowClear
                                       placeholder="默认周期"
                                       options={PERIOD_OPTIONS}
@@ -3441,6 +3475,11 @@ export function MetricCreate() {
                   onChange={setSelectedDims}
                   options={dimensionOptions}
                   allowClear
+                  showSearch
+                  filterOption={false}
+                  onSearch={handleDimensionSearch}
+                  loading={dimSearching}
+                  notFoundContent={dimSearching ? "搜索中…" : undefined}
                 />
               </Form.Item>
               <Collapse
@@ -3831,7 +3870,7 @@ export function MetricCreate() {
             {/* P2-8：切分模式（semicolon/statement/custom）在解析前可配置 */}
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
               <span className="muted" style={{ fontSize: 12 }}>切分模式</span>
-              <Select
+              <Select showSearch
                 size="small"
                 style={{ width: 120 }}
                 value={sqlBatchSplitMode}
@@ -4010,7 +4049,7 @@ export function MetricCreate() {
                                   {/* 指标类型可在线编辑（OneData 语义）：原子 = 逻辑度量 + 基础粒度
                                       （日）；派生 = 原子 + 时间周期（month/周/季/年，周期驱动默认派生）；
                                       复合 = 多指标运算。改派生/复合后下方切换为依赖指标 + 计算表达式 */}
-                                  <Select
+                                  <Select showSearch
                                     size="small"
                                     style={{ width: 96 }}
                                     value={c.type}
@@ -4078,7 +4117,7 @@ export function MetricCreate() {
                                   {c.type !== "composite" && (
                                     <>
                                       <SqlBatchField label="聚合">
-                                        <Select
+                                        <Select showSearch
                                           size="small"
                                           style={{ width: 130 }}
                                           value={c.aggregation || undefined}
@@ -4104,7 +4143,7 @@ export function MetricCreate() {
                                       </SqlBatchField>
                                       <SqlBatchField label="周期">
                                         {/* P2-9：周期可编辑（推断错可行内修正，不必先创建再改） */}
-                                        <Select
+                                        <Select showSearch
                                           size="small"
                                           style={{ width: 110 }}
                                           value={c.period || "day"}
@@ -4116,7 +4155,7 @@ export function MetricCreate() {
                                       <SqlBatchField label="粒度">
                                         {/* 批量候选粒度可编辑（与周期同源：day/week/month…；推断错
                                             可行内修正，不必先创建再改） */}
-                                        <Select
+                                        <Select showSearch
                                           size="small"
                                           style={{ width: 100 }}
                                           value={c.granularity || c.period || "day"}
@@ -4128,7 +4167,7 @@ export function MetricCreate() {
                                       <SqlBatchField label="粒度维度">
                                         {/* 组合粒度（方案 B）：GROUP BY 业务实体键（推断预填）；
                                             可增删/手输（如 医院/药品），提交透传落挂载 granularity_dims */}
-                                        <Select
+                                        <Select showSearch
                                           size="small"
                                           mode="tags"
                                           allowClear
@@ -4178,7 +4217,7 @@ export function MetricCreate() {
                                         {/* 派生/复合依赖指标：从本批基础候选选择（跨语句可选），
                                             提交合入 definition_json.dependencies → 血缘注册上游边。
                                             派生=可选依赖（纯周期/业务限定派生可不依赖）；复合=必填 */}
-                                        <Select
+                                        <Select showSearch
                                           size="small"
                                           mode="multiple"
                                           maxTagCount="responsive"
@@ -4245,12 +4284,16 @@ export function MetricCreate() {
                                       size="small"
                                       mode="tags"
                                       style={{ minWidth: 220 }}
-                                      placeholder="GROUP BY 推断维度（可增删/输入）"
-                                      optionFilterProp="label"
+                                      placeholder="GROUP BY 推断维度（可增删/输入，输入关键词实时检索平台维度）"
                                       value={c.dimensions || []}
                                       onChange={(v) => handleSqlBatchEdit(c.key, { dimensions: v })}
                                       data-testid={`sql-batch-dims-${c.key}`}
                                       options={dimensionOptions}
+                                      showSearch
+                                      filterOption={false}
+                                      onSearch={handleDimensionSearch}
+                                      loading={dimSearching}
+                                      notFoundContent={dimSearching ? "搜索中…" : undefined}
                                     />
                                   </SqlBatchField>
                                 </div>
@@ -4554,7 +4597,7 @@ export function MetricCreate() {
               {
                 title: "类型", width: 80,
                 render: (_, c: SqlBatchCandidate) => (
-                  <Select
+                  <Select showSearch
                     size="small"
                     style={{ width: 72 }}
                     value={c.type}
@@ -4593,7 +4636,7 @@ export function MetricCreate() {
                 title: "聚合", width: 120,
                 render: (_, c: SqlBatchCandidate) =>
                   c.type === "atomic" ? (
-                    <Select
+                    <Select showSearch
                       size="small"
                       style={{ width: 110 }}
                       value={c.aggregation || undefined}
@@ -4607,7 +4650,7 @@ export function MetricCreate() {
               {
                 title: "周期", width: 90,
                 render: (_, c: SqlBatchCandidate) => (
-                  <Select
+                  <Select showSearch
                     size="small"
                     style={{ width: 80 }}
                     value={c.period || "day"}
@@ -4619,7 +4662,7 @@ export function MetricCreate() {
               {
                 title: "主粒度", width: 90,
                 render: (_, c: SqlBatchCandidate) => (
-                  <Select
+                  <Select showSearch
                     size="small"
                     style={{ width: 80 }}
                     value={c.granularity || c.period || "day"}
@@ -4631,7 +4674,7 @@ export function MetricCreate() {
               {
                 title: "粒度维度", width: 145,
                 render: (_, c: SqlBatchCandidate) => (
-                  <Select
+                  <Select showSearch
                     size="small"
                     mode="tags"
                     allowClear
@@ -4774,7 +4817,7 @@ export function MetricCreate() {
                   c.type === "atomic" ? (
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>—</Typography.Text>
                   ) : (
-                    <Select
+                    <Select showSearch
                       size="small"
                       mode="multiple"
                       maxTagCount="responsive"
@@ -5039,7 +5082,7 @@ export function MetricCreate() {
             <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
               粒度维度（业务实体，可多选/手输；清空=移除）
             </div>
-            <Select
+            <Select showSearch
               style={{ width: "100%" }}
               mode="tags"
               allowClear
@@ -5240,7 +5283,7 @@ export function MetricCreate() {
             <Row gutter={12}>
               <Col span={8}>
                 <Form.Item name="aggregation" label="聚合方式">
-                  <Select
+                  <Select showSearch
                     options={dictOptions["aggregation"] || []}
                     allowClear
                     placeholder="保持不变"
@@ -5260,7 +5303,7 @@ export function MetricCreate() {
               {quickEditMetric.type !== "atomic" && (
                 <Col span={8}>
                   <Form.Item name="granularity" label="粒度">
-                    <Select
+                    <Select showSearch
                       options={dictOptions["granularity"] || []}
                       allowClear
                       placeholder="保持不变"
@@ -5713,7 +5756,7 @@ export function MetricCreate() {
               rules={[{ required: true, message: "请至少选择一个度量列" }]}
               extra={batchColumnOptions.length > 0 ? "从该表列中选择（可多选），或输入自定义列名" : "可输入自定义列名（选择已采集源表后自动带出该表列）"}
             >
-              <Select
+              <Select showSearch
                 mode="tags"
                 tokenSeparators={[",", "\n"]}
                 placeholder={batchColumnOptions.length > 0 ? "选择该表列（可多选，也可输入）" : "请先选择源表后自动带出该表列"}
@@ -5744,14 +5787,12 @@ export function MetricCreate() {
                         >
                           <AutoComplete
                             data-testid="dim-name-auto"
-                            placeholder="维度名（可搜索平台维度或手输）"
+                            placeholder="维度名（输入关键词实时检索平台维度，或手输）"
                             style={{ width: "100%" }}
                             options={dimensionOptions}
-                            filterOption={(input, option) =>
-                              String(option?.value ?? "")
-                                .toLowerCase()
-                                .includes(input.toLowerCase())
-                            }
+                            filterOption={false}
+                            onSearch={handleDimensionSearch}
+                            notFoundContent={dimSearching ? "搜索中…" : undefined}
                           />
                         </Form.Item>
                         </Col>
