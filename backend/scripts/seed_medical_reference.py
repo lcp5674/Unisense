@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -215,6 +216,7 @@ DOMAIN_SEEDS: list[dict[str, Any]] = [
     {"code": "common_org", "name": "公共组织", "parent": "common", "sort_order": 4},
     {"code": "common_currency", "name": "公共币种", "parent": "common", "sort_order": 5},
     {"code": "common_customer", "name": "公共客户", "parent": "common", "sort_order": 6},
+    {"code": "common_campaign", "name": "公共活动", "parent": "common", "sort_order": 7},
 ]
 
 
@@ -348,6 +350,10 @@ TERM_SEEDS: list[dict[str, Any]] = [
     {"term_code": "org_dimension", "name": "组织维度", "definition": "按企业管理层级（集团/分公司/部门/团队）组织的公共维度，用于人效、成本、预算归口等内部经营分析；区别于临床科室（医疗业务视角）。", "domain": "common", "synonyms": ["行政组织", "dim_org"], "boundary": "不承载临床科室/医生，科室由科室维度表达"},
     {"term_code": "currency_dimension", "name": "币种维度", "definition": "以币种为成员的公共维度，提供币种代码/符号/汇率基准等属性，用于金额类指标的多币种结算（对外结算/保险理赔/跨境合作）。", "domain": "common", "synonyms": ["币种", "dim_currency"], "boundary": "不承载汇率明细，汇率由财务系统实时提供"},
     {"term_code": "customer_dimension", "name": "客户维度", "definition": "以商业合作主体（企业健管/保险/医院/政府/渠道）为成员的公共维度，区别于患者（临床个体）；用于商业客户经营分析（合同、营收、合作模式）。", "domain": "common", "synonyms": ["商业客户", "B端客户"], "boundary": "不承载患者个体，患者由患者维度表达"},
+    {"term_code": "campaign_dimension", "name": "活动维度", "definition": "以营销/运营活动为成员的公共维度，用于活动→业务量（问诊/挂号/下单/获客）的归因分析，衡量活动 ROI。", "domain": "common", "synonyms": ["营销活动", "活动"], "boundary": "不承载活动预算/执行明细，活动主数据由活动系统承载"},
+    {"term_code": "marketing_campaign", "name": "营销活动", "definition": "平台为获客/促活/转化组织的运营活动（义诊/健康日/保险促销/拉新/会员活动等），可关联指标做活动效果分析。", "domain": "common", "synonyms": ["运营活动", "促销活动"], "boundary": "区分日常运营动作：活动是阶段性、有明确目标与时间窗的运营项目"},
+    {"term_code": "free_clinic", "name": "义诊", "definition": "平台联合医院/医生提供的免费问诊或检查活动，常用于获客与品牌建设。", "domain": "common", "synonyms": ["公益义诊"], "boundary": None},
+    {"term_code": "health_day", "name": "健康日", "definition": "围绕健康主题（如世界高血压日、全国爱牙日）发起的科普/筛查/问诊活动。", "domain": "common", "synonyms": ["主题健康日"], "boundary": None},
 ]
 
 
@@ -447,35 +453,74 @@ def _disease_members() -> list[dict[str, Any]]:
     return [{"code": _slug(n), "name": n, "attributes": {"icd_chapter": f"{i + 1:02d}"}} for i, n in enumerate(names)]
 
 
+# 月份 → (季节, 财季, 主要法定节假日, 主要节气)
+_MONTH_META: dict[int, tuple[str, int, str, str]] = {
+    1: ("冬季", 1, "元旦、春节（农历正月初一）", "小寒、大寒"),
+    2: ("冬季", 1, "春节（农历正月初一）", "立春、雨水"),
+    3: ("春季", 1, "妇女节（部分）", "惊蛰、春分"),
+    4: ("春季", 2, "清明节", "清明、谷雨"),
+    5: ("春季", 2, "劳动节", "立夏、小满"),
+    6: ("夏季", 2, "端午节", "芒种、夏至"),
+    7: ("夏季", 3, "建党节（部分）", "小暑、大暑"),
+    8: ("夏季", 3, "建军节（部分）", "立秋、处暑"),
+    9: ("秋季", 3, "中秋节", "白露、秋分"),
+    10: ("秋季", 4, "国庆节", "寒露、霜降"),
+    11: ("秋季", 4, "无", "立冬、小雪"),
+    12: ("冬季", 4, "无", "大雪、冬至"),
+}
+
+
 def _date_members() -> list[dict[str, Any]]:
     """日期维度成员：年 → 季 → 月 三级层级节点（2024-2026）。
 
     设计取舍：维度管理是参照/口径层，只灌层级节点不灌每日明细
     （每日明细是海量主数据 dim_date 物理表承载，365 行/年）。
     按日分析由物理 date_id 字段承载，维度描述中已注明。
+
+    属性说明（层级节点提供可计算属性，日级属性由 dim_date 物理表承载）：
+    - 年节点：财年（=自然年）、是否闰年
+    - 季节点：财季（=自然季）、季节
+    - 月节点：季节、财季、当月主要法定节假日、当月主要节气
+    - 日级属性（工作日/周末、节假日调休、自然周/ISO 周、节气精确日、农历日）
+      由 dim_date 物理表按日承载，不在维度层级节点重复
     """
     members: list[dict[str, Any]] = []
     quarters = ["Q1", "Q2", "Q3", "Q4"]
     for year in (2024, 2025, 2026):
         y = str(year)
-        members.append({"code": f"y{y}", "name": f"{y}年", "attributes": {"level": "year"}})
+        members.append(
+            {
+                "code": f"y{y}",
+                "name": f"{y}年",
+                "attributes": {"level": "year", "fiscal_year": year, "is_leap": year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)},
+            }
+        )
         for q_idx, q in enumerate(quarters, start=1):
             q_code = f"{y}q{q_idx}"
+            season = {1: "冬季", 2: "春季", 3: "夏季", 4: "秋季"}[q_idx]
             members.append(
                 {
                     "code": q_code,
                     "name": f"{y}年第{q_idx}季度",
                     "parent_code": f"y{y}",
-                    "attributes": {"level": "quarter", "quarter": q_idx},
+                    "attributes": {"level": "quarter", "quarter": q_idx, "fiscal_quarter": q_idx, "season": season},
                 }
             )
             for m in range((q_idx - 1) * 3 + 1, q_idx * 3 + 1):
+                season, fq, festivals, solar_terms = _MONTH_META[m]
                 members.append(
                     {
                         "code": f"{y}{m:02d}",
                         "name": f"{y}年{m}月",
                         "parent_code": q_code,
-                        "attributes": {"level": "month", "month": m},
+                        "attributes": {
+                            "level": "month",
+                            "month": m,
+                            "season": season,
+                            "fiscal_quarter": fq,
+                            "festivals": festivals,
+                            "solar_terms": solar_terms,
+                        },
                     }
                 )
     return members
@@ -502,38 +547,104 @@ _REGION_SEEDS: dict[str, dict[str, list[str]]] = {
 }
 
 
+# 省/直辖市 → 大区
+_PROVINCE_MACRO_REGION: dict[str, str] = {
+    "北京市": "华北", "天津市": "华北", "河北省": "华北",
+    "上海市": "华东", "江苏省": "华东", "浙江省": "华东", "安徽省": "华东", "福建省": "华东", "山东省": "华东",
+    "广东省": "华南",
+    "四川省": "西南", "重庆市": "西南",
+    "湖北省": "华中", "湖南省": "华中", "河南省": "华中",
+    "陕西省": "西北",
+}
+
+# 健共体试点省（微医数字健共体核心落地区域）
+_HC_DEMO_PROVINCES = {"浙江省", "天津市", "山东省"}
+# 互联网医院落地省（已取得互联网医院牌照并实际运营的省份）
+_IOH_PROVINCES = {"浙江省", "天津市", "山东省", "北京市", "上海市", "广东省", "江苏省"}
+
+# 城市 → 城市等级（一线/新一线/二线；未列出的城市默认二线）
+_CITY_TIER: dict[str, str] = {
+    "北京市": "一线", "上海市": "一线", "广州市": "一线", "深圳市": "一线",
+    "杭州市": "新一线", "南京市": "新一线", "苏州市": "新一线", "天津市": "新一线",
+    "成都市": "新一线", "武汉市": "新一线", "长沙市": "新一线", "郑州市": "新一线",
+    "西安市": "新一线", "重庆市": "新一线", "青岛市": "新一线",
+    "宁波市": "二线", "温州市": "二线", "嘉兴市": "二线", "济南市": "二线",
+    "福州市": "二线", "厦门市": "二线", "合肥市": "二线", "石家庄市": "二线",
+}
+
+
 def _region_members() -> list[dict[str, Any]]:
     """地区维度成员：省（直辖市）→ 市 → 区县 三级层级，覆盖微医核心业务区域。
 
     设计约束：
     - 直辖市省=市（如北京市），只生成一个市级根节点，区县挂其下，避免同名撞码；
-    - 区县编码带「城市前缀」（如 hangzhou_xihu），避免不同城市同名区县（南京/福州鼓楼区）撞唯一索引。
+    - 区县编码带「城市前缀」（如 hangzhou_xihu），避免不同城市同名区县（南京/福州鼓楼区）撞唯一索引；
+    - 属性：大区/城市等级/是否健共体试点省/是否互联网医院落地省（省、市、区县逐级继承）。
     """
     members: list[dict[str, Any]] = []
     for prov, cities in _REGION_SEEDS.items():
         p_code = _region_code(prov)
+        macro_region = _PROVINCE_MACRO_REGION.get(prov, "其他")
+        is_hc = prov in _HC_DEMO_PROVINCES
+        is_ioh = prov in _IOH_PROVINCES
         # 直辖市：prov 自身即城市，根节点 + 区县
         if prov in cities:
-            members.append({"code": p_code, "name": prov, "attributes": {"level": "municipality"}})
+            members.append(
+                {
+                    "code": p_code,
+                    "name": prov,
+                    "attributes": {
+                        "level": "municipality",
+                        "macro_region": macro_region,
+                        "city_tier": _CITY_TIER.get(prov, "二线"),
+                        "is_hc_demo": is_hc,
+                        "is_ioh_province": is_ioh,
+                    },
+                }
+            )
             for dist in cities[prov]:
                 members.append(
                     {
                         "code": f"{p_code}_{_region_code(dist)}",
                         "name": dist,
                         "parent_code": p_code,
-                        "attributes": {"level": "district"},
+                        "attributes": {
+                            "level": "district",
+                            "macro_region": macro_region,
+                            "city_tier": _CITY_TIER.get(prov, "二线"),
+                            "is_hc_demo": is_hc,
+                            "is_ioh_province": is_ioh,
+                        },
                     }
                 )
             continue
-        members.append({"code": p_code, "name": prov, "attributes": {"level": "province"}})
+        members.append(
+            {
+                "code": p_code,
+                "name": prov,
+                "attributes": {
+                    "level": "province",
+                    "macro_region": macro_region,
+                    "is_hc_demo": is_hc,
+                    "is_ioh_province": is_ioh,
+                },
+            }
+        )
         for city, districts in cities.items():
             c_code = _region_code(city)
+            city_tier = _CITY_TIER.get(city, "二线")
             members.append(
                 {
                     "code": c_code,
                     "name": city,
                     "parent_code": p_code,
-                    "attributes": {"level": "city"},
+                    "attributes": {
+                        "level": "city",
+                        "macro_region": macro_region,
+                        "city_tier": city_tier,
+                        "is_hc_demo": is_hc,
+                        "is_ioh_province": is_ioh,
+                    },
                 }
             )
             for dist in districts:
@@ -542,7 +653,13 @@ def _region_members() -> list[dict[str, Any]]:
                         "code": f"{c_code}_{_region_code(dist)}",
                         "name": dist,
                         "parent_code": c_code,
-                        "attributes": {"level": "district"},
+                        "attributes": {
+                            "level": "district",
+                            "macro_region": macro_region,
+                            "city_tier": city_tier,
+                            "is_hc_demo": is_hc,
+                            "is_ioh_province": is_ioh,
+                        },
                     }
                 )
     return members
@@ -657,8 +774,22 @@ _ORG_TEAMS: dict[str, list[tuple[str, str]]] = {
 }
 
 
+# 部门名 → 组织类型（研发/运营/医疗/职能）
+_DEPT_ORG_CATEGORY: dict[str, str] = {
+    "技术研发部": "研发", "数据智能部": "研发", "产品设计部": "研发", "智慧医疗部": "研发",
+    "医疗运营部": "医疗", "健共体运营部": "医疗", "互联网医院运营部": "医疗", "公共卫生部": "医疗",
+    "市场品牌部": "运营", "商务合作部": "运营", "保险合作部": "运营",
+    "财务部": "职能", "人力资源部": "职能", "合规法务部": "职能", "综合管理部": "职能",
+}
+
+
 def _org_members() -> list[dict[str, Any]]:
-    """组织维度成员：集团 → 分公司 → 部门 → 团队 四级层级（SCD1 跟踪组织调整）。"""
+    """组织维度成员：集团 → 分公司 → 部门 → 团队 四级层级（SCD1 跟踪组织调整）。
+
+    属性：
+    - 集团/分公司：持有类型（直营/控股/参股，微医集团及分子公司均为直营）
+    - 部门：组织类型（研发/运营/医疗/职能）
+    """
     members: list[dict[str, Any]] = []
     for code, spec in _ORG_SEEDS.items():
         members.append(
@@ -666,7 +797,12 @@ def _org_members() -> list[dict[str, Any]]:
                 "code": code,
                 "name": spec["name"],
                 "parent_code": spec.get("parent"),
-                "attributes": {"level": spec["level"], "region": spec["region"], "org_type": "总部" if spec["level"] == "group" else "分公司"},
+                "attributes": {
+                    "level": spec["level"],
+                    "region": spec["region"],
+                    "org_type": "总部" if spec["level"] == "group" else "分公司",
+                    "holding_type": "直营",
+                },
             }
         )
     for branch_code, depts in _ORG_DEPARTMENTS.items():
@@ -677,7 +813,12 @@ def _org_members() -> list[dict[str, Any]]:
                     "code": full,
                     "name": dept_name,
                     "parent_code": branch_code,
-                    "attributes": {"level": "department", "org_type": "部门"},
+                    "attributes": {
+                        "level": "department",
+                        "org_type": "部门",
+                        "holding_type": "直营",
+                        "org_category": _DEPT_ORG_CATEGORY.get(dept_name, "职能"),
+                    },
                 }
             )
             for team_code, team_name in _ORG_TEAMS.get(full, []):
@@ -686,7 +827,12 @@ def _org_members() -> list[dict[str, Any]]:
                         "code": f"{full}_{team_code}",
                         "name": team_name,
                         "parent_code": full,
-                        "attributes": {"level": "team", "org_type": "团队"},
+                        "attributes": {
+                            "level": "team",
+                            "org_type": "团队",
+                            "holding_type": "直营",
+                            "org_category": _DEPT_ORG_CATEGORY.get(dept_name, "职能"),
+                        },
                     }
                 )
     return members
@@ -797,6 +943,86 @@ def _customer_members() -> list[dict[str, Any]]:
                     "name": cust_name,
                     "parent_code": type_code,
                     "attributes": {"level": "customer", "region": region, "cooperation_mode": mode},
+                }
+            )
+    return members
+
+
+_CAMPAIGN_SEEDS: dict[str, dict[str, Any]] = {
+    # type_code -> {name: 活动类型名, campaigns: [(campaign_code, 活动名, 活动对象, 区域, 目标指标)]}
+    "free_clinic": {
+        "name": "义诊活动",
+        "campaigns": [
+            ("spring_free_clinic", "春季大型义诊", "全科患者", "杭州", "问诊量/挂号量"),
+            ("mountain_village_clinic", "山区健康义诊行", "农村居民", "山东", "问诊量/筛查量"),
+            ("eye_care_clinic", "爱眼日义诊", "眼疾患者", "天津", "挂号量/检查量"),
+        ],
+    },
+    "health_day": {
+        "name": "健康日活动",
+        "campaigns": [
+            ("hypertension_day", "世界高血压日", "慢病患者", "全国", "筛查量/复诊量"),
+            ("tooth_day", "全国爱牙日", "口腔患者", "全国", "挂号量"),
+            ("diabetes_day", "联合国糖尿病日", "糖友", "全国", "筛查量/健管签约"),
+            ("lung_day", "世界慢阻肺日", "呼吸疾病患者", "浙江", "筛查量"),
+        ],
+    },
+    "insurance_promo": {
+        "name": "保险促销",
+        "campaigns": [
+            ("huiminbao_renewal", "惠民保续保季", "参保人", "浙江", "续保率/保费"),
+            ("commercial_insurance_gift", "商保购险赠健管", "新投保人", "全国", "保费/健管激活"),
+        ],
+    },
+    "acquisition": {
+        "name": "拉新活动",
+        "campaigns": [
+            ("new_user_benefit", "新用户问诊立减", "新用户", "全国", "新客数/首问转化"),
+            ("referral_bonus", "老带新奖励", "存量用户", "全国", "拉新数"),
+            ("campus_health", "校园健康卡推广", "大学生", "杭州", "开卡数"),
+        ],
+    },
+    "member_activity": {
+        "name": "会员活动",
+        "campaigns": [
+            ("family_card_week", "家庭会员周", "会员", "全国", "会员开卡/续费"),
+            ("point_mall_sale", "积分商城大促", "会员", "全国", "积分消耗/GMV"),
+            ("health_lecture", "名医健康讲堂", "会员", "全国", "参与人次"),
+        ],
+    },
+    "enterprise_health": {
+        "name": "企业健管活动",
+        "campaigns": [
+            ("corp_annual_check", "企业年度体检季", "企业员工", "华东", "体检人数/企业签约"),
+            ("corp_mental_week", "企业心理健康周", "企业员工", "华北", "咨询人次"),
+            ("occupational_health_day", "职业健康宣传日", "企业员工", "西北", "监护人次"),
+        ],
+    },
+}
+
+
+def _campaign_members() -> list[dict[str, Any]]:
+    """活动维度成员：活动类型 → 具体活动 两级层级（SCD0 活动类型稳定，活动实例滚动新增）。
+
+    设计取舍：活动为主数据（活动系统承载预算/执行明细），维度管理承载
+    「活动类型 → 活动」分析层级，供业务量（问诊/挂号/下单/获客）归因分析活动 ROI。
+    """
+    members: list[dict[str, Any]] = []
+    for type_code, spec in _CAMPAIGN_SEEDS.items():
+        members.append(
+            {
+                "code": type_code,
+                "name": spec["name"],
+                "attributes": {"level": "type"},
+            }
+        )
+        for camp_code, camp_name, target, region, goal in spec["campaigns"]:
+            members.append(
+                {
+                    "code": f"{type_code}_{camp_code}",
+                    "name": camp_name,
+                    "parent_code": type_code,
+                    "attributes": {"level": "campaign", "target_audience": target, "region": region, "goal_metrics": goal},
                 }
             )
     return members
@@ -1051,12 +1277,12 @@ DIMENSION_SEEDS: list[dict[str, Any]] = [
     # ---- 公共维度（横切基础参照，不归属业务线）----
     {
         "dim_code": "common_date", "name": "日期", "domain": "common", "type": "SCD0",
-        "description": "公共日期维度（dim_date 参照）：年→季→月三级层级，属性含自然日/星期/工作日/节假日（按日钻取由物理 date_id 承载，不灌每日明细）。指标按时间切片/钻取分析引用此维度。",
+        "description": "公共日期维度（dim_date 参照）：年→季→月三级层级，层级节点属性含财年/闰年、财季/季节、当月主要法定节假日与节气；日级属性（工作日/周末、节假日调休、自然周/ISO 周、节气精确日、农历日）由物理 dim_date 表按日承载（365 行/年），维度层级不重复灌每日明细。指标按时间切片/钻取分析引用此维度。",
         "members": _date_members(),
     },
     {
         "dim_code": "common_region", "name": "地区", "domain": "common", "type": "SCD1",
-        "description": "公共地区维度（dim_region 参照）：省→市→区县三级层级（parent_code/path），覆盖微医核心业务区域，用于按地域分析问诊/挂号/药品/健共体协作等业务量。SCD1 覆盖行政区划调整更名。",
+        "description": "公共地区维度（dim_region 参照）：省→市→区县三级层级（parent_code/path），覆盖微医核心业务区域；属性含大区（华东/华北/华南…）、城市等级（一线/新一线/二线）、是否健共体试点省（浙江/天津/山东）、是否互联网医院落地省，用于按地域分析问诊/挂号/药品/健共体协作等业务量。SCD1 覆盖行政区划调整更名。",
         "members": _region_members(),
     },
     {
@@ -1066,7 +1292,7 @@ DIMENSION_SEEDS: list[dict[str, Any]] = [
     },
     {
         "dim_code": "common_org", "name": "组织", "domain": "common", "type": "SCD1",
-        "description": "公共组织维度（dim_org 参照）：集团→分公司→部门→团队四级层级（parent_code/path），覆盖微医集团及杭州/天津/济南/北京/上海/深圳分公司组织架构，用于人效/成本/预算归口等内部经营分析；区别于临床科室（医疗业务视角）。SCD1 跟踪组织调整。",
+        "description": "公共组织维度（dim_org 参照）：集团→分公司→部门→团队四级层级（parent_code/path），覆盖微医集团及杭州/天津/济南/北京/上海/深圳分公司组织架构；属性含持有类型（直营/控股/参股）与组织类型（研发/运营/医疗/职能），用于人效/成本/预算归口等内部经营分析；区别于临床科室（医疗业务视角）。SCD1 跟踪组织调整。",
         "members": _org_members(),
     },
     {
@@ -1078,6 +1304,11 @@ DIMENSION_SEEDS: list[dict[str, Any]] = [
         "dim_code": "common_customer", "name": "客户", "domain": "common", "type": "SCD1",
         "description": "公共客户维度（dim_customer 参照）：客户类型→具体客户两级层级（企业健康管理/保险合作/医院客户/政府机构/渠道伙伴），覆盖商业合作主体，区别于患者（临床个体）；用于商业客户经营分析（合同/营收/合作模式）。SCD1 跟踪合作状态变化。",
         "members": _customer_members(),
+    },
+    {
+        "dim_code": "common_campaign", "name": "活动", "domain": "common", "type": "SCD0",
+        "description": "公共活动维度（dim_campaign 参照）：活动类型→具体活动两级层级（义诊活动/健康日活动/保险促销/拉新活动/会员活动/企业健管活动），属性含活动对象/区域/目标指标；用于活动→业务量（问诊/挂号/下单/获客）归因分析，衡量活动 ROI。活动实例为滚动主数据，SCD0 类型稳定、活动实例滚动新增。",
+        "members": _campaign_members(),
     },
 ]
 
@@ -1256,6 +1487,18 @@ async def seed_terms(db: AsyncSession) -> int:
 # ---------------------------------------------------------------------------
 # 灌入维度 + 成员
 # ---------------------------------------------------------------------------
+def _member_fingerprint(code: str, parent_code: str | None, attributes: dict | None) -> tuple:
+    """成员指纹：code + parent_code + 规范化 attributes 的稳定三元组。
+
+    用于判断成员是否与脚本定义一致——仅编码一致但属性/层级变更也会触发刷新。
+    """
+    return (
+        code,
+        parent_code,
+        json.dumps(attributes or {}, sort_keys=True, ensure_ascii=False),
+    )
+
+
 async def seed_dimensions(db: AsyncSession) -> int:
     """灌入医疗业务维度及成员（PUBLISHED 直灌），返回新增维度数。
 
@@ -1299,18 +1542,25 @@ async def seed_dimensions(db: AsyncSession) -> int:
             created += 1
             logger.info("dimension_created", dim_code=dim_code, members=len(spec["members"]))
             continue
-        # 已存在：成员集合不一致则刷新（删旧重灌），保证与脚本定义一致
-        current = set(
-            (
-                await db.execute(
-                    select(DimensionMember.member_code).where(
-                        DimensionMember.dim_code == dim_code,
-                        DimensionMember.deleted_at.is_(None),
-                    )
+        # 已存在：成员指纹集合（code+parent+attributes）不一致则刷新（删旧重灌）
+        # 保证与脚本定义一致（仅编码一致但属性/层级变更也会触发刷新）
+        current_rows = (
+            await db.execute(
+                select(
+                    DimensionMember.member_code,
+                    DimensionMember.parent_code,
+                    DimensionMember.attributes,
+                ).where(
+                    DimensionMember.dim_code == dim_code,
+                    DimensionMember.deleted_at.is_(None),
                 )
-            ).scalars()
-        )
-        expected = {m["code"] for m in spec["members"]}
+            )
+        ).all()
+        current = {_member_fingerprint(r.member_code, r.parent_code, r.attributes) for r in current_rows}
+        expected = {
+            _member_fingerprint(m["code"], m.get("parent_code"), m.get("attributes"))
+            for m in spec["members"]
+        }
         if current == expected:
             continue
         await db.execute(delete(DimensionMember).where(DimensionMember.dim_code == dim_code))
