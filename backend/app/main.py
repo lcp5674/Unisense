@@ -44,6 +44,7 @@ from app.api.observability import router as observability_router
 from app.api.organizations import router as organizations_router
 from app.api.preferences import router as preferences_router
 from app.api.quality import router as quality_router
+from app.api.query_engine_config import router as query_engine_config_router
 from app.api.recommend import router as recommend_router
 from app.api.search import router as search_router
 from app.api.semantic import quickbi_compat_router as semantic_quickbi_compat_router
@@ -377,6 +378,7 @@ def create_app() -> FastAPI:
     app.include_router(semantic_quickbi_compat_router, prefix="/api/v1")
     app.include_router(subject_domain_router, prefix="/api/v1")
     app.include_router(system_dict_router, prefix="/api/v1")
+    app.include_router(query_engine_config_router, prefix="/api/v1")
     app.include_router(sensitive_rules_router, prefix="/api/v1")
     app.include_router(feature_flags_router, prefix="/api/v1")
     app.include_router(admin_key_rotation_router, prefix="/api/v1")
