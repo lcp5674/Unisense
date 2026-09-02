@@ -92,6 +92,28 @@ async def _llm_gateway_alive() -> bool:
         return False
 
 
+async def _olap_probe_target() -> tuple[bool, str]:
+    """获取 OLAP 探测目标（DB 配置优先、env 兜底；方案 A）。
+
+    DB 配置（query_engine_config）启用时以 DB 的 doris_host/port 为准，否则回落
+    env 的 ``UNISENSE_OLAP_URL``；均未配置返回 (False, '')（探针按「未启用」写回，
+    避免把「未配置」误报为降级）。
+    """
+    try:
+        from app.db.mysql import async_session_factory
+        from app.services.query_engine.config_service import QueryEngineConfigService
+
+        async with async_session_factory() as db:
+            eff = await QueryEngineConfigService(db).get_effective()
+            if eff.get("olap_configured"):
+                host = eff["doris_host"]
+                port = int(eff["doris_port"] or 8030)
+                return True, f"http://{host}:{port}"
+            return False, ""
+    except Exception:  # noqa: BLE001 - best-effort：DB 不可达时按 env 判定
+        return bool(settings.olap_url), settings.olap_url
+
+
 async def _probe_dependency(
     dep_type: str, dep_id: str, enabled: bool, alive: bool
 ) -> None:
@@ -163,12 +185,17 @@ async def run_dependency_probe_once() -> dict[str, str]:
                 exc_info=True,
             )
 
-    # TCP 探活组：已配置（url 非空）才探测，未配置直接按未启用处理
+    # TCP 探活组：已配置（url 非空）才探测，未配置直接按未启用处理。
+    # OLAP 段经 DB 生效配置解析（方案 A）；GRAPH/ES 仍以 env 为准。
     tasks = []
     for dep_type, dep_id, url_attr in _TCP_DEPENDENCIES:
-        url = getattr(settings, url_attr, None)
-        enabled = bool(url)
-        alive = await _tcp_alive(url) if enabled else False
+        if dep_id == "olap":
+            enabled, probe_url = await _olap_probe_target()
+        else:
+            url = getattr(settings, url_attr, None)
+            enabled = bool(url)
+            probe_url = url
+        alive = await _tcp_alive(probe_url) if enabled else False
         tasks.append(asyncio.create_task(_run(dep_type, dep_id, enabled, alive)))
 
     # LLM 组：已配置（base_url + api_key 均非空）才探测

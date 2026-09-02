@@ -260,10 +260,8 @@ def _validate_config() -> None:
             raise ConfigurationError(
                 "生产环境 UNISENSE_FERNET_KEY 必须独立配置，禁止从 JWT_SECRET 派生降级"
             )
-        if not settings.olap_url:
-            raise ConfigurationError(
-                "生产环境 UNISENSE_OLAP_URL 必须非空，consume 查询需要 OLAP 执行引擎"
-            )
+        # 方案 A：OLAP 可经 DB 配置（query_engine_config），env 未配 olap_url 不拒启
+        # （双空由系统配置页提示 + consume 降级；详见 config.validate_production_config）
         # CORS 严格校验：allow_credentials=True 时禁止通配符
         origins = settings.cors_origins_list
         if "*" in origins:

@@ -60,9 +60,13 @@ class Settings(BaseSettings):
     mysql_fallback_url: str = ""
 
     # ---- Doris（OLAP 引擎直连配置）----
+    # 方案 A：DB 配置（query_engine_config）优先；env 兜底。doris_user/password
+    # 为 Doris HTTP basic auth（可空=无认证），仅 env 直接配置时使用。
     doris_host: str = "localhost"
     doris_port: int = 8030
     doris_database: str = "unisense"
+    doris_user: str = ""
+    doris_password: str = ""
 
     # ---- MinIO（S3 兼容对象存储）----
     minio_endpoint: str = "localhost:9000"
@@ -235,17 +239,22 @@ class Settings(BaseSettings):
                     "生产环境 UNISENSE_FERNET_KEY 必须独立配置，"
                     "禁止从 JWT_SECRET 派生降级。请设置独立的 Fernet 密钥后重启。"
                 )
-            if not self.olap_url:
-                raise ConfigurationError(
-                    "生产环境 UNISENSE_OLAP_URL 必须非空，"
-                    "consume 查询需要 OLAP 执行引擎。请配置 Doris/StarRocks 地址后重启。"
-                )
-            if self.doris_host in ("localhost", "127.0.0.1", "0.0.0.0"):
+            # 方案 A（前端可配置化）：OLAP 连接可经 DB 配置（query_engine_config），
+            # env 未配置 olap_url 不代表引擎不可用——故不再强制 olap_url 非空拒启
+            # （env/DB 双空时由系统配置页提示 + consume 降级 503/MySQL fallback）。
+            # 仅当 env 显式配置了 OLAP（olap_url 非空，或 doris_host 被改为非默认值）
+            # 时，才校验实际连接地址不能是 localhost（默认值即容器自身，查询必失败）。
+            olap_env_configured = bool(self.olap_url) or self.doris_host not in (
+                "", "localhost", "127.0.0.1", "0.0.0.0"
+            )
+            if olap_env_configured and self.doris_host in (
+                "localhost", "127.0.0.1", "0.0.0.0"
+            ):
                 raise ConfigurationError(
                     "生产环境 Doris 连接地址不能是 localhost/127.0.0.1——OLAPExecutor 实际"
                     "连接用 doris_host（默认 localhost 为容器自身，查询必失败）。"
                     "请通过 UNISENSE_OLAP_URL（自动派生）或 UNISENSE_DORIS_HOST/PORT "
-                    "配置真实 Doris/StarRocks FE 地址后重启。"
+                    "配置真实 Doris/StarRocks FE 地址，或在系统配置页配置查询引擎后重启。"
                 )
             # CORS 严格校验：allow_credentials=True 时禁止通配符
             if "*" in self.cors_origins_list:

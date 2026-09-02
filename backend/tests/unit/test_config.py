@@ -43,13 +43,17 @@ class TestValidateProductionConfig:
         with pytest.raises(ConfigurationError, match="FERNET_KEY"):
             _mk(fernet_key="")
 
-    def test_missing_olap_url_rejected(self) -> None:
-        with pytest.raises(ConfigurationError, match="OLAP_URL"):
-            _mk(olap_url="")
+    def test_missing_olap_url_allowed_for_db_config(self) -> None:
+        """方案 A：env 未配 olap_url 不再拒启——OLAP 可经 DB 配置
+        （query_engine_config），env/DB 双空时由 UI 提示 + consume 降级。"""
+        s = _mk(olap_url="")
+        assert s.env == "prod"
+        assert s.doris_host == "localhost"  # 默认值，未配置 OLAP
 
     def test_doris_localhost_rejected_in_prod(self) -> None:
-        """P0-1：生产 OLAP 直连地址不能是 localhost（容器自身），否则查询必失败——
-        olap_url 指向 localhost 会被派生为 doris_host=localhost，须拒绝启动。"""
+        """P0-1：生产显式配置 OLAP（olap_url 非空）时直连地址不能是 localhost
+        （容器自身），否则查询必失败——olap_url 指向 localhost 会被派生为
+        doris_host=localhost，须拒绝启动。"""
         with pytest.raises(ConfigurationError, match="Doris 连接地址"):
             _mk(olap_url="http://localhost:8030")
 
