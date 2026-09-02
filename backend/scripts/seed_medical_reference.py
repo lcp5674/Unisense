@@ -207,6 +207,10 @@ DOMAIN_SEEDS: list[dict[str, Any]] = [
     {"code": "satisfaction", "name": "满意度", "parent": "patient_service", "sort_order": 3},
     {"code": "complaint_service", "name": "投诉服务", "parent": "patient_service", "sort_order": 4},
     {"code": "patient_care", "name": "患者关怀", "parent": "patient_service", "sort_order": 5},
+    # ---- 公共（横切基础参照：日期/地区，不归属业务线，一级域）----
+    {"code": "common", "name": "公共", "parent": None, "sort_order": 22},
+    {"code": "common_date", "name": "公共日期", "parent": "common", "sort_order": 1},
+    {"code": "common_region", "name": "公共地区", "parent": "common", "sort_order": 2},
 ]
 
 
@@ -330,6 +334,12 @@ TERM_SEEDS: list[dict[str, Any]] = [
     {"term_code": "nps", "name": "净推荐值", "definition": "衡量用户推荐意愿的指标（NPS），反映服务口碑。", "domain": "patient_service", "synonyms": ["NPS"], "boundary": None},
     {"term_code": "patient_education", "name": "患者教育", "definition": "面向患者的疾病预防、用药与康复知识科普宣教。", "domain": "patient_service", "synonyms": ["健康科普"], "boundary": None},
     {"term_code": "complaint_handling", "name": "投诉处理", "definition": "对患者投诉的受理、调查、反馈与改进闭环。", "domain": "patient_service", "synonyms": ["客诉处理"], "boundary": None},
+    # 公共（横切基础参照：日期/地区）
+    {"term_code": "date_dimension", "name": "日期维度", "definition": "以日期为主键的公共维度，提供年/季/月/周/自然日/工作日/节假日等时间属性，供各业务指标按时间切片与钻取分析。", "domain": "common", "synonyms": ["时间维度", "dim_date"], "boundary": "与指标口径的时间粒度（granularity）不同：粒度描述统计单位，日期维度描述分析切片"},
+    {"term_code": "region_dimension", "name": "地区维度", "definition": "按行政区划（省/市/区县）组织的公共维度，用于按地域分析业务量（问诊/挂号/药品/健共体协作等）。", "domain": "common", "synonyms": ["地理维度", "dim_region"], "boundary": "不承载具体机构与地址，机构归属由医疗机构维度表达"},
+    {"term_code": "administrative_division", "name": "行政区划", "definition": "国家为分级管理划分的省、市、区县等行政区域体系。", "domain": "common", "synonyms": ["行政区"], "boundary": None},
+    {"term_code": "natural_day", "name": "自然日", "definition": "以自然 24 小时为单位的日历日，是日期维度按日分析的最小切片。", "domain": "common", "synonyms": ["日历日"], "boundary": None},
+    {"term_code": "workday", "name": "工作日", "definition": "一周中安排正常工作的日期（通常周一至周五），区分自然日以支持排班/就诊/配送等运营分析。", "domain": "common", "synonyms": ["上班日"], "boundary": "节假日调休由日期维度属性承载，不单独建维度"},
 ]
 
 
@@ -427,6 +437,137 @@ def _disease_members() -> list[dict[str, Any]]:
         "传染病", "损伤与中毒",
     ]
     return [{"code": _slug(n), "name": n, "attributes": {"icd_chapter": f"{i + 1:02d}"}} for i, n in enumerate(names)]
+
+
+def _date_members() -> list[dict[str, Any]]:
+    """日期维度成员：年 → 季 → 月 三级层级节点（2024-2026）。
+
+    设计取舍：维度管理是参照/口径层，只灌层级节点不灌每日明细
+    （每日明细是海量主数据 dim_date 物理表承载，365 行/年）。
+    按日分析由物理 date_id 字段承载，维度描述中已注明。
+    """
+    members: list[dict[str, Any]] = []
+    quarters = ["Q1", "Q2", "Q3", "Q4"]
+    for year in (2024, 2025, 2026):
+        y = str(year)
+        members.append({"code": f"y{y}", "name": f"{y}年", "attributes": {"level": "year"}})
+        for q_idx, q in enumerate(quarters, start=1):
+            q_code = f"{y}q{q_idx}"
+            members.append(
+                {
+                    "code": q_code,
+                    "name": f"{y}年第{q_idx}季度",
+                    "parent_code": f"y{y}",
+                    "attributes": {"level": "quarter", "quarter": q_idx},
+                }
+            )
+            for m in range((q_idx - 1) * 3 + 1, q_idx * 3 + 1):
+                members.append(
+                    {
+                        "code": f"{y}{m:02d}",
+                        "name": f"{y}年{m}月",
+                        "parent_code": q_code,
+                        "attributes": {"level": "month", "month": m},
+                    }
+                )
+    return members
+
+
+_REGION_SEEDS: dict[str, dict[str, list[str]]] = {
+    # 省/直辖市 → {市/区 → 区县示例}
+    "北京市": {"北京市": ["朝阳区", "海淀区", "东城区"]},
+    "天津市": {"天津市": ["和平区", "滨海新区", "河西区"]},
+    "上海市": {"上海市": ["浦东新区", "徐汇区", "静安区"]},
+    "浙江省": {"杭州市": ["西湖区", "余杭区", "滨江区"], "宁波市": ["海曙区", "鄞州区"], "温州市": ["鹿城区", "瓯海区"], "嘉兴市": ["南湖区", "秀洲区"]},
+    "山东省": {"济南市": ["历下区", "市中区"], "青岛市": ["市南区", "崂山区"]},
+    "广东省": {"广州市": ["天河区", "越秀区"], "深圳市": ["南山区", "福田区"]},
+    "江苏省": {"南京市": ["鼓楼区", "玄武区"], "苏州市": ["姑苏区", "工业园区"]},
+    "福建省": {"福州市": ["鼓楼区", "台江区"], "厦门市": ["思明区", "湖里区"]},
+    "四川省": {"成都市": ["武侯区", "锦江区"]},
+    "湖北省": {"武汉市": ["江汉区", "武昌区"]},
+    "湖南省": {"长沙市": ["岳麓区", "天心区"]},
+    "安徽省": {"合肥市": ["蜀山区", "庐阳区"]},
+    "河北省": {"石家庄市": ["长安区", "桥西区"]},
+    "河南省": {"郑州市": ["金水区", "中原区"]},
+    "陕西省": {"西安市": ["雁塔区", "碑林区"]},
+    "重庆市": {"重庆市": ["渝中区", "江北区"]},
+}
+
+
+def _region_members() -> list[dict[str, Any]]:
+    """地区维度成员：省（直辖市）→ 市 → 区县 三级层级，覆盖微医核心业务区域。
+
+    设计约束：
+    - 直辖市省=市（如北京市），只生成一个市级根节点，区县挂其下，避免同名撞码；
+    - 区县编码带「城市前缀」（如 hangzhou_xihu），避免不同城市同名区县（南京/福州鼓楼区）撞唯一索引。
+    """
+    members: list[dict[str, Any]] = []
+    for prov, cities in _REGION_SEEDS.items():
+        p_code = _region_code(prov)
+        # 直辖市：prov 自身即城市，根节点 + 区县
+        if prov in cities:
+            members.append({"code": p_code, "name": prov, "attributes": {"level": "municipality"}})
+            for dist in cities[prov]:
+                members.append(
+                    {
+                        "code": f"{p_code}_{_region_code(dist)}",
+                        "name": dist,
+                        "parent_code": p_code,
+                        "attributes": {"level": "district"},
+                    }
+                )
+            continue
+        members.append({"code": p_code, "name": prov, "attributes": {"level": "province"}})
+        for city, districts in cities.items():
+            c_code = _region_code(city)
+            members.append(
+                {
+                    "code": c_code,
+                    "name": city,
+                    "parent_code": p_code,
+                    "attributes": {"level": "city"},
+                }
+            )
+            for dist in districts:
+                members.append(
+                    {
+                        "code": f"{c_code}_{_region_code(dist)}",
+                        "name": dist,
+                        "parent_code": c_code,
+                        "attributes": {"level": "district"},
+                    }
+                )
+    return members
+
+
+def _region_code(name: str) -> str:
+    """地区名 → 拼音风格编码（与 _slug 共用映射，行政区固定清单）。"""
+    table = {
+        "北京市": "beijing", "天津市": "tianjin", "上海市": "shanghai", "重庆市": "chongqing",
+        "浙江省": "zhejiang", "山东省": "shandong", "广东省": "guangdong", "江苏省": "jiangsu",
+        "福建省": "fujian", "四川省": "sichuan", "湖北省": "hubei", "湖南省": "hunan",
+        "安徽省": "anhui", "河北省": "hebei", "河南省": "henan", "陕西省": "shaanxi",
+        "杭州市": "hangzhou", "宁波市": "ningbo", "温州市": "wenzhou", "嘉兴市": "jiaxing",
+        "济南市": "jinan", "青岛市": "qingdao", "广州市": "guangzhou", "深圳市": "shenzhen",
+        "南京市": "nanjing", "苏州市": "suzhou", "福州市": "fuzhou", "厦门市": "xiamen",
+        "成都市": "chengdu", "武汉市": "wuhan", "长沙市": "changsha", "合肥市": "hefei",
+        "石家庄市": "shijiazhuang", "郑州市": "zhengzhou", "西安市": "xian",
+        "朝阳区": "chaoyang", "海淀区": "haidian", "东城区": "dongcheng",
+        "和平区": "heping", "滨海新区": "binhai", "河西区": "hexi",
+        "浦东新区": "pudong", "徐汇区": "xuhui", "静安区": "jingan",
+        "西湖区": "xihu", "余杭区": "yuhang", "滨江区": "binjiang",
+        "海曙区": "haishu", "鄞州区": "yinzhou", "鹿城区": "lucheng", "瓯海区": "ouhai",
+        "南湖区": "nanhu", "秀洲区": "xiuzhou",
+        "历下区": "lixia", "市中区": "shizhong", "市南区": "shinan", "崂山区": "laoshan",
+        "天河区": "tianhe", "越秀区": "yuexiu", "南山区": "nanshan", "福田区": "futian",
+        "鼓楼区": "gulou", "玄武区": "xuanwu", "姑苏区": "gusu", "工业园区": "gongyeyuanqu",
+        "台江区": "taijiang", "思明区": "siming", "湖里区": "huli",
+        "武侯区": "wuhou", "锦江区": "jinjiang", "江汉区": "jianghan", "武昌区": "wuchang",
+        "岳麓区": "yuelu", "天心区": "tianxin", "蜀山区": "shushan", "庐阳区": "luyang",
+        "长安区": "changan", "桥西区": "qiaoxi", "金水区": "jinshui", "中原区": "zhongyuan",
+        "雁塔区": "yanta", "碑林区": "beilin", "渝中区": "yuzhong", "江北区": "jiangbei",
+    }
+    return table.get(name, name)
 
 
 DIMENSION_SEEDS: list[dict[str, Any]] = [
@@ -675,6 +816,17 @@ DIMENSION_SEEDS: list[dict[str, Any]] = [
             {"code": "data_extraction", "name": "科研数据提取"},
         ],
     },
+    # ---- 公共维度（横切基础参照，不归属业务线）----
+    {
+        "dim_code": "common_date", "name": "日期", "domain": "common", "type": "SCD0",
+        "description": "公共日期维度（dim_date 参照）：年→季→月三级层级，属性含自然日/星期/工作日/节假日（按日钻取由物理 date_id 承载，不灌每日明细）。指标按时间切片/钻取分析引用此维度。",
+        "members": _date_members(),
+    },
+    {
+        "dim_code": "common_region", "name": "地区", "domain": "common", "type": "SCD1",
+        "description": "公共地区维度（dim_region 参照）：省→市→区县三级层级（parent_code/path），覆盖微医核心业务区域，用于按地域分析问诊/挂号/药品/健共体协作等业务量。SCD1 覆盖行政区划调整更名。",
+        "members": _region_members(),
+    },
 ]
 
 
@@ -886,8 +1038,8 @@ async def seed_dimensions(db: AsyncSession) -> int:
                         dim_code=dim.dim_code,
                         member_code=m["code"],
                         member_name=m["name"],
-                        parent_code=None,
-                        path=None,
+                        parent_code=m.get("parent_code"),
+                        path=m.get("path"),
                         attributes=m.get("attributes"),
                         status="PUBLISHED",
                     )
@@ -916,8 +1068,8 @@ async def seed_dimensions(db: AsyncSession) -> int:
                     dim_code=dim_code,
                     member_code=m["code"],
                     member_name=m["name"],
-                    parent_code=None,
-                    path=None,
+                    parent_code=m.get("parent_code"),
+                    path=m.get("path"),
                     attributes=m.get("attributes"),
                     status="PUBLISHED",
                 )
