@@ -1129,11 +1129,9 @@ export function Dashboard() {
 
       {/* 推荐流：协同过滤 + 血缘兜底 / 推荐术语 */}
       <Row gutter={[20, 20]}>
-        <Col xs={24} lg={12} style={{ display: "flex" }}>
+        <Col xs={24} lg={12}>
           <Card
             title="为你推荐指标"
-            styles={{ body: { flex: 1, minHeight: 320, maxHeight: 320, overflow: "auto" } }}
-            style={{ height: "100%", display: "flex", flexDirection: "column" }}
             extra={<a onClick={() => navigate("/catalog", { state: { from: "dashboard" } })}>去目录</a>}
           >
             {recommended.length === 0 ? (
@@ -1207,11 +1205,9 @@ export function Dashboard() {
             )}
           </Card>
         </Col>
-        <Col xs={24} lg={12} style={{ display: "flex" }}>
+        <Col xs={24} lg={12}>
           <Card
             title="推荐术语"
-            styles={{ body: { flex: 1, minHeight: 320, maxHeight: 320, overflow: "auto" } }}
-            style={{ height: "100%", display: "flex", flexDirection: "column" }}
             extra={<a onClick={() => navigate("/glossary")}>术语表</a>}
           >
             {terms.length === 0 ? (
