@@ -612,6 +612,32 @@ vi .env.production                                           # 1c. 填 UNISENSE_
 #   docker run --rm -v unisense_unisense_binlog:/var/lib/mysql-binlog alpine \
 #     chown -R 999:999 /var/lib/mysql-binlog
 
+# ── 第 1.7 步：Docker 镜像源配置（仅当 `up` 报 Docker Hub 拉取超时）────────
+#   现象：`context canceled` / `Error response from daemon: Get "https://registry-1.docker.io/v2/"`
+#   原因：compose 需从 Docker Hub 拉取第三方基础镜像（mysql/neo4j/es/redis/minio，
+#         以及 --build 用的 python:3.11-slim/node:22-alpine/nginx:alpine），
+#         国内网络直连 Docker Hub 常超时/被 reset。
+#   解法：配置 registry-mirrors（生产机执行一次，以下地址 2026-09 实测可用）：
+sudo mkdir -p /etc/docker
+sudo tee /etc/docker/daemon.json <<'EOF'
+{
+  "registry-mirrors": [
+    "https://docker.1ms.run",
+    "https://dockerproxy.net",
+    "https://docker.xuanyuan.me"
+  ]
+}
+EOF
+sudo systemctl daemon-reload && sudo systemctl restart docker
+#   验证：docker pull mysql:8.0   # 能拉下即 mirror 生效
+#
+#   ⚠️ 重要：镜像加速只代理 Docker Hub 上的公共镜像。unisense/backend:dev、
+#   unisense/frontend:dev 是**本地构建**的应用镜像（Docker Hub 上不存在，
+#   配任何 mirror 都拉不到）——必须在本机 clone 源码后走 `--build` 构建。
+#   第 2 步的 `up -d --build` 会先本地构建这两个应用镜像（基础镜像走 mirror、
+#   pip 走清华源），再启动全部服务。**勿**在生产机执行不带 `--build` 的 up
+#   （会尝试从 Docker Hub 拉 unisense/* 而失败）。
+
 # ── 第 2 步：构建并启动（迁移与自举自动执行）──────────────
 docker compose --env-file .env.production up -d --build
 
