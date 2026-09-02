@@ -76,6 +76,7 @@ from app.models.quality import (
     ReconciliationRecord,
     ReconciliationStatus,
 )
+from app.models.query_engine_config import QueryEngineConfig
 from app.models.seed_marker import SeedMarker
 from app.models.sql_infer_eval import SqlInferEvalRun
 from app.models.subject_domain import SubjectDomain
@@ -143,6 +144,7 @@ __all__ = [
     "PendingVersionConfirmation",
     "QualityEvent",
     "QualityRule",
+    "QueryEngineConfig",
     "Reconciliation",
     "ReconciliationRecord",
     "ReconciliationStatus",
