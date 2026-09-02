@@ -3,13 +3,13 @@ import { useParams, useNavigate } from "react-router-dom";
 import { Card, Spin, Alert, Descriptions, Tag, Empty, Space, Button, Modal, Input, Typography, message } from "antd";
 import {
   InfoCircleOutlined, WarningOutlined, LinkOutlined, ArrowLeftOutlined,
-  EditOutlined, PlusOutlined, DeleteOutlined,
+  EditOutlined, PlusOutlined, DeleteOutlined, ProfileOutlined,
 } from "@ant-design/icons";
 import { fetchConsumptionGuide, getMetric, updateConsumptionGuide } from "../api";
 import type { ConsumptionGuideResponse, ConsumptionGuidePayload, MetricResponse } from "../types";
 import { useTracking } from "../hooks/useTracking";
 import { usePermission } from "../hooks/usePermission";
-import { ObjectView, DEF_FIELD_LABEL } from "../utils/display";
+import { DefinitionView } from "../utils/display";
 import { enumLabel, METRIC_TYPE_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, SERVING_MODE_LABEL } from "../utils/enums";
 
 /** 单组字符串列表编辑器（推荐用法/注意事项/关联指标共用，可增删行）。
@@ -255,8 +255,8 @@ export function ConsumptionGuide() {
       </Card>
 
       {metric && metric.definition_json && Object.keys(metric.definition_json).length > 0 && (
-        <Card title="口径定义" style={{ marginTop: 20 }}>
-          <ObjectView data={metric.definition_json} labels={DEF_FIELD_LABEL} />
+        <Card title={<span><ProfileOutlined /> 口径定义</span>} style={{ marginTop: 20 }}>
+          <DefinitionView data={metric.definition_json} />
         </Card>
       )}
 
