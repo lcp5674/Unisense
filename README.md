@@ -647,13 +647,14 @@ admin/domains 二次启动全部 `skipped`；reference 首次初始化后写 `se
   取容器已注入的 `UNISENSE_SEED_ADMIN_PASSWORD` 强口令，**勿用脚本内置默认弱口令**）：
 
 ```bash
-# a) 一次性：默认降级库指向 e2e_biz 时，先创建演示库/用户（幂等；生产指向真实库则跳过）
+# a) 一次性：默认降级库指向 e2e_biz 时，先创建演示库/用户（幂等；生产指向真实库则跳过）。
+#    密码从 mysql 容器已注入的 $MYSQL_ROOT_PASSWORD 读取，无需宿主机暴露明文。
 docker compose --env-file .env.production exec -T mysql \
-  mysql -uroot -p"${UNISENSE_MYSQL_ROOT_PASSWORD}" \
-  -e "CREATE DATABASE IF NOT EXISTS e2e_biz DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-      CREATE USER IF NOT EXISTS 'e2e'@'%' IDENTIFIED BY 'e2e';
-      GRANT ALL PRIVILEGES ON e2e_biz.* TO 'e2e'@'%';
-      FLUSH PRIVILEGES;"
+  sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" \
+    -e "CREATE DATABASE IF NOT EXISTS e2e_biz DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+        CREATE USER IF NOT EXISTS \"e2e\"@\"%\" IDENTIFIED BY \"e2e\";
+        GRANT ALL PRIVILEGES ON e2e_biz.* TO \"e2e\"@\"%\";
+        FLUSH PRIVILEGES;"'
 
 # b) 执行造数（20/20 步骤；幂等，重复执行自动跳过已建内容）
 docker compose --env-file .env.production exec -T backend \
