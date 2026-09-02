@@ -638,8 +638,28 @@ admin/domains 二次启动全部 `skipped`；reference 首次初始化后写 `se
   自动建此库；未配置时 OLAP 降级查询返回 `DEPENDENCY_DEGRADED_ENGINE` 业务错误，
   不影响进程存活）。
 - `UNISENSE_OLAP_URL`：已有外部 Doris/StarRocks 时配置，否则走 MySQL 降级。
-- 演示数据：需要时用 `docker compose exec backend python scripts/seed_e2e_data.py`
-  显式造数，不随启动自动执行。
+  > **也可在 Web 端配置（推荐，无需改 .env/重启）**：登录后
+  > 「系统配置 → 查询引擎配置」卡片可填写/修改 OLAP（Doris）与 MySQL 降级库连接
+  > （密码加密存 DB），保存后最长 30s 全量生效；DB 配置启用时以 DB 为准，env 仅兜底。
+- 演示数据：不随启动自动执行，需要时按下述步骤显式造数
+  （**注意：命令必须在容器内以 `--base http://localhost:8000` 执行**——uvicorn 在
+  容器内监听 8000，脚本默认值 8100 是宿主机映射端口，容器内不可达；admin 密码须
+  取容器已注入的 `UNISENSE_SEED_ADMIN_PASSWORD` 强口令，**勿用脚本内置默认弱口令**）：
+
+```bash
+# a) 一次性：默认降级库指向 e2e_biz 时，先创建演示库/用户（幂等；生产指向真实库则跳过）
+docker compose --env-file .env.production exec -T mysql \
+  mysql -uroot -p"${UNISENSE_MYSQL_ROOT_PASSWORD}" \
+  -e "CREATE DATABASE IF NOT EXISTS e2e_biz DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+      CREATE USER IF NOT EXISTS 'e2e'@'%' IDENTIFIED BY 'e2e';
+      GRANT ALL PRIVILEGES ON e2e_biz.* TO 'e2e'@'%';
+      FLUSH PRIVILEGES;"
+
+# b) 执行造数（20/20 步骤；幂等，重复执行自动跳过已建内容）
+docker compose --env-file .env.production exec -T backend \
+  sh -c 'python scripts/seed_e2e_data.py --base http://localhost:8000 \
+         --admin-pass "$UNISENSE_SEED_ADMIN_PASSWORD"'
+```
 
 ### 10.4 备份与恢复
 
