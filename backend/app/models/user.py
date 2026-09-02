@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, Enum, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Enum, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.mysql import Base
@@ -111,6 +111,12 @@ class User(Base, BaseModel):
         comment="用户角色（内置七角色或自定义角色名，方案 A：String 承载）",
     )
     domain: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="所属域")
+    #: 权限域完整列表（团队继承 ∪ 显式指定，并集去重，方案 B 增强）：``user.domain``
+    #: 为主域（兼容展示/Owner 责任链），``domains`` 为并集后的全部权限域；权限判定
+    #: 统一用 :meth:`domains_all`（动态并入所属团队域，团队改域成员自动继承）。
+    domains: Mapped[list[str] | None] = mapped_column(
+        JSON, nullable=True, comment="权限域列表（团队继承∪显式指定，并集去重）"
+    )
     status: Mapped[str] = mapped_column(
         Enum("active", "disabled", "deleted", name="user_status"),
         nullable=False,
@@ -161,3 +167,22 @@ class User(Base, BaseModel):
     def has_role(self, role: str) -> bool:
         """判断用户是否拥有指定角色（主角色或 ``user_role`` 扩展角色）。"""
         return role in self.roles_all()
+
+    def domains_all(self) -> list[str]:
+        """返回用户全部权限域：主域 + domains 扩展 + 所属团队域（动态继承，去重）。
+
+        团队域通过 ``_org_domain``（认证层 ``get_current_user`` 挂载）动态并入——
+        团队改绑业务域后成员无需重新保存即自动生效；未挂载（测试/mock）时安全回退。
+        语义：权限域 = 团队继承 ∪ 单独指定（并集），供 PDP/可见性/域收敛判定统一使用。
+        """
+        result: list[str] = []
+        seen: set[str] = set()
+        for d in (
+            self.domain,
+            *(self.__dict__.get("domains") or []),
+            getattr(self, "_org_domain", None),
+        ):
+            if d and d not in seen:
+                seen.add(d)
+                result.append(d)
+        return result

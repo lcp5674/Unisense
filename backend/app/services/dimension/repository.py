@@ -63,7 +63,7 @@ class DimensionRepository:
         offset: int = 0,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
-        visible_user_domain: str | None = None,
+        visible_user_domains: list[str] | None = None,
     ) -> tuple[list[tuple[Dimension, int]], int]:
         """分页列出维度并附带绑定指标数，返回 (列表, total)。
 
@@ -91,10 +91,10 @@ class DimensionRepository:
             elif visible_role == "domain_admin":
                 visibility = (
                     [
-                        Dimension.domain == visible_user_domain,
+                        Dimension.domain.in_(visible_user_domains),
                         Dimension.owner_id == visible_actor_id,
                     ]
-                    if visible_user_domain
+                    if visible_user_domains
                     else [
                         Dimension.status.in_(("PUBLISHED", "DEPRECATED")),
                         Dimension.owner_id == visible_actor_id,

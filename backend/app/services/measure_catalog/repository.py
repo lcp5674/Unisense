@@ -86,7 +86,7 @@ class MeasureCatalogRepository:
         offset: int = 0,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
-        visible_user_domain: str | None = None,
+        visible_user_domains: list[str] | None = None,
     ) -> tuple[list[MeasureCatalog], int]:
         """分页列出逻辑度量，返回 (列表, total)。
 
@@ -113,10 +113,10 @@ class MeasureCatalogRepository:
             elif visible_role == "domain_admin":
                 visibility = (
                     [
-                        MeasureCatalog.domain == visible_user_domain,
+                        MeasureCatalog.domain.in_(visible_user_domains),
                         MeasureCatalog.owner_id == visible_actor_id,
                     ]
-                    if visible_user_domain
+                    if visible_user_domains
                     else [
                         MeasureCatalog.status.in_(("PUBLISHED", "DEPRECATED")),
                         MeasureCatalog.owner_id == visible_actor_id,

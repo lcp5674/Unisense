@@ -163,7 +163,7 @@ async def metric_health(
     """
     scope: dict[str, Any] = {}
     if user.role != "platform_admin":
-        scope = {"actor_id": user.id, "role": user.role, "user_domain": user.domain}
+        scope = {"actor_id": user.id, "role": user.role, "user_domains": user.domains_all()}
     return ok(
         data=await ObservabilityService(db).metric_health_stats(**scope),
         trace_id=trace_id,

@@ -70,6 +70,10 @@ class FakeUser:
     def has_role(self, role: str) -> bool:
         return role in self.roles_all()
 
+    def domains_all(self) -> list[str]:
+        """权限域并集（对齐 User.domains_all 语义；FakeUser 仅主域）。"""
+        return [d for d in (self.domain,) if d]
+
 
 class FakeMetric:
     def __init__(self, **over: Any) -> None:

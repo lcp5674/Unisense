@@ -995,14 +995,14 @@ class TestMeasureReadVisibility:
         session.execute = AsyncMock(side_effect=[_FakeResult(row=0), _FakeResult(rows=[])])
         await repo.list(
             None, None, visible_actor_id=2, visible_role="domain_admin",
-            visible_user_domain="outpatient",
+            visible_user_domains=["outpatient"],
         )
         list_sql = str(
             session.execute.call_args_list[1][0][0].compile(
                 compile_kwargs={"literal_binds": True}
             )
         )
-        assert "measure_catalog.domain = 'outpatient'" in list_sql
+        assert "measure_catalog.domain IN ('outpatient')" in list_sql
         assert "measure_catalog.owner_id = 2" in list_sql
         assert "IN ('PUBLISHED', 'DEPRECATED')" not in list_sql
 
@@ -1011,7 +1011,7 @@ class TestMeasureReadVisibility:
         session.execute = AsyncMock(side_effect=[_FakeResult(row=0), _FakeResult(rows=[])])
         await repo.list(
             None, None, visible_actor_id=2, visible_role="domain_admin",
-            visible_user_domain=None,
+            visible_user_domains=None,
         )
         list_sql = str(
             session.execute.call_args_list[1][0][0].compile(
@@ -1020,7 +1020,7 @@ class TestMeasureReadVisibility:
         )
         assert "measure_catalog.status IN ('PUBLISHED', 'DEPRECATED')" in list_sql
         assert "measure_catalog.owner_id = 2" in list_sql
-        assert "measure_catalog.domain = 'outpatient'" not in list_sql
+        assert "measure_catalog.domain IN ('outpatient')" not in list_sql
 
     async def test_get_measure_visible_owner_sees_draft(self) -> None:
         """本人可见自己的 DRAFT 度量。"""

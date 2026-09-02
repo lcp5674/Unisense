@@ -434,7 +434,7 @@ async def list_terms(
         reviewed_by,
         visible_actor_id=user.id,
         visible_role=user.role,
-        visible_user_domain=user.domain,
+        visible_user_domains=user.domains_all(),
     )
     return ok(
         data={"items": items, "total": total, "page": page, "page_size": page_size},

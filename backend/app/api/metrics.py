@@ -356,7 +356,7 @@ async def list_metrics(
     """支持域/状态/分级/关键词过滤与分页。"""
     service = MetricService(db)
     metrics, total = await service.list_metrics(
-        params, actor_id=user.id, role=user.role, user_domain=user.domain
+        params, actor_id=user.id, role=user.role, user_domains=user.domains_all()
     )
     # 审核通过时间（审批工作台「我审过的」视图）：metric 表无 approved_at 列，
     # 从当前生效版本（effective_version）的 metric_version.published_at 批量填充——

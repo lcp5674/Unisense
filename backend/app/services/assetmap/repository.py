@@ -821,14 +821,14 @@ class AssetMapRepository:
         self,
         actor_id: int | None = None,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> dict[str, Any]:
         # C4（第七轮）：按域分布排除草稿/已废弃（对齐域树活跃指标口径，避免资产地图
         # 「指标总数」把 DRAFT/DEPRECATED 一并计入虚高）；按状态分布保留全量（分布视图）。
         # P0-3（审查修复）：非管理角色按读路径行级隔离收敛（仅公开状态 + 本人私有
         # 工作区 + 被指派 REVIEW），与指标明细列表同源，杜绝「列表按可见性过滤、
         # 汇总按全量计数」泄露他人 DRAFT/REVIEW 私有指标计数。
-        visibility = metric_visibility_conditions(actor_id, role, user_domain)
+        visibility = metric_visibility_conditions(actor_id, role, user_domains)
         by_domain = (
             await self._session.execute(
                 select(Metric.domain, func.count())
@@ -877,14 +877,14 @@ class AssetMapRepository:
         self,
         actor_id: int | None = None,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> dict[str, Any]:
         """指标体系聚合：指标多维分布 + PII 合规率。
 
         13 类维度：类型/粒度/分层/分级/单位/币种/聚合/时间语义/新鲜度/服务模式/可加性/状态/域。
         复用 SQL GROUP BY，与热力聚合同源（TD §12.11），避免指标体系口径漂移。
         """
-        visibility = metric_visibility_conditions(actor_id, role, user_domain)
+        visibility = metric_visibility_conditions(actor_id, role, user_domains)
         # 合规率：已复核 PII 指标 / 全部 PII 指标。
         # 排除 DEPRECATED——已废弃指标已下线、不再对外服务，其复核状态无意义，
         # 不应参与合规统计（否则废弃测试指标会撑起虚假合规率）。
@@ -1466,7 +1466,7 @@ class AssetMapRepository:
         org_id: int | None = None,
         actor_id: int | None = None,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """全局资产搜索：表/字段/指标三级，返回完整信息（源/责任人/口径/描述）。
 
@@ -1497,7 +1497,7 @@ class AssetMapRepository:
             results.extend(
                 await self._search_metrics(
                     needle, limit, org_id=org_id, actor_id=actor_id, role=role,
-                    user_domain=user_domain,
+                    user_domains=user_domains,
                 )
             )
         return results
@@ -1604,7 +1604,7 @@ class AssetMapRepository:
         org_id: int | None = None,
         actor_id: int | None = None,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """指标级搜索结果（含治理一等字段：类型/粒度/单位/聚合/新鲜度/分级/分层）。
 
@@ -1619,7 +1619,7 @@ class AssetMapRepository:
                 Metric.metric_code.like(needle, escape="/"),
                 Metric.name.like(needle, escape="/"),
             ),
-            *metric_visibility_conditions(actor_id, role, user_domain),
+            *metric_visibility_conditions(actor_id, role, user_domains),
         )
         if org_id is not None:
             stmt = stmt.join(User, User.id == Metric.owner_id).where(User.org_id == org_id)
@@ -2465,7 +2465,7 @@ class AssetMapRepository:
         org_id: int | None = None,
         actor_id: int | None = None,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> dict[str, Any]:
         """变更追踪流：最近 N 天新增/变更的目录与指标。
 
@@ -2478,7 +2478,7 @@ class AssetMapRepository:
             limit: 各子列表上限。
             org_id: 多租户隔离（P2 加固）：非平台管理员仅统计本组织变更——
                 catalog/drift 经 ``data_source.org_id``、metric 经 ``user.org_id``。
-            actor_id/role/user_domain: P0-3 指标可见性收敛（第三轮审查）——非管理
+            actor_id/role/user_domains: P0-3 指标可见性收敛（第三轮审查）——非管理
                 角色仅见公开状态 + 本人私有 + 被指派 REVIEW，防同组织他人
                 DRAFT/REVIEW 进入变更流。
 
@@ -2488,7 +2488,7 @@ class AssetMapRepository:
         cutoff = datetime.now(UTC) - timedelta(days=days)
         catalogs = await self._recent_catalog_changes(cutoff, limit, org_id)
         metrics = await self._recent_metric_changes(
-            cutoff, limit, org_id, actor_id=actor_id, role=role, user_domain=user_domain
+            cutoff, limit, org_id, actor_id=actor_id, role=role, user_domains=user_domains
         )
         drift = await self._recent_drift(cutoff, limit, org_id)
         return {"catalogs": catalogs, "metrics": metrics, "drift": drift, "days": days}
@@ -2549,7 +2549,7 @@ class AssetMapRepository:
         org_id: int | None = None,
         actor_id: int | None = None,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """最近变更的指标（change_type 由状态机推断：废弃/新增/更新）。
 
@@ -2570,7 +2570,7 @@ class AssetMapRepository:
         ).where(
             Metric.deleted_at.is_(None),
             Metric.updated_at >= cutoff,
-            *metric_visibility_conditions(actor_id, role, user_domain),
+            *metric_visibility_conditions(actor_id, role, user_domains),
         )
         if org_id is not None:
             stmt = stmt.join(User, User.id == Metric.owner_id).where(User.org_id == org_id)

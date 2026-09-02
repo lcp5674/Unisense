@@ -109,7 +109,7 @@ class GlobalSearchRepository:
         *,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
-        visible_user_domain: str | None = None,
+        visible_user_domains: list[str] | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         """跨 9 类资源聚合搜索，按类型分组返回。
 
@@ -120,7 +120,7 @@ class GlobalSearchRepository:
                 公开状态（PUBLISHED/EXPERIMENTAL/DEPRECATED）+ 本人 Owner/副 Owner
                 的未发布资产；管理角色传 None 即不加过滤（对齐指标目录语义）。
             visible_role: 调用者角色（配合 visible_actor_id 判定 reviewer 放行）。
-            visible_user_domain: 调用者域（reviewer 按域评审组放行，对齐指标目录）。
+            visible_user_domains: 调用者域（reviewer 按域评审组放行，对齐指标目录）。
 
         Returns:
             ``{"metric": [...], "dimension": [...], ...}`` 分组结构；
@@ -162,7 +162,7 @@ class GlobalSearchRepository:
                 raw_q=raw_q,
                 visible_actor_id=visible_actor_id,
                 visible_role=visible_role,
-                visible_user_domain=visible_user_domain,
+                visible_user_domains=visible_user_domains,
             ),
             self._search_dimensions(
                 needles,
@@ -190,7 +190,7 @@ class GlobalSearchRepository:
         self,
         visible_actor_id: int | None,
         visible_role: str | None,
-        visible_user_domain: str | None = None,
+        visible_user_domains: list[str] | None = None,
     ) -> Any | None:
         """指标读路径行级隔离（与 semantic/visibility.py 同源，P0-3）。
 
@@ -205,7 +205,7 @@ class GlobalSearchRepository:
             SQLAlchemy OR 条件；管理角色/未传上下文返回 None（不加过滤）。
         """
         conds = metric_visibility_conditions(
-            visible_actor_id, visible_role, visible_user_domain
+            visible_actor_id, visible_role, visible_user_domains
         )
         return or_(*conds) if conds else None
 
@@ -242,7 +242,7 @@ class GlobalSearchRepository:
         *,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
-        visible_user_domain: str | None = None,
+        visible_user_domains: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """指标检索：ES 优先（相关度排序），ES 禁用/异常/未命中时降级 MySQL LIKE。
 
@@ -275,7 +275,7 @@ class GlobalSearchRepository:
         syn_match = _like_any(MeasureCatalog.synonyms.cast(String), needles)
         conditions: list[Any] = [Metric.deleted_at.is_(None)]
         visibility = self._visibility_conditions(
-            visible_actor_id, visible_role, visible_user_domain
+            visible_actor_id, visible_role, visible_user_domains
         )
         if visibility is not None:
             conditions.append(visibility)

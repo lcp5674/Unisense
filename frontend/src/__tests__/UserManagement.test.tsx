@@ -233,7 +233,7 @@ describe("UserManagement 用户管理", () => {
     expect(screen.getByText(/仅在此展示一次/)).toBeTruthy();
   });
 
-  it("创建用户：显式指定业务域（覆盖团队继承），提交 payload 带 domain", async () => {
+  it("创建用户：显式指定业务域（与团队域取并集），提交 payload 带 domains 数组", async () => {
     mockMe.mockResolvedValue(ADMIN);
     mockList.mockResolvedValue(USERS);
     mockDomains.mockResolvedValue([
@@ -259,15 +259,15 @@ describe("UserManagement 用户管理", () => {
     fireEvent.change(screen.getByPlaceholderText("如 张三"), { target: { value: "鲍勃" } });
     fireEvent.change(screen.getByPlaceholderText("至少 8 位"), { target: { value: "secret123" } });
 
-    // 业务域下拉：显式指定 medical_fee
-    fireEvent.mouseDown(screen.getByText("留空自动继承所属团队业务域"));
+    // 业务域下拉（多选）：显式指定 medical_fee
+    fireEvent.mouseDown(screen.getByText("留空继承团队域；可多选，与团队域取并集"));
     await clickSelectOption("医疗费用（medical_fee）");
 
     fireEvent.click(screen.getByText("创 建"));
     await waitFor(() => expect(mockCreate).toHaveBeenCalled());
     expect(mockCreate.mock.calls[0][0]).toMatchObject({
       username: "bob",
-      domain: "medical_fee",
+      domains: ["medical_fee"],
       org_id: undefined,
     });
   });

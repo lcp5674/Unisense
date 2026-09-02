@@ -171,7 +171,7 @@ async def test_create_user_success(admin_client: httpx.AsyncClient) -> None:
     with (
         patch("app.api.users.hash_password", return_value="hashed:abc"),
         patch("app.api.users._assert_unique", new=AsyncMock()),
-        patch("app.api.users._assert_domain_active", new=AsyncMock()),
+        patch("app.api.users._assert_domains_active", new=AsyncMock()),
         patch(
             "app.api.users._assert_org_active",
             new=AsyncMock(return_value=_make_org()),
@@ -202,7 +202,7 @@ async def test_create_user_with_multiple_roles(admin_client: httpx.AsyncClient) 
     with (
         patch("app.api.users.hash_password", return_value="hashed:abc"),
         patch("app.api.users._assert_unique", new=AsyncMock()),
-        patch("app.api.users._assert_domain_active", new=AsyncMock()),
+        patch("app.api.users._assert_domains_active", new=AsyncMock()),
         patch(
             "app.api.users._assert_org_active",
             new=AsyncMock(return_value=_make_org()),
@@ -252,7 +252,7 @@ async def test_update_user_replaces_roles(admin_client: httpx.AsyncClient) -> No
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         with (
             patch("app.api.users._assert_unique", new=AsyncMock()),
-            patch("app.api.users._assert_domain_active", new=AsyncMock()),
+            patch("app.api.users._assert_domains_active", new=AsyncMock()),
             patch(
                 "app.api.users._assert_org_active",
                 new=AsyncMock(return_value=_make_org()),
@@ -304,7 +304,7 @@ async def test_update_self_platform_admin_removal_forbidden(
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         with (
             patch("app.api.users._assert_unique", new=AsyncMock()),
-            patch("app.api.users._assert_domain_active", new=AsyncMock()),
+            patch("app.api.users._assert_domains_active", new=AsyncMock()),
         ):
             resp = await client.put(
                 "/api/v1/users/1",
@@ -397,7 +397,7 @@ async def test_update_user_success(admin_client: httpx.AsyncClient) -> None:
     with (
         patch("app.api.users._get_user", return_value=user),
         patch("app.api.users._assert_unique", new=AsyncMock()),
-        patch("app.api.users._assert_domain_active", new=AsyncMock()),
+        patch("app.api.users._assert_domains_active", new=AsyncMock()),
     ):
         resp = await admin_client.put(
             "/api/v1/users/2",
@@ -610,7 +610,7 @@ async def test_create_user_sends_created_notification(admin_client: httpx.AsyncC
     with (
         patch("app.api.users.hash_password", return_value="hashed:abc"),
         patch("app.api.users._assert_unique", new=AsyncMock()),
-        patch("app.api.users._assert_domain_active", new=AsyncMock()),
+        patch("app.api.users._assert_domains_active", new=AsyncMock()),
         patch("app.api.users._assert_org_active", new=AsyncMock(return_value=_make_org())),
         patch("app.services.notify.service.NotifyService") as ns,
     ):
@@ -643,7 +643,7 @@ async def test_create_user_notify_failure_does_not_block(admin_client: httpx.Asy
     with (
         patch("app.api.users.hash_password", return_value="hashed:abc"),
         patch("app.api.users._assert_unique", new=AsyncMock()),
-        patch("app.api.users._assert_domain_active", new=AsyncMock()),
+        patch("app.api.users._assert_domains_active", new=AsyncMock()),
         patch("app.api.users._assert_org_active", new=AsyncMock(return_value=_make_org())),
         patch("app.services.notify.service.NotifyService") as ns,
     ):
@@ -775,7 +775,7 @@ async def test_create_user_inherits_team_domain(admin_client: httpx.AsyncClient)
     with (
         patch("app.api.users.hash_password", return_value="hashed:abc"),
         patch("app.api.users._assert_unique", new=AsyncMock()),
-        patch("app.api.users._assert_domain_active", new=AsyncMock()),
+        patch("app.api.users._assert_domains_active", new=AsyncMock()),
         patch(
             "app.api.users._assert_org_active",
             new=AsyncMock(return_value=_make_org(domain="sales")),
@@ -797,13 +797,43 @@ async def test_create_user_inherits_team_domain(admin_client: httpx.AsyncClient)
     assert resp.json()["data"]["org_id"] == 1
 
 
+async def test_create_user_domains_union_with_team_domain(admin_client: httpx.AsyncClient) -> None:
+    """创建用户：权限域 = 团队继承 ∪ 显式指定（并集），主域取显式首个。"""
+    with (
+        patch("app.api.users.hash_password", return_value="hashed:abc"),
+        patch("app.api.users._assert_unique", new=AsyncMock()),
+        patch("app.api.users._assert_domains_active", new=AsyncMock()),
+        patch(
+            "app.api.users._assert_org_active",
+            new=AsyncMock(return_value=_make_org(domain="sales")),
+        ),
+    ):
+        resp = await admin_client.post(
+            "/api/v1/users",
+            json={
+                "username": "bob",
+                "email": "bob@example.com",
+                "display_name": "鲍勃",
+                "role": "domain_admin",
+                "org_id": 1,
+                "domains": ["medical_fee", "online_consultation"],
+                "password": "Secret123!",
+            },
+        )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    # 主域 = 显式首个；domains = 团队域 ∪ 显式指定（去重并集）
+    assert data["domain"] == "medical_fee"
+    assert data["domains"] == ["medical_fee", "online_consultation", "sales"]
+
+
 async def test_update_user_change_team_inherits_new_domain(admin_client: httpx.AsyncClient) -> None:
     """编辑用户换团队：新团队绑定域（domain=finance）时，用户域自动切换为新团队域。"""
     user = _make_user(org_id=1, domain="sales")
     with (
         patch("app.api.users._get_user", return_value=user),
         patch("app.api.users._assert_unique", new=AsyncMock()),
-        patch("app.api.users._assert_domain_active", new=AsyncMock()),
+        patch("app.api.users._assert_domains_active", new=AsyncMock()),
         patch(
             "app.api.users._assert_org_active",
             new=AsyncMock(
@@ -1133,3 +1163,23 @@ async def test_resolve_user_names_unknown_and_empty_ids() -> None:
         assert resp2.status_code == 200
         assert resp2.json()["data"] == []
     app.dependency_overrides.clear()
+
+
+def test_user_domains_all_union_with_team() -> None:
+    """User.domains_all()：权限域 = 主域 ∪ domains 扩展 ∪ 团队域（动态继承，去重）。"""
+    user = _make_user(domain="medical_fee", domains=["online_consultation", "medical_fee"])
+    # 团队域经认证层挂载 _org_domain（动态继承）
+    user._org_domain = "sales"
+    assert user.domains_all() == ["medical_fee", "online_consultation", "sales"]
+
+    # 无 domains 扩展、无团队域 → 仅主域
+    u2 = _make_user(domain="finance")
+    assert u2.domains_all() == ["finance"]
+
+    # 主域为空、仅扩展域 → 扩展域生效
+    u3 = _make_user(domain=None, domains=["medical_fee"])
+    assert u3.domains_all() == ["medical_fee"]
+
+    # 完全无域 → 空
+    u4 = _make_user(domain=None)
+    assert u4.domains_all() == []

@@ -208,11 +208,11 @@ class TestTermRepo:
             offset=0,
             visible_actor_id=2,
             visible_role="domain_admin",
-            visible_user_domain="outpatient",
+            visible_user_domains=["outpatient"],
         )
         stmt = repo._session.execute.call_args_list[1].args[0]
         literal_sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
-        assert "term.domain = 'outpatient'" in literal_sql
+        assert "term.domain IN ('outpatient')" in literal_sql
         assert "term.owner_id = 2" in literal_sql
         assert "PUBLISHED" not in literal_sql
 
@@ -232,13 +232,13 @@ class TestTermRepo:
             offset=0,
             visible_actor_id=2,
             visible_role="domain_admin",
-            visible_user_domain=None,
+            visible_user_domains=None,
         )
         stmt = repo._session.execute.call_args_list[1].args[0]
         literal_sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "term.status IN ('PUBLISHED', 'DEPRECATED')" in literal_sql
         assert "term.owner_id = 2" in literal_sql
-        assert "term.domain = 'outpatient'" not in literal_sql
+        assert "term.domain IN ('outpatient')" not in literal_sql
 
     async def test_delete_term(self, repo: GlossaryRepository) -> None:
         term = Term(term_code="T1")

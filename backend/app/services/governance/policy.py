@@ -401,6 +401,8 @@ class Subject:
     Attributes:
         role: 主角色（兼容单角色决策路径）。
         roles: 全部角色（方案 A 多角色；缺省为空 → 决策时等价于 ``(role,)``）。
+        domains: 全部权限域（团队继承 ∪ 显式指定并集，方案 B 增强；缺省为空
+            → 决策时回退为 ``[domain]`` 单主域兼容）。
     """
 
     user_id: int
@@ -408,6 +410,7 @@ class Subject:
     domain: str | None = None
     grants: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     roles: tuple[str, ...] = field(default_factory=tuple)
+    domains: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True, slots=True)
@@ -494,10 +497,13 @@ def decide(
     if is_platform_admin:
         return Decision(True, "platform_admin 跨域运维直通", masking=masking)
 
+    # 同域判定（方案 B 增强）：subject.domains（团队继承∪显式指定并集）命中资源域即视为同域；
+    # 未提供 domains 时回退单主域兼容（存量 Subject 构造点）。
+    subject_domains = subject.domains or ((subject.domain,) if subject.domain else ())
     same_domain = (
-        subject.domain is not None
+        bool(subject_domains)
         and resource.domain is not None
-        and subject.domain == resource.domain
+        and resource.domain in subject_domains
     )
     if same_domain and act in role_actions_for_role:
         owner_mismatch = (

@@ -197,10 +197,10 @@ class TestDimensionCRUD:
             None,
             visible_actor_id=2,
             visible_role="domain_admin",
-            visible_user_domain="outpatient",
+            visible_user_domains=["outpatient"],
         )
         stmt = _rows_stmt(session)
-        assert "dimension.domain = 'outpatient'" in stmt
+        assert "dimension.domain IN ('outpatient')" in stmt
         assert "dimension.owner_id = 2" in stmt
         # 绑定域后不再把「公开状态」作为唯一门槛——本域 DRAFT/REVIEW 也可见
         assert "PUBLISHED" not in stmt
@@ -211,13 +211,13 @@ class TestDimensionCRUD:
         """未绑定域的 domain_admin → 退化个人视角（公开 + 本人负责），不泄露他人 DRAFT。"""
         session.execute = AsyncMock(side_effect=[_FakeResult(row=0), _FakeResult(rows=[])])
         await repo.list_dimensions(
-            None, None, visible_actor_id=2, visible_role="domain_admin", visible_user_domain=None
+            None, None, visible_actor_id=2, visible_role="domain_admin", visible_user_domains=None
         )
         stmt = _rows_stmt(session)
         assert "dimension.status IN ('PUBLISHED', 'DEPRECATED')" in stmt
         assert "dimension.owner_id = 2" in stmt
         # 无域收敛时不得出现全域 DRAFT 放行
-        assert "dimension.domain = 'outpatient'" not in stmt
+        assert "dimension.domain IN ('outpatient')" not in stmt
 
 
 class TestMemberCRUD:

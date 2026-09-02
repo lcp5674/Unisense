@@ -238,7 +238,10 @@ export function UserManagement() {
         role: roleList[0],
         roles: roleList,
         org_id: values.org_id ? Number(values.org_id) : undefined,
-        domain: values.domain ? String(values.domain) : undefined,
+        domains:
+          Array.isArray(values.domains) && values.domains.length > 0
+            ? (values.domains as string[]).map(String)
+            : undefined,
         password: String(values.password),
       };
       await createUser(payload);
@@ -270,7 +273,10 @@ export function UserManagement() {
         role: roleList[0],
         roles: roleList,
         org_id: values.org_id ? Number(values.org_id) : undefined,
-        domain: values.domain ? String(values.domain) : undefined,
+        domains:
+          Array.isArray(values.domains) && values.domains.length > 0
+            ? (values.domains as string[]).map(String)
+            : undefined,
       };
       await updateUser(editTarget.id, payload);
       message.success("用户已更新");
@@ -364,7 +370,12 @@ export function UserManagement() {
       email: u.email,
       roles: u.roles?.length ? u.roles : [u.role],
       org_id: u.org_id ?? undefined,
-      domain: u.domain ?? undefined,
+      domains:
+        u.domains?.length
+          ? u.domains
+          : u.domain
+            ? [u.domain]
+            : undefined,
     });
   }
 
@@ -646,15 +657,16 @@ export function UserManagement() {
             </div>
           ) : null}
           <Form.Item
-            name="domain"
+            name="domains"
             label="业务域"
-            extra="可空；留空自动继承所属团队业务域，选择则显式指定（覆盖团队继承）"
+            extra="可空；留空自动继承所属团队业务域，选择则与团队域取并集（权限域 = 团队继承 ∪ 显式指定）"
           >
             <Select
+              mode="multiple"
               allowClear
               showSearch
               optionFilterProp="label"
-              placeholder="留空自动继承所属团队业务域"
+              placeholder="留空继承团队域；可多选，与团队域取并集"
               options={domainOptions}
             />
           </Form.Item>
@@ -735,25 +747,26 @@ export function UserManagement() {
             />
           </Form.Item>
           <Form.Item
-            name="domain"
+            name="domains"
             label="业务域"
             extra={
               editOrgId
                 ? inheritedDomainOf(editOrgId)
-                  ? <>留空自动继承该团队业务域「<span className="mono">{inheritedDomainOf(editOrgId)}</span>」；选择则显式指定（覆盖团队继承）。</>
+                  ? <>留空自动继承该团队业务域「<span className="mono">{inheritedDomainOf(editOrgId)}</span>」；选择则与团队域取并集（权限域 = 团队继承 ∪ 显式指定）。</>
                   : <>该团队未绑定业务域；留空则无默认业务域（需经授权访问指标），选择则显式指定。</>
-                : "可空；留空自动继承所属团队业务域，选择则显式指定（覆盖团队继承）"
+                : "可空；留空自动继承所属团队业务域，选择则与团队域取并集"
             }
           >
             <Select
+              mode="multiple"
               allowClear
               showSearch
               optionFilterProp="label"
-              placeholder="留空自动继承所属团队业务域"
+              placeholder="留空继承团队域；可多选，与团队域取并集"
               options={domainOptions}
             />
           </Form.Item>
-          <div className="muted" style={{ fontSize: 12 }}>用户名不可修改；业务域留空继承所属团队；密码请使用「重置密码」单独操作。</div>
+          <div className="muted" style={{ fontSize: 12 }}>用户名不可修改；业务域留空继承所属团队、多选与团队域取并集；密码请使用「重置密码」单独操作。</div>
         </Form>
       </Modal>
 

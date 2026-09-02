@@ -846,6 +846,7 @@ class GovernanceService(BaseService):
             user_id=user.id,
             role=_role_to_str(user.role),
             domain=user.domain,
+            domains=tuple(user.domains_all()),
             grants=tuple(_grant_to_dict(g) for g in grants),
             roles=tuple(user.roles_all()),
         )
@@ -884,6 +885,7 @@ class GovernanceService(BaseService):
         role: str,
         user_domain: str | None = None,
         *,
+        user_domains: list[str] | None = None,
         skip_pii_gate: bool = False,
     ) -> policy.Decision:
         """PDP 决策入口——供 semantic 等服务调用。
@@ -896,7 +898,9 @@ class GovernanceService(BaseService):
             action: read/write/approve/export/review。
             user_id: 操作人 ID。
             role: 操作人角色字符串。
-            user_domain: 操作人所属域。
+            user_domain: 操作人所属主域。
+            user_domains: 操作人全部权限域（团队继承∪显式指定并集；缺省回退
+                单主域 ``[user_domain]`` 兼容存量调用）。
             skip_pii_gate: 跳过 PII 合规门禁（仅用于提交审核等 PII 合规流程入口，
                 否则未复核的 PII 指标永远无法进入 REVIEW 状态形成死锁）。
 
@@ -923,6 +927,7 @@ class GovernanceService(BaseService):
             user_id=user_id,
             role=role,
             domain=user_domain,
+            domains=tuple(user_domains) if user_domains else (),
             grants=(),
         )
         return policy.decide(
@@ -955,6 +960,7 @@ class GovernanceService(BaseService):
             user_id=user.id,
             role=_role_to_str(user.role),
             domain=user.domain,
+            domains=tuple(user.domains_all()),
             grants=tuple(_grant_to_dict(g) for g in grants),
             roles=tuple(user.roles_all()),
         )

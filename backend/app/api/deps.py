@@ -111,6 +111,9 @@ async def get_current_user(
     if org_status in ("suspended", "deleted"):
         raise AuthError("所属组织已停用，无法登录", error_code="ORG_DISABLED")
 
+    # 权限域动态继承（方案 B 增强）：挂载团队业务域，供 User.domains_all()
+    # 取「团队继承 ∪ 显式指定」并集——团队改绑业务域后成员无需重新保存即自动生效。
+    user._org_domain = org.domain
     return user
 
 

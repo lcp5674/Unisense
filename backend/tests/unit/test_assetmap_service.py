@@ -496,7 +496,7 @@ async def test_search_assets_passthrough() -> None:
     out = await svc.search_assets("sales", entity_type="metric", limit=20)
     assert out[0]["name"] == "sales_gmv_amount_day"
     repo.search_assets.assert_awaited_once_with(
-        "sales", "metric", 20, org_id=None, actor_id=None, role=None, user_domain=None
+        "sales", "metric", 20, org_id=None, actor_id=None, role=None, user_domains=None
     )
 
 
@@ -506,11 +506,11 @@ async def test_search_assets_passthrough_with_visibility() -> None:
     repo.search_assets = AsyncMock(return_value=[])
     await svc.search_assets(
         "x", entity_type="metric", limit=10, actor_id=4, role="metric_owner",
-        user_domain="sales",
+        user_domains=["sales"],
     )
     repo.search_assets.assert_awaited_once_with(
         "x", "metric", 10, org_id=None, actor_id=4, role="metric_owner",
-        user_domain="sales",
+        user_domains=["sales"],
     )
 
 
@@ -536,7 +536,7 @@ async def test_recent_changes_passthrough() -> None:
     out = await svc.recent_changes(days=7, limit=50)
     assert out["days"] == 7
     repo.recent_changes.assert_awaited_once_with(
-        7, 50, org_id=None, actor_id=None, role=None, user_domain=None
+        7, 50, org_id=None, actor_id=None, role=None, user_domains=None
     )
 
 

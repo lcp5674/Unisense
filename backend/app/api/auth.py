@@ -93,6 +93,9 @@ class UserInfo(BaseModel):
     role: str
     domain: str | None
     domain_name: str | None = None
+    domains: list[str] | None = Field(
+        default=None, description="权限域列表（团队继承∪显式指定，并集去重）"
+    )
     org_id: int
     org_name: str | None = None
     #: 首次登录/密码到期时需强制改密（前端据此在登录后渲染全屏改密守卫，
@@ -350,6 +353,7 @@ async def me(
             role=user.role,
             domain=user.domain,
             domain_name=domain_name,
+            domains=user.domains_all() or None,
             org_id=user.org_id,
             org_name=org_name,
             must_change_password=bool(getattr(user, "must_change_password", False)),

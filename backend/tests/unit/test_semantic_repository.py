@@ -549,7 +549,7 @@ async def test_list_metrics_reviewer_sees_domain_assigned():
         limit=10,
         visible_actor_id=7,
         visible_role="reviewer",
-        visible_user_domain="outpatient",
+        visible_user_domains=["outpatient"],
     )
 
     sql = _compiled_sql(db, 0)

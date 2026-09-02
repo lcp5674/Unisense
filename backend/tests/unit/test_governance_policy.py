@@ -376,6 +376,21 @@ def test_decide_multi_role_union_same_domain() -> None:
     assert d.error_code == ""
 
 
+def test_decide_multi_domain_union_same_domain() -> None:
+    """权限域并集（domains 含非主域）：对并集内任一域同域放行。"""
+    subject = Subject(1, "domain_admin", domain="sales", domains=("sales", "medical_fee"))
+    d = decide(subject, "approve", Resource(domain="medical_fee"))
+    assert d.allow, d.reason
+
+
+def test_decide_multi_domain_union_outside_rejects() -> None:
+    """权限域并集外（resource.domain 不在 domains）：拒绝。"""
+    subject = Subject(1, "domain_admin", domain="sales", domains=("sales",))
+    d = decide(subject, "approve", Resource(domain="medical_fee"))
+    assert not d.allow
+    assert d.error_code == "FORBIDDEN"
+
+
 def test_decide_multi_role_platform_admin_bypass() -> None:
     """主角色 reviewer + 扩展角色 platform_admin：跨域 write 应直通（任一角色命中）。"""
     subject = Subject(1, "reviewer", domain="hr", roles=("platform_admin",))

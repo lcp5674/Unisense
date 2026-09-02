@@ -108,7 +108,7 @@ def _metric_visibility_scope(user: User) -> dict[str, Any]:
     """
     if user.role == "platform_admin":
         return {}
-    return {"actor_id": user.id, "role": user.role, "user_domain": user.domain}
+    return {"actor_id": user.id, "role": user.role, "user_domains": user.domains_all()}
 
 
 
@@ -367,7 +367,7 @@ async def search_assets(
         limit=limit,
         actor_id=user.id,
         role=user.role,
-        user_domain=user.domain,
+        user_domains=user.domains_all(),
     )
     return ok(data={"items": data, "total": len(data)}, trace_id=trace_id)
 
@@ -422,7 +422,7 @@ async def recent_changes(
         limit=limit,
         actor_id=user.id,
         role=user.role,
-        user_domain=user.domain,
+        user_domains=user.domains_all(),
     )
     return ok(data=data, trace_id=trace_id)
 

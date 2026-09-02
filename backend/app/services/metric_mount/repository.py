@@ -72,7 +72,7 @@ class MetricMountRepository:
         offset: int = 0,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
-        visible_user_domain: str | None = None,
+        visible_user_domains: list[str] | None = None,
     ) -> tuple[list[tuple[MetricMount, Metric | None]], int]:
         """分页列出挂载并 LEFT JOIN Metric 取指标信息，返回 (列表, total)。
 
@@ -87,7 +87,7 @@ class MetricMountRepository:
         if domain:
             conditions.append(MetricMount.domain == domain)
         visibility = metric_visibility_conditions(
-            visible_actor_id, visible_role, visible_user_domain
+            visible_actor_id, visible_role, visible_user_domains
         )
         joins: list[tuple[Any, Any]] = []
         if visibility:

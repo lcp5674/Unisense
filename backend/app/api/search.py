@@ -60,7 +60,7 @@ async def global_search(
         limit=limit,
         visible_actor_id=user.id,
         visible_role=user.role,
-        visible_user_domain=user.domain,
+        visible_user_domains=user.domain,
     )
     total = sum(len(items) for items in data.values())
     return ok(data={"groups": data, "total": total}, trace_id=trace_id)

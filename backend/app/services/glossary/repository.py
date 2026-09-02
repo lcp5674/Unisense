@@ -80,7 +80,7 @@ class GlossaryRepository:
         reviewed_by: int | None = None,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
-        visible_user_domain: str | None = None,
+        visible_user_domains: list[str] | None = None,
     ) -> tuple[Iterable[Term], int]:
         # 回收站视图：deleted=True 列出已软删术语；默认列表仅未删
         conditions = [Term.deleted_at.is_not(None) if deleted else Term.deleted_at.is_(None)]
@@ -94,10 +94,10 @@ class GlossaryRepository:
             elif visible_role == "domain_admin":
                 visibility = (
                     [
-                        Term.domain == visible_user_domain,
+                        Term.domain.in_(visible_user_domains),
                         Term.owner_id == visible_actor_id,
                     ]
-                    if visible_user_domain
+                    if visible_user_domains
                     else [
                         Term.status.in_(("PUBLISHED", "DEPRECATED")),
                         Term.owner_id == visible_actor_id,

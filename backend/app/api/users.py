@@ -124,6 +124,9 @@ class UserAdmin(BaseModel):
     role: str
     roles: list[str] = Field(default_factory=list, description="全部角色（主角色在前）")
     domain: str | None
+    domains: list[str] | None = Field(
+        default=None, description="权限域列表（团队继承∪显式指定，并集去重）"
+    )
     org_id: int | None = None
     org_name: str | None = None
     status: str
@@ -151,11 +154,14 @@ class UserCreateRequest(BaseModel):
         max_length=16,
         description="全部角色（方案 A 多角色；缺省=[role]，主角色自动取权限最高者）",
     )
-    #: 方案 B：所属域不再由用户直接维护，改由所属团队（org_id）自动继承——
-    #: 团队绑定域则成员继承团队域，否则可显式指定（兼容旧客户端）；前端已合并为
-    #: 「所属团队」单一下拉。后端按 ``org.domain or payload.domain`` 解析。
+    #: 方案 B 增强：所属域由所属团队自动继承（org_id 绑定域则成员继承），
+    #: 亦可显式指定多个域——权限域 = 团队继承 ∪ 显式指定（并集）。前端已合并为
+    #: 「所属团队」下拉 + 「业务域」多选；``domain`` 单值兼容旧客户端（等价 domains=[domain]）。
     domain: str | None = Field(
-        default=None, max_length=64, description="所属域（由团队继承的兜底）"
+        default=None, max_length=64, description="所属域（主域，由团队继承的兜底）"
+    )
+    domains: list[str] | None = Field(
+        default=None, description="权限域列表（显式指定多个；与团队域取并集）"
     )
     org_id: int | None = Field(
         default=None, gt=0, description="所属团队 ID（缺省归入当前管理员团队）"
@@ -182,9 +188,13 @@ class UserUpdateRequest(BaseModel):
         max_length=16,
         description="全部角色（方案 A 多角色；缺省=[role]，主角色自动取权限最高者）",
     )
-    #: 方案 B：所属域由所属团队自动继承（同创建）；org_id 缺省保持不变（不换团队）。
+    #: 方案 B 增强：所属域由所属团队自动继承（org_id 缺省保持不变，不换团队），
+    #: 亦可显式指定多个域——权限域 = 团队继承 ∪ 显式指定（并集）。
     domain: str | None = Field(
-        default=None, max_length=64, description="所属域（由团队继承的兜底）"
+        default=None, max_length=64, description="所属域（主域，由团队继承的兜底）"
+    )
+    domains: list[str] | None = Field(
+        default=None, description="权限域列表（显式指定多个；与团队域取并集）"
     )
     org_id: int | None = Field(default=None, gt=0, description="所属团队 ID（缺省保持原团队）")
 
@@ -269,28 +279,30 @@ async def _assert_unique(
         )
 
 
-async def _assert_domain_active(db: AsyncSession, domain: str | None) -> None:
-    """校验所属域：若提供，必须是存在且 active 的主题域 code。
+async def _assert_domains_active(db: AsyncSession, domains: list[str] | None) -> None:
+    """校验权限域列表：逐个必须是存在且 active 的主题域 code（空列表/None 跳过）。
 
     与前端「主题域管理」下拉数据源（``list_domain_tree(status=active)``）保持一致，
     防止绕过 UI 直接写接口注入任意域值（对齐 TD §3.4，错误码见 TD §5.4）。
     """
-    if not domain:
+    if not domains:
         return
-    row = (
+    rows = (
         await db.execute(
-            select(SubjectDomain).where(
-                SubjectDomain.code == domain,
+            select(SubjectDomain.code).where(
+                SubjectDomain.code.in_(domains),
                 SubjectDomain.status == "active",
             )
         )
-    ).scalar_one_or_none()
-    if row is None:
-        raise ValidationError(
-            f"所属域不存在或未启用: {domain}",
-            error_code="USER_DOMAIN_INVALID",
-            ctx={"domain": domain},
-        )
+    ).scalars().all()
+    active = set(rows)
+    for d in domains:
+        if d not in active:
+            raise ValidationError(
+                f"所属域不存在或未启用: {d}",
+                error_code="USER_DOMAIN_INVALID",
+                ctx={"domain": d},
+            )
 
 
 async def _assert_org_active(db: AsyncSession, org_id: int) -> Organization:
@@ -319,14 +331,27 @@ async def _assert_org_active(db: AsyncSession, org_id: int) -> Organization:
     return org
 
 
-def _resolve_team_domain(org: Organization, fallback: str | None) -> str | None:
-    """方案 B：用户所属域 = 显式指定优先，未指定时由所属团队（组织）继承。
+def _resolve_team_domains(
+    org: Organization | None, selected: list[str] | None
+) -> tuple[str | None, list[str]]:
+    """用户权限域 = 显式指定（多选）∪ 团队继承（org.domain），取并集（方案 B 增强）。
 
-    ``fallback``（用户表单显式选填的业务域）优先——管理员可给单个用户指定/覆盖
-    业务域（如团队未绑定域、或用户跨域工作）；未显式指定（None）才继承团队域；
-    团队也不限域则为 None（不限定域，需经 grants 授权才能操作指标）。
+    管理员可给单个用户指定多个业务域（跨域治理/消费），未指定则继承团队域；
+    两者同时存在时并集去重（团队域 + 显式指定都算权限域，不再二选一）。
+
+    Returns:
+        (primary, domains)：primary=主域（显式首个或团队域，兼容旧单值展示），
+        domains=并集完整列表（去重、保持输入序）。
     """
-    return fallback or org.domain or None
+    chosen = [d.strip() for d in (selected or []) if d and d.strip()]
+    merged: list[str] = []
+    seen: set[str] = set()
+    for d in (*chosen, org.domain if org else None):
+        if d and d not in seen:
+            seen.add(d)
+            merged.append(d)
+    primary = merged[0] if merged else None
+    return primary, merged
 
 
 async def _assert_role_valid(db: AsyncSession, role: str) -> None:
@@ -399,6 +424,7 @@ def _to_admin(row: User, org_name: str | None = None) -> UserAdmin:
         role=row.role.value if hasattr(row.role, "value") else row.role,
         roles=row.roles_all(),
         domain=row.domain,
+        domains=row.domains or None,
         org_id=row.org_id,
         org_name=org_name,
         status=row.status,
@@ -521,9 +547,12 @@ async def create_user(
     primary_role = _resolve_primary_role(roles)
     org_id = payload.org_id or user.org_id
     org = await _assert_org_active(db, org_id)
-    # 方案 B：所属域由所属团队继承（团队绑定域则自动继承，否则用显式兜底）
-    domain = _resolve_team_domain(org, payload.domain)
-    await _assert_domain_active(db, domain)
+    # 方案 B 增强：权限域 = 团队继承 ∪ 显式指定（并集）；主域=显式首个或团队域
+    selected = (
+        payload.domains if payload.domains else ([payload.domain] if payload.domain else None)
+    )
+    domain, domains = _resolve_team_domains(org, selected)
+    await _assert_domains_active(db, domains or None)
     row = User(
         org_id=org_id,
         username=payload.username,
@@ -531,6 +560,7 @@ async def create_user(
         display_name=payload.display_name,
         role=primary_role,
         domain=domain,
+        domains=domains or None,
         status="active",
         must_change_password=True,
         password_hash=await hash_password(payload.password),
@@ -834,13 +864,16 @@ async def update_user(
         )
     primary_role = _resolve_primary_role(roles)
 
-    # 方案 B：换团队（org_id 提供时）或保持原团队，域由团队继承
+    # 方案 B 增强：换团队（org_id 提供时）或保持原团队，权限域 = 团队继承 ∪ 显式指定（并集）
     org_name: str | None = None
     if payload.org_id is not None:
         org = await _assert_org_active(db, payload.org_id)
         row.org_id = org.id
         org_name = org.name
-        domain = _resolve_team_domain(org, payload.domain)
+        selected = (
+            payload.domains if payload.domains else ([payload.domain] if payload.domain else None)
+        )
+        domain, domains = _resolve_team_domains(org, selected)
     else:
         cur_org = (
             await db.execute(
@@ -851,13 +884,17 @@ async def update_user(
         ).scalar_one_or_none()
         if cur_org is not None:
             org_name = cur_org.name
-        domain = _resolve_team_domain(cur_org, payload.domain) if cur_org else payload.domain
-    await _assert_domain_active(db, domain)
+        selected = (
+            payload.domains if payload.domains else ([payload.domain] if payload.domain else None)
+        )
+        domain, domains = _resolve_team_domains(cur_org, selected)
+    await _assert_domains_active(db, domains or None)
 
     row.display_name = payload.display_name
     row.email = payload.email
     row.role = primary_role
     row.domain = domain
+    row.domains = domains or None
     # 方案 A 多角色：整表替换 user_role（含主角色）。
     # 注：实测 SQLAlchemy 2.0 下本 relationship 的 delete-orphan 不触发
     # （clear()/remove()/整体赋值均不产生 DELETE，session.deleted 为空），

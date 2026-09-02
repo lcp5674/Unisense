@@ -1317,7 +1317,7 @@ class TestSearchAssets:
         s.execute = AsyncMock(side_effect=[r_met])
 
         await repo.search_assets(
-            "sales", "metric", 20, actor_id=4, role="metric_owner", user_domain="sales"
+            "sales", "metric", 20, actor_id=4, role="metric_owner", user_domains=["sales"]
         )
 
         stmt = str(s.execute.call_args_list[0].args[0])
@@ -1373,7 +1373,7 @@ class TestSearchAssets:
         s.execute = AsyncMock(side_effect=[r_cat, r_met, r_drift])
 
         out = await repo.recent_changes(
-            7, 50, org_id=1, actor_id=4, role="metric_owner", user_domain="sales"
+            7, 50, org_id=1, actor_id=4, role="metric_owner", user_domains=["sales"]
         )
 
         assert out["days"] == 7
@@ -1857,7 +1857,7 @@ class TestMetricSummaryVisibility:
             side_effect=[self._rows(("finance", 2)), self._rows(("PUBLISHED", 2))]
         )
         repo = AssetMapRepository(s)
-        out = await repo.metric_summary(actor_id=11, role="metric_owner", user_domain="finance")
+        out = await repo.metric_summary(actor_id=11, role="metric_owner", user_domains=["finance"])
         assert out["by_domain"] == {"finance": 2}
         assert out["by_status"] == {"PUBLISHED": 2}
         for call in s.execute.call_args_list:
@@ -1870,7 +1870,7 @@ class TestMetricSummaryVisibility:
         s.execute = AsyncMock(side_effect=[self._rows()] * 16)
         repo = AssetMapRepository(s)
         out = await repo.metric_dimension_summary(
-            actor_id=11, role="analyst", user_domain="finance"
+            actor_id=11, role="analyst", user_domains=["finance"]
         )
         assert out["total"] == 0
         assert s.execute.await_count == 16

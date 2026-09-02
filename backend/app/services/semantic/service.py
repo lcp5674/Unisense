@@ -1266,7 +1266,7 @@ class MetricService(BaseService):
         params: MetricListParams,
         actor_id: int | None = None,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> tuple[list[Metric], int]:
         """分页查询指标列表。
 
@@ -1275,7 +1275,8 @@ class MetricService(BaseService):
             actor_id: 读路径行级隔离（P0-3）——当前用户 ID；None 表示内部调用
                 （不过滤，端点层必传）。
             role: 当前用户角色（配合 actor_id 判定管理角色/评审人放行）。
-            user_domain: 当前用户所属域（评审指派 domain 类型判定同域评审组可见性）。
+            user_domains: 当前用户全部权限域（团队继承 ∪ 显式指定并集；配合
+                visible_role=domain_admin/reviewer 判定域收敛与同域评审组可见性）。
 
         Returns:
             (指标列表, 总数)。
@@ -1309,7 +1310,7 @@ class MetricService(BaseService):
             limit=params.page_size,
             visible_actor_id=actor_id,
             visible_role=role,
-            visible_user_domain=user_domain,
+            visible_user_domains=user_domains,
         )
 
     async def update_metric(

@@ -221,7 +221,7 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
         reviewed_by: int | None = None,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
-        visible_user_domain: str | None = None,
+        visible_user_domains: list[str] | None = None,
     ) -> tuple[list[TermResponse], int]:
         rows, total = await self._repo.list_terms(
             domain,
@@ -234,7 +234,7 @@ class GlossaryService(BaseService, MasterDataReviewMixin):
             reviewed_by,
             visible_actor_id=visible_actor_id,
             visible_role=visible_role,
-            visible_user_domain=visible_user_domain,
+            visible_user_domains=visible_user_domains,
         )
         return [TermResponse.from_model(t) for t in rows], total
 

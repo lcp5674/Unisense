@@ -105,7 +105,7 @@ async def list_mounts(
         page_size=page_size,
         visible_actor_id=user.id,
         visible_role=user.role,
-        visible_user_domain=user.domain,
+        visible_user_domains=user.domains_all(),
     )
     converted = [
         MetricMountResponse.from_model(mount, metric) for mount, metric in items
@@ -132,7 +132,7 @@ async def get_mount(
     # 指标物理不存在（metric is None）时同样拒绝：挂载指向的指标已不可追溯，
     # 不允许仅凭挂载行继续读取源表/业务限定（第三轮审查补严）。
     if metric is None or not metric_is_visible(
-        metric, user.id, user.role, user.domain
+        metric, user.id, user.role, user.domains_all()
     ):
         raise NotFoundError(f"挂载不存在: {mount_id}")
     return ok(data=MetricMountResponse.from_model(mount, metric), trace_id=trace_id)

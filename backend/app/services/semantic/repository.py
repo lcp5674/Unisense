@@ -210,7 +210,7 @@ class MetricRepository:
         limit: int = 20,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
-        visible_user_domain: str | None = None,
+        visible_user_domains: list[str] | None = None,
     ) -> tuple[list[Metric], int]:
         """分页查询指标列表。
 
@@ -235,8 +235,8 @@ class MetricRepository:
                 （DRAFT/REVIEW）+ 评审角色（REVIEW 待审）可见；其余不可见。
                 管理角色（platform_admin/domain_admin）传 None 即不加过滤。
             visible_role: 调用者角色（配合 visible_actor_id 判定 reviewer 放行）。
-            visible_user_domain: 调用者所属域（配合 visible_role=reviewer 判定
-                domain 指派的同域评审组可见性）。
+            visible_user_domains: 调用者全部权限域（团队继承 ∪ 显式指定并集；
+                配合 visible_role=domain_admin/reviewer 判定域收敛与同域评审组可见性）。
 
         Returns:
             (指标列表, 总数)。
@@ -251,7 +251,7 @@ class MetricRepository:
         # 复用共享可见性助手（visibility.py），与 assetmap 指标汇总同源，防止
         # 「列表按可见性过滤、汇总按全量计数」的口径漂移。
         conditions.extend(
-            metric_visibility_conditions(visible_actor_id, visible_role, visible_user_domain)
+            metric_visibility_conditions(visible_actor_id, visible_role, visible_user_domains)
         )
         if domain:
             conditions.append(Metric.domain == domain)

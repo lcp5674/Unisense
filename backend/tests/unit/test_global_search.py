@@ -499,7 +499,7 @@ class TestGlobalSearchService:
 
         assert out["metric"][0]["type"] == "metric"
         svc._repo.search.assert_awaited_once_with(
-            "sales", 5, visible_actor_id=None, visible_role=None, visible_user_domain=None
+            "sales", 5, visible_actor_id=None, visible_role=None, visible_user_domains=None
         )
 
 

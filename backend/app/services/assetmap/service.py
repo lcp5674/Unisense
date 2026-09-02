@@ -195,21 +195,21 @@ class AssetMapService(BaseService):
         self,
         actor_id: int | None = None,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> dict[str, Any]:
         # 管理角色（actor_id=None）走全局聚合缓存；非管理角色按 P0-3 可见性实时计算，
         # 不缓存（避免跨用户缓存串扰与按用户缓存键爆炸；查询本身廉价）。
         if actor_id is None:
             return await _agg_cached("metric_summary", self._repo.metric_summary)
         return await self._repo.metric_summary(
-            actor_id=actor_id, role=role, user_domain=user_domain
+            actor_id=actor_id, role=role, user_domains=user_domains
         )
 
     async def metric_dimension_summary(
         self,
         actor_id: int | None = None,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> dict[str, Any]:
         """指标体系聚合：指标多维分布 + PII 合规率（概览 Tab 指标体系区块数据源）。
 
@@ -220,7 +220,7 @@ class AssetMapService(BaseService):
                 "metric_dimension_summary", self._repo.metric_dimension_summary
             )
         return await self._repo.metric_dimension_summary(
-            actor_id=actor_id, role=role, user_domain=user_domain
+            actor_id=actor_id, role=role, user_domains=user_domains
         )
 
     async def list_tables(
@@ -480,12 +480,12 @@ class AssetMapService(BaseService):
         limit: int = 20,
         actor_id: int | None = None,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """全局资产搜索：目录 + 指标统一结果（指标按 P0-3 可见性 + 组织隔离）。"""
         return await self._repo.search_assets(
             q, entity_type, limit, org_id=self._org_id,
-            actor_id=actor_id, role=role, user_domain=user_domain,
+            actor_id=actor_id, role=role, user_domains=user_domains,
         )
 
     async def health_summary(self) -> dict[str, Any]:
@@ -509,12 +509,12 @@ class AssetMapService(BaseService):
         limit: int = 50,
         actor_id: int | None = None,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> dict[str, Any]:
         """变更追踪流：最近 N 天新增/变更的目录与指标（按组织隔离 + P0-3 收敛）。"""
         return await self._repo.recent_changes(
             days, limit, org_id=self._org_id,
-            actor_id=actor_id, role=role, user_domain=user_domain,
+            actor_id=actor_id, role=role, user_domains=user_domains,
         )
 
     async def my_assets(self, owner_id: int, limit: int = 50) -> dict[str, Any]:

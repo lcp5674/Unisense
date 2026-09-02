@@ -99,7 +99,7 @@ class MetricMountService(BaseService):
         page_size: int = 20,
         visible_actor_id: int | None = None,
         visible_role: str | None = None,
-        visible_user_domain: str | None = None,
+        visible_user_domains: list[str] | None = None,
     ) -> tuple[list[tuple[MetricMount, Metric | None]], int]:
         limit = min(max(page_size, 1), 200)
         offset = (max(page, 1) - 1) * limit
@@ -110,7 +110,7 @@ class MetricMountService(BaseService):
             offset=offset,
             visible_actor_id=visible_actor_id,
             visible_role=visible_role,
-            visible_user_domain=visible_user_domain,
+            visible_user_domains=visible_user_domains,
         )
 
     async def update_mount(self, mount_id: int, data: MetricMountUpdate) -> MetricMount:

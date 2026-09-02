@@ -274,7 +274,7 @@ class ObservabilityRepository:
         self,
         actor_id: int | None = None,
         role: str | None = None,
-        user_domain: str | None = None,
+        user_domains: list[str] | None = None,
     ) -> dict[str, Any]:
         """指标健康度摘要（总览仪表「指标可信度」卡片数据源，全员可读）。
 
@@ -282,7 +282,7 @@ class ObservabilityRepository:
         P0-3 可见性收敛（仅公开状态 + 本人私有），避免仪表盘经 /overview 拉取
         全局 OPS 遥测；管理角色（actor_id=None）全量。
         """
-        visibility = metric_visibility_conditions(actor_id, role, user_domain)
+        visibility = metric_visibility_conditions(actor_id, role, user_domains)
         live_join = (
             MetricHealthScore.metric_id == Metric.id,
             MetricHealthScore.deleted_at.is_(None),

@@ -204,7 +204,7 @@ async def list_dimensions(
         page_size=page_size,
         visible_actor_id=user.id,
         visible_role=user.role,
-        visible_user_domain=user.domain,
+        visible_user_domains=user.domains_all(),
     )
     converted = []
     for dim, metric_count in items:
