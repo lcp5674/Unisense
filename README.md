@@ -553,7 +553,7 @@ UNISENSE_BACKUP_DATABASES="unisense e2e_biz"       # 多库备份（含降级业
 | 数据库迁移 | `alembic upgrade head`，幂等；迁移内已含业务字典、敏感规则、命名词根、粒度等种子 |
 | **管理员账号** | 默认组织（code=default）+ `admin` / platform_admin；密码取 `UNISENSE_SEED_ADMIN_PASSWORD`，未注入则用默认弱口令并打印告警 |
 | **标准主题域 + 基础字典** | bootstrap domains 步骤预置标准主题域（门诊/药品/医保/诊断等）+ 12 类 `system_dict` 基础字典项，责任人为实际 admin id |
-| **业务参照数据（维度/术语/业务主题域）** | **不随启动自动灌入**——由 `seed-reference` 服务显式一步初始化（见第 2.5 步），幂等可重复执行 |
+| **业务参照数据（维度/术语/业务主题域）** | bootstrap **reference** 步骤**首次部署自动灌入**（119 主题域/127 术语/52 维度，责任人为实际 admin id）；受 `seed_marker` 持久标记约束——**仅首次自动初始化，迭代重建容器检测到标记即跳过**（不重灌，避免覆盖业务运行期对参照数据的修改）；如需强制重灌见第 2.5 步 |
 | **ES 索引** | 幂等创建 `metric_idx`/`term_idx`；索引为空或 analyzer 版本变更时自动全量同步 |
 | **Neo4j 资产血缘** | 首日全量对账，补齐资产属性与血缘边（后续漂移由每日定时任务兜底） |
 | MinIO 归档桶 | `audit_archive` 自动创建 |
@@ -574,23 +574,28 @@ vi .env.production                                           # 1c. 填 UNISENSE_
 # ── 第 2 步：构建并启动（迁移与自举自动执行）──────────────
 docker compose --env-file .env.production up -d --build
 
-# ── 第 2.5 步：参照数据初始化（首次部署执行一次，幂等可重复）──
-#   维度(52) / 术语(127) / 业务主题域(119) + 基础字典(12 类，兜底 bootstrap 关闭场景)
-docker compose --env-file .env.production --profile seed run --rm seed-reference
+# ── 第 2.5 步：参照数据手动重灌（可选，仅 bootstrap 关闭或需覆盖业务修改时）──
+#   首次部署**无需执行**（bootstrap reference 步骤已自动灌入维度/术语/业务主题域，
+#   seed_marker 只初始化一次）。仅当：a) 关闭了 bootstrap；或 b) 参照数据被业务
+#   修改后想强制重置为脚本基线时执行（幂等；已初始化默认跳过，FORCE=1 才重灌）：
+docker compose --env-file .env.production --profile seed run --rm \
+  -e UNISENSE_SEED_REFERENCE_FORCE=1 seed-reference
 
 # ── 第 3 步：验证 ──────────────────────────────────────────
 curl -fsS http://localhost:8100/health            # 应返回 {"status":"ok"}
 curl -fsS -o /dev/null -w '%{http_code}\n' http://localhost:8180
-docker compose logs backend | grep bootstrap_summary         # 自举四步各自 ok/skipped/failed
+docker compose logs backend | grep bootstrap_summary         # 自举各步 ok/skipped/failed
 
 # ── 第 4 步：上线后立即改种子管理员密码 ────────────────────
 #   admin / UNISENSE_SEED_ADMIN_PASSWORD（脚本生成的强口令）
 #   登录后右上角「修改密码」改密（或 API：POST /api/v1/users/me/password）
 ```
 
-自举步骤按「阻塞 / 尽力」分级：admin 与主题域属阻塞（失败则退出码 1、容器按
-`restart: unless-stopped` 自动重试）；ES 与 Neo4j 属尽力（可选依赖，失败仅告警
-不阻断启动，服务仍有降级路径）。重复执行幂等，二次启动全部 `skipped`。
+自举步骤按「阻塞 / 尽力」分级：admin、主题域与业务参照数据（reference）属阻塞
+（失败则退出码 1、容器按 `restart: unless-stopped` 自动重试）；ES 与 Neo4j 属
+尽力（可选依赖，失败仅告警不阻断启动，服务仍有降级路径）。重复执行幂等：
+admin/domains 二次启动全部 `skipped`；reference 首次初始化后写 `seed_marker`
+标记，二次启动直接 `skipped (already_seeded)`——**迭代重建不重灌参照数据**。
 
 **仍需运维决策的配置项**（非初始化动作，属环境对接，无法自动推断）：
 

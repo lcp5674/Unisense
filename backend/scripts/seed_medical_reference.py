@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -43,8 +44,8 @@ from app.core.logging import configure_logging  # noqa: E402
 from app.db.mysql import async_session_factory  # noqa: E402
 from app.models.dimension import (  # noqa: E402
     Dimension,
-    DimensionMember,
     DimensionMapping,
+    DimensionMember,
     MetricDimension,
     Reconciliation,
 )
@@ -53,16 +54,26 @@ from app.models.glossary import (  # noqa: E402
     TermRelation,
     TermVersion,
 )
+from app.models.seed_marker import SeedMarker  # noqa: E402
 from app.models.subject_domain import SubjectDomain  # noqa: E402
 from app.models.term import Term  # noqa: E402
+from app.models.user import User  # noqa: E402
 
 logger = structlog.get_logger("unisense.seed")
 
 # ---- 主数据 owner：与既有数据保持一致（现有 term/dimension owner_id=3 admin；
 # 主题域沿用 seed_domains_dicts 的 owner_id=1）----
+# 运行时由 _resolve_owner_id 按实际 admin 用户动态解析（干净库自增 id 可能非 3），
+# 这些常量仅作「查不到 admin」时的存量兼容回退。
 TERM_OWNER_ID = 3
 DIM_OWNER_ID = 3
 DOMAIN_OWNER_ID = 1
+
+# 参照数据「只初始化一次」的持久标记（seed_marker 表）——bootstrap reference 步骤
+# 与 CLI 共用。标记存 DB：迭代重建容器后仍存在 → bootstrap 检测到即跳过（不重灌），
+# 避免 seed「成员指纹不一致→删旧重灌」覆盖业务运行期对参照数据的修改。
+MARKER_NAME = "medical_reference"
+MARKER_VERSION = "20260902-r5"
 
 # E2E/测试参照数据编码前缀（清除匹配，覆盖 E2E 重建后再次执行场景）
 _MOCK_DIM_PREFIXES = (
@@ -508,7 +519,6 @@ def _date_members() -> list[dict[str, Any]]:
       由 dim_date 物理表按日承载，不在维度层级节点重复
     """
     members: list[dict[str, Any]] = []
-    quarters = ["Q1", "Q2", "Q3", "Q4"]
     for year in (2024, 2025, 2026):
         y = str(year)
         members.append(
@@ -518,7 +528,7 @@ def _date_members() -> list[dict[str, Any]]:
                 "attributes": {"level": "year", "fiscal_year": year, "is_leap": year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)},
             }
         )
-        for q_idx, q in enumerate(quarters, start=1):
+        for q_idx in range(1, 5):
             q_code = f"{y}q{q_idx}"
             season = {1: "冬季", 2: "春季", 3: "夏季", 4: "秋季"}[q_idx]
             members.append(
@@ -1636,9 +1646,16 @@ async def clear_mock_terms(db: AsyncSession) -> int:
 # ---------------------------------------------------------------------------
 # 灌入主题域
 # ---------------------------------------------------------------------------
-async def seed_domains(db: AsyncSession) -> int:
-    """确保微医主题域树存在（一级域 + 二级子域），返回新增数。"""
+async def seed_domains(db: AsyncSession, *, owner_id: int | None = None) -> int:
+    """确保微医主题域树存在（一级域 + 二级子域），返回新增数。
+
+    Args:
+        db: 复用调用方会话。
+        owner_id: 责任人用户 id；None 时用模块常量 ``DOMAIN_OWNER_ID``
+            （存量兼容；bootstrap/CLI 应传实际 admin id）。
+    """
     created = 0
+    oid = DOMAIN_OWNER_ID if owner_id is None else owner_id
     existing = {
         row.code: row
         for row in (
@@ -1663,7 +1680,7 @@ async def seed_domains(db: AsyncSession) -> int:
             status="active",
             defaults_json={},
             description=f"微医业务主题域: {seed['name']}",
-            owner_id=DOMAIN_OWNER_ID,
+            owner_id=oid,
         )
         db.add(node)
         await db.flush()
@@ -1691,7 +1708,7 @@ async def seed_domains(db: AsyncSession) -> int:
             status="active",
             defaults_json={},
             description=f"微医业务主题域: {seed['name']}",
-            owner_id=DOMAIN_OWNER_ID,
+            owner_id=oid,
         )
         db.add(node)
         await db.flush()
@@ -1705,9 +1722,15 @@ async def seed_domains(db: AsyncSession) -> int:
 # ---------------------------------------------------------------------------
 # 灌入术语
 # ---------------------------------------------------------------------------
-async def seed_terms(db: AsyncSession) -> int:
-    """灌入微医业务术语（PUBLISHED 直灌），返回新增数。"""
+async def seed_terms(db: AsyncSession, *, owner_id: int | None = None) -> int:
+    """灌入微医业务术语（PUBLISHED 直灌），返回新增数。
+
+    Args:
+        db: 复用调用方会话。
+        owner_id: 责任人用户 id；None 时用模块常量 ``TERM_OWNER_ID``。
+    """
     created = 0
+    oid = TERM_OWNER_ID if owner_id is None else owner_id
     existing = {
         row.term_code
         for row in (
@@ -1726,7 +1749,7 @@ async def seed_terms(db: AsyncSession) -> int:
                 synonyms=spec["synonyms"],
                 boundary=spec["boundary"],
                 status="PUBLISHED",
-                owner_id=TERM_OWNER_ID,
+                owner_id=oid,
             )
         )
         created += 1
@@ -1750,14 +1773,19 @@ def _member_fingerprint(code: str, parent_code: str | None, attributes: dict | N
     )
 
 
-async def seed_dimensions(db: AsyncSession) -> int:
+async def seed_dimensions(db: AsyncSession, *, owner_id: int | None = None) -> int:
     """灌入医疗业务维度及成员（PUBLISHED 直灌），返回新增维度数。
 
     幂等增强：维度已存在时校验成员集合是否与脚本定义一致（如脚本扩充了成员），
     不一致则先删旧成员再重灌，保证参照数据与脚本同步；一致则跳过。
+
+    Args:
+        db: 复用调用方会话。
+        owner_id: 责任人用户 id；None 时用模块常量 ``DIM_OWNER_ID``。
     """
     created = 0
     refreshed = 0
+    oid = DIM_OWNER_ID if owner_id is None else owner_id
     existing = {
         row.dim_code
         for row in (
@@ -1773,7 +1801,7 @@ async def seed_dimensions(db: AsyncSession) -> int:
                 domain=spec["domain"],
                 type=spec["type"],
                 description=spec["description"],
-                owner_id=DIM_OWNER_ID,
+                owner_id=oid,
                 status="PUBLISHED",
             )
             db.add(dim)
@@ -1840,30 +1868,101 @@ async def seed_dimensions(db: AsyncSession) -> int:
     return created
 
 
-async def run() -> None:
-    """执行 seed：清除 mock → 灌入参照数据。"""
+# ---------------------------------------------------------------------------
+# 「只初始化一次」标记（seed_marker）+ owner 动态解析
+# ---------------------------------------------------------------------------
+async def is_reference_seeded(db: AsyncSession) -> bool:
+    """参照数据是否已初始化（seed_marker 存在即 True）。
+
+    供部署自举（bootstrap reference 步骤）判定「迭代重建容器时跳过重灌」——
+    标记存 DB，容器重建后仍存在。
+    """
+    row = await db.get(SeedMarker, MARKER_NAME)
+    return row is not None
+
+
+async def _mark_reference_seeded(db: AsyncSession, summary: dict[str, Any]) -> None:
+    """写入/更新初始化标记（幂等 upsert，独立小事务由调用方提交）。"""
+    row = await db.get(SeedMarker, MARKER_NAME)
+    if row is None:
+        db.add(SeedMarker(name=MARKER_NAME, version=MARKER_VERSION, detail=summary))
+    else:
+        row.version = MARKER_VERSION
+        row.detail = summary
+    logger.info("reference_seed_marked", name=MARKER_NAME, version=MARKER_VERSION)
+
+
+async def _resolve_owner_id(db: AsyncSession) -> int:
+    """解析参照数据责任人：取实际 admin 用户 id（干净库自增 id 可能非 3）。
+
+    seed_medical_reference 此前硬编码 owner_id=3/1——干净库 bootstrap 先建
+    admin（username=admin），其自增 id 未必是 3，硬编码会落错人/悬挂。此处
+    动态解析：username=admin → id；查不到回退平台管理员首行；再无则回退
+    ``TERM_OWNER_ID``（存量库兼容）。
+    """
+    admin = (
+        await db.execute(select(User).where(User.username == "admin"))
+    ).scalar_one_or_none()
+    if admin is not None:
+        return int(admin.id)
+    fallback = (
+        await db.execute(select(User).where(User.deleted_at.is_(None)).limit(1))
+    ).scalar_one_or_none()
+    if fallback is not None:
+        logger.warning("reference_owner_admin_missing_fallback_user", user_id=fallback.id)
+        return int(fallback.id)
+    logger.warning("reference_owner_admin_missing_fallback_constant", owner_id=TERM_OWNER_ID)
+    return TERM_OWNER_ID
+
+
+async def run(*, force: bool = False) -> dict[str, Any]:
+    """执行 seed：清除 mock → 灌入参照数据 → 写初始化标记。
+
+    Args:
+        force: True 时无视 seed_marker（强制重灌，运维手动通道）；
+            False 时已初始化（marker 存在）直接返回 skipped——bootstrap 迭代
+            重建不重灌的关键。
+
+    Returns:
+        ``{"status": "ok"|"skipped", ...摘要}``。
+    """
     configure_logging()
     async with async_session_factory() as db:
+        if not force and await is_reference_seeded(db):
+            logger.info("reference_seed_skipped_already_seeded", name=MARKER_NAME)
+            return {"status": "skipped", "reason": "already_seeded", "marker": MARKER_NAME}
+        owner_id = await _resolve_owner_id(db)
         try:
             cleared_dims = await clear_mock_dimensions(db)
             cleared_terms = await clear_mock_terms(db)
-            domain_count = await seed_domains(db)
-            term_count = await seed_terms(db)
-            dim_count = await seed_dimensions(db)
+            domain_count = await seed_domains(db, owner_id=owner_id)
+            term_count = await seed_terms(db, owner_id=owner_id)
+            dim_count = await seed_dimensions(db, owner_id=owner_id)
+            summary = {
+                "mock_dimensions_cleared": cleared_dims,
+                "mock_terms_cleared": cleared_terms,
+                "domains_created": domain_count,
+                "terms_created": term_count,
+                "dimensions_created": dim_count,
+                "owner_id": owner_id,
+            }
+            await _mark_reference_seeded(db, summary)
             await db.commit()
-            logger.info(
-                "seed_medical_reference_complete",
-                mock_dimensions_cleared=cleared_dims,
-                mock_terms_cleared=cleared_terms,
-                domains_created=domain_count,
-                terms_created=term_count,
-                dimensions_created=dim_count,
-            )
         except Exception:
             await db.rollback()
             logger.exception("seed_failed")
             raise
+        logger.info("seed_medical_reference_complete", **summary)
+        return {"status": "ok", **summary}
+
+
+def _cli_force() -> bool:
+    """CLI 强制重灌开关：``--force`` 参数或 ``UNISENSE_SEED_REFERENCE_FORCE=1``。"""
+    if "--force" in sys.argv:
+        return True
+    raw = os.getenv("UNISENSE_SEED_REFERENCE_FORCE", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    sys.exit(asyncio.run(run(force=_cli_force())))

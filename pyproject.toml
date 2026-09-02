@@ -97,6 +97,8 @@ ignore = ["B008"]
 # 迁移文件含大量 DDL/种子长行（与既有 0066 等一致），豁免 E501
 [tool.ruff.lint.per-file-ignores]
 "backend/alembic/versions/*.py" = ["E501"]
+# 参照数据定义脚本含大量长字符串数据行（主题域/术语/维度种子），同迁移豁免
+"backend/scripts/seed_medical_reference.py" = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]

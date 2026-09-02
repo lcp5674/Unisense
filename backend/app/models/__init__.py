@@ -76,6 +76,7 @@ from app.models.quality import (
     ReconciliationRecord,
     ReconciliationStatus,
 )
+from app.models.seed_marker import SeedMarker
 from app.models.sql_infer_eval import SqlInferEvalRun
 from app.models.subject_domain import SubjectDomain
 from app.models.system_dict import SystemDict
@@ -149,6 +150,7 @@ __all__ = [
     "RoleName",
     "RulingRecord",
     "SchemaDriftLog",
+    "SeedMarker",
     "SensitivityLevel",
     "SensitivityLevelEnum",
     "SnapshotGeneratedBy",

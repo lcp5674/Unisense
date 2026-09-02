@@ -331,6 +331,9 @@ async def test_exit_code_zero_when_best_effort_step_fails(
         raise RuntimeError("neo4j down")
 
     monkeypatch.setattr("scripts.bootstrap._seed_core", _ok_core, raising=False)
+    monkeypatch.setattr(
+        "scripts.bootstrap._step_reference", lambda _p: _ok_step("reference"), raising=False
+    )
     monkeypatch.setattr("scripts.bootstrap._step_es", lambda _p: _ok_step("es"), raising=False)
     monkeypatch.setattr("scripts.bootstrap._step_neo4j", _boom, raising=False)
     monkeypatch.setattr("scripts.bootstrap._release_resources", _noop, raising=False)
@@ -348,6 +351,9 @@ async def test_exit_code_one_when_blocking_step_fails(monkeypatch: pytest.Monkey
         raise RuntimeError("db down")
 
     monkeypatch.setattr("scripts.bootstrap._seed_core", _boom, raising=False)
+    monkeypatch.setattr(
+        "scripts.bootstrap._step_reference", lambda _p: _ok_step("reference"), raising=False
+    )
     monkeypatch.setattr("scripts.bootstrap._step_es", lambda _p: _ok_step("es"), raising=False)
     monkeypatch.setattr("scripts.bootstrap._step_neo4j", lambda: _ok_step("neo4j"), raising=False)
     monkeypatch.setattr("scripts.bootstrap._release_resources", _noop, raising=False)
@@ -365,6 +371,90 @@ async def test_dry_run_executes_nothing(monkeypatch: pytest.MonkeyPatch) -> None
 
     monkeypatch.setattr("scripts.bootstrap._seed_core", _boom, raising=False)
     assert await bootstrap.main(["--dry-run"]) == 0
+
+
+# --------------------------------------------------------------------------- #
+# reference 步骤：参照数据「只初始化一次」（seed_marker）
+# --------------------------------------------------------------------------- #
+def _marker_db_session() -> MagicMock:
+    """reference 步骤的会话替身（仅 is_reference_seeded 的 get 查询）。"""
+    session = MagicMock()
+    session.get = AsyncMock(return_value=None)
+    session.execute = AsyncMock(return_value=_result(None))
+    return session
+
+
+def _patch_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    seeded: bool,
+    run_summary: dict[str, Any] | None = None,
+) -> MagicMock:
+    """把 reference 步骤依赖的 seed_medical_reference 函数全部替换为替身。"""
+    session = _marker_db_session()
+    session.get = AsyncMock(return_value=MagicMock(name="medical_reference") if seeded else None)
+    monkeypatch.setattr(
+        "scripts.bootstrap.async_session_factory", _session_factory(session), raising=False
+    )
+    monkeypatch.setattr(
+        "scripts.seed_medical_reference.is_reference_seeded",
+        AsyncMock(return_value=seeded),
+        raising=False,
+    )
+    fake_run = AsyncMock(
+        return_value=run_summary
+        or {"status": "ok", "domains_created": 0, "terms_created": 0, "dimensions_created": 0}
+    )
+    monkeypatch.setattr("scripts.seed_medical_reference.run", fake_run, raising=False)
+    return fake_run
+
+
+async def test_reference_step_skipped_when_already_seeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """标记已存在（含迭代重建容器后）→ skipped，不执行 seed、不触碰参照数据。"""
+    fake_run = _patch_reference(monkeypatch, seeded=True)
+
+    result = await bootstrap._step_reference(pool=None)
+
+    assert result.status == "skipped"
+    assert result.detail["reason"] == "already_seeded"
+    fake_run.assert_not_awaited()
+
+
+async def test_reference_step_runs_when_not_seeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """标记缺失（首次部署）→ 在单副本守卫下执行 run(force=True) 并写标记。"""
+    fake_run = _patch_reference(monkeypatch, seeded=False)
+    pool = _redis_pool(set_result=True)  # acquired
+
+    result = await bootstrap._step_reference(pool)
+
+    assert result.status == "ok"
+    fake_run.assert_awaited_once_with(force=True)
+
+
+async def test_reference_step_skipped_when_other_replica(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """多副本并发首启：他人已持有 reference-seed 锁 → 本副本跳过（不重复灌）。"""
+    fake_run = _patch_reference(monkeypatch, seeded=False)
+    pool = _redis_pool(set_result=None)  # held by other
+
+    result = await bootstrap._step_reference(pool)
+
+    assert result.status == "skipped"
+    assert result.detail["reason"] == "other_replica"
+    fake_run.assert_not_awaited()
+
+
+async def test_main_includes_reference_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认步骤含 reference（位于 admin/domains 之后），且其失败按阻塞处理。"""
+    monkeypatch.delenv("UNISENSE_BOOTSTRAP_STEPS", raising=False)
+    assert "reference" in bootstrap.DEFAULT_STEPS
+    assert bootstrap.DEFAULT_STEPS.index("admin") < bootstrap.DEFAULT_STEPS.index("reference")
+    assert bootstrap.BLOCKING_STEPS["reference"] is True
 
 
 # --------------------------------------------------------------------------- #

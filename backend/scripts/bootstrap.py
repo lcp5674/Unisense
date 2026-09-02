@@ -3,8 +3,11 @@
 目标：``docker compose up -d`` 完成后所有服务立即可用，无需运维手工执行任何脚本或调用接口。
 
 编排策略（对齐 app/main.py lifespan 的 best-effort 播种先例）：
-    - **阻塞步骤**（admin、主题域+字典）：无账号/无域则平台完全不可用，失败即
-      ``exit 1``，由 compose ``restart: unless-stopped`` 自动重试。
+    - **阻塞步骤**（admin、主题域+字典、参照数据）：无账号/无域则平台完全不可用，
+      失败即 ``exit 1``，由 compose ``restart: unless-stopped`` 自动重试。
+      ``reference``（维度/术语/业务主题域）额外受 ``seed_marker`` 持久标记约束——
+      **仅首次部署自动初始化；迭代重建容器检测到标记即跳过**（不重灌，
+      避免 seed「成员指纹不一致→删旧重灌」覆盖业务运行期修改）。
     - **尽力步骤**（ES 索引、ES 同步、Neo4j 同步）：均为可选依赖，失败只记
       warning 不阻断启动，后续由定时任务/手工补偿。
 
@@ -14,7 +17,9 @@
     UNISENSE_BOOTSTRAP_STEPS=admin,domains python -m scripts.bootstrap
     python -m scripts.bootstrap --dry-run    # 只打印计划，不执行
 
-幂等性：所有步骤均可重复执行；二次启动全部命中已存在数据 → ``skipped``。
+幂等性：admin/domains/es/neo4j 均可重复执行；二次启动全部命中已存在数据 →
+``skipped``。reference 特殊：首次初始化后写 ``seed_marker``，后续启动直接
+``skipped (already_seeded)``，不触碰维度/术语数据。
 """
 
 from __future__ import annotations
@@ -46,12 +51,14 @@ logger = structlog.get_logger("unisense.bootstrap")
 BLOCKING_STEPS: dict[str, bool] = {
     "admin": True,
     "domains": True,
+    "reference": True,
     "es": False,
     "neo4j": False,
 }
 
 #: 默认执行顺序（阻塞步骤在前，最慢的在后）
-DEFAULT_STEPS = ("admin", "domains", "es", "neo4j")
+#: reference（参照数据首次初始化）依赖 admin/domains 先建好 admin 用户作为 owner。
+DEFAULT_STEPS = ("admin", "domains", "reference", "es", "neo4j")
 
 
 # --------------------------------------------------------------------------- #
@@ -385,6 +392,34 @@ async def _step_neo4j() -> StepResult:
     return StepResult("neo4j", "ok", {"stats": {k: int(v) for k, v in stats.items()}})
 
 
+# --------------------------------------------------------------------------- #
+# 阻塞步骤：参照数据首次初始化（维度/术语/业务主题域，只跑一次）
+# --------------------------------------------------------------------------- #
+async def _step_reference(pool: Any) -> StepResult:
+    """参照数据（维度/术语/业务主题域）首次初始化。
+
+    为什么需要 ``seed_marker`` 持久标记：seed_medical_reference 的「成员指纹
+    不一致 → 删旧重灌」语义在**迭代重建容器**时若再次执行，会覆盖业务运行期
+    对参照数据的修改。标记存 DB（容器重建后仍在）：标记存在 → skipped；
+    缺失（首次部署）→ 在单副本守卫下执行 seed 并写标记。
+
+    Returns:
+        ``ok``（本次完成初始化）/ ``skipped``（已初始化或其它副本在灌）。
+    """
+    from scripts.seed_medical_reference import is_reference_seeded, run
+
+    async with async_session_factory() as db:
+        if await is_reference_seeded(db):
+            return StepResult("reference", "skipped", {"reason": "already_seeded"})
+
+    async with _guard_once(pool, "reference-seed", ttl=600) as should_run:
+        if not should_run:
+            return StepResult("reference", "skipped", {"reason": "other_replica"})
+        # guard 已保证单副本执行；force=True 跳过 run 内部二次 marker 检查（防 TOCTOU）
+        summary = await run(force=True)
+    return StepResult("reference", "ok", summary)
+
+
 async def _release_resources() -> None:
     """进程退出前释放引擎/ES 连接（独立进程，释放全局资源安全）。
 
@@ -454,6 +489,12 @@ async def main(argv: list[str] | None = None) -> int:
                 logger.info("bootstrap_step", **item.as_dict())
                 if item.name in steps:
                     results.append(item)
+
+        # ---- 参照数据首次初始化（阻塞；seed_marker 缺失才执行，迭代重建跳过）----
+        if "reference" in steps:
+            results.append(
+                await _execute_step("reference", lambda: _step_reference(pool), timeout)
+            )
 
         # ---- 尽力步骤 ----
         if "es" in steps:

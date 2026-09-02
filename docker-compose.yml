@@ -196,9 +196,12 @@ services:
     environment:
       UNISENSE_ENV: ${UNISENSE_ENV:-dev}
       # ---- 部署自举（scripts/bootstrap.py，随容器启动自动完成，无需人工介入）----
-      # true=启用；UNISENSE_BOOTSTRAP_STEPS 可裁剪步骤（逗号分隔：admin,domains,es,neo4j）
+      # true=启用；UNISENSE_BOOTSTRAP_STEPS 可裁剪步骤
+      # （逗号分隔：admin,domains,reference,es,neo4j）
+      # reference=维度/术语/业务主题域首次初始化：受 seed_marker 持久标记约束，
+      # 仅首次部署自动灌入；迭代重建容器检测到标记即跳过（不重灌，不覆盖业务修改）。
       UNISENSE_BOOTSTRAP_ENABLED: ${UNISENSE_BOOTSTRAP_ENABLED:-true}
-      UNISENSE_BOOTSTRAP_STEPS: ${UNISENSE_BOOTSTRAP_STEPS:-admin,domains,es,neo4j}
+      UNISENSE_BOOTSTRAP_STEPS: ${UNISENSE_BOOTSTRAP_STEPS:-admin,domains,reference,es,neo4j}
       UNISENSE_BOOTSTRAP_ES_SYNC: ${UNISENSE_BOOTSTRAP_ES_SYNC:-true}
       UNISENSE_BOOTSTRAP_NEO4J_SYNC: ${UNISENSE_BOOTSTRAP_NEO4J_SYNC:-true}
       # 单步软超时（秒）：Neo4j 全量对账在超大图上可能超时 → 该步标记 failed 但不
@@ -440,10 +443,14 @@ services:
   # ============ 参照数据 seed（一次性初始化，profiles: seed）============
   # 维度管理 / 术语 / 主题域 / 数据字典的基础数据自动初始化：
   #   docker compose --profile seed run --rm seed-reference
-  # 依次执行两个幂等 seed（重复执行安全，0 新增）：
+  # 依次执行两个 seed（重复执行安全，0 新增）：
   #   1. scripts.seed_domains_dicts     —— 标准主题域 + 12 类 system_dict 基础字典
   #      （backend bootstrap 的 domains 步骤启动时已自动执行；此处兜底其关闭场景）
   #   2. scripts.seed_medical_reference —— 业务主题域(119) + 术语(127) + 维度(52)
+  #      bootstrap 的 reference 步骤首次部署已自动执行（seed_marker 只初始化一次）；
+  #      本服务主要作为**手动强制重灌**入口：默认已初始化则跳过；
+  #      需覆盖业务修改重灌时：docker compose --profile seed run --rm \
+  #        -e UNISENSE_SEED_REFERENCE_FORCE=1 seed-reference
   # 镜像复用 unisense/backend（scripts 已随 COPY backend/ 入镜像），依赖 mysql healthy。
   seed-reference:
     image: unisense/backend:${UNISENSE_IMAGE_TAG:-dev}
@@ -476,6 +483,8 @@ services:
       UNISENSE_LLM_DEFAULT_MODEL: ${UNISENSE_LLM_DEFAULT_MODEL:-deepseek-chat}
       UNISENSE_NOTIFY_WEBHOOK_URL: ${UNISENSE_NOTIFY_WEBHOOK_URL:-}
       UNISENSE_FERNET_KEY: ${UNISENSE_FERNET_KEY:-}
+      # 参照数据强制重灌开关：1/true = 无视 seed_marker 强制重灌（覆盖业务修改前慎用）
+      UNISENSE_SEED_REFERENCE_FORCE: ${UNISENSE_SEED_REFERENCE_FORCE:-}
     # 顺序执行两个幂等 seed：标准域/字典 → 业务主题域/术语/维度
     command:
       - sh
