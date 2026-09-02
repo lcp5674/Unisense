@@ -679,11 +679,12 @@ function OwnerDistribution({
   isAdmin: boolean;
 }) {
   const owners = Object.entries(data.by_owner ?? {}).sort((a, b) => b[1].total - a[1].total);
-  const title = isAdmin ? "Owner 责任分布" : "我的资产责任分布";
-  const hint = isAdmin
-    ? "跨资产构成（指标/数据表/数据源/维度/术语/模板），点击资产段直达对应目录、点卡片查看其指标目录"
-    : "仅展示您作为责任人（Owner）负责的资产构成，点击资产段直达对应目录";
-  // 非管理角色且无任何责任资产：展示引导而非空白（普通用户通常不是资产 Owner）
+  // 总览页展示系统总体情况（产品语义）：Owner 责任分布为全局统计，所有登录用户可见；
+  // 点击卡片跳转目标目录时由路由守卫（RequirePerm）鉴权。
+  const title = "Owner 责任分布";
+  const hint =
+    "跨资产构成（指标/数据表/数据源/维度/术语/模板），点击资产段直达对应目录、点卡片查看其指标目录";
+  // 平台无任何资产时：管理员不渲染（无意义），其余角色展示引导
   if (owners.length === 0) {
     if (isAdmin) return null;
     return (
@@ -701,7 +702,7 @@ function OwnerDistribution({
       >
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description="您名下暂无负责的资产——可浏览下方资产总览或前往指标目录消费已发布指标"
+          description="平台暂无资产数据——可浏览下方资产总览，或前往指标目录查看已发布指标"
         />
       </Card>
     );
@@ -877,7 +878,8 @@ export function Dashboard() {
   const { track } = useTracking();
   const navigate = useGuardedNavigate();
   const { snapshot } = usePermission();
-  // 管理角色（platform_admin/domain_admin）看全量 Owner 责任分布；普通用户仅看自己（后端已隔离）
+  // 总览页展示系统总体情况：Owner 责任分布为全局统计（后端不按角色收敛），
+  // 模块级鉴权在点击跳转时由路由守卫完成；isAdmin 仅用于「平台无资产」的空态展示
   const isAdmin = snapshot?.role === "platform_admin" || snapshot?.role === "domain_admin";
 
   // 推荐曝光上报：仅对首次进入列表的推荐项上报 recommend_view；

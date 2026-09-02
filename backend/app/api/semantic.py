@@ -719,30 +719,17 @@ async def dashboard(
     ``assets`` 覆盖指标/数据表/数据源/维度/术语/指标模板/数据字典（DB 聚合），
     采集任务为运行时 JobStore 数据，由采集服务聚合后并入，避免 semantic 仓储耦合 collector。
 
-    数据隔离（P0-3 对齐）：非管理角色（非 platform_admin/domain_admin）强制 ``owner_id=当前用户``，
-    且忽略外部传入的 owner_id/domain 参数——仪表盘只展示"我负责的资产"，杜绝越权枚举他人
-    Owner 责任分布/下钻他人数据；管理角色保留全量治理视角。
+    总览页展示系统总体情况（产品语义，2026-09-03 确认）：所有登录用户均可查看全平台
+    聚合统计（指标总数/覆盖域/资产构成/Owner 责任分布）——聚合为计数不涉明细；具体模块
+    与明细的越权保护在点击跳转时由路由守卫（RequirePerm）+ 各模块读端点行级收敛（P0-3）
+    完成。此前对 domain_admin/普通用户按 owner/domain 强制收敛导致「总览 0 指标而指标
+    目录有指标」的口径分裂（未绑定域 domain_admin 名下 0 资产但目录可见公开指标）。
+    外部 domain/owner_id 仅作为用户主动筛选的透传参数，不再按角色强制改写。
     """
     from app.services.semantic.repository import MetricRepository
 
     roles = user.roles_all()
     is_admin = "platform_admin" in roles or "domain_admin" in roles
-    if "platform_admin" in roles:
-        # 平台管理员：保留外部筛选（全平台治理视角）
-        pass
-    elif "domain_admin" in roles:
-        # 域管理员：域收敛（对齐 visibility.metric_visibility_conditions）——
-        # 绑定域 → 本域全状态统计；未绑定域 → 退化为个人视角（只统计本人负责的资产）
-        if user.domain:
-            domain = user.domain
-            owner_id = None
-        else:
-            domain = None
-            owner_id = user.id
-    else:
-        # 普通用户：强制只看自己负责的资产（忽略外部 owner_id/domain 防越权）
-        owner_id = user.id
-        domain = None
     repo = MetricRepository(db)
     data = await repo.aggregate_dashboard(domain=domain, owner_id=owner_id)
     # 评审动作告警口径（TD §13，与 service._assert_reviewer_authorized 完全对齐）：

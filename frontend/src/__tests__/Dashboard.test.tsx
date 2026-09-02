@@ -799,10 +799,10 @@ describe("Dashboard 数据隔离（非管理角色视角）", () => {
     vi.mocked(listDomainTree).mockResolvedValue([]);
   });
 
-  it("普通用户：Owner 责任分布标题为「我的资产责任分布」而非「Owner 责任分布」", async () => {
+  it("普通用户：Owner 责任分布为全局统计，标题「Owner 责任分布」（总览展示系统总体情况）", async () => {
     renderDashboard();
-    await waitFor(() => expect(screen.getByText("我的资产责任分布")).toBeInTheDocument());
-    expect(screen.queryByText("Owner 责任分布")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
+    expect(screen.queryByText("我的资产责任分布")).not.toBeInTheDocument();
   });
 
   it("普通用户：后端返回空 by_owner 时展示空状态引导而非隐藏区块", async () => {
@@ -811,13 +811,13 @@ describe("Dashboard 数据隔离（非管理角色视角）", () => {
       by_owner: {},
     } as never);
     renderDashboard();
-    await waitFor(() => expect(screen.getByText("我的资产责任分布")).toBeInTheDocument());
-    expect(screen.getByText(/您名下暂无负责的资产/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
+    expect(screen.getByText(/平台暂无资产数据/)).toBeInTheDocument();
   });
 
   it("普通用户：不展示「指标待审核」评审动作告警（无评审能力，TD §13）", async () => {
     renderDashboard();
-    await waitFor(() => expect(screen.getByText("我的资产责任分布")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
     // 本人名下审核中状态在 Owner 分布体现，但评审动作告警（去评审）不出现
     expect(screen.queryByText(/个指标待审核/)).not.toBeInTheDocument();
   });
@@ -857,7 +857,7 @@ describe("总览仪表跳转权限守卫（按钮级）", () => {
   it("普通用户：点击资产卡片无反应（守卫拦截，路由不变）", async () => {
     mockPermRole = "analyst";
     const probe = renderWithLocation();
-    await waitFor(() => expect(screen.getByText("我的资产责任分布")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
     const head = document.querySelector<HTMLButtonElement>(".asset-card .ac-head");
     fireEvent.click(head!);
     // 无权限：路由保持 /dashboard，未发生跳转
@@ -867,7 +867,7 @@ describe("总览仪表跳转权限守卫（按钮级）", () => {
   it("普通用户：点击快捷入口（质量中心）无反应", async () => {
     mockPermRole = "analyst";
     const probe = renderWithLocation();
-    await waitFor(() => expect(screen.getByText("我的资产责任分布")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
     const qualityEntry = screen.getByText("质量中心");
     const btn = qualityEntry.closest("button");
     expect(btn).not.toBeNull();
