@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Card, Popconfirm, Popover, Row, Col, Spin, Alert, Tag, Empty, Tooltip, message } from "antd";
 import {
-  AppstoreOutlined,
   PlusCircleOutlined,
   ConsoleSqlOutlined,
   GlobalOutlined,
@@ -1130,10 +1129,11 @@ export function Dashboard() {
 
       {/* 推荐流：协同过滤 + 血缘兜底 / 推荐术语 */}
       <Row gutter={[20, 20]}>
-        <Col xs={24} lg={12}>
+        <Col xs={24} lg={12} style={{ display: "flex" }}>
           <Card
             title="为你推荐指标"
-            styles={{ body: { maxHeight: 320, overflow: "auto" } }}
+            styles={{ body: { flex: 1, minHeight: 320, maxHeight: 320, overflow: "auto" } }}
+            style={{ height: "100%", display: "flex", flexDirection: "column" }}
             extra={<a onClick={() => navigate("/catalog", { state: { from: "dashboard" } })}>去目录</a>}
           >
             {recommended.length === 0 ? (
@@ -1207,10 +1207,11 @@ export function Dashboard() {
             )}
           </Card>
         </Col>
-        <Col xs={24} lg={12}>
+        <Col xs={24} lg={12} style={{ display: "flex" }}>
           <Card
             title="推荐术语"
-            styles={{ body: { maxHeight: 320, overflow: "auto" } }}
+            styles={{ body: { flex: 1, minHeight: 320, maxHeight: 320, overflow: "auto" } }}
+            style={{ height: "100%", display: "flex", flexDirection: "column" }}
             extra={<a onClick={() => navigate("/glossary")}>术语表</a>}
           >
             {terms.length === 0 ? (
@@ -1242,11 +1243,6 @@ export function Dashboard() {
         </Col>
       </Row>
 
-      <div style={{ height: 8 }} />
-      <div className="muted" style={{ fontSize: 12, display: "flex", gap: 20 }}>
-        <span><AppstoreOutlined /> 总览数据由后端聚合仪表接口实时返回</span>
-        <span>推荐基于协同过滤与血缘关系</span>
-      </div>
     </div>
   );
 }
