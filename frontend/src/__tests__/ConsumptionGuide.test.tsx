@@ -35,6 +35,52 @@ const mockGuideData = {
   related_metrics: ["finance_cost_sum_d"],
 };
 
+/** 默认指标 mock（beforeEach 默认注入，单测可覆盖 definition_json 等字段） */
+const mockMetric = {
+  id: 1,
+  metric_code: "finance_revenue_sum_d",
+  name: "财务域收入汇总",
+  domain: "finance",
+  type: "atomic",
+  granularity: "day",
+  unit: "元",
+  currency: null,
+  aggregation: "SUM",
+  time_semantics: "PERIOD",
+  freshness: "T1",
+  dw_layer: "DWS",
+  sla: null,
+  metric_tier: "T1",
+  serving_mode: "BATCH_ONLY",
+  additivity: "ADDITIVE",
+  non_additive_dimensions: null,
+  definition_json: { expr: "sum(amount)" },
+  version: 1,
+  row_version: 1,
+  status: "PUBLISHED",
+  owner_id: 1,
+  backup_owner_id: null,
+  approver_id: null,
+  submitted_by: null,
+  pii_flag: true,
+  compliance_reviewed: true,
+  term_id: null,
+  effective_version: 1,
+  consumption_guide: null,
+  successor_code: null,
+  deprecated_at: null,
+  sunset_until: null,
+  emergency_publish: false,
+  emergency_reason: null,
+  emergency_reviewed_at: null,
+  gray_tenant_ids: null,
+  pending_conflict: false,
+  pending_conflict_detail: null,
+  pending_version: false,
+  created_at: "2026-08-01T00:00:00",
+  updated_at: "2026-08-01T00:00:00",
+};
+
 function renderGuide(metricCode = "finance_revenue_sum_d") {
   return render(
     <MemoryRouter initialEntries={[`/guide/${metricCode}`]}>
@@ -48,50 +94,7 @@ function renderGuide(metricCode = "finance_revenue_sum_d") {
 describe("ConsumptionGuide", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(getMetric).mockResolvedValue({
-      id: 1,
-      metric_code: "finance_revenue_sum_d",
-      name: "财务域收入汇总",
-      domain: "finance",
-      type: "atomic",
-      granularity: "day",
-      unit: "元",
-      currency: null,
-      aggregation: "SUM",
-      time_semantics: "PERIOD",
-      freshness: "T1",
-      dw_layer: "DWS",
-      sla: null,
-      metric_tier: "T1",
-      serving_mode: "BATCH_ONLY",
-      additivity: "ADDITIVE",
-      non_additive_dimensions: null,
-      definition_json: { expr: "sum(amount)" },
-      version: 1,
-      row_version: 1,
-      status: "PUBLISHED",
-      owner_id: 1,
-      backup_owner_id: null,
-      approver_id: null,
-      submitted_by: null,
-      pii_flag: true,
-      compliance_reviewed: true,
-      term_id: null,
-      effective_version: 1,
-      consumption_guide: null,
-      successor_code: null,
-      deprecated_at: null,
-      sunset_until: null,
-      emergency_publish: false,
-      emergency_reason: null,
-      emergency_reviewed_at: null,
-      gray_tenant_ids: null,
-      pending_conflict: false,
-      pending_conflict_detail: null,
-  pending_version: false,
-      created_at: "2026-08-01T00:00:00",
-      updated_at: "2026-08-01T00:00:00",
-    });
+    vi.mocked(getMetric).mockResolvedValue({ ...mockMetric });
   });
 
   it("shows loading state initially", () => {
@@ -128,6 +131,43 @@ describe("ConsumptionGuide", () => {
 
     expect(screen.getByText("注意事项")).toBeInTheDocument();
     expect(screen.getByText("关联指标")).toBeInTheDocument();
+  });
+
+  it("口径定义分区渲染：统计要素/技术口径/来源与依赖分组展示", async () => {
+    vi.mocked(getMetric).mockResolvedValue({
+      ...mockMetric,
+      definition_json: {
+        sql: "SELECT COUNT(1) AS cnt\nFROM ods_sales",
+        period: "day",
+        measures: [{ name: "cnt", aggregation: "COUNT" }],
+        dimensions: ["dept_id"],
+        source_tables: ["ods_sales"],
+      },
+    });
+    mockedFetchGuide.mockResolvedValue(mockGuideData);
+    renderGuide();
+
+    await waitFor(() => {
+      expect(screen.getAllByText("finance_revenue_sum_d").length).toBeGreaterThan(0);
+    });
+
+    // 分区标题
+    expect(screen.getByText("统计要素")).toBeInTheDocument();
+    expect(screen.getByText("技术口径")).toBeInTheDocument();
+    expect(screen.getByText("来源与依赖")).toBeInTheDocument();
+
+    // SQL 代码块头部：标签 + 复制按钮（含行数）
+    expect(screen.getByText("技术口径（源业务库口径）")).toBeInTheDocument();
+    expect(screen.getByText(/复制 SQL（2 行）/)).toBeInTheDocument();
+
+    // 统计要素 chip：统计周期: day（day 同时出现在基本信息粒度，故用 getAllByText）
+    expect(screen.getByText("统计周期")).toBeInTheDocument();
+    expect(screen.getAllByText("day").length).toBeGreaterThan(0);
+
+    // 来源与依赖：来源表 Tag 与维度
+    expect(screen.getByText("依赖表（上游）")).toBeInTheDocument();
+    expect(screen.getByText("维度")).toBeInTheDocument();
+    expect(screen.getByText("ods_sales")).toBeInTheDocument();
   });
 
   it("提供统一的返回按钮（返回上一入口）", async () => {

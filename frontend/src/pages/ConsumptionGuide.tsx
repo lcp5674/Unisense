@@ -9,7 +9,7 @@ import { fetchConsumptionGuide, getMetric, updateConsumptionGuide } from "../api
 import type { ConsumptionGuideResponse, ConsumptionGuidePayload, MetricResponse } from "../types";
 import { useTracking } from "../hooks/useTracking";
 import { usePermission } from "../hooks/usePermission";
-import { DefinitionView } from "../utils/display";
+import { DefinitionSections } from "../utils/display";
 import { enumLabel, METRIC_TYPE_LABEL, AGGREGATION_LABEL, TIME_SEMANTICS_LABEL, SERVING_MODE_LABEL } from "../utils/enums";
 
 /** 单组字符串列表编辑器（推荐用法/注意事项/关联指标共用，可增删行）。
@@ -256,7 +256,7 @@ export function ConsumptionGuide() {
 
       {metric && metric.definition_json && Object.keys(metric.definition_json).length > 0 && (
         <Card title={<span><ProfileOutlined /> 口径定义</span>} style={{ marginTop: 20 }}>
-          <DefinitionView data={metric.definition_json} />
+          <DefinitionSections data={metric.definition_json} />
         </Card>
       )}
 

@@ -1,7 +1,8 @@
 // 通用展示辅助 —— 将后端技术对象渲染为中文可读视图，避免裸 JSON 直出。
 // 供执行计划 / 元信息 / 口径定义 / Schema 摘要 / 质量阈值等复用。
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Tag } from "antd";
+import { CheckOutlined, CopyOutlined } from "@ant-design/icons";
 import { enumLabel, DATE_RANGE_LABEL, GRANULARITY_LABEL, METRIC_STATUS_LABEL } from "./enums";
 import { formatSql } from "./sqlFormat";
 
@@ -337,6 +338,183 @@ export function DefinitionView({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// ---------- 口径定义分区视图（消费指南页专用） ----------
+// 与 DefinitionView 的规格表不同，按语义分组为「核心口径 / 统计要素 / 技术口径 / 来源与依赖」：
+// 业务口径大段突出、SQL 带头部与复制、要素与来源紧凑网格，视觉层次比平铺规格表更清晰。
+const DEF_CORE_KEYS = ["definition", "pseudo_definition"];
+const DEF_STAT_KEYS = ["period", "grain", "unit", "expression", "expr", "time_column", "partition_key", "aggregation", "pii"];
+const DEF_SQL_KEYS = ["sql", "etl_sql", "dw_definition"];
+const DEF_SOURCE_KEYS = [
+  "source_tables", "source_table", "source_fields", "source_columns",
+  "measures", "dimensions", "columns", "group_by", "filters",
+  "dependencies", "measure_column", "measure_columns", "downstream_tables",
+];
+
+/** 按组键挑选非空条目，组内按 DEF_CANON_ORDER 优先级排序 */
+function pickDefEntries(data: Record<string, unknown>, keys: string[]): [string, unknown][] {
+  return keys
+    .filter((k) => data[k] !== null && data[k] !== undefined && data[k] !== "")
+    .map((k) => [k, data[k]] as [string, unknown])
+    .sort((a, b) => DEF_CANON_ORDER.indexOf(a[0]) - DEF_CANON_ORDER.indexOf(b[0]));
+}
+
+/** 分区小标题：竖条 + 文本 */
+function DefSectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+      <span style={{ width: 3, height: 12, borderRadius: 2, background: "var(--primary, #1677ff)", display: "inline-block" }} />
+      <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", letterSpacing: 0.5 }}>{children}</span>
+    </div>
+  );
+}
+
+/** SQL 代码块：头部（标签 + 行数 + 复制）+ 高亮代码 */
+function DefSqlBlock({ label, sql }: { label: string; sql: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(sql);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* 剪贴板不可用时静默 */
+    }
+  };
+  return (
+    <div style={{ border: "1px solid var(--border, #e5e7eb)", borderRadius: 8, overflow: "hidden" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 12px", background: "var(--paper)", borderBottom: "1px solid var(--border, #e5e7eb)" }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)" }}>{label}</span>
+        <span
+          role="button"
+          tabIndex={0}
+          onClick={copy}
+          onKeyDown={(e) => e.key === "Enter" && copy()}
+          style={{ fontSize: 12, color: "var(--text-secondary)", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4 }}
+        >
+          {copied ? <CheckOutlined style={{ color: "#52c41a" }} /> : <CopyOutlined />}
+          {copied ? "已复制" : `复制 SQL（${sql.split("\n").length} 行）`}
+        </span>
+      </div>
+      <pre style={{ margin: 0, padding: 12, maxHeight: 320, overflow: "auto", fontSize: 12.5, lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+        {formatSql(sql)}
+      </pre>
+    </div>
+  );
+}
+
+/** 核心口径区块：浅底 + 左侧强调竖线，突出业务口径大段文本 */
+function DefCoreBlocks({ core, labels }: { core: [string, unknown][]; labels: Record<string, string> }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {core.map(([k, v]) => (
+        <div key={k} style={{ background: "var(--paper)", borderLeft: "3px solid var(--primary, #1677ff)", borderRadius: 6, padding: "10px 14px", lineHeight: 1.8 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 2 }}>{labels[k] ?? k}</div>
+          <div style={{ fontSize: 14 }}>{renderDefValue(k, v, labels)}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** 统计要素：横向 chips（标签 + 值） */
+function DefStatChips({ stat, labels }: { stat: [string, unknown][]; labels: Record<string, string> }) {
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+      {stat.map(([k, v]) => (
+        <span key={k} style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "var(--paper)", borderRadius: 6, padding: "4px 10px" }}>
+          <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>{labels[k] ?? k}</span>
+          <span style={{ fontSize: 13 }}>{renderDefValue(k, v, labels)}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** 来源与依赖：自适应网格（标签在上、值在下） */
+function DefSourceGrid({ source, labels }: { source: [string, unknown][]; labels: Record<string, string> }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "6px 20px" }}>
+      {source.map(([k, v]) => (
+        <div key={k} style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 4 }}>{labels[k] ?? k}</div>
+          <div style={{ fontSize: 13, lineHeight: 1.7 }}>{renderDefValue(k, v, labels)}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** 未归类字段：回退为规格表行，保证不丢任何字段 */
+function DefOtherRows({ other, labels }: { other: [string, unknown][]; labels: Record<string, string> }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      {other.map(([k, v]) => (
+        <div key={k} style={{ display: "grid", gridTemplateColumns: "84px 1fr", gap: 8, alignItems: "start" }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", textAlign: "right", lineHeight: 1.7 }}>{labels[k] ?? k}</span>
+          <div style={{ fontSize: 13, lineHeight: 1.7, minWidth: 0 }}>{renderDefValue(k, v, labels)}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** 口径定义分区视图：按语义分组展示，突出业务口径与 SQL，要素/来源紧凑网格 */
+export function DefinitionSections({
+  data,
+  labels = DEF_FIELD_LABEL,
+}: {
+  data: Record<string, unknown>;
+  labels?: Record<string, string>;
+}) {
+  const core = pickDefEntries(data, DEF_CORE_KEYS);
+  const stat = pickDefEntries(data, DEF_STAT_KEYS);
+  const sqls = pickDefEntries(data, DEF_SQL_KEYS);
+  const source = pickDefEntries(data, DEF_SOURCE_KEYS);
+  const known = new Set([...DEF_CORE_KEYS, ...DEF_STAT_KEYS, ...DEF_SQL_KEYS, ...DEF_SOURCE_KEYS]);
+  const other = Object.entries(data)
+    .filter(([k, v]) => !known.has(k) && v !== null && v !== undefined && v !== "")
+    .sort((a, b) => DEF_CANON_ORDER.indexOf(a[0]) - DEF_CANON_ORDER.indexOf(b[0]));
+  if (!core.length && !stat.length && !sqls.length && !source.length && !other.length) {
+    return <span className="muted">—</span>;
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {core.length > 0 && (
+        <div>
+          <DefSectionLabel>核心口径</DefSectionLabel>
+          <DefCoreBlocks core={core} labels={labels} />
+        </div>
+      )}
+      {stat.length > 0 && (
+        <div>
+          <DefSectionLabel>统计要素</DefSectionLabel>
+          <DefStatChips stat={stat} labels={labels} />
+        </div>
+      )}
+      {sqls.length > 0 && (
+        <div>
+          <DefSectionLabel>技术口径</DefSectionLabel>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {sqls.map(([k, v]) => <DefSqlBlock key={k} label={labels[k] ?? k} sql={String(v)} />)}
+          </div>
+        </div>
+      )}
+      {source.length > 0 && (
+        <div>
+          <DefSectionLabel>来源与依赖</DefSectionLabel>
+          <DefSourceGrid source={source} labels={labels} />
+        </div>
+      )}
+      {other.length > 0 && (
+        <div>
+          <DefSectionLabel>其他字段</DefSectionLabel>
+          <DefOtherRows other={other} labels={labels} />
+        </div>
+      )}
     </div>
   );
 }
