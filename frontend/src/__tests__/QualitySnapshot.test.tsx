@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { QualitySnapshot } from "../pages/metric/QualitySnapshot";
-import { listSnapshots, listQualityEvents, listQualityRules } from "../api";
+import { listSnapshots } from "../api";
 
 vi.mock("../api", async (importOriginal) => {
   const mod = await importOriginal<typeof import("../api")>();
