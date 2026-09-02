@@ -113,6 +113,59 @@ class UserPermissionResponse(BaseModel):
     effective_actions: list[str] = Field(default_factory=list)
 
 
+class InspectionUser(BaseModel):
+    """权限检查目标用户概览。
+
+    Attributes:
+        id/username/display_name: 用户标识。
+        role: 主角色。
+        roles: 全部角色（主角色 + user_role 扩展）。
+        org_id/org_name: 所属组织。
+        domain/domains: 主域与全部权限域（团队继承 ∪ 显式指定并集）。
+        status: 用户状态（active/disabled…）。
+    """
+
+    id: int
+    username: str
+    display_name: str
+    role: str
+    roles: list[str] = Field(default_factory=list)
+    org_id: int | None = None
+    org_name: str | None = None
+    domain: str | None = None
+    domains: list[str] = Field(default_factory=list)
+    status: str = "active"
+
+
+class InspectionGrant(BaseModel):
+    """权限检查数据授权明细（有效授权条目）。"""
+
+    id: int
+    domain: str | None = None
+    metric_whitelist: list[Any] | None = None
+    grant_type: str
+    row_level: bool = False
+    expires_at: datetime | None = None
+    reason: str | None = None
+
+
+class UserInspectionResponse(BaseModel):
+    """指定用户权限全景（权限治理 → 权限检查）。
+
+    三层：
+    - ``user``：用户归属概览（角色 / 组织 / 权限域）。
+    - ``ui``：按钮权限点（角色继承 + 直挂并集 + deny 收窄）。
+    - ``resource_actions``：资源级动作（read/write/approve/export/review）——
+      数据可见性（PDP）判定基础。
+    - ``grants``：跨域/指标级数据授权（数据可见性扩展）。
+    """
+
+    user: InspectionUser
+    ui: UserPermissionResponse
+    resource_actions: list[str] = Field(default_factory=list)
+    grants: list[InspectionGrant] = Field(default_factory=list)
+
+
 class UserPermissionUpdateRequest(BaseModel):
     """用户直挂按钮权限点更新请求。
 

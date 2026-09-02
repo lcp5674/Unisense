@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Alert, Descriptions, Checkbox, Popconfirm, Tooltip, Dropdown } from "antd";
+import { Card, Table, Tag, Button, Modal, Form, Input, Select, message, Tabs, Space, Alert, Descriptions, Checkbox, Popconfirm, Tooltip, Dropdown, Empty, Collapse, Progress } from "antd";
 import { PlusOutlined, SafetyCertificateOutlined, ExperimentOutlined, SearchOutlined, AuditOutlined, DeleteOutlined, SettingOutlined, TeamOutlined, DownOutlined } from "@ant-design/icons";
 import {
   fetchMyPermissions,
@@ -22,14 +22,16 @@ import {
   listMetrics,
   listRoleOptions,
   listDictItems,
+  inspectUserPermission,
   UnisenseApiError,
 } from "../api";
-import type { ActionRegistryItem, GrantBatchResult, GrantCreate, GrantResponse, PermissionSnapshot, RoleOption, RolePermissionItem, SubjectDomainTreeNode, UserBrief } from "../types";
+import type { ActionRegistryItem, GrantBatchResult, GrantCreate, GrantResponse, PermissionSnapshot, RoleOption, RolePermissionItem, SubjectDomainTreeNode, UserBrief, UserInspectionResponse } from "../types";
 import { formatCnTime } from "../utils/timeCn";
 import { useUserNames } from "../utils/userNames";
-import { usePermission } from "../hooks/usePermission";
+import { ROUTE_PERM, usePermission } from "../hooks/usePermission";
 import { UserPermModal, groupRegistry, categoryOf, UI_CATEGORIES } from "../components/governance/UserPermModal";
 import type { UiCategory } from "../components/governance/UserPermModal";
+import { NAV_GROUPS } from "../components/Layout";
 import { SidebarPermPanel } from "../components/governance/SidebarPermPanel";
 
 // 主题域树 → 扁平化下拉选项（保留层级缩进，与用户管理/数据源页「业务域」下拉同款实现）
@@ -692,6 +694,16 @@ const ROLE_LABEL: Record<string, string> = {
   compliance_officer: "合规官",
   analyst: "分析师（存量兼容）",
   viewer: "只读用户",
+};
+
+const ROLE_TAG_COLOR: Record<string, string> = {
+  platform_admin: "gold",
+  domain_admin: "volcano",
+  metric_owner: "blue",
+  reviewer: "green",
+  compliance_officer: "purple",
+  analyst: "cyan",
+  viewer: "default",
 };
 
 const ACTION_ORDER = ["read", "write", "approve", "export", "review"];
@@ -1391,16 +1403,23 @@ function PiiReviewTab() {
 }
 
 function CheckTab() {
-  const [result, setResult] = useState<{ allow: boolean; reason: string; masking: string; restricted: boolean } | null>(null);
   const [users, setUsers] = useState<UserBrief[]>([]);
+  const [registry, setRegistry] = useState<ActionRegistryItem[]>([]);
+  const [inspection, setInspection] = useState<UserInspectionResponse | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [selectedUserId, setSelectedUserId] = useState<number | undefined>(undefined);
   const [domainOptions, setDomainOptions] = useState<Array<{ value: string; label: string }>>([]);
   const [metricOptions, setMetricOptions] = useState<Array<{ value: string; label: string }>>([]);
-  const [form] = Form.useForm();
+  const [quickResult, setQuickResult] = useState<{ allow: boolean; reason: string; masking: string; restricted: boolean } | null>(null);
+  const [quickForm] = Form.useForm();
 
   useEffect(() => {
     listUsers()
       .then(setUsers)
       .catch(() => setUsers([]));
+    listActionRegistry()
+      .then(setRegistry)
+      .catch(() => setRegistry([]));
     listDomainTree("active")
       .then((tree) => setDomainOptions(flattenDomains(tree)))
       .catch(() => setDomainOptions([]));
@@ -1413,7 +1432,32 @@ function CheckTab() {
       .catch(() => setMetricOptions([]));
   }, []);
 
-  async function handleCheck(values: Record<string, unknown>) {
+  const effective = useMemo(
+    () => new Set(inspection?.ui.effective_actions ?? []),
+    [inspection],
+  );
+  const roleSet = useMemo(() => new Set(inspection?.ui.role_actions ?? []), [inspection]);
+  const directSet = useMemo(() => new Set(inspection?.ui.direct_actions ?? []), [inspection]);
+  const denySet = useMemo(() => new Set(inspection?.ui.deny_actions ?? []), [inspection]);
+
+  async function handleInspect() {
+    if (selectedUserId == null) {
+      message.warning("请先选择要检查的用户");
+      return;
+    }
+    setChecking(true);
+    try {
+      const res = await inspectUserPermission(selectedUserId);
+      setInspection(res);
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "权限检查失败");
+      setInspection(null);
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  async function handleQuickCheck(values: Record<string, unknown>) {
     try {
       const res = await checkPermission({
         user_id: Number(values.user_id),
@@ -1421,66 +1465,290 @@ function CheckTab() {
         domain: values.domain ? String(values.domain) : null,
         metric_code: values.metric_code ? String(values.metric_code) : null,
       });
-      setResult({ allow: res.allow, reason: res.reason, masking: res.masking, restricted: res.restricted });
+      setQuickResult({ allow: res.allow, reason: res.reason, masking: res.masking, restricted: res.restricted });
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "检查失败");
     }
   }
 
+  // ---- 视图一：侧边栏菜单可见性（按前端菜单栏内容逐入口检查） ----
+  const menuGroups = NAV_GROUPS.map((g) => {
+    const items = g.children.map((c) => {
+      const perm = ROUTE_PERM[c.key];
+      const visible = perm ? effective.has(perm) : true;
+      return { key: c.key, label: c.label, perm: perm ?? null, visible };
+    });
+    const visibleCount = items.filter((i) => i.visible).length;
+    return { ...g, items, visibleCount };
+  });
+
+  function renderMenuVisibility() {
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 12 }}>
+        {menuGroups.map((g) => (
+          <Card key={g.label} size="small" title={<span>{g.label} <span style={{ color: "#999", fontSize: 12 }}>{g.visibleCount}/{g.items.length} 可见</span></span>} styles={{ body: { padding: "8px 12px" } }}>
+            <Space direction="vertical" style={{ width: "100%" }} size={4}>
+              {g.items.map((i) => (
+                <div key={i.key} style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between" }}>
+                  <Space size={6}>
+                    <Tag color={i.visible ? "success" : "default"} style={{ marginInlineEnd: 0 }}>
+                      {i.visible ? "可见" : "隐藏"}
+                    </Tag>
+                    <span style={{ fontSize: 13 }}>{i.label}</span>
+                    <span className="mono" style={{ color: "#bbb", fontSize: 11 }}>{i.key}</span>
+                  </Space>
+                  {i.perm ? (
+                    <Tag color={i.visible ? "blue" : "default"} style={{ marginInlineEnd: 0, fontSize: 11 }}>
+                      {i.perm}
+                    </Tag>
+                  ) : (
+                    <span style={{ color: "#bbb", fontSize: 11 }}>公开</span>
+                  )}
+                </div>
+              ))}
+            </Space>
+          </Card>
+        ))}
+      </div>
+    );
+  }
+
+  // ---- 视图二：按钮权限点（按注册表模块分组，标注来源） ----
+  const grouped = groupRegistry(registry);
+
+  function sourceTag(action: string) {
+    if (denySet.has(action)) return <Tag color="red" style={{ marginInlineEnd: 0 }}>已禁用</Tag>;
+    if (directSet.has(action)) return <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>直挂</Tag>;
+    if (roleSet.has(action)) return <Tag color="green" style={{ marginInlineEnd: 0 }}>角色</Tag>;
+    return <Tag color="default" style={{ marginInlineEnd: 0 }}>无</Tag>;
+  }
+
+  function renderButtonPerms() {
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(360px, 1fr))", gap: 12 }}>
+        {grouped.map((mod) => {
+          const owned = mod.items.filter((i) => effective.has(i.action)).length;
+          return (
+            <Card
+              key={mod.module}
+              size="small"
+              title={<span>{mod.module} <span style={{ color: "#999", fontSize: 12 }}>{owned}/{mod.items.length}</span></span>}
+              styles={{ body: { padding: "8px 12px" } }}
+            >
+              <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                {mod.items.map((it) => (
+                  <div key={it.action} style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "space-between" }}>
+                    <Tooltip title={it.description}>
+                      <span style={{ fontSize: 13 }}>{it.label}</span>
+                    </Tooltip>
+                    <Space size={6}>
+                      <span className="mono" style={{ color: "#bbb", fontSize: 11 }}>{it.action}</span>
+                      {sourceTag(it.action)}
+                    </Space>
+                  </div>
+                ))}
+              </Space>
+            </Card>
+          );
+        })}
+      </div>
+    );
+  }
+
+  // ---- 视图三：数据可见性（资源级动作 + 跨域授权） ----
+  function renderDataVisibility() {
+    const grants = inspection?.grants ?? [];
+    return (
+      <Space direction="vertical" style={{ width: "100%" }} size={16}>
+        <Alert
+          type="info"
+          showIcon
+          message="数据可见性 = 资源级动作（read/write/approve/export/review，PDP 判定基础） + 权限域（domains_all） + 跨域/指标授权（grants）"
+        />
+        <Descriptions column={3} bordered size="small">
+          <Descriptions.Item label="可执行资源动作">
+            <Space wrap>
+              {(inspection?.resource_actions ?? []).length
+                ? (inspection?.resource_actions ?? []).map((a) => <Tag key={a} color="blue">{ACTION_LABEL[a] ?? a}</Tag>)
+                : <Tag color="default">无</Tag>}
+            </Space>
+          </Descriptions.Item>
+          <Descriptions.Item label="可读数据范围">
+            {inspection && inspection.user.domains.length ? (
+              <Space wrap>
+                {inspection.user.domains.map((d) => <Tag key={d} color="cyan">{d}</Tag>)}
+              </Space>
+            ) : (
+              <Tag color="warning">无权限域（需 grants 授权）</Tag>
+            )}
+          </Descriptions.Item>
+          <Descriptions.Item label="指标白名单">
+            {grants.some((gr) => (gr.metric_whitelist ?? []).length)
+              ? grants.flatMap((gr) => (gr.metric_whitelist ?? []).map((m) => String(m)))
+                  .filter((v, i, arr) => arr.indexOf(v) === i)
+                  .map((m) => <Tag key={m} color="purple" className="mono">{m}</Tag>)
+              : <span style={{ color: "#bbb" }}>无</span>}
+          </Descriptions.Item>
+        </Descriptions>
+        {grants.length ? (
+          <Table
+            rowKey="id"
+            size="small"
+            pagination={false}
+            dataSource={grants}
+            columns={[
+              { title: "授权类型", dataIndex: "grant_type", width: 90, render: (v: string) => <Tag color="blue">{ACTION_LABEL[v] ?? v}</Tag> },
+              { title: "授权域", dataIndex: "domain", render: (v: string | null) => v ?? <span style={{ color: "#bbb" }}>全局</span> },
+              { title: "行级受限", dataIndex: "row_level", width: 90, render: (v: boolean) => (v ? <Tag color="orange">受限</Tag> : <Tag>否</Tag>) },
+              { title: "到期", dataIndex: "expires_at", width: 130, render: (v: string | null) => (v ? formatCnTime(v) : <span style={{ color: "#bbb" }}>永久</span>) },
+              { title: "事由", dataIndex: "reason", ellipsis: true },
+            ]}
+          />
+        ) : (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无跨域数据授权（grants）" />
+        )}
+      </Space>
+    );
+  }
+
   return (
-    <Card title="权限即时检查">
-      <Form form={form} layout="inline" onFinish={handleCheck} style={{ rowGap: 12 }}>
-        <Form.Item name="user_id" label="用户" rules={[{ required: true, message: "请选择用户" }]}>
+    <Card title="权限检查">
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 12 }}
+        message="选择用户后点击「检查」——按 ① 侧边栏菜单可见性 → ② 按钮权限点 → ③ 数据可见性 三层查看该用户实际拥有的权限（平台管理员可查任意用户；域管理员仅本组织用户）。"
+      />
+      <Form layout="inline" style={{ rowGap: 12, marginBottom: 12 }}>
+        <Form.Item label="用户">
           <Select
             showSearch
             optionFilterProp="label"
-            style={{ width: 220 }}
+            style={{ width: 260 }}
             placeholder="按用户名 / 显示名搜索"
+            value={selectedUserId}
+            onChange={(v) => setSelectedUserId(v)}
             options={users.map((u) => ({
               value: u.id,
-              label: `${u.username}（${u.display_name}）`,
+              label: `${u.username}（${u.display_name}）· ${ROLE_LABEL[u.role] ?? u.role}`,
             }))}
           />
         </Form.Item>
-        <Form.Item name="action" label="动作" rules={[{ required: true }]}>
-          <Select style={{ width: 130 }} options={["read", "write", "approve", "export", "review"].map((v) => ({ value: v, label: ACTION_LABEL[v] ?? v }))} />
-        </Form.Item>
-        <Form.Item name="domain" label="域">
-          <Select
-            allowClear
-            showSearch
-            optionFilterProp="label"
-            style={{ width: 160 }}
-            placeholder="全部域"
-            options={domainOptions}
-          />
-        </Form.Item>
-        <Form.Item name="metric_code" label="指标">
-          <Select
-            allowClear
-            showSearch
-            optionFilterProp="label"
-            style={{ width: 220 }}
-            placeholder="不限（从已发布指标选择）"
-            options={metricOptions}
-          />
-        </Form.Item>
         <Form.Item>
-          <Button type="primary" htmlType="submit" icon={<SearchOutlined />}>检查</Button>
+          <Button type="primary" icon={<SearchOutlined />} loading={checking} onClick={handleInspect}>检查</Button>
         </Form.Item>
       </Form>
-      {result && (
-        <Alert
-          type={result.allow ? "success" : "error"}
-          showIcon
-          style={{ marginTop: 12 }}
-          message={result.allow ? "允许执行" : "拒绝执行"}
-          description={`${result.reason}${result.restricted ? "（行级受限）" : ""}${result.masking && result.masking !== "none" ? ` · 脱敏策略：${MASK_POLICY_LABEL[result.masking] ?? result.masking}` : ""}`}
+
+      {inspection ? (
+        <>
+          <Descriptions column={4} bordered size="small" style={{ marginBottom: 12 }}>
+            <Descriptions.Item label="用户">
+              <b>{inspection.user.display_name}</b>
+              <span className="mono" style={{ color: "#999", marginLeft: 6 }}>@{inspection.user.username}</span>
+            </Descriptions.Item>
+            <Descriptions.Item label="角色">
+              <Space size={4}>
+                {inspection.user.roles.map((r) => <Tag key={r} color={ROLE_TAG_COLOR[r] ?? "blue"}>{ROLE_LABEL[r] ?? r}</Tag>)}
+              </Space>
+            </Descriptions.Item>
+            <Descriptions.Item label="权限域">
+              {inspection.user.domains.length
+                ? inspection.user.domains.map((d) => <Tag key={d} color="cyan">{d}</Tag>)
+                : <Tag color="warning">未绑定</Tag>}
+            </Descriptions.Item>
+            <Descriptions.Item label="所属组织">
+              {inspection.user.org_name ?? <span style={{ color: "#bbb" }}>未绑定</span>}
+            </Descriptions.Item>
+            <Descriptions.Item label="按钮权限点覆盖率">
+              <Space>
+                <Progress
+                  type="circle"
+                  size={40}
+                  percent={Math.round((effective.size / Math.max(registry.length, 1)) * 100)}
+                  format={() => `${effective.size}/${registry.length}`}
+                />
+                <span style={{ color: "#999", fontSize: 12 }}>已授权 / 全部权限点</span>
+              </Space>
+            </Descriptions.Item>
+            <Descriptions.Item label="主角色">{ROLE_LABEL[inspection.user.role] ?? inspection.user.role}</Descriptions.Item>
+            <Descriptions.Item label="扩展角色">
+              {inspection.user.roles.slice(1).length
+                ? inspection.user.roles.slice(1).map((r) => <Tag key={r} color="gold">{ROLE_LABEL[r] ?? r}</Tag>)
+                : <span style={{ color: "#bbb" }}>无</span>}
+            </Descriptions.Item>
+            <Descriptions.Item label="账号状态">
+              <Tag color={inspection.user.status === "active" ? "success" : "default"}>{inspection.user.status}</Tag>
+            </Descriptions.Item>
+          </Descriptions>
+
+          <Tabs
+            items={[
+              { key: "menu", label: "① 菜单可见性（侧边栏）", children: renderMenuVisibility() },
+              { key: "btn", label: "② 按钮权限点", children: renderButtonPerms() },
+              { key: "data", label: "③ 数据可见性", children: renderDataVisibility() },
+            ]}
+          />
+
+          <Collapse
+            ghost
+            style={{ marginTop: 12 }}
+            items={[
+              {
+                key: "quick",
+                label: "动作模拟（PDP 即时判定）：选动作与目标，模拟一次数据权限决策",
+                children: (
+                  <div>
+                    <Form form={quickForm} layout="inline" onFinish={handleQuickCheck} style={{ rowGap: 12 }}>
+                      <Form.Item name="user_id" label="用户" rules={[{ required: true, message: "请选择用户" }]}>
+                        <Select
+                          showSearch
+                          optionFilterProp="label"
+                          style={{ width: 220 }}
+                          placeholder="按用户名 / 显示名搜索"
+                          options={users.map((u) => ({
+                            value: u.id,
+                            label: `${u.username}（${u.display_name}）`,
+                          }))}
+                        />
+                      </Form.Item>
+                      <Form.Item name="action" label="动作" rules={[{ required: true }]}>
+                        <Select style={{ width: 130 }} options={["read", "write", "approve", "export", "review"].map((v) => ({ value: v, label: ACTION_LABEL[v] ?? v }))} />
+                      </Form.Item>
+                      <Form.Item name="domain" label="域">
+                        <Select allowClear showSearch optionFilterProp="label" style={{ width: 160 }} placeholder="全部域" options={domainOptions} />
+                      </Form.Item>
+                      <Form.Item name="metric_code" label="指标">
+                        <Select allowClear showSearch optionFilterProp="label" style={{ width: 220 }} placeholder="不限（从已发布指标选择）" options={metricOptions} />
+                      </Form.Item>
+                      <Form.Item>
+                        <Button type="primary" htmlType="submit" icon={<ExperimentOutlined />}>判定</Button>
+                      </Form.Item>
+                    </Form>
+                    {quickResult && (
+                      <Alert
+                        type={quickResult.allow ? "success" : "error"}
+                        showIcon
+                        style={{ marginTop: 12 }}
+                        message={quickResult.allow ? "允许执行" : "拒绝执行"}
+                        description={`${quickResult.reason}${quickResult.restricted ? "（行级受限）" : ""}${quickResult.masking && quickResult.masking !== "none" ? ` · 脱敏策略：${MASK_POLICY_LABEL[quickResult.masking] ?? quickResult.masking}` : ""}`}
+                      />
+                    )}
+                  </div>
+                ),
+              },
+            ]}
+          />
+        </>
+      ) : (
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description={checking ? "正在加载权限全景…" : "选择用户后点击「检查」查看该用户权限全景"}
         />
       )}
     </Card>
   );
 }
+
 
 function ErasureTab() {
   const [modalOpen, setModalOpen] = useState(false);

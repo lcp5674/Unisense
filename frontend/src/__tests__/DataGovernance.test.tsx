@@ -44,6 +44,7 @@ vi.mock("../api", () => {
     listDictItems: vi.fn(),
     getUserPermissions: vi.fn(),
     setUserPermissions: vi.fn(),
+    inspectUserPermission: vi.fn(),
     UnisenseApiError,
   };
 });
@@ -65,6 +66,7 @@ import {
   listDictItems,
   getUserPermissions,
   setUserPermissions,
+  inspectUserPermission,
 } from "../api";
 
 const mockPerms = vi.mocked(fetchMyPermissions);
@@ -78,6 +80,7 @@ const mockActionRegistry = vi.mocked(listActionRegistry);
 const mockRoleOptions = vi.mocked(listRoleOptions);
 const mockGetUserPerms = vi.mocked(getUserPermissions);
 const mockSetUserPerms = vi.mocked(setUserPermissions);
+const mockInspect = vi.mocked(inspectUserPermission);
 const mockBatch = vi.mocked(batchGrant);
 const mockUsers = vi.mocked(listUsers);
 const mockDomains = vi.mocked(listDomainTree);
@@ -151,6 +154,7 @@ describe("Governance 权限治理", () => {
     mockRoleOptions.mockReset();
     mockGetUserPerms.mockReset();
     mockSetUserPerms.mockReset();
+    mockInspect.mockReset();
     mockPerms.mockResolvedValue({
       user_id: 1,
       role: "platform_admin",
@@ -190,6 +194,40 @@ describe("Governance 权限治理", () => {
       direct_actions: ["metric:create"],
       deny_actions: [],
       effective_actions: ["catalog:view", "metric:create"],
+    });
+    mockInspect.mockResolvedValue({
+      user: {
+        id: 1,
+        username: "viewer1",
+        display_name: "只读用户一",
+        role: "viewer",
+        roles: ["viewer"],
+        org_id: 1,
+        org_name: "默认组织",
+        domain: "sales",
+        domains: ["sales"],
+        status: "active",
+      },
+      ui: {
+        user_id: 1,
+        role: "viewer",
+        role_actions: ["catalog:view", "dashboard:view"],
+        direct_actions: [],
+        deny_actions: ["metric:create"],
+        effective_actions: ["catalog:view", "dashboard:view"],
+      },
+      resource_actions: ["read"],
+      grants: [
+        {
+          id: 1,
+          domain: "finance",
+          metric_whitelist: ["sales_gmv_daily"],
+          grant_type: "read",
+          row_level: false,
+          expires_at: null,
+          reason: "跨域查看",
+        },
+      ],
     });
   });
 
@@ -749,6 +787,40 @@ describe("Governance 授权管理 - 角色下拉与按用户授权矩阵", () =>
       deny_actions: [],
       effective_actions: ["catalog:view", "metric:create"],
     });
+    mockInspect.mockResolvedValue({
+      user: {
+        id: 1,
+        username: "viewer1",
+        display_name: "只读用户一",
+        role: "viewer",
+        roles: ["viewer"],
+        org_id: 1,
+        org_name: "默认组织",
+        domain: "sales",
+        domains: ["sales"],
+        status: "active",
+      },
+      ui: {
+        user_id: 1,
+        role: "viewer",
+        role_actions: ["catalog:view", "dashboard:view"],
+        direct_actions: [],
+        deny_actions: ["metric:create"],
+        effective_actions: ["catalog:view", "dashboard:view"],
+      },
+      resource_actions: ["read"],
+      grants: [
+        {
+          id: 1,
+          domain: "finance",
+          metric_whitelist: ["sales_gmv_daily"],
+          grant_type: "read",
+          row_level: false,
+          expires_at: null,
+          reason: "跨域查看",
+        },
+      ],
+    });
   });
 
   it("角色列显示角色名（非数字 ID）；授权弹窗角色为下拉选项", async () => {
@@ -866,5 +938,43 @@ describe("Governance 授权管理 - 角色下拉与按用户授权矩阵", () =>
       expect(cb?.checked).toBe(true);
     });
     // 预设中不在注册表的权限点被过滤（applyPreset 仅合并 registry 内点）——此处注册表无 query:execute，不抛错即可
+  });
+
+  it("权限检查：选择用户后展示菜单可见性/按钮权限点/数据可见性全景", async () => {
+    renderGov();
+    await clickTab("权限检查");
+    await screen.findByText(/三层查看该用户实际拥有的权限/);
+
+    // 打开用户下拉并选择 alice（id=1）
+    const userSelect = document.querySelector(".ant-select-selector");
+    fireEvent.mouseDown(userSelect!);
+    const aliceOption = await screen.findByTitle("alice（爱丽丝）· 只读用户");
+    await userEvent.click(aliceOption);
+
+    await userEvent.click(screen.getByRole("button", { name: /检\s*查/ }));
+    await waitFor(() => expect(mockInspect).toHaveBeenCalledWith(1));
+
+    // 概览卡：用户/组织/权限域/按钮权限点覆盖率
+    expect(await screen.findByText("只读用户一")).toBeTruthy();
+    expect(screen.getByText("默认组织")).toBeTruthy();
+    expect(screen.getByText("sales")).toBeTruthy();
+
+    // ① 菜单可见性（默认 Tab）：按 NAV_GROUPS 分组展示入口可见性
+    expect(screen.getByText(/指标资产/)).toBeTruthy();
+    expect(screen.getAllByText("可见").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("隐藏").length).toBeGreaterThan(0);
+
+    // ② 按钮权限点：角色继承（查看指标目录）+ 用户级禁用（metric:create）
+    await userEvent.click(screen.getByRole("tab", { name: /② 按钮权限点/ }));
+    expect(await screen.findByText("查看指标目录")).toBeTruthy();
+    expect(screen.getAllByText("角色").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("已禁用").length).toBeGreaterThan(0);
+
+    // ③ 数据可见性：资源动作 read + 跨域授权（finance / 白名单 / 事由）
+    await userEvent.click(screen.getByRole("tab", { name: /③ 数据可见性/ }));
+    expect(await screen.findByText("finance")).toBeTruthy();
+    expect(screen.getByText("sales_gmv_daily")).toBeTruthy();
+    expect(screen.getByText("跨域查看")).toBeTruthy();
+    expect(screen.getAllByText("读取").length).toBeGreaterThan(0);
   });
 });

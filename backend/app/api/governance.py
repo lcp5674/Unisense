@@ -47,6 +47,7 @@ from app.services.governance.schemas import (
     RolePermissionItem,
     RolePermissionUpdate,
     RoleResponse,
+    UserInspectionResponse,
     UserPermissionResponse,
     UserPermissionUpdateRequest,
 )
@@ -247,6 +248,24 @@ async def get_user_permissions(
     svc = _svc(db, request)
     data = await svc.get_user_ui_permissions(user_id)
     return ok(data=UserPermissionResponse.model_validate(data).model_dump(), trace_id=trace_id)
+
+
+@router.get("/users/{user_id}/inspection", dependencies=_GRANT_ADMIN_DEPS)
+async def inspect_user_permission(
+    user_id: int,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """权限检查：指定用户权限全景（角色 / 组织 / 权限域 / 按钮权限点 / 数据可见性）。
+
+    平台管理员可查任意用户；域管理员仅可查本组织用户（service 层收敛）。
+    数据为只读聚合，不含凭据等敏感字段。
+    """
+    svc = _svc(db, request)
+    data = await svc.inspect_user_permission(user_id, actor=user)
+    return ok(data=UserInspectionResponse.model_validate(data).model_dump(), trace_id=trace_id)
 
 
 @router.put("/users/{user_id}/permissions", dependencies=_ROLE_ADMIN_DEPS)

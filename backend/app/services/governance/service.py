@@ -37,7 +37,7 @@ from app.models.governance import (
     RoleName,
     SensitivityLevel,
 )
-from app.models.user import User
+from app.models.user import Organization, User
 from app.services.governance import policy
 from app.services.governance.events import GovernanceEventPublisher
 from app.services.governance.repository import GovernanceRepository
@@ -401,6 +401,83 @@ class GovernanceService(BaseService):
             "direct_actions": sorted(direct_allows),
             "deny_actions": sorted(direct_denies),
             "effective_actions": sorted(effective),
+        }
+
+    async def inspect_user_permission(
+        self, user_id: int, *, actor: User | None = None
+    ) -> dict[str, Any]:
+        """指定用户权限全景（权限治理 → 权限检查）。
+
+        聚合三层供前端「按前端菜单栏 → 按钮权限点 → 数据可见性」检查：
+        - ``user``：角色 / 组织 / 全部权限域（domains_all）。
+        - ``ui``：按钮权限点三来源 + 生效并集（复用 :meth:`get_user_ui_permissions`）。
+        - ``resource_actions``：多角色资源级动作并集（PDP 数据可见性基础；
+          platform_admin 恒全量）。
+        - ``grants``：有效跨域/指标级授权。
+
+        Args:
+            user_id: 被检查用户 ID。
+            actor: 操作人（domain_admin 仅可检查本组织用户，platform_admin 不限；
+              缺省跳过组织收敛，供内部调用）。
+
+        Raises:
+            AuthError: domain_admin 检查他组织用户。
+            NotFoundError: 用户不存在。
+        """
+        user = await self._ensure_user_exists(user_id)
+        if (
+            actor is not None
+            and _role_to_str(actor.role) == "domain_admin"
+            and user.org_id != actor.org_id
+        ):
+            raise AuthError(
+                "域管理员仅可检查本组织用户的权限",
+                error_code="PERMISSION_INSPECTION_SCOPE",
+            )
+        ui = await self.get_user_ui_permissions(user_id)
+        roles = user.roles_all()
+        if "platform_admin" in roles:
+            resource_actions = sorted(policy.CONFIGURABLE_ACTIONS)
+        else:
+            resource_actions = sorted(
+                set().union(*(policy.ROLE_ACTIONS.get(r, frozenset()) for r in roles))
+            )
+        org_name: str | None = None
+        if user.org_id is not None:
+            org = (
+                await self._db.execute(
+                    select(Organization).where(Organization.id == user.org_id)
+                )
+            ).scalar_one_or_none()
+            org_name = org.name if org is not None else None
+        grants = await self._repo.active_grants_for_user(user_id)
+        return {
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "display_name": user.display_name,
+                "role": ui["role"],
+                "roles": roles,
+                "org_id": user.org_id,
+                "org_name": org_name,
+                "domain": user.domain,
+                "domains": user.domains_all(),
+                "status": getattr(user, "status", "active") or "active",
+            },
+            "ui": ui,
+            "resource_actions": resource_actions,
+            "grants": [
+                {
+                    "id": g.id,
+                    "domain": g.domain,
+                    "metric_whitelist": g.metric_whitelist,
+                    "grant_type": g.grant_type,
+                    "row_level": bool(g.row_level),
+                    "expires_at": g.expires_at,
+                    "reason": g.reason,
+                }
+                for g in grants
+            ],
         }
 
     async def set_user_ui_permissions(

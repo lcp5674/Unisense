@@ -150,6 +150,7 @@ import {
   RolePermissionItem,
   RoleResponse,
   UserPermissionResponse,
+  UserInspectionResponse,
   ActionRegistryItem,
   OrganizationView,
   RulingRecord,
@@ -3349,6 +3350,13 @@ export async function getUserPermissions(
   userId: number,
 ): Promise<UserPermissionResponse> {
   return request<UserPermissionResponse>(`${API_BASE}/users/${userId}/permissions`);
+}
+
+/** 权限检查：指定用户权限全景（backend GET /governance/users/{id}/inspection）。 */
+export async function inspectUserPermission(
+  userId: number,
+): Promise<UserInspectionResponse> {
+  return request<UserInspectionResponse>(`${API_BASE}/users/${userId}/inspection`);
 }
 
 /** 整表替换用户直挂按钮权限点（正向授权 + 负向收窄，backend PUT /api/v1/users/{id}/permissions）。 */

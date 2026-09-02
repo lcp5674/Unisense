@@ -62,6 +62,13 @@ class FakeUser:
         self.role = role
         self.domain = domain
         self._extra_roles = extra_roles or []
+        # inspect_user_permission 读取的用户属性（FakeDB 对 Organization 查询也返回
+        # FakeUser，故补 name 使 org_name 取到）
+        self.username = f"user_{uid}"
+        self.display_name = f"用户{uid}"
+        self.org_id = 1
+        self.status = "active"
+        self.name = "测试组织"
 
     def roles_all(self) -> list[str]:
         """方案 A 多角色：主角色 + 扩展角色。"""
@@ -576,6 +583,48 @@ async def test_my_permissions_filters_expired_grants() -> None:
     snap = await svc.my_permissions(viewer)  # type: ignore[arg-type]
     assert snap.grants == []
     assert snap.granted_domains == []
+
+
+# --------------------------------------------------------- 权限检查（全景）
+
+
+async def test_inspect_user_permission_aggregates_ui_and_grants() -> None:
+    # 被检查用户：domain_admin + reviewer 扩展角色，直挂 metric:create
+    target = FakeUser(uid=1, role="domain_admin", domain="sales", extra_roles=["reviewer"])
+    svc, repo, _ = _svc(FakeUser(uid=9, role="platform_admin"))
+    svc._db._user = target  # type: ignore[attr-defined]  # 被检查用户=1
+    await svc.grant(_payload(metric_whitelist=["m1"]), actor_id=9)
+    repo.user_permissions = {1: {"metric:create"}}
+
+    result = await svc.inspect_user_permission(1)
+
+    assert result["user"]["id"] == 1
+    assert result["user"]["username"] == "user_1"
+    assert result["user"]["roles"] == ["domain_admin", "reviewer"]
+    assert result["user"]["org_name"] == "测试组织"
+    assert result["user"]["domains"] == ["sales"]
+    assert "metric:create" in result["ui"]["direct_actions"]
+    # domain_admin(read/write/approve/export) ∪ reviewer(read/approve) 并集
+    assert {"read", "write", "approve", "export"} <= set(result["resource_actions"])
+    assert len(result["grants"]) == 1
+    assert result["grants"][0]["domain"] == "sales"
+
+
+async def test_inspect_user_permission_platform_admin_full_resource() -> None:
+    target = FakeUser(uid=1, role="platform_admin")
+    svc, _, _ = _svc(target)
+    result = await svc.inspect_user_permission(1)
+    assert set(result["resource_actions"]) == {"read", "write", "approve", "export", "review"}
+
+
+async def test_inspect_user_permission_domain_admin_cross_org_denied() -> None:
+    target = FakeUser(uid=1, role="viewer")
+    target.org_id = 2  # 他组织
+    svc, _, _ = _svc(target)
+    actor = FakeUser(uid=9, role="domain_admin")
+    actor.org_id = 1
+    with pytest.raises(AuthError):
+        await svc.inspect_user_permission(1, actor=actor)
 
 
 # ------------------------------------------------------------- PII 复核

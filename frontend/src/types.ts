@@ -1445,6 +1445,38 @@ export interface UserPermissionResponse {
   effective_actions: string[];
 }
 
+/** 权限检查：目标用户概览（backend GET /governance/users/{id}/inspection）。 */
+export interface InspectionUser {
+  id: number;
+  username: string;
+  display_name: string;
+  role: string;
+  roles: string[];
+  org_id: number | null;
+  org_name: string | null;
+  domain: string | null;
+  domains: string[];
+  status: string;
+}
+
+export interface InspectionGrant {
+  id: number;
+  domain: string | null;
+  metric_whitelist: string[] | null;
+  grant_type: string;
+  row_level: boolean;
+  expires_at: string | null;
+  reason: string | null;
+}
+
+/** 指定用户权限全景（权限治理 → 权限检查）。 */
+export interface UserInspectionResponse {
+  user: InspectionUser;
+  ui: UserPermissionResponse;
+  resource_actions: string[];
+  grants: InspectionGrant[];
+}
+
 export interface OrganizationView {
   id: number;
   name: string;
