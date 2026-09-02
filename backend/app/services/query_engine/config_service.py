@@ -133,50 +133,66 @@ class QueryEngineConfigService:
         return value
 
     async def _compute_effective(self) -> dict[str, Any]:
-        """计算生效配置（进程内锁防并发重复查库；DB 行逐段解析）。"""
+        """计算生效配置（DB 整行接管；无 DB/disabled/全空时回落 env）。
+
+        DB 行 enabled=true 且至少配置了一个引擎段（OLAP 或 MySQL fallback）时，
+        以 DB 行为准**整行接管**——段为空即该段未配置，**不回退 env**（这样
+        「DB 只配 MySQL 降级」能表达「关闭 OLAP」；与 llm_config get_effective
+        的「DB 行启用即接管」语义一致）。仅当无 DB 行 / DB disabled / DB 行
+        全空（异常态）时，才整体回落环境变量。
+        """
         row = await self.get_row()
         db_enabled = row is not None and row.enabled
-        # OLAP 段
         olap_url = doris_host = doris_database = doris_user = doris_password = ""
         doris_port = 8030
-        db_olap_configured = False
-        db_updated_by: int | None = None
-        db_updated_at: str | None = None
+        mysql_fallback_url = ""
+        updated_by: int | None = None
+        updated_at: str | None = None
         if db_enabled:
-            db_updated_by = row.updated_by
-            db_updated_at = str(row.updated_at) if row.updated_at else None
+            updated_by = row.updated_by
+            updated_at = str(row.updated_at) if row.updated_at else None
             if row.doris_host or row.olap_url:
-                db_olap_configured = True
                 olap_url = row.olap_url or ""
                 doris_host = row.doris_host or ""
                 if not doris_host and olap_url:
-                    doris_host, _, _ = _derive_doris_from_url(olap_url)
-                doris_port = row.doris_port or 8030
-                doris_database = row.doris_database or ""
+                    doris_host, doris_port, doris_database = _derive_doris_from_url(olap_url)
+                else:
+                    doris_port = row.doris_port or 8030
+                    doris_database = row.doris_database or ""
                 doris_user = row.doris_user or ""
                 doris_password = await _decrypt_field(row.doris_password_enc)
-        if not db_olap_configured and (
-            settings.olap_url or settings.doris_host not in ("", "localhost")
-        ):
-            # env 兜底（settings 已由 config.py 从 olap_url 派生 doris_host/port/db）
+            if row.mysql_fallback_url_enc:
+                mysql_fallback_url = await _decrypt_field(row.mysql_fallback_url_enc)
+            # DB 行至少配置了一个段 → 整行接管（段空不回退 env）
+            if doris_host or mysql_fallback_url:
+                return {
+                    "source": "db",
+                    "olap_url": olap_url,
+                    "doris_host": doris_host,
+                    "doris_port": doris_port or 8030,
+                    "doris_database": doris_database,
+                    "doris_user": doris_user,
+                    "doris_password": doris_password,
+                    "mysql_fallback_url": mysql_fallback_url,
+                    "olap_configured": bool(doris_host),
+                    "mysql_fallback_configured": bool(mysql_fallback_url),
+                    "updated_by": updated_by,
+                    "updated_at": updated_at,
+                }
+            # DB 行 enabled 但全空（异常态）→ 落到下方 env 兜底
+        # env 兜底（无 DB / disabled / DB 全空）
+        if settings.olap_url or settings.doris_host not in ("", "localhost"):
             olap_url = settings.olap_url or ""
             doris_host = settings.doris_host or ""
             doris_port = settings.doris_port
             doris_database = settings.doris_database or ""
             doris_user = getattr(settings, "doris_user", "") or ""
-        # MySQL 降级段
-        mysql_fallback_url = ""
-        db_mysql_configured = False
-        if db_enabled and row.mysql_fallback_url_enc:
-            url = await _decrypt_field(row.mysql_fallback_url_enc)
-            if url:
-                db_mysql_configured = True
-                mysql_fallback_url = url
-        if not db_mysql_configured:
-            mysql_fallback_url = settings.mysql_fallback_url or ""
-        if db_enabled and (db_olap_configured or db_mysql_configured):
-            source = "db"
-        elif settings.olap_url or settings.mysql_fallback_url:
+        mysql_fallback_url = settings.mysql_fallback_url or ""
+        if (
+            settings.olap_url
+            or settings.mysql_fallback_url
+            or settings.doris_host not in ("", "localhost")
+        ):
             source = "env"
         else:
             source = "none"
@@ -191,8 +207,8 @@ class QueryEngineConfigService:
             "mysql_fallback_url": mysql_fallback_url,
             "olap_configured": bool(doris_host),
             "mysql_fallback_configured": bool(mysql_fallback_url),
-            "updated_by": db_updated_by if db_enabled else None,
-            "updated_at": db_updated_at if db_enabled else None,
+            "updated_by": updated_by,
+            "updated_at": updated_at,
         }
 
     # ---- 写入 ----

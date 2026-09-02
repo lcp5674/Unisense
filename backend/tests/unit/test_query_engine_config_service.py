@@ -132,6 +132,27 @@ async def test_effective_none_when_no_config(monkeypatch) -> None:
     assert eff["mysql_fallback_configured"] is False
 
 
+async def test_effective_db_mysql_only_does_not_fallback_env_olap(monkeypatch) -> None:
+    """DB 行只配 MySQL fallback（OLAP 段空）→ 不回落 env 的 OLAP（能表达「关闭 OLAP」）。"""
+    monkeypatch.setattr(
+        "app.services.query_engine.config_service.settings.olap_url", "http://env-doris:8030"
+    )
+    monkeypatch.setattr(
+        "app.services.query_engine.config_service.settings.doris_host", "env-doris"
+    )
+    row = _FakeRow(
+        doris_host="",
+        olap_url="",
+        mysql_fallback_url_enc=_enc_url("mysql+aiomysql://e2e:e2e@mysql:3306/e2e_biz"),
+    )
+    eff = await _svc(row).get_effective()
+    assert eff["source"] == "db"
+    assert eff["olap_configured"] is False
+    assert eff["doris_host"] == ""
+    assert eff["mysql_fallback_configured"] is True
+    assert eff["mysql_fallback_url"] == "mysql+aiomysql://e2e:e2e@mysql:3306/e2e_biz"
+
+
 # ---- 保存：upsert + 加密 + 留空保持 ----
 
 async def test_save_creates_row_with_encrypted_secrets() -> None:
