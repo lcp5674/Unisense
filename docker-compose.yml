@@ -368,14 +368,10 @@ services:
     # S-3：发布/回滚载体（与 backend 同 tag 策略）
     image: unisense/frontend:${UNISENSE_IMAGE_TAG:-dev}
     container_name: unisense-frontend
-    # nginx 官方设计 = master 以 root 跑（管理：读配置/绑端口/写 pid），worker 由 nginx.conf
-    # 的 `user nginx;` 自动降权（真正处理请求）。Dockerfile 的 USER nginx 把 master 也降权属
-    # 过度加固——CentOS 7 老内核(3.10)上非 root master 写 pid(/tmp/nginx.pid) 触发 overlay
-    # copy-up EPERM → 崩溃重启（tmpfs 也无效）。compose 层 user:"0" 恢复官方形态根治。
-    user: "0"
-    # tmpfs 保留：即便 root master 可写，worker 可能写 /tmp 的临时文件也走内存盘（无害兜底）
-    tmpfs:
-      - /tmp
+    # nginx 官方形态 = master root + worker 降权，pid 写 /var/run/nginx.pid——
+    # 已在 frontend/Dockerfile 固化（曾用 USER nginx 降权 master + pid 写 /tmp，
+    # 在 CentOS 7 老内核(3.10)+Docker 26 上 EPERM 崩溃；compose user/tmpfs 覆盖
+    # 是临时止血，现镜像原生修复，此处不再需要任何覆盖）。
     # 宿主 8180 → 容器 8080（nginx 降权后监听非特权端口 8080；宿主端口保持 8180 不变）
     ports: ["8180:8080"]
     mem_limit: ${UNISENSE_FRONTEND_MEM:-0.5g}

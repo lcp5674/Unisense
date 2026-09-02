@@ -27,11 +27,11 @@ FROM nginx:alpine
 # 复制构建产物
 COPY --from=builder /build/dist /usr/share/nginx/html
 
-# S-2：非 root 运行——nginx 工作进程本就以 nginx 用户跑，这里让 master 也
-# 降权（需 8080 非特权端口 + 缓存/pid 目录归 nginx 用户）。外部端口不受影响
-# （compose 仍映射宿主 8180）。
+# pid 文件写 /var/run/nginx.pid（镜像层目录，已 chown nginx，root/nginx 均可写）。
+# 不用 /tmp/nginx.pid——生产实测 CentOS 7 老内核(3.10)+Docker 26 组合下，nginx 写
+# /tmp 触发 EPERM（tmpfs 挂载也无法规避），而 /var/run 写 overlay 恒可写。
 RUN chown -R nginx:nginx /var/cache/nginx /var/run && \
-    sed -i 's|^pid .*|pid /tmp/nginx.pid;|' /etc/nginx/nginx.conf
+    sed -i 's|^pid .*|pid /var/run/nginx.pid;|' /etc/nginx/nginx.conf
 
 # nginx 配置：SPA 路由 + API 反代到后端
 RUN cat > /etc/nginx/conf.d/default.conf <<'EOF'
@@ -128,9 +128,10 @@ EXPOSE 8080
 
 # S-2：nginx 官方形态 = master 以 root 运行（读配置/绑 80→8080/写 pid），worker 由
 # nginx.conf 的 `user nginx;` 自动降权处理请求。曾用 `USER nginx` 把 master 也降权
-# （过度加固），但 CentOS 7 老内核(3.10) overlay2 上非 root master 写镜像层 pid
-# (/tmp/nginx.pid) 触发目录 copy-up 返回 EPERM → 容器崩溃重启。移除 USER nginx 恢复
-# 官方形态；worker 降权不变（安全面与官方 nginx 镜像一致）。
+# （过度加固），但 CentOS 7 老内核(3.10) overlay2 上非 root master 写镜像层 pid 触发
+# 目录 copy-up 返回 EPERM → 容器崩溃重启（实测 tmpfs /tmp 也无法规避，pid 已一并
+# 改到 /var/run）。移除 USER nginx 恢复官方形态；worker 降权不变（安全面与官方镜像
+# 一致）。
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
     CMD wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1
 
