@@ -368,10 +368,9 @@ services:
     # S-3：发布/回滚载体（与 backend 同 tag 策略）
     image: unisense/frontend:${UNISENSE_IMAGE_TAG:-dev}
     container_name: unisense-frontend
-    # nginx 官方形态 = master root + worker 降权，pid 写 /var/run/nginx.pid——
-    # 已在 frontend/Dockerfile 固化（曾用 USER nginx 降权 master + pid 写 /tmp，
-    # 在 CentOS 7 老内核(3.10)+Docker 26 上 EPERM 崩溃；compose user/tmpfs 覆盖
-    # 是临时止血，现镜像原生修复，此处不再需要任何覆盖）。
+    # nginx 官方形态 = master root + worker 降权；pid 写 /dev/null（见 frontend/Dockerfile
+    # 注释）——绕开 CentOS 7 老内核(3.10)+Docker 26 下 pid 文件写 EPERM 崩溃问题。
+    # 曾试过 compose user: "0"/tmpfs 覆盖与 pid 改 /var/run，均无法规避，最终 pid 置 /dev/null。
     # 宿主 8180 → 容器 8080（nginx 降权后监听非特权端口 8080；宿主端口保持 8180 不变）
     ports: ["8180:8080"]
     mem_limit: ${UNISENSE_FRONTEND_MEM:-0.5g}
