@@ -40,6 +40,7 @@ import {
   fetchAssetEntityDetail,
   fetchBatchInferHistory,
   fetchDescriptionCoverage,
+  getBatchInferTask,
   inferColumnDescription,
   inferDescriptions,
   inferTableDescription,
@@ -52,6 +53,7 @@ import {
 import type {
   BatchInferHistoryEntry,
   BatchInferHistoryTable,
+  BatchInferTask,
   DescriptionCoverage,
   TableCoverageItem,
 } from "../api";
@@ -588,10 +590,10 @@ export const DescriptionCoveragePanel = forwardRef<
   const [batchProgress, setBatchProgress] = useState<BatchProgressItem[]>([]);
   /** 当前批次的完整任务集（供「重试失败项」复用，不受勾选清空影响）。 */
   const [batchTasks, setBatchTasks] = useState<BatchTask[]>([]);
-  /** 并发数（1/2/3/5，默认 2），localStorage 持久化。 */
+  /** 并发数（1/2/3/5/8/10，默认 2），localStorage 持久化。 */
   const [batchConcurrency, setBatchConcurrency] = useState<number>(() => {
     const v = Number(localStorage.getItem("unisense.desc-coverage.batchConcurrency"));
-    return Number.isInteger(v) && v >= 1 && v <= 5 ? v : 2;
+    return Number.isInteger(v) && v >= 1 && v <= 10 ? v : 2;
   });
   /** 上次批量会话失败表（localStorage 持久化，刷新后可一键重新勾选重试）。 */
   const [lastFailed, setLastFailed] = useState<LastFailedTable[]>(() => {
@@ -613,6 +615,14 @@ export const DescriptionCoveragePanel = forwardRef<
   const batchAbortRef = useRef<AbortController | null>(null);
   /** 点击取消后的即时反馈状态（按钮切「正在取消…」防重复点击）。 */
   const [cancelling, setCancelling] = useState(false);
+  /**
+   * 本次批量任务中已成功完成（服务端 progress.done / 本地 ok）的表 id 集合：
+   * 用于把已补全的表「实时」从治理主列表移除（不等整批结束 load()）。
+   * 任务终态/本地批次结束后由 load() 同步服务端数据并清空。
+   */
+  const [coveredIds, setCoveredIds] = useState<Set<number>>(() => new Set());
+  /** 服务端批量任务逐表完成轮询句柄（提交后端任务后启动，终态/组件卸载清理）。 */
+  const serverPollRef = useRef<number | null>(null);
 
   // 概览指标下钻明细（点击指标数字 → 该口径贡献的 per_table 子集）
   const [metricDrillOpen, setMetricDrillOpen] = useState(false);
@@ -992,6 +1002,11 @@ export const DescriptionCoveragePanel = forwardRef<
       if (prev && !shouldReset) return prev;
       return { catalog_id: t.catalog_id, entity_name: t.entity_name, status: "pending", summary: "" };
     });
+    // 重试场景：initial 中已 done 的表保持从治理主列表移除（其描述上一轮已补全）
+    const initialDoneIds = new Set(
+      (initial ?? []).filter((p) => p.status === "done").map((p) => p.catalog_id),
+    );
+    setCoveredIds(initialDoneIds);
     setBatchProgress(progress);
     setBatchRunning(true);
     setBatchFinished(false);
@@ -1036,6 +1051,15 @@ export const DescriptionCoveragePanel = forwardRef<
           skipped: r.skipped,
         };
         setBatchProgress([...progress]);
+        // 该表已补全：实时从治理主列表移除（不等整批结束 load），并从勾选移除
+        if (r.ok) {
+          setCoveredIds((prev) => {
+            const nx = new Set(prev);
+            nx.add(task.catalog_id);
+            return nx;
+          });
+          setSelectedRowKeys((prev) => prev.filter((k) => Number(k) !== task.catalog_id));
+        }
       }
     };
     await Promise.all(
@@ -1074,6 +1098,8 @@ export const DescriptionCoveragePanel = forwardRef<
     if (cancelRef.current) return;
     await load();
     setSelectedRowKeys([]);
+    // load 已同步服务端最新数据（成功表已不在待治理列表），coveredIds 使命完成
+    setCoveredIds(new Set());
     persistLastFailed(
       final.filter((p) => p.status === "error").map((p) => ({
         catalog_id: p.catalog_id,
@@ -1217,6 +1243,63 @@ export const DescriptionCoveragePanel = forwardRef<
     setBatchOpen(true);
   }
 
+  /** 组件卸载时清理服务端任务轮询（避免跨实例泄漏定时器）。 */
+  useEffect(
+    () => () => {
+      if (serverPollRef.current) {
+        window.clearInterval(serverPollRef.current);
+        serverPollRef.current = null;
+      }
+    },
+    [],
+  );
+
+  /**
+   * 提交后端批量任务后，轮询单任务进度（复用 getBatchInferTask，4s/次）：
+   * 每张表 progress.status=done → 实时加入 coveredIds（治理主列表即时移除该行）并从勾选移除；
+   * 任务终态（completed/failed/cancelled）→ 停轮询 + load() 同步服务端最新数据 + 清空 coveredIds。
+   * 失败/取消表不进 coveredIds——load 后仍留在列表供重试。
+   */
+  function trackServerTaskRemoval(taskId: number) {
+    const stopPoll = () => {
+      if (serverPollRef.current) {
+        window.clearInterval(serverPollRef.current);
+        serverPollRef.current = null;
+      }
+    };
+    const apply = (t: BatchInferTask) => {
+      const doneIds = t.progress
+        .filter((p) => p.status === "done" && p.catalog_id != null)
+        .map((p) => p.catalog_id as number);
+      if (doneIds.length > 0) {
+        setCoveredIds((prev) => {
+          const nx = new Set(prev);
+          doneIds.forEach((id) => nx.add(id));
+          return nx;
+        });
+        setSelectedRowKeys((prev) => prev.filter((k) => !doneIds.includes(Number(k))));
+      }
+      if (!["pending", "running"].includes(t.status)) {
+        stopPoll();
+        void (async () => {
+          await load();
+          setCoveredIds(new Set());
+        })();
+      }
+    };
+    const pollOnce = async () => {
+      try {
+        apply(await getBatchInferTask(taskId));
+      } catch {
+        // 网络抖动静默（下轮继续）；任务在右下角任务中心仍有独立轮询展示
+      }
+    };
+    stopPoll();
+    // 启动即先拉一次（若任务已有完成表立即移除），此后每 4s 增量
+    void pollOnce();
+    serverPollRef.current = window.setInterval(pollOnce, 4000);
+  }
+
   /**
    * 提交跨表批量推断为后端任务（方案 B：arq 执行 + 进度落库）。
    * 关闭本地进度弹窗，进度/结果经右下角「批量任务中心」（BatchInferCenter）跨页可见，
@@ -1246,6 +1329,9 @@ export const DescriptionCoveragePanel = forwardRef<
       closeBatch();
       await load();
       setSelectedRowKeys([]);
+      // 逐表完成轮询：某表推断完成即实时从治理主列表移除，不等整批结束
+      setCoveredIds(new Set());
+      trackServerTaskRemoval(task.id);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "提交批量推断任务失败");
     }
@@ -1373,9 +1459,10 @@ export const DescriptionCoveragePanel = forwardRef<
 
   // 方案 A：治理主列表只展示「仍需治理」的表（字段缺失或表描述缺失），
   // 已完全覆盖的表不再占位——单表/批量推断完成后 load() 刷新即从列表消失。
+  // 批量推断运行中：本次任务已成功完成的表（coveredIds）实时从列表移除（不等整批结束）。
   // 全量表资产浏览保留在概览卡下钻（totalTables/fieldCoverage 明细，基于全量 per_table）。
   const governTableRows = coverage.per_table.filter(
-    (t) => t.missing_fields > 0 || !t.table_desc,
+    (t) => (t.missing_fields > 0 || !t.table_desc) && !coveredIds.has(t.catalog_id),
   );
 
   return (
@@ -1845,6 +1932,8 @@ export const DescriptionCoveragePanel = forwardRef<
                           { value: 2, label: "2" },
                           { value: 3, label: "3" },
                           { value: 5, label: "5" },
+                          { value: 8, label: "8" },
+                          { value: 10, label: "10" },
                         ]}
                       />
                       <Tooltip title="并发数越大越快，但会增加 LLM 并发调用；建议按接口限流设置">

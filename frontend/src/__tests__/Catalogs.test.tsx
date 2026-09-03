@@ -39,6 +39,7 @@ vi.mock("../api", () => {
     createBatchInferHistory: vi.fn(),
     clearBatchInferHistory: vi.fn(),
     submitBatchInferTask: vi.fn(),
+    getBatchInferTask: vi.fn(),
     listFavorites: vi.fn(),
     addFavorite: vi.fn(),
     removeFavorite: vi.fn(),
@@ -46,7 +47,7 @@ vi.mock("../api", () => {
   };
 });
 
-import { listCatalogs, registerCatalog, listDataSources, listCatalogDatabases, refreshCatalogEntity, sampleCatalogEntity, fetchSamplingCoverage, fetchDescriptionCoverage, fetchAssetEntityDetail, inferDescriptions, inferTableDescription, updateTableDescription, updateColumnDescription, listFavorites, fetchBatchInferHistory, createBatchInferHistory, submitBatchInferTask } from "../api";
+import { listCatalogs, registerCatalog, listDataSources, listCatalogDatabases, refreshCatalogEntity, sampleCatalogEntity, fetchSamplingCoverage, fetchDescriptionCoverage, fetchAssetEntityDetail, inferDescriptions, inferTableDescription, updateTableDescription, updateColumnDescription, listFavorites, fetchBatchInferHistory, createBatchInferHistory, submitBatchInferTask, getBatchInferTask } from "../api";
 
 const mockedList = vi.mocked(listCatalogs);
 const mockedRegister = vi.mocked(registerCatalog);
@@ -1361,6 +1362,82 @@ describe("Catalogs 页面", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /关\s*闭/ })).toBeTruthy(),
     );
+  });
+
+  it("跨表批量推断：提交后端任务后，单表完成即实时从治理列表移除（不等整批结束）", async () => {
+    vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
+      total_tables: 2,
+      tables_with_desc: 0,
+      tables_missing_desc: 2,
+      total_fields: 4,
+      fields_with_desc: 1,
+      fields_missing_desc: 3,
+      per_table: [
+        {
+          catalog_id: 1, entity_name: "ods_order", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: false,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 1, missing_fields: 1,
+          missing_field_names: ["id"], updated_at: "2026-08-14T02:30:00",
+        },
+        {
+          catalog_id: 3, entity_name: "ods_pay", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: false,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 0, missing_fields: 2,
+          missing_field_names: ["amount", "pay_time"], updated_at: "2026-08-14T04:00:00",
+        },
+      ],
+    });
+    const mkTask = (status: "running" | "completed", doneIds: number[]) => ({
+      id: 9,
+      actor_id: 1,
+      actor_name: "admin",
+      status,
+      total: 2,
+      done: doneIds.length,
+      failed: 0,
+      cancelled: 0,
+      added_total: doneIds.length,
+      concurrency: 2,
+      cancel_requested: false,
+      error: null,
+      tasks: [],
+      progress: [1, 3].map((cid) => ({
+        catalog_id: cid,
+        entity_name: cid === 1 ? "ods_order" : "ods_pay",
+        status: doneIds.includes(cid) ? "done" : "running",
+        summary: doneIds.includes(cid) ? "字段 +1" : "",
+        detail: "",
+      })),
+      created_at: "2026-08-14T05:00:00",
+      started_at: "2026-08-14T05:00:00",
+      finished_at: null,
+    });
+    vi.mocked(submitBatchInferTask).mockResolvedValue(mkTask("running", []) as never);
+    // 提交后立即轮询：任务中心显示 ods_order 已完成 → 治理主列表应实时移除该行
+    vi.mocked(getBatchInferTask).mockResolvedValue(mkTask("running", [1]) as never);
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText("ods_order")).toBeTruthy());
+    const orderRow = screen.getByText("ods_order").closest("tr") as HTMLElement;
+    const payRow = screen.getByText("ods_pay").closest("tr") as HTMLElement;
+    fireEvent.click(within(orderRow).getByRole("checkbox"));
+    fireEvent.click(within(payRow).getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: /批量推断所选表/ }));
+    await waitFor(() => expect(screen.getByText("批量 LLM 推断确认")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /开始推断/ }));
+
+    // 提交后端任务成功后：轮询已启动，ods_order 完成 → 实时从治理列表移除
+    await waitFor(() => expect(submitBatchInferTask).toHaveBeenCalledTimes(1));
+    await waitFor(() => {
+      expect(screen.queryByText("ods_order")).toBeNull();
+      expect(screen.getByText("ods_pay")).toBeTruthy();
+    });
   });
 
   it.skip("跨表批量推断：失败表展示明细并支持一键重试失败项", async () => {

@@ -743,7 +743,7 @@ class BatchLlmInferTaskCreate(BaseModel):
     tasks: list[BatchLlmInferTaskItem] = Field(
         min_length=1, max_length=200, description="待推断表清单"
     )
-    concurrency: int = Field(default=3, ge=1, le=8, description="有界并发表数")
+    concurrency: int = Field(default=3, ge=1, le=10, description="有界并发表数")
 
 
 class BatchInferHistoryTable(BaseModel):
