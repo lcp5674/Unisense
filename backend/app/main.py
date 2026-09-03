@@ -35,6 +35,7 @@ from app.api.glossary import router as glossary_router
 from app.api.governance import router as governance_router
 from app.api.health import router as health_router
 from app.api.lineage import router as lineage_router
+from app.api.lineage_dp_sync import router as lineage_dp_sync_router
 from app.api.measure_catalog import router as measure_catalog_router
 from app.api.metric_mount import router as metric_mount_router
 from app.api.metric_stats import router as metric_stats_router
@@ -360,6 +361,7 @@ def create_app() -> FastAPI:
     app.include_router(catalog_router, prefix="/api/v1")
     app.include_router(collection_run_router, prefix="/api/v1")
     app.include_router(lineage_router, prefix="/api/v1")
+    app.include_router(lineage_dp_sync_router, prefix="/api/v1")
     app.include_router(conflict_router, prefix="/api/v1")
     app.include_router(governance_router, prefix="/api/v1")
     app.include_router(quality_router, prefix="/api/v1")

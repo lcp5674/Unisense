@@ -192,6 +192,8 @@ UI_ACTION_REGISTRY: dict[str, dict[str, str]] = {
     "lineage:view": {"module": "资产地图", "label": "查看血缘", "description": "访问血缘图谱"},
     "lineage:write": {"module": "资产地图", "label": "解析 / 登记血缘", "description": "触发血缘解析入库 / 手动登记血缘边"},  # noqa: E501
     "lineage:manage-edge": {"module": "资产地图", "label": "治理血缘边", "description": "删除 / 失效 / 恢复血缘边"},  # noqa: E501
+    "lineage:sync": {"module": "资产地图", "label": "血缘同步配置", "description": "配置 dp 调度血缘同步 / 查看运维运行记录"},  # noqa: E501
+    "lineage:resolve": {"module": "资产地图", "label": "血缘待抉择", "description": "裁决 dp 血缘解析分歧 / 兜底 / 无法解析节点"},  # noqa: E501
     # ---- 质量 / 冲突
     "quality:view": {"module": "质量中心", "label": "查看质量中心", "description": "访问质量中心"},
     "quality:run-check": {"module": "质量中心", "label": "执行质量校验", "description": "运行数据质量规则"},  # noqa: E501
@@ -292,6 +294,7 @@ ROLE_UI_ACTIONS: dict[str, frozenset[str]] = {
             "metric:infer-description",
             "assetmap:view", "assetmap:edit", "assetmap:export", "lineage:view",
             "lineage:write", "lineage:manage-edge",
+            "lineage:sync", "lineage:resolve",
             "quality:view", "quality:run-check", "quality:config-rule", "review:view",
             "review:arbitrate", "review:escalate", "review:close", "review:reopen",
             "query:view", "query:execute", "ai:view", "ai:nl2sql", "dimensions:view",

@@ -54,6 +54,14 @@ def sql_fingerprint(sql: str) -> str:
     return hashlib.sha256((sql or "").encode("utf-8")).hexdigest()
 
 
+def _split_table_column(name: str) -> tuple[str | None, str | None]:
+    """拆分 ``库.表.列`` 为 (库.表, 列)；无列时 (整名, None)。"""
+    parts = name.rsplit(".", 1)
+    if len(parts) == 2 and parts[0] and parts[1]:
+        return parts[0], parts[1]
+    return (name, None) if name else (None, None)
+
+
 def build_task_ref(task: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
     """从 dp task/step 行构建 dp_task_refs 数组元素（静态身份 + 准静态元数据）。
 
@@ -302,13 +310,11 @@ class DpSyncService:
             await self._store_sqlglot_edges(outcome, task, step, sql_hash, config)
             return {"step_id": step.get("step_id"), "status": "memory_reused"}
         if ticket.resolution == "accept_llm":
-            await self._apply_llm_opinion(
-                ticket.llm_opinion, task, step, sql_hash, config
-            )
+            await self._apply_llm_opinion(ticket.llm_opinion, task, step, sql_hash)
             return {"step_id": step.get("step_id"), "status": "memory_reused"}
         if ticket.resolution == "manual":
             await self._apply_manual_edges(
-                ticket.manual_edges_json, task, step, sql_hash, config
+                ticket.manual_edges_json, task, step, sql_hash
             )
             return {"step_id": step.get("step_id"), "status": "memory_reused"}
         return None
@@ -394,9 +400,8 @@ class DpSyncService:
         task: dict[str, Any],
         step: dict[str, Any],
         sql_hash: str,
-        config: Any,
     ) -> None:
-        """采纳 LLM：把意见中补漏的边（missing_edges）入库（无字段映射，参考语义）。"""
+        """采纳 LLM（分歧单）：sqlglot 边 + 意见补漏边入库（missing_edges 参考语义）。"""
         if not opinion:
             return
         ref = build_task_ref(task, step)
@@ -412,7 +417,6 @@ class DpSyncService:
         task: dict[str, Any],
         step: dict[str, Any],
         sql_hash: str,
-        config: Any,
     ) -> None:
         """采纳手动配置：table_edges/field_mappings 手填入库。"""
         if not manual:
@@ -696,3 +700,150 @@ class DpSyncService:
             "ORDER BY task_step",
             params,
         )
+
+    # ---- 待抉择裁决（D9 人工抉择工作台） ----
+    async def resolve_ticket(
+        self,
+        ticket_id: int,
+        *,
+        resolution: str,
+        resolved_by: int,
+        manual_edges: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """裁决一张待抉择单并按所选结果入库（accept_sqlglot/accept_llm/manual/ignore）。
+
+        已裁决单幂等：再次提交同一 resolution 不重复写边（repository resolve 覆盖留痕）。
+        """
+        ticket = await self._dp_repo.get_ticket(ticket_id)
+        if ticket is None:
+            raise LookupError(f"待抉择单不存在: {ticket_id}")
+        task = {
+            "task_id": ticket.task_id,
+            "task_name": ticket.task_name,
+            "out_table": ticket.out_table,
+        }
+        step = {"step_id": ticket.step_id}
+        sql_hash = ticket.sql_hash
+        if resolution == "accept_sqlglot":
+            await self._apply_json_edges(
+                ticket.sqlglot_result, task, step, sql_hash,
+                provenance="sqlglot", confidence=1.0,
+            )
+        elif resolution == "accept_llm":
+            await self._apply_llm_resolution(ticket, task, step, sql_hash)
+        elif resolution == "manual":
+            payload = manual_edges if manual_edges is not None else ticket.manual_edges_json
+            await self._apply_manual_edges(payload, task, step, sql_hash)
+        elif resolution != "ignore":
+            raise ValueError(f"未知裁决方式: {resolution}")
+        await self._dp_repo.resolve_ticket(
+            ticket_id,
+            resolution=resolution,
+            resolved_by=resolved_by,
+            manual_edges=manual_edges,
+        )
+        return {"ticket_id": ticket_id, "resolution": resolution}
+
+    async def _apply_llm_resolution(
+        self, ticket: Any, task: dict[str, Any], step: dict[str, Any], sql_hash: str
+    ) -> None:
+        """采纳 LLM：按单类型应用意见（diverged=sqlglot 边+补漏；llm_fallback=兜底流转）。"""
+        if ticket.status == "llm_fallback":
+            await self._apply_fallback_flow(ticket.llm_opinion, task, step, sql_hash)
+            return
+        # diverged：先入库 sqlglot 边，再补 LLM 认为漏掉的边
+        await self._apply_json_edges(
+            ticket.sqlglot_result, task, step, sql_hash,
+            provenance="sqlglot", confidence=1.0,
+        )
+        await self._apply_llm_opinion(ticket.llm_opinion, task, step, sql_hash)
+
+    async def _apply_json_edges(
+        self,
+        edges_json: dict[str, Any] | None,
+        task: dict[str, Any],
+        step: dict[str, Any],
+        sql_hash: str,
+        *,
+        provenance: str,
+        confidence: float,
+    ) -> None:
+        """从 ticket.sqlglot_result JSON 写边（table_edges + field_edges）。"""
+        if not edges_json:
+            return
+        ref = build_task_ref(task, step)
+        for te in edges_json.get("table_edges") or []:
+            source = te.get("source")
+            target = te.get("target")
+            if not (source and target):
+                continue
+            edge = await self._upsert_edge(source, target, task, step, ref)
+            if edge is None:
+                continue
+            for fe in edges_json.get("field_edges") or []:
+                if fe.get("target_table") == target and fe.get("source_table") == source:
+                    await self._dp_repo.upsert_field_mapping(
+                        edge_id=edge.id,
+                        source_table=source,
+                        source_column=fe.get("source_column"),
+                        target_table=target,
+                        target_column=fe.get("target_column"),
+                        expression=fe.get("expression"),
+                        degraded=bool(fe.get("degraded")),
+                        confidence=confidence,
+                        provenance=provenance,
+                        sql_hash=sql_hash,
+                        task_id=task.get("task_id"),
+                        step_id=step.get("step_id"),
+                    )
+
+    async def _apply_fallback_flow(
+        self,
+        opinion: dict[str, Any] | None,
+        task: dict[str, Any],
+        step: dict[str, Any],
+        sql_hash: str,
+    ) -> None:
+        """采纳 LLM 兜底流转：field_mappings 明确的写字段边；无映射时源集→目标表边。"""
+        if not opinion:
+            return
+        ref = build_task_ref(task, step)
+        written: set[tuple[str, str]] = set()
+        for pair in opinion.get("field_mappings") or []:
+            if len(pair) < 2:
+                continue
+            source_t, source_c = _split_table_column(str(pair[0]))
+            target_t, target_c = _split_table_column(str(pair[1]))
+            if not (source_t and target_t):
+                continue
+            key = (source_t, target_t)
+            if key not in written:
+                edge = await self._upsert_edge(source_t, target_t, task, step, ref)
+                written.add(key)
+                if edge is None:
+                    continue
+            else:
+                edge = None
+            if edge is not None and source_c and target_c:
+                await self._dp_repo.upsert_field_mapping(
+                    edge_id=edge.id,
+                    source_table=source_t,
+                    source_column=source_c,
+                    target_table=target_t,
+                    target_column=target_c,
+                    expression=None,
+                    degraded=False,
+                    confidence=0.5,
+                    provenance="llm",
+                    sql_hash=sql_hash,
+                    task_id=task.get("task_id"),
+                    step_id=step.get("step_id"),
+                )
+        # 无字段映射时：源表集合 → 每个目标表建表级边
+        sources = [s for s in opinion.get("source_tables") or [] if s]
+        targets = [t for t in opinion.get("target_tables") or [] if t]
+        for target in targets:
+            for source in sources:
+                if (source, target) not in written:
+                    await self._upsert_edge(source, target, task, step, ref)
+                    written.add((source, target))
