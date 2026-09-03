@@ -172,14 +172,30 @@ if ! curl -sf "http://localhost:${LLM_PORT}/health" >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[5/5] 验证 OpenAI /v1 端点（response_format=json_object + 抑制思考）..."
-RESP=$(curl -sf "http://localhost:${LLM_PORT}/v1/chat/completions" \
+echo "[5/5] 验证 OpenAI /v1 端点（response_format=json_object + enable_thinking=false）..."
+RESP=$(curl -sf --max-time 180 "http://localhost:${LLM_PORT}/v1/chat/completions" \
   -H "Content-Type: application/json" \
-  -d "{\"model\":\"${LLM_VERIFY_MODEL}\",\"messages\":[{\"role\":\"system\",\"content\":\"你是数据平台的 AI 助手。直接给出最终答案，不要输出任何思考过程（不要使用 think 标签）。\"},{\"role\":\"user\",\"content\":\"返回 JSON：{\\\"ok\\\":true}\"}],\"response_format\":{\"type\":\"json_object\"},\"max_tokens\":32}" 2>/dev/null || echo "ERR")
-echo "${RESP}" | head -c 500
+  -d "{\"model\":\"${LLM_VERIFY_MODEL}\",\"messages\":[{\"role\":\"system\",\"content\":\"你是数据平台的 AI 助手。直接给出最终答案，不要输出任何思考过程。\"},{\"role\":\"user\",\"content\":\"返回 JSON：{\\\"ok\\\":true}\"}],\"response_format\":{\"type\":\"json_object\"},\"chat_template_kwargs\":{\"enable_thinking\":false},\"max_tokens\":512}" 2>/dev/null || echo "ERR")
+echo "${RESP}" | head -c 600
 echo
 
-if echo "${RESP}" | grep -q '"ok"'; then
+# 断言：解析 JSON 检查 message.content（而非 reasoning_content）含 {"ok":true}。
+#   用 python3 解析——curl 原始文本 grep 会被 JSON 转义 \" 干扰而误判。
+VERIFY_OK=1
+if [ "${RESP}" != "ERR" ]; then
+  python3 - "$RESP" <<'PY'
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    content = data["choices"][0]["message"].get("content") or ""
+    sys.exit(0 if '"ok":true' in content else 1)
+except Exception:
+    sys.exit(1)
+PY
+  VERIFY_OK=$?
+fi
+
+if [ "${VERIFY_OK}" -eq 0 ]; then
   echo
   echo "=============================================================="
   echo "✅ 本地 LLM 部署成功！"
