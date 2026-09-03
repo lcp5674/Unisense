@@ -3491,7 +3491,7 @@ async def test_repo_update_table_description_not_found() -> None:
 def _coverage_session() -> MagicMock:
     """构造 coverage 统计用 session：SQL 聚合（scalar）+ execute 返回分页明细。"""
     s = MagicMock()
-    # scalar 顺序：total_tables / tables_with_desc / fields_with_desc / per_table_total
+    # scalar 顺序：total_tables / tables_with_desc / governed_desc_count(A) / per_table_total
     s.scalar = AsyncMock(side_effect=[2, 1, 1, 2])
 
     cat1 = MagicMock()
@@ -3549,35 +3549,49 @@ def _coverage_session() -> MagicMock:
 
     res_fields = MagicMock()
     res_fields.scalar.return_value = 4
+    # execute[5]：方案 C 汇总 B——有效源 comment 且无 manual/llm 记录的字段数
+    # （ods_order.name comment="用户名" 有效 → 计 1；cat2 字段 comment 空不计）
+    res_comment_covered = MagicMock()
+    res_comment_covered.scalar.return_value = 1
     s.execute = AsyncMock(
-        side_effect=[res_fields, res_cats, res_descs, res_srcs, res_users]
+        side_effect=[
+            res_fields,
+            res_cats,
+            res_descs,
+            res_srcs,
+            res_users,
+            res_comment_covered,
+        ]
     )
     return s
 
 
 async def test_repo_get_description_coverage_stats() -> None:
     """覆盖统计：表/字段覆盖率、按表列缺失字段数、domain join。"""
-    repo = CollectorRepository(_coverage_session())
+    s = _coverage_session()
+    repo = CollectorRepository(s)
     cov = await repo.get_description_coverage()
 
     assert cov["total_tables"] == 2
     assert cov["tables_with_desc"] == 1
     assert cov["tables_missing_desc"] == 1
     assert cov["total_fields"] == 4
-    # 仅 manual/llm 记录计覆盖（cat2.email）；cat1.name 的 schema comment 不计
-    assert cov["fields_with_desc"] == 1
-    assert cov["fields_missing_desc"] == 3
+    # 方案 C：有效源 comment 也算已描述——A(manual/llm: cat2.email)=1 + B(有效 comment
+    # 且无 manual/llm: cat1.name "用户名")=1 → fields_with_desc=2
+    assert cov["fields_with_desc"] == 2
+    assert cov["fields_missing_desc"] == 2
     # P1-8: 分页元信息（默认 page_size=None 全量）
     assert cov["per_table_total"] == 2
     assert cov["page"] == 1
     assert cov["page_size"] is None
 
     by_name = {t["entity_name"]: t for t in cov["per_table"]}
-    assert by_name["ods_order"]["missing_fields"] == 2
+    # cat1.name 带有效 comment "用户名" → 已描述；仅 id 缺失
+    assert by_name["ods_order"]["missing_fields"] == 1
     assert by_name["ods_order"]["domain"] == "sales"
     assert by_name["ods_order"]["table_desc"] is False
     assert by_name["ods_order"]["sensitivity_level"] == "INTERNAL"
-    assert by_name["ods_order"]["missing_field_names"] == ["id", "name"]
+    assert by_name["ods_order"]["missing_field_names"] == ["id"]
     assert by_name["ods_order"]["source_name"] == "Sales MySQL"
     assert by_name["ods_order"]["owner_name"] is None
     assert by_name["dwd_user"]["missing_fields"] == 1
@@ -3589,6 +3603,10 @@ async def test_repo_get_description_coverage_stats() -> None:
     assert by_name["dwd_user"]["owner_name"] == "张三"
     assert by_name["dwd_user"]["description"] == "用户明细表"
     assert by_name["dwd_user"]["description_source"] == "manual"
+    # 汇总 B 走参数化 raw SQL（MySQL JSON_TABLE），execute[5] 为有效 comment 统计语句
+    b_stmt = str(s.execute.call_args_list[5].args[0])
+    assert "JSON_TABLE" in b_stmt
+    assert "from deserializer" in b_stmt
 
 
 async def test_count_jobs_by_status_aggregates() -> None:
@@ -4416,9 +4434,9 @@ async def test_repo_get_description_coverage_pagination() -> None:
     page_stmt = s.execute.call_args_list[1].args[0]
     assert page_stmt._limit == 1
     assert page_stmt._offset == 1
-    # 汇总指标不受分页影响（SQL 端聚合，全量口径；字段覆盖仅计 manual/llm）
+    # 汇总指标不受分页影响（SQL 端聚合，全量口径；字段覆盖 = A(manual/llm) + B(有效 comment)）
     assert cov["total_tables"] == 2
-    assert cov["fields_with_desc"] == 1
+    assert cov["fields_with_desc"] == 2
 
 
 async def test_repo_get_description_coverage_filters() -> None:
@@ -4443,7 +4461,7 @@ async def test_repo_get_description_coverage_filters() -> None:
     assert "source_id" in page_text and "LIKE" in page_text
     # 汇总结果仍按 mock 口径返回（filter 只影响 SQL 构造，不影响 mock 返回值）
     assert cov["total_tables"] == 2
-    assert cov["fields_with_desc"] == 1
+    assert cov["fields_with_desc"] == 2
 
 
 async def test_repo_get_description_coverage_database_filter() -> None:
@@ -4464,7 +4482,7 @@ async def test_repo_get_description_coverage_database_filter() -> None:
     assert "ods.%" in page_text
     # 汇总结果不受 filter 影响（mock 口径）
     assert cov["total_tables"] == 2
-    assert cov["fields_with_desc"] == 1
+    assert cov["fields_with_desc"] == 2
 
 
 async def test_repo_get_description_coverage_database_escape() -> None:
@@ -5606,3 +5624,23 @@ async def test_query_sql_no_database_selected_friendly_hint():
     assert "库名.表名" in msg
     assert "USE 库名" in msg
     assert "No database selected" not in msg
+
+
+def test_is_effective_comment_semantics() -> None:
+    """采集注释有效性判定（placeholders）：空/纯空白/采集占位串=无效，真实注释=有效。
+
+    纯空白修正（方案 C）：旧实现漏了 strip 后为空的情形，把 ``"  "`` 当有效；
+    现与 SQL 端（描述覆盖汇总 JSON_TABLE ``TRIM(cm) <> ''``）语义一致。
+    """
+    from app.services.collector.placeholders import is_effective_comment
+
+    assert is_effective_comment(None) is False
+    assert is_effective_comment("") is False
+    assert is_effective_comment("   ") is False
+    assert is_effective_comment("\t\n") is False
+    # Spark Thrift 无注释列的占位串（归一化/推断跳过共用）
+    assert is_effective_comment("from deserializer") is False
+    assert is_effective_comment(" FROM DESERIALIZER ") is False
+    # 真实 DDL 注释（中英文/含空白）视为有效
+    assert is_effective_comment("用户名") is True
+    assert is_effective_comment("user name") is True

@@ -902,7 +902,8 @@ describe("Catalogs 页面", () => {
       expect(screen.getByText("按表列缺失字段数（点击行查看详情并补全）")).toBeTruthy(),
     );
     expect(screen.getByText("ods_order")).toBeTruthy();
-    expect(screen.getByText("dwd_user")).toBeTruthy();
+    // 方案 A：已完全覆盖的表（table_desc=true 且 missing_fields=0）不再出现在治理主列表
+    expect(screen.queryByText("dwd_user")).not.toBeInTheDocument();
 
     // 行点击 → 治理抽屉（表级编辑/推断入口）
     fireEvent.click(screen.getByText("ods_order"));
@@ -1198,9 +1199,8 @@ describe("Catalogs 页面", () => {
     const batchBtn = screen.getByRole("button", { name: /批量推断所选表/ }) as HTMLButtonElement;
     expect(batchBtn.disabled).toBe(true);
 
-    // 无缺失表（dwd_user）复选框禁用，有缺失表可勾选
-    const fullRow = screen.getByText("dwd_user").closest("tr") as HTMLElement;
-    expect(within(fullRow).getByRole("checkbox")).toBeDisabled();
+    // 方案 A：已覆盖表（dwd_user）不再出现在治理主列表；待治理表复选框均可勾选
+    expect(screen.queryByText("dwd_user")).not.toBeInTheDocument();
     const orderRow = screen.getByText("ods_order").closest("tr") as HTMLElement;
     const payRow = screen.getByText("ods_pay").closest("tr") as HTMLElement;
     fireEvent.click(within(orderRow).getByRole("checkbox"));

@@ -1336,6 +1336,13 @@ export const DescriptionCoveragePanel = forwardRef<
   // 智能重试建议：仅在完成后有失败时计算（限流→降并发、超时→单表串行、并发冲突→稍后）
   const retryAdvice = batchFinished && batchErrorCount > 0 ? computeRetryAdvice() : null;
 
+  // 方案 A：治理主列表只展示「仍需治理」的表（字段缺失或表描述缺失），
+  // 已完全覆盖的表不再占位——单表/批量推断完成后 load() 刷新即从列表消失。
+  // 全量表资产浏览保留在概览卡下钻（totalTables/fieldCoverage 明细，基于全量 per_table）。
+  const governTableRows = coverage.per_table.filter(
+    (t) => t.missing_fields > 0 || !t.table_desc,
+  );
+
   return (
     <div>
       {isSummary && (
@@ -1827,7 +1834,7 @@ export const DescriptionCoveragePanel = forwardRef<
             </Card>
           )}
           <Table<TableCoverageItem>
-            dataSource={coverage.per_table}
+            dataSource={governTableRows}
             columns={tableCoverageCols}
             rowKey={(r) => r.catalog_id}
             size="small"

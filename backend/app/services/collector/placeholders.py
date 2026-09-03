@@ -17,7 +17,12 @@ PLACEHOLDER_COMMENTS: frozenset[str] = frozenset({"from deserializer"})
 
 
 def is_effective_comment(comment: str | None) -> bool:
-    """comment 是否为「有效 DDL 注释」（排除空/纯空白与采集占位串）。"""
-    if not comment:
+    """comment 是否为「有效 DDL 注释」（排除空/纯空白与采集占位串）。
+
+    纯空白（如 ``"  "``）也视为无效：docstring 声称排除纯空白，但旧实现漏了
+    ``strip()`` 后为空的情形，会把纯空格注释当成有效（描述缺失治理计数偏差）。
+    SQL 端（描述覆盖汇总 JSON_TABLE 判定）用 ``TRIM(cm) <> ''`` 表达同一语义。
+    """
+    if not comment or not comment.strip():
         return False
     return comment.strip().lower() not in PLACEHOLDER_COMMENTS

@@ -30,6 +30,7 @@ from app.models.data_source import ColumnDescription, DataSource, DBCatalog
 from app.models.governance import Classification
 from app.models.user import User
 from app.services.collector.drift_detector import DriftDetector, compute_content_signature
+from app.services.collector.placeholders import is_effective_comment
 from app.services.collector.schemas import BulkDeprecateItem
 
 logger = get_logger("unisense.collector.repository")
@@ -51,14 +52,20 @@ def _column_has_desc(
     catalog_id: int,
     desc_keys: set[tuple[int, str]],
 ) -> bool:
-    """字段是否有治理描述：仅 ``column_descriptions`` 的 manual/llm 记录。
+    """字段是否有「已描述」：治理产出（column_descriptions manual/llm）或有效源 comment。
 
-    口径对齐汇总 ``fields_with_desc``（只计 manual/llm）——schema comment 是采集
-    原始值、非治理产出，若计入会使 per_table 明细与汇总口径矛盾
-    （摘要 fields_missing_desc ≠ 各表 missing_fields 之和，治理数据误导）。
+    口径（方案 C，与批量推断跳过/汇总 SQL 端一致）：schema 里**有效的源 comment**
+    （非空/非采集占位串，``is_effective_comment``）也算已描述——有真实 DDL 注释的字段
+    不应被治理面板计为缺失（否则「治理计缺失、批量推断又跳过有注释字段」死循环，
+    表永远留在治理列表）。纯空白/占位注释（如 Spark Thrift ``from deserializer``）
+    仍视为无描述。汇总 ``fields_with_desc`` 的 SQL 端同步统计带有效 comment 的列，
+    保证明细 missing_fields 与摘要一致（不重复计：同一列 manual/llm 与 comment 并存
+    只算一次）。
     """
     name = str(col.get("name") or col.get("column"))
-    return (catalog_id, name) in desc_keys
+    if (catalog_id, name) in desc_keys:
+        return True
+    return is_effective_comment(col.get("comment"))
 
 
 class CollectorRepository:
@@ -1462,7 +1469,8 @@ class CollectorRepository:
             .where(*filters)
         )
         total_fields = int(total_fields_row.scalar() or 0)
-        fields_with_desc = int(
+        # A：治理产出描述数（column_descriptions manual/llm 记录）
+        governed_desc_count = int(
             await self._db.scalar(
                 select(func.count(ColumnDescription.id))
                 .join(DBCatalog, DBCatalog.id == ColumnDescription.catalog_id)
@@ -1517,11 +1525,64 @@ class CollectorRepository:
             )
         ).all()
 
+        # B：范围内「带有效源 comment 且无 manual/llm 治理记录」的字段数。
+        # 方案 C 口径：有真实 DDL 注释的字段视为已描述（与 _column_has_desc /
+        # 批量推断跳过一致），否则「治理计缺失、推断跳过有注释字段」死循环。
+        # 治理筛选（org/source/keyword/database）与汇总 A 同口径（参数化防注入）。
+        # MySQL JSON_TABLE 无法用 ORM 表达，走参数化 raw SQL（repository 已有 text 先例）。
+        kw_pat = None
+        if keyword:
+            kw_pat = (
+                f"%{keyword.replace('/', '//').replace('%', '/%').replace('_', '/_')}%"
+            )
+        db_pat = None
+        if database:
+            db_pat = f"{database.replace('/', '//').replace('%', '/%').replace('_', '/_')}.%"
+        b_row = await self._db.execute(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM db_catalog c
+                JOIN data_source ds ON ds.source_id = c.source_id
+                                     AND ds.deleted_at IS NULL
+                JOIN JSON_TABLE(c.schema_json, '$.columns[*]' COLUMNS(
+                    n VARCHAR(255) PATH '$.name',
+                    cc VARCHAR(255) PATH '$.column',
+                    cm TEXT PATH '$.comment'
+                )) jt
+                LEFT JOIN column_descriptions cd
+                  ON cd.catalog_id = c.id
+                 AND cd.column_name = COALESCE(jt.n, jt.cc)
+                 AND cd.deleted_at IS NULL
+                 AND cd.source IN ('manual', 'llm')
+                WHERE c.deleted_at IS NULL
+                  AND cd.id IS NULL
+                  AND jt.cm IS NOT NULL
+                  AND TRIM(jt.cm) <> ''
+                  AND LOWER(TRIM(jt.cm)) <> 'from deserializer'
+                  AND (:org_id IS NULL OR ds.org_id = :org_id)
+                  AND (:source_id IS NULL OR c.source_id = :source_id)
+                  AND (:keyword IS NULL OR c.entity_name LIKE :kw_pat ESCAPE '/')
+                  AND (:database IS NULL OR c.entity_name LIKE :db_pat ESCAPE '/')
+                """,
+            ),
+            {
+                "org_id": org_id,
+                "source_id": source_id,
+                "keyword": keyword,
+                "kw_pat": kw_pat,
+                "database": database,
+                "db_pat": db_pat,
+            },
+        )
+        comment_covered = int(b_row.scalar() or 0)
+        fields_with_desc = governed_desc_count + comment_covered
+
         domain_map = {row.source_id: row.domain for row in srcs}
         src_name_map = {row.source_id: row.name for row in srcs}
         # 责任人展示名：display_name 优先，缺省回退 username
         owner_map = {row.id: (row.display_name or row.username) for row in users}
-        # 仅 manual/llm 记录计入已描述（schema 来源与 comment 等价，避免重复计）
+        # 已描述列键：manual/llm 记录（与 _column_has_desc 的 comment 判定叠加，见其 docstring）
         desc_keys: set[tuple[int, str]] = {
             (d.catalog_id, d.column_name)
             for d in descs
