@@ -230,3 +230,71 @@ async def test_scan_commit_failure_records_failed_run() -> None:
     assert result["skipped"] == "failed"
     svc._dp_repo.update_run_log.assert_awaited()
     assert svc._dp_repo.update_run_log.await_args.kwargs["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_scan_force_bypasses_interval_gate() -> None:
+    """手动「立即扫描」（force=True）绕过轮询间隔；周期任务保持节流。"""
+    collector = FakeCollector()
+    svc = _svc(collector)
+    svc._dp_repo.get_watermark = AsyncMock(
+        return_value=_wm(last_scan_at=datetime.now(UTC) - timedelta(minutes=1))
+    )
+    # 默认（force=False）：interval 未到 → 跳过
+    skipped = await svc.scan_once(_fc(FakeCollector()))
+    assert skipped["skipped"] == "interval_not_due"
+    # force=True：即使 enabled=False 也执行（手动验证场景）
+    svc2 = _svc(collector, _config(enabled=False))
+    svc2._dp_repo.get_watermark = AsyncMock(return_value=None)
+    result = await svc2.scan_once(_fc(collector), force=True)
+    assert "skipped" not in result
+    assert result["scanned_tasks"] == 2
+    svc2._dp_repo.update_run_log.assert_awaited()
+    assert svc2._dp_repo.update_run_log.await_args.kwargs["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_scan_cancel_before_start_keeps_watermark() -> None:
+    """预置取消：不处理任何任务、run_log 标 cancelled、水位不推进（下轮重扫）。"""
+    import asyncio
+
+    collector = FakeCollector()
+    svc = _svc(collector)
+    cancel_event = asyncio.Event()
+    cancel_event.set()
+    progress: dict[str, object] = {}
+    result = await svc.scan_once(
+        _fc(collector), progress=progress, cancel_event=cancel_event
+    )
+    assert result["skipped"] == "cancelled"
+    assert result["scanned_tasks"] == 0
+    assert svc._dp_repo.update_run_log.await_args.kwargs["status"] == "cancelled"
+    # 水位：只更新 last_scan_at，不传 last_max_update（保留原值下轮重扫）
+    wm_calls = svc._dp_repo.update_watermark.await_args_list
+    assert wm_calls, "取消时仍应记录 last_scan_at"
+    for call in wm_calls:
+        assert "last_max_update" not in call.kwargs
+    assert progress.get("stage") == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_scan_cancel_mid_round_keeps_processed() -> None:
+    """处理中取消：已处理结果保留（scanned_tasks=1），取消后停止后续任务。"""
+    import asyncio
+
+    collector = FakeCollector()
+    svc = _svc(collector)
+    cancel_event = asyncio.Event()
+
+    async def _proc_one_then_cancel(*_a, **_kw):
+        cancel_event.set()  # 首个任务处理完成后置位
+
+    svc._process_task = AsyncMock(side_effect=_proc_one_then_cancel)
+    progress: dict[str, object] = {}
+    result = await svc.scan_once(
+        _fc(collector), progress=progress, cancel_event=cancel_event
+    )
+    assert result["skipped"] == "cancelled"
+    assert svc._process_task.await_count == 1  # 只处理了第一个任务
+    assert svc._dp_repo.update_run_log.await_args.kwargs["status"] == "cancelled"
+    assert progress.get("stage") == "cancelled"

@@ -18,6 +18,7 @@ LLM 调用由调用方注入 ``llm_chat``（async (messages, **kw) -> {content}�
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from collections.abc import Awaitable, Callable
@@ -504,22 +505,37 @@ class DpSyncService:
         return {"backfilled": len(catalogs), "shadow_created": shadow_created}
 
     # ---- 扫描（D7 定时增量轮询） ----
-    async def scan_once(self, fetch_collector: Callable[[str], Awaitable[Any]]) -> dict[str, Any]:
-        """执行一轮 dp 血缘增量扫描（由 arq 1 分钟 ticker 按间隔触发）。
+    async def scan_once(
+        self,
+        fetch_collector: Callable[[str], Awaitable[Any]],
+        *,
+        progress: dict[str, Any] | None = None,
+        cancel_event: asyncio.Event | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """执行一轮 dp 血缘增量扫描（由 arq 周期任务或手动「立即扫描」触发）。
 
         Args:
             fetch_collector: ``async (source_id) -> collector``（含 query/dispose）。
                 由部署侧注入（tasks 用真实 dp 连接），测试注入假 collector。
+            progress: 可选进度字典（手动扫描实时反馈）；就地更新 total/processed/
+                current_task_id/stage。
+            cancel_event: 可选取消事件；置位后在**当前任务处理完**停止后续任务，
+                已处理结果保留、水位不推进（下轮从原水位重扫，幂等安全）。
+            force: True 时绕过 enabled/轮询间隔检查（手动「立即扫描」用）；
+                周期任务保持 False（按配置节流）。
         """
         config = await self._dp_repo.get_config()
-        if config is None or not config.enabled:
+        if config is None or (not config.enabled and not force):
             return {"skipped": "not_configured_or_disabled"}
         wm = await self._dp_repo.get_watermark("task")
         now = datetime.now(UTC)
-        if wm is not None and wm.last_scan_at is not None:
+        if not force and wm is not None and wm.last_scan_at is not None:
             interval = max(1, int(config.poll_interval_minutes or 5)) * 60
             if (now - wm.last_scan_at).total_seconds() < interval:
                 return {"skipped": "interval_not_due"}
+        if progress is not None:
+            progress["stage"] = "collecting"
         run = await self._dp_repo.create_run_log(status="running", run_at=now)
         collector = await fetch_collector(config.source_id)
         counters: dict[str, int] = {
@@ -540,7 +556,19 @@ class DpSyncService:
             task_ids, task_max, step_max = await self._changed_ids(
                 collector, config, wm
             )
-            for task_id in task_ids:
+            if progress is not None:
+                progress["total"] = len(task_ids)
+                progress["processed"] = 0
+                progress["current_task_id"] = None
+                progress["stage"] = "parsing"
+            cancelled = False
+            for idx, task_id in enumerate(task_ids, start=1):
+                if cancel_event is not None and cancel_event.is_set():
+                    cancelled = True
+                    break
+                if progress is not None:
+                    progress["processed"] = idx - 1
+                    progress["current_task_id"] = task_id
                 try:
                     await self._process_task(
                         collector, config, task_id, counters, seen_pairs
@@ -548,14 +576,21 @@ class DpSyncService:
                 except Exception as exc:  # noqa: BLE001 —— 单任务失败不阻断整轮
                     counters["errors"] += 1
                     logger.warning("dp_sync_task_failed task_id=%s error=%s", task_id, exc)
+                if progress is not None:
+                    progress["processed"] = idx
             await self._db.commit()
-            # 收尾：水位推进 + 边确认（stale 机制）
-            await self._dp_repo.update_watermark(
-                "task", last_max_update=task_max, last_scan_at=now
-            )
-            await self._dp_repo.update_watermark(
-                "step", last_max_update=step_max, last_scan_at=now
-            )
+            # 收尾：水位 + 边确认（stale 机制）。取消时**不推进 max 水位**——
+            # 未处理任务保留在变更集内，下轮从原水位重扫（幂等安全），避免跳过。
+            if cancelled:
+                await self._dp_repo.update_watermark("task", last_scan_at=now)
+                await self._dp_repo.update_watermark("step", last_scan_at=now)
+            else:
+                await self._dp_repo.update_watermark(
+                    "task", last_max_update=task_max, last_scan_at=now
+                )
+                await self._dp_repo.update_watermark(
+                    "step", last_max_update=step_max, last_scan_at=now
+                )
             confirmed, restored = await self._lineage_repo.mark_seen(
                 DP_PROVENANCE, seen_pairs
             )
@@ -563,9 +598,10 @@ class DpSyncService:
             await self._db.commit()
             detail = dict(counters)
             detail["seen_pairs"] = len(seen_pairs)
+            log_status = "cancelled" if cancelled else "success"
             await self._dp_repo.update_run_log(
                 run.id,
-                status="success",
+                status=log_status,
                 scanned_tasks=counters["scanned_tasks"],
                 scanned_steps=counters["scanned_steps"],
                 parsed_ok=counters["parsed_ok"],
@@ -580,6 +616,10 @@ class DpSyncService:
                 detail_json=__import__("json").dumps(detail, ensure_ascii=False),
             )
             await self._db.commit()
+            if progress is not None:
+                progress["stage"] = "cancelled" if cancelled else "done"
+            if cancelled:
+                counters["skipped"] = "cancelled"
             return counters
         except Exception as exc:  # noqa: BLE001 —— 记录失败，下轮重试
             await self._db.rollback()

@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "antd";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LineageDpSync } from "../pages/LineageDpSync";
 import * as api from "../api";
 import type { DataSource } from "../types";
@@ -16,6 +16,8 @@ vi.mock("../api", () => ({
   getDpSyncWatermark: vi.fn(),
   resetDpSyncWatermark: vi.fn(),
   scanDpSyncNow: vi.fn(),
+  getDpSyncScanStatus: vi.fn(),
+  cancelDpSyncScan: vi.fn(),
   listDataSources: vi.fn(),
   getDpSyncMeta: vi.fn(),
   previewDpSyncExclude: vi.fn(),
@@ -58,6 +60,13 @@ describe("LineageDpSync", () => {
       task: { last_scan_at: "2026-09-03T10:00:00" },
       step: null,
     });
+    mockedApi.getDpSyncScanStatus.mockResolvedValue({
+      task_id: 1,
+      status: "success",
+      progress: { stage: "done", total: 1, processed: 1, current_task_id: null },
+      result: null,
+    });
+    mockedApi.cancelDpSyncScan.mockResolvedValue({ cancelled: true });
     mockedApi.listDataSources.mockResolvedValue({
       items: [
         { source_id: "mysql_uncategorized", name: "dp", source_type: "mysql" },
@@ -88,6 +97,11 @@ describe("LineageDpSync", () => {
       invalid_patterns: [],
       note: "预览范围为 dp 任务产出表",
     });
+  });
+
+  afterEach(() => {
+    // 部分用例使用 fake timers——统一恢复，避免泄漏影响后续用例
+    vi.useRealTimers();
   });
 
   it("renders three tab entries and loads config", async () => {
@@ -205,6 +219,93 @@ describe("LineageDpSync", () => {
     await user.click(screen.getByText(/运\s*维/));
     await screen.findByText("运行记录");
     expect(mockedApi.getDpSyncWatermark).toHaveBeenCalled();
+  });
+
+  it("ops scan submits async task and surfaces failure error clearly", async () => {
+    const user = userEvent.setup();
+    mockedApi.scanDpSyncNow.mockResolvedValue({
+      task_id: 1,
+      status: "running",
+      already_running: false,
+    });
+    mockedApi.getDpSyncScanStatus
+      .mockResolvedValueOnce({
+        task_id: 1,
+        status: "running",
+        progress: {
+          stage: "parsing",
+          total: 10,
+          processed: 2,
+          current_task_id: 101,
+        },
+        result: null,
+      })
+      .mockResolvedValueOnce({
+        task_id: 1,
+        status: "failed",
+        error: "(pymysql.err.OperationalError) (2003, \"Can't connect\")",
+        progress: { stage: "parsing", total: 10, processed: 2, current_task_id: 101 },
+        result: { skipped: "failed", error: "(pymysql.err.OperationalError)" },
+      });
+    renderPage();
+    await user.click(screen.getByText(/运\s*维/));
+    await screen.findByText("运行记录");
+    await user.click(screen.getByText(/立即扫描一轮/));
+    // 首帧（提交后立即轮询）：running → 实时进度展示
+    await screen.findByText(/扫描中：解析 SQL 节点并写血缘（已处理 2 \/ 10 个任务）/);
+    expect(screen.getByText(/当前任务 #101/)).toBeInTheDocument();
+    // 推进 1.6s（轮询间隔 1.5s）：第二帧 failed → 明确异常提示（不再显示「扫描完成」）
+    await new Promise((r) => setTimeout(r, 1600));
+    await screen.findByText("扫描失败");
+    expect(screen.getAllByText(/Can't connect/, { exact: false }).length).toBeGreaterThan(0);
+    expect(mockedApi.scanDpSyncNow).toHaveBeenCalledTimes(1);
+    expect(mockedApi.getDpSyncScanStatus).toHaveBeenCalledWith(1);
+  });
+
+  it("ops scan shows cancel button and cancels running task", async () => {
+    const user = userEvent.setup();
+    mockedApi.scanDpSyncNow.mockResolvedValue({
+      task_id: 7,
+      status: "running",
+      already_running: false,
+    });
+    mockedApi.getDpSyncScanStatus.mockResolvedValue({
+      task_id: 7,
+      status: "running",
+      progress: { stage: "parsing", total: 5, processed: 1, current_task_id: 11 },
+      result: null,
+    });
+    renderPage();
+    await user.click(screen.getByText(/运\s*维/));
+    await screen.findByText("运行记录");
+    await user.click(screen.getByText(/立即扫描一轮/));
+    await screen.findByText(/扫描中/);
+    await user.click(screen.getByText(/取\s*消\s*扫\s*描/));
+    expect(mockedApi.cancelDpSyncScan).toHaveBeenCalledWith(7);
+  });
+
+  it("ops scan already-running submit tracks existing task", async () => {
+    mockedApi.scanDpSyncNow.mockResolvedValue({
+      task_id: 9,
+      status: "running",
+      already_running: true,
+    });
+    mockedApi.getDpSyncScanStatus.mockResolvedValue({
+      task_id: 9,
+      status: "success",
+      progress: { stage: "done", total: 3, processed: 3, current_task_id: null },
+      result: { scanned_tasks: 3, scanned_steps: 5, parsed_ok: 3 },
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByText(/运\s*维/));
+    await screen.findByText("运行记录");
+    await user.click(screen.getByText(/立即扫描一轮/));
+    // 已有任务运行时：不重复提交，跟踪其进度并最终展示完成
+    await waitFor(() =>
+      expect(mockedApi.getDpSyncScanStatus).toHaveBeenCalledWith(9)
+    );
+    expect(mockedApi.scanDpSyncNow).toHaveBeenCalledTimes(1);
   });
 
   it("source_id renders as data-source select and loads type/exclude meta", async () => {

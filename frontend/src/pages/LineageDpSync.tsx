@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   App,
@@ -10,6 +10,7 @@ import {
   Input,
   InputNumber,
   Modal,
+  Progress,
   Row,
   Col,
   Select,
@@ -18,12 +19,15 @@ import {
   Table,
   Tag,
   Tooltip,
+  Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
 import {
+  cancelDpSyncScan,
   getDpSyncConfig,
   getDpSyncMeta,
+  getDpSyncScanStatus,
   getDpSyncWatermark,
   getDpTicket,
   listDataSources,
@@ -41,6 +45,7 @@ import type {
   DpSyncConfig,
   DpSyncMeta,
   DpSyncRun,
+  DpSyncScanStatus,
   DpTicket,
   DpSyncTypeOption,
   DpSyncWatermarkInfo,
@@ -64,6 +69,19 @@ const RESOLUTION_LABEL: Record<string, string> = {
 
 function fmt(v?: string | null): string {
   return v ? dayjs(v).format("YYYY-MM-DD HH:mm") : "—";
+}
+
+/** 扫描阶段中文文案（progress.stage）。 */
+const SCAN_STAGE_LABEL: Record<string, string> = {
+  queued: "排队中",
+  collecting: "拉取变更任务集",
+  parsing: "解析 SQL 节点并写血缘",
+  done: "已完成",
+  cancelled: "已取消",
+};
+
+function scanStageText(stage?: string): string {
+  return SCAN_STAGE_LABEL[stage ?? ""] ?? stage ?? "准备中";
 }
 
 /** 类型选项目录的展示文本（内置已识别 / 探测未识别 + 条数）。 */
@@ -775,8 +793,26 @@ function OpsTab() {
   const [runs, setRuns] = useState<DpSyncRun[]>([]);
   const [runsTotal, setRunsTotal] = useState(0);
   const [loading, setLoading] = useState(false);
+  // 手动扫描：后台异步执行 → 轮询状态实时展示进度/取消/异常（不再同步等待）
   const [scanning, setScanning] = useState(false);
-  const [scanResult, setScanResult] = useState<Record<string, unknown> | null>(null);
+  const [scanTaskId, setScanTaskId] = useState<number | null>(null);
+  const [scanStatus, setScanStatus] = useState<DpSyncScanStatus | null>(null);
+  const pollTimer = useRef<number | null>(null);
+
+  const stopPolling = useCallback(() => {
+    if (pollTimer.current !== null) {
+      window.clearInterval(pollTimer.current);
+      pollTimer.current = null;
+    }
+    setScanning(false);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (pollTimer.current !== null) window.clearInterval(pollTimer.current);
+    },
+    []
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -811,18 +847,79 @@ function OpsTab() {
     });
   };
 
+  const finishScan = useCallback(
+    async (st: DpSyncScanStatus) => {
+      stopPolling();
+      setScanStatus(st);
+      void load();
+      if (st.status === "failed") {
+        message.error(`扫描失败：${st.error || "未知错误（详见运行记录）"}`, 6);
+      } else if (st.status === "cancelled") {
+        message.info(st.message || "扫描已取消");
+      } else if (st.status === "success") {
+        message.success(st.message || "本轮扫描完成");
+      }
+    },
+    [message, stopPolling, load]
+  );
+
+  const pollOnce = useCallback(
+    async (taskId: number) => {
+      try {
+        const st = await getDpSyncScanStatus(taskId);
+        setScanStatus(st);
+        if (
+          st.status === "success" ||
+          st.status === "failed" ||
+          st.status === "cancelled"
+        ) {
+          await finishScan(st);
+        }
+      } catch {
+        stopPolling();
+        message.error("查询扫描状态失败（可能任务已随进程结束）");
+      }
+    },
+    [finishScan, message, stopPolling]
+  );
+
   const handleScanNow = async () => {
     setScanning(true);
+    setScanStatus(null);
+    setScanTaskId(null);
     try {
-      const result = await scanDpSyncNow();
-      setScanResult(result);
-      void load();
+      const submit = await scanDpSyncNow();
+      setScanTaskId(submit.task_id);
+      if (submit.already_running) {
+        message.info("已有扫描任务在运行，正在跟踪其进度");
+      }
+      // 立即拉一次 + 1.5s 轮询实时进度
+      void pollOnce(submit.task_id);
+      pollTimer.current = window.setInterval(() => {
+        void pollOnce(submit.task_id);
+      }, 1500);
     } catch {
-      message.error("扫描失败（可能正在扫描或数据源不可达）");
-    } finally {
-      setScanning(false);
+      stopPolling();
+      message.error("提交扫描失败");
     }
   };
+
+  const handleCancelScan = async () => {
+    if (scanTaskId === null) return;
+    try {
+      const r = await cancelDpSyncScan(scanTaskId);
+      if (r.cancelled) message.info("取消请求已发送，正在停止扫描…");
+    } catch {
+      message.error("取消失败，请稍后重试");
+    }
+  };
+
+  const scanProgress = scanStatus?.progress;
+  const scanPercent =
+    scanProgress && scanProgress.total > 0
+      ? Math.min(100, Math.round((scanProgress.processed / scanProgress.total) * 100))
+      : 0;
+  const scanResult = scanStatus?.result ?? null;
 
   return (
     <Space direction="vertical" style={{ width: "100%" }} size={12}>
@@ -833,22 +930,72 @@ function OpsTab() {
             <Button type="primary" loading={scanning} onClick={handleScanNow}>
               立即扫描一轮
             </Button>
+            {scanning && scanTaskId !== null && (
+              <Button danger onClick={handleCancelScan}>
+                取消扫描
+              </Button>
+            )}
             <Button onClick={handleReset}>重置水位（触发全量）</Button>
           </Space>
         }
       >
-        {scanResult && (
+        {scanning && scanStatus?.status === "running" && (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message={
+              <Space direction="vertical" style={{ width: "100%" }} size={4}>
+                <span>
+                  扫描中：{scanStageText(scanProgress?.stage)}（已处理{" "}
+                  {scanProgress?.processed ?? 0} / {scanProgress?.total ?? 0} 个任务）
+                  {scanProgress?.current_task_id
+                    ? ` · 当前任务 #${scanProgress.current_task_id}`
+                    : ""}
+                </span>
+                <Progress
+                  percent={scanPercent}
+                  status="active"
+                  style={{ width: "100%" }}
+                />
+              </Space>
+            }
+          />
+        )}
+        {!scanning && scanStatus && scanStatus.status === "success" && (
           <Alert
             type="success"
             showIcon
             style={{ marginBottom: 12 }}
-            message={`本轮扫描完成：任务 ${String(scanResult.scanned_tasks ?? 0)} / 节点 ${String(
-              scanResult.scanned_steps ?? 0
-            )}，直入 ${String(scanResult.parsed_ok ?? 0)}，LLM 确认 ${String(
-              scanResult.llm_confirmed ?? 0
-            )}，分歧 ${String(scanResult.diverged ?? 0)}，兜底 ${String(
-              scanResult.llm_fallback ?? 0
-            )}，无法解析 ${String(scanResult.unparseable ?? 0)}`}
+            message={`本轮扫描完成：任务 ${String(scanResult?.scanned_tasks ?? 0)} / 节点 ${String(
+              scanResult?.scanned_steps ?? 0
+            )}，直入 ${String(scanResult?.parsed_ok ?? 0)}，LLM 确认 ${String(
+              scanResult?.llm_confirmed ?? 0
+            )}，分歧 ${String(scanResult?.diverged ?? 0)}，兜底 ${String(
+              scanResult?.llm_fallback ?? 0
+            )}，无法解析 ${String(scanResult?.unparseable ?? 0)}`}
+          />
+        )}
+        {!scanning && scanStatus && scanStatus.status === "failed" && (
+          <Alert
+            type="error"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="扫描失败"
+            description={
+              <Typography.Text code copyable style={{ whiteSpace: "pre-wrap" }}>
+                {scanStatus.error || "未知错误"}
+              </Typography.Text>
+            }
+          />
+        )}
+        {!scanning && scanStatus && scanStatus.status === "cancelled" && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message={scanStatus.message || "扫描已取消"}
+            description="已处理结果保留，水位未推进——下轮扫描将从原水位重扫未完成任务。"
           />
         )}
         <Descriptions size="small" column={2} bordered>
@@ -885,8 +1032,24 @@ function OpsTab() {
               dataIndex: "status",
               width: 90,
               render: (v: string) => (
-                <Tag color={v === "success" ? "green" : v === "running" ? "blue" : "red"}>
-                  {v === "success" ? "成功" : v === "running" ? "运行中" : "失败"}
+                <Tag
+                  color={
+                    v === "success"
+                      ? "green"
+                      : v === "running"
+                        ? "blue"
+                        : v === "cancelled"
+                          ? "orange"
+                          : "red"
+                  }
+                >
+                  {v === "success"
+                    ? "成功"
+                    : v === "running"
+                      ? "运行中"
+                      : v === "cancelled"
+                        ? "已取消"
+                        : "失败"}
                 </Tag>
               ),
             },

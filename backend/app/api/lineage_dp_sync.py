@@ -22,6 +22,7 @@ from app.api.responses import ApiResponse, ok
 from app.db.mysql import get_db_session
 from app.models.data_source import DataSource
 from app.services.collector.spi import build_collector
+from app.services.lineage import dp_sync_manual
 from app.services.lineage.dp_sync_meta import (
     DP_STEP_TYPES,
     DP_TASK_TYPES,
@@ -39,12 +40,8 @@ _ADMIN_ROLES = ("platform_admin", "domain_admin")
 _ADMIN_DEPS = [Depends(require_roles(*_ADMIN_ROLES))]
 
 
-def _service(db) -> DpSyncService:
-    return DpSyncService(db)
-
-
 async def _collector_factory(db):
-    """构建 dp 数据源只读采集器（供手动扫描）。"""
+    """构建 dp 数据源只读采集器（供排除规则预览）。"""
 
     async def fetch(source_id: str):
         src = (
@@ -57,20 +54,6 @@ async def _collector_factory(db):
         return build_collector(src.source_type, src.connection_config)
 
     return fetch
-
-
-async def _llm_chat(messages: list[dict[str, str]], **kwargs: Any) -> dict[str, Any]:
-    """手动扫描时的 LLM 调用（平台默认客户端，异常转空由协议层建单）。"""
-    from app.services.llm.client import LlmClient
-
-    try:
-        return await LlmClient().chat(
-            messages,
-            temperature=0.0,
-            max_tokens=int(kwargs.get("max_tokens") or 2000),
-        )
-    except Exception:  # noqa: BLE001 —— LLM 故障转空输出
-        return {"content": ""}
 
 
 @router.get("/config", response_model=ApiResponse, dependencies=_ADMIN_DEPS)
@@ -375,14 +358,50 @@ async def reset_watermark(
 
 
 @router.post("/scan-now", response_model=ApiResponse, dependencies=_ADMIN_DEPS)
-async def scan_now(
-    db=Depends(get_db_session),
-):
-    """手动立即扫描一轮（同步执行，返回本轮统计）。"""
-    fetch = await _collector_factory(db)
-    svc = DpSyncService(db, llm_chat=_llm_chat)
-    result = await svc.scan_once(fetch)
-    return ok(data=result)
+async def scan_now():
+    """提交一轮手动立即扫描（后台异步执行，立即返回 task_id）。
+
+    进度/结果/取消走下方 ``scan/status/{task_id}`` 与 ``scan/{task_id}/cancel``：
+    提交不阻塞请求；异常以状态接口的 error 呈现，不再被包成「成功」。
+    """
+    task_id, already_running = await dp_sync_manual.submit_scan(force=True)
+    return ok(
+        data={
+            "task_id": task_id,
+            "status": "running",
+            "already_running": already_running,
+        }
+    )
+
+
+@router.get(
+    "/scan/status/{task_id}", response_model=ApiResponse, dependencies=_ADMIN_DEPS
+)
+async def get_scan_status(task_id: int):
+    """读取手动扫描任务状态（OpsTab 轮询实时进度/结束态/异常）。"""
+    state = dp_sync_manual.scan_status(task_id)
+    if state is None:
+        return ok(
+            code="SCAN_NOT_FOUND",
+            message="扫描任务不存在或已随进程结束",
+            data=None,
+        )
+    return ok(data=state)
+
+
+@router.post(
+    "/scan/{task_id}/cancel", response_model=ApiResponse, dependencies=_ADMIN_DEPS
+)
+async def cancel_scan(task_id: int):
+    """请求取消运行中的手动扫描（当前任务处理完停止，水位不推进）。"""
+    accepted = await dp_sync_manual.cancel_scan(task_id)
+    if not accepted:
+        return ok(
+            code="SCAN_NOT_RUNNING",
+            message="扫描任务不存在或已不在运行",
+            data={"cancelled": False},
+        )
+    return ok(data={"cancelled": True})
 
 
 def _ticket_dict(ticket, full: bool = False) -> dict[str, Any]:

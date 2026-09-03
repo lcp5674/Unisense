@@ -3613,7 +3613,7 @@ export interface DpTicket {
 export interface DpSyncRun {
   id: number;
   run_at: string;
-  status: "running" | "success" | "failed";
+  status: "running" | "success" | "failed" | "cancelled";
   scanned_tasks: number;
   scanned_steps: number;
   parsed_ok: number;
@@ -3664,4 +3664,31 @@ export interface DpExcludePreview {
   invalid_patterns?: { pattern: string; error: string }[];
   note?: string;
   error?: string | null;
+}
+
+/** 手动扫描实时进度（stage：queued/collecting/parsing/done/cancelled） */
+export interface DpSyncScanProgress {
+  stage: string;
+  total: number;
+  processed: number;
+  current_task_id?: number | null;
+}
+
+/** 手动扫描任务状态（OpsTab 轮询） */
+export interface DpSyncScanStatus {
+  task_id: number;
+  status: "running" | "success" | "failed" | "cancelled";
+  started_at?: string | null;
+  finished_at?: string | null;
+  error?: string | null;
+  message?: string | null;
+  progress: DpSyncScanProgress;
+  result?: Record<string, unknown> | null;
+}
+
+/** 手动扫描提交结果 */
+export interface DpSyncScanSubmit {
+  task_id: number;
+  status: string;
+  already_running: boolean;
 }

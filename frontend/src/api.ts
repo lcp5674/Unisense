@@ -201,6 +201,8 @@ import {
   DpTicket,
   DpSyncMeta,
   DpExcludePreview,
+  DpSyncScanStatus,
+  DpSyncScanSubmit,
   API_BASE,
 } from "./types";
 
@@ -5991,10 +5993,30 @@ export async function resetDpSyncWatermark(): Promise<{ reset: boolean }> {
   });
 }
 
-export async function scanDpSyncNow(): Promise<Record<string, unknown>> {
-  return request<Record<string, unknown>>(`${API_BASE}/lineage/dp-sync/scan-now`, {
+/** 提交一轮手动立即扫描（后台异步执行，立即返回 task_id；进度/取消走 status/cancel） */
+export async function scanDpSyncNow(): Promise<DpSyncScanSubmit> {
+  return request<DpSyncScanSubmit>(`${API_BASE}/lineage/dp-sync/scan-now`, {
     method: "POST",
   });
+}
+
+/** 读取手动扫描任务状态（OpsTab 轮询实时进度/结束态/异常） */
+export async function getDpSyncScanStatus(
+  taskId: number
+): Promise<DpSyncScanStatus> {
+  return request<DpSyncScanStatus>(
+    `${API_BASE}/lineage/dp-sync/scan/status/${taskId}`
+  );
+}
+
+/** 请求取消运行中的手动扫描（当前任务处理完停止，水位不推进） */
+export async function cancelDpSyncScan(
+  taskId: number
+): Promise<{ cancelled: boolean }> {
+  return request<{ cancelled: boolean }>(
+    `${API_BASE}/lineage/dp-sync/scan/${taskId}/cancel`,
+    { method: "POST" }
+  );
 }
 
 /** dp 类型枚举目录 + 内置排除默认规则（配置源可达时带全量真实枚举） */
