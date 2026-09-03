@@ -736,6 +736,46 @@ docker compose exec backend alembic downgrade -1     # 迁移可逆（up+down+up
 - **监控**：Prometheus 抓取 `http://localhost:8100/metrics`；关注 ES 堆使用率、Redis 队列积压、MySQL 慢查询
 - **审计增长**：WORM 表只增，务必开启 `audit_archive` 归档（worker 定时任务）
 
+### 10.7 本地 LLM 部署（生产机内网模型，替代/兜底远程 provider）
+
+Unisense 的 LLM 能力（NL2SQL / 口径推断 / 术语生成等）走 **OpenAI 兼容协议 + DB 多实例路由**
+（`llm_config` 表，系统配置 → LLM 路由）。可在生产机本地部署一套开源模型作为主用或远程 provider 的
+failover 兜底，数据不出内网。
+
+**选型结论（32GB 内存 + 纯 CPU 实测推荐）**：
+
+| 模型 | 量化 | 体积 | 内存需求 | CPU 速度 | 结论 |
+|---|---|---|---|---|---|
+| **Qwen3-8B**（推荐） | Q4_K_M | ~4.9GB | 32GB 即可 | 10-15 tok/s | 单次 NL2SQL 输出 100-300 token，10-25s，在路由 30s 超时内 |
+| Qwen3-14B | Q4_K_M | ~9GB | ≥64GB 更稳 | 5-8 tok/s | 32GB 紧张且易超时，不建议 |
+
+> 2026 新旗舰（Qwen3 27B+ / GLM-5.1 / DeepSeek-V4）均需 GPU，纯 CPU 无法生产使用。
+> 本机 Docker 默认 seccomp 曾拦截 nginx 的 `pwrite`（见 10.6 注），llama.cpp 容器**必须加
+> `seccomp=unconfined`**（部署脚本已内置，勿移除）。
+
+**一键部署**（生产机执行，幂等，约 10-20 分钟含 5GB 模型下载）：
+
+```bash
+cd /opt/unisense && git pull internal main      # 或 origin master
+bash scripts/deploy_local_llm.sh                # 默认 ModelScope 下载；网络受限可 LLM_MODEL_SOURCE=hf
+```
+
+脚本自动完成：拉取 `ghcr.io/ggml-org/llama.cpp:server`（直连失败回退 DaoCloud ghcr mirror）→
+下载 `Qwen3-8B-Q4_K_M.gguf` 到 `/data/llm/models`（断点续传）→ 启动 `unisense-llm` 容器
+（`-p 8081`、`-c 16384`、`-t 24`、`--jinja`）→ 健康检查 + OpenAI /v1 端点实测。
+
+**接入 Unisense**（系统配置 → LLM 路由 → 新增实例）：
+
+```
+名称:     本地 Qwen3-8B     provider: custom
+base_url: http://<本机IP>:8081/v1
+model:    qwen3-8b          api_key: 任意占位（本地无鉴权，如 local）
+timeout:  60（CPU 推理预留） priority: 主用填 0，远程兜底填大值
+```
+
+保存后点「测试连通」，再到 AI 问数 / NL2SQL 实测。调整参数可覆盖环境变量：
+`LLM_MODEL_DIR / LLM_PORT / LLM_MEM / LLM_CPUS / LLM_CTX / LLM_MODEL_SOURCE`。
+
 ---
 
 ## 十一、开发规范
