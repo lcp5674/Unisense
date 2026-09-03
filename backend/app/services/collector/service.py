@@ -1693,7 +1693,7 @@ class CollectorService(BaseService):
                 for fmt in (_BATCH_DESCRIPTION_RESPONSE_FORMAT, _JSON_OBJECT_FORMAT):
                     try:
                         result = await client.chat(
-                            aug, temperature=0.0, max_tokens=1500, response_format=fmt
+                            aug, temperature=0.0, max_tokens=2500, response_format=fmt
                         )
                     except LlmError:
                         continue
@@ -1792,7 +1792,7 @@ class CollectorService(BaseService):
         self,
         catalog_id: int,
         *,
-        batch_chunk: int = 60,
+        batch_chunk: int = 40,
         cancel_checker: Callable[[], Awaitable[bool]] | None = None,
     ) -> dict[str, Any]:
         """整表空 comment 字段批量 LLM 推断（后台任务/同步端点共用的单一编排）。

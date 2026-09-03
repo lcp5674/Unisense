@@ -1882,7 +1882,8 @@ async def infer_descriptions_batch(
 
         # FR-023: 一次 LLM 调用返回全部字段描述（json_schema 数组强约束 + 按 column_name 回填，
         # 不依赖返回顺序）。字段超限时按块多次调用（每块仍为一次请求），写库保持 targets 原始顺序。
-        batch_chunk = 60
+        # batch_chunk=40: 每块 ~1200 token 输出，远低于 max_tokens=2500 上限，避免截断重试放大。
+        batch_chunk = 40
         parsed_map: dict[str, tuple[str, float]] = {}
         for start in range(0, len(targets), batch_chunk):
             chunk = targets[start : start + batch_chunk]

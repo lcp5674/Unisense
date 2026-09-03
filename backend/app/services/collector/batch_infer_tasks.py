@@ -30,7 +30,7 @@ from app.services.collector.service import BatchTaskCancelledError, CollectorSer
 logger = structlog.get_logger("unisense.collector.batch_infer")
 
 #: 单表字段推断批块大小（与同步端点一致）。
-_BATCH_CHUNK = 60
+_BATCH_CHUNK = 40
 
 
 async def _load_task(db: Any, task_id: int) -> BatchLlmInferTask | None:
