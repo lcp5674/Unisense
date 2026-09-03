@@ -26,6 +26,9 @@ def _fake_state(task_id: int, status: str = "running"):
         "result": None,
         "progress": {"stage": "queued", "total": 0, "processed": 0, "current_task_id": None},
         "cancel_event": asyncio.Event(),
+        "force_event": asyncio.Event(),
+        "cancel_requested_at": None,
+        "force_stop": False,
     }
 
 
@@ -72,7 +75,10 @@ async def test_scan_status_exposes_progress_and_error(monkeypatch) -> None:
     assert data["status"] == "failed"
     assert data["error"] == "boom"
     assert data["progress"]["processed"] == 2
+    assert data["cancel_requested"] is False
+    assert data["force_stop"] is False
     assert "cancel_event" not in data  # 事件对象不外泄
+    assert "force_event" not in data
 
 
 @pytest.mark.asyncio
@@ -83,7 +89,27 @@ async def test_cancel_scan_accepts_running_only(monkeypatch) -> None:
 
     assert await manual.cancel_scan(1) is True
     assert running["cancel_event"].is_set()
+    assert running["cancel_requested_at"] is not None
+    assert running["force_stop"] is False  # 协作取消不置 force
     assert running["message"] is not None
 
     assert await manual.cancel_scan(2) is False  # 已结束不可取消
     assert await manual.cancel_scan(99) is False  # 不存在
+
+
+@pytest.mark.asyncio
+async def test_force_cancel_sets_both_signals(monkeypatch) -> None:
+    """强制终止：同时置位 force_event 与 cancel_event，state 标记 force_stop。"""
+    running = _fake_state(5, status="running")
+    finished = _fake_state(6, status="cancelled")
+    monkeypatch.setattr(manual, "_SCANS", {5: running, 6: finished})
+
+    assert await manual.force_cancel_scan(5) is True
+    assert running["cancel_event"].is_set()
+    assert running["force_event"].is_set()
+    assert running["force_stop"] is True
+    assert running["cancel_requested_at"] is not None
+    assert "强制终止" in (running["message"] or "")
+
+    assert await manual.force_cancel_scan(6) is False  # 已结束不可强制
+    assert await manual.force_cancel_scan(99) is False

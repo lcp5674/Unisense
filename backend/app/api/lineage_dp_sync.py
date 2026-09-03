@@ -393,8 +393,31 @@ async def get_scan_status(task_id: int):
     "/scan/{task_id}/cancel", response_model=ApiResponse, dependencies=_ADMIN_DEPS
 )
 async def cancel_scan(task_id: int):
-    """请求取消运行中的手动扫描（当前任务处理完停止，水位不推进）。"""
+    """请求取消运行中的手动扫描（协作式：当前步骤完成后停止，水位不推进）。
+
+    与 ``force-cancel`` 的区别：cancel 等待当前写库/LLM 子步骤自然完成（保证
+    事务原子）；若当前步骤卡在慢 IO 长时间未停，可调用 ``force-cancel``。
+    """
     accepted = await dp_sync_manual.cancel_scan(task_id)
+    if not accepted:
+        return ok(
+            code="SCAN_NOT_RUNNING",
+            message="扫描任务不存在或已不在运行",
+            data={"cancelled": False},
+        )
+    return ok(data={"cancelled": True})
+
+
+@router.post(
+    "/scan/{task_id}/force-cancel", response_model=ApiResponse, dependencies=_ADMIN_DEPS
+)
+async def force_cancel_scan(task_id: int):
+    """强制终止运行中的手动扫描（子步骤检查点立即中断，事务回滚不落半成品）。
+
+    仅作最后手段（如当前步骤卡在慢 IO）；与协作 cancel 不同，可能在子步骤
+    中间中断——未完成部分不落库，已提交部分保留，水位不推进。
+    """
+    accepted = await dp_sync_manual.force_cancel_scan(task_id)
     if not accepted:
         return ok(
             code="SCAN_NOT_RUNNING",

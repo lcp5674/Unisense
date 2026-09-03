@@ -728,12 +728,13 @@ describe("LineageView 采集通道 Tab", () => {
     vi.mocked(api.lineageGraph).mockResolvedValue(graphData);
     vi.mocked(api.lineageChannels).mockResolvedValue([
       { source: "sqlglot", edge_count: 18, node_count: 28, stale_count: 0, last_run: null },
+      { source: "dp_sql", edge_count: 12, node_count: 20, stale_count: 0, last_run: null },
       { source: "dp_csv", edge_count: 10553, node_count: 4012, stale_count: 0, last_run: null },
     ]);
     vi.mocked(api.lineageStale).mockResolvedValue([]);
   });
 
-  it("采集通道卡片展示友好名称（SQL 解析 / DP 同步）与原始标识", async () => {
+  it("采集通道卡片展示友好名称（SQL 解析 / DP 同步 / CSV 历史）与原始标识", async () => {
     renderLineage();
     await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
     await act(async () => {
@@ -742,8 +743,10 @@ describe("LineageView 采集通道 Tab", () => {
     await waitFor(() => expect(api.lineageChannels).toHaveBeenCalled());
     expect(screen.getByText("SQL 解析")).toBeInTheDocument();
     expect(screen.getByText("DP 同步")).toBeInTheDocument();
+    expect(screen.getByText("DP 同步（CSV 历史）")).toBeInTheDocument();
     // 原始 provenance 标识以小字一并展示
     expect(screen.getByText("sqlglot")).toBeInTheDocument();
+    expect(screen.getByText("dp_sql")).toBeInTheDocument();
     expect(screen.getByText("dp_csv")).toBeInTheDocument();
   });
 

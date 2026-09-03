@@ -6009,12 +6009,22 @@ export async function getDpSyncScanStatus(
   );
 }
 
-/** 请求取消运行中的手动扫描（当前任务处理完停止，水位不推进） */
+/** 请求取消运行中的手动扫描（当前步骤完成后停止，水位不推进） */
 export async function cancelDpSyncScan(
   taskId: number
 ): Promise<{ cancelled: boolean }> {
   return request<{ cancelled: boolean }>(
     `${API_BASE}/lineage/dp-sync/scan/${taskId}/cancel`,
+    { method: "POST" }
+  );
+}
+
+/** 强制终止运行中的手动扫描（子步骤检查点立即中断，事务回滚不落半成品） */
+export async function forceCancelDpSyncScan(
+  taskId: number
+): Promise<{ cancelled: boolean }> {
+  return request<{ cancelled: boolean }>(
+    `${API_BASE}/lineage/dp-sync/scan/${taskId}/force-cancel`,
     { method: "POST" }
   );
 }

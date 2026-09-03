@@ -25,6 +25,7 @@ import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
 import {
   cancelDpSyncScan,
+  forceCancelDpSyncScan,
   getDpSyncConfig,
   getDpSyncMeta,
   getDpSyncScanStatus,
@@ -798,12 +799,20 @@ function OpsTab() {
   const [scanTaskId, setScanTaskId] = useState<number | null>(null);
   const [scanStatus, setScanStatus] = useState<DpSyncScanStatus | null>(null);
   const pollTimer = useRef<number | null>(null);
+  // 两段式取消（B 方案）：cancel 请求时间（本地）+ 是否已请求 + 是否超时可强制终止
+  const cancelStartRef = useRef<number | null>(null);
+  const [cancelRequested, setCancelRequested] = useState(false);
+  const [forceArmed, setForceArmed] = useState(false);
+  const FORCE_WAIT_MS = 8000; // 协作取消等待上限：超过则显示「强制终止」入口
 
   const stopPolling = useCallback(() => {
     if (pollTimer.current !== null) {
       window.clearInterval(pollTimer.current);
       pollTimer.current = null;
     }
+    cancelStartRef.current = null;
+    setCancelRequested(false);
+    setForceArmed(false);
     setScanning(false);
   }, []);
 
@@ -868,6 +877,18 @@ function OpsTab() {
       try {
         const st = await getDpSyncScanStatus(taskId);
         setScanStatus(st);
+        // 协作取消超时武装：请求取消后超过等待上限仍未结束 → 显示「强制终止」
+        if (
+          st.status === "running" &&
+          (st.cancel_requested || cancelStartRef.current !== null)
+        ) {
+          const since =
+            cancelStartRef.current ??
+            (st.cancel_requested_at
+              ? new Date(st.cancel_requested_at).getTime()
+              : Date.now());
+          if (Date.now() - since > FORCE_WAIT_MS) setForceArmed(true);
+        }
         if (
           st.status === "success" ||
           st.status === "failed" ||
@@ -908,10 +929,37 @@ function OpsTab() {
     if (scanTaskId === null) return;
     try {
       const r = await cancelDpSyncScan(scanTaskId);
-      if (r.cancelled) message.info("取消请求已发送，正在停止扫描…");
+      if (r.cancelled) {
+        cancelStartRef.current = Date.now();
+        setCancelRequested(true);
+        setForceArmed(false);
+        message.info("正在停止扫描：等待当前步骤完成后停止（长时间未停可强制终止）");
+      }
     } catch {
       message.error("取消失败，请稍后重试");
     }
+  };
+
+  const handleForceCancelScan = async () => {
+    if (scanTaskId === null) return;
+    Modal.confirm({
+      title: "强制终止扫描",
+      content:
+        "将在当前步骤处理点立即停止（未完成部分不落库，已提交部分保留，水位不推进）。若当前步骤正在写库可能中断事务，由服务端回滚兜底。确认强制终止？",
+      okText: "强制终止",
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          const r = await forceCancelDpSyncScan(scanTaskId as number);
+          if (r.cancelled) {
+            setForceArmed(false);
+            message.info("强制终止中：将在当前步骤处理点立即停止", 4);
+          }
+        } catch {
+          message.error("强制终止失败，请稍后重试");
+        }
+      },
+    });
   };
 
   const scanProgress = scanStatus?.progress;
@@ -931,9 +979,21 @@ function OpsTab() {
               立即扫描一轮
             </Button>
             {scanning && scanTaskId !== null && (
-              <Button danger onClick={handleCancelScan}>
-                取消扫描
-              </Button>
+              <>
+                <Button
+                  danger
+                  onClick={handleCancelScan}
+                  disabled={cancelRequested}
+                  loading={cancelRequested}
+                >
+                  {cancelRequested ? "正在停止…" : "取消扫描"}
+                </Button>
+                {forceArmed && !scanStatus?.force_stop && (
+                  <Button danger type="primary" onClick={handleForceCancelScan}>
+                    强制终止
+                  </Button>
+                )}
+              </>
             )}
             <Button onClick={handleReset}>重置水位（触发全量）</Button>
           </Space>
@@ -941,23 +1001,38 @@ function OpsTab() {
       >
         {scanning && scanStatus?.status === "running" && (
           <Alert
-            type="info"
+            type={cancelRequested || scanStatus.force_stop ? "warning" : "info"}
             showIcon
             style={{ marginBottom: 12 }}
             message={
               <Space direction="vertical" style={{ width: "100%" }} size={4}>
                 <span>
-                  扫描中：{scanStageText(scanProgress?.stage)}（已处理{" "}
-                  {scanProgress?.processed ?? 0} / {scanProgress?.total ?? 0} 个任务）
+                  {scanStatus.force_stop
+                    ? "强制终止中：将在当前步骤处理点立即停止…"
+                    : cancelRequested
+                      ? "正在停止扫描：等待当前步骤完成后停止…"
+                      : `扫描中：${scanStageText(scanProgress?.stage)}`}
+                  {!cancelRequested &&
+                    !scanStatus.force_stop &&
+                    `（已处理 ${scanProgress?.processed ?? 0} / ${scanProgress?.total ?? 0} 个任务）`}
                   {scanProgress?.current_task_id
                     ? ` · 当前任务 #${scanProgress.current_task_id}`
                     : ""}
                 </span>
                 <Progress
                   percent={scanPercent}
-                  status="active"
+                  status={
+                    cancelRequested || scanStatus.force_stop
+                      ? "exception"
+                      : "active"
+                  }
                   style={{ width: "100%" }}
                 />
+                {cancelRequested && !forceArmed && !scanStatus.force_stop && (
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    已在步骤边界停止，通常数秒内结束；若长时间未停可点「强制终止」。
+                  </Typography.Text>
+                )}
               </Space>
             }
           />

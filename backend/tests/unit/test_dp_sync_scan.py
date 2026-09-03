@@ -112,6 +112,8 @@ def _svc(
     svc._lineage_repo = MagicMock()
     svc._lineage_repo.would_create_cycle = AsyncMock(return_value=False)
     svc._lineage_repo.mark_seen = AsyncMock(return_value=(1, 0))
+    svc._lineage_repo.begin_ingest_run = AsyncMock(return_value=MagicMock(id=900))
+    svc._lineage_repo.finish_ingest_run = AsyncMock()
 
     async def _fake_upsert(**kw):
         edge = MagicMock()
@@ -182,6 +184,11 @@ async def test_scan_first_full_round() -> None:
     svc._lineage_repo.mark_seen.assert_awaited_once()
     args = svc._dp_repo.update_run_log.await_args.kwargs
     assert args["status"] == "success"
+    # 双轨：采集通道运行摘要（ingest_run source=dp_sql）
+    svc._lineage_repo.begin_ingest_run.assert_awaited_once()
+    fin = svc._lineage_repo.finish_ingest_run.await_args.kwargs
+    assert fin["status"] == "success"
+    assert fin["total_edges"] > 0
     assert collector.disposed is True
 
 
@@ -228,8 +235,15 @@ async def test_scan_commit_failure_records_failed_run() -> None:
     )
     result = await svc.scan_once(_fc(collector))
     assert result["skipped"] == "failed"
-    svc._dp_repo.update_run_log.assert_awaited()
-    assert svc._dp_repo.update_run_log.await_args.kwargs["status"] == "failed"
+    # 失败可见：rollback 撤销了 running run_log，except 重建一条 failed 记录
+    # （不再用 update_run_log 更新已回滚行——那是 0 行静默失败）。
+    last = svc._dp_repo.create_run_log.call_args.kwargs
+    assert last["status"] == "failed"
+    assert "db down" in str(last["error"])
+    # 双轨：采集通道同样写一条 failed ingest_run
+    svc._lineage_repo.begin_ingest_run.assert_awaited()
+    fin = svc._lineage_repo.finish_ingest_run.await_args.kwargs
+    assert fin["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -297,4 +311,67 @@ async def test_scan_cancel_mid_round_keeps_processed() -> None:
     assert result["skipped"] == "cancelled"
     assert svc._process_task.await_count == 1  # 只处理了第一个任务
     assert svc._dp_repo.update_run_log.await_args.kwargs["status"] == "cancelled"
+    assert progress.get("stage") == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_scan_cancel_inside_task_stops_at_step_boundary() -> None:
+    """协作取消检查点下沉：任务内 set 取消后，该任务剩余 steps 不再处理。
+
+    之前是「当前任务完整处理完才停」；A 方案下 _process_task 在 step 循环内
+    检查 cancel_event → break（剩余 steps 丢弃、回填跳过），外层任务循环同样
+    感知取消停止后续任务。
+    """
+    import asyncio
+
+    collector = FakeCollector()
+    svc = _svc(collector)
+    cancel_event = asyncio.Event()
+
+    async def _proc_with_checkpoint(*_a, **_kw):
+        # 模拟处理完第一个 step 后置位取消 → 后续 steps/任务不应再处理
+        cancel_event.set()
+
+    svc._process_task = AsyncMock(side_effect=_proc_with_checkpoint)
+    progress: dict[str, object] = {}
+    result = await svc.scan_once(
+        _fc(collector), progress=progress, cancel_event=cancel_event
+    )
+    assert result["skipped"] == "cancelled"
+    assert svc._process_task.await_count == 1
+    fin = svc._lineage_repo.finish_ingest_run.await_args.kwargs
+    assert fin["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_scan_force_stop_raises_cancelled() -> None:
+    """强制终止：force_event 置位后 _process_task 在检查点抛 _ScanCancelled，
+    scan_once 捕获并整体按 cancelled 收尾（水位不推进、run_log/ingest 标 cancelled）。
+    """
+    import asyncio
+
+    from app.services.lineage.dp_sync_service import _ScanCancelledError
+
+    collector = FakeCollector()
+    svc = _svc(collector)
+    cancel_event = asyncio.Event()
+    force_event = asyncio.Event()
+
+    async def _proc_force(*_a, **_kw):
+        cancel_event.set()
+        force_event.set()
+        raise _ScanCancelledError("force-stop")
+
+    svc._process_task = AsyncMock(side_effect=_proc_force)
+    progress: dict[str, object] = {}
+    result = await svc.scan_once(
+        _fc(collector),
+        progress=progress,
+        cancel_event=cancel_event,
+        force_event=force_event,
+    )
+    assert result["skipped"] == "cancelled"
+    assert svc._dp_repo.update_run_log.await_args.kwargs["status"] == "cancelled"
+    fin = svc._lineage_repo.finish_ingest_run.await_args.kwargs
+    assert fin["status"] == "cancelled"
     assert progress.get("stage") == "cancelled"

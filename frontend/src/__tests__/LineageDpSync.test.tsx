@@ -18,6 +18,7 @@ vi.mock("../api", () => ({
   scanDpSyncNow: vi.fn(),
   getDpSyncScanStatus: vi.fn(),
   cancelDpSyncScan: vi.fn(),
+  forceCancelDpSyncScan: vi.fn(),
   listDataSources: vi.fn(),
   getDpSyncMeta: vi.fn(),
   previewDpSyncExclude: vi.fn(),
@@ -67,6 +68,7 @@ describe("LineageDpSync", () => {
       result: null,
     });
     mockedApi.cancelDpSyncScan.mockResolvedValue({ cancelled: true });
+    mockedApi.forceCancelDpSyncScan.mockResolvedValue({ cancelled: true });
     mockedApi.listDataSources.mockResolvedValue({
       items: [
         { source_id: "mysql_uncategorized", name: "dp", source_type: "mysql" },
@@ -282,6 +284,46 @@ describe("LineageDpSync", () => {
     await screen.findByText(/扫描中/);
     await user.click(screen.getByText(/取\s*消\s*扫\s*描/));
     expect(mockedApi.cancelDpSyncScan).toHaveBeenCalledWith(7);
+    // 两段式取消（B）：请求后按钮变「正在停止…」+ 明确等待文案（不再只是「已发送」）
+    await waitFor(() =>
+      expect(screen.getAllByText(/正在停止扫描：/).length).toBeGreaterThan(0)
+    );
+    expect(screen.getByText(/正在停止…/)).toBeInTheDocument();
+  });
+
+  it("ops scan shows force-terminate entry after cancel wait timeout", async () => {
+    const user = userEvent.setup();
+    mockedApi.scanDpSyncNow.mockResolvedValue({
+      task_id: 11,
+      status: "running",
+      already_running: false,
+    });
+    // cancel_requested 且已超过等待上限（10s 前请求）→ 轮询应武装「强制终止」入口
+    mockedApi.getDpSyncScanStatus.mockResolvedValue({
+      task_id: 11,
+      status: "running",
+      cancel_requested: true,
+      cancel_requested_at: new Date(Date.now() - 10000).toISOString(),
+      progress: { stage: "parsing", total: 5, processed: 2, current_task_id: 11 },
+      result: null,
+    });
+    renderPage();
+    await user.click(screen.getByText(/运\s*维/));
+    await screen.findByText("运行记录");
+    await user.click(screen.getByText(/立即扫描一轮/));
+    await waitFor(() =>
+      expect(screen.getAllByText(/^强制终止$/).length).toBeGreaterThan(0)
+    );
+    // 点击触发按钮（首个）打开确认弹窗 → 确认（Modal ok 按钮文本同为「强制终止」，取最后一个）
+    await user.click(screen.getAllByText(/^强制终止$/)[0]);
+    await waitFor(() =>
+      expect(screen.getAllByText(/^强制终止$/).length).toBeGreaterThanOrEqual(2)
+    );
+    const btns = screen.getAllByText(/^强制终止$/);
+    await user.click(btns[btns.length - 1]);
+    await waitFor(() =>
+      expect(mockedApi.forceCancelDpSyncScan).toHaveBeenCalledWith(11)
+    );
   });
 
   it("ops scan already-running submit tracks existing task", async () => {

@@ -122,7 +122,8 @@ const SQL_DIALECT_OPTIONS: Array<{ value: string; label: string }> = [
 /** 血缘采集来源通道友好名称（provenance → 中文标签；未知来源显示原始标识）。 */
 const CHANNEL_LABEL: Record<string, string> = {
   sqlglot: "SQL 解析",
-  dp_csv: "DP 同步",
+  dp_sql: "DP 同步",
+  dp_csv: "DP 同步（CSV 历史）",
   metric_definition: "指标定义",
   quickbi: "QuickBI",
   neo4j: "图同步",
@@ -134,7 +135,8 @@ const CHANNEL_LABEL: Record<string, string> = {
 const EDGE_PROVENANCE_LABEL: Record<string, string> = {
   metric_definition: "指标口径",
   sql_parse: "SQL解析",
-  dp_csv: "DP导入",
+  dp_sql: "DP 同步",
+  dp_csv: "DP 同步（CSV 历史）",
   metric_consumer: "指标消费",
 };
 
@@ -618,7 +620,8 @@ function GraphTab() {
           style={{ width: 180 }}
           options={[
             { value: "all", label: "全部血缘（含 DP/SQL/指标）" },
-            { value: "dp_csv", label: "DP 同步血缘" },
+            { value: "dp_sql", label: "DP 同步血缘" },
+            { value: "dp_csv", label: "DP 同步（CSV 历史）血缘" },
             { value: "sqlglot", label: "SQL 解析血缘" },
             { value: "metric_definition", label: "指标定义血缘" },
             { value: "", label: "采集目录视角（指标+目录表）" },
@@ -656,14 +659,14 @@ function GraphTab() {
         !loading &&
         (focusMiss ? (
           <Empty
-            description={`「${focusNode}」暂无血缘数据。可在「SQL 血缘解析」粘贴 SQL 入库，或运行 scripts/import_dp_lineage.py 导入。`}
+            description={`「${focusNode}」暂无血缘数据。可在「SQL 血缘解析」粘贴 SQL 入库，或到「dp 血缘同步」开启数据源同步接入。`}
           >
             <Button type="primary" onClick={clearFocus}>
               查看全量血缘图谱
             </Button>
           </Empty>
         ) : (
-          <Empty description="暂无血缘图谱数据。可在「SQL 血缘解析」粘贴 SQL 入库，或运行 scripts/import_dp_lineage.py 导入。" />
+          <Empty description="暂无血缘图谱数据。可在「SQL 血缘解析」粘贴 SQL 入库，或到「dp 血缘同步」开启数据源同步接入。" />
         ))
       )}
 
@@ -1606,7 +1609,7 @@ function ChannelsTab() {
       </Space>
 
       {channels.length === 0 && !loading ? (
-        <Empty description="暂无血缘采集通道。运行 scripts/import_dp_lineage.py 或通过 SQL 解析写入血缘。" />
+        <Empty description="暂无血缘采集通道。到「dp 血缘同步」开启数据源同步，或通过「SQL 血缘解析」写入血缘。" />
       ) : (
         <Row gutter={[16, 16]}>
           {channels.map((c) => {

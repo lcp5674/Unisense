@@ -6,7 +6,9 @@
   执行不阻塞请求事件循环。
 - ``scan-now`` 提交后立即返回 ``task_id``；OpsTab 轮询 ``scan/status/{id}``
   实时展示进度（total/processed/current_task_id/stage）；``cancel`` 置位
-  ``asyncio.Event``，``scan_once`` 在当前任务处理完后停止（进度见 service）。
+  ``asyncio.Event``，``scan_once`` 在**当前 step 边界**停止（协作式，不打断正在
+  写库/调 LLM 的子步骤，保证事务原子）；``force-cancel`` 置位 ``force_event``
+  在子步骤检查点立即中断（仅作慢 IO 卡住时的最后手段）。
 - 进程重启 registry 丢失：状态查询对未知 id 返回 None（前端提示任务已随
   进程结束）；该轮 run_log 若残留 running，由下轮扫描/运维可见处置。
 
@@ -51,6 +53,9 @@ def _new_state(task_id: int) -> dict[str, Any]:
             "current_task_id": None,
         },
         "cancel_event": asyncio.Event(),
+        "force_event": asyncio.Event(),
+        "cancel_requested_at": None,
+        "force_stop": False,
     }
 
 
@@ -83,16 +88,46 @@ def scan_status(task_id: int) -> dict[str, Any] | None:
         "message": st["message"],
         "result": st["result"],
         "progress": dict(st["progress"]),
+        "cancel_requested": st["cancel_requested_at"] is not None,
+        "cancel_requested_at": (
+            st["cancel_requested_at"].isoformat()
+            if st["cancel_requested_at"]
+            else None
+        ),
+        "force_stop": st["force_stop"],
     }
 
 
 async def cancel_scan(task_id: int) -> bool:
-    """请求取消运行中的扫描。返回是否受理（任务不存在/已结束返回 False）。"""
+    """请求取消运行中的扫描（协作式：当前步骤完成后停止）。
+
+    仅置位 ``cancel_event``——由 ``scan_once``/``_process_task`` 在 step 边界消费，
+    不强制打断正在写库/调 LLM 的子步骤（保证事务原子性）。返回是否受理。
+    """
     st = _SCANS.get(task_id)
     if st is None or st["status"] != "running":
         return False
     st["cancel_event"].set()
-    st["message"] = "取消请求已发送，等待当前任务处理完成后停止"
+    st["cancel_requested_at"] = datetime.now(UTC)
+    st["message"] = "正在停止扫描：等待当前步骤完成后停止（若长时间未停可强制终止）"
+    return True
+
+
+async def force_cancel_scan(task_id: int) -> bool:
+    """强制终止运行中的扫描（更强信号：子步骤检查点立即中断）。
+
+    同时置位 ``force_event`` 与 ``cancel_event``；``scan_once`` 在下一个检查点
+    抛出 ``_ScanCancelled`` 中断本轮，事务由 scan_once 回滚兜底（不落半成品）。
+    仅作最后手段（如当前步骤卡在慢 IO 时用户可强制终止）。返回是否受理。
+    """
+    st = _SCANS.get(task_id)
+    if st is None or st["status"] != "running":
+        return False
+    st["force_stop"] = True
+    st["force_event"].set()
+    st["cancel_event"].set()
+    st["cancel_requested_at"] = datetime.now(UTC)
+    st["message"] = "强制终止中：将在当前步骤处理点立即停止（未完成部分不落库）"
     return True
 
 
@@ -108,15 +143,21 @@ async def _run_scan_job(task_id: int, *, force: bool) -> None:
                 lambda sid: _fetch_collector(db, sid),
                 progress=st["progress"],
                 cancel_event=st["cancel_event"],
+                force_event=st["force_event"],
                 force=force,
             )
         st["result"] = result
         skipped = result.get("skipped")
         if skipped == "cancelled":
             st["status"] = "cancelled"
-            st["message"] = (
-                "扫描已取消：已处理结果保留，水位未推进，下轮从原水位重扫"
-            )
+            if st["force_stop"]:
+                st["message"] = (
+                    "扫描已强制终止：未完成部分不落库，水位未推进，下轮从原水位重扫"
+                )
+            else:
+                st["message"] = (
+                    "扫描已取消：已处理结果保留，水位未推进，下轮从原水位重扫"
+                )
         elif skipped == "failed":
             st["status"] = "failed"
             st["error"] = result.get("error") or "扫描失败（详情见运行记录）"

@@ -44,6 +44,11 @@ from app.services.lineage.repository import LineageRepository
 
 logger = logging.getLogger(__name__)
 
+
+class _ScanCancelledError(Exception):
+    """强制终止信号：置位 force_event 后在子步骤检查点抛出，中断本轮扫描。"""
+
+
 #: 单次 step LLM 生成上限（确认/兜底均够用）。
 _LLM_MAX_TOKENS = 2000
 
@@ -511,6 +516,7 @@ class DpSyncService:
         *,
         progress: dict[str, Any] | None = None,
         cancel_event: asyncio.Event | None = None,
+        force_event: asyncio.Event | None = None,
         force: bool = False,
     ) -> dict[str, Any]:
         """执行一轮 dp 血缘增量扫描（由 arq 周期任务或手动「立即扫描」触发）。
@@ -520,8 +526,11 @@ class DpSyncService:
                 由部署侧注入（tasks 用真实 dp 连接），测试注入假 collector。
             progress: 可选进度字典（手动扫描实时反馈）；就地更新 total/processed/
                 current_task_id/stage。
-            cancel_event: 可选取消事件；置位后在**当前任务处理完**停止后续任务，
-                已处理结果保留、水位不推进（下轮从原水位重扫，幂等安全）。
+            cancel_event: 可选取消事件；置位后在**当前 step 边界**停止（协作式：
+                已处理结果保留、水位不推进，下轮从原水位重扫，幂等安全）。
+            force_event: 可选强制终止事件（更强信号）；置位后在子步骤检查点
+                立即抛出 ``_ScanCancelledError`` 中断本轮（不等当前任务剩余 steps），
+                由调用方保证事务安全回滚。
             force: True 时绕过 enabled/轮询间隔检查（手动「立即扫描」用）；
                 周期任务保持 False（按配置节流）。
         """
@@ -537,7 +546,8 @@ class DpSyncService:
         if progress is not None:
             progress["stage"] = "collecting"
         run = await self._dp_repo.create_run_log(status="running", run_at=now)
-        collector = await fetch_collector(config.source_id)
+        collector = None
+        ingest_run = None
         counters: dict[str, int] = {
             "scanned_tasks": 0,
             "scanned_steps": 0,
@@ -553,6 +563,10 @@ class DpSyncService:
         }
         seen_pairs: set[tuple[str, str]] = set()
         try:
+            # 连接获取与采集通道运行记录（begin）一并纳入 try：fetch 失败/中途异常
+            # 统一走 except 记录 failed，不再让未绑定 collector 从 finally 二次抛错。
+            collector = await fetch_collector(config.source_id)
+            ingest_run = await self._lineage_repo.begin_ingest_run(DP_PROVENANCE)
             task_ids, task_max, step_max = await self._changed_ids(
                 collector, config, wm
             )
@@ -571,8 +585,18 @@ class DpSyncService:
                     progress["current_task_id"] = task_id
                 try:
                     await self._process_task(
-                        collector, config, task_id, counters, seen_pairs
+                        collector,
+                        config,
+                        task_id,
+                        counters,
+                        seen_pairs,
+                        cancel_event=cancel_event,
+                        force_event=force_event,
                     )
+                except _ScanCancelledError:
+                    # 强制终止：当前任务已回滚（事务由 scan_once 收尾统一处理）
+                    cancelled = True
+                    break
                 except Exception as exc:  # noqa: BLE001 —— 单任务失败不阻断整轮
                     counters["errors"] += 1
                     logger.warning("dp_sync_task_failed task_id=%s error=%s", task_id, exc)
@@ -615,6 +639,16 @@ class DpSyncService:
                 llm_calls=counters["llm_calls"],
                 detail_json=__import__("json").dumps(detail, ensure_ascii=False),
             )
+            # 双轨：同步写血缘采集通道运行摘要（ingest_run），与 dp_sync_run_log 并存
+            # ——采集通道视图（lineage_ingest_run）获得 dp_sql 运行历史，失效治理同机制。
+            if ingest_run is not None:
+                await self._lineage_repo.finish_ingest_run(
+                    ingest_run,
+                    status=log_status,
+                    total_edges=len(seen_pairs),
+                    restored=restored,
+                    detail=detail,
+                )
             await self._db.commit()
             if progress is not None:
                 progress["stage"] = "cancelled" if cancelled else "done"
@@ -623,12 +657,24 @@ class DpSyncService:
             return counters
         except Exception as exc:  # noqa: BLE001 —— 记录失败，下轮重试
             await self._db.rollback()
-            await self._dp_repo.update_run_log(run.id, status="failed", error=str(exc))
-            await self._db.commit()
+            try:
+                # 失败必须可见：rollback 已撤销 run_log/ingest_run 的未提交行，
+                # 直接 update 会 0 行静默失败 → 重建一条 failed 记录（双轨同写）。
+                await self._dp_repo.create_run_log(
+                    status="failed", error=str(exc), run_at=now
+                )
+                failed_run = await self._lineage_repo.begin_ingest_run(DP_PROVENANCE)
+                await self._lineage_repo.finish_ingest_run(
+                    failed_run, status="failed", error=str(exc)
+                )
+                await self._db.commit()
+            except Exception:  # noqa: BLE001 —— 失败记录兜底，不影响错误上报
+                await self._db.rollback()
             logger.exception("dp_sync_scan_failed")
             return {"skipped": "failed", "error": str(exc)}
         finally:
-            await collector.dispose()
+            if collector is not None:
+                await collector.dispose()
 
     async def _changed_ids(
         self,
@@ -704,8 +750,16 @@ class DpSyncService:
         task_id: int,
         counters: dict[str, int],
         seen_pairs: set[tuple[str, str]],
+        *,
+        cancel_event: asyncio.Event | None = None,
+        force_event: asyncio.Event | None = None,
     ) -> None:
-        """处理单个任务：拉 task 静态字段 + SQL 节点 → process_step 逐节点。"""
+        """处理单个任务：拉 task 静态字段 + SQL 节点 → process_step 逐节点。
+
+        取消检查点下沉（A 方案）：fetch task 后 / 每个 step 前 / 资产回填前检查——
+        协作取消（仅 cancel_event）在 step 边界停止，不再等完整任务跑完；
+        强制终止（force_event 一并置位）在检查点直接抛 ``_ScanCancelled`` 中断。
+        """
         task = await self._fetch_task(collector, task_id)
         if task is None:
             return
@@ -722,6 +776,10 @@ class DpSyncService:
             return
         counters["scanned_tasks"] += 1
         for step in steps:
+            if cancel_event is not None and cancel_event.is_set():
+                if force_event is not None and force_event.is_set():
+                    raise _ScanCancelledError(f"task {task_id} force-stop")
+                break  # 协作取消：本任务剩余 steps 不再处理（已处理 steps 保留）
             sql = str(step.get("script_info") or "")
             counters["scanned_steps"] += 1
             result = await self.process_step(task, step, sql, config)
@@ -733,6 +791,10 @@ class DpSyncService:
                 outcome_rows = await self._collect_seen_pairs(task, step, sql, config)
                 seen_pairs.update(outcome_rows)
         # 资产 Owner 回填（产出表孤儿）
+        if cancel_event is not None and cancel_event.is_set():
+            if force_event is not None and force_event.is_set():
+                raise _ScanCancelledError(f"task {task_id} force-stop at backfill")
+            return  # 协作取消：跳过回填
         await self.backfill_owner(task, config)
 
     async def _collect_seen_pairs(

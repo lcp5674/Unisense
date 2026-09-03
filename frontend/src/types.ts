@@ -3684,6 +3684,11 @@ export interface DpSyncScanStatus {
   message?: string | null;
   progress: DpSyncScanProgress;
   result?: Record<string, unknown> | null;
+  /** 是否已收到协作取消请求（前端据此展示「正在停止」并给出强制终止入口） */
+  cancel_requested?: boolean | null;
+  cancel_requested_at?: string | null;
+  /** 是否已收到强制终止请求 */
+  force_stop?: boolean | null;
 }
 
 /** 手动扫描提交结果 */

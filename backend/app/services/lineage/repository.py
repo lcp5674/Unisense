@@ -20,8 +20,9 @@ from app.models.metric import Metric
 from app.services.lineage.parser import node_column, node_dimension, node_table
 
 #: 系统内置血缘采集通道：无论当前是否有边都展示，保证「采集通道」视图来源全景完整
-#: （SQL 解析=sqlglot / DP 同步=dp_csv；其余动态来源如 metric_definition 有边时自动出现）。
-_KNOWN_CHANNELS = ("dp_csv", "sqlglot")
+#: （SQL 解析=sqlglot / DP 同步=dp_sql，dp_csv 为历史 CSV 导入通道保留展示；
+#: 其余动态来源如 metric_definition 有边时自动出现）。
+_KNOWN_CHANNELS = ("dp_csv", "dp_sql", "sqlglot")
 
 
 class LineageRepository:
