@@ -10,6 +10,8 @@ import {
   Input,
   InputNumber,
   Modal,
+  Row,
+  Col,
   Select,
   Space,
   Switch,
@@ -184,58 +186,136 @@ function ConfigTab() {
             : "尚未配置。保存后将创建默认配置（默认不启用：勾选「启用同步」才会开始轮询）。"
         }
       />
-      <Form form={form} layout="vertical" style={{ maxWidth: 720 }}>
-        <Space size={24} wrap>
-          <Form.Item name="enabled" label="启用同步" valuePropName="checked">
-            <Switch />
-          </Form.Item>
-          <Form.Item name="poll_interval_minutes" label="轮询间隔（分钟）">
-            <InputNumber min={1} max={60} style={{ width: 140 }} />
-          </Form.Item>
-          <Form.Item name="source_id" label="dp 数据源 source_id">
-            <Input placeholder="mysql_uncategorized" style={{ width: 240 }} />
-          </Form.Item>
-        </Space>
-        <Space size={24} wrap>
-          <Form.Item name="task_type_filter" label="任务类型（type）">
-            <Select
-              mode="multiple"
-              options={[{ value: 1, label: "1 = SQL 任务" }]}
-              style={{ width: 200 }}
-            />
-          </Form.Item>
-          <Form.Item name="step_type_filter" label="节点类型（task_step_type）">
-            <Select
-              mode="multiple"
-              options={[{ value: 7, label: "7 = Hive/Spark SQL" }]}
-              style={{ width: 220 }}
-            />
-          </Form.Item>
-        </Space>
-        <Form.Item
-          name="exclude_table_patterns"
-          label="排除表名正则（每行一条，命中源/目标表的边不入图）"
-          tooltip="默认规则已含 tmp/temp/_bak/adhoc；此处追加自定义。留空 = 使用内置默认排除。"
+      <Form form={form} layout="vertical" style={{ maxWidth: 980 }}>
+        <Card
+          type="inner"
+          size="small"
+          title="基础设置"
+          style={{ marginBottom: 16 }}
+          styles={{ body: { paddingBottom: 0 } }}
         >
-          <Input.TextArea rows={3} placeholder={"^tmp_\n_bak$"} />
-        </Form.Item>
-        <Space size={24} wrap>
-          <Form.Item name="llm_enabled" label="LLM 确认 / 兜底" valuePropName="checked">
-            <Switch />
+          <Row gutter={24}>
+            <Col xs={24} sm={8}>
+              <Form.Item
+                name="enabled"
+                label="启用同步"
+                valuePropName="checked"
+                extra="停用后不再轮询/解析（已写入血缘保留）"
+              >
+                <Switch />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={8}>
+              <Form.Item
+                name="poll_interval_minutes"
+                label="轮询间隔（分钟）"
+                extra="1~60，修改即时生效，无需重启"
+              >
+                <InputNumber min={1} max={60} style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={8}>
+              <Form.Item
+                name="source_id"
+                label="dp 数据源 source_id"
+                extra="对应数据源需已在「数据源管理」配置连接"
+              >
+                <Input placeholder="mysql_uncategorized" />
+              </Form.Item>
+            </Col>
+          </Row>
+        </Card>
+
+        <Card
+          type="inner"
+          size="small"
+          title="同步范围"
+          style={{ marginBottom: 16 }}
+          styles={{ body: { paddingBottom: 0 } }}
+        >
+          <Row gutter={24}>
+            <Col xs={24} md={12}>
+              <Form.Item
+                name="task_type_filter"
+                label="任务类型（dispatch_task.type）"
+                extra="仅扫描匹配类型的任务"
+              >
+                <Select
+                  mode="multiple"
+                  options={[{ value: 1, label: "1 = SQL 任务" }]}
+                  style={{ width: "100%" }}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item
+                name="step_type_filter"
+                label="节点类型（dispatch_task_step.task_step_type）"
+                extra="仅解析匹配类型的 SQL 节点"
+              >
+                <Select
+                  mode="multiple"
+                  options={[{ value: 7, label: "7 = Hive/Spark SQL" }]}
+                  style={{ width: "100%" }}
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item
+            name="exclude_table_patterns"
+            label="排除表名正则（每行一条，命中源/目标表的边不入图）"
+            tooltip="默认规则已含 tmp/temp/_bak/adhoc；此处追加自定义。留空 = 使用内置默认排除。"
+          >
+            <Input.TextArea rows={3} placeholder={"^tmp_\n_bak$"} />
           </Form.Item>
-          <Form.Item name="resolve_memory_enabled" label="裁决记忆复用" valuePropName="checked">
-            <Switch />
-          </Form.Item>
-          <Form.Item name="owner_backfill" label="资产 Owner 回填策略">
-            <Select
-              style={{ width: 200 }}
-              options={[
-                { value: "orphan_only", label: "仅孤儿回填（默认）" },
-                { value: "never", label: "不回填" },
-              ]}
-            />
-          </Form.Item>
-        </Space>
+        </Card>
+
+        <Card
+          type="inner"
+          size="small"
+          title="LLM 与裁决"
+          style={{ marginBottom: 16 }}
+          styles={{ body: { paddingBottom: 0 } }}
+        >
+          <Row gutter={24}>
+            <Col xs={24} md={8}>
+              <Form.Item
+                name="llm_enabled"
+                label="LLM 确认 / 兜底"
+                valuePropName="checked"
+                extra="关闭后纯 sqlglot 解析，分歧全进待抉择"
+              >
+                <Switch />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item
+                name="resolve_memory_enabled"
+                label="裁决记忆复用"
+                valuePropName="checked"
+                extra="SQL 未变时自动复用上次裁决，不再重复待抉择"
+              >
+                <Switch />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item
+                name="owner_backfill"
+                label="资产 Owner 回填策略"
+                extra="仅孤儿回填 = 只在资产 owner 为空时回填"
+              >
+                <Select
+                  style={{ width: "100%" }}
+                  options={[
+                    { value: "orphan_only", label: "仅孤儿回填（默认）" },
+                    { value: "never", label: "不回填" },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+        </Card>
+
         <Alert
           type="warning"
           showIcon
@@ -584,16 +664,18 @@ function OpsTab() {
         )}
         <Descriptions size="small" column={2} bordered>
           <Descriptions.Item label="任务水位">
-            {watermark.task ? fmt(watermark.task.last_max_update) : "未扫描（首次为全量）"}
+            {watermark?.task?.last_max_update
+              ? fmt(watermark.task.last_max_update)
+              : "未扫描（首次为全量）"}
           </Descriptions.Item>
           <Descriptions.Item label="任务上次扫描">
-            {watermark.task ? fmt(watermark.task.last_scan_at) : "—"}
+            {watermark?.task?.last_scan_at ? fmt(watermark.task.last_scan_at) : "—"}
           </Descriptions.Item>
           <Descriptions.Item label="节点水位">
-            {watermark.step ? fmt(watermark.step.last_max_update) : "未扫描"}
+            {watermark?.step?.last_max_update ? fmt(watermark.step.last_max_update) : "未扫描"}
           </Descriptions.Item>
           <Descriptions.Item label="节点上次扫描">
-            {watermark.step ? fmt(watermark.step.last_scan_at) : "—"}
+            {watermark?.step?.last_scan_at ? fmt(watermark.step.last_scan_at) : "—"}
           </Descriptions.Item>
         </Descriptions>
       </Card>

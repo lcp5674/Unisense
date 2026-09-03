@@ -5921,20 +5921,16 @@ export async function testQueryEngineConfig(body: {
 
 // ==================== dp 调度血缘同步 ====================
 export async function getDpSyncConfig(): Promise<DpSyncConfig | null> {
-  const r = await request<{ data: DpSyncConfig | null }>(
-    `${API_BASE}/lineage/dp-sync/config`
-  );
-  return r.data ?? null;
+  return request<DpSyncConfig | null>(`${API_BASE}/lineage/dp-sync/config`);
 }
 
 export async function saveDpSyncConfig(
   payload: Partial<DpSyncConfig>
 ): Promise<DpSyncConfig> {
-  const r = await request<{ data: DpSyncConfig }>(
-    `${API_BASE}/lineage/dp-sync/config`,
-    { method: "PUT", body: JSON.stringify(payload) }
-  );
-  return r.data;
+  return request<DpSyncConfig>(`${API_BASE}/lineage/dp-sync/config`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function listDpTickets(params?: {
@@ -5948,28 +5944,23 @@ export async function listDpTickets(params?: {
   if (params?.keyword) qs.set("keyword", params.keyword);
   qs.set("page", String(params?.page ?? 1));
   qs.set("page_size", String(params?.page_size ?? 20));
-  const r = await request<{
-    data: { items: DpTicket[]; total: number; page: number; page_size: number };
-  }>(`${API_BASE}/lineage/dp-sync/tickets?${qs.toString()}`);
-  return r.data;
+  return request<{ items: DpTicket[]; total: number; page: number; page_size: number }>(
+    `${API_BASE}/lineage/dp-sync/tickets?${qs.toString()}`
+  );
 }
 
 export async function getDpTicket(ticketId: number): Promise<DpTicket | null> {
-  const r = await request<{ data: DpTicket | null }>(
-    `${API_BASE}/lineage/dp-sync/tickets/${ticketId}`
-  );
-  return r.data ?? null;
+  return request<DpTicket | null>(`${API_BASE}/lineage/dp-sync/tickets/${ticketId}`);
 }
 
 export async function resolveDpTicket(
   ticketId: number,
   body: { resolution: string; manual_edges?: unknown }
 ): Promise<{ ticket_id: number; resolution: string }> {
-  const r = await request<{ data: { ticket_id: number; resolution: string } }>(
+  return request<{ ticket_id: number; resolution: string }>(
     `${API_BASE}/lineage/dp-sync/tickets/${ticketId}/resolve`,
     { method: "POST", body: JSON.stringify(body) }
   );
-  return r.data;
 }
 
 export async function listDpSyncRuns(params?: {
@@ -5979,31 +5970,27 @@ export async function listDpSyncRuns(params?: {
   const qs = new URLSearchParams();
   qs.set("page", String(params?.page ?? 1));
   qs.set("page_size", String(params?.page_size ?? 20));
-  const r = await request<{
-    data: { items: DpSyncRun[]; total: number; page: number; page_size: number };
-  }>(`${API_BASE}/lineage/dp-sync/runs?${qs.toString()}`);
-  return r.data;
+  return request<{ items: DpSyncRun[]; total: number; page: number; page_size: number }>(
+    `${API_BASE}/lineage/dp-sync/runs?${qs.toString()}`
+  );
 }
 
-export async function getDpSyncWatermark(): Promise<Record<string, DpSyncWatermarkInfo | null>> {
-  const r = await request<{ data: Record<string, DpSyncWatermarkInfo | null> }>(
+export async function getDpSyncWatermark(): Promise<
+  Record<string, DpSyncWatermarkInfo | null>
+> {
+  return request<Record<string, DpSyncWatermarkInfo | null>>(
     `${API_BASE}/lineage/dp-sync/watermark`
   );
-  return r.data;
 }
 
 export async function resetDpSyncWatermark(): Promise<{ reset: boolean }> {
-  const r = await request<{ data: { reset: boolean } }>(
-    `${API_BASE}/lineage/dp-sync/reset`,
-    { method: "POST" }
-  );
-  return r.data;
+  return request<{ reset: boolean }>(`${API_BASE}/lineage/dp-sync/reset`, {
+    method: "POST",
+  });
 }
 
 export async function scanDpSyncNow(): Promise<Record<string, unknown>> {
-  const r = await request<{ data: Record<string, unknown> }>(
-    `${API_BASE}/lineage/dp-sync/scan-now`,
-    { method: "POST" }
-  );
-  return r.data;
+  return request<Record<string, unknown>>(`${API_BASE}/lineage/dp-sync/scan-now`, {
+    method: "POST",
+  });
 }
