@@ -21,7 +21,7 @@ def upgrade() -> None:
     # 幂等：已加过（并行会话/重复执行）则跳过
     conn = op.get_bind()
     cols = {
-        r["COLUMN_NAME"]
+        r[0]
         for r in conn.execute(
             sa.text(
                 "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
@@ -45,7 +45,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     conn = op.get_bind()
     cols = {
-        r["COLUMN_NAME"]
+        r[0]
         for r in conn.execute(
             sa.text(
                 "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
