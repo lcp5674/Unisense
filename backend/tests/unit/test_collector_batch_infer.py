@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.services.collector.batch_infer_tasks import _new_progress
-from app.services.collector.service import CollectorService
+from app.services.collector.service import BatchTaskCancelledError, CollectorService
 
 
 def _svc_with_catalog(schema_json: dict, **cat_kw) -> tuple[CollectorService, MagicMock]:
@@ -181,3 +181,73 @@ async def test_infer_table_description_llm_unavailable_returns_none():
     res = await svc.infer_catalog_table_description(1)
     assert res is None
     repo.update_table_description.assert_not_awaited()
+
+
+# ---- chunk 级协作取消 ----
+
+
+@pytest.mark.asyncio
+async def test_infer_catalog_columns_cancel_aborts_before_chunk():
+    """cancel_checker 返回 False → 抛 BatchTaskCancelledError，且不发起任何 LLM 调用。"""
+    schema = {"columns": _cols(("col_a", "bigint", None), ("col_b", "string", None))}
+    svc, repo = _svc_with_catalog(schema)
+    repo.get_descriptions = AsyncMock(return_value=[])
+    svc._llm_infer_batch_descriptions = AsyncMock(  # type: ignore[method-assign]
+        return_value={"col_a": ("A", 0.9)}
+    )
+    checker = AsyncMock(return_value=False)
+    with pytest.raises(BatchTaskCancelledError):
+        await svc.infer_catalog_columns(1, cancel_checker=checker)
+    # 首个块前探测即中止 → LLM 未被调用、无 upsert
+    svc._llm_infer_batch_descriptions.assert_not_awaited()
+    repo.upsert_description.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_infer_catalog_columns_cancel_checker_called_per_chunk():
+    """cancel_checker 每块调用一次（chunk 粒度探测），放行时正常执行。"""
+    schema = {
+        "columns": _cols(
+            ("c1", "bigint", None),
+            ("c2", "string", None),
+            ("c3", "string", None),
+            ("c4", "string", None),
+            ("c5", "string", None),
+        )
+    }
+    svc, repo = _svc_with_catalog(schema)
+    repo.get_descriptions = AsyncMock(return_value=[])
+    svc._llm_infer_batch_descriptions = AsyncMock(  # type: ignore[method-assign]
+        return_value={f"c{i}": (f"描述{i}", 0.9) for i in range(1, 6)}
+    )
+    checker = AsyncMock(return_value=True)
+    res = await svc.infer_catalog_columns(1, batch_chunk=2, cancel_checker=checker)
+    assert res["error"] is None
+    assert len(res["inferred"]) == 5
+    # 5 字段 / 2 每块 = 3 块 → checker 调 3 次
+    assert checker.await_count == 3
+    assert repo.upsert_description.await_count == 5
+
+
+@pytest.mark.asyncio
+async def test_infer_catalog_columns_cancel_midway():
+    """第 2 块前探测到取消 → 抛 BatchTaskCancelledError（第 1 块已完成后中止）。"""
+    schema = {
+        "columns": _cols(
+            ("c1", "bigint", None),
+            ("c2", "string", None),
+            ("c3", "string", None),
+            ("c4", "string", None),
+        )
+    }
+    svc, repo = _svc_with_catalog(schema)
+    repo.get_descriptions = AsyncMock(return_value=[])
+    svc._llm_infer_batch_descriptions = AsyncMock(  # type: ignore[method-assign]
+        return_value={f"c{i}": (f"描述{i}", 0.9) for i in range(1, 5)}
+    )
+    # 第一次（第 1 块前）放行，之后（第 2 块前）取消
+    checker = AsyncMock(side_effect=[True, False])
+    with pytest.raises(BatchTaskCancelledError):
+        await svc.infer_catalog_columns(1, batch_chunk=2, cancel_checker=checker)
+    # 第 1 块已调 LLM、第 2 块未调
+    assert svc._llm_infer_batch_descriptions.await_count == 1

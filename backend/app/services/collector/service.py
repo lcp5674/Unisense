@@ -61,6 +61,17 @@ from app.services.llm.client import (
 
 logger = get_logger("unisense.collector.service")
 
+
+class BatchTaskCancelledError(Exception):
+    """批量任务已在执行中被请求取消（chunk 级探测信号）。
+
+    由后台任务（batch_infer_tasks）传入 ``cancel_checker`` 时，``infer_catalog_columns``
+    在每块 LLM 调用前探测到取消即抛出，任务侧捕获后把该表标记为 cancelled 并停止派发
+    剩余表——将取消粒度从「表」降到「块」（一次 LLM 调用），大表单表等待取消从分钟级
+    降到数十秒内。同步端点不传 cancel_checker，永不抛出。
+    """
+
+
 #: 连接配置中的敏感凭据键名提示（编辑回显「二次确认」时保留未提交的旧值）。
 #: 覆盖各连接器：mysql/postgres/clickhouse 的 ``password``，kafka 的
 #: ``sasl_password``/``registry_password``/``auth_password`` 等。
@@ -1782,6 +1793,7 @@ class CollectorService(BaseService):
         catalog_id: int,
         *,
         batch_chunk: int = 60,
+        cancel_checker: Callable[[], Awaitable[bool]] | None = None,
     ) -> dict[str, Any]:
         """整表空 comment 字段批量 LLM 推断（后台任务/同步端点共用的单一编排）。
 
@@ -1789,6 +1801,13 @@ class CollectorService(BaseService):
         有效源 comment 的字段，仅对无描述字段调用 LLM（一次调用返回整块字段
         描述，字段超限按 batch_chunk 分块），成功后 upsert source=llm。
         目录不存在/无待推断字段/LLM 不可用均不抛异常，以 error 承载原因。
+
+        Args:
+            catalog_id: 目录表主键。
+            batch_chunk: 每块字段数上限。
+            cancel_checker: 后台任务协作取消探测——每块 LLM 调用**前**调用一次，
+                返回 False 表示任务已被请求取消，立即抛 ``BatchTaskCancelledError``
+                中断剩余块（取消粒度=块）。同步端点不传（None），永不检查。
 
         Returns:
             ``{"inferred": [{"column_name", "description", "source", "confidence"}],
@@ -1839,9 +1858,14 @@ class CollectorService(BaseService):
             targets.append((col_name, str(col_type) if col_type else None))
 
         # 一次 LLM 调用返回全部字段描述（json_schema 数组强约束 + 按 column_name 回填），
-        # 字段超限时按块多次调用；写库保持 targets 原始顺序
+        # 字段超限时按块多次调用；写库保持 targets 原始顺序。每块前探测协作取消
+        # （后台任务用，粒度=块；同步端点 cancel_checker=None 不检查）。
         parsed_map: dict[str, tuple[str, float]] = {}
         for start in range(0, len(targets), batch_chunk):
+            if cancel_checker is not None and not await cancel_checker():
+                raise BatchTaskCancelledError(
+                    f"任务已请求取消，中断于第 {start // batch_chunk + 1} 块"
+                )
             chunk = targets[start : start + batch_chunk]
             parsed_map.update(
                 await self._llm_infer_batch_descriptions(

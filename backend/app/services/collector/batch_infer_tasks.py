@@ -25,7 +25,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.db.mysql import async_session_factory
 from app.models.collector_models import BatchInferHistory, BatchLlmInferTask
-from app.services.collector.service import CollectorService
+from app.services.collector.service import BatchTaskCancelledError, CollectorService
 
 logger = structlog.get_logger("unisense.collector.batch_infer")
 
@@ -114,9 +114,22 @@ async def _run_single_table(task_id: int, item: dict[str, Any]) -> dict[str, Any
         needs_fields = bool(item.get("missing_fields", 0) > 0)
         needs_table = bool(item.get("needs_table_desc", False))
 
+        # chunk 级协作取消探测：每块 LLM 调用前重读任务行，检测到 cancel_requested
+        # 即返回 False → infer_catalog_columns 抛 BatchTaskCancelledError 中断剩余块。
+        async def _is_cancelled() -> bool:
+            async with async_session_factory() as _probe_db:
+                _fresh = await _load_task(_probe_db, task_id)
+                return _fresh is not None and not (
+                    _fresh.cancel_requested or _fresh.status == "cancelled"
+                )
+
         if needs_fields:
             try:
-                res = await svc.infer_catalog_columns(catalog_id, batch_chunk=_BATCH_CHUNK)
+                res = await svc.infer_catalog_columns(
+                    catalog_id,
+                    batch_chunk=_BATCH_CHUNK,
+                    cancel_checker=_is_cancelled,
+                )
                 if res.get("error"):
                     raise RuntimeError(str(res["error"]))
                 added = len(res["inferred"])
@@ -129,6 +142,9 @@ async def _run_single_table(task_id: int, item: dict[str, Any]) -> dict[str, Any
                         + "、".join(res["failed"][:3])
                     )
                     error_category = error_category or "llm_failed"
+            except BatchTaskCancelledError:
+                # 任务已被请求取消：不标 error、不吞异常，交由外层把本表标 cancelled。
+                raise
             except Exception as exc:  # noqa: BLE001 - 单动作失败不阻断另一动作/后续表
                 logger.warning(
                     "batch_infer_table_fields_failed",
@@ -141,6 +157,10 @@ async def _run_single_table(task_id: int, item: dict[str, Any]) -> dict[str, Any
                 errs.append(f"字段推断失败：{str(exc)[:200]}")
 
         if needs_table:
+            # 表描述为单次 LLM 调用（无法块内中断）：字段动作完成后/执行前
+            # 各探测一次，避免「字段跑完期间被取消」仍发起表描述。
+            if not await _is_cancelled():
+                raise BatchTaskCancelledError("任务已请求取消，表描述执行前中止")
             try:
                 tres = await svc.infer_catalog_table_description(catalog_id)
                 if tres is None:
@@ -292,6 +312,21 @@ async def run_batch_llm_infer_task(ctx: dict[str, Any], task_id: int) -> None:
             # 锁外独立 session 执行表推断（慢 LLM 调用不占锁）
             try:
                 updated = await _run_single_table(task_id, item)
+            except BatchTaskCancelledError as exc:
+                # chunk 级探测到取消：本表标 cancelled（非 error），停止派发剩余表。
+                logger.warning(
+                    "batch_infer_table_cancelled",
+                    task_id=task_id,
+                    idx=idx,
+                    reason=str(exc)[:200],
+                )
+                updated = {
+                    **item,
+                    "status": "cancelled",
+                    "summary": "任务已取消",
+                    "detail": str(exc)[:200],
+                    "error_category": None,
+                }
             except Exception as exc:  # noqa: BLE001 - 表级兜底，不拖垮整批
                 logger.exception(
                     "batch_infer_table_unexpected",
