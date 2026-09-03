@@ -23,16 +23,28 @@ import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
 import {
   getDpSyncConfig,
+  getDpSyncMeta,
   getDpSyncWatermark,
   getDpTicket,
+  listDataSources,
   listDpSyncRuns,
   listDpTickets,
+  previewDpSyncExclude,
   resetDpSyncWatermark,
   resolveDpTicket,
   saveDpSyncConfig,
   scanDpSyncNow,
 } from "../api";
-import type { DpSyncConfig, DpSyncRun, DpTicket, DpSyncWatermarkInfo } from "../types";
+import type {
+  DataSource,
+  DpExcludePreview,
+  DpSyncConfig,
+  DpSyncMeta,
+  DpSyncRun,
+  DpTicket,
+  DpSyncTypeOption,
+  DpSyncWatermarkInfo,
+} from "../types";
 
 const TICKET_STATUS_LABEL: Record<string, { text: string; color: string }> = {
   diverged: { text: "分歧待抉择", color: "orange" },
@@ -52,6 +64,12 @@ const RESOLUTION_LABEL: Record<string, string> = {
 
 function fmt(v?: string | null): string {
   return v ? dayjs(v).format("YYYY-MM-DD HH:mm") : "—";
+}
+
+/** 类型选项目录的展示文本（内置已识别 / 探测未识别 + 条数）。 */
+function typeOptionLabel(o: DpSyncTypeOption): string {
+  const suffix = o.known ? "" : "（未识别，可全选以覆盖）";
+  return `${o.value} = ${o.label}${suffix} · ${o.count} 条`;
 }
 
 export function LineageDpSync() {
@@ -104,6 +122,20 @@ function ConfigTab() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [configured, setConfigured] = useState(false);
+  const [sources, setSources] = useState<DataSource[]>([]);
+  const [meta, setMeta] = useState<DpSyncMeta | null>(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [previewResult, setPreviewResult] = useState<DpExcludePreview | null>(null);
+
+  // 数据源下拉 + dp 类型/默认规则目录（失败不阻塞配置加载）
+  useEffect(() => {
+    listDataSources({ page: 1, page_size: 200 })
+      .then((res) => setSources(res.items ?? []))
+      .catch(() => setSources([]));
+    getDpSyncMeta()
+      .then(setMeta)
+      .catch(() => setMeta(null));
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -121,6 +153,9 @@ function ConfigTab() {
           enabled: false,
           source_id: "mysql_uncategorized",
           poll_interval_minutes: 5,
+          // 与后端 create_default_config 一致：默认仅 SQL 任务 / Hive-Spark SQL 节点
+          task_type_filter: [1],
+          step_type_filter: [7],
           llm_enabled: true,
           resolve_memory_enabled: true,
           owner_backfill: "orphan_only",
@@ -146,8 +181,9 @@ function ConfigTab() {
         enabled: values.enabled,
         source_id: values.source_id,
         poll_interval_minutes: values.poll_interval_minutes,
-        task_type_filter: values.task_type_filter ?? [1],
-        step_type_filter: values.step_type_filter ?? [7],
+        // 空数组 = 全部类型（含未识别）；未配置时后端默认仅 SQL 任务/Hive SQL
+        task_type_filter: values.task_type_filter ?? [],
+        step_type_filter: values.step_type_filter ?? [],
         exclude_table_patterns: String(values.exclude_table_patterns ?? "")
           .split("\n")
           .map((s) => s.trim())
@@ -164,6 +200,80 @@ function ConfigTab() {
     } finally {
       setSaving(false);
     }
+  };
+
+  /** 排除规则校验 + 命中量预览（连 dp 源统计产出表命中）。 */
+  const handlePreviewExclude = async () => {
+    const vals = await form.validateFields(["source_id"]).catch(() => null);
+    if (!vals?.source_id) {
+      message.warning("请先选择 dp 数据源，再预览排除规则命中量");
+      return;
+    }
+    const patterns = String(form.getFieldValue("exclude_table_patterns") ?? "")
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    setPreviewBusy(true);
+    setPreviewResult(null);
+    try {
+      const res = await previewDpSyncExclude({
+        source_id: vals.source_id,
+        patterns,
+      });
+      setPreviewResult(res);
+    } catch (e) {
+      message.error(`预览失败：${(e as Error).message ?? e}`);
+    } finally {
+      setPreviewBusy(false);
+    }
+  };
+
+  const renderExcludePreview = () => {
+    if (!previewResult) return null;
+    const r = previewResult;
+    if (!r.reachable) {
+      return (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginTop: 8 }}
+          message="无法预览命中量"
+          description={r.error || "dp 数据源不可达或查询失败，请检查连接配置"}
+        />
+      );
+    }
+    const invalid = (r.invalid_patterns ?? []).map(
+      (x) => `${x.pattern}：${x.error}`
+    );
+    return (
+      <Alert
+        type={r.matched ? "warning" : "success"}
+        showIcon
+        style={{ marginTop: 8 }}
+        message={`命中 ${r.matched ?? 0} / ${r.total ?? 0} 张任务产出表`}
+        description={
+          <Space direction="vertical" size={4} style={{ width: "100%" }}>
+            {(r.samples ?? []).length > 0 && (
+              <span>
+                样例：
+                {(r.samples ?? []).slice(0, 6).map((s) => (
+                  <Tag key={s.table} style={{ marginBottom: 4 }}>
+                    {s.table}
+                  </Tag>
+                ))}
+                {(r.samples ?? []).length > 6 ? "…" : ""}
+              </span>
+            )}
+            {invalid.length > 0 && (
+              <span style={{ color: "#cf1322" }}>
+                正则不合法（未参与匹配）：{invalid.join("；")}
+              </span>
+            )}
+            <span style={{ color: "#999" }}>{r.note}</span>
+          </Space>
+        }
+      />
+    );
   };
 
   return (
@@ -217,10 +327,19 @@ function ConfigTab() {
             <Col xs={24} sm={8}>
               <Form.Item
                 name="source_id"
-                label="dp 数据源 source_id"
-                extra="对应数据源需已在「数据源管理」配置连接"
+                label="dp 数据源"
+                extra="下拉选择已配置的数据源（需含 dp 元库 dispatch_task 等）"
+                rules={[{ required: true, message: "请选择 dp 数据源" }]}
               >
-                <Input placeholder="mysql_uncategorized" />
+                <Select
+                  showSearch
+                  placeholder="选择 dp 数据源"
+                  optionFilterProp="label"
+                  options={sources.map((s) => ({
+                    value: s.source_id,
+                    label: `${s.source_id} · ${s.name}（${s.source_type}）`,
+                  }))}
+                />
               </Form.Item>
             </Col>
           </Row>
@@ -238,11 +357,33 @@ function ConfigTab() {
               <Form.Item
                 name="task_type_filter"
                 label="任务类型（dispatch_task.type）"
-                extra="仅扫描匹配类型的任务"
+                extra={
+                  <Space size={8} wrap>
+                    <span style={{ color: "#999" }}>留空 = 全部任务类型；默认仅 SQL 任务。</span>
+                    <a
+                      onClick={() =>
+                        form.setFieldValue(
+                          "task_type_filter",
+                          (meta?.task_types ?? []).map((o) => o.value)
+                        )
+                      }
+                    >
+                      全选
+                    </a>
+                    <a onClick={() => form.setFieldValue("task_type_filter", [])}>
+                      清空（=全部）
+                    </a>
+                  </Space>
+                }
               >
                 <Select
                   mode="multiple"
-                  options={[{ value: 1, label: "1 = SQL 任务" }]}
+                  showSearch
+                  optionFilterProp="label"
+                  placeholder={meta?.reachable === false && meta?.reason ? "类型枚举：配置源不可达，仅显示已知值" : "选择任务类型"}
+                  options={(meta?.task_types ?? [{ value: 1, label: "SQL 任务", known: true, count: 0 }]).map(
+                    (o) => ({ value: o.value, label: typeOptionLabel(o) })
+                  )}
                   style={{ width: "100%" }}
                 />
               </Form.Item>
@@ -251,11 +392,34 @@ function ConfigTab() {
               <Form.Item
                 name="step_type_filter"
                 label="节点类型（dispatch_task_step.task_step_type）"
-                extra="仅解析匹配类型的 SQL 节点"
+                extra={
+                  <Space size={8} wrap>
+                    <span style={{ color: "#999" }}>留空 = 全部节点类型；默认仅 Hive/Spark SQL。</span>
+                    <a
+                      onClick={() =>
+                        form.setFieldValue(
+                          "step_type_filter",
+                          (meta?.step_types ?? []).map((o) => o.value)
+                        )
+                      }
+                    >
+                      全选
+                    </a>
+                    <a onClick={() => form.setFieldValue("step_type_filter", [])}>
+                      清空（=全部）
+                    </a>
+                  </Space>
+                }
               >
                 <Select
                   mode="multiple"
-                  options={[{ value: 7, label: "7 = Hive/Spark SQL" }]}
+                  showSearch
+                  optionFilterProp="label"
+                  placeholder={meta?.reachable === false && meta?.reason ? "类型枚举：配置源不可达，仅显示已知值" : "选择节点类型"}
+                  options={(meta?.step_types ?? [
+                    { value: 2, label: "DataX 同步", known: true, count: 0 },
+                    { value: 7, label: "Hive/Spark SQL", known: true, count: 0 },
+                  ]).map((o) => ({ value: o.value, label: typeOptionLabel(o) }))}
                   style={{ width: "100%" }}
                 />
               </Form.Item>
@@ -263,11 +427,36 @@ function ConfigTab() {
           </Row>
           <Form.Item
             name="exclude_table_patterns"
-            label="排除表名正则（每行一条，命中源/目标表的边不入图）"
-            tooltip="默认规则已含 tmp/temp/_bak/adhoc；此处追加自定义。留空 = 使用内置默认排除。"
+            label="追加排除的表名正则（每行一条）"
+            tooltip="命中这些正则的表（库.表 全名匹配）不入血缘图。系统内置默认排除始终生效（见下方列表），这里填写的会叠加到内置规则之上。留空 = 仅内置默认排除。"
           >
-            <Input.TextArea rows={3} placeholder={"^tmp_\n_bak$"} />
+            <Input.TextArea rows={3} placeholder={"每行一条正则，如：\n^dwd_.*_temp$\n.*_history$"} />
           </Form.Item>
+          <Space direction="vertical" size={4} style={{ width: "100%", marginBottom: 16 }}>
+            <Space size={4} wrap>
+              <span style={{ fontSize: 12, color: "#666" }}>
+                内置默认排除（始终生效）：
+              </span>
+              {(meta?.exclude_defaults ?? ["(^|\\.)(tmp|temp)[\\d_]*$", "(^|\\.)tmp_", "_bak$", "(^|\\.)adhoc"]).map(
+                (p) => (
+                  <Tag key={p} style={{ fontFamily: "monospace", fontSize: 11 }}>
+                    {p}
+                  </Tag>
+                )
+              )}
+            </Space>
+            <Space size={8}>
+              <Button size="small" loading={previewBusy} onClick={handlePreviewExclude}>
+                校验并预览命中量
+              </Button>
+              {!meta?.reachable && meta?.reason && (
+                <span style={{ fontSize: 12, color: "#999" }}>
+                  类型枚举与默认规则已加载；命中预览需 dp 源可达（{meta.reason}）
+                </span>
+              )}
+            </Space>
+            {renderExcludePreview()}
+          </Space>
         </Card>
 
         <Card

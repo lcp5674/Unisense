@@ -199,6 +199,8 @@ import {
   DpSyncRun,
   DpSyncWatermarkInfo,
   DpTicket,
+  DpSyncMeta,
+  DpExcludePreview,
   API_BASE,
 } from "./types";
 
@@ -5992,5 +5994,22 @@ export async function resetDpSyncWatermark(): Promise<{ reset: boolean }> {
 export async function scanDpSyncNow(): Promise<Record<string, unknown>> {
   return request<Record<string, unknown>>(`${API_BASE}/lineage/dp-sync/scan-now`, {
     method: "POST",
+  });
+}
+
+/** dp 类型枚举目录 + 内置排除默认规则（配置源可达时带全量真实枚举） */
+export async function getDpSyncMeta(): Promise<DpSyncMeta> {
+  return request<DpSyncMeta>(`${API_BASE}/lineage/dp-sync/meta`);
+}
+
+/** 排除表名正则「校验 + 命中量预览」（连 dp 源统计产出表命中） */
+export async function previewDpSyncExclude(body: {
+  source_id?: string;
+  schema_name?: string;
+  patterns: string[];
+}): Promise<DpExcludePreview> {
+  return request<DpExcludePreview>(`${API_BASE}/lineage/dp-sync/exclude-preview`, {
+    method: "POST",
+    body: JSON.stringify(body),
   });
 }

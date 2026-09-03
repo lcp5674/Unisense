@@ -4,6 +4,7 @@ import { App } from "antd";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LineageDpSync } from "../pages/LineageDpSync";
 import * as api from "../api";
+import type { DataSource } from "../types";
 
 vi.mock("../api", () => ({
   getDpSyncConfig: vi.fn(),
@@ -15,6 +16,9 @@ vi.mock("../api", () => ({
   getDpSyncWatermark: vi.fn(),
   resetDpSyncWatermark: vi.fn(),
   scanDpSyncNow: vi.fn(),
+  listDataSources: vi.fn(),
+  getDpSyncMeta: vi.fn(),
+  previewDpSyncExclude: vi.fn(),
 }));
 
 const mockedApi = vi.mocked(api);
@@ -53,6 +57,36 @@ describe("LineageDpSync", () => {
     mockedApi.getDpSyncWatermark.mockResolvedValue({
       task: { last_scan_at: "2026-09-03T10:00:00" },
       step: null,
+    });
+    mockedApi.listDataSources.mockResolvedValue({
+      items: [
+        { source_id: "mysql_uncategorized", name: "dp", source_type: "mysql" },
+        { source_id: "other_source", name: "其它源", source_type: "mysql" },
+      ] as unknown as DataSource[],
+      total: 2,
+      page: 1,
+      page_size: 200,
+    });
+    mockedApi.getDpSyncMeta.mockResolvedValue({
+      task_types: [{ value: 1, label: "SQL 任务", known: true, count: 100 }],
+      step_types: [
+        { value: 2, label: "DataX 同步", known: true, count: 50 },
+        { value: 7, label: "Hive/Spark SQL", known: true, count: 200 },
+      ],
+      exclude_defaults: ["(^|\\.)tmp_", "_bak$"],
+      reachable: false,
+      reason: "测试环境 dp 源不可达",
+    });
+    mockedApi.previewDpSyncExclude.mockResolvedValue({
+      reachable: true,
+      total: 4,
+      matched: 2,
+      samples: [
+        { table: "wedw_dwd.tmp_x", pattern: "(^|\\.)tmp_" },
+        { table: "wedw_ods.tbl_bak", pattern: "_bak$" },
+      ],
+      invalid_patterns: [],
+      note: "预览范围为 dp 任务产出表",
     });
   });
 
@@ -171,5 +205,55 @@ describe("LineageDpSync", () => {
     await user.click(screen.getByText(/运\s*维/));
     await screen.findByText("运行记录");
     expect(mockedApi.getDpSyncWatermark).toHaveBeenCalled();
+  });
+
+  it("source_id renders as data-source select and loads type/exclude meta", async () => {
+    renderPage();
+    // 数据源下拉：选中值显示 source_id · name（来自 listDataSources 选项）
+    await screen.findByText("mysql_uncategorized · dp（mysql）");
+    // 类型目录（meta）驱动 + 内置排除默认规则只读展示
+    await screen.findByText(/内置默认排除（始终生效）/);
+    expect(screen.getByText("(^|\\.)tmp_")).toBeInTheDocument();
+    expect(mockedApi.listDataSources).toHaveBeenCalled();
+    expect(mockedApi.getDpSyncMeta).toHaveBeenCalled();
+  });
+
+  it("clears task type filter to all (= empty array) on save", async () => {
+    const user = userEvent.setup();
+    mockedApi.saveDpSyncConfig.mockResolvedValue({
+      enabled: false,
+      source_id: "mysql_uncategorized",
+      poll_interval_minutes: 5,
+      task_type_filter: [],
+      step_type_filter: [7],
+      llm_enabled: true,
+      resolve_memory_enabled: true,
+      owner_backfill: "orphan_only",
+    });
+    renderPage();
+    await screen.findByText(/保\s*存/);
+    // 任务类型卡的「清空（=全部）」
+    const clearLinks = screen.getAllByText("清空（=全部）");
+    await user.click(clearLinks[0]);
+    await user.click(screen.getByText(/保\s*存/));
+    await waitFor(() =>
+      expect(mockedApi.saveDpSyncConfig).toHaveBeenCalledTimes(1)
+    );
+    const payload = mockedApi.saveDpSyncConfig.mock.calls[0][0];
+    expect(payload.task_type_filter).toEqual([]); // 空 = 全部任务类型
+  });
+
+  it("previews exclude regex hit count from dp source", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("校验并预览命中量");
+    // 填一条正则再预览（默认空也允许：仅内置默认）
+    const textarea = screen.getByPlaceholderText(/每行一条正则/);
+    await user.type(textarea, "(^\\.)*tmp_");
+    await user.click(screen.getByText("校验并预览命中量"));
+    await screen.findByText(/命中 2 \/ 4 张任务产出表/);
+    expect(mockedApi.previewDpSyncExclude).toHaveBeenCalledWith(
+      expect.objectContaining({ source_id: "mysql_uncategorized" })
+    );
   });
 });

@@ -3635,3 +3635,33 @@ export interface DpSyncWatermarkInfo {
   last_scan_at?: string | null;
   last_full_scan_at?: string | null;
 }
+
+/** dp 任务/节点类型选项目录（内置已知 + 配置源可达时探测合并） */
+export interface DpSyncTypeOption {
+  value: number;
+  label: string;
+  /** true=内置已识别；false=探测到但未内置（不编造语义） */
+  known: boolean;
+  /** 该类型在 dp 库中的任务/节点条数（0=内置但当前无数据） */
+  count: number;
+}
+
+/** dp 同步元数据（类型目录 + 内置排除默认规则） */
+export interface DpSyncMeta {
+  task_types: DpSyncTypeOption[];
+  step_types: DpSyncTypeOption[];
+  exclude_defaults: string[];
+  reachable: boolean;
+  reason?: string | null;
+}
+
+/** 排除表名正则命中预览结果 */
+export interface DpExcludePreview {
+  reachable: boolean;
+  total?: number;
+  matched?: number;
+  samples?: { table: string; pattern: string }[];
+  invalid_patterns?: { pattern: string; error: string }[];
+  note?: string;
+  error?: string | null;
+}
