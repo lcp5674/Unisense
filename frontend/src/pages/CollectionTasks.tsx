@@ -156,6 +156,24 @@ export function CollectionTasks() {
     }
   }
 
+  // 详情抽屉实时刷新：打开且任务未终态（排队/采集中）期间每 5s 拉最新状态，
+  // 进度消息随之实时更新（此前抽屉只在 openDetail 取一次快照，须关掉重开才见新消息）；
+  // 任务进入终态后自动停止（内容已完整不再变化）。
+  useEffect(() => {
+    if (!detailOpen || !detailJob) return;
+    if (detailJob.status !== "QUEUED" && detailJob.status !== "RUNNING") return;
+    const id = detailJob.job_id;
+    const timer = window.setInterval(async () => {
+      try {
+        const fresh = await getCollectionJob(id);
+        if (fresh) setDetailJob(fresh);
+      } catch {
+        /* 静默保留当前详情（不打断查看） */
+      }
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [detailOpen, detailJob?.job_id, detailJob?.status]);
+
   /** 失败任务重试：复用 collect-now 重新投递，保留原任务的 mode 与表级过滤（H3）。 */
   async function handleRetry(job: CollectionJob) {
     if (!job.source_id) {
@@ -409,11 +427,16 @@ export function CollectionTasks() {
                     return detailLoading ? <span className="muted">加载中…</span> : <span className="muted">—</span>;
                   }
                   return (
-                    <ul style={{ margin: 0, paddingLeft: 16, maxHeight: 260, overflow: "auto" }}>
-                      {msgs.map((m, i) => (
-                        <li key={i} style={{ fontSize: 12 }}>{m}</li>
-                      ))}
-                    </ul>
+                    <div>
+                      {(detailJob.status === "QUEUED" || detailJob.status === "RUNNING") && (
+                        <Tag color="processing" style={{ marginBottom: 4 }}>实时更新中（每 5 秒）</Tag>
+                      )}
+                      <ul style={{ margin: 0, paddingLeft: 16, maxHeight: 260, overflow: "auto" }}>
+                        {msgs.map((m, i) => (
+                          <li key={i} style={{ fontSize: 12 }}>{m}</li>
+                        ))}
+                      </ul>
+                    </div>
                   );
                 })(),
               },

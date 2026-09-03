@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { CollectionTasks } from "../pages/CollectionTasks";
 import type { CollectionJob, DataSource } from "../types";
@@ -173,6 +173,48 @@ describe("CollectionTasks", () => {
     // 抽屉展示任务 ID（表格行 + 抽屉两处）与状态（两处）
     expect(screen.getAllByText("collect:mysql_finance:abc123").length).toBeGreaterThanOrEqual(2);
     expect(screen.getAllByText("已完成").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("详情抽屉打开 RUNNING 任务：每 5s 自动刷新进度消息（无需重开详情）", async () => {
+    vi.useFakeTimers();
+    try {
+      const runJob: CollectionJob = {
+        ...jobs[0],
+        job_id: "collect:mysql_finance:run1",
+        status: "RUNNING",
+        detail: { mode: "FULL", progress: { messages: ["开始扫描表…"] } },
+      };
+      mockedJobs.mockResolvedValue({ items: [runJob], total: 1, page: 1, page_size: 10 });
+      mockedGetJob
+        .mockResolvedValueOnce(runJob)
+        .mockResolvedValueOnce({
+          ...runJob,
+          detail: { mode: "FULL", progress: { messages: ["开始扫描表…", "已注册 12 张表"] } },
+        });
+      render(<MemoryRouter><CollectionTasks /></MemoryRouter>);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      fireEvent.click(screen.getAllByRole("button", { name: /详\s*情/ })[0]);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      // 首次打开：首批进度消息 + 实时更新标记
+      expect(screen.getByText("开始扫描表…")).toBeTruthy();
+      expect(screen.getByText(/实时更新中/)).toBeTruthy();
+      expect(mockedGetJob).toHaveBeenCalledTimes(1);
+      // 推进 5s：抽屉内进度消息自动刷新（此前须关掉重开才能看到）
+      act(() => {
+        vi.advanceTimersByTime(5000);
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(mockedGetJob).toHaveBeenCalledTimes(2);
+      expect(screen.getByText("已注册 12 张表")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("失败任务可重试：调用 collect-now 重新投递并刷新列表", async () => {
