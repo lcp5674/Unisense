@@ -27,6 +27,7 @@ import {
   listDataSourceDatabases,
   listDataSourceTables,
   listDriftLogs,
+  listSourceTables,
   listUsers,
   UnisenseApiError,
 } from "../api";
@@ -38,6 +39,25 @@ import { formatCnTime } from "../utils/timeCn";
 import { useResizableColumns } from "../components/ResizableTable";
 import { AuditTimeline } from "./metric/AuditTimeline";
 import { usePermission } from "../hooks/usePermission";
+
+/** fnmatch 风格模式转正则（支持 * 与 ?，用于采集白/黑名单命中预览）。 */
+function fnmatchToRegExp(pattern: string): RegExp {
+  let re = "";
+  for (const ch of pattern) {
+    if (ch === "*") re += ".*";
+    else if (ch === "?") re += ".";
+    else re += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`^${re}$`);
+}
+
+/** 解析「每行/逗号分隔」的模式文本（与 handleCollect 同口径）。 */
+function parsePatternText(raw: string): string[] {
+  return raw
+    .split(/[\n,，]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
 
 // 数据源类型以接口（GET /data-sources/types）为唯一权威来源（2026-08-28 起不再
 // 硬编码兜底——后端新增/下线类型时前端列表曾失真，且可创建后端不支持的类型）。
@@ -162,9 +182,18 @@ function SourceDetailModal({
   const [collectMode, setCollectMode] = useState("FULL");
   const [collectInclude, setCollectInclude] = useState("");
   const [collectExclude, setCollectExclude] = useState("");
+  const [patternPreview, setPatternPreview] = useState<{
+    busy: boolean;
+    result: {
+      total: number;
+      includeCount: number;
+      excludeCount: number;
+      expectedCount: number;
+      samples: string[];
+    } | null;
+  }>({ busy: false, result: null });
   const [checking, setChecking] = useState(false);
-  const [checkResult, setCheckResult] = useState<TestConnectionResult | null>(null);
-  const [driftLogs, setDriftLogs] = useState<DriftLogItem[]>([]);
+  const [checkResult, setCheckResult] = useState<TestConnectionResult | null>(null);  const [driftLogs, setDriftLogs] = useState<DriftLogItem[]>([]);
   const [overview, setOverview] = useState<SourceOverview | null>(null);
   const [runs, setRuns] = useState<CollectionRun[]>([]);
 
@@ -284,6 +313,55 @@ function SourceDetailModal({
     } catch (err) {
       setCollecting(false);
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "采集失败");
+    }
+  }
+
+  /** 校验并预览本次临时白/黑名单：拉源表清单按 fnmatch 统计命中（白名单优先）。 */
+  async function handlePreviewPatterns() {
+    setPatternPreview((p) => ({ ...p, busy: true }));
+    try {
+      const include = parsePatternText(collectInclude);
+      const exclude = parsePatternText(collectExclude);
+      const res = await listSourceTables(
+        source.source_id,
+        source.databases && source.databases.length > 0 ? source.databases : undefined
+      );
+      const tables = res.tables ?? [];
+      // 每张表生成匹配候选（name / 库.表 / 表），任一候选命中模式即该表命中
+      const keyOf = (t: { name?: string; database?: string; table?: string }) =>
+        t.name || (t.database && t.table ? `${t.database}.${t.table}` : (t.table ?? ""));
+      const matchOne = (pats: string[], t: { name?: string; database?: string; table?: string }) => {
+        if (pats.length === 0) return false;
+        const cands = [
+          t.name,
+          t.database && t.table ? `${t.database}.${t.table}` : "",
+          t.table ?? "",
+        ].filter((x): x is string => Boolean(x));
+        return cands.some((c) => pats.some((p) => fnmatchToRegExp(p).test(c)));
+      };
+      const hitInclude = new Set(tables.filter((t) => matchOne(include, t)).map((t) => keyOf(t)));
+      const hitExclude = new Set(tables.filter((t) => matchOne(exclude, t)).map((t) => keyOf(t)));
+      // 白名单优先：仅白名单命中且不在黑名单的保留；无白名单 = 全集减黑名单
+      const expected = tables
+        .map((t) => keyOf(t))
+        .filter((k) => (include.length > 0 ? hitInclude.has(k) : true) && !hitExclude.has(k));
+      setPatternPreview({
+        busy: false,
+        result: {
+          total: tables.length,
+          includeCount: hitInclude.size,
+          excludeCount: hitExclude.size,
+          expectedCount: expected.length,
+          samples: expected.slice(0, 6),
+        },
+      });
+    } catch (e) {
+      setPatternPreview({ busy: false, result: null });
+      message.error(
+        e instanceof Error
+          ? `预览失败：${e.message}（源端表枚举失败或数据源不可达）`
+          : "预览失败：源端表枚举失败或数据源不可达"
+      );
     }
   }
 
@@ -699,6 +777,49 @@ function SourceDetailModal({
               />
             </Form.Item>
           </Form>
+          <Space size={8} style={{ marginBottom: patternPreview.result ? 8 : 0 }}>
+            <Button size="small" loading={patternPreview.busy} onClick={handlePreviewPatterns}>
+              校验并预览命中
+            </Button>
+            <span className="muted" style={{ fontSize: 12 }}>
+              拉取源端表清单，按 fnmatch 统计白/黑名单命中（白名单优先）
+            </span>
+          </Space>
+          {patternPreview.result && (
+            <Alert
+              type="success"
+              showIcon
+              style={{ marginTop: 8 }}
+              message={`预计采集 ${patternPreview.result.expectedCount} / ${patternPreview.result.total} 张表`}
+              description={
+                <Space direction="vertical" size={4}>
+                  <span>
+                    白名单命中 {patternPreview.result.includeCount} 张
+                    {patternPreview.result.includeCount > 0 &&
+                    patternPreview.result.includeCount === patternPreview.result.total
+                      ? "（全部）"
+                      : ""}
+                    ；黑名单排除 {patternPreview.result.excludeCount} 张
+                    {patternPreview.result.includeCount > 0 &&
+                    patternPreview.result.excludeCount > 0
+                      ? "（白名单优先，同时命中黑白名单的表仍会采集）"
+                      : ""}
+                  </span>
+                  {patternPreview.result.samples.length > 0 && (
+                    <span>
+                      将采集的样例：
+                      {patternPreview.result.samples.map((s) => (
+                        <Tag key={s} style={{ marginBottom: 4 }}>
+                          {s}
+                        </Tag>
+                      ))}
+                      {patternPreview.result.expectedCount > 6 ? "…" : ""}
+                    </span>
+                  )}
+                </Space>
+              }
+            />
+          )}
           <span className="muted" style={{ fontSize: 12 }}>
             本次临时过滤仅对这次采集生效，数据源保存的采集规则不会被修改。
           </span>

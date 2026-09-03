@@ -36,6 +36,7 @@ vi.mock("../api", () => {
     getCollectionJob: vi.fn(),
     listDataSourceDatabases: vi.fn(),
     listDataSourceTables: vi.fn(),
+    listSourceTables: vi.fn(),
     scheduleSource: vi.fn(),
     getSourceHealth: vi.fn(),
     getSourceWatermark: vi.fn(),
@@ -76,6 +77,7 @@ import {
   getCollectionJob,
   listDataSourceDatabases,
   listDataSourceTables,
+  listSourceTables,
   scheduleSource,
 } from "../api";
 
@@ -98,6 +100,7 @@ const mockedStream = vi.mocked(streamCollectionJob);
 const mockedGetJob = vi.mocked(getCollectionJob);
 const mockedListDatabases = vi.mocked(listDataSourceDatabases);
 const mockedListTables = vi.mocked(listDataSourceTables);
+const mockedSourceTables = vi.mocked(listSourceTables);
 const mockedOverview = vi.mocked(getSourceOverview);
 const mockedRuns = vi.mocked(listCollectionRuns);
 const mockedAudits = vi.mocked(listAudit);
@@ -216,6 +219,13 @@ describe("DataSources", () => {
     mockedListTables.mockResolvedValue({
       tables: { finance: ["orders", "gmv"], orders: ["items"] },
       source_type: "mysql",
+    });
+    mockedSourceTables.mockResolvedValue({
+      tables: [
+        { database: "finance", table: "orders", name: "finance.orders" },
+        { database: "finance", table: "ods_orders", name: "finance.ods_orders" },
+        { database: "finance", table: "tmp_x", name: "finance.tmp_x" },
+      ],
     });
     mockedBatchToggle.mockResolvedValue({ succeeded: [], failed: [] });
     mockedBatchDelete.mockResolvedValue({ succeeded: [], failed: [] });
@@ -952,6 +962,24 @@ describe("DataSources", () => {
         { include_patterns: ["ods_*", "dwd_*"], exclude_patterns: undefined },
       );
     });
+  });
+
+  it("立即采集弹窗：校验并预览白/黑名单命中（白名单优先）", async () => {
+    renderSources();
+    await screen.findByText("mysql_finance");
+    fireEvent.click(screen.getByText("管理"));
+    await screen.findByText(/数据源：财务库/);
+    fireEvent.click(screen.getByText("立即采集"));
+    await screen.findByText(/立即采集：财务库/);
+    // 白名单 ods_* + 黑名单 tmp_*：3 张表 → 命中白名单 1（ods_orders）、黑名单 1（tmp_x），预计采集 1
+    const textareas = screen.getAllByPlaceholderText(/每行一个模式，如：/);
+    fireEvent.change(textareas[0], { target: { value: "ods_*" } });
+    fireEvent.change(textareas[1], { target: { value: "tmp_*" } });
+    fireEvent.click(screen.getByText("校验并预览命中"));
+    await screen.findByText(/预计采集 1 \/ 3 张表/);
+    expect(screen.getByText(/白名单命中 1 张/)).toBeInTheDocument();
+    expect(screen.getByText(/黑名单排除 1 张/)).toBeInTheDocument();
+    expect(mockedSourceTables).toHaveBeenCalledWith("mysql_finance", undefined);
   });
 
   it("调度启停开关：关停后保存调度透传 schedule_enabled=false", async () => {
