@@ -39,6 +39,13 @@ from app.models.dimension import (
     MetricDimension,
     Reconciliation,
 )
+from app.models.dp_sync import (
+    DpResolutionTicket,
+    DpSyncConfig,
+    DpSyncRunLog,
+    DpSyncWatermark,
+    LineageFieldMapping,
+)
 from app.models.enums import (
     DictStatusEnum,
     DictTypeEnum,
@@ -114,6 +121,10 @@ __all__ = [
     "DimensionSnapshotRun",
     "DimensionValueSnapshot",
     "DomainStatusEnum",
+    "DpResolutionTicket",
+    "DpSyncConfig",
+    "DpSyncRunLog",
+    "DpSyncWatermark",
     "EntityTypeEnum",
     "ErasureRequest",
     "ErasureStatus",
@@ -128,6 +139,7 @@ __all__ = [
     "GrantType",
     "LineageEdge",
     "LineageEdgeHistory",
+    "LineageFieldMapping",
     "LlmConfig",
     "MeasureCatalog",
     "MeasureFormat",

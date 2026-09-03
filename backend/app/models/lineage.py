@@ -111,6 +111,15 @@ class LineageEdge(Base, BaseModel):
         default=None,
         comment="进入失效队列的时间（UTC）",
     )
+    #: dp 调度血缘任务/节点静态身份与准静态元数据快照（D10 静态落边 + 增量顺刷）。
+    #: JSON 数组：[{task_id, task_no, task_name, out_table, step_id, step_name, ...}]；
+    #: 动态运行态（任务状态/最近执行）不落边，展示层实时旁路拉 dp 库。
+    dp_task_refs: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+        comment="dp 调度任务/节点静态身份 JSON（来源 provenance=dp_sql 时承载）",
+    )
     # created_at / updated_at / deleted_at 由 BaseModel 提供，不重复声明
 
     __table_args__ = (
