@@ -78,6 +78,11 @@ def _mask_secret(value: str) -> str:
     return value
 
 
+def mask_secret_url(value: str) -> str:
+    """公开别名：把含密码的 URL 掩码为 ``scheme://user:***@host/...``（API 脱敏展示组装用）。"""
+    return _mask_secret(value)
+
+
 def _invalidate_cache() -> None:
     """保存/删除后清空进程内生效配置缓存（本 worker 立即生效）。"""
     _cache["at"] = 0.0

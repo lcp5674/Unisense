@@ -2099,6 +2099,8 @@ export interface QueryEngineEffective {
   has_mysql_fallback: boolean;
   olap_configured: boolean;
   mysql_fallback_configured: boolean;
+  /** MySQL 降级连接的脱敏展示串（scheme://user:***@host/db），编辑/展示用 */
+  mysql_fallback_url_masked: string;
   updated_by: number | null;
   updated_at: string | null;
   note: string;

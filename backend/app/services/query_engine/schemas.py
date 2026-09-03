@@ -73,6 +73,9 @@ class QueryEngineEffectiveResponse(BaseModel):
     has_mysql_fallback: bool = False
     olap_configured: bool = False
     mysql_fallback_configured: bool = False
+    #: MySQL 降级连接的脱敏展示串（scheme://user:***@host/db，仅展示不含密码；
+    #: 明文 URL 绝不回传，编辑时留空表示保持原值/需重新填写）
+    mysql_fallback_url_masked: str = ""
     updated_by: int | None = None
     updated_at: str | None = None
     note: str = ""

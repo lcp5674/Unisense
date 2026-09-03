@@ -23,7 +23,10 @@ from app.core.audit import write_audit
 from app.core.exceptions import ValidationError
 from app.core.guard import guard_against_injection
 from app.db.mysql import get_db_session
-from app.services.query_engine.config_service import QueryEngineConfigService
+from app.services.query_engine.config_service import (
+    QueryEngineConfigService,
+    mask_secret_url,
+)
 from app.services.query_engine.schemas import (
     QueryEngineConfigPayload,
     QueryEngineConfigResponse,
@@ -100,6 +103,7 @@ async def get_query_engine_config(
         has_mysql_fallback=bool(eff["mysql_fallback_url"]),
         olap_configured=eff["olap_configured"],
         mysql_fallback_configured=eff["mysql_fallback_configured"],
+        mysql_fallback_url_masked=mask_secret_url(eff["mysql_fallback_url"]),
         updated_by=eff["updated_by"],
         updated_at=eff["updated_at"],
         note=_effective_note(eff),

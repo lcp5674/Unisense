@@ -68,6 +68,7 @@ function viewData(overrides: Record<string, unknown> = {}) {
       has_mysql_fallback: true,
       olap_configured: true,
       mysql_fallback_configured: true,
+      mysql_fallback_url_masked: "mysql+aiomysql://root:***@mysql:3306/unisense",
       updated_by: 1,
       updated_at: "2026-09-02T08:00:00",
       note: "数据库配置生效中（保存后无需重启，最长 30s 全量生效）",
@@ -131,5 +132,53 @@ describe("QueryEngineConfigCard 查询引擎配置", () => {
     expect(arg.engine).toBe("olap");
     expect(arg.payload).toBeUndefined();
     expect(await screen.findByText(/OLAP连通正常/)).toBeTruthy();
+  });
+
+  it("env 配置来源（无 DB 行）：编辑弹窗按生效值回填 + 接管提示 + 脱敏展示 MySQL 降级", async () => {
+    mockGet.mockResolvedValue({
+      row: null,
+      effective: {
+        source: "env",
+        olap_url: "http://doris-not-configured:8030/unisense",
+        doris_host: "doris-not-configured",
+        doris_port: 8030,
+        doris_database: "unisense",
+        doris_user: "readonly",
+        has_doris_password: false,
+        has_mysql_fallback: true,
+        olap_configured: true,
+        mysql_fallback_configured: true,
+        mysql_fallback_url_masked:
+          "mysql+aiomysql://e2e:***@mysql:3306/e2e_biz?charset=utf8mb4",
+        updated_by: null,
+        updated_at: null,
+        note: "环境变量配置生效中（DB 未启用或未配置对应段）",
+      },
+      can_edit: true,
+    } as never);
+    renderCard();
+    fireEvent.click(await screen.findByText("编辑配置"));
+    // 接管提示：当前来自环境变量、尚未写库
+    expect(screen.getByText(/当前配置来自环境变量/)).toBeTruthy();
+    // OLAP 主机按生效值回填（不再全空）
+    const hostInput = (await screen.findByDisplayValue(
+      "doris-not-configured",
+    )) as HTMLInputElement;
+    expect(hostInput.value).toBe("doris-not-configured");
+    // MySQL 降级脱敏展示（不含密码明文）
+    expect(
+      screen.getAllByText((c: string) =>
+        c.includes("mysql+aiomysql://e2e:***@mysql:3306/e2e_biz"),
+      ).length,
+    ).toBeGreaterThanOrEqual(1);
+    // 保存不改动 → payload 携带回填的主机（接管为 DB 配置）
+    fireEvent.click(screen.getByText("保 存") ?? screen.getByText("保存"));
+    await waitFor(() => expect(mockSave).toHaveBeenCalledTimes(1));
+    const payload = mockSave.mock.calls[0][0] as {
+      doris_host: string;
+      mysql_fallback_url: string;
+    };
+    expect(payload.doris_host).toBe("doris-not-configured");
+    expect(payload.mysql_fallback_url).toBe(""); // 敏感连接串不回显，留空需重填
   });
 });
