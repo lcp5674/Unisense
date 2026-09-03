@@ -88,7 +88,14 @@ async def update_dp_sync_config(
     repo = DpLineageRepository(db)
     cfg = await repo.get_config()
     if cfg is None:
-        cfg = await repo.create_default_config()
+        source_id = str(payload.get("source_id") or "").strip()
+        if not source_id:
+            return ok(
+                code="VALIDATION_ERROR",
+                message="首次保存必须提供 source_id（dp 数据源标识）",
+                data=None,
+            )
+        cfg = await repo.create_default_config(source_id)
         await db.commit()
     await repo.update_config(cfg.id, **payload, updated_by=user.id)
     await db.commit()

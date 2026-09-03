@@ -55,8 +55,18 @@ class DpLineageRepository:
         )
         return (await self._db.execute(stmt)).scalar_one_or_none()
 
-    async def create_default_config(self) -> DpSyncConfig:
-        cfg = DpSyncConfig()
+    async def create_default_config(self, source_id: str) -> DpSyncConfig:
+        """创建默认配置行（source_id 必填——dp 数据源标识）。"""
+        cfg = DpSyncConfig(
+            source_id=source_id,
+            enabled=False,
+            poll_interval_minutes=5,
+            task_type_filter=[1],
+            step_type_filter=[7],
+            llm_enabled=True,
+            resolve_memory_enabled=True,
+            owner_backfill="orphan_only",
+        )
         self._db.add(cfg)
         await self._db.flush()
         return cfg
