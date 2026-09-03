@@ -22,6 +22,13 @@ from app.api.responses import ApiResponse, ok
 from app.db.mysql import get_db_session
 from app.models.data_source import DataSource
 from app.services.collector.spi import build_collector
+from app.services.lineage.dp_sync_meta import (
+    DP_STEP_TYPES,
+    DP_TASK_TYPES,
+    catalog_with_counts,
+    count_regex_matches,
+)
+from app.services.lineage.dp_sync_parser import DEFAULT_EXCLUDE_TABLE_PATTERNS
 from app.services.lineage.dp_sync_repo import DpLineageRepository
 from app.services.lineage.dp_sync_service import DpSyncService
 
@@ -101,6 +108,118 @@ async def update_dp_sync_config(
     await db.commit()
     fresh = await repo.get_config()
     return ok(data=fresh.to_dict())
+
+
+@router.post("/exclude-preview", response_model=ApiResponse, dependencies=_ADMIN_DEPS)
+async def preview_exclude_rules(
+    payload: dict[str, Any] = Body(...),
+    db=Depends(get_db_session),
+):
+    """排除表名正则「规则校验 + 命中量预览」。
+
+    body: ``{source_id?, schema_name?, patterns: [str]}``——patterns 每行为一条
+    正则；source_id/schema_name 缺省回退当前配置。连 dp 源读任务产出表
+    （out_table 去重全集）统计命中表数与样例；正则非法返回逐条错误。
+    """
+    patterns = payload.get("patterns")
+    if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
+        return ok(
+            code="VALIDATION_ERROR", message="patterns 必须为字符串数组", data=None
+        )
+    patterns = [s.strip() for s in patterns if s and s.strip()]
+    repo = DpLineageRepository(db)
+    cfg = await repo.get_config()
+    source_id = str(
+        payload.get("source_id") or (cfg.source_id if cfg is not None else "") or ""
+    ).strip()
+    if not source_id:
+        return ok(
+            code="VALIDATION_ERROR",
+            message="请先配置 dp 数据源 source_id 再预览（或传入 source_id）",
+            data=None,
+        )
+    schema = (
+        str(
+            payload.get("schema_name")
+            or (cfg.schema_name if cfg is not None else "dp_stable")
+        ).strip()
+        or "dp_stable"
+    )
+    fetch = await _collector_factory(db)
+    try:
+        collector = await fetch(source_id)
+        try:
+            rows = await collector.query(
+                f"SELECT DISTINCT out_table AS t FROM {schema}.dispatch_task "
+                "WHERE is_deleted=0 AND out_table IS NOT NULL AND out_table <> ''"
+            )
+        finally:
+            await collector.dispose()
+    except Exception as exc:  # noqa: BLE001 —— 数据源不可达/查询失败给明确信号
+        return ok(
+            code="SOURCE_UNREACHABLE",
+            message=f"dp 数据源不可达或查询失败：{exc}",
+            data={"reachable": False, "error": str(exc)},
+        )
+    tables = [str(r["t"]) for r in rows if r.get("t")]
+    result = count_regex_matches(tables, patterns)
+    result["reachable"] = True
+    result["note"] = (
+        "预览范围为 dp 任务产出表（out_table 去重全集）；脚本内源表命中在真实解析时逐 SQL 排除。"
+    )
+    return ok(data=result)
+
+
+@router.get("/meta", response_model=ApiResponse, dependencies=_ADMIN_DEPS)
+async def get_dp_sync_meta(
+    db=Depends(get_db_session),
+):
+    """dp 类型枚举目录 + 内置排除默认规则。
+
+    内置已知映射（有实据）；配置的数据源可达时以 DISTINCT+COUNT 探测合并
+    真实类型（未内置值标注「未识别」），保证选项框覆盖全部枚举而不编造。
+    """
+    repo = DpLineageRepository(db)
+    cfg = await repo.get_config()
+    meta: dict[str, Any] = {
+        "task_types": catalog_with_counts(DP_TASK_TYPES, {}),
+        "step_types": catalog_with_counts(DP_STEP_TYPES, {}),
+        "exclude_defaults": list(DEFAULT_EXCLUDE_TABLE_PATTERNS),
+        "reachable": False,
+        "reason": "not_configured" if cfg is None else None,
+    }
+    if cfg is None:
+        return ok(data=meta)
+    fetch = await _collector_factory(db)
+    collector = None
+    try:
+        collector = await fetch(cfg.source_id)
+        schema = cfg.schema_name or "dp_stable"
+        task_rows = await collector.query(
+            f"SELECT type AS v, COUNT(*) AS c FROM {schema}.dispatch_task "
+            "WHERE is_deleted=0 GROUP BY type ORDER BY type"
+        )
+        step_rows = await collector.query(
+            f"SELECT task_step_type AS v, COUNT(*) AS c FROM {schema}.dispatch_task_step "
+            "WHERE is_deleted=0 GROUP BY task_step_type ORDER BY task_step_type"
+        )
+        tcounts = {int(r["v"]): int(r["c"]) for r in task_rows}
+        scounts = {int(r["v"]): int(r["c"]) for r in step_rows}
+        meta.update(
+            {
+                "task_types": catalog_with_counts(DP_TASK_TYPES, tcounts),
+                "step_types": catalog_with_counts(DP_STEP_TYPES, scounts),
+                "reachable": True,
+                "reason": None,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 —— 探测失败不阻断：返回内置 + 原因
+        meta["reachable"] = False
+        meta["reason"] = f"dp 数据源不可达或探测失败：{exc}"
+    finally:
+        if collector is not None:
+            await collector.dispose()
+    return ok(data=meta)
 
 
 @router.get("/tickets", response_model=ApiResponse, dependencies=_ADMIN_DEPS)

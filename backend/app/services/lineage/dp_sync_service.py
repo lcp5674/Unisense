@@ -35,6 +35,7 @@ from app.services.lineage.dp_sync_llm import (
     parse_confirm_response,
     parse_fallback_response,
 )
+from app.services.lineage.dp_sync_meta import merged_exclude_table_patterns
 from app.services.lineage.dp_sync_parser import parse_dp_step
 from app.services.lineage.dp_sync_repo import DpLineageRepository
 from app.services.lineage.parser import node_table
@@ -47,6 +48,34 @@ _LLM_MAX_TOKENS = 2000
 
 #: dp 通道 provenance 标记。
 DP_PROVENANCE = "dp_sql"
+
+
+def _in_clause(
+    column: str, values: list[int], prefix: str, params: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    """构造 `` AND col IN (:p0,:p1)`` 子句；values 为空（=全部）返回空子句。"""
+    if not values:
+        return "", params
+    ph = ",".join(f":{prefix}{i}" for i in range(len(values)))
+    for i, v in enumerate(values):
+        params[f"{prefix}{i}"] = v
+    return f" AND {column} IN ({ph})", params
+
+
+def _type_filters(config: Any) -> tuple[list[int], list[int]]:
+    """类型过滤取值：显式空列表 = 全部；未设置（None）= 默认 SQL 范围 [1]/[7]。"""
+    task_types = (
+        list(config.task_type_filter)
+        if config.task_type_filter is not None
+        else [1]
+    )
+    step_types = (
+        list(config.step_type_filter)
+        if config.step_type_filter is not None
+        else [7]
+    )
+    return task_types, step_types
+
 
 
 def sql_fingerprint(sql: str) -> str:
@@ -131,7 +160,9 @@ class DpSyncService:
         outcome = parse_dp_step(
             sql,
             dialect="hive",
-            exclude_patterns=config.exclude_table_patterns,
+            exclude_patterns=merged_exclude_table_patterns(
+                config.exclude_table_patterns
+            ),
             rules=config.llm_complexity_rules,
             target_table=task.get("out_table") or None,
         )
@@ -569,14 +600,13 @@ class DpSyncService:
 
         首轮无水位 = 全量（活跃 type 过滤任务）。返回 (ids, task_max, step_max)。
         """
-        task_types = list(config.task_type_filter or [1])
-        step_types = list(config.step_type_filter or [7])
-        placeholders = ",".join(f":t{i}" for i in range(len(task_types)))
-        params: dict[str, Any] = {f"t{i}": v for i, v in enumerate(task_types)}
+        task_types, step_types = _type_filters(config)
+        params: dict[str, Any] = {}
+        task_clause, params = _in_clause("type", task_types, "t", params)
         task_wm = wm.last_max_update if wm is not None else None
         base = (
             "SELECT id FROM dp_stable.dispatch_task "
-            f"WHERE is_deleted=0 AND type IN ({placeholders})"
+            f"WHERE is_deleted=0{task_clause}"
         )
         if task_wm is not None:
             params["twm"] = task_wm
@@ -584,10 +614,14 @@ class DpSyncService:
         rows = await collector.query(base, params)
         ids = {int(r["id"]) for r in rows}
         # task 变更水位推进（增量模式下含本批最大；全量模式取全部最大）
+        task_max_params: dict[str, Any] = {}
+        task_max_clause, task_max_params = _in_clause(
+            "type", task_types, "t", task_max_params
+        )
         task_rows = await collector.query(
             "SELECT MAX(gmt_modified) AS m FROM dp_stable.dispatch_task "
-            f"WHERE is_deleted=0 AND type IN ({placeholders})",
-            params,
+            f"WHERE is_deleted=0{task_max_clause}",
+            task_max_params,
         )
         task_max = task_rows[0]["m"] if task_rows and task_rows[0]["m"] else task_wm
         # step 独立变更：按 step 水位补任务（跨表 join 保证 task type 过滤）
@@ -595,25 +629,28 @@ class DpSyncService:
         swm_row = await self._dp_repo.get_watermark("step")
         if swm_row is not None:
             step_wm = swm_row.last_max_update
-        sph = ",".join(f":s{i}" for i in range(len(step_types)))
-        sp = {f"s{i}": v for i, v in enumerate(step_types)}
+        sp: dict[str, Any] = {}
+        task_join_clause, sp = _in_clause("t.type", task_types, "t", sp)
+        step_clause, sp = _in_clause("st.task_step_type", step_types, "s", sp)
         step_sql = (
             "SELECT DISTINCT st.task_id AS id FROM dp_stable.dispatch_task_step st "
             "JOIN dp_stable.dispatch_task t ON st.task_id=t.id "
-            f"WHERE st.is_deleted=0 AND t.is_deleted=0 AND t.type IN ({placeholders}) "
-            f"AND st.task_step_type IN ({sph})"
+            f"WHERE st.is_deleted=0 AND t.is_deleted=0{task_join_clause}{step_clause}"
         )
-        sp.update({f"t{i}": v for i, v in enumerate(task_types)})
         if step_wm is not None:
             sp["swm"] = step_wm
             step_sql += " AND st.gmt_modified > :swm"
         step_rows = await collector.query(step_sql, sp)
         ids.update(int(r["id"]) for r in step_rows)
         # step 变更水位推进
+        sp_max: dict[str, Any] = {}
+        step_max_clause, sp_max = _in_clause(
+            "task_step_type", step_types, "s", sp_max
+        )
         step_max_rows = await collector.query(
             "SELECT MAX(gmt_modified) AS m FROM dp_stable.dispatch_task_step "
-            f"WHERE is_deleted=0 AND task_step_type IN ({sph})",
-            {f"s{i}": v for i, v in enumerate(step_types)},
+            f"WHERE is_deleted=0{step_max_clause}",
+            sp_max,
         )
         step_max = (
             step_max_rows[0]["m"] if step_max_rows and step_max_rows[0]["m"] else step_wm
@@ -665,7 +702,9 @@ class DpSyncService:
         outcome = parse_dp_step(
             sql,
             dialect="hive",
-            exclude_patterns=config.exclude_table_patterns,
+            exclude_patterns=merged_exclude_table_patterns(
+                config.exclude_table_patterns
+            ),
             rules=config.llm_complexity_rules,
             target_table=task.get("out_table") or None,
         )
@@ -688,15 +727,16 @@ class DpSyncService:
     async def _fetch_sql_steps(
         self, collector: Any, task_id: int, config: Any
     ) -> list[dict[str, Any]]:
-        step_types = list(config.step_type_filter or [7])
-        placeholders = ",".join(f":s{i}" for i in range(len(step_types)))
-        params: dict[str, Any] = {f"s{i}": v for i, v in enumerate(step_types)}
-        params["tid"] = task_id
+        _, step_types = _type_filters(config)
+        params: dict[str, Any] = {"tid": task_id}
+        step_clause, params = _in_clause(
+            "task_step_type", step_types, "s", params
+        )
         return await collector.query(
             "SELECT id AS step_id, task_id, task_step, "
             "task_step_name AS step_name, task_step_type, task_node_type, script_info "
             "FROM dp_stable.dispatch_task_step "
-            f"WHERE task_id=:tid AND is_deleted=0 AND task_step_type IN ({placeholders}) "
+            f"WHERE task_id=:tid AND is_deleted=0{step_clause} "
             "ORDER BY task_step",
             params,
         )
