@@ -279,6 +279,49 @@ class TestLlmClient:
         assert payload["stream"] is False
 
     @pytest.mark.asyncio
+    async def test_chat_disable_thinking_appends_template_kwargs(self) -> None:
+        """disable_thinking=True 时请求体附加 chat_template_kwargs.enable_thinking=false。
+
+        本地 Qwen3 默认输出 <think> 推理，max_tokens 被思考耗尽 → content 空 → 触发
+        重试/failover（160s 放大根因）。此开关从模板层关闭思考（llama.cpp server 支持，
+        远程 OpenAI 兼容网关忽略未知字段）。
+        """
+        client = LlmClient(
+            base_url="https://api.example.com", api_key="test-key", disable_thinking=True
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.headers = {"content-type": "application/json"}
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": '{"ok":true}', "finish_reason": "stop"}}],
+            "model": "test-model",
+        }
+        client._client = MagicMock()
+        client._client.post = AsyncMock(return_value=mock_response)
+        await client.chat([{"role": "user", "content": "返回 JSON"}])
+        payload = client._client.post.call_args[1]["json"]
+        assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+    @pytest.mark.asyncio
+    async def test_chat_disable_thinking_false_no_kwargs(self) -> None:
+        """默认（disable_thinking=False）不附加 chat_template_kwargs——保持远程原请求体。"""
+        client = LlmClient(base_url="https://api.example.com", api_key="test-key")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.headers = {"content-type": "application/json"}
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "Hello", "finish_reason": "stop"}}],
+            "model": "test-model",
+        }
+        client._client = MagicMock()
+        client._client.post = AsyncMock(return_value=mock_response)
+        await client.chat([{"role": "user", "content": "Hi"}])
+        payload = client._client.post.call_args[1]["json"]
+        assert "chat_template_kwargs" not in payload
+
+    @pytest.mark.asyncio
     async def test_chat_sse_response_aggregates_delta(self) -> None:
         """方案 2：网关返回 text/event-stream 时，逐帧聚合 delta 而非把信封原文当 content。"""
         client = LlmClient(base_url="https://api.example.com", api_key="test-key")

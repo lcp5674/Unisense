@@ -150,6 +150,42 @@ class TestCreateUpdateDelete:
         # base_url 归一化：openai 预设（含 /v1）落库为干净裸 URL
         assert added.base_url == "https://api.openai.com"
 
+    async def test_create_persists_disable_thinking(self) -> None:
+        """create 把 disable_thinking 开关写入实例（本地 Qwen3 关思考，防 token 被思考耗尽）。"""
+        s = _session([])
+        payload = LlmConfigPayload(
+            name="本地 Qwen3",
+            provider="custom",
+            base_url="http://host.docker.internal:8082",
+            model="qwen3-30b-a3b",
+            api_key="local",
+            timeout=120,
+            enabled=True,
+            disable_thinking=True,
+        )
+        await LlmConfigService(s).create(payload, updated_by=7)
+        added = s.add.call_args[0][0]
+        assert isinstance(added, LlmConfig)
+        assert added.disable_thinking is True
+
+    async def test_update_persists_disable_thinking(self) -> None:
+        """update 更新 disable_thinking 开关（编辑开启/关闭思考模式生效）。"""
+        s = _session()
+        existing = _row()
+        s.execute.return_value.scalar_one_or_none.return_value = existing
+        payload = LlmConfigPayload(
+            name="改",
+            provider="custom",
+            base_url="https://new.example.com",
+            model="m1",
+            api_key="",
+            timeout=30,
+            enabled=True,
+            disable_thinking=True,
+        )
+        await LlmConfigService(s).update(1, payload, updated_by=2)
+        assert existing.disable_thinking is True
+
     async def test_update_keeps_key_when_payload_empty(self) -> None:
         s = _session()
         existing = _row()
@@ -251,6 +287,18 @@ class TestBuildClient:
         from app.services.llm.client import LlmClient
 
         assert isinstance(client, LlmClient)
+
+    async def test_build_single_client_passes_disable_thinking(self) -> None:
+        """build_client 把 disable_thinking 透传给 LlmClient（chat 附加 enable_thinking=false）。"""
+        s = _session([_row(disable_thinking=True)])
+        with patch("app.services.llm.config_service.settings") as ms:
+            ms.llm_base_url = ""
+            ms.llm_api_key = ""
+            client = await LlmConfigService(s).build_client()
+        from app.services.llm.client import LlmClient
+
+        assert isinstance(client, LlmClient)
+        assert client._disable_thinking is True
 
     async def test_build_fallback_when_no_config(self) -> None:
         s = _session([])

@@ -58,6 +58,12 @@ class LlmConfig(Base, BaseModel):
     priority: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, comment="路由优先级（小者优先，0 最高）"
     )
+    disable_thinking: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        comment="是否关闭模型思考模式（Qwen3 等默认思考，开启可避免 token 被思考耗尽）",
+    )
     updated_by: Mapped[int | None] = mapped_column(
         nullable=True, comment="最后编辑者用户 ID"
     )

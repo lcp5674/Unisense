@@ -188,6 +188,7 @@ class LlmConfigService:
                     "model": row.model,
                     "api_key": api_key,
                     "timeout": row.timeout or 30,
+                    "disable_thinking": bool(row.disable_thinking),
                     "source": "db",
                     "instance_id": row.id,
                     "name": row.name,
@@ -201,6 +202,7 @@ class LlmConfigService:
                 "model": settings.llm_default_model,
                 "api_key": settings.llm_api_key,
                 "timeout": 30,
+                "disable_thinking": False,
                 "source": "env",
                 "instance_id": None,
                 "name": "环境变量",
@@ -213,6 +215,7 @@ class LlmConfigService:
             "model": "",
             "api_key": "",
             "timeout": 30,
+            "disable_thinking": False,
             "source": "none",
             "instance_id": None,
             "name": "",
@@ -249,6 +252,7 @@ class LlmConfigService:
             timeout=payload.timeout,
             enabled=payload.enabled,
             priority=payload.priority,
+            disable_thinking=payload.disable_thinking,
             updated_by=updated_by,
         )
         if payload.api_key.strip():
@@ -273,6 +277,7 @@ class LlmConfigService:
         row.timeout = payload.timeout
         row.enabled = payload.enabled
         row.priority = payload.priority
+        row.disable_thinking = payload.disable_thinking
         row.updated_by = updated_by
         if payload.api_key.strip():
             row.api_key_enc = SecretManager.encrypt({"api_key": payload.api_key.strip()})
@@ -323,6 +328,7 @@ class LlmConfigService:
                     timeout=float(row.timeout or 30),
                     breaker=breaker,
                     name=row.name or f"llm-{row.id}",
+                    disable_thinking=bool(row.disable_thinking),
                 )
             )
         # 环境变量兜底实例（始终参与路由，避免 DB 全部禁用时降级）

@@ -388,7 +388,13 @@ export function SystemConfig() {
   function openCreate() {
     setEditing(null);
     form.resetFields();
-    form.setFieldsValue({ provider: "custom", timeout: 30, enabled: true, priority: 0 });
+    form.setFieldsValue({
+      provider: "custom",
+      timeout: 30,
+      enabled: true,
+      priority: 0,
+      disable_thinking: false,
+    });
     clearReveal();
     setModelOptions([]);
     setModelOpen(false);
@@ -407,6 +413,7 @@ export function SystemConfig() {
       timeout: item.timeout,
       enabled: item.enabled,
       priority: item.priority,
+      disable_thinking: item.disable_thinking,
       // api_key 不回填明文：留空表示保持原密钥，按需经「显示密钥」按钮解密回显
     });
     clearReveal();
@@ -475,6 +482,7 @@ export function SystemConfig() {
         timeout: values.timeout,
         enabled: values.enabled,
         priority: values.priority ?? 0,
+        disable_thinking: values.disable_thinking ?? false,
       };
       // P0-4 生效反馈：记录保存前位次（编辑场景），保存后对比给出"新位次"
       const prevRank = editing?.id != null ? computeRank(data?.items ?? [], editing.id) : -1;
@@ -599,6 +607,7 @@ export function SystemConfig() {
       timeout: item.timeout,
       enabled: item.enabled,
       priority: item.priority,
+      disable_thinking: item.disable_thinking,
     };
   }
 
@@ -1156,7 +1165,16 @@ export function SystemConfig() {
               <InputNumber min={0} max={100} />
             </Form.Item>
             <Form.Item name="enabled" label="启用" valuePropName="checked" style={{ marginBottom: 12 }}>
-              <Switch />
+              <Switch aria-label="启用" />
+            </Form.Item>
+            <Form.Item
+              name="disable_thinking"
+              label="关闭思考"
+              valuePropName="checked"
+              tooltip="本地 Qwen3/DeepSeek-R1 等默认先输出 <think> 推理，会占满 max_tokens 导致返回为空、触发重试（单次推断被放大到 160s）。开启后请求附加 enable_thinking=false 从模板层关闭思考；远程 OpenAI 兼容网关忽略该字段，无副作用"
+              style={{ marginBottom: 12 }}
+            >
+              <Switch aria-label="关闭思考" />
             </Form.Item>
           </Space>
         </Form>

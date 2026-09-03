@@ -81,6 +81,7 @@ const PRIMARY_ITEM = {
   timeout: 30,
   enabled: true,
   priority: 0,
+  disable_thinking: false,
   source: "db",
   can_edit: true,
   updated_by: 1,
@@ -189,6 +190,36 @@ describe("SystemConfig LLM 路由配置", () => {
           base_url: "https://dashscope.aliyuncs.com/compatible-mode",
           model: "qwen-turbo",
           api_key: "sk-test",
+        }),
+      );
+    });
+  });
+
+  it("新增实例：默认关闭思考=false，开启后保存 payload 含 disable_thinking:true", async () => {
+    mockCreate.mockResolvedValue({ id: 2 });
+    render(<SystemConfig />, { wrapper: MemoryRouter });
+    fireEvent.click(await screen.findByText("新增 LLM 实例"));
+    // 默认新增弹窗中「关闭思考」开关为关
+    const sw = await screen.findByRole("switch", { name: "关闭思考" });
+    expect(sw.getAttribute("aria-checked")).toBe("false");
+    fireEvent.change(screen.getByPlaceholderText("https://api.deepseek.com"), {
+      target: { value: "http://host.docker.internal:8082" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "模型名称" }), {
+      target: { value: "qwen3-30b-a3b" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("sk-..."), {
+      target: { value: "local" },
+    });
+    fireEvent.click(sw); // 开启「关闭思考」（本地 Qwen3 场景）
+    expect(sw.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => {
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          base_url: "http://host.docker.internal:8082",
+          model: "qwen3-30b-a3b",
+          disable_thinking: true,
         }),
       );
     });
@@ -329,7 +360,7 @@ describe("SystemConfig LLM 路由配置", () => {
       expect(screen.getByDisplayValue("deepseek-chat")).toBeTruthy();
     });
     // 停用：关闭「启用」Switch（PRIMARY_ITEM 初始 enabled=true）
-    const sw = screen.getByRole("switch");
+    const sw = screen.getByRole("switch", { name: "启用" });
     expect(sw.getAttribute("aria-checked")).toBe("true");
     fireEvent.click(sw);
     expect(sw.getAttribute("aria-checked")).toBe("false");

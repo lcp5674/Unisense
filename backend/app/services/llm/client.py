@@ -184,12 +184,18 @@ class LlmClient:
         timeout: float = 30.0,
         breaker: Any | None = None,
         name: str = "llm",
+        disable_thinking: bool = False,
     ) -> None:
         self._base_url = (base_url or settings.llm_base_url or "").rstrip("/")
         self._api_key = api_key or settings.llm_api_key
         self._model = model or settings.llm_default_model
         self._timeout = timeout
         self._name = name
+        # 关闭思考模式（本地 Qwen3/DeepSeek-R1 等默认输出 <think> 推理）：为 True 时
+        # 请求体附加 chat_template_kwargs={"enable_thinking": False}，从模板层关闭思考，
+        # 避免 max_tokens 被思考耗尽、content 为空触发重试/failover（160s 放大根因）。
+        # 远程 provider（OpenAI 等）忽略未知字段，无副作用；仅 DB 实例可配置（env 兜底为 False）。
+        self._disable_thinking = disable_thinking
         # 熔断器：多实例路由时传入「每实例专属熔断器」实现隔离（某实例故障不牵连其他实例）；
         # 缺省回落到模块级全局熔断器（单实例/直接构建场景，向后兼容）。
         self._breaker = breaker or _LLM_BREAKER
@@ -266,6 +272,12 @@ class LlmClient:
             # 「流式原文垃圾」。明确告知期望一次性返回，避免网关进入流式路径。
             "stream": False,
         }
+        # 实例配置「关闭思考模式」：本地 Qwen3 等默认 enable_thinking=True，会在输出
+        # 正文前生成 <think> 推理——max_tokens 被思考耗尽则 content 残缺/为空，触发
+        # 下游多轮重试/failover。llama.cpp server 支持 chat_template_kwargs 从模板层
+        # 关闭思考（system prompt「不要思考」不可靠）；OpenAI 等远程网关忽略未知字段。
+        if self._disable_thinking:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         last_exc: Exception | None = None
         max_retries = _LLM_MAX_RETRIES if retries is None else max(retries, 0)

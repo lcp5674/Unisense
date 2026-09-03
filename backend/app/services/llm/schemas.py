@@ -23,9 +23,20 @@ class LlmConfigPayload(BaseModel):
     base_url: str = Field("", max_length=256, description="OpenAI 兼容接口基础 URL")
     model: str = Field("", max_length=128, description="模型名称")
     api_key: str = Field("", description="API Key（留空表示保持原密钥）")
-    timeout: int = Field(30, ge=1, le=900, description="请求超时秒数（CPU 推理单请求可达数分钟，上限 900s）")
+    timeout: int = Field(
+        30,
+        ge=1,
+        le=900,
+        description="请求超时秒数（CPU 推理单请求可达数分钟，上限 900s）",
+    )
     enabled: bool = Field(False, description="是否启用该实例（仅启用参与路由）")
     priority: int = Field(0, ge=0, le=100, description="路由优先级（小者优先，0 最高）")
+    disable_thinking: bool = Field(
+        False,
+        description="是否关闭模型思考模式（本地 Qwen3/DeepSeek-R1 等默认输出 <think> 推理，"
+        "关闭可避免 max_tokens 被思考耗尽、content 为空触发重试/failover；"
+        "远程 provider 忽略该附加字段）",
+    )
 
     @field_validator("base_url", "model", mode="after")
     @classmethod
@@ -45,6 +56,7 @@ class LlmConfigResponse(BaseModel):
     timeout: int = 30
     enabled: bool = False
     priority: int = 0
+    disable_thinking: bool = False
     source: str = "none"  # db | env | none
     can_edit: bool = False
     updated_by: int | None = None
@@ -63,6 +75,7 @@ class LlmConfigResponse(BaseModel):
         timeout: int = 30,
         enabled: bool = False,
         priority: int = 0,
+        disable_thinking: bool = False,
         source: str = "none",
         can_edit: bool = False,
         updated_by: int | None = None,
@@ -78,6 +91,7 @@ class LlmConfigResponse(BaseModel):
             timeout=timeout,
             enabled=enabled,
             priority=priority,
+            disable_thinking=disable_thinking,
             source=source,
             can_edit=can_edit,
             updated_by=updated_by,
@@ -107,7 +121,12 @@ class LlmConfigTestRequest(BaseModel):
     base_url: str = Field("", max_length=256, description="OpenAI 兼容接口基础 URL")
     model: str = Field("", max_length=128, description="模型名称")
     api_key: str = Field("", description="API Key（留空回落已保存/环境密钥）")
-    timeout: int = Field(30, ge=1, le=900, description="请求超时秒数（CPU 推理单请求可达数分钟，上限 900s）")
+    timeout: int = Field(
+        30,
+        ge=1,
+        le=900,
+        description="请求超时秒数（CPU 推理单请求可达数分钟，上限 900s）",
+    )
 
 
 class LlmConfigSecretResponse(BaseModel):
@@ -163,7 +182,12 @@ class LlmModelsRequest(BaseModel):
     instance_id: int | None = Field(None, description="已保存实例 ID")
     base_url: str = Field("", max_length=256, description="OpenAI 兼容接口基础 URL")
     api_key: str = Field("", description="API Key（留空回落已保存/环境密钥）")
-    timeout: int = Field(30, ge=1, le=900, description="请求超时秒数（CPU 推理单请求可达数分钟，上限 900s）")
+    timeout: int = Field(
+        30,
+        ge=1,
+        le=900,
+        description="请求超时秒数（CPU 推理单请求可达数分钟，上限 900s）",
+    )
     provider: str = Field("", max_length=32, description="提供商标识（目录兜底用）")
 
 

@@ -1436,15 +1436,33 @@ class CollectorService(BaseService):
             if attempt:
                 aug = [*messages, {"role": "user", "content": _STRICT_JSON_HINT}]
             for fmt in (_DESCRIPTION_RESPONSE_FORMAT, _JSON_OBJECT_FORMAT):
+                fmt_name = "json_schema" if fmt is _DESCRIPTION_RESPONSE_FORMAT else "json_object"
                 try:
                     result = await client.chat(
                         aug, temperature=0.0, max_tokens=max_tokens, response_format=fmt
                     )
-                except LlmError:
+                except LlmError as exc:
+                    # 单次调用失败（超时/空 content/网关错误）：记 warning 便于观测重试放大，
+                    # 继续下一格式/尝试（此前静默 continue 导致 160s 级放大无迹可查）。
+                    logger.warning(
+                        "llm_infer_desc_attempt_failed: attempt=%d fmt=%s max_tokens=%d err=%s",
+                        attempt,
+                        fmt_name,
+                        max_tokens,
+                        exc,
+                    )
                     continue
                 description, confidence = parse_description_result(result.get("content", ""))
                 if description is not None and confidence is not None:
                     return {"description": description, "confidence": confidence}
+                # 解析失败（模型返回非目标结构/空 content）：记 warning 后重试下一格式，
+                # 避免「静默 4 次重发」让单次推断墙钟放大到数分钟而无日志。
+                logger.warning(
+                    "llm_infer_desc_parse_failed: attempt=%d fmt=%s content_len=%d",
+                    attempt,
+                    fmt_name,
+                    len(result.get("content") or ""),
+                )
         logger.warning("llm_infer_desc_all_formats_failed: 强约束与降级均无法解析")
         return None
 
@@ -1584,7 +1602,7 @@ class CollectorService(BaseService):
                 },
             ]
 
-            result = await self._infer_description_structured(client, messages, max_tokens=200)
+            result = await self._infer_description_structured(client, messages, max_tokens=120)
             return result
         except (TimeoutError, ConnectionError, OSError) as exc:
             logger.warning("llm_infer_desc_timeout_error: %s", exc)
@@ -1737,7 +1755,7 @@ class CollectorService(BaseService):
                 },
             ]
 
-            result = await self._infer_description_structured(client, messages, max_tokens=300)
+            result = await self._infer_description_structured(client, messages, max_tokens=150)
             return result
         except (TimeoutError, ConnectionError, OSError) as exc:
             logger.warning("llm_infer_table_desc_timeout_error: %s", exc)

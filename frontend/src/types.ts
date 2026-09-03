@@ -2024,6 +2024,7 @@ export interface LlmConfigItem {
   timeout: number;
   enabled: boolean;
   priority: number;
+  disable_thinking: boolean;
   source: "db" | "env" | "none";
   can_edit: boolean;
   updated_by: number | null;
@@ -2051,6 +2052,7 @@ export interface LlmConfigPayload {
   timeout: number;
   enabled: boolean;
   priority: number;
+  disable_thinking: boolean;
 }
 
 export interface LlmConfigTestResult {

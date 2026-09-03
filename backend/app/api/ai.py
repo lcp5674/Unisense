@@ -128,6 +128,7 @@ async def get_llm_config(
             timeout=row.timeout or 30,
             enabled=row.enabled,
             priority=row.priority or 0,
+            disable_thinking=bool(row.disable_thinking),
             source="db",
             can_edit=can_edit,
             updated_by=row.updated_by,
