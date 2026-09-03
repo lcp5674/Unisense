@@ -77,7 +77,8 @@ class FallbackFlow:
 def build_confirm_messages(sql: str, sqlglot_json: dict) -> list[dict[str, str]]:
     """构造共识确认请求消息。"""
     user_content = (
-        f"SQL：\n```sql\n{sql}\n```\n\nsqlglot 提取的血缘结果（JSON）：\n{json.dumps(sqlglot_json, ensure_ascii=False, indent=2)}\n\n"
+        f"SQL：\n```sql\n{sql}\n```\n\nsqlglot 提取的血缘结果（JSON）：\n"
+        f"{json.dumps(sqlglot_json, ensure_ascii=False, indent=2)}\n\n"
         "请校验并只输出差异。"
     )
     return [
