@@ -49,6 +49,7 @@ import {
   UnisenseApiError,
 } from "../api";
 import { navigateToSearchItem } from "../utils/searchNavigate";
+import { BatchInferCenter } from "./BatchInferCenter";
 
 const ROLE_LABEL: Record<string, string> = {
   platform_admin: "平台管理员",
@@ -781,6 +782,8 @@ export function Layout({ user }: { user: CurrentUser }) {
         force={forceChangeRequired}
         onClose={handlePasswordModalClose}
       />
+      {/* 跨表批量 LLM 推断任务中心（方案 B）：右下角浮条，任意页面可见批量进度/结果 */}
+      <BatchInferCenter />
     </AntLayout>
   );
 }

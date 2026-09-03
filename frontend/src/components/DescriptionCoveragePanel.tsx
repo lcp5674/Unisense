@@ -45,6 +45,7 @@ import {
   inferTableDescription,
   listCatalogDatabases,
   listDataSources,
+  submitBatchInferTask,
   updateColumnDescription,
   updateTableDescription,
 } from "../api";
@@ -1216,6 +1217,40 @@ export const DescriptionCoveragePanel = forwardRef<
     setBatchOpen(true);
   }
 
+  /**
+   * 提交跨表批量推断为后端任务（方案 B：arq 执行 + 进度落库）。
+   * 关闭本地进度弹窗，进度/结果经右下角「批量任务中心」（BatchInferCenter）跨页可见，
+   * 刷新不丢（服务端 batch_llm_infer_task 行，前端轮询恢复）。
+   */
+  async function submitBackendBatch(tasks: BatchTask[]) {
+    if (tasks.length === 0) return;
+    try {
+      const task = await submitBatchInferTask({
+        tasks: tasks.map((t) => ({
+          catalog_id: t.catalog_id,
+          entity_name: t.entity_name,
+          missing_fields: t.missing_fields,
+          needs_table_desc: t.needs_table_desc,
+        })),
+        concurrency: batchConcurrency,
+      });
+      message.success(
+        `批量推断任务已提交（#${task.id}，共 ${task.total} 张表）——进度与结果在右下角「批量任务中心」实时查看`,
+      );
+      setLastFailed([]);
+      try {
+        localStorage.removeItem("unisense.desc-coverage.lastBatchFailed");
+      } catch {
+        // localStorage 不可用时静默降级
+      }
+      closeBatch();
+      await load();
+      setSelectedRowKeys([]);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "提交批量推断任务失败");
+    }
+  }
+
   /** 从上次失败记录一键恢复：重新勾选失败表并打开确认面板（并清除旧提示）。 */
   function relaunchLastFailed() {
     setSelectedRowKeys(lastFailed.map((f) => f.catalog_id));
@@ -1823,7 +1858,7 @@ export const DescriptionCoveragePanel = forwardRef<
                       <Button
                         type="primary"
                         icon={<ThunderboltOutlined />}
-                        onClick={() => startBatchInfer(selectedTasks)}
+                        onClick={() => submitBackendBatch(selectedTasks)}
                       >
                         开始推断
                       </Button>

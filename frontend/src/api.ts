@@ -4921,6 +4921,80 @@ export async function inferTableDescription(
   );
 }
 
+// ---- 跨表批量 LLM 推断后台任务（方案 B：arq 执行，进度落库跨页可见） ----
+
+export interface BatchInferTaskItem {
+  catalog_id: number;
+  entity_name: string;
+  missing_fields: number;
+  needs_table_desc: boolean;
+}
+
+export interface BatchInferTaskProgressItem {
+  catalog_id: number;
+  entity_name: string;
+  status: "pending" | "running" | "done" | "error" | "cancelled";
+  summary: string;
+  detail?: string;
+  error_category?: string | null;
+  added?: number;
+  skipped?: number;
+  inferred?: string[];
+}
+
+export interface BatchInferTask {
+  id: number;
+  actor_id: number | null;
+  actor_name: string | null;
+  status: "pending" | "running" | "completed" | "cancelled" | "failed";
+  total: number;
+  done: number;
+  failed: number;
+  cancelled: number;
+  added_total: number;
+  concurrency: number;
+  cancel_requested: boolean;
+  error?: string | null;
+  tasks: BatchInferTaskItem[];
+  progress: BatchInferTaskProgressItem[];
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+/** 提交跨表批量 LLM 推断任务（返回任务初始状态，前端轮询进度）。 */
+export async function submitBatchInferTask(
+  payload: { tasks: BatchInferTaskItem[]; concurrency?: number },
+): Promise<BatchInferTask> {
+  return request<BatchInferTask>(
+    `${API_BASE}/catalogs/batch-llm-infer`,
+    { method: "POST", body: JSON.stringify(payload), timeout: 30_000 },
+  );
+}
+
+/** 批量任务列表（含进行中与最近历史，按创建倒序；本人可见）。 */
+export async function listBatchInferTasks(limit = 50): Promise<BatchInferTask[]> {
+  const qs = pageQs({ limit });
+  return request<BatchInferTask[]>(
+    `${API_BASE}/catalogs/batch-llm-infer${qs ? `?${qs}` : ""}`,
+  );
+}
+
+/** 单任务进度（任务中心轮询用）。 */
+export async function getBatchInferTask(taskId: number): Promise<BatchInferTask> {
+  return request<BatchInferTask>(
+    `${API_BASE}/catalogs/batch-llm-infer/${taskId}`,
+  );
+}
+
+/** 请求取消批量任务（置 cancel_requested，worker 协作收尾）。 */
+export async function cancelBatchInferTask(taskId: number): Promise<BatchInferTask> {
+  return request<BatchInferTask>(
+    `${API_BASE}/catalogs/batch-llm-infer/${taskId}/cancel`,
+    { method: "POST", timeout: 30_000 },
+  );
+}
+
 // ---- 跨表批量 LLM 推断历史（服务端持久化，跨设备/团队可见） ----
 
 export interface BatchInferHistoryTable {
