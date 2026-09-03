@@ -976,6 +976,80 @@ describe("Catalogs 页面", () => {
     });
   });
 
+  it("描述缺失治理面板：治理抽屉表级推断提交后端任务（进度入任务中心，不再走同步端点）", async () => {
+    vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
+      total_tables: 1,
+      tables_with_desc: 0,
+      tables_missing_desc: 1,
+      total_fields: 2,
+      fields_with_desc: 1,
+      fields_missing_desc: 1,
+      per_table: [
+        {
+          catalog_id: 1, entity_name: "ods_order", source_id: "s1", source_name: "Sales MySQL",
+          entity_type: "TABLE", domain: "sales", sensitivity_level: "INTERNAL", table_desc: false,
+          description: null, description_source: null, owner_name: null,
+          total_fields: 2, covered_fields: 1, missing_fields: 1,
+          missing_field_names: ["id"], updated_at: "2026-08-14T02:30:00",
+        },
+      ],
+    });
+    vi.mocked(fetchAssetEntityDetail).mockResolvedValue({
+      id: 1,
+      entity_name: "ods_order",
+      entity_type: "TABLE",
+      source_id: "s1",
+      sensitivity_level: "INTERNAL",
+      owner_id: null,
+      schema_incomplete: false,
+      content_signature: "sig1",
+      schema_summary: [],
+      description: null,
+      description_source: null,
+    } as never);
+    vi.mocked(submitBatchInferTask).mockResolvedValue({
+      id: 9,
+      actor_id: 1,
+      actor_name: "admin",
+      status: "pending",
+      total: 1,
+      done: 0,
+      failed: 0,
+      cancelled: 0,
+      added_total: 0,
+      concurrency: 1,
+      cancel_requested: false,
+      tasks: [{ catalog_id: 1, entity_name: "ods_order", missing_fields: 0, needs_table_desc: true }],
+      progress: [],
+      created_at: "2026-08-14T02:30:00",
+    } as never);
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText("ods_order")).toBeTruthy());
+    fireEvent.click(screen.getByText("ods_order"));
+    await waitFor(() => expect(screen.getByText("暂无表级描述")).toBeTruthy());
+
+    // 表级「推断」按钮（canInferCatalog 默认 fail-open true 可点；accessible name 含 icon 前缀 "thunderbolt 推断"）
+    fireEvent.click(screen.getByRole("button", { name: /推断$/ }));
+    await waitFor(() => {
+      expect(submitBatchInferTask).toHaveBeenCalledWith({
+        tasks: [
+          { catalog_id: 1, entity_name: "ods_order", missing_fields: 0, needs_table_desc: true },
+        ],
+        concurrency: 1,
+      });
+    });
+    // 不再直接调用同步推断端点
+    expect(inferTableDescription).not.toHaveBeenCalled();
+    expect(inferDescriptions).not.toHaveBeenCalled();
+    // 提示进度与结果在右下角任务中心查看
+    await waitFor(() => expect(screen.getByText(/批量任务中心/)).toBeTruthy());
+  });
+
   it("描述缺失治理面板：按数据源筛选治理（选择数据源后按 source_id 重新拉取）", async () => {
     render(
       <MemoryRouter>

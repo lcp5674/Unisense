@@ -575,6 +575,11 @@ export const DescriptionCoveragePanel = forwardRef<
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detail, setDetail] = useState<AssetEntityDetail | null>(null);
+  // 抽屉当前实体 id（ref：供异步任务完成回调安全判断「是否仍开着本表」，避免误刷新已切换/关闭的抽屉）
+  const detailIdRef = useRef<number | null>(null);
+  useEffect(() => {
+    detailIdRef.current = detail?.id ?? null;
+  }, [detail]);
 
   // 表级描述编辑态
   const [tableDescEditing, setTableDescEditing] = useState(false);
@@ -820,30 +825,53 @@ export const DescriptionCoveragePanel = forwardRef<
     }
   }
 
-  async function handleBatchInfer() {
+  /**
+   * 详情侧栏推断任务化（方案 B 延伸）：单表字段/表描述推断改为提交后端批量任务，
+   * 进度经右下角「批量任务中心」跨页可见（切页/刷新不丢），任务终态自动刷新抽屉与主列表。
+   */
+  async function submitDetailTask(opts: { fields?: boolean; table?: boolean; label: string }) {
     if (!detail) return;
-    const key = `batch:${detail.id}`;
-    const p = runInflight(key, () =>
-      inferDescriptions(detail.id).then((res) => {
-        message.success(
-          `批量推断完成：成功 ${res.inferred.length}，跳过 ${res.skipped.length}，失败 ${res.failed.length}`,
-        );
-        return refreshDetail();
-      }),
-    );
+    const catalogId = detail.id;
+    const key = `detail-task:${catalogId}:${opts.fields ? "f" : ""}${opts.table ? "t" : ""}`;
+    const p = runInflight(key, async () => {
+      const task = await submitBatchInferTask({
+        tasks: [
+          {
+            catalog_id: catalogId,
+            entity_name: detail.entity_name,
+            missing_fields: opts.fields ? 1 : 0,
+            needs_table_desc: !!opts.table,
+          },
+        ],
+        concurrency: 1,
+      });
+      message.success(
+        `${opts.label}任务已提交（#${task.id}）——进度与结果在右下角「批量任务中心」实时查看`,
+      );
+      // 唤醒全局任务中心立即感知并恢复轮询（无任务时它零请求）
+      notifyBatchInferActivity();
+      // 主列表：该表推断完成即实时移除；终态额外刷新详情抽屉（若仍开着本表）
+      trackServerTaskRemoval(task.id, () => {
+        if (detailIdRef.current === catalogId) void refreshDetail();
+      });
+    });
     if (!p) {
-      message.info("该表的批量推断正在进行中，请稍候");
+      message.info("该表推断任务提交中，请稍候");
       return;
     }
     try {
       await p;
     } catch (err) {
       if (isInferInProgress(err)) {
-        message.info("该表的批量推断正在进行中，请稍候");
+        message.info("该表推断正在进行中，请稍候");
       } else {
-        message.error(err instanceof Error ? err.message : "批量推断失败");
+        message.error(err instanceof Error ? err.message : `${opts.label}任务提交失败`);
       }
     }
+  }
+
+  async function handleBatchInfer() {
+    await submitDetailTask({ fields: true, label: "字段批量推断" });
   }
 
   async function handleTableDescSave() {
@@ -864,29 +892,8 @@ export const DescriptionCoveragePanel = forwardRef<
   async function handleTableDescInfer() {
     if (!detail) return;
     setTableInferring(true);
-    const key = `table:${detail.id}`;
-    const fields = Array.isArray(detail.schema_summary)
-      ? detail.schema_summary.map((c) => ({ name: c.name, type: c.type }))
-      : [];
-    const p = runInflight(key, () =>
-      inferTableDescription(detail.id, fields).then(() => {
-        message.success("表级描述已生成");
-        return refreshDetail();
-      }),
-    );
-    if (!p) {
-      setTableInferring(false);
-      message.info("该表的表级推断正在进行中，请稍候");
-      return;
-    }
     try {
-      await p;
-    } catch (err) {
-      if (isInferInProgress(err)) {
-        message.info("该表的表级推断正在进行中，请稍候");
-      } else {
-        message.error(err instanceof Error ? err.message : "推断表描述失败");
-      }
+      await submitDetailTask({ table: true, label: "表描述推断" });
     } finally {
       setTableInferring(false);
     }
@@ -1260,8 +1267,9 @@ export const DescriptionCoveragePanel = forwardRef<
    * 每张表 progress.status=done → 实时加入 coveredIds（治理主列表即时移除该行）并从勾选移除；
    * 任务终态（completed/failed/cancelled）→ 停轮询 + load() 同步服务端最新数据 + 清空 coveredIds。
    * 失败/取消表不进 coveredIds——load 后仍留在列表供重试。
+   * onDone：任务终态（completed/failed/cancelled）额外回调（侧栏单表任务用它刷新详情抽屉）。
    */
-  function trackServerTaskRemoval(taskId: number) {
+  function trackServerTaskRemoval(taskId: number, onDone?: () => void) {
     const stopPoll = () => {
       if (serverPollRef.current) {
         window.clearInterval(serverPollRef.current);
@@ -1285,6 +1293,7 @@ export const DescriptionCoveragePanel = forwardRef<
         void (async () => {
           await load();
           setCoveredIds(new Set());
+          onDone?.();
         })();
       }
     };
