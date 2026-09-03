@@ -8,12 +8,11 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy.sql.dml import Update
 
-from app.models.dp_sync import DpSyncConfig, LineageFieldMapping
+from app.models.dp_sync import LineageFieldMapping
 from app.services.lineage.dp_sync_repo import DpLineageRepository
 
 
