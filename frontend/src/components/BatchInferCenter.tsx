@@ -62,6 +62,9 @@ function TaskProgressCard({
 }) {
   const done = taskDoneCount(task);
   const err = taskErrCount(task);
+  const running = RUNNING.has(task.status);
+  // 取消已请求但 worker 尚未收尾（协作取消：当前表跑完后才翻终态）→ 展示「停止中」
+  const stopPending = running && task.cancel_requested;
   const percent =
     task.total > 0 ? Math.round(((done + err + task.cancelled) / task.total) * 100) : 0;
   const columns: ColumnsType<BatchInferTaskProgressItem> = [
@@ -92,8 +95,8 @@ function TaskProgressCard({
         <Space>
           <FireOutlined style={{ color: "#fa541c" }} />
           <strong>批量推断 #{task.id}（共 {task.total} 张表）</strong>
-          <Tag color={RUNNING.has(task.status) ? "blue" : "default"}>
-            {RUNNING.has(task.status) ? "进行中" : "已结束"}
+          <Tag color={running ? (stopPending ? "orange" : "blue") : "default"}>
+            {stopPending ? "停止中（当前表结束后取消）" : running ? "进行中" : "已结束"}
           </Tag>
           {task.finished_at && (
             <span className="muted" style={{ fontSize: 12 }}>
@@ -101,7 +104,12 @@ function TaskProgressCard({
             </span>
           )}
         </Space>
-        {RUNNING.has(task.status) && (
+        {stopPending && (
+          <Button size="small" disabled icon={<StopOutlined />}>
+            已请求取消
+          </Button>
+        )}
+        {running && !stopPending && (
           <Button
             size="small"
             danger
@@ -160,6 +168,7 @@ export function BatchInferCenter() {
 
   const running = tasks.filter((t) => RUNNING.has(t.status));
   const finished = tasks.filter(isFinished).slice(0, 3);
+  const stopping = running.some((t) => t.cancel_requested);
 
   async function handleCancel(id: number) {
     setCancellingId(id);
@@ -197,7 +206,7 @@ export function BatchInferCenter() {
         >
           <CheckCircleOutlined style={{ color: "#fa541c" }} />
           <span>
-            批量推断进行中{" "}
+            {stopping ? "批量推断停止中" : "批量推断进行中"}{" "}
             <strong>
               {running.reduce((s, t) => s + taskDoneCount(t) + taskErrCount(t), 0)}/
               {running.reduce((s, t) => s + t.total, 0)}
