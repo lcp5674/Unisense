@@ -36,6 +36,25 @@ _GUARD = asyncio.Lock()
 _SCANS: dict[int, dict[str, Any]] = {}
 _IDS = itertools.count(1)
 
+#: registry 保留的最大**终态**任务数（防只增不减无限增长；运行中任务不受限）。
+_MAX_FINISHED_SCANS = 20
+
+
+def _prune_registry() -> None:
+    """终态任务超量时清理最旧（保留运行中 + 最新 N 个终态）。
+
+    手动扫描低频，保留最近 20 条终态供前端查看足够；进程重启 registry 本就
+    清空，仅防单进程长期运行内无限累积（P2-8）。
+    """
+    finished = sorted(
+        (s for s in _SCANS.values() if s["status"] != "running"),
+        key=lambda s: s["finished_at"] or datetime.min.replace(tzinfo=UTC),
+    )
+    overflow = len(finished) - _MAX_FINISHED_SCANS
+    if overflow > 0:
+        for st in finished[:overflow]:
+            _SCANS.pop(st["task_id"], None)
+
 
 def _new_state(task_id: int) -> dict[str, Any]:
     return {
@@ -173,3 +192,4 @@ async def _run_scan_job(task_id: int, *, force: bool) -> None:
         st["error"] = str(exc)
     finally:
         st["finished_at"] = datetime.now(UTC)
+        _prune_registry()

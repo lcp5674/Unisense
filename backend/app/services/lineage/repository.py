@@ -19,6 +19,23 @@ from app.models.lineage import LineageEdge, LineageEdgeHistory, LineageIngestRun
 from app.models.metric import Metric
 from app.services.lineage.parser import node_column, node_dimension, node_table
 
+
+def merge_provenances(existing: str | None, incoming: str) -> str:
+    """多来源合并：同一条边被多个采集通道确认时 provenance 保留全部来源。
+
+    以 ``+`` 连接去重（如 ``hive+dp_sql``）——边是结构事实，被任一通道持续
+    确认即保持有效；通道失效（mark_missing）需全部来源通道都连续未确认才
+    标 stale（P2-7：修复后写通道覆盖前通道 provenance 致治理归属漂移）。
+    """
+    tokens = []
+    for chunk in (existing or "").split("+"):
+        chunk = chunk.strip()
+        if chunk and chunk not in tokens:
+            tokens.append(chunk)
+    if incoming and incoming not in tokens:
+        tokens.append(incoming)
+    return "+".join(tokens)
+
 #: 系统内置血缘采集通道：无论当前是否有边都展示，保证「采集通道」视图来源全景完整
 #: （SQL 解析=sqlglot / DP 同步=dp_sql，dp_csv 为历史 CSV 导入通道保留展示；
 #: 其余动态来源如 metric_definition 有边时自动出现）。
@@ -114,7 +131,10 @@ class LineageRepository:
             if existing.confidence != confidence:
                 changes["confidence"] = confidence
             if existing.provenance != provenance:
-                changes["provenance"] = provenance
+                # 多来源合并：不覆盖既有通道来源（P2-7 修复归属漂移）
+                merged = merge_provenances(existing.provenance, provenance)
+                if merged != existing.provenance:
+                    changes["provenance"] = merged
             if existing.pii_inherited != pii_inherited:
                 changes["pii_inherited"] = pii_inherited
             if owner is not None and existing.owner != owner:
@@ -762,12 +782,21 @@ class LineageRepository:
     # ---- 增量采集与失效管理（TD §12.2 血缘采集通道）----
 
     async def _source_l1_edges(self, source: str) -> list[LineageEdge]:
-        """取某来源通道全部未删除的表级（L1/DERIVED_FROM）血缘边。"""
+        """取某来源通道全部未删除的表级（L1/DERIVED_FROM）血缘边。
+
+        provenance 现可含多来源（``hive+dp_sql``，P2-7 合并语义）——匹配「该
+        source 是否在来源集合中」（等值 OR 前缀/中缀/后缀 token 匹配）。
+        """
         return list(
             (
                 await self._db.execute(
                     select(LineageEdge).where(
-                        LineageEdge.provenance == source,
+                        or_(
+                            LineageEdge.provenance == source,
+                            LineageEdge.provenance.like(f"{source}+%"),
+                            LineageEdge.provenance.like(f"%+{source}+%"),
+                            LineageEdge.provenance.like(f"%+{source}"),
+                        ),
                         LineageEdge.edge_type == "DERIVED_FROM",
                         LineageEdge.granularity == "L1",
                         LineageEdge.deleted_at.is_(None),

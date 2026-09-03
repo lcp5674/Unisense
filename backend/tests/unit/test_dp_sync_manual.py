@@ -113,3 +113,33 @@ async def test_force_cancel_sets_both_signals(monkeypatch) -> None:
 
     assert await manual.force_cancel_scan(6) is False  # 已结束不可强制
     assert await manual.force_cancel_scan(99) is False
+
+
+def test_prune_registry_keeps_latest_finished(monkeypatch) -> None:
+    """registry 终态超量时清理最旧、保留运行中 + 最新 N 个终态（P2-8）。
+
+    回归：此前 _SCANS 只增不减，手动扫描低频但进程内无限增长。
+    """
+    from datetime import UTC, datetime, timedelta
+
+    states: dict[int, dict] = {}
+    now = datetime.now(UTC)
+    # 25 个终态（finished_at 递增）+ 1 个运行中
+    for i in range(1, 26):
+        states[i] = {
+            "task_id": i,
+            "status": "success",
+            "finished_at": now - timedelta(seconds=100 - i),
+        }
+    states[99] = {"task_id": 99, "status": "running", "finished_at": None}
+    monkeypatch.setattr(manual, "_SCANS", states)
+
+    manual._prune_registry()
+
+    remaining = manual._SCANS
+    assert 99 in remaining  # 运行中保留
+    # 终态保留最新 20 个（即 id 6..25 被清掉的是 1..5）
+    assert len(remaining) == 21
+    assert 1 not in remaining
+    assert 2 not in remaining
+    assert 25 in remaining

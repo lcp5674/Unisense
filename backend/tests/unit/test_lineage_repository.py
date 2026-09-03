@@ -886,7 +886,7 @@ async def test_list_channels_includes_known_channels_when_empty() -> None:
     repo = LineageRepository(db)
     channels = await repo.list_channels()
     sources = [c["source"] for c in channels]
-    assert sources == ["dp_csv", "sqlglot"]
+    assert sources == ["dp_csv", "dp_sql", "sqlglot"]
     assert all(c["edge_count"] == 0 for c in channels)
     assert all(c["node_count"] == 0 for c in channels)
 
@@ -1799,8 +1799,51 @@ async def test_metric_referrers_batch_returns_per_code() -> None:
         {"node": "metric:sales_gmv_derived", "edge_type": "DERIVED_FROM"},
         {"node": "consumer:bi_report", "edge_type": "CONSUMED_BY"},
     ]
-    assert got["sales_uv_daily"] == [{"node": "metric:sales_uv_derived", "edge_type": "DERIVED_FROM"}]
+    assert got["sales_uv_daily"] == [
+        {"node": "metric:sales_uv_derived", "edge_type": "DERIVED_FROM"}
+    ]
     # 无引用指标 → 空列表（入参必有键）
     assert got["no_ref"] == []
     # 空入参 → 空 dict
     assert await repo.metric_referrers_batch([]) == {}
+
+
+async def test_merge_provenances() -> None:
+    """provenance 多来源合并 helper：去重、顺序保留（P2-7）。"""
+    from app.services.lineage.repository import merge_provenances
+
+    assert merge_provenances(None, "dp_sql") == "dp_sql"
+    assert merge_provenances("hive", "dp_sql") == "hive+dp_sql"
+    assert merge_provenances("hive+dp_sql", "hive") == "hive+dp_sql"
+    assert merge_provenances("dp_sql", "hive") == "dp_sql+hive"
+
+
+async def test_upsert_merges_provenance_instead_of_overwrite() -> None:
+    """同一边被第二通道写入时 provenance 合并而非覆盖（P2-7 修复归属漂移）。
+
+    回归：此前 dp_sql 后写会覆盖 hive 建立的边 provenance，使 hive 通道失去
+    该边治理权（mark_seen/mark_missing 按 provenance 精确匹配查不到）。
+    """
+    db = _FakeDB(
+        [
+            _Row(
+                1,
+                "table:ods.a",
+                "table:dwd.b",
+                edge_type="DERIVED_FROM",
+                granularity="L1",
+                provenance="hive",
+            )
+        ]
+    )
+    repo = LineageRepository(db)
+    edge, created = await repo.upsert_edge_with_status(
+        source_node="table:ods.a",
+        target_node="table:dwd.b",
+        edge_type="DERIVED_FROM",
+        granularity="L1",
+        provenance="dp_sql",
+        change_reason="dp_sync",
+    )
+    assert created is False
+    assert edge.provenance == "hive+dp_sql"

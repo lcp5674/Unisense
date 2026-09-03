@@ -115,6 +115,7 @@ def _svc(
     svc._lineage_repo = MagicMock()
     svc._lineage_repo.would_create_cycle = AsyncMock(return_value=False)
     svc._lineage_repo.mark_seen = AsyncMock(return_value=(1, 0))
+    svc._lineage_repo.mark_missing = AsyncMock(return_value=(0, 0))
     svc._lineage_repo.begin_ingest_run = AsyncMock(return_value=MagicMock(id=900))
     svc._lineage_repo.finish_ingest_run = AsyncMock()
 
@@ -135,6 +136,7 @@ def _svc(
     svc._dp_repo.find_ticket_by_step_hash = AsyncMock(return_value=None)
     svc._dp_repo.create_ticket = AsyncMock(return_value=MagicMock())
     svc._dp_repo.upsert_field_mapping = AsyncMock()
+    svc._dp_repo.soft_delete_field_mappings = AsyncMock(return_value=0)
     svc._dp_repo.find_orphan_catalogs = AsyncMock(return_value=[])
     svc._llm_chat = None
     return svc
@@ -394,10 +396,10 @@ async def test_scan_db_error_isolated_per_task_via_savepoint() -> None:
     svc = _svc(collector)
     real_process = svc.process_step
 
-    async def flaky_process(task, step, sql, config):
+    async def flaky_process(task, step, sql, config, seen_pairs=None):
         if task["task_id"] == 101:
             raise OperationalError("stmt", {}, Exception("Deadlock"))
-        return await real_process(task, step, sql, config)
+        return await real_process(task, step, sql, config, seen_pairs)
 
     svc.process_step = flaky_process  # type: ignore[method-assign]
     result = await svc.scan_once(_fc(collector))
@@ -445,3 +447,37 @@ async def test_scan_invalid_table_name_fails_visible() -> None:
     result = await svc.scan_once(_fc(collector))
     assert result["skipped"] == "failed"
     assert "合法标识符" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_scan_full_round_runs_mark_missing() -> None:
+    """全量轮（无水位）对未再出现边执行失效观察 mark_missing。
+
+    回归（P1-6）：此前 scan_once 只 mark_seen 从不 mark_missing，任务/节点
+    删除后其边永不进入失效队列（stale 保留历史）。
+    """
+    collector = FakeCollector()
+    svc = _svc(collector)  # watermark None → 全量
+    result = await svc.scan_once(_fc(collector))
+    assert "skipped" not in result
+    svc._lineage_repo.mark_missing.assert_awaited_once()
+    args = svc._lineage_repo.mark_missing.await_args
+    assert args.args[0] == "dp_sql"
+    assert args.kwargs["threshold"] == 2
+
+
+@pytest.mark.asyncio
+async def test_scan_incremental_skips_mark_missing() -> None:
+    """增量轮（有水位）不执行 mark_missing——未变更任务边不在 seen_pairs，
+    若每轮累加会误伤大量正常边（P1-6 防误伤）。
+    """
+    collector = FakeCollector()
+    svc = _svc(collector)
+    svc._dp_repo.get_watermark = AsyncMock(
+        return_value=_wm(
+            last_scan_at=NOW - timedelta(minutes=10), last_max=NOW - timedelta(days=1)
+        )
+    )
+    result = await svc.scan_once(_fc(collector))
+    assert "skipped" not in result
+    svc._lineage_repo.mark_missing.assert_not_awaited()

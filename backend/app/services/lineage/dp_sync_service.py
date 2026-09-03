@@ -178,8 +178,14 @@ class DpSyncService:
         step: dict[str, Any],
         sql: str,
         config: Any,
+        seen_pairs: set[tuple[str, str]] | None = None,
     ) -> dict[str, Any]:
-        """处理单个 SQL 节点，返回结果摘要（run_log detail 项）。"""
+        """处理单个 SQL 节点，返回结果摘要（run_log detail 项）。
+
+        seen_pairs: 可选——实际**入库**的边集合（node_table 化）；各写入路径
+            写入后自行 add，供收尾 mark_seen/mark_missing 精确确认（不再靠
+            事后重复 sqlglot 解析，P2-9 #10）。
+        """
         sql_hash = sql_fingerprint(sql)
         outcome = parse_dp_step(
             sql,
@@ -191,23 +197,39 @@ class DpSyncService:
             target_table=task.get("out_table") or None,
         )
         if outcome.status == "no_flow":
+            # SQL 从有流转演化为无流转：清该 step 旧映射（保留本次 hash 无映射可写）
+            await self._dp_repo.soft_delete_field_mappings(
+                step_id=step.get("step_id"), keep_sql_hash=sql_hash
+            )
             return {"step_id": step.get("step_id"), "status": "no_flow"}
 
+        # SQL 演进清理（P2-8）：同 step 旧 sql_hash 的字段映射先软删（保留本次
+        # hash——新映射随后写入），避免旧列映射永久残留致表膨胀/展示过时。
+        await self._dp_repo.soft_delete_field_mappings(
+            step_id=step.get("step_id"), keep_sql_hash=sql_hash
+        )
+
         if outcome.status == "ok" and not outcome.is_complex:
-            await self._store_sqlglot_edges(outcome, task, step, sql_hash, config)
+            await self._store_sqlglot_edges(
+                outcome, task, step, sql_hash, config, seen_pairs
+            )
             return {"step_id": step.get("step_id"), "status": "parsed_ok"}
 
         # 复杂或失败：先查裁决记忆（同 step+hash 已裁决自动沿用）
         if config.resolve_memory_enabled:
             reused = await self._reuse_resolution(
-                task, step, sql, sql_hash, outcome, config
+                task, step, sql, sql_hash, outcome, config, seen_pairs
             )
             if reused:
                 return reused
 
         if outcome.status == "ok":
-            return await self._handle_complex(task, step, sql, sql_hash, outcome, config)
-        return await self._handle_failed(task, step, sql, sql_hash, outcome, config)
+            return await self._handle_complex(
+                task, step, sql, sql_hash, outcome, config, seen_pairs
+            )
+        return await self._handle_failed(
+            task, step, sql, sql_hash, outcome, config, seen_pairs
+        )
 
     async def _handle_complex(
         self,
@@ -217,6 +239,7 @@ class DpSyncService:
         sql_hash: str,
         outcome: Any,
         config: Any,
+        seen_pairs: set[tuple[str, str]] | None = None,
     ) -> dict[str, Any]:
         """复杂节点：LLM 共识确认（一致入库 / 分歧建单）；LLM 关闭建待抉择单。"""
         if not config.llm_enabled or self._llm_chat is None:
@@ -250,7 +273,9 @@ class DpSyncService:
             )
             return {"step_id": step.get("step_id"), "status": "diverged"}
         if verdict.agree:
-            await self._store_sqlglot_edges(outcome, task, step, sql_hash, config)
+            await self._store_sqlglot_edges(
+                outcome, task, step, sql_hash, config, seen_pairs
+            )
             return {"step_id": step.get("step_id"), "status": "llm_confirmed"}
         # 分歧：建待抉择单（附 sqlglot 结果 + LLM 意见 + 原因）
         await self._dp_repo.create_ticket(
@@ -279,6 +304,7 @@ class DpSyncService:
         sql_hash: str,
         outcome: Any,
         config: Any,
+        seen_pairs: set[tuple[str, str]] | None = None,
     ) -> dict[str, Any]:
         """失败节点：LLM 兜底提炼（llm_fallback / unparseable）；LLM 关闭建单。"""
         sqlglot_json = edges_to_json(outcome.table_edges, outcome.field_edges)
@@ -353,6 +379,7 @@ class DpSyncService:
         sql_hash: str,
         outcome: Any,
         config: Any,
+        seen_pairs: set[tuple[str, str]] | None = None,
     ) -> dict[str, Any] | None:
         ticket = await self._dp_repo.find_ticket_by_step_hash(
             step.get("step_id"), sql_hash
@@ -362,14 +389,18 @@ class DpSyncService:
         if ticket.resolution == "ignore" or ticket.status == "ignored":
             return {"step_id": step.get("step_id"), "status": "memory_ignored"}
         if ticket.resolution == "accept_sqlglot":
-            await self._store_sqlglot_edges(outcome, task, step, sql_hash, config)
+            await self._store_sqlglot_edges(
+                outcome, task, step, sql_hash, config, seen_pairs
+            )
             return {"step_id": step.get("step_id"), "status": "memory_reused"}
         if ticket.resolution == "accept_llm":
-            await self._apply_llm_opinion(ticket.llm_opinion, task, step, sql_hash)
+            await self._apply_llm_opinion(
+                ticket.llm_opinion, task, step, sql_hash, seen_pairs
+            )
             return {"step_id": step.get("step_id"), "status": "memory_reused"}
         if ticket.resolution == "manual":
             await self._apply_manual_edges(
-                ticket.manual_edges_json, task, step, sql_hash
+                ticket.manual_edges_json, task, step, sql_hash, seen_pairs
             )
             return {"step_id": step.get("step_id"), "status": "memory_reused"}
         return None
@@ -395,6 +426,7 @@ class DpSyncService:
         step: dict[str, Any],
         sql_hash: str,
         config: Any,
+        seen_pairs: set[tuple[str, str]] | None = None,
     ) -> None:
         """入库表级边 + dp_task_refs 合并 + 字段映射独立表（幂等聚合）。"""
         ref = build_task_ref(task, step)
@@ -402,6 +434,8 @@ class DpSyncService:
             edge = await self._upsert_edge(te.source, te.target, task, step, ref)
             if edge is None:
                 continue
+            if seen_pairs is not None:
+                seen_pairs.add((node_table(te.source), node_table(te.target)))
             # 字段映射：匹配该表边的字段级边（source_table/target_table 对齐）
             for fe in outcome.field_edges:
                 if fe.target_table == te.target and fe.source_table == te.source:
@@ -455,8 +489,9 @@ class DpSyncService:
         task: dict[str, Any],
         step: dict[str, Any],
         sql_hash: str,
+        seen_pairs: set[tuple[str, str]] | None = None,
     ) -> None:
-        """采纳 LLM（分歧单）：sqlglot 边 + 意见补漏边入库（missing_edges 参考语义）。"""
+        """采纳 LLM（分歧单）：意见补漏边入库（missing_edges 参考语义）。"""
         if not opinion:
             return
         ref = build_task_ref(task, step)
@@ -464,7 +499,9 @@ class DpSyncService:
             source = edge.get("source")
             target = edge.get("target")
             if source and target:
-                await self._upsert_edge(source, target, task, step, ref)
+                written = await self._upsert_edge(source, target, task, step, ref)
+                if written is not None and seen_pairs is not None:
+                    seen_pairs.add((node_table(source), node_table(target)))
 
     async def _apply_manual_edges(
         self,
@@ -472,6 +509,7 @@ class DpSyncService:
         task: dict[str, Any],
         step: dict[str, Any],
         sql_hash: str,
+        seen_pairs: set[tuple[str, str]] | None = None,
     ) -> None:
         """采纳手动配置：table_edges/field_mappings 手填入库。"""
         if not manual:
@@ -485,6 +523,8 @@ class DpSyncService:
             edge = await self._upsert_edge(source, target, task, step, ref)
             if edge is None:
                 continue
+            if seen_pairs is not None:
+                seen_pairs.add((node_table(source), node_table(target)))
             for fm in manual.get("field_mappings") or []:
                 if fm.get("source_table") == source and fm.get("target_table") == target:
                     await self._dp_repo.upsert_field_mapping(
@@ -557,6 +597,10 @@ class DpSyncService:
             return {"skipped": "not_configured_or_disabled"}
         wm = await self._dp_repo.get_watermark("task")
         now = datetime.now(UTC)
+        # 全量轮判定：无 task 水位 = 首轮/重置后全量。仅全量轮对未再出现的边
+        # 执行失效观察（mark_missing）——增量轮只处理变更任务，未变更任务边不在
+        # seen_pairs，若每轮 mark_missing 会误伤大量正常边（P1-6）。
+        full_scan = wm is None or wm.last_max_update is None
         if not force and wm is not None and wm.last_scan_at is not None:
             interval = max(1, int(config.poll_interval_minutes or 5)) * 60
             if (now - wm.last_scan_at).total_seconds() < interval:
@@ -642,9 +686,20 @@ class DpSyncService:
                 DP_PROVENANCE, seen_pairs
             )
             counters["tickets_resolved"] += restored
+            # 删除语义闭环（P1-6）：仅**全量轮**对未再出现的边执行失效观察——
+            # mark_missing 累加 missing_count（threshold=2 观察期）后标 stale，
+            # 任务/节点删除后其边保留历史但进入失效队列。增量轮跳过（防误伤）。
+            missing = 0
+            stale_flagged = 0
+            if full_scan and not cancelled:
+                missing, stale_flagged = await self._lineage_repo.mark_missing(
+                    DP_PROVENANCE, seen_pairs, threshold=2
+                )
             await self._db.commit()
             detail = dict(counters)
             detail["seen_pairs"] = len(seen_pairs)
+            detail["missing"] = missing
+            detail["stale_flagged"] = stale_flagged
             log_status = "cancelled" if cancelled else "success"
             await self._dp_repo.update_run_log(
                 run.id,
@@ -670,6 +725,8 @@ class DpSyncService:
                     status=log_status,
                     total_edges=len(seen_pairs),
                     restored=restored,
+                    missing=missing,
+                    stale_flagged=stale_flagged,
                     detail=detail,
                 )
             await self._db.commit()
@@ -819,37 +876,16 @@ class DpSyncService:
                 break  # 协作取消：本任务剩余 steps 不再处理（已处理 steps 保留）
             sql = str(step.get("script_info") or "")
             counters["scanned_steps"] += 1
-            result = await self.process_step(task, step, sql, config)
+            result = await self.process_step(task, step, sql, config, seen_pairs)
             status = result.get("status", "unknown")
             if status in counters:
                 counters[status] += 1
-            if status in ("parsed_ok", "llm_confirmed", "memory_reused"):
-                # 记录确认边（供收尾 mark_seen）
-                outcome_rows = await self._collect_seen_pairs(task, step, sql, config)
-                seen_pairs.update(outcome_rows)
         # 资产 Owner 回填（产出表孤儿）
         if cancel_event is not None and cancel_event.is_set():
             if force_event is not None and force_event.is_set():
                 raise _ScanCancelledError(f"task {task_id} force-stop at backfill")
             return  # 协作取消：跳过回填
         await self.backfill_owner(task, config)
-
-    async def _collect_seen_pairs(
-        self, task: dict[str, Any], step: dict[str, Any], sql: str, config: Any
-    ) -> set[tuple[str, str]]:
-        """对本轮成功入库的节点重新解析出边集（供 mark_seen 确认）。"""
-        outcome = parse_dp_step(
-            sql,
-            dialect="hive",
-            exclude_patterns=merged_exclude_table_patterns(
-                config.exclude_table_patterns
-            ),
-            rules=config.llm_complexity_rules,
-            target_table=task.get("out_table") or None,
-        )
-        return {
-            (node_table(e.source), node_table(e.target)) for e in outcome.table_edges
-        }
 
     async def _fetch_task(
         self, collector: Any, task_id: int, config: Any
@@ -986,6 +1022,7 @@ class DpSyncService:
         *,
         provenance: str,
         confidence: float,
+        seen_pairs: set[tuple[str, str]] | None = None,
     ) -> None:
         """从 ticket.sqlglot_result JSON 写边（table_edges + field_edges）。"""
         if not edges_json:
@@ -999,6 +1036,8 @@ class DpSyncService:
             edge = await self._upsert_edge(source, target, task, step, ref)
             if edge is None:
                 continue
+            if seen_pairs is not None:
+                seen_pairs.add((node_table(source), node_table(target)))
             for fe in edges_json.get("field_edges") or []:
                 if fe.get("target_table") == target and fe.get("source_table") == source:
                     await self._dp_repo.upsert_field_mapping(
@@ -1022,6 +1061,7 @@ class DpSyncService:
         task: dict[str, Any],
         step: dict[str, Any],
         sql_hash: str,
+        seen_pairs: set[tuple[str, str]] | None = None,
     ) -> None:
         """采纳 LLM 兜底流转：field_mappings 明确的写字段边；无映射时源集→目标表边。"""
         if not opinion:
@@ -1041,6 +1081,8 @@ class DpSyncService:
                 written.add(key)
                 if edge is None:
                     continue
+                if seen_pairs is not None:
+                    seen_pairs.add((node_table(source_t), node_table(target_t)))
             else:
                 edge = None
             if edge is not None and source_c and target_c:
@@ -1064,5 +1106,7 @@ class DpSyncService:
         for target in targets:
             for source in sources:
                 if (source, target) not in written:
-                    await self._upsert_edge(source, target, task, step, ref)
+                    edge = await self._upsert_edge(source, target, task, step, ref)
                     written.add((source, target))
+                    if edge is not None and seen_pairs is not None:
+                        seen_pairs.add((node_table(source), node_table(target)))

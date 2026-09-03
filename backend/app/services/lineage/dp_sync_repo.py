@@ -90,7 +90,24 @@ class DpLineageRepository:
             "owner_backfill",
             "updated_by",
         }
-        data = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        # 可置 NULL 的字段（DB nullable=True）；显式传 null 表示「清空/回默认」。
+        # 非空字段收到 null 忽略（防 DB not-null 报错）。
+        nullable = {
+            "task_type_filter",
+            "step_type_filter",
+            "exclude_task_patterns",
+            "exclude_table_patterns",
+            "llm_complexity_rules",
+            "llm_model",
+            "updated_by",
+        }
+        data: dict[str, Any] = {}
+        for key, value in fields.items():
+            if key not in allowed:
+                continue
+            if value is None and key not in nullable:
+                continue
+            data[key] = value
         if data:
             data["updated_at"] = datetime.now(UTC)
             await self._db.execute(
@@ -204,6 +221,25 @@ class DpLineageRepository:
             .order_by(LineageFieldMapping.id)
         )
         return list((await self._db.execute(stmt)).scalars().all())
+
+    async def soft_delete_field_mappings(
+        self, *, step_id: int, keep_sql_hash: str | None = None
+    ) -> int:
+        """软删某节点（step）下不再对应当前 SQL 指纹的字段映射（P2-8 防膨胀）。
+
+        SQL 演进（sql_hash 变化）后旧映射行永久残留会表膨胀且展示过时；
+        同 step 仅保留 keep_sql_hash 的映射（None=清空该 step 全部）。
+        """
+        stmt = update(LineageFieldMapping).where(
+            LineageFieldMapping.step_id == step_id,
+            LineageFieldMapping.deleted_at.is_(None),
+        )
+        if keep_sql_hash is not None:
+            stmt = stmt.where(LineageFieldMapping.sql_hash != keep_sql_hash)
+        result = await self._db.execute(
+            stmt.values(deleted_at=datetime.now(UTC))
+        )
+        return result.rowcount or 0
 
     # ---- dp_resolution_ticket ----
     async def find_ticket_by_step_hash(

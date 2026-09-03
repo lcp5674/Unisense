@@ -55,6 +55,7 @@ def _svc(**kwargs) -> DpSyncService:
     svc._dp_repo.find_ticket_by_step_hash = AsyncMock(return_value=None)
     svc._dp_repo.create_ticket = AsyncMock(return_value=MagicMock())
     svc._dp_repo.upsert_field_mapping = AsyncMock()
+    svc._dp_repo.soft_delete_field_mappings = AsyncMock(return_value=0)
     svc._dp_repo.find_orphan_catalogs = AsyncMock(return_value=[])
     svc._dp_repo.find_user_by_username = AsyncMock(return_value=None)
     svc._dp_repo.create_shadow_user = AsyncMock(return_value=MagicMock(id=99))
