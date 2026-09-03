@@ -742,39 +742,52 @@ Unisense 的 LLM 能力（NL2SQL / 口径推断 / 术语生成等）走 **OpenAI
 （`llm_config` 表，系统配置 → LLM 路由）。可在生产机本地部署一套开源模型作为主用或远程 provider 的
 failover 兜底，数据不出内网。
 
-**选型结论（32GB 内存 + 纯 CPU 实测推荐）**：
+**选型结论（生产机实测 62G 内存 + 纯 CPU）**：
 
-| 模型 | 量化 | 体积 | 内存需求 | CPU 速度 | 结论 |
-|---|---|---|---|---|---|
-| **Qwen3-8B**（推荐） | Q4_K_M | ~4.9GB | 32GB 即可 | 10-15 tok/s | 单次 NL2SQL 输出 100-300 token，10-25s，在路由 30s 超时内 |
-| Qwen3-14B | Q4_K_M | ~9GB | ≥64GB 更稳 | 5-8 tok/s | 32GB 紧张且易超时，不建议 |
+| 档位 | 模型 | 类型 | 量化 | 体积 | 质量 | 速度预期 | 结论 |
+|---|---|---|---|---|---|---|---|
+| **主推** | **Qwen3-30B-A3B** | MoE（激活 3.3B） | Q4_K_M | ~18.6GB | ≈30B dense | 接近小模型 | **62G 内存「最优×最快」甜点**——NL2SQL/口径推断质量碾压 8B，单请求速度却接近 3-4B dense |
+| 兜底 | Qwen3-8B | dense | Q4_K_M | ~4.9GB | 中 | 10-15 tok/s | 原默认档；与 30B-A3B 并存作 fallback（快） |
+| 不建议 | Qwen3-14B | dense | Q4_K_M | ~9GB | 良 | 5-8 tok/s | 速度不划算：质量不如 30B-A3B、速度不如 8B |
 
 > 2026 新旗舰（Qwen3 27B+ / GLM-5.1 / DeepSeek-V4）均需 GPU，纯 CPU 无法生产使用。
 > 本机 Docker 默认 seccomp 曾拦截 nginx 的 `pwrite`（见 10.6 注），llama.cpp 容器**必须加
 > `seccomp=unconfined`**（部署脚本已内置，勿移除）。
 
-**一键部署**（生产机执行，幂等，约 10-20 分钟含 5GB 模型下载）：
+**一键部署**（生产机执行，幂等；8B 含 ~5GB、30B-A3B 含 ~18.6GB 模型下载）：
 
 ```bash
-cd /opt/unisense && git pull internal main      # 或 origin master
-bash scripts/deploy_local_llm.sh                # 默认 ModelScope 下载；网络受限可 LLM_MODEL_SOURCE=hf
+cd /opt/unisense && git pull internal main          # 或 origin master
+
+# 档位一：Qwen3-30B-A3B（主用，质量主力）—— 端口 8082
+LLM_MODEL=30b-a3b bash scripts/deploy_local_llm.sh
+
+# 档位二：Qwen3-8B（fallback，速度兜底）—— 端口 8081（默认档）
+bash scripts/deploy_local_llm.sh
+
+# 网络受限加 LLM_MODEL_SOURCE=hf（hf-mirror）；双档可并存，重复执行幂等
 ```
 
 脚本自动完成：拉取 `ghcr.io/ggml-org/llama.cpp:server`（直连失败回退 DaoCloud ghcr mirror）→
-下载 `Qwen3-8B-Q4_K_M.gguf` 到 `/data/llm/models`（断点续传）→ 启动 `unisense-llm` 容器
-（`-p 8081`、`-c 16384`、`-t 24`、`--jinja`）→ 健康检查 + OpenAI /v1 端点实测。
+按档位下载 GGUF 到 `/data/llm/models`（断点续传）→ 启动容器（8B=`unisense-llm`/8081、
+MoE=`unisense-llm-30b-a3b`/8082；`-c 16384`、`-t 28`、`--jinja`、默认 `--numa distribute`
+双路内存均衡，NUMA 启动失败自动回退无 NUMA 重启）→ 健康检查 + OpenAI /v1 端点实测
+（system prompt 抑制思考，JSON grammar 兜底）。
 
-**接入 Unisense**（系统配置 → LLM 路由 → 新增实例）：
+**接入 Unisense**（系统配置 → LLM 路由 → 新增**两个**实例，按 priority 路由）：
 
 ```
-名称:     本地 Qwen3-8B     provider: custom
-base_url: http://<本机IP>:8081/v1
-model:    qwen3-8b          api_key: 任意占位（本地无鉴权，如 local）
-timeout:  60（CPU 推理预留） priority: 主用填 0，远程兜底填大值
+实例 1（主用）                   实例 2（fallback）
+名称:     本地 Qwen3-30B-A3B     名称:     本地 Qwen3-8B
+base_url: http://<IP>:8082/v1     base_url: http://<IP>:8081/v1
+model:    qwen3-30b-a3b           model:    qwen3-8b
+api_key:  任意占位（如 local）      api_key:  任意占位（如 local）
+timeout:  90（CPU 推理预留）        timeout:  60
+priority: 0（主）                  priority: 10（兜底）
 ```
 
-保存后点「测试连通」，再到 AI 问数 / NL2SQL 实测。调整参数可覆盖环境变量：
-`LLM_MODEL_DIR / LLM_PORT / LLM_MEM / LLM_CPUS / LLM_CTX / LLM_MODEL_SOURCE`。
+保存后点「测试连通」，再到 AI 问数 / NL2SQL 实测。可覆盖环境变量：
+`LLM_MODEL / LLM_MODEL_DIR / LLM_PORT / LLM_MEM / LLM_CPUS / LLM_CTX / LLM_NUMA / LLM_MODEL_SOURCE`。
 
 ---
 
