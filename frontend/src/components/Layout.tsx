@@ -557,7 +557,7 @@ export function Layout({ user }: { user: CurrentUser }) {
   // 按权限点过滤导航菜单（细粒度管控：替代原 ADMIN_ONLY 角色二值过滤）：
   // 菜单项映射到 ``ROUTE_PERM[path]`` 权限点，用户无该权限点则隐藏；
   // 某组过滤后为空则整组隐藏。无映射的菜单项默认放行（保持向后兼容）。
-  const { can, canAny, error: permError } = usePermission();
+  const { can, canAny, error: permError, snapshot: permSnapshot } = usePermission();
   const menuItems = useMemo(() => {
     return NAV_GROUPS.map((g) => ({
       type: "group" as const,
@@ -574,6 +574,16 @@ export function Layout({ user }: { user: CurrentUser }) {
         .map((c) => ({ key: c.key, icon: c.icon, label: c.label })),
     })).filter((g) => g.children.length > 0);
   }, [can, canAny, user.role]);
+
+  // 批量任务中心「读」角色 = 后端 _READ_ROLES（collector.py: platform_admin/domain_admin/metric_owner）。
+  // 权限快照未就绪时 fail-open 挂载（与全局 can 语义一致：后端强制兜底）；快照就绪后
+  // 无读角色不挂载 → 零请求零 403（列表端点 require_roles 会拒无角色用户，纯属多余请求）。
+  const canViewBatchInfer =
+    permSnapshot === null ||
+    (permSnapshot.roles ?? [user.role]).some((r) =>
+      ["platform_admin", "domain_admin", "metric_owner"].includes(r),
+    );
+
 
   // 首次登录强制改密（forceChangeRequired 在组件顶部声明，供全局轮询/内容区抑制）
 
@@ -782,8 +792,9 @@ export function Layout({ user }: { user: CurrentUser }) {
         force={forceChangeRequired}
         onClose={handlePasswordModalClose}
       />
-      {/* 跨表批量 LLM 推断任务中心（方案 B）：右下角浮条，任意页面可见批量进度/结果 */}
-      <BatchInferCenter />
+      {/* 跨表批量 LLM 推断任务中心（方案 B）：右下角浮条，任意页面可见批量进度/结果。
+          仅后端读角色挂载（canViewBatchInfer），无权限角色零请求零 403 */}
+      {canViewBatchInfer && <BatchInferCenter />}
     </AntLayout>
   );
 }

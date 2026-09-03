@@ -5,18 +5,43 @@ import { Layout } from "../components/Layout";
 import { NOTIF_CHANGED_EVENT } from "../utils/notifBus";
 
 // Mock API：Layout 挂载时拉取未读通知数与用户偏好（折叠态服务端持久化）；
-// fetchGlobalSearch 供顶栏实时下拉使用（测试中不触发）
+// fetchGlobalSearch 供顶栏实时下拉使用（测试中不触发）；listBatchInferTasks 供
+// 批量任务中心挂载探测使用（条件渲染用例断言「无读角色不调用」）
 vi.mock("../api", () => ({
   fetchUnreadCount: vi.fn(),
   clearToken: vi.fn(),
   fetchPreferences: vi.fn(),
   setPreference: vi.fn(),
   fetchGlobalSearch: vi.fn(),
+  listBatchInferTasks: vi.fn(),
 }));
-import { fetchUnreadCount, fetchPreferences, setPreference } from "../api";
+import { fetchUnreadCount, fetchPreferences, setPreference, listBatchInferTasks } from "../api";
 vi.mocked(fetchUnreadCount).mockResolvedValue(0);
 vi.mocked(fetchPreferences).mockResolvedValue({});
 vi.mocked(setPreference).mockResolvedValue(undefined);
+vi.mocked(listBatchInferTasks).mockResolvedValue([]);
+
+// Mock usePermission：Layout 依赖权限快照做菜单过滤与批量任务中心条件渲染。
+// 默认返回与真实 PermissionContext 默认一致的 fail-open 形态（can 全 true、snapshot=null），
+// 使既有用例行为不变；条件渲染用例通过 setPerm 注入指定角色的 snapshot。
+const { __perm } = vi.hoisted(() => {
+  const state: { value: any } = {
+    value: {
+      can: () => true,
+      canAny: () => true,
+      canAll: () => true,
+      snapshot: null,
+      loading: false,
+      error: false,
+      refresh: async () => undefined,
+    },
+  };
+  return { __perm: state };
+});
+vi.mock("../hooks/usePermission", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../hooks/usePermission")>();
+  return { ...actual, usePermission: () => __perm.value };
+});
 
 // 折叠状态按用户隔离存储：key 带 user.id
 const SIDER_KEY = "unisense.sider.collapsed.1";
@@ -177,4 +202,49 @@ describe("Layout 顶栏通知角标", () => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("Layout 批量任务中心按读角色条件渲染", () => {
+  /** 注入指定角色的权限快照（roles=null 模拟快照未就绪 fail-open） */
+  function setPerm(roles: string[] | null) {
+    __perm.value = {
+      can: () => true,
+      canAny: () => true,
+      canAll: () => true,
+      snapshot: roles === null ? null : ({ role: roles[0], roles } as never),
+      loading: false,
+      error: false,
+      refresh: async () => undefined,
+    };
+  }
+
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    vi.mocked(fetchPreferences).mockResolvedValue({});
+    vi.mocked(setPreference).mockResolvedValue(undefined);
+    vi.mocked(listBatchInferTasks).mockResolvedValue([]);
+  });
+
+  it("无读角色（viewer）不挂载任务中心 → 零请求（不调用列表接口）", () => {
+    setPerm(["viewer"]);
+    renderLayout({ ...mockUser, role: "viewer" });
+    expect(listBatchInferTasks).not.toHaveBeenCalled();
+  });
+
+  it("读角色（domain_admin）挂载任务中心 → 挂载探测调用一次列表接口", async () => {
+    setPerm(["domain_admin"]);
+    renderLayout({ ...mockUser, role: "domain_admin" });
+    await waitFor(() => {
+      expect(listBatchInferTasks).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("权限快照未就绪（null）fail-open 挂载（与全局 can 语义一致，后端强制兜底）", async () => {
+    setPerm(null);
+    renderLayout();
+    await waitFor(() => {
+      expect(listBatchInferTasks).toHaveBeenCalledTimes(1);
+    });
+  });
 });
