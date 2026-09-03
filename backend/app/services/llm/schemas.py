@@ -35,6 +35,13 @@ class LlmConfigPayload(BaseModel):
         le=32768,
         description="单次请求最大生成长度上限（实际请求取 min(场景值, 实例上限)）",
     )
+    temperature: float | None = Field(
+        None,
+        ge=0,
+        le=2,
+        description="实例采样温度（None=不覆盖，沿用调用方温度 0 确定性优先；"
+        "配置后该实例请求使用此温度，生成类场景可调高增加多样性）",
+    )
     enabled: bool = Field(False, description="是否启用该实例（仅启用参与路由）")
     priority: int = Field(0, ge=0, le=100, description="路由优先级（小者优先，0 最高）")
     disable_thinking: bool = Field(
@@ -61,6 +68,7 @@ class LlmConfigResponse(BaseModel):
     has_api_key: bool = False
     timeout: int = 30
     max_tokens: int = 2048
+    temperature: float | None = None
     enabled: bool = False
     priority: int = 0
     disable_thinking: bool = False
@@ -81,6 +89,7 @@ class LlmConfigResponse(BaseModel):
         has_api_key: bool = False,
         timeout: int = 30,
         max_tokens: int = 2048,
+        temperature: float | None = None,
         enabled: bool = False,
         priority: int = 0,
         disable_thinking: bool = False,
@@ -98,6 +107,7 @@ class LlmConfigResponse(BaseModel):
             has_api_key=has_api_key,
             timeout=timeout,
             max_tokens=max_tokens,
+            temperature=temperature,
             enabled=enabled,
             priority=priority,
             disable_thinking=disable_thinking,

@@ -2024,6 +2024,8 @@ export interface LlmConfigItem {
   timeout: number;
   /** 单次请求最大生成长度上限（实际请求取 min(场景值, 实例上限)） */
   max_tokens: number;
+  /** 实例采样温度（null=不覆盖，沿用调用方温度 0 确定性优先；配置后该实例请求使用此温度） */
+  temperature: number | null;
   enabled: boolean;
   priority: number;
   disable_thinking: boolean;
@@ -2054,6 +2056,8 @@ export interface LlmConfigPayload {
   timeout: number;
   /** 单次请求最大生成长度上限（实际请求取 min(场景值, 实例上限)） */
   max_tokens: number;
+  /** 实例采样温度（留空=不覆盖，沿用调用方温度 0 确定性优先） */
+  temperature?: number | null;
   enabled: boolean;
   priority: number;
   disable_thinking: boolean;

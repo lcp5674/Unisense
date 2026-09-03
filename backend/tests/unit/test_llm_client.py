@@ -365,6 +365,41 @@ class TestLlmClient:
         payload3 = client3._client.post.call_args[1]["json"]
         assert payload3["max_tokens"] == 2048
 
+    async def test_chat_instance_temperature_overrides_request(self) -> None:
+        """实例级采样温度：配置后覆盖调用方温度；未配置（None）沿用调用方值。
+
+        调用方各场景默认 temperature=0（确定性）；管理员给实例配置温度（如生成类
+        0.7）后，该实例所有请求使用此温度——配置即覆盖。
+        """
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.headers = {"content-type": "application/json"}
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "ok", "finish_reason": "stop"}}],
+            "model": "test-model",
+        }
+
+        # 实例配置温度 0.7 → 覆盖调用方默认 0
+        client = LlmClient(
+            base_url="https://api.example.com",
+            api_key="test-key",
+            temperature=0.7,
+        )
+        client._client = MagicMock()
+        client._client.post = AsyncMock(return_value=mock_response)
+        await client.chat([{"role": "user", "content": "Hi"}], temperature=0.0)
+        payload = client._client.post.call_args[1]["json"]
+        assert payload["temperature"] == 0.7
+
+        # 实例未配置（None=env 兜底/直接构建）→ 沿用调用方温度
+        client2 = LlmClient(base_url="https://api.example.com", api_key="test-key")
+        client2._client = MagicMock()
+        client2._client.post = AsyncMock(return_value=mock_response)
+        await client2.chat([{"role": "user", "content": "Hi"}], temperature=0.0)
+        payload2 = client2._client.post.call_args[1]["json"]
+        assert payload2["temperature"] == 0.0
+
     @pytest.mark.asyncio
     async def test_chat_sse_response_aggregates_delta(self) -> None:
         """方案 2：网关返回 text/event-stream 时，逐帧聚合 delta 而非把信封原文当 content。"""

@@ -413,6 +413,7 @@ export function SystemConfig() {
       model: item.model,
       timeout: item.timeout,
       max_tokens: item.max_tokens ?? 2048,
+      temperature: item.temperature,
       enabled: item.enabled,
       priority: item.priority,
       disable_thinking: item.disable_thinking,
@@ -483,6 +484,7 @@ export function SystemConfig() {
         api_key: values.api_key || "",
         timeout: values.timeout,
         max_tokens: values.max_tokens ?? 2048,
+        temperature: values.temperature ?? null,
         enabled: values.enabled,
         priority: values.priority ?? 0,
         disable_thinking: values.disable_thinking ?? false,
@@ -609,6 +611,7 @@ export function SystemConfig() {
       api_key: "",
       timeout: item.timeout,
       max_tokens: item.max_tokens ?? 2048,
+      temperature: item.temperature,
       enabled: item.enabled,
       priority: item.priority,
       disable_thinking: item.disable_thinking,
@@ -1151,7 +1154,7 @@ export function SystemConfig() {
               </Space>
             </div>
           ) : null}
-          <Space size={24}>
+          <Space size={24} wrap>
             <Form.Item
               name="timeout"
               label="超时（秒）"
@@ -1168,6 +1171,21 @@ export function SystemConfig() {
               style={{ marginBottom: 12 }}
             >
               <InputNumber min={1} max={32768} style={{ width: 140 }} aria-label="最大生成长度" />
+            </Form.Item>
+            <Form.Item
+              name="temperature"
+              label="温度"
+              tooltip="该实例请求使用的采样温度：留空=不配置（沿用调用方温度 0，确定性优先）；配置后该实例所有请求使用此温度（0~2，生成类场景可调 0.7~1.0 增加多样性）"
+              style={{ marginBottom: 12 }}
+            >
+              <InputNumber
+                min={0}
+                max={2}
+                step={0.1}
+                style={{ width: 140 }}
+                placeholder="不配置（0）"
+                aria-label="温度"
+              />
             </Form.Item>
             <Form.Item
               name="priority"

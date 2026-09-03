@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Integer, String, Text
+from sqlalchemy import Boolean, Float, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.mysql import Base
@@ -57,6 +57,15 @@ class LlmConfig(Base, BaseModel):
         nullable=False,
         default=2048,
         comment="单次请求最大生成长度上限（实际请求取 min(场景值, 实例上限)）",
+    )
+    temperature: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+        default=None,
+        comment=(
+            "实例采样温度（None=不覆盖，沿用调用方温度 0 确定性优先；"
+            "配置后该实例请求使用此温度 0~2）"
+        ),
     )
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, comment="是否启用该配置"

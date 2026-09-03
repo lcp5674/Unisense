@@ -255,6 +255,53 @@ describe("SystemConfig LLM 路由配置", () => {
     });
   });
 
+  it("新增实例：配置温度（temperature）→ 保存 payload 透传", async () => {
+    mockCreate.mockResolvedValue({ id: 3 });
+    render(<SystemConfig />, { wrapper: MemoryRouter });
+    fireEvent.click(await screen.findByText("新增 LLM 实例"));
+    // 默认不配置（留空 = 沿用调用方温度 0）
+    const tmp = await screen.findByRole("spinbutton", { name: "温度" });
+    expect((tmp as HTMLInputElement).value).toBe("");
+    // 生成类场景调高温度增加多样性
+    fireEvent.change(tmp, { target: { value: "0.7" } });
+    fireEvent.change(screen.getByPlaceholderText("https://api.deepseek.com"), {
+      target: { value: "http://host.docker.internal:8082" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "模型名称" }), {
+      target: { value: "qwen3-30b-a3b" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("sk-..."), {
+      target: { value: "local" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => {
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          temperature: 0.7,
+          model: "qwen3-30b-a3b",
+        }),
+      );
+    });
+  });
+
+  it("编辑实例：温度/关闭思考回显（不配置显示留空）", async () => {
+    mockGet.mockResolvedValue(
+      listData({
+        items: [
+          {
+            ...PRIMARY_ITEM,
+            temperature: 0.9,
+            disable_thinking: true,
+          },
+        ],
+      }) as never,
+    );
+    render(<SystemConfig />, { wrapper: MemoryRouter });
+    fireEvent.click(await screen.findByText("编辑"));
+    const tmp = await screen.findByRole("spinbutton", { name: "温度" });
+    expect((tmp as HTMLInputElement).value).toBe("0.9");
+  });
+
   it("新增实例：点获取模型 → 调 fetchLlmModels → 提示可用模型数", async () => {
     mockFetchModels.mockResolvedValue({
       models: ["hy3", "hy3-pro"],

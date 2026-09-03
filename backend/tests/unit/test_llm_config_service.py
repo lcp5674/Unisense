@@ -227,6 +227,47 @@ class TestCreateUpdateDelete:
         await LlmConfigService(s).update(1, payload, updated_by=2)
         assert existing.max_tokens == 512
 
+    async def test_create_persists_temperature(self) -> None:
+        """create 把温度写入实例；缺省不配置（None=沿用调用方温度 0）。"""
+        s = _session([])
+        payload = LlmConfigPayload(
+            name="生成",
+            provider="custom",
+            base_url="http://host.docker.internal:8082",
+            model="qwen3-30b-a3b",
+            api_key="local",
+            timeout=900,
+            enabled=True,
+            temperature=0.7,
+        )
+        await LlmConfigService(s).create(payload, updated_by=7)
+        added = s.add.call_args[0][0]
+        assert isinstance(added, LlmConfig)
+        assert added.temperature == 0.7
+        # 未显式传 temperature → None（不覆盖，确定性优先）
+        payload_default = LlmConfigPayload(
+            name="默认", base_url="https://a.com", model="m", api_key="k"
+        )
+        assert payload_default.temperature is None
+
+    async def test_update_persists_temperature(self) -> None:
+        """update 更新温度（编辑实例采样温度生效）；置空清除为 None。"""
+        s = _session()
+        existing = _row()
+        s.execute.return_value.scalar_one_or_none.return_value = existing
+        payload = LlmConfigPayload(
+            name="改",
+            provider="custom",
+            base_url="https://new.example.com",
+            model="m1",
+            api_key="",
+            timeout=30,
+            enabled=True,
+            temperature=1.2,
+        )
+        await LlmConfigService(s).update(1, payload, updated_by=2)
+        assert existing.temperature == 1.2
+
     async def test_update_keeps_key_when_payload_empty(self) -> None:
         s = _session()
         existing = _row()

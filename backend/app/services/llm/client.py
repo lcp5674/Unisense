@@ -183,6 +183,7 @@ class LlmClient:
         model: str | None = None,
         timeout: float = 30.0,
         max_tokens: int | None = None,
+        temperature: float | None = None,
         breaker: Any | None = None,
         name: str = "llm",
         disable_thinking: bool = False,
@@ -195,6 +196,9 @@ class LlmClient:
         # 场景值）；配置后实际请求取 min(调用方场景值, 实例上限)——CPU 推理部署
         # 可下调上限控制生成规模/耗时，防止思考模型超长生成拖死/超时。
         self._max_tokens = max_tokens
+        # 实例级采样温度（可视化配置）：None=不覆盖（沿用调用方温度 0，确定性优先）；
+        # 配置后该实例所有请求使用此温度（生成类场景可调高增加多样性）。
+        self._temperature = temperature
         self._name = name
         # 关闭思考模式（本地 Qwen3/DeepSeek-R1 等默认输出 <think> 推理）：为 True 时
         # 请求体附加 chat_template_kwargs={"enable_thinking": False}，从模板层关闭思考，
@@ -269,11 +273,15 @@ class LlmClient:
         effective_max_tokens = (
             min(max_tokens, self._max_tokens) if self._max_tokens else max_tokens
         )
+        # 实例级采样温度：配置后覆盖调用方温度（未配置沿用调用方值，默认 0 确定性）。
+        effective_temperature = (
+            self._temperature if self._temperature is not None else temperature
+        )
 
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
-            "temperature": temperature,
+            "temperature": effective_temperature,
             "max_tokens": effective_max_tokens,
             "response_format": effective_format,
             # 显式声明非流式（方案 1）：部分网关缺省流式或对省略 stream 字段的请求以
