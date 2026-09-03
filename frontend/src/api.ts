@@ -212,6 +212,21 @@ const API_BASE_URL: string =
 const SEMANTIC_API_KEY: string =
   (import.meta.env.VITE_SEMANTIC_API_KEY as string | undefined) || "";
 
+// X-Trace-Id 生成：crypto.randomUUID 仅在 secure context（HTTPS/localhost）暴露。
+// 生产以 http://<IP>:8180 直接访问时属 insecure context → randomUUID 为 undefined，
+// 请求在发出前即抛 TypeError（页面表现为无错误码的「登录失败」且后端无日志）。
+// 降级用 crypto.getRandomValues 生成 UUIDv4（该 API 在非 secure context 同样可用）。
+function newTraceId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const c = crypto.getRandomValues(new Uint8Array(16));
+  c[6] = (c[6] & 0x0f) | 0x40; // version 4
+  c[8] = (c[8] & 0x3f) | 0x80; // variant 10
+  const hex = Array.from(c, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 const TOKEN_KEY = "unisense_token";
 
 export function getToken(): string | null {
@@ -479,7 +494,7 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
     ...(SEMANTIC_API_KEY ? { "X-Api-Key": SEMANTIC_API_KEY } : {}),
     // P2-2（第八轮）：透传 X-Trace-Id——后端 TraceIdMiddleware 读取并随响应回传，
     // 使前端请求与后端日志/审计 trace_id 贯通（排查慢请求/报错无需手工对时间）。
-    "X-Trace-Id": crypto.randomUUID(),
+    "X-Trace-Id": newTraceId(),
     ...(init?.headers as Record<string, string> | undefined),
   };
   // FormData（文件上传）由浏览器自动生成 multipart boundary——显式 Content-Type
@@ -909,7 +924,7 @@ export async function downloadMetricImportTemplate(format: "csv" | "xlsx" = "csv
     headers: {
       Authorization: `Bearer ${getToken() ?? ""}`,
       ...(SEMANTIC_API_KEY ? { "X-Api-Key": SEMANTIC_API_KEY } : {}),
-      "X-Trace-Id": crypto.randomUUID(),
+      "X-Trace-Id": newTraceId(),
     },
   });
   if (!res.ok) {
