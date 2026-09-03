@@ -51,10 +51,10 @@ class DpSyncConfig(Base, BaseModel):
         default=False,
         comment="同步总开关（停用不再轮询/解析，血缘保留）",
     )
-    source_id: Mapped[int] = mapped_column(
-        BigInteger,
+    source_id: Mapped[str] = mapped_column(
+        String(64),
         nullable=False,
-        comment="dp 数据源 id（默认本地 4）",
+        comment="dp 数据源 source_id（如 mysql_uncategorized）",
     )
     schema_name: Mapped[str] = mapped_column(
         String(64),

@@ -28,6 +28,7 @@ from app.services.collector.queue import RedisJobStore
 from app.services.collector.repository import CollectorRepository
 from app.services.collector.tasks import run_collection_task
 from app.services.conflict.sla_tasks import auto_escalate_overdue, remind_stale_escalated
+from app.services.lineage.dp_sync_tasks import dp_lineage_poll_task
 from app.services.lineage.neo4j_sync import sync_neo4j_assets_task
 from app.services.lineage.scan_tasks import lineage_scan_task
 from app.services.notify.consumers import register_notify_event_consumers
@@ -258,6 +259,7 @@ class WorkerSettings:
         remind_stale_escalated,
         sync_neo4j_assets_task,
         lineage_scan_task,
+        dp_lineage_poll_task,
         purge_retained_records,
         check_table_growth,
         refresh_dimension_snapshots_task,
@@ -382,6 +384,12 @@ class WorkerSettings:
             name="lineage-scan",
             hour=3,
             minute=30,
+            run_at_startup=False,
+        ),
+        cron(
+            dp_lineage_poll_task,
+            name="dp-lineage-poll",
+            second=0,
             run_at_startup=False,
         ),
         cron(

@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from app.db.mysql import AsyncSession
@@ -372,7 +373,7 @@ class DpSyncService:
             source_node=sn, target_node=tn, edge_type="DERIVED_FROM", granularity="L1"
         )
         if await self._lineage_repo.would_create_cycle(probe):
-            logger.warning("dp_sync_edge_cycle_skipped", source=sn, target=tn)
+            logger.warning("dp_sync_edge_cycle_skipped: %s -> %s", sn, tn)
             return None
         edge, _ = await self._lineage_repo.upsert_edge_with_status(
             source_node=sn,
@@ -466,3 +467,232 @@ class DpSyncService:
         for catalog in catalogs:
             await self._dp_repo.update_catalog_owner(catalog.id, user.id)
         return {"backfilled": len(catalogs), "shadow_created": shadow_created}
+
+    # ---- 扫描（D7 定时增量轮询） ----
+    async def scan_once(self, fetch_collector: Callable[[str], Awaitable[Any]]) -> dict[str, Any]:
+        """执行一轮 dp 血缘增量扫描（由 arq 1 分钟 ticker 按间隔触发）。
+
+        Args:
+            fetch_collector: ``async (source_id) -> collector``（含 query/dispose）。
+                由部署侧注入（tasks 用真实 dp 连接），测试注入假 collector。
+        """
+        config = await self._dp_repo.get_config()
+        if config is None or not config.enabled:
+            return {"skipped": "not_configured_or_disabled"}
+        wm = await self._dp_repo.get_watermark("task")
+        now = datetime.now(UTC)
+        if wm is not None and wm.last_scan_at is not None:
+            interval = max(1, int(config.poll_interval_minutes or 5)) * 60
+            if (now - wm.last_scan_at).total_seconds() < interval:
+                return {"skipped": "interval_not_due"}
+        run = await self._dp_repo.create_run_log(status="running", run_at=now)
+        collector = await fetch_collector(config.source_id)
+        counters: dict[str, int] = {
+            "scanned_tasks": 0,
+            "scanned_steps": 0,
+            "parsed_ok": 0,
+            "llm_confirmed": 0,
+            "diverged": 0,
+            "llm_fallback": 0,
+            "unparseable": 0,
+            "tickets_created": 0,
+            "tickets_resolved": 0,
+            "errors": 0,
+            "llm_calls": 0,
+        }
+        seen_pairs: set[tuple[str, str]] = set()
+        try:
+            task_ids, task_max, step_max = await self._changed_ids(
+                collector, config, wm
+            )
+            for task_id in task_ids:
+                try:
+                    await self._process_task(
+                        collector, config, task_id, counters, seen_pairs
+                    )
+                except Exception as exc:  # noqa: BLE001 —— 单任务失败不阻断整轮
+                    counters["errors"] += 1
+                    logger.warning("dp_sync_task_failed task_id=%s error=%s", task_id, exc)
+            await self._db.commit()
+            # 收尾：水位推进 + 边确认（stale 机制）
+            await self._dp_repo.update_watermark(
+                "task", last_max_update=task_max, last_scan_at=now
+            )
+            await self._dp_repo.update_watermark(
+                "step", last_max_update=step_max, last_scan_at=now
+            )
+            confirmed, restored = await self._lineage_repo.mark_seen(
+                DP_PROVENANCE, seen_pairs
+            )
+            counters["tickets_resolved"] += restored
+            await self._db.commit()
+            detail = dict(counters)
+            detail["seen_pairs"] = len(seen_pairs)
+            await self._dp_repo.update_run_log(
+                run.id,
+                status="success",
+                scanned_tasks=counters["scanned_tasks"],
+                scanned_steps=counters["scanned_steps"],
+                parsed_ok=counters["parsed_ok"],
+                llm_confirmed=counters["llm_confirmed"],
+                diverged=counters["diverged"],
+                llm_fallback=counters["llm_fallback"],
+                unparseable=counters["unparseable"],
+                tickets_created=counters["tickets_created"],
+                tickets_resolved=counters["tickets_resolved"],
+                errors=counters["errors"],
+                llm_calls=counters["llm_calls"],
+                detail_json=__import__("json").dumps(detail, ensure_ascii=False),
+            )
+            await self._db.commit()
+            return counters
+        except Exception as exc:  # noqa: BLE001 —— 记录失败，下轮重试
+            await self._db.rollback()
+            await self._dp_repo.update_run_log(run.id, status="failed", error=str(exc))
+            await self._db.commit()
+            logger.exception("dp_sync_scan_failed")
+            return {"skipped": "failed", "error": str(exc)}
+        finally:
+            await collector.dispose()
+
+    async def _changed_ids(
+        self,
+        collector: Any,
+        config: Any,
+        wm: Any,
+    ) -> tuple[list[int], datetime | None, datetime | None]:
+        """按 gmt_modified 水位查变更任务 id 集合（task 变更 ∪ step 变更关联任务）。
+
+        首轮无水位 = 全量（活跃 type 过滤任务）。返回 (ids, task_max, step_max)。
+        """
+        task_types = list(config.task_type_filter or [1])
+        step_types = list(config.step_type_filter or [7])
+        placeholders = ",".join(f":t{i}" for i in range(len(task_types)))
+        params: dict[str, Any] = {f"t{i}": v for i, v in enumerate(task_types)}
+        task_wm = wm.last_max_update if wm is not None else None
+        base = (
+            "SELECT id FROM dp_stable.dispatch_task "
+            f"WHERE is_deleted=0 AND type IN ({placeholders})"
+        )
+        if task_wm is not None:
+            params["twm"] = task_wm
+            base += " AND gmt_modified > :twm"
+        rows = await collector.query(base, params)
+        ids = {int(r["id"]) for r in rows}
+        # task 变更水位推进（增量模式下含本批最大；全量模式取全部最大）
+        task_rows = await collector.query(
+            "SELECT MAX(gmt_modified) AS m FROM dp_stable.dispatch_task "
+            f"WHERE is_deleted=0 AND type IN ({placeholders})",
+            params,
+        )
+        task_max = task_rows[0]["m"] if task_rows and task_rows[0]["m"] else task_wm
+        # step 独立变更：按 step 水位补任务（跨表 join 保证 task type 过滤）
+        step_wm = None
+        swm_row = await self._dp_repo.get_watermark("step")
+        if swm_row is not None:
+            step_wm = swm_row.last_max_update
+        sph = ",".join(f":s{i}" for i in range(len(step_types)))
+        sp = {f"s{i}": v for i, v in enumerate(step_types)}
+        step_sql = (
+            "SELECT DISTINCT st.task_id AS id FROM dp_stable.dispatch_task_step st "
+            "JOIN dp_stable.dispatch_task t ON st.task_id=t.id "
+            f"WHERE st.is_deleted=0 AND t.is_deleted=0 AND t.type IN ({placeholders}) "
+            f"AND st.task_step_type IN ({sph})"
+        )
+        sp.update({f"t{i}": v for i, v in enumerate(task_types)})
+        if step_wm is not None:
+            sp["swm"] = step_wm
+            step_sql += " AND st.gmt_modified > :swm"
+        step_rows = await collector.query(step_sql, sp)
+        ids.update(int(r["id"]) for r in step_rows)
+        # step 变更水位推进
+        step_max_rows = await collector.query(
+            "SELECT MAX(gmt_modified) AS m FROM dp_stable.dispatch_task_step "
+            f"WHERE is_deleted=0 AND task_step_type IN ({sph})",
+            {f"s{i}": v for i, v in enumerate(step_types)},
+        )
+        step_max = (
+            step_max_rows[0]["m"] if step_max_rows and step_max_rows[0]["m"] else step_wm
+        )
+        return sorted(ids), task_max, step_max
+
+    async def _process_task(
+        self,
+        collector: Any,
+        config: Any,
+        task_id: int,
+        counters: dict[str, int],
+        seen_pairs: set[tuple[str, str]],
+    ) -> None:
+        """处理单个任务：拉 task 静态字段 + SQL 节点 → process_step 逐节点。"""
+        task = await self._fetch_task(collector, task_id)
+        if task is None:
+            return
+        # 排除规则：任务名命中排除
+        patterns = list(config.exclude_task_patterns or [])
+        if patterns:
+            import re as _re
+
+            name = str(task.get("task_name") or "")
+            if any(_re.search(p, name) for p in patterns):
+                return
+        steps = await self._fetch_sql_steps(collector, task_id, config)
+        if not steps:
+            return
+        counters["scanned_tasks"] += 1
+        for step in steps:
+            sql = str(step.get("script_info") or "")
+            counters["scanned_steps"] += 1
+            result = await self.process_step(task, step, sql, config)
+            status = result.get("status", "unknown")
+            if status in counters:
+                counters[status] += 1
+            if status in ("parsed_ok", "llm_confirmed", "memory_reused"):
+                # 记录确认边（供收尾 mark_seen）
+                outcome_rows = await self._collect_seen_pairs(task, step, sql, config)
+                seen_pairs.update(outcome_rows)
+        # 资产 Owner 回填（产出表孤儿）
+        await self.backfill_owner(task, config)
+
+    async def _collect_seen_pairs(
+        self, task: dict[str, Any], step: dict[str, Any], sql: str, config: Any
+    ) -> set[tuple[str, str]]:
+        """对本轮成功入库的节点重新解析出边集（供 mark_seen 确认）。"""
+        outcome = parse_dp_step(
+            sql,
+            dialect="hive",
+            exclude_patterns=config.exclude_table_patterns,
+            rules=config.llm_complexity_rules,
+            target_table=task.get("out_table") or None,
+        )
+        return {
+            (node_table(e.source), node_table(e.target)) for e in outcome.table_edges
+        }
+
+    async def _fetch_task(self, collector: Any, task_id: int) -> dict[str, Any] | None:
+        rows = await collector.query(
+            "SELECT id AS task_id, task_no, name AS task_name, type, out_table, "
+            "director, created_user_id, modified_user_id, checker, settle_project_director, "
+            "project_id, settle_project_name, settle_department_name, budget_unit_name, "
+            "cycle, cron_express, week_day, month_day, specific_time, frequence, remark, "
+            "task_version_desc, task_version, master_task_id, is_master_task "
+            "FROM dp_stable.dispatch_task WHERE id=:tid",
+            {"tid": task_id},
+        )
+        return rows[0] if rows else None
+
+    async def _fetch_sql_steps(
+        self, collector: Any, task_id: int, config: Any
+    ) -> list[dict[str, Any]]:
+        step_types = list(config.step_type_filter or [7])
+        placeholders = ",".join(f":s{i}" for i in range(len(step_types)))
+        params: dict[str, Any] = {f"s{i}": v for i, v in enumerate(step_types)}
+        params["tid"] = task_id
+        return await collector.query(
+            "SELECT id AS step_id, task_id, task_step, "
+            "task_step_name AS step_name, task_step_type, task_node_type, script_info "
+            "FROM dp_stable.dispatch_task_step "
+            f"WHERE task_id=:tid AND is_deleted=0 AND task_step_type IN ({placeholders}) "
+            "ORDER BY task_step",
+            params,
+        )

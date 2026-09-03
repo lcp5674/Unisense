@@ -65,7 +65,7 @@ def upgrade() -> None:
         [
             sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
             sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.text("0"), comment="同步总开关"),
-            sa.Column("source_id", sa.BigInteger(), nullable=False, comment="dp 数据源 id"),
+            sa.Column("source_id", sa.String(64), nullable=False, comment="dp 数据源 source_id"),
             sa.Column("schema_name", sa.String(64), nullable=False, server_default="dp_stable", comment="dp 元库库名"),
             sa.Column("task_table", sa.String(128), nullable=False, server_default="dispatch_task", comment="任务表名"),
             sa.Column("step_table", sa.String(128), nullable=False, server_default="dispatch_task_step", comment="节点表名"),
