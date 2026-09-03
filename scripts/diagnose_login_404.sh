@@ -36,6 +36,7 @@ echo ""
 echo "== 2. 核心接口探测（404 = 后端缺路由，200 = 接口正常）=="
 ENDPOINTS=(
   "auth/me"
+  "me/permissions"
   "notify/notifications/unread-count"
   "semantics/dashboard"
   "recommend/metrics?limit=5"
@@ -66,6 +67,20 @@ else
     printf "  %s  %s\n" "$code" "$a"
     [[ "$code" == "404" ]] && STATIC404=1
   done <<< "$ASSETS"
+fi
+
+# 浏览器在页面未声明 favicon 时会自动请求 /favicon.ico（Chrome/Edge 行为），
+# 文件不存在会在 Console 报 404 红字（无害但容易误判为故障）。补探测。
+echo ""
+echo "== 3.1 自动请求项探测（favicon 等浏览器隐式请求）=="
+STATIC404="${STATIC404:-0}"
+FAVICON_CODE="$(curl -s -o /dev/null -w "%{http_code}" "$BASE/favicon.ico")"
+printf "  %s  /favicon.ico（浏览器隐式请求，404 = 无害噪音；已随 favicon.svg 声明消除）\n" "$FAVICON_CODE"
+FAV_SVG_CODE="$(curl -s -o /dev/null -w "%{http_code}" "$BASE/favicon.svg")"
+printf "  %s  /favicon.svg（index.html 声明的图标）\n" "$FAV_SVG_CODE"
+if [[ "$FAV_SVG_CODE" != "200" ]]; then
+  echo "  ⚠ /favicon.svg 非 200：前端镜像未含新 public 资源，需重建 frontend"
+  STATIC404=1
 fi
 
 echo ""
