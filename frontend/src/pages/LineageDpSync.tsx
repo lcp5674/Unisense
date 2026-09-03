@@ -52,7 +52,7 @@ function fmt(v?: string | null): string {
   return v ? dayjs(v).format("YYYY-MM-DD HH:mm") : "—";
 }
 
-export default function LineageDpSync() {
+export function LineageDpSync() {
   const [activeTab, setActiveTab] = useState("config");
 
   const renderContent = () => {

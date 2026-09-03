@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "antd";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import LineageDpSync from "../pages/LineageDpSync";
+import { LineageDpSync } from "../pages/LineageDpSync";
 import * as api from "../api";
 
 vi.mock("../api", () => ({
