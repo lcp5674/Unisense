@@ -30,7 +30,7 @@ case "${LLM_MODEL}" in
   8b)
     LLM_MODEL_FILE="${LLM_MODEL_FILE:-Qwen3-8B-Q4_K_M.gguf}"
     LLM_REPO="${LLM_REPO:-Qwen/Qwen3-8B-GGUF}"
-    LLM_DEFAULT_MEM="8g"; LLM_DEFAULT_PORT="8081"
+    LLM_DEFAULT_MEM="12g"; LLM_DEFAULT_PORT="8081"   # 12g：4 slot×16k KV 峰值余量（62G 机器，避免并发兜底 OOM）
     LLM_DEFAULT_CPUS="28"; LLM_DEFAULT_CTX="16384"
     LLM_VERIFY_MODEL="qwen3-8b"
     LLM_DISPLAY="Qwen3-8B (dense, Q4_K_M ~4.9GB)"
