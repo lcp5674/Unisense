@@ -143,11 +143,14 @@ def _svc(
 
 
 def _wm(
-    last_scan_at: datetime | None = None, last_max: datetime | None = None
+    last_scan_at: datetime | None = None,
+    last_max: datetime | None = None,
+    last_full: datetime | None = None,
 ) -> DpSyncWatermark:
     wm = DpSyncWatermark(table_name="task")
     wm.last_scan_at = last_scan_at
     wm.last_max_update = last_max
+    wm.last_full_scan_at = last_full
     return wm
 
 
@@ -203,7 +206,9 @@ async def test_scan_incremental_passes_watermark() -> None:
     svc = _svc(collector)
     svc._dp_repo.get_watermark = AsyncMock(
         return_value=_wm(
-            last_scan_at=NOW - timedelta(minutes=10), last_max=NOW - timedelta(days=1)
+            last_scan_at=NOW - timedelta(minutes=10),
+            last_max=NOW - timedelta(days=1),
+            last_full=NOW - timedelta(hours=1),  # 最近全量过 → 增量模式
         )
     )
     result = await svc.scan_once(_fc(collector))
@@ -475,7 +480,9 @@ async def test_scan_incremental_skips_mark_missing() -> None:
     svc = _svc(collector)
     svc._dp_repo.get_watermark = AsyncMock(
         return_value=_wm(
-            last_scan_at=NOW - timedelta(minutes=10), last_max=NOW - timedelta(days=1)
+            last_scan_at=NOW - timedelta(minutes=10),
+            last_max=NOW - timedelta(days=1),
+            last_full=NOW - timedelta(hours=1),  # 最近全量过 → 非周期自动全量
         )
     )
     result = await svc.scan_once(_fc(collector))

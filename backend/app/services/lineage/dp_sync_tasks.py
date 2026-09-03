@@ -54,10 +54,30 @@ def _make_llm_chat(db: Any):
 
 
 async def dp_lineage_poll_task(ctx: dict[str, Any]) -> dict[str, Any]:
-    """dp 血缘同步轮询任务（worker 每分钟触发，按配置间隔执行扫描）。"""
+    """dp 血缘同步轮询任务（worker 每分钟触发，按配置间隔执行扫描）。
+
+    分布式锁（H3）：cron 每分钟触发、scan_once 间隔节流读的是上一轮收尾才
+    写的 last_scan_at——扫描超 poll_interval 时后续 tick 会判定到点而重入，
+    多副本 worker 更甚（并发双跑致 mark_missing 双倍累加 / 建单撞唯一键）。
+    用 Redis SET NX 锁防重入（key 按数据源隔离；Redis 不可用降级放行）。
+    """
     from app.db.mysql import async_session_factory
+    from app.services.collector.distributed_lock import CollectionLock
     from app.services.lineage.dp_sync_service import DpSyncService
 
-    async with async_session_factory() as db:
-        svc = DpSyncService(db, llm_chat=_make_llm_chat(db))
-        return await svc.scan_once(lambda sid: _fetch_collector(db, sid))
+    redis = ctx.get("redis")
+    lock = CollectionLock(redis)
+    # dp 同步配置为全局单行（跨域平台能力），锁 key 固定防任意 worker/副本重入
+    lock_key = "dp_lineage_poll"
+    owner = f"poll-{lock_key}"
+    # TTL 60min：覆盖首轮长全量；任务结束显式释放，worker 崩溃后 60min 内自愈
+    acquired = await lock.acquire(lock_key, owner, ttl=3600)
+    if not acquired:
+        logger.info("dp_lineage_poll_skipped_locked: %s 已有扫描运行", lock_key)
+        return {"skipped": "locked"}
+    try:
+        async with async_session_factory() as db:
+            svc = DpSyncService(db, llm_chat=_make_llm_chat(db))
+            return await svc.scan_once(lambda sid: _fetch_collector(db, sid))
+    finally:
+        await lock.release(lock_key, owner)

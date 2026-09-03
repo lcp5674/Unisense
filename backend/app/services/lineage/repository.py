@@ -36,6 +36,22 @@ def merge_provenances(existing: str | None, incoming: str) -> str:
         tokens.append(incoming)
     return "+".join(tokens)
 
+
+def provenance_contains(column: Any, source: str) -> Any:
+    """SQLAlchemy 条件：``provenance`` 列含 ``source`` token（``+`` 分隔多来源）。
+
+    写路径 provenance 会合并为 ``sqlglot+dp_sql``（见 ``merge_provenances``），
+    读路径按通道过滤必须 token 匹配（等值 OR 前缀/中缀/后缀），否则合并边
+    在前端按通道过滤时丢失（M4 图谱/边列表与 ``_source_l1_edges`` 口径一致）。
+    """
+    return or_(
+        column == source,
+        column.like(f"{source}+%"),
+        column.like(f"%+{source}+%"),
+        column.like(f"%+{source}"),
+    )
+
+
 #: 系统内置血缘采集通道：无论当前是否有边都展示，保证「采集通道」视图来源全景完整
 #: （SQL 解析=sqlglot / DP 同步=dp_sql，dp_csv 为历史 CSV 导入通道保留展示；
 #: 其余动态来源如 metric_definition 有边时自动出现）。
@@ -174,14 +190,19 @@ class LineageRepository:
             )
         ).scalar_one_or_none()
         if tombstone is not None:
-            # 复活：落复活快照，清除软删/失效标记，再应用新值
+            # 复活：落复活快照，清除软删/失效标记，再应用新值。
+            # provenance 须与既有来源合并（M9：原实现直接覆盖会丢 tombstone
+            # 中其他通道 token——dp 复活被软删的 sqlglot+dp_sql 共享边后，
+            # sqlglot 通道 mark_seen/mark_missing 将匹配不到该边失去保护）。
             await self.record_edge_history(tombstone, f"revive:{change_reason}")
             tombstone.deleted_at = None
             tombstone.stale = False
             tombstone.stale_since = None
             tombstone.missing_count = 0
             tombstone.confidence = confidence
-            tombstone.provenance = provenance
+            merged = merge_provenances(tombstone.provenance, provenance)
+            if merged != tombstone.provenance:
+                tombstone.provenance = merged
             tombstone.pii_inherited = pii_inherited
             if owner is not None:
                 tombstone.owner = owner
@@ -785,18 +806,13 @@ class LineageRepository:
         """取某来源通道全部未删除的表级（L1/DERIVED_FROM）血缘边。
 
         provenance 现可含多来源（``hive+dp_sql``，P2-7 合并语义）——匹配「该
-        source 是否在来源集合中」（等值 OR 前缀/中缀/后缀 token 匹配）。
+        source 是否在来源集合中」（``provenance_contains`` token 匹配）。
         """
         return list(
             (
                 await self._db.execute(
                     select(LineageEdge).where(
-                        or_(
-                            LineageEdge.provenance == source,
-                            LineageEdge.provenance.like(f"{source}+%"),
-                            LineageEdge.provenance.like(f"%+{source}+%"),
-                            LineageEdge.provenance.like(f"%+{source}"),
-                        ),
+                        provenance_contains(LineageEdge.provenance, source),
                         LineageEdge.edge_type == "DERIVED_FROM",
                         LineageEdge.granularity == "L1",
                         LineageEdge.deleted_at.is_(None),
@@ -1026,7 +1042,7 @@ class LineageRepository:
             .limit(limit)
         )
         if source:
-            stmt = stmt.where(LineageEdge.provenance == source)
+            stmt = stmt.where(provenance_contains(LineageEdge.provenance, source))
         return list((await self._db.execute(stmt)).scalars().all())
 
     async def get_edge(self, edge_id: int) -> LineageEdge | None:
@@ -1289,7 +1305,7 @@ class LineageRepository:
             LineageEdge.edge_type,
         ).where(LineageEdge.deleted_at.is_(None))
         if provenance:
-            stmt = stmt.where(LineageEdge.provenance == provenance)
+            stmt = stmt.where(provenance_contains(LineageEdge.provenance, provenance))
         rows = (await self._db.execute(stmt.limit(limit))).all()
         if not rows:
             return [], []
@@ -1591,7 +1607,7 @@ class LineageRepository:
         if granularity:
             stmt = stmt.where(LineageEdge.granularity == granularity)
         if provenance:
-            stmt = stmt.where(LineageEdge.provenance == provenance)
+            stmt = stmt.where(provenance_contains(LineageEdge.provenance, provenance))
         if node:
             if direction == "upstream":
                 stmt = stmt.where(LineageEdge.target_node == node)

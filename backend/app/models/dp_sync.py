@@ -188,7 +188,6 @@ class LineageFieldMapping(Base, BaseModel):
     edge_id: Mapped[int] = mapped_column(
         BigInteger,
         nullable=False,
-        index=True,
         comment="所属表级边 id（lineage_edge.id）",
     )
     source_table: Mapped[str] = mapped_column(

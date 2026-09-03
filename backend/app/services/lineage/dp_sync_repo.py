@@ -182,7 +182,12 @@ class DpLineageRepository:
         task_id: int | None = None,
         step_id: int | None = None,
     ) -> None:
-        """按唯一索引幂等写入字段映射（已存在则忽略，不重复）。"""
+        """按唯一索引幂等写入字段映射（已存在则忽略，不重复）。
+
+        uq_lineage_field_mapping 不含 deleted_at：SQL 演进（soft_delete_field_mappings
+        软删旧 hash 映射）后同 tuple 重插会撞 1062。故先查活跃行（存在即忽略），
+        无活跃行时再查软删墓碑（存在则复活覆盖），最后才新建（H2）。
+        """
         stmt = select(LineageFieldMapping).where(
             LineageFieldMapping.source_table == source_table,
             LineageFieldMapping.source_column.is_(source_column),
@@ -193,6 +198,42 @@ class DpLineageRepository:
         )
         existing = (await self._db.execute(stmt)).scalar_one_or_none()
         if existing is not None:
+            return
+        # 软删墓碑复活：同 tuple 曾被 soft_delete_field_mappings 软删（SQL 演进），
+        # 复活覆盖并更新 provenance（合并保留历史来源）——避免撞 uq 1062 拖垮整轮。
+        tombstone = (
+            await self._db.execute(
+                select(LineageFieldMapping)
+                .where(
+                    LineageFieldMapping.source_table == source_table,
+                    LineageFieldMapping.source_column.is_(source_column),
+                    LineageFieldMapping.target_table == target_table,
+                    LineageFieldMapping.target_column == target_column,
+                    LineageFieldMapping.degraded.is_(degraded),
+                    LineageFieldMapping.deleted_at.is_not(None),
+                )
+                .order_by(LineageFieldMapping.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if tombstone is not None:
+            tombstone.deleted_at = None
+            tombstone.edge_id = edge_id
+            tombstone.expression = expression
+            tombstone.confidence = confidence
+            tombstone.sql_hash = sql_hash
+            tombstone.task_id = task_id
+            tombstone.step_id = step_id
+            # provenance 多来源合并（与 lineage/repository.merge_provenances 同语义）：
+            # 复活时保留墓碑既有通道 token，防其他通道失去对该映射的保护。
+            tokens: list[str] = []
+            for chunk in (tombstone.provenance or "").split("+"):
+                chunk = chunk.strip()
+                if chunk and chunk not in tokens:
+                    tokens.append(chunk)
+            if provenance and provenance not in tokens:
+                tokens.append(provenance)
+            tombstone.provenance = "+".join(tokens)
             return
         self._db.add(
             LineageFieldMapping(

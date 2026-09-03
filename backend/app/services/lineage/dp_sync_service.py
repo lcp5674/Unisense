@@ -57,6 +57,11 @@ _LLM_MAX_TOKENS = 2000
 #: dp 通道 provenance 标记。
 DP_PROVENANCE = "dp_sql"
 
+#: 自动全量观察周期（秒）。稳态增量轮下任务/节点删除后其边永不进失效队列
+#: （mark_missing 仅全量轮执行，P1-6 防误伤设计）——每满该周期自动执行一次
+#: 全量扫描（忽略水位全量拉取 + mark_missing），闭合「删除语义」（M1）。
+_AUTO_FULL_SCAN_SECONDS = 24 * 3600
+
 
 def _in_clause(
     column: str, values: list[int], prefix: str, params: dict[str, Any]
@@ -604,10 +609,23 @@ class DpSyncService:
             return {"skipped": "not_configured_or_disabled"}
         wm = await self._dp_repo.get_watermark("task")
         now = datetime.now(UTC)
-        # 全量轮判定：无 task 水位 = 首轮/重置后全量。仅全量轮对未再出现的边
-        # 执行失效观察（mark_missing）——增量轮只处理变更任务，未变更任务边不在
+        # 全量轮判定：无 task 水位 = 首轮/重置后全量；或距上次全量超周期自动全量
+        # （M1：稳态增量轮任务删除永不 stale——每 _AUTO_FULL_SCAN_SECONDS 强制一次
+        # 全量观察，使 mark_missing 对「不再出现的任务边」执行失效闭环）。仅全量轮
+        # 对未再出现的边执行失效观察——增量轮只处理变更任务，未变更任务边不在
         # seen_pairs，若每轮 mark_missing 会误伤大量正常边（P1-6）。
         full_scan = wm is None or wm.last_max_update is None
+        auto_full = (
+            not full_scan
+            and wm is not None
+            and (
+                wm.last_full_scan_at is None
+                or (now - wm.last_full_scan_at).total_seconds()
+                >= _AUTO_FULL_SCAN_SECONDS
+            )
+        )
+        if auto_full:
+            full_scan = True
         if not force and wm is not None and wm.last_scan_at is not None:
             interval = max(1, int(config.poll_interval_minutes or 5)) * 60
             if (now - wm.last_scan_at).total_seconds() < interval:
@@ -637,7 +655,7 @@ class DpSyncService:
             collector = await fetch_collector(config.source_id)
             ingest_run = await self._lineage_repo.begin_ingest_run(DP_PROVENANCE)
             task_ids, task_max, step_max = await self._changed_ids(
-                collector, config, wm
+                collector, config, wm, force_full=full_scan
             )
             if progress is not None:
                 progress["total"] = len(task_ids)
@@ -677,17 +695,25 @@ class DpSyncService:
                 if progress is not None:
                     progress["processed"] = idx
             await self._db.commit()
-            # 收尾：水位 + 边确认（stale 机制）。取消时**不推进 max 水位**——
-            # 未处理任务保留在变更集内，下轮从原水位重扫（幂等安全），避免跳过。
-            if cancelled:
+            # 收尾：水位 + 边确认（stale 机制）。取消/单任务失败时**不推进 max 水位**——
+            # 未处理任务保留在变更集内，下轮从原水位重扫（幂等安全），避免跳过：
+            # 失败任务 gmt_modified ≤ 全表 MAX，若照常推进会被新水位永久跳过（H1）。
+            if cancelled or counters["errors"] > 0:
                 await self._dp_repo.update_watermark("task", last_scan_at=now)
                 await self._dp_repo.update_watermark("step", last_scan_at=now)
             else:
+                # full_scan 成功时记录 last_full_scan_at（M1 周期全量判定的基准）
                 await self._dp_repo.update_watermark(
-                    "task", last_max_update=task_max, last_scan_at=now
+                    "task",
+                    last_max_update=task_max,
+                    last_scan_at=now,
+                    full_scan=full_scan,
                 )
                 await self._dp_repo.update_watermark(
-                    "step", last_max_update=step_max, last_scan_at=now
+                    "step",
+                    last_max_update=step_max,
+                    last_scan_at=now,
+                    full_scan=full_scan,
                 )
             confirmed, restored = await self._lineage_repo.mark_seen(
                 DP_PROVENANCE, seen_pairs
@@ -768,19 +794,27 @@ class DpSyncService:
         collector: Any,
         config: Any,
         wm: Any,
+        *,
+        force_full: bool = False,
     ) -> tuple[list[int], datetime | None, datetime | None]:
         """按 gmt_modified 水位查变更任务 id 集合（task 变更 ∪ step 变更关联任务）。
 
-        首轮无水位 = 全量（活跃 type 过滤任务）。返回 (ids, task_max, step_max)。
+        首轮无水位 = 全量（活跃 type 过滤任务）；force_full=True（周期自动全量，
+        M1）时忽略既有水位同样全量拉取——使 mark_missing 能观察「不再出现的
+        任务边」。返回 (ids, task_max, step_max)。
         表名取自配置（schema/task_table/step_table），标识符白名单校验（P1-5）。
         """
         schema, task_table, step_table = self._table_scope(config)
         task_types, step_types = _type_filters(config)
         params: dict[str, Any] = {}
         task_clause, params = _in_clause("type", task_types, "t", params)
-        task_wm = wm.last_max_update if wm is not None else None
+        effective_wm = None if force_full else wm
+        task_wm = effective_wm.last_max_update if effective_wm is not None else None
+        # 变更集查询直接带 gmt_modified（M2：不再单独查全表 MAX——两查询分离窗口内
+        # 新提交行 ts ≤ 全表 MAX 会被水位永久跳过；用「已扫集 max」推进则窗口内
+        # 新行 ts > 已扫集 max，下轮必然命中）。
         base = (
-            f"SELECT id FROM {schema}.{task_table} "
+            f"SELECT id, gmt_modified FROM {schema}.{task_table} "
             f"WHERE is_deleted=0{task_clause}"
         )
         if task_wm is not None:
@@ -788,27 +822,28 @@ class DpSyncService:
             base += " AND gmt_modified > :twm"
         rows = await collector.query(base, params)
         ids = {int(r["id"]) for r in rows}
-        # task 变更水位推进（增量模式下含本批最大；全量模式取全部最大）
-        task_max_params: dict[str, Any] = {}
-        task_max_clause, task_max_params = _in_clause(
-            "type", task_types, "t", task_max_params
+        # task 变更水位推进 = 本轮已扫 task 变更集内最大 gmt_modified（无 task 变更
+        # 则保持旧水位——不要因 step 变更引入任务而推进 task 水位，防超前漏扫）。
+        task_changed_max = max(
+            (r["gmt_modified"] for r in rows if r.get("gmt_modified") is not None),
+            default=None,
         )
-        task_rows = await collector.query(
-            f"SELECT MAX(gmt_modified) AS m FROM {schema}.{task_table} "
-            f"WHERE is_deleted=0{task_max_clause}",
-            task_max_params,
+        task_max = (
+            task_changed_max if task_changed_max is not None else task_wm
         )
-        task_max = task_rows[0]["m"] if task_rows and task_rows[0]["m"] else task_wm
-        # step 独立变更：按 step 水位补任务（跨表 join 保证 task type 过滤）
+        # step 独立变更：按 step 水位补任务（跨表 join 保证 task type 过滤）。
+        # 变更集查询直接带 gmt_modified（M2 同 task：水位 = 已扫 step 集 max，
+        # 不单独查全表 MAX——防两查询窗口内新提交 step 被水位跳过）。
         step_wm = None
         swm_row = await self._dp_repo.get_watermark("step")
-        if swm_row is not None:
+        if swm_row is not None and not force_full:
             step_wm = swm_row.last_max_update
         sp: dict[str, Any] = {}
         task_join_clause, sp = _in_clause("t.type", task_types, "t", sp)
         step_clause, sp = _in_clause("st.task_step_type", step_types, "s", sp)
         step_sql = (
-            f"SELECT DISTINCT st.task_id AS id FROM {schema}.{step_table} st "
+            f"SELECT st.task_id AS id, st.gmt_modified AS gm "
+            f"FROM {schema}.{step_table} st "
             f"JOIN {schema}.{task_table} t ON st.task_id=t.id "
             f"WHERE st.is_deleted=0 AND t.is_deleted=0{task_join_clause}{step_clause}"
         )
@@ -817,18 +852,13 @@ class DpSyncService:
             step_sql += " AND st.gmt_modified > :swm"
         step_rows = await collector.query(step_sql, sp)
         ids.update(int(r["id"]) for r in step_rows)
-        # step 变更水位推进
-        sp_max: dict[str, Any] = {}
-        step_max_clause, sp_max = _in_clause(
-            "task_step_type", step_types, "s", sp_max
-        )
-        step_max_rows = await collector.query(
-            f"SELECT MAX(gmt_modified) AS m FROM {schema}.{step_table} "
-            f"WHERE is_deleted=0{step_max_clause}",
-            sp_max,
+        # step 变更水位推进 = 本轮已扫 step 变更集内最大 gmt_modified
+        step_changed_max = max(
+            (r["gm"] for r in step_rows if r.get("gm") is not None),
+            default=None,
         )
         step_max = (
-            step_max_rows[0]["m"] if step_max_rows and step_max_rows[0]["m"] else step_wm
+            step_changed_max if step_changed_max is not None else step_wm
         )
         return sorted(ids), task_max, step_max
 
@@ -876,17 +906,40 @@ class DpSyncService:
         if not steps:
             return
         counters["scanned_tasks"] += 1
-        for step in steps:
-            if cancel_event is not None and cancel_event.is_set():
-                if force_event is not None and force_event.is_set():
-                    raise _ScanCancelledError(f"task {task_id} force-stop")
-                break  # 协作取消：本任务剩余 steps 不再处理（已处理 steps 保留）
-            sql = str(step.get("script_info") or "")
-            counters["scanned_steps"] += 1
-            result = await self.process_step(task, step, sql, config, seen_pairs)
-            status = result.get("status", "unknown")
-            if status in counters:
-                counters[status] += 1
+        # M8: llm_calls/tickets_created 计数——包装注入的 llm_chat 与 repo 建单
+        # （此前恒 0，LLM 成本不可见）。service 实例每轮新建无并发共享，函数内
+        # 替换 + finally 恢复保证异常安全。
+        llm_orig = self._llm_chat
+        create_orig = self._dp_repo.create_ticket
+        counters["llm_calls"] = counters.get("llm_calls", 0)
+        counters["tickets_created"] = counters.get("tickets_created", 0)
+
+        async def _counted_llm(messages: Any, **kw: Any) -> dict[str, Any]:
+            counters["llm_calls"] += 1
+            return await llm_orig(messages, **kw)  # type: ignore[misc]
+
+        async def _counted_create_ticket(**kw: Any) -> Any:
+            counters["tickets_created"] += 1
+            return await create_orig(**kw)
+
+        if llm_orig is not None:
+            self._llm_chat = _counted_llm  # type: ignore[method-assign]
+        self._dp_repo.create_ticket = _counted_create_ticket  # type: ignore[method-assign]
+        try:
+            for step in steps:
+                if cancel_event is not None and cancel_event.is_set():
+                    if force_event is not None and force_event.is_set():
+                        raise _ScanCancelledError(f"task {task_id} force-stop")
+                    break  # 协作取消：本任务剩余 steps 不再处理（已处理 steps 保留）
+                sql = str(step.get("script_info") or "")
+                counters["scanned_steps"] += 1
+                result = await self.process_step(task, step, sql, config, seen_pairs)
+                status = result.get("status", "unknown")
+                if status in counters:
+                    counters[status] += 1
+        finally:
+            self._llm_chat = llm_orig
+            self._dp_repo.create_ticket = create_orig
         # 资产 Owner 回填（产出表孤儿）
         if cancel_event is not None and cancel_event.is_set():
             if force_event is not None and force_event.is_set():
