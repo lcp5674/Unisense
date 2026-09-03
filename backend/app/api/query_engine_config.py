@@ -31,6 +31,7 @@ from app.services.query_engine.schemas import (
     QueryEngineConfigPayload,
     QueryEngineConfigResponse,
     QueryEngineEffectiveResponse,
+    QueryEngineSecretsResponse,
     QueryEngineTestRequest,
     QueryEngineViewResponse,
 )
@@ -114,6 +115,45 @@ async def get_query_engine_config(
         can_edit=user.has_role("platform_admin"),
     )
     return ok(data=view.model_dump(), trace_id=trace_id)
+
+
+@router.get("/config/secrets", dependencies=_ADMIN_DEPS)
+async def reveal_query_engine_config_secrets(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> Any:
+    """回显当前生效的查询引擎密钥（用户名/密码/降级连接串）。仅 platform_admin。
+
+    与读视图（GET /config）隔离：普通读一律脱敏；本端点仅 platform_admin 可调，
+    返回明文供「编辑弹窗回填 / 点击眼睛查看」，每次访问写入审计（detail 只含
+    has_* 标记与来源，不含明文）。
+    """
+    svc = QueryEngineConfigService(db)
+    eff = await svc.get_effective()
+    resp = QueryEngineSecretsResponse(
+        source=eff["source"],
+        doris_user=eff["doris_user"],
+        doris_password=eff["doris_password"],
+        mysql_fallback_url=eff["mysql_fallback_url"],
+        has_doris_password=bool(eff["doris_password"]),
+        has_mysql_fallback=bool(eff["mysql_fallback_url"]),
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="query_engine_config.secret.reveal",
+        entity_type="query_engine_config",
+        entity_id="secrets",
+        detail={
+            "source": eff["source"],
+            "has_doris_password": resp.has_doris_password,
+            "has_mysql_fallback": resp.has_mysql_fallback,
+        },
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=resp.model_dump(), trace_id=trace_id)
 
 
 @router.put("/config", dependencies=_ADMIN_DEPS)

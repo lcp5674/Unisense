@@ -24,6 +24,7 @@ import {
 } from "@ant-design/icons";
 import {
   getQueryEngineConfig,
+  getQueryEngineSecrets,
   saveQueryEngineConfig,
   testQueryEngineConfig,
   UnisenseApiError,
@@ -83,7 +84,7 @@ export default function QueryEngineConfigCard() {
     void load();
   }, [load]);
 
-  function openEdit() {
+  async function openEdit() {
     // 回填源：优先 DB 行；DB 未配置（配置来自环境变量/未配置）时回填当前生效值，
     // 让管理员在「接管为 DB 配置」时无需重抄一遍已生效的连接参数。
     const src = view?.row ?? view?.effective;
@@ -99,6 +100,20 @@ export default function QueryEngineConfigCard() {
     });
     setTestResult(null);
     setEditing(true);
+    // 平台管理员打开编辑即按需回填已存密钥（Doris 密码 / MySQL 降级连接串）。
+    // 字段用 Input.Password 密文显示——点击右侧眼睛才明文展示；服务端每次访问写审计。
+    // 拉取失败（网络/权限降级）不阻断：留空 = 保存保持原值。
+    if (!view?.can_edit) return;
+    try {
+      const sec = await getQueryEngineSecrets();
+      const patch: Partial<QueryEnginePayload> = {};
+      if (sec.doris_user) patch.doris_user = sec.doris_user;
+      if (sec.doris_password) patch.doris_password = sec.doris_password;
+      if (sec.mysql_fallback_url) patch.mysql_fallback_url = sec.mysql_fallback_url;
+      form.setFieldsValue(patch);
+    } catch {
+      // 密钥回填失败：保持空值（保存即「留空保持原值」，不覆盖既有密钥）
+    }
   }
 
   async function handleSave() {
@@ -145,21 +160,17 @@ export default function QueryEngineConfigCard() {
   const rowHasMysql = Boolean(view?.row?.has_mysql_fallback);
   // 无 DB 行且环境变量生效中 → 编辑=「接管为 DB 配置」，密码/URL 需重填才能保留
   const envTakeover = !hasDbRow && eff?.source === "env";
-  const dorisPwdLabel = rowHasDorisPwd
-    ? "Doris 密码（已配置，留空保持原值）"
-    : !hasDbRow && eff?.has_doris_password
-      ? "Doris 密码（环境变量已配置，密码不回显；如需保留请重新输入）"
-      : "Doris 密码（可空=无认证）";
-  const mysqlLabel = rowHasMysql
-    ? "MySQL 降级引擎 URL（已配置，留空保持原值）"
-    : envTakeover && eff?.mysql_fallback_configured
-      ? "MySQL 降级引擎 URL（当前生效来自环境变量；留空保存后将停用）"
-      : "MySQL 降级引擎 URL（可空=不启用）";
-  const mysqlPlaceholder = rowHasMysql
-    ? "已配置，留空保持"
-    : envTakeover && eff?.mysql_fallback_configured
-      ? "粘贴完整连接串以保留（如 mysql+aiomysql://user:pass@host:3306/db）"
-      : "mysql+aiomysql://...";
+  const dorisHasPwd = rowHasDorisPwd || Boolean(eff?.has_doris_password);
+  const mysqlConfigured = rowHasMysql || Boolean(eff?.mysql_fallback_configured);
+  const dorisPwdLabel = dorisHasPwd
+    ? "Doris 密码（已回填当前值；密文显示，点击眼睛查看明文）"
+    : "Doris 密码（可空=无认证）";
+  const mysqlLabel = mysqlConfigured
+    ? "MySQL 降级引擎 URL（已回填当前连接串；密文显示，点击眼睛查看明文）"
+    : "MySQL 降级引擎 URL（可空=不启用）";
+  const mysqlPlaceholder = mysqlConfigured
+    ? "已配置"
+    : "mysql+aiomysql://user:pass@host:3306/db";
   const mysqlMasked = eff?.mysql_fallback_url_masked || "";
   return (
     <Card
@@ -279,7 +290,7 @@ export default function QueryEngineConfigCard() {
             showIcon
             style={{ marginBottom: 12 }}
             message="配置优先级：数据库 > 环境变量"
-            description="保存即生效（最长 30s 全量生效）。olap_url 与 doris_host 二选一即可（填写 olap_url 时自动派生主机/端口/库）；密码与 MySQL 降级 URL 留空表示保持已保存值。"
+            description="保存即生效（最长 30s 全量生效）。olap_url 与 doris_host 二选一即可（填写 olap_url 时自动派生主机/端口/库）；已配置的 Doris 密码与 MySQL 降级连接串已回填（密文显示，点击右侧眼睛查看明文）。"
           />
           {envTakeover ? (
             <Alert
@@ -287,7 +298,7 @@ export default function QueryEngineConfigCard() {
               showIcon
               style={{ marginBottom: 12 }}
               message="当前配置来自环境变量（尚未写入数据库）"
-              description="OLAP 连接已按当前生效值预填，保存后将写入数据库并接管。密码与 MySQL 降级 URL 属敏感信息不回显——如需保留 MySQL 降级，请在此粘贴完整连接串；留空保存后该项将停用（不再回落环境变量）。"
+              description="OLAP 连接参数已按当前生效值预填，MySQL 降级连接串已一并回填（密文显示，点击眼睛查看明文）——保存后将写入数据库并接管。环境变量来源的 Doris 密码不在生效配置内（如确实配置了请重新输入一次），其余无需重抄。"
             />
           ) : null}
           <Form.Item label="OLAP 基础 URL（可选，自动派生连接参数）" name="olap_url">
@@ -311,11 +322,8 @@ export default function QueryEngineConfigCard() {
           </Space.Compact>
           <Form.Item label={dorisPwdLabel} name="doris_password">
             <Input.Password
-              placeholder={
-                rowHasDorisPwd || (!hasDbRow && eff?.has_doris_password)
-                  ? "已配置，留空保持"
-                  : "密码"
-              }
+              autoComplete="new-password"
+              placeholder={dorisHasPwd ? "已配置" : "密码"}
             />
           </Form.Item>
           <Form.Item
@@ -323,11 +331,15 @@ export default function QueryEngineConfigCard() {
             name="mysql_fallback_url"
             extra={
               mysqlMasked
-                ? `当前生效：${mysqlMasked}${rowHasMysql ? "（留空保持原值）" : envTakeover ? "（来自环境变量，留空保存后停用）" : ""}`
+                ? `当前生效：${mysqlMasked}（密文显示，点击眼睛查看明文）`
                 : "完整连接串：mysql+aiomysql://user:pass@host:3306/db"
             }
           >
-            <Input placeholder={mysqlPlaceholder} />
+            <Input.Password
+              className="mono"
+              autoComplete="new-password"
+              placeholder={mysqlPlaceholder}
+            />
           </Form.Item>
           <Form.Item label="启用数据库配置（关闭则回落环境变量）" name="enabled" valuePropName="checked">
             <Switch />

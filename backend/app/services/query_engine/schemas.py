@@ -89,6 +89,24 @@ class QueryEngineViewResponse(BaseModel):
     can_edit: bool = False
 
 
+class QueryEngineSecretsResponse(BaseModel):
+    """密钥回显载荷（仅供 platform_admin 经 ``GET /config/secrets`` 获取，写审计日志）。
+
+    返回**当前生效**（DB 或 env）的连接账号与明文密钥，供编辑弹窗回填/点击查看：
+    - doris_user / doris_password：Doris basic auth 凭据；
+    - mysql_fallback_url：MySQL 降级完整连接串（含账号口令）；
+    未配置的段为空串（不臆造）。普通读视图（``QueryEngineViewResponse``）仍一律
+    脱敏、不含明文——本载荷与读视图隔离，杜绝「查看状态即拿到密钥」。
+    """
+
+    source: str = "none"
+    doris_user: str = ""
+    doris_password: str = ""
+    mysql_fallback_url: str = ""
+    has_doris_password: bool = False
+    has_mysql_fallback: bool = False
+
+
 class QueryEngineTestRequest(BaseModel):
     """连通性测试请求。
 

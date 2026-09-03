@@ -134,6 +134,7 @@ import {
   ObsOverview,
   PermissionCheckResult,
   QueryEnginePayload,
+  QueryEngineSecrets,
   QueryEngineTestResult,
   QueryEngineView,
   PermissionSnapshot,
@@ -5802,6 +5803,11 @@ export async function refineMetricDefinition(
 /** 读取查询引擎配置视图（DB 行脱敏 + 生效状态 + 可编辑标记）。任意登录可读。 */
 export async function getQueryEngineConfig(): Promise<QueryEngineView> {
   return request<QueryEngineView>(`${API_BASE}/query-engine/config`);
+}
+
+/** 回显当前生效的查询引擎密钥（用户名/密码/降级连接串）。仅 platform_admin，写审计。 */
+export async function getQueryEngineSecrets(): Promise<QueryEngineSecrets> {
+  return request<QueryEngineSecrets>(`${API_BASE}/query-engine/config/secrets`);
 }
 
 /** 保存查询引擎配置（整行 upsert；密码/URL 留空保持原值）。仅 platform_admin。 */

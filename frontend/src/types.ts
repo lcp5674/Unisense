@@ -2112,6 +2112,16 @@ export interface QueryEngineView {
   can_edit: boolean;
 }
 
+/** 查询引擎密钥回显载荷（仅 platform_admin 经 /query-engine/config/secrets 获取） */
+export interface QueryEngineSecrets {
+  source: "db" | "env" | "none";
+  doris_user: string;
+  doris_password: string;
+  mysql_fallback_url: string;
+  has_doris_password: boolean;
+  has_mysql_fallback: boolean;
+}
+
 export interface QueryEnginePayload {
   olap_url: string;
   doris_host: string;
