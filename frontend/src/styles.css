@@ -1665,22 +1665,28 @@ body {
   padding: 12px 16px 10px;
 }
 
-/* 标题行：业务标题 + 状态标签 */
+/* 标题行：业务标题 + 状态标签
+   允许换行（flex-wrap）：窄容器下右侧状态区整体下移，而不是把标题挤压到极窄，
+   避免长标题在过窄区域内被逐字拆行（单字符竖排）。 */
 .notif-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
+  flex-wrap: wrap;
 }
 
 .notif-title {
+  flex: 1 1 auto;
   font-size: 14px;
   font-weight: 600;
   color: var(--ink);
   line-height: 1.4;
-  /* 标题过长时收缩换行，避免挤压右侧状态区导致重叠 */
+  /* 标题过长时收缩换行；优先在词间断行，仅超长无空格 token（编码/异常串）必要时词内断，
+     不用 overflow-wrap:anywhere——后者会逐字符断行，窄容器下观感为单字符竖排 */
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 /* 事件类型徽标：标题旁的小字 Tag，帮助用户快速识别通知类型（业务术语） */
@@ -1731,7 +1737,9 @@ body {
 
 .notif-impact-text {
   color: var(--ink);
+  min-width: 0;
   word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 /* 操作者行：谁发起了这个操作（审计语义） */
@@ -1773,8 +1781,6 @@ body {
   font-size: 12.5px;
   line-height: 1.55;
   min-width: 0;
-  /* 兜底：字段级允许任意长串（如超长指标编码）在词内换行，防止撑破 grid 列 */
-  overflow-wrap: anywhere;
 }
 
 .notif-body-label {
@@ -1786,6 +1792,7 @@ body {
 .notif-body-value {
   color: var(--ink);
   word-break: break-word;
+  overflow-wrap: break-word;
   min-width: 0;
 }
 
@@ -1866,6 +1873,7 @@ body {
   line-height: 1.6;
   color: var(--ink);
   word-break: break-word;
+  overflow-wrap: break-word;
 }
 
 /* 元信息区：送达方式 / 关联对象 / 时间，发丝线分隔 */
