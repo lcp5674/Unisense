@@ -15,8 +15,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0138"
-down_revision = "0137"
+revision = "0138_dp_ticket_task_refs"
+down_revision = "0137_dp_lineage_sync"
 branch_labels = None
 depends_on = None
 
