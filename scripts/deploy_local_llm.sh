@@ -127,10 +127,16 @@ start_container() {
   local numa="$1"
   local args=("${RUN_ARGS_BASE[@]}")
   if [ "${numa}" != "off" ]; then
-    # 双路 NUMA：挂载 /sys 节点供 llama.cpp 探测，--numa distribute 均衡跨节点内存
-    args+=(-v /sys/devices/system/node:/sys/devices/system/node:ro --numa "${numa}")
+    # 双路 NUMA：挂载 /sys 节点供 llama.cpp 探测（挂载是 docker 选项，放镜像名前）
+    args+=(-v /sys/devices/system/node:/sys/devices/system/node:ro)
   fi
+  # 镜像名之后才是容器内 llama-server 的启动参数：
+  #   --numa/--jinja/-m/-c/-t 等都是 llama-server 参数，必须放镜像名后，
+  #   放镜像名前会被 docker run 当成自身参数 → unknown flag: --numa
   args+=("${LLM_IMAGE}" "${MODEL_ARGS[@]}")
+  if [ "${numa}" != "off" ]; then
+    args+=(--numa "${numa}")
+  fi
   docker run "${args[@]}"
 }
 
