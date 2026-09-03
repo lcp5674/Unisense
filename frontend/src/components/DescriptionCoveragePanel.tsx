@@ -608,6 +608,10 @@ export const DescriptionCoveragePanel = forwardRef<
   const [historyOpen, setHistoryOpen] = useState(false);
   /** 运行中取消标志（ref 保证异步调度内可靠读写）。 */
   const cancelRef = useRef(false);
+  /** 本批次 AbortController：取消时中止 in-flight 的 LLM 请求（快速结束，而非干等最慢请求自然完成）。 */
+  const batchAbortRef = useRef<AbortController | null>(null);
+  /** 点击取消后的即时反馈状态（按钮切「正在取消…」防重复点击）。 */
+  const [cancelling, setCancelling] = useState(false);
 
   // 概览指标下钻明细（点击指标数字 → 该口径贡献的 per_table 子集）
   const [metricDrillOpen, setMetricDrillOpen] = useState(false);
@@ -883,7 +887,10 @@ export const DescriptionCoveragePanel = forwardRef<
    * 各动作独立 try/catch：单动作失败不阻断另一动作，返回汇总文本、失败明细与统计。
    * 复用后端单表批量端点（FR-023 幂等 + in-flight 锁 + 审计），不覆盖已有 manual/llm 描述。
    */
-  async function inferOneTable(task: BatchTask): Promise<{
+  async function inferOneTable(
+    task: BatchTask,
+    signal?: AbortSignal,
+  ): Promise<{
     ok: boolean;
     summary: string;
     detail?: string;
@@ -901,7 +908,7 @@ export const DescriptionCoveragePanel = forwardRef<
     const inferredNames: string[] = [];
     if (task.missing_fields > 0) {
       try {
-        const res = await inferDescriptions(task.catalog_id);
+        const res = await inferDescriptions(task.catalog_id, signal);
         added = res.inferred.length;
         skipped = res.skipped.length;
         inferredNames.push(...res.inferred.map((i) => i.column_name));
@@ -911,6 +918,8 @@ export const DescriptionCoveragePanel = forwardRef<
           errs.push(`字段失败 ${res.failed.length} 个：${res.failed.slice(0, 3).join("、")}`);
         }
       } catch (err) {
+        // 用户取消：把中止向上抛给调度层（标已取消），不按失败计
+        if (signal?.aborted) throw err;
         ok = false;
         const cat = classifyBatchError(err);
         errorCategory = errorCategory ?? cat;
@@ -923,9 +932,11 @@ export const DescriptionCoveragePanel = forwardRef<
     }
     if (task.needs_table_desc) {
       try {
-        await inferTableDescription(task.catalog_id);
+        await inferTableDescription(task.catalog_id, undefined, undefined, signal);
         parts.push("表描述已生成");
       } catch (err) {
+        // 用户取消：把中止向上抛给调度层（标已取消），不按失败计
+        if (signal?.aborted) throw err;
         ok = false;
         const cat = classifyBatchError(err);
         errorCategory = errorCategory ?? cat;
@@ -983,7 +994,12 @@ export const DescriptionCoveragePanel = forwardRef<
     setBatchProgress(progress);
     setBatchRunning(true);
     setBatchFinished(false);
+    setCancelling(false);
     cancelRef.current = false;
+    // 每次批次开始重建 AbortController（取消旧批次遗留引用），供取消时中止 in-flight
+    batchAbortRef.current?.abort();
+    batchAbortRef.current = new AbortController();
+    const batchSignal = batchAbortRef.current.signal;
     const startMs = Date.now();
     const taskById = new Map(tasks.map((t) => [t.catalog_id, t]));
     const workIdx = progress
@@ -999,7 +1015,15 @@ export const DescriptionCoveragePanel = forwardRef<
         if (!task) continue;
         progress[i] = { ...progress[i], status: "running" };
         setBatchProgress([...progress]);
-        const r = await inferOneTable(task);
+        let r: Awaited<ReturnType<typeof inferOneTable>>;
+        try {
+          r = await inferOneTable(task, batchSignal);
+        } catch {
+          // 用户取消（AbortSignal 已触发）→ 该表标已取消，不按失败计
+          progress[i] = { ...progress[i], status: "cancelled", summary: "已取消" };
+          setBatchProgress([...progress]);
+          continue;
+        }
         progress[i] = {
           ...progress[i],
           status: r.ok ? "done" : "error",
@@ -1022,6 +1046,8 @@ export const DescriptionCoveragePanel = forwardRef<
     setBatchProgress(final);
     setBatchRunning(false);
     setBatchFinished(true);
+    setCancelling(false);
+    batchAbortRef.current = null;
     setBatchElapsed(Math.round((Date.now() - startMs) / 1000));
     // 写入批量历史（近 5 次）：含结果摘要与失败表，供历史视图查看与一键重跑；
     // 同时 best-effort 持久化到服务端（跨设备/团队可见，失败静默降级 localStorage）。
@@ -1164,9 +1190,11 @@ export const DescriptionCoveragePanel = forwardRef<
     startBatchInfer(batchTasks, batchProgress, new Set([catalogId]));
   }
 
-  /** 运行中取消：停止调度未启动任务，进行中的自然完成（已完成结果保留）。 */
+  /** 运行中取消：停止调度未启动任务，并中止进行中的 LLM 请求（快速结束批次，被中止表标已取消）。 */
   function cancelBatch() {
     cancelRef.current = true;
+    batchAbortRef.current?.abort();
+    setCancelling(true);
   }
 
   /** 关闭批量面板并重置状态（推断中不可关闭）。 */
@@ -1637,11 +1665,11 @@ export const DescriptionCoveragePanel = forwardRef<
                   <div style={{ marginTop: 16, textAlign: "right" }}>
                     {batchRunning ? (
                       <Space>
-                        <Button danger onClick={cancelBatch}>
-                          取消
+                        <Button danger onClick={cancelBatch} disabled={cancelling}>
+                          {cancelling ? "正在取消…" : "取消"}
                         </Button>
                         <Button type="primary" disabled>
-                          推断中…
+                          {cancelling ? "正在停止…" : "推断中…"}
                         </Button>
                       </Space>
                     ) : (

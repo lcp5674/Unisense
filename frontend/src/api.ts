@@ -4797,11 +4797,14 @@ export async function inferColumnDescription(
   );
 }
 
-/** 批量推断缺失描述 */
-export async function inferDescriptions(catalogId: number): Promise<InferBatchResult> {
+/** 批量推断缺失描述（signal 支持运行中取消：中止 in-flight 请求而非干等完成） */
+export async function inferDescriptions(
+  catalogId: number,
+  signal?: AbortSignal,
+): Promise<InferBatchResult> {
   return request<InferBatchResult>(
     `${API_BASE}/catalogs/${catalogId}/infer-descriptions`,
-    { method: "POST" },
+    { method: "POST", signal },
   );
 }
 
@@ -4897,17 +4900,19 @@ export async function updateTableDescription(
   );
 }
 
-/** LLM 推断表级描述 */
+/** LLM 推断表级描述（signal 支持运行中取消：中止 in-flight 请求而非干等完成） */
 export async function inferTableDescription(
   catalogId: number,
   fields?: Array<{ name?: string; type?: string }>,
   force?: boolean,
+  signal?: AbortSignal,
 ): Promise<InferTableDescriptionResult> {
   return request<InferTableDescriptionResult>(
     `${API_BASE}/catalogs/${catalogId}/infer-table-description`,
     {
       method: "POST",
       body: JSON.stringify({ fields: fields ?? [], force: force ?? false }),
+      signal,
     },
   );
 }

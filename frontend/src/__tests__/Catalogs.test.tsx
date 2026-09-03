@@ -1221,9 +1221,9 @@ describe("Catalogs 页面", () => {
 
     // 开始推断：串行调用字段批量（表1、表3）与表描述（表1），完成后刷新覆盖数据
     fireEvent.click(screen.getByRole("button", { name: /开始推断/ }));
-    await waitFor(() => expect(inferDescriptions).toHaveBeenCalledWith(1));
-    await waitFor(() => expect(inferDescriptions).toHaveBeenCalledWith(3));
-    expect(inferTableDescription).toHaveBeenCalledWith(1);
+    await waitFor(() => expect(inferDescriptions).toHaveBeenCalledWith(1, expect.anything()));
+    await waitFor(() => expect(inferDescriptions).toHaveBeenCalledWith(3, expect.anything()));
+    expect(inferTableDescription).toHaveBeenCalledWith(1, undefined, undefined, expect.anything());
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /关\s*闭/ })).toBeTruthy(),
     );
@@ -1289,7 +1289,7 @@ describe("Catalogs 页面", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /关\s*闭/ })).toBeTruthy(),
     );
-    expect(inferDescriptions).toHaveBeenCalledWith(3);
+    expect(inferDescriptions).toHaveBeenCalledWith(3, expect.anything());
     // 刷新覆盖数据照常执行（失败不阻断整体）
     await waitFor(() => expect(fetchDescriptionCoverage).toHaveBeenCalledTimes(2));
   });
@@ -1355,8 +1355,8 @@ describe("Catalogs 页面", () => {
 
     // 按所选并发开始推断：两表均被调度，全部完成后可关闭
     fireEvent.click(screen.getByRole("button", { name: /开始推断/ }));
-    await waitFor(() => expect(inferDescriptions).toHaveBeenCalledWith(1));
-    await waitFor(() => expect(inferDescriptions).toHaveBeenCalledWith(3));
+    await waitFor(() => expect(inferDescriptions).toHaveBeenCalledWith(1, expect.anything()));
+    await waitFor(() => expect(inferDescriptions).toHaveBeenCalledWith(3, expect.anything()));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /关\s*闭/ })).toBeTruthy(),
     );
@@ -1508,6 +1508,73 @@ describe("Catalogs 页面", () => {
     await waitFor(() =>
       expect(screen.getByText(/成功 1 张 \/ 失败 0 张 \/ 取消 2 张/)).toBeTruthy(),
     );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /关\s*闭/ })).toBeTruthy(),
+    );
+  });
+
+  it("跨表批量推断：运行中取消会中止 in-flight 请求（AbortSignal 触发，按钮即时反馈）", async () => {
+    // 并发 1：表1 推断挂起中点取消 → 传入的 AbortSignal 被 abort（此前仅等自然完成、看似无反应）
+    localStorage.setItem("unisense.desc-coverage.batchConcurrency", "1");
+    vi.mocked(fetchDescriptionCoverage).mockResolvedValue({
+      total_tables: 3,
+      tables_with_desc: 0,
+      tables_missing_desc: 3,
+      total_fields: 6,
+      fields_with_desc: 1,
+      fields_missing_desc: 5,
+      per_table: [1, 2, 3].map((id) => ({
+        catalog_id: id,
+        entity_name: `ods_t${id}`,
+        source_id: "s1",
+        source_name: "Sales MySQL",
+        entity_type: "TABLE",
+        domain: "sales",
+        sensitivity_level: "INTERNAL",
+        table_desc: true,
+        description: null,
+        description_source: null,
+        owner_name: null,
+        total_fields: 2,
+        covered_fields: 0,
+        missing_fields: 2,
+        missing_field_names: ["a", "b"],
+        updated_at: "2026-08-14T02:30:00",
+      })),
+    });
+    let capturedSignal: AbortSignal | undefined;
+    let resolveInfer!: (v: Awaited<ReturnType<typeof inferDescriptions>>) => void;
+    const pending = new Promise<Awaited<ReturnType<typeof inferDescriptions>>>((r) => {
+      resolveInfer = r;
+    });
+    vi.mocked(inferDescriptions).mockImplementationOnce((_id, signal) => {
+      capturedSignal = signal;
+      return pending;
+    });
+    render(
+      <MemoryRouter>
+        <Catalogs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByText("ods_t1")).toBeTruthy());
+    ["ods_t1", "ods_t2", "ods_t3"].forEach((name) => {
+      const row = screen.getByText(name).closest("tr") as HTMLElement;
+      fireEvent.click(within(row).getByRole("checkbox"));
+    });
+    fireEvent.click(screen.getByRole("button", { name: /批量推断所选表/ }));
+    await waitFor(() => expect(screen.getByText("批量 LLM 推断确认")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /开始推断/ }));
+    await waitFor(() => expect(inferDescriptions).toHaveBeenCalledTimes(1));
+    expect(capturedSignal?.aborted).toBe(false);
+
+    // 点取消：in-flight 请求立即被中止，按钮切「正在取消…」即时反馈
+    fireEvent.click(screen.getByRole("button", { name: /取\s*消/ }));
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(screen.getByRole("button", { name: /正在取消/ })).toBeTruthy();
+
+    // 请求返回后批次结束，面板回到可关闭状态（未启动表标已取消）
+    resolveInfer({ inferred: [], skipped: [], failed: [] });
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /关\s*闭/ })).toBeTruthy(),
     );
