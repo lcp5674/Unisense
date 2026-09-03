@@ -22,6 +22,7 @@ import structlog
 from app.db.mysql import async_session_factory
 from app.models.collector_models import BatchInferHistory, BatchLlmInferTask
 from app.services.collector.service import CollectorService
+from sqlalchemy.orm.attributes import flag_modified
 
 logger = structlog.get_logger("unisense.collector.batch_infer")
 
@@ -44,11 +45,13 @@ async def _load_task(db: Any, task_id: int) -> BatchLlmInferTask | None:
 
 
 def _new_progress(tasks_json: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """由任务清单初始化逐表进度（保持前端勾选顺序）。"""
+    """由任务清单初始化逐表进度（保持前端勾选顺序，保留执行动作标记）。"""
     return [
         {
             "catalog_id": t.get("catalog_id"),
             "entity_name": t.get("entity_name") or "",
+            "missing_fields": int(t.get("missing_fields") or 0),
+            "needs_table_desc": bool(t.get("needs_table_desc", False)),
             "status": "pending",
             "summary": "",
             "detail": "",
@@ -192,22 +195,16 @@ async def run_batch_llm_infer_task(ctx: dict[str, Any], task_id: int) -> None:
         task.total = total
         await db.commit()
 
-        concurrency = max(1, min(task.concurrency or 3, 8))
+        # 逐表串行执行（AsyncSession 不支持并发操作；跨任务并发由 arq max_jobs 提供）。
+        # concurrency 字段保留（前端选择器展示；未来如需任务内并行，须改为每表独立 session）。
         pending_idx = [
             i for i, p in enumerate(task.progress_json) if p.get("status") == "pending"
         ]
-        next_pos = 0
         cancelled = False
         global_error: str | None = None
 
-        async def worker() -> None:
-            nonlocal next_pos, cancelled, global_error
-            while not cancelled:
-                if next_pos >= len(pending_idx):
-                    break
-                pos = next_pos
-                next_pos += 1
-                i = pending_idx[pos]
+        try:
+            for i in pending_idx:
                 # 每表前重读任务行：API 可能已置 cancel_requested（跨进程/跨会话）
                 fresh = await _load_task(db, task_id)
                 if fresh is None or fresh.cancel_requested or fresh.status == "cancelled":
@@ -216,10 +213,12 @@ async def run_batch_llm_infer_task(ctx: dict[str, Any], task_id: int) -> None:
                 item = dict(task.progress_json[i])
                 item["status"] = "running"
                 task.progress_json[i] = item
+                flag_modified(task, "progress_json")
                 await db.commit()
 
                 updated = await _run_single_table(db, task_id, item, i, fresh)
                 task.progress_json[i] = updated
+                flag_modified(task, "progress_json")
                 task.done = sum(
                     1 for p in task.progress_json if p.get("status") == "done"
                 )
@@ -234,9 +233,6 @@ async def run_batch_llm_infer_task(ctx: dict[str, Any], task_id: int) -> None:
                     catalog_id=updated.get("catalog_id"),
                     status=updated.get("status"),
                 )
-
-        try:
-            await asyncio_gather_concurrent(concurrency, worker, pending_idx)
         except Exception as exc:  # noqa: BLE001 - 任务级异常落 failed 终态
             logger.exception("batch_infer_task_error", task_id=task_id, error=str(exc)[:300])
             global_error = str(exc)[:500]
@@ -250,6 +246,7 @@ async def run_batch_llm_infer_task(ctx: dict[str, Any], task_id: int) -> None:
                 if p.get("status") == "pending":
                     p["status"] = "cancelled"
                     p["summary"] = p.get("summary") or "未执行"
+            flag_modified(task, "progress_json")
             task.cancelled = sum(
                 1 for p in task.progress_json if p.get("status") == "cancelled"
             )
@@ -310,16 +307,3 @@ async def _write_infer_history(db: Any, task: BatchLlmInferTask) -> None:
     )
     db.add(row)
     await db.commit()
-
-
-async def asyncio_gather_concurrent(
-    concurrency: int, worker: Any, pending_idx: list[int]
-) -> None:
-    """有界并发执行 worker（pending 为空时直接返回）。"""
-    if not pending_idx:
-        return
-    import asyncio
-
-    await asyncio.gather(
-        *[worker() for _ in range(max(1, min(concurrency, len(pending_idx))))]
-    )

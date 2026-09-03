@@ -59,6 +59,10 @@ def test_new_progress_init_pending_in_order():
     prog = _new_progress(tasks)
     assert [p["status"] for p in prog] == ["pending", "pending"]
     assert prog[0]["catalog_id"] == 1
+    assert prog[0]["missing_fields"] == 3
+    assert prog[0]["needs_table_desc"] is True
+    assert prog[1]["missing_fields"] == 0
+    assert prog[1]["needs_table_desc"] is True
     assert prog[0]["added"] == 0 and prog[0]["skipped"] == 0
 
 
