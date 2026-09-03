@@ -57,6 +57,7 @@ import type {
   DescriptionCoverage,
   TableCoverageItem,
 } from "../api";
+import { notifyBatchInferActivity } from "./BatchInferCenter";
 import type {
   AssetEntityDetail,
   DataSource,
@@ -1331,6 +1332,8 @@ export const DescriptionCoveragePanel = forwardRef<
       setSelectedRowKeys([]);
       // 逐表完成轮询：某表推断完成即实时从治理主列表移除，不等整批结束
       setCoveredIds(new Set());
+      // 唤醒全局任务中心立即刷新并恢复轮询（无任务时它零请求，靠此事件感知新任务）
+      notifyBatchInferActivity();
       trackServerTaskRemoval(task.id);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "提交批量推断任务失败");

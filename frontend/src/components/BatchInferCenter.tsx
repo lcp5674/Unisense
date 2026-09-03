@@ -32,6 +32,21 @@ import { formatCnTime } from "../utils/timeCn";
 const RUNNING = new Set(["pending", "running"]);
 const POLL_MS = 4000;
 
+/**
+ * 模块级批量任务「活动事件」总线（pub/sub）。
+ *
+ * 任务中心按状态机轮询（有运行中任务才 4s 轮询，无任务零请求）——但零请求意味着
+ * 它无法自己感知「别的入口刚提交了任务」。DescriptionCoveragePanel 提交任务成功后
+ * 调 notifyBatchInferActivity() 唤醒任务中心：立即刷新一次并（按需）恢复轮询。
+ */
+type ActivityListener = () => void;
+const activityListeners = new Set<ActivityListener>();
+
+/** 通知任务中心：有新任务活动（如提交批量推断），应立即刷新并恢复轮询。 */
+export function notifyBatchInferActivity(): void {
+  activityListeners.forEach((fn) => fn());
+}
+
 const STATUS_TAG: Record<string, { color: string; label: string }> = {
   pending: { color: "default", label: "排队中" },
   running: { color: "processing", label: "推断中" },
@@ -146,25 +161,45 @@ export function BatchInferCenter() {
   const [open, setOpen] = useState(false);
   const [cancellingId, setCancellingId] = useState<number | null>(null);
   const mounted = useRef(true);
+  const timerRef = useRef<number | null>(null);
+
+  const stopPolling = useCallback(() => {
+    if (timerRef.current != null) {
+      window.clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
       const rows = await listBatchInferTasks(30);
-      if (mounted.current) setTasks(rows);
+      if (!mounted.current) return;
+      setTasks(rows);
+      // 状态机：有运行中任务 → 保持/恢复 4s 轮询；无任务 → 停止轮询（零请求）
+      const hasRunning = rows.some((t) => RUNNING.has(t.status));
+      if (hasRunning) {
+        if (timerRef.current == null) {
+          timerRef.current = window.setInterval(() => void refresh(), POLL_MS);
+        }
+      } else {
+        stopPolling();
+      }
     } catch {
       // 轮询失败静默（网络抖动/后端不可用时不打扰）
     }
-  }, []);
+  }, [stopPolling]);
 
   useEffect(() => {
     mounted.current = true;
-    refresh();
-    const timer = window.setInterval(refresh, POLL_MS);
+    void refresh(); // 挂载探测一次：有进行中任务则恢复轮询，无任务保持零请求
+    const onActivity = () => void refresh(); // 提交任务等事件 → 立即刷新（内部按需恢复轮询）
+    activityListeners.add(onActivity);
     return () => {
       mounted.current = false;
-      window.clearInterval(timer);
+      stopPolling();
+      activityListeners.delete(onActivity);
     };
-  }, [refresh]);
+  }, [refresh, stopPolling]);
 
   const running = tasks.filter((t) => RUNNING.has(t.status));
   const finished = tasks.filter(isFinished).slice(0, 3);
