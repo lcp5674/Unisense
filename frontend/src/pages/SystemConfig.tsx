@@ -1145,7 +1145,7 @@ export function SystemConfig() {
               rules={[{ required: true, message: "请输入超时" }]}
               style={{ marginBottom: 12 }}
             >
-              <InputNumber min={1} max={300} />
+              <InputNumber min={1} max={900} />
             </Form.Item>
             <Form.Item
               name="priority"

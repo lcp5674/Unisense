@@ -4797,14 +4797,16 @@ export async function inferColumnDescription(
   );
 }
 
-/** 批量推断缺失描述（signal 支持运行中取消：中止 in-flight 请求而非干等完成） */
+/** 批量推断缺失描述（signal 支持运行中取消：中止 in-flight 请求而非干等完成）。
+ *  timeout 显式放宽到 30min：单表推断后端按 60 列/块串行调 LLM，CPU 推理下单块
+ *  可达数分钟、多块叠加超 30s 全局默认，必须放宽否则前端先 abort（后端仍在跑）。 */
 export async function inferDescriptions(
   catalogId: number,
   signal?: AbortSignal,
 ): Promise<InferBatchResult> {
   return request<InferBatchResult>(
     `${API_BASE}/catalogs/${catalogId}/infer-descriptions`,
-    { method: "POST", signal },
+    { method: "POST", signal, timeout: 1_800_000 },
   );
 }
 
@@ -4900,7 +4902,8 @@ export async function updateTableDescription(
   );
 }
 
-/** LLM 推断表级描述（signal 支持运行中取消：中止 in-flight 请求而非干等完成） */
+/** LLM 推断表级描述（signal 支持运行中取消：中止 in-flight 请求而非干等完成）。
+ *  timeout 放宽到 30min：CPU 推理单次 LLM 请求可达数分钟，30s 全局默认会误杀。 */
 export async function inferTableDescription(
   catalogId: number,
   fields?: Array<{ name?: string; type?: string }>,
@@ -4913,6 +4916,7 @@ export async function inferTableDescription(
       method: "POST",
       body: JSON.stringify({ fields: fields ?? [], force: force ?? false }),
       signal,
+      timeout: 1_800_000,
     },
   );
 }

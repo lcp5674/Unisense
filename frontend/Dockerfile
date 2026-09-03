@@ -77,10 +77,11 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        # 批量 LLM 推断（逐字段并发调 LLM）可能长达几分钟——放宽反代读写超时，避免 504
+        # 批量 LLM 推断（逐字段并发调 LLM）可能长达数分钟——放宽反代读写超时，避免 504
+        # LLM 单请求上限 900s + 表内多块串行，反代读超时给 1800s 兜底（仅慢响应时占用）
         proxy_connect_timeout 30s;
         proxy_send_timeout 300s;
-        proxy_read_timeout 300s;
+        proxy_read_timeout 1800s;
     }
 
     # API 文档（Swagger UI / ReDoc / OpenAPI 规范）：反代到后端
