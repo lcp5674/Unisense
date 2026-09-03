@@ -39,6 +39,10 @@ _IDS = itertools.count(1)
 #: registry 保留的最大**终态**任务数（防只增不减无限增长；运行中任务不受限）。
 _MAX_FINISHED_SCANS = 20
 
+#: 手动「立即扫描」最小触发间隔（秒）——全量扫描是重操作（拉全量调度表 +
+#: 逐节点解析 + 可能调 LLM），防误连点/脚本反复触发压垮 dp 源库（L1）。
+_MANUAL_SCAN_MIN_INTERVAL = 30
+
 
 def _prune_registry() -> None:
     """终态任务超量时清理最旧（保留运行中 + 最新 N 个终态）。
@@ -82,11 +86,23 @@ async def submit_scan(*, force: bool = True) -> tuple[int, bool]:
     """提交一轮手动扫描。返回 (task_id, already_running)。
 
     already_running=True 时返回现有运行中任务 id（不重复启动）。
+    距上次触发 < ``_MANUAL_SCAN_MIN_INTERVAL`` 时返回 (None, False)（节流，
+    L1——全量扫描重操作，防误连点反复压 dp 源库）。
     """
     async with _GUARD:
+        now = datetime.now(UTC)
         for st in _SCANS.values():
             if st["status"] == "running":
                 return st["task_id"], True
+        # 节流：查最近一次触发（含运行中之外的最早完成时间不适用——以最近触发为准）
+        recent = sorted(
+            (s.get("started_at") for s in _SCANS.values() if s.get("started_at")),
+            reverse=True,
+        )
+        if recent:
+            last = recent[0]
+            if (now - last).total_seconds() < _MANUAL_SCAN_MIN_INTERVAL:
+                return 0, False  # 0 = 被节流拒绝（无任务 id）
         task_id = next(_IDS)
         _SCANS[task_id] = _new_state(task_id)
     asyncio.create_task(_run_scan_job(task_id, force=force))

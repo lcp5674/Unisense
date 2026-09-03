@@ -143,3 +143,44 @@ def test_prune_registry_keeps_latest_finished(monkeypatch) -> None:
     assert 1 not in remaining
     assert 2 not in remaining
     assert 25 in remaining
+
+
+@pytest.mark.asyncio
+async def test_submit_scan_throttled_within_interval(monkeypatch) -> None:
+    """L1：距上次触发 < 30s 时 submit_scan 返回 (0, False)（节流拒绝）。"""
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    import app.services.lineage.dp_sync_manual as manual
+
+    now = datetime.now(UTC)
+    # 最近一次触发在 10s 前
+    states = {5: {"task_id": 5, "status": "success", "started_at": now - timedelta(seconds=10)}}
+    monkeypatch.setattr(manual, "_SCANS", states)
+    monkeypatch.setattr(manual, "_GUARD", asyncio.Lock())
+    monkeypatch.setattr(manual, "asyncio", asyncio)  # create_task 不会被真实调度到
+    task_id, already = await manual.submit_scan(force=True)
+    assert task_id == 0
+    assert already is False
+
+
+@pytest.mark.asyncio
+async def test_submit_scan_allowed_after_interval(monkeypatch) -> None:
+    """L1：距上次触发 ≥ 30s 时 submit_scan 正常提交（返回真实 task_id）。"""
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    import app.services.lineage.dp_sync_manual as manual
+
+    now = datetime.now(UTC)
+    states = {5: {"task_id": 5, "status": "success", "started_at": now - timedelta(seconds=60)}}
+    monkeypatch.setattr(manual, "_SCANS", states)
+    monkeypatch.setattr(manual, "_GUARD", asyncio.Lock())
+
+    async def _fake_run_scan_job(task_id: int, *, force: bool) -> None:
+        return None
+
+    monkeypatch.setattr(manual, "_run_scan_job", _fake_run_scan_job)
+    task_id, already = await manual.submit_scan(force=True)
+    assert task_id != 0
+    assert already is False

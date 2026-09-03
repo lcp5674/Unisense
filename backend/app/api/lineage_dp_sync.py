@@ -443,6 +443,12 @@ async def scan_now(
     提交不阻塞请求；异常以状态接口的 error 呈现，不再被包成「成功」。
     """
     task_id, already_running = await dp_sync_manual.submit_scan(force=True)
+    if task_id == 0:
+        return ok(
+            code="SCAN_THROTTLED",
+            message="触发过于频繁，请稍候再试（全量扫描为重操作）",
+            data={"task_id": None, "status": "throttled"},
+        )
     await write_audit(
         db,
         actor_id=user.id,
