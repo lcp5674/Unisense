@@ -728,6 +728,24 @@ class DescriptionCoverageResponse(BaseModel):
 # ---- 跨表批量 LLM 推断历史（服务端持久化，跨设备/团队可见） ----
 
 
+class BatchLlmInferTaskItem(BaseModel):
+    """批量任务清单中的一张表（对齐治理面板勾选项：字段缺失与表描述缺失可并存）。"""
+
+    catalog_id: int = Field(..., description="目录实体 ID")
+    entity_name: str = Field(default="", description="实体名（展示用）")
+    missing_fields: int = Field(default=0, ge=0, description="缺失字段数（>0 则执行字段批量推断）")
+    needs_table_desc: bool = Field(default=False, description="是否需生成表描述")
+
+
+class BatchLlmInferTaskCreate(BaseModel):
+    """创建跨表批量 LLM 推断后台任务（方案 B：arq 执行，进度落库跨页可见）。"""
+
+    tasks: list[BatchLlmInferTaskItem] = Field(
+        min_length=1, max_length=200, description="待推断表清单"
+    )
+    concurrency: int = Field(default=3, ge=1, le=8, description="有界并发表数")
+
+
 class BatchInferHistoryTable(BaseModel):
     """批量历史中的一张表（catalog_id + entity_name，供一键重新勾选）。"""
 

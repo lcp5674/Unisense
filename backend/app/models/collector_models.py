@@ -310,3 +310,81 @@ class BatchInferHistory(Base, BaseModel):
     )
 
     __table_args__ = (Index("idx_batch_history_created", "created_at"),)
+
+
+class BatchLlmInferTask(Base, BaseModel):
+    """跨表批量 LLM 推断后台任务（arq 执行，跨页面/刷新可见进度）。
+
+    方案 B（后端任务化）：描述缺失治理「批量推断所选表」从前端有界并发改为
+    提交本任务由 arq worker 逐表执行——任务与进度落库，任意页面/刷新后可查询，
+    解决「切页后看不到批量进度/结果」（前端组件 state 随卸载丢失的历史缺陷）。
+
+    Attributes:
+        actor_id: 发起人 ID（可见性隔离：非平台管理员仅见本人任务）。
+        actor_name: 发起人姓名快照。
+        org_id: 发起人组织（冗余，便于组织级聚合）。
+        tasks_json: 待处理表清单 [{catalog_id, entity_name, missing_fields, needs_table_desc}]。
+        progress_json: 逐表进度 [{catalog_id, entity_name, status, summary, detail,
+            error_category, added, skipped, inferred}]。
+            status: pending/running/done/error/cancelled。
+        status: 任务状态 pending/running/completed/cancelled/failed。
+        total: 任务表数。done: 成功表数。failed: 失败表数。cancelled: 取消表数。
+        added_total: 新增字段描述总数（各表 added 之和）。
+        concurrency: 有界并发数（默认 3）。
+        cancel_requested: 用户请求取消标记（worker 每表完成检查后置剩余 pending 为 cancelled）。
+        error: 任务级失败原因（全局异常；逐表失败不置，仅记入 progress）。
+        started_at: 任务开始执行时间。finished_at: 任务结束时间。
+    """
+
+    __tablename__ = "batch_llm_infer_task"
+
+    actor_id: Mapped[int | None] = mapped_column(
+        nullable=True, comment="发起人 ID"
+    )
+    actor_name: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="发起人姓名快照"
+    )
+    org_id: Mapped[int | None] = mapped_column(
+        nullable=True, comment="发起人组织 ID"
+    )
+    tasks_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list, comment="待处理表 [{catalog_id, entity_name, ...}]"
+    )
+    progress_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list, comment="逐表进度（worker 实时更新）"
+    )
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="pending",
+        comment="任务状态 pending/running/completed/cancelled/failed",
+    )
+    total: Mapped[int] = mapped_column(INTEGER, nullable=False, default=0, comment="任务表数")
+    done: Mapped[int] = mapped_column(INTEGER, nullable=False, default=0, comment="成功表数")
+    failed: Mapped[int] = mapped_column(INTEGER, nullable=False, default=0, comment="失败表数")
+    cancelled: Mapped[int] = mapped_column(
+        INTEGER, nullable=False, default=0, comment="取消表数"
+    )
+    added_total: Mapped[int] = mapped_column(
+        INTEGER, nullable=False, default=0, comment="新增字段描述总数"
+    )
+    concurrency: Mapped[int] = mapped_column(
+        INTEGER, nullable=False, default=3, comment="有界并发表数"
+    )
+    cancel_requested: Mapped[bool] = mapped_column(
+        nullable=False, default=False, comment="用户请求取消标记"
+    )
+    error: Mapped[str | None] = mapped_column(
+        String(512), nullable=True, comment="任务级失败原因（逐表失败不置）"
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DATETIME, nullable=True, comment="任务开始执行时间"
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DATETIME, nullable=True, comment="任务结束时间"
+    )
+
+    __table_args__ = (
+        Index("idx_batch_task_actor_created", "actor_id", "created_at"),
+        Index("idx_batch_task_status", "status"),
+    )

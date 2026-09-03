@@ -41,7 +41,7 @@ from app.core.logging import get_logger
 from app.core.probe_throttle import check_collect_rate, check_probe_rate
 from app.db.mysql import get_db_session
 from app.db.redis import get_redis
-from app.models.collector_models import BatchInferHistory
+from app.models.collector_models import BatchInferHistory, BatchLlmInferTask
 from app.models.data_source import DBCatalog
 from app.services.collector.distributed_lock import CollectionLock
 from app.services.collector.infer_guard import InferInflightGuard
@@ -51,6 +51,7 @@ from app.services.collector.schemas import (
     BatchInferHistoryCreate,
     BatchInferHistoryEntry,
     BatchInferHistoryTable,
+    BatchLlmInferTaskCreate,
     BatchScheduleRequest,
     BatchSourceResult,
     BatchTestConnectionRequest,
@@ -1374,6 +1375,198 @@ def _to_history_entry(r: BatchInferHistory) -> BatchInferHistoryEntry:
         ],
         created_at=r.created_at.isoformat() if r.created_at else "",
     )
+
+
+def _task_to_dict(task: BatchLlmInferTask) -> dict[str, Any]:
+    """批量任务行转 JSON 安全字典（进度/任务清单原样透传）。"""
+    return {
+        "id": task.id,
+        "actor_id": task.actor_id,
+        "actor_name": task.actor_name,
+        "status": task.status,
+        "total": task.total,
+        "done": task.done,
+        "failed": task.failed,
+        "cancelled": task.cancelled,
+        "added_total": task.added_total,
+        "concurrency": task.concurrency,
+        "cancel_requested": bool(task.cancel_requested),
+        "error": task.error,
+        "tasks": task.tasks_json or [],
+        "progress": task.progress_json or [],
+        "created_at": task.created_at.isoformat() if task.created_at else "",
+        "started_at": task.started_at.isoformat() if task.started_at else "",
+        "finished_at": task.finished_at.isoformat() if task.finished_at else "",
+    }
+
+
+def _assert_task_owner(task: BatchLlmInferTask, user: CurrentUser) -> None:
+    """任务归属校验：platform_admin 可见/操作全部；其余仅本人发起任务。"""
+    if "platform_admin" in user.roles_all():
+        return
+    if task.actor_id is not None and task.actor_id == user.id:
+        return
+    raise AuthError("无权访问该批量推断任务", error_code="FORBIDDEN")
+
+
+@catalog_router.post("/batch-llm-infer", dependencies=_WRITE_DEPS)
+async def create_batch_llm_infer_task(
+    body: BatchLlmInferTaskCreate,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """创建跨表批量 LLM 推断后台任务（方案 B：arq worker 执行，进度落库跨页可见）。
+
+    逐表校验目录存在且未软删；创建 pending 任务记录后入队 arq
+    ``run_batch_llm_infer_task``，返回任务初始状态供前端轮询（任意页面/刷新可查）。
+    """
+    from app.core.config import settings
+    from app.services.collector.queue import _get_shared_arq_redis
+
+    # 逐表校验目录存在（防无效 id / 已软删目录）
+    task_items: list[dict[str, Any]] = []
+    for t in body.tasks:
+        cat = (
+            await db.execute(
+                select(DBCatalog).where(
+                    DBCatalog.id == t.catalog_id, DBCatalog.deleted_at.is_(None)
+                )
+            )
+        ).scalar_one_or_none()
+        if cat is None:
+            raise NotFoundError(f"目录实体不存在: {t.catalog_id}")
+        task_items.append(
+            {
+                "catalog_id": t.catalog_id,
+                "entity_name": t.entity_name or cat.entity_name,
+                "missing_fields": t.missing_fields,
+                "needs_table_desc": t.needs_table_desc,
+            }
+        )
+
+    row = BatchLlmInferTask(
+        actor_id=user.id,
+        actor_name=getattr(user, "username", None),
+        org_id=getattr(user, "org_id", None),
+        tasks_json=task_items,
+        progress_json=[],
+        status="pending",
+        total=len(task_items),
+        concurrency=body.concurrency,
+    )
+    db.add(row)
+    await db.flush()
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="catalog.batch_llm_infer_task",
+        entity_type="batch_llm_infer_task",
+        entity_id=str(row.id),
+        detail={"tables": len(task_items), "concurrency": body.concurrency},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    await db.refresh(row)
+
+    # 入队 arq（失败不阻断创建——任务保持 pending 可查询，worker 不消费属环境问题）
+    try:
+        redis = _get_shared_arq_redis(settings.redis_url)
+        await redis.enqueue_job(
+            "run_batch_llm_infer_task",
+            row.id,
+            _job_id=f"batch-infer:{row.id}",
+        )
+    except Exception as exc:  # noqa: BLE001 - 入队失败仅告警，不阻断响应
+        logger.warning("batch_llm_infer_enqueue_failed", task_id=row.id, error=str(exc)[:200])
+
+    return ok(data=_task_to_dict(row), trace_id=trace_id)
+
+
+@catalog_router.get("/batch-llm-infer", dependencies=_READ_DEPS)
+async def list_batch_llm_infer_tasks(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    limit: int = Query(20, ge=1, le=100, description="返回条数"),
+) -> ApiResponse[list[dict[str, Any]]]:
+    """批量推断任务列表（含进行中与最近历史，按创建倒序）。
+
+    可见性：platform_admin 全部；其余仅本人发起任务（防跨用户窥探批量推断范围）。
+    """
+    stmt = (
+        select(BatchLlmInferTask)
+        .where(BatchLlmInferTask.deleted_at.is_(None))
+        .order_by(BatchLlmInferTask.created_at.desc())
+        .limit(limit)
+    )
+    if "platform_admin" not in user.roles_all():
+        stmt = stmt.where(BatchLlmInferTask.actor_id == user.id)
+    rows = (await db.execute(stmt)).scalars().all()
+    return ok(data=[_task_to_dict(r) for r in rows], trace_id=trace_id)
+
+
+@catalog_router.get("/batch-llm-infer/{task_id}", dependencies=_READ_DEPS)
+async def get_batch_llm_infer_task(
+    task_id: int,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """单任务进度（前端任务中心轮询用）。"""
+    row = (
+        await db.execute(
+            select(BatchLlmInferTask).where(
+                BatchLlmInferTask.id == task_id,
+                BatchLlmInferTask.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise NotFoundError(f"批量推断任务不存在: {task_id}")
+    _assert_task_owner(row, user)
+    return ok(data=_task_to_dict(row), trace_id=trace_id)
+
+
+@catalog_router.post("/batch-llm-infer/{task_id}/cancel", dependencies=_WRITE_DEPS)
+async def cancel_batch_llm_infer_task(
+    task_id: int,
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[dict[str, Any]]:
+    """请求取消批量任务（置 cancel_requested；worker 每表完成后检查并收尾）。"""
+    row = (
+        await db.execute(
+            select(BatchLlmInferTask).where(
+                BatchLlmInferTask.id == task_id,
+                BatchLlmInferTask.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise NotFoundError(f"批量推断任务不存在: {task_id}")
+    _assert_task_owner(row, user)
+    if row.status not in ("pending", "running"):
+        # 已终态任务无需取消（幂等返回当前状态，避免重复取消告警）
+        return ok(data=_task_to_dict(row), trace_id=trace_id)
+    row.cancel_requested = True
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="catalog.batch_llm_infer_task_cancel",
+        entity_type="batch_llm_infer_task",
+        entity_id=str(row.id),
+        detail={"status": row.status},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    await db.refresh(row)
+    return ok(data=_task_to_dict(row), trace_id=trace_id)
 
 
 @catalog_router.get("/batch-infer-history", dependencies=_READ_DEPS)

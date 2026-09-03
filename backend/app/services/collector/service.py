@@ -1777,6 +1777,160 @@ class CollectorService(BaseService):
             if client is not None:
                 await client.close()
 
+    async def infer_catalog_columns(
+        self,
+        catalog_id: int,
+        *,
+        batch_chunk: int = 60,
+    ) -> dict[str, Any]:
+        """整表空 comment 字段批量 LLM 推断（后台任务/同步端点共用的单一编排）。
+
+        语义与描述缺失治理「推断此表字段」一致：跳过已有 manual/llm 描述与
+        有效源 comment 的字段，仅对无描述字段调用 LLM（一次调用返回整块字段
+        描述，字段超限按 batch_chunk 分块），成功后 upsert source=llm。
+        目录不存在/无待推断字段/LLM 不可用均不抛异常，以 error 承载原因。
+
+        Returns:
+            ``{"inferred": [{"column_name", "description", "source", "confidence"}],
+            "skipped": [column_name], "failed": [column_name], "error": str | None}``
+        """
+        from sqlalchemy import select
+
+        from app.models.data_source import DBCatalog
+        from app.services.collector.placeholders import is_effective_comment
+
+        cat = (
+            await self._db.execute(
+                select(DBCatalog).where(
+                    DBCatalog.id == catalog_id, DBCatalog.deleted_at.is_(None)
+                )
+            )
+        ).scalar_one_or_none()
+        if cat is None:
+            return {"inferred": [], "skipped": [], "failed": [], "error": "目录实体不存在"}
+
+        # 获取已有描述（避免覆盖 manual/llm 记录）
+        existing_descs = await self._repo.get_descriptions(catalog_id)
+        existing_map = {d.column_name: d for d in existing_descs}
+
+        schema_json = cat.schema_json or {}
+        columns = schema_json.get("columns") or schema_json.get("fields") or []
+        inferred: list[dict[str, Any]] = []
+        skipped: list[str] = []
+        failed: list[str] = []
+
+        # 收集待推断字段（跳过已有 manual/llm 描述或已有有效 comment 的字段）
+        targets: list[tuple[str, str | None]] = []
+        for col in columns:
+            if not isinstance(col, dict):
+                continue
+            col_name = col.get("name") or col.get("column")
+            if not col_name:
+                continue
+            col_name = str(col_name)
+            if col_name in existing_map and existing_map[col_name].source in ("manual", "llm"):
+                skipped.append(col_name)
+                continue
+            comment = col.get("comment")
+            if is_effective_comment(comment) and col_name not in existing_map:
+                skipped.append(col_name)
+                continue
+            col_type = col.get("type") or col.get("data_type")
+            targets.append((col_name, str(col_type) if col_type else None))
+
+        # 一次 LLM 调用返回全部字段描述（json_schema 数组强约束 + 按 column_name 回填），
+        # 字段超限时按块多次调用；写库保持 targets 原始顺序
+        parsed_map: dict[str, tuple[str, float]] = {}
+        for start in range(0, len(targets), batch_chunk):
+            chunk = targets[start : start + batch_chunk]
+            parsed_map.update(
+                await self._llm_infer_batch_descriptions(
+                    entity_name=cat.entity_name,
+                    targets=chunk,
+                )
+            )
+
+        for col_name, _ctype in targets:
+            item = parsed_map.get(col_name)
+            if item is None:
+                failed.append(col_name)
+                continue
+            description, confidence = item
+            await self._repo.upsert_description(
+                catalog_id=catalog_id,
+                column_name=col_name,
+                description=description,
+                source="llm",
+            )
+            inferred.append(
+                {
+                    "column_name": col_name,
+                    "description": description,
+                    "source": "llm",
+                    "confidence": confidence,
+                }
+            )
+        return {
+            "inferred": inferred,
+            "skipped": skipped,
+            "failed": failed,
+            "error": None,
+        }
+
+    async def infer_catalog_table_description(
+        self,
+        catalog_id: int,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any] | None:
+        """LLM 推断表级业务描述（后台任务/同步端点共用的单一编排）。
+
+        幂等短路：已存在 LLM 推断描述且未强制 → 直接返回现有描述（不重复调 LLM）。
+        目录不存在或 LLM 不可用返回 None（调用方按失败处理）。
+
+        Returns:
+            ``{"description", "confidence", "source"}``；失败返回 None。
+        """
+        from sqlalchemy import select
+
+        from app.models.data_source import DBCatalog
+
+        cat = (
+            await self._db.execute(
+                select(DBCatalog).where(
+                    DBCatalog.id == catalog_id, DBCatalog.deleted_at.is_(None)
+                )
+            )
+        ).scalar_one_or_none()
+        if cat is None:
+            return None
+
+        if not force and cat.description_source == "llm" and cat.description:
+            return {
+                "description": cat.description,
+                "source": "llm",
+                "confidence": 1.0,
+            }
+
+        schema_json = cat.schema_json or {}
+        fields = schema_json.get("columns") or schema_json.get("fields") or []
+        result = await self._llm_infer_table_description(
+            entity_name=cat.entity_name,
+            columns=fields,
+        )
+        if result is None:
+            return None
+        await self._repo.update_table_description(
+            catalog_id=catalog_id,
+            description=result["description"],
+            source="llm",
+        )
+        return {
+            "description": result["description"],
+            "source": "llm",
+            "confidence": result["confidence"],
+        }
+
     async def _handle_drift(
         self, source_id: str, entity_name: str, drift_info: dict[str, Any]
     ) -> None:

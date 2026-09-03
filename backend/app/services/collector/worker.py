@@ -23,6 +23,7 @@ from croniter import croniter
 from app.core.config import settings
 from app.core.eventbus import init_eventbus
 from app.core.logging import configure_logging
+from app.services.collector.batch_infer_tasks import run_batch_llm_infer_task
 from app.services.collector.queue import RedisJobStore
 from app.services.collector.repository import CollectorRepository
 from app.services.collector.tasks import run_collection_task
@@ -239,6 +240,7 @@ class WorkerSettings:
 
     functions = [
         run_collection_task,
+        run_batch_llm_infer_task,
         collect_scheduler,
         check_pending_version_timeouts,
         refresh_health_scores,
