@@ -320,6 +320,27 @@ describe("SystemConfig LLM 路由配置", () => {
     });
   });
 
+  it("编辑并停用实例：关掉「启用」→ 保存 → 不自动跑连通性测试", async () => {
+    mockGet.mockResolvedValue(listData({ items: [PRIMARY_ITEM] }) as never);
+    mockUpdate.mockResolvedValue({ id: 1 });
+    render(<SystemConfig />, { wrapper: MemoryRouter });
+    fireEvent.click(await screen.findByText("编辑"));
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("deepseek-chat")).toBeTruthy();
+    });
+    // 停用：关闭「启用」Switch（PRIMARY_ITEM 初始 enabled=true）
+    const sw = screen.getByRole("switch");
+    expect(sw.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(sw);
+    expect(sw.getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => {
+      expect(mockUpdate).toHaveBeenCalledWith(1, expect.objectContaining({ enabled: false }));
+    });
+    // 停用 = 下线该实例，不应自动跑连通性测试（测试无意义且会在停用时误报连通失败）
+    expect(mockTest).not.toHaveBeenCalled();
+  });
+
   it("删除实例：点删除 → 确认弹窗 → 确定 → 调用 deleteLlmConfig", async () => {
     mockGet.mockResolvedValue(listData({ items: [PRIMARY_ITEM] }) as never);
     mockDelete.mockResolvedValue({ id: 1 });

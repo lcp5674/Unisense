@@ -502,8 +502,12 @@ export function SystemConfig() {
       } else {
         message.success(editing ? "LLM 实例已更新" : "LLM 实例已新增");
       }
-      // P0-2 保存后一键启用流：自动跑连通性测试，失败给"去编辑密钥"引导
-      await autoTestAfterSave(savedId);
+      // P0-2 保存后一键启用流：仅在「启用」状态下自动跑连通性测试，失败给"去编辑密钥"引导。
+      // 停用（enabled=false）= 将该实例下线，不再参与轮询路由——连通性无意义，且
+      // 不应在停用时误报「连通失败」（用户本意是下线一个地址/密钥已失效的实例）。
+      if (values.enabled) {
+        await autoTestAfterSave(savedId);
+      }
     } catch (err) {
       if (err instanceof Error && "errorFields" in err) return; // 表单校验错误，已高亮
       message.error(
