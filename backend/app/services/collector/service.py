@@ -1602,7 +1602,7 @@ class CollectorService(BaseService):
                 },
             ]
 
-            result = await self._infer_description_structured(client, messages, max_tokens=120)
+            result = await self._infer_description_structured(client, messages, max_tokens=160)
             return result
         except (TimeoutError, ConnectionError, OSError) as exc:
             logger.warning("llm_infer_desc_timeout_error: %s", exc)
@@ -1755,7 +1755,7 @@ class CollectorService(BaseService):
                 },
             ]
 
-            result = await self._infer_description_structured(client, messages, max_tokens=150)
+            result = await self._infer_description_structured(client, messages, max_tokens=400)
             return result
         except (TimeoutError, ConnectionError, OSError) as exc:
             logger.warning("llm_infer_table_desc_timeout_error: %s", exc)

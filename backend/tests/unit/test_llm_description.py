@@ -225,6 +225,9 @@ async def test_llm_infer_table_description_normal():
     # 字段清单应传给 LLM 上下文
     call_content = mock_client.chat.await_args.args[0][1]["content"]
     assert "order_id" in call_content
+    # 表描述 max_tokens 必须充足（150 会截断长描述致解析失败，回归：400）
+    call_kwargs = mock_client.chat.await_args.kwargs
+    assert call_kwargs["max_tokens"] == 400
 
 
 @pytest.mark.asyncio
