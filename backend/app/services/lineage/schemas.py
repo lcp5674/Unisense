@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class LineageParseRequest(BaseModel):
@@ -41,6 +42,27 @@ class LineageEdgeResponse(BaseModel):
     confidence: float
     provenance: str
     pii_inherited: bool = Field(default=False, description="PII 是否沿血缘继承")
+    dp_task_refs: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="DP 调度来源引用（任务/负责人/产出，来自 dp_task_refs JSON；"
+        "非 DP 通道为 None）",
+    )
+
+    @field_validator("dp_task_refs", mode="before")
+    @classmethod
+    def _parse_dp_task_refs(cls, v: Any) -> Any:
+        """model 列是 JSON 字符串（Text），解析为 list；空/非法返回 None。"""
+        if v is None or v == "":
+            return None
+        if isinstance(v, list):
+            return v or None
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+            except (ValueError, TypeError):
+                return None
+            return parsed if isinstance(parsed, list) and parsed else None
+        return None
 
 
 class TableLineageItem(BaseModel):

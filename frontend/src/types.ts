@@ -528,6 +528,7 @@ export interface LineageEdge {
   confidence: number;
   provenance: string;
   pii_inherited?: boolean;
+  dp_task_refs?: Array<Record<string, unknown>> | null;
 }
 
 // 血缘影响分析/边列表分页响应（T4 起后端返回 {items,total,...}）
@@ -755,6 +756,7 @@ export interface LineageEdgeDetail {
   provenance?: string;
   pii_inherited?: boolean;
   created_at?: string;
+  dp_task_refs?: Array<Record<string, unknown>> | null;
   history: LineageEdgeHistoryItem[];
 }
 

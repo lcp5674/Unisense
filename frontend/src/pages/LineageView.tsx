@@ -1805,6 +1805,25 @@ function EdgeDetailDrawer({
             <Descriptions.Item label="创建时间">{detail.created_at ? formatCnTime(detail.created_at) : "—"}</Descriptions.Item>
           </Descriptions>
 
+          {Array.isArray(detail.dp_task_refs) && detail.dp_task_refs.length > 0 ? (
+            <div style={{ marginTop: 16 }}>
+              <h4>调度来源（DP 同步）</h4>
+              <Table
+                size="small"
+                rowKey={(r, i) => `${String(r?.task_id ?? "")}__${i}`}
+                dataSource={detail.dp_task_refs}
+                pagination={false}
+                columns={[
+                  { title: "任务", dataIndex: "task_name", key: "task_name", render: (v?: string) => v || "—" },
+                  { title: "产出表", dataIndex: "out_table", key: "out_table", render: (v?: string) => (v ? <span className="mono">{v}</span> : "—") },
+                  { title: "负责人", dataIndex: "director", key: "director", render: (v?: string) => v || "—" },
+                  { title: "周期", dataIndex: "cycle", key: "cycle", render: (v?: string) => (v ? <Tag>{v}</Tag> : "—") },
+                  { title: "SQL 节点", dataIndex: "step_name", key: "step_name", render: (v?: string) => v || "—" },
+                ]}
+              />
+            </div>
+          ) : null}
+
           <h4 style={{ marginTop: 16 }}>变更历史（{detail.history.length}）</h4>
           {detail.history.length > 0 ? (
             <Table
