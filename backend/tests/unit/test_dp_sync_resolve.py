@@ -21,6 +21,7 @@ def _ticket(**overrides) -> MagicMock:
     t.out_table = "wedw_dwd.dp_out"
     t.sql_hash = "abc123"
     t.status = "diverged"
+    t.resolution = None  # 未裁决（M3 幂等拦截基准）
     t.sqlglot_result = {
         "table_edges": [{"source": "wedw_ods.a", "target": "wedw_dwd.dp_out"}],
         "field_edges": [
@@ -260,3 +261,33 @@ async def test_resolve_restores_full_task_refs_from_snapshot() -> None:
     assert '"director": "shifeng"' in edge.dp_task_refs
     assert '"task_no": "T1386"' in edge.dp_task_refs
     assert '"cycle": "day"' in edge.dp_task_refs
+
+
+@pytest.mark.asyncio
+async def test_resolve_already_resolved_different_rejected() -> None:
+    """M3：已裁决单不同 resolution 重复裁决被拒（防 accept 落边后改 ignore 背离）。"""
+    t = _ticket(resolution="accept_sqlglot")
+    svc = _svc(t)
+    with pytest.raises(ValueError, match="已裁决为 accept_sqlglot"):
+        await svc.resolve_ticket(1, resolution="ignore", resolved_by=3)
+    # 同 resolution 幂等放行（不重复写边）
+    svc._lineage_repo.upsert_edge_with_status = AsyncMock(return_value=(MagicMock(), False))
+    result = await svc.resolve_ticket(1, resolution="accept_sqlglot", resolved_by=3)
+    assert result["resolution"] == "accept_sqlglot"
+
+
+@pytest.mark.asyncio
+async def test_resolve_manual_rejects_dirty_table_name() -> None:
+    """M3：manual 边表名含脏字符（空格/分号）被格式校验拒绝。"""
+    t = _ticket()
+    svc = _svc(t)
+    manual = {
+        "table_edges": [
+            {"source": "wedw_ods.a; drop", "target": "wedw_dwd.dp_out"}
+        ]
+    }
+    with pytest.raises(ValueError, match="手动血缘表名不合法"):
+        await svc.resolve_ticket(
+            1, resolution="manual", resolved_by=3, manual_edges=manual
+        )
+    svc._lineage_repo.upsert_edge_with_status.assert_not_awaited()

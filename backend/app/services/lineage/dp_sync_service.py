@@ -120,6 +120,27 @@ def _safe_table_name(value: str | None, field: str, default: str) -> str:
     return text
 
 
+#: 手动血缘表名合法字符：库名.表名（点号分隔），仅字母/数字/下划线/点。
+_TABLE_RE = re.compile(r"^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)?$")
+
+
+def _validate_manual_table(name: str) -> None:
+    """手动裁决/手动边的表名格式校验：非法抛 ValueError（M3）。
+
+    manual 边由用户手填，脏节点（空格/分号/超长/协议前缀）会污染血缘图且
+    无回收路径；入库前 fail-fast 拒绝，提示合法形态（``库.表`` 或 ``表``）。
+    """
+    text = (name or "").strip()
+    if not text:
+        raise ValueError("手动血缘表名不能为空")
+    if len(text) > 255:
+        raise ValueError(f"手动血缘表名过长（>255）: {text[:30]!r}...")
+    if not _TABLE_RE.match(text):
+        raise ValueError(
+            f"手动血缘表名不合法（仅允许 库.表 或 表，字符限字母/数字/下划线/点）: {text!r}"
+        )
+
+
 def build_task_ref(task: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
     """从 dp task/step 行构建 dp_task_refs 数组元素（静态身份 + 准静态元数据）。
 
@@ -532,6 +553,10 @@ class DpSyncService:
             target = te.get("target")
             if not (source and target):
                 continue
+            # M3: manual 表名格式校验（手填脏节点——含空格/分号/超长——会污染
+            # 血缘图且无回收路径；对比 lineage.py 手动建边同样做格式/域校验）
+            for tbl in (source, target):
+                _validate_manual_table(tbl)
             edge = await self._upsert_edge(source, target, task, step, ref)
             if edge is None:
                 continue
@@ -1017,11 +1042,21 @@ class DpSyncService:
     ) -> dict[str, Any]:
         """裁决一张待抉择单并按所选结果入库（accept_sqlglot/accept_llm/manual/ignore）。
 
-        已裁决单幂等：再次提交同一 resolution 不重复写边（repository resolve 覆盖留痕）。
+        已裁决单幂等（M3）：同 resolution 重复提交放行（repository resolve 覆盖
+        留痕不重复写边）；**不同 resolution** 重复裁决拒绝——先 accept 后 ignore
+        会造成「边已落库但裁决改 ignore」的永久背离且无撤销路径。
         """
         ticket = await self._dp_repo.get_ticket(ticket_id)
         if ticket is None:
             raise LookupError(f"待抉择单不存在: {ticket_id}")
+        if ticket.resolution is not None:
+            if ticket.resolution == resolution:
+                # 同 resolution 重复提交幂等：边已按上次裁决写入，直接返回现状
+                return {"ticket_id": ticket_id, "resolution": resolution}
+            raise ValueError(
+                f"该单已裁决为 {ticket.resolution}，如需改判请先在运维侧处理"
+                f"（防 accept 落边后改 ignore 造成血缘事实背离）"
+            )
         # 用建单时快照还原完整 task/step（含 director/cycle 等准静态元数据），
         # 使 build_task_ref 产出完整 dp_task_refs——此前只用 id/name/out_table，
         # 责任人快照在裁决入库时丢失（P2-9 #12）。

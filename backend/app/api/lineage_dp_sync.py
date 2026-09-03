@@ -14,11 +14,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query, Request
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, require_roles
-from app.api.responses import ApiResponse, ok
+from app.api.responses import ApiResponse, get_trace_id, ok
+from app.core.audit import client_ip, write_audit
 from app.db.mysql import get_db_session
 from app.models.data_source import DataSource
 from app.services.collector.spi import build_collector
@@ -94,6 +95,8 @@ async def update_dp_sync_config(
     user: CurrentUser,
     payload: dict[str, Any] = Body(...),
     db=Depends(get_db_session),
+    request: Request = None,
+    trace_id: str = Depends(get_trace_id),
 ):
     """创建或更新同步配置（首次保存创建单行；更新只覆盖白名单字段）。"""
     repo = DpLineageRepository(db)
@@ -112,6 +115,16 @@ async def update_dp_sync_config(
         cfg = await repo.create_default_config(source_id)
         await db.commit()
     await repo.update_config(cfg.id, **payload, updated_by=user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dp_sync.config_update",
+        entity_type="dp_sync_config",
+        entity_id=str(cfg.id),
+        detail={k: v for k, v in payload.items() if k != "api_key"},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
     await db.commit()
     fresh = await repo.get_config()
     return ok(data=fresh.to_dict())
@@ -280,6 +293,8 @@ async def resolve_ticket(
     ticket_id: int,
     payload: dict[str, Any] = Body(...),
     db=Depends(get_db_session),
+    request: Request = None,
+    trace_id: str = Depends(get_trace_id),
 ):
     """裁决待抉择单：resolution ∈ accept_sqlglot / accept_llm / manual / ignore。"""
     resolution = str(payload.get("resolution") or "")
@@ -296,6 +311,16 @@ async def resolve_ticket(
         return ok(code="NOT_FOUND", message=str(exc), data=None)
     except ValueError as exc:
         return ok(code="VALIDATION_ERROR", message=str(exc), data=None)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dp_sync.resolve",
+        entity_type="dp_ticket",
+        entity_id=str(ticket_id),
+        detail={"resolution": resolution, "ticket_id": ticket_id},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
     await db.commit()
     return ok(data=result)
 
@@ -380,7 +405,10 @@ async def get_watermark(
 
 @router.post("/reset", response_model=ApiResponse, dependencies=_ADMIN_DEPS)
 async def reset_watermark(
+    user: CurrentUser,
     db=Depends(get_db_session),
+    request: Request = None,
+    trace_id: str = Depends(get_trace_id),
 ):
     """重置水位（下轮扫描自动全量；幂等安全）。"""
     repo = DpLineageRepository(db)
@@ -388,18 +416,44 @@ async def reset_watermark(
         wm = await repo.get_watermark(name)
         if wm is not None:
             wm.last_max_update = None
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dp_sync.reset",
+        entity_type="dp_sync_watermark",
+        entity_id="task,step",
+        detail={"reset": True},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
     await db.commit()
     return ok(data={"reset": True})
 
 
 @router.post("/scan-now", response_model=ApiResponse, dependencies=_ADMIN_DEPS)
-async def scan_now():
+async def scan_now(
+    user: CurrentUser,
+    db=Depends(get_db_session),
+    request: Request = None,
+    trace_id: str = Depends(get_trace_id),
+):
     """提交一轮手动立即扫描（后台异步执行，立即返回 task_id）。
 
     进度/结果/取消走下方 ``scan/status/{task_id}`` 与 ``scan/{task_id}/cancel``：
     提交不阻塞请求；异常以状态接口的 error 呈现，不再被包成「成功」。
     """
     task_id, already_running = await dp_sync_manual.submit_scan(force=True)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dp_sync.scan_now",
+        entity_type="dp_sync_scan",
+        entity_id=str(task_id),
+        detail={"already_running": already_running},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
     return ok(
         data={
             "task_id": task_id,
@@ -427,13 +481,30 @@ async def get_scan_status(task_id: int):
 @router.post(
     "/scan/{task_id}/cancel", response_model=ApiResponse, dependencies=_ADMIN_DEPS
 )
-async def cancel_scan(task_id: int):
+async def cancel_scan(
+    task_id: int,
+    user: CurrentUser,
+    db=Depends(get_db_session),
+    request: Request = None,
+    trace_id: str = Depends(get_trace_id),
+):
     """请求取消运行中的手动扫描（协作式：当前步骤完成后停止，水位不推进）。
 
     与 ``force-cancel`` 的区别：cancel 等待当前写库/LLM 子步骤自然完成（保证
     事务原子）；若当前步骤卡在慢 IO 长时间未停，可调用 ``force-cancel``。
     """
     accepted = await dp_sync_manual.cancel_scan(task_id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dp_sync.scan_cancel",
+        entity_type="dp_sync_scan",
+        entity_id=str(task_id),
+        detail={"cancelled": accepted},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
     if not accepted:
         return ok(
             code="SCAN_NOT_RUNNING",
@@ -446,13 +517,30 @@ async def cancel_scan(task_id: int):
 @router.post(
     "/scan/{task_id}/force-cancel", response_model=ApiResponse, dependencies=_ADMIN_DEPS
 )
-async def force_cancel_scan(task_id: int):
+async def force_cancel_scan(
+    task_id: int,
+    user: CurrentUser,
+    db=Depends(get_db_session),
+    request: Request = None,
+    trace_id: str = Depends(get_trace_id),
+):
     """强制终止运行中的手动扫描（子步骤检查点立即中断，事务回滚不落半成品）。
 
     仅作最后手段（如当前步骤卡在慢 IO）；与协作 cancel 不同，可能在子步骤
     中间中断——未完成部分不落库，已提交部分保留，水位不推进。
     """
     accepted = await dp_sync_manual.force_cancel_scan(task_id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dp_sync.scan_force_cancel",
+        entity_type="dp_sync_scan",
+        entity_id=str(task_id),
+        detail={"force_cancelled": accepted},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
     if not accepted:
         return ok(
             code="SCAN_NOT_RUNNING",
