@@ -216,3 +216,158 @@ def test_mask_secret_hides_password() -> None:
     assert "p@ss" not in _mask_secret("mysql+aiomysql://u:p@ss@h:3306/db")
     masked = _mask_secret("mysql+aiomysql://u:p@ss@h:3306/db")
     assert "u:***@h" in masked
+
+
+# ---- 连通性测试（olap 必须 HTTP 验证 Doris FE，防「TCP 通即通过」假阳性） ----
+
+def _eff_olap(
+    *, host: str = "fe.internal", port: int = 8030, user: str = "", password: str = ""
+) -> dict:
+    """构造 _test_olap(payload=None) 所需的生效配置子集。"""
+    return {
+        "doris_host": host,
+        "doris_port": port,
+        "doris_user": user,
+        "doris_password": password,
+    }
+
+
+def _probe_ok() -> dict:
+    return {"ok": True, "latency_ms": 3, "status_code": 200}
+
+
+def _probe_not_doris() -> dict:
+    return {
+        "ok": False,
+        "latency_ms": 3,
+        "error": (
+            "对端不是可用的 Doris FE 或 FE 尚未就绪（HTTP 502，请求 "
+            "http://fe.internal:8030/api/bootstrap）: bad gateway"
+        ),
+    }
+
+
+def _probe_unauthorized() -> dict:
+    return {
+        "ok": False,
+        "latency_ms": 3,
+        "error": (
+            "Doris 鉴权失败（HTTP 401，请求 http://fe.internal:8030/api/bootstrap）："
+            "用户名或密码错误，请检查 doris_user / doris_password"
+        ),
+    }
+
+
+async def test_olap_no_user_tcp_ok_bootstrap_ok_passes(monkeypatch) -> None:
+    """无凭据 + TCP 通 + FE HTTP 200 → 通过（auth: none）——真实 Doris FE 免认证场景。"""
+    from app.services.query_engine import config_service as cs
+
+    calls: list[tuple] = []
+
+    async def fake_tcp(host: str, port: int) -> tuple[bool, str]:
+        calls.append(("tcp", host, port))
+        return True, ""
+
+    async def fake_probe(host: str, port: int, user: str, password: str) -> dict:
+        calls.append(("http", host, port, user, password))
+        assert user == "" and password == ""  # 无凭据必须不带 auth 调用
+        return _probe_ok()
+
+    monkeypatch.setattr(cs, "_tcp_probe", fake_tcp)
+    monkeypatch.setattr(cs, "_doris_http_probe", fake_probe)
+    svc = _svc(None)
+    res = await svc._test_olap(None, _eff_olap(user="", password=""))
+    assert res.ok is True
+    assert res.detail["auth"] == "none"
+    assert ("tcp", "fe.internal", 8030) in calls
+    assert ("http", "fe.internal", 8030, "", "") in calls
+
+
+async def test_olap_no_user_tcp_ok_bootstrap_non200_fails(monkeypatch) -> None:
+    """回归：无凭据时 TCP 通 ≠ 通过——对端非 Doris FE（HTTP 非 200）必须失败。
+
+    此前实现 `if user:` 才做 HTTP 探活，未配用户名时 TCP 探活成功即返回 ok=True，
+    导致生产「没配用户名密码、端口恰好开放」误报连通正常。
+    """
+    from app.services.query_engine import config_service as cs
+
+    async def fake_tcp(host: str, port: int) -> tuple[bool, str]:
+        return True, ""
+
+    async def fake_probe(host: str, port: int, user: str, password: str) -> dict:
+        return _probe_not_doris()
+
+    monkeypatch.setattr(cs, "_tcp_probe", fake_tcp)
+    monkeypatch.setattr(cs, "_doris_http_probe", fake_probe)
+    svc = _svc(None)
+    res = await svc._test_olap(None, _eff_olap(user="", password=""))
+    assert res.ok is False
+    assert "不是可用的 Doris FE" in res.error
+
+
+async def test_olap_with_user_bad_credentials_fails(monkeypatch) -> None:
+    """有用户 + HTTP 401 → 鉴权失败（用户名/密码错误）。"""
+    from app.services.query_engine import config_service as cs
+
+    async def fake_tcp(host: str, port: int) -> tuple[bool, str]:
+        return True, ""
+
+    async def fake_probe(host: str, port: int, user: str, password: str) -> dict:
+        assert user == "root" and password == "wrong"
+        return _probe_unauthorized()
+
+    monkeypatch.setattr(cs, "_tcp_probe", fake_tcp)
+    monkeypatch.setattr(cs, "_doris_http_probe", fake_probe)
+    svc = _svc(None)
+    res = await svc._test_olap(None, _eff_olap(user="root", password="wrong"))
+    assert res.ok is False
+    assert "鉴权失败" in res.error
+
+
+async def test_olap_with_user_ok_passes(monkeypatch) -> None:
+    """有用户 + HTTP 200 → 通过（auth: basic，凭据与服务均验证）。"""
+    from app.services.query_engine import config_service as cs
+
+    async def fake_tcp(host: str, port: int) -> tuple[bool, str]:
+        return True, ""
+
+    async def fake_probe(host: str, port: int, user: str, password: str) -> dict:
+        assert user == "root" and password == "s3cret"
+        return _probe_ok()
+
+    monkeypatch.setattr(cs, "_tcp_probe", fake_tcp)
+    monkeypatch.setattr(cs, "_doris_http_probe", fake_probe)
+    svc = _svc(None)
+    res = await svc._test_olap(None, _eff_olap(user="root", password="s3cret"))
+    assert res.ok is True
+    assert res.detail["auth"] == "basic"
+
+
+async def test_olap_tcp_down_fails(monkeypatch) -> None:
+    """TCP 不通 → 失败（不触发 HTTP 探活）。"""
+    from app.services.query_engine import config_service as cs
+
+    async def fake_tcp(host: str, port: int) -> tuple[bool, str]:
+        return False, "OSError: [Errno 61] Connection refused"
+
+    called = {"http": False}
+
+    async def fake_probe(host: str, port: int, user: str, password: str) -> dict:
+        called["http"] = True
+        return _probe_ok()
+
+    monkeypatch.setattr(cs, "_tcp_probe", fake_tcp)
+    monkeypatch.setattr(cs, "_doris_http_probe", fake_probe)
+    svc = _svc(None)
+    res = await svc._test_olap(None, _eff_olap())
+    assert res.ok is False
+    assert "无法连接 Doris FE" in res.error
+    assert called["http"] is False
+
+
+async def test_olap_missing_host_fails() -> None:
+    """未配置 host → 直接失败（未配置 OLAP 主机）。"""
+    svc = _svc(None)
+    res = await svc._test_olap(None, _eff_olap(host=""))
+    assert res.ok is False
+    assert "未配置 OLAP 主机" in res.error

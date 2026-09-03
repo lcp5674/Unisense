@@ -274,7 +274,7 @@ class QueryEngineConfigService:
     async def test_connection(
         self, engine: str, payload: QueryEngineConfigPayload | None
     ) -> QueryEngineTestResult:
-        """测试引擎连通性：olap=TCP 探活(+可选 basic auth)、mysql=真实 SELECT 1。
+        """测试引擎连通性：olap=TCP 探活 + FE HTTP 健康探活(+basic auth)、mysql=真实 SELECT 1。
 
         payload 为空时使用当前生效配置；否则用载荷临时测试（不落库）。
         """
@@ -317,29 +317,36 @@ class QueryEngineConfigService:
                 detail={"host": host, "port": port},
             )
         tcp_ms = int((time.monotonic() - start) * 1000)
-        # 2) 配置了用户名时做 HTTP basic auth 鉴权校验（/api/bootstrap）
-        if user:
-            auth = await _doris_auth_probe(host, port, user, password)
-            if not auth["ok"]:
-                return QueryEngineTestResult(
-                    ok=False,
-                    engine="olap",
-                    latency_ms=tcp_ms + int(auth.get("latency_ms", 0)),
-                    error=auth["error"],
-                    detail={"host": host, "port": port, "user": user},
-                )
+        # 2) Doris FE HTTP 健康探活（/api/bootstrap，FE 免认证健康端点）：
+        #    无论是否配置凭据都执行——TCP 探活成功只说明端口有 TCP 服务监听，
+        #    不验证对端是 Doris FE；HTTP 200 才真正证明 Doris FE 可用。
+        #    配置了 user 时携带 basic auth，同时验证用户名/密码。
+        probe = await _doris_http_probe(host, port, user, password)
+        if not probe["ok"]:
             return QueryEngineTestResult(
-                ok=True,
+                ok=False,
                 engine="olap",
-                latency_ms=tcp_ms + int(auth.get("latency_ms", 0)),
-                detail={"host": host, "port": port, "user": user, "auth": "basic"},
+                latency_ms=tcp_ms + int(probe.get("latency_ms", 0)),
+                error=probe["error"],
+                detail={"host": host, "port": port, "user": user or None},
             )
-        logger.info("query_engine_olap_probe_ok: %s:%s latency=%dms", host, port, tcp_ms)
+        logger.info(
+            "query_engine_olap_probe_ok: %s:%s latency=%dms auth=%s",
+            host,
+            port,
+            tcp_ms + int(probe.get("latency_ms", 0)),
+            "basic" if user else "none",
+        )
         return QueryEngineTestResult(
             ok=True,
             engine="olap",
-            latency_ms=tcp_ms,
-            detail={"host": host, "port": port, "auth": "none"},
+            latency_ms=tcp_ms + int(probe.get("latency_ms", 0)),
+            detail={
+                "host": host,
+                "port": port,
+                "user": user or None,
+                "auth": "basic" if user else "none",
+            },
         )
 
     async def _test_mysql(self, url: str) -> QueryEngineTestResult:
@@ -391,17 +398,22 @@ async def _tcp_probe(host: str, port: int) -> tuple[bool, str]:
         return False, f"{type(exc).__name__}: {exc}"
 
 
-async def _doris_auth_probe(
+async def _doris_http_probe(
     host: str, port: int, user: str, password: str
 ) -> dict[str, Any]:
-    """Doris basic auth 鉴权探活：GET /api/bootstrap（Doris FE HTTP 健康端点）。"""
+    """Doris FE HTTP 健康探活：GET /api/bootstrap（FE 免认证健康端点）。
+
+    配置了 ``user`` 时携带 basic auth（同时验证用户名/密码）；未配置 ``user``
+    时不带认证——``/api/bootstrap`` 无需登录即返回 200，仍能验证对端确为
+    Doris FE 且 HTTP 服务正常（TCP 通 ≠ Doris 通）。
+    """
     url = f"http://{host}:{port}/api/bootstrap"
     start = time.monotonic()
     try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(_HTTP_TIMEOUT),
-            auth=(user, password),
-        ) as client:
+        kwargs: dict[str, Any] = {"timeout": httpx.Timeout(_HTTP_TIMEOUT)}
+        if user:
+            kwargs["auth"] = (user, password)
+        async with httpx.AsyncClient(**kwargs) as client:
             resp = await client.get(url)
     except httpx.HTTPError as exc:
         latency = int((time.monotonic() - start) * 1000)
@@ -413,8 +425,20 @@ async def _doris_auth_probe(
     latency = int((time.monotonic() - start) * 1000)
     if resp.status_code == 200:
         return {"ok": True, "latency_ms": latency, "status_code": 200}
+    if resp.status_code in (401, 403):
+        return {
+            "ok": False,
+            "latency_ms": latency,
+            "error": (
+                f"Doris 鉴权失败（HTTP {resp.status_code}，请求 {url}）："
+                "用户名或密码错误，请检查 doris_user / doris_password"
+            ),
+        }
     return {
         "ok": False,
         "latency_ms": latency,
-        "error": f"Doris 鉴权失败（HTTP {resp.status_code}，请求 {url}）: {resp.text[:200]}",
+        "error": (
+            f"对端不是可用的 Doris FE 或 FE 尚未就绪（HTTP {resp.status_code}，"
+            f"请求 {url}）: {resp.text[:200]}"
+        ),
     }
