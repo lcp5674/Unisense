@@ -50,11 +50,15 @@ gateways-verify: ## 门禁真实性校验
 gateways: lint type unit integration security chaos contract docsync ## 运行全部门禁
 
 # ---- Docker 服务 ----
-setup-services: ## 启动本地依赖服务
-	docker compose up -d
+# 统一按生产环境标准：默认读 .env.production（凭据/特性与生产一致）；
+# 确需临时切换可 `make setup-services COMPOSE_ENV_FILE=.env`
+COMPOSE_ENV_FILE ?= .env.production
+
+setup-services: ## 启动本地依赖服务（.env.production）
+	docker compose --env-file $(COMPOSE_ENV_FILE) up -d
 
 teardown-services: ## 停止本地依赖服务
-	docker compose down
+	docker compose --env-file $(COMPOSE_ENV_FILE) down
 
 # ---- 数据库迁移 ----
 migrate-up: ## 执行数据库迁移
