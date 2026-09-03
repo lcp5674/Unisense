@@ -163,3 +163,61 @@ async def test_resolve_missing_ticket_raises() -> None:
     svc._dp_repo.get_ticket = AsyncMock(return_value=None)
     with pytest.raises(LookupError):
         await svc.resolve_ticket(999, resolution="ignore", resolved_by=3)
+
+
+@pytest.mark.asyncio
+async def test_resolve_accept_llm_excludes_wrong_edges() -> None:
+    """diverged 采纳 LLM：wrong_edges 声明的 sqlglot 边不再入库（P1-4 回归）。
+
+    此前 wrong_edges 是死字段，「采纳 LLM」与「采纳 sqlglot」等价，LLM 判定
+    错误的边仍留在库里。
+    """
+    t = _ticket(
+        sqlglot_result={
+            "table_edges": [
+                {"source": "wedw_ods.a", "target": "wedw_dwd.dp_out"},
+                {"source": "wedw_ods.legacy", "target": "wedw_dwd.dp_out"},
+            ],
+            "field_edges": [
+                {
+                    "source_table": "wedw_ods.legacy",
+                    "source_column": "id",
+                    "target_table": "wedw_dwd.dp_out",
+                    "target_column": "id",
+                }
+            ],
+        },
+        llm_opinion={
+            "agree": False,
+            "missing_edges": [{"source": "wedw_ods.b", "target": "wedw_dwd.dp_out"}],
+            "wrong_edges": [{"source": "wedw_ods.legacy", "target": "wedw_dwd.dp_out"}],
+            "reason": "legacy 表未在本 SQL 出现，判定错误",
+        },
+    )
+    svc = _svc(t)
+    await svc.resolve_ticket(1, resolution="accept_llm", resolved_by=3)
+    # wrong 边剔除 + sqlglot 保留边 + missing 补边 = 2 次 upsert（legacy 不再出现）
+    upserts = svc._lineage_repo.upsert_edge_with_status.await_args_list
+    assert len(upserts) == 2
+    targets = {a.kwargs["source_node"] for a in upserts}
+    assert "table:wedw_ods.legacy" not in targets
+    # legacy 的字段映射也不落库
+    for call in svc._dp_repo.upsert_field_mapping.await_args_list:
+        assert call.kwargs["source_table"] != "wedw_ods.legacy"
+
+
+@pytest.mark.asyncio
+async def test_resolve_accept_llm_no_wrong_keeps_all_sqlglot() -> None:
+    """无 wrong_edges 时采纳 LLM 保留全部 sqlglot 边（不误伤）。"""
+    t = _ticket(
+        sqlglot_result={
+            "table_edges": [{"source": "wedw_ods.a", "target": "wedw_dwd.dp_out"}],
+            "field_edges": [],
+        },
+        llm_opinion={"agree": False, "missing_edges": [], "wrong_edges": []},
+    )
+    svc = _svc(t)
+    await svc.resolve_ticket(1, resolution="accept_llm", resolved_by=3)
+    upserts = svc._lineage_repo.upsert_edge_with_status.await_args_list
+    assert len(upserts) == 1
+    assert upserts[0].kwargs["source_node"] == "table:wedw_ods.a"

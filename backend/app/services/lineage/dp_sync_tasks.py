@@ -47,7 +47,7 @@ def _make_llm_chat(db: Any):
                 max_tokens=int(kwargs.get("max_tokens") or 2000),
             )
         except Exception as exc:  # noqa: BLE001 —— LLM 故障转空输出，由协议层建单
-            logger.warning("dp_sync_llm_call_failed", error=str(exc))
+            logger.warning("dp_sync_llm_call_failed: %s", exc)
             return {"content": ""}
 
     return llm_chat

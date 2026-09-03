@@ -31,13 +31,34 @@ from app.services.lineage.dp_sync_meta import (
 )
 from app.services.lineage.dp_sync_parser import DEFAULT_EXCLUDE_TABLE_PATTERNS
 from app.services.lineage.dp_sync_repo import DpLineageRepository
-from app.services.lineage.dp_sync_service import DpSyncService
+from app.services.lineage.dp_sync_service import (
+    DpSyncService,
+    _safe_table_name,
+)
 
 router = APIRouter(prefix="/lineage/dp-sync", tags=["lineage-dp-sync"])
 
 #: dp 血缘同步为治理能力：仅平台/域管理员可配置、运维与抉择。
 _ADMIN_ROLES = ("platform_admin", "domain_admin")
 _ADMIN_DEPS = [Depends(require_roles(*_ADMIN_ROLES))]
+
+
+def _ident_field_error(payload: dict[str, Any]) -> str | None:
+    """校验配置中的 schema/表名标识符（防 SQL 拼接注入）；非法返回错误信息。
+
+    仅校验 payload 中显式出现的字段；缺省值由 service 层兜底。
+    """
+    for field, default in (
+        ("schema_name", "dp_stable"),
+        ("task_table", "dispatch_task"),
+        ("step_table", "dispatch_task_step"),
+    ):
+        if field in payload and payload.get(field) is not None:
+            try:
+                _safe_table_name(payload.get(field), field, default)
+            except ValueError as exc:
+                return str(exc)
+    return None
 
 
 async def _collector_factory(db):
@@ -76,6 +97,9 @@ async def update_dp_sync_config(
 ):
     """创建或更新同步配置（首次保存创建单行；更新只覆盖白名单字段）。"""
     repo = DpLineageRepository(db)
+    ident_err = _ident_field_error(payload)
+    if ident_err:
+        return ok(code="VALIDATION_ERROR", message=ident_err, data=None)
     cfg = await repo.get_config()
     if cfg is None:
         source_id = str(payload.get("source_id") or "").strip()
@@ -121,19 +145,26 @@ async def preview_exclude_rules(
             message="请先配置 dp 数据源 source_id 再预览（或传入 source_id）",
             data=None,
         )
-    schema = (
-        str(
+    try:
+        schema = _safe_table_name(
             payload.get("schema_name")
-            or (cfg.schema_name if cfg is not None else "dp_stable")
-        ).strip()
-        or "dp_stable"
-    )
+            or (cfg.schema_name if cfg is not None else None),
+            "schema_name",
+            "dp_stable",
+        )
+        task_table = _safe_table_name(
+            payload.get("task_table") or (cfg.task_table if cfg is not None else None),
+            "task_table",
+            "dispatch_task",
+        )
+    except ValueError as exc:
+        return ok(code="VALIDATION_ERROR", message=str(exc), data=None)
     fetch = await _collector_factory(db)
     try:
         collector = await fetch(source_id)
         try:
             rows = await collector.query(
-                f"SELECT DISTINCT out_table AS t FROM {schema}.dispatch_task "
+                f"SELECT DISTINCT out_table AS t FROM {schema}.{task_table} "
                 "WHERE is_deleted=0 AND out_table IS NOT NULL AND out_table <> ''"
             )
         finally:
@@ -177,13 +208,15 @@ async def get_dp_sync_meta(
     collector = None
     try:
         collector = await fetch(cfg.source_id)
-        schema = cfg.schema_name or "dp_stable"
+        schema = _safe_table_name(cfg.schema_name, "schema_name", "dp_stable")
+        task_table = _safe_table_name(cfg.task_table, "task_table", "dispatch_task")
+        step_table = _safe_table_name(cfg.step_table, "step_table", "dispatch_task_step")
         task_rows = await collector.query(
-            f"SELECT type AS v, COUNT(*) AS c FROM {schema}.dispatch_task "
+            f"SELECT type AS v, COUNT(*) AS c FROM {schema}.{task_table} "
             "WHERE is_deleted=0 GROUP BY type ORDER BY type"
         )
         step_rows = await collector.query(
-            f"SELECT task_step_type AS v, COUNT(*) AS c FROM {schema}.dispatch_task_step "
+            f"SELECT task_step_type AS v, COUNT(*) AS c FROM {schema}.{step_table} "
             "WHERE is_deleted=0 GROUP BY task_step_type ORDER BY task_step_type"
         )
         tcounts = {int(r["v"]): int(r["c"]) for r in task_rows}
@@ -261,6 +294,8 @@ async def resolve_ticket(
         )
     except LookupError as exc:
         return ok(code="NOT_FOUND", message=str(exc), data=None)
+    except ValueError as exc:
+        return ok(code="VALIDATION_ERROR", message=str(exc), data=None)
     await db.commit()
     return ok(data=result)
 

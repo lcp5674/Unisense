@@ -89,6 +89,9 @@ def _config(**overrides) -> SimpleNamespace:
     defaults = {
         "enabled": True,
         "source_id": "mysql_uncategorized",
+        "schema_name": "dp_stable",
+        "task_table": "dispatch_task",
+        "step_table": "dispatch_task_step",
         "poll_interval_minutes": 5,
         "task_type_filter": [1],
         "step_type_filter": [7],
@@ -375,3 +378,70 @@ async def test_scan_force_stop_raises_cancelled() -> None:
     fin = svc._lineage_repo.finish_ingest_run.await_args.kwargs
     assert fin["status"] == "cancelled"
     assert progress.get("stage") == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_scan_db_error_isolated_per_task_via_savepoint() -> None:
+    """单任务 DB 级错误（写库抛异常）由 savepoint 隔离，不影响后续任务。
+
+    回归（P1-3）：此前整轮单事务 + per-task except 不回滚，第一个任务写库
+    抛 DB 错误后事务进入 failed 态，后续任务全部 PendingRollbackError，
+    整轮白做只落一条 failed。
+    """
+    from sqlalchemy.exc import OperationalError
+
+    collector = FakeCollector()
+    svc = _svc(collector)
+    real_process = svc.process_step
+
+    async def flaky_process(task, step, sql, config):
+        if task["task_id"] == 101:
+            raise OperationalError("stmt", {}, Exception("Deadlock"))
+        return await real_process(task, step, sql, config)
+
+    svc.process_step = flaky_process  # type: ignore[method-assign]
+    result = await svc.scan_once(_fc(collector))
+    assert result["errors"] == 1  # 仅任务 101 失败
+    assert result["scanned_tasks"] == 2  # 两个任务均进入处理
+    assert result["parsed_ok"] == 1  # 任务 102 成功入库
+    # savepoint 被使用（per-task 隔离）
+    assert svc._db.begin_nested.call_count == 2
+    # 收尾仍走成功态（未触发整轮 rollback）
+    assert svc._db.rollback.await_count == 0
+    assert svc._dp_repo.update_run_log.await_args.kwargs["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_scan_uses_configured_table_names() -> None:
+    """扫描 SQL 使用配置的 schema/task_table/step_table（不再硬编码 dp_stable）。
+
+    回归（P1-5）：此前 schema/task_table/step_table 配置只被 /meta 使用，
+    scan 始终扫写死的 dp_stable.dispatch_task。
+    """
+    collector = FakeCollector()
+    svc = _svc(
+        collector,
+        _config(
+            schema_name="other_db",
+            task_table="my_task",
+            step_table="my_step",
+        ),
+    )
+    await svc.scan_once(_fc(collector))
+    assert any("other_db.my_task" in q for q in collector.queries)
+    assert any("other_db.my_step" in q for q in collector.queries)
+    # 不再出现硬编码默认表名
+    assert not any("dp_stable.dispatch_task" in q for q in collector.queries)
+
+
+@pytest.mark.asyncio
+async def test_scan_invalid_table_name_fails_visible() -> None:
+    """非法表名标识符（注入面）→ 整轮 fail fast 记 failed，不静默扫错表。
+
+    回归（P2-9 注入面 + P1-5）：配置表名经 f-string 拼 SQL，必须白名单校验。
+    """
+    collector = FakeCollector()
+    svc = _svc(collector, _config(task_table="dispatch_task; DROP TABLE x"))
+    result = await svc.scan_once(_fc(collector))
+    assert result["skipped"] == "failed"
+    assert "合法标识符" in result["error"]

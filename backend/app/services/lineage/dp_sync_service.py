@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -95,6 +97,22 @@ def _split_table_column(name: str) -> tuple[str | None, str | None]:
     if len(parts) == 2 and parts[0] and parts[1]:
         return parts[0], parts[1]
     return (name, None) if name else (None, None)
+
+
+#: 标识符白名单（schema/表名只允许字母数字下划线——SQL 拼接防注入）。
+_IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _safe_table_name(value: str | None, field: str, default: str) -> str:
+    """配置表名/库名标识符白名单校验：非法抛 ValueError（fail fast，运维可见）。
+
+    配置值经 f-string 拼进 SQL，必须校验为合法标识符；非法时抛错由 scan_once
+    外层捕获记 failed（原因可见），不做静默回退（避免扫错表）。
+    """
+    text = (value or "").strip() or default
+    if not _IDENT_RE.match(text):
+        raise ValueError(f"{field} 不是合法标识符（仅允许字母/数字/下划线）: {text!r}")
+    return text
 
 
 def build_task_ref(task: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
@@ -584,17 +602,22 @@ class DpSyncService:
                     progress["processed"] = idx - 1
                     progress["current_task_id"] = task_id
                 try:
-                    await self._process_task(
-                        collector,
-                        config,
-                        task_id,
-                        counters,
-                        seen_pairs,
-                        cancel_event=cancel_event,
-                        force_event=force_event,
-                    )
+                    # per-task 事务隔离（savepoint）：单任务 DB 异常（唯一冲突/
+                    # DataError/断连）只回滚自身 savepoint，不再让整轮单事务进入
+                    # PendingRollbackError 导致后续任务全部失败、整轮 1000 任务
+                    # 白做。任务成功释放 savepoint，收尾统一 commit。
+                    async with self._db.begin_nested():
+                        await self._process_task(
+                            collector,
+                            config,
+                            task_id,
+                            counters,
+                            seen_pairs,
+                            cancel_event=cancel_event,
+                            force_event=force_event,
+                        )
                 except _ScanCancelledError:
-                    # 强制终止：当前任务已回滚（事务由 scan_once 收尾统一处理）
+                    # 强制终止：当前任务已随 savepoint 回滚（事务由 scan_once 收尾统一处理）
                     cancelled = True
                     break
                 except Exception as exc:  # noqa: BLE001 —— 单任务失败不阻断整轮
@@ -637,7 +660,7 @@ class DpSyncService:
                 tickets_resolved=counters["tickets_resolved"],
                 errors=counters["errors"],
                 llm_calls=counters["llm_calls"],
-                detail_json=__import__("json").dumps(detail, ensure_ascii=False),
+                detail_json=json.dumps(detail, ensure_ascii=False),
             )
             # 双轨：同步写血缘采集通道运行摘要（ingest_run），与 dp_sync_run_log 并存
             # ——采集通道视图（lineage_ingest_run）获得 dp_sql 运行历史，失效治理同机制。
@@ -685,13 +708,15 @@ class DpSyncService:
         """按 gmt_modified 水位查变更任务 id 集合（task 变更 ∪ step 变更关联任务）。
 
         首轮无水位 = 全量（活跃 type 过滤任务）。返回 (ids, task_max, step_max)。
+        表名取自配置（schema/task_table/step_table），标识符白名单校验（P1-5）。
         """
+        schema, task_table, step_table = self._table_scope(config)
         task_types, step_types = _type_filters(config)
         params: dict[str, Any] = {}
         task_clause, params = _in_clause("type", task_types, "t", params)
         task_wm = wm.last_max_update if wm is not None else None
         base = (
-            "SELECT id FROM dp_stable.dispatch_task "
+            f"SELECT id FROM {schema}.{task_table} "
             f"WHERE is_deleted=0{task_clause}"
         )
         if task_wm is not None:
@@ -705,7 +730,7 @@ class DpSyncService:
             "type", task_types, "t", task_max_params
         )
         task_rows = await collector.query(
-            "SELECT MAX(gmt_modified) AS m FROM dp_stable.dispatch_task "
+            f"SELECT MAX(gmt_modified) AS m FROM {schema}.{task_table} "
             f"WHERE is_deleted=0{task_max_clause}",
             task_max_params,
         )
@@ -719,8 +744,8 @@ class DpSyncService:
         task_join_clause, sp = _in_clause("t.type", task_types, "t", sp)
         step_clause, sp = _in_clause("st.task_step_type", step_types, "s", sp)
         step_sql = (
-            "SELECT DISTINCT st.task_id AS id FROM dp_stable.dispatch_task_step st "
-            "JOIN dp_stable.dispatch_task t ON st.task_id=t.id "
+            f"SELECT DISTINCT st.task_id AS id FROM {schema}.{step_table} st "
+            f"JOIN {schema}.{task_table} t ON st.task_id=t.id "
             f"WHERE st.is_deleted=0 AND t.is_deleted=0{task_join_clause}{step_clause}"
         )
         if step_wm is not None:
@@ -734,7 +759,7 @@ class DpSyncService:
             "task_step_type", step_types, "s", sp_max
         )
         step_max_rows = await collector.query(
-            "SELECT MAX(gmt_modified) AS m FROM dp_stable.dispatch_task_step "
+            f"SELECT MAX(gmt_modified) AS m FROM {schema}.{step_table} "
             f"WHERE is_deleted=0{step_max_clause}",
             sp_max,
         )
@@ -742,6 +767,18 @@ class DpSyncService:
             step_max_rows[0]["m"] if step_max_rows and step_max_rows[0]["m"] else step_wm
         )
         return sorted(ids), task_max, step_max
+
+    @staticmethod
+    def _table_scope(config: Any) -> tuple[str, str, str]:
+        """解析并校验扫描表名（schema/task_table/step_table，标识符白名单）。"""
+        schema = _safe_table_name(config.schema_name, "schema_name", "dp_stable")
+        task_table = _safe_table_name(
+            config.task_table, "task_table", "dispatch_task"
+        )
+        step_table = _safe_table_name(
+            config.step_table, "step_table", "dispatch_task_step"
+        )
+        return schema, task_table, step_table
 
     async def _process_task(
         self,
@@ -760,7 +797,7 @@ class DpSyncService:
         协作取消（仅 cancel_event）在 step 边界停止，不再等完整任务跑完；
         强制终止（force_event 一并置位）在检查点直接抛 ``_ScanCancelled`` 中断。
         """
-        task = await self._fetch_task(collector, task_id)
+        task = await self._fetch_task(collector, task_id, config)
         if task is None:
             return
         # 排除规则：任务名命中排除
@@ -814,14 +851,17 @@ class DpSyncService:
             (node_table(e.source), node_table(e.target)) for e in outcome.table_edges
         }
 
-    async def _fetch_task(self, collector: Any, task_id: int) -> dict[str, Any] | None:
+    async def _fetch_task(
+        self, collector: Any, task_id: int, config: Any
+    ) -> dict[str, Any] | None:
+        schema, task_table, _ = self._table_scope(config)
         rows = await collector.query(
             "SELECT id AS task_id, task_no, name AS task_name, type, out_table, "
             "director, created_user_id, modified_user_id, checker, settle_project_director, "
             "project_id, settle_project_name, settle_department_name, budget_unit_name, "
             "cycle, cron_express, week_day, month_day, specific_time, frequence, remark, "
             "task_version_desc, task_version, master_task_id, is_master_task "
-            "FROM dp_stable.dispatch_task WHERE id=:tid",
+            f"FROM {schema}.{task_table} WHERE id=:tid",
             {"tid": task_id},
         )
         return rows[0] if rows else None
@@ -829,6 +869,7 @@ class DpSyncService:
     async def _fetch_sql_steps(
         self, collector: Any, task_id: int, config: Any
     ) -> list[dict[str, Any]]:
+        schema, _, step_table = self._table_scope(config)
         _, step_types = _type_filters(config)
         params: dict[str, Any] = {"tid": task_id}
         step_clause, params = _in_clause(
@@ -837,7 +878,7 @@ class DpSyncService:
         return await collector.query(
             "SELECT id AS step_id, task_id, task_step, "
             "task_step_name AS step_name, task_step_type, task_node_type, script_info "
-            "FROM dp_stable.dispatch_task_step "
+            f"FROM {schema}.{step_table} "
             f"WHERE task_id=:tid AND is_deleted=0{step_clause} "
             "ORDER BY task_step",
             params,
@@ -893,12 +934,48 @@ class DpSyncService:
         if ticket.status == "llm_fallback":
             await self._apply_fallback_flow(ticket.llm_opinion, task, step, sql_hash)
             return
-        # diverged：先入库 sqlglot 边，再补 LLM 认为漏掉的边
+        # diverged：LLM 判定 sqlglot 部分边为错误（wrong_edges）——先剔除再入库，
+        # 再补 LLM 认为漏掉的边（missing_edges）。此前 wrong_edges 是死字段，
+        # 「采纳 LLM」与「采纳 sqlglot」实际等价，错误边从未被剔除（P1-4）。
+        sqlglot_json = self._without_wrong_edges(
+            ticket.sqlglot_result, ticket.llm_opinion
+        )
         await self._apply_json_edges(
-            ticket.sqlglot_result, task, step, sql_hash,
+            sqlglot_json, task, step, sql_hash,
             provenance="sqlglot", confidence=1.0,
         )
         await self._apply_llm_opinion(ticket.llm_opinion, task, step, sql_hash)
+
+    @staticmethod
+    def _without_wrong_edges(
+        edges_json: dict[str, Any] | None, opinion: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        """从 sqlglot 结果中剔除 LLM 判定错误的表边及其字段映射（深拷贝，不污染原单）。
+
+        wrong_edges 语义：LLM 认为 sqlglot 声称的 ``source->target`` 流转不成立
+        （来源误判/目标表错/实为过滤非流转）。采纳 LLM 即不采纳这些边。
+        """
+        if not edges_json:
+            return edges_json
+        wrong = {
+            (str(w.get("source")), str(w.get("target")))
+            for w in (opinion or {}).get("wrong_edges") or []
+            if w.get("source") and w.get("target")
+        }
+        if not wrong:
+            return edges_json
+        cleaned = json.loads(json.dumps(edges_json, ensure_ascii=False))
+        cleaned["table_edges"] = [
+            te
+            for te in cleaned.get("table_edges") or []
+            if (te.get("source"), te.get("target")) not in wrong
+        ]
+        cleaned["field_edges"] = [
+            fe
+            for fe in cleaned.get("field_edges") or []
+            if (fe.get("source_table"), fe.get("target_table")) not in wrong
+        ]
+        return cleaned
 
     async def _apply_json_edges(
         self,

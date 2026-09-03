@@ -77,7 +77,12 @@ async def test_meta_unreachable_degrades_gracefully(
     dp_client: httpx.AsyncClient,
 ) -> None:
     """配置了 dp 源但不可达：/meta 返回内置 + 明确 reason（不 500）。"""
-    cfg = SimpleNamespace(source_id="dp", schema_name="dp_stable")
+    cfg = SimpleNamespace(
+        source_id="dp",
+        schema_name="dp_stable",
+        task_table="dispatch_task",
+        step_table="dispatch_task_step",
+    )
     with (
         patch.object(
             dp_api.DpLineageRepository, "get_config", new=AsyncMock(return_value=cfg)
@@ -108,7 +113,12 @@ async def test_exclude_preview_requires_source(dp_client: httpx.AsyncClient) -> 
 
 async def test_exclude_preview_unreachable(dp_client: httpx.AsyncClient) -> None:
     """dp 源不可达：明确 SOURCE_UNREACHABLE 信号而非 500。"""
-    cfg = SimpleNamespace(source_id="dp", schema_name="dp_stable")
+    cfg = SimpleNamespace(
+        source_id="dp",
+        schema_name="dp_stable",
+        task_table="dispatch_task",
+        step_table="dispatch_task_step",
+    )
     with (
         patch.object(
             dp_api.DpLineageRepository, "get_config", new=AsyncMock(return_value=cfg)
@@ -128,7 +138,12 @@ async def test_exclude_preview_counts_and_samples(
     dp_client: httpx.AsyncClient,
 ) -> None:
     """命中统计：对 out_table 全集统计匹配表数与样例；正则非法逐条报告。"""
-    cfg = SimpleNamespace(source_id="dp", schema_name="dp_stable")
+    cfg = SimpleNamespace(
+        source_id="dp",
+        schema_name="dp_stable",
+        task_table="dispatch_task",
+        step_table="dispatch_task_step",
+    )
     collector = _FakeDpCollector(
         [{"t": "wedw_dwd.dp_out"}, {"t": "wedw_dwd.tmp_x"}, {"t": "wedw_ods.tbl_bak"}]
     )
@@ -170,3 +185,73 @@ async def _unreachable_factory(db):
         raise RuntimeError("Can't connect to dp")
 
     return fetch
+
+
+async def test_resolve_ticket_unknown_resolution_returns_validation(
+    dp_client: httpx.AsyncClient,
+) -> None:
+    """未知裁决方式（service 抛 ValueError）应返回 VALIDATION_ERROR 而非 500。
+
+    回归：此前 API 只 catch LookupError，ValueError 逃逸成 500（P0-2）。
+    """
+    from app.services.lineage import dp_sync_service as dp_svc_mod
+
+    with patch.object(
+        dp_svc_mod.DpSyncService,
+        "resolve_ticket",
+        new=AsyncMock(
+            side_effect=ValueError("未知裁决方式: nuke")
+        ),
+    ):
+        resp = await dp_client.post(
+            "/api/v1/lineage/dp-sync/tickets/1/resolve",
+            json={"resolution": "nuke"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["code"] == "VALIDATION_ERROR"
+    assert "未知裁决方式" in body["message"]
+
+
+async def test_update_config_rejects_invalid_ident(
+    dp_client: httpx.AsyncClient,
+) -> None:
+    """保存配置时非法 schema/表名标识符 → VALIDATION_ERROR（注入面防御）。
+
+    回归（P2-9）：配置表名经 f-string 拼 SQL，此前未在保存时校验。
+    """
+    cfg = SimpleNamespace(
+        source_id="dp",
+        schema_name="dp_stable",
+        task_table="dispatch_task",
+        step_table="dispatch_task_step",
+    )
+    cfg.id = 1
+    cfg.to_dict = lambda: {"source_id": "dp"}
+    with patch.object(
+        dp_api.DpLineageRepository,
+        "get_config",
+        new=AsyncMock(side_effect=[cfg, cfg]),
+    ):
+        resp = await dp_client.put(
+            "/api/v1/lineage/dp-sync/config",
+            json={"task_table": "dispatch_task; DROP TABLE x"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["code"] == "VALIDATION_ERROR"
+    assert "合法标识符" in body["message"]
+
+
+async def test_exclude_preview_rejects_invalid_schema(
+    dp_client: httpx.AsyncClient,
+) -> None:
+    """排除预览非法 schema → VALIDATION_ERROR（不拼进 SQL）。"""
+    resp = await dp_client.post(
+        "/api/v1/lineage/dp-sync/exclude-preview",
+        json={"source_id": "dp", "schema_name": "dp_stable; DROP", "patterns": ["tmp"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["code"] == "VALIDATION_ERROR"
+    assert "合法标识符" in body["message"]
