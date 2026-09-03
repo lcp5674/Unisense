@@ -90,6 +90,11 @@ _SWAGGER_DEFAULTS: dict[str, object] = {
     "persistAuthorization": True,
     "displayRequestDuration": True,
     "syntaxHighlight": {"theme": "obsidian"},
+    # 禁用外部 validator（validator.swagger.io）：① 内网/生产无法访问外网，页面右上角
+    # validator 徽章会因 CSP img-src 'self' data: 被拦而报错；② 避免把内网 openapi.json
+    # 提交给第三方公网服务。设为空串 = 不显示校验徽章、不发起任何 validator 请求
+    # （文档自托管离线设计本就不依赖外部服务，validator 是唯一残留外呼）。
+    "validatorUrl": "",
 }
 
 # OpenAPI 顶层 tags（中文分组名 x-displayName + 分组描述）——供 Swagger UI 左侧分组展示

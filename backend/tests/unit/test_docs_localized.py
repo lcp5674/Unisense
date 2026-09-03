@@ -38,6 +38,10 @@ def test_swagger_ui_html_uses_only_local_assets() -> None:
     assert "/static/swagger-ui/custom.css" in html
     # 初始化配置经 meta 注入（由 swagger-init.js 读取）
     assert 'name="swagger-config"' in html
+    # 禁用外部 validator：validatorUrl 为空串——内网/生产不发起 validator.swagger.io
+    # 请求（避免 CSP img-src 拦截报错 + 不把内网 openapi.json 提交第三方公网）
+    assert '"validatorUrl": ""' in html
+    assert "validator.swagger.io" not in html
     # 无 inline script（CSP script-src 'self' 无需 'unsafe-inline'）
     scripts = re.findall(r"<script[^>]*>", html)
     assert scripts, "应存在脚本标签"
