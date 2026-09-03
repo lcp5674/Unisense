@@ -391,6 +391,7 @@ export function SystemConfig() {
     form.setFieldsValue({
       provider: "custom",
       timeout: 30,
+      max_tokens: 2048,
       enabled: true,
       priority: 0,
       disable_thinking: false,
@@ -411,6 +412,7 @@ export function SystemConfig() {
       base_url: item.base_url,
       model: item.model,
       timeout: item.timeout,
+      max_tokens: item.max_tokens ?? 2048,
       enabled: item.enabled,
       priority: item.priority,
       disable_thinking: item.disable_thinking,
@@ -480,6 +482,7 @@ export function SystemConfig() {
         model: values.model,
         api_key: values.api_key || "",
         timeout: values.timeout,
+        max_tokens: values.max_tokens ?? 2048,
         enabled: values.enabled,
         priority: values.priority ?? 0,
         disable_thinking: values.disable_thinking ?? false,
@@ -605,6 +608,7 @@ export function SystemConfig() {
       model: item.model,
       api_key: "",
       timeout: item.timeout,
+      max_tokens: item.max_tokens ?? 2048,
       enabled: item.enabled,
       priority: item.priority,
       disable_thinking: item.disable_thinking,
@@ -1155,6 +1159,15 @@ export function SystemConfig() {
               style={{ marginBottom: 12 }}
             >
               <InputNumber min={1} max={900} />
+            </Form.Item>
+            <Form.Item
+              name="max_tokens"
+              label="最大生成长度"
+              tooltip="单次请求最大生成长度（max_tokens）上限：实际请求取 min(场景需要, 此处配置)。CPU 推理等生成慢的实例可适当下调，防止超长生成拖慢/超时；默认 2048"
+              rules={[{ required: true, message: "请输入最大生成长度" }]}
+              style={{ marginBottom: 12 }}
+            >
+              <InputNumber min={1} max={32768} style={{ width: 140 }} aria-label="最大生成长度" />
             </Form.Item>
             <Form.Item
               name="priority"

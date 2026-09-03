@@ -52,6 +52,12 @@ class LlmConfig(Base, BaseModel):
     timeout: Mapped[int] = mapped_column(
         Integer, nullable=False, default=30, comment="请求超时秒数"
     )
+    max_tokens: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=2048,
+        comment="单次请求最大生成长度上限（实际请求取 min(场景值, 实例上限)）",
+    )
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, comment="是否启用该配置"
     )

@@ -29,6 +29,12 @@ class LlmConfigPayload(BaseModel):
         le=900,
         description="请求超时秒数（CPU 推理单请求可达数分钟，上限 900s）",
     )
+    max_tokens: int = Field(
+        2048,
+        ge=1,
+        le=32768,
+        description="单次请求最大生成长度上限（实际请求取 min(场景值, 实例上限)）",
+    )
     enabled: bool = Field(False, description="是否启用该实例（仅启用参与路由）")
     priority: int = Field(0, ge=0, le=100, description="路由优先级（小者优先，0 最高）")
     disable_thinking: bool = Field(
@@ -54,6 +60,7 @@ class LlmConfigResponse(BaseModel):
     model: str = ""
     has_api_key: bool = False
     timeout: int = 30
+    max_tokens: int = 2048
     enabled: bool = False
     priority: int = 0
     disable_thinking: bool = False
@@ -73,6 +80,7 @@ class LlmConfigResponse(BaseModel):
         model: str = "",
         has_api_key: bool = False,
         timeout: int = 30,
+        max_tokens: int = 2048,
         enabled: bool = False,
         priority: int = 0,
         disable_thinking: bool = False,
@@ -89,6 +97,7 @@ class LlmConfigResponse(BaseModel):
             model=model,
             has_api_key=has_api_key,
             timeout=timeout,
+            max_tokens=max_tokens,
             enabled=enabled,
             priority=priority,
             disable_thinking=disable_thinking,

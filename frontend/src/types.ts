@@ -2022,6 +2022,8 @@ export interface LlmConfigItem {
   model: string;
   has_api_key: boolean;
   timeout: number;
+  /** 单次请求最大生成长度上限（实际请求取 min(场景值, 实例上限)） */
+  max_tokens: number;
   enabled: boolean;
   priority: number;
   disable_thinking: boolean;
@@ -2050,6 +2052,8 @@ export interface LlmConfigPayload {
   model: string;
   api_key?: string;
   timeout: number;
+  /** 单次请求最大生成长度上限（实际请求取 min(场景值, 实例上限)） */
+  max_tokens: number;
   enabled: boolean;
   priority: number;
   disable_thinking: boolean;

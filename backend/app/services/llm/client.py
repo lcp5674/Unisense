@@ -182,6 +182,7 @@ class LlmClient:
         api_key: str | None = None,
         model: str | None = None,
         timeout: float = 30.0,
+        max_tokens: int | None = None,
         breaker: Any | None = None,
         name: str = "llm",
         disable_thinking: bool = False,
@@ -190,6 +191,10 @@ class LlmClient:
         self._api_key = api_key or settings.llm_api_key
         self._model = model or settings.llm_default_model
         self._timeout = timeout
+        # 实例级「单次请求最大生成长度上限」（可视化配置）：None=不限制（用调用方
+        # 场景值）；配置后实际请求取 min(调用方场景值, 实例上限)——CPU 推理部署
+        # 可下调上限控制生成规模/耗时，防止思考模型超长生成拖死/超时。
+        self._max_tokens = max_tokens
         self._name = name
         # 关闭思考模式（本地 Qwen3/DeepSeek-R1 等默认输出 <think> 推理）：为 True 时
         # 请求体附加 chat_template_kwargs={"enable_thinking": False}，从模板层关闭思考，
@@ -260,12 +265,16 @@ class LlmClient:
         # 显式 {"type": "text"} 时原样传给网关（自由文本输出，避免纯文本 prompt
         # 被 json_object 约束污染为空 JSON）。实例返回空 content 由路由层 failover 兜底。
         effective_format = response_format or {"type": "json_object"}
+        # 实例级 max_tokens 上限钳制：实际生成上限 = min(调用方场景值, 实例上限)。
+        effective_max_tokens = (
+            min(max_tokens, self._max_tokens) if self._max_tokens else max_tokens
+        )
 
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_tokens": effective_max_tokens,
             "response_format": effective_format,
             # 显式声明非流式（方案 1）：部分网关缺省流式或对省略 stream 字段的请求以
             # SSE 流式响应，正文（data: {...} 信封帧）被当非流式 JSON 解析即产生

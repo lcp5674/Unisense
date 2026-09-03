@@ -41,6 +41,7 @@ def _row(**overrides: object) -> MagicMock:
         "model": "deepseek-chat",
         "api_key_enc": SecretManager.encrypt({"api_key": "sk-test"}),
         "timeout": 30,
+        "max_tokens": 2048,
         "enabled": True,
         "priority": 0,
         "updated_by": 1,

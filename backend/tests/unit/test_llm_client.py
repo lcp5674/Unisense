@@ -322,6 +322,50 @@ class TestLlmClient:
         assert "chat_template_kwargs" not in payload
 
     @pytest.mark.asyncio
+    async def test_chat_instance_max_tokens_caps_request(self) -> None:
+        """实例级 max_tokens 上限钳制：实际请求取 min(场景值, 实例上限)。
+
+        实例 max_tokens=1024（CPU 推理下调生成上限）→ 调用方场景值 2048 被钳到
+        1024；场景值 500（未超上限）保持 500；未配置上限（None）时用场景值。
+        """
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.headers = {"content-type": "application/json"}
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "ok", "finish_reason": "stop"}}],
+            "model": "test-model",
+        }
+
+        # 场景值 2048 > 实例上限 1024 → 钳到 1024
+        client = LlmClient(
+            base_url="https://api.example.com", api_key="test-key", max_tokens=1024
+        )
+        client._client = MagicMock()
+        client._client.post = AsyncMock(return_value=mock_response)
+        await client.chat([{"role": "user", "content": "Hi"}], max_tokens=2048)
+        payload = client._client.post.call_args[1]["json"]
+        assert payload["max_tokens"] == 1024
+
+        # 场景值 500 未超上限 → 保持 500
+        client2 = LlmClient(
+            base_url="https://api.example.com", api_key="test-key", max_tokens=1024
+        )
+        client2._client = MagicMock()
+        client2._client.post = AsyncMock(return_value=mock_response)
+        await client2.chat([{"role": "user", "content": "Hi"}], max_tokens=500)
+        payload2 = client2._client.post.call_args[1]["json"]
+        assert payload2["max_tokens"] == 500
+
+        # 未配置上限（None=env 兜底/直接构建）→ 场景值原样
+        client3 = LlmClient(base_url="https://api.example.com", api_key="test-key")
+        client3._client = MagicMock()
+        client3._client.post = AsyncMock(return_value=mock_response)
+        await client3.chat([{"role": "user", "content": "Hi"}], max_tokens=2048)
+        payload3 = client3._client.post.call_args[1]["json"]
+        assert payload3["max_tokens"] == 2048
+
+    @pytest.mark.asyncio
     async def test_chat_sse_response_aggregates_delta(self) -> None:
         """方案 2：网关返回 text/event-stream 时，逐帧聚合 delta 而非把信封原文当 content。"""
         client = LlmClient(base_url="https://api.example.com", api_key="test-key")

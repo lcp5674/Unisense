@@ -79,6 +79,7 @@ const PRIMARY_ITEM = {
   model: "deepseek-chat",
   has_api_key: true,
   timeout: 30,
+  max_tokens: 2048,
   enabled: true,
   priority: 0,
   disable_thinking: false,
@@ -220,6 +221,35 @@ describe("SystemConfig LLM 路由配置", () => {
           base_url: "http://host.docker.internal:8082",
           model: "qwen3-30b-a3b",
           disable_thinking: true,
+        }),
+      );
+    });
+  });
+
+  it("新增实例：配置最大生成长度（max_tokens）→ 保存 payload 透传", async () => {
+    mockCreate.mockResolvedValue({ id: 2 });
+    render(<SystemConfig />, { wrapper: MemoryRouter });
+    fireEvent.click(await screen.findByText("新增 LLM 实例"));
+    // 默认新增弹窗 max_tokens 预置 2048
+    const mt = await screen.findByRole("spinbutton", { name: "最大生成长度" });
+    expect((mt as HTMLInputElement).value).toBe("2048");
+    // 改为 1024（CPU 推理下调生成上限场景）
+    fireEvent.change(mt, { target: { value: "1024" } });
+    fireEvent.change(screen.getByPlaceholderText("https://api.deepseek.com"), {
+      target: { value: "http://host.docker.internal:8082" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "模型名称" }), {
+      target: { value: "qwen3-30b-a3b" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("sk-..."), {
+      target: { value: "local" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => {
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          max_tokens: 1024,
+          model: "qwen3-30b-a3b",
         }),
       );
     });

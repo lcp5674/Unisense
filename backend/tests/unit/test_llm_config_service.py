@@ -168,6 +168,29 @@ class TestCreateUpdateDelete:
         assert isinstance(added, LlmConfig)
         assert added.disable_thinking is True
 
+    async def test_create_persists_max_tokens(self) -> None:
+        """create 把 max_tokens（实例生成上限）写入实例；缺省默认 2048。"""
+        s = _session([])
+        payload = LlmConfigPayload(
+            name="CPU 推理",
+            provider="custom",
+            base_url="http://host.docker.internal:8082",
+            model="qwen3-30b-a3b",
+            api_key="local",
+            timeout=900,
+            enabled=True,
+            max_tokens=1024,
+        )
+        await LlmConfigService(s).create(payload, updated_by=7)
+        added = s.add.call_args[0][0]
+        assert isinstance(added, LlmConfig)
+        assert added.max_tokens == 1024
+        # 未显式传 max_tokens → schema 默认 2048
+        payload_default = LlmConfigPayload(
+            name="默认", base_url="https://a.com", model="m", api_key="k"
+        )
+        assert payload_default.max_tokens == 2048
+
     async def test_update_persists_disable_thinking(self) -> None:
         """update 更新 disable_thinking 开关（编辑开启/关闭思考模式生效）。"""
         s = _session()
@@ -185,6 +208,24 @@ class TestCreateUpdateDelete:
         )
         await LlmConfigService(s).update(1, payload, updated_by=2)
         assert existing.disable_thinking is True
+
+    async def test_update_persists_max_tokens(self) -> None:
+        """update 更新 max_tokens（编辑实例生成上限生效）。"""
+        s = _session()
+        existing = _row()
+        s.execute.return_value.scalar_one_or_none.return_value = existing
+        payload = LlmConfigPayload(
+            name="改",
+            provider="custom",
+            base_url="https://new.example.com",
+            model="m1",
+            api_key="",
+            timeout=30,
+            enabled=True,
+            max_tokens=512,
+        )
+        await LlmConfigService(s).update(1, payload, updated_by=2)
+        assert existing.max_tokens == 512
 
     async def test_update_keeps_key_when_payload_empty(self) -> None:
         s = _session()
@@ -299,6 +340,18 @@ class TestBuildClient:
 
         assert isinstance(client, LlmClient)
         assert client._disable_thinking is True
+
+    async def test_build_single_client_passes_max_tokens(self) -> None:
+        """build_client 把实例 max_tokens 透传给 LlmClient（chat 钳制生成上限）。"""
+        s = _session([_row(max_tokens=1024)])
+        with patch("app.services.llm.config_service.settings") as ms:
+            ms.llm_base_url = ""
+            ms.llm_api_key = ""
+            client = await LlmConfigService(s).build_client()
+        from app.services.llm.client import LlmClient
+
+        assert isinstance(client, LlmClient)
+        assert client._max_tokens == 1024
 
     async def test_build_fallback_when_no_config(self) -> None:
         s = _session([])

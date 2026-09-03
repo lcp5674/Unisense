@@ -188,6 +188,7 @@ class LlmConfigService:
                     "model": row.model,
                     "api_key": api_key,
                     "timeout": row.timeout or 30,
+                    "max_tokens": row.max_tokens or 2048,
                     "disable_thinking": bool(row.disable_thinking),
                     "source": "db",
                     "instance_id": row.id,
@@ -202,6 +203,7 @@ class LlmConfigService:
                 "model": settings.llm_default_model,
                 "api_key": settings.llm_api_key,
                 "timeout": 30,
+                "max_tokens": 2048,
                 "disable_thinking": False,
                 "source": "env",
                 "instance_id": None,
@@ -215,6 +217,7 @@ class LlmConfigService:
             "model": "",
             "api_key": "",
             "timeout": 30,
+            "max_tokens": 2048,
             "disable_thinking": False,
             "source": "none",
             "instance_id": None,
@@ -250,6 +253,7 @@ class LlmConfigService:
             model=payload.model,
             api_key_enc="",
             timeout=payload.timeout,
+            max_tokens=payload.max_tokens,
             enabled=payload.enabled,
             priority=payload.priority,
             disable_thinking=payload.disable_thinking,
@@ -275,6 +279,7 @@ class LlmConfigService:
         row.base_url = normalize_base_url(payload.base_url)
         row.model = payload.model
         row.timeout = payload.timeout
+        row.max_tokens = payload.max_tokens
         row.enabled = payload.enabled
         row.priority = payload.priority
         row.disable_thinking = payload.disable_thinking
@@ -326,6 +331,7 @@ class LlmConfigService:
                     api_key=api_key,
                     model=row.model or "deepseek-chat",
                     timeout=float(row.timeout or 30),
+                    max_tokens=int(row.max_tokens or 2048),
                     breaker=breaker,
                     name=row.name or f"llm-{row.id}",
                     disable_thinking=bool(row.disable_thinking),

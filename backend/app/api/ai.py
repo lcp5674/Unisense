@@ -126,6 +126,7 @@ async def get_llm_config(
             model=row.model,
             has_api_key=bool(row.api_key_enc),
             timeout=row.timeout or 30,
+            max_tokens=row.max_tokens or 2048,
             enabled=row.enabled,
             priority=row.priority or 0,
             disable_thinking=bool(row.disable_thinking),
