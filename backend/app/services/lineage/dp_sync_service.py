@@ -248,6 +248,7 @@ class DpSyncService:
                 step_id=step.get("step_id"),
                 task_name=task.get("task_name"),
                 out_table=task.get("out_table"),
+                task_refs=build_task_ref(task, step),
                 sql_text=sql,
                 sql_hash=sql_hash,
                 status="diverged",
@@ -265,6 +266,7 @@ class DpSyncService:
                 step_id=step.get("step_id"),
                 task_name=task.get("task_name"),
                 out_table=task.get("out_table"),
+                task_refs=build_task_ref(task, step),
                 sql_text=sql,
                 sql_hash=sql_hash,
                 status="diverged",
@@ -283,6 +285,7 @@ class DpSyncService:
             step_id=step.get("step_id"),
             task_name=task.get("task_name"),
             out_table=task.get("out_table"),
+            task_refs=build_task_ref(task, step),
             sql_text=sql,
             sql_hash=sql_hash,
             status="diverged",
@@ -314,6 +317,7 @@ class DpSyncService:
                 step_id=step.get("step_id"),
                 task_name=task.get("task_name"),
                 out_table=task.get("out_table"),
+                task_refs=build_task_ref(task, step),
                 sql_text=sql,
                 sql_hash=sql_hash,
                 status="unparseable",
@@ -330,6 +334,7 @@ class DpSyncService:
                 step_id=step.get("step_id"),
                 task_name=task.get("task_name"),
                 out_table=task.get("out_table"),
+                task_refs=build_task_ref(task, step),
                 sql_text=sql,
                 sql_hash=sql_hash,
                 status="unparseable",
@@ -343,6 +348,7 @@ class DpSyncService:
                 step_id=step.get("step_id"),
                 task_name=task.get("task_name"),
                 out_table=task.get("out_table"),
+                task_refs=build_task_ref(task, step),
                 sql_text=sql,
                 sql_hash=sql_hash,
                 status="llm_fallback",
@@ -361,6 +367,7 @@ class DpSyncService:
             step_id=step.get("step_id"),
             task_name=task.get("task_name"),
             out_table=task.get("out_table"),
+            task_refs=build_task_ref(task, step),
             sql_text=sql,
             sql_hash=sql_hash,
             status="unparseable",
@@ -921,6 +928,32 @@ class DpSyncService:
         )
 
     # ---- 待抉择裁决（D9 人工抉择工作台） ----
+    @staticmethod
+    def _restore_task_step(ticket: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        """从 ticket.task_refs_json 快照还原完整 task/step（无快照回退 id 三字段）。
+
+        快照为 build_task_ref 产物：task 字段（task_id/task_no/task_name/out_table/
+        director/cycle/…）+ step 字段（step_id/step_name/task_node_type/task_step）。
+        """
+        step_keys = {"step_id", "step_name", "task_node_type", "task_step"}
+        ref = getattr(ticket, "task_refs_json", None)
+        if isinstance(ref, dict) and ref:
+            step = {k: v for k, v in ref.items() if k in step_keys}
+            task = {k: v for k, v in ref.items() if k not in step_keys}
+            step.setdefault("step_id", ticket.step_id)
+            task.setdefault("task_id", ticket.task_id)
+            task.setdefault("task_name", ticket.task_name)
+            task.setdefault("out_table", ticket.out_table)
+            return task, step
+        return (
+            {
+                "task_id": ticket.task_id,
+                "task_name": ticket.task_name,
+                "out_table": ticket.out_table,
+            },
+            {"step_id": ticket.step_id},
+        )
+
     async def resolve_ticket(
         self,
         ticket_id: int,
@@ -936,12 +969,10 @@ class DpSyncService:
         ticket = await self._dp_repo.get_ticket(ticket_id)
         if ticket is None:
             raise LookupError(f"待抉择单不存在: {ticket_id}")
-        task = {
-            "task_id": ticket.task_id,
-            "task_name": ticket.task_name,
-            "out_table": ticket.out_table,
-        }
-        step = {"step_id": ticket.step_id}
+        # 用建单时快照还原完整 task/step（含 director/cycle 等准静态元数据），
+        # 使 build_task_ref 产出完整 dp_task_refs——此前只用 id/name/out_table，
+        # 责任人快照在裁决入库时丢失（P2-9 #12）。
+        task, step = self._restore_task_step(ticket)
         sql_hash = ticket.sql_hash
         if resolution == "accept_sqlglot":
             await self._apply_json_edges(

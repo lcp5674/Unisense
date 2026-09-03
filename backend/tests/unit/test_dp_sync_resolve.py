@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -221,3 +220,43 @@ async def test_resolve_accept_llm_no_wrong_keeps_all_sqlglot() -> None:
     upserts = svc._lineage_repo.upsert_edge_with_status.await_args_list
     assert len(upserts) == 1
     assert upserts[0].kwargs["source_node"] == "table:wedw_ods.a"
+
+
+@pytest.mark.asyncio
+async def test_resolve_restores_full_task_refs_from_snapshot() -> None:
+    """裁决时从 task_refs_json 快照还原完整任务元数据（director 等入 dp_task_refs）。
+
+    回归（P2-9 #12）：此前 resolve 只用 id/name/out_table 构造 task/step，
+    build_task_ref 产出的 ref 缺 director/cycle——责任人快照在裁决入库时丢失。
+    """
+    t = _ticket(
+        task_refs_json={
+            "task_id": 1386,
+            "task_no": "T1386",
+            "task_name": "任务",
+            "out_table": "wedw_dwd.dp_out",
+            "director": "shifeng",
+            "cycle": "day",
+            "step_id": 5012,
+            "step_name": "SQL节点",
+            "task_step": 1,
+            "task_node_type": 2,
+        }
+    )
+    svc = _svc(t)
+    # 捕获实际写入边的 dp_task_refs（共享 edge 对象回写）
+    captured: dict[str, int] = {"calls": 0}
+    edge = MagicMock()
+    edge.id = 100
+    edge.dp_task_refs = None
+
+    async def _fake_upsert(**kw):
+        captured["calls"] += 1
+        return edge, False
+
+    svc._lineage_repo.upsert_edge_with_status = AsyncMock(side_effect=_fake_upsert)
+    await svc.resolve_ticket(1, resolution="accept_sqlglot", resolved_by=3)
+    assert captured["calls"] == 1
+    assert '"director": "shifeng"' in edge.dp_task_refs
+    assert '"task_no": "T1386"' in edge.dp_task_refs
+    assert '"cycle": "day"' in edge.dp_task_refs

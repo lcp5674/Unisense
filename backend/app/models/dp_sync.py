@@ -360,6 +360,12 @@ class DpResolutionTicket(Base, BaseModel):
         default=None,
         comment="手动配置的边/字段映射（manual 时）",
     )
+    task_refs_json: Mapped[dict | None] = mapped_column(
+        JSON,
+        nullable=True,
+        default=None,
+        comment="建单时任务/节点静态身份快照（build_task_ref 产物，裁决入库时还原完整元数据）",
+    )
     resolved_by: Mapped[int | None] = mapped_column(
         BigInteger,
         nullable=True,
