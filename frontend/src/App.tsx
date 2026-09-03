@@ -31,6 +31,7 @@ const SqlInferEval = lazyNamed(() => import("./pages/SqlInferEval"), "SqlInferEv
 const ApprovalCenter = lazyNamed(() => import("./pages/ApprovalCenter"), "ApprovalCenter");
 const TodoCenter = lazyNamed(() => import("./pages/TodoCenter"), "TodoCenter");
 const LineageView = lazyNamed(() => import("./pages/LineageView"), "LineageView");
+const LineageDpSync = lazyNamed(() => import("./pages/LineageDpSync"), "LineageDpSync");
 const Favorites = lazyNamed(() => import("./pages/Favorites"), "Favorites");
 const Dashboard = lazyNamed(() => import("./pages/Dashboard"), "Dashboard");
 const ConsumptionGuide = lazyNamed(() => import("./pages/ConsumptionGuide"), "ConsumptionGuide");
@@ -428,6 +429,7 @@ function App() {
               <Route path="/favorites" element={<RequirePerm perm={ROUTE_PERM["/favorites"]}><Favorites /></RequirePerm>} />
               <Route path="/assetmap" element={<RequirePerm perm={ROUTE_PERM["/assetmap"]}><AssetMap /></RequirePerm>} />
               <Route path="/lineage" element={<RequirePerm perm={ROUTE_PERM["/lineage"]}><LineageView /></RequirePerm>} />
+              <Route path="/lineage/dp-sync" element={<RequirePerm perm={ROUTE_PERM["/lineage/dp-sync"]}><LineageDpSync /></RequirePerm>} />
               <Route path="/review" element={<Navigate to="/approval?tab=conflict" replace />} />
               <Route path="/quality" element={<RequirePerm perm={ROUTE_PERM["/quality"]}><QualityCenter /></RequirePerm>} />
               <Route path="/dimensions" element={<RequirePerm perm={ROUTE_PERM["/dimensions"]}><Dimensions /></RequirePerm>} />

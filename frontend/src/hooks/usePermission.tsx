@@ -156,6 +156,7 @@ export const ROUTE_PERM: Record<string, string> = {
   "/master-data/review": "master-data:review",
   "/assetmap": "assetmap:view",
   "/lineage": "lineage:view",
+  "/lineage/dp-sync": "lineage:sync",
   "/review": "review:view",
   "/quality": "quality:view",
   "/dimensions": "dimensions:view",

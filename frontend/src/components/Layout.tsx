@@ -9,6 +9,7 @@ import {
   AuditOutlined,
   CheckSquareOutlined,
   ApartmentOutlined,
+  SyncOutlined,
   HeartOutlined,
   DashboardOutlined,
   LogoutOutlined,
@@ -122,6 +123,7 @@ export const NAV_GROUPS: Array<{ label: string; children: Array<{ key: string; l
     children: [
       { key: "/assetmap", label: "资产地图", icon: <GlobalOutlined /> },
       { key: "/lineage", label: "血缘视图", icon: <ApartmentOutlined /> },
+      { key: "/lineage/dp-sync", label: "dp 血缘同步", icon: <SyncOutlined /> },
     ],
   },
   {

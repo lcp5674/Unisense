@@ -3568,3 +3568,70 @@ export interface MetricConsistencyStats {
   /** 已解决冲突的平均解决时长（小时） */
   avg_resolve_hours: number;
 }
+
+
+// ==================== dp 调度血缘同步 ====================
+export interface DpSyncConfig {
+  id?: number;
+  enabled: boolean;
+  source_id: string;
+  schema_name?: string;
+  task_table?: string;
+  step_table?: string;
+  poll_interval_minutes: number;
+  task_type_filter?: number[];
+  step_type_filter?: number[];
+  exclude_task_patterns?: string[];
+  exclude_table_patterns?: string[];
+  llm_enabled: boolean;
+  llm_complexity_rules?: Record<string, unknown>;
+  llm_model?: string | null;
+  resolve_memory_enabled: boolean;
+  owner_backfill: "orphan_only" | "never";
+  updated_by?: number | null;
+  updated_at?: string;
+}
+
+export interface DpTicket {
+  id: number;
+  task_id: number;
+  step_id: number;
+  task_name?: string | null;
+  out_table?: string | null;
+  sql_hash: string;
+  status: "diverged" | "llm_fallback" | "unparseable" | "pending" | "resolved" | "ignored";
+  resolution?: string | null;
+  divergence_reason?: string | null;
+  resolved_by?: number | null;
+  resolved_at?: string | null;
+  created_at?: string;
+  sql_text?: string;
+  sqlglot_result?: { table_edges?: { source: string; target: string }[]; field_edges?: unknown[] } | null;
+  llm_opinion?: Record<string, unknown> | null;
+}
+
+export interface DpSyncRun {
+  id: number;
+  run_at: string;
+  status: "running" | "success" | "failed";
+  scanned_tasks: number;
+  scanned_steps: number;
+  parsed_ok: number;
+  llm_confirmed: number;
+  diverged: number;
+  llm_fallback: number;
+  unparseable: number;
+  tickets_created: number;
+  tickets_resolved: number;
+  errors: number;
+  llm_calls: number;
+  duration_ms: number;
+  error?: string | null;
+  detail?: Record<string, unknown> | null;
+}
+
+export interface DpSyncWatermarkInfo {
+  last_max_update?: string | null;
+  last_scan_at?: string | null;
+  last_full_scan_at?: string | null;
+}
