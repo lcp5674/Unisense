@@ -87,6 +87,38 @@ function generateStrongPassword(length = 16): string {
   return chars.join("");
 }
 
+/** 复制文本到剪贴板（异步安全）。
+ *
+ * 优先 navigator.clipboard（仅 HTTPS/localhost 安全上下文可用）；生产内网常为
+ * http://IP 非安全上下文，clipboard API 不存在 → 回退临时 textarea + execCommand。
+ * 返回是否成功，供调用方决定提示文案（避免「谎报已复制」）。
+ */
+async function copyText(text: string): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // 权限拒绝等 → 落到 execCommand 兜底
+    }
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.top = "-9999px";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch {
+    ok = false;
+  }
+  document.body.removeChild(ta);
+  return ok;
+}
+
 const STATUS_LABEL: Record<string, { text: string; color: string }> = {
   active: { text: "启用", color: "success" },
   disabled: { text: "禁用", color: "error" },
@@ -819,9 +851,10 @@ export function UserManagement() {
             key="copy"
             type="primary"
             icon={<CopyOutlined />}
-            onClick={() => {
-              navigator.clipboard?.writeText(resetResult?.password ?? "");
-              message.success("新密码已复制");
+            onClick={async () => {
+              const ok = await copyText(resetResult?.password ?? "");
+              if (ok) message.success("新密码已复制");
+              else message.error("复制失败：当前为非安全上下文，请手动选中上方密码复制");
             }}
           >
             复制密码
@@ -861,9 +894,10 @@ export function UserManagement() {
             key="copy"
             type="primary"
             icon={<CopyOutlined />}
-            onClick={() => {
-              navigator.clipboard?.writeText(createdResult?.password ?? "");
-              message.success("初始密码已复制");
+            onClick={async () => {
+              const ok = await copyText(createdResult?.password ?? "");
+              if (ok) message.success("初始密码已复制");
+              else message.error("复制失败：当前为非安全上下文，请手动选中上方密码复制");
             }}
           >
             复制密码
