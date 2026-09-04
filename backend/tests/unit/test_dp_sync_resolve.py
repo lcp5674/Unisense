@@ -465,3 +465,56 @@ async def test_retry_llm_error_counts_failed_keeps_open() -> None:
     assert counters["auto_resolved"] == 0
     svc._dp_repo.resolve_ticket.assert_not_awaited()
     svc._dp_repo.update_ticket_llm.assert_not_awaited()
+
+
+# ==================== 异步任务化（_retry_one_ticket / collect） ====================
+
+
+@pytest.mark.asyncio
+async def test_retry_one_ticket_returns_action_detail() -> None:
+    """单张处置方法（任务逐单复用）返回 (action, detail, err) 三元组——异步任务
+    据此写逐张进度，不依赖同步方法内部计数（方案 A 复用正确性）。"""
+    t = _ticket(status="diverged")
+    t.divergence_reason = "LLM 确认输出异常：LLM 返回空内容"
+    svc = _retry_svc(t, {"content": '{"agree": true, "reason": "ok"}'})
+    action, detail, err = await svc._retry_one_ticket(t, resolved_by=0)
+    assert action == "auto_resolved"
+    assert detail["ticket_id"] == t.id
+    assert detail["action"] == "auto_resolved"
+    assert detail["task_name"] == t.task_name
+    assert detail["out_table"] == t.out_table
+    assert "采纳" in detail["reason"]
+    assert err is None
+
+
+@pytest.mark.asyncio
+async def test_retry_one_ticket_failed_returns_error_text() -> None:
+    """LLM 异常单张处置返回 failed + err（不抛出，任务不因单张崩）。"""
+    t = _ticket(status="diverged")
+    t.divergence_reason = "LLM 已关闭（配置），复杂节点未确认，请人工抉择"
+    svc = _retry_svc(t, {"content": ""})  # 空 content → DpSyncLlmError
+    action, detail, err = await svc._retry_one_ticket(t, resolved_by=0)
+    assert action == "failed"
+    assert detail["action"] == "failed"
+    assert err is not None and f"#{t.id}" in err
+
+
+@pytest.mark.asyncio
+async def test_collect_retry_candidates_snapshot() -> None:
+    """候选收集：repo 返回模型 → 任务快照 dict（供 tickets_json 落库）。"""
+    t1 = _ticket(id=21, status="llm_fallback", task_name="t_a", out_table="db.o1")
+    t2 = _ticket(id=22, status="diverged", task_name="t_b", out_table="db.o2")
+    svc = DpSyncService.__new__(DpSyncService)
+    svc._dp_repo = MagicMock()
+    svc._dp_repo.list_retryable_llm_tickets = AsyncMock(return_value=[t1, t2])
+    shots = await svc.collect_retry_candidates()
+    assert len(shots) == 2
+    assert shots[0] == {
+        "ticket_id": 21,
+        "task_name": "t_a",
+        "out_table": "db.o1",
+        "status": "llm_fallback",
+    }
+    svc._dp_repo.list_retryable_llm_tickets.assert_awaited_once_with(
+        limit=500, ticket_ids=None
+    )

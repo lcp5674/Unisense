@@ -6124,3 +6124,66 @@ export async function retryDpSyncLlm(body?: {
     body: JSON.stringify(body ?? {}),
   });
 }
+
+// ---- dp 待抉择单 LLM 重试后台任务（异步任务中心） ----
+
+export interface DpTicketRetryTaskProgressItem {
+  ticket_id: number;
+  task_name: string;
+  out_table: string;
+  status: "pending" | "running" | "done" | "error" | "cancelled";
+  action?: string | null;
+  summary: string;
+  detail?: string;
+}
+
+export interface DpTicketRetryTask {
+  id: number;
+  actor_id: number | null;
+  actor_name: string | null;
+  status: "pending" | "running" | "completed" | "cancelled" | "failed";
+  total: number;
+  done: number;
+  failed: number;
+  cancelled: number;
+  counts: { auto_resolved: number; refreshed: number; kept: number; failed: number };
+  progress: DpTicketRetryTaskProgressItem[];
+  cancel_requested: boolean;
+  error?: string | null;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+/** 提交 dp 待抉择单 LLM 重试后台任务（无候选返回 task: null）。 */
+export async function createDpRetryTask(body?: {
+  ticket_ids?: number[];
+}): Promise<{ task: DpTicketRetryTask | null }> {
+  return request<{ task: DpTicketRetryTask | null }>(
+    `${API_BASE}/lineage/dp-sync/tickets/retry-llm/async`,
+    { method: "POST", body: JSON.stringify(body ?? {}) },
+  );
+}
+
+/** dp 重试任务列表（含进行中与最近历史；本人可见）。 */
+export async function listDpRetryTasks(limit = 30): Promise<DpTicketRetryTask[]> {
+  const qs = pageQs({ limit });
+  return request<DpTicketRetryTask[]>(
+    `${API_BASE}/lineage/dp-sync/tickets/retry-tasks${qs ? `?${qs}` : ""}`,
+  );
+}
+
+/** dp 重试单任务进度（任务中心轮询用）。 */
+export async function getDpRetryTask(taskId: number): Promise<DpTicketRetryTask> {
+  return request<DpTicketRetryTask>(
+    `${API_BASE}/lineage/dp-sync/tickets/retry-tasks/${taskId}`,
+  );
+}
+
+/** 请求取消 dp 重试任务（置 cancel_requested，worker 协作收尾）。 */
+export async function cancelDpRetryTask(taskId: number): Promise<DpTicketRetryTask> {
+  return request<DpTicketRetryTask>(
+    `${API_BASE}/lineage/dp-sync/tickets/retry-tasks/${taskId}/cancel`,
+    { method: "POST", timeout: 30_000 },
+  );
+}

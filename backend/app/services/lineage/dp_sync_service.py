@@ -1204,6 +1204,28 @@ class DpSyncService:
                 counters["kept"] += 1
         return counters
 
+    async def collect_retry_candidates(
+        self, *, ticket_ids: list[int] | None = None, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        """收集「LLM 可重试」候选单快照（供异步重试任务建任务行）。
+
+        与同步 ``retry_llm_tickets`` 同一候选范围（repo.list_retryable_llm_
+        tickets）；快照落 tickets_json，worker 执行时逐张按 id 重读最新状态
+        （已被他人裁决/删除的单跳过），任务中心按快照展示。
+        """
+        rows = await self._dp_repo.list_retryable_llm_tickets(
+            limit=limit, ticket_ids=ticket_ids
+        )
+        return [
+            {
+                "ticket_id": t.id,
+                "task_name": t.task_name,
+                "out_table": t.out_table,
+                "status": t.status,
+            }
+            for t in rows
+        ]
+
     async def retry_llm_tickets(
         self,
         *,
@@ -1241,108 +1263,148 @@ class DpSyncService:
             "failed": 0,
         }
         details: list[dict[str, Any]] = []
-
-        def _add(tk: Any, action: str, reason: str) -> None:
-            details.append(
-                {
-                    "ticket_id": tk.id,
-                    "task_name": tk.task_name,
-                    "out_table": tk.out_table,
-                    "action": action,
-                    "reason": reason,
-                }
-            )
+        errors: list[str] = []
 
         for tk in tickets:
-            try:
-                task, step = self._restore_task_step(tk)
-                sql_hash = tk.sql_hash
-                if tk.status == "diverged":
-                    verdict = await self._llm_confirm_json(
-                        tk.sql_text, tk.sqlglot_result or {}
+            action, detail, err = await self._retry_one_ticket(
+                tk, resolved_by=resolved_by
+            )
+            if action not in counters:
+                counters[action] = 0
+            counters[action] += 1
+            details.append(detail)
+            if err:
+                errors.append(err)
+
+        if errors:
+            counters["errors"] = errors
+        counters["details"] = details
+        return counters
+
+    async def _retry_one_ticket(
+        self, tk: Any, *, resolved_by: int
+    ) -> tuple[str, dict[str, Any], str | None]:
+        """处置一张 LLM 可重试单，返回 ``(action, detail, error_text)``。
+
+        供同步 ``retry_llm_tickets`` 与异步任务（``dp_retry_task`` 逐单独立
+        session）共用——单张失败不阻断批量，异常转 ``failed`` 不抛出。
+        action ∈ auto_resolved / refreshed / kept / failed。
+        """
+        if self._llm_chat is None:
+            self._llm_chat = await self._build_llm_chat()
+        try:
+            task, step = self._restore_task_step(tk)
+            sql_hash = tk.sql_hash
+            if tk.status == "diverged":
+                verdict = await self._llm_confirm_json(
+                    tk.sql_text, tk.sqlglot_result or {}
+                )
+                if verdict.agree:
+                    await self._apply_json_edges(
+                        tk.sqlglot_result,
+                        task,
+                        step,
+                        sql_hash,
+                        provenance="sqlglot",
+                        confidence=1.0,
                     )
-                    if verdict.agree:
-                        await self._apply_json_edges(
-                            tk.sqlglot_result,
-                            task,
-                            step,
-                            sql_hash,
-                            provenance="sqlglot",
-                            confidence=1.0,
-                        )
-                        await self._dp_repo.resolve_ticket(
-                            tk.id,
-                            resolution="accept_sqlglot",
-                            resolved_by=resolved_by,
-                        )
-                        counters["auto_resolved"] += 1
-                        _add(tk, "auto_resolved", "LLM 认可 sqlglot，已自动采纳消解")
-                    else:
-                        await self._dp_repo.update_ticket_llm(
-                            tk.id,
-                            llm_opinion={
-                                "agree": False,
-                                "missing_edges": verdict.missing_edges,
-                                "wrong_edges": verdict.wrong_edges,
-                            },
-                            divergence_reason=(
-                                verdict.reason or "sqlglot 与 LLM 意见不一致"
-                            ),
-                        )
-                        counters["refreshed"] += 1
-                        _add(
-                            tk,
-                            "refreshed",
-                            verdict.reason or "LLM 不同意 sqlglot，已刷新意见待人工",
-                        )
-                    continue
-                # llm_fallback / unparseable：失败节点产物 → 重跑兜底
-                flow = await self._llm_fallback(tk.sql_text)
-                if flow.ok:
-                    await self._dp_repo.update_ticket_llm(
+                    await self._dp_repo.resolve_ticket(
                         tk.id,
-                        status="llm_fallback",
-                        llm_opinion={
-                            "target_tables": flow.target_tables,
-                            "source_tables": flow.source_tables,
-                            "field_mappings": flow.field_mappings,
-                            "note": flow.note,
-                        },
-                        divergence_reason=(
-                            flow.note or "sqlglot 解析失败，LLM 兜底提炼（低置信参考）"
-                        ),
+                        resolution="accept_sqlglot",
+                        resolved_by=resolved_by,
                     )
-                    counters["refreshed"] += 1
-                    _add(
+                    return (
+                        "auto_resolved",
+                        self._retry_detail(
+                            tk, "auto_resolved", "LLM 认可 sqlglot，已自动采纳消解"
+                        ),
+                        None,
+                    )
+                await self._dp_repo.update_ticket_llm(
+                    tk.id,
+                    llm_opinion={
+                        "agree": False,
+                        "missing_edges": verdict.missing_edges,
+                        "wrong_edges": verdict.wrong_edges,
+                    },
+                    divergence_reason=(
+                        verdict.reason or "sqlglot 与 LLM 意见不一致"
+                    ),
+                )
+                return (
+                    "refreshed",
+                    self._retry_detail(
+                        tk,
+                        "refreshed",
+                        verdict.reason or "LLM 不同意 sqlglot，已刷新意见待人工",
+                    ),
+                    None,
+                )
+            # llm_fallback / unparseable：失败节点产物 → 重跑兜底
+            flow = await self._llm_fallback(tk.sql_text)
+            if flow.ok:
+                await self._dp_repo.update_ticket_llm(
+                    tk.id,
+                    status="llm_fallback",
+                    llm_opinion={
+                        "target_tables": flow.target_tables,
+                        "source_tables": flow.source_tables,
+                        "field_mappings": flow.field_mappings,
+                        "note": flow.note,
+                    },
+                    divergence_reason=(
+                        flow.note or "sqlglot 解析失败，LLM 兜底提炼（低置信参考）"
+                    ),
+                )
+                return (
+                    "refreshed",
+                    self._retry_detail(
                         tk,
                         "refreshed",
                         flow.note or "LLM 兜底提炼成功，已刷新低置信参考待人工",
-                    )
-                else:
-                    await self._dp_repo.update_ticket_llm(
-                        tk.id,
-                        status="unparseable",
-                        llm_opinion={"note": flow.note},
-                        divergence_reason=(
-                            flow.note or "sqlglot 与 LLM 均无法解析，请手动配置"
-                        ),
-                    )
-                    counters["kept"] += 1
-                    _add(
-                        tk,
-                        "kept",
-                        flow.note or "sqlglot 与 LLM 均无法解析，保留待手动配置",
-                    )
-            except DpSyncLlmError as exc:  # noqa: BLE001 —— 单张失败不阻断批量
-                counters["failed"] += 1
-                counters.setdefault("errors", []).append(f"#{tk.id}: {exc}")
-                _add(tk, "failed", f"LLM 异常：{exc}")
-            except Exception as exc:  # noqa: BLE001 —— 写库/连接等异常同样容错
-                counters["failed"] += 1
-                counters.setdefault("errors", []).append(f"#{tk.id}: {exc}")
-                _add(tk, "failed", f"处理异常：{exc}")
-        counters["details"] = details
-        return counters
+                    ),
+                    None,
+                )
+            await self._dp_repo.update_ticket_llm(
+                tk.id,
+                status="unparseable",
+                llm_opinion={"note": flow.note},
+                divergence_reason=(
+                    flow.note or "sqlglot 与 LLM 均无法解析，请手动配置"
+                ),
+            )
+            return (
+                "kept",
+                self._retry_detail(
+                    tk,
+                    "kept",
+                    flow.note or "sqlglot 与 LLM 均无法解析，保留待手动配置",
+                ),
+                None,
+            )
+        except DpSyncLlmError as exc:  # noqa: BLE001 —— 单张失败不阻断批量
+            return (
+                "failed",
+                self._retry_detail(tk, "failed", f"LLM 异常：{exc}"),
+                f"#{tk.id}: {exc}",
+            )
+        except Exception as exc:  # noqa: BLE001 —— 写库/连接等异常同样容错
+            return (
+                "failed",
+                self._retry_detail(tk, "failed", f"处理异常：{exc}"),
+                f"#{tk.id}: {exc}",
+            )
+
+    @staticmethod
+    def _retry_detail(tk: Any, action: str, reason: str) -> dict[str, Any]:
+        """构造一张单的 LLM 重试处置明细（结果面板逐单展示用）。"""
+        return {
+            "ticket_id": tk.id,
+            "task_name": tk.task_name,
+            "out_table": tk.out_table,
+            "action": action,
+            "reason": reason,
+        }
 
     async def _build_llm_chat(self) -> Callable[..., Awaitable[dict[str, Any]]]:
         """按需构造 LLM 闭包（重试端点等未注入 llm_chat 的场景）。

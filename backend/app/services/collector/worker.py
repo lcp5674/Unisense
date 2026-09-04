@@ -28,6 +28,7 @@ from app.services.collector.queue import RedisJobStore
 from app.services.collector.repository import CollectorRepository
 from app.services.collector.tasks import run_collection_task
 from app.services.conflict.sla_tasks import auto_escalate_overdue, remind_stale_escalated
+from app.services.lineage.dp_retry_task import run_dp_ticket_retry_task
 from app.services.lineage.dp_sync_tasks import dp_lineage_poll_task
 from app.services.lineage.neo4j_sync import sync_neo4j_assets_task
 from app.services.lineage.scan_tasks import lineage_scan_task
@@ -260,6 +261,7 @@ class WorkerSettings:
         sync_neo4j_assets_task,
         lineage_scan_task,
         dp_lineage_poll_task,
+        run_dp_ticket_retry_task,
         purge_retained_records,
         check_table_growth,
         refresh_dimension_snapshots_task,

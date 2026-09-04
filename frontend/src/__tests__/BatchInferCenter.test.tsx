@@ -4,16 +4,19 @@ import {
   BatchInferCenter,
   notifyBatchInferActivity,
 } from "../components/BatchInferCenter";
-import type { BatchInferTask } from "../api";
+import type { BatchInferTask, DpTicketRetryTask } from "../api";
 
 vi.mock("../api", () => ({
   listBatchInferTasks: vi.fn(),
   cancelBatchInferTask: vi.fn(),
+  listDpRetryTasks: vi.fn(),
+  cancelDpRetryTask: vi.fn(),
 }));
 
-import { listBatchInferTasks } from "../api";
+import { listBatchInferTasks, listDpRetryTasks } from "../api";
 
 const mockedList = vi.mocked(listBatchInferTasks);
+const mockedDpList = vi.mocked(listDpRetryTasks);
 
 function makeTask(over: Partial<BatchInferTask>): BatchInferTask {
   return {
@@ -43,6 +46,34 @@ function makeTask(over: Partial<BatchInferTask>): BatchInferTask {
   };
 }
 
+function makeDpTask(over: Partial<DpTicketRetryTask>): DpTicketRetryTask {
+  return {
+    id: 30,
+    actor_id: 1,
+    actor_name: "admin",
+    status: "running",
+    total: 1,
+    done: 0,
+    failed: 0,
+    cancelled: 0,
+    counts: { auto_resolved: 0, refreshed: 0, kept: 0, failed: 0 },
+    cancel_requested: false,
+    error: null,
+    progress: [
+      {
+        ticket_id: 21,
+        task_name: "t_a",
+        out_table: "db.o1",
+        status: "running",
+        action: null,
+        summary: "",
+      },
+    ],
+    created_at: "2026-09-03T08:00:00",
+    ...over,
+  };
+}
+
 async function openCenter() {
   const bar = await screen.findByTestId("batch-infer-center-bar");
   fireEvent.click(bar);
@@ -51,6 +82,8 @@ async function openCenter() {
 describe("BatchInferCenter 取消状态展示", () => {
   beforeEach(() => {
     mockedList.mockReset();
+    mockedDpList.mockReset();
+    mockedDpList.mockResolvedValue([]);
   });
 
   it("取消已请求（cancel_requested=true 且 running）→ 浮条停止中 + 抽屉停止 Tag + 禁用按钮", async () => {
@@ -59,7 +92,8 @@ describe("BatchInferCenter 取消状态展示", () => {
     ]);
     render(<BatchInferCenter />);
     // 浮条文案立即变化（无需开抽屉即可感知取消已生效）
-    expect(await screen.findByText(/批量推断停止中/)).toBeTruthy();
+    const bar = await screen.findByTestId("batch-infer-center-bar");
+    expect(bar.textContent).toMatch(/批量推断\s*停止中/);
     await openCenter();
     expect(screen.getByText(/停止中（当前表结束后取消）/)).toBeTruthy();
     expect(screen.getByRole("button", { name: /已请求取消/ })).toBeDisabled();
@@ -72,7 +106,8 @@ describe("BatchInferCenter 取消状态展示", () => {
       makeTask({ id: 7, status: "running", cancel_requested: false }),
     ]);
     render(<BatchInferCenter />);
-    expect(await screen.findByText(/批量推断进行中/)).toBeTruthy();
+    const bar = await screen.findByTestId("batch-infer-center-bar");
+    expect(bar.textContent).toMatch(/批量推断\s*进行中/);
     await openCenter();
     expect(screen.getByRole("button", { name: /取消任务/ })).toBeTruthy();
   });
@@ -81,6 +116,8 @@ describe("BatchInferCenter 取消状态展示", () => {
 describe("BatchInferCenter 状态机轮询（无任务零请求 / 有任务立即感知）", () => {
   beforeEach(() => {
     mockedList.mockReset();
+    mockedDpList.mockReset();
+    mockedDpList.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -190,7 +227,8 @@ describe("BatchInferCenter 状态机轮询（无任务零请求 / 有任务立�
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(screen.getByText(/批量推断进行中/)).toBeTruthy();
+    const bar = screen.getByTestId("batch-infer-center-bar");
+    expect(bar.textContent).toMatch(/批量推断\s*进行中/);
 
     // 下一轮轮询：任务 completed（带聚合统计）
     mockedList.mockResolvedValue([
@@ -248,5 +286,79 @@ describe("BatchInferCenter 状态机轮询（无任务零请求 / 有任务立�
     expect(screen.queryByText(/失败 0 表/)).toBeNull();
     expect(screen.queryByText(/取消 0 表/)).toBeNull();
     expect(screen.queryByText(/新增 0 处/)).toBeNull();
+  });
+});
+
+describe("BatchInferCenter dp 待抉择 LLM 重试双源", () => {
+  beforeEach(() => {
+    mockedList.mockReset();
+    mockedDpList.mockReset();
+    mockedDpList.mockResolvedValue([]);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("dp 任务提交事件(kind=dp)+秒级终态 → dp 完成摘要出现（自动采纳/失败计数）", async () => {
+    vi.useFakeTimers();
+    // 挂载探测：两源均无任务（零请求空闲）
+    mockedList.mockResolvedValueOnce([]);
+    mockedDpList.mockResolvedValueOnce([]);
+    render(<BatchInferCenter />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(mockedDpList).toHaveBeenCalledTimes(1);
+
+    // LineageDpSync 提交 dp 重试 → notifyBatchInferActivity(taskId, "dp")；
+    // 任务极快终态（completed）——事件唤醒首次刷新即终态 → dp 完成摘要必须出现
+    mockedDpList.mockResolvedValue([
+      makeDpTask({
+        id: 30,
+        status: "completed",
+        total: 1,
+        done: 0,
+        failed: 1,
+        cancelled: 0,
+        counts: { auto_resolved: 0, refreshed: 0, kept: 0, failed: 1 },
+        progress: [
+          {
+            ticket_id: 21,
+            task_name: "t_a",
+            out_table: "db.o1",
+            status: "error",
+            action: "failed",
+            summary: "LLM 异常",
+          },
+        ],
+      }),
+    ]);
+    await act(async () => {
+      notifyBatchInferActivity(30, "dp");
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // catalog 无任务 → 无进行中浮条；dp 完成摘要出现
+    expect(screen.queryByText(/LLM 任务进行中/)).toBeNull();
+    expect(screen.getByTestId("batch-infer-done-bar")).toBeTruthy();
+    expect(screen.getByText(/LLM 重试 #30 完成/)).toBeTruthy();
+    expect(screen.getByText(/自动采纳 0/)).toBeTruthy();
+    expect(screen.getByText(/失败 1/)).toBeTruthy();
+  });
+
+  it("dp running 任务单独存在时也启动轮询（双源任一 running 即轮询）", async () => {
+    vi.useFakeTimers();
+    mockedList.mockResolvedValueOnce([]); // catalog 无任务
+    mockedDpList.mockResolvedValueOnce([makeDpTask({ id: 31, status: "running" })]);
+    render(<BatchInferCenter />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const bar = screen.getByTestId("batch-infer-center-bar");
+    expect(bar.textContent).toMatch(/LLM 重试\s*进行中/);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    expect(mockedDpList).toHaveBeenCalledTimes(2); // 轮询持续拉 dp 源
   });
 });

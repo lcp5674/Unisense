@@ -23,8 +23,10 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { formatCnTime } from "../utils/timeCn";
+import { notifyBatchInferActivity } from "../components/BatchInferCenter";
 import {
   cancelDpSyncScan,
+  createDpRetryTask,
   forceCancelDpSyncScan,
   getDpSyncConfig,
   getDpSyncCurrentScan,
@@ -39,11 +41,9 @@ import {
   resetDpSyncWatermark,
   resolveDpTicket,
   resolveDpSyncLlmDisabled,
-  retryDpSyncLlm,
   saveDpSyncConfig,
   scanDpSyncNow,
 } from "../api";
-import type { DpSyncLlmRetryDetail } from "../api";
 import type {
   DataSource,
   DpExcludePreview,
@@ -631,15 +631,6 @@ function TicketsTab() {
   const [reloadTick, setReloadTick] = useState(0);
   // 批量 LLM 重试的勾选集（仅 isLlmRetryable 行可勾选；跨页保留，提交后清空）
   const [selectedKeys, setSelectedKeys] = useState<number[]>([]);
-  // LLM 重试结果面板（统计 + 逐单明细）
-  const [retryResult, setRetryResult] = useState<{
-    auto_resolved: number;
-    refreshed: number;
-    kept: number;
-    failed: number;
-    details?: DpSyncLlmRetryDetail[];
-  } | null>(null);
-
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -709,18 +700,26 @@ function TicketsTab() {
       : "全部 LLM 失败/兜底低置信的待抉择单";
     Modal.confirm({
       title: ticketIds ? "LLM 重试（单条）" : "LLM 重试（批量）",
-      content: `将重新调用本地 LLM 解析「${scopeLabel}」。分歧单 LLM 认可 sqlglot 结果将自动采纳消解；不认可则刷新 LLM 意见待人工；兜底单刷新参考意见。确认重试？`,
+      content: `将重新调用本地 LLM 解析「${scopeLabel}」。任务将在后台执行，进度与结果实时显示在右下角「LLM 任务中心」（可随时取消、跨页面可见）。确认提交？`,
       onOk: async () => {
         setActing(true);
         try {
-          const r = await retryDpSyncLlm(ticketIds ? { ticket_ids: ticketIds } : {});
-          setRetryResult(r);
-          message.success(`LLM 重试完成：自动采纳 ${r.auto_resolved}、刷新意见 ${r.refreshed}、保留 ${r.kept}、失败 ${r.failed}`);
+          const r = await createDpRetryTask(
+            ticketIds ? { ticket_ids: ticketIds } : {},
+          );
+          if (r.task) {
+            message.success(
+              `LLM 重试任务已提交（#${r.task.id}，共 ${r.task.total} 张单）——进度与结果在右下角「LLM 任务中心」实时查看`,
+            );
+            notifyBatchInferActivity(r.task.id, "dp");
+          } else {
+            message.info("没有可重试的 LLM 失败/兜底待抉择单");
+          }
           setDetail(null);
           setSelectedKeys([]);
           setReloadTick((x) => x + 1);
         } catch {
-          message.error("LLM 重试失败");
+          message.error("LLM 重试任务提交失败");
           setSelectedKeys([]);
         } finally {
           setActing(false);
@@ -945,67 +944,7 @@ function TicketsTab() {
           placeholder={"wedw_ods.a -> wedw_dwd.t\nwedw_ods.b -> wedw_dwd.t"}
         />
       </Modal>
-      <Modal
-        title="LLM 重试结果"
-        width={860}
-        open={retryResult !== null}
-        onCancel={() => setRetryResult(null)}
-        footer={[
-          <Button key="close" type="primary" onClick={() => setRetryResult(null)}>
-            知道了
-          </Button>,
-        ]}
-      >
-        {retryResult && (
-          <>
-            <Descriptions size="small" column={4} bordered style={{ marginBottom: 12 }}>
-              <Descriptions.Item label="自动采纳">
-                <Tag color="green">{retryResult.auto_resolved}</Tag>
-              </Descriptions.Item>
-              <Descriptions.Item label="刷新意见">
-                <Tag color="blue">{retryResult.refreshed}</Tag>
-              </Descriptions.Item>
-              <Descriptions.Item label="保留">
-                <Tag color="gold">{retryResult.kept}</Tag>
-              </Descriptions.Item>
-              <Descriptions.Item label="失败">
-                <Tag color="red">{retryResult.failed}</Tag>
-              </Descriptions.Item>
-            </Descriptions>
-            {retryResult.details && retryResult.details.length > 0 ? (
-              <Table
-                size="small"
-                rowKey="ticket_id"
-                pagination={false}
-                dataSource={retryResult.details}
-                columns={[
-                  { title: "单号", dataIndex: "ticket_id", width: 70 },
-                  { title: "任务", dataIndex: "task_name", ellipsis: true, render: (v) => v || "—" },
-                  { title: "产出表", dataIndex: "out_table", ellipsis: true, render: (v) => v || "—" },
-                  {
-                    title: "处置",
-                    dataIndex: "action",
-                    width: 110,
-                    render: (v: DpSyncLlmRetryDetail["action"]) => {
-                      const m: Record<string, { text: string; color: string }> = {
-                        auto_resolved: { text: "自动采纳", color: "green" },
-                        refreshed: { text: "刷新意见", color: "blue" },
-                        kept: { text: "保留", color: "gold" },
-                        failed: { text: "失败", color: "red" },
-                      };
-                      return <Tag color={m[v]?.color}>{m[v]?.text ?? v}</Tag>;
-                    },
-                  },
-                  { title: "原因", dataIndex: "reason", ellipsis: true },
-                ]}
-                locale={{ emptyText: "无明细" }}
-              />
-            ) : (
-              <Alert type="info" showIcon message="本次重试未返回逐单明细（后端旧版无 details），以上为汇总统计。" />
-            )}
-          </>
-        )}
-      </Modal>
+
     </Card>
   );
 }

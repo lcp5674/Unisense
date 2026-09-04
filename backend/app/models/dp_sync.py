@@ -19,6 +19,7 @@ SQL 节点解析为血缘写入血缘模块；支持字段级全链路、LLM 分
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     JSON,
@@ -494,3 +495,76 @@ class DpSyncRunLog(Base, BaseModel):
     )
 
     __table_args__ = (Index("ix_dp_run_log_run_at", "run_at"),)
+
+
+class DpTicketRetryTask(Base, BaseModel):
+    """dp 待抉择单 LLM 重试后台任务（arq 执行，跨页面/刷新可见进度）。
+
+    方案 A：待抉择单「LLM 重试」原为同步 HTTP 请求（逐张串行调 LLM 可达
+    数分钟），切页即失明。改为提交本任务由 arq worker 逐张执行——任务与
+    进度落库，经右下角任务中心（与采集批量推断 batch_llm_infer_task 双源
+    聚合）跨页面可见/可取消，解决「重试切页后看不到进度/结果」。
+
+    Attributes:
+        actor_id: 发起人 ID（可见性隔离：非平台管理员仅见本人任务）。
+        tickets_json: 候选单快照 [{ticket_id, task_name, out_table, status}]。
+        progress_json: 逐张进度 [{ticket_id, task_name, out_table, status,
+            action, summary, detail}]。status: pending/running/done/error/cancelled。
+        status: 任务状态 pending/running/completed/cancelled/failed。
+        counts_json: 终态语义计数 {auto_resolved, refreshed, kept, failed}。
+        cancel_requested: 用户请求取消标记（worker 每张完成检查后收敛终态）。
+    """
+
+    __tablename__ = "dp_ticket_retry_task"
+
+    actor_id: Mapped[int | None] = mapped_column(
+        nullable=True, comment="发起人 ID"
+    )
+    actor_name: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="发起人姓名快照"
+    )
+    org_id: Mapped[int | None] = mapped_column(
+        nullable=True, comment="发起人组织 ID"
+    )
+    tickets_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        comment="候选单快照 [{ticket_id, task_name, out_table, status}]",
+    )
+    progress_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list, comment="逐张进度（worker 实时更新）"
+    )
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="pending",
+        comment="任务状态 pending/running/completed/cancelled/failed",
+    )
+    total: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="候选单数")
+    done: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="成功动作单数")
+    failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="失败单数")
+    cancelled: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="取消单数")
+    counts_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        comment="终态语义计数 {auto_resolved, refreshed, kept, failed}",
+    )
+    cancel_requested: Mapped[bool] = mapped_column(
+        nullable=False, default=False, comment="用户请求取消标记"
+    )
+    error: Mapped[str | None] = mapped_column(
+        String(512), nullable=True, comment="任务级失败原因（逐单失败不置）"
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="任务开始执行时间"
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="任务结束时间"
+    )
+
+    __table_args__ = (
+        Index("idx_dp_retry_task_actor_created", "actor_id", "created_at"),
+        Index("idx_dp_retry_task_status", "status"),
+    )
