@@ -1448,8 +1448,8 @@ describe("buildFieldGraphData 字段级血缘视图数据", () => {
     expect(g.nodes).toHaveLength(2);
   });
 
-  it("边带加工标注：edgeLabel=加工方式:表达式（≤60 完整、超 60 截断），fullExpr=完整表达式（hover 可查）", () => {
-    // COALESCE(SUM(gmv),0) ≤60 不截断 → edgeLabel 含完整表达式；再测一条超 60 截断
+  it("边带加工标注：edgeLabel=加工方式:表达式完整原文（不截断成省略号），fullExpr=完整表达式", () => {
+    // 短表达式完整；长表达式也不再截断（折行排版交给 AssetGraph 渲染侧 wrapEdgeExpr）
     const g = buildFieldGraphData([item()]);
     const e = g.edges[0]!;
     expect(e.edgeLabel).toBe("空值兜底：COALESCE(SUM(gmv),0)"); // exprKind(COALESCE)=空值兜底
@@ -1457,8 +1457,10 @@ describe("buildFieldGraphData 字段级血缘视图数据", () => {
     const longExpr =
       "CASE WHEN status='paid' AND source='app' THEN amount*0.9 ELSE amount*0.8 END";
     const g2 = buildFieldGraphData([item({ id: 9, expression: longExpr })]);
-    expect(g2.edges[0]!.edgeLabel!.startsWith("条件分支：CASE WHEN status='paid'")).toBe(true);
-    expect(g2.edges[0]!.edgeLabel!.endsWith("…")).toBe(true);
+    // 用户要求「表达式在边的旁边且完整展示」：edgeLabel 含完整原文（加工方式：表达式全文），
+    // 不以省略号截断；完整内容同时存 fullExpr 供 hover 大字核对。
+    expect(g2.edges[0]!.edgeLabel).toBe(`条件分支：${longExpr}`);
+    expect(g2.edges[0]!.edgeLabel!.endsWith("…")).toBe(false);
     expect(g2.edges[0]!.fullExpr).toBe(longExpr);
   });
 
@@ -1963,7 +1965,7 @@ describe("decorateDrillGraph 字段钻取图：表名与加工信息画进图里
     expect(nodes.find((n) => n.id === "metric:revenue")?.label).toBe("营收");
   });
 
-  it("字段边 label = 加工方式:表达式（≤60 完整标注在边中点旁），完整表达式进 fullExpr；直取边标「直取」", () => {
+  it("字段边 label = 加工方式:表达式完整原文（不截断，折行由 AssetGraph 渲染侧处理），完整表达式进 fullExpr；直取边标「直取」", () => {
     const edges = decorateDrillGraphEdges(drill as never);
     const plain = edges.find((e) => (e as { expression?: string | null }).expression == null);
     expect(plain?.edgeLabel).toBe("直取");

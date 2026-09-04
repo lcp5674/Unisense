@@ -11,6 +11,7 @@ import {
   collectPathNodes,
   collectPathEdges,
   wrapFieldLabel,
+  wrapEdgeExpr,
   type AssetGraphNode,
   type AssetGraphEdge,
 } from "../components/assetmap/AssetGraph";
@@ -854,5 +855,39 @@ describe("wrapFieldLabel 字段节点 label 折行（字段级血缘图长「库
     const out = wrapFieldLabel("wedw_dw. wy_zh .col ", 24);
     expect(out.includes(" ")).toBe(false);
     expect(out).toBe("wedw_dw.wy_zh.col");
+  });
+});
+
+describe("wrapEdgeExpr 边加工表达式折行（字段级血缘边「加工方式：表达式」完整展示不截断）", () => {
+  it("短标注（≤maxChars）原样返回，保留空格", () => {
+    expect(wrapEdgeExpr("空值兜底：COALESCE(SUM(gmv),0)", 40)).toBe(
+      "空值兜底：COALESCE(SUM(gmv),0)",
+    );
+    expect(wrapEdgeExpr("直取", 40)).toBe("直取");
+    expect(wrapEdgeExpr("", 40)).toBe("");
+  });
+
+  it("超长表达式按空白切词折行成多行、内容完整不丢", () => {
+    const expr =
+      "条件分支：CASE WHEN status='paid' AND source='app' THEN amount*0.9 ELSE amount*0.8 END";
+    const out = wrapEdgeExpr(expr, 40);
+    const lines = out.split("\n");
+    expect(lines.length).toBeGreaterThan(1);
+    // 折行只换行不丢字符：把换行还原为空格即原文
+    expect(lines.join(" ")).toBe(expr);
+    for (const ln of lines) expect(ln.length).toBeLessThanOrEqual(40);
+  });
+
+  it("无空格超长单 token 硬切兜底、仍不丢字符", () => {
+    const long = "聚合加工：SUM(" + "abcdefghij".repeat(10) + ")";
+    const out = wrapEdgeExpr(long, 40);
+    expect(out.split("\n").join("")).toBe(long);
+    for (const ln of out.split("\n")) expect(ln.length).toBeLessThanOrEqual(40);
+  });
+
+  it("短标注含空格原样返回、不折行（仅超长折行时空白才规整）", () => {
+    const out = wrapEdgeExpr("函数加工：CONCAT(a,  b)", 40);
+    expect(out).toBe("函数加工：CONCAT(a,  b)");
+    expect(out.includes("\n")).toBe(false);
   });
 });

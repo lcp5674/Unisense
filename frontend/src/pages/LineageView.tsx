@@ -211,19 +211,11 @@ export function decorateDrillGraphNodes(drill: FieldDrillData | null): AssetGrap
   });
 }
 
-/** 字段钻取图边中点常驻表达式最大展示长度（超长截断，完整走 hover/清单，避免整图糊死）。 */
-const MAX_EDGE_EXPR = 60;
-
-/** 边中点表达式展示：超长时截断并追加省略号（完整表达式经 fullExpr 悬停可见）。 */
-function trimEdgeExpr(v: string): string {
-  const s = String(v).trim();
-  return s.length > MAX_EDGE_EXPR ? `${s.slice(0, MAX_EDGE_EXPR)}…` : s;
-}
-
 /**
  * 字段钻取图边装饰（加工方式与表达式直接标注在连线中点旁，血缘关系图即完整载体）：
- * - edgeLabel = 「加工方式：表达式」——用户在图上直接看到该字段「经过什么加工、具体
- *   表达式是什么」（表达式 ≤60 字符完整展示，超长截断 + hover 全显 + 列映射清单兜底）；
+ * - edgeLabel = 「加工方式：表达式」**完整原文**——用户在图上直接看到该字段「经过什么加工、
+ *   具体表达式是什么」，不做截断（长表达式由 AssetGraph 渲染侧按词折行完整展示，见
+ *   wrapEdgeExpr；hover tooltip 仍可大字全文核对）；
  * - 直取（无表达式）边仅标「直取」，表级主图边不设 edgeLabel → AssetGraph 不渲染，
  *   零影响；完整加工表达式存 fullExpr，hover 边 tooltip 展示全文。
  * 导出供测试与图渲染复用。 */
@@ -234,7 +226,7 @@ export function decorateDrillGraphEdges(drill: FieldDrillData | null): AssetGrap
     const kind = exprKind(expr);
     return {
       ...e,
-      edgeLabel: expr && expr.trim() ? `${kind.label}：${trimEdgeExpr(expr)}` : kind.label,
+      edgeLabel: expr && expr.trim() ? `${kind.label}：${expr.trim()}` : kind.label,
       fullExpr: expr || "",
     } as AssetGraphEdge;
   });
@@ -361,8 +353,9 @@ export function edgesToGraphData(
  * 把字段级查询/影响分析结果（FieldImpactItem）构建为血缘视图图数据（粒度=字段级）。
  * - 字段节点 label 显式拼「完整表.列」——表名含库前缀（如 ``wedw_dw.sales_detail.gmv``），
  *   不依赖节点 id 前缀剥离，杜绝长表名下 id 形态差异导致的列名展示不全；
- * - 字段映射边带 edgeLabel（边中点标注「加工方式 · 表达式」，复用 exprKind 分类；表达式长
- *   则截断 + …）与 fullExpr（完整加工表达式，供 hover 边完整查看）；直取边仅标「直取」。
+ * - 字段映射边带 edgeLabel（边中点标注「加工方式 · 表达式」完整原文，复用 exprKind 分类；
+ *   长表达式不做截断——由 AssetGraph 渲染侧折行完整展示，hover 边仍可全文核对）与
+ *   fullExpr（完整加工表达式）；直取边仅标「直取」。
  * 导出供测试与图渲染复用。
  */
 export function buildFieldGraphData(
@@ -396,8 +389,8 @@ export function buildFieldGraphData(
       source: it.source_node,
       target: it.target_node,
       type: "DERIVED_FROM",
-      // 与字段钻取图同一标注口径：加工方式：表达式（≤60 完整，超长截断 + fullExpr 悬停全文）
-      edgeLabel: expr && expr.trim() ? `${kind.label}：${trimEdgeExpr(expr)}` : kind.label,
+      // 与字段钻取图同一标注口径：加工方式：表达式（完整原文，渲染侧折行）
+      edgeLabel: expr && expr.trim() ? `${kind.label}：${expr.trim()}` : kind.label,
       fullExpr: expr || "",
     });
   }
@@ -808,8 +801,9 @@ function GraphTab() {
   }
 
   // 字段钻取图派生数据：把「表名与加工信息直接画进图里」——字段节点 label 带所属表名
-  //（短表名.列名，跨表场景一眼可辨），字段边中点标注「加工方式 · 表达式」（完整表达式
-  // 走 fullExpr，hover 边可看）。表级主图边无表达式字段 → 不渲染 label，零影响。
+  //（短表名.列名，跨表场景一眼可辨），字段边中点标注「加工方式 · 表达式」完整原文
+  //（长表达式由 AssetGraph 渲染侧按词折行，hover 边可大字核对）。表级主图边无表达式
+  // 字段 → 不渲染 label，零影响。
   const drillGraphNodes = useMemo<AssetGraphNode[]>(
     () => decorateDrillGraphNodes(drill),
     [drill],
@@ -926,8 +920,8 @@ function GraphTab() {
                 onNodeClick={handleNodeClick}
               />
               <span className="muted" style={{ fontSize: 12, display: "block", marginTop: 6 }}>
-                节点 = 「短表名.列名」，同表同色（表色见图例）；边上直接标注「加工方式：表达式」——
-                该字段经过什么加工一目了然；长表达式自动截断（≤60 字符），悬停边或切「列映射清单」看全文；
+                节点 = 「短表名.列名」，同表同色（表色见图例）；边上直接标注「加工方式：表达式」完整原文——
+                该字段经过什么加工一目了然；长表达式按词折行完整展示在连线旁（不截断），悬停边可大字核对全文；
                 悬停节点可看完整「库.表.列」，滚轮缩放查看细节。
               </span>
             </>

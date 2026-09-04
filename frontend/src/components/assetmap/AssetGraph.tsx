@@ -179,6 +179,44 @@ export function wrapFieldLabel(label: string, maxChars = 24): string {
 }
 
 /**
+ * 边 label（「加工方式：表达式」）折行：加工表达式是带空格的 SQL/函数文本，按空白切词
+ * 贪婪累积到每行不超过 maxChars 字符时折行；单词超长（无空格的超长列名/常量串）才硬切
+ * 兜底。与 wrapFieldLabel 的差异：表达式保留空格语义（不能像节点名那样去空白），且折行
+ * 只换行不丢任何字符——join("\n") 去掉换行即原文（仅连续空白规整为单空格，不影响 SQL
+ * 语义）。字段级血缘图的边标注不再截断成省略号，完整表达式常驻边旁多行展示。
+ */
+export function wrapEdgeExpr(label: string, maxChars = 40): string {
+  const src = String(label ?? "").trim();
+  if (!src) return "";
+  if (src.length <= maxChars) return src;
+  const words = src.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let line = "";
+  const pushLine = (s: string) => {
+    lines.push(s);
+    line = "";
+  };
+  for (const w of words) {
+    let piece = w;
+    while (piece.length > maxChars) {
+      if (line) pushLine(line);
+      lines.push(piece.slice(0, maxChars));
+      piece = piece.slice(maxChars);
+    }
+    if (!piece) continue;
+    const candidate = line ? `${line} ${piece}` : piece;
+    if (!line || candidate.length <= maxChars) {
+      line = candidate;
+    } else {
+      pushLine(line);
+      line = piece;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.join("\n");
+}
+
+/**
  * 自适应节点基准半径：按图规模动态缩放。
  * 聚焦视图（如从指标目录跳转 ?node= 只看 1-3 个节点的上下游）节点少，
  * 若仍用全景的大半径（24）会显得图标硕大突兀；节点越少半径越小，越多越大。
@@ -843,9 +881,10 @@ function pickVisible(
 }
 
 /** 布局配置：分层（DAG 自上而下或从左到右）｜力导向（环/交互定位）｜血缘度径向（同心圆，依赖引用数高者居中）。
- *  label：字段节点折行度量（{maxLines, maxLineChars}，非字段图为 {1,0}）——分层布局据其放大
- *  ranksep/nodesep：多行标签纵向需要更高层距、长行标签横向需要更大节点距，保证完整「库.表.列」
- *  不被邻节点/相邻层标签压字（字段级血缘图“布局紧凑、表列名看不全”的根因）。
+ *  label：节点与边 label 的综合折行度量（{maxLines, maxLineChars}，无长标注图为 {1,0}）——
+ *  分层布局据其放大 ranksep/nodesep：多行标签/边表达式纵向需要更高层距、长行横向需要更大
+ *  节点距，保证完整「库.表.列」与边旁完整加工表达式不被邻节点/相邻层/其他标注压字
+ *  （字段级血缘图“布局紧凑、表列名/表达式看不全”的根因）。
  */
 function layoutConfig(
   layoutMode: "hierarchy" | "force" | "radial",
@@ -858,8 +897,9 @@ function layoutConfig(
     // 避免被压成一条细带；间距按"节点半径+下方标签"最小需求计算留有余量避免文字压字。
     // rankdir 由 direction 决定：TB 泳道纵向（源在上字段在下）、LR 横向（源在左字段在右）。
     // align：TB 下 DL（深层靠左）让加工链更紧凑；LR 下 UL（dagre 默认）避免跨层折返。
-    // 字段折行图：maxLineChars≈24 字符 → 行宽约 190px，nodesep 放宽到行宽保证同层标签不横向压字；
-    // 多行（maxLines>1）时 ranksep 额外 + (行数-1)*16px 让跨层多行标签不上下压字。
+    // 折行图（字段节点 / 边表达式）：最长行字符决定行宽 → nodesep 放宽到行宽，保证同层
+    // 标签与边中点标注不横向压字；maxLines>1 时 ranksep 额外 +(行数-1)*16px，让跨层多行
+    // 标签 / 多行边表达式（完整加工方式：表达式常驻边旁）不上下压字。
     const hasLongLabel = (label?.maxLineChars ?? 0) > 20;
     const nodeGap = hasLongLabel
       ? Math.min(240, Math.max(90, (label?.maxLineChars ?? 0) * 6.2 + 40))
@@ -960,22 +1000,30 @@ function GraphCanvas({
   // 「点击聚焦」的当前节点 id：点击节点后该血缘链保持高亮（其余压暗），点击画布空白才清空恢复全亮。
   // 与悬停高亮（pointerenter/leave）并存——悬停是瞬态的（移出即按聚焦态恢复），聚焦是持久的（点击空白才清）。
   const focusedIdRef = useRef<string | null>(null);
-  // 字段节点 label 折行度量：多行折行后标签纵向变高、需加大 dagre ranksep（层间距）避免层间压字；
-  // 最长行字符用于估算横向最小节点间距（nodesep），让完整「库.表.列」不被邻节点标签遮挡。
+  // label 折行度量（节点 + 边）：字段节点「库.表.列」折行、字段血缘边「加工方式：表达式」
+  // 折行后纵向变高（多行）、横向变宽（最长行），需同步加大 dagre ranksep（层间距，防层间
+  // 压字/压边标注）与 nodesep（节点间距，防同层标签与边标注横向互压）。
   // 经 ref 供 mount effect 构建布局配置时读取最新值（与 dimOnHoverRef 同模式规避闭包过期）。
-  const fieldLabelMetrics = useMemo(() => {
+  const labelMetrics = useMemo(() => {
     let maxLines = 1;
     let maxLineChars = 0;
-    for (const n of nodes) {
-      if ((n as AssetGraphNode).type !== "field") continue;
-      const lines = wrapFieldLabel((n as AssetGraphNode).label ?? "", 24).split("\n");
+    const absorb = (lines: string[]) => {
       maxLines = Math.max(maxLines, lines.length);
       for (const ln of lines) maxLineChars = Math.max(maxLineChars, ln.length);
+    };
+    for (const n of nodes) {
+      if ((n as AssetGraphNode).type !== "field") continue;
+      absorb(wrapFieldLabel((n as AssetGraphNode).label ?? "", 24).split("\n"));
+    }
+    for (const e of edges) {
+      const edgeLabel = (e as RenderEdge).edgeLabel;
+      if (!edgeLabel || !edgeLabel.trim()) continue;
+      absorb(wrapEdgeExpr(edgeLabel).split("\n"));
     }
     return { maxLines, maxLineChars };
-  }, [nodes]);
-  const fieldLabelMetricsRef = useRef(fieldLabelMetrics);
-  fieldLabelMetricsRef.current = fieldLabelMetrics;
+  }, [nodes, edges]);
+  const labelMetricsRef = useRef(labelMetrics);
+  labelMetricsRef.current = labelMetrics;
   // 边流动动画的取消函数（render 后启动、数据重载/卸载时取消）
   const edgeFlowCancelRef = useRef<(() => void) | null>(null);
 
@@ -1392,21 +1440,23 @@ function GraphCanvas({
               return d?.bidirectional ? true : false;
             },
             radius: 10,
-            // 字段级血缘边的加工标注：携带 edgeLabel 的边（字段钻取子图）在连线中点显示
-            // 加工方式/表达式（白底 pill、小字），表级主图边无 edgeLabel → 空串不渲染。
+            // 字段级血缘边的加工标注：携带 edgeLabel 的边（字段钻取子图/字段级血缘查询图）
+            // 在连线中点显示「加工方式：表达式」完整原文——长表达式按词折行（wrapEdgeExpr）
+            // 成多行完整展示、不再截断省略；表级主图边无 edgeLabel → 空串不渲染。
             labelText: (e) => {
               const d = e.data as RenderEdge | undefined;
-              return d?.edgeLabel ?? "";
+              return d?.edgeLabel ? wrapEdgeExpr(d.edgeLabel) : "";
             },
             labelPlacement: "center",
             labelOffset: 8,
             labelBackground: true,
             labelBackgroundFill: "#ffffff",
-            labelBackgroundPadding: [1, 4],
+            labelBackgroundPadding: [2, 6],
             labelBackgroundLineWidth: 1,
             labelBackgroundStroke: "#cbd5e1",
+            labelBackgroundRadius: 4,
             labelFill: "#475569",
-            labelFontSize: 10,
+            labelFontSize: 11,
             labelFontWeight: 500,
           },
           // 路径高亮状态（hover 血缘链）：active=链上边醒目（加亮不加粗，保留方向箭头），
@@ -1426,7 +1476,7 @@ function GraphCanvas({
             translate: false,
           },
         },
-        layout: layoutConfig(layoutMode, direction, fieldLabelMetricsRef.current),
+        layout: layoutConfig(layoutMode, direction, labelMetricsRef.current),
         behaviors: ["drag-canvas", "zoom-canvas", "drag-element"],
         // 血缘度提示：悬停节点显示「依赖 N 项（上游）/ 被 M 项引用（下游）」，
         // 与右上角 badge 角标互补——badge 快速看总数，tooltip 细分方向。
@@ -1473,17 +1523,19 @@ function GraphCanvas({
                   div.innerHTML = `<b>${esc(label)}</b><br/>依赖 ${up} 项（上游）<br/>被 ${down} 项引用（下游）<br/><span style="color:#e65100">血缘度 ${total}</span>`;
                   return div;
                 }
-                // 兜底边：字段级血缘边展示完整加工表达式（edgeLabel 已标注加工方式与
-                // 截断表达式，此处补全 fullExpr）。无表达式的普通边不弹内容。
+                // 兜底边：字段级血缘边——edgeLabel 已是「加工方式：表达式」完整原文（图上
+                // 连线中点折行展示），tooltip 放大字号便于核对全文（\n 在 HTML 中折叠为空格）。
+                // 无表达式的普通边不弹内容。
                 const edge = graph?.getEdgeData(String(id)) as
                   | { data?: RenderEdge }
                   | undefined;
                 const ed = edge?.data;
                 if (ed?.edgeLabel || ed?.fullExpr) {
-                  const kind = ed.fullExpr
-                    ? `<br/><span style="color:#1a73e8">加工表达式：${esc(ed.fullExpr)}</span>`
-                    : "";
-                  div.innerHTML = `<b>${esc(ed.edgeLabel ?? "字段映射")}</b>${kind}<br/><span style="color:#94a3b8">hover 查看完整加工表达式</span>`;
+                  div.innerHTML = `<b>${esc(ed.edgeLabel ?? "字段映射")}</b>${
+                    ed.fullExpr && ed.edgeLabel !== ed.fullExpr
+                      ? `<br/><span style="color:#1a73e8">加工表达式：${esc(ed.fullExpr)}</span>`
+                      : ""
+                  }`;
                   return div;
                 }
               }
