@@ -7,6 +7,7 @@ import type { GraphData, IElementEvent, NodeData } from "@antv/g6";
 import { computeDagrePositions } from "./dagreLayout";
 import type { DagrePosition } from "./dagreLayout";
 import { computeLayoutInWorker } from "./dagreLayoutClient";
+import { dwLayerStroke } from "../../utils/dwLayer";
 
 /** 资产地图图谱节点（后端 /assetmap/graph 的 nodes 元素）。 */
 export interface AssetGraphNode extends Record<string, unknown> {
@@ -322,29 +323,8 @@ interface RenderEdge extends AssetGraphEdge {
 // 优先级低于 PII（红）与环（橙）：仅当两者都不命中时用层色描边。
 // 分层集合以 system_dict 的 dw_layer 字典为唯一事实源：后端按库名后缀命中字典 active
 // 码下发 dw_layer（含管理员补录的 dim/mid/st 等扩展层），前端不再用硬编码白名单丢弃。
-const LAYER_STROKE: Record<string, string> = {
-  ods: "#2e7d32", // 操作数据层（绿）
-  dwd: "#1565c0", // 明细数据层（蓝）
-  dws: "#6a1b9a", // 汇总数据层（紫）
-  ads: "#ef6c00", // 应用数据层（橙）
-  dm: "#00695c", // 数据集市（青）
-};
-
-// 字典扩展层（非标准 5 层）兜底色板：按层名 hash 稳定取色，使 dim/mid/st/tmp 等补录
-// 分层也有区分度配色，且同一层在多次渲染间颜色一致（不随节点顺序漂移）。
-const EXTRA_LAYER_PALETTE = [
-  "#00838f", "#5d4037", "#c2185b", "#455a64", "#7cb342",
-  "#8e24aa", "#00897b", "#f9a825", "#6d4c41", "#3949ab",
-];
-
-/** 分层配色：标准层取 LAYER_STROKE；字典扩展层按层名 hash 从兜底色板稳定取色。 */
-function layerStroke(layer: string): string {
-  const known = LAYER_STROKE[layer];
-  if (known) return known;
-  let h = 0;
-  for (let i = 0; i < layer.length; i += 1) h = (h * 31 + layer.charCodeAt(i)) >>> 0;
-  return EXTRA_LAYER_PALETTE[h % EXTRA_LAYER_PALETTE.length];
-}
+// 层色统一取自 utils/dwLayer（dwLayerStroke，内部小写归一化）——与治理中心/血缘
+// 小视图共用同一份标准层色与扩展层 hash 色板，避免多处重复实现漂移致大小写/配色不一致。
 
 /** 推断节点数仓分层：优先用后端按 dw_layer 字典派生下发的分层字段（任意非空值都是合法
  *  分层，含字典扩展层 dim/mid…，不再用配色表白名单丢弃）；表节点无下发时按名称前缀兜底
@@ -1264,7 +1244,7 @@ function GraphCanvas({
             ? [r * 1.3, r * 0.7]
             : r;
       const fill = cl
-        ? layerStroke(cl)
+        ? dwLayerStroke(cl)
         : cyc
           ? "#ff8a80"
           : n?.domain
@@ -1282,7 +1262,7 @@ function GraphCanvas({
           : n?.pii
             ? "#c62828"
             : layer
-              ? layerStroke(layer)
+              ? dwLayerStroke(layer)
               : "#ffffff";
       const lineWidth = cyc ? 3.5 : cl ? 3 : n?.pii ? 3 : layer ? 2.5 : 2;
       const hub = !cyc && !cl && d >= 8;
@@ -2681,10 +2661,10 @@ export function AssetGraph({
           <div className="legend-group">
             <span className="muted">数仓层：</span>
             {[
-              ...DW_LANE_ORDER.map((l) => [l, layerStroke(l)] as const),
+              ...DW_LANE_ORDER.map((l) => [l, dwLayerStroke(l)] as const),
               ...[...new Set(nodes.map(layerOf).filter((l): l is string => !!l && !(DW_LANE_ORDER as readonly string[]).includes(l)))]
                 .sort()
-                .map((l) => [l, layerStroke(l)] as const),
+                .map((l) => [l, dwLayerStroke(l)] as const),
             ].map(([layer, color]) => (
               <span className="legend-swatch" key={layer}>
                 <span

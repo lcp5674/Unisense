@@ -23,12 +23,15 @@ export const DW_LAYER_EXTRA_PALETTE = [
   "#8e24aa", "#00897b", "#f9a825", "#6d4c41", "#3949ab",
 ];
 
-/** 分层配色：标准层取标准色；字典扩展层按层名 hash 从兜底色板稳定取色（同层跨渲染一致）。 */
+/** 分层配色：标准层取标准色；字典扩展层按层名 hash 从兜底色板稳定取色（同层跨渲染一致）。
+ *  内部统一小写归一化——无论调用方传入大写/混合大小写层码（如直接消费字典原值或
+ *  Metric.dw_layer），都命中标准色而非误入扩展色板（大小写不敏感取色）。 */
 export function dwLayerStroke(layer: string): string {
-  const known = DW_LAYER_STANDARD_COLORS[layer];
+  const key = String(layer || "").toLowerCase();
+  const known = DW_LAYER_STANDARD_COLORS[key];
   if (known) return known;
   let h = 0;
-  for (let i = 0; i < layer.length; i += 1) h = (h * 31 + layer.charCodeAt(i)) >>> 0;
+  for (let i = 0; i < key.length; i += 1) h = (h * 31 + key.charCodeAt(i)) >>> 0;
   return DW_LAYER_EXTRA_PALETTE[h % DW_LAYER_EXTRA_PALETTE.length];
 }
 

@@ -81,7 +81,8 @@ async def _sync_json_references(db: Any, dict_type: str, old: str, new: str) -> 
             payload = dict(row.defaults_json or {})
             dirty = False
             for field in fields:
-                if payload.get(field) == old:
+                # JSON 内嵌字典值大小写不敏感比较（与 SQL 引用同步口径一致）
+                if str(payload.get(field) or "").lower() == (old or "").lower():
                     payload[field] = new
                     dirty = True
             if dirty:
@@ -217,7 +218,8 @@ class SystemDictService:
         """
         item = await self.get_item(dict_type, code)
         new_code = (data.code or "").strip()
-        if new_code and new_code != code:
+        # 仅大小写不同视为归一化（不触发引用同步——lower 比较下新旧语义一致，直接改码）
+        if new_code and new_code.lower() != (code or "").lower():
             await self._rename_item_code(dict_type, item, code, new_code)
         if data.label is not None:
             item.label = data.label
@@ -264,12 +266,14 @@ class SystemDictService:
                 error_code="DUPLICATE_DICT_CODE",
             )
         synced: dict[str, int] = {}
-        from sqlalchemy import update
+        from sqlalchemy import func, update
 
         for model, column, _is_enum in targets:
+            # 引用同步大小写不敏感：列内旧值（可能大写）与字典旧码（可能小写）经
+            # func.lower 归一比较后统一改写为新码——防「字典改码后旧值残留」。
             stmt = (
                 update(model)
-                .where(getattr(model, column) == old)
+                .where(func.lower(getattr(model, column)) == (old or "").lower())
                 .values({column: new})
             )
             result = await self._db.execute(stmt)
@@ -451,10 +455,14 @@ class SystemDictService:
 
         total = 0
         for model, column, _is_enum in targets:
+            # 引用计数大小写不敏感（func.lower）：字典 code 与引用列存量值可能大小写
+            # 不一致（如字典补录小写、metric 存量大写），精确匹配会漏检致误停用/误删。
             stmt = (
                 select(func.count())
                 .select_from(model)
-                .where(getattr(model, column) == code)
+                .where(
+                    func.lower(getattr(model, column)) == (code or "").lower()
+                )
             )
             # 指标表按软删过滤（软删指标不计引用）；其余表无 deleted_at 或行数极少
             if hasattr(model, "deleted_at"):

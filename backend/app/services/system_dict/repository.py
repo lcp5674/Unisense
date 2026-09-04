@@ -29,9 +29,11 @@ class SystemDictRepository:
         return list(result.scalars().all())
 
     async def get_item(self, dict_type: str, code: str) -> SystemDict | None:
+        # 编码大小写不敏感（func.lower）：字典 code 允许任意大小写录入，查询/引用
+        # 计数/改码同步均按忽略大小写匹配，避免「dwd vs DWD」两套并存或漏检。
         stmt = select(SystemDict).where(
             SystemDict.dict_type == dict_type,
-            SystemDict.code == code,
+            func.lower(SystemDict.code) == (code or "").lower(),
             SystemDict.deleted_at.is_(None),
         )
         result = await self._db.execute(stmt)
@@ -45,7 +47,7 @@ class SystemDictRepository:
         """
         stmt = select(SystemDict).where(
             SystemDict.dict_type == dict_type,
-            SystemDict.code == code,
+            func.lower(SystemDict.code) == (code or "").lower(),
         )
         result = await self._db.execute(stmt)
         return result.scalars().first()
@@ -56,7 +58,7 @@ class SystemDictRepository:
             .select_from(SystemDict)
             .where(
                 SystemDict.dict_type == dict_type,
-                SystemDict.code == code,
+                func.lower(SystemDict.code) == (code or "").lower(),
                 SystemDict.deleted_at.is_(None),
             )
         )
@@ -78,13 +80,13 @@ class SystemDictRepository:
         return (result.scalar() or 0) > 0
 
     async def code_exists_in_type(self, dict_type: str, code: str) -> bool:
-        """检查某类型下某编码是否存在。"""
+        """检查某类型下某编码是否存在（忽略大小写，供编码自动生成判重）。"""
         stmt = (
             select(func.count())
             .select_from(SystemDict)
             .where(
                 SystemDict.dict_type == dict_type,
-                SystemDict.code == code,
+                func.lower(SystemDict.code) == (code or "").lower(),
                 SystemDict.deleted_at.is_(None),
             )
         )
