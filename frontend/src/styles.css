@@ -1157,21 +1157,21 @@ body {
   opacity: 0.6;
 }
 
-/* Owner 责任分布：责任人卡片网格——头像 + 资产构成条 + 生命周期色点 */
+/* Owner 责任分布：每责任人一横行——左侧名称区（头像+名字+待处理），右侧资产堆叠色带，
+   段宽 = count / 全 Owner 最大总资产（同分母，跨人直接比绝对量）；颜色图例全局仅一份（.owner-legend） */
 .owner-grid {
-  display: grid;
-  /* 每责任人一横行卡片：单列等宽（整卡片长度一致），高度统一，逐人横向对比 */
-  grid-template-columns: 1fr;
-  gap: 10px;
-}
-
-.owner-card {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px 16px;
+  gap: 8px;
+}
+
+.owner-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--surface);
   cursor: pointer;
   text-align: left;
@@ -1179,59 +1179,62 @@ body {
   min-width: 0;
 }
 
-.owner-card:hover {
+.owner-row:hover {
   border-color: var(--data);
   box-shadow: 0 4px 16px rgba(14, 124, 134, 0.12);
   transform: translateY(-1px);
 }
 
-.owner-card.owner-hot {
+.owner-row.owner-hot {
   border-color: var(--signal);
   background: linear-gradient(180deg, var(--signal-soft), var(--surface) 45%);
 }
 
-.owner-card.owner-hot:hover {
+.owner-row.owner-hot:hover {
   border-color: var(--signal);
   box-shadow: 0 4px 16px rgba(232, 134, 45, 0.18);
 }
 
-/* 卡片头部：首字母头像 + 名字 + 待审 pill + 总数 */
-.owner-card .oc-head {
+/* 左侧名称区：首字母头像 + 名字 + 待处理 pill（固定宽度，不随条挤压） */
+.owner-row .or-id {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  flex: none;
+  width: 200px;
   min-width: 0;
 }
 
-.owner-card .oc-avatar {
+.owner-row .oc-avatar {
   flex: none;
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
   color: var(--chassis);
   background: linear-gradient(140deg, var(--signal), #f2a45c);
   letter-spacing: 0.5px;
 }
 
-.owner-card.owner-hot .oc-avatar {
+.owner-row.owner-hot .oc-avatar {
   box-shadow: 0 0 0 2px rgba(232, 134, 45, 0.25);
 }
 
-.owner-card .oc-name {
-  font-weight: 600;
-  font-size: 14px;
+.owner-row .oc-name {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
+  font-weight: 600;
+  font-size: 13px;
 }
 
-.owner-card .oc-hot {
+.owner-row .oc-hot {
   flex: none;
   font-size: 11px;
   font-weight: 600;
@@ -1290,31 +1293,32 @@ body {
   background: #b07a1f;
 }
 
-.owner-card .oc-total {
-  margin-left: auto;
+.owner-row .oc-total {
   flex: none;
+  margin-left: auto;
   font-size: 12px;
   color: var(--muted);
   font-family: var(--font-mono);
   white-space: nowrap;
 }
 
-.owner-card.owner-hot .oc-total {
+.owner-row.owner-hot .oc-total {
   color: var(--signal);
 }
 
-/* 资产构成条：各段按资产类型占比着色（指标青 / 表绿 / 维度紫 / 术语金 / 模板蓝） */
-.owner-card .oc-bar {
+/* 资产构成条：右侧弹性区，各段按资产类型占比着色（指标青 / 表绿 / 维度紫 / 术语金 / 模板蓝） */
+.owner-row .oc-bar {
   display: flex;
-  height: 26px;
-  border-radius: 7px;
+  flex: 1 1 auto;
+  height: 22px;
+  border-radius: 6px;
   overflow: hidden;
   background: var(--line-soft);
   border: 1px solid var(--line);
-  min-width: 0;
+  min-width: 60px;
 }
 
-.owner-card .oc-seg {
+.owner-row .oc-seg {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1327,129 +1331,80 @@ body {
   transition: filter 0.15s ease;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
 }
-.owner-card .oc-seg:hover {
+.owner-row .oc-seg:hover {
   filter: brightness(1.08);
 }
-.owner-card .oc-seg.oc-metric {
+.owner-row .oc-seg.oc-metric {
   background: var(--data);
 }
-.owner-card .oc-seg.oc-table {
+.owner-row .oc-seg.oc-table {
   background: #3a7d44;
 }
-.owner-card .oc-seg.oc-source {
+.owner-row .oc-seg.oc-source {
   background: #1f8a8c;
 }
-.owner-card .oc-seg.oc-dim {
+.owner-row .oc-seg.oc-dim {
   background: #8b6fd8;
 }
-.owner-card .oc-seg.oc-term {
+.owner-row .oc-seg.oc-term {
   background: #b07a1f;
 }
-.owner-card .oc-seg.oc-tpl {
+.owner-row .oc-seg.oc-tpl {
   background: #4a6fa5;
 }
 /* 0 值资产段：灰色弱化，最小占位宽度，让 6 类完整可见但不抢视觉 */
-.owner-card .oc-seg.oc-zero {
+.owner-row .oc-seg.oc-zero {
   background: rgba(160, 168, 184, 0.42);
   color: rgba(120, 130, 150, 0.85);
 }
-.owner-card .oc-seg.oc-zero:hover {
+.owner-row .oc-seg.oc-zero:hover {
   background: rgba(160, 168, 184, 0.62);
   color: var(--ink);
 }
 
-/* 资产构成图例：构成条下方完整展示 6 类资产（标签 + 数量），0 值项灰显但标签可见 */
-.owner-card .oc-legend {
+/* 资产颜色图例：全局仅一份（不随每个责任人重复），色点 + 标签说明 6 类资产颜色含义；
+   各责任人具体数值由悬停该行 Tooltip 展示，0 值不占段（不误导）。 */
+.owner-legend {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  gap: 6px 12px;
-  margin-top: 8px;
-  padding-top: 8px;
+  gap: 4px 14px;
+  margin-top: 10px;
+  padding-top: 10px;
   border-top: 1px dashed var(--line);
 }
-.owner-card .oc-chip {
+.owner-legend .oc-legend-title {
+  font-size: 11px;
+  color: var(--muted);
+}
+.owner-legend .oc-chip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   font-size: 11px;
   font-weight: 500;
   color: var(--ink-2);
-  cursor: pointer;
+  cursor: default;
   border-radius: 4px;
-  padding: 2px 6px;
+  padding: 2px 4px;
   transition: background 0.15s ease, color 0.15s ease;
 }
-.owner-card .oc-chip:hover {
+.owner-legend .oc-chip:hover {
   background: var(--line-soft);
   color: var(--ink);
 }
-.owner-card .oc-chip-dot {
+.owner-legend .oc-chip-dot {
   width: 8px;
   height: 8px;
   border-radius: 2px;
   display: inline-block;
 }
-.owner-card .oc-chip.oc-metric .oc-chip-dot { background: var(--data); }
-.owner-card .oc-chip.oc-table .oc-chip-dot { background: #3a7d44; }
-.owner-card .oc-chip.oc-source .oc-chip-dot { background: #1f8a8c; }
-.owner-card .oc-chip.oc-dim .oc-chip-dot { background: #8b6fd8; }
-.owner-card .oc-chip.oc-term .oc-chip-dot { background: #b07a1f; }
-.owner-card .oc-chip.oc-tpl .oc-chip-dot { background: #4a6fa5; }
-/* 0 值图例项：文字灰显 + 圆点浅灰，仍显示「标签 0」让用户看清全维度 */
-.owner-card .oc-chip.oc-chip-zero {
-  color: rgba(120, 130, 150, 0.8);
-}
-.owner-card .oc-chip.oc-chip-zero .oc-chip-dot {
-  background: rgba(160, 168, 184, 0.42);
-}
-.owner-card .oc-chip.oc-chip-zero:hover {
-  color: var(--ink);
-}
-
-/* 生命周期次级信息：色点 + 标签 + 计数（仅展示非零状态） */
-.owner-card .oc-life {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px 12px;
-  min-height: 18px;
-}
-
-.owner-card .oc-life-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 12px;
-  color: var(--ink-2);
-  white-space: nowrap;
-}
-
-.owner-card .oc-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex: none;
-}
-.owner-card .oc-dot.ob-draft {
-  background: #9aa4b2;
-}
-.owner-card .oc-dot.ob-experimental {
-  background: #8b6fd8;
-}
-.owner-card .oc-dot.ob-review {
-  background: var(--signal);
-}
-.owner-card .oc-dot.ob-published {
-  background: var(--data);
-}
-.owner-card .oc-dot.ob-deprecated {
-  background: #5b6472;
-}
-
-/* ---- Owner 责任分布：单条堆叠条（与图例同源，段宽 = count / 全 Owner 最大总资产） ----
-   每个责任人一横行卡条：堆叠条总长反映资产规模占比，同类色段跨人直接比长度即比绝对量；
-   0 值资产不渲染色段（长度 0 不误导），由图例 .oc-legend 灰显保证 6 类完整可读。
-   oc-bar/oc-seg/oc-legend/oc-chip/oc-life 结构定义见上方「资产构成条」区。 */
+.owner-legend .oc-chip.oc-metric .oc-chip-dot { background: var(--data); }
+.owner-legend .oc-chip.oc-table .oc-chip-dot { background: #3a7d44; }
+.owner-legend .oc-chip.oc-source .oc-chip-dot { background: #1f8a8c; }
+.owner-legend .oc-chip.oc-dim .oc-chip-dot { background: #8b6fd8; }
+.owner-legend .oc-chip.oc-term .oc-chip-dot { background: #b07a1f; }
+.owner-legend .oc-chip.oc-tpl .oc-chip-dot { background: #4a6fa5; }
 
 /* 快速入口 */
 .quick-entry {

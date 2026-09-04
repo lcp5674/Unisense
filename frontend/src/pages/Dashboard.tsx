@@ -685,7 +685,7 @@ function OwnerDistribution({
   // 点击卡片跳转目标目录时由路由守卫（RequirePerm）鉴权。
   const title = "Owner 责任分布";
   const hint =
-    "每个责任人一条堆叠卡条，段长与全平台最大责任人同比（同分母），指标/数据表等各类资产可直接跨人比绝对量；点色段或图例直达对应目录、点卡片查看其指标目录";
+    "每个责任人一行：名称在左、资产堆叠色带在右，段长与全平台最大责任人同比（同分母）——同类色段跨人直接比长度即比绝对量；悬停每行查看该责任人明细（含生命周期），点名称或色段直达对应目录，资产颜色见图例";
   // 平台无任何资产时：管理员不渲染（无意义），其余角色展示引导
   if (owners.length === 0) {
     if (isAdmin) return null;
@@ -742,121 +742,100 @@ function OwnerDistribution({
           const pending = pendingCounts.metric + pendingCounts.dim + pendingCounts.term;
           const hot = pending > 0;
           const initials = (o.name || "?").slice(0, 2);
+          // 每行明细（悬停 Tooltip 展示，行内不重复放 6 类文字 + 生命周期以省空间）：
+          // 各类资产数值 + 指标生命周期非零状态 + 待处理提示。
+          const lifeItems = OWNER_STATES.filter(
+            (s) => (assetStats.metrics.by_status[s.key] ?? 0) > 0,
+          )
+            .map((s) => `${s.label} ${assetStats.metrics.by_status[s.key]}`)
+            .join(" · ");
+          const tipContent = (
+            <div style={{ fontSize: 12, lineHeight: 1.8 }}>
+              <div style={{ fontWeight: 600 }}>
+                {o.name} · 共 {o.total} 项 · 待处理 {pending}
+              </div>
+              <div>
+                {OWNER_ASSETS.map((a) => `${a.label} ${assetStats[a.key].total}`).join(" · ")}
+              </div>
+              {lifeItems && <div>指标生命周期：{lifeItems}</div>}
+              <div style={{ color: "var(--muted)" }}>点名称或色段跳转对应目录</div>
+            </div>
+          );
           return (
-            <button
+            <Tooltip
               key={id}
-              type="button"
-              className={`owner-card${hot ? " owner-hot" : ""}`}
-              onClick={() => navigate(`/catalog?owner_id=${id}`)}
-              title={`${o.name}：共 ${o.total} 项资产，待处理 ${pending}。点击查看其指标目录`}
+              title={tipContent}
+              placement="top"
+              mouseEnterDelay={0.1}
+              styles={{ root: { maxWidth: 440 } }}
             >
-              <span className="oc-head">
-                <span className="oc-avatar">{initials}</span>
-                <span className="oc-name">{o.name}</span>
-                {hot && (
-                  <OwnerHotBadge
-                    ownerId={id}
-                    ownerName={o.name}
-                    counts={pendingCounts}
-                    navigate={navigate}
-                  />
-                )}
+              <button
+                type="button"
+                className={`owner-row${hot ? " owner-hot" : ""}`}
+                onClick={() => navigate(`/catalog?owner_id=${id}`)}
+                aria-label={`${o.name}：共 ${o.total} 项资产，待处理 ${pending}。点击查看其指标目录`}
+              >
+                <span className="or-id">
+                  <span className="oc-avatar">{initials}</span>
+                  <span className="oc-name">{o.name}</span>
+                  {hot && (
+                    <OwnerHotBadge
+                      ownerId={id}
+                      ownerName={o.name}
+                      counts={pendingCounts}
+                      navigate={navigate}
+                    />
+                  )}
+                </span>
+                <span className="oc-bar" role="img" aria-label={`${o.name} 各类型资产数量（与最大责任人同尺度）`}>
+                  {OWNER_ASSETS.map((a) => {
+                    const count = assetStats[a.key].total;
+                    if (count <= 0) return null;
+                    // 段宽 = count / maxTotal（全 Owner 最大总资产）×100%：条总长即资产规模占比，
+                    // 同类色段跨人直接比长度即比绝对量。0 值不占段（tooltip 完整展示），避免误导。
+                    const w = Math.min(100, (count / maxTotal) * 100);
+                    // 段内标注：足够宽才显示（≥14% 放「标签 数量」、≥5% 放数量），过窄段只留色块；
+                    // 完整「标签 数量」与生命周期由悬停 Tooltip 展示。
+                    const segText =
+                      w >= 14 ? `${a.label} ${count}` : w >= 5 ? `${count}` : "";
+                    return (
+                      <span
+                        key={a.key}
+                        className={`oc-seg ${a.cls}`}
+                        style={{ width: `${w.toFixed(2)}%` }}
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`${a.label} ${count}，点击查看该责任人名下${a.label}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigate(`${a.href}?owner_id=${id}`);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.stopPropagation();
+                            navigate(`${a.href}?owner_id=${id}`);
+                          }
+                        }}
+                      >
+                        {segText}
+                      </span>
+                    );
+                  })}
+                </span>
                 <span className="oc-total">共 {o.total} 项</span>
-              </span>
-              <span className="oc-bar" role="img" aria-label={`${o.name} 各类型资产数量（与最大责任人同尺度）`}>
-                {OWNER_ASSETS.map((a) => {
-                  const count = assetStats[a.key].total;
-                  if (count <= 0) return null;
-                  // 段宽 = count / maxTotal（全 Owner 最大总资产）×100%：条总长即资产规模占比，
-                  // 同类色段跨人直接比长度即比绝对量。0 值不占段，由图例灰显。
-                  const w = Math.min(100, (count / maxTotal) * 100);
-                  // 段内标注智能显示：足够宽才渲染（约 ≥13% 放「标签 数量」、≥4% 放数量），
-                  // 过窄段只留色块；完整「标签 数量」恒由图例 .oc-legend 展示。
-                  const segText =
-                    w >= 13 ? `${a.label} ${count}` : w >= 4 ? `${count}` : "";
-                  return (
-                    <span
-                      key={a.key}
-                      className={`oc-seg ${a.cls}`}
-                      style={{ width: `${w.toFixed(2)}%` }}
-                      title={`${a.label} ${count}，点击查看该责任人名下${a.label}`}
-                      role="button"
-                      tabIndex={0}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        navigate(`${a.href}?owner_id=${id}`);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.stopPropagation();
-                          navigate(`${a.href}?owner_id=${id}`);
-                        }
-                      }}
-                    >
-                      {segText}
-                    </span>
-                  );
-                })}
-              </span>
-              <span className="oc-legend">
-                {OWNER_ASSETS.map((a) => {
-                  const count = assetStats[a.key].total;
-                  const isZero = count === 0;
-                  return (
-                    <span
-                      key={a.key}
-                      className={`oc-chip ${a.cls}${isZero ? " oc-chip-zero" : ""}`}
-                      title={isZero ? `${a.label} ${count}（该责任人名下暂无此类资产）` : `${a.label} ${count}，点击查看该责任人名下${a.label}`}
-                      role="button"
-                      tabIndex={0}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        navigate(`${a.href}?owner_id=${id}`);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.stopPropagation();
-                          navigate(`${a.href}?owner_id=${id}`);
-                        }
-                      }}
-                    >
-                      <i className="oc-chip-dot" />
-                      {a.label} {count}
-                    </span>
-                  );
-                })}
-              </span>
-              <span className="oc-life">
-                {OWNER_STATES.map((s) => {
-                  const count = assetStats.metrics.by_status[s.key] ?? 0;
-                  if (count <= 0) return null;
-                  return (
-                    <span
-                      key={s.key}
-                      className="oc-life-item"
-                      title={`${s.label} ${count}，点击查看该责任人名下${s.label}指标`}
-                      role="button"
-                      tabIndex={0}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        navigate(`/catalog?status=${s.key}&owner_id=${id}`);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.stopPropagation();
-                          navigate(`/catalog?status=${s.key}&owner_id=${id}`);
-                        }
-                      }}
-                    >
-                      <i className={`oc-dot ${s.cls}`} />
-                      {s.label} {count}
-                    </span>
-                  );
-                })}
-              </span>
-            </button>
+              </button>
+            </Tooltip>
           );
         })}
+      </div>
+      <div className="oc-legend owner-legend">
+        <span className="oc-legend-title">资产颜色（悬停各责任人行查看明细，点色段直达对应目录）</span>
+        {OWNER_ASSETS.map((a) => (
+          <span key={a.key} className={`oc-chip ${a.cls}`}>
+            <i className="oc-chip-dot" />
+            {a.label}
+          </span>
+        ))}
       </div>
     </Card>
   );
