@@ -10,8 +10,8 @@
 
 from alembic import op
 
-revision = "0141"
-down_revision = "0140"
+revision = "0141_dp_poll_interval_1440"
+down_revision = "0140_dp_ticket_retry_task"
 branch_labels = None
 depends_on = None
 
