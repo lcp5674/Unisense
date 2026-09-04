@@ -22,7 +22,7 @@ vi.mock("../api", () => ({
 let mockPermRole = "platform_admin";
 vi.mock("../hooks/usePermission", () => ({
   usePermission: () => ({
-    can: (perm: string) =>
+    can: () =>
       mockPermRole === "platform_admin" || mockPermRole === "domain_admin",
     canAny: () => true,
     canAll: () => true,
