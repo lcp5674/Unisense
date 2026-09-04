@@ -571,6 +571,19 @@ class MetricDeprecateRequest(BaseModel):
     )
 
 
+class MetricRenameRequest(BaseModel):
+    """指标改编码请求（仅平台管理员 + DRAFT/DEPRECATED 状态，跨全系统级联）。"""
+
+    new_code: str = Field(
+        ...,
+        max_length=64,
+        description=(
+            "新指标编码：小写字母开头，仅含小写字母/数字/下划线（通用标识符，"
+            "与注册放宽后的编码规则一致），不能以下划线开头/结尾、无连续下划线"
+        ),
+    )
+
+
 class MetricSubmitRequest(BaseModel):
     """提交审核请求（DRAFT → REVIEW，对齐 FR-003）。
 

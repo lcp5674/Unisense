@@ -1498,6 +1498,7 @@ function MembersTab() {
     setEditTarget(m);
     setEditOpen(true);
     editForm.setFieldsValue({
+      member_code: m.member_code,
       member_name: m.member_name,
       parent_code: m.parent_code ?? undefined,
       status: m.status,
@@ -1508,14 +1509,21 @@ function MembersTab() {
     if (!dimCode || !editTarget) return;
     setEditSaving(true);
     try {
-      await updateDimensionMember({
-        dim_code: dimCode,
-        member_code: editTarget.member_code,
-        member_name: values.member_name ? String(values.member_name) : undefined,
-        // 空串表示置为根成员（取消父级），后端据此重算 path
-        parent_code: values.parent_code ? String(values.parent_code) : "",
-        status: values.status ? String(values.status) : undefined,
-      });
+      await updateDimensionMember(
+        dimCode,
+        editTarget.member_code, // URL 定位（旧码）
+        {
+          // 仅 DRAFT 成员改码时传新码（编辑弹窗仅 DRAFT 显示编码输入框）
+          member_code:
+            editTarget.status === "DRAFT" && values.member_code
+              ? String(values.member_code).trim()
+              : undefined,
+          member_name: values.member_name ? String(values.member_name) : undefined,
+          // 空串表示置为根成员（取消父级），后端据此重算 path
+          parent_code: values.parent_code ? String(values.parent_code) : "",
+          status: values.status ? String(values.status) : undefined,
+        },
+      );
       message.success("成员已更新");
       setEditOpen(false);
       editForm.resetFields();
@@ -2277,6 +2285,15 @@ function MembersTab() {
         confirmLoading={editSaving}
       >
         <Form form={editForm} layout="vertical" scrollToFirstError onFinish={handleEdit} style={{ marginTop: 8 }}>
+          {editTarget?.status === "DRAFT" ? (
+            <Form.Item
+              name="member_code"
+              label="成员编码"
+              extra={<span className="muted" style={{ fontSize: 12 }}>仅草稿成员可修改编码；留空保持不变（发布后编码为稳定标识不可变更）</span>}
+            >
+              <Input maxLength={64} placeholder={editTarget.member_code} />
+            </Form.Item>
+          ) : null}
           <Form.Item name="member_name" label="成员名称" rules={[{ required: true }]}>
             <Input />
           </Form.Item>

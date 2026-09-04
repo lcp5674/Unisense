@@ -1019,6 +1019,11 @@ export function Templates() {
     setEditSaving(true);
     try {
       const payload: Record<string, unknown> = {};
+      // 模板编码：手动输入则以输入值为准（后端校验 tpl_ 前缀格式），留空由后端自动生成
+      if (values.code !== undefined && values.code !== null) {
+        const c = String(values.code).trim();
+        if (c) payload.code = c;
+      }
       // 域 Cascader 值（路径数组）→ 叶子码（必填，由表单规则保证）
       if (values.domain) {
         const path = Array.isArray(values.domain) ? values.domain : [values.domain];
@@ -1704,6 +1709,27 @@ export function Templates() {
       >
         <Form form={editForm} layout="vertical" scrollToFirstError onFinish={createOpen ? handleCreateTpl : handleUpdateTpl} style={{ marginTop: 8 }}>
           <Space style={{ width: "100%" }} wrap align="start">
+            {createOpen ? (
+              <Form.Item
+                name="code"
+                label="模板编码"
+                style={{ width: 280 }}
+                extra={<span className="muted" style={{ fontSize: 12 }}>留空由系统自动生成（tpl_{"{域}_{名称}"}）；手动输入须 tpl_ 开头</span>}
+              >
+                <Input
+                  maxLength={64}
+                  showCount
+                  placeholder="留空自动生成，如 tpl_sales_order"
+                  onBlur={(e) => {
+                    const v = e.target.value.trim();
+                    if (v && !v.startsWith("tpl_")) {
+                      e.target.value = "";
+                      editForm.setFieldValue("code", "");
+                    }
+                  }}
+                />
+              </Form.Item>
+            ) : null}
             <Form.Item name="name" label="模板名称" rules={[{ required: true, message: "请填写名称" }, { max: 128, message: "最长 128 字符" }]} style={{ width: 280 }}>
               <Input maxLength={128} showCount />
             </Form.Item>

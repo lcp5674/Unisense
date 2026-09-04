@@ -32,6 +32,7 @@ vi.mock("../api", () => ({
   removeFavorite: vi.fn(),
   approveMetric: vi.fn(),
   deprecateMetric: vi.fn(),
+  renameMetricCode: vi.fn(),
   recoverSourceDropped: vi.fn(),
   confirmDeprecateDropped: vi.fn(),
   emergencyPublishMetric: vi.fn(),

@@ -473,6 +473,77 @@ async def test_update_member_invalid_status_rejected() -> None:
         await svc.update_member("geo_region", "m1", DimensionMemberUpdate(status="BOGUS"))
 
 
+async def test_update_member_rename_draft_cascades_references() -> None:
+    """DRAFT 成员改码成功：级联 rename_member_references + 自身编码更新。"""
+    svc, repo = await _svc()
+    member = DimensionMember(
+        id=1,
+        dim_code="geo_region",
+        member_code="m1",
+        member_name="成员",
+        parent_code=None,
+        path="/m1",
+        status="DRAFT",
+    )
+    # 第一次 get_member(dim, m1) 返回该成员；第二次 get_member(dim, m2) 唯一性检查返回 None
+    repo.get_member = AsyncMock(
+        side_effect=lambda dim, code: member if code == "m1" else None
+    )
+    repo.rename_member_references = AsyncMock()
+    updated = await svc.update_member(
+        "geo_region", "m1", DimensionMemberUpdate(member_code="m2")
+    )
+    assert updated.member_code == "m2"
+    repo.rename_member_references.assert_awaited_once_with("geo_region", "m1", "m2")
+
+
+async def test_update_member_rename_duplicate_rejected() -> None:
+    """DRAFT 改码撞已有成员编码 → 409（MEMBER_EXISTS）。"""
+    svc, repo = await _svc()
+    member = DimensionMember(
+        id=1,
+        dim_code="geo_region",
+        member_code="m1",
+        member_name="成员",
+        parent_code=None,
+        path="/m1",
+        status="DRAFT",
+    )
+    existing = DimensionMember(
+        id=2,
+        dim_code="geo_region",
+        member_code="m2",
+        member_name="已存在",
+        parent_code=None,
+        path="/m2",
+        status="PUBLISHED",
+    )
+    repo.get_member = AsyncMock(
+        side_effect=lambda dim, code: member if code == "m1" else existing
+    )
+    with pytest.raises(ConflictError) as exc:
+        await svc.update_member("geo_region", "m1", DimensionMemberUpdate(member_code="m2"))
+    assert exc.value.error_code == "MEMBER_EXISTS"
+
+
+async def test_update_member_rename_published_rejected() -> None:
+    """PUBLISHED 成员改码 → 拒绝（仅 DRAFT 可改）。"""
+    svc, repo = await _svc()
+    member = DimensionMember(
+        id=1,
+        dim_code="geo_region",
+        member_code="m1",
+        member_name="成员",
+        parent_code=None,
+        path="/m1",
+        status="PUBLISHED",
+    )
+    repo.get_member = AsyncMock(return_value=member)
+    with pytest.raises(UnisenseError) as exc:
+        await svc.update_member("geo_region", "m1", DimensionMemberUpdate(member_code="m2"))
+    assert exc.value.error_code == "INVALID_STATE"
+
+
 async def test_delete_member_cascades_subtree() -> None:
     """工业级语义：删除父级连带级联删除整个子树（BFS 收集后代一次删除）。"""
     svc, repo = await _svc()

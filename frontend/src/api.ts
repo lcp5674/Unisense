@@ -1091,6 +1091,20 @@ export async function restoreMetric(code: string): Promise<MetricResponse> {
   );
 }
 
+// 修改指标编码（改码：仅平台管理员 + DRAFT/DEPRECATED，跨全系统级联引用同步）
+export async function renameMetricCode(
+  code: string,
+  new_code: string,
+): Promise<MetricResponse> {
+  return request<MetricResponse>(
+    `${API_BASE}/metric-definitions/${encodeURIComponent(code)}/rename`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ new_code }),
+    },
+  );
+}
+
 // 彻底删除已软删指标（回收站硬删，物理删除不可恢复；仅平台管理员）
 export async function purgeMetric(code: string): Promise<{ metric_code: string }> {
   return request<{ metric_code: string }>(
@@ -2818,17 +2832,21 @@ export async function createDimensionMember(body: {
 }
 
 /** 编辑维度成员（PUT /dimensions/{dim_code}/members/{member_code}） */
-export async function updateDimensionMember(body: {
-  dim_code: string;
-  member_code: string;
-  member_name?: string;
-  parent_code?: string | null;
-  // path 由服务端按父级独占推导，前端不传
-  attributes?: Record<string, unknown> | null;
-  status?: string;
-}): Promise<DimensionMember> {
+export async function updateDimensionMember(
+  dimCode: string,
+  memberCode: string,
+  body: {
+    // 新编码：仅 DRAFT 成员改码时传（发布后编码为稳定标识，后端强校验拒绝）
+    member_code?: string;
+    member_name?: string;
+    parent_code?: string | null;
+    // path 由服务端按父级独占推导，前端不传
+    attributes?: Record<string, unknown> | null;
+    status?: string;
+  },
+): Promise<DimensionMember> {
   return request<DimensionMember>(
-    `${API_BASE}/dimensions/${encodeURIComponent(body.dim_code)}/members/${encodeURIComponent(body.member_code)}`,
+    `${API_BASE}/dimensions/${encodeURIComponent(dimCode)}/members/${encodeURIComponent(memberCode)}`,
     {
       method: "PUT",
       body: JSON.stringify(body),

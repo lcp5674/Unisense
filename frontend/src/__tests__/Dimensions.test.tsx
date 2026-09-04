@@ -442,11 +442,60 @@ describe("Dimensions 页面", () => {
     await user.click(screen.getByRole("button", { name: /保\s*存/ }));
     await waitFor(() => {
       expect(updateDimensionMember).toHaveBeenCalledWith(
+        "dim_channel",
+        "online",
         expect.objectContaining({
-          dim_code: "dim_channel",
-          member_code: "online",
           member_name: "线上（新）",
           status: "PUBLISHED",
+        }),
+      );
+    });
+  });
+
+  it("成员管理：DRAFT 成员编辑显示编码输入框并提交新码", async () => {
+    const user = userEvent.setup();
+    const member = {
+      id: 1,
+      dim_code: "dim_channel",
+      member_code: "online_typo",
+      member_name: "线上",
+      parent_code: null,
+      path: "/online_typo",
+      attributes: null,
+      status: "DRAFT",
+      created_at: "2026-08-01T00:00:00",
+    };
+    vi.mocked(listDimensionMembers).mockResolvedValue({ items: [member], total: 1 });
+    render(
+      <MemoryRouter>
+        <Dimensions />
+      </MemoryRouter>,
+    );
+    await user.click(screen.getByRole("tab", { name: /维度值管理/ }));
+    const dimSelect = await screen.findByRole("combobox");
+    fireEvent.mouseDown(dimSelect);
+    await user.click(await screen.findByText("dim_channel · 渠道"));
+
+    await screen.findByText("online_typo");
+    const row = screen.getByText("online_typo").closest("tr") as HTMLElement;
+    await user.click(within(row).getByRole("button", { name: /编\s*辑/ }));
+    await waitFor(() => {
+      expect(screen.getByText(/编辑成员：online_typo/)).toBeInTheDocument();
+    });
+    // DRAFT 成员显示编码输入框
+    const codeInput = screen.getByLabelText("成员编码") as HTMLInputElement;
+    expect(codeInput.value).toBe("online_typo");
+    await user.clear(codeInput);
+    await user.type(codeInput, "online");
+    await user.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => {
+      expect(updateDimensionMember).toHaveBeenCalledWith(
+        "dim_channel",
+        "online_typo",
+        expect.objectContaining({
+          member_code: "online",
+          member_name: "线上",
+          status: "DRAFT",
         }),
       );
     });

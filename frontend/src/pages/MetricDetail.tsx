@@ -47,6 +47,7 @@ import {
   approveMetric,
   deprecateMetric,
   deleteMetric,
+  renameMetricCode,
   recoverSourceDropped,
   confirmDeprecateDropped,
   emergencyPublishMetric,
@@ -833,6 +834,10 @@ export function MetricDetail() {
   const [grayOpen, setGrayOpen] = useState(false);
   const [deprecateOpen, setDeprecateOpen] = useState(false);
   const [successor, setSuccessor] = useState("");
+  // 改编码（平台管理员 + DRAFT/DEPRECATED，跨全系统级联）
+  const [renameCodeOpen, setRenameCodeOpen] = useState(false);
+  const [renameCodeValue, setRenameCodeValue] = useState("");
+  const [renameCodeSaving, setRenameCodeSaving] = useState(false);
   // 提交评审弹窗（TD §13）：可指派评审用户或域评审组
   const [submitOpen, setSubmitOpen] = useState(false);
   const [submitReviewerType, setSubmitReviewerType] = useState<"user" | "domain" | null>(null);
@@ -2415,6 +2420,20 @@ export function MetricDetail() {
           去改名
         </Button>
       )}
+      {/* 改编码（仅平台管理员 + DRAFT/DEPRECATED）：跨全系统级联同步引用 */}
+      {role === "platform_admin" &&
+        (metric.status === "DRAFT" || metric.status === "DEPRECATED") && (
+          <Button
+            icon={<EditOutlined />}
+            loading={busy}
+            onClick={() => {
+              setRenameCodeValue(metric.metric_code);
+              setRenameCodeOpen(true);
+            }}
+          >
+            改编码
+          </Button>
+        )}
     </Space>
   );
 
@@ -3221,6 +3240,61 @@ export function MetricDetail() {
         <p className="muted" style={{ marginTop: 8 }}>
           留空表示该指标无替代（直接废弃下线）；填写后废弃指标的消费方会看到「替代指标」引导。可从已发布指标搜索选择，无需手输编码。
         </p>
+      </Modal>
+
+      {/* 改编码（平台管理员 + DRAFT/DEPRECATED）：跨全系统级联同步血缘/收藏/订阅/质量引用 */}
+      <Modal
+        title="修改指标编码"
+        open={renameCodeOpen}
+        confirmLoading={renameCodeSaving}
+        onCancel={() => {
+          setRenameCodeOpen(false);
+          setRenameCodeValue("");
+        }}
+        okText="确认改码"
+        okButtonProps={{ danger: true }}
+        onOk={async () => {
+          const newCode = renameCodeValue.trim();
+          if (!newCode) {
+            message.warning("请输入新指标编码");
+            return;
+          }
+          if (newCode === metric.metric_code) {
+            message.warning("新编码与当前编码相同");
+            return;
+          }
+          setRenameCodeSaving(true);
+          try {
+            const updated = await renameMetricCode(metric.metric_code, newCode);
+            message.success(`指标编码已修改：${metric.metric_code} → ${updated.metric_code}`);
+            setRenameCodeOpen(false);
+            setRenameCodeValue("");
+            setMetric(updated);
+            // 编码变化后 URL 路径同步跳转，避免详情页停留旧码
+            window.history.replaceState(null, "", `/detail/${encodeURIComponent(updated.metric_code)}`);
+            if (typeof load === "function") load();
+          } catch (err) {
+            message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "改码失败");
+          } finally {
+            setRenameCodeSaving(false);
+          }
+        }}
+      >
+        <Input
+          value={renameCodeValue}
+          onChange={(e) => setRenameCodeValue(e.target.value)}
+          maxLength={64}
+          showCount
+          placeholder="新指标编码（小写字母开头，仅小写字母/数字/下划线）"
+          prefix={<span className="muted">{metric.metric_code} → </span>}
+        />
+        <Alert
+          style={{ marginTop: 12 }}
+          type="warning"
+          showIcon
+          message="改码将级联同步全系统引用"
+          description={`血缘边节点、收藏、资产订阅、质量观测/外部基准/对账记录、冲突仲裁中的「${metric.metric_code}」将同步改为新码；审计/快照等历史记录保留旧码以维持追溯（WORM）。操作将写入审计留痕。`}
+        />
       </Modal>
 
       {/* 编辑业务描述弹窗：复用 updateMetricDescription（已发布指标也可维护非口径描述） */}

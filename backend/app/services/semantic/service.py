@@ -461,6 +461,70 @@ class MetricService(BaseService):
                 ctx={"code": "CODE_EXHAUSTED", "metric_code": base},
             ) from exc
 
+    async def _takeover_archived_code(
+        self, metric_code: str, owner_id: int, role: str | None
+    ) -> None:
+        """软删同码接管：回收站软删记录被同码重建时级联清除，释放编码资源。
+
+        背景：``uq_metric_code`` 唯一索引不含 ``deleted_at``——软删记录仍占键位，
+        service 前置检查（过滤软删）放行后 INSERT 必撞唯一索引。此处把「仅软删同码」
+        视为编码资源接管：原 Owner（或平台管理员）重建同码 = 放弃旧废弃记录。
+
+        仲裁作废记录（``successor_code`` 置位，deleted_at+successor 语义）不接管——
+        保留「编码已作废并指向接替指标」的历史指针，避免破坏作废溯源。
+
+        Args:
+            metric_code: 指标编码。
+            owner_id: 创建人（将作为新指标 Owner）。
+            role: 创建人角色（None=未限定，仅按 owner 匹配）。
+
+        Raises:
+            ConflictError: 仲裁作废记录 / 非原 Owner 接管他人软删记录。
+        """
+        archived = await self._repo.get_archived_by_code(metric_code)
+        if archived is None:
+            return
+        if archived.successor_code:
+            raise ConflictError(
+                f"指标编码 {metric_code} 已作废并指向接替指标 {archived.successor_code}，无法重新创建",
+                error_code="METRIC_CODE_EXISTS",
+                ctx={
+                    "code": "METRIC_CODE_EXISTS",
+                    "metric_code": metric_code,
+                    "successor_code": archived.successor_code,
+                },
+            )
+        if role != "platform_admin" and archived.owner_id != owner_id:
+            raise ConflictError(
+                f"指标编码已存在（回收站含同名已删除记录，仅原 Owner 或平台管理员可接管重建）: {metric_code}",
+                error_code="METRIC_CODE_EXISTS",
+                ctx={
+                    "code": "METRIC_CODE_EXISTS",
+                    "metric_code": metric_code,
+                    "archived_owner_id": archived.owner_id,
+                },
+            )
+        await self._repo.purge_metric(archived.id, metric_code)
+        # 与 purge_metric 对齐：ES 索引与进程缓存同步清除（best-effort，失败不阻断创建）
+        try:
+            from app.services.search.es_indexer import EsIndexer
+
+            await EsIndexer(self._db).delete_metric(metric_code)
+        except Exception:  # noqa: BLE001 - ES 不可用不阻断业务（检索自动降级 MySQL）
+            logger.warning(
+                "metric_takeover_es_delete_failed",
+                metric_code=metric_code,
+                exc_info=True,
+            )
+        await self._cache.invalidate(metric_code)
+        logger.info(
+            "metric_archived_taken_over",
+            metric_code=metric_code,
+            archived_id=archived.id,
+            actor_id=owner_id,
+            role=role,
+        )
+
     async def create_metric(
         self,
         request: MetricCreateRequest,
@@ -510,7 +574,7 @@ class MetricService(BaseService):
         if not request.metric_code:
             request.metric_code = await self._generate_metric_code(request)
 
-        # 检查编码唯一性
+        # 检查编码唯一性（活跃同码 → 409）
         existing = await self._repo.get_by_code(request.metric_code)
         if existing is not None:
             raise ConflictError(
@@ -518,6 +582,11 @@ class MetricService(BaseService):
                 error_code="METRIC_CODE_EXISTS",
                 ctx={"code": "METRIC_CODE_EXISTS", "metric_code": request.metric_code},
             )
+        # 软删同码接管：uq_metric_code 唯一索引不含 deleted_at，回收站软删记录仍占键位，
+        # 直接 INSERT 必撞唯一索引 → IntegrityError 409。此处把「仅软删同码」按创建者
+        # 接管处理——级联清除旧废弃记录、释放编码，使同码重建成为可能（自删自建/清理后重建）。
+        if await self._repo.get_archived_by_code(request.metric_code) is not None:
+            await self._takeover_archived_code(request.metric_code, owner_id, role)
 
         # ---- 字典校验 + 自动推断（对齐 spec FR-008/FR-009/FR-011）----
         # 1. 校验 domain 存在且 active
@@ -3412,6 +3481,163 @@ class MetricService(BaseService):
         )
         return updated
 
+    async def rename_metric_code(
+        self,
+        metric_code: str,
+        new_code: str,
+        actor_id: int,
+        role: str,
+    ) -> Metric:
+        """平台管理员修改指标编码（仅 DRAFT/DEPRECATED），跨全系统级联重命名。
+
+        指标编码是全系统核心标识（血缘边节点键/收藏/资产订阅/质量观测/外部基准/
+        对账记录/冲突仲裁 JSON/替代指标引用均按编码关联），改码须同事务级联同步
+        活跃引用，否则留下悬挂引用；**WORM 语义的历史记录（审计/值快照/查询日志）
+        保留旧码**——改码本身即审计留痕（from→to），历史追溯按旧码仍可检索。
+
+        仅平台管理员可执行（跨域级联影响面超出 domain_admin 管辖边界）；仅
+        DRAFT/DEPRECATED 可改（发布后编码即消费/血缘的稳定标识，改码须废弃重建）。
+
+        Args:
+            metric_code: 当前指标编码。
+            new_code: 新编码（通用标识符，注册放宽后的编码规则）。
+            actor_id: 操作人 ID。
+            role: 操作人角色（须 platform_admin）。
+
+        Returns:
+            改码后的指标。
+
+        Raises:
+            NotFoundError: 指标不存在。
+            AuthError: 非平台管理员（越权）。
+            ValidationError: 新编码格式非法。
+            ConflictError: 新编码已被占用 / 状态不允许改码。
+        """
+        metric = await self.get_metric(metric_code)
+        if role != "platform_admin":
+            raise AuthError(
+                "仅平台管理员可修改指标编码（跨域级联影响面超出域管理员管辖）",
+                error_code="FORBIDDEN",
+            )
+        if metric.status not in ("DRAFT", "DEPRECATED"):
+            raise ConflictError(
+                f"仅 DRAFT/DEPRECATED 状态可修改编码（当前 {metric.status}）；"
+                "已发布指标改码须先废弃再重建",
+                error_code="INVALID_TRANSITION",
+            )
+        new_code = (new_code or "").strip()
+        if not new_code:
+            raise ValidationError("新指标编码不能为空", error_code="INVALID_METRIC_CODE")
+        from app.services.semantic.conflict_precheck import ConflictPrechecker
+
+        valid, code_err = ConflictPrechecker.validate_code_format(new_code)
+        if not valid:
+            raise ValidationError(
+                code_err or "新指标编码格式非法",
+                error_code="INVALID_METRIC_CODE",
+            )
+        if new_code == metric_code:
+            return metric  # 幂等 no-op（不触发级联/冲突校验）
+        exists = await self._repo.get_by_code(new_code)
+        if exists is not None:
+            raise ConflictError(
+                f"指标编码已存在: {new_code}",
+                error_code="METRIC_EXISTS",
+            )
+
+        # ---- 级联重命名活跃引用（同事务；WORM 历史保留旧码）----
+        from sqlalchemy import select, update
+
+        from app.models.conflict import Conflict, RulingRecord
+        from app.models.consume import Favorite, FavoriteAssetType
+        from app.models.lineage import LineageEdge
+        from app.models.notify import SubscriptionPref
+        from app.models.quality import (
+            ExternalBenchmark,
+            QualityObservation,
+            ReconciliationRecord,
+        )
+
+        old_node = f"metric:{metric_code}"
+        new_node = f"metric:{new_code}"
+        # 1) 血缘边节点键（L3 指标节点 + READS_COLUMN 等以 metric:{code} 为端点的活跃边）
+        await self._db.execute(
+            update(LineageEdge)
+            .where(LineageEdge.source_node == old_node)
+            .values(source_node=new_node)
+        )
+        await self._db.execute(
+            update(LineageEdge)
+            .where(LineageEdge.target_node == old_node)
+            .values(target_node=new_node)
+        )
+        # 2) 收藏（METRIC 类型 asset_id）
+        await self._db.execute(
+            update(Favorite)
+            .where(Favorite.asset_type == FavoriteAssetType.METRIC.value)
+            .where(Favorite.asset_id == metric_code)
+            .values(asset_id=new_code)
+        )
+        # 3) 资产订阅（METRIC watch）
+        await self._db.execute(
+            update(SubscriptionPref)
+            .where(SubscriptionPref.asset_type == "METRIC")
+            .where(SubscriptionPref.asset_id == metric_code)
+            .values(asset_id=new_code)
+        )
+        # 4) 质量观测/外部基准/对账记录（按 metric_code 冗余关联）
+        for model in (QualityObservation, ExternalBenchmark, ReconciliationRecord):
+            await self._db.execute(
+                update(model)
+                .where(model.metric_code == metric_code)
+                .values(metric_code=new_code)
+            )
+        # 5) 其他指标将本码作为替代（successor_code 反向引用）
+        await self._db.execute(
+            update(Metric)
+            .where(Metric.successor_code == metric_code)
+            .values(successor_code=new_code)
+        )
+        # 6) 冲突仲裁 / 裁决记录 JSON（metric_codes 值为 {candidate|existing: code}）
+        for model in (Conflict, RulingRecord):
+            rows = (
+                await self._db.execute(
+                    select(model).where(model.metric_codes.isnot(None))
+                )
+            ).scalars().all()
+            for row in rows:
+                mc = row.metric_codes or {}
+                changed = False
+                for k, v in list(mc.items()):
+                    if v == metric_code:
+                        mc[k] = new_code
+                        changed = True
+                if changed:
+                    await self._db.execute(
+                        update(model)
+                        .where(model.id == row.id)
+                        .values(metric_codes=mc)
+                    )
+        # 7) 主表编码
+        await self._db.execute(
+            update(Metric)
+            .where(Metric.metric_code == metric_code)
+            .values(metric_code=new_code)
+        )
+        await self._cache.invalidate(metric_code)
+        await self._cache.invalidate(new_code)
+        logger.info(
+            "metric_code_renamed",
+            old=metric_code,
+            new=new_code,
+            actor_id=actor_id,
+            status=metric.status,
+        )
+        renamed = await self._repo.get_by_code(new_code)
+        if renamed is None:  # pragma: no cover - 级联更新后必然存在
+            raise NotFoundError(f"改码后指标不存在: {new_code}")
+        return renamed
+
     async def promote_metric(
         self,
         metric_code: str,
@@ -4008,6 +4234,15 @@ class MetricService(BaseService):
             raise BusinessError(
                 "仅平台管理员或指标原 Owner 可恢复",
                 error_code="FORBIDDEN",
+            )
+
+        # 撞码保护：恢复 = 清除 deleted_at，若同码活跃新指标已存在（如经接管重建），
+        # 清除后必撞 uq_metric_code 唯一索引 → IntegrityError。显式检出并给出可操作提示。
+        if await self._repo.get_by_code(metric_code) is not None:
+            raise BusinessError(
+                f"编码 {metric_code} 已被新指标占用，无法恢复原记录"
+                "（可先修改新指标编码，或由平台管理员彻底删除软删记录后重试）",
+                error_code="VALIDATION_ERROR",
             )
 
         await self._repo.restore_metric(metric.id)

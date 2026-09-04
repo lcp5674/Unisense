@@ -72,6 +72,9 @@ def _svc_with_repo() -> tuple[MetricService, MagicMock]:
         mock_repo_cls.return_value.has_pending_version = AsyncMock(return_value=False)
         # P2-14 owner 名称映射：默认空（对比/治理路径不依赖 owner 解析）；个别测试覆盖
         mock_repo_cls.return_value.get_user_display_names = AsyncMock(return_value={})
+        # 软删同码接管（create 编码唯一性第二态）：默认无软删记录走普通路径；
+        # 接管场景由专项测试覆盖（get_archived_by_code 返回软删 Metric）。
+        mock_repo_cls.return_value.get_archived_by_code = AsyncMock(return_value=None)
         return svc, mock_repo_cls.return_value
 
 
@@ -1855,6 +1858,115 @@ async def test_deprecate_metric_empty_successor_direct_deprecate():
     repo.get_by_code.assert_called_once()  # 仅查被废弃指标自身
 
 
+# ---- 改编码（rename_metric_code）----
+
+
+async def test_rename_metric_code_rejects_non_platform_admin():
+    """非平台管理员改码 → 403（跨域级联影响面超出域管理员管辖）。"""
+    from app.core.exceptions import AuthError
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT"))
+    with pytest.raises(AuthError) as exc:
+        await svc.rename_metric_code(
+            "sales_gmv_daily",
+            "sales_gmv_daily_v2",
+            actor_id=1,
+            role="domain_admin",
+        )
+    assert exc.value.error_code == "FORBIDDEN"
+
+
+async def test_rename_metric_code_rejects_published():
+    """PUBLISHED 状态改码 → 409（发布后编码为稳定标识，须废弃重建）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="PUBLISHED"))
+    with pytest.raises(ConflictError) as exc:
+        await svc.rename_metric_code(
+            "sales_gmv_daily",
+            "sales_gmv_daily_v2",
+            actor_id=1,
+            role="platform_admin",
+        )
+    assert exc.value.error_code == "INVALID_TRANSITION"
+
+
+async def test_rename_metric_code_rejects_bad_format():
+    """新编码格式非法 → 422（大写/非法字符）。"""
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=make_metric(status="DRAFT"))
+    with pytest.raises(ValidationError) as exc:
+        await svc.rename_metric_code(
+            "sales_gmv_daily",
+            "Bad_Code!",
+            actor_id=1,
+            role="platform_admin",
+        )
+    assert exc.value.error_code == "INVALID_METRIC_CODE"
+
+
+async def test_rename_metric_code_same_code_idempotent():
+    """新码与旧码相同 → 幂等 no-op（不触发级联/冲突校验）。"""
+    svc, repo = _svc_with_repo()
+    metric = make_metric(status="DRAFT")
+    repo.get_by_code = AsyncMock(return_value=metric)
+    result = await svc.rename_metric_code(
+        "sales_gmv_daily",
+        "sales_gmv_daily",
+        actor_id=1,
+        role="platform_admin",
+    )
+    assert result is metric
+    repo.get_by_code.assert_awaited_once()  # 仅取指标自身，未查新码冲突
+
+
+async def test_rename_metric_code_rejects_duplicate():
+    """新码已存在 → 409（METRIC_EXISTS）。"""
+    svc, repo = _svc_with_repo()
+
+    def _dup_side_effect(code: str):
+        if code == "sales_gmv_daily":
+            return make_metric(status="DRAFT")
+        return make_metric(metric_code="sales_gmv_daily_v2")
+
+    repo.get_by_code = AsyncMock(side_effect=_dup_side_effect)
+    with pytest.raises(ConflictError) as exc:
+        await svc.rename_metric_code(
+            "sales_gmv_daily",
+            "sales_gmv_daily_v2",
+            actor_id=1,
+            role="platform_admin",
+        )
+    assert exc.value.error_code == "METRIC_EXISTS"
+
+
+async def test_rename_metric_code_draft_cascades_and_returns_new():
+    """DRAFT 改码成功：级联 update 血缘边/收藏/订阅/质量/successor + 主表，返回新码指标。"""
+    svc, repo = _svc_with_repo()
+    old = make_metric(status="DRAFT", metric_code="sales_gmv_daily")
+    renamed = make_metric(status="DRAFT", metric_code="sales_gmv_daily_v2")
+    # 第一次 get_by_code=取旧（get_metric），第二次=查新码冲突（None），第三次=取改码后
+    repo.get_by_code = AsyncMock(side_effect=[old, None, renamed])
+    # 级联 select（冲突 JSON 循环）需返回空结果集
+    svc._db.execute = AsyncMock(
+        return_value=MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[]))))
+    )
+    svc._cache.invalidate = AsyncMock()
+
+    result = await svc.rename_metric_code(
+        "sales_gmv_daily",
+        "sales_gmv_daily_v2",
+        actor_id=1,
+        role="platform_admin",
+    )
+
+    assert result.metric_code == "sales_gmv_daily_v2"
+    # 主表编码更新已执行（级联中最后一次 update Metric）
+    assert svc._db.execute.await_count >= 9
+    svc._cache.invalidate.assert_any_await("sales_gmv_daily")
+    svc._cache.invalidate.assert_any_await("sales_gmv_daily_v2")
+
+
 async def test_deprecate_metric_none_successor_direct_deprecate():
     """None 替代指标直接废弃（无替代下线合法场景）。"""
     svc, repo = _svc_with_repo()
@@ -3335,12 +3447,17 @@ async def test_create_metric_auto_code_conflict_suffix():
 
 
 async def test_create_metric_explicit_code_still_validated():
-    """显式传入 metric_code 仍走 4 段式校验（ConflictError 之外，非法格式 422）。"""
+    """显式传入 metric_code 仍走格式校验（非法标识符 422；放宽后不再强制 4 段式）。"""
     svc, repo = _svc_with_repo()
     repo.get_by_code = AsyncMock(return_value=None)
 
     with pytest.raises(ValueError):
-        MetricCreateRequest(**make_create_payload(metric_code="bad_code"))
+        MetricCreateRequest(**make_create_payload(metric_code="Bad_Code"))
+    with pytest.raises(ValueError):
+        MetricCreateRequest(**make_create_payload(metric_code="bad__code"))
+    # 放宽语义：短编码（非 4 段）合法可注册
+    req = MetricCreateRequest(**make_create_payload(metric_code="fin_gmv"))
+    assert req.metric_code == "fin_gmv"
 
 
 # ---- approve/reject 自审豁免（管理员可审核自己提交的指标，普通角色仍禁止）----

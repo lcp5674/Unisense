@@ -561,6 +561,29 @@ class DimensionService(BaseService, MasterDataReviewMixin):
                 f"已废弃成员不可更新: {dim_code}/{member_code}",
                 error_code="INVALID_STATE",
             )
+        # 改码（member_code）：仅 DRAFT 可改——发布后编码即下游消费/血缘的稳定标识，
+        # 改码须走废弃重建（对齐维度主体 update_dimension 的 DRAFT 限定语义）
+        if data.member_code is not None and data.member_code != member.member_code:
+            if member.status != DimensionStatus.DRAFT.value:
+                raise UnisenseError(
+                    f"仅 DRAFT 状态成员可修改编码（当前 {member.status}）；"
+                    f"已发布/已废弃成员请先废弃再重建: {dim_code}/{member_code}",
+                    error_code="INVALID_STATE",
+                )
+            new_code = data.member_code.strip()
+            if not new_code:
+                raise ValidationError(
+                    "成员编码不能为空",
+                    error_code="INVALID_MEMBER_CODE",
+                )
+            if await self._repo.get_member(dim_code, new_code) is not None:
+                raise ConflictError(
+                    f"维度成员编码已存在: {dim_code}/{new_code}",
+                    error_code="MEMBER_EXISTS",
+                    ctx={"member_code": new_code},
+                )
+            await self._repo.rename_member_references(dim_code, member.member_code, new_code)
+            member.member_code = new_code
         if (
             data.parent_code is not None
             and member.status == DimensionStatus.PUBLISHED.value

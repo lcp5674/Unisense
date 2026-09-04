@@ -68,6 +68,7 @@ from app.services.semantic.schemas import (
     MetricPublishRequest,
     MetricRefineDefinitionRequest,
     MetricRejectRequest,
+    MetricRenameRequest,
     MetricResponse,
     MetricSourceDroppedRequest,
     MetricSqlBatchRegisterRequest,
@@ -1679,6 +1680,48 @@ async def restore_metric(
         trace_id=trace_id,
     )
     # PLAT-3: 业务写入 + 审计同事务原子提交
+    await db.commit()
+    await service.run_lineage_post_commit()
+    return ok(data=MetricResponse.model_validate(metric), trace_id=trace_id)
+
+
+@router.put(
+    "/{metric_code}/rename",
+    response_model=ApiResponse[MetricResponse],
+    summary="修改指标编码（改码，仅平台管理员 + DRAFT/DEPRECATED，跨全系统级联）",
+    # 改码跨域级联（血缘/收藏/订阅/质量/冲突引用），仅平台管理员
+    dependencies=[Depends(require_roles("platform_admin")), Depends(guard_against_injection)],
+)
+async def rename_metric(
+    metric_code: str,
+    request: MetricRenameRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    http_req: Request,
+) -> ApiResponse[MetricResponse]:
+    """改码（DRAFT/DEPRECATED）：级联同步血缘边/收藏/订阅/质量/冲突引用并写审计。
+
+    历史 WORM 记录（审计/快照/查询日志）保留旧码，活跃引用跟随新码。
+    """
+    service = MetricService(db)
+    metric = await service.rename_metric_code(
+        metric_code,
+        new_code=request.new_code,
+        actor_id=user.id,
+        role=user.role,
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="metric_definition.rename",
+        entity_type="metric_definition",
+        entity_id=metric.metric_code,
+        detail={"from": metric_code, "to": metric.metric_code, "actor_role": user.role},
+        ip=client_ip(http_req),
+        trace_id=trace_id,
+    )
+    # PLAT-3: 业务写入（级联）+ 审计同事务原子提交
     await db.commit()
     await service.run_lineage_post_commit()
     return ok(data=MetricResponse.model_validate(metric), trace_id=trace_id)

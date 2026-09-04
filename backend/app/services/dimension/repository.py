@@ -379,5 +379,34 @@ class DimensionRepository:
             .values(dim_code=new_code)
         )
 
+    async def rename_member_references(
+        self, dim_code: str, old_code: str, new_code: str
+    ) -> None:
+        """级联重命名维度成员编码在引用位置的引用（事务内，防悬空）。
+
+        member_code 被两处引用（字符串外键，非 DB FK）：
+        - ``dimension_member.parent_code``：树形中该成员作为父级时，子成员的
+          parent_code 指向旧码——不同步则子树层级悬空
+        - ``metric_dimension.default_member``：指标绑定的默认成员指向旧码——
+          不同步则指标绑定的默认值悬空（废弃保护计数也按此列）
+
+        注意：business_filter（挂载/指标口径里的自由文本限定）不做结构化级联
+        （文本引用无法可靠改写），由消费端按成员新码重新配置。
+        """
+        from sqlalchemy import update
+
+        await self._session.execute(
+            update(DimensionMember)
+            .where(DimensionMember.dim_code == dim_code)
+            .where(DimensionMember.parent_code == old_code)
+            .values(parent_code=new_code)
+        )
+        await self._session.execute(
+            update(MetricDimension)
+            .where(MetricDimension.dim_code == dim_code)
+            .where(MetricDimension.default_member == old_code)
+            .values(default_member=new_code)
+        )
+
     async def commit(self) -> None:
         await self._session.commit()

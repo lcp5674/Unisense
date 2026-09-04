@@ -126,8 +126,15 @@ class DimensionMemberCreate(BaseModel):
 
 
 class DimensionMemberUpdate(BaseModel):
-    """维度成员编辑（member_code 为业务标识，不可变更；仅改名称/父级/属性/状态）。"""
+    """维度成员编辑（member_code 为业务标识；仅 DRAFT 状态可改码，发布后锁死）。
 
+    改码同步级联：子树成员 parent_code + 指标绑定 default_member（防悬空引用）；
+    已发布/已废弃成员的编码不可变更——发布后编码即下游消费/血缘的稳定标识。
+    """
+
+    member_code: str | None = Field(
+        None, max_length=64, description="成员编码（仅 DRAFT 可改，维度内唯一）"
+    )
     member_name: str | None = Field(None, max_length=128)
     parent_code: str | None = Field(None, max_length=64)  # 变更父级时服务端自动重算 path
     path: str | None = Field(None, max_length=512)
