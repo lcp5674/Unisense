@@ -4,6 +4,9 @@ import { Button, Empty, Input, InputNumber, Modal, Select, Spin, Table, Tag } fr
 import { FullscreenOutlined, FullscreenExitOutlined, SearchOutlined } from "@ant-design/icons";
 import { Graph as G6Graph } from "@antv/g6";
 import type { GraphData, IElementEvent, NodeData } from "@antv/g6";
+import { computeDagrePositions } from "./dagreLayout";
+import type { DagrePosition } from "./dagreLayout";
+import { computeLayoutInWorker } from "./dagreLayoutClient";
 
 /** 资产地图图谱节点（后端 /assetmap/graph 的 nodes 元素）。 */
 export interface AssetGraphNode extends Record<string, unknown> {
@@ -1014,31 +1017,43 @@ function pickVisible(
  *  节点距，保证完整「库.表.列」与边旁完整加工表达式不被邻节点/相邻层/其他标注压字
  *  （字段级血缘图“布局紧凑、表列名/表达式看不全”的根因）。
  */
+/**
+ * 分层布局（dagre）参数：供 GraphCanvas 预计算坐标（Web Worker/同步兜底）与内建
+ * antv-dagre 共用——坐标计算线程化后主线程不再跑 dagre，参数保持同源避免布局突变。
+ * 紧凑度策略：
+ *  - 全景大图（节点多）：ranksep 收紧到 36、nodesep 40，让 160 节点大图高度控制在 ~400px，
+ *    fitView 缩放后能均匀铺满画布中央（不再堆底部）；文字压在最小需求以上即可。
+ *  - 折行图（字段/长标签）：ranksep/nodesep 按 maxLines/maxLineChars 放宽，跨层不压字。
+ */
+export function hierarchyDagreParams(
+  direction: "TB" | "LR" = "TB",
+  label?: { maxLines: number; maxLineChars: number },
+): { rankdir: "TB" | "LR"; nodesep: number; ranksep: number; align: "UL" | "DL" } {
+  const hasLongLabel = (label?.maxLineChars ?? 0) > 20;
+  const nodeGap = hasLongLabel
+    ? Math.min(240, Math.max(90, (label?.maxLineChars ?? 0) * 6.2 + 40))
+    : direction === "LR"
+      ? 50
+      : 40;
+  const extraRank = hasLongLabel ? Math.max(0, (label?.maxLines ?? 1) - 1) * 16 : 0;
+  return {
+    rankdir: direction,
+    align: direction === "LR" ? "UL" : "DL",
+    nodesep: direction === "LR" ? Math.max(50, nodeGap) : Math.max(40, nodeGap),
+    ranksep: direction === "LR" ? Math.max(50, 50 + extraRank) : Math.max(36, 36 + extraRank),
+  };
+}
+
 function layoutConfig(
   layoutMode: "hierarchy" | "force" | "radial",
   direction: "TB" | "LR" = "TB",
   label?: { maxLines: number; maxLineChars: number },
 ) {
   if (layoutMode === "hierarchy") {
-    // 分层布局：血缘 DAG 自上而下（表→指标）或从左到右，节点多时比力导向清晰得多
-    // 紧凑度策略：
-    //  - 全景大图（节点多）：ranksep 收紧到 36、nodesep 40，让 160 节点大图高度控制在 ~400px，
-    //    fitView 缩放后能均匀铺满画布中央（不再堆底部）；文字压在最小需求以上即可。
-    //  - 折行图（字段/长标签）：ranksep/nodesep 按 maxLines/maxLineChars 放宽，跨层不压字。
-    const hasLongLabel = (label?.maxLineChars ?? 0) > 20;
-    const nodeGap = hasLongLabel
-      ? Math.min(240, Math.max(90, (label?.maxLineChars ?? 0) * 6.2 + 40))
-      : direction === "LR"
-        ? 50
-        : 40;
-    const extraRank = hasLongLabel ? Math.max(0, (label?.maxLines ?? 1) - 1) * 16 : 0;
-    return {
-      type: "antv-dagre",
-      rankdir: direction,
-      align: direction === "LR" ? "UL" : "DL",
-      nodesep: direction === "LR" ? Math.max(50, nodeGap) : Math.max(40, nodeGap),
-      ranksep: direction === "LR" ? Math.max(50, 50 + extraRank) : Math.max(36, 36 + extraRank),
-    };
+    // 分层布局：血缘 DAG 自上而下（表→指标）或从左到右，节点多时比力导向清晰得多。
+    // 注意：GraphCanvas 在 hierarchy 模式不再把该配置交给 G6（布局已线程化预计算），
+    // 此处保留仅作类型文档与 force/radial 分支并列的完整性。
+    return { type: "antv-dagre", ...hierarchyDagreParams(direction, label) };
   }
   if (layoutMode === "radial") {
     // 血缘度径向布局（同心圆）：按依赖引用数（degree）排序——引用数高的枢纽节点居中，
@@ -1119,6 +1134,13 @@ function GraphCanvas({
   const [renderFailed, setRenderFailed] = useState(false);
   // 图是否渲染完成（state 驱动搜索高亮 effect 在重挂载后自动重跑）
   const [graphReady, setGraphReady] = useState(false);
+  // 分层布局线程化：dagre 坐标在 Web Worker 计算期间置 true，canvas 上浮半透明遮罩
+  // 「正在布局 N 个节点…」提示（计算不阻塞主线程，遮罩仅作状态反馈，pointer-events:none
+  // 不拦截交互；Worker 不可用降级为同步计算时该状态几乎瞬态消失）
+  const [layouting, setLayouting] = useState(false);
+  // 布局请求递增序号：数据快速切换（聚焦/筛选/显示全部）时，旧请求的异步坐标返回后
+  // 与当前序号比对，不一致则丢弃——防止过期布局覆盖新数据（竞态）
+  const layoutReqSeqRef = useRef(0);
   // graphReady 的 ref 镜像：mount effect 内注册的 G6 事件回调（闭包捕获 mount 时初值）
   // 需读最新渲染状态——用 ref 规避闭包过期（修复：旧 hover 回调因捕获 graphReady=false 从不生效）
   const graphReadyRef = useRef(false);
@@ -1606,7 +1628,14 @@ function GraphCanvas({
             translate: false,
           },
         },
-        layout: layoutConfig(layoutMode, direction, labelMetricsRef.current),
+        // hierarchy 布局已线程化：dagre 坐标由 Web Worker/同步兜底预计算后以「预设坐标」
+        // 渲染（节点数据携带 style.x/y），G6 不再配内建 antv-dagre——否则 render() 会再同步
+        // 跑一遍 dagre 阻塞主线程（1763+ 节点实测卡死数十秒）。radial/force 保持内建布局
+        //（concentric/d3-force：前者计算轻、后者需迭代交互，均不适合外部预计算）。
+        layout:
+          layoutMode === "hierarchy"
+            ? undefined
+            : layoutConfig(layoutMode, direction, labelMetricsRef.current),
         behaviors: ["drag-canvas", "zoom-canvas", "drag-element"],
         // 血缘度提示：悬停节点显示「依赖 N 项（上游）/ 被 M 项引用（下游）」，
         // 与右上角 badge 角标互补——badge 快速看总数，tooltip 细分方向。
@@ -1825,73 +1854,119 @@ function GraphCanvas({
   }, []);
 
   // 数据渲染：挂载后首次 + 数据变化时复用实例 setData+render
+  // 分层（hierarchy）布局已线程化：dagre 坐标在 Web Worker 预计算（不可用时同步兜底），
+  // 拿到坐标后把节点 style.x/y 随 setData 一并写入，G6 以预设坐标渲染（graph 未配 layout）。
+  // 竞态防护：每次数据变化递增序号，过期 worker 响应返回后与当前序号比对，不一致即丢弃。
   useEffect(() => {
     const graph = graphRef.current;
     if (!graph || graph.destroyed) return;
     setGraphReady(false);
-    const data: GraphData =
-      nodes.length === 0
-        ? { nodes: [], edges: [] }
-        : {
-            nodes: nodes.map((n) => ({ id: n.id, data: n })),
-            edges: edges.map((e) => ({ source: e.source, target: e.target, data: e })),
-          };
-    graph.setData(data);
-    graph
-      .render()
-      .then(async () => {
-        if (graph.destroyed) return;
-        setGraphReady(true);
-        onReadyRef.current();
-        // 按节点规模自适应 fitView（带平滑缩放进入动画）：
-        //  - 节点多（全景）→ always 适配填满画布，但大图 always 会把 zoom 压到 <0.2，
-        //    节点缩成亚像素、信息全丢；故叠加最小缩放下限 0.35 保证标签可读，
-        //    用户可手动滚轮继续缩（<0.35 触发 compact 隐藏重装饰层，标签仍保留）；
-        //  - 节点少（聚焦视图）→ overflow 仅在内容超出视口时裁剪，不把少量节点放大填满画布。
-        // 相机方法走 viewport 变换路径，与 force 布局的 shape draw 解耦，动画安全。
-        try {
-          // 修复节点堆底部：fitView 用 duration:800 动画时，dagre 布局还在过渡中，
-          // fitView 拿到的是动画中间态的 bbox（节点全在底部 rank），居中后图仍偏下。
-          // 改为 duration:0 立即 fit；初始化时的 padding  [32,32,32,32] 已保证四周留白。
-          if (nodeCountRef.current > 5) {
-            await graph.fitView({ when: "always" }, { duration: 0 });
-            if (typeof graph.getZoom === "function" && graph.getZoom() < 0.35) {
-              await graph.zoomTo?.(0.35, { duration: 0 });
-            }
-          } else {
-            await graph.fitView({ when: "overflow" }, { duration: 0 });
-          }
-        } catch {
-          /* fitView 偶尔在过渡期失败 */
-        }
-        // 大数据量 LOD：fitView 缩放下限 0.35 后，初始首屏通常不再触发 compact；
-        // 此处保留 applyLod 仅用于用户后续滚轮缩到 < 0.35 时切换重装饰层（标签仍保留）。
-        applyLod();
-        // 边流动动画：只驱动有 lineDash 的边（骨干/次骨干/环边）。数据重载时先取消旧的再重启，
-        // 避免上一批元素 shape 引用失效后仍被驱动。
-        edgeFlowCancelRef.current?.();
-        edgeFlowCancelRef.current = startEdgeFlow(
-          graph,
-          edges
-            .filter((e) => {
-              const d = e as RenderEdge | undefined;
-              if (d?.anchorEdge) return false;
-              if (d?.inCycle) return true;
-              const total =
-                (degreeMapRef.current.get(String(e.source)) ?? 0) +
-                (degreeMapRef.current.get(String(e.target)) ?? 0);
-              return total >= 5;
-            })
-            .map((e) => `${e.source}-${e.target}`),
-        );
-      })
-      .catch((err) => {
-        console.error("[AssetGraph] G6 render 失败，降级为表格", err);
-        setRenderFailed(true);
-        onReadyRef.current();
-      });
     setRenderFailed(false);
-  }, [nodes, edges]);
+    const seq = ++layoutReqSeqRef.current;
+
+    // 渲染提交：数据（含已就绪的布局坐标）→ setData → render → 首帧适配。供两条路径共用。
+    const commit = (data: GraphData) => {
+      graph.setData(data);
+      graph
+        .render()
+        .then(async () => {
+          if (graph.destroyed) return;
+          setGraphReady(true);
+          onReadyRef.current();
+          // 按节点规模自适应 fitView（带平滑缩放进入动画）：
+          //  - 节点多（全景）→ always 适配填满画布，但大图 always 会把 zoom 压到 <0.2，
+          //    节点缩成亚像素、信息全丢；故叠加最小缩放下限 0.35 保证标签可读，
+          //    用户可手动滚轮继续缩（<0.35 触发 compact 隐藏重装饰层，标签仍保留）；
+          //  - 节点少（聚焦视图）→ overflow 仅在内容超出视口时裁剪，不把少量节点放大填满画布。
+          // 相机方法走 viewport 变换路径，与 force 布局的 shape draw 解耦，动画安全。
+          try {
+            // 修复节点堆底部：fitView 用 duration:800 动画时，dagre 布局还在过渡中，
+            // fitView 拿到的是动画中间态的 bbox（节点全在底部 rank），居中后图仍偏下。
+            // 改为 duration:0 立即 fit；初始化时的 padding  [32,32,32,32] 已保证四周留白。
+            if (nodeCountRef.current > 5) {
+              await graph.fitView({ when: "always" }, { duration: 0 });
+              if (typeof graph.getZoom === "function" && graph.getZoom() < 0.35) {
+                await graph.zoomTo?.(0.35, { duration: 0 });
+              }
+            } else {
+              await graph.fitView({ when: "overflow" }, { duration: 0 });
+            }
+          } catch {
+            /* fitView 偶尔在过渡期失败 */
+          }
+          // 大数据量 LOD：fitView 缩放下限 0.35 后，初始首屏通常不再触发 compact；
+          // 此处保留 applyLod 仅用于用户后续滚轮缩到 < 0.35 时切换重装饰层（标签仍保留）。
+          applyLod();
+          // 边流动动画：只驱动有 lineDash 的边（骨干/次骨干/环边）。数据重载时先取消旧的再重启，
+          // 避免上一批元素 shape 引用失效后仍被驱动。
+          edgeFlowCancelRef.current?.();
+          edgeFlowCancelRef.current = startEdgeFlow(
+            graph,
+            edges
+              .filter((e) => {
+                const d = e as RenderEdge | undefined;
+                if (d?.anchorEdge) return false;
+                if (d?.inCycle) return true;
+                const total =
+                  (degreeMapRef.current.get(String(e.source)) ?? 0) +
+                  (degreeMapRef.current.get(String(e.target)) ?? 0);
+                return total >= 5;
+              })
+              .map((e) => `${e.source}-${e.target}`),
+          );
+        })
+        .catch((err) => {
+          console.error("[AssetGraph] G6 render 失败，降级为表格", err);
+          setRenderFailed(true);
+          onReadyRef.current();
+        });
+    };
+
+    const edgeList = edges.map((e) => ({ source: e.source, target: e.target, data: e }));
+    if (layoutMode === "hierarchy" && nodes.length > 0) {
+      // 线程化布局：优先 Web Worker（主线程零阻塞），Worker 不可用（测试/降级）同步计算兜底。
+      // 小图（≤200 节点，如默认 LOD 160 核心）同步算——dagre 毫秒级，避免 worker 首次
+      // 初始化延迟与遮罩闪烁；大图（显示全部/字段图层，1763+）走 worker，主线程零阻塞。
+      // 两路径共用同一 computeDagrePositions，坐标一致、无行为分叉。
+      const layoutNodes = nodes.map((n) => {
+        const id = String(n.id);
+        const cached = nodeStyleCacheRef.current.get(id);
+        return { id, size: (cached?.size as number | [number, number] | undefined) ?? 12 };
+      });
+      const layoutParams = hierarchyDagreParams(direction, labelMetricsRef.current);
+      const useWorker = typeof Worker !== "undefined" && nodes.length > 200;
+      if (useWorker) setLayouting(true);
+      const run: Promise<Map<string, DagrePosition>> = useWorker
+        ? computeLayoutInWorker(layoutNodes, edgeList, layoutParams)
+        : Promise.resolve(computeDagrePositions(layoutNodes, edgeList, layoutParams));
+      run
+        .then((positions) => {
+          if (seq !== layoutReqSeqRef.current || graph.destroyed) return; // 过期结果丢弃
+          commit({
+            nodes: nodes.map((n) => {
+              const p = positions.get(String(n.id));
+              // 预设坐标：节点 style.x/y = dagre 中心坐标；G6 无 layout 时按此落位
+              return { id: n.id, data: n, style: p ? { x: p.x, y: p.y } : undefined };
+            }),
+            edges: edgeList,
+          });
+        })
+        .catch((err) => {
+          console.error("[AssetGraph] dagre 布局失败，降级为表格", err);
+          setRenderFailed(true);
+          onReadyRef.current();
+        })
+        .finally(() => {
+          if (seq === layoutReqSeqRef.current) setLayouting(false);
+        });
+    } else {
+      commit(
+        nodes.length === 0
+          ? { nodes: [], edges: [] }
+          : { nodes: nodes.map((n) => ({ id: n.id, data: n })), edges: edgeList },
+      );
+    }
+  }, [nodes, edges, layoutMode, direction]);
 
   // 搜索定位：命中节点高亮 + 聚焦首个匹配；清空时恢复全量状态。
   // graphReady 变化（含重挂载后重新渲染完成）时自动重跑，保证布局切换后搜索仍生效。
@@ -1987,6 +2062,30 @@ function GraphCanvas({
   return (
     <div style={{ position: "relative", width: "100%" }} data-testid="asset-graph-wrap">
       <div ref={containerRef} style={{ height, width: "100%" }} data-testid="asset-graph-canvas" />
+      {layouting && (
+        <div
+          style={{
+            position: "absolute",
+            left: 0,
+            top: 0,
+            width: "100%",
+            height,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 8,
+            background: "rgba(255,255,255,0.55)",
+            zIndex: 5,
+            pointerEvents: "none",
+            color: "#64748b",
+            fontSize: 12,
+          }}
+          data-testid="asset-graph-layouting"
+        >
+          <Spin size="small" />
+          <span>正在布局 {nodes.length} 个节点…</span>
+        </div>
+      )}
       <div style={{ marginTop: 6, textAlign: "right" }}>
         <Button
           size="small"

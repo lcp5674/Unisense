@@ -35,7 +35,14 @@ const { graphMock } = vi.hoisted(() => ({
 vi.mock("@antv/g6", () => ({
   Graph: vi.fn(() => graphMock),
 }));
+// 分层布局线程化：把 computeDagrePositions 包成 vi.fn（内部仍调原实现），
+// 使测试可断言「布局参数（方向/泳道）」传入计算器，同时保持同步兜底行为与其余用例一致。
+vi.mock("../components/assetmap/dagreLayout", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../components/assetmap/dagreLayout")>();
+  return { ...actual, computeDagrePositions: vi.fn(actual.computeDagrePositions) };
+});
 import { Graph } from "@antv/g6";
+import { computeDagrePositions } from "../components/assetmap/dagreLayout";
 
 const nodes: AssetGraphNode[] = [
   { id: "metric:revenue", label: "finance_revenue_sum_d", type: "metric", domain: "finance" },
@@ -214,7 +221,7 @@ describe("AssetGraph 交互", () => {
     ).toBe(true);
   });
 
-  it("无环的 DAG 使用分层布局", async () => {
+  it("无环的 DAG 使用分层布局（线程化：坐标预计算、G6 不配内建 dagre）", async () => {
     const dagNodes: AssetGraphNode[] = [
       { id: "table:o", label: "ods_orders", type: "table", domain: "sales" },
       { id: "metric:m", label: "gmv", type: "metric", domain: "sales" },
@@ -226,11 +233,18 @@ describe("AssetGraph 交互", () => {
     await waitFor(() => expect(Graph).toHaveBeenCalled());
 
     expect(screen.queryByTestId("asset-graph-cycle-banner")).toBeNull();
+    // hierarchy 布局不再配给 G6 内建 antv-dagre（坐标由 dagre 计算器线程化预计算 → 预设渲染）
     const ctorCalls = vi.mocked(Graph).mock.calls;
     const ctorConfig = ctorCalls[ctorCalls.length - 1][0] as {
       layout?: { type?: string };
     };
-    expect(ctorConfig.layout?.type).toBe("antv-dagre");
+    expect(ctorConfig.layout).toBeUndefined();
+    // 布局计算器仍被调用（走分层而非回退力导向），预设坐标随 setData 写入节点 style.x/y
+    await waitFor(() => expect(vi.mocked(computeDagrePositions)).toHaveBeenCalled());
+    const data = lastGraphData();
+    const first = data.nodes[0] as { style?: { x?: number; y?: number } };
+    expect(typeof first.style?.x).toBe("number");
+    expect(typeof first.style?.y).toBe("number");
   });
 
   it("分层布局默认自上而下（TB），工具栏可切换为从左到右（LR）并触发重挂载", async () => {
@@ -245,13 +259,12 @@ describe("AssetGraph 交互", () => {
     render(<AssetGraph nodes={dagNodes} edges={dagEdges} height={300} />);
     await waitFor(() => expect(Graph).toHaveBeenCalledTimes(1));
 
-    // 默认方向：自上而下（TB），align=DL
-    let ctorConfig = vi.mocked(Graph).mock.calls[0][0] as {
-      layout?: { type?: string; rankdir?: string; align?: string };
-    };
-    expect(ctorConfig.layout?.type).toBe("antv-dagre");
-    expect(ctorConfig.layout?.rankdir).toBe("TB");
-    expect(ctorConfig.layout?.align).toBe("DL");
+    // 默认方向：自上而下（TB），align=DL——布局参数传给 dagre 计算器（线程化预计算）
+    await waitFor(() => expect(vi.mocked(computeDagrePositions)).toHaveBeenCalledTimes(1));
+    const calls = vi.mocked(computeDagrePositions).mock.calls;
+    let params = calls[0][2] as { rankdir?: string; align?: string };
+    expect(params.rankdir).toBe("TB");
+    expect(params.align).toBe("DL");
 
     // 工具栏「方向」切换为从左到右
     const dirSelect = screen.getByTestId("asset-graph-direction");
@@ -259,14 +272,21 @@ describe("AssetGraph 交互", () => {
     await user.click(await screen.findByText("方向：从左到右"));
     await user.keyboard("{Escape}");
 
-    // 方向变化 → 代际 +1 → GraphCanvas 重挂载（第 2 次 Graph 构造），rankdir=LR、align=UL
+    // 方向变化 → 代际 +1 → GraphCanvas 重挂载（第 2 次 Graph 构造）；新实例已按 LR 重新布局，
+    // 最新一次布局计算器的参数应为 rankdir=LR、align=UL（同步兜底下调用紧跟重挂载发生）
     await waitFor(() => expect(Graph).toHaveBeenCalledTimes(2));
-    ctorConfig = vi.mocked(Graph).mock.calls[1][0] as {
-      layout?: { type?: string; rankdir?: string; align?: string };
-    };
-    expect(ctorConfig.layout?.type).toBe("antv-dagre");
-    expect(ctorConfig.layout?.rankdir).toBe("LR");
-    expect(ctorConfig.layout?.align).toBe("UL");
+    await waitFor(() =>
+      expect(
+        vi.mocked(computeDagrePositions).mock.calls[
+          vi.mocked(computeDagrePositions).mock.calls.length - 1
+        ][2],
+      ).toMatchObject({ rankdir: "LR", align: "UL" }),
+    );
+    params = vi.mocked(computeDagrePositions).mock.calls[
+      vi.mocked(computeDagrePositions).mock.calls.length - 1
+    ][2] as { rankdir?: string; align?: string };
+    expect(params.rankdir).toBe("LR");
+    expect(params.align).toBe("UL");
   });
 
   it("非分层布局（力导向）不显示方向切换控件", async () => {
@@ -426,10 +446,12 @@ describe("AssetGraph 交互", () => {
     ];
     render(<AssetGraph nodes={cycNodes} edges={cycEdges} height={300} lanes />);
     await waitFor(() => expect(Graph).toHaveBeenCalled());
-    // lanes 模式：即使有环（a↔b 双向 + 无 SCC>2）也走分层布局
+    // lanes 模式：即使有环（a↔b 双向）也走分层——G6 不配内建 layout（线程化），
+    // 但 dagre 计算器仍被调用（证明是分层而非回退力导向）
     const ctorCalls = vi.mocked(Graph).mock.calls;
     const ctorConfig = ctorCalls[ctorCalls.length - 1][0] as { layout?: { type?: string } };
-    expect(ctorConfig.layout?.type).toBe("antv-dagre");
+    expect(ctorConfig.layout).toBeUndefined();
+    await waitFor(() => expect(vi.mocked(computeDagrePositions)).toHaveBeenCalled());
   });
 
   it("全屏：点击全屏按钮打开 overlay，退出按钮关闭", async () => {
