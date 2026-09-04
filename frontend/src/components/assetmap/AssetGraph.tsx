@@ -637,6 +637,71 @@ export function collectPathEdges(
   return out;
 }
 
+// —— 搜索聚焦子图 ——
+// 搜索框的语义是「我只想看这个节点的上下游」，而非「在 1763 个节点里把命中的标亮」。
+// 因此命中后按多源 BFS 沿上下游收集 K 跳子图，只渲染子图内节点/边；其余节点压暗
+// （inactive）会让整图发灰、命中节点也不突出，子图过滤才是用户真正想要的「聚焦」。
+const SEARCH_FOCUS_MAX_NODES = 240; // 子图节点上限：防枢纽节点 K 跳爆炸，超限按 BFS 层序截断（近者优先）
+
+/**
+ * 多源 BFS：从一批中心节点沿上下游收集 maxDepth 跳内的节点（含中心）。
+ * 层序扩展 + 全局上限保证超限时保留「离任一命中节点最近」的节点。
+ */
+export function collectSubgraphNodes(
+  adj: LineageAdjacency,
+  centers: string[],
+  maxDepth: number,
+  maxNodes = SEARCH_FOCUS_MAX_NODES,
+): Set<string> {
+  const visited = new Set<string>(centers);
+  let frontier = [...centers];
+  for (let depth = 0; depth < maxDepth; depth += 1) {
+    if (visited.size >= maxNodes) break;
+    const next: string[] = [];
+    for (const id of frontier) {
+      for (const nb of [...(adj.up.get(id) ?? []), ...(adj.down.get(id) ?? [])]) {
+        if (visited.has(nb)) continue;
+        visited.add(nb);
+        next.push(nb);
+        if (visited.size >= maxNodes) break;
+      }
+      if (visited.size >= maxNodes) break;
+    }
+    if (next.length === 0) break;
+    frontier = next;
+  }
+  return visited;
+}
+
+/**
+ * 围绕命中节点裁剪出上下游 K 跳子图（自包含：仅保留两端都在子图内的边）。
+ * 邻接基于传入 nodes 范围内的边构建——类型/字段筛选先收窄候选，聚焦在其之上展开，
+ * 保证「按类型筛选 + 搜索」组合语义正确（勾选只看指标时不会把表带回来）。
+ */
+export function buildSearchFocus(
+  nodes: AssetGraphNode[],
+  edges: AssetGraphEdge[],
+  matchIds: Set<string>,
+  hops: number,
+  maxNodes = SEARCH_FOCUS_MAX_NODES,
+): { nodes: AssetGraphNode[]; edges: AssetGraphEdge[]; truncated: boolean } {
+  if (matchIds.size === 0 || hops <= 0) {
+    return { nodes, edges, truncated: false };
+  }
+  const scoped = new Set(nodes.map((n) => n.id));
+  const scopedEdges = edges.filter(
+    (e) => scoped.has(String(e.source)) && scoped.has(String(e.target)),
+  );
+  const adj = buildLineageAdjacency(scopedEdges);
+  const keep = collectSubgraphNodes(adj, [...matchIds], hops, maxNodes);
+  for (const id of matchIds) keep.add(id); // 命中节点必留（BFS 已含，双保险）
+  const subNodes = nodes.filter((n) => keep.has(n.id));
+  const subEdges = scopedEdges.filter(
+    (e) => keep.has(String(e.source)) && keep.has(String(e.target)),
+  );
+  return { nodes: subNodes, edges: subEdges, truncated: keep.size >= maxNodes };
+}
+
 /** Tarjan 强连通分量：返回尺寸>2 的分量（真实循环依赖，区别于双向边 2-cycle）。 */
 function findTrueCycles(edges: RenderEdge[], nodeIds: string[]): Set<string> {
   const adj = new Map<string, string[]>();
@@ -953,7 +1018,13 @@ interface GraphCanvasProps {
   /** 分层布局方向（仅 hierarchy 生效；force/radial 忽略） */
   direction: "TB" | "LR";
   height: number;
-  searchText: string;
+  /** 搜索命中的节点 id 集合（空集=无搜索，全部恢复常态）。
+   *  父组件计算后传入：图内节点可能已被聚焦为上下游子图，这里只负责「命中即高亮」。 */
+  searchMatchIds: Set<string>;
+  /** 非命中节点是否压暗（inactive）。
+   *  子图聚焦模式为 false——画布上剩下的都是命中节点的上下游，压暗会让整图发灰、
+   *  命中节点反而不突出；仅「全图（仅标亮）」模式为 true（保留旧的高亮定位语义）。 */
+  searchDimOthers: boolean;
   onNodeClick: (node: AssetGraphNode) => void;
   /** 图渲染完成回调（父组件用于清除布局切换 loading） */
   onReady: () => void;
@@ -977,7 +1048,8 @@ function GraphCanvas({
   layoutMode,
   direction,
   height,
-  searchText,
+  searchMatchIds,
+  searchDimOthers,
   onNodeClick,
   onReady,
   layerBadges = true,
@@ -1756,38 +1828,35 @@ function GraphCanvas({
     setRenderFailed(false);
   }, [nodes, edges]);
 
-  // 搜索定位：匹配 label 的节点高亮 + 聚焦首个匹配；清空时恢复全量状态。
+  // 搜索定位：命中节点高亮 + 聚焦首个匹配；清空时恢复全量状态。
   // graphReady 变化（含重挂载后重新渲染完成）时自动重跑，保证布局切换后搜索仍生效。
+  // 命中集合由父组件计算（基于筛选后的候选集），此处只负责上色——子图聚焦模式下
+  // 传入的 nodes 已是命中节点的上下游子图，故非命中节点保持常态（不压暗）。
   useEffect(() => {
     const graph = graphRef.current;
     if (!graph || graph.destroyed || !graphReady) return;
     try {
       const allNodes = graph.getNodeData?.() as unknown;
       const nodeList = Array.isArray(allNodes) ? allNodes : [];
-      if (!searchText.trim()) {
+      if (searchMatchIds.size === 0) {
         for (const n of nodeList) safeSetElementState(graph, String(n.id), stateWithCompact([]));
         return;
       }
-      const kw = searchText.trim().toLowerCase();
-      const matchIds = new Set(
-        nodes.filter((n) => n.label.toLowerCase().includes(kw)).map((n) => n.id),
-      );
       for (const n of nodeList) {
+        const id = String(n.id);
         safeSetElementState(
           graph,
-          String(n.id),
-          matchIds.has(String(n.id))
+          id,
+          searchMatchIds.has(id)
             ? stateWithCompact("active")
-            : stateWithCompact("inactive"),
+            : stateWithCompact(searchDimOthers ? "inactive" : []),
         );
       }
-      if (matchIds.size > 0) {
-        safeFocusElement(graph, [...matchIds][0]);
-      }
+      safeFocusElement(graph, [...searchMatchIds][0]);
     } catch {
       // 图状态变化导致的瞬时异常（如数据重载中）静默忽略，避免崩溃
     }
-  }, [searchText, graphReady, nodes]);
+  }, [searchMatchIds, searchDimOthers, graphReady, nodes]);
 
   // G6 内部 setData 的异步 batch 在数据过渡期可能抛 `Node not found` 未处理 rejection——
   // 这是库在节点被替换时的已知瞬时噪音，不影响渲染结果，作用域内抑制以免污染控制台。
@@ -1905,6 +1974,11 @@ export function AssetGraph({
   // 前端筛选：按节点类型过滤 + 按 label 搜索定位（不重新请求后端）
   const [typeFilter, setTypeFilter] = useState<string[]>([]);
   const [searchText, setSearchText] = useState("");
+  // 搜索范围：命中节点向外追溯的跳数（0=「全图（仅标亮）」，保留旧的高亮定位语义：
+  // 不裁剪节点，只在全图上把命中节点标亮、其余压暗）。默认 2 跳——血缘场景「上下游」
+  // 多为 1-2 跳可达，3 跳在枢纽节点上易把整图拉回（等价没搜）。
+  const [searchHops, setSearchHops] = useState<number>(2);
+  const trimmedSearch = searchText.trim().toLowerCase();
   // 血缘度筛选：仅展示依赖引用数 ≥ 阈值的节点（聚焦枢纽，隐藏低价值叶子）
   const [minDegreeFilter, setMinDegreeFilter] = useState(0);
   // 字段折叠：showFields 作为初始值并受控同步（父组件可动态改），控制条可切换
@@ -1963,9 +2037,35 @@ export function AssetGraph({
     return list;
   }, [nodes, typeFilter, showFieldsOn]);
 
+  // 搜索命中：在当前筛选（类型/字段）后的候选集内按 label 模糊匹配（id 也参与，
+  // 便于直接粘 `table:db.tbl` 这类完整节点 id 定位）
+  const searchMatchIds = useMemo(() => {
+    if (!trimmedSearch) return new Set<string>();
+    return new Set(
+      filteredNodes
+        .filter(
+          (n) =>
+            n.label.toLowerCase().includes(trimmedSearch) ||
+            n.id.toLowerCase().includes(trimmedSearch),
+        )
+        .map((n) => n.id),
+    );
+  }, [filteredNodes, trimmedSearch]);
+
+  // 搜索聚焦子图：命中节点的上下游 searchHops 跳（hops=0 → 全图仅标亮，不裁剪）。
+  // 无命中时返回空子图（而非全量）——搜不到就该明确告知，避免「搜了却还是全图」的错觉。
+  const searchFocus = useMemo(() => {
+    if (!trimmedSearch || searchHops <= 0) return null;
+    if (searchMatchIds.size === 0) return { nodes: [], edges: [], truncated: false };
+    return buildSearchFocus(filteredNodes, edges, searchMatchIds, searchHops);
+  }, [trimmedSearch, searchHops, searchMatchIds, filteredNodes, edges]);
+
   // 血缘度筛选（聚焦枢纽）：仅保留依赖引用数 ≥ 阈值的节点。度统计基于完整 edges
   //（含被 typeFilter/字段折叠隐藏的节点），保证「枢纽」判断不被筛选顺序影响。
+  // 搜索聚焦时让位——「看这个节点的上下游」是比「只看枢纽」更具体的意图，叠加会把
+  // 子图边缘的上下游叶子剪掉，用户看到的就是「搜了却看不到上下游」。
   const degreeFilteredNodes = useMemo(() => {
+    if (searchFocus) return searchFocus.nodes;
     if (minDegreeFilter <= 0) return filteredNodes;
     const dm = new Map<string, number>();
     for (const e of edges) {
@@ -1973,7 +2073,10 @@ export function AssetGraph({
       dm.set(e.target, (dm.get(e.target) ?? 0) + 1);
     }
     return filteredNodes.filter((n) => (dm.get(n.id) ?? 0) >= minDegreeFilter);
-  }, [filteredNodes, edges, minDegreeFilter]);
+  }, [searchFocus, filteredNodes, edges, minDegreeFilter]);
+
+  // 聚焦时边集同步裁剪为子图内边；否则用完整边集（由 pickVisible 按可见节点再过滤）
+  const scopedEdges = searchFocus ? searchFocus.edges : edges;
 
   // 限流渲染：核心节点（metric/table）按优先级+血缘度截断到 160；showFields 时
   // 字段节点按血缘度叠加（独立上限 400），不占用核心额度——避免大图按 rank
@@ -1983,8 +2086,10 @@ export function AssetGraph({
     visibleEdges,
     hidden,
   } = useMemo(
-    () => pickVisible(degreeFilteredNodes, edges, showAll, showFieldsOn),
-    [degreeFilteredNodes, edges, showAll, showFieldsOn],
+    // 聚焦子图已按 SEARCH_FOCUS_MAX_NODES 上限收束，不再走 LOD 截断——
+    // 否则「搜了某个节点」后 160 上限可能把命中节点本身挤掉，聚焦语义被破坏
+    () => pickVisible(degreeFilteredNodes, scopedEdges, showAll || Boolean(searchFocus), showFieldsOn),
+    [degreeFilteredNodes, scopedEdges, showAll, showFieldsOn, searchFocus],
   );
 
   // 泳道折叠（子图折叠）：在环检测/泳道之前把被折叠泳道的节点收成聚合节点。
@@ -2164,6 +2269,39 @@ export function AssetGraph({
           </Button>
         </div>
       )}
+      {searchFocus && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "6px 12px",
+            marginBottom: 8,
+            background: "rgba(22,119,255,0.08)",
+            border: "1px solid rgba(22,119,255,0.35)",
+            borderRadius: 6,
+            fontSize: 13,
+            color: "#0b3d91",
+          }}
+          data-testid="asset-graph-search-focus-banner"
+        >
+          {searchFocus.nodes.length === 0 ? (
+            <span>
+              没有匹配「<b>{searchText.trim()}</b>」的节点——可换更短的关键词，或把范围改为「全图（仅标亮）」核对。
+            </span>
+          ) : (
+            <span>
+              已聚焦 <b>{searchMatchIds.size}</b> 个匹配节点的上下游 <b>{searchHops}</b> 跳：
+              展示 <b>{searchFocus.nodes.length}</b> 个节点 / <b>{searchFocus.edges.length}</b> 条边
+              （全图 {nodes.length} 个节点）。
+              {searchFocus.truncated && " 已达子图上限，按距离优先截断——可缩小跳数或改用类型筛选。"}
+            </span>
+          )}
+          <Button size="small" type="link" onClick={() => setSearchText("")}>
+            清除搜索看全图
+          </Button>
+        </div>
+      )}
       <div
         style={{
           display: "flex",
@@ -2188,6 +2326,8 @@ export function AssetGraph({
           allowClear
           placeholder="依赖 ≥ 0"
           style={{ minWidth: 130 }}
+          // 搜索聚焦时血缘度筛选让位（见 degreeFilteredNodes 注释），禁用避免「选了却没生效」
+          disabled={Boolean(searchFocus)}
           value={minDegreeFilter === 0 ? undefined : minDegreeFilter}
           onChange={(v: number | undefined) => setMinDegreeFilter(v ?? 0)}
           data-testid="asset-graph-min-degree"
@@ -2204,10 +2344,22 @@ export function AssetGraph({
           allowClear
           prefix={<SearchOutlined />}
           placeholder="搜索节点（名称）…"
-          style={{ width: 240 }}
+          style={{ width: 200 }}
           value={searchText}
           onChange={(e) => setSearchText(e.target.value)}
           data-testid="asset-graph-search"
+        />
+        <Select showSearch
+          value={searchHops}
+          onChange={(v: number) => setSearchHops(v)}
+          style={{ width: 132 }}
+          data-testid="asset-graph-search-hops"
+          options={[
+            { value: 1, label: "上下游 1 跳" },
+            { value: 2, label: "上下游 2 跳" },
+            { value: 3, label: "上下游 3 跳" },
+            { value: 0, label: "全图（仅标亮）" },
+          ]}
         />
         <Select showSearch
           allowClear
@@ -2276,7 +2428,8 @@ export function AssetGraph({
           layoutMode={layoutMode}
           direction={directionState}
           height={h}
-          searchText={searchText}
+          searchMatchIds={searchMatchIds}
+          searchDimOthers={searchHops === 0}
           onNodeClick={(n) => {
             // 泳道聚合节点：点击=展开该泳道（回到未折叠），不触发外部下钻
             const cl = collapsedLayerOf(n);

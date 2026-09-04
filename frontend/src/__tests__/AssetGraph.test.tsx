@@ -10,6 +10,8 @@ import {
   buildLineageAdjacency,
   collectPathNodes,
   collectPathEdges,
+  collectSubgraphNodes,
+  buildSearchFocus,
   wrapFieldLabel,
   wrapEdgeExpr,
   type AssetGraphNode,
@@ -91,9 +93,36 @@ describe("AssetGraph 交互", () => {
     });
   });
 
-  it("搜索匹配节点时高亮并聚焦首个匹配", async () => {
+  it("搜索即聚焦：只渲染命中节点上下游子图，非全图标亮", async () => {
     const user = userEvent.setup();
-    // 模拟渲染后的节点集合（含 data 属性）
+    graphMock.getNodeData.mockReturnValue([
+      { id: "metric:revenue", data: nodes[0] },
+      { id: "table:orders", data: nodes[1] },
+    ]);
+    render(<AssetGraph nodes={nodes} edges={edges} height={300} />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+    // 搜索前为全量（3 节点：metric/table/field）
+    expect(lastGraphData().nodes).toHaveLength(3);
+
+    await user.type(screen.getByTestId("asset-graph-search"), "revenue");
+
+    await waitFor(() => {
+      // 命中节点高亮，且聚焦到首个匹配
+      expect(graphMock.setElementState).toHaveBeenCalledWith("metric:revenue", "active");
+      expect(graphMock.focusElement).toHaveBeenCalledWith("metric:revenue", {
+        duration: 600,
+        easing: "ease-out",
+      });
+    });
+    await waitFor(() => {
+      const ids = lastGraphData().nodes.map((n) => n.id).sort();
+      // 子图 = 命中节点 + 其上下游 2 跳（orders 直连，field:orders.id 与全图无血缘边故不在链上）
+      expect(ids).toEqual(["metric:revenue", "table:orders"]);
+    });
+  });
+
+  it("聚焦子图内非命中节点不压暗（否则整图发灰、命中不突出）", async () => {
+    const user = userEvent.setup();
     graphMock.getNodeData.mockReturnValue([
       { id: "metric:revenue", data: nodes[0] },
       { id: "table:orders", data: nodes[1] },
@@ -104,28 +133,38 @@ describe("AssetGraph 交互", () => {
     await user.type(screen.getByTestId("asset-graph-search"), "revenue");
 
     await waitFor(() => {
-      // 匹配节点进入 active 状态，其余 inactive
-      expect(graphMock.setElementState).toHaveBeenCalledWith("metric:revenue", "active");
-      expect(graphMock.setElementState).toHaveBeenCalledWith("table:orders", "inactive");
-      expect(graphMock.focusElement).toHaveBeenCalledWith("metric:revenue", {
-        duration: 600,
-        easing: "ease-out",
-      });
+      expect(graphMock.setElementState).toHaveBeenCalledWith("table:orders", []);
+      expect(graphMock.setElementState).not.toHaveBeenCalledWith("table:orders", "inactive");
     });
   });
 
-  it("清空搜索后恢复全部节点状态", async () => {
+  it("搜索无命中时提示无匹配并清空画布（而非回退全图）", async () => {
+    const user = userEvent.setup();
+    render(<AssetGraph nodes={nodes} edges={edges} height={300} />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+
+    await user.type(screen.getByTestId("asset-graph-search"), "zzz-not-exist");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("asset-graph-search-focus-banner")).toBeTruthy();
+    });
+    await waitFor(() => expect(lastGraphData().nodes).toHaveLength(0));
+  });
+
+  it("清除搜索恢复全量节点与状态", async () => {
     const user = userEvent.setup();
     graphMock.getNodeData.mockReturnValue([{ id: "metric:revenue", data: nodes[0] }]);
     render(<AssetGraph nodes={nodes} edges={edges} height={300} />);
     await waitFor(() => expect(Graph).toHaveBeenCalled());
 
-    await user.type(screen.getByTestId("asset-graph-search"), "x");
+    await user.type(screen.getByTestId("asset-graph-search"), "revenue");
+    await waitFor(() => expect(lastGraphData().nodes.length).toBeLessThan(3));
     await user.clear(screen.getByTestId("asset-graph-search"));
 
     await waitFor(() => {
       expect(graphMock.setElementState).toHaveBeenCalledWith("metric:revenue", []);
     });
+    await waitFor(() => expect(lastGraphData().nodes).toHaveLength(3));
   });
 
   it("showFields=false 时剔除字段节点（血缘总览降噪）", async () => {
@@ -696,6 +735,74 @@ describe("AssetGraph 专业降噪（第 3 层）", () => {
     expect(pathEdges.has("dwd:d-metric:m")).toBe(true);
     expect(pathEdges.has("metric:m-metric:m2")).toBe(true);
     expect(pathEdges.has("other:x-other:y")).toBe(false);
+  });
+
+  // —— 搜索聚焦子图 ——
+  it("collectSubgraphNodes：多源 BFS 收集命中节点上下游 K 跳（含全部命中源）", () => {
+    const chain = [
+      { source: "ods:o", target: "dwd:d", type: "DERIVED_FROM" },
+      { source: "dwd:d", target: "metric:m", type: "DERIVED_FROM" },
+      { source: "metric:m", target: "metric:m2", type: "DERIVED_FROM" },
+      { source: "other:x", target: "other:y", type: "DERIVED_FROM" }, // 无关链
+    ] as AssetGraphEdge[];
+    const adj = buildLineageAdjacency(chain);
+    // 单源 1 跳：只有直接上下游
+    expect([...collectSubgraphNodes(adj, ["dwd:d"], 1)].sort()).toEqual(["dwd:d", "metric:m", "ods:o"]);
+    // 单源 2 跳：再外扩一层到 m2；无关链始终不进子图
+    const two = collectSubgraphNodes(adj, ["dwd:d"], 2);
+    expect(two.has("metric:m2")).toBe(true);
+    expect(two.has("other:x")).toBe(false);
+    // 多源并集：命中多个节点时合并各自上下游
+    const multi = collectSubgraphNodes(adj, ["ods:o", "metric:m2"], 1);
+    expect(multi.has("ods:o")).toBe(true);
+    expect(multi.has("dwd:d")).toBe(true);
+    expect(multi.has("metric:m")).toBe(true);
+    expect(multi.has("metric:m2")).toBe(true);
+  });
+
+  it("collectSubgraphNodes：超上限按 BFS 层序截断（近命中者优先保留）", () => {
+    // 星型：hub 直连 10 个叶子，再从每个叶子外扩 1 个末端
+    const star: AssetGraphEdge[] = [{ source: "hub", target: "leaf0", type: "DERIVED_FROM" }];
+    for (let i = 1; i < 10; i += 1) star.push({ source: "hub", target: `leaf${i}`, type: "DERIVED_FROM" });
+    for (let i = 0; i < 10; i += 1) star.push({ source: `leaf${i}`, target: `tail${i}`, type: "DERIVED_FROM" });
+    const adj = buildLineageAdjacency(star);
+    // 上限 6：hub + 5 个 leaf（同层按边序取满即止），tail 层完全进不来
+    const capped = collectSubgraphNodes(adj, ["hub"], 3, 6);
+    expect(capped.size).toBe(6);
+    expect(capped.has("hub")).toBe(true);
+    expect([...capped].some((id) => id.startsWith("tail"))).toBe(false);
+  });
+
+  it("buildSearchFocus：裁剪出自包含子图（边两端都在子图内）且邻接受传入节点集约束", () => {
+    const ns: AssetGraphNode[] = [
+      { id: "ods:o", label: "ods_o", type: "table" },
+      { id: "dwd:d", label: "dwd_d", type: "table" },
+      { id: "metric:m", label: "m", type: "metric" },
+      { id: "far:z", label: "far_z", type: "table" },
+    ];
+    const es: AssetGraphEdge[] = [
+      { source: "ods:o", target: "dwd:d", type: "DERIVED_FROM" },
+      { source: "dwd:d", target: "metric:m", type: "DERIVED_FROM" },
+      { source: "metric:m", target: "far:z", type: "DERIVED_FROM" },
+    ];
+    // 命中 dwd:d、1 跳 → ods/metric 进子图，far:z（2 跳）不进；子图内边 2 条
+    const focus = buildSearchFocus(ns, es, new Set(["dwd:d"]), 1);
+    expect(focus.nodes.map((n) => n.id).sort()).toEqual(["dwd:d", "metric:m", "ods:o"]);
+    expect(focus.edges).toHaveLength(2);
+    expect(focus.truncated).toBe(false);
+
+    // 邻接基于传入的 nodes 构建：候选集不含 far:z 时，3 跳也走不到它（类型筛选语义生效）
+    const scoped = buildSearchFocus(
+      ns.filter((n) => n.id !== "far:z"),
+      es,
+      new Set(["dwd:d"]),
+      3,
+    );
+    expect(scoped.nodes.map((n) => n.id).sort()).toEqual(["dwd:d", "metric:m", "ods:o"]);
+
+    // 无命中 / hops=0：原样返回（hops=0 =「全图仅标亮」，不裁剪）
+    expect(buildSearchFocus(ns, es, new Set(), 2).nodes).toHaveLength(4);
+    expect(buildSearchFocus(ns, es, new Set(["dwd:d"]), 0).nodes).toHaveLength(4);
   });
 
   it("buildLineageAdjacency：忽略泳道锚定边（不参与血缘链）", () => {
