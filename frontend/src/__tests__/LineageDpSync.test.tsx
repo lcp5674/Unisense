@@ -24,6 +24,7 @@ vi.mock("../api", () => ({
   cancelDpSyncScan: vi.fn(),
   forceCancelDpSyncScan: vi.fn(),
   listDataSources: vi.fn(),
+  listSourceDatabases: vi.fn(),
   getDpSyncMeta: vi.fn(),
   previewDpSyncExclude: vi.fn(),
 }));
@@ -84,6 +85,11 @@ describe("LineageDpSync", () => {
       page: 1,
       page_size: 200,
     });
+    // 元数据库名选项来源：按数据源返回真实库列表（other_source 代表换源场景）
+    mockedApi.listSourceDatabases.mockImplementation(async (sid: string) => ({
+      databases:
+        sid === "other_source" ? ["other_db", "dp_ods"] : ["dp_stable", "dp_ods"],
+    }));
     mockedApi.getDpSyncMeta.mockResolvedValue({
       task_types: [
         { value: 1, label: "数据抽取（SQL 加工）", known: true, count: 100 },
@@ -211,9 +217,9 @@ describe("LineageDpSync", () => {
       owner_backfill: "orphan_only",
     });
     renderPage();
-    // 表单回显后端配置的库名（默认 dp_stable）
+    // 表单回显后端配置的库名（默认 dp_stable，AutoComplete 可编辑）
     await screen.findByText(/保\s*存/);
-    const schemaInput = screen.getByPlaceholderText("如 dp_stable");
+    const schemaInput = screen.getByLabelText(/元数据库名/);
     expect(schemaInput).toHaveValue("dp_stable");
     // 用户按生产实际库名修改（如 dp_ods）后保存 → payload 携带新库名
     await user.clear(schemaInput);
@@ -224,6 +230,48 @@ describe("LineageDpSync", () => {
     );
     const payload = mockedApi.saveDpSyncConfig.mock.calls[0][0];
     expect(payload.schema_name).toBe("dp_ods");
+  });
+
+  it("switches dp source then picks real database from fetched list (元数据库名 options)", async () => {
+    const user = userEvent.setup();
+    mockedApi.saveDpSyncConfig.mockResolvedValue({
+      enabled: false,
+      source_id: "other_source",
+      schema_name: "other_db",
+      poll_interval_minutes: 5,
+      llm_enabled: true,
+      resolve_memory_enabled: true,
+      owner_backfill: "orphan_only",
+    });
+    renderPage();
+    // 初始配置按 mysql_uncategorized 拉过一次真实库列表
+    await screen.findByText(/保\s*存/);
+    expect(mockedApi.listSourceDatabases).toHaveBeenCalledWith("mysql_uncategorized");
+    // 切换到另一数据源 → 触发按新源拉库 + 清空旧库名（换源后不适用）
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: /dp 数据源/ }));
+    await user.click(await screen.findByText(/other_source · 其它源/));
+    await waitFor(() =>
+      expect(mockedApi.listSourceDatabases).toHaveBeenCalledWith("other_source")
+    );
+    const schemaInput = screen.getByLabelText(/元数据库名/);
+    expect(schemaInput).toHaveValue("");
+    // 输入过滤词 → 下拉出现新源真实库 other_db → 点选（rc-select 需 mousedown+click 提交）
+    await user.click(schemaInput);
+    await user.type(schemaInput, "other");
+    const optionEl = (await screen.findAllByText("other_db"))
+      .map((el) => el.closest(".ant-select-item-option"))
+      .find(Boolean) as HTMLElement;
+    fireEvent.mouseDown(optionEl);
+    fireEvent.click(optionEl);
+    await waitFor(() => expect(schemaInput).toHaveValue("other_db"));
+    // 保存 → payload 携带新源 + 所选库
+    await user.click(screen.getByText(/保\s*存/));
+    await waitFor(() =>
+      expect(mockedApi.saveDpSyncConfig).toHaveBeenCalledTimes(1)
+    );
+    const payload = mockedApi.saveDpSyncConfig.mock.calls[0][0];
+    expect(payload.source_id).toBe("other_source");
+    expect(payload.schema_name).toBe("other_db");
   });
 
   it("lists tickets in tickets tab and resolves", async () => {

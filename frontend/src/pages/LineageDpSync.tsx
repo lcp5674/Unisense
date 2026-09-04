@@ -39,6 +39,7 @@ import {
   listDataSources,
   listDpSyncRuns,
   listDpTickets,
+  listSourceDatabases,
   previewDpSyncExclude,
   resetDpSyncWatermark,
   resolveDpTicket,
@@ -204,6 +205,28 @@ function ConfigTab() {
   const [meta, setMeta] = useState<DpSyncMeta | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [previewResult, setPreviewResult] = useState<DpExcludePreview | null>(null);
+  // 元数据库名选项：选定数据源后经 /dimensions/source-databases 拉取该源真实库列表
+  const [schemaOptions, setSchemaOptions] = useState<{ value: string; label: string }[]>([]);
+  const [schemaLoading, setSchemaLoading] = useState(false);
+
+  // 按数据源拉取真实库列表供「元数据库名」选项框选择；失败静默降级（保留手动输入兜底）
+  const refreshSchemaOptions = useCallback(async (sourceId?: string) => {
+    const sid = sourceId ?? (form.getFieldValue("source_id") as string | undefined);
+    if (!sid) {
+      setSchemaOptions([]);
+      return;
+    }
+    setSchemaLoading(true);
+    try {
+      const r = await listSourceDatabases(sid);
+      setSchemaOptions((r.databases ?? []).map((d) => ({ value: d, label: d })));
+    } catch {
+      // 源不可达/未配置私网放行：不阻塞配置，保留手输
+      setSchemaOptions([]);
+    } finally {
+      setSchemaLoading(false);
+    }
+  }, [form]);
 
   // 数据源下拉 + dp 类型/默认规则目录（失败不阻塞配置加载）
   useEffect(() => {
@@ -225,6 +248,8 @@ function ConfigTab() {
           ...cfg,
           exclude_table_patterns: (cfg.exclude_table_patterns ?? []).join("\n"),
         });
+        // 已有配置：按已选数据源拉一次真实库列表（供下拉回显/核对）
+        void refreshSchemaOptions(cfg.source_id);
       } else {
         setConfigured(false);
         form.setFieldsValue({
@@ -247,7 +272,7 @@ function ConfigTab() {
     } finally {
       setLoading(false);
     }
-  }, [form, message]);
+  }, [form, message, refreshSchemaOptions]);
 
   useEffect(() => {
     void load();
@@ -429,6 +454,11 @@ function ConfigTab() {
                     value: s.source_id,
                     label: `${s.source_id} · ${s.name}（${s.source_type}）`,
                   }))}
+                  onChange={(v) => {
+                    // 换源后旧库名通常不适用：清空待用户从新源真实库列表中重选
+                    form.setFieldsValue({ schema_name: undefined });
+                    void refreshSchemaOptions(v);
+                  }}
                 />
               </Form.Item>
             </Col>
@@ -436,16 +466,25 @@ function ConfigTab() {
               <Form.Item
                 name="schema_name"
                 label="元数据库名"
-                extra="dp 元库（dispatch_task/dispatch_task_step）所在数据库，如 dp_stable；不同环境库名可不同，选完数据源后请核对"
+                extra="dp 元库（dispatch_task/dispatch_task_step）所在数据库；下拉为所选数据源的真实库，也可手动输入"
                 rules={[
-                  { required: true, message: "请输入 dp 元库所在数据库名" },
+                  { required: true, message: "请选择或输入 dp 元库所在数据库名" },
                   {
                     pattern: /^[A-Za-z0-9_]+$/,
                     message: "仅允许字母/数字/下划线（库名，不含点）",
                   },
                 ]}
               >
-                <Input placeholder="如 dp_stable" allowClear />
+                <AutoComplete
+                  style={{ width: "100%" }}
+                  options={schemaOptions}
+                  allowClear
+                  placeholder="选择或输入库名（如 dp_stable）"
+                  filterOption={(input, option) =>
+                    (option?.value ?? "").toLowerCase().includes(input.toLowerCase())
+                  }
+                  notFoundContent={schemaLoading ? "加载库列表中…" : "未获取到库列表，可手动输入"}
+                />
               </Form.Item>
             </Col>
           </Row>
