@@ -180,6 +180,42 @@ async def test_scan_interval_not_due() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scan_naive_watermark_does_not_crash() -> None:
+    """H10 回归：MySQL DATETIME 读出 naive 水位时周期轮询不再抛 TypeError。
+
+    修复前 ``datetime.now(UTC) - wm.last_scan_at`` 直接相减（naive/aware）每分钟崩溃。
+    """
+    svc = _svc(FakeCollector())
+    naive_recent = (datetime.now(UTC) - timedelta(minutes=1)).replace(tzinfo=None)
+    svc._dp_repo.get_watermark = AsyncMock(
+        return_value=_wm(last_scan_at=naive_recent)
+    )
+    result = await svc.scan_once(_fc(FakeCollector()))
+    assert result["skipped"] == "interval_not_due"
+
+
+@pytest.mark.asyncio
+async def test_scan_naive_watermark_auto_full_does_not_crash() -> None:
+    """H10 回归：naive last_full_scan_at 距上次全量超周期 → 触发自动全量不崩溃。"""
+    collector = FakeCollector()
+    svc = _svc(collector)
+    naive_old = (datetime.now(UTC) - timedelta(days=2)).replace(tzinfo=None)
+    svc._dp_repo.get_watermark = AsyncMock(
+        return_value=_wm(
+            last_scan_at=naive_old,
+            last_max=NOW - timedelta(days=3),
+            last_full=naive_old,
+        )
+    )
+    result = await svc.scan_once(_fc(collector))
+    assert "skipped" not in result  # 自动全量轮正常执行
+    assert result["scanned_tasks"] == 2
+    svc._dp_repo.update_watermark.assert_awaited()
+    # 全量轮执行了 mark_missing（删除语义闭环）
+    svc._lineage_repo.mark_missing.assert_awaited()
+
+
+@pytest.mark.asyncio
 async def test_scan_first_full_round() -> None:
     collector = FakeCollector()
     svc = _svc(collector)

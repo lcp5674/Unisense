@@ -124,6 +124,17 @@ def _safe_table_name(value: str | None, field: str, default: str) -> str:
 _TABLE_RE = re.compile(r"^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)?$")
 
 
+def _utc_aware(dt: datetime | None) -> datetime | None:
+    """MySQL DATETIME 读出为 naive，统一按 UTC 补时区（与全仓 UTC 落库一致）。
+
+    避免 ``datetime.now(UTC) - naive`` 抛 offset-naive/aware TypeError
+    （周期轮询在 last_scan_at/last_full_scan_at 比较处曾每分钟崩溃）。
+    """
+    if dt is None or dt.tzinfo is not None:
+        return dt
+    return dt.replace(tzinfo=UTC)
+
+
 def _validate_manual_table(name: str) -> None:
     """手动裁决/手动边的表名格式校验：非法抛 ValueError（M3）。
 
@@ -640,20 +651,24 @@ class DpSyncService:
         # 对未再出现的边执行失效观察——增量轮只处理变更任务，未变更任务边不在
         # seen_pairs，若每轮 mark_missing 会误伤大量正常边（P1-6）。
         full_scan = wm is None or wm.last_max_update is None
+        # MySQL DATETIME 读出 naive → 归一化为 aware UTC 再比较（H10：周期轮询
+        # 曾在此对 naive 水位做减法抛 TypeError，每分钟崩溃）。
+        last_full_scan_at = _utc_aware(wm.last_full_scan_at) if wm else None
+        last_scan_at = _utc_aware(wm.last_scan_at) if wm else None
         auto_full = (
             not full_scan
             and wm is not None
             and (
-                wm.last_full_scan_at is None
-                or (now - wm.last_full_scan_at).total_seconds()
+                last_full_scan_at is None
+                or (now - last_full_scan_at).total_seconds()
                 >= _AUTO_FULL_SCAN_SECONDS
             )
         )
         if auto_full:
             full_scan = True
-        if not force and wm is not None and wm.last_scan_at is not None:
+        if not force and wm is not None and last_scan_at is not None:
             interval = max(1, int(config.poll_interval_minutes or 5)) * 60
-            if (now - wm.last_scan_at).total_seconds() < interval:
+            if (now - last_scan_at).total_seconds() < interval:
                 return {"skipped": "interval_not_due"}
         if progress is not None:
             progress["stage"] = "collecting"
