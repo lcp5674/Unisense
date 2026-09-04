@@ -1130,6 +1130,9 @@ function GraphTab() {
           edges={data.edges}
           height={viewMode === "overview" ? 520 : 900}
           onNodeClick={handleNodeClick}
+          // 点击/悬停只点亮血缘链（金色描边），不压暗其余节点——1763 节点全量图一旦
+          // 压暗就是「满屏灰」，链上高亮本身已足够突出焦点（与影响分析/字段级口径一致）
+          dimOnHover={false}
           // 血缘总览默认隐藏字段节点，聚焦子图同样隐藏，聚焦指标/表主干
           showFields={false}
           // 语义泳道：指标/表分带（表带在上、指标带下），表→指标血缘方向自然分层

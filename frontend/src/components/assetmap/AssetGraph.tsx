@@ -1625,6 +1625,15 @@ function GraphCanvas({
       /** 沿血缘链点亮 center 上下游各 K 跳节点/边（其余 inactive 压暗）；dimOthers=false 只点亮链上、不压暗。 */
       function applyChainHighlight(center: string, dimOthers: boolean) {
         if (!graph || graph.destroyed) return;
+        // center 必须仍在当前图中（数据重载/搜索聚焦子图替换后 focusedIdRef 可能指向
+        // 已被移除的节点）——此时若继续按空链压暗，会出现「整图全灰且无亮节点」且
+        // 点击空白也无法恢复的死态。降级为清空状态回到全亮。
+        const centerExists = graph.getNodeData(center) != null;
+        if (!centerExists) {
+          focusedIdRef.current = null;
+          clearAllStates();
+          return;
+        }
         const pathNodes = collectPathNodes(adjacencyRef.current, center);
         const pathEdges = collectPathEdges(edgesRef.current, pathNodes);
         const nodeRecord: Record<string, string | string[]> = {};
@@ -1699,6 +1708,10 @@ function GraphCanvas({
         const raw = evt.target as { id?: string; __data__?: { id?: string } } | undefined;
         const id = raw?.id ?? raw?.__data__?.id;
         if (!id) return;
+        // 泳道聚合锚点不在血缘邻接中：按链高亮会把其余节点全部压暗成「瞬时全灰」，
+        // 且锚点本身无血缘语义——直接跳过，不触发高亮。
+        const node = graph.getNodeData(String(id))?.data as AssetGraphNode | undefined;
+        if (node?.anchor) return;
         cancelAnimationFrame(hoverRaf);
         hoverRaf = requestAnimationFrame(() => {
           if (!graph || graph.destroyed) return;
