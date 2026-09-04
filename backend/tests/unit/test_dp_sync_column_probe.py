@@ -41,14 +41,14 @@ _SPARSE_TASK_COLUMNS = [
 ]
 
 
-#: 生产精简 dispatch_task_step 真实列（无 is_deleted 软删列）。
+#: 生产精简 dispatch_task_step 真实列（用户 DDL：无 task_node_type；此处亦无
+#: is_deleted，模拟另一形态的精简表以验证软删条件省略）。
 _SPARSE_STEP_COLUMNS = [
     "id",
     "task_id",
     "task_step",
     "task_step_name",
     "task_step_type",
-    "task_node_type",
     "script_info",
     "gmt_modified",
 ]
@@ -161,11 +161,11 @@ async def test_column_probe_cached_per_scan() -> None:
 
 
 @pytest.mark.asyncio
-async def test_column_probe_empty_falls_back_to_full_list() -> None:
-    """探测结果为空（如测试 mock 不识别 information_schema）→ 回退完整期望列。
+async def test_column_probe_empty_falls_back_to_baseline() -> None:
+    """探测结果为空（如测试 mock 不识别 information_schema）→ 回退基线真实列。
 
-    与既有 FakeCollector 行为一致：不新增探测即按历史完整列 SELECT，保证
-    旧测试/降级路径不回退成「零列 SELECT」。
+    基线 = 生产真实 DDL 观测列（无 settle_*/master_task_*）——即使不探测也
+    不会 SELECT 不存在的增强列，从根上避免 ``Unknown column`` 1054。
     """
 
     class _BlankCollector(_SparseCollector):
@@ -174,14 +174,52 @@ async def test_column_probe_empty_falls_back_to_full_list() -> None:
             if "WHERE id=:tid" in sql:
                 return [
                     {"task_id": 1, "task_name": "A", "out_table": "x"},
-                    {"settle_project_director": "p"},  # 增强列在行里也无妨
+                    {"settle_project_director": "p"},  # 行里多余的 key 无妨（fetch 不 SELECT）
                 ]
-            return []  # information_schema 也返回空 → cols=None → 全列回退
+            return []  # information_schema 也返回空 → cols=None → 回退基线
 
     collector = _BlankCollector()
     svc = _svc(collector)
     row = await svc._fetch_task(collector, 1, _config())
     assert row is not None and row["task_id"] == 1
     task_sql = collector.queries[-1]
-    # 回退 = 包含历史全部增强列（与旧实现一致，测试/旧环境不被裁剪）
+    # 回退 = 基线真实列：不含增强列（生产精简表安全）
+    assert "settle_project_director" not in task_sql
+    assert "master_task_id" not in task_sql
+    # 基线关键列齐全
+    assert "id AS task_id" in task_sql
+    assert "name AS task_name" in task_sql
+    assert "project_id" in task_sql
+
+
+@pytest.mark.asyncio
+async def test_fetch_task_enhanced_env_probe_adds_enhanced_columns() -> None:
+    """含增强列环境：探测确认 settle_*/master_task_* 存在 → SELECT 自动补上。
+
+    保证「增强环境快照含结算/主任务字段」能力不因基线收敛而回退。
+    """
+
+    class _EnhancedCollector(_SparseCollector):
+        async def query(self, sql: str, params: dict | None = None):
+            self.queries.append(sql)
+            if "information_schema.columns" in sql:
+                table = (params or {}).get("t")
+                if table == "dispatch_task":
+                    return [
+                        {"column_name": c}
+                        for c in _SPARSE_TASK_COLUMNS
+                        + ["settle_project_director", "master_task_id"]
+                    ]
+                return [{"column_name": c} for c in _SPARSE_STEP_COLUMNS]
+            if "WHERE id=:tid" in sql:
+                return [{"task_id": 1, "task_name": "A", "out_table": "x"}]
+            return []
+
+    collector = _EnhancedCollector()
+    svc = _svc(collector)
+    row = await svc._fetch_task(collector, 1, _config())
+    assert row is not None
+    task_sql = collector.queries[-1]
     assert "settle_project_director" in task_sql
+    assert "master_task_id" in task_sql
+    assert "name AS task_name" in task_sql

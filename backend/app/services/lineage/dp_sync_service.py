@@ -125,10 +125,11 @@ def _safe_table_name(value: str | None, field: str, default: str) -> str:
 _TABLE_RE = re.compile(r"^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)?$")
 
 
-#: dp ``dispatch_task`` 行 SELECT 期望列映射（源列, 别名，顺序 = 历史 SQL 顺序）。
-#: 不同环境的调度元库表结构可能不同（如新增 settle_project_*/master_task_* 或
-#: 精简旧表缺这些列）——fetch 前先探测真实列，仅 SELECT 两者交集；缺失列在
-#: ``build_task_ref`` 侧 ``if key in task`` 天然跳过（静态快照字段，无下游强依赖）。
+#: dp ``dispatch_task`` 行 SELECT 基线列映射（源列, 别名）——**基线 = 生产真实 DDL
+#: 观测列**（2026-09 dp 元库 dispatch_task，用户提供的表结构）。这些列在目标环境
+#: 必然存在，SELECT 永不报 ``Unknown column``（不依赖运行时探测也安全）。
+#: ``_TASK_ENHANCED_COLS`` 为部分环境才有的增强列（结算/主任务语义）——仅当
+#: information_schema 探测确认存在才追加 SELECT，缺失/探测失败一律不带。
 _TASK_SELECT_COLS: tuple[tuple[str, str], ...] = (
     ("id", "task_id"),
     ("task_no", "task_no"),
@@ -139,11 +140,7 @@ _TASK_SELECT_COLS: tuple[tuple[str, str], ...] = (
     ("created_user_id", "created_user_id"),
     ("modified_user_id", "modified_user_id"),
     ("checker", "checker"),
-    ("settle_project_director", "settle_project_director"),
     ("project_id", "project_id"),
-    ("settle_project_name", "settle_project_name"),
-    ("settle_department_name", "settle_department_name"),
-    ("budget_unit_name", "budget_unit_name"),
     ("cycle", "cycle"),
     ("cron_express", "cron_express"),
     ("week_day", "week_day"),
@@ -153,20 +150,33 @@ _TASK_SELECT_COLS: tuple[tuple[str, str], ...] = (
     ("remark", "remark"),
     ("task_version_desc", "task_version_desc"),
     ("task_version", "task_version"),
+)
+
+#: 可选增强列（生产精简表无；含结算/主任务语义的环境由探测动态补上）。
+_TASK_ENHANCED_COLS: tuple[tuple[str, str], ...] = (
+    ("settle_project_director", "settle_project_director"),
+    ("settle_project_name", "settle_project_name"),
+    ("settle_department_name", "settle_department_name"),
+    ("budget_unit_name", "budget_unit_name"),
     ("master_task_id", "master_task_id"),
     ("is_master_task", "is_master_task"),
 )
 
-#: dp ``dispatch_task_step`` 行 SELECT 期望列映射（同上自适应；is_deleted 列不存在
-#: 时 WHERE 软删条件同步省略）。
+#: dp ``dispatch_task_step`` 行 SELECT 基线列映射——基线 = 生产真实 DDL 观测列
+#: （2026-09 dispatch_task_step：id/task_id/task_step/task_step_name/
+#: task_step_type/script_info）；``task_node_type`` 等为假设增强列，仅探测确认
+#: 存在才带。is_deleted 只在 WHERE 用（真实 DDL 有；缺失时探测后省略）。
 _STEP_SELECT_COLS: tuple[tuple[str, str], ...] = (
     ("id", "step_id"),
     ("task_id", "task_id"),
     ("task_step", "task_step"),
     ("task_step_name", "step_name"),
     ("task_step_type", "task_step_type"),
-    ("task_node_type", "task_node_type"),
     ("script_info", "script_info"),
+)
+
+_STEP_ENHANCED_COLS: tuple[tuple[str, str], ...] = (
+    ("task_node_type", "task_node_type"),
 )
 
 
@@ -1143,15 +1153,17 @@ class DpSyncService:
     async def _available_columns(
         self, collector: Any, schema: str, table: str
     ) -> set[str] | None:
-        """探测 dp 元表真实列名集合（小写）；不可知返回 ``None``（调用方按全列处理）。
+        """探测 dp 元表真实列名集合（小写）；不可知返回 ``None``。
 
-        不同环境的调度元库 ``dispatch_task``/``dispatch_task_step`` 结构可能不同
-        （有的含 settle_project_*/master_task_* 等增强列，有的为精简旧表）——
-        fetch 前经 ``information_schema.columns`` 拿真实列，仅 SELECT 交集，避免
-        ``Unknown column`` 使单任务失败（生产曾因缺 settle_project_director 报错）。
+        SELECT 策略（基线 + 增强两级，见 ``_TASK_SELECT_COLS``/``_TASK_ENHANCED_COLS``）：
+        基线列 = 生产真实 DDL 观测列（2026-09 dp 元库），默认必然存在，探测不可知
+        时直接按基线 SELECT 即安全；探测成功后再裁剪更旧表可能缺失的基线列、
+        并补上探测确认存在的增强列（settle_project_*/master_task_* 等）——
+        兼容「精简生产表」与「含增强列环境」两种形态，不再依赖探测避免
+        ``Unknown column``（生产曾因缺 settle_project_director 报 1054）。
 
         结果按 (schema, table) 轮内缓存；探测失败/空集（如测试 mock）视为不可知，
-        回退完整期望列清单（保持旧行为与降级安全）。
+        调用方回退基线列（真实列，安全；不含增强列）。
         """
         # __init__ 已初始化缓存 dict；用 setdefault 兜底 __new__ 手工装配的
         # 测试对象（既有 helper 模式），真实对象直接复用既有缓存。
@@ -1185,9 +1197,13 @@ class DpSyncService:
     ) -> dict[str, Any] | None:
         schema, task_table, _ = self._table_scope(config)
         cols = await self._available_columns(collector, schema, task_table)
-        pairs = [
-            (c, a) for c, a in _TASK_SELECT_COLS if cols is None or c in cols
-        ] or list(_TASK_SELECT_COLS)
+        # 基线列 = 生产真实 DDL 列（必然存在）；探测不可知（None）时只用基线
+        # 即安全；探测成功时再裁剪更旧表可能缺的基线列 + 补存在的增强列。
+        pairs = list(_TASK_SELECT_COLS)
+        if cols is not None:
+            pairs = [(c, a) for c, a in pairs if c in cols] + [
+                (c, a) for c, a in _TASK_ENHANCED_COLS if c in cols
+            ]
         select = ", ".join(
             f"{col} AS {alias}" if col != alias else col for col, alias in pairs
         )
@@ -1207,9 +1223,12 @@ class DpSyncService:
             "task_step_type", step_types, "s", params
         )
         cols = await self._available_columns(collector, schema, step_table)
-        pairs = [
-            (c, a) for c, a in _STEP_SELECT_COLS if cols is None or c in cols
-        ] or list(_STEP_SELECT_COLS)
+        # 同 task：基线列（真实 DDL）默认全带；探测成功才裁剪 + 补增强列。
+        pairs = list(_STEP_SELECT_COLS)
+        if cols is not None:
+            pairs = [(c, a) for c, a in pairs if c in cols] + [
+                (c, a) for c, a in _STEP_ENHANCED_COLS if c in cols
+            ]
         select = ", ".join(
             f"{col} AS {alias}" if col != alias else col for col, alias in pairs
         )
