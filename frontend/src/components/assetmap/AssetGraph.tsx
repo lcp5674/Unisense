@@ -757,11 +757,20 @@ function nodeRank(n: AssetGraphNode): number {
   return 2; // field 及未知类型
 }
 
-/** 按优先级 + 血缘度截断节点，返回可见节点集与仅含两端可见的边。 */
+/** 字段节点独立上限：showFields 时叠加（不占核心额度），避免大图被成百上千字段挤爆 */
+const FIELD_RENDER_CAP = 400;
+
+/** 按优先级 + 血缘度截断节点，返回可见节点集与仅含两端可见的边。
+ *
+ * field 处理：showFields=true 时，字段节点**不占用核心 MAX_RENDER_NODES 额度**，
+ * 而是按血缘度排序后叠加（独立上限 FIELD_RENDER_CAP）。否则大图 >160 时
+ * field 因 nodeRank=2 最低会被截断挤掉，用户点「显示字段」无可见变化。
+ */
 function pickVisible(
   nodes: AssetGraphNode[],
   edges: AssetGraphEdge[],
   showAll: boolean,
+  showFields: boolean,
 ): { visible: AssetGraphNode[]; visibleEdges: AssetGraphEdge[]; hidden: number } {
   if (showAll || nodes.length <= MAX_RENDER_NODES) {
     const ids = new Set(nodes.map((n) => n.id));
@@ -776,15 +785,24 @@ function pickVisible(
     degree.set(e.source, (degree.get(e.source) ?? 0) + 1);
     degree.set(e.target, (degree.get(e.target) ?? 0) + 1);
   }
-  const sorted = [...nodes].sort(
+  // 分离核心（metric/table/未知）与字段：核心按 rank 截断；字段 showFields 时按血缘度叠加
+  const core = nodes.filter((n) => n.type !== "field");
+  const fields = nodes.filter((n) => n.type === "field");
+  const sortedCore = [...core].sort(
     (a, b) => nodeRank(a) - nodeRank(b) || (degree.get(b.id) ?? 0) - (degree.get(a.id) ?? 0),
   );
-  const visible = sorted.slice(0, MAX_RENDER_NODES);
+  const visibleCore = sortedCore.slice(0, MAX_RENDER_NODES);
+  const visibleFields = showFields
+    ? [...fields]
+        .sort((a, b) => (degree.get(b.id) ?? 0) - (degree.get(a.id) ?? 0))
+        .slice(0, FIELD_RENDER_CAP)
+    : [];
+  const visible = [...visibleCore, ...visibleFields];
   const ids = new Set(visible.map((n) => n.id));
   return {
     visible,
     visibleEdges: edges.filter((e) => ids.has(e.source) && ids.has(e.target)),
-    hidden: nodes.length - MAX_RENDER_NODES,
+    hidden: nodes.length - visible.length,
   };
 }
 
@@ -1172,7 +1190,10 @@ function GraphCanvas({
             labelText: (d: NodeData) => {
               const n = d.data as AssetGraphNode | undefined;
               if (n?.anchor) return ""; // 锚点无标签
-              return trimLabel(n?.label ?? String(d.id));
+              // 字段节点 label 为「库.表.列」完整标识（字段级血缘查询/钻取），长度常超
+              // 表级默认阈值（40）——放宽到 120 保证完整表列名不被截断；表级/指标节点维持
+              // 40（一般血缘节点名完整显示，仅极长名称截断）。
+              return trimLabel(n?.label ?? String(d.id), n?.type === "field" ? 120 : 40);
             },
             labelPlacement: "bottom",
             labelOffset: 10,
@@ -1781,14 +1802,16 @@ export function AssetGraph({
     return filteredNodes.filter((n) => (dm.get(n.id) ?? 0) >= minDegreeFilter);
   }, [filteredNodes, edges, minDegreeFilter]);
 
-  // 限流渲染：优先保留核心节点，超出阈值时默认隐藏附属字段节点
+  // 限流渲染：核心节点（metric/table）按优先级+血缘度截断到 160；showFields 时
+  // 字段节点按血缘度叠加（独立上限 400），不占用核心额度——避免大图按 rank
+  // 截断时把 field 挤出可见集（此前用户点「显示字段」看不到字段的根因）
   const {
     visible: visibleNodes,
     visibleEdges,
     hidden,
   } = useMemo(
-    () => pickVisible(degreeFilteredNodes, edges, showAll),
-    [degreeFilteredNodes, edges, showAll],
+    () => pickVisible(degreeFilteredNodes, edges, showAll, showFieldsOn),
+    [degreeFilteredNodes, edges, showAll, showFieldsOn],
   );
 
   // 泳道折叠（子图折叠）：在环检测/泳道之前把被折叠泳道的节点收成聚合节点。

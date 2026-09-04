@@ -554,6 +554,42 @@ describe("AssetGraph 交互", () => {
     await user.keyboard("{Escape}");
     await waitFor(() => expect(lastGraphData().nodes).toHaveLength(5));
   });
+
+  it("显示字段：大图超 160 节点时 field 不计入核心截断、叠加可见（用户点显示字段没反应根因修复）", async () => {
+    // 构造 160 表 + 6 字段（共 166 > MAX_RENDER_NODES=160）
+    const bigNodes: AssetGraphNode[] = [
+      ...Array.from({ length: 160 }, (_, i) => ({
+        id: `table:t${i}`,
+        label: `t${i}`,
+        type: "table" as const,
+      })),
+      ...Array.from({ length: 6 }, (_, i) => ({
+        id: `field:f${i}`,
+        label: `f${i}`,
+        type: "field" as const,
+      })),
+    ];
+    // 让 hub table(t0) 连接 4 个 field：验证 showFields 时字段边也进入 Graph
+    const bigEdges: AssetGraphEdge[] = [
+      { source: "table:t0", target: "field:f0", type: "DERIVED_FROM" },
+      { source: "table:t0", target: "field:f1", type: "DERIVED_FROM" },
+      { source: "table:t0", target: "field:f2", type: "DERIVED_FROM" },
+      { source: "table:t0", target: "field:f3", type: "DERIVED_FROM" },
+    ];
+    // 默认 showFields=true（默认 prop）→ field 默认可见，但因为超 160 截断，
+    // 旧实现会把 field 全挤掉；新实现让 field 不占核心额度，6 个 field 叠加可见。
+    render(<AssetGraph nodes={bigNodes} edges={bigEdges} height={300} />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+
+    // 默认 showFields=true：160 表 + 6 字段叠加（field 不占核心额度，全部可见）
+    const initial = lastGraphData();
+    expect(initial.nodes).toHaveLength(166);
+    expect(
+      initial.nodes.filter((n) => (n.data as AssetGraphNode | undefined)?.type === "field"),
+    ).toHaveLength(6);
+    // 字段边应进入 Graph（两端的 field 与 t0 都可见）
+    expect(initial.edges.length).toBeGreaterThanOrEqual(4);
+  });
 });
 
 describe("AssetGraph 专业降噪（第 3 层）", () => {
