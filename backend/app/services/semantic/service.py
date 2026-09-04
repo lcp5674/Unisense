@@ -486,7 +486,8 @@ class MetricService(BaseService):
             return
         if archived.successor_code:
             raise ConflictError(
-                f"指标编码 {metric_code} 已作废并指向接替指标 {archived.successor_code}，无法重新创建",
+                f"指标编码 {metric_code} 已作废并指向接替指标 "
+                f"{archived.successor_code}，无法重新创建",
                 error_code="METRIC_CODE_EXISTS",
                 ctx={
                     "code": "METRIC_CODE_EXISTS",
@@ -496,7 +497,8 @@ class MetricService(BaseService):
             )
         if role != "platform_admin" and archived.owner_id != owner_id:
             raise ConflictError(
-                f"指标编码已存在（回收站含同名已删除记录，仅原 Owner 或平台管理员可接管重建）: {metric_code}",
+                "指标编码已存在（回收站含同名已删除记录，仅原 Owner 或平台管理员可接管重建）: "
+                f"{metric_code}",
                 error_code="METRIC_CODE_EXISTS",
                 ctx={
                     "code": "METRIC_CODE_EXISTS",

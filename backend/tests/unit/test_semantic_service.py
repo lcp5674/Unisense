@@ -75,6 +75,8 @@ def _svc_with_repo() -> tuple[MetricService, MagicMock]:
         # 软删同码接管（create 编码唯一性第二态）：默认无软删记录走普通路径；
         # 接管场景由专项测试覆盖（get_archived_by_code 返回软删 Metric）。
         mock_repo_cls.return_value.get_archived_by_code = AsyncMock(return_value=None)
+        # 同码活跃存在性（restore 撞码保护）：默认无同码活跃放行；撞码场景专项覆盖
+        mock_repo_cls.return_value.get_by_code = AsyncMock(return_value=None)
         return svc, mock_repo_cls.return_value
 
 
@@ -637,6 +639,87 @@ async def test_create_metric_duplicate_code_raises_conflict():
 
     with pytest.raises(ConflictError):
         await svc.create_metric(MetricCreateRequest(**make_create_payload()), owner_id=1)
+
+
+async def test_create_metric_takeover_archived_code_same_owner():
+    """软删同码 + 创建者即原 Owner → 接管（级联清除旧废弃记录后正常重建）。"""
+    from datetime import UTC, datetime
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.get_archived_by_code = AsyncMock(
+        return_value=make_metric(id=99, owner_id=1, deleted_at=datetime.now(UTC))
+    )
+    repo.purge_metric = AsyncMock()
+    created = make_metric()
+    repo.create = AsyncMock(return_value=created)
+    repo.create_version = AsyncMock(return_value=MagicMock())
+
+    result = await svc.create_metric(MetricCreateRequest(**make_create_payload()), owner_id=1)
+
+    repo.purge_metric.assert_awaited_once_with(99, "sales_gmv_amount_daily")
+    repo.create.assert_awaited_once()
+    assert result.status == "DRAFT"
+
+
+async def test_create_metric_takeover_archived_other_owner_forbidden():
+    """软删同码 + 创建者非原 Owner 且非平台管理员 → 仍 409（不可接管他人废弃记录）。"""
+    from datetime import UTC, datetime
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.get_archived_by_code = AsyncMock(
+        return_value=make_metric(id=99, owner_id=2, deleted_at=datetime.now(UTC))
+    )
+    repo.purge_metric = AsyncMock()
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.create_metric(MetricCreateRequest(**make_create_payload()), owner_id=1)
+
+    assert "仅原 Owner 或平台管理员可接管" in str(exc.value)
+    repo.purge_metric.assert_not_awaited()
+
+
+async def test_create_metric_takeover_archived_successor_kept():
+    """仲裁作废软删记录（successor_code 置位）→ 不接管，提示指向接替指标。"""
+    from datetime import UTC, datetime
+
+    svc, repo = _svc_with_repo()
+    repo.get_by_code = AsyncMock(return_value=None)
+    repo.get_archived_by_code = AsyncMock(
+        return_value=make_metric(
+            id=99, owner_id=1, successor_code="sales_gmv_new_day",
+            deleted_at=datetime.now(UTC),
+        )
+    )
+    repo.purge_metric = AsyncMock()
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.create_metric(MetricCreateRequest(**make_create_payload()), owner_id=1)
+
+    assert "已作废并指向接替指标 sales_gmv_new_day" in str(exc.value)
+    repo.purge_metric.assert_not_awaited()
+
+
+async def test_restore_metric_code_collision_rejected():
+    """恢复软删指标时同码活跃新指标已存在 → 明确报错而非撞唯一索引 500。"""
+    from datetime import UTC, datetime
+
+    from app.core.exceptions import BusinessError
+
+    svc, repo = _svc_with_repo()
+    repo.get_archived_by_code = AsyncMock(
+        return_value=make_metric(owner_id=1, deleted_at=datetime.now(UTC))
+    )
+    # 同码活跃新指标已存在（软删记录被接管重建场景）
+    repo.get_by_code = AsyncMock(return_value=make_metric(id=100, metric_code="sales_gmv_daily"))
+    repo.restore_metric = AsyncMock()
+
+    with pytest.raises(BusinessError) as exc:
+        await svc.restore_metric("sales_gmv_daily", actor_id=1, role="platform_admin")
+
+    assert "已被新指标占用" in str(exc.value)
+    repo.restore_metric.assert_not_awaited()
 
 
 async def test_create_metric_marks_pending_conflict_on_precheck_hit():
