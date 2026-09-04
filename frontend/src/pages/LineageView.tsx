@@ -342,6 +342,53 @@ export function edgesToGraphData(
 }
 
 /**
+ * 把字段级查询/影响分析结果（FieldImpactItem）构建为血缘视图图数据（粒度=字段级）。
+ * - 字段节点 label 显式拼「完整表.列」——表名含库前缀（如 ``wedw_dw.sales_detail.gmv``），
+ *   不依赖节点 id 前缀剥离，杜绝长表名下 id 形态差异导致的列名展示不全；
+ * - 字段映射边带 edgeLabel（边中点标注「加工方式 · 表达式」，复用 exprKind 分类；表达式长
+ *   则截断 + …）与 fullExpr（完整加工表达式，供 hover 边完整查看）；直取边仅标「直取」。
+ * 导出供测试与图渲染复用。
+ */
+export function buildFieldGraphData(
+  items: FieldImpactItem[],
+  metas?: LineageNodeInfo[],
+): { nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } {
+  const metaById = new Map((metas ?? []).map((m) => [m.id, m]));
+  const nodeMap = new Map<string, AssetGraphNode>();
+  const graphEdges: AssetGraphEdge[] = [];
+  const addNode = (nodeId: string, table: string, column: string | null | undefined) => {
+    if (nodeMap.has(nodeId)) return;
+    const col = column && column !== "*" ? column : "*";
+    const meta = metaById.get(nodeId);
+    // 完整「库.表.列」：table 已含库前缀（lineage_field_mapping 存 db.tbl），列名补全其后。
+    nodeMap.set(nodeId, {
+      id: nodeId,
+      type: "field",
+      label: `${table}.${col}`,
+      entity_id: meta?.entity_id ?? undefined,
+      pii: meta?.pii,
+      domain: meta?.domain ?? undefined,
+      owner: meta?.owner ?? undefined,
+    });
+  };
+  for (const it of items) {
+    addNode(it.source_node, it.source_table, it.source_column);
+    addNode(it.target_node, it.target_table, it.target_column);
+    const expr = it.expression ?? null;
+    const kind = exprKind(expr);
+    const exprHead = expr ? (expr.length > 20 ? `${expr.slice(0, 20)}…` : expr) : "";
+    graphEdges.push({
+      source: it.source_node,
+      target: it.target_node,
+      type: "DERIVED_FROM",
+      edgeLabel: expr ? `${kind.label} · ${exprHead}` : kind.label,
+      fullExpr: expr || "",
+    });
+  }
+  return { nodes: Array.from(nodeMap.values()), edges: graphEdges };
+}
+
+/**
  * 把本次 SQL 解析的表级/字段级边合并构建为血缘图谱数据（SQL 血缘解析页当页图谱展示）。
  * - 表级边：源表 → 目标表（后端返回 ``table:`` 前缀节点，label 去前缀展示表名）；
  * - 字段级边：源字段 → 目标字段（前端拼 ``field:表.列`` 节点，label 展示 表.列）。
@@ -1232,17 +1279,8 @@ function ImpactTab() {
         setFieldTotal(data.total);
         setEdges([]);
         setTotal(0);
-        // 字段映射行 → 血缘视图边（field: 节点图渲染，粒度 L2）
-        const viewEdges: LineageEdge[] = data.items.map((it) => ({
-          id: it.id,
-          source_node: it.source_node,
-          target_node: it.target_node,
-          edge_type: "DERIVED_FROM",
-          granularity: "L2",
-          confidence: it.confidence,
-          provenance: it.provenance,
-        }));
-        setGraphData(viewEdges.length > 0 ? edgesToGraphData(viewEdges, data.nodes) : null);
+        // 字段映射行 → 血缘视图（field: 节点图 + 边中点标注加工方式/表达式，粒度 L2）
+        setGraphData(data.items.length > 0 ? buildFieldGraphData(data.items, data.nodes) : null);
         track("lineage_query", node.trim(), "field");
         return;
       }
@@ -1371,9 +1409,13 @@ function ImpactTab() {
       title: "表达式",
       dataIndex: "expression",
       key: "expr",
-      width: 220,
-      ellipsis: true,
-      render: (v?: string | null) => (v ? <code style={{ fontSize: 12 }}>{v}</code> : null),
+      width: 240,
+      render: (v?: string | null) =>
+        v ? (
+          <Tooltip title={<code style={{ wordBreak: "break-all" }}>{v}</code>}>
+            <code style={{ fontSize: 12 }}>{v}</code>
+          </Tooltip>
+        ) : null,
     },
     {
       title: "来源",

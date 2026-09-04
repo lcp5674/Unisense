@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, act, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
-import { LineageView, buildSubgraph, resolveRootId, parseResultToGraphData, upstreamDepsToGraphData, edgesToGraphData, decorateDrillGraphNodes, decorateDrillGraphEdges } from "../pages/LineageView";
+import { LineageView, buildSubgraph, resolveRootId, parseResultToGraphData, upstreamDepsToGraphData, edgesToGraphData, buildFieldGraphData, decorateDrillGraphNodes, decorateDrillGraphEdges } from "../pages/LineageView";
 import { adaptiveBaseRadius } from "../components/assetmap/AssetGraph";
 import * as api from "../api";
 import type { LineageGraphData } from "../types";
@@ -805,25 +805,25 @@ describe("LineageView 血缘查询 / 影响分析 Tab", () => {
       items: [
         {
           id: 11,
-          source_table: "orders",
+          source_table: "wedw_dw.orders",
           source_column: "amount",
-          target_table: "dws",
+          target_table: "wedw_dw.dws",
           target_column: "gmv",
-          source_node: "field:orders.amount",
-          target_node: "field:dws.gmv",
-          expression: null,
+          source_node: "field:wedw_dw.orders.amount",
+          target_node: "field:wedw_dw.dws.gmv",
+          expression: "SUM(amount)",
           confidence: 1,
           provenance: "dp_sql",
           hops: 1,
         },
         {
           id: 12,
-          source_table: "dws",
+          source_table: "wedw_dw.dws",
           source_column: "gmv",
-          target_table: "ads",
+          target_table: "wedw_dw.ads",
           target_column: "total",
-          source_node: "field:dws.gmv",
-          target_node: "field:ads.total",
+          source_node: "field:wedw_dw.dws.gmv",
+          target_node: "field:wedw_dw.ads.total",
           expression: null,
           confidence: 1,
           provenance: "dp_sql",
@@ -831,8 +831,9 @@ describe("LineageView 血缘查询 / 影响分析 Tab", () => {
         },
       ],
       nodes: [
-        { id: "field:orders.amount", type: "field", label: "orders.amount" },
-        { id: "field:dws.gmv", type: "field", label: "dws.gmv" },
+        { id: "field:wedw_dw.orders.amount", type: "field", label: "amount" },
+        { id: "field:wedw_dw.dws.gmv", type: "field", label: "gmv" },
+        { id: "field:wedw_dw.ads.total", type: "field", label: "total" },
       ],
     });
     const panel = await openImpactTabAndQuery(); // 先以表级查询选中 table:orders
@@ -848,11 +849,16 @@ describe("LineageView 血缘查询 / 影响分析 Tab", () => {
     );
     // 字段映射明细表 + 字段级血缘视图（field: 节点图）
     await waitFor(() => expect(within(panel).getByText(/共 2 条字段映射/)).toBeInTheDocument());
-    expect(within(panel).getByText("field:orders.amount".replace(/^field:/, ""))).toBeInTheDocument();
+    // 源/目标字段展示完整「库.表.列」（不再因去前缀/截断丢库名或列名）
+    expect(within(panel).getAllByText("wedw_dw.orders.amount").length).toBeGreaterThan(0);
+    expect(within(panel).getAllByText("wedw_dw.dws.gmv").length).toBeGreaterThan(0); // 第1行目标+第2行源
+    expect(within(panel).getAllByText("wedw_dw.ads.total").length).toBeGreaterThan(0);
     await waitFor(() => expect(within(panel).getByText(/字段级血缘视图/)).toBeInTheDocument());
-    // 表格首行：源字段 orders.amount → 目标字段 dws.gmv（第 1 跳）
+    // 表格首行：源字段 wedw_dw.orders.amount → 目标字段 wedw_dw.dws.gmv（第 1 跳）
     expect(within(panel).getByText(/第 1 跳/)).toBeInTheDocument();
     expect(within(panel).getByText(/第 2 跳/)).toBeInTheDocument();
+    // 表达式列展示加工表达式（第 1 跳 SUM(amount)）
+    expect(within(panel).getByText("SUM(amount)")).toBeInTheDocument();
   });
 
 });
@@ -1354,6 +1360,71 @@ describe("edgesToGraphData 合并节点元数据", () => {
     expect(tableA?.entity_id).toBeUndefined();
     expect(tableA?.domain).toBeUndefined();
     expect(tableA?.pii).toBeUndefined();
+  });
+});
+
+describe("buildFieldGraphData 字段级血缘视图数据", () => {
+  const item = (over: Partial<import("../types").FieldImpactItem> = {}): import("../types").FieldImpactItem => ({
+    id: 1,
+    source_table: "wedw_dw.sales_detail",
+    source_column: "gmv",
+    target_table: "wedw_dw.order_sum",
+    target_column: "total_amount",
+    source_node: "field:wedw_dw.sales_detail.gmv",
+    target_node: "field:wedw_dw.order_sum.total_amount",
+    expression: "COALESCE(SUM(gmv),0)",
+    confidence: 1,
+    provenance: "dp_sql",
+    hops: 1,
+    ...over,
+  });
+
+  it("字段节点 label 为完整「库.表.列」（不依赖 id 前缀剥离、不被截断）", () => {
+    const g = buildFieldGraphData([item()]);
+    const src = g.nodes.find((n) => n.id === "field:wedw_dw.sales_detail.gmv");
+    expect(src?.type).toBe("field");
+    expect(src?.label).toBe("wedw_dw.sales_detail.gmv"); // 完整库.表.列
+    const dst = g.nodes.find((n) => n.id === "field:wedw_dw.order_sum.total_amount");
+    expect(dst?.label).toBe("wedw_dw.order_sum.total_amount");
+    expect(g.nodes).toHaveLength(2);
+  });
+
+  it("边带加工标注：edgeLabel=加工方式·表达式（超 20 截断），fullExpr=完整表达式（hover 可查）", () => {
+    // COALESCE(SUM(gmv),0) 恰 20 字符不截断 → edgeLabel 含完整表达式；再测一条超长截断
+    const g = buildFieldGraphData([item()]);
+    const e = g.edges[0];
+    expect(e.edgeLabel).toBe("空值兜底 · COALESCE(SUM(gmv),0)"); // exprKind(COALESCE)=空值兜底
+    expect(e.fullExpr).toBe("COALESCE(SUM(gmv),0)");
+    const g2 = buildFieldGraphData([
+      item({ id: 9, expression: "CASE WHEN status='paid' THEN amount*0.9 ELSE amount END" }),
+    ]);
+    expect(g2.edges[0].edgeLabel).toBe("条件分支 · CASE WHEN status='pa…"); // 超 20 截断
+    expect(g2.edges[0].fullExpr).toBe("CASE WHEN status='paid' THEN amount*0.9 ELSE amount END");
+  });
+
+  it("直取边仅标「直取」、无 fullExpr；星号列节点补 *", () => {
+    const g = buildFieldGraphData([
+      item({
+        id: 2,
+        source_column: null,
+        source_node: "field:wedw_dw.sales_detail.*",
+        expression: null,
+      }),
+    ]);
+    const e = g.edges[0];
+    expect(e.edgeLabel).toBe("直取");
+    expect(e.fullExpr).toBe("");
+    const src = g.nodes.find((n) => n.id === "field:wedw_dw.sales_detail.*");
+    expect(src?.label).toBe("wedw_dw.sales_detail.*");
+  });
+
+  it("合并节点元数据（域/PII/entity_id 不适用于字段则缺省）", () => {
+    const g = buildFieldGraphData([item()], [
+      { id: "field:wedw_dw.sales_detail.gmv", type: "field", label: "gmv", domain: "sales", pii: true },
+    ]);
+    const src = g.nodes.find((n) => n.id === "field:wedw_dw.sales_detail.gmv");
+    expect(src?.domain).toBe("sales");
+    expect(src?.pii).toBe(true);
   });
 });
 
