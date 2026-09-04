@@ -188,6 +188,33 @@ describe("SystemDict 页面", () => {
     expect(callArg.code).toBeUndefined();
   });
 
+  it("新增弹窗编码可手动指定（全类型）：改写后提交携带自定义 code，清空恢复自动生成", async () => {
+    mockedCreate.mockResolvedValue({} as any);
+    renderDict();
+    await screen.findByText("日");
+    fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
+    const labelInput = await screen.findByPlaceholderText("如 人民币元");
+    fireEvent.change(labelInput, { target: { value: "维表层" } });
+    // 默认跟随自动预览（维表层 → 维_biao_ceng 之类自动转写），改写为字典规范码
+    const codeInput = await screen.findByTestId("dict-code-preview");
+    await waitFor(() => expect(codeInput).not.toBeDisabled());
+    fireEvent.change(codeInput, { target: { value: "dim" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
+    expect((mockedCreate.mock.calls[0][1] as { code?: string }).code).toBe("dim");
+
+    // 清空编码 → 恢复自动生成（提交不传 code）
+    mockedCreate.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: /新增参照数据项/ }));
+    const labelInput2 = await screen.findByPlaceholderText("如 人民币元");
+    fireEvent.change(labelInput2, { target: { value: "中间层" } });
+    const codeInput2 = await screen.findByTestId("dict-code-preview");
+    fireEvent.change(codeInput2, { target: { value: "" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalled());
+    expect((mockedCreate.mock.calls[0][1] as { code?: string }).code).toBeUndefined();
+  });
+
   it("度量格式字典：新增弹窗展示默认单位/小数位扩展字段，提交携带 extra", async () => {
     mockedTypes.mockResolvedValue(["granularity", "measure_format"]);
     mockedCreate.mockResolvedValue({} as any);

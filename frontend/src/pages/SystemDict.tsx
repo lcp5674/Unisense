@@ -229,6 +229,11 @@ export function SystemDict() {
   // 超上限回退 base（resolveUniqueCode 返回的 base 必然仍被占用）→ 无法自动
   // 生成唯一编码，切换为手动指定（后端对应抛 DICT_CODE_EXHAUSTED）。
   const codeExhausted = usedCodes.includes(codePreview);
+  // 手动编码草稿：null=跟随自动预览（codePreview）；字符串=用户显式指定的编码
+  // （清空输入框回退 null 恢复自动）。所有字典类型共用——默认自动生成、可一键改写，
+  // 不再把手动编码锁死在「超上限」单一场景（数仓层等需贴合既有编码体系的类型，
+  // 管理员可直接录入 DIM/MID/ST 等与真实数仓分层一致的编码）。
+  const [codeManual, setCodeManual] = useState<string | null>(null);
 
   // 状态筛选为客户端过滤（数据字典按类型 Tabs 一次性加载全部项）
   const visibleItems = useMemo(
@@ -274,6 +279,8 @@ export function SystemDict() {
     setCreateOpen(true);
     // 新建默认无扩展属性（度量格式专用字段由表单自带）
     setCreateExtra(null);
+    // 重置编码为自动跟随（避免上一次手动指定的编码残留到下一次新增）
+    setCodeManual(null);
     // 打开弹窗时基于最新项列表重算编码预览，缩小「他端新增同名编码但本页未
     // 刷新」导致的预览滞后窗口（提交仍以后端权威判定为准）。
     refreshItemsQuietly();
@@ -344,12 +351,15 @@ export function SystemDict() {
 
   async function handleCreate(values: { code?: string; label: string; sort_order?: number; description?: string; extra_unit?: string; extra_decimal?: number | null }) {
     try {
-      // code 不传由后端按显示名自动生成英文编码（冲突自动追加序号）；
-      // 仅「无法自动生成」时手动指定 code 才随表单透传。
+      // 编码：超上限时取表单手动输入（values.code）；否则取「自动预览/手动改写」草稿
+      // （codeManual，null=跟随自动预览）。归一化——trim 后为空一律不传（后端按显示名
+      // 自动生成），避免把自动预览当手动值、或用户清空后残留空串；非空才透传手动编码。
       // extra：度量格式走专用单位/小数位控件组装；其他类型走通用 ExtraEditor 草稿
+      const manualCode = (values.code ?? codeManual ?? "").trim();
       const extra = activeType === "measure_format" ? composeExtra(values) : createExtra;
       await createDictItem(activeType, {
         ...values,
+        code: manualCode ? manualCode : undefined,
         sort_order: values.sort_order ?? 0,
         extra,
       });
@@ -657,10 +667,20 @@ export function SystemDict() {
               </Space.Compact>
             </Form.Item>
           ) : (
-            <Form.Item label="编码（自动生成）" tooltip="系统根据显示名自动生成英文编码，与已有编码冲突时自动追加序号（如 minute_2）；若无法自动生成可手动指定编码后重试">
+            <Form.Item
+              label="编码"
+              tooltip="默认按显示名自动生成英文编码（与已有编码冲突自动追加序号，如 minute_2）；如需贴合既有编码体系（如数仓层 DIM/MID/ST），可直接改写为自定义编码（仅字母、数字、下划线），清空输入框则恢复自动生成"
+            >
               <Space.Compact style={{ width: "100%" }}>
-                <Input value={codePreview} disabled data-testid="dict-code-preview" />
-                <Tag color="blue" style={{ lineHeight: "30px", margin: 0 }}>自动生成</Tag>
+                <Input
+                  value={codeManual ?? codePreview}
+                  onChange={(e) => setCodeManual(e.target.value.replace(/[^A-Za-z0-9_]/g, ""))}
+                  placeholder={codePreview}
+                  data-testid="dict-code-preview"
+                />
+                <Tag color={codeManual !== null ? "gold" : "blue"} style={{ lineHeight: "30px", margin: 0 }}>
+                  {codeManual !== null ? "手动" : "自动"}
+                </Tag>
               </Space.Compact>
             </Form.Item>
           )}
