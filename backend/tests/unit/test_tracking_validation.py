@@ -34,6 +34,11 @@ async def test_allowed_metric_event_accepted() -> None:
     await _call(TrackEventRequest(event_type="sql_query", target_id="mysql_unisense"))
 
 
+async def test_allowed_lineage_field_drill_event_accepted() -> None:
+    """字段级血缘钻取埋点必须在白名单内（前端 lineage_field_drill 触发）。"""
+    await _call(TrackEventRequest(event_type="lineage_field_drill", target_id="dp_stable.dispatch_task"))
+
+
 async def test_context_too_many_keys_rejected() -> None:
     with pytest.raises(ValidationError):
         await _call(

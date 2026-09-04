@@ -169,6 +169,31 @@ function nodeTypeTag(id: string) {
   return <Tag color={def.color}>{def.label}</Tag>;
 }
 
+/** 字段加工方式识别：按表达式形态给出可读分类（字段级血缘明细「加工方式」列）。
+ *  空表达式=直取；COALESCE/NVL=空值兜底；聚合函数=聚合；CASE=条件分支；
+ *  纯数字/字符串字面量=常量；含算术运算符=计算表达式；其余=函数加工。 */
+function exprKind(
+  v: string | null | undefined,
+): { label: string; color: string } {
+  if (!v || !v.trim()) return { label: "直取", color: "green" };
+  const s = v.trim();
+  const up = s.toUpperCase();
+  if (/^(COALESCE|IFNULL|NVL|ISNULL)\s*\(/i.test(up))
+    return { label: "空值兜底", color: "cyan" };
+  if (/^(SUM|COUNT|AVG|MAX|MIN|COUNT_DISTINCT|GROUP_CONCAT)\s*\(/i.test(up))
+    return { label: "聚合加工", color: "purple" };
+  if (/^CASE\s+WHEN/i.test(up)) return { label: "条件分支", color: "orange" };
+  if (
+    /^[-+]?\d+(\.\d+)?$/.test(s) ||
+    /^'(\\.|[^'\\])*'$/.test(s) ||
+    /^(TRUE|FALSE|NULL)$/i.test(s)
+  )
+    return { label: "常量", color: "default" };
+  if (/[+\-*/%]\s*/.test(s) && !/^[-+]?[\d.]+$/.test(s))
+    return { label: "计算表达式", color: "blue" };
+  return { label: "函数加工", color: "geekblue" };
+}
+
 /** 血缘候选节点类型标签（影响分析选项框下拉分组）。 */
 const NODE_TYPE_LABEL: Record<string, string> = {
   table: "表",
@@ -686,6 +711,14 @@ function GraphTab() {
     }
   }
 
+  // 字段钻取视图：本表加工上下文（参与映射的上游来源表 / 下游去向表，均排除当前表）
+  const drillUpstreamTables = drill
+    ? Array.from(new Set(drill.mappings.map((m) => m.source_table).filter((t) => t !== drill.table)))
+    : [];
+  const drillDownstreamTables = drill
+    ? Array.from(new Set(drill.mappings.map((m) => m.target_table).filter((t) => t !== drill.table)))
+    : [];
+
   return (
     <div>
       <Space style={{ marginBottom: 12 }} wrap>
@@ -733,7 +766,7 @@ function GraphTab() {
           ，点击节点：指标 / 表视图均在本页侧边栏展示详情
         </span>
       </Space>
-            {drill ? (
+      {drill ? (
         <Card
           size="small"
           title={
@@ -763,11 +796,76 @@ function GraphTab() {
             点击表节点展开其字段级血缘：节点为字段（{drill.table} 的上游来源列与下游去向列），
             连线为该表参与的逐列映射；完整明细见下方表格。
           </span>
+          {(drillUpstreamTables.length > 0 || drillDownstreamTables.length > 0) && (
+            <div
+              style={{
+                marginBottom: 8,
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 4,
+                alignItems: "center",
+                background: "rgba(59,130,246,0.05)",
+                borderRadius: 6,
+                padding: "4px 8px",
+              }}
+            >
+              {drillUpstreamTables.length > 0 && (
+                <>
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    上游来源表
+                  </span>
+                  {drillUpstreamTables.map((t) => (
+                    <Tag
+                      key={`up-${t}`}
+                      color="cyan"
+                      style={{ cursor: "pointer", marginInlineEnd: 0 }}
+                      title="点击查看该表字段级血缘"
+                      onClick={() => {
+                        const n = data?.nodes.find((x) => x.id === `table:${t}`);
+                        if (n) void startFieldDrill(n as AssetGraphNode);
+                        else message.info(`「${t}」不在当前血缘图中，仅展示当前表字段关系`);
+                      }}
+                    >
+                      {t}
+                    </Tag>
+                  ))}
+                </>
+              )}
+              <span style={{ color: "#94a3b8" }}>→</span>
+              <Tag color="blue" style={{ fontWeight: 600, marginInlineEnd: 0 }}>
+                {drill.table}
+              </Tag>
+              {drillDownstreamTables.length > 0 && (
+                <>
+                  <span style={{ color: "#94a3b8" }}>→</span>
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    下游去向表
+                  </span>
+                  {drillDownstreamTables.map((t) => (
+                    <Tag
+                      key={`down-${t}`}
+                      color="green"
+                      style={{ cursor: "pointer", marginInlineEnd: 0 }}
+                      title="点击查看该表字段级血缘"
+                      onClick={() => {
+                        const n = data?.nodes.find((x) => x.id === `table:${t}`);
+                        if (n) void startFieldDrill(n as AssetGraphNode);
+                        else message.info(`「${t}」不在当前血缘图中，仅展示当前表字段关系`);
+                      }}
+                    >
+                      {t}
+                    </Tag>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
           <AssetGraph
             key={`drill-${drill.table}`}
             nodes={drill.nodes as AssetGraphNode[]}
             edges={drill.edges as AssetGraphEdge[]}
             height={430}
+            dimOnHover={false}
             onNodeClick={handleNodeClick}
           />
           <Divider style={{ margin: "12px 0" }} />
@@ -799,7 +897,16 @@ function GraphTab() {
                 ),
               },
               {
-                title: "表达式",
+                title: "加工方式",
+                key: "kind",
+                width: 110,
+                render: (_: unknown, r) => {
+                  const k = exprKind(r.expression);
+                  return <Tag color={k.color}>{k.label}</Tag>;
+                },
+              },
+              {
+                title: "加工表达式",
                 dataIndex: "expression",
                 key: "expr",
                 render: (v: string | null) =>
@@ -808,7 +915,7 @@ function GraphTab() {
                       {v}
                     </span>
                   ) : (
-                    <span className="muted">直取</span>
+                    <span className="muted">—</span>
                   ),
               },
               {

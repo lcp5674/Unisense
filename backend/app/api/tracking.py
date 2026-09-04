@@ -48,6 +48,7 @@ _ALLOWED_EVENT_TYPES = frozenset(
         "lineage_channel_runs",
         "lineage_coverage_view",
         "lineage_edge_detail",
+        "lineage_field_drill",
         "lineage_graph_view",
         "lineage_parse",
         "lineage_preview",

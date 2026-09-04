@@ -34,6 +34,10 @@ interface AssetGraphProps {
   onNodeClick?: (node: AssetGraphNode) => void;
   /** 是否展示字段节点（血缘总览等场景默认隐藏，减少视觉噪声）；默认 true */
   showFields?: boolean;
+  /** 悬停路径高亮时是否把「非血缘链节点」压暗（inactive 半透明）。
+   *  小图（字段级钻取、聚焦子图）节点密集、hover 链短，压暗会让其他节点几乎不可见，
+   *  应关闭（只高亮链上、不压暗其余）；大图默认 true 保持「从哪来/流向哪」的聚焦效果。 */
+  dimOnHover?: boolean;
   /** 布局策略：auto=检测到真环用力导向否则分层；hierarchy=分层（DAG）；force=力导向；radial=血缘度同心圆（依赖引用数高者居中）。默认 auto */
   layout?: "auto" | "hierarchy" | "force" | "radial";
   /**
@@ -837,6 +841,8 @@ interface GraphCanvasProps {
   onReady: () => void;
   /** 是否启用数仓分层徽标描边（非 PII 非环时按表名前缀用层色描边） */
   layerBadges?: boolean;
+  /** 悬停高亮是否压暗非链节点（false=只高亮链上、不压暗其余；见外层 dimOnHover） */
+  dimOnHover?: boolean;
 }
 
 /**
@@ -857,6 +863,7 @@ function GraphCanvas({
   onNodeClick,
   onReady,
   layerBadges = true,
+  dimOnHover = true,
 }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<G6Graph | null>(null);
@@ -871,6 +878,9 @@ function GraphCanvas({
   // 需读最新渲染状态——用 ref 规避闭包过期（修复：旧 hover 回调因捕获 graphReady=false 从不生效）
   const graphReadyRef = useRef(false);
   graphReadyRef.current = graphReady;
+  // dimOnHover 的 ref 镜像：mount effect 注册的 hover 回调需读最新值（同 graphReady 规避闭包过期）
+  const dimOnHoverRef = useRef(dimOnHover);
+  dimOnHoverRef.current = dimOnHover;
   // 边流动动画的取消函数（render 后启动、数据重载/卸载时取消）
   const edgeFlowCancelRef = useRef<(() => void) | null>(null);
 
@@ -1369,21 +1379,32 @@ function GraphCanvas({
             // 路径节点集 + 路径边集（BFS 层序，超限保留近者）
             const pathNodes = collectPathNodes(adjacencyRef.current, center);
             const pathEdges = collectPathEdges(edgesRef.current, pathNodes);
-            // 节点状态：路径链上 active，其余 inactive（淡化到 0.06）
+            // 节点状态：路径链上 active，其余 inactive（淡化到 0.06）。
+            // dimOnHover=false（字段级钻取等小图）：只高亮链上节点、不压暗其余，
+            // 避免密集小图上「看一个字段、其他全暗到看不清」。
+            const dimOthers = dimOnHoverRef.current;
             const nodeRecord: Record<string, string | string[]> = {};
             for (const n of graph.getNodeData()) {
               const nid = String(n.id);
               if (nid === center) continue; // 中心节点单独动画点亮
-              nodeRecord[nid] = pathNodes.has(nid)
-                ? stateWithCompact("active")
-                : stateWithCompact("inactive");
+              if (dimOthers) {
+                nodeRecord[nid] = pathNodes.has(nid)
+                  ? stateWithCompact("active")
+                  : stateWithCompact("inactive");
+              } else if (pathNodes.has(nid)) {
+                nodeRecord[nid] = stateWithCompact("active");
+              }
             }
             // 边状态：路径边保持醒目，非路径边压暗（锚定边跳过）
             const edgeRecord: Record<string, string | string[]> = {};
             for (const e of edgesRef.current) {
               if ((e as RenderEdge | undefined)?.anchorEdge) continue;
               const eid = `${String(e.source)}-${String(e.target)}`;
-              edgeRecord[eid] = pathEdges.has(eid) ? "active" : "inactive";
+              if (dimOthers) {
+                edgeRecord[eid] = pathEdges.has(eid) ? "active" : "inactive";
+              } else if (pathEdges.has(eid)) {
+                edgeRecord[eid] = "active";
+              }
             }
             void graph.setElementState(nodeRecord, false).catch(() => {});
             void graph.setElementState(edgeRecord, false).catch(() => {});
@@ -1642,6 +1663,7 @@ export function AssetGraph({
   fullscreenable = true,
   direction = "TB",
   defaultCollapsedLayers,
+  dimOnHover = true,
 }: AssetGraphProps) {
   const onNodeClickRef = useRef(onNodeClick);
   onNodeClickRef.current = onNodeClick;
@@ -2009,6 +2031,7 @@ export function AssetGraph({
           }}
           onReady={() => setLayoutSwitching(false)}
           layerBadges={layerBadges}
+          dimOnHover={dimOnHover}
         />
         {layoutSwitching && (
           <div

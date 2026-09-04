@@ -287,6 +287,11 @@ describe("LineageView 血缘图谱 Tab", () => {
     // 映射明细表：源列 → 目标列完整展示（表.列）
     expect(screen.getByText("customers.id")).toBeInTheDocument();
     expect(screen.getByText("orders.id")).toBeInTheDocument();
+    // 表加工上下文带：上游来源表 customers → 当前表 orders（本数据无下游，仅展示上游）
+    expect(screen.getByText("上游来源表")).toBeInTheDocument();
+    expect(screen.getByText("customers")).toBeInTheDocument();
+    // 加工方式列：expression 为空 → 「直取」
+    expect(screen.getByText("直取")).toBeInTheDocument();
     // 返回表级图谱按钮存在，不直接打开表详情（表详情经钻取视图顶部按钮进入）
     expect(screen.getByRole("button", { name: /返回表级图谱/ })).toBeTruthy();
     expect(api.getCatalogDetail).not.toHaveBeenCalled();
