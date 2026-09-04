@@ -1636,27 +1636,24 @@ function GraphCanvas({
         }
         const pathNodes = collectPathNodes(adjacencyRef.current, center);
         const pathEdges = collectPathEdges(edgesRef.current, pathNodes);
+        // 每次都对「全量」节点/边给出确定性状态（链上=active，非链=inactive 或常态 []），
+        // 而非只写链上——否则连续聚焦 A 再聚焦 B 时，A 链上节点会残留 active 金态不清，
+        // 也可能残留上一轮 inactive 灰态。全量赋值保证高亮集合始终恰为当前血缘链。
         const nodeRecord: Record<string, string | string[]> = {};
         for (const n of graph.getNodeData()) {
           const nid = String(n.id);
           if (nid === center) continue; // 中心节点单独动画点亮
-          if (dimOthers) {
-            nodeRecord[nid] = pathNodes.has(nid)
-              ? stateWithCompact("active")
-              : stateWithCompact("inactive");
-          } else if (pathNodes.has(nid)) {
-            nodeRecord[nid] = stateWithCompact("active");
-          }
+          nodeRecord[nid] = pathNodes.has(nid)
+            ? stateWithCompact("active")
+            : stateWithCompact(dimOthers ? "inactive" : []);
         }
         const edgeRecord: Record<string, string | string[]> = {};
         for (const e of edgesRef.current) {
           if ((e as RenderEdge | undefined)?.anchorEdge) continue;
           const eid = `${String(e.source)}-${String(e.target)}`;
-          if (dimOthers) {
-            edgeRecord[eid] = pathEdges.has(eid) ? "active" : "inactive";
-          } else if (pathEdges.has(eid)) {
-            edgeRecord[eid] = "active";
-          }
+          if (pathEdges.has(eid)) edgeRecord[eid] = "active";
+          else if (dimOthers) edgeRecord[eid] = "inactive";
+          else edgeRecord[eid] = [];
         }
         void graph.setElementState(nodeRecord, false).catch(() => {});
         void graph.setElementState(edgeRecord, false).catch(() => {});
