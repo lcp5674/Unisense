@@ -86,11 +86,17 @@ function TaskProgressCard({
     {
       title: "表",
       dataIndex: "entity_name",
+      width: 220,
       render: (v: string, r) => (
-        <Space size={4}>
-          <span>{v}</span>
-          {r.catalog_id != null && <span className="muted">#{r.catalog_id}</span>}
-        </Space>
+        // 表名可能为无空格的英文长串，禁止溢出覆盖相邻列：完整换行展示（不截断）
+        <div style={{ wordBreak: "break-word" }}>
+          {v}
+          {r.catalog_id != null && (
+            <span className="muted" style={{ marginLeft: 4 }}>
+              #{r.catalog_id}
+            </span>
+          )}
+        </div>
       ),
     },
     {
@@ -102,12 +108,22 @@ function TaskProgressCard({
         return <Tag color={cfg.color}>{cfg.label}</Tag>;
       },
     },
-    { title: "结果", dataIndex: "summary", ellipsis: true },
+    {
+      title: "结果",
+      dataIndex: "summary",
+      // 结果为「；」连接的多段文本，同样完整换行展示，不用 ellipsis 截断
+      render: (v: string) =>
+        v ? (
+          <div style={{ wordBreak: "break-word" }}>{v}</div>
+        ) : (
+          <span className="muted">-</span>
+        ),
+    },
   ];
   return (
     <div style={{ marginBottom: 16 }}>
       <Space style={{ width: "100%", justifyContent: "space-between" }}>
-        <Space>
+        <Space wrap>
           <FireOutlined style={{ color: "#fa541c" }} />
           <strong>批量推断 #{task.id}（共 {task.total} 张表）</strong>
           <Tag color={running ? (stopPending ? "orange" : "blue") : "default"}>
@@ -149,6 +165,7 @@ function TaskProgressCard({
         columns={columns}
         dataSource={task.progress}
         pagination={false}
+        tableLayout="fixed"
         scroll={{ y: 260 }}
       />
     </div>
@@ -254,7 +271,7 @@ export function BatchInferCenter() {
       )}
       <Drawer
         title="批量 LLM 推断任务中心"
-        width={640}
+        width={760}
         open={open}
         onClose={() => setOpen(false)}
         extra={
