@@ -6,6 +6,7 @@
  * 取消任务、最近完成结果。解决「批量推断切页后看不到进度/结果」的历史缺陷。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import {
   Button,
   Drawer,
@@ -31,6 +32,8 @@ import { formatCnTime } from "../utils/timeCn";
 
 const RUNNING = new Set(["pending", "running"]);
 const POLL_MS = 4000;
+/** 任务进入终态后，完成摘要浮条的停留时长（ms）。避免「任务跑完浮条无声消失、用户不知结果」。 */
+const FINISHED_NOTICE_MS = 10_000;
 
 /**
  * 模块级批量任务「活动事件」总线（pub/sub）。
@@ -177,8 +180,12 @@ export function BatchInferCenter() {
   const [tasks, setTasks] = useState<BatchInferTask[]>([]);
   const [open, setOpen] = useState(false);
   const [cancellingId, setCancellingId] = useState<number | null>(null);
+  // 刚进入终态的任务摘要（用于浮条短暂展示「本次批量推断结果」，避免任务完成时无声消失）
+  const [finishedNotice, setFinishedNotice] = useState<BatchInferTask | null>(null);
   const mounted = useRef(true);
   const timerRef = useRef<number | null>(null);
+  // 上一轮已知的各任务 status（识别「上轮 running/pending → 本轮终态」的任务 → 弹完成摘要）
+  const lastStatusRef = useRef<Map<number, string>>(new Map());
 
   const stopPolling = useCallback(() => {
     if (timerRef.current != null) {
@@ -192,6 +199,15 @@ export function BatchInferCenter() {
       const rows = await listBatchInferTasks(30);
       if (!mounted.current) return;
       setTasks(rows);
+      // 终态摘要：识别「上一轮 running/pending → 本轮已终态」的任务，弹完成摘要浮条
+      // （避免任务很短时浮条一闪而过、用户不知本次批量推断结果）
+      const last = lastStatusRef.current;
+      const newlyFinished = rows.find(
+        (t) => last.get(t.id) != null && RUNNING.has(last.get(t.id) as string) && isFinished(t),
+      );
+      if (newlyFinished) setFinishedNotice(newlyFinished);
+      last.clear();
+      rows.forEach((t) => last.set(t.id, t.status));
       // 状态机：有运行中任务 → 保持/恢复 4s 轮询；无任务 → 停止轮询（零请求）
       const hasRunning = rows.some((t) => RUNNING.has(t.status));
       if (hasRunning) {
@@ -205,6 +221,15 @@ export function BatchInferCenter() {
       // 轮询失败静默（网络抖动/后端不可用时不打扰）
     }
   }, [stopPolling]);
+
+  // 完成摘要浮条停留 FINISHED_NOTICE_MS 后自动消失
+  useEffect(() => {
+    if (!finishedNotice) return;
+    const timer = window.setTimeout(() => {
+      if (mounted.current) setFinishedNotice(null);
+    }, FINISHED_NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, [finishedNotice]);
 
   useEffect(() => {
     mounted.current = true;
@@ -221,6 +246,22 @@ export function BatchInferCenter() {
   const running = tasks.filter((t) => RUNNING.has(t.status));
   const finished = tasks.filter(isFinished).slice(0, 3);
   const stopping = running.some((t) => t.cancel_requested);
+  // 无运行中任务但存在「刚完成」的摘要 → 展示完成浮条（有运行中任务时优先展示进行中浮条）
+  const showDoneNotice = running.length === 0 && finishedNotice != null;
+  const barStyle: CSSProperties = {
+    position: "fixed",
+    right: 24,
+    bottom: 24,
+    zIndex: 1000,
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    padding: "8px 14px",
+    background: "#fff",
+    borderRadius: 24,
+    boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
+    cursor: "pointer",
+  };
 
   async function handleCancel(id: number) {
     setCancellingId(id);
@@ -239,20 +280,7 @@ export function BatchInferCenter() {
     <>
       {running.length > 0 && (
         <div
-          style={{
-            position: "fixed",
-            right: 24,
-            bottom: 24,
-            zIndex: 1000,
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            padding: "8px 14px",
-            background: "#fff",
-            borderRadius: 24,
-            boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
-            cursor: "pointer",
-          }}
+          style={barStyle}
           onClick={() => setOpen(true)}
           data-testid="batch-infer-center-bar"
         >
@@ -263,6 +291,31 @@ export function BatchInferCenter() {
               {running.reduce((s, t) => s + taskDoneCount(t) + taskErrCount(t), 0)}/
               {running.reduce((s, t) => s + t.total, 0)}
             </strong>
+          </span>
+          <span className="muted" style={{ fontSize: 12 }}>
+            （点击查看）
+          </span>
+        </div>
+      )}
+      {showDoneNotice && finishedNotice && (
+        <div
+          style={barStyle}
+          onClick={() => setOpen(true)}
+          data-testid="batch-infer-done-bar"
+        >
+          <CheckCircleOutlined style={{ color: "#52c41a" }} />
+          <span>
+            批量推断 #{finishedNotice.id} 完成：
+            <strong>成功 {finishedNotice.done} 表</strong>
+            {finishedNotice.failed > 0 && (
+              <span style={{ color: "#cf1322" }}> · 失败 {finishedNotice.failed} 表</span>
+            )}
+            {finishedNotice.cancelled > 0 && (
+              <span> · 取消 {finishedNotice.cancelled} 表</span>
+            )}
+            {finishedNotice.added_total > 0 && (
+              <span style={{ color: "#389e0d" }}> · 新增 {finishedNotice.added_total} 处</span>
+            )}
           </span>
           <span className="muted" style={{ fontSize: 12 }}>
             （点击查看）

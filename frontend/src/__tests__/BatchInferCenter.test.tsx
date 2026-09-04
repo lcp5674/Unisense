@@ -145,4 +145,72 @@ describe("BatchInferCenter 状态机轮询（无任务零请求 / 有任务立�
     });
     expect(mockedList).toHaveBeenCalledTimes(3);
   });
+
+  it("任务进入终态后显示完成摘要浮条（成功/失败/取消/新增统计），停留后自动消失", async () => {
+    vi.useFakeTimers();
+    // 挂载探测：任务 running
+    mockedList.mockResolvedValueOnce([makeTask({ id: 6, status: "running" })]);
+    render(<BatchInferCenter />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText(/批量推断进行中/)).toBeTruthy();
+
+    // 下一轮轮询：任务 completed（带聚合统计）
+    mockedList.mockResolvedValue([
+      makeTask({
+        id: 6,
+        status: "completed",
+        total: 4,
+        done: 2,
+        failed: 1,
+        cancelled: 1,
+        added_total: 7,
+        progress: [
+          { catalog_id: 1, entity_name: "t1", status: "done", summary: "字段描述已生成", added: 5 },
+          { catalog_id: 2, entity_name: "t2", status: "done", summary: "表描述已生成", added: 2 },
+          { catalog_id: 3, entity_name: "t3", status: "error", summary: "LLM 推断失败" },
+          { catalog_id: 4, entity_name: "t4", status: "cancelled", summary: "已取消" },
+        ],
+      }),
+    ]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+
+    // 进行中浮条消失 → 完成摘要浮条出现（不再无声消失）
+    expect(screen.queryByText(/批量推断进行中/)).toBeNull();
+    expect(screen.getByTestId("batch-infer-done-bar")).toBeTruthy();
+    expect(screen.getByText(/批量推断 #6 完成/)).toBeTruthy();
+    expect(screen.getByText(/成功 2 表/)).toBeTruthy();
+    expect(screen.getByText(/失败 1 表/)).toBeTruthy();
+    expect(screen.getByText(/取消 1 表/)).toBeTruthy();
+    expect(screen.getByText(/新增 7 处/)).toBeTruthy();
+
+    // 停留 FINISHED_NOTICE_MS(10s) 后自动消失
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(screen.queryByTestId("batch-infer-done-bar")).toBeNull();
+  });
+
+  it("任务全部成功（无失败/取消/新增）→ 摘要浮条不含失败/取消/新增段", async () => {
+    vi.useFakeTimers();
+    mockedList.mockResolvedValueOnce([makeTask({ id: 7, status: "running" })]);
+    render(<BatchInferCenter />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    mockedList.mockResolvedValue([
+      makeTask({ id: 7, status: "completed", total: 2, done: 2, failed: 0, cancelled: 0, added_total: 0 }),
+    ]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    expect(screen.getByTestId("batch-infer-done-bar")).toBeTruthy();
+    expect(screen.getByText(/成功 2 表/)).toBeTruthy();
+    expect(screen.queryByText(/失败 0 表/)).toBeNull();
+    expect(screen.queryByText(/取消 0 表/)).toBeNull();
+    expect(screen.queryByText(/新增 0 处/)).toBeNull();
+  });
 });
