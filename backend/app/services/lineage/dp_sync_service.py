@@ -41,6 +41,7 @@ from app.services.lineage.dp_sync_llm import (
 from app.services.lineage.dp_sync_meta import merged_exclude_table_patterns
 from app.services.lineage.dp_sync_parser import parse_dp_step
 from app.services.lineage.dp_sync_repo import DpLineageRepository
+from app.services.lineage.dp_sync_typed import parse_dp_step_typed
 from app.services.lineage.parser import node_table
 from app.services.lineage.repository import LineageRepository
 
@@ -224,8 +225,9 @@ class DpSyncService:
             事后重复 sqlglot 解析，P2-9 #10）。
         """
         sql_hash = sql_fingerprint(sql)
-        outcome = parse_dp_step(
+        outcome = parse_dp_step_typed(
             sql,
+            step_type=int(step.get("task_step_type") or 7),
             dialect="hive",
             exclude_patterns=merged_exclude_table_patterns(
                 config.exclude_table_patterns

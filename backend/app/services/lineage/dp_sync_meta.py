@@ -34,14 +34,15 @@ DP_TASK_TYPES: dict[int, str] = {
 }
 
 #: dispatch_task_step.task_step_type 节点类型映射（依据：列注释 + script 形态实据，
-#: 2026-09 连库观测）。
+#: 2026-09 连库观测）。解析支持见 dp_sync_typed（2/3/9/15 非 SQL 形态均有
+#: 类型化解析器；4/5/6/7 走 SQL 解析并切方言）。
 #: 列注释：`任务类型 2:datax; 3:shell; 7:hive`。
 #: 其余值语义由 script 内容归纳：
-#:   - 4：直连库 DML 语句（delete/insert 非 Hive） → SQL 执行脚本
+#:   - 4：直连库 DML 语句（delete/insert 非 Hive） → SQL 执行脚本（mysql 方言）
 #:   - 5：TRUNCATE 清表语句 → 清表脚本
-#:   - 6：Oracle 语法（declare/dba_views/PLSQL） → Oracle SQL/PLSQL 脚本
-#:   - 9：script 为纯数字（上报配置 ID），task_node_type=6(上报) → 上报配置节点
-#:   - 15：JSON 接口同步配置（hiveDbName/mysqlDbName/url） → 接口同步配置
+#:   - 6：Oracle 语法（declare/dba_views/PLSQL） → Oracle SQL/PLSQL 脚本（oracle 方言）
+#:   - 9：script 为纯数字（上报配置 ID），task_node_type=6(上报) → 上报配置节点（no_flow）
+#:   - 15：JSON 接口同步配置（hiveDbName/mysqlDbName/url） → 接口同步配置（mysql↔hive 边）
 DP_STEP_TYPES: dict[int, str] = {
     2: "DataX 同步",
     3: "Shell 脚本",
