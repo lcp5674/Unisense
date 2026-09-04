@@ -106,6 +106,17 @@ async def update_dp_sync_config(
     ident_err = _ident_field_error(payload)
     if ident_err:
         return ok(code="VALIDATION_ERROR", message=ident_err, data=None)
+    if "poll_interval_minutes" in payload:
+        try:
+            interval = int(payload["poll_interval_minutes"])
+        except (TypeError, ValueError):
+            interval = 0
+        if not 1 <= interval <= 1440:
+            return ok(
+                code="VALIDATION_ERROR",
+                message="poll_interval_minutes 取值范围 1~1440（分钟，最长 24 小时）",
+                data=None,
+            )
     cfg = await repo.get_config()
     if cfg is None:
         source_id = str(payload.get("source_id") or "").strip()

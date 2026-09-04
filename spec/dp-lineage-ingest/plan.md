@@ -34,7 +34,7 @@
 | enabled | bool | 同步总开关（停用不再轮询/解析，血缘保留） |
 | source_id / schema_name | int / str | dp 数据源 id（默认 4）/ 库（默认 dp_stable） |
 | task_table / step_table | str | dispatch_task / dispatch_task_step（允许换表） |
-| poll_interval_minutes | int 1–60 | 轮询间隔，默认 5（**前端可配置**） |
+| poll_interval_minutes | int 1–1440 | 轮询间隔，默认 5（**前端可配置**，最长 24 小时；0141 放宽，API 校验 1~1440） |
 | task_type_filter / step_type_filter | JSON | 默认 `[1]` / `[7]` |
 | exclude_task_patterns / exclude_table_patterns | JSON | 排除规则（任务名/目标表前缀正则，默认 tmp/temp/_bak/adhoc） |
 | llm_enabled | bool | LLM 开关（关 = 纯 sqlglot，复杂/失败节点全进待抉择） |
@@ -193,7 +193,7 @@ script_info ─┬─ sqlglot 多语句拆分 + extract_table/field/ddl_lineage
 
 | Tab | 内容 | 权限 |
 |---|---|---|
-| **同步配置** | 总开关 / 轮询间隔（1–60 分钟滑条）/ 任务·节点类型过滤 / 排除规则（Tag 编辑）/ LLM 开关与分级规则（高级折叠）/ 保存即生效 | `lineage:sync`（可读）+ 写需 `lineage:sync` 管理 |
+| **同步配置** | 总开关 / 轮询间隔（1~1440 分钟，档位+自定义）/ 任务·节点类型过滤 / 排除规则（Tag 编辑）/ LLM 开关与分级规则（高级折叠）/ 保存即生效 | `lineage:sync`（可读）+ 写需 `lineage:sync` 管理 |
 | **待抉择** | 列表 + 详情三栏对照 + 操作按钮（采纳/忽略/手动配置）+ 记忆复用说明 | `lineage:resolve` |
 | **运维** | 水位查看/重置（触发全量）、运行记录表（每轮 scanned/parsed/diverged/llm_calls/duration，可点看 detail_json）、依赖实时状态 | `lineage:sync` |
 

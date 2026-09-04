@@ -2,13 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   App,
+  AutoComplete,
   Button,
   Card,
   Descriptions,
   Drawer,
   Form,
   Input,
-  InputNumber,
   Modal,
   Progress,
   Row,
@@ -255,7 +255,7 @@ function ConfigTab() {
       const payload: Partial<DpSyncConfig> = {
         enabled: values.enabled,
         source_id: values.source_id,
-        poll_interval_minutes: values.poll_interval_minutes,
+        poll_interval_minutes: Number(values.poll_interval_minutes),
         // 空数组 = 全部类型（含未识别）；未配置时后端默认仅 SQL 任务/Hive SQL
         task_type_filter: values.task_type_filter ?? [],
         step_type_filter: values.step_type_filter ?? [],
@@ -394,9 +394,17 @@ function ConfigTab() {
               <Form.Item
                 name="poll_interval_minutes"
                 label="轮询间隔（分钟）"
-                extra="1~60，修改即时生效，无需重启"
+                extra="1~1440（最长 24 小时），修改即时生效，无需重启"
               >
-                <InputNumber min={1} max={60} style={{ width: "100%" }} />
+                <AutoComplete
+                  style={{ width: "100%" }}
+                  options={[5, 15, 30, 60, 120, 360, 720, 1440].map((v) => ({
+                    value: String(v),
+                    label: `${v} 分钟${v >= 60 ? `（${v / 60} 小时）` : ""}`,
+                  }))}
+                  filterOption={false}
+                  placeholder="选择档位或输入分钟数"
+                />
               </Form.Item>
             </Col>
             <Col xs={24} sm={8}>

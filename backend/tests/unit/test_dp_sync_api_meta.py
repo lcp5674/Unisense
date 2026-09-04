@@ -277,3 +277,45 @@ async def test_resolve_llm_disabled_endpoint(dp_client: httpx.AsyncClient) -> No
     assert data["skipped"] == 2
     audit.assert_awaited_once()
     assert audit.await_args.kwargs["action"] == "dp_sync.resolve_llm_disabled"
+
+
+async def test_config_poll_interval_out_of_range_rejected(
+    dp_client: httpx.AsyncClient,
+) -> None:
+    """poll_interval_minutes 超出 1~1440 → VALIDATION_ERROR，且不落库。"""
+    cfg = MagicMock(id=1)
+    update_cfg = AsyncMock()
+    with (
+        patch.object(dp_api.DpLineageRepository, "get_config", new=AsyncMock(return_value=cfg)),
+        patch.object(dp_api.DpLineageRepository, "update_config", new=update_cfg),
+        patch.object(dp_api, "write_audit", new=AsyncMock()),
+    ):
+        for bad in (0, -5, 1441, "abc"):
+            resp = await dp_client.put(
+                "/api/v1/lineage/dp-sync/config",
+                json={"poll_interval_minutes": bad},
+            )
+            assert resp.status_code == 200
+            assert resp.json()["code"] == "VALIDATION_ERROR", bad
+    update_cfg.assert_not_awaited()
+
+
+async def test_config_poll_interval_upper_bound_accepted(
+    dp_client: httpx.AsyncClient,
+) -> None:
+    """1440（24 小时）为合法上界 → 正常落库。"""
+    cfg = MagicMock(id=1)
+    cfg.to_dict = MagicMock(return_value={"id": 1, "poll_interval_minutes": 1440})
+    update_cfg = AsyncMock()
+    with (
+        patch.object(dp_api.DpLineageRepository, "get_config", new=AsyncMock(return_value=cfg)),
+        patch.object(dp_api.DpLineageRepository, "update_config", new=update_cfg),
+        patch.object(dp_api, "write_audit", new=AsyncMock()),
+    ):
+        resp = await dp_client.put(
+            "/api/v1/lineage/dp-sync/config",
+            json={"poll_interval_minutes": 1440},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["code"] == "OK"
+    update_cfg.assert_awaited_once()

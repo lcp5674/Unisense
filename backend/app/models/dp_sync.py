@@ -79,7 +79,7 @@ class DpSyncConfig(Base, BaseModel):
         Integer,
         nullable=False,
         default=5,
-        comment="轮询间隔（1~60 分钟，前端可配置）",
+        comment="轮询间隔（1~1440 分钟，最长 24 小时，前端可配置）",
     )
     task_type_filter: Mapped[list | None] = mapped_column(
         JSON,
