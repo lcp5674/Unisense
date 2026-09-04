@@ -1196,8 +1196,9 @@ function GraphTab() {
           lanes
           // 性能护栏：全量血缘默认走 AssetGraph 内置 LOD（优先渲染度最高的核心节点子集，
           // 画布底部出现「共 N 节点，已优先展示 M 个核心节点」提示 + 「显示全部」按钮）。
-          // 切忌改为 defaultShowAll=true——1763 节点全量 dagre 布局 + G6 渲染同步阻塞主线程
-          // 实测 66 秒（进入血缘图谱即卡死）。「显示全部」由用户显式触发并经规模确认后放行。
+          // dagre 布局已线程化（Web Worker 预计算坐标 + G6 预设渲染，AssetGraph 内实现），
+          // 但 1763 节点的 G6 渲染/首帧适配本身仍重——保留 LOD 渐进让首屏快速可交互，
+          // 「显示全部」由用户显式触发并经规模确认后放行（布局在后台线程，页面不再卡死）。
           // 结构概览：进入即全层聚合（每层一个聚合带 + 层间去重边），点击层带展开该层明细
           defaultCollapsedLayers={viewMode === "overview" ? ALL_LINEAGE_LAYERS : undefined}
         />
