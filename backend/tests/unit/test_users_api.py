@@ -600,6 +600,62 @@ async def test_reset_password_not_found(admin_client: httpx.AsyncClient) -> None
     assert resp.status_code == 404
 
 
+async def test_reset_password_managed_admin_forbidden(admin_client: httpx.AsyncClient) -> None:
+    """部署托管账号 admin：管理员重置密码一律 403，且不触碰哈希。"""
+    admin = _make_user(id=1, username="admin", role="platform_admin")
+    with (
+        patch("app.api.users._get_user", return_value=admin),
+        patch("app.api.users.hash_password", new=AsyncMock()) as hash_pw,
+    ):
+        resp = await admin_client.post(
+            "/api/v1/users/1/reset-password", json={"new_password": "Newsecret123!"}
+        )
+    assert resp.status_code == 403
+    assert resp.json()["code"] == "ACCOUNT_MANAGED_BY_DEPLOYMENT"
+    hash_pw.assert_not_called()
+
+
+async def test_change_my_password_managed_admin_forbidden() -> None:
+    """部署托管账号 admin 自助改密同样 403（在校验旧密码之前拦截）。"""
+    session = _make_session()
+
+    async def fake_db():
+        yield session
+
+    app.dependency_overrides[deps.get_db_session] = fake_db
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=1, username="admin", role="platform_admin", password_hash="hashed:old"
+    )
+    transport = ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            with patch("app.api.users.verify_password", new=AsyncMock()) as verify_pw:
+                resp = await c.post(
+                    "/api/v1/users/me/password",
+                    json={"current_password": "Oldsecret123!", "new_password": "Newsecret123!"},
+                )
+        assert resp.status_code == 403
+        assert resp.json()["code"] == "ACCOUNT_MANAGED_BY_DEPLOYMENT"
+        verify_pw.assert_not_called()  # 托管账号在验密前即拒绝
+    finally:
+        app.dependency_overrides.clear()
+
+
+async def test_is_managed_account_env_list() -> None:
+    """托管账号集合默认含 admin，可经 UNISENSE_MANAGED_ACCOUNTS 扩展。"""
+    from app.api import users
+    from app.core.config import settings
+
+    with patch.object(settings, "managed_accounts", "admin, opsbot, deploy"):
+        assert users._is_managed_account("admin") is True
+        assert users._is_managed_account("opsbot") is True
+        assert users._is_managed_account("alice") is False
+        assert users._is_managed_account(None) is False
+    with patch.object(settings, "managed_accounts", "admin"):
+        assert users._is_managed_account("admin") is True
+        assert users._is_managed_account("opsbot") is False
+
+
 # ---------------------------------------------------------------------------
 # 账号安全事件定向通知（轨道D：NotifyService.notify_user best-effort）
 # ---------------------------------------------------------------------------

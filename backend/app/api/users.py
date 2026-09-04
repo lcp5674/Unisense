@@ -54,6 +54,32 @@ def _escape_like(text: str) -> str:
     """
     return text.replace("/", "//").replace("%", "/%").replace("_", "/_")
 
+
+def _is_managed_account(username: str | None) -> bool:
+    """是否为部署托管账号（默认种子管理员 admin，可经 UNISENSE_MANAGED_ACCOUNTS 扩展）。
+
+    托管账号的口令由部署侧 env（``UNISENSE_SEED_ADMIN_PASSWORD``）统一托管，
+    禁止经应用内任何改密入口（自助改密 / 管理员重置）变更——防止多会话或人工在
+    UI 内漂移部署口令导致「.env 与库不一致」。改密只能改 env + 部署侧对齐脚本。
+    """
+    if not username:
+        return False
+    from app.core.config import settings
+
+    managed = {n.strip() for n in (settings.managed_accounts or "").split(",") if n.strip()}
+    return username in managed
+
+
+def _assert_not_managed(username: str | None) -> None:
+    """改密入口拦截托管账号（403，错误码 ACCOUNT_MANAGED_BY_DEPLOYMENT）。"""
+    if _is_managed_account(username):
+        raise AuthError(
+            "该账号为部署托管账号，密码由部署环境统一管理，不能在系统内修改。"
+            "如需变更，请修改部署环境变量后由部署流程对齐。",
+            error_code="ACCOUNT_MANAGED_BY_DEPLOYMENT",
+            ctx={"username": username},
+        )
+
 router = APIRouter(prefix="/users", tags=["users"])
 
 logger = logging.getLogger("unisense.users.api")
@@ -703,6 +729,7 @@ async def change_my_password(
     成功后清除首登强制改密标记（must_change_password=False）并落审计。
     注意：本静态路径注册在 ``/{user_id}`` 系列之前（FastAPI 按注册顺序匹配）。
     """
+    _assert_not_managed(user.username)  # 部署托管账号（如 admin）禁止应用内改密
     _validate_password_complexity(payload.new_password)
     if not await verify_password(payload.current_password, user.password_hash):
         raise AuthError("当前密码错误", error_code="PASSWORD_INCORRECT")
@@ -987,6 +1014,7 @@ async def reset_password(
     row = await _get_user(db, user_id)
     if row is None:
         raise NotFoundError("用户不存在", error_code="USER_NOT_FOUND")
+    _assert_not_managed(row.username)  # 部署托管账号（如 admin）禁止管理员重置
 
     _validate_password_complexity(payload.new_password)
     row.password_hash = await hash_password(payload.new_password)

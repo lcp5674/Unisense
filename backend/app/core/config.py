@@ -98,6 +98,13 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 15
 
+    # ---- 部署托管账号（密码由部署/env 统一托管，禁止经应用改密入口修改）----
+    # 逗号分隔的用户名列表，默认内置种子管理员 admin。命中的账号在应用内
+    # 「自助改密 / 管理员重置密码」一律 403 拒绝；其密码只能通过部署侧
+    # （UNISENSE_SEED_ADMIN_PASSWORD + scripts/align_admin_password.py 对齐）变更，
+    # 避免多会话/人工在 UI 内漂移部署口令。
+    managed_accounts: str = "admin"
+
     # ---- CORS ----
     cors_origins: str = "http://localhost:3000"
 
