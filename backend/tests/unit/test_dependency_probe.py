@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.core import dependency_probe as mod
+from app.core.config import settings
 
 
 def _registry():
@@ -88,6 +89,8 @@ async def test_probe_configured_unreachable_marks_degraded():
 async def test_run_dependency_probe_once_never_raises():
     """run_dependency_probe_once 全程 best-effort：依赖更新失败不阻断整体。"""
     with patch.object(mod, "_tcp_alive", new=AsyncMock(return_value=True)), patch.object(
+        mod, "_llm_probe_target", new=AsyncMock(return_value=(True, "http://llm-gateway"))
+    ), patch.object(
         mod, "_llm_gateway_alive", new=AsyncMock(return_value=True)
     ), patch.object(
         mod, "_probe_dependency", new=AsyncMock(side_effect=RuntimeError("boom"))
@@ -96,6 +99,63 @@ async def test_run_dependency_probe_once_never_raises():
 
     # 全部依赖探测失败也不抛异常（best-effort），返回空状态映射
     assert results == {}
+
+
+@pytest.mark.asyncio
+async def test_llm_probe_target_prefers_db_enabled_instance():
+    """系统配置页（llm_config 表）配置的实例优先于 env——修复「AI 模型误判未启用」。
+
+    探针此前只读 env（settings.llm_base_url），DB 配置的本地 LLM 实例被误判
+    「未启用」（meta.enabled=false）。生效配置必须与运行时 LLM 路由同源。
+    """
+    eff = {"source": "db", "base_url": "http://192.168.9.10:8000/v1"}
+    svc = MagicMock()
+    svc.get_effective = AsyncMock(return_value=eff)
+    db_cm = MagicMock()
+    db_cm.__aenter__ = AsyncMock(return_value=MagicMock())
+    db_cm.__aexit__ = AsyncMock(return_value=False)
+    factory = MagicMock(return_value=db_cm)
+    with patch(
+        "app.services.llm.config_service.LlmConfigService", return_value=svc
+    ), patch("app.db.mysql.async_session_factory", factory):
+        enabled, url = await mod._llm_probe_target()
+
+    assert enabled is True
+    assert url == "http://192.168.9.10:8000/v1"
+
+
+@pytest.mark.asyncio
+async def test_llm_probe_target_unconfigured_returns_false():
+    """DB 与 env 均未配置（get_effective source=none）→ 未启用。"""
+    svc = MagicMock()
+    svc.get_effective = AsyncMock(return_value={"source": "none", "base_url": ""})
+    db_cm = MagicMock()
+    db_cm.__aenter__ = AsyncMock(return_value=MagicMock())
+    db_cm.__aexit__ = AsyncMock(return_value=False)
+    factory = MagicMock(return_value=db_cm)
+    with patch(
+        "app.services.llm.config_service.LlmConfigService", return_value=svc
+    ), patch("app.db.mysql.async_session_factory", factory):
+        enabled, url = await mod._llm_probe_target()
+
+    assert enabled is False
+    assert url == ""
+
+
+@pytest.mark.asyncio
+async def test_llm_probe_target_falls_back_to_env_when_db_fails():
+    """DB 解析异常（库不可达等）回落 env 判定，不抛异常（best-effort）。"""
+    with patch(
+        "app.db.mysql.async_session_factory", side_effect=RuntimeError("db down")
+    ):
+        enabled, url = await mod._llm_probe_target()
+
+    env_configured = bool(
+        getattr(settings, "llm_base_url", None) and getattr(settings, "llm_api_key", None)
+    )
+    assert enabled == env_configured
+    if env_configured:
+        assert url == settings.llm_base_url
 
 
 @pytest.mark.asyncio

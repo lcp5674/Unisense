@@ -79,9 +79,8 @@ async def _tcp_alive(url: str, timeout: float = 0.5) -> bool:
         return False
 
 
-async def _llm_gateway_alive() -> bool:
-    """LLM 网关可达性探活：GET base_url，任意 HTTP 响应即视为可达（连接成功）。"""
-    base_url = getattr(settings, "llm_base_url", None)
+async def _llm_gateway_alive(base_url: str | None) -> bool:
+    """LLM 网关可达性探活：GET 目标 base_url，任意 HTTP 响应即视为可达（连接成功）。"""
     if not base_url:
         return False
     try:
@@ -90,6 +89,28 @@ async def _llm_gateway_alive() -> bool:
         return True
     except (httpx.HTTPError, OSError):
         return False
+
+
+async def _llm_probe_target() -> tuple[bool, str]:
+    """获取 LLM 探测目标（DB 生效实例优先、env 兜底；与 _olap_probe_target 同构）。
+
+    生效配置经 ``LlmConfigService.get_effective()`` 解析——优先级为
+    **DB 启用实例（系统配置页 llm_config 表）> env（UNISENSE_LLM_*）> 未配置**，
+    与运行时 LLM 路由同源。探针此前只读 env，导致系统配置页配置的本地 LLM
+    实例被误判「未启用」。DB 解析失败（库不可达等）时回落 env 判定。
+    """
+    try:
+        from app.db.mysql import async_session_factory
+        from app.services.llm.config_service import LlmConfigService
+
+        async with async_session_factory() as db:
+            eff = await LlmConfigService(db).get_effective()
+        if eff.get("source") != "none" and eff.get("base_url"):
+            return True, str(eff["base_url"])
+        return False, ""
+    except Exception:  # noqa: BLE001 - best-effort：DB 不可达时按 env 判定
+        base_url = getattr(settings, "llm_base_url", None)
+        return bool(base_url and getattr(settings, "llm_api_key", None)), base_url or ""
 
 
 async def _olap_probe_target() -> tuple[bool, str]:
@@ -198,11 +219,10 @@ async def run_dependency_probe_once() -> dict[str, str]:
         alive = await _tcp_alive(probe_url) if enabled else False
         tasks.append(asyncio.create_task(_run(dep_type, dep_id, enabled, alive)))
 
-    # LLM 组：已配置（base_url + api_key 均非空）才探测
-    llm_enabled = bool(
-        getattr(settings, "llm_base_url", None) and getattr(settings, "llm_api_key", None)
-    )
-    llm_alive = await _llm_gateway_alive() if llm_enabled else False
+    # LLM 组：生效配置（DB 启用实例 > env）非空才探测——系统配置页配置的
+    # 本地 LLM 实例（llm_config 表）由此被正确识别，不再被误判「未启用」。
+    llm_enabled, llm_url = await _llm_probe_target()
+    llm_alive = await _llm_gateway_alive(llm_url) if llm_enabled else False
     tasks.append(
         asyncio.create_task(_run(_LLM_DEPENDENCY[0], _LLM_DEPENDENCY[1], llm_enabled, llm_alive))
     )
