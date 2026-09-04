@@ -694,6 +694,28 @@ describe("LineageDpSync", () => {
     );
   });
 
+  it("ops scan throttled submit shows warning and never polls null task id", async () => {
+    const user = userEvent.setup();
+    // 后端节流拒绝：task_id=null / status=throttled（此前会拼出 /scan/status/null → 422）
+    mockedApi.scanDpSyncNow.mockResolvedValue({
+      task_id: null,
+      status: "throttled",
+      already_running: false,
+      message: "触发过于频繁，请稍候再试（全量扫描为重操作）",
+    });
+    const userRender = renderPage();
+    await user.click(screen.getByText(/运\s*维/));
+    await screen.findByText("运行记录");
+    await user.click(screen.getByText(/立即全量扫描/));
+    // 提示节流警示（而非把 null 当任务去轮询）
+    await screen.findByText(/触发过于频繁/);
+    expect(mockedApi.scanDpSyncNow).toHaveBeenCalledTimes(1);
+    // 关键断言：绝不调用 status 轮询（避免 /scan/status/null 422）
+    await new Promise((r) => setTimeout(r, 1600));
+    expect(mockedApi.getDpSyncScanStatus).not.toHaveBeenCalled();
+    userRender?.unmount?.();
+  });
+
   it("ops scan already-running submit tracks existing task", async () => {
     mockedApi.scanDpSyncNow.mockResolvedValue({
       task_id: 9,

@@ -3815,11 +3815,12 @@ export interface DpSyncScanStatus {
   force_stop?: boolean | null;
 }
 
-/** 手动扫描提交结果 */
+/** 手动扫描提交结果（被节流拒绝时 task_id=null、status=throttled，无任务可跟踪） */
 export interface DpSyncScanSubmit {
-  task_id: number;
+  task_id: number | null;
   status: string;
   already_running: boolean;
+  message?: string | null;
 }
 
 /** 手动扫描「当前运行任务」查询结果（切走页面回来自动恢复进度跟踪） */

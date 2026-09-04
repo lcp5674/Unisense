@@ -1171,14 +1171,27 @@ function OpsTab() {
     setScanTaskId(null);
     try {
       const submit = await scanDpSyncNow();
-      setScanTaskId(submit.task_id);
+      // 被节流拒绝时后端返回 task_id=null（无任务可跟踪），不得把 null 拼进
+      // status 轮询 URL（会 422）；直接提示并复位，不启动轮询。
+      if (submit.task_id == null || submit.status === "throttled") {
+        stopPolling();
+        setScanning(false);
+        message.warning(
+          submit.message || "触发过于频繁，请稍候再试（全量扫描为重操作）",
+          4
+        );
+        return;
+      }
+      // 进入这里 task_id 必非 null（上面已 return），用局部 const 承接便于闭包引用
+      const taskId: number = submit.task_id;
+      setScanTaskId(taskId);
       if (submit.already_running) {
         message.info("已有扫描任务在运行，正在跟踪其进度");
       }
       // 立即拉一次 + 1.5s 轮询实时进度
-      void pollOnce(submit.task_id);
+      void pollOnce(taskId);
       pollTimer.current = window.setInterval(() => {
-        void pollOnce(submit.task_id);
+        void pollOnce(taskId);
       }, 1500);
     } catch {
       stopPolling();
