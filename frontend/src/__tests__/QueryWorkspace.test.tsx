@@ -667,6 +667,44 @@ describe("QueryWorkspace", () => {
     expect(screen.getByText("测试")).toBeInTheDocument();
   });
 
+  it("SQL 查询 Tab：切换「每页条数」立即生效——45 行结果默认 20 条/页，切 100 条后一屏铺满", async () => {
+    const user = userEvent.setup();
+    // 45 行 > 默认每页 20 → 触发前端分页
+    const rows = Array.from({ length: 45 }, (_, i) => ({ id: i + 1, name: `行 ${i + 1}` }));
+    mockedQueryDataSourceSql.mockResolvedValue({
+      columns: ["id", "name"],
+      rows,
+      total: 45,
+      truncated: false,
+      elapsed_ms: 5,
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("查询工作台")).toBeInTheDocument());
+    await user.click(screen.getByText("SQL 查询"));
+    expect(await screen.findByText("数据源只读 SQL 查询")).toBeInTheDocument();
+    const dsLabel = screen.getByText("数据源", { selector: "label" });
+    const dsItem = dsLabel.closest(".ant-form-item") as HTMLElement;
+    await user.click(within(dsItem).getByRole("combobox"));
+    await user.click(await screen.findByText(/mysql_unisense · 主库/));
+    const sqlTextarea = screen.getByPlaceholderText(/SELECT \* FROM db\.table/);
+    await user.clear(sqlTextarea);
+    await user.type(sqlTextarea, "SELECT id FROM t");
+    await user.click(screen.getByRole("button", { name: /执行 SQL/ }));
+    expect(await screen.findByText(/查询成功：45 行/)).toBeInTheDocument();
+
+    const bodyRows = () => document.querySelectorAll(".ant-table-tbody .ant-table-row").length;
+    // 默认每页 20 条：分页生效，首屏只渲染 20 行（而非 45 全量）
+    await waitFor(() => expect(bodyRows()).toBe(20));
+
+    // 打开「每页条数」选择器 → 选 100 条/页
+    const sizeSel = document.querySelector(".ant-pagination-options .ant-select-selector") as HTMLElement;
+    expect(sizeSel).toBeTruthy();
+    await user.click(sizeSel);
+    await user.click(await screen.findByRole("option", { name: /100/ }));
+    // 切换后一屏铺满 45 行 —— 修复前 pageSize 受控恒 20，切 100 无反应（行数仍 20）
+    await waitFor(() => expect(bodyRows()).toBe(45));
+  });
+
   it("SQL 查询 Tab：USE 切换后展示当前库 Tag，未限定表名查询自动补前缀", async () => {
     const user = userEvent.setup();
     renderPage();

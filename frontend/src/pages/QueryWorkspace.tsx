@@ -86,7 +86,19 @@ function QueryResultTable({ data }: { data: Record<string, unknown> }) {
     }));
     return (
       <div>
-        <Table size="small" dataSource={rows} columns={cols} rowKey={(_, i) => String(i)} pagination={{ pageSize: 10 }} />
+        <Table
+          size="small"
+          dataSource={rows}
+          columns={cols}
+          rowKey={(_, i) => String(i)}
+          pagination={{
+            // 必须用 defaultPageSize（非受控）而非 pageSize：pageSize 显式传入会被 antd 当受控值，
+            // 未接 onChange 时切换「每页条数」永远停留原值（10/20 切 100 无反应）
+            defaultPageSize: 10,
+            showSizeChanger: true,
+            pageSizeOptions: [10, 20, 50, 100],
+          }}
+        />
         <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
           共 {String(data.total ?? rows.length)} 行
           {data.elapsed_ms != null ? ` · 耗时 ${data.elapsed_ms} ms` : ""}
@@ -751,7 +763,7 @@ export function QueryWorkspace() {
 
           {snapshots.length > 0 && (
             <Card size="small" title={`快照（${snapshots.length}）`} style={{ marginTop: 20 }}>
-              <Table dataSource={snapshots} columns={snapColumns} rowKey="id" size="small" pagination={{ pageSize: 10 }} />
+              <Table dataSource={snapshots} columns={snapColumns} rowKey="id" size="small" pagination={{ defaultPageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100] }} />
             </Card>
           )}
 
@@ -931,7 +943,7 @@ export function QueryWorkspace() {
                         : {}),
                     }))}
                     rowKey={(_, i) => String(i)}
-                    pagination={{ pageSize: 20 }}
+                    pagination={{ defaultPageSize: 20, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100] }}
                     scroll={{ x: "max-content" }}
                   />
                 ) : (
