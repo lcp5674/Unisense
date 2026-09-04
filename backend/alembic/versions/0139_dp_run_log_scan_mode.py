@@ -12,6 +12,7 @@ Create Date: 2026-09-04
 
 from __future__ import annotations
 
+import sqlalchemy as sa
 from alembic import op
 
 revision = "0139_dp_run_log_scan_mode"
@@ -21,16 +22,40 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # MySQL 8 支持一条 ADD COLUMN IF NOT EXISTS（幂等自愈）
-    op.execute(
-        "ALTER TABLE dp_sync_run_log "
-        "ADD COLUMN IF NOT EXISTS scan_mode VARCHAR(16) NOT NULL DEFAULT 'incremental' "
-        "COMMENT '扫描模式：full=全量 / incremental=增量'"
-    )
+    # 幂等：MySQL 8 不支持 ADD COLUMN IF NOT EXISTS（MariaDB 语法），先查列存在再补
+    conn = op.get_bind()
+    exists = False
+    for _r in conn.execute(
+        sa.text(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'dp_sync_run_log' "
+            "AND COLUMN_NAME = 'scan_mode'"
+        )
+    ):
+        exists = True
+    if not exists:
+        op.add_column(
+            "dp_sync_run_log",
+            sa.Column(
+                "scan_mode",
+                sa.String(length=16),
+                nullable=False,
+                server_default="incremental",
+                comment="扫描模式：full=全量 / incremental=增量",
+            ),
+        )
 
 
 def downgrade() -> None:
-    op.execute(
-        "ALTER TABLE dp_sync_run_log "
-        "DROP COLUMN IF EXISTS scan_mode"
-    )
+    conn = op.get_bind()
+    exists = False
+    for _r in conn.execute(
+        sa.text(
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'dp_sync_run_log' "
+            "AND COLUMN_NAME = 'scan_mode'"
+        )
+    ):
+        exists = True
+    if exists:
+        op.drop_column("dp_sync_run_log", "scan_mode")
