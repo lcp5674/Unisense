@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "指标查询完整请求时序 · 缓存回源",
+    "locale": "zh-CN",
+    "output": "unisense-query-sequence.html",
+    "viewBox": [1000, 860],
+    "column_fit": "spread",
+    "quality_profile": "showcase"
+  },
+  "participants": [
+    { "id": "user", "type": "external", "label": "分析师", "sublabel": "浏览器会话" },
+    { "id": "web", "type": "frontend", "label": "查询工作台", "sublabel": "React SPA" },
+    { "id": "api", "type": "backend", "label": "消费服务", "sublabel": "consume / FastAPI" },
+    { "id": "auth", "type": "security", "label": "鉴权 · PDP", "sublabel": "JWT · 四级闸门" },
+    { "id": "cache", "type": "database", "label": "Redis", "sublabel": "聚合缓存" },
+    { "id": "db", "type": "database", "label": "MySQL", "sublabel": "指标口径 / 版本" },
+    { "id": "olap", "type": "external", "label": "OLAP", "sublabel": "下推数据源 · 可降级" },
+    { "id": "events", "type": "messagebus", "label": "事件总线", "sublabel": "Redis pub/sub" }
+  ],
+  "segments": [
+    { "from": 178, "to": 315, "label": "鉴权 · 授权" },
+    { "from": 335, "to": 555, "label": "口径读取 · 缓存回源" },
+    { "from": 575, "to": 730, "label": "响应 · 异步上报" }
+  ],
+  "messages": [
+    { "id": "open-query", "from": "user", "to": "web", "y": 188, "label": "输入指标与筛选", "variant": "default" },
+    { "id": "query-req", "from": "web", "to": "api", "y": 230, "label": "POST /consume/query", "variant": "emphasis" },
+    { "id": "verify-jwt", "from": "api", "to": "auth", "y": 272, "label": "校验 JWT + PDP", "variant": "security" },
+    { "id": "auth-pass", "from": "auth", "to": "api", "y": 308, "label": "授权通过 · 未超配额", "variant": "return" },
+    { "id": "read-def", "from": "api", "to": "db", "y": 352, "label": "读指标口径与版本", "variant": "default" },
+    { "id": "def-return", "from": "db", "to": "api", "y": 390, "label": "口径 AST + 版本 vN", "variant": "return" },
+    { "id": "cache-read", "from": "api", "to": "cache", "y": 432, "label": "查聚合缓存(键含 vN)", "variant": "default" },
+    { "id": "cache-miss", "from": "cache", "to": "api", "y": 468, "label": "未命中", "variant": "return" },
+    { "id": "push-sql", "from": "api", "to": "olap", "y": 510, "label": "下推翻译后 SQL", "variant": "emphasis" },
+    { "id": "rows-return", "from": "olap", "to": "api", "y": 548, "label": "结果集 + 明细", "variant": "return" },
+    { "id": "cache-write", "from": "api", "to": "cache", "y": 592, "label": "写回缓存(带版本 TTL)", "variant": "dashed" },
+    { "id": "async-audit", "from": "api", "to": "events", "y": 632, "label": "审计 + query_log 埋点", "variant": "dashed" },
+    { "id": "resp", "from": "api", "to": "web", "y": 676, "label": "200 JSON + meta", "variant": "return" },
+    { "id": "render", "from": "web", "to": "user", "y": 712, "label": "渲染结果", "variant": "return" }
+  ],
+  "activations": [
+    { "participant": "web", "from": 222, "to": 722, "type": "frontend" },
+    { "participant": "api", "from": 230, "to": 684, "type": "backend" },
+    { "participant": "auth", "from": 266, "to": 312, "type": "security" },
+    { "participant": "db", "from": 346, "to": 396, "type": "database" },
+    { "participant": "cache", "from": 426, "to": 476, "type": "database" },
+    { "participant": "olap", "from": 504, "to": 554, "type": "external" },
+    { "participant": "events", "from": 626, "to": 640, "type": "messagebus" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "主请求路径",
+      "items": [
+        "分析师 → 查询工作台 → 消费服务 → 缓存 → OLAP → 响应，顺序明确",
+        "每条返回消息弱于前向调用，激活条显示持有时长",
+        "口径读取带版本 vN，保证口径可追溯"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "鉴权与边界",
+      "items": [
+        "JWT 校验 + PDP 授权（scope → 白名单 → PII → 复核）+ QPS/日配额限流",
+        "DEPRECATED 指标：平台管理员可读历史，普通用户 403 FORBIDDEN",
+        "EXPERIMENTAL 灰度仅放行命中 gray_tenant_ids 的租户"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "缓存与异步",
+      "items": [
+        "缓存键含口径版本 vN——口径变更即主动失效，杜绝旧结果",
+        "未命中才下推 OLAP 回源；命中时跳过回源直接返回",
+        "审计与 query_log 埋点异步经 Redis pub/sub 上报，不阻塞响应"
+      ]
+    }
+  ]
+}

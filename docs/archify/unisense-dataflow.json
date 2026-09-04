@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "Unisense 数据血缘全链路 · 数据流",
+    "locale": "zh-CN",
+    "output": "unisense-dataflow.html",
+    "viewBox": [1080, 800],
+    "quality_profile": "showcase"
+  },
+  "stages": [
+    { "label": "数据源" },
+    { "label": "采集" },
+    { "label": "资产与血缘" },
+    { "label": "语义" },
+    { "label": "消费" }
+  ],
+  "nodes": [
+    { "id": "biz_mysql", "type": "database", "label": "业务 MySQL", "sublabel": "批 · 业务明细", "stage": 0, "row": 0 },
+    { "id": "kafka", "type": "messagebus", "label": "Kafka 流", "sublabel": "流 · 实时事件", "stage": 0, "row": 1 },
+    { "id": "hive", "type": "database", "label": "Hive / Spark", "sublabel": "批 · ETL SQL", "stage": 0, "row": 2 },
+    { "id": "collector", "type": "backend", "label": "采集服务", "sublabel": "schema 采集 · 采样打码", "stage": 1, "row": 0 },
+    { "id": "catalog", "type": "database", "label": "资产目录", "sublabel": "MySQL · db_catalog + 分类", "stage": 2, "row": 0, "width": 132 },
+    { "id": "lineage", "type": "database", "label": "血缘图谱", "sublabel": "SQL 解析 → Neo4j", "stage": 2, "row": 2 },
+    { "id": "semantic", "type": "backend", "label": "语义层", "sublabel": "指标注册 · 口径版本", "stage": 3, "row": 1 },
+    { "id": "consume", "type": "backend", "label": "消费服务", "sublabel": "PII 门禁 · 下推查询", "stage": 4, "row": 1 },
+    { "id": "quickbi", "type": "external", "label": "下游消费", "sublabel": "QuickBI · Agent · 前端", "stage": 4, "row": 2 }
+  ],
+  "flows": [
+    { "id": "f-batch-schema", "from": "biz_mysql", "to": "collector", "label": "表结构 + 样本", "classification": "批 · 周期拉取", "fromSide": "right", "toSide": "left", "route": "straight", "labelAt": [176, 100] },
+    { "id": "f-stream-events", "from": "kafka", "to": "collector", "label": "实时事件", "classification": "流式", "variant": "emphasis" },
+    { "id": "f-etl-sql", "from": "hive", "to": "lineage", "label": "ETL SQL 解析", "classification": "批" },
+    { "id": "f-catalog-write", "from": "collector", "to": "catalog", "label": "元数据 + 敏感分类", "classification": "PII 打码样本", "variant": "security" },
+    { "id": "f-anchor", "from": "catalog", "to": "semantic", "label": "表/字段锚定", "classification": "引用", "labelDy": 36 },
+    { "id": "f-lineage-ref", "from": "lineage", "to": "semantic", "label": "血缘引用", "classification": "只读", "variant": "dashed", "fromSide": "bottom", "toSide": "bottom", "via": [[530, 462], [745, 462]] },
+    { "id": "f-def-query", "from": "semantic", "to": "consume", "label": "口径读取", "classification": "真相源", "fromSide": "right", "toSide": "left", "route": "straight" },
+    { "id": "f-pii-gate", "from": "catalog", "to": "consume", "label": "敏感分类供门禁", "classification": "PII 边界", "variant": "security", "fromSide": "bottom", "toSide": "top", "via": [[530, 222], [960, 222]] },
+    { "id": "f-result", "from": "consume", "to": "quickbi", "label": "结果 + meta", "classification": "受控消费", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "straight", "labelDy": 20 }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "主数据路径",
+      "items": [
+        "源 → 采集 → 资产目录/血缘 → 语义 → 消费，自左向右逐级命名",
+        "每条流带标签：数据资产（表结构 / ETL SQL / 事件）与动作",
+        "口径读取回到指标真相源，指标版本 vN 全程可追溯"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "数据分类边界",
+      "items": [
+        "采集即打码：样本以脱敏形态连同敏感分类写入资产目录（security 流）",
+        "消费服务以分类做 PII 四级门禁，敏感资产不落下游普通报表",
+        "注册含 PII 指标时经 governance 合规复核（FORBIDDEN_PII 拦截）"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "流批与下游",
+      "items": [
+        "批路径（业务 MySQL / Hive 周期拉取）与流式路径（Kafka 实时事件）分道",
+        "ETL SQL 独立解析入库 Neo4j 血缘图，语义层引用血缘做变更影响分析",
+        "下游 QuickBI / DataAgent / 前端经消费服务统一受控取数"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Unisense 指标语义中台 · 高层系统架构",
+    "locale": "zh-CN",
+    "output": "unisense-architecture.html",
+    "viewBox": [1280, 950],
+    "quality_profile": "showcase"
+  },
+  "components": [
+    { "id": "browser", "type": "external", "label": "浏览器 / 用户", "sublabel": "分析师 · 管理员 · Agent", "pos": [281, 12], "size": [150, 58] },
+    { "id": "frontend", "type": "frontend", "label": "Web 前端", "sublabel": "React SPA · nginx :8180", "pos": [270, 122], "size": [172, 64], "tag": "接入层" },
+    { "id": "backend", "type": "backend", "label": "API 服务", "sublabel": "FastAPI :8100 · 23 领域服务", "pos": [522, 150], "size": [190, 92], "tag": "应用层" },
+    { "id": "mysql", "type": "database", "label": "MySQL 8", "sublabel": "指标/目录/审计/用户 主库", "pos": [50, 566], "size": [172, 64] },
+    { "id": "redis", "type": "database", "label": "Redis 7", "sublabel": "缓存 · 会话 · 队列 · SSE", "pos": [244, 566], "size": [172, 64] },
+    { "id": "neo4j", "type": "database", "label": "Neo4j", "sublabel": "血缘图谱存储", "pos": [438, 566], "size": [172, 64] },
+    { "id": "es", "type": "database", "label": "Elasticsearch 8", "sublabel": "指标/术语全文检索", "pos": [632, 566], "size": [172, 64] },
+    { "id": "minio", "type": "cloud", "label": "MinIO", "sublabel": "审计冷归档 · 对象存储", "pos": [826, 566], "size": [172, 64] },
+    { "id": "worker", "type": "backend", "label": "异步 Worker", "sublabel": "arq · 采集/归档/巡检/清理", "pos": [295, 706], "size": [182, 68], "tag": "应用层" },
+    { "id": "source_dbs", "type": "external", "label": "源数据系统", "sublabel": "业务 MySQL · Hive · Kafka", "pos": [296, 856], "size": [204, 60] },
+    { "id": "llm", "type": "external", "label": "LLM 网关", "sublabel": "codebuddy / deepseek 等", "pos": [1102, 150], "size": [172, 60] },
+    { "id": "olap", "type": "external", "label": "OLAP / Doris", "sublabel": "消费下推 · 可降级", "pos": [1102, 306], "size": [172, 60] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Unisense 平台 · Docker Compose 部署域", "wraps": ["frontend", "backend", "worker", "mysql", "redis", "neo4j", "es", "minio"], "pad": 22 },
+    { "kind": "security-group", "label": "平台内网 · 应用与数据直连", "wraps": ["backend", "worker", "mysql", "redis", "neo4j", "es", "minio"], "pad": 16 }
+  ],
+  "connections": [
+    { "from": "browser", "to": "frontend", "label": "HTTPS 访问", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "labelDy": 24 },
+    { "from": "frontend", "to": "backend", "label": "/api/v1 反代", "variant": "emphasis", "fromSide": "right", "toSide": "left" },
+    { "from": "backend", "to": "mysql", "label": "指标/目录/审计 读写", "variant": "emphasis", "fromSide": "bottom", "toSide": "top" },
+    { "from": "backend", "to": "redis", "label": "缓存 · 会话 · pub/sub", "fromSide": "bottom", "toSide": "top" },
+    { "from": "backend", "to": "neo4j", "label": "血缘图读写", "fromSide": "bottom", "toSide": "top", "labelAt": [604, 470] },
+    { "from": "backend", "to": "es", "label": "检索索引与查询", "fromSide": "bottom", "toSide": "top" },
+    { "from": "worker", "to": "redis", "label": "拉取任务 · 心跳", "variant": "dashed", "fromSide": "top", "toSide": "bottom" },
+    { "from": "source_dbs", "to": "worker", "label": "周期采集元数据/样本", "variant": "dashed", "fromSide": "top", "toSide": "bottom" },
+    { "from": "worker", "to": "minio", "label": "审计 JSONL 冷归档", "variant": "dashed", "fromSide": "right", "toSide": "bottom" },
+    { "from": "backend", "to": "llm", "label": "血缘分歧/口径推断", "variant": "dashed", "fromSide": "right", "toSide": "left" },
+    { "from": "backend", "to": "olap", "label": "消费下推查询", "variant": "dashed", "fromSide": "right", "toSide": "left" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "主请求路径",
+      "items": [
+        "浏览器 → React SPA → FastAPI（/api/v1）→ MySQL / Redis → 返回",
+        "指标查询经 consume 下推 OLAP，附口径版本 / 新鲜度 / quality_flag meta",
+        "血缘与检索经 Neo4j / ES，双写最终一致"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "信任与数据分类边界",
+      "items": [
+        "平台内网（security-group）承载应用与全部数据直连，外部仅经 nginx",
+        "PII 四级门禁（scope → 白名单 → PII → 复核）+ 敏感分类落库",
+        "WORM 审计 30 天后由 Worker 归档 MinIO（SHA-256 哈希链）"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "异步与降级",
+      "items": [
+        "Worker（arq）从 Redis 拉取采集/归档/巡检任务，无本地状态可水平扩展",
+        "SSE 通知跨进程走 Redis pub/sub，禁用进程内内存推送",
+        "LLM / ES / Neo4j / OLAP / Redis 任一不可用 → 降级而非 500，事件入 degradation_event"
+      ]
+    }
+  ]
+}
