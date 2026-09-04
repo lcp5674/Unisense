@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Button, Empty, Input, Modal, Select, Spin, Table, Tag } from "antd";
+import { Button, Empty, Input, InputNumber, Modal, Select, Spin, Table, Tag } from "antd";
 import { FullscreenOutlined, FullscreenExitOutlined, SearchOutlined } from "@ant-design/icons";
 import { Graph as G6Graph } from "@antv/g6";
 import type { GraphData, IElementEvent, NodeData } from "@antv/g6";
@@ -1023,7 +1023,7 @@ interface GraphCanvasProps {
   searchMatchIds: Set<string>;
   /** 非命中节点是否压暗（inactive）。
    *  子图聚焦模式为 false——画布上剩下的都是命中节点的上下游，压暗会让整图发灰、
-   *  命中节点反而不突出；仅「全图（仅标亮）」模式为 true（保留旧的高亮定位语义）。 */
+   *  命中节点反而不突出；仅「全图仅标亮」模式为 true（保留旧的高亮定位语义）。 */
   searchDimOthers: boolean;
   onNodeClick: (node: AssetGraphNode) => void;
   /** 图渲染完成回调（父组件用于清除布局切换 loading） */
@@ -1974,9 +1974,9 @@ export function AssetGraph({
   // 前端筛选：按节点类型过滤 + 按 label 搜索定位（不重新请求后端）
   const [typeFilter, setTypeFilter] = useState<string[]>([]);
   const [searchText, setSearchText] = useState("");
-  // 搜索范围：命中节点向外追溯的跳数（0=「全图（仅标亮）」，保留旧的高亮定位语义：
+  // 搜索范围：命中节点向外追溯的跳数（0=「全图仅标亮」，保留旧的高亮定位语义：
   // 不裁剪节点，只在全图上把命中节点标亮、其余压暗）。默认 2 跳——血缘场景「上下游」
-  // 多为 1-2 跳可达，3 跳在枢纽节点上易把整图拉回（等价没搜）。
+  // 多为 1-2 跳可达，过大跳数在枢纽节点上易把整图拉回（等价没搜），控件上限 8。
   const [searchHops, setSearchHops] = useState<number>(2);
   const trimmedSearch = searchText.trim().toLowerCase();
   // 血缘度筛选：仅展示依赖引用数 ≥ 阈值的节点（聚焦枢纽，隐藏低价值叶子）
@@ -2287,7 +2287,7 @@ export function AssetGraph({
         >
           {searchFocus.nodes.length === 0 ? (
             <span>
-              没有匹配「<b>{searchText.trim()}</b>」的节点——可换更短的关键词，或把范围改为「全图（仅标亮）」核对。
+              没有匹配「<b>{searchText.trim()}</b>」的节点——可换更短的关键词，或切「全图仅标亮」在全图核对。
             </span>
           ) : (
             <span>
@@ -2349,18 +2349,29 @@ export function AssetGraph({
           onChange={(e) => setSearchText(e.target.value)}
           data-testid="asset-graph-search"
         />
-        <Select showSearch
-          value={searchHops}
-          onChange={(v: number) => setSearchHops(v)}
-          style={{ width: 132 }}
+        <InputNumber
+          min={1}
+          max={8}
+          precision={0}
+          // 0=「全图仅标亮」模式（保留旧的高亮定位语义：不裁剪节点，只在全图上把命中
+          // 节点标亮、其余压暗）。默认 2 跳——血缘场景「上下游」多为 1-2 跳可达，
+          // 过大跳数在枢纽节点上易把整图拉回（等价没搜），故上限 8。
+          value={searchHops === 0 ? undefined : searchHops}
+          onChange={(v) => setSearchHops(v != null && v >= 1 ? Math.min(Math.floor(v), 8) : 2)}
+          addonBefore="上下游"
+          addonAfter="跳"
+          disabled={searchHops === 0}
+          style={{ width: 176 }}
           data-testid="asset-graph-search-hops"
-          options={[
-            { value: 1, label: "上下游 1 跳" },
-            { value: 2, label: "上下游 2 跳" },
-            { value: 3, label: "上下游 3 跳" },
-            { value: 0, label: "全图（仅标亮）" },
-          ]}
         />
+        <Button
+          size="middle"
+          type={searchHops === 0 ? "primary" : "default"}
+          onClick={() => setSearchHops(searchHops === 0 ? 2 : 0)}
+          data-testid="asset-graph-search-highlight-mode"
+        >
+          {searchHops === 0 ? "全图标亮中" : "全图仅标亮"}
+        </Button>
         <Select showSearch
           allowClear
           placeholder="布局：自动"

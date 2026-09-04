@@ -295,6 +295,35 @@ describe("LineageView 血缘图谱 Tab", () => {
     expect(api.getCatalogDetail).not.toHaveBeenCalled();
   });
 
+  it("返回表级图谱 → 聚焦回钻取来源表的上下游（URL node 参数），不退回默认全图", async () => {
+    vi.mocked(api.lineageFieldDrill).mockResolvedValue({
+      table: "orders",
+      nodes: [{ id: "field:orders.amount", type: "field", label: "amount", table: "orders" }],
+      edges: [{ source: "field:orders.amount", target: "field:orders.amount", type: "DERIVED_FROM" }],
+      mappings: [],
+    });
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    const clickHandler = graphMock.on.mock.calls.find(([evt]) => evt === "node:click")?.[1] as
+      | ((evt: unknown) => void)
+      | undefined;
+    await act(async () => {
+      clickHandler?.({ target: { id: "table:orders" } });
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/字段级血缘 · 订单表/)).toBeInTheDocument();
+    });
+    vi.mocked(api.lineageGraph).mockClear();
+    fireEvent.click(screen.getByRole("button", { name: /返回表级图谱/ }));
+    // 字段级卡片关闭，URL 带 node=orders → 图谱聚焦回该表上下游（带「聚焦」Tag 可一键清除）
+    await waitFor(() => {
+      expect(screen.queryByText(/字段级血缘 · 订单表/)).not.toBeInTheDocument();
+    });
+    expect(currentPath).toBe("/lineage?node=orders");
+    expect(screen.getByText(/聚焦：orders 的上下游血缘/)).toBeInTheDocument();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+  });
+
   it("字段钻取默认「血缘关系图」：节点=表.列、边直接标注加工方式:表达式；可切「列映射清单」逐行核对并切回", async () => {
     vi.mocked(api.lineageFieldDrill).mockResolvedValue({
       table: "orders",

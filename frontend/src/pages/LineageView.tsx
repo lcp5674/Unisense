@@ -851,9 +851,13 @@ function GraphTab() {
     }
   }
 
+  /** 返回表级图谱：聚焦回钻取来源表的上下游（URL node 参数，复用既有聚焦子图机制），
+   *  而非退回默认全量图——用户从哪个表进入字段级，就回到哪个表的图谱。 */
   function clearFieldDrill() {
+    const tbl = drill?.table;
     setDrill(null);
     setDrillTableLabel(null);
+    if (tbl && focusNode !== tbl) setSearchParams({ node: tbl }, { replace: true });
   }
 
   /** 字段钻取视图顶部「查看表详情」：从主图节点找回 entity_id 打开表详情。 */
