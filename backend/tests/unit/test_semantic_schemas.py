@@ -1,4 +1,10 @@
-"""语义层 Schema 校验测试（枚举字段非法值 → 422，而非穿透到 DB 抛 500）。"""
+"""语义层 Schema 校验测试。
+
+0143 起纯字典消费治理字段（aggregation/time_semantics/freshness/dw_layer/metric_tier/
+serving_mode/additivity）由 Literal 放开为 str——schema 不复制值域（字典单一事实源，
+service 层 validate_dict_value 校验），本文件仅对 metric.type 等业务逻辑字段断言
+枚举外值 → ValidationError，并对放开的字典字段断言任意值可透传。
+"""
 
 from __future__ import annotations
 
@@ -43,12 +49,20 @@ def _base_payload(**overrides) -> dict:
         ("metric_tier", "T4"),
         ("serving_mode", "STREAM_ONLY"),
         ("additivity", "PARTIAL"),
-        ("type", "weird"),
     ],
 )
-def test_enum_fields_reject_invalid_values(field, bad_value):
+def test_dict_driven_fields_accept_extended_value(field, bad_value):
+    """0143：7 个纯字典消费字段放开 Literal——schema 接受任意字符串（字典补录
+    DIM/STAGE 等扩展值不再 422），值域校验下沉到 service 层 validate_dict_value
+    （字典 active 校验），列类型与 schema 均不再复制值域。"""
+    req = MetricCreateRequest(**_base_payload(**{field: bad_value}))
+    assert getattr(req, field) == bad_value
+
+
+def test_type_literal_still_rejects_invalid():
+    """metric.type 是业务逻辑字段（atomic/derived/composite 三分支），schema 仍拒绝枚举外值。"""
     with pytest.raises(ValidationError):
-        MetricCreateRequest(**_base_payload(**{field: bad_value}))
+        MetricCreateRequest(**_base_payload(type="weird"))
 
 
 def test_valid_enum_values_accepted():
@@ -255,23 +269,24 @@ def test_template_create_onedata_presets():
     assert req.product_owner_name == "外部产品"
 
 
-def test_template_enum_literals_aligned_with_metric_create():
-    """方案A：模板预设枚举与 MetricCreateRequest 同源——非法值（REALTIME）被拒。
-
-    修复前模板 serving_mode 为宽松 str，模板作者可预设 "REALTIME"，实例化时撞
-    MetricCreateRequest Literal 校验 422。收严后创建/编辑即拦截，从源头消除漂移。
+def test_template_dict_presets_accept_extended_value():
+    """0143：模板预设枚举放开为 str——预设字典扩展值（如 serving_mode=REALTIME、
+    aggregation=FOO，字典补录后即合法）不再被 schema 拒绝；实例化/创建指标时由
+    service 层 ``_validate_dict_fields``（字典 active 校验）兜底拦截非法/停用值。
+    type 仍是业务字段（三分支），schema 仍拒绝枚举外预设。
     """
     from app.services.semantic.schemas import (
         MetricTemplateCreateRequest,
         MetricTemplateUpdateRequest,
     )
 
+    # 字典扩展值（此前 REALTIME serving_mode 撞 MetricCreateRequest Literal → 422）现被 schema 接受
+    MetricTemplateCreateRequest(name="x", domain="s", serving_mode="REALTIME")
+    MetricTemplateCreateRequest(name="x", domain="s", aggregation="FOO")
+    MetricTemplateUpdateRequest(serving_mode="REALTIME")
+    # type 仍锁三态
     with pytest.raises(ValidationError):
-        MetricTemplateCreateRequest(name="x", domain="s", serving_mode="REALTIME")
-    with pytest.raises(ValidationError):
-        MetricTemplateCreateRequest(name="x", domain="s", aggregation="FOO")
-    with pytest.raises(ValidationError):
-        MetricTemplateUpdateRequest(serving_mode="REALTIME")
+        MetricTemplateCreateRequest(name="x", domain="s", type="weird")
     # 合法值通过
     MetricTemplateCreateRequest(name="x", domain="s", serving_mode="REALTIME_ONLY")
     MetricTemplateUpdateRequest(additivity="SEMI_ADDITIVE")

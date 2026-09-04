@@ -31,7 +31,9 @@ _WRITE_ROLES = ("platform_admin", "domain_admin", "metric_owner")
 _READ_DEPS = [Depends(require_roles(*_READ_ROLES)), Depends(guard_against_injection)]
 _WRITE_DEPS = [Depends(require_roles(*_WRITE_ROLES)), Depends(guard_against_injection)]
 
-#: 模板预设中受 MetricCreateRequest 枚举约束的字段（方案A 收严后与请求同源枚举）
+#: 模板预设中受 MetricCreateRequest 约束的治理字段（0143 起已放开为 str——值域以字典
+#: 为准，实例化透传由 create 层 validate_dict_value 校验；保留清单仅为防御性兜底注解，
+#: ``_drop_invalid_literal_presets`` 对 str 注解自动放行，对仍收 Literal 的字段生效）
 _LITERAL_PRESET_FIELDS = (
     "aggregation",
     "time_semantics",
@@ -61,12 +63,13 @@ def _literal_values(ann: Any) -> set[Any]:
 
 
 def _drop_invalid_literal_presets(merged: dict[str, Any]) -> None:
-    """实例化前剔除非法枚举预设值（强韧性兜底）。
+    """实例化前剔除非法 Literal 预设值（强韧性兜底，仅对仍收 Literal 的字段生效）。
 
-    模板预设字段已与 ``MetricCreateRequest`` 同源枚举收严，但存量/直接改库的模板仍可能
-    含非法枚举值（如 ``serving_mode='REALTIME'``，迁移 0085 已清洗存量；此处防御后续
-    枚举集收缩或绕过校验直写库）。透传给 ``MetricCreateRequest`` 会 422 卡死整个实例化
-    ——对枚举字段仅保留合法取值，非法值丢弃让其落到请求默认值，单个脏模板不阻断实例化。
+    0143 起模板治理预设字段（aggregation/time_semantics/.../metric_tier）已放开为
+    str——``_literal_values(str)`` 返回空集自动放行，字典扩展值（如 serving_mode=
+    REALTIME）透传给 create，由 service 层 ``validate_dict_value`` 按字典 active 值
+    校验（未收录返回 400，不 422 卡死实例化）。保留本防御逻辑：若未来模板 preset
+    加入仍收 Literal 的业务字段（如 type），或直写库出现枚举集收缩脏值，仍剔除放行。
     """
     from app.services.semantic.schemas import MetricCreateRequest
 

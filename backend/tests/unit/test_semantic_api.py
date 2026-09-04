@@ -513,10 +513,10 @@ async def test_instantiate_body_overrides_template_preset() -> None:
     assert create_req.measure_id == 9
 
 
-async def test_instantiate_drops_invalid_literal_preset() -> None:
-    """强韧性：模板预设非法枚举值（如历史脏数据 serving_mode='REALTIME'）不 422 卡死。
-
-    实例化前剔除非法枚举，让其落到 MetricCreateRequest 默认值（BATCH_ONLY）。
+async def test_instantiate_passes_through_dict_preset() -> None:
+    """0143：模板预设字典扩展值（serving_mode='REALTIME'）不再是非法枚举——schema 已
+    放开为 str，实例化透传保留（不再回退 BATCH_ONLY）；真正创建时由 service 层
+    validate_dict_value 按字典 active 值校验（未收录则 400，不 422 卡死实例化）。
     """
     from app.api.semantic import instantiate_template
 
@@ -531,7 +531,7 @@ async def test_instantiate_drops_invalid_literal_preset() -> None:
             body={"name": "测试", "domain": "sales"}, db=db,
         )
     create_req = svc_instance.create_metric.call_args[0][0]
-    assert create_req.serving_mode == "BATCH_ONLY"
+    assert create_req.serving_mode == "REALTIME"
 
 
 async def test_instantiate_mount_only_applies_for_derived() -> None:

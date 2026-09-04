@@ -97,58 +97,49 @@ class Metric(Base, BaseModel):
     )
     unit: Mapped[str] = mapped_column(String(32), nullable=False, comment="单位")
     currency: Mapped[str | None] = mapped_column(String(16), nullable=True, comment="币种")
+    # 字典驱动治理改造（0143）：下列 7 个纯字典消费列由 MySQL ENUM 放开为 VARCHAR(32)
+    # ——ENUM 锁死值域，字典补录新值（如 dw_layer 扩 DIM/MID/ST）须 ALTER ENUM 才能落库；
+    # 值域校验统一收敛到 system_dict（保存侧 validate_dict_value + 改码侧注册表），列类型
+    # 不再复制值域。metric.type（上）是业务逻辑字段（三分支）仍保留 ENUM，不让字典扩第 4 态。
     # 与字典种子（aggregation 9 值）对齐：补充 MAX/MIN/MEDIAN/PERCENTILE。
     # 2026-08-28：派生/复合指标聚合语义由口径表达式/依赖承载（如客单价 =
     # ROUND(SUM/NULLIF) 整体是除法非 SUM），aggregation 改可空——派生/复合
     # 落 NULL（「无聚合」），仅原子/普通聚合派生填真实枚举值，详情页据此
     # 展示「派生表达式」而非假 SUM。
     aggregation: Mapped[str | None] = mapped_column(
-        Enum(
-            "SUM",
-            "AVG",
-            "COUNT",
-            "COUNT_DISTINCT",
-            "LAST_VALUE",
-            "MAX",
-            "MIN",
-            "MEDIAN",
-            "PERCENTILE",
-            name="agg_type",
-        ),
+        String(32),
         nullable=True,
         comment="聚合方式（派生/复合无聚合语义时为空）",
     )
-    # 与字典种子（time_semantics 6 值）对齐：补充 MOM/YOY
     time_semantics: Mapped[str] = mapped_column(
-        Enum("PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY", name="time_sem"),
+        String(32),
         nullable=False,
         comment="时间语义",
     )
-    # 与字典种子（freshness 4 值）对齐：补充 T0（实时/流）
     freshness: Mapped[str] = mapped_column(
-        Enum("REALTIME", "T0", "T1", "HOURLY", name="freshness_type"),
+        String(32),
         nullable=False,
         comment="数据新鲜度",
     )
     sla: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="SLA 契约")
     dw_layer: Mapped[str] = mapped_column(
-        Enum("ODS", "DWD", "DWS", "ADS", "DM", name="dw_layer_type"),
+        String(32),
         nullable=False,
         comment="数仓分层",
     )
     metric_tier: Mapped[str] = mapped_column(
-        Enum("T1", "T2", "T3", name="metric_tier_type"),
+        String(32),
         nullable=False,
         default="T3",
         comment="指标分级",
     )
     serving_mode: Mapped[str] = mapped_column(
-        Enum("BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL", name="serving_mode_type"),
+        String(32),
         nullable=False,
         comment="服务模式",
     )
     additivity: Mapped[str] = mapped_column(
-        Enum("ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE", name="additivity_type"),
+        String(32),
         nullable=False,
         comment="可加性",
     )

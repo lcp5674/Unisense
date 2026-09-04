@@ -29,8 +29,11 @@ def _reference_targets() -> dict[str, list[tuple[type, str, bool]]]:
     """字典类型 → 引用该编码的业务表列注册表（改码同步与引用计数的单一事实源）。
 
     返回 ``dict_type -> [(Model, column_name, is_enum), ...]``；``is_enum``
-    表示该列是 MySQL ENUM——改码新值必须在值域内（运行时从表结构
-    ``Column.type.enums`` 取，避免手工维护副本漂移），否则改码被拒绝。
+    表示该列是 MySQL ENUM 且被**业务逻辑强依赖**（如 metric.type 的
+    atomic/derived/composite 三分支）——此类列改码新值必须在值域内（运行时从
+    表结构 ``Column.type.enums`` 取，避免手工维护副本漂移），否则改码被拒绝。
+    纯字典消费列（0143 起 VARCHAR(32)）值域由字典单一事实源承载，``is_enum`` 为
+    False，改码直接同步引用列，保存侧 ``validate_dict_value`` 负责脏值拦截。
     """
     from app.models.measure_catalog import MeasureCatalog
     from app.models.metric import Metric
@@ -45,16 +48,16 @@ def _reference_targets() -> dict[str, list[tuple[type, str, bool]]]:
         ],
         "unit": [(Metric, "unit", False)],
         "currency": [(Metric, "currency", False)],
-        "aggregation": [(Metric, "aggregation", True)],
-        "time_semantics": [(Metric, "time_semantics", True)],
-        "freshness": [(Metric, "freshness", True)],
-        "dw_layer": [(Metric, "dw_layer", True)],
+        "aggregation": [(Metric, "aggregation", False)],
+        "time_semantics": [(Metric, "time_semantics", False)],
+        "freshness": [(Metric, "freshness", False)],
+        "dw_layer": [(Metric, "dw_layer", False)],
         "metric_type": [(Metric, "type", True)],
-        "metric_tier": [(Metric, "metric_tier", True)],
-        "serving_mode": [(Metric, "serving_mode", True)],
-        "additivity": [(Metric, "additivity", True)],
+        "metric_tier": [(Metric, "metric_tier", False)],
+        "serving_mode": [(Metric, "serving_mode", False)],
+        "additivity": [(Metric, "additivity", False)],
         "measure_category": [(MeasureCatalog, "category", False)],
-        "measure_format": [(MeasureCatalog, "measure_format", True)],
+        "measure_format": [(MeasureCatalog, "measure_format", False)],
     }
 
 

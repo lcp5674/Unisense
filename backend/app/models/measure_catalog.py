@@ -71,8 +71,12 @@ class MeasureCatalog(Base, BaseModel, ReviewFieldsMixin):
     )
     name: Mapped[str] = mapped_column(String(128), nullable=False, comment="度量中文名（支付金额）")
     description: Mapped[str | None] = mapped_column(Text, nullable=True, comment="度量描述")
+    # 字典驱动治理改造（0143）：measure_format 列放开为 VARCHAR(32)，值域以 system_dict
+    # measure_format 为单一事实源（extra 带默认单位/小数位联动，保存侧 validate_dict_value
+    # 校验）——DB 建表即 varchar，仅 model 残留 Enum 声明，此处对齐真实列类型。
+    # MeasureFormat python 枚举仍保留：default 常量引用 + 格式→默认单位/小数位联动回退。
     measure_format: Mapped[str] = mapped_column(
-        Enum(MeasureFormat, values_callable=lambda e: [m.value for m in e]),
+        String(32),
         nullable=False,
         default=MeasureFormat.AMOUNT.value,
         comment="度量格式（AMOUNT/RATIO/NUMERIC）",

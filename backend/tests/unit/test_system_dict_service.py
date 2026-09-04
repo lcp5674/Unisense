@@ -232,28 +232,28 @@ class TestRenameCode:
         assert mock_db.execute.await_count == 1  # unit 只有 Metric.unit 一个目标列
 
     async def test_rename_enum_value_rejected(self, svc, mock_db) -> None:
-        """ENUM 列绑定类型：新编码不在 DB 枚举值域 → 拒绝且不触发任何写。"""
+        """业务逻辑 ENUM 列（metric.type 三分支）：新编码不在值域 → 拒绝且不触发任何写。"""
         item = MagicMock()
-        item.dict_type = "dw_layer"
-        item.code = "ODS"
+        item.dict_type = "metric_type"
+        item.code = "atomic"
         svc._repo.get_item = AsyncMock(return_value=item)
 
         from app.services.system_dict.schemas import DictItemUpdate
 
         with pytest.raises(BusinessError) as exc_info:
-            await svc.update_item("dw_layer", "ODS", DictItemUpdate(code="STAGING"))
+            await svc.update_item("metric_type", "atomic", DictItemUpdate(code="STAGING"))
         assert exc_info.value.error_code == "DICT_CODE_ENUM_CONSTRAINT"
         mock_db.execute.assert_not_awaited()
 
-    async def test_rename_enum_to_sibling_allowed(self, svc, mock_db) -> None:
-        """ENUM 列绑定类型：新编码在值域内（如 T1→T2 纠偏）→ 放行同步。"""
+    async def test_rename_varchar_value_allowed(self, svc, mock_db) -> None:
+        """纯字典消费列（0143 起 VARCHAR）：新编码不受 ENUM 值域限制（如扩 DIM）→ 放行。"""
         item = MagicMock()
-        item.dict_type = "metric_tier"
-        item.code = "T1"
+        item.dict_type = "dw_layer"
+        item.code = "ODS"
         svc._repo.get_item = AsyncMock(return_value=item)
         svc._repo.get_item_including_deleted = AsyncMock(return_value=None)
         svc._repo.update = AsyncMock(return_value=item)
-        mock_db.execute = AsyncMock(return_value=_exec_result(rowcount=5))
+        mock_db.execute = AsyncMock(return_value=_exec_result(rowcount=2))
 
         from app.services.system_dict.schemas import DictItemUpdate
 
@@ -261,9 +261,9 @@ class TestRenameCode:
             "app.services.system_dict.service._sync_json_references",
             new=AsyncMock(return_value=0),
         ):
-            await svc.update_item("metric_tier", "T1", DictItemUpdate(code="T2"))
-        # metric_tier → 仅 Metric.metric_tier 一列
-        assert mock_db.execute.await_count == 1
+            result = await svc.update_item("dw_layer", "ODS", DictItemUpdate(code="DIM"))
+        assert result.code == "DIM"
+        assert mock_db.execute.await_count == 1  # dw_layer → 仅 Metric.dw_layer 一列
 
     async def test_rename_duplicate_rejected(self, svc) -> None:
         item = MagicMock()

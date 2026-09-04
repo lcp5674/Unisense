@@ -189,35 +189,34 @@ class MetricCreateRequest(BaseModel):
         ),
     )
     currency: str | None = Field(None, max_length=16, description="币种")
-    # 与字典种子对齐（10 值）：SUM/AVG/COUNT/COUNT_DISTINCT/LAST_VALUE/FIRST_VALUE
-    # + MAX/MIN/MEDIAN/PERCENTILE（FIRST_VALUE 由 SQL 推断产出，如余额首值场景）。
-    # 2026-08-28 可空：派生/复合指标聚合语义由口径表达式/依赖承载（客单价 =
+    # 字典驱动治理改造（0143）：下述治理字段由 Literal 枚举放开为 str——值域以 system_dict
+    # 为单一事实源（保存侧 _validate_dict_fields → validate_dict_value 校验 active 值，
+    # 字典补录新值如 dw_layer=DIM 无需再改 schema/迁移）。type 是业务逻辑字段保留 Literal。
+    # 2026-08-28 起 aggregation 可空：派生/复合指标聚合语义由口径表达式/依赖承载（客单价 =
     # ROUND(SUM/NULLIF) 整体是除法非 SUM），缺省 None 落 NULL；原子/普通聚合派生
     # 由 create_metric 兜底真实枚举值（原子缺省 SUM）。
-    aggregation: Literal[
-        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "FIRST_VALUE",
-        "MAX", "MIN", "MEDIAN", "PERCENTILE",
-    ] | None = Field(
+    aggregation: str | None = Field(
         None,
-        description="聚合方式（派生/复合无聚合语义时缺省 None）",
+        max_length=32,
+        description="聚合方式（派生/复合无聚合语义时缺省 None；值域以字典 aggregation 为准）",
     )
-    # 与字典种子对齐（6 值）：PERIOD/YTD/TTM/AVG + MOM/YOY
-    time_semantics: Literal["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"] | None = Field(
-        None, description="时间语义（缺省 PERIOD）"
+    time_semantics: str | None = Field(
+        None, max_length=32, description="时间语义（缺省 PERIOD；值域以字典 time_semantics 为准）"
     )
-    # 与字典种子对齐（4 值）：REALTIME/T0/T1/HOURLY
-    freshness: Literal["REALTIME", "T0", "T1", "HOURLY"] | None = Field(
-        None, description="新鲜度（缺省 T1）"
+    freshness: str | None = Field(
+        None, max_length=32, description="新鲜度（缺省 T1；值域以字典 freshness 为准）"
     )
-    dw_layer: Literal["ODS", "DWD", "DWS", "ADS", "DM"] | None = Field(
-        None, description="数仓分层（缺省 DWD）"
+    dw_layer: str | None = Field(
+        None, max_length=32, description="数仓分层（缺省 DWD；值域以字典 dw_layer 为准）"
     )
-    metric_tier: Literal["T1", "T2", "T3"] = Field("T3", description="指标分级: T1/T2/T3")
-    serving_mode: Literal["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"] = Field(
-        "BATCH_ONLY", description="服务模式"
+    metric_tier: str = Field(
+        "T3", max_length=32, description="指标分级（值域以字典 metric_tier 为准）"
     )
-    additivity: Literal["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"] = Field(
-        "ADDITIVE", description="可加性: ADDITIVE/SEMI_ADDITIVE/NON_ADDITIVE"
+    serving_mode: str = Field(
+        "BATCH_ONLY", max_length=32, description="服务模式（值域以字典 serving_mode 为准）"
+    )
+    additivity: str = Field(
+        "ADDITIVE", max_length=32, description="可加性（值域以字典 additivity 为准）"
     )
     non_additive_dimensions: list[str] | None = Field(None, description="不可加维度列表")
     definition_json: dict[str, Any] = Field(..., description="口径定义")
@@ -444,26 +443,17 @@ class MetricUpdateRequest(BaseModel):
     # 指标创建后治理字段（数仓分层/时效/时间语义/分级/聚合/服务模式/可加性）常需调整
     # （分层纠正、时效调整、分级晋升、币种修正等生产高频场景），此前只能重建指标。
     # 修复：更新请求支持治理字段，service 直接更新主表治理列（不改变口径定义，非破坏性）。
-    aggregation: Literal[
-        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "FIRST_VALUE",
-        "MAX", "MIN", "MEDIAN", "PERCENTILE",
-    ] | None = Field(None, description="聚合方式（治理属性）")
-    time_semantics: Literal["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"] | None = Field(
-        None, description="时间语义（治理属性）"
+    # 0143：治理字段由 Literal 放开为 str，值域以 system_dict 为准（保存侧逐字段
+    # _validate_dict_field 校验 active 值；字典补录扩展层后此处无需再改）。
+    aggregation: str | None = Field(None, max_length=32, description="聚合方式（治理属性）")
+    time_semantics: str | None = Field(
+        None, max_length=32, description="时间语义（治理属性）"
     )
-    freshness: Literal["REALTIME", "T0", "T1", "HOURLY"] | None = Field(
-        None, description="新鲜度（治理属性）"
-    )
-    dw_layer: Literal["ODS", "DWD", "DWS", "ADS", "DM"] | None = Field(
-        None, description="数仓分层（治理属性）"
-    )
-    metric_tier: Literal["T1", "T2", "T3"] | None = Field(None, description="指标分级（治理属性）")
-    serving_mode: Literal["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"] | None = Field(
-        None, description="服务模式（治理属性）"
-    )
-    additivity: Literal["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"] | None = Field(
-        None, description="可加性（治理属性）"
-    )
+    freshness: str | None = Field(None, max_length=32, description="新鲜度（治理属性）")
+    dw_layer: str | None = Field(None, max_length=32, description="数仓分层（治理属性）")
+    metric_tier: str | None = Field(None, max_length=32, description="指标分级（治理属性）")
+    serving_mode: str | None = Field(None, max_length=32, description="服务模式（治理属性）")
+    additivity: str | None = Field(None, max_length=32, description="可加性（治理属性）")
     non_additive_dimensions: list[str] | None = Field(None, description="不可加维度（治理属性）")
     definition_json: dict[str, Any] | None = Field(None, description="口径定义")
     sla: str | None = Field(None, max_length=128)
@@ -861,14 +851,16 @@ class MetricBatchRegisterRequest(BaseModel):
     )
     sla: str | None = Field(None, max_length=128, description="整批共享 SLA 契约")
     pii_flag: bool = Field(False, description="整批共享是否含 PII")
-    metric_tier: Literal["T1", "T2", "T3"] | None = Field(
-        None, description="整批共享指标分级（缺省回退域默认 T3）"
+    # 0143：共享治理字段由 Literal 放开为 str（值域以字典为准，逐候选 create_metric
+    # 校验），字典补录扩展值后批量注册亦可选用。
+    metric_tier: str | None = Field(
+        None, max_length=32, description="整批共享指标分级（缺省回退域默认 T3）"
     )
-    serving_mode: Literal["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"] | None = Field(
-        None, description="整批共享服务模式（缺省回退域默认 BATCH_ONLY）"
+    serving_mode: str | None = Field(
+        None, max_length=32, description="整批共享服务模式（缺省回退域默认 BATCH_ONLY）"
     )
-    additivity: Literal["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"] | None = Field(
-        None, description="整批共享可加性（缺省回退域默认 ADDITIVE）"
+    additivity: str | None = Field(
+        None, max_length=32, description="整批共享可加性（缺省回退域默认 ADDITIVE）"
     )
 
 
@@ -1031,10 +1023,12 @@ class MetricBatchImportRequest(BaseModel):
 class MetricTemplateCreateRequest(BaseModel):
     """模板创建请求（对齐 FR-041：Schema 校验替代裸 dict）。
 
-    预设字段枚举与 ``MetricCreateRequest`` 对齐（方案A）：此前模板枚举字段为宽松
-    ``str``，实例化时透传给 Literal 严格校验会契约漂移——模板作者预设非法值
-    （如 ``serving_mode="REALTIME"``）在实例化/编辑时 422。收严为同源枚举，从源头
-    拦截非法值；存量非法值由迁移 0085 清洗。
+    预设字段与 ``MetricCreateRequest`` 对齐。0143 起枚举预设（aggregation/
+    time_semantics/freshness/dw_layer/serving_mode/additivity/metric_tier）由
+    Literal 放开为 str——值域以 system_dict 为单一事实源：模板作者预设任意字典
+    active 值（如 dw_layer=DIM），实例化/创建指标时经 ``_validate_dict_fields``
+    校验拦截非法/停用值（替代早期"收严同源枚举防契约漂移"方案，迁移 0085 清洗
+    的存量非法值仍由字典校验兜底）。
     """
 
     code: str | None = Field(
@@ -1051,26 +1045,27 @@ class MetricTemplateCreateRequest(BaseModel):
     type: Literal["atomic", "derived", "composite"] | None = Field(None, description="指标类型预设")
     granularity: str | None = Field(None, max_length=64, description="粒度预设")
     unit: str | None = Field(None, max_length=32, description="单位预设")
-    aggregation: Literal[
-        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "FIRST_VALUE",
-        "MAX", "MIN", "MEDIAN", "PERCENTILE",
-    ] | None = Field(None, description="聚合方式预设")
-    time_semantics: Literal["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"] | None = Field(
-        None, description="时间语义预设"
+    aggregation: str | None = Field(
+        None, max_length=32, description="聚合方式预设（值域以字典 aggregation 为准）"
     )
-    freshness: Literal["REALTIME", "T0", "T1", "HOURLY"] | None = Field(
-        None, description="数据新鲜度预设"
+    time_semantics: str | None = Field(
+        None, max_length=32, description="时间语义预设（值域以字典 time_semantics 为准）"
     )
-    dw_layer: Literal["ODS", "DWD", "DWS", "ADS", "DM"] | None = Field(
-        None, description="数仓分层预设"
+    freshness: str | None = Field(
+        None, max_length=32, description="数据新鲜度预设（值域以字典 freshness 为准）"
     )
-    serving_mode: Literal["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"] | None = Field(
-        None, description="服务模式预设"
+    dw_layer: str | None = Field(
+        None, max_length=32, description="数仓分层预设（值域以字典 dw_layer 为准）"
     )
-    additivity: Literal["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"] | None = Field(
-        None, description="可加性预设"
+    serving_mode: str | None = Field(
+        None, max_length=32, description="服务模式预设（值域以字典 serving_mode 为准）"
     )
-    metric_tier: Literal["T1", "T2", "T3"] | None = Field(None, description="指标分级预设")
+    additivity: str | None = Field(
+        None, max_length=32, description="可加性预设（值域以字典 additivity 为准）"
+    )
+    metric_tier: str | None = Field(
+        None, max_length=32, description="指标分级预设（值域以字典 metric_tier 为准）"
+    )
     # OneData 原子层：原子指标预设逻辑度量（度量格式/单位/小数位/源头系统实例化时继承）
     measure_id: int | None = Field(None, ge=1, description="逻辑度量预设（原子指标）")
     # OneData 挂载层：派生指标预设挂载实体（源表/列/粒度/周期/域，实例化时落 metric_mount）
@@ -1101,26 +1096,27 @@ class MetricTemplateUpdateRequest(BaseModel):
     type: Literal["atomic", "derived", "composite"] | None = Field(None, description="指标类型预设")
     granularity: str | None = Field(None, max_length=64, description="粒度预设")
     unit: str | None = Field(None, max_length=32, description="单位预设")
-    aggregation: Literal[
-        "SUM", "AVG", "COUNT", "COUNT_DISTINCT", "LAST_VALUE", "FIRST_VALUE",
-        "MAX", "MIN", "MEDIAN", "PERCENTILE",
-    ] | None = Field(None, description="聚合方式预设")
-    time_semantics: Literal["PERIOD", "YTD", "TTM", "AVG", "MOM", "YOY"] | None = Field(
-        None, description="时间语义预设"
+    aggregation: str | None = Field(
+        None, max_length=32, description="聚合方式预设（值域以字典 aggregation 为准）"
     )
-    freshness: Literal["REALTIME", "T0", "T1", "HOURLY"] | None = Field(
-        None, description="数据新鲜度预设"
+    time_semantics: str | None = Field(
+        None, max_length=32, description="时间语义预设（值域以字典 time_semantics 为准）"
     )
-    dw_layer: Literal["ODS", "DWD", "DWS", "ADS", "DM"] | None = Field(
-        None, description="数仓分层预设"
+    freshness: str | None = Field(
+        None, max_length=32, description="数据新鲜度预设（值域以字典 freshness 为准）"
     )
-    serving_mode: Literal["BATCH_ONLY", "REALTIME_ONLY", "BATCH_REALTIME_DUAL"] | None = Field(
-        None, description="服务模式预设"
+    dw_layer: str | None = Field(
+        None, max_length=32, description="数仓分层预设（值域以字典 dw_layer 为准）"
     )
-    additivity: Literal["ADDITIVE", "SEMI_ADDITIVE", "NON_ADDITIVE"] | None = Field(
-        None, description="可加性预设"
+    serving_mode: str | None = Field(
+        None, max_length=32, description="服务模式预设（值域以字典 serving_mode 为准）"
     )
-    metric_tier: Literal["T1", "T2", "T3"] | None = Field(None, description="指标分级预设")
+    additivity: str | None = Field(
+        None, max_length=32, description="可加性预设（值域以字典 additivity 为准）"
+    )
+    metric_tier: str | None = Field(
+        None, max_length=32, description="指标分级预设（值域以字典 metric_tier 为准）"
+    )
     # OneData 原子层：逻辑度量预设（传 null 清除）
     measure_id: int | None = Field(None, ge=1, description="逻辑度量预设（原子指标）")
     # OneData 挂载层：挂载实体预设（传 null 清除）
