@@ -62,6 +62,8 @@ vi.mock("../api", async (importOriginal) => {
     lineageScanDirectory: vi.fn(),
     deleteLineageEdgesByNode: vi.fn(),
     lineageExport: vi.fn(),
+    // dw_layer 字典（治理中心表节点分层视觉事实源；默认空=前缀兜底）
+    listDictItems: vi.fn(async () => []),
   };
 });
 
@@ -1940,6 +1942,46 @@ describe("LineageView 治理中心 Tab", () => {
     // 分层步骤条节点胶囊：层标签按数仓层展示（DWD/DWS/指标）
     expect(within(panel).getByText("DWD ·")).toBeInTheDocument();
     expect(within(panel).getByText("DWS ·")).toBeInTheDocument();
+    expect(within(panel).getByText("指标 ·")).toBeInTheDocument();
+  });
+
+  it("链路体检：路径含字典扩展层表（库名带 dim）时按 dw_layer 字典归层，不再归「未分层表」", async () => {
+    // dw_layer 字典含管理员补录的扩展层 dim（区别于默认 5 层）
+    vi.mocked(api.listDictItems).mockResolvedValue([
+      {
+        id: 1, dict_type: "dw_layer", code: "dim", label: "维度层", sort_order: 10,
+        status: "active", description: null, extra: null, ref_count: 0, created_at: "", updated_at: "",
+      },
+    ] as never);
+    vi.mocked(api.lineagePathQuery).mockResolvedValue({
+      source: "table:dwd_order_di",
+      target: "metric:sales_gmv_day",
+      has_path: true,
+      path_count: 1,
+      shortest_hops: 2,
+      truncated: false,
+      paths: [
+        {
+          hops: 2,
+          nodes: ["table:dwd_order_di", "table:wedw_dim.dim_hospital", "metric:sales_gmv_day"],
+          edges: [
+            { source: "table:dwd_order_di", target: "table:wedw_dim.dim_hospital", edge_type: "DERIVED_FROM" },
+            { source: "table:wedw_dim.dim_hospital", target: "metric:sales_gmv_day", edge_type: "DERIVED_FROM" },
+          ],
+        },
+      ],
+    });
+    const panel = await openGovernance();
+    await pickNode(panel, 0, "dwd_order_di");
+    await pickNode(panel, 1, "sales_gmv_day");
+    fireEvent.click(within(panel).getByRole("button", { name: /查询链路/ }));
+    await waitFor(() =>
+      expect(api.lineagePathQuery).toHaveBeenCalledWith("table:dwd_order_di", "metric:sales_gmv_day"),
+    );
+    // 扩展层表（库名 wedw_dim 命中字典码 dim）显示 DIM 层胶囊，而非「表」
+    await waitFor(() => expect(within(panel).getByText("路径 1 · 2 跳（3 个节点）")).toBeInTheDocument());
+    expect(within(panel).getByText("DIM ·")).toBeInTheDocument();
+    expect(within(panel).getByText("DWD ·")).toBeInTheDocument();
     expect(within(panel).getByText("指标 ·")).toBeInTheDocument();
   });
 

@@ -69,6 +69,7 @@ import {
   lineageRunDetail,
   lineageScanDirectory,
   lineageStale,
+  listDictItems,
   parseLineage,
   restoreStaleEdge,
   UnisenseApiError,
@@ -99,6 +100,7 @@ import { LineageNodePicker } from "../components/lineage/LineageNodePicker";
 import { useTracking } from "../hooks/useTracking";
 import { usePermission } from "../hooks/usePermission";
 import { enumLabel, GRANULARITY_LABEL, METRIC_STATUS_LABEL } from "../utils/enums";
+import { deriveDwLayerFromCatalogName, dwLayerStroke } from "../utils/dwLayer";
 import { formatCnTime } from "../utils/timeCn";
 import { formatSql } from "../utils/sqlFormat";
 
@@ -2754,13 +2756,11 @@ function CoverageTab() {
 
 /** 血缘治理中心（补齐 P2/P3/P4 开放能力前端入口）：健康度 / 路径查询 / 终止点 / 批量解析 / 目录扫描 / 导出 / 级联删 */
 /** 治理中心：血缘节点分层视觉（与 AssetGraph 泳道/层色同语义的轻量推断）。
- *  指标/字段/维度等按前缀定层；表按数仓前缀正则（未命中归「未分层表」）。 */
+ *  指标/字段/维度等按前缀定层；表按 ``system_dict`` 的 dw_layer 字典派生
+ *  （``dwLayerCodes`` 为治理中心拉取的 active 分层码；缺省/未命中回退标准前缀正则，
+ *  与主图 layerOf「下发优先、前缀兜底」语义一致——字典补录 dim/mid/st 等扩展层后
+ *  治理中心自动归层，无需改前端白名单）。 */
 const PATH_LAYER_COLOR: Record<string, string> = {
-  ods: "#2e7d32",
-  dwd: "#1565c0",
-  dws: "#6a1b9a",
-  ads: "#ef6c00",
-  dm: "#00695c",
   table: "#64748b",
   metric: "#7c3aed",
   field: "#0ea5e9",
@@ -2768,8 +2768,9 @@ const PATH_LAYER_COLOR: Record<string, string> = {
   external: "#94a3b8",
 };
 
-/** 解析治理中心节点 id（``metric:xxx``/``table:xxx``）为 {颜色, 层级标签, 展示名}。 */
-function pathNodeVisual(id: string): { color: string; layer: string; short: string } {
+/** 解析治理中心节点 id（``metric:xxx``/``table:xxx``）为 {颜色, 层级标签, 展示名}。
+ *  ``dwLayerCodes`` 为 dw_layer 字典 active 码（小写），表节点按它派生分层（字典驱动）。 */
+function pathNodeVisual(id: string, dwLayerCodes?: string[] | null): { color: string; layer: string; short: string } {
   const colon = id.indexOf(":");
   const prefix = colon === -1 ? "" : id.slice(0, colon);
   const name = colon === -1 ? id : id.slice(colon + 1);
@@ -2778,25 +2779,37 @@ function pathNodeVisual(id: string): { color: string; layer: string; short: stri
   if (prefix === "dimension") return { color: PATH_LAYER_COLOR.dimension, layer: "维度", short: name };
   if (prefix === "external") return { color: PATH_LAYER_COLOR.external, layer: "外部", short: name };
   if (prefix === "consumer" || prefix === "query") return { color: "#059669", layer: prefix === "consumer" ? "消费方" : "查询", short: name };
-  // 表（table: 前缀或裸名）：按数仓前缀推断分层
-  const lower = name.toLowerCase();
-  const hit =
-    lower.startsWith("ods_") || lower.startsWith("ods.")
-      ? { layer: "ODS", color: PATH_LAYER_COLOR.ods }
-      : lower.startsWith("dwd_") || lower.startsWith("dwd.")
-        ? { layer: "DWD", color: PATH_LAYER_COLOR.dwd }
-        : lower.startsWith("dws_") || lower.startsWith("dws.")
-          ? { layer: "DWS", color: PATH_LAYER_COLOR.dws }
-          : lower.startsWith("ads_") || lower.startsWith("ads.")
-            ? { layer: "ADS", color: PATH_LAYER_COLOR.ads }
-            : lower.startsWith("dm_") || lower.startsWith("dm.")
-              ? { layer: "DM", color: PATH_LAYER_COLOR.dm }
-              : { layer: "表", color: PATH_LAYER_COLOR.table };
-  return { color: hit.color, layer: hit.layer, short: name };
+  // 表（table: 前缀或裸名）：优先按字典 active 码派生（含管理员补录扩展层），
+  // 未命中回退标准数仓前缀（兼容字典未加载/未收录场景）。
+  const codes = dwLayerCodes && dwLayerCodes.length > 0 ? dwLayerCodes : undefined;
+  const derived = deriveDwLayerFromCatalogName(name, codes);
+  const layer = derived ?? STANDARD_PREFIX_LAYER(name);
+  if (!layer) return { color: PATH_LAYER_COLOR.table, layer: "表", short: name };
+  return { color: dwLayerStroke(layer), layer: layer.toUpperCase(), short: name };
 }
 
-/** 治理中心链路可视化：把若干条血缘路径（节点串）合并为一张小血缘图。 */
-function pathsToGraphData(paths: import("../api").LineagePathItem[]): {
+/** 标准数仓前缀兜底（字典未加载/未收录时用）：仅识别固定 5 层命名惯例。 */
+function STANDARD_PREFIX_LAYER(name: string): string | null {
+  const lower = name.toLowerCase();
+  const hits = ["ods", "dwd", "dws", "ads", "dm"] as const;
+  for (const code of hits) {
+    if (lower.startsWith(`${code}_`) || lower.startsWith(`${code}.`)) return code;
+  }
+  // 兼容库名携带分层（wedw_dwd.xxx）——按段从右往左找标准层
+  const db = lower.split(".")[0];
+  for (const seg of [...db.split("_").filter(Boolean)].reverse()) {
+    if ((hits as readonly string[]).includes(seg)) return seg;
+  }
+  return null;
+}
+
+/** 治理中心链路可视化：把若干条血缘路径（节点串）合并为一张小血缘图。
+ *  ``dwLayerCodes`` 存在时给 table 节点补 ``dw_layer``（AssetGraph 同名字段），
+ *  使泳道/层色按 dw_layer 字典驱动（与主图后端下发一致）。 */
+function pathsToGraphData(
+  paths: import("../api").LineagePathItem[],
+  dwLayerCodes?: string[] | null,
+): {
   nodes: AssetGraphNode[];
   edges: AssetGraphEdge[];
 } {
@@ -2807,12 +2820,18 @@ function pathsToGraphData(paths: import("../api").LineagePathItem[]): {
     if (nodeMap.has(id)) return;
     const colon = id.indexOf(":");
     const prefix = colon === -1 ? "" : id.slice(0, colon);
-    nodeMap.set(id, {
+    const label = colon === -1 ? id : id.slice(colon + 1);
+    const node: AssetGraphNode = {
       id,
       type:
         prefix === "table" ? "table" : prefix === "metric" ? "metric" : prefix === "field" || prefix === "column" ? "field" : "other",
-      label: colon === -1 ? id : id.slice(colon + 1),
-    });
+      label,
+    };
+    if (prefix === "table" && dwLayerCodes && dwLayerCodes.length > 0) {
+      const layer = deriveDwLayerFromCatalogName(label, dwLayerCodes);
+      if (layer) node.dw_layer = layer;
+    }
+    nodeMap.set(id, node);
   };
   const addEdge = (s: string, t: string) => {
     const k = `${s}->${t}`;
@@ -2836,8 +2855,8 @@ function pathsToGraphData(paths: import("../api").LineagePathItem[]): {
 }
 
 /** 治理中心链路节点胶囊：分层色实底 + 展示名，悬浮显示完整节点 id。 */
-function PathNodeChip({ id }: { id: string }) {
-  const v = pathNodeVisual(id);
+function PathNodeChip({ id, dwLayerCodes }: { id: string; dwLayerCodes?: string[] | null }) {
+  const v = pathNodeVisual(id, dwLayerCodes);
   return (
     <Tooltip title={id}>
       <Tag color={v.color} style={{ marginInlineEnd: 0, lineHeight: "20px" }}>
@@ -2881,6 +2900,23 @@ function GovernanceTab() {
   const [fieldTotal, setFieldTotal] = useState(0);
   const [fieldLoading, setFieldLoading] = useState(false);
   const [fieldGraph, setFieldGraph] = useState<{ nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } | null>(null);
+  // dw_layer 字典 active 码（治理中心表节点分层视觉的字典事实源，与主图 AssetGraph
+  // 后端下发同口径；管理员补录 dim/mid/st 等扩展层后治理中心自动归层）
+  const [dwLayerCodes, setDwLayerCodes] = useState<string[] | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    listDictItems("dw_layer")
+      .then((items) => {
+        if (mounted) setDwLayerCodes(items.map((i) => i.code.toLowerCase()));
+      })
+      .catch(() => {
+        if (mounted) setDwLayerCodes([]);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const run = async (key: typeof busy, fn: () => Promise<void>) => {
     setBusy(key);
@@ -2974,7 +3010,7 @@ function GovernanceTab() {
   function confirmCleanNode() {
     const node = delNode.trim();
     if (!node) return;
-    const v = pathNodeVisual(node);
+    const v = pathNodeVisual(node, dwLayerCodes ?? undefined);
     Modal.confirm({
       title: "清理节点血缘",
       content: (
@@ -3001,8 +3037,8 @@ function GovernanceTab() {
 
   // 链路可视化图数据（has_path 时合并全部可达路径）
   const pathGraph = useMemo(
-    () => (pathResult && pathResult.has_path ? pathsToGraphData(pathResult.paths) : null),
-    [pathResult],
+    () => (pathResult && pathResult.has_path ? pathsToGraphData(pathResult.paths, dwLayerCodes) : null),
+    [pathResult, dwLayerCodes],
   );
 
   // 下游体检可视化：从起点到各终止节点的路径合并为一张小血缘图
@@ -3015,9 +3051,10 @@ function GovernanceTab() {
               edges: [],
               hops: t.hops,
             })),
+            dwLayerCodes,
           )
         : null,
-    [termResult],
+    [termResult, dwLayerCodes],
   );
 
   /** 治理中心内嵌「查看表下字段血缘」：以 table: 前缀查该表下游字段链路（复用 field-impact 能力），
@@ -3159,7 +3196,7 @@ function GovernanceTab() {
                         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
                           {p.nodes.map((n, idx) => (
                             <span key={idx} style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                              <PathNodeChip id={n} />
+                              <PathNodeChip id={n} dwLayerCodes={dwLayerCodes} />
                               {idx < p.nodes.length - 1 && <ArrowRightOutlined style={{ color: "#bbb", fontSize: 12 }} />}
                             </span>
                           ))}
@@ -3212,7 +3249,7 @@ function GovernanceTab() {
                     </div>
                     <Space wrap>
                       {termResult.terminals.map((t) => {
-                        const v = pathNodeVisual(t.node);
+                        const v = pathNodeVisual(t.node, dwLayerCodes ?? undefined);
                         return (
                           <Tooltip key={`${t.node}-${t.hops}`}
                             title={t.entity_exists ? `下游终点 · ${t.hops} 跳` : "该节点对应目录/指标实体已删除（断链嫌疑）"}>
