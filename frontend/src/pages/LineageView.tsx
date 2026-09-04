@@ -17,6 +17,7 @@ import {
   Segmented,
   Select,
   Space,
+  Spin,
   Statistic,
   Switch,
   Table,
@@ -52,6 +53,7 @@ import {
   lineageEdges,
   lineageExport,
   lineageGraph,
+  lineageFieldDrill,
   lineageHealth,
   lineageImpact,
   lineageImpactPreview,
@@ -70,6 +72,7 @@ import type {
   CoverageBrokenEdgeItem,
   CoverageOrphanItem,
   DBCatalog,
+  FieldDrillData,
   LineageChannel,
   LineageCoverage,
   LineageEdge,
@@ -576,6 +579,59 @@ function GraphTab() {
     setSearchParams({}, { replace: true });
   }
 
+  // 字段级血缘钻取（方案 B）：点击表节点展开该表参与的字段映射子图
+  const [drillTableLabel, setDrillTableLabel] = useState<string | null>(null);
+  const [drill, setDrill] = useState<FieldDrillData | null>(null);
+  const [drillLoading, setDrillLoading] = useState(false);
+
+  /** 点击表节点 → 字段级钻取：有逐列映射则进入字段视图，无则回退表详情。 */
+  async function startFieldDrill(node: AssetGraphNode) {
+    const tbl = node.id.replace(/^table:/, "");
+    if (!tbl) {
+      if (node.entity_id != null) void openTableDetail(node);
+      return;
+    }
+    setDrillLoading(true);
+    try {
+      const d = await lineageFieldDrill(tbl);
+      if (d.nodes.length === 0 || d.edges.length === 0) {
+        // 无逐列映射（纯 SELECT */聚合/未开启采样解析）：字段级无内容，回退表详情
+        message.info(
+          `「${node.label}」暂无字段级血缘（无逐列映射）。已在${node.entity_id != null ? "下方展示表详情" : "边明细中展示表级血缘"}`,
+        );
+        if (node.entity_id != null) void openTableDetail(node);
+        setDrill(null);
+        setDrillTableLabel(null);
+        return;
+      }
+      setDrill(d);
+      setDrillTableLabel(node.label);
+      track("lineage_field_drill", tbl, "table");
+    } catch (err) {
+      message.error(
+        err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载字段级血缘失败",
+      );
+    } finally {
+      setDrillLoading(false);
+    }
+  }
+
+  function clearFieldDrill() {
+    setDrill(null);
+    setDrillTableLabel(null);
+  }
+
+  /** 字段钻取视图顶部「查看表详情」：从主图节点找回 entity_id 打开表详情。 */
+  async function openDrillTableDetail() {
+    if (!drill) return;
+    const node = data?.nodes.find((n) => n.id === `table:${drill.table}`);
+    if (!node || node.entity_id == null) {
+      message.warning("该表未在元数据目录中（可能尚未采集），仅展示字段级血缘");
+      return;
+    }
+    await openTableDetail(node as AssetGraphNode);
+  }
+
   async function openTableDetail(node: AssetGraphNode) {
     const entityId = node.entity_id;
     if (!entityId) {
@@ -602,7 +658,8 @@ function GraphTab() {
       setMetricCode(node.id.replace(/^metric:/, ""));
       setMetricDrawerOpen(true);
     } else if (node.type === "table") {
-      void openTableDetail(node);
+      // 字段级钻取：该表有逐列映射 → 展开字段节点；无 → 回退表详情
+      void startFieldDrill(node);
     } else if (node.type === "dimension") {
       // 维度节点：轻量抽屉展示详情 + 手动添加上下游
       setMetaNode({ id: node.id, label: node.label, kind: "dimension", domain: node.domain });
@@ -612,10 +669,15 @@ function GraphTab() {
       setMetaNode({ id: node.id, label: node.label, kind: "consumer", domain: node.domain });
       setMetaNodeOpen(true);
     } else if (node.type === "field" || node.type === "column") {
-      // 字段节点：展示字段名 + 所属表入口 + 手动添加上下游（baseNode=column:）
+      // 字段节点：展示字段名 + 所属表入口 + 手动添加上下游（baseNode=field:{table}.{col}）
       setFieldNode(node);
-      const tbl = node.label.split(".").slice(0, -1).join(".");
-      setFieldTableNode({ ...node, label: tbl } as AssetGraphNode);
+      const rawId = node.id.startsWith("field:") ? node.id.slice("field:".length) : node.label;
+      const tbl = rawId.split(".").slice(0, -1).join(".");
+      setFieldTableNode(
+        tbl
+          ? ({ ...node, id: `table:${tbl}`, label: tbl } as AssetGraphNode)
+          : null,
+      );
     }
   }
 
@@ -666,7 +728,107 @@ function GraphTab() {
           ，点击节点：指标 / 表视图均在本页侧边栏展示详情
         </span>
       </Space>
-      {data && data.nodes.length > 0 ? (
+            {drill ? (
+        <Card
+          size="small"
+          title={
+            <Space>
+              <DatabaseOutlined />
+              <span>字段级血缘 · {drillTableLabel ?? drill.table}</span>
+              <Tag color="geekblue">{drill.nodes.length} 字段</Tag>
+              <Tag color="purple">{drill.edges.length} 条字段映射</Tag>
+            </Space>
+          }
+          extra={
+            <Space>
+              <Button
+                size="small"
+                icon={<ApartmentOutlined />}
+                onClick={() => void openDrillTableDetail()}
+              >
+                查看表详情
+              </Button>
+              <Button size="small" onClick={clearFieldDrill}>
+                返回表级图谱
+              </Button>
+            </Space>
+          }
+        >
+          <span className="muted" style={{ fontSize: 13, display: "block", marginBottom: 8 }}>
+            点击表节点展开其字段级血缘：节点为字段（{drill.table} 的上游来源列与下游去向列），
+            连线为该表参与的逐列映射；完整明细见下方表格。
+          </span>
+          <AssetGraph
+            key={`drill-${drill.table}`}
+            nodes={drill.nodes as AssetGraphNode[]}
+            edges={drill.edges as AssetGraphEdge[]}
+            height={430}
+            onNodeClick={handleNodeClick}
+          />
+          <Divider style={{ margin: "12px 0" }} />
+          <Table
+            size="small"
+            rowKey={(r) => `${r.source_table}.${r.source_column}→${r.target_table}.${r.target_column}-${r.provenance}-${r.expression ?? ""}`}
+            dataSource={drill.mappings}
+            columns={[
+              {
+                title: "源列",
+                dataIndex: "source_column",
+                key: "src",
+                width: "30%",
+                render: (_: string, r) => (
+                  <span className="mono" style={{ fontSize: 12 }}>
+                    {r.source_table}.{r.source_column}
+                  </span>
+                ),
+              },
+              {
+                title: "目标列",
+                dataIndex: "target_column",
+                key: "dst",
+                width: "30%",
+                render: (_: string, r) => (
+                  <span className="mono" style={{ fontSize: 12 }}>
+                    {r.target_table}.{r.target_column}
+                  </span>
+                ),
+              },
+              {
+                title: "表达式",
+                dataIndex: "expression",
+                key: "expr",
+                render: (v: string | null) =>
+                  v ? (
+                    <span className="mono" style={{ fontSize: 12 }}>
+                      {v}
+                    </span>
+                  ) : (
+                    <span className="muted">直取</span>
+                  ),
+              },
+              {
+                title: "来源",
+                dataIndex: "provenance",
+                key: "prov",
+                width: 140,
+                render: (v: string) => <Tag color="blue">{CHANNEL_LABEL[v] ?? v}</Tag>,
+              },
+              {
+                title: "置信度",
+                dataIndex: "confidence",
+                key: "conf",
+                width: 80,
+                render: (v: number) => `${(v * 100).toFixed(0)}%`,
+              },
+            ]}
+            pagination={{ pageSize: 10, showSizeChanger: true }}
+          />
+        </Card>
+      ) : drillLoading ? (
+        <div style={{ textAlign: "center", padding: 48 }}>
+          <Spin tip="加载字段级血缘…" />
+        </div>
+      ) : data && data.nodes.length > 0 ? (
         <AssetGraph
           // 切换视图模式强制重挂载：折叠初值（defaultCollapsedLayers）按模式重置——
           // 结构概览=全部数仓层折叠为聚合带（层间主干边），全量血缘=全部展开

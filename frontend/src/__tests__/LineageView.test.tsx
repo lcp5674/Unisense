@@ -35,6 +35,8 @@ vi.mock("../api", async (importOriginal) => {
   return {
     ...actual,
     lineageGraph: vi.fn(),
+    // 默认空字段映射：点击表节点回退表详情（既有行为）；钻取测试单独 mock 有值
+    lineageFieldDrill: vi.fn(async () => ({ table: "", nodes: [], edges: [], mappings: [] })),
     getCatalogDetail: vi.fn(),
     parseLineage: vi.fn(),
     lineageNodes: vi.fn(),
@@ -233,11 +235,71 @@ describe("LineageView 血缘图谱 Tab", () => {
     expect(screen.getByText("MySQL 主库")).toBeInTheDocument();
     expect(screen.getByText("amount")).toBeInTheDocument();
     expect(screen.getByText("decimal(18,2)")).toBeInTheDocument();
+
     // 点击「在指标目录中查看」跳转采集目录
     await act(async () => {
       screen.getByRole("button", { name: /在指标目录中查看/ }).click();
     });
     expect(currentPath).toBe("/catalog?kw=orders");
+  });
+
+  it("点击有字段映射的表节点 → 展开字段级血缘子图（节点/边 + 映射明细表）", async () => {
+    vi.mocked(api.lineageFieldDrill).mockResolvedValue({
+      table: "orders",
+      nodes: [
+        { id: "field:customers.id", type: "field", label: "id", table: "customers" },
+        { id: "field:orders.id", type: "field", label: "id", table: "orders" },
+        { id: "field:orders.amount", type: "field", label: "amount", table: "orders" },
+      ],
+      edges: [{ source: "field:customers.id", target: "field:orders.id", type: "DERIVED_FROM" }],
+      mappings: [
+        {
+          source_table: "customers",
+          source_column: "id",
+          target_table: "orders",
+          target_column: "id",
+          expression: null,
+          confidence: 1,
+          provenance: "dp_sql",
+        },
+      ],
+    });
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    const clickHandler = graphMock.on.mock.calls.find(([evt]) => evt === "node:click")?.[1] as
+      | ((evt: unknown) => void)
+      | undefined;
+    await act(async () => {
+      clickHandler?.({ target: { id: "table:orders" } });
+    });
+    // 字段级血缘卡片出现：标题带表名
+    await waitFor(() => {
+      expect(screen.getByText(/字段级血缘 · 订单表/)).toBeInTheDocument();
+    });
+    // 映射明细表：源列 → 目标列完整展示（表.列）
+    expect(screen.getByText("customers.id")).toBeInTheDocument();
+    expect(screen.getByText("orders.id")).toBeInTheDocument();
+    // 返回表级图谱按钮存在，不直接打开表详情（表详情经钻取视图顶部按钮进入）
+    expect(screen.getByRole("button", { name: /返回表级图谱/ })).toBeTruthy();
+    expect(api.getCatalogDetail).not.toHaveBeenCalled();
+  });
+
+  it("点击无字段映射的表节点 → 回退打开表详情抽屉", async () => {
+    vi.mocked(api.lineageFieldDrill).mockResolvedValue({
+      table: "orders",
+      nodes: [],
+      edges: [],
+      mappings: [],
+    });
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    const clickHandler = graphMock.on.mock.calls.find(([evt]) => evt === "node:click")?.[1] as
+      | ((evt: unknown) => void)
+      | undefined;
+    await act(async () => {
+      clickHandler?.({ target: { id: "table:orders" } });
+    });
+    await waitFor(() => expect(api.getCatalogDetail).toHaveBeenCalledWith(42));
   });
 
   it("图谱为空时显示引导提示", async () => {

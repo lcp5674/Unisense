@@ -91,6 +91,7 @@ import {
   LineageCoverage,
   CoverageOrphanList,
   CoverageBrokenEdgeList,
+  FieldDrillData,
   LineageEdgeDetail,
   LineageEdgePage,
   LineageGraphData,
@@ -1578,6 +1579,11 @@ export async function lineageGraph(params?: {
     provenance: params?.provenance,
   });
   return request<LineageGraphData>(`${API_BASE}/lineage/graph${qs ? `?${qs}` : ""}`);
+}
+
+/** 血缘字段级钻取（方案 B）：点击表节点下钻，返回该表参与的字段映射子图。 */
+export async function lineageFieldDrill(table: string): Promise<FieldDrillData> {
+  return request<FieldDrillData>(`${API_BASE}/lineage/field-drill?table=${encodeURIComponent(table)}`);
 }
 
 export async function parseLineage(

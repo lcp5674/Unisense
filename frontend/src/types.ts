@@ -596,6 +596,8 @@ export interface LineageGraphNode {
   pii?: boolean;
   domain?: string;
   owner?: string;
+  /** 字段节点所属表（db.tbl，字段钻取子图返回） */
+  table?: string;
 }
 
 export interface LineageGraphEdge {
@@ -607,6 +609,26 @@ export interface LineageGraphEdge {
 export interface LineageGraphData {
   nodes: LineageGraphNode[];
   edges: LineageGraphEdge[];
+}
+
+// 血缘字段级钻取（方案 B）：点击表节点下钻，展示该表参与的字段映射子图
+export interface FieldDrillMapping {
+  source_table: string;
+  source_column: string;
+  target_table: string;
+  target_column: string;
+  expression?: string | null;
+  confidence: number;
+  provenance: string;
+  task_id?: number | null;
+  step_id?: number | null;
+}
+
+export interface FieldDrillData {
+  table: string;
+  nodes: LineageGraphNode[];
+  edges: LineageGraphEdge[];
+  mappings: FieldDrillMapping[];
 }
 
 // 变更影响预览（what-if）——后端 lineage/schemas.py 的 ImpactPreviewResponse
