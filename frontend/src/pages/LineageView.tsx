@@ -196,27 +196,36 @@ function exprKind(
 }
 
 /**
- * 字段钻取图节点装饰（表泳道/去拥挤方案）：
- * - label 仅保留「列名」（表名前缀不再重复 N 次——表名只出现一次于图例与清单分组头）；
- * - domain 置为所属表短名 → AssetGraph 按 domainColor 为每张表分配恒定颜色（同表同色、
- *   异表异色），底部「业务域」图例即成为「表 → 色」图例（表名一次、不重复占位）；
- * - 保留 table 全名，hover 节点由 GraphCanvas 拼接展示完整「库.表.列」。
+ * 字段钻取图节点装饰（信息直接上「图」方案，血缘关系图即完整载体）：
+ * - label = 「短表名.列名」——图上直接可读「哪个表的哪个字段」（表名不再隐藏进图例/
+ *   悬停）；短表名去库前缀控制常驻长度，hover 仍可看完整「库.表.列」；
+ * - domain 置为所属表短名 → AssetGraph 按 domainColor 同表同色、异表异色（表色辅助
+ *   分组，跨同名前缀表也能一眼区分）。
  * 表级/指标节点保持原样。导出供测试与图渲染复用。 */
 export function decorateDrillGraphNodes(drill: FieldDrillData | null): AssetGraphNode[] {
   if (!drill) return [];
   return drill.nodes.map((n) => {
     if (n.type !== "field" || !n.table) return n as AssetGraphNode;
     const tbl = n.table.split(".").pop() || n.table;
-    // domain 已是业务域（非表）时不覆盖；字段节点大多无 domain，以表短名作着色维度
-    return { ...n, label: n.label, domain: n.domain || tbl } as AssetGraphNode;
+    return { ...n, label: `${tbl}.${n.label}`, domain: n.domain || tbl, table: n.table } as AssetGraphNode;
   });
 }
 
+/** 字段钻取图边中点常驻表达式最大展示长度（超长截断，完整走 hover/清单，避免整图糊死）。 */
+const MAX_EDGE_EXPR = 60;
+
+/** 边中点表达式展示：超长时截断并追加省略号（完整表达式经 fullExpr 悬停可见）。 */
+function trimEdgeExpr(v: string): string {
+  const s = String(v).trim();
+  return s.length > MAX_EDGE_EXPR ? `${s.slice(0, MAX_EDGE_EXPR)}…` : s;
+}
+
 /**
- * 字段钻取图边装饰（加工标注移出中点/去遮挡方案）：
- * - edgeLabel 仅标「加工方式」短词（不再把表达式截断拼接进边中点——文字不再与连线
- *   叠压遮挡），表级主图边不设 edgeLabel → AssetGraph 不渲染 label，零影响；
- * - 完整加工表达式存 fullExpr，hover 边 tooltip 展示（详见 AssetGraph 边兜底分支）。
+ * 字段钻取图边装饰（加工方式与表达式直接标注在连线中点旁，血缘关系图即完整载体）：
+ * - edgeLabel = 「加工方式：表达式」——用户在图上直接看到该字段「经过什么加工、具体
+ *   表达式是什么」（表达式 ≤60 字符完整展示，超长截断 + hover 全显 + 列映射清单兜底）；
+ * - 直取（无表达式）边仅标「直取」，表级主图边不设 edgeLabel → AssetGraph 不渲染，
+ *   零影响；完整加工表达式存 fullExpr，hover 边 tooltip 展示全文。
  * 导出供测试与图渲染复用。 */
 export function decorateDrillGraphEdges(drill: FieldDrillData | null): AssetGraphEdge[] {
   if (!drill) return [];
@@ -225,7 +234,7 @@ export function decorateDrillGraphEdges(drill: FieldDrillData | null): AssetGrap
     const kind = exprKind(expr);
     return {
       ...e,
-      edgeLabel: kind.label,
+      edgeLabel: expr && expr.trim() ? `${kind.label}：${trimEdgeExpr(expr)}` : kind.label,
       fullExpr: expr || "",
     } as AssetGraphEdge;
   });
@@ -383,12 +392,12 @@ export function buildFieldGraphData(
     addNode(it.target_node, it.target_table, it.target_column);
     const expr = it.expression ?? null;
     const kind = exprKind(expr);
-    const exprHead = expr ? (expr.length > 20 ? `${expr.slice(0, 20)}…` : expr) : "";
     graphEdges.push({
       source: it.source_node,
       target: it.target_node,
       type: "DERIVED_FROM",
-      edgeLabel: expr ? `${kind.label} · ${exprHead}` : kind.label,
+      // 与字段钻取图同一标注口径：加工方式：表达式（≤60 完整，超长截断 + fullExpr 悬停全文）
+      edgeLabel: expr && expr.trim() ? `${kind.label}：${trimEdgeExpr(expr)}` : kind.label,
       fullExpr: expr || "",
     });
   }
@@ -697,8 +706,9 @@ function GraphTab() {
   const [drillTableLabel, setDrillTableLabel] = useState<string | null>(null);
   const [drill, setDrill] = useState<FieldDrillData | null>(null);
   const [drillLoading, setDrillLoading] = useState(false);
-  // 钻取默认「列映射清单」视图（表分组卡 + 完整表达式为主通道），图收纳为第二视图
-  const [drillView, setDrillView] = useState<"list" | "graph">("list");
+  // 钻取默认「血缘关系图」——完整信息（表.列 / 加工方式 / 表达式）直接画进图里；
+  // 「列映射清单」保留为逐行核对/长表达式全文的第二通道
+  const [drillView, setDrillView] = useState<"list" | "graph">("graph");
 
   /** 点击表节点 → 字段级钻取：有逐列映射则进入字段视图，无则回退表详情。 */
   async function startFieldDrill(node: AssetGraphNode) {
@@ -797,14 +807,6 @@ function GraphTab() {
     }
   }
 
-  // 字段钻取视图：本表加工上下文（参与映射的上游来源表 / 下游去向表，均排除当前表）
-  const drillUpstreamTables = drill
-    ? Array.from(new Set(drill.mappings.map((m) => m.source_table).filter((t) => t !== drill.table)))
-    : [];
-  const drillDownstreamTables = drill
-    ? Array.from(new Set(drill.mappings.map((m) => m.target_table).filter((t) => t !== drill.table)))
-    : [];
-
   // 字段钻取图派生数据：把「表名与加工信息直接画进图里」——字段节点 label 带所属表名
   //（短表名.列名，跨表场景一眼可辨），字段边中点标注「加工方式 · 表达式」（完整表达式
   // 走 fullExpr，hover 边可看）。表级主图边无表达式字段 → 不渲染 label，零影响。
@@ -901,8 +903,8 @@ function GraphTab() {
             }}
           >
             <span className="muted" style={{ fontSize: 13 }}>
-              {drill.table} 参与 {drill.mappings.length} 条字段映射——默认以「列映射清单」展示
-              （每行含加工方式与完整表达式），可切换「血缘关系图」查看字段节点连线。
+              {drill.table} 参与 {drill.mappings.length} 条字段映射——血缘关系图直接呈现
+              「哪个表的哪个字段 ← 经什么加工（表达式）得到」；可切换「列映射清单」逐行核对/看超长表达式全文。
             </span>
             <Segmented
               value={drillView}
@@ -913,70 +915,6 @@ function GraphTab() {
               ]}
             />
           </div>
-          {(drillUpstreamTables.length > 0 || drillDownstreamTables.length > 0) && (
-            <div
-              style={{
-                marginBottom: 8,
-                display: "flex",
-                flexWrap: "wrap",
-                gap: 4,
-                alignItems: "center",
-                background: "rgba(59,130,246,0.05)",
-                borderRadius: 6,
-                padding: "4px 8px",
-              }}
-            >
-              {drillUpstreamTables.length > 0 && (
-                <>
-                  <span className="muted" style={{ fontSize: 12 }}>
-                    上游来源表
-                  </span>
-                  {drillUpstreamTables.map((t) => (
-                    <Tag
-                      key={`up-${t}`}
-                      color="cyan"
-                      style={{ cursor: "pointer", marginInlineEnd: 0 }}
-                      title="点击查看该表字段级血缘"
-                      onClick={() => {
-                        const n = data?.nodes.find((x) => x.id === `table:${t}`);
-                        if (n) void startFieldDrill(n as AssetGraphNode);
-                        else message.info(`「${t}」不在当前血缘图中，仅展示当前表字段关系`);
-                      }}
-                    >
-                      {t}
-                    </Tag>
-                  ))}
-                </>
-              )}
-              <span style={{ color: "#94a3b8" }}>→</span>
-              <Tag color="blue" style={{ fontWeight: 600, marginInlineEnd: 0 }}>
-                {drill.table}
-              </Tag>
-              {drillDownstreamTables.length > 0 && (
-                <>
-                  <span style={{ color: "#94a3b8" }}>→</span>
-                  <span className="muted" style={{ fontSize: 12 }}>
-                    下游去向表
-                  </span>
-                  {drillDownstreamTables.map((t) => (
-                    <Tag
-                      key={`down-${t}`}
-                      color="green"
-                      style={{ cursor: "pointer", marginInlineEnd: 0 }}
-                      title="点击查看该表字段级血缘"
-                      onClick={() => {
-                        const n = data?.nodes.find((x) => x.id === `table:${t}`);
-                        if (n) void startFieldDrill(n as AssetGraphNode);
-                        else message.info(`「${t}」不在当前血缘图中，仅展示当前表字段关系`);
-                      }}
-                    >
-                      {t}
-                    </Tag>
-                  ))}
-                </>
-              )}
-            </div>
-          )}
           {drillView === "graph" ? (
             <>
               <AssetGraph
@@ -988,8 +926,9 @@ function GraphTab() {
                 onNodeClick={handleNodeClick}
               />
               <span className="muted" style={{ fontSize: 12, display: "block", marginTop: 6 }}>
-                节点按所属表着色（同表同色，表名见图例「业务域」区），节点仅显示列名避免重复表名；
-                悬停节点查看完整「库.表.列」，悬停边查看完整加工表达式；加工方式见边旁短标签。
+                节点 = 「短表名.列名」，同表同色（表色见图例）；边上直接标注「加工方式：表达式」——
+                该字段经过什么加工一目了然；长表达式自动截断（≤60 字符），悬停边或切「列映射清单」看全文；
+                悬停节点可看完整「库.表.列」，滚轮缩放查看细节。
               </span>
             </>
           ) : (
@@ -1242,7 +1181,7 @@ function GraphTab() {
   );
 }
 
-function ImpactTab() {
+function ImpactTab({ request }: { request?: { node: string; ts: number } | null }) {
   const [node, setNode] = useState("");
   const [nodeOptions, setNodeOptions] = useState<LineageNode[]>([]);
   const [nodeLoading, setNodeLoading] = useState(false);
@@ -1300,6 +1239,42 @@ function ImpactTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /** 字段级血缘查询（独立于粒度 state，供手动「字段级血缘」与外部预填「查看表下字段」复用） */
+  async function runFieldQuery(raw: string) {
+    const q = raw.trim();
+    if (!q) return;
+    setLoading(true);
+    try {
+      const data = await lineageFieldImpact({ node: q, direction, max_hops: 3, limit: 300 });
+      setFieldItems(data.items);
+      setFieldTotal(data.total);
+      setEdges([]);
+      setTotal(0);
+      // 字段映射行 → 血缘视图（field: 节点图 + 边中点标注加工方式/表达式，粒度 L2）
+      setGraphData(data.items.length > 0 ? buildFieldGraphData(data.items, data.nodes) : null);
+      track("lineage_query", q, "field");
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "查询失败");
+      setEdges([]);
+      setTotal(0);
+      setFieldItems([]);
+      setFieldTotal(0);
+      setGraphData(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // 治理中心「查看表下字段血缘」跳转预填：切字段级粒度 + 填入表名并自动查询
+  useEffect(() => {
+    if (request && request.node) {
+      setGranularity("field");
+      setNode(request.node);
+      void runFieldQuery(request.node);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [request]);
+
   async function loadImpact() {
     if (!node.trim()) {
       message.warning(granularity === "field" ? "请输入节点（表名或 表.列）" : "请输入节点（指标编码或表名）");
@@ -1308,19 +1283,7 @@ function ImpactTab() {
     setLoading(true);
     try {
       if (granularity === "field") {
-        const data = await lineageFieldImpact({
-          node: node.trim(),
-          direction,
-          max_hops: 3,
-          limit: 300,
-        });
-        setFieldItems(data.items);
-        setFieldTotal(data.total);
-        setEdges([]);
-        setTotal(0);
-        // 字段映射行 → 血缘视图（field: 节点图 + 边中点标注加工方式/表达式，粒度 L2）
-        setGraphData(data.items.length > 0 ? buildFieldGraphData(data.items, data.nodes) : null);
-        track("lineage_query", node.trim(), "field");
+        await runFieldQuery(node.trim());
         return;
       }
       const data =
@@ -2661,7 +2624,7 @@ function PathNodeChip({ id }: { id: string }) {
   );
 }
 
-function GovernanceTab() {
+function GovernanceTab({ onOpenFieldLineage }: { onOpenFieldLineage?: (tableName: string) => void }) {
   const { can } = usePermission();
   const [health, setHealth] = useState<import("../api").LineageHealthResult | null>(null);
   // 链路体检（A→B 路径）
@@ -2825,6 +2788,14 @@ function GovernanceTab() {
     [termResult],
   );
 
+  /** 治理中心血缘视图点击表节点 → 通知父组件跳「血缘查询」字段级血缘并预填该表（查看表下字段血缘） */
+  function handleMiniNodeClick(n: AssetGraphNode) {
+    if (n.type === "table") {
+      const name = n.id.replace(/^table:/, "");
+      if (name) onOpenFieldLineage?.(name);
+    }
+  }
+
   const doExport = () => {
     setExporting(true);
     lineageExport({ format: exportFormat })
@@ -2945,7 +2916,7 @@ function GovernanceTab() {
                     }))}
                   />
                 ) : pathGraph && pathGraph.nodes.length > 0 ? (
-                  <AssetGraph nodes={pathGraph.nodes} edges={pathGraph.edges} height={380} />
+                  <AssetGraph nodes={pathGraph.nodes} edges={pathGraph.edges} height={380} onNodeClick={handleMiniNodeClick} />
                 ) : null}
               </>
             )}
@@ -2980,7 +2951,7 @@ function GovernanceTab() {
                 </div>
                 {termView === "graph" ? (
                   termGraph && termGraph.nodes.length > 0 ? (
-                    <AssetGraph nodes={termGraph.nodes} edges={termGraph.edges} height={320} />
+                    <AssetGraph nodes={termGraph.nodes} edges={termGraph.edges} height={320} onNodeClick={handleMiniNodeClick} />
                   ) : null
                 ) : (
                   <div>
@@ -3118,6 +3089,10 @@ function GovernanceTab() {
 
 export function LineageView() {
   const navigate = useNavigate();
+  // 受控激活 Tab：治理中心「查看表下字段血缘」可切到「血缘查询/影响分析」
+  const [activeTab, setActiveTab] = useState("graph");
+  // 治理中心 → 血缘查询字段级的预填请求（node=裸表名；ts 保证重复点击同表仍触发）
+  const [fieldLineageRequest, setFieldLineageRequest] = useState<{ node: string; ts: number } | null>(null);
 
   // 统一返回上一入口：优先回退浏览器历史（资产地图等入口），无上一页（URL 直达）时兜底总览仪表
   function handleBack() {
@@ -3125,13 +3100,19 @@ export function LineageView() {
     else navigate("/dashboard");
   }
 
+  // 治理中心血缘视图点击表节点 → 切到「血缘查询/影响分析」的字段级血缘并预填该表
+  function handleOpenFieldLineage(tableName: string) {
+    setFieldLineageRequest({ node: tableName, ts: Date.now() });
+    setActiveTab("impact");
+  }
+
   const tabItems = [
     { key: "graph", label: <span><ShareAltOutlined /> 血缘图谱</span>, children: <GraphTab /> },
-    { key: "impact", label: <span><ApartmentOutlined /> 血缘查询 / 影响分析</span>, children: <ImpactTab /> },
+    { key: "impact", label: <span><ApartmentOutlined /> 血缘查询 / 影响分析</span>, children: <ImpactTab request={fieldLineageRequest} /> },
     { key: "parse", label: <span><CodeOutlined /> SQL 血缘解析</span>, children: <ParseTab /> },
     { key: "channels", label: <span><DatabaseOutlined /> 采集通道</span>, children: <ChannelsTab /> },
     { key: "coverage", label: <span><PieChartOutlined /> 覆盖治理</span>, children: <CoverageTab /> },
-    { key: "governance", label: <span><ApartmentOutlined /> 治理中心</span>, children: <GovernanceTab /> },
+    { key: "governance", label: <span><ApartmentOutlined /> 治理中心</span>, children: <GovernanceTab onOpenFieldLineage={handleOpenFieldLineage} /> },
   ];
 
   return (
@@ -3147,7 +3128,7 @@ export function LineageView() {
         </div>
       </div>
       <Card styles={{ body: { paddingTop: 16 } }}>
-        <Tabs items={tabItems} />
+        <Tabs items={tabItems} activeKey={activeTab} onChange={(k) => setActiveTab(k)} />
       </Card>
     </div>
   );

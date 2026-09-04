@@ -285,20 +285,17 @@ describe("LineageView 血缘图谱 Tab", () => {
     await waitFor(() => {
       expect(screen.getByText(/字段级血缘 · 订单表/)).toBeInTheDocument();
     });
-    // 映射明细表：源列 → 目标列完整展示（表.列）
-    expect(screen.getByText("customers.id")).toBeInTheDocument();
-    expect(screen.getByText("orders.id")).toBeInTheDocument();
-    // 表加工上下文带：上游来源表 customers → 当前表 orders（本数据无下游，仅展示上游）
-    expect(screen.getByText("上游来源表")).toBeInTheDocument();
-    expect(screen.getByText("customers")).toBeInTheDocument();
-    // 加工方式列：expression 为空 → 「直取」
-    expect(screen.getByText("直取")).toBeInTheDocument();
+    // 默认「血缘关系图」视图（信息直接上画布：节点表.列、边加工方式:表达式），
+    // 不再默认清单、也不再展示顶部「上游来源表 → 下游去向表」信息带
+    expect(screen.getByText(/短表名\.列名/)).toBeInTheDocument();
+    expect(screen.queryByText("上游来源表")).not.toBeInTheDocument();
+    expect(screen.queryByText("目标列")).not.toBeInTheDocument();
     // 返回表级图谱按钮存在，不直接打开表详情（表详情经钻取视图顶部按钮进入）
     expect(screen.getByRole("button", { name: /返回表级图谱/ })).toBeTruthy();
     expect(api.getCatalogDetail).not.toHaveBeenCalled();
   });
 
-  it("字段钻取默认「列映射清单」视图（完整表达式为主通道），可切换血缘关系图并切回", async () => {
+  it("字段钻取默认「血缘关系图」：节点=表.列、边直接标注加工方式:表达式；可切「列映射清单」逐行核对并切回", async () => {
     vi.mocked(api.lineageFieldDrill).mockResolvedValue({
       table: "orders",
       nodes: [
@@ -342,27 +339,25 @@ describe("LineageView 血缘图谱 Tab", () => {
     await waitFor(() => {
       expect(screen.getByText(/字段级血缘 · 订单表/)).toBeInTheDocument();
     });
-    // C 默认「列映射清单」：Segmented 出现，表格表头与完整表达式（不截断）可见，
-    // 图的提示文案此时不应存在（图不是默认主视图）
-    expect(screen.getByText(/列映射清单（2）/)).toBeInTheDocument();
-    expect(screen.getByText("目标列")).toBeInTheDocument();
-    expect(screen.getByText("来源列")).toBeInTheDocument();
-    expect(screen.getByText("SUM(amount) AS amount")).toBeInTheDocument();
-    expect(screen.queryByText(/节点按所属表着色/)).not.toBeInTheDocument();
-    // 切到「血缘关系图」：图提示出现（含 hover 完整表达式说明）
-    fireEvent.click(screen.getByText("血缘关系图"));
-    await waitFor(() => {
-      expect(screen.getByText(/节点按所属表着色/)).toBeInTheDocument();
-    });
-    expect(screen.getByText(/悬停边查看完整加工表达式/)).toBeInTheDocument();
-    // 切回清单：表格再次可见
+    // 默认「血缘关系图」：图提示（节点表.列 + 边加工方式:表达式）在；清单表格不渲染；顶部信息带不存在
+    expect(screen.getByText(/短表名\.列名/)).toBeInTheDocument();
+    expect(screen.getByText(/加工方式：表达式/)).toBeInTheDocument();
+    expect(screen.queryByText("目标列")).not.toBeInTheDocument();
+    expect(screen.queryByText("上游来源表")).not.toBeInTheDocument();
+    // 切「列映射清单」：Segmented 出现，完整表达式（不截断）+ 加工方式列可见
     fireEvent.click(screen.getByText(/列映射清单（2）/));
     await waitFor(() => {
-      expect(screen.getByText("来源列")).toBeInTheDocument();
+      expect(screen.getByText("目标列")).toBeInTheDocument();
     });
-  });
-
-  it("点击无字段映射的表节点 → 回退打开表详情抽屉", async () => {
+    expect(screen.getByText("来源列")).toBeInTheDocument();
+    expect(screen.getByText("SUM(amount) AS amount")).toBeInTheDocument();
+    expect(screen.getByText("直取")).toBeInTheDocument();
+    // 切回血缘关系图：图提示再次可见
+    fireEvent.click(screen.getByText("血缘关系图"));
+    await waitFor(() => {
+      expect(screen.getByText(/短表名\.列名/)).toBeInTheDocument();
+    });
+  });  it("点击无字段映射的表节点 → 回退打开表详情抽屉", async () => {
     vi.mocked(api.lineageFieldDrill).mockResolvedValue({
       table: "orders",
       nodes: [],
@@ -1453,17 +1448,18 @@ describe("buildFieldGraphData 字段级血缘视图数据", () => {
     expect(g.nodes).toHaveLength(2);
   });
 
-  it("边带加工标注：edgeLabel=加工方式·表达式（超 20 截断），fullExpr=完整表达式（hover 可查）", () => {
-    // COALESCE(SUM(gmv),0) 恰 20 字符不截断 → edgeLabel 含完整表达式；再测一条超长截断
+  it("边带加工标注：edgeLabel=加工方式:表达式（≤60 完整、超 60 截断），fullExpr=完整表达式（hover 可查）", () => {
+    // COALESCE(SUM(gmv),0) ≤60 不截断 → edgeLabel 含完整表达式；再测一条超 60 截断
     const g = buildFieldGraphData([item()]);
     const e = g.edges[0];
-    expect(e.edgeLabel).toBe("空值兜底 · COALESCE(SUM(gmv),0)"); // exprKind(COALESCE)=空值兜底
+    expect(e.edgeLabel).toBe("空值兜底：COALESCE(SUM(gmv),0)"); // exprKind(COALESCE)=空值兜底
     expect(e.fullExpr).toBe("COALESCE(SUM(gmv),0)");
-    const g2 = buildFieldGraphData([
-      item({ id: 9, expression: "CASE WHEN status='paid' THEN amount*0.9 ELSE amount END" }),
-    ]);
-    expect(g2.edges[0].edgeLabel).toBe("条件分支 · CASE WHEN status='pa…"); // 超 20 截断
-    expect(g2.edges[0].fullExpr).toBe("CASE WHEN status='paid' THEN amount*0.9 ELSE amount END");
+    const longExpr =
+      "CASE WHEN status='paid' AND source='app' THEN amount*0.9 ELSE amount*0.8 END";
+    const g2 = buildFieldGraphData([item({ id: 9, expression: longExpr })]);
+    expect(g2.edges[0].edgeLabel.startsWith("条件分支：CASE WHEN status='paid'")).toBe(true);
+    expect(g2.edges[0].edgeLabel.endsWith("…")).toBe(true);
+    expect(g2.edges[0].fullExpr).toBe(longExpr);
   });
 
   it("直取边仅标「直取」、无 fullExpr；星号列节点补 *", () => {
@@ -1712,6 +1708,13 @@ describe("LineageView 治理中心 Tab", () => {
     return screen.findByRole("tabpanel");
   }
 
+  // 治理中心血缘视图（链路/下游小图）的 node:click 处理器——最后注册的那个
+  //（血缘图谱/影响分析 Tab 先挂载注册，治理中心小图最后渲染）
+  function governanceNodeClickHandler(): ((evt: { target: { id?: string } }) => void) | undefined {
+    const calls = graphMock.on.mock.calls.filter(([evt]) => evt === "node:click");
+    return calls[calls.length - 1]?.[1] as ((evt: { target: { id?: string } }) => void) | undefined;
+  }
+
   /** 在治理中心面板内选第 idx 个节点选择器的候选（打开下拉 → 在可见下拉内点选项）。
    *  antd v5 关闭的下拉仍残留 DOM（hidden class），须限定可见下拉避免 getByText 多匹配。 */
   async function pickNode(panel: HTMLElement, idx: number, label: string) {
@@ -1837,6 +1840,47 @@ describe("LineageView 治理中心 Tab", () => {
     );
   });
 
+  it("下游健康体检血缘视图点击表节点 → 跳「血缘查询」字段级血缘并预填该表", async () => {
+    vi.mocked(api.lineagePathTerminals).mockResolvedValue({
+      node: "table:dwd_order_di",
+      terminal_count: 1,
+      truncated: false,
+      terminals: [
+        { node: "table:dws_sales_daily", path: ["table:dwd_order_di", "table:dws_sales_daily"], hops: 1, node_type: "table", entity_exists: true },
+      ],
+    });
+    vi.mocked(api.lineageFieldImpact).mockResolvedValue({
+      node: "dws_sales_daily", direction: "downstream", total: 0, items: [], nodes: [],
+    });
+    const panel = await openGovernance();
+    await pickNode(panel, 2, "dwd_order_di");
+    fireEvent.click(within(panel).getByRole("button", { name: /体\s*检/ }));
+    await waitFor(() => expect(within(panel).getByText(/发现 1 个下游终止节点/)).toBeInTheDocument());
+    fireEvent.click(within(panel).getByRole("radio", { name: /血缘视图/ }));
+    await waitFor(() => expect(panel.querySelector('[data-testid="asset-graph-wrap"]')).toBeTruthy());
+    // 治理中心血缘视图的 node:click handler 最后注册（Graph/影响图先挂载），取末位
+    graphMock.getNodeData.mockImplementation((id?: string) => {
+      if (id === "table:dws_sales_daily") {
+        return { id: "table:dws_sales_daily", data: { id: "table:dws_sales_daily", type: "table", label: "dws_sales_daily" } } as never;
+      }
+      return undefined;
+    });
+    const handler = governanceNodeClickHandler();
+    expect(handler).toBeDefined();
+    await act(async () => {
+      handler?.({ target: { id: "table:dws_sales_daily" } });
+    });
+    // 自动切到「血缘查询 / 影响分析」Tab 并预填该表 → 触发字段级血缘查询（裸表名）
+    await waitFor(() =>
+      expect(api.lineageFieldImpact).toHaveBeenCalledWith({
+        node: "dws_sales_daily", direction: "downstream", max_hops: 3, limit: 300,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: /血缘查询/ })).toHaveAttribute("aria-selected", "true"),
+    );
+  });
+
   it("节点清理：Modal 二次确认后按节点软删血缘边", async () => {
     vi.mocked(api.deleteLineageEdgesByNode).mockResolvedValue({ deleted: 3 });
     const panel = await openGovernance();
@@ -1904,29 +1948,29 @@ describe("decorateDrillGraph 字段钻取图：表名与加工信息画进图里
     mappings: [],
   };
 
-  it("字段节点 label 仅列名（表名不重复），domain 置为所属表短名用于按表着色；表级/指标节点不受影响", () => {
+  it("字段节点 label = 短表名.列名（血缘关系图直接可读哪表哪列），domain=所属表短名着色；表级/指标节点不受影响", () => {
     const nodes = decorateDrillGraphNodes(drill as never);
-    // A 表泳道/去拥挤：常驻 label 只显示列名（表名只出现一次于图例与清单分组头），
+    // 信息直接上「图」：常驻 label 即「短表名.列名」——表归属不再需要悬停/清单/图例才能读；
     // domain=所属表短名让 AssetGraph domainColor 同表同色、异表异色；table 保留全名供 hover
-    expect(nodes.find((n) => n.id === "field:customers.id")?.label).toBe("id");
+    expect(nodes.find((n) => n.id === "field:customers.id")?.label).toBe("customers.id");
     expect(nodes.find((n) => n.id === "field:customers.id")?.domain).toBe("customers");
     expect(nodes.find((n) => n.id === "field:customers.id")?.table).toBe("customers");
-    // orders 有库前缀 → domain 取短表名 orders，table 保留全名
-    expect(nodes.find((n) => n.id === "field:orders.id")?.label).toBe("id");
+    // orders 有库前缀 → label/domain 取短表名 orders，table 保留全名
+    expect(nodes.find((n) => n.id === "field:orders.id")?.label).toBe("orders.id");
     expect(nodes.find((n) => n.id === "field:orders.id")?.domain).toBe("orders");
     expect(nodes.find((n) => n.id === "field:orders.id")?.table).toBe("wedw_dwd.orders");
     // 指标节点不带表名，保持原样
     expect(nodes.find((n) => n.id === "metric:revenue")?.label).toBe("营收");
   });
 
-  it("字段边 label 仅标加工方式（表达式不再压边中点），完整表达式进 fullExpr；直取边标「直取」", () => {
+  it("字段边 label = 加工方式:表达式（≤60 完整标注在边中点旁），完整表达式进 fullExpr；直取边标「直取」", () => {
     const edges = decorateDrillGraphEdges(drill as never);
     const plain = edges.find((e) => (e as { expression?: string | null }).expression == null);
     expect(plain?.edgeLabel).toBe("直取");
     expect((plain as { fullExpr?: string }).fullExpr).toBe("");
     const calc = edges.find((e) => e !== plain);
-    // B 去遮挡：edgeLabel 只保留加工方式短词，不再把截断表达式拼进边中点
-    expect(calc?.edgeLabel).toBe("聚合加工");
+    // 用户要求「加工方式与具体表达式直接标在边上」：edgeLabel 含「聚合加工：SUM(amount * 1.2) AS amount」
+    expect(calc?.edgeLabel).toBe("聚合加工：SUM(amount * 1.2) AS amount");
     expect((calc as { fullExpr?: string }).fullExpr).toBe("SUM(amount * 1.2) AS amount");
   });
 
