@@ -658,11 +658,26 @@ export interface FieldImpactResult {
 }
 
 // 变更影响预览（what-if）——后端 lineage/schemas.py 的 ImpactPreviewResponse
+export interface ImpactAffectedEdge {
+  source: string;
+  target: string;
+  edge_type: string;
+  /** 加工/映射表达式（字段级边携带，用于边标注完整展示） */
+  expression?: string | null;
+  granularity?: string;
+}
+
 export interface ImpactPreview {
+  /** 规范化起点节点（带前缀，回显） */
+  node?: string | null;
+  /** 变更类型（回显） */
+  change_type?: string | null;
   affected_metrics: { metric_code: string; change_type: string }[];
   affected_tables: string[];
   affected_consumers: string[];
   risk_level: "low" | "medium" | "high" | "critical";
+  /** 影响子图边（起点指向受影响对象的血缘边/字段映射，供渲染受影响图谱） */
+  affected_edges?: ImpactAffectedEdge[];
 }
 
 // 血缘采集通道运行记录（后端 lineage/schemas.py 的 LineageIngestRunResponse）

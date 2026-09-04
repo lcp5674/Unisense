@@ -179,20 +179,24 @@ describe("LineageImpact", () => {
 
   it("点击「变更影响预览」调用 lineageImpactPreview 并展示风险摘要", async () => {
     mockedPreview.mockResolvedValue({
+      node: "metric:outp_e2e_fee_day",
+      change_type: "schema_drift",
       affected_metrics: [{ metric_code: "outp_e2e_avgfee_day", change_type: "schema_drift" }],
       affected_tables: ["dwd_sales_detail"],
       affected_consumers: ["看板A", "报表B"],
       risk_level: "high",
+      affected_edges: [],
     } as any);
     render(<LineageImpact metricCode="outp_e2e_fee_day" />);
     // 等首次 load 完成（loading=false，按钮可点）
     await waitFor(() => expect(mockedImpact).toHaveBeenCalled());
     fireEvent.click(screen.getByText("变更影响预览"));
     await waitFor(() => {
-      expect(mockedPreview).toHaveBeenCalledWith("outp_e2e_fee_day", "schema_drift");
+      expect(mockedPreview).toHaveBeenCalledWith("metric:outp_e2e_fee_day", "schema_drift");
       expect(screen.getByText("变更影响预览（what-if）")).toBeTruthy();
       expect(screen.getByText(/受影响指标 1/)).toBeTruthy();
       expect(screen.getByText(/风险等级 高/)).toBeTruthy();
+      expect(screen.getByText("outp_e2e_avgfee_day")).toBeTruthy();
     });
   });
 });

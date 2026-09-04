@@ -54,7 +54,9 @@ from app.services.lineage.schemas import (
     FieldImpactResponse,
     FieldLineageItem,
     HealthDimension,
+    ImpactAffectedEdge,
     ImpactPreviewResponse,
+    ImpactedMetric,
     LineageChannelResponse,
     LineageCoverageResponse,
     LineageEdgeDetailResponse,
@@ -102,7 +104,9 @@ _MAX_SCAN_FILE_BYTES = 5 * 1024 * 1024
 _CACHE_KEY_PREFIX = "lineage:impact:"
 
 #: 变更类型中视为破坏性/高风险的取值（what-if 风险分级用）。
-_RISKY_CHANGE_TYPES = frozenset({"BREAKING", "DROP", "DELETE", "REMOVE"})
+#: ``SCHEMA_DRIFT`` 为指标详情页「变更影响预览」固定使用的变更语义（schema 漂移
+#: 等价结构破坏），一并纳入破坏性升级。
+_RISKY_CHANGE_TYPES = frozenset({"BREAKING", "DROP", "DELETE", "REMOVE", "SCHEMA_DRIFT"})
 #: 增量采集分批提交大小（控制单事务规模，大批量导入时分批 commit）。
 _INGEST_COMMIT_BATCH = 500
 #: 运行详情快照中保留的边明细示例条数（上限）。
@@ -1833,47 +1837,253 @@ class LineageService(BaseService):
         edges = [e for e in edges if e["source"] in node_ids and e["target"] in node_ids]
         return {"nodes": nodes, "edges": edges[:limit]}
 
-    async def impact_preview(self, metric_code: str, change_type: str) -> ImpactPreviewResponse:
-        """变更影响预览（what-if）：估算变更影响面与风险等级。
+    async def impact_preview(self, node: str, change_type: str) -> ImpactPreviewResponse:
+        """变更影响预览（what-if）：按拟变更节点类型估算影响面与风险等级。
 
-        基于下游影响分析结果分类：``metric:`` 前缀计受影响指标，``table:`` 前缀
-        计受影响物理表，``CONSUMED_BY`` 边计消费方；risk_level 按影响面与变更
-        类型分级（critical >=20 / high >=10 或破坏性变更 / medium / low 无影响）。
+        相比旧版（仅支持指标编码起点，血缘查询页查表/字段时恒为 0），现按节点
+        类型路由，覆盖血缘查询/影响分析的主场景：
+        - ``metric:{code}``：下游 BFS——派生指标/落地表与下游使用表/消费方
+          （原口径保留）；
+        - ``table:{db.tbl}``：下游表链 BFS + 字段映射下游目标表补充 + 反查直接
+          依赖该表的指标（指标以 T 为源表 DERIVED_FROM / 指标读 T 字段
+          READS_COLUMN；兼容带库与裸表名两种登记）；
+        - ``field:{db.tbl}.{col}``：字段映射下游链路 + 反查读该列/所属表的指标；
+        - ``column:{db.tbl}.{col}``：指标血缘字段节点，反查读该列的指标；
+        - ``dimension:{code}``：反查使用该维度的指标（USES_DIMENSION）。
+
+        响应除受影响对象清单外携带影响子图边（``affected_edges``），供前端渲染
+        what-if 受影响图谱。无前缀裸输入按 metric/table/field 候选逐个尝试、取
+        首个有影响的类型（与影响分析读路径的多候选容错语义一致）。
 
         Args:
-            metric_code: 拟变更的指标编码。
+            node: 拟变更节点（带类型前缀；无前缀按候选尝试）。
             change_type: 变更类型（用于风险升级判定）。
 
         Returns:
-            ``ImpactPreviewResponse``，含 ``affected_metrics``（含 metric_code 与
-            change_type）、``affected_tables``（物理表）、``affected_consumers``、
-            ``risk_level``。
+            ``ImpactPreviewResponse``：受影响指标/物理表/消费方 + 风险等级 +
+            影响子图边（含回显 node/change_type）。
         """
-        params = LineageImpactParams(
-            node=f"metric:{metric_code}", direction="downstream", max_hops=5
+        node = (node or "").strip()
+        if not node:
+            raise ValidationError("预览节点不能为空", error_code="BAD_REQUEST")
+        if ":" not in node:
+            # 无前缀容错：与影响分析读路径一致，metric/table/field 候选逐个尝试，
+            # 取首个有影响的类型（旧调用传裸指标编码仍走 metric 分支）。
+            # 字段候选要求 表.列 形态，裸输入不含点时格式不适用——跳过不阻断。
+            for prefix in ("metric", "table", "field"):
+                try:
+                    sub = await self._impact_for_node(f"{prefix}:{node}", change_type)
+                except ValidationError:
+                    continue
+                if sub.affected_edges or sub.affected_metrics or sub.affected_tables or sub.affected_consumers:
+                    return sub
+            return await self._impact_for_node(f"metric:{node}", change_type)
+        return await self._impact_for_node(node, change_type)
+
+    async def _impact_for_node(self, node_id: str, change_type: str) -> ImpactPreviewResponse:
+        """按前缀把预览请求分派到指标/表/字段/维度影响口径。"""
+        prefix, rest = node_id.split(":", 1)
+        if prefix == "metric":
+            return await self._impact_metric(rest, change_type)
+        if prefix == "table":
+            return await self._impact_table(rest, change_type)
+        if prefix in ("field", "column"):
+            return await self._impact_field(prefix, rest, change_type)
+        if prefix == "dimension":
+            return await self._impact_dimension(rest, change_type)
+        raise ValidationError(
+            f"预览暂不支持 {prefix}: 类型节点（支持 metric/table/field/column/dimension）",
+            error_code="BAD_REQUEST",
         )
-        edges = await self.query_impact(params)
-        metrics: list[dict[str, str]] = []
-        tables: list[str] = []
+
+    async def _impact_metric(self, code: str, change_type: str) -> ImpactPreviewResponse:
+        """指标起点：下游 BFS 分类派生指标/落地表/消费方（原 what-if 口径）。"""
+        edges = await self.query_impact(
+            LineageImpactParams(node=f"metric:{code}", direction="downstream", max_hops=5)
+        )
+        metrics: list[ImpactedMetric] = []
+        tables: set[str] = set()
         consumers: set[str] = set()
-        seen_metrics: set[str] = set()
+        seen: set[str] = set()
         for e in edges:
             if e.edge_type == "CONSUMED_BY":
                 consumers.add(e.target_node)
             if e.target_node.startswith("metric:"):
                 mc = e.target_node[len("metric:") :]
-                if mc not in seen_metrics:
-                    seen_metrics.add(mc)
-                    metrics.append({"metric_code": mc, "change_type": change_type})
+                if mc not in seen:
+                    seen.add(mc)
+                    metrics.append(ImpactedMetric(metric_code=mc, change_type=change_type))
             elif e.target_node.startswith("table:"):
-                tables.append(e.target_node)
-        risk_level = self._risk_level(len(metrics) + len(tables) + len(consumers), change_type)
+                tables.add(e.target_node)
         return ImpactPreviewResponse(
+            node=f"metric:{code}",
+            change_type=change_type,
             affected_metrics=metrics,
             affected_tables=sorted(tables),
             affected_consumers=sorted(consumers),
-            risk_level=risk_level,
+            risk_level=self._risk_level(len(metrics) + len(tables) + len(consumers), change_type),
+            affected_edges=[self._edge_to_affected(e) for e in edges],
         )
+
+    async def _impact_table(self, table: str, change_type: str) -> ImpactPreviewResponse:
+        """表起点：下游表链 BFS + 字段映射目标表补充 + 反查直接依赖该表的指标。"""
+        node = f"table:{table}"
+        bfs = await self.query_impact(
+            LineageImpactParams(node=node, direction="downstream", max_hops=5)
+        )
+        names = self._table_candidates(table)
+        dep_rows = await self._repo.reverse_metric_edges(table_names=names)
+        fld_targets = await self._repo.field_mapping_target_tables(source_tables=names)
+
+        # 受影响物理表：BFS 下游边端点中的 table 节点（排除起点自身）+ 字段映射目标表
+        tables = {f"table:{t}" for t in fld_targets}
+        # 受影响指标：BFS 下游 metric + 反查直接依赖该表的指标
+        metrics: set[str] = set()
+        consumers: set[str] = set()
+        seen_metric: set[str] = set()
+        for e in bfs:
+            if e.edge_type == "CONSUMED_BY":
+                consumers.add(e.target_node)
+            for n in (e.source_node, e.target_node):
+                if n.startswith("table:") and n != node:
+                    tables.add(n)
+                elif n.startswith("metric:"):
+                    mc = n[len("metric:") :]
+                    if mc not in seen_metric:
+                        seen_metric.add(mc)
+                        metrics.add(mc)
+        for r in dep_rows:
+            if r.target_node.startswith("metric:"):
+                mc = r.target_node[len("metric:") :]
+                if mc not in seen_metric:
+                    seen_metric.add(mc)
+                    metrics.add(mc)
+        return ImpactPreviewResponse(
+            node=node,
+            change_type=change_type,
+            affected_metrics=[
+                ImpactedMetric(metric_code=mc, change_type=change_type) for mc in sorted(metrics)
+            ],
+            affected_tables=sorted(tables),
+            affected_consumers=sorted(consumers),
+            risk_level=self._risk_level(len(metrics) + len(tables) + len(consumers), change_type),
+            affected_edges=self._merge_affected_edges(bfs, dep_rows),
+        )
+
+    async def _impact_field(
+        self, prefix: str, rest: str, change_type: str
+    ) -> ImpactPreviewResponse:
+        """字段/列起点：字段映射下游链路（field:）+ 反查读该列/所属表的指标。"""
+        parts = rest.rsplit(".", 1)
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            raise ValidationError(
+                f"{prefix}: 节点须为 {prefix}:表.列", error_code="BAD_REQUEST"
+            )
+        table, col = parts
+        names = self._table_candidates(table)
+        affected: list[ImpactAffectedEdge] = []
+        tables: set[str] = set()
+        # a) field: 起点沿 lineage_field_mapping 展开下游字段链路（受影响表=目标表）
+        if prefix == "field":
+            fld = await self.field_impact(
+                node=f"field:{rest}", direction="downstream", max_hops=3, limit=300
+            )
+            for it in fld.items:
+                tables.add(f"table:{it.target_table}")
+                affected.append(
+                    ImpactAffectedEdge(
+                        source=it.source_node,
+                        target=it.target_node,
+                        edge_type="DERIVED_FROM",
+                        expression=it.expression,
+                        granularity="L2",
+                    )
+                )
+        # b) 反查读该列（column:{t}.{col} 精确）/ 以所属表为源表的指标
+        dep_rows = await self._repo.reverse_metric_edges(
+            table_names=names,
+            column_ids={f"column:{t}.{col}" for t in names},
+        )
+        metrics: set[str] = set()
+        for r in dep_rows:
+            if r.target_node.startswith("metric:"):
+                metrics.add(r.target_node[len("metric:") :])
+        seen = {(e.source, e.target, e.edge_type) for e in affected}
+        for r in dep_rows:
+            key = (r.source_node, r.target_node, r.edge_type)
+            if key not in seen:
+                seen.add(key)
+                affected.append(self._edge_to_affected(r))
+        return ImpactPreviewResponse(
+            node=f"{prefix}:{rest}",
+            change_type=change_type,
+            affected_metrics=[
+                ImpactedMetric(metric_code=mc, change_type=change_type) for mc in sorted(metrics)
+            ],
+            affected_tables=sorted(tables),
+            affected_consumers=[],
+            risk_level=self._risk_level(len(metrics) + len(tables), change_type),
+            affected_edges=affected,
+        )
+
+    async def _impact_dimension(self, code: str, change_type: str) -> ImpactPreviewResponse:
+        """维度起点：反查使用该维度的指标（USES_DIMENSION 边，维度为 target）。"""
+        dim_node = f"dimension:{code}"
+        dep_rows = await self._repo.reverse_metric_edges(dimension_ids={dim_node})
+        metrics = sorted(
+            {
+                r.source_node[len("metric:") :]
+                for r in dep_rows
+                if r.source_node.startswith("metric:")
+            }
+        )
+        return ImpactPreviewResponse(
+            node=dim_node,
+            change_type=change_type,
+            affected_metrics=[
+                ImpactedMetric(metric_code=mc, change_type=change_type) for mc in metrics
+            ],
+            affected_tables=[],
+            affected_consumers=[],
+            risk_level=self._risk_level(len(metrics), change_type),
+            affected_edges=[self._edge_to_affected(r) for r in dep_rows],
+        )
+
+    @staticmethod
+    def _table_candidates(table: str) -> set[str]:
+        """表名候选集合：原样 + 去库前缀裸名（血缘两侧登记习惯不同，兼容反查）。"""
+        names = {table}
+        if "." in table:
+            bare = table.rsplit(".", 1)[-1]
+            if bare:
+                names.add(bare)
+        return names
+
+    @staticmethod
+    def _edge_to_affected(e: Any) -> ImpactAffectedEdge:
+        """LineageEdgeResponse/LineageEdge ORM → 影响子图统一边结构。"""
+        return ImpactAffectedEdge(
+            source=e.source_node,
+            target=e.target_node,
+            edge_type=e.edge_type,
+            expression=getattr(e, "expression", None),
+            granularity=getattr(e, "granularity", "L1") or "L1",
+        )
+
+    def _merge_affected_edges(
+        self,
+        bfs: list[LineageEdgeResponse],
+        dep_rows: list[Any],
+    ) -> list[ImpactAffectedEdge]:
+        """合并 BFS 下游边与反查边为影响子图（(source,target,edge_type) 去重）。"""
+        out: list[ImpactAffectedEdge] = [self._edge_to_affected(e) for e in bfs]
+        seen = {(e.source, e.target, e.edge_type) for e in out}
+        for r in dep_rows:
+            key = (r.source_node, r.target_node, r.edge_type)
+            if key not in seen:
+                seen.add(key)
+                out.append(self._edge_to_affected(r))
+        return out
 
     async def propagate_pii(self, node: str, depth: int = 3) -> int:
         """PII 沿血缘传导：沿 ``DERIVED_FROM`` 下游遍历至多 ``depth`` 跳，标记边继承 PII。

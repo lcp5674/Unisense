@@ -1801,14 +1801,15 @@ export async function deleteLineageEdgesByNode(node: string): Promise<{ deleted:
   return request<{ deleted: number }>(`${API_BASE}/lineage/edges?${qs}`, { method: "DELETE" });
 }
 
-// 变更影响预览（what-if）
+// 变更影响预览（what-if）：按拟变更节点类型（metric:/table:/field:/column:/dimension: 带前缀）
+// 路由影响口径，返回受影响对象清单 + 风险等级 + 影响子图边（affected_edges 供图渲染）
 export async function lineageImpactPreview(
-  metricCode: string,
+  node: string,
   changeType: string,
 ): Promise<ImpactPreview> {
   return request<ImpactPreview>(`${API_BASE}/lineage/impact-preview`, {
     method: "POST",
-    body: JSON.stringify({ metric_code: metricCode, change_type: changeType }),
+    body: JSON.stringify({ node, change_type: changeType }),
   });
 }
 

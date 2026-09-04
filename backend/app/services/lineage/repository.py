@@ -53,6 +53,16 @@ def provenance_contains(column: Any, source: str) -> Any:
     )
 
 
+def like_literal(value: str) -> str:
+    """把字符串转义为 LIKE 模式字面量（``%``/``_``/``\\`` 前缀反斜杠）。
+
+    列前缀反查（如 ``column:{表名}.%``）里表名常含下划线（``wedw_mid.xxx_df``），
+    不转义会让 ``_`` 通配任意单字符导致误匹配同前缀表；转义后仅匹配字面。
+    与 SQLAlchemy ``Column.like(..., escape="\\\\")`` 配对使用。
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 #: 系统内置血缘采集通道：无论当前是否有边都展示，保证「采集通道」视图来源全景完整
 #: （SQL 解析=sqlglot / DP 同步=dp_sql，dp_csv 为历史 CSV 导入通道保留展示；
 #: 其余动态来源如 metric_definition 有边时自动出现）。
@@ -1247,6 +1257,110 @@ class LineageRepository:
             .limit(limit)
         )
         return list((await self._db.execute(stmt)).scalars().all())
+
+    async def reverse_metric_edges(
+        self,
+        *,
+        table_names: set[str] | None = None,
+        column_ids: set[str] | None = None,
+        dimension_ids: set[str] | None = None,
+    ) -> list[LineageEdge]:
+        """反查「直接依赖给定节点」的指标血缘边（what-if 预览的受影响指标反查）。
+
+        覆盖三种"改动 → 指标受伤"的直连形态（软删过滤，去重后按 id 升序）：
+        - ``DERIVED_FROM`` ``table:{T} → metric:{M}``：指标以 T 为源表（T 可带库名）；
+        - ``READS_COLUMN`` ``column:{T}.{c} → metric:{M}``：指标读 T 的列——
+          ``table_names`` 命中列前缀（``column:{T}.%``，LIKE 通配符转义防误配）；
+          ``column_ids`` 命中完整列节点（字段级起点精确到列）；
+        - ``USES_DIMENSION`` ``metric:{M} → dimension:{D}``：指标使用维度 D
+          （``dimension_ids`` 命中 target）。
+
+        Args:
+            table_names: 表名集合（可含 ``db.`` 前缀；服务层负责补裸表名候选）。
+            column_ids: 完整列节点集合（``column:{db}.{tbl}.{col}``，精确匹配 source）。
+            dimension_ids: 维度节点集合（``dimension:{code}``，匹配 USES_DIMENSION 的 target）。
+
+        Returns:
+            命中的 ``LineageEdge`` 列表（含目标指标在 target_node）。
+        """
+        conds: list[Any] = [LineageEdge.deleted_at.is_(None)]
+        or_parts: list[Any] = []
+        if table_names:
+            names = {t for t in table_names if t}
+            if names:
+                or_parts.append(
+                    and_(
+                        LineageEdge.edge_type == "DERIVED_FROM",
+                        LineageEdge.source_node.in_({f"table:{t}" for t in names}),
+                        LineageEdge.target_node.like("metric:%"),
+                    )
+                )
+                or_parts.append(
+                    and_(
+                        LineageEdge.edge_type == "READS_COLUMN",
+                        or_(
+                            *[
+                                LineageEdge.source_node.like(
+                                    f"column:{like_literal(t)}.%", escape="\\"
+                                )
+                                for t in names
+                            ]
+                        ),
+                        LineageEdge.target_node.like("metric:%"),
+                    )
+                )
+        if column_ids:
+            cols = {c for c in column_ids if c}
+            if cols:
+                or_parts.append(
+                    and_(
+                        LineageEdge.edge_type == "READS_COLUMN",
+                        LineageEdge.source_node.in_(cols),
+                        LineageEdge.target_node.like("metric:%"),
+                    )
+                )
+        if dimension_ids:
+            dims = {d for d in dimension_ids if d}
+            if dims:
+                or_parts.append(
+                    and_(
+                        LineageEdge.edge_type == "USES_DIMENSION",
+                        LineageEdge.target_node.in_(dims),
+                    )
+                )
+        if not or_parts:
+            return []
+        stmt = select(LineageEdge).where(*conds, or_(*or_parts)).order_by(LineageEdge.id)
+        return list((await self._db.execute(stmt)).scalars().all())
+
+    async def field_mapping_target_tables(self, *, source_tables: set[str]) -> set[str]:
+        """字段映射下游目标表集合：``source_table`` 命中给定表名的有效列映射去重。
+
+        供 what-if 表起点预览补充"字段加工去向"——表级血缘边（``lineage_edge``
+        table→table）未覆盖而字段映射（``lineage_field_mapping``）已建立的场景，
+        仍能算出受影响物理表。
+
+        Args:
+            source_tables: 源表名集合（服务层负责补裸表名候选）。
+
+        Returns:
+            目标表名集合（``db.tbl`` 形式，未加 ``table:`` 前缀）。
+        """
+        names = {t for t in (source_tables or set()) if t}
+        if not names:
+            return set()
+        rows = (
+            await self._db.execute(
+                select(LineageFieldMapping.target_table)
+                .where(
+                    LineageFieldMapping.deleted_at.is_(None),
+                    LineageFieldMapping.source_column.is_not(None),
+                    LineageFieldMapping.source_table.in_(names),
+                )
+                .distinct()
+            )
+        ).all()
+        return {r[0] for r in rows}
 
     async def resolve_node_meta(self, node_ids: set[str]) -> dict[str, dict[str, Any]]:
         """批量解析血缘节点的基础元数据（影响分析/边列表响应的 ``nodes`` 字段）。

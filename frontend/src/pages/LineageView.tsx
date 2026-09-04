@@ -108,6 +108,25 @@ const RISK_LEVEL_LABEL: Record<string, string> = {
   critical: "严重",
 };
 
+/** 风险等级 → 标签配色（what-if 预览 Alert 内 Tag）。 */
+const RISK_LEVEL_COLOR: Record<string, string> = {
+  low: "green",
+  medium: "orange",
+  high: "red",
+  critical: "volcano",
+};
+
+/** what-if 预览可选变更类型（用于风险分级：破坏性/删除直接升级风险）。 */
+const CHANGE_TYPE_OPTIONS = [
+  { value: "UPDATE", label: "常规修改" },
+  { value: "BREAKING", label: "破坏性变更" },
+  { value: "DROP", label: "下线删除" },
+] as const;
+
+const CHANGE_TYPE_LABEL: Record<string, string> = Object.fromEntries(
+  CHANGE_TYPE_OPTIONS.map((o) => [o.value, o.label]),
+);
+
 const EDGE_TYPE_LABEL: Record<string, string> = {
   DERIVED_FROM: "派生自",
   BASED_ON: "基于原子",
@@ -1289,7 +1308,10 @@ function ImpactTab() {
   // 字段级结果（粒度=field 时使用，含列级来源/去向/表达式）
   const [fieldItems, setFieldItems] = useState<FieldImpactItem[]>([]);
   const [fieldTotal, setFieldTotal] = useState(0);
-  const [risk, setRisk] = useState<string | null>(null);
+  // 变更影响预览（what-if）：变更类型 + 富结果（受影响对象清单 + 影响子图）
+  const [changeType, setChangeType] = useState<(typeof CHANGE_TYPE_OPTIONS)[number]["value"]>("UPDATE");
+  const [preview, setPreview] = useState<ImpactPreview | null>(null);
+  const [showPreviewGraph, setShowPreviewGraph] = useState(false);
   const [loading, setLoading] = useState(false);
   // 查询结果的血缘视图（图形化展示，替代纯文字边列表为主展示）
   const [graphData, setGraphData] = useState<{
@@ -1399,25 +1421,32 @@ function ImpactTab() {
   }
 
   async function previewImpact() {
-    // Select 选择值带 metric: 前缀，预览接口期望裸指标编码，去前缀规范化
-    const code = node.trim().replace(/^metric:/, "");
-    if (!code) {
-      message.warning("请输入指标编码");
+    const raw = node.trim();
+    if (!raw) {
+      message.warning("请先在节点框选择或输入拟变更的表 / 指标 / 字段");
       return;
     }
+    // 节点带前缀原样传给后端（metric:/table:/field:/column:/dimension: 按类型路由）；
+    // 裸输入（手动输入非目录表名）按表节点兜底——血缘查询主场景查表。
+    const target = raw.includes(":") ? raw : `table:${raw}`;
     setLoading(true);
     try {
-      const p = await lineageImpactPreview(code, "schema_drift");
-      setRisk(
-        `受影响指标 ${p.affected_metrics.length} · 物理表 ${p.affected_tables.length} · 消费方 ${p.affected_consumers.length} · 风险等级 ${RISK_LEVEL_LABEL[p.risk_level] ?? p.risk_level}`,
-      );
-      track("lineage_preview", node.trim(), "node");
+      const p = await lineageImpactPreview(target, changeType);
+      setPreview(p);
+      setShowPreviewGraph(false);
+      track("lineage_preview", target, "node", { change_type: changeType });
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "预览失败");
     } finally {
       setLoading(false);
     }
   }
+
+  // 预览影响子图数据：受影响边（表/指标血缘边 + 字段映射边）→ 血缘视图图数据
+  const previewGraph = useMemo(
+    () => (preview ? previewEdgesToGraph(preview.affected_edges ?? []) : null),
+    [preview],
+  );
 
   /** 表/视图详情侧边栏：按 entity_id 拉取目录详情（与血缘图谱交互一致）。 */
   async function openTableDetail(entityId: number) {
@@ -1494,6 +1523,8 @@ function ImpactTab() {
             setGraphData(null);
             setTotal(0);
             setFieldTotal(0);
+            setPreview(null);
+            setShowPreviewGraph(false);
             if (!node) return;
           }}
           options={[
@@ -1551,19 +1582,110 @@ function ImpactTab() {
         <Button type="primary" onClick={loadImpact} loading={loading}>
           查询
         </Button>
+        <Select
+          value={changeType}
+          onChange={(v) => setChangeType(v as (typeof CHANGE_TYPE_OPTIONS)[number]["value"])}
+          style={{ width: 120 }}
+          options={[...CHANGE_TYPE_OPTIONS]}
+          title="拟变更类型（破坏性/删除会升级风险等级）"
+        />
         <Button onClick={previewImpact} loading={loading}>
           变更影响预览
         </Button>
       </Space>
 
-      {risk && (
+      {preview && (
         <Alert
-          type="info"
+          type={preview.risk_level === "low" ? "info" : preview.risk_level === "medium" ? "warning" : "error"}
           showIcon
+          closable
+          onClose={() => setPreview(null)}
           style={{ marginBottom: 12 }}
-          message="变更影响预览（what-if）"
-          description={risk}
+          message={
+            <Space size={8}>
+              <span>变更影响预览（what-if）</span>
+              <Tag color="geekblue">{CHANGE_TYPE_LABEL[changeType] ?? changeType}</Tag>
+              <span className="mono" style={{ fontSize: 12 }}>
+                {preview.node ?? node}
+              </span>
+            </Space>
+          }
+          description={
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <Space size={18} wrap>
+                <span>
+                  受影响指标 <b>{preview.affected_metrics.length}</b>
+                </span>
+                <span>
+                  物理表 <b>{preview.affected_tables.length}</b>
+                </span>
+                <span>
+                  消费方 <b>{preview.affected_consumers.length}</b>
+                </span>
+                <Tag color={RISK_LEVEL_COLOR[preview.risk_level] ?? "default"}>
+                  风险等级 {RISK_LEVEL_LABEL[preview.risk_level] ?? preview.risk_level}
+                </Tag>
+              </Space>
+              {(preview.affected_metrics.length > 0 ||
+                preview.affected_tables.length > 0 ||
+                preview.affected_consumers.length > 0) && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                  {preview.affected_metrics.slice(0, 12).map((m) => (
+                    <Tag key={m.metric_code} color="purple" title="受影响指标">
+                      {m.metric_code}
+                    </Tag>
+                  ))}
+                  {preview.affected_metrics.length > 12 && (
+                    <Tag>…等 {preview.affected_metrics.length} 个指标</Tag>
+                  )}
+                  {preview.affected_tables.slice(0, 16).map((t) => (
+                    <Tag key={t} color="blue" title="受影响物理表">
+                      {t.replace(/^table:/, "")}
+                    </Tag>
+                  ))}
+                  {preview.affected_tables.length > 16 && (
+                    <Tag>…等 {preview.affected_tables.length} 张表</Tag>
+                  )}
+                  {preview.affected_consumers.slice(0, 8).map((c) => (
+                    <Tag key={c} color="green" title="受影响消费方">
+                      {c.replace(/^consumer:/, "")}
+                    </Tag>
+                  ))}
+                  {preview.affected_consumers.length > 8 && (
+                    <Tag>…等 {preview.affected_consumers.length} 个消费方</Tag>
+                  )}
+                </div>
+              )}
+              {preview.affected_edges && preview.affected_edges.length > 0 && (
+                <Button
+                  type="link"
+                  size="small"
+                  style={{ padding: 0, alignSelf: "flex-start" }}
+                  onClick={() => setShowPreviewGraph((v) => !v)}
+                >
+                  {showPreviewGraph ? "收起" : "展开"}受影响子图（{preview.affected_edges.length} 条边）
+                </Button>
+              )}
+            </div>
+          }
         />
+      )}
+
+      {preview && showPreviewGraph && previewGraph && previewGraph.nodes.length > 0 && (
+        <Card
+          size="small"
+          title={`受影响子图 · ${preview.node ?? node} 变更后受影响的血缘`}
+          style={{ marginBottom: 16 }}
+        >
+          <AssetGraph
+            nodes={previewGraph.nodes}
+            edges={previewGraph.edges}
+            height={360}
+            onNodeClick={handleNodeClick}
+            lanes={false}
+            dimOnHover={false}
+          />
+        </Card>
       )}
 
       {graphData && graphData.nodes.length > 0 && (

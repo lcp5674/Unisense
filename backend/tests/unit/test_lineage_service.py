@@ -86,6 +86,9 @@ class FakeRepo:
         self.export_edges: list[Any] = []
         # DDL 变更事件化：node -> 受影响资产 Owner 集合（affected_asset_owners 假实现）
         self.affected_owners: dict[str, set[str]] = {}
+        # what-if 预览反查假数据
+        self.reverse_edges: list[Any] = []
+        self.mapping_target_tables: set[str] = set()
 
     async def upsert_edge(self, **kwargs: object) -> SimpleNamespace:
         self.upsert_calls.append(kwargs)
@@ -432,6 +435,49 @@ class FakeRepo:
             if len(rows) >= limit:
                 break
         return rows
+
+    async def reverse_metric_edges(
+        self,
+        *,
+        table_names: set[str] | None = None,
+        column_ids: set[str] | None = None,
+        dimension_ids: set[str] | None = None,
+    ) -> list[Any]:
+        """what-if 反查假实现：在 self.reverse_edges 上按 OR 语义过滤（对齐真实 SQL）。"""
+        rows = list(self.reverse_edges)
+        matched: list[Any] = []
+        seen: set[int] = set()
+        if dimension_ids:
+            for e in rows:
+                if getattr(e, "target_node", None) in dimension_ids and id(e) not in seen:
+                    seen.add(id(e))
+                    matched.append(e)
+        if column_ids:
+            for e in rows:
+                if (
+                    getattr(e, "edge_type", None) == "READS_COLUMN"
+                    and getattr(e, "source_node", None) in column_ids
+                    and id(e) not in seen
+                ):
+                    seen.add(id(e))
+                    matched.append(e)
+        if table_names:
+            table_nodes = {f"table:{t}" for t in table_names}
+            for e in rows:
+                src = getattr(e, "source_node", "") or ""
+                et = getattr(e, "edge_type", None)
+                hit = (et == "DERIVED_FROM" and src in table_nodes) or (
+                    et == "READS_COLUMN"
+                    and any(src.startswith(f"column:{t}.") for t in table_names)
+                )
+                if hit and id(e) not in seen:
+                    seen.add(id(e))
+                    matched.append(e)
+        return matched
+
+    async def field_mapping_target_tables(self, *, source_tables: set[str]) -> set[str]:
+        """字段映射下游目标表假实现：返回 self.mapping_target_tables。"""
+        return set(self.mapping_target_tables)
 
     async def resolve_node_meta(self, node_ids: set[str]) -> dict[str, dict[str, Any]]:
         """节点元数据假实现：类型/标签按前缀推导，无目录实体（供 node_meta 测试）。"""
@@ -910,6 +956,83 @@ async def test_impact_preview_breaking_change_escalates_risk() -> None:
     svc._redis = None
     result = await svc.impact_preview("gm", "BREAKING")
     assert result.risk_level == "high"
+
+
+async def test_impact_preview_table_start_collects_downstream_tables_and_dep_metrics() -> None:
+    """表起点：下游表链 + 字段映射目标表 + 反查依赖指标均纳入，子图边完整。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.impact = [
+        make_edge(1, "table:dw.ods1", "table:dw.dwd1"),
+        make_edge(3, "table:dw.ods1", "metric:m_rpt"),
+    ]
+    # 反查：裸表名源表 DERIVED_FROM + 列前缀 READS_COLUMN
+    repo.reverse_edges = [
+        make_edge(11, "table:ods1", "metric:m_src", edge_type="DERIVED_FROM"),
+        make_edge(12, "column:ods1.amt", "metric:m_col", edge_type="READS_COLUMN"),
+    ]
+    # 字段映射补充：表级边未覆盖的加工去向表
+    repo.mapping_target_tables = {"dw.extra_t"}
+    svc._repo = repo
+    svc._graph = None
+    svc._redis = None
+    result = await svc.impact_preview("table:dw.ods1", "UPDATE")
+    # 受影响物理表：BFS 下游表（排除起点自身）+ 字段映射目标表
+    assert {"table:dw.dwd1", "table:dw.extra_t"} <= set(result.affected_tables)
+    assert "table:dw.ods1" not in result.affected_tables
+    # 受影响指标：BFS 链 metric + 反查（源表 DERIVED_FROM / 字段 READS_COLUMN）
+    codes = {m.metric_code for m in result.affected_metrics}
+    assert {"m_rpt", "m_src", "m_col"} <= codes
+    # 消费方：表起点沿多跳 BFS 到 metric 后经 CONSUMED_BY 计入（单跳 FakeRepo 不含；
+    # consumer 收集语义已由 metric 起点用例覆盖），此处不断言。
+    # 影响子图：BFS 边 + 反查边（反查 source 为裸表名/列节点，仍完整呈现）
+    keys = {(e.source, e.target, e.edge_type) for e in result.affected_edges}
+    assert ("table:dw.ods1", "table:dw.dwd1", "DERIVED_FROM") in keys
+    assert ("table:ods1", "metric:m_src", "DERIVED_FROM") in keys
+    assert ("column:ods1.amt", "metric:m_col", "READS_COLUMN") in keys
+    assert result.node == "table:dw.ods1"
+    assert result.change_type == "UPDATE"
+    assert result.risk_level != "low"
+
+
+async def test_impact_preview_field_start_field_mapping_downstream_and_metric() -> None:
+    """字段起点：lineage_field_mapping 下游链路计物理表，READS_COLUMN 反查计指标。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.field_rows = [
+        _fm(1, "dw.src", "amt", "dw.dst", "total"),
+        _fm(2, "dw.dst", "total", "dw.rpt", "amount"),
+    ]
+    repo.reverse_edges = [
+        make_edge(11, "column:src.amt", "metric:m_col", edge_type="READS_COLUMN")
+    ]
+    svc._repo = repo
+    svc._graph = None
+    svc._redis = None
+    result = await svc.impact_preview("field:dw.src.amt", "UPDATE")
+    assert {"table:dw.dst", "table:dw.rpt"} <= set(result.affected_tables)
+    assert {m.metric_code for m in result.affected_metrics} == {"m_col"}
+    # 子图：2 条字段映射（携带 expression 语义 L2）+ 1 条反查边
+    assert len(result.affected_edges) == 3
+    assert result.affected_edges[0].granularity == "L2"
+    assert result.node == "field:dw.src.amt"
+
+
+async def test_impact_preview_dimension_start_reverse_uses_dimension() -> None:
+    """维度起点：USES_DIMENSION 边反查（metric→dimension，维度为 target）。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.reverse_edges = [
+        make_edge(1, "metric:m1", "dimension:dept", edge_type="USES_DIMENSION"),
+        make_edge(2, "metric:m2", "dimension:region", edge_type="USES_DIMENSION"),
+    ]
+    svc._repo = repo
+    svc._graph = None
+    svc._redis = None
+    result = await svc.impact_preview("dimension:dept", "UPDATE")
+    assert [m.metric_code for m in result.affected_metrics] == ["m1"]
+    assert result.risk_level == "medium"
+    assert len(result.affected_edges) == 1
 
 
 async def test_propagate_pii_marks_derived_descendants() -> None:

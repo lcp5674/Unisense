@@ -352,15 +352,21 @@ async def impact_preview(
     user: CurrentUser,
     trace_id: Annotated[str, Depends(get_trace_id)],
 ) -> ApiResponse[Any]:
-    """变更影响预览 what-if：估算影响面（指标/物理表/消费方）与风险等级。"""
+    """变更影响预览 what-if：估算影响面（指标/物理表/消费方）与风险等级。
+
+    按拟变更节点类型路由（metric:/table:/field:/column:/dimension:），前端血缘
+    查询传当前所选节点（带前缀），指标详情页经 ``metric_code`` 兼容字段调用。
+    """
     svc = _svc(db)
-    result = await svc.impact_preview(body.metric_code, body.change_type)
+    # node（带前缀）优先；metric_code 为旧调用兼容（等价 node=metric:{code}）
+    target = body.node or (f"metric:{body.metric_code}" if body.metric_code else None)
+    result = await svc.impact_preview(target, body.change_type)
     await write_audit(
         db,
         actor_id=user.id,
         action="lineage.preview_impact",
         entity_type="lineage",
-        entity_id=f"metric:{body.metric_code}",
+        entity_id=result.node or target,
         detail=result.model_dump(),
         ip=client_ip(request),
         trace_id=trace_id,

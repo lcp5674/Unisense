@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, act, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
-import { LineageView, buildSubgraph, resolveRootId, parseResultToGraphData, upstreamDepsToGraphData, edgesToGraphData, buildFieldGraphData, decorateDrillGraphNodes, decorateDrillGraphEdges } from "../pages/LineageView";
+import { LineageView, buildSubgraph, resolveRootId, parseResultToGraphData, upstreamDepsToGraphData, edgesToGraphData, buildFieldGraphData, decorateDrillGraphNodes, decorateDrillGraphEdges, previewEdgesToGraph } from "../pages/LineageView";
 import { adaptiveBaseRadius } from "../components/assetmap/AssetGraph";
 import * as api from "../api";
 import type { LineageGraphData } from "../types";
@@ -1530,6 +1530,46 @@ describe("buildFieldGraphData 字段级血缘视图数据", () => {
     const src = g.nodes.find((n) => n.id === "field:wedw_dw.sales_detail.gmv");
     expect(src?.domain).toBe("sales");
     expect(src?.pii).toBe(true);
+  });
+});
+
+describe("previewEdgesToGraph 变更影响预览子图数据", () => {
+  it("节点按前缀推断类型（column: 视作 field），label 去前缀", () => {
+    const g = previewEdgesToGraph([
+      { source: "table:ods.orders", target: "table:dwd.order_sum", edge_type: "DERIVED_FROM" },
+      { source: "metric:gm", target: "consumer:报表A", edge_type: "CONSUMED_BY" },
+      { source: "column:dwd.order_sum.total", target: "metric:gm", edge_type: "READS_COLUMN" },
+    ]);
+    const table = g.nodes.find((n) => n.id === "table:ods.orders");
+    expect(table?.type).toBe("table");
+    expect(table?.label).toBe("ods.orders");
+    const col = g.nodes.find((n) => n.id === "column:dwd.order_sum.total");
+    expect(col?.type).toBe("field"); // column: 归字段，复用折行展示
+    const consumer = g.nodes.find((n) => n.id === "consumer:报表A");
+    expect(consumer?.type).toBe("other");
+    expect(g.nodes).toHaveLength(5); // 2 表 + 指标 + 消费方 + 列节点（metric 与表跨边去重）
+    expect(g.edges).toHaveLength(3);
+  });
+
+  it("字段映射边带 edgeLabel（加工方式：表达式完整原文）与 fullExpr", () => {
+    const g = previewEdgesToGraph([
+      {
+        source: "field:wedw_dw.sales_detail.gmv",
+        target: "field:wedw_dw.order_sum.total_amount",
+        edge_type: "DERIVED_FROM",
+        expression: "COALESCE(SUM(gmv),0)",
+        granularity: "L2",
+      },
+    ]);
+    expect(g.edges[0]!.edgeLabel).toBe("空值兜底：COALESCE(SUM(gmv),0)");
+    expect(g.edges[0]!.fullExpr).toBe("COALESCE(SUM(gmv),0)");
+  });
+
+  it("无表达式边不设 edgeLabel（表级血缘边零标注）", () => {
+    const g = previewEdgesToGraph([
+      { source: "table:a", target: "table:b", edge_type: "DERIVED_FROM" },
+    ]);
+    expect(g.edges[0]!.edgeLabel).toBeUndefined();
   });
 });
 

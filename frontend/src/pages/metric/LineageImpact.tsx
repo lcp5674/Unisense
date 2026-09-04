@@ -29,6 +29,13 @@ const RISK_LEVEL_LABEL: Record<string, string> = {
   critical: "严重",
 };
 
+const RISK_LEVEL_COLOR: Record<string, string> = {
+  low: "green",
+  medium: "orange",
+  high: "red",
+  critical: "volcano",
+};
+
 // 跳数选项：与后端 /lineage/impact max_hops(ge=1, le=10) 对齐
 const HOPS_OPTIONS = [1, 2, 3, 5, 8, 10].map((v) => ({ value: v, label: `${v} 跳` }));
 
@@ -79,7 +86,7 @@ export function LineageImpact({ metricCode }: { metricCode: string }) {
   } | null>(null);
   const [direction, setDirection] = useState<"upstream" | "downstream" | "both">("downstream");
   const [maxHops, setMaxHops] = useState(5);
-  const [risk, setRisk] = useState<string | null>(null);
+  const [preview, setPreview] = useState<ImpactPreview | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -109,10 +116,8 @@ export function LineageImpact({ metricCode }: { metricCode: string }) {
   async function previewImpact() {
     setLoading(true);
     try {
-      const p: ImpactPreview = await lineageImpactPreview(metricCode, "schema_drift");
-      setRisk(
-        `受影响指标 ${p.affected_metrics.length} · 物理表 ${p.affected_tables.length} · 消费方 ${p.affected_consumers.length} · 风险等级 ${RISK_LEVEL_LABEL[p.risk_level] ?? p.risk_level}`,
-      );
+      const p: ImpactPreview = await lineageImpactPreview(`metric:${metricCode}`, "schema_drift");
+      setPreview(p);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "变更影响预览失败");
     } finally {
@@ -201,13 +206,53 @@ export function LineageImpact({ metricCode }: { metricCode: string }) {
         </Button>
       </div>
 
-      {risk && (
+      {preview && (
         <Alert
-          type="info"
+          type={preview.risk_level === "low" ? "info" : preview.risk_level === "medium" ? "warning" : "error"}
           showIcon
+          closable
+          onClose={() => setPreview(null)}
           style={{ marginBottom: 12 }}
           message="变更影响预览（what-if）"
-          description={risk}
+          description={
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <Space size={18} wrap>
+                <span>受影响指标 {preview.affected_metrics.length}</span>
+                <span>物理表 {preview.affected_tables.length}</span>
+                <span>消费方 {preview.affected_consumers.length}</span>
+                <Tag color={RISK_LEVEL_COLOR[preview.risk_level] ?? "default"}>
+                  风险等级 {RISK_LEVEL_LABEL[preview.risk_level] ?? preview.risk_level}
+                </Tag>
+              </Space>
+              {(preview.affected_metrics.length > 0 ||
+                preview.affected_tables.length > 0 ||
+                preview.affected_consumers.length > 0) && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                  {preview.affected_metrics.slice(0, 12).map((m) => (
+                    <Tag key={m.metric_code} color="purple" title="受影响指标">
+                      {m.metric_code}
+                    </Tag>
+                  ))}
+                  {preview.affected_metrics.length > 12 && (
+                    <Tag>…等 {preview.affected_metrics.length} 个指标</Tag>
+                  )}
+                  {preview.affected_tables.slice(0, 16).map((t) => (
+                    <Tag key={t} color="blue" title="受影响物理表">
+                      {t.replace(/^table:/, "")}
+                    </Tag>
+                  ))}
+                  {preview.affected_tables.length > 16 && (
+                    <Tag>…等 {preview.affected_tables.length} 张表</Tag>
+                  )}
+                  {preview.affected_consumers.slice(0, 8).map((c) => (
+                    <Tag key={c} color="green" title="受影响消费方">
+                      {c.replace(/^consumer:/, "")}
+                    </Tag>
+                  ))}
+                </div>
+              )}
+            </div>
+          }
         />
       )}
 

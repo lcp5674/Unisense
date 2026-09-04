@@ -134,17 +134,38 @@ class ImpactedMetric(BaseModel):
     change_type: str = Field(description="影响路径上的变更类型，如 UPDATED/DELETED")
 
 
+class ImpactAffectedEdge(BaseModel):
+    """变更影响预览（what-if）影响子图的一条边。
+
+    统一承载两类来源：``lineage_edge`` 血缘边（表/指标/消费方/维度）与
+    ``lineage_field_mapping`` 字段映射行（字段→字段，携带加工表达式）。前端据此
+    渲染"受影响子图"，字段映射行以 ``field:`` 节点对呈现。
+    """
+
+    source: str = Field(description="上游节点（带前缀，如 table:/metric:/field:/column:）")
+    target: str = Field(description="下游节点（同上）")
+    edge_type: str = Field(default="DERIVED_FROM", description="边类型")
+    expression: str | None = Field(default=None, description="加工/映射表达式（字段级边携带）")
+    granularity: str = Field(default="L1", description="血缘粒度（字段级为 L2）")
+
+
 class ImpactPreviewResponse(BaseModel):
     """变更影响预览（what-if）响应。"""
 
     model_config = ConfigDict(from_attributes=True)
 
+    node: str | None = Field(default=None, description="规范化起点节点（带前缀，回显）")
+    change_type: str | None = Field(default=None, description="变更类型（回显，用于风险分级）")
     affected_metrics: list[ImpactedMetric] = Field(
         description="受影响的指标列表（含 metric_code 与影响类型）"
     )
-    affected_tables: list[str] = Field(description="受影响的物理表列表（table: 前缀）")
+    affected_tables: list[str] = Field(description="受影响的物理表节点列表（table: 前缀）")
     affected_consumers: list[str] = Field(description="消费方节点列表（CONSUMED_BY 边终点）")
     risk_level: str = Field(description="风险等级：critical/high/medium/low")
+    affected_edges: list[ImpactAffectedEdge] = Field(
+        default_factory=list,
+        description="影响子图边（起点指向受影响对象的血缘边；字段级含映射表达式）",
+    )
 
 
 class LineageNodeInfo(BaseModel):
@@ -230,13 +251,31 @@ class LineageEdgeListParams(BaseModel):
 
 
 class ImpactPreviewRequest(BaseModel):
-    """变更影响预览（what-if）请求。"""
+    """变更影响预览（what-if）请求。
 
-    metric_code: str = Field(..., min_length=1, max_length=512, description="拟变更的指标编码")
+    ``node``（推荐，带类型前缀）与 ``metric_code``（兼容旧调用，等价于
+    ``node=f"metric:{code}"``）二选一；两者均提供时以 ``node`` 为准。
+    支持起点类型：``metric:{code}``（指标）/ ``table:{db.tbl}``（物理表）/
+    ``field:{db.tbl}.{col}``（字段级血缘字段）/ ``column:{db.tbl}.{col}``
+    （指标血缘字段）/ ``dimension:{code}``（维度）。
+    """
+
+    node: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=512,
+        description="拟变更节点（带类型前缀，按前缀路由影响口径）",
+    )
+    metric_code: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=512,
+        description="[兼容] 拟变更指标编码（等价于 node=metric:{code}）",
+    )
     change_type: str = Field(
         default="UPDATE",
         max_length=32,
-        description="变更类型，如 UPDATE/BREAKING/DROP/ADD，用于风险分级",
+        description="变更类型：UPDATE/BREAKING/DROP/ADD/SCHEMA_DRIFT，用于风险分级",
     )
 
 
