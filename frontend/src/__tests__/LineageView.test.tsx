@@ -1451,15 +1451,15 @@ describe("buildFieldGraphData 字段级血缘视图数据", () => {
   it("边带加工标注：edgeLabel=加工方式:表达式（≤60 完整、超 60 截断），fullExpr=完整表达式（hover 可查）", () => {
     // COALESCE(SUM(gmv),0) ≤60 不截断 → edgeLabel 含完整表达式；再测一条超 60 截断
     const g = buildFieldGraphData([item()]);
-    const e = g.edges[0];
+    const e = g.edges[0]!;
     expect(e.edgeLabel).toBe("空值兜底：COALESCE(SUM(gmv),0)"); // exprKind(COALESCE)=空值兜底
     expect(e.fullExpr).toBe("COALESCE(SUM(gmv),0)");
     const longExpr =
       "CASE WHEN status='paid' AND source='app' THEN amount*0.9 ELSE amount*0.8 END";
     const g2 = buildFieldGraphData([item({ id: 9, expression: longExpr })]);
-    expect(g2.edges[0].edgeLabel.startsWith("条件分支：CASE WHEN status='paid'")).toBe(true);
-    expect(g2.edges[0].edgeLabel.endsWith("…")).toBe(true);
-    expect(g2.edges[0].fullExpr).toBe(longExpr);
+    expect(g2.edges[0]!.edgeLabel!.startsWith("条件分支：CASE WHEN status='paid'")).toBe(true);
+    expect(g2.edges[0]!.edgeLabel!.endsWith("…")).toBe(true);
+    expect(g2.edges[0]!.fullExpr).toBe(longExpr);
   });
 
   it("直取边仅标「直取」、无 fullExpr；星号列节点补 *", () => {
