@@ -2187,6 +2187,62 @@ describe("MetricCreate 指标类型级联（三类指标配置差异化，PRD 4.
       expect(screen.getByText("① 选择业务域")).toBeTruthy();
     });
   });
+
+  it("原子模式选源表不被推断翻成派生 + 用户已填内容保留（2026-09 反馈：选源表跳派生/返回无记忆）", async () => {
+    // 域默认把类型预填为派生（生产 outpatient/medical_fee 域默认常如此），
+    // 用户在 Step1 显式切回「原子指标」——userTypeChosenRef 随之置位。
+    mockedDomainDefaults.mockResolvedValue({ type: "derived" } as never);
+    // 推断返回派生建议（后端 _infer_type 对「源表+度量列」恒推 derived）
+    mockedSuggest.mockResolvedValue({
+      metric_code_suggestion: "sales_order_gmv_day",
+      fields: {
+        source_table: { value: "dwd.sales_detail", source: "sql_parse", confidence: 0.9, reason: "" },
+        measure_column: { value: "gmv", source: "sql_parse", confidence: 0.9, reason: "" },
+        name: { value: "订单销售额（推断覆盖名）", source: "sql_parse", confidence: 0.8 },
+        type: { value: "derived", source: "sql_parse", confidence: 0.85 },
+      },
+    } as never);
+    renderPage();
+    await screen.findByText("注册指标（草稿）");
+    await pickDomain();
+    await goToStep(1);
+    // 域默认派生预填已生效
+    await waitFor(() =>
+      expect(document.querySelector(".ant-segmented-item-selected")?.textContent).toContain("派生指标")
+    );
+    // 用户显式切回「原子指标」+ 手输名称（记忆保护字段）
+    fireEvent.click(screen.getByText("原子指标"));
+    await waitFor(() =>
+      expect(document.querySelector(".ant-segmented-item-selected")?.textContent).toContain("原子指标")
+    );
+    fireEvent.change(document.querySelector('input[id="name"]') as HTMLInputElement, {
+      target: { value: "我的原子指标" },
+    });
+    await goToStep(2);
+    // 原子来源卡：选源表（兼容旧式来源，可选）
+    fireEvent.mouseDown(document.querySelector('input[id="source_table"]') as HTMLInputElement);
+    await waitFor(() => expect(screen.getAllByText("dwd.sales_detail").length).toBeGreaterThan(0));
+    fireEvent.click(screen.getAllByText("dwd.sales_detail")[0]);
+    // 类型保护：推断 type=derived 不覆盖用户显式选择的原子——④ 原子来源卡仍在
+    await waitFor(() => {
+      expect(mockedSuggest).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("④ 原子来源（逻辑度量 + 基础统计粒度）")).toBeTruthy();
+    });
+    expect(screen.queryByText("④ 依赖指标（派生选填）")).toBeNull();
+    // 记忆保护：返回 Step1 名称仍是用户手输值（推断覆盖名未生效、跨步骤不丢失）
+    await goToStep(1);
+    expect((document.querySelector('input[id="name"]') as HTMLInputElement).value).toBe("我的原子指标");
+    // 返回 Step2：所选源表保留在原子来源卡（未因推断/切步丢失）
+    await goToStep(2);
+    await waitFor(() => {
+      const srcItem = document.querySelector(
+        '.ant-select-selection-item[title="dwd.sales_detail"]'
+      ) as HTMLElement | null;
+      expect(srcItem).toBeTruthy();
+    });
+  });
 });
 
 describe("MetricCreate 三层口径与分角色双字段（业务/伪代码/数仓SQL口径）", () => {

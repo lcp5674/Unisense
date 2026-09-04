@@ -16,15 +16,15 @@ class TestValidateCodeFormat:
         assert ok is True
         assert err is None
 
-    def test_invalid_2segment_code_fails(self) -> None:
-        ok, err = ConflictPrechecker.validate_code_format("a_b")
-        assert ok is False
-        assert err is not None
-        assert "4" in err or "段" in err
+    def test_relaxed_short_code_passes(self) -> None:
+        # 2026-09 放宽：不再强制 4 段式——短编码（1~3 段）合法即可注册
+        for code in ("sales", "a_b", "fin_gmv"):
+            ok, err = ConflictPrechecker.validate_code_format(code)
+            assert ok is True, f"{code}: {err}"
+            assert err is None
 
-    def test_domain_with_underscore_passes(self) -> None:
-        # 域编码本身可含下划线（如 online_consultation）：字面 >4 段但语义 4 段，
-        # 后 3 段无下划线时合并前面为域段 → 放行
+    def test_relaxed_long_code_passes(self) -> None:
+        # 域编码本身可含下划线：任意段数均放行（通用标识符校验）
         ok, err = ConflictPrechecker.validate_code_format(
             "online_consultation_wy_imageconsultcntday_day"
         )
@@ -34,19 +34,29 @@ class TestValidateCodeFormat:
         assert ok is True
         assert err is None
 
-    def test_multi_segment_bad_tail_fails(self) -> None:
-        # 多段字面但后 3 段（业务对象/度量/周期）含大写或数字开头 → 拒
+    def test_invalid_chars_fail(self) -> None:
+        # 通用标识符校验：大写/数字开头/非法字符均拒
         ok, err = ConflictPrechecker.validate_code_format("a_b_c_d_E")
         assert ok is False
-        assert "后 3 段" in err
-        ok, err = ConflictPrechecker.validate_code_format("a_b_c_d_1e")
+        ok, err = ConflictPrechecker.validate_code_format("2sales_gmv_day")
         assert ok is False
-        assert "后 3 段" in err
-
-    def test_single_segment_fails(self) -> None:
-        ok, err = ConflictPrechecker.validate_code_format("sales")
+        ok, err = ConflictPrechecker.validate_code_format("sales_GMV_amount_day")
+        assert ok is False
+        ok, err = ConflictPrechecker.validate_code_format("sales-gmv-day")
         assert ok is False
         assert err is not None
+
+    def test_underscore_hygiene_fails(self) -> None:
+        # 下划线卫生：不能开头/结尾/连续
+        for code in ("_sales", "sales_", "sales__gmv"):
+            ok, err = ConflictPrechecker.validate_code_format(code)
+            assert ok is False, f"{code} 应拒绝"
+            assert err is not None
+
+    def test_single_segment_passes(self) -> None:
+        ok, err = ConflictPrechecker.validate_code_format("sales")
+        assert ok is True
+        assert err is None
 
     def test_reserved_word_test_rejected(self) -> None:
         ok, err = ConflictPrechecker.validate_code_format("test_gmv_amount_day")
@@ -83,16 +93,6 @@ class TestValidateCodeFormat:
 
     def test_starts_with_number_segment_fails(self) -> None:
         ok, err = ConflictPrechecker.validate_code_format("2sales_gmv_day")
-        assert ok is False
-
-    def test_four_segments_with_invalid_char_rejected(self) -> None:
-        # 恰好 4 段，但某段以小写字母外字符开头（命中"每段格式"分支）
-        ok, err = ConflictPrechecker.validate_code_format("sales_gmv_2amount_day")
-        assert ok is False
-        assert "小写字母" in err
-
-    def test_four_segments_with_uppercase_rejected(self) -> None:
-        ok, err = ConflictPrechecker.validate_code_format("sales_GMV_amount_day")
         assert ok is False
 
     def test_valid_complex_code(self) -> None:

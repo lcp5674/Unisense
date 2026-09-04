@@ -392,6 +392,12 @@ export function MetricCreate() {
   //      onValuesChange（已实测确认），故必须在这类调用点显式调用 setMetricType，
   //      否则出现「Segmented 显示派生指标、粒度区仍渲染原子只读日粒度」的状态不一致。
   const [metricType, setMetricType] = useState<MetricType>("atomic");
+  // 用户是否显式选择过指标类型（Step1 类型 Segmented 点击 / 候选「在向导中编辑」）。
+  // 显式选择后，自动推断（applySuggestion）不得再覆盖 type——否则在原子模式选
+  // 「源表名（兼容旧式来源）」会被推断的 type=derived 强制跳转到派生指标。
+  // onValuesChange 仅由用户交互触发（setFieldsValue 编程式写入不触发，见上注释），
+  // 因此在 onValuesChange 里置位即等价于「用户亲手选的」。
+  const userTypeChosenRef = useRef(false);
   const isAtomic = metricType === "atomic";
   const isDerivedOrComposite = metricType === "derived" || metricType === "composite";
   // R5（二次审查）：仅复合指标强制计算表达式（OneData：复合=多指标运算）；派生纯周期
@@ -979,6 +985,15 @@ export function MetricCreate() {
     for (const [key, sf] of Object.entries(fields)) {
       if (key === "definition_json" || key === "definition_mode") continue;
       if (protectedFields && protectedFields.has(key)) continue;
+      // 类型保护：用户显式选过指标类型（Segmented/候选编辑）后，推断建议不再覆盖
+      // type——原子模式选「源表名（兼容旧式来源，可选）」不会被强制跳转到派生指标。
+      if (key === "type" && userTypeChosenRef.current) continue;
+      // 记忆保护：用户已亲手输入（isFieldTouched）且非空的字段不被推断覆盖，
+      // 保证「切类型/跨步骤返回」后此前填写内容仍在（推断只补空缺，不冲掉用户输入）
+      if (key !== "metric_code" && form.isFieldTouched(key)) {
+        const cur = form.getFieldValue(key);
+        if (cur !== undefined && cur !== null && String(cur).trim() !== "") continue;
+      }
       if (sf && sf.value !== null && sf.value !== undefined) merged[key] = sf.value;
     }
     // 用户已手输指标编码时不被推断建议覆盖（尊重显式输入；留空才用建议）
@@ -1789,8 +1804,11 @@ export function MetricCreate() {
         },
       ]);
     }
-    // 类型联动 + 逻辑度量联动（继承单位/格式/小数位）
-    if (candType) setMetricType(candType);
+    // 类型联动 + 逻辑度量联动（继承单位/格式/小数位）；用户主动点候选编辑 = 显式选型
+    if (candType) {
+      userTypeChosenRef.current = true;
+      setMetricType(candType);
+    }
     if (c.measure_id) {
       setSelectedMeasure(
         measureOptions.find((o) => o.value === c.measure_id)?.measure ?? null,
@@ -1943,7 +1961,7 @@ export function MetricCreate() {
       message.warning("请先勾选候选指标：在候选列表或「批量编辑向导」步骤①②勾选（默认仅勾选派生候选，复合需手动勾选）");
       return;
     }
-    // 编码 4 段预校验（对齐后端 MetricCreateRequest.validate_code）——非法编码提交将
+    // 编码格式预校验（对齐后端 MetricCreateRequest.validate_code，通用标识符）——非法编码提交将
     // 整批 422 且零创建，先在前端拦截并指出具体候选，避免"提交后整批失败"
     for (const c of checked) {
       const codeErr = validateMetricCode(resolveCandidateCode(c));
@@ -2793,7 +2811,10 @@ export function MetricCreate() {
             if (precheckResult) setPrecheckResult(null);
             // 同步指标类型到 state（覆盖 Segmented 点击/域默认预填/推断回填等所有写入路径；
             // 见 metricType 声明——useWatch 跨步骤卸载后失效，须由 state 持有）
-            if ("type" in changed) setMetricType(changed.type as MetricType);
+            if ("type" in changed) {
+              userTypeChosenRef.current = true; // 用户亲手切换类型 → 推断不得再覆盖
+              setMetricType(changed.type as MetricType);
+            }
             // 用户手动修改被推断字段的值 → 清除该字段徽标（徽标只标记「值来自自动推断」；
             // 程序回填 applySuggestion 经 setFieldsValue 写入的值与推断值一致，不会误清——
             // 见 applySuggestion；用户改回推断值同样保留徽标，因值确实等于推断结果）
@@ -3476,7 +3497,7 @@ export function MetricCreate() {
                       )
                     }
                   >
-                    <Input placeholder={suggestedCode ? `点击右侧「一键采纳」使用 ${suggestedCode}` : "4段式: 域_业务对象_度量_周期（留空自动生成）"} maxLength={64} showCount />
+                    <Input placeholder={suggestedCode ? `点击右侧「一键采纳」使用 ${suggestedCode}` : "小写字母/数字/下划线（留空自动生成）"} maxLength={64} showCount />
                   </Form.Item>
                 </Col>
                 <Col span={12}>
@@ -4340,12 +4361,12 @@ export function MetricCreate() {
                                 <div style={{ display: "flex", gap: 12, rowGap: 8, flexWrap: "wrap", marginTop: 8 }}>
                                   <SqlBatchField label="指标编码">
                                     {/* P0-1：候选编码为空（域未定时后端不 bake-in）→ 提示选域后自动生成；
-                                        编码可在线编辑（4 段式：域_业务对象_度量_周期），改后创建即用 */}
+                                        编码可在线编辑（小写字母/数字/下划线），改后创建即用 */}
                                     <Input
                                       size="small"
                                       style={{ width: 240, fontFamily: "monospace", ...(validateMetricCode(c.metric_code) ? { borderColor: "#ff4d4f" } : {}) }}
                                       value={c.metric_code || ""}
-                                      placeholder={selectedDomain ? "指标编码（4 段式，可修改）" : "选域后自动生成"}
+                                      placeholder={selectedDomain ? "指标编码（可修改）" : "选域后自动生成"}
                                       onChange={(e) => handleSqlBatchEdit(c.key, { metric_code: e.target.value })}
                                       data-testid={`sql-batch-code-${c.key}`}
                                     />
@@ -4666,7 +4687,7 @@ export function MetricCreate() {
                     size="small"
                     style={{ fontFamily: "monospace" }}
                     value={c.metric_code || ""}
-                    placeholder={selectedDomain ? "4 段式，可修改" : "选域后自动生成"}
+                    placeholder={selectedDomain ? "编码可修改" : "选域后自动生成"}
                     onChange={(e) => handleSqlBatchEdit(c.key, { metric_code: e.target.value })}
                   />
                 ),
@@ -5437,7 +5458,7 @@ export function MetricCreate() {
         width={480}
       >
         <Paragraph type="secondary" style={{ fontSize: 12 }}>
-          未能从 SQL 自动反查到业务域。指标编码首段是业务域（4 段式），请先指定业务域；
+          未能从 SQL 自动反查到业务域。指标编码建议以业务域为首段，请先指定业务域；
           选择后将自动继续{forceDomainMode === "infer" ? "SQL 智能推断" : "批量解析"}。
         </Paragraph>
         <Select

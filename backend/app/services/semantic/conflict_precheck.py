@@ -1,7 +1,8 @@
 """冲突预检与命名规范校验（对齐 TD §12.3 / spec FR-012/FR-013）。
 
 指标注册时：
-1. metric_code 严格校验"域_业务对象_度量_统计周期"4 段格式
+1. metric_code 校验为通用小写标识符（2026-09 放宽：不再强制
+   "域_业务对象_度量_统计周期"4 段式——4 段式仅保留为系统自动生成建议）
 2. 保留词检测（test/temp/dummy/demo/tmp/sample/staging/todo）
 3. 异步调 conflict 服务预检相似口径（命中→挂 pending_conflict 标记）
 
@@ -32,9 +33,9 @@ from app.services.semantic.dependency_checker import DependencyChecker
 
 logger = structlog.get_logger("unisense.semantic.conflict_precheck")
 
-# 4 段式 metric_code 正则: 域_业务对象_度量_统计周期
-# 每段: 小写字母开头，后跟小写字母或数字
-CODE_PATTERN = re.compile(r"^([a-z][a-z0-9]*)(_[a-z][a-z0-9]*){3}$")
+# 指标编码正则（通用小写标识符，见 validate_code_format docstring）：
+# 小写字母开头，仅含小写字母/数字/下划线；下划线卫生（不首尾/连续）在方法内检查
+CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 
 # 保留词：命中后软提醒（非硬阻断），但用于命名规范校验
 RESERVED_WORDS: frozenset[str] = frozenset(
@@ -458,48 +459,31 @@ class ConflictPrechecker:
 
     @staticmethod
     def validate_code_format(code: str) -> tuple[bool, str | None]:
-        """校验 metric_code 格式：4 段式"域_业务对象_度量_统计周期"。
+        """校验 metric_code 格式：通用小写标识符（不强制 4 段式）。
 
-        域段可含下划线（域编码如 ``online_consultation`` 本身带下划线）：字面
-        split 后 >4 段时，取最后 3 段为业务对象/度量/统计周期（须无下划线），
-        前面所有段合并为域段。系统生成侧已把域段去下划线，此处宽容手写编码。
+        2026-09 用户反馈放宽：注册指标不再强制「域_业务对象_度量_统计周期」
+        4 段式——4 段式保留为**系统自动生成的命名建议**（按域/源表/度量列/周期
+        拼接），手输编码仅校验通用标识符合法性：小写字母开头、仅含小写字母/
+        数字/下划线、不以下划线开头/结尾、无连续下划线。保留词按 ``_`` 分词
+        逐 token 检查（防 ``test_x``/``tmp_y`` 类测试/临时命名）。
         """
         if not code:
             return False, "metric_code 不能为空"
 
-        parts = code.split("_")
-        if len(parts) < 4:
+        if not CODE_PATTERN.fullmatch(code):
             return (
                 False,
-                f"metric_code 须符合 4 段格式（域_业务对象_度量_统计周期），"
-                f"当前仅 {len(parts)} 段",
+                "metric_code 须以小写字母开头，仅含小写字母、数字和下划线",
             )
-        if len(parts) > 4:
-            # 域段可含下划线：最后 3 段须无下划线（业务对象/度量/周期段规范无下划线），
-            # 前面所有段合并为域段
-            tail = parts[-3:]
-            domain_seg = "_".join(parts[:-3])
-            for seg in tail:
-                if not re.fullmatch(r"[a-z][a-z0-9]*", seg):
-                    return (
-                        False,
-                        "metric_code 后 3 段（业务对象_度量_统计周期）须小写字母开头"
-                        "+小写字母数字（无下划线）",
-                    )
-            if not re.fullmatch(r"[a-z][a-z0-9_]*", domain_seg):
-                return (
-                    False,
-                    "metric_code 第 1 段（域）格式错误：须小写字母开头"
-                    "+小写字母数字下划线",
-                )
-            segments = [domain_seg, *tail]
-        else:
-            if not CODE_PATTERN.match(code):
-                return False, "metric_code 每段须以小写字母开头，仅含小写字母和数字"
-            segments = parts
+        if code.startswith("_") or code.endswith("_") or "__" in code:
+            return (
+                False,
+                "metric_code 不能以下划线开头/结尾，且不允许连续下划线",
+            )
 
         # 检查保留词（软提醒：不硬阻断，但在校验中提示）
-        reserved_hits = [s for s in segments if s.lower() in RESERVED_WORDS]
+        segments = code.split("_")
+        reserved_hits = [s for s in segments if s and s.lower() in RESERVED_WORDS]
         if reserved_hits:
             hits = ", ".join(reserved_hits)
             return False, f"metric_code 含保留词: {hits}，请使用业务含义明确的命名"
