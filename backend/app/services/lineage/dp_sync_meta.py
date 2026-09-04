@@ -17,15 +17,40 @@ from typing import Any
 
 from app.services.lineage.dp_sync_parser import DEFAULT_EXCLUDE_TABLE_PATTERNS
 
-#: dispatch_task.type 已实据映射（观测：type=1 SQL 任务，占 1299/1390）。
+#: dispatch_task.type 任务开发类型映射（依据：列注释 + 节点构成实据，2026-09 连库观测）。
+#: 列注释：`任务开发类型 0：同步类型. 1：数据抽取`。
+#: 其余值语义由该类型任务的节点构成（dispatch_task_step.task_step_type 分布）归纳：
+#:   - 3：节点几乎全为 Shell(step 3) → Shell 驱动任务
+#:   - 4：节点混合 Hive/直连 SQL/Oracle 稽核(step 4/5/6/7) → 混合加工任务
+#:   - 10：节点全为 DataX(step 2) → DataX 同步任务
+#:   - 15：节点含 HTTP 接口同步(step 15) → 接口同步/上传任务
 DP_TASK_TYPES: dict[int, str] = {
-    1: "SQL 任务",
+    0: "同步任务",
+    1: "数据抽取（SQL 加工）",
+    3: "Shell 任务",
+    4: "混合加工任务",
+    10: "DataX 同步任务",
+    15: "接口同步任务",
 }
 
-#: dispatch_task_step.task_step_type 已实据映射（观测：2=DataX 628、7=Hive/Spark SQL 1596）。
+#: dispatch_task_step.task_step_type 节点类型映射（依据：列注释 + script 形态实据，
+#: 2026-09 连库观测）。
+#: 列注释：`任务类型 2:datax; 3:shell; 7:hive`。
+#: 其余值语义由 script 内容归纳：
+#:   - 4：直连库 DML 语句（delete/insert 非 Hive） → SQL 执行脚本
+#:   - 5：TRUNCATE 清表语句 → 清表脚本
+#:   - 6：Oracle 语法（declare/dba_views/PLSQL） → Oracle SQL/PLSQL 脚本
+#:   - 9：script 为纯数字（上报配置 ID），task_node_type=6(上报) → 上报配置节点
+#:   - 15：JSON 接口同步配置（hiveDbName/mysqlDbName/url） → 接口同步配置
 DP_STEP_TYPES: dict[int, str] = {
     2: "DataX 同步",
+    3: "Shell 脚本",
+    4: "SQL 执行脚本",
+    5: "清表脚本（TRUNCATE）",
+    6: "Oracle SQL/PLSQL 脚本",
     7: "Hive/Spark SQL",
+    9: "上报配置节点",
+    15: "接口同步配置",
 }
 
 

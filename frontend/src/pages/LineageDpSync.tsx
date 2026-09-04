@@ -402,9 +402,13 @@ function ConfigTab() {
                   showSearch
                   optionFilterProp="label"
                   placeholder={meta?.reachable === false && meta?.reason ? "类型枚举：配置源不可达，仅显示已知值" : "选择任务类型"}
-                  options={(meta?.task_types ?? [{ value: 1, label: "SQL 任务", known: true, count: 0 }]).map(
-                    (o) => ({ value: o.value, label: typeOptionLabel(o) })
-                  )}
+                  options={(meta?.task_types ?? [
+                    { value: 1, label: "数据抽取（SQL 加工）", known: true, count: 0 },
+                    { value: 3, label: "Shell 任务", known: true, count: 0 },
+                    { value: 4, label: "混合加工任务", known: true, count: 0 },
+                    { value: 10, label: "DataX 同步任务", known: true, count: 0 },
+                    { value: 15, label: "接口同步任务", known: true, count: 0 },
+                  ]).map((o) => ({ value: o.value, label: typeOptionLabel(o) }))}
                   style={{ width: "100%" }}
                 />
               </Form.Item>
@@ -439,7 +443,13 @@ function ConfigTab() {
                   placeholder={meta?.reachable === false && meta?.reason ? "类型枚举：配置源不可达，仅显示已知值" : "选择节点类型"}
                   options={(meta?.step_types ?? [
                     { value: 2, label: "DataX 同步", known: true, count: 0 },
+                    { value: 3, label: "Shell 脚本", known: true, count: 0 },
+                    { value: 4, label: "SQL 执行脚本", known: true, count: 0 },
+                    { value: 5, label: "清表脚本（TRUNCATE）", known: true, count: 0 },
+                    { value: 6, label: "Oracle SQL/PLSQL 脚本", known: true, count: 0 },
                     { value: 7, label: "Hive/Spark SQL", known: true, count: 0 },
+                    { value: 9, label: "上报配置节点", known: true, count: 0 },
+                    { value: 15, label: "接口同步配置", known: true, count: 0 },
                   ]).map((o) => ({ value: o.value, label: typeOptionLabel(o) }))}
                   style={{ width: "100%" }}
                 />

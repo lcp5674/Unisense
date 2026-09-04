@@ -79,7 +79,11 @@ describe("LineageDpSync", () => {
       page_size: 200,
     });
     mockedApi.getDpSyncMeta.mockResolvedValue({
-      task_types: [{ value: 1, label: "SQL 任务", known: true, count: 100 }],
+      task_types: [
+        { value: 1, label: "数据抽取（SQL 加工）", known: true, count: 100 },
+        { value: 3, label: "Shell 任务", known: true, count: 18 },
+        { value: 10, label: "DataX 同步任务", known: true, count: 31 },
+      ],
       step_types: [
         { value: 2, label: "DataX 同步", known: true, count: 50 },
         { value: 7, label: "Hive/Spark SQL", known: true, count: 200 },

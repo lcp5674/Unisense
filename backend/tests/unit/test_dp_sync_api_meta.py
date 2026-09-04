@@ -67,9 +67,10 @@ async def test_meta_without_config_returns_builtin(dp_client: httpx.AsyncClient)
     data = resp.json()["data"]
     assert data["reachable"] is False
     assert data["reason"] == "not_configured"
-    assert [t["value"] for t in data["task_types"]] == [1]
-    assert data["task_types"][0]["label"] == "SQL 任务"
-    assert [s["value"] for s in data["step_types"]] == [2, 7]
+    assert [t["value"] for t in data["task_types"]] == [0, 1, 3, 4, 10, 15]
+    assert {t["value"]: t["label"] for t in data["task_types"]}[1] == "数据抽取（SQL 加工）"
+    assert [s["value"] for s in data["step_types"]] == [2, 3, 4, 5, 6, 7, 9, 15]
+    assert {s["value"]: s["label"] for s in data["step_types"]}[7] == "Hive/Spark SQL"
     assert any("tmp_" in p for p in data["exclude_defaults"])
 
 
@@ -94,7 +95,8 @@ async def test_meta_unreachable_degrades_gracefully(
     data = resp.json()["data"]
     assert data["reachable"] is False
     assert "不可达" in data["reason"]
-    assert [t["value"] for t in data["task_types"]] == [1]
+    assert [t["value"] for t in data["task_types"]] == [0, 1, 3, 4, 10, 15]
+    assert all("未识别" not in t["label"] for t in data["task_types"])
 
 
 async def test_exclude_preview_requires_source(dp_client: httpx.AsyncClient) -> None:
