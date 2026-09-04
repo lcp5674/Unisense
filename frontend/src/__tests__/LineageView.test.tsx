@@ -52,6 +52,14 @@ vi.mock("../api", async (importOriginal) => {
     fetchLineageOrphans: vi.fn(),
     fetchLineageBrokenEdges: vi.fn(),
     fetchLineageEdgeDetail: vi.fn(),
+    // 治理中心
+    lineageHealth: vi.fn(),
+    lineagePathQuery: vi.fn(),
+    lineagePathTerminals: vi.fn(),
+    lineageParseBatch: vi.fn(),
+    lineageScanDirectory: vi.fn(),
+    deleteLineageEdgesByNode: vi.fn(),
+    lineageExport: vi.fn(),
   };
 });
 
@@ -1483,5 +1491,140 @@ describe("LineageView 边详情抽屉（Task B）", () => {
     expect(screen.getByText("some_unknown_source")).toBeInTheDocument();
     // 无历史 → 空态提示
     expect(screen.getByText(/该边暂无变更历史/)).toBeInTheDocument();
+  });
+});
+
+describe("LineageView 治理中心 Tab", () => {
+  const NODES: Array<import("../types").LineageNode> = [
+    { id: "table:dwd_order_di", label: "dwd_order_di", type: "table", count: 5 },
+    { id: "metric:sales_gmv_day", label: "sales_gmv_day", type: "metric", count: 3 },
+    { id: "table:dws_sales_daily", label: "dws_sales_daily", type: "table", count: 2 },
+    { id: "table:ods_legacy", label: "ods_legacy", type: "table", count: 1 },
+  ];
+
+  async function openGovernance() {
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await act(async () => {
+      screen.getByRole("tab", { name: /治理中心/ }).click();
+    });
+    return screen.findByRole("tabpanel");
+  }
+
+  /** 在治理中心面板内选第 idx 个节点选择器的候选（打开下拉 → 在可见下拉内点选项）。
+   *  antd v5 关闭的下拉仍残留 DOM（hidden class），须限定可见下拉避免 getByText 多匹配。 */
+  async function pickNode(panel: HTMLElement, idx: number, label: string) {
+    const combos = within(panel).getAllByRole("combobox");
+    fireEvent.mouseDown(combos[idx]);
+    const dropdown = await waitFor(() => {
+      const visible = Array.from(document.querySelectorAll<HTMLElement>(".ant-select-dropdown")).find(
+        (d) => !d.classList.contains("ant-select-dropdown-hidden") && d.querySelector(".ant-select-item-option"),
+      );
+      if (!visible) throw new Error("dropdown not open");
+      return visible;
+    });
+    fireEvent.click(within(dropdown).getByText(label));
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.lineageGraph).mockResolvedValue(graphData);
+    vi.mocked(api.lineageNodes).mockResolvedValue(NODES);
+  });
+
+  it("治理中心按产品化布局展示（健康度 / 链路体检 / 下游健康体检 / 节点清理 / 血缘重建）", async () => {
+    const panel = await openGovernance();
+    expect(within(panel).getByText("血缘平台健康度")).toBeInTheDocument();
+    expect(within(panel).getByText("链路体检（A → B）")).toBeInTheDocument();
+    expect(within(panel).getByText("下游健康体检（断链定位）")).toBeInTheDocument();
+    expect(within(panel).getByText("节点清理（下线维护）")).toBeInTheDocument();
+    expect(within(panel).getByText("血缘重建（高级）")).toBeInTheDocument();
+    // 健康度默认空态引导（不再是裸的整段 Alert 罗列）
+    expect(within(panel).getByText(/点击「评估」体检血缘平台综合健康度/)).toBeInTheDocument();
+    // 链路/下游/清理用可搜索节点选择器而非技术前缀文本框
+    expect(within(panel).getByText("起点（表 / 指标 / 字段）")).toBeInTheDocument();
+  });
+
+  it("链路体检：选择起点/终点后查询，可达路径按分层步骤条展示", async () => {
+    vi.mocked(api.lineagePathQuery).mockResolvedValue({
+      source: "table:dwd_order_di",
+      target: "metric:sales_gmv_day",
+      has_path: true,
+      path_count: 1,
+      shortest_hops: 2,
+      truncated: false,
+      paths: [
+        {
+          hops: 2,
+          nodes: ["table:dwd_order_di", "table:dws_sales_daily", "metric:sales_gmv_day"],
+          edges: [
+            { source: "table:dwd_order_di", target: "table:dws_sales_daily", edge_type: "DERIVED_FROM" },
+            { source: "table:dws_sales_daily", target: "metric:sales_gmv_day", edge_type: "DERIVED_FROM" },
+          ],
+        },
+      ],
+    });
+    const panel = await openGovernance();
+    await pickNode(panel, 0, "dwd_order_di");
+    await pickNode(panel, 1, "sales_gmv_day");
+    fireEvent.click(within(panel).getByRole("button", { name: /查询链路/ }));
+    await waitFor(() =>
+      expect(api.lineagePathQuery).toHaveBeenCalledWith("table:dwd_order_di", "metric:sales_gmv_day"),
+    );
+    await waitFor(() => expect(within(panel).getByText("可达路径 1 条")).toBeInTheDocument());
+    expect(within(panel).getByText("路径 1 · 2 跳（3 个节点）")).toBeInTheDocument();
+    // 分层步骤条节点胶囊：层标签按数仓层展示（DWD/DWS/指标）
+    expect(within(panel).getByText("DWD ·")).toBeInTheDocument();
+    expect(within(panel).getByText("DWS ·")).toBeInTheDocument();
+    expect(within(panel).getByText("指标 ·")).toBeInTheDocument();
+  });
+
+  it("链路体检：两节点不可达时给出明确提示", async () => {
+    vi.mocked(api.lineagePathQuery).mockResolvedValue({
+      source: "table:dwd_order_di",
+      target: "metric:sales_gmv_day",
+      has_path: false,
+      path_count: 0,
+      shortest_hops: null,
+      truncated: false,
+      paths: [],
+    });
+    const panel = await openGovernance();
+    await pickNode(panel, 0, "dwd_order_di");
+    await pickNode(panel, 1, "sales_gmv_day");
+    fireEvent.click(within(panel).getByRole("button", { name: /查询链路/ }));
+    await waitFor(() => expect(within(panel).getByText("两节点间无血缘链路")).toBeInTheDocument());
+  });
+
+  it("下游健康体检：断链终止点红色高亮并标注实体已删除", async () => {
+    vi.mocked(api.lineagePathTerminals).mockResolvedValue({
+      source: "table:dwd_order_di",
+      total: 2,
+      terminals: [
+        { node: "table:dws_sales_daily", entity_exists: true, hops: 1 },
+        { node: "table:ghost_legacy", entity_exists: false, hops: 2 },
+      ],
+    });
+    const panel = await openGovernance();
+    await pickNode(panel, 2, "dwd_order_di");
+    fireEvent.click(within(panel).getByRole("button", { name: /体\s*检/ }));
+    await waitFor(() =>
+      expect(api.lineagePathTerminals).toHaveBeenCalledWith("table:dwd_order_di"),
+    );
+    await waitFor(() => expect(within(panel).getByText(/发现 2 个下游终止节点/)).toBeInTheDocument());
+    expect(within(panel).getByText("DWS · dws_sales_daily")).toBeInTheDocument();
+    expect(within(panel).getByText("断链 · ghost_legacy")).toBeInTheDocument();
+  });
+
+  it("节点清理：Modal 二次确认后按节点软删血缘边", async () => {
+    vi.mocked(api.deleteLineageEdgesByNode).mockResolvedValue({ deleted: 3 });
+    const panel = await openGovernance();
+    await pickNode(panel, 3, "ods_legacy");
+    fireEvent.click(within(panel).getByRole("button", { name: /清理血缘/ }));
+    // Modal 确认框出现（portal 到 body）
+    await screen.findByText(/将软删/);
+    fireEvent.click(screen.getByRole("button", { name: /确认清理/ }));
+    await waitFor(() => expect(api.deleteLineageEdgesByNode).toHaveBeenCalledWith("table:ods_legacy"));
+    await waitFor(() => expect(screen.getByText(/已清理 3 条血缘边/)).toBeInTheDocument());
   });
 });
