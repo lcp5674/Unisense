@@ -628,6 +628,8 @@ function TicketsTab() {
   const [manualOpen, setManualOpen] = useState(false);
   const [manualText, setManualText] = useState("");
   const [reloadTick, setReloadTick] = useState(0);
+  // 批量 LLM 重试的勾选集（仅 isLlmRetryable 行可勾选；跨页保留，提交后清空）
+  const [selectedKeys, setSelectedKeys] = useState<number[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -707,9 +709,11 @@ function TicketsTab() {
             `LLM 重试完成：自动采纳 ${r.auto_resolved}、刷新意见 ${r.refreshed}、保留 ${r.kept}、失败 ${r.failed}`
           );
           setDetail(null);
+          setSelectedKeys([]);
           setReloadTick((x) => x + 1);
         } catch {
           message.error("LLM 重试失败");
+          setSelectedKeys([]);
         } finally {
           setActing(false);
         }
@@ -761,10 +765,12 @@ function TicketsTab() {
           <Button
             type="primary"
             ghost
-            onClick={() => void doRetryLlm()}
+            onClick={() =>
+              void (selectedKeys.length ? doRetryLlm(selectedKeys) : doRetryLlm())
+            }
             loading={acting}
           >
-            LLM 重试
+            {selectedKeys.length ? `LLM 重试（已选 ${selectedKeys.length}）` : "LLM 重试"}
           </Button>
           <Button onClick={() => void doResolveLlmDisabled()} loading={acting}>
             处置 LLM 关闭期单
@@ -799,6 +805,11 @@ function TicketsTab() {
         loading={loading}
         columns={columns}
         dataSource={rows}
+        rowSelection={{
+          selectedRowKeys: selectedKeys,
+          onChange: (keys) => setSelectedKeys(keys as number[]),
+          getCheckboxProps: (r) => ({ disabled: !isLlmRetryable(r) }),
+        }}
         size="middle"
         pagination={{
           current: page,

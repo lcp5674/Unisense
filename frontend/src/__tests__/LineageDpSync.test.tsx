@@ -12,6 +12,8 @@ vi.mock("../api", () => ({
   listDpTickets: vi.fn(),
   getDpTicket: vi.fn(),
   resolveDpTicket: vi.fn(),
+  resolveDpSyncLlmDisabled: vi.fn(),
+  retryDpSyncLlm: vi.fn(),
   listDpSyncRuns: vi.fn(),
   getDpSyncWatermark: vi.fn(),
   resetDpSyncWatermark: vi.fn(),
@@ -105,6 +107,17 @@ describe("LineageDpSync", () => {
       invalid_patterns: [],
       note: "预览范围为 dp 任务产出表",
     });
+    mockedApi.retryDpSyncLlm.mockResolvedValue({
+      auto_resolved: 0,
+      refreshed: 0,
+      kept: 0,
+      failed: 0,
+    });
+    mockedApi.resolveDpSyncLlmDisabled.mockResolvedValue({
+      resolved: 0,
+      skipped: 0,
+      failed: 0,
+    });
   });
 
   afterEach(() => {
@@ -195,6 +208,84 @@ describe("LineageDpSync", () => {
         resolution: "accept_sqlglot",
       })
     );
+  });
+
+  it("batch LLM retry drives by row selection (only llm-retryable rows selectable)", async () => {
+    const user = userEvent.setup();
+    mockedApi.listDpTickets.mockResolvedValue({
+      items: [
+        {
+          id: 21,
+          task_id: 1386,
+          step_id: 5012,
+          task_name: "llm 兜底单",
+          out_table: "wedw_dwd.t1",
+          sql_hash: "a",
+          status: "llm_fallback",
+          divergence_reason: "LLM 兜底低置信，等待人工确认",
+        },
+        {
+          id: 22,
+          task_id: 1386,
+          step_id: 5013,
+          task_name: "真分歧单",
+          out_table: "wedw_dwd.t2",
+          sql_hash: "b",
+          status: "diverged",
+          divergence_reason: "sqlglot 与 LLM 意见不一致",
+        },
+        {
+          id: 23,
+          task_id: 1386,
+          step_id: 5014,
+          task_name: "LLM 关闭单",
+          out_table: "wedw_dwd.t3",
+          sql_hash: "c",
+          status: "unparseable",
+          divergence_reason: "LLM 已关闭，无法解析",
+        },
+      ],
+      total: 3,
+      page: 1,
+      page_size: 10,
+    });
+    mockedApi.retryDpSyncLlm.mockResolvedValue({
+      auto_resolved: 1,
+      refreshed: 1,
+      kept: 0,
+      failed: 0,
+    });
+    renderPage();
+    await user.click(screen.getByText("待抉择"));
+    await screen.findByText("llm 兜底单");
+    // 仅 LLM 可重试行可勾选：行 21(llm_fallback)/23(LLM 已关闭) 可勾，行 22(真分歧) 禁用
+    const cbs = () =>
+      Array.from(
+        document.querySelectorAll<HTMLInputElement>(
+          "tbody .ant-table-row input[type=checkbox]"
+        )
+      );
+    expect(cbs()).toHaveLength(3);
+    expect(cbs()[1]).toBeDisabled();
+    // 勾选两行可重试 → 按钮显示已选数 → 确认后按勾选 id 提交
+    fireEvent.click(cbs()[0]);
+    fireEvent.click(cbs()[2]);
+    expect(screen.getByText("LLM 重试（已选 2）")).toBeInTheDocument();
+    await user.click(screen.getByText("LLM 重试（已选 2）"));
+    await waitFor(() =>
+      expect(document.querySelector(".ant-modal-confirm-btns")).toBeTruthy()
+    );
+    fireEvent.click(
+      document.querySelector(
+        ".ant-modal-confirm-btns .ant-btn-primary"
+      ) as HTMLButtonElement
+    );
+    await waitFor(() =>
+      expect(mockedApi.retryDpSyncLlm).toHaveBeenCalledWith({
+        ticket_ids: [21, 23],
+      })
+    );
+    await screen.findByText(/LLM 重试完成/);
   });
 
   it("renders ops tab with run log columns", async () => {
