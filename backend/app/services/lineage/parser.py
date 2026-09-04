@@ -983,6 +983,187 @@ def _is_bare_column_projection(projection: exp.Expression) -> bool:
     )
 
 
+#: star 展开递归深度上限（CTE 链/嵌套子查询穿透层数）。
+_STAR_EXPAND_MAX_DEPTH = 6
+#: star 展开单语句产出列数上限（防宽表 UNION 乘积爆炸）。
+_STAR_EXPAND_MAX_WIDTH = 400
+
+
+def _source_output_provenance(
+    src: Any,
+    cte_map: dict[str, exp.CTE],
+    dialect: str | None,
+    schema_columns: dict[str, list[str]],
+    depth: int,
+) -> list[tuple[str, str]] | None:
+    """计算 scope 单个来源的输出列清单（含物理归因）：``[(表名, 列名), ...]``。
+
+    ``src`` 可为 sqlglot ``Scope``（``build_scope().sources`` 的值形态）或 AST
+    节点（``exp.Table`` / ``exp.Subquery``）。三类来源：
+    - 真实表且在 ``schema_columns``（外部提供的信息 schema/DESCRIBE 列清单）→
+      直接返回该表全部列（star 展开的物理依据）；
+    - CTE 引用 / 子查询 → 递归 ``_query_output_provenance`` 穿透其投影；
+    - 其余（无 schema 的真实表等）→ ``None``（信息不足，调用方降级）。
+    """
+    if depth > _STAR_EXPAND_MAX_DEPTH:
+        return None
+    node: Any = src
+    if not isinstance(src, (exp.Table, exp.Subquery)):
+        # build_scope 的 sources 值为 Scope 包装——取其底层 AST
+        node = getattr(src, "expression", None)
+        if node is None:
+            return None
+    if isinstance(node, exp.Table):
+        name = _norm_table(node)
+        cols = schema_columns.get(name)
+        if cols is None and "." in name:
+            cols = schema_columns.get(name.split(".", 1)[1])
+        if cols is not None:
+            return [(name, c) for c in cols]
+        cte = cte_map.get(node.name)
+        if cte is None:
+            return None
+        return _query_output_provenance(cte.this, cte_map, dialect, schema_columns, depth + 1)
+    if isinstance(node, exp.Subquery):
+        inner = node.this
+    elif isinstance(node, (exp.Select, exp.SetOperation)):
+        inner = node
+    else:
+        return None
+    return _query_output_provenance(inner, cte_map, dialect, schema_columns, depth + 1)
+
+
+def _query_output_provenance(
+    query: exp.Expression,
+    cte_map: dict[str, exp.CTE],
+    dialect: str | None,
+    schema_columns: dict[str, list[str]],
+    depth: int,
+) -> list[tuple[str, str]] | None:
+    """计算查询（SELECT/集合运算）输出列的物理归因清单。
+
+    逐分支逐投影：
+    - 显式投影（列/表达式/别名）→ 复用 ``_resolve_projection`` 解析到物理源列
+      （天然穿透 CTE/子查询）；
+    - star 投影 → 单源查 schema / CTE 递归穿透 / 多源取全部来源输出的并集
+      （``SELECT *`` FROM join 的输出 = 各源列并集，语义成立）；
+    任何一处信息不足（来源无 schema、别名 star、超限）即整体返回 ``None``。
+    """
+    if depth > _STAR_EXPAND_MAX_DEPTH:
+        return None
+    local_ctes = _collect_ctes(query)
+    merged = {**cte_map, **local_ctes} if local_ctes else cte_map
+    out: list[tuple[str, str]] = []
+    total = 0
+    for branch in _branch_queries(query):
+        scope = _try_build_scope(branch)
+        if scope is None:
+            return None
+        sources = list((getattr(scope, "sources", {}) or {}).values())
+        if not sources:
+            return None
+        for projection in getattr(branch, "selects", None) or []:
+            alias, qualifier = _star_descriptor(projection)
+            if _projection_has_star(projection):
+                if alias:
+                    return None  # ``a.* AS x`` 重命名 star：目标列名不可确定
+                if qualifier:
+                    src = (getattr(scope, "sources", {}) or {}).get(qualifier)
+                    if src is None:
+                        return None
+                    prov = _source_output_provenance(
+                        src, merged, dialect, schema_columns, depth + 1
+                    )
+                    if prov is None:
+                        return None
+                    out.extend(prov)
+                    total += len(prov)
+                else:
+                    for s in sources:
+                        prov = _source_output_provenance(
+                            s, merged, dialect, schema_columns, depth + 1
+                        )
+                        if prov is None:
+                            return None
+                        out.extend(prov)
+                        total += len(prov)
+            else:
+                inner = projection.this if isinstance(projection, exp.Alias) else projection
+                resolved = _resolve_projection(scope, inner, merged, dialect, depth + 1)
+                if not resolved:
+                    return None
+                out.extend(resolved)
+                total += len(resolved)
+            if total > _STAR_EXPAND_MAX_WIDTH:
+                return None
+    return out or None
+
+
+def _expand_star_edges(
+    projection: exp.Expression,
+    scope: Any,
+    ast: exp.Expression,
+    branch: exp.Select | None,
+    target_name: str,
+    cte_map: dict[str, exp.CTE],
+    dialect: str | None,
+    schema_columns: dict[str, list[str]] | None,
+) -> list[FieldEdge] | None:
+    """基于源表 schema 把 ``SELECT *`` 展开为逐列字段边（方案 3 schema 感知）。
+
+    替代 ``_star_edge`` 的降级标记：单源查 schema、CTE/子查询穿透递归、多源
+    （JOIN/UNION）取全部来源输出的并集归因。信息不足（无 schema/别名 star/
+    超深超宽）返回 ``None``，调用方回退降级标记行为（语义不变）。
+
+    ``branch``: star 所属的 SELECT 分支（UNION 逐分支解析时必传）——裸 star 的
+    输出归因限定在分支范围内，避免跨分支误并。
+    """
+    if not schema_columns:
+        return None
+    alias, qualifier = _star_descriptor(projection)
+    if alias:
+        return None
+    if qualifier:
+        src = (getattr(scope, "sources", {}) or {}).get(qualifier)
+        prov = (
+            _source_output_provenance(src, cte_map, dialect, schema_columns, 0)
+            if src is not None
+            else None
+        )
+    else:
+        prov = None
+        if branch is not None:
+            prov = _query_output_provenance(branch, cte_map, dialect, schema_columns, 0)
+        if prov is None:
+            # 分支级归因失败时，退回「scope 直接来源并集」——覆盖 scope 结构
+            # 异常（无 selects 分支）但 sources 完整的形态。
+            sources = list((getattr(scope, "sources", {}) or {}).values())
+            if sources:
+                prov = []
+                for s in sources:
+                    p = _source_output_provenance(s, cte_map, dialect, schema_columns, 1)
+                    if p is None:
+                        prov = None
+                        break
+                    prov.extend(p)
+    if not prov:
+        return None
+    edges: list[FieldEdge] = []
+    for src_table, src_col in prov:
+        if not src_table or not src_col:
+            continue
+        edges.append(
+            FieldEdge(
+                source_table=src_table,
+                source_column=src_col,
+                target_table=target_name,
+                target_column=src_col,
+                degraded=False,
+            )
+        )
+    return edges or None
+
+
 def _emit_leaf_edges(
     scope: Any,
     source_expr: exp.Expression,
@@ -1038,15 +1219,24 @@ def _extract_branch_edges(
     dialect: str | None,
     edges: list[FieldEdge],
     target_cols: list[str] | None = None,
+    schema_columns: dict[str, list[str]] | None = None,
 ) -> None:
     """展开单个 SELECT 分支的投影：星号降级标记 + 常规列边 + 表达式边。
 
     ``target_cols`` 为 INSERT 显式列清单（按位置对应投影）；未提供时目标列名取
     投影别名（``INSERT INTO t SELECT x AS a`` → 目标列 ``a``）。
+    ``schema_columns``（表名→列清单，方案 3）非空时 star 投影优先展开为逐列边，
+    信息不足回退降级标记。
     """
     for i, projection in enumerate(getattr(branch, "selects", None) or []):
         if _projection_has_star(projection):
-            edges.append(_star_edge(projection, scope, ast, target_name))
+            expanded = _expand_star_edges(
+                projection, scope, ast, branch, target_name, cte_map, dialect, schema_columns
+            )
+            if expanded is not None:
+                edges.extend(expanded)
+            else:
+                edges.append(_star_edge(projection, scope, ast, target_name))
             continue
         target_col = _projection_name(projection)
         if target_cols is not None and i < len(target_cols):
@@ -1314,8 +1504,13 @@ def _extract_multitable_edges(
                 )
 
 
-def _extract_field_edges(ast: Any, dialect: str | None) -> list[FieldEdge]:
-    """单条已解析语句的字段级血缘边（含 MERGE 专用路径与星号降级标记）。"""
+def _extract_field_edges(
+    ast: Any, dialect: str | None, schema_columns: dict[str, list[str]] | None = None
+) -> list[FieldEdge]:
+    """单条已解析语句的字段级血缘边（含 MERGE 专用路径与星号降级标记）。
+
+    ``schema_columns``（表名→列清单，方案 3）非空时 star 投影优先展开为逐列边。
+    """
     edges: list[FieldEdge] = []
     if isinstance(ast, exp.MultitableInserts):
         # Oracle INSERT ALL/FIRST 多目标：逐分支处理（见 _extract_multitable_edges）
@@ -1341,11 +1536,18 @@ def _extract_field_edges(ast: Any, dialect: str | None) -> list[FieldEdge]:
         scope = _try_build_scope(branch)
         if scope is None:
             continue
-        _extract_branch_edges(branch, scope, ast, target_name, cte_map, dialect, edges, target_cols)
+        _extract_branch_edges(
+            branch, scope, ast, target_name, cte_map, dialect, edges, target_cols, schema_columns
+        )
     return edges
 
 
-def _select_field_edges(ast: Any, target_name: str, dialect: str | None) -> list[FieldEdge]:
+def _select_field_edges(
+    ast: Any,
+    target_name: str,
+    dialect: str | None,
+    schema_columns: dict[str, list[str]] | None = None,
+) -> list[FieldEdge]:
     """纯 SELECT 指定落点（方案 A+B）：SELECT 投影列 → target_name 字段级边。
 
     复用 ``_extract_branch_edges`` 的分支展开 + 作用域列解析链路，仅把目标表替换为
@@ -1357,7 +1559,9 @@ def _select_field_edges(ast: Any, target_name: str, dialect: str | None) -> list
         scope = _try_build_scope(branch)
         if scope is None:
             continue
-        _extract_branch_edges(branch, scope, ast, target_name, cte_map, dialect, edges)
+        _extract_branch_edges(
+            branch, scope, ast, target_name, cte_map, dialect, edges, None, schema_columns
+        )
     return edges
 
 
@@ -1366,13 +1570,18 @@ def extract_field_lineage(
     dialect: str | None = None,
     target_table: str | None = None,
     variables: dict[str, str] | None = None,
+    schema_columns: dict[str, list[str]] | None = None,
 ) -> list[FieldEdge]:
     """抽取字段级血缘（深度解析：CTE / 子查询 / 表达式 / MERGE / UNION）。
 
     基于 sqlglot ``build_scope`` 递归展开作用域，将每个目标投影列解析到其真实源列
     （可跨多层）CTE 与子查询；UNION 逐分支解析。派生表达式（如 ``a.col + b.col``）
-    记录到 ``expression`` 字段，并拆出多个源列边。``SELECT *`` 投影以
-    ``degraded=True`` 标记降级而不产出伪字段边。
+    记录到 ``expression`` 字段，并拆出多个源列边。
+
+    ``SELECT *`` 投影两种处理：
+    - ``schema_columns`` 提供源表列清单（方案 3 schema 感知，dp 同步链路注入）→
+      star 展开为逐列真实字段边（穿透 CTE/子查询/JOIN/UNION，``degraded=False``）；
+    - 未提供或信息不足 → ``degraded=True`` 降级标记（不产出伪字段边）。
 
     Args:
         sql: SQL 文本（支持注释/多语句，自动净化）。
@@ -1382,6 +1591,8 @@ def extract_field_lineage(
             了该值时，把 SELECT 投影列 → ``target_table`` 对应列生成字段级边；未指定
             时纯 SELECT 保持无成边（返回空，由调用方降级展示上游依赖）。
         variables: 可选 Hive/Spark 变量表（P5 宏展开，同 ``extract_table_lineage``）。
+        schema_columns: 可选源表列清单（表名→有序列名列表，方案 3 star 展开）。
+            键为 ``_norm_table`` 规范化表名（与血缘边 source 同形态）。
 
     Returns:
         字段级血缘边列表（含降级标记）；解析不可用或失败时返回空列表（降级）。
@@ -1394,10 +1605,10 @@ def extract_field_lineage(
             ast = sqlglot.parse_one(stmt, dialect=dialect)
         except Exception:
             continue
-        stmt_edges = _extract_field_edges(ast, dialect)
+        stmt_edges = _extract_field_edges(ast, dialect, schema_columns)
         if not stmt_edges and target_table and _is_query_node(ast):
             # 纯 SELECT/集合运算显式落点：投影列 → 目标表列（写入语句目标非表时不回退）
-            stmt_edges = _select_field_edges(ast, target_table, dialect)
+            stmt_edges = _select_field_edges(ast, target_table, dialect, schema_columns)
         for edge in stmt_edges:
             key = (
                 edge.source_table,

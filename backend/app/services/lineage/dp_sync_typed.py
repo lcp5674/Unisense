@@ -313,6 +313,7 @@ def parse_dp_step_typed(
     exclude_patterns: list[str] | None = None,
     rules: dict | None = None,
     target_table: str | None = None,
+    schema_columns: dict[str, list[str]] | None = None,
 ) -> StepParseOutcome:
     """按节点类型分发解析 dp step 脚本（统一入口，供 service 调用）。
 
@@ -322,6 +323,7 @@ def parse_dp_step_typed(
         dialect: SQL 类默认方言；type 4/6 自动切换 mysql/oracle。
         exclude_patterns/rules/target_table: 透传 SQL 解析器（DataX/接口同步等
             非 SQL 形态不使用但保留签名一致性）。
+        schema_columns: 可选源表列清单（方案 3 star 展开），仅 SQL 类使用。
     """
     if step_type == 2:
         return _parse_datax(script)
@@ -341,4 +343,5 @@ def parse_dp_step_typed(
         exclude_patterns=exclude_patterns,
         rules=rules,
         target_table=target_table,
+        schema_columns=schema_columns,
     )

@@ -208,6 +208,9 @@ class DpSyncService:
         self._llm_chat = llm_chat
         self._lineage_repo = LineageRepository(db)
         self._dp_repo = DpLineageRepository(db)
+        # 方案 3：schema 感知 star 展开的提供者（scan_once 内创建并绑定 dp
+        # collector；实例每轮新建，故实例级缓存安全）。
+        self._schema_provider: Any | None = None
 
     # ---- 单 step 处理 ----
     async def process_step(
@@ -242,6 +245,36 @@ class DpSyncService:
             )
             return {"step_id": step.get("step_id"), "status": "no_flow"}
 
+        # 方案 3（schema 感知 star 展开）：首轮解析已给出表级边——拉取各源表列
+        # 清单（两级通道尽力获取，per-run 缓存）后二次解析，把 ``SELECT *`` 展开为
+        # 逐列真实字段边（穿透 CTE/子查询/JOIN/UNION）；无 schema 的表保持降级
+        # 标记（语义与方案 3 之前一致）。
+        if outcome.table_edges and self._schema_provider is not None:
+            try:
+                schema_map = await self._schema_provider.as_map(
+                    [te.source for te in outcome.table_edges]
+                )
+            except Exception as exc:  # noqa: BLE001 —— schema 获取失败即按无 schema 解析
+                logger.warning("dp_schema_map_failed step=%s error=%s", step.get("step_id"), exc)
+                schema_map = {}
+            if schema_map:
+                outcome = parse_dp_step_typed(
+                    sql,
+                    step_type=int(step.get("task_step_type") or 7),
+                    dialect="hive",
+                    exclude_patterns=merged_exclude_table_patterns(
+                        config.exclude_table_patterns
+                    ),
+                    rules=config.llm_complexity_rules,
+                    target_table=task.get("out_table") or None,
+                    schema_columns=schema_map,
+                )
+                if outcome.status == "no_flow":
+                    await self._dp_repo.soft_delete_field_mappings(
+                        step_id=step.get("step_id"), keep_sql_hash=sql_hash
+                    )
+                    return {"step_id": step.get("step_id"), "status": "no_flow"}
+
         # SQL 演进清理（P2-8）：同 step 旧 sql_hash 的字段映射先软删（保留本次
         # hash——新映射随后写入），避免旧列映射永久残留致表膨胀/展示过时。
         await self._dp_repo.soft_delete_field_mappings(
@@ -249,10 +282,15 @@ class DpSyncService:
         )
 
         if outcome.status == "ok" and not outcome.is_complex:
-            await self._store_sqlglot_edges(
+            written, degraded_cnt = await self._store_sqlglot_edges(
                 outcome, task, step, sql_hash, config, seen_pairs
             )
-            return {"step_id": step.get("step_id"), "status": "parsed_ok"}
+            return {
+                "step_id": step.get("step_id"),
+                "status": "parsed_ok",
+                "fields_written": written,
+                "fields_degraded": degraded_cnt,
+            }
 
         # 复杂或失败：先查裁决记忆（同 step+hash 已裁决自动沿用）
         if config.resolve_memory_enabled:
@@ -435,10 +473,15 @@ class DpSyncService:
         if ticket.resolution == "ignore" or ticket.status == "ignored":
             return {"step_id": step.get("step_id"), "status": "memory_ignored"}
         if ticket.resolution == "accept_sqlglot":
-            await self._store_sqlglot_edges(
+            written, degraded = await self._store_sqlglot_edges(
                 outcome, task, step, sql_hash, config, seen_pairs
             )
-            return {"step_id": step.get("step_id"), "status": "memory_reused"}
+            return {
+                "step_id": step.get("step_id"),
+                "status": "memory_reused",
+                "fields_written": written,
+                "fields_degraded": degraded,
+            }
         if ticket.resolution == "accept_llm":
             await self._apply_llm_opinion(
                 ticket.llm_opinion, task, step, sql_hash, seen_pairs
@@ -473,9 +516,16 @@ class DpSyncService:
         sql_hash: str,
         config: Any,
         seen_pairs: set[tuple[str, str]] | None = None,
-    ) -> None:
-        """入库表级边 + dp_task_refs 合并 + 字段映射独立表（幂等聚合）。"""
+    ) -> tuple[int, int]:
+        """入库表级边 + dp_task_refs 合并 + 字段映射独立表（幂等聚合）。
+
+        Returns:
+            ``(字段映射写入数, 其中降级标记数)``——供 run_log 字段级统计（方案 3
+            可观测性：此前成功路径的字段边产出/丢弃完全无记录）。
+        """
         ref = build_task_ref(task, step)
+        written = 0
+        degraded_cnt = 0
         for te in outcome.table_edges:
             edge = await self._upsert_edge(te.source, te.target, task, step, ref)
             if edge is None:
@@ -499,6 +549,10 @@ class DpSyncService:
                         task_id=task.get("task_id"),
                         step_id=step.get("step_id"),
                     )
+                    written += 1
+                    if fe.degraded:
+                        degraded_cnt += 1
+        return written, degraded_cnt
 
     async def _upsert_edge(
         self,
@@ -694,12 +748,22 @@ class DpSyncService:
             "tickets_resolved": 0,
             "errors": 0,
             "llm_calls": 0,
+            # 方案 3 可观测性：字段级映射产出统计（此前成功路径完全无记录，
+            # 用户无法回答「这张表字段级解析了多少/为什么没有」）
+            "field_mappings_written": 0,
+            "field_edges_degraded": 0,
         }
         seen_pairs: set[tuple[str, str]] = set()
         try:
             # 连接获取与采集通道运行记录（begin）一并纳入 try：fetch 失败/中途异常
             # 统一走 except 记录 failed，不再让未绑定 collector 从 finally 二次抛错。
             collector = await fetch_collector(config.source_id)
+            # 方案 3：schema 提供者绑定 dp collector + 数据源构建通道（per-run 缓存）
+            from app.services.lineage.dp_sync_schema import DpSchemaProvider
+
+            self._schema_provider = DpSchemaProvider(
+                self._db, collector, fetch_collector
+            )
             ingest_run = await self._lineage_repo.begin_ingest_run(DP_PROVENANCE)
             task_ids, task_max, step_max = await self._changed_ids(
                 collector, config, wm, force_full=full_scan
@@ -807,6 +871,8 @@ class DpSyncService:
                 tickets_resolved=counters["tickets_resolved"],
                 errors=counters["errors"],
                 llm_calls=counters["llm_calls"],
+                field_mappings_written=counters["field_mappings_written"],
+                field_edges_degraded=counters["field_edges_degraded"],
                 detail_json=json.dumps(detail, ensure_ascii=False),
             )
             # 双轨：同步写血缘采集通道运行摘要（ingest_run），与 dp_sync_run_log 并存
@@ -1008,6 +1074,14 @@ class DpSyncService:
                 status = result.get("status", "unknown")
                 if status in counters:
                     counters[status] += 1
+                # 字段级统计聚合（方案 3 可观测性）：parsed_ok/memory_reused
+                # 的 detail 携带本次写入的映射数与降级数
+                counters["field_mappings_written"] += int(
+                    result.get("fields_written") or 0
+                )
+                counters["field_edges_degraded"] += int(
+                    result.get("fields_degraded") or 0
+                )
         finally:
             self._llm_chat = llm_orig
             self._dp_repo.create_ticket = create_orig

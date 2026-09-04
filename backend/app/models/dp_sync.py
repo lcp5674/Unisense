@@ -475,6 +475,18 @@ class DpSyncRunLog(Base, BaseModel):
         nullable=False,
         comment="LLM 调用量",
     )
+    field_mappings_written: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False,
+        comment="字段级血缘映射写入数（方案 3 schema 感知解析产出的真实/降级字段边）",
+    )
+    field_edges_degraded: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False,
+        comment="字段级降级边数（SELECT * 无源表 schema 时产出的列名缺失映射）",
+    )
     duration_ms: Mapped[int] = mapped_column(
         Integer,
         default=0,

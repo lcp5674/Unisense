@@ -401,6 +401,7 @@ def parse_dp_step(
     exclude_patterns: list[str] | None = None,
     rules: dict | None = None,
     target_table: str | None = None,
+    schema_columns: dict[str, list[str]] | None = None,
 ) -> StepParseOutcome:
     """解析单个 dp SQL 节点，产出三态判定结果。
 
@@ -410,6 +411,7 @@ def parse_dp_step(
         exclude_patterns: 排除表名正则（默认 ``DEFAULT_EXCLUDE_TABLE_PATTERNS``）。
         rules: 复杂度分级规则（默认 ``DEFAULT_COMPLEXITY_RULES``）。
         target_table: 可选落点表（纯 SELECT 场景显式指向产出表）。
+        schema_columns: 可选源表列清单（方案 3 star 展开），透传给字段解析。
     """
     if not sql or not sql.strip():
         return StepParseOutcome(status="no_flow", error="空脚本")
@@ -433,7 +435,9 @@ def parse_dp_step(
     # 「替换后能解析」时改写，使含真实数据流的脚本不再被误判 failed（语义不变）。
     qualified = _quote_reserved_column_words(qualified, dialect)
     table_edges = extract_table_lineage(qualified, dialect, target_table=target_table)
-    field_edges = extract_field_lineage(qualified, dialect, target_table=target_table)
+    field_edges = extract_field_lineage(
+        qualified, dialect, target_table=target_table, schema_columns=schema_columns
+    )
     ddl_edges = extract_ddl_lineage(qualified, dialect)
 
     # 排除明显临时表
