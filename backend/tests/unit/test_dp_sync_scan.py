@@ -133,6 +133,7 @@ def _svc(
     svc._dp_repo.create_run_log = AsyncMock(return_value=MagicMock(id=1))
     svc._dp_repo.update_run_log = AsyncMock()
     svc._dp_repo.update_watermark = AsyncMock()
+    svc._dp_repo.pending_retry_task_ids = AsyncMock(return_value=[])
     svc._dp_repo.find_ticket_by_step_hash = AsyncMock(return_value=None)
     svc._dp_repo.create_ticket = AsyncMock(return_value=MagicMock())
     svc._dp_repo.upsert_field_mapping = AsyncMock()
@@ -244,7 +245,7 @@ async def test_scan_incremental_passes_watermark() -> None:
         return_value=_wm(
             last_scan_at=NOW - timedelta(minutes=10),
             last_max=NOW - timedelta(days=1),
-            last_full=NOW - timedelta(hours=1),  # 最近全量过 → 增量模式
+            last_full=datetime.now(UTC) - timedelta(hours=1),  # 最近全量过 → 增量模式
         )
     )
     result = await svc.scan_once(_fc(collector))
@@ -267,7 +268,7 @@ async def test_scan_force_full_ignores_watermark() -> None:
         return_value=_wm(
             last_scan_at=NOW - timedelta(minutes=10),
             last_max=NOW - timedelta(days=1),
-            last_full=NOW - timedelta(hours=1),  # 存在水位（增量条件满足）
+            last_full=datetime.now(UTC) - timedelta(hours=1),  # 存在水位（增量条件满足）
         )
     )
     result = await svc.scan_once(_fc(collector), force_full=True)
@@ -288,7 +289,7 @@ async def test_scan_force_full_ignores_watermark() -> None:
         return_value=_wm(
             last_scan_at=NOW - timedelta(minutes=10),
             last_max=NOW - timedelta(days=1),
-            last_full=NOW - timedelta(hours=1),
+            last_full=datetime.now(UTC) - timedelta(hours=1),
         )
     )
     # FakeCollector 任务 gmt_modified 均 > 水位 → 增量仍会扫到（2 任务）；
@@ -318,20 +319,31 @@ async def test_scan_excludes_tasks_by_pattern() -> None:
 
 @pytest.mark.asyncio
 async def test_scan_commit_failure_records_failed_run() -> None:
+    """收尾 commit 失败 → except 把已前置提交的 run_log 更新为 failed。
+
+    方案 B：run_log 在扫描开始即独立提交持久化（running），收尾故障走 except 时
+    直接 update 为 failed——不再重建新行（重建会造成 running 永久残留 + 重复行）。
+    """
     collector = FakeCollector()
     svc = _svc(collector)
-    svc._db.commit = AsyncMock(
-        side_effect=[None, RuntimeError("db down"), None]
-    )
+    calls = {"n": 0}
+
+    async def _commit() -> None:
+        calls["n"] += 1
+        # 第 6 次 commit = 收尾 update_run_log/finish_ingest_run 之后的提交 → 失败
+        # （前 5 次：前置 run、前置 ingest、任务 101、任务 102、收尾 mark_missing 后）
+        if calls["n"] == 6:
+            raise RuntimeError("db down")
+
+    svc._db.commit = AsyncMock(side_effect=_commit)
     result = await svc.scan_once(_fc(collector))
     assert result["skipped"] == "failed"
-    # 失败可见：rollback 撤销了 running run_log，except 重建一条 failed 记录
-    # （不再用 update_run_log 更新已回滚行——那是 0 行静默失败）。
-    last = svc._dp_repo.create_run_log.call_args.kwargs
-    assert last["status"] == "failed"
-    assert "db down" in str(last["error"])
-    # 双轨：采集通道同样写一条 failed ingest_run
-    svc._lineage_repo.begin_ingest_run.assert_awaited()
+    # run_log 已前置提交 → 直接 update 为 failed（不重建新行）
+    assert svc._dp_repo.update_run_log.await_args.kwargs["status"] == "failed"
+    assert "db down" in str(svc._dp_repo.update_run_log.await_args.kwargs["error"])
+    # create_run_log 仅前置 1 次（running），未重建 failed（无 running 残留）
+    assert svc._dp_repo.create_run_log.call_count == 1
+    # 双轨：采集通道 ingest_run 同标 failed
     fin = svc._lineage_repo.finish_ingest_run.await_args.kwargs
     assert fin["status"] == "failed"
 
@@ -468,13 +480,15 @@ async def test_scan_force_stop_raises_cancelled() -> None:
 
 
 @pytest.mark.asyncio
-async def test_scan_db_error_isolated_per_task_via_savepoint() -> None:
-    """单任务 DB 级错误（写库抛异常）由 savepoint 隔离，不影响后续任务。
+async def test_scan_db_error_isolated_per_task_commit() -> None:
+    """单任务 DB 级错误（写库抛异常）独立事务回滚，不影响后续任务。
 
-    回归（P1-3）：此前整轮单事务 + per-task except 不回滚，第一个任务写库
-    抛 DB 错误后事务进入 failed 态，后续任务全部 PendingRollbackError，
-    整轮白做只落一条 failed。
+    方案 B：整轮不再单一大事务——每任务独立 commit。任务 101 失败回滚自身
+    （边不落库、记入 failed_task_ids 下轮重扫），任务 102 成功独立提交——
+    边随各自任务即时对其它会话可见（不再等整轮统一 commit）。
     """
+    import json as _json
+
     from sqlalchemy.exc import OperationalError
 
     collector = FakeCollector()
@@ -491,11 +505,18 @@ async def test_scan_db_error_isolated_per_task_via_savepoint() -> None:
     assert result["errors"] == 1  # 仅任务 101 失败
     assert result["scanned_tasks"] == 2  # 两个任务均进入处理
     assert result["parsed_ok"] == 1  # 任务 102 成功入库
-    # savepoint 被使用（per-task 隔离）
-    assert svc._db.begin_nested.call_count == 2
-    # 收尾仍走成功态（未触发整轮 rollback）
-    assert svc._db.rollback.await_count == 0
+    # 独立事务：失败任务回滚 1 次（101）；成功任务逐任务提交
+    # （commit 计数：前置 run/前置 ingest 2 + 任务 102 1 + 收尾 mark_missing 后/
+    #   run_log 终态后 2 = 5）
+    assert svc._db.rollback.await_count == 1
+    assert svc._db.commit.await_count == 5
+    # 收尾仍走成功态（部分失败不触发整轮 failed）
     assert svc._dp_repo.update_run_log.await_args.kwargs["status"] == "success"
+    # 失败任务 id 记录进 run_log detail（下轮 pending_retry_task_ids 显式重扫）
+    detail = _json.loads(
+        svc._dp_repo.update_run_log.await_args.kwargs["detail_json"]
+    )
+    assert detail["retry_task_ids"] == [101]
 
 
 @pytest.mark.asyncio
@@ -595,7 +616,7 @@ async def test_scan_incremental_skips_mark_missing() -> None:
         return_value=_wm(
             last_scan_at=NOW - timedelta(minutes=10),
             last_max=NOW - timedelta(days=1),
-            last_full=NOW - timedelta(hours=1),  # 最近全量过 → 非周期自动全量
+            last_full=datetime.now(UTC) - timedelta(hours=1),  # 最近全量过 → 非周期自动全量
         )
     )
     result = await svc.scan_once(_fc(collector))

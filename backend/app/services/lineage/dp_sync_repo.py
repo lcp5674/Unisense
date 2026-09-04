@@ -175,6 +175,39 @@ class DpLineageRepository:
                 update(DpSyncRunLog).where(DpSyncRunLog.id == log_id).values(**data)
             )
 
+    async def latest_run_log(self) -> DpSyncRunLog | None:
+        """最近一轮扫描运行记录（按 id 倒序，含 detail_json）。"""
+        stmt = (
+            select(DpSyncRunLog)
+            .where(DpSyncRunLog.deleted_at.is_(None))
+            .order_by(DpSyncRunLog.id.desc())
+            .limit(1)
+        )
+        return (await self._db.execute(stmt)).scalar_one_or_none()
+
+    async def pending_retry_task_ids(self) -> list[int]:
+        """上轮部分失败留下的待重扫任务 id（来自 run_log detail 的 retry_task_ids）。
+
+        方案 B 语义：单任务失败 → 该任务回滚、边不落库；收尾水位仍推进（否则有
+        1 个顽固失败任务就永远全量空转）。失败任务 id 记入本轮 run_log detail，
+        下轮 scan_once 显式并入变更集重扫（成功则不再出现，幂等安全）。
+        """
+        log = await self.latest_run_log()
+        if log is None or not log.detail_json:
+            return []
+        try:
+            detail = json.loads(log.detail_json)
+        except Exception:  # noqa: BLE001 —— 旧 detail 非 JSON/结构变化，视为无重扫
+            return []
+        raw = detail.get("retry_task_ids") or []
+        out: list[int] = []
+        for item in raw:
+            try:
+                out.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        return out
+
     # ---- 统计概览 ----
     async def sync_stats(self) -> dict[str, Any]:
         """dp 血缘同步统计聚合（运维页「统计概览」卡；只读，不连 dp 源）。

@@ -1487,6 +1487,44 @@ function ImpactTab() {
     }
   }
 
+  // —— 自动刷新（方案 C）——
+  // 后台持续写血缘（如 dp 血缘同步/采集批量）时，图与边表不会自己变化——开启后
+  // 每 30s 按**最新**查询条件重查当前节点，实时呈现新解析的表/字段血缘边。
+  // 用 ref 持最新闭包（node/direction/granularity/loading），避免 setInterval 捕获
+  // 开启瞬间的旧 state（换节点/方向后仍按旧条件刷新）。
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const autoRefreshTimer = useRef<number | null>(null);
+  const loadImpactRef = useRef<() => Promise<void>>(loadImpact);
+  const loadingRef = useRef(loading);
+  loadImpactRef.current = loadImpact;
+  loadingRef.current = loading;
+  useEffect(
+    () => () => {
+      if (autoRefreshTimer.current) window.clearInterval(autoRefreshTimer.current);
+    },
+    []
+  );
+  async function toggleAutoRefresh() {
+    if (autoRefresh) {
+      setAutoRefresh(false);
+      if (autoRefreshTimer.current) {
+        window.clearInterval(autoRefreshTimer.current);
+        autoRefreshTimer.current = null;
+      }
+      return;
+    }
+    if (!node.trim()) {
+      message.warning("请先选择/输入查询节点，再开启自动刷新");
+      return;
+    }
+    setAutoRefresh(true);
+    await loadImpact(); // 开启即立即重查一次
+    autoRefreshTimer.current = window.setInterval(() => {
+      if (loadingRef.current) return; // 查询进行中跳过（防叠请求）
+      void loadImpactRef.current();
+    }, 30_000);
+  }
+
   async function previewImpact() {
     const raw = node.trim();
     if (!raw) {
@@ -1649,6 +1687,15 @@ function ImpactTab() {
         <Button type="primary" onClick={loadImpact} loading={loading}>
           查询
         </Button>
+        <Tooltip title="后台写血缘（如 dp 血缘同步）进行中开启：每 30s 自动重查当前节点，实时呈现新解析的表/字段血缘边；切换节点/方向后按最新条件刷新">
+          <Button
+            icon={<ReloadOutlined />}
+            type={autoRefresh ? "primary" : "default"}
+            onClick={() => void toggleAutoRefresh()}
+          >
+            自动刷新
+          </Button>
+        </Tooltip>
         <Select
           value={changeType}
           onChange={(v) => setChangeType(v as (typeof CHANGE_TYPE_OPTIONS)[number]["value"])}

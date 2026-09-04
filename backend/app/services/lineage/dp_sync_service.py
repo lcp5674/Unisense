@@ -791,7 +791,10 @@ class DpSyncService:
                 return {"skipped": "interval_not_due"}
         if progress is not None:
             progress["stage"] = "collecting"
+        # run_log 前置提交（B：整轮不再单一大事务——run 行若随首个任务事务
+        # 回滚会丢，先独立提交持久化 running 状态，供中途/收尾 update 终态）。
         run = await self._dp_repo.create_run_log(status="running", run_at=now)
+        await self._db.commit()
         collector = None
         ingest_run = None
         counters: dict[str, int] = {
@@ -812,6 +815,8 @@ class DpSyncService:
             "field_edges_degraded": 0,
         }
         seen_pairs: set[tuple[str, str]] = set()
+        # B：本轮失败任务 id（随 run_log detail 记录，下轮显式并入重扫）
+        failed_task_ids: list[int] = []
         try:
             # 连接获取与采集通道运行记录（begin）一并纳入 try：fetch 失败/中途异常
             # 统一走 except 记录 failed，不再让未绑定 collector 从 finally 二次抛错。
@@ -823,9 +828,18 @@ class DpSyncService:
                 self._db, collector, fetch_collector
             )
             ingest_run = await self._lineage_repo.begin_ingest_run(DP_PROVENANCE)
+            # ingest_run 前置提交：同 run_log 理由——否则随首个任务事务回滚会丢。
+            await self._db.commit()
             task_ids, task_max, step_max = await self._changed_ids(
                 collector, config, wm, force_full=full_scan
             )
+            # 失败任务重扫（B）：上轮部分失败（errors>0）的任务 id 已记入 run_log
+            # detail（retry_task_ids），收尾水位推进后增量查询不再命中它们，需显式
+            # 并入本轮重扫；成功即从下轮消失（detail 只含本轮新失败，幂等安全）。
+            retry_ids = await self._dp_repo.pending_retry_task_ids()
+            if retry_ids:
+                merged = set(task_ids) | set(retry_ids)
+                task_ids = sorted(merged)
             if progress is not None:
                 progress["total"] = len(task_ids)
                 progress["processed"] = 0
@@ -844,31 +858,34 @@ class DpSyncService:
                     progress["processed"] = idx - 1
                     progress["current_task_id"] = task_id
                 try:
-                    # per-task 事务隔离（savepoint）：单任务 DB 异常（唯一冲突/
-                    # DataError/断连）只回滚自身 savepoint，不再让整轮单事务进入
-                    # PendingRollbackError 导致后续任务全部失败、整轮 1000 任务
-                    # 白做。任务成功释放 savepoint，收尾统一 commit。
-                    async with self._db.begin_nested():
-                        await self._process_task(
-                            collector,
-                            config,
-                            task_id,
-                            counters,
-                            seen_pairs,
-                            cancel_event=cancel_event,
-                            force_event=force_event,
-                            progress=progress,
-                        )
+                    # 每任务独立事务（B）：任务内所有写（边/字段映射/ticket/owner
+                    # 回填）在同一事务，成功即 commit —— 处理完一个任务，其血缘边
+                    # **立即对其它会话可见**（血缘视图实时可查，不再等整轮 2517 个
+                    # 任务跑完才一次性提交）。单任务异常 rollback 自身（边不落库、
+                    # 幂等），记入 failed_task_ids 下轮显式重扫，不拖垮整轮。
+                    await self._process_task(
+                        collector,
+                        config,
+                        task_id,
+                        counters,
+                        seen_pairs,
+                        cancel_event=cancel_event,
+                        force_event=force_event,
+                        progress=progress,
+                    )
+                    await self._db.commit()
                 except _ScanCancelledError:
-                    # 强制终止：当前任务已随 savepoint 回滚（事务由 scan_once 收尾统一处理）
+                    # 强制终止：当前任务随 rollback 回滚（已提交的前序任务保留）
+                    await self._db.rollback()
                     cancelled = True
                     break
                 except Exception as exc:  # noqa: BLE001 —— 单任务失败不阻断整轮
+                    await self._db.rollback()
                     counters["errors"] += 1
+                    failed_task_ids.append(task_id)
                     logger.warning("dp_sync_task_failed task_id=%s error=%s", task_id, exc)
                 if progress is not None:
                     progress["processed"] = idx
-            await self._db.commit()
             # 收尾：水位 + 边确认（stale 机制）。
             # - cancelled：**不推进 max 水位**——未处理任务保留在变更集内，下轮
             #   从原水位重扫（幂等安全）；也不记录 last_full_scan_at（本轮未完整）。
@@ -913,6 +930,10 @@ class DpSyncService:
             detail["seen_pairs"] = len(seen_pairs)
             detail["missing"] = missing
             detail["stale_flagged"] = stale_flagged
+            # B：本轮失败任务 id 随 detail 记录 → 下轮 scan_once 经
+            # pending_retry_task_ids 显式并入重扫（水位推进后它们不被增量命中）
+            if failed_task_ids:
+                detail["retry_task_ids"] = failed_task_ids
             log_status = "cancelled" if cancelled else "success"
             await self._dp_repo.update_run_log(
                 run.id,
@@ -954,21 +975,43 @@ class DpSyncService:
         except Exception as exc:  # noqa: BLE001 —— 记录失败，下轮重试
             await self._db.rollback()
             try:
-                # 失败必须可见：rollback 已撤销 run_log/ingest_run 的未提交行，
-                # 直接 update 会 0 行静默失败 → 重建一条 failed 记录（双轨同写）。
-                await self._dp_repo.create_run_log(
+                # B：run_log 已前置提交 → 直接 update 为 failed（不留 running 残留、
+                # 不重复建行）；仅当异常发生在首次前置 commit 前（run 未落库）导致
+                # update 0 行时，才走内层 create 兜底。
+                await self._dp_repo.update_run_log(
+                    run.id,
                     status="failed",
                     scan_mode="full" if full_scan else "incremental",
                     error=str(exc),
-                    run_at=now,
+                    detail_json=json.dumps(
+                        {
+                            "error": str(exc),
+                            "retry_task_ids": failed_task_ids or None,
+                        },
+                        ensure_ascii=False,
+                    ),
                 )
-                failed_run = await self._lineage_repo.begin_ingest_run(DP_PROVENANCE)
-                await self._lineage_repo.finish_ingest_run(
-                    failed_run, status="failed", error=str(exc)
-                )
+                if ingest_run is not None:
+                    await self._lineage_repo.finish_ingest_run(
+                        ingest_run, status="failed", error=str(exc)
+                    )
                 await self._db.commit()
-            except Exception:  # noqa: BLE001 —— 失败记录兜底，不影响错误上报
+            except Exception:  # noqa: BLE001 —— run 未落库等极端情况：重建 failed（双轨同写）
                 await self._db.rollback()
+                try:
+                    await self._dp_repo.create_run_log(
+                        status="failed",
+                        scan_mode="full" if full_scan else "incremental",
+                        error=str(exc),
+                        run_at=now,
+                    )
+                    failed_run = await self._lineage_repo.begin_ingest_run(DP_PROVENANCE)
+                    await self._lineage_repo.finish_ingest_run(
+                        failed_run, status="failed", error=str(exc)
+                    )
+                    await self._db.commit()
+                except Exception:  # noqa: BLE001 —— 失败记录兜底，不影响错误上报
+                    await self._db.rollback()
             logger.exception("dp_sync_scan_failed")
             return {"skipped": "failed", "error": str(exc)}
         finally:
