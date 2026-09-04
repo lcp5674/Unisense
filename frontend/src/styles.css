@@ -1162,27 +1162,26 @@ body {
 .owner-grid {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
 }
 
 .owner-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
+  gap: 10px;
+  padding: 3px 10px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 7px;
   background: var(--surface);
   cursor: pointer;
   text-align: left;
-  transition: all 0.18s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
   min-width: 0;
 }
 
 .owner-row:hover {
   border-color: var(--data);
-  box-shadow: 0 4px 16px rgba(14, 124, 134, 0.12);
-  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(14, 124, 134, 0.1);
 }
 
 .owner-row.owner-hot {
@@ -1199,21 +1198,21 @@ body {
 .owner-row .or-id {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex: none;
-  width: 200px;
+  width: 168px;
   min-width: 0;
 }
 
 .owner-row .oc-avatar {
   flex: none;
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
+  font-size: 10px;
   font-weight: 700;
   color: var(--chassis);
   background: linear-gradient(140deg, var(--signal), #f2a45c);
@@ -1231,17 +1230,17 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .owner-row .oc-hot {
   flex: none;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
   color: #fff;
   background: var(--signal);
   border-radius: 999px;
-  padding: 2px 8px;
+  padding: 1px 6px;
   white-space: nowrap;
 }
 
@@ -1296,7 +1295,7 @@ body {
 .owner-row .oc-total {
   flex: none;
   margin-left: auto;
-  font-size: 12px;
+  font-size: 11px;
   color: var(--muted);
   font-family: var(--font-mono);
   white-space: nowrap;
@@ -1310,24 +1309,24 @@ body {
 .owner-row .oc-bar {
   display: flex;
   flex: 1 1 auto;
-  height: 22px;
-  border-radius: 6px;
+  height: 16px;
+  border-radius: 4px;
   overflow: hidden;
   background: var(--line-soft);
   border: 1px solid var(--line);
-  min-width: 60px;
+  min-width: 40px;
 }
 
 .owner-row .oc-seg {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
   color: #fff;
   white-space: nowrap;
   overflow: hidden;
-  padding: 0 4px;
+  padding: 0 3px;
   transition: filter 0.15s ease;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
 }
@@ -1368,9 +1367,9 @@ body {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px 14px;
-  margin-top: 10px;
-  padding-top: 10px;
+  gap: 3px 14px;
+  margin-top: 6px;
+  padding-top: 6px;
   border-top: 1px dashed var(--line);
 }
 .owner-legend .oc-legend-title {

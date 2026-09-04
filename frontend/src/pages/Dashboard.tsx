@@ -691,8 +691,8 @@ function OwnerDistribution({
     if (isAdmin) return null;
     return (
       <Card
-        style={{ marginBottom: 20 }}
-        styles={{ body: { paddingTop: 16, paddingBottom: 16 } }}
+        style={{ marginBottom: 12 }}
+        styles={{ body: { paddingTop: 10, paddingBottom: 10 } }}
         title={
           <span style={{ fontSize: 15, fontWeight: 600 }}>
             {title}
@@ -711,8 +711,8 @@ function OwnerDistribution({
   }
   return (
     <Card
-      style={{ marginBottom: 20 }}
-      styles={{ body: { paddingTop: 16, paddingBottom: 16 } }}
+      style={{ marginBottom: 12 }}
+      styles={{ body: { paddingTop: 10, paddingBottom: 10 } }}
       title={
         <span style={{ fontSize: 15, fontWeight: 600 }}>
           {title}
@@ -1024,8 +1024,8 @@ export function Dashboard() {
 
       {/* 资产总览：全资产计数 + 状态下钻（与生命周期信号条一致的交互） */}
       <Card
-        style={{ marginBottom: 20 }}
-        styles={{ body: { paddingTop: 16, paddingBottom: 16 } }}
+        style={{ marginBottom: 12 }}
+        styles={{ body: { paddingTop: 10, paddingBottom: 10 } }}
         title={
           <span style={{ fontSize: 15, fontWeight: 600 }}>
             资产总览
