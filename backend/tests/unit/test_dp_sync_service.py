@@ -43,6 +43,8 @@ def _svc(**kwargs) -> DpSyncService:
     svc._lineage_repo = MagicMock()
     svc._dp_repo = MagicMock()
     svc._llm_chat = kwargs.get("llm_chat")
+    # 方案 3：schema provider 默认 None（scan_once 内绑定，单测不启用）
+    svc._schema_provider = None
     # 默认 mock：无环、upsert 返回带 id 的边
     svc._lineage_repo.would_create_cycle = AsyncMock(return_value=False)
 

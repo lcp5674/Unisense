@@ -168,8 +168,30 @@ class DpSchemaProvider:
 
 
 async def _describe_with_timeout(collector: Any, table: str) -> list[str] | None:
-    """带超时的 DESCRIBE（HiveCollector.list_columns），返回纯列名列表。"""
-    cols = await asyncio.wait_for(
-        collector.list_columns(table), timeout=_COLUMN_QUERY_TIMEOUT
-    )
-    return [str(c["name"]).strip() for c in cols if c.get("name")]
+    """按 collector 能力分派的列清单查询，返回纯列名列表。
+
+    - ``list_columns(table)``：HiveCollector（pyhive 直连 HiveServer2 DESCRIBE）；
+    - ``_query_columns_one(schema, tbl)``：HiveMetastoreCollector（查 HMS 元库
+      ``COLUMNS_V2``）——Metastore 只存表结构，列清单恰是它的主场；
+    两者都不可用返回 ``None``（调用方尝试下一个数据源 / 降级）。
+    """
+    split = _split_table(table)
+    if hasattr(collector, "list_columns"):
+        cols = await asyncio.wait_for(
+            collector.list_columns(table), timeout=_COLUMN_QUERY_TIMEOUT
+        )
+        return [str(c["name"]).strip() for c in cols if c.get("name")]
+    if hasattr(collector, "_query_columns_one") and split is not None:
+        schema, tbl = split
+        rows = await asyncio.wait_for(
+            collector._query_columns_one(schema, tbl), timeout=_COLUMN_QUERY_TIMEOUT
+        )
+        names: list[str] = []
+        for r in rows or []:
+            name = str(
+                r.get("COLUMN_NAME") or r.get("column_name") or ""
+            ).strip()
+            if name:
+                names.append(name)
+        return names or None
+    return None

@@ -182,10 +182,34 @@ async def force_cancel_scan(task_id: int) -> bool:
 
 
 async def _run_scan_job(task_id: int, *, force: bool) -> None:
-    """后台执行一轮手动扫描并收尾状态（成功/失败/取消区分）。"""
+    """后台执行一轮手动扫描并收尾状态（成功/失败/取消区分）。
+
+    分布式锁（H3 补充）：手动扫描跑在 backend 进程，与 worker 的周期 cron
+    并发会双跑同一批任务（InnoDB 1205 lock wait 实证）——用与 cron 同一把
+    ``dp_lineage_poll`` 锁跨进程互斥；拿不到锁标记 skipped（提示稍后再试）。
+    """
     st = _SCANS.get(task_id)
     if st is None:
         return
+    from app.core.eventbus import get_eventbus
+    from app.services.collector.distributed_lock import CollectionLock
+
+    lock = CollectionLock(getattr(get_eventbus(), "_redis_pool", None))
+    lock_key = "dp_lineage_poll"
+    owner = f"manual-{task_id}"
+    acquired = await lock.acquire(lock_key, owner, ttl=3600)
+    if not acquired:
+        st["status"] = "failed"
+        st["error"] = "已有周期/手动扫描在运行，请稍后再试（跨进程互斥保护）"
+        return
+    try:
+        await _run_scan_job_locked(task_id, st, force=force)
+    finally:
+        await lock.release(lock_key, owner)
+
+
+async def _run_scan_job_locked(task_id: int, st: dict[str, Any], *, force: bool) -> None:
+    """持锁执行扫描主体（成功/失败/取消收尾）。"""
     try:
         async with async_session_factory() as db:
             svc = DpSyncService(db, llm_chat=_make_llm_chat(db))

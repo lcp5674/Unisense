@@ -1076,12 +1076,12 @@ class DpSyncService:
                     counters[status] += 1
                 # 字段级统计聚合（方案 3 可观测性）：parsed_ok/memory_reused
                 # 的 detail 携带本次写入的映射数与降级数
-                counters["field_mappings_written"] += int(
-                    result.get("fields_written") or 0
-                )
-                counters["field_edges_degraded"] += int(
-                    result.get("fields_degraded") or 0
-                )
+                counters["field_mappings_written"] = counters.get(
+                    "field_mappings_written", 0
+                ) + int(result.get("fields_written") or 0)
+                counters["field_edges_degraded"] = counters.get(
+                    "field_edges_degraded", 0
+                ) + int(result.get("fields_degraded") or 0)
         finally:
             self._llm_chat = llm_orig
             self._dp_repo.create_ticket = create_orig
