@@ -15,6 +15,8 @@ export interface AssetGraphNode extends Record<string, unknown> {
   pii?: boolean;
   domain?: string;
   owner?: string;
+  /** 数仓分层（后端返回小写：ods/dwd/dws/ads/dm；指标取 Metric.dw_layer，表侧未来采集登记）。 */
+  dw_layer?: string;
   /** 语义泳道的隐藏锚点节点（渲染为不可见、不响应交互） */
   anchor?: boolean;
 }
@@ -225,18 +227,19 @@ const LAYER_STROKE: Record<string, string> = {
   dm: "#00695c", // 数据集市（青）
 };
 
-/** 推断节点数仓分层：表按名称前缀，指标按 dw_layer 属性（后端可选返回）。 */
+/** 推断节点数仓分层：表优先用节点携带的分层字段（后端/采集登记），否则按名称前缀；
+ *  指标按 dw_layer 属性（后端返回小写）。大小写归一化兜底（兼容 ODS/DWS 大写写法）。 */
 export function layerOf(n: AssetGraphNode): string | null {
+  const carried = (n as { dw_layer?: unknown }).dw_layer;
+  if (typeof carried === "string" && carried) {
+    const l = carried.toLowerCase();
+    if (LAYER_STROKE[l]) return l;
+  }
   if (n.type === "table") {
     const name = (n.label || n.id).toLowerCase();
     for (const layer of Object.keys(LAYER_STROKE)) {
       if (name.startsWith(`${layer}_`) || name.startsWith(`${layer}.`)) return layer;
     }
-    return null;
-  }
-  if (n.type === "metric") {
-    const l = (n as { dw_layer?: unknown }).dw_layer;
-    if (typeof l === "string" && LAYER_STROKE[l]) return l;
     return null;
   }
   return null;

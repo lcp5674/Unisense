@@ -966,6 +966,7 @@ class AssetMapRepository:
             Metric.pii_flag,
             Metric.owner_id,
             Metric.status,
+            Metric.dw_layer,
         ).where(Metric.deleted_at.is_(None))
         if domain:
             metric_stmt = metric_stmt.where(Metric.domain == domain)
@@ -990,6 +991,8 @@ class AssetMapRepository:
                     "pii": bool(row.pii_flag),
                     "domain": row.domain,
                     "owner": str(row.owner_id) if row.owner_id else None,
+                    # 数仓分层（前端层色描边消费）：小写归一化（ODS→ods），空值 None
+                    "dw_layer": (row.dw_layer or "").lower() or None,
                 }
             )
         return nodes, allowed

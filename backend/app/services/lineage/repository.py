@@ -1202,6 +1202,7 @@ class LineageRepository:
                         Metric.domain,
                         Metric.pii_flag,
                         Metric.owner_id,
+                        Metric.dw_layer,
                     ).where(
                         Metric.metric_code.in_(metric_codes),
                         Metric.deleted_at.is_(None),
@@ -1218,6 +1219,9 @@ class LineageRepository:
                     "pii": bool(r.pii_flag),
                     "domain": r.domain,
                     "owner": str(r.owner_id) if r.owner_id else None,
+                    # 数仓分层（前端血缘泳道/层色描边消费）：小写归一化（ODS→ods），
+                    # 空值返回 None 保持"未分层"语义（前端 layerOf 据此回退）
+                    "dw_layer": (r.dw_layer or "").lower() or None,
                 }
         # 目录元数据：显式 table 节点 + 字段所属表（后者仅用于字段继承域，不产生条目）
         catalog_names = table_names | field_parents

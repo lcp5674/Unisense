@@ -436,6 +436,21 @@ describe("AssetGraph 交互", () => {
     expect(layerOf(metricNoLayer)).toBeNull();
   });
 
+  it("layerOf dw_layer 大小写归一化 + 节点携带优先于表名前缀", () => {
+    // 大写枚举（后端原始 ODS/DWS）→ 归一化小写
+    const upper = { id: "metric:m", label: "m", type: "metric" as const, dw_layer: "DWS" };
+    expect(layerOf(upper)).toBe("dws");
+    // 表节点携带 dw_layer（采集/登记）→ 优先于名字前缀（名字无前缀也能分层）
+    const tableCarried = { id: "table:t", label: "orders", type: "table" as const, dw_layer: "dwd" };
+    expect(layerOf(tableCarried)).toBe("dwd");
+    // 携带值非法/未知 → 回退表名前缀推断
+    const invalid = { id: "table:t2", label: "dwd_orders", type: "table" as const, dw_layer: "bogus" };
+    expect(layerOf(invalid)).toBe("dwd");
+    // 携带空串 → 视为未携带
+    const empty = { id: "metric:e", label: "e", type: "metric" as const, dw_layer: "" };
+    expect(layerOf(empty)).toBeNull();
+  });
+
   it("applyLanes 单测：单类型不插锚点、other 类型不挂锚、锚点链按表→指标→字段", () => {
     const onlyTable: AssetGraphNode[] = [
       { id: "table:a", label: "a", type: "table" },

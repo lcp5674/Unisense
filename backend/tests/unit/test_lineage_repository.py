@@ -118,6 +118,7 @@ class _MetaRow:
         catalog_id: int | None = None,
         entity_name: str | None = None,
         sensitivity_level: str | None = None,
+        dw_layer: str | None = None,
     ) -> None:
         self.table = table
         self.metric_code = metric_code
@@ -127,6 +128,7 @@ class _MetaRow:
         self.id = catalog_id
         self.entity_name = entity_name
         self.sensitivity_level = sensitivity_level
+        self.dw_layer = dw_layer
 
 
 class _FakeDB:
@@ -999,7 +1001,14 @@ async def test_resolve_node_meta_metric_and_table() -> None:
     db = _FakeDB(
         [],
         meta_rows=[
-            _MetaRow(table="metric", metric_code="gmv", domain="sales", pii_flag=True, owner_id=7),
+            _MetaRow(
+                table="metric",
+                metric_code="gmv",
+                domain="sales",
+                pii_flag=True,
+                owner_id=7,
+                dw_layer="DWS",
+            ),
             _MetaRow(
                 table="catalog",
                 catalog_id=42,
@@ -1020,6 +1029,7 @@ async def test_resolve_node_meta_metric_and_table() -> None:
         "pii": True,
         "domain": "sales",
         "owner": "7",
+        "dw_layer": "dws",  # DWS 大写枚举 → 小写归一化（前端层色描边消费）
     }
     assert out["table:orders"]["entity_id"] == 42
     assert out["table:orders"]["pii"] is True  # PII-HIGH 含 PII

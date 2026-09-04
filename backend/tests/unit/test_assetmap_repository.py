@@ -240,13 +240,16 @@ class TestSummarizeSchema:
 
 
 class TestGraphFromMysql:
-    def _metric(self, code: str, domain: str, pii: bool = False) -> SimpleNamespace:
+    def _metric(
+        self, code: str, domain: str, pii: bool = False, dw_layer: str | None = None
+    ) -> SimpleNamespace:
         return SimpleNamespace(
             metric_code=code,
             domain=domain,
             pii_flag=pii,
             owner_id=1,
             status="PUBLISHED",
+            dw_layer=dw_layer,
         )
 
     def _catalog(
@@ -288,7 +291,9 @@ class TestGraphFromMysql:
         s = _session()
         repo = AssetMapRepository(s)
         r_metrics = MagicMock()
-        r_metrics.all.return_value = [self._metric("sales_gmv_amount_day", "sales")]
+        r_metrics.all.return_value = [
+            self._metric("sales_gmv_amount_day", "sales", dw_layer="DWS")
+        ]
         r_edges = MagicMock()
         r_edges.all.return_value = [self._edge("table:sales.ods", "metric:sales_gmv_amount_day")]
         s.execute = AsyncMock(
@@ -299,6 +304,7 @@ class TestGraphFromMysql:
 
         assert nodes[0]["id"] == "metric:sales_gmv_amount_day"
         assert nodes[0]["label"] == "sales_gmv_amount_day"
+        assert nodes[0]["dw_layer"] == "dws"  # DWS 大写枚举 → 小写归一化
         assert len(edges) == 1
         edge_stmt = s.execute.call_args_list[3].args[0]
         compiled = str(edge_stmt.compile(compile_kwargs={"literal_binds": True}))
