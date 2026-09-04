@@ -1244,7 +1244,31 @@ function OpsTab() {
                 </Tag>
               ),
             },
-            { title: "任务/节点", width: 110, render: (_, r) => `${r.scanned_tasks}/${r.scanned_steps}` },
+            {
+              title: "模式",
+              dataIndex: "scan_mode",
+              width: 90,
+              render: (v: string) =>
+                v === "full" ? (
+                  <Tag color="blue">全量</Tag>
+                ) : (
+                  <Tooltip title="周期增量扫描（按水位）；0/0 = 无变更，属正常">
+                    <Tag>增量</Tag>
+                  </Tooltip>
+                ),
+            },
+            {
+              title: "任务/节点",
+              width: 100,
+              render: (_, r) =>
+                r.scan_mode === "incremental" &&
+                r.scanned_tasks === 0 &&
+                r.scanned_steps === 0 ? (
+                  <span style={{ color: "#999" }}>0/0 空扫</span>
+                ) : (
+                  `${r.scanned_tasks}/${r.scanned_steps}`
+                ),
+            },
             { title: "直入", dataIndex: "parsed_ok", width: 70 },
             { title: "LLM 确认", dataIndex: "llm_confirmed", width: 90 },
             { title: "分歧", dataIndex: "diverged", width: 70 },

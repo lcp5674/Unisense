@@ -787,6 +787,7 @@ class DpSyncService:
                 )
             await self._db.commit()
             detail = dict(counters)
+            detail["scan_mode"] = "full" if full_scan else "incremental"
             detail["seen_pairs"] = len(seen_pairs)
             detail["missing"] = missing
             detail["stale_flagged"] = stale_flagged
@@ -794,6 +795,7 @@ class DpSyncService:
             await self._dp_repo.update_run_log(
                 run.id,
                 status=log_status,
+                scan_mode="full" if full_scan else "incremental",
                 scanned_tasks=counters["scanned_tasks"],
                 scanned_steps=counters["scanned_steps"],
                 parsed_ok=counters["parsed_ok"],
@@ -831,7 +833,10 @@ class DpSyncService:
                 # 失败必须可见：rollback 已撤销 run_log/ingest_run 的未提交行，
                 # 直接 update 会 0 行静默失败 → 重建一条 failed 记录（双轨同写）。
                 await self._dp_repo.create_run_log(
-                    status="failed", error=str(exc), run_at=now
+                    status="failed",
+                    scan_mode="full" if full_scan else "incremental",
+                    error=str(exc),
+                    run_at=now,
                 )
                 failed_run = await self._lineage_repo.begin_ingest_run(DP_PROVENANCE)
                 await self._lineage_repo.finish_ingest_run(

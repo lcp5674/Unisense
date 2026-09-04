@@ -205,6 +205,7 @@ describe("LineageDpSync", () => {
           id: 1,
           run_at: "2026-09-03T10:00:00",
           status: "success",
+          scan_mode: "full",
           scanned_tasks: 2,
           scanned_steps: 3,
           parsed_ok: 2,
@@ -227,6 +228,44 @@ describe("LineageDpSync", () => {
     await user.click(screen.getByText(/运\s*维/));
     await screen.findByText("运行记录");
     expect(mockedApi.getDpSyncWatermark).toHaveBeenCalled();
+    // 模式列：full → 全量 Tag；任务/节点 2/3
+    expect(screen.getByText("全量")).toBeTruthy();
+    expect(screen.getByText("2/3")).toBeTruthy();
+  });
+
+  it("renders incremental empty-scan run as 0/0 空扫 with mode tag", async () => {
+    const user = userEvent.setup();
+    mockedApi.listDpSyncRuns.mockResolvedValue({
+      items: [
+        {
+          id: 2,
+          run_at: "2026-09-03T11:00:00",
+          status: "success",
+          scan_mode: "incremental",
+          scanned_tasks: 0,
+          scanned_steps: 0,
+          parsed_ok: 0,
+          llm_confirmed: 0,
+          diverged: 0,
+          llm_fallback: 0,
+          unparseable: 0,
+          tickets_created: 0,
+          tickets_resolved: 0,
+          errors: 0,
+          llm_calls: 0,
+          duration_ms: 50,
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 10,
+    });
+    renderPage();
+    await user.click(screen.getByText(/运\s*维/));
+    await screen.findByText("运行记录");
+    // 增量空扫：增量 Tag + 0/0 空扫（而非裸 0/0 误导）
+    expect(screen.getByText("增量")).toBeTruthy();
+    expect(screen.getByText("0/0 空扫")).toBeTruthy();
   });
 
   it("ops scan submits async task and surfaces failure error clearly", async () => {

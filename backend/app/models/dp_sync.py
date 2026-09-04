@@ -399,7 +399,14 @@ class DpSyncRunLog(Base, BaseModel):
         String(16),
         nullable=False,
         default="running",
-        comment="running/success/failed",
+        comment="running/success/failed/cancelled",
+    )
+    scan_mode: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="incremental",
+        comment="扫描模式：full=全量（首次/重置/周期自动全量/手动立即全量）；"
+        "incremental=增量（周期水位）",
     )
     scanned_tasks: Mapped[int] = mapped_column(
         Integer,

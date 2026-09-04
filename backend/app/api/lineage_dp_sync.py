@@ -359,6 +359,7 @@ async def list_runs(
                     "id": r.id,
                     "run_at": r.run_at,
                     "status": r.status,
+                    "scan_mode": r.scan_mode,
                     "scanned_tasks": r.scanned_tasks,
                     "scanned_steps": r.scanned_steps,
                     "parsed_ok": r.parsed_ok,

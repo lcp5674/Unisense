@@ -3638,6 +3638,7 @@ export interface DpSyncRun {
   id: number;
   run_at: string;
   status: "running" | "success" | "failed" | "cancelled";
+  scan_mode: "full" | "incremental";
   scanned_tasks: number;
   scanned_steps: number;
   parsed_ok: number;
