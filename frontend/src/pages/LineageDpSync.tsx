@@ -230,6 +230,8 @@ function ConfigTab() {
         form.setFieldsValue({
           enabled: false,
           source_id: "mysql_uncategorized",
+          // 与后端 create_default_config 一致：元库库名默认 dp_stable，可按环境改
+          schema_name: "dp_stable",
           poll_interval_minutes: 5,
           // 与后端 create_default_config 一致：默认仅 SQL 任务 / Hive-Spark SQL 节点
           task_type_filter: [1],
@@ -258,6 +260,8 @@ function ConfigTab() {
       const payload: Partial<DpSyncConfig> = {
         enabled: values.enabled,
         source_id: values.source_id,
+        // dp 元库所在数据库名（后端 _safe_table_name 白名单校验，缺省回退 dp_stable）
+        schema_name: String(values.schema_name ?? "").trim() || "dp_stable",
         poll_interval_minutes: Number(values.poll_interval_minutes),
         // 空数组 = 全部类型（含未识别）；未配置时后端默认仅 SQL 任务/Hive SQL
         task_type_filter: values.task_type_filter ?? [],
@@ -426,6 +430,22 @@ function ConfigTab() {
                     label: `${s.source_id} · ${s.name}（${s.source_type}）`,
                   }))}
                 />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={8}>
+              <Form.Item
+                name="schema_name"
+                label="元数据库名"
+                extra="dp 元库（dispatch_task/dispatch_task_step）所在数据库，如 dp_stable；不同环境库名可不同，选完数据源后请核对"
+                rules={[
+                  { required: true, message: "请输入 dp 元库所在数据库名" },
+                  {
+                    pattern: /^[A-Za-z0-9_]+$/,
+                    message: "仅允许字母/数字/下划线（库名，不含点）",
+                  },
+                ]}
+              >
+                <Input placeholder="如 dp_stable" allowClear />
               </Form.Item>
             </Col>
           </Row>

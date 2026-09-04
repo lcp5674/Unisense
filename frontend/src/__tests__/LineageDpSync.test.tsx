@@ -44,6 +44,7 @@ describe("LineageDpSync", () => {
     mockedApi.getDpSyncConfig.mockResolvedValue({
       enabled: false,
       source_id: "mysql_uncategorized",
+      schema_name: "dp_stable",
       poll_interval_minutes: 5,
       llm_enabled: true,
       resolve_memory_enabled: true,
@@ -194,6 +195,35 @@ describe("LineageDpSync", () => {
     const payload = mockedApi.saveDpSyncConfig.mock.calls[0][0];
     expect(payload.poll_interval_minutes).toBe(5);
     expect(payload.source_id).toBe("mysql_uncategorized");
+    // 元数据库名随配置保存（后端缺省回退 dp_stable，前端显式回填）
+    expect(payload.schema_name).toBe("dp_stable");
+  });
+
+  it("saves schema_name (元数据库名) edited to a non-default database", async () => {
+    const user = userEvent.setup();
+    mockedApi.saveDpSyncConfig.mockResolvedValue({
+      enabled: false,
+      source_id: "mysql_uncategorized",
+      schema_name: "dp_stable",
+      poll_interval_minutes: 5,
+      llm_enabled: true,
+      resolve_memory_enabled: true,
+      owner_backfill: "orphan_only",
+    });
+    renderPage();
+    // 表单回显后端配置的库名（默认 dp_stable）
+    await screen.findByText(/保\s*存/);
+    const schemaInput = screen.getByPlaceholderText("如 dp_stable");
+    expect(schemaInput).toHaveValue("dp_stable");
+    // 用户按生产实际库名修改（如 dp_ods）后保存 → payload 携带新库名
+    await user.clear(schemaInput);
+    await user.type(schemaInput, "dp_ods");
+    await user.click(screen.getByText(/保\s*存/));
+    await waitFor(() =>
+      expect(mockedApi.saveDpSyncConfig).toHaveBeenCalledTimes(1)
+    );
+    const payload = mockedApi.saveDpSyncConfig.mock.calls[0][0];
+    expect(payload.schema_name).toBe("dp_ods");
   });
 
   it("lists tickets in tickets tab and resolves", async () => {
