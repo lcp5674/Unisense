@@ -196,6 +196,34 @@ function exprKind(
   return { label: "函数加工", color: "geekblue" };
 }
 
+/** 字段钻取图节点装饰：字段节点 label 带所属表名（短表名.列名），跨表场景一眼可辨。
+ *  表级/指标节点保持原样。导出供测试与图渲染复用。 */
+export function decorateDrillGraphNodes(drill: FieldDrillData | null): AssetGraphNode[] {
+  if (!drill) return [];
+  return drill.nodes.map((n) => {
+    if (n.type !== "field" || !n.table) return n as AssetGraphNode;
+    const tbl = n.table.split(".").pop() || n.table;
+    return { ...n, label: `${tbl}.${n.label}` } as AssetGraphNode;
+  });
+}
+
+/** 字段钻取图边装饰：字段边中点标注「加工方式 · 表达式」（表达式长则截断 + …），
+ *  完整表达式存 fullExpr 供 hover tooltip；直取边仅标「直取」。表级主图边不设
+ *  edgeLabel → AssetGraph 不渲染 label，零影响。导出供测试与图渲染复用。 */
+export function decorateDrillGraphEdges(drill: FieldDrillData | null): AssetGraphEdge[] {
+  if (!drill) return [];
+  return drill.edges.map((e) => {
+    const expr = (e as { expression?: string | null }).expression ?? null;
+    const kind = exprKind(expr);
+    const exprHead = expr ? (expr.length > 20 ? `${expr.slice(0, 20)}…` : expr) : "";
+    return {
+      ...e,
+      edgeLabel: expr ? `${kind.label} · ${exprHead}` : kind.label,
+      fullExpr: expr || "",
+    } as AssetGraphEdge;
+  });
+}
+
 /** 血缘候选节点类型标签（影响分析选项框下拉分组）。 */
 const NODE_TYPE_LABEL: Record<string, string> = {
   table: "表",
@@ -725,30 +753,11 @@ function GraphTab() {
   //（短表名.列名，跨表场景一眼可辨），字段边中点标注「加工方式 · 表达式」（完整表达式
   // 走 fullExpr，hover 边可看）。表级主图边无表达式字段 → 不渲染 label，零影响。
   const drillGraphNodes = useMemo<AssetGraphNode[]>(
-    () =>
-      drill
-        ? drill.nodes.map((n) => {
-            if (n.type !== "field" || !n.table) return n as AssetGraphNode;
-            const tbl = n.table.split(".").pop() || n.table;
-            return { ...n, label: `${tbl}.${n.label}` } as AssetGraphNode;
-          })
-        : [],
+    () => decorateDrillGraphNodes(drill),
     [drill],
   );
   const drillGraphEdges = useMemo<AssetGraphEdge[]>(
-    () =>
-      drill
-        ? drill.edges.map((e) => {
-            const expr = (e as { expression?: string | null }).expression ?? null;
-            const kind = exprKind(expr);
-            const exprHead = expr ? (expr.length > 20 ? `${expr.slice(0, 20)}…` : expr) : "";
-            return {
-              ...e,
-              edgeLabel: expr ? `${kind.label} · ${exprHead}` : kind.label,
-              fullExpr: expr || "",
-            } as AssetGraphEdge;
-          })
-        : [],
+    () => decorateDrillGraphEdges(drill),
     [drill],
   );
 

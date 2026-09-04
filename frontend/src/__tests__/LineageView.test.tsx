@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, act, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
-import { LineageView, buildSubgraph, resolveRootId, parseResultToGraphData, upstreamDepsToGraphData, edgesToGraphData } from "../pages/LineageView";
+import { LineageView, buildSubgraph, resolveRootId, parseResultToGraphData, upstreamDepsToGraphData, edgesToGraphData, decorateDrillGraphNodes, decorateDrillGraphEdges } from "../pages/LineageView";
 import { adaptiveBaseRadius } from "../components/assetmap/AssetGraph";
 import * as api from "../api";
 import type { LineageGraphData } from "../types";
@@ -1747,4 +1747,50 @@ describe("LineageView 治理中心 Tab", () => {
     expect(within(panel).getByText("78")).toBeInTheDocument();
   });
 
+});
+
+describe("decorateDrillGraph 字段钻取图：表名与加工信息画进图里", () => {
+  const drill = {
+    table: "orders",
+    nodes: [
+      { id: "field:customers.id", type: "field", label: "id", table: "customers" },
+      { id: "field:orders.id", type: "field", label: "id", table: "wedw_dwd.orders" },
+      { id: "metric:revenue", type: "metric", label: "营收" },
+    ],
+    edges: [
+      { source: "field:customers.id", target: "field:orders.id", type: "DERIVED_FROM", expression: null },
+      {
+        source: "field:customers.id",
+        target: "field:orders.amount",
+        type: "DERIVED_FROM",
+        expression: "SUM(amount * 1.2) AS amount",
+      },
+    ],
+    mappings: [],
+  };
+
+  it("字段节点 label 带所属表名（短表名.列名），表级/指标节点不受影响", () => {
+    const nodes = decorateDrillGraphNodes(drill as never);
+    // customers 无库前缀 → customers.id；orders 有库前缀 → 取短表名 orders.id
+    expect(nodes.find((n) => n.id === "field:customers.id")?.label).toBe("customers.id");
+    expect(nodes.find((n) => n.id === "field:orders.id")?.label).toBe("orders.id");
+    // 指标节点不带表名，保持原样
+    expect(nodes.find((n) => n.id === "metric:revenue")?.label).toBe("营收");
+  });
+
+  it("字段边标注加工方式+表达式（edgeLabel），完整表达式进 fullExpr；直取边标「直取」", () => {
+    const edges = decorateDrillGraphEdges(drill as never);
+    const plain = edges.find((e) => (e as { expression?: string | null }).expression == null);
+    expect(plain?.edgeLabel).toBe("直取");
+    expect((plain as { fullExpr?: string }).fullExpr).toBe("");
+    const calc = edges.find((e) => e !== plain);
+    expect(calc?.edgeLabel).toContain("聚合加工");
+    expect(calc?.edgeLabel).toContain("SUM(amount * 1.2)");
+    expect((calc as { fullExpr?: string }).fullExpr).toBe("SUM(amount * 1.2) AS amount");
+  });
+
+  it("null/空钻取返回空数组（防崩溃）", () => {
+    expect(decorateDrillGraphNodes(null)).toEqual([]);
+    expect(decorateDrillGraphEdges(null)).toEqual([]);
+  });
 });

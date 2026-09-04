@@ -25,6 +25,11 @@ export interface AssetGraphEdge extends Record<string, unknown> {
   source: string;
   target: string;
   type: string;
+  /** 字段级血缘边在连线上展示的加工标注（如「空值兜底 COALESCE(id,…)」）；
+   *  仅字段钻取等携带表达式信息的边设置，表级主图边不设 → 不渲染 label，零影响。 */
+  edgeLabel?: string;
+  /** 完整加工表达式（用于边 label 截断后的 hover 完整查看）。 */
+  fullExpr?: string;
 }
 
 interface AssetGraphProps {
@@ -1290,6 +1295,22 @@ function GraphCanvas({
               return d?.bidirectional ? true : false;
             },
             radius: 10,
+            // 字段级血缘边的加工标注：携带 edgeLabel 的边（字段钻取子图）在连线中点显示
+            // 加工方式/表达式（白底 pill、小字），表级主图边无 edgeLabel → 空串不渲染。
+            labelText: (e) => {
+              const d = e.data as RenderEdge | undefined;
+              return d?.edgeLabel ?? "";
+            },
+            labelPlacement: "center",
+            labelOffset: 8,
+            labelBackground: true,
+            labelBackgroundFill: "#ffffff",
+            labelBackgroundPadding: [1, 4],
+            labelBackgroundLineWidth: 1,
+            labelBackgroundStroke: "#cbd5e1",
+            labelFill: "#475569",
+            labelFontSize: 10,
+            labelFontWeight: 500,
           },
           // 路径高亮状态（hover 血缘链）：active=链上边醒目（加亮不加粗，保留方向箭头），
           // inactive=非链边整体压暗到 0.05，让"从哪来/流向哪"一目了然。
@@ -1319,16 +1340,11 @@ function GraphCanvas({
             getContent: (evt: IElementEvent) => {
               const raw = evt.target as { id?: string; __data__?: { id?: string } } | undefined;
               const id = raw?.id ?? raw?.__data__?.id;
-              const node = id
-                ? (graph?.getNodeData(String(id))?.data as AssetGraphNode | undefined)
-                : undefined;
-              const label = node?.label ?? id ?? "";
-              const up = id ? (outDegreeMapRef.current.get(String(id)) ?? 0) : 0; // 依赖的上游
-              const down = id ? (inDegreeMapRef.current.get(String(id)) ?? 0) : 0; // 被引用的下游
-              const total = up + down;
               const div = document.createElement("div");
               div.style.fontSize = "12px";
               div.style.lineHeight = "1.6";
+              div.style.maxWidth = "360px";
+              div.style.wordBreak = "break-all";
               // P0-4：label 来自 SQL 解析/DP 同步/手动登记，直接插 innerHTML 是存储型
               // XSS 向量（节点名可含 HTML）。先转义再拼接；数字字段天然安全。
               const esc = (s: string) =>
@@ -1343,8 +1359,32 @@ function GraphCanvas({
                       "'": "&#39;",
                     })[c] as string,
                 );
-              div.innerHTML = `<b>${esc(label)}</b><br/>依赖 ${up} 项（上游）<br/>被 ${down} 项引用（下游）<br/><span style="color:#e65100">血缘度 ${total}</span>`;
-              return div;
+              if (id) {
+                // 优先节点：展示名称 + 血缘度
+                const node = graph?.getNodeData(String(id))?.data as AssetGraphNode | undefined;
+                if (node && !node.anchor) {
+                  const label = node.label ?? String(id);
+                  const up = outDegreeMapRef.current.get(String(id)) ?? 0;
+                  const down = inDegreeMapRef.current.get(String(id)) ?? 0;
+                  const total = up + down;
+                  div.innerHTML = `<b>${esc(label)}</b><br/>依赖 ${up} 项（上游）<br/>被 ${down} 项引用（下游）<br/><span style="color:#e65100">血缘度 ${total}</span>`;
+                  return div;
+                }
+                // 兜底边：字段级血缘边展示完整加工表达式（edgeLabel 已标注加工方式与
+                // 截断表达式，此处补全 fullExpr）。无表达式的普通边不弹内容。
+                const edge = graph?.getEdgeData(String(id)) as
+                  | { data?: RenderEdge }
+                  | undefined;
+                const ed = edge?.data;
+                if (ed?.edgeLabel || ed?.fullExpr) {
+                  const kind = ed.fullExpr
+                    ? `<br/><span style="color:#1a73e8">加工表达式：${esc(ed.fullExpr)}</span>`
+                    : "";
+                  div.innerHTML = `<b>${esc(ed.edgeLabel ?? "字段映射")}</b>${kind}<br/><span style="color:#94a3b8">hover 查看完整加工表达式</span>`;
+                  return div;
+                }
+              }
+              return null as unknown as HTMLElement;
             },
           },
         ],
