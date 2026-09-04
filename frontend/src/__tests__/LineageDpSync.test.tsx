@@ -16,6 +16,7 @@ vi.mock("../api", () => ({
   createDpRetryTask: vi.fn(),
   listDpSyncRuns: vi.fn(),
   getDpSyncWatermark: vi.fn(),
+  getDpSyncStats: vi.fn(),
   resetDpSyncWatermark: vi.fn(),
   scanDpSyncNow: vi.fn(),
   getDpSyncScanStatus: vi.fn(),
@@ -108,6 +109,49 @@ describe("LineageDpSync", () => {
       note: "预览范围为 dp 任务产出表",
     });
     mockedApi.createDpRetryTask.mockResolvedValue({ task: null });
+    mockedApi.getDpSyncStats.mockResolvedValue({
+      task_total: 118,
+      step_total: 260,
+      dp_reachable: true,
+      dp_unreachable_reason: null,
+      cumulative: {
+        runs: 3,
+        scanned_tasks: 100,
+        scanned_steps: 120,
+        parsed_ok: 60,
+        llm_confirmed: 20,
+        diverged: 10,
+        llm_fallback: 5,
+        unparseable: 3,
+        errors: 2,
+        parse_success_total: 80,
+        parse_fail_total: 20,
+        parse_rate: 80.0,
+      },
+      last_full_scan: {
+        id: 9,
+        run_at: "2026-09-03T10:00:00",
+        status: "success",
+        scan_mode: "full",
+        scanned_tasks: 40,
+        scanned_steps: 55,
+        parsed_ok: 30,
+        llm_confirmed: 5,
+        diverged: 4,
+        llm_fallback: 2,
+        unparseable: 1,
+        tickets_created: 2,
+        tickets_resolved: 1,
+        errors: 1,
+        llm_calls: 3,
+        duration_ms: 40000,
+        parse_success_total: 35,
+        parse_fail_total: 8,
+        parse_rate: 81.4,
+      },
+      pending_tickets: { pending: 2, resolved_pending: 1 },
+      lineage: { table_edges: 70, table_nodes: 42, field_mappings: 500 },
+    });
     mockedApi.resolveDpSyncLlmDisabled.mockResolvedValue({
       resolved: 0,
       skipped: 0,
@@ -328,6 +372,62 @@ describe("LineageDpSync", () => {
     // 模式列：full → 全量 Tag；任务/节点 2/3
     expect(screen.getByText("全量")).toBeTruthy();
     expect(screen.getByText("2/3")).toBeTruthy();
+  });
+
+  it("ops tab renders stats overview card with task/parse/lineage numbers", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByText(/运\s*维/));
+    // 统计卡四项 Statistic：任务总量/血缘表节点/字段血缘/待抉择
+    await screen.findByText("DP 任务总量（活跃）");
+    expect(screen.getByText("118")).toBeInTheDocument();
+    expect(screen.getByText("42")).toBeInTheDocument();
+    expect(screen.getByText("500")).toBeInTheDocument();
+    // 最近全量轮：成功 35 / 失败 8 / 成功率 81.4%（来自 API 派生字段）
+    expect(screen.getByText("解析成功 35")).toBeInTheDocument();
+    expect(screen.getByText("解析失败 8")).toBeInTheDocument();
+    expect(screen.getByText(/成功率 81\.4%/)).toBeInTheDocument();
+    expect(screen.getByText(/扫描 40 任务 \/ 55 节点/)).toBeInTheDocument();
+    // 历史累计：3 次成功轮 · 成功 80 / 失败 20 · 80%
+    expect(screen.getByText("历史累计（3 次成功轮）")).toBeInTheDocument();
+    expect(screen.getByText("解析成功 80")).toBeInTheDocument();
+    expect(screen.getByText(/累计成功率 80%/)).toBeInTheDocument();
+    // 待抉择存量（pending 2 + resolved_pending 1 = 3）
+    const pendings = screen.getAllByText("3");
+    expect(pendings.length).toBeGreaterThan(0);
+    expect(mockedApi.getDpSyncStats).toHaveBeenCalledTimes(1);
+  });
+
+  it("ops tab stats shows unreachable alert when dp source is down", async () => {
+    const user = userEvent.setup();
+    mockedApi.getDpSyncStats.mockResolvedValue({
+      task_total: null,
+      step_total: null,
+      dp_reachable: false,
+      dp_unreachable_reason: "dp 数据源不可达或查询失败：连接超时",
+      cumulative: {
+        runs: 0,
+        scanned_tasks: 0,
+        scanned_steps: 0,
+        parsed_ok: 0,
+        llm_confirmed: 0,
+        diverged: 0,
+        llm_fallback: 0,
+        unparseable: 0,
+        errors: 0,
+        parse_success_total: 0,
+        parse_fail_total: 0,
+        parse_rate: null,
+      },
+      last_full_scan: null,
+      pending_tickets: {},
+      lineage: { table_edges: 0, table_nodes: 0, field_mappings: 0 },
+    });
+    renderPage();
+    await user.click(screen.getByText(/运\s*维/));
+    await screen.findByText("dp 数据源不可达");
+    expect(screen.getByText(/连接超时/)).toBeInTheDocument();
+    expect(screen.getByText("尚无成功的全量扫描记录")).toBeInTheDocument();
   });
 
   it("renders incremental empty-scan run as 0/0 空扫 with mode tag", async () => {

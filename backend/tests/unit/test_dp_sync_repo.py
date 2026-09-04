@@ -147,3 +147,95 @@ async def test_list_field_mappings_by_table_filters_active_column_mappings() -> 
     assert "target_table = 'dwd.dp_dq_measure_df'" in sql
     # 排除降级占位（source_column IS NOT NULL 已涵盖）与软删行
     assert "source_column" in sql
+
+
+class _StatsFakeDb:
+    """sync_stats 专用假 session：按序返回预置结果并记录语句。"""
+
+    def __init__(self, results: list) -> None:
+        self._results = list(results)
+        self.executed: list = []
+
+    async def execute(self, stmt, *args, **kwargs):
+        self.executed.append(stmt)
+        return self._results.pop(0)
+
+
+def _sync_stats_repo(results: list):
+    from app.services.lineage.dp_sync_repo import DpLineageRepository as Repo
+
+    db = _StatsFakeDb(results)
+    return Repo(db), db
+
+
+@pytest.mark.asyncio
+async def test_sync_stats_aggregates_and_derives() -> None:
+    """统计概览聚合：累计 SUM/最近全量轮/待抉择存量/血缘沉淀 + 成功率派生。"""
+    from types import SimpleNamespace as NS
+
+    cumulative_row = (3, 100, 120, 60, 20, 10, 5, 3, 2)  # runs + 8 sums
+    log_row = NS(
+        to_dict=lambda: {
+            "id": 9,
+            "scan_mode": "full",
+            "scanned_tasks": 40,
+            "scanned_steps": 55,
+            "parsed_ok": 30,
+            "llm_confirmed": 5,
+            "diverged": 4,
+            "llm_fallback": 2,
+            "unparseable": 1,
+            "errors": 1,
+        }
+    )
+    results = [
+        NS(one=lambda: cumulative_row),          # cumulative
+        NS(scalar_one_or_none=lambda: log_row),  # last full scan
+        NS(all=lambda: [("pending", 2), ("resolved_pending", 1)]),  # tickets
+        NS(scalar=lambda: 70),                   # table edges
+        NS(scalar=lambda: 42),                   # table nodes
+        NS(scalar=lambda: 500),                  # field mappings
+    ]
+    repo, db = _sync_stats_repo(results)
+    stats = await repo.sync_stats()
+    assert len(db.executed) == 6
+    assert stats["cumulative"]["runs"] == 3
+    assert stats["cumulative"]["parsed_ok"] == 60
+    assert stats["last_full_scan"]["scanned_tasks"] == 40
+    assert stats["pending_tickets"] == {"pending": 2, "resolved_pending": 1}
+    assert stats["lineage"] == {
+        "table_edges": 70,
+        "table_nodes": 42,
+        "field_mappings": 500,
+    }
+    # 派生（API 层 _derived）：最近全量轮 ok=35 bad=8 → rate 81.4
+    ok = 30 + 5
+    bad = 4 + 2 + 1 + 1
+    assert round(ok * 100.0 / (ok + bad), 1) == 81.4
+
+
+@pytest.mark.asyncio
+async def test_sync_stats_sql_scopes_dp_channel_and_active() -> None:
+    """血缘沉淀统计仅统计 dp_sql 通道 + 未软删；run_log 仅成功成功轮。"""
+    from types import SimpleNamespace as NS
+
+    def _scalar(v):
+        return NS(scalar=lambda: v)
+
+    results = [
+        NS(one=lambda: (0, *([0] * 8))),
+        NS(scalar_one_or_none=lambda: None),
+        NS(all=lambda: []),
+        _scalar(0),
+        _scalar(0),
+        _scalar(0),
+    ]
+    repo, db = _sync_stats_repo(results)
+    await repo.sync_stats()
+    edge_sql = str(db.executed[3].compile(compile_kwargs={"literal_binds": True}))
+    assert "provenance = 'dp_sql'" in edge_sql
+    assert "deleted_at IS NULL" in edge_sql
+    run_sql = str(db.executed[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "status = 'success'" in run_sql
+    ticket_sql = str(db.executed[2].compile(compile_kwargs={"literal_binds": True}))
+    assert "resolution IS NULL" in ticket_sql

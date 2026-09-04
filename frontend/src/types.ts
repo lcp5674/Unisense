@@ -3696,6 +3696,52 @@ export interface DpSyncRun {
   detail?: Record<string, unknown> | null;
 }
 
+/** dp 血缘同步统计概览（运维页「统计概览」卡，GET /lineage/dp-sync/stats）。 */
+export interface DpSyncStats {
+  /** dp 数据源活跃任务总量（实时 COUNT；源不可达为 null） */
+  task_total: number | null;
+  /** dp 数据源活跃节点（step）总量 */
+  step_total: number | null;
+  dp_reachable: boolean;
+  dp_unreachable_reason: string | null;
+  /** 历史成功轮累计 */
+  cumulative: {
+    runs: number;
+    scanned_tasks: number;
+    scanned_steps: number;
+    parsed_ok: number;
+    llm_confirmed: number;
+    diverged: number;
+    llm_fallback: number;
+    unparseable: number;
+    errors: number;
+  } & {
+    /** API 派生：解析成功总数（parsed_ok + llm_confirmed） */
+    parse_success_total?: number;
+    /** API 派生：解析失败总数（diverged + llm_fallback + unparseable + errors） */
+    parse_fail_total?: number;
+    /** API 派生：解析成功率（百分比，一位小数） */
+    parse_rate?: number | null;
+  };
+  /** 最近一次成功全量轮的解析成果（增量轮只扫变更任务，不作概览口径） */
+  last_full_scan: (Omit<DpSyncRun, "error" | "detail"> & {
+    parse_success_total?: number;
+    parse_fail_total?: number;
+    parse_rate?: number | null;
+  }) | null;
+  /** 待抉择存量（未裁决单按状态计数） */
+  pending_tickets: Record<string, number>;
+  /** dp 通道血缘沉淀 */
+  lineage: {
+    /** 活跃表级血缘边数 */
+    table_edges: number;
+    /** 涉及的 distinct 表节点数 */
+    table_nodes: number;
+    /** 字段映射条数（解析出的字段级血缘） */
+    field_mappings: number;
+  };
+}
+
 export interface DpSyncWatermarkInfo {
   last_max_update?: string | null;
   last_scan_at?: string | null;

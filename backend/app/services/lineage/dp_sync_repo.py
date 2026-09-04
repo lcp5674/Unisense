@@ -15,7 +15,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 
 from app.db.mysql import AsyncSession
 from app.models.data_source import DBCatalog
@@ -26,6 +26,7 @@ from app.models.dp_sync import (
     DpSyncWatermark,
     LineageFieldMapping,
 )
+from app.models.lineage import LineageEdge
 from app.models.user import Organization, User
 
 #: 影子用户归属组织（不存在时自动创建）。
@@ -173,6 +174,100 @@ class DpLineageRepository:
             await self._db.execute(
                 update(DpSyncRunLog).where(DpSyncRunLog.id == log_id).values(**data)
             )
+
+    # ---- 统计概览 ----
+    async def sync_stats(self) -> dict[str, Any]:
+        """dp 血缘同步统计聚合（运维页「统计概览」卡；只读，不连 dp 源）。
+
+        四块数据：
+        - ``cumulative``：历史成功轮累计（run_log SUM）——解析成功 = parsed_ok +
+          llm_confirmed，未解析成功 = diverged + llm_fallback + unparseable + errors
+        - ``last_full_scan``：最近一次成功全量轮（最贴近「dp 数据源全量解析成果」
+          ——增量轮只扫变更任务，计数远小于全量，不作概览口径）
+        - ``pending_tickets``：待抉择存量（未裁决单按状态计数）
+        - ``lineage``：dp 通道血缘沉淀——活跃表级边 / 涉及 distinct 表节点 /
+          字段映射条数（lineage_field_mapping 仅 dp 同步写入，全表即 dp 字段数）
+        """
+        success = DpSyncRunLog.status == "success"
+        not_deleted = DpSyncRunLog.deleted_at.is_(None)
+        sum_cols = {
+            "scanned_tasks": func.sum(DpSyncRunLog.scanned_tasks),
+            "scanned_steps": func.sum(DpSyncRunLog.scanned_steps),
+            "parsed_ok": func.sum(DpSyncRunLog.parsed_ok),
+            "llm_confirmed": func.sum(DpSyncRunLog.llm_confirmed),
+            "diverged": func.sum(DpSyncRunLog.diverged),
+            "llm_fallback": func.sum(DpSyncRunLog.llm_fallback),
+            "unparseable": func.sum(DpSyncRunLog.unparseable),
+            "errors": func.sum(DpSyncRunLog.errors),
+        }
+        row = (
+            await self._db.execute(
+                select(func.count(DpSyncRunLog.id), *sum_cols.values()).where(
+                    success, not_deleted
+                )
+            )
+        ).one()
+        cumulative = {
+            "runs": int(row[0] or 0),
+            **{k: int(v or 0) for k, v in zip(sum_cols.keys(), row[1:], strict=True)},
+        }
+
+        full_row = (
+            await self._db.execute(
+                select(DpSyncRunLog)
+                .where(
+                    success,
+                    DpSyncRunLog.scan_mode == "full",
+                    not_deleted,
+                )
+                .order_by(DpSyncRunLog.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+        ticket_rows = (
+            await self._db.execute(
+                select(DpResolutionTicket.status, func.count(DpResolutionTicket.id))
+                .where(
+                    DpResolutionTicket.deleted_at.is_(None),
+                    DpResolutionTicket.resolution.is_(None),
+                )
+                .group_by(DpResolutionTicket.status)
+            )
+        ).all()
+        pending = {str(r[0]): int(r[1]) for r in ticket_rows}
+
+        edge_cond = and_(
+            LineageEdge.provenance == "dp_sql", LineageEdge.deleted_at.is_(None)
+        )
+        table_edges = (
+            await self._db.execute(select(func.count(LineageEdge.id)).where(edge_cond))
+        ).scalar() or 0
+        nodes_sq = select(LineageEdge.source_node.label("n")).where(edge_cond).union_all(
+            select(LineageEdge.target_node.label("n")).where(edge_cond)
+        )
+        table_nodes = (
+            await self._db.execute(
+                select(func.count(func.distinct(nodes_sq.subquery().c.n)))
+            )
+        ).scalar() or 0
+        field_mappings = (
+            await self._db.execute(
+                select(func.count(LineageFieldMapping.id)).where(
+                    LineageFieldMapping.deleted_at.is_(None)
+                )
+            )
+        ).scalar() or 0
+        return {
+            "cumulative": cumulative,
+            "last_full_scan": full_row.to_dict() if full_row else None,
+            "pending_tickets": pending,
+            "lineage": {
+                "table_edges": int(table_edges),
+                "table_nodes": int(table_nodes),
+                "field_mappings": int(field_mappings),
+            },
+        }
 
     # ---- lineage_field_mapping（uq 幂等） ----
     async def upsert_field_mapping(

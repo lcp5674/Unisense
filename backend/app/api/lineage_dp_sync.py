@@ -35,7 +35,9 @@ from app.services.lineage.dp_sync_parser import DEFAULT_EXCLUDE_TABLE_PATTERNS
 from app.services.lineage.dp_sync_repo import DpLineageRepository
 from app.services.lineage.dp_sync_service import (
     DpSyncService,
+    _in_clause,
     _safe_table_name,
+    _type_filters,
 )
 
 logger = logging.getLogger(__name__)
@@ -209,6 +211,97 @@ async def preview_exclude_rules(
         "预览范围为 dp 任务产出表（out_table 去重全集）；脚本内源表命中在真实解析时逐 SQL 排除。"
     )
     return ok(data=result)
+
+
+@router.get("/stats", response_model=ApiResponse, dependencies=_ADMIN_DEPS)
+async def get_dp_sync_stats(
+    db=Depends(get_db_session),
+):
+    """dp 血缘同步统计概览（运维页顶部卡片）。
+
+    - ``task_total`` / ``step_total``：dp 数据源活跃任务/节点总量（按配置类型
+      过滤，实时 COUNT；源不可达为 null 并给 reason）
+    - ``last_full_scan``：最近一次成功全量轮的解析成果（成功 = parsed_ok +
+      llm_confirmed，失败 = diverged + llm_fallback + unparseable + errors，
+      附成功率 parse_rate）——增量轮只扫变更任务，不作概览口径
+    - ``cumulative``：历史成功轮累计
+    - ``pending_tickets``：待抉择存量（未裁决单按状态计数）
+    - ``lineage``：dp 通道血缘沉淀——活跃表级边 / 涉及 distinct 表节点 /
+      字段映射条数
+    """
+    repo = DpLineageRepository(db)
+    cfg = await repo.get_config()
+    stats = await repo.sync_stats()
+    task_total: int | None = None
+    step_total: int | None = None
+    reachable = False
+    reason = "not_configured" if cfg is None else None
+    if cfg is not None:
+        fetch = await _collector_factory(db)
+        collector = None
+        try:
+            collector = await fetch(cfg.source_id)
+            schema = _safe_table_name(cfg.schema_name, "schema_name", "dp_stable")
+            task_table = _safe_table_name(
+                cfg.task_table, "task_table", "dispatch_task"
+            )
+            step_table = _safe_table_name(
+                cfg.step_table, "step_table", "dispatch_task_step"
+            )
+            task_types, step_types = _type_filters(cfg)
+            tparams: dict[str, Any] = {}
+            tclause, tparams = _in_clause("type", task_types, "t", tparams)
+            task_rows = await collector.query(
+                f"SELECT COUNT(*) AS c FROM {schema}.{task_table} "
+                f"WHERE is_deleted=0{tclause}",
+                tparams,
+            )
+            sparams: dict[str, Any] = {}
+            tj_clause, sparams = _in_clause("t.type", task_types, "t", sparams)
+            ss_clause, sparams = _in_clause(
+                "st.task_step_type", step_types, "s", sparams
+            )
+            step_rows = await collector.query(
+                f"SELECT COUNT(*) AS c FROM {schema}.{step_table} st "
+                f"JOIN {schema}.{task_table} t ON st.task_id=t.id "
+                f"WHERE st.is_deleted=0 AND t.is_deleted=0{tj_clause}{ss_clause}",
+                sparams,
+            )
+            task_total = int(task_rows[0]["c"]) if task_rows else 0
+            step_total = int(step_rows[0]["c"]) if step_rows else 0
+            reachable = True
+        except Exception as exc:  # noqa: BLE001 —— 源不可达不阻断统计，给原因
+            reason = f"dp 数据源不可达或查询失败：{exc}"
+        finally:
+            if collector is not None:
+                await collector.dispose()
+
+    def _derived(bucket: dict[str, Any] | None) -> None:
+        if not bucket:
+            return
+        ok = int(bucket.get("parsed_ok") or 0) + int(bucket.get("llm_confirmed") or 0)
+        bad = (
+            int(bucket.get("diverged") or 0)
+            + int(bucket.get("llm_fallback") or 0)
+            + int(bucket.get("unparseable") or 0)
+            + int(bucket.get("errors") or 0)
+        )
+        denom = ok + bad
+        bucket["parse_success_total"] = ok
+        bucket["parse_fail_total"] = bad
+        bucket["parse_rate"] = round(ok * 100.0 / denom, 1) if denom else None
+
+    _derived(stats.get("last_full_scan"))
+    _derived(stats.get("cumulative"))
+    return ok(
+        data={
+            "task_total": task_total,
+            "step_total": step_total,
+            "dp_reachable": reachable,
+            "dp_unreachable_reason": reason,
+            **stats,
+        }
+    )
 
 
 @router.get("/meta", response_model=ApiResponse, dependencies=_ADMIN_DEPS)

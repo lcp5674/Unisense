@@ -199,6 +199,7 @@ import {
   Watermark,
   DpSyncConfig,
   DpSyncRun,
+  DpSyncStats,
   DpSyncWatermarkInfo,
   DpTicket,
   DpSyncMeta,
@@ -6008,6 +6009,11 @@ export async function listDpSyncRuns(params?: {
   return request<{ items: DpSyncRun[]; total: number; page: number; page_size: number }>(
     `${API_BASE}/lineage/dp-sync/runs?${qs.toString()}`
   );
+}
+
+/** dp 血缘同步统计概览（运维页「统计概览」卡）。 */
+export async function getDpSyncStats(): Promise<DpSyncStats> {
+  return request<DpSyncStats>(`${API_BASE}/lineage/dp-sync/stats`);
 }
 
 export async function getDpSyncWatermark(): Promise<

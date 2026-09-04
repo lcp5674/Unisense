@@ -15,6 +15,7 @@ import {
   Col,
   Select,
   Space,
+  Statistic,
   Switch,
   Table,
   Tag,
@@ -32,6 +33,7 @@ import {
   getDpSyncCurrentScan,
   getDpSyncMeta,
   getDpSyncScanStatus,
+  getDpSyncStats,
   getDpSyncWatermark,
   getDpTicket,
   listDataSources,
@@ -52,6 +54,7 @@ import type {
   DpSyncRun,
   DpSyncScanProgress,
   DpSyncScanStatus,
+  DpSyncStats,
   DpTicket,
   DpSyncTypeOption,
   DpSyncWatermarkInfo,
@@ -963,6 +966,7 @@ function OpsTab() {
   const [watermark, setWatermark] = useState<Record<string, DpSyncWatermarkInfo | null>>({});
   const [runs, setRuns] = useState<DpSyncRun[]>([]);
   const [runsTotal, setRunsTotal] = useState(0);
+  const [stats, setStats] = useState<DpSyncStats | null>(null);
   const [loading, setLoading] = useState(false);
   // 手动扫描：后台异步执行 → 轮询状态实时展示进度/取消/异常（不再同步等待）
   const [scanning, setScanning] = useState(false);
@@ -996,13 +1000,15 @@ function OpsTab() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [wm, runData] = await Promise.all([
+      const [wm, runData, statsData] = await Promise.all([
         getDpSyncWatermark(),
         listDpSyncRuns({ page: 1, page_size: 10 }),
+        getDpSyncStats(),
       ]);
       setWatermark(wm);
       setRuns(runData.items);
       setRunsTotal(runData.total);
+      setStats(statsData);
     } catch {
       message.error("加载运维数据失败");
     } finally {
@@ -1167,6 +1173,124 @@ function OpsTab() {
 
   return (
     <Space direction="vertical" style={{ width: "100%" }} size={12}>
+      <Card title="统计概览" size="small" loading={loading && stats === null}>
+        {!stats ? (
+          <Typography.Text type="secondary">暂无统计数据</Typography.Text>
+        ) : (
+          <>
+            {!stats.dp_reachable && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message="dp 数据源不可达"
+                description={stats.dp_unreachable_reason ?? undefined}
+              />
+            )}
+            <Row gutter={16}>
+              <Col span={6}>
+                <Statistic
+                  title="DP 任务总量（活跃）"
+                  value={stats.task_total ?? "—"}
+                  suffix={
+                    stats.task_total !== null ? (
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        / 节点 {stats.step_total ?? "—"}
+                      </Typography.Text>
+                    ) : undefined
+                  }
+                />
+              </Col>
+              <Col span={6}>
+                <Statistic
+                  title="血缘表节点"
+                  value={stats.lineage.table_nodes}
+                  suffix={
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      / 活跃边 {stats.lineage.table_edges}
+                    </Typography.Text>
+                  }
+                />
+              </Col>
+              <Col span={6}>
+                <Statistic
+                  title="字段级血缘（条）"
+                  value={stats.lineage.field_mappings}
+                />
+              </Col>
+              <Col span={6}>
+                <Statistic
+                  title="待抉择工单"
+                  value={Object.values(stats.pending_tickets).reduce((a, b) => a + b, 0)}
+                  valueStyle={
+                    Object.values(stats.pending_tickets).reduce((a, b) => a + b, 0) > 0
+                      ? { color: "#d46b08" }
+                      : undefined
+                  }
+                />
+              </Col>
+            </Row>
+            <Row gutter={16} style={{ marginTop: 16 }}>
+              <Col span={12}>
+                {stats.last_full_scan ? (
+                  <>
+                    <Space size={4} wrap>
+                      <Typography.Text strong>最近全量轮</Typography.Text>
+                      <Tag color="green">
+                        解析成功 {stats.last_full_scan.parse_success_total ?? "—"}
+                      </Tag>
+                      <Tag color="orange">
+                        解析失败 {stats.last_full_scan.parse_fail_total ?? "—"}
+                      </Tag>
+                      <Tag color="blue">
+                        扫描 {stats.last_full_scan.scanned_tasks} 任务 /{" "}
+                        {stats.last_full_scan.scanned_steps} 节点
+                      </Tag>
+                      <Typography.Text type="secondary">
+                        {formatCnTime(stats.last_full_scan.run_at)}
+                      </Typography.Text>
+                    </Space>
+                    {stats.last_full_scan.parse_rate !== null &&
+                      stats.last_full_scan.parse_rate !== undefined && (
+                        <Progress
+                          percent={stats.last_full_scan.parse_rate}
+                          size="small"
+                          status="normal"
+                          strokeColor="#52c41a"
+                          style={{ maxWidth: 420, marginTop: 4, marginBottom: 0 }}
+                          format={(p) => `成功率 ${p}%`}
+                        />
+                      )}
+                  </>
+                ) : (
+                  <Typography.Text type="secondary">
+                    尚无成功的全量扫描记录
+                  </Typography.Text>
+                )}
+              </Col>
+              <Col span={12}>
+                <Space size={4} wrap>
+                  <Typography.Text strong>
+                    历史累计（{stats.cumulative.runs} 次成功轮）
+                  </Typography.Text>
+                  <Tag color="green">
+                    解析成功 {stats.cumulative.parse_success_total ?? "—"}
+                  </Tag>
+                  <Tag color="orange">
+                    解析失败 {stats.cumulative.parse_fail_total ?? "—"}
+                  </Tag>
+                  {stats.cumulative.parse_rate !== null &&
+                    stats.cumulative.parse_rate !== undefined && (
+                      <Typography.Text type="secondary">
+                        累计成功率 {stats.cumulative.parse_rate}%
+                      </Typography.Text>
+                    )}
+                </Space>
+              </Col>
+            </Row>
+          </>
+        )}
+      </Card>
       <Card
         title="增量水位"
         extra={
