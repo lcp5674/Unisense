@@ -631,6 +631,32 @@ export interface FieldDrillData {
   mappings: FieldDrillMapping[];
 }
 
+// 字段级血缘查询/影响分析（方案 B）——后端 lineage/schemas.py FieldImpactResponse
+export interface FieldImpactItem {
+  id: number;
+  source_table: string;
+  source_column?: string | null;
+  target_table: string;
+  target_column: string;
+  /** field:{source_table}.{source_column} */
+  source_node: string;
+  /** field:{target_table}.{target_column} */
+  target_node: string;
+  expression?: string | null;
+  confidence: number;
+  provenance: string;
+  /** 距起点跳数（表起点首跳=1） */
+  hops: number;
+}
+
+export interface FieldImpactResult {
+  node: string;
+  direction: string;
+  total: number;
+  items: FieldImpactItem[];
+  nodes: LineageNodeInfo[];
+}
+
 // 变更影响预览（what-if）——后端 lineage/schemas.py 的 ImpactPreviewResponse
 export interface ImpactPreview {
   affected_metrics: { metric_code: string; change_type: string }[];

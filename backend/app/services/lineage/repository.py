@@ -10,11 +10,12 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import case, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.consume import ApiClient, ApiClientStatus
 from app.models.data_source import DataSource, DBCatalog
+from app.models.dp_sync import LineageFieldMapping
 from app.models.lineage import LineageEdge, LineageEdgeHistory, LineageIngestRun
 from app.models.metric import Metric
 from app.services.lineage.parser import node_column, node_dimension, node_table
@@ -1127,10 +1128,10 @@ class LineageRepository:
         return int(getattr(result, "rowcount", 0) or 0)
 
     async def list_nodes(self, kw: str | None = None, limit: int = 50) -> list[tuple[str, int]]:
-        """血缘候选节点：聚合血缘边两端节点（源∪目标去重，软删过滤）。
+        """血缘候选节点：聚合血缘边（lineage_edge）与字段映射（lineage_field_mapping）两端节点。
 
         无 ``kw`` 时按参与边数倒序返回 top-N（预加载常用节点）；带 ``kw`` 时按
-        节点 id 模糊过滤（用户关键词搜索指定）。
+        节点 id 模糊过滤（用户关键词搜索指定——含裸列名/表.列 命中 field: 节点）。
 
         Returns:
             ``[(node, count)]``，count 为该节点参与的血缘边数。
@@ -1141,7 +1142,29 @@ class LineageRepository:
         tgt_q = select(LineageEdge.target_node.label("node")).where(
             LineageEdge.deleted_at.is_(None)
         )
-        union = src_q.union(tgt_q).subquery()
+        # 字段级候选（方案 B）：把 lineage_field_mapping 的列映射也聚合为 field: 节点——
+        # 用户输入列名（如 real_amount）或 表.列 即可搜出字段节点作为影响分析起点。
+        # 仅聚合有效列映射（source_column 非空，排除表级降级/表达式占位）。
+        fld_src_q = select(
+            func.concat(
+                "field:",
+                LineageFieldMapping.source_table,
+                ".",
+                LineageFieldMapping.source_column,
+            ).label("node")
+        ).where(
+            LineageFieldMapping.deleted_at.is_(None),
+            LineageFieldMapping.source_column.is_not(None),
+        )
+        fld_tgt_q = select(
+            func.concat(
+                "field:",
+                LineageFieldMapping.target_table,
+                ".",
+                LineageFieldMapping.target_column,
+            ).label("node")
+        ).where(LineageFieldMapping.deleted_at.is_(None))
+        union = src_q.union(tgt_q, fld_src_q, fld_tgt_q).subquery()
         stmt = (
             select(union.c.node, func.count().label("cnt"))
             .group_by(union.c.node)
@@ -1153,6 +1176,70 @@ class LineageRepository:
             stmt = stmt.where(union.c.node.like(f"%{escaped}%", escape="/"))
         rows = (await self._db.execute(stmt.limit(limit))).all()
         return [(str(r[0]), int(r[1] or 0)) for r in rows]
+
+    async def field_mappings_hop(
+        self,
+        *,
+        direction: str,
+        tables: set[str] | None = None,
+        fields: set[tuple[str, str]] | None = None,
+        limit: int = 500,
+    ) -> list[LineageFieldMapping]:
+        """字段级血缘单跳展开（方案 B）：沿 ``lineage_field_mapping`` 查与起点相邻的列映射行。
+
+        Args:
+            direction: ``upstream`` = 起点作目标，返回这些映射行（其 source 是上游来源列）；
+                ``downstream`` = 起点作源，返回这些映射行（其 target 是下游去向列）。
+            tables: 表级起点集合（``db.tbl``，匹配该表作为 目标/源 的全部有效列映射）。
+            fields: 字段级起点集合（``(table, column)`` 精确对，匹配该字段作为 目标/源 的映射）。
+            limit: 单跳返回上限（防大扇出爆炸；BFS 由 service 层按跳数收敛）。
+
+        Returns:
+            按 id 升序的映射行列表（软删过滤、有效列映射 source_column 非空）。
+        """
+        conds: list[Any] = [
+            LineageFieldMapping.deleted_at.is_(None),
+            LineageFieldMapping.source_column.is_not(None),
+        ]
+        if direction == "upstream":
+            # 起点作为「目标」→ 这些行的 source 列是它的上游来源
+            if tables:
+                conds.append(LineageFieldMapping.target_table.in_(tables))
+            if fields:
+                conds.append(
+                    or_(
+                        *[
+                            and_(
+                                LineageFieldMapping.target_table == t,
+                                LineageFieldMapping.target_column == c,
+                            )
+                            for t, c in fields
+                        ]
+                    )
+                )
+        else:
+            # 起点作为「源」→ 这些行的 target 列是它的下游去向
+            if tables:
+                conds.append(LineageFieldMapping.source_table.in_(tables))
+            if fields:
+                conds.append(
+                    or_(
+                        *[
+                            and_(
+                                LineageFieldMapping.source_table == t,
+                                LineageFieldMapping.source_column == c,
+                            )
+                            for t, c in fields
+                        ]
+                    )
+                )
+        stmt = (
+            select(LineageFieldMapping)
+            .where(*conds)
+            .order_by(LineageFieldMapping.id)
+            .limit(limit)
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
 
     async def resolve_node_meta(self, node_ids: set[str]) -> dict[str, dict[str, Any]]:
         """批量解析血缘节点的基础元数据（影响分析/边列表响应的 ``nodes`` 字段）。

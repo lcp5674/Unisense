@@ -50,6 +50,8 @@ from app.services.lineage.schemas import (
     CoverageOrphanItem,
     DDLEdgeItem,
     EdgeDeleteResult,
+    FieldImpactItem,
+    FieldImpactResponse,
     FieldLineageItem,
     HealthDimension,
     ImpactPreviewResponse,
@@ -1089,6 +1091,115 @@ class LineageService(BaseService):
                     seen.add(key)
                     merged.append(resp)
         return merged
+
+    async def field_impact(
+        self,
+        node: str,
+        direction: str = "downstream",
+        max_hops: int = 3,
+        limit: int = 300,
+    ) -> FieldImpactResponse:
+        """字段级血缘查询/影响分析（方案 B）：沿 ``lineage_field_mapping`` 展开字段→字段链路。
+
+        以 ``table:db.tbl``（整表字段视角）或 ``field:db.tbl.col``（单字段）为起点，
+        按方向 BFS：每跳取「起点字段/表作为源（下游）或目标（上游）」的有效列映射，
+        收集映射行并推进 frontier 到映射另一端字段；表起点首跳展开为该表全部列映射，
+        之后为纯字段级精确迭代。返回字段映射边（items，按跳数升序）+ 涉及节点元数据
+        （field 域继承所属表、table 附 entity_id 供表详情——见 ``node_meta``）。
+
+        Args:
+            node: 起点（``table:``/``field:`` 前缀；无前缀/不支持前缀抛 400）。
+            direction: upstream / downstream / both。
+            max_hops: 最大跳数（表起点首跳=1，默认 3）。
+            limit: 映射行总数上限（防大扇出爆炸，默认 300）。
+
+        Returns:
+            ``FieldImpactResponse``（node/direction/total/items/nodes）。
+        """
+        if not node or ":" not in node:
+            raise ValidationError(
+                "字段级查询须指定节点前缀（table: 或 field:）", error_code="BAD_REQUEST"
+            )
+        prefix, rest = node.split(":", 1)
+        if prefix == "table":
+            if not rest:
+                raise ValidationError("表节点不能为空", error_code="BAD_REQUEST")
+            start_tables: set[str] = {rest}
+            start_fields: set[tuple[str, str]] = set()
+        elif prefix == "field":
+            if rest.count(".") < 2:
+                raise ValidationError(
+                    "字段节点须为 field:库.表.列", error_code="BAD_REQUEST"
+                )
+            table, col = rest.rsplit(".", 1)
+            start_tables = set()
+            start_fields = {(table, col)}
+        else:
+            raise ValidationError(
+                "字段级查询仅支持 table:/field: 起点", error_code="BAD_REQUEST"
+            )
+
+        dirs = ["upstream", "downstream"] if direction == "both" else [direction]
+        # mapping_id -> (行, 首次命中的跳数)；双向时同一映射可能两侧都命中，保留首次。
+        collected: dict[int, tuple[Any, int]] = {}
+        frontier_tables = start_tables
+        frontier_fields: set[tuple[str, str]] = set(start_fields)
+        for hop in range(1, max_hops + 1):
+            if not frontier_tables and not frontier_fields:
+                break
+            if len(collected) >= limit:
+                break
+            new_fields: set[tuple[str, str]] = set()
+            for d in dirs:
+                rows = await self._repo.field_mappings_hop(
+                    direction=d,
+                    tables=frontier_tables or None,
+                    fields=frontier_fields or None,
+                    limit=max(1, limit - len(collected)),
+                )
+                for r in rows:
+                    if r.id not in collected:
+                        collected[r.id] = (r, hop)
+                        # 推进 frontier：向另一端字段（有效列映射 source/target 均有列）
+                        if d == "upstream":
+                            new_fields.add((r.source_table, r.source_column or ""))
+                        else:
+                            new_fields.add((r.target_table, r.target_column))
+            frontier_tables = set()
+            frontier_fields = {
+                (t, c) for t, c in new_fields if c  # 表起点首跳展开所得/字段推进均须有列
+            }
+        ordered = sorted(collected.values(), key=lambda kv: (kv[1], kv[0].id))
+        items = [
+            FieldImpactItem(
+                id=r.id,
+                source_table=r.source_table,
+                source_column=r.source_column,
+                target_table=r.target_table,
+                target_column=r.target_column,
+                source_node=node_field(r.source_table, r.source_column or "*"),
+                target_node=node_field(r.target_table, r.target_column),
+                expression=r.expression,
+                confidence=r.confidence,
+                provenance=r.provenance,
+                hops=hops,
+            )
+            for r, hops in ordered
+        ]
+        node_ids: set[str] = set()
+        for it in items:
+            node_ids.add(it.source_node)
+            node_ids.add(it.target_node)
+            node_ids.add(f"table:{it.source_table}")
+            node_ids.add(f"table:{it.target_table}")
+        metas = await self.node_meta(node_ids)
+        return FieldImpactResponse(
+            node=node,
+            direction=direction,
+            total=len(items),
+            items=items,
+            nodes=metas,
+        )
 
     async def export_lineage(
         self,

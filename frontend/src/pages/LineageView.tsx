@@ -58,6 +58,7 @@ import {
   lineageExport,
   lineageGraph,
   lineageFieldDrill,
+  lineageFieldImpact,
   lineageHealth,
   lineageImpact,
   lineageImpactPreview,
@@ -77,6 +78,7 @@ import type {
   CoverageOrphanItem,
   DBCatalog,
   FieldDrillData,
+  FieldImpactItem,
   LineageChannel,
   LineageCoverage,
   LineageEdge,
@@ -719,6 +721,37 @@ function GraphTab() {
     ? Array.from(new Set(drill.mappings.map((m) => m.target_table).filter((t) => t !== drill.table)))
     : [];
 
+  // 字段钻取图派生数据：把「表名与加工信息直接画进图里」——字段节点 label 带所属表名
+  //（短表名.列名，跨表场景一眼可辨），字段边中点标注「加工方式 · 表达式」（完整表达式
+  // 走 fullExpr，hover 边可看）。表级主图边无表达式字段 → 不渲染 label，零影响。
+  const drillGraphNodes = useMemo<AssetGraphNode[]>(
+    () =>
+      drill
+        ? drill.nodes.map((n) => {
+            if (n.type !== "field" || !n.table) return n as AssetGraphNode;
+            const tbl = n.table.split(".").pop() || n.table;
+            return { ...n, label: `${tbl}.${n.label}` } as AssetGraphNode;
+          })
+        : [],
+    [drill],
+  );
+  const drillGraphEdges = useMemo<AssetGraphEdge[]>(
+    () =>
+      drill
+        ? drill.edges.map((e) => {
+            const expr = (e as { expression?: string | null }).expression ?? null;
+            const kind = exprKind(expr);
+            const exprHead = expr ? (expr.length > 20 ? `${expr.slice(0, 20)}…` : expr) : "";
+            return {
+              ...e,
+              edgeLabel: expr ? `${kind.label} · ${exprHead}` : kind.label,
+              fullExpr: expr || "",
+            } as AssetGraphEdge;
+          })
+        : [],
+    [drill],
+  );
+
   return (
     <div>
       <Space style={{ marginBottom: 12 }} wrap>
@@ -862,8 +895,8 @@ function GraphTab() {
           )}
           <AssetGraph
             key={`drill-${drill.table}`}
-            nodes={drill.nodes as AssetGraphNode[]}
-            edges={drill.edges as AssetGraphEdge[]}
+            nodes={drillGraphNodes}
+            edges={drillGraphEdges}
             height={430}
             dimOnHover={false}
             onNodeClick={handleNodeClick}
@@ -1119,9 +1152,14 @@ function ImpactTab() {
   const [nodeOptions, setNodeOptions] = useState<LineageNode[]>([]);
   const [nodeLoading, setNodeLoading] = useState(false);
   const [searchWord, setSearchWord] = useState("");
+  // 查询粒度：表级（lineage_edge 展开） / 字段级（lineage_field_mapping 字段→字段链路，方案 B）
+  const [granularity, setGranularity] = useState<"table" | "field">("table");
   const [direction, setDirection] = useState<Direction>("downstream");
   const [edges, setEdges] = useState<LineageEdge[]>([]);
   const [total, setTotal] = useState(0);
+  // 字段级结果（粒度=field 时使用，含列级来源/去向/表达式）
+  const [fieldItems, setFieldItems] = useState<FieldImpactItem[]>([]);
+  const [fieldTotal, setFieldTotal] = useState(0);
   const [risk, setRisk] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   // 查询结果的血缘视图（图形化展示，替代纯文字边列表为主展示）
@@ -1169,11 +1207,36 @@ function ImpactTab() {
 
   async function loadImpact() {
     if (!node.trim()) {
-      message.warning("请输入节点（指标编码或表名）");
+      message.warning(granularity === "field" ? "请输入节点（表名或 表.列）" : "请输入节点（指标编码或表名）");
       return;
     }
     setLoading(true);
     try {
+      if (granularity === "field") {
+        const data = await lineageFieldImpact({
+          node: node.trim(),
+          direction,
+          max_hops: 3,
+          limit: 300,
+        });
+        setFieldItems(data.items);
+        setFieldTotal(data.total);
+        setEdges([]);
+        setTotal(0);
+        // 字段映射行 → 血缘视图边（field: 节点图渲染，粒度 L2）
+        const viewEdges: LineageEdge[] = data.items.map((it) => ({
+          id: it.id,
+          source_node: it.source_node,
+          target_node: it.target_node,
+          edge_type: "DERIVED_FROM",
+          granularity: "L2",
+          confidence: it.confidence,
+          provenance: it.provenance,
+        }));
+        setGraphData(viewEdges.length > 0 ? edgesToGraphData(viewEdges, data.nodes) : null);
+        track("lineage_query", node.trim(), "field");
+        return;
+      }
       const data =
         direction === "downstream"
           ? await lineageImpact({ node: node.trim(), direction, max_hops: 5 })
@@ -1181,6 +1244,8 @@ function ImpactTab() {
       const items = Array.isArray(data.items) ? data.items : (data as unknown as LineageEdge[]);
       setEdges(items);
       setTotal(data.total ?? items.length);
+      setFieldItems([]);
+      setFieldTotal(0);
       // 构建血缘视图（节点/边），供力导向图展示；合并后端节点元数据（entity_id/域/PII）
       setGraphData(items.length > 0 ? edgesToGraphData(items, data.nodes) : null);
       track("lineage_query", node.trim(), "node");
@@ -1188,6 +1253,8 @@ function ImpactTab() {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "查询失败");
       setEdges([]);
       setTotal(0);
+      setFieldItems([]);
+      setFieldTotal(0);
       setGraphData(null);
     } finally {
       setLoading(false);
@@ -1270,6 +1337,51 @@ function ImpactTab() {
     { title: "PII", dataIndex: "pii_inherited", key: "pii", width: 70, render: (v?: boolean) => (v ? <Tag color="red">PII</Tag> : null) },
   ];
 
+  // 字段级血缘列（粒度=field）：列映射明细（源字段→目标字段 + 表达式/跳数），点击行不弹边历史。
+  const fieldColumns = [
+    {
+      title: "跳数",
+      dataIndex: "hops",
+      key: "hops",
+      width: 70,
+      render: (v: number) => <Tag color={v === 1 ? "default" : "orange"}>第 {v} 跳</Tag>,
+    },
+    {
+      title: "源字段",
+      dataIndex: "source_node",
+      key: "src",
+      render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v.replace(/^field:/, "")}</span>,
+    },
+    {
+      title: "目标字段",
+      dataIndex: "target_node",
+      key: "dst",
+      render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v.replace(/^field:/, "")}</span>,
+    },
+    {
+      title: "表达式",
+      dataIndex: "expression",
+      key: "expr",
+      width: 220,
+      ellipsis: true,
+      render: (v?: string | null) => (v ? <code style={{ fontSize: 12 }}>{v}</code> : null),
+    },
+    {
+      title: "来源",
+      dataIndex: "provenance",
+      key: "prov",
+      width: 110,
+      render: (v: string) => <Tag color="blue">{CHANNEL_LABEL[v] ?? v}</Tag>,
+    },
+    {
+      title: "置信度",
+      dataIndex: "confidence",
+      key: "conf",
+      width: 90,
+      render: (v: number) => `${(v * 100).toFixed(0)}%`,
+    },
+  ];
+
   // 搜索词非空且候选里无完全匹配时，兜底提供「使用输入值」选项（支持自由指定节点）
   const hasExact = nodeOptions.some((n) => n.id === searchWord);
   const customOption: LineageNode[] =
@@ -1280,13 +1392,34 @@ function ImpactTab() {
   return (
     <div>
       <Space style={{ marginBottom: 16 }} wrap>
+        <Segmented
+          value={granularity}
+          onChange={(v) => {
+            setGranularity(v as "table" | "field");
+            // 切换粒度清空上次结果，避免表级/字段级结果混淆
+            setEdges([]);
+            setFieldItems([]);
+            setGraphData(null);
+            setTotal(0);
+            setFieldTotal(0);
+            if (!node) return;
+          }}
+          options={[
+            { value: "table", label: "表级血缘" },
+            { value: "field", label: "字段级血缘" },
+          ]}
+        />
         <Select
           showSearch
           allowClear
           loading={nodeLoading}
           value={node || undefined}
-          placeholder="选择或搜索节点（表 / 指标 / 字段）"
-          style={{ width: 360 }}
+          placeholder={
+            granularity === "field"
+              ? "选择或搜索节点（表 / 表.列，如 dwd.orders / field:…）"
+              : "选择或搜索节点（表 / 指标 / 字段）"
+          }
+          style={{ width: 380 }}
           className="mono"
           filterOption={(input, opt) => {
             const raw = String(opt?.value ?? "").toLowerCase();
@@ -1344,9 +1477,9 @@ function ImpactTab() {
       {graphData && graphData.nodes.length > 0 && (
         <Card
           size="small"
-          title={`血缘视图 · ${node} 的${
+          title={`${granularity === "field" ? "字段级" : ""}血缘视图 · ${node} 的${
             direction === "upstream" ? "上游来源" : direction === "downstream" ? "下游影响" : "双向关系"
-          }（${graphData.nodes.length} 节点 · ${graphData.edges.length} 条边）`}
+          }（${graphData.nodes.length} 节点 · ${graphData.edges.length} 条${granularity === "field" ? "字段映射" : "边"}）`}
           style={{ marginBottom: 16 }}
         >
           <AssetGraph
@@ -1359,7 +1492,24 @@ function ImpactTab() {
         </Card>
       )}
 
-      {edges.length > 0 ? (
+      {granularity === "field" ? (
+        fieldItems.length > 0 ? (
+          <Table
+            dataSource={fieldItems}
+            columns={fieldColumns}
+            rowKey="id"
+            pagination={false}
+            size="small"
+            footer={() => `共 ${fieldTotal} 条字段映射（字段→字段）`}
+          />
+        ) : (
+          !loading && (
+            <p className="muted" style={{ textAlign: "center", padding: 24 }}>
+              输入表名或 表.列 后查询字段级血缘关系
+            </p>
+          )
+        )
+      ) : edges.length > 0 ? (
         <Table
           dataSource={edges}
           columns={columns}

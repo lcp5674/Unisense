@@ -28,6 +28,7 @@ from app.services.lineage.schemas import (
     CoverageBrokenEdgeItem,
     CoverageOrphanItem,
     EdgeDeleteResult,
+    FieldImpactParams,
     ImpactPreviewRequest,
     LineageCoverageResponse,
     LineageEdgeDetailResponse,
@@ -389,6 +390,33 @@ async def impact(
         {it["source_node"] for it in page["items"]} | {it["target_node"] for it in page["items"]}
     )
     return ok(data=page, trace_id=trace_id)
+
+
+@router.get("/field-impact", dependencies=_READ_DEPS)
+async def field_impact(
+    params: Annotated[FieldImpactParams, Depends()],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+) -> ApiResponse[Any]:
+    """字段级血缘查询/影响分析（方案 B）：沿 lineage_field_mapping 展开字段→字段链路。
+
+    以 ``table:db.tbl``（整表字段视角）或 ``field:db.tbl.col``（单字段）为起点，
+    按方向 BFS 展开上游来源列 / 下游去向列（max_hops 跳、limit 防爆炸），返回
+    字段映射边（items）+ 涉及节点元数据（nodes，field 域继承所属表）。
+    """
+    svc = _svc(db)
+    # X-2 读路径域收敛：field: 起点收敛其父表域；table: 起点直接收敛
+    prefix, sep, rest = params.node.partition(":")
+    if prefix == "field" and sep and "." in rest:
+        guard_node = f"table:{rest.rsplit('.', 1)[0]}"
+    else:
+        guard_node = params.node
+    await _assert_node_read_access(user, svc, guard_node)
+    result = await svc.field_impact(
+        params.node, params.direction, params.max_hops, params.limit
+    )
+    return ok(data=result, trace_id=trace_id)
 
 
 @router.get("/edges", dependencies=_READ_DEPS)

@@ -41,6 +41,7 @@ vi.mock("../api", async (importOriginal) => {
     parseLineage: vi.fn(),
     lineageNodes: vi.fn(),
     lineageImpact: vi.fn(),
+    lineageFieldImpact: vi.fn(),
     lineageChannels: vi.fn(),
     lineageStale: vi.fn(),
     lineageChannelRuns: vi.fn(),
@@ -795,7 +796,67 @@ describe("LineageView 血缘查询 / 影响分析 Tab", () => {
       expect(screen.getByText(/表 · orders/)).toBeInTheDocument();
     });
   });
+
+  it("字段级血缘：切「字段级血缘」后以选中表为起点查询字段→字段映射链路", async () => {
+    vi.mocked(api.lineageFieldImpact).mockResolvedValue({
+      node: "table:orders",
+      direction: "downstream",
+      total: 2,
+      items: [
+        {
+          id: 11,
+          source_table: "orders",
+          source_column: "amount",
+          target_table: "dws",
+          target_column: "gmv",
+          source_node: "field:orders.amount",
+          target_node: "field:dws.gmv",
+          expression: null,
+          confidence: 1,
+          provenance: "dp_sql",
+          hops: 1,
+        },
+        {
+          id: 12,
+          source_table: "dws",
+          source_column: "gmv",
+          target_table: "ads",
+          target_column: "total",
+          source_node: "field:dws.gmv",
+          target_node: "field:ads.total",
+          expression: null,
+          confidence: 1,
+          provenance: "dp_sql",
+          hops: 2,
+        },
+      ],
+      nodes: [
+        { id: "field:orders.amount", type: "field", label: "orders.amount" },
+        { id: "field:dws.gmv", type: "field", label: "dws.gmv" },
+      ],
+    });
+    const panel = await openImpactTabAndQuery(); // 先以表级查询选中 table:orders
+    fireEvent.click(within(panel).getByText("字段级血缘"));
+    fireEvent.click(within(panel).getByRole("button", { name: /查\s*询/ }));
+    await waitFor(() =>
+      expect(api.lineageFieldImpact).toHaveBeenCalledWith({
+        node: "table:orders",
+        direction: "downstream",
+        max_hops: 3,
+        limit: 300,
+      }),
+    );
+    // 字段映射明细表 + 字段级血缘视图（field: 节点图）
+    await waitFor(() => expect(within(panel).getByText(/共 2 条字段映射/)).toBeInTheDocument());
+    expect(within(panel).getByText("field:orders.amount".replace(/^field:/, ""))).toBeInTheDocument();
+    await waitFor(() => expect(within(panel).getByText(/字段级血缘视图/)).toBeInTheDocument());
+    // 表格首行：源字段 orders.amount → 目标字段 dws.gmv（第 1 跳）
+    expect(within(panel).getByText(/第 1 跳/)).toBeInTheDocument();
+    expect(within(panel).getByText(/第 2 跳/)).toBeInTheDocument();
+  });
+
 });
+
 
 describe("LineageView 采集通道 Tab", () => {
   beforeEach(() => {
@@ -1685,4 +1746,5 @@ describe("LineageView 治理中心 Tab", () => {
     // 综合健康度
     expect(within(panel).getByText("78")).toBeInTheDocument();
   });
+
 });

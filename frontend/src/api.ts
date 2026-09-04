@@ -92,6 +92,7 @@ import {
   CoverageOrphanList,
   CoverageBrokenEdgeList,
   FieldDrillData,
+  FieldImpactResult,
   LineageEdgeDetail,
   LineageEdgePage,
   LineageGraphData,
@@ -1584,6 +1585,22 @@ export async function lineageGraph(params?: {
 /** 血缘字段级钻取（方案 B）：点击表节点下钻，返回该表参与的字段映射子图。 */
 export async function lineageFieldDrill(table: string): Promise<FieldDrillData> {
   return request<FieldDrillData>(`${API_BASE}/lineage/field-drill?table=${encodeURIComponent(table)}`);
+}
+
+/** 字段级血缘查询/影响分析（方案 B）：以 table:/field: 为起点沿字段映射展开链路。 */
+export async function lineageFieldImpact(params: {
+  node: string;
+  direction?: "upstream" | "downstream" | "both";
+  max_hops?: number;
+  limit?: number;
+}): Promise<FieldImpactResult> {
+  const qs = pageQs({
+    node: params.node,
+    direction: params.direction ?? "downstream",
+    max_hops: params.max_hops ?? 3,
+    limit: params.limit,
+  });
+  return request<FieldImpactResult>(`${API_BASE}/lineage/field-impact?${qs}`);
 }
 
 export async function parseLineage(

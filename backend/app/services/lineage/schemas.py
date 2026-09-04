@@ -174,6 +174,52 @@ class LineageImpactParams(BaseModel):
     page_size: int = Field(default=50, ge=1, le=200, description="每页条数")
 
 
+class FieldImpactParams(BaseModel):
+    """字段级血缘查询/影响分析参数（query，方案 B）。
+
+    以 ``field:db.tbl.col``（单字段）或 ``table:db.tbl``（整表字段视角）为起点，
+    沿 ``lineage_field_mapping`` 展开字段→字段链路（上游来源列 / 下游去向列）。
+    """
+
+    node: str = Field(..., min_length=1, max_length=512)
+    direction: Literal["upstream", "downstream", "both"] = "downstream"
+    max_hops: int = Field(default=3, ge=1, le=6, description="字段级最大跳数（默认 3）")
+    limit: int = Field(default=300, ge=1, le=1000, description="映射行总数上限")
+
+
+class FieldImpactItem(BaseModel):
+    """字段级血缘边（一条列映射 = 一条字段边）。
+
+    与 ``LineageEdgeResponse`` 的差异：字段映射无 ``lineage_edge.id`` 语义，
+    ``id`` 取 ``lineage_field_mapping.id``；来源/去向细化到列级并附表达式。
+    """
+
+    id: int = Field(description="lineage_field_mapping.id")
+    source_table: str
+    source_column: str | None = Field(default=None)
+    target_table: str
+    target_column: str
+    source_node: str = Field(description="field:{source_table}.{source_column}")
+    target_node: str = Field(description="field:{target_table}.{target_column}")
+    expression: str | None = Field(default=None, description="计算/聚合表达式（若来源非单列）")
+    confidence: float = Field(default=1.0)
+    provenance: str = Field(default="sqlglot")
+    hops: int = Field(default=1, description="距起点的跳数（表起点首跳=1）")
+
+
+class FieldImpactResponse(BaseModel):
+    """字段级血缘查询/影响分析响应（方案 B）。"""
+
+    node: str = Field(description="查询起点（原样回显）")
+    direction: str = Field(description="查询方向")
+    total: int = Field(description="字段映射边总数")
+    items: list[FieldImpactItem] = Field(default_factory=list)
+    nodes: list[LineageNodeInfo] = Field(
+        default_factory=list,
+        description="涉及节点基础元数据（field 域继承所属表；table 附 entity_id 供表详情）",
+    )
+
+
 class LineageEdgeListParams(BaseModel):
     """血缘边列表查询参数（query）。"""
 

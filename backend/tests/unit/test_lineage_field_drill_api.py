@@ -139,3 +139,81 @@ async def test_field_drill_empty_table_returns_empty_subgraph(
     assert data["nodes"] == []
     assert data["edges"] == []
     assert data["mappings"] == []
+
+
+async def test_field_impact_returns_mappings_and_nodes(
+    client: httpx.AsyncClient,
+) -> None:
+    """字段级影响分析：透传 node/direction/max_hops/limit，返回字段映射边与节点元数据。"""
+    from app.services.lineage.schemas import FieldImpactResponse
+
+    fake = FieldImpactResponse(
+        node="table:dwd.b",
+        direction="downstream",
+        total=2,
+        items=[
+            {
+                "id": 21,
+                "source_table": "dwd.b",
+                "source_column": "id",
+                "target_table": "dws.c",
+                "target_column": "id",
+                "source_node": "field:dwd.b.id",
+                "target_node": "field:dws.c.id",
+                "expression": None,
+                "confidence": 1.0,
+                "provenance": "dp_sql",
+                "hops": 1,
+            },
+            {
+                "id": 22,
+                "source_table": "dws.c",
+                "source_column": "id",
+                "target_table": "ads.d",
+                "target_column": "id",
+                "source_node": "field:dws.c.id",
+                "target_node": "field:ads.d.id",
+                "expression": None,
+                "confidence": 1.0,
+                "provenance": "dp_sql",
+                "hops": 2,
+            },
+        ],
+        nodes=[
+            {"id": "field:dwd.b.id", "type": "field", "label": "dwd.b.id"},
+            {"id": "field:dws.c.id", "type": "field", "label": "dws.c.id"},
+        ],
+    )
+    with patch(
+        "app.services.lineage.service.LineageService.field_impact",
+        new=AsyncMock(return_value=fake),
+    ):
+        resp = await client.get(
+            "/api/v1/lineage/field-impact?node=table:dwd.b&direction=downstream&max_hops=3"
+        )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["node"] == "table:dwd.b"
+    assert data["total"] == 2
+    assert data["items"][0]["source_node"] == "field:dwd.b.id"
+    assert data["items"][1]["hops"] == 2
+    assert data["nodes"][0]["id"] == "field:dwd.b.id"
+
+
+async def test_field_impact_rejects_field_without_permission(
+    client: httpx.AsyncClient,
+) -> None:
+    """读角色之外的账号（viewer）调 field-impact 被 403（_READ_ROLES 门禁）。"""
+    app.dependency_overrides[deps.get_current_user] = lambda: MagicMock(
+        id=9,
+        org_id=1,
+        role="viewer",
+        roles_all=lambda: ["viewer"],
+        has_role=lambda r: r == "viewer",
+        domains_all=lambda: [],
+    )
+    resp = await client.get(
+        "/api/v1/lineage/field-impact?node=table:dwd.b&direction=downstream"
+    )
+    assert resp.status_code == 403
+    app.dependency_overrides.clear()

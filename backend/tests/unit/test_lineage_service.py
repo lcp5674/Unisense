@@ -62,6 +62,8 @@ class FakeRepo:
         self._keys: set[tuple[object, ...]] = set()
         self.runs: list[SimpleNamespace] = []
         self.consumer_ids: list[str] = []
+        # 字段级影响（方案 B）假数据
+        self.field_rows: list[object] = []
         # 覆盖率治理（Task B）假数据
         self.metric_total_count: int = 0
         self.codes_with_lineage: list[str] = []
@@ -401,6 +403,35 @@ class FakeRepo:
             ("external:ext", 4),
             ("plain_node", 1),
         ]
+
+    async def field_mappings_hop(
+        self,
+        *,
+        direction: str,
+        tables: set[str] | None = None,
+        fields: set[tuple[str, str]] | None = None,
+        limit: int = 500,
+    ) -> list[object]:
+        """字段级单跳展开假实现：按 source/target 表或字段精确匹配 field_rows。"""
+        rows = []
+        for r in self.field_rows:
+            if direction == "upstream":
+                hit = (tables and getattr(r, "target_table", None) in tables) or (
+                    fields
+                    and (getattr(r, "target_table", None), getattr(r, "target_column", None))
+                    in fields
+                )
+            else:
+                hit = (tables and getattr(r, "source_table", None) in tables) or (
+                    fields
+                    and (getattr(r, "source_table", None), getattr(r, "source_column", None))
+                    in fields
+                )
+            if hit:
+                rows.append(r)
+            if len(rows) >= limit:
+                break
+        return rows
 
     async def resolve_node_meta(self, node_ids: set[str]) -> dict[str, dict[str, Any]]:
         """节点元数据假实现：类型/标签按前缀推导，无目录实体（供 node_meta 测试）。"""
@@ -2902,3 +2933,104 @@ async def test_notify_ddl_change_skips_when_no_owners(monkeypatch) -> None:
     await svc._notify_ddl_change([DDLEdge(ddl_type="drop_table", table="ods.s")])
     assert called is False
     eventbus.publish.assert_not_awaited()
+
+
+# ---- 字段级血缘查询/影响分析（方案 B）----
+
+
+def _fm(
+    mid: int,
+    st: str,
+    sc: str,
+    tt: str,
+    tc: str,
+    expr: str | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=mid,
+        source_table=st,
+        source_column=sc,
+        target_table=tt,
+        target_column=tc,
+        expression=expr,
+        confidence=1.0,
+        provenance="dp_sql",
+    )
+
+
+async def test_field_impact_field_start_downstream_bfs() -> None:
+    """字段起点下游展开：A.a→B.b（hop1）→C.c（hop2），BFS 逐跳收集，方向外不入。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.field_rows = [
+        _fm(1, "dw.a", "x", "dw.b", "y"),
+        _fm(2, "dw.b", "y", "dw.c", "z"),
+        _fm(3, "dw.x", "q", "dw.a", "x"),  # a.x 的上游，不在下游方向内
+    ]
+    svc._repo = repo
+    res = await svc.field_impact("field:dw.a.x", direction="downstream", max_hops=2)
+    assert res.node == "field:dw.a.x"
+    assert res.total == 2
+    assert [(i.id, i.hops) for i in res.items] == [(1, 1), (2, 2)]
+    assert res.items[0].source_node == "field:dw.a.x"
+    assert res.items[1].target_node == "field:dw.c.z"
+    nids = {n.id for n in res.nodes}
+    assert "table:dw.a" in nids and "table:dw.c" in nids
+
+
+async def test_field_impact_table_start_expands_all_columns() -> None:
+    """表起点下游：首跳=该表全部列映射，随后字段级精确继续（hop2）。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.field_rows = [
+        _fm(1, "dw.a", "x", "dw.b", "y"),
+        _fm(2, "dw.a", "x2", "dw.b", "y2"),
+        _fm(3, "dw.b", "y", "dw.c", "z"),
+    ]
+    svc._repo = repo
+    res = await svc.field_impact("table:dw.a", direction="downstream", max_hops=2)
+    assert res.total == 3
+    assert [i.hops for i in res.items] == [1, 1, 2]
+
+
+async def test_field_impact_upstream_and_both() -> None:
+    """上游=来源列；双向=两侧合并。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.field_rows = [
+        _fm(1, "dw.s", "p", "dw.a", "x"),
+        _fm(2, "dw.a", "x", "dw.d", "q"),
+    ]
+    svc._repo = repo
+    up = await svc.field_impact("field:dw.a.x", direction="upstream", max_hops=1)
+    assert up.total == 1
+    assert up.items[0].source_node == "field:dw.s.p"
+    both = await svc.field_impact("field:dw.a.x", direction="both", max_hops=1)
+    assert both.total == 2
+
+
+async def test_field_impact_respects_max_hops_and_empty() -> None:
+    """跳数上限收敛；无命中起点返回空结果。"""
+    svc = LineageService(db=_FakeSession())
+    repo = FakeRepo()
+    repo.field_rows = [
+        _fm(1, "dw.a", "x", "dw.b", "y"),
+        _fm(2, "dw.b", "y", "dw.c", "z"),
+        _fm(3, "dw.c", "z", "dw.d", "w"),
+    ]
+    svc._repo = repo
+    one = await svc.field_impact("field:dw.a.x", direction="downstream", max_hops=1)
+    assert one.total == 1
+    empty = await svc.field_impact("field:dw.z.zz", direction="downstream", max_hops=2)
+    assert empty.total == 0
+    assert empty.items == []
+
+
+async def test_field_impact_rejects_bad_start() -> None:
+    """无前缀 / 不支持前缀（metric:）起点抛 ValidationError。"""
+    svc = LineageService(db=_FakeSession())
+    svc._repo = FakeRepo()
+    with pytest.raises(ValidationError):
+        await svc.field_impact("dbA.a", direction="downstream")
+    with pytest.raises(ValidationError):
+        await svc.field_impact("metric:m1", direction="downstream")
