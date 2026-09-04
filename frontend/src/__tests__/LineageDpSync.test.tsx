@@ -256,7 +256,7 @@ describe("LineageDpSync", () => {
     renderPage();
     await user.click(screen.getByText(/运\s*维/));
     await screen.findByText("运行记录");
-    await user.click(screen.getByText(/立即扫描一轮/));
+    await user.click(screen.getByText(/立即全量扫描/));
     // 首帧（提交后立即轮询）：running → 实时进度展示
     await screen.findByText(/扫描中：解析 SQL 节点并写血缘（已处理 2 \/ 10 个任务）/);
     expect(screen.getByText(/当前任务 #101/)).toBeInTheDocument();
@@ -284,7 +284,7 @@ describe("LineageDpSync", () => {
     renderPage();
     await user.click(screen.getByText(/运\s*维/));
     await screen.findByText("运行记录");
-    await user.click(screen.getByText(/立即扫描一轮/));
+    await user.click(screen.getByText(/立即全量扫描/));
     await screen.findByText(/扫描中/);
     await user.click(screen.getByText(/取\s*消\s*扫\s*描/));
     expect(mockedApi.cancelDpSyncScan).toHaveBeenCalledWith(7);
@@ -314,7 +314,7 @@ describe("LineageDpSync", () => {
     renderPage();
     await user.click(screen.getByText(/运\s*维/));
     await screen.findByText("运行记录");
-    await user.click(screen.getByText(/立即扫描一轮/));
+    await user.click(screen.getByText(/立即全量扫描/));
     await waitFor(() =>
       expect(screen.getAllByText(/^强制终止$/).length).toBeGreaterThan(0)
     );
@@ -346,7 +346,7 @@ describe("LineageDpSync", () => {
     renderPage();
     await user.click(screen.getByText(/运\s*维/));
     await screen.findByText("运行记录");
-    await user.click(screen.getByText(/立即扫描一轮/));
+    await user.click(screen.getByText(/立即全量扫描/));
     // 已有任务运行时：不重复提交，跟踪其进度并最终展示完成
     await waitFor(() =>
       expect(mockedApi.getDpSyncScanStatus).toHaveBeenCalledWith(9)

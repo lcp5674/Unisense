@@ -174,12 +174,16 @@ async def _run_scan_job(task_id: int, *, force: bool) -> None:
     try:
         async with async_session_factory() as db:
             svc = DpSyncService(db, llm_chat=_make_llm_chat(db))
+            # force_full=True：手动「立即扫描」的用户心智是「完整跑一遍看真实
+            # 解析」，忽略水位全量重扫（幂等，边 upsert 不重复）；周期任务走
+            # scan_once 默认增量 + 周期自动全量，不受本模块影响。
             result = await svc.scan_once(
                 lambda sid: _fetch_collector(db, sid),
                 progress=st["progress"],
                 cancel_event=st["cancel_event"],
                 force_event=st["force_event"],
                 force=force,
+                force_full=True,
             )
         st["result"] = result
         skipped = result.get("skipped")
@@ -201,7 +205,15 @@ async def _run_scan_job(task_id: int, *, force: bool) -> None:
             st["message"] = f"本轮跳过：{skipped}"
         else:
             st["status"] = "success"
-            st["message"] = "本轮扫描完成"
+            # 手动扫描恒全量（force_full）——成功 message 明确「全量」而非
+            # 含糊的「本轮」，避免与周期增量空扫 0 任务混淆（用户心智：点了
+            # 立即扫描就要看到完整解析结果）。
+            st["message"] = (
+                f"全量扫描完成：任务 {result.get('scanned_tasks', 0)} / "
+                f"节点 {result.get('scanned_steps', 0)}，直入 "
+                f"{result.get('parsed_ok', 0)}，分歧 {result.get('diverged', 0)}，"
+                f"无法解析 {result.get('unparseable', 0)}"
+            )
     except Exception as exc:  # noqa: BLE001 —— 兜底失败态，不静默
         logger.exception("dp_manual_scan_job_failed task_id=%s", task_id)
         st["status"] = "failed"

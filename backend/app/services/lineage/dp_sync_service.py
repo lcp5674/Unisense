@@ -624,8 +624,9 @@ class DpSyncService:
         cancel_event: asyncio.Event | None = None,
         force_event: asyncio.Event | None = None,
         force: bool = False,
+        force_full: bool = False,
     ) -> dict[str, Any]:
-        """执行一轮 dp 血缘增量扫描（由 arq 周期任务或手动「立即扫描」触发）。
+        """执行一轮 dp 血缘扫描（由 arq 周期任务或手动「立即扫描」触发）。
 
         Args:
             fetch_collector: ``async (source_id) -> collector``（含 query/dispose）。
@@ -639,18 +640,22 @@ class DpSyncService:
                 由调用方保证事务安全回滚。
             force: True 时绕过 enabled/轮询间隔检查（手动「立即扫描」用）；
                 周期任务保持 False（按配置节流）。
+            force_full: True 时**强制全量重扫**（忽略水位，完整扫 dp 全部活跃
+                任务）——手动「立即扫描一轮」的用户心智是「完整跑一遍看真实解析」，
+                而非增量空扫 0 任务；周期任务保持 False（增量 + 周期自动全量）。
         """
         config = await self._dp_repo.get_config()
         if config is None or (not config.enabled and not force):
             return {"skipped": "not_configured_or_disabled"}
         wm = await self._dp_repo.get_watermark("task")
         now = datetime.now(UTC)
-        # 全量轮判定：无 task 水位 = 首轮/重置后全量；或距上次全量超周期自动全量
-        # （M1：稳态增量轮任务删除永不 stale——每 _AUTO_FULL_SCAN_SECONDS 强制一次
-        # 全量观察，使 mark_missing 对「不再出现的任务边」执行失效闭环）。仅全量轮
-        # 对未再出现的边执行失效观察——增量轮只处理变更任务，未变更任务边不在
-        # seen_pairs，若每轮 mark_missing 会误伤大量正常边（P1-6）。
-        full_scan = wm is None or wm.last_max_update is None
+        # 全量轮判定：手动强制全量（force_full）或首轮/重置后全量；或距上次全量
+        # 超周期自动全量（M1：稳态增量轮任务删除永不 stale——每
+        # _AUTO_FULL_SCAN_SECONDS 强制一次全量观察，使 mark_missing 对「不再出现
+        # 的任务边」执行失效闭环）。仅全量轮对未再出现的边执行失效观察——增量轮
+        # 只处理变更任务，未变更任务边不在 seen_pairs，若每轮 mark_missing 会误伤
+        # 大量正常边（P1-6）。
+        full_scan = force_full or wm is None or wm.last_max_update is None
         # MySQL DATETIME 读出 naive → 归一化为 aware UTC 再比较（H10：周期轮询
         # 曾在此对 naive 水位做减法抛 TypeError，每分钟崩溃）。
         last_full_scan_at = _utc_aware(wm.last_full_scan_at) if wm else None

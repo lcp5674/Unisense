@@ -878,7 +878,7 @@ function OpsTab() {
       } else if (st.status === "cancelled") {
         message.info(st.message || "扫描已取消");
       } else if (st.status === "success") {
-        message.success(st.message || "本轮扫描完成");
+        message.success(st.message || "全量扫描完成");
       }
     },
     [message, stopPolling, load]
@@ -988,7 +988,7 @@ function OpsTab() {
         extra={
           <Space>
             <Button type="primary" loading={scanning} onClick={handleScanNow}>
-              立即扫描一轮
+              立即全量扫描
             </Button>
             {scanning && scanTaskId !== null && (
               <>

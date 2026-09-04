@@ -254,6 +254,50 @@ async def test_scan_incremental_passes_watermark() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scan_force_full_ignores_watermark() -> None:
+    """手动「立即扫描」（force_full=True）即使存在水位也强制全量重扫。
+
+    用户心智：点「立即扫描」= 完整跑一遍看真实解析，而非增量空扫 0 任务。
+    - 全量 SQL 不带 ``gmt_modified > :twm`` 水位过滤（扫全部活跃任务）
+    - 收尾触发 mark_missing（全量删除观察）并记录 last_full_scan_at
+    """
+    collector = FakeCollector()
+    svc = _svc(collector)
+    svc._dp_repo.get_watermark = AsyncMock(
+        return_value=_wm(
+            last_scan_at=NOW - timedelta(minutes=10),
+            last_max=NOW - timedelta(days=1),
+            last_full=NOW - timedelta(hours=1),  # 存在水位（增量条件满足）
+        )
+    )
+    result = await svc.scan_once(_fc(collector), force_full=True)
+    assert "skipped" not in result
+    assert result["scanned_tasks"] == 2  # 全部任务被扫，而非 0
+    task_sqls = [q for q in collector.queries if "gmt_modified > :twm" in q]
+    assert not task_sqls  # 全量模式不带水位过滤
+    # 全量轮触发删除观察（mark_missing）+ 记录 last_full_scan_at
+    svc._lineage_repo.mark_missing.assert_awaited_once()
+    wm_calls = svc._dp_repo.update_watermark.await_args_list
+    assert wm_calls, "水位应在全量收尾推进"
+    assert any(c.kwargs.get("full_scan") is True for c in wm_calls)
+    # 注：fake 数据行无 gmt_modified 列 → task_max=None（真实数据返回已扫集 max）；
+    # 对比：同样的水位、无 force_full → 走增量（0 变更）而非全量
+    collector2 = FakeCollector()
+    svc2 = _svc(collector2)
+    svc2._dp_repo.get_watermark = AsyncMock(
+        return_value=_wm(
+            last_scan_at=NOW - timedelta(minutes=10),
+            last_max=NOW - timedelta(days=1),
+            last_full=NOW - timedelta(hours=1),
+        )
+    )
+    # FakeCollector 任务 gmt_modified 均 > 水位 → 增量仍会扫到（2 任务）；
+    # 关键差异在 SQL 是否带水位过滤 + 是否触发 mark_missing
+    await svc2.scan_once(_fc(collector2))
+    svc2._lineage_repo.mark_missing.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_scan_task_failure_does_not_abort_round() -> None:
     collector = FakeCollector(boom_on_task=True)
     svc = _svc(collector)
