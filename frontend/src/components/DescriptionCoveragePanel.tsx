@@ -629,6 +629,8 @@ export const DescriptionCoveragePanel = forwardRef<
   const [coveredIds, setCoveredIds] = useState<Set<number>>(() => new Set());
   /** 服务端批量任务逐表完成轮询句柄（提交后端任务后启动，终态/组件卸载清理）。 */
   const serverPollRef = useRef<number | null>(null);
+  /** 静默统计刷新防抖句柄（抽屉写操作/任务逐表 done 后合并刷新统计卡，不触发整页 loading）。 */
+  const statsRefreshTimerRef = useRef<number | null>(null);
 
   // 概览指标下钻明细（点击指标数字 → 该口径贡献的 per_table 子集）
   const [metricDrillOpen, setMetricDrillOpen] = useState(false);
@@ -659,6 +661,37 @@ export const DescriptionCoveragePanel = forwardRef<
     } finally {
       setLoading(false);
     }
+  }
+
+  /**
+   * 静默刷新统计（不触发整页 loading，失败静默保留当前数据）：
+   * 抽屉内单字段编辑/推断、表描述人工保存、批量任务逐表 done 后调用——
+   * 让「字段覆盖率 / 缺失字段数 / 缺表描述」统计卡与主列表同步实时变化，
+   * 而非等到整个任务终态或下次筛选才 load() 刷新。
+   */
+  async function silentRefreshStats() {
+    try {
+      setCoverage(
+        await fetchDescriptionCoverage({
+          source_id: sourceId || undefined,
+          database: database || undefined,
+          keyword: keyword || undefined,
+        }),
+      );
+    } catch {
+      // 静默失败：保留当前数据，后续 load/轮询自然校正
+    }
+  }
+
+  /** 合并多次触发（任务逐表 done 常连发）：防抖 800ms 后静默刷新统计。 */
+  function scheduleSilentStatsRefresh() {
+    if (statsRefreshTimerRef.current !== null) {
+      window.clearTimeout(statsRefreshTimerRef.current);
+    }
+    statsRefreshTimerRef.current = window.setTimeout(() => {
+      statsRefreshTimerRef.current = null;
+      void silentRefreshStats();
+    }, 800);
   }
 
   /** 表名搜索防抖（350ms，对齐采集目录主列表）：输入即时更新，查询值延迟提交重新拉取。 */
@@ -796,6 +829,7 @@ export const DescriptionCoveragePanel = forwardRef<
     await updateColumnDescription(detail.id, col.name, newDesc);
     message.success(`字段「${col.name}」描述已保存`);
     await refreshDetail();
+    void silentRefreshStats();
   }
 
   async function handleFieldInfer(col: SchemaColumn) {
@@ -807,6 +841,7 @@ export const DescriptionCoveragePanel = forwardRef<
         column_type: col.type,
       }).then(() => {
         message.success(`字段「${col.name}」描述已生成`);
+        void silentRefreshStats();
         return refreshDetail();
       }),
     );
@@ -882,6 +917,7 @@ export const DescriptionCoveragePanel = forwardRef<
       message.success("表级描述已保存");
       setTableDescEditing(false);
       await refreshDetail();
+      void silentRefreshStats();
     } catch (err) {
       message.error(err instanceof Error ? err.message : "保存表描述失败");
     } finally {
@@ -1061,6 +1097,7 @@ export const DescriptionCoveragePanel = forwardRef<
         setBatchProgress([...progress]);
         // 该表已补全：实时从治理主列表移除（不等整批结束 load），并从勾选移除
         if (r.ok) {
+          scheduleSilentStatsRefresh();
           setCoveredIds((prev) => {
             const nx = new Set(prev);
             nx.add(task.catalog_id);
@@ -1258,6 +1295,10 @@ export const DescriptionCoveragePanel = forwardRef<
         window.clearInterval(serverPollRef.current);
         serverPollRef.current = null;
       }
+      if (statsRefreshTimerRef.current !== null) {
+        window.clearTimeout(statsRefreshTimerRef.current);
+        statsRefreshTimerRef.current = null;
+      }
     },
     [],
   );
@@ -1276,11 +1317,17 @@ export const DescriptionCoveragePanel = forwardRef<
         serverPollRef.current = null;
       }
     };
+    /** 本任务已见过的 done 表（用于识别「新增 done」→ 静默刷新统计，避免每轮轮询都重拉）。 */
+    const seenDone = new Set<number>();
     const apply = (t: BatchInferTask) => {
       const doneIds = t.progress
         .filter((p) => p.status === "done" && p.catalog_id != null)
         .map((p) => p.catalog_id as number);
-      if (doneIds.length > 0) {
+      const freshDone = doneIds.filter((id) => !seenDone.has(id));
+      if (freshDone.length > 0) {
+        freshDone.forEach((id) => seenDone.add(id));
+        // 统计卡实时：done 表一旦完成即静默刷新「字段覆盖率/缺失字段数/缺表描述」，不等整批终态
+        scheduleSilentStatsRefresh();
         setCoveredIds((prev) => {
           const nx = new Set(prev);
           doneIds.forEach((id) => nx.add(id));
