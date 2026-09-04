@@ -4,8 +4,9 @@
   判断是否到轮询间隔（默认 5 分钟，前端可配 1~60，改配置即时生效无需重启）。
 - 未初始化配置 / 未启用 → 直接跳过（默认 enabled=false，不自动扫 dp）。
 - 通过 ``fetch_collector`` 注入 dp 数据源真实连接（build_collector，已落库源
-  放行内网但仍拒回环）；LLM 走平台默认 LlmClient（异常转空 content 由协议
-  层降级建单，不拖垮扫描）。
+  放行内网但仍拒回环）；LLM 走 ``LlmConfigService.build_client``（DB 实例优先
+  + env 兜底 + 路由/熔断，含 disable_thinking；异常转空 content 由协议层
+  降级建单，不拖垮扫描）。
 """
 
 from __future__ import annotations
@@ -34,12 +35,19 @@ async def _fetch_collector(db: Any, source_id: str) -> Any:
 
 
 def _make_llm_chat(db: Any):
-    """构造 LLM 调用闭包：平台默认客户端；异常转空 content（协议层降级）。"""
+    """构造 LLM 调用闭包：走 LlmConfigService.build_client（DB 实例优先，含
+    disable_thinking/路由/熔断 + env 兜底）；异常转空 content（协议层降级）。
+
+    与 glossary/collector/metrics 等全库调用点一致——此前裸 ``LlmClient()``
+    只读 env、绕过 DB 实例：本地 Qwen3 配在 llm_config（disable_thinking=True）
+    时不被尊重，思考模式耗尽 max_tokens 致 content 空 → 待抉择单误报
+    「LLM 返回空内容」。build_client 每次调用重读 DB（配置即时生效）。
+    """
 
     async def llm_chat(messages: list[dict[str, str]], **kwargs: Any) -> dict[str, Any]:
-        from app.services.llm.client import LlmClient
+        from app.services.llm.config_service import LlmConfigService
 
-        client = LlmClient()
+        client = await LlmConfigService(db).build_client()
         try:
             return await client.chat(
                 messages,

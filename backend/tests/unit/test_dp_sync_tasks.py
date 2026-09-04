@@ -22,9 +22,11 @@ async def test_make_llm_chat_llm_exception_returns_empty_content() -> None:
     stdlib logging 收到会抛 TypeError，使降级链断裂（P0-1）。
     """
     llm_chat = _make_llm_chat(MagicMock())
+    client = MagicMock()
+    client.chat = AsyncMock(side_effect=RuntimeError("gateway down"))
     with patch(
-        "app.services.llm.client.LlmClient.chat",
-        new=AsyncMock(side_effect=RuntimeError("gateway down")),
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=client),
     ):
         result = await llm_chat([{"role": "user", "content": "hi"}])
     assert result == {"content": ""}
@@ -32,13 +34,20 @@ async def test_make_llm_chat_llm_exception_returns_empty_content() -> None:
 
 @pytest.mark.asyncio
 async def test_make_llm_chat_success_returns_content() -> None:
-    """LLM 正常返回 → 透传 content（max_tokens 默认 2000）。"""
+    """LLM 正常返回 → 透传 content（max_tokens 默认 2000）。
+
+    走 LlmConfigService.build_client（DB 实例优先 + env 兜底，与全库 LLM 调用
+    点一致）——而非裸 LlmClient()（绕过 DB disable_thinking 致空 content）。
+    """
     llm_chat = _make_llm_chat(MagicMock())
+    client = MagicMock()
+    client.chat = AsyncMock(return_value={"content": "ok", "finish_reason": "stop"})
     with patch(
-        "app.services.llm.client.LlmClient.chat",
-        new=AsyncMock(return_value={"content": "ok", "finish_reason": "stop"}),
-    ) as mock_chat:
+        "app.services.llm.config_service.LlmConfigService.build_client",
+        new=AsyncMock(return_value=client),
+    ) as mock_build:
         result = await llm_chat([{"role": "user", "content": "hi"}])
     assert result["content"] == "ok"
-    assert mock_chat.await_args.kwargs.get("temperature") == 0.0
-    assert mock_chat.await_args.kwargs.get("max_tokens") == 2000
+    mock_build.assert_awaited_once()
+    assert client.chat.await_args.kwargs.get("temperature") == 0.0
+    assert client.chat.await_args.kwargs.get("max_tokens") == 2000
