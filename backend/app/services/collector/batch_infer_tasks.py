@@ -411,6 +411,12 @@ async def _write_infer_history(db: Any, task: BatchLlmInferTask) -> None:
     ]
     started = task.started_at or task.created_at
     finished = task.finished_at or datetime.now(UTC)
+    # started_at/finished_at 列是无时区 DATETIME（ORM 读回 naive），created_at 是
+    # timezone=True（读回 aware）——相减前统一补 UTC，避免 aware-naive TypeError。
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    if finished.tzinfo is None:
+        finished = finished.replace(tzinfo=UTC)
     row = BatchInferHistory(
         actor_id=task.actor_id,
         actor_name=task.actor_name,
