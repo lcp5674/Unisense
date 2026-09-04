@@ -1992,14 +1992,16 @@ export function AssetGraph({
             data-testid="asset-graph-collapse-lanes"
           />
         )}
-        <Button
-          size="middle"
-          data-testid="asset-graph-show-fields"
-          type={showFieldsOn ? "primary" : "default"}
-          onClick={() => setShowFieldsOn((v) => !v)}
-        >
-          {showFieldsOn ? "隐藏字段" : "显示字段"}
-        </Button>
+        {(typeCounts.field ?? 0) > 0 && (
+          <Button
+            size="middle"
+            data-testid="asset-graph-show-fields"
+            type={showFieldsOn ? "primary" : "default"}
+            onClick={() => setShowFieldsOn((v) => !v)}
+          >
+            {showFieldsOn ? "隐藏字段" : "显示字段"}
+          </Button>
+        )}
         {fullscreenable && (
           <Button
             size="middle"

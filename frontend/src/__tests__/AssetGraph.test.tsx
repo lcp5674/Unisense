@@ -772,3 +772,21 @@ describe("AssetGraph 专业降噪（第 3 层）", () => {
     });
   });
 });
+
+describe("字段开关按数据自适应", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(graphMock.render).mockImplementation(() => Promise.resolve(undefined));
+  });
+
+  it("数据无字段节点时不渲染「显示字段」按钮（治理中心血缘视图等纯表/指标场景）", async () => {
+    const tNodes: AssetGraphNode[] = [
+      { id: "metric:m", label: "gmv", type: "metric", domain: "sales" },
+      { id: "table:o", label: "ods_orders", type: "table", domain: "sales" },
+    ];
+    render(<AssetGraph nodes={tNodes} edges={[]} height={300} />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+    // 数据无 field 节点 → 字段切换开关无意义，应隐藏（避免"点击没反应"）
+    expect(screen.queryByTestId("asset-graph-show-fields")).toBeNull();
+  });
+});
