@@ -276,6 +276,100 @@ async def list_tickets(
         }
     )
 
+@router.get(
+    "/tickets/retry-tasks", response_model=ApiResponse, dependencies=_ADMIN_DEPS
+)
+async def list_dp_retry_tasks(
+    user: CurrentUser,
+    db=Depends(get_db_session),
+    trace_id: str = Depends(get_trace_id),
+    limit: int = Query(30, ge=1, le=100, description="返回条数"),
+):
+    """dp 重试任务列表（含进行中与最近历史，按创建倒序）。
+
+    可见性：platform_admin 全部；其余仅本人发起任务（防跨用户窥探）。
+    """
+    from app.models.dp_sync import DpTicketRetryTask
+
+    stmt = (
+        select(DpTicketRetryTask)
+        .where(DpTicketRetryTask.deleted_at.is_(None))
+        .order_by(DpTicketRetryTask.created_at.desc())
+        .limit(limit)
+    )
+    if "platform_admin" not in user.roles_all():
+        stmt = stmt.where(DpTicketRetryTask.actor_id == user.id)
+    rows = (await db.execute(stmt)).scalars().all()
+    return ok(data=[_retry_task_to_dict(r) for r in rows], trace_id=trace_id)
+
+
+@router.get(
+    "/tickets/retry-tasks/{task_id}",
+    response_model=ApiResponse,
+    dependencies=_ADMIN_DEPS,
+)
+async def get_dp_retry_task(
+    task_id: int,
+    user: CurrentUser,
+    db=Depends(get_db_session),
+    trace_id: str = Depends(get_trace_id),
+):
+    """单任务进度（前端任务中心轮询用）。"""
+    from app.models.dp_sync import DpTicketRetryTask
+
+    row = (
+        await db.execute(
+            select(DpTicketRetryTask).where(
+                DpTicketRetryTask.id == task_id,
+                DpTicketRetryTask.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise LookupError(f"dp 重试任务不存在: {task_id}")
+    _assert_retry_task_owner(row, user)
+    return ok(data=_retry_task_to_dict(row), trace_id=trace_id)
+
+
+@router.post(
+    "/tickets/retry-tasks/{task_id}/cancel",
+    response_model=ApiResponse,
+    dependencies=_ADMIN_DEPS,
+)
+async def cancel_dp_retry_task(
+    task_id: int,
+    user: CurrentUser,
+    db=Depends(get_db_session),
+    request: Request = None,
+    trace_id: str = Depends(get_trace_id),
+):
+    """请求取消 dp 重试任务（置 cancel_requested；worker 每张完成后检查并收尾）。"""
+    from app.models.dp_sync import DpTicketRetryTask
+
+    row = (
+        await db.execute(
+            select(DpTicketRetryTask).where(
+                DpTicketRetryTask.id == task_id,
+                DpTicketRetryTask.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise LookupError(f"dp 重试任务不存在: {task_id}")
+    _assert_retry_task_owner(row, user)
+    row.cancel_requested = True
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dp_sync.retry_task_cancel",
+        entity_type="dp_ticket_retry_task",
+        entity_id=str(row.id),
+        detail={},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=_retry_task_to_dict(row), trace_id=trace_id)
 
 @router.get("/tickets/{ticket_id}", response_model=ApiResponse, dependencies=_ADMIN_DEPS)
 async def get_ticket(
@@ -695,102 +789,6 @@ async def create_dp_retry_task(
     except Exception as exc:  # noqa: BLE001 —— 入队失败仅告警，任务保持 pending 可查
         logger.warning("dp_retry_enqueue_failed", task_id=row.id, error=str(exc)[:200])
     return ok(data={"task": _retry_task_to_dict(row)}, trace_id=trace_id)
-
-
-@router.get(
-    "/tickets/retry-tasks", response_model=ApiResponse, dependencies=_ADMIN_DEPS
-)
-async def list_dp_retry_tasks(
-    user: CurrentUser,
-    db=Depends(get_db_session),
-    trace_id: str = Depends(get_trace_id),
-    limit: int = Query(30, ge=1, le=100, description="返回条数"),
-):
-    """dp 重试任务列表（含进行中与最近历史，按创建倒序）。
-
-    可见性：platform_admin 全部；其余仅本人发起任务（防跨用户窥探）。
-    """
-    from app.models.dp_sync import DpTicketRetryTask
-
-    stmt = (
-        select(DpTicketRetryTask)
-        .where(DpTicketRetryTask.deleted_at.is_(None))
-        .order_by(DpTicketRetryTask.created_at.desc())
-        .limit(limit)
-    )
-    if "platform_admin" not in user.roles_all():
-        stmt = stmt.where(DpTicketRetryTask.actor_id == user.id)
-    rows = (await db.execute(stmt)).scalars().all()
-    return ok(data=[_retry_task_to_dict(r) for r in rows], trace_id=trace_id)
-
-
-@router.get(
-    "/tickets/retry-tasks/{task_id}",
-    response_model=ApiResponse,
-    dependencies=_ADMIN_DEPS,
-)
-async def get_dp_retry_task(
-    task_id: int,
-    user: CurrentUser,
-    db=Depends(get_db_session),
-    trace_id: str = Depends(get_trace_id),
-):
-    """单任务进度（前端任务中心轮询用）。"""
-    from app.models.dp_sync import DpTicketRetryTask
-
-    row = (
-        await db.execute(
-            select(DpTicketRetryTask).where(
-                DpTicketRetryTask.id == task_id,
-                DpTicketRetryTask.deleted_at.is_(None),
-            )
-        )
-    ).scalar_one_or_none()
-    if row is None:
-        raise LookupError(f"dp 重试任务不存在: {task_id}")
-    _assert_retry_task_owner(row, user)
-    return ok(data=_retry_task_to_dict(row), trace_id=trace_id)
-
-
-@router.post(
-    "/tickets/retry-tasks/{task_id}/cancel",
-    response_model=ApiResponse,
-    dependencies=_ADMIN_DEPS,
-)
-async def cancel_dp_retry_task(
-    task_id: int,
-    user: CurrentUser,
-    db=Depends(get_db_session),
-    request: Request = None,
-    trace_id: str = Depends(get_trace_id),
-):
-    """请求取消 dp 重试任务（置 cancel_requested；worker 每张完成后检查并收尾）。"""
-    from app.models.dp_sync import DpTicketRetryTask
-
-    row = (
-        await db.execute(
-            select(DpTicketRetryTask).where(
-                DpTicketRetryTask.id == task_id,
-                DpTicketRetryTask.deleted_at.is_(None),
-            )
-        )
-    ).scalar_one_or_none()
-    if row is None:
-        raise LookupError(f"dp 重试任务不存在: {task_id}")
-    _assert_retry_task_owner(row, user)
-    row.cancel_requested = True
-    await write_audit(
-        db,
-        actor_id=user.id,
-        action="dp_sync.retry_task_cancel",
-        entity_type="dp_ticket_retry_task",
-        entity_id=str(row.id),
-        detail={},
-        ip=client_ip(request),
-        trace_id=trace_id,
-    )
-    await db.commit()
-    return ok(data=_retry_task_to_dict(row), trace_id=trace_id)
 
 
 @router.post(
