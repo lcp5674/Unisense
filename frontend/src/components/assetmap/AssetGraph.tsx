@@ -1384,7 +1384,13 @@ function GraphCanvas({
                 // 优先节点：展示名称 + 血缘度
                 const node = graph?.getNodeData(String(id))?.data as AssetGraphNode | undefined;
                 if (node && !node.anchor) {
-                  const label = node.label ?? String(id);
+                  // 字段节点常驻 label 仅列名（表泳道去拥挤：表名只出现于图例），hover 时
+                  // 用 node.table 补全「库.表.列」完整标识；无 table（主图字段节点 label 已是
+                  // 完整标识）则原样展示。
+                  const table = (node as { table?: string }).table;
+                  const label = node.type === "field" && table
+                    ? `${table}.${node.label ?? ""}`
+                    : (node.label ?? String(id));
                   const up = outDegreeMapRef.current.get(String(id)) ?? 0;
                   const down = inDegreeMapRef.current.get(String(id)) ?? 0;
                   const total = up + down;

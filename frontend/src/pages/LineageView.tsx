@@ -8,7 +8,6 @@ import {
   Col,
   Collapse,
   Descriptions,
-  Divider,
   Drawer,
   Empty,
   Input,
@@ -196,29 +195,37 @@ function exprKind(
   return { label: "函数加工", color: "geekblue" };
 }
 
-/** 字段钻取图节点装饰：字段节点 label 带所属表名（短表名.列名），跨表场景一眼可辨。
- *  表级/指标节点保持原样。导出供测试与图渲染复用。 */
+/**
+ * 字段钻取图节点装饰（表泳道/去拥挤方案）：
+ * - label 仅保留「列名」（表名前缀不再重复 N 次——表名只出现一次于图例与清单分组头）；
+ * - domain 置为所属表短名 → AssetGraph 按 domainColor 为每张表分配恒定颜色（同表同色、
+ *   异表异色），底部「业务域」图例即成为「表 → 色」图例（表名一次、不重复占位）；
+ * - 保留 table 全名，hover 节点由 GraphCanvas 拼接展示完整「库.表.列」。
+ * 表级/指标节点保持原样。导出供测试与图渲染复用。 */
 export function decorateDrillGraphNodes(drill: FieldDrillData | null): AssetGraphNode[] {
   if (!drill) return [];
   return drill.nodes.map((n) => {
     if (n.type !== "field" || !n.table) return n as AssetGraphNode;
     const tbl = n.table.split(".").pop() || n.table;
-    return { ...n, label: `${tbl}.${n.label}` } as AssetGraphNode;
+    // domain 已是业务域（非表）时不覆盖；字段节点大多无 domain，以表短名作着色维度
+    return { ...n, label: n.label, domain: n.domain || tbl } as AssetGraphNode;
   });
 }
 
-/** 字段钻取图边装饰：字段边中点标注「加工方式 · 表达式」（表达式长则截断 + …），
- *  完整表达式存 fullExpr 供 hover tooltip；直取边仅标「直取」。表级主图边不设
- *  edgeLabel → AssetGraph 不渲染 label，零影响。导出供测试与图渲染复用。 */
+/**
+ * 字段钻取图边装饰（加工标注移出中点/去遮挡方案）：
+ * - edgeLabel 仅标「加工方式」短词（不再把表达式截断拼接进边中点——文字不再与连线
+ *   叠压遮挡），表级主图边不设 edgeLabel → AssetGraph 不渲染 label，零影响；
+ * - 完整加工表达式存 fullExpr，hover 边 tooltip 展示（详见 AssetGraph 边兜底分支）。
+ * 导出供测试与图渲染复用。 */
 export function decorateDrillGraphEdges(drill: FieldDrillData | null): AssetGraphEdge[] {
   if (!drill) return [];
   return drill.edges.map((e) => {
     const expr = (e as { expression?: string | null }).expression ?? null;
     const kind = exprKind(expr);
-    const exprHead = expr ? (expr.length > 20 ? `${expr.slice(0, 20)}…` : expr) : "";
     return {
       ...e,
-      edgeLabel: expr ? `${kind.label} · ${exprHead}` : kind.label,
+      edgeLabel: kind.label,
       fullExpr: expr || "",
     } as AssetGraphEdge;
   });
@@ -690,6 +697,8 @@ function GraphTab() {
   const [drillTableLabel, setDrillTableLabel] = useState<string | null>(null);
   const [drill, setDrill] = useState<FieldDrillData | null>(null);
   const [drillLoading, setDrillLoading] = useState(false);
+  // 钻取默认「列映射清单」视图（表分组卡 + 完整表达式为主通道），图收纳为第二视图
+  const [drillView, setDrillView] = useState<"list" | "graph">("list");
 
   /** 点击表节点 → 字段级钻取：有逐列映射则进入字段视图，无则回退表详情。 */
   async function startFieldDrill(node: AssetGraphNode) {
@@ -881,10 +890,29 @@ function GraphTab() {
             </Space>
           }
         >
-          <span className="muted" style={{ fontSize: 13, display: "block", marginBottom: 8 }}>
-            点击表节点展开其字段级血缘：节点为字段（{drill.table} 的上游来源列与下游去向列），
-            连线为该表参与的逐列映射；完整明细见下方表格。
-          </span>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 8,
+              gap: 8,
+              flexWrap: "wrap",
+            }}
+          >
+            <span className="muted" style={{ fontSize: 13 }}>
+              {drill.table} 参与 {drill.mappings.length} 条字段映射——默认以「列映射清单」展示
+              （每行含加工方式与完整表达式），可切换「血缘关系图」查看字段节点连线。
+            </span>
+            <Segmented
+              value={drillView}
+              onChange={(v) => setDrillView(v as "list" | "graph")}
+              options={[
+                { value: "list", label: `列映射清单（${drill.mappings.length}）` },
+                { value: "graph", label: "血缘关系图" },
+              ]}
+            />
+          </div>
           {(drillUpstreamTables.length > 0 || drillDownstreamTables.length > 0) && (
             <div
               style={{
@@ -949,81 +977,92 @@ function GraphTab() {
               )}
             </div>
           )}
-          <AssetGraph
-            key={`drill-${drill.table}`}
-            nodes={drillGraphNodes}
-            edges={drillGraphEdges}
-            height={430}
-            dimOnHover={false}
-            onNodeClick={handleNodeClick}
-          />
-          <Divider style={{ margin: "12px 0" }} />
-          <Table
-            size="small"
-            rowKey={(r) => `${r.source_table}.${r.source_column}→${r.target_table}.${r.target_column}-${r.provenance}-${r.expression ?? ""}`}
-            dataSource={drill.mappings}
-            columns={[
-              {
-                title: "源列",
-                dataIndex: "source_column",
-                key: "src",
-                width: "30%",
-                render: (_: string, r) => (
-                  <span className="mono" style={{ fontSize: 12 }}>
-                    {r.source_table}.{r.source_column}
-                  </span>
-                ),
-              },
-              {
-                title: "目标列",
-                dataIndex: "target_column",
-                key: "dst",
-                width: "30%",
-                render: (_: string, r) => (
-                  <span className="mono" style={{ fontSize: 12 }}>
-                    {r.target_table}.{r.target_column}
-                  </span>
-                ),
-              },
-              {
-                title: "加工方式",
-                key: "kind",
-                width: 110,
-                render: (_: unknown, r) => {
-                  const k = exprKind(r.expression);
-                  return <Tag color={k.color}>{k.label}</Tag>;
-                },
-              },
-              {
-                title: "加工表达式",
-                dataIndex: "expression",
-                key: "expr",
-                render: (v: string | null) =>
-                  v ? (
+          {drillView === "graph" ? (
+            <>
+              <AssetGraph
+                key={`drill-${drill.table}`}
+                nodes={drillGraphNodes}
+                edges={drillGraphEdges}
+                height={430}
+                dimOnHover={false}
+                onNodeClick={handleNodeClick}
+              />
+              <span className="muted" style={{ fontSize: 12, display: "block", marginTop: 6 }}>
+                节点按所属表着色（同表同色，表名见图例「业务域」区），节点仅显示列名避免重复表名；
+                悬停节点查看完整「库.表.列」，悬停边查看完整加工表达式；加工方式见边旁短标签。
+              </span>
+            </>
+          ) : (
+            <Table
+              size="small"
+              rowKey={(r) => `${r.source_table}.${r.source_column}→${r.target_table}.${r.target_column}-${r.provenance}-${r.expression ?? ""}`}
+              dataSource={drill.mappings}
+              columns={[
+                {
+                  title: "目标列",
+                  dataIndex: "target_column",
+                  key: "dst",
+                  width: "30%",
+                  render: (_: string, r) => (
                     <span className="mono" style={{ fontSize: 12 }}>
-                      {v}
+                      {r.target_table}.{r.target_column}
                     </span>
-                  ) : (
-                    <span className="muted">—</span>
                   ),
-              },
-              {
-                title: "来源",
-                dataIndex: "provenance",
-                key: "prov",
-                width: 140,
-                render: (v: string) => <Tag color="blue">{CHANNEL_LABEL[v] ?? v}</Tag>,
-              },
-              {
-                title: "置信度",
-                dataIndex: "confidence",
-                key: "conf",
-                width: 80,
-                render: (v: number) => `${(v * 100).toFixed(0)}%`,
-              },
-            ]}
-            pagination={{ pageSize: 10, showSizeChanger: true }}
-          />
+                },
+                {
+                  title: "来源列",
+                  dataIndex: "source_column",
+                  key: "src",
+                  width: "30%",
+                  render: (_: string, r) => (
+                    <span className="mono" style={{ fontSize: 12 }}>
+                      {r.source_table}.{r.source_column}
+                    </span>
+                  ),
+                },
+                {
+                  title: "加工方式",
+                  key: "kind",
+                  width: 110,
+                  render: (_: unknown, r) => {
+                    const k = exprKind(r.expression);
+                    return <Tag color={k.color}>{k.label}</Tag>;
+                  },
+                },
+                {
+                  title: "加工表达式",
+                  dataIndex: "expression",
+                  key: "expr",
+                  ellipsis: true,
+                  render: (v: string | null) =>
+                    v ? (
+                      <Tooltip title={<span className="mono">{v}</span>}>
+                        <span className="mono" style={{ fontSize: 12 }}>
+                          {v}
+                        </span>
+                      </Tooltip>
+                    ) : (
+                      <span className="muted">—</span>
+                    ),
+                },
+                {
+                  title: "来源",
+                  dataIndex: "provenance",
+                  key: "prov",
+                  width: 140,
+                  render: (v: string) => <Tag color="blue">{CHANNEL_LABEL[v] ?? v}</Tag>,
+                },
+                {
+                  title: "置信度",
+                  dataIndex: "confidence",
+                  key: "conf",
+                  width: 80,
+                  render: (v: number) => `${(v * 100).toFixed(0)}%`,
+                },
+              ]}
+              pagination={{ pageSize: 10, showSizeChanger: true }}
+            />
+          )}
         </Card>
       ) : drillLoading ? (
         <div style={{ textAlign: "center", padding: 48 }}>
