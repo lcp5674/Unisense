@@ -1650,14 +1650,20 @@ export interface LineagePathResult {
 
 export interface LineageTerminalItem {
   node: string;
-  entity_exists: boolean;
+  /** 从起点到该终止节点的最短路径节点序列（含起点） */
+  path: string[];
   hops: number;
+  node_type: string;
+  entity_exists: boolean;
 }
 
 export interface LineageTerminalsResult {
-  source: string;
-  total: number;
+  /** 起点节点 id（后端字段名为 node） */
+  node: string;
+  /** 终止节点数（可能因 limit 截断） */
+  terminal_count: number;
   terminals: LineageTerminalItem[];
+  truncated: boolean;
 }
 
 export interface LineageBatchStatementResult {

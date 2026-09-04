@@ -2426,6 +2426,7 @@ function GovernanceTab() {
   // 下游健康体检（终止点/断链定位）
   const [termNode, setTermNode] = useState("");
   const [termResult, setTermResult] = useState<import("../api").LineageTerminalsResult | null>(null);
+  const [termView, setTermView] = useState<"tags" | "graph">("tags");
   // 批量解析（血缘重建）
   const [batchText, setBatchText] = useState("");
   const [batchResult, setBatchResult] = useState<import("../api").LineageParseBatchResult | null>(null);
@@ -2491,6 +2492,7 @@ function GovernanceTab() {
         return;
       }
       setTermResult(await lineagePathTerminals(termNode.trim()));
+      setTermView("tags");
     });
 
   /** 节点清理：Modal 二次确认后软删该节点全部血缘边（可恢复）。 */
@@ -2526,6 +2528,21 @@ function GovernanceTab() {
   const pathGraph = useMemo(
     () => (pathResult && pathResult.has_path ? pathsToGraphData(pathResult.paths) : null),
     [pathResult],
+  );
+
+  // 下游体检可视化：从起点到各终止节点的路径合并为一张小血缘图
+  const termGraph = useMemo(
+    () =>
+      termResult && termResult.terminals.length > 0
+        ? pathsToGraphData(
+            termResult.terminals.map((t) => ({
+              nodes: t.path && t.path.length > 0 ? t.path : [termResult.node, t.node],
+              edges: [],
+              hops: t.hops,
+            })),
+          )
+        : null,
+    [termResult],
   );
 
   const doExport = () => {
@@ -2663,26 +2680,40 @@ function GovernanceTab() {
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="选择起点，定位其下游链路中的断点" style={{ padding: "12px 0" }} />
             ) : termResult.terminals.length === 0 ? (
               <Alert type="success" showIcon message="链路完整"
-                description={`「${termResult.source}」下游无死端节点`} />
+                description={`「${termResult.node}」下游无死端节点`} />
             ) : (
               <div>
-                <div style={{ marginBottom: 8 }}>
-                  <Tag color="orange">发现 {termResult.total} 个下游终止节点</Tag>
-                  <span className="muted" style={{ fontSize: 12 }}>红色 = 对应实体已不存在（断链），可到「覆盖治理」修复</span>
+                <div style={{ marginBottom: 8, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <Tag color="orange">发现 {termResult.terminal_count} 个下游终止节点</Tag>
+                  {termResult.truncated && <Tag color="default">已截断（超出上限）</Tag>}
+                  <Segmented size="small" value={termView}
+                    onChange={(v) => setTermView(v as "tags" | "graph")}
+                    options={[{ value: "tags", label: "终止节点" }, { value: "graph", label: "血缘视图" }]} />
                 </div>
-                <Space wrap>
-                  {termResult.terminals.map((t) => {
-                    const v = pathNodeVisual(t.node);
-                    return (
-                      <Tooltip key={`${t.node}-${t.hops}`}
-                        title={t.entity_exists ? `下游终点 · ${t.hops} 跳` : "该节点对应目录/指标实体已删除（断链嫌疑）"}>
-                        <Tag color={t.entity_exists ? v.color : "red"} style={{ marginInlineEnd: 0, cursor: "default" }}>
-                          {t.entity_exists ? `${v.layer} · ${v.short}` : `断链 · ${v.short}`}
-                        </Tag>
-                      </Tooltip>
-                    );
-                  })}
-                </Space>
+                {termView === "graph" ? (
+                  termGraph && termGraph.nodes.length > 0 ? (
+                    <AssetGraph nodes={termGraph.nodes} edges={termGraph.edges} height={320} />
+                  ) : null
+                ) : (
+                  <div>
+                    <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+                      红色 = 对应实体已不存在（断链），可到「覆盖治理」修复
+                    </div>
+                    <Space wrap>
+                      {termResult.terminals.map((t) => {
+                        const v = pathNodeVisual(t.node);
+                        return (
+                          <Tooltip key={`${t.node}-${t.hops}`}
+                            title={t.entity_exists ? `下游终点 · ${t.hops} 跳` : "该节点对应目录/指标实体已删除（断链嫌疑）"}>
+                            <Tag color={t.entity_exists ? v.color : "red"} style={{ marginInlineEnd: 0, cursor: "default" }}>
+                              {t.entity_exists ? `${v.layer} · ${v.short}` : `断链 · ${v.short}`}
+                            </Tag>
+                          </Tooltip>
+                        );
+                      })}
+                    </Space>
+                  </div>
+                )}
               </div>
             )}
           </Card>

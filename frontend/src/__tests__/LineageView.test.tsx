@@ -1603,11 +1603,12 @@ describe("LineageView 治理中心 Tab", () => {
 
   it("下游健康体检：断链终止点红色高亮并标注实体已删除", async () => {
     vi.mocked(api.lineagePathTerminals).mockResolvedValue({
-      source: "table:dwd_order_di",
-      total: 2,
+      node: "table:dwd_order_di",
+      terminal_count: 2,
+      truncated: false,
       terminals: [
-        { node: "table:dws_sales_daily", entity_exists: true, hops: 1 },
-        { node: "table:ghost_legacy", entity_exists: false, hops: 2 },
+        { node: "table:dws_sales_daily", path: ["table:dwd_order_di", "table:dws_sales_daily"], hops: 1, node_type: "table", entity_exists: true },
+        { node: "table:ghost_legacy", path: ["table:dwd_order_di", "table:dwd_legacy_mid", "table:ghost_legacy"], hops: 2, node_type: "table", entity_exists: false },
       ],
     });
     const panel = await openGovernance();
@@ -1619,6 +1620,25 @@ describe("LineageView 治理中心 Tab", () => {
     await waitFor(() => expect(within(panel).getByText(/发现 2 个下游终止节点/)).toBeInTheDocument());
     expect(within(panel).getByText("DWS · dws_sales_daily")).toBeInTheDocument();
     expect(within(panel).getByText("断链 · ghost_legacy")).toBeInTheDocument();
+  });
+
+  it("下游健康体检：切换「血缘视图」把终止节点路径渲染为小血缘图", async () => {
+    vi.mocked(api.lineagePathTerminals).mockResolvedValue({
+      node: "table:dwd_order_di",
+      terminal_count: 1,
+      truncated: false,
+      terminals: [
+        { node: "table:dws_sales_daily", path: ["table:dwd_order_di", "table:dws_sales_daily"], hops: 1, node_type: "table", entity_exists: true },
+      ],
+    });
+    const panel = await openGovernance();
+    await pickNode(panel, 2, "dwd_order_di");
+    fireEvent.click(within(panel).getByRole("button", { name: /体\s*检/ }));
+    await waitFor(() => expect(within(panel).getByText(/发现 1 个下游终止节点/)).toBeInTheDocument());
+    fireEvent.click(within(panel).getByRole("radio", { name: /血缘视图/ }));
+    await waitFor(() =>
+      expect(panel.querySelector('[data-testid="asset-graph-wrap"]')).toBeTruthy(),
+    );
   });
 
   it("节点清理：Modal 二次确认后按节点软删血缘边", async () => {
