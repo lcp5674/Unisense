@@ -1128,10 +1128,12 @@ class LineageRepository:
         return int(getattr(result, "rowcount", 0) or 0)
 
     async def list_nodes(self, kw: str | None = None, limit: int = 50) -> list[tuple[str, int]]:
-        """血缘候选节点：聚合血缘边（lineage_edge）与字段映射（lineage_field_mapping）两端节点。
+        """血缘候选节点：聚合血缘边（lineage_edge）两端节点。
 
-        无 ``kw`` 时按参与边数倒序返回 top-N（预加载常用节点）；带 ``kw`` 时按
-        节点 id 模糊过滤（用户关键词搜索指定——含裸列名/表.列 命中 field: 节点）。
+        无 ``kw`` 时只返回表/指标级节点并按参与边数倒序返回 top-N（预加载常用节点，
+        不掺入字段映射——避免 3.6 万行列映射把表级节点挤出选项框）；带 ``kw`` 时
+        额外聚合字段映射（lineage_field_mapping）为 ``field:`` 节点并按节点 id 模糊
+        过滤——用户输入裸列名/表.列 可搜出字段节点作为字段级血缘起点。
 
         Returns:
             ``[(node, count)]``，count 为该节点参与的血缘边数。
@@ -1142,29 +1144,34 @@ class LineageRepository:
         tgt_q = select(LineageEdge.target_node.label("node")).where(
             LineageEdge.deleted_at.is_(None)
         )
-        # 字段级候选（方案 B）：把 lineage_field_mapping 的列映射也聚合为 field: 节点——
-        # 用户输入列名（如 real_amount）或 表.列 即可搜出字段节点作为影响分析起点。
+        # 无关键词预加载 = 只返回表/指标级节点（选项框保持常用表/指标）。
+        # 字段级候选（方案 B）仅在有搜索词时聚合 lineage_field_mapping 的列映射为 field: 节点——
+        # 用户输入列名（如 real_amount）或 表.列 即可搜出字段节点作为字段级血缘起点；
+        # 不参与无关键词 top-N 预加载，避免 3.6 万行字段映射把表级节点挤出选项框。
         # 仅聚合有效列映射（source_column 非空，排除表级降级/表达式占位）。
-        fld_src_q = select(
-            func.concat(
-                "field:",
-                LineageFieldMapping.source_table,
-                ".",
-                LineageFieldMapping.source_column,
-            ).label("node")
-        ).where(
-            LineageFieldMapping.deleted_at.is_(None),
-            LineageFieldMapping.source_column.is_not(None),
-        )
-        fld_tgt_q = select(
-            func.concat(
-                "field:",
-                LineageFieldMapping.target_table,
-                ".",
-                LineageFieldMapping.target_column,
-            ).label("node")
-        ).where(LineageFieldMapping.deleted_at.is_(None))
-        union = src_q.union(tgt_q, fld_src_q, fld_tgt_q).subquery()
+        if kw:
+            fld_src_q = select(
+                func.concat(
+                    "field:",
+                    LineageFieldMapping.source_table,
+                    ".",
+                    LineageFieldMapping.source_column,
+                ).label("node")
+            ).where(
+                LineageFieldMapping.deleted_at.is_(None),
+                LineageFieldMapping.source_column.is_not(None),
+            )
+            fld_tgt_q = select(
+                func.concat(
+                    "field:",
+                    LineageFieldMapping.target_table,
+                    ".",
+                    LineageFieldMapping.target_column,
+                ).label("node")
+            ).where(LineageFieldMapping.deleted_at.is_(None))
+            union = src_q.union(tgt_q, fld_src_q, fld_tgt_q).subquery()
+        else:
+            union = src_q.union(tgt_q).subquery()
         stmt = (
             select(union.c.node, func.count().label("cnt"))
             .group_by(union.c.node)

@@ -920,6 +920,31 @@ async def test_list_nodes_aggregates_and_filters() -> None:
     assert any("LIMIT 10" in s for s in db.sqls)
 
 
+async def test_list_nodes_no_kw_excludes_field_mappings() -> None:
+    """无关键词预加载候选不聚合字段映射（防 3.6 万行列映射把表级节点挤出选项框）。
+
+    回归：上一轮方案 B 把 lineage_field_mapping 无条件聚合进候选，无 kw 的
+    top-50 预加载被 field: 节点占满（实测 39/50），血缘查询选项框全是字段。
+    """
+    db = _AggregateDB(nodes=[("table:orders", 12)])
+    repo = LineageRepository(db)
+    await repo.list_nodes(limit=50)
+    joined = " ".join(db.sqls)
+    assert "lineage_field_mapping" not in joined
+    # 无 kw 不产生 LIKE 过滤（全量按参与度倒序）
+    assert "LIKE" not in joined
+
+
+async def test_list_nodes_with_kw_includes_field_mappings() -> None:
+    """带关键词搜索时才聚合字段映射——输入列名/表.列 可搜出 field: 节点（方案 B 能力保留）。"""
+    db = _AggregateDB(nodes=[("field:wedw_dw.orders.real_amount", 6)])
+    repo = LineageRepository(db)
+    await repo.list_nodes(kw="real_amount", limit=50)
+    joined = " ".join(db.sqls)
+    assert "lineage_field_mapping" in joined
+    assert "LIKE" in joined
+
+
 # ---- 运行记录详情快照（detail_json / get_ingest_run）----
 
 
