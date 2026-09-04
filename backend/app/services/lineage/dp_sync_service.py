@@ -1107,6 +1107,42 @@ class DpSyncService:
         )
         return {"ticket_id": ticket_id, "resolution": resolution}
 
+    async def resolve_llm_disabled_tickets(self, resolved_by: int) -> dict[str, int]:
+        """一键处置「LLM 关闭期」待抉择单（diverged 且标记原因含 ``LLM 已关闭``）。
+
+        背景：llm_enabled=false 时复杂节点按 plan §3.1「关 = 纯 sqlglot，复杂/失败
+        节点全进待抉择」建 diverged 单（非真实语义分歧——无 LLM 对比，sqlglot 结果
+        完整）。LLM 恢复开启后这批历史单仍需人工逐个「采纳 sqlglot」，效率低且淹没
+        工作台。本方法按标记筛选并批量 ``accept_sqlglot`` 入库（复用 resolve_ticket
+        幂等与防背离），返回 ``{"resolved": n, "failed": n, "skipped": n}``。
+        """
+        tickets, _ = await self._dp_repo.list_tickets(
+            status="diverged", page=1, page_size=500
+        )
+        targets = [
+            t
+            for t in tickets
+            if (t.divergence_reason or "").startswith("LLM 已关闭")
+            and t.resolution is None
+        ]
+        counters = {
+            "resolved": 0,
+            "failed": 0,
+            "skipped": len(tickets) - len(targets),  # 非标记/已裁决被排除
+        }
+        for tk in targets:
+            try:
+                await self.resolve_ticket(
+                    ticket_id=tk.id,
+                    resolution="accept_sqlglot",
+                    resolved_by=resolved_by,
+                )
+                counters["resolved"] += 1
+            except ValueError as exc:  # noqa: BLE001 —— 单张失败不阻断批量
+                counters["failed"] += 1
+                counters.setdefault("errors", []).append(str(exc))
+        return counters
+
     async def reprocess_unparseable_tickets(self, limit: int = 200) -> dict[str, int]:
         """调度宏展开能力上线后，对存量 ``unparseable`` 单自动重判并尽量消解。
 

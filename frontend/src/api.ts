@@ -6045,3 +6045,14 @@ export async function previewDpSyncExclude(body: {
     body: JSON.stringify(body),
   });
 }
+
+export async function resolveDpSyncLlmDisabled(): Promise<{
+  resolved: number;
+  failed: number;
+  skipped: number;
+}> {
+  return request<{ resolved: number; failed: number; skipped: number }>(
+    `${API_BASE}/lineage/dp-sync/resolve-llm-disabled`,
+    { method: "POST" }
+  );
+}

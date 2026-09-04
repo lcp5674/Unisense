@@ -257,3 +257,23 @@ async def test_exclude_preview_rejects_invalid_schema(
     body = resp.json()
     assert body["code"] == "VALIDATION_ERROR"
     assert "合法标识符" in body["message"]
+
+
+async def test_resolve_llm_disabled_endpoint(dp_client: httpx.AsyncClient) -> None:
+    """一键处置 LLM 关闭期单端点：调用 service 并返回计数、写审计。"""
+    with (
+        patch.object(
+            dp_api.DpSyncService,
+            "resolve_llm_disabled_tickets",
+            new=AsyncMock(return_value={"resolved": 3, "failed": 0, "skipped": 2}),
+        ),
+        patch.object(dp_api, "write_audit", new=AsyncMock()) as audit,
+    ):
+        resp = await dp_client.post("/api/v1/lineage/dp-sync/resolve-llm-disabled")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["resolved"] == 3
+    assert data["failed"] == 0
+    assert data["skipped"] == 2
+    audit.assert_awaited_once()
+    assert audit.await_args.kwargs["action"] == "dp_sync.resolve_llm_disabled"

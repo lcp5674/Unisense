@@ -332,3 +332,37 @@ async def test_reprocess_unparseable_three_state() -> None:
     assert svc._lineage_repo.upsert_edge_with_status.await_count == 1
     calls = [c.kwargs["resolution"] for c in svc._dp_repo.resolve_ticket.await_args_list]
     assert calls == ["accept_sqlglot", "ignore"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_llm_disabled_batch() -> None:
+    """一键处置 LLM 关闭期单：筛选标记 + 批量 accept_sqlglot，含失败容错。"""
+    t1 = _ticket()
+    t1.divergence_reason = "LLM 已关闭（配置），复杂节点未确认，请人工抉择"
+    t2 = _ticket()
+    t2.id = 2
+    t2.divergence_reason = "sqlglot 与 LLM 意见不一致"  # 真分歧，不应被处置
+    t3 = _ticket()
+    t3.id = 3
+    t3.divergence_reason = "LLM 已关闭（配置），复杂节点未确认，请人工抉择"
+    t3.resolution = "ignore"  # 已裁决，应跳过
+    svc = _svc(t1)
+    svc._dp_repo.list_tickets = AsyncMock(
+        return_value=([t1, t2, t3], 3)
+    )
+    # t1 入库成功，t3 已裁决（resolve_ticket 会因 resolution 非 None 报错——
+    # 但这里 resolve_ticket 被 mock 恒成功；改用 resolve_ticket side_effect 模拟失败
+    async def _maybe_fail(ticket_id, **kw):
+        if ticket_id == 3:
+            raise ValueError("该单已裁决为 ignore")
+        return {"ticket_id": ticket_id}
+
+    svc.resolve_ticket = AsyncMock(side_effect=_maybe_fail)  # type: ignore[method-assign]
+    counters = await svc.resolve_llm_disabled_tickets(resolved_by=3)
+    # targets 仅 t1（t2 非 LLM 关闭标记、t3 已裁决被跳过）
+    assert counters["resolved"] == 1
+    assert counters["failed"] == 0
+    assert counters["skipped"] == 2  # t2/t3 被排除（非标记 + 已裁决）
+    svc.resolve_ticket.assert_awaited_once_with(
+        ticket_id=1, resolution="accept_sqlglot", resolved_by=3
+    )

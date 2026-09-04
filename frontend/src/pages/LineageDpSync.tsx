@@ -37,6 +37,7 @@ import {
   previewDpSyncExclude,
   resetDpSyncWatermark,
   resolveDpTicket,
+  resolveDpSyncLlmDisabled,
   saveDpSyncConfig,
   scanDpSyncNow,
 } from "../api";
@@ -606,6 +607,26 @@ function TicketsTab() {
     }
   };
 
+  const doResolveLlmDisabled = async () => {
+    Modal.confirm({
+      title: "处置 LLM 关闭期待抉择单",
+      content:
+        "将「LLM 已关闭」标记的复杂节点待抉择单批量采纳 sqlglot 结果入库（这些单无真实语义分歧、sqlglot 结果完整）。确认批量处置？",
+      onOk: async () => {
+        setActing(true);
+        try {
+          const r = await resolveDpSyncLlmDisabled();
+          message.success(`已处置：采纳 ${r.resolved}、排除 ${r.skipped}、失败 ${r.failed}`);
+          setReloadTick((x) => x + 1);
+        } catch {
+          message.error("批量处置失败");
+        } finally {
+          setActing(false);
+        }
+      },
+    });
+  };
+
   const columns: ColumnsType<DpTicket> = [
     {
       title: "任务",
@@ -646,7 +667,10 @@ function TicketsTab() {
     <Card
       title="待抉择（LLM 分歧 / 兜底 / 无法解析）"
       extra={
-        <Space>
+        <Space wrap>
+          <Button onClick={() => void doResolveLlmDisabled()} loading={acting}>
+            处置 LLM 关闭期单
+          </Button>
           <Select
             allowClear
             placeholder="状态筛选"

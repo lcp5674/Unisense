@@ -516,6 +516,37 @@ async def reprocess_unparseable(
 
 
 @router.post(
+    "/resolve-llm-disabled", response_model=ApiResponse, dependencies=_ADMIN_DEPS
+)
+async def resolve_llm_disabled(
+    user: CurrentUser,
+    db=Depends(get_db_session),
+    request: Request = None,
+    trace_id: str = Depends(get_trace_id),
+):
+    """一键处置「LLM 关闭期」待抉择单（diverged 且原因含 LLM 已关闭）。
+
+    这些单是 llm_enabled=false 时复杂节点按 plan §3.1 降级建单的产物——无真实
+    语义分歧（无 LLM 对比），sqlglot 结果完整，批量 ``accept_sqlglot`` 入库即可
+    清空工作台，只保留真分歧/兜底/无法解析。返回 resolved/failed/skipped。
+    """
+    svc = DpSyncService(db)
+    counters = await svc.resolve_llm_disabled_tickets(resolved_by=user.id)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dp_sync.resolve_llm_disabled",
+        entity_type="dp_sync_ticket",
+        entity_id="batch",
+        detail=counters,
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=counters)
+
+
+@router.post(
     "/scan/{task_id}/cancel", response_model=ApiResponse, dependencies=_ADMIN_DEPS
 )
 async def cancel_scan(
