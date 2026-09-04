@@ -291,3 +291,44 @@ async def test_resolve_manual_rejects_dirty_table_name() -> None:
             1, resolution="manual", resolved_by=3, manual_edges=manual
         )
     svc._lineage_repo.upsert_edge_with_status.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reprocess_unparseable_three_state() -> None:
+    """调度宏展开后存量 unparseable 自动重判：宏可解析→入库置 accept_sqlglot、
+    纯 DDL→ignore、真失败（垃圾文本）→保留待人工。"""
+    ok_ticket = _ticket()
+    ok_ticket.id = 1
+    ok_ticket.status = "unparseable"
+    ok_ticket.resolution = None
+    ok_ticket.sql_text = (
+        "use wedw_ods;\ncreate table wedw_ods.t_${DATA_DATE} as "
+        "select * from wedw_ods.src_${DATA_DATE};\n"
+    )
+    ok_ticket.task_refs_json = {"task_id": 1386, "step_id": 5012}
+
+    noflow_ticket = _ticket()
+    noflow_ticket.id = 2
+    noflow_ticket.status = "unparseable"
+    noflow_ticket.resolution = None
+    noflow_ticket.sql_text = "create table wedw_ods.x_${D} (id string);\n"
+    noflow_ticket.task_refs_json = {"task_id": 1386, "step_id": 5013}
+
+    keep_ticket = _ticket()
+    keep_ticket.id = 3
+    keep_ticket.status = "unparseable"
+    keep_ticket.resolution = None
+    keep_ticket.sql_text = "this is not sql at all {{{"
+    keep_ticket.task_refs_json = {"task_id": 1386, "step_id": 5014}
+
+    svc = _svc(ok_ticket)
+    svc._dp_repo.list_tickets = AsyncMock(
+        return_value=([ok_ticket, noflow_ticket, keep_ticket], 3)
+    )
+
+    counters = await svc.reprocess_unparseable_tickets(limit=100)
+    assert counters == {"parsed": 1, "no_flow": 1, "kept": 1}
+    # 可解析单：边入库 + 标 accept_sqlglot；纯 DDL 单标 ignore；失败单不动
+    assert svc._lineage_repo.upsert_edge_with_status.await_count == 1
+    calls = [c.kwargs["resolution"] for c in svc._dp_repo.resolve_ticket.await_args_list]
+    assert calls == ["accept_sqlglot", "ignore"]

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 
 import sqlglot
 
@@ -53,6 +54,51 @@ _SET_STMT_RE = re.compile(r"^\s*set\s+", re.IGNORECASE)
 _USE_STMT_RE = re.compile(r"^\s*use\s+", re.IGNORECASE)
 #: 提取 USE 语句中的库名（支持反引号包裹）。
 _USE_DB_RE = re.compile(r"^\s*use\s+[`\"]?([A-Za-z0-9_\-]+)[`\"]?\s*;?\s*$", re.IGNORECASE)
+
+#: dp 调度平台注入的运行期宏占位符（SQL 内无 set 定义，由调度系统运行时替换）。
+#: 形如 ``${DATA_DATE}`` / ``${HIVE_DATA_DATE-1}`` / ``${tmp_tabname}``。血缘解析
+#: 只关心表/列结构，不关心宏的实际运行值——统一替换为稳定的基准值即可使 sqlglot
+#: 可解析；偏移宏按基准日期推算真实日期，保证同脚本内不同偏移展开为互异值，
+#: 避免 ``tab_${DATA_DATE}`` 与 ``tab_${DATA_DATE-1}`` 碰撞成同一张表。
+_SCHED_MACRO_RE = re.compile(
+    r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*?)(?P<off>[-+]\d+)?\}"
+)
+#: 日期类宏名（可按 ±N 天偏移）。
+_DATE_MACRO_NAMES = {"DATA_DATE", "HIVE_DATA_DATE", "PART_DATE", "TODAY"}
+#: 宏展开基准日期（血缘结构语义与日期取值无关，取固定基准即可）。
+_MACRO_BASE_DATE = date(2026, 1, 1)
+
+
+def _expand_schedule_macros(sql: str) -> str:
+    """展开 dp 调度宏占位符（解析前文本归一化，血缘语义不变）。
+
+    - 日期宏（DATA_DATE/HIVE_DATA_DATE/PART_DATE/TODAY，含 ``±N`` 天偏移）：
+      按基准日期推算并输出 ``YYYYMMDD`` 无横杠（表名/标识符上下文安全），
+      偏移互异防同名碰撞；
+    - ``YYYY`` → 基准年、``HH`` → ``00``、``tmp_tabname`` → 稳定临时名；
+    - ``EXEC_TIME``/``exec_time`` → 稳定时间戳字面量；
+    - 其他未知宏 → ``x``（字母占位，避免数字开头破坏标识符；值上下文亦合法）。
+    """
+    if not sql or "${" not in sql:
+        return sql
+
+    def _sub(m: re.Match[str]) -> str:
+        name = m.group("name")
+        off = int(m.group("off") or 0) if m.group("off") else 0
+        if name in _DATE_MACRO_NAMES:
+            d = _MACRO_BASE_DATE + timedelta(days=off)
+            return d.strftime("%Y%m%d")
+        if name == "YYYY":
+            return str(_MACRO_BASE_DATE.year)
+        if name == "HH":
+            return "00"
+        if name == "tmp_tabname":
+            return "tmp_dp_parse"
+        if name in ("EXEC_TIME", "exec_time"):
+            return _MACRO_BASE_DATE.strftime("%Y%m%d%H%M%S")
+        return "x"
+
+    return _SCHED_MACRO_RE.sub(_sub, sql)
 
 
 @dataclass
@@ -304,6 +350,9 @@ def parse_dp_step(
         prepared = _preprocess_dialect(sql, dialect, None)
     except Exception:  # noqa: BLE001 —— 预处理失败仍交由原生解析尝试
         prepared = sql
+    # dp 调度宏展开：${DATA_DATE} 等由调度平台运行时注入（SQL 内无 set 定义），
+    # 不展开 sqlglot 无法解析——统一替换为稳定基准值使数据流可解析（血缘结构不变）。
+    prepared = _expand_schedule_macros(prepared)
 
     # 按语句级 USE 作用域给无前缀表名补默认库（dp 脚本标准形态：use db; create ...）
     qualified, used_db = _qualify_sql_text(prepared, dialect)

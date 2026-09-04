@@ -22,7 +22,7 @@ import {
   Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import dayjs from "dayjs";
+import { formatCnTime } from "../utils/timeCn";
 import {
   cancelDpSyncScan,
   forceCancelDpSyncScan,
@@ -69,7 +69,9 @@ const RESOLUTION_LABEL: Record<string, string> = {
 };
 
 function fmt(v?: string | null): string {
-  return v ? dayjs(v).format("YYYY-MM-DD HH:mm") : "—";
+  // 后端以 UTC 落库、MySQL 返回无偏移 naive 串——必须经 parseBackendTime 按 UTC
+  // 解析再转上海时区，直接 dayjs(v) 会按浏览器本地时区误读导致差 8 小时。
+  return formatCnTime(v);
 }
 
 /** 扫描阶段中文文案（progress.stage）。 */

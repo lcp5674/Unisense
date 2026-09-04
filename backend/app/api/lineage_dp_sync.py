@@ -485,6 +485,37 @@ async def get_scan_status(task_id: int):
 
 
 @router.post(
+    "/reprocess-unparseable", response_model=ApiResponse, dependencies=_ADMIN_DEPS
+)
+async def reprocess_unparseable(
+    user: CurrentUser,
+    db=Depends(get_db_session),
+    request: Request = None,
+    trace_id: str = Depends(get_trace_id),
+    limit: int = Query(200, ge=1, le=2000),
+):
+    """调度宏展开上线后对存量「无法解析」单自动重判并尽量消解。
+
+    可解析（宏展开后）→ 自动入库并置「采纳 sqlglot（系统）」；无数据流 →
+    忽略；仍失败（UDF 声明/方言等）→ 保留待人工。返回 parsed/no_flow/kept。
+    """
+    svc = DpSyncService(db)
+    counters = await svc.reprocess_unparseable_tickets(limit=limit)
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dp_sync.reprocess_unparseable",
+        entity_type="dp_sync_ticket",
+        entity_id="batch",
+        detail=counters,
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=counters)
+
+
+@router.post(
     "/scan/{task_id}/cancel", response_model=ApiResponse, dependencies=_ADMIN_DEPS
 )
 async def cancel_scan(

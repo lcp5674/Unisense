@@ -1087,6 +1087,46 @@ class DpSyncService:
         )
         return {"ticket_id": ticket_id, "resolution": resolution}
 
+    async def reprocess_unparseable_tickets(self, limit: int = 200) -> dict[str, int]:
+        """调度宏展开能力上线后，对存量 ``unparseable`` 单自动重判并尽量消解。
+
+        背景：此前 dp 脚本含 ``${DATA_DATE}`` 等调度宏（平台注入、SQL 内无 set
+        定义），sqlglot 无法解析致大量节点落 ``unparseable`` 淹没人工工作台；
+        宏展开（``parse_dp_step`` 已内置）使多数可自动解析。本方法供一次性补扫
+        与运维复用，按重判结果：
+            ok      → 入库边/字段映射 + 单置 ``accept_sqlglot``（系统自动裁决）
+            no_flow → 单置 ``ignore``（无数据流，无可采纳对象）
+            failed  → 保留待人工（UDF 声明/方言等仍无法解析）
+        返回 ``{"parsed": n, "no_flow": n, "kept": n}`` 计数。
+        """
+        tickets, _ = await self._dp_repo.list_tickets(
+            status="unparseable", page=1, page_size=limit
+        )
+        counters = {"parsed": 0, "no_flow": 0, "kept": 0}
+        for tk in tickets:
+            outcome = parse_dp_step(
+                tk.sql_text,
+                dialect="hive",
+                target_table=tk.out_table or None,
+            )
+            if outcome.status == "ok":
+                task, step = self._restore_task_step(tk)
+                await self._store_sqlglot_edges(
+                    outcome, task, step, tk.sql_hash, None, None
+                )
+                await self._dp_repo.resolve_ticket(
+                    tk.id, resolution="accept_sqlglot", resolved_by=0
+                )
+                counters["parsed"] += 1
+            elif outcome.status == "no_flow":
+                await self._dp_repo.resolve_ticket(
+                    tk.id, resolution="ignore", resolved_by=0
+                )
+                counters["no_flow"] += 1
+            else:
+                counters["kept"] += 1
+        return counters
+
     async def _apply_llm_resolution(
         self, ticket: Any, task: dict[str, Any], step: dict[str, Any], sql_hash: str
     ) -> None:

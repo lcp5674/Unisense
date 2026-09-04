@@ -78,8 +78,7 @@ def test_parse_error_garbage_is_failed() -> None:
 def test_macro_pure_ddl_is_no_flow() -> None:
     """含 ${DATA_DATE} 宏的纯 DDL 建表（无数据流）→ no_flow，不堆 unparseable 单。
 
-    回归：dp 大量 ODS 建表节点带宏导致 sqlglot 失败，此前全部落 unparseable
-    淹没人工抉择工作台（实测 662 单中 459 为无数据流纯 DDL）。
+    调度宏展开后建表可解析，但无数据搬移——仍 no_flow 跳过。
     """
     sql = (
         "use wedw_ods;\ndrop table if exists wedw_ods.t_${DATA_DATE};\n"
@@ -89,18 +88,54 @@ def test_macro_pure_ddl_is_no_flow() -> None:
     )
     r = parse_dp_step(sql)
     assert r.status == "no_flow"
-    assert "no_dataflow" in r.features
 
 
-def test_macro_with_dataflow_stays_failed() -> None:
-    """宏 + as select/insert（有真实数据搬移）→ 仍 failed，保留给 LLM/人工。"""
+def test_schedule_macro_with_dataflow_is_ok() -> None:
+    """宏 + as select/insert（有真实数据搬移）→ 宏展开后自动解析为 ok。
+
+    回归：dp 大量带 ${DATA_DATE} 的加工脚本此前 sqlglot 失败落 unparseable
+    （实测 201 单中 195 含调度宏、92% 可借此自动解析），不再需要 LLM/人工。
+    """
     sql = (
         "use wedw_ods;\ndrop table if exists wedw_ods.t_${DATA_DATE};\n"
         "create table wedw_ods.t_${DATA_DATE} as select * from wedw_ods.src_${DATA_DATE};\n"
     )
     r = parse_dp_step(sql)
-    assert r.status == "failed"
-    assert "parse_error" in r.features
+    assert r.status == "ok"
+    assert {e.source for e in r.table_edges} == {"wedw_ods.src_20260101"}
+    assert {e.target for e in r.table_edges} == {"wedw_ods.t_20260101"}
+
+
+def test_schedule_macro_date_offset_are_distinct() -> None:
+    """日期宏 ±N 偏移展开为互异日期（防同名表碰撞）。"""
+    sql = (
+        "create table wedw_ods.t_${DATA_DATE} as "
+        "select * from wedw_ods.src_${DATA_DATE} a "
+        "left join wedw_ods.src_${DATA_DATE-1} b on a.id=b.id "
+        "left join wedw_ods.src_${DATA_DATE-7} c on a.id=c.id"
+    )
+    r = parse_dp_step(sql)
+    assert r.status == "ok"
+    targets = {e.target for e in r.table_edges}
+    sources = {e.source for e in r.table_edges}
+    assert targets == {"wedw_ods.t_20260101"}
+    assert sources == {
+        "wedw_ods.src_20260101",
+        "wedw_ods.src_20251231",
+        "wedw_ods.src_20251225",
+    }
+
+
+def test_schedule_macro_unknown_and_tmp() -> None:
+    """未知宏兜底字母占位、tmp_tabname 稳定展开、EXEC_TIME 稳定时间戳。"""
+    sql = (
+        "create table wedw_ods.t_${tmp_tabname} as select * "
+        "from wedw_ods.src where dt='${DATA_DATE}' and hh='${HH}' and y=${YYYY}"
+    )
+    r = parse_dp_step(sql)
+    assert r.status == "ok"
+    assert {e.target for e in r.table_edges} == {"wedw_ods.t_tmp_dp_parse"}
+    assert {e.source for e in r.table_edges} == {"wedw_ods.src"}
 
 
 def test_macro_create_external_no_flow() -> None:
