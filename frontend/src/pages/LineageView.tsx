@@ -2462,6 +2462,40 @@ function GovernanceTab() {
   const GRADE_LABEL: Record<string, string> = { excellent: "优秀", good: "良好", fair: "一般", poor: "较差" };
   const GRADE_COLOR: Record<string, string> = { excellent: "green", good: "blue", fair: "orange", poor: "red" };
 
+  /** 健康度维度业务明细文案（detail → 中文可读数值：失效率/断链率展示「失效 X / Y 边（Z%）」等，
+   *  而非只有健康分进度条——避免「失效率」标签下无实际数值可读）。 */
+  const healthDimDetail = (key: string, d?: import("../api").LineageHealthDimension) => {
+    if (!d) return "暂无数据";
+    const dt = d.detail ?? {};
+    const ratio = (n: unknown, total: unknown) => {
+      if (typeof n !== "number" || typeof total !== "number" || total <= 0) return "—";
+      return `${n} / ${total} 边（${((n / total) * 100).toFixed(1)}%）`;
+    };
+    switch (key) {
+      case "coverage":
+        return `指标 ${dt.metric_with_lineage ?? "—"} / ${dt.metric_total ?? "—"} 有血缘 · ${dt.table_no_downstream ?? "—"} 表无下游`;
+      case "broken":
+        return `断链 ${ratio(dt.broken_edges, dt.edge_total)}`;
+      case "stale":
+        return `失效 ${ratio(dt.stale_edges, dt.edge_total)}`;
+      case "freshness": {
+        const days = dt.days_since_run;
+        if (typeof days !== "number") return "尚无采集运行记录";
+        return days === 0 ? "最近采集：刚刚" : `最近采集：${days} 天前`;
+      }
+      case "reconciliation": {
+        if (dt.reason === "graph_unavailable") return "图存储不可达，该维度未参与评分";
+        if (dt.reason === "graph_not_configured") return "图存储未配置，该维度未参与评分";
+        const drift = dt.drift;
+        return `库 ${dt.mysql_edges ?? "—"} vs 图 ${dt.graph_edges ?? "—"} 边 · 偏差 ${
+          typeof drift === "number" ? `${(drift * 100).toFixed(1)}%` : "—"
+        }`;
+      }
+      default:
+        return "";
+    }
+  };
+
   const downloadExport = (data: import("../api").LineageJsonExportResult) => {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -2589,10 +2623,18 @@ function GovernanceTab() {
             <Row gutter={[16, 8]}>
               {HEALTH_DIMS.map(({ key, label, color }) => {
                 const d = health.dimensions[key];
+                const score = Math.round(d?.score ?? 0);
                 return (
                   <Col xs={12} md={8} key={key}>
-                    <div style={{ fontSize: 12, color: "#666" }}>{label}</div>
-                    <Progress percent={Math.round(d?.score ?? 0)} size="small" strokeColor={color} />
+                    <div style={{ fontSize: 12, color: "#666", marginBottom: 2 }}>{label}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <Progress percent={score} size="small" strokeColor={color}
+                        style={{ flex: 1, minWidth: 0 }} format={() => ""} />
+                      <span style={{ fontSize: 13, fontWeight: 600, color, whiteSpace: "nowrap" }}>{score} 分</span>
+                    </div>
+                    <div className="muted" style={{ fontSize: 11, marginTop: 2, lineHeight: 1.5 }}>
+                      {healthDimDetail(key, d)}
+                    </div>
                   </Col>
                 );
               })}

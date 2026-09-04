@@ -1652,4 +1652,37 @@ describe("LineageView 治理中心 Tab", () => {
     await waitFor(() => expect(api.deleteLineageEdgesByNode).toHaveBeenCalledWith("table:ods_legacy"));
     await waitFor(() => expect(screen.getByText(/已清理 3 条血缘边/)).toBeInTheDocument());
   });
+
+  it("健康度评估：各维度展示得分数字与业务明细数值（失效率显示失效边数而非仅健康分条）", async () => {
+    vi.mocked(api.lineageHealth).mockResolvedValue({
+      overall_score: 78.2,
+      grade: "good",
+      dimensions: {
+        coverage: { score: 86.7, weight: 0.4, detail: { metric_total: 11, metric_with_lineage: 10, table_total: 22654, table_no_downstream: 673 } },
+        broken: { score: 48.3, weight: 0.2, detail: { broken_edges: 1960, edge_total: 3789 } },
+        stale: { score: 100.0, weight: 0.15, detail: { stale_edges: 0, edge_total: 3789 } },
+        freshness: { score: 100.0, weight: 0.15, detail: { latest_run_at: "2026-09-04T04:02:01+00:00", days_since_run: 0 } },
+        reconciliation: { score: 38.7, weight: 0.1, detail: { mysql_edges: 3789, graph_edges: 1466, drift: 0.6131 } },
+      },
+      edge_total: 3789,
+      metric_total: 11,
+      table_total: 22654,
+      evaluated_at: "2026-09-04T04:02:39+00:00",
+    });
+    const panel = await openGovernance();
+    fireEvent.click(within(panel).getByRole("button", { name: /评\s*估/ }));
+    await waitFor(() => expect(api.lineageHealth).toHaveBeenCalled());
+    // 失效率：实际数值（失效边 / 总边 + 真实占比）而非只有健康分进度条
+    await waitFor(() => expect(within(panel).getByText("失效率")).toBeInTheDocument());
+    expect(within(panel).getByText(/失效 0 \/ 3789 边（0\.0%）/)).toBeInTheDocument();
+    expect(within(panel).getByText(/断链 1960 \/ 3789 边（51\.7%）/)).toBeInTheDocument();
+    expect(within(panel).getByText(/指标 10 \/ 11 有血缘 · 673 表无下游/)).toBeInTheDocument();
+    expect(within(panel).getByText("最近采集：刚刚")).toBeInTheDocument();
+    expect(within(panel).getByText(/偏差 61\.3%/)).toBeInTheDocument();
+    // 得分数字明确标注「分」，与坏率语义区分（stale/freshness 均为 100 分 → 多处）
+    expect(within(panel).getAllByText("100 分").length).toBeGreaterThanOrEqual(1);
+    expect(within(panel).getByText("48 分")).toBeInTheDocument();
+    // 综合健康度
+    expect(within(panel).getByText("78")).toBeInTheDocument();
+  });
 });
