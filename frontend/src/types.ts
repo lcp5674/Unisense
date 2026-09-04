@@ -3696,6 +3696,10 @@ export interface DpSyncScanProgress {
   total: number;
   processed: number;
   current_task_id?: number | null;
+  /** 当前正在解析的节点类型（后端 DP_STEP_TYPES 权威映射；parsing 阶段实时更新）。 */
+  current_step_type?: number | null;
+  /** 当前正在解析的节点类型中文 label（如「DataX 同步」「Hive/Spark SQL」）。 */
+  current_step_label?: string | null;
 }
 
 /** 手动扫描任务状态（OpsTab 轮询） */

@@ -48,6 +48,7 @@ import type {
   DpSyncConfig,
   DpSyncMeta,
   DpSyncRun,
+  DpSyncScanProgress,
   DpSyncScanStatus,
   DpTicket,
   DpSyncTypeOption,
@@ -95,6 +96,16 @@ function typeOptionLabel(o: DpSyncTypeOption): string {
 
 function scanStageText(stage?: string): string {
   return SCAN_STAGE_LABEL[stage ?? ""] ?? stage ?? "准备中";
+}
+
+/** parsing 阶段按「当前正在解析的节点类型」动态展示（progress.current_step_label）；
+ *  无类型信息（如单个任务内的 step 未开始/未知）时回退静态文案。 */
+function scanParsingText(progress?: DpSyncScanProgress): string {
+  const label = progress?.current_step_label?.trim();
+  if (progress?.stage === "parsing" && label) {
+    return `正在解析 ${label} 节点并写血缘`;
+  }
+  return "解析节点脚本并写血缘";
 }
 
 //: 不承载 SQL 脚本的节点类型（血缘解析仅实现 SQL 内容）：扫描命中只会得到
@@ -1112,7 +1123,11 @@ function OpsTab() {
                     ? "强制终止中：将在当前步骤处理点立即停止…"
                     : cancelRequested
                       ? "正在停止扫描：等待当前步骤完成后停止…"
-                      : `扫描中：${scanStageText(scanProgress?.stage)}`}
+                      : `扫描中：${
+                          scanProgress?.stage === "parsing"
+                            ? scanParsingText(scanProgress)
+                            : scanStageText(scanProgress?.stage)
+                        }`}
                   {!cancelRequested &&
                     !scanStatus.force_stop &&
                     `（已处理 ${scanProgress?.processed ?? 0} / ${scanProgress?.total ?? 0} 个任务）`}

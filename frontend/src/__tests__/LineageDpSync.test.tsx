@@ -270,6 +270,54 @@ describe("LineageDpSync", () => {
     expect(mockedApi.getDpSyncScanStatus).toHaveBeenCalledWith(1);
   });
 
+  it("ops scan parsing text reflects current step type dynamically", async () => {
+    const user = userEvent.setup();
+    mockedApi.scanDpSyncNow.mockResolvedValue({
+      task_id: 2,
+      status: "running",
+      already_running: false,
+    });
+    // DataX 节点类型 → parsing 文案应展示「正在解析 DataX 同步 节点并写血缘」
+    mockedApi.getDpSyncScanStatus.mockResolvedValue({
+      task_id: 2,
+      status: "running",
+      progress: {
+        stage: "parsing",
+        total: 10,
+        processed: 3,
+        current_task_id: 202,
+        current_step_type: 2,
+        current_step_label: "DataX 同步",
+      },
+      result: null,
+    });
+    renderPage();
+    await user.click(screen.getByText(/运\s*维/));
+    await screen.findByText("运行记录");
+    await user.click(screen.getByText(/立即全量扫描/));
+    await screen.findByText(/扫描中：正在解析 DataX 同步 节点并写血缘/);
+    expect(screen.getByText(/已处理 3 \/ 10 个任务/)).toBeInTheDocument();
+    // 无类型信息时回退静态文案（scanParsingText 兜底）
+    mockedApi.getDpSyncScanStatus.mockResolvedValue({
+      task_id: 2,
+      status: "running",
+      progress: {
+        stage: "parsing",
+        total: 10,
+        processed: 4,
+        current_task_id: 202,
+      },
+      result: null,
+    });
+    await waitFor(
+      () =>
+        expect(
+          screen.getAllByText(/解析节点脚本并写血缘/).length
+        ).toBeGreaterThan(0),
+      { timeout: 3000 }
+    );
+  });
+
   it("ops scan shows cancel button and cancels running task", async () => {
     const user = userEvent.setup();
     mockedApi.scanDpSyncNow.mockResolvedValue({

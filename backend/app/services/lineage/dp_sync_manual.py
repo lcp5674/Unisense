@@ -74,6 +74,8 @@ def _new_state(task_id: int) -> dict[str, Any]:
             "total": 0,
             "processed": 0,
             "current_task_id": None,
+            "current_step_type": None,
+            "current_step_label": None,
         },
         "cancel_event": asyncio.Event(),
         "force_event": asyncio.Event(),

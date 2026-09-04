@@ -38,7 +38,7 @@ from app.services.lineage.dp_sync_llm import (
     parse_confirm_response,
     parse_fallback_response,
 )
-from app.services.lineage.dp_sync_meta import merged_exclude_table_patterns
+from app.services.lineage.dp_sync_meta import DP_STEP_TYPES, merged_exclude_table_patterns
 from app.services.lineage.dp_sync_parser import parse_dp_step
 from app.services.lineage.dp_sync_repo import DpLineageRepository
 from app.services.lineage.dp_sync_typed import parse_dp_step_typed
@@ -708,6 +708,10 @@ class DpSyncService:
                 progress["total"] = len(task_ids)
                 progress["processed"] = 0
                 progress["current_task_id"] = None
+                # 当前正在解析的节点类型（label 权威映射见 DP_STEP_TYPES）——
+                # 由 _process_task 的 step 循环实时更新，供前端按类型动态展示进度。
+                progress["current_step_type"] = None
+                progress["current_step_label"] = None
                 progress["stage"] = "parsing"
             cancelled = False
             for idx, task_id in enumerate(task_ids, start=1):
@@ -731,6 +735,7 @@ class DpSyncService:
                             seen_pairs,
                             cancel_event=cancel_event,
                             force_event=force_event,
+                            progress=progress,
                         )
                 except _ScanCancelledError:
                     # 强制终止：当前任务已随 savepoint 回滚（事务由 scan_once 收尾统一处理）
@@ -936,12 +941,15 @@ class DpSyncService:
         *,
         cancel_event: asyncio.Event | None = None,
         force_event: asyncio.Event | None = None,
+        progress: dict[str, Any] | None = None,
     ) -> None:
         """处理单个任务：拉 task 静态字段 + SQL 节点 → process_step 逐节点。
 
         取消检查点下沉（A 方案）：fetch task 后 / 每个 step 前 / 资产回填前检查——
         协作取消（仅 cancel_event）在 step 边界停止，不再等完整任务跑完；
         强制终止（force_event 一并置位）在检查点直接抛 ``_ScanCancelled`` 中断。
+        progress: 非空时在每个 step 处理前写入当前节点类型（current_step_type/
+            current_step_label），供前端按类型动态展示扫描文案。
         """
         task = await self._fetch_task(collector, task_id, config)
         if task is None:
@@ -983,6 +991,12 @@ class DpSyncService:
                     if force_event is not None and force_event.is_set():
                         raise _ScanCancelledError(f"task {task_id} force-stop")
                     break  # 协作取消：本任务剩余 steps 不再处理（已处理 steps 保留）
+                if progress is not None:
+                    stype = int(step.get("task_step_type") or 7)
+                    progress["current_step_type"] = stype
+                    progress["current_step_label"] = DP_STEP_TYPES.get(
+                        stype, f"类型 {stype}"
+                    )
                 sql = str(step.get("script_info") or "")
                 counters["scanned_steps"] += 1
                 result = await self.process_step(task, step, sql, config, seen_pairs)

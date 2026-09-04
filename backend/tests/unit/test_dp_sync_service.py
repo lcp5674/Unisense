@@ -31,6 +31,7 @@ def _config(**overrides) -> DpSyncConfig:
         "resolve_memory_enabled": True,
         "owner_backfill": "orphan_only",
         "exclude_table_patterns": None,
+        "exclude_task_patterns": None,
         "llm_complexity_rules": None,
     }
     return SimpleNamespace(**{**defaults, **overrides})
@@ -271,3 +272,33 @@ async def test_backfill_owner_existing_user_no_shadow() -> None:
     assert result == {"backfilled": 1, "shadow_created": False}
     svc._dp_repo.create_shadow_user.assert_not_awaited()
     svc._dp_repo.update_catalog_owner.assert_awaited_once_with(5, 3)
+
+
+@pytest.mark.asyncio
+async def test_process_task_writes_current_step_type_to_progress() -> None:
+    """_process_task 逐 step 处理时把当前节点类型写入 progress（供前端按类型动态展示）。
+
+    进度轮询端读取 progress["current_step_label"]：DataX(2) 在前、Hive(7) 在后——
+    处理后 progress 应保留最近处理的类型 label（Hive/Spark SQL）。
+    """
+    svc = _svc()
+    svc._fetch_task = AsyncMock(
+        return_value={"task_id": 1386, "task_name": "T", "out_table": "a.b"}
+    )
+    svc._fetch_sql_steps = AsyncMock(
+        return_value=[
+            {"task_step_type": 2, "script_info": '{"job": {"content": []}}'},
+            {"task_step_type": 7, "script_info": SIMPLE_SQL},
+        ]
+    )
+    svc.process_step = AsyncMock(return_value={"status": "parsed_ok"})
+    svc.backfill_owner = AsyncMock()
+    counters = {"scanned_tasks": 0, "scanned_steps": 0}
+    progress: dict[str, object] = {"stage": "parsing"}
+    await svc._process_task(
+        object(), _config(), 1386, counters, set(), progress=progress
+    )
+    assert counters["scanned_steps"] == 2
+    assert progress["current_step_type"] == 7
+    assert progress["current_step_label"] == "Hive/Spark SQL"
+    svc.backfill_owner.assert_awaited_once()
