@@ -901,6 +901,61 @@ describe("LineageView 血缘图谱聚焦（?node= 参数）", () => {
   });
 });
 
+describe("血缘图谱 结构概览 / 全量血缘 双模式", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.lineageGraph).mockResolvedValue(graphData);
+    vi.mocked(api.getCatalogDetail).mockResolvedValue(tableDetail);
+    vi.mocked(api.getMetric).mockResolvedValue(metricDetail);
+    graphMock.getNodeData.mockImplementation((id?: string) => {
+      const found = graphData.nodes.find((n) => n.id === String(id));
+      return found ? ({ id: found.id, data: found } as never) : undefined;
+    });
+  });
+
+  it("默认进入结构概览：全部数仓层折叠为聚合带（折叠提示出现）+ 模式切换控件存在", async () => {
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    // 模式切换控件（结构概览 / 全量血缘）
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="lineage-view-mode"]')).toBeTruthy();
+    });
+    // 结构概览默认折叠 → AssetGraph 折叠提示条出现（节点已收成泳道聚合节点）
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="asset-graph-fold-banner"]')).toBeTruthy();
+    });
+  });
+
+  it("切换到「全量血缘」：折叠清除（折叠提示消失）", async () => {
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="asset-graph-fold-banner"]')).toBeTruthy();
+    });
+    // 点 Segmented「全量血缘」→ key 重挂载、折叠初值重置为空
+    await act(async () => {
+      screen.getByText("全量血缘").click();
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="asset-graph-fold-banner"]')).toBeNull();
+    });
+  });
+
+  it("?node= 聚焦时不显示模式切换（聚焦子图直接展示，无需概览折叠）", async () => {
+    render(
+      <MemoryRouter initialEntries={["/lineage?node=revenue"]}>
+        <LineageView />
+        <PathProbe />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByText(/已限定为 2 节点 · 1 条血缘边/)).toBeInTheDocument();
+    });
+    expect(document.querySelector('[data-testid="lineage-view-mode"]')).toBeNull();
+  });
+});
+
 describe("buildSubgraph / resolveRootId 单元测试", () => {
   const nodes = [
     { id: "metric:gmv", type: "metric", label: "GMV" },

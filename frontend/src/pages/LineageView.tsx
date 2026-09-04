@@ -487,6 +487,9 @@ function TableDetailDrawer({ detail, open, onClose, loading }: {
  *  展示详情（指标详情抽屉 / 表详情抽屉），不跳转页面，用户可再决定是否前往完整页面。
  *  支持 URL ``?node=xxx`` 聚焦：从指标详情「在图谱中查看」跳转时，仅展示该节点
  *  上下游子图（BFS 展开 3 跳），而非全量血缘节点。 */
+/** 结构概览模式默认折叠的全部数仓层：进入即显示各层聚合带 + 层间主干血缘（全貌不拥堵），
+ *  点击层带展开该层明细。字段层因 showFields=false 本无节点，折叠无副作用（保留占位一致性）。 */
+const ALL_LINEAGE_LAYERS = ["ods", "dwd", "dws", "ads", "dm", "table", "metric", "field"];
 function GraphTab() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [data, setData] = useState<{ nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } | null>(null);
@@ -496,6 +499,14 @@ function GraphTab() {
   const [provenance, setProvenance] = useState<string>("all");
   // 聚焦节点：URL ?node= 参数（指标详情「在图谱中查看」跳转来源），限定该指标/表上下游
   const focusNode = searchParams.get("node")?.trim() || null;
+  // 视图模式：结构概览（默认，各数仓层折叠为聚合带、仅显示层间主干血缘——全貌不拥堵）/
+  // 全量血缘（展开全部节点）。有 ?node= 聚焦时直接展示聚焦子图（节点少天然清晰），不启用概览折叠。
+  const [viewMode, setViewMode] = useState<"overview" | "full">(focusNode ? "full" : "overview");
+  // 聚焦/清除聚焦时联动：进入聚焦子图切全量，清除聚焦回结构概览。
+  useEffect(() => {
+    setViewMode(focusNode ? "full" : "overview");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusNode]);
   // 聚焦节点不在图谱中（无血缘数据）时的空态标记
   const [focusMiss, setFocusMiss] = useState(false);
   // 指标节点详情抽屉（侧边栏）
@@ -635,6 +646,17 @@ function GraphTab() {
             </Button>
           </Tag>
         )}
+        {!focusNode && (
+          <Segmented
+            value={viewMode}
+            onChange={(v) => setViewMode(v as "overview" | "full")}
+            options={[
+              { value: "overview", label: "结构概览" },
+              { value: "full", label: "全量血缘" },
+            ]}
+            data-testid="lineage-view-mode"
+          />
+        )}
         <span className="muted" style={{ fontSize: 13 }}>
           {data
             ? focusNode
@@ -646,14 +668,19 @@ function GraphTab() {
       </Space>
       {data && data.nodes.length > 0 ? (
         <AssetGraph
+          // 切换视图模式强制重挂载：折叠初值（defaultCollapsedLayers）按模式重置——
+          // 结构概览=全部数仓层折叠为聚合带（层间主干边），全量血缘=全部展开
+          key={viewMode}
           nodes={data.nodes}
           edges={data.edges}
-          height={740}
+          height={viewMode === "overview" ? 520 : 740}
           onNodeClick={handleNodeClick}
           // 血缘总览默认隐藏字段节点，聚焦子图同样隐藏，聚焦指标/表主干
           showFields={false}
           // 语义泳道：指标/表分带（表带在上、指标带下），表→指标血缘方向自然分层
           lanes
+          // 结构概览：进入即全层聚合（每层一个聚合带 + 层间去重边），点击层带展开该层明细
+          defaultCollapsedLayers={viewMode === "overview" ? ALL_LINEAGE_LAYERS : undefined}
         />
       ) : (
         !loading &&

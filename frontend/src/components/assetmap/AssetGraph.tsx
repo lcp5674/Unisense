@@ -48,6 +48,10 @@ interface AssetGraphProps {
   /** 分层布局方向：TB=自上而下（数仓源头在上、字段在下）；LR=从左到右（源头在左、字段在右）。
    *  仅影响 hierarchy 布局，force/radial 无方向概念。默认 "TB"（保持既有行为）；可在工具栏手动切换。 */
   direction?: "TB" | "LR";
+  /** 初始泳道折叠集合（结构概览模式：父组件传入全层折叠，进入即显示各层聚合带 + 层间主干边）。
+   *  仅作为 collapsedLayers 的初值（内部仍可点击聚合节点展开/工具栏调整/全部展开）。
+   *  父组件切换模式时应通过 key 强制重挂载以应用新初值。默认 []（不折叠，保持既有行为）。 */
+  defaultCollapsedLayers?: string[];
 }
 
 const TYPE_LABEL: Record<string, string> = {
@@ -1634,6 +1638,7 @@ export function AssetGraph({
   layerBadges = true,
   fullscreenable = true,
   direction = "TB",
+  defaultCollapsedLayers,
 }: AssetGraphProps) {
   const onNodeClickRef = useRef(onNodeClick);
   onNodeClickRef.current = onNodeClick;
@@ -1662,7 +1667,8 @@ export function AssetGraph({
   useEffect(() => setDirectionState(direction), [direction]);
   // 泳道折叠（子图折叠）：把某数仓分层/语义带的全部节点收成一个聚合节点，减少中间层堆叠噪声。
   // collapsedLayers 为当前折叠的泳道集合；工具栏多选切换，点击聚合节点单独展开该层。
-  const [collapsedLayers, setCollapsedLayers] = useState<string[]>([]);
+  // defaultCollapsedLayers 提供初始折叠集合（结构概览模式：进入即全层聚合、显示层间主干）。
+  const [collapsedLayers, setCollapsedLayers] = useState<string[]>(defaultCollapsedLayers ?? []);
   // 全屏展示：portal 到 body 的 fixed overlay（复用同一实例 UI 状态，筛选/搜索/布局不丢失）
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
 
