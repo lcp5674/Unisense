@@ -883,8 +883,9 @@ export const DescriptionCoveragePanel = forwardRef<
       message.success(
         `${opts.label}任务已提交（#${task.id}）——进度与结果在右下角「批量任务中心」实时查看`,
       );
-      // 唤醒全局任务中心立即感知并恢复轮询（无任务时它零请求）
-      notifyBatchInferActivity();
+      // 唤醒全局任务中心立即感知并恢复轮询（无任务时它零请求）；带任务 id：
+      // 任务可能极快终态（LLM 不可用秒级失败），带上 id 让任务中心即便首次刷新即终态也弹完成摘要
+      notifyBatchInferActivity(task.id);
       // 主列表：该表推断完成即实时移除；终态额外刷新详情抽屉（若仍开着本表）
       trackServerTaskRemoval(task.id, () => {
         if (detailIdRef.current === catalogId) void refreshDetail();
@@ -1389,7 +1390,7 @@ export const DescriptionCoveragePanel = forwardRef<
       // 逐表完成轮询：某表推断完成即实时从治理主列表移除，不等整批结束
       setCoveredIds(new Set());
       // 唤醒全局任务中心立即刷新并恢复轮询（无任务时它零请求，靠此事件感知新任务）
-      notifyBatchInferActivity();
+      notifyBatchInferActivity(task.id);
       trackServerTaskRemoval(task.id);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "提交批量推断任务失败");

@@ -146,6 +146,42 @@ describe("BatchInferCenter 状态机轮询（无任务零请求 / 有任务立�
     expect(mockedList).toHaveBeenCalledTimes(3);
   });
 
+  it("任务秒级失败（提交事件带 id，首次刷新即终态）→ 仍弹完成摘要而非无声消失", async () => {
+    vi.useFakeTimers();
+    // 挂载探测：无任务（任务中心零请求空闲）
+    mockedList.mockResolvedValueOnce([]);
+    render(<BatchInferCenter />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(mockedList).toHaveBeenCalledTimes(1);
+
+    // 用户提交任务 → DescriptionCoveragePanel 触发 notifyBatchInferActivity(taskId)
+    // 但任务极快失败（LLM 不可达 → 秒级 completed/failed）——事件唤醒的首次刷新就拉到终态
+    mockedList.mockResolvedValue([
+      makeTask({
+        id: 16,
+        status: "completed",
+        total: 1,
+        done: 0,
+        failed: 1,
+        cancelled: 0,
+        added_total: 0,
+        progress: [{ catalog_id: 75, entity_name: "t75", status: "error", summary: "LLM 推断失败" }],
+      }),
+    ]);
+    await act(async () => {
+      notifyBatchInferActivity(16);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    // 无进行中浮条（任务已终态），但完成摘要必须出现——用户能立即看到「失败 1 表」而非什么都看不到
+    expect(screen.queryByText(/批量推断进行中/)).toBeNull();
+    expect(screen.getByTestId("batch-infer-done-bar")).toBeTruthy();
+    expect(screen.getByText(/批量推断 #16 完成/)).toBeTruthy();
+    expect(screen.getByText(/失败 1 表/)).toBeTruthy();
+  });
+
   it("任务进入终态后显示完成摘要浮条（成功/失败/取消/新增统计），停留后自动消失", async () => {
     vi.useFakeTimers();
     // 挂载探测：任务 running

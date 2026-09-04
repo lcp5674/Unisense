@@ -42,12 +42,17 @@ const FINISHED_NOTICE_MS = 10_000;
  * 它无法自己感知「别的入口刚提交了任务」。DescriptionCoveragePanel 提交任务成功后
  * 调 notifyBatchInferActivity() 唤醒任务中心：立即刷新一次并（按需）恢复轮询。
  */
-type ActivityListener = () => void;
+type ActivityListener = (taskId?: number) => void;
 const activityListeners = new Set<ActivityListener>();
 
-/** 通知任务中心：有新任务活动（如提交批量推断），应立即刷新并恢复轮询。 */
-export function notifyBatchInferActivity(): void {
-  activityListeners.forEach((fn) => fn());
+/**
+ * 通知任务中心：有新任务活动（如提交批量推断），应立即刷新并恢复轮询。
+ * @param taskId 刚提交的任务 id（可选）——任务可能极快进入终态（如 LLM 不可用秒级失败），
+ *   带上 id 让任务中心识别「刚提交的任务」：即使首次刷新就已终态也会弹完成摘要，
+ *   避免「任务秒失败 → 右下角什么都没出现、用户只看到提交提示」的盲区。
+ */
+export function notifyBatchInferActivity(taskId?: number): void {
+  activityListeners.forEach((fn) => fn(taskId));
 }
 
 const STATUS_TAG: Record<string, { color: string; label: string }> = {
@@ -186,6 +191,9 @@ export function BatchInferCenter() {
   const timerRef = useRef<number | null>(null);
   // 上一轮已知的各任务 status（识别「上轮 running/pending → 本轮终态」的任务 → 弹完成摘要）
   const lastStatusRef = useRef<Map<number, string>>(new Map());
+  // 本次会话「刚提交」的任务 id（事件唤醒时登记）：任务可能极快终态（秒级失败），
+  // 首次刷新即终态时 lastStatusRef 无历史——需靠此集合识别并弹完成摘要
+  const pendingSubmitRef = useRef<Set<number>>(new Set());
 
   const stopPolling = useCallback(() => {
     if (timerRef.current != null) {
@@ -202,9 +210,18 @@ export function BatchInferCenter() {
       // 终态摘要：识别「上一轮 running/pending → 本轮已终态」的任务，弹完成摘要浮条
       // （避免任务很短时浮条一闪而过、用户不知本次批量推断结果）
       const last = lastStatusRef.current;
-      const newlyFinished = rows.find(
-        (t) => last.get(t.id) != null && RUNNING.has(last.get(t.id) as string) && isFinished(t),
-      );
+      // 终态摘要识别：上轮 running/pending → 本轮终态，或「刚提交（pendingSubmitRef）且本轮已终态」
+      // （后者覆盖任务秒级失败场景——首次刷新即终态，上轮无记录）
+      let newlyFinished: BatchInferTask | undefined;
+      for (const t of rows) {
+        if (!isFinished(t)) continue;
+        const prev = last.get(t.id);
+        const justSubmitted = pendingSubmitRef.current.delete(t.id);
+        if ((prev != null && RUNNING.has(prev)) || justSubmitted) {
+          newlyFinished = t;
+          break;
+        }
+      }
       if (newlyFinished) setFinishedNotice(newlyFinished);
       last.clear();
       rows.forEach((t) => last.set(t.id, t.status));
@@ -234,7 +251,12 @@ export function BatchInferCenter() {
   useEffect(() => {
     mounted.current = true;
     void refresh(); // 挂载探测一次：有进行中任务则恢复轮询，无任务保持零请求
-    const onActivity = () => void refresh(); // 提交任务等事件 → 立即刷新（内部按需恢复轮询）
+    const onActivity = (taskId?: number) => {
+      // 登记刚提交的任务 id：任务极快终态时（秒级失败）首次刷新即终态，
+      // 靠 pendingSubmitRef 识别并弹完成摘要（而非无声消失）
+      if (taskId != null) pendingSubmitRef.current.add(taskId);
+      void refresh(); // 立即刷新（内部按需恢复轮询/弹摘要）
+    };
     activityListeners.add(onActivity);
     return () => {
       mounted.current = false;
