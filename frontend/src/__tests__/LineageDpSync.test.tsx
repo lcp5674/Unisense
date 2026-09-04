@@ -701,10 +701,9 @@ describe("LineageDpSync", () => {
     const user = userEvent.setup();
     renderPage();
     await screen.findByText(/保\s*存/);
-    // 打开「节点类型」下拉（页面 Select 顺序：数据源/任务类型/节点类型——取第三个）
-    const selectors = document.querySelectorAll(".ant-select-selector");
-    expect(selectors.length).toBeGreaterThanOrEqual(3);
-    fireEvent.mouseDown(selectors[2]);
+    // 打开「节点类型」下拉（Form.Item label → combobox accessible name，精确命中；
+    // 旧写法按 .ant-select-selector DOM 顺序取第三个在布局变化后已不可靠）
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: /节点类型/ }));
     await user.click(await screen.findByText(/2 = DataX 同步/));
     await screen.findByText(/所选节点类型包含无法解析为血缘的类型/);
     expect(screen.getAllByText(/DataX 同步/).length).toBeGreaterThan(0);
