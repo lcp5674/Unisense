@@ -75,6 +75,41 @@ def test_parse_error_garbage_is_failed() -> None:
     assert "parse_error" in r.features
 
 
+def test_macro_pure_ddl_is_no_flow() -> None:
+    """含 ${DATA_DATE} 宏的纯 DDL 建表（无数据流）→ no_flow，不堆 unparseable 单。
+
+    回归：dp 大量 ODS 建表节点带宏导致 sqlglot 失败，此前全部落 unparseable
+    淹没人工抉择工作台（实测 662 单中 459 为无数据流纯 DDL）。
+    """
+    sql = (
+        "use wedw_ods;\ndrop table if exists wedw_ods.t_${DATA_DATE};\n"
+        "create table wedw_ods.t_${DATA_DATE}\n"
+        "    (id string COMMENT '主键'\n"
+        "    ,amt double COMMENT '金额')\n"
+    )
+    r = parse_dp_step(sql)
+    assert r.status == "no_flow"
+    assert "no_dataflow" in r.features
+
+
+def test_macro_with_dataflow_stays_failed() -> None:
+    """宏 + as select/insert（有真实数据搬移）→ 仍 failed，保留给 LLM/人工。"""
+    sql = (
+        "use wedw_ods;\ndrop table if exists wedw_ods.t_${DATA_DATE};\n"
+        "create table wedw_ods.t_${DATA_DATE} as select * from wedw_ods.src_${DATA_DATE};\n"
+    )
+    r = parse_dp_step(sql)
+    assert r.status == "failed"
+    assert "parse_error" in r.features
+
+
+def test_macro_create_external_no_flow() -> None:
+    """宏 + create external table（无 select/insert）→ no_flow。"""
+    sql = "create external table if not exists wedw_dw.y_${D} (id string) stored as parquet;\n"
+    r = parse_dp_step(sql)
+    assert r.status == "no_flow"
+
+
 def test_tmp_table_excluded_by_default() -> None:
     sql = "create table wedw_tmp.tmp_clean_1 as select * from wedw_ods.src"
     r = parse_dp_step(sql)

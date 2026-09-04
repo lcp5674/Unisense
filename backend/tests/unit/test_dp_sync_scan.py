@@ -419,6 +419,39 @@ async def test_scan_db_error_isolated_per_task_via_savepoint() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scan_partial_errors_still_advance_watermark() -> None:
+    """部分任务失败（errors>0）仍推进 max 水位并记录 last_full_scan_at。
+
+    回归（H8）：此前 ``cancelled or errors>0`` 都不推水位——只要有 1 个顽固
+    失败任务（gmt_modified ≤ max），水位永远停在初始态，每轮周期任务都全量
+    重扫上千任务空转。失败任务由周期自动全量观察兜底重扫，不应阻塞水位推进。
+    """
+    from sqlalchemy.exc import OperationalError
+
+    collector = FakeCollector()
+    svc = _svc(collector)
+    real_process = svc.process_step
+
+    async def flaky_process(task, step, sql, config, seen_pairs=None):
+        if task["task_id"] == 101:
+            raise OperationalError("stmt", {}, Exception("Deadlock"))
+        return await real_process(task, step, sql, config, seen_pairs)
+
+    svc.process_step = flaky_process  # type: ignore[method-assign]
+    result = await svc.scan_once(_fc(collector))
+    assert result["errors"] == 1
+    assert result["parsed_ok"] == 1
+    # 收尾推进水位（带 last_max_update + full_scan=True），而非只刷 last_scan_at
+    # （cancelled 分支不传 last_max_update/full_scan 键）
+    wm_calls = svc._dp_repo.update_watermark.await_args_list
+    assert len(wm_calls) == 2
+    for call in wm_calls:
+        assert call.kwargs.get("full_scan") is True
+        assert "last_max_update" in call.kwargs
+    assert svc._dp_repo.update_run_log.await_args.kwargs["status"] == "success"
+
+
+@pytest.mark.asyncio
 async def test_scan_uses_configured_table_names() -> None:
     """扫描 SQL 使用配置的 schema/task_table/step_table（不再硬编码 dp_stable）。
 

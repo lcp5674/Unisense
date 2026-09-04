@@ -720,10 +720,15 @@ class DpSyncService:
                 if progress is not None:
                     progress["processed"] = idx
             await self._db.commit()
-            # 收尾：水位 + 边确认（stale 机制）。取消/单任务失败时**不推进 max 水位**——
-            # 未处理任务保留在变更集内，下轮从原水位重扫（幂等安全），避免跳过：
-            # 失败任务 gmt_modified ≤ 全表 MAX，若照常推进会被新水位永久跳过（H1）。
-            if cancelled or counters["errors"] > 0:
+            # 收尾：水位 + 边确认（stale 机制）。
+            # - cancelled：**不推进 max 水位**——未处理任务保留在变更集内，下轮
+            #   从原水位重扫（幂等安全）；也不记录 last_full_scan_at（本轮未完整）。
+            # - errors>0（部分任务硬失败，如 DB 异常/断连）：**仍推进 max 水位**并记录
+            #   last_full_scan_at——失败任务（gmt_modified ≤ max）虽不进下轮增量，
+            #   但由周期自动全量观察（_AUTO_FULL_SCAN_SECONDS）兜底重扫；否则只要有
+            #   1 个顽固失败任务，水位永远停在初始态，每轮周期任务都全量重扫
+            #   上千任务（实测每轮 6 分钟空转）。
+            if cancelled:
                 await self._dp_repo.update_watermark("task", last_scan_at=now)
                 await self._dp_repo.update_watermark("step", last_scan_at=now)
             else:

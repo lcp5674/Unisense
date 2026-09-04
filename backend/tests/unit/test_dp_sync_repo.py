@@ -21,10 +21,14 @@ class _FakeDb:
 
     def __init__(self) -> None:
         self.executed: list = []
+        self.added: list = []
 
     async def execute(self, stmt, *args, **kwargs):
         self.executed.append(stmt)
         return SimpleNamespace(rowcount=1, scalar_one_or_none=lambda: None)
+
+    def add(self, obj) -> None:
+        self.added.append(obj)
 
 
 def _repo() -> tuple[DpLineageRepository, _FakeDb]:
@@ -87,3 +91,39 @@ async def test_soft_delete_field_mappings_clear_all_when_no_hash() -> None:
     await repo.soft_delete_field_mappings(step_id=5012)
     assert len(db.executed) == 1
     assert isinstance(db.executed[0], Update)
+
+
+@pytest.mark.asyncio
+async def test_upsert_field_mapping_uses_eq_not_is_for_column() -> None:
+    """source_column 非 NULL 时查询编译为 ``=``（回归：曾误用 ``.is_()``
+    编译成 ``col IS 'x'`` 致 MySQL 1064 语法错误，整轮 dp 扫描失败）。"""
+    repo, db = _repo()
+    await repo.upsert_field_mapping(
+        edge_id=1,
+        source_table="ods.a",
+        source_column="region_code",
+        target_table="dwd.b",
+        target_column="region_code",
+        sql_hash="h1",
+    )
+    assert len(db.executed) == 2  # active 查询 + tombstone 查询（均 None 落到新建）
+    sql = str(db.executed[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "source_column = 'region_code'" in sql
+    assert "source_column IS" not in sql
+    assert len(db.added) == 1
+
+
+@pytest.mark.asyncio
+async def test_upsert_field_mapping_null_column_uses_is_null() -> None:
+    """source_column 为 None 时应匹配 ``IS NULL``（语义正确）。"""
+    repo, db = _repo()
+    await repo.upsert_field_mapping(
+        edge_id=2,
+        source_table="ods.a",
+        source_column=None,
+        target_table="dwd.b",
+        target_column="cnt",
+        sql_hash="h2",
+    )
+    sql = str(db.executed[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "source_column IS NULL" in sql

@@ -39,6 +39,15 @@ SHADOW_EMAIL_SUFFIX = "@external.local"
 SHADOW_ROLE = "viewer"
 
 
+def _column_eq(column, value):
+    """列等值比较：value 为 None 时匹配 ``IS NULL``，否则 ``= value``。
+
+    SQLAlchemy 的 ``.is_()`` 仅适用于 NULL/布尔比较，对字符串会编译成
+    ``col IS 'x'``（MySQL 语法错误）——等值必须用 ``==``。
+    """
+    return column.is_(None) if value is None else column == value
+
+
 class DpLineageRepository:
     """dp 血缘同步仓储。"""
 
@@ -190,7 +199,7 @@ class DpLineageRepository:
         """
         stmt = select(LineageFieldMapping).where(
             LineageFieldMapping.source_table == source_table,
-            LineageFieldMapping.source_column.is_(source_column),
+            _column_eq(LineageFieldMapping.source_column, source_column),
             LineageFieldMapping.target_table == target_table,
             LineageFieldMapping.target_column == target_column,
             LineageFieldMapping.degraded.is_(degraded),
@@ -206,7 +215,7 @@ class DpLineageRepository:
                 select(LineageFieldMapping)
                 .where(
                     LineageFieldMapping.source_table == source_table,
-                    LineageFieldMapping.source_column.is_(source_column),
+                    _column_eq(LineageFieldMapping.source_column, source_column),
                     LineageFieldMapping.target_table == target_table,
                     LineageFieldMapping.target_column == target_column,
                     LineageFieldMapping.degraded.is_(degraded),

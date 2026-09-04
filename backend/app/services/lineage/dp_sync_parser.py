@@ -231,6 +231,51 @@ def _has_parse_error(sql: str, dialect: str | None) -> bool:
     return any(ast is None for ast in stmts)
 
 
+#: 数据流关键字——存在即意味着脚本可能在搬移数据（SQL 演进宏/方言失败时仍应
+#: 归 unparseable 交 LLM/人工；纯 DDL 建表/drop/set 不含这些词则直接 no_flow 跳过）。
+_DATAFLOW_KEYWORD_RE = re.compile(
+    r"\b(?:insert\s+(?:into|overwrite)|as\s+select|"
+    r"select\s+|load\s+data|create\s+table\s+[^;()]*\s+as\s+select|"
+    r"overwrite\s+table|into\s+table)\b",
+    re.IGNORECASE,
+)
+
+#: DDL 结构关键字——判定「解析失败但确实在操作表结构」（宏/方言 DDL 建表），
+#: 区别于完全不可识别的垃圾文本（shell 残留等，仍归 failed 交 LLM/人工甄别）。
+_DDL_STRUCT_KEYWORD_RE = re.compile(
+    r"\b(?:create\s+(?:external\s+)?table|drop\s+table|alter\s+table|"
+    r"truncate\s+table|set\s+|use\s+\w+|add\s+jar|create\s+temporary\s+function)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_dataflow_keyword(sql: str) -> bool:
+    """去注释/字符串后粗判脚本是否含真实数据搬移语句。
+
+    解析失败的脚本（宏 `${DATA_DATE}`、方言建表等）若**不含**任何数据流关键字，
+    判定为「纯 DDL 无流转」（如 ``create table x (列定义)``）——血缘上无输入输出，
+    人工抉择无可采纳对象，应 no_flow 跳过而非堆 unparseable 待抉择单。
+    """
+    if not sql:
+        return False
+    cleaned = re.sub(r"--[^\n]*", "", sql)
+    cleaned = re.sub(r"/\*.*?\*/", "", cleaned, flags=re.DOTALL)
+    return bool(_DATAFLOW_KEYWORD_RE.search(cleaned))
+
+
+def _is_ddl_only_script(sql: str) -> bool:
+    """脚本无数据流但含 DDL 结构词（宏/方言建表、set/use 等表结构操作）。
+
+    与垃圾文本（shell 残留等）区分：后者无任何 DDL 结构词，仍归 failed
+    交 LLM/人工甄别，避免把「非 SQL 脚本」静默吞掉。
+    """
+    if not sql:
+        return False
+    cleaned = re.sub(r"--[^\n]*", "", sql)
+    cleaned = re.sub(r"/\*.*?\*/", "", cleaned, flags=re.DOTALL)
+    return bool(_DDL_STRUCT_KEYWORD_RE.search(cleaned))
+
+
 def parse_dp_step(
     sql: str,
     dialect: str | None = "hive",
@@ -286,6 +331,18 @@ def parse_dp_step(
         )
     # 无表级流转：区分「能解析但纯建表/无流转」与「解析失败」
     if parse_error:
+        if not _has_dataflow_keyword(qualified) and _is_ddl_only_script(qualified):
+            # 解析失败但脚本是纯 DDL 结构（宏/方言建表，无数据搬移）——
+            # 血缘上无输入输出，判 no_flow 跳过，避免噪音淹没人工抉择工作台。
+            return StepParseOutcome(
+                status="no_flow",
+                table_edges=filtered_table,
+                field_edges=filtered_field,
+                ddl_edges=ddl_edges,
+                features=["no_dataflow"],
+                error="解析失败且无数据流关键字（纯 DDL/宏建表，跳过）",
+                used_db=used_db,
+            )
         return StepParseOutcome(
             status="failed",
             table_edges=filtered_table,
