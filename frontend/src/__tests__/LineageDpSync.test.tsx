@@ -288,6 +288,86 @@ describe("LineageDpSync", () => {
     await screen.findByText(/LLM 重试完成/);
   });
 
+  it("shows retry result panel with per-ticket details after LLM retry", async () => {
+    const user = userEvent.setup();
+    mockedApi.listDpTickets.mockResolvedValue({
+      items: [
+        {
+          id: 31,
+          task_id: 9001,
+          step_id: 6011,
+          task_name: "分歧单-1",
+          out_table: "wedw_dwd.t1",
+          sql_hash: "d1",
+          status: "diverged",
+          divergence_reason: "LLM 确认输出异常：LLM 返回空内容",
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 10,
+    });
+    mockedApi.retryDpSyncLlm.mockResolvedValue({
+      auto_resolved: 1,
+      refreshed: 1,
+      kept: 0,
+      failed: 1,
+      details: [
+        {
+          ticket_id: 31,
+          task_name: "分歧单-1",
+          out_table: "wedw_dwd.t1",
+          action: "auto_resolved",
+          reason: "LLM 认可 sqlglot，已自动采纳消解",
+        },
+        {
+          ticket_id: 32,
+          task_name: "兜底单-2",
+          out_table: "wedw_dwd.t2",
+          action: "refreshed",
+          reason: "LLM 兜底提炼成功，已刷新低置信参考待人工",
+        },
+        {
+          ticket_id: 33,
+          task_name: "失败单-3",
+          out_table: "wedw_dwd.t3",
+          action: "failed",
+          reason: "LLM 异常：连接超时",
+        },
+      ],
+    });
+    renderPage();
+    await user.click(screen.getByText("待抉择"));
+    await screen.findByText("分歧单-1");
+    // 单条：详情抽屉 LLM 重试 → 完成后弹结果面板
+    fireEvent.click(
+      Array.from(document.querySelectorAll("tbody .ant-table-row a")).find(
+        (el) => el.textContent === "分歧单-1"
+      ) as HTMLButtonElement
+    );
+    await screen.findByText(/待抉择详情/);
+    await user.click(screen.getByRole("button", { name: /LLM 重试/ }));
+    await waitFor(() =>
+      expect(document.querySelector(".ant-modal-confirm-btns")).toBeTruthy()
+    );
+    fireEvent.click(
+      document.querySelector(
+        ".ant-modal-confirm-btns .ant-btn-primary"
+      ) as HTMLButtonElement
+    );
+    // 结果面板：标题 + 统计 + 逐单明细（统计 label 与明细 Tag 文本可能重复，用 getAllByText）
+    await screen.findByText("LLM 重试结果");
+    expect(screen.getAllByText("自动采纳").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("刷新意见").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("失败").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("分歧单-1").length).toBeGreaterThan(0);
+    expect(screen.getByText("兜底单-2")).toBeInTheDocument();
+    expect(screen.getByText("失败单-3")).toBeInTheDocument();
+    expect(
+      screen.getByText("LLM 认可 sqlglot，已自动采纳消解")
+    ).toBeInTheDocument();
+  });
+
   it("renders ops tab with run log columns", async () => {
     const user = userEvent.setup();
     mockedApi.listDpSyncRuns.mockResolvedValue({

@@ -43,6 +43,7 @@ import {
   saveDpSyncConfig,
   scanDpSyncNow,
 } from "../api";
+import type { DpSyncLlmRetryDetail } from "../api";
 import type {
   DataSource,
   DpExcludePreview,
@@ -630,6 +631,14 @@ function TicketsTab() {
   const [reloadTick, setReloadTick] = useState(0);
   // 批量 LLM 重试的勾选集（仅 isLlmRetryable 行可勾选；跨页保留，提交后清空）
   const [selectedKeys, setSelectedKeys] = useState<number[]>([]);
+  // LLM 重试结果面板（统计 + 逐单明细）
+  const [retryResult, setRetryResult] = useState<{
+    auto_resolved: number;
+    refreshed: number;
+    kept: number;
+    failed: number;
+    details?: DpSyncLlmRetryDetail[];
+  } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -705,9 +714,8 @@ function TicketsTab() {
         setActing(true);
         try {
           const r = await retryDpSyncLlm(ticketIds ? { ticket_ids: ticketIds } : {});
-          message.success(
-            `LLM 重试完成：自动采纳 ${r.auto_resolved}、刷新意见 ${r.refreshed}、保留 ${r.kept}、失败 ${r.failed}`
-          );
+          setRetryResult(r);
+          message.success(`LLM 重试完成：自动采纳 ${r.auto_resolved}、刷新意见 ${r.refreshed}、保留 ${r.kept}、失败 ${r.failed}`);
           setDetail(null);
           setSelectedKeys([]);
           setReloadTick((x) => x + 1);
@@ -936,6 +944,67 @@ function TicketsTab() {
           onChange={(e) => setManualText(e.target.value)}
           placeholder={"wedw_ods.a -> wedw_dwd.t\nwedw_ods.b -> wedw_dwd.t"}
         />
+      </Modal>
+      <Modal
+        title="LLM 重试结果"
+        width={860}
+        open={retryResult !== null}
+        onCancel={() => setRetryResult(null)}
+        footer={[
+          <Button key="close" type="primary" onClick={() => setRetryResult(null)}>
+            知道了
+          </Button>,
+        ]}
+      >
+        {retryResult && (
+          <>
+            <Descriptions size="small" column={4} bordered style={{ marginBottom: 12 }}>
+              <Descriptions.Item label="自动采纳">
+                <Tag color="green">{retryResult.auto_resolved}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="刷新意见">
+                <Tag color="blue">{retryResult.refreshed}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="保留">
+                <Tag color="gold">{retryResult.kept}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="失败">
+                <Tag color="red">{retryResult.failed}</Tag>
+              </Descriptions.Item>
+            </Descriptions>
+            {retryResult.details && retryResult.details.length > 0 ? (
+              <Table
+                size="small"
+                rowKey="ticket_id"
+                pagination={false}
+                dataSource={retryResult.details}
+                columns={[
+                  { title: "单号", dataIndex: "ticket_id", width: 70 },
+                  { title: "任务", dataIndex: "task_name", ellipsis: true, render: (v) => v || "—" },
+                  { title: "产出表", dataIndex: "out_table", ellipsis: true, render: (v) => v || "—" },
+                  {
+                    title: "处置",
+                    dataIndex: "action",
+                    width: 110,
+                    render: (v: DpSyncLlmRetryDetail["action"]) => {
+                      const m: Record<string, { text: string; color: string }> = {
+                        auto_resolved: { text: "自动采纳", color: "green" },
+                        refreshed: { text: "刷新意见", color: "blue" },
+                        kept: { text: "保留", color: "gold" },
+                        failed: { text: "失败", color: "red" },
+                      };
+                      return <Tag color={m[v]?.color}>{m[v]?.text ?? v}</Tag>;
+                    },
+                  },
+                  { title: "原因", dataIndex: "reason", ellipsis: true },
+                ]}
+                locale={{ emptyText: "无明细" }}
+              />
+            ) : (
+              <Alert type="info" showIcon message="本次重试未返回逐单明细（后端旧版无 details），以上为汇总统计。" />
+            )}
+          </>
+        )}
       </Modal>
     </Card>
   );

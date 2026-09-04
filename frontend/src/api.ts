@@ -6094,6 +6094,15 @@ export async function resolveDpSyncLlmDisabled(): Promise<{
   );
 }
 
+/** LLM 重试结果逐单明细（action: auto_resolved/refreshed/kept/failed） */
+export interface DpSyncLlmRetryDetail {
+  ticket_id: number;
+  task_name: string | null;
+  out_table: string | null;
+  action: "auto_resolved" | "refreshed" | "kept" | "failed";
+  reason: string;
+}
+
 /** LLM 恢复/修复后重试「LLM 类型错误」待抉择单（单条传 ticket_ids，批量可不传） */
 export async function retryDpSyncLlm(body?: {
   ticket_ids?: number[];
@@ -6102,9 +6111,16 @@ export async function retryDpSyncLlm(body?: {
   refreshed: number;
   kept: number;
   failed: number;
+  details?: DpSyncLlmRetryDetail[];
 }> {
-  return request<{ auto_resolved: number; refreshed: number; kept: number; failed: number }>(
-    `${API_BASE}/lineage/dp-sync/tickets/retry-llm`,
-    { method: "POST", body: JSON.stringify(body ?? {}) }
-  );
+  return request<{
+    auto_resolved: number;
+    refreshed: number;
+    kept: number;
+    failed: number;
+    details?: DpSyncLlmRetryDetail[];
+  }>(`${API_BASE}/lineage/dp-sync/tickets/retry-llm`, {
+    method: "POST",
+    body: JSON.stringify(body ?? {}),
+  });
 }

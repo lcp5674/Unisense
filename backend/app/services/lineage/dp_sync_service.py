@@ -1225,7 +1225,9 @@ class DpSyncService:
                 ok      → 刷新为 llm_fallback 低置信参考（refreshed，待人工采纳）
                 仍无法提炼 → 保持/转 unparseable（kept）
             - LLM 协议/调用异常 → 保留，计 failed（单张失败不阻断批量）
-        返回 ``{"auto_resolved": n, "refreshed": n, "kept": n, "failed": n}``。
+        返回 ``{"auto_resolved": n, "refreshed": n, "kept": n, "failed": n,
+        "details": [...]}``——details 为逐单处置明细（ticket_id/task_name/
+        out_table/action/reason），供前端结果面板展示。
         """
         if self._llm_chat is None:
             self._llm_chat = await self._build_llm_chat()
@@ -1238,6 +1240,19 @@ class DpSyncService:
             "kept": 0,
             "failed": 0,
         }
+        details: list[dict[str, Any]] = []
+
+        def _add(tk: Any, action: str, reason: str) -> None:
+            details.append(
+                {
+                    "ticket_id": tk.id,
+                    "task_name": tk.task_name,
+                    "out_table": tk.out_table,
+                    "action": action,
+                    "reason": reason,
+                }
+            )
+
         for tk in tickets:
             try:
                 task, step = self._restore_task_step(tk)
@@ -1261,6 +1276,7 @@ class DpSyncService:
                             resolved_by=resolved_by,
                         )
                         counters["auto_resolved"] += 1
+                        _add(tk, "auto_resolved", "LLM 认可 sqlglot，已自动采纳消解")
                     else:
                         await self._dp_repo.update_ticket_llm(
                             tk.id,
@@ -1274,6 +1290,11 @@ class DpSyncService:
                             ),
                         )
                         counters["refreshed"] += 1
+                        _add(
+                            tk,
+                            "refreshed",
+                            verdict.reason or "LLM 不同意 sqlglot，已刷新意见待人工",
+                        )
                     continue
                 # llm_fallback / unparseable：失败节点产物 → 重跑兜底
                 flow = await self._llm_fallback(tk.sql_text)
@@ -1292,6 +1313,11 @@ class DpSyncService:
                         ),
                     )
                     counters["refreshed"] += 1
+                    _add(
+                        tk,
+                        "refreshed",
+                        flow.note or "LLM 兜底提炼成功，已刷新低置信参考待人工",
+                    )
                 else:
                     await self._dp_repo.update_ticket_llm(
                         tk.id,
@@ -1302,12 +1328,20 @@ class DpSyncService:
                         ),
                     )
                     counters["kept"] += 1
+                    _add(
+                        tk,
+                        "kept",
+                        flow.note or "sqlglot 与 LLM 均无法解析，保留待手动配置",
+                    )
             except DpSyncLlmError as exc:  # noqa: BLE001 —— 单张失败不阻断批量
                 counters["failed"] += 1
                 counters.setdefault("errors", []).append(f"#{tk.id}: {exc}")
+                _add(tk, "failed", f"LLM 异常：{exc}")
             except Exception as exc:  # noqa: BLE001 —— 写库/连接等异常同样容错
                 counters["failed"] += 1
                 counters.setdefault("errors", []).append(f"#{tk.id}: {exc}")
+                _add(tk, "failed", f"处理异常：{exc}")
+        counters["details"] = details
         return counters
 
     async def _build_llm_chat(self) -> Callable[..., Awaitable[dict[str, Any]]]:
