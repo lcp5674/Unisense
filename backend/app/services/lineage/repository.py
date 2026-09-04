@@ -42,6 +42,13 @@ def merge_provenances(existing: str | None, incoming: str) -> str:
     return "+".join(tokens)
 
 
+def _edge_unique_key(
+    edge: LineageEdge,
+) -> tuple[str, str, str, str]:
+    """血缘边唯一键 ``(source, target, edge_type, granularity)``（批量方法分组用）。"""
+    return (edge.source_node, edge.target_node, edge.edge_type, edge.granularity)
+
+
 def provenance_contains(column: Any, source: str) -> Any:
     """SQLAlchemy 条件：``provenance`` 列含 ``source`` token（``+`` 分隔多来源）。
 
@@ -259,6 +266,151 @@ class LineageRepository:
             change_reason=change_reason,
         )
 
+    async def upsert_edges_with_status_batch(
+        self, requests: list[dict[str, Any]]
+    ) -> dict[tuple[str, str, str, str], tuple[LineageEdge, bool]]:
+        """批量幂等写入血缘边（语义同 ``upsert_edge_with_status``）。
+
+        输入 ``requests``：每个元素即 ``upsert_edge_with_status`` 的关键字参数字典。
+        返回 ``{(source,target,edge_type,granularity): (edge, created)}``。
+
+        与单条路径的差异只在访问模式：现存活跃/墓碑各**一次批量查询**载入内存
+        分类（新建/覆盖/复活），历史快照先 ``add`` 排队、末尾**一次 flush** 批量
+        INSERT/UPDATE——避免每条边 2 次 SELECT + 1 次 flush（dp 同步每 step 表边
+        逐条写是每轮数万次小查询的来源之一）。适合单批几十条以内；超大请分块。
+        """
+        if not requests:
+            return {}
+        # 同唯一键多次出现时以后一次参数为准（解析产物同表对一般已去重，防御）。
+        params_by_key: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        for r in requests:
+            key = (
+                r["source_node"],
+                r["target_node"],
+                r["edge_type"],
+                r.get("granularity") or "L3",
+            )
+            params_by_key[key] = r
+        keys = list(params_by_key)
+
+        def _conds(ks: list[tuple[str, str, str, str]]) -> Any:
+            return or_(
+                *[
+                    and_(
+                        LineageEdge.source_node == s,
+                        LineageEdge.target_node == t,
+                        LineageEdge.edge_type == et,
+                        LineageEdge.granularity == g,
+                    )
+                    for (s, t, et, g) in ks
+                ]
+            )
+
+        active = (
+            await self._db.execute(
+                select(LineageEdge).where(_conds(keys), LineageEdge.deleted_at.is_(None))
+            )
+        ).scalars().all()
+        existing_map = {_edge_unique_key(e): e for e in active}
+        miss_keys = [k for k in keys if k not in existing_map]
+        tomb_map: dict[tuple[str, str, str, str], LineageEdge] = {}
+        if miss_keys:
+            tombs = (
+                await self._db.execute(
+                    select(LineageEdge).where(
+                        _conds(miss_keys), LineageEdge.deleted_at.is_not(None)
+                    )
+                )
+            ).scalars().all()
+            for e in tombs:
+                # 唯一键不含 deleted_at → 同键理论至多一行；防御性保留最早复活候选
+                tomb_map.setdefault(_edge_unique_key(e), e)
+        result: dict[tuple[str, str, str, str], tuple[LineageEdge, bool]] = {}
+        for key in keys:
+            r = params_by_key[key]
+            source_node = r["source_node"]
+            target_node = r["target_node"]
+            edge_type = r["edge_type"]
+            granularity = r.get("granularity") or "L3"
+            confidence = float(r.get("confidence", 1.0))
+            provenance = str(r.get("provenance", "sqlglot"))
+            pii_inherited = bool(r.get("pii_inherited", False))
+            change_reason = str(r.get("change_reason", "ingest"))
+            owner = r.get("owner")
+            existing = existing_map.get(key)
+            if existing is not None:
+                changes: dict[str, object] = {}
+                if existing.confidence != confidence:
+                    changes["confidence"] = confidence
+                if existing.provenance != provenance:
+                    merged = merge_provenances(existing.provenance, provenance)
+                    if merged != existing.provenance:
+                        changes["provenance"] = merged
+                if existing.pii_inherited != pii_inherited:
+                    changes["pii_inherited"] = pii_inherited
+                if owner is not None and existing.owner != owner:
+                    changes["owner"] = owner
+                if changes:
+                    self._db.add(
+                        LineageEdgeHistory(
+                            source_node=existing.source_node,
+                            target_node=existing.target_node,
+                            edge_type=existing.edge_type,
+                            granularity=existing.granularity,
+                            confidence=existing.confidence,
+                            provenance=existing.provenance,
+                            pii_inherited=existing.pii_inherited,
+                            change_reason=change_reason,
+                        )
+                    )
+                    for column, value in changes.items():
+                        setattr(existing, column, value)
+                result[key] = (existing, False)
+                continue
+            tomb = tomb_map.get(key)
+            if tomb is not None:
+                # 复活（同单条 _revive_or_insert 墓碑分支）：清软删/失效标记 + 应用新值
+                self._db.add(
+                    LineageEdgeHistory(
+                        source_node=tomb.source_node,
+                        target_node=tomb.target_node,
+                        edge_type=tomb.edge_type,
+                        granularity=tomb.granularity,
+                        confidence=tomb.confidence,
+                        provenance=tomb.provenance,
+                        pii_inherited=tomb.pii_inherited,
+                        change_reason=f"revive:{change_reason}",
+                    )
+                )
+                tomb.deleted_at = None
+                tomb.stale = False
+                tomb.stale_since = None
+                tomb.missing_count = 0
+                tomb.confidence = confidence
+                merged = merge_provenances(tomb.provenance, provenance)
+                if merged != tomb.provenance:
+                    tomb.provenance = merged
+                tomb.pii_inherited = pii_inherited
+                if owner is not None:
+                    tomb.owner = owner
+                result[key] = (tomb, False)
+                continue
+            edge = LineageEdge(
+                source_node=source_node,
+                target_node=target_node,
+                edge_type=edge_type,
+                granularity=granularity,
+                confidence=confidence,
+                provenance=provenance,
+                pii_inherited=pii_inherited,
+                owner=owner,
+            )
+            self._db.add(edge)
+            result[key] = (edge, True)
+        # 末尾一次 flush：新建 INSERT / 覆盖 UPDATE / 历史快照批量落库（同事务）
+        await self._db.flush()
+        return result
+
     async def upsert_edge(
         self,
         *,
@@ -325,6 +477,46 @@ class LineageRepository:
                     visited.add(e.target_node)
                     frontier.append(e.target_node)
         return False
+
+    async def would_create_cycle_many(
+        self, probes: list[LineageEdge]
+    ) -> set[tuple[str, str]]:
+        """批量环检测：返回 ``probes`` 中会成环的 ``(source, target)`` 集合。
+
+        与 ``would_create_cycle`` 同语义（source 已在其 target 的下游闭包即成环），
+        但按 target 分组、每层用 ``_edges_from_many`` 一次批量拉取下游边——同一
+        target 的多条候选 source 共享一次 BFS，查询次数从「每条边每个节点 1 次
+        SELECT」降到「每个 target 每层 1 次」。dp 同步每 step 的表边候选经此
+        批量判环，消除逐条 N+1（P2 阶段 2）。
+        """
+        if not probes:
+            return set()
+        cyclic: set[tuple[str, str]] = set()
+        by_target: dict[str, list[str]] = {}
+        for p in probes:
+            if p.edge_type != "DERIVED_FROM":
+                continue
+            if p.source_node == p.target_node:
+                cyclic.add((p.source_node, p.target_node))
+                continue
+            by_target.setdefault(p.target_node, []).append(p.source_node)
+        for target, sources in by_target.items():
+            # 单 target 下游闭包：逐层批量拉取，visited 即全部可达节点。
+            visited: set[str] = {target}
+            frontier: list[str] = [target]
+            while frontier:
+                edges = await self._edges_from_many(frontier)
+                frontier = []
+                for e in edges:
+                    if e.edge_type != "DERIVED_FROM":
+                        continue
+                    if e.target_node not in visited:
+                        visited.add(e.target_node)
+                        frontier.append(e.target_node)
+            for s in sources:
+                if s in visited:
+                    cyclic.add((s, target))
+        return cyclic
 
     async def upsert_metric_edge(
         self,

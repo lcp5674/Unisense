@@ -611,39 +611,99 @@ class DpSyncService:
     ) -> tuple[int, int]:
         """入库表级边 + dp_task_refs 合并 + 字段映射独立表（幂等聚合）。
 
+        P2 阶段 2 批量写：本 step 的表级边候选先**批量环检测**（would_create_cycle_many
+        按 target 分组一次子图加载，成环边过滤），再**批量 upsert**（一次查询现存
+        活跃/墓碑 + 一次 flush），字段映射**批量幂等写**（一次查询 + 一次 flush）——
+        替代此前逐条「环检测 BFS + 活跃/墓碑双查 + 各自 flush」的 N+1 访问模式
+        （dp 全量轮逐条写是自身元数据库每轮数万次小查询的来源）。单条路径
+        （``_upsert_edge`` / ``upsert_field_mapping``）保留给补边等小量入口。
+
         Returns:
             ``(字段映射写入数, 其中降级标记数)``——供 run_log 字段级统计（方案 3
             可观测性：此前成功路径的字段边产出/丢弃完全无记录）。
         """
         ref = build_task_ref(task, step)
-        written = 0
-        degraded_cnt = 0
+        # 1) 表级边候选去重 + 字段请求按 (node 化 source,target) 分组
+        table_keys: list[tuple[str, str]] = []
+        seen_table: set[tuple[str, str]] = set()
+        field_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for te in outcome.table_edges:
-            edge = await self._upsert_edge(te.source, te.target, task, step, ref)
-            if edge is None:
-                continue
-            if seen_pairs is not None:
-                seen_pairs.add((node_table(te.source), node_table(te.target)))
-            # 字段映射：匹配该表边的字段级边（source_table/target_table 对齐）
+            key = (node_table(te.source), node_table(te.target))
+            if key not in seen_table:
+                seen_table.add(key)
+                table_keys.append(key)
             for fe in outcome.field_edges:
                 if fe.target_table == te.target and fe.source_table == te.source:
-                    await self._dp_repo.upsert_field_mapping(
-                        edge_id=edge.id,
-                        source_table=fe.source_table,
-                        source_column=fe.source_column,
-                        target_table=fe.target_table,
-                        target_column=fe.target_column,
-                        expression=fe.expression,
-                        degraded=fe.degraded,
-                        confidence=1.0,
-                        provenance="sqlglot",
-                        sql_hash=sql_hash,
-                        task_id=task.get("task_id"),
-                        step_id=step.get("step_id"),
+                    field_by_key.setdefault(key, []).append(
+                        {
+                            "source_table": fe.source_table,
+                            "source_column": fe.source_column,
+                            "target_table": fe.target_table,
+                            "target_column": fe.target_column,
+                            "expression": fe.expression,
+                            "degraded": bool(fe.degraded),
+                        }
                     )
-                    written += 1
-                    if fe.degraded:
-                        degraded_cnt += 1
+        if not table_keys:
+            return 0, 0
+        # 2) 批量环检测：成环边跳过（含其字段映射，与单条 _upsert_edge 返回 None 语义一致）
+        probes = [
+            LineageEdge(
+                source_node=s,
+                target_node=t,
+                edge_type="DERIVED_FROM",
+                granularity="L1",
+            )
+            for (s, t) in table_keys
+        ]
+        cyclic = await self._lineage_repo.would_create_cycle_many(probes)
+        if cyclic:
+            for s, t in cyclic:
+                logger.warning("dp_sync_edge_cycle_skipped: %s -> %s", s, t)
+        valid_keys = [(s, t) for (s, t) in table_keys if (s, t) not in cyclic]
+        if not valid_keys:
+            return 0, 0
+        # 3) 批量 upsert 表级边（一次查询 + 一次 flush），返回边实例供 edge_id/refs
+        edges = await self._lineage_repo.upsert_edges_with_status_batch(
+            [
+                {
+                    "source_node": s,
+                    "target_node": t,
+                    "edge_type": "DERIVED_FROM",
+                    "granularity": "L1",
+                    "provenance": DP_PROVENANCE,
+                    "change_reason": "dp_sync",
+                }
+                for (s, t) in valid_keys
+            ]
+        )
+        field_items: list[dict[str, Any]] = []
+        degraded_cnt = 0
+        for key in valid_keys:
+            edge, _ = edges[(key[0], key[1], "DERIVED_FROM", "L1")]
+            merged = DpLineageRepository.merge_task_refs(edge.dp_task_refs, ref)
+            if merged != edge.dp_task_refs:
+                edge.dp_task_refs = merged
+            if seen_pairs is not None:
+                seen_pairs.add(key)
+            for fm in field_by_key.get(key, []):
+                field_items.append(
+                    {
+                        **fm,
+                        "edge_id": edge.id,
+                        "confidence": 1.0,
+                        "provenance": "sqlglot",
+                        "sql_hash": sql_hash,
+                        "task_id": task.get("task_id"),
+                        "step_id": step.get("step_id"),
+                    }
+                )
+                if fm["degraded"]:
+                    degraded_cnt += 1
+        # 4) 字段映射批量幂等写
+        if field_items:
+            await self._dp_repo.upsert_field_mappings_batch(field_items)
+        written = len(field_items)
         return written, degraded_cnt
 
     async def _upsert_edge(

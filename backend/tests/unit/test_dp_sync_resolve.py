@@ -53,10 +53,28 @@ def _svc(ticket: MagicMock) -> DpSyncService:
         return edge, False
 
     svc._lineage_repo.upsert_edge_with_status = AsyncMock(side_effect=_fake_upsert)
+    # P2 阶段 2：reprocess_unparseable 的 ok 分支走 _store_sqlglot_edges 批量写
+    svc._lineage_repo.would_create_cycle_many = AsyncMock(return_value=set())
+
+    async def _fake_upsert_batch(requests):
+        out = {}
+        for r in requests:
+            edge = MagicMock()
+            edge.id = 100
+            edge.dp_task_refs = None
+            out[
+                (r["source_node"], r["target_node"], r["edge_type"], "L1")
+            ] = (edge, False)
+        return out
+
+    svc._lineage_repo.upsert_edges_with_status_batch = AsyncMock(
+        side_effect=_fake_upsert_batch
+    )
     svc._dp_repo = MagicMock()
     svc._dp_repo.get_ticket = AsyncMock(return_value=ticket)
     svc._dp_repo.resolve_ticket = AsyncMock(return_value=ticket)
     svc._dp_repo.upsert_field_mapping = AsyncMock()
+    svc._dp_repo.upsert_field_mappings_batch = AsyncMock(return_value=0)
     return svc
 
 
@@ -328,8 +346,8 @@ async def test_reprocess_unparseable_three_state() -> None:
 
     counters = await svc.reprocess_unparseable_tickets(limit=100)
     assert counters == {"parsed": 1, "no_flow": 1, "kept": 1}
-    # 可解析单：边入库 + 标 accept_sqlglot；纯 DDL 单标 ignore；失败单不动
-    assert svc._lineage_repo.upsert_edge_with_status.await_count == 1
+    # 可解析单：批量边入库 + 标 accept_sqlglot；纯 DDL 单标 ignore；失败单不动
+    assert svc._lineage_repo.upsert_edges_with_status_batch.await_count == 1
     calls = [c.kwargs["resolution"] for c in svc._dp_repo.resolve_ticket.await_args_list]
     assert calls == ["accept_sqlglot", "ignore"]
 

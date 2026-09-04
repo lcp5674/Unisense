@@ -145,6 +145,23 @@ def _svc(
         return edge, False
 
     svc._lineage_repo.upsert_edge_with_status = AsyncMock(side_effect=_fake_upsert)
+    # P2 阶段 2：_store_sqlglot_edges 走批量写（scan 全流程经 FakeCollector 简单任务）
+    svc._lineage_repo.would_create_cycle_many = AsyncMock(return_value=set())
+
+    async def _fake_upsert_batch(requests):
+        out = {}
+        for r in requests:
+            edge = MagicMock()
+            edge.id = 100
+            edge.dp_task_refs = None
+            out[
+                (r["source_node"], r["target_node"], r["edge_type"], "L1")
+            ] = (edge, False)
+        return out
+
+    svc._lineage_repo.upsert_edges_with_status_batch = AsyncMock(
+        side_effect=_fake_upsert_batch
+    )
     svc._dp_repo = MagicMock()
     cfg = config or _config()
     svc._dp_repo.get_config = AsyncMock(return_value=cfg)
@@ -156,6 +173,7 @@ def _svc(
     svc._dp_repo.find_ticket_by_step_hash = AsyncMock(return_value=None)
     svc._dp_repo.create_ticket = AsyncMock(return_value=MagicMock())
     svc._dp_repo.upsert_field_mapping = AsyncMock()
+    svc._dp_repo.upsert_field_mappings_batch = AsyncMock(return_value=0)
     svc._dp_repo.soft_delete_field_mappings = AsyncMock(return_value=0)
     svc._dp_repo.find_orphan_catalogs = AsyncMock(return_value=[])
     svc._llm_chat = None

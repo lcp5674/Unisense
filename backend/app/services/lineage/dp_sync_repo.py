@@ -49,6 +49,19 @@ def _column_eq(column, value):
     return column.is_(None) if value is None else column == value
 
 
+def _fm_key_from_row(
+    row: LineageFieldMapping,
+) -> tuple[str, str | None, str, str, bool]:
+    """字段映射唯一键 ``(source_table, source_column, target_table, target_column, degraded)``。"""
+    return (
+        row.source_table,
+        row.source_column,
+        row.target_table,
+        row.target_column,
+        bool(row.degraded),
+    )
+
+
 class DpLineageRepository:
     """dp 血缘同步仓储。"""
 
@@ -388,6 +401,119 @@ class DpLineageRepository:
                 step_id=step_id,
             )
         )
+
+    async def upsert_field_mappings_batch(self, items: list[dict[str, Any]]) -> int:
+        """批量幂等写入字段映射（语义同 ``upsert_field_mapping``，P2 阶段 2）。
+
+        输入 ``items``：每个元素即 ``upsert_field_mapping`` 的关键字参数字典。
+        现存活跃/墓碑各**一次批量查询**载入内存分类（忽略/复活/新建），末尾
+        一次 flush——避免每条 2 次 SELECT（dp 全量轮字段映射逐条写是每轮
+        数万次小查询的最大来源）。返回本次新建+复活条数（供日志，忽略条不计）。
+        """
+        if not items:
+            return 0
+
+        def _fm_key(it: dict[str, Any]) -> tuple[str, str | None, str, str, bool]:
+            return (
+                str(it["source_table"]),
+                it.get("source_column"),
+                str(it["target_table"]),
+                str(it["target_column"]),
+                bool(it.get("degraded")),
+            )
+
+        # 同 5 元组去重（后项覆盖前项，SQL 演进/多 te 防御）
+        params_by_key: dict[tuple[str, str | None, str, str, bool], dict[str, Any]] = {}
+        for it in items:
+            params_by_key[_fm_key(it)] = it
+        keys = list(params_by_key)
+
+        def _conds(ks: list[tuple[str, str | None, str, str, bool]]) -> Any:
+            return or_(
+                *[
+                    and_(
+                        LineageFieldMapping.source_table == s,
+                        _column_eq(LineageFieldMapping.source_column, sc),
+                        LineageFieldMapping.target_table == t,
+                        LineageFieldMapping.target_column == tc,
+                        LineageFieldMapping.degraded.is_(dg),
+                    )
+                    for (s, sc, t, tc, dg) in ks
+                ]
+            )
+
+        active = (
+            await self._db.execute(
+                select(LineageFieldMapping).where(
+                    _conds(keys), LineageFieldMapping.deleted_at.is_(None)
+                )
+            )
+        ).scalars().all()
+        existing_map = {_fm_key_from_row(x): x for x in active}
+        miss_keys = [k for k in keys if k not in existing_map]
+        tomb_map: dict[tuple[str, str | None, str, str, bool], LineageFieldMapping] = {}
+        if miss_keys:
+            tombs = (
+                await self._db.execute(
+                    select(LineageFieldMapping)
+                    .where(_conds(miss_keys), LineageFieldMapping.deleted_at.is_not(None))
+                    .order_by(LineageFieldMapping.id.desc())
+                )
+            ).scalars().all()
+            for row in tombs:
+                # 墓碑软删行同键可能残留多行（软删多次）——取最新（id 最大）复活
+                tomb_map.setdefault(_fm_key_from_row(row), row)
+        written = 0
+        for key in keys:
+            it = params_by_key[key]
+            if key in existing_map:
+                continue  # 活跃已存在 → 忽略（与单条一致，不覆盖）
+            tomb = tomb_map.get(key)
+            edge_id = int(it["edge_id"])
+            expression = it.get("expression")
+            confidence = float(it.get("confidence", 1.0))
+            provenance = str(it.get("provenance", "sqlglot"))
+            sql_hash = it.get("sql_hash")
+            task_id = it.get("task_id")
+            step_id = it.get("step_id")
+            if tomb is not None:
+                # 复活覆盖（与单条墓碑分支一致，provenance 合并保留历史来源）
+                tomb.deleted_at = None
+                tomb.edge_id = edge_id
+                tomb.expression = expression
+                tomb.confidence = confidence
+                tomb.sql_hash = sql_hash  # type: ignore[assignment]
+                tomb.task_id = task_id
+                tomb.step_id = step_id
+                tokens: list[str] = []
+                for chunk in (tomb.provenance or "").split("+"):
+                    chunk = chunk.strip()
+                    if chunk and chunk not in tokens:
+                        tokens.append(chunk)
+                if provenance and provenance not in tokens:
+                    tokens.append(provenance)
+                tomb.provenance = "+".join(tokens)
+                written += 1
+                continue
+            self._db.add(
+                LineageFieldMapping(
+                    edge_id=edge_id,
+                    source_table=it["source_table"],
+                    source_column=it.get("source_column"),
+                    target_table=it["target_table"],
+                    target_column=it["target_column"],
+                    expression=expression,
+                    degraded=bool(it.get("degraded")),
+                    confidence=confidence,
+                    provenance=provenance,
+                    sql_hash=sql_hash,
+                    task_id=task_id,
+                    step_id=step_id,
+                )
+            )
+            written += 1
+        await self._db.flush()
+        return written
 
     async def list_field_mappings(self, edge_id: int) -> list[LineageFieldMapping]:
         stmt = (

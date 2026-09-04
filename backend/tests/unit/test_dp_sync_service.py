@@ -55,9 +55,32 @@ def _svc(**kwargs) -> DpSyncService:
         return edge, False
 
     svc._lineage_repo.upsert_edge_with_status = AsyncMock(side_effect=_fake_upsert)
+    # P2 阶段 2：_store_sqlglot_edges 走批量写——批量环检测默认无环、批量 upsert
+    # 返回 ``{(source,target,type,gran): (edge, created)}``、字段映射批量默认成功。
+    svc._lineage_repo.would_create_cycle_many = AsyncMock(return_value=set())
+
+    async def _fake_upsert_batch(requests):
+        out = {}
+        for r in requests:
+            edge = MagicMock()
+            edge.id = 100
+            edge.dp_task_refs = None
+            key = (
+                r["source_node"],
+                r["target_node"],
+                r["edge_type"],
+                r.get("granularity") or "L3",
+            )
+            out[key] = (edge, False)
+        return out
+
+    svc._lineage_repo.upsert_edges_with_status_batch = AsyncMock(
+        side_effect=_fake_upsert_batch
+    )
     svc._dp_repo.find_ticket_by_step_hash = AsyncMock(return_value=None)
     svc._dp_repo.create_ticket = AsyncMock(return_value=MagicMock())
     svc._dp_repo.upsert_field_mapping = AsyncMock()
+    svc._dp_repo.upsert_field_mappings_batch = AsyncMock(return_value=0)
     svc._dp_repo.soft_delete_field_mappings = AsyncMock(return_value=0)
     svc._dp_repo.find_orphan_catalogs = AsyncMock(return_value=[])
     svc._dp_repo.find_user_by_username = AsyncMock(return_value=None)
@@ -79,13 +102,13 @@ async def test_simple_ok_stored_without_llm() -> None:
     result = await svc.process_step(TASK, STEP, SIMPLE_SQL, _config())
     assert result["status"] == "parsed_ok"
     svc._dp_repo.create_ticket.assert_not_awaited()
-    # 表级边写入 + dp_task_refs 合并 + 字段映射
-    assert svc._lineage_repo.upsert_edge_with_status.await_count == 1
-    edge = svc._lineage_repo.upsert_edge_with_status.await_args.kwargs
+    # 表级边批量写入 + dp_task_refs 合并 + 字段映射批量
+    assert svc._lineage_repo.upsert_edges_with_status_batch.await_count == 1
+    edge = svc._lineage_repo.upsert_edges_with_status_batch.await_args.args[0][0]
     assert edge["target_node"] == "table:wedw_dwd.dp_dq_measure_df"
     assert edge["provenance"] == "dp_sql"
-    # 字段映射（department_id/cnt 两条源列）写入
-    svc._dp_repo.upsert_field_mapping.assert_awaited()
+    # 字段映射（department_id/cnt 两条源列）批量写入
+    svc._dp_repo.upsert_field_mappings_batch.assert_awaited()
 
 
 @pytest.mark.asyncio
@@ -102,7 +125,7 @@ async def test_complex_llm_agree_stored() -> None:
     result = await svc.process_step(TASK, STEP, sql, _config())
     assert result["status"] == "llm_confirmed"
     svc._dp_repo.create_ticket.assert_not_awaited()
-    assert svc._lineage_repo.upsert_edge_with_status.await_count == 1
+    assert svc._lineage_repo.upsert_edges_with_status_batch.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -172,7 +195,7 @@ async def test_llm_output_garbage_falls_to_ticket() -> None:
     )
     result = await svc.process_step(TASK, STEP, sql, _config())
     assert result["status"] == "diverged"
-    assert svc._lineage_repo.upsert_edge_with_status.await_count == 0  # 未入库
+    assert svc._lineage_repo.upsert_edges_with_status_batch.await_count == 0  # 未入库
 
 
 @pytest.mark.asyncio
@@ -184,6 +207,7 @@ async def test_no_flow_skipped() -> None:
     assert result["status"] == "no_flow"
     svc._dp_repo.create_ticket.assert_not_awaited()
     svc._lineage_repo.upsert_edge_with_status.assert_not_awaited()
+    svc._lineage_repo.upsert_edges_with_status_batch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -203,7 +227,7 @@ async def test_memory_reuse_accept_sqlglot() -> None:
     result = await svc.process_step(TASK, STEP, sql, _config())
     assert result["status"] == "memory_reused"
     svc._dp_repo.create_ticket.assert_not_awaited()
-    assert svc._lineage_repo.upsert_edge_with_status.await_count == 1
+    assert svc._lineage_repo.upsert_edges_with_status_batch.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -222,6 +246,7 @@ async def test_memory_reuse_ignored_skips() -> None:
     assert result["status"] == "memory_ignored"
     svc._dp_repo.create_ticket.assert_not_awaited()
     svc._lineage_repo.upsert_edge_with_status.assert_not_awaited()
+    svc._lineage_repo.upsert_edges_with_status_batch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -304,3 +329,41 @@ async def test_process_task_writes_current_step_type_to_progress() -> None:
     assert progress["current_step_type"] == 7
     assert progress["current_step_label"] == "Hive/Spark SQL"
     svc.backfill_owner.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_store_sqlglot_edges_skips_cyclic_edge_and_its_fields() -> None:
+    """P2 阶段 2：批量环检测命中时，成环表边与其字段映射整体跳过（不写库、不进 seen）。"""
+    svc = _svc()
+    cyclic = {("table:wedw_ods.visit_d", "table:wedw_dwd.dp_dq_measure_df")}
+    svc._lineage_repo.would_create_cycle_many = AsyncMock(return_value=cyclic)
+    seen: set[tuple[str, str]] = set()
+    result = await svc.process_step(TASK, STEP, SIMPLE_SQL, _config(), seen_pairs=seen)
+    assert result["status"] == "parsed_ok"
+    assert result["fields_written"] == 0
+    svc._lineage_repo.upsert_edges_with_status_batch.assert_not_awaited()
+    svc._dp_repo.upsert_field_mappings_batch.assert_not_awaited()
+    assert seen == set()  # 成环边不进 seen_pairs → 收尾不 mark_seen 保护
+
+
+@pytest.mark.asyncio
+async def test_store_sqlglot_edges_batches_field_items_with_edge_refs() -> None:
+    """P2 阶段 2：字段映射走批量，每条携带 edge_id/sql_hash/step_id/provenance。"""
+    svc = _svc()
+    seen: set[tuple[str, str]] = set()
+    result = await svc.process_step(TASK, STEP, SIMPLE_SQL, _config(), seen_pairs=seen)
+    assert result["status"] == "parsed_ok"
+    # 批量 upsert 一次 + 字段映射批量一次
+    assert svc._lineage_repo.upsert_edges_with_status_batch.await_count == 1
+    assert svc._dp_repo.upsert_field_mappings_batch.await_count == 1
+    items = svc._dp_repo.upsert_field_mappings_batch.await_args.args[0]
+    assert len(items) >= 1
+    for it in items:
+        assert it["edge_id"] == 100  # fake 批量 upsert 返回的边 id
+        assert it["sql_hash"]  # sql_fingerprint 派生，非空
+        assert it["step_id"] == 5012
+        assert it["provenance"] == "sqlglot"
+        assert it["confidence"] == 1.0
+        assert it["target_table"] == "wedw_dwd.dp_dq_measure_df"
+    # seen_pairs 记录成功写入的表边（visit_d → 产出表）
+    assert ("table:wedw_ods.visit_d", "table:wedw_dwd.dp_dq_measure_df") in seen
