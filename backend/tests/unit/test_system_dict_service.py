@@ -199,6 +199,126 @@ class TestUpdate:
             await svc.update_item("granularity", "nope", DictItemUpdate(label="x"))
 
 
+def _exec_result(rowcount: int = 0, scalar: int | None = None) -> MagicMock:
+    """构造 db.execute 返回值：UPDATE 用 rowcount，COUNT 用 scalar。"""
+    result = MagicMock()
+    result.rowcount = rowcount
+    result.scalar.return_value = scalar if scalar is not None else rowcount
+    result.scalars.return_value.all.return_value = []
+    return result
+
+
+class TestRenameCode:
+    """改码（rename-with-sync）：校验 → 同步引用 → 更新编码，任一步失败整体回滚。"""
+
+    async def test_rename_syncs_references(self, svc, mock_db) -> None:
+        item = MagicMock()
+        item.dict_type = "unit"
+        item.code = "yuan"
+        svc._repo.get_item = AsyncMock(return_value=item)
+        svc._repo.get_item_including_deleted = AsyncMock(return_value=None)
+        svc._repo.update = AsyncMock(return_value=item)
+        # unit → 仅 Metric.unit 一列；UPDATE rowcount=3；JSON 同步 0 行
+        mock_db.execute = AsyncMock(return_value=_exec_result(rowcount=3))
+
+        from app.services.system_dict.schemas import DictItemUpdate
+
+        with patch(
+            "app.services.system_dict.service._sync_json_references",
+            new=AsyncMock(return_value=0),
+        ):
+            result = await svc.update_item("unit", "yuan", DictItemUpdate(code="CNY"))
+        assert result.code == "CNY"
+        assert mock_db.execute.await_count == 1  # unit 只有 Metric.unit 一个目标列
+
+    async def test_rename_enum_value_rejected(self, svc, mock_db) -> None:
+        """ENUM 列绑定类型：新编码不在 DB 枚举值域 → 拒绝且不触发任何写。"""
+        item = MagicMock()
+        item.dict_type = "dw_layer"
+        item.code = "ODS"
+        svc._repo.get_item = AsyncMock(return_value=item)
+
+        from app.services.system_dict.schemas import DictItemUpdate
+
+        with pytest.raises(BusinessError) as exc_info:
+            await svc.update_item("dw_layer", "ODS", DictItemUpdate(code="STAGING"))
+        assert exc_info.value.error_code == "DICT_CODE_ENUM_CONSTRAINT"
+        mock_db.execute.assert_not_awaited()
+
+    async def test_rename_enum_to_sibling_allowed(self, svc, mock_db) -> None:
+        """ENUM 列绑定类型：新编码在值域内（如 T1→T2 纠偏）→ 放行同步。"""
+        item = MagicMock()
+        item.dict_type = "metric_tier"
+        item.code = "T1"
+        svc._repo.get_item = AsyncMock(return_value=item)
+        svc._repo.get_item_including_deleted = AsyncMock(return_value=None)
+        svc._repo.update = AsyncMock(return_value=item)
+        mock_db.execute = AsyncMock(return_value=_exec_result(rowcount=5))
+
+        from app.services.system_dict.schemas import DictItemUpdate
+
+        with patch(
+            "app.services.system_dict.service._sync_json_references",
+            new=AsyncMock(return_value=0),
+        ):
+            await svc.update_item("metric_tier", "T1", DictItemUpdate(code="T2"))
+        # metric_tier → 仅 Metric.metric_tier 一列
+        assert mock_db.execute.await_count == 1
+
+    async def test_rename_duplicate_rejected(self, svc) -> None:
+        item = MagicMock()
+        item.dict_type = "unit"
+        item.code = "yuan"
+        svc._repo.get_item = AsyncMock(return_value=item)
+        other = MagicMock()
+        other.id = 999
+        svc._repo.get_item_including_deleted = AsyncMock(return_value=other)
+
+        from app.core.exceptions import ConflictError
+        from app.services.system_dict.schemas import DictItemUpdate
+
+        with pytest.raises(ConflictError):
+            await svc.update_item("unit", "yuan", DictItemUpdate(code="ge"))
+
+    async def test_rename_same_code_noop(self, svc) -> None:
+        """code 与现值相同 → 不触发改码路径（无唯一性查询/UPDATE）。"""
+        item = MagicMock()
+        item.dict_type = "unit"
+        item.code = "yuan"
+        svc._repo.get_item = AsyncMock(return_value=item)
+        svc._repo.get_item_including_deleted = AsyncMock()
+        svc._repo.update = AsyncMock(return_value=item)
+
+        from app.services.system_dict.schemas import DictItemUpdate
+
+        await svc.update_item("unit", "yuan", DictItemUpdate(code="yuan", label="元"))
+        svc._repo.get_item_including_deleted.assert_not_awaited()
+
+
+class TestRefCountRegistry:
+    """引用计数复用注册表：覆盖度量/挂载等 Metric 之外的引用面。"""
+
+    async def test_ref_count_measure_category(self, svc, mock_db) -> None:
+        """measure_category → MeasureCatalog.category（此前不计数，删除保护缺口）。"""
+        result = _exec_result(rowcount=7)
+        mock_db.execute = AsyncMock(return_value=result)
+        assert await svc.get_ref_count("measure_category", "FLOW") == 7
+
+    async def test_ref_count_unknown_type_zero(self, svc) -> None:
+        assert await svc.get_ref_count("pii_rule", "phone") == 0
+
+    async def test_ref_count_sums_multiple_tables(self, svc, mock_db) -> None:
+        """granularity → Metric + MetricMount + MetricTemplate 三列求和。"""
+        mock_db.execute = AsyncMock(
+            side_effect=[
+                _exec_result(rowcount=2),
+                _exec_result(rowcount=3),
+                _exec_result(rowcount=1),
+            ]
+        )
+        assert await svc.get_ref_count("granularity", "day") == 6
+
+
 class TestToggle:
     async def test_deactivate_item(self, svc) -> None:
         item = MagicMock()

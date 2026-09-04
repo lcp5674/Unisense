@@ -46,12 +46,27 @@ class DictItemCreate(BaseModel):
 
 
 class DictItemUpdate(BaseModel):
-    """更新字典项请求。"""
+    """更新字典项请求。
 
+    ``code`` 可选：传入且与当前编码不同时执行**改码**——校验格式/唯一性后
+    同步更新全部引用该编码的业务数据（指标/逻辑度量/挂载/模板/域默认值），
+    见 ``SystemDictService.update_item``。未传或不变化时不触发改码。
+    """
+
+    code: str | None = Field(None, max_length=64, description="新编码（变更时同步全部引用）")
     label: str | None = Field(None, max_length=128)
     sort_order: int | None = None
     description: str | None = Field(None, max_length=256)
     extra: dict[str, Any] | None = None
+
+    @field_validator("code")
+    @classmethod
+    def validate_code(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not _DICT_CODE_PATTERN.match(v):
+            raise ValueError("字典项编码仅含字母、数字和下划线")
+        return v
 
 
 class DictInferDescriptionRequest(BaseModel):

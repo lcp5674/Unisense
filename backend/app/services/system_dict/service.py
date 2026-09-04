@@ -25,6 +25,72 @@ logger = structlog.get_logger("unisense.system_dict.service")
 _NOTIFY_DEDUP_WINDOW_SECONDS = 60
 
 
+def _reference_targets() -> dict[str, list[tuple[type, str, bool]]]:
+    """字典类型 → 引用该编码的业务表列注册表（改码同步与引用计数的单一事实源）。
+
+    返回 ``dict_type -> [(Model, column_name, is_enum), ...]``；``is_enum``
+    表示该列是 MySQL ENUM——改码新值必须在值域内（运行时从表结构
+    ``Column.type.enums`` 取，避免手工维护副本漂移），否则改码被拒绝。
+    """
+    from app.models.measure_catalog import MeasureCatalog
+    from app.models.metric import Metric
+    from app.models.metric_mount import MetricMount
+    from app.models.metric_template import MetricTemplate
+
+    return {
+        "granularity": [
+            (Metric, "granularity", False),
+            (MetricMount, "granularity", False),
+            (MetricTemplate, "granularity", False),
+        ],
+        "unit": [(Metric, "unit", False)],
+        "currency": [(Metric, "currency", False)],
+        "aggregation": [(Metric, "aggregation", True)],
+        "time_semantics": [(Metric, "time_semantics", True)],
+        "freshness": [(Metric, "freshness", True)],
+        "dw_layer": [(Metric, "dw_layer", True)],
+        "metric_type": [(Metric, "type", True)],
+        "metric_tier": [(Metric, "metric_tier", True)],
+        "serving_mode": [(Metric, "serving_mode", True)],
+        "additivity": [(Metric, "additivity", True)],
+        "measure_category": [(MeasureCatalog, "category", False)],
+        "measure_format": [(MeasureCatalog, "measure_format", True)],
+    }
+
+
+async def _sync_json_references(db: Any, dict_type: str, old: str, new: str) -> int:
+    """同步 JSON 列内嵌的字典值（SubjectDomain/MetricTemplate 的 defaults_json）。
+
+    字段 → dict_type 映射复用 subject_domain service 的
+    ``_DEFAULT_FIELD_DICT_TYPES``（延迟 import 防循环依赖）；逐行读改写
+    （域/模板均为个位数量级），返回同步的行数。
+    """
+    from sqlalchemy import select
+
+    from app.models.metric_template import MetricTemplate
+    from app.models.subject_domain import SubjectDomain
+    from app.services.subject_domain.service import _DEFAULT_FIELD_DICT_TYPES
+
+    fields = [f for f, dt in _DEFAULT_FIELD_DICT_TYPES.items() if dt == dict_type]
+    if not fields:
+        return 0
+    changed = 0
+    for model in (SubjectDomain, MetricTemplate):
+        result = await db.execute(select(model))
+        for row in result.scalars().all():
+            payload = dict(row.defaults_json or {})
+            dirty = False
+            for field in fields:
+                if payload.get(field) == old:
+                    payload[field] = new
+                    dirty = True
+            if dirty:
+                row.defaults_json = payload
+                changed += 1
+    await db.flush()
+    return changed
+
+
 class SystemDictService:
     """系统字典服务。"""
 
@@ -142,8 +208,17 @@ class SystemDictService:
         code: str,
         data: DictItemUpdate,
     ) -> SystemDict:
-        """更新字典项（label/sort_order/description/extra）。"""
+        """更新字典项（code/label/sort_order/description/extra）。
+
+        ``data.code`` 传入且与当前编码不同时执行**改码**（rename-with-sync）：
+        校验格式/唯一性 → ENUM 值域校验 → 同步全部引用（指标/逻辑度量/挂载/
+        模板/域默认值）→ 更新字典项编码；任一步失败整体回滚（API 层 rollback），
+        不出现「引用已改、字典未改」或反向的半程状态。
+        """
         item = await self.get_item(dict_type, code)
+        new_code = (data.code or "").strip()
+        if new_code and new_code != code:
+            await self._rename_item_code(dict_type, item, code, new_code)
         if data.label is not None:
             item.label = data.label
         if data.sort_order is not None:
@@ -153,8 +228,67 @@ class SystemDictService:
         if data.extra is not None:
             item.extra = data.extra
         item = await self._repo.update(item)
-        logger.info("dict_item_updated", dict_type=dict_type, code=code)
+        logger.info("dict_item_updated", dict_type=dict_type, code=item.code)
         return item
+
+    async def _rename_item_code(
+        self,
+        dict_type: str,
+        item: SystemDict,
+        old: str,
+        new: str,
+    ) -> dict[str, int]:
+        """改码并同步全部引用（在同一事务内完成）。
+
+        返回各引用列的同步行数（含 ``subject_domain.defaults_json`` 等内嵌值）。
+        """
+        targets = _reference_targets().get(dict_type, [])
+        # ENUM 列值域校验：新编码必须是 DB 枚举的合法值，否则拒绝改码
+        #（提示可选值 + 建议「新增新条目 + 停用旧条目」的替代路径）
+        for model, column, is_enum in targets:
+            if not is_enum:
+                continue
+            allowed = list(getattr(model.__table__.c, column).type.enums)
+            if new not in allowed:
+                raise BusinessError(
+                    f"编码 {new} 不在该类型的数据列允许值内（{', '.join(allowed)}），"
+                    "无法同步引用。如需其他编码，请新增正确编码的条目并停用本条目",
+                    error_code="DICT_CODE_ENUM_CONSTRAINT",
+                    ctx={"dict_type": dict_type, "allowed": allowed},
+                )
+        # 唯一性（含软删行——软删行仍占唯一索引，排除自身）
+        dup = await self._repo.get_item_including_deleted(dict_type, new)
+        if dup is not None and dup.id != item.id:
+            raise ConflictError(
+                f"字典项已存在: {dict_type}/{new}",
+                error_code="DUPLICATE_DICT_CODE",
+            )
+        synced: dict[str, int] = {}
+        from sqlalchemy import update
+
+        for model, column, _is_enum in targets:
+            stmt = (
+                update(model)
+                .where(getattr(model, column) == old)
+                .values({column: new})
+            )
+            result = await self._db.execute(stmt)
+            rowcount = result.rowcount or 0
+            if rowcount:
+                synced[f"{model.__tablename__}.{column}"] = rowcount
+        json_rows = await _sync_json_references(self._db, dict_type, old, new)
+        if json_rows:
+            synced["defaults_json"] = json_rows
+        item.code = new
+        await self._repo.update(item)
+        logger.info(
+            "dict_item_code_renamed",
+            dict_type=dict_type,
+            old_code=old,
+            new_code=new,
+            synced=synced,
+        )
+        return synced
 
     async def deactivate_item(self, dict_type: str, code: str) -> SystemDict:
         """停用字典项。"""
@@ -178,7 +312,7 @@ class SystemDictService:
         ref_count = await self.get_ref_count(dict_type, code)
         if ref_count > 0:
             raise BusinessError(
-                f"该字典项被 {ref_count} 个指标引用，不可删除，请先停用",
+                f"该字典项被 {ref_count} 处业务数据引用，不可删除，请先停用",
                 error_code="HAS_REFERENCES",
             )
         await self._repo.soft_delete(item)
@@ -303,47 +437,31 @@ class SystemDictService:
         return DictBatchResult(succeeded=succeeded, failed=failed)
 
     async def get_ref_count(self, dict_type: str, code: str) -> int:
-        """获取字典项引用计数（被多少指标引用）。
+        """获取字典项引用计数（被多少处业务数据引用）。
 
-        按 dict_type 映射到 Metric 对应字段，统计引用数。
+        复用 ``_reference_targets`` 注册表逐表计数（与改码同步的引用面严格
+        一致）：指标 11 个字典字段 + 逻辑度量 category/measure_format +
+        挂载/模板粒度。删除保护据此判定——引用面内任何一处引用都阻止删除。
         """
         from sqlalchemy import func, select
 
-        from app.models.metric import Metric
-
-        # dict_type → Metric 字段映射
-        field_map: dict[str, str] = {
-            "granularity": "granularity",
-            "unit": "unit",
-            "currency": "currency",
-            "aggregation": "aggregation",
-            "time_semantics": "time_semantics",
-            "freshness": "freshness",
-            "dw_layer": "dw_layer",
-            "metric_type": "type",
-            "additivity": "additivity",
-            "serving_mode": "serving_mode",
-            "metric_tier": "metric_tier",
-        }
-
-        metric_field = field_map.get(dict_type)
-        if metric_field is None:
+        targets = _reference_targets().get(dict_type)
+        if not targets:
             return 0
 
-        column = getattr(Metric, metric_field, None)
-        if column is None:
-            return 0
-
-        stmt = (
-            select(func.count())
-            .select_from(Metric)
-            .where(
-                column == code,
-                Metric.deleted_at.is_(None),
+        total = 0
+        for model, column, _is_enum in targets:
+            stmt = (
+                select(func.count())
+                .select_from(model)
+                .where(getattr(model, column) == code)
             )
-        )
-        result = await self._db.execute(stmt)
-        return result.scalar() or 0
+            # 指标表按软删过滤（软删指标不计引用）；其余表无 deleted_at 或行数极少
+            if hasattr(model, "deleted_at"):
+                stmt = stmt.where(model.deleted_at.is_(None))
+            result = await self._db.execute(stmt)
+            total += result.scalar() or 0
+        return total
 
     async def validate_dict_value(self, dict_type: str, code: str) -> SystemDict:
         """校验字典值存在且 active（供指标注册时调用）。"""

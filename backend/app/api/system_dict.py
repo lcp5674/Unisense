@@ -371,21 +371,27 @@ async def update_dict_item(
 ) -> ApiResponse[DictItemResponse]:
     try:
         item = await svc.update_item(dict_type, code, data)
-        ref_count = await svc.get_ref_count(dict_type, code)
+        ref_count = await svc.get_ref_count(dict_type, item.code)
         await write_audit(
             svc._db,
             actor_id=user.id,
             action="dict.update",
             entity_type="dict_item",
             entity_id=f"{dict_type}:{code}",
-            detail={"dict_type": dict_type, "code": code, "label": item.label},
+            detail={
+                "dict_type": dict_type,
+                "code": code,
+                "new_code": item.code if item.code != code else None,
+                "label": item.label,
+            },
             ip=client_ip(request),
             trace_id=trace_id,
         )
         await svc._db.commit()
         await _refresh_morpheme_cache_if_needed(svc._db, dict_type)
         return ok(data=_item_response(item, ref_count), trace_id=trace_id)
-    except NotFoundError:
+    except (NotFoundError, BusinessError):
+        # BusinessError：改码的 ENUM 值域/唯一性校验失败须回滚半程状态
         await svc._db.rollback()
         raise
 

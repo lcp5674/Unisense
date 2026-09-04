@@ -372,15 +372,16 @@ export function SystemDict() {
     }
   }
 
-  async function handleEdit(values: { label?: string; sort_order?: number; description?: string; extra_unit?: string; extra_decimal?: number | null }) {
+  async function doEdit(values: { label?: string; sort_order?: number; description?: string; extra_unit?: string; extra_decimal?: number | null }, codeToSend: string | undefined, targetCode: string) {
     if (!editItem) return;
     try {
       const extra = activeType === "measure_format" ? composeExtra(values) : editExtra;
-      await updateDictItem(activeType, editItem.code, {
+      await updateDictItem(activeType, targetCode, {
         ...values,
+        code: codeToSend,
         extra,
       });
-      message.success("更新成功");
+      message.success(codeToSend ? "编码已修改，引用已同步更新" : "更新成功");
       setEditOpen(false);
       editForm.resetFields();
       setEditItem(null);
@@ -388,6 +389,22 @@ export function SystemDict() {
     } catch (err: any) {
       message.error(err?.message || "更新失败");
     }
+  }
+
+  async function handleEdit(values: { code?: string; label?: string; sort_order?: number; description?: string; extra_unit?: string; extra_decimal?: number | null }) {
+    if (!editItem) return;
+    // 改码二次确认：编码变化时提示同步影响面（后端权威校验 ENUM 值域/唯一性并同步引用）
+    const nextCode = (values.code ?? editItem.code).trim();
+    if (nextCode && nextCode !== editItem.code) {
+      modal.confirm({
+        title: "确认修改编码",
+        content: `编码将从「${editItem.code}」改为「${nextCode}」，后端将同步更新所有引用该编码的业务数据（当前 ${editItem.ref_count ?? 0} 处引用）。`,
+        okText: "确认改码",
+        onOk: () => doEdit(values, nextCode, editItem.code),
+      });
+      return;
+    }
+    await doEdit(values, undefined, editItem.code);
   }
 
   async function handleToggle(item: SystemDictItem) {
@@ -554,7 +571,7 @@ export function SystemDict() {
       title: "操作", key: "action", width: 200,
       render: (_: unknown, record: SystemDictItem) => (
         <Space size="small">
-          {can("dict:create") && <Button size="small" icon={<EditOutlined />} onClick={() => { setEditItem(record); setEditExtra((record.extra ?? null) as Record<string, unknown> | null); const ex = (record.extra ?? {}) as { unit?: unknown; decimal?: unknown }; editForm.setFieldsValue({ label: record.label, sort_order: record.sort_order, description: record.description, extra_unit: ex.unit != null ? String(ex.unit) : undefined, extra_decimal: ex.decimal != null ? Number(ex.decimal) : undefined }); setEditOpen(true); }}>编辑</Button>}
+          {can("dict:create") && <Button size="small" icon={<EditOutlined />} onClick={() => { setEditItem(record); setEditExtra((record.extra ?? null) as Record<string, unknown> | null); const ex = (record.extra ?? {}) as { unit?: unknown; decimal?: unknown }; editForm.setFieldsValue({ code: record.code, label: record.label, sort_order: record.sort_order, description: record.description, extra_unit: ex.unit != null ? String(ex.unit) : undefined, extra_decimal: ex.decimal != null ? Number(ex.decimal) : undefined }); setEditOpen(true); }}>编辑</Button>}
           {can("dict:create") && (
             <Button size="small" icon={record.status === "active" ? <StopOutlined /> : <CheckCircleOutlined />} onClick={() => handleToggle(record)}>
               {record.status === "active" ? "停用" : "启用"}
@@ -744,6 +761,17 @@ export function SystemDict() {
       {/* 编辑弹窗 */}
       <Modal title="编辑参照数据项" open={editOpen} onCancel={() => { setEditOpen(false); setEditItem(null); }} onOk={() => editForm.submit()}>
         <Form form={editForm} onFinish={handleEdit} layout="vertical">
+          <Form.Item
+            name="code"
+            label="编码"
+            rules={[
+              { required: true, message: "编码不能为空" },
+              { pattern: /^[A-Za-z0-9_]+$/, message: "编码仅含字母、数字和下划线" },
+            ]}
+            extra="修改编码将同步更新所有引用该编码的指标/度量/模板（受数据库枚举约束的类型仅允许值域内取值）"
+          >
+            <Input maxLength={64} data-testid="dict-edit-code" />
+          </Form.Item>
           <Form.Item name="label" label="显示名" rules={[{ required: true }]}>
             <Input />
           </Form.Item>

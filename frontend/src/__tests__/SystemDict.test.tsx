@@ -553,4 +553,39 @@ describe("SystemDict 页面", () => {
     const [, , payload] = mockedUpdate.mock.calls[0] as [string, string, { extra?: Record<string, unknown> }];
     expect(payload.extra).toEqual({ category: "经营" });
   });
+
+  it("编辑弹窗：不改码提交不携带 code（后端不触发改码路径）", async () => {
+    mockedUpdate.mockResolvedValue({} as any);
+    renderDict();
+    await screen.findByText("日");
+    fireEvent.click(screen.getAllByRole("button", { name: /编\s*辑/ })[0]);
+    // 编码框回填当前编码，未修改直接提交
+    await waitFor(() => expect(screen.getByTestId("dict-edit-code")).toHaveValue("daily"));
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => expect(mockedUpdate).toHaveBeenCalled());
+    const [dt, code, payload] = mockedUpdate.mock.calls[0] as [string, string, { code?: string }];
+    expect(dt).toBe("granularity");
+    expect(code).toBe("daily");
+    expect(payload.code).toBeUndefined();
+  });
+
+  it("编辑弹窗：修改编码后提交，弹出改码确认（含引用数），确认后携带新 code", async () => {
+    mockedUpdate.mockResolvedValue({} as any);
+    renderDict();
+    await screen.findByText("日");
+    fireEvent.click(screen.getAllByRole("button", { name: /编\s*辑/ })[0]);
+    await waitFor(() => expect(screen.getByTestId("dict-edit-code")).toHaveValue("daily"));
+    // 改编码 daily → day 并提交
+    fireEvent.change(screen.getByTestId("dict-edit-code"), { target: { value: "day" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    // 改码确认框：提示同步影响面（当前引用数 3）
+    await screen.findAllByText(/确认修改编码/);
+    await screen.findByText(/同步更新所有引用该编码的业务数据（当前 3 处引用）/);
+    fireEvent.click(screen.getByRole("button", { name: /确认改码/ }));
+    await waitFor(() => expect(mockedUpdate).toHaveBeenCalled());
+    const [dt, code, payload] = mockedUpdate.mock.calls[0] as [string, string, { code?: string }];
+    expect(dt).toBe("granularity");
+    expect(code).toBe("daily");
+    expect(payload.code).toBe("day");
+  });
 });

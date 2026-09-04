@@ -3122,6 +3122,8 @@ export interface DictItemCreateRequest {
 }
 
 export interface DictItemUpdateRequest {
+  /** 新编码；与当前编码不同时后端改码并同步全部引用（ENUM 绑定类型限值域内取值） */
+  code?: string;
   label?: string;
   sort_order?: number;
   description?: string | null;
