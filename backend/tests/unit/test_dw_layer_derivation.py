@@ -63,3 +63,57 @@ def test_plain_table_name_with_layer_prefix():
 def test_no_layer_returns_none():
     assert derive_dw_layer_from_catalog_name("gdc.some_table", SEED) is None
     assert derive_dw_layer_from_catalog_name("airflow.abc", SEED) is None
+
+
+# ---- 方案 B：整库名/库前缀形态（多段 code，如 wedw_dwd/wedw_ods）----
+
+#: 整库名形态字典（用户实际配置：wedw_ods/wedw_dwd + 标准码 DWS/ADS/DM）
+FULL_DB_CODES = {"wedw_ods", "wedw_dwd", "dws", "ads", "dm"}
+
+
+def test_full_db_name_code_matches_same_db():
+    # 字典 code 配整库名 wedw_dwd → 库名 wedw_dwd 直接命中（此前拆段找 dwd 而 miss）
+    assert (
+        derive_dw_layer_from_catalog_name("wedw_dwd.dw_order_df", FULL_DB_CODES)
+        == "wedw_dwd"
+    )
+    assert (
+        derive_dw_layer_from_catalog_name("wedw_ods.ods_his", FULL_DB_CODES)
+        == "wedw_ods"
+    )
+
+
+def test_full_db_code_with_db_suffix():
+    # 库名以整库名 code + "_" 开头（带子库后缀）同样命中
+    assert (
+        derive_dw_layer_from_catalog_name("wedw_dwd_bak.dw_order_df", FULL_DB_CODES)
+        == "wedw_dwd"
+    )
+
+
+def test_full_db_and_segment_codes_coexist():
+    # 整库名与分段码并存：整库名形态更具体优先（wedw_dwd.dw_x → wedw_dwd 而非 dwd）
+    mixed = FULL_DB_CODES | {"dwd", "ods"}
+    assert (
+        derive_dw_layer_from_catalog_name("wedw_dwd.dw_order_df", mixed) == "wedw_dwd"
+    )
+    # 字典无整库名 wedw_dws 时，拆段命中分段码 dws
+    assert (
+        derive_dw_layer_from_catalog_name("wedw_dws.dw_ord_df", mixed) == "dws"
+    )
+    # 纯分段码形态库（无整库名前缀）仍走拆段
+    assert derive_dw_layer_from_catalog_name("dwd.plain_table", mixed) == "dwd"
+
+
+def test_full_db_case_insensitive():
+    assert (
+        derive_dw_layer_from_catalog_name("WEDW_DWD.DW_ORDER_DF", {"WEDW_DWD"})
+        == "wedw_dwd"
+    )
+
+
+def test_full_db_unrelated_db_returns_none():
+    # 整库名 code 只匹配自身库名/前缀，不误伤其它库
+    assert (
+        derive_dw_layer_from_catalog_name("other_db.some_table", FULL_DB_CODES) is None
+    )

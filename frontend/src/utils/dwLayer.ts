@@ -37,15 +37,19 @@ export function dwLayerStroke(layer: string): string {
 
 /**
  * 按 ``库.表`` 名派生数仓分层码（小写），命中字典 active 码才返回（与后端
- * ``derive_dw_layer_from_catalog_name`` 同规则，保证治理中心与主图口径一致）：
+ * ``derive_dw_layer_from_catalog_name`` 同规则，保证治理中心与主图口径一致，
+ * **同时支持整库名与分段码两种字典形态**）：
  *
- * 1. 库名（``.`` 前段）按 ``_`` 拆段，**从右往左**找首个命中分层码的段
- *    （``wedw_dwd.xxx`` → ``dwd``；``wedw_dim.dim_x`` 且字典含 ``dim`` → ``dim``）。
- * 2. 库名未命中时回退表名前缀（``ods_``/``dwd.`` 等）。
- * 3. 都不命中返回 ``null``（保持「未分层表」语义）。
+ * 1. 整库名/库前缀匹配：字典中含 ``_`` 的多段 code（如 ``wedw_dwd``/``wedw_ods``），
+ *    最长优先；库名等于该 code 或以 code+``_`` 开头（带子库后缀）即命中。
+ * 2. 分段码匹配：库名（``.`` 前段）按 ``_`` 拆段，**从右往左**找首个命中分段码的段
+ *    （``wedw_dwd.xxx`` 且字典含 ``dwd`` → ``dwd``；``wedw_dim.dim_x`` 且含 ``dim`` → ``dim``）。
+ * 3. 库名未命中时回退表名前缀（``ods_``/``dwd.`` 等）。
+ * 4. 都不命中返回 ``null``（保持「未分层表」语义）。
  *
  * ``activeCodes`` 为 dw_layer 字典的 active 编码集合（小写，可含管理员补录的
- * dim/mid/st/tmp 等扩展层）；传入空集/未提供时返回 ``null``（调用方归未分层）。
+ * dim/mid/st/tmp 等扩展层，也可含整库名形态如 wedw_dwd）；传入空集/未提供时返回
+ * ``null``（调用方归未分层）。
  */
 export function deriveDwLayerFromCatalogName(
   entityName: string,
@@ -60,9 +64,18 @@ export function deriveDwLayerFromCatalogName(
   const full = entityName.trim().toLowerCase();
   if (!full) return null;
   const [dbPart, tablePart] = full.split(".");
+  // 1. 整库名/库前缀匹配（多段 code 优先，防短码如环境前缀提前命中）
+  const multi = [...codes]
+    .filter((c) => c.includes("_"))
+    .sort((a, b) => b.length - a.length);
+  for (const code of multi) {
+    if (dbPart === code || dbPart.startsWith(`${code}_`)) return code;
+  }
+  // 2. 分段码：库名拆段从右往左
   for (const seg of [...dbPart.split("_").filter(Boolean)].reverse()) {
     if (codes.has(seg)) return seg;
   }
+  // 3. 回退表名前缀
   if (tablePart) {
     for (const code of codes) {
       if (tablePart.startsWith(`${code}_`) || tablePart.startsWith(`${code}.`)) return code;
