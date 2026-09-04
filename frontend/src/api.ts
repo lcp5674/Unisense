@@ -6076,3 +6076,18 @@ export async function resolveDpSyncLlmDisabled(): Promise<{
     { method: "POST" }
   );
 }
+
+/** LLM 恢复/修复后重试「LLM 类型错误」待抉择单（单条传 ticket_ids，批量可不传） */
+export async function retryDpSyncLlm(body?: {
+  ticket_ids?: number[];
+}): Promise<{
+  auto_resolved: number;
+  refreshed: number;
+  kept: number;
+  failed: number;
+}> {
+  return request<{ auto_resolved: number; refreshed: number; kept: number; failed: number }>(
+    `${API_BASE}/lineage/dp-sync/tickets/retry-llm`,
+    { method: "POST", body: JSON.stringify(body ?? {}) }
+  );
+}

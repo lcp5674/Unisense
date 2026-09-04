@@ -366,3 +366,102 @@ async def test_resolve_llm_disabled_batch() -> None:
     svc.resolve_ticket.assert_awaited_once_with(
         ticket_id=1, resolution="accept_sqlglot", resolved_by=3
     )
+
+
+# ==================== LLM 重试（retry_llm_tickets） ====================
+
+
+def _retry_svc(ticket: MagicMock, responses) -> DpSyncService:
+    """构造带注入 llm_chat 的 service（retry 时跳过 _build_llm_chat）。"""
+    svc = _svc(ticket)
+    svc._dp_repo.list_retryable_llm_tickets = AsyncMock(return_value=[ticket])
+    svc._dp_repo.update_ticket_llm = AsyncMock(return_value=ticket)
+    if isinstance(responses, list):
+        svc._llm_chat = AsyncMock(side_effect=responses)
+    else:
+        svc._llm_chat = AsyncMock(return_value=responses)
+    return svc
+
+
+@pytest.mark.asyncio
+async def test_retry_diverged_agree_auto_resolves() -> None:
+    """LLM 关闭期 diverged 单重试：LLM 认可 sqlglot → 自动采纳入库消解。"""
+    t = _ticket(status="diverged")
+    t.divergence_reason = "LLM 已关闭（配置），复杂节点未确认，请人工抉择"
+    svc = _retry_svc(t, {"content": '{"agree": true, "reason": "ok"}'})
+    counters = await svc.retry_llm_tickets(resolved_by=3)
+    assert counters["auto_resolved"] == 1
+    assert counters["failed"] == 0
+    svc._dp_repo.resolve_ticket.assert_awaited_once_with(
+        1, resolution="accept_sqlglot", resolved_by=3
+    )
+    svc._dp_repo.update_ticket_llm.assert_not_awaited()
+    # 边已写入（采纳 sqlglot）
+    svc._lineage_repo.upsert_edge_with_status.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_retry_diverged_disagree_refreshes_opinion() -> None:
+    """LLM 恢复后仍不认可 sqlglot → 刷新意见保留待人工，不自动裁决。"""
+    t = _ticket(status="diverged")
+    t.divergence_reason = "LLM 确认输出异常：LLM 返回空内容"
+    content = (
+        '{"agree": false, "wrong_edges": [{"source": "wedw_ods.a", '
+        '"target": "wedw_dwd.dp_out"}], "reason": "目标表实为中间层"}'
+    )
+    svc = _retry_svc(t, {"content": content})
+    counters = await svc.retry_llm_tickets(resolved_by=3)
+    assert counters["refreshed"] == 1
+    assert counters["auto_resolved"] == 0
+    svc._dp_repo.update_ticket_llm.assert_awaited_once()
+    kwargs = svc._dp_repo.update_ticket_llm.await_args.kwargs
+    assert kwargs["llm_opinion"]["agree"] is False
+    assert kwargs["divergence_reason"] == "目标表实为中间层"
+    svc._dp_repo.resolve_ticket.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retry_llm_fallback_refreshes_flow() -> None:
+    """llm_fallback 单重试：LLM 重新提炼成功 → 刷新低置信参考意见。"""
+    t = _ticket(status="llm_fallback")
+    t.llm_opinion = {"target_tables": [], "note": "旧兜底"}
+    content = (
+        '{"target_tables": ["wedw_dwd.dp_out"], "source_tables": ["wedw_ods.a"], '
+        '"field_mappings": [], "note": "新兜底"}'
+    )
+    svc = _retry_svc(t, {"content": content})
+    counters = await svc.retry_llm_tickets(resolved_by=3)
+    assert counters["refreshed"] == 1
+    svc._dp_repo.update_ticket_llm.assert_awaited_once()
+    kwargs = svc._dp_repo.update_ticket_llm.await_args.kwargs
+    assert kwargs["status"] == "llm_fallback"
+    assert kwargs["llm_opinion"]["target_tables"] == ["wedw_dwd.dp_out"]
+    svc._dp_repo.resolve_ticket.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retry_unparseable_still_fails_kept() -> None:
+    """unparseable 单重试后 LLM 仍无法提炼 → 保留待人工。"""
+    t = _ticket(status="unparseable")
+    t.divergence_reason = "LLM 兜底输出异常：LLM 返回空内容"
+    content = '{"target_tables": [], "source_tables": [], "note": "还是不行"}'
+    svc = _retry_svc(t, {"content": content})
+    counters = await svc.retry_llm_tickets(resolved_by=3)
+    assert counters["kept"] == 1
+    assert counters["refreshed"] == 0
+    kwargs = svc._dp_repo.update_ticket_llm.await_args.kwargs
+    assert kwargs["status"] == "unparseable"
+    assert kwargs["llm_opinion"]["note"] == "还是不行"
+
+
+@pytest.mark.asyncio
+async def test_retry_llm_error_counts_failed_keeps_open() -> None:
+    """LLM 仍返回空内容（协议错误）→ 计 failed、单保持未裁决。"""
+    t = _ticket(status="diverged")
+    t.divergence_reason = "LLM 已关闭（配置），复杂节点未确认，请人工抉择"
+    svc = _retry_svc(t, {"content": ""})  # 空 content → parse 抛 DpSyncLlmError
+    counters = await svc.retry_llm_tickets(resolved_by=3)
+    assert counters["failed"] == 1
+    assert counters["auto_resolved"] == 0
+    svc._dp_repo.resolve_ticket.assert_not_awaited()
+    svc._dp_repo.update_ticket_llm.assert_not_awaited()

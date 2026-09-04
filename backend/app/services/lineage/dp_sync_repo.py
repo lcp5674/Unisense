@@ -15,7 +15,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 
 from app.db.mysql import AsyncSession
 from app.models.data_source import DBCatalog
@@ -375,6 +375,56 @@ class DpLineageRepository:
             )
         )
         return (await self._db.execute(stmt)).scalar_one_or_none()
+
+    async def list_retryable_llm_tickets(
+        self, *, limit: int = 500, ticket_ids: list[int] | None = None
+    ) -> list[DpResolutionTicket]:
+        """筛选「可 LLM 重试」的未裁决单：LLM 当时失败/未跑/兜底低置信。
+
+        范围（resolution is None）：
+          - status == llm_fallback（LLM 兜底低置信参考，可重试刷新意见）
+          - diverged/unparseable 且原因标记 LLM 关闭或输出异常（LLM 当时未给出
+            真实意见，恢复后重跑 confirm/fallback 才有意义）。
+        """
+        stmt = select(DpResolutionTicket).where(
+            DpResolutionTicket.deleted_at.is_(None),
+            DpResolutionTicket.resolution.is_(None),
+            or_(
+                DpResolutionTicket.status == "llm_fallback",
+                and_(
+                    DpResolutionTicket.status.in_(("diverged", "unparseable")),
+                    or_(
+                        DpResolutionTicket.divergence_reason.like("LLM 已关闭%"),
+                        DpResolutionTicket.divergence_reason.like("LLM 确认输出异常%"),
+                        DpResolutionTicket.divergence_reason.like("LLM 兜底输出异常%"),
+                    ),
+                ),
+            ),
+        )
+        if ticket_ids:
+            stmt = stmt.where(DpResolutionTicket.id.in_(ticket_ids))
+        stmt = stmt.order_by(DpResolutionTicket.id.asc()).limit(limit)
+        return list((await self._db.execute(stmt)).scalars().all())
+
+    async def update_ticket_llm(
+        self,
+        ticket_id: int,
+        *,
+        status: str | None = None,
+        llm_opinion: dict | None = None,
+        divergence_reason: str | None = None,
+    ) -> DpResolutionTicket | None:
+        """LLM 重试后刷新单的意见/原因/状态（不裁决、不动 resolution/resolved_*）。"""
+        ticket = await self.get_ticket(ticket_id)
+        if ticket is None:
+            return None
+        if status is not None:
+            ticket.status = status
+        if llm_opinion is not None:
+            ticket.llm_opinion = llm_opinion
+        if divergence_reason is not None:
+            ticket.divergence_reason = divergence_reason
+        return ticket
 
     async def list_tickets(
         self,

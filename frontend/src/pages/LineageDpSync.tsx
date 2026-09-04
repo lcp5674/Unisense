@@ -39,6 +39,7 @@ import {
   resetDpSyncWatermark,
   resolveDpTicket,
   resolveDpSyncLlmDisabled,
+  retryDpSyncLlm,
   saveDpSyncConfig,
   scanDpSyncNow,
 } from "../api";
@@ -70,6 +71,20 @@ const RESOLUTION_LABEL: Record<string, string> = {
   manual: "手动修正",
   ignore: "忽略节点",
 };
+
+/** 是否为「LLM 类型错误」可重试单（与后端 list_retryable_llm_tickets 同语义）：
+ *  llm_fallback 全部；diverged/unparseable 且原因标记 LLM 已关闭/确认输出异常/
+ *  兜底输出异常——LLM 当时未给出真实意见，恢复后可重跑。 */
+function isLlmRetryable(t: DpTicket): boolean {
+  if (t.status === "llm_fallback") return true;
+  if (t.status !== "diverged" && t.status !== "unparseable") return false;
+  const r = t.divergence_reason || "";
+  return (
+    r.startsWith("LLM 已关闭") ||
+    r.startsWith("LLM 确认输出异常") ||
+    r.startsWith("LLM 兜底输出异常")
+  );
+}
 
 function fmt(v?: string | null): string {
   // 后端以 UTC 落库、MySQL 返回无偏移 naive 串——必须经 parseBackendTime 按 UTC
@@ -677,6 +692,31 @@ function TicketsTab() {
     });
   };
 
+  const doRetryLlm = async (ticketIds?: number[]) => {
+    const scopeLabel = ticketIds
+      ? `待抉择单 #${ticketIds.join(", ")}`
+      : "全部 LLM 失败/兜底低置信的待抉择单";
+    Modal.confirm({
+      title: ticketIds ? "LLM 重试（单条）" : "LLM 重试（批量）",
+      content: `将重新调用本地 LLM 解析「${scopeLabel}」。分歧单 LLM 认可 sqlglot 结果将自动采纳消解；不认可则刷新 LLM 意见待人工；兜底单刷新参考意见。确认重试？`,
+      onOk: async () => {
+        setActing(true);
+        try {
+          const r = await retryDpSyncLlm(ticketIds ? { ticket_ids: ticketIds } : {});
+          message.success(
+            `LLM 重试完成：自动采纳 ${r.auto_resolved}、刷新意见 ${r.refreshed}、保留 ${r.kept}、失败 ${r.failed}`
+          );
+          setDetail(null);
+          setReloadTick((x) => x + 1);
+        } catch {
+          message.error("LLM 重试失败");
+        } finally {
+          setActing(false);
+        }
+      },
+    });
+  };
+
   const columns: ColumnsType<DpTicket> = [
     {
       title: "任务",
@@ -718,6 +758,14 @@ function TicketsTab() {
       title="待抉择（LLM 分歧 / 兜底 / 无法解析）"
       extra={
         <Space wrap>
+          <Button
+            type="primary"
+            ghost
+            onClick={() => void doRetryLlm()}
+            loading={acting}
+          >
+            LLM 重试
+          </Button>
           <Button onClick={() => void doResolveLlmDisabled()} loading={acting}>
             处置 LLM 关闭期单
           </Button>
@@ -774,6 +822,15 @@ function TicketsTab() {
         extra={
           detail && detail.status !== "resolved" && detail.status !== "ignored" ? (
             <Space>
+              {isLlmRetryable(detail) && (
+                <Button
+                  type="primary"
+                  onClick={() => void doRetryLlm([detail.id])}
+                  loading={acting}
+                >
+                  LLM 重试
+                </Button>
+              )}
               <Button
                 onClick={() => void doResolve(detail.id, "accept_sqlglot")}
                 loading={acting}

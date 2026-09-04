@@ -563,6 +563,44 @@ async def resolve_llm_disabled(
 
 
 @router.post(
+    "/tickets/retry-llm", response_model=ApiResponse, dependencies=_ADMIN_DEPS
+)
+async def retry_llm_tickets(
+    user: CurrentUser,
+    db=Depends(get_db_session),
+    request: Request = None,
+    trace_id: str = Depends(get_trace_id),
+    payload: dict = Body(default={}),
+):
+    """LLM 恢复/修复后重试「LLM 类型错误」待抉择单（单条或批量）。
+
+    body: ``{"ticket_ids": [1,2] | null}``——传 id 列表则仅重试指定单；
+    不传/空则批量重试全部未裁决且 LLM 失败/兜底低置信的单。
+    处置：diverged 单重跑 LLM confirm（agree → 自动采纳 sqlglot 消解；
+    disagree → 刷新意见保留）；llm_fallback/unparseable 单重跑 LLM 兜底
+    （可提炼 → 刷新为 llm_fallback 参考；仍失败 → 保留 unparseable）。
+    返回 ``auto_resolved/refreshed/kept/failed`` 计数。
+    """
+    ticket_ids = payload.get("ticket_ids") or None
+    svc = DpSyncService(db)
+    counters = await svc.retry_llm_tickets(
+        ticket_ids=ticket_ids, resolved_by=user.id
+    )
+    await write_audit(
+        db,
+        actor_id=user.id,
+        action="dp_sync.retry_llm",
+        entity_type="dp_sync_ticket",
+        entity_id="batch" if not ticket_ids else ",".join(str(i) for i in ticket_ids),
+        detail={"ticket_ids": ticket_ids, **counters},
+        ip=client_ip(request),
+        trace_id=trace_id,
+    )
+    await db.commit()
+    return ok(data=counters)
+
+
+@router.post(
     "/scan/{task_id}/cancel", response_model=ApiResponse, dependencies=_ADMIN_DEPS
 )
 async def cancel_scan(
