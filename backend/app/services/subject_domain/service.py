@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessError, ConflictError, NotFoundError
@@ -264,6 +265,29 @@ class SubjectDomainService:
         domain = await self.get_domain(code)
         if user is not None:
             await self._assert_domain_admin_scope(code, user)
+        # 编码变更守卫：编码是全局标识符（指标/维度/挂载/模板/术语/度量/数据源/
+        # 冲突/授权/接入方/评审指派/用户权限域均按 code 引用），改名级联影响全系统，
+        # 仅平台管理员可执行；服务端在同一事务内级联更新全部引用。
+        new_code = (data.code or "").strip() or None
+        code_changed = new_code is not None and new_code != domain.code
+        old_code = domain.code
+        if data.code is not None:
+            if not code_changed:
+                pass  # 编码未变化：忽略（幂等）
+            elif user is None or "platform_admin" not in user.roles_all():
+                raise BusinessError(
+                    "域编码仅平台管理员可修改（编码被全部业务资产与用户权限域引用，"
+                    "修改将级联更新所有引用记录）",
+                    error_code="FORBIDDEN_CODE_RENAME",
+                )
+            else:
+                if await self._repo.code_exists(new_code):
+                    raise ConflictError(
+                        f"域编码已存在: {new_code}", error_code="DUPLICATE_CODE"
+                    )
+                await self._rename_domain_references(old_code, new_code)
+                domain.code = new_code
+                logger.info("domain_code_renamed", old_code=old_code, new_code=new_code)
         if data.name is not None:
             # 改名时检测同父域同名（排除自身；名称未实际变化则不查）
             if data.name.strip() != (domain.name or "").strip() and await self._repo.name_exists(
@@ -285,8 +309,77 @@ class SubjectDomainService:
             await _validate_defaults_json(self._db, data.defaults_json)
             domain.defaults_json = data.defaults_json
         domain = await self._repo.update(domain)
-        logger.info("domain_updated", code=code)
+        logger.info("domain_updated", code=domain.code, renamed_from=code if code_changed else None)
         return domain
+
+    async def _rename_domain_references(self, old_code: str, new_code: str) -> int:
+        """域编码变更级联：同一事务内更新全部按 code 引用该域的记录。
+
+        直接列（Core 批量 UPDATE）：指标/域评审指派/维度/挂载/模板/逻辑度量/
+        术语/数据源/冲突/授权/接入方作用域/主数据评审域指派/用户主域；
+        JSON 列（Python 改写）：``user.domains`` 权限域数组（含去重合并）。
+
+        Returns:
+            受影响记录总数（不含 subject_domain 自身）。
+        """
+        from app.models.conflict import Conflict
+        from app.models.consume import ApiClient
+        from app.models.data_source import DataSource
+        from app.models.dimension import Dimension
+        from app.models.governance import Grant
+        from app.models.measure_catalog import MeasureCatalog
+        from app.models.metric import Metric
+        from app.models.metric_mount import MetricMount
+        from app.models.metric_template import MetricTemplate
+        from app.models.term import Term
+        from app.models.user import User
+
+        #: (模型, 列名) —— 存储域 code 的全部直接引用列。
+        #: ``reviewer_domain`` 来自 ReviewFieldsMixin（dimension/term/measure_catalog
+        #: 三表共用，域评审组指派）与 Metric 自有列（指标域评审指派）。
+        direct_refs: list[tuple[type[Any], str]] = [
+            (Metric, "domain"),
+            (Metric, "reviewer_domain"),
+            (Dimension, "domain"),
+            (Dimension, "reviewer_domain"),
+            (MetricMount, "domain"),
+            (MetricTemplate, "domain"),
+            (MeasureCatalog, "domain"),
+            (MeasureCatalog, "reviewer_domain"),
+            (Term, "domain"),
+            (Term, "reviewer_domain"),
+            (DataSource, "domain"),
+            (Conflict, "domain"),
+            (Grant, "domain"),
+            (ApiClient, "scope_domain"),
+            (User, "domain"),
+        ]
+
+        affected = 0
+        for model_cls, col in direct_refs:
+            column = getattr(model_cls, col)
+            result = await self._db.execute(
+                update(model_cls).where(column == old_code).values(**{col: new_code})
+            )
+            affected += result.rowcount or 0
+
+        # user.domains JSON 数组：查含旧域的行，Python 改写（并集去重语义保持）
+        users = (
+            (
+                await self._db.execute(
+                    select(User).where(
+                        func.json_contains(User.domains, f'"{old_code}"')
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for u in users:
+            domains = list(u.domains or [])
+            u.domains = sorted({new_code if d == old_code else d for d in domains})
+            affected += 1
+        return affected
 
     async def deactivate_domain(self, code: str, user: Any | None = None) -> SubjectDomain:
         domain = await self.get_domain(code)

@@ -353,6 +353,91 @@ class TestUpdateDomain:
         assert domain.sort_order == 9
 
 
+class TestUpdateDomainCodeRename:
+    """域编码变更：仅平台管理员，服务端同事务级联更新全部引用。"""
+
+    @staticmethod
+    def _make_svc(svc: SubjectDomainService) -> None:
+        """统一 mock：域存在、新编码不冲突、repo.update 透传。"""
+        domain = MagicMock()
+        domain.code = "sales"
+        domain.id = 1
+        domain.name = "销售"
+        domain.parent_id = None
+        svc._repo.get_by_code = AsyncMock(return_value=domain)
+        svc._repo.code_exists = AsyncMock(return_value=False)
+        svc._repo.name_exists = AsyncMock(return_value=False)
+        svc._repo.update = AsyncMock(return_value=domain)
+        return domain
+
+    @staticmethod
+    def _admin(roles: list[str]) -> MagicMock:
+        user = MagicMock()
+        user.roles_all.return_value = roles
+        return user
+
+    async def test_rename_requires_platform_admin(self, svc) -> None:
+        """域管理员/普通调用不可改编码（编码被全系统引用）。"""
+        self._make_svc(svc)
+        from app.services.subject_domain.schemas import SubjectDomainUpdate
+
+        for roles in (["domain_admin"], ["metric_owner"]):
+            with pytest.raises(BusinessError) as exc:
+                await svc.update_domain(
+                    "sales", SubjectDomainUpdate(code="sales_new"), user=self._admin(roles)
+                )
+            assert exc.value.error_code == "FORBIDDEN_CODE_RENAME"
+
+    async def test_rename_conflict_rejected(self, svc) -> None:
+        """新编码已被占用时抛 ConflictError。"""
+        self._make_svc(svc)
+        svc._repo.code_exists = AsyncMock(return_value=True)
+        from app.core.exceptions import ConflictError
+        from app.services.subject_domain.schemas import SubjectDomainUpdate
+
+        with pytest.raises(ConflictError) as exc:
+            await svc.update_domain(
+                "sales", SubjectDomainUpdate(code="taken"), user=self._admin(["platform_admin"])
+            )
+        assert exc.value.error_code == "DUPLICATE_CODE"
+
+    async def test_rename_cascades_references(self, svc) -> None:
+        """平台管理员改编码：同事务批量 UPDATE 直接引用列 + 改写 user.domains JSON。"""
+        domain = self._make_svc(svc)
+        exec_result = MagicMock()
+        exec_result.rowcount = 3
+        user_row = MagicMock()
+        user_row.domain = "sales"
+        user_row.domains = ["sales", "ops", "sales"]
+        exec_result.scalars.return_value.all.return_value = [user_row]
+        svc._db.execute = AsyncMock(return_value=exec_result)
+
+        from app.services.subject_domain.schemas import SubjectDomainUpdate
+
+        result = await svc.update_domain(
+            "sales", SubjectDomainUpdate(code="sales_v2"), user=self._admin(["platform_admin"])
+        )
+        assert result.code == "sales_v2"
+        assert domain.code == "sales_v2"
+        # 16 次 execute：15 个直接引用列（含 user.domain 主域）+ 1 次 user.domains JSON 查询
+        assert svc._db.execute.await_count == 16
+        # JSON 权限域数组改写：旧域替换 + 去重、其余保留
+        assert user_row.domains == ["ops", "sales_v2"]
+
+    async def test_rename_unchanged_is_noop(self, svc) -> None:
+        """编码未变化（幂等提交）：不触发级联、不校验冲突。"""
+        self._make_svc(svc)
+        svc._db.execute = AsyncMock()
+
+        from app.services.subject_domain.schemas import SubjectDomainUpdate
+
+        await svc.update_domain(
+            "sales", SubjectDomainUpdate(code="sales"), user=self._admin(["platform_admin"])
+        )
+        svc._db.execute.assert_not_awaited()
+        svc._repo.code_exists.assert_not_awaited()
+
+
 class TestDuplicateName:
     """同父域下名称唯一：创建/改名时检测同名冲突。"""
 

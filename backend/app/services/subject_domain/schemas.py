@@ -45,13 +45,29 @@ class SubjectDomainCreate(BaseModel):
 
 
 class SubjectDomainUpdate(BaseModel):
-    """更新主题域请求。"""
+    """更新主题域请求。
 
+    ``code`` 可选：修改域编码（仅平台管理员，服务端级联更新全部引用——
+    指标/维度/挂载/模板/逻辑度量/术语/数据源/冲突/授权/接入方/评审指派/用户权限域）。
+    """
+
+    code: str | None = Field(
+        None, max_length=64, description="域编码（可选，变更将级联更新全部引用）"
+    )
     name: str | None = Field(None, max_length=128)
     sort_order: int | None = None
     description: str | None = None
     owner_id: int | None = None
     defaults_json: dict[str, Any] | None = None
+
+    @field_validator("code")
+    @classmethod
+    def validate_code(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not _DOMAIN_CODE_PATTERN.match(v):
+            raise ValueError("域编码须以小写字母开头，仅含小写字母、数字和下划线")
+        return v
 
 
 class SubjectDomainDefaultsUpdate(BaseModel):

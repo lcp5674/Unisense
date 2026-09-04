@@ -154,7 +154,10 @@ function treeDataToNodes(nodes: SubjectDomainTreeNode[], onAddChild: (n: Subject
 
 export function SubjectDomain() {
   const { message, modal } = AntApp.useApp();
-  const { can } = usePermission();
+  const { can, snapshot } = usePermission();
+  // 域编码是全局标识符（被全部业务资产与用户权限域引用），改编码仅平台管理员可执行
+  const isPlatformAdmin =
+    snapshot?.roles?.includes("platform_admin") ?? snapshot?.role === "platform_admin";
   const navigate = useNavigate();
   const [treeData, setTreeData] = useState<SubjectDomainTreeNode[]>([]);
   // R9: 主题域树搜索（名称过滤，命中的祖先路径自动展开）
@@ -222,6 +225,7 @@ export function SubjectDomain() {
   // 编码自动生成预览：监听显示名 + 上级域
   const watchName = Form.useWatch("name", createForm);
   const watchParentId = Form.useWatch("parent_id", createForm);
+  const watchCode = Form.useWatch("code", createForm);
   // 搜索过滤：保留名称命中的节点及其祖先链（保证可导航到命中节点），返回原始节点树
   function filterDomainNodes(nodes: SubjectDomainTreeNode[], q: string): SubjectDomainTreeNode[] {
     const lower = q.toLowerCase();
@@ -247,6 +251,7 @@ export function SubjectDomain() {
 
   // 编辑弹窗同名冲突检测（排除自身 selectedCode）
   const watchEditName = Form.useWatch("name", editForm);
+  const watchEditCode = Form.useWatch("code", editForm);
   const editDup = watchEditName?.trim()
     ? findDuplicateNode(treeData, watchEditName, detail?.parent_id ?? null, selectedCode)
     : null;
@@ -288,7 +293,7 @@ export function SubjectDomain() {
   }
 
   // 创建域
-  async function handleCreate(values: { name: string; parent_id?: number | null; sort_order?: number; description?: string }) {
+  async function handleCreate(values: { code?: string; name: string; parent_id?: number | null; sort_order?: number; description?: string }) {
     // 同名冲突：提交前拦截，避免依赖后端 409 往返
     if (createDup) {
       message.warning(createDupWarning!);
@@ -297,8 +302,13 @@ export function SubjectDomain() {
     if (saving) return;
     setSaving(true);
     try {
-      // code 不传：由后端按显示名自动生成；owner_id 由后端以创建人认证身份覆盖（P2-3 修复硬编码）
-      await createDomain({ ...values, parent_id: values.parent_id ?? null, sort_order: values.sort_order ?? 0 });
+      // code 手动指定或留空（后端按显示名自动生成）；owner_id 由后端以创建人认证身份覆盖（P2-3 修复硬编码）
+      await createDomain({
+        ...values,
+        code: values.code?.trim() || undefined,
+        parent_id: values.parent_id ?? null,
+        sort_order: values.sort_order ?? 0,
+      });
       message.success("创建成功");
       setCreateOpen(false);
       createForm.resetFields();
@@ -324,7 +334,7 @@ export function SubjectDomain() {
   }
 
   // 编辑域
-  async function handleEdit(values: { name?: string; sort_order?: number; description?: string }) {
+  async function handleEdit(values: { code?: string; name?: string; sort_order?: number; description?: string }) {
     if (!selectedCode) return;
     // 同名冲突：提交前拦截
     if (editDup) {
@@ -334,11 +344,18 @@ export function SubjectDomain() {
     if (saving) return;
     setSaving(true);
     try {
-      await updateDomain(selectedCode, values);
-      message.success("更新成功");
+      const newCode = values.code?.trim();
+      const renamed = !!newCode && newCode !== selectedCode;
+      // code 仅在变更时携带（后端级联更新全部引用并留审计）
+      await updateDomain(selectedCode, {
+        ...values,
+        code: renamed ? newCode : undefined,
+      });
+      message.success(renamed ? `编码已更新为 ${newCode}（全部引用已同步）` : "更新成功");
       setEditOpen(false);
       editForm.resetFields();
-      loadDetail(selectedCode);
+      if (renamed && newCode) setSelectedCode(newCode);
+      else loadDetail(selectedCode);
       loadTree();
     } catch (err: any) {
       message.error(err?.message || "更新失败");
@@ -474,7 +491,7 @@ export function SubjectDomain() {
                   <Button icon={<SettingOutlined />} onClick={() => { defaultsForm.setFieldsValue(defaults); setDefaultsOpen(true); }}>默认值</Button>
                 )}
                 {can("domain:create") && (
-                  <Button icon={<EditOutlined />} onClick={() => { editForm.setFieldsValue({ name: detail.name, sort_order: detail.sort_order, description: detail.description }); setEditOpen(true); }}>编辑</Button>
+                  <Button icon={<EditOutlined />} onClick={() => { editForm.setFieldsValue({ code: detail.code, name: detail.name, sort_order: detail.sort_order, description: detail.description }); setEditOpen(true); }}>编辑</Button>
                 )}
                 {can("domain:create") && (
                   <Button icon={detail.status === "active" ? <StopOutlined /> : <CheckCircleOutlined />} onClick={handleToggle}>
@@ -538,11 +555,27 @@ export function SubjectDomain() {
             <Input placeholder="如 销售" status={createDup ? "error" : undefined} />
           </Form.Item>
           {createDupWarning && <Alert type="error" showIcon message={createDupWarning} style={{ marginBottom: 16 }} data-testid="create-dup-warning" />}
-          <Form.Item label="域编码（自动生成）" tooltip="系统根据显示名自动生成，子域自动带父域前缀，冲突时自动追加序号；提交后以后端返回为准">
-            <Space.Compact style={{ width: "100%" }}>
-              <Input value={codePreview} disabled data-testid="domain-code-preview" />
-              <Tag color="blue" style={{ lineHeight: "30px", margin: 0 }}>自动生成</Tag>
-            </Space.Compact>
+          <Form.Item
+            name="code"
+            label="域编码"
+            tooltip="可手动指定；留空则由系统按显示名自动生成（子域自动带父域前缀，冲突时自动追加序号）"
+            rules={[
+              {
+                pattern: /^[a-z][a-z0-9_]*$/,
+                message: "编码须以小写字母开头，仅含小写字母、数字和下划线",
+              },
+            ]}
+            extra={
+              watchCode?.trim()
+                ? "编码已手动指定，将以输入值为准"
+                : `留空自动生成${codePreview ? `（预览：${codePreview}）` : ""}`
+            }
+          >
+            <Input
+              placeholder="留空则按显示名自动生成"
+              maxLength={64}
+              data-testid="domain-code-input"
+            />
           </Form.Item>
           <Form.Item name="sort_order" label="排序" initialValue={0}>
             <InputNumber min={0} />
@@ -556,6 +589,30 @@ export function SubjectDomain() {
       {/* 编辑弹窗 */}
       <Modal title="编辑主题域" open={editOpen} onCancel={() => setEditOpen(false)} onOk={() => editForm.submit()} confirmLoading={saving}>
         <Form form={editForm} onFinish={handleEdit} layout="vertical" scrollToFirstError>
+          <Form.Item
+            name="code"
+            label="域编码"
+            tooltip={isPlatformAdmin ? "域编码是全局标识符，修改后将级联更新该域下指标/维度/挂载/模板/逻辑度量/术语/数据源/授权/接入方与用户权限域等全部引用" : "域编码仅平台管理员可修改"}
+            rules={[
+              { required: true, message: "请输入域编码" },
+              {
+                pattern: /^[a-z][a-z0-9_]*$/,
+                message: "编码须以小写字母开头，仅含小写字母、数字和下划线",
+              },
+            ]}
+          >
+            <Input maxLength={64} disabled={!isPlatformAdmin} data-testid="edit-domain-code" />
+          </Form.Item>
+          {isPlatformAdmin && watchEditCode?.trim() && watchEditCode.trim() !== selectedCode && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="修改域编码将级联更新全部引用"
+              description={`该域下指标、维度、术语、挂载、模板、数据源、冲突/授权记录及用户权限域中的「${selectedCode}」将同步更新为「${watchEditCode.trim()}」。此操作会写入审计日志。`}
+              data-testid="code-rename-warning"
+            />
+          )}
           <Form.Item name="name" label="显示名" rules={[{ required: true }]}>
             <Input status={editDup ? "error" : undefined} />
           </Form.Item>

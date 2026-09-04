@@ -18,6 +18,27 @@ vi.mock("../api", () => ({
   listDictItems: vi.fn(),
 }));
 
+// 可变角色快照（默认 platform_admin——保持既有 can() fail-open 等效语义）
+let mockPermRole = "platform_admin";
+vi.mock("../hooks/usePermission", () => ({
+  usePermission: () => ({
+    can: (perm: string) =>
+      mockPermRole === "platform_admin" || mockPermRole === "domain_admin",
+    canAny: () => true,
+    canAll: () => true,
+    snapshot: {
+      role: mockPermRole,
+      roles: [mockPermRole],
+      user_id: 1,
+      ui_actions: [],
+      home_domain: null,
+    },
+    loading: false,
+    error: false,
+    refresh: async () => undefined,
+  }),
+}));
+
 import { listDomainTree, createDomain, getDomain, getDomainDefaults, updateDomain, listDictItems, updateDomainDefaults } from "../api";
 
 const mockedList = vi.mocked(listDomainTree);
@@ -79,6 +100,7 @@ describe("previewDomainCode", () => {
 describe("SubjectDomain 页面", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockPermRole = "platform_admin";
     mockedList.mockResolvedValue(TREE);
     mockedCreate.mockResolvedValue({ id: 4, code: "risk", name: "风控", parent_id: null, level: 1, path: "4", sort_order: 0, status: "active", defaults_json: {}, description: null, owner_id: 1, metric_count: 0, created_at: "", updated_at: "" });
     mockedGet.mockResolvedValue({ id: 1, code: "sales", name: "销售", parent_id: null, level: 1, path: "1", sort_order: 0, status: "active", defaults_json: {}, description: null, owner_id: 1, metric_count: 3, created_at: "", updated_at: "" });
@@ -98,25 +120,28 @@ describe("SubjectDomain 页面", () => {
     expect(screen.getByLabelText("新建子域-订单")).toBeTruthy();
   });
 
-  it("新建弹窗：编码预览随显示名实时变化（空名兜底 domain，中文转英文）", async () => {
+  it("新建弹窗：编码可手动输入，留空时 extra 显示自动生成预览（随显示名实时变化）", async () => {
     renderPage();
     await screen.findByText("销售");
     fireEvent.click(screen.getAllByText("新建根域")[0]);
 
     const input = await screen.findByPlaceholderText("如 销售");
-    const preview = screen.getByTestId("domain-code-preview") as HTMLInputElement;
-    // 初始为空 → domain
-    expect(preview.value).toBe("domain");
+    // 编码输入框可编辑（testid: domain-code-input）
+    const codeInput = screen.getByTestId("domain-code-input") as HTMLInputElement;
+    expect(codeInput.disabled).toBe(false);
+    // 初始为空 → extra 显示自动生成预览 domain
+    expect(screen.getByText(/预览：domain/)).toBeTruthy();
 
     fireEvent.change(input, { target: { value: "Risk Control" } });
-    expect((screen.getByTestId("domain-code-preview") as HTMLInputElement).value).toBe("risk_control");
+    expect(screen.getByText(/预览：risk_control/)).toBeTruthy();
 
-    // 纯中文 → 英文
-    fireEvent.change(input, { target: { value: "销售" } });
-    expect((screen.getByTestId("domain-code-preview") as HTMLInputElement).value).toBe("sales");
+    // 手动输入编码后：extra 切换为「已手动指定」
+    fireEvent.change(codeInput, { target: { value: "risk_mgmt" } });
+    expect(screen.getByText(/已手动指定/)).toBeTruthy();
+    expect(screen.queryByText(/预览：/)).toBeNull();
   });
 
-  it("新建弹窗：选父域后编码预览带父域前缀", async () => {
+  it("新建弹窗：选父域后自动生成预览带父域前缀", async () => {
     renderPage();
     await screen.findByText("销售");
     fireEvent.click(screen.getAllByText("新建根域")[0]);
@@ -128,7 +153,7 @@ describe("SubjectDomain 页面", () => {
     fireEvent.click(option);
 
     fireEvent.change(screen.getByPlaceholderText("如 销售"), { target: { value: "Order" } });
-    expect((screen.getByTestId("domain-code-preview") as HTMLInputElement).value).toBe("sales_order");
+    expect(screen.getByText(/预览：sales_order/)).toBeTruthy();
   });
 
   it("提交不传 code（由后端自动生成）", async () => {
@@ -157,7 +182,20 @@ describe("SubjectDomain 页面", () => {
     expect(await screen.findByText("在「销售」下新建子域")).toBeTruthy();
 
     fireEvent.change(screen.getByPlaceholderText("如 销售"), { target: { value: "Order" } });
-    expect((screen.getByTestId("domain-code-preview") as HTMLInputElement).value).toBe("sales_order");
+    expect(screen.getByText(/预览：sales_order/)).toBeTruthy();
+  });
+
+  it("新建弹窗：手动输入编码提交时携带 code", async () => {
+    renderPage();
+    await screen.findByText("销售");
+    fireEvent.click(screen.getAllByText("新建根域")[0]);
+
+    fireEvent.change(await screen.findByPlaceholderText("如 销售"), { target: { value: "Risk" } });
+    fireEvent.change(screen.getByTestId("domain-code-input"), { target: { value: "risk_ctrl" } });
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+
+    await waitFor(() => expect(mockedCreate).toHaveBeenCalledTimes(1));
+    expect(mockedCreate.mock.calls[0][0].code).toBe("risk_ctrl");
   });
 
   it("创建根域与已存在同名域冲突：显示警告并拦截提交", async () => {
@@ -214,6 +252,57 @@ describe("SubjectDomain 页面", () => {
     const editInput = await screen.findByDisplayValue("销售");
     fireEvent.change(editInput, { target: { value: "销售" } });
     expect(screen.queryByTestId("edit-dup-warning")).toBeNull();
+  });
+
+  it("编辑弹窗：编码字段预填且平台管理员可修改（改码显示级联警告并提交新码）", async () => {
+    mockedUpdate.mockResolvedValue({ id: 1, code: "sales_v2", name: "销售", parent_id: null, level: 1, path: "1", sort_order: 0, status: "active", defaults_json: {}, description: null, owner_id: 1, metric_count: 3, created_at: "", updated_at: "" });
+    renderPage();
+    await screen.findByText("销售");
+    fireEvent.click(screen.getByText("销售"));
+    fireEvent.click(await screen.findByText("编辑"));
+
+    // 编码预填当前值、可编辑（platform_admin）
+    const codeInput = (await screen.findByTestId("edit-domain-code")) as HTMLInputElement;
+    expect(codeInput.value).toBe("sales");
+    expect(codeInput.disabled).toBe(false);
+
+    // 改编码 → 显示级联更新警告
+    fireEvent.change(codeInput, { target: { value: "sales_v2" } });
+    expect(await screen.findByTestId("code-rename-warning")).toBeTruthy();
+
+    // 提交携带新编码
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => expect(mockedUpdate).toHaveBeenCalledTimes(1));
+    expect(mockedUpdate.mock.calls[0][0]).toBe("sales");
+    expect(mockedUpdate.mock.calls[0][1].code).toBe("sales_v2");
+    // 改码成功后：选中新编码 → 详情按新编码加载
+    await waitFor(() => expect(mockedGet).toHaveBeenCalledWith("sales_v2"));
+  });
+
+  it("编辑弹窗：编码未变化提交不携带 code（幂等）", async () => {
+    mockedUpdate.mockResolvedValue(undefined as never);
+    renderPage();
+    await screen.findByText("销售");
+    fireEvent.click(screen.getByText("销售"));
+    fireEvent.click(await screen.findByText("编辑"));
+
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => expect(mockedUpdate).toHaveBeenCalledTimes(1));
+    expect(mockedUpdate.mock.calls[0][1].code).toBeUndefined();
+  });
+
+  it("编辑弹窗：非平台管理员编码禁用且不显示级联警告", async () => {
+    mockPermRole = "domain_admin";
+    renderPage();
+    await screen.findByText("销售");
+    fireEvent.click(screen.getByText("销售"));
+    fireEvent.click(await screen.findByText("编辑"));
+
+    const codeInput = (await screen.findByTestId("edit-domain-code")) as HTMLInputElement;
+    expect(codeInput.disabled).toBe(true);
+    fireEvent.click(document.querySelector(".ant-modal .ant-btn-primary") as HTMLElement);
+    await waitFor(() => expect(mockedUpdate).toHaveBeenCalledTimes(1));
+    expect(mockedUpdate.mock.calls[0][1].code).toBeUndefined();
   });
 
   it("提供统一的返回按钮（返回上一入口）", async () => {

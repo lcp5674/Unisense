@@ -141,13 +141,17 @@ async def update_domain(
 ) -> ApiResponse[SubjectDomainResponse]:
     try:
         domain = await svc.update_domain(code, data, user=user)
+        detail: dict[str, object] = {"code": code, "name": domain.name}
+        # 编码变更留痕（old→new，审计可追溯全量级联更新）
+        if data.code is not None and data.code.strip() and data.code.strip() != code:
+            detail["code_renamed"] = {"from": code, "to": domain.code}
         await write_audit(
             svc._db,
             actor_id=user.id,
             action="subject_domain.update",
             entity_type="subject_domain",
             entity_id=code,
-            detail={"code": code, "name": domain.name},
+            detail=detail,
             ip=client_ip(request),
             trace_id=trace_id,
         )

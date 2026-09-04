@@ -3083,6 +3083,8 @@ export interface SubjectDomainCreateRequest {
 }
 
 export interface SubjectDomainUpdateRequest {
+  /** 域编码：可选，仅平台管理员可修改（后端级联更新全部引用并留审计） */
+  code?: string;
   name?: string;
   sort_order?: number;
   description?: string | null;
