@@ -898,26 +898,23 @@ function layoutConfig(
 ) {
   if (layoutMode === "hierarchy") {
     // 分层布局：血缘 DAG 自上而下（表→指标）或从左到右，节点多时比力导向清晰得多
-    // nodesep/ranksep 收紧（80/70）让 160 节点大图在 zoom 下限 0.35 下能展示更多层级，
-    // 避免被压成一条细带；间距按"节点半径+下方标签"最小需求计算留有余量避免文字压字。
-    // rankdir 由 direction 决定：TB 泳道纵向（源在上字段在下）、LR 横向（源在左字段在右）。
-    // align：TB 下 DL（深层靠左）让加工链更紧凑；LR 下 UL（dagre 默认）避免跨层折返。
-    // 折行图（字段节点 / 边表达式）：最长行字符决定行宽 → nodesep 放宽到行宽，保证同层
-    // 标签与边中点标注不横向压字；maxLines>1 时 ranksep 额外 +(行数-1)*16px，让跨层多行
-    // 标签 / 多行边表达式（完整加工方式：表达式常驻边旁）不上下压字。
+    // 紧凑度策略：
+    //  - 全景大图（节点多）：ranksep 收紧到 36、nodesep 40，让 160 节点大图高度控制在 ~400px，
+    //    fitView 缩放后能均匀铺满画布中央（不再堆底部）；文字压在最小需求以上即可。
+    //  - 折行图（字段/长标签）：ranksep/nodesep 按 maxLines/maxLineChars 放宽，跨层不压字。
     const hasLongLabel = (label?.maxLineChars ?? 0) > 20;
     const nodeGap = hasLongLabel
       ? Math.min(240, Math.max(90, (label?.maxLineChars ?? 0) * 6.2 + 40))
       : direction === "LR"
-        ? 70
-        : 80;
+        ? 50
+        : 40;
     const extraRank = hasLongLabel ? Math.max(0, (label?.maxLines ?? 1) - 1) * 16 : 0;
     return {
       type: "antv-dagre",
       rankdir: direction,
       align: direction === "LR" ? "UL" : "DL",
-      nodesep: direction === "LR" ? Math.max(70, nodeGap) : Math.max(80, nodeGap),
-      ranksep: direction === "LR" ? Math.max(80, 80 + extraRank) : Math.max(70, 70 + extraRank),
+      nodesep: direction === "LR" ? Math.max(50, nodeGap) : Math.max(40, nodeGap),
+      ranksep: direction === "LR" ? Math.max(50, 50 + extraRank) : Math.max(36, 36 + extraRank),
     };
   }
   if (layoutMode === "radial") {
@@ -1195,12 +1192,13 @@ function GraphCanvas({
     try {
       graph = new G6Graph({
         container,
-        // autoFit 仅居中不缩放，缩放由 render 完成后的手动 fitView 按节点规模自适应控制：
-        //  - 聚焦场景（?node= 跳转 1-3 节点）→ fitView overflow：不放大，按自然尺寸显示
-        //    （'view' always 会把少量节点放大填满画布，节点硕大突兀——用户反馈的根因）；
-        //  - 全景大图（节点多）→ fitView always：适配填满画布，节点分布均匀。
-        autoFit: "center",
-        padding: 32,
+        // 修复节点堆底部：之前 autoFit:"center" 仅平移不缩放，dagre TB 160 节点 bbox
+        // (~640x1400) 被平移到画布中央后，超出画布高度的节点堆在底部溢出区不可见、看起来"节点都暗"。
+        // 改 autoFit:"view"：G6 v5 初始化时执行一次完整 fitView（缩放+居中），与后续 render().then
+        // 的手动 fitView({when:"always"}) 一致——bbox 计算+适配画布一起做，不会有平移+缩放分裂
+        // 导致的部分溢出。
+        autoFit: "view",
+        padding: [32, 32, 32, 32],
         // 全局 animation 用对象（非 false）激活元素动画管线，使节点/边的 enter/exit 淡入淡出
         // 真正生效（此前 false 会短路所有元素动画，enter/exit 配置实际从未驱动）。
         // 关键：必须显式把 node/edge 的 update/translate 置 false——G6 默认主题给两者配了
@@ -1715,13 +1713,16 @@ function GraphCanvas({
         //  - 节点少（聚焦视图）→ overflow 仅在内容超出视口时裁剪，不把少量节点放大填满画布。
         // 相机方法走 viewport 变换路径，与 force 布局的 shape draw 解耦，动画安全。
         try {
+          // 修复节点堆底部：fitView 用 duration:800 动画时，dagre 布局还在过渡中，
+          // fitView 拿到的是动画中间态的 bbox（节点全在底部 rank），居中后图仍偏下。
+          // 改为 duration:0 立即 fit；初始化时的 padding  [32,32,32,32] 已保证四周留白。
           if (nodeCountRef.current > 5) {
-            await graph.fitView({ when: "always" }, { duration: 800, easing: "ease-out" });
+            await graph.fitView({ when: "always" }, { duration: 0 });
             if (typeof graph.getZoom === "function" && graph.getZoom() < 0.35) {
-              await graph.zoomTo?.(0.35, { duration: 400, easing: "ease-out" });
+              await graph.zoomTo?.(0.35, { duration: 0 });
             }
           } else {
-            await graph.fitView({ when: "overflow" }, { duration: 800, easing: "ease-out" });
+            await graph.fitView({ when: "overflow" }, { duration: 0 });
           }
         } catch {
           /* fitView 偶尔在过渡期失败 */
