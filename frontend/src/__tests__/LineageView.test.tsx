@@ -1842,7 +1842,7 @@ describe("LineageView 治理中心 Tab", () => {
     );
   });
 
-  it("下游健康体检血缘视图点击表节点 → 跳「血缘查询」字段级血缘并预填该表", async () => {
+  it("下游健康体检血缘视图点击表节点 → 治理中心内嵌 Drawer 查看该表字段级血缘（不跳 Tab，node 带 table: 前缀）", async () => {
     vi.mocked(api.lineagePathTerminals).mockResolvedValue({
       node: "table:dwd_order_di",
       terminal_count: 1,
@@ -1872,15 +1872,19 @@ describe("LineageView 治理中心 Tab", () => {
     await act(async () => {
       handler?.({ target: { id: "table:dws_sales_daily" } });
     });
-    // 自动切到「血缘查询 / 影响分析」Tab 并预填该表 → 触发字段级血缘查询（裸表名）
+    // 不跳 Tab：治理中心仍激活、血缘查询 Tab 未选中
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: /治理中心/ })).toHaveAttribute("aria-selected", "true"),
+    );
+    expect(screen.getByRole("tab", { name: /血缘查询/ })).toHaveAttribute("aria-selected", "false");
+    // 治理中心内 Drawer 展示该表字段级血缘（以 table: 前缀查询，不再裸表名 → 422）
     await waitFor(() =>
       expect(api.lineageFieldImpact).toHaveBeenCalledWith({
-        node: "dws_sales_daily", direction: "downstream", max_hops: 3, limit: 300,
+        node: "table:dws_sales_daily", direction: "downstream", max_hops: 3, limit: 300,
       }),
     );
-    await waitFor(() =>
-      expect(screen.getByRole("tab", { name: /血缘查询/ })).toHaveAttribute("aria-selected", "true"),
-    );
+    await waitFor(() => expect(screen.getByText(/字段级血缘 · dws_sales_daily/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/暂无下游字段级血缘/)).toBeInTheDocument());
   });
 
   it("节点清理：Modal 二次确认后按节点软删血缘边", async () => {

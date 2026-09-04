@@ -397,6 +397,56 @@ export function buildFieldGraphData(
   return { nodes: Array.from(nodeMap.values()), edges: graphEdges };
 }
 
+/** 字段级血缘映射明细列（模块级共享：影响分析字段级视图与治理中心「查看表下字段」共用）。
+ *  纯展示列——列映射行（源字段→目标字段 + 表达式/跳数），点击行不弹边历史。 */
+const fieldColumns = [
+  {
+    title: "跳数",
+    dataIndex: "hops",
+    key: "hops",
+    width: 70,
+    render: (v: number) => <Tag color={v === 1 ? "default" : "orange"}>第 {v} 跳</Tag>,
+  },
+  {
+    title: "源字段",
+    dataIndex: "source_node",
+    key: "src",
+    render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v.replace(/^field:/, "")}</span>,
+  },
+  {
+    title: "目标字段",
+    dataIndex: "target_node",
+    key: "dst",
+    render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v.replace(/^field:/, "")}</span>,
+  },
+  {
+    title: "表达式",
+    dataIndex: "expression",
+    key: "expr",
+    width: 240,
+    render: (v?: string | null) =>
+      v ? (
+        <Tooltip title={<code style={{ wordBreak: "break-all" }}>{v}</code>}>
+          <code style={{ fontSize: 12 }}>{v}</code>
+        </Tooltip>
+      ) : null,
+  },
+  {
+    title: "来源",
+    dataIndex: "provenance",
+    key: "prov",
+    width: 110,
+    render: (v: string) => <Tag color="blue">{CHANNEL_LABEL[v] ?? v}</Tag>,
+  },
+  {
+    title: "置信度",
+    dataIndex: "confidence",
+    key: "conf",
+    width: 90,
+    render: (v: number) => `${(v * 100).toFixed(0)}%`,
+  },
+];
+
 /**
  * 把本次 SQL 解析的表级/字段级边合并构建为血缘图谱数据（SQL 血缘解析页当页图谱展示）。
  * - 表级边：源表 → 目标表（后端返回 ``table:`` 前缀节点，label 去前缀展示表名）；
@@ -1175,7 +1225,7 @@ function GraphTab() {
   );
 }
 
-function ImpactTab({ request }: { request?: { node: string; ts: number } | null }) {
+function ImpactTab() {
   const [node, setNode] = useState("");
   const [nodeOptions, setNodeOptions] = useState<LineageNode[]>([]);
   const [nodeLoading, setNodeLoading] = useState(false);
@@ -1258,16 +1308,6 @@ function ImpactTab({ request }: { request?: { node: string; ts: number } | null 
       setLoading(false);
     }
   }
-
-  // 治理中心「查看表下字段血缘」跳转预填：切字段级粒度 + 填入表名并自动查询
-  useEffect(() => {
-    if (request && request.node) {
-      setGranularity("field");
-      setNode(request.node);
-      void runFieldQuery(request.node);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [request]);
 
   async function loadImpact() {
     if (!node.trim()) {
@@ -1378,55 +1418,6 @@ function ImpactTab({ request }: { request?: { node: string; ts: number } | null 
     { title: "来源", dataIndex: "provenance", key: "provenance", width: 110, render: (v: string) => <Tag color="blue">{CHANNEL_LABEL[v] ?? v}</Tag> },
     { title: "置信度", dataIndex: "confidence", key: "confidence", width: 90, render: (v: number) => `${(v * 100).toFixed(0)}%` },
     { title: "PII", dataIndex: "pii_inherited", key: "pii", width: 70, render: (v?: boolean) => (v ? <Tag color="red">PII</Tag> : null) },
-  ];
-
-  // 字段级血缘列（粒度=field）：列映射明细（源字段→目标字段 + 表达式/跳数），点击行不弹边历史。
-  const fieldColumns = [
-    {
-      title: "跳数",
-      dataIndex: "hops",
-      key: "hops",
-      width: 70,
-      render: (v: number) => <Tag color={v === 1 ? "default" : "orange"}>第 {v} 跳</Tag>,
-    },
-    {
-      title: "源字段",
-      dataIndex: "source_node",
-      key: "src",
-      render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v.replace(/^field:/, "")}</span>,
-    },
-    {
-      title: "目标字段",
-      dataIndex: "target_node",
-      key: "dst",
-      render: (v: string) => <span className="mono" style={{ fontSize: 12 }}>{v.replace(/^field:/, "")}</span>,
-    },
-    {
-      title: "表达式",
-      dataIndex: "expression",
-      key: "expr",
-      width: 240,
-      render: (v?: string | null) =>
-        v ? (
-          <Tooltip title={<code style={{ wordBreak: "break-all" }}>{v}</code>}>
-            <code style={{ fontSize: 12 }}>{v}</code>
-          </Tooltip>
-        ) : null,
-    },
-    {
-      title: "来源",
-      dataIndex: "provenance",
-      key: "prov",
-      width: 110,
-      render: (v: string) => <Tag color="blue">{CHANNEL_LABEL[v] ?? v}</Tag>,
-    },
-    {
-      title: "置信度",
-      dataIndex: "confidence",
-      key: "conf",
-      width: 90,
-      render: (v: number) => `${(v * 100).toFixed(0)}%`,
-    },
   ];
 
   // 搜索词非空且候选里无完全匹配时，兜底提供「使用输入值」选项（支持自由指定节点）
@@ -2618,7 +2609,7 @@ function PathNodeChip({ id }: { id: string }) {
   );
 }
 
-function GovernanceTab({ onOpenFieldLineage }: { onOpenFieldLineage?: (tableName: string) => void }) {
+function GovernanceTab() {
   const { can } = usePermission();
   const [health, setHealth] = useState<import("../api").LineageHealthResult | null>(null);
   // 链路体检（A→B 路径）
@@ -2643,6 +2634,12 @@ function GovernanceTab({ onOpenFieldLineage }: { onOpenFieldLineage?: (tableName
   // 节点清理
   const [delNode, setDelNode] = useState("");
   const [busy, setBusy] = useState<"health" | "path" | "term" | "batch" | "scan" | "del" | null>(null);
+  // 治理中心内嵌「查看表下字段血缘」：血缘视图点击表节点 → 本 Tab 内 Drawer 展示该表下游字段链路
+  const [fieldTable, setFieldTable] = useState<string | null>(null);
+  const [fieldItems, setFieldItems] = useState<FieldImpactItem[]>([]);
+  const [fieldTotal, setFieldTotal] = useState(0);
+  const [fieldLoading, setFieldLoading] = useState(false);
+  const [fieldGraph, setFieldGraph] = useState<{ nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } | null>(null);
 
   const run = async (key: typeof busy, fn: () => Promise<void>) => {
     setBusy(key);
@@ -2782,11 +2779,31 @@ function GovernanceTab({ onOpenFieldLineage }: { onOpenFieldLineage?: (tableName
     [termResult],
   );
 
-  /** 治理中心血缘视图点击表节点 → 通知父组件跳「血缘查询」字段级血缘并预填该表（查看表下字段血缘） */
+  /** 治理中心内嵌「查看表下字段血缘」：以 table: 前缀查该表下游字段链路（复用 field-impact 能力），
+   *  在本 Tab 的 Drawer 直接渲染血缘图 + 字段映射明细——不跳转「血缘查询」Tab。 */
+  async function openFieldTable(name: string) {
+    setFieldTable(name);
+    setFieldItems([]);
+    setFieldTotal(0);
+    setFieldGraph(null);
+    setFieldLoading(true);
+    try {
+      const data = await lineageFieldImpact({ node: `table:${name}`, direction: "downstream", max_hops: 3, limit: 300 });
+      setFieldItems(data.items);
+      setFieldTotal(data.total);
+      setFieldGraph(data.items.length > 0 ? buildFieldGraphData(data.items, data.nodes) : null);
+    } catch (err) {
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载字段级血缘失败");
+    } finally {
+      setFieldLoading(false);
+    }
+  }
+
+  /** 治理中心血缘视图点击表节点 → 在本 Tab 内查看该表下字段级血缘 */
   function handleMiniNodeClick(n: AssetGraphNode) {
     if (n.type === "table") {
       const name = n.id.replace(/^table:/, "");
-      if (name) onOpenFieldLineage?.(name);
+      if (name) void openFieldTable(name);
     }
   }
 
@@ -3077,16 +3094,56 @@ function GovernanceTab({ onOpenFieldLineage }: { onOpenFieldLineage?: (tableName
           </Card>
         </Col>
       </Row>
+
+      {/* 治理中心内嵌「查看表下字段血缘」：血缘视图点表节点在此 Drawer 直接展示字段链路（不跳 Tab） */}
+      <Drawer
+        title={fieldTable ? `字段级血缘 · ${fieldTable}` : "字段级血缘"}
+        width={760}
+        open={fieldTable !== null}
+        onClose={() => setFieldTable(null)}
+        extra={
+          fieldTotal > 0 ? (
+            <Tag color="purple">{fieldTotal} 条字段映射（下游）</Tag>
+          ) : undefined
+        }
+      >
+        {fieldLoading ? (
+          <div style={{ textAlign: "center", padding: 48 }}>
+            <Spin tip="加载字段级血缘…" />
+          </div>
+        ) : fieldGraph && fieldGraph.nodes.length > 0 ? (
+          <>
+            <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+              「{fieldTable}」作为源表，沿字段映射（lineage_field_mapping）向下游展开的字段级链路。
+            </div>
+            <AssetGraph
+              nodes={fieldGraph.nodes}
+              edges={fieldGraph.edges}
+              height={460}
+              // 字段级图只有 field 节点，泳道反致拥挤——关闭泳道让 dagre 按血缘链自然分层（同影响分析字段级）
+              lanes={false}
+              dimOnHover={false}
+            />
+            <Table
+              dataSource={fieldItems}
+              columns={fieldColumns}
+              rowKey="id"
+              pagination={false}
+              size="small"
+              style={{ marginTop: 12 }}
+              footer={() => `共 ${fieldTotal} 条字段映射（字段→字段）`}
+            />
+          </>
+        ) : (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`「${fieldTable}」暂无下游字段级血缘（无逐列映射记录）`} />
+        )}
+      </Drawer>
     </div>
   );
 }
 
 export function LineageView() {
   const navigate = useNavigate();
-  // 受控激活 Tab：治理中心「查看表下字段血缘」可切到「血缘查询/影响分析」
-  const [activeTab, setActiveTab] = useState("graph");
-  // 治理中心 → 血缘查询字段级的预填请求（node=裸表名；ts 保证重复点击同表仍触发）
-  const [fieldLineageRequest, setFieldLineageRequest] = useState<{ node: string; ts: number } | null>(null);
 
   // 统一返回上一入口：优先回退浏览器历史（资产地图等入口），无上一页（URL 直达）时兜底总览仪表
   function handleBack() {
@@ -3094,19 +3151,13 @@ export function LineageView() {
     else navigate("/dashboard");
   }
 
-  // 治理中心血缘视图点击表节点 → 切到「血缘查询/影响分析」的字段级血缘并预填该表
-  function handleOpenFieldLineage(tableName: string) {
-    setFieldLineageRequest({ node: tableName, ts: Date.now() });
-    setActiveTab("impact");
-  }
-
   const tabItems = [
     { key: "graph", label: <span><ShareAltOutlined /> 血缘图谱</span>, children: <GraphTab /> },
-    { key: "impact", label: <span><ApartmentOutlined /> 血缘查询 / 影响分析</span>, children: <ImpactTab request={fieldLineageRequest} /> },
+    { key: "impact", label: <span><ApartmentOutlined /> 血缘查询 / 影响分析</span>, children: <ImpactTab /> },
     { key: "parse", label: <span><CodeOutlined /> SQL 血缘解析</span>, children: <ParseTab /> },
     { key: "channels", label: <span><DatabaseOutlined /> 采集通道</span>, children: <ChannelsTab /> },
     { key: "coverage", label: <span><PieChartOutlined /> 覆盖治理</span>, children: <CoverageTab /> },
-    { key: "governance", label: <span><ApartmentOutlined /> 治理中心</span>, children: <GovernanceTab onOpenFieldLineage={handleOpenFieldLineage} /> },
+    { key: "governance", label: <span><ApartmentOutlined /> 治理中心</span>, children: <GovernanceTab /> },
   ];
 
   return (
@@ -3122,7 +3173,7 @@ export function LineageView() {
         </div>
       </div>
       <Card styles={{ body: { paddingTop: 16 } }}>
-        <Tabs items={tabItems} activeKey={activeTab} onChange={(k) => setActiveTab(k)} />
+        <Tabs items={tabItems} />
       </Card>
     </div>
   );
