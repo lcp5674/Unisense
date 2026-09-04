@@ -572,6 +572,8 @@ async def list_runs(
                     "tickets_resolved": r.tickets_resolved,
                     "errors": r.errors,
                     "llm_calls": r.llm_calls,
+                    "field_mappings_written": r.field_mappings_written,
+                    "field_edges_degraded": r.field_edges_degraded,
                     "duration_ms": r.duration_ms,
                     "error": r.error,
                     "detail": _safe_json(r.detail_json),

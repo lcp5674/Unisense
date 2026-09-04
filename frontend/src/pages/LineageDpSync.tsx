@@ -1483,6 +1483,24 @@ function OpsTab() {
             { title: "兜底", dataIndex: "llm_fallback", width: 70 },
             { title: "无法解析", dataIndex: "unparseable", width: 90 },
             { title: "LLM 调用", dataIndex: "llm_calls", width: 90 },
+            {
+              title: "字段血缘",
+              key: "field_lineage",
+              width: 110,
+              render: (_: unknown, r: DpSyncRun) => {
+                const written = Number(r.field_mappings_written ?? 0);
+                const degraded = Number(r.field_edges_degraded ?? 0);
+                if (!written && !degraded) return <span style={{ color: "var(--text-tertiary)" }}>—</span>;
+                return (
+                  <Tooltip title="字段级映射写入数 / 其中 SELECT * 降级（无源表 schema）">
+                    <span>
+                      <Tag color={written ? "green" : "default"}>{written}</Tag>
+                      {degraded > 0 && <Tag color="orange">降 {degraded}</Tag>}
+                    </span>
+                  </Tooltip>
+                );
+              },
+            },
             { title: "耗时(ms)", dataIndex: "duration_ms", width: 90 },
             {
               title: "错误",

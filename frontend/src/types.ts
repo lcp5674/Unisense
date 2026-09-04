@@ -3691,6 +3691,10 @@ export interface DpSyncRun {
   tickets_resolved: number;
   errors: number;
   llm_calls: number;
+  /** 字段级血缘映射写入数（方案 3 schema 感知解析产出的真实/降级字段边）。 */
+  field_mappings_written?: number;
+  /** 字段级降级边数（SELECT * 无源表 schema 时列名缺失）。 */
+  field_edges_degraded?: number;
   duration_ms: number;
   error?: string | null;
   detail?: Record<string, unknown> | null;
