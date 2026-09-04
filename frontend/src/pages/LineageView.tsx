@@ -78,6 +78,8 @@ import type {
   DBCatalog,
   FieldDrillData,
   FieldImpactItem,
+  ImpactAffectedEdge,
+  ImpactPreview,
   LineageChannel,
   LineageCoverage,
   LineageEdge,
@@ -345,6 +347,48 @@ export function edgesToGraphData(
     addNode(e.source_node);
     addNode(e.target_node);
     graphEdges.push({ source: e.source_node, target: e.target_node, type: e.edge_type });
+  }
+  return { nodes: Array.from(nodeMap.values()), edges: graphEdges };
+}
+
+/**
+ * 变更影响预览「受影响子图」构建：把后端 ``ImpactAffectedEdge[]``（统一轻量边，
+ * 覆盖 lineage_edge 表/指标/消费方边与 lineage_field_mapping 字段边）转为血缘视图
+ * 图数据。节点 id 去重、label 去前缀、type 由前缀推断（``column:`` 视作 ``field``
+ * 以复用字段节点折行展示）；带 expression 的字段映射边设 ``edgeLabel``（加工方式
+ * 与表达式常驻边旁完整呈现，与字段级血缘视图一致）。导出供测试与渲染复用。
+ */
+export function previewEdgesToGraph(
+  edges: ImpactAffectedEdge[],
+): { nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } {
+  const nodeMap = new Map<string, AssetGraphNode>();
+  const graphEdges: AssetGraphEdge[] = [];
+  const addNode = (id: string) => {
+    if (!id || nodeMap.has(id)) return;
+    const colon = id.indexOf(":");
+    const prefix = colon === -1 ? "" : id.slice(0, colon);
+    const raw = colon === -1 ? id : id.slice(colon + 1);
+    const type =
+      prefix === "table"
+        ? "table"
+        : prefix === "metric"
+          ? "metric"
+          : prefix === "field" || prefix === "column"
+            ? "field"
+            : "other";
+    const label = type === "field" ? raw : raw || id;
+    nodeMap.set(id, { id, type, label });
+  };
+  for (const e of edges) {
+    addNode(e.source);
+    addNode(e.target);
+    const edge: AssetGraphEdge = { source: e.source, target: e.target, type: e.edge_type };
+    if (e.expression && e.expression.trim()) {
+      const kind = exprKind(e.expression);
+      edge.edgeLabel = `${kind.label}：${e.expression.trim()}`;
+      edge.fullExpr = e.expression;
+    }
+    graphEdges.push(edge);
   }
   return { nodes: Array.from(nodeMap.values()), edges: graphEdges };
 }
@@ -668,12 +712,15 @@ function GraphTab() {
   const [provenance, setProvenance] = useState<string>("all");
   // 聚焦节点：URL ?node= 参数（指标详情「在图谱中查看」跳转来源），限定该指标/表上下游
   const focusNode = searchParams.get("node")?.trim() || null;
-  // 视图模式：结构概览（默认，各数仓层折叠为聚合带、仅显示层间主干血缘——全貌不拥堵）/
-  // 全量血缘（展开全部节点）。有 ?node= 聚焦时直接展示聚焦子图（节点少天然清晰），不启用概览折叠。
-  const [viewMode, setViewMode] = useState<"overview" | "full">(focusNode ? "full" : "overview");
-  // 聚焦/清除聚焦时联动：进入聚焦子图切全量，清除聚焦回结构概览。
+  // 视图模式：默认「全量血缘」（展开全部 1763 节点，用户直接看到真实节点不被聚合 badge 覆盖），
+  // 「结构概览」为折叠到 160 个数仓层聚合带的紧凑视图（侧重层间主干、需手动切换）。
+  // 有 ?node= 聚焦子图时同样走「全量」（子图本身已限定节点数、不需要再折叠）。
+  // 清除聚焦时保留当前视图模式，不强制回结构概览（用户已选定的视图偏好不被覆盖）。
+  const [viewMode, setViewMode] = useState<"overview" | "full">("full");
   useEffect(() => {
-    setViewMode(focusNode ? "full" : "overview");
+    // 聚焦子图：切全量（idempotent，确保聚焦子图始终展开）
+    if (focusNode) setViewMode("full");
+    // 清除聚焦：不动 viewMode（保留用户已选视图）
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusNode]);
   // 聚焦节点不在图谱中（无血缘数据）时的空态标记
@@ -1058,12 +1105,16 @@ function GraphTab() {
           key={viewMode}
           nodes={data.nodes}
           edges={data.edges}
-          height={viewMode === "overview" ? 520 : 740}
+          height={viewMode === "overview" ? 520 : 900}
           onNodeClick={handleNodeClick}
           // 血缘总览默认隐藏字段节点，聚焦子图同样隐藏，聚焦指标/表主干
           showFields={false}
           // 语义泳道：指标/表分带（表带在上、指标带下），表→指标血缘方向自然分层
           lanes
+          // 全量血缘默认渲染所有 1763 节点（去掉 160 节点 LOD 限流，用户进入即可看到完整图谱、
+          // 画布被充分填满，不再出现「上半空白节点挤在底部」的现象；可通过「域筛选」/来源通道/搜索
+          // 主动收窄到子集。showAll=true 时 LOD 提示横幅与「显示全部」按钮自动隐藏。
+          defaultShowAll={viewMode === "full"}
           // 结构概览：进入即全层聚合（每层一个聚合带 + 层间去重边），点击层带展开该层明细
           defaultCollapsedLayers={viewMode === "overview" ? ALL_LINEAGE_LAYERS : undefined}
         />

@@ -43,6 +43,11 @@ interface AssetGraphProps {
    *  小图（字段级钻取、聚焦子图）节点密集、hover 链短，压暗会让其他节点几乎不可见，
    *  应关闭（只高亮链上、不压暗其余）；大图默认 true 保持「从哪来/流向哪」的聚焦效果。 */
   dimOnHover?: boolean;
+  /** 是否默认渲染全部节点（true=跳过 160 节点上限、画所有传入节点；false=LOD 限流 +「显示全部」按钮）。
+   *  适用于调用方已确定节点数可全画的场景（如血缘图谱 1763 节点要全部可见）。默认 false。
+   *  showAll=true 时 LOD 提示横幅与「显示全部」按钮自动隐藏（节点不再被裁剪）。
+   */
+  defaultShowAll?: boolean;
   /** 布局策略：auto=检测到真环用力导向否则分层；hierarchy=分层（DAG）；force=力导向；radial=血缘度同心圆（依赖引用数高者居中）。默认 auto */
   layout?: "auto" | "hierarchy" | "force" | "radial";
   /**
@@ -1891,10 +1896,11 @@ export function AssetGraph({
   direction = "TB",
   defaultCollapsedLayers,
   dimOnHover = true,
+  defaultShowAll = false,
 }: AssetGraphProps) {
   const onNodeClickRef = useRef(onNodeClick);
   onNodeClickRef.current = onNodeClick;
-  const [showAll, setShowAll] = useState(false);
+  const [showAll, setShowAll] = useState(defaultShowAll);
   // 前端筛选：按节点类型过滤 + 按 label 搜索定位（不重新请求后端）
   const [typeFilter, setTypeFilter] = useState<string[]>([]);
   const [searchText, setSearchText] = useState("");
