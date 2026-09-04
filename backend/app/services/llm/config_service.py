@@ -33,6 +33,13 @@ from app.services.llm.schemas import LlmConfigPayload, LlmConfigTestResult, LlmM
 
 logger = get_logger("unisense.llm.config")
 
+#: 真实 chat 探测的超时上限（秒）。原 15s 是为远程网关设计的快速失败；
+#: 本地 CPU LLM（llama.cpp/Ollama 等）4 slot 并发架构下，新请求需排队等
+#: 正在生成的 slot 结束（长块 1500-2500 token ÷ 11 t/s ≈ 2-4 分钟/块），
+#: 15s 必然 ReadTimeout 假失败。90s 覆盖「排队等待 + 本地 prefill 偏慢」，
+#: 真正不可用（连接拒绝/4xx/模型下线）仍秒级失败不拖慢 UI。
+_CHAT_PROBE_TIMEOUT_CAP: float = 90.0
+
 #: 主流 OpenAI 协议兼容提供商的默认配置（与 services/llm/client.py 保持一致）
 PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
     "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini"},
@@ -470,8 +477,9 @@ class LlmConfigService:
         """真实 chat 探测：极小生成量（max_tokens=5）验证模型能产出推理结果。
 
         不带 response_format 约束（兼容不支持 json_object 约束的中小网关），
-        短超时（上限 15 秒，覆盖本地模型 prefill 偏慢的场景）；成功定义为
-        HTTP 200 且响应含 ``choices[].message.content``（非 None）。
+        超时上限取 ``_CHAT_PROBE_TIMEOUT_CAP``（90 秒，跟随实例 timeout 但留上限，
+        覆盖本地 CPU 模型 slot 排队 + prefill 偏慢的场景，避免 15s 快速假失败）；
+        成功定义为 HTTP 200 且响应含 ``choices[].message.content``（非 None）。
         4xx/5xx（如 400 Model unavailable、401 无额度、404 模型下线）均判失败，
         并携带网关返回的错误摘要供前端展示。
         """
@@ -485,7 +493,7 @@ class LlmConfigService:
         req_url = chat_completions_url(base_url)
         try:
             async with httpx.AsyncClient(
-                timeout=httpx.Timeout(min(timeout, 15.0)),
+                timeout=httpx.Timeout(min(timeout, _CHAT_PROBE_TIMEOUT_CAP)),
                 headers={"Authorization": f"Bearer {api_key}"},
             ) as client:
                 resp = await client.post(req_url, json=payload)
