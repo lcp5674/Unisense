@@ -157,14 +157,14 @@ async def _apply_progress(task_id: int, idx: int, updated: dict[str, Any]) -> bo
 
 async def run_dp_ticket_retry_task(ctx: dict[str, Any], task_id: int) -> None:
     """执行 dp 待抉择单 LLM 重试任务（逐张串行 + 进度实时落库 + 协作取消）。"""
-    logger.info("dp_retry_task_start", task_id=task_id)
+    logger.info("dp_retry_task_start task_id=%s", task_id)
     async with async_session_factory() as db:
         task = await _load_task(db, task_id)
         if task is None:
-            logger.warning("dp_retry_task_not_found", task_id=task_id)
+            logger.warning("dp_retry_task_not_found task_id=%s", task_id)
             return
         if task.status != "pending":
-            logger.info("dp_retry_task_skip_non_pending", task_id=task_id, status=task.status)
+            logger.info("dp_retry_task_skip_non_pending task_id=%s status=%s", task_id, task.status)
             return
         task.status = "running"
         task.started_at = datetime.now(UTC)
@@ -205,11 +205,12 @@ async def run_dp_ticket_retry_task(ctx: dict[str, Any], task_id: int) -> None:
         try:
             updated = await _run_single_ticket(task_id, item)
         except Exception as exc:  # noqa: BLE001 —— 任务级兜底，单张失败不拖垮
-            logger.exception(
-                "dp_retry_ticket_unexpected",
-                task_id=task_id,
-                idx=idx,
-                error=str(exc)[:300],
+            logger.error(
+                "dp_retry_ticket_unexpected task_id=%s idx=%s error=%s",
+                task_id,
+                idx,
+                str(exc)[:300],
+                exc_info=True,
             )
             updated = {
                 **item,
@@ -222,11 +223,11 @@ async def run_dp_ticket_retry_task(ctx: dict[str, Any], task_id: int) -> None:
             stop = True
             break
         logger.info(
-            "dp_retry_ticket_done",
-            task_id=task_id,
-            ticket_id=updated.get("ticket_id"),
-            status=updated.get("status"),
-            action=updated.get("action"),
+            "dp_retry_ticket_done task_id=%s ticket_id=%s status=%s action=%s",
+            task_id,
+            updated.get("ticket_id"),
+            updated.get("status"),
+            updated.get("action"),
         )
 
     # 终态收敛（重读最新：取消可能已由 API 置位）
@@ -257,11 +258,11 @@ async def run_dp_ticket_retry_task(ctx: dict[str, Any], task_id: int) -> None:
         task.finished_at = datetime.now(UTC)
         await db.commit()
         logger.info(
-            "dp_retry_task_finish",
-            task_id=task_id,
-            status=task.status,
-            done=task.done,
-            failed=task.failed,
-            cancelled=task.cancelled,
-            counts=counts,
+            "dp_retry_task_finish task_id=%s status=%s done=%s failed=%s cancelled=%s counts=%s",
+            task_id,
+            task.status,
+            task.done,
+            task.failed,
+            task.cancelled,
+            counts,
         )
