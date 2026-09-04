@@ -935,6 +935,10 @@ const MAX_RENDER_NODES = 160;
 // 滚轮缩小到很小时才触发。
 const LOD_COMPACT_ZOOM = 0.35;
 const LOD_LARGE_GRAPH = 200;
+// 大图档节点数阈值：超过则走「全图概览」路线——dagre 间距收紧、fitView 下限放宽到 0.05、
+// 节点首帧直接以 compact 状态渲染（不建重装饰层 + 跳过渲染后的批切 state，否则 1763 节点的
+// setElementState 逐节点重绘实测阻塞主线程 ~90s）。≤600 保持「可读优先」（fit 钳 0.35、完整样式）。
+const LARGE_GRAPH_FIT_COUNT = 600;
 
 function nodeRank(n: AssetGraphNode): number {
   if (n.type === "metric") return 0;
@@ -1001,26 +1005,36 @@ function pickVisible(
  * 分层布局（dagre）参数：供 GraphCanvas 预计算坐标（Web Worker/同步兜底）与内建
  * antv-dagre 共用——坐标计算线程化后主线程不再跑 dagre，参数保持同源避免布局突变。
  * 紧凑度策略：
- *  - 全景大图（节点多）：ranksep 收紧到 36、nodesep 40，让 160 节点大图高度控制在 ~400px，
- *    fitView 缩放后能均匀铺满画布中央（不再堆底部）；文字压在最小需求以上即可。
- *  - 折行图（字段/长标签）：ranksep/nodesep 按 maxLines/maxLineChars 放宽，跨层不压字。
+ *  - 全景大图（节点 > 600）：ranksep 20 / nodesep 24（更紧凑一档）——dagre bbox 高度
+ *    显著减小，fitView 后整图能完整塞进画布，节点虽小（zoom≈0.12、节点≈2-3 px）但
+ *    全貌可见；LOD compact 在低 zoom 自动隐藏重装饰层保证可读。
+ *  - 中小图（≤600）：ranksep 36 / nodesep 40（与既有体验一致，节点可读优先）。
+ *  - 折行图（字段/长标签）：中小图按 maxLines/maxLineChars 放宽（防跨层压字）；
+ *    大图档不再无限放宽（防 bbox 过大），与"全图概览"意图一致。
  */
 export function hierarchyDagreParams(
   direction: "TB" | "LR" = "TB",
   label?: { maxLines: number; maxLineChars: number },
+  nodeCount?: number,
 ): { rankdir: "TB" | "LR"; nodesep: number; ranksep: number; align: "UL" | "DL" } {
   const hasLongLabel = (label?.maxLineChars ?? 0) > 20;
-  const nodeGap = hasLongLabel
+  const isLarge = (nodeCount ?? 0) > LARGE_GRAPH_FIT_COUNT;
+  const baseNodesep = isLarge ? 24 : 40;
+  const baseRanksep = isLarge ? 20 : 36;
+  // LR 方向节点间距稍大（节点排成列时宽度更敏感）
+  const baseNodesepDir = direction === "LR" ? Math.max(baseNodesep, 50) : baseNodesep;
+  const baseRanksepDir = direction === "LR" ? Math.max(baseRanksep, 50) : baseRanksep;
+  const nodeGap = hasLongLabel && !isLarge
     ? Math.min(240, Math.max(90, (label?.maxLineChars ?? 0) * 6.2 + 40))
-    : direction === "LR"
-      ? 50
-      : 40;
-  const extraRank = hasLongLabel ? Math.max(0, (label?.maxLines ?? 1) - 1) * 16 : 0;
+    : baseNodesepDir;
+  const extraRank = hasLongLabel && !isLarge ? Math.max(0, (label?.maxLines ?? 1) - 1) * 16 : 0;
+  const nodesepFloor = isLarge ? baseNodesep : 40; // 大图档不再被钳到 40，保住紧凑度
+  const ranksepFloor = isLarge ? baseRanksep : 36;  // 大图档不再被钳到 36
   return {
     rankdir: direction,
     align: direction === "LR" ? "UL" : "DL",
-    nodesep: direction === "LR" ? Math.max(50, nodeGap) : Math.max(40, nodeGap),
-    ranksep: direction === "LR" ? Math.max(50, 50 + extraRank) : Math.max(36, 36 + extraRank),
+    nodesep: direction === "LR" ? Math.max(50, nodeGap) : Math.max(nodesepFloor, nodeGap),
+    ranksep: direction === "LR" ? Math.max(50, baseRanksepDir + extraRank) : Math.max(ranksepFloor, baseRanksepDir + extraRank),
   };
 }
 
@@ -1295,6 +1309,11 @@ function GraphCanvas({
       lodRaf = 0;
       const graph = graphRef.current;
       if (!graph || graph.destroyed) return;
+      // 大图档（>600）：紧凑由「默认样式函数省略 halo/icon/badge/shadow」实现，不走
+      // compact state——这里直接跳过。否则 zoom≥0.35（dagre 收紧后 fit 常达此值）会被判定
+      // 需切回非 compact，对数千元素执行一次全量 setElementState（G6 重算全部样式 + 全量
+      // draw，1763 节点实测阻塞 ~10s+，CPU 46% 落在该调用链）。
+      if (nodeCountRef.current > LARGE_GRAPH_FIT_COUNT) return;
       // getZoom 缺失时（降级/测试环境）按非紧凑处理，避免抛错触发降级
       const compact =
         typeof graph.getZoom === "function" && graph.getZoom() < LOD_COMPACT_ZOOM;
@@ -1388,7 +1407,13 @@ function GraphCanvas({
             // 柔光 halo：节点填充色提亮版作为外圈，让节点从画布上"发光"、更立体。
             // 枢纽节点（血缘度≥8）halo 略宽更实，形成"骨干发光"层次；幅度收紧以免密集
             // 大图下邻接节点光晕相互侵染、显得"脏乱"。
-            halo: (d: NodeData) => !(d.data as AssetGraphNode | undefined)?.anchor,
+            // 大图档（>600）halo 不创建：光晕在 zoom<0.2 全貌视图下不可见，而每节点一个
+            // halo shape 显著拖慢 draw（之前实测 CPU 大头上 draw/computeStyle 均与数千
+            // 重装饰 shape 相关）。compact state 的「置透明」不省成本（shape 仍在场景树），
+            // 必须让存在性回调返回 false 才能真正不创建。
+            halo: (d: NodeData) =>
+              !(d.data as AssetGraphNode | undefined)?.anchor &&
+              nodeCountRef.current <= LARGE_GRAPH_FIT_COUNT,
             haloStroke: (d: NodeData) => {
               const n = d.data as AssetGraphNode | undefined;
               const base = cycleNodesRef.current.has(String(d.id)) ? "#ff8a80" : domainColor(n);
@@ -1406,8 +1431,11 @@ function GraphCanvas({
                   : 0.32,
             // 类型图标：Lucide 风格 24x24 线性 SVG（指标=折线+端点圆 / 表=表格+列头圆点 /
             // 字段=列表+段头圆点），内嵌深色半透明圆衬底让白线条在任意节点填充色上都清晰。
-            // 尺寸按节点形状收窄（表节点扁、字段节点更扁），避免溢出节点边界
-            icon: (d: NodeData) => !(d.data as AssetGraphNode | undefined)?.anchor,
+            // 尺寸按节点形状收窄（表节点扁、字段节点更扁），避免溢出节点边界。
+            // 大图档（>600）不创建：图标在全貌视图 zoom<0.2 下不可见，省 shape + draw 成本。
+            icon: (d: NodeData) =>
+              !(d.data as AssetGraphNode | undefined)?.anchor &&
+              nodeCountRef.current <= LARGE_GRAPH_FIT_COUNT,
             iconSrc: (d: NodeData) =>
               nodeIconSrc((d.data as AssetGraphNode | undefined)?.type),
             iconWidth: (d: NodeData) => {
@@ -1421,7 +1449,10 @@ function GraphCanvas({
             },
             // 依赖引用数角标（血缘度 badge）：节点右上角显示该节点被引用的次数，
             // 用户一眼看出哪些是枢纽节点（高血缘度）。compact LOD 模式下隐藏（大图性能）。
-            badge: (d: NodeData) => !(d.data as AssetGraphNode | undefined)?.anchor,
+            // 大图档（>600）不创建：同 icon/halo——全貌视图下 badge 数字不可读，省 shape。
+            badge: (d: NodeData) =>
+              !(d.data as AssetGraphNode | undefined)?.anchor &&
+              nodeCountRef.current <= LARGE_GRAPH_FIT_COUNT,
             badgeText: (d: NodeData) => {
               const deg = degreeMapRef.current.get(String(d.id)) ?? 0;
               return deg > 0 ? String(deg) : "";
@@ -1842,6 +1873,25 @@ function GraphCanvas({
     if (!graph || graph.destroyed) return;
     setGraphReady(false);
     setRenderFailed(false);
+    // 大图档紧凑判定（> LARGE_GRAPH_FIT_COUNT）：compactRef/lodAppliedRef 直接对齐为 true，
+    // 使渲染后 applyLod 幂等跳过——紧凑样式由「节点默认样式函数按 nodeCount 省略 halo/icon/
+    // badge/shadow（不创建 shape）」实现，不走 setElementState（数据 states 触发 G6 内部全量
+    // 状态应用 = 双倍样式计算 + 全量 draw，1763 节点实测阻塞 ~13s）。
+    // 中小图保持完整样式、fit 钳 0.35 可读优先，滚轮 zoom<0.35 时仍由 compact state 隐藏重装饰。
+    const initialCompact = nodes.length > LARGE_GRAPH_FIT_COUNT;
+    compactRef.current = initialCompact;
+    lodAppliedRef.current = initialCompact;
+    // 大图档禁用 G6 动画引擎：1763 节点 + 3200 边同时 enter 时，@antv/g 的 rAF 动画循环
+    //（processRafCallbacks）对数千元素逐帧插值 + 触发全量重绘——CPU Profile 实测 66% 样本
+    // 落在动画 value 函数、主线程阻塞 ~73s（GC 风暴 10%+）。全图概览首屏整体淡入无意义，
+    // 禁用后元素瞬时出现；中小图保持 { duration: 300 } 的淡入/悬停动画体验。
+    if (initialCompact) {
+      try {
+        graph.setOptions({ animation: false });
+      } catch {
+        // 动画开关失败不阻断渲染（元素按默认无动画出现）
+      }
+    }
     const seq = ++layoutReqSeqRef.current;
 
     // 渲染提交：数据（含已就绪的布局坐标）→ setData → render → 首帧适配。供两条路径共用。
@@ -1854,19 +1904,24 @@ function GraphCanvas({
           setGraphReady(true);
           onReadyRef.current();
           // 按节点规模自适应 fitView（带平滑缩放进入动画）：
-          //  - 节点多（全景）→ always 适配填满画布，但大图 always 会把 zoom 压到 <0.2，
-          //    节点缩成亚像素、信息全丢；故叠加最小缩放下限 0.35 保证标签可读，
-          //    用户可手动滚轮继续缩（<0.35 触发 compact 隐藏重装饰层，标签仍保留）；
           //  - 节点少（聚焦视图）→ overflow 仅在内容超出视口时裁剪，不把少量节点放大填满画布。
+          //  - 节点中（5 < N ≤ 600）→ always 适配填满画布，但 600+ 节点的 dagre bbox 远超画布，
+          //    缩到 <0.2 节点缩成亚像素、信息全丢；故叠加最小缩放下限 0.35 保证标签可读，
+          //    用户可手动滚轮继续缩（<0.35 触发 compact 隐藏重装饰层，标签仍保留）。
+          //  - 节点多（> 600）→ 取消 0.35 钳制，下限降到 0.05 让整图完整 fit：
+          //    否则 dagre bbox 高度远超画布时只能看到 bbox 中间一截（"节点堆底部、上方大片空白"）。
+          //    节点缩到 ~2-3 px 是"全图概览"应有的尺度——用户点"全量"本就要看全貌而非细节，
+          //    滚轮放大即可看细节。LOD compact 在低 zoom 自动隐藏重装饰层让节点主体清晰。
           // 相机方法走 viewport 变换路径，与 force 布局的 shape draw 解耦，动画安全。
           try {
             // 修复节点堆底部：fitView 用 duration:800 动画时，dagre 布局还在过渡中，
             // fitView 拿到的是动画中间态的 bbox（节点全在底部 rank），居中后图仍偏下。
             // 改为 duration:0 立即 fit；初始化时的 padding  [32,32,32,32] 已保证四周留白。
+            const minFitZoom = nodeCountRef.current > 600 ? 0.05 : 0.35;
             if (nodeCountRef.current > 5) {
               await graph.fitView({ when: "always" }, { duration: 0 });
-              if (typeof graph.getZoom === "function" && graph.getZoom() < 0.35) {
-                await graph.zoomTo?.(0.35, { duration: 0 });
+              if (typeof graph.getZoom === "function" && graph.getZoom() < minFitZoom) {
+                await graph.zoomTo?.(minFitZoom, { duration: 0 });
               }
             } else {
               await graph.fitView({ when: "overflow" }, { duration: 0 });
@@ -1874,26 +1929,32 @@ function GraphCanvas({
           } catch {
             /* fitView 偶尔在过渡期失败 */
           }
-          // 大数据量 LOD：fitView 缩放下限 0.35 后，初始首屏通常不再触发 compact；
-          // 此处保留 applyLod 仅用于用户后续滚轮缩到 < 0.35 时切换重装饰层（标签仍保留）。
+          // 大数据量 LOD：fitView 缩放下限 0.35 后，中小图初始首屏通常不再触发 compact；
+          // 大图档（>600）默认样式已紧凑 + applyLod 直接跳过，此处保留调用是统一入口。
           applyLod();
           // 边流动动画：只驱动有 lineDash 的边（骨干/次骨干/环边）。数据重载时先取消旧的再重启，
           // 避免上一批元素 shape 引用失效后仍被驱动。
           edgeFlowCancelRef.current?.();
-          edgeFlowCancelRef.current = startEdgeFlow(
-            graph,
-            edges
-              .filter((e) => {
-                const d = e as RenderEdge | undefined;
-                if (d?.anchorEdge) return false;
-                if (d?.inCycle) return true;
-                const total =
-                  (degreeMapRef.current.get(String(e.source)) ?? 0) +
-                  (degreeMapRef.current.get(String(e.target)) ?? 0);
-                return total >= 5;
-              })
-              .map((e) => `${e.source}-${e.target}`),
-          );
+          // 大图档（>600 节点，全图概览缩至 ~2-3px）跳过流动动画：此时虚线流动肉眼不可见，
+          // 而每帧驱动上千条骨干边（degree≥5）的 lineDashOffset 会触发 @antv/g 响应式重绘
+          // + 对象分配 GC 风暴——1763 节点全量实测主线程阻塞 ~73s（CPU Profile：23.8% GC、
+          // 持续 fillText/setLineDash 重绘）。中小图节点可读、虚线可辨，流动方向感保留。
+          edgeFlowCancelRef.current = initialCompact
+            ? () => {}
+            : startEdgeFlow(
+                graph,
+                edges
+                  .filter((e) => {
+                    const d = e as RenderEdge | undefined;
+                    if (d?.anchorEdge) return false;
+                    if (d?.inCycle) return true;
+                    const total =
+                      (degreeMapRef.current.get(String(e.source)) ?? 0) +
+                      (degreeMapRef.current.get(String(e.target)) ?? 0);
+                    return total >= 5;
+                  })
+                  .map((e) => `${e.source}-${e.target}`),
+              );
         })
         .catch((err) => {
           console.error("[AssetGraph] G6 render 失败，降级为表格", err);
@@ -1913,7 +1974,7 @@ function GraphCanvas({
         const cached = nodeStyleCacheRef.current.get(id);
         return { id, size: (cached?.size as number | [number, number] | undefined) ?? 12 };
       });
-      const layoutParams = hierarchyDagreParams(direction, labelMetricsRef.current);
+      const layoutParams = hierarchyDagreParams(direction, labelMetricsRef.current, nodes.length);
       const useWorker = typeof Worker !== "undefined" && nodes.length > 200;
       if (useWorker) setLayouting(true);
       const run: Promise<Map<string, DagrePosition>> = useWorker
@@ -1925,8 +1986,16 @@ function GraphCanvas({
           commit({
             nodes: nodes.map((n) => {
               const p = positions.get(String(n.id));
-              // 预设坐标：节点 style.x/y = dagre 中心坐标；G6 无 layout 时按此落位
-              return { id: n.id, data: n, style: p ? { x: p.x, y: p.y } : undefined };
+              // 预设坐标：节点 style.x/y = dagre 中心坐标；G6 无 layout 时按此落位。
+              // 大图档紧凑由「默认样式函数按 nodeCount 直接省略重装饰 shape」实现——
+              // 不用数据 states:["compact"]（实测 G6 render 遇数据 states 会对数千元素
+              // 内部逐个 setElementState：先算 default 再算 states 样式 = 双倍样式计算 +
+              // 全量 draw，CPU 48% 阻塞），compact 仅保留给中小图滚轮 zoom 切换用。
+              return {
+                id: n.id,
+                data: n,
+                style: p ? { x: p.x, y: p.y } : undefined,
+              };
             }),
             edges: edgeList,
           });
@@ -1943,7 +2012,13 @@ function GraphCanvas({
       commit(
         nodes.length === 0
           ? { nodes: [], edges: [] }
-          : { nodes: nodes.map((n) => ({ id: n.id, data: n })), edges: edgeList },
+          : {
+              nodes: nodes.map((n) => ({
+                id: n.id,
+                data: n,
+              })),
+              edges: edgeList,
+            },
       );
     }
   }, [nodes, edges, layoutMode, direction]);
@@ -1959,7 +2034,14 @@ function GraphCanvas({
       const allNodes = graph.getNodeData?.() as unknown;
       const nodeList = Array.isArray(allNodes) ? allNodes : [];
       if (searchMatchIds.size === 0) {
-        for (const n of nodeList) safeSetElementState(graph, String(n.id), stateWithCompact([]));
+        // 大图档（>600）跳过：无搜索时 setData 新渲染的元素默认无状态，无需逐个
+        // setElementState 清空——否则每次 graphReady（点「显示全部」渲染完成触发本 effect）
+        // 都对 1763 节点逐个 setElementState，实测单个长任务阻塞主线程 ~12s
+        //（PerformanceObserver longtask 12180ms，CPU 大头 g6 样式重算）。
+        // 中小图节点少、逐个清空毫秒级，保留原行为（处理同 id 元素复用时旧状态残留）。
+        if (nodes.length <= LARGE_GRAPH_FIT_COUNT) {
+          for (const n of nodeList) safeSetElementState(graph, String(n.id), stateWithCompact([]));
+        }
         return;
       }
       for (const n of nodeList) {

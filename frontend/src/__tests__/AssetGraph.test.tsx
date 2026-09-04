@@ -12,6 +12,7 @@ import {
   collectPathEdges,
   collectSubgraphNodes,
   buildSearchFocus,
+  hierarchyDagreParams,
   wrapFieldLabel,
   wrapEdgeExpr,
   type AssetGraphNode,
@@ -1055,5 +1056,44 @@ describe("wrapEdgeExpr 边加工表达式折行（字段级血缘边「加工方
     const out = wrapEdgeExpr("函数加工：CONCAT(a,  b)", 40);
     expect(out).toBe("函数加工：CONCAT(a,  b)");
     expect(out.includes("\n")).toBe(false);
+  });
+});
+
+describe("hierarchyDagreParams 大图档紧凑化（全量档 fit 不再堆底部）", () => {
+  it("默认（不传 nodeCount）保持既有 TB 参数：ranksep 36 / nodesep 40", () => {
+    const p = hierarchyDagreParams("TB");
+    expect(p).toEqual({ rankdir: "TB", nodesep: 40, ranksep: 36, align: "DL" });
+  });
+
+  it("中小图（≤600）保持现有 ranksep 36 / nodesep 40", () => {
+    const p600 = hierarchyDagreParams("TB", undefined, 600);
+    expect(p600.ranksep).toBe(36);
+    expect(p600.nodesep).toBe(40);
+    const p100 = hierarchyDagreParams("TB", undefined, 100);
+    expect(p100.ranksep).toBe(36);
+    expect(p100.nodesep).toBe(40);
+  });
+
+  it("大图（>600）收紧到 ranksep 20 / nodesep 24——让 dagre bbox 显著减小、整图能完整 fit", () => {
+    const p = hierarchyDagreParams("TB", undefined, 1763);
+    expect(p.ranksep).toBe(20);
+    expect(p.nodesep).toBe(24);
+    // 节点变密，间距绝对值应严格小于中小图档
+    expect(p.ranksep).toBeLessThan(36);
+    expect(p.nodesep).toBeLessThan(40);
+  });
+
+  it("LR 方向：大图档 ranksep/nodesep 维持下限 ≥ 50（防列列过窄）", () => {
+    const p = hierarchyDagreParams("LR", undefined, 1000);
+    expect(p.rankdir).toBe("LR");
+    expect(p.align).toBe("UL");
+    expect(p.nodesep).toBeGreaterThanOrEqual(50);
+    expect(p.ranksep).toBeGreaterThanOrEqual(50);
+  });
+
+  it("大图档即便有长 label 也不再无限放宽 ranksep（避免 bbox 过大、fit 后只能看中间一截）", () => {
+    const p = hierarchyDagreParams("TB", { maxLines: 4, maxLineChars: 40 }, 1500);
+    expect(p.ranksep).toBe(20); // 保持大图档紧凑值，不叠加 extraRank
+    expect(p.nodesep).toBe(24);
   });
 });
