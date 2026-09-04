@@ -1171,3 +1171,23 @@ async def test_list_active_for_conflict_excludes_deprecated_and_paginates():
     # 每次查询均携带 select 语句对象（含 where/order/offset）
     assert db.execute.await_args_list[0].args[0] is not None
     assert db.execute.await_args_list[1].args[0] is not None
+
+
+async def test_purge_metric_executes_cascade_without_nameerror():
+    """purge 级联真实执行不抛 NameError（防模型 import 回归）。
+
+    背景：purge_metric 引用 QualityRule/Favorite 等模型执行 delete，若 repository
+    import 区被误删（曾发生 QualityRule/Favorite/text 缺失），真实执行到该 delete
+    构造即抛 NameError——单元测试若仅 MagicMock repo 方法无法暴露。此处用
+    _mock_session 让全部 delete 语句真实构造（execute 为 AsyncMock 不真正执行）。
+    """
+    db = _mock_session()
+    repo = MetricRepository(db)
+    # 真实执行 purge：12 个级联 delete 语句逐一构造（模型名须在 repository 命名空间可见）
+    await repo.purge_metric(metric_id=7, metric_code="sales_gmv_daily")
+    # 全部级联删除 + 主行删除均发出（LineageEdge/快照/版本/待确认/维度/健康度/挂载/
+    # 质量规则/冲突/收藏/主行 = 11 条 delete；LineageEdge 亦计 delete）
+    assert db.execute.await_count >= 11
+    # 每个调用均为 delete 语句（非空）
+    for call in db.execute.await_args_list:
+        assert call.args[0] is not None

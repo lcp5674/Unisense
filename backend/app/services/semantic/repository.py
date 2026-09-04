@@ -8,14 +8,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import ColumnElement, and_, delete, func, literal, or_, select, update
+from sqlalchemy import ColumnElement, and_, delete, func, literal, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.exceptions import SystemError as AppSystemError
 from app.models.conflict import Conflict
-from app.models.consume import MetricValueSnapshot
+from app.models.consume import Favorite, MetricValueSnapshot
 from app.models.data_source import DataSource, DBCatalog
 from app.models.dimension import Dimension, MetricDimension
 from app.models.lineage import LineageEdge
@@ -24,7 +24,7 @@ from app.models.metric_health import MetricHealthScore
 from app.models.metric_mount import MetricMount
 from app.models.metric_template import MetricTemplate
 from app.models.metric_version import MetricVersion, PendingVersionConfirmation
-from app.models.quality import QualityEvent
+from app.models.quality import QualityEvent, QualityRule
 from app.models.system_dict import SystemDict
 from app.models.term import Term
 from app.models.user import User
