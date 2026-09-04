@@ -183,6 +183,10 @@ class LineageNodeInfo(BaseModel):
     pii: bool = Field(default=False, description="是否含 PII")
     domain: str | None = Field(default=None, description="业务域（表从数据源继承）")
     owner: str | None = Field(default=None, description="Owner ID（字符串）")
+    dw_layer: str | None = Field(
+        default=None,
+        description="数仓分层（小写归一化；表节点由 dw_layer 字典按库名派生，未命中为 None）",
+    )
 
 
 class LineageImpactParams(BaseModel):

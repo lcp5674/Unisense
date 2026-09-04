@@ -1569,6 +1569,10 @@ class LineageRepository:
                     "pii": bool(m.get("pii")),
                     "domain": m.get("domain"),
                     "owner": m.get("owner"),
+                    # 数仓分层：resolve_node_meta 已按 dw_layer 字典为 table: 节点派生
+                    # （整库名/分段码/表前缀三形态归层），此处必须透传，否则血缘图谱
+                    # provenance=all 主视图的表节点全部落回「未分层」泳道
+                    "dw_layer": m.get("dw_layer"),
                 }
             )
         return nodes, edges

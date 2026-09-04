@@ -234,6 +234,21 @@ class _FakeDB:
             if m_limit:
                 rows = rows[: int(m_limit.group(1))]
             return _Result(list(rows))
+        # graph_from_edges（血缘图谱主图）：SELECT source/target/type ... LIMIT（无 order/count）
+        if (
+            " FROM lineage_edge " in sql
+            and "deleted_at IS NULL" in sql
+            and "limit" in sql.lower()
+            and "order by" not in sql.lower()
+            and "count(" not in sql.lower()
+        ):
+            return _Result(
+                [
+                    r
+                    for r in self._rows
+                    if getattr(r, "deleted_at", None) is None
+                ][:2000]
+            )
         if sql.lstrip().upper().startswith("DELETE"):
             node = _extract(sql, "source_node")
             matched = [
@@ -1121,6 +1136,36 @@ async def test_resolve_node_meta_empty_and_unknown() -> None:
         # 表节点统一携带派生分层（库名未命中 dw_layer 字典 → None，保持未分层）
         "dw_layer": None,
     }
+
+
+async def test_graph_from_edges_carries_dw_layer() -> None:
+    """graph_from_edges 组装节点透传 dw_layer（血缘图谱 provenance=all 主视图分层）。
+
+    回归：resolve_node_meta 已为表节点派生 dw_layer，但 graph_from_edges 组装时只挑
+    id/type/label/entity_id/pii/domain/owner，把 dw_layer 丢掉 → 血缘图谱里 DP 导入的
+    表即使库名命中 dw_layer 字典也全部显示「未分层」。本测试锁定透传行为。
+    """
+    db = _FakeDB(
+        [_Row(1, "metric:gmv", "table:wedw_dwd.dw_order", "DERIVED_FROM", "L3")],
+        meta_rows=[
+            _MetaRow(
+                table="metric",
+                metric_code="gmv",
+                domain="sales",
+                dw_layer="DWS",
+            ),
+        ],
+    )
+    repo = LineageRepository(db)
+    nodes, edges = await repo.graph_from_edges()
+    by_id = {n["id"]: n for n in nodes}
+    assert len(edges) == 1
+    # metric 命中 metric 表 → dw_layer 随 resolve_node_meta 小写归一化（dws）并透传
+    assert by_id["metric:gmv"]["dw_layer"] == "dws"
+    # table 未在 db_catalog 命中的外部表也统一携带 dw_layer 键（派生 None=未分层），
+    # 与 resolve_node_meta 语义一致，前端 layerOf 据此可稳定读取
+    assert "dw_layer" in by_id["table:wedw_dwd.dw_order"]
+    assert by_id["table:wedw_dwd.dw_order"]["dw_layer"] is None
 
 
 # ---- Task D：血缘边详情（get_edge + edge_history_by_key）----
