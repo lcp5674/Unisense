@@ -109,6 +109,19 @@ async def submit_scan(*, force: bool = True) -> tuple[int, bool]:
     return task_id, False
 
 
+def current_running_status() -> dict[str, Any] | None:
+    """返回当前运行中的手动扫描状态（无则 None）。
+
+    供前端「切走页面回来自动恢复进度跟踪」：OpsTab 挂载时查询一次，有运行中
+    任务则接上轮询，无需重新点「立即扫描」（任务跑在 backend 进程内，不因
+    页面切换而中断——只有 backend 进程重启才会丢失）。
+    """
+    for st in _SCANS.values():
+        if st["status"] == "running":
+            return scan_status(st["task_id"])
+    return None
+
+
 def scan_status(task_id: int) -> dict[str, Any] | None:
     """读取任务状态（供轮询）；未知/已随进程结束返回 None。"""
     st = _SCANS.get(task_id)

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App } from "antd";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,6 +17,7 @@ vi.mock("../api", () => ({
   resetDpSyncWatermark: vi.fn(),
   scanDpSyncNow: vi.fn(),
   getDpSyncScanStatus: vi.fn(),
+  getDpSyncCurrentScan: vi.fn(),
   cancelDpSyncScan: vi.fn(),
   forceCancelDpSyncScan: vi.fn(),
   listDataSources: vi.fn(),
@@ -67,6 +68,7 @@ describe("LineageDpSync", () => {
       progress: { stage: "done", total: 1, processed: 1, current_task_id: null },
       result: null,
     });
+    mockedApi.getDpSyncCurrentScan.mockResolvedValue({ running: false });
     mockedApi.cancelDpSyncScan.mockResolvedValue({ cancelled: true });
     mockedApi.forceCancelDpSyncScan.mockResolvedValue({ cancelled: true });
     mockedApi.listDataSources.mockResolvedValue({
@@ -258,7 +260,7 @@ describe("LineageDpSync", () => {
     await screen.findByText("运行记录");
     await user.click(screen.getByText(/立即全量扫描/));
     // 首帧（提交后立即轮询）：running → 实时进度展示
-    await screen.findByText(/扫描中：解析 SQL 节点并写血缘（已处理 2 \/ 10 个任务）/);
+    await screen.findByText(/扫描中：解析节点脚本并写血缘（已处理 2 \/ 10 个任务）/);
     expect(screen.getByText(/当前任务 #101/)).toBeInTheDocument();
     // 推进 1.6s（轮询间隔 1.5s）：第二帧 failed → 明确异常提示（不再显示「扫描完成」）
     await new Promise((r) => setTimeout(r, 1600));
@@ -352,6 +354,46 @@ describe("LineageDpSync", () => {
       expect(mockedApi.getDpSyncScanStatus).toHaveBeenCalledWith(9)
     );
     expect(mockedApi.scanDpSyncNow).toHaveBeenCalledTimes(1);
+  });
+
+  it("ops tab auto-resumes running scan progress when re-entered", async () => {
+    const user = userEvent.setup();
+    // 切走页面再回来：后端仍有运行中的手动扫描（OpsTab 挂载即自动接上轮询，
+    // 无需重新点「立即扫描」）
+    mockedApi.getDpSyncCurrentScan.mockResolvedValue({
+      running: true,
+      task_id: 5,
+      status: "running",
+      progress: { stage: "parsing", total: 20, processed: 8, current_task_id: 202 },
+      result: null,
+    });
+    mockedApi.getDpSyncScanStatus.mockResolvedValue({
+      task_id: 5,
+      status: "running",
+      progress: { stage: "parsing", total: 20, processed: 10, current_task_id: 202 },
+      result: null,
+    });
+    renderPage();
+    await user.click(screen.getByText(/运\s*维/));
+    await screen.findByText("运行记录");
+    // 未点「立即扫描」即自动恢复运行中任务进度
+    await screen.findByText(/扫描中：解析节点脚本并写血缘/);
+    expect(mockedApi.getDpSyncCurrentScan).toHaveBeenCalledTimes(1);
+    expect(mockedApi.getDpSyncScanStatus).toHaveBeenCalledWith(5);
+    expect(mockedApi.scanDpSyncNow).not.toHaveBeenCalled();
+  });
+
+  it("warns when selected step types include non-parseable (non-SQL) types", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/保\s*存/);
+    // 打开「节点类型」下拉（页面 Select 顺序：数据源/任务类型/节点类型——取第三个）
+    const selectors = document.querySelectorAll(".ant-select-selector");
+    expect(selectors.length).toBeGreaterThanOrEqual(3);
+    fireEvent.mouseDown(selectors[2]);
+    await user.click(await screen.findByText(/2 = DataX 同步/));
+    await screen.findByText(/所选节点类型包含无法解析为血缘的类型/);
+    expect(screen.getAllByText(/DataX 同步/).length).toBeGreaterThan(0);
   });
 
   it("source_id renders as data-source select and loads type/exclude meta", async () => {

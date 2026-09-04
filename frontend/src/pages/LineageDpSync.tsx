@@ -27,6 +27,7 @@ import {
   cancelDpSyncScan,
   forceCancelDpSyncScan,
   getDpSyncConfig,
+  getDpSyncCurrentScan,
   getDpSyncMeta,
   getDpSyncScanStatus,
   getDpSyncWatermark,
@@ -79,19 +80,41 @@ function fmt(v?: string | null): string {
 const SCAN_STAGE_LABEL: Record<string, string> = {
   queued: "排队中",
   collecting: "拉取变更任务集",
-  parsing: "解析 SQL 节点并写血缘",
+  // 中性表述：所选节点类型包含非 SQL 类型（Shell/DataX 等）时，管线同样把它们
+  // 的脚本按 SQL 文本尝试解析——避免误导为「只处理 SQL 节点」（原「解析 SQL 节点」）。
+  parsing: "解析节点脚本并写血缘",
   done: "已完成",
   cancelled: "已取消",
 };
-
-function scanStageText(stage?: string): string {
-  return SCAN_STAGE_LABEL[stage ?? ""] ?? stage ?? "准备中";
-}
 
 /** 类型选项目录的展示文本（内置已识别 / 探测未识别 + 条数）。 */
 function typeOptionLabel(o: DpSyncTypeOption): string {
   const suffix = o.known ? "" : "（未识别，可全选以覆盖）";
   return `${o.value} = ${o.label}${suffix} · ${o.count} 条`;
+}
+
+function scanStageText(stage?: string): string {
+  return SCAN_STAGE_LABEL[stage ?? ""] ?? stage ?? "准备中";
+}
+
+//: 不承载 SQL 脚本的节点类型（血缘解析仅实现 SQL 内容）：扫描命中只会得到
+//: no_flow/无法解析待抉择，不会产出血缘——配置页据此提示（不建议全选扫它们）。
+const NON_PARSEABLE_STEP_TYPES: ReadonlySet<number> = new Set([2, 3, 5, 9, 15]);
+
+/** 返回所选节点类型中「无法解析为血缘」的类型 label（配置页警示用）。 */
+function unparseableStepTypeLabels(
+  selected: number[] | undefined,
+  options: DpSyncTypeOption[]
+): string[] {
+  const byValue = new Map(options.map((o) => [o.value, o]));
+  const labels: string[] = [];
+  for (const v of selected ?? []) {
+    const opt = byValue.get(v);
+    if (opt && NON_PARSEABLE_STEP_TYPES.has(v)) {
+      labels.push(opt.label);
+    }
+  }
+  return labels;
 }
 
 export function LineageDpSync() {
@@ -141,6 +164,9 @@ export function LineageDpSync() {
 function ConfigTab() {
   const { message } = App.useApp();
   const [form] = Form.useForm();
+  // 节点类型选择实时跟踪——命中不可解析类型时给出警示（避免「全选=全部」把
+  // Shell/DataX/清表等非 SQL 节点扫成满屏待抉择单的误解）
+  const stepTypeFilter = Form.useWatch("step_type_filter", form);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [configured, setConfigured] = useState(false);
@@ -457,6 +483,19 @@ function ConfigTab() {
               </Form.Item>
             </Col>
           </Row>
+          {unparseableStepTypeLabels(stepTypeFilter, meta?.step_types ?? []).length >
+            0 && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="所选节点类型包含无法解析为血缘的类型"
+              description={`${unparseableStepTypeLabels(
+                stepTypeFilter,
+                meta?.step_types ?? []
+              ).join("、")} 的节点脚本不是 SQL（如 DataX 配置/Shell 脚本/清表/上报 ID/接口同步配置），系统只会把脚本按 SQL 文本尝试解析，绝大多数落「无流转」或「无法解析」待抉择单，不会产出血缘——若希望解析到真实血缘，请只保留承载 SQL 的节点类型（Hive/Spark SQL、SQL 执行脚本等）。`}
+            />
+          )}
           <Form.Item
             name="exclude_table_patterns"
             label="追加排除的表名正则（每行一条）"
@@ -939,6 +978,32 @@ function OpsTab() {
     },
     [finishScan, message, stopPolling]
   );
+
+  // 切走页面/Tab 再回来：若后端仍有运行中的手动扫描，自动接上进度轮询，无需
+  // 重新点「立即扫描」——任务跑在 backend 进程内不受页面切换影响（仅进程重启
+  // 会丢，registry 查询不到时此 effect 静默不打扰）。
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const cur = await getDpSyncCurrentScan();
+        if (cancelled || !cur?.running || cur.task_id == null) return;
+        setScanning(true);
+        setScanStatus(cur);
+        setScanTaskId(cur.task_id);
+        message.info("检测到扫描仍在运行，已恢复实时进度跟踪");
+        void pollOnce(cur.task_id);
+        pollTimer.current = window.setInterval(() => {
+          void pollOnce(cur.task_id as number);
+        }, 1500);
+      } catch {
+        // 查询失败（如任务已随进程结束）不打扰，运行记录表仍可见
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pollOnce, message]);
 
   const handleScanNow = async () => {
     setScanning(true);

@@ -3699,3 +3699,8 @@ export interface DpSyncScanSubmit {
   status: string;
   already_running: boolean;
 }
+
+/** 手动扫描「当前运行任务」查询结果（切走页面回来自动恢复进度跟踪） */
+export type DpSyncCurrentScan =
+  | ({ running: true } & DpSyncScanStatus)
+  | { running: false };

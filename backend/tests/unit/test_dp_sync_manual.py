@@ -82,6 +82,32 @@ async def test_scan_status_exposes_progress_and_error(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_current_running_status_returns_running_task(monkeypatch) -> None:
+    """切页自动恢复：仅当存在运行中任务时返回其状态（供前端接上轮询）。"""
+    running = _fake_state(8, status="running")
+    finished = _fake_state(9, status="success")
+    monkeypatch.setattr(manual, "_SCANS", {8: running, 9: finished})
+
+    data = manual.current_running_status()
+    assert data is not None
+    assert data["task_id"] == 8
+    assert data["status"] == "running"
+    assert "cancel_event" not in data  # 事件对象不外泄
+    assert "force_event" not in data
+
+
+@pytest.mark.asyncio
+async def test_current_running_status_none_when_idle(monkeypatch) -> None:
+    """无运行中任务（仅终态/空 registry）返回 None——前端不接轮询。"""
+    finished = _fake_state(10, status="cancelled")
+    monkeypatch.setattr(manual, "_SCANS", {10: finished})
+    assert manual.current_running_status() is None
+
+    monkeypatch.setattr(manual, "_SCANS", {})
+    assert manual.current_running_status() is None
+
+
+@pytest.mark.asyncio
 async def test_cancel_scan_accepts_running_only(monkeypatch) -> None:
     running = _fake_state(1, status="running")
     finished = _fake_state(2, status="success")

@@ -203,6 +203,7 @@ import {
   DpExcludePreview,
   DpSyncScanStatus,
   DpSyncScanSubmit,
+  DpSyncCurrentScan,
   API_BASE,
 } from "./types";
 
@@ -6006,6 +6007,13 @@ export async function getDpSyncScanStatus(
 ): Promise<DpSyncScanStatus> {
   return request<DpSyncScanStatus>(
     `${API_BASE}/lineage/dp-sync/scan/status/${taskId}`
+  );
+}
+
+/** 查询当前是否有运行中的手动扫描（切走页面回来自动恢复进度跟踪） */
+export async function getDpSyncCurrentScan(): Promise<DpSyncCurrentScan> {
+  return request<DpSyncCurrentScan>(
+    `${API_BASE}/lineage/dp-sync/scan/current`
   );
 }
 

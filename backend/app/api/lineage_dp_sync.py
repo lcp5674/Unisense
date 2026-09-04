@@ -470,6 +470,21 @@ async def scan_now(
 
 
 @router.get(
+    "/scan/current", response_model=ApiResponse, dependencies=_ADMIN_DEPS
+)
+async def get_current_scan():
+    """查询当前运行中的手动扫描（OpsTab 挂载时自动恢复进度跟踪用）。
+
+    有运行中任务 → ``{running: true, task_id, ...state}``；无 → ``{running: false}``。
+    任务 registry 在 backend 进程内，页面切走不中断；前端据此在回来时接上轮询。
+    """
+    state = dp_sync_manual.current_running_status()
+    if state is None:
+        return ok(data={"running": False})
+    return ok(data={"running": True, **state})
+
+
+@router.get(
     "/scan/status/{task_id}", response_model=ApiResponse, dependencies=_ADMIN_DEPS
 )
 async def get_scan_status(task_id: int):
