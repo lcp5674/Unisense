@@ -5,6 +5,11 @@ import {
   AssetGraph,
   applyLanes,
   layerOf,
+  collapseLayers,
+  markLaneSpan,
+  buildLineageAdjacency,
+  collectPathNodes,
+  collectPathEdges,
   type AssetGraphNode,
   type AssetGraphEdge,
 } from "../components/assetmap/AssetGraph";
@@ -18,7 +23,7 @@ const { graphMock } = vi.hoisted(() => ({
     setData: vi.fn(),
     getNodeData: vi.fn<() => Array<{ id: string; data?: Record<string, unknown> }>>(() => []),
     getNeighborNodesData: vi.fn(() => []),
-    setElementState: vi.fn(),
+    setElementState: vi.fn(() => Promise.resolve(undefined)),
     focusElement: vi.fn(),
     getZoom: vi.fn(() => 1),
   },
@@ -533,5 +538,222 @@ describe("AssetGraph 交互", () => {
     await user.click(await screen.findByText("依赖 ≥ 0（全部）"));
     await user.keyboard("{Escape}");
     await waitFor(() => expect(lastGraphData().nodes).toHaveLength(5));
+  });
+});
+
+describe("AssetGraph 专业降噪（第 3 层）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(graphMock.render).mockImplementation(() => Promise.resolve(undefined));
+    vi.mocked(graphMock.getZoom).mockReturnValue(1);
+  });
+
+  // —— 泳道折叠纯函数 ——
+  const foldNodes: AssetGraphNode[] = [
+    { id: "ods:o1", label: "ods_o1", type: "table", domain: "sales" },
+    { id: "ods:o2", label: "ods_o2", type: "table", domain: "finance" },
+    { id: "dwd:d1", label: "dwd_d1", type: "table", domain: "sales" },
+    { id: "dwd:d2", label: "dwd_d2", type: "table", domain: "sales" },
+    { id: "metric:m", label: "gmv", type: "metric", domain: "sales" },
+  ];
+  const foldEdges: AssetGraphEdge[] = [
+    { source: "ods:o1", target: "dwd:d1", type: "DERIVED_FROM" },
+    { source: "ods:o1", target: "dwd:d2", type: "DERIVED_FROM" },
+    { source: "dwd:d1", target: "dwd:d2", type: "DERIVED_FROM" }, // 层内边应丢弃
+    { source: "dwd:d1", target: "metric:m", type: "DERIVED_FROM" },
+    { source: "dwd:d2", target: "metric:m", type: "DERIVED_FROM" }, // 聚合后与上条同向同型→去重
+  ];
+
+  it("collapseLayers：折叠 dwd 层为聚合节点，内部边丢弃、外部边去重", () => {
+    const r = collapseLayers(foldNodes, foldEdges, ["dwd"]);
+    // 节点：2 ods + 1 聚合(dwd) + 1 metric = 4（d1/d2 被收走）
+    expect(r.nodes).toHaveLength(4);
+    expect(r.collapsedCount).toBe(2);
+    const agg = r.nodes.find((n) => n.id === "__fold_dwd__");
+    expect(agg).toBeDefined();
+    expect((agg as { collapsedLayer?: string }).collapsedLayer).toBe("dwd");
+    expect((agg as { collapsedCount?: number }).collapsedCount).toBe(2);
+    // 层内边（d1→d2）丢弃；o1→两个 dwd 合并为 1、dwd 两表→metric 合并为 1 → 共 2 条
+    expect(r.edges).toHaveLength(2);
+    expect(r.edges.some((e) => e.source === "dwd:d1" && e.target === "dwd:d2")).toBe(false);
+    expect(
+      r.edges.filter((e) => e.source === "__fold_dwd__" && e.target === "metric:m"),
+    ).toHaveLength(1);
+    expect(r.edges.some((e) => e.source === "ods:o1" && e.target === "__fold_dwd__")).toBe(true);
+  });
+
+  it("collapseLayers：空折叠/无命中层时原样返回", () => {
+    const r1 = collapseLayers(foldNodes, foldEdges, []);
+    expect(r1.nodes).toHaveLength(foldNodes.length);
+    expect(r1.collapsedCount).toBe(0);
+    const r2 = collapseLayers(foldNodes, foldEdges, ["ads"]); // ads 层不存在
+    expect(r2.nodes).toHaveLength(foldNodes.length);
+    expect(r2.collapsedCount).toBe(0);
+  });
+
+  it("collapseLayers：聚合节点参与 applyLanes 泳道归位（dwd 锚挂到聚合节点）", () => {
+    const r = collapseLayers(foldNodes, foldEdges, ["dwd"]);
+    const laned = applyLanes(r.nodes, r.edges as never);
+    // 折叠后存在 ods/dwd/metric 三类 → 泳道含 ods/dwd/metric；dwd 泳道挂载聚合节点
+    const anchors = laned.nodes.filter((n) => (n as { anchor?: boolean }).anchor);
+    expect(anchors.some((a) => a.id === "__lane_dwd__")).toBe(true);
+    expect(
+      laned.edges.some((e) => e.source === "__lane_dwd__" && e.target === "__fold_dwd__"),
+    ).toBe(true);
+  });
+
+  // —— 跨层跨度标记 ——
+  it("markLaneSpan：计算边两端泳道跨度（跨层长边 layerSpan≥2）", () => {
+    const nodesL = [
+      { id: "ods:a", label: "ods_a", type: "table" as const },
+      { id: "dwd:b", label: "dwd_b", type: "table" as const },
+      { id: "ads:c", label: "ads_c", type: "table" as const },
+      { id: "metric:m", label: "m", type: "metric" as const },
+    ];
+    const edgesL = [
+      { source: "ods:a", target: "dwd:b", type: "DERIVED_FROM" as const },
+      { source: "ods:a", target: "ads:c", type: "DERIVED_FROM" as const },
+      { source: "dwd:b", target: "metric:m", type: "DERIVED_FROM" as const },
+    ];
+    const spanned = markLaneSpan(edgesL as never, nodesL);
+    expect(spanned.find((e) => e.target === "dwd:b")?.layerSpan).toBe(1); // ods(0)→dwd(1)
+    expect(spanned.find((e) => e.target === "ads:c")?.layerSpan).toBe(3); // ods(0)→ads(3)
+    expect(spanned.find((e) => e.target === "metric:m")?.layerSpan).toBe(5); // dwd(1)→metric(6)
+  });
+
+  // —— 路径高亮 BFS ——
+  it("buildLineageAdjacency + collectPathNodes：上下游 K 跳收集血缘链节点", () => {
+    const chain = [
+      { source: "ods:o", target: "dwd:d", type: "DERIVED_FROM" },
+      { source: "dwd:d", target: "metric:m", type: "DERIVED_FROM" },
+      { source: "metric:m", target: "metric:m2", type: "DERIVED_FROM" },
+      { source: "other:x", target: "other:y", type: "DERIVED_FROM" }, // 无关链
+    ] as AssetGraphEdge[];
+    const adj = buildLineageAdjacency(chain);
+    // 从 dwd:d 出发 2 跳内：上游 ods:o、下游 metric:m（再 1 跳到 m2）
+    const path = collectPathNodes(adj, "dwd:d", 2, 100);
+    expect(path.has("ods:o")).toBe(true);
+    expect(path.has("metric:m")).toBe(true);
+    expect(path.has("metric:m2")).toBe(true);
+    expect(path.has("other:x")).toBe(false);
+    expect(path.has("other:y")).toBe(false);
+    // 路径边 = 两端都在路径节点集内
+    const pathEdges = collectPathEdges(chain, path);
+    expect(pathEdges.has("ods:o-dwd:d")).toBe(true);
+    expect(pathEdges.has("dwd:d-metric:m")).toBe(true);
+    expect(pathEdges.has("metric:m-metric:m2")).toBe(true);
+    expect(pathEdges.has("other:x-other:y")).toBe(false);
+  });
+
+  it("buildLineageAdjacency：忽略泳道锚定边（不参与血缘链）", () => {
+    const withAnchor = [
+      { source: "ods:o", target: "dwd:d", type: "DERIVED_FROM" },
+      { source: "__lane_ods__", target: "ods:o", type: "ANCHOR", anchorEdge: true },
+    ] as never;
+    const adj = buildLineageAdjacency(withAnchor as AssetGraphEdge[]);
+    // 锚定边被过滤：不产生 up/down 邻接；真实血缘边 ods:o→dwd:d 正常建立
+    expect(adj.up.get("dwd:d") ?? []).toEqual(["ods:o"]);
+    expect(adj.down.get("ods:o") ?? []).toEqual(["dwd:d"]);
+    expect(adj.up.get("ods:o") ?? []).toHaveLength(0); // __lane_ods__→ods:o 被过滤
+    expect(adj.down.get("__lane_ods__") ?? []).toHaveLength(0);
+  });
+
+  it("泳道折叠：工具栏出现折叠控件，折叠 dwd 后 setData 节点含聚合节点", async () => {
+    const user = userEvent.setup();
+    const multiNodes: AssetGraphNode[] = [
+      { id: "ods:o1", label: "ods_o1", type: "table", domain: "sales" },
+      { id: "dwd:d1", label: "dwd_d1", type: "table", domain: "sales" },
+      { id: "dwd:d2", label: "dwd_d2", type: "table", domain: "sales" },
+      { id: "metric:m", label: "gmv", type: "metric", domain: "sales" },
+    ];
+    const multiEdges: AssetGraphEdge[] = [
+      { source: "ods:o1", target: "dwd:d1", type: "DERIVED_FROM" },
+      { source: "ods:o1", target: "dwd:d2", type: "DERIVED_FROM" },
+      { source: "dwd:d1", target: "metric:m", type: "DERIVED_FROM" },
+      { source: "dwd:d2", target: "metric:m", type: "DERIVED_FROM" },
+    ];
+    render(<AssetGraph nodes={multiNodes} edges={multiEdges} height={300} lanes />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+    // lanes + 分层 + 泳道节点≥2 → 折叠控件出现
+    const foldSel = screen.getByTestId("asset-graph-collapse-lanes");
+    expect(foldSel).toBeTruthy();
+    // 折叠 dwd 层
+    fireEvent.mouseDown(foldSel.querySelector(".ant-select-selector") as Element);
+    await user.click(await screen.findByText(/DWD 明细层（2）/));
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      const data = lastGraphData();
+      // lanes 泳道：3 泳道锚点 + (ods:o1 + 聚合 + metric:m) = 6；d1/d2 被收走
+      expect(data.nodes).toHaveLength(6);
+      expect(data.nodes.some((n) => n.id === "__fold_dwd__")).toBe(true);
+      const agg = data.nodes.find((n) => n.id === "__fold_dwd__")?.data as AssetGraphNode;
+      expect((agg as { collapsedLayer?: string }).collapsedLayer).toBe("dwd");
+    });
+    // 折叠提示条出现（点击聚合节点可展开）
+    const foldBanner = await screen.findByTestId("asset-graph-fold-banner");
+    expect(foldBanner.textContent).toContain("2");
+  });
+
+  it("悬停路径高亮：点亮上下游血缘链节点与边，其余节点/边压暗（record 批量）", async () => {
+    const hoverNodes: AssetGraphNode[] = [
+      { id: "ods:o", label: "ods_o", type: "table" },
+      { id: "dwd:d", label: "dwd_d", type: "table" },
+      { id: "metric:m", label: "gmv", type: "metric" },
+      { id: "iso:i", label: "isolated", type: "table" }, // 与血缘链无关的孤立节点
+    ];
+    const hoverEdges: AssetGraphEdge[] = [
+      { source: "ods:o", target: "dwd:d", type: "DERIVED_FROM" },
+      { source: "dwd:d", target: "metric:m", type: "DERIVED_FROM" },
+    ];
+    graphMock.getNodeData.mockReturnValue(hoverNodes.map((n) => ({ id: n.id, data: n })));
+    render(<AssetGraph nodes={hoverNodes} edges={hoverEdges} height={300} />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+    await waitFor(() => expect(graphMock.setData).toHaveBeenCalled());
+    // 等 graphReady 置 true（render().then 微任务后）
+    await new Promise((r) => setTimeout(r, 20));
+
+    const enterHandler = graphMock.on.mock.calls.find(
+      ([name]) => name === "node:pointerenter",
+    )?.[1] as ((evt: { target: { id: string } }) => void) | undefined;
+    expect(enterHandler).toBeDefined();
+    // hover 中间节点 dwd:d → 上下游链 ods:o/dwd:d/metric:m 全点亮，孤立节点 iso:i 压暗
+    enterHandler?.({ target: { id: "dwd:d" } });
+    await waitFor(() => {
+      expect(graphMock.setElementState).toHaveBeenCalledWith(
+        expect.objectContaining({
+          "ods:o": "active",
+          "metric:m": "active",
+          "iso:i": "inactive",
+        }),
+        false,
+      );
+    });
+    // 边 record：链上两条边 active
+    expect(graphMock.setElementState).toHaveBeenCalledWith(
+      expect.objectContaining({ "ods:o-dwd:d": "active", "dwd:d-metric:m": "active" }),
+      false,
+    );
+
+    // hover 孤立节点 iso:i → 链上全部压暗
+    enterHandler?.({ target: { id: "iso:i" } });
+    await waitFor(() => {
+      expect(graphMock.setElementState).toHaveBeenCalledWith(
+        expect.objectContaining({ "dwd:d": "inactive", "metric:m": "inactive" }),
+        false,
+      );
+    });
+
+    // pointerleave 恢复全部为无状态
+    const leaveHandler = graphMock.on.mock.calls.find(
+      ([name]) => name === "node:pointerleave",
+    )?.[1] as (() => void) | undefined;
+    expect(leaveHandler).toBeDefined();
+    leaveHandler?.();
+    await waitFor(() => {
+      expect(graphMock.setElementState).toHaveBeenCalledWith(
+        expect.objectContaining({ "ods:o": [] }),
+        false,
+      );
+    });
   });
 });

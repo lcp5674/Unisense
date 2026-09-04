@@ -206,6 +206,8 @@ interface RenderEdge extends AssetGraphEdge {
   inCycle?: boolean;
   /** 语义泳道的隐藏锚定边（锚点间连线 / 锚点→真实节点挂载边，渲染时不可见） */
   anchorEdge?: boolean;
+  /** 两端节点的泳道跨度（|层差|），≥2 为跨层长边（线团主因，样式降噪用） */
+  layerSpan?: number;
 }
 
 // —— 数仓分层徽标 ——
@@ -236,6 +238,48 @@ export function layerOf(n: AssetGraphNode): string | null {
   return null;
 }
 
+// —— 语义泳道共享常量 ——
+// 泳道顺序与血缘方向一致：数仓分层（源头→应用）→ 其他表 → 指标 → 字段。
+// applyLanes / collapseLayers / laneOfNode / 跨层边捆绑 共用同一顺序，保证"层"判定一致。
+const LANE_ORDER = ["ods", "dwd", "dws", "ads", "dm", "table", "metric", "field"] as const;
+const LANE_LABEL: Record<string, string> = {
+  ods: "ODS 贴源层",
+  dwd: "DWD 明细层",
+  dws: "DWS 汇总层",
+  ads: "ADS 应用层",
+  dm: "DM 集市层",
+  table: "未分层表",
+  metric: "指标层",
+  field: "字段层",
+};
+
+/** 节点所属泳道：折叠聚合节点按其 collapsedLayer 归位；表按数仓前缀；指标/字段按语义带；
+ *  其余类型（other/unknown/上游中心节点）返回 ""（自由参与分层，不挂锚）。 */
+function laneOfNode(n: AssetGraphNode): string {
+  if ((n as { collapsedLayer?: string }).collapsedLayer) {
+    return (n as { collapsedLayer?: string }).collapsedLayer as string;
+  }
+  if (n.type === "table") {
+    const l = layerOf(n);
+    if (l) return l;
+    return "table";
+  }
+  if (n.type === "metric") return "metric";
+  if (n.type === "field" || String(n.type).indexOf("column") === 0) return "field";
+  return "";
+}
+
+/** 泳道序号（用于跨层跨度计算）；未知层返回 -1。 */
+function laneIndexOf(n: AssetGraphNode): number {
+  const lane = laneOfNode(n);
+  return LANE_ORDER.indexOf(lane as (typeof LANE_ORDER)[number]);
+}
+
+/** 折叠聚合节点的层标记读取/判断：节点是否为泳道折叠聚合节点。 */
+function collapsedLayerOf(n?: AssetGraphNode): string | undefined {
+  return (n as { collapsedLayer?: string } | undefined)?.collapsedLayer;
+}
+
 /**
  * 数仓分层泳道：为 dagre 分层插入隐藏锚点节点与锚定边，把节点按「数仓分层 + 语义带」
  * 聚进多条泳道（血缘方向：ODS → DWD → DWS → ADS/DM → 其他表 → 指标 → 字段）。
@@ -252,19 +296,8 @@ export function applyLanes(
   nodes: AssetGraphNode[],
   edges: RenderEdge[],
 ): { nodes: AssetGraphNode[]; edges: RenderEdge[] } {
-  // 泳道顺序与血缘方向一致：数仓分层（源头→应用）→ 其他表 → 指标 → 字段
-  const order = ["ods", "dwd", "dws", "ads", "dm", "table", "metric", "field"] as const;
-  const laneOf = (n: AssetGraphNode): string => {
-    if (n.type === "table") {
-      const l = layerOf(n);
-      if (l) return l;
-      return "table";
-    }
-    if (n.type === "metric") return "metric";
-    if (n.type === "field" || String(n.type).indexOf("column") === 0) return "field";
-    return "";
-  };
-  const present = order.filter((l) => nodes.some((n) => laneOf(n) === l));
+  const order = LANE_ORDER;
+  const present = order.filter((l) => nodes.some((n) => laneOfNode(n) === l));
   // 少于两类时泳道无意义（单类型带内 dagre 已天然分层），直接透传
   if (present.length < 2) return { nodes, edges };
 
@@ -289,7 +322,7 @@ export function applyLanes(
   for (const t of present) {
     const anchorId = `__lane_${t}__`;
     for (const n of nodes) {
-      if (laneOf(n) === t) {
+      if (laneOfNode(n) === t) {
         anchorEdges.push({ source: anchorId, target: n.id, type: "ANCHOR", anchorEdge: true });
       }
     }
@@ -315,6 +348,198 @@ function mergeBidirectionalEdges(edges: AssetGraphEdge[]): RenderEdge[] {
     result.push({ ...e, bidirectional: false });
   }
   return result;
+}
+
+/** 泳道折叠聚合节点在 AssetGraphNode 上扩展的字段（供样式/交互识别）。 */
+interface CollapsedNodeMeta {
+  /** 被折叠的泳道（ods/dwd/dws/ads/dm/table/metric/field） */
+  collapsedLayer?: string;
+  /** 被折叠的真实节点数 */
+  collapsedCount?: number;
+}
+
+/**
+ * 子图折叠（泳道折叠）：把某一数仓分层/语义带的全部节点收成一个「聚合节点」，
+ * 减少"中间层几十个表堆在一起"造成的视觉噪声。
+ * - 每个被折叠泳道生成一个聚合节点（id `__fold_{layer}__`，标记 collapsedLayer/collapsedCount，
+ *   归位到原泳道）；层内节点从图中移除；
+ * - 聚合节点与外部节点之间的边被保留并**按 (源,目标,类型) 去重**（多个层内节点连同一外部
+ *   节点 → 合并为一条）；两端都在被折叠层内的边（内部边）丢弃；
+ * - 已折叠聚合节点不再递归折叠；锚点（anchor）不受折叠影响（调用方在 applyLanes 前折叠）。
+ * 返回折叠后的 nodes/edges 与折叠统计（供工具栏显示"已折叠 N 层/M 节点"）。
+ */
+export function collapseLayers(
+  nodes: AssetGraphNode[],
+  edges: AssetGraphEdge[],
+  collapsed: readonly string[],
+): {
+  nodes: AssetGraphNode[];
+  edges: AssetGraphEdge[];
+  collapsedCount: number;
+} {
+  const wanted = new Set(collapsed);
+  if (wanted.size === 0) return { nodes, edges, collapsedCount: 0 };
+
+  // 按泳道分组被折叠节点（排除锚点与已折叠聚合节点）
+  const membersByLayer = new Map<string, AssetGraphNode[]>();
+  for (const n of nodes) {
+    if ((n as { anchor?: boolean }).anchor || collapsedLayerOf(n)) continue;
+    const lane = laneOfNode(n);
+    if (wanted.has(lane)) {
+      const list = membersByLayer.get(lane) ?? [];
+      list.push(n);
+      membersByLayer.set(lane, list);
+    }
+  }
+  if (membersByLayer.size === 0) return { nodes, edges, collapsedCount: 0 };
+
+  // 折叠映射：memberId → 聚合节点 id
+  const foldId = (lane: string) => `__fold_${lane}__`;
+  const memberToFold = new Map<string, string>();
+  const aggregateNodes: AssetGraphNode[] = [];
+  let collapsedCount = 0;
+  const typeFor = (lane: string): string => (lane === "metric" || lane === "field" ? lane : "table");
+
+  for (const [lane, members] of membersByLayer) {
+    collapsedCount += members.length;
+    const aggId = foldId(lane);
+    for (const m of members) memberToFold.set(String(m.id), aggId);
+    // 聚合节点：域取该层出现最多的域（无则取第一个非空），保持聚合节点也按域着色统一观感
+    const domainCount = new Map<string, number>();
+    for (const m of members) {
+      if (m.domain) domainCount.set(m.domain, (domainCount.get(m.domain) ?? 0) + 1);
+    }
+    let domain: string | undefined;
+    let max = -1;
+    for (const [d, c] of domainCount) {
+      if (c > max) {
+        max = c;
+        domain = d;
+      }
+    }
+    const agg: AssetGraphNode & CollapsedNodeMeta = {
+      id: aggId,
+      type: typeFor(lane),
+      label: `${LANE_LABEL[lane] ?? lane}（${members.length}）`,
+      domain,
+      collapsedLayer: lane,
+      collapsedCount: members.length,
+    };
+    aggregateNodes.push(agg as AssetGraphNode);
+  }
+
+  // 边重定向 + 去重 + 内部边丢弃
+  const remaining = nodes.filter((n) => !memberToFold.has(String(n.id)));
+  const seen = new Set<string>();
+  const outEdges: AssetGraphEdge[] = [];
+  for (const e of edges) {
+    const ns = memberToFold.get(String(e.source)) ?? e.source;
+    const nt = memberToFold.get(String(e.target)) ?? e.target;
+    if (ns === nt) continue; // 折叠层内部边丢弃
+    const key = `${ns}__${nt}__${e.type}`;
+    if (seen.has(key)) continue; // 聚合后重复边去重
+    seen.add(key);
+    outEdges.push({ ...e, source: ns, target: nt });
+  }
+  return { nodes: [...remaining, ...aggregateNodes], edges: outEdges, collapsedCount };
+}
+
+/** 跨层边跨度标记：计算每条边两端节点的泳道跨度（|层差|），供"跨层长边"样式降噪。 */
+export function markLaneSpan(
+  edges: RenderEdge[],
+  nodes: AssetGraphNode[],
+): RenderEdge[] {
+  const idxById = new Map<string, number>();
+  for (const n of nodes) idxById.set(String(n.id), laneIndexOf(n));
+  const getIdx = (id: string): number => {
+    const i = idxById.get(id);
+    if (i !== undefined && i >= 0) return i;
+    // 节点不在当前列表（锚点/外部）——给一个中性值，不参与"跨层"判定
+    return -1;
+  };
+  return edges.map((e) => {
+    const a = getIdx(e.source);
+    const b = getIdx(e.target);
+    if (a < 0 || b < 0) return { ...e, layerSpan: 0 };
+    return { ...e, layerSpan: Math.abs(a - b) };
+  });
+}
+
+// —— 路径高亮（替代 1 跳邻域淡化）——
+// hover 节点时点亮它的"血缘链"：沿边的两个方向各向外 K 跳收集上下游节点与路径边，
+// 其余节点/边压暗——用户一眼看出"这个节点从哪来、流向哪、和谁同链"，比 1 跳邻域更有信息量。
+const PATH_MAX_DEPTH = 3; // 上游/下游各最多追溯 3 跳
+const PATH_MAX_NODES = 120; // 防枢纽节点路径爆炸（超限按 BFS 层截断）
+
+/** 血缘邻接表：source→target 视为数据流方向（上游→下游）。排除锚定边。 */
+export interface LineageAdjacency {
+  /** nodeId → 上游节点（指向它的 source 集合） */
+  up: Map<string, string[]>;
+  /** nodeId → 下游节点（它指向的 target 集合） */
+  down: Map<string, string[]>;
+}
+
+export function buildLineageAdjacency(edges: AssetGraphEdge[]): LineageAdjacency {
+  const up = new Map<string, string[]>();
+  const down = new Map<string, string[]>();
+  for (const e of edges) {
+    if ((e as RenderEdge | undefined)?.anchorEdge) continue; // 锚定边不参与血缘链
+    const s = String(e.source);
+    const t = String(e.target);
+    const u = up.get(t) ?? [];
+    u.push(s);
+    up.set(t, u);
+    const d = down.get(s) ?? [];
+    d.push(t);
+    down.set(s, d);
+  }
+  return { up, down };
+}
+
+/**
+ * 从中心节点沿上下游 BFS 收集 K 跳内的路径节点集（含中心）。层序截断保证
+ * 超限时保留"离中心最近"的节点（BFS 天然近者优先）。
+ */
+export function collectPathNodes(
+  adj: LineageAdjacency,
+  center: string,
+  maxDepth = PATH_MAX_DEPTH,
+  maxNodes = PATH_MAX_NODES,
+): Set<string> {
+  const visited = new Set<string>([center]);
+  let frontier = [center];
+  for (let depth = 0; depth < maxDepth; depth += 1) {
+    if (visited.size >= maxNodes) break;
+    const next: string[] = [];
+    for (const id of frontier) {
+      for (const nb of [...(adj.up.get(id) ?? []), ...(adj.down.get(id) ?? [])]) {
+        if (!visited.has(nb)) {
+          visited.add(nb);
+          next.push(nb);
+          if (visited.size >= maxNodes) break;
+        }
+      }
+      if (visited.size >= maxNodes) break;
+    }
+    if (next.length === 0) break;
+    frontier = next;
+  }
+  return visited;
+}
+
+/** 路径边 = 两端都在路径节点集内的真实血缘边（锚定边除外）。 */
+export function collectPathEdges(
+  edges: AssetGraphEdge[],
+  pathNodes: Set<string>,
+): Set<string> {
+  const out = new Set<string>();
+  for (const e of edges) {
+    if ((e as RenderEdge | undefined)?.anchorEdge) continue;
+    if (pathNodes.has(String(e.source)) && pathNodes.has(String(e.target))) {
+      out.add(`${String(e.source)}-${String(e.target)}`);
+    }
+  }
+  return out;
 }
 
 /** Tarjan 强连通分量：返回尺寸>2 的分量（真实循环依赖，区别于双向边 2-cycle）。 */
@@ -635,6 +860,10 @@ function GraphCanvas({
   const [renderFailed, setRenderFailed] = useState(false);
   // 图是否渲染完成（state 驱动搜索高亮 effect 在重挂载后自动重跑）
   const [graphReady, setGraphReady] = useState(false);
+  // graphReady 的 ref 镜像：mount effect 内注册的 G6 事件回调（闭包捕获 mount 时初值）
+  // 需读最新渲染状态——用 ref 规避闭包过期（修复：旧 hover 回调因捕获 graphReady=false 从不生效）
+  const graphReadyRef = useRef(false);
+  graphReadyRef.current = graphReady;
   // 边流动动画的取消函数（render 后启动、数据重载/卸载时取消）
   const edgeFlowCancelRef = useRef<(() => void) | null>(null);
 
@@ -664,6 +893,12 @@ function GraphCanvas({
   inDegreeMapRef.current = inDegreeMap;
   const outDegreeMapRef = useRef(outDegreeMap);
   outDegreeMapRef.current = outDegreeMap;
+  // 血缘邻接表（排除锚定边）：hover 路径高亮用，BFS 收集上下游 K 跳（非 1 跳邻域）
+  const adjacency = useMemo(() => buildLineageAdjacency(edges), [edges]);
+  const adjacencyRef = useRef(adjacency);
+  adjacencyRef.current = adjacency;
+  const edgesRef = useRef(edges);
+  edgesRef.current = edges;
   const cycleNodes = useMemo(
     () => findTrueCycles(edges, nodes.map((n) => n.id)),
     [edges, nodes],
@@ -705,15 +940,25 @@ function GraphCanvas({
       const cyc = cycleNodesRef.current.has(id);
       const layer = layerMapRef.current.get(id);
       const d = degreeMapRef.current.get(id) ?? 0;
+      // 泳道折叠聚合节点：用该泳道层色做填充 + 白色粗描边（可点击展开的视觉暗示），
+      // 与普通按域着色节点区分——一眼看出"这是一个折叠层，点击可展开"。
+      const cl = collapsedLayerOf(n);
       // 血缘度缩放（与渲染一致性）：原始 r = max(base, 12 + degree*1.2)，表*2.0/字段*1.3
       const r = Math.max(base, 12 + d * 1.2);
-      const size =
-        t === "table" ? [r * 2.0, r * 1.2] : t === "field" ? [r * 1.3, r * 0.7] : r;
-      const fill = cyc
-        ? "#ff8a80"
-        : n?.domain
-          ? _allocateDomainColor(n.domain)
-          : TYPE_FALLBACK_COLOR[n?.type ?? "unknown"] ?? TYPE_FALLBACK_COLOR.unknown;
+      const size = cl
+        ? [r * 2.6, r * 1.6] // 聚合节点略大，便于点击展开
+        : t === "table"
+          ? [r * 2.0, r * 1.2]
+          : t === "field"
+            ? [r * 1.3, r * 0.7]
+            : r;
+      const fill = cl
+        ? (LAYER_STROKE[cl] ?? "#475569")
+        : cyc
+          ? "#ff8a80"
+          : n?.domain
+            ? _allocateDomainColor(n.domain)
+            : TYPE_FALLBACK_COLOR[n?.type ?? "unknown"] ?? TYPE_FALLBACK_COLOR.unknown;
       // 径向渐变填充：中心提亮 → 0.55 主色 → 边缘微压暗，节点呈轻微球面感。
       // 提亮/压暗幅度收紧（38/8 而非 62/18）避免小节点下中心过白、边缘过暗导致"脏"或
       // 与白底标签对比变差；@antv/g 的 r(cx,cy,r) 渐变按 shape bbox 归一化，字符串预计算
@@ -721,13 +966,15 @@ function GraphCanvas({
       const gradFill = `r(0.5, 0.5, 0.5) 0:${lightenHex(fill, 38)} 0.55:${fill} 1:${darkenHex(fill, 8)}`;
       const stroke = cyc
         ? "#e65100"
-        : n?.pii
-          ? "#c62828"
-          : layer
-            ? (LAYER_STROKE[layer] ?? "#ffffff")
-            : "#ffffff";
-      const lineWidth = cyc ? 3.5 : n?.pii ? 3 : layer ? 2.5 : 2;
-      const hub = !cyc && d >= 8;
+        : cl
+          ? "#ffffff" // 聚合节点：白描边强调可点击
+          : n?.pii
+            ? "#c62828"
+            : layer
+              ? (LAYER_STROKE[layer] ?? "#ffffff")
+              : "#ffffff";
+      const lineWidth = cyc ? 3.5 : cl ? 3 : n?.pii ? 3 : layer ? 2.5 : 2;
+      const hub = !cyc && !cl && d >= 8;
       map.set(id, { size, fill: gradFill, stroke, lineWidth, hub });
     }
     return map;
@@ -978,30 +1225,40 @@ function GraphCanvas({
             },
             // 粗细与透明度按「两端血缘度总和」分层：骨干边（连接枢纽）清晰突出，
             // 叶子边淡雅退后，形成"主干醒目、枝叶退让"的视觉层次。
+            // 跨层长边（layerSpan≥2，泳道间直达、横穿多层）是线团视觉主因：额外降一档
+            // 透明度 + 细线，让"跨层束"整体退后为淡色底纹，避免与层内骨干边抢视觉。
             lineWidth: (e) => {
               const d = e.data as RenderEdge | undefined;
               if (d?.anchorEdge) return 0;
+              const span = d?.layerSpan ?? 0;
               const total =
                 (degreeMapRef.current.get(String(e.source)) ?? 0) +
                 (degreeMapRef.current.get(String(e.target)) ?? 0);
-              return d?.inCycle ? 2.4 : total >= 10 ? 1.9 : total >= 5 ? 1.5 : 1.2;
+              if (d?.inCycle) return 2.4;
+              if (span >= 2) return 1.1; // 跨层束：统一细线
+              return total >= 10 ? 1.9 : total >= 5 ? 1.5 : 1.2;
             },
             strokeOpacity: (e) => {
               const d = e.data as RenderEdge | undefined;
               if (d?.anchorEdge) return 0;
               if (d?.inCycle) return 1;
+              const span = d?.layerSpan ?? 0;
               const total =
                 (degreeMapRef.current.get(String(e.source)) ?? 0) +
                 (degreeMapRef.current.get(String(e.target)) ?? 0);
+              if (span >= 2) return 0.22; // 跨层束：统一淡透明度（层内按血缘度分层）
               return total >= 10 ? 0.92 : total >= 5 ? 0.75 : 0.52;
             },
             // 虚线分层：骨干边（连接枢纽，血缘度总和≥10）用「数据流管道」式虚线 + 流动动画
             //（见 startEdgeFlow），次骨干（≥5）细虚线静态，叶子边实线——与线宽/透明度分层呼应，
             // 形成"主干流动、枝叶静止"的方向感。环边保留红色虚线警示。
+            // 跨层长边（span≥2）不再参与虚线分层（保持实线淡色底纹，避免虚线加剧"乱"）。
             lineDash: (e) => {
               const d = e.data as RenderEdge | undefined;
               if (d?.anchorEdge) return undefined;
               if (d?.inCycle) return [6, 4];
+              const span = d?.layerSpan ?? 0;
+              if (span >= 2) return undefined;
               const total =
                 (degreeMapRef.current.get(String(e.source)) ?? 0) +
                 (degreeMapRef.current.get(String(e.target)) ?? 0);
@@ -1016,6 +1273,12 @@ function GraphCanvas({
               return d?.bidirectional ? true : false;
             },
             radius: 10,
+          },
+          // 路径高亮状态（hover 血缘链）：active=链上边醒目（加亮不加粗，保留方向箭头），
+          // inactive=非链边整体压暗到 0.05，让"从哪来/流向哪"一目了然。
+          state: {
+            active: { strokeOpacity: 0.95 },
+            inactive: { strokeOpacity: 0.05 },
           },
           // 边动画：加载淡入、移除淡出。translate 显式 false——force 布局迭代时
           // 边端点位置由 G6 内部驱动，位置动画会触发 draw 崩溃（与节点同理）。
@@ -1080,15 +1343,14 @@ function GraphCanvas({
         if (node && !node.anchor) onNodeClickRef.current?.(node); // 泳道锚点不响应点击
       });
 
-      // 悬停邻域高亮：相邻节点高亮，其余淡化（图销毁/渲染过渡期的在途事件一律忽略）。
+      // 悬停路径高亮（替代旧 1 跳邻域淡化）：沿血缘边上下游各 K 跳收集"血缘链"节点与
+      // 路径边，链上节点/边高亮、其余全部压暗——一眼看出节点从哪来、流向哪、与谁同链。
       // 性能优化：pointerenter 高频触发（跨节点移动），用 rAF 节流到每帧只处理最后一次；
-      // setElementState 改为**批量 record**（单次调用），替代逐节点循环（160+ 次调用 + 全量重绘
-      // 是 rAF 550ms 卡顿的直接来源）。
-      // 中心节点单独 setElementState(..., true) 走 update 标量动画（描边/光晕 200ms 过渡），
-      // 视觉上"点亮"更柔和；邻域其余节点仍批量瞬时，保证大图性能。
+      // 节点与边各用**批量 record**（单次调用），替代逐节点循环。
+      // 中心节点单独 setElementState(..., true) 走 update 标量动画（描边/光晕 200ms 过渡）。
       let hoverRaf = 0;
       graph.on<IElementEvent>("node:pointerenter", (evt) => {
-        if (!graph || graph.destroyed || !graphReady) return;
+        if (!graph || graph.destroyed || !graphReadyRef.current) return;
         const raw = evt.target as { id?: string; __data__?: { id?: string } } | undefined;
         const id = raw?.id ?? raw?.__data__?.id;
         if (!id) return;
@@ -1096,30 +1358,48 @@ function GraphCanvas({
         hoverRaf = requestAnimationFrame(() => {
           if (!graph || graph.destroyed) return;
           try {
-            const neighbors = graph.getNeighborNodesData(String(id));
-            const active = new Set<string>([String(id), ...neighbors.map((n) => String(n.id))]);
-            const record: Record<string, string | string[]> = {};
+            const center = String(id);
+            // 路径节点集 + 路径边集（BFS 层序，超限保留近者）
+            const pathNodes = collectPathNodes(adjacencyRef.current, center);
+            const pathEdges = collectPathEdges(edgesRef.current, pathNodes);
+            // 节点状态：路径链上 active，其余 inactive（淡化到 0.06）
+            const nodeRecord: Record<string, string | string[]> = {};
             for (const n of graph.getNodeData()) {
-              if (String(n.id) !== String(id)) {
-                record[String(n.id)] = active.has(String(n.id))
-                  ? stateWithCompact("active")
-                  : stateWithCompact("inactive");
-              }
+              const nid = String(n.id);
+              if (nid === center) continue; // 中心节点单独动画点亮
+              nodeRecord[nid] = pathNodes.has(nid)
+                ? stateWithCompact("active")
+                : stateWithCompact("inactive");
             }
-            void graph.setElementState(record, false).catch(() => {});
-            void graph.setElementState(String(id), stateWithCompact("active"), true).catch(() => {});
+            // 边状态：路径边保持醒目，非路径边压暗（锚定边跳过）
+            const edgeRecord: Record<string, string | string[]> = {};
+            for (const e of edgesRef.current) {
+              if ((e as RenderEdge | undefined)?.anchorEdge) continue;
+              const eid = `${String(e.source)}-${String(e.target)}`;
+              edgeRecord[eid] = pathEdges.has(eid) ? "active" : "inactive";
+            }
+            void graph.setElementState(nodeRecord, false).catch(() => {});
+            void graph.setElementState(edgeRecord, false).catch(() => {});
+            void graph.setElementState(center, stateWithCompact("active"), true).catch(() => {});
           } catch {
             // 高亮为装饰性交互，过渡期失败静默忽略
           }
         });
       });
       graph.on("node:pointerleave", () => {
-        if (!graph || graph.destroyed || !graphReady) return;
+        if (!graph || graph.destroyed || !graphReadyRef.current) return;
         cancelAnimationFrame(hoverRaf);
         try {
-          const record: Record<string, string | string[]> = {};
-          for (const n of graph.getNodeData()) record[String(n.id)] = stateWithCompact([]);
-          void graph.setElementState(record, false).catch(() => {});
+          // 恢复全部节点与边为无状态（回落到 style 函数默认值）
+          const nodeRecord: Record<string, string | string[]> = {};
+          for (const n of graph.getNodeData()) nodeRecord[String(n.id)] = stateWithCompact([]);
+          const edgeRecord: Record<string, string | string[]> = {};
+          for (const e of edgesRef.current) {
+            if ((e as RenderEdge | undefined)?.anchorEdge) continue;
+            edgeRecord[`${String(e.source)}-${String(e.target)}`] = [];
+          }
+          void graph.setElementState(nodeRecord, false).catch(() => {});
+          void graph.setElementState(edgeRecord, false).catch(() => {});
         } catch {
           // 忽略过渡期状态清理失败
         }
@@ -1380,6 +1660,9 @@ export function AssetGraph({
   // 由工具栏「方向」Select 手动切换；prop direction 作为初始值（父组件可指定首屏方向）。
   const [directionState, setDirectionState] = useState<"TB" | "LR">(direction);
   useEffect(() => setDirectionState(direction), [direction]);
+  // 泳道折叠（子图折叠）：把某数仓分层/语义带的全部节点收成一个聚合节点，减少中间层堆叠噪声。
+  // collapsedLayers 为当前折叠的泳道集合；工具栏多选切换，点击聚合节点单独展开该层。
+  const [collapsedLayers, setCollapsedLayers] = useState<string[]>([]);
   // 全屏展示：portal 到 body 的 fixed overlay（复用同一实例 UI 状态，筛选/搜索/布局不丢失）
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
 
@@ -1437,16 +1720,28 @@ export function AssetGraph({
     [degreeFilteredNodes, edges, showAll],
   );
 
+  // 泳道折叠（子图折叠）：在环检测/泳道之前把被折叠泳道的节点收成聚合节点。
+  // 折叠后节点/边进入后续全部管线（合并双向边→环检测→泳道），保证聚合节点也参与
+  // 环/泳道语义（聚合节点按 collapsedLayer 归位原泳道）。
+  const folded = useMemo(
+    () => collapseLayers(visibleNodes, visibleEdges, collapsedLayers),
+    [visibleNodes, visibleEdges, collapsedLayers],
+  );
+  const foldNodes = folded.nodes;
+  const foldEdges = folded.edges;
+
   // 环检测 + 双向边合并：A↔B 合并为双箭头减少视觉噪声；SCC>2 的真环单独标记
-  const mergedEdges = useMemo(() => mergeBidirectionalEdges(visibleEdges), [visibleEdges]);
+  const mergedEdges = useMemo(() => mergeBidirectionalEdges(foldEdges), [foldEdges]);
   const cycleNodes = useMemo(
-    () => findTrueCycles(mergedEdges, visibleNodes.map((n) => n.id)),
-    [mergedEdges, visibleNodes],
+    () => findTrueCycles(mergedEdges, foldNodes.map((n) => n.id)),
+    [mergedEdges, foldNodes],
   );
   const renderEdges = useMemo(
     () => markCycleEdges(mergedEdges, cycleNodes),
     [mergedEdges, cycleNodes],
   );
+  // 跨层跨度标记（层间边束降噪）：基于折叠后节点计算泳道跨度。节点/边变化时重算。
+  const spanEdges = useMemo(() => markLaneSpan(renderEdges, foldNodes), [renderEdges, foldNodes]);
   // 布局策略：泳道模式强制分层（dagre acyclic 翻转环边 + 环标记，环不再毁掉全图秩序）；
   // 否则 auto=有真环用力导向（环图 dagre 渲染异常），无环用分层；手动覆盖优先
   const layoutMode = useMemo<"hierarchy" | "force" | "radial">(() => {
@@ -1461,22 +1756,36 @@ export function AssetGraph({
   // 力导向大图边降采样：仅 force 布局 + 边数超阈值时按「两端血缘度和」降序保留枢纽边。
   // 用「边数」判断（而非节点数）——节点被 160 限流后边可能仍上千，边才是力导向密集的主因。
   const layoutEdges = useMemo(() => {
-    if (layoutMode !== "force") return renderEdges;
+    if (layoutMode !== "force") return spanEdges;
     const dm = new Map<string, number>();
-    for (const e of renderEdges) {
+    for (const e of spanEdges) {
       dm.set(e.source, (dm.get(e.source) ?? 0) + 1);
       dm.set(e.target, (dm.get(e.target) ?? 0) + 1);
     }
-    return filterDenseForceEdges(renderEdges, dm, renderEdges.length > MAX_FORCE_DENSE_EDGES);
-  }, [layoutMode, renderEdges]);
+    return filterDenseForceEdges(spanEdges, dm, spanEdges.length > MAX_FORCE_DENSE_EDGES);
+  }, [layoutMode, spanEdges]);
 
   // 语义泳道：仅分层布局下插入隐藏锚点 + 锚定边（力导向不需要泳道）
   const laneData = useMemo(() => {
     if (!lanes || layoutMode !== "hierarchy") {
-      return { nodes: visibleNodes, edges: layoutEdges };
+      return { nodes: foldNodes, edges: layoutEdges };
     }
-    return applyLanes(visibleNodes, layoutEdges);
-  }, [lanes, layoutMode, visibleNodes, layoutEdges]);
+    return applyLanes(foldNodes, layoutEdges);
+  }, [lanes, layoutMode, foldNodes, layoutEdges]);
+
+  // 可折叠泳道候选：当前可见节点中节点数 ≥2 的泳道（单节点泳道折叠无意义）。
+  // 仅泳道模式（lanes && hierarchy）下提供折叠控件——折叠语义依赖泳道归位。
+  const collapsibleOptions = useMemo(() => {
+    if (!lanes || layoutMode !== "hierarchy") return [];
+    const cnt = new Map<string, number>();
+    for (const n of visibleNodes) {
+      const lane = laneOfNode(n);
+      if (lane) cnt.set(lane, (cnt.get(lane) ?? 0) + 1);
+    }
+    return [...cnt.entries()]
+      .filter(([, c]) => c >= 2)
+      .map(([lane, c]) => ({ value: lane, label: `${LANE_LABEL[lane] ?? lane}（${c}）` }));
+  }, [lanes, layoutMode, visibleNodes]);
 
   if (nodes.length === 0) {
     return <Empty description="暂无图谱数据" />;
@@ -1538,6 +1847,35 @@ export function AssetGraph({
             <b style={{ color: "#e53935" }}> 红色虚线</b>为环边（见下图例）。
             这通常是 ETL 回流或配置错误，请检查相关表的加工链。
           </span>
+        </div>
+      )}
+      {folded.collapsedCount > 0 && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "6px 12px",
+            marginBottom: 8,
+            background: "rgba(124,58,237,0.08)",
+            border: "1px solid rgba(124,58,237,0.35)",
+            borderRadius: 6,
+            fontSize: 13,
+            color: "#5b21b6",
+          }}
+          data-testid="asset-graph-fold-banner"
+        >
+          <span>
+            已折叠 <b>{folded.collapsedCount}</b> 个节点为泳道聚合节点（紫色层色块，点击可展开该层）。
+            工具栏「泳道折叠」可调整；跨层长边已弱化为淡色底纹，聚焦核心血缘链更清晰。
+          </span>
+          <Button
+            size="small"
+            type="link"
+            onClick={() => setCollapsedLayers([])} // 数据 effect 随折叠变化自动 setData 重排
+          >
+            全部展开
+          </Button>
         </div>
       )}
       <div
@@ -1610,6 +1948,19 @@ export function AssetGraph({
             ]}
           />
         )}
+        {collapsibleOptions.length > 0 && (
+          <Select
+            mode="multiple"
+            allowClear
+            placeholder="泳道折叠（中间层收束）"
+            style={{ minWidth: 210 }}
+            value={collapsedLayers}
+            onChange={(v: string[]) => setCollapsedLayers(v)}
+            options={collapsibleOptions}
+            maxTagCount="responsive"
+            data-testid="asset-graph-collapse-lanes"
+          />
+        )}
         <Button
           size="middle"
           data-testid="asset-graph-show-fields"
@@ -1638,7 +1989,15 @@ export function AssetGraph({
           direction={directionState}
           height={h}
           searchText={searchText}
-          onNodeClick={(n) => onNodeClickRef.current?.(n)}
+          onNodeClick={(n) => {
+            // 泳道聚合节点：点击=展开该泳道（回到未折叠），不触发外部下钻
+            const cl = collapsedLayerOf(n);
+            if (cl) {
+              setCollapsedLayers((prev) => prev.filter((l) => l !== cl));
+              return;
+            }
+            onNodeClickRef.current?.(n);
+          }}
           onReady={() => setLayoutSwitching(false)}
           layerBadges={layerBadges}
         />
