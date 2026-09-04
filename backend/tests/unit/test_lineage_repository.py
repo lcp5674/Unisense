@@ -1118,6 +1118,8 @@ async def test_resolve_node_meta_empty_and_unknown() -> None:
         "pii": False,
         "domain": None,
         "owner": None,
+        # 表节点统一携带派生分层（库名未命中 dw_layer 字典 → None，保持未分层）
+        "dw_layer": None,
     }
 
 

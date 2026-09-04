@@ -26,6 +26,10 @@ from app.models.lineage import LineageEdge
 from app.models.metric import Metric
 from app.models.user import User
 from app.services.semantic.visibility import metric_visibility_conditions
+from app.services.system_dict.layers import (
+    derive_dw_layer_from_catalog_name,
+    load_active_dw_layer_codes,
+)
 
 logger = structlog.get_logger("unisense.assetmap.repository")
 
@@ -1049,6 +1053,9 @@ class AssetMapRepository:
             .where(*filters)
         )
         rows = (await self._session.execute(catalog_stmt.limit(self._GRAPH_CATALOG_LIMIT))).all()
+        # 数仓分层以 dw_layer 字典 active 码为唯一事实源（读路径派生，不新增持久化列）：
+        # 库名后缀命中字典码即归层，字典补录 dim/mid 等扩展层后自动生效，无需重新采集。
+        layer_codes = await load_active_dw_layer_codes(self._session)
         nodes: list[dict[str, Any]] = []
         domain_by_id: dict[str, str | None] = {}
         seen: set[str] = set()
@@ -1067,6 +1074,7 @@ class AssetMapRepository:
                     "pii": bool(row.sensitivity_level and "PII" in row.sensitivity_level),
                     "domain": row.domain,
                     "owner": str(row.owner_id) if row.owner_id else None,
+                    "dw_layer": derive_dw_layer_from_catalog_name(row.entity_name, layer_codes),
                 }
             )
         return nodes, domain_by_id

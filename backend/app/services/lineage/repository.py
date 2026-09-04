@@ -19,6 +19,10 @@ from app.models.dp_sync import LineageFieldMapping
 from app.models.lineage import LineageEdge, LineageEdgeHistory, LineageIngestRun
 from app.models.metric import Metric
 from app.services.lineage.parser import node_column, node_dimension, node_table
+from app.services.system_dict.layers import (
+    derive_dw_layer_from_catalog_name,
+    load_active_dw_layer_codes,
+)
 
 
 def merge_provenances(existing: str | None, incoming: str) -> str:
@@ -1473,6 +1477,15 @@ class LineageRepository:
                 dom = field_domain.get(table_part)
                 if dom:
                     meta["domain"] = dom
+        # 表节点数仓分层：以 dw_layer 字典为唯一事实源，按 ``库.表`` 名派生
+        # （库名后缀命中字典 active 码即归层；字典未收录的分层在管理员补录后
+        # 自动归层，无需重新采集）。指标侧已随 Metric.dw_layer 下发，表侧在此统一派生。
+        layer_codes = await load_active_dw_layer_codes(self._db)
+        for nid, meta in result.items():
+            if nid.startswith("table:"):
+                meta["dw_layer"] = derive_dw_layer_from_catalog_name(
+                    nid[len("table:") :], layer_codes
+                )
         return result
 
     @staticmethod

@@ -277,6 +277,12 @@ class TestGraphFromMysql:
         r.all.return_value = []
         return r
 
+    def _dw_layer_rows(self, codes: list[str] | None = None) -> MagicMock:
+        """dw_layer 字典 active 码查询 mock（表节点分层派生的第一查；默认空=全部未分层）。"""
+        r = MagicMock()
+        r.all.return_value = [(c,) for c in (codes or [])]
+        return r
+
     def _lineage_names(self, names: list[str] | None = None) -> MagicMock:
         """血缘边引用的表名查询 mock（scalars().all() 返回完整 ``table:`` 节点）。"""
         r = MagicMock()
@@ -297,7 +303,13 @@ class TestGraphFromMysql:
         r_edges = MagicMock()
         r_edges.all.return_value = [self._edge("table:sales.ods", "metric:sales_gmv_amount_day")]
         s.execute = AsyncMock(
-            side_effect=[r_metrics, self._lineage_names(), self._empty_rows(), r_edges]
+            side_effect=[
+                r_metrics,
+                self._lineage_names(),
+                self._empty_rows(),
+                self._dw_layer_rows(),
+                r_edges,
+            ]
         )
 
         nodes, edges = await repo.graph_from_mysql(domain="sales", pii_only=False)
@@ -306,7 +318,7 @@ class TestGraphFromMysql:
         assert nodes[0]["label"] == "sales_gmv_amount_day"
         assert nodes[0]["dw_layer"] == "dws"  # DWS 大写枚举 → 小写归一化
         assert len(edges) == 1
-        edge_stmt = s.execute.call_args_list[3].args[0]
+        edge_stmt = s.execute.call_args_list[4].args[0]
         compiled = str(edge_stmt.compile(compile_kwargs={"literal_binds": True}))
         # 精确匹配：IN 集合，非 LIKE/contains 子串
         assert "metric:sales_gmv_amount_day" in compiled
@@ -326,12 +338,18 @@ class TestGraphFromMysql:
         r_edges = MagicMock()
         r_edges.all.return_value = [self._edge("table:fin.raw", "metric:fin_cost")]
         s.execute = AsyncMock(
-            side_effect=[r_metrics, self._lineage_names(), self._empty_rows(), r_edges]
+            side_effect=[
+                r_metrics,
+                self._lineage_names(),
+                self._empty_rows(),
+                self._dw_layer_rows(),
+                r_edges,
+            ]
         )
 
         await repo.graph_from_mysql(domain="sales", pii_only=False)
 
-        edge_stmt = s.execute.call_args_list[3].args[0]
+        edge_stmt = s.execute.call_args_list[4].args[0]
         compiled = str(edge_stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "metric:sales_gmv_amount_day" in compiled
         assert "metric:fin_cost" not in compiled
@@ -344,13 +362,17 @@ class TestGraphFromMysql:
         repo = AssetMapRepository(s)
         r_metrics = MagicMock()
         r_metrics.all.return_value = []
-        s.execute = AsyncMock(side_effect=[r_metrics, self._lineage_names(), self._empty_rows()])
+        s.execute = AsyncMock(
+            side_effect=[
+                r_metrics, self._lineage_names(), self._empty_rows(), self._dw_layer_rows(),
+            ]
+        )
 
         nodes, edges = await repo.graph_from_mysql(domain="sales", pii_only=False)
 
         assert nodes == []
         assert edges == []
-        assert s.execute.await_count == 3
+        assert s.execute.await_count == 4
 
     async def test_pii_only_filters_metric_stmt(self) -> None:
         s = _session()
@@ -360,7 +382,13 @@ class TestGraphFromMysql:
         r_edges = MagicMock()
         r_edges.all.return_value = [self._edge("table:sales.ods", "metric:sales_pii")]
         s.execute = AsyncMock(
-            side_effect=[r_metrics, self._lineage_names(), self._empty_rows(), r_edges]
+            side_effect=[
+                r_metrics,
+                self._lineage_names(),
+                self._empty_rows(),
+                self._dw_layer_rows(),
+                r_edges,
+            ]
         )
 
         nodes, edges = await repo.graph_from_mysql(domain=None, pii_only=True)
@@ -385,7 +413,9 @@ class TestGraphFromMysql:
         r_edges = MagicMock()
         r_edges.all.return_value = [self._edge("table:sales.ods", "metric:sales_gmv_amount_day")]
         s.execute = AsyncMock(
-            side_effect=[r_metrics, self._lineage_names(), r_catalog, r_edges]
+            side_effect=[
+                r_metrics, self._lineage_names(), r_catalog, self._dw_layer_rows(), r_edges,
+            ]
         )
 
         nodes, edges = await repo.graph_from_mysql(domain="sales", pii_only=False)
@@ -408,7 +438,7 @@ class TestGraphFromMysql:
         assert "JOIN" in compiled.upper()
         assert "sales.ods" in compiled
         # 边的 IN 集合同时含表节点
-        edge_stmt = s.execute.call_args_list[3].args[0]
+        edge_stmt = s.execute.call_args_list[4].args[0]
         edge_sql = str(edge_stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "table:sales.ods" in edge_sql
 
@@ -426,7 +456,9 @@ class TestGraphFromMysql:
             self._edge("field:sales.ods.amount", "metric:sales_gmv_amount_day"),
         ]
         s.execute = AsyncMock(
-            side_effect=[r_metrics, self._lineage_names(), r_catalog, r_edges]
+            side_effect=[
+                r_metrics, self._lineage_names(), r_catalog, self._dw_layer_rows(), r_edges,
+            ]
         )
 
         nodes, _ = await repo.graph_from_mysql(domain="sales", pii_only=False)
@@ -448,7 +480,9 @@ class TestGraphFromMysql:
         r_edges = MagicMock()
         r_edges.all.return_value = [self._edge("field:sales.ods.amount", "metric:sales_pii")]
         s.execute = AsyncMock(
-            side_effect=[r_metrics, self._lineage_names(), r_catalog, r_edges]
+            side_effect=[
+                r_metrics, self._lineage_names(), r_catalog, self._dw_layer_rows(), r_edges,
+            ]
         )
 
         nodes, _ = await repo.graph_from_mysql(domain=None, pii_only=True)
@@ -478,7 +512,9 @@ class TestGraphFromMysql:
             self._edge("table:sales.ods", "table:sales.dwd"),
         ]
         s.execute = AsyncMock(
-            side_effect=[r_metrics, self._lineage_names(), r_catalog, r_edges]
+            side_effect=[
+                r_metrics, self._lineage_names(), r_catalog, self._dw_layer_rows(), r_edges,
+            ]
         )
 
         nodes, edges = await repo.graph_from_mysql(
@@ -510,7 +546,9 @@ class TestGraphFromMysql:
             self._edge("table:sales.dwd", "table:sales.ads"),
         ]
         s.execute = AsyncMock(
-            side_effect=[r_metrics, self._lineage_names(), r_catalog, r_edges]
+            side_effect=[
+                r_metrics, self._lineage_names(), r_catalog, self._dw_layer_rows(), r_edges,
+            ]
         )
 
         nodes, edges = await repo.graph_from_mysql(domain="sales", pii_only=False)
@@ -518,6 +556,41 @@ class TestGraphFromMysql:
         ids = [n["id"] for n in nodes]
         assert "table:sales.dwd" in ids
         assert len(edges) == 2
+
+    async def test_catalog_table_nodes_carry_dw_layer_from_dict(self) -> None:
+        """表节点下发 dw_layer：字典 active 码驱动库名派生（含扩展层 dim）。
+
+        库名 wedw_dwd/wedw_dim 命中字典码 dwd/dim 即归层；字典未收录的
+        wedw_mid 保持 None（未分层）——管理员补录字典后自动归层。
+        """
+        s = _session()
+        repo = AssetMapRepository(s)
+        r_metrics = MagicMock()
+        r_metrics.all.return_value = [self._metric("sales_gmv", "sales")]
+        r_catalog = MagicMock()
+        r_catalog.all.return_value = [
+            self._catalog("wedw_dwd.tjhis_visits"),
+            self._catalog("wedw_dim.dim_hospital"),
+            self._catalog("wedw_mid.tmp_stage"),
+        ]
+        r_edges = MagicMock()
+        r_edges.all.return_value = [self._edge("table:wedw_dwd.tjhis_visits", "metric:sales_gmv")]
+        s.execute = AsyncMock(
+            side_effect=[
+                r_metrics,
+                self._lineage_names(),
+                r_catalog,
+                self._dw_layer_rows(["ODS", "DWD", "DWS", "ADS", "DM", "DIM"]),
+                r_edges,
+            ]
+        )
+
+        nodes, _ = await repo.graph_from_mysql(domain=None, pii_only=False)
+
+        layer_by_id = {n["id"]: n.get("dw_layer") for n in nodes if n["type"] == "table"}
+        assert layer_by_id["table:wedw_dwd.tjhis_visits"] == "dwd"
+        assert layer_by_id["table:wedw_dim.dim_hospital"] == "dim"  # 字典补录扩展层自动归层
+        assert layer_by_id["table:wedw_mid.tmp_stage"] is None  # 字典未收录 → 未分层
 
 
 class TestCatalogIdByNames:

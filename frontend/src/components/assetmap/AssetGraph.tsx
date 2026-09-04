@@ -305,8 +305,10 @@ interface RenderEdge extends AssetGraphEdge {
 }
 
 // —— 数仓分层徽标 ——
-// 表节点按命名前缀推断数仓分层（ods→dwd→dws→ads），加工链的"层级"通过描边色一眼可见。
+// 表节点按数仓分层着色，加工链的"层级"通过描边色一眼可见。
 // 优先级低于 PII（红）与环（橙）：仅当两者都不命中时用层色描边。
+// 分层集合以 system_dict 的 dw_layer 字典为唯一事实源：后端按库名后缀命中字典 active
+// 码下发 dw_layer（含管理员补录的 dim/mid/st 等扩展层），前端不再用硬编码白名单丢弃。
 const LAYER_STROKE: Record<string, string> = {
   ods: "#2e7d32", // 操作数据层（绿）
   dwd: "#1565c0", // 明细数据层（蓝）
@@ -315,17 +317,33 @@ const LAYER_STROKE: Record<string, string> = {
   dm: "#00695c", // 数据集市（青）
 };
 
-/** 推断节点数仓分层：表优先用节点携带的分层字段（后端/采集登记），否则按名称前缀；
- *  指标按 dw_layer 属性（后端返回小写）。大小写归一化兜底（兼容 ODS/DWS 大写写法）。 */
+// 字典扩展层（非标准 5 层）兜底色板：按层名 hash 稳定取色，使 dim/mid/st/tmp 等补录
+// 分层也有区分度配色，且同一层在多次渲染间颜色一致（不随节点顺序漂移）。
+const EXTRA_LAYER_PALETTE = [
+  "#00838f", "#5d4037", "#c2185b", "#455a64", "#7cb342",
+  "#8e24aa", "#00897b", "#f9a825", "#6d4c41", "#3949ab",
+];
+
+/** 分层配色：标准层取 LAYER_STROKE；字典扩展层按层名 hash 从兜底色板稳定取色。 */
+function layerStroke(layer: string): string {
+  const known = LAYER_STROKE[layer];
+  if (known) return known;
+  let h = 0;
+  for (let i = 0; i < layer.length; i += 1) h = (h * 31 + layer.charCodeAt(i)) >>> 0;
+  return EXTRA_LAYER_PALETTE[h % EXTRA_LAYER_PALETTE.length];
+}
+
+/** 推断节点数仓分层：优先用后端按 dw_layer 字典派生下发的分层字段（任意非空值都是合法
+ *  分层，含字典扩展层 dim/mid…，不再用配色表白名单丢弃）；表节点无下发时按名称前缀兜底
+ *  （仅标准层，扩展层归层由后端字典派生）；指标按 dw_layer 属性。大小写归一化。 */
 export function layerOf(n: AssetGraphNode): string | null {
   const carried = (n as { dw_layer?: unknown }).dw_layer;
-  if (typeof carried === "string" && carried) {
-    const l = carried.toLowerCase();
-    if (LAYER_STROKE[l]) return l;
+  if (typeof carried === "string" && carried.trim()) {
+    return carried.trim().toLowerCase();
   }
   if (n.type === "table") {
     const name = (n.label || n.id).toLowerCase();
-    for (const layer of Object.keys(LAYER_STROKE)) {
+    for (const layer of DW_LANE_ORDER) {
       if (name.startsWith(`${layer}_`) || name.startsWith(`${layer}.`)) return layer;
     }
     return null;
@@ -336,17 +354,45 @@ export function layerOf(n: AssetGraphNode): string | null {
 // —— 语义泳道共享常量 ——
 // 泳道顺序与血缘方向一致：数仓分层（源头→应用）→ 其他表 → 指标 → 字段。
 // applyLanes / collapseLayers / laneOfNode / 跨层边捆绑 共用同一顺序，保证"层"判定一致。
-const LANE_ORDER = ["ods", "dwd", "dws", "ads", "dm", "table", "metric", "field"] as const;
-const LANE_LABEL: Record<string, string> = {
+// 标准数仓分层（名称前缀兜底推断 + 固定泳道顺序，血缘方向 ODS→…→DM）
+const DW_LANE_ORDER = ["ods", "dwd", "dws", "ads", "dm"] as const;
+// 语义带（非数仓层）：未分层表 / 指标 / 字段
+const MISC_LANES = ["table", "metric", "field"] as const;
+
+// 数仓分层泳道标签（标准层固定中文）
+const DW_LANE_LABEL: Record<string, string> = {
   ods: "ODS 贴源层",
   dwd: "DWD 明细层",
   dws: "DWS 汇总层",
   ads: "ADS 应用层",
   dm: "DM 集市层",
+};
+const MISC_LANE_LABEL: Record<string, string> = {
   table: "未分层表",
   metric: "指标层",
   field: "字段层",
 };
+
+/** 泳道展示名：标准层/语义带用固定中文；字典扩展层（dim/mid/st…）用大写编码兜底。 */
+function laneLabel(lane: string): string {
+  return DW_LANE_LABEL[lane] ?? MISC_LANE_LABEL[lane] ?? lane.toUpperCase();
+}
+
+/**
+ * 构建泳道顺序：标准数仓层（血缘方向）→ 图中出现的字典扩展层（按层名排序，稳定）
+ * → 未分层表 → 指标 → 字段。扩展层插在 DM 之后、未分层表之前，保持「数仓分层带」连续；
+ * 字典补录 dim/mid 等分层后无需改前端即自动成带（后端下发 dw_layer 驱动）。
+ */
+function laneOrderFor(nodes: AssetGraphNode[]): string[] {
+  const known = new Set<string>([...DW_LANE_ORDER, ...MISC_LANES]);
+  const extra = new Set<string>();
+  for (const n of nodes) {
+    // 普通节点取 layerOf；折叠聚合节点的层记在 collapsedLayer（无 dw_layer）
+    const l = layerOf(n) ?? collapsedLayerOf(n) ?? null;
+    if (l && !known.has(l)) extra.add(l);
+  }
+  return [...DW_LANE_ORDER, ...[...extra].sort(), ...MISC_LANES];
+}
 
 /** 节点所属泳道：折叠聚合节点按其 collapsedLayer 归位；表按数仓前缀；指标/字段按语义带；
  *  其余类型（other/unknown/上游中心节点）返回 ""（自由参与分层，不挂锚）。 */
@@ -364,10 +410,9 @@ function laneOfNode(n: AssetGraphNode): string {
   return "";
 }
 
-/** 泳道序号（用于跨层跨度计算）；未知层返回 -1。 */
-function laneIndexOf(n: AssetGraphNode): number {
-  const lane = laneOfNode(n);
-  return LANE_ORDER.indexOf(lane as (typeof LANE_ORDER)[number]);
+/** 泳道序号（基于本次图的动态泳道顺序）；未知层返回 -1。 */
+function laneIndexIn(order: string[], n: AssetGraphNode): number {
+  return order.indexOf(laneOfNode(n));
 }
 
 /** 折叠聚合节点的层标记读取/判断：节点是否为泳道折叠聚合节点。 */
@@ -391,7 +436,8 @@ export function applyLanes(
   nodes: AssetGraphNode[],
   edges: RenderEdge[],
 ): { nodes: AssetGraphNode[]; edges: RenderEdge[] } {
-  const order = LANE_ORDER;
+  // 动态泳道顺序：标准数仓层 + 图中出现的字典扩展层（dim/mid…）+ 语义带
+  const order = laneOrderFor(nodes);
   const present = order.filter((l) => nodes.some((n) => laneOfNode(n) === l));
   // 少于两类时泳道无意义（单类型带内 dagre 已天然分层），直接透传
   if (present.length < 2) return { nodes, edges };
@@ -515,7 +561,7 @@ export function collapseLayers(
     const agg: AssetGraphNode & CollapsedNodeMeta = {
       id: aggId,
       type: typeFor(lane),
-      label: `${LANE_LABEL[lane] ?? lane}（${members.length}）`,
+      label: `${laneLabel(lane)}（${members.length}）`,
       domain,
       collapsedLayer: lane,
       collapsedCount: members.length,
@@ -544,8 +590,10 @@ export function markLaneSpan(
   edges: RenderEdge[],
   nodes: AssetGraphNode[],
 ): RenderEdge[] {
+  // 动态泳道顺序（含字典扩展层），跨度按本次图的层序计算
+  const order = laneOrderFor(nodes);
   const idxById = new Map<string, number>();
-  for (const n of nodes) idxById.set(String(n.id), laneIndexOf(n));
+  for (const n of nodes) idxById.set(String(n.id), laneIndexIn(order, n));
   const getIdx = (id: string): number => {
     const i = idxById.get(id);
     if (i !== undefined && i >= 0) return i;
@@ -1019,12 +1067,10 @@ interface GraphCanvasProps {
   direction: "TB" | "LR";
   height: number;
   /** 搜索命中的节点 id 集合（空集=无搜索，全部恢复常态）。
-   *  父组件计算后传入：图内节点可能已被聚焦为上下游子图，这里只负责「命中即高亮」。 */
+   *  父组件计算后传入：图内节点可能已被聚焦为上下游子图，这里只负责「命中即高亮」。
+   *  非命中节点一律保持常态不压暗——压暗（inactive 0.2）会把整图打成灰、只剩搜索节点亮，
+   *  是「全部灰色」观感的最后一处来源（此前「全图仅标亮」模式的旧语义，已废弃压暗）。 */
   searchMatchIds: Set<string>;
-  /** 非命中节点是否压暗（inactive）。
-   *  子图聚焦模式为 false——画布上剩下的都是命中节点的上下游，压暗会让整图发灰、
-   *  命中节点反而不突出；仅「全图仅标亮」模式为 true（保留旧的高亮定位语义）。 */
-  searchDimOthers: boolean;
   onNodeClick: (node: AssetGraphNode) => void;
   /** 图渲染完成回调（父组件用于清除布局切换 loading） */
   onReady: () => void;
@@ -1049,7 +1095,6 @@ function GraphCanvas({
   direction,
   height,
   searchMatchIds,
-  searchDimOthers,
   onNodeClick,
   onReady,
   layerBadges = true,
@@ -1187,7 +1232,7 @@ function GraphCanvas({
             ? [r * 1.3, r * 0.7]
             : r;
       const fill = cl
-        ? (LAYER_STROKE[cl] ?? "#475569")
+        ? layerStroke(cl)
         : cyc
           ? "#ff8a80"
           : n?.domain
@@ -1205,7 +1250,7 @@ function GraphCanvas({
           : n?.pii
             ? "#c62828"
             : layer
-              ? (LAYER_STROKE[layer] ?? "#ffffff")
+              ? layerStroke(layer)
               : "#ffffff";
       const lineWidth = cyc ? 3.5 : cl ? 3 : n?.pii ? 3 : layer ? 2.5 : 2;
       const hub = !cyc && !cl && d >= 8;
@@ -1854,19 +1899,16 @@ function GraphCanvas({
       }
       for (const n of nodeList) {
         const id = String(n.id);
-        safeSetElementState(
-          graph,
-          id,
-          searchMatchIds.has(id)
-            ? stateWithCompact("active")
-            : stateWithCompact(searchDimOthers ? "inactive" : []),
-        );
+        // 非命中节点一律恢复常态（不压暗）：「全图仅标亮」旧语义会把非命中打成 inactive 0.2，
+        // 白底上近乎不可见 →「整图只剩搜索节点亮、其余全灰」的观感（用户三次反馈的灰态根源）。
+        // 标亮只做加法：命中=active 金色，其余=常态，任何搜索状态下图都保持可读。
+        safeSetElementState(graph, id, searchMatchIds.has(id) ? stateWithCompact("active") : stateWithCompact([]));
       }
       safeFocusElement(graph, [...searchMatchIds][0]);
     } catch {
       // 图状态变化导致的瞬时异常（如数据重载中）静默忽略，避免崩溃
     }
-  }, [searchMatchIds, searchDimOthers, graphReady, nodes]);
+  }, [searchMatchIds, graphReady, nodes]);
 
   // G6 内部 setData 的异步 batch 在数据过渡期可能抛 `Node not found` 未处理 rejection——
   // 这是库在节点被替换时的已知瞬时噪音，不影响渲染结果，作用域内抑制以免污染控制台。
@@ -1984,8 +2026,8 @@ export function AssetGraph({
   // 前端筛选：按节点类型过滤 + 按 label 搜索定位（不重新请求后端）
   const [typeFilter, setTypeFilter] = useState<string[]>([]);
   const [searchText, setSearchText] = useState("");
-  // 搜索范围：命中节点向外追溯的跳数（0=「全图仅标亮」，保留旧的高亮定位语义：
-  // 不裁剪节点，只在全图上把命中节点标亮、其余压暗）。默认 2 跳——血缘场景「上下游」
+  // 搜索范围：命中节点向外追溯的跳数（0=「全图仅标亮」：不裁剪节点，全图上把命中
+  // 节点标亮、其余保持常态不压暗）。默认 2 跳——血缘场景「上下游」
   // 多为 1-2 跳可达，过大跳数在枢纽节点上易把整图拉回（等价没搜），控件上限 8。
   const [searchHops, setSearchHops] = useState<number>(2);
   const trimmedSearch = searchText.trim().toLowerCase();
@@ -2166,7 +2208,7 @@ export function AssetGraph({
     }
     return [...cnt.entries()]
       .filter(([, c]) => c >= 2)
-      .map(([lane, c]) => ({ value: lane, label: `${LANE_LABEL[lane] ?? lane}（${c}）` }));
+      .map(([lane, c]) => ({ value: lane, label: `${laneLabel(lane)}（${c}）` }));
   }, [lanes, layoutMode, visibleNodes]);
 
   if (nodes.length === 0) {
@@ -2363,8 +2405,9 @@ export function AssetGraph({
           min={1}
           max={8}
           precision={0}
-          // 0=「全图仅标亮」模式（保留旧的高亮定位语义：不裁剪节点，只在全图上把命中
-          // 节点标亮、其余压暗）。默认 2 跳——血缘场景「上下游」多为 1-2 跳可达，
+          // 0=「全图仅标亮」模式（不裁剪节点，全图上把命中节点标亮、其余保持常态——
+          // 只做加法不压暗，旧「其余压暗」语义会产生整图灰、只剩搜索节点亮的死观感，已废弃）。
+          // 默认 2 跳——血缘场景「上下游」多为 1-2 跳可达，
           // 过大跳数在枢纽节点上易把整图拉回（等价没搜），故上限 8。
           value={searchHops === 0 ? undefined : searchHops}
           onChange={(v) => setSearchHops(v != null && v >= 1 ? Math.min(Math.floor(v), 8) : 2)}
@@ -2450,7 +2493,6 @@ export function AssetGraph({
           direction={directionState}
           height={h}
           searchMatchIds={searchMatchIds}
-          searchDimOthers={searchHops === 0}
           onNodeClick={(n) => {
             // 泳道聚合节点：点击=展开该泳道（回到未折叠），不触发外部下钻
             const cl = collapsedLayerOf(n);
@@ -2515,13 +2557,18 @@ export function AssetGraph({
         {hasLayerNodes && (
           <div className="legend-group">
             <span className="muted">数仓层：</span>
-            {Object.entries(LAYER_STROKE).map(([layer, color]) => (
+            {[
+              ...DW_LANE_ORDER.map((l) => [l, layerStroke(l)] as const),
+              ...[...new Set(nodes.map(layerOf).filter((l): l is string => !!l && !(DW_LANE_ORDER as readonly string[]).includes(l)))]
+                .sort()
+                .map((l) => [l, layerStroke(l)] as const),
+            ].map(([layer, color]) => (
               <span className="legend-swatch" key={layer}>
                 <span
                   className="legend-dot"
                   style={{ border: `2.5px solid ${color}`, background: "rgba(0,0,0,0.06)" }}
                 />
-                {layer.toUpperCase()}
+                {laneLabel(layer)}
               </span>
             ))}
           </div>

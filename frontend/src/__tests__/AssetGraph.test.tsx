@@ -484,9 +484,10 @@ describe("AssetGraph 交互", () => {
     // 表节点携带 dw_layer（采集/登记）→ 优先于名字前缀（名字无前缀也能分层）
     const tableCarried = { id: "table:t", label: "orders", type: "table" as const, dw_layer: "dwd" };
     expect(layerOf(tableCarried)).toBe("dwd");
-    // 携带值非法/未知 → 回退表名前缀推断
-    const invalid = { id: "table:t2", label: "dwd_orders", type: "table" as const, dw_layer: "bogus" };
-    expect(layerOf(invalid)).toBe("dwd");
+    // 携带任意非空值均为合法分层（后端按 dw_layer 字典派生，含扩展层 dim/mid），
+    // 不再用硬编码白名单回退——扩展层不再被丢弃进"未分层表"
+    const extra = { id: "table:t2", label: "dim_orders", type: "table" as const, dw_layer: "dim" };
+    expect(layerOf(extra)).toBe("dim");
     // 携带空串 → 视为未携带
     const empty = { id: "metric:e", label: "e", type: "metric" as const, dw_layer: "" };
     expect(layerOf(empty)).toBeNull();
