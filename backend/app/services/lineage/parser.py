@@ -330,7 +330,11 @@ def _split_statements(sql: str) -> list[str]:
         stmts = [str(s).strip() for s in parsed if s is not None]
     except Exception:
         return [sql]
-    return [s for s in stmts if s]
+    # 过滤空/纯分号元素：sqlparse.split 对 ``";\n"`` join 的多语句偶发产生
+    # 独立 ``";"`` 元素（空语句）——它会让逐语句 parse_one 抛 ParseError、
+    # 整段 tolerant parse 置 None，导致 extract 无辜跳过 / parse_dp_step 把
+    # 可解析的数据流脚本误判 failed（dp 血缘 16 张 unparseable 中 14 张根因）。
+    return [s for s in stmts if s and s.strip("; \t\r\n")]
 
 
 def _multitable_branches(ast: exp.MultitableInserts) -> list[tuple[str, exp.Insert]]:

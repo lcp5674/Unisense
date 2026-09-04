@@ -185,3 +185,87 @@ def test_default_rules_are_json_serializable() -> None:
     import json
 
     json.dumps(DEFAULT_COMPLEXITY_RULES)  # 不抛异常即视为可配置承载
+
+
+def test_split_statements_filters_lone_semicolons() -> None:
+    """_split_statements 不再返回纯分号/空元素（否则逐语句 parse_one 误判失败）。
+
+    sqlparse.split 对 ``";\\n"`` join 的多语句偶发产生独立 ``";"`` 元素——
+    此前导致可解析的数据流脚本被 _has_parse_error 误判 failed（dp 16 张
+    unparseable 中 14 张根因）。
+    """
+    from app.services.lineage.parser import _split_statements
+
+    # 模拟 _qualify_sql_text 的 ";\\n" join 产物（sqlparse 曾从中拆出 ; 元素）
+    sql = (
+        "drop table wedw_dw.a;\n"
+        "create table if not exists wedw_dw.b (\n"
+        "etl_time string comment '数据加工时间'\n"
+        ") comment '南平医院情况'\n"
+        "partitioned by (date_id string comment '数据日期')\n"
+        "STORED AS orcfile;\n"
+        "insert overwrite table wedw_dw.b partition(date_id='20260101')\n"
+        "select 'x', 'y';\n"
+    )
+    stmts = _split_statements(sql)
+    assert stmts, "应拆出语句"
+    assert all(s and s.strip("; \t\r\n") for s in stmts), "不应含纯分号/空元素"
+    # 全部语句可独立解析（不会被空分号误伤）
+    import sqlglot
+
+    for st in stmts:
+        sqlglot.parse_one(st, dialect="hive")  # 不抛即通过
+
+
+def test_semicolon_noise_no_longer_marks_failed() -> None:
+    """多语句脚本含空分号噪音不再被误判 failed。
+
+    直接构造 sqlparse 易拆出 ``;`` 的多行 DDL + insert 脚本，验证 parse_dp_step
+    给出 no_flow/ok 而非 failed（此前 `;` 元素使 _has_parse_error 误判）。
+    """
+    sql = (
+        "-- 注释行\n"
+        "drop table wedw_dw.np_hosp_list_info_df_df;\n"
+        "create table if not exists wedw_dw.np_hosp_list_info_df_df (\n"
+        "etl_time string comment '数据加工时间',\n"
+        "org_code string comment '医院id'\n"
+        ") comment '南平医院情况'\n"
+        "partitioned by (date_id string comment '数据日期')\n"
+        "STORED AS orcfile;\n"
+        "insert overwrite table wedw_dw.np_hosp_list_info_df_df partition(date_id='20260101')\n"
+        "select from_unixtime(unix_timestamp(), 'yyyy-MM-dd HH:mm:ss'), 'xxx';\n"
+    )
+    r = parse_dp_step(sql, dialect="hive")
+    # insert 是常量 select（无源表）→ 无数据流边 → no_flow（而非 failed 堆工作台）
+    assert r.status == "no_flow", r.status
+
+
+def test_reserved_column_word_lock_quoted_and_ok() -> None:
+    """裸保留字列名（lock）反引号保护后可解析并出真实边。
+
+    dp 真实脚本 `select ..., lock, ... from src`（精神科锁档字段）未加引号，
+    sqlglot 把 lock 当 LOCK 语法关键字致整条 CTAS 失败 → 此前误判 failed。
+    """
+    sql = (
+        "create table wedw_dwd.out_t as\n"
+        "select id, lock, hospitalization, lastDischargeDate\n"
+        "from wedw_ods.src_t"
+    )
+    r = parse_dp_step(sql, dialect="hive")
+    assert r.status == "ok", r.status
+    assert r.table_edges, "应提取到源→目标表级边"
+    assert any(e.source == "wedw_ods.src_t" for e in r.table_edges)
+    assert any(e.target == "wedw_dwd.out_t" for e in r.table_edges)
+
+
+def test_reserved_quote_does_not_break_order_by() -> None:
+    """保留字保护不破坏 order by/partition by 语法结构（替换失败自动回退）。"""
+    from app.services.lineage.dp_sync_parser import _quote_reserved_column_words
+
+    sql = "select id, lock from wedw_ods.s order by id limit 10"
+    fixed = _quote_reserved_column_words(sql, "hive")
+    # 只应包 lock（order 后跟 by 属语法，若被包则 parse 失败回退不采用）
+    assert fixed == "select id, `lock` from wedw_ods.s order by id limit 10", fixed
+    import sqlglot
+
+    sqlglot.parse_one(fixed, dialect="hive")  # 不抛即通过

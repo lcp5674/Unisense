@@ -101,6 +101,70 @@ def _expand_schedule_macros(sql: str) -> str:
     return _SCHED_MACRO_RE.sub(_sub, sql)
 
 
+#: 作列名/表别名常见、且被 sqlglot 当作保留字导致整条语句解析失败的裸词。
+#: 仅当「替换后能解析成功」才采用（破坏语法的替换会被丢弃），故集合可安全
+#: 保守扩大；``order by``/``partition by``/``rows between`` 等语法结构词在
+#: 整段替换后 parse 失败自动回退逐词重试，不会误伤。实测 dp 脚本 ``lock``
+#: （精神科「是否锁档」字段）为高频触发词。
+_QUOTABLE_RESERVED_WORDS: tuple[str, ...] = (
+    "lock",
+    "key",
+    "value",
+    "rank",
+    "rows",
+    "range",
+    "offset",
+    "bucket",
+    "stats",
+)
+
+
+def _quote_reserved_column_words(sql: str, dialect: str | None) -> str:
+    """把裸保留字标识符加反引号并验证可解析；无法安全替换则原样返回。
+
+    dp 真实调度脚本存在未加引号的保留字列名（如 ``select lock ... ``），
+    sqlglot 严格方言解析失败 → 整条数据流语句被误判 failed 走人工（此前 16 张
+    unparseable 中 2 张根因）。阶段 1 全量替换候选词（一次处理多裸列）parse 成功
+    即用；阶段 2 逐个词独立替换（``order by`` 等语法词被全量替换破坏时回退），
+    任一成功即用。仅替换「替换后能解析」的形态——不改变语句语义（列名等价）。
+    """
+    if not sql or not any(w in sql.lower() for w in _QUOTABLE_RESERVED_WORDS):
+        return sql
+    if _parse_ok(sql, dialect):
+        return sql  # 原句本就可解析，无需保护
+
+    def _quote(text: str, words: tuple[str, ...]) -> str:
+        out = text
+        for w in words:
+            pat = re.compile(rf"(?<![A-Za-z0-9_`]){w}(?![A-Za-z0-9_`])", re.IGNORECASE)
+            out = pat.sub(lambda m, w=w: f"`{w}`", out)
+        return out
+
+    # 阶段 1：全部候选词一次替换
+    all_quoted = _quote(sql, _QUOTABLE_RESERVED_WORDS)
+    if _parse_ok(all_quoted, dialect):
+        return all_quoted
+    # 阶段 2：逐个词独立替换（order by/partition by 等语法词被误包时回退）
+    for w in _QUOTABLE_RESERVED_WORDS:
+        one_quoted = _quote(sql, (w,))
+        if one_quoted != sql and _parse_ok(one_quoted, dialect):
+            return one_quoted
+    return sql
+
+
+def _parse_ok(sql: str, dialect: str | None) -> bool:
+    """整段是否可解析（任一语句失败即 False，与 _has_parse_error 一致）。"""
+    if not sql or not sql.strip():
+        return True
+    for stmt in _split_statements(sql):
+        try:
+            if sqlglot.parse_one(stmt, dialect=dialect) is None:
+                return False
+        except Exception:  # noqa: BLE001 —— 单语句失败即整体不可解析
+            return False
+    return True
+
+
 @dataclass
 class StepParseOutcome:
     """单节点解析结果（sqlglot 阶段，未入 LLM）。
@@ -270,11 +334,20 @@ def detect_complexity_features(
 
 
 def _has_parse_error(sql: str, dialect: str | None) -> bool:
-    """任一句子解析失败（返回 None 或列表含 None）。"""
-    stmts = _parse_statements(sql, dialect)
-    if stmts is None:
-        return True
-    return any(ast is None for ast in stmts)
+    """是否存在解析失败语句（与 extract 逐语句容错语义一致）。
+
+    不用整段 ``sqlglot.parse``（tolerant 列表含 None 判定）——整段解析对
+    空 ``;`` 元素/个别方言偶发误判 None，把可解析的数据流脚本误伤为 failed；
+    逐语句 ``parse_one`` 失败即抛错，判定精确且与 ``extract_*`` 的容错路径
+    完全同源（失败的语句被跳过、成功的语句照常出边）。
+    """
+    for stmt in _split_statements(sql):
+        try:
+            if sqlglot.parse_one(stmt, dialect=dialect) is None:
+                return True
+        except Exception:  # noqa: BLE001 —— 单语句解析失败即视为存在失败语句
+            return True
+    return False
 
 
 #: 数据流关键字——存在即意味着脚本可能在搬移数据（SQL 演进宏/方言失败时仍应
@@ -356,6 +429,9 @@ def parse_dp_step(
 
     # 按语句级 USE 作用域给无前缀表名补默认库（dp 脚本标准形态：use db; create ...）
     qualified, used_db = _qualify_sql_text(prepared, dialect)
+    # 保留字列保护：裸保留字列名（lock/key/value…）令 sqlglot 整条失败——仅在
+    # 「替换后能解析」时改写，使含真实数据流的脚本不再被误判 failed（语义不变）。
+    qualified = _quote_reserved_column_words(qualified, dialect)
     table_edges = extract_table_lineage(qualified, dialect, target_table=target_table)
     field_edges = extract_field_lineage(qualified, dialect, target_table=target_table)
     ddl_edges = extract_ddl_lineage(qualified, dialect)
