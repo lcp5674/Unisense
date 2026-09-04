@@ -63,6 +63,19 @@ DP_PROVENANCE = "dp_sql"
 #: 全量扫描（忽略水位全量拉取 + mark_missing），闭合「删除语义」（M1）。
 _AUTO_FULL_SCAN_SECONDS = 24 * 3600
 
+#: 明细批量预取批大小（阶段 1）：逐任务拉取 task+step 明细 = 每任务 2 次源库往返，
+#: 一轮 N 任务 ≈ 2N 次小查询、长占源库连接几十分钟。改为按批预取——每批任务
+#: 静态字段 + step 明细各 1~2 次批量 ``IN`` 查询载入内存（SQL 全文本地解析），
+#: 源库往返从 2N 降到 ~N/100，占用从分钟级降到秒级。
+_PREFETCH_BATCH_SIZE = 200
+#: 单条 ``IN`` 子句最大元素数（超过分块并发查询，避免 SQL 过长/参数上限）。
+_IN_CHUNK = 400
+
+
+def _chunks(items: list[int], size: int) -> list[list[int]]:
+    """把 id 列表切成不超过 ``size`` 的块（批量 IN 查询分块用）。"""
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
 
 def _in_clause(
     column: str, values: list[int], prefix: str, params: dict[str, Any]
@@ -271,6 +284,35 @@ class DpSyncService:
         self._dp_table_columns: dict[tuple[str, str], set[str] | None] = {}
 
     # ---- 单 step 处理 ----
+    @staticmethod
+    async def _parse_typed(
+        sql: str,
+        *,
+        step_type: int,
+        config: Any,
+        target_table: str | None,
+        schema_columns: dict[str, list[str]] | None = None,
+    ) -> Any:
+        """同步 sqlglot 解析 offload 线程池（阶段 1：解除事件循环阻塞）。
+
+        ``parse_dp_step_typed`` 是纯 CPU 同步函数；手动「立即扫描」跑在 backend
+        uvicorn worker 的事件循环上，直接调用会阻塞同 worker 其它 API 请求（arq
+        worker 亦然）。``asyncio.to_thread`` 丢默认线程池执行——解析期间事件循环
+        保持响应（长 SQL/复杂 CTE 解析毫秒~百毫秒级，不再饿死心跳/请求）。
+        """
+        return await asyncio.to_thread(
+            parse_dp_step_typed,
+            sql,
+            step_type=step_type,
+            dialect="hive",
+            exclude_patterns=merged_exclude_table_patterns(
+                config.exclude_table_patterns
+            ),
+            rules=config.llm_complexity_rules,
+            target_table=target_table,
+            schema_columns=schema_columns,
+        )
+
     async def process_step(
         self,
         task: dict[str, Any],
@@ -286,14 +328,10 @@ class DpSyncService:
             事后重复 sqlglot 解析，P2-9 #10）。
         """
         sql_hash = sql_fingerprint(sql)
-        outcome = parse_dp_step_typed(
+        outcome = await self._parse_typed(
             sql,
             step_type=int(step.get("task_step_type") or 7),
-            dialect="hive",
-            exclude_patterns=merged_exclude_table_patterns(
-                config.exclude_table_patterns
-            ),
-            rules=config.llm_complexity_rules,
+            config=config,
             target_table=task.get("out_table") or None,
         )
         if outcome.status == "no_flow":
@@ -316,14 +354,10 @@ class DpSyncService:
                 logger.warning("dp_schema_map_failed step=%s error=%s", step.get("step_id"), exc)
                 schema_map = {}
             if schema_map:
-                outcome = parse_dp_step_typed(
+                outcome = await self._parse_typed(
                     sql,
                     step_type=int(step.get("task_step_type") or 7),
-                    dialect="hive",
-                    exclude_patterns=merged_exclude_table_patterns(
-                        config.exclude_table_patterns
-                    ),
-                    rules=config.llm_complexity_rules,
+                    config=config,
                     target_table=task.get("out_table") or None,
                     schema_columns=schema_map,
                 )
@@ -850,42 +884,60 @@ class DpSyncService:
                 progress["current_step_label"] = None
                 progress["stage"] = "parsing"
             cancelled = False
-            for idx, task_id in enumerate(task_ids, start=1):
+            # 明细批量预取（阶段 1）：逐任务拉取 = 每任务 2 次源库往返（task+step），
+            # 一轮 N 任务 ≈ 2N 次小查询、源库连接被占几十分钟。改为按批预取——
+            # 每批任务静态字段 + step 明细各 1~2 次批量 IN 查询载入内存（task/steps
+            # SQL 全文本地解析），源库往返从 2N → ~N/100。每任务独立提交语义保留
+            # （B：任务内所有写同一事务、成功即 commit、单任务异常 rollback 自身）。
+            # 预取失败时 _prefetch_batch 返回 {} → _process_task 回退逐任务拉取
+            # （保底不阻断、单任务错误可定位）。
+            for batch_start in range(0, len(task_ids), _PREFETCH_BATCH_SIZE):
+                batch_ids = task_ids[batch_start : batch_start + _PREFETCH_BATCH_SIZE]
                 if cancel_event is not None and cancel_event.is_set():
                     cancelled = True
                     break
-                if progress is not None:
-                    progress["processed"] = idx - 1
-                    progress["current_task_id"] = task_id
-                try:
-                    # 每任务独立事务（B）：任务内所有写（边/字段映射/ticket/owner
-                    # 回填）在同一事务，成功即 commit —— 处理完一个任务，其血缘边
-                    # **立即对其它会话可见**（血缘视图实时可查，不再等整轮 2517 个
-                    # 任务跑完才一次性提交）。单任务异常 rollback 自身（边不落库、
-                    # 幂等），记入 failed_task_ids 下轮显式重扫，不拖垮整轮。
-                    await self._process_task(
-                        collector,
-                        config,
-                        task_id,
-                        counters,
-                        seen_pairs,
-                        cancel_event=cancel_event,
-                        force_event=force_event,
-                        progress=progress,
-                    )
-                    await self._db.commit()
-                except _ScanCancelledError:
-                    # 强制终止：当前任务随 rollback 回滚（已提交的前序任务保留）
-                    await self._db.rollback()
-                    cancelled = True
+                prefetched = await self._prefetch_batch(collector, config, batch_ids)
+                for idx, task_id in enumerate(batch_ids, start=batch_start + 1):
+                    if cancel_event is not None and cancel_event.is_set():
+                        cancelled = True
+                        break
+                    if progress is not None:
+                        progress["processed"] = idx - 1
+                        progress["current_task_id"] = task_id
+                    try:
+                        # 每任务独立事务（B）：任务内所有写（边/字段映射/ticket/owner
+                        # 回填）在同一事务，成功即 commit —— 处理完一个任务，其血缘边
+                        # **立即对其它会话可见**（血缘视图实时可查，不再等整轮 2517 个
+                        # 任务跑完才一次性提交）。单任务异常 rollback 自身（边不落库、
+                        # 幂等），记入 failed_task_ids 下轮显式重扫，不拖垮整轮。
+                        await self._process_task(
+                            collector,
+                            config,
+                            task_id,
+                            counters,
+                            seen_pairs,
+                            prefetched=prefetched,
+                            cancel_event=cancel_event,
+                            force_event=force_event,
+                            progress=progress,
+                        )
+                        await self._db.commit()
+                    except _ScanCancelledError:
+                        # 强制终止：当前任务随 rollback 回滚（已提交的前序任务保留）
+                        await self._db.rollback()
+                        cancelled = True
+                        break
+                    except Exception as exc:  # noqa: BLE001 —— 单任务失败不阻断整轮
+                        await self._db.rollback()
+                        counters["errors"] += 1
+                        failed_task_ids.append(task_id)
+                        logger.warning(
+                            "dp_sync_task_failed task_id=%s error=%s", task_id, exc
+                        )
+                    if progress is not None:
+                        progress["processed"] = idx
+                if cancelled:
                     break
-                except Exception as exc:  # noqa: BLE001 —— 单任务失败不阻断整轮
-                    await self._db.rollback()
-                    counters["errors"] += 1
-                    failed_task_ids.append(task_id)
-                    logger.warning("dp_sync_task_failed task_id=%s error=%s", task_id, exc)
-                if progress is not None:
-                    progress["processed"] = idx
             # 收尾：水位 + 边确认（stale 机制）。
             # - cancelled：**不推进 max 水位**——未处理任务保留在变更集内，下轮
             #   从原水位重扫（幂等安全）；也不记录 last_full_scan_at（本轮未完整）。
@@ -1114,16 +1166,29 @@ class DpSyncService:
         cancel_event: asyncio.Event | None = None,
         force_event: asyncio.Event | None = None,
         progress: dict[str, Any] | None = None,
+        prefetched: dict[int, tuple[dict[str, Any] | None, list[dict[str, Any]]]]
+        | None = None,
     ) -> None:
-        """处理单个任务：拉 task 静态字段 + SQL 节点 → process_step 逐节点。
+        """处理单个任务：取 task 静态字段 + SQL 节点 → process_step 逐节点。
 
         取消检查点下沉（A 方案）：fetch task 后 / 每个 step 前 / 资产回填前检查——
         协作取消（仅 cancel_event）在 step 边界停止，不再等完整任务跑完；
         强制终止（force_event 一并置位）在检查点直接抛 ``_ScanCancelled`` 中断。
         progress: 非空时在每个 step 处理前写入当前节点类型（current_step_type/
             current_step_label），供前端按类型动态展示扫描文案。
+        prefetched: 可选批量预取结果 ``{task_id: (task|None, [steps])}``——scan_once
+            按批预取后传入，本方法不再逐任务打源库（2N 次往返 → 每批 2~4 次）。
+            为 ``None`` 或键缺失时回退单任务拉取（兼容独立调用/测试与预取失败降级）。
         """
-        task = await self._fetch_task(collector, task_id, config)
+        if prefetched is not None and task_id in prefetched:
+            task, steps = prefetched[task_id]
+        else:
+            task = await self._fetch_task(collector, task_id, config)
+            steps = (
+                await self._fetch_sql_steps(collector, task_id, config)
+                if task is not None
+                else []
+            )
         if task is None:
             return
         # 排除规则：任务名命中排除
@@ -1134,7 +1199,6 @@ class DpSyncService:
             name = str(task.get("task_name") or "")
             if any(_re.search(p, name) for p in patterns):
                 return
-        steps = await self._fetch_sql_steps(collector, task_id, config)
         if not steps:
             return
         counters["scanned_tasks"] += 1
@@ -1286,6 +1350,110 @@ class DpSyncService:
             "ORDER BY task_step",
             params,
         )
+
+    # ---- 明细批量预取（阶段 1：2N 次逐任务往返 → 每批 2~4 次批量往返）----
+
+    async def _fetch_tasks_batch(
+        self, collector: Any, config: Any, task_ids: list[int]
+    ) -> list[dict[str, Any]]:
+        """批量拉取 task 静态字段（``WHERE id IN (...)``，列裁剪与 _fetch_task 同源）。
+
+        任务数超过 ``_IN_CHUNK`` 时按块并发查询后拼接（避免单条 IN 过长）。
+        """
+        schema, task_table, _ = self._table_scope(config)
+        cols = await self._available_columns(collector, schema, task_table)
+        pairs = list(_TASK_SELECT_COLS)
+        if cols is not None:
+            pairs = [(c, a) for c, a in pairs if c in cols] + [
+                (c, a) for c, a in _TASK_ENHANCED_COLS if c in cols
+            ]
+        select = ", ".join(
+            f"{col} AS {alias}" if col != alias else col for col, alias in pairs
+        )
+        out: list[dict[str, Any]] = []
+        for chunk in _chunks(task_ids, _IN_CHUNK):
+            params = {f"tid{i}": v for i, v in enumerate(chunk)}
+            ph = ",".join(f":tid{i}" for i in range(len(chunk)))
+            rows = await collector.query(
+                f"SELECT {select} FROM {schema}.{task_table} WHERE id IN ({ph})",
+                params,
+            )
+            out.extend(rows)
+        return out
+
+    async def _fetch_steps_batch(
+        self, collector: Any, config: Any, task_ids: list[int]
+    ) -> list[dict[str, Any]]:
+        """批量拉取 SQL 节点 step 明细（``task_id IN (...)`` + 类型过滤 + 未删）。
+
+        与 ``_fetch_sql_steps`` 同源列裁剪/is_deleted 探测；按 task_id,task_step 排序
+        返回（调用方按 task_id 归组后各任务 steps 保序）。
+        """
+        schema, _, step_table = self._table_scope(config)
+        _, step_types = _type_filters(config)
+        cols = await self._available_columns(collector, schema, step_table)
+        pairs = list(_STEP_SELECT_COLS)
+        if cols is not None:
+            pairs = [(c, a) for c, a in pairs if c in cols] + [
+                (c, a) for c, a in _STEP_ENHANCED_COLS if c in cols
+            ]
+        select = ", ".join(
+            f"{col} AS {alias}" if col != alias else col for col, alias in pairs
+        )
+        deleted = (
+            ""
+            if cols is not None and "is_deleted" not in cols
+            else " AND is_deleted=0"
+        )
+        out: list[dict[str, Any]] = []
+        for chunk in _chunks(task_ids, _IN_CHUNK):
+            params: dict[str, Any] = {}
+            type_clause, params = _in_clause(
+                "task_step_type", step_types, "s", params
+            )
+            id_clause, params = _in_clause("task_id", chunk, "t", params)
+            rows = await collector.query(
+                f"SELECT {select} FROM {schema}.{step_table} "
+                f"WHERE 1=1{deleted}{type_clause}{id_clause} "
+                "ORDER BY task_id, task_step",
+                params,
+            )
+            out.extend(rows)
+        return out
+
+    async def _prefetch_batch(
+        self, collector: Any, config: Any, task_ids: list[int]
+    ) -> dict[int, tuple[dict[str, Any] | None, list[dict[str, Any]]]]:
+        """按批预取 task 明细 + step 明细到内存（源库往返 2N → 每批 2~4 次）。
+
+        返回 ``{task_id: (task_dict | None, [step_dict, ...])}``——task 已在源库
+        消失的键值为 ``(None, [])``（等同 ``_fetch_task`` 返回 None 的语义，处理时
+        直接跳过）。批量查询异常时返回 ``{}``（调用方 _process_task 逐任务回退，
+        保证预取失败不阻断扫描且单任务错误可定位）。
+        """
+        if not task_ids:
+            return {}
+        try:
+            tasks = await self._fetch_tasks_batch(collector, config, task_ids)
+            steps = await self._fetch_steps_batch(collector, config, task_ids)
+        except Exception as exc:  # noqa: BLE001 —— 预取失败降级逐任务拉取
+            logger.warning(
+                "dp_prefetch_batch_failed n=%d error=%s", len(task_ids), exc
+            )
+            return {}
+        by_id: dict[int, tuple[dict[str, Any] | None, list[dict[str, Any]]]] = {}
+        for t in tasks:
+            tid = t.get("task_id")
+            if tid is not None:
+                by_id[int(tid)] = (t, [])
+        # 变更集内未命中的任务（并发窗口内被删）补 None——与 _fetch_task None 同语义
+        for tid in task_ids:
+            by_id.setdefault(int(tid), (None, []))
+        for s in steps:
+            k = s.get("task_id")
+            if k is not None and k in by_id and by_id[k][0] is not None:
+                by_id[k][1].append(s)
+        return by_id
 
     # ---- 待抉择裁决（D9 人工抉择工作台） ----
     @staticmethod

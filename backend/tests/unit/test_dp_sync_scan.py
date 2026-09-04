@@ -29,6 +29,20 @@ TASKS = [
 ]
 
 
+def _task_ids(params: dict | None) -> set[int]:
+    """从查询参数提取任务 id 集合（单任务 ``tid`` / 批量 ``tid0..`` / step 批量 ``t0..``）。
+
+    参数命名约定：task 批量用 ``tid{i}``、step 批量 task_id IN 用 ``t{i}``（type
+    IN 用 ``s{i}``）；统一取以 ``t`` 开头的参数值作为任务 id 候选。
+    """
+    out: set[int] = set()
+    for k, v in (params or {}).items():
+        if v is None or not k.startswith("t"):
+            continue
+        out.add(int(v))
+    return out
+
+
 class FakeCollector:
     """假 dp 连接器：按 SQL 精确路由。"""
 
@@ -49,7 +63,7 @@ class FakeCollector:
         if "dispatch_task_step st" in sql:
             return []  # step 独立变更（无）
         if "FROM dp_stable.dispatch_task_step" in sql:
-            tid = (params or {}).get("tid")
+            ids = _task_ids(params)
             return [
                 {
                     "step_id": t["task_id"] * 10,
@@ -61,13 +75,18 @@ class FakeCollector:
                     "script_info": TASK_SQL,
                 }
                 for t in self.tasks
-                if t["task_id"] == tid
+                if t["task_id"] in ids
             ]
         if "WHERE id=:tid" in sql:
             tid = (params or {}).get("tid")
             if self.boom_on_task:
                 raise RuntimeError("dp 连接中断")
             return [t for t in self.tasks if t["task_id"] == tid]
+        if "WHERE id IN" in sql:  # 批量预取（_fetch_tasks_batch）
+            if self.boom_on_task:
+                raise RuntimeError("dp 连接中断")
+            ids = _task_ids(params)
+            return [t for t in self.tasks if t["task_id"] in ids]
         if "FROM dp_stable.dispatch_task" in sql:
             return [{"id": t["task_id"]} for t in self.tasks]
         return []
@@ -622,3 +641,64 @@ async def test_scan_incremental_skips_mark_missing() -> None:
     result = await svc.scan_once(_fc(collector))
     assert "skipped" not in result
     svc._lineage_repo.mark_missing.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prefetch_batch_groups_tasks_and_steps() -> None:
+    """批量预取按 task_id 归组 task 静态字段 + step 明细；源库消失的任务补 None。
+
+    阶段 1：逐任务拉取 = 每任务 2 次往返，批量后 2 个任务仅 task/step 各 1 次。
+    """
+    collector = FakeCollector()
+    svc = _svc(collector)
+    out = await svc._prefetch_batch(collector, _config(), [101, 102])
+    assert set(out) == {101, 102}
+    # task 静态字段完整归组
+    assert out[101][0]["task_name"] == "任务A"
+    assert out[102][0]["task_name"] == "任务B"
+    # step 明细归到对应 task 下（各 1 个 SQL 节点）
+    assert [s["task_id"] for s in out[101][1]] == [101]
+    assert [s["task_id"] for s in out[102][1]] == [102]
+    # 批量往返计数：task/step 各 1 次批量 IN（不含变更集/水位探测查询）
+    detail_queries = [q for q in collector.queries if "WHERE id IN" in q or "task_id IN" in q]
+    assert len(detail_queries) == 2
+
+
+@pytest.mark.asyncio
+async def test_prefetch_batch_missing_task_none_and_failure_fallback() -> None:
+    """预取对源库消失任务补 (None, [])；批量查询异常时返回 {}（回退逐任务拉取）。"""
+    collector = FakeCollector()
+    svc = _svc(collector)
+    # 变更集含 99（源库不存在）→ (None, [])，等同 _fetch_task None 语义
+    out = await svc._prefetch_batch(collector, _config(), [99])
+    assert out == {99: (None, [])}
+    # 批量查询失败 → 返回 {}（scan_once 逐任务回退，不阻断）
+    boom = FakeCollector(boom_on_task=True)
+    assert await svc._prefetch_batch(boom, _config(), [101, 102]) == {}
+
+
+@pytest.mark.asyncio
+async def test_scan_batch_prefetch_replaces_per_task_fetch() -> None:
+    """scan_once 走批量预取后，_process_task 不再发逐任务明细查询。
+
+    用 monkeypatch 包装 _fetch_task/_fetch_sql_steps 计数：若被调用说明回退发生
+    （批量路径成功时不应触发逐任务拉取）。
+    """
+    collector = FakeCollector()
+    svc = _svc(collector)
+    fetched: list[str] = []
+
+    async def _spy_fetch_task(*a: object, **kw: object) -> object:
+        fetched.append("task")
+        # 保留原行为：委托 _fetch_task 真实实现（预取缺失才走这里）
+        return await DpSyncService._fetch_task(svc, *a, **kw)
+
+    svc._fetch_task = _spy_fetch_task  # type: ignore[method-assign]
+    result = await svc.scan_once(_fc(collector))
+    assert result["scanned_tasks"] == 2
+    assert result["parsed_ok"] == 2
+    # 批量预取成功 → 无逐任务回退（_fetch_task/_fetch_sql_steps 均未触发）
+    assert fetched == []
+    # 明细往返数：task 批量 1 + step 批量 1（+变更集 2）——远小于逐任务 4 次明细
+    batch_detail = [q for q in collector.queries if "WHERE id IN" in q or "task_id IN" in q]
+    assert len(batch_detail) == 2

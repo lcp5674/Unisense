@@ -35,6 +35,10 @@ _MAX_HIVE_SOURCES = 3
 #: 单次 DESCRIBE/信息 schema 查询超时（秒）——schema 获取是血缘解析的旁路，
 #: 失败即降级，不能拖慢扫描主链路。
 _COLUMN_QUERY_TIMEOUT = 20.0
+#: as_map 有界并发度（阶段 1）：多源表逐表串行 = 每表至少 1 次网络往返（通道 A）
+#: 或逐个 hive DESCRIBE——长 SQL 涉及几十张源表时拖慢二次解析。改为有界并发同时
+#: 拉多张表；dp collector 为 SQLAlchemy 引擎池（query 每次引擎 connect），并发安全。
+_SCHEMA_FETCH_CONCURRENCY = 6
 
 
 def _split_table(table: str) -> tuple[str, str] | None:
@@ -87,10 +91,24 @@ class DpSchemaProvider:
         return cols
 
     async def as_map(self, tables: list[str]) -> dict[str, list[str]]:
-        """批量获取多张表的列清单（跳过不可知项），供 ``extract_field_lineage``。"""
+        """批量获取多张表的列清单（跳过不可知项），供 ``extract_field_lineage``。
+
+        有界并发（阶段 1）：逐表串行 = 每表至少 1 次网络往返（通道 A）或逐个 hive
+        DESCRIBE，长 SQL 涉及几十张源表时二次解析被拖慢。改为 ``asyncio.gather`` +
+        Semaphore 并发拉取（缓存写入幂等——不同表键互不冲突，Python 单线程 asyncio
+        无真竞态）。
+        """
         out: dict[str, list[str]] = {}
-        for t in dict.fromkeys(tables):  # 去重保序
-            cols = await self.columns(t)
+        sem = asyncio.Semaphore(_SCHEMA_FETCH_CONCURRENCY)
+
+        async def _one(t: str) -> tuple[str, list[str] | None]:
+            async with sem:
+                return t, await self.columns(t)
+
+        results = await asyncio.gather(
+            *(_one(t) for t in dict.fromkeys(tables))
+        )
+        for t, cols in results:
             if cols:
                 out[t] = cols
         return out
