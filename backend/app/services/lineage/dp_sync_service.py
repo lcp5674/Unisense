@@ -125,6 +125,51 @@ def _safe_table_name(value: str | None, field: str, default: str) -> str:
 _TABLE_RE = re.compile(r"^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)?$")
 
 
+#: dp ``dispatch_task`` 行 SELECT 期望列映射（源列, 别名，顺序 = 历史 SQL 顺序）。
+#: 不同环境的调度元库表结构可能不同（如新增 settle_project_*/master_task_* 或
+#: 精简旧表缺这些列）——fetch 前先探测真实列，仅 SELECT 两者交集；缺失列在
+#: ``build_task_ref`` 侧 ``if key in task`` 天然跳过（静态快照字段，无下游强依赖）。
+_TASK_SELECT_COLS: tuple[tuple[str, str], ...] = (
+    ("id", "task_id"),
+    ("task_no", "task_no"),
+    ("name", "task_name"),
+    ("type", "type"),
+    ("out_table", "out_table"),
+    ("director", "director"),
+    ("created_user_id", "created_user_id"),
+    ("modified_user_id", "modified_user_id"),
+    ("checker", "checker"),
+    ("settle_project_director", "settle_project_director"),
+    ("project_id", "project_id"),
+    ("settle_project_name", "settle_project_name"),
+    ("settle_department_name", "settle_department_name"),
+    ("budget_unit_name", "budget_unit_name"),
+    ("cycle", "cycle"),
+    ("cron_express", "cron_express"),
+    ("week_day", "week_day"),
+    ("month_day", "month_day"),
+    ("specific_time", "specific_time"),
+    ("frequence", "frequence"),
+    ("remark", "remark"),
+    ("task_version_desc", "task_version_desc"),
+    ("task_version", "task_version"),
+    ("master_task_id", "master_task_id"),
+    ("is_master_task", "is_master_task"),
+)
+
+#: dp ``dispatch_task_step`` 行 SELECT 期望列映射（同上自适应；is_deleted 列不存在
+#: 时 WHERE 软删条件同步省略）。
+_STEP_SELECT_COLS: tuple[tuple[str, str], ...] = (
+    ("id", "step_id"),
+    ("task_id", "task_id"),
+    ("task_step", "task_step"),
+    ("task_step_name", "step_name"),
+    ("task_step_type", "task_step_type"),
+    ("task_node_type", "task_node_type"),
+    ("script_info", "script_info"),
+)
+
+
 def _utc_aware(dt: datetime | None) -> datetime | None:
     """MySQL DATETIME 读出为 naive，统一按 UTC 补时区（与全仓 UTC 落库一致）。
 
@@ -211,6 +256,9 @@ class DpSyncService:
         # 方案 3：schema 感知 star 展开的提供者（scan_once 内创建并绑定 dp
         # collector；实例每轮新建，故实例级缓存安全）。
         self._schema_provider: Any | None = None
+        # dp 元表（dispatch_task/dispatch_task_step）真实列探测缓存——不同环境
+        # 表结构可能不同，fetch 前按 (schema, table) 探测一次、轮内复用。
+        self._dp_table_columns: dict[tuple[str, str], set[str] | None] = {}
 
     # ---- 单 step 处理 ----
     async def process_step(
@@ -1092,17 +1140,59 @@ class DpSyncService:
             return  # 协作取消：跳过回填
         await self.backfill_owner(task, config)
 
+    async def _available_columns(
+        self, collector: Any, schema: str, table: str
+    ) -> set[str] | None:
+        """探测 dp 元表真实列名集合（小写）；不可知返回 ``None``（调用方按全列处理）。
+
+        不同环境的调度元库 ``dispatch_task``/``dispatch_task_step`` 结构可能不同
+        （有的含 settle_project_*/master_task_* 等增强列，有的为精简旧表）——
+        fetch 前经 ``information_schema.columns`` 拿真实列，仅 SELECT 交集，避免
+        ``Unknown column`` 使单任务失败（生产曾因缺 settle_project_director 报错）。
+
+        结果按 (schema, table) 轮内缓存；探测失败/空集（如测试 mock）视为不可知，
+        回退完整期望列清单（保持旧行为与降级安全）。
+        """
+        # __init__ 已初始化缓存 dict；用 setdefault 兜底 __new__ 手工装配的
+        # 测试对象（既有 helper 模式），真实对象直接复用既有缓存。
+        cache = self.__dict__.setdefault("_dp_table_columns", {})
+        key = (schema, table)
+        if key in cache:
+            return cache[key]
+        cols: set[str] | None = None
+        try:
+            rows = await collector.query(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema=:d AND table_name=:t",
+                {"d": schema, "t": table},
+            )
+            got = {
+                str(r.get("column_name") or r.get("COLUMN_NAME") or "").strip().lower()
+                for r in (rows or [])
+                if r.get("column_name") or r.get("COLUMN_NAME")
+            }
+            cols = got or None
+        except Exception as exc:  # noqa: BLE001 —— 探测失败即按全列处理，不阻断扫描
+            logger.warning(
+                "dp_column_probe_failed schema=%s table=%s error=%s", schema, table, exc
+            )
+            cols = None
+        self._dp_table_columns[key] = cols
+        return cols
+
     async def _fetch_task(
         self, collector: Any, task_id: int, config: Any
     ) -> dict[str, Any] | None:
         schema, task_table, _ = self._table_scope(config)
+        cols = await self._available_columns(collector, schema, task_table)
+        pairs = [
+            (c, a) for c, a in _TASK_SELECT_COLS if cols is None or c in cols
+        ] or list(_TASK_SELECT_COLS)
+        select = ", ".join(
+            f"{col} AS {alias}" if col != alias else col for col, alias in pairs
+        )
         rows = await collector.query(
-            "SELECT id AS task_id, task_no, name AS task_name, type, out_table, "
-            "director, created_user_id, modified_user_id, checker, settle_project_director, "
-            "project_id, settle_project_name, settle_department_name, budget_unit_name, "
-            "cycle, cron_express, week_day, month_day, specific_time, frequence, remark, "
-            "task_version_desc, task_version, master_task_id, is_master_task "
-            f"FROM {schema}.{task_table} WHERE id=:tid",
+            f"SELECT {select} FROM {schema}.{task_table} WHERE id=:tid",
             {"tid": task_id},
         )
         return rows[0] if rows else None
@@ -1116,11 +1206,21 @@ class DpSyncService:
         step_clause, params = _in_clause(
             "task_step_type", step_types, "s", params
         )
+        cols = await self._available_columns(collector, schema, step_table)
+        pairs = [
+            (c, a) for c, a in _STEP_SELECT_COLS if cols is None or c in cols
+        ] or list(_STEP_SELECT_COLS)
+        select = ", ".join(
+            f"{col} AS {alias}" if col != alias else col for col, alias in pairs
+        )
+        deleted = (
+            ""
+            if cols is not None and "is_deleted" not in cols
+            else " AND is_deleted=0"
+        )
         return await collector.query(
-            "SELECT id AS step_id, task_id, task_step, "
-            "task_step_name AS step_name, task_step_type, task_node_type, script_info "
-            f"FROM {schema}.{step_table} "
-            f"WHERE task_id=:tid AND is_deleted=0{step_clause} "
+            f"SELECT {select} FROM {schema}.{step_table} "
+            f"WHERE task_id=:tid{deleted}{step_clause} "
             "ORDER BY task_step",
             params,
         )
