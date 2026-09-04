@@ -1575,9 +1575,15 @@ function ImpactTab() {
           <AssetGraph
             nodes={graphData.nodes}
             edges={graphData.edges}
-            height={420}
+            height={granularity === "field" ? 520 : 420}
             onNodeClick={handleNodeClick}
-            lanes
+            // 表级血缘：语义泳道按类型分带展示（表/指标/字段各就各位）；
+            // 字段级血缘只有 field 节点（无表/指标带可分层），泳道反而把全部字段压进单一窄带
+            // 导致布局拥挤——关闭泳道让 dagre 按血缘链自然分层（配合字段 label 折行与加大间距）。
+            lanes={granularity === "table"}
+            // 字段级：与字段钻取小图一致不压暗其余节点（密集字段图“看一个字段其余全暗看不清”），
+            // 也避免“点击节点后其他全灰、点空白不回亮”的观感问题。
+            dimOnHover={granularity === "table"}
           />
         </Card>
       )}

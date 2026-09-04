@@ -143,6 +143,42 @@ function trimLabel(label: string, max = 40): string {
 }
 
 /**
+ * 字段节点 label 折行：完整「库.表.列」按点分段、贪婪累积到每行不超过 maxChars 字符时折行。
+ * 字段级血缘图的长表列名（如 wedw_mid.jwy_anhao_population_history_tag_df.tag_code）若单行展示
+ * 会与邻节点底部标签互相压字、布局拥挤——折行后每行短、完整内容不丢，悬停 tooltip 仍可全文。
+ * 换行尽量以「.」为界（不切断库/表/列名）；单段超长（如无点长表名）才在段内硬切兜底。
+ */
+export function wrapFieldLabel(label: string, maxChars = 24): string {
+  const src = String(label ?? "").replace(/\s+/g, "");
+  if (!src) return "";
+  if (src.length <= maxChars) return src;
+  const lines: string[] = [];
+  const n = src.length;
+  let i = 0;
+  while (i < n) {
+    if (n - i <= maxChars) {
+      lines.push(src.slice(i));
+      break;
+    }
+    const winEnd = i + maxChars;
+    // 优先在窗口内最后一个分隔符（. 或 _）处断行，断点保留分隔符——折行只换行不丢任何字符，
+    // 还原时 join("\n").replace("\n","") 即原文；窗口内无分隔符（超长无点无下划线段）才硬切兜底。
+    let br = -1;
+    for (let k = i; k < winEnd; k++) {
+      if (src[k] === "." || src[k] === "_") br = k;
+    }
+    if (br > i) {
+      lines.push(src.slice(i, br + 1));
+      i = br + 1;
+    } else {
+      lines.push(src.slice(i, winEnd));
+      i = winEnd;
+    }
+  }
+  return lines.join("\n");
+}
+
+/**
  * 自适应节点基准半径：按图规模动态缩放。
  * 聚焦视图（如从指标目录跳转 ?node= 只看 1-3 个节点的上下游）节点少，
  * 若仍用全景的大半径（24）会显得图标硕大突兀；节点越少半径越小，越多越大。
@@ -806,20 +842,37 @@ function pickVisible(
   };
 }
 
-/** 布局配置：分层（DAG 自上而下或从左到右）｜力导向（环/交互定位）｜血缘度径向（同心圆，依赖引用数高者居中）。 */
-function layoutConfig(layoutMode: "hierarchy" | "force" | "radial", direction: "TB" | "LR" = "TB") {
+/** 布局配置：分层（DAG 自上而下或从左到右）｜力导向（环/交互定位）｜血缘度径向（同心圆，依赖引用数高者居中）。
+ *  label：字段节点折行度量（{maxLines, maxLineChars}，非字段图为 {1,0}）——分层布局据其放大
+ *  ranksep/nodesep：多行标签纵向需要更高层距、长行标签横向需要更大节点距，保证完整「库.表.列」
+ *  不被邻节点/相邻层标签压字（字段级血缘图“布局紧凑、表列名看不全”的根因）。
+ */
+function layoutConfig(
+  layoutMode: "hierarchy" | "force" | "radial",
+  direction: "TB" | "LR" = "TB",
+  label?: { maxLines: number; maxLineChars: number },
+) {
   if (layoutMode === "hierarchy") {
     // 分层布局：血缘 DAG 自上而下（表→指标）或从左到右，节点多时比力导向清晰得多
     // nodesep/ranksep 收紧（80/70）让 160 节点大图在 zoom 下限 0.35 下能展示更多层级，
     // 避免被压成一条细带；间距按"节点半径+下方标签"最小需求计算留有余量避免文字压字。
     // rankdir 由 direction 决定：TB 泳道纵向（源在上字段在下）、LR 横向（源在左字段在右）。
     // align：TB 下 DL（深层靠左）让加工链更紧凑；LR 下 UL（dagre 默认）避免跨层折返。
+    // 字段折行图：maxLineChars≈24 字符 → 行宽约 190px，nodesep 放宽到行宽保证同层标签不横向压字；
+    // 多行（maxLines>1）时 ranksep 额外 + (行数-1)*16px 让跨层多行标签不上下压字。
+    const hasLongLabel = (label?.maxLineChars ?? 0) > 20;
+    const nodeGap = hasLongLabel
+      ? Math.min(240, Math.max(90, (label?.maxLineChars ?? 0) * 6.2 + 40))
+      : direction === "LR"
+        ? 70
+        : 80;
+    const extraRank = hasLongLabel ? Math.max(0, (label?.maxLines ?? 1) - 1) * 16 : 0;
     return {
       type: "antv-dagre",
       rankdir: direction,
       align: direction === "LR" ? "UL" : "DL",
-      nodesep: direction === "LR" ? 70 : 80,
-      ranksep: direction === "LR" ? 80 : 70,
+      nodesep: direction === "LR" ? Math.max(70, nodeGap) : Math.max(80, nodeGap),
+      ranksep: direction === "LR" ? Math.max(80, 80 + extraRank) : Math.max(70, 70 + extraRank),
     };
   }
   if (layoutMode === "radial") {
@@ -904,6 +957,25 @@ function GraphCanvas({
   // dimOnHover 的 ref 镜像：mount effect 注册的 hover 回调需读最新值（同 graphReady 规避闭包过期）
   const dimOnHoverRef = useRef(dimOnHover);
   dimOnHoverRef.current = dimOnHover;
+  // 「点击聚焦」的当前节点 id：点击节点后该血缘链保持高亮（其余压暗），点击画布空白才清空恢复全亮。
+  // 与悬停高亮（pointerenter/leave）并存——悬停是瞬态的（移出即按聚焦态恢复），聚焦是持久的（点击空白才清）。
+  const focusedIdRef = useRef<string | null>(null);
+  // 字段节点 label 折行度量：多行折行后标签纵向变高、需加大 dagre ranksep（层间距）避免层间压字；
+  // 最长行字符用于估算横向最小节点间距（nodesep），让完整「库.表.列」不被邻节点标签遮挡。
+  // 经 ref 供 mount effect 构建布局配置时读取最新值（与 dimOnHoverRef 同模式规避闭包过期）。
+  const fieldLabelMetrics = useMemo(() => {
+    let maxLines = 1;
+    let maxLineChars = 0;
+    for (const n of nodes) {
+      if ((n as AssetGraphNode).type !== "field") continue;
+      const lines = wrapFieldLabel((n as AssetGraphNode).label ?? "", 24).split("\n");
+      maxLines = Math.max(maxLines, lines.length);
+      for (const ln of lines) maxLineChars = Math.max(maxLineChars, ln.length);
+    }
+    return { maxLines, maxLineChars };
+  }, [nodes]);
+  const fieldLabelMetricsRef = useRef(fieldLabelMetrics);
+  fieldLabelMetricsRef.current = fieldLabelMetrics;
   // 边流动动画的取消函数（render 后启动、数据重载/卸载时取消）
   const edgeFlowCancelRef = useRef<(() => void) | null>(null);
 
@@ -1193,7 +1265,11 @@ function GraphCanvas({
               // 字段节点 label 为「库.表.列」完整标识（字段级血缘查询/钻取），长度常超
               // 表级默认阈值（40）——放宽到 120 保证完整表列名不被截断；表级/指标节点维持
               // 40（一般血缘节点名完整显示，仅极长名称截断）。
-              return trimLabel(n?.label ?? String(d.id), n?.type === "field" ? 120 : 40);
+              // 字段节点同时按点折行（每行 ≤24 字符）：完整内容多行展示，避免长 label 与
+              // 邻节点压字导致字段级图「布局紧凑、表列名看不全」。
+              return n?.type === "field"
+                ? wrapFieldLabel(n?.label ?? String(d.id), 24)
+                : trimLabel(n?.label ?? String(d.id), 40);
             },
             labelPlacement: "bottom",
             labelOffset: 10,
@@ -1350,7 +1426,7 @@ function GraphCanvas({
             translate: false,
           },
         },
-        layout: layoutConfig(layoutMode, direction),
+        layout: layoutConfig(layoutMode, direction, fieldLabelMetricsRef.current),
         behaviors: ["drag-canvas", "zoom-canvas", "drag-element"],
         // 血缘度提示：悬停节点显示「依赖 N 项（上游）/ 被 M 项引用（下游）」，
         // 与右上角 badge 角标互补——badge 快速看总数，tooltip 细分方向。
@@ -1418,20 +1494,78 @@ function GraphCanvas({
       });
       graphRef.current = graph;
 
+      // —— 血缘链高亮共享逻辑 ——
+      /** 沿血缘链点亮 center 上下游各 K 跳节点/边（其余 inactive 压暗）；dimOthers=false 只点亮链上、不压暗。 */
+      function applyChainHighlight(center: string, dimOthers: boolean) {
+        if (!graph || graph.destroyed) return;
+        const pathNodes = collectPathNodes(adjacencyRef.current, center);
+        const pathEdges = collectPathEdges(edgesRef.current, pathNodes);
+        const nodeRecord: Record<string, string | string[]> = {};
+        for (const n of graph.getNodeData()) {
+          const nid = String(n.id);
+          if (nid === center) continue; // 中心节点单独动画点亮
+          if (dimOthers) {
+            nodeRecord[nid] = pathNodes.has(nid)
+              ? stateWithCompact("active")
+              : stateWithCompact("inactive");
+          } else if (pathNodes.has(nid)) {
+            nodeRecord[nid] = stateWithCompact("active");
+          }
+        }
+        const edgeRecord: Record<string, string | string[]> = {};
+        for (const e of edgesRef.current) {
+          if ((e as RenderEdge | undefined)?.anchorEdge) continue;
+          const eid = `${String(e.source)}-${String(e.target)}`;
+          if (dimOthers) {
+            edgeRecord[eid] = pathEdges.has(eid) ? "active" : "inactive";
+          } else if (pathEdges.has(eid)) {
+            edgeRecord[eid] = "active";
+          }
+        }
+        void graph.setElementState(nodeRecord, false).catch(() => {});
+        void graph.setElementState(edgeRecord, false).catch(() => {});
+        void graph.setElementState(center, stateWithCompact("active"), true).catch(() => {});
+      }
+
+      /** 清空全部节点/边状态（回落到 style 默认值 → 全亮）。 */
+      function clearAllStates() {
+        if (!graph || graph.destroyed) return;
+        const nodeRecord: Record<string, string | string[]> = {};
+        for (const n of graph.getNodeData()) nodeRecord[String(n.id)] = stateWithCompact([]);
+        const edgeRecord: Record<string, string | string[]> = {};
+        for (const e of edgesRef.current) {
+          if ((e as RenderEdge | undefined)?.anchorEdge) continue;
+          edgeRecord[`${String(e.source)}-${String(e.target)}`] = [];
+        }
+        void graph.setElementState(nodeRecord, false).catch(() => {});
+        void graph.setElementState(edgeRecord, false).catch(() => {});
+      }
+
       graph.on<IElementEvent>("node:click", (evt) => {
         if (!graph || graph.destroyed) return;
         const raw = evt.target as { id?: string; __data__?: { id?: string } } | undefined;
         const id = raw?.id ?? raw?.__data__?.id;
         if (!id) return;
         const node = graph.getNodeData(String(id))?.data as AssetGraphNode | undefined;
-        if (node && !node.anchor) onNodeClickRef.current?.(node); // 泳道锚点不响应点击
+        if (node && !node.anchor) {
+          // 泳道锚点不响应点击；点击真实节点 = 持久聚焦其血缘链（其余压暗），
+          // 悬停移出不会清空，点击画布空白（canvas:click）才清空恢复全亮——避免「整图暗无亮节点」卡死。
+          focusedIdRef.current = String(id);
+          try {
+            applyChainHighlight(String(id), dimOnHoverRef.current);
+          } catch {
+            // 高亮为装饰性交互，过渡期失败静默忽略
+          }
+          onNodeClickRef.current?.(node);
+        }
       });
 
-      // 悬停路径高亮（替代旧 1 跳邻域淡化）：沿血缘边上下游各 K 跳收集"血缘链"节点与
-      // 路径边，链上节点/边高亮、其余全部压暗——一眼看出节点从哪来、流向哪、与谁同链。
+      // 悬停路径高亮：沿血缘边上下游各 K 跳收集"血缘链"节点与路径边，链上节点/边高亮、
+      // 其余全部压暗——一眼看出节点从哪来、流向哪、与谁同链。
       // 性能优化：pointerenter 高频触发（跨节点移动），用 rAF 节流到每帧只处理最后一次；
       // 节点与边各用**批量 record**（单次调用），替代逐节点循环。
       // 中心节点单独 setElementState(..., true) 走 update 标量动画（描边/光晕 200ms 过渡）。
+      // 与点击聚焦共存：悬停是瞬态（移出后若有点击聚焦则恢复聚焦链高亮、否则清空恢复全亮）。
       let hoverRaf = 0;
       graph.on<IElementEvent>("node:pointerenter", (evt) => {
         if (!graph || graph.destroyed || !graphReadyRef.current) return;
@@ -1442,40 +1576,7 @@ function GraphCanvas({
         hoverRaf = requestAnimationFrame(() => {
           if (!graph || graph.destroyed) return;
           try {
-            const center = String(id);
-            // 路径节点集 + 路径边集（BFS 层序，超限保留近者）
-            const pathNodes = collectPathNodes(adjacencyRef.current, center);
-            const pathEdges = collectPathEdges(edgesRef.current, pathNodes);
-            // 节点状态：路径链上 active，其余 inactive（淡化到 0.06）。
-            // dimOnHover=false（字段级钻取等小图）：只高亮链上节点、不压暗其余，
-            // 避免密集小图上「看一个字段、其他全暗到看不清」。
-            const dimOthers = dimOnHoverRef.current;
-            const nodeRecord: Record<string, string | string[]> = {};
-            for (const n of graph.getNodeData()) {
-              const nid = String(n.id);
-              if (nid === center) continue; // 中心节点单独动画点亮
-              if (dimOthers) {
-                nodeRecord[nid] = pathNodes.has(nid)
-                  ? stateWithCompact("active")
-                  : stateWithCompact("inactive");
-              } else if (pathNodes.has(nid)) {
-                nodeRecord[nid] = stateWithCompact("active");
-              }
-            }
-            // 边状态：路径边保持醒目，非路径边压暗（锚定边跳过）
-            const edgeRecord: Record<string, string | string[]> = {};
-            for (const e of edgesRef.current) {
-              if ((e as RenderEdge | undefined)?.anchorEdge) continue;
-              const eid = `${String(e.source)}-${String(e.target)}`;
-              if (dimOthers) {
-                edgeRecord[eid] = pathEdges.has(eid) ? "active" : "inactive";
-              } else if (pathEdges.has(eid)) {
-                edgeRecord[eid] = "active";
-              }
-            }
-            void graph.setElementState(nodeRecord, false).catch(() => {});
-            void graph.setElementState(edgeRecord, false).catch(() => {});
-            void graph.setElementState(center, stateWithCompact("active"), true).catch(() => {});
+            applyChainHighlight(String(id), dimOnHoverRef.current);
           } catch {
             // 高亮为装饰性交互，过渡期失败静默忽略
           }
@@ -1485,19 +1586,26 @@ function GraphCanvas({
         if (!graph || graph.destroyed || !graphReadyRef.current) return;
         cancelAnimationFrame(hoverRaf);
         try {
-          // 恢复全部节点与边为无状态（回落到 style 函数默认值）
-          const nodeRecord: Record<string, string | string[]> = {};
-          for (const n of graph.getNodeData()) nodeRecord[String(n.id)] = stateWithCompact([]);
-          const edgeRecord: Record<string, string | string[]> = {};
-          for (const e of edgesRef.current) {
-            if ((e as RenderEdge | undefined)?.anchorEdge) continue;
-            edgeRecord[`${String(e.source)}-${String(e.target)}`] = [];
+          // 有「点击聚焦」：离开悬停节点后恢复聚焦链高亮（保持聚焦态，不因移动而清空）；
+          // 无聚焦：清空全部节点/边状态（回落到 style 函数默认值 → 全亮）。
+          if (focusedIdRef.current) {
+            applyChainHighlight(focusedIdRef.current, dimOnHoverRef.current);
+          } else {
+            clearAllStates();
           }
-          void graph.setElementState(nodeRecord, false).catch(() => {});
-          void graph.setElementState(edgeRecord, false).catch(() => {});
         } catch {
           // 忽略过渡期状态清理失败
         }
+      });
+
+      // 点击画布空白：清空「点击聚焦」并恢复全亮（targetType='node' 说明是节点点击冒泡，忽略不打断聚焦）。
+      // 修复：此前点击节点后其余节点被压暗，再点空白无任何处理器恢复 → 整图暗沉无亮节点的卡死观感。
+      graph.on<IElementEvent>("canvas:click", (evt) => {
+        if (!graph || graph.destroyed || !graphReadyRef.current) return;
+        if ((evt as { targetType?: string }).targetType === "node") return;
+        if (!focusedIdRef.current) return;
+        focusedIdRef.current = null;
+        clearAllStates();
       });
 
       // 大数据量 LOD：滚轮缩放跨过阈值时批量切换 compact 状态（隐藏标签/图标/柔光/投影），

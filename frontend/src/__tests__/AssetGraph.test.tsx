@@ -10,6 +10,7 @@ import {
   buildLineageAdjacency,
   collectPathNodes,
   collectPathEdges,
+  wrapFieldLabel,
   type AssetGraphNode,
   type AssetGraphEdge,
 } from "../components/assetmap/AssetGraph";
@@ -824,5 +825,34 @@ describe("字段开关按数据自适应", () => {
     await waitFor(() => expect(Graph).toHaveBeenCalled());
     // 数据无 field 节点 → 字段切换开关无意义，应隐藏（避免"点击没反应"）
     expect(screen.queryByTestId("asset-graph-show-fields")).toBeNull();
+  });
+});
+
+describe("wrapFieldLabel 字段节点 label 折行（字段级血缘图长「库.表.列」完整展示不压字）", () => {
+  it("短 label（≤maxChars）原样返回", () => {
+    expect(wrapFieldLabel("orders.id", 24)).toBe("orders.id");
+    expect(wrapFieldLabel("", 24)).toBe("");
+  });
+
+  it("超长「库.表.列」按点折行成多行、内容完整不丢", () => {
+    const out = wrapFieldLabel("wedw_mid.jwy_anhao_population_history_tag_df.tag_code", 24);
+    const lines = out.split("\n");
+    expect(lines.length).toBeGreaterThan(1);
+    // 折行只换行不截断：把折行点替换回 "." 后应还原原文
+    expect(lines.join("")).toBe("wedw_mid.jwy_anhao_population_history_tag_df.tag_code");
+    // 每行不超过阈值（允许最后单段略超阈值的小尾巴由逐段累积保证，均 ≤ 阈值）
+    for (const ln of lines) expect(ln.length).toBeLessThanOrEqual(24);
+  });
+
+  it("单段超长（无点可分的库表名）在段内硬切兜底、仍不丢字符", () => {
+    const long = "this_is_a_very_long_database_table_name_that_has_no_dot.col";
+    const out = wrapFieldLabel(long, 24);
+    expect(out.split("\n").join("")).toBe(long.replace(/\s+/g, ""));
+  });
+
+  it("空白字符被剥离（label 不应含空格）", () => {
+    const out = wrapFieldLabel("wedw_dw. wy_zh .col ", 24);
+    expect(out.includes(" ")).toBe(false);
+    expect(out).toBe("wedw_dw.wy_zh.col");
   });
 });
