@@ -322,16 +322,19 @@ describe("Dashboard", () => {
     expect(document.querySelectorAll(".owner-card.owner-hot").length).toBeGreaterThan(0);
   });
 
-  it("Owner 责任分布跨资产：每责任人卡片含 6 类同尺度资产条与跨资产总计", async () => {
+  it("Owner 责任分布跨资产：每责任人单条堆叠条（非 0 段按绝对量）+ 图例恒展示 6 类", async () => {
     const { container } = renderDashboard();
     await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
 
     // Alice（total=82 排前）：指标 60 / 数据表 8 / 数据源 4 / 维度 3 / 术语 5 / 模板 2
     const aliceCard = container.querySelectorAll(".owner-card")[0];
-    // 同尺度迷你条矩阵：恒渲染 6 类（每条自带 label + 数值，0 值也保留灰条），卡片高度统一
-    const bars = Array.from(aliceCard!.querySelectorAll(".or-bar"));
-    expect(bars.length).toBe(6);
-    const textOf = (i: number) => bars[i].textContent?.replace(/\s/g, "");
+    // 单条堆叠条：6 类全非 0 → 6 段
+    const segs = Array.from(aliceCard!.querySelectorAll(".oc-bar .oc-seg"));
+    expect(segs.length).toBe(6);
+    // 图例恒 6 项（chip），每项含「标签 数值」
+    const chips = Array.from(aliceCard!.querySelectorAll(".oc-legend .oc-chip"));
+    expect(chips.length).toBe(6);
+    const textOf = (i: number) => chips[i].textContent?.replace(/\s/g, "");
     expect(textOf(0)).toContain("指标");
     expect(textOf(0)).toContain("60");
     expect(textOf(1)).toContain("数据表");
@@ -348,21 +351,23 @@ describe("Dashboard", () => {
     expect(aliceCard!.querySelector(".oc-total")?.textContent).toContain("82");
   });
 
-  it("Owner 分布以图表样式展示：同类资产条同尺度（条长与全平台该类最大值同比），可直接对比绝对量", async () => {
+  it("Owner 分布以单条堆叠条展示：段宽 = count/全 Owner 最大总资产，跨人同类段直接比绝对量", async () => {
     const { container } = renderDashboard();
     await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
 
-    // 每 Owner 一张横贯卡片（Alice/Bob/Charlie 共 3 张）
+    // 每 Owner 一横行卡条（Alice/Bob/Charlie 共 3 张）
     const cards = Array.from(container.querySelectorAll(".owner-card"));
     expect(cards.length).toBe(3);
-    // 同尺度基准 = 全平台该类 Owner 最大值：指标 Alice 60 / Bob 40 / Charlie 5 → max=60
-    // Bob 指标条 = 40/60 = 66.7%（toFixed(1)）；Charlie 指标条 = 5/60 = 8.3% → Charlie 条长约为 Bob 的 1/8，绝对量直接可比
-    const bobBars = Array.from(cards[1].querySelectorAll(".or-bar"));
-    expect(bobBars[0].querySelector(".or-fill")?.getAttribute("style")).toContain("66.7%");
-    const charlieBars = Array.from(cards[2].querySelectorAll(".or-bar"));
-    expect(charlieBars[0].querySelector(".or-fill")?.getAttribute("style")).toContain("8.3%");
-    // 0 值资产（Charlie 数据表）：无 or-fill（条留空），仅 label + 灰 0
-    expect(charlieBars[1].querySelector(".or-fill")).toBeNull();
+    // 同尺度分母 = 全 Owner 最大总资产 maxTotal = Alice total 82（82>52>5）
+    // Bob 指标段 = 40/82 = 48.78%；Charlie 指标段 = 5/82 = 6.10% → 段长直接反映绝对量
+    const bobSegs = Array.from(cards[1].querySelectorAll(".oc-bar .oc-seg"));
+    expect(bobSegs[0].getAttribute("style")).toContain("48.78%");
+    const charlieSegs = Array.from(cards[2].querySelectorAll(".oc-bar .oc-seg"));
+    expect(charlieSegs[0].getAttribute("style")).toContain("6.1%");
+    // 0 值资产（Charlie 数据表）：不渲染色段（长度 0），由图例灰显
+    expect(charlieSegs.length).toBe(1);
+    const charlieTableChip = Array.from(cards[2].querySelectorAll(".oc-legend .oc-chip"))[1];
+    expect(charlieTableChip.className).toContain("oc-chip-zero");
     // 生命周期作为次级信息展示（色点 + 标签 + 计数）
     const life = cards[0].querySelector(".oc-life");
     expect(life?.textContent).toContain("草稿");
@@ -371,20 +376,20 @@ describe("Dashboard", () => {
     expect(life?.textContent).toContain("36");
   });
 
-  it("Owner 资产条跳转：点击「数据表」条跳 /catalogs?owner_id=、点「维度」条跳 /dimensions?owner_id=", async () => {
+  it("Owner 资产段跳转：点击「数据表」色段跳 /catalogs?owner_id=、点「维度」色段跳 /dimensions?owner_id=", async () => {
     const probe = renderWithLocation();
     await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
 
-    // Alice 卡片（total=82 排前）第 2 条 = 数据表
+    // Alice 卡片（total=82 排前）第 2 段 = 数据表
     const aliceCard = document.querySelectorAll(".owner-card")[0];
-    const bars = Array.from(aliceCard!.querySelectorAll(".or-bar"));
-    fireEvent.click(bars[1]); // 数据表
+    const segs = Array.from(aliceCard!.querySelectorAll(".oc-bar .oc-seg"));
+    fireEvent.click(segs[1]); // 数据表
     expect(probe.location()?.pathname).toBe("/catalogs");
     expect(probe.location()?.search).toContain("owner_id=1");
 
-    // 再点击「维度」条（第 4 条）→ /dimensions?owner_id=1
-    const bars2 = Array.from(document.querySelectorAll(".owner-card")[0].querySelectorAll(".or-bar"));
-    fireEvent.click(bars2[3]); // 维度
+    // 再点击「维度」段（第 4 段）→ /dimensions?owner_id=1
+    const segs2 = Array.from(document.querySelectorAll(".owner-card")[0].querySelectorAll(".oc-bar .oc-seg"));
+    fireEvent.click(segs2[3]); // 维度
     expect(probe.location()?.pathname).toBe("/dimensions");
     expect(probe.location()?.search).toContain("owner_id=1");
   });
@@ -512,7 +517,7 @@ describe("Dashboard", () => {
     expect(probe.location()?.search).toContain("owner_id=1");
   });
 
-  it("Owner 卡片：含 0 值资产类型仍完整渲染 6 条（数据表/数据源为 0 不被过滤）", async () => {
+  it("Owner 卡条：0 值资产不渲染色段（长度 0），由图例灰显且保留完整 6 类可读", async () => {
     const { container } = renderDashboard();
     await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
 
@@ -520,49 +525,47 @@ describe("Dashboard", () => {
     const cards = Array.from(container.querySelectorAll(".owner-card"));
     const charlieCard = cards[2];
     expect(charlieCard).toBeTruthy();
-    const bars = Array.from(charlieCard!.querySelectorAll(".or-bar"));
-    // 6 类全渲染（含 0 值的 tables/sources/dimensions/terms/templates）
-    expect(bars.length).toBe(6);
-    // 数据表条（index=1）：count=0，含 or-zero 类、无 or-fill（条留空）、数值灰 0、title 提示「暂无」
-    const tableBar = bars[1];
-    expect(tableBar.className).toContain("or-zero");
-    expect(tableBar.querySelector(".or-fill")).toBeNull();
-    expect(tableBar.querySelector(".or-val")?.textContent).toBe("0");
-    expect(tableBar.getAttribute("title") ?? "").toContain("数据表");
-    expect(tableBar.getAttribute("title") ?? "").toContain("暂无");
-    // 数据源条（index=2）：同样 0 + or-zero + 无 or-fill
-    const sourceBar = bars[2];
-    expect(sourceBar.className).toContain("or-zero");
-    expect(sourceBar.querySelector(".or-fill")).toBeNull();
-    expect(sourceBar.getAttribute("title") ?? "").toContain("数据源");
-    // 指标条（index=0）：count=5（>0），有 or-fill、无 or-zero 类
-    const metricBar = bars[0];
-    expect(metricBar.querySelector(".or-fill")).toBeTruthy();
-    expect(metricBar.textContent).toContain("指标");
-    expect(metricBar.textContent).toContain("5");
-    expect(metricBar.className).not.toContain("or-zero");
+    // Charlie 仅指标 5 非 0 → 堆叠条只有 1 个色段
+    const segs = Array.from(charlieCard!.querySelectorAll(".oc-bar .oc-seg"));
+    expect(segs.length).toBe(1);
+    // 图例恒 6 项（含 0 值）：数据表/数据源 chip 灰显且含 0
+    const chips = Array.from(charlieCard!.querySelectorAll(".oc-legend .oc-chip"));
+    expect(chips.length).toBe(6);
+    const tableChip = chips[1];
+    expect(tableChip.className).toContain("oc-chip-zero");
+    expect(tableChip.textContent).toContain("数据表");
+    expect(tableChip.textContent).toContain("0");
+    const sourceChip = chips[2];
+    expect(sourceChip.className).toContain("oc-chip-zero");
+    expect(sourceChip.textContent).toContain("数据源");
+    expect(sourceChip.textContent).toContain("0");
+    // 指标（非 0）：图例正常无灰显
+    const metricChip = chips[0];
+    expect(metricChip.className).not.toContain("oc-chip-zero");
+    expect(metricChip.textContent).toContain("指标");
+    expect(metricChip.textContent).toContain("5");
   });
 
-  it("Owner 资产条：每条自带 label 与数值，0 值项灰显（数据表 0 / 数据源 0）不再依赖独立图例", async () => {
+  it("Owner 图例：恒展示 6 类 label 与数值，0 值项灰显（数据表 0 / 数据源 0）", async () => {
     const { container } = renderDashboard();
     await waitFor(() => expect(screen.getByText("Owner 责任分布")).toBeInTheDocument());
 
     // cards 按 total 降序：Alice(82) → Bob(52) → Charlie(5)
     const cards = Array.from(container.querySelectorAll(".owner-card"));
     const charlieCard = cards[2];
-    const bars = Array.from(charlieCard!.querySelectorAll(".or-bar"));
-    expect(bars.length).toBe(6);
-    // 0 值项（数据表/数据源）：条上 label + 0 均可见（灰显 or-zero）
-    expect(bars[1].textContent).toContain("数据表");
-    expect(bars[1].textContent).toContain("0");
-    expect(bars[1].className).toContain("or-zero");
-    expect(bars[2].textContent).toContain("数据源");
-    expect(bars[2].textContent).toContain("0");
-    expect(bars[2].className).toContain("or-zero");
-    // 非 0 项（指标）：正常显示 label + 数值，无 or-zero
-    expect(bars[0].textContent).toContain("指标");
-    expect(bars[0].textContent).toContain("5");
-    expect(bars[0].className).not.toContain("or-zero");
+    const chips = Array.from(charlieCard!.querySelectorAll(".oc-legend .oc-chip"));
+    expect(chips.length).toBe(6);
+    // 0 值项（数据表/数据源）：chip 灰显（oc-chip-zero）
+    expect(chips[1].textContent).toContain("数据表");
+    expect(chips[1].textContent).toContain("0");
+    expect(chips[1].className).toContain("oc-chip-zero");
+    expect(chips[2].textContent).toContain("数据源");
+    expect(chips[2].textContent).toContain("0");
+    expect(chips[2].className).toContain("oc-chip-zero");
+    // 非 0 项（指标）：正常显示 label + 数值，无灰显
+    expect(chips[0].textContent).toContain("指标");
+    expect(chips[0].textContent).toContain("5");
+    expect(chips[0].className).not.toContain("oc-chip-zero");
   });
 
   it("治理指标卡：质量健康渲染严重级分布与待处理", async () => {

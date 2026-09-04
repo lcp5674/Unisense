@@ -1446,96 +1446,10 @@ body {
   background: #5b6472;
 }
 
-/* ---- Owner 责任分布：6 类资产同尺度迷你条（替代原按自身占比的堆叠条） ----
-   条长 = count / 全平台该类 Owner 最大值 ×100%：不同责任人同类资产直接比条长即比绝对量，
-   2 列 × 3 行矩阵在整行卡片内铺开，卡片高度固定（恒渲染 6 条）不再参差 */
-.owner-card .or-bars {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px 26px;
-  align-items: center;
-  min-width: 0;
-}
-.owner-card .or-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  cursor: pointer;
-  border-radius: 6px;
-  padding: 2px 4px;
-  margin: 0 -4px;
-  transition: background 0.15s ease;
-}
-.owner-card .or-bar:hover {
-  background: var(--line-soft);
-}
-.owner-card .or-label {
-  flex: none;
-  width: 58px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--ink-2);
-  white-space: nowrap;
-  min-width: 0;
-}
-.owner-card .or-track {
-  flex: 1;
-  height: 9px;
-  border-radius: 5px;
-  background: var(--line-soft);
-  border: 1px solid var(--line-soft);
-  overflow: hidden;
-  min-width: 0;
-}
-.owner-card .or-fill {
-  display: block;
-  height: 100%;
-  border-radius: 5px;
-  min-width: 2px;
-}
-.owner-card .or-val {
-  flex: none;
-  width: 42px;
-  text-align: right;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--ink);
-  white-space: nowrap;
-}
-/* 0 值资产：label/数值灰显（条留空仅见 track 底色），保持 6 类完整可见 */
-.owner-card .or-zero .or-label,
-.owner-card .or-zero .or-val {
-  color: rgba(120, 130, 150, 0.82);
-}
-/* 条色与 label 圆点：沿用资产类型语义色（指标青 / 数据表绿 / 数据源青 / 维度紫 / 术语金 / 模板蓝） */
-.owner-card .or-label.oc-metric .oc-chip-dot,
-.owner-card .or-fill.oc-metric {
-  background: var(--data);
-}
-.owner-card .or-label.oc-table .oc-chip-dot,
-.owner-card .or-fill.oc-table {
-  background: #3a7d44;
-}
-.owner-card .or-label.oc-source .oc-chip-dot,
-.owner-card .or-fill.oc-source {
-  background: #1f8a8c;
-}
-.owner-card .or-label.oc-dim .oc-chip-dot,
-.owner-card .or-fill.oc-dim {
-  background: #8b6fd8;
-}
-.owner-card .or-label.oc-term .oc-chip-dot,
-.owner-card .or-fill.oc-term {
-  background: #b07a1f;
-}
-.owner-card .or-label.oc-tpl .oc-chip-dot,
-.owner-card .or-fill.oc-tpl {
-  background: #4a6fa5;
-}
+/* ---- Owner 责任分布：单条堆叠条（与图例同源，段宽 = count / 全 Owner 最大总资产） ----
+   每个责任人一横行卡条：堆叠条总长反映资产规模占比，同类色段跨人直接比长度即比绝对量；
+   0 值资产不渲染色段（长度 0 不误导），由图例 .oc-legend 灰显保证 6 类完整可读。
+   oc-bar/oc-seg/oc-legend/oc-chip/oc-life 结构定义见上方「资产构成条」区。 */
 
 /* 快速入口 */
 .quick-entry {

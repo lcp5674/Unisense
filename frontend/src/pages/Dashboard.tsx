@@ -678,20 +678,14 @@ function OwnerDistribution({
   isAdmin: boolean;
 }) {
   const owners = Object.entries(data.by_owner ?? {}).sort((a, b) => b[1].total - a[1].total);
-  // 同尺度基准：每种资产类型取全平台 Owner 中该类最大值。迷你条长 = count / typeMax[类型]，
-  // 让不同 Owner 的同类资产条长直接比绝对量（不再按自身占比——占比条无法跨人对比）。
-  const typeMax = OWNER_ASSETS.reduce(
-    (acc, a) => {
-      acc[a.key] = Math.max(1, ...owners.map(([, o]) => normalizeOwnerStat(o[a.key]).total));
-      return acc;
-    },
-    {} as Record<(typeof OWNER_ASSETS)[number]["key"], number>,
-  );
+  // 同尺度基准：全 Owner 中最大总资产。堆叠段宽 = count / maxTotal ×100%——条总长反映资产规模，
+  // 同类段跨人比长度即比绝对量（0 值不占段、由图例灰显，避免误导）。
+  const maxTotal = Math.max(1, ...owners.map(([, o]) => o.total ?? 0));
   // 总览页展示系统总体情况（产品语义）：Owner 责任分布为全局统计，所有登录用户可见；
   // 点击卡片跳转目标目录时由路由守卫（RequirePerm）鉴权。
   const title = "Owner 责任分布";
   const hint =
-    "每个责任人一行，6 类资产条同尺度（条长与全平台该类最大值同比）可直接对比绝对量；点条直达对应目录、点卡片查看其指标目录";
+    "每个责任人一条堆叠卡条，段长与全平台最大责任人同比（同分母），指标/数据表等各类资产可直接跨人比绝对量；点色段或图例直达对应目录、点卡片查看其指标目录";
   // 平台无任何资产时：管理员不渲染（无意义），其余角色展示引导
   if (owners.length === 0) {
     if (isAdmin) return null;
@@ -769,19 +763,25 @@ function OwnerDistribution({
                 )}
                 <span className="oc-total">共 {o.total} 项</span>
               </span>
-              <span className="or-bars" role="img" aria-label={`${o.name} 各类型资产数量（同尺度）`}>
+              <span className="oc-bar" role="img" aria-label={`${o.name} 各类型资产数量（与最大责任人同尺度）`}>
                 {OWNER_ASSETS.map((a) => {
                   const count = assetStats[a.key].total;
-                  const isZero = count === 0;
-                  // 条长 = count / 全平台该类 Owner 最大值 ×100%：不同 Owner 同类资产直接比条长即比绝对量
-                  const pct = Math.min(100, (count / typeMax[a.key]) * 100);
+                  if (count <= 0) return null;
+                  // 段宽 = count / maxTotal（全 Owner 最大总资产）×100%：条总长即资产规模占比，
+                  // 同类色段跨人直接比长度即比绝对量。0 值不占段，由图例灰显。
+                  const w = Math.min(100, (count / maxTotal) * 100);
+                  // 段内标注智能显示：足够宽才渲染（约 ≥13% 放「标签 数量」、≥4% 放数量），
+                  // 过窄段只留色块；完整「标签 数量」恒由图例 .oc-legend 展示。
+                  const segText =
+                    w >= 13 ? `${a.label} ${count}` : w >= 4 ? `${count}` : "";
                   return (
                     <span
                       key={a.key}
-                      className={`or-bar${isZero ? " or-zero" : ""}`}
+                      className={`oc-seg ${a.cls}`}
+                      style={{ width: `${w.toFixed(2)}%` }}
+                      title={`${a.label} ${count}，点击查看该责任人名下${a.label}`}
                       role="button"
                       tabIndex={0}
-                      title={isZero ? `${a.label} ${count}（该责任人名下暂无此类资产）` : `${a.label} ${count}，点击查看该责任人名下${a.label}`}
                       onClick={(e) => {
                         e.stopPropagation();
                         navigate(`${a.href}?owner_id=${id}`);
@@ -793,16 +793,35 @@ function OwnerDistribution({
                         }
                       }}
                     >
-                      <span className={`or-label ${a.cls}`}>
-                        <i className="oc-chip-dot" />
-                        {a.label}
-                      </span>
-                      <span className="or-track">
-                        {count > 0 && (
-                          <span className={`or-fill ${a.cls}`} style={{ width: `${pct.toFixed(1)}%` }} />
-                        )}
-                      </span>
-                      <span className={`or-val${isZero ? " or-val-zero" : ""}`}>{count}</span>
+                      {segText}
+                    </span>
+                  );
+                })}
+              </span>
+              <span className="oc-legend">
+                {OWNER_ASSETS.map((a) => {
+                  const count = assetStats[a.key].total;
+                  const isZero = count === 0;
+                  return (
+                    <span
+                      key={a.key}
+                      className={`oc-chip ${a.cls}${isZero ? " oc-chip-zero" : ""}`}
+                      title={isZero ? `${a.label} ${count}（该责任人名下暂无此类资产）` : `${a.label} ${count}，点击查看该责任人名下${a.label}`}
+                      role="button"
+                      tabIndex={0}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        navigate(`${a.href}?owner_id=${id}`);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.stopPropagation();
+                          navigate(`${a.href}?owner_id=${id}`);
+                        }
+                      }}
+                    >
+                      <i className="oc-chip-dot" />
+                      {a.label} {count}
                     </span>
                   );
                 })}
