@@ -1287,16 +1287,19 @@ function ImpactTab() {
   async function runFieldQuery(raw: string) {
     const q = raw.trim();
     if (!q) return;
+    // 规范起点：无前缀的裸表名/库.表补 table:（与治理中心 openFieldTable 一致）；
+    // 字段起点（field:库.表.列）由选择器显式带前缀，手动输入时按表处理兜底。
+    const nodeArg = q.includes(":") ? q : `table:${q}`;
     setLoading(true);
     try {
-      const data = await lineageFieldImpact({ node: q, direction, max_hops: 3, limit: 300 });
+      const data = await lineageFieldImpact({ node: nodeArg, direction, max_hops: 3, limit: 300 });
       setFieldItems(data.items);
       setFieldTotal(data.total);
       setEdges([]);
       setTotal(0);
       // 字段映射行 → 血缘视图（field: 节点图 + 边中点标注加工方式/表达式，粒度 L2）
       setGraphData(data.items.length > 0 ? buildFieldGraphData(data.items, data.nodes) : null);
-      track("lineage_query", q, "field");
+      track("lineage_query", nodeArg, "field");
     } catch (err) {
       message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "查询失败");
       setEdges([]);

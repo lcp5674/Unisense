@@ -1108,7 +1108,8 @@ class LineageService(BaseService):
         （field 域继承所属表、table 附 entity_id 供表详情——见 ``node_meta``）。
 
         Args:
-            node: 起点（``table:``/``field:`` 前缀；无前缀/不支持前缀抛 400）。
+            node: 起点（``table:``/``field:`` 前缀；无前缀按表起点处理，字段起点须显式
+                ``field:``——治理中心/血缘查询以表为入口最常见，宽容免 422）。
             direction: upstream / downstream / both。
             max_hops: 最大跳数（表起点首跳=1，默认 3）。
             limit: 映射行总数上限（防大扇出爆炸，默认 300）。
@@ -1116,11 +1117,9 @@ class LineageService(BaseService):
         Returns:
             ``FieldImpactResponse``（node/direction/total/items/nodes）。
         """
-        if not node or ":" not in node:
-            raise ValidationError(
-                "字段级查询须指定节点前缀（table: 或 field:）", error_code="BAD_REQUEST"
-            )
-        prefix, rest = node.split(":", 1)
+        if not node:
+            raise ValidationError("起点不能为空", error_code="BAD_REQUEST")
+        prefix, rest = node.split(":", 1) if ":" in node else ("table", node)
         if prefix == "table":
             if not rest:
                 raise ValidationError("表节点不能为空", error_code="BAD_REQUEST")

@@ -920,6 +920,42 @@ describe("LineageView 血缘查询 / 影响分析 Tab", () => {
     expect(within(panel).getByText("SUM(amount)")).toBeInTheDocument();
   });
 
+  it("字段级血缘：手动输入裸表名（使用输入值）自动补 table: 前缀查询（防 422）", async () => {
+    vi.mocked(api.lineageFieldImpact).mockResolvedValue({
+      node: "table:wedw_dw.wy_jzyx_rule_base_info_df",
+      direction: "both",
+      total: 0,
+      items: [],
+      nodes: [],
+    });
+    const panel = await openImpactTabAndQuery(); // 进入血缘查询 Tab
+    // 切「字段级血缘」粒度
+    fireEvent.click(within(panel).getByText("字段级血缘"));
+    // 在节点输入框输入裸表名（远程候选无完全匹配 → 出现「使用输入值」兜底）
+    const combo = within(panel).getAllByRole("combobox")[0];
+    fireEvent.mouseDown(combo);
+    const input = document.querySelector<HTMLInputElement>(".ant-select-open .ant-select-selection-search-input");
+    fireEvent.change(input as HTMLInputElement, {
+      target: { value: "wedw_dw.wy_jzyx_rule_base_info_df" },
+    });
+    await screen.findByText(/使用「wedw_dw.wy_jzyx_rule_base_info_df」/);
+    fireEvent.click(screen.getByText(/使用「wedw_dw.wy_jzyx_rule_base_info_df」/));
+    // 方向切「双向」
+    const dirCombo = within(panel).getAllByRole("combobox")[1];
+    fireEvent.mouseDown(dirCombo);
+    fireEvent.click(await screen.findByText("双向"));
+    // 查询 → 应以 table: 前缀（而非裸表名）请求，不再 422
+    fireEvent.click(within(panel).getByRole("button", { name: /查\s*询/ }));
+    await waitFor(() =>
+      expect(api.lineageFieldImpact).toHaveBeenCalledWith({
+        node: "table:wedw_dw.wy_jzyx_rule_base_info_df",
+        direction: "both",
+        max_hops: 3,
+        limit: 300,
+      }),
+    );
+  });
+
 });
 
 

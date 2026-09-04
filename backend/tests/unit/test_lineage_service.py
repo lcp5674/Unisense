@@ -3026,11 +3026,20 @@ async def test_field_impact_respects_max_hops_and_empty() -> None:
     assert empty.items == []
 
 
-async def test_field_impact_rejects_bad_start() -> None:
-    """无前缀 / 不支持前缀（metric:）起点抛 ValidationError。"""
+async def test_field_impact_accepts_bare_table_and_rejects_unsupported_prefix() -> None:
+    """无前缀起点按表处理（宽容，防裸表名 422）；不支持前缀（metric:）仍抛 ValidationError。"""
     svc = LineageService(db=_FakeSession())
-    svc._repo = FakeRepo()
-    with pytest.raises(ValidationError):
-        await svc.field_impact("dbA.a", direction="downstream")
+    repo = FakeRepo()
+    repo.field_rows = [
+        _fm(1, "dw.a", "x", "dw.b", "y"),
+        _fm(2, "dw_b", "p", "dw_c", "q"),
+    ]
+    svc._repo = repo
+    # 无前缀（裸库.表）→ 按 table: 起点展开首跳列映射
+    res = await svc.field_impact("dw.a", direction="downstream", max_hops=1)
+    assert res.total == 1
+    # 纯表名（无点）同样按表处理
+    res2 = await svc.field_impact("dw_b", direction="downstream", max_hops=1)
+    assert res2.total == 1
     with pytest.raises(ValidationError):
         await svc.field_impact("metric:m1", direction="downstream")
