@@ -935,6 +935,42 @@ describe("字段开关按数据自适应", () => {
     // 数据无 field 节点 → 字段切换开关无意义，应隐藏（避免"点击没反应"）
     expect(screen.queryByTestId("asset-graph-show-fields")).toBeNull();
   });
+
+  it("懒加载模式：数据无字段节点仍显示按钮，点击触发 onFieldsToggle 回调", async () => {
+    const onFieldsToggle = vi.fn();
+    const tNodes: AssetGraphNode[] = [
+      { id: "metric:m", label: "gmv", type: "metric", domain: "sales" },
+      { id: "table:o", label: "ods_orders", type: "table", domain: "sales" },
+    ];
+    const user = userEvent.setup();
+    render(
+      <AssetGraph
+        nodes={tNodes}
+        edges={[]}
+        height={300}
+        showFields={false}
+        onFieldsToggle={onFieldsToggle}
+      />,
+    );
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+    // 首屏无 field 节点，但懒加载模式按钮是拉取字段的唯一入口 → 恒显示
+    const btn = screen.getByTestId("asset-graph-show-fields");
+    await user.click(btn);
+    expect(onFieldsToggle).toHaveBeenCalledWith(true);
+    expect(screen.getByTestId("asset-graph-show-fields").textContent).toContain("隐藏字段");
+    await user.click(screen.getByTestId("asset-graph-show-fields"));
+    expect(onFieldsToggle).toHaveBeenCalledWith(false);
+  });
+
+  it("懒加载模式：fieldsLoading=true 按钮转 loading 态", async () => {
+    const tNodes: AssetGraphNode[] = [
+      { id: "metric:m", label: "gmv", type: "metric", domain: "sales" },
+      { id: "table:o", label: "ods_orders", type: "table", domain: "sales" },
+    ];
+    render(<AssetGraph nodes={tNodes} edges={[]} height={300} onFieldsToggle={vi.fn()} fieldsLoading />);
+    await waitFor(() => expect(Graph).toHaveBeenCalled());
+    expect(screen.getByTestId("asset-graph-show-fields").className).toContain("ant-btn-loading");
+  });
 });
 
 describe("wrapFieldLabel 字段节点 label 折行（字段级血缘图长「库.表.列」完整展示不压字）", () => {

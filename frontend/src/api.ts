@@ -1588,6 +1588,16 @@ export async function lineageFieldDrill(table: string): Promise<FieldDrillData> 
   return request<FieldDrillData>(`${API_BASE}/lineage/field-drill?table=${encodeURIComponent(table)}`);
 }
 
+/** 血缘图谱字段图层（「显示字段」懒加载）：表对热度聚合后的字段节点/边，
+ *  前端与首屏 /graph 数据合并渲染——首屏只含表/指标，字段映射 3.6 万边不随首屏返回。 */
+export async function lineageGraphFields(params?: {
+  domain?: string;
+  limit?: number;
+}): Promise<LineageGraphData> {
+  const qs = pageQs({ domain: params?.domain, limit: params?.limit });
+  return request<LineageGraphData>(`${API_BASE}/lineage/graph/fields${qs ? `?${qs}` : ""}`);
+}
+
 /** 字段级血缘查询/影响分析（方案 B）：以 table:/field: 为起点沿字段映射展开链路。 */
 export async function lineageFieldImpact(params: {
   node: string;

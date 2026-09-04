@@ -767,6 +767,24 @@ async def lineage_graph(
     return ok(data=data, trace_id=trace_id)
 
 
+@router.get("/graph/fields", dependencies=_READ_DEPS)
+async def lineage_graph_fields(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    domain: str | None = Query(None, description="按业务域过滤节点"),
+    limit: int = Query(1200, ge=1, le=3000, description="返回字段边数上限"),
+) -> ApiResponse[Any]:
+    """字段级血缘图层：血缘图谱「显示字段」按钮按需懒加载。
+
+    首屏 ``/graph`` 只含表/指标（字段映射 3.6 万边不宜随首屏返回）；本端点
+    返回表对热度聚合后的字段图谱（field 节点 + 字段边），前端合并渲染。
+    """
+    effective_domain = _effective_read_domain(user, domain)
+    data = await _svc(db).query_field_graph(domain=effective_domain, limit=limit)
+    return ok(data=data, trace_id=trace_id)
+
+
 @router.get("/field-drill", dependencies=_READ_DEPS)
 async def lineage_field_drill(
     db: Annotated[AsyncSession, Depends(get_db_session)],

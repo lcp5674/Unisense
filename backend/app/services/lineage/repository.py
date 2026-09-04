@@ -1573,6 +1573,125 @@ class LineageRepository:
             )
         return nodes, edges
 
+    async def graph_from_field_mappings(
+        self,
+        *,
+        limit: int = 1200,
+        pair_cap: int = 80,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """从字段映射构建字段级血缘图谱（「显示字段」图层懒加载用）。
+
+        ``lineage_field_mapping`` 全量去重后约 3.6 万条字段边，直接全量返回
+        JSON 体积（MB 级）与渲染量都不可接受。两步聚合控制规模：
+
+        1. 表对热度：按 ``(source_table, target_table)`` 聚合计数取 top
+           ``pair_cap`` 个表对——字段边集中在最有信息量的加工链路上（与表级
+           图谱「边数上限截断」的取前语义对齐，而非字母序偏斜）；
+        2. 字段边：仅取命中表对的去重字段映射（四元组 GROUP BY + MAX
+           expression），按 ``limit`` 截断。
+
+        节点 = 边两端 ``field:{表}.{列}`` 去重，经 ``resolve_node_meta`` 富集
+        （字段继承所属表业务域/PII）；域收敛由 service 层完成（与
+        ``graph_from_edges`` 的 provenance 分支同模式）。
+
+        Returns:
+            ``(nodes, edges)``——边为自包含子图（节点集来自边两端）。
+        """
+        # 步骤 1：表对热度 top N（决定字段边落在哪些加工链路上）
+        pair_rows = (
+            await self._db.execute(
+                select(
+                    LineageFieldMapping.source_table,
+                    LineageFieldMapping.target_table,
+                    func.count().label("cnt"),
+                )
+                .where(LineageFieldMapping.deleted_at.is_(None))
+                .group_by(
+                    LineageFieldMapping.source_table,
+                    LineageFieldMapping.target_table,
+                )
+                .order_by(func.count().desc())
+                .limit(pair_cap)
+            )
+        ).all()
+        if not pair_rows:
+            return [], []
+        # concat 键做 IN 过滤（MySQL 元组 IN 方言不稳，concat 键全表扫描 3.6 万行可忽略）
+        pair_keys = {f"{r.source_table}\x1f{r.target_table}" for r in pair_rows}
+        pair_key = func.concat(
+            LineageFieldMapping.source_table,
+            "\x1f",
+            LineageFieldMapping.target_table,
+        )
+        # 步骤 2：命中表对的去重字段边（四元组聚合；聚合/计算列 source_column 为
+        # 空时该映射由表级血缘承载，不伪造字段边——与 field-drill 口径一致）
+        rows = (
+            await self._db.execute(
+                select(
+                    LineageFieldMapping.source_table,
+                    LineageFieldMapping.source_column,
+                    LineageFieldMapping.target_table,
+                    LineageFieldMapping.target_column,
+                    func.max(LineageFieldMapping.expression).label("expr"),
+                )
+                .where(
+                    LineageFieldMapping.deleted_at.is_(None),
+                    LineageFieldMapping.source_column.is_not(None),
+                    pair_key.in_(pair_keys),
+                )
+                .group_by(
+                    LineageFieldMapping.source_table,
+                    LineageFieldMapping.source_column,
+                    LineageFieldMapping.target_table,
+                    LineageFieldMapping.target_column,
+                )
+                .order_by(
+                    LineageFieldMapping.source_table,
+                    LineageFieldMapping.source_column,
+                    LineageFieldMapping.target_table,
+                    LineageFieldMapping.target_column,
+                )
+                .limit(limit)
+            )
+        ).all()
+
+        node_ids: set[str] = set()
+        edges: list[dict[str, Any]] = []
+        for r in rows:
+            src_col = (r.source_column or "").strip()
+            if not src_col or not r.source_table:
+                continue
+            src_id = f"field:{r.source_table}.{src_col}"
+            dst_id = f"field:{r.target_table}.{r.target_column}"
+            node_ids.add(src_id)
+            node_ids.add(dst_id)
+            edges.append(
+                {
+                    "source": src_id,
+                    "target": dst_id,
+                    "type": "DERIVED_FROM",
+                    "expression": r.expr,
+                }
+            )
+        if not edges:
+            return [], []
+
+        meta = await self.resolve_node_meta(node_ids)
+        nodes: list[dict[str, Any]] = []
+        for nid in sorted(node_ids):
+            m = meta.get(nid) or self._fallback_node_meta(nid, "field", nid[len("field:") :])
+            nodes.append(
+                {
+                    "id": nid,
+                    "type": "field",
+                    "label": nid[len("field:") :].rsplit(".", 1)[-1],
+                    "table": nid[len("field:") :].rsplit(".", 1)[0],
+                    "pii": bool(m.get("pii")),
+                    "domain": m.get("domain"),
+                }
+            )
+        return nodes, edges
+
     # ---- 消费方节点注册（Task A）----
 
     async def list_active_consumers_for_metric(self, metric_code: str) -> list[str]:

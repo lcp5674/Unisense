@@ -35,6 +35,7 @@ vi.mock("../api", async (importOriginal) => {
   return {
     ...actual,
     lineageGraph: vi.fn(),
+    lineageGraphFields: vi.fn(),
     // 默认空字段映射：点击表节点回退表详情（既有行为）；钻取测试单独 mock 有值
     lineageFieldDrill: vi.fn(async () => ({ table: "", nodes: [], edges: [], mappings: [] })),
     getCatalogDetail: vi.fn(),
@@ -410,6 +411,51 @@ describe("LineageView 血缘图谱 Tab", () => {
     await waitFor(() => {
       expect(screen.getByText(/暂无血缘图谱数据/)).toBeInTheDocument();
     });
+  });
+
+  it("「显示字段」懒加载字段图层：请求 /graph/fields 并合并渲染（隐藏时移除）", async () => {
+    // 首屏 graphData 无 field 节点（懒加载核心场景：字段映射不随首屏返回）
+    vi.mocked(api.lineageGraphFields).mockResolvedValue({
+      nodes: [
+        { id: "field:orders.id", type: "field", label: "id" },
+        { id: "field:orders.user_id", type: "field", label: "user_id" },
+      ],
+      edges: [{ source: "field:orders.id", target: "field:orders.user_id", type: "DERIVED_FROM" }],
+    });
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByText(/共 2 节点 · 1 条血缘边/)).toBeInTheDocument();
+    });
+    // 首屏无 field 节点，但懒加载模式下「显示字段」按钮是拉取字段的唯一入口 → 恒显示
+    fireEvent.click(screen.getByTestId("asset-graph-show-fields"));
+    await waitFor(() => {
+      expect(api.lineageGraphFields).toHaveBeenCalledWith({ limit: 1200 });
+    });
+    // 字段图层合并渲染：2 表/指标 + 2 字段 = 4 节点、1+1=2 边
+    await waitFor(() => {
+      expect(screen.getByText(/共 4 节点 · 2 条血缘边/)).toBeInTheDocument();
+    });
+    // 隐藏字段：字段图层移除，恢复主图规模
+    fireEvent.click(screen.getByTestId("asset-graph-show-fields"));
+    await waitFor(() => {
+      expect(screen.getByText(/共 2 节点 · 1 条血缘边/)).toBeInTheDocument();
+    });
+  });
+
+  it("字段图层为空时提示引导且不合并", async () => {
+    vi.mocked(api.lineageGraphFields).mockResolvedValue({ nodes: [], edges: [] });
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    fireEvent.click(screen.getByTestId("asset-graph-show-fields"));
+    await waitFor(() => {
+      expect(api.lineageGraphFields).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/暂无字段级血缘数据/)).toBeInTheDocument();
+    });
+    // 不合并空图层：banner 保持主图规模
+    expect(screen.getByText(/共 2 节点 · 1 条血缘边/)).toBeInTheDocument();
   });
 
   it("提供统一的返回按钮（返回上一入口）", async () => {

@@ -55,8 +55,8 @@ from app.services.lineage.schemas import (
     FieldLineageItem,
     HealthDimension,
     ImpactAffectedEdge,
-    ImpactPreviewResponse,
     ImpactedMetric,
+    ImpactPreviewResponse,
     LineageChannelResponse,
     LineageCoverageResponse,
     LineageEdgeDetailResponse,
@@ -1836,6 +1836,37 @@ class LineageService(BaseService):
         node_ids = {n["id"] for n in nodes}
         edges = [e for e in edges if e["source"] in node_ids and e["target"] in node_ids]
         return {"nodes": nodes, "edges": edges[:limit]}
+
+    async def query_field_graph(
+        self,
+        domain: str | None = None,
+        limit: int = 1200,
+    ) -> dict[str, Any]:
+        """字段级血缘图层（血缘图谱「显示字段」懒加载）。
+
+        默认图谱路径（采集目录视角）只含表/指标节点——字段映射
+        （``lineage_field_mapping``，全量去重约 3.6 万边）不随首屏返回；
+        前端点击「显示字段」时按需拉取本图层并合并渲染。节点/边规模由
+        repo 层表对热度聚合控制（``graph_from_field_mappings``），域收敛
+        与 ``graph_from_edges`` 的 provenance 分支同模式（按节点域过滤 +
+        自包含子图），防跨域窥探字段级明细。
+
+        Returns:
+            ``{"nodes": [...], "edges": [...]}``（仅 field 节点与字段边）。
+        """
+        nodes, edges = await self._repo.graph_from_field_mappings(limit=limit)
+        if domain and nodes:
+            # 与 graph_from_edges 的 provenance 分支同模式：node_meta 返回对象
+            # （_node_domain_visible 以属性访问取域）
+            metas = {m.id: m for m in await self.node_meta({n["id"] for n in nodes})}
+            nodes = [
+                n for n in nodes if self._node_domain_visible(metas.get(n["id"]), domain)
+            ]
+            visible = {n["id"] for n in nodes}
+            edges = [
+                e for e in edges if e["source"] in visible and e["target"] in visible
+            ]
+        return {"nodes": nodes, "edges": edges}
 
     async def impact_preview(self, node: str, change_type: str) -> ImpactPreviewResponse:
         """变更影响预览（what-if）：按拟变更节点类型估算影响面与风险等级。

@@ -56,6 +56,7 @@ import {
   lineageEdges,
   lineageExport,
   lineageGraph,
+  lineageGraphFields,
   lineageFieldDrill,
   lineageFieldImpact,
   lineageHealth,
@@ -791,6 +792,10 @@ function GraphTab() {
       }
       if (seq !== loadSeqRef.current) return; // 聚焦子图构建期间的竞态丢弃
       setData({ nodes, edges });
+      // 主图数据重载（通道/聚焦/域变化）：字段图层与旧主图不匹配，清空并复位
+      // 「显示字段」开关（下次点击重新按需拉取，避免残留旧通道的字段边）
+      setFieldLayer(null);
+      setFieldsOn(false);
       track("lineage_graph_view");
     } catch (err) {
       if (seq !== loadSeqRef.current) return; // 旧请求失败不弹错
@@ -805,6 +810,56 @@ function GraphTab() {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusNode, provenance]);
+
+  // —— 字段图层懒加载（「显示字段」按钮）——
+  // 首屏 /graph 只含表/指标节点（字段映射全量去重 3.6 万边不随首屏返回），
+  // 点「显示字段」时按需拉取 /graph/fields（表对热度聚合 + 上限截断）合并渲染。
+  const [fieldsOn, setFieldsOn] = useState(false);
+  const [fieldLayer, setFieldLayer] = useState<{ nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } | null>(null);
+  const [fieldLayerLoading, setFieldLayerLoading] = useState(false);
+  const fieldSeqRef = useRef(0);
+
+  /** 「显示字段/隐藏字段」切换：开=拉取字段图层合并；关=移除字段图层。 */
+  async function handleFieldsToggle(show: boolean) {
+    setFieldsOn(show);
+    const seq = ++fieldSeqRef.current;
+    if (!show) {
+      setFieldLayer(null);
+      return;
+    }
+    setFieldLayerLoading(true);
+    try {
+      const d = await lineageGraphFields({ limit: 1200 });
+      if (seq !== fieldSeqRef.current) return; // 旧响应丢弃（快速连点/已关闭）
+      if (d.nodes.length === 0) {
+        message.info("暂无字段级血缘数据：可到「dp 血缘同步」开启字段映射采集（SQL 解析）");
+        setFieldLayer(null);
+        return;
+      }
+      setFieldLayer({ nodes: d.nodes as AssetGraphNode[], edges: d.edges as AssetGraphEdge[] });
+    } catch (err) {
+      if (seq !== fieldSeqRef.current) return;
+      message.error(err instanceof UnisenseApiError ? `${err.message}（${err.codeZh}）` : "加载字段血缘图层失败");
+      setFieldLayer(null);
+      setFieldsOn(false);
+    } finally {
+      if (seq === fieldSeqRef.current) setFieldLayerLoading(false);
+    }
+  }
+
+  /** 主图 + 字段图层合并渲染数据（id 去重；field 与 table/metric 前缀天然不重叠）。 */
+  const mergedData = useMemo(() => {
+    if (!data) return null;
+    if (!fieldLayer) return data;
+    const nodeMap = new Map<string, AssetGraphNode>();
+    for (const n of data.nodes) nodeMap.set(n.id, n);
+    for (const n of fieldLayer.nodes) if (!nodeMap.has(n.id)) nodeMap.set(n.id, n);
+    const edgeKey = (e: AssetGraphEdge) => `${e.source}\x1f${e.target}\x1f${e.type ?? ""}`;
+    const edgeMap = new Map<string, AssetGraphEdge>();
+    for (const e of data.edges) edgeMap.set(edgeKey(e), e);
+    for (const e of fieldLayer.edges) if (!edgeMap.has(edgeKey(e))) edgeMap.set(edgeKey(e), e);
+    return { nodes: [...nodeMap.values()], edges: [...edgeMap.values()] };
+  }, [data, fieldLayer]);
 
   /** 清除聚焦：回到全量图谱并移除 URL node 参数（保持地址与视图一致）。 */
   function clearFocus() {
@@ -972,10 +1027,10 @@ function GraphTab() {
           />
         )}
         <span className="muted" style={{ fontSize: 13 }}>
-          {data
+          {mergedData
             ? focusNode
-              ? `已限定为 ${data.nodes.length} 节点 · ${data.edges.length} 条血缘边`
-              : `共 ${data.nodes.length} 节点 · ${data.edges.length} 条血缘边`
+              ? `已限定为 ${mergedData.nodes.length} 节点 · ${mergedData.edges.length} 条血缘边`
+              : `共 ${mergedData.nodes.length} 节点 · ${mergedData.edges.length} 条血缘边${fieldLayer ? "（含字段图层）" : ""}`
             : "加载血缘图谱…"}
           ，点击节点：指标 / 表视图均在本页侧边栏展示详情
         </span>
@@ -1126,15 +1181,17 @@ function GraphTab() {
           // 切换视图模式强制重挂载：折叠初值（defaultCollapsedLayers）按模式重置——
           // 结构概览=全部数仓层折叠为聚合带（层间主干边），全量血缘=全部展开
           key={viewMode}
-          nodes={data.nodes}
-          edges={data.edges}
+          nodes={mergedData?.nodes ?? []}
+          edges={mergedData?.edges ?? []}
           height={viewMode === "overview" ? 520 : 900}
           onNodeClick={handleNodeClick}
           // 点击/悬停只点亮血缘链（金色描边），不压暗其余节点——1763 节点全量图一旦
           // 压暗就是「满屏灰」，链上高亮本身已足够突出焦点（与影响分析/字段级口径一致）
           dimOnHover={false}
-          // 血缘总览默认隐藏字段节点，聚焦子图同样隐藏，聚焦指标/表主干
-          showFields={false}
+          // 字段节点显示开关受控（「显示字段」按钮懒加载字段图层，见 handleFieldsToggle）
+          showFields={fieldsOn}
+          onFieldsToggle={handleFieldsToggle}
+          fieldsLoading={fieldLayerLoading}
           // 语义泳道：指标/表分带（表带在上、指标带下），表→指标血缘方向自然分层
           lanes
           // 性能护栏：全量血缘默认走 AssetGraph 内置 LOD（优先渲染度最高的核心节点子集，

@@ -68,6 +68,16 @@ interface AssetGraphProps {
    *  仅作为 collapsedLayers 的初值（内部仍可点击聚合节点展开/工具栏调整/全部展开）。
    *  父组件切换模式时应通过 key 强制重挂载以应用新初值。默认 []（不折叠，保持既有行为）。 */
   defaultCollapsedLayers?: string[];
+  /**
+   * 「显示字段/隐藏字段」按钮的外部数据回调（懒加载图层模式）。传入后按钮点击
+   * 在本地 state 切换之外同步通知父组件：show=true 时父组件按需拉取字段图谱
+   * （如血缘图谱 3.6 万字段映射不宜随首屏返回）并合并进 nodes；show=false 时
+   * 移除。不传则维持纯本地切换（字段数据已随 nodes 传入的调用方，如资产地图
+   * 单表下钻）。fieldsLoading=true 时按钮转 loading（字段图层请求中）。
+   */
+  onFieldsToggle?: (show: boolean) => void;
+  /** 字段图层加载中（按钮 loading 态）。默认 false。 */
+  fieldsLoading?: boolean;
 }
 
 const TYPE_LABEL: Record<string, string> = {
@@ -2019,9 +2029,14 @@ export function AssetGraph({
   defaultCollapsedLayers,
   dimOnHover = true,
   defaultShowAll = false,
+  onFieldsToggle,
+  fieldsLoading = false,
 }: AssetGraphProps) {
   const onNodeClickRef = useRef(onNodeClick);
   onNodeClickRef.current = onNodeClick;
+  // onFieldsToggle 的 ref 镜像：按钮 onClick 读最新值（避免闭包捕获旧回调）
+  const onFieldsToggleRef = useRef(onFieldsToggle);
+  onFieldsToggleRef.current = onFieldsToggle;
   const [showAll, setShowAll] = useState(defaultShowAll);
   // 前端筛选：按节点类型过滤 + 按 label 搜索定位（不重新请求后端）
   const [typeFilter, setTypeFilter] = useState<string[]>([]);
@@ -2463,12 +2478,21 @@ export function AssetGraph({
             data-testid="asset-graph-collapse-lanes"
           />
         )}
-        {(typeCounts.field ?? 0) > 0 && (
+        {/* 字段图层按钮：数据自带字段（typeCounts.field>0）或懒加载模式（onFieldsToggle，
+            首屏可能无字段节点，按钮是拉取字段的唯一入口）时显示 */}
+        {((typeCounts.field ?? 0) > 0 || onFieldsToggle !== undefined) && (
           <Button
             size="middle"
             data-testid="asset-graph-show-fields"
             type={showFieldsOn ? "primary" : "default"}
-            onClick={() => setShowFieldsOn((v) => !v)}
+            loading={fieldsLoading}
+            onClick={() => {
+              const next = !showFieldsOn;
+              setShowFieldsOn(next);
+              // 懒加载图层模式：通知父组件按需拉取/移除字段图谱数据（血缘图谱
+              // 3.6 万字段映射不随首屏返回，点「显示字段」时才请求合并渲染）
+              onFieldsToggleRef.current?.(next);
+            }}
           >
             {showFieldsOn ? "隐藏字段" : "显示字段"}
           </Button>

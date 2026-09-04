@@ -1569,6 +1569,82 @@ async def test_query_graph_provenance_uses_edge_repo(monkeypatch: Any) -> None:
     assert len(out["edges"]) == 1
 
 
+async def test_query_field_graph_merges_without_domain() -> None:
+    """query_field_graph：无域限制时直接透传字段图层（血缘图谱「显示字段」懒加载）。"""
+    fake_repo = FakeRepo()
+
+    async def fake_graph_from_field_mappings(self, *, limit):
+        assert limit == 1200
+        nodes = [
+            {"id": "field:wedw_ods.t1.id", "type": "field", "label": "id", "domain": "finance"},
+            {"id": "field:wedw_mid.t2.id", "type": "field", "label": "id", "domain": "finance"},
+        ]
+        edges = [
+            {
+                "source": "field:wedw_ods.t1.id",
+                "target": "field:wedw_mid.t2.id",
+                "type": "DERIVED_FROM",
+                "expression": "id",
+            },
+        ]
+        return (nodes, edges)
+
+    fake_repo.graph_from_field_mappings = (
+        fake_graph_from_field_mappings.__get__(fake_repo, FakeRepo)
+    )
+    svc = LineageService(db=_FakeSession())
+    svc._repo = fake_repo
+
+    out = await svc.query_field_graph()
+    assert [n["id"] for n in out["nodes"]] == [
+        "field:wedw_ods.t1.id",
+        "field:wedw_mid.t2.id",
+    ]
+    assert len(out["edges"]) == 1
+
+
+async def test_query_field_graph_filters_by_domain() -> None:
+    """query_field_graph：带域限制时按节点域过滤并保持边自包含（防跨域窥探字段明细）。"""
+    fake_repo = FakeRepo()
+
+    async def fake_graph_from_field_mappings(self, *, limit):
+        nodes = [
+            {"id": "field:fin.t1.id", "type": "field", "label": "id", "domain": "finance"},
+            {"id": "field:hr.t1.id", "type": "field", "label": "id", "domain": "hr"},
+            {"id": "field:fin.t2.id", "type": "field", "label": "id", "domain": "finance"},
+        ]
+        edges = [
+            {"source": "field:fin.t1.id", "target": "field:hr.t1.id", "type": "DERIVED_FROM"},
+            {"source": "field:fin.t1.id", "target": "field:fin.t2.id", "type": "DERIVED_FROM"},
+        ]
+        return (nodes, edges)
+
+    async def fake_resolve_node_meta(self, node_ids):
+        def _m(nid: str, dom: str):
+            return {"id": nid, "type": "field", "label": nid.removeprefix("field:"), "domain": dom}
+
+        return {
+            "field:fin.t1.id": _m("field:fin.t1.id", "finance"),
+            "field:hr.t1.id": _m("field:hr.t1.id", "hr"),
+            "field:fin.t2.id": _m("field:fin.t2.id", "finance"),
+        }
+
+    fake_repo.graph_from_field_mappings = (
+        fake_graph_from_field_mappings.__get__(fake_repo, FakeRepo)
+    )
+    fake_repo.resolve_node_meta = fake_resolve_node_meta.__get__(fake_repo, FakeRepo)
+    svc = LineageService(db=_FakeSession())
+    svc._repo = fake_repo
+
+    out = await svc.query_field_graph(domain="finance")
+    ids = {n["id"] for n in out["nodes"]}
+    assert ids == {"field:fin.t1.id", "field:fin.t2.id"}
+    # 自包含：跨域边（fin→hr）被剔除
+    assert out["edges"] == [
+        {"source": "field:fin.t1.id", "target": "field:fin.t2.id", "type": "DERIVED_FROM"}
+    ]
+
+
 # ---- Task A：消费方节点注册 ----
 
 
