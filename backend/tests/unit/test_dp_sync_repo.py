@@ -25,7 +25,11 @@ class _FakeDb:
 
     async def execute(self, stmt, *args, **kwargs):
         self.executed.append(stmt)
-        return SimpleNamespace(rowcount=1, scalar_one_or_none=lambda: None)
+        return SimpleNamespace(
+            rowcount=1,
+            scalar_one_or_none=lambda: None,
+            scalars=lambda: SimpleNamespace(all=lambda: []),
+        )
 
     def add(self, obj) -> None:
         self.added.append(obj)
@@ -127,3 +131,19 @@ async def test_upsert_field_mapping_null_column_uses_is_null() -> None:
     )
     sql = str(db.executed[0].compile(compile_kwargs={"literal_binds": True}))
     assert "source_column IS NULL" in sql
+
+
+@pytest.mark.asyncio
+async def test_list_field_mappings_by_table_filters_active_column_mappings() -> None:
+    """按表反查字段映射：仅有效列映射（source_column 非空 + 未软删），
+    且命中该表作为源或目标（OR 范围）——字段钻取子图数据源。"""
+    repo, db = _repo()
+    await repo.list_field_mappings_by_table("dwd.dp_dq_measure_df")
+    assert len(db.executed) == 1
+    sql = str(db.executed[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "source_column IS NOT NULL" in sql
+    assert "deleted_at IS NULL" in sql
+    assert "source_table = 'dwd.dp_dq_measure_df'" in sql
+    assert "target_table = 'dwd.dp_dq_measure_df'" in sql
+    # 排除降级占位（source_column IS NOT NULL 已涵盖）与软删行
+    assert "source_column" in sql

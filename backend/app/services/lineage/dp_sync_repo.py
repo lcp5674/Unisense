@@ -272,6 +272,29 @@ class DpLineageRepository:
         )
         return list((await self._db.execute(stmt)).scalars().all())
 
+    async def list_field_mappings_by_table(
+        self, table: str
+    ) -> list[LineageFieldMapping]:
+        """按表反查参与该表的字段级血缘映射（字段钻取子图数据源）。
+
+        ``table`` 为 ``db.tbl``（不带 ``table:`` 前缀）。返回该表作为
+        源（下游流向）或目标（上游来源）的全部**有效列映射**
+        （``source_column`` 非空 + 未软删），供血缘图谱字段级钻取。
+        """
+        stmt = (
+            select(LineageFieldMapping)
+            .where(
+                LineageFieldMapping.deleted_at.is_(None),
+                LineageFieldMapping.source_column.is_not(None),
+                (
+                    (LineageFieldMapping.source_table == table)
+                    | (LineageFieldMapping.target_table == table)
+                ),
+            )
+            .order_by(LineageFieldMapping.id)
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
+
     async def soft_delete_field_mappings(
         self, *, step_id: int, keep_sql_hash: str | None = None
     ) -> int:

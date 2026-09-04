@@ -21,6 +21,7 @@ from app.core.resilience import CircuitBreaker
 from app.db.mysql import get_db_session
 from app.db.redis import get_redis
 from app.models.user import User
+from app.services.lineage.dp_sync_repo import DpLineageRepository
 from app.services.lineage.events import LineageEventPublisher
 from app.services.lineage.graph import LineageGraphClient
 from app.services.lineage.schemas import (
@@ -161,6 +162,64 @@ async def _assert_node_read_access(user: User, svc: LineageService, node: str) -
                 f"无权读取域外血缘节点（当前权限域: {uds}，节点域: {d}）",
                 error_code="FORBIDDEN",
             )
+
+
+def _build_field_drill(rows: list[Any]) -> dict[str, Any]:
+    """把字段映射行组装为字段钻取子图数据（节点/边/明细三份）。
+
+    节点 id 沿用血缘模块 field 节点约定 ``field:{table}.{column}``——前端
+    AssetGraph 直接渲染，字段信息抽屉可据此反推所属表。表级血缘的每一列
+    映射对应一条 ``DERIVED_FROM`` 字段边；聚合/计算列（source_column 为空）
+    已在 repo 查询层排除（由表级血缘承载，不伪造字段映射）。
+    """
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: list[dict[str, Any]] = []
+    mappings: list[dict[str, Any]] = []
+    for m in rows:
+        src_col = (m.source_column or "").strip()
+        dst_col = (m.target_column or "").strip()
+        if not src_col or not m.source_table:
+            continue
+        mappings.append(
+            {
+                "source_table": m.source_table,
+                "source_column": src_col,
+                "target_table": m.target_table,
+                "target_column": dst_col,
+                "expression": m.expression,
+                "confidence": m.confidence,
+                "provenance": m.provenance,
+                "task_id": m.task_id,
+                "step_id": m.step_id,
+            }
+        )
+        src_id = f"field:{m.source_table}.{src_col}"
+        dst_id = f"field:{m.target_table}.{dst_col}"
+        if src_id not in nodes:
+            nodes[src_id] = {
+                "id": src_id,
+                "type": "field",
+                "label": src_col,
+                "table": m.source_table,
+            }
+        if dst_id not in nodes:
+            nodes[dst_id] = {
+                "id": dst_id,
+                "type": "field",
+                "label": dst_col,
+                "table": m.target_table,
+            }
+        edges.append(
+            {
+                "source": src_id,
+                "target": dst_id,
+                "type": "DERIVED_FROM",
+                "expression": m.expression,
+                "confidence": m.confidence,
+                "provenance": m.provenance,
+            }
+        )
+    return {"nodes": list(nodes.values()), "edges": edges, "mappings": mappings}
 
 
 async def dispose_graph_client() -> None:
@@ -672,6 +731,25 @@ async def lineage_graph(
         domain=effective_domain, pii_only=pii_only, limit=limit, provenance=provenance
     )
     return ok(data=data, trace_id=trace_id)
+
+
+@router.get("/field-drill", dependencies=_READ_DEPS)
+async def lineage_field_drill(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: CurrentUser,
+    trace_id: Annotated[str, Depends(get_trace_id)],
+    table: str = Query(..., description="表名（db.tbl，不带 table: 前缀）"),
+) -> ApiResponse[Any]:
+    """表级血缘 → 字段级钻取（方案 B）。
+
+    返回以 ``table`` 为中心、深度 1 的字段级血缘子图：该表作为目标
+    （上游字段来源）与作为源（下游字段去向）的全部有效列映射；
+    节点为 ``field:{表}.{列}``，边为 ``DERIVED_FROM``，附 mappings 明细
+    （含表达式/置信度/来源/任务）供前端表格与图谱双展示。
+    """
+    repo = DpLineageRepository(db)
+    rows = await repo.list_field_mappings_by_table(table)
+    return ok(data={"table": table, **_build_field_drill(rows)}, trace_id=trace_id)
 
 
 @router.get("/channels", dependencies=_READ_DEPS)
