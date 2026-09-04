@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Button, Empty, Input, Select, Spin, Table, Tag } from "antd";
+import { Button, Empty, Input, Modal, Select, Spin, Table, Tag } from "antd";
 import { FullscreenOutlined, FullscreenExitOutlined, SearchOutlined } from "@ant-design/icons";
 import { Graph as G6Graph } from "@antv/g6";
 import type { GraphData, IElementEvent, NodeData } from "@antv/g6";
@@ -2086,7 +2086,26 @@ export function AssetGraph({
             图节点较多（共 {nodes.length} 个），已优先展示 {visibleNodes.length} 个核心节点。
             可切换到全部或使用「域筛选」缩小范围后更清晰。
           </span>
-          <Button size="small" type="link" onClick={() => setShowAll(true)}>
+          <Button
+            size="small"
+            type="link"
+            onClick={() => {
+              const total = nodes.length;
+              const heavy = total > 600;
+              if (!heavy) {
+                setShowAll(true);
+                return;
+              }
+              Modal.confirm({
+                title: "全量渲染大图？",
+                content: `将一次性布局并渲染全部 ${total} 个节点（含关联边）。节点规模较大时布局与渲染会同步占用页面主线程，可能需要数秒甚至数十秒，期间页面会卡顿无响应。建议先用「域筛选」/搜索收窄范围；确需全量请点「继续」。`,
+                okText: "继续全量",
+                cancelText: "取消",
+                okButtonProps: { danger: true },
+                onOk: () => setShowAll(true),
+              });
+            }}
+          >
             显示全部
           </Button>
         </div>

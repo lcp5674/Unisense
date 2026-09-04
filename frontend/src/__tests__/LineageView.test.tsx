@@ -1150,26 +1150,33 @@ describe("血缘图谱 结构概览 / 全量血缘 双模式", () => {
     });
   });
 
-  it("默认进入结构概览：全部数仓层折叠为聚合带（折叠提示出现）+ 模式切换控件存在", async () => {
+  it("默认进入「全量血缘」：无折叠提示（直接展示表/指标节点）+ 模式切换控件存在", async () => {
     renderLineage();
     await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
     // 模式切换控件（结构概览 / 全量血缘）
     await waitFor(() => {
       expect(document.querySelector('[data-testid="lineage-view-mode"]')).toBeTruthy();
     });
-    // 结构概览默认折叠 → AssetGraph 折叠提示条出现（节点已收成泳道聚合节点）
-    await waitFor(() => {
-      expect(document.querySelector('[data-testid="asset-graph-fold-banner"]')).toBeTruthy();
-    });
+    // 默认 full：无泳道折叠 → 折叠提示条不出现
+    expect(document.querySelector('[data-testid="asset-graph-fold-banner"]')).toBeNull();
   });
 
-  it("切换到「全量血缘」：折叠清除（折叠提示消失）", async () => {
+  it("切换到「结构概览」：全层折叠提示出现；切回「全量血缘」：折叠提示消失", async () => {
     renderLineage();
     await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
     await waitFor(() => {
+      expect(document.querySelector('[data-testid="lineage-view-mode"]')).toBeTruthy();
+    });
+    // 默认 full：折叠提示不出现
+    expect(document.querySelector('[data-testid="asset-graph-fold-banner"]')).toBeNull();
+    // 点 Segmented「结构概览」→ key 重挂载、defaultCollapsedLayers=ALL → 折叠提示出现
+    await act(async () => {
+      screen.getByText("结构概览").click();
+    });
+    await waitFor(() => {
       expect(document.querySelector('[data-testid="asset-graph-fold-banner"]')).toBeTruthy();
     });
-    // 点 Segmented「全量血缘」→ key 重挂载、折叠初值重置为空
+    // 切回「全量血缘」→ 折叠初值重置为空 → 折叠提示消失
     await act(async () => {
       screen.getByText("全量血缘").click();
     });

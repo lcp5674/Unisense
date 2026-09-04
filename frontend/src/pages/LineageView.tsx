@@ -1111,10 +1111,10 @@ function GraphTab() {
           showFields={false}
           // 语义泳道：指标/表分带（表带在上、指标带下），表→指标血缘方向自然分层
           lanes
-          // 全量血缘默认渲染所有 1763 节点（去掉 160 节点 LOD 限流，用户进入即可看到完整图谱、
-          // 画布被充分填满，不再出现「上半空白节点挤在底部」的现象；可通过「域筛选」/来源通道/搜索
-          // 主动收窄到子集。showAll=true 时 LOD 提示横幅与「显示全部」按钮自动隐藏。
-          defaultShowAll={viewMode === "full"}
+          // 性能护栏：全量血缘默认走 AssetGraph 内置 LOD（优先渲染度最高的核心节点子集，
+          // 画布底部出现「共 N 节点，已优先展示 M 个核心节点」提示 + 「显示全部」按钮）。
+          // 切忌改为 defaultShowAll=true——1763 节点全量 dagre 布局 + G6 渲染同步阻塞主线程
+          // 实测 66 秒（进入血缘图谱即卡死）。「显示全部」由用户显式触发并经规模确认后放行。
           // 结构概览：进入即全层聚合（每层一个聚合带 + 层间去重边），点击层带展开该层明细
           defaultCollapsedLayers={viewMode === "overview" ? ALL_LINEAGE_LAYERS : undefined}
         />
