@@ -1321,8 +1321,16 @@ class DpSyncService:
                 # 与实际动作（拉取中）不符、进度看似冻结。prefetch 前置 fetching、
                 # 拉取完成进入批内逐任务解析前恢复 parsing（_process_task 只更新
                 # step 类型/已处理数不改 stage，终态由收尾统一置 done/cancelled）。
+                # fetching 同时透出批序号（batch_index/batch_count）——多批全量轮
+                # 下进度在「拉取节点脚本到本地（第 x/y 批）」间有批级心跳。
                 if progress is not None:
+                    batch_no = batch_start // _PREFETCH_BATCH_SIZE + 1
+                    batch_count = (len(task_ids) + _PREFETCH_BATCH_SIZE - 1) // (
+                        _PREFETCH_BATCH_SIZE
+                    )
                     progress["stage"] = "fetching"
+                    progress["batch_index"] = batch_no
+                    progress["batch_count"] = batch_count
                 prefetched = await self._prefetch_batch(collector, config, batch_ids)
                 if progress is not None:
                     progress["stage"] = "parsing"
@@ -1388,12 +1396,17 @@ class DpSyncService:
                         )
                         break
                     batch_works = [w for _, ws in deferred for w in ws]
-                    await self._resolve_llm_works(batch_works, counters)
+                    # 批末 LLM 裁决窗口透出进度心跳（_resolve_llm_works 内逐项推进）
+                    await self._resolve_llm_works(batch_works, counters, progress)
                     for task_id, works in deferred:
                         if cancel_event is not None and cancel_event.is_set():
                             cancelled = True
                             break
                         try:
+                            # phase2 应用期（逐任务裁决写库）推进当前任务，避免
+                            # 批末长时间「已处理停在批末值」的静止观感
+                            if progress is not None:
+                                progress["current_task_id"] = task_id
                             await self._finish_deferred_task(
                                 works, config, counters, seen_pairs
                             )
@@ -1880,7 +1893,10 @@ class DpSyncService:
         return works
 
     async def _resolve_llm_works(
-        self, works: list[_LlmWork], counters: dict[str, int]
+        self,
+        works: list[_LlmWork],
+        counters: dict[str, int],
+        progress: dict[str, Any] | None = None,
     ) -> None:
         """Semaphore 并发执行批内全部待裁决 LLM 调用（结果回填 work.result/error）。
 
@@ -1888,8 +1904,18 @@ class DpSyncService:
         （共享 AsyncSession 不可并发）。单轮数百次 LLM 串行 ≈ 数分钟，并发后
         压到 ~1/_LLM_CONCURRENCY。llm_calls 计数就地累计（defer 模式下
         process_step 现场不调 llm_chat，计数不再经 _counted_llm）。
+
+        progress（可选）：透出「LLM 裁决中」实时心跳——stage 置 llm、llm_total
+        为该批工作项总数、llm_done 随每项完成就地 +1（单事件循环内并发自增安全）。
+        批末裁决窗口（数十秒~分钟级，此前进度零更新）前端据此展示逐项推进；
+        不传（周期 cron 路径）行为不变。
         """
         sem = asyncio.Semaphore(_LLM_CONCURRENCY)
+        if progress is not None:
+            progress["stage"] = "llm"
+            progress["llm_total"] = len(works)
+            progress["llm_done"] = 0
+            progress["current_task_id"] = None
 
         async def _one(w: _LlmWork) -> None:
             async with sem:
@@ -1913,6 +1939,8 @@ class DpSyncService:
                         exc,
                     )
                     w.error = f"LLM 调用异常：{exc}"
+                if progress is not None:
+                    progress["llm_done"] = progress.get("llm_done", 0) + 1
 
         await asyncio.gather(*(_one(w) for w in works))
 

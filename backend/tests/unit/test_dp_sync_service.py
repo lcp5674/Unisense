@@ -762,6 +762,43 @@ async def test_resolve_llm_works_unexpected_exception_marked() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_llm_works_progress_heartbeat() -> None:
+    """A：progress 透出 LLM 裁决心跳——stage=llm、llm_total=批大小、llm_done 随
+    每项完成推进到批大小（前端据此在批末裁决窗口展示「裁决中 k/n」，不再静止）。"""
+    import asyncio
+
+    from app.services.lineage.dp_sync_service import _LlmWork
+
+    async def llm(messages, **kw):
+        await asyncio.sleep(0)  # 让出事件循环（模拟 IO）
+        return {"content": '{"agree": true}'}
+
+    svc = _svc(llm_chat=llm)
+    works: list[_LlmWork] = []
+    for _ in range(3):
+        w = await svc.process_step(TASK, STEP, COMPLEX_SQL, _config(), defer_llm=True)
+        assert isinstance(w, _LlmWork)
+        works.append(w)
+
+    progress: dict[str, object] = {}
+    counters: dict[str, int] = dict.fromkeys(
+        (
+            "parsed_ok", "llm_confirmed", "diverged", "llm_fallback",
+            "unparseable", "llm_calls", "tickets_created", "errors",
+            "field_mappings_written", "field_edges_degraded",
+            "tickets_resolved", "memory_ignored", "memory_reused",
+            "scanned_tasks", "scanned_steps", "no_flow", "unknown",
+        ),
+        0,
+    )
+    await svc._resolve_llm_works(works, counters, progress)
+    assert progress["stage"] == "llm"
+    assert progress["llm_total"] == 3
+    assert progress["llm_done"] == 3
+    assert counters.get("llm_calls") == 3
+
+
+@pytest.mark.asyncio
 async def test_store_sqlglot_edges_written_uses_batch_real_count() -> None:
     """D5 回归：fields_written 取 upsert_field_mappings_batch 的真实写入数（新建+
     复活），而非「尝试条数」——SQL 未变的重扫（活跃已存在项被忽略）不再每轮把
