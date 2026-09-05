@@ -1210,6 +1210,39 @@ async def test_resolve_node_meta_empty_and_unknown() -> None:
     }
 
 
+async def test_resolve_node_meta_table_case_insensitive_catalog_match() -> None:
+    """血缘边名与目录 entity_name 仅大小写不同时仍挂实体（entity_id 落回边名节点）。
+
+    回归：db_catalog.entity_name 排序规则 utf8mb4_0900_ai_ci 使 SQL IN 大小写不敏感，
+    但旧实现 Python 侧 ``cr.entity_name in table_names`` 精确匹配把大小写不同的行丢弃
+    → 表节点 entity_id 为 None → 血缘详情误报「该表未在元数据目录中」（要求不区分大小写）。
+    """
+    db = _FakeDB(
+        [],
+        meta_rows=[
+            _MetaRow(
+                table="catalog",
+                catalog_id=88,
+                entity_name="WEDW_DWD.YH_HIS_K_BG05_HF",  # 目录规范名（大写形态）
+                domain="finance",
+                sensitivity_level="INTERNAL",
+                owner_id=5,
+            ),
+        ],
+    )
+    repo = LineageRepository(db)
+    # 血缘边引用小写/混写形态（SQL 解析归一化差异）→ 仍应命中目录行
+    out = await repo.resolve_node_meta({"table:wedw_dwd.yh_his_K_BG05_hf"})
+    node = out["table:wedw_dwd.yh_his_K_BG05_hf"]
+    assert node["entity_id"] == 88
+    assert node["label"] == "WEDW_DWD.YH_HIS_K_BG05_HF"  # label 用目录规范名
+    assert node["domain"] == "finance"
+    assert node["owner"] == "5"
+    # 字段节点继承所属表业务域同样不区分大小写
+    out2 = await repo.resolve_node_meta({"field:WEDW_DWD.YH_HIS_K_BG05_HF.amount"})
+    assert out2["field:WEDW_DWD.YH_HIS_K_BG05_HF.amount"]["domain"] == "finance"
+
+
 async def test_graph_from_edges_carries_dw_layer() -> None:
     """graph_from_edges 组装节点透传 dw_layer（血缘图谱 provenance=all 主视图分层）。
 
@@ -1695,6 +1728,36 @@ async def test_entity_exists_metric_and_table() -> None:
     assert await repo.entity_exists("table:dws.zzz") is False
     # field/external 等派生节点中性返回 True（不构成断链）
     assert await repo.entity_exists("field:a.b.c") is True
+
+
+async def test_coverage_broken_edges_case_insensitive_catalog() -> None:
+    """断链检测对仅大小写不同的目录表不误判断链（同 resolve_node_meta 根因）。
+
+    回归：SQL IN 在 ci 排序规则下大小写不敏感已命中目录行，Python 侧旧集合按原样
+    比较会把大小写不同的边名误判断链。此处锁定：目录存在（仅大小写不同）不判断链，
+    目录确实缺失的仍判断链。
+    """
+    db = _FakeDB(
+        [
+            _Row(1, "table:wedw_dwd.yh_his", "table:WEDW_DWD.next", "DERIVED_FROM", "L1"),
+            _Row(2, "table:real_missing", "table:WEDW_DWD.next", "DERIVED_FROM", "L1"),
+        ],
+        meta_rows=[
+            _MetaRow(
+                table="catalog",
+                catalog_id=77,
+                entity_name="WEDW_DWD.YH_HIS",
+                domain="finance",
+            ),
+        ],
+    )
+    repo = LineageRepository(db)
+    broken = await repo.coverage_broken_edges()
+    names = {b["source_node"] for b in broken}
+    # 目录里存在（仅大小写不同）的 wedw_dwd.yh_his 不判断链
+    assert "table:wedw_dwd.yh_his" not in names
+    # 目录确实缺失的 real_missing 仍判断链
+    assert "table:real_missing" in names
 
 
 async def test_table_nodes_in_edges_unions_sources_and_targets() -> None:

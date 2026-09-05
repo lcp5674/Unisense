@@ -1688,9 +1688,14 @@ class LineageRepository:
                     # 空值返回 None 保持"未分层"语义（前端 layerOf 据此回退）
                     "dw_layer": (r.dw_layer or "").lower() or None,
                 }
-        # 目录元数据：显式 table 节点 + 字段所属表（后者仅用于字段继承域，不产生条目）
+        # 目录元数据：显式 table 节点 + 字段所属表（后者仅用于字段继承域，不产生条目）。
+        # entity_name 列排序规则为 utf8mb4_0900_ai_ci（大小写/口音不敏感）：SQL 层
+        # IN/== 能查出与边名大小写不同的目录行，但 Python 侧集合/字典是精确串匹配——
+        # 若血缘边名与目录名仅大小写不同（HIS 混大小写表名 / SQL 解析归一化差异），
+        # 行会被查出却在 Python 侧被丢弃，表节点 entity_id 挂不上 → 详情误报
+        # 「该表未在元数据目录中」。故 Python 侧统一按小写命中，与 ci 排序规则对齐。
         catalog_names = table_names | field_parents
-        field_domain: dict[str, str | None] = {}
+        catalog_by_lower: dict[str, Any] = {}
         if catalog_names:
             catalog_rows = (
                 await self._db.execute(
@@ -1711,25 +1716,31 @@ class LineageRepository:
                 )
             ).all()
             for cr in catalog_rows:
-                field_domain[cr.entity_name] = cr.domain
-                if cr.entity_name in table_names:
-                    nid = f"table:{cr.entity_name}"
-                    result[nid] = {
-                        "id": nid,
-                        "type": "table",
-                        "label": cr.entity_name,
-                        "entity_id": cr.id,
-                        "pii": "PII" in (cr.sensitivity_level or ""),
-                        "domain": cr.domain,
-                        "owner": str(cr.owner_id) if cr.owner_id else None,
-                    }
-        # 字段节点继承所属表业务域（field 无独立元数据，域取自身份上层的表）
+                catalog_by_lower[cr.entity_name.lower()] = cr
+        # 表节点按小写命中目录实体：以请求侧（血缘边名）node id 为键挂载，label 用目录
+        # 规范名——键不随大小写漂移，entity_id/域/PII/Owner 稳定落回边名节点上
+        # （graph_from_edges 以请求侧 id 取 meta，键若写成目录名大小写则节点拿不到实体）
+        for name in table_names:
+            cr = catalog_by_lower.get(name.lower())
+            if cr is None:
+                continue
+            nid = f"table:{name}"
+            result[nid] = {
+                "id": nid,
+                "type": "table",
+                "label": cr.entity_name,
+                "entity_id": cr.id,
+                "pii": "PII" in (cr.sensitivity_level or ""),
+                "domain": cr.domain,
+                "owner": str(cr.owner_id) if cr.owner_id else None,
+            }
+        # 字段节点继承所属表业务域（field 无独立元数据；按小写命中目录行取域）
         for nid, meta in result.items():
             if nid.startswith("field:"):
-                table_part = nid[len("field:") :].rsplit(".", 1)[0]
-                dom = field_domain.get(table_part)
-                if dom:
-                    meta["domain"] = dom
+                table_part = nid[len("field:") :].rsplit(".", 1)[0].lower()
+                cr = catalog_by_lower.get(table_part)
+                if cr is not None and cr.domain:
+                    meta["domain"] = cr.domain
         # 表节点数仓分层：以 dw_layer 字典为唯一事实源，按 ``库.表`` 名派生
         # （库名后缀命中字典 active 码即归层；字典未收录的分层在管理员补录后
         # 自动归层，无需重新采集）。指标侧已随 Metric.dw_layer 下发，表侧在此统一派生。
@@ -2249,7 +2260,7 @@ class LineageRepository:
                     Metric.metric_code.in_(metric_keys), Metric.deleted_at.is_(None)
                 )
             )
-            existing_metrics = {r.metric_code for r in rows.all()}
+            existing_metrics = {r.metric_code.lower() for r in rows.all()}
         existing_tables: set[str] = set()
         if table_keys:
             rows = await self._db.execute(
@@ -2257,14 +2268,18 @@ class LineageRepository:
                     DBCatalog.entity_name.in_(table_keys), DBCatalog.deleted_at.is_(None)
                 )
             )
-            existing_tables = {r.entity_name for r in rows.all()}
+            # SQL IN 在 ci 排序规则下大小写不敏感已返回行；Python 侧集合须小写对齐，
+            # 否则边名与目录名仅大小写不同会被误判断链（与 resolve_node_meta 同款缺陷）
+            existing_tables = {r.entity_name.lower() for r in rows.all()}
         broken: list[dict[str, Any]] = []
         for e in edges:
             src = e.source_node
             metric_break = src.startswith("metric:") and (
-                src[len("metric:") :] not in existing_metrics
+                src[len("metric:") :].lower() not in existing_metrics
             )
-            table_break = src.startswith("table:") and src[len("table:") :] not in existing_tables
+            table_break = src.startswith("table:") and (
+                src[len("table:") :].lower() not in existing_tables
+            )
             if metric_break or table_break:
                 broken.append(self._edge_dict(e))
             if len(broken) >= limit:
