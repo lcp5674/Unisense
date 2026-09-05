@@ -57,7 +57,6 @@ async def test_hive_sources_uses_independent_session() -> None:
     provider = DpSchemaProvider(
         db,
         dp_collector=None,
-        fetch_collector=None,
         session_factory=lambda: _FakeSession(),
     )
     srcs = await provider._hive_sources()
@@ -73,7 +72,7 @@ async def test_hive_sources_falls_back_to_db_without_factory() -> None:
     """F1：无 session_factory 时回退 db（旧调用形态/测试兼容，无并发场景）。"""
     db = MagicMock()
     db.execute = AsyncMock(return_value=_FakeResult([_fake_src("hive-2")]))
-    provider = DpSchemaProvider(db, dp_collector=None, fetch_collector=None)
+    provider = DpSchemaProvider(db, dp_collector=None)
     srcs = await provider._hive_sources()
     assert len(srcs) == 1 and srcs[0].source_id == "hive-2"
     db.execute.assert_awaited_once()

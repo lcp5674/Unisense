@@ -180,6 +180,7 @@ def _svc(
     svc._dp_repo.pending_retry_task_ids = AsyncMock(return_value=[])
     svc._dp_repo.find_ticket_by_step_hash = AsyncMock(return_value=None)
     svc._dp_repo.create_ticket = AsyncMock(return_value=MagicMock())
+    svc._dp_repo.record_auto_accept_memory = AsyncMock(return_value=None)
     svc._dp_repo.upsert_field_mapping = AsyncMock()
     svc._dp_repo.upsert_field_mappings_batch = AsyncMock(return_value=0)
     svc._dp_repo.soft_delete_field_mappings = AsyncMock(return_value=0)

@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.models.dp_sync import DpSyncConfig
-from app.services.lineage.dp_sync_service import DpSyncService
+from app.services.lineage.dp_sync_service import DpSyncService, sql_fingerprint
 
 TASK = {
     "task_id": 1386,
@@ -80,6 +80,7 @@ def _svc(**kwargs) -> DpSyncService:
     )
     svc._dp_repo.find_ticket_by_step_hash = AsyncMock(return_value=None)
     svc._dp_repo.create_ticket = AsyncMock(return_value=MagicMock())
+    svc._dp_repo.record_auto_accept_memory = AsyncMock(return_value=None)
     svc._dp_repo.upsert_field_mapping = AsyncMock()
     svc._dp_repo.upsert_field_mappings_batch = AsyncMock(return_value=0)
     svc._dp_repo.soft_delete_field_mappings = AsyncMock(return_value=0)
@@ -126,6 +127,11 @@ async def test_complex_llm_agree_stored() -> None:
     result = await svc.process_step(TASK, STEP, sql, _config())
     assert result["status"] == "llm_confirmed"
     svc._dp_repo.create_ticket.assert_not_awaited()
+    # G1：agree 落自动消解记忆（下轮不再重复调 LLM confirm）
+    svc._dp_repo.record_auto_accept_memory.assert_awaited_once()
+    kwargs = svc._dp_repo.record_auto_accept_memory.await_args.kwargs
+    assert kwargs["step_id"] == STEP["step_id"]
+    assert kwargs["sql_hash"] == sql_fingerprint(sql)
     assert svc._lineage_repo.upsert_edges_with_status_batch.await_count == 1
 
 
@@ -375,6 +381,58 @@ async def test_resolved_ticket_not_skipped_by_pending_check() -> None:
     assert result["status"] == "memory_reused"
     svc._dp_repo.create_ticket.assert_not_awaited()
     assert svc._lineage_repo.upsert_edges_with_status_batch.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_step_ticket_lookup_happens_once() -> None:
+    """G3：复杂/失败 step 的票查询合并为一次（reuse + pending 不再各查一遍）。
+
+    覆盖三态：未裁决 → pending；已裁决（记忆开）→ memory_reused；已裁决但记忆关
+    → 放行走 LLM。三者 find_ticket_by_step_hash 均只 await 一次。
+    """
+    complex_sql = (
+        "create table t as select dept_id, "
+        "row_number() over (partition by dept_id order by cnt desc) as rn "
+        "from (select dept_id, count(1) as cnt from wedw_ods.x group by dept_id) a"
+    )
+
+    # 态 1：未裁决票 → ticket_pending，只查一次
+    pending = MagicMock()
+    pending.status = "diverged"
+    pending.resolution = None
+    svc = _svc()
+    find = AsyncMock(return_value=pending)
+    svc._dp_repo.find_ticket_by_step_hash = find
+    result = await svc.process_step(TASK, STEP, complex_sql, _config())
+    assert result["status"] == "ticket_pending"
+    assert find.await_count == 1
+
+    # 态 2：已裁决票（accept_sqlglot，记忆开）→ memory_reused，只查一次
+    resolved = MagicMock()
+    resolved.status = "resolved"
+    resolved.resolution = "accept_sqlglot"
+    resolved.llm_opinion = None
+    resolved.manual_edges_json = None
+    svc2 = _svc()
+    find2 = AsyncMock(return_value=resolved)
+    svc2._dp_repo.find_ticket_by_step_hash = find2
+    result2 = await svc2.process_step(TASK, STEP, complex_sql, _config())
+    assert result2["status"] == "memory_reused"
+    assert find2.await_count == 1
+
+    # 态 3：已裁决票但记忆关 → 放行走 LLM（agree → llm_confirmed），只查一次
+    async def llm(messages, **kw):
+        return {"content": '{"agree": true}'}
+
+    svc3 = _svc(llm_chat=llm)
+    find3 = AsyncMock(return_value=resolved)
+    svc3._dp_repo.find_ticket_by_step_hash = find3
+    result3 = await svc3.process_step(
+        TASK, STEP, complex_sql, _config(resolve_memory_enabled=False)
+    )
+    assert result3["status"] == "llm_confirmed"
+    assert find3.await_count == 1
+    svc3._dp_repo.record_auto_accept_memory.assert_awaited_once()
 
 
 @pytest.mark.asyncio

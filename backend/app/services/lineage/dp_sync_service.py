@@ -448,20 +448,34 @@ class DpSyncService:
                 "fields_degraded": degraded_cnt,
             }
 
-        # 复杂或失败：先查裁决记忆（同 step+hash 已裁决自动沿用）
-        if config.resolve_memory_enabled:
+        # 复杂或失败：先查裁决记忆 / 未裁决票（G3：合并为一次票查询三态判定——
+        # 此前 _reuse_resolution 与 _skip_pending_llm 各查一次 find_ticket_by_step_hash，
+        # 每复杂/失败 step 每次重扫 2 次票查询；查一次按态分流：
+        #   已裁决（status ∈ resolved/ignored）且记忆开关开 → 复用；
+        #   未裁决（resolution IS NULL，diverged/unparseable/llm_fallback 待人工）
+        #     → 跳过不重复调 LLM（独立于记忆开关）；
+        #   无票 → 走 LLM confirm/fallback）。
+        ticket = await self._dp_repo.find_ticket_by_step_hash(
+            step.get("step_id"), sql_hash  # type: ignore[arg-type]
+        )
+        if (
+            config.resolve_memory_enabled
+            and ticket is not None
+            and ticket.status in ("resolved", "ignored")
+        ):
             reused = await self._reuse_resolution(
-                task, step, sql, sql_hash, outcome, config, seen_pairs
+                task, step, sql, sql_hash, outcome, config, seen_pairs,
+                ticket=ticket,
             )
             if reused:
                 return reused
 
-        # 未裁决票跳过（独立于记忆复用开关）：同 step+sql_hash 已存在未裁决
-        # 待抉择单（resolution IS NULL）时不再重复调 LLM——每轮重扫的 LLM 意见
-        # 被 create_ticket 幂等丢弃（已存在单不更新），纯烧成本；人工裁决
-        # （resolve/ignore）前重复确认无意义。已裁决票（resolution 非空）由上方
-        # 记忆复用处理；无票则正常走 LLM。
-        skip = await self._skip_pending_llm(step, sql_hash)
+        # 未裁决票跳过：同 step+sql_hash 已存在未裁决待抉择单（resolution IS NULL）
+        # 时不再重复调 LLM——每轮重扫的 LLM 意见被 create_ticket 幂等丢弃（已存在
+        # 单不更新），纯烧成本；人工裁决（resolve/ignore）前重复确认无意义。已裁决
+        # 票（resolution 非空）由上方记忆复用处理（记忆开关关时此处放行走 LLM，与
+        # 原行为一致）；无票则正常走 LLM。
+        skip = await self._skip_pending_llm(step, sql_hash, ticket=ticket)
         if skip is not None:
             return skip
 
@@ -604,6 +618,25 @@ class DpSyncService:
             written, degraded = await self._store_sqlglot_edges(
                 outcome, task, step, sql_hash, config, seen_pairs
             )
+            # G1：agree 落自动消解记忆（status=resolved + accept_sqlglot）——
+            # 当场入库的复杂 step 若无记忆，下轮重扫/24h 全量轮会再次调 LLM
+            # confirm（幂等入库丢弃意见，纯烧成本）；落票后 _reuse_resolution
+            # 命中，行为与人工 accept_sqlglot / retry_llm_tickets 自动消解对齐。
+            # repo 幂等：同 step+hash 已有票（待裁决/已裁决）不重复建不覆盖。
+            # （task_id/step_id 的 arg-type ignore：task dict 为 Any，实际恒 int，
+            #   与文件内 create_ticket 调用点同类。）
+            await self._dp_repo.record_auto_accept_memory(
+                task_id=task.get("task_id"),  # type: ignore[arg-type]
+                step_id=step.get("step_id"),  # type: ignore[arg-type]
+                task_name=task.get("task_name"),
+                out_table=task.get("out_table"),
+                task_refs=build_task_ref(task, step),
+                sql_text=sql,
+                sql_hash=sql_hash,
+                sqlglot_result=edges_to_json(
+                    outcome.table_edges, outcome.field_edges
+                ),
+            )
             return {
                 "step_id": step.get("step_id"),
                 "status": "llm_confirmed",
@@ -744,10 +777,13 @@ class DpSyncService:
         outcome: Any,
         config: Any,
         seen_pairs: set[tuple[str, str]] | None = None,
+        *,
+        ticket: Any | None = None,
     ) -> dict[str, Any] | None:
-        ticket = await self._dp_repo.find_ticket_by_step_hash(
-            step.get("step_id"), sql_hash
-        )
+        if ticket is None:
+            ticket = await self._dp_repo.find_ticket_by_step_hash(
+                step.get("step_id"), sql_hash  # type: ignore[arg-type]
+            )
         if ticket is None or ticket.status not in ("resolved", "ignored"):
             return None
         # F4：裁决记忆命中即本 step 将以记忆写入/忽略收尾（不再 defer）——统一先清
@@ -798,7 +834,11 @@ class DpSyncService:
 
     # ---- 未裁决票跳过 ----
     async def _skip_pending_llm(
-        self, step: dict[str, Any], sql_hash: str
+        self,
+        step: dict[str, Any],
+        sql_hash: str,
+        *,
+        ticket: Any | None = None,
     ) -> dict[str, Any] | None:
         """同 step+sql_hash 已存在未裁决待抉择单 → 返回跳过摘要（不重复调 LLM）。
 
@@ -807,10 +847,14 @@ class DpSyncService:
         意见会被 ``create_ticket`` 幂等丢弃（已存在单不更新），纯烧成本——人工
         裁决（resolve/ignore）前不重复确认。无未裁决票（无票，或已裁决——已裁决
         由 ``_reuse_resolution`` 记忆复用处理）返回 ``None``，调用方继续走 LLM。
+
+        ticket: 可选——调用方（process_step，G3）已查过票时传入复用，避免同轮
+            第二次 find_ticket_by_step_hash；None 时自查（独立调用形态）。
         """
-        ticket = await self._dp_repo.find_ticket_by_step_hash(
-            step.get("step_id"), sql_hash  # type: ignore[arg-type]
-        )
+        if ticket is None:
+            ticket = await self._dp_repo.find_ticket_by_step_hash(
+                step.get("step_id"), sql_hash  # type: ignore[arg-type]
+            )
         if ticket is None or ticket.resolution is not None:
             return None
         return {"step_id": step.get("step_id"), "status": "ticket_pending"}
@@ -1182,11 +1226,11 @@ class DpSyncService:
             # F1：注入独立 session 工厂——as_map 有界并发（Semaphore 6）下多路
             # 通道 B（Hive 系 DataSource DESCRIBE）用各自独立只读 session 查询，
             # 不再并发 execute 本扫描主链路共享的 self._db（SQLAlchemy AsyncSession
-            # 非并发安全对象）。
+            # 非并发安全对象）。G2：通道 B 在 provider 内按 DataSource 行自建
+            # collector，不再接收注入的 fetch_collector（死参数，已删除）。
             self._schema_provider = DpSchemaProvider(
                 self._db,
                 collector,
-                fetch_collector,
                 session_factory=_mysql_session_factory,
             )
             ingest_run = await self._lineage_repo.begin_ingest_run(DP_PROVENANCE)

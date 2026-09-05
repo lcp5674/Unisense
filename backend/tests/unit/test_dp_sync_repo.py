@@ -32,6 +32,9 @@ class _FakeDb:
             scalars=lambda: SimpleNamespace(all=lambda: []),
         )
 
+    async def flush(self) -> None:  # no-op：单测不模拟真实 flush 回填
+        return None
+
     def add(self, obj) -> None:
         self.added.append(obj)
 
@@ -310,3 +313,63 @@ async def test_reset_backoff_clears_counter_and_deadline() -> None:
     values = _update_values(repo, db, idx=0)
     assert values["consecutive_failures"] == 0
     assert values["next_scan_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_record_auto_accept_memory_creates_resolved_ticket() -> None:
+    """G1：无既有票时 agree 记忆落一张已消解票（resolved + accept_sqlglot + by 0）。"""
+    repo, db = _repo(scalar_value=None)
+    ret = await repo.record_auto_accept_memory(
+        task_id=1,
+        step_id=2,
+        task_name="t",
+        out_table="o",
+        task_refs={"k": 1},
+        sql_text="sql",
+        sql_hash="h1",
+        sqlglot_result={"edges": []},
+    )
+    assert ret is db.added[0]  # 新建返回新票
+    assert len(db.added) == 1
+    tk = db.added[0]
+    assert tk.status == "resolved"
+    assert tk.resolution == "accept_sqlglot"
+    assert tk.resolved_by == 0
+    assert tk.sql_hash == "h1"
+    assert tk.llm_opinion == {"agree": True}
+
+
+@pytest.mark.asyncio
+async def test_record_auto_accept_memory_idempotent_on_existing() -> None:
+    """G1：同 step+hash 已有票（待裁决/已裁决）不重复建不覆盖。"""
+    # 已有待裁决票：不新增，原票保持未裁决（人工抉择语义不被覆盖）
+    existing = SimpleNamespace(id=9, status="diverged", resolution=None)
+    repo, db = _repo(scalar_value=existing)
+    ret = await repo.record_auto_accept_memory(
+        task_id=1,
+        step_id=2,
+        task_name="t",
+        out_table="o",
+        task_refs=None,
+        sql_text="sql",
+        sql_hash="h1",
+        sqlglot_result=None,
+    )
+    assert ret is existing
+    assert db.added == []
+    # 已有已裁决记忆票：同样不新增不覆盖
+    db2 = _FakeDb(
+        SimpleNamespace(id=9, status="resolved", resolution="accept_sqlglot")
+    )
+    repo2 = DpLineageRepository(db2)
+    await repo2.record_auto_accept_memory(
+        task_id=1,
+        step_id=2,
+        task_name="t",
+        out_table="o",
+        task_refs=None,
+        sql_text="sql",
+        sql_hash="h1",
+        sqlglot_result=None,
+    )
+    assert db2.added == []

@@ -56,7 +56,6 @@ class DpSchemaProvider:
         self,
         db: Any,
         dp_collector: Any,
-        fetch_collector: Any,
         *,
         session_factory: Any = None,
     ) -> None:
@@ -66,8 +65,6 @@ class DpSchemaProvider:
                 见 session_factory）。
             dp_collector: dp 元数据源 collector（通道 A 的 ``information_schema``
                 查询走它；与扫描主链路共用连接，不 dispose）。
-            fetch_collector: ``async (source_id) -> collector``（通道 B 构建
-                Hive 系数据源连接；用完即 dispose）。
             session_factory: 可选独立 session 工厂（``async_session_factory``）——
                 ``as_map`` 有界并发拉多张表列清单时，多路通道 B 各自用**独立的
                 短生命周期只读 session** 查 DataSource，不再并发 execute 扫描主链路
@@ -76,7 +73,6 @@ class DpSchemaProvider:
         """
         self._db = db
         self._dp_collector = dp_collector
-        self._fetch_collector = fetch_collector
         self._session_factory = session_factory
         self._cache: dict[str, list[str] | None] = {}
         #: 通道 B 候选 Hive 系数据源（轮内惰性预取一次，缓存 DataSource 行——

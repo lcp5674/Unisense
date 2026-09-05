@@ -784,6 +784,55 @@ class DpLineageRepository:
         ticket.status = "ignored" if resolution == "ignore" else "resolved"
         return ticket
 
+    async def record_auto_accept_memory(
+        self,
+        *,
+        task_id: int,
+        step_id: int,
+        task_name: str | None,
+        out_table: str | None,
+        task_refs: dict[str, Any] | None,
+        sql_text: str,
+        sql_hash: str,
+        sqlglot_result: dict[str, Any] | None,
+    ) -> DpResolutionTicket | None:
+        """记录「LLM 认可 sqlglot」的自动消解记忆（G1）。
+
+        扫描时复杂 step 的 LLM confirm 意见为 agree（``_apply_confirm_verdict``
+        agree 分支）会当场把 sqlglot 边入库——若不落记忆，该 step 每轮重扫 /
+        24h 自动全量轮都会再次调 LLM confirm（结果被幂等入库丢弃，纯烧成本）；
+        与人工 accept_sqlglot / retry_llm_tickets 自动消解对齐：落一张已消解
+        记忆票（status=resolved + resolution=accept_sqlglot + resolved_by=0），
+        下轮 ``_reuse_resolution`` 命中后不再重复调 LLM。
+
+        幂等：同 step+sql_hash 已有未删票（无论待裁决/已裁决记忆）不重复建——
+        find_ticket_by_step_hash 命中即返回 existing（调用方自行忽略）。直接构造
+        已消解态票，不经过 create_ticket/resolve_ticket——避免调用方（如
+        _finish_deferred_task 的 tickets_created 计数包装）把记忆票误计为待抉择单。
+        """
+        existing = await self.find_ticket_by_step_hash(step_id, sql_hash)
+        if existing is not None:
+            return existing
+        ticket = DpResolutionTicket(
+            task_id=task_id,
+            step_id=step_id,
+            task_name=task_name,
+            out_table=out_table,
+            sql_text=sql_text,
+            sql_hash=sql_hash,
+            status="resolved",
+            task_refs_json=task_refs,
+            sqlglot_result=sqlglot_result,
+            llm_opinion={"agree": True},
+            divergence_reason="LLM 认可 sqlglot，自动采纳消解（扫描 agree 记忆）",
+            resolution="accept_sqlglot",
+            resolved_by=0,
+            resolved_at=datetime.now(UTC),
+        )
+        self._db.add(ticket)
+        await self._db.flush()
+        return ticket
+
     # ---- 资产 Owner 回填（D10） ----
     async def find_orphan_catalogs(self, entity_name: str) -> list[DBCatalog]:
         """查 owner 为空的同名表资产实体（仅孤儿回填，绝不覆盖人工治理）。"""
