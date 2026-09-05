@@ -623,6 +623,27 @@ class DpLineageRepository:
         )
         return result.rowcount or 0
 
+    async def step_has_other_active_hash(
+        self, step_id: int, exclude_hash: str
+    ) -> bool:
+        """该 step 是否已存在「非 exclude_hash」的活跃字段映射（SQL 演进判定）。
+
+        O2：reprocess/retry 处理的是**历史 SQL 快照**的未裁决单——若该 step 已被
+        **更新版本的 SQL** 扫过并写入了字段映射（活跃行 sql_hash != 单内 hash），
+        说明单内 SQL 已过时：按旧 SQL 重判写库会用历史结果覆盖/污染当前血缘（且
+        _store_sqlglot_edges 以旧 hash 为 keep 清理会把新映射一并软删）。调用方
+        据此把过时单作废（resolve ignore），不按历史 SQL 写边。
+        """
+        if step_id is None:
+            return False
+        stmt = select(LineageFieldMapping.id).where(
+            LineageFieldMapping.step_id == step_id,
+            LineageFieldMapping.deleted_at.is_(None),
+            LineageFieldMapping.sql_hash.is_not(None),
+            LineageFieldMapping.sql_hash != exclude_hash,
+        ).limit(1)
+        return (await self._db.execute(stmt)).scalar_one_or_none() is not None
+
     # ---- dp_resolution_ticket ----
     async def find_ticket_by_step_hash(
         self, step_id: int, sql_hash: str

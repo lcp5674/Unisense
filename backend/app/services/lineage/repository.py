@@ -1082,6 +1082,48 @@ class LineageRepository:
             await self._db.flush()
         return confirmed, restored
 
+    async def touch_edges_seen(self, pairs: set[tuple[str, str]]) -> int:
+        """把扫描轮外写库的边直接置为「已见」（last_seen_at=now 并清观察计数）。
+
+        N4：resolve_ticket / reprocess / retry_llm_tickets 等**扫描轮外**的写边
+        入口没有扫描轮的 seen_pairs——若不刷新这些边的 last_seen_at，mark_missing
+        会因 ``last_seen_at IS NULL`` 跳过它们（不进入失效观察），任务/节点删除后
+        这些边永不 stale（删除语义不闭合，与 D6 记忆复用重新确认的设计不一致）。
+        调用方（dp_sync_service resolve 区）写边后传入本次实际写入的边对集合，
+        此处批量 UPDATE 置 seen——使它们进入后续全量轮失效观察闭环（任务仍存在且
+        SQL 未变时由记忆复用/重扫重新确认，不会被误删；任务删除后正常 stale）。
+
+        返回命中行数（仅统计活跃边；分块避免 IN 过长）。
+        """
+        if not pairs:
+            return 0
+        now = datetime.now(UTC)
+        total = 0
+        items = sorted(pairs)
+        for i in range(0, len(items), 400):
+            chunk = items[i : i + 400]
+            cond = or_(
+                *[
+                    and_(
+                        LineageEdge.source_node == s,
+                        LineageEdge.target_node == t,
+                    )
+                    for (s, t) in chunk
+                ]
+            )
+            result = await self._db.execute(
+                update(LineageEdge)
+                .where(cond, LineageEdge.deleted_at.is_(None))
+                .values(
+                    last_seen_at=now,
+                    missing_count=0,
+                    stale=False,
+                    stale_since=None,
+                )
+            )
+            total += int(getattr(result, "rowcount", 0) or 0)
+        return total
+
     async def mark_missing(
         self,
         source: str,

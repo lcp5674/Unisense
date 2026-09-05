@@ -77,6 +77,10 @@ def _svc(ticket: MagicMock) -> DpSyncService:
     svc._dp_repo.upsert_field_mappings_batch = AsyncMock(return_value=0)
     # F4：_store_sqlglot_edges 开头清理旧 hash 映射（reprocess ok 分支必经）
     svc._dp_repo.soft_delete_field_mappings = AsyncMock(return_value=0)
+    # O2：reprocess SQL 演进检测默认无演进（放行）
+    svc._dp_repo.step_has_other_active_hash = AsyncMock(return_value=False)
+    # N4：resolve 区写边后 touch last_seen_at（mock 记录调用，不落库）
+    svc._lineage_repo.touch_edges_seen = AsyncMock(return_value=0)
     return svc
 
 
@@ -93,6 +97,10 @@ async def test_resolve_accept_sqlglot_stores_edges() -> None:
     assert edge["provenance"] == "dp_sql"
     svc._dp_repo.resolve_ticket.assert_awaited_once()
     svc._dp_repo.upsert_field_mapping.assert_awaited()
+    # N4：resolve 写边后 touch last_seen_at（进入失效观察闭环，删除语义闭合）
+    svc._lineage_repo.touch_edges_seen.assert_awaited_once()
+    touched = svc._lineage_repo.touch_edges_seen.await_args.args[0]
+    assert ("table:wedw_ods.a", "table:wedw_dwd.dp_out") in touched
 
 
 @pytest.mark.asyncio
@@ -347,11 +355,43 @@ async def test_reprocess_unparseable_three_state() -> None:
     )
 
     counters = await svc.reprocess_unparseable_tickets(limit=100)
-    assert counters == {"parsed": 1, "no_flow": 1, "kept": 1}
-    # 可解析单：批量边入库 + 标 accept_sqlglot；纯 DDL 单标 ignore；失败单不动
-    assert svc._lineage_repo.upsert_edges_with_status_batch.await_count == 1
+    assert counters == {"parsed": 1, "no_flow": 1, "kept": 1, "stale": 0}
+    # 可解析单：走 _apply_json_edges 单条边入库（不 purge——O2 防误删新映射）
+    # + N4 touch seen；纯 DDL 单标 ignore；失败单不动
+    assert svc._lineage_repo.upsert_edge_with_status.await_count == 1
+    assert svc._lineage_repo.upsert_edges_with_status_batch.await_count == 0
+    svc._lineage_repo.touch_edges_seen.assert_awaited_once()
     calls = [c.kwargs["resolution"] for c in svc._dp_repo.resolve_ticket.await_args_list]
     assert calls == ["accept_sqlglot", "ignore"]
+
+
+@pytest.mark.asyncio
+async def test_reprocess_skips_stale_when_sql_evolved() -> None:
+    """O2：单内 SQL 已过时（该 step 已被更新版本 SQL 扫过并写字段映射）→ 旧单
+    作废 ignore（计 stale），不按历史 SQL 重判写库——防旧血缘覆盖当前结果 +
+    _store_sqlglot_edges 以旧 hash 为 keep 清理把新映射一并软删。"""
+    stale_ticket = _ticket()
+    stale_ticket.id = 1
+    stale_ticket.status = "unparseable"
+    stale_ticket.resolution = None
+    stale_ticket.sql_text = (
+        "use wedw_ods;\ncreate table wedw_ods.t_${DATA_DATE} as "
+        "select * from wedw_ods.src_${DATA_DATE};\n"
+    )
+    stale_ticket.task_refs_json = {"task_id": 1386, "step_id": 5012}
+    svc = _svc(stale_ticket)
+    svc._dp_repo.list_tickets = AsyncMock(return_value=([stale_ticket], 1))
+    # 该 step 已存在其它 hash 的活跃映射（SQL 已演进并被扫描写库）
+    svc._dp_repo.step_has_other_active_hash = AsyncMock(return_value=True)
+
+    counters = await svc.reprocess_unparseable_tickets(limit=100)
+    assert counters == {"parsed": 0, "no_flow": 0, "kept": 0, "stale": 1}
+    # 作废为 ignore，不写任何边、不 touch（无新边）
+    assert svc._lineage_repo.upsert_edge_with_status.await_count == 0
+    svc._lineage_repo.touch_edges_seen.assert_not_awaited()
+    svc._dp_repo.resolve_ticket.assert_awaited_once_with(
+        1, resolution="ignore", resolved_by=0
+    )
 
 
 @pytest.mark.asyncio

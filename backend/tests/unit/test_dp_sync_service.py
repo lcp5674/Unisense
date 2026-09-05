@@ -79,7 +79,9 @@ def _svc(**kwargs) -> DpSyncService:
         side_effect=_fake_upsert_batch
     )
     svc._dp_repo.find_ticket_by_step_hash = AsyncMock(return_value=None)
-    svc._dp_repo.create_ticket = AsyncMock(return_value=MagicMock())
+    # O1 回归：create_ticket 真实返回 DpResolutionTicket ORM（无 .get）——mock 用
+    # SimpleNamespace 模拟（若代码对返回值调 .get 会 AttributeError，测试即红）。
+    svc._dp_repo.create_ticket = AsyncMock(return_value=SimpleNamespace())
     svc._dp_repo.record_auto_accept_memory = AsyncMock(return_value=None)
     svc._dp_repo.upsert_field_mapping = AsyncMock()
     svc._dp_repo.upsert_field_mappings_batch = AsyncMock(return_value=0)
@@ -680,6 +682,11 @@ async def test_finish_deferred_task_error_creates_diverged_ticket() -> None:
     await svc._finish_deferred_task([work], _config(), counters, set())
     assert counters.get("diverged") == 1
     assert counters.get("tickets_created") == 1
+    # O1 回归：create_ticket 返回 ORM（无 .get）不抛 AttributeError——error 建单
+    # 无字段写入，field_mappings_written 计 0（此前对 ORM 调 .get 整任务 phase2
+    # 回滚、建单丢失、每轮重扫重烧 LLM；MagicMock 的 __int__=1 掩盖了该缺陷）
+    assert counters.get("field_mappings_written") == 0
+    assert counters.get("field_edges_degraded") == 0
     kwargs = svc._dp_repo.create_ticket.await_args.kwargs
     assert kwargs["status"] == "diverged"
     assert "LLM 确认输出异常" in kwargs["divergence_reason"]
@@ -723,6 +730,35 @@ async def test_resolve_llm_works_concurrent_fills_results() -> None:
     assert counters.get("llm_calls") == 4
     assert all(w.result is not None or w.error for w in works)
     assert works[3].error is not None  # 不可解析项被标记
+
+
+@pytest.mark.asyncio
+async def test_resolve_llm_works_unexpected_exception_marked() -> None:
+    """O3：注入 llm_chat 抛非 DpSyncLlmError 异常（网络/协议意外）→ 同样标记
+    error 不静默丢失——此前只捕 DpSyncLlmError，gather 会把异常上抛到 scan_once
+    批末（无内层 try）整轮 failed 且本批全部 work 丢失。"""
+    from app.services.lineage.dp_sync_service import _LlmWork
+
+    async def llm(messages, **kw):
+        raise RuntimeError("连接被重置")  # 非协议层异常
+
+    svc = _svc(llm_chat=llm)
+    work = await svc.process_step(TASK, STEP, COMPLEX_SQL, _config(), defer_llm=True)
+    assert isinstance(work, _LlmWork)
+    counters: dict[str, int] = dict.fromkeys(
+        (
+            "parsed_ok", "llm_confirmed", "diverged", "llm_fallback",
+            "unparseable", "llm_calls", "tickets_created", "errors",
+            "field_mappings_written", "field_edges_degraded",
+            "tickets_resolved", "memory_ignored", "memory_reused",
+            "scanned_tasks", "scanned_steps", "no_flow", "unknown",
+        ),
+        0,
+    )
+    await svc._resolve_llm_works([work], counters)
+    assert counters.get("llm_calls") == 1
+    assert work.error is not None
+    assert "连接被重置" in work.error
 
 
 @pytest.mark.asyncio

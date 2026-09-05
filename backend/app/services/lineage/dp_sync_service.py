@@ -378,6 +378,17 @@ class DpSyncService:
             step_id=step.get("step_id"), keep_sql_hash=sql_hash
         )
 
+    async def _touch_seen(self, seen_pairs: set[tuple[str, str]] | None) -> None:
+        """把扫描轮外本次写入的边对置为「已见」（last_seen_at=now）。
+
+        N4：resolve_ticket / reprocess / retry 等入口没有扫描轮 seen_pairs——
+        写库的边若不刷新 last_seen_at，mark_missing 会跳过（永 NULL 不进入失效
+        观察），任务删除后永不 stale（删除语义不闭合）。本 helper 供这些入口在
+        写边后调用（同事务，随调用方 commit 落库）。
+        """
+        if seen_pairs:
+            await self._lineage_repo.touch_edges_seen(seen_pairs)
+
     async def process_step(
         self,
         task: dict[str, Any],
@@ -1870,6 +1881,17 @@ class DpSyncService:
                 except DpSyncLlmError as exc:
                     # LLM 输出异常：phase2 转建单（不静默丢失、不阻断其它并发项）
                     w.error = str(exc)
+                except Exception as exc:  # noqa: BLE001 —— O3：注入 llm_chat/协议层
+                    # 抛非 DpSyncLlmError 异常（网络中断、协议意外等）同样按 error
+                    # 标记——否则 gather 会把异常上抛到 scan_once 批末（无内层 try），
+                    # 整轮 failed 且本批全部 work 丢失（幂等靠下轮重扫，但白烧 LLM）。
+                    logger.warning(
+                        "dp_sync_llm_work_unexpected kind=%s step=%s error=%s",
+                        w.kind,
+                        w.step.get("step_id"),
+                        exc,
+                    )
+                    w.error = f"LLM 调用异常：{exc}"
 
         await asyncio.gather(*(_one(w) for w in works))
 
@@ -1903,11 +1925,18 @@ class DpSyncService:
         self._dp_repo.create_ticket = _counted_create_ticket  # type: ignore[method-assign]
         try:
             for w in works:
+                # result 为各分支统一摘要 dict（agree/dict 摘要/error dict 摘要）
+                result: dict[str, Any]
                 sqlglot_json = edges_to_json(w.outcome.table_edges, w.outcome.field_edges)
                 if w.kind == "confirm":
                     if w.error is not None:
                         await self._purge_step_old_mappings(w.step, w.sql_hash)
-                        result = await self._dp_repo.create_ticket(
+                        # O1：create_ticket 返回 DpResolutionTicket ORM（无 .get）——
+                        # 不能把返回值当 result dict 用（下方 result.get("fields_*")
+                        # 会 AttributeError → 该任务 phase2 整体回滚、刚建的单也丢失、
+                        # 记 failed 后下轮重扫重烧 LLM、待抉择单永不落库）。error 建单
+                        # 无字段写入，result 用 dict 摘要（fields_* 计 0）。
+                        await self._dp_repo.create_ticket(
                             task_id=w.task.get("task_id"),
                             step_id=w.step.get("step_id"),
                             task_name=w.task.get("task_name"),
@@ -1919,6 +1948,11 @@ class DpSyncService:
                             sqlglot_result=sqlglot_json,
                             divergence_reason=f"LLM 确认输出异常：{w.error}",
                         )
+                        result = {
+                            "status": "diverged",
+                            "fields_written": 0,
+                            "fields_degraded": 0,
+                        }
                         status = "diverged"
                     else:
                         result = await self._apply_confirm_verdict(
@@ -1935,7 +1969,8 @@ class DpSyncService:
                 else:
                     if w.error is not None:
                         await self._purge_step_old_mappings(w.step, w.sql_hash)
-                        result = await self._dp_repo.create_ticket(
+                        # O1：同上——create_ticket 返回 ORM 无 .get，不能作 result dict。
+                        await self._dp_repo.create_ticket(
                             task_id=w.task.get("task_id"),
                             step_id=w.step.get("step_id"),
                             task_name=w.task.get("task_name"),
@@ -1947,6 +1982,11 @@ class DpSyncService:
                             sqlglot_result=sqlglot_json,
                             divergence_reason=f"LLM 兜底输出异常：{w.error}",
                         )
+                        result = {
+                            "status": "unparseable",
+                            "fields_written": 0,
+                            "fields_degraded": 0,
+                        }
                         status = "unparseable"
                     else:
                         result = await self._apply_fallback_flow_verdict(
@@ -2219,18 +2259,29 @@ class DpSyncService:
         # 责任人快照在裁决入库时丢失（P2-9 #12）。
         task, step = self._restore_task_step(ticket)
         sql_hash = ticket.sql_hash
+        # N4：人工裁决是扫描轮外写边——构造局部 seen 集传 _apply_*（各路径写入后
+        # add），末尾统一 touch_edges_seen 置 last_seen_at=now，使本单写入的边进入
+        # 失效观察闭环（任务删除后正常 stale；任务仍在且 SQL 未变时由记忆复用
+        # 重新确认，不误删）。
+        local_seen: set[tuple[str, str]] = set()
         if resolution == "accept_sqlglot":
             await self._apply_json_edges(
                 ticket.sqlglot_result, task, step, sql_hash,
                 provenance="sqlglot", confidence=1.0,
+                seen_pairs=local_seen,
             )
         elif resolution == "accept_llm":
-            await self._apply_llm_resolution(ticket, task, step, sql_hash)
+            await self._apply_llm_resolution(
+                ticket, task, step, sql_hash, seen_pairs=local_seen
+            )
         elif resolution == "manual":
             payload = manual_edges if manual_edges is not None else ticket.manual_edges_json
-            await self._apply_manual_edges(payload, task, step, sql_hash)
+            await self._apply_manual_edges(
+                payload, task, step, sql_hash, seen_pairs=local_seen
+            )
         elif resolution != "ignore":
             raise ValueError(f"未知裁决方式: {resolution}")
+        await self._touch_seen(local_seen)
         await self._dp_repo.resolve_ticket(
             ticket_id,
             resolution=resolution,
@@ -2285,23 +2336,48 @@ class DpSyncService:
             ok      → 入库边/字段映射 + 单置 ``accept_sqlglot``（系统自动裁决）
             no_flow → 单置 ``ignore``（无数据流，无可采纳对象）
             failed  → 保留待人工（UDF 声明/方言等仍无法解析）
-        返回 ``{"parsed": n, "no_flow": n, "kept": n}`` 计数。
+        O2：单内 SQL 已过时（该 step 已被更新版本的 SQL 扫过并写入字段映射，
+        ``step_has_other_active_hash`` 命中）→ 作废为 ``ignore``（计 stale）——
+        按历史 SQL 重判写库会用旧血缘覆盖/污染当前结果（_store_sqlglot_edges 以
+        旧 hash 为 keep 清理会把新映射一并软删）。写边改走 ``_apply_json_edges``
+        （不清任何 hash 映射，二道防线）+ 局部 seen 收尾 touch（N4 删除闭环）。
+        返回 ``{"parsed": n, "no_flow": n, "kept": n, "stale": n}`` 计数。
         """
         tickets, _ = await self._dp_repo.list_tickets(
             status="unparseable", page=1, page_size=limit
         )
-        counters = {"parsed": 0, "no_flow": 0, "kept": 0}
+        counters = {"parsed": 0, "no_flow": 0, "kept": 0, "stale": 0}
         for tk in tickets:
+            task, step = self._restore_task_step(tk)
+            # O2：SQL 演进检测——该 step 已存在其它 hash 的活跃映射 → 单内 SQL
+            # 过时，作废不写边（防历史血缘覆盖当前 + purge 误删新映射）。
+            if await self._dp_repo.step_has_other_active_hash(
+                tk.step_id, tk.sql_hash
+            ):
+                await self._dp_repo.resolve_ticket(
+                    tk.id, resolution="ignore", resolved_by=0
+                )
+                counters["stale"] += 1
+                continue
             outcome = parse_dp_step(
                 tk.sql_text,
                 dialect="hive",
                 target_table=tk.out_table or None,
             )
             if outcome.status == "ok":
-                task, step = self._restore_task_step(tk)
-                await self._store_sqlglot_edges(
-                    outcome, task, step, tk.sql_hash, None, None
+                # N4：局部 seen 收尾 touch——本入口写边无扫描轮 seen_pairs，不 touch
+                # 则 last_seen_at 永 NULL、任务删除后永不 stale（删除语义不闭合）。
+                local_seen: set[tuple[str, str]] = set()
+                await self._apply_json_edges(
+                    edges_to_json(outcome.table_edges, outcome.field_edges),
+                    task,
+                    step,
+                    tk.sql_hash,
+                    provenance="sqlglot",
+                    confidence=1.0,
+                    seen_pairs=local_seen,
                 )
+                await self._touch_seen(local_seen)
                 await self._dp_repo.resolve_ticket(
                     tk.id, resolution="accept_sqlglot", resolved_by=0
                 )
@@ -2411,6 +2487,9 @@ class DpSyncService:
                     tk.sql_text, tk.sqlglot_result or {}
                 )
                 if verdict.agree:
+                    # N4：重试自动采纳是扫描轮外写边——局部 seen + touch 闭环
+                    # （否则 last_seen_at 永 NULL、任务删除后边永不 stale）。
+                    local_seen: set[tuple[str, str]] = set()
                     await self._apply_json_edges(
                         tk.sqlglot_result,
                         task,
@@ -2418,7 +2497,9 @@ class DpSyncService:
                         sql_hash,
                         provenance="sqlglot",
                         confidence=1.0,
+                        seen_pairs=local_seen,
                     )
+                    await self._touch_seen(local_seen)
                     await self._dp_repo.resolve_ticket(
                         tk.id,
                         resolution="accept_sqlglot",
@@ -2552,11 +2633,18 @@ class DpSyncService:
         return parse_confirm_response(str(result.get("content") or ""))
 
     async def _apply_llm_resolution(
-        self, ticket: Any, task: dict[str, Any], step: dict[str, Any], sql_hash: str
+        self,
+        ticket: Any,
+        task: dict[str, Any],
+        step: dict[str, Any],
+        sql_hash: str,
+        seen_pairs: set[tuple[str, str]] | None = None,
     ) -> None:
         """采纳 LLM：按单类型应用意见（diverged=sqlglot 边+补漏；llm_fallback=兜底流转）。"""
         if ticket.status == "llm_fallback":
-            await self._apply_fallback_flow(ticket.llm_opinion, task, step, sql_hash)
+            await self._apply_fallback_flow(
+                ticket.llm_opinion, task, step, sql_hash, seen_pairs=seen_pairs
+            )
             return
         # diverged：LLM 判定 sqlglot 部分边为错误（wrong_edges）——先剔除再入库，
         # 再补 LLM 认为漏掉的边（missing_edges）。此前 wrong_edges 是死字段，
@@ -2566,9 +2654,11 @@ class DpSyncService:
         )
         await self._apply_json_edges(
             sqlglot_json, task, step, sql_hash,
-            provenance="sqlglot", confidence=1.0,
+            provenance="sqlglot", confidence=1.0, seen_pairs=seen_pairs,
         )
-        await self._apply_llm_opinion(ticket.llm_opinion, task, step, sql_hash)
+        await self._apply_llm_opinion(
+            ticket.llm_opinion, task, step, sql_hash, seen_pairs=seen_pairs
+        )
 
     @staticmethod
     def _without_wrong_edges(
