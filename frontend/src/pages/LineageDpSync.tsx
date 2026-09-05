@@ -107,6 +107,10 @@ const SCAN_STAGE_LABEL: Record<string, string> = {
   // 中性表述：所选节点类型包含非 SQL 类型（Shell/DataX 等）时，管线同样把它们
   // 的脚本按 SQL 文本尝试解析——避免误导为「只处理 SQL 节点」（原「解析 SQL 节点」）。
   parsing: "解析节点脚本并写血缘",
+  // llm = 批末 LLM 并发裁决窗口：批内复杂/失败 step 攒批后 Semaphore 并发调 LLM
+  // 确认/兜底（数十秒~分钟级），逐项完成推进 llm_done——此前该窗口进度零更新，
+  // 前端靠「LLM 裁决中 k/n」心跳让进度条保持活性。
+  llm: "LLM 裁决中",
   done: "已完成",
   cancelled: "已取消",
 };
@@ -129,6 +133,22 @@ function scanParsingText(progress?: DpSyncScanProgress): string {
     return `正在解析 ${label} 节点并写血缘`;
   }
   return "解析节点脚本并写血缘";
+}
+
+/** 非 parsing 阶段的动态文案：llm 阶段展示「裁决中 k/n」逐项心跳（后端随每项
+ *  裁决完成推进 llm_done），fetching 阶段带「第 x/y 批」批级心跳（多批全量轮下
+ *  进度仍有呼吸）；无附加信息时回退静态文案。 */
+function scanStageDetailText(progress?: DpSyncScanProgress): string {
+  const stage = progress?.stage;
+  if (stage === "llm") {
+    const done = progress?.llm_done ?? 0;
+    const total = progress?.llm_total ?? 0;
+    return total > 0 ? `LLM 裁决中 ${done} / ${total}` : "LLM 裁决中";
+  }
+  if (stage === "fetching" && (progress?.batch_index ?? 0) > 0) {
+    return `${SCAN_STAGE_LABEL.fetching}（第 ${progress?.batch_index} / ${progress?.batch_count} 批）`;
+  }
+  return scanStageText(stage);
 }
 
 //: 不承载 SQL 脚本的节点类型（血缘解析仅实现 SQL 内容）：扫描命中只会得到
@@ -1035,6 +1055,9 @@ function OpsTab() {
   const [scanTaskId, setScanTaskId] = useState<number | null>(null);
   const [scanStatus, setScanStatus] = useState<DpSyncScanStatus | null>(null);
   const pollTimer = useRef<number | null>(null);
+  // 统计概览实时刷新定时器：扫描运行中每 ~3s 只刷 stats（字段血缘条数/待抉择
+  // 工单在 DB 实时增长，页面需跟随）；水位/运行列表仅在完成时随 load 全量刷新。
+  const statsTimer = useRef<number | null>(null);
   // 两段式取消（B 方案）：cancel 请求时间（本地）+ 是否已请求 + 是否超时可强制终止
   const cancelStartRef = useRef<number | null>(null);
   const [cancelRequested, setCancelRequested] = useState(false);
@@ -1046,6 +1069,10 @@ function OpsTab() {
       window.clearInterval(pollTimer.current);
       pollTimer.current = null;
     }
+    if (statsTimer.current !== null) {
+      window.clearInterval(statsTimer.current);
+      statsTimer.current = null;
+    }
     cancelStartRef.current = null;
     setCancelRequested(false);
     setForceArmed(false);
@@ -1055,6 +1082,7 @@ function OpsTab() {
   useEffect(
     () => () => {
       if (pollTimer.current !== null) window.clearInterval(pollTimer.current);
+      if (statsTimer.current !== null) window.clearInterval(statsTimer.current);
     },
     []
   );
@@ -1081,6 +1109,16 @@ function OpsTab() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 扫描运行期间的轻量统计刷新（只刷 stats，不重拉水位/运行列表）
+  const refreshStats = useCallback(async () => {
+    try {
+      const statsData = await getDpSyncStats();
+      setStats(statsData);
+    } catch {
+      // 统计刷新失败静默——不影响主进度轮询，下个 tick 再试
+    }
+  }, []);
 
   const handleReset = async () => {
     Modal.confirm({
@@ -1159,6 +1197,10 @@ function OpsTab() {
         pollTimer.current = window.setInterval(() => {
           void pollOnce(cur.task_id as number);
         }, 1500);
+        // 恢复跟踪的同时让统计概览实时跟随（每 3s 轻量刷 stats）
+        statsTimer.current = window.setInterval(() => {
+          void refreshStats();
+        }, 3000);
       } catch {
         // 查询失败（如任务已随进程结束）不打扰，运行记录表仍可见
       }
@@ -1166,7 +1208,7 @@ function OpsTab() {
     return () => {
       cancelled = true;
     };
-  }, [pollOnce, message]);
+  }, [pollOnce, refreshStats, message]);
 
   const handleScanNow = async () => {
     setScanning(true);
@@ -1196,6 +1238,10 @@ function OpsTab() {
       pollTimer.current = window.setInterval(() => {
         void pollOnce(taskId);
       }, 1500);
+      // 扫描运行期间统计概览实时跟随（每 3s 轻量刷 stats，不刷列表/水位）
+      statsTimer.current = window.setInterval(() => {
+        void refreshStats();
+      }, 3000);
     } catch {
       stopPolling();
       message.error("提交扫描失败");
@@ -1419,7 +1465,7 @@ function OpsTab() {
                       : `扫描中：${
                           scanParsing
                             ? scanParsingText(scanProgress)
-                            : scanStageText(scanProgress?.stage)
+                            : scanStageDetailText(scanProgress)
                         }`}
                   {showScanTaskDetail &&
                     `（已处理 ${scanProgress?.processed ?? 0} / ${scanProgress?.total ?? 0} 个任务）`}
@@ -1436,6 +1482,14 @@ function OpsTab() {
                   }
                   style={{ width: "100%" }}
                 />
+                {scanProgress?.stage === "llm" &&
+                  !cancelRequested &&
+                  !scanStatus.force_stop && (
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      已解析 {scanProgress.processed ?? 0} / {scanProgress.total ?? 0}{" "}
+                      个任务，裁决结果逐任务写库中…
+                    </Typography.Text>
+                  )}
                 {cancelRequested && !forceArmed && !scanStatus.force_stop && (
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                     已在步骤边界停止，通常数秒内结束；若长时间未停可点「强制终止」。

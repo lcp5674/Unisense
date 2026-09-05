@@ -650,6 +650,9 @@ describe("LineageDpSync", () => {
         total: 2517,
         processed: 103,
         current_task_id: 123,
+        // 多批全量轮：透出批序号（A 方案）——文案带「第 x/y 批」批级心跳
+        batch_index: 1,
+        batch_count: 13,
       },
       result: null,
     });
@@ -658,6 +661,7 @@ describe("LineageDpSync", () => {
     await screen.findByText("运行记录");
     await user.click(screen.getByText(/立即全量扫描/));
     await screen.findByText(/扫描中：拉取节点脚本到本地/);
+    expect(screen.getByText(/第 1 \/ 13 批/)).toBeInTheDocument();
     expect(screen.queryByText(/已处理 103 \/ 2517 个任务/)).not.toBeInTheDocument();
     expect(screen.queryByText(/当前任务 #123/)).not.toBeInTheDocument();
   });
@@ -689,6 +693,65 @@ describe("LineageDpSync", () => {
     expect(screen.queryByText(/已处理 0 \/ 0 个任务/)).not.toBeInTheDocument();
     expect(screen.queryByText(/当前任务/)).not.toBeInTheDocument();
   });
+
+  it("ops scan llm stage shows 裁决中 k/n heartbeat", async () => {
+    const user = userEvent.setup();
+    mockedApi.scanDpSyncNow.mockResolvedValue({
+      task_id: 12,
+      status: "running",
+      already_running: false,
+    });
+    // llm = 批末 LLM 并发裁决窗口（A 方案）：progress 透出 llm_total/llm_done 逐项
+    // 心跳，前端展示「LLM 裁决中 k / n」——此前该窗口零更新、进度条静止。
+    mockedApi.getDpSyncScanStatus.mockResolvedValue({
+      task_id: 12,
+      status: "running",
+      progress: {
+        stage: "llm",
+        total: 2517,
+        processed: 2000,
+        current_task_id: null,
+        llm_total: 120,
+        llm_done: 34,
+      },
+      result: null,
+    });
+    renderPage();
+    await user.click(screen.getByText(/运\s*维/));
+    await screen.findByText("运行记录");
+    await user.click(screen.getByText(/立即全量扫描/));
+    await screen.findByText(/扫描中：LLM 裁决中 34 \/ 120/);
+    // llm 阶段仍给出已解析任务概览，提示裁决结果写库中
+    expect(screen.getByText(/已解析 2000 \/ 2517 个任务/)).toBeInTheDocument();
+  });
+
+  it("ops scan refreshes stats overview periodically while running", async () => {
+    const user = userEvent.setup();
+    mockedApi.scanDpSyncNow.mockResolvedValue({
+      task_id: 20,
+      status: "running",
+      already_running: false,
+    });
+    mockedApi.getDpSyncScanStatus.mockResolvedValue({
+      task_id: 20,
+      status: "running",
+      progress: { stage: "parsing", total: 50, processed: 5, current_task_id: 101 },
+      result: null,
+    });
+    renderPage();
+    await user.click(screen.getByText(/运\s*维/));
+    await screen.findByText("运行记录");
+    // 挂载 load 已拉取一次 stats
+    expect(mockedApi.getDpSyncStats).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByText(/立即全量扫描/));
+    await screen.findByText(/扫描中/);
+    // 扫描运行中每 3s 轻量刷新 stats（B 方案）——等待第二个 tick 触发
+    await waitFor(
+      () =>
+        expect(mockedApi.getDpSyncStats.mock.calls.length).toBeGreaterThanOrEqual(2),
+      { timeout: 5000 }
+    );
+  }, 15000);
 
   it("ops scan shows cancel button and cancels running task", async () => {
     const user = userEvent.setup();

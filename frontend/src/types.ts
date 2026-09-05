@@ -3796,6 +3796,12 @@ export interface DpSyncScanProgress {
   current_step_type?: number | null;
   /** 当前正在解析的节点类型中文 label（如「DataX 同步」「Hive/Spark SQL」）。 */
   current_step_label?: string | null;
+  /** LLM 裁决阶段总工作项/已完成（stage=llm 时后端随每项裁决完成就地 +1）。 */
+  llm_total?: number;
+  llm_done?: number;
+  /** 批量预取阶段批序号/总批数（stage=fetching 时展示，多批全量轮下进度仍有批级心跳）。 */
+  batch_index?: number;
+  batch_count?: number;
 }
 
 /** 手动扫描任务状态（OpsTab 轮询） */
