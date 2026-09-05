@@ -7,6 +7,14 @@
 #   - 30b-a3b   Qwen3-30B-A3B  (Q4_K_M, ~18.6GB) MoE：质量≈30B dense、速度≈3B 激活
 #                 —— 62G 内存生产机的「最优×最快」甜点（见 README 10.7）
 #
+# 并发 slot 与 KV cache 设计（生产事故后收敛，勿随意调大）：
+#   llama.cpp 官方镜像默认 env LLAMA_ARG_PARALLEL=4 → n_slots=4 共享同一 KV 池；
+#   CPU 推理 30B 极慢（~0.03-10 t/s），4 路并发长请求会互相拖慢并挤爆共享 KV
+#   （decode: failed to find a memory slot → 缩 batch 到 1 仍失败 → Context size exceeded）。
+#   因此脚本显式传 --parallel + -e LLAMA_ARG_PARALLEL 覆盖镜像默认：30b 单 slot 最稳，
+#   8b 默认 2 slot 兼顾并发；KV cache 量化 q8_0（近无损、KV 内存减半）换取同等内存更大余量。
+#   仍遇超长单请求可再降 LLM_PARALLEL=1 或在 Unisense 侧控 prompt/max_tokens。
+#
 # llama.cpp server（OpenAI /v1 兼容，Unisense LLM 路由直接接入）
 #
 # 用法：
@@ -14,6 +22,7 @@
 #   LLM_MODEL=30b-a3b bash scripts/deploy_local_llm.sh     # MoE 档（端口 8082）
 #   LLM_MODEL_SOURCE=hf bash scripts/deploy_local_llm.sh   # 改用 hf-mirror 下载
 #   LLM_PORT=8083 LLM_MEM=16g LLM_CPUS=24 ...              # 覆盖任意参数
+#   LLM_PARALLEL=1 LLM_KV_CACHE=q8_0 ...                   # slot 并发 / KV 量化（30b 遇挤爆建议 1 + q8_0）
 #   LLM_NUMA=off bash ...                                  # 关闭 NUMA 绑定
 #
 # 幂等：模型已存在/容器已运行则跳过，可重复执行。
@@ -30,8 +39,9 @@ case "${LLM_MODEL}" in
   8b)
     LLM_MODEL_FILE="${LLM_MODEL_FILE:-Qwen3-8B-Q4_K_M.gguf}"
     LLM_REPO="${LLM_REPO:-Qwen/Qwen3-8B-GGUF}"
-    LLM_DEFAULT_MEM="12g"; LLM_DEFAULT_PORT="8081"   # 12g：4 slot×16k KV 峰值余量（62G 机器，避免并发兜底 OOM）
+    LLM_DEFAULT_MEM="12g"; LLM_DEFAULT_PORT="8081"   # 12g：2 slot×16k KV(q8) 峰值余量（62G 机器）
     LLM_DEFAULT_CPUS="28"; LLM_DEFAULT_CTX="16384"
+    LLM_DEFAULT_PARALLEL="2"                          # 8B dense CPU 尚可，2 slot 兼顾吞吐
     LLM_VERIFY_MODEL="qwen3-8b"
     LLM_DISPLAY="Qwen3-8B (dense, Q4_K_M ~4.9GB)"
     ;;
@@ -40,6 +50,7 @@ case "${LLM_MODEL}" in
     LLM_REPO="${LLM_REPO:-Qwen/Qwen3-30B-A3B-GGUF}"
     LLM_DEFAULT_MEM="28g"; LLM_DEFAULT_PORT="8082"
     LLM_DEFAULT_CPUS="28"; LLM_DEFAULT_CTX="16384"
+    LLM_DEFAULT_PARALLEL="1"                          # CPU 慢推理：单 slot 最稳，防共享 KV 被并发长请求挤爆
     LLM_VERIFY_MODEL="qwen3-30b-a3b"
     LLM_DISPLAY="Qwen3-30B-A3B (MoE, Q4_K_M ~18.6GB)"
     ;;
@@ -54,6 +65,8 @@ LLM_PORT="${LLM_PORT:-${LLM_DEFAULT_PORT}}"
 LLM_MEM="${LLM_MEM:-${LLM_DEFAULT_MEM}}"                    # 容器内存上限
 LLM_CPUS="${LLM_CPUS:-${LLM_DEFAULT_CPUS}}"                 # CPU 线程（双路 32 物理核留 4 给系统）
 LLM_CTX="${LLM_CTX:-${LLM_DEFAULT_CTX}}"                    # 上下文长度（NL2SQL 16k 足够）
+LLM_PARALLEL="${LLM_PARALLEL:-${LLM_DEFAULT_PARALLEL}}"      # 并发 slot 数（必须显式传参覆盖镜像 env 默认 4）
+LLM_KV_CACHE="${LLM_KV_CACHE:-q8_0}"                          # KV cache 量化: f16 | q8_0 | q4_0（q8_0 近无损、KV 内存减半）
 LLM_NUMA="${LLM_NUMA:-distribute}"                          # distribute | off
 LLM_MODEL_SOURCE="${LLM_MODEL_SOURCE:-modelscope}"          # modelscope | hf
 
@@ -74,8 +87,13 @@ HF_MIRROR_URL="https://hf-mirror.com/${LLM_REPO}/resolve/main/${LLM_MODEL_FILE}"
 
 # ---------- 1. 校验环境 ----------
 command -v docker >/dev/null || { echo "[ERR] docker 未安装"; exit 1; }
+# 参数值域校验（非法值直接报错，避免 docker run 裸报 unknown flag/枚举错误）
+case "${LLM_KV_CACHE}" in f16|q8_0|q4_0) ;; *) echo "[ERR] LLM_KV_CACHE 仅支持 f16 | q8_0 | q4_0（当前: ${LLM_KV_CACHE}）"; exit 1 ;; esac
+if ! [[ "${LLM_PARALLEL}" =~ ^[0-9]+$ ]] || [ "${LLM_PARALLEL}" -lt 1 ]; then
+  echo "[ERR] LLM_PARALLEL 必须为正整数（当前: ${LLM_PARALLEL}）"; exit 1
+fi
 DOCKER_VER=$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo "?")
-echo "[OK] Docker server: ${DOCKER_VER} | 档位: ${LLM_DISPLAY} | 端口: ${LLM_PORT}"
+echo "[OK] Docker server: ${DOCKER_VER} | 档位: ${LLM_DISPLAY} | 端口: ${LLM_PORT} | slot: ${LLM_PARALLEL} | KV: ${LLM_KV_CACHE}"
 
 # ---------- 2. 拉取 llama.cpp server 镜像 ----------
 echo "[1/5] 拉取镜像 ${LLM_IMAGE} ..."
@@ -115,11 +133,14 @@ RUN_ARGS_BASE=(
   -m "${LLM_MEM}" --cpus "${LLM_CPUS}"
   -p "${LLM_PORT}:${LLM_PORT}"
   -v "${LLM_MODEL_DIR}:/models:ro"
+  -e "LLAMA_ARG_PARALLEL=${LLM_PARALLEL}"   # 覆盖镜像 env 默认 4（n_slots），双重保险防并发挤爆 KV
 )
 MODEL_ARGS=(
   -m "/models/${LLM_MODEL_FILE}"
   --host 0.0.0.0 --port "${LLM_PORT}"
   -c "${LLM_CTX}" -t "${LLM_CPUS}"
+  --parallel "${LLM_PARALLEL}"
+  --cache-type-k "${LLM_KV_CACHE}" --cache-type-v "${LLM_KV_CACHE}"
   --jinja
 )
 
@@ -140,7 +161,7 @@ start_container() {
   docker run "${args[@]}"
 }
 
-echo "[3/5] 启动容器 ${LLM_CONTAINER}（NUMA=${LLM_NUMA}，内存 ${LLM_MEM}，线程 ${LLM_CPUS}）..."
+echo "[3/5] 启动容器 ${LLM_CONTAINER}（NUMA=${LLM_NUMA}，内存 ${LLM_MEM}，线程 ${LLM_CPUS}，slot ${LLM_PARALLEL}，KV ${LLM_KV_CACHE}）..."
 if docker ps -a --format '{{.Names}}' | grep -qx "${LLM_CONTAINER}"; then
   echo "[INFO] 容器已存在，执行 recreate（应用最新参数）"
   docker rm -f "${LLM_CONTAINER}" >/dev/null
