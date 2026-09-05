@@ -355,7 +355,14 @@ async def test_reprocess_unparseable_three_state() -> None:
     )
 
     counters = await svc.reprocess_unparseable_tickets(limit=100)
-    assert counters == {"parsed": 1, "no_flow": 1, "kept": 1, "stale": 0}
+    assert counters == {
+        "parsed": 1,
+        "no_flow": 1,
+        "kept": 1,
+        "stale": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
     # 可解析单：走 _apply_json_edges 单条边入库（不 purge——O2 防误删新映射）
     # + N4 touch seen；纯 DDL 单标 ignore；失败单不动
     assert svc._lineage_repo.upsert_edge_with_status.await_count == 1
@@ -385,7 +392,14 @@ async def test_reprocess_skips_stale_when_sql_evolved() -> None:
     svc._dp_repo.step_has_other_active_hash = AsyncMock(return_value=True)
 
     counters = await svc.reprocess_unparseable_tickets(limit=100)
-    assert counters == {"parsed": 0, "no_flow": 0, "kept": 0, "stale": 1}
+    assert counters == {
+        "parsed": 0,
+        "no_flow": 0,
+        "kept": 0,
+        "stale": 1,
+        "skipped": 0,
+        "failed": 0,
+    }
     # 作废为 ignore，不写任何边、不 touch（无新边）
     assert svc._lineage_repo.upsert_edge_with_status.await_count == 0
     svc._lineage_repo.touch_edges_seen.assert_not_awaited()
@@ -578,3 +592,126 @@ async def test_collect_retry_candidates_snapshot() -> None:
     svc._dp_repo.list_retryable_llm_tickets.assert_awaited_once_with(
         limit=500, ticket_ids=None
     )
+
+
+# ==================== R1 / Q1 / S1（第五轮审查） ====================
+
+
+@pytest.mark.asyncio
+async def test_retry_one_ticket_skips_when_already_resolved() -> None:
+    """R1：_retry_one_ticket 处理前重读单状态——快照窗口内已被他人裁决 → skipped，
+    不把已裁决单 status 覆盖回退（产生 resolution 非空 + status=llm_fallback
+    不一致态，复用判定失效每轮白烧 LLM）也不触发 LLM。"""
+    t = _ticket(status="diverged")
+    t.divergence_reason = "LLM 已关闭（配置），复杂节点未确认，请人工抉择"
+    svc = _retry_svc(t, {"content": '{"agree": true}'})
+    # 重读发现已被他人裁决为 accept_sqlglot
+    svc._dp_repo.get_ticket = AsyncMock(
+        return_value=MagicMock(resolution="accept_sqlglot", status="resolved")
+    )
+    action, detail, err = await svc._retry_one_ticket(t, resolved_by=3)
+    assert action == "skipped"
+    assert detail["action"] == "skipped"
+    assert err is None
+    svc._llm_chat.assert_not_awaited()  # 不烧 LLM
+    svc._dp_repo.resolve_ticket.assert_not_awaited()
+    svc._dp_repo.update_ticket_llm.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retry_one_ticket_skips_when_missing() -> None:
+    """R1：重读发现单已删除 → skipped（不 resolve 不写边）。"""
+    t = _ticket(status="diverged")
+    svc = _retry_svc(t, {"content": '{"agree": true}'})
+    svc._dp_repo.get_ticket = AsyncMock(return_value=None)
+    action, detail, err = await svc._retry_one_ticket(t, resolved_by=3)
+    assert action == "skipped"
+    assert "不存在" in detail["reason"]
+    svc._dp_repo.resolve_ticket.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retry_one_ticket_stale_when_sql_evolved() -> None:
+    """Q1：_retry_one_ticket 补 SQL 演进检测——该 step 已被更新版本 SQL 扫过并写
+    字段映射 → 单内 SQL 过时，作废 ignore 计 stale，不按历史 SQL 写边（防 agree
+    逐条 upsert 复活历史独有边污染当前血缘；与 reprocess O2 对称）。"""
+    t = _ticket(status="diverged")
+    t.divergence_reason = "LLM 已关闭（配置），复杂节点未确认，请人工抉择"
+    svc = _retry_svc(t, {"content": '{"agree": true}'})
+    svc._dp_repo.step_has_other_active_hash = AsyncMock(return_value=True)
+    action, detail, err = await svc._retry_one_ticket(t, resolved_by=3)
+    assert action == "stale"
+    assert detail["action"] == "stale"
+    assert err is None
+    svc._dp_repo.resolve_ticket.assert_awaited_once_with(
+        1, resolution="ignore", resolved_by=3
+    )
+    svc._llm_chat.assert_not_awaited()  # 不烧 LLM
+    svc._lineage_repo.upsert_edge_with_status.assert_not_awaited()  # 不写边
+    svc._dp_repo.update_ticket_llm.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reprocess_skips_when_already_resolved() -> None:
+    """R1：reprocess 处理前重读单状态——快照窗口内已被他人裁决 → skipped，
+    不覆盖不重判（此前直接 repo.resolve_ticket 覆盖，绕过 service 入口的 M3
+    防背离，可把已 ignore 的单改回 accept_sqlglot 并写边）。"""
+    t = _ticket(status="unparseable")
+    t.sql_text = "this is not sql at all {{{"
+    t.task_refs_json = {"task_id": 1386, "step_id": 5012}
+    svc = _svc(t)
+    svc._dp_repo.list_tickets = AsyncMock(return_value=([t], 1))
+    svc._dp_repo.get_ticket = AsyncMock(
+        return_value=MagicMock(resolution="ignore", status="ignored")
+    )
+    counters = await svc.reprocess_unparseable_tickets(limit=100)
+    assert counters["skipped"] == 1
+    assert counters["failed"] == 0
+    svc._dp_repo.resolve_ticket.assert_not_awaited()
+    svc._lineage_repo.upsert_edge_with_status.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reprocess_failed_does_not_abort_batch() -> None:
+    """S1：reprocess 单张写库异常 → 计 failed、循环继续（此前非 ValueError 异常
+    上抛到端点 → 整批回滚，前几张已处理的全丢）。"""
+    ok_ticket = _ticket()
+    ok_ticket.id = 1
+    ok_ticket.status = "unparseable"
+    ok_ticket.resolution = None
+    ok_ticket.sql_text = (
+        "use wedw_ods;\ncreate table wedw_ods.t_${DATA_DATE} as "
+        "select * from wedw_ods.src_${DATA_DATE};\n"
+    )
+    ok_ticket.task_refs_json = {"task_id": 1386, "step_id": 5012}
+    bad_ticket = _ticket()
+    bad_ticket.id = 2
+    bad_ticket.status = "unparseable"
+    bad_ticket.resolution = None
+    bad_ticket.sql_text = (
+        "use wedw_ods;\ncreate table wedw_ods.u_${DATA_DATE} as "
+        "select * from wedw_ods.src_${DATA_DATE};\n"
+    )
+    bad_ticket.task_refs_json = {"task_id": 1386, "step_id": 5013}
+    svc = _svc(ok_ticket)
+    svc._dp_repo.list_tickets = AsyncMock(return_value=([ok_ticket, bad_ticket], 2))
+    real = svc._apply_json_edges
+    calls = {"n": 0}
+
+    async def _flaky(*a: object, **kw: object) -> None:
+        calls["n"] += 1
+        if calls["n"] == 2:  # 第二张写库抛 DB 级异常
+            raise RuntimeError("connection lost")
+        await real(*a, **kw)
+
+    svc._apply_json_edges = _flaky  # type: ignore[method-assign]
+    counters = await svc.reprocess_unparseable_tickets(limit=100)
+    assert counters["parsed"] == 1  # 第一张正常消解
+    assert counters["failed"] == 1  # 第二张异常被容错，不阻断批量
+    assert len(counters.get("errors", [])) == 1
+    # 只有 ok 单被 resolve（bad 异常未 resolve）
+    calls_resolve = [
+        c.kwargs["resolution"]
+        for c in svc._dp_repo.resolve_ticket.await_args_list
+    ]
+    assert calls_resolve == ["accept_sqlglot"]

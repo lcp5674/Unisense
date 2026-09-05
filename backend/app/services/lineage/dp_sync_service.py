@@ -1782,8 +1782,16 @@ class DpSyncService:
             return await llm_orig(messages, **kw)  # type: ignore[misc]
 
         async def _counted_create_ticket(**kw: Any) -> Any:
-            counters["tickets_created"] += 1
-            return await create_orig(**kw)
+            # S2：幂等建单计数——同 step+hash 已有未删票时 create_ticket 返回
+            # existing 不新建（已裁决记忆票在 memory 关时放行走 LLM 的分歧建单
+            # 即此场景），只对真正新建的单计数，避免 tickets_created 虚增。
+            existing = await self._dp_repo.find_ticket_by_step_hash(
+                kw["step_id"], kw["sql_hash"]
+            )
+            ticket = await create_orig(**kw)
+            if existing is None:
+                counters["tickets_created"] += 1
+            return ticket
 
         if llm_orig is not None:
             self._llm_chat = _counted_llm  # type: ignore[method-assign]
@@ -1919,8 +1927,16 @@ class DpSyncService:
         counters["tickets_created"] = counters.get("tickets_created", 0)
 
         async def _counted_create_ticket(**kw: Any) -> Any:
-            counters["tickets_created"] += 1
-            return await create_orig(**kw)
+            # S2：幂等建单计数——同 step+hash 已有未删票时 create_ticket 返回
+            # existing 不新建（已裁决记忆票在 memory 关时放行走 LLM 的分歧建单
+            # 即此场景），只对真正新建的单计数，避免 tickets_created 虚增。
+            existing = await self._dp_repo.find_ticket_by_step_hash(
+                kw["step_id"], kw["sql_hash"]
+            )
+            ticket = await create_orig(**kw)
+            if existing is None:
+                counters["tickets_created"] += 1
+            return ticket
 
         self._dp_repo.create_ticket = _counted_create_ticket  # type: ignore[method-assign]
         try:
@@ -2315,13 +2331,23 @@ class DpSyncService:
         }
         for tk in targets:
             try:
+                # R1：处理前重读单状态——快照可能过期（窗口内已被他人裁决/
+                # 删除）；已裁决/不存在 → 计 skipped，不当作失败也不重复 resolve。
+                fresh = await self._dp_repo.get_ticket(tk.id)
+                if (
+                    fresh is None
+                    or fresh.resolution is not None
+                    or fresh.status == "resolved"
+                ):
+                    counters["skipped"] += 1
+                    continue
                 await self.resolve_ticket(
                     ticket_id=tk.id,
                     resolution="accept_sqlglot",
                     resolved_by=resolved_by,
                 )
                 counters["resolved"] += 1
-            except ValueError as exc:  # noqa: BLE001 —— 单张失败不阻断批量
+            except Exception as exc:  # noqa: BLE001 —— 单张失败不阻断批量
                 counters["failed"] += 1
                 counters.setdefault("errors", []).append(str(exc))
         return counters
@@ -2341,54 +2367,79 @@ class DpSyncService:
         按历史 SQL 重判写库会用旧血缘覆盖/污染当前结果（_store_sqlglot_edges 以
         旧 hash 为 keep 清理会把新映射一并软删）。写边改走 ``_apply_json_edges``
         （不清任何 hash 映射，二道防线）+ 局部 seen 收尾 touch（N4 删除闭环）。
-        返回 ``{"parsed": n, "no_flow": n, "kept": n, "stale": n}`` 计数。
+        返回 ``{"parsed": n, "no_flow": n, "kept": n, "stale": n,
+        "skipped": n, "failed": n}`` 计数。
         """
         tickets, _ = await self._dp_repo.list_tickets(
             status="unparseable", page=1, page_size=limit
         )
-        counters = {"parsed": 0, "no_flow": 0, "kept": 0, "stale": 0}
+        counters: dict[str, Any] = {
+            "parsed": 0,
+            "no_flow": 0,
+            "kept": 0,
+            "stale": 0,
+            "skipped": 0,
+            "failed": 0,
+        }
         for tk in tickets:
-            task, step = self._restore_task_step(tk)
-            # O2：SQL 演进检测——该 step 已存在其它 hash 的活跃映射 → 单内 SQL
-            # 过时，作废不写边（防历史血缘覆盖当前 + purge 误删新映射）。
-            if await self._dp_repo.step_has_other_active_hash(
-                tk.step_id, tk.sql_hash
-            ):
-                await self._dp_repo.resolve_ticket(
-                    tk.id, resolution="ignore", resolved_by=0
+            try:
+                # R1：处理前重读单状态——批量列表是查询时快照，窗口内可能已被
+                # 他人裁决/删除；直接 resolve 会把已裁决单覆盖（跳过 repo 层
+                # 也无防背离，service.resolve_ticket 的 M3 检查未经过）。
+                # 与异步任务逐单重读语义对齐：已裁决/不存在 → 跳过不覆盖。
+                fresh = await self._dp_repo.get_ticket(tk.id)
+                if (
+                    fresh is None
+                    or fresh.resolution is not None
+                    or fresh.status == "resolved"
+                ):
+                    counters["skipped"] += 1
+                    continue
+                task, step = self._restore_task_step(tk)
+                # O2：SQL 演进检测——该 step 已存在其它 hash 的活跃映射 → 单内 SQL
+                # 过时，作废不写边（防历史血缘覆盖当前 + purge 误删新映射）。
+                if await self._dp_repo.step_has_other_active_hash(
+                    tk.step_id, tk.sql_hash
+                ):
+                    await self._dp_repo.resolve_ticket(
+                        tk.id, resolution="ignore", resolved_by=0
+                    )
+                    counters["stale"] += 1
+                    continue
+                outcome = parse_dp_step(
+                    tk.sql_text,
+                    dialect="hive",
+                    target_table=tk.out_table or None,
                 )
-                counters["stale"] += 1
-                continue
-            outcome = parse_dp_step(
-                tk.sql_text,
-                dialect="hive",
-                target_table=tk.out_table or None,
-            )
-            if outcome.status == "ok":
-                # N4：局部 seen 收尾 touch——本入口写边无扫描轮 seen_pairs，不 touch
-                # 则 last_seen_at 永 NULL、任务删除后永不 stale（删除语义不闭合）。
-                local_seen: set[tuple[str, str]] = set()
-                await self._apply_json_edges(
-                    edges_to_json(outcome.table_edges, outcome.field_edges),
-                    task,
-                    step,
-                    tk.sql_hash,
-                    provenance="sqlglot",
-                    confidence=1.0,
-                    seen_pairs=local_seen,
-                )
-                await self._touch_seen(local_seen)
-                await self._dp_repo.resolve_ticket(
-                    tk.id, resolution="accept_sqlglot", resolved_by=0
-                )
-                counters["parsed"] += 1
-            elif outcome.status == "no_flow":
-                await self._dp_repo.resolve_ticket(
-                    tk.id, resolution="ignore", resolved_by=0
-                )
-                counters["no_flow"] += 1
-            else:
-                counters["kept"] += 1
+                if outcome.status == "ok":
+                    # N4：局部 seen 收尾 touch——本入口写边无扫描轮 seen_pairs，不
+                    # touch 则 last_seen_at 永 NULL、任务删除后永不 stale（删除语义
+                    # 不闭合）。
+                    local_seen: set[tuple[str, str]] = set()
+                    await self._apply_json_edges(
+                        edges_to_json(outcome.table_edges, outcome.field_edges),
+                        task,
+                        step,
+                        tk.sql_hash,
+                        provenance="sqlglot",
+                        confidence=1.0,
+                        seen_pairs=local_seen,
+                    )
+                    await self._touch_seen(local_seen)
+                    await self._dp_repo.resolve_ticket(
+                        tk.id, resolution="accept_sqlglot", resolved_by=0
+                    )
+                    counters["parsed"] += 1
+                elif outcome.status == "no_flow":
+                    await self._dp_repo.resolve_ticket(
+                        tk.id, resolution="ignore", resolved_by=0
+                    )
+                    counters["no_flow"] += 1
+                else:
+                    counters["kept"] += 1
+            except Exception as exc:  # noqa: BLE001 —— 单张异常不阻断批量（S1）
+                counters["failed"] += 1
+                counters.setdefault("errors", []).append(str(exc))
         return counters
 
     async def collect_retry_candidates(
@@ -2434,9 +2485,12 @@ class DpSyncService:
                 ok      → 刷新为 llm_fallback 低置信参考（refreshed，待人工采纳）
                 仍无法提炼 → 保持/转 unparseable（kept）
             - LLM 协议/调用异常 → 保留，计 failed（单张失败不阻断批量）
-        返回 ``{"auto_resolved": n, "refreshed": n, "kept": n, "failed": n,
-        "details": [...]}``——details 为逐单处置明细（ticket_id/task_name/
-        out_table/action/reason），供前端结果面板展示。
+        R1：每张处理前重读单状态——批量快照窗口内已被他人裁决/删除 → skipped；
+        Q1：单内 SQL 已演进（该 step 存在新版本活跃映射）→ 作废 ignore 计 stale，
+        不按历史 SQL 写边（O2 对称）。
+        返回 ``{"auto_resolved": n, "refreshed": n, "kept": n, "stale": n,
+        "skipped": n, "failed": n, "details": [...]}``——details 为逐单处置明细
+        （ticket_id/task_name/out_table/action/reason），供前端结果面板展示。
         """
         if self._llm_chat is None:
             self._llm_chat = await self._build_llm_chat()
@@ -2447,6 +2501,8 @@ class DpSyncService:
             "auto_resolved": 0,
             "refreshed": 0,
             "kept": 0,
+            "stale": 0,
+            "skipped": 0,
             "failed": 0,
         }
         details: list[dict[str, Any]] = []
@@ -2475,13 +2531,51 @@ class DpSyncService:
 
         供同步 ``retry_llm_tickets`` 与异步任务（``dp_retry_task`` 逐单独立
         session）共用——单张失败不阻断批量，异常转 ``failed`` 不抛出。
-        action ∈ auto_resolved / refreshed / kept / failed。
+        action ∈ auto_resolved / refreshed / kept / stale / skipped / failed。
         """
         if self._llm_chat is None:
             self._llm_chat = await self._build_llm_chat()
         try:
+            # R1：处理前重读单状态——同步批量传入的是 list_retryable 快照，窗口内
+            # 可能已被他人裁决/删除。直接处置会把已裁决单 status 覆盖回退成
+            # llm_fallback（产生 resolution 非空 + status=llm_fallback 不一致态，
+            # 复用判定失效、每轮重扫白烧 LLM），或经 repo.resolve_ticket 绕过
+            # service 入口的 M3 防背离。与异步任务 _run_single_ticket 对齐：
+            # 已裁决/不存在 → 跳过（不覆盖、不计失败）。
+            fresh = await self._dp_repo.get_ticket(tk.id)
+            if fresh is None:
+                return (
+                    "skipped",
+                    self._retry_detail(tk, "skipped", "单不存在（可能已删除）"),
+                    None,
+                )
+            if fresh.resolution is not None or fresh.status == "resolved":
+                return (
+                    "skipped",
+                    self._retry_detail(
+                        tk, "skipped", f"已裁决为 {fresh.resolution}，跳过"
+                    ),
+                    None,
+                )
             task, step = self._restore_task_step(tk)
             sql_hash = tk.sql_hash
+            # Q1：SQL 演进检测（O2 对称）——该 step 已被更新版本 SQL 扫过并写入
+            # 字段映射（活跃行 hash != 单内 hash），单内 SQL 过时。diverged 旧单
+            # agree 按历史 SQL 逐条 upsert（含墓碑 revive）会复活历史独有边污染
+            # 当前血缘；作废 ignore 计 stale，不按历史 SQL 写边。
+            if await self._dp_repo.step_has_other_active_hash(
+                tk.step_id, sql_hash
+            ):
+                await self._dp_repo.resolve_ticket(
+                    tk.id, resolution="ignore", resolved_by=resolved_by
+                )
+                return (
+                    "stale",
+                    self._retry_detail(
+                        tk, "stale", "SQL 已演进（存在新版本活跃映射），历史单作废"
+                    ),
+                    None,
+                )
             if tk.status == "diverged":
                 verdict = await self._llm_confirm_json(
                     tk.sql_text, tk.sqlglot_result or {}

@@ -33,6 +33,10 @@ _ACTION_TO_STATUS = {
     "auto_resolved": "done",
     "refreshed": "done",
     "kept": "done",
+    # R1/Q1：_retry_one_ticket 内部重读发现已裁决/不存在（skipped）或 SQL 已演进
+    # 作废（stale）——均为终态完成（非错误），异步任务进度不误计 failed。
+    "stale": "done",
+    "skipped": "done",
     "failed": "error",
 }
 

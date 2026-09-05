@@ -899,3 +899,25 @@ async def test_confirm_agree_reports_field_stats() -> None:
     work.result = verdict
     await svc._finish_deferred_task([work], _config(), counters, set())
     assert counters["field_mappings_written"] == 5
+
+
+@pytest.mark.asyncio
+async def test_finish_deferred_error_existing_ticket_not_counted() -> None:
+    """S2：幂等建单计数——同 step+hash 已存在未删票时 create_ticket 返回
+    existing 不新建，tickets_created 不虚增（已裁决记忆票在 memory 关放行分歧
+    建单即此场景——此前无条件 +1 虚增误导「本轮新建待抉择单」计数）。"""
+    from app.services.lineage.dp_sync_service import _LlmWork
+
+    svc = _svc(llm_chat=lambda messages, **kw: {"content": ""})
+    work = await svc.process_step(TASK, STEP, COMPLEX_SQL, _config(), defer_llm=True)
+    assert isinstance(work, _LlmWork)
+    work.error = "无法解析 LLM 输出"
+    # 该 step+hash 已有未删票（existing）→ 建单幂等返回 existing 不新建
+    svc._dp_repo.find_ticket_by_step_hash = AsyncMock(
+        return_value=SimpleNamespace(id=1)
+    )
+    counters = _counters()
+    await svc._finish_deferred_task([work], _config(), counters, set())
+    assert counters["diverged"] == 1  # 分支语义仍成立
+    assert counters["tickets_created"] == 0  # 但未真正新建 → 不计数
+    svc._dp_repo.create_ticket.assert_awaited_once()

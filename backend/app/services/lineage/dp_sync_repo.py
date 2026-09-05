@@ -774,10 +774,12 @@ class DpLineageRepository:
                 | DpResolutionTicket.out_table.like(like)
                 | DpResolutionTicket.sql_text.like(like)
             )
-        count_stmt = select(DpResolutionTicket.id).where(
+        # S3：total 用 func.count 聚合——此前 select(id) 载入全部 id 再 len，
+        # 票数增长后分页接口每页都全表载入变慢。
+        count_stmt = select(func.count(DpResolutionTicket.id)).where(
             *stmt._where_criteria
         )
-        total = len((await self._db.execute(count_stmt)).scalars().all())
+        total = (await self._db.execute(count_stmt)).scalar_one()
         stmt = (
             stmt.order_by(DpResolutionTicket.created_at.desc())
             .offset((page - 1) * page_size)
