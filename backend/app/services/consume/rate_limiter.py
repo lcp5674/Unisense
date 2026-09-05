@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 import redis.asyncio as aioredis
 
 from app.core.logging import get_logger
+from app.core.timeutil import today_schedule
 
 logger = get_logger(__name__)
 
@@ -124,7 +125,9 @@ class RedisRateLimiter:
             True 允许，False 拒绝。
         """
         if today is None:
-            today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+            # TZ（审查）：日配额换日按业务时区（默认 Asia/Shanghai）自然日，
+            # 非 UTC 日（UTC 日界在北京 08:00 才换日，配额窗口与客户直觉错位）。
+            today = today_schedule().isoformat()
 
         if self._redis is None:
             logger.warning("rate_limiter.redis_unavailable_fallback_daily", key=key)

@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import ColumnElement, and_, delete, func, literal, or_, select, text, update
@@ -1258,7 +1258,9 @@ class MetricRepository:
         conflict_by_status = {row[0]: row[1] for row in conflict_rows}
 
         # 5) 新鲜度：近 30 天更新的指标数
-        cutoff = datetime.now() - timedelta(days=30)
+        # TZ（审查）：UTC 归一——原 datetime.now() 裸本地钟，容器切业务时区后与
+        # Metric.updated_at（UTC 列）比较会差 8 小时；统一 datetime.now(UTC)。
+        cutoff = datetime.now(UTC) - timedelta(days=30)
         freshness_stmt = select(func.count()).where(
             Metric.deleted_at.is_(None),
             Metric.updated_at >= cutoff,

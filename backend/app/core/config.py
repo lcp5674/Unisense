@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     # ---- 环境标识 ----
     env: str = "local"
 
+    # ---- 业务时区（IANA 名称，默认 Asia/Shanghai）----
+    # 决定「cron 几点触发」「哪个自然日」等业务钟点/日历语义。系统内部存储与
+    # 绝对时刻比较仍以 UTC 为准（ORM default=datetime.now(UTC)），本项只把
+    # 调度判定与日历日边界从容器时区（默认 UTC）对齐到国内业务时区，避免
+    # 配置 "0 13 * * *" 实际按 UTC 13 点（北京 21 点）触发的 8 小时错位。
+    schedule_timezone: str = "Asia/Shanghai"
+
     # ---- MySQL ----
     db_url: str
 

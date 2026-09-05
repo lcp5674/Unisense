@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+
+from app.core.timeutil import today_schedule
 from typing import Any
 
 import structlog
@@ -440,7 +442,10 @@ async def check_sunset_expiry(ctx: dict[str, Any]) -> list[int]:
     from app.models.metric import Metric
 
     archived: list[int] = []
-    today = datetime.now(UTC).date()
+    # TZ（审查）：废弃生效日判定按业务时区（默认 Asia/Shanghai）日历日——
+    # sunset_until 由 service 以「now(UTC)+days 转上海日」生成，此处 today 须同口径，
+    # 否则 UTC 日界会让上海 00:00-08:00 期间提前一天归档（软删）。
+    today = today_schedule()
 
     async with async_session_factory() as db:
         stmt = select(Metric).where(

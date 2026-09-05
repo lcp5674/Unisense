@@ -68,23 +68,28 @@ engine = create_async_engine(
 
 
 @event.listens_for(engine.sync_engine, "connect")
-def _set_mysql_statement_timeout(dbapi_connection: Any, connection_record: Any) -> None:  # noqa: ANN401
-    """R-1：新连接注入语句级超时（SELECT 慢查询硬上限，防无限占用连接）。
+def _set_mysql_session_options(dbapi_connection: Any, connection_record: Any) -> None:  # noqa: ANN401
+    """R-1 + TZ：新连接注入会话级选项（语句超时 + 会话时区对齐 UTC）。
 
-    ``MAX_EXECUTION_TIME`` 仅对 SELECT 生效（MySQL 5.7.8+），覆盖主查询路径；
-    DML/事务由连接池 ``pool_recycle`` 与 server ``wait_timeout`` 兜底。
+    - ``MAX_EXECUTION_TIME`` 仅对 SELECT 生效（MySQL 5.7.8+），覆盖主查询路径；
+      DML/事务由连接池 ``pool_recycle`` 与 server ``wait_timeout`` 兜底。
+    - ``time_zone='+00:00'`` 把 MySQL 会话钟对齐 UTC——ORM 用 Python ``datetime.now(UTC)``
+      存 UTC 墙钟到 DATETIME 列，若 DB 服务器钟为 +08:00，SQL 侧 ``func.now()``/
+      ``CURRENT_TIMESTAMP`` 会写入上海墙钟，与同表 Python UTC 列混用两种钟差 8 小时。
+      显式固定会话时区后，两类写入统一 UTC（读取 DATETIME 无时区语义不受影响）。
     任一语句异常（权限不足等）不应阻断连接建立，best-effort 记录。
     """
     try:
         cursor = dbapi_connection.cursor()
+        cursor.execute("SET SESSION time_zone = '+00:00'")
         cursor.execute(f"SET SESSION MAX_EXECUTION_TIME = {_DB_MAX_EXECUTION_TIME_MS}")
         cursor.close()
-    except Exception as exc:  # noqa: BLE001 - 语句级超时注入失败不应阻断建连
+    except Exception as exc:  # noqa: BLE001 - 会话级选项注入失败不应阻断建连
         # R12（审查修复）：失败不再静默——该连接此后无语句级超时保护，须告警
         import logging
 
         logging.getLogger(__name__).warning(
-            "set_session_max_execution_time_failed", error=str(exc)
+            "set_mysql_session_options_failed", error=str(exc)
         )
 
 async_session_factory = async_sessionmaker(

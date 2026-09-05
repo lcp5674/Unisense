@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
+
+from app.core.timeutil import schedule_tz
 from typing import Any, cast
 
 import structlog
@@ -3394,7 +3396,9 @@ class MetricService(BaseService):
             status="DEPRECATED",
             successor_code=successor_code,
             deprecated_at=now,
-            sunset_until=(now + timedelta(days=sunset_days)).date(),
+            sunset_until=(
+                now.astimezone(schedule_tz()) + timedelta(days=sunset_days)
+            ).date(),
         )
 
         await self._cache.invalidate(metric_code)
@@ -6313,7 +6317,9 @@ class MetricService(BaseService):
             status="DEPRECATED",
             successor_code=successor_code,
             deprecated_at=now,
-            sunset_until=(now + timedelta(days=sunset_days)).date(),
+            sunset_until=(
+                now.astimezone(schedule_tz()) + timedelta(days=sunset_days)
+            ).date(),
         )
         await self._cache.invalidate(metric_code)
         await self._cleanup_metric_lineage(metric_code)

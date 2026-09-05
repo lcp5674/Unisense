@@ -285,3 +285,41 @@ async def test_scheduler_no_duplicate_when_watermark_already_advanced():
     # 存在水位且 get_next 返回的是水位之后的点（>now 则不触发）——此处 FakeCronIter
     # 恒定返回 now-5s（< now），仍会补偿一次（croniter 语义由真实实现保证不重复）。
     redis.enqueue_job.assert_awaited()
+
+
+# ---------- TZ（审查）：调度基准时区（Asia/Shanghai）----------
+
+
+def test_worker_settings_exposes_shanghai_timezone() -> None:
+    """WorkerSettings.timezone 透传 arq → 内建 cron 按业务时区判定。"""
+    from app.core.timeutil import schedule_tz
+    from app.services.collector.worker import WorkerSettings, collect_scheduler
+
+    assert collect_scheduler.__name__  # 触发 import 校验
+    tz = WorkerSettings.timezone
+    assert str(tz) == "Asia/Shanghai"
+    assert tz is schedule_tz()
+    # arq create_worker 的 get_kwargs 会从 WorkerSettings.__dict__ 透传 timezone
+    from arq.worker import get_kwargs
+
+    kwargs = get_kwargs(WorkerSettings)
+    assert kwargs.get("timezone") is schedule_tz()
+
+
+def test_croniter_interprets_expression_in_shanghai_tz() -> None:
+    """croniter 在带上海时区的 aware base 上推进 → 命中上海钟点（非 UTC）。
+
+    "0 13 * * *" 若按上海 13:00 语义，base 为上海 10:00 时下一次是当日 13:00+08；
+    若误按 UTC 13:00（= 上海 21:00），则下一次应跳到次日。本测试锁定前者。
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from croniter import croniter
+
+    base = datetime(2026, 9, 5, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    nxt = croniter("0 13 * * *", base).get_next(datetime)
+    assert nxt.hour == 13
+    assert nxt.tzinfo is not None
+    assert nxt.utcoffset() == timedelta(hours=8)
+    assert (nxt - base) == timedelta(hours=3)

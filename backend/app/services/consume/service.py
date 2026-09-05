@@ -12,6 +12,8 @@ import hashlib
 import json
 import re
 from datetime import UTC, datetime, timedelta
+
+from app.core.timeutil import now_schedule, schedule_tz, today_schedule
 from typing import Any
 
 from sqlalchemy import select
@@ -431,7 +433,7 @@ class ConsumeService(BaseService):
             raise BusinessError(
                 "QPS 超限", error_code=ErrorCode.RATE_LIMITED, ctx={"retry_after": 1}
             )
-        today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+        today = today_schedule().isoformat()  # TZ：日配额按上海自然日，非 UTC 日
         if not await limiter.allow_daily(client.client_id, client.daily_quota, today):
             raise BusinessError(
                 "日查询配额已耗尽",
@@ -1361,9 +1363,13 @@ class ConsumeService(BaseService):
         （查询日志量级可控，避免过度工程）。
         """
         days = max(1, min(int(days), 90))
-        since = (datetime.now(UTC) - timedelta(days=days - 1)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
+        # TZ（审查）：统计日界按业务时区（默认 Asia/Shanghai）自然日——
+        # since 取「上海日 00:00」对应 UTC 时刻（naive UTC 列与 aware 比较前对齐），
+        # 行内聚合按 created_at 转上海日；此前按 UTC 日界在北京 08:00 才换日，口径偏斜。
+        since_sh = (
+            now_schedule() - timedelta(days=days - 1)
+        ).replace(hour=0, minute=0, second=0, microsecond=0)
+        since = since_sh.astimezone(UTC)
         rows = (
             await self._db.execute(
                 select(QueryLog.created_at, QueryLog.duration_ms, QueryLog.status)
@@ -1374,13 +1380,14 @@ class ConsumeService(BaseService):
         by_day: dict[str, list[int]] = {}
         errors: dict[str, int] = {}
         for created_at, duration_ms, status in rows:
-            day = created_at.astimezone(UTC).date().isoformat()
+            # created_at 读回 naive UTC → 先补 UTC 再转上海日聚合
+            day = created_at.replace(tzinfo=UTC).astimezone(schedule_tz()).date().isoformat()
             by_day.setdefault(day, []).append(int(duration_ms or 0))
             if status == "error":
                 errors[day] = errors.get(day, 0) + 1
         items: list[dict[str, Any]] = []
         for i in range(days):
-            day = (since + timedelta(days=i)).date().isoformat()
+            day = (since_sh + timedelta(days=i)).date().isoformat()
             vals = sorted(by_day.get(day, []))
             items.append(
                 {

@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import structlog
@@ -23,6 +23,7 @@ from croniter import croniter
 from app.core.config import settings
 from app.core.eventbus import init_eventbus
 from app.core.logging import configure_logging
+from app.core.timeutil import schedule_tz
 from app.services.collector.batch_infer_tasks import run_batch_llm_infer_task
 from app.services.collector.queue import RedisJobStore
 from app.services.collector.repository import CollectorRepository
@@ -105,7 +106,10 @@ async def _on_job_end(ctx: dict[str, Any]) -> None:
 
 
 #: P1-6 错过调度补偿：每个源的上次触发水位 key 前缀 / 补偿上限 / 补偿窗口。
-_SCHED_WATERMARK_PREFIX = "collect:sched_watermark:"
+# v2：调度基准从 UTC 切换为业务时区（settings.schedule_timezone，默认 Asia/Shanghai）
+# 后水位值携带新时区（+08:00），旧前缀（collect:sched_watermark:）存的是 UTC ISO，
+# 换代避免 `fromisoformat` 把两种时区混读导致补偿时刻错位 8 小时。
+_SCHED_WATERMARK_PREFIX = "collect:sched_watermark:v2:"
 #: 单次扫描最多补偿的错失触发次数（防停机很久导致积压风暴）。
 _SCHED_CATCHUP_MAX = 5
 #: 首次（无水位）或停机恢复时的补偿窗口：只补偿最近 24h 内的错失触发。
@@ -152,10 +156,13 @@ async def collect_scheduler(ctx: dict[str, Any], *args: Any) -> None:
     触发窗口：cron 表达式的下一次执行时间在当前时刻后 1 分钟内即触发。
     幂等：job_id 含目标执行时间戳（``collect:sched:{source_id}:{ts}``），
     同一分钟内的重复扫描不会重复入队（arq 按 job_id 去重）。
+
+    时区：cron 表达式按 ``settings.schedule_timezone``（默认 Asia/Shanghai）解释——
+    数据源管理里配 ``0 13 * * *`` 即每天业务时区 13:00 触发（非容器 UTC 13:00）。
     """
     from app.db.mysql import async_session_factory
 
-    now = datetime.now(UTC)
+    now = datetime.now(schedule_tz())
     redis = ctx.get("redis")
     if redis is None:
         logger.error("scheduler_redis_unavailable")
@@ -437,3 +444,8 @@ class WorkerSettings:
     on_job_start = _on_job_start
     on_job_end = _on_job_end
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
+    # 时区：arq 0.28 Worker 构造接受 timezone，cron 判定 now=datetime.now(tz=self.timezone)。
+    # create_worker 的 get_kwargs 会把本类属性透传给 Worker（arq worker.py:887-894），
+    # 使下方 cron_jobs 里所有固定小时任务（如 refresh_health_scores hour=3）按业务时区
+    # （默认 Asia/Shanghai）解释——hour=3 即业务时区凌晨 3 点，而非容器 UTC 3 点。
+    timezone = schedule_tz()
