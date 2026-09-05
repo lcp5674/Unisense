@@ -497,6 +497,26 @@ async def test_scan_cancel_before_start_keeps_watermark() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scan_cancel_does_not_reset_backoff() -> None:
+    """T9：取消轮不重置失败退避——force-cancel 卡死扫描后源库仍不可达时，
+    退避防护不被单次取消绕过（周期 cron 不恢复高频空转）。"""
+    import asyncio
+
+    collector = FakeCollector()
+    svc = _svc(collector)
+    cancel_event = asyncio.Event()
+    cancel_event.set()
+    progress: dict[str, object] = {}
+    result = await svc.scan_once(
+        _fc(collector), progress=progress, cancel_event=cancel_event
+    )
+    assert result["skipped"] == "cancelled"
+    # 成功轮（非取消）才 reset；取消轮保留 consecutive_failures/next_scan_at
+    svc._dp_repo.reset_backoff.assert_not_awaited()
+    assert progress.get("stage") == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_scan_cancel_mid_round_keeps_processed() -> None:
     """处理中取消：已处理结果保留（scanned_tasks=1），取消后停止后续任务。"""
     import asyncio

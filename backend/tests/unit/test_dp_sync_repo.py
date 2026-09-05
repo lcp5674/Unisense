@@ -373,3 +373,31 @@ async def test_record_auto_accept_memory_idempotent_on_existing() -> None:
         sqlglot_result=None,
     )
     assert db2.added == []
+
+
+@pytest.mark.asyncio
+async def test_list_retryable_explicit_ids_chunked_not_truncated() -> None:
+    """T7：显式 ticket_ids（>默认 limit 500）分块 IN 全量返回，不静默截断前 500。
+
+    回归：此前 ``where id in (...).limit(500)``——传 >500 个 id 只处理 id 最小
+    的 500 张、其余无声丢弃（批量裁决「部分执行」难以发现）。
+    """
+    repo = DpLineageRepository.__new__(DpLineageRepository)
+    ids = list(range(1, 1201))  # 1200 > 500 → 应分 3 块
+    executed: list = []
+
+    class _Rows:
+        def __init__(self, n: int) -> None:
+            self._n = n
+
+        def scalars(self):
+            return SimpleNamespace(all=lambda: [object() for _ in range(self._n)])
+
+    async def _exec(stmt, *args, **kwargs):
+        executed.append(stmt)
+        return _Rows(2)  # 每块返回 2 张
+
+    repo._db = SimpleNamespace(execute=_exec)
+    rows = await repo.list_retryable_llm_tickets(ticket_ids=ids)
+    assert len(executed) == 3, "显式 id 应分块查询（ceil(1200/500)=3），而非单次 limit"
+    assert len(rows) == 6

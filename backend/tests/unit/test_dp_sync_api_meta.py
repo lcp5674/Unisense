@@ -319,3 +319,65 @@ async def test_config_poll_interval_upper_bound_accepted(
     assert resp.status_code == 200
     assert resp.json()["code"] == "OK"
     update_cfg.assert_awaited_once()
+
+
+async def test_config_rejects_invalid_owner_backfill(dp_client: httpx.AsyncClient) -> None:
+    """T8：owner_backfill 非法枚举（DB SQLEnum 外值）→ VALIDATION_ERROR 不落库。
+
+    回归：此前仅白名单放行后 commit 抛 MySQL 枚举 DataError → 裸 500。
+    """
+    cfg = MagicMock(id=1)
+    update_cfg = AsyncMock()
+    with (
+        patch.object(dp_api.DpLineageRepository, "get_config", new=AsyncMock(return_value=cfg)),
+        patch.object(dp_api.DpLineageRepository, "update_config", new=update_cfg),
+        patch.object(dp_api, "write_audit", new=AsyncMock()),
+    ):
+        for bad in ("always", "ALL", ""):
+            resp = await dp_client.put(
+                "/api/v1/lineage/dp-sync/config",
+                json={"owner_backfill": bad},
+            )
+            assert resp.status_code == 200
+            assert resp.json()["code"] == "VALIDATION_ERROR", bad
+    update_cfg.assert_not_awaited()
+
+
+async def test_config_rejects_invalid_type_filter(dp_client: httpx.AsyncClient) -> None:
+    """T8：task_type_filter/step_type_filter 非整数数组 → VALIDATION_ERROR 不落库。"""
+    cfg = MagicMock(id=1)
+    update_cfg = AsyncMock()
+    with (
+        patch.object(dp_api.DpLineageRepository, "get_config", new=AsyncMock(return_value=cfg)),
+        patch.object(dp_api.DpLineageRepository, "update_config", new=update_cfg),
+        patch.object(dp_api, "write_audit", new=AsyncMock()),
+    ):
+        for bad in ("1", [1, "x"], [True], "abc"):
+            resp = await dp_client.put(
+                "/api/v1/lineage/dp-sync/config",
+                json={"task_type_filter": bad},
+            )
+            assert resp.status_code == 200
+            assert resp.json()["code"] == "VALIDATION_ERROR", bad
+    update_cfg.assert_not_awaited()
+
+
+async def test_config_type_filter_string_numbers_normalized(
+    dp_client: httpx.AsyncClient,
+) -> None:
+    """T8：数字字符串类型过滤项归一为 int（兼容前端传串）+ 空数组放行。"""
+    cfg = MagicMock(id=1)
+    cfg.to_dict = MagicMock(return_value={"id": 1})
+    update_cfg = AsyncMock()
+    with (
+        patch.object(dp_api.DpLineageRepository, "get_config", new=AsyncMock(return_value=cfg)),
+        patch.object(dp_api.DpLineageRepository, "update_config", new=update_cfg),
+        patch.object(dp_api, "write_audit", new=AsyncMock()),
+    ):
+        resp = await dp_client.put(
+            "/api/v1/lineage/dp-sync/config",
+            json={"task_type_filter": [1, "7"]},
+        )
+    assert resp.status_code == 200
+    kwargs = update_cfg.await_args.kwargs
+    assert kwargs["task_type_filter"] == [1, 7]

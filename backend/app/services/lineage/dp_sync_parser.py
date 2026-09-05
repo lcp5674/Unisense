@@ -119,6 +119,68 @@ _QUOTABLE_RESERVED_WORDS: tuple[str, ...] = (
 )
 
 
+def _mask_protected_regions(sql: str) -> tuple[str, list[tuple[str, str]]]:
+    """把字符串字面量与注释区段替换为占位 token，返回 (掩码文本, [(token, 原文), ...])。
+
+    T2：保留字引号保护（``_quote_reserved_column_words``）的替换正则无字符串/
+    注释上下文感知——不掩码会把字符串常量里的保留字（如 ``'lock'``）连带改写为
+    ``'`lock`'``，污染派生列表达式与谓词语义。掩码后仅代码 token 参与替换，
+    替换完按 token 还原原文。token 含 NUL（不可能出现在 SQL 源文本），避免碰撞。
+    """
+    tokens: list[tuple[str, str]] = []
+    out: list[str] = []
+    i, n, idx = 0, len(sql), 0
+    while i < n:
+        ch = sql[i]
+        if ch in ("'", '"'):
+            quote = ch
+            j = i + 1
+            while j < n:
+                if sql[j] == quote:
+                    if j + 1 < n and sql[j + 1] == quote:
+                        j += 2  # 转义（'' / ""）
+                        continue
+                    j += 1
+                    break
+                j += 1
+            token = f"\x00DPQ{idx}\x00"
+            tokens.append((token, sql[i:j]))
+            out.append(token)
+            idx += 1
+            i = j
+        elif sql.startswith("--", i):
+            j = sql.find("\n", i)
+            if j == -1:
+                j = n
+            token = f"\x00DPQ{idx}\x00"
+            tokens.append((token, sql[i:j]))
+            out.append(token)
+            idx += 1
+            i = j
+        elif sql.startswith("/*", i):
+            j = sql.find("*/", i + 2)
+            if j == -1:
+                j = n
+            else:
+                j += 2
+            token = f"\x00DPQ{idx}\x00"
+            tokens.append((token, sql[i:j]))
+            out.append(token)
+            idx += 1
+            i = j
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out), tokens
+
+
+def _restore_protected(masked: str, tokens: list[tuple[str, str]]) -> str:
+    """按占位 token 还原被掩码的字符串/注释区段原文。"""
+    for token, original in tokens:
+        masked = masked.replace(token, original)
+    return masked
+
+
 def _quote_reserved_column_words(sql: str, dialect: str | None) -> str:
     """把裸保留字标识符加反引号并验证可解析；无法安全替换则原样返回。
 
@@ -127,11 +189,17 @@ def _quote_reserved_column_words(sql: str, dialect: str | None) -> str:
     unparseable 中 2 张根因）。阶段 1 全量替换候选词（一次处理多裸列）parse 成功
     即用；阶段 2 逐个词独立替换（``order by`` 等语法词被全量替换破坏时回退），
     任一成功即用。仅替换「替换后能解析」的形态——不改变语句语义（列名等价）。
+
+    T2：先 ``_mask_protected_regions`` 掩码字符串/注释区段，替换仅作用于代码
+    token——防止把字符串常量里的保留字（``concat('lock','-x')``/``kind='lock'``）
+    连带改写为反引号形态，污染表达式/谓词语义。
     """
     if not sql or not any(w in sql.lower() for w in _QUOTABLE_RESERVED_WORDS):
         return sql
     if _parse_ok(sql, dialect):
         return sql  # 原句本就可解析，无需保护
+
+    masked, protected = _mask_protected_regions(sql)
 
     def _quote(text: str, words: tuple[str, ...]) -> str:
         out = text
@@ -140,14 +208,20 @@ def _quote_reserved_column_words(sql: str, dialect: str | None) -> str:
             out = pat.sub(lambda m, w=w: f"`{w}`", out)
         return out
 
+    def _try(text: str, words: tuple[str, ...]) -> str | None:
+        quoted = _restore_protected(_quote(text, words), protected)
+        if quoted != sql and _parse_ok(quoted, dialect):
+            return quoted
+        return None
+
     # 阶段 1：全部候选词一次替换
-    all_quoted = _quote(sql, _QUOTABLE_RESERVED_WORDS)
-    if _parse_ok(all_quoted, dialect):
+    all_quoted = _try(masked, _QUOTABLE_RESERVED_WORDS)
+    if all_quoted is not None:
         return all_quoted
     # 阶段 2：逐个词独立替换（order by/partition by 等语法词被误包时回退）
     for w in _QUOTABLE_RESERVED_WORDS:
-        one_quoted = _quote(sql, (w,))
-        if one_quoted != sql and _parse_ok(one_quoted, dialect):
+        one_quoted = _try(masked, (w,))
+        if one_quoted is not None:
             return one_quoted
     return sql
 
@@ -259,18 +333,6 @@ def _filter_field_edges(
     ]
 
 
-def _parse_statements(sql: str, dialect: str | None) -> list | None:
-    """解析多语句 SQL，返回 AST 列表；整体失败返回 None。
-
-    部分语句无法识别时 sqlglot 在列表中置 None（不抛异常），由调用方按
-    「存在解析失败语句」处理。
-    """
-    try:
-        return sqlglot.parse(sql, dialect=dialect)
-    except Exception:
-        return None
-
-
 def detect_complexity_features(
     sql: str,
     dialect: str | None,
@@ -280,15 +342,22 @@ def detect_complexity_features(
 
     特征（对应 ``DEFAULT_COMPLEXITY_RULES`` 键）：
         subquery_depth / cte_count / join_count / window / parse_error
+
+    T3：与 ``_has_parse_error``/``extract_*``/``_parse_ok`` 同源——逐语句
+    ``_split_statements`` + ``parse_one``。此前用整段 ``sqlglot.parse``：对
+    ``_qualify_sql_text`` 的 ``";\\n"`` join 多语句形态会插入 None 空语句，
+    把逐句全可解析的脚本误报 ``parse_error``——引号保护/宏展开修复的脚本仍
+    每轮判复杂喂 LLM confirm /（LLM 关）反复建 diverged 单。
     """
     cfg = {**DEFAULT_COMPLEXITY_RULES, **(rules or {})}
     features: list[str] = []
-    stmts = _parse_statements(sql, dialect)
-    if stmts is None:
-        features.append("parse_error")
-        return features
-
-    for ast in stmts:
+    for stmt in _split_statements(sql):
+        try:
+            ast = sqlglot.parse_one(stmt, dialect=dialect)
+        except Exception:  # noqa: BLE001 —— 与 _has_parse_error 同源：单语句失败
+            if cfg.get("has_parse_error"):
+                features.append("parse_error")
+            continue
         if ast is None:
             if cfg.get("has_parse_error"):
                 features.append("parse_error")
@@ -449,7 +518,15 @@ def parse_dp_step(
     # 三态判定
     if filtered_table:
         # 有真实流转：命中复杂特征 → complex（status 仍 ok，由调用方决定 LLM 确认）
-        features = detect_complexity_features(prepared, dialect, rules)
+        # T3：复杂度检测与三态判定同文本（qualified，引号保护后）且同源逐语句解析——
+        # 此前对 prepared（保护前）+ 整段 parse，把引号修复/宏展开后逐句全可解析的
+        # 脚本误报 parse_error，每轮重复喂 LLM confirm/建 diverged 单。
+        features = detect_complexity_features(qualified, dialect, rules)
+        # T4：部分失败留痕——多语句脚本一条出边、另一条仍解析失败时，显式补
+        # parse_error 特征 → 节点判复杂走 LLM confirm（LLM 关则建 diverged 单），
+        # 不让失败语句的血缘静默丢失（无 unparseable 留痕）。
+        if parse_error and "parse_error" not in features:
+            features.append("parse_error")
         return StepParseOutcome(
             status="ok",
             table_edges=filtered_table,

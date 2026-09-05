@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -732,7 +733,16 @@ class DpLineageRepository:
             ),
         )
         if ticket_ids:
-            stmt = stmt.where(DpResolutionTicket.id.in_(ticket_ids))
+            # T7：显式 ticket_ids 是调用方明确意图——不再被默认 limit 静默截断为
+            # id 最小的前 limit 张（其余无声丢弃）。分块 IN（防 MySQL 参数上限）
+            # 全量返回命中单，按 id 升序稳定。
+            ids = list(dict.fromkeys(ticket_ids))
+            out: list[DpResolutionTicket] = []
+            for chunk in [ids[i : i + 500] for i in range(0, len(ids), 500)]:
+                q = stmt.where(DpResolutionTicket.id.in_(chunk))
+                q = q.order_by(DpResolutionTicket.id.asc())
+                out.extend(list((await self._db.execute(q)).scalars().all()))
+            return out
         stmt = stmt.order_by(DpResolutionTicket.id.asc()).limit(limit)
         return list((await self._db.execute(stmt)).scalars().all())
 
@@ -787,6 +797,40 @@ class DpLineageRepository:
         )
         rows = list((await self._db.execute(stmt)).scalars().all())
         return rows, total
+
+    async def iter_tickets_cursor(
+        self,
+        *,
+        status: str,
+        reason_like: str | None = None,
+        batch: int = 500,
+    ) -> AsyncIterator[DpResolutionTicket]:
+        """按 id 升序游标分页迭代未裁决单（批量处置入口用，异步生成器）。
+
+        T10：``list_tickets`` 按 created_at desc 只取最新一页——批量处置
+        （reprocess_unparseable / resolve_llm_disabled）反复调用总在处理同一批
+        最新单、历史单永不处理。本方法以 id 升序游标推进，旧单也依次被处理；
+        已裁决（resolution 非空）的单不入列（处置入口内部仍逐张重读 R1）。
+        """
+        last_id = 0
+        while True:
+            stmt = select(DpResolutionTicket).where(
+                DpResolutionTicket.deleted_at.is_(None),
+                DpResolutionTicket.status == status,
+                DpResolutionTicket.resolution.is_(None),
+                DpResolutionTicket.id > last_id,
+            )
+            if reason_like:
+                stmt = stmt.where(
+                    DpResolutionTicket.divergence_reason.like(reason_like)
+                )
+            stmt = stmt.order_by(DpResolutionTicket.id.asc()).limit(batch)
+            rows = list((await self._db.execute(stmt)).scalars().all())
+            if not rows:
+                return
+            for r in rows:
+                yield r
+            last_id = rows[-1].id
 
     async def resolve_ticket(
         self,

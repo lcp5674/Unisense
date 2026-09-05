@@ -40,6 +40,32 @@ def _ticket(**overrides) -> MagicMock:
     return t
 
 
+def _ticket_cursor(tickets: list) -> MagicMock:
+    """``iter_tickets_cursor`` 假实现：按给定未裁决单序列产出候选。
+
+    T10 批量处置（reprocess / resolve_llm_disabled）改走 repo.iter_tickets_cursor
+    （id 升序游标，只列 resolution IS NULL）后，测试以游标形态提供候选——替代
+    原 ``list_tickets`` 一次快照返回。假实现保留 resolution IS NULL 语义
+    （已裁决不入列）与 reason_like 前缀过滤（resolve_llm_disabled 只取
+    「LLM 已关闭」标记单）；游标分页细节不模拟。
+    """
+
+    async def _agen(*, reason_like: str | None = None, **_kw: object):
+        prefix = reason_like.rstrip("%") if reason_like else None
+        for t in tickets:
+            if t.resolution is not None:
+                continue
+            if prefix is not None and not (
+                t.divergence_reason or ""
+            ).startswith(prefix):
+                continue
+            yield t
+
+    m = MagicMock()
+    m.side_effect = _agen
+    return m
+
+
 def _svc(ticket: MagicMock) -> DpSyncService:
     svc = DpSyncService.__new__(DpSyncService)
     svc._db = MagicMock()
@@ -350,9 +376,7 @@ async def test_reprocess_unparseable_three_state() -> None:
     keep_ticket.task_refs_json = {"task_id": 1386, "step_id": 5014}
 
     svc = _svc(ok_ticket)
-    svc._dp_repo.list_tickets = AsyncMock(
-        return_value=([ok_ticket, noflow_ticket, keep_ticket], 3)
-    )
+    svc._dp_repo.iter_tickets_cursor = _ticket_cursor([ok_ticket, noflow_ticket, keep_ticket])
 
     counters = await svc.reprocess_unparseable_tickets(limit=100)
     assert counters == {
@@ -387,7 +411,7 @@ async def test_reprocess_skips_stale_when_sql_evolved() -> None:
     )
     stale_ticket.task_refs_json = {"task_id": 1386, "step_id": 5012}
     svc = _svc(stale_ticket)
-    svc._dp_repo.list_tickets = AsyncMock(return_value=([stale_ticket], 1))
+    svc._dp_repo.iter_tickets_cursor = _ticket_cursor([stale_ticket])
     # 该 step 已存在其它 hash 的活跃映射（SQL 已演进并被扫描写库）
     svc._dp_repo.step_has_other_active_hash = AsyncMock(return_value=True)
 
@@ -410,33 +434,34 @@ async def test_reprocess_skips_stale_when_sql_evolved() -> None:
 
 @pytest.mark.asyncio
 async def test_resolve_llm_disabled_batch() -> None:
-    """一键处置 LLM 关闭期单：筛选标记 + 批量 accept_sqlglot，含失败容错。"""
+    """一键处置 LLM 关闭期单：游标候选 + 批量 accept_sqlglot + R1 跳过。"""
     t1 = _ticket()
     t1.divergence_reason = "LLM 已关闭（配置），复杂节点未确认，请人工抉择"
-    t2 = _ticket()
-    t2.id = 2
-    t2.divergence_reason = "sqlglot 与 LLM 意见不一致"  # 真分歧，不应被处置
-    t3 = _ticket()
-    t3.id = 3
-    t3.divergence_reason = "LLM 已关闭（配置），复杂节点未确认，请人工抉择"
-    t3.resolution = "ignore"  # 已裁决，应跳过
+    t4 = _ticket()
+    t4.id = 4
+    t4.divergence_reason = "LLM 已关闭（配置），复杂节点未确认，请人工抉择"
     svc = _svc(t1)
-    svc._dp_repo.list_tickets = AsyncMock(
-        return_value=([t1, t2, t3], 3)
-    )
-    # t1 入库成功，t3 已裁决（resolve_ticket 会因 resolution 非 None 报错——
-    # 但这里 resolve_ticket 被 mock 恒成功；改用 resolve_ticket side_effect 模拟失败
-    async def _maybe_fail(ticket_id, **kw):
-        if ticket_id == 3:
-            raise ValueError("该单已裁决为 ignore")
+    # T10：候选按 id 升序游标提供——真分歧（非 LLM 关闭标记）/ 已裁决单由
+    # cursor 的 reason_like / resolution IS NULL 在查询层排除，不入候选。
+    svc._dp_repo.iter_tickets_cursor = _ticket_cursor([t1, t4])
+    # R1：t4 在游标快照后被他人裁决（fresh 重读命中已裁决）→ skipped，不覆盖
+    async def _fresh(ticket_id: int):
+        if ticket_id == 4:
+            return MagicMock(resolution="ignore", status="ignored")
+        return t1
+
+    svc._dp_repo.get_ticket = AsyncMock(side_effect=_fresh)
+    real_resolve = svc.resolve_ticket
+
+    async def _record(ticket_id: int, **kw: object):
+        await real_resolve(ticket_id, **kw)
         return {"ticket_id": ticket_id}
 
-    svc.resolve_ticket = AsyncMock(side_effect=_maybe_fail)  # type: ignore[method-assign]
+    svc.resolve_ticket = AsyncMock(side_effect=_record)  # type: ignore[method-assign]
     counters = await svc.resolve_llm_disabled_tickets(resolved_by=3)
-    # targets 仅 t1（t2 非 LLM 关闭标记、t3 已裁决被跳过）
     assert counters["resolved"] == 1
     assert counters["failed"] == 0
-    assert counters["skipped"] == 2  # t2/t3 被排除（非标记 + 已裁决）
+    assert counters["skipped"] == 1  # t4 窗口内已被他人裁决
     svc.resolve_ticket.assert_awaited_once_with(
         ticket_id=1, resolution="accept_sqlglot", resolved_by=3
     )
@@ -660,7 +685,7 @@ async def test_reprocess_skips_when_already_resolved() -> None:
     t.sql_text = "this is not sql at all {{{"
     t.task_refs_json = {"task_id": 1386, "step_id": 5012}
     svc = _svc(t)
-    svc._dp_repo.list_tickets = AsyncMock(return_value=([t], 1))
+    svc._dp_repo.iter_tickets_cursor = _ticket_cursor([t])
     svc._dp_repo.get_ticket = AsyncMock(
         return_value=MagicMock(resolution="ignore", status="ignored")
     )
@@ -694,7 +719,7 @@ async def test_reprocess_failed_does_not_abort_batch() -> None:
     )
     bad_ticket.task_refs_json = {"task_id": 1386, "step_id": 5013}
     svc = _svc(ok_ticket)
-    svc._dp_repo.list_tickets = AsyncMock(return_value=([ok_ticket, bad_ticket], 2))
+    svc._dp_repo.iter_tickets_cursor = _ticket_cursor([ok_ticket, bad_ticket])
     real = svc._apply_json_edges
     calls = {"n": 0}
 

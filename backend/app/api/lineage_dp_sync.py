@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Query, Request
@@ -67,6 +68,59 @@ def _ident_field_error(payload: dict[str, Any]) -> str | None:
     return None
 
 
+#: 类型过滤字段（JSON 数组列）——校验必须为整数数组（显式空 = 全部）。
+_TYPE_FILTER_FIELDS = ("task_type_filter", "step_type_filter")
+#: 排除正则字段（JSON 数组列）——必须为字符串数组。
+_EXCLUDE_PATTERN_FIELDS = ("exclude_task_patterns", "exclude_table_patterns")
+#: 布尔开关字段。
+_BOOL_FIELDS = ("enabled", "llm_enabled", "resolve_memory_enabled")
+#: owner_backfill SQLEnum 合法取值（DB 枚举非法值 commit 会抛 DataError → 裸 500）。
+_OWNER_BACKFILL_ALLOWED = ("orphan_only", "never")
+
+
+def _config_value_error(payload: dict[str, Any]) -> str | None:
+    """配置值域/类型校验（T8）——非法枚举/类型提前返回错误。
+
+    此前仅校验 poll_interval 与标识符：``owner_backfill`` 非法枚举（如 "always"）
+    被 repo.update_config 白名单放行后 commit 抛 MySQL 枚举 DataError → 裸 500；
+    ``task_type_filter``/``step_type_filter`` 可传任意类型使 service ``_type_filters``
+    迭代错误、扫描行为静默出错。返回错误信息或 None。
+    """
+    if (
+        "owner_backfill" in payload
+        and payload.get("owner_backfill") not in _OWNER_BACKFILL_ALLOWED
+    ):
+        return "owner_backfill 取值仅 orphan_only / never"
+    for field in _TYPE_FILTER_FIELDS:
+        if field not in payload or payload.get(field) is None:
+            continue
+        val = payload[field]
+        if not isinstance(val, list):
+            return f"{field} 必须为整数数组（空数组=全部）"
+        nums: list[int] = []
+        for item in val:
+            # 兼容数字与数字字符串（前端可能传字符串），统一归一为 int
+            if isinstance(item, bool) or not isinstance(item, (int, str)):
+                return f"{field} 必须为整数数组（空数组=全部）"
+            try:
+                nums.append(int(item))
+            except (TypeError, ValueError):
+                return f"{field} 必须为整数数组（空数组=全部）"
+        payload[field] = nums
+    for field in _EXCLUDE_PATTERN_FIELDS:
+        if field in payload and payload.get(field) is not None:
+            val = payload[field]
+            if not isinstance(val, list) or not all(
+                isinstance(p, str) for p in val
+            ):
+                return f"{field} 必须为字符串数组"
+    for field in _BOOL_FIELDS:
+        if field in payload and payload.get(field) is not None:
+            if not isinstance(payload[field], bool):
+                return f"{field} 必须为布尔值"
+    return None
+
+
 async def _collector_factory(db):
     """构建 dp 数据源只读采集器（供排除规则预览）。"""
 
@@ -108,6 +162,9 @@ async def update_dp_sync_config(
     ident_err = _ident_field_error(payload)
     if ident_err:
         return ok(code="VALIDATION_ERROR", message=ident_err, data=None)
+    value_err = _config_value_error(payload)
+    if value_err:
+        return ok(code="VALIDATION_ERROR", message=value_err, data=None)
     if "poll_interval_minutes" in payload:
         try:
             interval = int(payload["poll_interval_minutes"])
@@ -447,7 +504,12 @@ async def cancel_dp_retry_task(
     request: Request = None,
     trace_id: str = Depends(get_trace_id),
 ):
-    """请求取消 dp 重试任务（置 cancel_requested；worker 每张完成后检查并收尾）。"""
+    """请求取消 dp 重试任务（置 cancel_requested；worker 每张完成后检查并收尾）。
+
+    T5：任务不在 running（pending 未启动 / 已终态）时无 worker 会来收敛——此处
+    立即把 pending 收敛为 cancelled（不留僵尸），终态任务幂等 no-op；仅 running
+    任务置 cancel_requested 交由 worker 协作取消（worker 侧 finally 兜底）。
+    """
     from app.models.dp_sync import DpTicketRetryTask
 
     row = (
@@ -461,14 +523,20 @@ async def cancel_dp_retry_task(
     if row is None:
         raise LookupError(f"dp 重试任务不存在: {task_id}")
     _assert_retry_task_owner(row, user)
-    row.cancel_requested = True
+    if row.status == "running":
+        row.cancel_requested = True
+    elif row.status == "pending":
+        # 从未被 worker 拾起：直接收敛终态，避免任务中心永久 pending
+        row.status = "cancelled"
+        row.finished_at = datetime.now(UTC)
+    # completed / cancelled / failed → 幂等 no-op（保留已收敛终态）
     await write_audit(
         db,
         actor_id=user.id,
         action="dp_sync.retry_task_cancel",
         entity_type="dp_ticket_retry_task",
         entity_id=str(row.id),
-        detail={},
+        detail={"status": row.status},
         ip=client_ip(request),
         trace_id=trace_id,
     )
@@ -892,8 +960,16 @@ async def create_dp_retry_task(
             row.id,
             _job_id=f"dp-retry:{row.id}",
         )
-    except Exception as exc:  # noqa: BLE001 —— 入队失败仅告警，任务保持 pending 可查
-        logger.warning("dp_retry_enqueue_failed", task_id=row.id, error=str(exc)[:200])
+    except Exception as exc:  # noqa: BLE001
+        # T5：入队失败（Redis 不可达等）收敛终态 failed——此前任务行留 pending、
+        # 无 worker 会来拾起、也无重投路径，任务中心永久 pending 僵尸。
+        logger.warning(
+            "dp_retry_enqueue_failed task_id=%s error=%s", row.id, str(exc)[:200]
+        )
+        row.status = "failed"
+        row.error = f"入队失败：{str(exc)[:300]}"
+        row.finished_at = datetime.now(UTC)
+        await db.commit()
     return ok(data={"task": _retry_task_to_dict(row)}, trace_id=trace_id)
 
 

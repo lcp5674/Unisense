@@ -123,16 +123,19 @@ def extract_json(text: str) -> dict:
 def parse_confirm_response(text: str) -> ConfirmVerdict:
     """解析共识确认响应为裁决。
 
-    宽容解析：agree 缺失时按 missing/wrong 边非空推断不同意；布尔兼容字符串。
+    宽容解析：布尔兼容字符串；agree 缺失时按 missing/wrong 边非空推断不同意。
+    T1：未显式给 agree（LLM 规则 5「无法判断」漏发 ``agree:false``，或返回空
+    对象）**一律按不同意**——共识确认是入库门禁，缺省方向放行（sqlglot 边直接
+    入库 + 写 auto-accept 记忆、后续轮次永不复查）会让「无法判断」被当成「同意」，
+    安全方向是建分歧单交人工而非静默放行。
     """
     data = extract_json(text)
     agree_raw = data.get("agree", None)
     agree = _as_bool(agree_raw)
     if agree is None:
-        # 未显式给 agree：有差异报告视为 disagree
-        missing = data.get("missing_edges") or []
-        wrong = data.get("wrong_edges") or []
-        agree = not (missing or wrong)
+        # 未显式给 agree：无论是否有差异报告都按不同意（保守建分歧单）。
+        # reason 保留给调用方展示 LLM 的「无法判断」说明。
+        agree = False
     return ConfirmVerdict(
         agree=bool(agree),
         missing_edges=[e for e in (data.get("missing_edges") or []) if isinstance(e, dict)],

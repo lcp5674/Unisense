@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -128,9 +129,10 @@ async def _run_single_ticket(
             }
 
         svc = DpSyncService(db)
-        action, detail, err = await svc._retry_one_ticket(
-            tk, resolved_by=task_id
-        )
+        # T6：resolved_by 归因——系统动作惯例用 0（repo 中 reprocess/auto 均 0）。
+        # 此前传 task_id（dp_ticket_retry_task 自增 id）会落在真实用户 id 空间，
+        # 前端按用户渲染/审计归属错乱。
+        action, detail, err = await svc._retry_one_ticket(tk, resolved_by=0)
         await db.commit()
         status = _ACTION_TO_STATUS.get(action, "error")
         return {
@@ -159,8 +161,78 @@ async def _apply_progress(task_id: int, idx: int, updated: dict[str, Any]) -> bo
         return not (task.cancel_requested or task.status == "cancelled")
 
 
+async def _finalize_retry_task(
+    task_id: int,
+    *,
+    interrupted: bool = False,
+    error: str | None = None,
+) -> None:
+    """收敛重试任务终态（独立 session 重读最新状态，任何路径调用都幂等安全）。
+
+    - 正常完成 / 协作取消（interrupted=False）：按 cancel_requested / status 收敛
+      为 completed / cancelled（原收尾逻辑）。
+    - 中断收敛（interrupted=True，T5）：job 超时（CancelledError）/ 进程关闭 /
+      未预期异常——任务行置 ``failed`` + ``error`` + ``finished_at``，**不留
+      running 僵尸**（此前无外层收尾：arq job_timeout=1800 中断后行永久 running，
+      重启后 ``status != pending`` 直接 return 永不续跑，任务中心出现无法回收的
+      僵尸任务）。
+    - 期间已被 API 置 cancel_requested / cancelled → 优先收敛 cancelled（协作取消
+      语义不被中断覆盖）。
+    """
+    async with async_session_factory() as db:
+        task = await _load_task(db, task_id)
+        if task is None:
+            return
+        cancelled = bool(task.cancel_requested or task.status == "cancelled")
+        if interrupted and not cancelled:
+            # 中断且未被请求取消 → failed（可重新发起/重投，终态可回收）
+            task.status = "failed"
+            task.error = (error or "任务执行被中断（job 超时/进程关闭/异常）")[:500]
+        elif cancelled:
+            for p in task.progress_json:
+                if p.get("status") == "pending":
+                    p["status"] = "cancelled"
+                    p["summary"] = p.get("summary") or "未执行"
+            flag_modified(task, "progress_json")
+            task.status = "cancelled"
+        else:
+            task.status = "completed"
+        task.done = sum(1 for p in task.progress_json if p.get("status") == "done")
+        task.failed = sum(1 for p in task.progress_json if p.get("status") == "error")
+        task.cancelled = sum(
+            1 for p in task.progress_json if p.get("status") == "cancelled"
+        )
+        counts: dict[str, int] = {
+            "auto_resolved": 0,
+            "refreshed": 0,
+            "kept": 0,
+            "failed": 0,
+        }
+        for p in task.progress_json:
+            action = p.get("action")
+            if action in counts:
+                counts[action] += 1
+        task.counts_json = counts
+        task.finished_at = datetime.now(UTC)
+        await db.commit()
+        logger.info(
+            "dp_retry_task_finish task_id=%s status=%s done=%s failed=%s cancelled=%s counts=%s interrupted=%s",
+            task_id,
+            task.status,
+            task.done,
+            task.failed,
+            task.cancelled,
+            counts,
+            interrupted,
+        )
+
+
 async def run_dp_ticket_retry_task(ctx: dict[str, Any], task_id: int) -> None:
-    """执行 dp 待抉择单 LLM 重试任务（逐张串行 + 进度实时落库 + 协作取消）。"""
+    """执行 dp 待抉择单 LLM 重试任务（逐张串行 + 进度实时落库 + 协作取消）。
+
+    T5：主流程包 try/except（CancelledError / Exception）——任何路径最终都经
+    ``_finalize_retry_task`` 收敛终态后重抛，杜绝 running 僵尸。
+    """
     logger.info("dp_retry_task_start task_id=%s", task_id)
     async with async_session_factory() as db:
         task = await _load_task(db, task_id)
@@ -184,89 +256,61 @@ async def run_dp_ticket_retry_task(ctx: dict[str, Any], task_id: int) -> None:
         await db.commit()
         total = task.total
 
-    if total == 0:
-        async with async_session_factory() as db:
-            task = await _load_task(db, task_id)
-            if task is not None:
-                task.status = "completed"
-                task.finished_at = datetime.now(UTC)
-                await db.commit()
-        return
-
-    stop = False
-    for idx in range(total):
-        async with async_session_factory() as db:
-            if not await _ticket_is_cancellable(db, task_id):
-                stop = True
-                break
-        async with async_session_factory() as db:
-            task = await _load_task(db, task_id)
-            if task is None:
-                return
-            item = dict(task.progress_json[idx])
-        item["status"] = "running"
-        await _apply_progress(task_id, idx, item)
-        try:
-            updated = await _run_single_ticket(task_id, item)
-        except Exception as exc:  # noqa: BLE001 —— 任务级兜底，单张失败不拖垮
-            logger.error(
-                "dp_retry_ticket_unexpected task_id=%s idx=%s error=%s",
-                task_id,
-                idx,
-                str(exc)[:300],
-                exc_info=True,
-            )
-            updated = {
-                **item,
-                "status": "error",
-                "action": "failed",
-                "summary": "任务内异常",
-                "detail": str(exc)[:200],
-            }
-        if not await _apply_progress(task_id, idx, updated):
-            stop = True
-            break
-        logger.info(
-            "dp_retry_ticket_done task_id=%s ticket_id=%s status=%s action=%s",
-            task_id,
-            updated.get("ticket_id"),
-            updated.get("status"),
-            updated.get("action"),
-        )
-
-    # 终态收敛（重读最新：取消可能已由 API 置位）
-    async with async_session_factory() as db:
-        task = await _load_task(db, task_id)
-        if task is None:
+    try:
+        if total == 0:
+            await _finalize_retry_task(task_id)
             return
-        if stop or task.cancel_requested or task.status == "cancelled":
-            for p in task.progress_json:
-                if p.get("status") == "pending":
-                    p["status"] = "cancelled"
-                    p["summary"] = p.get("summary") or "未执行"
-            flag_modified(task, "progress_json")
-            task.status = "cancelled"
-        else:
-            task.status = "completed"
-        task.done = sum(1 for p in task.progress_json if p.get("status") == "done")
-        task.failed = sum(1 for p in task.progress_json if p.get("status") == "error")
-        task.cancelled = sum(
-            1 for p in task.progress_json if p.get("status") == "cancelled"
-        )
-        counts: dict[str, int] = {"auto_resolved": 0, "refreshed": 0, "kept": 0, "failed": 0}
-        for p in task.progress_json:
-            action = p.get("action")
-            if action in counts:
-                counts[action] += 1
-        task.counts_json = counts
-        task.finished_at = datetime.now(UTC)
-        await db.commit()
-        logger.info(
-            "dp_retry_task_finish task_id=%s status=%s done=%s failed=%s cancelled=%s counts=%s",
+
+        for idx in range(total):
+            async with async_session_factory() as db:
+                if not await _ticket_is_cancellable(db, task_id):
+                    break
+            async with async_session_factory() as db:
+                task = await _load_task(db, task_id)
+                if task is None:
+                    break
+                item = dict(task.progress_json[idx])
+            item["status"] = "running"
+            await _apply_progress(task_id, idx, item)
+            try:
+                updated = await _run_single_ticket(task_id, item)
+            except Exception as exc:  # noqa: BLE001 —— 任务级兜底，单张失败不拖垮
+                logger.error(
+                    "dp_retry_ticket_unexpected task_id=%s idx=%s error=%s",
+                    task_id,
+                    idx,
+                    str(exc)[:300],
+                    exc_info=True,
+                )
+                updated = {
+                    **item,
+                    "status": "error",
+                    "action": "failed",
+                    "summary": "任务内异常",
+                    "detail": str(exc)[:200],
+                }
+            if not await _apply_progress(task_id, idx, updated):
+                break
+            logger.info(
+                "dp_retry_ticket_done task_id=%s ticket_id=%s status=%s action=%s",
+                task_id,
+                updated.get("ticket_id"),
+                updated.get("status"),
+                updated.get("action"),
+            )
+        await _finalize_retry_task(task_id)
+    except asyncio.CancelledError:
+        # arq job_timeout=1800 中断 / 进程关闭：终态收敛为 failed 后重抛（不留僵尸）
+        await _finalize_retry_task(
             task_id,
-            task.status,
-            task.done,
-            task.failed,
-            task.cancelled,
-            counts,
+            interrupted=True,
+            error="任务被中断（job 超时/进程关闭）",
         )
+        raise
+    except Exception as exc:  # noqa: BLE001 —— 未预期异常：终态收敛后重抛
+        logger.exception("dp_retry_task_unexpected_fail task_id=%s", task_id)
+        try:
+            await _finalize_retry_task(task_id, interrupted=True, error=str(exc)[:500])
+        except Exception:  # noqa: BLE001 —— 收尾失败不掩盖原始异常
+            logger.exception("dp_retry_task_finalize_failed task_id=%s", task_id)
+        raise

@@ -1486,9 +1486,12 @@ class DpSyncService:
                     stale_flagged=stale_flagged,
                     detail=detail,
                 )
-            # 成功（含 cancelled——用户主动停、源库正常）一轮：连续失败归零、清除
-            # 退避截止，下次恢复按 poll_interval 正常扫描。
-            await self._dp_repo.reset_backoff(config.id)
+            # 成功一轮（非取消）——连续失败归零、清除退避截止，下次恢复按
+            # poll_interval 正常扫描。取消轮（cancelled）不重置（T9）：用户
+            # force-cancel 一个卡死的手动扫描时，若源库仍不可达，退避防护不应被
+            # 单次取消绕过——否则周期 cron 恢复按 poll_interval 高频空转。
+            if not cancelled:
+                await self._dp_repo.reset_backoff(config.id)
             await self._db.commit()
             if progress is not None:
                 progress["stage"] = "cancelled" if cancelled else "done"
@@ -2315,21 +2318,17 @@ class DpSyncService:
         工作台。本方法按标记筛选并批量 ``accept_sqlglot`` 入库（复用 resolve_ticket
         幂等与防背离），返回 ``{"resolved": n, "failed": n, "skipped": n}``。
         """
-        tickets, _ = await self._dp_repo.list_tickets(
-            status="diverged", page=1, page_size=500
-        )
-        targets = [
-            t
-            for t in tickets
-            if (t.divergence_reason or "").startswith("LLM 已关闭")
-            and t.resolution is None
-        ]
         counters = {
             "resolved": 0,
             "failed": 0,
-            "skipped": len(tickets) - len(targets),  # 非标记/已裁决被排除
+            # R1：窗口内已被他人裁决/删除（未重复 resolve）
+            "skipped": 0,
         }
-        for tk in targets:
+        # T10：iter_tickets_cursor 按 id 升序游标推进——list_tickets 的 created_at
+        # desc 只取最新一页，历史「LLM 已关闭」单永不处理；游标让旧单也依次消解。
+        async for tk in self._dp_repo.iter_tickets_cursor(
+            status="diverged", reason_like="LLM 已关闭%"
+        ):
             try:
                 # R1：处理前重读单状态——快照可能过期（窗口内已被他人裁决/
                 # 删除）；已裁决/不存在 → 计 skipped，不当作失败也不重复 resolve。
@@ -2370,9 +2369,6 @@ class DpSyncService:
         返回 ``{"parsed": n, "no_flow": n, "kept": n, "stale": n,
         "skipped": n, "failed": n}`` 计数。
         """
-        tickets, _ = await self._dp_repo.list_tickets(
-            status="unparseable", page=1, page_size=limit
-        )
         counters: dict[str, Any] = {
             "parsed": 0,
             "no_flow": 0,
@@ -2381,7 +2377,16 @@ class DpSyncService:
             "skipped": 0,
             "failed": 0,
         }
-        for tk in tickets:
+        # T10：iter_tickets_cursor 按 id 升序游标推进——list_tickets 的 created_at
+        # desc 只取最新一页，存量历史单（>limit）永不处理；游标让单次调用处理最旧
+        # 的 limit 张未裁决单，重复调用渐进覆盖全部（已裁决不入列不重判）。
+        processed = 0
+        async for tk in self._dp_repo.iter_tickets_cursor(
+            status="unparseable", batch=min(limit, 500)
+        ):
+            if processed >= limit:
+                break
+            processed += 1
             try:
                 # R1：处理前重读单状态——批量列表是查询时快照，窗口内可能已被
                 # 他人裁决/删除；直接 resolve 会把已裁决单覆盖（跳过 repo 层

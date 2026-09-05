@@ -104,6 +104,25 @@ def test_parse_confirm_implicit_disagree_on_missing() -> None:
     assert v.agree is False
 
 
+def test_parse_confirm_cannot_judge_defaults_disagree() -> None:
+    """T1：LLM 规则 5「无法判断」漏发 agree:false → 保守按不同意（建分歧单）。"""
+    v = parse_confirm_response('{"reason": "无法判断：SQL 语义不明确"}')
+    assert v.agree is False
+    assert v.reason == "无法判断：SQL 语义不明确"
+
+
+def test_parse_confirm_empty_object_defaults_disagree() -> None:
+    """T1：LLM 返回空对象（缺 agree 且无边差异）→ 不再默认同意入库。"""
+    v = parse_confirm_response("{}")
+    assert v.agree is False
+
+
+def test_parse_confirm_explicit_true_still_agree() -> None:
+    """T1 保守缺省不影响显式 agree:true 的放行路径。"""
+    v = parse_confirm_response('{"agree": true, "reason": "确认正确"}')
+    assert v.agree is True
+
+
 def test_parse_fallback_normal() -> None:
     text = (
         '{"target_tables": ["wedw_dwd.t"], "source_tables": ["wedw_ods.s"],'

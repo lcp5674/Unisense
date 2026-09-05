@@ -269,3 +269,62 @@ def test_reserved_quote_does_not_break_order_by() -> None:
     import sqlglot
 
     sqlglot.parse_one(fixed, dialect="hive")  # 不抛即通过
+
+
+def test_quote_reserved_does_not_rewrite_string_literals() -> None:
+    """T2：引号保护不连带改写字符串常量里的保留字（'lock' 不被包反引号）。
+
+    dp 真实形态 `concat('lock','-x') as tag` / `where kind='lock'`——替换正则无
+    字符串上下文感知，若不掩码会把字面量改写为 '`lock`'，污染派生列表达式与
+    谓词语义（实验确证）。
+    """
+    from app.services.lineage.dp_sync_parser import _quote_reserved_column_words
+
+    sql = (
+        "create table wedw_dwd.out_t as\n"
+        "select id, lock, concat('lock', '-x') as tag\n"
+        "from wedw_ods.src_t\n"
+        "where kind = 'lock'"
+    )
+    fixed = _quote_reserved_column_words(sql, "hive")
+    # 裸列 lock 被包；字符串字面量 'lock' / '-x' 与谓词 'lock' 保持原样
+    assert "`lock`" in fixed, fixed
+    assert "concat('lock', '-x')" in fixed, fixed
+    assert "kind = 'lock'" in fixed, fixed
+    import sqlglot
+
+    sqlglot.parse_one(fixed, dialect="hive")  # 不抛即通过
+
+
+def test_detect_complexity_multi_statement_no_false_parse_error() -> None:
+    """T3：多语句（';\\n' join）脚本逐句全可解析时不再误报 parse_error。
+
+    此前整段 sqlglot.parse 对 join 形态插入 None 空语句 → parse_error 假阳性 →
+    引号保护/宏展开修复的脚本仍每轮判复杂喂 LLM/建 diverged 单。
+    """
+    sql = (
+        "use wedw_dwd;\n"
+        "create table if not exists wedw_dwd.t as select id, `lock` from wedw_ods.s;\n"
+        "insert overwrite table wedw_dwd.t partition(date_id='20260101')\n"
+        "select id, `lock` from wedw_ods.s;\n"
+    )
+    features = detect_complexity_features(sql, "hive")
+    assert "parse_error" not in features, features
+
+
+def test_partial_parse_failure_leaves_parse_error_feature() -> None:
+    """T4：多语句一条出边、另一条仍解析失败 → 显式补 parse_error 特征留痕。
+
+    不再让失败语句血缘静默丢失（有边 ok 掩盖）——节点判复杂走 LLM confirm /
+    LLM 关则建 diverged 单。
+    """
+    sql = (
+        "create table wedw_dwd.out_t as\n"
+        "select id, `lock` from wedw_ods.src_t;\n"
+        # 第二条含方言/宏形态令 sqlglot 无法解析（保留字引号保护也救不回）
+        "create table wedw_dwd.bad_t as select cast(a as weird_type_udf(x)) from wedw_ods.o;\n"
+    )
+    r = parse_dp_step(sql, dialect="hive")
+    assert r.status == "ok", r.status
+    assert r.table_edges, "应有第一条语句的流转边"
+    assert "parse_error" in r.features, r.features
