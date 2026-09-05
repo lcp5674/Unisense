@@ -75,6 +75,8 @@ def _svc(ticket: MagicMock) -> DpSyncService:
     svc._dp_repo.resolve_ticket = AsyncMock(return_value=ticket)
     svc._dp_repo.upsert_field_mapping = AsyncMock()
     svc._dp_repo.upsert_field_mappings_batch = AsyncMock(return_value=0)
+    # F4：_store_sqlglot_edges 开头清理旧 hash 映射（reprocess ok 分支必经）
+    svc._dp_repo.soft_delete_field_mappings = AsyncMock(return_value=0)
     return svc
 
 

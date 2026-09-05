@@ -488,11 +488,21 @@ class LineageRepository:
         target 的多条候选 source 共享一次 BFS，查询次数从「每条边每个节点 1 次
         SELECT」降到「每个 target 每层 1 次」。dp 同步每 step 的表边候选经此
         批量判环，消除逐条 N+1（P2 阶段 2）。
+
+        F2（probe 间成环预检）：闭包传播除已落库边外，**同时沿本批 probes 的
+        出边扩展**——若同一批候选含互逆/连环（如 ``(A→B, B→A)`` 且两者当前都
+        不在图中），仅按落库图 BFS 会双双放行、批量 upsert 后图产生持久环且无
+        自愈（dagre 永久 acyclic 翻转显示）。沿 probe 边传播后，环上每条边的
+        target 闭包必含其 source → 全部标记 cyclic 拒绝，绝不落环（与单条顺序
+        语义在「环最终不产生」上一致；代价是罕见同批互逆场景可能多拒几条可疑
+        边——它们本身即解析异常信号，log 可见）。
         """
         if not probes:
             return set()
         cyclic: set[tuple[str, str]] = set()
         by_target: dict[str, list[str]] = {}
+        # probe 出边邻接表：BFS 传播时把「同批将插入的候选边」纳入闭包
+        probe_out: dict[str, list[str]] = {}
         for p in probes:
             if p.edge_type != "DERIVED_FROM":
                 continue
@@ -500,19 +510,28 @@ class LineageRepository:
                 cyclic.add((p.source_node, p.target_node))
                 continue
             by_target.setdefault(p.target_node, []).append(p.source_node)
+            probe_out.setdefault(p.source_node, []).append(p.target_node)
+        if not by_target:
+            return cyclic
         for target, sources in by_target.items():
-            # 单 target 下游闭包：逐层批量拉取，visited 即全部可达节点。
+            # 单 target 下游闭包：逐层批量拉取（落库边 + probe 出边混合传播）。
             visited: set[str] = {target}
             frontier: list[str] = [target]
             while frontier:
                 edges = await self._edges_from_many(frontier)
-                frontier = []
+                next_frontier: list[str] = []
                 for e in edges:
                     if e.edge_type != "DERIVED_FROM":
                         continue
                     if e.target_node not in visited:
                         visited.add(e.target_node)
-                        frontier.append(e.target_node)
+                        next_frontier.append(e.target_node)
+                for node in frontier:
+                    for tgt in probe_out.get(node, []):
+                        if tgt not in visited:
+                            visited.add(tgt)
+                            next_frontier.append(tgt)
+                frontier = next_frontier
             for s in sources:
                 if s in visited:
                     cyclic.add((s, target))

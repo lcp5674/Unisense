@@ -188,6 +188,11 @@ _TASK_SELECT_COLS: tuple[tuple[str, str], ...] = (
     ("remark", "remark"),
     ("task_version_desc", "task_version_desc"),
     ("task_version", "task_version"),
+    # gmt_modified：供 F3 预取快照新鲜度校验（task 行变更时间 > 本轮变更集水位
+    # 时跳过留待下轮，防批量预取放大「查询→处理」竞态窗口导致旧快照覆盖）。
+    # 该列真实 DDL 必然存在（_changed_ids 增量查询依赖它）；build_task_ref 的
+    # task_fields 不含它 → 不落入 dp_task_refs 快照，零副作用。
+    ("gmt_modified", "gmt_modified"),
 )
 
 #: 可选增强列（生产精简表无；含结算/主任务语义的环境由探测动态补上）。
@@ -338,6 +343,20 @@ class DpSyncService:
             schema_columns=schema_columns,
         )
 
+    async def _purge_step_old_mappings(
+        self, step: dict[str, Any], sql_hash: str
+    ) -> None:
+        """清该 step 旧 sql_hash 的字段映射（保留本次 hash），供各写入/建单点调用。
+
+        F4：SQL 演进清理（P2-8）下沉到「先清后写/先清后建单」的最终动作——保证
+        「清旧」与「写新/留痕」落在同一事务。调用方各写入路径在真正落库/建单前
+        调用一次（幂等：同 step+hash 重复清理无副作用），defer 的复杂/失败 step
+        不再在 phase1 提前删（见 process_step 注释）。
+        """
+        await self._dp_repo.soft_delete_field_mappings(
+            step_id=step.get("step_id"), keep_sql_hash=sql_hash
+        )
+
     async def process_step(
         self,
         task: dict[str, Any],
@@ -409,11 +428,14 @@ class DpSyncService:
                         )
                         return {"step_id": step.get("step_id"), "status": "no_flow"}
 
-        # SQL 演进清理（P2-8）：同 step 旧 sql_hash 的字段映射先软删（保留本次
-        # hash——新映射随后写入），避免旧列映射永久残留致表膨胀/展示过时。
-        await self._dp_repo.soft_delete_field_mappings(
-            step_id=step.get("step_id"), keep_sql_hash=sql_hash
-        )
+        # F4（旧映射清理下沉）：本 step 的旧 sql_hash 字段映射清理不再在此无条件
+        # 提前执行——若本 step 将 defer（复杂/失败 + LLM 开启，打包 _LlmWork 到
+        # phase2 裁决），phase1 先删旧映射而 phase2 因取消/异常未执行，会造成
+        # 「旧映射已删、新映射未写」的断链且无留痕。改为在**每个最终写入/建单点**
+        # 先清后写（同事务原子）：_store_sqlglot_edges 开头 / _reuse_resolution
+        # 命中后 / _handle_complex / _handle_failed / _apply_confirm_verdict /
+        # _apply_fallback_flow_verdict / _finish_deferred_task（见各自实现）。
+        # no_flow 分支（无 defer）保持原位清理，见上两处。
 
         if outcome.status == "ok" and not outcome.is_complex:
             written, degraded_cnt = await self._store_sqlglot_edges(
@@ -511,6 +533,9 @@ class DpSyncService:
     ) -> dict[str, Any]:
         """复杂节点：LLM 共识确认（一致入库 / 分歧建单）；LLM 关闭建待抉择单。"""
         if not config.llm_enabled or self._llm_chat is None:
+            # F4：建单前清旧 hash 映射（先清后留痕，与建单同事务——SQL 已演进的
+            # step 不残留旧列映射；defer 场景由 phase2 在此统一清，不再提前删）
+            await self._purge_step_old_mappings(step, sql_hash)
             await self._dp_repo.create_ticket(
                 task_id=task.get("task_id"),
                 step_id=step.get("step_id"),
@@ -529,6 +554,7 @@ class DpSyncService:
             verdict = await self._llm_confirm(sql, outcome)
         except DpSyncLlmError as exc:
             # LLM 输出异常/无法解析：不能静默入库，建待抉择单交人工
+            await self._purge_step_old_mappings(step, sql_hash)
             await self._dp_repo.create_ticket(
                 task_id=task.get("task_id"),
                 step_id=step.get("step_id"),
@@ -563,11 +589,20 @@ class DpSyncService:
         按任务归集，由本函数落库（不入库静默失败，分歧必建单留痕）。
         """
         if verdict.agree:
-            await self._store_sqlglot_edges(
+            # F4：旧映射清理在 _store_sqlglot_edges 开头执行（先清后写同事务）。
+            # F6：接住 _store 返回的字段映射写入/降级统计——此前丢弃致 LLM 确认
+            # 路径的 field_mappings_written 被系统性计 0（可观测性缺陷）。
+            written, degraded = await self._store_sqlglot_edges(
                 outcome, task, step, sql_hash, config, seen_pairs
             )
-            return {"step_id": step.get("step_id"), "status": "llm_confirmed"}
+            return {
+                "step_id": step.get("step_id"),
+                "status": "llm_confirmed",
+                "fields_written": written,
+                "fields_degraded": degraded,
+            }
         # 分歧：建待抉择单（附 sqlglot 结果 + LLM 意见 + 原因）
+        await self._purge_step_old_mappings(step, sql_hash)
         await self._dp_repo.create_ticket(
             task_id=task.get("task_id"),
             step_id=step.get("step_id"),
@@ -600,6 +635,8 @@ class DpSyncService:
         """失败节点：LLM 兜底提炼（llm_fallback / unparseable）；LLM 关闭建单。"""
         sqlglot_json = edges_to_json(outcome.table_edges, outcome.field_edges)
         if not config.llm_enabled or self._llm_chat is None:
+            # F4：建单前清旧 hash 映射（先清后留痕，同事务）
+            await self._purge_step_old_mappings(step, sql_hash)
             await self._dp_repo.create_ticket(
                 task_id=task.get("task_id"),
                 step_id=step.get("step_id"),
@@ -617,6 +654,7 @@ class DpSyncService:
         try:
             flow = await self._llm_fallback(sql)
         except DpSyncLlmError as exc:
+            await self._purge_step_old_mappings(step, sql_hash)
             await self._dp_repo.create_ticket(
                 task_id=task.get("task_id"),
                 step_id=step.get("step_id"),
@@ -649,6 +687,9 @@ class DpSyncService:
         命名带 ``_verdict`` 后缀与 resolve 区既有的 ``_apply_fallback_flow``
         （重试单刷新低置信参考）区分，避免类内覆盖。
         """
+        # F4：先清旧 hash 映射再建单（覆盖 flow.ok 参考单与 flow.fail unparseable
+        # 两分支；defer 场景由 phase2 经本函数统一清，不再 phase1 提前删）
+        await self._purge_step_old_mappings(step, sql_hash)
         if flow.ok:
             await self._dp_repo.create_ticket(
                 task_id=task.get("task_id"),
@@ -700,6 +741,10 @@ class DpSyncService:
         )
         if ticket is None or ticket.status not in ("resolved", "ignored"):
             return None
+        # F4：裁决记忆命中即本 step 将以记忆写入/忽略收尾（不再 defer）——统一先清
+        # 旧 hash 映射再写（accept_sqlglot 经 _store 开头清、accept_llm/manual/
+        # ignored 走此处）；phase1 无条件提前删已移除，故必须在此补齐。
+        await self._purge_step_old_mappings(step, sql_hash)
         if ticket.resolution == "ignore" or ticket.status == "ignored":
             return {"step_id": step.get("step_id"), "status": "memory_ignored"}
         if ticket.resolution == "accept_sqlglot":
@@ -778,6 +823,10 @@ class DpSyncService:
             ``(字段映射写入数, 其中降级标记数)``——供 run_log 字段级统计（方案 3
             可观测性：此前成功路径的字段边产出/丢弃完全无记录）。
         """
+        # F4：本 step 将写入新映射——先清旧 sql_hash 映射（保留本次 hash）再写，
+        # 与批量写同事务（先清后写原子）。覆盖 parsed_ok / accept_sqlglot /
+        # confirm-agree / reprocess 等所有经本函数落库的路径。
+        await self._purge_step_old_mappings(step, sql_hash)
         ref = build_task_ref(task, step)
         # 1) 表级边候选去重 + 字段请求按 (node 化 source,target) 分组
         table_keys: list[tuple[str, str]] = []
@@ -1096,10 +1145,18 @@ class DpSyncService:
             # 统一走 except 记录 failed，不再让未绑定 collector 从 finally 二次抛错。
             collector = await fetch_collector(config.source_id)
             # 方案 3：schema 提供者绑定 dp collector + 数据源构建通道（per-run 缓存）
+            from app.db.mysql import async_session_factory as _mysql_session_factory
             from app.services.lineage.dp_sync_schema import DpSchemaProvider
 
+            # F1：注入独立 session 工厂——as_map 有界并发（Semaphore 6）下多路
+            # 通道 B（Hive 系 DataSource DESCRIBE）用各自独立只读 session 查询，
+            # 不再并发 execute 本扫描主链路共享的 self._db（SQLAlchemy AsyncSession
+            # 非并发安全对象）。
             self._schema_provider = DpSchemaProvider(
-                self._db, collector, fetch_collector
+                self._db,
+                collector,
+                fetch_collector,
+                session_factory=_mysql_session_factory,
             )
             ingest_run = await self._lineage_repo.begin_ingest_run(DP_PROVENANCE)
             # ingest_run 前置提交：同 run_log 理由——否则随首个任务事务回滚会丢。
@@ -1166,6 +1223,7 @@ class DpSyncService:
                             cancel_event=cancel_event,
                             force_event=force_event,
                             progress=progress,
+                            task_max=task_max,
                         )
                         await self._db.commit()
                         if works:
@@ -1188,7 +1246,18 @@ class DpSyncService:
                 # 提交裁决写（分歧建单/一致入库/LLM 异常建单）——单轮 288 次 LLM
                 # 串行 ≈ 7 分钟，并发后压到 ~1/_LLM_CONCURRENCY。phase2 是任务级
                 # 独立小事务：A 的裁决写不随 B 的 phase2 异常回滚。
-                if deferred and not cancelled:
+                # F5（取消一致性）：取消信号落在不同批位置不再导致行为分叉——统一为
+                # 「resolve 前检查取消：已置位则整批丢弃（不 resolve 不应用，白攒的
+                # work 不烧 LLM；水位不推进 → 下轮整批重扫，幂等）；未置位则 resolve
+                # 后 phase2 逐任务应用，循环内取消 → 已应用保留、剩余丢弃」。F4 已把
+                # 复杂 step 的旧映射清理延后到 phase2，取消丢弃不再产生断链无留痕。
+                if deferred:
+                    if cancel_event is not None and cancel_event.is_set():
+                        cancelled = True
+                        logger.info(
+                            "dp_sync_phase2_dropped_on_cancel n=%d", len(deferred)
+                        )
+                        break
                     batch_works = [w for _, ws in deferred for w in ws]
                     await self._resolve_llm_works(batch_works, counters)
                     for task_id, works in deferred:
@@ -1515,6 +1584,7 @@ class DpSyncService:
         progress: dict[str, Any] | None = None,
         prefetched: dict[int, tuple[dict[str, Any] | None, list[dict[str, Any]]]]
         | None = None,
+        task_max: datetime | None = None,
     ) -> list[_LlmWork]:
         """处理单个任务（方案 A phase1）：取 task 静态字段 + SQL 节点逐 step 处理。
 
@@ -1526,12 +1596,15 @@ class DpSyncService:
         prefetched: 可选批量预取结果 ``{task_id: (task|None, [steps])}``——scan_once
             按批预取后传入，本方法不再逐任务打源库（2N 次往返 → 每批 2~4 次）。
             为 ``None`` 或键缺失时回退单任务拉取（兼容独立调用/测试与预取失败降级）。
+        task_max: 本轮变更集水位（task gmt_modified 最大值）——预取行 gmt_modified
+            超出水位说明任务在变更集查询后被更新，跳过留待下轮（F3，见实现处）。
 
         Returns:
-            需批级并发 LLM 裁决的工作项列表（空=本任务已全部处理完，调用方可
-            立即 commit——简单/复用 step 的边已写入 session，保持实时可见）。
-            工作项由 scan_once 攒批并发裁决后经 ``_finish_deferred_task`` 应用，
-            本任务的事务在 phase2 完成后统一 commit（任务内写仍同一事务原子）。
+            需批级并发 LLM 裁决的工作项列表（空=本任务已全部处理完，调用方可在
+            phase1 返回后立即 commit——简单/复用 step 的边已写入 session，实时可见；
+            工作项由 scan_once 攒批并发裁决后经 ``_finish_deferred_task`` 在 phase2
+            独立小事务提交——phase1 与 phase2 是两个独立事务，phase2 失败不回滚
+            phase1 已提交的写，二者互不阻塞（A 方案）。
         """
         if prefetched is not None and task_id in prefetched:
             task, steps = prefetched[task_id]
@@ -1544,6 +1617,27 @@ class DpSyncService:
             )
         if task is None:
             return []
+        # F3（预取快照新鲜度）：task 行 gmt_modified 超出本轮变更集水位 task_max，
+        # 说明该任务在「变更集查询」之后被更新（预取拿到的是中间快照）。本轮跳过：
+        # 下轮增量查询 ``gmt_modified > task_max`` 必然命中最新变更由下轮专门处理。
+        # 若本轮用旧快照写库、而处理期间新变更的 gmt_modified 落在 (旧, task_max]
+        # 区间，水位推进后下轮增量不再命中 → 该变更静默延迟到 24h 自动全量。
+        # 批量预取把「查询→处理」窗口从逐任务的秒级拉长到整批分钟级，故处理前
+        # 必须校验（逐任务拉取路径同样适用，窗口小但语义一致）。
+        task_gmt = task.get("gmt_modified")
+        if task_max is not None and isinstance(task_gmt, datetime):
+            # 双值归一化 UTC 后比较（MySQL DATETIME naive；_utc_aware 补 UTC 防
+            # naive/aware 混比 TypeError），均非 None（已判）才可能触发跳过。
+            gmt_aware = _utc_aware(task_gmt)
+            max_aware = _utc_aware(task_max)
+            if gmt_aware is not None and max_aware is not None and gmt_aware > max_aware:
+                logger.info(
+                    "dp_sync_skip_stale_snapshot task_id=%s gmt=%s > task_max=%s",
+                    task_id,
+                    task_gmt,
+                    task_max,
+                )
+                return []
         # 排除规则：任务名命中排除
         patterns = list(config.exclude_task_patterns or [])
         if patterns:
@@ -1612,7 +1706,9 @@ class DpSyncService:
         finally:
             self._llm_chat = llm_orig
             self._dp_repo.create_ticket = create_orig  # type: ignore[method-assign]
-        # 资产 Owner 回填（产出表孤儿）——含工作项的任务其回填随 phase2 一起提交
+        # 资产 Owner 回填（产出表孤儿）——F8：本处执行即随 phase1 提交（scan_once 在
+        # _process_task 返回后立即 commit），并非「随 phase2 一起提交」（含工作项的
+        # 任务其边/裁决写由 phase2 独立小事务提交，二者互不干扰）。
         if cancel_event is not None and cancel_event.is_set():
             if force_event is not None and force_event.is_set():
                 raise _ScanCancelledError(f"task {task_id} force-stop at backfill")
@@ -1666,8 +1762,12 @@ class DpSyncService:
         对每个工作项把并发裁决结果（result/error）落库——confirm agree 入库 /
         分歧建待抉择单 / LLM 异常建单；fallback 提炼成功建低置信参考 / 失败建
         unparseable。计数（tickets_created/status/字段映射）就地累计，与 phase1
-        的语义一致。调用方（scan_once）在应用后统一 commit——任务内所有写
-        （phase1 简单边 + 本阶段裁决写）仍在同一事务，保持原子。
+        的语义一致。调用方（scan_once）在本函数返回后统一 commit——本阶段的
+        裁决写是**独立小事务**，与 phase1（该任务无需 LLM 的简单边等写）分属两个
+        事务：phase2 失败/取消只回滚本阶段写，不影响 phase1 已提交内容（A 方案）。
+        F4：error 建单前统一清旧 hash 映射（phase1 对 defer 的 step 不再提前删，
+        本处保证「清旧 + 留痕」同事务）；正常路径分别由 _apply_confirm_verdict /
+        _apply_fallback_flow_verdict / _store_sqlglot_edges 清理。
         """
         # tickets_created 计数：包装 repo.create_ticket（同 _process_task 语义）
         create_orig = self._dp_repo.create_ticket
@@ -1683,6 +1783,7 @@ class DpSyncService:
                 sqlglot_json = edges_to_json(w.outcome.table_edges, w.outcome.field_edges)
                 if w.kind == "confirm":
                     if w.error is not None:
+                        await self._purge_step_old_mappings(w.step, w.sql_hash)
                         result = await self._dp_repo.create_ticket(
                             task_id=w.task.get("task_id"),
                             step_id=w.step.get("step_id"),
@@ -1710,6 +1811,7 @@ class DpSyncService:
                         status = result.get("status", "diverged")
                 else:
                     if w.error is not None:
+                        await self._purge_step_old_mappings(w.step, w.sql_hash)
                         result = await self._dp_repo.create_ticket(
                             task_id=w.task.get("task_id"),
                             step_id=w.step.get("step_id"),

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -519,3 +520,92 @@ async def test_store_sqlglot_edges_written_uses_batch_real_count() -> None:
     # 对比：旧实现 written = len(field_items) 会把忽略的活跃项也计入
     items = svc._dp_repo.upsert_field_mappings_batch.await_args.args[0]
     assert len(items) >= 1
+
+
+_COUNTER_KEYS = (
+    "parsed_ok", "llm_confirmed", "diverged", "llm_fallback", "unparseable",
+    "llm_calls", "tickets_created", "errors", "field_mappings_written",
+    "field_edges_degraded", "tickets_resolved", "memory_ignored",
+    "memory_reused", "scanned_tasks", "scanned_steps", "no_flow", "unknown",
+)
+
+
+def _counters() -> dict[str, int]:
+    return dict.fromkeys(_COUNTER_KEYS, 0)
+
+
+async def test_process_task_skips_stale_prefetch_snapshot() -> None:
+    """F3：预取 task 行 gmt_modified 超出本轮变更集水位 task_max → 跳过不处理
+    （旧快照交给下轮增量命中重扫），scanned_tasks 不虚增。"""
+    task = dict(TASK)
+    task["gmt_modified"] = datetime(2026, 9, 5, 12, 0, tzinfo=UTC)
+    svc = _svc()
+    counters = _counters()
+    result = await svc._process_task(
+        AsyncMock(),
+        _config(),
+        TASK["task_id"],
+        counters,
+        set(),
+        prefetched={TASK["task_id"]: (task, [])},
+        task_max=datetime(2026, 9, 5, 11, 0, tzinfo=UTC),
+    )
+    assert result == []
+    assert counters["scanned_tasks"] == 0
+    svc._dp_repo.soft_delete_field_mappings.assert_not_awaited()
+
+
+async def test_defer_complex_does_not_purge_in_phase1() -> None:
+    """F4：defer 的复杂 step 在 phase1（process_step defer_llm=True）**不提前软删**
+    旧映射（此前无条件删 + phase2 取消/失败 → 断链无留痕）；phase2 error 建单时才
+    清（先清后留痕同事务）。"""
+    from app.services.lineage.dp_sync_service import _LlmWork
+
+    svc = _svc(llm_chat=lambda messages, **kw: {"content": '{"agree": true}'})
+    work = await svc.process_step(TASK, STEP, COMPLEX_SQL, _config(), defer_llm=True)
+    assert isinstance(work, _LlmWork)
+    # phase1 打包工作项：不建单不写边**也不清旧映射**
+    svc._dp_repo.create_ticket.assert_not_awaited()
+    svc._dp_repo.soft_delete_field_mappings.assert_not_awaited()
+    # phase2 error 建单 → 清旧映射（与建单同事务）
+    work.error = "LLM 输出异常"
+    await svc._finish_deferred_task([work], _config(), _counters(), set())
+    svc._dp_repo.soft_delete_field_mappings.assert_awaited_once()
+    assert svc._dp_repo.create_ticket.await_count == 1
+
+
+async def test_purge_old_mappings_before_each_final_write() -> None:
+    """F4：非 defer 简单路径仍先清后写（_store_sqlglot_edges 开头清一次）。"""
+    svc = _svc()
+    seen: set[tuple[str, str]] = set()
+    result = await svc.process_step(TASK, STEP, SIMPLE_SQL, _config(), seen_pairs=seen)
+    assert result["status"] == "parsed_ok"
+    svc._dp_repo.soft_delete_field_mappings.assert_awaited_once()
+    # 清理携带 keep 本次 hash（新映射稍后写入不被误删）
+    kwargs = svc._dp_repo.soft_delete_field_mappings.await_args.kwargs
+    assert kwargs["keep_sql_hash"]
+    assert kwargs["step_id"] == STEP["step_id"]
+
+
+async def test_confirm_agree_reports_field_stats() -> None:
+    """F6：confirm agree 路径返回 fields_written/fields_degraded——LLM 确认路径的
+    字段映射产出不再被 _finish_deferred_task 计 0（此前丢弃 _store 返回值）。"""
+    from app.services.lineage.dp_sync_llm import parse_confirm_response
+    from app.services.lineage.dp_sync_service import _LlmWork
+
+    svc = _svc(llm_chat=lambda messages, **kw: {"content": '{"agree": true}'})
+    work = await svc.process_step(TASK, STEP, COMPLEX_SQL, _config(), defer_llm=True)
+    assert isinstance(work, _LlmWork)
+    svc._dp_repo.upsert_field_mappings_batch = AsyncMock(return_value=5)
+    verdict = parse_confirm_response('{"agree": true}')
+    result = await svc._apply_confirm_verdict(
+        TASK, STEP, work.sql, work.sql_hash, work.outcome, _config(), None, verdict
+    )
+    assert result["status"] == "llm_confirmed"
+    assert result["fields_written"] == 5
+    assert result["fields_degraded"] == 0
+    # 端到端：phase2 经 counters 聚合不再计 0
+    counters = _counters()
+    work.result = verdict
+    await svc._finish_deferred_task([work], _config(), counters, set())
+    assert counters["field_mappings_written"] == 5

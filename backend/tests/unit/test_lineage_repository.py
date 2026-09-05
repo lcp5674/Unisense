@@ -9,6 +9,7 @@ import json
 import re
 from datetime import datetime
 from typing import Any
+from unittest.mock import AsyncMock
 
 from app.models.lineage import LineageEdge, LineageEdgeHistory, LineageIngestRun
 from app.services.lineage.repository import LineageRepository
@@ -599,6 +600,77 @@ async def test_would_create_cycle_ignores_non_derived() -> None:
         source_node="table:b", target_node="table:a", edge_type="LINEAGE_DOWN", granularity="L1"
     )
     assert await repo.would_create_cycle(edge) is False
+
+
+def _dfe(source: str, target: str) -> LineageEdge:
+    """构造 DERIVED_FROM 候选/落库边（环检测测试用）。"""
+    return LineageEdge(
+        source_node=f"table:{source}",
+        target_node=f"table:{target}",
+        edge_type="DERIVED_FROM",
+        granularity="L1",
+    )
+
+
+async def test_would_create_cycle_many_detects_mutual_probes() -> None:
+    """F2：同批互逆 probe（A→B, B→A 且均不在落库图）必须双双判环——
+
+    此前仅按落库图 BFS，两者都放行 → 批量 upsert 后产生持久环且无自愈。"""
+    db = _FakeDB([])
+    repo = LineageRepository(db)
+    repo._edges_from_many = AsyncMock(return_value=[])  # 落库无下游
+    cyclic = await repo.would_create_cycle_many(
+        [_dfe("a", "b"), _dfe("b", "a")]
+    )
+    assert cyclic == {("table:a", "table:b"), ("table:b", "table:a")}
+
+
+async def test_would_create_cycle_many_detects_probe_chain() -> None:
+    """F2：同批三连环（A→B→C→A）整环拒绝，绝不落环。"""
+    db = _FakeDB([])
+    repo = LineageRepository(db)
+    repo._edges_from_many = AsyncMock(return_value=[])  # 落库无下游
+    cyclic = await repo.would_create_cycle_many(
+        [_dfe("a", "b"), _dfe("b", "c"), _dfe("c", "a")]
+    )
+    assert cyclic == {
+        ("table:a", "table:b"),
+        ("table:b", "table:c"),
+        ("table:c", "table:a"),
+    }
+
+
+async def test_would_create_cycle_many_chain_probes_ok() -> None:
+    """F2：同批无环链（A→B→C）全部放行，不被 probe 传播误伤。"""
+    db = _FakeDB([])
+    repo = LineageRepository(db)
+    repo._edges_from_many = AsyncMock(return_value=[])  # 落库无下游
+    cyclic = await repo.would_create_cycle_many(
+        [_dfe("a", "b"), _dfe("b", "c")]
+    )
+    assert cyclic == set()
+
+
+async def test_would_create_cycle_many_hits_stored_downstream() -> None:
+    """F2：probe 命中落库下游闭包仍判环（原批量语义不回归）。"""
+    db = _FakeDB([])
+    repo = LineageRepository(db)
+
+    async def _efm(frontier: list[str]) -> list[LineageEdge]:
+        out: list[LineageEdge] = []
+        for node in frontier:
+            if node == "table:a":
+                out.append(_dfe("a", "b"))
+            if node == "table:b":
+                out.append(_dfe("b", "c"))
+        return out
+
+    repo._edges_from_many = AsyncMock(side_effect=_efm)
+    # 落库 a→b→c；新增 c→a 成环、d→a 不成环
+    cyclic = await repo.would_create_cycle_many(
+        [_dfe("c", "a"), _dfe("d", "a")]
+    )
+    assert cyclic == {("table:c", "table:a")}
 
 
 async def test_upsert_metric_edge() -> None:

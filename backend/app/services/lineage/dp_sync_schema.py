@@ -57,19 +57,31 @@ class DpSchemaProvider:
         db: Any,
         dp_collector: Any,
         fetch_collector: Any,
+        *,
+        session_factory: Any = None,
     ) -> None:
         """
         Args:
-            db: unisense 业务库会话（查已登记的 Hive 系数据源）。
+            db: unisense 业务库会话（查已登记的 Hive 系数据源；并发场景勿共享——
+                见 session_factory）。
             dp_collector: dp 元数据源 collector（通道 A 的 ``information_schema``
                 查询走它；与扫描主链路共用连接，不 dispose）。
             fetch_collector: ``async (source_id) -> collector``（通道 B 构建
                 Hive 系数据源连接；用完即 dispose）。
+            session_factory: 可选独立 session 工厂（``async_session_factory``）——
+                ``as_map`` 有界并发拉多张表列清单时，多路通道 B 各自用**独立的
+                短生命周期只读 session** 查 DataSource，不再并发 execute 扫描主链路
+                共享的 AsyncSession（SQLAlchemy 官方禁止并发共享 session，F1）；
+                为 None 时回退 ``db``（同步/测试形态无并发风险）。
         """
         self._db = db
         self._dp_collector = dp_collector
         self._fetch_collector = fetch_collector
+        self._session_factory = session_factory
         self._cache: dict[str, list[str] | None] = {}
+        #: 通道 B 候选 Hive 系数据源（轮内惰性预取一次，缓存 DataSource 行——
+        #: 避免每张源表都重复查 DataSource 列表与详情）。
+        self._hive_sources_cache: list[Any] | None = None
 
     async def columns(self, table: str) -> list[str] | None:
         """返回表的全部列名（有序）；不可知返回 ``None``（调用方降级）。"""
@@ -141,30 +153,12 @@ class DpSchemaProvider:
 
     async def _via_hive_source(self, table: str) -> list[str] | None:
         """通道 B：平台已登记的 Hive/Hive Metastore/Spark 数据源 DESCRIBE。"""
-        hive_types = (
-            SourceTypeEnum.HIVE.value,
-            SourceTypeEnum.HIVE_METASTORE.value,
-            SourceTypeEnum.SPARK.value,
-        )
-        rows = (
-            await self._db.execute(
-                select(DataSource.source_id)
-                .where(DataSource.source_type.in_(hive_types))
-                .order_by(DataSource.id)
-                .limit(_MAX_HIVE_SOURCES)
-            )
-        ).all()
         # 惰性 import：collector 模块注册 + Fernet 解密依赖较重，仅在需要时加载
         from app.services.collector.spi import build_collector
 
-        for (source_id,) in rows:
+        for src in await self._hive_sources():
             collector = None
             try:
-                src = (
-                    await self._db.execute(
-                        select(DataSource).where(DataSource.source_id == source_id)
-                    )
-                ).scalar_one_or_none()
                 if src is None:
                     continue
                 collector = build_collector(src.source_type, src.connection_config)
@@ -173,14 +167,14 @@ class DpSchemaProvider:
                     logger.info(
                         "dp_schema_via_hive table=%s source=%s columns=%d",
                         table,
-                        source_id,
+                        src.source_id,
                         len(cols),
                     )
                     return cols
             except Exception as exc:  # noqa: BLE001 —— 单数据源失败继续尝试下一个
                 logger.info(
                     "dp_schema_hive_source_miss source=%s table=%s error=%s",
-                    source_id,
+                    src.source_id if src is not None else None,
                     table,
                     exc,
                 )
@@ -189,6 +183,39 @@ class DpSchemaProvider:
                     with contextlib.suppress(Exception):
                         await collector.dispose()
         return None
+
+    async def _hive_sources(self) -> list[Any]:
+        """轮内缓存平台已登记的 Hive 系数据源（最多 ``_MAX_HIVE_SOURCES`` 个）。
+
+        独立短生命周期只读 session 查询（配置了 session_factory 时）——as_map
+        有界并发下多路 ``_via_hive_source`` 不再并发 execute 扫描主链路共享的
+        AsyncSession（F1 根因：SQLAlchemy AsyncSession 非并发安全对象，多协程
+        同时 execute 可能随机 Lost connection/InternalError）。结果整轮复用，
+        DataSource 行（含 connection_config）只查一次。
+        """
+        if self._hive_sources_cache is not None:
+            return self._hive_sources_cache
+        hive_types = (
+            SourceTypeEnum.HIVE.value,
+            SourceTypeEnum.HIVE_METASTORE.value,
+            SourceTypeEnum.SPARK.value,
+        )
+        stmt = (
+            select(DataSource)
+            .where(DataSource.source_type.in_(hive_types))
+            .order_by(DataSource.id)
+            .limit(_MAX_HIVE_SOURCES)
+        )
+        factory = self._session_factory
+        if factory is None:
+            # 未注入工厂（旧调用形态/测试）回退 self._db——无并发场景下共享安全；
+            # 生产（scan_once 注入 async_session_factory）走独立 session（F1）。
+            rows = (await self._db.execute(stmt)).scalars().all()
+        else:
+            async with factory() as s:
+                rows = (await s.execute(stmt)).scalars().all()
+        self._hive_sources_cache = list(rows)
+        return self._hive_sources_cache
 
 
 async def _describe_with_timeout(collector: Any, table: str) -> list[str] | None:

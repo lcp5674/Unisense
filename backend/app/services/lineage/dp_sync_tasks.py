@@ -42,12 +42,20 @@ def _make_llm_chat(db: Any):
     只读 env、绕过 DB 实例：本地 Qwen3 配在 llm_config（disable_thinking=True）
     时不被尊重，思考模式耗尽 max_tokens 致 content 空 → 待抉择单误报
     「LLM 返回空内容」。build_client 每次调用重读 DB（配置即时生效）。
+
+    F1（并发安全）：build_client 用**独立的短生命周期只读 session** 读配置，
+    而非闭包捕获的扫描主链路 ``db``——``_resolve_llm_works`` 以 Semaphore(4)
+    并发调用本闭包时，4 路 build_client 若共享同一 AsyncSession 会并发 execute
+    （SQLAlchemy 官方禁止并发共享 session）。独立 session 各自执行，消除随机
+    Lost connection/InternalError 隐患。传入的 ``db`` 仅作兼容占位（不再使用）。
     """
 
     async def llm_chat(messages: list[dict[str, str]], **kwargs: Any) -> dict[str, Any]:
+        from app.db.mysql import async_session_factory
         from app.services.llm.config_service import LlmConfigService
 
-        client = await LlmConfigService(db).build_client()
+        async with async_session_factory() as s:
+            client = await LlmConfigService(s).build_client()
         try:
             return await client.chat(
                 messages,
