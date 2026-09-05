@@ -367,3 +367,136 @@ async def test_store_sqlglot_edges_batches_field_items_with_edge_refs() -> None:
         assert it["target_table"] == "wedw_dwd.dp_dq_measure_df"
     # seen_pairs 记录成功写入的表边（visit_d → 产出表）
     assert ("table:wedw_ods.visit_d", "table:wedw_dwd.dp_dq_measure_df") in seen
+
+
+# ---------------------------------------------------------------------------
+# 方案 A：LLM 裁决延迟（_LlmWork）+ 批级并发 phase2
+# ---------------------------------------------------------------------------
+
+COMPLEX_SQL = (
+    "create table t as select dept_id, "
+    "row_number() over (partition by dept_id order by cnt desc) as rn "
+    "from (select dept_id, count(1) as cnt from wedw_ods.x group by dept_id) a"
+)
+
+
+@pytest.mark.asyncio
+async def test_process_step_defer_llm_returns_work_item() -> None:
+    """defer_llm=True + LLM 开启：复杂节点返回 _LlmWork（不现场调 LLM/不建单）。"""
+    from app.services.lineage.dp_sync_service import _LlmWork
+
+    svc = _svc(llm_chat=lambda messages, **kw: {"content": '{"agree": true}'})
+    result = await svc.process_step(TASK, STEP, COMPLEX_SQL, _config(), defer_llm=True)
+    assert isinstance(result, _LlmWork)
+    assert result.kind == "confirm"
+    svc._dp_repo.create_ticket.assert_not_awaited()
+    svc._lineage_repo.upsert_edges_with_status_batch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_step_defer_llm_disabled_creates_ticket_immediately() -> None:
+    """defer_llm=True + LLM 关闭：复杂节点即时建单（与不 defer 的关闭行为一致）。"""
+    from app.services.lineage.dp_sync_service import _LlmWork
+
+    svc = _svc()
+    result = await svc.process_step(
+        TASK, STEP, COMPLEX_SQL, _config(llm_enabled=False), defer_llm=True
+    )
+    assert not isinstance(result, _LlmWork)
+    assert result["status"] == "diverged"
+    svc._dp_repo.create_ticket.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_finish_deferred_task_applies_agree_verdict() -> None:
+    """phase2：confirm 裁决 agree → 边入库 + llm_confirmed 计数。"""
+    from app.services.lineage.dp_sync_service import _LlmWork
+
+    svc = _svc(llm_chat=lambda messages, **kw: {"content": '{"agree": true}'})
+    # 先收集工作项（不现场裁决）
+    work = await svc.process_step(TASK, STEP, COMPLEX_SQL, _config(), defer_llm=True)
+    assert isinstance(work, _LlmWork)
+    # 模拟并发裁决回填 result
+    from app.services.lineage.dp_sync_llm import parse_confirm_response
+
+    work.result = parse_confirm_response('{"agree": true}')
+    counters: dict[str, int] = {
+        k: 0 for k in (
+            "parsed_ok", "llm_confirmed", "diverged", "llm_fallback",
+            "unparseable", "llm_calls", "tickets_created", "errors",
+            "field_mappings_written", "field_edges_degraded",
+            "tickets_resolved", "memory_ignored", "memory_reused",
+            "scanned_tasks", "scanned_steps", "no_flow", "unknown",
+        )
+    }
+    seen: set[tuple[str, str]] = set()
+    await svc._finish_deferred_task([work], _config(), counters, seen)
+    assert counters.get("llm_confirmed") == 1
+    assert svc._lineage_repo.upsert_edges_with_status_batch.await_count == 1
+    svc._dp_repo.create_ticket.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_finish_deferred_task_error_creates_diverged_ticket() -> None:
+    """phase2：LLM 输出异常（error 回填）→ 建 diverged 单，不静默丢失。"""
+    from app.services.lineage.dp_sync_service import _LlmWork
+
+    svc = _svc(llm_chat=lambda messages, **kw: {"content": ""})
+    work = await svc.process_step(TASK, STEP, COMPLEX_SQL, _config(), defer_llm=True)
+    assert isinstance(work, _LlmWork)
+    work.error = "无法解析 LLM 输出"
+    counters: dict[str, int] = {
+        k: 0 for k in (
+            "parsed_ok", "llm_confirmed", "diverged", "llm_fallback",
+            "unparseable", "llm_calls", "tickets_created", "errors",
+            "field_mappings_written", "field_edges_degraded",
+            "tickets_resolved", "memory_ignored", "memory_reused",
+            "scanned_tasks", "scanned_steps", "no_flow", "unknown",
+        )
+    }
+    await svc._finish_deferred_task([work], _config(), counters, set())
+    assert counters.get("diverged") == 1
+    assert counters.get("tickets_created") == 1
+    kwargs = svc._dp_repo.create_ticket.await_args.kwargs
+    assert kwargs["status"] == "diverged"
+    assert "LLM 确认输出异常" in kwargs["divergence_reason"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_llm_works_concurrent_fills_results() -> None:
+    """批级并发裁决：全部工作项 result 回填、llm_calls 计数、异常项 error 标记。"""
+    import asyncio
+
+    from app.services.lineage.dp_sync_service import _LlmWork
+
+    from app.services.lineage.dp_sync_llm import DpSyncLlmError
+
+    n = {"calls": 0}
+
+    async def llm(messages, **kw):
+        n["calls"] += 1
+        if n["calls"] == 4:  # 第 4 个并发项模拟 LLM 输出异常
+            raise DpSyncLlmError("LLM 输出不可解析")
+        await asyncio.sleep(0)  # 让出事件循环（模拟 IO）
+        return {"content": '{"agree": true}'}
+
+    svc = _svc(llm_chat=llm)
+    works: list[_LlmWork] = []
+    for i in range(4):
+        w = await svc.process_step(TASK, STEP, COMPLEX_SQL, _config(), defer_llm=True)
+        assert isinstance(w, _LlmWork)
+        works.append(w)
+
+    counters: dict[str, int] = {
+        k: 0 for k in (
+            "parsed_ok", "llm_confirmed", "diverged", "llm_fallback",
+            "unparseable", "llm_calls", "tickets_created", "errors",
+            "field_mappings_written", "field_edges_degraded",
+            "tickets_resolved", "memory_ignored", "memory_reused",
+            "scanned_tasks", "scanned_steps", "no_flow", "unknown",
+        )
+    }
+    await svc._resolve_llm_works(works, counters)
+    assert counters.get("llm_calls") == 4
+    assert all(w.result is not None or w.error for w in works)
+    assert works[3].error is not None  # 不可解析项被标记

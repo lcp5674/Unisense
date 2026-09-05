@@ -24,6 +24,7 @@ import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -70,6 +71,30 @@ _AUTO_FULL_SCAN_SECONDS = 24 * 3600
 _PREFETCH_BATCH_SIZE = 200
 #: 单条 ``IN`` 子句最大元素数（超过分块并发查询，避免 SQL 过长/参数上限）。
 _IN_CHUNK = 400
+#: LLM 裁决并发度（方案 A）：需 LLM 的 step 攒批后以该并发度同时调用——
+#: 单轮 288 次 LLM × ~1.5s 串行 ≈ 7 分钟，Semaphore(4) 下降到 ~1/4。
+#: LLM 客户端每次调用独立建连（无共享可变状态），并发安全；db 写仍在
+#: 批后逐任务串行（共享 AsyncSession 不可并发）。
+_LLM_CONCURRENCY = 4
+
+
+@dataclass
+class _LlmWork:
+    """延迟到批级并发执行的 LLM 裁决工作项（复杂确认 / 失败兜底）。
+
+    scan_once 预取批内，需 LLM 的 step 先打包为工作项攒批（不现场调 LLM——
+    现场调用 = 每任务串行 await，单轮数百次 LLM 全串行）。批末统一
+    Semaphore 并发裁决后回填 ``result``/``error``，再按任务归集应用写库。
+    """
+
+    kind: str  # "confirm"=复杂节点共识确认 / "fallback"=失败节点兜底提炼
+    task: dict[str, Any]
+    step: dict[str, Any]
+    sql: str
+    sql_hash: str
+    outcome: Any
+    result: Any = None  # ConfirmVerdict / FallbackFlow（_resolve_llm_works 后回填）
+    error: str | None = None  # LLM 输出异常（phase2 转建单，不静默丢失）
 
 
 def _chunks(items: list[int], size: int) -> list[list[int]]:
@@ -320,12 +345,17 @@ class DpSyncService:
         sql: str,
         config: Any,
         seen_pairs: set[tuple[str, str]] | None = None,
-    ) -> dict[str, Any]:
+        *,
+        defer_llm: bool = False,
+    ) -> dict[str, Any] | _LlmWork:
         """处理单个 SQL 节点，返回结果摘要（run_log detail 项）。
 
         seen_pairs: 可选——实际**入库**的边集合（node_table 化）；各写入路径
             写入后自行 add，供收尾 mark_seen/mark_missing 精确确认（不再靠
             事后重复 sqlglot 解析，P2-9 #10）。
+        defer_llm: True 时复杂/失败节点不现场调 LLM——LLM 开启则返回
+            ``_LlmWork`` 工作项（由 scan_once 批级并发裁决后 phase2 应用），
+            关闭则即时建待抉择单（与不 defer 的关闭行为一致）。
         """
         sql_hash = sql_fingerprint(sql)
         outcome = await self._parse_typed(
@@ -393,11 +423,68 @@ class DpSyncService:
                 return reused
 
         if outcome.status == "ok":
+            if defer_llm:
+                return await self._defer_complex(
+                    task, step, sql, sql_hash, outcome, config, seen_pairs
+                )
             return await self._handle_complex(
+                task, step, sql, sql_hash, outcome, config, seen_pairs
+            )
+        if defer_llm:
+            return await self._defer_failed(
                 task, step, sql, sql_hash, outcome, config, seen_pairs
             )
         return await self._handle_failed(
             task, step, sql, sql_hash, outcome, config, seen_pairs
+        )
+
+    async def _defer_complex(
+        self,
+        task: dict[str, Any],
+        step: dict[str, Any],
+        sql: str,
+        sql_hash: str,
+        outcome: Any,
+        config: Any,
+        seen_pairs: set[tuple[str, str]] | None = None,
+    ) -> dict[str, Any] | _LlmWork:
+        """复杂节点延迟分支：LLM 开启 → 打包 ``_LlmWork``（批级并发裁决）；
+        LLM 关闭 → 即时建待抉择单（与 ``_handle_complex`` 关闭分支一致）。"""
+        if not config.llm_enabled or self._llm_chat is None:
+            return await self._handle_complex(
+                task, step, sql, sql_hash, outcome, config, seen_pairs
+            )
+        return _LlmWork(
+            kind="confirm",
+            task=task,
+            step=step,
+            sql=sql,
+            sql_hash=sql_hash,
+            outcome=outcome,
+        )
+
+    async def _defer_failed(
+        self,
+        task: dict[str, Any],
+        step: dict[str, Any],
+        sql: str,
+        sql_hash: str,
+        outcome: Any,
+        config: Any,
+        seen_pairs: set[tuple[str, str]] | None = None,
+    ) -> dict[str, Any] | _LlmWork:
+        """失败节点延迟分支：LLM 开启 → 打包 ``_LlmWork``；关闭 → 即时建单。"""
+        if not config.llm_enabled or self._llm_chat is None:
+            return await self._handle_failed(
+                task, step, sql, sql_hash, outcome, config, seen_pairs
+            )
+        return _LlmWork(
+            kind="fallback",
+            task=task,
+            step=step,
+            sql=sql,
+            sql_hash=sql_hash,
+            outcome=outcome,
         )
 
     async def _handle_complex(
@@ -443,6 +530,26 @@ class DpSyncService:
                 divergence_reason=f"LLM 确认输出异常：{exc}",
             )
             return {"step_id": step.get("step_id"), "status": "diverged"}
+        return await self._apply_confirm_verdict(
+            task, step, sql, sql_hash, outcome, config, seen_pairs, verdict
+        )
+
+    async def _apply_confirm_verdict(
+        self,
+        task: dict[str, Any],
+        step: dict[str, Any],
+        sql: str,
+        sql_hash: str,
+        outcome: Any,
+        config: Any,
+        seen_pairs: set[tuple[str, str]] | None,
+        verdict: Any,
+    ) -> dict[str, Any]:
+        """LLM 确认意见应用段（agree→sqlglot 结果入库 / 分歧→建待抉择单）。
+
+        从 ``_handle_complex`` 抽出供批级并发路径复用：并发裁决拿到 verdict 后
+        按任务归集，由本函数落库（不入库静默失败，分歧必建单留痕）。
+        """
         if verdict.agree:
             await self._store_sqlglot_edges(
                 outcome, task, step, sql_hash, config, seen_pairs
@@ -511,6 +618,25 @@ class DpSyncService:
                 divergence_reason=f"LLM 兜底输出异常：{exc}",
             )
             return {"step_id": step.get("step_id"), "status": "unparseable"}
+        return await self._apply_fallback_flow_verdict(
+            task, step, sql, sql_hash, sqlglot_json, flow
+        )
+
+    async def _apply_fallback_flow_verdict(
+        self,
+        task: dict[str, Any],
+        step: dict[str, Any],
+        sql: str,
+        sql_hash: str,
+        sqlglot_json: Any,
+        flow: Any,
+    ) -> dict[str, Any]:
+        """LLM 兜底流应用段（提炼成功→建低置信参考单 / 失败→unparseable）。
+
+        从 ``_handle_failed`` 抽出供批级并发路径复用（flow 由并发裁决回填）。
+        命名带 ``_verdict`` 后缀与 resolve 区既有的 ``_apply_fallback_flow``
+        （重试单刷新低置信参考）区分，避免类内覆盖。
+        """
         if flow.ok:
             await self._dp_repo.create_ticket(
                 task_id=task.get("task_id"),
@@ -961,16 +1087,19 @@ class DpSyncService:
             # 明细批量预取（阶段 1）：逐任务拉取 = 每任务 2 次源库往返（task+step），
             # 一轮 N 任务 ≈ 2N 次小查询、源库连接被占几十分钟。改为按批预取——
             # 每批任务静态字段 + step 明细各 1~2 次批量 IN 查询载入内存（task/steps
-            # SQL 全文本地解析），源库往返从 2N → ~N/100。每任务独立提交语义保留
-            # （B：任务内所有写同一事务、成功即 commit、单任务异常 rollback 自身）。
-            # 预取失败时 _prefetch_batch 返回 {} → _process_task 回退逐任务拉取
-            # （保底不阻断、单任务错误可定位）。
+            # SQL 全文本地解析），源库往返从 2N → ~N/100。预取失败时 _prefetch_batch
+            # 返回 {} → _process_task 回退逐任务拉取（保底不阻断）。
+            # 事务与并发（B + A）：每任务 phase1 独立小事务即时提交（无需 LLM 的写
+            # 立即可见）；需 LLM 的 step 攒批后 Semaphore 并发裁决，批末逐任务
+            # phase2 独立提交——任务 A 的裁决写不随任务 B 的 LLM/异常而阻塞或回滚。
             for batch_start in range(0, len(task_ids), _PREFETCH_BATCH_SIZE):
                 batch_ids = task_ids[batch_start : batch_start + _PREFETCH_BATCH_SIZE]
                 if cancel_event is not None and cancel_event.is_set():
                     cancelled = True
                     break
                 prefetched = await self._prefetch_batch(collector, config, batch_ids)
+                # 批内待 LLM 裁决任务（方案 A phase2 队列）
+                deferred: list[tuple[int, list[_LlmWork]]] = []
                 for idx, task_id in enumerate(batch_ids, start=batch_start + 1):
                     if cancel_event is not None and cancel_event.is_set():
                         cancelled = True
@@ -979,12 +1108,12 @@ class DpSyncService:
                         progress["processed"] = idx - 1
                         progress["current_task_id"] = task_id
                     try:
-                        # 每任务独立事务（B）：任务内所有写（边/字段映射/ticket/owner
-                        # 回填）在同一事务，成功即 commit —— 处理完一个任务，其血缘边
-                        # **立即对其它会话可见**（血缘视图实时可查，不再等整轮 2517 个
-                        # 任务跑完才一次性提交）。单任务异常 rollback 自身（边不落库、
-                        # 幂等），记入 failed_task_ids 下轮显式重扫，不拖垮整轮。
-                        await self._process_task(
+                        # 每任务 phase1 独立小事务：任务内**无需 LLM 的写**（简单/复用
+                        # step 的边、LLM 关闭分支建单、owner 回填）在此提交，处理完
+                        # 即对其它会话可见（B 实时可见增强）；需 LLM 的 step 打包返回
+                        # 工作项（不现场调——现场=逐任务串行 await，单轮数百次 LLM
+                        # 全串行数分钟），其裁决写由批末 phase2 独立提交。
+                        works = await self._process_task(
                             collector,
                             config,
                             task_id,
@@ -996,6 +1125,8 @@ class DpSyncService:
                             progress=progress,
                         )
                         await self._db.commit()
+                        if works:
+                            deferred.append((task_id, works))
                     except _ScanCancelledError:
                         # 强制终止：当前任务随 rollback 回滚（已提交的前序任务保留）
                         await self._db.rollback()
@@ -1010,6 +1141,33 @@ class DpSyncService:
                         )
                     if progress is not None:
                         progress["processed"] = idx
+                # 批末：攒批 LLM 并发裁决（Semaphore 限流），再逐任务 phase2 独立
+                # 提交裁决写（分歧建单/一致入库/LLM 异常建单）——单轮 288 次 LLM
+                # 串行 ≈ 7 分钟，并发后压到 ~1/_LLM_CONCURRENCY。phase2 是任务级
+                # 独立小事务：A 的裁决写不随 B 的 phase2 异常回滚。
+                if deferred and not cancelled:
+                    batch_works = [w for _, ws in deferred for w in ws]
+                    await self._resolve_llm_works(batch_works, counters)
+                    for task_id, works in deferred:
+                        if cancel_event is not None and cancel_event.is_set():
+                            cancelled = True
+                            break
+                        try:
+                            await self._finish_deferred_task(
+                                works, config, counters, seen_pairs
+                            )
+                            await self._db.commit()
+                        except _ScanCancelledError:
+                            await self._db.rollback()
+                            cancelled = True
+                            break
+                        except Exception as exc:  # noqa: BLE001 —— phase2 单任务失败不阻断
+                            await self._db.rollback()
+                            counters["errors"] += 1
+                            failed_task_ids.append(task_id)
+                            logger.warning(
+                                "dp_sync_phase2_failed task_id=%s error=%s", task_id, exc
+                            )
                 if cancelled:
                     break
             # 收尾：水位 + 边确认（stale 机制）。
@@ -1248,8 +1406,8 @@ class DpSyncService:
         progress: dict[str, Any] | None = None,
         prefetched: dict[int, tuple[dict[str, Any] | None, list[dict[str, Any]]]]
         | None = None,
-    ) -> None:
-        """处理单个任务：取 task 静态字段 + SQL 节点 → process_step 逐节点。
+    ) -> list[_LlmWork]:
+        """处理单个任务（方案 A phase1）：取 task 静态字段 + SQL 节点逐 step 处理。
 
         取消检查点下沉（A 方案）：fetch task 后 / 每个 step 前 / 资产回填前检查——
         协作取消（仅 cancel_event）在 step 边界停止，不再等完整任务跑完；
@@ -1259,6 +1417,12 @@ class DpSyncService:
         prefetched: 可选批量预取结果 ``{task_id: (task|None, [steps])}``——scan_once
             按批预取后传入，本方法不再逐任务打源库（2N 次往返 → 每批 2~4 次）。
             为 ``None`` 或键缺失时回退单任务拉取（兼容独立调用/测试与预取失败降级）。
+
+        Returns:
+            需批级并发 LLM 裁决的工作项列表（空=本任务已全部处理完，调用方可
+            立即 commit——简单/复用 step 的边已写入 session，保持实时可见）。
+            工作项由 scan_once 攒批并发裁决后经 ``_finish_deferred_task`` 应用，
+            本任务的事务在 phase2 完成后统一 commit（任务内写仍同一事务原子）。
         """
         if prefetched is not None and task_id in prefetched:
             task, steps = prefetched[task_id]
@@ -1270,7 +1434,7 @@ class DpSyncService:
                 else []
             )
         if task is None:
-            return
+            return []
         # 排除规则：任务名命中排除
         patterns = list(config.exclude_task_patterns or [])
         if patterns:
@@ -1278,13 +1442,15 @@ class DpSyncService:
 
             name = str(task.get("task_name") or "")
             if any(_re.search(p, name) for p in patterns):
-                return
+                return []
         if not steps:
-            return
+            return []
         counters["scanned_tasks"] += 1
         # M8: llm_calls/tickets_created 计数——包装注入的 llm_chat 与 repo 建单
         # （此前恒 0，LLM 成本不可见）。service 实例每轮新建无并发共享，函数内
-        # 替换 + finally 恢复保证异常安全。
+        # 替换 + finally 恢复保证异常安全。defer 模式下 llm_calls 由
+        # _resolve_llm_works（批级并发裁决）就地累计，此处包装仅覆盖 LLM 关闭
+        # 分支即时建单的 tickets_created。
         llm_orig = self._llm_chat
         create_orig = self._dp_repo.create_ticket
         counters["llm_calls"] = counters.get("llm_calls", 0)
@@ -1301,6 +1467,7 @@ class DpSyncService:
         if llm_orig is not None:
             self._llm_chat = _counted_llm  # type: ignore[method-assign]
         self._dp_repo.create_ticket = _counted_create_ticket  # type: ignore[method-assign]
+        works: list[_LlmWork] = []
         try:
             for step in steps:
                 if cancel_event is not None and cancel_event.is_set():
@@ -1315,7 +1482,13 @@ class DpSyncService:
                     )
                 sql = str(step.get("script_info") or "")
                 counters["scanned_steps"] += 1
-                result = await self.process_step(task, step, sql, config, seen_pairs)
+                result = await self.process_step(
+                    task, step, sql, config, seen_pairs, defer_llm=True
+                )
+                # 需 LLM 的 step 打包为工作项攒批（现场不调 LLM）；正常 result 立即计数
+                if isinstance(result, _LlmWork):
+                    works.append(result)
+                    continue
                 status = result.get("status", "unknown")
                 if status in counters:
                     counters[status] += 1
@@ -1329,13 +1502,125 @@ class DpSyncService:
                 ) + int(result.get("fields_degraded") or 0)
         finally:
             self._llm_chat = llm_orig
-            self._dp_repo.create_ticket = create_orig
-        # 资产 Owner 回填（产出表孤儿）
+            self._dp_repo.create_ticket = create_orig  # type: ignore[method-assign]
+        # 资产 Owner 回填（产出表孤儿）——含工作项的任务其回填随 phase2 一起提交
         if cancel_event is not None and cancel_event.is_set():
             if force_event is not None and force_event.is_set():
                 raise _ScanCancelledError(f"task {task_id} force-stop at backfill")
-            return  # 协作取消：跳过回填
+            return works  # 协作取消：跳过回填
         await self.backfill_owner(task, config)
+        return works
+
+    async def _resolve_llm_works(
+        self, works: list[_LlmWork], counters: dict[str, int]
+    ) -> None:
+        """Semaphore 并发执行批内全部待裁决 LLM 调用（结果回填 work.result/error）。
+
+        纯 LLM 网络 IO（不碰 db session），可安全并发；db 写仍在批后逐任务串行
+        （共享 AsyncSession 不可并发）。单轮数百次 LLM 串行 ≈ 数分钟，并发后
+        压到 ~1/_LLM_CONCURRENCY。llm_calls 计数就地累计（defer 模式下
+        process_step 现场不调 llm_chat，计数不再经 _counted_llm）。
+        """
+        sem = asyncio.Semaphore(_LLM_CONCURRENCY)
+
+        async def _one(w: _LlmWork) -> None:
+            async with sem:
+                counters["llm_calls"] = counters.get("llm_calls", 0) + 1
+                try:
+                    if w.kind == "confirm":
+                        w.result = await self._llm_confirm(w.sql, w.outcome)
+                    else:
+                        w.result = await self._llm_fallback(w.sql)
+                except DpSyncLlmError as exc:
+                    # LLM 输出异常：phase2 转建单（不静默丢失、不阻断其它并发项）
+                    w.error = str(exc)
+
+        await asyncio.gather(*(_one(w) for w in works))
+
+    async def _finish_deferred_task(
+        self,
+        works: list[_LlmWork],
+        config: Any,
+        counters: dict[str, int],
+        seen_pairs: set[tuple[str, str]],
+    ) -> None:
+        """应用一批已完成 LLM 裁决的工作项（phase2）：按任务归集落库。
+
+        对每个工作项把并发裁决结果（result/error）落库——confirm agree 入库 /
+        分歧建待抉择单 / LLM 异常建单；fallback 提炼成功建低置信参考 / 失败建
+        unparseable。计数（tickets_created/status/字段映射）就地累计，与 phase1
+        的语义一致。调用方（scan_once）在应用后统一 commit——任务内所有写
+        （phase1 简单边 + 本阶段裁决写）仍在同一事务，保持原子。
+        """
+        # tickets_created 计数：包装 repo.create_ticket（同 _process_task 语义）
+        create_orig = self._dp_repo.create_ticket
+        counters["tickets_created"] = counters.get("tickets_created", 0)
+
+        async def _counted_create_ticket(**kw: Any) -> Any:
+            counters["tickets_created"] += 1
+            return await create_orig(**kw)
+
+        self._dp_repo.create_ticket = _counted_create_ticket  # type: ignore[method-assign]
+        try:
+            for w in works:
+                sqlglot_json = edges_to_json(w.outcome.table_edges, w.outcome.field_edges)
+                if w.kind == "confirm":
+                    if w.error is not None:
+                        result = await self._dp_repo.create_ticket(
+                            task_id=w.task.get("task_id"),
+                            step_id=w.step.get("step_id"),
+                            task_name=w.task.get("task_name"),
+                            out_table=w.task.get("out_table"),
+                            task_refs=build_task_ref(w.task, w.step),
+                            sql_text=w.sql,
+                            sql_hash=w.sql_hash,
+                            status="diverged",
+                            sqlglot_result=sqlglot_json,
+                            divergence_reason=f"LLM 确认输出异常：{w.error}",
+                        )
+                        status = "diverged"
+                    else:
+                        result = await self._apply_confirm_verdict(
+                            w.task,
+                            w.step,
+                            w.sql,
+                            w.sql_hash,
+                            w.outcome,
+                            config,
+                            seen_pairs,
+                            w.result,
+                        )
+                        status = result.get("status", "diverged")
+                else:
+                    if w.error is not None:
+                        result = await self._dp_repo.create_ticket(
+                            task_id=w.task.get("task_id"),
+                            step_id=w.step.get("step_id"),
+                            task_name=w.task.get("task_name"),
+                            out_table=w.task.get("out_table"),
+                            task_refs=build_task_ref(w.task, w.step),
+                            sql_text=w.sql,
+                            sql_hash=w.sql_hash,
+                            status="unparseable",
+                            sqlglot_result=sqlglot_json,
+                            divergence_reason=f"LLM 兜底输出异常：{w.error}",
+                        )
+                        status = "unparseable"
+                    else:
+                        result = await self._apply_fallback_flow_verdict(
+                            w.task, w.step, w.sql, w.sql_hash, sqlglot_json, w.result
+                        )
+                        status = result.get("status", "unparseable")
+                if status in counters:
+                    counters[status] += 1
+                counters["field_mappings_written"] = counters.get(
+                    "field_mappings_written", 0
+                ) + int(result.get("fields_written") or 0)
+                counters["field_edges_degraded"] = counters.get(
+                    "field_edges_degraded", 0
+                ) + int(result.get("fields_degraded") or 0)
+        finally:
+            self._dp_repo.create_ticket = create_orig  # type: ignore[method-assign]
 
     async def _available_columns(
         self, collector: Any, schema: str, table: str

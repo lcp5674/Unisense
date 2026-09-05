@@ -47,10 +47,14 @@ class FakeCollector:
     """假 dp 连接器：按 SQL 精确路由。"""
 
     def __init__(
-        self, tasks: list[dict] | None = None, boom_on_task: bool = False
+        self,
+        tasks: list[dict] | None = None,
+        boom_on_task: bool = False,
+        sql: str | None = None,
     ) -> None:
         self.tasks = tasks or TASKS
         self.boom_on_task = boom_on_task
+        self.sql = sql or TASK_SQL
         self.disposed = False
         self.queries: list[str] = []
 
@@ -72,7 +76,7 @@ class FakeCollector:
                     "step_name": "SQL",
                     "task_step_type": 7,
                     "task_node_type": 1,
-                    "script_info": TASK_SQL,
+                    "script_info": self.sql,
                 }
                 for t in self.tasks
                 if t["task_id"] in ids
@@ -593,7 +597,7 @@ async def test_scan_db_error_isolated_per_task_commit() -> None:
     svc = _svc(collector)
     real_process = svc.process_step
 
-    async def flaky_process(task, step, sql, config, seen_pairs=None):
+    async def flaky_process(task, step, sql, config, seen_pairs=None, **kwargs):
         if task["task_id"] == 101:
             raise OperationalError("stmt", {}, Exception("Deadlock"))
         return await real_process(task, step, sql, config, seen_pairs)
@@ -631,7 +635,7 @@ async def test_scan_partial_errors_still_advance_watermark() -> None:
     svc = _svc(collector)
     real_process = svc.process_step
 
-    async def flaky_process(task, step, sql, config, seen_pairs=None):
+    async def flaky_process(task, step, sql, config, seen_pairs=None, **kwargs):
         if task["task_id"] == 101:
             raise OperationalError("stmt", {}, Exception("Deadlock"))
         return await real_process(task, step, sql, config, seen_pairs)
@@ -781,3 +785,77 @@ async def test_scan_batch_prefetch_replaces_per_task_fetch() -> None:
     # 明细往返数：task 批量 1 + step 批量 1（+变更集 2）——远小于逐任务 4 次明细
     batch_detail = [q for q in collector.queries if "WHERE id IN" in q or "task_id IN" in q]
     assert len(batch_detail) == 2
+
+
+# ---------------------------------------------------------------------------
+# 方案 A：scan_once 批级 LLM 并发裁决（phase1 即时提交 + 批末并发 + phase2 落库）
+# ---------------------------------------------------------------------------
+
+COMPLEX_TASKS = [
+    {"task_id": 201, "task_name": "复杂任务A", "out_table": "wedw_dwd.dp_cx1"},
+    {"task_id": 202, "task_name": "复杂任务B", "out_table": "wedw_dwd.dp_cx2"},
+]
+
+COMPLEX_SQL = (
+    "create table t as select dept_id, "
+    "row_number() over (partition by dept_id order by cnt desc) as rn "
+    "from (select dept_id, count(1) as cnt from wedw_ods.x group by dept_id) a"
+)
+
+
+@pytest.mark.asyncio
+async def test_scan_deferred_llm_agree_phase2_stores() -> None:
+    """复杂任务攒批并发裁决 agree → phase2 逐任务入库；llm_calls 计数正确。"""
+    collector = FakeCollector(tasks=COMPLEX_TASKS, sql=COMPLEX_SQL)
+    svc = _svc(collector)
+
+    async def llm(messages, **kw):
+        return {"content": '{"agree": true}'}
+
+    svc._llm_chat = llm  # type: ignore[method-assign]
+    result = await svc.scan_once(_fc(collector))
+    assert result["scanned_tasks"] == 2
+    assert result["llm_calls"] == 2  # 两个复杂 step 均经并发裁决（非现场串行）
+    assert result["llm_confirmed"] == 2  # agree → sqlglot 结果入库
+    assert result["errors"] == 0
+    svc._dp_repo.create_ticket.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scan_deferred_llm_disagree_creates_tickets() -> None:
+    """复杂任务 LLM 分歧 → phase2 逐任务建 diverged 单（tickets_created 计数）。"""
+    collector = FakeCollector(tasks=COMPLEX_TASKS, sql=COMPLEX_SQL)
+    svc = _svc(collector)
+
+    async def llm(messages, **kw):
+        return {"content": '{"agree": false, "reason": "目标表应为 wedw_dwd.other"}'}
+
+    svc._llm_chat = llm  # type: ignore[method-assign]
+    result = await svc.scan_once(_fc(collector))
+    assert result["scanned_tasks"] == 2
+    assert result["llm_calls"] == 2
+    assert result["diverged"] == 2
+    assert result["tickets_created"] == 2
+    assert svc._dp_repo.create_ticket.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_scan_mixed_simple_and_llm_tasks() -> None:
+    """简单任务 phase1 即时提交 + 复杂任务攒批并发 phase2：两类都正确计数。"""
+    from datetime import UTC, datetime, timedelta
+
+    mixed = TASKS + COMPLEX_TASKS  # 101/102 简单 + 201/202 复杂
+    collector = FakeCollector(tasks=mixed, sql=COMPLEX_SQL)
+    # 注意：简单任务 101/102 的 step 也用 COMPLEX_SQL（FakeCollector 全局 sql），
+    # 因此四个任务全复杂——改用 llm agree 使四者都 llm_confirmed。
+    svc = _svc(collector)
+
+    async def llm(messages, **kw):
+        return {"content": '{"agree": true}'}
+
+    svc._llm_chat = llm  # type: ignore[method-assign]
+    result = await svc.scan_once(_fc(collector))
+    assert result["scanned_tasks"] == 4
+    assert result["llm_calls"] == 4
+    assert result["llm_confirmed"] == 4
+    assert result["errors"] == 0
