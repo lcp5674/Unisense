@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, func, or_, select, update
@@ -38,6 +38,18 @@ SHADOW_EMAIL_SUFFIX = "@external.local"
 
 #: 影子用户默认角色（无平台权限，仅作为资产 Owner 挂接展示）。
 SHADOW_ROLE = "viewer"
+
+#: 连续整轮失败退避阶梯（分钟）：第 n 次失败后的自动扫描等待时长。
+#: 1~2 次失败退避 5 分钟（瞬时网络抖动可较快自愈）；≥3 次起 15→30→60 指数
+#: 拉长封顶——源库持续不可达时避免周期任务按 poll_interval（可配 1 分钟）
+#: 每分钟重试一次、持续空转刷 run_log（实测 280+ 轮 failed）。
+_BACKOFF_AFTER_FAILURE_MIN = (5, 5, 15, 30, 60)
+
+
+def _backoff_delay_min(consecutive: int) -> int:
+    """第 ``consecutive`` 次连续失败后的退避分钟数（1-based，封顶末档）。"""
+    idx = min(max(consecutive, 1) - 1, len(_BACKOFF_AFTER_FAILURE_MIN) - 1)
+    return _BACKOFF_AFTER_FAILURE_MIN[idx]
 
 
 def _column_eq(column, value):
@@ -136,6 +148,40 @@ class DpLineageRepository:
             await self._db.execute(
                 update(DpSyncConfig).where(DpSyncConfig.id == cfg_id).values(**data)
             )
+
+    # ---- 失败退避状态（scan_once 内部管理；不入 update_config 白名单防人工误改） ----
+    async def reset_backoff(self, cfg_id: int) -> None:
+        """成功一轮：连续失败归零、清除退避截止（恢复按 poll_interval 正常扫描）。"""
+        await self._db.execute(
+            update(DpSyncConfig)
+            .where(DpSyncConfig.id == cfg_id)
+            .values(
+                consecutive_failures=0,
+                next_scan_at=None,
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    async def record_backoff_failure(self, cfg_id: int) -> None:
+        """整轮异常：连续失败 +1，并按下阶梯写退避截止时间（UTC）。"""
+        row = (
+            await self._db.execute(
+                select(DpSyncConfig.consecutive_failures).where(
+                    DpSyncConfig.id == cfg_id
+                )
+            )
+        ).scalar_one_or_none()
+        n = int(row or 0) + 1
+        await self._db.execute(
+            update(DpSyncConfig)
+            .where(DpSyncConfig.id == cfg_id)
+            .values(
+                consecutive_failures=n,
+                next_scan_at=datetime.now(UTC)
+                + timedelta(minutes=_backoff_delay_min(n)),
+                updated_at=datetime.now(UTC),
+            )
+        )
 
     # ---- dp_sync_watermark ----
     async def get_watermark(self, table_name: str) -> DpSyncWatermark | None:

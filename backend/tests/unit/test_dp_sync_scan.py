@@ -106,6 +106,7 @@ def _fc(collector: FakeCollector):
 
 def _config(**overrides) -> SimpleNamespace:
     defaults = {
+        "id": 1,
         "enabled": True,
         "source_id": "mysql_uncategorized",
         "schema_name": "dp_stable",
@@ -120,6 +121,9 @@ def _config(**overrides) -> SimpleNamespace:
         "llm_enabled": True,
         "resolve_memory_enabled": True,
         "owner_backfill": "orphan_only",
+        # 失败退避字段（scan_once 退避检查读取）
+        "consecutive_failures": 0,
+        "next_scan_at": None,
     }
     return SimpleNamespace(**{**defaults, **overrides})
 
@@ -176,6 +180,8 @@ def _svc(
     svc._dp_repo.upsert_field_mappings_batch = AsyncMock(return_value=0)
     svc._dp_repo.soft_delete_field_mappings = AsyncMock(return_value=0)
     svc._dp_repo.find_orphan_catalogs = AsyncMock(return_value=[])
+    svc._dp_repo.reset_backoff = AsyncMock()
+    svc._dp_repo.record_backoff_failure = AsyncMock()
     svc._llm_chat = None
     return svc
 
@@ -215,6 +221,61 @@ async def test_scan_interval_not_due() -> None:
     )
     result = await svc.scan_once(_fc(FakeCollector()))
     assert result["skipped"] == "interval_not_due"
+
+
+@pytest.mark.asyncio
+async def test_scan_backoff_skips_before_deadline() -> None:
+    """退避期（next_scan_at 在未来）：周期任务跳过自动扫描，不建 run_log。"""
+    svc = _svc(
+        FakeCollector(),
+        _config(
+            next_scan_at=datetime.now(UTC) + timedelta(minutes=30),
+            consecutive_failures=3,
+        ),
+    )
+    result = await svc.scan_once(_fc(FakeCollector()))
+    assert result["skipped"] == "backoff"
+    assert result["consecutive_failures"] == 3
+    svc._dp_repo.create_run_log.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scan_backoff_force_bypasses_deadline() -> None:
+    """手动「立即扫描」（force=True）不受退避限制，正常执行。"""
+    collector = FakeCollector()
+    svc = _svc(
+        collector,
+        _config(
+            next_scan_at=datetime.now(UTC) + timedelta(minutes=30),
+            consecutive_failures=3,
+        ),
+    )
+    result = await svc.scan_once(_fc(collector), force=True)
+    assert "skipped" not in result
+    assert result["scanned_tasks"] == 2
+
+
+@pytest.mark.asyncio
+async def test_scan_success_resets_backoff() -> None:
+    """成功一轮：reset_backoff 被调用（计数归零、清退避截止）。"""
+    collector = FakeCollector()
+    svc = _svc(collector)
+    result = await svc.scan_once(_fc(collector))
+    assert "skipped" not in result
+    svc._dp_repo.reset_backoff.assert_awaited_with(1)
+
+
+@pytest.mark.asyncio
+async def test_scan_exception_records_backoff_failure() -> None:
+    """整轮异常（fetch_collector 抛错）：record_backoff_failure 被调用。"""
+
+    async def _boom(sid: str) -> FakeCollector:
+        raise RuntimeError("dp 源不可达")
+
+    svc = _svc(FakeCollector())
+    result = await svc.scan_once(_boom)
+    assert result["skipped"] == "failed"
+    svc._dp_repo.record_backoff_failure.assert_awaited_with(1)
 
 
 @pytest.mark.asyncio

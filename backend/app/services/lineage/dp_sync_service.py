@@ -857,6 +857,20 @@ class DpSyncService:
             return {"skipped": "not_configured_or_disabled"}
         wm = await self._dp_repo.get_watermark("task")
         now = datetime.now(UTC)
+        # 失败退避（B）：整轮异常（源库不可达等）后累积计数并写 next_scan_at，
+        # 此时间前周期任务跳过自动扫描——防 poll_interval 可配到 1 分钟时源库持续
+        # 不可达仍每分钟重试一次、持续空转刷 run_log（实测 280+ 轮 failed）。
+        # 手动「立即扫描」（force=True）不受退避限制——用户主动触发即放行。
+        if (
+            not force
+            and config.next_scan_at is not None
+            and now < _utc_aware(config.next_scan_at)
+        ):
+            return {
+                "skipped": "backoff",
+                "next_scan_at": config.next_scan_at.isoformat(),
+                "consecutive_failures": config.consecutive_failures,
+            }
         # 全量轮判定：手动强制全量（force_full）或首轮/重置后全量；或距上次全量
         # 超周期自动全量（M1：稳态增量轮任务删除永不 stale——每
         # _AUTO_FULL_SCAN_SECONDS 强制一次全量观察，使 mark_missing 对「不再出现
@@ -1078,6 +1092,9 @@ class DpSyncService:
                     stale_flagged=stale_flagged,
                     detail=detail,
                 )
+            # 成功（含 cancelled——用户主动停、源库正常）一轮：连续失败归零、清除
+            # 退避截止，下次恢复按 poll_interval 正常扫描。
+            await self._dp_repo.reset_backoff(config.id)
             await self._db.commit()
             if progress is not None:
                 progress["stage"] = "cancelled" if cancelled else "done"
@@ -1107,6 +1124,8 @@ class DpSyncService:
                     await self._lineage_repo.finish_ingest_run(
                         ingest_run, status="failed", error=str(exc)
                     )
+                # 整轮异常：连续失败 +1 并按阶梯写退避截止（同事务，随 run_log failed 落库）
+                await self._dp_repo.record_backoff_failure(config.id)
                 await self._db.commit()
             except Exception:  # noqa: BLE001 —— run 未落库等极端情况：重建 failed（双轨同写）
                 await self._db.rollback()
@@ -1121,6 +1140,7 @@ class DpSyncService:
                     await self._lineage_repo.finish_ingest_run(
                         failed_run, status="failed", error=str(exc)
                     )
+                    await self._dp_repo.record_backoff_failure(config.id)
                     await self._db.commit()
                 except Exception:  # noqa: BLE001 —— 失败记录兜底，不影响错误上报
                     await self._db.rollback()

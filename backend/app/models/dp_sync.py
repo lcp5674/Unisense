@@ -142,6 +142,23 @@ class DpSyncConfig(Base, BaseModel):
         comment="最近更新人 id",
     )
 
+    # ---- 失败退避（源库不可达等整轮异常时指数退避，防周期任务每分钟空转） ----
+    # 状态由 scan_once 内部管理（成功归零 / 异常累积），不入前端配置白名单
+    # （update_config allowed 集合不含这两列，防人工/外部 API 误改）。
+    consecutive_failures: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+        comment="连续整轮失败次数（成功一轮归零；≥1 次按阶梯退避）",
+    )
+    next_scan_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+        comment="退避截止时间（UTC）——此前周期任务跳过自动扫描；手动「立即扫描」不受限",
+    )
+
     __table_args__ = (Index("ux_dp_sync_config_id", "id"),)
 
 

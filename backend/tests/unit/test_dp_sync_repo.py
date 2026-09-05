@@ -19,15 +19,16 @@ from app.services.lineage.dp_sync_repo import DpLineageRepository
 class _FakeDb:
     """记录 execute 语句的假 session。"""
 
-    def __init__(self) -> None:
+    def __init__(self, scalar_value=None) -> None:
         self.executed: list = []
         self.added: list = []
+        self._scalar_value = scalar_value
 
     async def execute(self, stmt, *args, **kwargs):
         self.executed.append(stmt)
         return SimpleNamespace(
             rowcount=1,
-            scalar_one_or_none=lambda: None,
+            scalar_one_or_none=lambda: self._scalar_value,
             scalars=lambda: SimpleNamespace(all=lambda: []),
         )
 
@@ -35,8 +36,8 @@ class _FakeDb:
         self.added.append(obj)
 
 
-def _repo() -> tuple[DpLineageRepository, _FakeDb]:
-    db = _FakeDb()
+def _repo(scalar_value=None) -> tuple[DpLineageRepository, _FakeDb]:
+    db = _FakeDb(scalar_value)
     return DpLineageRepository(db), db
 
 
@@ -239,3 +240,73 @@ async def test_sync_stats_sql_scopes_dp_channel_and_active() -> None:
     assert "status = 'success'" in run_sql
     ticket_sql = str(db.executed[2].compile(compile_kwargs={"literal_binds": True}))
     assert "resolution IS NULL" in ticket_sql
+
+
+# ---------------------------------------------------------------------------
+# 失败退避（B）：record_backoff_failure / reset_backoff
+# ---------------------------------------------------------------------------
+
+
+def _update_values(repo, db, idx=1) -> dict:
+    """解出第 idx 次 execute 的 Update 语句 values（列名→值）。"""
+    stmt = db.executed[idx]
+    assert isinstance(stmt, Update)
+    values = stmt._values if hasattr(stmt, "_values") else {}
+    return {
+        getattr(k, "name", str(k)): (v.value if hasattr(v, "value") else v)
+        for k, v in values.items()
+    }
+
+
+@pytest.mark.asyncio
+async def test_record_backoff_failure_first_waits_five_minutes() -> None:
+    """首次整轮失败：计数 0→1，退避截止 ≈ now+5 分钟。"""
+    from datetime import UTC, datetime, timedelta
+
+    repo, db = _repo(scalar_value=0)
+    before = datetime.now(UTC)
+    await repo.record_backoff_failure(1)
+    values = _update_values(repo, db, idx=1)  # idx0=select 计数, idx1=update
+    assert values["consecutive_failures"] == 1
+    assert isinstance(values["next_scan_at"], datetime)
+    assert before + timedelta(minutes=4) <= values["next_scan_at"]
+    assert values["next_scan_at"] <= datetime.now(UTC) + timedelta(minutes=6)
+
+
+@pytest.mark.asyncio
+async def test_record_backoff_failure_escalates_after_three() -> None:
+    """连续第 3 次失败：按阶梯 15 分钟（1~2 次 5min，≥3 起 15→30→60）。"""
+    from datetime import UTC, datetime, timedelta
+
+    repo, db = _repo(scalar_value=2)  # 已有 2 次失败 → 本次为第 3 次
+    before = datetime.now(UTC)
+    await repo.record_backoff_failure(1)
+    values = _update_values(repo, db, idx=1)
+    assert values["consecutive_failures"] == 3
+    assert before + timedelta(minutes=14) <= values["next_scan_at"]
+    assert values["next_scan_at"] <= datetime.now(UTC) + timedelta(minutes=16)
+
+
+@pytest.mark.asyncio
+async def test_record_backoff_failure_caps_at_sixty_minutes() -> None:
+    """退避封顶 60 分钟：连续失败次数再多也不再拉长。"""
+    from datetime import UTC, datetime, timedelta
+
+    repo, db = _repo(scalar_value=9)  # 本次第 10 次
+    before = datetime.now(UTC)
+    await repo.record_backoff_failure(1)
+    values = _update_values(repo, db, idx=1)
+    assert values["consecutive_failures"] == 10
+    assert before + timedelta(minutes=59) <= values["next_scan_at"]
+    assert values["next_scan_at"] <= datetime.now(UTC) + timedelta(minutes=61)
+
+
+@pytest.mark.asyncio
+async def test_reset_backoff_clears_counter_and_deadline() -> None:
+    """成功一轮：计数归零、退避截止清 NULL。"""
+    repo, db = _repo()
+    await repo.reset_backoff(1)
+    assert len(db.executed) == 1
+    values = _update_values(repo, db, idx=0)
+    assert values["consecutive_failures"] == 0
+    assert values["next_scan_at"] is None
