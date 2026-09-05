@@ -632,6 +632,64 @@ describe("LineageDpSync", () => {
     );
   });
 
+  it("ops scan fetching stage shows pull-to-local label without task counter", async () => {
+    const user = userEvent.setup();
+    mockedApi.scanDpSyncNow.mockResolvedValue({
+      task_id: 3,
+      status: "running",
+      already_running: false,
+    });
+    // fetching = 明细批量预取窗口（把整批 SQL 全文从 dp 源库拉到本地，源库慢时
+    // 可达几十秒）：只展示阶段文案，不带「已处理 X/N」——processed 是上一批末值，
+    // 本批还没开始解析，拼任务计数会让用户误以为这批已在逐个处理。
+    mockedApi.getDpSyncScanStatus.mockResolvedValue({
+      task_id: 3,
+      status: "running",
+      progress: {
+        stage: "fetching",
+        total: 2517,
+        processed: 103,
+        current_task_id: 123,
+      },
+      result: null,
+    });
+    renderPage();
+    await user.click(screen.getByText(/运\s*维/));
+    await screen.findByText("运行记录");
+    await user.click(screen.getByText(/立即全量扫描/));
+    await screen.findByText(/扫描中：拉取节点脚本到本地/);
+    expect(screen.queryByText(/已处理 103 \/ 2517 个任务/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/当前任务 #123/)).not.toBeInTheDocument();
+  });
+
+  it("ops scan collecting stage shows label without processed counter", async () => {
+    const user = userEvent.setup();
+    mockedApi.scanDpSyncNow.mockResolvedValue({
+      task_id: 4,
+      status: "running",
+      already_running: false,
+    });
+    // collecting = 拉变更任务集：total 尚未确定，此前会错配拼「已处理 0 / 0 个任务」
+    mockedApi.getDpSyncScanStatus.mockResolvedValue({
+      task_id: 4,
+      status: "running",
+      progress: {
+        stage: "collecting",
+        total: 0,
+        processed: 0,
+        current_task_id: null,
+      },
+      result: null,
+    });
+    renderPage();
+    await user.click(screen.getByText(/运\s*维/));
+    await screen.findByText("运行记录");
+    await user.click(screen.getByText(/立即全量扫描/));
+    await screen.findByText(/扫描中：拉取变更任务集/);
+    expect(screen.queryByText(/已处理 0 \/ 0 个任务/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/当前任务/)).not.toBeInTheDocument();
+  });
+
   it("ops scan shows cancel button and cancels running task", async () => {
     const user = userEvent.setup();
     mockedApi.scanDpSyncNow.mockResolvedValue({

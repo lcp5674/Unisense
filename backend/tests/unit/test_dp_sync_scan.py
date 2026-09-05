@@ -808,6 +808,43 @@ async def test_scan_batch_prefetch_replaces_per_task_fetch() -> None:
     assert len(batch_detail) == 2
 
 
+@pytest.mark.asyncio
+async def test_scan_progress_flips_fetching_during_batch_prefetch() -> None:
+    """批量预取窗口透出 fetching 阶段（方案 B）：每批 _prefetch_batch 前置
+    stage=fetching、批内逐任务处理前恢复 parsing——此前 stage 固定 parsing，
+    前端无法区分「拉取明细到本地」与「解析写边」，批首拉取几十秒期间进度
+    文案与实际动作不符（用户诉求：全量扫描要能把「先拉取再解析」透出为文案）。
+    """
+    collector = FakeCollector()
+    svc = _svc(collector)
+    progress: dict[str, object] = {}
+    stage_at_prefetch: list[str] = []
+    stage_at_process: list[str] = []
+
+    async def _spy_prefetch(*a: object, **kw: object) -> object:
+        # prefetch 入口时 progress.stage 应为 fetching（scan_once 已前置切换）
+        stage_at_prefetch.append(str(progress.get("stage")))
+        return await DpSyncService._prefetch_batch(svc, *a, **kw)
+
+    async def _spy_process(*a: object, **kw: object) -> object:
+        # 批内逐任务处理（解析写边）前 stage 已恢复 parsing（非 fetching 残留）
+        stage_at_process.append(str(progress.get("stage")))
+        return await DpSyncService._process_task(svc, *a, **kw)
+
+    svc._prefetch_batch = _spy_prefetch  # type: ignore[method-assign]
+    svc._process_task = _spy_process  # type: ignore[method-assign]
+    result = await svc.scan_once(_fc(collector), progress=progress)
+    assert result["scanned_tasks"] == 2
+    # 单批（2 任务 < _PREFETCH_BATCH_SIZE）：prefetch 只发生一次且窗口为 fetching
+    assert stage_at_prefetch == ["fetching"]
+    # 每个任务开始解析前 stage 均为 parsing（fetching 未泄漏进任务处理）
+    assert stage_at_process and all(s == "parsing" for s in stage_at_process)
+    # 终态：收尾统一置 done（fetching 为中间态，不影响终态机）
+    assert progress.get("stage") == "done"
+    assert progress.get("processed") == 2
+    assert progress.get("total") == 2
+
+
 # ---------------------------------------------------------------------------
 # 方案 A：scan_once 批级 LLM 并发裁决（phase1 即时提交 + 批末并发 + phase2 落库）
 # ---------------------------------------------------------------------------

@@ -1315,7 +1315,17 @@ class DpSyncService:
                 if cancel_event is not None and cancel_event.is_set():
                     cancelled = True
                     break
+                # 阶段透出（方案 B）：每批开头是**批量拉取明细**窗口——_prefetch_batch
+                # 一次载入整批 task/step SQL 全文本地（源库慢时可达几十秒），此前
+                # stage 固定 parsing 而 processed 停在上一批末值，前端文案「正在解析」
+                # 与实际动作（拉取中）不符、进度看似冻结。prefetch 前置 fetching、
+                # 拉取完成进入批内逐任务解析前恢复 parsing（_process_task 只更新
+                # step 类型/已处理数不改 stage，终态由收尾统一置 done/cancelled）。
+                if progress is not None:
+                    progress["stage"] = "fetching"
                 prefetched = await self._prefetch_batch(collector, config, batch_ids)
+                if progress is not None:
+                    progress["stage"] = "parsing"
                 # 批内待 LLM 裁决任务（方案 A phase2 队列）
                 deferred: list[tuple[int, list[_LlmWork]]] = []
                 for idx, task_id in enumerate(batch_ids, start=batch_start + 1):

@@ -101,6 +101,9 @@ function fmt(v?: string | null): string {
 const SCAN_STAGE_LABEL: Record<string, string> = {
   queued: "排队中",
   collecting: "拉取变更任务集",
+  // fetching = 明细批量预取窗口：把整批 task/step 的 SQL 全文从 dp 源库拉到本地
+  // （_prefetch_batch，源库慢时单批可达几十秒）——解析在数据落地后才开始。
+  fetching: "拉取节点脚本到本地",
   // 中性表述：所选节点类型包含非 SQL 类型（Shell/DataX 等）时，管线同样把它们
   // 的脚本按 SQL 文本尝试解析——避免误导为「只处理 SQL 节点」（原「解析 SQL 节点」）。
   parsing: "解析节点脚本并写血缘",
@@ -1242,6 +1245,16 @@ function OpsTab() {
       ? Math.min(100, Math.round((scanProgress.processed / scanProgress.total) * 100))
       : 0;
   const scanResult = scanStatus?.result ?? null;
+  // 逐任务解析阶段（parsing）才展示任务计数/当前任务——collecting/fetching 属
+  // 准备/拉取阶段：processed 停在 0 或上一批末值，拼「已处理 X/N」会让用户误以为
+  // 正在逐个处理任务（拉变更任务集 / 拉节点脚本都还没开始解析，collecting 阶段
+  // 会错配成「已处理 0/N 个任务」）。
+  const scanParsing = scanProgress?.stage === "parsing";
+  const showScanTaskDetail =
+    scanStatus?.status === "running" &&
+    !cancelRequested &&
+    !scanStatus.force_stop &&
+    scanParsing;
 
   return (
     <Space direction="vertical" style={{ width: "100%" }} size={12}>
@@ -1404,14 +1417,13 @@ function OpsTab() {
                     : cancelRequested
                       ? "正在停止扫描：等待当前步骤完成后停止…"
                       : `扫描中：${
-                          scanProgress?.stage === "parsing"
+                          scanParsing
                             ? scanParsingText(scanProgress)
                             : scanStageText(scanProgress?.stage)
                         }`}
-                  {!cancelRequested &&
-                    !scanStatus.force_stop &&
+                  {showScanTaskDetail &&
                     `（已处理 ${scanProgress?.processed ?? 0} / ${scanProgress?.total ?? 0} 个任务）`}
-                  {scanProgress?.current_task_id
+                  {showScanTaskDetail && scanProgress?.current_task_id
                     ? ` · 当前任务 #${scanProgress.current_task_id}`
                     : ""}
                 </span>

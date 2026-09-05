@@ -3786,7 +3786,7 @@ export interface DpExcludePreview {
   error?: string | null;
 }
 
-/** 手动扫描实时进度（stage：queued/collecting/parsing/done/cancelled） */
+/** 手动扫描实时进度（stage：queued/collecting/fetching/parsing/done/cancelled） */
 export interface DpSyncScanProgress {
   stage: string;
   total: number;
