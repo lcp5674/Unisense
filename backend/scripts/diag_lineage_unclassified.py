@@ -1,15 +1,26 @@
-"""血缘图谱主图「已配层码仍显示未分层」只读自检脚本。
+"""血缘图谱主图「未分层表」只读诊断 + 存量补码建议脚本。
 
 用途
 ----
-生产血缘视图主图（``/lineage/graph``）中出现「``system_dict.dw_layer`` 已配置
-（如 ``wedw_dwd`` 整库码 active）却仍落在「未分层表」泳道」的表时，本脚本做只读
-分流定位，把责任在四段之间钉死：
+生产血缘视图主图（``/lineage/graph``）中仍有「未分层表」时，本脚本做只读分流，
+回答两类问题：
+  A. 已配层码（如 ``wedw_dwd`` active）却仍显示未分层 → 链路断点在哪一段；
+  B. 剩余未分层表是哪些库、能不能补字典码一次归层、补哪些码、覆盖多少。
 
+输出分段：
 1. 后端下发：主图 API 返回的表节点是否带 ``dw_layer``（不带 → 后端/数据链路问题）；
-2. 字典行：``dw_layer`` 的 active 码里到底有没有目标库（没读到/被软删/状态非 active）；
-3. 节点形态：未分层节点 id 是否干净 ``table:wedw_dwd.xxx``（引号/大小写/缺库前缀都会落空）；
-4. 前端消费：API 已正确下发时，问题在前端（跑旧版不认扩展层 / 浏览器缓存旧 chunk）。
+2. 字典行：``system_dict.dw_layer`` 的 active 码（没读到/被软删/状态非 active 都不采用）；
+3. 节点形态：同一库内「部分归层、部分未分层」的自动检出 + 样例 id
+   （引号/大小写/缺库前缀都会让派生落空）；
+4. 未分层全景：按库聚类 + **家族聚类**（di_tj* 这类共享前缀的库族一眼可辨）+ 动态结论
+   ——不再硬编码 wedw_dwd/wedw_ods 两种"重点库"（生产上它们已全归层时结论会误导）。
+
+动态结论逻辑：
+- 某库名**已是字典 active 整库码**却仍有表未分层 → 链路/形态断点（非缺码），列样例；
+- 家族与现有 active 码同前缀（如 wedw_* 已配 wedw_ods/wedw_dwd）→ 族内其余库属
+  「部分配置」，按整库码补齐即可；
+- 家族在字典中完全无覆盖（如 di_tj*）→ 候选新码族，逐库给出建议码 + 覆盖表数 + 样例，
+  是否归层（或映射贴源层）由管理员决策。
 
 只读保证
 --------
@@ -27,11 +38,13 @@
     python3 diag_lineage_unclassified.py --env-file .env.production --skip-db
 
     # 3) https 自签加 --insecure；MySQL 不在本机默认端口时加 --mysql-host/--mysql-port
+    # 4) 关注别的库族时用 --focus-db（逗号分隔）替换默认 wedw_dwd,wedw_ods
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import ssl
@@ -53,9 +66,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--password", default=None,
                         help="登录密码；缺省读 env 的 UNISENSE_SEED_ADMIN_PASSWORD，避免落命令行")
     parser.add_argument("--env-file", default=None,
-                        help="部署环境文件（解析 UNISENSE_SEED_ADMIN_PASSWORD 与 UNISENSE_MYSQL_*）")
+                        help="部署环境文件（解析 UNISENSE_SEED_ADMIN_PASSWORD "
+                             "与 UNISENSE_MYSQL_*）")
     parser.add_argument("--focus-db", default="wedw_dwd,wedw_ods",
-                        help="重点核验的库前缀，逗号分隔（默认 wedw_dwd,wedw_ods）")
+                        help="链路自检用的重点库前缀，逗号分隔（默认 wedw_dwd,wedw_ods）")
     parser.add_argument("--provenance", choices=("both", "all", "empty"), default="both",
                         help="主图视角：both=默认采集目录视角 + provenance=all 各查一次")
     parser.add_argument("--top", type=int, default=15, help="未分层按库聚类的展示条数")
@@ -169,57 +183,192 @@ def _is_unclassified(node: dict) -> bool:
     return layer is None or str(layer).strip() == ""
 
 
-def _analyze(nodes: list[dict], focus_dbs: list[str], top: int) -> dict:
-    """按四段证据组装统计结果（不落库、不打印敏感字段）。"""
+def _common_prefix(a: str, b: str) -> str:
+    """两字符串公共前缀（未分层库家族聚类用）。"""
+    for i, (ca, cb) in enumerate(zip(a, b, strict=False)):
+        if ca != cb:
+            return a[:i]
+    return a if len(a) <= len(b) else b
+
+
+def _cluster_families(dbs: list[str], min_members: int = 2,
+                      min_prefix_len: int = 3) -> list[dict]:
+    """把库名按最长公共前缀聚成家族（di_tjnanshi/di_tjhepingfuyou…→族 di_tj*）。
+
+    贪心：每轮取「覆盖成员最多（同覆盖取更长前缀）」的前缀，把命中库移出池；
+    剩余单库各自成簇（singleton）。前缀长度 < min_prefix_len 不视为家族，
+    避免把巧合同前缀的无关库并在一起。
+    """
+    pool = sorted(set(dbs))
+    clusters: list[dict] = []
+    while pool:
+        best_prefix: str | None = None
+        best_members: list[str] = []
+        for i, anchor in enumerate(pool):
+            for other in pool[i + 1:]:
+                prefix = _common_prefix(anchor, other)
+                if len(prefix) < min_prefix_len:
+                    continue
+                members = [x for x in pool if x.startswith(prefix)]
+                if len(members) < min_members:
+                    continue
+                if (best_prefix is None
+                        or len(members) > len(best_members)
+                        or (len(members) == len(best_members)
+                            and len(prefix) > len(best_prefix))):
+                    best_prefix = prefix
+                    best_members = members
+        if best_prefix is None:
+            clusters.extend(
+                {"family": db, "members": [db], "singleton": True} for db in pool)
+            break
+        clusters.append({"family": best_prefix, "members": sorted(best_members),
+                         "singleton": False})
+        pool = [x for x in pool if x not in set(best_members)]
+    return clusters
+
+
+def _analyze(nodes: list[dict], focus_dbs: list[str]) -> dict:
+    """按库统计 + 重点库逐库判定 + 部分未分层（形态嫌疑）检出。不落库、不打印敏感字段。"""
     tables = _table_nodes(nodes)
-    unclassified = [n for n in tables if _is_unclassified(n)]
-    by_db = Counter(_db_of_table_node(str(n.get("id") or "")) for n in unclassified)
+    stats: dict[str, dict] = {}
+    for n in tables:
+        db = _db_of_table_node(str(n.get("id") or "")) or "<空库名>"
+        row = stats.setdefault(db, {"total": 0, "classified": 0, "unclassified": 0,
+                                    "samples": []})
+        row["total"] += 1
+        if _is_unclassified(n):
+            row["unclassified"] += 1
+            if len(row["samples"]) < 10:
+                row["samples"].append(str(n.get("id")))
+        else:
+            row["classified"] += 1
+    unclassified_by_db = Counter({db: row["unclassified"]
+                                  for db, row in stats.items() if row["unclassified"] > 0})
+    partial = [{"db": db, **row} for db, row in stats.items()
+               if row["unclassified"] > 0 and row["classified"] > 0]
     focus = []
     for db in focus_dbs:
-        hit = [n for n in tables if _db_of_table_node(str(n.get("id") or "")).lower() == db.lower()]
+        hit = [n for n in tables
+               if _db_of_table_node(str(n.get("id") or "")).lower() == db.lower()]
         if not hit:
             continue
         bad = [n for n in hit if _is_unclassified(n)]
-        focus.append({
-            "db": db,
-            "total": len(hit),
-            "classified": len(hit) - len(bad),
-            "unclassified": len(bad),
-            "samples": [str(n.get("id")) for n in bad[:10]],
-        })
+        focus.append({"db": db, "total": len(hit),
+                      "classified": len(hit) - len(bad), "unclassified": len(bad),
+                      "samples": [str(n.get("id")) for n in bad[:10]]})
     return {
-        "total_nodes": len(nodes),
+        "view_nodes": len(nodes),
         "table_nodes": len(tables),
-        "unclassified": len(unclassified),
-        "unclassified_by_db": by_db.most_common(top),
+        "unclassified": sum(unclassified_by_db.values()),
+        "unclassified_by_db": unclassified_by_db,
         "focus": focus,
+        "partial": partial,
     }
 
 
-def _print_api_report(view_name: str, result: dict) -> None:
-    """打印单个视角（默认/ provenance=all）的四段证据摘要。"""
+def _print_focus_and_partial(result: dict) -> None:
+    """打印重点库逐库状态与同库部分未分层（形态/链路嫌疑）。"""
+    if result["focus"]:
+        for item in result["focus"]:
+            state = ("全部未分层" if item["unclassified"] == item["total"] and item["total"] > 0
+                     else "全部已归层" if item["unclassified"] == 0 else "部分未分层")
+            print(f"[{item['db']}] {state}：{item['classified']}/{item['total']} 已归层，"
+                  f"{item['unclassified']} 未分层")
+            for sample in item["samples"]:
+                print(f"    未分层样例 id：{sample}")
+    if result["partial"]:
+        print(f"[形态/链路嫌疑] {len(result['partial'])} 个库同库内既有归层又有未分层"
+              "（派生输入不一致），核对样例：")
+        for p in result["partial"][:8]:
+            print(f"    {p['db']}: {p['classified']} 已归层 / {p['unclassified']} 未分层")
+            for sample in p["samples"][:3]:
+                print(f"      样例 id：{sample}")
+
+
+def _family_summary(cluster: dict, counts: Counter, active: set[str]) -> str:
+    """家族一行摘要：成员计数 + 字典覆盖状态（已配/部分配/未覆盖/已是码仍未分层）。"""
+    family = cluster["family"]
+    suffix = "*" if not cluster["singleton"] else ""
+    members = ", ".join(f"{m}({counts[m]})" for m in cluster["members"])
+    if cluster["singleton"]:
+        db = cluster["members"][0]
+        if db in active:
+            state = "★已是字典 active 整库码仍全未分层 → 链路/形态断点"
+        else:
+            matched = sorted(code for code in active
+                             if len(_common_prefix(db, code)) >= 3)
+            state = (f"族内部分配置（已有 {', '.join(matched[:5])}），"
+                     "补该整库码即可归层" if matched else "候选补码")
+    else:
+        has_active_prefix = any(code.startswith(family) for code in active)
+        in_family_active = [m for m in cluster["members"] if m in active]
+        if in_family_active:
+            state = f"★含已是 active 码的成员（{','.join(in_family_active)}）→ 链路/形态断点"
+        elif has_active_prefix:
+            shared = ",".join(sorted(code for code in active if code.startswith(family))[:5])
+            state = f"族内部分配置（已有 {shared}），其余成员可补整库码"
+        else:
+            state = "字典完全未覆盖的库族，候选整库码/贴源映射（人工决策）"
+    coverage = sum(counts[m] for m in cluster["members"])
+    return (f"  {family}{suffix:<24} 未分层 {coverage:>4} 张 | "
+            f"{members}  [{state}]")
+
+
+def _print_api_report(view_name: str, result: dict, active: set[str], top: int) -> None:
+    """打印单个视角（默认 / provenance=all）的证据摘要。"""
     print(f"\n===== 视角：{view_name}（表节点 {result['table_nodes']} / "
           f"未分层 {result['unclassified']}）=====")
-    if not result["focus"]:
-        print("重点库在图中无表节点（无数据或库名不符），跳过分段判定。")
+    if result["table_nodes"] == 0:
+        print("  该视角无表节点。")
         return
-    for item in result["focus"]:
-        state = ("全部未分层" if item["unclassified"] == item["total"] and item["total"] > 0
-                 else "全部已归层" if item["unclassified"] == 0 else "部分未分层")
-        print(f"[{item['db']}] {state}：{item['classified']}/{item['total']} 已归层，"
-              f"{item['unclassified']} 未分层")
-        if item["samples"]:
-            print("  未分层样例 id（核对形态/大小写/引号）：")
-            for sample in item["samples"]:
-                print(f"    {sample}")
-    if result["unclassified_by_db"]:
-        print(f"全部未分层按库聚类（top {len(result['unclassified_by_db'])}）：")
-        for db, count in result["unclassified_by_db"]:
-            print(f"  {db or '<空库名>'}: {count}")
+    _print_focus_and_partial(result)
+    full = result["unclassified_by_db"]
+    if full:
+        print(f"全部未分层按库聚类（top {min(top, len(full))}）：")
+        for db, count in full.most_common(top):
+            print(f"  {db or '<空库名>':<28} {count}")
+        clusters = _cluster_families(list(full))
+        print(f"家族聚类（{len(clusters)} 族/单库，同前缀库族一眼可辨）：")
+        for cluster in clusters:
+            print(_family_summary(cluster, full, active))
 
 
-def _run_api_diagnostics(args: argparse.Namespace, password: str) -> None:
-    """登录并按 --provenance 指定的视角拉图、分段判定、打印报告。"""
+def _print_action_plan(summary: dict, active: set[str] | None) -> None:
+    """基于最大视角（通常 provenance=all）输出动态结论 + 可直接执行的补码清单。"""
+    if summary["table_nodes"] == 0:
+        return
+    print("\n===== [结论与建议] =====")
+    un = summary["unclassified_by_db"]
+    if not un:
+        print("该视角无未分层表，无需处理。")
+        return
+    if active is None:
+        print("（未连库，无法核对字典 active 码；下述建议请在补录前先跑 DB 段核对。）")
+    clusters = _cluster_families(list(un))
+    for cluster in clusters:
+        rows = cluster["members"]
+        already = [m for m in rows if m in (active or set())]
+        if already:
+            print(f"\n★ 库名已是字典 active 整库码却仍有表未分层（{', '.join(already)}）")
+            print("  → 非缺码，是链路/形态断点：核对上面样例 id 的大小写/引号/缺库前缀；")
+            print("    若整库普遍如此，查生产后端是否跑着「table 节点统一派生 + graph 透传 "
+                  "dw_layer」的版本（缺透传时主图表节点全落未分层）。")
+        pending = [m for m in rows if m not in (active or set())]
+        if not pending:
+            continue
+        print(f"\n建议补录（{len(pending)} 个整库码，共覆盖 "
+              f"{sum(un[m] for m in pending)} 张未分层表）：")
+        for m in pending:
+            print(f"  code={m:<24} label=<中文层名>   覆盖 {un[m]:>4} 张  样例 {m}.<表名>")
+    if active is None:
+        print("\n判定口径：目标库对应码须 status='active' 且 deleted_at IS NULL，"
+              "读路径才采用（软删不参与派生）。")
+
+
+def _run_api_diagnostics(args: argparse.Namespace, password: str,
+                         active: set[str]) -> list[dict]:
+    """登录按 --provenance 视角拉图、分段判定，返回各视角分析结果（最大视角置尾便于汇总）。"""
     token = _api_login(args.api_base, args.username, password, insecure=args.insecure)
     print(f"登录成功（{args.username}），开始拉取血缘主图……")
     focus_dbs = [db.strip() for db in args.focus_db.split(",") if db.strip()]
@@ -228,9 +377,13 @@ def _run_api_diagnostics(args: argparse.Namespace, password: str) -> None:
         provenances.append(("默认采集目录视角", None))
     if args.provenance in ("both", "all"):
         provenances.append(("provenance=all（血缘边完整表级）", "all"))
+    reports = []
     for view_name, provenance in provenances:
         nodes = _fetch_graph_nodes(args.api_base, token, provenance, insecure=args.insecure)
-        _print_api_report(view_name, _analyze(nodes, focus_dbs, args.top))
+        result = _analyze(nodes, focus_dbs)
+        _print_api_report(view_name, result, active, args.top)
+        reports.append(result)
+    return reports
 
 
 def _dict_sql_hint() -> None:
@@ -249,15 +402,15 @@ def _dict_sql_hint() -> None:
 """)
 
 
-def _check_dict(args: argparse.Namespace, env: dict[str, str]) -> None:
-    """只读 SELECT system_dict 核对 dw_layer active 码；缺依赖/连不上则打印 SQL 提示。"""
+def _check_dict(args: argparse.Namespace, env: dict[str, str]) -> set[str] | None:
+    """只读 SELECT system_dict，返回 active 码集合；缺依赖/连不上返回 None 并打印 SQL。"""
     if args.skip_db:
-        return
+        return None
     try:
         import pymysql  # 延迟导入：仅本段需要
     except ImportError:
         _dict_sql_hint()
-        return
+        return None
     host = args.mysql_host or "127.0.0.1"
     port = args.mysql_port or 3306
     user = env.get("UNISENSE_MYSQL_USER")
@@ -266,14 +419,15 @@ def _check_dict(args: argparse.Namespace, env: dict[str, str]) -> None:
     if not (user and password and database):
         print("[DB 字典检查被跳过] .env 缺 UNISENSE_MYSQL_USER/PASSWORD/DATABASE 键。")
         _dict_sql_hint()
-        return
+        return None
     try:
         conn = pymysql.connect(host=host, port=port, user=user, password=password,
                                database=database, connect_timeout=5, charset="utf8mb4")
     except Exception as exc:  # noqa: BLE001 - 连接失败仅提示
         print(f"[DB 字典检查失败] 连接 {host}:{port} 失败：{exc}")
         _dict_sql_hint()
-        return
+        return None
+    active: set[str] = set()
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT code, label, status, deleted_at FROM system_dict "
@@ -281,13 +435,21 @@ def _check_dict(args: argparse.Namespace, env: dict[str, str]) -> None:
             rows = cur.fetchall()
         print(f"\n===== system_dict.dw_layer 字典（共 {len(rows)} 行）=====")
         for code, label, status, deleted_at in rows:
-            state = "生效" if status == "active" and deleted_at is None else f"失效(status={status},deleted={deleted_at is not None})"
-            print(f"  {code or '<空>':<20} {label or '':<20} {state}")
+            is_active = status == "active" and deleted_at is None
+            if is_active and code:
+                active.add(code)
+            state = ("生效" if is_active
+                     else f"失效(status={status},deleted={deleted_at is not None})")
+            print(f"  {(code or '<空>'):<20} {(label or ''):<20} {state}")
     finally:
         conn.close()
+    return active
 
 
 def main() -> None:
+    # 规避 GBK 终端把中文标题打成乱码；reconfigure 不可用时忽略
+    with contextlib.suppress(Exception):
+        sys.stdout.reconfigure(encoding="utf-8")
     args = _parse_args()
     env: dict[str, str] = {}
     if args.env_file and os.path.exists(args.env_file):
@@ -301,16 +463,12 @@ def main() -> None:
                 print(f"已从 {candidate} 读取部署配置。")
                 break
     password = _resolve_password(args, env)
-    _run_api_diagnostics(args, password)
-    _check_dict(args, env)
-    print("""
-===== 分流结论 =====
-- 重点库「全部已归层」→ 后端/数据无罪，请硬刷新（Cmd+Shift+R）血缘页，仍复现则查前端
-  运行产物是否含「扩展层自动成带」逻辑（老版只认硬编码单段白名单，整库码会落未分层）。
-- 重点库「全部未分层」→ 后端或字典链路问题：核对上方 dw_layer active 码；码在且 active，
-  则查生产后端是否跑着透传 dw_layer 的版本（graph_from_edges 缺透传时主图表节点全落未分层）。
-- 重点库「部分未分层」→ 节点形态问题：看未分层样例 id 是否带引号/大小写/缺库前缀。
-""")
+    active = _check_dict(args, env)
+    reports = _run_api_diagnostics(args, password, active or set())
+    if reports:
+        # 汇总用「表节点最多」的视角（provenance=all 通常最全），避免小视角误导
+        summary = max(reports, key=lambda r: r["table_nodes"])
+        _print_action_plan(summary, active)
 
 
 if __name__ == "__main__":
