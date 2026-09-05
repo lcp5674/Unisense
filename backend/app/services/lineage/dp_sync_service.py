@@ -456,6 +456,15 @@ class DpSyncService:
             if reused:
                 return reused
 
+        # 未裁决票跳过（独立于记忆复用开关）：同 step+sql_hash 已存在未裁决
+        # 待抉择单（resolution IS NULL）时不再重复调 LLM——每轮重扫的 LLM 意见
+        # 被 create_ticket 幂等丢弃（已存在单不更新），纯烧成本；人工裁决
+        # （resolve/ignore）前重复确认无意义。已裁决票（resolution 非空）由上方
+        # 记忆复用处理；无票则正常走 LLM。
+        skip = await self._skip_pending_llm(step, sql_hash)
+        if skip is not None:
+            return skip
+
         if outcome.status == "ok":
             if defer_llm:
                 return await self._defer_complex(
@@ -786,6 +795,25 @@ class DpSyncService:
             )
             return {"step_id": step.get("step_id"), "status": "memory_reused"}
         return None
+
+    # ---- 未裁决票跳过 ----
+    async def _skip_pending_llm(
+        self, step: dict[str, Any], sql_hash: str
+    ) -> dict[str, Any] | None:
+        """同 step+sql_hash 已存在未裁决待抉择单 → 返回跳过摘要（不重复调 LLM）。
+
+        复杂/失败节点若已有未裁决票（``resolution IS NULL``，如 diverged /
+        unparseable / llm_fallback 待人工抉择），每轮重扫重复调 LLM 确认/兜底的
+        意见会被 ``create_ticket`` 幂等丢弃（已存在单不更新），纯烧成本——人工
+        裁决（resolve/ignore）前不重复确认。无未裁决票（无票，或已裁决——已裁决
+        由 ``_reuse_resolution`` 记忆复用处理）返回 ``None``，调用方继续走 LLM。
+        """
+        ticket = await self._dp_repo.find_ticket_by_step_hash(
+            step.get("step_id"), sql_hash  # type: ignore[arg-type]
+        )
+        if ticket is None or ticket.resolution is not None:
+            return None
+        return {"step_id": step.get("step_id"), "status": "ticket_pending"}
 
     # ---- LLM 调用 ----
     async def _llm_confirm(self, sql: str, outcome: Any) -> ConfirmVerdict:
@@ -1123,6 +1151,9 @@ class DpSyncService:
             "diverged": 0,
             "llm_fallback": 0,
             "unparseable": 0,
+            # 未裁决票跳过（重复 LLM 拦截）：同 step+hash 已有待抉择单未裁决，
+            # 本轮不重复确认——run_log detail 可见（不入 update_run_log 固定列）
+            "ticket_pending": 0,
             "tickets_created": 0,
             "tickets_resolved": 0,
             "errors": 0,

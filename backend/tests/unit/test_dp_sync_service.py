@@ -250,6 +250,133 @@ async def test_memory_reuse_ignored_skips() -> None:
     svc._lineage_repo.upsert_edges_with_status_batch.assert_not_awaited()
 
 
+# ---- 未裁决票跳过（重复 LLM 拦截）----
+
+
+@pytest.mark.asyncio
+async def test_pending_ticket_skips_llm_defer() -> None:
+    """defer 模式：已有未裁决 diverged 票 → 返回 ticket_pending，不再打包 _LlmWork。"""
+    calls = 0
+
+    async def llm(messages, **kw):
+        nonlocal calls
+        calls += 1
+        return {"content": '{"agree": true}'}
+
+    ticket = MagicMock()
+    ticket.status = "diverged"
+    ticket.resolution = None  # 未裁决
+    svc = _svc(llm_chat=llm)
+    svc._dp_repo.find_ticket_by_step_hash = AsyncMock(return_value=ticket)
+    sql = (
+        "create table t as select dept_id, "
+        "row_number() over (partition by dept_id order by cnt desc) as rn "
+        "from (select dept_id, count(1) as cnt from wedw_ods.x group by dept_id) a"
+    )
+    result = await svc.process_step(TASK, STEP, sql, _config(), defer_llm=True)
+    assert result["status"] == "ticket_pending"
+    assert calls == 0  # LLM 未被调用
+    svc._dp_repo.create_ticket.assert_not_awaited()  # 幂等建单也免调
+    svc._lineage_repo.upsert_edges_with_status_batch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pending_ticket_skips_llm_sync() -> None:
+    """现场（非 defer）模式同样跳过——defer/现场两路径都不重复烧 LLM。"""
+    calls = 0
+
+    async def llm(messages, **kw):
+        nonlocal calls
+        calls += 1
+        return {"content": '{"agree": false}'}
+
+    ticket = MagicMock()
+    ticket.status = "diverged"
+    ticket.resolution = None
+    svc = _svc(llm_chat=llm)
+    svc._dp_repo.find_ticket_by_step_hash = AsyncMock(return_value=ticket)
+    sql = (
+        "create table t as select dept_id, "
+        "row_number() over (partition by dept_id order by cnt desc) as rn "
+        "from (select dept_id, count(1) as cnt from wedw_ods.x group by dept_id) a"
+    )
+    result = await svc.process_step(TASK, STEP, sql, _config())
+    assert result["status"] == "ticket_pending"
+    assert calls == 0
+    svc._dp_repo.create_ticket.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pending_ticket_unparseable_skips_llm() -> None:
+    """失败节点已有未裁决 unparseable 票 → 同样跳过 LLM 兜底（不再重试提炼）。"""
+    calls = 0
+
+    async def llm(messages, **kw):
+        nonlocal calls
+        calls += 1
+        return {"content": '{"target_tables": [], "source_tables": [], "note": "ok"}'}
+
+    ticket = MagicMock()
+    ticket.status = "unparseable"
+    ticket.resolution = None
+    svc = _svc(llm_chat=llm)
+    svc._dp_repo.find_ticket_by_step_hash = AsyncMock(return_value=ticket)
+    result = await svc.process_step(TASK, STEP, "this is not sql {{{", _config())
+    assert result["status"] == "ticket_pending"
+    assert calls == 0
+    svc._dp_repo.create_ticket.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pending_ticket_skip_independent_of_memory_switch() -> None:
+    """resolve_memory_enabled=False（不复用已裁决记忆）时未裁决票仍跳过——
+    拦截针对「未裁决重复确认白烧 LLM」，与记忆复用开关语义正交。"""
+    calls = 0
+
+    async def llm(messages, **kw):
+        nonlocal calls
+        calls += 1
+        return {"content": '{"agree": true}'}
+
+    ticket = MagicMock()
+    ticket.status = "llm_fallback"
+    ticket.resolution = None
+    svc = _svc(llm_chat=llm)
+    svc._dp_repo.find_ticket_by_step_hash = AsyncMock(return_value=ticket)
+    sql = (
+        "create table t as select dept_id, "
+        "row_number() over (partition by dept_id order by cnt desc) as rn "
+        "from (select dept_id, count(1) as cnt from wedw_ods.x group by dept_id) a"
+    )
+    result = await svc.process_step(
+        TASK, STEP, sql, _config(resolve_memory_enabled=False)
+    )
+    assert result["status"] == "ticket_pending"
+    assert calls == 0
+    svc._dp_repo.create_ticket.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolved_ticket_not_skipped_by_pending_check() -> None:
+    """已裁决票（resolution 非空）不被未裁决拦截误伤——仍走记忆复用（当开关开）。"""
+    ticket = MagicMock()
+    ticket.status = "resolved"
+    ticket.resolution = "accept_sqlglot"
+    ticket.llm_opinion = None
+    ticket.manual_edges_json = None
+    svc = _svc()
+    svc._dp_repo.find_ticket_by_step_hash = AsyncMock(return_value=ticket)
+    sql = (
+        "create table t as select dept_id, "
+        "row_number() over (partition by dept_id order by cnt desc) as rn "
+        "from (select dept_id, count(1) as cnt from wedw_ods.x group by dept_id) a"
+    )
+    result = await svc.process_step(TASK, STEP, sql, _config())
+    assert result["status"] == "memory_reused"
+    svc._dp_repo.create_ticket.assert_not_awaited()
+    assert svc._lineage_repo.upsert_edges_with_status_batch.await_count == 1
+
+
 @pytest.mark.asyncio
 async def test_llm_disabled_complex_creates_ticket() -> None:
     svc = _svc()
