@@ -103,6 +103,41 @@ async def test_simple_ok_stored_without_llm() -> None:
     svc = _svc()
     result = await svc.process_step(TASK, STEP, SIMPLE_SQL, _config())
     assert result["status"] == "parsed_ok"
+
+
+@pytest.mark.asyncio
+async def test_schema_second_parse_failed_keeps_first() -> None:
+    """N1：带 schema 的二轮解析返回 failed **状态**（非抛异常）→ 沿用首轮结果。
+
+    parse_dp_step 对语句失败是整体返回 status="failed" 而非上抛——D7 只兜了抛
+    异常分支，failed 态曾被无条件采纳（outcome=second），把首轮已产出的表级边
+    整体丢弃并降级走 llm_fallback 低置信参考单。仅采纳二轮 ok / no_flow。
+    """
+    svc = _svc()
+    provider = MagicMock()
+    provider.as_map = AsyncMock(
+        return_value={"wedw_ods.visit_d": ["department_id", "cnt", "date_id"]}
+    )
+    svc._schema_provider = provider
+    real_parse = svc._parse_typed  # 真实 sqlglot 解析（bound method）
+    calls = {"n": 0}
+
+    async def _fake_parse(sql, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return await real_parse(sql, **kw)  # type: ignore[misc]
+        return SimpleNamespace(
+            status="failed", table_edges=[], field_edges=[], is_complex=False
+        )
+
+    svc._parse_typed = _fake_parse  # type: ignore[method-assign]
+    seen: set[tuple[str, str]] = set()
+    result = await svc.process_step(TASK, STEP, SIMPLE_SQL, _config(), seen_pairs=seen)
+    assert result["status"] == "parsed_ok"  # 沿用首轮 ok 非 complex
+    assert calls["n"] == 2  # 首轮 + schema 二轮各一次
+    # 未降级走 failed LLM fallback（无建单）；首轮表级边正常入库进 seen
+    svc._dp_repo.create_ticket.assert_not_awaited()
+    assert ("table:wedw_ods.visit_d", "table:wedw_dwd.dp_dq_measure_df") in seen
     svc._dp_repo.create_ticket.assert_not_awaited()
     # 表级边批量写入 + dp_task_refs 合并 + 字段映射批量
     assert svc._lineage_repo.upsert_edges_with_status_batch.await_count == 1
@@ -738,6 +773,40 @@ async def test_process_task_skips_stale_prefetch_snapshot() -> None:
     assert result == []
     assert counters["scanned_tasks"] == 0
     svc._dp_repo.soft_delete_field_mappings.assert_not_awaited()
+
+
+async def test_process_task_skips_stale_step_snapshot() -> None:
+    """N2：预取 step 行 gmt_modified 超出本轮 step 水位 step_max → 该 step 跳过
+    留待下轮（task 行新鲜仍处理其余 step，不整任务跳过——F3 只校验 task 行，
+    漏了最常见的变更源 SQL 脚本）。scanned_steps 不虚增。"""
+    svc = _svc()
+    task = dict(TASK)  # 无 gmt_modified → 不触发 task 级 F3
+    fresh = datetime(2026, 9, 5, 10, 0, tzinfo=UTC)
+    stale = datetime(2026, 9, 5, 12, 0, tzinfo=UTC)
+    step_max = datetime(2026, 9, 5, 11, 0, tzinfo=UTC)
+    svc.process_step = AsyncMock(return_value={"status": "parsed_ok"})
+    svc.backfill_owner = AsyncMock()
+    counters = _counters()
+    steps = [
+        {"step_id": 1, "task_step_type": 7, "script_info": SIMPLE_SQL,
+         "gmt_modified": stale},  # 超水位 → 跳过
+        {"step_id": 2, "task_step_type": 7, "script_info": SIMPLE_SQL,
+         "gmt_modified": fresh},  # 新鲜 → 处理
+        {"step_id": 3, "task_step_type": 7, "script_info": SIMPLE_SQL},  # 无 gmt → 处理
+    ]
+    await svc._process_task(
+        AsyncMock(),
+        _config(),
+        TASK["task_id"],
+        counters,
+        set(),
+        prefetched={TASK["task_id"]: (task, steps)},
+        task_max=datetime(2026, 9, 5, 23, 0, tzinfo=UTC),
+        step_max=step_max,
+    )
+    assert counters["scanned_steps"] == 2
+    processed_ids = [c.args[1]["step_id"] for c in svc.process_step.await_args_list]
+    assert processed_ids == [2, 3]  # stale step 1 被跳过，未交给 process_step
 
 
 async def test_defer_complex_does_not_purge_in_phase1() -> None:

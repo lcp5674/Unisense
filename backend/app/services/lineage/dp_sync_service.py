@@ -216,6 +216,12 @@ _STEP_SELECT_COLS: tuple[tuple[str, str], ...] = (
     ("task_step_name", "step_name"),
     ("task_step_type", "task_step_type"),
     ("script_info", "script_info"),
+    # gmt_modified：供 N2 预取 step 快照新鲜度校验（step 行变更时间 > 本轮变更集
+    # 水位时跳过留待下轮，防批量预取放大「查询→处理」竞态窗口致 SQL 脚本变更
+    # 静默延迟到 24h 自动全量——F3 只校验了 task 行，漏了最常见的变更源）。
+    # 该列真实 DDL 必然存在（_changed_ids 的 step 增量查询依赖它）；build_task_ref
+    # 的 step_fields 不含它 → 不落入 dp_task_refs 快照，零副作用。
+    ("gmt_modified", "gmt_modified"),
 )
 
 _STEP_ENHANCED_COLS: tuple[tuple[str, str], ...] = (
@@ -232,6 +238,21 @@ def _utc_aware(dt: datetime | None) -> datetime | None:
     if dt is None or dt.tzinfo is not None:
         return dt
     return dt.replace(tzinfo=UTC)
+
+
+def _is_stale_snapshot(gmt: Any, max_dt: datetime | None) -> bool:
+    """预取快照新鲜度判定：源行变更时间 ``gmt`` > 本轮变更集水位 ``max_dt``。
+
+    F3/N2：批量预取把「变更集查询 → 处理」窗口从逐任务的秒级拉长到整批分钟级——
+    任务/step 在窗口内被更新时，预取拿到的行可能不属于本轮已确认的变更集（其
+    gmt > 本轮水位）。本轮跳过留待下轮增量命中（水位推进后 ``gmt > 水位`` 的新
+    变更由下轮专门处理），防「本轮处理越界行 + 下轮重扫」的重复与快照撕裂。
+    """
+    if max_dt is None or not isinstance(gmt, datetime):
+        return False
+    gmt_aware = _utc_aware(gmt)
+    max_aware = _utc_aware(max_dt)
+    return gmt_aware is not None and max_aware is not None and gmt_aware > max_aware
 
 
 def _validate_manual_table(name: str) -> None:
@@ -421,12 +442,23 @@ class DpSyncService:
                         exc,
                     )
                 else:
-                    outcome = second
-                    if outcome.status == "no_flow":
-                        await self._dp_repo.soft_delete_field_mappings(
-                            step_id=step.get("step_id"), keep_sql_hash=sql_hash
+                    # N1：二轮返回 failed **状态**（非抛异常）同样沿用首轮。parse_dp_step
+                    # 对语句失败是整体返回 status="failed" 而非上抛——D7 只兜了抛异常
+                    # 分支，failed 态曾被无条件采纳（outcome=second），把首轮已产出的
+                    # 表级边整体丢弃并降级走 llm_fallback 低置信参考单。仅采纳二轮
+                    # ok / no_flow 结果。
+                    if second.status == "failed":
+                        logger.warning(
+                            "dp_schema_second_failed_keep_first step=%s",
+                            step.get("step_id"),
                         )
-                        return {"step_id": step.get("step_id"), "status": "no_flow"}
+                    else:
+                        outcome = second
+                        if outcome.status == "no_flow":
+                            await self._dp_repo.soft_delete_field_mappings(
+                                step_id=step.get("step_id"), keep_sql_hash=sql_hash
+                            )
+                            return {"step_id": step.get("step_id"), "status": "no_flow"}
 
         # F4（旧映射清理下沉）：本 step 的旧 sql_hash 字段映射清理不再在此无条件
         # 提前执行——若本 step 将 defer（复杂/失败 + LLM 开启，打包 _LlmWork 到
@@ -1299,6 +1331,7 @@ class DpSyncService:
                             force_event=force_event,
                             progress=progress,
                             task_max=task_max,
+                            step_max=step_max,
                         )
                         await self._db.commit()
                         if works:
@@ -1660,6 +1693,7 @@ class DpSyncService:
         prefetched: dict[int, tuple[dict[str, Any] | None, list[dict[str, Any]]]]
         | None = None,
         task_max: datetime | None = None,
+        step_max: datetime | None = None,
     ) -> list[_LlmWork]:
         """处理单个任务（方案 A phase1）：取 task 静态字段 + SQL 节点逐 step 处理。
 
@@ -1673,6 +1707,9 @@ class DpSyncService:
             为 ``None`` 或键缺失时回退单任务拉取（兼容独立调用/测试与预取失败降级）。
         task_max: 本轮变更集水位（task gmt_modified 最大值）——预取行 gmt_modified
             超出水位说明任务在变更集查询后被更新，跳过留待下轮（F3，见实现处）。
+        step_max: 本轮变更集水位（step gmt_modified 最大值）——预取 step 行
+            gmt_modified 超出水位说明该 SQL 节点在变更集查询后被更新，跳过该 step
+            留待下轮（N2，F3 的 step 侧对偶——SQL 脚本变更不总伴随 task 行变化）。
 
         Returns:
             需批级并发 LLM 裁决的工作项列表（空=本任务已全部处理完，调用方可在
@@ -1700,19 +1737,14 @@ class DpSyncService:
         # 批量预取把「查询→处理」窗口从逐任务的秒级拉长到整批分钟级，故处理前
         # 必须校验（逐任务拉取路径同样适用，窗口小但语义一致）。
         task_gmt = task.get("gmt_modified")
-        if task_max is not None and isinstance(task_gmt, datetime):
-            # 双值归一化 UTC 后比较（MySQL DATETIME naive；_utc_aware 补 UTC 防
-            # naive/aware 混比 TypeError），均非 None（已判）才可能触发跳过。
-            gmt_aware = _utc_aware(task_gmt)
-            max_aware = _utc_aware(task_max)
-            if gmt_aware is not None and max_aware is not None and gmt_aware > max_aware:
-                logger.info(
-                    "dp_sync_skip_stale_snapshot task_id=%s gmt=%s > task_max=%s",
-                    task_id,
-                    task_gmt,
-                    task_max,
-                )
-                return []
+        if _is_stale_snapshot(task_gmt, task_max):
+            logger.info(
+                "dp_sync_skip_stale_snapshot task_id=%s gmt=%s > task_max=%s",
+                task_id,
+                task_gmt,
+                task_max,
+            )
+            return []
         # 排除规则：任务名命中排除
         patterns = list(config.exclude_task_patterns or [])
         if patterns:
@@ -1752,6 +1784,22 @@ class DpSyncService:
                     if force_event is not None and force_event.is_set():
                         raise _ScanCancelledError(f"task {task_id} force-stop")
                     break  # 协作取消：本任务剩余 steps 不再处理（已处理 steps 保留）
+                # N2（step 快照新鲜度）：F3 只校验 task 行——但 SQL 脚本变更是最常见
+                # 变更源，且不总伴随 task 行变化（_changed_ids 独立维护 step 水位即
+                # 因此）。预取 step 行 gmt_modified 超出本轮 step 水位时，说明该节点
+                # 在变更集查询后被更新（预取拿到越界行）；跳过该 step 留待下轮增量
+                # 命中（task 级扫描继续处理其余 step，不整任务跳过——与 F3 的
+                # task 级语义对偶）。force_full 时 step_max=全表 max，不触发跳过。
+                if _is_stale_snapshot(step.get("gmt_modified"), step_max):
+                    logger.info(
+                        "dp_sync_skip_stale_step_snapshot task_id=%s step_id=%s "
+                        "gmt=%s > step_max=%s",
+                        task_id,
+                        step.get("step_id"),
+                        step.get("gmt_modified"),
+                        step_max,
+                    )
+                    continue
                 if progress is not None:
                     stype = int(step.get("task_step_type") or 7)
                     progress["current_step_type"] = stype
