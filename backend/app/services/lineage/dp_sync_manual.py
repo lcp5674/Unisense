@@ -203,12 +203,22 @@ async def _run_scan_job(task_id: int, *, force: bool) -> None:
         st["error"] = "已有周期/手动扫描在运行，请稍后再试（跨进程互斥保护）"
         return
     try:
-        await _run_scan_job_locked(task_id, st, force=force)
+        async def _hb() -> None:
+            # D3：手动长扫描心跳续期锁（>TTL 不被 worker cron 抢占双跑）。
+            await lock.refresh(lock_key, owner, ttl=3600)
+
+        await _run_scan_job_locked(task_id, st, force=force, heartbeat=_hb)
     finally:
         await lock.release(lock_key, owner)
 
 
-async def _run_scan_job_locked(task_id: int, st: dict[str, Any], *, force: bool) -> None:
+async def _run_scan_job_locked(
+    task_id: int,
+    st: dict[str, Any],
+    *,
+    force: bool,
+    heartbeat: Any | None = None,
+) -> None:
     """持锁执行扫描主体（成功/失败/取消收尾）。"""
     try:
         async with async_session_factory() as db:
@@ -223,6 +233,7 @@ async def _run_scan_job_locked(task_id: int, st: dict[str, Any], *, force: bool)
                 force_event=st["force_event"],
                 force=force,
                 force_full=True,
+                heartbeat=heartbeat,
             )
         st["result"] = result
         skipped = result.get("skipped")

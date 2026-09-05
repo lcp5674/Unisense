@@ -24,7 +24,7 @@ import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -384,18 +384,30 @@ class DpSyncService:
                 logger.warning("dp_schema_map_failed step=%s error=%s", step.get("step_id"), exc)
                 schema_map = {}
             if schema_map:
-                outcome = await self._parse_typed(
-                    sql,
-                    step_type=int(step.get("task_step_type") or 7),
-                    config=config,
-                    target_table=task.get("out_table") or None,
-                    schema_columns=schema_map,
-                )
-                if outcome.status == "no_flow":
-                    await self._dp_repo.soft_delete_field_mappings(
-                        step_id=step.get("step_id"), keep_sql_hash=sql_hash
+                # D7：二轮（schema 显式展开）解析套 try——star 展开路径对异常 SQL
+                # 无最外层兜底时若裸调抛错，会上抛至任务级 except 回滚首轮可用
+                # outcome 且记 failed（稳定触发则每轮重扫每轮失败）。失败沿用首轮。
+                try:
+                    second = await self._parse_typed(
+                        sql,
+                        step_type=int(step.get("task_step_type") or 7),
+                        config=config,
+                        target_table=task.get("out_table") or None,
+                        schema_columns=schema_map,
                     )
-                    return {"step_id": step.get("step_id"), "status": "no_flow"}
+                except Exception as exc:  # noqa: BLE001 —— 二轮失败沿用首轮 outcome
+                    logger.warning(
+                        "dp_schema_second_parse_failed step=%s error=%s",
+                        step.get("step_id"),
+                        exc,
+                    )
+                else:
+                    outcome = second
+                    if outcome.status == "no_flow":
+                        await self._dp_repo.soft_delete_field_mappings(
+                            step_id=step.get("step_id"), keep_sql_hash=sql_hash
+                        )
+                        return {"step_id": step.get("step_id"), "status": "no_flow"}
 
         # SQL 演进清理（P2-8）：同 step 旧 sql_hash 的字段映射先软删（保留本次
         # hash——新映射随后写入），避免旧列映射永久残留致表膨胀/展示过时。
@@ -701,6 +713,24 @@ class DpSyncService:
                 "fields_degraded": degraded,
             }
         if ticket.resolution == "accept_llm":
+            # D6：基础 sqlglot 边（剔除 LLM 判错的 wrong_edges）重新确认并 add
+            # seen_pairs——resolve 时写的基础边从未进扫描轮 seen_pairs，last_seen_at
+            # 永 NULL → mark_missing 跳过，任务删除后永不 stale（删除语义不闭合，
+            # 与 accept_sqlglot/manual 全量重见不对称）。剔 wrong 后确认与当初
+            # resolve 的写库一致（幂等 upsert 不重复）。
+            sqlglot_json = self._without_wrong_edges(
+                edges_to_json(outcome.table_edges, outcome.field_edges),
+                ticket.llm_opinion,
+            )
+            await self._apply_json_edges(
+                sqlglot_json,
+                task,
+                step,
+                sql_hash,
+                provenance="sqlglot",
+                confidence=1.0,
+                seen_pairs=seen_pairs,
+            )
             await self._apply_llm_opinion(
                 ticket.llm_opinion, task, step, sql_hash, seen_pairs
             )
@@ -826,10 +856,12 @@ class DpSyncService:
                 )
                 if fm["degraded"]:
                     degraded_cnt += 1
-        # 4) 字段映射批量幂等写
+        # 4) 字段映射批量幂等写——written 取真实写入数（新建+复活；活跃已存在项
+        # 被忽略不计，D5 统计口径），而非「尝试条数」——SQL 未变的重扫不再每轮
+        # 把全量映射虚报为 field_mappings_written。
+        written = 0
         if field_items:
-            await self._dp_repo.upsert_field_mappings_batch(field_items)
-        written = len(field_items)
+            written = await self._dp_repo.upsert_field_mappings_batch(field_items)
         return written, degraded_cnt
 
     async def _upsert_edge(
@@ -959,6 +991,7 @@ class DpSyncService:
         force_event: asyncio.Event | None = None,
         force: bool = False,
         force_full: bool = False,
+        heartbeat: Callable[[], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """执行一轮 dp 血缘扫描（由 arq 周期任务或手动「立即扫描」触发）。
 
@@ -977,6 +1010,8 @@ class DpSyncService:
             force_full: True 时**强制全量重扫**（忽略水位，完整扫 dp 全部活跃
                 任务）——手动「立即扫描一轮」的用户心智是「完整跑一遍看真实解析」，
                 而非增量空扫 0 任务；周期任务保持 False（增量 + 周期自动全量）。
+            heartbeat: 可选心跳回调（持锁调用方注入——主循环每批任务前续期
+                分布式锁，防长扫描 > 锁 TTL 被其它 cron/manual 抢占双跑，D3）。
         """
         config = await self._dp_repo.get_config()
         if config is None or (not config.enabled and not force):
@@ -1051,6 +1086,11 @@ class DpSyncService:
         seen_pairs: set[tuple[str, str]] = set()
         # B：本轮失败任务 id（随 run_log detail 记录，下轮显式并入重扫）
         failed_task_ids: list[int] = []
+        # D1：前轮遗留待重扫任务 id——**进入 try 前**读取（本轮 run 已前置提交为
+        # running 会被 repo 排除，读到最近一条非 running 的 detail）；fetch/整轮
+        # 异常发生在 try 内时 prev_retry_ids 仍已取到，收尾 failed detail 并入防
+        # 丢失（失败轮被异常轮覆盖不再静默丢任务，只等 24h 全量兜底）。
+        prev_retry_ids = await self._dp_repo.pending_retry_task_ids()
         try:
             # 连接获取与采集通道运行记录（begin）一并纳入 try：fetch 失败/中途异常
             # 统一走 except 记录 failed，不再让未绑定 collector 从 finally 二次抛错。
@@ -1067,12 +1107,11 @@ class DpSyncService:
             task_ids, task_max, step_max = await self._changed_ids(
                 collector, config, wm, force_full=full_scan
             )
-            # 失败任务重扫（B）：上轮部分失败（errors>0）的任务 id 已记入 run_log
-            # detail（retry_task_ids），收尾水位推进后增量查询不再命中它们，需显式
-            # 并入本轮重扫；成功即从下轮消失（detail 只含本轮新失败，幂等安全）。
-            retry_ids = await self._dp_repo.pending_retry_task_ids()
-            if retry_ids:
-                merged = set(task_ids) | set(retry_ids)
+            # 失败任务重扫（B + D1）：前轮失败任务 id（try 前已读入 prev_retry_ids）
+            # 显式并入变更集重扫——水位推进后增量查询不再命中它们；成功即从下轮
+            # 消失（detail 只含本轮新失败，幂等安全）。
+            if prev_retry_ids:
+                merged = set(task_ids) | set(prev_retry_ids)
                 task_ids = sorted(merged)
             if progress is not None:
                 progress["total"] = len(task_ids)
@@ -1093,6 +1132,10 @@ class DpSyncService:
             # 立即可见）；需 LLM 的 step 攒批后 Semaphore 并发裁决，批末逐任务
             # phase2 独立提交——任务 A 的裁决写不随任务 B 的 LLM/异常而阻塞或回滚。
             for batch_start in range(0, len(task_ids), _PREFETCH_BATCH_SIZE):
+                # D3：长扫描心跳——每批续期分布式锁（TTL 重置），防扫描超锁 TTL
+                # 被其它 cron/manual 抢占双跑（mark_missing 双倍累加/建单撞唯一键）。
+                if heartbeat is not None:
+                    await heartbeat()
                 batch_ids = task_ids[batch_start : batch_start + _PREFETCH_BATCH_SIZE]
                 if cancel_event is not None and cancel_event.is_set():
                     cancelled = True
@@ -1198,13 +1241,17 @@ class DpSyncService:
             confirmed, restored = await self._lineage_repo.mark_seen(
                 DP_PROVENANCE, seen_pairs
             )
-            counters["tickets_resolved"] += restored
+            # D4：失效边恢复数（restored）不并入 tickets_resolved（后者只统计抉择单
+            # 裁决）——单列 restored_edges 记入 detail，避免 run_log/统计口径被污染。
             # 删除语义闭环（P1-6）：仅**全量轮**对未再出现的边执行失效观察——
             # mark_missing 累加 missing_count（threshold=2 观察期）后标 stale，
             # 任务/节点删除后其边保留历史但进入失效队列。增量轮跳过（防误伤）。
             missing = 0
             stale_flagged = 0
-            if full_scan and not cancelled:
+            # 全量轮带任务失败（errors>0）跳过 mark_missing（D3）：失败任务回滚其
+            # 边不在 seen_pairs，照常累加会把「连续两轮全量都失败」的任务旧边误标
+            # stale 删边——下一轮全量（24h 自动）再补失效观察即可。
+            if full_scan and not cancelled and counters["errors"] == 0:
                 missing, stale_flagged = await self._lineage_repo.mark_missing(
                     DP_PROVENANCE, seen_pairs, threshold=2
                 )
@@ -1214,6 +1261,7 @@ class DpSyncService:
             detail["seen_pairs"] = len(seen_pairs)
             detail["missing"] = missing
             detail["stale_flagged"] = stale_flagged
+            detail["restored_edges"] = restored
             # B：本轮失败任务 id 随 detail 记录 → 下轮 scan_once 经
             # pending_retry_task_ids 显式并入重扫（水位推进后它们不被增量命中）
             if failed_task_ids:
@@ -1259,6 +1307,36 @@ class DpSyncService:
             if cancelled:
                 counters["skipped"] = "cancelled"
             return counters
+        except asyncio.CancelledError:
+            # D3 BaseException：arq job_timeout/进程关闭会以取消中断扫描——普通
+            # except Exception 不捕获 CancelledError，run_log 残留 running 成为
+            # latest_run_log、屏蔽前轮 retry ids。此处尽力收尾后重新抛出（取消态下
+            # DB 操作失败忽略，不吞 CancelledError）。
+            await self._db.rollback()
+            try:
+                await self._dp_repo.update_run_log(
+                    run.id,
+                    status="failed",
+                    error="扫描被取消（job 超时/进程关闭）",
+                    detail_json=json.dumps(
+                        {
+                            "error": "cancelled",
+                            "retry_task_ids": (
+                                sorted(set(prev_retry_ids) | set(failed_task_ids))
+                                or None
+                            ),
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+                if ingest_run is not None:
+                    await self._lineage_repo.finish_ingest_run(
+                        ingest_run, status="failed", error="cancelled"
+                    )
+                await self._db.commit()
+            except Exception:  # noqa: BLE001 —— 收尾失败忽略，CancelledError 继续传播
+                await self._db.rollback()
+            raise
         except Exception as exc:  # noqa: BLE001 —— 记录失败，下轮重试
             await self._db.rollback()
             try:
@@ -1273,7 +1351,14 @@ class DpSyncService:
                     detail_json=json.dumps(
                         {
                             "error": str(exc),
-                            "retry_task_ids": failed_task_ids or None,
+                            # D1：整轮异常轮（源库不可达/中途崩溃）也要并入前轮遗留
+                            # 失败任务——否则本 run 成为 latest_run_log（detail 无
+                            # retry ids），pending_retry_task_ids 读到空，前轮失败
+                            # 任务静默丢失（只能等 24h 自动全量兜底）。
+                            "retry_task_ids": (
+                                sorted(set(prev_retry_ids) | set(failed_task_ids))
+                                or None
+                            ),
                         },
                         ensure_ascii=False,
                     ),
@@ -1324,6 +1409,14 @@ class DpSyncService:
         表名取自配置（schema/task_table/step_table），标识符白名单校验（P1-5）。
         """
         schema, task_table, step_table = self._table_scope(config)
+        # D8：is_deleted 条件列自适应——批量变更集查询与单条 fetch 同样走列探测，
+        # 极端精简元表无 is_deleted 时省略条件（防整轮 1054）。探测不可知按基线有。
+        task_has_del = await self._table_has_is_deleted(
+            collector, schema, task_table
+        )
+        step_has_del = await self._table_has_is_deleted(
+            collector, schema, step_table
+        )
         task_types, step_types = _type_filters(config)
         params: dict[str, Any] = {}
         task_clause, params = _in_clause("type", task_types, "t", params)
@@ -1332,10 +1425,10 @@ class DpSyncService:
         # 变更集查询直接带 gmt_modified（M2：不再单独查全表 MAX——两查询分离窗口内
         # 新提交行 ts ≤ 全表 MAX 会被水位永久跳过；用「已扫集 max」推进则窗口内
         # 新行 ts > 已扫集 max，下轮必然命中）。
-        base = (
-            f"SELECT id, gmt_modified FROM {schema}.{task_table} "
-            f"WHERE is_deleted=0{task_clause}"
-        )
+        base = f"SELECT id, gmt_modified FROM {schema}.{task_table} WHERE 1=1"
+        if task_has_del:
+            base += " AND is_deleted=0"
+        base += task_clause
         if task_wm is not None:
             params["twm"] = task_wm
             base += " AND gmt_modified > :twm"
@@ -1363,9 +1456,13 @@ class DpSyncService:
         step_sql = (
             f"SELECT st.task_id AS id, st.gmt_modified AS gm "
             f"FROM {schema}.{step_table} st "
-            f"JOIN {schema}.{task_table} t ON st.task_id=t.id "
-            f"WHERE st.is_deleted=0 AND t.is_deleted=0{task_join_clause}{step_clause}"
+            f"JOIN {schema}.{task_table} t ON st.task_id=t.id WHERE 1=1"
         )
+        if step_has_del:
+            step_sql += " AND st.is_deleted=0"
+        if task_has_del:
+            step_sql += " AND t.is_deleted=0"
+        step_sql += task_join_clause + step_clause
         if step_wm is not None:
             sp["swm"] = step_wm
             step_sql += " AND st.gmt_modified > :swm"
@@ -1392,6 +1489,18 @@ class DpSyncService:
             config.step_table, "step_table", "dispatch_task_step"
         )
         return schema, task_table, step_table
+
+    async def _table_has_is_deleted(
+        self, collector: Any, schema: str, table: str
+    ) -> bool:
+        """目标表是否有 ``is_deleted`` 软删列（批量变更集查询 WHERE 条件用）。
+
+        走 ``_available_columns`` 轮内缓存探测；探测不可知（None，如测试 mock/
+        无 information_schema 权限）按基线「有」处理（真实 DDL 均含该列）——
+        探测失败绝不导致硬编码 ``is_deleted=0`` 在精简表上报 1054（D8）。
+        """
+        cols = await self._available_columns(collector, schema, table)
+        return cols is None or "is_deleted" in cols
 
     async def _process_task(
         self,
@@ -1508,7 +1617,15 @@ class DpSyncService:
             if force_event is not None and force_event.is_set():
                 raise _ScanCancelledError(f"task {task_id} force-stop at backfill")
             return works  # 协作取消：跳过回填
-        await self.backfill_owner(task, config)
+        # D9：owner 回填（孤儿资产 + director 匹配/影子用户）包独立 try——影子用户
+        # 创建/owner 更新抛错（用户名非法等）若裸调会 rollback 该任务全部边写入并
+        # 每轮失败。降级记录，不拖垮任务血缘。
+        try:
+            await self.backfill_owner(task, config)
+        except Exception as exc:  # noqa: BLE001 —— 回填失败仅告警
+            logger.warning(
+                "dp_sync_owner_backfill_failed task_id=%s error=%s", task_id, exc
+            )
         return works
 
     async def _resolve_llm_works(

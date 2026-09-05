@@ -234,14 +234,19 @@ class DpLineageRepository:
                 update(DpSyncRunLog).where(DpSyncRunLog.id == log_id).values(**data)
             )
 
-    async def latest_run_log(self) -> DpSyncRunLog | None:
-        """最近一轮扫描运行记录（按 id 倒序，含 detail_json）。"""
-        stmt = (
-            select(DpSyncRunLog)
-            .where(DpSyncRunLog.deleted_at.is_(None))
-            .order_by(DpSyncRunLog.id.desc())
-            .limit(1)
-        )
+    async def latest_run_log(
+        self, *, exclude_running: bool = False
+    ) -> DpSyncRunLog | None:
+        """最近一轮扫描运行记录（按 id 倒序，含 detail_json）。
+
+        exclude_running=True 时跳过 running 行——D1：本轮扫描 run_log 前置提交为
+        running（detail 空）会成为 latest、挡住前轮 detail；pending_retry_task_ids
+        用它读「最近一条非 running」以取回前轮遗留失败任务（整轮异常轮并入）。
+        """
+        stmt = select(DpSyncRunLog).where(DpSyncRunLog.deleted_at.is_(None))
+        if exclude_running:
+            stmt = stmt.where(DpSyncRunLog.status != "running")
+        stmt = stmt.order_by(DpSyncRunLog.id.desc()).limit(1)
         return (await self._db.execute(stmt)).scalar_one_or_none()
 
     async def pending_retry_task_ids(self) -> list[int]:
@@ -250,8 +255,12 @@ class DpLineageRepository:
         方案 B 语义：单任务失败 → 该任务回滚、边不落库；收尾水位仍推进（否则有
         1 个顽固失败任务就永远全量空转）。失败任务 id 记入本轮 run_log detail，
         下轮 scan_once 显式并入变更集重扫（成功则不再出现，幂等安全）。
+
+        D1：读**最近一条非 running** run_log——本轮扫描前置提交的 running 行
+        detail 为空，若不排除会成为 latest 而挡掉前轮 detail（fetch/整轮异常轮
+        发生在本轮任务循环前时，前轮失败任务会因此静默丢失，只能等 24h 全量）。
         """
-        log = await self.latest_run_log()
+        log = await self.latest_run_log(exclude_running=True)
         if log is None or not log.detail_json:
             return []
         try:

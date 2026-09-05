@@ -420,15 +420,16 @@ async def test_finish_deferred_task_applies_agree_verdict() -> None:
     from app.services.lineage.dp_sync_llm import parse_confirm_response
 
     work.result = parse_confirm_response('{"agree": true}')
-    counters: dict[str, int] = {
-        k: 0 for k in (
+    counters: dict[str, int] = dict.fromkeys(
+        (
             "parsed_ok", "llm_confirmed", "diverged", "llm_fallback",
             "unparseable", "llm_calls", "tickets_created", "errors",
             "field_mappings_written", "field_edges_degraded",
             "tickets_resolved", "memory_ignored", "memory_reused",
             "scanned_tasks", "scanned_steps", "no_flow", "unknown",
-        )
-    }
+        ),
+        0,
+    )
     seen: set[tuple[str, str]] = set()
     await svc._finish_deferred_task([work], _config(), counters, seen)
     assert counters.get("llm_confirmed") == 1
@@ -445,15 +446,16 @@ async def test_finish_deferred_task_error_creates_diverged_ticket() -> None:
     work = await svc.process_step(TASK, STEP, COMPLEX_SQL, _config(), defer_llm=True)
     assert isinstance(work, _LlmWork)
     work.error = "无法解析 LLM 输出"
-    counters: dict[str, int] = {
-        k: 0 for k in (
+    counters: dict[str, int] = dict.fromkeys(
+        (
             "parsed_ok", "llm_confirmed", "diverged", "llm_fallback",
             "unparseable", "llm_calls", "tickets_created", "errors",
             "field_mappings_written", "field_edges_degraded",
             "tickets_resolved", "memory_ignored", "memory_reused",
             "scanned_tasks", "scanned_steps", "no_flow", "unknown",
-        )
-    }
+        ),
+        0,
+    )
     await svc._finish_deferred_task([work], _config(), counters, set())
     assert counters.get("diverged") == 1
     assert counters.get("tickets_created") == 1
@@ -467,9 +469,8 @@ async def test_resolve_llm_works_concurrent_fills_results() -> None:
     """批级并发裁决：全部工作项 result 回填、llm_calls 计数、异常项 error 标记。"""
     import asyncio
 
-    from app.services.lineage.dp_sync_service import _LlmWork
-
     from app.services.lineage.dp_sync_llm import DpSyncLlmError
+    from app.services.lineage.dp_sync_service import _LlmWork
 
     n = {"calls": 0}
 
@@ -482,21 +483,39 @@ async def test_resolve_llm_works_concurrent_fills_results() -> None:
 
     svc = _svc(llm_chat=llm)
     works: list[_LlmWork] = []
-    for i in range(4):
+    for _ in range(4):
         w = await svc.process_step(TASK, STEP, COMPLEX_SQL, _config(), defer_llm=True)
         assert isinstance(w, _LlmWork)
         works.append(w)
 
-    counters: dict[str, int] = {
-        k: 0 for k in (
+    counters: dict[str, int] = dict.fromkeys(
+        (
             "parsed_ok", "llm_confirmed", "diverged", "llm_fallback",
             "unparseable", "llm_calls", "tickets_created", "errors",
             "field_mappings_written", "field_edges_degraded",
             "tickets_resolved", "memory_ignored", "memory_reused",
             "scanned_tasks", "scanned_steps", "no_flow", "unknown",
-        )
-    }
+        ),
+        0,
+    )
     await svc._resolve_llm_works(works, counters)
     assert counters.get("llm_calls") == 4
     assert all(w.result is not None or w.error for w in works)
     assert works[3].error is not None  # 不可解析项被标记
+
+
+@pytest.mark.asyncio
+async def test_store_sqlglot_edges_written_uses_batch_real_count() -> None:
+    """D5 回归：fields_written 取 upsert_field_mappings_batch 的真实写入数（新建+
+    复活），而非「尝试条数」——SQL 未变的重扫（活跃已存在项被忽略）不再每轮把
+    全量映射虚报为 field_mappings_written。"""
+    svc = _svc()
+    # 批量写返回真实写入数 3（模拟：5 条尝试、2 条活跃已存在被忽略）
+    svc._dp_repo.upsert_field_mappings_batch = AsyncMock(return_value=3)
+    seen: set[tuple[str, str]] = set()
+    result = await svc.process_step(TASK, STEP, SIMPLE_SQL, _config(), seen_pairs=seen)
+    assert result["status"] == "parsed_ok"
+    assert result["fields_written"] == 3  # 真实写入数（非尝试条数）
+    # 对比：旧实现 written = len(field_items) 会把忽略的活跃项也计入
+    items = svc._dp_repo.upsert_field_mappings_batch.await_args.args[0]
+    assert len(items) >= 1

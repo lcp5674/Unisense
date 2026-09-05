@@ -842,7 +842,6 @@ async def test_scan_deferred_llm_disagree_creates_tickets() -> None:
 @pytest.mark.asyncio
 async def test_scan_mixed_simple_and_llm_tasks() -> None:
     """简单任务 phase1 即时提交 + 复杂任务攒批并发 phase2：两类都正确计数。"""
-    from datetime import UTC, datetime, timedelta
 
     mixed = TASKS + COMPLEX_TASKS  # 101/102 简单 + 201/202 复杂
     collector = FakeCollector(tasks=mixed, sql=COMPLEX_SQL)
@@ -859,3 +858,66 @@ async def test_scan_mixed_simple_and_llm_tasks() -> None:
     assert result["llm_calls"] == 4
     assert result["llm_confirmed"] == 4
     assert result["errors"] == 0
+
+
+@pytest.mark.asyncio
+async def test_scan_whole_round_exception_preserves_prev_retry() -> None:
+    """D1 回归：整轮异常轮（fetch_collector 抛错）在 failed run detail 中并入前轮
+    遗留 retry_task_ids——此前 except 只写本轮 failed_task_ids（为空），使本 run 成为
+    latest_run_log（detail 无 retry ids）后，pending_retry_task_ids 读到空，前轮
+    失败任务静默丢失（只能等 24h 自动全量兜底）。"""
+    import json as _json
+
+    async def _boom(sid: str) -> FakeCollector:
+        raise RuntimeError("dp 源不可达")
+
+    svc = _svc(FakeCollector())
+    svc._dp_repo.pending_retry_task_ids = AsyncMock(return_value=[100, 101])
+    result = await svc.scan_once(_boom)
+    assert result["skipped"] == "failed"
+    detail = _json.loads(
+        svc._dp_repo.update_run_log.await_args.kwargs["detail_json"]
+    )
+    assert detail["retry_task_ids"] == [100, 101]
+
+
+@pytest.mark.asyncio
+async def test_scan_full_with_errors_skips_mark_missing() -> None:
+    """D3 回归：全量轮带任务失败（errors>0）跳过 mark_missing——失败任务回滚其边
+    不在 seen_pairs，照常累加会把「连续两轮全量都失败」的任务旧边误标 stale 删边。
+    下一轮全量（24h 自动）再补失效观察即可。"""
+    from sqlalchemy.exc import OperationalError
+
+    collector = FakeCollector()
+    svc = _svc(collector)
+    real_process = svc.process_step
+
+    async def flaky_process(task, step, sql, config, seen_pairs=None, **kwargs):
+        if task["task_id"] == 101:
+            raise OperationalError("stmt", {}, Exception("Deadlock"))
+        return await real_process(task, step, sql, config, seen_pairs)
+
+    svc.process_step = flaky_process  # type: ignore[method-assign]
+    result = await svc.scan_once(_fc(collector))
+    assert result["errors"] == 1
+    # 全量轮（首轮无水位）+ errors>0 → mark_missing 不执行（防误伤）
+    svc._lineage_repo.mark_missing.assert_not_awaited()
+    # 收尾仍成功态 + 失败任务记录重扫
+    assert svc._dp_repo.update_run_log.await_args.kwargs["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_scan_restored_edges_not_counted_as_tickets_resolved() -> None:
+    """D4 回归：mark_seen 恢复的失效边数（restored）单列 restored_edges 记入 detail，
+    不再累加进 tickets_resolved（后者只统计抉择单裁决，避免 run_log/统计口径污染）。"""
+    import json as _json
+
+    collector = FakeCollector()
+    svc = _svc(collector)
+    svc._lineage_repo.mark_seen = AsyncMock(return_value=(2, 3))  # confirmed=2, restored=3
+    result = await svc.scan_once(_fc(collector))
+    assert result["parsed_ok"] >= 1
+    kw = svc._dp_repo.update_run_log.await_args.kwargs
+    assert kw["tickets_resolved"] == 0  # restored=3 不计入裁决数
+    detail = _json.loads(kw["detail_json"])
+    assert detail["restored_edges"] == 3

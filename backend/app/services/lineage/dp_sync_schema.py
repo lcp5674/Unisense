@@ -121,15 +121,21 @@ class DpSchemaProvider:
         if split is None:
             return None
         db_name, tbl = split
-        rows = await self._dp_collector.query(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_schema=:d AND table_name=:t ORDER BY ordinal_position",
-            {"d": db_name, "t": tbl},
-        )
+
+        async def _q() -> list[Any]:
+            return await self._dp_collector.query(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema=:d AND table_name=:t ORDER BY ordinal_position",
+                {"d": db_name, "t": tbl},
+            )
+
+        # D10：通道 A 也套 wait_for——docstring 声明的 20s 超时此前只套在通道 B，
+        # dp 连接卡死时通道 A 无期挂起拖慢整轮（违背「schema 旁路不拖慢主链路」）。
+        rows = await asyncio.wait_for(_q(), timeout=_COLUMN_QUERY_TIMEOUT)
         names = [
-            str(r[0]).strip()
+            str(r.get("column_name") or r.get("COLUMN_NAME") or "").strip()
             for r in (rows or [])
-            if r and r[0] and str(r[0]).strip()
+            if r and (r.get("column_name") or r.get("COLUMN_NAME"))
         ]
         return names or None
 

@@ -86,6 +86,13 @@ async def dp_lineage_poll_task(ctx: dict[str, Any]) -> dict[str, Any]:
     try:
         async with async_session_factory() as db:
             svc = DpSyncService(db, llm_chat=_make_llm_chat(db))
-            return await svc.scan_once(lambda sid: _fetch_collector(db, sid))
+
+            async def _hb() -> None:
+                # D3：扫描心跳续期锁——长扫描（>TTL）不被其它 cron/manual 抢占。
+                await lock.refresh(lock_key, owner, ttl=3600)
+
+            return await svc.scan_once(
+                lambda sid: _fetch_collector(db, sid), heartbeat=_hb
+            )
     finally:
         await lock.release(lock_key, owner)
