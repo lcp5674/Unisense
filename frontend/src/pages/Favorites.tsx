@@ -21,6 +21,7 @@ import {
 } from "../api";
 import type { FavoriteAssetType, FavoriteDetail } from "../api";
 import { useTracking } from "../hooks/useTracking";
+import { formatCnDate, parseBackendTime } from "../utils/timeCn";
 
 const ASSET_TYPE_LABEL: Record<FavoriteAssetType, string> = {
   METRIC: "指标",
@@ -102,13 +103,15 @@ function assetTarget(f: FavoriteDetail): string {
 
 function timeAgo(iso: string): string {
   if (!iso) return "";
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return "";
-  const days = Math.floor((Date.now() - t) / 86_400_000);
+  // TZ（审查）：先按后端 UTC 语义解析（naive 补 Z），再算相对差——
+  // 原 new Date(naive) 被当北京本地，相对差放大 8 小时。
+  const d = parseBackendTime(iso);
+  if (!d) return "";
+  const days = Math.floor((Date.now() - d.getTime()) / 86_400_000);
   if (days <= 0) return "今天";
   if (days === 1) return "昨天";
   if (days < 30) return `${days} 天前`;
-  return new Date(iso).toLocaleDateString("zh-CN");
+  return formatCnDate(iso);
 }
 
 const TABS: { key: FavoriteAssetType | "ALL"; label: string }[] = [

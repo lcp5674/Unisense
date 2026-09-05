@@ -67,7 +67,7 @@ import { SchemaTable } from "./SchemaTable";
 import { DrillDownDrawer } from "./assetmap/DrillDownDrawer";
 import { ResizableDrawer } from "./ResizableDrawer";
 import { ENTITY_TYPE_LABEL } from "../utils/enums";
-import { formatCnTime } from "../utils/timeCn";
+import { formatCnTime, parseBackendTime } from "../utils/timeCn";
 import { PAGE_SIZE_OPTIONS, usePersistentPageSize } from "../hooks/usePersistentPageSize";
 import { usePermission } from "../hooks/usePermission";
 
@@ -190,12 +190,14 @@ type BatchHistoryEntry = {
   failedTables: LastFailedTable[];
 };
 
-/** 服务端条目 → 本地 BatchHistoryEntry 结构（created_at UTC ISO → epoch）。 */
+/** 服务端条目 → 本地 BatchHistoryEntry 结构（created_at UTC ISO → epoch）。
+ *  TZ（审查）：created_at 为 naive UTC，须按 UTC 解析（补 Z）再取 epoch——
+ *  原 new Date(naive) 被当北京本地，epoch 早 8h，叠加 1904 行 round-trip 双重漂移。 */
 function toLocalHistoryEntry(e: BatchInferHistoryEntry): BatchHistoryEntry {
   return {
     id: e.id,
     actor_name: e.actor_name ?? undefined,
-    ts: new Date(e.created_at).getTime(),
+    ts: parseBackendTime(e.created_at)?.getTime() ?? 0,
     tables: e.tables.map((t) => t.entity_name),
     tablesWithId: e.tables,
     done: e.done,

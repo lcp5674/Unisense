@@ -19,7 +19,7 @@ import type { ConflictResponse, MetricCompareResult, RulingRecord, UserBrief } f
 import { useTracking } from "../hooks/useTracking";
 import { usePermission } from "../hooks/usePermission";
 import { MetricCompareTable } from "../components/MetricCompareTable";
-import { formatCnTime } from "../utils/timeCn";
+import { formatCnTime, parseBackendTime } from "../utils/timeCn";
 import { useUserNames } from "../utils/userNames";
 import { RULING_DECISION_LABEL } from "../utils/enums";
 
@@ -44,9 +44,11 @@ function isEscalationOverdue(c: ConflictResponse): boolean {
   if (c.status !== "ESCALATED") return false;
   const raw = c.updated_at ?? c.created_at;
   if (!raw) return false;
-  const ts = new Date(raw).getTime();
-  if (Number.isNaN(ts)) return false;
-  return Date.now() - ts > ESCALATED_TIMEOUT_HOURS * 3600 * 1000;
+  // TZ（审查）：后端时间 naive UTC，须按 UTC 解析后再与当前时刻比较——
+  // 原 new Date(naive) 当北京本地，Date.now()-ts 放大 8h，升级最多提前 8h 误判超时。
+  const d = parseBackendTime(raw);
+  if (!d) return false;
+  return Date.now() - d.getTime() > ESCALATED_TIMEOUT_HOURS * 3600 * 1000;
 }
 
 const CONFLICT_TYPE_LABEL: Record<string, string> = {

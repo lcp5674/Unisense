@@ -19,6 +19,7 @@ import type { MetricHealth, MetricResponse, RecommendItem } from "../../types";
 import { ResizableDrawer } from "../ResizableDrawer";
 import { ManualEdgeModal } from "../lineage/ManualEdgeModal";
 import { ADDITIVITY_LABEL, AGGREGATION_LABEL, DW_LAYER_LABEL, FRESHNESS_LABEL, GRANULARITY_LABEL, METRIC_TIER_LABEL, METRIC_TYPE_LABEL, TIME_SEMANTICS_LABEL } from "../../utils/enums";
+import { formatCnTime } from "../../utils/timeCn";
 
 const STATUS_COLOR: Record<string, string> = {
   DRAFT: "default",
@@ -317,8 +318,8 @@ export function MetricDetailDrawer({ open, metricCode, onClose }: MetricDetailDr
             <Descriptions.Item label="版本">{metric.version}</Descriptions.Item>
             <Descriptions.Item label="可加性">{ADDITIVITY_LABEL[metric.additivity ?? ""] ?? metric.additivity ?? "-"}</Descriptions.Item>
             <Descriptions.Item label="Owner ID">{metric.owner_id}</Descriptions.Item>
-            <Descriptions.Item label="创建时间">{metric.created_at}</Descriptions.Item>
-            <Descriptions.Item label="更新时间">{metric.updated_at}</Descriptions.Item>
+            <Descriptions.Item label="创建时间">{formatCnTime(metric.created_at)}</Descriptions.Item>
+            <Descriptions.Item label="更新时间">{formatCnTime(metric.updated_at)}</Descriptions.Item>
           </Descriptions>
 
           <Card size="small" title="口径明细" style={{ marginBottom: 16 }}>

@@ -22,7 +22,7 @@ import type { Dayjs } from "dayjs";
 import { listDataSources, listDriftLogs, listCollectionRuns, getCollectionRunDetail, getCollectionRunSummary, getCollectionRunLogs } from "../api";
 import type { DataSource, CollectionRun, CollectionRunLogItem } from "../types";
 import type { DriftLogItem } from "../api";
-import { formatCnTime } from "../utils/timeCn";
+import { formatCnTime, parseBackendTime } from "../utils/timeCn";
 
 const CHANGE_TYPE_LABEL: Record<string, { label: string; color: string }> = {
   ADD_COLUMN: { label: "新增列", color: "green" },
@@ -95,18 +95,20 @@ function durationText(seconds?: number | null) {
   return <span className="mono" style={{ fontSize: 12 }}>{seconds}s</span>;
 }
 
-/** 日志时间格式化：ISO → HH:mm:ss（本地时区）。 */
+/** 日志时间格式化：ISO → HH:mm:ss（上海时区）。
+ *  TZ（审查）：改按上海时区取时分秒——原 new Date(ts).getHours() 把后端 naive UTC 串
+ *  当浏览器本地（北京）解析，DB 回放日志（无 Z）显示成 UTC 墙钟，差 8 小时。 */
 function formatLogTime(ts?: string | null) {
   if (!ts) return "";
-  try {
-    const d = new Date(ts);
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mm = String(d.getMinutes()).padStart(2, "0");
-    const ss = String(d.getSeconds()).padStart(2, "0");
-    return `${hh}:${mm}:${ss}`;
-  } catch {
-    return ts;
-  }
+  const d = parseBackendTime(ts);
+  if (!d) return ts;
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).format(d);
 }
 
 /** 模式展示：增量降级为全量时标注实际执行模式。 */

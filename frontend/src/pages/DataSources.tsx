@@ -688,13 +688,13 @@ function SourceDetailModal({
             </Button>
           </Tooltip>
         )}
-        <Tooltip title="定时采集按数据源的默认采集模式执行（可在编辑表单修改）">
+        <Tooltip title="定时采集按数据源的默认采集模式执行（可在编辑表单修改）；cron 表达式按上海时区（Asia/Shanghai）判定——0 13 * * * 即每天上海 13:00 触发">
           <Input
             className="mono"
             value={cron}
             onChange={(e) => setCron(e.target.value)}
             style={{ width: 150 }}
-            placeholder="cron"
+            placeholder="cron（上海时区）"
           />
         </Tooltip>
         <Tooltip title="停用调度后保留 cron 配置但不自动触发，源仍可手动采集">
@@ -2172,6 +2172,7 @@ export function DataSources() {
           />
           <span className="muted" style={{ fontSize: 12 }}>
             将为选中的数据源统一覆盖调度表达式；停用的数据源不会触发定时采集。
+            cron 按上海时区（Asia/Shanghai）判定（与系统配置的 schedule_timezone 一致）。
           </span>
         </Space>
       </Modal>

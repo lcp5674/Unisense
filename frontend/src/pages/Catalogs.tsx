@@ -11,7 +11,7 @@ import { DescriptionCoveragePanel, type DescriptionCoveragePanelHandle } from ".
 import { useResizableColumns } from "../components/ResizableTable";
 import { usePermission } from "../hooks/usePermission";
 import { usePersistentPageSize } from "../hooks/usePersistentPageSize";
-import { formatCnTime } from "../utils/timeCn";
+import { formatCnTime, timeAgoCn } from "../utils/timeCn";
 
 const SENSITIVITY_LABEL: Record<string, string> = {
   PUBLIC: "公开",
@@ -41,17 +41,11 @@ const COLUMN_OPTIONS = [
 ];
 const ALL_COLUMN_VALUES = COLUMN_OPTIONS.map((o) => o.value);
 
-/** 相对时间（资产「最近更新」列）：刚刚/N 分钟前/N 小时前/N 天前/日期。 */
+/** 相对时间（资产「最近更新」列）：刚刚/N 分钟前/N 小时前/N 天前/更早绝对时间。
+ *  TZ（审查）：改走 timeAgoCn——原 new Date(naive UTC 串) 在北京时区被当本地，
+ *  相对差被放大 8 小时（显示「10 小时前」实为 2 小时前）。 */
 function formatRelative(iso?: string | null): string {
-  if (!iso) return "—";
-  const ts = new Date(iso).getTime();
-  if (Number.isNaN(ts)) return "—";
-  const diff = Date.now() - ts;
-  if (diff < 60_000) return "刚刚";
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
-  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`;
-  return new Date(iso).toLocaleDateString("zh-CN");
+  return timeAgoCn(iso);
 }
 
 /**

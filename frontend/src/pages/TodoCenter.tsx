@@ -4,6 +4,7 @@ import { Card, Button, List, Tag, Space, Alert, message } from "antd";
 import { fetchCurrentUser, listConflicts, listMetrics, listQualityEvents, UnisenseApiError } from "../api";
 import { usePermission } from "../hooks/usePermission";
 import { useTracking } from "../hooks/useTracking";
+import { parseBackendTime } from "../utils/timeCn";
 
 const CONFLICT_TYPE_LABEL: Record<string, string> = {
   same_name_diff_def: "同名不同义",
@@ -124,9 +125,11 @@ export function TodoCenter() {
         });
       }
       for (const m of drafts.items) {
+        // TZ（审查）：后端 created_at 为 naive UTC，按 UTC 解析后再判超期——
+        // 原 new Date(naive) 当北京本地，超期判定最多提前 8 小时误报。
+        const created = parseBackendTime(m.created_at);
         const stale =
-          m.created_at != null &&
-          new Date(m.created_at).getTime() < Date.now() - DRAFT_STALE_DAYS * 86400000;
+          created != null && created.getTime() < Date.now() - DRAFT_STALE_DAYS * 86400000;
         list.push({
           kind: "draft",
           title: `草稿待完善/发布：${m.name}`,

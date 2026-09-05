@@ -30,6 +30,7 @@ import {
   UnisenseApiError,
 } from "../api";
 import type { QueryEnginePayload, QueryEngineTestResult, QueryEngineView } from "../types";
+import { formatCnTime } from "../utils/timeCn";
 
 const SOURCE_LABEL: Record<string, string> = {
   db: "数据库配置",
@@ -260,7 +261,8 @@ export default function QueryEngineConfigCard() {
             label: "最近更新",
             children: eff?.updated_at ? (
               <span>
-                用户 #{eff.updated_by ?? "-"} · {String(eff.updated_at).slice(0, 19).replace("T", " ")}
+                {/* TZ（审查）：formatCnTime 按后端 UTC 解析转上海；原 slice(0,19) 裸切展示 UTC 墙钟差 8h */}
+                用户 #{eff.updated_by ?? "-"} · {formatCnTime(eff.updated_at)}
               </span>
             ) : (
               <span className="muted">—</span>
