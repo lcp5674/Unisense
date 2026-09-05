@@ -93,7 +93,12 @@ import type {
   StaleEdge,
   UpstreamDeps,
 } from "../types";
-import { AssetGraph, AssetGraphNode, AssetGraphEdge } from "../components/assetmap/AssetGraph";
+import {
+  AssetGraph,
+  AssetGraphNode,
+  AssetGraphEdge,
+  layerOf,
+} from "../components/assetmap/AssetGraph";
 import { MetricDetailDrawer } from "../components/assetmap/MetricDetailDrawer";
 import { ManualEdgeModal } from "../components/lineage/ManualEdgeModal";
 import { LineageNodePicker } from "../components/lineage/LineageNodePicker";
@@ -725,6 +730,35 @@ function TableDetailDrawer({ detail, open, onClose, loading }: {
 /** 结构概览模式默认折叠的全部数仓层：进入即显示各层聚合带 + 层间主干血缘（全貌不拥堵），
  *  点击层带展开该层明细。字段层因 showFields=false 本无节点，折叠无副作用（保留占位一致性）。 */
 const ALL_LINEAGE_LAYERS = ["ods", "dwd", "dws", "ads", "dm", "table", "metric", "field"];
+
+/** 血缘图谱主图视图模式：full=全量血缘（展开全部节点）；overview=结构概览（折叠到
+ *  各层聚合带）；unclassified=只看未分层（隔离展示未分层表本身，不带上下游/其它层）。 */
+type GraphViewMode = "overview" | "full" | "unclassified";
+
+/** 「只看未分层」清单按库分组：库名取节点 id 的 ``table:`` 前缀后首段（血缘边引用完整
+ *  ``库.表``，比 label 可靠）；表显示名取 label 末段（主图 label 生产上即完整库.表，
+ *  去掉库前缀更紧凑；无库前缀的单段名/中文名原样展示）。导出供单测。 */
+export function groupUnclassifiedByDb(
+  nodes: AssetGraphNode[],
+): { db: string; tables: string[] }[] {
+  const m = new Map<string, string[]>();
+  for (const n of nodes) {
+    const full =
+      (n.id.startsWith("table:") ? n.id.slice("table:".length) : n.id) || n.label || n.id;
+    const dot = full.indexOf(".");
+    const db = dot > 0 ? full.slice(0, dot) : "(无库名)";
+    const label = n.label || full;
+    const short =
+      dot > 0 && label.includes(".") ? label.slice(label.lastIndexOf(".") + 1) : label;
+    const arr = m.get(db) ?? [];
+    arr.push(short);
+    m.set(db, arr);
+  }
+  return [...m.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([db, tables]) => ({ db, tables }));
+}
+
 function GraphTab() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [data, setData] = useState<{ nodes: AssetGraphNode[]; edges: AssetGraphEdge[] } | null>(null);
@@ -736,9 +770,11 @@ function GraphTab() {
   const focusNode = searchParams.get("node")?.trim() || null;
   // 视图模式：默认「全量血缘」（展开全部 1763 节点，用户直接看到真实节点不被聚合 badge 覆盖），
   // 「结构概览」为折叠到 160 个数仓层聚合带的紧凑视图（侧重层间主干、需手动切换）。
+  // 「只看未分层」为隔离视图：仅展示未分层表节点本身 + 按库分组清单（不带其它层与上下游，
+  // 便于核对哪些表缺字典层码）。
   // 有 ?node= 聚焦子图时同样走「全量」（子图本身已限定节点数、不需要再折叠）。
-  // 清除聚焦时保留当前视图模式，不强制回结构概览（用户已选定的视图偏好不被覆盖）。
-  const [viewMode, setViewMode] = useState<"overview" | "full">("full");
+  // 清除聚焦时保留当前视图模式，不强制回结构概览/只看未分层（用户已选定的视图偏好不被覆盖）。
+  const [viewMode, setViewMode] = useState<GraphViewMode>("full");
   useEffect(() => {
     // 聚焦子图：切全量（idempotent，确保聚焦子图始终展开）
     if (focusNode) setViewMode("full");
@@ -863,6 +899,33 @@ function GraphTab() {
     return { nodes: [...nodeMap.values()], edges: [...edgeMap.values()] };
   }, [data, fieldLayer]);
 
+  // 「只看未分层」隔离数据：仅保留未分层表节点（layerOf 为 null 的 table）+ 这些表之间的
+  // 内部血缘边。判定与 AssetGraph 的 layerOf 同源（后端 dw_layer 下发优先、名称前缀兜底），
+  // 保证「哪些算未分层」与泳道归位一致。进入该模式才计算（避免全量模式无谓过滤开销）。
+  const unclassifiedData = useMemo(() => {
+    if (viewMode !== "unclassified" || !mergedData) return null;
+    const ids = new Set(
+      mergedData.nodes.filter((n) => n.type === "table" && layerOf(n) === null).map((n) => n.id),
+    );
+    if (ids.size === 0) return { nodes: [], edges: [] };
+    return {
+      nodes: mergedData.nodes.filter((n) => ids.has(n.id)),
+      edges: mergedData.edges.filter((e) => ids.has(e.source) && ids.has(e.target)),
+    };
+  }, [viewMode, mergedData]);
+
+  // 未分层表总量（字段图层只有 field 节点不计入）：Segmented 第三档禁用条件 + 说明条计数。
+  const unclassifiedTotal = useMemo(() => {
+    if (!mergedData) return 0;
+    return mergedData.nodes.filter((n) => n.type === "table" && layerOf(n) === null).length;
+  }, [mergedData]);
+
+  // 按库分组的未分层表清单（核对哪些库缺字典层码）。
+  const unclassifiedByDb = useMemo(
+    () => groupUnclassifiedByDb(unclassifiedData?.nodes ?? []),
+    [unclassifiedData],
+  );
+
   /** 清除聚焦：回到全量图谱并移除 URL node 参数（保持地址与视图一致）。 */
   function clearFocus() {
     setSearchParams({}, { replace: true });
@@ -977,6 +1040,27 @@ function GraphTab() {
     }
   }
 
+  /** 视图模式切换：切离「全量血缘」时若正处字段钻取视图则关闭（钻取卡片只属于全量/聚焦
+   *  上下文，避免切到结构概览/只看未分层后钻取卡片仍覆盖主图）。 */
+  function changeViewMode(v: GraphViewMode) {
+    setViewMode(v);
+    if (v !== "full") {
+      setDrill(null);
+      setDrillTableLabel(null);
+    }
+  }
+
+  /** 「只看未分层」隔离视图内点击表节点：直接打开目录详情（不进入字段级钻取——钻取会带出
+   *  该表字段级上下游，违背隔离查看意图）；未采集表（无 entity_id）提示无详情。 */
+  function handleIsolatedTableClick(node: AssetGraphNode) {
+    if (node.type !== "table") {
+      handleNodeClick(node);
+      return;
+    }
+    if (node.entity_id != null) void openTableDetail(node);
+    else message.info(`「${node.label}」未在元数据目录中（可能尚未采集），仅作为血缘节点展示`);
+  }
+
   // 字段钻取图派生数据：把「表名与加工信息直接画进图里」——字段节点 label 带所属表名
   //（短表名.列名，跨表场景一眼可辨），字段边中点标注「加工方式 · 表达式」完整原文
   //（长表达式由 AssetGraph 渲染侧按词折行，hover 边可大字核对）。表级主图边无表达式
@@ -1020,10 +1104,16 @@ function GraphTab() {
         {!focusNode && (
           <Segmented
             value={viewMode}
-            onChange={(v) => setViewMode(v as "overview" | "full")}
+            onChange={(v) => changeViewMode(v as GraphViewMode)}
             options={[
               { value: "overview", label: "结构概览" },
               { value: "full", label: "全量血缘" },
+              // 无未分层表时禁用（避免切进空隔离视图；数据未加载完同样禁用）
+              {
+                value: "unclassified",
+                label: `只看未分层${unclassifiedTotal > 0 ? `（${unclassifiedTotal}）` : ""}`,
+                disabled: !data || unclassifiedTotal === 0,
+              },
             ]}
             data-testid="lineage-view-mode"
           />
@@ -1032,9 +1122,11 @@ function GraphTab() {
           {mergedData
             ? focusNode
               ? `已限定为 ${mergedData.nodes.length} 节点 · ${mergedData.edges.length} 条血缘边`
-              : `共 ${mergedData.nodes.length} 节点 · ${mergedData.edges.length} 条血缘边${fieldLayer ? "（含字段图层）" : ""}`
+              : viewMode === "unclassified"
+                ? `仅展示 ${unclassifiedData?.nodes.length ?? 0} 张未分层表 · ${unclassifiedData?.edges.length ?? 0} 条内部血缘边（已过滤其它层与上下游）`
+                : `共 ${mergedData.nodes.length} 节点 · ${mergedData.edges.length} 条血缘边${fieldLayer ? "（含字段图层）" : ""}`
             : "加载血缘图谱…"}
-          ，点击节点：指标 / 表视图均在本页侧边栏展示详情
+          {viewMode !== "unclassified" && "，点击节点：指标 / 表视图均在本页侧边栏展示详情"}
         </span>
       </Space>
       {drill ? (
@@ -1179,6 +1271,81 @@ function GraphTab() {
           <Spin tip="加载字段级血缘…" />
         </div>
       ) : data && data.nodes.length > 0 ? (
+        viewMode === "unclassified" ? (
+          unclassifiedData && unclassifiedData.nodes.length > 0 ? (
+            <>
+              {/* 「只看未分层」顶部说明条：隔离状态 + 按库核对入口 + 退出 */}
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 8,
+                  flexWrap: "wrap",
+                  marginBottom: 10,
+                  padding: "6px 12px",
+                  background: "rgba(22,119,255,0.06)",
+                  border: "1px solid rgba(22,119,255,0.3)",
+                  borderRadius: 6,
+                  fontSize: 13,
+                }}
+                data-testid="lineage-unclassified-banner"
+              >
+                <span>
+                  仅展示 <b>{unclassifiedData.nodes.length}</b> 张未分层表（已过滤其它层、
+                  指标及其上下游，便于逐库核对缺字典层码的表）；表间内部血缘边{" "}
+                  <b>{unclassifiedData.edges.length}</b> 条。下方按库分组清单可展开逐表核对。
+                </span>
+                <Button size="small" type="link" onClick={() => setViewMode("full")}>
+                  返回全量血缘
+                </Button>
+              </div>
+              <AssetGraph
+                key="unclassified"
+                nodes={unclassifiedData.nodes}
+                edges={unclassifiedData.edges}
+                height={640}
+                onNodeClick={handleIsolatedTableClick}
+                dimOnHover={false}
+                showFields={false}
+                lanes
+              />
+              {unclassifiedByDb.length > 0 && (
+                <Collapse
+                  size="small"
+                  style={{ marginTop: 10 }}
+                  defaultActiveKey={[unclassifiedByDb[0].db]}
+                  data-testid="lineage-unclassified-db-list"
+                  items={unclassifiedByDb.map((g) => ({
+                    key: g.db,
+                    label: (
+                      <span>
+                        <Tag color="geekblue">{g.db}</Tag> 共 {g.tables.length} 张
+                      </span>
+                    ),
+                    children: (
+                      <div
+                        style={{
+                          maxHeight: 240,
+                          overflow: "auto",
+                          display: "flex",
+                          flexWrap: "wrap",
+                          gap: 4,
+                        }}
+                      >
+                        {g.tables.map((t) => (
+                          <Tag key={`${g.db}.${t}`}>{t}</Tag>
+                        ))}
+                      </div>
+                    ),
+                  }))}
+                />
+              )}
+            </>
+          ) : (
+            <Empty description="当前图谱中不存在未分层表节点（全部已按字典层码归层）" />
+          )
+        ) : (
         <AssetGraph
           // 切换视图模式强制重挂载：折叠初值（defaultCollapsedLayers）按模式重置——
           // 结构概览=全部数仓层折叠为聚合带（层间主干边），全量血缘=全部展开
@@ -1196,6 +1363,8 @@ function GraphTab() {
           fieldsLoading={fieldLayerLoading}
           // 语义泳道：指标/表分带（表带在上、指标带下），表→指标血缘方向自然分层
           lanes
+          // 结构概览折叠提示条内「只看未分层表（N）」快捷入口 → 切隔离视图
+          onShowLaneOnly={() => setViewMode("unclassified")}
           // 性能护栏：全量血缘默认走 AssetGraph 内置 LOD（优先渲染度最高的核心节点子集，
           // 画布底部出现「共 N 节点，已优先展示 M 个核心节点」提示 + 「显示全部」按钮）。
           // dagre 布局已线程化（Web Worker 预计算坐标 + G6 预设渲染，AssetGraph 内实现），
@@ -1204,6 +1373,7 @@ function GraphTab() {
           // 结构概览：进入即全层聚合（每层一个聚合带 + 层间去重边），点击层带展开该层明细
           defaultCollapsedLayers={viewMode === "overview" ? ALL_LINEAGE_LAYERS : undefined}
         />
+        )
       ) : (
         !loading &&
         (focusMiss ? (

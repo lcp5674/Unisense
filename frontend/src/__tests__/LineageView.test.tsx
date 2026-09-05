@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, act, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
-import { LineageView, buildSubgraph, resolveRootId, parseResultToGraphData, upstreamDepsToGraphData, edgesToGraphData, buildFieldGraphData, decorateDrillGraphNodes, decorateDrillGraphEdges, previewEdgesToGraph } from "../pages/LineageView";
+import { LineageView, buildSubgraph, resolveRootId, parseResultToGraphData, upstreamDepsToGraphData, edgesToGraphData, buildFieldGraphData, decorateDrillGraphNodes, decorateDrillGraphEdges, previewEdgesToGraph, groupUnclassifiedByDb } from "../pages/LineageView";
 import { adaptiveBaseRadius } from "../components/assetmap/AssetGraph";
 import * as api from "../api";
 import type { LineageGraphData } from "../types";
@@ -1274,6 +1274,101 @@ describe("血缘图谱 结构概览 / 全量血缘 双模式", () => {
       expect(screen.getByText(/已限定为 2 节点 · 1 条血缘边/)).toBeInTheDocument();
     });
     expect(document.querySelector('[data-testid="lineage-view-mode"]')).toBeNull();
+  });
+
+  it("「只看未分层」隔离视图：仅展示未分层表 + 按库分组清单；返回全量血缘", async () => {
+    // 覆盖 beforeEach 的简单 graphData：含已分层表（后端下发 dw_layer）、未分层表（无下发）、指标
+    vi.mocked(api.lineageGraph).mockResolvedValue({
+      nodes: [
+        { id: "metric:revenue", type: "metric", label: "营收", domain: "finance" },
+        { id: "table:ads.dm_orders", type: "table", label: "ads.dm_orders", dw_layer: "ads" },
+        { id: "table:orders", type: "table", label: "orders", domain: "sales", entity_id: 42 },
+        { id: "table:wedw_tmp.tmp_1", type: "table", label: "wedw_tmp.tmp_1" },
+      ],
+      edges: [],
+    } as never);
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="lineage-view-mode"]')).toBeTruthy();
+    });
+    // 第三档 Segmented 带未分层计数（orders + wedw_tmp.tmp_1 = 2 张）且可点
+    const unclassifiedOption = screen.getByText("只看未分层（2）");
+    expect(unclassifiedOption).toBeTruthy();
+    await act(async () => {
+      unclassifiedOption.click();
+    });
+    // 隔离说明条出现：2 张未分层表（ads.dm_orders 已归层、metric 被过滤）
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="lineage-unclassified-banner"]')).toBeTruthy();
+    });
+    // 顶部计数文案切换为隔离口径
+    expect(screen.getByText(/仅展示 2 张未分层表 · 0 条内部血缘边/)).toBeInTheDocument();
+    // 按库分组清单：orders（无库前缀 → (无库名)，默认展开面板）与 wedw_tmp（折叠面板）
+    const dbList = document.querySelector('[data-testid="lineage-unclassified-db-list"]');
+    expect(dbList).toBeTruthy();
+    expect(within(dbList as HTMLElement).getByText("(无库名)")).toBeInTheDocument();
+    expect(within(dbList as HTMLElement).getByText("wedw_tmp")).toBeInTheDocument();
+    expect(within(dbList as HTMLElement).getByText("orders")).toBeInTheDocument();
+    // wedw_tmp 面板默认折叠（Collapse 仅默认展开首个库），点开核对表短名
+    await act(async () => {
+      fireEvent.click(within(dbList as HTMLElement).getByText("wedw_tmp"));
+    });
+    await waitFor(() => {
+      expect(within(dbList as HTMLElement).getByText("tmp_1")).toBeInTheDocument();
+    });
+    // 已分层表 / 指标不进隔离视图（清单与说明条均不出现其名）
+    expect(within(dbList as HTMLElement).queryByText("ads.dm_orders")).toBeNull();
+    expect(screen.queryByText(/共 4 节点/)).toBeNull();
+    // 返回全量血缘 → 隔离说明条消失
+    await act(async () => {
+      screen.getByText("返回全量血缘").click();
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="lineage-unclassified-banner"]')).toBeNull();
+    });
+  });
+
+  it("结构概览折叠提示条内「只看未分层表（N）」快捷入口：点击进入隔离视图", async () => {
+    renderLineage();
+    await waitFor(() => expect(api.lineageGraph).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="lineage-view-mode"]')).toBeTruthy();
+    });
+    // 切「结构概览」：默认全层折叠 → 折叠提示条 + 「只看未分层表（1）」入口出现
+    //（graphData 中 table:orders 未分层 1 张，metric:revenue 非表不计）
+    await act(async () => {
+      screen.getByText("结构概览").click();
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="asset-graph-fold-banner"]')).toBeTruthy();
+    });
+    const shortcut = screen.getByTestId("asset-graph-show-lane-only");
+    expect(shortcut).toHaveTextContent("只看未分层表（1）");
+    // 点击快捷入口 → 进入只看未分层隔离视图（入口是额外按钮，不替代「点击聚合带=展开」语义）
+    await act(async () => {
+      shortcut.click();
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="lineage-unclassified-banner"]')).toBeTruthy();
+    });
+    expect(screen.getByText(/仅展示 1 张未分层表/)).toBeInTheDocument();
+  });
+});
+
+describe("groupUnclassifiedByDb 未分层清单按库分组", () => {
+  const nodes = [
+    { id: "table:wedw_tmp.tmp_1", type: "table", label: "wedw_tmp.tmp_1" },
+    { id: "table:wedw_tmp.tmp_2", type: "table", label: "临时表2" },
+    { id: "table:orders", type: "table", label: "orders" },
+  ] as never as import("../components/assetmap/AssetGraph").AssetGraphNode[];
+
+  it("按 id 库名分组、label 取末段短名；无库前缀归 (无库名) 并字典序排序", () => {
+    const groups = groupUnclassifiedByDb(nodes);
+    expect(groups.map((g) => g.db)).toEqual(["(无库名)", "wedw_tmp"]);
+    expect(groups[0].tables).toEqual(["orders"]);
+    // wedw_tmp 组：label 带库前缀 → 短名；中文 label 无点 → 原样
+    expect(groups[1].tables).toEqual(["tmp_1", "临时表2"]);
   });
 });
 

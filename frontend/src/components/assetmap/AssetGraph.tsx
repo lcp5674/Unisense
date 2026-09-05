@@ -82,6 +82,13 @@ interface AssetGraphProps {
   onFieldsToggle?: (show: boolean) => void;
   /** 字段图层加载中（按钮 loading 态）。默认 false。 */
   fieldsLoading?: boolean;
+  /**
+   * 「只看本层」快捷入口（血缘图谱主图结构概览折叠场景用）。传入后，折叠提示条内
+   * 对「未分层表」额外显示「只看未分层表（N）」按钮（N=图中 layerOf 为 null 的 table
+   * 节点数），点击回调 "table" 由父组件切换隔离视图。其余调用方（资产地图/影响分析）
+   * 不传则不渲染按钮——向后兼容，不影响既有行为。
+   */
+  onShowLaneOnly?: (lane: string) => void;
 }
 
 const TYPE_LABEL: Record<string, string> = {
@@ -2192,6 +2199,7 @@ export function AssetGraph({
   defaultShowAll = false,
   onFieldsToggle,
   fieldsLoading = false,
+  onShowLaneOnly,
 }: AssetGraphProps) {
   const onNodeClickRef = useRef(onNodeClick);
   onNodeClickRef.current = onNodeClick;
@@ -2399,6 +2407,13 @@ export function AssetGraph({
 
   const hasLayerNodes = layerBadges && nodes.some((n) => layerOf(n) !== null);
 
+  // 未分层表数（layerOf 为 null 的 table 节点）——供折叠提示条内「只看未分层表（N）」
+  // 快捷入口计数。用传入 nodes（未折叠全集）统计，折叠聚合态下被折叠节点仍计入。
+  const unclassifiedTableCount = useMemo(
+    () => nodes.filter((n) => n.type === "table" && layerOf(n) === null).length,
+    [nodes],
+  );
+
   // 图谱主体渲染（主视图与全屏视图共用，UI 状态共享——切换全屏不丢失筛选/搜索/布局）
   const renderBody = (h: number) => (
     <div>
@@ -2495,6 +2510,16 @@ export function AssetGraph({
           >
             全部展开
           </Button>
+          {onShowLaneOnly && unclassifiedTableCount > 0 && (
+            <Button
+              size="small"
+              type="link"
+              data-testid="asset-graph-show-lane-only"
+              onClick={() => onShowLaneOnly("table")}
+            >
+              只看未分层表（{unclassifiedTableCount}）
+            </Button>
+          )}
         </div>
       )}
       {searchFocus && (
